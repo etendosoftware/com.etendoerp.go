@@ -65,25 +65,38 @@ import com.etendoerp.payment.removal.util.PaymentRemovalUtil;
  * injects both {@code Fin_Payment_ID} (correct key) and {@code action = "P"} (confirm
  * action expected by {@code FIN_PaymentProcess}), and delegates to the standard executor.
  *
- * <p><b>Remove ({@code eTPRRemovePayment}):</b> the backing process
- * ({@code com.etendoerp.payment.removal.handler.RemovePayment}, invoked via
- * {@code PaymentRemovalUtil.reactivateAndRemove(payment)}) ends with a plain
- * {@code OBDal.getInstance().remove(payment)}. It never deletes the join rows between the
- * payment and the invoice/order it was applied to ({@code FIN_PaymentScheduleDetail} /
- * {@code FIN_PaymentDetail}); there is no delete-cascade for them either, since they are
- * an internal payment↔schedule join, not an AD parent/child tab. Removing an <em>applied</em>
- * payment (one with an active application) therefore fails with a raw FK violation,
- * surfaced to the user as the generic "This record cannot be deleted... Please see Linked
- * Items" error. This handler intercepts the action and, before delegating, deletes those
- * join rows itself and recalculates the affected invoices — mirroring exactly what
- * {@code PaymentRemovalUtil.remove()} does, just completed correctly. Unapplied payments
- * (no {@code FIN_PaymentDetail} rows) are unaffected — the cleanup is a no-op and the
- * standard action proceeds as before. Two further live-testing rounds (see the reject-cycle
- * notes on {@link #handleRemove} and {@link #removeApplicationDetails}) found: (1) deleted
- * children must also be detached from their parent's in-memory collection, or Hibernate's
- * final end-of-request flush throws; (2) a still-{@code Processed} payment must be reactivated
- * BEFORE its detail rows are touched, or a core AD trigger blocks the delete outright — and a
- * payment tied to a processed Payment Proposal cannot be removed via this action at all.
+ * <p><b>Remove ({@code eTPRRemovePayment}):</b> the standard process
+ * ({@code com.etendoerp.payment.removal.handler.RemovePayment}, via {@code
+ * PaymentRemovalUtil.reactivateAndRemove(payment)}) ends with a plain {@code
+ * OBDal.getInstance().remove(payment)}. It never deletes the join rows between the payment and
+ * the invoice/order it was applied to ({@code FIN_PaymentScheduleDetail} /
+ * {@code FIN_PaymentDetail}); there is no delete-cascade for them either, since they are an
+ * internal payment↔schedule join, not an AD parent/child tab. Removing an <em>applied</em>
+ * payment therefore fails with a raw FK violation, surfaced to the user as the generic "This
+ * record cannot be deleted... Please see Linked Items" error. This handler, before removing
+ * the payment, deletes those join rows itself and recalculates the affected invoices —
+ * mirroring exactly what {@code PaymentRemovalUtil.remove()} does, just completed correctly.
+ * Unapplied payments (no {@code FIN_PaymentDetail} rows) are unaffected — the cleanup is a
+ * no-op.
+ *
+ * <p>Three rounds of live testing (see the reject-cycle notes on {@link #handleRemove} and
+ * {@link #removeApplicationDetails}) shaped the current design: (1) deleted children must also
+ * be detached from their parent's in-memory collection, or Hibernate's final end-of-request
+ * flush throws {@code EntityNotFoundException: deleted object would be re-saved by cascade};
+ * (2) a still-{@code Processed} payment must be reactivated BEFORE its detail rows are
+ * touched, or a core AD trigger blocks the delete outright — and a payment tied to a processed
+ * Payment Proposal cannot be removed via this action at all; (3) reactivating a reconciled
+ * payment clears the ENTIRE Hibernate session as a side effect of {@code
+ * PaymentRemovalUtil.reactivate()}'s own internals, which broke a FOURTH design (delegating
+ * the final removal step to the standard button-action framework via {@code
+ * NeoButtonActionHelper.executeButtonActionCore}) because that framework needs {@code
+ * context.getSfEntity()}'s lazy {@code AD_Tab} proxy, loaded before this handler ever ran and
+ * before the session got cleared. Rather than defensively initializing that proxy around the
+ * one call proven to clear the session, this handler now removes the payment itself by
+ * calling {@code PaymentRemovalUtil.remove(payment)} directly — the same utility already used
+ * for every other step here — eliminating the button-action delegation (and the {@code
+ * context.getSfEntity()} dependency, and the whole class of stale-proxy-after-session-clear
+ * risk that comes with it) for this action entirely, instead of working around it.
  *
  * <p><b>GET (single record, post-hook):</b> injects a nullable {@code financialTransactionId}
  * field so the UI can navigate from the payment detail to the reconciled bank transaction
@@ -182,8 +195,7 @@ public class ReactivatePaymentHandler implements NeoHandler {
    * Deletes the payment↔schedule join rows ({@code FIN_PaymentScheduleDetail} /
    * {@code FIN_PaymentDetail}) that block {@code OBDal.remove(FIN_Payment)} with a raw FK
    * violation (see class javadoc), recalculates the invoices they were applied to, then
-   * delegates to the standard {@code eTPRRemovePayment} button action so the payment header
-   * itself gets removed exactly as before.
+   * removes the payment itself via {@code PaymentRemovalUtil.remove(payment)}.
    *
    * <p>Order matters: {@code collectAffectedInvoiceIds} is called <em>before</em> deleting
    * anything — it walks the same detail list we are about to remove.
@@ -192,55 +204,31 @@ public class ReactivatePaymentHandler implements NeoHandler {
    * {@code OBDal.remove()} on each child without detaching it from its parent's in-memory
    * Hibernate collection first. That collection object stays loaded and unchanged in the
    * session even after the child row is deleted, so at the <em>final</em> flush of the request
-   * (Hibernate's own end-of-thread cleanup, {@code DalThreadCleaner}, which runs after this
-   * method — and even after the whole button action — has already returned) the session's
+   * (Hibernate's own end-of-thread cleanup, {@code DalThreadCleaner}) the session's
    * dirty-checking pass finds a still-managed collection that "contains" an entity it also
    * knows is deleted, and throws {@code EntityNotFoundException: deleted object would be
-   * re-saved by cascade}. Because that flush happens outside this method's call stack, no
-   * try/catch here can intercept it — it surfaced as an unhandled 500 to the client instead of
-   * the NeoResponse.error(...) this method returns for in-method failures. {@link
-   * #removeApplicationDetails} now removes each child from its owning collection in the same
-   * step as the {@code OBDal.remove()} call, so no stale membership survives past this method
-   * for Hibernate to trip over later.
+   * re-saved by cascade}. {@link #removeApplicationDetails} now removes each child from its
+   * owning collection in the same step as the {@code OBDal.remove()} call, so no stale
+   * membership survives for Hibernate to trip over later.
    *
-   * <p>The payment is additionally evicted from the Hibernate session before delegating. With
-   * the collections now correctly mutated, eviction is no longer load-bearing for correctness
-   * — the in-memory {@code payment} object is already consistent with the DB, so even the
-   * cached instance would dirty-check cleanly. It is kept as defense in depth for whatever the
-   * delegated button action's own re-fetch does (it may run through a different framework path
-   * than a plain {@code OBDal.get}), since removing it could not be re-verified against a live
-   * server in this pass and the risk of introducing a second reject cycle outweighs deleting a
-   * redundant-but-harmless line. Not the whole session — {@code context.getSfEntity()} and its
-   * lazily-loaded {@code AD_Tab} association, read later by
-   * {@code NeoButtonActionHelper.addTabParamsCore}, must stay attached.
-   *
-   * <p>Everything — our cleanup and the delegated removal — stays inside the single request
+   * <p>Everything here — cleanup and the final removal — stays inside the single request
    * transaction, so a downstream failure rolls back atomically instead of leaving a
    * partially-cleaned payment.
    *
    * <p><b>Reject-cycle 2 fix — reactivate before touching detail rows:</b> a core Etendo
    * trigger ({@code aprm_fin_pmt_detail_check_trg} on {@code FIN_Payment_Detail}) hard-blocks
    * inserting or deleting a detail row while its parent {@code FIN_Payment.Processed = 'Y'}
-   * (AD_Message 20501, "Document posted/processed"). {@code RemovePayment.action()} (the
-   * standard delegated action) DOES reactivate the payment before removing it — but only
-   * inside {@code PaymentRemovalUtil.reactivateAndRemove()}, i.e. AFTER our pre-hook cleanup
-   * has already run. So for any payment that is still {@code Processed = 'Y'} when this
-   * handler runs (the normal case — the one already-reactivated payment tested in the first
-   * live check happened to slip past this because it had been partially reactivated by an
-   * earlier failed attempt), {@link #removeApplicationDetails} used to try deleting detail
-   * rows while still processed, and the trigger rejected it. This method now calls {@code
-   * PaymentRemovalUtil.reactivate(recordId, "R")} itself first whenever {@code
-   * payment.isProcessed()}, then re-fetches the payment (reactivation reassigns/reloads
-   * state — e.g. reversing a linked {@code FIN_Finacc_Transaction} and clearing the session —
-   * through its own internal calls, so the local reference must not be reused), before any
-   * cleanup runs.
-   *
-   * <p>This does <em>not</em> risk a double-reactivation: {@code reactivateAndRemove()}'s own
-   * logic is {@code if (payment.isProcessed()) reactivate(...)} — since we already flipped
-   * {@code Processed} to {@code 'N'} ourselves, the delegated action's fresh reload of the
-   * payment sees {@code isProcessed() == false} and skips calling {@code reactivate()} a
-   * second time, going straight to {@code remove()}. This is read directly from
-   * {@code PaymentRemovalUtil}'s source, not assumed.
+   * (AD_Message 20501, "Document posted/processed"). The standard {@code RemovePayment.action()}
+   * DOES reactivate the payment before removing it — but only inside {@code
+   * PaymentRemovalUtil.reactivateAndRemove()}, i.e. only if that whole helper is used, and only
+   * AFTER whatever cleanup runs ahead of it. So for any payment that is still {@code
+   * Processed = 'Y'} when this handler runs, {@link #removeApplicationDetails} would try
+   * deleting detail rows while still processed, and the trigger would reject it. This method
+   * calls {@code PaymentRemovalUtil.reactivate(recordId, "R")} itself first whenever {@code
+   * payment.isProcessed()}, then re-fetches the payment (reactivation reassigns/reloads state
+   * — e.g. reversing a linked {@code FIN_Finacc_Transaction} and clearing the session — through
+   * its own internal calls, so the local reference must not be reused), before any cleanup
+   * runs.
    *
    * <p><b>Reject-cycle 2 fix — Payment Proposal guard:</b> a second, independent trigger
    * ({@code aprm_fin_prop_detail_check_trg} on {@code FIN_Payment_Prop_Detail}) hard-blocks
@@ -252,35 +240,60 @@ public class ReactivatePaymentHandler implements NeoHandler {
    * #findProcessedProposalPropDetail} detects this upfront and this method returns a clear
    * 400 instead of attempting (and failing) any mutation.
    *
+   * <p><b>Reject-cycle 3 fix — remove the button-action delegation entirely:</b> a fourth
+   * design, delegating the final removal to the standard button-action framework ({@code
+   * NeoButtonActionHelper.executeButtonActionCore(context.getSfEntity(), ...)}), broke because
+   * reactivating a reconciled payment clears the ENTIRE Hibernate session as a side effect of
+   * {@code PaymentRemovalUtil.reactivate()}'s own internals ({@code
+   * TransactionRemovalUtil.reactivateAndRemove(...)} followed by {@code
+   * OBDal.getInstance().getSession().clear()}), silently detaching {@code
+   * context.getSfEntity()}'s lazy {@code AD_Tab} proxy — loaded by the NEO dispatch layer
+   * before this handler ever ran — which the delegated action's {@code addTabParamsCore} then
+   * failed to lazily resolve ({@code could not initialize proxy [ADTab#...] - no Session}).
+   * Rather than defensively initializing that proxy around the one call proven to clear the
+   * session, this method instead calls {@code PaymentRemovalUtil.remove(payment)} directly —
+   * the same utility already used for every other step here — which eliminates {@code
+   * context.getSfEntity()} and the button-action framework from this action's path entirely.
+   * {@code remove()} is confirmed, via {@code javap -c} on the exact dependency jar
+   * ({@code payment.removal-3.1.0.jar}), to have exactly one return path (always {@code true}
+   * on success) and to always throw on failure (an {@code OBException}, re-wrapped) — never a
+   * silent {@code false} — so the existing {@code catch (Exception e)} below already handles
+   * every failure mode; no boolean-return branching is needed. {@code remove()} also clears the
+   * session itself, but nothing after this method touches any entity loaded before it, so that
+   * is harmless now.
+   *
    * @param context the current NEO request context
-   * @return the process result from the delegated button action, a 400 if the payment is tied
-   *     to a processed Payment Proposal, or a 500 error on unexpected failure
+   * @return a 200 on success, a 404 if the payment does not exist, a 400 if the payment is
+   *     tied to a processed Payment Proposal, or a 500 error on unexpected failure
    */
   private NeoResponse handleRemove(NeoContext context) {
     try {
       FIN_Payment payment = OBDal.getInstance().get(FIN_Payment.class, context.getRecordId());
-      if (payment != null) {
-        FIN_PaymentPropDetail blocking = findProcessedProposalPropDetail(payment);
-        if (blocking != null) {
-          return NeoResponse.error(400, "This payment was generated from a processed Payment "
-              + "Proposal (" + blocking.getFinPaymentProposal().getIdentifier() + ") and cannot "
-              + "be removed from here; reverse the Payment Proposal instead.");
-        }
-
-        if (Boolean.TRUE.equals(payment.isProcessed())) {
-          PaymentRemovalUtil.reactivate(context.getRecordId(), REACTIVATE_BEFORE_REMOVE_VALUE);
-          payment = OBDal.getInstance().get(FIN_Payment.class, context.getRecordId());
-        }
-
-        Set<String> affectedInvoiceIds = PaymentRemovalUtil.collectAffectedInvoiceIds(payment);
-        removeApplicationDetails(payment);
-        OBDal.getInstance().flush();
-        PaymentRemovalUtil.updateInvoicesAfterPaymentRemoval(affectedInvoiceIds);
-        OBDal.getInstance().flush();
-        OBDal.getInstance().getSession().evict(payment);
+      if (payment == null) {
+        return NeoResponse.error(404, "Payment not found: " + context.getRecordId());
       }
-      return NeoButtonActionHelper.executeButtonActionCore(
-          context.getSfEntity(), context.getRecordId(), context.getFieldName(), new JSONObject());
+
+      FIN_PaymentPropDetail blocking = findProcessedProposalPropDetail(payment);
+      if (blocking != null) {
+        return NeoResponse.error(400, "This payment was generated from a processed Payment "
+            + "Proposal (" + blocking.getFinPaymentProposal().getIdentifier() + ") and cannot "
+            + "be removed from here; reverse the Payment Proposal instead.");
+      }
+
+      if (Boolean.TRUE.equals(payment.isProcessed())) {
+        PaymentRemovalUtil.reactivate(payment.getId(), REACTIVATE_BEFORE_REMOVE_VALUE);
+        payment = OBDal.getInstance().get(FIN_Payment.class, context.getRecordId());
+      }
+
+      Set<String> affectedInvoiceIds = PaymentRemovalUtil.collectAffectedInvoiceIds(payment);
+      removeApplicationDetails(payment);
+      OBDal.getInstance().flush();
+      PaymentRemovalUtil.updateInvoicesAfterPaymentRemoval(affectedInvoiceIds);
+      OBDal.getInstance().flush();
+
+      PaymentRemovalUtil.remove(payment);
+
+      return NeoResponse.ok(new JSONObject().put("success", true));
     } catch (Exception e) {
       log.error("Error removing payment for record {}", context.getRecordId(), e);
       return NeoResponse.error(500, "Payment removal failed: " + e.getMessage());

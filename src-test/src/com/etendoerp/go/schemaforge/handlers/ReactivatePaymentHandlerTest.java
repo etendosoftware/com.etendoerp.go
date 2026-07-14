@@ -22,7 +22,6 @@ import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
-import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.spy;
@@ -40,7 +39,6 @@ import javax.inject.Named;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
-import org.hibernate.Session;
 import org.junit.Test;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
@@ -57,8 +55,6 @@ import org.openbravo.model.financialmgmt.payment.FIN_PaymentScheduleDetail;
 import com.etendoerp.go.schemaforge.NeoContext;
 import com.etendoerp.go.schemaforge.NeoEndpointType;
 import com.etendoerp.go.schemaforge.NeoResponse;
-import com.etendoerp.go.schemaforge.data.SFEntity;
-import com.etendoerp.go.schemaforge.util.NeoButtonActionHelper;
 import com.etendoerp.payment.removal.util.PaymentRemovalUtil;
 
 /**
@@ -83,7 +79,7 @@ public class ReactivatePaymentHandlerTest {
         .build();
   }
 
-  private static NeoContext removeActionCtx(String recordId, SFEntity sfEntity) {
+  private static NeoContext removeActionCtx(String recordId) {
     return NeoContext.builder()
         .specName("payment-in")
         .entityName("finPayment")
@@ -91,7 +87,6 @@ public class ReactivatePaymentHandlerTest {
         .endpointType(NeoEndpointType.ACTION)
         .fieldName("eTPRRemovePayment")
         .recordId(recordId)
-        .sfEntity(sfEntity)
         .build();
   }
 
@@ -145,24 +140,32 @@ public class ReactivatePaymentHandlerTest {
   // its own change-tracking metadata at flush time, and a mocked List has no such semantics —
   // verify(dal).remove(child) passes whether or not the child was also detached from the
   // parent's collection, which is exactly the distinction that mattered here. These tests only
-  // prove "our code called remove() on the right objects, in the right order, and delegates
-  // correctly" — they do NOT prove the fix is safe against a real Hibernate flush. That can only
-  // be verified by an OBBaseTest-based integration test against a real session (see
+  // prove "our code called remove()/reactivate() on the right objects, in the right order" —
+  // they do NOT prove the fix is safe against a real Hibernate flush. That can only be verified
+  // by an OBBaseTest-based integration test against a real session (see
   // ReactivatePaymentHandlerRemoveIntegrationTest in this package) or by manual live
-  // verification against a real applied payment, as was done to both find and (needs
-  // re-confirmation) fix this regression. QA: re-test the live scenario again after this fix,
+  // verification against a real applied payment, as was done to find (and, across three
+  // reject cycles, fix) this regression. QA: re-test the live scenario again after this fix,
   // don't rely on this unit suite passing as sufficient evidence.
+  //
+  // Reject-cycle 3 note: an earlier design delegated the final removal step to
+  // NeoButtonActionHelper.executeButtonActionCore(context.getSfEntity(), ...), which broke
+  // because reactivating a reconciled payment clears the whole Hibernate session, stranding
+  // context.getSfEntity()'s lazily-loaded AD_Tab proxy. That delegation (and the
+  // context.getSfEntity() dependency for this action) has been removed entirely — handleRemove
+  // now calls PaymentRemovalUtil.remove(payment) directly — so these tests no longer need to
+  // mock NeoButtonActionHelper or stub an sfEntity's AD_Tab/Table at all.
 
   /**
    * Payment applied to an invoice (the reported bug scenario): {@code handle} must delete the
    * {@code FIN_PaymentScheduleDetail} and {@code FIN_PaymentDetail} join rows itself (via
-   * {@code OBDal.remove}) before delegating, call {@code collectAffectedInvoiceIds} BEFORE
-   * that cleanup (it reads the same list being deleted), then recalculate the invoice via
-   * {@code updateInvoicesAfterPaymentRemoval} before finally delegating to the standard
-   * button action so the payment header itself gets removed.
+   * {@code OBDal.remove}), call {@code collectAffectedInvoiceIds} BEFORE that cleanup (it
+   * reads the same list being deleted), recalculate the invoice via {@code
+   * updateInvoicesAfterPaymentRemoval}, then remove the payment itself via {@code
+   * PaymentRemovalUtil.remove(payment)}.
    */
   @Test
-  public void handleRemoveCleansUpInvoiceAppliedDetailsBeforeDelegating() throws Exception {
+  public void handleRemoveCleansUpInvoiceAppliedDetailsBeforeRemovingPayment() throws Exception {
     FIN_Payment payment = mock(FIN_Payment.class);
     FIN_PaymentScheduleDetail scheduleDetail = mockScheduleDetail();
     FIN_PaymentSchedule invoiceSchedule = mock(FIN_PaymentSchedule.class);
@@ -178,29 +181,19 @@ public class ReactivatePaymentHandlerTest {
     when(payment.getFINPaymentDetailList()).thenReturn(detailList);
 
     Set<String> affectedInvoiceIds = new HashSet<>(Collections.singletonList("inv-1"));
-    SFEntity sfEntity = mock(SFEntity.class);
-    NeoResponse delegatedResponse = NeoResponse.ok(new JSONObject());
 
     try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
          MockedStatic<PaymentRemovalUtil> removalUtilMock =
-             Mockito.mockStatic(PaymentRemovalUtil.class);
-         MockedStatic<NeoButtonActionHelper> buttonHelperMock =
-             Mockito.mockStatic(NeoButtonActionHelper.class)) {
+             Mockito.mockStatic(PaymentRemovalUtil.class)) {
 
       OBDal dal = mock(OBDal.class);
-      Session session = mock(Session.class);
       obDalMock.when(OBDal::getInstance).thenReturn(dal);
       when(dal.get(FIN_Payment.class, "pay-1")).thenReturn(payment);
-      when(dal.getSession()).thenReturn(session);
 
       removalUtilMock.when(() -> PaymentRemovalUtil.collectAffectedInvoiceIds(payment))
           .thenReturn(affectedInvoiceIds);
 
-      buttonHelperMock.when(() -> NeoButtonActionHelper.executeButtonActionCore(
-              eq(sfEntity), eq("pay-1"), eq("eTPRRemovePayment"), Mockito.any(JSONObject.class)))
-          .thenReturn(delegatedResponse);
-
-      NeoResponse result = new ReactivatePaymentHandler().handle(removeActionCtx("pay-1", sfEntity));
+      NeoResponse result = new ReactivatePaymentHandler().handle(removeActionCtx("pay-1"));
 
       assertEquals(200, result.getHttpStatus());
       // Cleanup happened: both the schedule-detail and the detail itself were removed.
@@ -210,11 +203,8 @@ public class ReactivatePaymentHandlerTest {
       removalUtilMock.verify(() -> PaymentRemovalUtil.collectAffectedInvoiceIds(payment));
       removalUtilMock.verify(
           () -> PaymentRemovalUtil.updateInvoicesAfterPaymentRemoval(affectedInvoiceIds));
-      // The session-cached payment instance is evicted so the delegated action reloads fresh.
-      verify(session).evict(payment);
-      // Finally, delegation to the standard button action happened.
-      buttonHelperMock.verify(() -> NeoButtonActionHelper.executeButtonActionCore(
-          eq(sfEntity), eq("pay-1"), eq("eTPRRemovePayment"), Mockito.any(JSONObject.class)));
+      // The payment itself is removed directly — no more button-action delegation.
+      removalUtilMock.verify(() -> PaymentRemovalUtil.remove(payment));
       assertFalse("detail must be removed from payment.getFINPaymentDetailList()",
           detailList.contains(detail));
       assertFalse("scheduleDetail must be removed from detail.getFINPaymentScheduleDetailList()",
@@ -232,56 +222,44 @@ public class ReactivatePaymentHandlerTest {
    * AD trigger ({@code aprm_fin_pmt_detail_check_trg}) blocks deleting {@code
    * FIN_Payment_Detail} rows while {@code FIN_Payment.Processed = 'Y'}. After reactivating, the
    * handler must re-fetch the payment (not reuse the stale local reference) before running
-   * cleanup.
+   * cleanup and the final {@code PaymentRemovalUtil.remove(...)} call.
    */
   @Test
   public void handleRemoveReactivatesProcessedPaymentBeforeCleanup() throws Exception {
     FIN_Payment processedPayment = mock(FIN_Payment.class);
     when(processedPayment.isProcessed()).thenReturn(true);
+    when(processedPayment.getId()).thenReturn("pay-processed");
     when(processedPayment.getFINPaymentDetailList()).thenReturn(new ArrayList<>());
 
     FIN_Payment reactivatedPayment = mock(FIN_Payment.class);
     when(reactivatedPayment.isProcessed()).thenReturn(false);
     when(reactivatedPayment.getFINPaymentDetailList()).thenReturn(new ArrayList<>());
 
-    SFEntity sfEntity = mock(SFEntity.class);
-    NeoResponse delegatedResponse = NeoResponse.ok(new JSONObject());
-
     try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
          MockedStatic<PaymentRemovalUtil> removalUtilMock =
-             Mockito.mockStatic(PaymentRemovalUtil.class);
-         MockedStatic<NeoButtonActionHelper> buttonHelperMock =
-             Mockito.mockStatic(NeoButtonActionHelper.class)) {
+             Mockito.mockStatic(PaymentRemovalUtil.class)) {
 
       OBDal dal = mock(OBDal.class);
-      Session session = mock(Session.class);
       obDalMock.when(OBDal::getInstance).thenReturn(dal);
       // First load returns the still-processed payment; the post-reactivate re-fetch returns a
       // fresh (already-reactivated) instance — exactly what a real Hibernate session would
       // hand back after PaymentRemovalUtil.reactivate() mutates and reloads state internally.
       when(dal.get(FIN_Payment.class, "pay-processed"))
           .thenReturn(processedPayment, reactivatedPayment);
-      when(dal.getSession()).thenReturn(session);
 
       removalUtilMock.when(() -> PaymentRemovalUtil.collectAffectedInvoiceIds(reactivatedPayment))
           .thenReturn(Collections.emptySet());
 
-      buttonHelperMock.when(() -> NeoButtonActionHelper.executeButtonActionCore(
-              eq(sfEntity), eq("pay-processed"), eq("eTPRRemovePayment"),
-              Mockito.any(JSONObject.class)))
-          .thenReturn(delegatedResponse);
-
       NeoResponse result =
-          new ReactivatePaymentHandler().handle(removeActionCtx("pay-processed", sfEntity));
+          new ReactivatePaymentHandler().handle(removeActionCtx("pay-processed"));
 
       assertEquals(200, result.getHttpStatus());
       removalUtilMock.verify(() -> PaymentRemovalUtil.reactivate("pay-processed", "R"));
-      // Cleanup and delegation both operated on the RE-FETCHED (reactivated) instance, not the
-      // stale one from before reactivation.
+      // Cleanup and the final removal both operated on the RE-FETCHED (reactivated) instance,
+      // not the stale one from before reactivation.
       removalUtilMock.verify(() -> PaymentRemovalUtil.collectAffectedInvoiceIds(reactivatedPayment));
+      removalUtilMock.verify(() -> PaymentRemovalUtil.remove(reactivatedPayment));
       verify(dal, Mockito.times(2)).get(FIN_Payment.class, "pay-processed");
-      buttonHelperMock.verify(() -> NeoButtonActionHelper.executeButtonActionCore(
-          eq(sfEntity), eq("pay-processed"), eq("eTPRRemovePayment"), Mockito.any(JSONObject.class)));
     }
   }
 
@@ -291,7 +269,7 @@ public class ReactivatePaymentHandlerTest {
    * {@code FIN_Payment_Prop_Detail} rows regardless of the payment's own processed state
    * (reactivating the payment does not touch the proposal's separate {@code Processed} flag).
    * The handler must detect this upfront and return a clear 400 — no cleanup, no reactivate,
-   * no delegation.
+   * no removal.
    */
   @Test
   public void handleRemoveRefusesPaymentTiedToProcessedProposal() throws Exception {
@@ -307,27 +285,22 @@ public class ReactivatePaymentHandlerTest {
     FIN_PaymentDetail detail = mockDetailWith(new ArrayList<>(List.of(scheduleDetail)));
     when(payment.getFINPaymentDetailList()).thenReturn(new ArrayList<>(List.of(detail)));
 
-    SFEntity sfEntity = mock(SFEntity.class);
-
     try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
          MockedStatic<PaymentRemovalUtil> removalUtilMock =
-             Mockito.mockStatic(PaymentRemovalUtil.class);
-         MockedStatic<NeoButtonActionHelper> buttonHelperMock =
-             Mockito.mockStatic(NeoButtonActionHelper.class)) {
+             Mockito.mockStatic(PaymentRemovalUtil.class)) {
 
       OBDal dal = mock(OBDal.class);
       obDalMock.when(OBDal::getInstance).thenReturn(dal);
       when(dal.get(FIN_Payment.class, "pay-proposal")).thenReturn(payment);
 
       NeoResponse result =
-          new ReactivatePaymentHandler().handle(removeActionCtx("pay-proposal", sfEntity));
+          new ReactivatePaymentHandler().handle(removeActionCtx("pay-proposal"));
 
       assertEquals(400, result.getHttpStatus());
       assertTrue("error message should name the blocking proposal",
           result.getBody().toString().contains("MPP-001"));
       verify(dal, never()).remove(Mockito.any());
       removalUtilMock.verifyNoInteractions();
-      buttonHelperMock.verifyNoInteractions();
     }
   }
 
@@ -339,7 +312,7 @@ public class ReactivatePaymentHandlerTest {
    * collection differs (empty, since order applications do not recalculate an invoice).
    */
   @Test
-  public void handleRemoveCleansUpOrderAppliedDetailsBeforeDelegating() throws Exception {
+  public void handleRemoveCleansUpOrderAppliedDetailsBeforeRemovingPayment() throws Exception {
     FIN_Payment payment = mock(FIN_Payment.class);
     FIN_PaymentScheduleDetail scheduleDetail = mockScheduleDetail();
     FIN_PaymentSchedule orderSchedule = mock(FIN_PaymentSchedule.class);
@@ -350,37 +323,26 @@ public class ReactivatePaymentHandlerTest {
     when(payment.getFINPaymentDetailList()).thenReturn(detailList);
 
     Set<String> noAffectedInvoices = Collections.emptySet();
-    SFEntity sfEntity = mock(SFEntity.class);
-    NeoResponse delegatedResponse = NeoResponse.ok(new JSONObject());
 
     try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
          MockedStatic<PaymentRemovalUtil> removalUtilMock =
-             Mockito.mockStatic(PaymentRemovalUtil.class);
-         MockedStatic<NeoButtonActionHelper> buttonHelperMock =
-             Mockito.mockStatic(NeoButtonActionHelper.class)) {
+             Mockito.mockStatic(PaymentRemovalUtil.class)) {
 
       OBDal dal = mock(OBDal.class);
-      Session session = mock(Session.class);
       obDalMock.when(OBDal::getInstance).thenReturn(dal);
       when(dal.get(FIN_Payment.class, "pay-2")).thenReturn(payment);
-      when(dal.getSession()).thenReturn(session);
 
       removalUtilMock.when(() -> PaymentRemovalUtil.collectAffectedInvoiceIds(payment))
           .thenReturn(noAffectedInvoices);
 
-      buttonHelperMock.when(() -> NeoButtonActionHelper.executeButtonActionCore(
-              eq(sfEntity), eq("pay-2"), eq("eTPRRemovePayment"), Mockito.any(JSONObject.class)))
-          .thenReturn(delegatedResponse);
-
-      NeoResponse result = new ReactivatePaymentHandler().handle(removeActionCtx("pay-2", sfEntity));
+      NeoResponse result = new ReactivatePaymentHandler().handle(removeActionCtx("pay-2"));
 
       assertEquals(200, result.getHttpStatus());
       verify(dal).remove(scheduleDetail);
       verify(dal).remove(detail);
       removalUtilMock.verify(
           () -> PaymentRemovalUtil.updateInvoicesAfterPaymentRemoval(noAffectedInvoices));
-      buttonHelperMock.verify(() -> NeoButtonActionHelper.executeButtonActionCore(
-          eq(sfEntity), eq("pay-2"), eq("eTPRRemovePayment"), Mockito.any(JSONObject.class)));
+      removalUtilMock.verify(() -> PaymentRemovalUtil.remove(payment));
       assertFalse("detail must be removed from payment.getFINPaymentDetailList()",
           detailList.contains(detail));
       assertFalse("scheduleDetail must be removed from detail.getFINPaymentScheduleDetailList()",
@@ -391,56 +353,42 @@ public class ReactivatePaymentHandlerTest {
   /**
    * Regression check: a payment with no applied details (draft/unapplied payment) must go
    * through unchanged — the cleanup loop is a no-op (nothing removed), and the handler still
-   * delegates to the standard button action exactly as it did before this fix.
+   * removes the payment itself exactly as it did before this fix.
    */
   @Test
   public void handleRemoveIsNoOpCleanupWhenPaymentHasNoDetails() throws Exception {
     FIN_Payment payment = mock(FIN_Payment.class);
     when(payment.getFINPaymentDetailList()).thenReturn(Collections.emptyList());
 
-    SFEntity sfEntity = mock(SFEntity.class);
-    NeoResponse delegatedResponse = NeoResponse.ok(new JSONObject());
-
     try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
          MockedStatic<PaymentRemovalUtil> removalUtilMock =
-             Mockito.mockStatic(PaymentRemovalUtil.class);
-         MockedStatic<NeoButtonActionHelper> buttonHelperMock =
-             Mockito.mockStatic(NeoButtonActionHelper.class)) {
+             Mockito.mockStatic(PaymentRemovalUtil.class)) {
 
       OBDal dal = mock(OBDal.class);
-      Session session = mock(Session.class);
       obDalMock.when(OBDal::getInstance).thenReturn(dal);
       when(dal.get(FIN_Payment.class, "pay-3")).thenReturn(payment);
-      when(dal.getSession()).thenReturn(session);
 
       removalUtilMock.when(() -> PaymentRemovalUtil.collectAffectedInvoiceIds(payment))
           .thenReturn(Collections.emptySet());
 
-      buttonHelperMock.when(() -> NeoButtonActionHelper.executeButtonActionCore(
-              eq(sfEntity), eq("pay-3"), eq("eTPRRemovePayment"), Mockito.any(JSONObject.class)))
-          .thenReturn(delegatedResponse);
-
-      NeoResponse result = new ReactivatePaymentHandler().handle(removeActionCtx("pay-3", sfEntity));
+      NeoResponse result = new ReactivatePaymentHandler().handle(removeActionCtx("pay-3"));
 
       assertEquals(200, result.getHttpStatus());
       verify(dal, never()).remove(Mockito.any(FIN_PaymentDetail.class));
       verify(dal, never()).remove(Mockito.any(FIN_PaymentScheduleDetail.class));
-      buttonHelperMock.verify(() -> NeoButtonActionHelper.executeButtonActionCore(
-          eq(sfEntity), eq("pay-3"), eq("eTPRRemovePayment"), Mockito.any(JSONObject.class)));
+      removalUtilMock.verify(() -> PaymentRemovalUtil.remove(payment));
     }
   }
 
   /**
-   * If cleanup or delegation throws (e.g. an unexpected DB error while removing the join
-   * rows), {@code handle} must not propagate the exception — it logs and returns a 500
-   * {@code NeoResponse.error(...)} instead.
+   * If cleanup throws (e.g. an unexpected DB error while removing the join rows), {@code
+   * handle} must not propagate the exception — it logs and returns a 500 {@code
+   * NeoResponse.error(...)} instead.
    */
   @Test
   public void handleRemoveReturns500WhenCleanupThrows() {
     FIN_Payment payment = mock(FIN_Payment.class);
     when(payment.getFINPaymentDetailList()).thenThrow(new RuntimeException("boom"));
-
-    SFEntity sfEntity = mock(SFEntity.class);
 
     try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
          MockedStatic<PaymentRemovalUtil> removalUtilMock =
@@ -452,77 +400,59 @@ public class ReactivatePaymentHandlerTest {
       removalUtilMock.when(() -> PaymentRemovalUtil.collectAffectedInvoiceIds(payment))
           .thenReturn(Collections.emptySet());
 
-      NeoResponse result = new ReactivatePaymentHandler().handle(removeActionCtx("pay-4", sfEntity));
+      NeoResponse result = new ReactivatePaymentHandler().handle(removeActionCtx("pay-4"));
 
       assertEquals(500, result.getHttpStatus());
     }
   }
 
   /**
-   * If the delegated button action itself throws after a successful cleanup, {@code handle}
-   * must still catch it and return a 500 error rather than letting the exception propagate
-   * (and, notably, without having committed anything — cleanup and delegation share one
-   * transaction).
+   * If the final {@code PaymentRemovalUtil.remove(payment)} call itself throws after a
+   * successful cleanup, {@code handle} must still catch it and return a 500 error rather than
+   * letting the exception propagate (and, notably, without having committed anything —
+   * cleanup and the final removal share one transaction).
    */
   @Test
-  public void handleRemoveReturns500WhenDelegationThrows() throws Exception {
+  public void handleRemoveReturns500WhenFinalRemoveThrows() throws Exception {
     FIN_Payment payment = mock(FIN_Payment.class);
     when(payment.getFINPaymentDetailList()).thenReturn(Collections.emptyList());
 
-    SFEntity sfEntity = mock(SFEntity.class);
-
     try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
          MockedStatic<PaymentRemovalUtil> removalUtilMock =
-             Mockito.mockStatic(PaymentRemovalUtil.class);
-         MockedStatic<NeoButtonActionHelper> buttonHelperMock =
-             Mockito.mockStatic(NeoButtonActionHelper.class)) {
+             Mockito.mockStatic(PaymentRemovalUtil.class)) {
 
       OBDal dal = mock(OBDal.class);
-      Session session = mock(Session.class);
       obDalMock.when(OBDal::getInstance).thenReturn(dal);
       when(dal.get(FIN_Payment.class, "pay-5")).thenReturn(payment);
-      when(dal.getSession()).thenReturn(session);
       removalUtilMock.when(() -> PaymentRemovalUtil.collectAffectedInvoiceIds(payment))
           .thenReturn(Collections.emptySet());
+      removalUtilMock.when(() -> PaymentRemovalUtil.remove(payment))
+          .thenThrow(new RuntimeException("remove failed"));
 
-      buttonHelperMock.when(() -> NeoButtonActionHelper.executeButtonActionCore(
-              eq(sfEntity), eq("pay-5"), eq("eTPRRemovePayment"), Mockito.any(JSONObject.class)))
-          .thenThrow(new RuntimeException("delegated action failed"));
-
-      NeoResponse result = new ReactivatePaymentHandler().handle(removeActionCtx("pay-5", sfEntity));
+      NeoResponse result = new ReactivatePaymentHandler().handle(removeActionCtx("pay-5"));
 
       assertEquals(500, result.getHttpStatus());
     }
   }
 
   /**
-   * A missing/stale record id (payment not found) must skip cleanup entirely and still
-   * delegate — the standard button action is responsible for surfacing a not-found error.
+   * A missing/stale record id (payment not found) must return a 404 immediately — no cleanup,
+   * no reactivate, no {@code PaymentRemovalUtil} call of any kind.
    */
   @Test
-  public void handleRemoveSkipsCleanupWhenPaymentNotFound() throws Exception {
-    SFEntity sfEntity = mock(SFEntity.class);
-    NeoResponse delegatedResponse = NeoResponse.error(404, "not found");
-
+  public void handleRemoveReturns404WhenPaymentNotFound() throws Exception {
     try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
          MockedStatic<PaymentRemovalUtil> removalUtilMock =
-             Mockito.mockStatic(PaymentRemovalUtil.class);
-         MockedStatic<NeoButtonActionHelper> buttonHelperMock =
-             Mockito.mockStatic(NeoButtonActionHelper.class)) {
+             Mockito.mockStatic(PaymentRemovalUtil.class)) {
 
       OBDal dal = mock(OBDal.class);
       obDalMock.when(OBDal::getInstance).thenReturn(dal);
       when(dal.get(FIN_Payment.class, "missing")).thenReturn(null);
 
-      buttonHelperMock.when(() -> NeoButtonActionHelper.executeButtonActionCore(
-              eq(sfEntity), eq("missing"), eq("eTPRRemovePayment"), Mockito.any(JSONObject.class)))
-          .thenReturn(delegatedResponse);
-
-      NeoResponse result = new ReactivatePaymentHandler().handle(removeActionCtx("missing", sfEntity));
+      NeoResponse result = new ReactivatePaymentHandler().handle(removeActionCtx("missing"));
 
       assertEquals(404, result.getHttpStatus());
-      removalUtilMock.verify(
-          () -> PaymentRemovalUtil.collectAffectedInvoiceIds(Mockito.any()), never());
+      removalUtilMock.verifyNoInteractions();
     }
   }
 
