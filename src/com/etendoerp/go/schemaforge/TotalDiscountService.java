@@ -247,6 +247,7 @@ public class TotalDiscountService {
    *
    * @param headerId  the ID of the C_Invoice or C_Order record
    * @param isInvoice {@code true} for invoice documents, {@code false} for order documents
+   * @return {@code true} if an active discount line already exists on the document
    */
   @SuppressWarnings("java:S2077")
   public boolean hasDiscountLine(String headerId, boolean isInvoice) {
