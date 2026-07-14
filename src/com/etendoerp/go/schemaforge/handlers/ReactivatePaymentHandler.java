@@ -168,15 +168,37 @@ public class ReactivatePaymentHandler implements NeoHandler {
    * itself gets removed exactly as before.
    *
    * <p>Order matters: {@code collectAffectedInvoiceIds} is called <em>before</em> deleting
-   * anything — it walks the same detail list we are about to remove. The payment is evicted
-   * from the Hibernate session (not the whole session — {@code context.getSfEntity()} and its
+   * anything — it walks the same detail list we are about to remove.
+   *
+   * <p><b>Reject-cycle 1 fix:</b> an earlier version of this method called
+   * {@code OBDal.remove()} on each child without detaching it from its parent's in-memory
+   * Hibernate collection first. That collection object stays loaded and unchanged in the
+   * session even after the child row is deleted, so at the <em>final</em> flush of the request
+   * (Hibernate's own end-of-thread cleanup, {@code DalThreadCleaner}, which runs after this
+   * method — and even after the whole button action — has already returned) the session's
+   * dirty-checking pass finds a still-managed collection that "contains" an entity it also
+   * knows is deleted, and throws {@code EntityNotFoundException: deleted object would be
+   * re-saved by cascade}. Because that flush happens outside this method's call stack, no
+   * try/catch here can intercept it — it surfaced as an unhandled 500 to the client instead of
+   * the NeoResponse.error(...) this method returns for in-method failures. {@link
+   * #removeApplicationDetails} now removes each child from its owning collection in the same
+   * step as the {@code OBDal.remove()} call, so no stale membership survives past this method
+   * for Hibernate to trip over later.
+   *
+   * <p>The payment is additionally evicted from the Hibernate session before delegating. With
+   * the collections now correctly mutated, eviction is no longer load-bearing for correctness
+   * — the in-memory {@code payment} object is already consistent with the DB, so even the
+   * cached instance would dirty-check cleanly. It is kept as defense in depth for whatever the
+   * delegated button action's own re-fetch does (it may run through a different framework path
+   * than a plain {@code OBDal.get}), since removing it could not be re-verified against a live
+   * server in this pass and the risk of introducing a second reject cycle outweighs deleting a
+   * redundant-but-harmless line. Not the whole session — {@code context.getSfEntity()} and its
    * lazily-loaded {@code AD_Tab} association, read later by
-   * {@code NeoButtonActionHelper.addTabParamsCore}, must stay attached) so that the delegated
-   * action's own {@code OBDal.get(FIN_Payment.class, id)} re-queries a fresh instance whose
-   * {@code getFINPaymentDetailList()} correctly reflects the just-flushed deletes, instead of
-   * returning the same session-cached instance with a stale in-memory collection. Everything
-   * — our cleanup and the delegated removal — stays inside the single request transaction, so
-   * a downstream failure rolls back atomically instead of leaving a partially-cleaned payment.
+   * {@code NeoButtonActionHelper.addTabParamsCore}, must stay attached.
+   *
+   * <p>Everything — our cleanup and the delegated removal — stays inside the single request
+   * transaction, so a downstream failure rolls back atomically instead of leaving a
+   * partially-cleaned payment.
    *
    * @param context the current NEO request context
    * @return the process result from the delegated button action, or a 500 error on failure
@@ -205,16 +227,34 @@ public class ReactivatePaymentHandler implements NeoHandler {
    * belonging to {@code payment}. A no-op when the payment has no applied details (e.g. a
    * draft/unapplied payment) — the regression path is unaffected.
    *
+   * <p>Each child is removed from its <em>owning collection</em> in the same step as the
+   * {@code OBDal.remove()} call ({@code detail.getFINPaymentScheduleDetailList().remove(...)}
+   * before removing {@code scheduleDetail}; {@code payment.getFINPaymentDetailList().remove
+   * (...)} before removing {@code detail}). Deleting a child via {@code OBDal.remove()} without
+   * also detaching it from its parent's already-loaded in-memory collection leaves that
+   * collection stale — Hibernate still considers the parent "associated" with an entity it also
+   * knows is deleted, and throws {@code EntityNotFoundException: deleted object would be
+   * re-saved by cascade} the next time that collection is dirty-checked (see the reject-cycle 1
+   * note on {@link #handleRemove}). Iterating over defensive {@code ArrayList} copies (not the
+   * live collections) avoids a {@code ConcurrentModificationException} from removing while
+   * iterating.
+   *
+   * <p>Package-private (not {@code private}) so the {@code OBBaseTest}-based integration
+   * regression test can invoke it directly against a real Hibernate session, the same way
+   * {@link #resolveFinancialTransactionId} is package-private for its own unit tests.
+   *
    * @param payment the payment whose application join rows are being removed
    */
-  private static void removeApplicationDetails(FIN_Payment payment) {
+  static void removeApplicationDetails(FIN_Payment payment) {
     List<FIN_PaymentDetail> details = new ArrayList<>(payment.getFINPaymentDetailList());
     for (FIN_PaymentDetail detail : details) {
       List<FIN_PaymentScheduleDetail> scheduleDetails =
           new ArrayList<>(detail.getFINPaymentScheduleDetailList());
       for (FIN_PaymentScheduleDetail scheduleDetail : scheduleDetails) {
+        detail.getFINPaymentScheduleDetailList().remove(scheduleDetail);
         OBDal.getInstance().remove(scheduleDetail);
       }
+      payment.getFINPaymentDetailList().remove(detail);
       OBDal.getInstance().remove(detail);
     }
   }

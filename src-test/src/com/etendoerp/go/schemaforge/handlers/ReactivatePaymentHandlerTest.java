@@ -18,6 +18,7 @@
 package com.etendoerp.go.schemaforge.handlers;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
@@ -28,7 +29,6 @@ import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
@@ -128,6 +128,22 @@ public class ReactivatePaymentHandlerTest {
   }
 
   // ── handle — Remove action (eTPRRemovePayment) ────────────────────────────
+  //
+  // IMPORTANT — coverage gap (reject-cycle 1, ETP-4479): every test below mocks OBDal and
+  // returns plain Mockito/ArrayList collections for getFINPaymentDetailList() /
+  // getFINPaymentScheduleDetailList(). That structurally CANNOT catch the class of bug that
+  // caused the live 500 ("EntityNotFoundException: deleted object would be re-saved by
+  // cascade"): a real Hibernate session dirty-checks a still-loaded PARENT collection against
+  // its own change-tracking metadata at flush time, and a mocked List has no such semantics —
+  // verify(dal).remove(child) passes whether or not the child was also detached from the
+  // parent's collection, which is exactly the distinction that mattered here. These tests only
+  // prove "our code called remove() on the right objects, in the right order, and delegates
+  // correctly" — they do NOT prove the fix is safe against a real Hibernate flush. That can only
+  // be verified by an OBBaseTest-based integration test against a real session (see
+  // ReactivatePaymentHandlerRemoveIntegrationTest in this package) or by manual live
+  // verification against a real applied payment, as was done to both find and (needs
+  // re-confirmation) fix this regression. QA: re-test the live scenario again after this fix,
+  // don't rely on this unit suite passing as sufficient evidence.
 
   /**
    * Payment applied to an invoice (the reported bug scenario): {@code handle} must delete the
@@ -143,8 +159,15 @@ public class ReactivatePaymentHandlerTest {
     FIN_PaymentScheduleDetail scheduleDetail = mockScheduleDetail();
     FIN_PaymentSchedule invoiceSchedule = mock(FIN_PaymentSchedule.class);
     when(scheduleDetail.getInvoicePaymentSchedule()).thenReturn(invoiceSchedule);
-    FIN_PaymentDetail detail = mockDetailWith(Arrays.asList(scheduleDetail));
-    when(payment.getFINPaymentDetailList()).thenReturn(Arrays.asList(detail));
+    // Real mutable ArrayLists (not Arrays.asList/List.of), matching how a real Hibernate-backed
+    // getter returns the actual persistent collection instance: production code calls
+    // .remove(...) on these directly to detach the child, so an immutable list here would throw
+    // UnsupportedOperationException and (correctly) fail this test if that detachment call were
+    // ever removed by a future edit.
+    List<FIN_PaymentScheduleDetail> scheduleDetailList = new ArrayList<>(List.of(scheduleDetail));
+    FIN_PaymentDetail detail = mockDetailWith(scheduleDetailList);
+    List<FIN_PaymentDetail> detailList = new ArrayList<>(List.of(detail));
+    when(payment.getFINPaymentDetailList()).thenReturn(detailList);
 
     Set<String> affectedInvoiceIds = new HashSet<>(Collections.singletonList("inv-1"));
     SFEntity sfEntity = mock(SFEntity.class);
@@ -184,6 +207,10 @@ public class ReactivatePaymentHandlerTest {
       // Finally, delegation to the standard button action happened.
       buttonHelperMock.verify(() -> NeoButtonActionHelper.executeButtonActionCore(
           eq(sfEntity), eq("pay-1"), eq("eTPRRemovePayment"), Mockito.any(JSONObject.class)));
+      assertFalse("detail must be removed from payment.getFINPaymentDetailList()",
+          detailList.contains(detail));
+      assertFalse("scheduleDetail must be removed from detail.getFINPaymentScheduleDetailList()",
+          scheduleDetailList.contains(scheduleDetail));
     }
   }
 
@@ -200,8 +227,10 @@ public class ReactivatePaymentHandlerTest {
     FIN_PaymentScheduleDetail scheduleDetail = mockScheduleDetail();
     FIN_PaymentSchedule orderSchedule = mock(FIN_PaymentSchedule.class);
     when(scheduleDetail.getOrderPaymentSchedule()).thenReturn(orderSchedule);
-    FIN_PaymentDetail detail = mockDetailWith(Arrays.asList(scheduleDetail));
-    when(payment.getFINPaymentDetailList()).thenReturn(Arrays.asList(detail));
+    List<FIN_PaymentScheduleDetail> scheduleDetailList = new ArrayList<>(List.of(scheduleDetail));
+    FIN_PaymentDetail detail = mockDetailWith(scheduleDetailList);
+    List<FIN_PaymentDetail> detailList = new ArrayList<>(List.of(detail));
+    when(payment.getFINPaymentDetailList()).thenReturn(detailList);
 
     Set<String> noAffectedInvoices = Collections.emptySet();
     SFEntity sfEntity = mock(SFEntity.class);
@@ -235,6 +264,10 @@ public class ReactivatePaymentHandlerTest {
           () -> PaymentRemovalUtil.updateInvoicesAfterPaymentRemoval(noAffectedInvoices));
       buttonHelperMock.verify(() -> NeoButtonActionHelper.executeButtonActionCore(
           eq(sfEntity), eq("pay-2"), eq("eTPRRemovePayment"), Mockito.any(JSONObject.class)));
+      assertFalse("detail must be removed from payment.getFINPaymentDetailList()",
+          detailList.contains(detail));
+      assertFalse("scheduleDetail must be removed from detail.getFINPaymentScheduleDetailList()",
+          scheduleDetailList.contains(scheduleDetail));
     }
   }
 
