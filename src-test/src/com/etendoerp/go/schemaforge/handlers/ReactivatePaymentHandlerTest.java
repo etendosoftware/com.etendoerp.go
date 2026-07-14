@@ -733,10 +733,10 @@ public class ReactivatePaymentHandlerTest {
     NeoResponse result = handler.afterHandle(ctx);
 
     assertNotNull(result);
-    JSONObject record = result.getBody()
+    JSONObject paymentRecord = result.getBody()
         .getJSONObject("response").getJSONArray("data").getJSONObject(0);
-    assertTrue(record.has("financialTransactionId"));
-    assertEquals(JSONObject.NULL, record.get("financialTransactionId"));
+    assertTrue(paymentRecord.has("financialTransactionId"));
+    assertEquals(JSONObject.NULL, paymentRecord.get("financialTransactionId"));
   }
 
   /**

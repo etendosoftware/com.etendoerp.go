@@ -397,9 +397,9 @@ public class ReactivatePaymentHandler implements NeoHandler {
       if (dataArr == null || dataArr.length() != 1) {
         return null;
       }
-      JSONObject record = dataArr.getJSONObject(0);
+      JSONObject paymentRecord = dataArr.getJSONObject(0);
       String transactionId = resolveFinancialTransactionId(context.getRecordId());
-      record.put(FIELD_FINANCIAL_TRANSACTION_ID,
+      paymentRecord.put(FIELD_FINANCIAL_TRANSACTION_ID,
           transactionId != null ? transactionId : JSONObject.NULL);
       return NeoResponse.ok(body);
     } catch (Exception e) {
