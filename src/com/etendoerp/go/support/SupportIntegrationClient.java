@@ -47,6 +47,16 @@ final class SupportIntegrationClient {
   private static final String HEADER_AUTHORIZATION = "Authorization";
   private static final String CONTENT_TYPE_JSON = "application/json";
 
+  // Attachment mime types eligible to be forwarded to the ADK model as real inlineData
+  // (as opposed to a text placeholder). Scope is images and documents only — no
+  // audio/video — matching the frontend file-picker's accept list.
+  private static final String MIME_TYPE_IMAGE_PREFIX = "image/";
+  private static final String MIME_TYPE_PDF = "application/pdf";
+  private static final String MIME_TYPE_DOCX =
+      "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+  private static final String MIME_TYPE_XLSX =
+      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+
   private static final String ADK_BASE_URL =
       System.getProperty("support.adk.url", "http://localhost:8000");
   private static final String ADK_APP_NAME = "agent";
@@ -172,19 +182,44 @@ final class SupportIntegrationClient {
     String mimeType = att.optString("mimeType", "application/octet-stream");
     String name = att.optString("name", "archivo");
     String textContent = att.optString("text", "");
+    String data = att.optString("data", "");
+
     if (!textContent.isEmpty()) {
       parts.put(new JSONObject().put("text",
           "--- Archivo adjunto: " + name + " ---\n" + textContent + "\n---"));
+      // Text-file attachments (CSV/TXT) may also carry the raw bytes alongside the
+      // inlined text so the ADK side can extract and upload the real file to Jira.
+      // Older/cached frontend builds may still send text-only — guard on data presence.
+      if (!data.isEmpty()) {
+        parts.put(new JSONObject().put("inlineData",
+            new JSONObject().put("mimeType", mimeType).put("data", data)));
+      }
       return;
     }
-    String data = att.optString("data", "");
+
     if (data.isEmpty()) return;
-    if (mimeType.startsWith("image/") || "application/pdf".equals(mimeType)) {
+    if (isInlineableMimeType(mimeType)) {
       parts.put(new JSONObject().put("inlineData",
           new JSONObject().put("mimeType", mimeType).put("data", data)));
     } else {
+      // Defensive/system-boundary fallback: the payload is client-controlled, so a
+      // stale client or a direct API call could still send audio/video/anything else.
       parts.put(new JSONObject().put("text", "[Archivo adjunto: " + name + "]"));
     }
+  }
+
+  /**
+   * Attachments and documents allow-listed for forwarding as real inlineData to the
+   * ADK model: images and documents (PDF, DOCX, XLSX) — no audio, no video. Matches
+   * the frontend file-picker's {@code accept="image/*,.pdf,.csv,.txt,.xlsx,.docx"}.
+   * CSV/TXT are handled separately in {@link #appendSingleAttachmentPart} since they
+   * always carry a {@code text} field and are inlined regardless of this allow-list.
+   */
+  private static boolean isInlineableMimeType(String mimeType) {
+    return mimeType.startsWith(MIME_TYPE_IMAGE_PREFIX)
+        || MIME_TYPE_PDF.equals(mimeType)
+        || MIME_TYPE_DOCX.equals(mimeType)
+        || MIME_TYPE_XLSX.equals(mimeType);
   }
 
   static String parseAdkResponse(String json) {
