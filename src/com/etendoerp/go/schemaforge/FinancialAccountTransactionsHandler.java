@@ -17,7 +17,6 @@
 
 package com.etendoerp.go.schemaforge;
 
-import static com.etendoerp.go.schemaforge.FinancialAccountTransactionsSupport.attachOptional;
 import static com.etendoerp.go.schemaforge.FinancialAccountTransactionsSupport.bpartnerRoleFilter;
 import static com.etendoerp.go.schemaforge.FinancialAccountTransactionsSupport.buildPaymentLabel;
 import static com.etendoerp.go.schemaforge.FinancialAccountTransactionsSupport.daysUntil;
@@ -25,6 +24,7 @@ import static com.etendoerp.go.schemaforge.FinancialAccountTransactionsSupport.f
 import static com.etendoerp.go.schemaforge.FinancialAccountTransactionsSupport.optBigDecimal;
 import static com.etendoerp.go.schemaforge.FinancialAccountTransactionsSupport.parseDate;
 import static com.etendoerp.go.schemaforge.FinancialAccountTransactionsSupport.resolveConversionRate;
+import static com.etendoerp.go.schemaforge.FinancialAccountTransactionsSupport.setOptionalRef;
 import static com.etendoerp.go.schemaforge.FinancialAccountTransactionsSupport.statusClassicLabel;
 import static com.etendoerp.go.schemaforge.FinancialAccountTransactionsSupport.trxTypeClassicLabel;
 
@@ -52,15 +52,21 @@ import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.advpaymentmngt.actionHandler.FundsTransferActionHandler;
+import org.openbravo.advpaymentmngt.process.FIN_TransactionProcess;
 import org.openbravo.base.provider.OBProvider;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.security.OrganizationStructureProvider;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.businesspartner.BusinessPartner;
 import org.openbravo.model.common.currency.Currency;
+import org.openbravo.model.common.plm.Product;
+import org.openbravo.model.financialmgmt.accounting.Costcenter;
 import org.openbravo.model.financialmgmt.gl.GLItem;
 import org.openbravo.model.financialmgmt.payment.FIN_FinaccTransaction;
 import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
+import org.openbravo.model.project.Project;
+
+import com.etendoerp.payment.removal.util.TransactionRemovalUtil;
 
 /**
  * NeoHandler that powers the financial account transactions list introduced by ETP-4098.
@@ -116,8 +122,12 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
   private static final String PARAM_ACCOUNT_ID = "FIN_Financial_Account_ID";
   private static final String PARAM_ACTION = "action";
   private static final String ACTION_CREATE = "create";
+  private static final String ACTION_UPDATE = "update";
   private static final String ACTION_CREATE_PAYMENT = "create-payment";
   private static final String ACTION_TRANSFER = "transfer";
+  private static final String ACTION_PROCESS = "process";
+  private static final String ACTION_REACTIVATE = "reactivate";
+  private static final String ACTION_DELETE = "delete";
   private static final String ACTION_BP_LOOKUP = "bpartner-lookup";
   private static final String ACTION_GL_LOOKUP = "glitem-lookup";
   private static final String ACTION_DIM_VALUES = "dimension-values";
@@ -171,9 +181,15 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
           + "       ft.paymentamt AS payment_amt,"
           + "       COALESCE(ft.description, fp.description, '') AS description,"
           + "       ft.posted,"
+          + "       ft.processed AS processed_flag,"
           + "       COALESCE(fp.documentno, '') AS document_no,"
           + "       ft.fin_payment_id AS payment_id,"
           + "       fp.isreceipt AS payment_isreceipt,"
+          + "       ft.c_glitem_id AS gl_item_id,"
+          + "       ft.c_bpartner_id AS bpartner_id,"
+          + "       ft.c_project_id AS project_id,"
+          + "       ft.c_costcenter_id AS costcenter_id,"
+          + "       ft.m_product_id AS product_id,"
           + "       COALESCE(tbp.name, pbp.name, '') AS contact,"
           + "       COALESCE(gl.name, '') AS gl_item,"
           + "       COALESCE(dimorg.name, '')  AS dim_organization,"
@@ -262,8 +278,12 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
   /** Routes the mutating {@code POST} actions. */
   private NeoResponse handlePost(String action, NeoContext context) {
     if (ACTION_CREATE.equals(action)) return handleCreate(context);
+    if (ACTION_UPDATE.equals(action)) return handleUpdate(context);
     if (ACTION_CREATE_PAYMENT.equals(action)) return handleCreatePayment(context);
     if (ACTION_TRANSFER.equals(action)) return handleTransfer(context);
+    if (ACTION_PROCESS.equals(action)) return handleProcess(context);
+    if (ACTION_REACTIVATE.equals(action)) return handleReactivate(context);
+    if (ACTION_DELETE.equals(action)) return handleDelete(context);
     return NeoResponse.error(405, "Method not allowed.");
   }
 
@@ -340,6 +360,12 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
           row.put("paymentIsReceipt", StringUtils.trimToEmpty(rs.getString("payment_isreceipt")));
           row.put("contact", contact);
           row.put("glItem", StringUtils.trimToEmpty(rs.getString("gl_item")));
+          // FK ids so the edit modal can prefill its {id,name} selectors.
+          row.put("glItemId", StringUtils.trimToEmpty(rs.getString("gl_item_id")));
+          row.put("bpartnerId", StringUtils.trimToEmpty(rs.getString("bpartner_id")));
+          row.put("projectId", StringUtils.trimToEmpty(rs.getString("project_id")));
+          row.put("costcenterId", StringUtils.trimToEmpty(rs.getString("costcenter_id")));
+          row.put("productId", StringUtils.trimToEmpty(rs.getString("product_id")));
           row.put("currencyIso", StringUtils.trimToEmpty(rs.getString("currency_iso")));
           // Pre-derived fields consumed by the generic CSV export (export=csv) so it
           // stays a dumb serializer: Classic-style type/status labels, the deposit
@@ -350,7 +376,10 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
           row.put(FIELD_DEPOSIT_AMOUNT, nullSafeBigDecimal(rs.getBigDecimal("deposit_amt")));
           row.put("withdrawalAmount", nullSafeBigDecimal(rs.getBigDecimal("payment_amt")));
           row.put("statusLabel", statusClassicLabel(status));
-          row.put("processed", !"RPAP".equals(status) && !"RPAE".equals(status));
+          // "processed" reflects the actual DB flag (NOT derived from the status code): a
+          // reactivated transaction keeps status RPR/PPM but processed='N', i.e. it is a Draft
+          // again. The UI drives the Borrador state and the Editar/Procesar row actions from this.
+          row.put("processed", "Y".equals(StringUtils.trimToEmpty(rs.getString("processed_flag"))));
           row.put("paymentLabel", buildPaymentLabel(documentNo, dateTs, contact, amount));
           // Accounting dimensions for the expandable "more info" panel. All are
           // marshalled; the UI shows only the ones enabled in the chart of
@@ -593,12 +622,23 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
       OBDal.getInstance().save(trx);
       OBDal.getInstance().flush();
 
+      // "Confirmar" in the modal creates AND processes in one atomic call (Borrador → Procesado);
+      // "Guardar" leaves it Draft (process omitted / false).
+      if (body.optBoolean("process", false)) {
+        FIN_TransactionProcess.doTransactionProcess("P", trx);
+        OBDal.getInstance().flush();
+      }
+
       JSONObject result = new JSONObject();
       result.put("id", trx.getId());
       result.put(FIELD_TRX_TYPE, trx.getTransactionType());
       result.put("status", trx.getStatus());
       return NeoResponse.createdWithData(result);
 
+    } catch (org.openbravo.base.exception.OBException e) {
+      log.warn("Create transaction business error: {}", e.getMessage());
+      OBDal.getInstance().rollbackAndClose();
+      return NeoResponse.error(400, e.getMessage());
     } catch (Exception e) {
       // Log full stack trace server-side; never echo e.getMessage() back —
       // that can leak DB constraint names or other internal details to the
@@ -606,6 +646,51 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
       log.error("Error creating financial account transaction", e);
       OBDal.getInstance().rollbackAndClose();
       return NeoResponse.error(500, "Could not create the movement. Please check logs for details.");
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  /**
+   * Handles {@code POST ?action=update} — edits an existing DRAFT transaction. Rejects processed
+   * transactions (their dimensions are locked; the user must reactivate first). Optionally processes
+   * it afterwards when {@code process:true} (edit + confirm in one call).
+   */
+  private NeoResponse handleUpdate(NeoContext context) {
+    JSONObject body = context.getRequestBody();
+    if (body == null) return NeoResponse.error(400, MSG_BODY_REQUIRED);
+    try {
+      OBContext.setAdminMode(true);
+      FIN_FinaccTransaction trx = loadTransactionFromBody(body);
+      if (trx == null) return NeoResponse.error(404, "Transaction not found");
+      if (Boolean.TRUE.equals(trx.isProcessed())) {
+        return NeoResponse.error(400, "A processed transaction cannot be edited; reactivate it first.");
+      }
+
+      String currencyId = body.optString("currencyId", null);
+      Currency currency = StringUtils.isBlank(currencyId)
+          ? trx.getCurrency()
+          : OBDal.getInstance().get(Currency.class, currencyId);
+      if (currency == null) return NeoResponse.error(400, "Currency not found: " + currencyId);
+
+      applyEditableFields(trx, body, currency);
+      OBDal.getInstance().save(trx);
+      OBDal.getInstance().flush();
+
+      if (body.optBoolean("process", false)) {
+        FIN_TransactionProcess.doTransactionProcess("P", trx);
+        OBDal.getInstance().flush();
+      }
+      return lifecycleOk(trx);
+
+    } catch (org.openbravo.base.exception.OBException e) {
+      log.warn("Update transaction business error: {}", e.getMessage());
+      OBDal.getInstance().rollbackAndClose();
+      return NeoResponse.error(400, e.getMessage());
+    } catch (Exception e) {
+      log.error("Error updating financial account transaction", e);
+      OBDal.getInstance().rollbackAndClose();
+      return NeoResponse.error(500, "Could not update the movement. Please check logs for details.");
     } finally {
       OBContext.restorePreviousMode();
     }
@@ -630,6 +715,123 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
       log.error("Error creating payment", e);
       OBDal.getInstance().rollbackAndClose();
       return NeoResponse.error(500, "Could not register the payment. Please check logs for details.");
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  /**
+   * Loads the {@link FIN_FinaccTransaction} referenced by the request body's {@code id} field,
+   * or {@code null} when the id is blank / unknown. Shared by the process, reactivate and delete
+   * lifecycle actions.
+   */
+  private FIN_FinaccTransaction loadTransactionFromBody(JSONObject body) {
+    String id = body.optString("id", null);
+    return StringUtils.isBlank(id) ? null : OBDal.getInstance().get(FIN_FinaccTransaction.class, id);
+  }
+
+  /**
+   * Success envelope shared by the lifecycle actions. Wraps the result in the standard
+   * {@code {"response":{"data": ...}}} shape the front hooks read (see useCreateMovement.js).
+   */
+  private static NeoResponse lifecycleOk(FIN_FinaccTransaction trx) throws Exception {
+    JSONObject result = new JSONObject();
+    result.put("success", true);
+    if (trx != null) {
+      result.put("id", trx.getId());
+      result.put("status", trx.getStatus());
+    }
+    JSONObject responseData = new JSONObject();
+    responseData.put("data", result);
+    JSONObject envelope = new JSONObject();
+    envelope.put(KEY_RESPONSE, responseData);
+    return NeoResponse.ok(envelope);
+  }
+
+  /**
+   * Handles {@code POST ?action=process} — confirms a Draft transaction (Borrador → Procesado)
+   * by delegating to Etendo Classic's {@link FIN_TransactionProcess#doTransactionProcess} with the
+   * {@code "P"} (process) action. Never reimplements the processing logic.
+   */
+  private NeoResponse handleProcess(NeoContext context) {
+    JSONObject body = context.getRequestBody();
+    if (body == null) return NeoResponse.error(400, MSG_BODY_REQUIRED);
+    try {
+      OBContext.setAdminMode(true);
+      FIN_FinaccTransaction trx = loadTransactionFromBody(body);
+      if (trx == null) return NeoResponse.error(404, "Transaction not found");
+      FIN_TransactionProcess.doTransactionProcess("P", trx);
+      OBDal.getInstance().flush();
+      return lifecycleOk(trx);
+    } catch (org.openbravo.base.exception.OBException e) {
+      log.warn("Process transaction business error: {}", e.getMessage());
+      OBDal.getInstance().rollbackAndClose();
+      return NeoResponse.error(400, e.getMessage());
+    } catch (Exception e) {
+      log.error("Error processing financial account transaction", e);
+      OBDal.getInstance().rollbackAndClose();
+      return NeoResponse.error(500, "Could not process the movement. Please check logs for details.");
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  /**
+   * Handles {@code POST ?action=reactivate} — reactivates a Processed transaction (Procesado →
+   * Borrador), undoing posting and reconciliation in reverse order via the payment-removal module's
+   * {@link TransactionRemovalUtil#reactivate}. Never reimplements that logic.
+   */
+  private NeoResponse handleReactivate(NeoContext context) {
+    JSONObject body = context.getRequestBody();
+    if (body == null) return NeoResponse.error(400, MSG_BODY_REQUIRED);
+    try {
+      OBContext.setAdminMode(true);
+      FIN_FinaccTransaction trx = loadTransactionFromBody(body);
+      if (trx == null) return NeoResponse.error(404, "Transaction not found");
+      TransactionRemovalUtil.reactivate(trx);
+      OBDal.getInstance().flush();
+      trx = OBDal.getInstance().get(FIN_FinaccTransaction.class, trx.getId());
+      return lifecycleOk(trx);
+    } catch (org.openbravo.base.exception.OBException e) {
+      log.warn("Reactivate transaction business error: {}", e.getMessage());
+      OBDal.getInstance().rollbackAndClose();
+      return NeoResponse.error(400, e.getMessage());
+    } catch (Exception e) {
+      log.error("Error reactivating financial account transaction", e);
+      OBDal.getInstance().rollbackAndClose();
+      return NeoResponse.error(500, "Could not reactivate the movement. Please check logs for details.");
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  /**
+   * Handles {@code POST ?action=delete} — deletes a transaction. A Draft (not processed) is removed
+   * directly; a Processed transaction is reactivated and removed via the payment-removal module
+   * ({@link TransactionRemovalUtil#reactivateAndRemove}), undoing posting/reconciliation first.
+   */
+  private NeoResponse handleDelete(NeoContext context) {
+    JSONObject body = context.getRequestBody();
+    if (body == null) return NeoResponse.error(400, MSG_BODY_REQUIRED);
+    try {
+      OBContext.setAdminMode(true);
+      FIN_FinaccTransaction trx = loadTransactionFromBody(body);
+      if (trx == null) return NeoResponse.error(404, "Transaction not found");
+      if (Boolean.TRUE.equals(trx.isProcessed())) {
+        TransactionRemovalUtil.reactivateAndRemove(trx.getId());
+      } else {
+        OBDal.getInstance().remove(trx);
+        OBDal.getInstance().flush();
+      }
+      return lifecycleOk(null);
+    } catch (org.openbravo.base.exception.OBException e) {
+      log.warn("Delete transaction business error: {}", e.getMessage());
+      OBDal.getInstance().rollbackAndClose();
+      return NeoResponse.error(400, e.getMessage());
+    } catch (Exception e) {
+      log.error("Error deleting financial account transaction", e);
+      OBDal.getInstance().rollbackAndClose();
+      return NeoResponse.error(500, "Could not delete the movement. Please check logs for details.");
     } finally {
       OBContext.restorePreviousMode();
     }
@@ -780,34 +982,48 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
   private FIN_FinaccTransaction buildTransaction(JSONObject body,
                                                  FIN_FinancialAccount account,
                                                  Currency currency) {
-    String trxType = body.optString(FIELD_TRX_TYPE, null);
-    String description = body.optString(FIELD_DESCRIPTION, "");
-    BigDecimal depositAmount = nullSafeBigDecimal(optBigDecimal(body, FIELD_DEPOSIT_AMOUNT));
-    BigDecimal paymentAmount = nullSafeBigDecimal(optBigDecimal(body, "paymentAmount"));
-    Date transactionDate = parseDate(body.optString("transactionDate", null), new Date());
-    Date accountingDate = parseDate(body.optString("accountingDate", null), transactionDate);
-
     FIN_FinaccTransaction trx = OBProvider.getInstance().get(FIN_FinaccTransaction.class);
     trx.setClient(account.getClient());
     trx.setOrganization(account.getOrganization());
     trx.setActive(true);
     trx.setAccount(account);
+    trx.setLineNo(nextLineNo(account));
+    applyEditableFields(trx, body, currency);
+    return trx;
+  }
+
+  /**
+   * Applies the user-editable fields (type, dates, amounts, description, G/L item, business
+   * partner and accounting dimensions) to a Draft transaction. Shared by create and update.
+   * For BPD/BPW only one amount column is editable in Classic; status follows the convention
+   * (any deposit → {@code RPAE}, otherwise → {@code RPAP}). References use {@link
+   * FinancialAccountTransactionsSupport#setOptionalRef} so an edit can also clear them.
+   */
+  private void applyEditableFields(FIN_FinaccTransaction trx, JSONObject body, Currency currency) {
+    String trxType = body.optString(FIELD_TRX_TYPE, trx.getTransactionType());
+    BigDecimal depositAmount = nullSafeBigDecimal(optBigDecimal(body, FIELD_DEPOSIT_AMOUNT));
+    BigDecimal paymentAmount = nullSafeBigDecimal(optBigDecimal(body, "paymentAmount"));
+    Date fallbackDate = trx.getTransactionDate() != null ? trx.getTransactionDate() : new Date();
+    Date transactionDate = parseDate(body.optString("transactionDate", null), fallbackDate);
+    Date accountingDate = parseDate(body.optString("accountingDate", null), transactionDate);
+
     trx.setCurrency(currency);
     trx.setTransactionType(trxType);
     trx.setTransactionDate(transactionDate);
     trx.setDateAcct(accountingDate);
-    trx.setDescription(description);
-    trx.setLineNo(nextLineNo(account));
-
-    // For BPD/BPW only one column is editable in Classic; for BF both are.
-    // Status follows the convention: any deposit → RPAE, otherwise → RPAP.
+    trx.setDescription(body.optString(FIELD_DESCRIPTION, ""));
     trx.setDepositAmount(depositAmount);
     trx.setPaymentAmount(paymentAmount);
     trx.setStatus(depositAmount.signum() > 0 ? "RPAE" : "RPAP");
+    trx.setProcessed(false);
 
-    attachOptional(body.optString("bpartnerId", null), BusinessPartner.class, trx::setBusinessPartner);
-    attachOptional(body.optString("glItemId", null), GLItem.class, trx::setGLItem);
-    return trx;
+    setOptionalRef(body, "bpartnerId", BusinessPartner.class, trx::setBusinessPartner);
+    setOptionalRef(body, "glItemId", GLItem.class, trx::setGLItem);
+    // Accounting dimensions — only the ones enabled in the chart of accounts are ever sent by
+    // the UI (see headerDimensions in the list payload).
+    setOptionalRef(body, "projectId", Project.class, trx::setProject);
+    setOptionalRef(body, "costcenterId", Costcenter.class, trx::setCostCenter);
+    setOptionalRef(body, "productId", Product.class, trx::setProduct);
   }
 
   long nextLineNo(FIN_FinancialAccount account) {

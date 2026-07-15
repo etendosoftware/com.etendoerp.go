@@ -152,4 +152,16 @@ final class FinancialAccountTransactionsSupport {
     T ref = OBDal.getInstance().get(entityClass, id);
     if (ref != null) setter.accept(ref);
   }
+
+  /**
+   * Sets an optional FK reference from a request-body key, supporting edits: when the key is
+   * ABSENT the reference is left unchanged; when it is present-but-blank the reference is CLEARED
+   * (set to {@code null}); otherwise the referenced entity is loaded and set.
+   */
+  static <T extends BaseOBObject> void setOptionalRef(JSONObject body, String key,
+      Class<T> entityClass, Consumer<T> setter) {
+    if (!body.has(key)) return;
+    String id = body.optString(key, null);
+    setter.accept(StringUtils.isBlank(id) ? null : OBDal.getInstance().get(entityClass, id));
+  }
 }
