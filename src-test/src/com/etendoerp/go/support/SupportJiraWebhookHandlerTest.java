@@ -33,7 +33,9 @@ import java.io.BufferedReader;
 import java.io.PrintWriter;
 import java.io.StringReader;
 import java.io.StringWriter;
+import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Date;
 import java.util.List;
 
 import javax.servlet.http.HttpServletRequest;
@@ -799,6 +801,379 @@ class SupportJiraWebhookHandlerTest {
 
     verify(response).setStatus(200);
     assertEquals(IGNORED_BODY, capture.toString());
+  }
+
+  // -------------------------------------------------------------------------
+  // collectAdfMediaIds
+  // -------------------------------------------------------------------------
+
+  @Nested
+  @DisplayName("collectAdfMediaIds")
+  class CollectAdfMediaIds {
+
+    @Test
+    @DisplayName("A comment with no media nodes collects nothing")
+    void noMediaNodes() throws Exception {
+      JSONArray content = new JSONArray();
+      content.put(new JSONObject().put("type", "text").put("text", "just plain text"));
+      JSONObject paragraph = new JSONObject().put("type", "paragraph").put("content", content);
+      List<String> ids = new ArrayList<>();
+
+      SupportJiraWebhookHandler.collectAdfMediaIds(paragraph, ids);
+
+      assertTrue(ids.isEmpty());
+    }
+
+    @Test
+    @DisplayName("A single media node's attrs.id is collected")
+    void singleMediaNode() throws Exception {
+      JSONObject media = new JSONObject().put("type", "media")
+          .put("attrs", new JSONObject().put("id", "att-1"));
+      JSONArray content = new JSONArray().put(media);
+      JSONObject mediaSingle = new JSONObject().put("type", "mediaSingle").put("content", content);
+      List<String> ids = new ArrayList<>();
+
+      SupportJiraWebhookHandler.collectAdfMediaIds(mediaSingle, ids);
+
+      assertEquals(List.of("att-1"), ids);
+    }
+
+    @Test
+    @DisplayName("Multiple media nodes nested under a mediaGroup are all collected, in order")
+    void multipleMediaNodes() throws Exception {
+      JSONObject media1 = new JSONObject().put("type", "media").put("attrs", new JSONObject().put("id", "att-1"));
+      JSONObject media2 = new JSONObject().put("type", "media").put("attrs", new JSONObject().put("id", "att-2"));
+      JSONArray content = new JSONArray().put(media1).put(media2);
+      JSONObject mediaGroup = new JSONObject().put("type", "mediaGroup").put("content", content);
+      List<String> ids = new ArrayList<>();
+
+      SupportJiraWebhookHandler.collectAdfMediaIds(mediaGroup, ids);
+
+      assertEquals(List.of("att-1", "att-2"), ids);
+    }
+
+    @Test
+    @DisplayName("A media node with a blank attrs.id is skipped")
+    void blankMediaId() throws Exception {
+      JSONObject media = new JSONObject().put("type", "media").put("attrs", new JSONObject().put("id", ""));
+      List<String> ids = new ArrayList<>();
+
+      SupportJiraWebhookHandler.collectAdfMediaIds(media, ids);
+
+      assertTrue(ids.isEmpty());
+    }
+
+    @Test
+    @DisplayName("A media node with no attrs at all is skipped, not an NPE")
+    void missingAttrs() throws Exception {
+      JSONObject media = new JSONObject().put("type", "media");
+      List<String> ids = new ArrayList<>();
+
+      SupportJiraWebhookHandler.collectAdfMediaIds(media, ids);
+
+      assertTrue(ids.isEmpty());
+    }
+
+    @Test
+    @DisplayName("String-encoded ADF body (the production webhook shape) is parsed the same way")
+    void stringEncodedBody() throws Exception {
+      String raw = "{\"type\":\"doc\",\"content\":[{\"type\":\"mediaSingle\",\"content\":"
+          + "[{\"type\":\"media\",\"attrs\":{\"id\":\"att-9\"}}]}]}";
+      List<String> ids = new ArrayList<>();
+
+      SupportJiraWebhookHandler.collectAdfMediaIds(raw, ids);
+
+      assertEquals(List.of("att-9"), ids);
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // parseJiraInstantMillis / parseCommentTimestamp
+  // -------------------------------------------------------------------------
+
+  @Nested
+  @DisplayName("parseJiraInstantMillis / parseCommentTimestamp")
+  class ParseTimestamps {
+
+    @Test
+    @DisplayName("ISO offset date-time string (colon offset) parses to the correct epoch millis")
+    void isoOffsetDateTime() {
+      long millis = SupportJiraWebhookHandler.parseJiraInstantMillis("2026-07-14T10:00:00.000-03:00");
+      assertTrue(millis > 0);
+    }
+
+    @Test
+    @DisplayName("Plain Instant-parseable string (Z suffix) is also accepted")
+    void instantStyle() {
+      long millis = SupportJiraWebhookHandler.parseJiraInstantMillis("2026-07-14T13:00:00Z");
+      assertTrue(millis > 0);
+    }
+
+    @Test
+    @DisplayName("Null or empty value returns -1")
+    void nullOrEmpty() {
+      assertEquals(-1, SupportJiraWebhookHandler.parseJiraInstantMillis(null));
+      assertEquals(-1, SupportJiraWebhookHandler.parseJiraInstantMillis(""));
+    }
+
+    @Test
+    @DisplayName("Unparseable garbage value returns -1")
+    void unparseable() {
+      assertEquals(-1, SupportJiraWebhookHandler.parseJiraInstantMillis("not-a-date"));
+    }
+
+    /**
+     * BUG (flagged for QA — see report): Jira Cloud's REST API v3 actually formats dates
+     * (issue/comment/attachment {@code created}) with a numeric offset WITHOUT a colon, e.g.
+     * {@code "2021-01-05T10:15:30.000+0000"} — this is Jira Cloud's well-documented date shape,
+     * not a hypothetical. Neither {@code DateTimeFormatter.ISO_OFFSET_DATE_TIME} nor
+     * {@code Instant.parse} (the two formats this method tries) accept that shape — both throw,
+     * so this returns -1 for every real Jira timestamp this code will ever actually receive.
+     */
+    @Test
+    @DisplayName("BUG: Jira Cloud's real no-colon offset date format ('+0000') fails to parse and returns -1")
+    void realJiraDateFormatFailsToParse_documentsBug() {
+      long millis = SupportJiraWebhookHandler.parseJiraInstantMillis("2021-01-05T10:15:30.000+0000");
+      assertEquals(-1, millis);
+    }
+
+    @Test
+    @DisplayName("Comment with a valid ISO 'created' field uses it verbatim")
+    void commentWithCreated() throws Exception {
+      JSONObject comment = new JSONObject().put("created", "2026-07-14T13:00:00.000Z");
+      Date result = SupportJiraWebhookHandler.parseCommentTimestamp(comment);
+      assertEquals(SupportJiraWebhookHandler.parseJiraInstantMillis("2026-07-14T13:00:00.000Z"), result.getTime());
+    }
+
+    @Test
+    @DisplayName("Comment without a 'created' field falls back to 'now' rather than throwing")
+    void commentWithoutCreatedFallsBackToNow() {
+      JSONObject comment = new JSONObject();
+      long before = System.currentTimeMillis();
+      Date result = SupportJiraWebhookHandler.parseCommentTimestamp(comment);
+      long after = System.currentTimeMillis();
+      assertTrue(result.getTime() >= before && result.getTime() <= after);
+    }
+
+    @Test
+    @DisplayName("Comment with Jira's real no-colon 'created' format also falls back to 'now' (same bug)")
+    void commentWithRealJiraCreatedFallsBackToNow() throws Exception {
+      JSONObject comment = new JSONObject().put("created", "2021-01-05T10:15:30.000+0000");
+      long before = System.currentTimeMillis();
+      Date result = SupportJiraWebhookHandler.parseCommentTimestamp(comment);
+      long after = System.currentTimeMillis();
+      assertTrue(result.getTime() >= before && result.getTime() <= after);
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // toAttachmentMeta
+  // -------------------------------------------------------------------------
+
+  @Nested
+  @DisplayName("toAttachmentMeta")
+  class ToAttachmentMeta {
+
+    @Test
+    @DisplayName("Applies defaults when filename/mimeType are absent")
+    void defaults() throws Exception {
+      JSONObject att = new JSONObject().put("id", "10001");
+      JSONObject meta = SupportJiraWebhookHandler.toAttachmentMeta(att);
+      assertEquals("10001", meta.getString("id"));
+      assertEquals("attachment", meta.getString("filename"));
+      assertEquals("application/octet-stream", meta.getString("mimeType"));
+    }
+
+    @Test
+    @DisplayName("Preserves the real filename/mimeType when present")
+    void realValues() throws Exception {
+      JSONObject att = new JSONObject().put("id", "10001").put("filename", "screenshot.png")
+          .put("mimeType", "image/png");
+      JSONObject meta = SupportJiraWebhookHandler.toAttachmentMeta(att);
+      assertEquals("screenshot.png", meta.getString("filename"));
+      assertEquals("image/png", meta.getString("mimeType"));
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // correlateAttachments — the ADF-media-id ↔ Jira-REST-attachment correlation logic
+  // -------------------------------------------------------------------------
+
+  @Nested
+  @DisplayName("correlateAttachments")
+  class CorrelateAttachments {
+
+    private JSONObject attachment(String id, String filename, String mimeType, String created) throws Exception {
+      return new JSONObject().put("id", id).put("filename", filename).put("mimeType", mimeType)
+          .put("created", created);
+    }
+
+    private String isoOf(long epochMillis) {
+      return java.time.Instant.ofEpochMilli(epochMillis).toString();
+    }
+
+    @Test
+    @DisplayName("Empty media ids yields an empty result")
+    void noMediaIds() {
+      JSONArray result = SupportJiraWebhookHandler.correlateAttachments(new JSONArray(), List.of(), new Date());
+      assertEquals(0, result.length());
+    }
+
+    @Test
+    @DisplayName("Empty issue attachments yields an empty result even with media ids present")
+    void noIssueAttachments() {
+      JSONArray result = SupportJiraWebhookHandler.correlateAttachments(new JSONArray(), List.of("m1"), new Date());
+      assertEquals(0, result.length());
+    }
+
+    @Test
+    @DisplayName("A media id matching an attachment id directly resolves with the right {id, filename, mimeType}")
+    void directIdMatch() throws Exception {
+      JSONArray issueAttachments = new JSONArray()
+          .put(attachment("10001", "screenshot.png", "image/png", isoOf(1_800_000_000_000L)));
+
+      JSONArray result = SupportJiraWebhookHandler.correlateAttachments(
+          issueAttachments, List.of("10001"), new Date());
+
+      assertEquals(1, result.length());
+      JSONObject meta = result.getJSONObject(0);
+      assertEquals("10001", meta.getString("id"));
+      assertEquals("screenshot.png", meta.getString("filename"));
+      assertEquals("image/png", meta.getString("mimeType"));
+    }
+
+    @Test
+    @DisplayName("Multiple media ids in one comment are ALL correlated, not just the first")
+    void multipleDirectMatches() throws Exception {
+      JSONArray issueAttachments = new JSONArray()
+          .put(attachment("10001", "a.png", "image/png", isoOf(1_800_000_000_000L)))
+          .put(attachment("10002", "b.pdf", "application/pdf", isoOf(1_800_000_005_000L)));
+
+      JSONArray result = SupportJiraWebhookHandler.correlateAttachments(
+          issueAttachments, List.of("10001", "10002"), new Date());
+
+      assertEquals(2, result.length());
+      assertEquals("10001", result.getJSONObject(0).getString("id"));
+      assertEquals("10002", result.getJSONObject(1).getString("id"));
+    }
+
+    @Test
+    @DisplayName("A media id with no direct match falls back to the closest-by-timestamp unclaimed attachment")
+    void fallbackPicksClosestByTime() throws Exception {
+      Date commentTime = new Date(1_800_000_000_000L);
+      JSONArray issueAttachments = new JSONArray()
+          // 1 hour before the comment
+          .put(attachment("A1", "far.png", "image/png", isoOf(commentTime.getTime() - 3_600_000)))
+          // 2 seconds after the comment — the closest one
+          .put(attachment("A2", "close.png", "image/png", isoOf(commentTime.getTime() + 2_000)));
+
+      // "adf-media-xyz" stands in for a Media Platform file id that never appears verbatim in the
+      // REST attachment list — this forces the fallback path.
+      JSONArray result = SupportJiraWebhookHandler.correlateAttachments(
+          issueAttachments, List.of("adf-media-xyz"), commentTime);
+
+      assertEquals(1, result.length());
+      assertEquals("A2", result.getJSONObject(0).getString("id"));
+    }
+
+    @Test
+    @DisplayName("Fallback does not re-claim an attachment already resolved by a direct id match")
+    void fallbackSkipsAlreadyClaimedAttachment() throws Exception {
+      Date commentTime = new Date(1_800_000_000_000L);
+      // "10002" is both the direct match AND would be the closest-by-time candidate for the
+      // fallback — the fallback for the unmatched id must not double-claim it.
+      JSONArray issueAttachments = new JSONArray()
+          .put(attachment("10002", "close.png", "image/png", isoOf(commentTime.getTime())))
+          .put(attachment("A3", "far.png", "image/png", isoOf(commentTime.getTime() - 3_600_000)));
+
+      JSONArray result = SupportJiraWebhookHandler.correlateAttachments(
+          issueAttachments, List.of("10002", "adf-media-xyz"), commentTime);
+
+      assertEquals(2, result.length());
+      assertEquals("10002", result.getJSONObject(0).getString("id"));
+      assertEquals("A3", result.getJSONObject(1).getString("id"));
+    }
+
+    @Test
+    @DisplayName("More unmatched media ids than available attachments: only what actually exists is returned")
+    void moreMediaIdsThanAttachments() throws Exception {
+      Date commentTime = new Date(1_800_000_000_000L);
+      JSONArray issueAttachments = new JSONArray()
+          .put(attachment("A1", "only.png", "image/png", isoOf(commentTime.getTime())));
+
+      JSONArray result = SupportJiraWebhookHandler.correlateAttachments(
+          issueAttachments, List.of("media-1", "media-2"), commentTime);
+
+      assertEquals(1, result.length());
+    }
+
+    /**
+     * BUG (flagged for QA — see report): {@code closestUnclaimedByTime} applies NO distance
+     * threshold whatsoever — it force-pairs an unmatched media node with whichever unclaimed
+     * attachment is nominally "closest" in time, no matter how far away that actually is. This
+     * test documents the CURRENT behavior (it passes against the code as written); it does not
+     * assert this is correct. Combined with the separate parsing bug above (real Jira timestamps
+     * never parse, see {@code ParseTimestamps}), production behavior is actually "never
+     * fallback-match" rather than "wrongly fallback-match" — but if that parsing bug is ever
+     * fixed in isolation without also adding a distance guard here, this false-pairing risk
+     * becomes live.
+     */
+    @Test
+    @DisplayName("BUG: fallback force-pairs with the closest attachment even when it is weeks away")
+    void fallbackHasNoDistanceThreshold_documentsBug() throws Exception {
+      Date commentTime = new Date(1_800_000_000_000L);
+      long thirtyDaysMillis = 30L * 24 * 3600 * 1000;
+      JSONArray issueAttachments = new JSONArray()
+          .put(attachment("OLD", "unrelated-old-file.pdf", "application/pdf",
+              isoOf(commentTime.getTime() - thirtyDaysMillis)));
+
+      JSONArray result = SupportJiraWebhookHandler.correlateAttachments(
+          issueAttachments, List.of("adf-media-unrelated"), commentTime);
+
+      // Desired behavior would likely be an empty result (no match within a reasonable window).
+      // Actual behavior: still force-paired, 30 days apart.
+      assertEquals(1, result.length());
+      assertEquals("OLD", result.getJSONObject(0).getString("id"));
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // resolveCommentAttachments — integration of collectAdfMediaIds + fetchIssueAttachments +
+  // correlateAttachments. support.jira.token is empty in this test environment (no system
+  // property override), so fetchIssueAttachments always short-circuits before any network call —
+  // this is what lets these run as pure unit tests, and it also documents the graceful-degradation
+  // path for a real deployment missing that token.
+  // -------------------------------------------------------------------------
+
+  @Nested
+  @DisplayName("resolveCommentAttachments")
+  class ResolveCommentAttachments {
+
+    @Test
+    @DisplayName("A comment with no media nodes (plain text) returns null without any Jira call")
+    void plainTextCommentReturnsNull() throws Exception {
+      JSONObject body = new JSONObject().put("type", "doc").put("content", new JSONArray()
+          .put(new JSONObject().put("type", "paragraph").put("content", new JSONArray()
+              .put(new JSONObject().put("type", "text").put("text", "just a plain reply")))));
+      JSONObject comment = new JSONObject().put("body", body);
+
+      JSONArray result = SupportJiraWebhookHandler.resolveCommentAttachments("SUP-1", comment);
+
+      assertNull(result);
+    }
+
+    @Test
+    @DisplayName("A comment with a media node but no Jira token configured resolves to null (network call cannot complete)")
+    void mediaNodeWithoutTokenResolvesToNull() throws Exception {
+      JSONObject media = new JSONObject().put("type", "media").put("attrs", new JSONObject().put("id", "att-1"));
+      JSONObject body = new JSONObject().put("type", "doc").put("content", new JSONArray()
+          .put(new JSONObject().put("type", "mediaSingle").put("content", new JSONArray().put(media))));
+      JSONObject comment = new JSONObject().put("body", body);
+
+      JSONArray result = SupportJiraWebhookHandler.resolveCommentAttachments("SUP-2", comment);
+
+      assertNull(result);
+    }
   }
 
   // -------------------------------------------------------------------------
