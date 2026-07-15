@@ -46,6 +46,8 @@ import org.junit.jupiter.api.Test;
 import org.mockito.MockedStatic;
 import org.openbravo.dal.service.OBQuery;
 
+import com.etendoerp.go.schemaforge.util.NeoTrl;
+
 import com.etendoerp.go.schemaforge.selector.meta.SelectorMeta;
 
 /**
@@ -154,6 +156,53 @@ class NeoSelectorExecutionHelperTest {
       StringBuilder hql = new StringBuilder("e.active = true");
       NeoSelectorExecutionHelper.appendSimpleSearchFilter(hql, "commercialName", "acme");
       assertEquals("e.active = true AND lower(e.commercialName) LIKE :search", hql.toString());
+    }
+  }
+
+  // ------------------------------------------------------------------ //
+  // appendTranslatedSearchFilter
+  // ------------------------------------------------------------------ //
+
+  @Nested
+  @DisplayName("appendTranslatedSearchFilter")
+  class AppendTranslatedSearchFilterTests {
+
+    private final NeoTrl.TrlSearchMeta uomTrl = new NeoTrl.TrlSearchMeta("UOMTrl", "uOM", "name");
+
+    @Test
+    @DisplayName("blank search is ignored")
+    void blankSearchIsIgnored() {
+      StringBuilder hql = new StringBuilder("existing");
+      NeoSelectorExecutionHelper.appendTranslatedSearchFilter(hql, "name", "", uomTrl);
+      assertEquals("existing", hql.toString());
+    }
+
+    @Test
+    @DisplayName("null trl meta is ignored")
+    void nullTrlMetaIsIgnored() {
+      StringBuilder hql = new StringBuilder("existing");
+      NeoSelectorExecutionHelper.appendTranslatedSearchFilter(hql, "name", "pie", null);
+      assertEquals("existing", hql.toString());
+    }
+
+    @Test
+    @DisplayName("matches base name OR the *_Trl translated name for the request language")
+    void appendsBaseOrTrlClause() {
+      StringBuilder hql = new StringBuilder();
+      NeoSelectorExecutionHelper.appendTranslatedSearchFilter(hql, "name", "pie", uomTrl);
+      assertEquals(
+          "(lower(e.name) LIKE :search OR exists (from UOMTrl t2 where t2.uOM = e "
+              + "and t2.language.language = :searchLang and lower(t2.name) LIKE :search))",
+          hql.toString());
+    }
+
+    @Test
+    @DisplayName("prepends AND when hql is non-empty")
+    void appendsWithAnd() {
+      StringBuilder hql = new StringBuilder("e.active = true");
+      NeoSelectorExecutionHelper.appendTranslatedSearchFilter(hql, "name", "pie", uomTrl);
+      assertTrue(hql.toString().startsWith(
+          "e.active = true AND (lower(e.name) LIKE :search OR exists (from UOMTrl t2"));
     }
   }
 
