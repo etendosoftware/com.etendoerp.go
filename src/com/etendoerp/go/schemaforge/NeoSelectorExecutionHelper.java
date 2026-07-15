@@ -8,6 +8,7 @@ import org.codehaus.jettison.json.JSONArray;
 import org.openbravo.model.ad.datamodel.Column;
 import com.etendoerp.go.schemaforge.selector.meta.SelectorDescriptorBuilder;
 import com.etendoerp.go.schemaforge.selector.meta.SelectorMeta;
+import com.etendoerp.go.schemaforge.util.NeoTrl;
 import org.openbravo.dal.service.OBQuery;
 
 /**
@@ -76,6 +77,24 @@ class NeoSelectorExecutionHelper {
     }
     appendAndIfNeeded(hql);
     hql.append("lower(e.").append(displayProperty).append(") LIKE :search");
+  }
+
+  /**
+   * Like {@link #appendSimpleSearchFilter} but a record also matches when its {@code *_Trl}
+   * translated name (for the request language, bound as {@code :searchLang}) satisfies the search.
+   * This makes selector search work in the GO locale, not only the base language (ETP-4304). The
+   * caller must bind both {@code :search} and {@code :searchLang}.
+   */
+  static void appendTranslatedSearchFilter(StringBuilder hql, String displayProperty, String search,
+      NeoTrl.TrlSearchMeta trl) {
+    if (StringUtils.isBlank(search) || trl == null) {
+      return;
+    }
+    appendAndIfNeeded(hql);
+    hql.append("(lower(e.").append(displayProperty).append(") LIKE :search OR exists (from ")
+        .append(trl.trlEntityName).append(" t2 where t2.").append(trl.backRefProperty)
+        .append(" = e and t2.language.language = :searchLang and lower(t2.")
+        .append(trl.nameProperty).append(") LIKE :search))");
   }
 
   static String buildSimpleWhereClause(StringBuilder hql) {

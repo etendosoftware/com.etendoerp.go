@@ -61,6 +61,7 @@ import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.common.invoice.Invoice;
 import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
 import org.openbravo.model.financialmgmt.payment.FIN_Payment;
+import org.openbravo.model.financialmgmt.payment.FIN_Payment_Credit;
 import org.openbravo.model.financialmgmt.payment.FIN_PaymentMethod;
 import org.openbravo.model.financialmgmt.payment.FIN_PaymentSchedule;
 import org.openbravo.model.financialmgmt.payment.FIN_PaymentScheduleDetail;
@@ -114,6 +115,15 @@ class PaymentRegistrationServiceTest {
     when(pisPaymentCriteria.add(any(Criterion.class))).thenReturn(pisPaymentCriteria);
     when(pisPaymentCriteria.setMaxResults(anyInt())).thenReturn(pisPaymentCriteria);
     when(pisPaymentCriteria.uniqueResult()).thenReturn(null);
+
+    // paymentListItem also calls creditSourcesUsedByPayment for every non-processed row, which
+    // queries FIN_Payment_Credit — stub it here once so every test gets a real, non-null
+    // OBCriteria (with an empty result, i.e. "consumes no credit") instead of Mockito's default
+    // null, same reasoning as the PisPayment stub above.
+    OBCriteria<FIN_Payment_Credit> creditCriteria = mock(OBCriteria.class);
+    when(obDal.createCriteria(FIN_Payment_Credit.class)).thenReturn(creditCriteria);
+    when(creditCriteria.add(any(Criterion.class))).thenReturn(creditCriteria);
+    when(creditCriteria.list()).thenReturn(Collections.emptyList());
   }
 
   @AfterEach
