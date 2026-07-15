@@ -661,6 +661,18 @@ Then set `JAVA_QUALIFIER = 'myCustomHandler'` on the corresponding ETGO_SF_Entit
 - Return `null` to let the request fall through to the default DataSourceServlet handling.
 - If the handler class is not found via CDI, the request falls through to default handling with a warning log.
 
+**Advanced pattern — legacy `ad_actionButton` servlets with no `CallProcess` path:** most custom
+handlers either call `CallProcess` (stored-procedure AD Processes) or run their own HQL query.
+`YearCloseHandler` (`calendar` spec, `JAVA_QUALIFIER = 'year-close'`) is the first case in this
+module of a third shape: AD Processes 800036/800038 ("Close Year"/"Undo Close Year") are legacy
+classname-based `ad_actionButton` servlets with `AD_Process.procedurename = NULL` — `CallProcess`
+has no code path for these at all. The handler invokes the servlet's private `processButton(...)`
+method directly via reflection instead of simulating an HTTP request. See
+`docs/neo-headless-guide.md` §16 ("Patron avanzado") for the full write-up and code sketch, and
+the class javadoc in `YearCloseHandler.java` for the complete rationale. Treat this as a
+last-resort pattern, not a default — only reach for it once you've confirmed (not assumed) that
+`CallProcess` genuinely has no path for the process in question.
+
 **NeoContext fields:**
 
 | Field | Type | Description |
