@@ -923,18 +923,18 @@ class SupportJiraWebhookHandlerTest {
     }
 
     /**
-     * BUG (flagged for QA — see report): Jira Cloud's REST API v3 actually formats dates
-     * (issue/comment/attachment {@code created}) with a numeric offset WITHOUT a colon, e.g.
+     * FIXED: Jira Cloud's REST API v3 actually formats dates (issue/comment/attachment
+     * {@code created}) with a numeric offset WITHOUT a colon, e.g.
      * {@code "2021-01-05T10:15:30.000+0000"} — this is Jira Cloud's well-documented date shape,
-     * not a hypothetical. Neither {@code DateTimeFormatter.ISO_OFFSET_DATE_TIME} nor
-     * {@code Instant.parse} (the two formats this method tries) accept that shape — both throw,
-     * so this returns -1 for every real Jira timestamp this code will ever actually receive.
+     * not a hypothetical. {@code parseJiraInstantMillis} now also tries a {@code Z}-pattern
+     * formatter that accepts this no-colon offset shape, so real Jira timestamps parse correctly
+     * instead of always returning -1.
      */
     @Test
-    @DisplayName("BUG: Jira Cloud's real no-colon offset date format ('+0000') fails to parse and returns -1")
-    void realJiraDateFormatFailsToParse_documentsBug() {
+    @DisplayName("FIXED: Jira Cloud's real no-colon offset date format ('+0000') now parses correctly")
+    void realJiraDateFormatParsesCorrectly() {
       long millis = SupportJiraWebhookHandler.parseJiraInstantMillis("2021-01-05T10:15:30.000+0000");
-      assertEquals(-1, millis);
+      assertEquals(1_609_841_730_000L, millis);
     }
 
     @Test
@@ -956,13 +956,11 @@ class SupportJiraWebhookHandlerTest {
     }
 
     @Test
-    @DisplayName("Comment with Jira's real no-colon 'created' format also falls back to 'now' (same bug)")
-    void commentWithRealJiraCreatedFallsBackToNow() throws Exception {
+    @DisplayName("FIXED: Comment with Jira's real no-colon 'created' format now uses it verbatim")
+    void commentWithRealJiraCreatedUsesItVerbatim() throws Exception {
       JSONObject comment = new JSONObject().put("created", "2021-01-05T10:15:30.000+0000");
-      long before = System.currentTimeMillis();
       Date result = SupportJiraWebhookHandler.parseCommentTimestamp(comment);
-      long after = System.currentTimeMillis();
-      assertTrue(result.getTime() >= before && result.getTime() <= after);
+      assertEquals(1_609_841_730_000L, result.getTime());
     }
   }
 
@@ -1108,19 +1106,15 @@ class SupportJiraWebhookHandlerTest {
     }
 
     /**
-     * BUG (flagged for QA — see report): {@code closestUnclaimedByTime} applies NO distance
-     * threshold whatsoever — it force-pairs an unmatched media node with whichever unclaimed
-     * attachment is nominally "closest" in time, no matter how far away that actually is. This
-     * test documents the CURRENT behavior (it passes against the code as written); it does not
-     * assert this is correct. Combined with the separate parsing bug above (real Jira timestamps
-     * never parse, see {@code ParseTimestamps}), production behavior is actually "never
-     * fallback-match" rather than "wrongly fallback-match" — but if that parsing bug is ever
-     * fixed in isolation without also adding a distance guard here, this false-pairing risk
-     * becomes live.
+     * FIXED: {@code closestUnclaimedByTime} now applies {@code
+     * MAX_FALLBACK_CORRELATION_DISTANCE_MILLIS} (24 hours) as a distance threshold — it no
+     * longer force-pairs an unmatched media node with whichever unclaimed attachment is
+     * nominally "closest" in time when that attachment is actually unrelated (e.g. weeks old).
+     * Beyond the threshold, the fallback now yields no match rather than a wrong one.
      */
     @Test
-    @DisplayName("BUG: fallback force-pairs with the closest attachment even when it is weeks away")
-    void fallbackHasNoDistanceThreshold_documentsBug() throws Exception {
+    @DisplayName("FIXED: fallback no longer force-pairs with a closest attachment that is weeks away")
+    void fallbackRespectsDistanceThreshold_noMatchWhenTooFar() throws Exception {
       Date commentTime = new Date(1_800_000_000_000L);
       long thirtyDaysMillis = 30L * 24 * 3600 * 1000;
       JSONArray issueAttachments = new JSONArray()
@@ -1130,10 +1124,8 @@ class SupportJiraWebhookHandlerTest {
       JSONArray result = SupportJiraWebhookHandler.correlateAttachments(
           issueAttachments, List.of("adf-media-unrelated"), commentTime);
 
-      // Desired behavior would likely be an empty result (no match within a reasonable window).
-      // Actual behavior: still force-paired, 30 days apart.
-      assertEquals(1, result.length());
-      assertEquals("OLD", result.getJSONObject(0).getString("id"));
+      // Beyond the distance threshold, no fallback match is forced.
+      assertEquals(0, result.length());
     }
   }
 

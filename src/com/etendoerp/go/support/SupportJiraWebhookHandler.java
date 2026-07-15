@@ -508,15 +508,28 @@ final class SupportJiraWebhookHandler {
     return millis > 0 ? new Date(millis) : new Date();
   }
 
+  /** Jira Cloud REST v3 formats {@code created} timestamps with a numeric offset that has NO
+   * colon (e.g. {@code "2021-01-05T10:15:30.000+0000"}), which neither {@link
+   * DateTimeFormatter#ISO_OFFSET_DATE_TIME} nor {@link Instant#parse} accepts. The {@code Z}
+   * pattern letter does accept that no-colon offset form, so it is tried as a second option;
+   * {@code ISO_OFFSET_DATE_TIME} is tried first since it already correctly handles both the
+   * colon-offset form ({@code -03:00}) and the {@code Z}/zulu suffix form. */
+  private static final DateTimeFormatter NO_COLON_OFFSET_FORMAT =
+      DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSSZ");
+
   static long parseJiraInstantMillis(String value) {
     if (value == null || value.isEmpty()) return -1;
     try {
       return OffsetDateTime.parse(value, DateTimeFormatter.ISO_OFFSET_DATE_TIME).toInstant().toEpochMilli();
     } catch (Exception e) {
       try {
-        return Instant.parse(value).toEpochMilli();
+        return OffsetDateTime.parse(value, NO_COLON_OFFSET_FORMAT).toInstant().toEpochMilli();
       } catch (Exception e2) {
-        return -1;
+        try {
+          return Instant.parse(value).toEpochMilli();
+        } catch (Exception e3) {
+          return -1;
+        }
       }
     }
   }
@@ -588,6 +601,15 @@ final class SupportJiraWebhookHandler {
     return -1;
   }
 
+  /** Maximum gap allowed between a comment and an unclaimed attachment for the fallback,
+   * closest-by-timestamp pairing to be trusted. Sized generously above the couple-of-minutes
+   * gap typical of an upload-then-comment sequence (and above the widest gap exercised by this
+   * class's own fallback test fixtures, ~1 hour) so ordinary support-session delays still
+   * correlate, while still rejecting force-pairs against attachments that are actually unrelated
+   * (e.g. weeks-old uploads on a long-lived ticket). Beyond this window, "no match" is preferred
+   * over a wrong one. */
+  private static final long MAX_FALLBACK_CORRELATION_DISTANCE_MILLIS = 24L * 60 * 60 * 1000; // 24 hours
+
   static int closestUnclaimedByTime(JSONArray issueAttachments, Date commentTime, Set<Integer> claimed) {
     int bestIdx = -1;
     long bestDiff = Long.MAX_VALUE;
@@ -598,7 +620,7 @@ final class SupportJiraWebhookHandler {
       long attMillis = parseJiraInstantMillis(att.optString("created", ""));
       if (attMillis < 0) continue;
       long diff = Math.abs(attMillis - commentTime.getTime());
-      if (diff < bestDiff) {
+      if (diff < bestDiff && diff <= MAX_FALLBACK_CORRELATION_DISTANCE_MILLIS) {
         bestDiff = diff;
         bestIdx = i;
       }
