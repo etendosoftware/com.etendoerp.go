@@ -37,6 +37,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Date;
 import java.util.List;
+import java.util.Set;
 
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
@@ -1079,10 +1080,11 @@ class SupportJiraWebhookHandlerTest {
     void fallbackSkipsAlreadyClaimedAttachment() throws Exception {
       Date commentTime = new Date(1_800_000_000_000L);
       // "10002" is both the direct match AND would be the closest-by-time candidate for the
-      // fallback — the fallback for the unmatched id must not double-claim it.
+      // fallback — the fallback for the unmatched id must not double-claim it. A3 is 5 minutes
+      // away, comfortably inside the 15-minute fallback distance threshold.
       JSONArray issueAttachments = new JSONArray()
           .put(attachment("10002", "close.png", "image/png", isoOf(commentTime.getTime())))
-          .put(attachment("A3", "far.png", "image/png", isoOf(commentTime.getTime() - 3_600_000)));
+          .put(attachment("A3", "far.png", "image/png", isoOf(commentTime.getTime() - 300_000)));
 
       JSONArray result = SupportJiraWebhookHandler.correlateAttachments(
           issueAttachments, List.of("10002", "adf-media-xyz"), commentTime);
@@ -1107,7 +1109,7 @@ class SupportJiraWebhookHandlerTest {
 
     /**
      * FIXED: {@code closestUnclaimedByTime} now applies {@code
-     * MAX_FALLBACK_CORRELATION_DISTANCE_MILLIS} (24 hours) as a distance threshold — it no
+     * MAX_FALLBACK_CORRELATION_DISTANCE_MILLIS} (15 minutes) as a distance threshold — it no
      * longer force-pairs an unmatched media node with whichever unclaimed attachment is
      * nominally "closest" in time when that attachment is actually unrelated (e.g. weeks old).
      * Beyond the threshold, the fallback now yields no match rather than a wrong one.
@@ -1125,6 +1127,60 @@ class SupportJiraWebhookHandlerTest {
           issueAttachments, List.of("adf-media-unrelated"), commentTime);
 
       // Beyond the distance threshold, no fallback match is forced.
+      assertEquals(0, result.length());
+    }
+
+    @Test
+    @DisplayName("FIXED (tightened threshold): a same-day but hour-apart attachment is now rejected by the fallback")
+    void fallbackRespectsTightenedThreshold_noMatchWhenHoursApart() throws Exception {
+      Date commentTime = new Date(1_800_000_000_000L);
+      // 1 hour away — would have matched under the old 24-hour window, but exceeds the new
+      // 15-minute one. This is exactly the "busy, long-lived ticket" scenario the loose
+      // threshold used to force-pair incorrectly.
+      JSONArray issueAttachments = new JSONArray()
+          .put(attachment("HOUR-OLD", "unrelated-same-day-file.pdf", "application/pdf",
+              isoOf(commentTime.getTime() - 3_600_000)));
+
+      JSONArray result = SupportJiraWebhookHandler.correlateAttachments(
+          issueAttachments, List.of("adf-media-unrelated"), commentTime);
+
+      assertEquals(0, result.length());
+    }
+
+    // -----------------------------------------------------------------------
+    // Cross-comment exclusion (4-arg overload) — attachments already linked to an EARLIER
+    // SupportMessage in the same conversation must not be re-claimed by a later comment's
+    // fallback correlation, even when they are otherwise the closest-by-timestamp candidate.
+    // -----------------------------------------------------------------------
+
+    @Test
+    @DisplayName("Fallback skips an attachment already linked to a previous message, even when closest")
+    void fallbackExcludesAttachmentAlreadyLinkedToEarlierMessage() throws Exception {
+      Date commentTime = new Date(1_800_000_000_000L);
+      // "ALREADY-LINKED" is the closest-by-time candidate, but a previous webhook call already
+      // attached it to an earlier SupportMessage — it must be skipped in favor of "OTHER", which
+      // is farther away but still within the fallback distance threshold.
+      JSONArray issueAttachments = new JSONArray()
+          .put(attachment("ALREADY-LINKED", "already.png", "image/png", isoOf(commentTime.getTime() + 60_000)))
+          .put(attachment("OTHER", "other.png", "image/png", isoOf(commentTime.getTime() + 300_000)));
+
+      JSONArray result = SupportJiraWebhookHandler.correlateAttachments(
+          issueAttachments, List.of("adf-media-unrelated"), commentTime, Set.of("ALREADY-LINKED"));
+
+      assertEquals(1, result.length());
+      assertEquals("OTHER", result.getJSONObject(0).getString("id"));
+    }
+
+    @Test
+    @DisplayName("When every unclaimed candidate is already linked elsewhere, the fallback yields no match")
+    void fallbackYieldsNoMatchWhenAllCandidatesAlreadyLinked() throws Exception {
+      Date commentTime = new Date(1_800_000_000_000L);
+      JSONArray issueAttachments = new JSONArray()
+          .put(attachment("ALREADY-LINKED", "already.png", "image/png", isoOf(commentTime.getTime())));
+
+      JSONArray result = SupportJiraWebhookHandler.correlateAttachments(
+          issueAttachments, List.of("adf-media-unrelated"), commentTime, Set.of("ALREADY-LINKED"));
+
       assertEquals(0, result.length());
     }
   }
@@ -1165,6 +1221,51 @@ class SupportJiraWebhookHandlerTest {
       JSONArray result = SupportJiraWebhookHandler.resolveCommentAttachments("SUP-2", comment);
 
       assertNull(result);
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // findAlreadyLinkedAttachmentIds — cross-comment exclusion source
+  // -------------------------------------------------------------------------
+
+  @Nested
+  @DisplayName("findAlreadyLinkedAttachmentIds")
+  class FindAlreadyLinkedAttachmentIds {
+
+    @Test
+    @DisplayName("No matching conversation returns an empty set")
+    void noConversation() {
+      try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+           MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+        OBDal obDal = mockObDal(dalMock);
+        mockCriteria(obDal, SupportConversation.class, Collections.emptyList());
+
+        Set<String> ids = SupportJiraWebhookHandler.findAlreadyLinkedAttachmentIds("SUP-30");
+
+        assertTrue(ids.isEmpty());
+      }
+    }
+
+    @Test
+    @DisplayName("Collects attachment ids across multiple earlier messages, skipping malformed JSON")
+    void collectsIdsAcrossMessages() {
+      try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+           MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+        OBDal obDal = mockObDal(dalMock);
+        mockCriteria(obDal, SupportConversation.class, List.of(mockConversation("conv-1")));
+
+        SupportMessage msg1 = mock(SupportMessage.class);
+        when(msg1.getAttachments()).thenReturn("[{\"id\":\"att-1\"},{\"id\":\"att-2\"}]");
+        SupportMessage msg2 = mock(SupportMessage.class);
+        when(msg2.getAttachments()).thenReturn("not valid json");
+        SupportMessage msg3 = mock(SupportMessage.class);
+        when(msg3.getAttachments()).thenReturn("[{\"id\":\"att-3\"}]");
+        mockCriteria(obDal, SupportMessage.class, List.of(msg1, msg2, msg3));
+
+        Set<String> ids = SupportJiraWebhookHandler.findAlreadyLinkedAttachmentIds("SUP-31");
+
+        assertEquals(Set.of("att-1", "att-2", "att-3"), ids);
+      }
     }
   }
 
