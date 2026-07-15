@@ -246,15 +246,12 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
     JSONObject body = parseBody(request, response);
     if (body == null) return;
 
-    String firstMessage;
-    try {
-      firstMessage = body.getString(FIELD_MESSAGE).trim();
-    } catch (JSONException e) {
-      writeError(response, HttpServletResponse.SC_BAD_REQUEST, "Missing required field: message");
-      return;
-    }
-    if (firstMessage.isEmpty()) {
-      writeError(response, HttpServletResponse.SC_BAD_REQUEST, "Field message must not be empty");
+    String firstMessage = body.optString(FIELD_MESSAGE, "").trim();
+    JSONArray attachments = body.optJSONArray(FIELD_ATTACHMENTS);
+    boolean hasAttachments = attachments != null && attachments.length() > 0;
+    if (firstMessage.isEmpty() && !hasAttachments) {
+      writeError(response, HttpServletResponse.SC_BAD_REQUEST,
+          "Message must have text or at least one attachment");
       return;
     }
 
@@ -288,7 +285,6 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
       SessionHandler.getInstance().commitAndStart();
 
       // AI reply
-      JSONArray attachments = body.optJSONArray("attachments");
       String locale = body.optString("locale", "es");
       String userEmail = SupportIntegrationClient.getUserEmail(userId);
       SupportIntegrationClient.createAdkSession(userId, conv.getId(), locale, userEmail);
@@ -423,15 +419,12 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
     JSONObject body = parseBody(request, response);
     if (body == null) return;
 
-    String text;
-    try {
-      text = body.getString("text").trim();
-    } catch (JSONException e) {
-      writeError(response, HttpServletResponse.SC_BAD_REQUEST, "Missing required field: text");
-      return;
-    }
-    if (text.isEmpty()) {
-      writeError(response, HttpServletResponse.SC_BAD_REQUEST, "Field text must not be empty");
+    String text = body.optString("text", "").trim();
+    JSONArray attachments = body.optJSONArray(FIELD_ATTACHMENTS);
+    boolean hasAttachments = attachments != null && attachments.length() > 0;
+    if (text.isEmpty() && !hasAttachments) {
+      writeError(response, HttpServletResponse.SC_BAD_REQUEST,
+          "Message must have text or at least one attachment");
       return;
     }
 
@@ -465,7 +458,6 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
         return;
       }
 
-      JSONArray attachments = body.optJSONArray("attachments");
       // Sync human_takeover=false into ADK session state; flag tells agent to skip Jira re-check
       JSONObject stateDelta = new JSONObject()
           .put("human_takeover", false)

@@ -813,7 +813,7 @@ class SupportConversationsServletTest {
   class DoPostCreateConversation {
 
     @Test
-    @DisplayName("Missing message field returns 400")
+    @DisplayName("Missing message field with no attachments returns 400")
     void missingMessage() throws Exception {
       StringWriter capture = new StringWriter();
       HttpServletResponse response = mockResponse(capture);
@@ -823,11 +823,11 @@ class SupportConversationsServletTest {
         new SupportConversationsServlet().doPost(request, response);
       }
 
-      assertTrue(capture.toString().contains("Missing required field: message"));
+      assertTrue(capture.toString().contains("Message must have text or at least one attachment"));
     }
 
     @Test
-    @DisplayName("Blank message returns 400")
+    @DisplayName("Blank message with no attachments returns 400")
     void blankMessage() throws Exception {
       StringWriter capture = new StringWriter();
       HttpServletResponse response = mockResponse(capture);
@@ -837,7 +837,47 @@ class SupportConversationsServletTest {
         new SupportConversationsServlet().doPost(request, response);
       }
 
-      assertTrue(capture.toString().contains("must not be empty"));
+      assertTrue(capture.toString().contains("Message must have text or at least one attachment"));
+    }
+
+    @Test
+    @DisplayName("Blank message with a valid attachment is accepted (not 400)")
+    void blankMessageWithAttachmentIsAccepted() throws Exception {
+      StringWriter capture = new StringWriter();
+      HttpServletResponse response = mockResponse(capture);
+      String body = "{\"message\":\"\",\"attachments\":[{\"mimeType\":\"image/png\",\"name\":\"screenshot.png\","
+          + "\"data\":\"Zm9v\"}]}";
+      HttpServletRequest request = authenticatedRequest("/conversations", body);
+
+      try (MockedStatic<SecureWebServicesUtils> swsMock = mockValidAuth();
+           MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+           MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+           MockedStatic<OBProvider> providerMock = mockStatic(OBProvider.class);
+           MockedStatic<SessionHandler> shMock = mockSessionHandler();
+           MockedStatic<SupportIntegrationClient> sicMock = mockStatic(SupportIntegrationClient.class)) {
+        OBDal obDal = mockObDal(dalMock);
+        User authUser = mockUser(USER_ID);
+        when(obDal.get(User.class, USER_ID)).thenReturn(authUser);
+        when(obDal.get(Client.class, CLIENT_ID)).thenReturn(mock(Client.class));
+        when(obDal.get(Organization.class, ORG_ID)).thenReturn(mock(Organization.class));
+
+        SupportConversation conv = mockConversation("conv-attach-only");
+        when(conv.getLastMessage()).thenReturn("Hola! ¿En qué puedo ayudarte?");
+        when(obDal.get(SupportConversation.class, "conv-attach-only")).thenReturn(conv);
+        stubProvider(providerMock, conv, mock(SupportMessage.class));
+        mockCriteria(obDal, SupportMessage.class, Collections.emptyList());
+
+        sicMock.when(() -> SupportIntegrationClient.getUserEmail(anyString()))
+            .thenReturn("user@example.com");
+        sicMock.when(() -> SupportIntegrationClient.sendToAdk(anyString(), anyString(), anyString(), any()))
+            .thenReturn("Hola! ¿En qué puedo ayudarte?");
+
+        new SupportConversationsServlet().doPost(request, response);
+      }
+
+      String out = capture.toString();
+      assertTrue(out.contains("conv-attach-only"));
+      assertTrue(!out.contains("must have text or at least one attachment"));
     }
 
     @Test
@@ -958,7 +998,7 @@ class SupportConversationsServletTest {
   class DoPostSendMessage {
 
     @Test
-    @DisplayName("Missing text field returns 400")
+    @DisplayName("Missing text field with no attachments returns 400")
     void missingText() throws Exception {
       StringWriter capture = new StringWriter();
       HttpServletResponse response = mockResponse(capture);
@@ -968,7 +1008,40 @@ class SupportConversationsServletTest {
         new SupportConversationsServlet().doPost(request, response);
       }
 
-      assertTrue(capture.toString().contains("Missing required field: text"));
+      assertTrue(capture.toString().contains("Message must have text or at least one attachment"));
+    }
+
+    @Test
+    @DisplayName("Empty text with a valid attachment is accepted (not 400)")
+    void emptyTextWithAttachmentIsAccepted() throws Exception {
+      StringWriter capture = new StringWriter();
+      HttpServletResponse response = mockResponse(capture);
+      String body = "{\"text\":\"\",\"attachments\":[{\"mimeType\":\"image/png\",\"name\":\"screenshot.png\","
+          + "\"data\":\"Zm9v\"}]}";
+      HttpServletRequest request = authenticatedRequest("/conversations/conv-1/messages", body);
+
+      try (MockedStatic<SecureWebServicesUtils> swsMock = mockValidAuth();
+           MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+           MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+           MockedStatic<OBProvider> providerMock = mockStatic(OBProvider.class);
+           MockedStatic<SupportIntegrationClient> sicMock = mockStatic(SupportIntegrationClient.class)) {
+        OBDal obDal = mockObDal(dalMock);
+        SupportConversation conv = mockConversation("conv-1");
+        when(conv.isHumanTakeover()).thenReturn(false);
+        when(obDal.get(SupportConversation.class, "conv-1")).thenReturn(conv);
+        stubProvider(providerMock, null, mock(SupportMessage.class));
+        mockCriteria(obDal, SupportMessage.class, Collections.emptyList());
+
+        sicMock.when(() -> SupportIntegrationClient.sendToAdk(
+                anyString(), anyString(), anyString(), any(), any()))
+            .thenReturn("Claro, veo tu adjunto");
+
+        new SupportConversationsServlet().doPost(request, response);
+      }
+
+      String out = capture.toString();
+      assertTrue(out.contains(FIELD_MESSAGES_LITERAL));
+      assertTrue(!out.contains("must have text or at least one attachment"));
     }
 
     @Test
