@@ -19,7 +19,10 @@ package com.etendoerp.go.support;
 
 import java.io.BufferedReader;
 import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
 import java.io.PrintWriter;
+import java.net.http.HttpResponse;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.util.Date;
@@ -89,8 +92,11 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
   private static final String FIELD_SUBJECT     = "subject";
   private static final String FIELD_UNREAD      = "unread";
   private static final String FIELD_RATED       = "rated";
+  private static final String FIELD_ATTACHMENTS = "attachments";
+  private static final String FIELD_ID          = "id";
   private static final String MSG_INTERNAL_ERROR = "Internal error";
   private static final String MSG_CONVERSATION_NOT_FOUND = "Conversation not found";
+  private static final String MSG_ATTACHMENT_NOT_FOUND = "Attachment not found";
   private static final String HEADER_INTERNAL_SECRET = "X-Internal-Secret";
   private static final String MSG_INVALID_SECRET = "Invalid secret";
 
@@ -131,6 +137,10 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
     String[] parts = pathInfo.split("/");
     if (parts.length == 4 && FIELD_CONVERSATIONS.equals(parts[1]) && FIELD_MESSAGES.equals(parts[3])) {
       handleGetMessages(response, ctx, parts[2]);
+      return;
+    }
+    if (parts.length == 3 && FIELD_ATTACHMENTS.equals(parts[1])) {
+      handleGetAttachment(response, ctx, parts[2]);
       return;
     }
 
@@ -321,6 +331,91 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
     } finally {
       restoreTenantContext(previous);
     }
+  }
+
+  /**
+   * Authenticated proxy for a Jira attachment's raw content ({@code GET
+   * /sws/support/attachments/:jiraAttachmentId}). Authorization mirrors every other
+   * conversation-scoped endpoint in this servlet: the attachment id must appear in some
+   * {@link SupportMessage#getAttachments()} row, and that message's conversation must belong to
+   * the requesting user ({@link #belongsToUser}) — otherwise this returns 404, same as a
+   * not-found conversation, so the endpoint does not leak whether the id exists at all.
+   * <p>
+   * The lookup itself runs in admin mode across every client (like the Jira webhook's own
+   * lookups) because the caller's JWT tenant may not be the same tenant the message was stamped
+   * with when the human agent's reply was ingested; ownership is enforced afterwards by the
+   * explicit {@code belongsToUser} check, not by client scoping.
+   */
+  private void handleGetAttachment(HttpServletResponse response, AuthContext ctx, String jiraAttachmentId)
+      throws IOException {
+    OBContext.setAdminMode(true);
+    try {
+      SupportMessage msg = findMessageByAttachmentId(jiraAttachmentId);
+      if (msg == null || !belongsToUser(msg.getConversation(), ctx.userId)) {
+        writeError(response, HttpServletResponse.SC_NOT_FOUND, MSG_ATTACHMENT_NOT_FOUND);
+        return;
+      }
+      JSONObject meta = findAttachmentMeta(msg, jiraAttachmentId);
+      String filename = meta != null ? meta.optString("filename", jiraAttachmentId) : jiraAttachmentId;
+      String mimeType = meta != null ? meta.optString("mimeType", "application/octet-stream")
+          : "application/octet-stream";
+      streamJiraAttachment(response, jiraAttachmentId, filename, mimeType);
+    } catch (Exception e) {
+      log.error("Error proxying Jira attachment {}", jiraAttachmentId, e);
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, MSG_INTERNAL_ERROR);
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  /** Scans messages whose {@code attachments} column is non-null for a JSON-encoded object with
+   * this id, confirming with an actual JSON parse (the {@code LIKE} below is only a cheap
+   * pre-filter, not the authorization decision — a substring collision here would just make this
+   * candidate get rejected by {@link #findAttachmentMeta} returning null). */
+  private static SupportMessage findMessageByAttachmentId(String jiraAttachmentId) {
+    OBCriteria<SupportMessage> crit = OBDal.getInstance().createCriteria(SupportMessage.class);
+    crit.setFilterOnReadableClients(false);
+    crit.setFilterOnReadableOrganization(false);
+    crit.add(Restrictions.isNotNull(SupportMessage.PROPERTY_ATTACHMENTS));
+    crit.add(Restrictions.like(SupportMessage.PROPERTY_ATTACHMENTS, "%\"" + jiraAttachmentId + "\"%"));
+    for (SupportMessage msg : crit.list()) {
+      if (findAttachmentMeta(msg, jiraAttachmentId) != null) return msg;
+    }
+    return null;
+  }
+
+  private static JSONObject findAttachmentMeta(SupportMessage msg, String jiraAttachmentId) {
+    try {
+      JSONArray arr = new JSONArray(msg.getAttachments());
+      for (int i = 0; i < arr.length(); i++) {
+        JSONObject att = arr.optJSONObject(i);
+        if (att != null && jiraAttachmentId.equals(att.optString(FIELD_ID, ""))) return att;
+      }
+    } catch (JSONException e) {
+      // Malformed attachments JSON on this row — treat as no match rather than fail the request.
+    }
+    return null;
+  }
+
+  private static void streamJiraAttachment(HttpServletResponse response, String jiraAttachmentId,
+      String filename, String mimeType) throws IOException {
+    HttpResponse<InputStream> jiraResp = SupportJiraWebhookHandler.fetchAttachmentContent(jiraAttachmentId);
+    if (jiraResp == null) {
+      writeError(response, HttpServletResponse.SC_NOT_FOUND, "Attachment not available");
+      return;
+    }
+    response.setStatus(HttpServletResponse.SC_OK);
+    response.setContentType(mimeType);
+    response.setHeader("Content-Disposition", "inline; filename=\"" + sanitizeFilenameHeader(filename) + "\"");
+    try (InputStream in = jiraResp.body(); OutputStream out = response.getOutputStream()) {
+      in.transferTo(out);
+    }
+  }
+
+  /** Strips characters that would break the {@code Content-Disposition} header value (quotes,
+   * control chars) — the filename only ever drives a UI download hint, never a filesystem path. */
+  private static String sanitizeFilenameHeader(String filename) {
+    return filename.replaceAll("[\"\\r\\n]", "_");
   }
 
   private void handleSendMessage(HttpServletRequest request, HttpServletResponse response,
@@ -747,6 +842,7 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
       json.put("senderName",     msg.getSenderName());
       json.put("text",           msg.getText());
       json.put("timestamp",      toIso(msg.getMessageDate()));
+      json.put(FIELD_ATTACHMENTS, parseAttachments(msg.getAttachments()));
       arr.put(json);
     }
     return arr;
@@ -758,6 +854,19 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
   private static String toIso(Date date) {
     if (date == null) return null;
     return date.toInstant().atZone(ZoneId.systemDefault()).format(ISO_NO_ZONE);
+  }
+
+  /** Parses the {@code attachments} column (a JSON array string, or null/blank for the common
+   * case of a message with none) into the {@code [{id, filename, mimeType}]} array the frontend
+   * contract expects. Never fails the response — malformed JSON degrades to an empty array. */
+  private static JSONArray parseAttachments(String raw) {
+    if (raw == null || raw.isEmpty()) return new JSONArray();
+    try {
+      return new JSONArray(raw);
+    } catch (JSONException e) {
+      log.warn("Malformed attachments JSON, returning empty array: {}", e.getMessage());
+      return new JSONArray();
+    }
   }
 
   /** Package-private: also used by {@link SupportJiraWebhookHandler} to mint message/comment ids. */

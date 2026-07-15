@@ -24,15 +24,24 @@ import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.io.BufferedReader;
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
+import java.io.InputStream;
 import java.io.PrintWriter;
 import java.io.StringReader;
 import java.io.StringWriter;
+import java.net.http.HttpResponse;
+import java.nio.charset.StandardCharsets;
 import java.util.Collections;
 import java.util.List;
 
+import javax.servlet.ServletOutputStream;
+import javax.servlet.WriteListener;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 
@@ -426,6 +435,154 @@ class SupportConversationsServletTest {
       }
 
       assertTrue(capture.toString().contains("Unknown endpoint"));
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // doGet — get attachment (new Jira attachment content proxy)
+  // -------------------------------------------------------------------------
+
+  @Nested
+  @DisplayName("doGet — get attachment")
+  class DoGetAttachment {
+
+    private SupportMessage mockMessageWithAttachments(String attachmentsJson, SupportConversation conv) {
+      SupportMessage msg = mock(SupportMessage.class);
+      when(msg.getAttachments()).thenReturn(attachmentsJson);
+      when(msg.getConversation()).thenReturn(conv);
+      return msg;
+    }
+
+    private ServletOutputStream mockOutputStream(ByteArrayOutputStream sink) {
+      return new ServletOutputStream() {
+        @Override
+        public void write(int b) {
+          sink.write(b);
+        }
+
+        @Override
+        public boolean isReady() {
+          return true;
+        }
+
+        @Override
+        public void setWriteListener(WriteListener writeListener) {
+          // Not needed for this synchronous test double.
+        }
+      };
+    }
+
+    @Test
+    @DisplayName("Attachment id present in no message's attachments column: 404, no NPE")
+    void attachmentNotFoundAnywhere() throws Exception {
+      StringWriter capture = new StringWriter();
+      HttpServletResponse response = mockResponse(capture);
+      HttpServletRequest request = authenticatedRequest("/attachments/does-not-exist", null);
+
+      try (MockedStatic<SecureWebServicesUtils> swsMock = mockValidAuth();
+           MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+           MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+        OBDal obDal = mockObDal(dalMock);
+        mockCriteria(obDal, SupportMessage.class, Collections.emptyList());
+
+        new SupportConversationsServlet().doGet(request, response);
+      }
+
+      assertTrue(capture.toString().contains("Attachment not found"));
+      verify(response).setStatus(HttpServletResponse.SC_NOT_FOUND);
+    }
+
+    @Test
+    @DisplayName("Attachment owned by a conversation belonging to ANOTHER user is rejected; "
+        + "the Jira content-fetch is never attempted")
+    void attachmentOwnedByAnotherUserIsRejected() throws Exception {
+      StringWriter capture = new StringWriter();
+      HttpServletResponse response = mockResponse(capture);
+      HttpServletRequest request = authenticatedRequest("/attachments/att-1", null);
+
+      SupportConversation otherUsersConv = mock(SupportConversation.class);
+      User otherUser = mockUser("someone-else");
+      when(otherUsersConv.getUser()).thenReturn(otherUser);
+      String attachmentsJson = "[{\"id\":\"att-1\",\"filename\":\"a.png\",\"mimeType\":\"image/png\"}]";
+      SupportMessage msg = mockMessageWithAttachments(attachmentsJson, otherUsersConv);
+
+      try (MockedStatic<SecureWebServicesUtils> swsMock = mockValidAuth();
+           MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+           MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+           MockedStatic<SupportJiraWebhookHandler> jiraMock = mockStatic(SupportJiraWebhookHandler.class)) {
+        OBDal obDal = mockObDal(dalMock);
+        mockCriteria(obDal, SupportMessage.class, List.of(msg));
+
+        new SupportConversationsServlet().doGet(request, response);
+
+        jiraMock.verify(() -> SupportJiraWebhookHandler.fetchAttachmentContent(anyString()), never());
+      }
+
+      assertTrue(capture.toString().contains("Attachment not found"));
+      verify(response).setStatus(HttpServletResponse.SC_NOT_FOUND);
+    }
+
+    @Test
+    @DisplayName("Attachment owned by the requesting user's own conversation streams the correct Content-Type")
+    void attachmentOwnedByRequestingUserStreams() throws Exception {
+      HttpServletResponse response = mock(HttpServletResponse.class);
+      HttpServletRequest request = authenticatedRequest("/attachments/att-1", null);
+
+      SupportConversation ownConv = mock(SupportConversation.class);
+      User owningUser = mockUser(USER_ID);
+      when(ownConv.getUser()).thenReturn(owningUser);
+      String attachmentsJson = "[{\"id\":\"att-1\",\"filename\":\"screenshot.png\",\"mimeType\":\"image/png\"}]";
+      SupportMessage msg = mockMessageWithAttachments(attachmentsJson, ownConv);
+
+      byte[] fileBytes = "fake-image-bytes".getBytes(StandardCharsets.UTF_8);
+      @SuppressWarnings("unchecked")
+      HttpResponse<InputStream> jiraResp = mock(HttpResponse.class);
+      when(jiraResp.body()).thenReturn(new ByteArrayInputStream(fileBytes));
+
+      ByteArrayOutputStream sink = new ByteArrayOutputStream();
+      when(response.getOutputStream()).thenReturn(mockOutputStream(sink));
+
+      try (MockedStatic<SecureWebServicesUtils> swsMock = mockValidAuth();
+           MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+           MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+           MockedStatic<SupportJiraWebhookHandler> jiraMock = mockStatic(SupportJiraWebhookHandler.class)) {
+        OBDal obDal = mockObDal(dalMock);
+        mockCriteria(obDal, SupportMessage.class, List.of(msg));
+        jiraMock.when(() -> SupportJiraWebhookHandler.fetchAttachmentContent("att-1")).thenReturn(jiraResp);
+
+        new SupportConversationsServlet().doGet(request, response);
+      }
+
+      verify(response).setContentType("image/png");
+      verify(response).setStatus(HttpServletResponse.SC_OK);
+      assertEquals("fake-image-bytes", sink.toString(StandardCharsets.UTF_8));
+    }
+
+    @Test
+    @DisplayName("Jira content-fetch failure (null response) is surfaced as 404, not a 500/NPE")
+    void jiraContentFetchFailureIsNotFound() throws Exception {
+      StringWriter capture = new StringWriter();
+      HttpServletResponse response = mockResponse(capture);
+      HttpServletRequest request = authenticatedRequest("/attachments/att-1", null);
+
+      SupportConversation ownConv = mock(SupportConversation.class);
+      User owningUser = mockUser(USER_ID);
+      when(ownConv.getUser()).thenReturn(owningUser);
+      String attachmentsJson = "[{\"id\":\"att-1\",\"filename\":\"screenshot.png\",\"mimeType\":\"image/png\"}]";
+      SupportMessage msg = mockMessageWithAttachments(attachmentsJson, ownConv);
+
+      try (MockedStatic<SecureWebServicesUtils> swsMock = mockValidAuth();
+           MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+           MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+           MockedStatic<SupportJiraWebhookHandler> jiraMock = mockStatic(SupportJiraWebhookHandler.class)) {
+        OBDal obDal = mockObDal(dalMock);
+        mockCriteria(obDal, SupportMessage.class, List.of(msg));
+        jiraMock.when(() -> SupportJiraWebhookHandler.fetchAttachmentContent("att-1")).thenReturn(null);
+
+        new SupportConversationsServlet().doGet(request, response);
+      }
+
+      verify(response).setStatus(HttpServletResponse.SC_NOT_FOUND);
     }
   }
 

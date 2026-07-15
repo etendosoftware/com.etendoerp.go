@@ -18,8 +18,23 @@
 package com.etendoerp.go.support;
 
 import java.io.IOException;
+import java.io.InputStream;
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.nio.charset.StandardCharsets;
+import java.time.Duration;
+import java.time.Instant;
+import java.time.OffsetDateTime;
+import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
+import java.util.Base64;
+import java.util.Collections;
 import java.util.Date;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
@@ -55,7 +70,16 @@ final class SupportJiraWebhookHandler {
   private static final String JIRA_USERNAME =
       System.getProperty("support.jira.username", "info@smfconsulting.es");
 
+  /** Same system properties {@link SupportIntegrationClient} reads for outbound Jira calls —
+   * duplicated here (not shared via that class) so this file stays independent of the parallel
+   * outbound-attachments work happening on {@link SupportIntegrationClient}. */
+  private static final String JIRA_URL =
+      System.getProperty("support.jira.url", "https://etendoproject.atlassian.net");
+  private static final String JIRA_API_TOKEN =
+      System.getProperty("support.jira.token", "");
+
   private static final String HEADER_WEBHOOK_SECRET = "X-Webhook-Secret";
+  private static final String HEADER_AUTHORIZATION = "Authorization";
   private static final String MSG_INVALID_SECRET = "Invalid secret";
   private static final String MSG_INTERNAL_ERROR = "Internal error";
   private static final String RESP_IGNORED = "{\"status\":\"ignored\"}";
@@ -63,6 +87,19 @@ final class SupportJiraWebhookHandler {
   private static final String FIELD_STATUS = "status";
   private static final String FIELD_CONVERSATION_ID = "conversationId";
   private static final String FIELD_JIRA_TICKET_KEY = "jiraTicketKey";
+  private static final String FIELD_ID = "id";
+  private static final String FIELD_FILENAME = "filename";
+  private static final String FIELD_MIME_TYPE = "mimeType";
+
+  /** Shared HTTP client for outbound calls to Jira from this handler (attachment metadata lookup
+   * and the authenticated content proxy in {@link SupportConversationsServlet}). Redirects are
+   * followed because Jira Cloud's attachment content endpoint commonly 303s to a signed media
+   * URL; {@link HttpClient} already strips the Authorization header on cross-host redirects, so
+   * the service account credentials are not leaked to that URL. */
+  private static final HttpClient HTTP_CLIENT = HttpClient.newBuilder()
+      .connectTimeout(Duration.ofSeconds(10))
+      .followRedirects(HttpClient.Redirect.NORMAL)
+      .build();
 
   private SupportJiraWebhookHandler() {
   }
@@ -111,7 +148,8 @@ final class SupportJiraWebhookHandler {
     String authorEmail = author != null ? author.optString("emailAddress", "") : "";
     String authorName = author != null ? author.optString("displayName", DEFAULT_AGENT_NAME) : DEFAULT_AGENT_NAME;
     String text = extractAdfText(comment.opt("body")).trim();
-    return new JiraWebhookComment(jiraKey, commentId, authorName, authorEmail, text);
+    JSONArray attachments = resolveCommentAttachments(jiraKey, comment);
+    return new JiraWebhookComment(jiraKey, commentId, authorName, authorEmail, text, attachments);
   }
 
   /** No "comment" field: either an assignee-change-back-to-bot or a status transition to Done. */
@@ -178,7 +216,10 @@ final class SupportJiraWebhookHandler {
       return null;
     }
     if (commentId == null) commentId = SupportConversationsServlet.newId();
-    return new JiraWebhookComment(jiraKey, commentId, authorName, authorEmail, text);
+    // Jira Automation cannot template a JSON body in this dev's plan (see
+    // docs/support-chat-session-2026-06-11.md) — "commentText" arrives as a plain query param,
+    // never as ADF, so there is no media node to look for on this path.
+    return new JiraWebhookComment(jiraKey, commentId, authorName, authorEmail, text, null);
   }
 
   // --- Persisting the comment as a support message ---
@@ -210,7 +251,7 @@ final class SupportJiraWebhookHandler {
         return;
       }
       Date ts = new Date();
-      insertJiraMessage(conv, comment.authorName, text, ts, externalId);
+      insertJiraMessage(conv, comment.authorName, text, ts, externalId, comment.attachments);
       SupportConversationsServlet.updateConvSummary(conv.getId(), text, ts);
       conv.setUnread(true);
       OBDal.getInstance().save(conv);
@@ -243,9 +284,11 @@ final class SupportJiraWebhookHandler {
   }
 
   /** Jira comments have no authenticated Etendo requester — tagged as system-created, same tenant
-   * as the owning conversation. */
+   * as the owning conversation. {@code attachments} is the resolved {@code [{id, filename,
+   * mimeType}]} array (see {@link #resolveCommentAttachments}), or {@code null} when the comment
+   * carried none — stored as-is (null column), never as an empty-array string. */
   private static void insertJiraMessage(SupportConversation conv, String authorName, String text, Date ts,
-      String externalId) {
+      String externalId, JSONArray attachments) {
     User systemUser = OBDal.getInstance().get(User.class, SupportConversationsServlet.SYSTEM_USER_ID);
     SupportMessage msg = OBProvider.getInstance().get(SupportMessage.class);
     msg.setNewOBObject(true);
@@ -260,6 +303,9 @@ final class SupportJiraWebhookHandler {
     msg.setText(text);
     msg.setMessageDate(ts);
     msg.setExternalId(externalId);
+    if (attachments != null && attachments.length() > 0) {
+      msg.setAttachments(attachments.toString());
+    }
     OBDal.getInstance().save(msg);
   }
 
@@ -374,13 +420,327 @@ final class SupportJiraWebhookHandler {
     final String authorName;
     final String authorEmail;
     final String text;
+    /** Resolved {@code [{id, filename, mimeType}]} array, or {@code null} when the comment
+     * carried no attachment (or none could be resolved). See {@link #resolveCommentAttachments}. */
+    final JSONArray attachments;
 
-    JiraWebhookComment(String jiraKey, String commentId, String authorName, String authorEmail, String text) {
+    JiraWebhookComment(String jiraKey, String commentId, String authorName, String authorEmail, String text,
+        JSONArray attachments) {
       this.jiraKey = jiraKey;
       this.commentId = commentId;
       this.authorName = authorName;
       this.authorEmail = authorEmail;
       this.text = text;
+      this.attachments = attachments;
+    }
+  }
+
+  // --- Jira attachment resolution (ADF media nodes → Jira REST attachment metadata) ---
+
+  /**
+   * Detects attachments carried by a Jira comment and resolves them to {@code {id, filename,
+   * mimeType}} metadata.
+   * <p>
+   * <b>Approach:</b> Jira's ADF {@code media}/{@code mediaGroup}/{@code mediaSingle} nodes are
+   * walked the same way {@link #extractAdfText} already walks the document for text — this
+   * handler has been parsing real nested ADF (string-encoded, via {@code extractAdfTextFromString})
+   * from the live production webhook since before this change (see
+   * {@code docs/support-chat-session-2026-06-11.md}: the Jira Automation "Send web request" body
+   * embeds {@code {{comment.body}}} as a JSON string, and this class's existing dual
+   * String/JSONObject dispatch already round-trips it as real ADF). Since a {@code media} node's
+   * schema is part of the same ADF document, it is present in that same payload whenever the
+   * comment has an image/file attached — no separate Jira call is needed to <em>detect</em> an
+   * attachment.
+   * <p>
+   * ADF's {@code media} node attrs only carry an {@code id} (and type/collection) — never a
+   * filename or MIME type — so resolving those still requires one Jira REST call per comment:
+   * {@code GET /rest/api/3/issue/{key}?fields=attachment}. The ADF media id is a Media
+   * Platform file id, which in Jira Cloud is commonly a different value than the classic
+   * attachment id used by {@code /rest/api/3/attachment/*} — so this method first tries a direct
+   * id match against that list, and falls back to pairing any still-unmatched media node with the
+   * closest-by-timestamp unclaimed attachment. <b>This fallback path is unverified against a real
+   * Jira comment with an attachment — flagged for QA.</b>
+   */
+  static JSONArray resolveCommentAttachments(String jiraKey, JSONObject comment) {
+    List<String> mediaIds = new ArrayList<>();
+    collectAdfMediaIds(comment.opt("body"), mediaIds);
+    if (mediaIds.isEmpty()) return null;
+    Date commentTime = parseCommentTimestamp(comment);
+    JSONArray issueAttachments = fetchIssueAttachments(jiraKey);
+    // Nothing to correlate against — skip the (avoidable) DB round-trip below.
+    if (issueAttachments.length() == 0) return null;
+    Set<String> alreadyLinkedIds = findAlreadyLinkedAttachmentIds(jiraKey);
+    JSONArray resolved = correlateAttachments(issueAttachments, mediaIds, commentTime, alreadyLinkedIds);
+    return resolved.length() > 0 ? resolved : null;
+  }
+
+  /** Jira attachment ids already persisted on an earlier {@link SupportMessage} of the
+   * conversation tied to {@code jiraKey} — read from that message's {@code attachments} JSON
+   * column, the same shape {@link #insertJiraMessage} writes. Used to keep the fallback
+   * closest-by-timestamp correlation (see {@link #closestUnclaimedByTime}) from re-pairing a
+   * later, unmatched media node with an attachment that a PREVIOUS webhook call (an earlier
+   * comment on the same ticket) already legitimately linked to an earlier message: {@code
+   * claimed} in {@link #correlateAttachments} only prevents double-matching within a single
+   * webhook invocation, it has no memory of earlier invocations. */
+  static Set<String> findAlreadyLinkedAttachmentIds(String jiraKey) {
+    Set<String> ids = new HashSet<>();
+    OBContext.setAdminMode(true);
+    try {
+      SupportConversation conv = findConversationByJiraKey(jiraKey);
+      if (conv == null) return ids;
+      OBCriteria<SupportMessage> crit = OBDal.getInstance().createCriteria(SupportMessage.class);
+      crit.setFilterOnReadableClients(false);
+      crit.setFilterOnReadableOrganization(false);
+      crit.add(Restrictions.eq(SupportMessage.PROPERTY_CONVERSATION + ".id", conv.getId()));
+      crit.add(Restrictions.isNotNull(SupportMessage.PROPERTY_ATTACHMENTS));
+      for (SupportMessage msg : crit.list()) {
+        collectAttachmentIds(msg.getAttachments(), ids);
+      }
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+    return ids;
+  }
+
+  /** Parses a persisted {@code attachments} column ({@code [{id, filename, mimeType}]}) and adds
+   * every {@code id} found into {@code ids}. Malformed JSON on a row is skipped rather than
+   * failing the whole lookup. */
+  static void collectAttachmentIds(String attachmentsJson, Set<String> ids) {
+    if (attachmentsJson == null || attachmentsJson.isEmpty()) return;
+    try {
+      JSONArray arr = new JSONArray(attachmentsJson);
+      for (int i = 0; i < arr.length(); i++) {
+        JSONObject att = arr.optJSONObject(i);
+        String id = att != null ? att.optString(FIELD_ID, "") : "";
+        if (!id.isEmpty()) ids.add(id);
+      }
+    } catch (JSONException e) {
+      // Malformed attachments JSON on this row — skip it, don't fail the whole lookup.
+    }
+  }
+
+  /** Recursively collects the {@code attrs.id} of every ADF {@code media} node under {@code node}
+   * (mirrors {@link #extractAdfText}'s traversal/dual String-or-JSONObject dispatch). */
+  static void collectAdfMediaIds(Object node, List<String> ids) {
+    if (node instanceof String) {
+      String s = ((String) node).trim();
+      if (!s.startsWith("{")) return;
+      try {
+        collectAdfMediaIds(new JSONObject(s), ids);
+      } catch (Exception e) {
+        // Not JSON after all — nothing to collect.
+      }
+      return;
+    }
+    if (!(node instanceof JSONObject)) return;
+    JSONObject obj = (JSONObject) node;
+    if ("media".equals(obj.optString("type", ""))) {
+      JSONObject attrs = obj.optJSONObject("attrs");
+      String id = attrs != null ? attrs.optString(FIELD_ID, "") : "";
+      if (!id.isEmpty()) ids.add(id);
+    }
+    JSONArray content = obj.optJSONArray("content");
+    if (content != null) {
+      for (int i = 0; i < content.length(); i++) {
+        Object child = content.opt(i);
+        if (child instanceof JSONObject) collectAdfMediaIds(child, ids);
+      }
+    }
+  }
+
+  /** Standard Jira webhooks carry {@code comment.created}; the current production Automation
+   * body (see class javadoc) does not, so "now" is the best available proxy — the webhook fires
+   * within seconds of the comment being posted. */
+  static Date parseCommentTimestamp(JSONObject comment) {
+    String created = comment.optString("created", "");
+    long millis = parseJiraInstantMillis(created);
+    return millis > 0 ? new Date(millis) : new Date();
+  }
+
+  /** Jira Cloud REST v3 formats {@code created} timestamps with a numeric offset that has NO
+   * colon (e.g. {@code "2021-01-05T10:15:30.000+0000"}), which neither {@link
+   * DateTimeFormatter#ISO_OFFSET_DATE_TIME} nor {@link Instant#parse} accepts. The {@code Z}
+   * pattern letter does accept that no-colon offset form, so it is tried as a second option;
+   * {@code ISO_OFFSET_DATE_TIME} is tried first since it already correctly handles both the
+   * colon-offset form ({@code -03:00}) and the {@code Z}/zulu suffix form. */
+  private static final DateTimeFormatter NO_COLON_OFFSET_FORMAT =
+      DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSSZ");
+
+  static long parseJiraInstantMillis(String value) {
+    if (value == null || value.isEmpty()) return -1;
+    try {
+      return OffsetDateTime.parse(value, DateTimeFormatter.ISO_OFFSET_DATE_TIME).toInstant().toEpochMilli();
+    } catch (Exception e) {
+      try {
+        return OffsetDateTime.parse(value, NO_COLON_OFFSET_FORMAT).toInstant().toEpochMilli();
+      } catch (Exception e2) {
+        try {
+          return Instant.parse(value).toEpochMilli();
+        } catch (Exception e3) {
+          return -1;
+        }
+      }
+    }
+  }
+
+  /** {@code GET /rest/api/3/issue/{key}?fields=attachment} — returns that issue's attachment
+   * list ({@code [{id, filename, mimeType, created, ...}]}), or an empty array on any failure
+   * (missing token, network error, non-200). */
+  static JSONArray fetchIssueAttachments(String jiraKey) {
+    if (JIRA_API_TOKEN.isEmpty()) {
+      log.warn("Cannot resolve Jira attachments for {}: support.jira.token system property is empty", jiraKey);
+      return new JSONArray();
+    }
+    try {
+      HttpRequest req = HttpRequest.newBuilder()
+          .uri(URI.create(JIRA_URL + "/rest/api/3/issue/" + jiraKey + "?fields=attachment"))
+          .header(HEADER_AUTHORIZATION, "Basic " + jiraBasicAuthCredentials())
+          .timeout(Duration.ofSeconds(15))
+          .GET()
+          .build();
+      HttpResponse<String> resp = HTTP_CLIENT.send(req, HttpResponse.BodyHandlers.ofString());
+      if (resp.statusCode() != 200) {
+        log.warn("Jira attachment lookup FAILED for {} ← {}", jiraKey, resp.statusCode());
+        return new JSONArray();
+      }
+      JSONObject fields = new JSONObject(resp.body()).optJSONObject("fields");
+      JSONArray attachments = fields != null ? fields.optJSONArray("attachment") : null;
+      return attachments != null ? attachments : new JSONArray();
+    } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
+      log.warn("Failed to fetch Jira attachments for {}: {}", jiraKey, e.getMessage());
+      return new JSONArray();
+    } catch (Exception e) {
+      log.warn("Failed to fetch Jira attachments for {}: {}", jiraKey, e.getMessage());
+      return new JSONArray();
+    }
+  }
+
+  /** Matches each ADF media id against {@code issueAttachments} by direct id equality first,
+   * then pairs any leftovers with the closest-by-timestamp unclaimed attachment. Each match is
+   * projected down to {@code {id, filename, mimeType}} — {@code id} is always the REST attachment
+   * id (never the raw ADF media id), since that is what the content-proxy endpoint needs.
+   * Equivalent to {@link #correlateAttachments(JSONArray, List, Date, Set)} with no cross-comment
+   * exclusions — kept for callers/tests that only care about the within-call correlation. */
+  static JSONArray correlateAttachments(JSONArray issueAttachments, List<String> mediaIds, Date commentTime) {
+    return correlateAttachments(issueAttachments, mediaIds, commentTime, Collections.emptySet());
+  }
+
+  /** Same as {@link #correlateAttachments(JSONArray, List, Date)}, but the fallback
+   * closest-by-timestamp pairing additionally skips any attachment whose id is in {@code
+   * alreadyLinkedIds} — see {@link #findAlreadyLinkedAttachmentIds}. Direct id matches are not
+   * filtered by this set: an exact ADF-media-id-to-attachment-id match is trusted regardless. */
+  static JSONArray correlateAttachments(JSONArray issueAttachments, List<String> mediaIds, Date commentTime,
+      Set<String> alreadyLinkedIds) {
+    JSONArray result = new JSONArray();
+    if (mediaIds.isEmpty() || issueAttachments.length() == 0) return result;
+    Set<Integer> claimed = new HashSet<>();
+    for (String mediaId : mediaIds) {
+      int idx = indexOfAttachmentById(issueAttachments, mediaId, claimed);
+      if (idx >= 0) {
+        result.put(toAttachmentMeta(issueAttachments.optJSONObject(idx)));
+        claimed.add(idx);
+      }
+    }
+    int unmatched = mediaIds.size() - result.length();
+    for (int n = 0; n < unmatched; n++) {
+      int idx = closestUnclaimedByTime(issueAttachments, commentTime, claimed, alreadyLinkedIds);
+      if (idx < 0) break;
+      result.put(toAttachmentMeta(issueAttachments.optJSONObject(idx)));
+      claimed.add(idx);
+    }
+    return result;
+  }
+
+  static int indexOfAttachmentById(JSONArray issueAttachments, String id, Set<Integer> claimed) {
+    for (int i = 0; i < issueAttachments.length(); i++) {
+      if (claimed.contains(i)) continue;
+      JSONObject att = issueAttachments.optJSONObject(i);
+      if (att != null && id.equals(att.optString(FIELD_ID, ""))) return i;
+    }
+    return -1;
+  }
+
+  /** Maximum gap allowed between a comment and an unclaimed attachment for the fallback,
+   * closest-by-timestamp pairing to be trusted. The class's own javadoc on {@link
+   * #resolveCommentAttachments} already notes the realistic gap is "a couple of minutes" — a
+   * human agent attaches a file in Jira's UI and Jira fires the resulting comment webhook within
+   * seconds to low minutes of that. 15 minutes gives that a generous ~10x buffer for slower manual
+   * workflows or webhook delivery lag, while still being tight enough to refuse a force-pair
+   * against a same-day-but-hours-apart, unrelated attachment on a busy, long-lived ticket (the
+   * scenario a 24-hour window let through). Beyond this window, "no match" is preferred over a
+   * wrong one. */
+  private static final long MAX_FALLBACK_CORRELATION_DISTANCE_MILLIS = 15L * 60 * 1000; // 15 minutes
+
+  static int closestUnclaimedByTime(JSONArray issueAttachments, Date commentTime, Set<Integer> claimed,
+      Set<String> alreadyLinkedIds) {
+    int bestIdx = -1;
+    long bestDiff = Long.MAX_VALUE;
+    for (int i = 0; i < issueAttachments.length(); i++) {
+      if (claimed.contains(i)) continue;
+      JSONObject att = issueAttachments.optJSONObject(i);
+      if (att == null) continue;
+      String attId = att.optString(FIELD_ID, "");
+      if (!attId.isEmpty() && alreadyLinkedIds.contains(attId)) continue;
+      long attMillis = parseJiraInstantMillis(att.optString("created", ""));
+      if (attMillis < 0) continue;
+      long diff = Math.abs(attMillis - commentTime.getTime());
+      if (diff < bestDiff && diff <= MAX_FALLBACK_CORRELATION_DISTANCE_MILLIS) {
+        bestDiff = diff;
+        bestIdx = i;
+      }
+    }
+    return bestIdx;
+  }
+
+  static JSONObject toAttachmentMeta(JSONObject att) {
+    try {
+      return new JSONObject()
+          .put(FIELD_ID, att.optString(FIELD_ID, ""))
+          .put(FIELD_FILENAME, att.optString(FIELD_FILENAME, "attachment"))
+          .put(FIELD_MIME_TYPE, att.optString(FIELD_MIME_TYPE, "application/octet-stream"));
+    } catch (JSONException e) {
+      // JSONObject#put only throws on a null key, which never happens here.
+      throw new IllegalStateException(e);
+    }
+  }
+
+  static String jiraBasicAuthCredentials() {
+    return Base64.getEncoder().encodeToString((JIRA_USERNAME + ":" + JIRA_API_TOKEN).getBytes(StandardCharsets.UTF_8));
+  }
+
+  // --- Authenticated attachment content proxy (used by SupportConversationsServlet) ---
+
+  /** {@code GET /rest/api/3/attachment/content/{id}} — streams the raw bytes back to the caller.
+   * Package-private: invoked by {@link SupportConversationsServlet}'s {@code /attachments/{id}}
+   * endpoint after it has verified the requesting user owns the conversation the attachment
+   * belongs to. Returns {@code null} on any failure (missing token, network error, non-2xx) —
+   * the caller is expected to turn that into a 404/500 rather than leak Jira's error body. */
+  static HttpResponse<InputStream> fetchAttachmentContent(String jiraAttachmentId) {
+    if (JIRA_API_TOKEN.isEmpty()) {
+      log.warn("Cannot proxy Jira attachment {}: support.jira.token system property is empty", jiraAttachmentId);
+      return null;
+    }
+    try {
+      HttpRequest req = HttpRequest.newBuilder()
+          .uri(URI.create(JIRA_URL + "/rest/api/3/attachment/content/" + jiraAttachmentId))
+          .header(HEADER_AUTHORIZATION, "Basic " + jiraBasicAuthCredentials())
+          .timeout(Duration.ofSeconds(30))
+          .GET()
+          .build();
+      HttpResponse<InputStream> resp = HTTP_CLIENT.send(req, HttpResponse.BodyHandlers.ofInputStream());
+      if (resp.statusCode() < 200 || resp.statusCode() >= 300) {
+        log.warn("Jira attachment content FAILED for {} ← {}", jiraAttachmentId, resp.statusCode());
+        return null;
+      }
+      return resp;
+    } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
+      log.warn("Failed to fetch Jira attachment content {}: {}", jiraAttachmentId, e.getMessage());
+      return null;
+    } catch (Exception e) {
+      log.warn("Failed to fetch Jira attachment content {}: {}", jiraAttachmentId, e.getMessage());
+      return null;
     }
   }
 }
