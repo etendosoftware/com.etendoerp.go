@@ -45,9 +45,12 @@ import javax.servlet.WriteListener;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 
+import org.json.JSONArray;
+import org.json.JSONObject;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 import org.mockito.MockedStatic;
 import org.openbravo.base.provider.OBProvider;
 import org.openbravo.dal.core.OBContext;
@@ -881,6 +884,67 @@ class SupportConversationsServletTest {
     }
 
     @Test
+    @DisplayName("The user's own outgoing attachment is persisted as {filename, mimeType} "
+        + "(no id) and shows up in the returned message list")
+    void userMessageAttachmentsArePersisted() throws Exception {
+      StringWriter capture = new StringWriter();
+      HttpServletResponse response = mockResponse(capture);
+      String body = "{\"message\":\"\",\"attachments\":[{\"mimeType\":\"image/png\",\"name\":\"screenshot.png\","
+          + "\"data\":\"Zm9v\"}]}";
+      HttpServletRequest request = authenticatedRequest("/conversations", body);
+
+      SupportMessage userMsg = mock(SupportMessage.class);
+      when(userMsg.getAttachments())
+          .thenReturn("[{\"filename\":\"screenshot.png\",\"mimeType\":\"image/png\"}]");
+
+      try (MockedStatic<SecureWebServicesUtils> swsMock = mockValidAuth();
+           MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+           MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+           MockedStatic<OBProvider> providerMock = mockStatic(OBProvider.class);
+           MockedStatic<SessionHandler> shMock = mockSessionHandler();
+           MockedStatic<SupportIntegrationClient> sicMock = mockStatic(SupportIntegrationClient.class)) {
+        OBDal obDal = mockObDal(dalMock);
+        User authUser = mockUser(USER_ID);
+        when(obDal.get(User.class, USER_ID)).thenReturn(authUser);
+        when(obDal.get(Client.class, CLIENT_ID)).thenReturn(mock(Client.class));
+        when(obDal.get(Organization.class, ORG_ID)).thenReturn(mock(Organization.class));
+
+        SupportConversation conv = mockConversation("conv-attach-persist");
+        when(conv.getLastMessage()).thenReturn("Hola! ¿En qué puedo ayudarte?");
+        when(obDal.get(SupportConversation.class, "conv-attach-persist")).thenReturn(conv);
+        stubProvider(providerMock, conv, userMsg);
+        mockCriteria(obDal, SupportMessage.class, List.of(userMsg));
+
+        sicMock.when(() -> SupportIntegrationClient.getUserEmail(anyString()))
+            .thenReturn("user@example.com");
+        sicMock.when(() -> SupportIntegrationClient.sendToAdk(anyString(), anyString(), anyString(), any()))
+            .thenReturn("Hola! ¿En qué puedo ayudarte?");
+
+        new SupportConversationsServlet().doPost(request, response);
+
+        ArgumentCaptor<String> stored = ArgumentCaptor.forClass(String.class);
+        verify(userMsg).setAttachments(stored.capture());
+        // Parsed rather than substring-matched: org.json escapes '/' as '\/' when serializing,
+        // so a raw-string check for "image/png" is brittle against that (valid, order-preserving)
+        // quoting quirk. Parsing is immune to both escaping and key order.
+        JSONArray storedAttachments = new JSONArray(stored.getValue());
+        assertEquals(1, storedAttachments.length());
+        JSONObject storedAttachment = storedAttachments.getJSONObject(0);
+        assertEquals("screenshot.png", storedAttachment.getString("filename"));
+        assertEquals("image/png", storedAttachment.getString("mimeType"));
+        assertTrue(!storedAttachment.has("id"));
+      }
+
+      String out = capture.toString();
+      JSONArray outAttachments = new JSONObject(out).getJSONArray(FIELD_MESSAGES_LITERAL)
+          .getJSONObject(0).getJSONArray("attachments");
+      assertEquals(1, outAttachments.length());
+      JSONObject outAttachment = outAttachments.getJSONObject(0);
+      assertEquals("screenshot.png", outAttachment.getString("filename"));
+      assertEquals("image/png", outAttachment.getString("mimeType"));
+    }
+
+    @Test
     @DisplayName("Invalid JSON body returns 400")
     void invalidJsonBody() throws Exception {
       StringWriter capture = new StringWriter();
@@ -1042,6 +1106,60 @@ class SupportConversationsServletTest {
       String out = capture.toString();
       assertTrue(out.contains(FIELD_MESSAGES_LITERAL));
       assertTrue(!out.contains("must have text or at least one attachment"));
+    }
+
+    @Test
+    @DisplayName("The user's own outgoing attachment on an existing conversation is persisted "
+        + "as {filename, mimeType} (no id) and shows up in the returned message list")
+    void userMessageAttachmentsArePersisted() throws Exception {
+      StringWriter capture = new StringWriter();
+      HttpServletResponse response = mockResponse(capture);
+      String body = "{\"text\":\"\",\"attachments\":[{\"mimeType\":\"image/png\",\"name\":\"screenshot.png\","
+          + "\"data\":\"Zm9v\"}]}";
+      HttpServletRequest request = authenticatedRequest("/conversations/conv-1/messages", body);
+
+      SupportMessage userMsg = mock(SupportMessage.class);
+      when(userMsg.getAttachments())
+          .thenReturn("[{\"filename\":\"screenshot.png\",\"mimeType\":\"image/png\"}]");
+
+      try (MockedStatic<SecureWebServicesUtils> swsMock = mockValidAuth();
+           MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+           MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+           MockedStatic<OBProvider> providerMock = mockStatic(OBProvider.class);
+           MockedStatic<SupportIntegrationClient> sicMock = mockStatic(SupportIntegrationClient.class)) {
+        OBDal obDal = mockObDal(dalMock);
+        SupportConversation conv = mockConversation("conv-1");
+        when(conv.isHumanTakeover()).thenReturn(false);
+        when(obDal.get(SupportConversation.class, "conv-1")).thenReturn(conv);
+        stubProvider(providerMock, null, userMsg);
+        mockCriteria(obDal, SupportMessage.class, List.of(userMsg));
+
+        sicMock.when(() -> SupportIntegrationClient.sendToAdk(
+                anyString(), anyString(), anyString(), any(), any()))
+            .thenReturn("Claro, veo tu adjunto");
+
+        new SupportConversationsServlet().doPost(request, response);
+
+        ArgumentCaptor<String> stored = ArgumentCaptor.forClass(String.class);
+        verify(userMsg).setAttachments(stored.capture());
+        // Parsed rather than substring-matched: org.json escapes '/' as '\/' when serializing,
+        // so a raw-string check for "image/png" is brittle against that (valid, order-preserving)
+        // quoting quirk. Parsing is immune to both escaping and key order.
+        JSONArray storedAttachments = new JSONArray(stored.getValue());
+        assertEquals(1, storedAttachments.length());
+        JSONObject storedAttachment = storedAttachments.getJSONObject(0);
+        assertEquals("screenshot.png", storedAttachment.getString("filename"));
+        assertEquals("image/png", storedAttachment.getString("mimeType"));
+        assertTrue(!storedAttachment.has("id"));
+      }
+
+      String out = capture.toString();
+      JSONArray outAttachments = new JSONObject(out).getJSONArray(FIELD_MESSAGES_LITERAL)
+          .getJSONObject(0).getJSONArray("attachments");
+      assertEquals(1, outAttachments.length());
+      JSONObject outAttachment = outAttachments.getJSONObject(0);
+      assertEquals("screenshot.png", outAttachment.getString("filename"));
+      assertEquals("image/png", outAttachment.getString("mimeType"));
     }
 
     @Test

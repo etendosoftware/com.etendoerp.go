@@ -276,7 +276,7 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
       OBDal.getInstance().save(conv);
 
       // Insert user message
-      saveMessage(conv, SENDER_USER, "Tú", firstMessage, now, user);
+      saveMessage(conv, SENDER_USER, "Tú", firstMessage, now, user, attachments);
 
       // Commit before calling ADK so background set-ticket can see the new conversation row
       // (the ADK's callback arrives via a separate HTTP request/transaction). Uses
@@ -443,7 +443,7 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
 
       User user = conv.getUser();
       Date now = new Date();
-      saveMessage(conv, SENDER_USER, "Tú", text, now, user);
+      saveMessage(conv, SENDER_USER, "Tú", text, now, user, attachments);
 
       // If ticket is assigned to a human agent, block AI response
       if (Boolean.TRUE.equals(conv.isHumanTakeover())) {
@@ -783,6 +783,18 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
 
   private static void saveMessage(SupportConversation conv, String sender, String senderName,
       String text, Date timestamp, User createdBy) {
+    saveMessage(conv, sender, senderName, text, timestamp, createdBy, null);
+  }
+
+  /** Same as the 5-arg {@link #saveMessage} but also persists the sender's own outgoing
+   * attachments (request wire format {@code [{name, mimeType, data}]}) as the {@code [{filename,
+   * mimeType}]} shape the frontend's {@code AttachmentItem} already renders for Jira-sourced
+   * attachments — no {@code id}, since there is no fetchable Jira attachment id for the user's
+   * own just-sent message. Mirrors {@link SupportJiraWebhookHandler#insertJiraMessage}'s
+   * null-vs-empty convention: the column is left {@code null} (never an empty-array string) when
+   * {@code attachments} is null/empty/all-malformed. */
+  private static void saveMessage(SupportConversation conv, String sender, String senderName,
+      String text, Date timestamp, User createdBy, JSONArray attachments) {
     SupportMessage msg = OBProvider.getInstance().get(SupportMessage.class);
     msg.setNewOBObject(true);
     msg.setId(newId());
@@ -795,7 +807,33 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
     msg.setSenderName(senderName);
     msg.setText(text);
     msg.setMessageDate(timestamp);
+    String attachmentsJson = buildOutgoingAttachmentsJson(attachments);
+    if (attachmentsJson != null) {
+      msg.setAttachments(attachmentsJson);
+    }
     OBDal.getInstance().save(msg);
+  }
+
+  /** Maps the request's outgoing {@code attachments} array ({@code name}/{@code mimeType}/{@code
+   * data}, per {@link SupportIntegrationClient#appendSingleAttachmentPart}) to the persisted
+   * {@code [{filename, mimeType}]} shape. Returns {@code null} — never an empty-array string —
+   * when there is nothing to store, matching {@link SupportJiraWebhookHandler#insertJiraMessage}. */
+  private static String buildOutgoingAttachmentsJson(JSONArray attachments) {
+    if (attachments == null || attachments.length() == 0) return null;
+    JSONArray stored = new JSONArray();
+    for (int i = 0; i < attachments.length(); i++) {
+      JSONObject att = attachments.optJSONObject(i);
+      if (att == null) continue;
+      try {
+        stored.put(new JSONObject()
+            .put("filename", att.optString("name", ""))
+            .put("mimeType", att.optString("mimeType", "application/octet-stream")));
+      } catch (JSONException e) {
+        // Malformed attachment entry — skip it rather than fail the whole message save.
+        log.warn("Skipping malformed outgoing attachment entry: {}", e.getMessage());
+      }
+    }
+    return stored.length() > 0 ? stored.toString() : null;
   }
 
   /** Package-private: also used by {@link SupportJiraWebhookHandler} when storing an inbound Jira comment. */
