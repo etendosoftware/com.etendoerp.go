@@ -35,6 +35,8 @@ import java.util.Date;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
@@ -148,8 +150,9 @@ final class SupportJiraWebhookHandler {
     String authorEmail = author != null ? author.optString("emailAddress", "") : "";
     String authorName = author != null ? author.optString("displayName", DEFAULT_AGENT_NAME) : DEFAULT_AGENT_NAME;
     String text = extractAdfText(comment.opt("body")).trim();
-    JSONArray attachments = resolveCommentAttachments(jiraKey, comment);
-    return new JiraWebhookComment(jiraKey, commentId, authorName, authorEmail, text, attachments);
+    ResolvedAttachments resolvedAttachments = resolveCommentAttachments(jiraKey, comment);
+    text = stripResolvedWikiMarkupTokens(text, resolvedAttachments.resolvedWikiMarkupTokens);
+    return new JiraWebhookComment(jiraKey, commentId, authorName, authorEmail, text, resolvedAttachments.attachments);
   }
 
   /** No "comment" field: either an assignee-change-back-to-bot or a status transition to Done. */
@@ -414,6 +417,67 @@ final class SupportJiraWebhookHandler {
     return (value != null && !value.isEmpty()) ? value : fallback;
   }
 
+  // --- Jira wiki-markup (non-ADF) embedded image detection ---
+
+  /** Matches a Jira wiki-markup image/file reference: {@code !filename!} or
+   * {@code !filename|param1=val1,param2=val2!} (e.g.
+   * {@code !Captura desde 2026-07-15 13-21-04.png|width=989,alt="..."!} — real Jira filenames
+   * routinely contain spaces, so the filename group only excludes {@code |} and {@code !}
+   * themselves, not whitespace). Group 1 is the filename portion (before the first {@code |}, if
+   * any; lazily matched so it stops at the first {@code |} or {@code !} it hits, whichever comes
+   * first). The dot check in {@link #extractWikiMarkupImageFilenames} — not whitespace exclusion —
+   * is what keeps a bare {@code !} used as normal sentence punctuation from turning into a
+   * spurious match: two nearby {@code !}/{@code !} with no file extension in between is discarded
+   * there. */
+  private static final Pattern WIKI_MARKUP_IMAGE_PATTERN = Pattern.compile("!([^|!]+?)(?:\\|[^!]*)?!");
+
+  /** One {@code !...!} token found in a Jira wiki-markup comment body: {@code filename} is the
+   * extracted filename to correlate against the Jira REST attachment list, {@code token} is the
+   * exact original matched substring (including the surrounding {@code !}/{@code |params}) so it
+   * can be stripped verbatim from the displayed text once correlated. */
+  static final class WikiMarkupImageRef {
+    final String filename;
+    final String token;
+
+    WikiMarkupImageRef(String filename, String token) {
+      this.filename = filename;
+      this.token = token;
+    }
+  }
+
+  /** Scans {@code text} for Jira wiki-markup image/file references ({@code !filename.ext!} or
+   * {@code !filename.ext|params!}) — the shape Jira Automation's {@code {{comment.body}}} smart
+   * value actually renders as for a comment with an embedded image, instead of ADF JSON (see
+   * {@link #resolveCommentAttachments}). A matched "filename" is only kept when it contains a
+   * {@code .} (a file extension): a bare {@code !} used as normal punctuation never has a dot
+   * immediately before the next {@code !}/{@code |}, so this simple heuristic is enough to avoid
+   * false positives without a more elaborate parser. */
+  static List<WikiMarkupImageRef> extractWikiMarkupImageFilenames(String text) {
+    List<WikiMarkupImageRef> refs = new ArrayList<>();
+    if (text == null || text.isEmpty()) return refs;
+    Matcher matcher = WIKI_MARKUP_IMAGE_PATTERN.matcher(text);
+    while (matcher.find()) {
+      String filename = matcher.group(1);
+      if (filename.indexOf('.') < 0) continue; // not shaped like a real filename — likely punctuation
+      refs.add(new WikiMarkupImageRef(filename, matcher.group(0)));
+    }
+    return refs;
+  }
+
+  /** Removes every token in {@code tokensToStrip} (exact substrings, as produced by {@link
+   * #extractWikiMarkupImageFilenames}) from {@code text}, then does minimal whitespace cleanup —
+   * collapsing runs of spaces/tabs left behind and trimming the ends. Tokens that could not be
+   * correlated to a real attachment are never passed in here, so they are left in the text as-is
+   * (safer than silently swallowing unresolved content). */
+  static String stripResolvedWikiMarkupTokens(String text, List<String> tokensToStrip) {
+    if (text == null || tokensToStrip == null || tokensToStrip.isEmpty()) return text;
+    String result = text;
+    for (String token : tokensToStrip) {
+      result = result.replace(token, "");
+    }
+    return result.replaceAll("[ \\t]{2,}", " ").replaceAll("\\n{3,}", "\n\n").trim();
+  }
+
   static final class JiraWebhookComment {
     final String jiraKey;
     final String commentId;
@@ -438,40 +502,98 @@ final class SupportJiraWebhookHandler {
   // --- Jira attachment resolution (ADF media nodes → Jira REST attachment metadata) ---
 
   /**
+   * Result of {@link #resolveCommentAttachments}: the resolved {@code {id, filename, mimeType}}
+   * attachments (or {@code null} when none were found) plus the exact wiki-markup {@code !...!}
+   * substrings that were successfully correlated to one of them — the caller ({@link
+   * #parseStandardJiraWebhook}) strips those substrings out of the displayed comment text via
+   * {@link #stripResolvedWikiMarkupTokens}. Unmatched wiki-markup tokens are intentionally NOT
+   * included here, so they are left as-is in the text (see {@link #stripResolvedWikiMarkupTokens}).
+   */
+  static final class ResolvedAttachments {
+    final JSONArray attachments;
+    final List<String> resolvedWikiMarkupTokens;
+
+    ResolvedAttachments(JSONArray attachments, List<String> resolvedWikiMarkupTokens) {
+      this.attachments = attachments;
+      this.resolvedWikiMarkupTokens = resolvedWikiMarkupTokens;
+    }
+  }
+
+  /**
    * Detects attachments carried by a Jira comment and resolves them to {@code {id, filename,
-   * mimeType}} metadata.
-   * <p>
-   * <b>Approach:</b> Jira's ADF {@code media}/{@code mediaGroup}/{@code mediaSingle} nodes are
-   * walked the same way {@link #extractAdfText} already walks the document for text — this
+   * mimeType}} metadata. Supports BOTH shapes Jira actually sends {@code comment.body} as:
+   * <ul>
+   * <li><b>ADF (structured JSON):</b> {@code media}/{@code mediaGroup}/{@code mediaSingle} nodes
+   * are walked the same way {@link #extractAdfText} already walks the document for text — this
    * handler has been parsing real nested ADF (string-encoded, via {@code extractAdfTextFromString})
    * from the live production webhook since before this change (see
-   * {@code docs/support-chat-session-2026-06-11.md}: the Jira Automation "Send web request" body
-   * embeds {@code {{comment.body}}} as a JSON string, and this class's existing dual
-   * String/JSONObject dispatch already round-trips it as real ADF). Since a {@code media} node's
-   * schema is part of the same ADF document, it is present in that same payload whenever the
-   * comment has an image/file attached — no separate Jira call is needed to <em>detect</em> an
-   * attachment.
-   * <p>
+   * {@code docs/support-chat-session-2026-06-11.md}). Since a {@code media} node's schema is part
+   * of the same ADF document, it is present in that same payload whenever the comment has an
+   * image/file attached — no separate Jira call is needed to <em>detect</em> an attachment.</li>
+   * <li><b>Jira wiki markup (plain string):</b> confirmed against a real Jira comment with an
+   * embedded image — Jira Automation's {@code {{comment.body}}} smart value renders as wiki markup
+   * ({@code !filename.png|width=989,alt="filename.png"!}) rather than ADF JSON for this case, so
+   * {@code comment.opt("body")} is a plain string that never reaches the ADF walk above with
+   * anything to find. {@link #extractWikiMarkupImageFilenames} extracts the filename out of every
+   * {@code !...!} token and this method correlates it against the Jira REST attachment list by
+   * EXACT filename match — unambiguous, unlike the ADF id correlation below.</li>
+   * </ul>
    * ADF's {@code media} node attrs only carry an {@code id} (and type/collection) — never a
-   * filename or MIME type — so resolving those still requires one Jira REST call per comment:
-   * {@code GET /rest/api/3/issue/{key}?fields=attachment}. The ADF media id is a Media
-   * Platform file id, which in Jira Cloud is commonly a different value than the classic
-   * attachment id used by {@code /rest/api/3/attachment/*} — so this method first tries a direct
-   * id match against that list, and falls back to pairing any still-unmatched media node with the
-   * closest-by-timestamp unclaimed attachment. <b>This fallback path is unverified against a real
-   * Jira comment with an attachment — flagged for QA.</b>
+   * filename or MIME type — so resolving those (and the wiki-markup filenames) still requires one
+   * Jira REST call per comment: {@code GET /rest/api/3/issue/{key}?fields=attachment}. The ADF
+   * media id is a Media Platform file id, which in Jira Cloud is commonly a different value than
+   * the classic attachment id used by {@code /rest/api/3/attachment/*} — so the ADF side first
+   * tries a direct id match against that list, and falls back to pairing any still-unmatched media
+   * node with the closest-by-timestamp unclaimed attachment. The wiki-markup side needs none of
+   * that: an exact filename match is either found or it isn't.
    */
-  static JSONArray resolveCommentAttachments(String jiraKey, JSONObject comment) {
+  static ResolvedAttachments resolveCommentAttachments(String jiraKey, JSONObject comment) {
+    Object rawBody = comment.opt("body");
     List<String> mediaIds = new ArrayList<>();
-    collectAdfMediaIds(comment.opt("body"), mediaIds);
-    if (mediaIds.isEmpty()) return null;
+    collectAdfMediaIds(rawBody, mediaIds);
+    List<WikiMarkupImageRef> wikiRefs = (rawBody instanceof String)
+        ? extractWikiMarkupImageFilenames((String) rawBody)
+        : Collections.emptyList();
+    if (mediaIds.isEmpty() && wikiRefs.isEmpty()) {
+      return new ResolvedAttachments(null, Collections.emptyList());
+    }
+
     Date commentTime = parseCommentTimestamp(comment);
     JSONArray issueAttachments = fetchIssueAttachments(jiraKey);
     // Nothing to correlate against — skip the (avoidable) DB round-trip below.
-    if (issueAttachments.length() == 0) return null;
-    Set<String> alreadyLinkedIds = findAlreadyLinkedAttachmentIds(jiraKey);
-    JSONArray resolved = correlateAttachments(issueAttachments, mediaIds, commentTime, alreadyLinkedIds);
-    return resolved.length() > 0 ? resolved : null;
+    if (issueAttachments.length() == 0) return new ResolvedAttachments(null, Collections.emptyList());
+
+    JSONArray resolved = new JSONArray();
+    if (!mediaIds.isEmpty()) {
+      Set<String> alreadyLinkedIds = findAlreadyLinkedAttachmentIds(jiraKey);
+      JSONArray adfResolved = correlateAttachments(issueAttachments, mediaIds, commentTime, alreadyLinkedIds);
+      for (int i = 0; i < adfResolved.length(); i++) {
+        resolved.put(adfResolved.opt(i));
+      }
+    }
+
+    List<String> resolvedWikiMarkupTokens = new ArrayList<>();
+    for (WikiMarkupImageRef ref : wikiRefs) {
+      JSONObject match = findAttachmentByFilename(issueAttachments, ref.filename);
+      if (match != null) {
+        resolved.put(toAttachmentMeta(match));
+        resolvedWikiMarkupTokens.add(ref.token);
+      }
+    }
+
+    return new ResolvedAttachments(resolved.length() > 0 ? resolved : null, resolvedWikiMarkupTokens);
+  }
+
+  /** Exact {@code filename} match against {@code issueAttachments} — used for the wiki-markup
+   * correlation, which (unlike the ADF media-id path) has no ambiguous id mapping to resolve, so a
+   * direct filename match is sufficient and unambiguous. Returns the first match, or {@code null}
+   * when none of the issue's attachments has that filename. */
+  static JSONObject findAttachmentByFilename(JSONArray issueAttachments, String filename) {
+    for (int i = 0; i < issueAttachments.length(); i++) {
+      JSONObject att = issueAttachments.optJSONObject(i);
+      if (att != null && filename.equals(att.optString(FIELD_FILENAME, ""))) return att;
+    }
+    return null;
   }
 
   /** Jira attachment ids already persisted on an earlier {@link SupportMessage} of the

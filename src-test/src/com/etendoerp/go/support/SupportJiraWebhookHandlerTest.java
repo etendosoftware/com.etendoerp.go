@@ -486,6 +486,29 @@ class SupportJiraWebhookHandlerTest {
       assertEquals("Agente de soporte", result.authorName);
       assertEquals("", result.authorEmail);
     }
+
+    @Test
+    @DisplayName("Wiki-markup embedded image reference in the comment body is preserved verbatim when "
+        + "attachment correlation is unavailable (no Jira token configured in this test environment) — "
+        + "an unresolved reference is never silently swallowed")
+    void wikiMarkupBodyNoTokenConfigured() throws Exception {
+      HttpServletResponse response = mockResponse(new StringWriter());
+      JSONObject comment = new JSONObject()
+          .put("id", "c50")
+          .put("jsdPublic", true)
+          .put("body", "!Captura desde 2026-07-15 13-21-04.png|width=989,"
+              + "alt=\"Captura desde 2026-07-15 13-21-04.png\"!");
+      JSONObject body = new JSONObject()
+          .put("issue", new JSONObject().put("key", "SUP-50"))
+          .put("comment", comment);
+
+      SupportJiraWebhookHandler.JiraWebhookComment result =
+          SupportJiraWebhookHandler.parseStandardJiraWebhook(response, body);
+
+      assertNotNull(result);
+      assertTrue(result.text.contains("!Captura desde 2026-07-15 13-21-04.png"));
+      assertNull(result.attachments);
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -1205,9 +1228,11 @@ class SupportJiraWebhookHandlerTest {
               .put(new JSONObject().put("type", "text").put("text", "just a plain reply")))));
       JSONObject comment = new JSONObject().put("body", body);
 
-      JSONArray result = SupportJiraWebhookHandler.resolveCommentAttachments("SUP-1", comment);
+      SupportJiraWebhookHandler.ResolvedAttachments result =
+          SupportJiraWebhookHandler.resolveCommentAttachments("SUP-1", comment);
 
-      assertNull(result);
+      assertNull(result.attachments);
+      assertTrue(result.resolvedWikiMarkupTokens.isEmpty());
     }
 
     @Test
@@ -1218,9 +1243,227 @@ class SupportJiraWebhookHandlerTest {
           .put(new JSONObject().put("type", "mediaSingle").put("content", new JSONArray().put(media))));
       JSONObject comment = new JSONObject().put("body", body);
 
-      JSONArray result = SupportJiraWebhookHandler.resolveCommentAttachments("SUP-2", comment);
+      SupportJiraWebhookHandler.ResolvedAttachments result =
+          SupportJiraWebhookHandler.resolveCommentAttachments("SUP-2", comment);
 
-      assertNull(result);
+      assertNull(result.attachments);
+      assertTrue(result.resolvedWikiMarkupTokens.isEmpty());
+    }
+
+    @Test
+    @DisplayName("A wiki-markup image reference resolves to null when no Jira token is configured (same as ADF path)")
+    void wikiMarkupWithoutTokenResolvesToNull() throws Exception {
+      JSONObject comment = new JSONObject().put("body",
+          "!screenshot.png|width=989,alt=\"screenshot.png\"!");
+
+      SupportJiraWebhookHandler.ResolvedAttachments result =
+          SupportJiraWebhookHandler.resolveCommentAttachments("SUP-40", comment);
+
+      assertNull(result.attachments);
+      assertTrue(result.resolvedWikiMarkupTokens.isEmpty());
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // extractWikiMarkupImageFilenames
+  // -------------------------------------------------------------------------
+
+  @Nested
+  @DisplayName("extractWikiMarkupImageFilenames")
+  class ExtractWikiMarkupImageFilenames {
+
+    @Test
+    @DisplayName("A simple image reference with no params is extracted")
+    void simpleReference() {
+      List<SupportJiraWebhookHandler.WikiMarkupImageRef> refs =
+          SupportJiraWebhookHandler.extractWikiMarkupImageFilenames("Look at !screenshot.png!");
+
+      assertEquals(1, refs.size());
+      assertEquals("screenshot.png", refs.get(0).filename);
+      assertEquals("!screenshot.png!", refs.get(0).token);
+    }
+
+    @Test
+    @DisplayName("A reference with params extracts only the filename portion, and the full token")
+    void referenceWithParams() {
+      String raw = "!Captura desde 2026-07-15 13-21-04.png|width=989,alt=\"Captura desde 2026-07-15 13-21-04.png\"!";
+      List<SupportJiraWebhookHandler.WikiMarkupImageRef> refs =
+          SupportJiraWebhookHandler.extractWikiMarkupImageFilenames("before " + raw + " after");
+
+      assertEquals(1, refs.size());
+      assertEquals(raw, refs.get(0).token);
+    }
+
+    @Test
+    @DisplayName("Plain text with no '!...!' patterns at all yields nothing (regression)")
+    void plainTextNoPatterns() {
+      List<SupportJiraWebhookHandler.WikiMarkupImageRef> refs = SupportJiraWebhookHandler
+          .extractWikiMarkupImageFilenames("Thanks for reaching out, we will look into this soon.");
+
+      assertTrue(refs.isEmpty());
+    }
+
+    @Test
+    @DisplayName("'!' used as normal sentence punctuation (no dot in the matched span) is not mistaken for a file")
+    void exclamationPunctuationIsNotAFile() {
+      List<SupportJiraWebhookHandler.WikiMarkupImageRef> refs =
+          SupportJiraWebhookHandler.extractWikiMarkupImageFilenames("Great!works! Thanks a lot!");
+
+      assertTrue(refs.isEmpty());
+    }
+
+    @Test
+    @DisplayName("Two nearby '!' punctuation marks with plain words (and spaces) in between are not mistaken "
+        + "for a file, since the filename group has no dot")
+    void exclamationPunctuationWithSpacesIsNotAFile() {
+      List<SupportJiraWebhookHandler.WikiMarkupImageRef> refs =
+          SupportJiraWebhookHandler.extractWikiMarkupImageFilenames("Sounds good! Let's ship it! Great work!");
+
+      assertTrue(refs.isEmpty());
+    }
+
+    @Test
+    @DisplayName("Null or empty text yields nothing")
+    void nullOrEmpty() {
+      assertTrue(SupportJiraWebhookHandler.extractWikiMarkupImageFilenames(null).isEmpty());
+      assertTrue(SupportJiraWebhookHandler.extractWikiMarkupImageFilenames("").isEmpty());
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // stripResolvedWikiMarkupTokens
+  // -------------------------------------------------------------------------
+
+  @Nested
+  @DisplayName("stripResolvedWikiMarkupTokens")
+  class StripResolvedWikiMarkupTokens {
+
+    @Test
+    @DisplayName("No tokens to strip returns the text unchanged")
+    void noTokens() {
+      assertEquals("hello world",
+          SupportJiraWebhookHandler.stripResolvedWikiMarkupTokens("hello world", List.of()));
+    }
+
+    @Test
+    @DisplayName("A matched token is removed and surrounding whitespace collapsed/trimmed")
+    void removesToken() {
+      String text = "Here you go  !screenshot.png|width=989!  thanks";
+      String result = SupportJiraWebhookHandler.stripResolvedWikiMarkupTokens(text,
+          List.of("!screenshot.png|width=989!"));
+
+      assertEquals("Here you go thanks", result);
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // findAttachmentByFilename — the wiki-markup correlation lookup
+  // -------------------------------------------------------------------------
+
+  @Nested
+  @DisplayName("findAttachmentByFilename")
+  class FindAttachmentByFilename {
+
+    @Test
+    @DisplayName("Exact filename match returns the matching attachment")
+    void exactMatch() throws Exception {
+      JSONArray issueAttachments = new JSONArray()
+          .put(new JSONObject().put("id", "10001").put("filename", "other.png"))
+          .put(new JSONObject().put("id", "10002").put("filename", "Captura desde 2026-07-15 13-21-04.png"));
+
+      JSONObject match = SupportJiraWebhookHandler.findAttachmentByFilename(
+          issueAttachments, "Captura desde 2026-07-15 13-21-04.png");
+
+      assertNotNull(match);
+      assertEquals("10002", match.getString("id"));
+    }
+
+    @Test
+    @DisplayName("No matching filename returns null")
+    void noMatch() throws Exception {
+      JSONArray issueAttachments = new JSONArray()
+          .put(new JSONObject().put("id", "10001").put("filename", "other.png"));
+
+      JSONObject match = SupportJiraWebhookHandler.findAttachmentByFilename(issueAttachments, "missing.png");
+
+      assertNull(match);
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // Wiki-markup embedded image: detect (extractWikiMarkupImageFilenames) → correlate
+  // (findAttachmentByFilename) → strip (stripResolvedWikiMarkupTokens) — the same composition
+  // resolveCommentAttachments/parseStandardJiraWebhook wire together, exercised here as pure
+  // functions since fetchIssueAttachments needs a real Jira token to reach the network (see the
+  // resolveCommentAttachments section above).
+  // -------------------------------------------------------------------------
+
+  @Nested
+  @DisplayName("Wiki-markup embedded image: detect, correlate, strip")
+  class WikiMarkupCorrelationFlow {
+
+    @Test
+    @DisplayName("(a) A wiki-markup image reference correlates to a real attachment by filename "
+        + "and the token is stripped from the displayed text")
+    void correlatesAndStripsMatchedReference() throws Exception {
+      String rawComment = "Here is the issue !Captura desde 2026-07-15 13-21-04.png"
+          + "|width=989,alt=\"Captura desde 2026-07-15 13-21-04.png\"! let me know";
+      JSONArray issueAttachments = new JSONArray()
+          .put(new JSONObject().put("id", "10099").put("filename", "Captura desde 2026-07-15 13-21-04.png")
+              .put("mimeType", "image/png"));
+
+      List<SupportJiraWebhookHandler.WikiMarkupImageRef> refs =
+          SupportJiraWebhookHandler.extractWikiMarkupImageFilenames(rawComment);
+      assertEquals(1, refs.size());
+
+      List<String> resolvedTokens = new ArrayList<>();
+      for (SupportJiraWebhookHandler.WikiMarkupImageRef ref : refs) {
+        JSONObject match = SupportJiraWebhookHandler.findAttachmentByFilename(issueAttachments, ref.filename);
+        assertNotNull(match, "expected a matching attachment for " + ref.filename);
+        assertEquals("10099", match.getString("id"));
+        resolvedTokens.add(ref.token);
+      }
+
+      String finalText = SupportJiraWebhookHandler.stripResolvedWikiMarkupTokens(rawComment, resolvedTokens);
+
+      assertEquals("Here is the issue let me know", finalText);
+      assertFalse(finalText.contains("!"));
+    }
+
+    @Test
+    @DisplayName("(b) A wiki-markup reference with NO matching attachment is left in the text unchanged")
+    void unmatchedReferenceLeftAsIs() throws Exception {
+      String rawComment = "Here is the issue !unknown-file.png|width=989! let me know";
+      JSONArray issueAttachments = new JSONArray()
+          .put(new JSONObject().put("id", "10099").put("filename", "other.png"));
+
+      List<SupportJiraWebhookHandler.WikiMarkupImageRef> refs =
+          SupportJiraWebhookHandler.extractWikiMarkupImageFilenames(rawComment);
+      assertEquals(1, refs.size());
+
+      List<String> resolvedTokens = new ArrayList<>();
+      for (SupportJiraWebhookHandler.WikiMarkupImageRef ref : refs) {
+        JSONObject match = SupportJiraWebhookHandler.findAttachmentByFilename(issueAttachments, ref.filename);
+        if (match != null) resolvedTokens.add(ref.token);
+      }
+      assertTrue(resolvedTokens.isEmpty());
+
+      String finalText = SupportJiraWebhookHandler.stripResolvedWikiMarkupTokens(rawComment, resolvedTokens);
+
+      // No token was resolved, so stripResolvedWikiMarkupTokens must be a no-op.
+      assertEquals(rawComment, finalText);
+    }
+
+    @Test
+    @DisplayName("(c) Plain text with no '!...!' patterns at all is completely unaffected (regression)")
+    void plainTextUnaffected() {
+      String rawComment = "Thanks for the report, we're looking into it now.";
+
+      List<SupportJiraWebhookHandler.WikiMarkupImageRef> refs =
+          SupportJiraWebhookHandler.extractWikiMarkupImageFilenames(rawComment);
+
+      assertTrue(refs.isEmpty());
+      assertEquals(rawComment, SupportJiraWebhookHandler.stripResolvedWikiMarkupTokens(rawComment, List.of()));
     }
   }
 
