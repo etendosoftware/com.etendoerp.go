@@ -27,6 +27,7 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.when;
 
 import java.lang.reflect.InvocationTargetException;
@@ -51,6 +52,8 @@ import org.openbravo.dal.service.OBDal;
 import org.openbravo.dal.service.OBQuery;
 
 import com.etendoerp.go.schemaforge.selector.meta.SelectorMeta;
+import com.etendoerp.go.schemaforge.util.NeoLanguage;
+import com.etendoerp.go.schemaforge.util.NeoTrl;
 
 /**
  * Unit tests for {@link SelectorQueryExecutor} covering routing, property resolution,
@@ -93,10 +96,10 @@ public class SelectorQueryExecutorTest {
   }
 
   /**
-   * Invokes the private {@code enrichCountryTranslations} method.
+   * Invokes the private {@code enrichTranslations} method.
    */
   private static void invokeEnrich(JSONArray items, String entityName, String language) throws Exception {
-    Method m = SelectorQueryExecutor.class.getDeclaredMethod("enrichCountryTranslations", JSONArray.class, String.class,
+    Method m = SelectorQueryExecutor.class.getDeclaredMethod("enrichTranslations", JSONArray.class, String.class,
         String.class);
     m.setAccessible(true);
     m.invoke(null, items, entityName, language);
@@ -443,7 +446,8 @@ public class SelectorQueryExecutorTest {
   }
 
   /**
-   * language=es_ES with a Country entity triggers enrichment and replaces item labels.
+   * A translatable entity with a resolved GO locale triggers enrichment: labels are replaced with
+   * the translated names {@link NeoTrl} returns for the request language.
    */
   @Test
   @SuppressWarnings("unchecked")
@@ -458,28 +462,27 @@ public class SelectorQueryExecutorTest {
 
     OBQuery countQuery = mock(OBQuery.class);
     OBQuery dataQuery = mock(OBQuery.class);
-    OBQuery trlQuery = mock(OBQuery.class);
     when(countQuery.count()).thenReturn(1);
     when(dataQuery.list()).thenReturn(Collections.singletonList(bob));
 
-    BaseOBObject country = mock(BaseOBObject.class);
-    when(country.getId()).thenReturn("47");
-    BaseOBObject trl = mock(BaseOBObject.class);
-    when(trl.get("country")).thenReturn(country);
-    when(trl.get("name")).thenReturn("España");
-    when(trlQuery.list()).thenReturn(Collections.singletonList(trl));
-
     OBDal obDal = mock(OBDal.class);
-    when(obDal.createQuery(anyString(), anyString())).thenReturn(countQuery, dataQuery, trlQuery);
+    when(obDal.createQuery(anyString(), anyString())).thenReturn(countQuery, dataQuery);
+
+    Map<String, String> translations = new HashMap<>();
+    translations.put("47", "España");
 
     try (MockedStatic<NeoSelectorExecutionHelper> helperMock = mockStatic(
         NeoSelectorExecutionHelper.class); MockedStatic<SelectorRowMapper> mapperMock = mockStatic(
         SelectorRowMapper.class); MockedStatic<OBDal> obDalMock = mockStatic(
-        OBDal.class); MockedStatic<SelectorResponseSupport> respMock = mockStatic(SelectorResponseSupport.class)) {
+        OBDal.class); MockedStatic<NeoLanguage> langMock = mockStatic(
+        NeoLanguage.class); MockedStatic<NeoTrl> trlMock = mockStatic(
+        NeoTrl.class); MockedStatic<SelectorResponseSupport> respMock = mockStatic(SelectorResponseSupport.class)) {
 
       setupVoidHelperMocks(helperMock);
       mapperMock.when(() -> SelectorRowMapper.normalizeEntityId("47")).thenReturn("47");
       obDalMock.when(OBDal::getInstance).thenReturn(obDal);
+      langMock.when(NeoLanguage::currentCode).thenReturn("es_ES");
+      trlMock.when(() -> NeoTrl.translatedNames(eq("Country"), any(), eq("es_ES"))).thenReturn(translations);
 
       JSONArray[] capturedItems = new JSONArray[1];
       respMock.when(
@@ -550,45 +553,11 @@ public class SelectorQueryExecutorTest {
   // ---------------------------------------------------------------
 
   /**
-   * A non-Country entity causes enrichCountryTranslations to return early without modifying items.
+   * When NeoTrl returns a translation for only some ids, only those labels are replaced; items
+   * without a translation keep their original label.
    */
   @Test
-  public void testEnrichCountryTranslationsNonCountryEntityIsNoOp() throws Exception {
-    JSONArray items = new JSONArray();
-    JSONObject item = new JSONObject();
-    item.put("id", "1");
-    item.put("label", "Spain");
-    items.put(item);
-
-    invokeEnrich(items, "BusinessPartner", "es_ES");
-
-    assertEquals("Spain", items.getJSONObject(0).getString("label"));
-  }
-
-  // ---------------------------------------------------------------
-  // enrichCountryTranslations — translation applied
-  // ---------------------------------------------------------------
-
-  /**
-   * An empty items array causes enrichCountryTranslations to return before reaching OBDal.
-   */
-  @Test
-  public void testEnrichCountryTranslationsEmptyItemsDoesNotCallOBDal() throws Exception {
-    // If OBDal were reached, it would throw without a mock.
-    // No exception here confirms the early-return before the query.
-    invokeEnrich(new JSONArray(), "Country", "es_ES");
-  }
-
-  // ---------------------------------------------------------------
-  // enrichCountryTranslations — missing translation keeps original
-  // ---------------------------------------------------------------
-
-  /**
-   * Country items are relabelled with translated names from CountryTrl when a translation exists.
-   */
-  @Test
-  @SuppressWarnings("unchecked")
-  public void testEnrichCountryTranslationsReplacesLabelsWithTranslatedNames() throws Exception {
+  public void testEnrichTranslationsPartialTranslationKeepsUntranslatedLabels() throws Exception {
     JSONArray items = new JSONArray();
     JSONObject item1 = new JSONObject();
     item1.put("id", "47");
@@ -599,26 +568,58 @@ public class SelectorQueryExecutorTest {
     item2.put("label", "Argentina");
     items.put(item2);
 
-    BaseOBObject country1 = mock(BaseOBObject.class);
-    when(country1.getId()).thenReturn("47");
-    BaseOBObject trl1 = mock(BaseOBObject.class);
-    when(trl1.get("country")).thenReturn(country1);
-    when(trl1.get("name")).thenReturn("España");
+    Map<String, String> translations = new HashMap<>();
+    translations.put("47", "España");
 
-    BaseOBObject country2 = mock(BaseOBObject.class);
-    when(country2.getId()).thenReturn("10");
-    BaseOBObject trl2 = mock(BaseOBObject.class);
-    when(trl2.get("country")).thenReturn(country2);
-    when(trl2.get("name")).thenReturn("Argentina");
+    try (MockedStatic<NeoTrl> trlMock = mockStatic(NeoTrl.class)) {
+      trlMock.when(() -> NeoTrl.translatedNames(eq("Country"), any(), eq("es_ES"))).thenReturn(translations);
+      invokeEnrich(items, "Country", "es_ES");
+    }
 
-    OBQuery<BaseOBObject> trlQuery = mock(OBQuery.class);
-    when(trlQuery.list()).thenReturn(Arrays.asList(trl1, trl2));
+    assertEquals("España", items.getJSONObject(0).getString("label"));
+    assertEquals("Argentina", items.getJSONObject(1).getString("label"));
+  }
 
-    OBDal obDal = mock(OBDal.class);
-    when(obDal.createQuery(anyString(), anyString())).thenReturn(trlQuery);
+  // ---------------------------------------------------------------
+  // enrichCountryTranslations — translation applied
+  // ---------------------------------------------------------------
 
-    try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
-      obDalMock.when(OBDal::getInstance).thenReturn(obDal);
+  /**
+   * An empty items array causes enrichTranslations to return before calling NeoTrl.
+   */
+  @Test
+  public void testEnrichTranslationsEmptyItemsDoesNotCallNeoTrl() throws Exception {
+    try (MockedStatic<NeoTrl> trlMock = mockStatic(NeoTrl.class)) {
+      invokeEnrich(new JSONArray(), "Country", "es_ES");
+      trlMock.verify(() -> NeoTrl.translatedNames(any(), any(), any()), never());
+    }
+  }
+
+  // ---------------------------------------------------------------
+  // enrichCountryTranslations — missing translation keeps original
+  // ---------------------------------------------------------------
+
+  /**
+   * Items are relabelled with the translated names NeoTrl returns for each id.
+   */
+  @Test
+  public void testEnrichTranslationsReplacesLabelsWithTranslatedNames() throws Exception {
+    JSONArray items = new JSONArray();
+    JSONObject item1 = new JSONObject();
+    item1.put("id", "47");
+    item1.put("label", "Spain");
+    items.put(item1);
+    JSONObject item2 = new JSONObject();
+    item2.put("id", "10");
+    item2.put("label", "Argentine Republic");
+    items.put(item2);
+
+    Map<String, String> translations = new HashMap<>();
+    translations.put("47", "España");
+    translations.put("10", "Argentina");
+
+    try (MockedStatic<NeoTrl> trlMock = mockStatic(NeoTrl.class)) {
+      trlMock.when(() -> NeoTrl.translatedNames(eq("Country"), any(), eq("es_ES"))).thenReturn(translations);
       invokeEnrich(items, "Country", "es_ES");
     }
 
@@ -631,25 +632,18 @@ public class SelectorQueryExecutorTest {
   // ---------------------------------------------------------------
 
   /**
-   * A country with no CountryTrl row keeps its original label unchanged.
+   * When NeoTrl returns no translations, item labels are left unchanged.
    */
   @Test
-  @SuppressWarnings("unchecked")
-  public void testEnrichCountryTranslationsNoMatchingTranslationKeepsOriginalLabel() throws Exception {
+  public void testEnrichTranslationsNoMatchingTranslationKeepsOriginalLabel() throws Exception {
     JSONArray items = new JSONArray();
     JSONObject item = new JSONObject();
     item.put("id", "99");
     item.put("label", "Unknown");
     items.put(item);
 
-    OBQuery<BaseOBObject> trlQuery = mock(OBQuery.class);
-    when(trlQuery.list()).thenReturn(Collections.emptyList());
-
-    OBDal obDal = mock(OBDal.class);
-    when(obDal.createQuery(anyString(), anyString())).thenReturn(trlQuery);
-
-    try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
-      obDalMock.when(OBDal::getInstance).thenReturn(obDal);
+    try (MockedStatic<NeoTrl> trlMock = mockStatic(NeoTrl.class)) {
+      trlMock.when(() -> NeoTrl.translatedNames(eq("Country"), any(), eq("es_ES"))).thenReturn(Collections.emptyMap());
       invokeEnrich(items, "Country", "es_ES");
     }
 
