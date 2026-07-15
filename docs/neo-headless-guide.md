@@ -1105,6 +1105,56 @@ Headers custom via `withHeader(name, value)`.
 - El `beans.xml` del modulo tiene `bean-discovery-mode="all"` para discovery automatico
 - El handler se ejecuta **antes** del field filtering
 
+### Patron avanzado: invocar un `ad_actionButton` legacy por reflection (sin `CallProcess`)
+
+La mayoria de los `NeoHandler` custom terminan invocando un AD Process via `CallProcess`
+(stored procedure) o simplemente ejecutan una query HQL propia (ej. `YearAccountingHandler`,
+seccion 5 arriba). Pero algunos AD Process **legacy** no son stored procedures ni son invocables
+por `CallProcess` en absoluto: son servlets `ad_actionButton` classname-based (`AD_Process.
+procedurename IS NULL`), cuya logica de negocio real vive en un metodo privado
+`processButton(...)`.
+
+`YearCloseHandler` (`com.etendoerp.go.schemaforge.YearCloseHandler`, `JAVA_QUALIFIER =
+'year-close'`, spec `calendar`) es el primer caso de este patron en el modulo: los AD Process
+800036/800038 ("Close Year"/"Undo Close Year", clases `CreateRegFactAcct`/`DropRegFactAcct`)
+no tienen `procedurename`, y `CallProcess.callProcess()` no tiene ninguna rama de codigo para
+processes basados en `classname` — confirmado por spike, no asumido. Ir por el propio
+`doPost()` del servlet (simular un request HTTP real) tampoco es viable sin un contenedor
+servlet real y sin replicar los nombres de parametro legacy (`inpcYearId`, `inpwindowId`, ...).
+
+La solucion — invocar `processButton(...)` directamente via reflection, evitando la capa de
+parseo HTTP por completo — se apoya en dos piezas del propio Etendo core, no en hacks:
+
+1. `VariablesSecureApp` tiene un constructor "manual instance" oficialmente documentado en su
+   propio javadoc (el mismo mecanismo que usa `ProcessContext#toVars()` para ejecutar processes
+   en background/scheduled, fuera de un request HTTP).
+2. `DalConnectionProvider` es un `ConnectionProvider` construido sobre la conexion DAL actual,
+   pensado precisamente para callers fuera de un contexto servlet — se setea directamente sobre
+   el campo protegido `myPool` (tambien via reflection), de modo que el `init()` del servlet
+   (que necesita un `ServletConfig`/`ServletContext` real) nunca se llama.
+
+```java
+CreateRegFactAcct servlet = servletClass.getDeclaredConstructor().newInstance();
+Field poolField = /* buscar myPool en la jerarquia de clases */;
+poolField.setAccessible(true);
+poolField.set(servlet, new DalConnectionProvider(true));
+
+VariablesSecureApp vars = new VariablesSecureApp(userId, clientId, orgId, roleId, language);
+Method processButton = CreateRegFactAcct.class.getDeclaredMethod("processButton",
+    VariablesSecureApp.class, String.class, String.class, String.class);
+processButton.setAccessible(true);
+OBError result = (OBError) processButton.invoke(servlet, vars, yearId, orgId, windowId);
+```
+
+**Fragilidad conocida (trade-off aceptado, no un bug):** reflection sobre un metodo privado es
+inherentemente fragil entre versiones del core — si `processButton(...)` cambia de firma, el
+handler rompe en runtime, no en compile time. Esto se acepta unicamente porque no existe un
+punto de entrada oficial menos fragil para estos dos processes legacy en particular. **No uses
+este patron por defecto** — resuelvelo con `CallProcess` (stored procedure) o una query HQL
+directa (ver `YearAccountingHandler`) salvo que confirmes, como aqui, que `AD_Process.
+procedurename IS NULL` y que no hay otra via. Ver el javadoc de la clase
+`YearCloseHandler.java` para el razonamiento completo.
+
 ---
 
 ## 17. OpenAPI Auto-Generado

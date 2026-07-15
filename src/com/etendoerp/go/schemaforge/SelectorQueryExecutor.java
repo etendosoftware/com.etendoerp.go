@@ -20,6 +20,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 import org.apache.commons.lang3.StringUtils;
@@ -34,6 +35,8 @@ import org.openbravo.dal.service.OBDal;
 import org.openbravo.dal.service.OBQuery;
 import com.etendoerp.go.schemaforge.selector.meta.RichFieldMeta;
 import com.etendoerp.go.schemaforge.selector.meta.SelectorMeta;
+import com.etendoerp.go.schemaforge.util.NeoLanguage;
+import com.etendoerp.go.schemaforge.util.NeoTrl;
 
 /**
  * Executes resolved selector query plans against DAL/HQL and maps rows into selector responses.
@@ -42,6 +45,7 @@ final class SelectorQueryExecutor {
 
   private static final Logger log = LogManager.getLogger(SelectorQueryExecutor.class);
   private static final String PARAM_SEARCH = "search";
+  private static final String PARAM_SEARCH_LANG = "searchLang";
   private static final String FIELD_LABEL = "label";
   private static final String PARAM_LANGUAGE = "language";
 
@@ -83,7 +87,18 @@ final class SelectorQueryExecutor {
     NeoSelectorExecutionHelper.appendLiteralFilter(hql, validationFilter);
     NeoSelectorExecutionHelper.appendSelectorOrganizationFilter(hql, queryParams, meta,
         contextOrganizationId);
-    NeoSelectorExecutionHelper.appendSimpleSearchFilter(hql, meta.displayProperty, search);
+    // Match the search against the translated name too, so users can search selectors in the GO
+    // locale (e.g. "pie" → Pie/Pie Cúbico), not only the base language (ETP-4304). Falls back to a
+    // base-only filter when the entity has no *_Trl or there is no request language.
+    String searchLang = resolveEnrichLanguage(language);
+    NeoTrl.TrlSearchMeta trlSearch = (StringUtils.isNotBlank(search) && StringUtils.isNotBlank(searchLang))
+        ? NeoTrl.resolveSearchMeta(meta.entityName) : null;
+    if (trlSearch != null) {
+      NeoSelectorExecutionHelper.appendTranslatedSearchFilter(hql, meta.displayProperty, search, trlSearch);
+      queryParams.put(PARAM_SEARCH_LANG, searchLang);
+    } else {
+      NeoSelectorExecutionHelper.appendSimpleSearchFilter(hql, meta.displayProperty, search);
+    }
     if (safeExtraParams != null) {
       queryParams.putAll(safeExtraParams);
     }
@@ -119,9 +134,7 @@ final class SelectorQueryExecutor {
 
     JSONArray items = buildSimpleSelectorItems(dataQuery.list(), meta);
 
-    if (language != null && !"en_US".equals(language)) {
-      enrichCountryTranslations(items, meta.entityName, language);
-    }
+    enrichTranslations(items, meta.entityName, searchLang);
 
     return SelectorResponseSupport.buildSelectorResponse(items, new JSONArray(), totalCount, limit, offset);
   }
@@ -163,8 +176,22 @@ final class SelectorQueryExecutor {
         meta, search, validationFilter, alias, contextOrganizationId);
     boolean hasSearch = StringUtils.isNotBlank(search) && !meta.searchableProperties.isEmpty();
 
+    // For view-backed selectors whose Value Field is not the entity PK (e.g. Product Complete →
+    // M_Product_Stock_V, one row per product×warehouse×locator), the same value appears in many
+    // rows. Restrict both the count and the data query to one representative row per distinct
+    // valueProperty so the response holds one item per value (no duplicates) and paging math is
+    // correct. Guard mirrors resolveRichItemId exactly: only when valueProperty is a non-PK path.
+    // When the guard is false the where clause is byte-identical to before (zero regression).
+    boolean distinctByValue = meta.valueProperty != null && !"id".equals(meta.valueProperty);
+    String effectiveWhere = distinctByValue
+        ? buildRepresentativeRowWhere(whereClause.getHql(), meta, alias)
+        : whereClause.getHql();
+
+    // count(*) over representative rows == count(distinct valueProperty), because the subquery
+    // yields exactly one row per distinct value. Both count and data use the same OBQuery path,
+    // so Hibernate's automatic readable-client/org filters apply identically to each.
     OBQuery<BaseOBObject> countQuery = OBDal.getInstance()
-        .createQuery(meta.entityName, whereClause.getHql());
+        .createQuery(meta.entityName, effectiveWhere);
     NeoSelectorExecutionHelper.bindNamedParameters(countQuery, whereClause.getParams());
     NeoSelectorExecutionHelper.bindNamedParameters(countQuery, extraFilterParams);
     if (hasSearch) {
@@ -172,7 +199,7 @@ final class SelectorQueryExecutor {
     }
     int totalCount = countQuery.count();
 
-    String dataWhere = whereClause.getHql() + " ORDER BY " + alias + "." + meta.displayProperty;
+    String dataWhere = effectiveWhere + " ORDER BY " + alias + "." + meta.displayProperty;
     OBQuery<BaseOBObject> dataQuery = OBDal.getInstance().createQuery(meta.entityName, dataWhere);
     NeoSelectorExecutionHelper.bindNamedParameters(dataQuery, whereClause.getParams());
     NeoSelectorExecutionHelper.bindNamedParameters(dataQuery, extraFilterParams);
@@ -201,7 +228,67 @@ final class SelectorQueryExecutor {
       items.put(item);
     }
 
+    enrichTranslations(items, meta.entityName, resolveEnrichLanguage(null));
+
     return SelectorResponseSupport.buildSelectorResponse(items, columns, totalCount, limit, offset);
+  }
+
+  /**
+   * Rewrites a rich-selector OBQuery where-string so it returns a single representative row per
+   * distinct {@code valueProperty}. Used only when the selector's Value Field is not the entity PK.
+   *
+   * <p>The representative row is deterministic: the one with the minimum {@code id} within each
+   * value group. The very same filter (the original where conditions) is re-applied inside the
+   * subquery — with the entity alias rewritten to a private sub-alias — so filtering stays
+   * consistent and the chosen representative always satisfies the outer predicate. Because there is
+   * exactly one representative per value, {@code count(*)} over the result equals
+   * {@code count(distinct valueProperty)}, which keeps limit/offset paging math correct.</p>
+   *
+   * <p>Input format is what {@link SelectorQueryBuilder#buildRichQueryWhereClause} produces:
+   * {@code "as e"} or {@code "as e where <conditions>"}. Named parameters that appear in the
+   * original conditions are duplicated into the subquery text, but Hibernate binds each named
+   * parameter to every occurrence, so the existing single binding still applies.</p>
+   */
+  private static String buildRepresentativeRowWhere(String baseWhere, SelectorMeta meta,
+      String alias) {
+    final String whereKeyword = " where ";
+    int whereIdx = StringUtils.indexOfIgnoreCase(baseWhere, whereKeyword);
+    String conditions = (whereIdx >= 0)
+        ? baseWhere.substring(whereIdx + whereKeyword.length())
+        : null;
+
+    String subAlias = alias + "_dv";
+    StringBuilder subQuery = new StringBuilder();
+    subQuery.append("select min(").append(subAlias).append(".id) from ")
+        .append(meta.entityName).append(" ").append(subAlias);
+    if (conditions != null) {
+      subQuery.append(whereKeyword).append(rewriteAlias(conditions, alias, subAlias));
+    }
+    subQuery.append(" group by ").append(subAlias).append(".").append(meta.valueProperty);
+
+    StringBuilder result = new StringBuilder("as ").append(alias).append(whereKeyword);
+    if (conditions != null) {
+      result.append("(").append(conditions).append(")").append(SelectorQueryBuilder.SQL_AND);
+    }
+    result.append(alias).append(".id in (").append(subQuery).append(")");
+    return result.toString();
+  }
+
+  /**
+   * Rewrites {@code <alias>.} property references in an HQL fragment to use {@code <newAlias>.}.
+   * The negative look-behind avoids touching identifiers that merely end in the alias letters
+   * (e.g. {@code table.name}) and leaves named parameters ({@code :search}) untouched.
+   *
+   * <p>KNOWN LIMITATION: this is a purely lexical rewrite — it does not skip string literals. A
+   * WHERE condition embedding {@code <alias>.} inside a single-quoted literal (e.g.
+   * {@code 'see e.g. below'}) would be corrupted. This is safe for every value-field selector in
+   * use today (their resolved HQL where clauses are simple: {@code e.active='Y'} plus org filters,
+   * no literals containing the alias). A future value-field selector with such a literal would
+   * need this rewrite hardened to skip quoted literals before it could be used safely.</p>
+   */
+  private static String rewriteAlias(String hql, String alias, String newAlias) {
+    Pattern aliasRef = Pattern.compile("(?<![\\w.])" + Pattern.quote(alias) + "\\.");
+    return aliasRef.matcher(hql).replaceAll(Matcher.quoteReplacement(newAlias + "."));
   }
 
   @SuppressWarnings("unchecked")
@@ -209,6 +296,14 @@ final class SelectorQueryExecutor {
       String search, int limit, int offset, String validationFilter,
       String contextOrganizationId, Map<String, Object> extraFilterParams) throws Exception {
 
+    // KNOWN GAP: distinct-by-valueProperty (see buildRepresentativeRowWhere / executeRichQuery) is
+    // NOT applied here. A raw custom-query selector selects multiple projected columns, so
+    // "SELECT DISTINCT" would dedupe by the full row tuple rather than by valueProperty, and pairing
+    // it with COUNT(DISTINCT valueProperty) would desync count vs. data and break paging. None of
+    // the current value-field selectors are custom_query='Y', so this path is unaffected today.
+    // A future custom-query selector whose Value Field is not the PK would still emit duplicates —
+    // fixing it safely requires collapsing rows by valueProperty at query level, not a blanket
+    // DISTINCT. Left unchanged deliberately to avoid a regression.
     String alias = meta.entityAlias;
     String rawHql = meta.customHql.replace("@additional_filters@", "1=1");
     java.util.regex.Matcher fromMatcher = Pattern.compile("\\sFROM\\s",
@@ -316,46 +411,40 @@ final class SelectorQueryExecutor {
   }
 
   /**
-   * Post-processes a selector result to replace English country names with translated names
-   * from the {@code CountryTrl} entity for the requested language.
-   * Falls back silently to the original name when no translation is found.
+   * The language to resolve selector-value translations into: the GO locale already applied to the
+   * request by {@code NeoAuthenticator} ({@link NeoLanguage#currentCode()}), falling back to an
+   * explicit {@code language} context param when there is no request locale.
    */
-  private static void enrichCountryTranslations(JSONArray items, String entityName, String language) {
-    if (!"Country".equals(entityName)) {
+  private static String resolveEnrichLanguage(String contextParamLanguage) {
+    String current = NeoLanguage.currentCode();
+    return current != null ? current : contextParamLanguage;
+  }
+
+  /**
+   * Replaces base-language selector labels with their {@code *_Trl} translation for {@code language}
+   * when one exists, for any translatable entity (UoM, Country, …). Entity identifiers are not
+   * translated by Etendo, so this is what makes selector values honor the GO locale (ETP-4304).
+   * Falls back silently to the original label when there is no translation.
+   */
+  private static void enrichTranslations(JSONArray items, String entityName, String language)
+      throws Exception {
+    if (items.length() == 0 || StringUtils.isBlank(language)) {
       return;
     }
-    try {
-      List<String> ids = new ArrayList<>();
-      for (int i = 0; i < items.length(); i++) {
-        ids.add(items.getJSONObject(i).getString("id"));
+    List<String> ids = new ArrayList<>();
+    for (int i = 0; i < items.length(); i++) {
+      ids.add(items.getJSONObject(i).getString("id"));
+    }
+    Map<String, String> translations = NeoTrl.translatedNames(entityName, ids, language);
+    if (translations.isEmpty()) {
+      return;
+    }
+    for (int i = 0; i < items.length(); i++) {
+      JSONObject item = items.getJSONObject(i);
+      String translated = translations.get(item.getString("id"));
+      if (translated != null) {
+        item.put(FIELD_LABEL, translated);
       }
-      if (ids.isEmpty()) {
-        return;
-      }
-      OBQuery<BaseOBObject> trlQuery = OBDal.getInstance().createQuery("CountryTrl",
-          "as t where t.language.language = :lang and t.country.id in :ids");
-      trlQuery.setNamedParameter("lang", language);
-      trlQuery.setNamedParameter("ids", ids);
-
-      Map<String, String> translations = new HashMap<>();
-      for (BaseOBObject trl : trlQuery.list()) {
-        BaseOBObject country = (BaseOBObject) trl.get("country");
-        String name = (String) trl.get("name");
-        if (country != null && StringUtils.isNotBlank(name)) {
-          translations.put(country.getId().toString(), name);
-        }
-      }
-
-      for (int i = 0; i < items.length(); i++) {
-        JSONObject item = items.getJSONObject(i);
-        String id = item.getString("id");
-        String translated = translations.get(id);
-        if (translated != null) {
-          item.put(FIELD_LABEL, translated);
-        }
-      }
-    } catch (Exception e) {
-      log.debug("Country translation enrichment failed for language {}: {}", language, e.getMessage());
     }
   }
 }
