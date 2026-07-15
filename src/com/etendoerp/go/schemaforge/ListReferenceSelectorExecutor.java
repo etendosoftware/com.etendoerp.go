@@ -16,7 +16,9 @@
  */
 package com.etendoerp.go.schemaforge;
 
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 import org.apache.commons.lang3.StringUtils;
@@ -26,6 +28,9 @@ import org.hibernate.criterion.Restrictions;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.datamodel.Column;
+
+import com.etendoerp.go.schemaforge.util.NeoLanguage;
+import com.etendoerp.go.schemaforge.util.NeoTrl;
 
 /** Executes AD List reference selectors. */
 final class ListReferenceSelectorExecutor {
@@ -55,13 +60,38 @@ final class ListReferenceSelectorExecutor {
     dataCrit.setMaxResults(limit);
 
     JSONArray items = new JSONArray();
+    List<String> listIds = new ArrayList<>();
     for (org.openbravo.model.ad.domain.List listItem : dataCrit.list()) {
       JSONObject item = new JSONObject();
       item.put("id", listItem.getSearchKey());
       item.put(FIELD_LABEL, listItem.getName());
+      listIds.add(listItem.getId());
       items.put(item);
     }
+    enrichListTranslations(items, listIds, NeoLanguage.currentCode());
     return SelectorResponseSupport.buildSelectorResponse(items, new JSONArray(), totalCount, limit, offset);
+  }
+
+  /**
+   * Replaces base-language AD_Ref_List labels with their {@code AD_Ref_List_Trl} translation for
+   * {@code language} (the GO locale) when one exists (ETP-4304). {@code items} and {@code listIds}
+   * are index-aligned. Falls back silently to the base label when there is no translation.
+   */
+  private static void enrichListTranslations(JSONArray items, List<String> listIds, String language)
+      throws Exception {
+    if (listIds.isEmpty() || StringUtils.isBlank(language)) {
+      return;
+    }
+    Map<String, String> translations = NeoTrl.translatedNames("ADList", listIds, language);
+    if (translations.isEmpty()) {
+      return;
+    }
+    for (int i = 0; i < items.length(); i++) {
+      String translated = translations.get(listIds.get(i));
+      if (translated != null) {
+        items.getJSONObject(i).put(FIELD_LABEL, translated);
+      }
+    }
   }
 
   static Map<String, String> getListLabels(String referenceId) {
