@@ -16,18 +16,26 @@
  */
 package com.etendoerp.go.onboarding;
 
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertNotNull;
-import static org.junit.Assert.assertSame;
-import static org.junit.Assert.assertTrue;
-import static org.junit.Assert.fail;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.fail;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
-import org.junit.Test;
+import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Test;
 import org.openbravo.base.exception.OBException;
+import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.enterprise.Organization;
+import org.openbravo.model.common.enterprise.Warehouse;
+import org.openbravo.model.common.plm.Product;
+import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
+import org.openbravo.model.pricing.pricelist.PriceList;
 import org.openbravo.service.db.ImportResult;
 
 /**
@@ -70,7 +78,7 @@ public class OnboardingDatasetImportServiceTest {
       service.importDataset("missing-client", ORGANIZATION_ID);
       fail("Expected missing client to fail");
     } catch (OBException e) {
-      assertNotNull("Exception message should not be null", e.getMessage());
+      assertNotNull(e.getMessage(), "Exception message should not be null");
       assertTrue(e.getMessage().contains("missing-client"));
     }
   }
@@ -86,7 +94,7 @@ public class OnboardingDatasetImportServiceTest {
       service.importDataset(CLIENT_ID, "missing-org");
       fail("Expected missing organization to fail");
     } catch (OBException e) {
-      assertNotNull("Exception message should not be null", e.getMessage());
+      assertNotNull(e.getMessage(), "Exception message should not be null");
       assertTrue(e.getMessage().contains("missing-org"));
     }
   }
@@ -104,9 +112,102 @@ public class OnboardingDatasetImportServiceTest {
       service.importDataset(CLIENT_ID, ORGANIZATION_ID);
       fail("Expected import errors to fail");
     } catch (OBException e) {
-      assertNotNull("Exception message should not be null", e.getMessage());
+      assertNotNull(e.getMessage(), "Exception message should not be null");
       assertTrue(e.getMessage().contains("broken import"));
     }
+  }
+
+  /** ETP-4428: a retry must not re-import when the curated seed is already present. */
+  @Test
+  @DisplayName("importDataset skips (returns null) when the seed is already present")
+  public void testImportDatasetSkipsWhenSeedAlreadyPresent() {
+    Client client = mockClient(CLIENT_ID);
+    Organization org = mockOrganization(ORGANIZATION_ID);
+    FakeImportService service = new FakeImportService(new StubNormalizer(EMPTY_OPENBRAVO_XML),
+        client, org, new ImportResult());
+    service.seedAlreadyPresent = true;
+
+    ImportResult actual = service.importDataset(CLIENT_ID, ORGANIZATION_ID);
+
+    assertNull(actual, "Import should be skipped and return null when the seed is already present");
+    assertFalse(service.importXmlCalled, "importXml must not run when the seed is already present");
+  }
+
+  /**
+   * ETP-4428: exercises the REAL {@code isSeedAlreadyPresent} (the 4-term AND over
+   * {@code buildSeedVisibilitySummary}) rather than the fake override. When every entity has at
+   * least one visible row, the seed is considered fully present.
+   */
+  @Test
+  @DisplayName("isSeedAlreadyPresent returns true when all four counts are greater than zero")
+  public void testIsSeedAlreadyPresentTrueWhenSeedComplete() {
+    CountingImportService service = new CountingImportService(1, 1, 1, 1);
+
+    assertTrue(service.isSeedAlreadyPresent(mockClient(CLIENT_ID), mockOrganization(ORGANIZATION_ID)),
+        "A fully imported seed (all counts > 0) must be reported as already present");
+  }
+
+  /**
+   * ETP-4428: a partial import that left no products must NOT be treated as present, so the retry
+   * repairs the missing rows.
+   */
+  @Test
+  @DisplayName("isSeedAlreadyPresent returns false when there are no products")
+  public void testIsSeedAlreadyPresentFalseWhenNoProducts() {
+    CountingImportService service = new CountingImportService(0, 1, 1, 1);
+
+    assertFalse(service.isSeedAlreadyPresent(mockClient(CLIENT_ID), mockOrganization(ORGANIZATION_ID)),
+        "Missing products must mark the seed as not present so the re-import repairs it");
+  }
+
+  /**
+   * ETP-4428: a partial import that left no warehouses must NOT be treated as present.
+   */
+  @Test
+  @DisplayName("isSeedAlreadyPresent returns false when there are no warehouses")
+  public void testIsSeedAlreadyPresentFalseWhenNoWarehouses() {
+    CountingImportService service = new CountingImportService(1, 0, 1, 1);
+
+    assertFalse(service.isSeedAlreadyPresent(mockClient(CLIENT_ID), mockOrganization(ORGANIZATION_ID)),
+        "Missing warehouses must mark the seed as not present so the re-import repairs it");
+  }
+
+  /**
+   * ETP-4428: a partial import that left no price lists must NOT be treated as present.
+   */
+  @Test
+  @DisplayName("isSeedAlreadyPresent returns false when there are no price lists")
+  public void testIsSeedAlreadyPresentFalseWhenNoPriceLists() {
+    CountingImportService service = new CountingImportService(1, 1, 0, 1);
+
+    assertFalse(service.isSeedAlreadyPresent(mockClient(CLIENT_ID), mockOrganization(ORGANIZATION_ID)),
+        "Missing price lists must mark the seed as not present so the re-import repairs it");
+  }
+
+  /**
+   * ETP-4428: the core partial-failure scenario. An import that succeeded for products, warehouses
+   * and price lists but was cut off before creating the financial accounts must NOT be treated as
+   * present, so the retry finishes the job instead of skipping.
+   */
+  @Test
+  @DisplayName("isSeedAlreadyPresent returns false when there are no financial accounts")
+  public void testIsSeedAlreadyPresentFalseWhenNoFinancialAccounts() {
+    CountingImportService service = new CountingImportService(1, 1, 1, 0);
+
+    assertFalse(service.isSeedAlreadyPresent(mockClient(CLIENT_ID), mockOrganization(ORGANIZATION_ID)),
+        "A partial import missing only financial accounts must be re-imported, not skipped");
+  }
+
+  /**
+   * ETP-4428: nothing imported at all is obviously not present.
+   */
+  @Test
+  @DisplayName("isSeedAlreadyPresent returns false when nothing was imported")
+  public void testIsSeedAlreadyPresentFalseWhenEmpty() {
+    CountingImportService service = new CountingImportService(0, 0, 0, 0);
+
+    assertFalse(service.isSeedAlreadyPresent(mockClient(CLIENT_ID), mockOrganization(ORGANIZATION_ID)),
+        "An empty tenant must never be reported as already seeded");
   }
 
   private Client mockClient(String clientId) {
@@ -153,6 +254,57 @@ public class OnboardingDatasetImportServiceTest {
     }
   }
 
+  /**
+   * Exercises the REAL {@link OnboardingDatasetImportService#isSeedAlreadyPresent} by stubbing only
+   * the two persistence seams it ultimately relies on: {@code resolveSystemOrganization} and
+   * {@code countByClientAndOrganization}. The private {@code buildSeedVisibilitySummary} and the
+   * 4-term AND therefore run for real. Each per-entity total is the sum of the system-org and
+   * target-org calls; this stub returns the configured count once (for the system org) and 0 for
+   * the target org, so the resulting total equals the configured value.
+   */
+  private static final class CountingImportService extends OnboardingDatasetImportService {
+    private final Organization systemOrganization = mock(Organization.class);
+    private final long productCount;
+    private final long warehouseCount;
+    private final long priceListCount;
+    private final long financialAccountCount;
+
+    private CountingImportService(long productCount, long warehouseCount, long priceListCount,
+        long financialAccountCount) {
+      this.productCount = productCount;
+      this.warehouseCount = warehouseCount;
+      this.priceListCount = priceListCount;
+      this.financialAccountCount = financialAccountCount;
+    }
+
+    @Override
+    protected Organization resolveSystemOrganization() {
+      return systemOrganization;
+    }
+
+    @Override
+    protected <T extends BaseOBObject> long countByClientAndOrganization(Class<T> entityClass,
+        String clientProperty, String organizationProperty, Client client,
+        Organization organization) {
+      if (organization != systemOrganization) {
+        return 0L;
+      }
+      if (entityClass == Product.class) {
+        return productCount;
+      }
+      if (entityClass == Warehouse.class) {
+        return warehouseCount;
+      }
+      if (entityClass == PriceList.class) {
+        return priceListCount;
+      }
+      if (entityClass == FIN_FinancialAccount.class) {
+        return financialAccountCount;
+      }
+      return fail("Unexpected entity counted: " + entityClass);
+    }
+  }
+
   private static class FakeImportService extends OnboardingDatasetImportService {
     private final Client client;
     private final Organization organization;
@@ -163,6 +315,8 @@ public class OnboardingDatasetImportServiceTest {
     private boolean summaryLogged;
     private boolean validationCalled;
     private boolean flushCalled;
+    private boolean importXmlCalled;
+    private boolean seedAlreadyPresent = false;
 
     private FakeImportService(OnboardingDatasetNormalizer normalizer, Client client,
         Organization organization, ImportResult result) {
@@ -183,7 +337,13 @@ public class OnboardingDatasetImportServiceTest {
     }
 
     @Override
+    protected boolean isSeedAlreadyPresent(Client client, Organization organization) {
+      return seedAlreadyPresent;
+    }
+
+    @Override
     protected ImportResult importXml(Client client, Organization organization, String xml) {
+      this.importXmlCalled = true;
       this.importedClient = client;
       this.importedOrganization = organization;
       this.importedXml = xml;
