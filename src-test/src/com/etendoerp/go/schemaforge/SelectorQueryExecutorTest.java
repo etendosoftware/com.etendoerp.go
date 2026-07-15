@@ -27,13 +27,16 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.when;
 
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 import org.hibernate.Session;
@@ -49,6 +52,8 @@ import org.openbravo.dal.service.OBDal;
 import org.openbravo.dal.service.OBQuery;
 
 import com.etendoerp.go.schemaforge.selector.meta.SelectorMeta;
+import com.etendoerp.go.schemaforge.util.NeoLanguage;
+import com.etendoerp.go.schemaforge.util.NeoTrl;
 
 /**
  * Unit tests for {@link SelectorQueryExecutor} covering routing, property resolution,
@@ -80,10 +85,21 @@ public class SelectorQueryExecutorTest {
   }
 
   /**
-   * Invokes the private {@code enrichCountryTranslations} method.
+   * Invokes the private {@code buildRepresentativeRowWhere} method.
+   */
+  private static String invokeBuildRepresentativeRowWhere(String baseWhere, SelectorMeta meta,
+      String alias) throws Exception {
+    Method m = SelectorQueryExecutor.class.getDeclaredMethod("buildRepresentativeRowWhere",
+        String.class, SelectorMeta.class, String.class);
+    m.setAccessible(true);
+    return (String) m.invoke(null, baseWhere, meta, alias);
+  }
+
+  /**
+   * Invokes the private {@code enrichTranslations} method.
    */
   private static void invokeEnrich(JSONArray items, String entityName, String language) throws Exception {
-    Method m = SelectorQueryExecutor.class.getDeclaredMethod("enrichCountryTranslations", JSONArray.class, String.class,
+    Method m = SelectorQueryExecutor.class.getDeclaredMethod("enrichTranslations", JSONArray.class, String.class,
         String.class);
     m.setAccessible(true);
     m.invoke(null, items, entityName, language);
@@ -430,7 +446,8 @@ public class SelectorQueryExecutorTest {
   }
 
   /**
-   * language=es_ES with a Country entity triggers enrichment and replaces item labels.
+   * A translatable entity with a resolved GO locale triggers enrichment: labels are replaced with
+   * the translated names {@link NeoTrl} returns for the request language.
    */
   @Test
   @SuppressWarnings("unchecked")
@@ -445,28 +462,27 @@ public class SelectorQueryExecutorTest {
 
     OBQuery countQuery = mock(OBQuery.class);
     OBQuery dataQuery = mock(OBQuery.class);
-    OBQuery trlQuery = mock(OBQuery.class);
     when(countQuery.count()).thenReturn(1);
     when(dataQuery.list()).thenReturn(Collections.singletonList(bob));
 
-    BaseOBObject country = mock(BaseOBObject.class);
-    when(country.getId()).thenReturn("47");
-    BaseOBObject trl = mock(BaseOBObject.class);
-    when(trl.get("country")).thenReturn(country);
-    when(trl.get("name")).thenReturn("España");
-    when(trlQuery.list()).thenReturn(Collections.singletonList(trl));
-
     OBDal obDal = mock(OBDal.class);
-    when(obDal.createQuery(anyString(), anyString())).thenReturn(countQuery, dataQuery, trlQuery);
+    when(obDal.createQuery(anyString(), anyString())).thenReturn(countQuery, dataQuery);
+
+    Map<String, String> translations = new HashMap<>();
+    translations.put("47", "España");
 
     try (MockedStatic<NeoSelectorExecutionHelper> helperMock = mockStatic(
         NeoSelectorExecutionHelper.class); MockedStatic<SelectorRowMapper> mapperMock = mockStatic(
         SelectorRowMapper.class); MockedStatic<OBDal> obDalMock = mockStatic(
-        OBDal.class); MockedStatic<SelectorResponseSupport> respMock = mockStatic(SelectorResponseSupport.class)) {
+        OBDal.class); MockedStatic<NeoLanguage> langMock = mockStatic(
+        NeoLanguage.class); MockedStatic<NeoTrl> trlMock = mockStatic(
+        NeoTrl.class); MockedStatic<SelectorResponseSupport> respMock = mockStatic(SelectorResponseSupport.class)) {
 
       setupVoidHelperMocks(helperMock);
       mapperMock.when(() -> SelectorRowMapper.normalizeEntityId("47")).thenReturn("47");
       obDalMock.when(OBDal::getInstance).thenReturn(obDal);
+      langMock.when(NeoLanguage::currentCode).thenReturn("es_ES");
+      trlMock.when(() -> NeoTrl.translatedNames(eq("Country"), any(), eq("es_ES"))).thenReturn(translations);
 
       JSONArray[] capturedItems = new JSONArray[1];
       respMock.when(
@@ -537,45 +553,11 @@ public class SelectorQueryExecutorTest {
   // ---------------------------------------------------------------
 
   /**
-   * A non-Country entity causes enrichCountryTranslations to return early without modifying items.
+   * When NeoTrl returns a translation for only some ids, only those labels are replaced; items
+   * without a translation keep their original label.
    */
   @Test
-  public void testEnrichCountryTranslationsNonCountryEntityIsNoOp() throws Exception {
-    JSONArray items = new JSONArray();
-    JSONObject item = new JSONObject();
-    item.put("id", "1");
-    item.put("label", "Spain");
-    items.put(item);
-
-    invokeEnrich(items, "BusinessPartner", "es_ES");
-
-    assertEquals("Spain", items.getJSONObject(0).getString("label"));
-  }
-
-  // ---------------------------------------------------------------
-  // enrichCountryTranslations — translation applied
-  // ---------------------------------------------------------------
-
-  /**
-   * An empty items array causes enrichCountryTranslations to return before reaching OBDal.
-   */
-  @Test
-  public void testEnrichCountryTranslationsEmptyItemsDoesNotCallOBDal() throws Exception {
-    // If OBDal were reached, it would throw without a mock.
-    // No exception here confirms the early-return before the query.
-    invokeEnrich(new JSONArray(), "Country", "es_ES");
-  }
-
-  // ---------------------------------------------------------------
-  // enrichCountryTranslations — missing translation keeps original
-  // ---------------------------------------------------------------
-
-  /**
-   * Country items are relabelled with translated names from CountryTrl when a translation exists.
-   */
-  @Test
-  @SuppressWarnings("unchecked")
-  public void testEnrichCountryTranslationsReplacesLabelsWithTranslatedNames() throws Exception {
+  public void testEnrichTranslationsPartialTranslationKeepsUntranslatedLabels() throws Exception {
     JSONArray items = new JSONArray();
     JSONObject item1 = new JSONObject();
     item1.put("id", "47");
@@ -586,26 +568,58 @@ public class SelectorQueryExecutorTest {
     item2.put("label", "Argentina");
     items.put(item2);
 
-    BaseOBObject country1 = mock(BaseOBObject.class);
-    when(country1.getId()).thenReturn("47");
-    BaseOBObject trl1 = mock(BaseOBObject.class);
-    when(trl1.get("country")).thenReturn(country1);
-    when(trl1.get("name")).thenReturn("España");
+    Map<String, String> translations = new HashMap<>();
+    translations.put("47", "España");
 
-    BaseOBObject country2 = mock(BaseOBObject.class);
-    when(country2.getId()).thenReturn("10");
-    BaseOBObject trl2 = mock(BaseOBObject.class);
-    when(trl2.get("country")).thenReturn(country2);
-    when(trl2.get("name")).thenReturn("Argentina");
+    try (MockedStatic<NeoTrl> trlMock = mockStatic(NeoTrl.class)) {
+      trlMock.when(() -> NeoTrl.translatedNames(eq("Country"), any(), eq("es_ES"))).thenReturn(translations);
+      invokeEnrich(items, "Country", "es_ES");
+    }
 
-    OBQuery<BaseOBObject> trlQuery = mock(OBQuery.class);
-    when(trlQuery.list()).thenReturn(Arrays.asList(trl1, trl2));
+    assertEquals("España", items.getJSONObject(0).getString("label"));
+    assertEquals("Argentina", items.getJSONObject(1).getString("label"));
+  }
 
-    OBDal obDal = mock(OBDal.class);
-    when(obDal.createQuery(anyString(), anyString())).thenReturn(trlQuery);
+  // ---------------------------------------------------------------
+  // enrichCountryTranslations — translation applied
+  // ---------------------------------------------------------------
 
-    try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
-      obDalMock.when(OBDal::getInstance).thenReturn(obDal);
+  /**
+   * An empty items array causes enrichTranslations to return before calling NeoTrl.
+   */
+  @Test
+  public void testEnrichTranslationsEmptyItemsDoesNotCallNeoTrl() throws Exception {
+    try (MockedStatic<NeoTrl> trlMock = mockStatic(NeoTrl.class)) {
+      invokeEnrich(new JSONArray(), "Country", "es_ES");
+      trlMock.verify(() -> NeoTrl.translatedNames(any(), any(), any()), never());
+    }
+  }
+
+  // ---------------------------------------------------------------
+  // enrichCountryTranslations — missing translation keeps original
+  // ---------------------------------------------------------------
+
+  /**
+   * Items are relabelled with the translated names NeoTrl returns for each id.
+   */
+  @Test
+  public void testEnrichTranslationsReplacesLabelsWithTranslatedNames() throws Exception {
+    JSONArray items = new JSONArray();
+    JSONObject item1 = new JSONObject();
+    item1.put("id", "47");
+    item1.put("label", "Spain");
+    items.put(item1);
+    JSONObject item2 = new JSONObject();
+    item2.put("id", "10");
+    item2.put("label", "Argentine Republic");
+    items.put(item2);
+
+    Map<String, String> translations = new HashMap<>();
+    translations.put("47", "España");
+    translations.put("10", "Argentina");
+
+    try (MockedStatic<NeoTrl> trlMock = mockStatic(NeoTrl.class)) {
+      trlMock.when(() -> NeoTrl.translatedNames(eq("Country"), any(), eq("es_ES"))).thenReturn(translations);
       invokeEnrich(items, "Country", "es_ES");
     }
 
@@ -618,25 +632,18 @@ public class SelectorQueryExecutorTest {
   // ---------------------------------------------------------------
 
   /**
-   * A country with no CountryTrl row keeps its original label unchanged.
+   * When NeoTrl returns no translations, item labels are left unchanged.
    */
   @Test
-  @SuppressWarnings("unchecked")
-  public void testEnrichCountryTranslationsNoMatchingTranslationKeepsOriginalLabel() throws Exception {
+  public void testEnrichTranslationsNoMatchingTranslationKeepsOriginalLabel() throws Exception {
     JSONArray items = new JSONArray();
     JSONObject item = new JSONObject();
     item.put("id", "99");
     item.put("label", "Unknown");
     items.put(item);
 
-    OBQuery<BaseOBObject> trlQuery = mock(OBQuery.class);
-    when(trlQuery.list()).thenReturn(Collections.emptyList());
-
-    OBDal obDal = mock(OBDal.class);
-    when(obDal.createQuery(anyString(), anyString())).thenReturn(trlQuery);
-
-    try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
-      obDalMock.when(OBDal::getInstance).thenReturn(obDal);
+    try (MockedStatic<NeoTrl> trlMock = mockStatic(NeoTrl.class)) {
+      trlMock.when(() -> NeoTrl.translatedNames(eq("Country"), any(), eq("es_ES"))).thenReturn(Collections.emptyMap());
       invokeEnrich(items, "Country", "es_ES");
     }
 
@@ -780,6 +787,200 @@ public class SelectorQueryExecutorTest {
       assertEquals(1, capturedItems[0].length());
       assertEquals("47", capturedItems[0].getJSONObject(0).getString("id"));
       assertEquals("España", capturedItems[0].getJSONObject(0).getString("label"));
+    }
+  }
+
+  // ---------------------------------------------------------------
+  // buildRepresentativeRowWhere — DISTINCT-by-valueProperty query building
+  // ---------------------------------------------------------------
+
+  /**
+   * With an existing where clause, the representative-row where restricts the outer query to the
+   * MIN(id) per distinct valueProperty, re-applying the same conditions inside the subquery with
+   * the entity alias rewritten to the private sub-alias, and grouping by valueProperty.
+   */
+  @Test
+  public void testBuildRepresentativeRowWhereWithConditions() throws Exception {
+    SelectorMeta meta = new SelectorMeta.Builder("ProductStock", "name")
+        .isRich(true).valueProperty("product.id").build();
+
+    String result = invokeBuildRepresentativeRowWhere("as e where e.active = true", meta, "e");
+
+    assertTrue("outer conditions preserved", result.contains("(e.active = true)"));
+    assertTrue("restricts to representative ids", result.contains("e.id in (select min(e_dv.id)"));
+    assertTrue("subquery targets same entity", result.contains("from ProductStock e_dv"));
+    assertTrue("subquery re-applies conditions with rewritten alias",
+        result.contains("where e_dv.active = true"));
+    assertTrue("grouped by valueProperty", result.contains("group by e_dv.product.id"));
+  }
+
+  /**
+   * With no where clause ("as e"), the representative-row where adds only the MIN(id) restriction
+   * and GROUP BY valueProperty — the subquery carries no WHERE.
+   */
+  @Test
+  public void testBuildRepresentativeRowWhereWithoutConditions() throws Exception {
+    SelectorMeta meta = new SelectorMeta.Builder("ProductStock", "name")
+        .isRich(true).valueProperty("product.id").build();
+
+    String result = invokeBuildRepresentativeRowWhere("as e", meta, "e");
+
+    assertEquals("as e where e.id in (select min(e_dv.id) from ProductStock e_dv "
+        + "group by e_dv.product.id)", result);
+    assertFalse("no leftover WHERE inside subquery", result.contains("where e_dv"));
+  }
+
+  /**
+   * A search predicate keeps its named parameter untouched while only the alias references are
+   * rewritten in the subquery copy.
+   */
+  @Test
+  public void testBuildRepresentativeRowWhereRewritesAliasButKeepsNamedParams() throws Exception {
+    SelectorMeta meta = new SelectorMeta.Builder("ProductStock", "name")
+        .isRich(true).valueProperty("product.id").build();
+
+    String result = invokeBuildRepresentativeRowWhere(
+        "as e where lower(e.name) LIKE :search", meta, "e");
+
+    assertTrue("subquery rewrites alias reference", result.contains("lower(e_dv.name) LIKE :search"));
+    assertTrue("named parameter preserved in both occurrences",
+        result.indexOf(":search") != result.lastIndexOf(":search"));
+  }
+
+  /**
+   * A view-backed value-field selector wires the representative-row where into BOTH the count and
+   * the data query, so count(*) equals the distinct-value count and paging fills correctly. The
+   * data query is the count query plus the display ORDER BY, and it returns one item per row.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  public void testExecuteRichQueryValueFieldSelectorAppliesDistinctToCountAndData() throws Exception {
+    SelectorMeta meta = new SelectorMeta.Builder("ProductStock", "name")
+        .isRich(true).valueProperty("product.id").build();
+
+    // Two representative product rows out of a view that (in the DB) would hold many duplicates.
+    BaseOBObject row1 = mock(BaseOBObject.class);
+    BaseOBObject prod1 = mock(BaseOBObject.class);
+    when(prod1.get("id")).thenReturn("P1");
+    when(row1.get("product")).thenReturn(prod1);
+    when(row1.getId()).thenReturn("stock1");
+    when(row1.getIdentifier()).thenReturn("Product One");
+    BaseOBObject row2 = mock(BaseOBObject.class);
+    BaseOBObject prod2 = mock(BaseOBObject.class);
+    when(prod2.get("id")).thenReturn("P2");
+    when(row2.get("product")).thenReturn(prod2);
+    when(row2.getId()).thenReturn("stock2");
+    when(row2.getIdentifier()).thenReturn("Product Two");
+
+    OBQuery countQuery = mock(OBQuery.class);
+    OBQuery dataQuery = mock(OBQuery.class);
+    when(countQuery.count()).thenReturn(2); // distinct product count
+    when(dataQuery.list()).thenReturn(Arrays.asList(row1, row2));
+
+    List<String> capturedWhere = new ArrayList<>();
+    OBDal obDal = mock(OBDal.class);
+    when(obDal.createQuery(anyString(), anyString())).thenAnswer(inv -> {
+      capturedWhere.add(inv.getArgument(1));
+      return capturedWhere.size() == 1 ? countQuery : dataQuery;
+    });
+
+    NeoResponse expected = NeoResponse.ok(new JSONObject());
+    SelectorQueryBuilder.HqlWithParams clause =
+        new SelectorQueryBuilder.HqlWithParams("as e where e.active = true", new HashMap<>());
+
+    try (MockedStatic<SelectorQueryBuilder> builderMock = mockStatic(
+        SelectorQueryBuilder.class); MockedStatic<NeoSelectorExecutionHelper> helperMock = mockStatic(
+        NeoSelectorExecutionHelper.class); MockedStatic<SelectorAuxResolver> auxMock = mockStatic(
+        SelectorAuxResolver.class); MockedStatic<OBDal> obDalMock = mockStatic(
+        OBDal.class); MockedStatic<SelectorResponseSupport> respMock = mockStatic(
+        SelectorResponseSupport.class)) {
+
+      builderMock.when(
+          () -> SelectorQueryBuilder.buildRichQueryWhereClause(any(), any(), any(), any(), any()))
+          .thenReturn(clause);
+      helperMock.when(() -> NeoSelectorExecutionHelper.bindNamedParameters(any(OBQuery.class), any()))
+          .thenAnswer(inv -> null);
+      auxMock.when(() -> SelectorAuxResolver.appendAuxFields(any(), any(), any())).thenAnswer(inv -> null);
+      obDalMock.when(OBDal::getInstance).thenReturn(obDal);
+      respMock.when(() -> SelectorResponseSupport.buildGridColumnMetadata(any())).thenReturn(new JSONArray());
+
+      JSONArray[] capturedItems = new JSONArray[1];
+      int[] capturedTotal = new int[1];
+      respMock.when(
+          () -> SelectorResponseSupport.buildSelectorResponse(any(), any(), anyInt(), anyInt(), anyInt()))
+          .thenAnswer(inv -> {
+            capturedItems[0] = inv.getArgument(0);
+            capturedTotal[0] = inv.getArgument(2);
+            return expected;
+          });
+
+      NeoResponse result = SelectorQueryExecutor.execute(meta, "", 20, 0, null, "org-1", null);
+
+      assertNotNull(result);
+      // Count query uses the representative-row where (distinct drives page math).
+      assertEquals(2, capturedWhere.size());
+      assertTrue("count query is distinct-restricted",
+          capturedWhere.get(0).contains("group by e_dv.product.id"));
+      // Data query = same representative where + display ORDER BY (consistent with count).
+      assertEquals(capturedWhere.get(0) + " ORDER BY e.name", capturedWhere.get(1));
+      // totalCount comes from count(*) over representative rows.
+      assertEquals(2, capturedTotal[0]);
+      // One item per representative row, id taken from valueProperty.
+      assertEquals(2, capturedItems[0].length());
+      assertEquals("P1", capturedItems[0].getJSONObject(0).getString("id"));
+      assertEquals("P2", capturedItems[0].getJSONObject(1).getString("id"));
+    }
+  }
+
+  /**
+   * A PK-valued selector (valueProperty == "id") is byte-identical to the pre-fix behavior: the
+   * where string passed to the count query is exactly the builder output with no DISTINCT subquery.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  public void testExecuteRichQueryPkValuedSelectorIsUnaffected() throws Exception {
+    SelectorMeta meta = new SelectorMeta.Builder("Country", "name").isRich(true).build();
+
+    OBQuery countQuery = mock(OBQuery.class);
+    OBQuery dataQuery = mock(OBQuery.class);
+    when(countQuery.count()).thenReturn(0);
+    when(dataQuery.list()).thenReturn(Collections.emptyList());
+
+    List<String> capturedWhere = new ArrayList<>();
+    OBDal obDal = mock(OBDal.class);
+    when(obDal.createQuery(anyString(), anyString())).thenAnswer(inv -> {
+      capturedWhere.add(inv.getArgument(1));
+      return capturedWhere.size() == 1 ? countQuery : dataQuery;
+    });
+
+    SelectorQueryBuilder.HqlWithParams clause =
+        new SelectorQueryBuilder.HqlWithParams("as e where e.active = true", new HashMap<>());
+
+    try (MockedStatic<SelectorQueryBuilder> builderMock = mockStatic(
+        SelectorQueryBuilder.class); MockedStatic<NeoSelectorExecutionHelper> helperMock = mockStatic(
+        NeoSelectorExecutionHelper.class); MockedStatic<OBDal> obDalMock = mockStatic(
+        OBDal.class); MockedStatic<SelectorResponseSupport> respMock = mockStatic(
+        SelectorResponseSupport.class)) {
+
+      builderMock.when(
+          () -> SelectorQueryBuilder.buildRichQueryWhereClause(any(), any(), any(), any(), any()))
+          .thenReturn(clause);
+      helperMock.when(() -> NeoSelectorExecutionHelper.bindNamedParameters(any(OBQuery.class), any()))
+          .thenAnswer(inv -> null);
+      obDalMock.when(OBDal::getInstance).thenReturn(obDal);
+      respMock.when(() -> SelectorResponseSupport.buildGridColumnMetadata(any())).thenReturn(new JSONArray());
+      respMock.when(
+          () -> SelectorResponseSupport.buildSelectorResponse(any(), any(), anyInt(), anyInt(), anyInt()))
+          .thenReturn(NeoResponse.ok(new JSONObject()));
+
+      SelectorQueryExecutor.execute(meta, "", 20, 0, null, "org-1", null);
+
+      assertEquals(2, capturedWhere.size());
+      assertEquals("as e where e.active = true", capturedWhere.get(0));
+      assertFalse("no DISTINCT subquery for PK-valued selector",
+          capturedWhere.get(0).contains("min("));
+      assertFalse("no GROUP BY for PK-valued selector",
+          capturedWhere.get(0).contains("group by"));
     }
   }
 }
