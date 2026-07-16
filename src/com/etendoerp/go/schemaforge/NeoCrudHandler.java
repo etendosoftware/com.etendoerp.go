@@ -61,6 +61,7 @@ import com.etendoerp.go.schemaforge.telemetry.NeoTelemetryService;
 import com.etendoerp.go.schemaforge.util.NeoCrudHelper;
 import com.etendoerp.go.schemaforge.util.NeoErrorSanitizer;
 import com.etendoerp.go.schemaforge.util.NeoListIdentifierHelper;
+import com.etendoerp.go.schemaforge.util.NeoLocatorIdentifierHelper;
 import com.etendoerp.go.schemaforge.util.NeoTypeCoercionHelper;
 
 /**
@@ -414,6 +415,7 @@ class NeoCrudHandler {
     fieldFilter.filterGetResponse(responseJson);
     if ("GET".equals(context.getHttpMethod()) && context.getSfEntity() != null) {
       NeoListIdentifierHelper.enrichListIdentifiers(responseJson, context.getSfEntity());
+      NeoLocatorIdentifierHelper.enrichLocatorIdentifiers(responseJson, context.getSfEntity());
     }
     return NeoResponse.ok(responseJson);
   }
