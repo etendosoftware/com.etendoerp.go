@@ -278,7 +278,7 @@ public class McpToolRouter {
     JSONObject filters = args.optJSONObject("filters");
 
     SFSpec spec = McpToolRouterSupport.findActiveSpecByName(specName);
-    SFEntity sfEntity = McpToolRouterSupport.findIncludedEntity(spec.getId(), entityName);
+    SFEntity sfEntity = McpToolRouterSupport.resolveIncludedEntityOrExplain(spec, entityName);
     Tab adTab = getAdTabOrThrow(sfEntity, entityName);
 
     String dalEntityName = adTab.getTable().getName();
@@ -342,7 +342,7 @@ public class McpToolRouter {
     String recordId = args.getString("id");
 
     SFSpec spec = McpToolRouterSupport.findActiveSpecByName(specName);
-    SFEntity sfEntity = McpToolRouterSupport.findIncludedEntity(spec.getId(), entityName);
+    SFEntity sfEntity = McpToolRouterSupport.resolveIncludedEntityOrExplain(spec, entityName);
     Tab adTab = getAdTabOrThrow(sfEntity, entityName);
 
     String dalEntityName = adTab.getTable().getName();
@@ -377,7 +377,7 @@ public class McpToolRouter {
     JSONObject fields = args.getJSONObject(McpConstants.PARAM_FIELDS);
 
     SFSpec spec = McpToolRouterSupport.findActiveSpecByName(specName);
-    SFEntity sfEntity = McpToolRouterSupport.findIncludedEntity(spec.getId(), entityName);
+    SFEntity sfEntity = McpToolRouterSupport.resolveIncludedEntityOrExplain(spec, entityName);
     Tab adTab = getAdTabOrThrow(sfEntity, entityName);
 
     String dalEntityName = adTab.getTable().getName();
@@ -490,7 +490,7 @@ public class McpToolRouter {
     JSONObject fields = args.getJSONObject(McpConstants.PARAM_FIELDS);
 
     SFSpec spec = McpToolRouterSupport.findActiveSpecByName(specName);
-    SFEntity sfEntity = McpToolRouterSupport.findIncludedEntity(spec.getId(), entityName);
+    SFEntity sfEntity = McpToolRouterSupport.resolveIncludedEntityOrExplain(spec, entityName);
     Tab adTab = getAdTabOrThrow(sfEntity, entityName);
 
     String dalEntityName = adTab.getTable().getName();
@@ -542,7 +542,7 @@ public class McpToolRouter {
     String recordId = args.getString("id");
 
     SFSpec spec = McpToolRouterSupport.findActiveSpecByName(specName);
-    SFEntity sfEntity = McpToolRouterSupport.findIncludedEntity(spec.getId(), entityName);
+    SFEntity sfEntity = McpToolRouterSupport.resolveIncludedEntityOrExplain(spec, entityName);
     Tab adTab = getAdTabOrThrow(sfEntity, entityName);
 
     String dalEntityName = adTab.getTable().getName();
@@ -595,7 +595,7 @@ public class McpToolRouter {
     String query = args.optString(McpConstants.PARAM_QUERY, null);
 
     SFSpec spec = McpToolRouterSupport.findActiveSpecByName(specName);
-    SFEntity sfEntity = McpToolRouterSupport.findIncludedEntity(spec.getId(), entityName);
+    SFEntity sfEntity = McpToolRouterSupport.resolveIncludedEntityOrExplain(spec, entityName);
     Tab adTab = getAdTabOrThrow(sfEntity, entityName);
 
     // Find the AD_Column by DB column name or DAL property name (field name from schema)
@@ -643,7 +643,7 @@ public class McpToolRouter {
     }
 
     SFSpec spec = McpToolRouterSupport.findActiveSpecByName(specName);
-    SFEntity sfEntity = McpToolRouterSupport.findIncludedEntity(spec.getId(), entityName);
+    SFEntity sfEntity = McpToolRouterSupport.resolveIncludedEntityOrExplain(spec, entityName);
     Tab adTab = getAdTabOrThrow(sfEntity, entityName);
 
     NeoContext ctx = NeoContext.builder()
@@ -700,7 +700,7 @@ public class McpToolRouter {
     String entityName = args.getString(McpConstants.PARAM_ENTITY);
 
     SFSpec spec = McpToolRouterSupport.findActiveSpecByName(specName);
-    SFEntity sfEntity = McpToolRouterSupport.findIncludedEntity(spec.getId(), entityName);
+    SFEntity sfEntity = McpToolRouterSupport.resolveIncludedEntityOrExplain(spec, entityName);
     Tab adTab = getAdTabOrThrow(sfEntity, entityName);
 
     Entity dalEntity = ModelProvider.getInstance()
