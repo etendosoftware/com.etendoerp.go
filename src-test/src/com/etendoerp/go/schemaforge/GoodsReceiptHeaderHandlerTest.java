@@ -501,4 +501,51 @@ public class GoodsReceiptHeaderHandlerTest {
           recWithoutId.opt("invoiceStatus"));
     }
   }
+
+  // ── ETP-4531: afterCallout blocks callout-driven accountingDate ─────────────
+
+  @Test
+  public void afterCallout_blocksAccountingDateFromMovementDateTrigger() throws Exception {
+    // Mirrors the live M_InOut.MovementDate -> SL_InOut_AccountingDate coupling: editing
+    // movementDate must never carry an accountingDate value through to the saved record.
+    JSONObject updates = new JSONObject().put("accountingDate", "2026-07-01");
+    JSONObject calloutBody = new JSONObject().put("updates", updates);
+    JSONObject requestBody = new JSONObject().put("field", "movementDate").put("value", "2026-07-01");
+    NeoContext ctx = NeoContext.builder()
+        .previousResult(new NeoResponse(200, calloutBody))
+        .requestBody(requestBody)
+        .build();
+    GoodsReceiptHeaderHandler handler = new GoodsReceiptHeaderHandler();
+
+    NeoResponse result = handler.afterCallout(ctx);
+
+    assertNull(result);
+    assertNull("accountingDate must be stripped when movementDate is the trigger",
+        updates.opt("accountingDate"));
+  }
+
+  @Test
+  public void afterCallout_keepsAccountingDateWhenItIsTheTriggerField() throws Exception {
+    JSONObject updates = new JSONObject().put("accountingDate", "2026-07-05");
+    JSONObject calloutBody = new JSONObject().put("updates", updates);
+    JSONObject requestBody = new JSONObject()
+        .put("field", "accountingDate").put("value", "2026-07-05");
+    NeoContext ctx = NeoContext.builder()
+        .previousResult(new NeoResponse(200, calloutBody))
+        .requestBody(requestBody)
+        .build();
+    GoodsReceiptHeaderHandler handler = new GoodsReceiptHeaderHandler();
+
+    handler.afterCallout(ctx);
+
+    assertEquals("2026-07-05", updates.getString("accountingDate"));
+  }
+
+  @Test
+  public void afterCallout_noPreviousResult_returnsNull() {
+    NeoContext ctx = NeoContext.builder().httpMethod("POST").build();
+    GoodsReceiptHeaderHandler handler = new GoodsReceiptHeaderHandler();
+
+    assertNull(handler.afterCallout(ctx));
+  }
 }

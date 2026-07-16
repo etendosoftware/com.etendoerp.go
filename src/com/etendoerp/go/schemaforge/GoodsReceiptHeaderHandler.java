@@ -168,6 +168,27 @@ public class GoodsReceiptHeaderHandler implements NeoHandler {
     }
   }
 
+  /**
+   * Post-callout hook (ETP-4531): blocks a callout-driven {@code accountingDate} update unless
+   * the user directly edited {@code accountingDate} itself. {@code M_InOut.MovementDate} carries
+   * the classic {@code SL_InOut_AccountingDate} callout, which {@link NeoCalloutService} executes
+   * server-side and which auto-fills {@code dateAcct} from {@code movementDate} as a side effect
+   * — accountingDate must stay independent from the document's own date.
+   */
+  @Override
+  public NeoResponse afterCallout(NeoContext context) {
+    try {
+      NeoHandlerUtils.CalloutFields fields = NeoHandlerUtils.extractCalloutFields(context);
+      if (fields == null) {
+        return null;
+      }
+      NeoHandlerUtils.blockCalloutFieldUpdate(fields.updates(), fields.triggerField(), "accountingDate");
+    } catch (Exception e) {
+      log.warn("[ETP-4531] afterCallout failed (non-fatal): {}", e.getMessage());
+    }
+    return null; // mutation applied in-place; dispatcher merges nothing extra
+  }
+
   private int computeInvoiceStatus(String receiptId) {
     String sql = buildInvoiceStatusSql("iol.m_inout_id = ?");
     try (PreparedStatement ps = OBDal.getInstance().getConnection().prepareStatement(sql)) {

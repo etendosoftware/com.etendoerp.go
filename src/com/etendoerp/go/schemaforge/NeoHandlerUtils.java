@@ -222,4 +222,30 @@ final class NeoHandlerUtils {
     }
     return candidates.isEmpty() ? null : candidates.get(0);
   }
+
+  /**
+   * Removes a callout-pushed update to {@code fieldName} from the callout {@code updates} map,
+   * unless {@code fieldName} is itself the field the user directly edited (the callout trigger).
+   *
+   * <p>ETP-4531: {@code accountingDate} must be an independent field, fully decoupled from the
+   * document's own date (invoice date, movement date, etc.). Several classic Etendo callouts —
+   * e.g. {@code SifInvoiceOperationDateCallout}/{@code SE_Invoice_AccountingDate} on
+   * {@code C_Invoice.DateInvoiced} and {@code SL_InOut_AccountingDate} on
+   * {@code M_InOut.MovementDate} — auto-fill {@code dateAcct} as a side effect, and
+   * {@link NeoCalloutService} executes those same classic callouts server-side. This guard
+   * mirrors {@code AbstractInvoiceHeaderHandler#blockCalloutCurrencyUpdate} (ETP-4029): it lets
+   * the user still edit {@code accountingDate} directly (in which case it IS the trigger field
+   * and its own callout's updates pass through untouched), but strips any value another field's
+   * callout tries to push into it.
+   *
+   * @param updates      the callout response's {@code updates} object; may be {@code null}
+   * @param triggerField the field that triggered the callout (from the request body)
+   * @param fieldName    the field to protect from callout-driven cross-updates
+   */
+  static void blockCalloutFieldUpdate(JSONObject updates, String triggerField, String fieldName) {
+    if (updates != null && updates.has(fieldName) && !fieldName.equals(triggerField)) {
+      updates.remove(fieldName);
+      log.debug("[ETP-4531] Removed callout-driven '{}' update (trigger={})", fieldName, triggerField);
+    }
+  }
 }

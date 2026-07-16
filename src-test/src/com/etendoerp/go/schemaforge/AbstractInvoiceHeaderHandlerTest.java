@@ -139,6 +139,10 @@ public class AbstractInvoiceHeaderHandlerTest {
     public void callEnrichIsRectificative(JSONObject rec) throws Exception {
       enrichIsRectificative(rec);
     }
+
+    public NeoResponse callHandleCurrencyAfterCallout(NeoContext ctx) {
+      return handleCurrencyAfterCallout(ctx);
+    }
   }
 
   // ── ETP-4029: currency / exchange-rate hooks — test doubles ─────────────────
@@ -2601,5 +2605,61 @@ public class AbstractInvoiceHeaderHandlerTest {
 
       verify(dal).get(Invoice.class, "inv-put");
     }
+  }
+
+  // ── ETP-4531: handleCurrencyAfterCallout also blocks accountingDate ─────────
+
+  @Test
+  public void handleCurrencyAfterCallout_blocksAccountingDateFromOtherTrigger() throws Exception {
+    JSONObject updates = new JSONObject()
+        .put("accountingDate", "2026-07-01").put("businessPartner", "bp-1");
+    JSONObject calloutBody = new JSONObject().put("updates", updates);
+    JSONObject requestBody = new JSONObject().put("field", "businessPartner").put("value", "bp-1");
+    NeoContext ctx = NeoContext.builder()
+        .previousResult(new NeoResponse(200, calloutBody))
+        .requestBody(requestBody)
+        .build();
+
+    NeoResponse result = handler.callHandleCurrencyAfterCallout(ctx);
+
+    assertNull(result);
+    assertTrue(!updates.has("accountingDate"));
+    assertTrue(updates.has("businessPartner"));
+  }
+
+  @Test
+  public void handleCurrencyAfterCallout_blocksAccountingDateFromInvoiceDateTrigger()
+      throws Exception {
+    // Mirrors the live C_Invoice.DateInvoiced -> SifInvoiceOperationDateCallout (extends
+    // SE_Invoice_AccountingDate) coupling: an invoiceDate-triggered callout must never carry
+    // accountingDate through to the saved record.
+    JSONObject updates = new JSONObject().put("accountingDate", "2026-07-01");
+    JSONObject calloutBody = new JSONObject().put("updates", updates);
+    JSONObject requestBody = new JSONObject().put("field", "invoiceDate").put("value", "2026-07-01");
+    NeoContext ctx = NeoContext.builder()
+        .previousResult(new NeoResponse(200, calloutBody))
+        .requestBody(requestBody)
+        .build();
+
+    handler.callHandleCurrencyAfterCallout(ctx);
+
+    assertTrue(!updates.has("accountingDate"));
+  }
+
+  @Test
+  public void handleCurrencyAfterCallout_keepsAccountingDateWhenItIsTheTriggerField()
+      throws Exception {
+    JSONObject updates = new JSONObject().put("accountingDate", "2026-07-05");
+    JSONObject calloutBody = new JSONObject().put("updates", updates);
+    JSONObject requestBody = new JSONObject()
+        .put("field", "accountingDate").put("value", "2026-07-05");
+    NeoContext ctx = NeoContext.builder()
+        .previousResult(new NeoResponse(200, calloutBody))
+        .requestBody(requestBody)
+        .build();
+
+    handler.callHandleCurrencyAfterCallout(ctx);
+
+    assertEquals("2026-07-05", updates.getString("accountingDate"));
   }
 }

@@ -239,4 +239,54 @@ public class NeoHandlerUtilsTest {
 
     assertEquals("first-id", NeoHandlerUtils.extractCreatedIdFromPreviousResult(ctx));
   }
+
+  // ── ETP-4531: blockCalloutFieldUpdate ────────────────────────────────────
+
+  @Test
+  public void testBlockCalloutFieldUpdateRemovesFieldPushedByOtherTrigger() throws Exception {
+    JSONObject updates = new JSONObject().put("accountingDate", "2026-07-01").put("otherField", "x");
+
+    NeoHandlerUtils.blockCalloutFieldUpdate(updates, "invoiceDate", "accountingDate");
+
+    assertTrue(!updates.has("accountingDate"));
+    assertTrue(updates.has("otherField"));
+  }
+
+  @Test
+  public void testBlockCalloutFieldUpdateKeepsFieldWhenItIsTheTriggerField() throws Exception {
+    JSONObject updates = new JSONObject().put("accountingDate", "2026-07-01");
+
+    NeoHandlerUtils.blockCalloutFieldUpdate(updates, "accountingDate", "accountingDate");
+
+    assertEquals("2026-07-01", updates.getString("accountingDate"));
+  }
+
+  @Test
+  public void testBlockCalloutFieldUpdateNullUpdatesDoesNotThrow() {
+    // Must be a no-op guard: null updates map is a valid callout response shape.
+    NeoHandlerUtils.blockCalloutFieldUpdate(null, "invoiceDate", "accountingDate");
+  }
+
+  @Test
+  public void testBlockCalloutFieldUpdateNoopWhenFieldKeyAbsent() throws Exception {
+    JSONObject updates = new JSONObject().put("otherField", "unchanged");
+
+    NeoHandlerUtils.blockCalloutFieldUpdate(updates, "otherField", "accountingDate");
+
+    assertEquals("unchanged", updates.getString("otherField"));
+    assertTrue(!updates.has("accountingDate"));
+  }
+
+  @Test
+  public void testBlockCalloutFieldUpdateRemovesMovementDateDrivenAccountingDate()
+      throws Exception {
+    // Mirrors the live M_InOut.MovementDate -> SL_InOut_AccountingDate coupling (Goods
+    // Receipt / Goods Shipment): a callout triggered by movementDate must never carry
+    // accountingDate through to the saved record.
+    JSONObject updates = new JSONObject().put("accountingDate", "2026-07-01");
+
+    NeoHandlerUtils.blockCalloutFieldUpdate(updates, "movementDate", "accountingDate");
+
+    assertTrue(!updates.has("accountingDate"));
+  }
 }

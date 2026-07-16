@@ -72,6 +72,7 @@ public abstract class AbstractInvoiceHeaderHandler {
   protected static final String FIELD_ORIGIN_INVOICE       = "originInvoice";
   protected static final String FIELD_TRANSACTION_DOCUMENT = "transactionDocument";
   private static final String FIELD_CURRENCY = "currency";
+  private static final String FIELD_ACCOUNTING_DATE = "accountingDate";
   private static final String FIELD_VALUE = "value";
 
   // ---------------------------------------------------------------------------
@@ -747,10 +748,12 @@ public abstract class AbstractInvoiceHeaderHandler {
 
   /**
    * Shared {@code afterCallout} body: blocks callout-driven currency updates and appends an
-   * exchange-rate warning when the user directly changes the invoice currency (ETP-4029), and
-   * blocks callout-driven document type updates on an already-saved invoice (ETP-4535). Identical
-   * for both {@link PurchaseInvoiceHeaderHandler} and {@link SalesInvoiceHeaderHandler} — each
-   * subclass's {@code afterCallout()} override should just delegate here.
+   * exchange-rate warning when the user directly changes the invoice currency (ETP-4029);
+   * blocks callout-driven {@code accountingDate} updates so it stays independent from
+   * {@code invoiceDate} (ETP-4531 — see {@link NeoHandlerUtils#blockCalloutFieldUpdate}); and
+   * blocks callout-driven document type updates on an already-saved invoice (ETP-4535).
+   * Identical for both {@link PurchaseInvoiceHeaderHandler} and {@link SalesInvoiceHeaderHandler}
+   * — each subclass's {@code afterCallout()} override should just delegate here.
    */
   protected NeoResponse handleInvoiceAfterCallout(NeoContext context) {
     try {
@@ -760,10 +763,11 @@ public abstract class AbstractInvoiceHeaderHandler {
       }
       blockCalloutCurrencyUpdate(fields.updates(), fields.triggerField());
       checkExchangeRateWarning(fields.body(), fields.requestBody(), fields.formState(), fields.triggerField());
+      NeoHandlerUtils.blockCalloutFieldUpdate(fields.updates(), fields.triggerField(), FIELD_ACCOUNTING_DATE);
       String recordId = resolveCalloutRecordId(context, fields.formState());
       blockCalloutDocTypeUpdateIfLocked(fields.updates(), fields.triggerField(), recordId);
     } catch (Exception e) {
-      log.warn("[ETP-4029/ETP-4535] afterCallout failed (non-fatal): {}", e.getMessage());
+      log.warn("[ETP-4029/ETP-4531/ETP-4535] afterCallout failed (non-fatal): {}", e.getMessage());
     }
     return null; // mutations applied in-place; dispatcher merges nothing extra
   }
