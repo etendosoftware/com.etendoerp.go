@@ -53,6 +53,7 @@ import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.advpaymentmngt.actionHandler.FundsTransferActionHandler;
 import org.openbravo.advpaymentmngt.process.FIN_TransactionProcess;
+import org.openbravo.base.model.ModelProvider;
 import org.openbravo.base.provider.OBProvider;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.security.OrganizationStructureProvider;
@@ -66,6 +67,7 @@ import org.openbravo.model.financialmgmt.payment.FIN_FinaccTransaction;
 import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
 import org.openbravo.model.project.Project;
 
+import com.etendoerp.go.schemaforge.handlers.DocumentPostingService;
 import com.etendoerp.payment.removal.util.TransactionRemovalUtil;
 
 /**
@@ -128,6 +130,7 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
   private static final String ACTION_PROCESS = "process";
   private static final String ACTION_REACTIVATE = "reactivate";
   private static final String ACTION_DELETE = "delete";
+  private static final String ACTION_POST = "post";
   private static final String ACTION_BP_LOOKUP = "bpartner-lookup";
   private static final String ACTION_GL_LOOKUP = "glitem-lookup";
   private static final String ACTION_DIM_VALUES = "dimension-values";
@@ -284,6 +287,7 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
     if (ACTION_PROCESS.equals(action)) return handleProcess(context);
     if (ACTION_REACTIVATE.equals(action)) return handleReactivate(context);
     if (ACTION_DELETE.equals(action)) return handleDelete(context);
+    if (ACTION_POST.equals(action)) return handlePostAccounting(context);
     return NeoResponse.error(405, "Method not allowed.");
   }
 
@@ -832,6 +836,38 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
       log.error("Error deleting financial account transaction", e);
       OBDal.getInstance().rollbackAndClose();
       return NeoResponse.error(500, "Could not delete the movement. Please check logs for details.");
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  /**
+   * Handles {@code POST ?action=post} — posts the transaction's accounting (contabilizar) through
+   * the Etendo accounting engine via {@link DocumentPostingService}. Replaces the old, broken route
+   * that targeted a non-existent {@code financial-account-detail} spec. Posting is an independent
+   * flag; the transaction must already be Processed.
+   */
+  private NeoResponse handlePostAccounting(NeoContext context) {
+    JSONObject body = context.getRequestBody();
+    if (body == null) return NeoResponse.error(400, MSG_BODY_REQUIRED);
+    try {
+      OBContext.setAdminMode(true);
+      FIN_FinaccTransaction trx = loadTransactionFromBody(body);
+      if (trx == null) return NeoResponse.error(404, "Transaction not found");
+      String tableId = ModelProvider.getInstance().getEntity(FIN_FinaccTransaction.ENTITY_NAME).getTableId();
+      DocumentPostingService.PostResult result = new DocumentPostingService().post(tableId, trx.getId());
+      JSONObject data = new JSONObject();
+      data.put("success", result.ok());
+      data.put("message", result.message());
+      if (!result.ok()) return NeoResponse.error(422, data.toString());
+      JSONObject responseData = new JSONObject();
+      responseData.put("data", data);
+      JSONObject envelope = new JSONObject();
+      envelope.put(KEY_RESPONSE, responseData);
+      return NeoResponse.ok(envelope);
+    } catch (Exception e) {
+      log.error("Error posting financial account transaction", e);
+      return NeoResponse.error(500, "Could not post the movement. Please check logs for details.");
     } finally {
       OBContext.restorePreviousMode();
     }
