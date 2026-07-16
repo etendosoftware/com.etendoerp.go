@@ -187,7 +187,7 @@ public class FinancialAccountAccountingHandler implements NeoHandler {
     criteria.add(Restrictions.eq(FIN_FinancialAccountAccounting.PROPERTY_ACCOUNTINGSCHEMA, ledger));
     criteria.addOrder(Order.desc(FIN_FinancialAccountAccounting.PROPERTY_UPDATED));
     criteria.setMaxResults(1);
-    return criteria.uniqueResult();
+    return FIN_FinancialAccountAccounting.class.cast(criteria.uniqueResult());
   }
 
   private FIN_FinancialAccountAccounting findOrCreateRow(FIN_FinancialAccount account, AcctSchema ledger) {
