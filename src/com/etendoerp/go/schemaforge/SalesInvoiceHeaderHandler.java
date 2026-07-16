@@ -297,17 +297,24 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
    * Finds all sales shipments (M_InOut) whose lines are referenced by the invoice's
    * C_InvoiceLine.M_InOutLine_ID. Covers invoices created directly from a shipment
    * (standalone or via-order), where the native process always populates M_InOutLine_ID.
+   *
+   * <p>Joins C_DocType to expose {@code isReturn}, the actual discriminator between a
+   * regular delivery and a customer return: M_InOut.MovementType is NOT usable for this
+   * (see M_INOUT_TRG_PROV.xml) — it only ever takes 'C-' for every sales-side movement
+   * (shipments AND returns alike) or 'V+' for purchase-side, never branching on
+   * C_DocType.IsReturn. ETP-4534.</p>
    */
   @SuppressWarnings("java:S2077")
   private void enrichLinkedShipments(JSONObject rec, String invoiceId) {
     String sql =
-        "SELECT DISTINCT io.m_inout_id, io.documentno, io.docstatus, io.movementtype " +
+        "SELECT DISTINCT io.m_inout_id, io.documentno, io.docstatus, io.movementtype, dt.isreturn " +
         "FROM c_invoiceline il " +
         "JOIN m_inoutline iol ON (" +
         "  iol.m_inoutline_id = il.m_inoutline_id " +
         "  OR (il.m_inoutline_id IS NULL AND il.c_orderline_id IS NOT NULL AND iol.c_orderline_id = il.c_orderline_id)" +
         ") " +
         "JOIN m_inout io ON io.m_inout_id = iol.m_inout_id " +
+        "JOIN c_doctype dt ON dt.c_doctype_id = io.c_doctype_id " +
         "WHERE il.c_invoice_id = ? AND il.isactive = 'Y' " +
         "  AND io.isactive = 'Y' AND io.docstatus NOT IN ('VO','CL') " +
         "  AND io.issotrx = 'Y'";
@@ -322,6 +329,7 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
           s.put(FIELD_DOCUMENT_NO, rs.getString(2));
           s.put("documentStatus", rs.getString(3));
           s.put("movementType", rs.getString(4));
+          s.put("isReturn", "Y".equalsIgnoreCase(rs.getString(5)));
           shipments.put(s);
         }
       }
