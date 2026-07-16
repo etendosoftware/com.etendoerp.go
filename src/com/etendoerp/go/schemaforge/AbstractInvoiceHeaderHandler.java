@@ -572,6 +572,48 @@ public abstract class AbstractInvoiceHeaderHandler {
   }
 
   /**
+   * Removes a callout-pushed {@code transactionDocument} key from the callout {@code updates} map
+   * once the invoice has already been saved. Document type is only ever changed by the user
+   * directly (or defaulted at first-save time) — a business-partner (or other) callout must not
+   * silently revert NC/DEV subtypes back to the org's default document type after save (ETP-4535).
+   *
+   * <p>Unlike {@link #blockCalloutCurrencyUpdate}, which blocks ANY callout-driven overwrite, this
+   * guard only applies once the invoice has a {@code documentNo} — choosing a document type via
+   * BP-driven defaults before the first save is legitimate and must not be blocked. Mirrors the
+   * "not yet saved, allow" rule already enforced client-side (PUT edits) by
+   * {@link #validateDocTypeLock}.
+   *
+   * <p>Call from each subclass's {@code afterCallout()} override.
+   *
+   * @param updates      the callout response's {@code updates} object; may be {@code null}
+   * @param triggerField the field that triggered the callout (from the request body)
+   * @param recordId     the invoice's record id from the current context; may be {@code null} for
+   *                     a new (unsaved) record
+   */
+  protected static void blockCalloutDocTypeUpdateIfLocked(JSONObject updates, String triggerField,
+      String recordId) {
+    if (updates == null || !updates.has(FIELD_TRANSACTION_DOCUMENT)
+        || FIELD_TRANSACTION_DOCUMENT.equals(triggerField)) {
+      return;
+    }
+    if (StringUtils.isBlank(recordId)) {
+      return; // not yet saved — allow callout-driven doc type defaults
+    }
+    try {
+      Invoice invoice = OBDal.getInstance().get(Invoice.class, recordId);
+      if (invoice == null || StringUtils.isBlank(invoice.getDocumentNo())) {
+        return; // not yet saved — allow
+      }
+      updates.remove(FIELD_TRANSACTION_DOCUMENT);
+      log.debug("[ETP-4535] Removed callout-driven document type update on saved invoice {} (trigger={})",
+          recordId, triggerField);
+    } catch (Exception e) {
+      log.warn("[ETP-4535] Could not evaluate document type lock for invoice {}: {}",
+          recordId, e.getMessage());
+    }
+  }
+
+  /**
    * Appends a {@code WARNING} message to the callout response body when the user directly
    * changes the invoice's {@code currency} field and no {@code C_Conversion_Rate} exists for
    * (docCurrency → orgCurrency, invoiceDate). Mirrors
@@ -608,12 +650,13 @@ public abstract class AbstractInvoiceHeaderHandler {
   }
 
   /**
-   * Shared {@code afterCallout} body (ETP-4029): blocks callout-driven currency updates and
-   * appends an exchange-rate warning when the user directly changes the invoice currency.
-   * Identical for both {@link PurchaseInvoiceHeaderHandler} and {@link SalesInvoiceHeaderHandler}
-   * — each subclass's {@code afterCallout()} override should just delegate here.
+   * Shared {@code afterCallout} body: blocks callout-driven currency updates and appends an
+   * exchange-rate warning when the user directly changes the invoice currency (ETP-4029), and
+   * blocks callout-driven document type updates on an already-saved invoice (ETP-4535). Identical
+   * for both {@link PurchaseInvoiceHeaderHandler} and {@link SalesInvoiceHeaderHandler} — each
+   * subclass's {@code afterCallout()} override should just delegate here.
    */
-  protected NeoResponse handleCurrencyAfterCallout(NeoContext context) {
+  protected NeoResponse handleInvoiceAfterCallout(NeoContext context) {
     try {
       NeoHandlerUtils.CalloutFields fields = NeoHandlerUtils.extractCalloutFields(context);
       if (fields == null) {
@@ -621,10 +664,44 @@ public abstract class AbstractInvoiceHeaderHandler {
       }
       blockCalloutCurrencyUpdate(fields.updates(), fields.triggerField());
       checkExchangeRateWarning(fields.body(), fields.requestBody(), fields.formState(), fields.triggerField());
+      String recordId = resolveCalloutRecordId(context, fields.formState());
+      blockCalloutDocTypeUpdateIfLocked(fields.updates(), fields.triggerField(), recordId);
     } catch (Exception e) {
-      log.warn("[ETP-4029] afterCallout failed (non-fatal): {}", e.getMessage());
+      log.warn("[ETP-4029/ETP-4535] afterCallout failed (non-fatal): {}", e.getMessage());
     }
     return null; // mutations applied in-place; dispatcher merges nothing extra
+  }
+
+  /**
+   * Resolves the invoice's record id for a callout request.
+   *
+   * <p>Callout URLs carry no record-id path segment — {@code NeoServletSupport.parseSubEndpointPath}
+   * matches the callout route as a literal {@code {specName}/{entityName}/callout} 3-segment path
+   * with the record-id segment hardcoded {@code null}, and {@link NeoCalloutEndpoint#handleCallout}
+   * never calls {@code .recordId(...)} on the {@link NeoContext} builder. So
+   * {@link NeoContext#getRecordId()} is always {@code null} for a real callout, and the currently
+   * loaded record's id must instead be read from the callout's echoed {@code formState.id} — the
+   * same idiom already used by {@code InventoryLineHandler#afterCallout} (formState null-guard +
+   * {@code optString("id", ...)}) and {@code CalloutRequestBuilder#injectParentId}
+   * ({@code formState.has("id")} before reading).
+   *
+   * <p>{@code context.getRecordId()} is checked first as a defensive fallback for any future/other
+   * dispatch path that DOES populate it (e.g. a non-callout invocation of this shared method), but
+   * for the real production callout path it is always blank and {@code formState.id} is what fires.
+   *
+   * @param context   the current NeoContext
+   * @param formState the callout's {@code formState} object; may be {@code null}
+   * @return the resolved invoice record id, or {@code null} if neither source has one
+   */
+  private static String resolveCalloutRecordId(NeoContext context, JSONObject formState) {
+    String recordId = context.getRecordId();
+    if (StringUtils.isNotBlank(recordId)) {
+      return recordId;
+    }
+    if (formState == null) {
+      return null;
+    }
+    return StringUtils.trimToNull(formState.optString("id", null));
   }
 
   /**
