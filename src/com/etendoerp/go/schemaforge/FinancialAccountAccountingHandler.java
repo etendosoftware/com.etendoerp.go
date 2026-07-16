@@ -162,9 +162,13 @@ public class FinancialAccountAccountingHandler implements NeoHandler {
     FIN_FinancialAccountAccounting row = findOrCreateRow(account, ledger);
     row.setFINAssetAcct(assetAcct);
     row.setFINTransitoryAcct(transitoryAcct);
-    // Classic's bank-statement accounting engine only reads these two accounts when this flag is
-    // enabled — auto-enable it here so saving from this tab has an observable effect (ETP-4530
-    // does not otherwise expose this flag; see delivery notes).
+    // WARNING (ETP-4530): this flips EnableBankStatement to Y on EVERY Contabilidad save, not just
+    // the two fields this tab visually presents — Classic's bank-statement accounting engine only
+    // reads fINAssetAcct/fINTransitoryAcct when this flag is Y, so without it the save would have
+    // no observable effect in Classic. The flag itself is NOT exposed as an editable field here
+    // (out of scope for this ticket), so a user who later opens the equivalent Classic window will
+    // find it pre-checked without having touched it directly — see financial-account.md, "Not
+    // implemented yet", for the full note.
     row.setEnablebankstatement(true);
     OBDal.getInstance().save(row);
     OBDal.getInstance().flush();
