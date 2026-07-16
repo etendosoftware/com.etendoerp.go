@@ -36,6 +36,24 @@ public class NeoDefaultsCascadeHelper {
   private static final String KEY_COMBOS = "combos";
   private static final String KEY_SELECTED = "selected";
 
+  // ETP-4531: accountingDate must stay independent from the document's own date
+  // (invoiceDate, movementDate, etc.) across every cascade entry point that funnels
+  // through processCalloutForField — GET /defaults (new-record form bootstrap), POST
+  // create (executeCalloutCascadeForCreate), and interactive per-field callout chaining
+  // beyond the first hop. See NeoHandlerUtils#blockCalloutFieldUpdate for the same guard
+  // applied to the single-callout afterCallout() hooks (SalesInvoiceHeaderHandler,
+  // PurchaseInvoiceHeaderHandler, GoodsReceiptHeaderHandler, GoodsShipmentHeaderHandler).
+  //
+  // This is a table/property-name check, not a per-window branch — "accountingDate"
+  // (DateAcct) is a cross-cutting Etendo accounting concept that recurs, with the exact
+  // same classic-callout anti-pattern, on every postable-document table (C_Invoice,
+  // M_InOut, GL_Journal, FIN_Finacc_Transaction, ...), not something scoped to the 4
+  // windows this ticket happened to touch. It sits alongside the existing table-agnostic
+  // invariants already hardcoded in this helper family (e.g. the PK/audit-column skips in
+  // NeoDefaultsService#injectMandatoryDefaults, the AD_Reference_ID literals in
+  // injectSafeTypeDefault below) rather than being NeoHandler-scoped custom behavior.
+  private static final String FIELD_ACCOUNTING_DATE = "accountingDate";
+
   private NeoDefaultsCascadeHelper() {
   }
 
@@ -292,6 +310,13 @@ public class NeoDefaultsCascadeHelper {
       if (calloutBody == null) {
         return;
       }
+
+      // ETP-4531: strip a callout-driven accountingDate update before it ever reaches
+      // mergeCalloutUpdates, unless accountingDate is itself the field whose callout just
+      // ran. Fixes the GET /defaults and POST create cascades, which (unlike the single-field
+      // afterCallout() hooks) had no protection against this specific cross-field push.
+      NeoHandlerUtils.blockCalloutFieldUpdate(
+          calloutBody.optJSONObject(KEY_UPDATES), fieldName, FIELD_ACCOUNTING_DATE);
 
       mergeCalloutUpdates(calloutBody, cCtx.formState, cCtx.defaults, cCtx.seqFields,
           adTab, cCtx.result, cCtx.nextPending, cCtx.protectedFields);

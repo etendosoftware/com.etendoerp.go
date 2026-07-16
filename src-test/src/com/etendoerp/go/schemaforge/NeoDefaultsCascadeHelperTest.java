@@ -722,6 +722,96 @@ public class NeoDefaultsCascadeHelperTest {
     }
   }
 
+  // ===================================================================
+  // executeCalloutCascade — ETP-4531: accountingDate independence
+  // ===================================================================
+
+  /**
+   * Regression test for the REVIEW blocker: the trigger-field-aware accountingDate guard
+   * must hold on the GET /defaults cascade path (new-record form bootstrap via
+   * {@code NeoDefaultsService#applyCascadeAndResolveTab}), not just on the interactive
+   * {@code afterCallout()} hooks. Mirrors the live M_InOut.MovementDate ->
+   * SL_InOut_AccountingDate coupling (same shape for C_Invoice.DateInvoiced ->
+   * SifInvoiceOperationDateCallout).
+   */
+  @Test
+  public void testExecuteCalloutCascadeBlocksAccountingDateFromMovementDateTrigger()
+      throws Exception {
+    try (MockedStatic<NeoCalloutService> calloutMock = mockStatic(NeoCalloutService.class);
+         MockedStatic<ModelProvider> providerMock = mockStatic(ModelProvider.class)) {
+
+      NeoCalloutService.CalloutInfo info = new NeoCalloutService.CalloutInfo(
+          "org.openbravo.erpCommon.ad_callouts.SL_InOut_AccountingDate",
+          "inpmovementdate", "MovementDate");
+      calloutMock.when(() -> NeoCalloutService.resolveCallout(any(), eq("movementDate")))
+          .thenReturn(info);
+      calloutMock.when(() -> NeoCalloutService.resolveCallout(any(), eq("accountingDate")))
+          .thenReturn(null);
+
+      JSONObject calloutResponseBody = new JSONObject();
+      JSONObject updateEntry = new JSONObject();
+      updateEntry.put("value", "2026-01-01"); // callout tries to push movementDate's value
+      JSONObject updates = new JSONObject();
+      updates.put("accountingDate", updateEntry);
+      calloutResponseBody.put("updates", updates);
+      calloutMock.when(() -> NeoCalloutService.executeCallout(any(), any()))
+          .thenReturn(NeoResponse.ok(calloutResponseBody));
+
+      ModelProvider mockProvider = mock(ModelProvider.class);
+      providerMock.when(ModelProvider::getInstance).thenReturn(mockProvider);
+      when(mockProvider.getEntityByTableId(anyString())).thenReturn(null);
+
+      Tab adTab = mockTabWithTable("150");
+      NeoContext ctx = mock(NeoContext.class);
+      JSONObject defaults = new JSONObject();
+      defaults.put("movementDate", "2026-02-02");
+      defaults.put("accountingDate", "2026-02-02"); // independently pre-resolved own default
+
+      NeoDefaultsCascadeHelper.executeCalloutCascade(ctx, adTab, defaults, new HashSet<>());
+
+      assertEquals("accountingDate must stay independent from movementDate on the "
+              + "GET /defaults cascade",
+          "2026-02-02", defaults.get("accountingDate"));
+    }
+  }
+
+  @Test
+  public void testExecuteCalloutCascadeKeepsAccountingDateWhenItIsTheTrigger() throws Exception {
+    try (MockedStatic<NeoCalloutService> calloutMock = mockStatic(NeoCalloutService.class);
+         MockedStatic<ModelProvider> providerMock = mockStatic(ModelProvider.class)) {
+
+      NeoCalloutService.CalloutInfo info = new NeoCalloutService.CalloutInfo(
+          "org.openbravo.erpCommon.ad_callouts.SE_Invoice_TaxDate",
+          "inpdateacct", "DateAcct");
+      calloutMock.when(() -> NeoCalloutService.resolveCallout(any(), eq("accountingDate")))
+          .thenReturn(info);
+
+      JSONObject calloutResponseBody = new JSONObject();
+      JSONObject updateEntry = new JSONObject();
+      updateEntry.put("value", "2026-03-03");
+      JSONObject updates = new JSONObject();
+      updates.put("accountingDate", updateEntry);
+      calloutResponseBody.put("updates", updates);
+      calloutMock.when(() -> NeoCalloutService.executeCallout(any(), any()))
+          .thenReturn(NeoResponse.ok(calloutResponseBody));
+
+      ModelProvider mockProvider = mock(ModelProvider.class);
+      providerMock.when(ModelProvider::getInstance).thenReturn(mockProvider);
+      when(mockProvider.getEntityByTableId(anyString())).thenReturn(null);
+
+      Tab adTab = mockTabWithTable("151");
+      NeoContext ctx = mock(NeoContext.class);
+      JSONObject defaults = new JSONObject();
+      defaults.put("accountingDate", "2026-01-01");
+
+      NeoDefaultsCascadeHelper.executeCalloutCascade(ctx, adTab, defaults, new HashSet<>());
+
+      assertEquals("A callout triggered by accountingDate itself must still be able to "
+              + "update accountingDate",
+          "2026-03-03", defaults.get("accountingDate"));
+    }
+  }
+
   @Test
   public void testExecuteCalloutCascadeWithProtectedFields() throws Exception {
     try (MockedStatic<NeoCalloutService> calloutMock = mockStatic(NeoCalloutService.class);
@@ -1102,6 +1192,56 @@ public class NeoDefaultsCascadeHelperTest {
       body.put("field1", "val1");
 
       NeoDefaultsCascadeHelper.executeCalloutCascadeForCreate(ctx, adTab, body);
+    }
+  }
+
+  /**
+   * Regression test for the REVIEW blocker: the trigger-field-aware accountingDate guard
+   * must also hold on POST create ({@code executeCalloutCascadeForCreate}). The pre-existing
+   * "protectedFields = keys already in body" mechanism only protects a field if it was
+   * ALREADY a key in the create payload before the cascade ran — it gives no protection when
+   * accountingDate is absent from the payload and gets introduced purely as a callout side
+   * effect of movementDate/invoiceDate, which is exactly this scenario.
+   */
+  @Test
+  public void testExecuteCalloutCascadeForCreateBlocksAccountingDateFromMovementDate()
+      throws Exception {
+    try (MockedStatic<NeoCalloutService> calloutMock = mockStatic(NeoCalloutService.class);
+         MockedStatic<ModelProvider> providerMock = mockStatic(ModelProvider.class)) {
+
+      NeoCalloutService.CalloutInfo info = new NeoCalloutService.CalloutInfo(
+          "org.openbravo.erpCommon.ad_callouts.SL_InOut_AccountingDate",
+          "inpmovementdate", "MovementDate");
+      calloutMock.when(() -> NeoCalloutService.resolveCallout(any(), eq("movementDate")))
+          .thenReturn(info);
+      calloutMock.when(() -> NeoCalloutService.resolveCallout(any(), eq("accountingDate")))
+          .thenReturn(null);
+
+      JSONObject calloutResponseBody = new JSONObject();
+      JSONObject updateEntry = new JSONObject();
+      updateEntry.put("value", "2026-03-03");
+      JSONObject updates = new JSONObject();
+      updates.put("accountingDate", updateEntry);
+      calloutResponseBody.put("updates", updates);
+      calloutMock.when(() -> NeoCalloutService.executeCallout(any(), any()))
+          .thenReturn(NeoResponse.ok(calloutResponseBody));
+
+      ModelProvider mockProvider = mock(ModelProvider.class);
+      providerMock.when(ModelProvider::getInstance).thenReturn(mockProvider);
+      when(mockProvider.getEntityByTableId(anyString())).thenReturn(null);
+
+      Tab adTab = mockTabWithTable("152");
+      NeoContext ctx = mock(NeoContext.class);
+      JSONObject body = new JSONObject();
+      // accountingDate is NOT yet a key in the create payload — it must not be introduced
+      // by movementDate's callout side effect.
+      body.put("movementDate", "2026-03-03");
+
+      NeoDefaultsCascadeHelper.executeCalloutCascadeForCreate(ctx, adTab, body);
+
+      assertFalse("Callout-driven accountingDate must never be introduced on create by "
+              + "movementDate's callout",
+          body.has("accountingDate"));
     }
   }
 
