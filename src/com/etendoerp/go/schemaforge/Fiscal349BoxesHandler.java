@@ -194,18 +194,28 @@ class Fiscal349BoxesHandler extends AbstractFiscalHandler {
         .list();
     for (Object[] r : rows) {
       JSONObject row = new JSONObject();
-      row.put("ref",           r[0] != null ? r[0].toString() : "");
-      row.put("date",          r[1] != null ? sdf.format((Date) r[1]) : "");
+      row.put("ref",           str(r[0]));
+      row.put("date",          dateStr(r[1], sdf));
       row.put("type",          type);
-      row.put("party",         r[2] != null ? r[2].toString() : "");
-      row.put("nifIva",        r[3] != null ? r[3].toString() : "");
-      row.put("originalRef",   r[4] != null ? r[4].toString() : "");
-      row.put("declaredYear",  r[5] != null ? r[5].toString() : "");
-      row.put("declaredPeriod", r[6] != null ? r[6].toString() : "");
+      row.put("party",         str(r[2]));
+      row.put("nifIva",        str(r[3]));
+      row.put("originalRef",   str(r[4]));
+      row.put("declaredYear",  str(r[5]));
+      row.put("declaredPeriod", str(r[6]));
       row.put("baseProducts",  scaled((BigDecimal) r[7]));
       row.put("baseServices",  scaled((BigDecimal) r[8]));
       arr.put(row);
     }
+  }
+
+  // Null-safe string coercion for HQL projection columns (null -> "").
+  private static String str(Object o) {
+    return o != null ? o.toString() : "";
+  }
+
+  // Null-safe date formatting for HQL projection columns (null -> "").
+  private static String dateStr(Object o, SimpleDateFormat sdf) {
+    return o != null ? sdf.format((Date) o) : "";
   }
 
   private static String scaled(BigDecimal v) {
