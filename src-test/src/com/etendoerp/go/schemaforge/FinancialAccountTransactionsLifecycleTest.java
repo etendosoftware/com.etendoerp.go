@@ -23,7 +23,6 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.mockConstruction;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -41,13 +40,10 @@ import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
-import org.mockito.MockedConstruction;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
 import org.mockito.junit.MockitoJUnitRunner;
 import org.openbravo.advpaymentmngt.process.FIN_TransactionProcess;
-import org.openbravo.base.model.Entity;
-import org.openbravo.base.model.ModelProvider;
 import org.openbravo.base.provider.OBProvider;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
@@ -61,7 +57,6 @@ import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
 import org.openbravo.model.common.plm.Product;
 import org.openbravo.model.project.Project;
 
-import com.etendoerp.go.schemaforge.handlers.DocumentPostingService;
 import com.etendoerp.payment.removal.util.TransactionRemovalUtil;
 
 /**
@@ -280,75 +275,6 @@ public class FinancialAccountTransactionsLifecycleTest {
       assertEquals(200, r.getHttpStatus());
       removal.verify(() -> TransactionRemovalUtil.reactivateAndRemove("tx-1"));
       verify(dal, never()).remove(any());
-    }
-  }
-
-  // ─────────────────────────────────────────────────────────────────────────
-  // action=post (accounting)
-  // ─────────────────────────────────────────────────────────────────────────
-
-  /**
-   * Posting delegates to {@link DocumentPostingService}; a successful {@code PostResult} maps to 200
-   * with {@code response.data.success == true}.
-   */
-  @Test
-  public void testPostAccountingSuccessReturns200() throws Exception {
-    JSONObject body = new JSONObject().put("id", "tx-1");
-    FIN_FinaccTransaction trx = mock(FIN_FinaccTransaction.class);
-    when(trx.getId()).thenReturn("tx-1");
-
-    Entity entity = mock(Entity.class);
-    when(entity.getTableId()).thenReturn("table-1");
-
-    try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
-         MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
-         MockedStatic<ModelProvider> modelProvider = mockStatic(ModelProvider.class);
-         MockedConstruction<DocumentPostingService> posting = mockConstruction(
-             DocumentPostingService.class,
-             (m, c) -> when(m.post(any(), any()))
-                 .thenReturn(new DocumentPostingService.PostResult(true, "Document posted")))) {
-      OBDal dal = mock(OBDal.class);
-      obDal.when(OBDal::getInstance).thenReturn(dal);
-      when(dal.get(eq(FIN_FinaccTransaction.class), eq("tx-1"))).thenReturn(trx);
-      ModelProvider mp = mock(ModelProvider.class);
-      modelProvider.when(ModelProvider::getInstance).thenReturn(mp);
-      when(mp.getEntity(anyString())).thenReturn(entity);
-
-      NeoResponse r = handler.handle(postActionCtx("post", body));
-
-      assertEquals(200, r.getHttpStatus());
-      JSONObject data = r.getBody().getJSONObject("response").getJSONObject("data");
-      assertTrue(data.getBoolean("success"));
-    }
-  }
-
-  /** A failed {@code PostResult} maps to 422. */
-  @Test
-  public void testPostAccountingFailureReturns422() throws Exception {
-    JSONObject body = new JSONObject().put("id", "tx-1");
-    FIN_FinaccTransaction trx = mock(FIN_FinaccTransaction.class);
-    when(trx.getId()).thenReturn("tx-1");
-
-    Entity entity = mock(Entity.class);
-    when(entity.getTableId()).thenReturn("table-1");
-
-    try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
-         MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
-         MockedStatic<ModelProvider> modelProvider = mockStatic(ModelProvider.class);
-         MockedConstruction<DocumentPostingService> posting = mockConstruction(
-             DocumentPostingService.class,
-             (m, c) -> when(m.post(any(), any()))
-                 .thenReturn(new DocumentPostingService.PostResult(false, "No accounting engine")))) {
-      OBDal dal = mock(OBDal.class);
-      obDal.when(OBDal::getInstance).thenReturn(dal);
-      when(dal.get(eq(FIN_FinaccTransaction.class), eq("tx-1"))).thenReturn(trx);
-      ModelProvider mp = mock(ModelProvider.class);
-      modelProvider.when(ModelProvider::getInstance).thenReturn(mp);
-      when(mp.getEntity(anyString())).thenReturn(entity);
-
-      NeoResponse r = handler.handle(postActionCtx("post", body));
-
-      assertEquals(422, r.getHttpStatus());
     }
   }
 

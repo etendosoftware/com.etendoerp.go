@@ -30,8 +30,12 @@ import java.util.Map;
 import java.util.function.Consumer;
 
 import org.apache.commons.lang3.StringUtils;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONObject;
+import org.openbravo.base.exception.OBException;
 import org.openbravo.base.structure.BaseOBObject;
+import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
 
@@ -42,6 +46,48 @@ import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
  * touch the DAL) and carry no per-request state, so they live here as static utilities.
  */
 final class FinancialAccountTransactionsSupport {
+
+  private static final Logger log = LogManager.getLogger(FinancialAccountTransactionsSupport.class);
+
+  /** Reused error message (appears across every mutating action). */
+  static final String MSG_BODY_REQUIRED = "Request body is required";
+
+  /**
+   * A mutating action operating on a (non-null) request body. Implementations do the DAL work and
+   * return the response; any thrown exception is translated to the standard error envelope by
+   * {@link #runMutation}.
+   */
+  @FunctionalInterface
+  interface DalAction {
+    NeoResponse run(JSONObject body) throws Exception;
+  }
+
+  /**
+   * Shared wrapper for the mutating POST actions (create / update / process / reactivate / delete /
+   * transfer / create-payment). Centralizes the admin-mode + try/catch/finally boilerplate that was
+   * previously duplicated in each handler: validates the body is present, runs the action under
+   * admin mode, and on failure rolls back and maps the exception to a 400 (business) / 500
+   * (unexpected) response. {@code logContext} labels the log lines; {@code userError} is the safe
+   * message returned to the client on an unexpected error (never leaks internal details).
+   */
+  static NeoResponse runMutation(JSONObject body, String logContext, String userError,
+      DalAction action) {
+    if (body == null) return NeoResponse.error(400, MSG_BODY_REQUIRED);
+    try {
+      OBContext.setAdminMode(true);
+      return action.run(body);
+    } catch (OBException e) {
+      log.warn("{} business error: {}", logContext, e.getMessage());
+      OBDal.getInstance().rollbackAndClose();
+      return NeoResponse.error(400, e.getMessage());
+    } catch (Exception e) {
+      log.error("Error during {}", logContext, e);
+      OBDal.getInstance().rollbackAndClose();
+      return NeoResponse.error(500, userError);
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
 
   /** trxType code → Classic "Transaction Type" label (unknown codes pass through). */
   private static final Map<String, String> TRX_TYPE_CLASSIC = Map.of(

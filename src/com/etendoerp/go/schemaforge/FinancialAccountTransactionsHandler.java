@@ -17,10 +17,7 @@
 
 package com.etendoerp.go.schemaforge;
 
-import static com.etendoerp.go.schemaforge.FinancialAccountTransactionsSupport.bpartnerRoleFilter;
 import static com.etendoerp.go.schemaforge.FinancialAccountTransactionsSupport.buildPaymentLabel;
-import static com.etendoerp.go.schemaforge.FinancialAccountTransactionsSupport.daysUntil;
-import static com.etendoerp.go.schemaforge.FinancialAccountTransactionsSupport.formatDmy;
 import static com.etendoerp.go.schemaforge.FinancialAccountTransactionsSupport.optBigDecimal;
 import static com.etendoerp.go.schemaforge.FinancialAccountTransactionsSupport.parseDate;
 import static com.etendoerp.go.schemaforge.FinancialAccountTransactionsSupport.parseLocalDate;
@@ -35,7 +32,6 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.Timestamp;
 import java.time.Instant;
-import java.time.LocalDate;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.time.temporal.ChronoUnit;
@@ -54,7 +50,6 @@ import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.advpaymentmngt.actionHandler.FundsTransferActionHandler;
 import org.openbravo.advpaymentmngt.process.FIN_TransactionProcess;
-import org.openbravo.base.model.ModelProvider;
 import org.openbravo.base.provider.OBProvider;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.security.OrganizationStructureProvider;
@@ -68,7 +63,6 @@ import org.openbravo.model.financialmgmt.payment.FIN_FinaccTransaction;
 import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
 import org.openbravo.model.project.Project;
 
-import com.etendoerp.go.schemaforge.handlers.DocumentPostingService;
 import com.etendoerp.payment.removal.util.TransactionRemovalUtil;
 
 /**
@@ -131,16 +125,21 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
   private static final String ACTION_PROCESS = "process";
   private static final String ACTION_REACTIVATE = "reactivate";
   private static final String ACTION_DELETE = "delete";
-  private static final String ACTION_POST = "post";
   private static final String ACTION_BP_LOOKUP = "bpartner-lookup";
   private static final String ACTION_GL_LOOKUP = "glitem-lookup";
   private static final String ACTION_DIM_VALUES = "dimension-values";
   private static final String ACTION_OUTSTANDING = "outstanding-invoices";
   /** Default description applied to the funds-transfer transactions when none is given. */
   private static final String DEFAULT_TRANSFER_DESCRIPTION = "Funds Transfer Transaction";
-  /** Reused error message (Sonar S1192 — appears across create / create-payment / transfer). */
-  private static final String MSG_BODY_REQUIRED = "Request body is required";
-  private static final int LOOKUP_LIMIT = 25;
+  /** Reused messages / body-field keys (Sonar S1192 — each appears 3+ times). */
+  private static final String MSG_TRANSACTION_NOT_FOUND = "Transaction not found";
+  private static final String FIELD_PROCESS = "process";
+  private static final String KEY_STATUS = "status";
+  private static final String FIELD_GL_ITEM_ID = "glItemId";
+  private static final String FIELD_BPARTNER_ID = "bpartnerId";
+  private static final String FIELD_PROJECT_ID = "projectId";
+  private static final String FIELD_COSTCENTER_ID = "costcenterId";
+  private static final String FIELD_PRODUCT_ID = "productId";
   /** Document base type of finacc transactions — used to resolve header dimensions. */
   private static final String DOCBASETYPE_FAT = "FAT";
   /** AD reference backing FIN_Finacc_Transaction.Trxtype (core list: BPD/BPW/BF). */
@@ -157,16 +156,16 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
   private static final String FIELD_AMOUNT = "amount";
 
   /** Accounting-dimension UI keys, reused across marshalling, mapping and ordering. */
-  private static final String DIM_ORGANIZATION = "organization";
-  private static final String DIM_BPARTNER = "bpartner";
-  private static final String DIM_PROJECT = "project";
-  private static final String DIM_COSTCENTER = "costcenter";
-  private static final String DIM_PRODUCT = "product";
-  private static final String DIM_ACTIVITY = "activity";
-  private static final String DIM_CAMPAIGN = "campaign";
-  private static final String DIM_SALESREGION = "salesregion";
-  private static final String DIM_USER1 = "user1";
-  private static final String DIM_USER2 = "user2";
+  static final String DIM_ORGANIZATION = "organization";
+  static final String DIM_BPARTNER = "bpartner";
+  static final String DIM_PROJECT = "project";
+  static final String DIM_COSTCENTER = "costcenter";
+  static final String DIM_PRODUCT = "product";
+  static final String DIM_ACTIVITY = "activity";
+  static final String DIM_CAMPAIGN = "campaign";
+  static final String DIM_SALESREGION = "salesregion";
+  static final String DIM_USER1 = "user1";
+  static final String DIM_USER2 = "user2";
 
   /** Rolling window for inflow/outflow KPIs, in days. */
   private static final int KPI_WINDOW_DAYS = 30;
@@ -272,14 +271,17 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
 
   /** Routes the read-only {@code GET} actions; defaults to the transactions list. */
   private NeoResponse handleGet(String action, NeoContext context) {
-    if (ACTION_BP_LOOKUP.equals(action)) return handleBpartnerLookup(context);
-    if (ACTION_GL_LOOKUP.equals(action)) return handleGlItemLookup(context);
-    if (ACTION_DIM_VALUES.equals(action)) return handleDimensionValues(context);
-    if (ACTION_OUTSTANDING.equals(action)) return handleOutstandingInvoices(context);
+    if (ACTION_BP_LOOKUP.equals(action)) return FinancialAccountTransactionsLookups.bpartnerLookup(context);
+    if (ACTION_GL_LOOKUP.equals(action)) return FinancialAccountTransactionsLookups.glItemLookup(context);
+    if (ACTION_DIM_VALUES.equals(action)) return FinancialAccountTransactionsLookups.dimensionValues(context);
+    if (ACTION_OUTSTANDING.equals(action)) return FinancialAccountTransactionsLookups.outstandingInvoices(context);
     return handleList(context);
   }
 
-  /** Routes the mutating {@code POST} actions. */
+  /**
+   * Routes the mutating {@code POST} actions. Posting the accounting (contabilizar/descontabilizar)
+   * is NOT handled here — it goes through the financial-account spec's document-posting action.
+   */
   private NeoResponse handlePost(String action, NeoContext context) {
     if (ACTION_CREATE.equals(action)) return handleCreate(context);
     if (ACTION_UPDATE.equals(action)) return handleUpdate(context);
@@ -288,7 +290,6 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
     if (ACTION_PROCESS.equals(action)) return handleProcess(context);
     if (ACTION_REACTIVATE.equals(action)) return handleReactivate(context);
     if (ACTION_DELETE.equals(action)) return handleDelete(context);
-    if (ACTION_POST.equals(action)) return handlePostAccounting(context);
     return NeoResponse.error(405, "Method not allowed.");
   }
 
@@ -345,7 +346,7 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
         while (rs.next()) {
           JSONObject row = new JSONObject();
           Timestamp dateTs = rs.getTimestamp("statementdate");
-          String status = StringUtils.trimToEmpty(rs.getString("status"));
+          String status = StringUtils.trimToEmpty(rs.getString(KEY_STATUS));
           String trxType = StringUtils.trimToEmpty(rs.getString("trxtype"));
           BigDecimal amount = nullSafeBigDecimal(rs.getBigDecimal(FIELD_AMOUNT));
           String documentNo = StringUtils.trimToEmpty(rs.getString("document_no"));
@@ -366,11 +367,11 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
           row.put("contact", contact);
           row.put("glItem", StringUtils.trimToEmpty(rs.getString("gl_item")));
           // FK ids so the edit modal can prefill its {id,name} selectors.
-          row.put("glItemId", StringUtils.trimToEmpty(rs.getString("gl_item_id")));
-          row.put("bpartnerId", StringUtils.trimToEmpty(rs.getString("bpartner_id")));
-          row.put("projectId", StringUtils.trimToEmpty(rs.getString("project_id")));
-          row.put("costcenterId", StringUtils.trimToEmpty(rs.getString("costcenter_id")));
-          row.put("productId", StringUtils.trimToEmpty(rs.getString("product_id")));
+          row.put(FIELD_GL_ITEM_ID, StringUtils.trimToEmpty(rs.getString("gl_item_id")));
+          row.put(FIELD_BPARTNER_ID, StringUtils.trimToEmpty(rs.getString("bpartner_id")));
+          row.put(FIELD_PROJECT_ID, StringUtils.trimToEmpty(rs.getString("project_id")));
+          row.put(FIELD_COSTCENTER_ID, StringUtils.trimToEmpty(rs.getString("costcenter_id")));
+          row.put(FIELD_PRODUCT_ID, StringUtils.trimToEmpty(rs.getString("product_id")));
           row.put("currencyIso", StringUtils.trimToEmpty(rs.getString("currency_iso")));
           // Pre-derived fields consumed by the generic CSV export (export=csv) so it
           // stays a dumb serializer: Classic-style type/status labels, the deposit
@@ -605,55 +606,38 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
    * {@link #buildTransaction(JSONObject, FIN_FinancialAccount, Currency)}.
    */
   private NeoResponse handleCreate(NeoContext context) {
-    JSONObject body = context.getRequestBody();
-    if (body == null) return NeoResponse.error(400, MSG_BODY_REQUIRED);
-    try {
-      OBContext.setAdminMode(true);
+    return FinancialAccountTransactionsSupport.runMutation(context.getRequestBody(), "create",
+        "Could not create the movement. Please check logs for details.", body -> {
+          NeoResponse validationError = validateCreateBody(body);
+          if (validationError != null) return validationError;
 
-      NeoResponse validationError = validateCreateBody(body);
-      if (validationError != null) return validationError;
+          String accountId = body.optString(PARAM_ACCOUNT_ID, null);
+          FIN_FinancialAccount account = OBDal.getInstance().get(FIN_FinancialAccount.class, accountId);
+          if (account == null) return NeoResponse.error(400, "Financial account not found: " + accountId);
 
-      String accountId = body.optString(PARAM_ACCOUNT_ID, null);
-      FIN_FinancialAccount account = OBDal.getInstance().get(FIN_FinancialAccount.class, accountId);
-      if (account == null) return NeoResponse.error(400, "Financial account not found: " + accountId);
+          String currencyId = body.optString("currencyId", null);
+          Currency currency = StringUtils.isBlank(currencyId)
+              ? account.getCurrency()
+              : OBDal.getInstance().get(Currency.class, currencyId);
+          if (currency == null) return NeoResponse.error(400, "Currency not found: " + currencyId);
 
-      String currencyId = body.optString("currencyId", null);
-      Currency currency = StringUtils.isBlank(currencyId)
-          ? account.getCurrency()
-          : OBDal.getInstance().get(Currency.class, currencyId);
-      if (currency == null) return NeoResponse.error(400, "Currency not found: " + currencyId);
+          FIN_FinaccTransaction trx = buildTransaction(body, account, currency);
+          OBDal.getInstance().save(trx);
+          OBDal.getInstance().flush();
 
-      FIN_FinaccTransaction trx = buildTransaction(body, account, currency);
-      OBDal.getInstance().save(trx);
-      OBDal.getInstance().flush();
+          // "Confirmar" in the modal creates AND processes in one atomic call (Borrador → Procesado);
+          // "Guardar" leaves it Draft (process omitted / false).
+          if (body.optBoolean(FIELD_PROCESS, false)) {
+            FIN_TransactionProcess.doTransactionProcess("P", trx);
+            OBDal.getInstance().flush();
+          }
 
-      // "Confirmar" in the modal creates AND processes in one atomic call (Borrador → Procesado);
-      // "Guardar" leaves it Draft (process omitted / false).
-      if (body.optBoolean("process", false)) {
-        FIN_TransactionProcess.doTransactionProcess("P", trx);
-        OBDal.getInstance().flush();
-      }
-
-      JSONObject result = new JSONObject();
-      result.put("id", trx.getId());
-      result.put(FIELD_TRX_TYPE, trx.getTransactionType());
-      result.put("status", trx.getStatus());
-      return NeoResponse.createdWithData(result);
-
-    } catch (org.openbravo.base.exception.OBException e) {
-      log.warn("Create transaction business error: {}", e.getMessage());
-      OBDal.getInstance().rollbackAndClose();
-      return NeoResponse.error(400, e.getMessage());
-    } catch (Exception e) {
-      // Log full stack trace server-side; never echo e.getMessage() back —
-      // that can leak DB constraint names or other internal details to the
-      // client.
-      log.error("Error creating financial account transaction", e);
-      OBDal.getInstance().rollbackAndClose();
-      return NeoResponse.error(500, "Could not create the movement. Please check logs for details.");
-    } finally {
-      OBContext.restorePreviousMode();
-    }
+          JSONObject result = new JSONObject();
+          result.put("id", trx.getId());
+          result.put(FIELD_TRX_TYPE, trx.getTransactionType());
+          result.put(KEY_STATUS, trx.getStatus());
+          return NeoResponse.createdWithData(result);
+        });
   }
 
   /**
@@ -662,52 +646,39 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
    * it afterwards when {@code process:true} (edit + confirm in one call).
    */
   private NeoResponse handleUpdate(NeoContext context) {
-    JSONObject body = context.getRequestBody();
-    if (body == null) return NeoResponse.error(400, MSG_BODY_REQUIRED);
-    try {
-      OBContext.setAdminMode(true);
-      FIN_FinaccTransaction trx = loadTransactionFromBody(body);
-      if (trx == null) return NeoResponse.error(404, "Transaction not found");
-      // A posted (contabilizado) transaction is fully locked — the user must reactivate first.
-      if ("Y".equals(trx.getPosted())) {
-        return NeoResponse.error(400, "A posted transaction cannot be edited; reactivate it first.");
-      }
+    return FinancialAccountTransactionsSupport.runMutation(context.getRequestBody(), "update",
+        "Could not update the movement. Please check logs for details.", body -> {
+          FIN_FinaccTransaction trx = loadTransactionFromBody(body);
+          if (trx == null) return NeoResponse.error(404, MSG_TRANSACTION_NOT_FOUND);
+          // A posted (contabilizado) transaction is fully locked — the user must reactivate first.
+          if ("Y".equals(trx.getPosted())) {
+            return NeoResponse.error(400, "A posted transaction cannot be edited; reactivate it first.");
+          }
 
-      boolean processed = Boolean.TRUE.equals(trx.isProcessed());
-      if (processed) {
-        // Processed (not posted): only the "safe" fields stay editable — G/L item, accounting
-        // dimensions, description and dates. Amount, direction and status are locked (they affect
-        // the balance already applied to the account).
-        applyEditableDimensions(trx, body);
-      } else {
-        String currencyId = body.optString("currencyId", null);
-        Currency currency = StringUtils.isBlank(currencyId)
-            ? trx.getCurrency()
-            : OBDal.getInstance().get(Currency.class, currencyId);
-        if (currency == null) return NeoResponse.error(400, "Currency not found: " + currencyId);
-        applyEditableFields(trx, body, currency);
-      }
-      OBDal.getInstance().save(trx);
-      OBDal.getInstance().flush();
+          boolean processed = Boolean.TRUE.equals(trx.isProcessed());
+          if (processed) {
+            // Processed (not posted): only the "safe" fields stay editable — G/L item, accounting
+            // dimensions, description and dates. Amount, direction and status are locked (they affect
+            // the balance already applied to the account).
+            applyEditableDimensions(trx, body);
+          } else {
+            String currencyId = body.optString("currencyId", null);
+            Currency currency = StringUtils.isBlank(currencyId)
+                ? trx.getCurrency()
+                : OBDal.getInstance().get(Currency.class, currencyId);
+            if (currency == null) return NeoResponse.error(400, "Currency not found: " + currencyId);
+            applyEditableFields(trx, body, currency);
+          }
+          OBDal.getInstance().save(trx);
+          OBDal.getInstance().flush();
 
-      // Confirm (process) is only available while the transaction is still Draft.
-      if (!processed && body.optBoolean("process", false)) {
-        FIN_TransactionProcess.doTransactionProcess("P", trx);
-        OBDal.getInstance().flush();
-      }
-      return lifecycleOk(trx);
-
-    } catch (org.openbravo.base.exception.OBException e) {
-      log.warn("Update transaction business error: {}", e.getMessage());
-      OBDal.getInstance().rollbackAndClose();
-      return NeoResponse.error(400, e.getMessage());
-    } catch (Exception e) {
-      log.error("Error updating financial account transaction", e);
-      OBDal.getInstance().rollbackAndClose();
-      return NeoResponse.error(500, "Could not update the movement. Please check logs for details.");
-    } finally {
-      OBContext.restorePreviousMode();
-    }
+          // Confirm (process) is only available while the transaction is still Draft.
+          if (!processed && body.optBoolean(FIELD_PROCESS, false)) {
+            FIN_TransactionProcess.doTransactionProcess("P", trx);
+            OBDal.getInstance().flush();
+          }
+          return lifecycleOk(trx);
+        });
   }
 
   /**
@@ -716,22 +687,8 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
    * Delegates the business logic to {@link AddPaymentService}.
    */
   private NeoResponse handleCreatePayment(NeoContext context) {
-    JSONObject body = context.getRequestBody();
-    if (body == null) return NeoResponse.error(400, MSG_BODY_REQUIRED);
-    try {
-      OBContext.setAdminMode(true);
-      return AddPaymentService.doAddPayment(body);
-    } catch (org.openbravo.base.exception.OBException e) {
-      log.warn("Add payment failed: {}", e.getMessage());
-      OBDal.getInstance().rollbackAndClose();
-      return NeoResponse.error(400, e.getMessage());
-    } catch (Exception e) {
-      log.error("Error creating payment", e);
-      OBDal.getInstance().rollbackAndClose();
-      return NeoResponse.error(500, "Could not register the payment. Please check logs for details.");
-    } finally {
-      OBContext.restorePreviousMode();
-    }
+    return FinancialAccountTransactionsSupport.runMutation(context.getRequestBody(), "add payment",
+        "Could not register the payment. Please check logs for details.", AddPaymentService::doAddPayment);
   }
 
   /**
@@ -753,7 +710,7 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
     result.put("success", true);
     if (trx != null) {
       result.put("id", trx.getId());
-      result.put("status", trx.getStatus());
+      result.put(KEY_STATUS, trx.getStatus());
     }
     JSONObject responseData = new JSONObject();
     responseData.put("data", result);
@@ -768,26 +725,14 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
    * {@code "P"} (process) action. Never reimplements the processing logic.
    */
   private NeoResponse handleProcess(NeoContext context) {
-    JSONObject body = context.getRequestBody();
-    if (body == null) return NeoResponse.error(400, MSG_BODY_REQUIRED);
-    try {
-      OBContext.setAdminMode(true);
-      FIN_FinaccTransaction trx = loadTransactionFromBody(body);
-      if (trx == null) return NeoResponse.error(404, "Transaction not found");
-      FIN_TransactionProcess.doTransactionProcess("P", trx);
-      OBDal.getInstance().flush();
-      return lifecycleOk(trx);
-    } catch (org.openbravo.base.exception.OBException e) {
-      log.warn("Process transaction business error: {}", e.getMessage());
-      OBDal.getInstance().rollbackAndClose();
-      return NeoResponse.error(400, e.getMessage());
-    } catch (Exception e) {
-      log.error("Error processing financial account transaction", e);
-      OBDal.getInstance().rollbackAndClose();
-      return NeoResponse.error(500, "Could not process the movement. Please check logs for details.");
-    } finally {
-      OBContext.restorePreviousMode();
-    }
+    return FinancialAccountTransactionsSupport.runMutation(context.getRequestBody(), ACTION_PROCESS,
+        "Could not process the movement. Please check logs for details.", body -> {
+          FIN_FinaccTransaction trx = loadTransactionFromBody(body);
+          if (trx == null) return NeoResponse.error(404, MSG_TRANSACTION_NOT_FOUND);
+          FIN_TransactionProcess.doTransactionProcess("P", trx);
+          OBDal.getInstance().flush();
+          return lifecycleOk(trx);
+        });
   }
 
   /**
@@ -796,27 +741,15 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
    * {@link TransactionRemovalUtil#reactivate}. Never reimplements that logic.
    */
   private NeoResponse handleReactivate(NeoContext context) {
-    JSONObject body = context.getRequestBody();
-    if (body == null) return NeoResponse.error(400, MSG_BODY_REQUIRED);
-    try {
-      OBContext.setAdminMode(true);
-      FIN_FinaccTransaction trx = loadTransactionFromBody(body);
-      if (trx == null) return NeoResponse.error(404, "Transaction not found");
-      TransactionRemovalUtil.reactivate(trx);
-      OBDal.getInstance().flush();
-      trx = OBDal.getInstance().get(FIN_FinaccTransaction.class, trx.getId());
-      return lifecycleOk(trx);
-    } catch (org.openbravo.base.exception.OBException e) {
-      log.warn("Reactivate transaction business error: {}", e.getMessage());
-      OBDal.getInstance().rollbackAndClose();
-      return NeoResponse.error(400, e.getMessage());
-    } catch (Exception e) {
-      log.error("Error reactivating financial account transaction", e);
-      OBDal.getInstance().rollbackAndClose();
-      return NeoResponse.error(500, "Could not reactivate the movement. Please check logs for details.");
-    } finally {
-      OBContext.restorePreviousMode();
-    }
+    return FinancialAccountTransactionsSupport.runMutation(context.getRequestBody(), ACTION_REACTIVATE,
+        "Could not reactivate the movement. Please check logs for details.", body -> {
+          FIN_FinaccTransaction trx = loadTransactionFromBody(body);
+          if (trx == null) return NeoResponse.error(404, MSG_TRANSACTION_NOT_FOUND);
+          TransactionRemovalUtil.reactivate(trx);
+          OBDal.getInstance().flush();
+          trx = OBDal.getInstance().get(FIN_FinaccTransaction.class, trx.getId());
+          return lifecycleOk(trx);
+        });
   }
 
   /**
@@ -825,62 +758,18 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
    * ({@link TransactionRemovalUtil#reactivateAndRemove}), undoing posting/reconciliation first.
    */
   private NeoResponse handleDelete(NeoContext context) {
-    JSONObject body = context.getRequestBody();
-    if (body == null) return NeoResponse.error(400, MSG_BODY_REQUIRED);
-    try {
-      OBContext.setAdminMode(true);
-      FIN_FinaccTransaction trx = loadTransactionFromBody(body);
-      if (trx == null) return NeoResponse.error(404, "Transaction not found");
-      if (Boolean.TRUE.equals(trx.isProcessed())) {
-        TransactionRemovalUtil.reactivateAndRemove(trx.getId());
-      } else {
-        OBDal.getInstance().remove(trx);
-        OBDal.getInstance().flush();
-      }
-      return lifecycleOk(null);
-    } catch (org.openbravo.base.exception.OBException e) {
-      log.warn("Delete transaction business error: {}", e.getMessage());
-      OBDal.getInstance().rollbackAndClose();
-      return NeoResponse.error(400, e.getMessage());
-    } catch (Exception e) {
-      log.error("Error deleting financial account transaction", e);
-      OBDal.getInstance().rollbackAndClose();
-      return NeoResponse.error(500, "Could not delete the movement. Please check logs for details.");
-    } finally {
-      OBContext.restorePreviousMode();
-    }
-  }
-
-  /**
-   * Handles {@code POST ?action=post} — posts the transaction's accounting (contabilizar) through
-   * the Etendo accounting engine via {@link DocumentPostingService}. Replaces the old, broken route
-   * that targeted a non-existent {@code financial-account-detail} spec. Posting is an independent
-   * flag; the transaction must already be Processed.
-   */
-  private NeoResponse handlePostAccounting(NeoContext context) {
-    JSONObject body = context.getRequestBody();
-    if (body == null) return NeoResponse.error(400, MSG_BODY_REQUIRED);
-    try {
-      OBContext.setAdminMode(true);
-      FIN_FinaccTransaction trx = loadTransactionFromBody(body);
-      if (trx == null) return NeoResponse.error(404, "Transaction not found");
-      String tableId = ModelProvider.getInstance().getEntity(FIN_FinaccTransaction.ENTITY_NAME).getTableId();
-      DocumentPostingService.PostResult result = new DocumentPostingService().post(tableId, trx.getId());
-      JSONObject data = new JSONObject();
-      data.put("success", result.ok());
-      data.put("message", result.message());
-      if (!result.ok()) return NeoResponse.error(422, data.toString());
-      JSONObject responseData = new JSONObject();
-      responseData.put("data", data);
-      JSONObject envelope = new JSONObject();
-      envelope.put(KEY_RESPONSE, responseData);
-      return NeoResponse.ok(envelope);
-    } catch (Exception e) {
-      log.error("Error posting financial account transaction", e);
-      return NeoResponse.error(500, "Could not post the movement. Please check logs for details.");
-    } finally {
-      OBContext.restorePreviousMode();
-    }
+    return FinancialAccountTransactionsSupport.runMutation(context.getRequestBody(), ACTION_DELETE,
+        "Could not delete the movement. Please check logs for details.", body -> {
+          FIN_FinaccTransaction trx = loadTransactionFromBody(body);
+          if (trx == null) return NeoResponse.error(404, MSG_TRANSACTION_NOT_FOUND);
+          if (Boolean.TRUE.equals(trx.isProcessed())) {
+            TransactionRemovalUtil.reactivateAndRemove(trx.getId());
+          } else {
+            OBDal.getInstance().remove(trx);
+            OBDal.getInstance().flush();
+          }
+          return lifecycleOk(null);
+        });
   }
 
   /**
@@ -890,22 +779,8 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
    * paired-transaction / conversion-rate / processing logic.
    */
   private NeoResponse handleTransfer(NeoContext context) {
-    JSONObject body = context.getRequestBody();
-    if (body == null) return NeoResponse.error(400, MSG_BODY_REQUIRED);
-    try {
-      OBContext.setAdminMode(true);
-      return transfer(body);
-    } catch (org.openbravo.base.exception.OBException e) {
-      log.warn("Funds transfer business error: {}", e.getMessage());
-      OBDal.getInstance().rollbackAndClose();
-      return NeoResponse.error(400, e.getMessage());
-    } catch (Exception e) {
-      log.error("Funds transfer failed", e);
-      OBDal.getInstance().rollbackAndClose();
-      return NeoResponse.error(500, "Could not transfer the funds. Please check logs for details.");
-    } finally {
-      OBContext.restorePreviousMode();
-    }
+    return FinancialAccountTransactionsSupport.runMutation(context.getRequestBody(), ACTION_TRANSFER,
+        "Could not transfer the funds. Please check logs for details.", this::transfer);
   }
 
   /**
@@ -945,7 +820,7 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
     // available balance (it allows overdrawing the account), so we match that behaviour here.
 
     GLItem glItem = null;
-    String glItemId = body.optString("glItemId", null);
+    String glItemId = body.optString(FIELD_GL_ITEM_ID, null);
     if (StringUtils.isNotBlank(glItemId)) {
       glItem = OBDal.getInstance().get(GLItem.class, glItemId);
     }
@@ -1065,13 +940,13 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
     trx.setStatus(depositAmount.signum() > 0 ? "RPAE" : "RPAP");
     trx.setProcessed(false);
 
-    setOptionalRef(body, "bpartnerId", BusinessPartner.class, trx::setBusinessPartner);
-    setOptionalRef(body, "glItemId", GLItem.class, trx::setGLItem);
+    setOptionalRef(body, FIELD_BPARTNER_ID, BusinessPartner.class, trx::setBusinessPartner);
+    setOptionalRef(body, FIELD_GL_ITEM_ID, GLItem.class, trx::setGLItem);
     // Accounting dimensions — only the ones enabled in the chart of accounts are ever sent by
     // the UI (see headerDimensions in the list payload).
-    setOptionalRef(body, "projectId", Project.class, trx::setProject);
-    setOptionalRef(body, "costcenterId", Costcenter.class, trx::setCostCenter);
-    setOptionalRef(body, "productId", Product.class, trx::setProduct);
+    setOptionalRef(body, FIELD_PROJECT_ID, Project.class, trx::setProject);
+    setOptionalRef(body, FIELD_COSTCENTER_ID, Costcenter.class, trx::setCostCenter);
+    setOptionalRef(body, FIELD_PRODUCT_ID, Product.class, trx::setProduct);
   }
 
   /**
@@ -1084,11 +959,11 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
     trx.setDescription(body.optString(FIELD_DESCRIPTION, trx.getDescription()));
     trx.setTransactionDate(parseLocalDate(body.optString("transactionDate", null), trx.getTransactionDate()));
     trx.setDateAcct(parseLocalDate(body.optString("accountingDate", null), trx.getDateAcct()));
-    setOptionalRef(body, "bpartnerId", BusinessPartner.class, trx::setBusinessPartner);
-    setOptionalRef(body, "glItemId", GLItem.class, trx::setGLItem);
-    setOptionalRef(body, "projectId", Project.class, trx::setProject);
-    setOptionalRef(body, "costcenterId", Costcenter.class, trx::setCostCenter);
-    setOptionalRef(body, "productId", Product.class, trx::setProduct);
+    setOptionalRef(body, FIELD_BPARTNER_ID, BusinessPartner.class, trx::setBusinessPartner);
+    setOptionalRef(body, FIELD_GL_ITEM_ID, GLItem.class, trx::setGLItem);
+    setOptionalRef(body, FIELD_PROJECT_ID, Project.class, trx::setProject);
+    setOptionalRef(body, FIELD_COSTCENTER_ID, Costcenter.class, trx::setCostCenter);
+    setOptionalRef(body, FIELD_PRODUCT_ID, Product.class, trx::setProduct);
   }
 
   long nextLineNo(FIN_FinancialAccount account) {
@@ -1106,213 +981,4 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
     return 10L;
   }
 
-  /**
-   * Handles {@code GET ?action=bpartner-lookup&q=...&role=customer|vendor} —
-   * fuzzy search over {@code c_bpartner.name}, scoped to the current client +
-   * system records. When {@code role=customer} only customers are returned;
-   * when {@code role=vendor} only vendors; otherwise all active bpartners.
-   */
-  private NeoResponse handleBpartnerLookup(NeoContext context) {
-    String q = context.getQueryParams() != null ? context.getQueryParams().get("q") : "";
-    String role = context.getQueryParams() != null ? context.getQueryParams().getOrDefault("role", "") : "";
-    return runLookup(
-        "SELECT c_bpartner_id AS id, name FROM c_bpartner"
-            + " WHERE isactive='Y' AND ad_client_id IN (?, ?)"
-            + bpartnerRoleFilter(role)
-            + "   AND LOWER(name) LIKE ?"
-            + " ORDER BY name ASC"
-            + " LIMIT " + LOOKUP_LIMIT,
-        q, "bpartners");
-  }
-
-  private NeoResponse handleGlItemLookup(NeoContext context) {
-    String q = context.getQueryParams() != null ? context.getQueryParams().get("q") : "";
-    return runLookup(
-        "SELECT c_glitem_id AS id, name FROM c_glitem"
-            + " WHERE isactive='Y' AND ad_client_id IN (?, ?)"
-            + "   AND LOWER(name) LIKE ?"
-            + " ORDER BY name ASC"
-            + " LIMIT " + LOOKUP_LIMIT,
-        q, "glItems");
-  }
-
-  /** Dimension key → {table, id column} for the dimension-values lookup. */
-  private static final Map<String, String[]> DIM_VALUE_TABLE = Map.ofEntries(
-      Map.entry(DIM_ORGANIZATION, new String[] { "ad_org", "ad_org_id" }),
-      Map.entry(DIM_BPARTNER, new String[] { "c_bpartner", "c_bpartner_id" }),
-      Map.entry(DIM_PRODUCT, new String[] { "m_product", "m_product_id" }),
-      Map.entry(DIM_PROJECT, new String[] { "c_project", "c_project_id" }),
-      Map.entry(DIM_COSTCENTER, new String[] { "c_costcenter", "c_costcenter_id" }),
-      Map.entry(DIM_ACTIVITY, new String[] { "c_activity", "c_activity_id" }),
-      Map.entry(DIM_CAMPAIGN, new String[] { "c_campaign", "c_campaign_id" }),
-      Map.entry(DIM_SALESREGION, new String[] { "c_salesregion", "c_salesregion_id" }),
-      Map.entry(DIM_USER1, new String[] { DIM_USER1, "user1_id" }),
-      Map.entry(DIM_USER2, new String[] { DIM_USER2, "user2_id" }));
-
-  /**
-   * Handles {@code GET ?action=dimension-values&dimension=<key>&q=...} — returns
-   * the selectable values for an accounting dimension (organizations, projects,
-   * cost centers, …), scoped to the current client + system records. The table
-   * and id column come from a fixed whitelist, never from user input.
-   */
-  private NeoResponse handleDimensionValues(NeoContext context) {
-    String dim = context.getQueryParams() != null ? context.getQueryParams().get("dimension") : null;
-    String[] meta = dim != null ? DIM_VALUE_TABLE.get(dim) : null;
-    if (meta == null) {
-      return NeoResponse.error(400, "Unknown or unsupported dimension: " + dim);
-    }
-    String q = context.getQueryParams() != null ? context.getQueryParams().get("q") : "";
-    String sql = "SELECT " + meta[1] + " AS id, name FROM " + meta[0]
-        + " WHERE isactive = 'Y' AND " + meta[1] + " <> '0' AND ad_client_id IN (?, ?)"
-        + "   AND LOWER(name) LIKE ?"
-        + " ORDER BY name ASC"
-        + " LIMIT 200";
-    return runLookup(sql, q, "values");
-  }
-
-  /**
-   * Outstanding (unpaid) invoice payment-schedule details for a business
-   * partner. The {@code amount} of a {@code FIN_Payment_ScheduleDetail} whose
-   * {@code fin_payment_detail_id} is NULL is the amount still pending payment;
-   * those rows are exactly what Classic's "Add Payment" grid shows. We expose
-   * the same triplet of amounts: invoiced ({@code c_invoice.grandtotal}),
-   * expected ({@code fin_payment_schedule.amount}) and outstanding
-   * ({@code fin_payment_scheduledetail.amount}).
-   */
-  private static final String OUTSTANDING_INVOICES_SQL =
-      "SELECT psd.fin_payment_scheduledetail_id AS id,"
-          + "       i.documentno AS doc_no,"
-          + "       COALESCE(i.description, '') AS descr,"
-          + "       bp.name AS bpartner,"
-          + "       i.dateinvoiced AS invoice_date,"
-          + "       ps.duedate AS due_date,"
-          + "       COALESCE(pm.name, '') AS payment_method,"
-          + "       COALESCE(proj.name, '') AS project,"
-          + "       COALESCE(o.documentno, '') AS order_no,"
-          + "       cur.iso_code AS currency_iso,"
-          + "       i.grandtotal AS invoiced_amount,"
-          + "       ps.amount AS expected_amount,"
-          + "       psd.amount AS outstanding_amount"
-          + "  FROM fin_payment_scheduledetail psd"
-          + "  JOIN fin_payment_schedule ps ON ps.fin_payment_schedule_id = psd.fin_payment_schedule_invoice"
-          + "  JOIN c_invoice i ON i.c_invoice_id = ps.c_invoice_id"
-          + "  JOIN c_bpartner bp ON bp.c_bpartner_id = i.c_bpartner_id"
-          + "  JOIN c_currency cur ON cur.c_currency_id = i.c_currency_id"
-          + "  LEFT JOIN fin_paymentmethod pm ON pm.fin_paymentmethod_id = COALESCE(ps.fin_paymentmethod_id, i.fin_paymentmethod_id)"
-          + "  LEFT JOIN c_project proj ON proj.c_project_id = i.c_project_id"
-          + "  LEFT JOIN c_order o ON o.c_order_id = i.c_order_id"
-          + " WHERE psd.fin_payment_detail_id IS NULL"
-          + "   AND psd.isactive = 'Y'"
-          + "   AND i.docstatus = 'CO'"
-          + "   AND i.issotrx = ?"
-          + "   AND i.ad_client_id IN (?, ?)";
-
-  /** Optional clause: scope to a single business partner when one is given. */
-  private static final String OUTSTANDING_INVOICES_BP_CLAUSE = "   AND i.c_bpartner_id = ?";
-  private static final String OUTSTANDING_INVOICES_TAIL =
-      " ORDER BY ps.duedate ASC, i.documentno ASC LIMIT 500";
-
-  /**
-   * Handles {@code GET ?action=outstanding-invoices&bpartnerId=...&doc=in|out} —
-   * returns the unpaid invoices scoped by direction ({@code doc=in} → sales /
-   * cobro, {@code doc=out} → purchase / pago). When {@code bpartnerId} is blank
-   * the invoices of ALL business partners are returned (so the user can allocate
-   * a payment to any contact); when given, they are scoped to that partner.
-   */
-  private NeoResponse handleOutstandingInvoices(NeoContext context) {
-    Map<String, String> qp = context.getQueryParams();
-    String bpartnerId = qp != null ? qp.get("bpartnerId") : null;
-    boolean hasBp = StringUtils.isNotBlank(bpartnerId);
-    String doc = qp != null ? qp.getOrDefault("doc", "in") : "in";
-    String isSotrx = "out".equals(doc) ? "N" : "Y";
-    String sql = OUTSTANDING_INVOICES_SQL
-        + (hasBp ? OUTSTANDING_INVOICES_BP_CLAUSE : "")
-        + OUTSTANDING_INVOICES_TAIL;
-    try {
-      OBContext.setAdminMode(true);
-      String clientId = OBContext.getOBContext().getCurrentClient().getId();
-      LocalDate today = LocalDate.now();
-      JSONArray arr = new JSONArray();
-      try (PreparedStatement ps = OBDal.getInstance().getConnection().prepareStatement(sql)) {
-        ps.setString(1, isSotrx);
-        ps.setString(2, "0");
-        ps.setString(3, clientId);
-        if (hasBp) ps.setString(4, bpartnerId);
-        try (ResultSet rs = ps.executeQuery()) {
-          while (rs.next()) {
-            arr.put(marshalOutstandingInvoice(rs, today));
-          }
-        }
-      }
-      JSONObject data = new JSONObject();
-      data.put("invoices", arr);
-      JSONObject responseData = new JSONObject();
-      responseData.put("data", data);
-      JSONObject envelope = new JSONObject();
-      envelope.put(KEY_RESPONSE, responseData);
-      return NeoResponse.ok(envelope);
-    } catch (Exception e) {
-      log.error("Outstanding invoices lookup failed for bpartner {}", bpartnerId, e);
-      return NeoResponse.error(500, "Outstanding invoices lookup failed");
-    } finally {
-      OBContext.restorePreviousMode();
-    }
-  }
-
-  /** Maps one outstanding-invoice row to the JSON shape the payment UI expects. */
-  private JSONObject marshalOutstandingInvoice(ResultSet rs, LocalDate today) throws Exception {
-    java.sql.Date invoiceDate = rs.getDate("invoice_date");
-    java.sql.Date dueDate = rs.getDate("due_date");
-    JSONObject row = new JSONObject();
-    row.put("id", rs.getString("id"));
-    row.put("no", StringUtils.trimToEmpty(rs.getString("doc_no")));
-    row.put(FIELD_DESCRIPTION, StringUtils.trimToEmpty(rs.getString("descr")));
-    row.put("bp", StringUtils.trimToEmpty(rs.getString(DIM_BPARTNER)));
-    row.put("fecha", formatDmy(invoiceDate));
-    row.put("venc", formatDmy(dueDate));
-    row.put("dias", daysUntil(dueDate, today));
-    row.put("metodo", StringUtils.trimToEmpty(rs.getString("payment_method")));
-    row.put("proyecto", StringUtils.trimToEmpty(rs.getString(DIM_PROJECT)));
-    row.put("orderNo", StringUtils.trimToEmpty(rs.getString("order_no")));
-    row.put("cc", "");
-    row.put("mon", StringUtils.trimToEmpty(rs.getString("currency_iso")));
-    row.put("total", nullSafeBigDecimal(rs.getBigDecimal("invoiced_amount")));
-    row.put("expected", nullSafeBigDecimal(rs.getBigDecimal("expected_amount")));
-    row.put("pend", nullSafeBigDecimal(rs.getBigDecimal("outstanding_amount")));
-    return row;
-  }
-
-  private NeoResponse runLookup(String sql, String q, String resultKey) {
-    try {
-      OBContext.setAdminMode(true);
-      String clientId = OBContext.getOBContext().getCurrentClient().getId();
-      String pattern = "%" + (q == null ? "" : q.toLowerCase()) + "%";
-      JSONArray arr = new JSONArray();
-      try (PreparedStatement ps = OBDal.getInstance().getConnection().prepareStatement(sql)) {
-        ps.setString(1, "0");
-        ps.setString(2, clientId);
-        ps.setString(3, pattern);
-        try (ResultSet rs = ps.executeQuery()) {
-          while (rs.next()) {
-            JSONObject row = new JSONObject();
-            row.put("id", rs.getString("id"));
-            row.put("name", StringUtils.trimToEmpty(rs.getString("name")));
-            arr.put(row);
-          }
-        }
-      }
-      JSONObject data = new JSONObject();
-      data.put(resultKey, arr);
-      JSONObject responseData = new JSONObject();
-      responseData.put("data", data);
-      JSONObject envelope = new JSONObject();
-      envelope.put(KEY_RESPONSE, responseData);
-      return NeoResponse.ok(envelope);
-    } catch (Exception e) {
-      log.error("Lookup failed for query '{}'", q, e);
-      return NeoResponse.error(500, "Lookup failed");
-    } finally {
-      OBContext.restorePreviousMode();
-    }
-  }
 }
