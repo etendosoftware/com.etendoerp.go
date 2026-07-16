@@ -70,15 +70,7 @@ public class LocatorWarehouseResolver {
    */
   public static Map<String, String> resolveNames(Collection<String> locatorIds) {
     Map<String, String> result = new HashMap<>();
-    if (locatorIds == null || locatorIds.isEmpty()) {
-      return result;
-    }
-    List<String> cleanIds = new ArrayList<>();
-    for (String id : locatorIds) {
-      if (id != null && !id.trim().isEmpty()) {
-        cleanIds.add(id);
-      }
-    }
+    List<String> cleanIds = filterBlankIds(locatorIds);
     if (cleanIds.isEmpty()) {
       return result;
     }
@@ -88,15 +80,8 @@ public class LocatorWarehouseResolver {
           .add(Restrictions.in("id", cleanIds))
           .list();
       for (Locator loc : locators) {
-        Warehouse warehouse = loc.getWarehouse();
-        if (warehouse == null) {
-          continue;
-        }
-        String name = warehouse.getName();
-        if (name == null || name.trim().isEmpty()) {
-          name = warehouse.getIdentifier();
-        }
-        if (name != null && !name.trim().isEmpty()) {
+        String name = resolveWarehouseName(loc);
+        if (name != null) {
           result.put(loc.getId(), name);
         }
       }
@@ -104,6 +89,33 @@ public class LocatorWarehouseResolver {
       OBContext.restorePreviousMode();
     }
     return result;
+  }
+
+  /** Filters out null/blank ids, tolerating a null collection. */
+  private static List<String> filterBlankIds(Collection<String> ids) {
+    List<String> cleanIds = new ArrayList<>();
+    if (ids == null) {
+      return cleanIds;
+    }
+    for (String id : ids) {
+      if (id != null && !id.trim().isEmpty()) {
+        cleanIds.add(id);
+      }
+    }
+    return cleanIds;
+  }
+
+  /** Resolves a locator's warehouse display name, falling back to its identifier; {@code null} when unresolvable. */
+  private static String resolveWarehouseName(Locator loc) {
+    Warehouse warehouse = loc.getWarehouse();
+    if (warehouse == null) {
+      return null;
+    }
+    String name = warehouse.getName();
+    if (name == null || name.trim().isEmpty()) {
+      name = warehouse.getIdentifier();
+    }
+    return (name != null && !name.trim().isEmpty()) ? name : null;
   }
 
   /**

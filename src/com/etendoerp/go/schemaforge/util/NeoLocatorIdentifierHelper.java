@@ -116,10 +116,9 @@ public class NeoLocatorIdentifierHelper {
     sfFieldCrit.setFilterOnReadableOrganization(false);
     for (SFField sfField : sfFieldCrit.list()) {
       Column col = sfField.getADColumn();
-      if (!Boolean.TRUE.equals(sfField.isIncluded()) || col == null) {
-        continue;
-      }
-      if (!LocatorWarehouseResolver.isLocatorRef(col)) {
+      boolean skip = !Boolean.TRUE.equals(sfField.isIncluded()) || col == null
+          || !LocatorWarehouseResolver.isLocatorRef(col);
+      if (skip) {
         continue;
       }
       Property prop = dalEnt.getPropertyByColumnName(col.getDBColumnName());
@@ -135,9 +134,9 @@ public class NeoLocatorIdentifierHelper {
     JSONArray dataArray = inner.optJSONArray(JsonConstants.RESPONSE_DATA);
     if (dataArray != null) {
       for (int i = 0; i < dataArray.length(); i++) {
-        JSONObject record = dataArray.optJSONObject(i);
-        if (record != null) {
-          records.add(record);
+        JSONObject jsonRecord = dataArray.optJSONObject(i);
+        if (jsonRecord != null) {
+          records.add(jsonRecord);
         }
       }
     } else {
@@ -151,9 +150,9 @@ public class NeoLocatorIdentifierHelper {
 
   private static Set<String> collectRawIds(List<JSONObject> records, Set<String> locatorProps) {
     Set<String> ids = new HashSet<>();
-    for (JSONObject record : records) {
+    for (JSONObject jsonRecord : records) {
       for (String propName : locatorProps) {
-        String rawValue = record.optString(propName, null);
+        String rawValue = jsonRecord.optString(propName, null);
         if (rawValue != null && !rawValue.isEmpty()) {
           ids.add(rawValue);
         }
@@ -164,16 +163,16 @@ public class NeoLocatorIdentifierHelper {
 
   private static void applyWarehouseNames(List<JSONObject> records, Set<String> locatorProps,
       Map<String, String> warehouseNames) {
-    for (JSONObject record : records) {
+    for (JSONObject jsonRecord : records) {
       try {
         for (String propName : locatorProps) {
-          String rawValue = record.optString(propName, null);
+          String rawValue = jsonRecord.optString(propName, null);
           if (rawValue == null || rawValue.isEmpty()) {
             continue;
           }
           String warehouseName = warehouseNames.get(rawValue);
           if (warehouseName != null) {
-            record.put(propName + IDENTIFIER_SUFFIX, warehouseName);
+            jsonRecord.put(propName + IDENTIFIER_SUFFIX, warehouseName);
           }
         }
       } catch (Exception e) {

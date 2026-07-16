@@ -102,10 +102,10 @@ public class NeoLocatorIdentifierHelperTest {
     when(warehouse.getName()).thenReturn("Almacen GO");
     stubLocatorQuery("loc-1", warehouse);
 
-    JSONObject record = new JSONObject();
-    record.put(LOCATOR_PROP, "loc-1");
-    record.put(LOCATOR_PROP + "$_identifier", "AG-0-0-0");
-    JSONObject response = buildResponseJson(record);
+    JSONObject jsonRecord = new JSONObject();
+    jsonRecord.put(LOCATOR_PROP, "loc-1");
+    jsonRecord.put(LOCATOR_PROP + "$_identifier", "AG-0-0-0");
+    JSONObject response = buildResponseJson(jsonRecord);
 
     NeoLocatorIdentifierHelper.enrichLocatorIdentifiers(response, sfEntity);
 
@@ -124,9 +124,9 @@ public class NeoLocatorIdentifierHelperTest {
     when(warehouse.getIdentifier()).thenReturn("Almacen GO");
     stubLocatorQuery("loc-1", warehouse);
 
-    JSONObject record = new JSONObject();
-    record.put(LOCATOR_PROP, "loc-1");
-    JSONObject response = buildResponseJson(record);
+    JSONObject jsonRecord = new JSONObject();
+    jsonRecord.put(LOCATOR_PROP, "loc-1");
+    JSONObject response = buildResponseJson(jsonRecord);
 
     NeoLocatorIdentifierHelper.enrichLocatorIdentifiers(response, sfEntity);
 
@@ -142,10 +142,10 @@ public class NeoLocatorIdentifierHelperTest {
     // Resolves to a non-locator entity → isLocatorRef returns false
     stubLocatorReference("BusinessPartner", "C_BPartner");
 
-    JSONObject record = new JSONObject();
-    record.put(LOCATOR_PROP, "bp-1");
-    record.put(LOCATOR_PROP + "$_identifier", "Original BP");
-    JSONObject response = buildResponseJson(record);
+    JSONObject jsonRecord = new JSONObject();
+    jsonRecord.put(LOCATOR_PROP, "bp-1");
+    jsonRecord.put(LOCATOR_PROP + "$_identifier", "Original BP");
+    JSONObject response = buildResponseJson(jsonRecord);
 
     NeoLocatorIdentifierHelper.enrichLocatorIdentifiers(response, sfEntity);
 
@@ -160,10 +160,10 @@ public class NeoLocatorIdentifierHelperTest {
     SFEntity sfEntity = buildEntityWithLocatorField();
     stubLocatorReference("Locator", "M_Locator");
 
-    JSONObject record = new JSONObject();
-    record.put(LOCATOR_PROP, "");
-    record.put(LOCATOR_PROP + "$_identifier", "AG-0-0-0");
-    JSONObject response = buildResponseJson(record);
+    JSONObject jsonRecord = new JSONObject();
+    jsonRecord.put(LOCATOR_PROP, "");
+    jsonRecord.put(LOCATOR_PROP + "$_identifier", "AG-0-0-0");
+    JSONObject response = buildResponseJson(jsonRecord);
 
     NeoLocatorIdentifierHelper.enrichLocatorIdentifiers(response, sfEntity);
 
@@ -179,10 +179,10 @@ public class NeoLocatorIdentifierHelperTest {
     stubLocatorReference("Locator", "M_Locator");
     stubLocatorQuery("loc-1", null); // no warehouse
 
-    JSONObject record = new JSONObject();
-    record.put(LOCATOR_PROP, "loc-1");
-    record.put(LOCATOR_PROP + "$_identifier", "AG-0-0-0");
-    JSONObject response = buildResponseJson(record);
+    JSONObject jsonRecord = new JSONObject();
+    jsonRecord.put(LOCATOR_PROP, "loc-1");
+    jsonRecord.put(LOCATOR_PROP + "$_identifier", "AG-0-0-0");
+    JSONObject response = buildResponseJson(jsonRecord);
 
     NeoLocatorIdentifierHelper.enrichLocatorIdentifiers(response, sfEntity);
 
@@ -259,9 +259,9 @@ public class NeoLocatorIdentifierHelperTest {
     when(locCrit.list()).thenReturn(Collections.singletonList(locator));
   }
 
-  private JSONObject buildResponseJson(JSONObject record) throws Exception {
+  private JSONObject buildResponseJson(JSONObject jsonRecord) throws Exception {
     JSONArray dataArray = new JSONArray();
-    dataArray.put(record);
+    dataArray.put(jsonRecord);
     JSONObject inner = new JSONObject();
     inner.put("data", dataArray);
     JSONObject response = new JSONObject();
