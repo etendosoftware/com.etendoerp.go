@@ -1234,6 +1234,10 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       // Country drives the org's tax resolution; default to Spain (ES) when the form omits it.
       data.countryCode = body.optString("countryCode", "ES").trim();
       data.address = body.optString("address", "").trim();
+      // Full name of the person onboarding. Optional in the payload; when present
+      // it becomes the display name of the client admin user (otherwise Etendo's
+      // InitialClientSetup leaves it as the username/email).
+      data.fullName = body.optString("fullName", "").trim();
       return data;
     } catch (JSONException e) {
         String message = e.getMessage() != null && e.getMessage().contains(FIELD_CLIENT_NAME)
@@ -1301,6 +1305,10 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     if (!createClient(vars, currencyId, requestData.clientName, clientUser, adminPassword, writer)) {
       return null;
     }
+    // InitialClientSetup names the admin AD_User after its username (the email).
+    // Override it with the full name entered during onboarding so the app shows
+    // the person's name instead of their email. No-op when fullName is blank.
+    EtendoGoJwtSupport.applyClientAdminDisplayName(clientUser, requestData.fullName);
     return EtendoGoJwtSupport.findClientIdByName(requestData.clientName);
   }
 
@@ -1919,6 +1927,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     private String language;
     private String countryCode;
     private String address;
+    private String fullName;
   }
 
   private static class AdminContextData {
