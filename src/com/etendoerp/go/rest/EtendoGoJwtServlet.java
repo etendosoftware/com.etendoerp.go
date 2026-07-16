@@ -1278,7 +1278,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    * part plus the domain (e.g. {@code r***@corp.com}). Null/blank/malformed inputs collapse to a
    * safe placeholder. Enough to correlate a lost-stream warning without recording the address.
    */
-  private static String maskEmail(String email) {
+  static String maskEmail(String email) {
     String trimmed = StringUtils.trimToNull(email);
     if (trimmed == null) {
       return "(unknown)";
