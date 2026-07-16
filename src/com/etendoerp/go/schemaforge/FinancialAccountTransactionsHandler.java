@@ -23,6 +23,7 @@ import static com.etendoerp.go.schemaforge.FinancialAccountTransactionsSupport.d
 import static com.etendoerp.go.schemaforge.FinancialAccountTransactionsSupport.formatDmy;
 import static com.etendoerp.go.schemaforge.FinancialAccountTransactionsSupport.optBigDecimal;
 import static com.etendoerp.go.schemaforge.FinancialAccountTransactionsSupport.parseDate;
+import static com.etendoerp.go.schemaforge.FinancialAccountTransactionsSupport.parseLocalDate;
 import static com.etendoerp.go.schemaforge.FinancialAccountTransactionsSupport.resolveConversionRate;
 import static com.etendoerp.go.schemaforge.FinancialAccountTransactionsSupport.setOptionalRef;
 import static com.etendoerp.go.schemaforge.FinancialAccountTransactionsSupport.statusClassicLabel;
@@ -416,15 +417,15 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
           + "   AND s.ad_client_id = (SELECT ad_client_id FROM fin_financial_account"
           + "                          WHERE fin_financial_account_id = ?)";
 
-  /** AcctSchema element type → UI dimension key (AC/PR are not navigable dimensions). */
+  /** AcctSchema element type → UI dimension key (AC = account, not a navigable dimension). */
   private static final Map<String, String> DIM_BY_ELEMENT = Map.of(
-      "OO", DIM_ORGANIZATION, "BP", DIM_BPARTNER, "PJ", DIM_PROJECT,
+      "OO", DIM_ORGANIZATION, "BP", DIM_BPARTNER, "PR", DIM_PRODUCT, "PJ", DIM_PROJECT,
       "CC", DIM_COSTCENTER, "AY", DIM_ACTIVITY, "MC", DIM_CAMPAIGN,
       "SR", DIM_SALESREGION, "U1", DIM_USER1, "U2", DIM_USER2);
 
   /** Stable display order for the "more info" dimension panel. */
   private static final List<String> DIM_ORDER = List.of(
-      DIM_ORGANIZATION, DIM_BPARTNER, DIM_PROJECT, DIM_COSTCENTER,
+      DIM_ORGANIZATION, DIM_BPARTNER, DIM_PROJECT, DIM_COSTCENTER, DIM_PRODUCT,
       DIM_ACTIVITY, DIM_CAMPAIGN, DIM_SALESREGION, DIM_USER1, DIM_USER2);
 
   /**
@@ -667,21 +668,30 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
       OBContext.setAdminMode(true);
       FIN_FinaccTransaction trx = loadTransactionFromBody(body);
       if (trx == null) return NeoResponse.error(404, "Transaction not found");
-      if (Boolean.TRUE.equals(trx.isProcessed())) {
-        return NeoResponse.error(400, "A processed transaction cannot be edited; reactivate it first.");
+      // A posted (contabilizado) transaction is fully locked — the user must reactivate first.
+      if ("Y".equals(trx.getPosted())) {
+        return NeoResponse.error(400, "A posted transaction cannot be edited; reactivate it first.");
       }
 
-      String currencyId = body.optString("currencyId", null);
-      Currency currency = StringUtils.isBlank(currencyId)
-          ? trx.getCurrency()
-          : OBDal.getInstance().get(Currency.class, currencyId);
-      if (currency == null) return NeoResponse.error(400, "Currency not found: " + currencyId);
-
-      applyEditableFields(trx, body, currency);
+      boolean processed = Boolean.TRUE.equals(trx.isProcessed());
+      if (processed) {
+        // Processed (not posted): only the "safe" fields stay editable — G/L item, accounting
+        // dimensions, description and dates. Amount, direction and status are locked (they affect
+        // the balance already applied to the account).
+        applyEditableDimensions(trx, body);
+      } else {
+        String currencyId = body.optString("currencyId", null);
+        Currency currency = StringUtils.isBlank(currencyId)
+            ? trx.getCurrency()
+            : OBDal.getInstance().get(Currency.class, currencyId);
+        if (currency == null) return NeoResponse.error(400, "Currency not found: " + currencyId);
+        applyEditableFields(trx, body, currency);
+      }
       OBDal.getInstance().save(trx);
       OBDal.getInstance().flush();
 
-      if (body.optBoolean("process", false)) {
+      // Confirm (process) is only available while the transaction is still Draft.
+      if (!processed && body.optBoolean("process", false)) {
         FIN_TransactionProcess.doTransactionProcess("P", trx);
         OBDal.getInstance().flush();
       }
@@ -1039,9 +1049,11 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
     String trxType = body.optString(FIELD_TRX_TYPE, trx.getTransactionType());
     BigDecimal depositAmount = nullSafeBigDecimal(optBigDecimal(body, FIELD_DEPOSIT_AMOUNT));
     BigDecimal paymentAmount = nullSafeBigDecimal(optBigDecimal(body, "paymentAmount"));
+    // Date-only fields: parse to LOCAL start-of-day so the stored calendar day is not shifted
+    // back by the JDBC driver in negative-offset timezones (see parseLocalDate).
     Date fallbackDate = trx.getTransactionDate() != null ? trx.getTransactionDate() : new Date();
-    Date transactionDate = parseDate(body.optString("transactionDate", null), fallbackDate);
-    Date accountingDate = parseDate(body.optString("accountingDate", null), transactionDate);
+    Date transactionDate = parseLocalDate(body.optString("transactionDate", null), fallbackDate);
+    Date accountingDate = parseLocalDate(body.optString("accountingDate", null), transactionDate);
 
     trx.setCurrency(currency);
     trx.setTransactionType(trxType);
@@ -1057,6 +1069,23 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
     setOptionalRef(body, "glItemId", GLItem.class, trx::setGLItem);
     // Accounting dimensions — only the ones enabled in the chart of accounts are ever sent by
     // the UI (see headerDimensions in the list payload).
+    setOptionalRef(body, "projectId", Project.class, trx::setProject);
+    setOptionalRef(body, "costcenterId", Costcenter.class, trx::setCostCenter);
+    setOptionalRef(body, "productId", Product.class, trx::setProduct);
+  }
+
+  /**
+   * Applies only the fields that stay editable once a transaction is Processed (but not yet
+   * posted): description, dates, G/L item and accounting dimensions. Amount, direction
+   * (deposit/withdrawal), currency and status are intentionally left untouched — they are locked
+   * because they already impacted the account balance.
+   */
+  private void applyEditableDimensions(FIN_FinaccTransaction trx, JSONObject body) {
+    trx.setDescription(body.optString(FIELD_DESCRIPTION, trx.getDescription()));
+    trx.setTransactionDate(parseLocalDate(body.optString("transactionDate", null), trx.getTransactionDate()));
+    trx.setDateAcct(parseLocalDate(body.optString("accountingDate", null), trx.getDateAcct()));
+    setOptionalRef(body, "bpartnerId", BusinessPartner.class, trx::setBusinessPartner);
+    setOptionalRef(body, "glItemId", GLItem.class, trx::setGLItem);
     setOptionalRef(body, "projectId", Project.class, trx::setProject);
     setOptionalRef(body, "costcenterId", Costcenter.class, trx::setCostCenter);
     setOptionalRef(body, "productId", Product.class, trx::setProduct);
@@ -1108,16 +1137,17 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
   }
 
   /** Dimension key → {table, id column} for the dimension-values lookup. */
-  private static final Map<String, String[]> DIM_VALUE_TABLE = Map.of(
-      DIM_ORGANIZATION, new String[] { "ad_org", "ad_org_id" },
-      DIM_BPARTNER, new String[] { "c_bpartner", "c_bpartner_id" },
-      DIM_PROJECT, new String[] { "c_project", "c_project_id" },
-      DIM_COSTCENTER, new String[] { "c_costcenter", "c_costcenter_id" },
-      DIM_ACTIVITY, new String[] { "c_activity", "c_activity_id" },
-      DIM_CAMPAIGN, new String[] { "c_campaign", "c_campaign_id" },
-      DIM_SALESREGION, new String[] { "c_salesregion", "c_salesregion_id" },
-      DIM_USER1, new String[] { DIM_USER1, "user1_id" },
-      DIM_USER2, new String[] { DIM_USER2, "user2_id" });
+  private static final Map<String, String[]> DIM_VALUE_TABLE = Map.ofEntries(
+      Map.entry(DIM_ORGANIZATION, new String[] { "ad_org", "ad_org_id" }),
+      Map.entry(DIM_BPARTNER, new String[] { "c_bpartner", "c_bpartner_id" }),
+      Map.entry(DIM_PRODUCT, new String[] { "m_product", "m_product_id" }),
+      Map.entry(DIM_PROJECT, new String[] { "c_project", "c_project_id" }),
+      Map.entry(DIM_COSTCENTER, new String[] { "c_costcenter", "c_costcenter_id" }),
+      Map.entry(DIM_ACTIVITY, new String[] { "c_activity", "c_activity_id" }),
+      Map.entry(DIM_CAMPAIGN, new String[] { "c_campaign", "c_campaign_id" }),
+      Map.entry(DIM_SALESREGION, new String[] { "c_salesregion", "c_salesregion_id" }),
+      Map.entry(DIM_USER1, new String[] { DIM_USER1, "user1_id" }),
+      Map.entry(DIM_USER2, new String[] { DIM_USER2, "user2_id" }));
 
   /**
    * Handles {@code GET ?action=dimension-values&dimension=<key>&q=...} — returns

@@ -21,6 +21,7 @@ import java.math.BigDecimal;
 import java.sql.Timestamp;
 import java.time.Instant;
 import java.time.LocalDate;
+import java.time.ZoneId;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.time.temporal.ChronoUnit;
@@ -141,6 +142,22 @@ final class FinancialAccountTransactionsSupport {
     if (StringUtils.isBlank(iso)) return fallback;
     try {
       return Date.from(Instant.parse(iso));
+    } catch (Exception e) {
+      return fallback;
+    }
+  }
+
+  /**
+   * Parses a civil (date-only) value like {@code "2026-07-16"} or {@code "2026-07-16T00:00:00Z"}
+   * into a {@link Date} at the SERVER's local start-of-day. Using local midnight (instead of UTC
+   * midnight) keeps the stored calendar day correct: UTC midnight would roll back a day when the
+   * JDBC driver writes a {@code date} column in a negative-offset timezone (e.g. UTC-3).
+   */
+  static Date parseLocalDate(String iso, Date fallback) {
+    if (StringUtils.isBlank(iso)) return fallback;
+    try {
+      String datePart = iso.length() >= 10 ? iso.substring(0, 10) : iso;
+      return Date.from(LocalDate.parse(datePart).atStartOfDay(ZoneId.systemDefault()).toInstant());
     } catch (Exception e) {
       return fallback;
     }
