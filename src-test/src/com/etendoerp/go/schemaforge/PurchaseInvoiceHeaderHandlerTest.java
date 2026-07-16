@@ -425,12 +425,21 @@ public class PurchaseInvoiceHeaderHandlerTest {
   }
 
   /**
-   * When validateLineQtyBeforeComplete passes, validateDocTypeLock passes, and
-   * validateOriginInvoiceRequired blocks (NC subtype without origin invoice),
-   * handle() returns 400 from origin invoice validation.
+   * Regression for ETP-4496: saving a Purchase Invoice with Document Type = Credit Note
+   * (APC category / NC subtype) without an Origin Invoice must NOT be blocked at save time.
+   * {@code validateOriginInvoiceRequired} is no longer invoked from {@code handle()}'s CRUD
+   * path — Etendo Classic treats the origin invoice as optional, and ETP-4036 had already
+   * deliberately removed this exact save-time block, until a later shared-code refactor
+   * (ETP-4035) accidentally reintroduced it.
+   *
+   * <p>With that call gone, the request falls through validateLineQtyBeforeComplete (no
+   * documentAction=CO), applyTotalDiscountBeforeComplete/completeInvoiceIfNeeded (same reason),
+   * and validateDocTypeLock (not a PUT), reaching {@code NeoHeaderActionRouter.dispatch}, where
+   * none of the mocked downstream handlers answer — proving handle() never short-circuits with
+   * a 400 from origin invoice validation.
    */
   @Test
-  public void handle_originInvoiceRequiredForNcSubtype_returns400() throws Exception {
+  public void handle_creditNoteWithoutOriginInvoice_doesNotBlock() throws Exception {
     JSONObject body = new JSONObject()
         .put("transactionDocument", "dt-apc");
     // no originInvoice field
@@ -441,21 +450,32 @@ public class PurchaseInvoiceHeaderHandlerTest {
         .requestBody(body)
         .build();
 
-    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
-      OBDal dal = mock(OBDal.class);
-      dalMock.when(OBDal::getInstance).thenReturn(dal);
+    NeoResponse result = handler.handle(ctx);
 
-      org.openbravo.model.common.enterprise.DocumentType dt =
-          mock(org.openbravo.model.common.enterprise.DocumentType.class);
-      when(dt.getDocumentCategory()).thenReturn("APC");
-      when(dal.get(org.openbravo.model.common.enterprise.DocumentType.class, "dt-apc"))
-          .thenReturn(dt);
+    assertNull("origin-invoice validation must no longer block Credit Note save", result);
+  }
 
-      NeoResponse result = handler.handle(ctx);
+  /**
+   * Regression for ETP-4496: the same removed call site also used to block Purchase Return
+   * Invoices (API category + isReturn / DEV subtype) without an Origin Invoice. Confirms the
+   * fix is not NC-specific — saving a Return Invoice without an origin invoice must not be
+   * blocked either.
+   */
+  @Test
+  public void handle_returnInvoiceWithoutOriginInvoice_doesNotBlock() throws Exception {
+    JSONObject body = new JSONObject()
+        .put("transactionDocument", "dt-api-return");
+    // no originInvoice field
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("POST")
+        .endpointType(NeoEndpointType.CRUD)
+        .recordId(null)
+        .requestBody(body)
+        .build();
 
-      assertNotNull(result);
-      assertEquals(HttpServletResponse.SC_BAD_REQUEST, result.getHttpStatus());
-    }
+    NeoResponse result = handler.handle(ctx);
+
+    assertNull("origin-invoice validation must no longer block Return Invoice save", result);
   }
 
   /**
