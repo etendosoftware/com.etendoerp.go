@@ -240,53 +240,39 @@ public class NeoHandlerUtilsTest {
     assertEquals("first-id", NeoHandlerUtils.extractCreatedIdFromPreviousResult(ctx));
   }
 
-  // ── ETP-4531: blockCalloutFieldUpdate ────────────────────────────────────
+  // ── ETP-4531: mirrorFieldValue ────────────────────────────────────────────
 
   @Test
-  public void testBlockCalloutFieldUpdateRemovesFieldPushedByOtherTrigger() throws Exception {
-    JSONObject updates = new JSONObject().put("accountingDate", "2026-07-01").put("otherField", "x");
+  public void testMirrorFieldValueCopiesSourceIntoTarget() throws Exception {
+    JSONObject body = new JSONObject().put("invoiceDate", "2026-07-01");
 
-    NeoHandlerUtils.blockCalloutFieldUpdate(updates, "invoiceDate", "accountingDate");
+    NeoHandlerUtils.mirrorFieldValue(body, "invoiceDate", "accountingDate");
 
-    assertTrue(!updates.has("accountingDate"));
-    assertTrue(updates.has("otherField"));
+    assertEquals("2026-07-01", body.getString("accountingDate"));
   }
 
   @Test
-  public void testBlockCalloutFieldUpdateKeepsFieldWhenItIsTheTriggerField() throws Exception {
-    JSONObject updates = new JSONObject().put("accountingDate", "2026-07-01");
+  public void testMirrorFieldValueOverwritesExistingTargetValue() throws Exception {
+    JSONObject body = new JSONObject()
+        .put("invoiceDate", "2026-07-10").put("accountingDate", "2026-01-01");
 
-    NeoHandlerUtils.blockCalloutFieldUpdate(updates, "accountingDate", "accountingDate");
+    NeoHandlerUtils.mirrorFieldValue(body, "invoiceDate", "accountingDate");
 
-    assertEquals("2026-07-01", updates.getString("accountingDate"));
+    assertEquals("2026-07-10", body.getString("accountingDate"));
   }
 
   @Test
-  public void testBlockCalloutFieldUpdateNullUpdatesDoesNotThrow() {
-    // Must be a no-op guard: null updates map is a valid callout response shape.
-    NeoHandlerUtils.blockCalloutFieldUpdate(null, "invoiceDate", "accountingDate");
+  public void testMirrorFieldValueNoopWhenSourceFieldAbsent() throws Exception {
+    JSONObject body = new JSONObject().put("otherField", "x");
+
+    NeoHandlerUtils.mirrorFieldValue(body, "invoiceDate", "accountingDate");
+
+    assertTrue(!body.has("accountingDate"));
   }
 
   @Test
-  public void testBlockCalloutFieldUpdateNoopWhenFieldKeyAbsent() throws Exception {
-    JSONObject updates = new JSONObject().put("otherField", "unchanged");
-
-    NeoHandlerUtils.blockCalloutFieldUpdate(updates, "otherField", "accountingDate");
-
-    assertEquals("unchanged", updates.getString("otherField"));
-    assertTrue(!updates.has("accountingDate"));
-  }
-
-  @Test
-  public void testBlockCalloutFieldUpdateRemovesMovementDateDrivenAccountingDate()
-      throws Exception {
-    // Mirrors the live M_InOut.MovementDate -> SL_InOut_AccountingDate coupling (Goods
-    // Receipt / Goods Shipment): a callout triggered by movementDate must never carry
-    // accountingDate through to the saved record.
-    JSONObject updates = new JSONObject().put("accountingDate", "2026-07-01");
-
-    NeoHandlerUtils.blockCalloutFieldUpdate(updates, "movementDate", "accountingDate");
-
-    assertTrue(!updates.has("accountingDate"));
+  public void testMirrorFieldValueNullBodyDoesNotThrow() {
+    // Must be a no-op guard: null body is a valid request-body shape to defend against.
+    NeoHandlerUtils.mirrorFieldValue(null, "invoiceDate", "accountingDate");
   }
 }

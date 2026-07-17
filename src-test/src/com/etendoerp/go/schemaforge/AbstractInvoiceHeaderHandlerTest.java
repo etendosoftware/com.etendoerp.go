@@ -2607,10 +2607,14 @@ public class AbstractInvoiceHeaderHandlerTest {
     }
   }
 
-  // ── ETP-4531: handleCurrencyAfterCallout also blocks accountingDate ─────────
+  // ── ETP-4531: handleInvoiceAfterCallout lets accountingDate cascade through ─
 
   @Test
-  public void handleCurrencyAfterCallout_blocksAccountingDateFromOtherTrigger() throws Exception {
+  public void handleInvoiceAfterCallout_letsAccountingDateCascadeFromOtherTrigger()
+      throws Exception {
+    // ETP-4531 (unified date): the classic invoiceDate -> accountingDate cascade is no
+    // longer blocked — a businessPartner-triggered callout may still carry an unrelated
+    // accountingDate update through untouched.
     JSONObject updates = new JSONObject()
         .put("accountingDate", "2026-07-01").put("businessPartner", "bp-1");
     JSONObject calloutBody = new JSONObject().put("updates", updates);
@@ -2623,16 +2627,16 @@ public class AbstractInvoiceHeaderHandlerTest {
     NeoResponse result = handler.callHandleCurrencyAfterCallout(ctx);
 
     assertNull(result);
-    assertTrue(!updates.has("accountingDate"));
+    assertEquals("2026-07-01", updates.getString("accountingDate"));
     assertTrue(updates.has("businessPartner"));
   }
 
   @Test
-  public void handleCurrencyAfterCallout_blocksAccountingDateFromInvoiceDateTrigger()
+  public void handleInvoiceAfterCallout_letsAccountingDateCascadeFromInvoiceDateTrigger()
       throws Exception {
     // Mirrors the live C_Invoice.DateInvoiced -> SifInvoiceOperationDateCallout (extends
-    // SE_Invoice_AccountingDate) coupling: an invoiceDate-triggered callout must never carry
-    // accountingDate through to the saved record.
+    // SE_Invoice_AccountingDate) coupling: this is now exactly the desired behavior — the
+    // single visible date (invoiceDate) must mirror into accountingDate on save.
     JSONObject updates = new JSONObject().put("accountingDate", "2026-07-01");
     JSONObject calloutBody = new JSONObject().put("updates", updates);
     JSONObject requestBody = new JSONObject().put("field", "invoiceDate").put("value", "2026-07-01");
@@ -2643,11 +2647,11 @@ public class AbstractInvoiceHeaderHandlerTest {
 
     handler.callHandleCurrencyAfterCallout(ctx);
 
-    assertTrue(!updates.has("accountingDate"));
+    assertEquals("2026-07-01", updates.getString("accountingDate"));
   }
 
   @Test
-  public void handleCurrencyAfterCallout_keepsAccountingDateWhenItIsTheTriggerField()
+  public void handleInvoiceAfterCallout_keepsAccountingDateWhenItIsTheTriggerField()
       throws Exception {
     JSONObject updates = new JSONObject().put("accountingDate", "2026-07-05");
     JSONObject calloutBody = new JSONObject().put("updates", updates);
@@ -2661,5 +2665,65 @@ public class AbstractInvoiceHeaderHandlerTest {
     handler.callHandleCurrencyAfterCallout(ctx);
 
     assertEquals("2026-07-05", updates.getString("accountingDate"));
+  }
+
+  // ── ETP-4531: mirrorAccountingDate (unified date, server-side mirror) ───────
+
+  @Test
+  public void mirrorAccountingDate_postCrud_copiesInvoiceDateIntoAccountingDate()
+      throws Exception {
+    JSONObject body = new JSONObject().put("invoiceDate", "2026-07-01");
+    NeoContext ctx = NeoContext.builder()
+        .endpointType(NeoEndpointType.CRUD)
+        .httpMethod("POST")
+        .requestBody(body)
+        .build();
+
+    AbstractInvoiceHeaderHandler.mirrorAccountingDate(ctx);
+
+    assertEquals("2026-07-01", body.getString("accountingDate"));
+  }
+
+  @Test
+  public void mirrorAccountingDate_putCrud_overwritesStaleAccountingDate() throws Exception {
+    JSONObject body = new JSONObject()
+        .put("invoiceDate", "2026-07-10").put("accountingDate", "2026-01-01");
+    NeoContext ctx = NeoContext.builder()
+        .endpointType(NeoEndpointType.CRUD)
+        .httpMethod("PUT")
+        .requestBody(body)
+        .build();
+
+    AbstractInvoiceHeaderHandler.mirrorAccountingDate(ctx);
+
+    assertEquals("2026-07-10", body.getString("accountingDate"));
+  }
+
+  @Test
+  public void mirrorAccountingDate_nonCrudEndpoint_doesNotMutateBody() throws Exception {
+    JSONObject body = new JSONObject().put("invoiceDate", "2026-07-01");
+    NeoContext ctx = NeoContext.builder()
+        .endpointType(NeoEndpointType.ACTION)
+        .httpMethod("POST")
+        .requestBody(body)
+        .build();
+
+    AbstractInvoiceHeaderHandler.mirrorAccountingDate(ctx);
+
+    assertTrue(!body.has("accountingDate"));
+  }
+
+  @Test
+  public void mirrorAccountingDate_getMethod_doesNotMutateBody() throws Exception {
+    JSONObject body = new JSONObject().put("invoiceDate", "2026-07-01");
+    NeoContext ctx = NeoContext.builder()
+        .endpointType(NeoEndpointType.CRUD)
+        .httpMethod("GET")
+        .requestBody(body)
+        .build();
+
+    AbstractInvoiceHeaderHandler.mirrorAccountingDate(ctx);
+
+    assertTrue(!body.has("accountingDate"));
   }
 }

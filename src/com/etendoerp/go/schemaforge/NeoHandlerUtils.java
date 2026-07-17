@@ -224,28 +224,28 @@ final class NeoHandlerUtils {
   }
 
   /**
-   * Removes a callout-pushed update to {@code fieldName} from the callout {@code updates} map,
-   * unless {@code fieldName} is itself the field the user directly edited (the callout trigger).
+   * Mirrors {@code sourceField}'s value from {@code body} into {@code targetField},
+   * unconditionally overwriting any existing value already there.
    *
-   * <p>ETP-4531: {@code accountingDate} must be an independent field, fully decoupled from the
-   * document's own date (invoice date, movement date, etc.). Several classic Etendo callouts —
-   * e.g. {@code SifInvoiceOperationDateCallout}/{@code SE_Invoice_AccountingDate} on
-   * {@code C_Invoice.DateInvoiced} and {@code SL_InOut_AccountingDate} on
-   * {@code M_InOut.MovementDate} — auto-fill {@code dateAcct} as a side effect, and
-   * {@link NeoCalloutService} executes those same classic callouts server-side. This guard
-   * mirrors {@code AbstractInvoiceHeaderHandler#blockCalloutCurrencyUpdate} (ETP-4029): it lets
-   * the user still edit {@code accountingDate} directly (in which case it IS the trigger field
-   * and its own callout's updates pass through untouched), but strips any value another field's
-   * callout tries to push into it.
+   * <p>ETP-4531 (unified date): several postable documents expose a single visible date field
+   * to the user while the underlying data model still carries two columns (e.g. document date
+   * + accounting date). Whatever value is saved for the visible field must also become the
+   * hidden field's value — this is the single source of truth going forward, not a
+   * fill-if-absent default like {@link #injectReturnDocType}. Table/window-agnostic: no field
+   * names are hardcoded here, callers supply them.
    *
-   * @param updates      the callout response's {@code updates} object; may be {@code null}
-   * @param triggerField the field that triggered the callout (from the request body)
-   * @param fieldName    the field to protect from callout-driven cross-updates
+   * @param body        the request body to mutate in place; may be {@code null}
+   * @param sourceField the field whose value is copied; no-op if absent from {@code body}
+   * @param targetField the field overwritten with {@code sourceField}'s value
    */
-  static void blockCalloutFieldUpdate(JSONObject updates, String triggerField, String fieldName) {
-    if (updates != null && updates.has(fieldName) && !fieldName.equals(triggerField)) {
-      updates.remove(fieldName);
-      log.debug("[ETP-4531] Removed callout-driven '{}' update (trigger={})", fieldName, triggerField);
+  static void mirrorFieldValue(JSONObject body, String sourceField, String targetField) {
+    if (body == null || !body.has(sourceField)) {
+      return;
+    }
+    try {
+      body.put(targetField, body.opt(sourceField));
+    } catch (Exception e) {
+      log.debug("Could not mirror '{}' into '{}': {}", sourceField, targetField, e.getMessage());
     }
   }
 }

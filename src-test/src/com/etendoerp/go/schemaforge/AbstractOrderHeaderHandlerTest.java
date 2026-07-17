@@ -17,6 +17,8 @@
 
 package com.etendoerp.go.schemaforge;
 
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNull;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
@@ -322,6 +324,65 @@ public class AbstractOrderHeaderHandlerTest {
     AbstractOrderHeaderHandler.syncTotalDiscountOnDocAction(ctx, svc, true);
 
     verify(svc).recalculate(ORDER_ID, true);
+  }
+
+  // ── ETP-4531: mirrorAccountingDate (unified date, server-side mirror) ───────
+
+  @Test
+  public void mirrorAccountingDate_postCrud_copiesOrderDateIntoAccountingDate() throws Exception {
+    JSONObject body = new JSONObject().put("orderDate", "2026-07-01");
+    NeoContext ctx = NeoContext.builder()
+        .endpointType(NeoEndpointType.CRUD)
+        .httpMethod("POST")
+        .requestBody(body)
+        .build();
+
+    AbstractOrderHeaderHandler.mirrorAccountingDate(ctx);
+
+    assertEquals("2026-07-01", body.getString("accountingDate"));
+  }
+
+  @Test
+  public void mirrorAccountingDate_putCrud_overwritesStaleAccountingDate() throws Exception {
+    JSONObject body = new JSONObject()
+        .put("orderDate", "2026-07-10").put("accountingDate", "2026-01-01");
+    NeoContext ctx = NeoContext.builder()
+        .endpointType(NeoEndpointType.CRUD)
+        .httpMethod("PUT")
+        .requestBody(body)
+        .build();
+
+    AbstractOrderHeaderHandler.mirrorAccountingDate(ctx);
+
+    assertEquals("2026-07-10", body.getString("accountingDate"));
+  }
+
+  @Test
+  public void mirrorAccountingDate_getMethod_doesNotMutateBody() throws Exception {
+    JSONObject body = new JSONObject().put("orderDate", "2026-07-01");
+    NeoContext ctx = NeoContext.builder()
+        .endpointType(NeoEndpointType.CRUD)
+        .httpMethod("GET")
+        .requestBody(body)
+        .build();
+
+    AbstractOrderHeaderHandler.mirrorAccountingDate(ctx);
+
+    assertNull(body.opt("accountingDate"));
+  }
+
+  @Test
+  public void mirrorAccountingDate_actionEndpoint_doesNotMutateBody() throws Exception {
+    JSONObject body = new JSONObject().put("orderDate", "2026-07-01");
+    NeoContext ctx = NeoContext.builder()
+        .endpointType(NeoEndpointType.ACTION)
+        .httpMethod("POST")
+        .requestBody(body)
+        .build();
+
+    AbstractOrderHeaderHandler.mirrorAccountingDate(ctx);
+
+    assertNull(body.opt("accountingDate"));
   }
 
   // ── helpers ───────────────────────────────────────────────────────────────

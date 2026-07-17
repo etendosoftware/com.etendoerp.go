@@ -502,50 +502,55 @@ public class GoodsReceiptHeaderHandlerTest {
     }
   }
 
-  // ── ETP-4531: afterCallout blocks callout-driven accountingDate ─────────────
+  // NOTE (ETP-4531): GoodsReceiptHeaderHandler previously overrode afterCallout() solely to
+  // block a callout-driven accountingDate update (the movementDate -> accountingDate
+  // cascade). The unified-date requirement now wants that cascade to happen, so the override
+  // was removed entirely — the handler falls back to NeoHandler's default no-op afterCallout.
+  // There is no handler-specific afterCallout behavior left here to test.
+
+  // ── ETP-4531: mirrorAccountingDate (unified date, server-side mirror) ───────
 
   @Test
-  public void afterCallout_blocksAccountingDateFromMovementDateTrigger() throws Exception {
-    // Mirrors the live M_InOut.MovementDate -> SL_InOut_AccountingDate coupling: editing
-    // movementDate must never carry an accountingDate value through to the saved record.
-    JSONObject updates = new JSONObject().put("accountingDate", "2026-07-01");
-    JSONObject calloutBody = new JSONObject().put("updates", updates);
-    JSONObject requestBody = new JSONObject().put("field", "movementDate").put("value", "2026-07-01");
+  public void mirrorAccountingDate_postCrud_copiesMovementDateIntoAccountingDate()
+      throws Exception {
+    JSONObject body = new JSONObject().put("movementDate", "2026-07-01");
     NeoContext ctx = NeoContext.builder()
-        .previousResult(new NeoResponse(200, calloutBody))
-        .requestBody(requestBody)
+        .endpointType(NeoEndpointType.CRUD)
+        .httpMethod("POST")
+        .requestBody(body)
         .build();
-    GoodsReceiptHeaderHandler handler = new GoodsReceiptHeaderHandler();
 
-    NeoResponse result = handler.afterCallout(ctx);
+    GoodsReceiptHeaderHandler.mirrorAccountingDate(ctx);
 
-    assertNull(result);
-    assertNull("accountingDate must be stripped when movementDate is the trigger",
-        updates.opt("accountingDate"));
+    assertEquals("2026-07-01", body.getString("accountingDate"));
   }
 
   @Test
-  public void afterCallout_keepsAccountingDateWhenItIsTheTriggerField() throws Exception {
-    JSONObject updates = new JSONObject().put("accountingDate", "2026-07-05");
-    JSONObject calloutBody = new JSONObject().put("updates", updates);
-    JSONObject requestBody = new JSONObject()
-        .put("field", "accountingDate").put("value", "2026-07-05");
+  public void mirrorAccountingDate_putCrud_overwritesStaleAccountingDate() throws Exception {
+    JSONObject body = new JSONObject()
+        .put("movementDate", "2026-07-10").put("accountingDate", "2026-01-01");
     NeoContext ctx = NeoContext.builder()
-        .previousResult(new NeoResponse(200, calloutBody))
-        .requestBody(requestBody)
+        .endpointType(NeoEndpointType.CRUD)
+        .httpMethod("PUT")
+        .requestBody(body)
         .build();
-    GoodsReceiptHeaderHandler handler = new GoodsReceiptHeaderHandler();
 
-    handler.afterCallout(ctx);
+    GoodsReceiptHeaderHandler.mirrorAccountingDate(ctx);
 
-    assertEquals("2026-07-05", updates.getString("accountingDate"));
+    assertEquals("2026-07-10", body.getString("accountingDate"));
   }
 
   @Test
-  public void afterCallout_noPreviousResult_returnsNull() {
-    NeoContext ctx = NeoContext.builder().httpMethod("POST").build();
-    GoodsReceiptHeaderHandler handler = new GoodsReceiptHeaderHandler();
+  public void mirrorAccountingDate_getMethod_doesNotMutateBody() throws Exception {
+    JSONObject body = new JSONObject().put("movementDate", "2026-07-01");
+    NeoContext ctx = NeoContext.builder()
+        .endpointType(NeoEndpointType.CRUD)
+        .httpMethod("GET")
+        .requestBody(body)
+        .build();
 
-    assertNull(handler.afterCallout(ctx));
+    GoodsReceiptHeaderHandler.mirrorAccountingDate(ctx);
+
+    assertNull(body.opt("accountingDate"));
   }
 }

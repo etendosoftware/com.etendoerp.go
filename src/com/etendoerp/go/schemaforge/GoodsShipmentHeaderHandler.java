@@ -66,6 +66,8 @@ public class GoodsShipmentHeaderHandler implements NeoHandler {
       "   )";
   private static final String FIELD_DOCUMENT_NO = "documentNo";
   private static final String FIELD_DOCUMENT_STATUS = "documentStatus";
+  private static final String FIELD_MOVEMENT_DATE = "movementDate";
+  private static final String FIELD_ACCOUNTING_DATE = "accountingDate";
 
   @Inject
   private CreateDraftInvoiceHandler createDraftInvoiceHandler;
@@ -86,12 +88,27 @@ public class GoodsShipmentHeaderHandler implements NeoHandler {
 
   @Override
   public NeoResponse handle(NeoContext context) {
+    mirrorAccountingDate(context);
     NeoResponse posting = postingService != null ? postingService.handleAction(context) : null;
     if (posting != null) {
       return posting;
     }
     return NeoHeaderActionRouter.dispatch(context,
         createDraftInvoiceHandler, neoCloneRecordHandler, createReturnReceiptHandler);
+  }
+
+  /**
+   * Mirrors the single visible {@code movementDate} field into the hidden
+   * {@code accountingDate} field on the request body, unconditionally, before the default CRUD
+   * path persists it (ETP-4531 — unified date). The user never sees or edits accountingDate
+   * directly; whatever value is saved for movementDate (create or update) must also become the
+   * shipment's accounting date.
+   */
+  static void mirrorAccountingDate(NeoContext context) {
+    if (NeoEndpointType.CRUD.equals(context.getEndpointType())
+        && ("POST".equals(context.getHttpMethod()) || "PUT".equals(context.getHttpMethod()))) {
+      NeoHandlerUtils.mirrorFieldValue(context.getRequestBody(), FIELD_MOVEMENT_DATE, FIELD_ACCOUNTING_DATE);
+    }
   }
 
   @Override
@@ -118,27 +135,6 @@ public class GoodsShipmentHeaderHandler implements NeoHandler {
       log.error("Error computing invoiceStatus for goods shipment", e);
       return null;
     }
-  }
-
-  /**
-   * Post-callout hook (ETP-4531): blocks a callout-driven {@code accountingDate} update unless
-   * the user directly edited {@code accountingDate} itself. {@code M_InOut.MovementDate} carries
-   * the classic {@code SL_InOut_AccountingDate} callout, which {@link NeoCalloutService} executes
-   * server-side and which auto-fills {@code dateAcct} from {@code movementDate} as a side effect
-   * — accountingDate must stay independent from the document's own date.
-   */
-  @Override
-  public NeoResponse afterCallout(NeoContext context) {
-    try {
-      NeoHandlerUtils.CalloutFields fields = NeoHandlerUtils.extractCalloutFields(context);
-      if (fields == null) {
-        return null;
-      }
-      NeoHandlerUtils.blockCalloutFieldUpdate(fields.updates(), fields.triggerField(), "accountingDate");
-    } catch (Exception e) {
-      log.warn("[ETP-4531] afterCallout failed (non-fatal): {}", e.getMessage());
-    }
-    return null; // mutation applied in-place; dispatcher merges nothing extra
   }
 
   private void enrichIssuerOrg(JSONObject shipmentRec, String recordId) {

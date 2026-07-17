@@ -723,19 +723,19 @@ public class NeoDefaultsCascadeHelperTest {
   }
 
   // ===================================================================
-  // executeCalloutCascade — ETP-4531: accountingDate independence
+  // executeCalloutCascade — ETP-4531: unified date cascades into accountingDate
   // ===================================================================
 
   /**
-   * Regression test for the REVIEW blocker: the trigger-field-aware accountingDate guard
-   * must hold on the GET /defaults cascade path (new-record form bootstrap via
-   * {@code NeoDefaultsService#applyCascadeAndResolveTab}), not just on the interactive
-   * {@code afterCallout()} hooks. Mirrors the live M_InOut.MovementDate ->
-   * SL_InOut_AccountingDate coupling (same shape for C_Invoice.DateInvoiced ->
-   * SifInvoiceOperationDateCallout).
+   * ETP-4531 (unified date): the classic M_InOut.MovementDate -> SL_InOut_AccountingDate
+   * coupling (same shape for C_Invoice.DateInvoiced -> SifInvoiceOperationDateCallout) is no
+   * longer blocked on the GET /defaults cascade path (new-record form bootstrap via
+   * {@code NeoDefaultsService#applyCascadeAndResolveTab}) — a movementDate-triggered callout
+   * is now allowed to overwrite the independently pre-resolved accountingDate default, so the
+   * single visible date is mirrored into accountingDate.
    */
   @Test
-  public void testExecuteCalloutCascadeBlocksAccountingDateFromMovementDateTrigger()
+  public void testExecuteCalloutCascadeLetsAccountingDateCascadeFromMovementDateTrigger()
       throws Exception {
     try (MockedStatic<NeoCalloutService> calloutMock = mockStatic(NeoCalloutService.class);
          MockedStatic<ModelProvider> providerMock = mockStatic(ModelProvider.class)) {
@@ -750,7 +750,7 @@ public class NeoDefaultsCascadeHelperTest {
 
       JSONObject calloutResponseBody = new JSONObject();
       JSONObject updateEntry = new JSONObject();
-      updateEntry.put("value", "2026-01-01"); // callout tries to push movementDate's value
+      updateEntry.put("value", "2026-01-01"); // callout pushes movementDate's value
       JSONObject updates = new JSONObject();
       updates.put("accountingDate", updateEntry);
       calloutResponseBody.put("updates", updates);
@@ -765,13 +765,13 @@ public class NeoDefaultsCascadeHelperTest {
       NeoContext ctx = mock(NeoContext.class);
       JSONObject defaults = new JSONObject();
       defaults.put("movementDate", "2026-02-02");
-      defaults.put("accountingDate", "2026-02-02"); // independently pre-resolved own default
+      defaults.put("accountingDate", "2026-02-02"); // stale/independently pre-resolved default
 
       NeoDefaultsCascadeHelper.executeCalloutCascade(ctx, adTab, defaults, new HashSet<>());
 
-      assertEquals("accountingDate must stay independent from movementDate on the "
+      assertEquals("accountingDate must mirror movementDate's cascade on the "
               + "GET /defaults cascade",
-          "2026-02-02", defaults.get("accountingDate"));
+          "2026-01-01", defaults.get("accountingDate"));
     }
   }
 
@@ -1196,15 +1196,13 @@ public class NeoDefaultsCascadeHelperTest {
   }
 
   /**
-   * Regression test for the REVIEW blocker: the trigger-field-aware accountingDate guard
-   * must also hold on POST create ({@code executeCalloutCascadeForCreate}). The pre-existing
-   * "protectedFields = keys already in body" mechanism only protects a field if it was
-   * ALREADY a key in the create payload before the cascade ran — it gives no protection when
-   * accountingDate is absent from the payload and gets introduced purely as a callout side
-   * effect of movementDate/invoiceDate, which is exactly this scenario.
+   * ETP-4531 (unified date): on POST create ({@code executeCalloutCascadeForCreate}),
+   * accountingDate being absent from the create payload must no longer prevent it from being
+   * introduced by movementDate's callout side effect — the single visible date (movementDate)
+   * is expected to cascade into accountingDate even on first save.
    */
   @Test
-  public void testExecuteCalloutCascadeForCreateBlocksAccountingDateFromMovementDate()
+  public void testExecuteCalloutCascadeForCreateLetsAccountingDateCascadeFromMovementDate()
       throws Exception {
     try (MockedStatic<NeoCalloutService> calloutMock = mockStatic(NeoCalloutService.class);
          MockedStatic<ModelProvider> providerMock = mockStatic(ModelProvider.class)) {
@@ -1233,15 +1231,15 @@ public class NeoDefaultsCascadeHelperTest {
       Tab adTab = mockTabWithTable("152");
       NeoContext ctx = mock(NeoContext.class);
       JSONObject body = new JSONObject();
-      // accountingDate is NOT yet a key in the create payload — it must not be introduced
-      // by movementDate's callout side effect.
+      // accountingDate is NOT yet a key in the create payload — it must now be introduced
+      // by movementDate's callout side effect (unified date requirement).
       body.put("movementDate", "2026-03-03");
 
       NeoDefaultsCascadeHelper.executeCalloutCascadeForCreate(ctx, adTab, body);
 
-      assertFalse("Callout-driven accountingDate must never be introduced on create by "
+      assertEquals("Callout-driven accountingDate must be introduced on create by "
               + "movementDate's callout",
-          body.has("accountingDate"));
+          "2026-03-03", body.getString("accountingDate"));
     }
   }
 
