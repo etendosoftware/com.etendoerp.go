@@ -900,7 +900,7 @@ class SupportJiraWebhookHandlerTest {
       JSONObject paragraph = new JSONObject().put("type", "paragraph").put("content", content);
       List<String> ids = new ArrayList<>();
 
-      SupportJiraWebhookHandler.collectAdfMediaIds(paragraph, ids);
+      SupportAdfAttachmentCorrelator.collectAdfMediaIds(paragraph, ids);
 
       assertTrue(ids.isEmpty());
     }
@@ -914,7 +914,7 @@ class SupportJiraWebhookHandlerTest {
       JSONObject mediaSingle = new JSONObject().put("type", "mediaSingle").put("content", content);
       List<String> ids = new ArrayList<>();
 
-      SupportJiraWebhookHandler.collectAdfMediaIds(mediaSingle, ids);
+      SupportAdfAttachmentCorrelator.collectAdfMediaIds(mediaSingle, ids);
 
       assertEquals(List.of("att-1"), ids);
     }
@@ -928,7 +928,7 @@ class SupportJiraWebhookHandlerTest {
       JSONObject mediaGroup = new JSONObject().put("type", "mediaGroup").put("content", content);
       List<String> ids = new ArrayList<>();
 
-      SupportJiraWebhookHandler.collectAdfMediaIds(mediaGroup, ids);
+      SupportAdfAttachmentCorrelator.collectAdfMediaIds(mediaGroup, ids);
 
       assertEquals(List.of("att-1", "att-2"), ids);
     }
@@ -939,7 +939,7 @@ class SupportJiraWebhookHandlerTest {
       JSONObject media = new JSONObject().put("type", "media").put("attrs", new JSONObject().put("id", ""));
       List<String> ids = new ArrayList<>();
 
-      SupportJiraWebhookHandler.collectAdfMediaIds(media, ids);
+      SupportAdfAttachmentCorrelator.collectAdfMediaIds(media, ids);
 
       assertTrue(ids.isEmpty());
     }
@@ -950,7 +950,7 @@ class SupportJiraWebhookHandlerTest {
       JSONObject media = new JSONObject().put("type", "media");
       List<String> ids = new ArrayList<>();
 
-      SupportJiraWebhookHandler.collectAdfMediaIds(media, ids);
+      SupportAdfAttachmentCorrelator.collectAdfMediaIds(media, ids);
 
       assertTrue(ids.isEmpty());
     }
@@ -962,7 +962,7 @@ class SupportJiraWebhookHandlerTest {
           + "[{\"type\":\"media\",\"attrs\":{\"id\":\"att-9\"}}]}]}";
       List<String> ids = new ArrayList<>();
 
-      SupportJiraWebhookHandler.collectAdfMediaIds(raw, ids);
+      SupportAdfAttachmentCorrelator.collectAdfMediaIds(raw, ids);
 
       assertEquals(List.of("att-9"), ids);
     }
@@ -1057,7 +1057,7 @@ class SupportJiraWebhookHandlerTest {
     @DisplayName("Applies defaults when filename/mimeType are absent")
     void defaults() throws Exception {
       JSONObject att = new JSONObject().put("id", "10001");
-      JSONObject meta = SupportJiraWebhookHandler.toAttachmentMeta(att);
+      JSONObject meta = SupportAdfAttachmentCorrelator.toAttachmentMeta(att);
       assertEquals("10001", meta.getString("id"));
       assertEquals("attachment", meta.getString("filename"));
       assertEquals("application/octet-stream", meta.getString("mimeType"));
@@ -1068,7 +1068,7 @@ class SupportJiraWebhookHandlerTest {
     void realValues() throws Exception {
       JSONObject att = new JSONObject().put("id", "10001").put("filename", "screenshot.png")
           .put("mimeType", "image/png");
-      JSONObject meta = SupportJiraWebhookHandler.toAttachmentMeta(att);
+      JSONObject meta = SupportAdfAttachmentCorrelator.toAttachmentMeta(att);
       assertEquals("screenshot.png", meta.getString("filename"));
       assertEquals("image/png", meta.getString("mimeType"));
     }
@@ -1094,14 +1094,14 @@ class SupportJiraWebhookHandlerTest {
     @Test
     @DisplayName("Empty media ids yields an empty result")
     void noMediaIds() {
-      JSONArray result = SupportJiraWebhookHandler.correlateAttachments(new JSONArray(), List.of(), new Date());
+      JSONArray result = SupportAdfAttachmentCorrelator.correlateAttachments(new JSONArray(), List.of(), new Date());
       assertEquals(0, result.length());
     }
 
     @Test
     @DisplayName("Empty issue attachments yields an empty result even with media ids present")
     void noIssueAttachments() {
-      JSONArray result = SupportJiraWebhookHandler.correlateAttachments(new JSONArray(), List.of("m1"), new Date());
+      JSONArray result = SupportAdfAttachmentCorrelator.correlateAttachments(new JSONArray(), List.of("m1"), new Date());
       assertEquals(0, result.length());
     }
 
@@ -1111,7 +1111,7 @@ class SupportJiraWebhookHandlerTest {
       JSONArray issueAttachments = new JSONArray()
           .put(attachment("10001", "screenshot.png", "image/png", isoOf(1_800_000_000_000L)));
 
-      JSONArray result = SupportJiraWebhookHandler.correlateAttachments(
+      JSONArray result = SupportAdfAttachmentCorrelator.correlateAttachments(
           issueAttachments, List.of("10001"), new Date());
 
       assertEquals(1, result.length());
@@ -1128,7 +1128,7 @@ class SupportJiraWebhookHandlerTest {
           .put(attachment("10001", "a.png", "image/png", isoOf(1_800_000_000_000L)))
           .put(attachment("10002", "b.pdf", "application/pdf", isoOf(1_800_000_005_000L)));
 
-      JSONArray result = SupportJiraWebhookHandler.correlateAttachments(
+      JSONArray result = SupportAdfAttachmentCorrelator.correlateAttachments(
           issueAttachments, List.of("10001", "10002"), new Date());
 
       assertEquals(2, result.length());
@@ -1148,7 +1148,7 @@ class SupportJiraWebhookHandlerTest {
 
       // "adf-media-xyz" stands in for a Media Platform file id that never appears verbatim in the
       // REST attachment list — this forces the fallback path.
-      JSONArray result = SupportJiraWebhookHandler.correlateAttachments(
+      JSONArray result = SupportAdfAttachmentCorrelator.correlateAttachments(
           issueAttachments, List.of("adf-media-xyz"), commentTime);
 
       assertEquals(1, result.length());
@@ -1166,7 +1166,7 @@ class SupportJiraWebhookHandlerTest {
           .put(attachment("10002", "close.png", "image/png", isoOf(commentTime.getTime())))
           .put(attachment("A3", "far.png", "image/png", isoOf(commentTime.getTime() - 300_000)));
 
-      JSONArray result = SupportJiraWebhookHandler.correlateAttachments(
+      JSONArray result = SupportAdfAttachmentCorrelator.correlateAttachments(
           issueAttachments, List.of("10002", "adf-media-xyz"), commentTime);
 
       assertEquals(2, result.length());
@@ -1181,7 +1181,7 @@ class SupportJiraWebhookHandlerTest {
       JSONArray issueAttachments = new JSONArray()
           .put(attachment("A1", "only.png", "image/png", isoOf(commentTime.getTime())));
 
-      JSONArray result = SupportJiraWebhookHandler.correlateAttachments(
+      JSONArray result = SupportAdfAttachmentCorrelator.correlateAttachments(
           issueAttachments, List.of("media-1", "media-2"), commentTime);
 
       assertEquals(1, result.length());
@@ -1203,7 +1203,7 @@ class SupportJiraWebhookHandlerTest {
           .put(attachment("OLD", "unrelated-old-file.pdf", "application/pdf",
               isoOf(commentTime.getTime() - thirtyDaysMillis)));
 
-      JSONArray result = SupportJiraWebhookHandler.correlateAttachments(
+      JSONArray result = SupportAdfAttachmentCorrelator.correlateAttachments(
           issueAttachments, List.of("adf-media-unrelated"), commentTime);
 
       // Beyond the distance threshold, no fallback match is forced.
@@ -1221,7 +1221,7 @@ class SupportJiraWebhookHandlerTest {
           .put(attachment("HOUR-OLD", "unrelated-same-day-file.pdf", "application/pdf",
               isoOf(commentTime.getTime() - 3_600_000)));
 
-      JSONArray result = SupportJiraWebhookHandler.correlateAttachments(
+      JSONArray result = SupportAdfAttachmentCorrelator.correlateAttachments(
           issueAttachments, List.of("adf-media-unrelated"), commentTime);
 
       assertEquals(0, result.length());
@@ -1244,7 +1244,7 @@ class SupportJiraWebhookHandlerTest {
           .put(attachment("ALREADY-LINKED", "already.png", "image/png", isoOf(commentTime.getTime() + 60_000)))
           .put(attachment("OTHER", "other.png", "image/png", isoOf(commentTime.getTime() + 300_000)));
 
-      JSONArray result = SupportJiraWebhookHandler.correlateAttachments(
+      JSONArray result = SupportAdfAttachmentCorrelator.correlateAttachments(
           issueAttachments, List.of("adf-media-unrelated"), commentTime, Set.of("ALREADY-LINKED"));
 
       assertEquals(1, result.length());
@@ -1258,7 +1258,7 @@ class SupportJiraWebhookHandlerTest {
       JSONArray issueAttachments = new JSONArray()
           .put(attachment("ALREADY-LINKED", "already.png", "image/png", isoOf(commentTime.getTime())));
 
-      JSONArray result = SupportJiraWebhookHandler.correlateAttachments(
+      JSONArray result = SupportAdfAttachmentCorrelator.correlateAttachments(
           issueAttachments, List.of("adf-media-unrelated"), commentTime, Set.of("ALREADY-LINKED"));
 
       assertEquals(0, result.length());
@@ -1622,7 +1622,7 @@ class SupportJiraWebhookHandlerTest {
 
         JSONObject match = SupportJiraWebhookHandler.findAttachmentByFilename(issueAttachments, refs.get(0).filename);
         assertNotNull(match, "expected a matching attachment for " + filename);
-        JSONObject meta = SupportJiraWebhookHandler.toAttachmentMeta(match);
+        JSONObject meta = SupportAdfAttachmentCorrelator.toAttachmentMeta(match);
         assertEquals("20001", meta.getString("id"));
         assertEquals(filename, meta.getString("filename"));
         assertEquals(mimeType, meta.getString("mimeType"));
@@ -1671,7 +1671,7 @@ class SupportJiraWebhookHandlerTest {
         OBDal obDal = mockObDal(dalMock);
         mockCriteria(obDal, SupportConversation.class, Collections.emptyList());
 
-        Set<String> ids = SupportJiraWebhookHandler.findAlreadyLinkedAttachmentIds("SUP-30");
+        Set<String> ids = SupportAdfAttachmentCorrelator.findAlreadyLinkedAttachmentIds("SUP-30");
 
         assertTrue(ids.isEmpty());
       }
@@ -1693,7 +1693,7 @@ class SupportJiraWebhookHandlerTest {
         when(msg3.getAttachments()).thenReturn("[{\"id\":\"att-3\"}]");
         mockCriteria(obDal, SupportMessage.class, List.of(msg1, msg2, msg3));
 
-        Set<String> ids = SupportJiraWebhookHandler.findAlreadyLinkedAttachmentIds("SUP-31");
+        Set<String> ids = SupportAdfAttachmentCorrelator.findAlreadyLinkedAttachmentIds("SUP-31");
 
         assertEquals(Set.of("att-1", "att-2", "att-3"), ids);
       }

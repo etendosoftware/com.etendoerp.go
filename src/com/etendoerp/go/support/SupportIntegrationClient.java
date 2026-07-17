@@ -310,7 +310,7 @@ final class SupportIntegrationClient {
    * ticket is human-escalated — {@link #postJiraComment} needs a non-empty body, so this
    * describes what the user attached instead of leaving it blank. {@code attachments} is the
    * request wire format ({@code [{name, mimeType, data}]}, per {@code buildOutgoingAttachmentsJson}
-   * in {@link SupportConversationsServlet}). */
+   * in {@link SupportAttachmentHelpers}). */
   static String describeAttachments(JSONArray attachments) {
     if (attachments == null || attachments.length() == 0) return "[Adjuntó un archivo]";
     List<String> names = new ArrayList<>();
