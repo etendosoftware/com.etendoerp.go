@@ -100,8 +100,17 @@ class TbaiSyncStatusInjector {
         + "  FROM tbai_syncinvoice"
         + "  WHERE c_invoice_id IN (:invoiceIds)"
         + ") t WHERE rn = 1";
+    // NOTE: must NOT pass Object[].class as a second argument to createNativeQuery(String, Class).
+    // That JPA-style overload treats the Class argument as an *entity* to map results onto
+    // (Session#createNativeQuery(String, Class) -> addEntity(alias, resultClass.getName(), ...)
+    // under the hood in Hibernate 5.6), and Object[] is not a mapped entity — every call threw a
+    // MappingException that was swallowed by the generic catch in inject() below, silently
+    // producing an empty map on every GET (list and detail) regardless of real data. The correct
+    // idiom for a multi-column scalar native query, used everywhere else in this package, is the
+    // single-argument createNativeQuery(String), whose untyped NativeQuery already yields Object[]
+    // rows for multi-column selects.
     NativeQuery<Object[]> nq = OBDal.getInstance().getSession()
-        .createNativeQuery(sql, Object[].class);
+        .createNativeQuery(sql);
     nq.setParameterList("invoiceIds", invoiceIds);
     List<Object[]> rows = nq.list();
     Map<String, String> result = new HashMap<>(rows.size());
