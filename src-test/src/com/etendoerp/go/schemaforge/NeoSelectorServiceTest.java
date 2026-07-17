@@ -21,10 +21,13 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.when;
 
 import java.lang.reflect.Method;
 import java.util.HashMap;
@@ -33,6 +36,9 @@ import java.util.Map;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.mockito.MockedStatic;
+import org.openbravo.base.model.Entity;
+import org.openbravo.base.model.Property;
+import org.openbravo.model.ad.datamodel.Column;
 
 import com.etendoerp.go.schemaforge.selector.meta.SelectorMeta;
 import com.etendoerp.go.schemaforge.selector.policy.NeoSelectorPolicy;
@@ -224,6 +230,80 @@ class NeoSelectorServiceTest {
 
     assertNotNull(captured[0]);
     assertFalse(captured[0].containsKey("language"));
+  }
+
+  // --------------------------------------------------------------------
+  // matchesPropertyName — resolve a selector identifier by DAL property
+  // name (in addition to the DB column name). See ETP-4058.
+  // --------------------------------------------------------------------
+
+  private static final String PRICE_LIST_COLUMN = "M_PriceList_ID";
+  private static final String PRICE_LIST_PROPERTY = "priceList";
+
+  private static Column mockColumn(String dbColumnName) {
+    Column column = mock(Column.class);
+    when(column.getDBColumnName()).thenReturn(dbColumnName);
+    return column;
+  }
+
+  private static Entity mockEntityWithProperty(String dbColumnName, String propertyName) {
+    Entity entity = mock(Entity.class);
+    Property property = mock(Property.class);
+    when(property.getName()).thenReturn(propertyName);
+    when(entity.getPropertyByColumnName(dbColumnName)).thenReturn(property);
+    return entity;
+  }
+
+  /** The DAL property name resolves the FK column (priceList -> M_PriceList_ID). */
+  @Test
+  @DisplayName("matchesPropertyName resolves the FK column by DAL property name")
+  void testMatchesPropertyNameByProperty() {
+    Column column = mockColumn(PRICE_LIST_COLUMN);
+    Entity entity = mockEntityWithProperty(PRICE_LIST_COLUMN, PRICE_LIST_PROPERTY);
+
+    assertTrue(NeoSelectorService.matchesPropertyName(entity, column, PRICE_LIST_PROPERTY));
+  }
+
+  /** Property-name matching is case-insensitive. */
+  @Test
+  @DisplayName("matchesPropertyName is case-insensitive")
+  void testMatchesPropertyNameCaseInsensitive() {
+    Column column = mockColumn(PRICE_LIST_COLUMN);
+    Entity entity = mockEntityWithProperty(PRICE_LIST_COLUMN, PRICE_LIST_PROPERTY);
+
+    assertTrue(NeoSelectorService.matchesPropertyName(entity, column, "PRICELIST"));
+  }
+
+  /** An identifier that matches neither the property nor the column returns false. */
+  @Test
+  @DisplayName("matchesPropertyName returns false for an unknown identifier")
+  void testMatchesPropertyNameUnknownIdentifier() {
+    Column column = mockColumn(PRICE_LIST_COLUMN);
+    Entity entity = mockEntityWithProperty(PRICE_LIST_COLUMN, PRICE_LIST_PROPERTY);
+
+    assertFalse(NeoSelectorService.matchesPropertyName(entity, column, "banana"));
+  }
+
+  /** A null DAL entity or column is handled defensively (no NPE, returns false). */
+  @Test
+  @DisplayName("matchesPropertyName returns false for null entity or column")
+  void testMatchesPropertyNameNullArguments() {
+    Column column = mockColumn(PRICE_LIST_COLUMN);
+
+    assertFalse(NeoSelectorService.matchesPropertyName(null, column, PRICE_LIST_PROPERTY));
+    assertFalse(NeoSelectorService.matchesPropertyName(mock(Entity.class), null, PRICE_LIST_PROPERTY));
+  }
+
+  /** A property lookup that throws is swallowed and treated as no match. */
+  @Test
+  @DisplayName("matchesPropertyName returns false when property lookup throws")
+  void testMatchesPropertyNameSwallowsException() {
+    Column column = mockColumn(PRICE_LIST_COLUMN);
+    Entity entity = mock(Entity.class);
+    when(entity.getPropertyByColumnName(PRICE_LIST_COLUMN))
+        .thenThrow(new RuntimeException("model not mapped"));
+
+    assertFalse(NeoSelectorService.matchesPropertyName(entity, column, PRICE_LIST_PROPERTY));
   }
 
   @SuppressWarnings("unchecked")

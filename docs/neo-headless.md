@@ -176,7 +176,7 @@ All URLs are relative to the servlet root `/sws/neo`.
 | `/{specName}/{entityName}/{recordId}` | PATCH | Partial update |
 | `/{specName}/{entityName}/{recordId}` | DELETE | Delete record |
 | `/{specName}/{entityName}/selectors` | GET | List FK selectors |
-| `/{specName}/{entityName}/selectors/{columnName}` | GET | Query selector values |
+| `/{specName}/{entityName}/selectors/{fieldIdentifier}` | GET | Query selector values (accepts DAL property name or DB column name) |
 | `/{specName}/{entityName}/{recordId}/action` | GET | List button actions |
 | `/{specName}/{entityName}/{recordId}/action/{columnName}` | POST | Execute button action |
 
@@ -260,7 +260,18 @@ Response:
 }
 ```
 
-**Query selector values** -- `GET /{specName}/{entityName}/selectors/{columnName}`
+**Query selector values** -- `GET /{specName}/{entityName}/selectors/{fieldIdentifier}`
+
+`{fieldIdentifier}` accepts **either** identity of the field's column:
+
+- the **DAL property name** (canonical, e.g. `priceList`, `partnerAddress`) — this is what
+  the rest of the NEO API uses everywhere else (POST/PATCH body, GET response, `/defaults`,
+  callouts) and what the generated selector URLs (`apiPrediction.selectors[].url`) carry;
+- the **DB column name** (backward-compat, e.g. `M_PriceList_ID`) — resolved via a fast exact
+  match so existing clients using column-name selector URLs keep working.
+
+The endpoint tries the exact DB-column match first, then falls back to matching the DAL property
+name. See ETP-4058.
 
 Query parameters:
 
