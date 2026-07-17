@@ -48,6 +48,10 @@ final class SelectorQueryExecutor {
   private static final String PARAM_SEARCH_LANG = "searchLang";
   private static final String FIELD_LABEL = "label";
   private static final String PARAM_LANGUAGE = "language";
+  /** Aux out-field suffix carrying the per-locator on-hand quantity of a stock-breakdown selector. */
+  private static final String AUX_SUFFIX_QTY = "_QTY";
+  /** Aux out-field suffix carrying the per-locator storage bin of a stock-breakdown selector. */
+  private static final String AUX_SUFFIX_LOC = "_LOC";
 
   private SelectorQueryExecutor() {
   }
@@ -181,8 +185,10 @@ final class SelectorQueryExecutor {
     // rows. Restrict both the count and the data query to one representative row per distinct
     // valueProperty so the response holds one item per value (no duplicates) and paging math is
     // correct. Guard mirrors resolveRichItemId exactly: only when valueProperty is a non-PK path.
-    // When the guard is false the where clause is byte-identical to before (zero regression).
-    boolean distinctByValue = meta.valueProperty != null && !"id".equals(meta.valueProperty);
+    // Stock-breakdown selectors are the deliberate exception (see shouldDistinctByValue): they
+    // MUST keep every per-locator row. When the guard is false the where clause is byte-identical
+    // to before (zero regression).
+    boolean distinctByValue = shouldDistinctByValue(meta);
     String effectiveWhere = distinctByValue
         ? buildRepresentativeRowWhere(whereClause.getHql(), meta, alias)
         : whereClause.getHql();
@@ -231,6 +237,49 @@ final class SelectorQueryExecutor {
     enrichTranslations(items, meta.entityName, resolveEnrichLanguage(null));
 
     return SelectorResponseSupport.buildSelectorResponse(items, columns, totalCount, limit, offset);
+  }
+
+  /**
+   * Decides whether the rich-selector query must be collapsed to one representative row per
+   * distinct {@code valueProperty} (the ETP-4429 de-duplication of view-backed selectors).
+   *
+   * <p>De-duplication is enabled only when the Value Field is a non-PK path (mirrors
+   * {@link #resolveRichItemId}), AND the selector is NOT a stock-breakdown selector. Stock-breakdown
+   * selectors (see {@link #isStockBreakdownSelector}) are the deliberate exception: their multiple
+   * rows per value are the payload the frontend needs, not duplicates to collapse.</p>
+   */
+  private static boolean shouldDistinctByValue(SelectorMeta meta) {
+    return meta.valueProperty != null
+        && !"id".equals(meta.valueProperty)
+        && !isStockBreakdownSelector(meta);
+  }
+
+  /**
+   * Detects a "stock-breakdown" selector — one that exposes a per-row on-hand-quantity and/or
+   * storage-bin aux out-field ({@code _QTY} / {@code _LOC}). The canonical case is the "Product
+   * Complete" selector over {@code M_Product_Stock_V}, used by the goods-movements and
+   * internal-consumption line product-search drawers, which returns ONE row per storage bin holding
+   * stock (plus a synthetic generic zero-stock row).
+   *
+   * <p>Such selectors must NOT be de-duplicated by {@code valueProperty}: the per-locator rows are
+   * exactly what the drawer renders (it reads {@code _aux._QTY} / {@code _aux._LOC} per row). The
+   * ETP-4429 de-dup picks the representative row via {@code MIN(id)}, but in
+   * {@code M_Product_Stock_V} the generic zero-stock row's id equals {@code <m_product_id>} — a
+   * strict string prefix of every real per-locator row id ({@code <m_product_id><m_storage_detail_id>})
+   * — so string {@code MIN()} always selects the zero-stock row, collapsing stock to 0 and destroying
+   * the breakdown. Skipping de-dup here returns all rows and fixes that.</p>
+   *
+   * <p>The signal keys off selector metadata (the OBUISEL aux out-field suffixes), not the window, so
+   * it covers every window sharing this selector. It cannot misfire on classic FK view-backed
+   * selectors: those expose no {@code _QTY}/{@code _LOC} aux out-fields, so they keep de-dup ON
+   * exactly as ETP-4429 established.</p>
+   */
+  private static boolean isStockBreakdownSelector(SelectorMeta meta) {
+    if (meta.auxFields == null) {
+      return false;
+    }
+    return meta.auxFields.stream().anyMatch(af -> af != null
+        && (AUX_SUFFIX_QTY.equalsIgnoreCase(af.suffix) || AUX_SUFFIX_LOC.equalsIgnoreCase(af.suffix)));
   }
 
   /**

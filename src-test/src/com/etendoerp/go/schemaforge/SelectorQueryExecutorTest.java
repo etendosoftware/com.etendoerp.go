@@ -51,6 +51,7 @@ import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.dal.service.OBQuery;
 
+import com.etendoerp.go.schemaforge.selector.meta.AuxFieldMeta;
 import com.etendoerp.go.schemaforge.selector.meta.SelectorMeta;
 import com.etendoerp.go.schemaforge.util.NeoLanguage;
 import com.etendoerp.go.schemaforge.util.NeoTrl;
@@ -93,6 +94,34 @@ public class SelectorQueryExecutorTest {
         String.class, SelectorMeta.class, String.class);
     m.setAccessible(true);
     return (String) m.invoke(null, baseWhere, meta, alias);
+  }
+
+  /**
+   * Invokes the private {@code shouldDistinctByValue} method (the de-dup guard decision).
+   */
+  private static boolean invokeShouldDistinctByValue(SelectorMeta meta) throws Exception {
+    Method m = SelectorQueryExecutor.class.getDeclaredMethod("shouldDistinctByValue",
+        SelectorMeta.class);
+    m.setAccessible(true);
+    return (boolean) m.invoke(null, meta);
+  }
+
+  /**
+   * Invokes the private {@code isStockBreakdownSelector} method.
+   */
+  private static boolean invokeIsStockBreakdownSelector(SelectorMeta meta) throws Exception {
+    Method m = SelectorQueryExecutor.class.getDeclaredMethod("isStockBreakdownSelector",
+        SelectorMeta.class);
+    m.setAccessible(true);
+    return (boolean) m.invoke(null, meta);
+  }
+
+  /**
+   * Builds an out-field aux metadata with only a response suffix (the shape resolved for
+   * {@code M_Product_Stock_V} out-fields such as {@code _QTY} / {@code _LOC}).
+   */
+  private static AuxFieldMeta auxWithSuffix(String suffix) {
+    return new AuxFieldMeta(suffix, null, suffix, null);
   }
 
   /**
@@ -981,6 +1010,162 @@ public class SelectorQueryExecutorTest {
           capturedWhere.get(0).contains("min("));
       assertFalse("no GROUP BY for PK-valued selector",
           capturedWhere.get(0).contains("group by"));
+    }
+  }
+
+  // ---------------------------------------------------------------
+  // Stock-breakdown selectors — the ETP-4429 de-dup exception
+  // ---------------------------------------------------------------
+
+  /**
+   * A selector exposing a per-row {@code _QTY} out-field is a stock-breakdown selector.
+   */
+  @Test
+  public void testIsStockBreakdownSelectorDetectsQtyAuxField() throws Exception {
+    SelectorMeta meta = new SelectorMeta.Builder("MaterialMgmtProductStock", "product$_identifier")
+        .isRich(true).valueProperty("product.id")
+        .auxFields(Collections.singletonList(auxWithSuffix("_QTY"))).build();
+
+    assertTrue(invokeIsStockBreakdownSelector(meta));
+  }
+
+  /**
+   * A selector exposing a per-row {@code _LOC} out-field is a stock-breakdown selector, and the
+   * suffix match is case-insensitive.
+   */
+  @Test
+  public void testIsStockBreakdownSelectorDetectsLocAuxFieldCaseInsensitive() throws Exception {
+    SelectorMeta meta = new SelectorMeta.Builder("MaterialMgmtProductStock", "product$_identifier")
+        .isRich(true).valueProperty("product.id")
+        .auxFields(Collections.singletonList(auxWithSuffix("_loc"))).build();
+
+    assertTrue(invokeIsStockBreakdownSelector(meta));
+  }
+
+  /**
+   * A classic view-backed FK selector with only unrelated out-fields (no {@code _QTY}/{@code _LOC})
+   * is NOT a stock-breakdown selector, so the ETP-4429 de-dup must still apply to it.
+   */
+  @Test
+  public void testIsStockBreakdownSelectorIgnoresUnrelatedAuxFields() throws Exception {
+    SelectorMeta meta = new SelectorMeta.Builder("MaterialMgmtProductStock", "product$_identifier")
+        .isRich(true).valueProperty("product.id")
+        .auxFields(Arrays.asList(auxWithSuffix("_UOM"), auxWithSuffix("_PRICE"))).build();
+
+    assertFalse(invokeIsStockBreakdownSelector(meta));
+  }
+
+  /**
+   * The de-dup guard is OFF for a stock-breakdown selector (all per-locator rows are kept), even
+   * though its valueProperty is a non-PK path.
+   */
+  @Test
+  public void testShouldDistinctByValueFalseForStockBreakdownSelector() throws Exception {
+    SelectorMeta meta = new SelectorMeta.Builder("MaterialMgmtProductStock", "product$_identifier")
+        .isRich(true).valueProperty("product.id")
+        .auxFields(Arrays.asList(auxWithSuffix("_QTY"), auxWithSuffix("_LOC"))).build();
+
+    assertFalse(invokeShouldDistinctByValue(meta));
+  }
+
+  /**
+   * The de-dup guard stays ON for a classic view-backed FK selector (non-PK valueProperty, no
+   * stock-breakdown out-fields) — the ETP-4429 duplicate-row fix is preserved.
+   */
+  @Test
+  public void testShouldDistinctByValueTrueForClassicViewBackedSelector() throws Exception {
+    SelectorMeta meta = new SelectorMeta.Builder("MaterialMgmtProductStock", "product$_identifier")
+        .isRich(true).valueProperty("product.id")
+        .auxFields(Collections.singletonList(auxWithSuffix("_UOM"))).build();
+
+    assertTrue(invokeShouldDistinctByValue(meta));
+  }
+
+  /**
+   * End-to-end: a stock-breakdown selector (aux {@code _QTY}/{@code _LOC}, non-PK valueProperty)
+   * must NOT collapse rows. Every per-locator row the query returns for the same product reaches the
+   * response, and the where string passed to the query carries no representative-row subquery.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  public void testExecuteRichQueryStockBreakdownSelectorReturnsAllRows() throws Exception {
+    SelectorMeta meta = new SelectorMeta.Builder("MaterialMgmtProductStock", "name")
+        .isRich(true).valueProperty("product.id")
+        .auxFields(Arrays.asList(auxWithSuffix("_QTY"), auxWithSuffix("_LOC"))).build();
+
+    // Three view rows for the SAME product: the synthetic zero-stock generic row (id == product id,
+    // the string-MIN prefix that used to win) plus two real per-locator rows. All must survive.
+    BaseOBObject prod = mock(BaseOBObject.class);
+    when(prod.get("id")).thenReturn("PROD1");
+
+    BaseOBObject generic = mock(BaseOBObject.class);
+    when(generic.get("product")).thenReturn(prod);
+    when(generic.getId()).thenReturn("PROD1");
+    when(generic.getIdentifier()).thenReturn("Product One");
+    BaseOBObject loc1 = mock(BaseOBObject.class);
+    when(loc1.get("product")).thenReturn(prod);
+    when(loc1.getId()).thenReturn("PROD1SD01");
+    when(loc1.getIdentifier()).thenReturn("Product One");
+    BaseOBObject loc2 = mock(BaseOBObject.class);
+    when(loc2.get("product")).thenReturn(prod);
+    when(loc2.getId()).thenReturn("PROD1SD02");
+    when(loc2.getIdentifier()).thenReturn("Product One");
+
+    OBQuery countQuery = mock(OBQuery.class);
+    OBQuery dataQuery = mock(OBQuery.class);
+    when(countQuery.count()).thenReturn(3);
+    when(dataQuery.list()).thenReturn(Arrays.asList(generic, loc1, loc2));
+
+    List<String> capturedWhere = new ArrayList<>();
+    OBDal obDal = mock(OBDal.class);
+    when(obDal.createQuery(anyString(), anyString())).thenAnswer(inv -> {
+      capturedWhere.add(inv.getArgument(1));
+      return capturedWhere.size() == 1 ? countQuery : dataQuery;
+    });
+
+    NeoResponse expected = NeoResponse.ok(new JSONObject());
+    SelectorQueryBuilder.HqlWithParams clause =
+        new SelectorQueryBuilder.HqlWithParams("as e where e.active = true", new HashMap<>());
+
+    try (MockedStatic<SelectorQueryBuilder> builderMock = mockStatic(
+        SelectorQueryBuilder.class); MockedStatic<NeoSelectorExecutionHelper> helperMock = mockStatic(
+        NeoSelectorExecutionHelper.class); MockedStatic<SelectorAuxResolver> auxMock = mockStatic(
+        SelectorAuxResolver.class); MockedStatic<OBDal> obDalMock = mockStatic(
+        OBDal.class); MockedStatic<SelectorResponseSupport> respMock = mockStatic(
+        SelectorResponseSupport.class)) {
+
+      builderMock.when(
+          () -> SelectorQueryBuilder.buildRichQueryWhereClause(any(), any(), any(), any(), any()))
+          .thenReturn(clause);
+      helperMock.when(() -> NeoSelectorExecutionHelper.bindNamedParameters(any(OBQuery.class), any()))
+          .thenAnswer(inv -> null);
+      auxMock.when(() -> SelectorAuxResolver.appendAuxFields(any(), any(), any())).thenAnswer(inv -> null);
+      obDalMock.when(OBDal::getInstance).thenReturn(obDal);
+      respMock.when(() -> SelectorResponseSupport.buildGridColumnMetadata(any())).thenReturn(new JSONArray());
+
+      JSONArray[] capturedItems = new JSONArray[1];
+      int[] capturedTotal = new int[1];
+      respMock.when(
+          () -> SelectorResponseSupport.buildSelectorResponse(any(), any(), anyInt(), anyInt(), anyInt()))
+          .thenAnswer(inv -> {
+            capturedItems[0] = inv.getArgument(0);
+            capturedTotal[0] = inv.getArgument(2);
+            return expected;
+          });
+
+      NeoResponse result = SelectorQueryExecutor.execute(meta, "", 20, 0, null, "org-1", null);
+
+      assertNotNull(result);
+      // No representative-row de-dup: the where is byte-identical to the builder output.
+      assertEquals(2, capturedWhere.size());
+      assertEquals("as e where e.active = true", capturedWhere.get(0));
+      assertFalse("stock-breakdown selector must not be de-duplicated",
+          capturedWhere.get(0).contains("group by"));
+      assertFalse("stock-breakdown selector must not restrict to MIN(id)",
+          capturedWhere.get(0).contains("min("));
+      // All three per-locator rows survive to the response.
+      assertEquals(3, capturedTotal[0]);
+      assertEquals(3, capturedItems[0].length());
     }
   }
 }

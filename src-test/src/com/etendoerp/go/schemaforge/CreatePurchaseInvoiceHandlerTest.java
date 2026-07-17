@@ -37,6 +37,8 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
 
+import javax.enterprise.inject.Vetoed;
+
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
@@ -81,6 +83,7 @@ public class CreatePurchaseInvoiceHandlerTest {
    * Test double that overrides the helper methods that hit the DB or other
    * heavy collaborators, leaving createFromOrder focused on the link-step.
    */
+  @Vetoed // not a CDI bean: a discoverable subclass makes @Inject of the real handler ambiguous
   private static class TestableHandler extends CreatePurchaseInvoiceHandler {
     DocumentType docTypeToReturn;
     JSONArray selectedLinesToReturn;

@@ -21,8 +21,11 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.argThat;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import org.openbravo.erpCommon.utility.OBMessageUtils;
@@ -30,6 +33,8 @@ import org.openbravo.erpCommon.utility.OBMessageUtils;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.sql.Savepoint;
 
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
@@ -424,6 +429,56 @@ class BusinessPartnerHandlerTest {
       assertNotNull(result);
       String patchedKey = body.getJSONObject("response").getJSONArray("data").getJSONObject(0).getString("searchKey");
       assertEquals("1000067", patchedKey);
+    }
+  }
+
+  /**
+   * Reproduces ETP-4469: two concurrent POSTs race on {@code updateSearchKey()} and the
+   * second one hits the {@code c_bpartner_value} unique-constraint violation (both rows
+   * fetched the same not-yet-committed sequence value). The handler must protect the
+   * update with a savepoint and roll back to it on the duplicate-key error, so the
+   * shared {@code /batch} connection is recovered instead of left poisoned for whatever
+   * statement runs next in the same transaction.
+   */
+  @Test
+  void testAfterHandleRecoversFromDuplicateSearchKeyRaceWithSavepoint() throws Exception {
+    JSONObject body = buildResponseBody();
+    NeoResponse prevResult = mock(NeoResponse.class);
+    when(prevResult.getBody()).thenReturn(body);
+    when(ctx.getHttpMethod()).thenReturn("POST");
+    when(ctx.getPreviousResult()).thenReturn(prevResult);
+
+    Connection connMock = mock(Connection.class);
+    PreparedStatement psSelect = mock(PreparedStatement.class);
+    PreparedStatement psUpdate = mock(PreparedStatement.class);
+    ResultSet rsMock = mock(ResultSet.class);
+    Savepoint savepointMock = mock(Savepoint.class);
+
+    when(rsMock.next()).thenReturn(true);
+    when(rsMock.getString(1)).thenReturn("1000013");
+    when(psSelect.executeQuery()).thenReturn(rsMock);
+    when(connMock.prepareStatement(argThat(s -> s != null && s.contains("em_etgo_identifier")))).thenReturn(psSelect);
+    when(connMock.prepareStatement(argThat(s -> s != null && s.contains("UPDATE")))).thenReturn(psUpdate);
+    when(connMock.setSavepoint()).thenReturn(savepointMock);
+
+    SQLException duplicateKeyViolation = new SQLException(
+        "ERROR: duplicate key value violates unique constraint \"c_bpartner_value\"", "23505");
+    doThrow(duplicateKeyViolation).when(psUpdate).executeUpdate();
+
+    try (MockedStatic<OBDal> mDal = mockStatic(OBDal.class)) {
+      OBDal obDalMock = mock(OBDal.class);
+      when(obDalMock.getConnection()).thenReturn(connMock);
+      mDal.when(OBDal::getInstance).thenReturn(obDalMock);
+
+      // Must not throw / must not blow up the batch — this is what the outer swallowing
+      // try/catch already gives us today, so it alone is not enough to prove the fix.
+      handler.afterHandle(ctx);
+
+      // The real assertion: the handler must recover the connection via a savepoint
+      // rollback rather than leaving the failed UPDATE unrolled-back on a shared connection.
+      verify(connMock).setSavepoint();
+      verify(connMock).rollback(savepointMock);
+      verify(connMock, never()).rollback();
     }
   }
 

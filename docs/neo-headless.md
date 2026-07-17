@@ -518,6 +518,43 @@ The React hook `usePreviewAttachment` (`tools/app-shell/src/windows/custom/share
 | No file cached, `autoFetch=true` | Caller's `leftPanel` (live viewer) while background caching runs |
 | File cached | PDF/image viewer + delete button |
 
+### 4.9 Global Similarity Search Endpoint
+
+```
+GET /sws/neo/simsearch?entityName={entity}&items=["term1","term2"]&qtyResults=5&minSimPercent=30
+Authorization: Bearer {token}
+```
+
+Fuzzy/trigram matching against an AD entity's identifier columns, for resolving free-text values
+(e.g. a CSV import's `country`/`region` cell) to real records. This is a global pseudo-spec — like
+`batch`, it bypasses ETGO_SF_SPEC/ETGO_SF_ENTITY resolution entirely — reusing
+`com.etendoerp.copilot.toolpack.webhooks.SimSearch#handleSimSearch` directly rather than
+duplicating its pg_trgm/`etcotp_sim_search` matching logic.
+
+**Why this exists instead of calling the "SimSearch" webhook directly:** the Webhooks module
+requires a per-`(webhook, role)` grant row in `SMFWHE_DEFINEDWEBHOOK_ROLE`, provisioned by hand per
+role per environment via the Webhooks window's "Role Access" tab. This endpoint is reached through
+NEO's own JWT bearer authentication instead (same as every other `/sws/neo/*` request) — no
+additional per-role grant is needed. Entity-level security is unaffected: `SimSearch.handleSimSearch`
+still filters through `OBContext.getEntityAccessChecker().getReadableEntities()`, so a role can only
+match against entities it can already read.
+
+**Query parameters:**
+
+| Param | Required | Default | Description |
+|-------|----------|---------|-------------|
+| `entityName` | Yes | — | AD entity name to search (e.g. `Country`) |
+| `items` | Yes | — | JSON array of search terms, one result set per term |
+| `qtyResults` | No | `1` | Max matches returned per term |
+| `minSimPercent` | No | `30` | Minimum similarity score (0-100) to include a match |
+
+**Response:** `200` with one key per input item (`item_0`, `item_1`, ...), each holding the same
+`{status, data}` shape `SimSearch`'s webhook already returns — so existing callers only need their
+request URL updated, not their response parsing.
+
+Returns `400` if `entityName`/`items` is missing or `items` is not valid JSON, `422` if `entityName`
+does not resolve to a readable entity, `405` for any method other than `GET`.
+
 ---
 
 ## 5. Configuration
@@ -660,6 +697,8 @@ last-resort pattern, not a default — only reach for it once you've confirmed (
 | `NeoResponse.error(int, String)` | (given) | Error with `{"error": {"message": "...", "status": N}}`. |
 
 Responses support custom headers via `withHeader(name, value)`.
+
+**Real-world example — `TbaiConfigSequenceHandler`** (`schemaforge/handlers/TbaiConfigSequenceHandler.java`, `@Named("tbai-config-sequence-handler")`, wired as the `header` entity's `JAVA_QUALIFIER` for the `tbai-config` spec): a post-hook (`afterHandle`) that runs on every successful `POST`/`PUT` of the TBAI Fiscal Configuration. It walks the config's organization tree — plus organization `*` (id `0`), added explicitly since Document Types are very commonly defined at org `*` and would otherwise be silently excluded (same precedent as `SelectorOrgFilter#buildOrganizationPredicate`) — and finds every **active** `DocumentType` whose backing table is `C_Invoice` — which naturally covers sales invoices (`ARI`), purchase invoices (`API`), and their credit notes (`ARC`/`APC`), since all four share that table. Rather than one sequence per Document Type, it ensures the whole scope shares **exactly one** chaining `Sequence` (prefix `TBAI-`): it reuses one already assigned to any qualifying Document Type in scope, or creates a single new one only if none exists yet. This is the core fiscal-correctness rule — TicketBAI chains invoice numbers with a single scope-wide counter, so independent per-Document-Type sequences could collide. A Document Type that already has a chaining sequence (`EM_Tbai_Ad_Sequence_ID`) is left untouched, so re-saving the config is safe (idempotent). Any error is logged and swallowed: this is a best-effort secondary side effect and must never fail the parent save request.
 
 ---
 
