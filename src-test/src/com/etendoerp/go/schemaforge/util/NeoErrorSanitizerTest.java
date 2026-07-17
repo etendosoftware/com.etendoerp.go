@@ -18,7 +18,9 @@
 package com.etendoerp.go.schemaforge.util;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertTrue;
 
 import org.junit.Test;
 
@@ -95,6 +97,73 @@ public class NeoErrorSanitizerTest {
     RuntimeException level2 = new RuntimeException("level2", level3);
     RuntimeException level1 = new RuntimeException("level1", level2);
     assertEquals(GENERIC, NeoErrorSanitizer.sanitize(level1));
+  }
+
+  @Test
+  public void sanitize_uniqueViolationSqlState_returnsDuplicateKeyError() {
+    java.sql.SQLException uniqueViolation = new java.sql.SQLException(
+        "duplicate key value violates unique constraint \"c_bpartner_value\"", "23505");
+    // Precedence: a real SQLException also matches the generic name-based isDbException
+    // check (its class name contains "SQLException"), but the more specific
+    // unique-violation check must win over the generic fallback.
+    assertEquals(NeoErrorSanitizer.DUPLICATE_KEY_ERROR, NeoErrorSanitizer.sanitize(uniqueViolation));
+  }
+
+  @Test
+  public void sanitize_nonUniqueViolationSqlState_fallsBackToGeneric() {
+    java.sql.SQLException foreignKeyViolation = new java.sql.SQLException(
+        "insert or update on table violates foreign key constraint", "23503");
+    assertEquals(GENERIC, NeoErrorSanitizer.sanitize(foreignKeyViolation));
+  }
+
+  @Test
+  public void sanitize_uniqueViolationWrappedInRuntimeException_walksChain() {
+    java.sql.SQLException uniqueViolation = new java.sql.SQLException(
+        "duplicate key value violates unique constraint \"c_bpartner_value\"", "23505");
+    RuntimeException wrapper = new RuntimeException("outer message", uniqueViolation);
+    assertEquals(NeoErrorSanitizer.DUPLICATE_KEY_ERROR, NeoErrorSanitizer.sanitize(wrapper));
+  }
+
+  @Test
+  public void duplicateKeyError_containsMustBeUniquePhrase() {
+    // NeoCrudHandler picks HTTP 409 vs 500 using isDuplicateKeyViolation(), but the import
+    // UI's own classification (importEngine.js's isDuplicateKeyError) matches this exact
+    // message text against /must be unique/i — if this phrase ever drifts, a duplicate row
+    // hitting this fallback path would be misclassified as a hard failure instead of a
+    // skippable "already exists" duplicate.
+    assertTrue(NeoErrorSanitizer.DUPLICATE_KEY_ERROR.toLowerCase().contains("must be unique"));
+  }
+
+  @Test
+  public void isDuplicateKeyViolation_null_returnsFalse() {
+    assertFalse(NeoErrorSanitizer.isDuplicateKeyViolation(null));
+  }
+
+  @Test
+  public void isDuplicateKeyViolation_plainException_returnsFalse() {
+    assertFalse(NeoErrorSanitizer.isDuplicateKeyViolation(new RuntimeException("boom")));
+  }
+
+  @Test
+  public void isDuplicateKeyViolation_uniqueViolationSqlState_returnsTrue() {
+    java.sql.SQLException uniqueViolation = new java.sql.SQLException(
+        "duplicate key value violates unique constraint \"c_bpartner_value\"", "23505");
+    assertTrue(NeoErrorSanitizer.isDuplicateKeyViolation(uniqueViolation));
+  }
+
+  @Test
+  public void isDuplicateKeyViolation_nonUniqueViolationSqlState_returnsFalse() {
+    java.sql.SQLException foreignKeyViolation = new java.sql.SQLException(
+        "insert or update on table violates foreign key constraint", "23503");
+    assertFalse(NeoErrorSanitizer.isDuplicateKeyViolation(foreignKeyViolation));
+  }
+
+  @Test
+  public void isDuplicateKeyViolation_wrappedInRuntimeException_walksChain() {
+    java.sql.SQLException uniqueViolation = new java.sql.SQLException(
+        "duplicate key value violates unique constraint \"c_bpartner_value\"", "23505");
+    RuntimeException wrapper = new RuntimeException("outer message", uniqueViolation);
+    assertTrue(NeoErrorSanitizer.isDuplicateKeyViolation(wrapper));
   }
 
   // Inner classes whose names contain the patterns checked by isDbException.

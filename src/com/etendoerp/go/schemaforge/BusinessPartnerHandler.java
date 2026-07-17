@@ -21,6 +21,8 @@ import java.util.Set;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.sql.Savepoint;
 
 import javax.inject.Named;
 
@@ -72,6 +74,7 @@ public class BusinessPartnerHandler implements NeoHandler {
   private static final String RESPONSE_KEY = "response";
   private static final String FIELD_SEARCH_KEY = "searchKey";
   private static final String FIELD_NAME = "name";
+  private static final String SQLSTATE_UNIQUE_VIOLATION = "23505";
 
   private static final Set<String> PRECREATE_BILLING_FIELDS = Set.of("priceList", "paymentMethod", "paymentTerms",
       "account", "customerBlocking", "purchasePricelist", "pOPaymentMethod", "pOPaymentTerms", "pOFinancialAccount",
@@ -175,6 +178,33 @@ public class BusinessPartnerHandler implements NeoHandler {
       ps.setString(1, identifier);
       ps.setString(2, recordId);
       ps.executeUpdate();
+    }
+  }
+
+  /**
+   * Runs {@link #updateSearchKey(String, String)} under a savepoint so a duplicate-key
+   * hit (two concurrent rows racing on the same not-yet-committed sequence value) only
+   * rolls back the failed UPDATE instead of poisoning the whole shared {@code /batch}
+   * transaction for every other operation that follows on the same connection.
+   *
+   * @return {@code true} when the identifier was applied, {@code false} when it was
+   *         skipped due to a duplicate-key race (the placeholder {@code searchKey} is
+   *         kept in that case).
+   */
+  private static boolean applySearchKeyUpdate(String recordId, String identifier) throws Exception {
+    Connection conn = OBDal.getInstance().getConnection();
+    Savepoint savepoint = conn.setSavepoint();
+    try {
+      updateSearchKey(recordId, identifier);
+      return true;
+    } catch (SQLException e) {
+      if (!SQLSTATE_UNIQUE_VIOLATION.equals(e.getSQLState())) {
+        throw e;
+      }
+      log.warn("BusinessPartnerHandler: searchKey race on bp={} (duplicate identifier {}), "
+          + "keeping placeholder searchKey", recordId, identifier, e);
+      conn.rollback(savepoint);
+      return false;
     }
   }
 
@@ -300,8 +330,7 @@ public class BusinessPartnerHandler implements NeoHandler {
         String recordId = extractRecordId(body);
         if (recordId != null) {
           String identifier = queryIdentifier(recordId);
-          if (StringUtils.isNotBlank(identifier)) {
-            updateSearchKey(recordId, identifier);
+          if (StringUtils.isNotBlank(identifier) && applySearchKeyUpdate(recordId, identifier)) {
             patchSearchKeyInResponse(body, identifier);
             modified = true;
           }
