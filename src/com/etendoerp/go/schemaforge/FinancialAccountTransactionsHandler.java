@@ -619,8 +619,8 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
           OBDal.getInstance().save(trx);
           OBDal.getInstance().flush();
 
-          // "Confirmar" in the modal creates AND processes in one atomic call (Borrador → Procesado);
-          // "Guardar" leaves it Draft (process omitted / false).
+          // Confirmar in the modal creates and processes in one atomic call — moving the movement
+          // from Borrador to Procesado — whereas Guardar leaves it as a Draft.
           if (body.optBoolean(FIELD_PROCESS, false)) {
             FIN_TransactionProcess.doTransactionProcess("P", trx);
             OBDal.getInstance().flush();
