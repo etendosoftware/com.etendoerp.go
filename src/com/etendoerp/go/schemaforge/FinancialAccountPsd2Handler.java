@@ -39,6 +39,8 @@ import org.hibernate.criterion.Restrictions;
 import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.currency.Currency;
 import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
+import org.openbravo.model.financialmgmt.payment.FIN_PaymentMethod;
+import org.openbravo.model.financialmgmt.payment.FinAccPaymentMethod;
 
 import com.etendoerp.psd2.bank.integration.data.FinaccConnection;
 import com.etendoerp.psd2.bank.integration.data.Provider;
@@ -465,6 +467,10 @@ public class FinancialAccountPsd2Handler implements NeoHandler {
 
     FIN_FinancialAccount finAcc = FinancialAccountSupport.createAccount(currentClient(),
         OBContext.getOBContext().getCurrentOrganization(), currency, name, type);
+    // Mirrors the manual "sin conexión" creation flow (FinancialAccountHandler.afterHandle):
+    // a Salt Edge-created account must also come pre-wired with the payment methods that
+    // correspond to its type, with one marked as default.
+    FinancialAccountSupport.assignDefaultPaymentMethods(finAcc);
 
     String warning = linkAccount(finAcc, connectionId, saltEdgeAccountId, node, details, apiKey);
     JSONObject data = new JSONObject();
@@ -511,6 +517,12 @@ public class FinancialAccountPsd2Handler implements NeoHandler {
       return NeoResponse.error(404, MSG_ACCOUNT_NOT_FOUND);
     }
     boolean disconnected = SaltEdgeAccountLinkHelper.disconnectFinancialAccount(finAcc);
+    if (disconnected) {
+      // Mirror of the connect-time clear: with PSD2 (and its PIS callback) gone, the transfer
+      // method must auto-create the FIN_Finacc_Transaction on processing again, like any
+      // non-PSD2 account. Scoped to this Etendo Go bridge only — never Classic's flow.
+      restoreAutomaticWithdrawnForTransferMethod(finAcc);
+    }
     JSONObject data = new JSONObject();
     data.put("disconnected", disconnected);
     return FinancialAccountPsd2Support.okData(data);
@@ -593,7 +605,73 @@ public class FinancialAccountPsd2Handler implements NeoHandler {
       finAcc.setPsd2Provider(provider);
       OBDal.getInstance().save(finAcc);
     }
+    disableAutomaticWithdrawnForTransferMethod(finAcc);
     return warning;
+  }
+
+  /**
+   * Scope note (ETP-4406): this is called ONLY from this Etendo Go bridge, never from Classic's
+   * own PSD2 connect flow (Classic calls {@link SaltEdgeAccountLinkHelper} directly through its
+   * own action handlers in the PSD2 module, which this method never touches). Etendo Go is
+   * introducing a new payment flow where the bank transaction is created by the PIS callback
+   * once Salt Edge confirms execution, not by the local "process payment" step — so once an
+   * account is connected to PSD2 via this SPA, its transfer payment method(s) must stop
+   * auto-creating a {@code FIN_Finacc_Transaction} on save, or the transaction would be created
+   * twice (once locally, once by the PSD2 callback). Classic's flow is untouched and keeps
+   * creating transactions the way it always has.
+   * <p>
+   * Only {@code Automatic Withdrawn} (Payment OUT) is cleared — PIS only initiates outbound
+   * transfers (paying suppliers), so incoming deposits are unaffected and {@code Automatic
+   * Deposit} (Payment IN) is left as configured.
+   * <p>
+   * Judgment call: {@code FIN_PaymentMethod} has no explicit "is transfer" flag in this model —
+   * same heuristic as {@code PisPaymentService.isTransferMethod}, matched here directly
+   * on the method name (contains "transfer"/"transferencia", case-insensitive).
+   */
+  private void disableAutomaticWithdrawnForTransferMethod(FIN_FinancialAccount finAcc) {
+    setAutomaticWithdrawnForTransferMethods(finAcc, false, "disabled");
+  }
+
+  /**
+   * Inverse of {@link #disableAutomaticWithdrawnForTransferMethod}, run when an account is
+   * disconnected from PSD2 via this Etendo Go bridge: re-enables {@code Automatic Withdrawn} on the
+   * account's transfer payment method(s) so that, with no PIS callback in play anymore, processing
+   * a payment once again auto-creates its {@code FIN_Finacc_Transaction} the way it does for any
+   * non-PSD2 account. Restores to {@code true} — the master {@code FIN_PaymentMethod} default for
+   * transfers — since the connect-time clear does not record the prior per-account value.
+   */
+  private void restoreAutomaticWithdrawnForTransferMethod(FIN_FinancialAccount finAcc) {
+    setAutomaticWithdrawnForTransferMethods(finAcc, true, "restored");
+  }
+
+  /**
+   * Sets {@code Automatic Withdrawn} to {@code value} on every transfer payment method linked to
+   * {@code finAcc}. Shared by the connect (clear → {@code false}) and disconnect (restore →
+   * {@code true}) flows so the transfer-method matching heuristic lives in one place.
+   */
+  private void setAutomaticWithdrawnForTransferMethods(FIN_FinancialAccount finAcc, boolean value,
+      String verb) {
+    OBCriteria<FinAccPaymentMethod> crit = OBDal.getInstance()
+        .createCriteria(FinAccPaymentMethod.class);
+    crit.add(Restrictions.eq(FinAccPaymentMethod.PROPERTY_ACCOUNT, finAcc));
+    int updated = 0;
+    for (FinAccPaymentMethod fapm : crit.list()) {
+      FIN_PaymentMethod method = fapm.getPaymentMethod();
+      if (method == null || method.getName() == null) {
+        continue;
+      }
+      if (StringUtils.containsIgnoreCase(method.getName(), "transfer")
+          || StringUtils.containsIgnoreCase(method.getName(), "transferencia")) {
+        fapm.setAutomaticWithdrawn(value);
+        OBDal.getInstance().save(fapm);
+        updated++;
+      }
+    }
+    if (updated > 0) {
+      OBDal.getInstance().flush();
+      log.info("PSD2 (Etendo Go): {} Automatic Withdrawn on {} transfer payment method "
+          + "row(s) for account {}", verb, updated, finAcc.getId());
+    }
   }
 
   /**

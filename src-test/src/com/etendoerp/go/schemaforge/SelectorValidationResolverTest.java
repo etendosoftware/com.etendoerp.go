@@ -17,8 +17,9 @@
 package com.etendoerp.go.schemaforge;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.lang.reflect.Modifier;
 import java.lang.reflect.Constructor;
@@ -159,6 +160,32 @@ class SelectorValidationResolverTest {
   }
 
   @Nested
+  @DisplayName("resolveValidationClause — nested subquery drop")
+  class NestedSubqueryDrop {
+    // Validation rules whose clause contains a nested (SELECT ...) subquery (e.g. the classic
+    // C_BPartner Account rule over Fin_Finacc_Paymentmethod) reference raw SQL table names the
+    // generic translator cannot map to HQL, so they must be dropped here and handled by a
+    // dedicated SelectorContextPolicy instead. The guard runs before any ModelProvider access.
+    @Test
+    @DisplayName("drops the classic financial-account IN (SELECT ...) rule")
+    void dropsClauseWithInSubquery() throws Exception {
+      Map<String, String> params = new HashMap<>();
+      params.put("Fin_Paymentmethod_ID", "PM1");
+      String clause = "Fin_Financial_Account_ID IN (SELECT Fin_Financial_Account_ID"
+          + " FROM Fin_Finacc_Paymentmethod WHERE Fin_Paymentmethod_ID=@Fin_Paymentmethod_ID@)";
+      assertNull(invokeStatic("resolveValidationClause",
+          new Class<?>[]{ String.class, Map.class }, clause, params));
+    }
+
+    @Test
+    @DisplayName("subquery detection is case-insensitive and tolerates whitespace")
+    void dropsClauseWithLowercaseSubquery() throws Exception {
+      assertNull(invokeStatic("resolveValidationClause",
+          new Class<?>[]{ String.class, Map.class }, "x IN ( select id from t)", new HashMap<>()));
+    }
+  }
+
+  @Nested
   @DisplayName("substituteValidationParams")
   class SubstituteValidationParams {
     @Test
@@ -230,6 +257,90 @@ class SelectorValidationResolverTest {
       String result = (String) invokeStatic("substituteValidationParams",
           new Class<?>[]{ String.class, Map.class }, clause, params);
       assertEquals("col1 = 'valA' AND col2 = 'valB'", result);
+    }
+  }
+
+  /**
+   * ETP-4286: dependent FK selectors (e.g. the invoice bill-to location selector) must be
+   * filtered by the businessPartner supplied in the MCP recordContext. That context flows
+   * into the validation-param map as {@code C_BPartner_ID}, which substitutes the
+   * {@code @C_BPartner_ID@} placeholder in the real AD validation rule:
+   *
+   * <pre>
+   *   C_BPartner_Location.C_BPartner_ID=@C_BPartner_ID@
+   *     AND C_BPartner_Location.IsBillTo='Y'
+   *     AND C_BPartner_Location.IsActive='Y'
+   * </pre>
+   *
+   * <p>When the businessPartner is present the placeholder resolves to the partner id, so the
+   * selector returns only that partner's bill-to locations. When it is absent the placeholder
+   * degrades to the SQL literal {@code NULL} — the documented behavior that makes the dependent
+   * selector return an empty set instead of silently relaxing the filter. These tests lock in
+   * both branches and guard against regressions on the ETP-4286 acceptance criterion.</p>
+   */
+  @Nested
+  @DisplayName("substituteValidationParams — ETP-4286 BP-location dependent selector")
+  class BusinessPartnerLocationValidation {
+
+    private static final String BP_LOCATION_CLAUSE =
+        "C_BPartner_Location.C_BPartner_ID=@C_BPartner_ID@"
+            + " AND C_BPartner_Location.IsBillTo='Y'"
+            + " AND C_BPartner_Location.IsActive='Y'";
+
+    @Test
+    @DisplayName("substitutes the businessPartner id when C_BPartner_ID is present in context")
+    void substitutesBusinessPartnerIdWhenPresent() throws Exception {
+      Map<String, String> params = new HashMap<>();
+      params.put("C_BPartner_ID", "ABC123");
+      String result = (String) invokeStatic("substituteValidationParams",
+          new Class<?>[]{ String.class, Map.class }, BP_LOCATION_CLAUSE, params);
+
+      // The dependent FK placeholder resolves to the supplied partner id (SQL-quoted)...
+      assertTrue(result.contains("'ABC123'"),
+          "Expected substituted partner id 'ABC123' in: " + result);
+      assertEquals("C_BPartner_Location.C_BPartner_ID='ABC123'"
+              + " AND C_BPartner_Location.IsBillTo='Y'"
+              + " AND C_BPartner_Location.IsActive='Y'",
+          result);
+      // ...and the filter is NOT degraded to a permanently-empty NULL comparison.
+      assertFalse(result.contains("C_BPartner_ID=NULL"),
+          "Partner-id filter must not degrade to NULL when context is present: " + result);
+      // Static clauses survive the substitution untouched.
+      assertTrue(result.contains("C_BPartner_Location.IsBillTo='Y'"),
+          "IsBillTo='Y' static clause must be preserved: " + result);
+      assertTrue(result.contains("C_BPartner_Location.IsActive='Y'"),
+          "IsActive='Y' static clause must be preserved: " + result);
+    }
+
+    @Test
+    @DisplayName("only the bare partner-id placeholder is substituted, scalar value gets quoted")
+    void substitutesOnlyPartnerIdPlaceholder() throws Exception {
+      Map<String, String> params = new HashMap<>();
+      params.put("C_BPartner_ID", "ABC123");
+      String clause = "C_BPartner_Location.C_BPartner_ID=@C_BPartner_ID@";
+      String result = (String) invokeStatic("substituteValidationParams",
+          new Class<?>[]{ String.class, Map.class }, clause, params);
+      assertEquals("C_BPartner_Location.C_BPartner_ID='ABC123'", result);
+    }
+
+    @Test
+    @DisplayName("degrades the partner-id placeholder to NULL when businessPartner is missing")
+    void degradesToNullWhenBusinessPartnerMissing() throws Exception {
+      Map<String, String> params = new HashMap<>();
+      // No C_BPartner_ID — mirrors an MCP recordContext without a businessPartner.
+      String result = (String) invokeStatic("substituteValidationParams",
+          new Class<?>[]{ String.class, Map.class }, BP_LOCATION_CLAUSE, params);
+
+      // Documented degradation: the dependent filter becomes a NULL comparison (empty result).
+      assertTrue(result.contains("C_BPartner_Location.C_BPartner_ID=NULL"),
+          "Expected partner-id filter to degrade to NULL when context is absent: " + result);
+      assertFalse(result.contains("'ABC123'"),
+          "No partner id must leak when businessPartner is absent: " + result);
+      // The static bill-to / active clauses are still applied.
+      assertTrue(result.contains("C_BPartner_Location.IsBillTo='Y'"),
+          "IsBillTo='Y' static clause must be preserved: " + result);
+      assertTrue(result.contains("C_BPartner_Location.IsActive='Y'"),
+          "IsActive='Y' static clause must be preserved: " + result);
     }
   }
 }

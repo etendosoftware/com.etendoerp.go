@@ -136,4 +136,107 @@ public class NeoHandlerUtilsTest {
     List<String> ids = NeoHandlerUtils.collectIds(new JSONArray());
     assertTrue(ids.isEmpty());
   }
+
+  // ── extractCreatedIdFromPreviousResult (ETP-4029) ────────────────────────
+
+  /**
+   * Correct/real shape produced by {@code DefaultJsonDataService.add()}: {@code response.data}
+   * is a {@code JSONArray} with a single element — the created record.
+   */
+  @Test
+  public void testExtractCreatedIdFromPreviousResultReturnsIdFromOneElementArray() throws Exception {
+    JSONArray data = new JSONArray().put(new JSONObject().put("id", "created-1"));
+    JSONObject body = new JSONObject().put("response", new JSONObject().put("data", data));
+    NeoContext ctx = NeoContext.builder()
+        .previousResult(new NeoResponse(201, body))
+        .build();
+
+    assertEquals("created-1", NeoHandlerUtils.extractCreatedIdFromPreviousResult(ctx));
+  }
+
+  @Test
+  public void testExtractCreatedIdFromPreviousResultReturnsNullForEmptyArray() throws Exception {
+    JSONObject body = new JSONObject().put("response", new JSONObject().put("data", new JSONArray()));
+    NeoContext ctx = NeoContext.builder()
+        .previousResult(new NeoResponse(201, body))
+        .build();
+
+    assertNull(NeoHandlerUtils.extractCreatedIdFromPreviousResult(ctx));
+  }
+
+  @Test
+  public void testExtractCreatedIdFromPreviousResultReturnsNullWhenNoPreviousResult() {
+    NeoContext ctx = NeoContext.builder().build();
+    assertNull(NeoHandlerUtils.extractCreatedIdFromPreviousResult(ctx));
+  }
+
+  @Test
+  public void testExtractCreatedIdFromPreviousResultReturnsNullWhenBodyNull() {
+    NeoContext ctx = NeoContext.builder()
+        .previousResult(new NeoResponse(201, null))
+        .build();
+    assertNull(NeoHandlerUtils.extractCreatedIdFromPreviousResult(ctx));
+  }
+
+  @Test
+  public void testExtractCreatedIdFromPreviousResultReturnsNullWhenNoResponseWrapper() throws Exception {
+    NeoContext ctx = NeoContext.builder()
+        .previousResult(new NeoResponse(201, new JSONObject()))
+        .build();
+    assertNull(NeoHandlerUtils.extractCreatedIdFromPreviousResult(ctx));
+  }
+
+  @Test
+  public void testExtractCreatedIdFromPreviousResultReturnsNullWhenDataMissing() throws Exception {
+    JSONObject body = new JSONObject().put("response", new JSONObject());
+    NeoContext ctx = NeoContext.builder()
+        .previousResult(new NeoResponse(201, body))
+        .build();
+    assertNull(NeoHandlerUtils.extractCreatedIdFromPreviousResult(ctx));
+  }
+
+  /**
+   * Malformed shape: {@code data} present but as a plain {@code JSONObject}, not an array
+   * (the OLD, wrong assumption some earlier code relied on). {@code optJSONArray} silently
+   * returns {@code null} for a non-array value — the method must fail closed (return null),
+   * never throw.
+   */
+  @Test
+  public void testExtractCreatedIdFromPreviousResultReturnsNullWhenDataIsPlainObjectNotArray()
+      throws Exception {
+    JSONObject dataAsObject = new JSONObject().put("id", "should-not-be-read");
+    JSONObject body = new JSONObject()
+        .put("response", new JSONObject().put("data", dataAsObject));
+    NeoContext ctx = NeoContext.builder()
+        .previousResult(new NeoResponse(201, body))
+        .build();
+
+    assertNull(NeoHandlerUtils.extractCreatedIdFromPreviousResult(ctx));
+  }
+
+  @Test
+  public void testExtractCreatedIdFromPreviousResultReturnsNullWhenFirstElementHasNoId()
+      throws Exception {
+    JSONArray data = new JSONArray().put(new JSONObject().put("someOtherField", "x"));
+    JSONObject body = new JSONObject().put("response", new JSONObject().put("data", data));
+    NeoContext ctx = NeoContext.builder()
+        .previousResult(new NeoResponse(201, body))
+        .build();
+
+    assertNull(NeoHandlerUtils.extractCreatedIdFromPreviousResult(ctx));
+  }
+
+  @Test
+  public void testExtractCreatedIdFromPreviousResultReturnsFirstElementIdWhenMultipleElements()
+      throws Exception {
+    JSONArray data = new JSONArray()
+        .put(new JSONObject().put("id", "first-id"))
+        .put(new JSONObject().put("id", "second-id"));
+    JSONObject body = new JSONObject().put("response", new JSONObject().put("data", data));
+    NeoContext ctx = NeoContext.builder()
+        .previousResult(new NeoResponse(201, body))
+        .build();
+
+    assertEquals("first-id", NeoHandlerUtils.extractCreatedIdFromPreviousResult(ctx));
+  }
 }

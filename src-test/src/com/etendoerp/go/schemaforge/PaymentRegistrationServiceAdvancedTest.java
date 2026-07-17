@@ -25,6 +25,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.contains;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockConstruction;
@@ -35,8 +36,11 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.math.BigDecimal;
+import java.text.SimpleDateFormat;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.Date;
 import java.util.List;
 
 import org.codehaus.jettison.json.JSONArray;
@@ -77,8 +81,15 @@ import org.openbravo.model.financialmgmt.payment.FIN_PaymentDetail;
 import org.openbravo.model.financialmgmt.payment.FIN_PaymentMethod;
 import org.openbravo.model.financialmgmt.payment.FIN_PaymentSchedule;
 import org.openbravo.model.financialmgmt.payment.FIN_PaymentScheduleDetail;
+import org.openbravo.model.financialmgmt.payment.FIN_Payment_Credit;
 import org.openbravo.model.financialmgmt.payment.FinAccPaymentMethod;
 import org.openbravo.service.db.DalConnectionProvider;
+
+import com.etendoerp.payment.removal.util.PaymentRemovalUtil;
+import com.etendoerp.psd2.bank.integration.data.PisPayment;
+import com.etendoerp.psd2.bank.integration.utils.BankIntegrationConstants;
+import com.etendoerp.psd2.bank.integration.utils.BankIntegrationPISUtils;
+import com.etendoerp.psd2.bank.integration.utils.PISPaymentDao;
 
 /**
  * Mockito unit tests for the ETP-4331 two-step Cobros/Pagos flow in
@@ -130,6 +141,7 @@ class PaymentRegistrationServiceAdvancedTest {
   private MockedStatic<FIN_PaymentProcess> finPaymentProcessMock;
   private MockedStatic<NeoDefaultsService> neoDefaultsMock;
   private MockedStatic<RequestContext> requestContextMock;
+  private MockedStatic<PaymentRemovalUtil> paymentRemovalUtilMock;
   private MockedConstruction<AdvPaymentMngtDao> daoConstruction;
   private MockedConstruction<DalConnectionProvider> connConstruction;
 
@@ -201,6 +213,8 @@ class PaymentRegistrationServiceAdvancedTest {
     requestContextMock = mockStatic(RequestContext.class);
     requestContextMock.when(RequestContext::get).thenReturn(mock(RequestContext.class));
 
+    paymentRemovalUtilMock = mockStatic(PaymentRemovalUtil.class);
+
     // ── common entity stubs ──────────────────────────────────────────────────
     when(okResult.getType()).thenReturn("Success");
     when(docType.getDocumentCategory()).thenReturn("ARR");
@@ -237,6 +251,7 @@ class PaymentRegistrationServiceAdvancedTest {
   void tearDown() {
     closeQuietly(daoConstruction);
     closeQuietly(connConstruction);
+    closeQuietly(paymentRemovalUtilMock);
     closeQuietly(requestContextMock);
     closeQuietly(neoDefaultsMock);
     closeQuietly(finPaymentProcessMock);
@@ -289,7 +304,7 @@ class PaymentRegistrationServiceAdvancedTest {
 
     stubCreditQuery(Arrays.asList(partial, consumed));
 
-    NeoResponse response = PaymentRegistrationService.handleListCreditSources(context, true);
+    NeoResponse response = PaymentCreditSourcesService.handleListCreditSources(context, true);
 
     assertEquals(200, response.getHttpStatus());
     JSONArray items = response.getBody().getJSONArray(ITEMS);
@@ -322,7 +337,7 @@ class PaymentRegistrationServiceAdvancedTest {
     stubAbonoQuery(Collections.singletonList(abono));
     stubCreditQuery(Collections.emptyList());
 
-    NeoResponse response = PaymentRegistrationService.handleListCreditSources(context, true);
+    NeoResponse response = PaymentCreditSourcesService.handleListCreditSources(context, true);
 
     assertEquals(200, response.getHttpStatus());
     JSONArray items = response.getBody().getJSONArray(ITEMS);
@@ -342,10 +357,125 @@ class PaymentRegistrationServiceAdvancedTest {
     when(dal.get(Invoice.class, INVOICE_ID)).thenReturn(invoice);
     when(invoice.getBusinessPartner()).thenReturn(null);
 
-    NeoResponse response = PaymentRegistrationService.handleListCreditSources(context, true);
+    NeoResponse response = PaymentCreditSourcesService.handleListCreditSources(context, true);
 
     assertEquals(200, response.getHttpStatus());
     assertEquals(0, response.getBody().getInt("totalCount"));
+  }
+
+  @Test
+  @DisplayName("Abono and credit sources are merged into a single date-descending list, "
+      + "interleaved by kind")
+  void testListCreditSourcesInterleavesByDateDescending() throws Exception {
+    NeoContext context = creditSourcesContext();
+    stubInvoiceWithBp();
+
+    // Abono rows: sorted by the originating credit-note/return invoice date.
+    FIN_PaymentScheduleDetail abono1 = abonoPsd("abono-1", new BigDecimal("-10.00"), "NC/001",
+        date("2026-07-02"), "Credit Memo");
+    FIN_PaymentScheduleDetail abono2 = abonoPsd("abono-2", new BigDecimal("-20.00"), "NC/002",
+        date("2026-06-30"), "Credit Memo");
+    stubAbonoQuery(Arrays.asList(abono1, abono2));
+
+    // Credit rows: sorted by the originating payment's payment date.
+    FIN_Payment credit1 = creditPayment("credit-1", "CR/001", new BigDecimal("100"),
+        new BigDecimal("0"), date("2026-07-01"));
+    FIN_Payment credit2 = creditPayment("credit-2", "CR/002", new BigDecimal("50"),
+        new BigDecimal("0"), date("2026-06-29"));
+    stubCreditQuery(Arrays.asList(credit1, credit2));
+
+    NeoResponse response = PaymentCreditSourcesService.handleListCreditSources(context, true);
+
+    assertEquals(200, response.getHttpStatus());
+    JSONArray items = response.getBody().getJSONArray(ITEMS);
+    assertEquals(4, items.length());
+
+    // Expected merged order (most recent first), interleaving the two kinds:
+    // abono(07-02), credit(07-01), abono(06-30), credit(06-29) — neither a pure
+    // "all abono then all credit" nor a pure "all credit then all abono" block.
+    JSONObject first = items.getJSONObject(0);
+    assertEquals(KIND_ABONO, first.getString("kind"));
+    assertEquals("abono-1", first.getString("id"));
+
+    JSONObject second = items.getJSONObject(1);
+    assertEquals(KIND_CREDIT, second.getString("kind"));
+    assertEquals("credit-1", second.getString("id"));
+
+    JSONObject third = items.getJSONObject(2);
+    assertEquals(KIND_ABONO, third.getString("kind"));
+    assertEquals("abono-2", third.getString("id"));
+
+    JSONObject fourth = items.getJSONObject(3);
+    assertEquals(KIND_CREDIT, fourth.getString("kind"));
+    assertEquals("credit-2", fourth.getString("id"));
+  }
+
+  @Test
+  @DisplayName("A source with a null date is not lost and sorts after every dated source")
+  void testListCreditSourcesNullDateSortsLast() throws Exception {
+    NeoContext context = creditSourcesContext();
+    stubInvoiceWithBp();
+
+    FIN_PaymentScheduleDetail abonoNoDate = abonoPsd("abono-null", new BigDecimal("-15.00"),
+        "NC/003", null, "Credit Memo");
+    stubAbonoQuery(Collections.singletonList(abonoNoDate));
+
+    FIN_Payment creditDated = creditPayment("credit-dated", "CR/003", new BigDecimal("30"),
+        new BigDecimal("0"), date("2026-06-15"));
+    stubCreditQuery(Collections.singletonList(creditDated));
+
+    NeoResponse response = PaymentCreditSourcesService.handleListCreditSources(context, true);
+
+    assertEquals(200, response.getHttpStatus());
+    JSONArray items = response.getBody().getJSONArray(ITEMS);
+    assertEquals(2, items.length());
+    assertEquals("credit-dated", items.getJSONObject(0).getString("id"));
+    assertEquals("abono-null", items.getJSONObject(1).getString("id"));
+  }
+
+  @Test
+  @DisplayName("With no credit sources, abono-only results stay ordered by invoice date desc")
+  void testListCreditSourcesOnlyAbonoOrderedByInvoiceDateDesc() throws Exception {
+    NeoContext context = creditSourcesContext();
+    stubInvoiceWithBp();
+
+    FIN_PaymentScheduleDetail older = abonoPsd("abono-old", new BigDecimal("-5.00"), "NC/010",
+        date("2026-06-01"), "Credit Memo");
+    FIN_PaymentScheduleDetail newer = abonoPsd("abono-new", new BigDecimal("-5.00"), "NC/011",
+        date("2026-06-20"), "Credit Memo");
+    stubAbonoQuery(Arrays.asList(older, newer));
+    stubCreditQuery(Collections.emptyList());
+
+    NeoResponse response = PaymentCreditSourcesService.handleListCreditSources(context, true);
+
+    assertEquals(200, response.getHttpStatus());
+    JSONArray items = response.getBody().getJSONArray(ITEMS);
+    assertEquals(2, items.length());
+    assertEquals("abono-new", items.getJSONObject(0).getString("id"));
+    assertEquals("abono-old", items.getJSONObject(1).getString("id"));
+  }
+
+  @Test
+  @DisplayName("With no abono sources, credit-only results stay ordered by payment date desc")
+  void testListCreditSourcesOnlyCreditOrderedByPaymentDateDesc() throws Exception {
+    NeoContext context = creditSourcesContext();
+    stubInvoiceWithBp();
+
+    stubAbonoQuery(Collections.emptyList());
+
+    FIN_Payment older = creditPayment("credit-old", "CR/010", new BigDecimal("40"),
+        new BigDecimal("0"), date("2026-05-01"));
+    FIN_Payment newer = creditPayment("credit-new", "CR/011", new BigDecimal("60"),
+        new BigDecimal("0"), date("2026-05-20"));
+    stubCreditQuery(Arrays.asList(older, newer));
+
+    NeoResponse response = PaymentCreditSourcesService.handleListCreditSources(context, true);
+
+    assertEquals(200, response.getHttpStatus());
+    JSONArray items = response.getBody().getJSONArray(ITEMS);
+    assertEquals(2, items.length());
+    assertEquals("credit-new", items.getJSONObject(0).getString("id"));
+    assertEquals("credit-old", items.getJSONObject(1).getString("id"));
   }
 
   // ════════════════════════════════════════════════════════════════════════
@@ -543,9 +673,91 @@ class PaymentRegistrationServiceAdvancedTest {
         any(), any(), eq("P"), eq(refundPayment), eq(""), anyString()));
   }
 
+  // ════════════════════════════════════════════════════════════════════════
+  // doRegisterPaymentAdvanced - PIS (bank transfer) branch
+  // ════════════════════════════════════════════════════════════════════════
+
+  /**
+   * When {@code pis=true} and the account/method/currency are PIS-eligible, the confirm flow
+   * dispatches to {@link PisPaymentService#applyOverpaymentAndInitiatePis}: it processes the
+   * payment to PPM and initiates the Salt Edge transfer, returning the PIS payment URL, the local
+   * PIS payment id, and status "requested" on top of the base payment envelope.
+   */
+  @Test
+  @DisplayName("PIS confirm initiates the bank transfer and returns the requested PIS response")
+  @SuppressWarnings("unchecked")
+  void testAdvancedPisConfirmInitiatesBankTransfer() throws Exception {
+    stubAdvancedBasics();
+    stubPendingPSDs(new BigDecimal("100.00"));
+
+    // PIS eligibility: connected PSD2 account, transfer method, EUR invoice.
+    when(account.getPSD2ConnectionStatus())
+        .thenReturn(BankIntegrationConstants.FA_CONNECTION_STATUS_CONNECTED);
+    when(method.getName()).thenReturn("Bank Transfer");
+    when(currency.getISOCode()).thenReturn("EUR");
+
+    // hasFinTransaction => 0 (no transaction created at processing time, as expected for PIS).
+    Query<Long> countQuery = mock(Query.class);
+    when(session.createQuery(anyString(), eq(Long.class))).thenReturn(countQuery);
+    when(countQuery.setParameter(anyString(), any())).thenReturn(countQuery);
+    when(countQuery.uniqueResult()).thenReturn(0L);
+
+    BankIntegrationPISUtils.PISCreatePaymentResult bridgeResult =
+        mock(BankIntegrationPISUtils.PISCreatePaymentResult.class);
+    when(bridgeResult.getPaymentId()).thenReturn("se-adv-1");
+    when(bridgeResult.getPaymentUrl()).thenReturn("https://sca.saltedge/adv");
+    PisPayment localPis = mock(PisPayment.class);
+    when(localPis.getId()).thenReturn("local-adv-1");
+
+    JSONObject body = advancedBody("100.00", CONFIRM)
+        .put("pis", true)
+        .put("pisTemplate", "SEPA")
+        .put("pisCreditorIban", "ES9121000418450200051332");
+
+    try (MockedStatic<PisPaymentBridge> bridgeMock = mockStatic(PisPaymentBridge.class);
+         MockedStatic<PISPaymentDao> pisDaoMock = mockStatic(PISPaymentDao.class)) {
+      bridgeMock.when(() -> PisPaymentBridge.initiatePisPayment(eq(newPayment), any(), any()))
+          .thenReturn(bridgeResult);
+      pisDaoMock.when(() -> PISPaymentDao.findBySaltedgePaymentId("se-adv-1")).thenReturn(localPis);
+
+      NeoResponse response = PaymentRegistrationService.doRegisterPaymentAdvanced(
+          INVOICE_ID, body, true);
+
+      assertEquals(201, response.getHttpStatus());
+      JSONObject data = response.getBody().getJSONObject("response").getJSONObject("data");
+      assertEquals("https://sca.saltedge/adv", data.getString("pisPaymentUrl"));
+      assertEquals("local-adv-1", data.getString("pisPaymentId"));
+      assertEquals("requested", data.getString("pisStatus"));
+      bridgeMock.verify(() -> PisPaymentBridge.initiatePisPayment(eq(newPayment), any(), any()));
+      // No refund path is ever taken for PIS (funds have not moved yet).
+      finAddPaymentMock.verify(
+          () -> FIN_AddPayment.createRefundPayment(any(), any(), any(), any(), any()), never());
+    }
+  }
+
+  /**
+   * A {@code pis=true} confirm against a NON-PSD2-connected account fails eligibility before any
+   * payment is processed: {@code validatePisEligibility} throws {@link OBException}.
+   */
+  @Test
+  @DisplayName("PIS confirm rejects a non-PSD2-connected account before processing")
+  void testAdvancedPisRejectsUnconnectedAccount() throws Exception {
+    stubAdvancedBasics();
+    when(account.getPSD2ConnectionStatus()).thenReturn("NC");
+    when(method.getName()).thenReturn("Bank Transfer");
+    when(currency.getISOCode()).thenReturn("EUR");
+
+    JSONObject body = advancedBody("100.00", CONFIRM).put("pis", true);
+
+    assertThrows(OBException.class,
+        () -> PaymentRegistrationService.doRegisterPaymentAdvanced(INVOICE_ID, body, true));
+    finAddPaymentMock.verify(() -> FIN_AddPayment.processPayment(
+        any(), any(), anyString(), any(), anyString()), never());
+  }
+
   @Test
   @DisplayName("Advanced register rejects an empty installment with no pending PSDs")
-  void testAdvancedEmptyPendingPsdsThrows() throws Exception {
+  void testAdvancedEmptyPendingPsdsThrows() {
     stubAdvancedBasics();
     stubPendingPSDs(); // empty
 
@@ -566,7 +778,7 @@ class PaymentRegistrationServiceAdvancedTest {
     when(dal.get(FIN_Payment.class, NEW_PAY_ID)).thenReturn(newPayment);
     when(newPayment.isProcessed()).thenReturn(true);
 
-    NeoResponse response = PaymentRegistrationService.confirmDraftPayment(NEW_PAY_ID);
+    NeoResponse response = PaymentDraftEditService.confirmDraftPayment(NEW_PAY_ID);
 
     assertEquals(201, response.getHttpStatus());
     finAddPaymentMock.verify(() -> FIN_AddPayment.processPayment(
@@ -580,7 +792,7 @@ class PaymentRegistrationServiceAdvancedTest {
   void testConfirmDraftPaymentNotFound() throws Exception {
     when(dal.get(FIN_Payment.class, "missing")).thenReturn(null);
 
-    NeoResponse response = PaymentRegistrationService.confirmDraftPayment("missing");
+    NeoResponse response = PaymentDraftEditService.confirmDraftPayment("missing");
 
     assertEquals(404, response.getHttpStatus());
     finAddPaymentMock.verify(
@@ -590,7 +802,7 @@ class PaymentRegistrationServiceAdvancedTest {
 
   @Test
   @DisplayName("confirmDraftPayment surfaces a processing error as an exception")
-  void testConfirmDraftPaymentProcessingError() throws Exception {
+  void testConfirmDraftPaymentProcessingError() {
     when(dal.get(FIN_Payment.class, NEW_PAY_ID)).thenReturn(newPayment);
     OBError error = mock(OBError.class);
     when(error.getType()).thenReturn(ERROR_TYPE);
@@ -599,8 +811,339 @@ class PaymentRegistrationServiceAdvancedTest {
         .thenReturn(error);
 
     OBException ex = assertThrows(OBException.class,
-        () -> PaymentRegistrationService.confirmDraftPayment(NEW_PAY_ID));
+        () -> PaymentDraftEditService.confirmDraftPayment(NEW_PAY_ID));
     assertEquals("boom", ex.getMessage());
+  }
+
+  // ════════════════════════════════════════════════════════════════════════
+  // deleteDraftPayment / releaseInstallmentDetails
+  // ════════════════════════════════════════════════════════════════════════
+
+  @Test
+  @DisplayName("deleteDraftPayment returns 404 when the payment does not exist")
+  void testDeleteDraftPaymentNotFoundReturns404() {
+    when(dal.get(FIN_Payment.class, "missing")).thenReturn(null);
+
+    NeoResponse response = PaymentDraftEditService.deleteDraftPayment("missing");
+
+    assertEquals(404, response.getHttpStatus());
+    paymentRemovalUtilMock.verify(() -> PaymentRemovalUtil.remove(any()), never());
+  }
+
+  @Test
+  @DisplayName("deleteDraftPayment rejects an already-processed payment")
+  void testDeleteDraftPaymentProcessedThrows() {
+    when(dal.get(FIN_Payment.class, NEW_PAY_ID)).thenReturn(newPayment);
+    when(newPayment.isProcessed()).thenReturn(true);
+
+    OBException ex = assertThrows(OBException.class,
+        () -> PaymentDraftEditService.deleteDraftPayment(NEW_PAY_ID));
+
+    assertEquals("Cannot delete a processed payment", ex.getMessage());
+    paymentRemovalUtilMock.verify(() -> PaymentRemovalUtil.remove(any()), never());
+  }
+
+  @Test
+  @DisplayName("Deleting a draft with only the document installment PSD zeroes and detaches it, "
+      + "then removes the payment")
+  void testDeleteDraftPaymentReleasesDocumentInstallmentAndRemovesPayment() {
+    when(dal.get(FIN_Payment.class, NEW_PAY_ID)).thenReturn(newPayment);
+    when(newPayment.isProcessed()).thenReturn(false);
+
+    FIN_PaymentScheduleDetail documentPsd = mock(FIN_PaymentScheduleDetail.class);
+    when(documentPsd.getInvoicePaymentSchedule()).thenReturn(schedule);
+
+    FIN_PaymentDetail detail = mock(FIN_PaymentDetail.class);
+    List<FIN_PaymentScheduleDetail> psdList = new ArrayList<>(Collections.singletonList(documentPsd));
+    when(detail.getFINPaymentScheduleDetailList()).thenReturn(psdList);
+
+    List<FIN_PaymentDetail> detailList = new ArrayList<>(Collections.singletonList(detail));
+    when(newPayment.getFINPaymentDetailList()).thenReturn(detailList);
+
+    stubNoConsumedCredit();
+
+    NeoResponse response = PaymentDraftEditService.deleteDraftPayment(NEW_PAY_ID);
+
+    assertEquals(204, response.getHttpStatus());
+    finAddPaymentMock.verify(() -> FIN_AddPayment.updatePaymentDetail(
+        eq(documentPsd), eq(newPayment), eq(BigDecimal.ZERO), eq(false)));
+    verify(dal).remove(documentPsd);
+    verify(dal).remove(detail);
+    assertTrue(detailList.isEmpty(), "the document detail must be detached from the payment");
+    paymentRemovalUtilMock.verify(() -> PaymentRemovalUtil.remove(newPayment));
+  }
+
+  @Test
+  @DisplayName("Deleting a draft that consumed accumulated credit restores usedCredit and removes "
+      + "the FIN_Payment_Credit link")
+  void testDeleteDraftPaymentReversesConsumedCredit() {
+    when(dal.get(FIN_Payment.class, NEW_PAY_ID)).thenReturn(newPayment);
+    when(newPayment.isProcessed()).thenReturn(false);
+    when(newPayment.getFINPaymentDetailList()).thenReturn(new ArrayList<>());
+
+    FIN_Payment creditSource = mock(FIN_Payment.class);
+    when(creditSource.getUsedCredit()).thenReturn(new BigDecimal("110"));
+
+    FIN_Payment_Credit link = mock(FIN_Payment_Credit.class);
+    when(link.getCreditPaymentUsed()).thenReturn(creditSource);
+    when(link.getAmount()).thenReturn(new BigDecimal("100"));
+
+    OBCriteria<FIN_Payment_Credit> crit = mock(OBCriteria.class);
+    when(dal.createCriteria(FIN_Payment_Credit.class)).thenReturn(crit);
+    when(crit.add(any(Criterion.class))).thenReturn(crit);
+    when(crit.list()).thenReturn(Collections.singletonList(link));
+
+    NeoResponse response = PaymentDraftEditService.deleteDraftPayment(NEW_PAY_ID);
+
+    assertEquals(204, response.getHttpStatus());
+    verify(creditSource).setUsedCredit(new BigDecimal("10"));
+    verify(dal).remove(link);
+    paymentRemovalUtilMock.verify(() -> PaymentRemovalUtil.remove(newPayment));
+  }
+
+  @Test
+  @DisplayName("Deleting a draft removes its payment-owned (credit/refund) schedule details")
+  void testDeleteDraftPaymentRemovesCreditOwnedDetails() {
+    when(dal.get(FIN_Payment.class, NEW_PAY_ID)).thenReturn(newPayment);
+    when(newPayment.isProcessed()).thenReturn(false);
+
+    // Payment-owned: neither an invoice nor an order schedule — e.g. a generated-credit detail.
+    FIN_PaymentScheduleDetail creditOwnedPsd = mock(FIN_PaymentScheduleDetail.class);
+
+    FIN_PaymentDetail detail = mock(FIN_PaymentDetail.class);
+    List<FIN_PaymentScheduleDetail> psdList = new ArrayList<>(Collections.singletonList(creditOwnedPsd));
+    when(detail.getFINPaymentScheduleDetailList()).thenReturn(psdList);
+
+    List<FIN_PaymentDetail> detailList = new ArrayList<>(Collections.singletonList(detail));
+    when(newPayment.getFINPaymentDetailList()).thenReturn(detailList);
+
+    stubNoConsumedCredit();
+
+    NeoResponse response = PaymentDraftEditService.deleteDraftPayment(NEW_PAY_ID);
+
+    assertEquals(204, response.getHttpStatus());
+    finAddPaymentMock.verify(() -> FIN_AddPayment.updatePaymentDetail(
+        any(), any(), any(), anyBoolean()), never());
+    verify(dal).remove(creditOwnedPsd);
+    verify(dal).remove(detail);
+    assertTrue(detailList.isEmpty(), "the credit-owned detail must be detached from the payment");
+  }
+
+  @Test
+  @DisplayName("Deleting a draft with both a document PSD and a credit-owned PSD processes both "
+      + "without double-processing or crashing")
+  void testDeleteDraftPaymentHandlesMixedDocumentAndCreditOwnedDetails() {
+    when(dal.get(FIN_Payment.class, NEW_PAY_ID)).thenReturn(newPayment);
+    when(newPayment.isProcessed()).thenReturn(false);
+
+    FIN_PaymentScheduleDetail documentPsd = mock(FIN_PaymentScheduleDetail.class);
+    when(documentPsd.getInvoicePaymentSchedule()).thenReturn(schedule);
+    FIN_PaymentDetail documentDetail = mock(FIN_PaymentDetail.class);
+    List<FIN_PaymentScheduleDetail> documentPsdList =
+        new ArrayList<>(Collections.singletonList(documentPsd));
+    when(documentDetail.getFINPaymentScheduleDetailList()).thenReturn(documentPsdList);
+
+    // Payment-owned: neither an invoice nor an order schedule.
+    FIN_PaymentScheduleDetail creditOwnedPsd = mock(FIN_PaymentScheduleDetail.class);
+    FIN_PaymentDetail creditOwnedDetail = mock(FIN_PaymentDetail.class);
+    List<FIN_PaymentScheduleDetail> creditOwnedPsdList =
+        new ArrayList<>(Collections.singletonList(creditOwnedPsd));
+    when(creditOwnedDetail.getFINPaymentScheduleDetailList()).thenReturn(creditOwnedPsdList);
+
+    List<FIN_PaymentDetail> detailList =
+        new ArrayList<>(Arrays.asList(documentDetail, creditOwnedDetail));
+    when(newPayment.getFINPaymentDetailList()).thenReturn(detailList);
+
+    stubNoConsumedCredit();
+
+    NeoResponse response = PaymentDraftEditService.deleteDraftPayment(NEW_PAY_ID);
+
+    assertEquals(204, response.getHttpStatus());
+    finAddPaymentMock.verify(() -> FIN_AddPayment.updatePaymentDetail(
+        eq(documentPsd), eq(newPayment), eq(BigDecimal.ZERO), eq(false)), times(1));
+    verify(dal).remove(documentPsd);
+    verify(dal).remove(documentDetail);
+    verify(dal).remove(creditOwnedPsd);
+    verify(dal).remove(creditOwnedDetail);
+    assertTrue(detailList.isEmpty(), "both details must be detached after the mixed cleanup");
+    paymentRemovalUtilMock.verify(() -> PaymentRemovalUtil.remove(newPayment));
+  }
+
+  // ════════════════════════════════════════════════════════════════════════
+  // creditSourcesUsedByPayment (via handleListPayments / paymentListItem)
+  // ════════════════════════════════════════════════════════════════════════
+
+  @Test
+  @DisplayName("A draft consuming both an accumulated-credit source and an abono lists both as "
+      + "creditSourcesUsed")
+  void testHandleListPaymentsIncludesCreditSourcesUsedForDraft() throws Exception {
+    stubNoPisPaymentLinked();
+
+    FIN_Payment draft = mock(FIN_Payment.class);
+    when(draft.getId()).thenReturn(NEW_PAY_ID);
+    when(draft.getDocumentNo()).thenReturn("PAY-DRAFT");
+    when(draft.getAmount()).thenReturn(new BigDecimal("70.00"));
+    when(draft.getStatus()).thenReturn("RPR");
+    when(draft.isProcessed()).thenReturn(false);
+    when(draft.isReceipt()).thenReturn(true);
+
+    FIN_Payment creditSourcePayment = mock(FIN_Payment.class);
+    when(creditSourcePayment.getId()).thenReturn(CREDIT_PAY_ID);
+    FIN_Payment_Credit link = mock(FIN_Payment_Credit.class);
+    when(link.getCreditPaymentUsed()).thenReturn(creditSourcePayment);
+    when(link.getAmount()).thenReturn(new BigDecimal("40"));
+    OBCriteria<FIN_Payment_Credit> creditCrit = mock(OBCriteria.class);
+    when(dal.createCriteria(FIN_Payment_Credit.class)).thenReturn(creditCrit);
+    when(creditCrit.add(any(Criterion.class))).thenReturn(creditCrit);
+    when(creditCrit.list()).thenReturn(Collections.singletonList(link));
+
+    FIN_PaymentScheduleDetail abonoDetail = mock(FIN_PaymentScheduleDetail.class);
+    when(abonoDetail.getId()).thenReturn(ABONO_PSD_ID);
+    when(abonoDetail.getAmount()).thenReturn(new BigDecimal("-30"));
+    FIN_PaymentDetail detail = mock(FIN_PaymentDetail.class);
+    when(detail.getFINPaymentScheduleDetailList())
+        .thenReturn(Collections.singletonList(abonoDetail));
+    when(draft.getFINPaymentDetailList()).thenReturn(Collections.singletonList(detail));
+
+    // Reused generic FIN_Payment session-query stub (same shape as stubCreditQuery).
+    stubCreditQuery(Collections.singletonList(draft));
+
+    NeoResponse response = PaymentRegistrationService.handleListPayments(listPaymentsContext());
+
+    assertEquals(200, response.getHttpStatus());
+    JSONArray data = response.getBody().getJSONObject("response").getJSONArray("data");
+    assertEquals(1, data.length());
+    JSONObject draftItem = data.getJSONObject(0);
+    assertFalse(draftItem.getBoolean("processed"));
+    JSONArray used = draftItem.getJSONArray("creditSourcesUsed");
+    assertEquals(2, used.length());
+
+    JSONObject creditUsed = used.getJSONObject(0);
+    assertEquals(KIND_CREDIT, creditUsed.getString("kind"));
+    assertEquals(CREDIT_PAY_ID, creditUsed.getString("paymentId"));
+    assertEquals(0, new BigDecimal("40").compareTo(new BigDecimal(creditUsed.getString("use"))));
+
+    JSONObject abonoUsed = used.getJSONObject(1);
+    assertEquals(KIND_ABONO, abonoUsed.getString("kind"));
+    assertEquals(ABONO_PSD_ID, abonoUsed.getString("psdId"));
+    assertEquals(0, new BigDecimal("30").compareTo(new BigDecimal(abonoUsed.getString("use"))));
+  }
+
+  @Test
+  @DisplayName("A draft with no consumed credit or abono sources lists an empty creditSourcesUsed array")
+  void testHandleListPaymentsCreditSourcesUsedEmptyWhenNoneConsumed() throws Exception {
+    stubNoPisPaymentLinked();
+
+    FIN_Payment draft = mock(FIN_Payment.class);
+    when(draft.getId()).thenReturn(NEW_PAY_ID);
+    when(draft.getDocumentNo()).thenReturn("PAY-DRAFT");
+    when(draft.getAmount()).thenReturn(new BigDecimal("50.00"));
+    when(draft.getStatus()).thenReturn("RPR");
+    when(draft.isProcessed()).thenReturn(false);
+    when(draft.isReceipt()).thenReturn(true);
+    when(draft.getFINPaymentDetailList()).thenReturn(Collections.emptyList());
+
+    OBCriteria<FIN_Payment_Credit> creditCrit = mock(OBCriteria.class);
+    when(dal.createCriteria(FIN_Payment_Credit.class)).thenReturn(creditCrit);
+    when(creditCrit.add(any(Criterion.class))).thenReturn(creditCrit);
+    when(creditCrit.list()).thenReturn(Collections.emptyList());
+
+    stubCreditQuery(Collections.singletonList(draft));
+
+    NeoResponse response = PaymentRegistrationService.handleListPayments(listPaymentsContext());
+
+    assertEquals(200, response.getHttpStatus());
+    JSONObject draftItem = response.getBody().getJSONObject("response")
+        .getJSONArray("data").getJSONObject(0);
+    assertTrue(draftItem.has("creditSourcesUsed"));
+    assertEquals(0, draftItem.getJSONArray("creditSourcesUsed").length());
+  }
+
+  @Test
+  @DisplayName("A processed payment does not expose creditSourcesUsed")
+  void testHandleListPaymentsOmitsCreditSourcesUsedForProcessedPayment() throws Exception {
+    stubNoPisPaymentLinked();
+
+    FIN_Payment processed = mock(FIN_Payment.class);
+    when(processed.getId()).thenReturn(NEW_PAY_ID);
+    when(processed.getDocumentNo()).thenReturn("PAY-1");
+    when(processed.getAmount()).thenReturn(new BigDecimal("100.00"));
+    when(processed.getStatus()).thenReturn("PPD");
+    when(processed.isProcessed()).thenReturn(true);
+    when(processed.isReceipt()).thenReturn(true);
+
+    stubCreditQuery(Collections.singletonList(processed));
+
+    NeoResponse response = PaymentRegistrationService.handleListPayments(listPaymentsContext());
+
+    assertEquals(200, response.getHttpStatus());
+    JSONObject item = response.getBody().getJSONObject("response")
+        .getJSONArray("data").getJSONObject(0);
+    assertFalse(item.has("creditSourcesUsed"));
+  }
+
+  // ════════════════════════════════════════════════════════════════════════
+  // handleListCreditSources with editPaymentId (creditUsedByDraft / abonosUsedByDraft)
+  // ════════════════════════════════════════════════════════════════════════
+
+  @Test
+  @DisplayName("Editing a draft adds its own consumption back in, so a fully-consumed credit "
+      + "source still appears")
+  void testListCreditSourcesWithEditPaymentIdIncludesFullyConsumedSource() throws Exception {
+    String editPaymentId = "draft-being-edited";
+    NeoContext context = creditSourcesContextWithEditPaymentId(editPaymentId);
+    stubInvoiceWithBp();
+    stubAbonoQuery(Collections.emptyList());
+
+    FIN_Payment fullyConsumed = mock(FIN_Payment.class);
+    when(fullyConsumed.getId()).thenReturn(CREDIT_PAY_ID);
+    when(fullyConsumed.getDocumentNo()).thenReturn("CR/FULL");
+    when(fullyConsumed.getGeneratedCredit()).thenReturn(new BigDecimal("100"));
+    when(fullyConsumed.getUsedCredit()).thenReturn(new BigDecimal("100"));
+    when(fullyConsumed.getPaymentDate()).thenReturn(null);
+    when(fullyConsumed.getDescription()).thenReturn("full");
+    stubCreditQuery(Collections.singletonList(fullyConsumed));
+
+    FIN_Payment_Credit link = mock(FIN_Payment_Credit.class);
+    when(link.getAmount()).thenReturn(new BigDecimal("40"));
+    OBCriteria<FIN_Payment_Credit> linkCrit = mock(OBCriteria.class);
+    when(dal.createCriteria(FIN_Payment_Credit.class)).thenReturn(linkCrit);
+    when(linkCrit.add(any(Criterion.class))).thenReturn(linkCrit);
+    when(linkCrit.setMaxResults(anyInt())).thenReturn(linkCrit);
+    when(linkCrit.uniqueResult()).thenReturn(link);
+
+    NeoResponse response = PaymentCreditSourcesService.handleListCreditSources(context, true);
+
+    assertEquals(200, response.getHttpStatus());
+    JSONArray items = response.getBody().getJSONArray(ITEMS);
+    assertEquals(1, items.length(),
+        "the fully-consumed source must still appear once its own draft's use is added back");
+    JSONObject item = items.getJSONObject(0);
+    assertEquals(KIND_CREDIT, item.getString("kind"));
+    assertEquals(CREDIT_PAY_ID, item.getString("paymentId"));
+    assertEquals(0, new BigDecimal("40").compareTo(new BigDecimal(item.getString("avail"))));
+  }
+
+  @Test
+  @DisplayName("Editing a draft relists an abono PSD already linked to it")
+  void testListCreditSourcesWithEditPaymentIdRelistsAlreadyLinkedAbono() throws Exception {
+    String editPaymentId = "draft-being-edited";
+    NeoContext context = creditSourcesContextWithEditPaymentId(editPaymentId);
+    stubInvoiceWithBp();
+    stubCreditQuery(Collections.emptyList());
+
+    FIN_PaymentScheduleDetail linkedAbono = abonoPsd("abono-linked", new BigDecimal("-20.00"),
+        "NC/020", date("2026-05-10"), "Credit Memo");
+    stubEditAbonoQueries(Collections.emptyList(), Collections.singletonList(linkedAbono));
+
+    NeoResponse response = PaymentCreditSourcesService.handleListCreditSources(context, true);
+
+    assertEquals(200, response.getHttpStatus());
+    JSONArray items = response.getBody().getJSONArray(ITEMS);
+    assertEquals(1, items.length());
+    JSONObject item = items.getJSONObject(0);
+    assertEquals(KIND_ABONO, item.getString("kind"));
+    assertEquals("abono-linked", item.getString("psdId"));
   }
 
   // ════════════════════════════════════════════════════════════════════════
@@ -650,6 +1193,106 @@ class PaymentRegistrationServiceAdvancedTest {
     when(q.setParameter(anyString(), any())).thenReturn(q);
     when(q.setMaxResults(anyInt())).thenReturn(q);
     when(q.list()).thenReturn(result);
+  }
+
+  /**
+   * Stubs the two distinct abono HQL queries used by {@code collectAbonoSources} when editing a
+   * draft: the "pending" query (excludes already-linked rows) and {@code abonosUsedByDraft}'s own
+   * query (rows already linked to the draft). Matched by a unique substring of each HQL string so
+   * they don't collide with the shared, single-mock {@link #stubAbonoQuery}.
+   */
+  @SuppressWarnings("unchecked")
+  private void stubEditAbonoQueries(List<FIN_PaymentScheduleDetail> pending,
+      List<FIN_PaymentScheduleDetail> usedByDraft) {
+    Query<FIN_PaymentScheduleDetail> pendingQuery = mock(Query.class);
+    when(session.createQuery(contains("psd.paymentDetails is null"), eq(FIN_PaymentScheduleDetail.class)))
+        .thenReturn(pendingQuery);
+    when(pendingQuery.setParameter(anyString(), any())).thenReturn(pendingQuery);
+    when(pendingQuery.setMaxResults(anyInt())).thenReturn(pendingQuery);
+    when(pendingQuery.list()).thenReturn(pending);
+
+    Query<FIN_PaymentScheduleDetail> usedQuery = mock(Query.class);
+    when(session.createQuery(contains("psd.paymentDetails.finPayment.id"), eq(FIN_PaymentScheduleDetail.class)))
+        .thenReturn(usedQuery);
+    when(usedQuery.setParameter(anyString(), any())).thenReturn(usedQuery);
+    when(usedQuery.list()).thenReturn(usedByDraft);
+  }
+
+  /** A {@code handleListCreditSources} context carrying {@code editPaymentId} in its request body. */
+  private NeoContext creditSourcesContextWithEditPaymentId(String editPaymentId) throws Exception {
+    return NeoContext.builder()
+        .recordId(INVOICE_ID)
+        .httpMethod("GET")
+        .endpointType(NeoEndpointType.CRUD)
+        .requestBody(new JSONObject().put("editPaymentId", editPaymentId))
+        .build();
+  }
+
+  /** A {@code handleListPayments} context — only {@code recordId} is read by that entry point. */
+  private NeoContext listPaymentsContext() {
+    return NeoContext.builder()
+        .recordId(INVOICE_ID)
+        .httpMethod("GET")
+        .endpointType(NeoEndpointType.ACTION)
+        .build();
+  }
+
+  /**
+   * Stubs {@code PisPaymentService.hasLinkedPisPayment} (called by every {@code paymentListItem})
+   * to report no linked PSD2 payment, so {@code handleListPayments} tests don't NPE on the
+   * unrelated {@code PisPayment} criteria.
+   */
+  @SuppressWarnings("unchecked")
+  private void stubNoPisPaymentLinked() {
+    OBCriteria<PisPayment> crit = mock(OBCriteria.class);
+    when(dal.createCriteria(PisPayment.class)).thenReturn(crit);
+    when(crit.add(any(Criterion.class))).thenReturn(crit);
+    when(crit.setMaxResults(anyInt())).thenReturn(crit);
+    when(crit.uniqueResult()).thenReturn(null);
+  }
+
+  /** Stubs {@code reverseConsumedCredit}'s {@code FIN_Payment_Credit} lookup to find nothing. */
+  @SuppressWarnings("unchecked")
+  private void stubNoConsumedCredit() {
+    OBCriteria<FIN_Payment_Credit> crit = mock(OBCriteria.class);
+    when(dal.createCriteria(FIN_Payment_Credit.class)).thenReturn(crit);
+    when(crit.add(any(Criterion.class))).thenReturn(crit);
+    when(crit.list()).thenReturn(Collections.emptyList());
+  }
+
+  /** Builds a mock 'abono' (pending negative credit-memo/return) PSD, sortable by invoice date. */
+  private FIN_PaymentScheduleDetail abonoPsd(String id, BigDecimal amount, String docNo,
+      Date invoiceDate, String docTypeName) {
+    FIN_PaymentScheduleDetail psd = mock(FIN_PaymentScheduleDetail.class);
+    when(psd.getId()).thenReturn(id);
+    when(psd.getAmount()).thenReturn(amount);
+    FIN_PaymentSchedule ps = mock(FIN_PaymentSchedule.class);
+    Invoice ncInvoice = mock(Invoice.class);
+    DocumentType ncType = mock(DocumentType.class);
+    when(ncType.getName()).thenReturn(docTypeName);
+    when(ncInvoice.getDocumentNo()).thenReturn(docNo);
+    when(ncInvoice.getInvoiceDate()).thenReturn(invoiceDate);
+    when(ncInvoice.getDocumentType()).thenReturn(ncType);
+    when(ps.getInvoice()).thenReturn(ncInvoice);
+    when(psd.getInvoicePaymentSchedule()).thenReturn(ps);
+    return psd;
+  }
+
+  /** Builds a mock accumulated-credit payment, sortable by payment date. */
+  private FIN_Payment creditPayment(String id, String docNo, BigDecimal generatedCredit,
+      BigDecimal usedCredit, Date paymentDate) {
+    FIN_Payment payment = mock(FIN_Payment.class);
+    when(payment.getId()).thenReturn(id);
+    when(payment.getDocumentNo()).thenReturn(docNo);
+    when(payment.getGeneratedCredit()).thenReturn(generatedCredit);
+    when(payment.getUsedCredit()).thenReturn(usedCredit);
+    when(payment.getPaymentDate()).thenReturn(paymentDate);
+    when(payment.getDescription()).thenReturn("desc");
+    return payment;
+  }
+
+  private Date date(String yyyyMMdd) throws Exception {
+    return new SimpleDateFormat("yyyy-MM-dd").parse(yyyyMMdd);
   }
 
   private FinAccPaymentMethod fapm(FIN_FinancialAccount acc, FIN_PaymentMethod pm) {

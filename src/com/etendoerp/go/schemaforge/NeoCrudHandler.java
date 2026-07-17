@@ -61,6 +61,7 @@ import com.etendoerp.go.schemaforge.telemetry.NeoTelemetryService;
 import com.etendoerp.go.schemaforge.util.NeoCrudHelper;
 import com.etendoerp.go.schemaforge.util.NeoErrorSanitizer;
 import com.etendoerp.go.schemaforge.util.NeoListIdentifierHelper;
+import com.etendoerp.go.schemaforge.util.NeoLocatorIdentifierHelper;
 import com.etendoerp.go.schemaforge.util.NeoTypeCoercionHelper;
 
 /**
@@ -260,7 +261,15 @@ class NeoCrudHandler {
       return buildMissingRequiredFieldsResponse(e);
     } catch (Exception e) {
       log.error("Error in default handler for {} {}", context.getHttpMethod(), context.getEntityName(), e);
-      return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR, NeoErrorSanitizer.sanitize(e));
+      // A unique-constraint violation is a data conflict, not a server failure — the
+      // client sent a value that already exists, which is a 409, never a 500. Reusing
+      // this same classification is also what keeps the message worded consistently
+      // with NeoErrorSanitizer.DUPLICATE_KEY_ERROR (see its javadoc for why the import
+      // UI depends on that exact wording).
+      int status = NeoErrorSanitizer.isDuplicateKeyViolation(e)
+          ? HttpServletResponse.SC_CONFLICT
+          : HttpServletResponse.SC_INTERNAL_SERVER_ERROR;
+      return NeoResponse.error(status, NeoErrorSanitizer.sanitize(e));
     }
   }
 
@@ -414,6 +423,7 @@ class NeoCrudHandler {
     fieldFilter.filterGetResponse(responseJson);
     if ("GET".equals(context.getHttpMethod()) && context.getSfEntity() != null) {
       NeoListIdentifierHelper.enrichListIdentifiers(responseJson, context.getSfEntity());
+      NeoLocatorIdentifierHelper.enrichLocatorIdentifiers(responseJson, context.getSfEntity());
     }
     return NeoResponse.ok(responseJson);
   }
@@ -455,8 +465,18 @@ class NeoCrudHandler {
           ? innerResponse.getJSONObject(JsonConstants.RESPONSE_ERROR)
               .optString("message", "Write operation failed")
           : "Write operation failed";
-      return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
-          OBMessageUtils.messageBD(errMsg));
+      String translated = OBMessageUtils.messageBD(errMsg);
+      // DefaultJsonDataService catches a unique-constraint violation internally and
+      // returns it as a normal RPC failure response (this branch), never as a thrown
+      // exception — so NeoErrorSanitizer.isDuplicateKeyViolation(Throwable), which only
+      // inspects real exceptions, can't see it. Etendo's own translated message already
+      // contains "must be unique" for this case, so that's what isDuplicateKeyMessage
+      // checks instead. Same reasoning as the catch-all in handleDefault(): a duplicate
+      // key is a data conflict (409), not a server failure (500).
+      int httpStatus = NeoErrorSanitizer.isDuplicateKeyMessage(translated)
+          ? HttpServletResponse.SC_CONFLICT
+          : HttpServletResponse.SC_INTERNAL_SERVER_ERROR;
+      return NeoResponse.error(httpStatus, translated);
     }
     if (status == JsonConstants.RPCREQUEST_STATUS_VALIDATION_ERROR) {
       return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, responseJson);

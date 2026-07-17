@@ -22,13 +22,20 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
+
+import org.openbravo.module.bptaxidkey.ViesService;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.lang.reflect.Method;
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
@@ -48,6 +55,7 @@ import org.openbravo.base.provider.OBProvider;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.core.SessionHandler;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.erpCommon.utility.OBMessageUtils;
 import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.businesspartner.BusinessPartner;
 import org.openbravo.model.common.enterprise.Organization;
@@ -910,6 +918,397 @@ class ContactsLocationAddressHandlerTest {
     when(geoLoc.getAddressLine1()).thenReturn(null);
 
     assertEquals("Madrid", method.invoke(null, geoLoc));
+  }
+
+  // ── queryBPKey ──────────────────────────────────────────────────────────
+
+  /**
+   * queryBPKey must return null immediately when bpId is null (no DB hit).
+   */
+  @Test
+  void testQueryBPKeyReturnsNullForNullBpId() throws Exception {
+    Method method = ContactsLocationAddressHandler.class.getDeclaredMethod("queryBPKey", String.class);
+    method.setAccessible(true);
+    assertNull(method.invoke(null, (Object) null));
+  }
+
+  /**
+   * queryBPKey must return null when bpId is blank (no DB hit).
+   */
+  @Test
+  void testQueryBPKeyReturnsNullForEmptyBpId() throws Exception {
+    Method method = ContactsLocationAddressHandler.class.getDeclaredMethod("queryBPKey", String.class);
+    method.setAccessible(true);
+    assertNull(method.invoke(null, ""));
+  }
+
+  /**
+   * queryBPKey returns the key value from the DB when the row exists.
+   */
+  @Test
+  void testQueryBPKeyReturnsValueFromDB() throws Exception {
+    Method method = ContactsLocationAddressHandler.class.getDeclaredMethod("queryBPKey", String.class);
+    method.setAccessible(true);
+
+    Connection connMock = mock(Connection.class);
+    PreparedStatement psMock = mock(PreparedStatement.class);
+    ResultSet rsMock = mock(ResultSet.class);
+    when(rsMock.next()).thenReturn(true);
+    when(rsMock.getString("em_obtik_tax_id_key")).thenReturn("2");
+    when(psMock.executeQuery()).thenReturn(rsMock);
+    when(connMock.prepareStatement(anyString())).thenReturn(psMock);
+    when(obDal.getConnection()).thenReturn(connMock);
+
+    assertEquals("2", method.invoke(null, "bp-123"));
+  }
+
+  /**
+   * queryBPKey returns null when the row is not found.
+   */
+  @Test
+  void testQueryBPKeyReturnsNullWhenRowNotFound() throws Exception {
+    Method method = ContactsLocationAddressHandler.class.getDeclaredMethod("queryBPKey", String.class);
+    method.setAccessible(true);
+
+    Connection connMock = mock(Connection.class);
+    PreparedStatement psMock = mock(PreparedStatement.class);
+    ResultSet rsMock = mock(ResultSet.class);
+    when(rsMock.next()).thenReturn(false);
+    when(psMock.executeQuery()).thenReturn(rsMock);
+    when(connMock.prepareStatement(anyString())).thenReturn(psMock);
+    when(obDal.getConnection()).thenReturn(connMock);
+
+    assertNull(method.invoke(null, "bp-123"));
+  }
+
+  // ── checkAndAutoSetTaxKey: early return paths ───────────────────────────
+
+  /**
+   * When handleCreate receives a country but the pre-save key is already "2" (NOI),
+   * checkAndAutoSetTaxKey returns immediately and no messages are injected.
+   */
+  @Test
+  void testHandleCreateSkipsAutoSetWhenPreSaveKeyIsNOI() throws Exception {
+    Map<String, String> params = new HashMap<>();
+    params.put("parentId", "bp-123");
+
+    BusinessPartner bp = mock(BusinessPartner.class);
+    Client client = mock(Client.class);
+    Organization org = mock(Organization.class);
+    when(bp.getClient()).thenReturn(client);
+    when(bp.getOrganization()).thenReturn(org);
+    when(obDal.get(BusinessPartner.class, "bp-123")).thenReturn(bp);
+
+    Location geoLoc = mock(Location.class);
+    when(geoLoc.getId()).thenReturn("geo-id");
+    when(obProvider.get(Location.class)).thenReturn(geoLoc);
+
+    org.openbravo.model.common.businesspartner.Location bpLoc =
+        mock(org.openbravo.model.common.businesspartner.Location.class);
+    when(bpLoc.getId()).thenReturn("bp-loc-id");
+    when(bpLoc.getName()).thenReturn("Addr");
+    when(bpLoc.isShipToAddress()).thenReturn(Boolean.TRUE);
+    when(bpLoc.isInvoiceToAddress()).thenReturn(Boolean.TRUE);
+    when(obProvider.get(org.openbravo.model.common.businesspartner.Location.class)).thenReturn(bpLoc);
+
+    // queryBPKey returns "2" — checkAndAutoSetTaxKey must exit immediately
+    Connection connMock = mock(Connection.class);
+    PreparedStatement psMock = mock(PreparedStatement.class);
+    ResultSet rsMock = mock(ResultSet.class);
+    when(rsMock.next()).thenReturn(true);
+    when(rsMock.getString("em_obtik_tax_id_key")).thenReturn("2");
+    when(psMock.executeQuery()).thenReturn(rsMock);
+    when(connMock.prepareStatement(anyString())).thenReturn(psMock);
+    when(obDal.getConnection()).thenReturn(connMock);
+
+    JSONObject body = new JSONObject();
+    body.put("name", "Test");
+    body.put("country", "ES");
+
+    NeoContext ctx = buildContext("POST", null, body, params);
+    NeoResponse response = handler.handle(ctx);
+
+    assertEquals(201, response.getHttpStatus());
+    JSONObject dataRec = response.getBody().getJSONObject("response").getJSONArray("data").getJSONObject(0);
+    assertNull(dataRec.optJSONArray("messages"));
+  }
+
+  /**
+   * When the country is not an EU country, checkAndAutoSetTaxKey returns early
+   * and no messages are injected.
+   */
+  @Test
+  void testHandleCreateSkipsAutoSetWhenCountryIsNotEU() throws Exception {
+    Map<String, String> params = new HashMap<>();
+    params.put("parentId", "bp-123");
+
+    BusinessPartner bp = mock(BusinessPartner.class);
+    Client client = mock(Client.class);
+    Organization org = mock(Organization.class);
+    when(bp.getClient()).thenReturn(client);
+    when(bp.getOrganization()).thenReturn(org);
+    when(obDal.get(BusinessPartner.class, "bp-123")).thenReturn(bp);
+
+    Location geoLoc = mock(Location.class);
+    when(geoLoc.getId()).thenReturn("geo-id");
+    when(obProvider.get(Location.class)).thenReturn(geoLoc);
+
+    org.openbravo.model.common.businesspartner.Location bpLoc =
+        mock(org.openbravo.model.common.businesspartner.Location.class);
+    when(bpLoc.getId()).thenReturn("bp-loc-id");
+    when(bpLoc.getName()).thenReturn("Addr");
+    when(bpLoc.isShipToAddress()).thenReturn(Boolean.TRUE);
+    when(bpLoc.isInvoiceToAddress()).thenReturn(Boolean.TRUE);
+    when(obProvider.get(org.openbravo.model.common.businesspartner.Location.class)).thenReturn(bpLoc);
+
+    // queryBPKey returns null (row not found), so preSaveKey != "2"
+    // checkAndAutoSetTaxKey check 1: country is NOT EU (em_eucntry_iseucountry = "N")
+    Connection connMock = mock(Connection.class);
+    when(obDal.getConnection()).thenReturn(connMock);
+
+    PreparedStatement psKey = mock(PreparedStatement.class);
+    ResultSet rsKey = mock(ResultSet.class);
+    when(rsKey.next()).thenReturn(false);
+    when(psKey.executeQuery()).thenReturn(rsKey);
+
+    PreparedStatement psCountry = mock(PreparedStatement.class);
+    ResultSet rsCountry = mock(ResultSet.class);
+    when(rsCountry.next()).thenReturn(true);
+    when(rsCountry.getString("em_eucntry_iseucountry")).thenReturn("N");
+    when(rsCountry.getString("countrycode")).thenReturn("US");
+    when(psCountry.executeQuery()).thenReturn(rsCountry);
+
+    when(connMock.prepareStatement(argThat(s -> s != null && s.contains("em_obtik_tax_id_key"))))
+        .thenReturn(psKey);
+    when(connMock.prepareStatement(argThat(s -> s != null && s.contains("em_eucntry_iseucountry"))))
+        .thenReturn(psCountry);
+
+    JSONObject body = new JSONObject();
+    body.put("name", "Test");
+    body.put("country", "US-COUNTRY-ID");
+
+    NeoContext ctx = buildContext("POST", null, body, params);
+    NeoResponse response = handler.handle(ctx);
+
+    assertEquals(201, response.getHttpStatus());
+    JSONObject dataRec = response.getBody().getJSONObject("response").getJSONArray("data").getJSONObject(0);
+    assertNull(dataRec.optJSONArray("messages"));
+  }
+
+  /**
+   * When the BP taxId is shorter than 2 characters, checkAndAutoSetTaxKey returns early.
+   */
+  @Test
+  void testHandleCreateSkipsAutoSetWhenTaxIdTooShort() throws Exception {
+    Map<String, String> params = new HashMap<>();
+    params.put("parentId", "bp-123");
+
+    BusinessPartner bp = mock(BusinessPartner.class);
+    Client client = mock(Client.class);
+    Organization org = mock(Organization.class);
+    when(bp.getClient()).thenReturn(client);
+    when(bp.getOrganization()).thenReturn(org);
+    when(obDal.get(BusinessPartner.class, "bp-123")).thenReturn(bp);
+
+    Location geoLoc = mock(Location.class);
+    when(geoLoc.getId()).thenReturn("geo-id");
+    when(obProvider.get(Location.class)).thenReturn(geoLoc);
+
+    org.openbravo.model.common.businesspartner.Location bpLoc =
+        mock(org.openbravo.model.common.businesspartner.Location.class);
+    when(bpLoc.getId()).thenReturn("bp-loc-id");
+    when(bpLoc.getName()).thenReturn("Addr");
+    when(bpLoc.isShipToAddress()).thenReturn(Boolean.TRUE);
+    when(bpLoc.isInvoiceToAddress()).thenReturn(Boolean.TRUE);
+    when(obProvider.get(org.openbravo.model.common.businesspartner.Location.class)).thenReturn(bpLoc);
+
+    Connection connMock = mock(Connection.class);
+    when(obDal.getConnection()).thenReturn(connMock);
+
+    // queryBPKey → null (no row)
+    PreparedStatement psKey = mock(PreparedStatement.class);
+    ResultSet rsKey = mock(ResultSet.class);
+    when(rsKey.next()).thenReturn(false);
+    when(psKey.executeQuery()).thenReturn(rsKey);
+
+    // country check → EU, not ES
+    PreparedStatement psCountry = mock(PreparedStatement.class);
+    ResultSet rsCountry = mock(ResultSet.class);
+    when(rsCountry.next()).thenReturn(true);
+    when(rsCountry.getString("em_eucntry_iseucountry")).thenReturn("Y");
+    when(rsCountry.getString("countrycode")).thenReturn("FR");
+    when(psCountry.executeQuery()).thenReturn(rsCountry);
+
+    // taxId query → "X" (single char — too short)
+    PreparedStatement psTax = mock(PreparedStatement.class);
+    ResultSet rsTax = mock(ResultSet.class);
+    when(rsTax.next()).thenReturn(true);
+    when(rsTax.getString("taxid")).thenReturn("X");
+    when(psTax.executeQuery()).thenReturn(rsTax);
+
+    when(connMock.prepareStatement(argThat(s -> s != null && s.contains("em_obtik_tax_id_key"))))
+        .thenReturn(psKey);
+    when(connMock.prepareStatement(argThat(s -> s != null && s.contains("em_eucntry_iseucountry"))))
+        .thenReturn(psCountry);
+    when(connMock.prepareStatement(argThat(s -> s != null && s.contains("taxid"))))
+        .thenReturn(psTax);
+
+    JSONObject body = new JSONObject();
+    body.put("name", "Test");
+    body.put("country", "FR-COUNTRY-ID");
+
+    NeoContext ctx = buildContext("POST", null, body, params);
+    NeoResponse response = handler.handle(ctx);
+
+    assertEquals(201, response.getHttpStatus());
+    JSONObject dataRec = response.getBody().getJSONObject("response").getJSONArray("data").getJSONObject(0);
+    assertNull(dataRec.optJSONArray("messages"));
+  }
+
+  /**
+   * Happy path: EU non-ES country, taxId prefix matches EU country, key auto-set to "2",
+   * VIES resolves to "V" — a "warning" (tax key auto-set notification) message is injected.
+   */
+  @Test
+  void testHandleCreateInjectsMessageWhenTaxKeyAutoSet() throws Exception {
+    Map<String, String> params = new HashMap<>();
+    params.put("parentId", "bp-123");
+
+    BusinessPartner bp = mock(BusinessPartner.class);
+    Client client = mock(Client.class);
+    Organization org = mock(Organization.class);
+    when(bp.getClient()).thenReturn(client);
+    when(bp.getOrganization()).thenReturn(org);
+    when(obDal.get(BusinessPartner.class, "bp-123")).thenReturn(bp);
+
+    Location geoLoc = mock(Location.class);
+    when(geoLoc.getId()).thenReturn("geo-id");
+    when(obProvider.get(Location.class)).thenReturn(geoLoc);
+
+    org.openbravo.model.common.businesspartner.Location bpLoc =
+        mock(org.openbravo.model.common.businesspartner.Location.class);
+    when(bpLoc.getId()).thenReturn("bp-loc-id");
+    when(bpLoc.getName()).thenReturn("Addr");
+    when(bpLoc.isShipToAddress()).thenReturn(Boolean.TRUE);
+    when(bpLoc.isInvoiceToAddress()).thenReturn(Boolean.TRUE);
+    when(obProvider.get(org.openbravo.model.common.businesspartner.Location.class)).thenReturn(bpLoc);
+
+    Connection connMock = mock(Connection.class);
+    when(obDal.getConnection()).thenReturn(connMock);
+
+    // queryBPKey → null (preSaveKey = null, not "2")
+    PreparedStatement psKey = mock(PreparedStatement.class);
+    ResultSet rsKey = mock(ResultSet.class);
+    when(rsKey.next()).thenReturn(false);
+    when(psKey.executeQuery()).thenReturn(rsKey);
+
+    // country check → EU, not ES
+    PreparedStatement psCountry = mock(PreparedStatement.class);
+    ResultSet rsCountry = mock(ResultSet.class);
+    when(rsCountry.next()).thenReturn(true);
+    when(rsCountry.getString("em_eucntry_iseucountry")).thenReturn("Y");
+    when(rsCountry.getString("countrycode")).thenReturn("FR");
+    when(psCountry.executeQuery()).thenReturn(rsCountry);
+
+    // taxId → "FR12345678"
+    PreparedStatement psTax = mock(PreparedStatement.class);
+    ResultSet rsTax = mock(ResultSet.class);
+    when(rsTax.next()).thenReturn(true);
+    when(rsTax.getString("taxid")).thenReturn("FR12345678");
+    when(psTax.executeQuery()).thenReturn(rsTax);
+
+    // prefix match count → 1 (FR is EU, not ES)
+    PreparedStatement psCount = mock(PreparedStatement.class);
+    ResultSet rsCount = mock(ResultSet.class);
+    when(rsCount.next()).thenReturn(true);
+    when(rsCount.getInt(1)).thenReturn(1);
+    when(psCount.executeQuery()).thenReturn(rsCount);
+
+    // UPDATE c_bpartner SET em_obtik_tax_id_key = '2'
+    PreparedStatement psUpdateKey = mock(PreparedStatement.class);
+
+    // UPDATE c_bpartner SET em_obtik_viesstatus
+    PreparedStatement psUpdateVies = mock(PreparedStatement.class);
+
+    when(connMock.prepareStatement(argThat(s -> s != null && s.contains("em_obtik_tax_id_key") && s.contains("SELECT"))))
+        .thenReturn(psKey);
+    when(connMock.prepareStatement(argThat(s -> s != null && s.contains("em_eucntry_iseucountry"))))
+        .thenReturn(psCountry);
+    when(connMock.prepareStatement(argThat(s -> s != null && s.contains("taxid"))))
+        .thenReturn(psTax);
+    when(connMock.prepareStatement(argThat(s -> s != null && s.contains("SUBSTRING"))))
+        .thenReturn(psCount);
+    when(connMock.prepareStatement(argThat(s -> s != null && s.contains("em_obtik_tax_id_key") && s.contains("UPDATE"))))
+        .thenReturn(psUpdateKey);
+    when(connMock.prepareStatement(argThat(s -> s != null && s.contains("em_obtik_viesstatus"))))
+        .thenReturn(psUpdateVies);
+
+    try (MockedStatic<ViesService> mVies = mockStatic(ViesService.class);
+         MockedStatic<OBMessageUtils> mMsg = mockStatic(OBMessageUtils.class)) {
+
+      java.lang.reflect.Constructor<ViesService.ViesResult> ctor =
+          ViesService.ViesResult.class.getDeclaredConstructor(String.class, String.class, String.class);
+      ctor.setAccessible(true);
+      ViesService.ViesResult viesResult = ctor.newInstance("V", null, null);
+      mVies.when(() -> ViesService.checkVat(anyString())).thenReturn(viesResult);
+      mMsg.when(() -> OBMessageUtils.messageBD(anyString())).thenReturn("msg");
+
+      JSONObject body = new JSONObject();
+      body.put("name", "Test");
+      body.put("country", "FR-COUNTRY-ID");
+
+      NeoContext ctx = buildContext("POST", null, body, params);
+      NeoResponse response = handler.handle(ctx);
+
+      assertEquals(201, response.getHttpStatus());
+      JSONObject dataRec = response.getBody().getJSONObject("response").getJSONArray("data").getJSONObject(0);
+      assertNotNull(dataRec.optJSONArray("messages"));
+      assertEquals("warning", dataRec.getJSONArray("messages").getJSONObject(0).getString("type"));
+    }
+  }
+
+  /**
+   * handleUpdate with country and preSaveKey already "2" skips auto-set and returns 200.
+   */
+  @Test
+  void testHandleUpdateSkipsAutoSetWhenPreSaveKeyIsNOI() throws Exception {
+    Location geoLoc = mock(Location.class);
+    when(geoLoc.getId()).thenReturn("geo-id");
+
+    org.openbravo.model.common.businesspartner.Location bpLoc =
+        mock(org.openbravo.model.common.businesspartner.Location.class);
+    when(bpLoc.getId()).thenReturn("bpl-id");
+    when(bpLoc.getName()).thenReturn("Name");
+    when(bpLoc.isShipToAddress()).thenReturn(Boolean.TRUE);
+    when(bpLoc.isInvoiceToAddress()).thenReturn(Boolean.TRUE);
+    when(bpLoc.getLocationAddress()).thenReturn(geoLoc);
+
+    BusinessPartner bp = mock(BusinessPartner.class);
+    when(bp.getId()).thenReturn("bp-123");
+    when(bpLoc.getBusinessPartner()).thenReturn(bp);
+
+    when(obDal.get(org.openbravo.model.common.businesspartner.Location.class, "bpl-id"))
+        .thenReturn(bpLoc);
+
+    // queryBPKey returns "2"
+    Connection connMock = mock(Connection.class);
+    PreparedStatement psMock = mock(PreparedStatement.class);
+    ResultSet rsMock = mock(ResultSet.class);
+    when(rsMock.next()).thenReturn(true);
+    when(rsMock.getString("em_obtik_tax_id_key")).thenReturn("2");
+    when(psMock.executeQuery()).thenReturn(rsMock);
+    when(connMock.prepareStatement(anyString())).thenReturn(psMock);
+    when(obDal.getConnection()).thenReturn(connMock);
+
+    JSONObject body = new JSONObject();
+    body.put("country", "FR-COUNTRY-ID");
+
+    NeoContext ctx = buildContext("PUT", "bpl-id", body, null);
+    NeoResponse response = handler.handle(ctx);
+
+    assertEquals(200, response.getHttpStatus());
+    JSONObject dataRec = response.getBody().getJSONObject("response").getJSONArray("data").getJSONObject(0);
+    assertNull(dataRec.optJSONArray("messages"));
   }
 
   // ── Private helpers ─────────────────────────────────────────────────────

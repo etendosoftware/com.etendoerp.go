@@ -21,6 +21,8 @@ import java.util.Set;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.sql.Savepoint;
 
 import javax.inject.Named;
 
@@ -31,6 +33,7 @@ import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.base.exception.OBException;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.erpCommon.utility.OBMessageUtils;
 
 /**
  * Pre/post-save hook for the businessPartner entity in the contacts spec.
@@ -68,8 +71,10 @@ import org.openbravo.dal.service.OBDal;
 public class BusinessPartnerHandler implements NeoHandler {
 
   private static final Logger log = LogManager.getLogger(BusinessPartnerHandler.class);
+  private static final String RESPONSE_KEY = "response";
   private static final String FIELD_SEARCH_KEY = "searchKey";
   private static final String FIELD_NAME = "name";
+  private static final String SQLSTATE_UNIQUE_VIOLATION = "23505";
 
   private static final Set<String> PRECREATE_BILLING_FIELDS = Set.of("priceList", "paymentMethod", "paymentTerms",
       "account", "customerBlocking", "purchasePricelist", "pOPaymentMethod", "pOPaymentTerms", "pOFinancialAccount",
@@ -110,7 +115,7 @@ public class BusinessPartnerHandler implements NeoHandler {
    */
   private static JSONObject firstRecord(JSONObject body) {
     try {
-      JSONObject response = body.optJSONObject("response");
+      JSONObject response = body.optJSONObject(RESPONSE_KEY);
       JSONArray data = (response != null) ? response.optJSONArray("data") : body.optJSONArray("data");
       if (data == null || data.length() == 0) {
         return null;
@@ -176,9 +181,36 @@ public class BusinessPartnerHandler implements NeoHandler {
     }
   }
 
+  /**
+   * Runs {@link #updateSearchKey(String, String)} under a savepoint so a duplicate-key
+   * hit (two concurrent rows racing on the same not-yet-committed sequence value) only
+   * rolls back the failed UPDATE instead of poisoning the whole shared {@code /batch}
+   * transaction for every other operation that follows on the same connection.
+   *
+   * @return {@code true} when the identifier was applied, {@code false} when it was
+   *         skipped due to a duplicate-key race (the placeholder {@code searchKey} is
+   *         kept in that case).
+   */
+  private static boolean applySearchKeyUpdate(String recordId, String identifier) throws Exception {
+    Connection conn = OBDal.getInstance().getConnection();
+    Savepoint savepoint = conn.setSavepoint();
+    try {
+      updateSearchKey(recordId, identifier);
+      return true;
+    } catch (SQLException e) {
+      if (!SQLSTATE_UNIQUE_VIOLATION.equals(e.getSQLState())) {
+        throw e;
+      }
+      log.warn("BusinessPartnerHandler: searchKey race on bp={} (duplicate identifier {}), "
+          + "keeping placeholder searchKey", recordId, identifier, e);
+      conn.rollback(savepoint);
+      return false;
+    }
+  }
+
   private static void patchSearchKeyInResponse(JSONObject body, String identifier) {
     try {
-      JSONObject response = body.optJSONObject("response");
+      JSONObject response = body.optJSONObject(RESPONSE_KEY);
       if (response == null) {
         return;
       }
@@ -282,7 +314,8 @@ public class BusinessPartnerHandler implements NeoHandler {
     if ("GET".equals(method)) {
       return fillContactEmailFallback(ctx);
     }
-    if (!"POST".equals(method)) {
+    boolean isWrite = "POST".equals(method) || "PUT".equals(method) || "PATCH".equals(method);
+    if (!isWrite) {
       return null;
     }
     NeoResponse previousResult = ctx.getPreviousResult();
@@ -290,20 +323,66 @@ public class BusinessPartnerHandler implements NeoHandler {
       return null;
     }
     try {
-      String recordId = extractRecordId(previousResult.getBody());
-      if (recordId == null) {
-        return null;
+      JSONObject body = previousResult.getBody();
+      boolean modified = false;
+
+      if ("POST".equals(method)) {
+        String recordId = extractRecordId(body);
+        if (recordId != null) {
+          String identifier = queryIdentifier(recordId);
+          if (StringUtils.isNotBlank(identifier) && applySearchKeyUpdate(recordId, identifier)) {
+            patchSearchKeyInResponse(body, identifier);
+            modified = true;
+          }
+        }
       }
-      String identifier = queryIdentifier(recordId);
-      if (StringUtils.isBlank(identifier)) {
-        return null;
-      }
-      updateSearchKey(recordId, identifier);
-      patchSearchKeyInResponse(previousResult.getBody(), identifier);
-      return NeoResponse.ok(previousResult.getBody());
+
+      modified |= injectViesMessage(body);
+      return modified ? NeoResponse.ok(body) : null;
     } catch (Exception e) {
-      log.error("BusinessPartnerHandler: error updating searchKey from em_etgo_identifier", e);
+      log.error("BusinessPartnerHandler: error in afterHandle()", e);
       return null;
+    }
+  }
+
+  /**
+   * If the saved record has {@code oBTIKTaxIDKey = '2'} and a resolved VIES status (V or I),
+   * injects a {@code messages} array at the root of the response body so the frontend
+   * (useEntity.js, line: {@code data?.messages}) can show the toast.
+   */
+  private static boolean injectViesMessage(JSONObject body) {
+    try {
+      JSONObject response = body.optJSONObject(RESPONSE_KEY);
+      if (response == null) {
+        return false;
+      }
+      JSONArray data = response.optJSONArray("data");
+      if (data == null || data.length() == 0) {
+        return false;
+      }
+      JSONObject savedRecord = data.getJSONObject(0);
+      String taxIdKey = savedRecord.optString("oBTIKTaxIDKey", null);
+      if (!"2".equals(taxIdKey)) {
+        return false;
+      }
+      String viesStatus = savedRecord.optString("oBTIKVIESStatus", null);
+      if (viesStatus == null || "P".equals(viesStatus)) {
+        return false;
+      }
+
+      boolean valid = "V".equals(viesStatus);
+      JSONObject msg = new JSONObject();
+      msg.put("type", valid ? "success" : "warning");
+      msg.put("title", OBMessageUtils.messageBD(valid ? "OBTIK_ViesValidTitle" : "OBTIK_ViesInvalidTitle"));
+      msg.put("text", OBMessageUtils.messageBD(valid ? "OBTIK_ViesValidText" : "OBTIK_ViesInvalidText"));
+
+      JSONArray messages = new JSONArray();
+      messages.put(msg);
+      body.put("messages", messages);
+      return true;
+    } catch (Exception e) {
+      log.warn("BusinessPartnerHandler: could not inject VIES message", e);
+      return false;
     }
   }
 

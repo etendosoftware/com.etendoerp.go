@@ -52,12 +52,16 @@ import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.common.invoice.Invoice;
 import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
 import org.openbravo.model.financialmgmt.payment.FIN_Payment;
+import org.openbravo.model.financialmgmt.payment.FIN_PaymentDetail;
 import org.openbravo.model.financialmgmt.payment.FIN_PaymentMethod;
 import org.openbravo.model.financialmgmt.payment.FIN_PaymentSchedule;
 import org.openbravo.model.financialmgmt.payment.FIN_PaymentScheduleDetail;
+import org.openbravo.model.financialmgmt.payment.FIN_Payment_Credit;
 import org.openbravo.model.financialmgmt.payment.FinAccPaymentMethod;
 import org.openbravo.service.db.DalConnectionProvider;
 import org.openbravo.service.json.JsonUtils;
+
+import com.etendoerp.psd2.bank.integration.utils.BankIntegrationConstants;
 
 /**
  * Shared payment registration logic for both sales-invoice and purchase-invoice handlers.
@@ -71,21 +75,40 @@ final class PaymentRegistrationService {
 
   private static final Logger log = LogManager.getLogger(PaymentRegistrationService.class);
 
-  // Error messages
-  private static final String MSG_INVOICE_NOT_FOUND = "Invoice not found";
-  private static final String MSG_INVOICE_ID_REQUIRED = "Invoice ID is required";
-  private static final String MSG_NO_PENDING_PSD =
+  // Error messages — package-visible: shared with PisPaymentService.
+  static final String MSG_INVOICE_NOT_FOUND = "Invoice not found";
+  static final String MSG_INVOICE_ID_REQUIRED = "Invoice ID is required";
+  // Package-visible: shared with PaymentDraftEditService.
+  static final String MSG_NO_PENDING_PSD =
       "No pending payment schedule details found for this installment";
+  // Package-visible: shared with PaymentDraftEditService.
+  static final String MSG_PAYMENT_NOT_FOUND = "Payment not found";
 
   // JSON response keys
   private static final String KEY_DOCUMENT_NO = "documentNo";
   private static final String KEY_AMOUNT = "amount";
-  private static final String KEY_STATUS = "status";
+  // Package-visible: shared with PisPaymentService.
+  static final String KEY_STATUS = "status";
   private static final String KEY_RESPONSE = "response";
   private static final String KEY_DATA = "data";
   private static final String KEY_ITEMS = "items";
   private static final String KEY_TOTAL_COUNT = "totalCount";
-  private static final String KEY_RECEIPT = "receipt";
+  // Package-visible: shared with PaymentCreditSourcesService.
+  static final String KEY_RECEIPT = "receipt";
+  private static final String KEY_LABEL = "label";
+  private static final String FIELD_PIS = "pis";
+  private static final String KEY_VIA_PIS = "viaPis";
+  // Package-visible: shared with PaymentCreditSourcesService.
+  static final String KEY_KIND = "kind";
+  private static final String KEY_USE = "use";
+  // Package-visible: shared with PaymentCreditSourcesService.
+  static final String KEY_PAYMENT_ID = "paymentId";
+  // Package-visible: shared with PaymentCreditSourcesService.
+  static final String KEY_PSD_ID = "psdId";
+  // Package-visible: shared with PaymentCreditSourcesService.
+  static final String KIND_CREDIT = "credit";
+  // Package-visible: shared with PaymentCreditSourcesService.
+  static final String KIND_ABONO = "abono";
 
   // OBError type returned by FIN_AddPayment.processPayment on failure
   private static final String STATUS_ERROR = "Error";
@@ -220,12 +243,24 @@ final class PaymentRegistrationService {
         crit.addOrderBy(FIN_FinancialAccount.PROPERTY_NAME, true);
 
         String allowProp = allowProperty(isReceipt);
+        Currency invoiceCurrency = invoice.getCurrency();
 
         JSONArray arr = new JSONArray();
         for (FIN_FinancialAccount acc : crit.list()) {
-          appendAccountItem(arr, acc, allowProp);
+          appendAccountItem(arr, acc, allowProp, invoiceCurrency);
         }
-        return itemsResponse(arr);
+        JSONObject resp = new JSONObject();
+        resp.put(KEY_ITEMS, arr);
+        resp.put(KEY_TOTAL_COUNT, arr.length());
+        FIN_PaymentMethod invoiceMethod = resolveInvoiceMethod(invoice);
+        if (invoiceMethod != null) {
+          resp.put("defaultMethodId", invoiceMethod.getId());
+        }
+        String bpAccountId = businessPartnerAccountId(invoice, isReceipt);
+        if (bpAccountId != null) {
+          resp.put("bpPreferredAccountId", bpAccountId);
+        }
+        return new NeoResponse(200, resp);
       } finally {
         OBContext.restorePreviousMode();
       }
@@ -236,30 +271,70 @@ final class PaymentRegistrationService {
     }
   }
 
-  /** Appends one account item if it has at least one valid payment method for the direction. */
-  private static void appendAccountItem(JSONArray arr, FIN_FinancialAccount acc, String allowProp)
-      throws Exception {
+  /**
+   * Appends one account item if it has at least one valid payment method for the direction
+   * and its currency matches the invoice's (accounts with no currency are always kept).
+   */
+  private static void appendAccountItem(JSONArray arr, FIN_FinancialAccount acc, String allowProp,
+      Currency invoiceCurrency) throws Exception {
+    if (acc.getCurrency() != null && invoiceCurrency != null
+        && !acc.getCurrency().getId().equals(invoiceCurrency.getId())) {
+      return;
+    }
     OBCriteria<FinAccPaymentMethod> methodCrit = OBDal.getInstance()
         .createCriteria(FinAccPaymentMethod.class);
     methodCrit.add(Restrictions.eq(FinAccPaymentMethod.PROPERTY_ACCOUNT, acc));
     methodCrit.add(Restrictions.eq(allowProp, Boolean.TRUE));
-    methodCrit.setMaxResults(1);
     List<FinAccPaymentMethod> methods = methodCrit.list();
     if (methods.isEmpty()) {
       return;
     }
     JSONObject item = new JSONObject();
     item.put("id", acc.getId());
-    item.put("label", acc.getName());
+    item.put(KEY_LABEL, acc.getName());
     if (acc.getCurrency() != null) {
       item.put("currency", acc.getCurrency().getISOCode());
       item.put("currencyId", acc.getCurrency().getId());
     }
+    item.put("psd2Connected", BankIntegrationConstants.FA_CONNECTION_STATUS_CONNECTED
+        .equals(acc.getPSD2ConnectionStatus()));
+    if (acc.getPSD2CardNumber() != null) {
+      item.put("maskedPan", acc.getPSD2CardNumber());
+    }
+    JSONArray methodIds = new JSONArray();
+    JSONArray defaultForMethodIds = new JSONArray();
+    for (FinAccPaymentMethod fapm : methods) {
+      if (fapm.getPaymentMethod() == null) {
+        continue;
+      }
+      methodIds.put(fapm.getPaymentMethod().getId());
+      if (Boolean.TRUE.equals(fapm.isDefault())) {
+        defaultForMethodIds.put(fapm.getPaymentMethod().getId());
+      }
+    }
+    item.put("paymentMethodIds", methodIds);
+    item.put("defaultForMethodIds", defaultForMethodIds);
     FIN_PaymentMethod defaultMethod = methods.get(0).getPaymentMethod();
     if (defaultMethod != null) {
       item.put("defaultPaymentMethod", defaultMethod.getName());
     }
     arr.put(item);
+  }
+
+  /**
+   * The business partner's preferred financial account for the given direction
+   * (its "Account" for receipts, "PO Financial Account" for payments), mirroring
+   * Classic's {@code AddPaymentDefaultValuesHandler} priority before the
+   * {@code FinAccPaymentMethod.default} flag.
+   */
+  private static String businessPartnerAccountId(Invoice invoice, boolean isReceipt) {
+    if (invoice.getBusinessPartner() == null) {
+      return null;
+    }
+    FIN_FinancialAccount bpAccount = isReceipt
+        ? invoice.getBusinessPartner().getAccount()
+        : invoice.getBusinessPartner().getPOFinancialAccount();
+    return bpAccount != null ? bpAccount.getId() : null;
   }
 
   // ─── PAYMENTS: list payments linked to an invoice ──────────────────────────
@@ -285,7 +360,7 @@ final class PaymentRegistrationService {
 
         JSONArray arr = new JSONArray();
         for (FIN_Payment p : invoicePayments) {
-          arr.put(paymentListItem(p));
+          arr.put(paymentListItem(p, invoiceId));
         }
 
         JSONObject data = new JSONObject();
@@ -304,11 +379,16 @@ final class PaymentRegistrationService {
     }
   }
 
-  private static JSONObject paymentListItem(FIN_Payment p) throws Exception {
+  private static JSONObject paymentListItem(FIN_Payment p, String invoiceId) throws Exception {
     JSONObject item = new JSONObject();
     item.put("id", p.getId());
     item.put(KEY_DOCUMENT_NO, p.getDocumentNo());
     item.put(KEY_AMOUNT, p.getAmount());
+    // Net amount THIS payment applies against THIS invoice's schedules — negative when the
+    // payment consumes a credit note / return. The header amount above is the payment's own
+    // total, which misleads on a credit note's history: there the row must show how much of
+    // the note the payment used, not how much cash the payment moved.
+    item.put("appliedToInvoice", appliedToInvoice(p, invoiceId));
     item.put("paymentDate", p.getPaymentDate() != null
         ? JsonUtils.createDateFormat().format(p.getPaymentDate()) : null);
     item.put(KEY_STATUS, p.getStatus());
@@ -323,7 +403,66 @@ final class PaymentRegistrationService {
     if (p.getPaymentMethod() != null) {
       item.put("paymentMethod", p.getPaymentMethod().getName());
     }
+    // A linked PSD2_PIS_PAYMENT row means this payment was initiated through the Salt Edge PIS
+    // flow (this popup), not just a manually-recorded bank transfer — surfaced in the SPA's
+    // payment history as a "Realizado vía PSD2" badge. PisPayment is a plain DAL entity (no
+    // PSD2-module method needed), so this is queried directly here.
+    item.put(KEY_VIA_PIS, PisPaymentService.hasLinkedPisPayment(p));
+    // Only a draft can be re-opened for editing — expose which credit/abono sources it is
+    // currently consuming so the edit modal can re-check them (see creditSourcesUsedByPayment).
+    if (!Boolean.TRUE.equals(p.isProcessed())) {
+      item.put("creditSourcesUsed", creditSourcesUsedByPayment(p));
+    }
     return item;
+  }
+
+  /**
+   * Net amount {@code p} applies against {@code invoiceId}'s payment schedules: the sum of its
+   * schedule details linked to that invoice. Positive when paying the invoice, negative when
+   * consuming it as a credit note / return.
+   */
+  private static BigDecimal appliedToInvoice(FIN_Payment p, String invoiceId) {
+    BigDecimal total = BigDecimal.ZERO;
+    for (FIN_PaymentDetail detail : p.getFINPaymentDetailList()) {
+      for (FIN_PaymentScheduleDetail psd : detail.getFINPaymentScheduleDetailList()) {
+        FIN_PaymentSchedule sched = psd.getInvoicePaymentSchedule();
+        if (sched != null && sched.getInvoice() != null
+            && invoiceId.equals(sched.getInvoice().getId())) {
+          total = total.add(nullToZero(psd.getAmount()));
+        }
+      }
+    }
+    return total;
+  }
+
+  /**
+   * Reconstructs the credit/abono sources {@code payment} (a draft) is currently consuming, in the
+   * same shape the frontend sends when registering ({@code {kind, paymentId|psdId, use}}), so the
+   * edit modal can re-check the sources the draft already applied.
+   */
+  private static JSONArray creditSourcesUsedByPayment(FIN_Payment payment) throws Exception {
+    JSONArray arr = new JSONArray();
+    OBCriteria<FIN_Payment_Credit> crit = OBDal.getInstance().createCriteria(FIN_Payment_Credit.class);
+    crit.add(Restrictions.eq(FIN_Payment_Credit.PROPERTY_PAYMENT, payment));
+    for (FIN_Payment_Credit link : crit.list()) {
+      JSONObject used = new JSONObject();
+      used.put(KEY_KIND, KIND_CREDIT);
+      used.put(KEY_PAYMENT_ID, link.getCreditPaymentUsed().getId());
+      used.put(KEY_USE, link.getAmount());
+      arr.put(used);
+    }
+    for (FIN_PaymentDetail detail : payment.getFINPaymentDetailList()) {
+      for (FIN_PaymentScheduleDetail psd : detail.getFINPaymentScheduleDetailList()) {
+        if (psd.getAmount().signum() < 0) {
+          JSONObject used = new JSONObject();
+          used.put(KEY_KIND, KIND_ABONO);
+          used.put(KEY_PSD_ID, psd.getId());
+          used.put(KEY_USE, psd.getAmount().abs());
+          arr.put(used);
+        }
+      }
+    }
+    return arr;
   }
 
   // ─── PAYMENT METHODS: list methods valid for the invoice's accounts ────────
@@ -362,7 +501,7 @@ final class PaymentRegistrationService {
         for (Map.Entry<String, String> e : distinct.entrySet()) {
           JSONObject item = new JSONObject();
           item.put("id", e.getKey());
-          item.put("label", e.getValue());
+          item.put(KEY_LABEL, e.getValue());
           arr.put(item);
         }
         return itemsResponse(arr);
@@ -391,105 +530,7 @@ final class PaymentRegistrationService {
   }
 
   // ─── CREDIT SOURCES: consumable credit / saldo a favor of the BP ───────────
-
-  /**
-   * Lists the consumable funding sources for the invoice's business partner:
-   *   - 'abono'  : pending credit-memo / return payment-schedule details (amount &lt; 0)
-   *   - 'credit' : available accumulated credit lines (generatedCredit minus usedCredit)
-   */
-  static NeoResponse handleListCreditSources(NeoContext context, boolean isReceipt) {
-    String invoiceId = context.getRecordId();
-    if (StringUtils.isBlank(invoiceId)) {
-      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, MSG_INVOICE_ID_REQUIRED);
-    }
-    try {
-      OBContext.setAdminMode(true);
-      try {
-        Invoice invoice = OBDal.getInstance().get(Invoice.class, invoiceId);
-        if (invoice == null) {
-          return NeoResponse.error(HttpServletResponse.SC_NOT_FOUND, MSG_INVOICE_NOT_FOUND);
-        }
-        if (invoice.getBusinessPartner() == null) {
-          return itemsResponse(new JSONArray());
-        }
-        String bpId = invoice.getBusinessPartner().getId();
-        JSONArray arr = new JSONArray();
-        appendAbonoSources(arr, bpId, invoiceId, isReceipt);
-        appendAccumulatedCredit(arr, bpId, isReceipt);
-        return itemsResponse(arr);
-      } finally {
-        OBContext.restorePreviousMode();
-      }
-    } catch (Exception e) {
-      log.error("Error listing credit sources for invoice {}: {}", invoiceId, e.getMessage(), e);
-      return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
-          "Failed to list credit sources");
-    }
-  }
-
-  /** Appends pending credit-memo / return PSDs (negative amount) of the BP. */
-  private static void appendAbonoSources(JSONArray arr, String bpId, String invoiceId,
-      boolean isReceipt) throws Exception {
-    String hql = "select psd from FIN_Payment_ScheduleDetail psd "
-        + "where psd.invoicePaymentSchedule.invoice.businessPartner.id = :bp "
-        + "and psd.invoicePaymentSchedule.invoice.salesTransaction = :receipt "
-        + "and psd.paymentDetails is null and psd.amount < 0 "
-        + "and psd.invoicePaymentSchedule.invoice.id <> :inv "
-        + "order by psd.invoicePaymentSchedule.invoice.invoiceDate desc";
-    List<FIN_PaymentScheduleDetail> abonos = OBDal.getInstance().getSession()
-        .createQuery(hql, FIN_PaymentScheduleDetail.class)
-        .setParameter("bp", bpId)
-        .setParameter(KEY_RECEIPT, isReceipt)
-        .setParameter("inv", invoiceId)
-        .setMaxResults(50)
-        .list();
-    for (FIN_PaymentScheduleDetail psd : abonos) {
-      Invoice ncInv = psd.getInvoicePaymentSchedule().getInvoice();
-      JSONObject item = new JSONObject();
-      item.put("id", psd.getId());
-      item.put("kind", "abono");
-      item.put("psdId", psd.getId());
-      item.put("doc", ncInv.getDocumentNo());
-      item.put("date", ncInv.getInvoiceDate() != null
-          ? JsonUtils.createDateFormat().format(ncInv.getInvoiceDate()) : null);
-      item.put("note", ncInv.getDocumentType() != null ? ncInv.getDocumentType().getName() : "");
-      item.put("avail", psd.getAmount().abs());
-      arr.put(item);
-    }
-  }
-
-  /** Appends accumulated-credit payments of the BP with available credit (generated minus used). */
-  private static void appendAccumulatedCredit(JSONArray arr, String bpId, boolean isReceipt)
-      throws Exception {
-    String hql = "select p from FIN_Payment p "
-        + "where p.businessPartner.id = :bp and p.receipt = :receipt "
-        + "and (coalesce(p.generatedCredit, 0) - coalesce(p.usedCredit, 0)) > 0 "
-        + "order by p.paymentDate desc";
-    List<FIN_Payment> credits = OBDal.getInstance().getSession()
-        .createQuery(hql, FIN_Payment.class)
-        .setParameter("bp", bpId)
-        .setParameter(KEY_RECEIPT, isReceipt)
-        .setMaxResults(50)
-        .list();
-    for (FIN_Payment src : credits) {
-      BigDecimal avail = nullToZero(src.getGeneratedCredit()).subtract(nullToZero(src.getUsedCredit()));
-      if (avail.signum() <= 0) {
-        // Defensive: the HQL already excludes fully-consumed credit, but never
-        // expose a zero/negative-availability row if one slips through.
-        continue;
-      }
-      JSONObject item = new JSONObject();
-      item.put("id", src.getId());
-      item.put("kind", "credit");
-      item.put("paymentId", src.getId());
-      item.put("doc", src.getDocumentNo());
-      item.put("date", src.getPaymentDate() != null
-          ? JsonUtils.createDateFormat().format(src.getPaymentDate()) : null);
-      item.put("note", src.getDescription());
-      item.put("avail", avail);
-      arr.put(item);
-    }
-  }
+  // Moved to PaymentCreditSourcesService (Sonar S1200: too many methods in this class).
 
   // ─── ADVANCED: draft/confirm + payment method + credit consumption ─────────
 
@@ -500,8 +541,22 @@ final class PaymentRegistrationService {
    * register any over-payment as generated credit (or refund) and process it.
    *
    * Body: {@code scheduleId, actual_payment, payment_date, fin_financial_account_id,
-   * fin_paymentmethod_id?, process('draft'|'confirm'), creditSources[], overpaymentAction?}.
-   * On {@code process='draft'} the payment is created but NOT processed (stays DR).
+   * fin_paymentmethod_id?, process('draft'|'confirm'), creditSources[], overpaymentAction?,
+   * pis?, paymentId?}. On {@code process='draft'} the payment is created but NOT processed (stays DR).
+   *
+   * <p>When {@code paymentId} is present the existing DRAFT it identifies is edited in place: the same
+   * {@link FIN_Payment} row (same id and documentNo) is reset — its payment details and the
+   * payment-owned schedule details it created are removed, the invoice's own installment details are
+   * restored to unpaid, any consumed accumulated credit is given back to its source payments, and the
+   * monetary aggregates are zeroed — and then re-applied with the new amount/date/account/method. A
+   * processed payment is read-only and rejected. A blank {@code paymentId} keeps the create behavior.
+   *
+   * <p>When {@code pis=true} the payment is registered as a real bank transfer through the
+   * PSD2 / Salt Edge PIS integration: the {@link FIN_Payment} is created, linked and PROCESSED to
+   * status {@code PPM} ("Payment Made") — applied to the invoice but with NO
+   * {@code FIN_Finacc_Transaction} yet (the transfer method's Automatic flags are cleared by §2b).
+   * The bank transaction is created only once Salt Edge confirms execution, by the PSD2 module's
+   * own {@code PisPaymentCallback}. See {@link PisPaymentService#applyOverpaymentAndInitiatePis}.
    */
   static NeoResponse doRegisterPaymentAdvanced(String invoiceId, JSONObject body, boolean isReceipt)
       throws Exception {
@@ -534,6 +589,7 @@ final class PaymentRegistrationService {
 
     boolean doProcess = !"draft".equalsIgnoreCase(body.optString("process", "confirm"));
     String overpaymentAction = body.optString("overpaymentAction", null);
+    boolean pis = body.optBoolean(FIELD_PIS, false);
 
     assertCurrencyMatch(invoice.getCurrency(), account.getCurrency());
 
@@ -546,37 +602,85 @@ final class PaymentRegistrationService {
     DocumentType docType = resolveArApDocType(org, isReceipt);
     checkPeriodOpen(invoice, docType, paymentDate);
 
+    JSONObject pisInput = null;
+    if (pis) {
+      PisPaymentService.validatePisEligibility(account, paymentMethod, invoice);
+      pisInput = PisPaymentService.extractPisInput(body);
+    }
+
     AdvPaymentMngtDao dao = new AdvPaymentMngtDao();
-    FIN_Payment payment = createDraftPayment(dao, isReceipt, invoice,
-        paymentMethod, account, paymentDate, cash);
+
+    // Edit-in-place: when paymentId is present, reuse the existing DRAFT (same id + documentNo)
+    // after resetting it; otherwise create a fresh draft.
+    String editPaymentId = body.optString(KEY_PAYMENT_ID, null);
+    boolean isEdit = StringUtils.isNotBlank(editPaymentId);
+    FIN_Payment payment = resolveOrCreatePayment(editPaymentId, dao, isReceipt, invoice,
+        new DraftFields(paymentMethod, account, paymentDate, cash));
+    if (payment == null) {
+      return NeoResponse.error(HttpServletResponse.SC_NOT_FOUND, MSG_PAYMENT_NOT_FOUND);
+    }
 
     BigDecimal totalFunded = PaymentCreditConsumer.consume(payment, body.optJSONArray("creditSources"));
-
-    List<FIN_PaymentScheduleDetail> pendingPSDs = findPendingPSDs(scheduleId);
-    if (pendingPSDs.isEmpty()) {
-      throw new OBException(MSG_NO_PENDING_PSD);
-    }
     BigDecimal funds = cash.add(totalFunded);
-    BigDecimal invoiceApplied = sumAmounts(pendingPSDs).min(funds).max(BigDecimal.ZERO);
-    linkPSDsToPayment(pendingPSDs, payment, invoiceApplied);
+    BigDecimal invoiceApplied = applyInvoiceInstallment(isEdit, payment, scheduleId, funds);
     OBDal.getInstance().save(payment);
     OBDal.getInstance().flush();
 
     // Draft: created and linked but NOT processed — no transaction, no accounting.
     if (doProcess) {
+      if (pis) {
+        return PisPaymentService.applyOverpaymentAndInitiatePis(payment, dao, org, funds,
+            invoiceApplied, pisInput, overpaymentAction);
+      }
       applyOverpaymentAndProcess(payment, dao, org, funds, invoiceApplied, overpaymentAction);
     }
     return builtPaymentResponse(payment);
   }
 
-  /** Processes a previously-saved draft payment (Borrador → Depositado). */
-  static NeoResponse confirmDraftPayment(String paymentId) throws Exception {
-    FIN_Payment payment = OBDal.getInstance().get(FIN_Payment.class, paymentId);
-    if (payment == null) {
-      return NeoResponse.error(HttpServletResponse.SC_NOT_FOUND, "Payment not found");
+  /** Groups the editable header fields applied to a fresh or reused draft (Sonar S107). */
+  private record DraftFields(FIN_PaymentMethod paymentMethod, FIN_FinancialAccount account,
+      Date paymentDate, BigDecimal cash) {
+  }
+
+  /**
+   * Resolves the payment to apply this registration to: a fresh draft, or (when {@code
+   * editPaymentId} is present) the existing draft it identifies, prepared for reuse. Returns
+   * {@code null} when {@code editPaymentId} does not resolve to an existing payment, letting the
+   * caller turn that into a 404 without nesting the lookup inside {@link
+   * #doRegisterPaymentAdvanced}.
+   */
+  private static FIN_Payment resolveOrCreatePayment(String editPaymentId, AdvPaymentMngtDao dao,
+      boolean isReceipt, Invoice invoice, DraftFields fields) throws Exception {
+    if (StringUtils.isBlank(editPaymentId)) {
+      return createDraftPayment(dao, isReceipt, invoice, fields.paymentMethod(), fields.account(),
+          fields.paymentDate(), fields.cash());
     }
-    processOrThrow(payment);
-    return builtPaymentResponse(payment);
+    FIN_Payment existing = OBDal.getInstance().get(FIN_Payment.class, editPaymentId);
+    return existing != null
+        ? PaymentDraftEditService.prepareEditableDraft(existing, fields.paymentMethod(),
+            fields.account(), fields.paymentDate(), fields.cash())
+        : null;
+  }
+
+  /**
+   * Applies the funded amount to the invoice installment: when editing, the document's own
+   * installment PSD is still linked to this payment (it was never detached — see
+   * {@link PaymentDraftEditService#prepareEditableDraft}) — adjusted in place via Core's own
+   * reconciliation ({@link PaymentDraftEditService#reapplyLinkedInstallmentPSD}), instead of
+   * re-searching for "pending" PSDs. On create, links the funded amount to the pending PSDs found.
+   */
+  private static BigDecimal applyInvoiceInstallment(boolean isEdit, FIN_Payment payment,
+      String scheduleId, BigDecimal funds) {
+    if (isEdit) {
+      return PaymentDraftEditService.reapplyLinkedInstallmentPSD(payment, scheduleId, funds);
+    }
+    List<FIN_PaymentScheduleDetail> pendingPSDs = findPendingPSDs(scheduleId);
+    if (pendingPSDs.isEmpty()) {
+      throw new OBException(MSG_NO_PENDING_PSD);
+    }
+    BigDecimal invoiceApplied = sumAmounts(pendingPSDs).min(funds).max(BigDecimal.ZERO);
+    linkPSDsToPayment(pendingPSDs, payment, invoiceApplied);
+    return invoiceApplied;
   }
 
   // ─── ADVANCED HELPERS ──────────────────────────────────────────────────────
@@ -624,16 +728,32 @@ final class PaymentRegistrationService {
     return resolvePaymentMethod(account, invoice, isReceipt);
   }
 
+  // ─── EDIT-IN-PLACE HELPERS ──────────────────────────────────────────────────
+  // Moved to PaymentDraftEditService (Sonar S1200: too many methods in this class).
+
   // ─── SHARED HELPERS ─────────────────────────────────────────────────────────
 
-  /** Builds the standard {response:{data:{id,documentNo,amount,status,processed}}} envelope. */
-  private static NeoResponse builtPaymentResponse(FIN_Payment payment) throws Exception {
+  /**
+   * Builds the standard {response:{data:{id,documentNo,amount,status,processed}}} envelope.
+   * Package-visible: also used by {@link PaymentDraftEditService#confirmDraftPayment}.
+   */
+  static NeoResponse builtPaymentResponse(FIN_Payment payment) throws Exception {
+    return wrapCreatedData(basePaymentData(payment));
+  }
+
+  /** Package-visible: also used by {@link PisPaymentService#applyOverpaymentAndInitiatePis}. */
+  static JSONObject basePaymentData(FIN_Payment payment) throws Exception {
     JSONObject data = new JSONObject();
     data.put("id", payment.getId());
     data.put(KEY_DOCUMENT_NO, payment.getDocumentNo());
     data.put(KEY_AMOUNT, payment.getAmount());
     data.put(KEY_STATUS, payment.getStatus());
     data.put("processed", payment.isProcessed());
+    return data;
+  }
+
+  /** Package-visible: also used by {@link PisPaymentService#applyOverpaymentAndInitiatePis}. */
+  static NeoResponse wrapCreatedData(JSONObject data) throws Exception {
     JSONObject responseData = new JSONObject();
     responseData.put(KEY_DATA, data);
     JSONObject wrapper = new JSONObject();
@@ -641,8 +761,11 @@ final class PaymentRegistrationService {
     return NeoResponse.created(wrapper);
   }
 
-  /** Builds the standard {items:[...], totalCount:n} listing envelope. */
-  private static NeoResponse itemsResponse(JSONArray arr) throws Exception {
+  /**
+   * Builds the standard {items:[...], totalCount:n} listing envelope. Package-visible: also
+   * used by {@link PisPaymentService}'s listing actions.
+   */
+  static NeoResponse itemsResponse(JSONArray arr) throws Exception {
     JSONObject resp = new JSONObject();
     resp.put(KEY_ITEMS, arr);
     resp.put(KEY_TOTAL_COUNT, arr.length());
@@ -687,8 +810,11 @@ final class PaymentRegistrationService {
     return payment;
   }
 
-  /** Processes the payment with action "P" and throws on a business error. */
-  private static void processOrThrow(FIN_Payment payment) throws Exception {
+  /**
+   * Processes the payment with action "P" and throws on a business error.
+   * Package-visible: also used by {@link PaymentDraftEditService#confirmDraftPayment}.
+   */
+  static void processOrThrow(FIN_Payment payment) throws Exception {
     VariablesSecureApp vars = NeoDefaultsService.buildVariablesSecureApp(OBContext.getOBContext());
     RequestContext.get().setVariableSecureApp(vars);
     failOnError(FIN_AddPayment.processPayment(vars, new DalConnectionProvider(false),
@@ -696,7 +822,8 @@ final class PaymentRegistrationService {
     OBDal.getInstance().flush();
   }
 
-  private static void failOnError(OBError result) {
+  /** Package-visible: also used by {@link PisPaymentService#applyOverpaymentAndInitiatePis}. */
+  static void failOnError(OBError result) {
     if (STATUS_ERROR.equalsIgnoreCase(result.getType())) {
       throw new OBException(result.getMessage());
     }
@@ -708,7 +835,11 @@ final class PaymentRegistrationService {
         : FinAccPaymentMethod.PROPERTY_PAYOUTALLOW;
   }
 
-  private static BigDecimal nullToZero(BigDecimal value) {
+  /**
+   * Package-visible: also used by {@link PaymentCreditSourcesService} and
+   * {@link PaymentDraftEditService}.
+   */
+  static BigDecimal nullToZero(BigDecimal value) {
     return value == null ? BigDecimal.ZERO : value;
   }
 
@@ -759,10 +890,7 @@ final class PaymentRegistrationService {
   private static FIN_PaymentMethod resolvePaymentMethod(FIN_FinancialAccount account,
       Invoice invoice, boolean isReceipt) {
 
-    FIN_PaymentMethod invoiceMethod = invoice.getPaymentMethod();
-    if (invoiceMethod == null && invoice.getBusinessPartner() != null) {
-      invoiceMethod = invoice.getBusinessPartner().getPaymentMethod();
-    }
+    FIN_PaymentMethod invoiceMethod = resolveInvoiceMethod(invoice);
 
     String allowProp = allowProperty(isReceipt);
     if (invoiceMethod != null && isMethodAllowed(account, invoiceMethod, allowProp)) {
@@ -776,6 +904,15 @@ final class PaymentRegistrationService {
     fallback.setMaxResults(1);
     List<FinAccPaymentMethod> methods = fallback.list();
     return methods.isEmpty() ? null : methods.get(0).getPaymentMethod();
+  }
+
+  /** The invoice's own payment method, falling back to its business partner's. */
+  private static FIN_PaymentMethod resolveInvoiceMethod(Invoice invoice) {
+    FIN_PaymentMethod invoiceMethod = invoice.getPaymentMethod();
+    if (invoiceMethod == null && invoice.getBusinessPartner() != null) {
+      invoiceMethod = invoice.getBusinessPartner().getPaymentMethod();
+    }
+    return invoiceMethod;
   }
 
   /** True when {@code method} is configured for {@code account} in the given direction. */

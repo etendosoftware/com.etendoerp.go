@@ -31,8 +31,10 @@ import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.criterion.Restrictions;
 import org.openbravo.base.provider.OBProvider;
+import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.erpCommon.utility.OBCurrencyUtils;
 import org.openbravo.model.pricing.pricelist.PriceList;
 import org.openbravo.model.pricing.pricelist.PriceListSchema;
 import org.openbravo.model.pricing.pricelist.PriceListVersion;
@@ -60,6 +62,7 @@ import org.openbravo.model.pricing.pricelist.PriceListVersion;
 public class PriceListHeaderHandler implements NeoHandler {
 
   private static final String FIELD_PRICE_LIST_VERSION = "priceListVersion";
+  private static final String FIELD_CURRENCY = "currency";
   private static final int MAX_SCHEMA_NAME_LENGTH = 60;
   private static final String DEFAULT_SCHEMA_NAME = "Esquema de Lista de Precios";
 
@@ -67,7 +70,42 @@ public class PriceListHeaderHandler implements NeoHandler {
 
   @Override
   public NeoResponse handle(NeoContext context) {
+    if (context != null && "POST".equals(context.getHttpMethod())) {
+      injectOrgCurrency(context);
+    }
     return null;
+  }
+
+  /**
+   * Tariffs have no currency field in the simplified interface — they inherit the
+   * organization currency (see the "Monedas y Tarifas" spec §5). When a create request
+   * omits {@code currency} (e.g. the inline "create tariff" flow from the product price
+   * tab), resolve and inject the org currency so the mandatory {@code C_Currency_ID}
+   * column is satisfied deterministically instead of relying on a session default.
+   */
+  private void injectOrgCurrency(NeoContext context) {
+    JSONObject body = context.getRequestBody();
+    if (body == null || body.has(FIELD_CURRENCY)) {
+      return;
+    }
+    OBContext obContext = context.getObContext();
+    if (obContext == null || obContext.getCurrentOrganization() == null) {
+      return;
+    }
+    try {
+      OBContext.setAdminMode();
+      try {
+        String orgId = obContext.getCurrentOrganization().getId();
+        String currencyId = OBCurrencyUtils.getOrgCurrency(orgId);
+        if (currencyId != null && !currencyId.isEmpty()) {
+          body.put(FIELD_CURRENCY, currencyId);
+        }
+      } finally {
+        OBContext.restorePreviousMode();
+      }
+    } catch (Exception e) {
+      log.warn("Could not inject organization currency into price list create: {}", e.getMessage());
+    }
   }
 
   @Override

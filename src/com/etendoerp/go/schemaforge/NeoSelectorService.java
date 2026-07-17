@@ -27,6 +27,7 @@ import com.etendoerp.go.schemaforge.selector.meta.SelectorContextResolver;
 import com.etendoerp.go.schemaforge.selector.meta.SelectorDescriptorResolver;
 import com.etendoerp.go.schemaforge.selector.meta.SelectorMeta;
 import com.etendoerp.go.schemaforge.selector.policy.NeoSelectorPolicy;
+import com.etendoerp.go.schemaforge.util.NeoLocatorSelectorHelper;
 
 /**
  * Generic dynamic selector service for FK fields.
@@ -181,6 +182,15 @@ public class NeoSelectorService {
 
   private static NeoResponse querySelectorByColumn(SFEntity sourceEntity, Column column, String columnName,
       String search, int limit, int offset, Map<String, String> contextParams) {
+    NeoResponse result = resolveSelectorResponse(
+        sourceEntity, column, columnName, search, limit, offset, contextParams);
+    // Generic post-processing: collapse M_Locator storage-bin labels into their parent
+    // warehouse name for every window. Fail-safe — leaves the response untouched on error.
+    return NeoLocatorSelectorHelper.rewriteLocatorLabels(result, column);
+  }
+
+  private static NeoResponse resolveSelectorResponse(SFEntity sourceEntity, Column column, String columnName,
+      String search, int limit, int offset, Map<String, String> contextParams) {
     try {
       int safeLimit = normalizeLimit(limit);
       int safeOffset = normalizeOffset(offset);
@@ -278,6 +288,16 @@ public class NeoSelectorService {
     if (StringUtils.isNotBlank(priceListId) && ctxParamFilter != null
         && ctxParamFilter.contains(":priceListId")) {
       ctxFilterParams.put("priceListId", priceListId);
+    }
+    if (ctxParamFilter != null && ctxParamFilter.contains(":finAccPaymentMethodId")) {
+      // Financial-account-by-payment-method policy: customer sends Fin_Paymentmethod_ID,
+      // vendor sends PO_Paymentmethod_ID (only one per request).
+      String finAccPaymentMethodId = StringUtils.defaultIfBlank(
+          safeContextParams.get("Fin_Paymentmethod_ID"),
+          safeContextParams.get("PO_Paymentmethod_ID"));
+      if (StringUtils.isNotBlank(finAccPaymentMethodId)) {
+        ctxFilterParams.put("finAccPaymentMethodId", finAccPaymentMethodId);
+      }
     }
     String language = safeContextParams.get("language");
     if (StringUtils.isNotBlank(language)) {
