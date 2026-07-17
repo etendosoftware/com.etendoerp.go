@@ -25,6 +25,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.mockConstruction;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.when;
 
@@ -50,6 +51,7 @@ import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
+import org.mockito.MockedConstruction;
 import org.mockito.MockedStatic;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.mockito.junit.jupiter.MockitoSettings;
@@ -58,15 +60,18 @@ import org.openbravo.base.expression.OBScriptEngine;
 import org.openbravo.base.model.Entity;
 import org.openbravo.base.model.ModelProvider;
 import org.openbravo.base.model.Property;
+import org.openbravo.client.application.DynamicExpressionParser;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.erpCommon.utility.DimensionDisplayUtility;
 import org.openbravo.model.ad.datamodel.Column;
 import org.openbravo.model.ad.datamodel.Table;
 import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.ad.system.Language;
 import org.openbravo.model.ad.ui.Field;
 import org.openbravo.model.ad.ui.Tab;
+import org.openbravo.model.common.enterprise.DocumentType;
 import org.openbravo.model.common.enterprise.Organization;
 
 import com.etendoerp.go.schemaforge.NeoResponse;
@@ -543,6 +548,180 @@ class NeoDisplayLogicHelperTest {
       Map<String, Object> ctx = NeoDisplayLogicHelper.buildEvalContext(fieldValues);
 
       assertEquals("DOC-001", ctx.get("documentNo"));
+    }
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // ETP-4529 regression: @ACCT_DIMENSION_DISPLAY@ macro for centrally-maintained clients
+  //
+  // Root cause: the evaluate-display endpoint used to be routed through
+  // NeoDisplayLogicHandler, whose context builder never set the
+  // "$IsAcctDimCentrally" session key. Etendo core's
+  // DimensionDisplayUtility.computeAccountingDimensionDisplayLogic() generates JS that
+  // branches on context.$IsAcctDimCentrally === 'N' vs 'Y'; with it undefined, BOTH
+  // branches are false, so @ACCT_DIMENSION_DISPLAY@ always evaluated to false for any
+  // client with acctdim_centrally_maintained = 'Y' (the mode almost every real client
+  // uses), regardless of the actual GL Configuration toggles.
+  //
+  // NeoDisplayLogicHelper.buildEvalContext() is the correct implementation (it sets
+  // $IsAcctDimCentrally, merges DimensionDisplayUtility.getAccountingDimensionConfiguration()
+  // for centrally-maintained clients, and resolves DOCBASETYPE) and is now the one NeoServlet
+  // routes evaluate-display through (see NeoSubEndpointDispatcher).
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  @Nested
+  @DisplayName("ETP-4529: ACCT_DIMENSION_DISPLAY macro for centrally-maintained clients")
+  class AcctDimensionDisplayCentrallyMaintainedRegressionTests {
+
+    /** Cost Center dimension flag key for an AR Invoice ("ARI") header field, as produced by
+     *  DimensionDisplayUtility#getAccountingDimensionConfiguration for a centrally-maintained
+     *  client with the Cost Center dimension enabled at header level. */
+    private static final String DIM_FLAG_KEY = "$Element_CC_ARI_H";
+
+    /** The exact JS shape DimensionDisplayUtility#computeAccountingDimensionDisplayLogic()
+     *  generates for a header field mapped to the Cost Center dimension (see
+     *  DimensionDisplayUtility.java lines 129-146). */
+    private static final String ACCT_DIMENSION_DISPLAY_JS =
+        "(context.$IsAcctDimCentrally === 'N' && context.$Element_CC === 'Y')"
+        + " || (context.$IsAcctDimCentrally === 'Y'"
+        + " && context['$Element_CC_' + OB.Utilities.getValue(currentValues, \"DOCBASETYPE\") + '_H'] === 'Y')";
+
+    @SuppressWarnings("unchecked")
+    @Test
+    @DisplayName("buildEvalContext sets $IsAcctDimCentrally='Y' and merges the dimension "
+        + "configuration map when the client is centrally maintained")
+    void buildEvalContext_centrallyMaintainedClient_setsIsAcctDimCentrallyAndDimensionFlags()
+        throws Exception {
+      JSONObject fieldValues = new JSONObject();
+      fieldValues.put("transactionDocument", "docType-ARI");
+
+      Client sysClient = mock(Client.class);
+      when(sysClient.isAcctdimCentrallyMaintained()).thenReturn(true);
+      when(obDal.get(eq(Client.class), eq("client-001"))).thenReturn(sysClient);
+
+      DocumentType docType = mock(DocumentType.class);
+      when(docType.getDocumentCategory()).thenReturn("ARI");
+      when(obDal.get(eq(DocumentType.class), eq("docType-ARI"))).thenReturn(docType);
+
+      Map<String, String> acctDimMap = new HashMap<>();
+      acctDimMap.put(DIM_FLAG_KEY, "Y");
+
+      try (MockedStatic<DimensionDisplayUtility> dimUtilMock =
+          mockStatic(DimensionDisplayUtility.class)) {
+        dimUtilMock.when(() -> DimensionDisplayUtility.getAccountingDimensionConfiguration(sysClient))
+            .thenReturn(acctDimMap);
+
+        Map<String, Object> ctx = NeoDisplayLogicHelper.buildEvalContext(fieldValues);
+
+        assertEquals("Y", ctx.get(DimensionDisplayUtility.IsAcctDimCentrally),
+            "buildEvalContext must set $IsAcctDimCentrally so the core-generated macro "
+                + "expression can branch correctly");
+        assertEquals("Y", ctx.get(DIM_FLAG_KEY),
+            "the centrally-maintained dimension configuration map must be merged into the "
+                + "eval context");
+        assertEquals("ARI", ctx.get("DOCBASETYPE"));
+        Map<String, Object> currentValues = (Map<String, Object>) ctx.get("currentValues");
+        assertEquals("ARI", currentValues.get("DOCBASETYPE"),
+            "DOCBASETYPE must also be reachable via OB.Utilities.getValue(currentValues, ...)");
+      }
+    }
+
+    /**
+     * End-to-end reproduction of the exact bug: evaluates the real macro-shaped JS expression
+     * (mirroring DynamicExpressionParser's generated output for @ACCT_DIMENSION_DISPLAY@) via the
+     * real Rhino engine -- no mocked eval result.
+     *
+     * <p>With the FIXED context (NeoDisplayLogicHelper.buildEvalContext, now wired into
+     * NeoServlet), the field-owning dimension (Cost Center) IS enabled in GL Configuration for
+     * this client/doc-base-type/level combination, so the macro must evaluate {@code true}.
+     *
+     * <p>With the BUGGY context shape (mirroring the pre-fix NeoDisplayLogicHandler, which never
+     * set $IsAcctDimCentrally), the exact same expression must evaluate {@code false} --
+     * reproducing ETP-4529 for a centrally-maintained client regardless of GL Configuration.
+     */
+    @Test
+    @DisplayName("the ACCT_DIMENSION_DISPLAY macro evaluates true with the fixed context and "
+        + "false with the pre-fix (buggy) context, for the same GL Configuration")
+    void acctDimensionDisplayMacro_trueWithFixedContext_falseWithBuggyContext() throws Exception {
+      // Let OBScriptEngine.getInstance() return the REAL singleton (real Rhino), overriding the
+      // class-level mock so this test exercises actual JS evaluation instead of a canned result.
+      scriptEngineMock.when(OBScriptEngine::getInstance).thenCallRealMethod();
+
+      Client sysClient = mock(Client.class);
+      when(sysClient.isAcctdimCentrallyMaintained()).thenReturn(true);
+      when(obDal.get(eq(Client.class), eq("client-001"))).thenReturn(sysClient);
+
+      DocumentType docType = mock(DocumentType.class);
+      when(docType.getDocumentCategory()).thenReturn("ARI");
+      when(obDal.get(eq(DocumentType.class), eq("docType-ARI"))).thenReturn(docType);
+
+      Map<String, String> acctDimMap = new HashMap<>();
+      // The Cost Center dimension IS enabled in GL Configuration for AR Invoice headers.
+      acctDimMap.put(DIM_FLAG_KEY, "Y");
+
+      JSONObject fieldValues = new JSONObject();
+      fieldValues.put("transactionDocument", "docType-ARI");
+
+      Tab tab = mock(Tab.class);
+      Field field = mock(Field.class);
+      when(field.getName()).thenReturn("costCenter");
+
+      // NeoDisplayLogicHelper#evaluateExpression always constructs a real DynamicExpressionParser
+      // from the raw AD display-logic string to obtain getJSExpression(). Parsing a real
+      // "@ACCT_DIMENSION_DISPLAY@" macro end-to-end needs a live AD_Tab/AD_Field/DB (dimension
+      // mapping lookups), so DynamicExpressionParser's construction is intercepted here to force
+      // getJSExpression() to return the exact JS core generates for this macro (see
+      // DimensionDisplayUtility#computeAccountingDimensionDisplayLogic) -- everything downstream
+      // of that (the OB.Utilities shim, context/currentValues preambles, and the real Rhino
+      // OBScriptEngine eval) runs for real and unmocked.
+      try (MockedConstruction<DynamicExpressionParser> parserMock = mockConstruction(
+          DynamicExpressionParser.class,
+          (mock, context) -> {
+            when(mock.getJSExpression()).thenReturn(ACCT_DIMENSION_DISPLAY_JS);
+            when(mock.getSessionAttributes()).thenReturn(Collections.emptyList());
+          })) {
+
+        // ── After the fix: NeoDisplayLogicHelper.buildEvalContext() ──
+        try (MockedStatic<DimensionDisplayUtility> dimUtilMock =
+            mockStatic(DimensionDisplayUtility.class)) {
+          dimUtilMock.when(() -> DimensionDisplayUtility.getAccountingDimensionConfiguration(sysClient))
+              .thenReturn(acctDimMap);
+
+          Map<String, Object> fixedContext = NeoDisplayLogicHelper.buildEvalContext(fieldValues);
+
+          boolean resultWithFix = NeoDisplayLogicHelper.evaluateExpression(
+              "@ACCT_DIMENSION_DISPLAY@", tab, field, fixedContext);
+
+          assertTrue(resultWithFix,
+              "With the fixed context ($IsAcctDimCentrally set + dimension config merged), the "
+                  + "macro must evaluate true when the dimension is enabled in GL Configuration");
+        }
+
+        // ── Before the fix: reproduces NeoDisplayLogicHandler's buggy context shape, which
+        //    never set $IsAcctDimCentrally (only old-style $Element_<DIM> keys). Built by hand
+        //    (rather than reusing buildEvalContext again) so DOCBASETYPE resolution and the
+        //    old-style dimension flag are both deterministically present -- isolating
+        //    $IsAcctDimCentrally as the only missing piece, exactly the ETP-4529 root cause.
+        Map<String, Object> buggyCurrentValues = new HashMap<>();
+        buggyCurrentValues.put("transactionDocument", "docType-ARI");
+        buggyCurrentValues.put("DOCBASETYPE", "ARI");
+
+        Map<String, Object> buggyContext = new HashMap<>();
+        buggyContext.put("currentValues", buggyCurrentValues);
+        buggyContext.putAll(buggyCurrentValues);
+        // Old-style key NeoDisplayLogicHandler's resolveAccountingDimensions() did resolve --
+        // present and 'Y', yet the macro still evaluates false because $IsAcctDimCentrally is
+        // undefined, so neither branch of the macro can match.
+        buggyContext.put("$Element_CC", "Y");
+        buggyContext.put("context", buggyContext);
+
+        boolean resultBeforeFix = NeoDisplayLogicHelper.evaluateExpression(
+            "@ACCT_DIMENSION_DISPLAY@", tab, field, buggyContext);
+
+        assertFalse(resultBeforeFix,
+            "Reproduces ETP-4529: without $IsAcctDimCentrally, both branches of the macro are "
+                + "false for a centrally-maintained client, regardless of GL Configuration");
+      }
     }
   }
 
