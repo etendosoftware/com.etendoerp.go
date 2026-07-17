@@ -466,18 +466,37 @@ public class BatchService {
       }
     }
 
+    // A custom NeoHandler (e.g. Contacts' locationAddress -> ContactsLocationAddressHandler)
+    // reads its parent id from queryParams, exactly like the real HTTP endpoint it also
+    // serves (POST .../locationAddress?parentId={bpId}) - body-only wouldn't reach it.
+    Map<String, String> queryParams = parentId != null
+        ? Collections.singletonMap(FIELD_PARENT_ID, parentId)
+        : Collections.emptyMap();
+
     NeoContext ctx = NeoContext.builder()
         .specName(spec.getId())
         .entityName(entityName)
         .httpMethod("POST")
         .requestBody(body)
-        .queryParams(Collections.emptyMap())
+        .queryParams(queryParams)
         .adTab(adTab)
         .sfEntity(sfEntity)
         .obContext(OBContext.getOBContext())
         .endpointType(NeoEndpointType.CRUD)
         .build();
 
+    // Entities with a configured Java_Qualifier own logic the generic CRUD path knows
+    // nothing about (e.g. locationAddress creates a nested C_Location from fields the
+    // C_BPartner_Location join entity itself never exposes) - dispatching straight to
+    // handleDefault silently skipped that logic for every /batch op, unlike the direct
+    // HTTP endpoint for the same entity, which always routes through handleWithHooks.
+    // Confirmed via a real import run: a location op created a bare C_BPartner_Location
+    // row with none of its required fields populated, hitting a raw Postgres NOT NULL
+    // violation instead of ever running ContactsLocationAddressHandler.
+    String javaQualifier = sfEntity.getJavaQualifier();
+    if (StringUtils.isNotBlank(javaQualifier)) {
+      return NeoServletSupport.handleWithHooks(javaQualifier, ctx, crudHandler);
+    }
     return crudHandler.handleDefault(ctx);
   }
 

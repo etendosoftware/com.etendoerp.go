@@ -42,6 +42,8 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
+import javax.enterprise.inject.Vetoed;
+
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
@@ -117,6 +119,7 @@ public class CreateDraftInvoiceHandlerTest {
    * {@code generateInvoiceDocumentNo} or {@code findARInvoiceDocType},
    * letting each test control those return values without static mocking.
    */
+  @Vetoed // not a CDI bean: a discoverable subclass makes @Inject of the real handler ambiguous
   private static class TestableHandler extends CreateDraftInvoiceHandler {
     String generatedDocNo = "DOC-TEST";
     DocumentType arDocTypeToReturn = null;
@@ -1003,6 +1006,7 @@ public class CreateDraftInvoiceHandlerTest {
    * Test double for dispatch-oriented scenarios where individual handler branches
    * need to be observed without executing the full persistence workflow.
    */
+  @Vetoed // not a CDI bean: a discoverable subclass makes @Inject of the real handler ambiguous
   private static class DispatchHandler extends CreateDraftInvoiceHandler {
     Invoice orderInvoice;
     Invoice shipmentInvoice;
@@ -1076,6 +1080,7 @@ public class CreateDraftInvoiceHandlerTest {
   /**
    * Test double for isolating {@code createFromOrder()} from downstream helpers.
    */
+  @Vetoed // not a CDI bean: a discoverable subclass makes @Inject of the real handler ambiguous
   private static class CreateFromOrderHandler extends CreateDraftInvoiceHandler {
     JSONArray selectedLines = new JSONArray();
     DocumentType resolvedDocType;
@@ -1113,6 +1118,7 @@ public class CreateDraftInvoiceHandlerTest {
   /**
    * Test double for shipment-based creation scenarios where collaborators are stubbed.
    */
+  @Vetoed // not a CDI bean: a discoverable subclass makes @Inject of the real handler ambiguous
   private static class CreateFromShipmentsHandler extends CreateDraftInvoiceHandler {
     List<ShipmentInOut> shipmentsToReturn = Collections.emptyList();
     Invoice invoiceHeader;
@@ -1143,6 +1149,7 @@ public class CreateDraftInvoiceHandlerTest {
   /**
    * Test double used to control AR invoice document type lookup for shipment headers.
    */
+  @Vetoed // not a CDI bean: a discoverable subclass makes @Inject of the real handler ambiguous
   private static class InvoiceHeaderHandler extends CreateDraftInvoiceHandler {
     DocumentType docTypeToReturn;
     String requestedOrgId;
@@ -1158,6 +1165,7 @@ public class CreateDraftInvoiceHandlerTest {
    * Test double that captures generated line numbers while bypassing invoice line creation
    * and DB access (pending-qty computation is stubbed to return an empty map).
    */
+  @Vetoed // not a CDI bean: a discoverable subclass makes @Inject of the real handler ambiguous
   private static class AddShipmentLinesHandler extends CreateDraftInvoiceHandler {
     final Map<String, BigDecimal> qtyByShipmentLineId = new HashMap<>();
     JSONArray capturedLines;

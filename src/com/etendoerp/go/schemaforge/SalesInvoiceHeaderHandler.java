@@ -125,13 +125,14 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
   }
 
   /**
-   * Post-callout hook (ETP-4029): blocks callout-driven currency updates and appends an
-   * exchange-rate warning when the user directly changes the invoice currency. Mirrors
+   * Post-callout hook: blocks callout-driven currency updates and appends an exchange-rate
+   * warning when the user directly changes the invoice currency (ETP-4029), and blocks
+   * callout-driven document type updates once the invoice has been saved (ETP-4535). Mirrors
    * {@code AbstractOrderHeaderHandler#afterCallout}.
    */
   @Override
   public NeoResponse afterCallout(NeoContext context) {
-    return handleCurrencyAfterCallout(context);
+    return handleInvoiceAfterCallout(context);
   }
 
   /**
