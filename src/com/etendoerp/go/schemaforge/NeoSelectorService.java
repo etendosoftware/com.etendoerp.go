@@ -153,7 +153,7 @@ public class NeoSelectorService {
       }
       if (column == null) {
         return NeoResponse.error(404,
-            "Field not found or not included: " + columnName);
+            "Field not found or not included (checked column and property name): " + columnName);
       }
 
       return querySelectorByColumn(entity, column, columnName, search, limit, offset, contextParams);
@@ -359,13 +359,18 @@ public class NeoSelectorService {
     criteria.add(Restrictions.eq(SFField.PROPERTY_ETGOSFENTITY + ".id", entityId));
     criteria.add(Restrictions.eq(SFField.PROPERTY_ISACTIVE, true));
     criteria.add(Restrictions.eq(SFField.PROPERTY_ISINCLUDED, true));
+    // All SFFields of one SF entity map to columns of the same AD table, so the
+    // DAL entity is resolved once (on the first field with a column) and reused.
+    Entity dalEntity = null;
     for (SFField field : criteria.list()) {
       Column column = field.getADColumn();
       if (column == null) {
         continue;
       }
-      Entity dalEntity = ModelProvider.getInstance()
-          .getEntityByTableName(column.getTable().getDBTableName());
+      if (dalEntity == null) {
+        dalEntity = ModelProvider.getInstance()
+            .getEntityByTableName(column.getTable().getDBTableName());
+      }
       if (matchesPropertyName(dalEntity, column, identifier)) {
         return field;
       }
