@@ -112,10 +112,6 @@ public class PurchaseInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler i
       if (lockError != null) {
         return lockError;
       }
-      NeoResponse originError = validateOriginInvoiceRequired(context);
-      if (originError != null) {
-        return originError;
-      }
     }
     return NeoHeaderActionRouter.dispatch(
         context,
