@@ -475,10 +475,31 @@ public class AbstractInvoiceHeaderHandlerTest {
   }
 
   @Test
-  @SuppressWarnings("unchecked")
-  public void persistOriginInvoice_withoutOriginId_onlyDeletesExistingLinks() throws Exception {
+  public void persistOriginInvoice_fieldAbsent_doesNotTouchExistingLinks() throws Exception {
+    // PATCH-like semantics: a PUT whose body omits "originInvoice" entirely must not
+    // delete existing reverse links (partial header updates would otherwise wipe them).
     JSONObject body = new JSONObject();
-    // no "originInvoice" field
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("PUT").recordId("inv-del").requestBody(body).build();
+
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
+         MockedStatic<OBProvider> providerMock = Mockito.mockStatic(OBProvider.class)) {
+
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      handler.callPersistOriginInvoice(ctx);
+
+      Mockito.verifyNoInteractions(dal);
+    }
+  }
+
+  @Test
+  @SuppressWarnings("unchecked")
+  public void persistOriginInvoice_blankOriginId_onlyDeletesExistingLinks() throws Exception {
+    // Explicitly clearing the field (present but blank) deletes the link without creating one.
+    JSONObject body = new JSONObject().put("originInvoice", "");
     NeoContext ctx = NeoContext.builder()
         .httpMethod("PUT").recordId("inv-del").requestBody(body).build();
 
