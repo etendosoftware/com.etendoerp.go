@@ -38,6 +38,8 @@ import org.openbravo.model.financialmgmt.payment.FIN_PaymentMethod;
 import org.openbravo.model.financialmgmt.payment.FinAccPaymentMethod;
 import org.openbravo.model.financialmgmt.payment.MatchingAlgorithm;
 
+import com.etendoerp.psd2.bank.integration.utils.BankIntegrationConstants;
+
 /**
  * Helper for creating {@link FIN_FinancialAccount} records programmatically, outside the generic
  * CRUD path. Used by the PSD2 bridge ({@link FinancialAccountPsd2Handler}) for the "connect first,
@@ -61,6 +63,7 @@ final class FinancialAccountSupport {
   // localizable or renameable this must migrate to a stable key.
   private static final String METHOD_CASH = "Efectivo";
   private static final String METHOD_TRANSFER = "Transferencia bancaria";
+  private static final String METHOD_TRANSFER_SHORT = "Transferencia";
   private static final String METHOD_CHECK = "Cheque";
   private static final String METHOD_CARD = "Tarjeta";
 
@@ -212,6 +215,12 @@ final class FinancialAccountSupport {
     link.setAccount(account);
     link.setPaymentMethod(method);
     link.setDefault(isDefault);
+    // Multicurrency ON by default (ETP-4503): runtime-created links are born multicurrency-ON,
+    // matching the onboarding sampledata. The PSD2 bank-transfer exception (a Bank account with an
+    // active PSD2 connection) is applied afterwards by FinancialAccountPsd2Handler through
+    // disableMulticurrencyForBankTransfer, so ordinary accounts keep multicurrency enabled.
+    link.setPayinIsMulticurrency(true);
+    link.setPayoutIsMulticurrency(true);
     // payinAllow/payoutAllow (true) and execution type ("M") come from the entity's
     // column defaults — Manual, allowing both receipts and payments. The reconcile/
     // automatic-use fields below do NOT have a sane default on their own (they default
@@ -223,5 +232,72 @@ final class FinancialAccountSupport {
     link.setAutomaticDeposit(method.isAutomaticDeposit());
     link.setAutomaticWithdrawn(method.isAutomaticWithdrawn());
     OBDal.getInstance().save(link);
+  }
+
+  /**
+   * Disables multicurrency (both pay-in and pay-out) on the bank-transfer payment-method link of
+   * {@code account}, implementing the PSD2 exception to the "multicurrency ON by default" rule
+   * (ETP-4503): a PSD2 transfer is executed by the bank in the account's own currency, so
+   * multicurrency on that link is misleading.
+   *
+   * <p>Called from {@link FinancialAccountPsd2Handler} right after a Bank account is connected to
+   * PSD2 (the create-and-link and link paths). The account-type gate lives here — the method only
+   * acts on Bank accounts ({@link BankIntegrationConstants#FA_TYPE_BANK}) — so the call site can
+   * invoke it unconditionally. The active-PSD2-connection condition is guaranteed by construction:
+   * the call sites are exactly the points where a connection has just been established.
+   *
+   * <p>The transfer link is identified the same way as the corrective R14 data-fix: the PSD2
+   * extension flag {@code EM_PSD2_Is_Bank_Transfer='Y'} first, with a name fallback
+   * ({@code "Transferencia bancaria"} / {@code "Transferencia"}) because the live flag diverges
+   * from the seeded value on existing tenants.
+   *
+   * <p>Idempotent (only touches links still multicurrency-ON) and best-effort: the account is
+   * already persisted, so any failure here is logged and swallowed rather than propagated —
+   * mirroring {@link #assignDefaultPaymentMethods}.
+   */
+  static void disableMulticurrencyForBankTransfer(FIN_FinancialAccount account) {
+    if (account == null || !BankIntegrationConstants.FA_TYPE_BANK.equals(account.getType())) {
+      return;
+    }
+    try {
+      OBCriteria<FinAccPaymentMethod> criteria =
+          OBDal.getInstance().createCriteria(FinAccPaymentMethod.class);
+      criteria.add(Restrictions.eq(FinAccPaymentMethod.PROPERTY_ACCOUNT, account));
+      boolean changed = false;
+      for (FinAccPaymentMethod link : criteria.list()) {
+        if (isBankTransferMethod(link.getPaymentMethod())
+            && (Boolean.TRUE.equals(link.isPayinIsMulticurrency())
+                || Boolean.TRUE.equals(link.isPayoutIsMulticurrency()))) {
+          link.setPayinIsMulticurrency(false);
+          link.setPayoutIsMulticurrency(false);
+          OBDal.getInstance().save(link);
+          changed = true;
+        }
+      }
+      if (changed) {
+        OBDal.getInstance().flush();
+        log.info("disableMulticurrencyForBankTransfer: disabled multicurrency on the transfer "
+            + "link(s) of PSD2-connected Bank account {}", account.getId());
+      }
+    } catch (Exception e) {
+      log.warn("disableMulticurrencyForBankTransfer: skipped for account {} ({})",
+          account.getId(), e.getMessage());
+    }
+  }
+
+  /**
+   * Whether {@code method} is the bank-transfer payment method: the PSD2 extension flag
+   * {@code EM_PSD2_Is_Bank_Transfer='Y'} first, then a name fallback. Mirrors the R14 data-fix
+   * predicate.
+   */
+  private static boolean isBankTransferMethod(FIN_PaymentMethod method) {
+    if (method == null) {
+      return false;
+    }
+    if (Boolean.TRUE.equals(method.isPSD2IsBankTransfer())) {
+      return true;
+    }
+    String name = method.getName();
+    return METHOD_TRANSFER.equals(name) || METHOD_TRANSFER_SHORT.equals(name);
   }
 }
