@@ -69,6 +69,13 @@ final class SupportJiraWebhookHandler {
 
   private static final String WEBHOOK_SECRET = System.getProperty("support.webhook.secret", "");
   private static final String JIRA_BOT_EMAIL = System.getProperty("support.jira.bot.email", "");
+  // Fallback for the bot-email check: Jira Cloud omits `emailAddress` from a comment's `author`
+  // object entirely for accounts whose Atlassian profile has email visibility set to private —
+  // true of our integration account ("Information Etendo"), confirmed against a real captured
+  // webhook payload. JIRA_BOT_EMAIL alone therefore NEVER matches our own comments; this name
+  // check is what actually catches them and prevents an echo loop once comments are public
+  // (a comment WE post gets picked up by the same webhook and re-inserted as if a human replied).
+  private static final String JIRA_BOT_NAME = System.getProperty("support.jira.bot.name", "Information Etendo");
   private static final String JIRA_USERNAME =
       System.getProperty("support.jira.username", "info@smfconsulting.es");
 
@@ -148,11 +155,13 @@ final class SupportJiraWebhookHandler {
     }
     JSONObject author = comment.optJSONObject("author");
     String authorEmail = author != null ? author.optString("emailAddress", "") : "";
+    String authorAccountId = author != null ? author.optString("accountId", "") : "";
     String authorName = author != null ? author.optString("displayName", DEFAULT_AGENT_NAME) : DEFAULT_AGENT_NAME;
     String text = extractAdfText(comment.opt("body")).trim();
     ResolvedAttachments resolvedAttachments = resolveCommentAttachments(jiraKey, comment);
     text = stripResolvedWikiMarkupTokens(text, resolvedAttachments.resolvedWikiMarkupTokens);
-    return new JiraWebhookComment(jiraKey, commentId, authorName, authorEmail, text, resolvedAttachments.attachments);
+    return new JiraWebhookComment(jiraKey, commentId, authorName, authorEmail, authorAccountId, text,
+        resolvedAttachments.attachments);
   }
 
   /** No "comment" field: either an assignee-change-back-to-bot or a status transition to Done. */
@@ -221,20 +230,26 @@ final class SupportJiraWebhookHandler {
     if (commentId == null) commentId = SupportConversationsServlet.newId();
     // Jira Automation cannot template a JSON body in this dev's plan (see
     // docs/support-chat-session-2026-06-11.md) — "commentText" arrives as a plain query param,
-    // never as ADF, so there is no media node to look for on this path.
-    return new JiraWebhookComment(jiraKey, commentId, authorName, authorEmail, text, null);
+    // never as ADF, so there is no media node to look for on this path. Automation's smart
+    // values on this rule don't expose an accountId either — the reporter-echo check just won't
+    // fire for events delivered this way (the standard webhook path is what production actually
+    // uses; this path is a documented fallback, not the primary trigger).
+    return new JiraWebhookComment(jiraKey, commentId, authorName, authorEmail, "", text, null);
   }
 
   // --- Persisting the comment as a support message ---
 
-  private static void storeJiraWebhookComment(HttpServletResponse response, JiraWebhookComment comment)
+  static void storeJiraWebhookComment(HttpServletResponse response, JiraWebhookComment comment)
       throws IOException, JSONException {
-    if (!JIRA_BOT_EMAIL.isEmpty() && JIRA_BOT_EMAIL.equalsIgnoreCase(comment.authorEmail)) {
+    boolean isBotComment = (!JIRA_BOT_EMAIL.isEmpty() && JIRA_BOT_EMAIL.equalsIgnoreCase(comment.authorEmail))
+        || (!JIRA_BOT_NAME.isEmpty() && JIRA_BOT_NAME.equalsIgnoreCase(comment.authorName));
+    if (isBotComment) {
       SupportConversationsServlet.writeJson(response, 200, new JSONObject().put(FIELD_STATUS, "skipped_bot"));
       return;
     }
     String text = comment.text == null ? "" : comment.text.trim();
-    if (text.isEmpty()) {
+    boolean hasAttachments = comment.attachments != null && comment.attachments.length() > 0;
+    if (text.isEmpty() && !hasAttachments) {
       SupportConversationsServlet.writeJson(response, 200, new JSONObject().put(FIELD_STATUS, "empty_body"));
       return;
     }
@@ -247,6 +262,22 @@ final class SupportJiraWebhookHandler {
         SupportConversationsServlet.writeJson(response, 200, new JSONObject().put(FIELD_STATUS, "no_conversation"));
         return;
       }
+      // NOTE: there is deliberately NO "is this the reporter replying to their own ticket"
+      // FILTER here. Replying via email or the JSM portal is a legitimate, intended second
+      // channel into the SAME conversation (that's the whole point of enabling portal access) —
+      // an earlier version of this check filtered those out entirely, which broke that feature.
+      // The bot-identity check above is what actually solves the real echo-loop bug (OUR OWN
+      // posted comments, from add_two_comments_sync, looping back in as if a human replied).
+      //
+      // What the reporter-identity signal IS used for: deciding how the message displays. A
+      // genuinely different support agent's reply should show as "human" (left-aligned, agent
+      // avatar) — but the reporter replying to their own ticket via another channel is THEM, so
+      // it should look exactly like their own chat messages (right-aligned, no avatar), not like
+      // someone else answering them. accountId is the reliable signal (email is commonly absent
+      // from Jira Cloud webhook payloads — see storeJiraWebhookComment's earlier bot check).
+      boolean isReporterReply = !comment.authorAccountId.isEmpty()
+          && comment.authorAccountId.equals(conv.getJiraReporterAccountId());
+      String sender = isReporterReply ? "user" : "human";
       if (findMessageByExternalId(externalId) != null) {
         // Already stored (Jira retry) — ack without duplicating.
         SupportConversationsServlet.writeJson(response, 200,
@@ -254,7 +285,7 @@ final class SupportJiraWebhookHandler {
         return;
       }
       Date ts = new Date();
-      insertJiraMessage(conv, comment.authorName, text, ts, externalId, comment.attachments);
+      insertJiraMessage(conv, sender, comment.authorName, text, ts, externalId, comment.attachments);
       SupportConversationsServlet.updateConvSummary(conv.getId(), text, ts);
       conv.setUnread(true);
       OBDal.getInstance().save(conv);
@@ -287,11 +318,14 @@ final class SupportJiraWebhookHandler {
   }
 
   /** Jira comments have no authenticated Etendo requester — tagged as system-created, same tenant
-   * as the owning conversation. {@code attachments} is the resolved {@code [{id, filename,
-   * mimeType}]} array (see {@link #resolveCommentAttachments}), or {@code null} when the comment
-   * carried none — stored as-is (null column), never as an empty-array string. */
-  private static void insertJiraMessage(SupportConversation conv, String authorName, String text, Date ts,
-      String externalId, JSONArray attachments) {
+   * as the owning conversation. {@code sender} is {@code "user"} when the comment is the
+   * reporter replying to their own ticket via email/portal (see the isReporterReply check in
+   * {@link #storeJiraWebhookComment}), {@code "human"} for a genuinely different support agent.
+   * {@code attachments} is the resolved {@code [{id, filename, mimeType}]} array (see
+   * {@link #resolveCommentAttachments}), or {@code null} when the comment carried none — stored
+   * as-is (null column), never as an empty-array string. */
+  private static void insertJiraMessage(SupportConversation conv, String sender, String authorName, String text,
+      Date ts, String externalId, JSONArray attachments) {
     User systemUser = OBDal.getInstance().get(User.class, SupportConversationsServlet.SYSTEM_USER_ID);
     SupportMessage msg = OBProvider.getInstance().get(SupportMessage.class);
     msg.setNewOBObject(true);
@@ -301,7 +335,7 @@ final class SupportJiraWebhookHandler {
     msg.setCreatedBy(systemUser);
     msg.setUpdatedBy(systemUser);
     msg.setConversation(conv);
-    msg.setSender("human");
+    msg.setSender(sender);
     msg.setSenderName(authorName);
     msg.setText(text);
     msg.setMessageDate(ts);
@@ -425,16 +459,29 @@ final class SupportJiraWebhookHandler {
    * routinely contain spaces, so the filename group only excludes {@code |} and {@code !}
    * themselves, not whitespace). Group 1 is the filename portion (before the first {@code |}, if
    * any; lazily matched so it stops at the first {@code |} or {@code !} it hits, whichever comes
-   * first). The dot check in {@link #extractWikiMarkupImageFilenames} — not whitespace exclusion —
+   * first). The dot check in {@link #extractWikiMarkupAttachmentRefs} — not whitespace exclusion —
    * is what keeps a bare {@code !} used as normal sentence punctuation from turning into a
    * spurious match: two nearby {@code !}/{@code !} with no file extension in between is discarded
-   * there. */
+   * there. This is the syntax Jira renders for an EMBEDDED image/file (inline media); a plain,
+   * non-embedded attachment link uses the different {@link #WIKI_MARKUP_ATTACHMENT_LINK_PATTERN}
+   * syntax below. */
   private static final Pattern WIKI_MARKUP_IMAGE_PATTERN = Pattern.compile("!([^|!]+?)(?:\\|[^!]*)?!");
 
-  /** One {@code !...!} token found in a Jira wiki-markup comment body: {@code filename} is the
-   * extracted filename to correlate against the Jira REST attachment list, {@code token} is the
-   * exact original matched substring (including the surrounding {@code !}/{@code |params}) so it
-   * can be stripped verbatim from the displayed text once correlated. */
+  /** Matches a Jira wiki-markup plain attachment link: {@code [^filename.ext]} (e.g.
+   * {@code [^Hoja de cálculo sin título.xlsx]}) — the syntax Jira Automation's
+   * {@code {{comment.body}}} smart value renders when a human agent attaches a file WITHOUT
+   * embedding it as inline media (a regular, non-embedded attachment), as opposed to the embedded
+   * image/file syntax matched by {@link #WIKI_MARKUP_IMAGE_PATTERN}. Group 1 is everything between
+   * {@code [^} and the closing {@code ]}, so spaces in the filename are preserved. The
+   * {@code [^...]} shape is distinctive enough on its own that plain prose essentially never
+   * produces it by accident, but {@link #extractWikiMarkupAttachmentRefs} still applies the same
+   * "must contain a dot" heuristic as the image pattern, as cheap extra insurance. */
+  private static final Pattern WIKI_MARKUP_ATTACHMENT_LINK_PATTERN = Pattern.compile("\\[\\^([^\\]]+)\\]");
+
+  /** One {@code !...!} or {@code [^...]} token found in a Jira wiki-markup comment body:
+   * {@code filename} is the extracted filename to correlate against the Jira REST attachment
+   * list, {@code token} is the exact original matched substring (including the surrounding
+   * markup) so it can be stripped verbatim from the displayed text once correlated. */
   static final class WikiMarkupImageRef {
     final String filename;
     final String token;
@@ -445,27 +492,38 @@ final class SupportJiraWebhookHandler {
     }
   }
 
-  /** Scans {@code text} for Jira wiki-markup image/file references ({@code !filename.ext!} or
-   * {@code !filename.ext|params!}) — the shape Jira Automation's {@code {{comment.body}}} smart
-   * value actually renders as for a comment with an embedded image, instead of ADF JSON (see
-   * {@link #resolveCommentAttachments}). A matched "filename" is only kept when it contains a
-   * {@code .} (a file extension): a bare {@code !} used as normal punctuation never has a dot
-   * immediately before the next {@code !}/{@code |}, so this simple heuristic is enough to avoid
-   * false positives without a more elaborate parser. */
-  static List<WikiMarkupImageRef> extractWikiMarkupImageFilenames(String text) {
+  /** Scans {@code text} for BOTH Jira wiki-markup attachment reference shapes and returns them
+   * merged into a single list: embedded image/file references ({@code !filename.ext!} or
+   * {@code !filename.ext|params!}, via {@link #WIKI_MARKUP_IMAGE_PATTERN}) and plain, non-embedded
+   * attachment links ({@code [^filename.ext]}, via {@link #WIKI_MARKUP_ATTACHMENT_LINK_PATTERN}) —
+   * the two shapes Jira Automation's {@code {{comment.body}}} smart value actually renders as
+   * (instead of ADF JSON) depending on whether the human agent embedded the file as inline media
+   * or attached it plainly (see {@link #resolveCommentAttachments}). For both patterns, a matched
+   * "filename" is only kept when it contains a {@code .} (a file extension): a bare {@code !} used
+   * as normal punctuation never has a dot immediately before the next {@code !}/{@code |}, so this
+   * simple heuristic is enough to avoid false positives without a more elaborate parser. */
+  static List<WikiMarkupImageRef> extractWikiMarkupAttachmentRefs(String text) {
     List<WikiMarkupImageRef> refs = new ArrayList<>();
     if (text == null || text.isEmpty()) return refs;
-    Matcher matcher = WIKI_MARKUP_IMAGE_PATTERN.matcher(text);
+    collectWikiMarkupRefs(WIKI_MARKUP_IMAGE_PATTERN, text, refs);
+    collectWikiMarkupRefs(WIKI_MARKUP_ATTACHMENT_LINK_PATTERN, text, refs);
+    return refs;
+  }
+
+  /** Runs {@code pattern} against {@code text} and appends every match whose captured filename
+   * (group 1) contains a {@code .} to {@code refs} — shared by both wiki-markup patterns in
+   * {@link #extractWikiMarkupAttachmentRefs}. */
+  private static void collectWikiMarkupRefs(Pattern pattern, String text, List<WikiMarkupImageRef> refs) {
+    Matcher matcher = pattern.matcher(text);
     while (matcher.find()) {
       String filename = matcher.group(1);
       if (filename.indexOf('.') < 0) continue; // not shaped like a real filename — likely punctuation
       refs.add(new WikiMarkupImageRef(filename, matcher.group(0)));
     }
-    return refs;
   }
 
   /** Removes every token in {@code tokensToStrip} (exact substrings, as produced by {@link
-   * #extractWikiMarkupImageFilenames}) from {@code text}, then does minimal whitespace cleanup —
+   * #extractWikiMarkupAttachmentRefs}) from {@code text}, then does minimal whitespace cleanup —
    * collapsing runs of spaces/tabs left behind and trimming the ends. Tokens that could not be
    * correlated to a real attachment are never passed in here, so they are left in the text as-is
    * (safer than silently swallowing unresolved content). */
@@ -483,17 +541,23 @@ final class SupportJiraWebhookHandler {
     final String commentId;
     final String authorName;
     final String authorEmail;
+    /** The author's Jira accountId — unlike {@code authorEmail}, always present regardless of
+     * the account's profile-privacy settings. Empty string when unavailable (e.g. the
+     * Automation query-param path, which never carries it). See
+     * {@link #storeJiraWebhookComment}'s reporter-echo check. */
+    final String authorAccountId;
     final String text;
     /** Resolved {@code [{id, filename, mimeType}]} array, or {@code null} when the comment
      * carried no attachment (or none could be resolved). See {@link #resolveCommentAttachments}. */
     final JSONArray attachments;
 
-    JiraWebhookComment(String jiraKey, String commentId, String authorName, String authorEmail, String text,
-        JSONArray attachments) {
+    JiraWebhookComment(String jiraKey, String commentId, String authorName, String authorEmail,
+        String authorAccountId, String text, JSONArray attachments) {
       this.jiraKey = jiraKey;
       this.commentId = commentId;
       this.authorName = authorName;
       this.authorEmail = authorEmail;
+      this.authorAccountId = authorAccountId;
       this.text = text;
       this.attachments = attachments;
     }
@@ -530,13 +594,15 @@ final class SupportJiraWebhookHandler {
    * {@code docs/support-chat-session-2026-06-11.md}). Since a {@code media} node's schema is part
    * of the same ADF document, it is present in that same payload whenever the comment has an
    * image/file attached — no separate Jira call is needed to <em>detect</em> an attachment.</li>
-   * <li><b>Jira wiki markup (plain string):</b> confirmed against a real Jira comment with an
-   * embedded image — Jira Automation's {@code {{comment.body}}} smart value renders as wiki markup
-   * ({@code !filename.png|width=989,alt="filename.png"!}) rather than ADF JSON for this case, so
-   * {@code comment.opt("body")} is a plain string that never reaches the ADF walk above with
-   * anything to find. {@link #extractWikiMarkupImageFilenames} extracts the filename out of every
-   * {@code !...!} token and this method correlates it against the Jira REST attachment list by
-   * EXACT filename match — unambiguous, unlike the ADF id correlation below.</li>
+   * <li><b>Jira wiki markup (plain string):</b> confirmed against real Jira comments with an
+   * embedded image, and separately with a plain (non-embedded) file attachment — Jira Automation's
+   * {@code {{comment.body}}} smart value renders as wiki markup rather than ADF JSON for both
+   * cases: {@code !filename.png|width=989,alt="filename.png"!} for an embedded image/file, or
+   * {@code [^filename.xlsx]} for a plain attachment link. Either way {@code comment.opt("body")}
+   * is a plain string that never reaches the ADF walk above with anything to find.
+   * {@link #extractWikiMarkupAttachmentRefs} extracts the filename out of every token of both
+   * shapes and this method correlates each against the Jira REST attachment list by EXACT filename
+   * match — unambiguous, unlike the ADF id correlation below.</li>
    * </ul>
    * ADF's {@code media} node attrs only carry an {@code id} (and type/collection) — never a
    * filename or MIME type — so resolving those (and the wiki-markup filenames) still requires one
@@ -552,7 +618,7 @@ final class SupportJiraWebhookHandler {
     List<String> mediaIds = new ArrayList<>();
     collectAdfMediaIds(rawBody, mediaIds);
     List<WikiMarkupImageRef> wikiRefs = (rawBody instanceof String)
-        ? extractWikiMarkupImageFilenames((String) rawBody)
+        ? extractWikiMarkupAttachmentRefs((String) rawBody)
         : Collections.emptyList();
     if (mediaIds.isEmpty() && wikiRefs.isEmpty()) {
       return new ResolvedAttachments(null, Collections.emptyList());
@@ -645,17 +711,25 @@ final class SupportJiraWebhookHandler {
    * (mirrors {@link #extractAdfText}'s traversal/dual String-or-JSONObject dispatch). */
   static void collectAdfMediaIds(Object node, List<String> ids) {
     if (node instanceof String) {
-      String s = ((String) node).trim();
-      if (!s.startsWith("{")) return;
-      try {
-        collectAdfMediaIds(new JSONObject(s), ids);
-      } catch (Exception e) {
-        // Not JSON after all — nothing to collect.
-      }
+      collectAdfMediaIdsFromString((String) node, ids);
       return;
     }
-    if (!(node instanceof JSONObject)) return;
-    JSONObject obj = (JSONObject) node;
+    if (node instanceof JSONObject) {
+      collectAdfMediaIdsFromObject((JSONObject) node, ids);
+    }
+  }
+
+  private static void collectAdfMediaIdsFromString(String node, List<String> ids) {
+    String s = node.trim();
+    if (!s.startsWith("{")) return;
+    try {
+      collectAdfMediaIdsFromObject(new JSONObject(s), ids);
+    } catch (Exception e) {
+      // Not JSON after all — nothing to collect.
+    }
+  }
+
+  private static void collectAdfMediaIdsFromObject(JSONObject obj, List<String> ids) {
     if ("media".equals(obj.optString("type", ""))) {
       JSONObject attrs = obj.optJSONObject("attrs");
       String id = attrs != null ? attrs.optString(FIELD_ID, "") : "";
@@ -665,7 +739,7 @@ final class SupportJiraWebhookHandler {
     if (content != null) {
       for (int i = 0; i < content.length(); i++) {
         Object child = content.opt(i);
-        if (child instanceof JSONObject) collectAdfMediaIds(child, ids);
+        if (child instanceof JSONObject) collectAdfMediaIdsFromObject((JSONObject) child, ids);
       }
     }
   }
@@ -800,19 +874,26 @@ final class SupportJiraWebhookHandler {
     long bestDiff = Long.MAX_VALUE;
     for (int i = 0; i < issueAttachments.length(); i++) {
       if (claimed.contains(i)) continue;
-      JSONObject att = issueAttachments.optJSONObject(i);
-      if (att == null) continue;
-      String attId = att.optString(FIELD_ID, "");
-      if (!attId.isEmpty() && alreadyLinkedIds.contains(attId)) continue;
-      long attMillis = parseJiraInstantMillis(att.optString("created", ""));
-      if (attMillis < 0) continue;
-      long diff = Math.abs(attMillis - commentTime.getTime());
-      if (diff < bestDiff && diff <= MAX_FALLBACK_CORRELATION_DISTANCE_MILLIS) {
+      Long diff = candidateDiffMillis(issueAttachments.optJSONObject(i), commentTime, alreadyLinkedIds);
+      if (diff != null && diff < bestDiff && diff <= MAX_FALLBACK_CORRELATION_DISTANCE_MILLIS) {
         bestDiff = diff;
         bestIdx = i;
       }
     }
     return bestIdx;
+  }
+
+  /** Absolute time gap (millis) between {@code commentTime} and {@code att}'s own {@code created}
+   * timestamp, or {@code null} if {@code att} is missing, has no parseable timestamp, or is an
+   * attachment already linked elsewhere ({@code alreadyLinkedIds}) — any of which disqualifies it
+   * as a fallback candidate in {@link #closestUnclaimedByTime}. */
+  private static Long candidateDiffMillis(JSONObject att, Date commentTime, Set<String> alreadyLinkedIds) {
+    if (att == null) return null;
+    String attId = att.optString(FIELD_ID, "");
+    if (!attId.isEmpty() && alreadyLinkedIds.contains(attId)) return null;
+    long attMillis = parseJiraInstantMillis(att.optString("created", ""));
+    if (attMillis < 0) return null;
+    return Math.abs(attMillis - commentTime.getTime());
   }
 
   static JSONObject toAttachmentMeta(JSONObject att) {

@@ -352,6 +352,49 @@ class SupportConversationsServletTest {
     }
 
     @Test
+    @DisplayName("Conversation summary includes jiraTicketKey when linked, so the frontend can search by "
+        + "the ticket key a customer receives in the JSM notification email")
+    void includesJiraTicketKeyWhenLinked() throws Exception {
+      StringWriter capture = new StringWriter();
+      HttpServletResponse response = mockResponse(capture);
+      HttpServletRequest request = authenticatedRequest("/conversations", null);
+
+      try (MockedStatic<SecureWebServicesUtils> swsMock = mockValidAuth();
+           MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+           MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+        OBDal obDal = mockObDal(dalMock);
+        SupportConversation conv = mockConversation("conv-2");
+        when(conv.getJiraTicketKey()).thenReturn("SUP-321");
+        mockCriteria(obDal, SupportConversation.class, List.of(conv));
+
+        new SupportConversationsServlet().doGet(request, response);
+      }
+
+      assertTrue(capture.toString().contains("\"jiraTicketKey\":\"SUP-321\""));
+    }
+
+    @Test
+    @DisplayName("Conversation summary includes an empty jiraTicketKey string (never null/omitted) when "
+        + "not linked to a Jira ticket")
+    void emptyJiraTicketKeyWhenNotLinked() throws Exception {
+      StringWriter capture = new StringWriter();
+      HttpServletResponse response = mockResponse(capture);
+      HttpServletRequest request = authenticatedRequest("/conversations", null);
+
+      try (MockedStatic<SecureWebServicesUtils> swsMock = mockValidAuth();
+           MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+           MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+        OBDal obDal = mockObDal(dalMock);
+        SupportConversation conv = mockConversation("conv-3");
+        mockCriteria(obDal, SupportConversation.class, List.of(conv));
+
+        new SupportConversationsServlet().doGet(request, response);
+      }
+
+      assertTrue(capture.toString().contains("\"jiraTicketKey\":\"\""));
+    }
+
+    @Test
     @DisplayName("A DB failure while listing returns 500")
     void dbFailure() throws Exception {
       StringWriter capture = new StringWriter();
@@ -1258,6 +1301,89 @@ class SupportConversationsServletTest {
 
       assertTrue(capture.toString().contains(FIELD_MESSAGES_LITERAL));
     }
+
+    @Test
+    @DisplayName("Sending a message right after a reopen (no new ticket linked yet, but a previous one "
+        + "recorded) prepends the VALERIA_RESET_TICKET_CONTEXT marker to the text sent to the ADK, so its "
+        + "callbacks reset all turn-scoped ticket/escalation state and create a fresh ticket this same turn")
+    void sendMessageAfterReopenPrependsResetMarker() throws Exception {
+      StringWriter capture = new StringWriter();
+      HttpServletResponse response = mockResponse(capture);
+      HttpServletRequest request = authenticatedRequest("/conversations/conv-1/messages", "{\"text\":\"hola de nuevo\"}");
+
+      try (MockedStatic<SecureWebServicesUtils> swsMock = mockValidAuth();
+           MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+           MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+           MockedStatic<OBProvider> providerMock = mockStatic(OBProvider.class);
+           MockedStatic<SupportIntegrationClient> sicMock = mockStatic(SupportIntegrationClient.class)) {
+        OBDal obDal = mockObDal(dalMock);
+        SupportConversation conv = mockConversation("conv-1");
+        when(conv.isHumanTakeover()).thenReturn(false);
+        when(conv.getJiraTicketKey()).thenReturn(null);
+        when(conv.getPreviousJiraTicketKey()).thenReturn("SUP-OLD");
+        when(obDal.get(SupportConversation.class, "conv-1")).thenReturn(conv);
+        stubProvider(providerMock, null, mock(SupportMessage.class));
+        mockCriteria(obDal, SupportMessage.class, Collections.emptyList());
+
+        ArgumentCaptor<String> textCaptor = ArgumentCaptor.forClass(String.class);
+        sicMock.when(() -> SupportIntegrationClient.sendToAdk(
+                anyString(), anyString(), textCaptor.capture(), any(), any()))
+            .thenReturn("Bienvenido de nuevo");
+
+        new SupportConversationsServlet().doPost(request, response);
+
+        assertEquals(" VALERIA_RESET_TICKET_CONTEXT(SUP-OLD) hola de nuevo", textCaptor.getValue());
+      }
+    }
+
+    @Test
+    @DisplayName("Sending a message with an ACTIVE Jira ticket already linked does NOT prepend the reset "
+        + "marker — the self-limiting condition only fires once, on the turn right after a reopen")
+    void sendMessageWithActiveTicketDoesNotPrependResetMarker() throws Exception {
+      StringWriter capture = new StringWriter();
+      HttpServletResponse response = mockResponse(capture);
+      HttpServletRequest request = authenticatedRequest("/conversations/conv-1/messages", "{\"text\":\"hola\"}");
+
+      try (MockedStatic<SecureWebServicesUtils> swsMock = mockValidAuth();
+           MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+           MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+           MockedStatic<OBProvider> providerMock = mockStatic(OBProvider.class);
+           MockedStatic<SupportIntegrationClient> sicMock = mockStatic(SupportIntegrationClient.class)) {
+        OBDal obDal = mockObDal(dalMock);
+        SupportConversation conv = mockConversation("conv-1");
+        when(conv.isHumanTakeover()).thenReturn(false);
+        when(conv.getJiraTicketKey()).thenReturn("SUP-ACTIVE");
+        when(conv.getPreviousJiraTicketKey()).thenReturn("SUP-OLD");
+        when(obDal.get(SupportConversation.class, "conv-1")).thenReturn(conv);
+        stubProvider(providerMock, null, mock(SupportMessage.class));
+        mockCriteria(obDal, SupportMessage.class, Collections.emptyList());
+
+        ArgumentCaptor<String> textCaptor = ArgumentCaptor.forClass(String.class);
+        sicMock.when(() -> SupportIntegrationClient.sendToAdk(
+                anyString(), anyString(), textCaptor.capture(), any(), any()))
+            .thenReturn("Claro, contame más");
+
+        new SupportConversationsServlet().doPost(request, response);
+
+        assertEquals("hola", textCaptor.getValue());
+      }
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // RESET_TICKET_CONTEXT_MARKER_FORMAT
+  // -------------------------------------------------------------------------
+
+  @Nested
+  @DisplayName("RESET_TICKET_CONTEXT_MARKER_FORMAT")
+  class ResetTicketContextMarkerFormat {
+
+    @Test
+    @DisplayName("Formats the exact marker string the ADK's callbacks.py _RESET_MARKER_RE regex expects")
+    void producesExpectedMarkerString() {
+      String result = String.format(SupportConversationsServlet.RESET_TICKET_CONTEXT_MARKER_FORMAT, "SUP-42");
+      assertEquals(" VALERIA_RESET_TICKET_CONTEXT(SUP-42) ", result);
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -1408,6 +1534,68 @@ class SupportConversationsServletTest {
         mockCriteria(obDal, SupportMessage.class, Collections.emptyList());
 
         new SupportConversationsServlet().doPost(request, response);
+      }
+
+      assertTrue(capture.toString().contains(FIELD_MESSAGES_LITERAL));
+    }
+
+    @Test
+    @DisplayName("Reopening a conversation with an existing Jira ticket unlinks it: previousJiraTicketKey "
+        + "is set to the old key, jiraTicketKey is cleared, and humanTakeover is reset to false — so the "
+        + "ADK creates a fresh ticket on the next turn instead of continuing to comment on the resolved one")
+    void reopenUnlinksOldJiraTicketAndResetsTakeover() throws Exception {
+      StringWriter capture = new StringWriter();
+      HttpServletResponse response = mockResponse(capture);
+      HttpServletRequest request = authenticatedRequest("/conversations/conv-1/reopen", "{}");
+
+      try (MockedStatic<SecureWebServicesUtils> swsMock = mockValidAuth();
+           MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+           MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+           MockedStatic<OBProvider> providerMock = mockStatic(OBProvider.class)) {
+        OBDal obDal = mockObDal(dalMock);
+        SupportConversation conv = mockConversation("conv-1");
+        when(conv.getStatus()).thenReturn("closed");
+        when(conv.getJiraTicketKey()).thenReturn("SUP-100");
+        when(obDal.get(SupportConversation.class, "conv-1")).thenReturn(conv);
+        stubProvider(providerMock, null, mock(SupportMessage.class));
+        mockCriteria(obDal, SupportMessage.class, Collections.emptyList());
+
+        new SupportConversationsServlet().doPost(request, response);
+
+        verify(conv).setPreviousJiraTicketKey("SUP-100");
+        verify(conv).setJiraTicketKey(null);
+        verify(conv).setHumanTakeover(false);
+        verify(conv).setStatus("open");
+      }
+
+      assertTrue(capture.toString().contains(FIELD_MESSAGES_LITERAL));
+    }
+
+    @Test
+    @DisplayName("Reopening a conversation with NO existing Jira ticket does not touch previousJiraTicketKey "
+        + "(nothing to preserve) but still resets humanTakeover and status")
+    void reopenWithNoJiraTicketDoesNotSetPrevious() throws Exception {
+      StringWriter capture = new StringWriter();
+      HttpServletResponse response = mockResponse(capture);
+      HttpServletRequest request = authenticatedRequest("/conversations/conv-1/reopen", "{}");
+
+      try (MockedStatic<SecureWebServicesUtils> swsMock = mockValidAuth();
+           MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+           MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+           MockedStatic<OBProvider> providerMock = mockStatic(OBProvider.class)) {
+        OBDal obDal = mockObDal(dalMock);
+        SupportConversation conv = mockConversation("conv-1");
+        when(conv.getStatus()).thenReturn("closed");
+        when(conv.getJiraTicketKey()).thenReturn(null);
+        when(obDal.get(SupportConversation.class, "conv-1")).thenReturn(conv);
+        stubProvider(providerMock, null, mock(SupportMessage.class));
+        mockCriteria(obDal, SupportMessage.class, Collections.emptyList());
+
+        new SupportConversationsServlet().doPost(request, response);
+
+        verify(conv, never()).setPreviousJiraTicketKey(anyString());
+        verify(conv).setHumanTakeover(false);
+        verify(conv).setStatus("open");
       }
 
       assertTrue(capture.toString().contains(FIELD_MESSAGES_LITERAL));

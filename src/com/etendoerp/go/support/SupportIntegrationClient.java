@@ -23,7 +23,9 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.Base64;
+import java.util.List;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -56,6 +58,8 @@ final class SupportIntegrationClient {
       "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
   private static final String MIME_TYPE_XLSX =
       "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+  private static final String FIELD_MIME_TYPE = "mimeType";
+  private static final String DEFAULT_MIME_TYPE = "application/octet-stream";
 
   private static final String ADK_BASE_URL =
       System.getProperty("support.adk.url", "http://localhost:8000");
@@ -179,7 +183,7 @@ final class SupportIntegrationClient {
   }
 
   static void appendSingleAttachmentPart(JSONArray parts, JSONObject att) throws JSONException {
-    String mimeType = att.optString("mimeType", "application/octet-stream");
+    String mimeType = att.optString(FIELD_MIME_TYPE, DEFAULT_MIME_TYPE);
     String name = att.optString("name", "archivo");
     String textContent = att.optString("text", "");
     String data = att.optString("data", "");
@@ -192,7 +196,7 @@ final class SupportIntegrationClient {
       // Older/cached frontend builds may still send text-only — guard on data presence.
       if (!data.isEmpty()) {
         parts.put(new JSONObject().put("inlineData",
-            new JSONObject().put("mimeType", mimeType).put("data", data)));
+            new JSONObject().put(FIELD_MIME_TYPE, mimeType).put("data", data)));
       }
       return;
     }
@@ -200,7 +204,7 @@ final class SupportIntegrationClient {
     if (data.isEmpty()) return;
     if (isInlineableMimeType(mimeType)) {
       parts.put(new JSONObject().put("inlineData",
-          new JSONObject().put("mimeType", mimeType).put("data", data)));
+          new JSONObject().put(FIELD_MIME_TYPE, mimeType).put("data", data)));
     } else {
       // Defensive/system-boundary fallback: the payload is client-controlled, so a
       // stale client or a direct API call could still send audio/video/anything else.
@@ -255,11 +259,19 @@ final class SupportIntegrationClient {
 
   // --- Jira comment posting ---
 
-  static void postJiraComment(String jiraKey, String userMessage) {
+  static void postJiraComment(String jiraKey, String userMessage, boolean internal) {
     if (jiraKey == null || jiraKey.isEmpty()) return;
     if (JIRA_API_TOKEN.isEmpty()) {
       log.warn("Jira comment for {} NOT sent: support.jira.token system property is empty", jiraKey);
       return;
+    }
+    // Jira rejects a blank comment body with 400 ("Comment body can not be empty!") — an
+    // attachment-only message (no text, e.g. the user just drops a file while the ticket is
+    // already human-escalated) would otherwise silently vanish: never reaching Jira and never
+    // getting any reply back to the chat. The caller should already pass a descriptive fallback
+    // (see describeAttachments) when there is no text, but this is the last line of defense.
+    if (userMessage == null || userMessage.trim().isEmpty()) {
+      userMessage = "[Mensaje sin texto]";
     }
     try {
       String credentials = Base64.getEncoder()
@@ -276,7 +288,7 @@ final class SupportIntegrationClient {
       // Jira API v3 with ADF body — built as literal string to avoid JSONObject serialization issues
       String payload = "{" +
           "\"body\":{\"type\":\"doc\",\"version\":1,\"content\":[{\"type\":\"paragraph\",\"content\":[{\"type\":\"text\",\"text\":\"" + escaped + "\"}]}]}," +
-          "\"properties\":[{\"key\":\"sd.public.comment\",\"value\":{\"internal\":true}}]" +
+          "\"properties\":[{\"key\":\"sd.public.comment\",\"value\":{\"internal\":" + internal + "}}]" +
           "}";
 
       HttpRequest req = HttpRequest.newBuilder()
@@ -299,6 +311,21 @@ final class SupportIntegrationClient {
     } catch (Exception e) {
       log.warn("Failed to post Jira comment to {}: {}", jiraKey, e.getMessage());
     }
+  }
+
+  /** Builds a fallback comment body for an attachment-only message (no text) sent while the
+   * ticket is human-escalated — {@link #postJiraComment} needs a non-empty body, so this
+   * describes what the user attached instead of leaving it blank. {@code attachments} is the
+   * request wire format ({@code [{name, mimeType, data}]}, per {@code buildOutgoingAttachmentsJson}
+   * in {@link SupportConversationsServlet}). */
+  static String describeAttachments(JSONArray attachments) {
+    if (attachments == null || attachments.length() == 0) return "[Adjuntó un archivo]";
+    List<String> names = new ArrayList<>();
+    for (int i = 0; i < attachments.length(); i++) {
+      JSONObject att = attachments.optJSONObject(i);
+      if (att != null) names.add(att.optString("name", "archivo"));
+    }
+    return names.isEmpty() ? "[Adjuntó un archivo]" : "📎 Adjuntó: " + String.join(", ", names);
   }
 
   static String buildFeedbackComment(int score, String comment) {

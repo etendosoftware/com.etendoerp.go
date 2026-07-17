@@ -454,6 +454,46 @@ class SupportJiraWebhookHandlerTest {
     }
 
     @Test
+    @DisplayName("Author accountId is parsed from the comment author object into the resulting comment")
+    void authorAccountIdParsed() throws Exception {
+      HttpServletResponse response = mockResponse(new StringWriter());
+      JSONObject author = new JSONObject().put("emailAddress", "agent@example.com")
+          .put("displayName", "Agent Smith").put("accountId", "acc-123");
+      JSONObject comment = new JSONObject()
+          .put("id", "c43")
+          .put("jsdPublic", true)
+          .put("author", author)
+          .put("body", "Thanks");
+      JSONObject body = new JSONObject()
+          .put("issue", new JSONObject().put("key", "SUP-43"))
+          .put("comment", comment);
+
+      SupportJiraWebhookHandler.JiraWebhookComment result =
+          SupportJiraWebhookHandler.parseStandardJiraWebhook(response, body);
+
+      assertNotNull(result);
+      assertEquals("acc-123", result.authorAccountId);
+    }
+
+    @Test
+    @DisplayName("Missing accountId on the author object defaults to an empty string, not null")
+    void missingAuthorAccountIdDefaultsToEmpty() throws Exception {
+      HttpServletResponse response = mockResponse(new StringWriter());
+      JSONObject author = new JSONObject().put("emailAddress", "agent@example.com").put("displayName", "Agent Smith");
+      JSONObject comment = new JSONObject()
+          .put("id", "c44").put("jsdPublic", true).put("author", author).put("body", "Thanks");
+      JSONObject body = new JSONObject()
+          .put("issue", new JSONObject().put("key", "SUP-44"))
+          .put("comment", comment);
+
+      SupportJiraWebhookHandler.JiraWebhookComment result =
+          SupportJiraWebhookHandler.parseStandardJiraWebhook(response, body);
+
+      assertNotNull(result);
+      assertEquals("", result.authorAccountId);
+    }
+
+    @Test
     @DisplayName("Missing comment id falls back to a generated id")
     void missingCommentId() throws Exception {
       HttpServletResponse response = mockResponse(new StringWriter());
@@ -1262,21 +1302,34 @@ class SupportJiraWebhookHandlerTest {
       assertNull(result.attachments);
       assertTrue(result.resolvedWikiMarkupTokens.isEmpty());
     }
+
+    @Test
+    @DisplayName("A plain attachment link '[^filename.ext]' resolves to null when no Jira token is configured "
+        + "(same as the embedded-image and ADF paths)")
+    void plainAttachmentLinkWithoutTokenResolvesToNull() throws Exception {
+      JSONObject comment = new JSONObject().put("body", "[^Hoja de cálculo sin título.xlsx]");
+
+      SupportJiraWebhookHandler.ResolvedAttachments result =
+          SupportJiraWebhookHandler.resolveCommentAttachments("SUP-41", comment);
+
+      assertNull(result.attachments);
+      assertTrue(result.resolvedWikiMarkupTokens.isEmpty());
+    }
   }
 
   // -------------------------------------------------------------------------
-  // extractWikiMarkupImageFilenames
+  // extractWikiMarkupAttachmentRefs
   // -------------------------------------------------------------------------
 
   @Nested
-  @DisplayName("extractWikiMarkupImageFilenames")
-  class ExtractWikiMarkupImageFilenames {
+  @DisplayName("extractWikiMarkupAttachmentRefs")
+  class ExtractWikiMarkupAttachmentRefs {
 
     @Test
     @DisplayName("A simple image reference with no params is extracted")
     void simpleReference() {
       List<SupportJiraWebhookHandler.WikiMarkupImageRef> refs =
-          SupportJiraWebhookHandler.extractWikiMarkupImageFilenames("Look at !screenshot.png!");
+          SupportJiraWebhookHandler.extractWikiMarkupAttachmentRefs("Look at !screenshot.png!");
 
       assertEquals(1, refs.size());
       assertEquals("screenshot.png", refs.get(0).filename);
@@ -1288,7 +1341,7 @@ class SupportJiraWebhookHandlerTest {
     void referenceWithParams() {
       String raw = "!Captura desde 2026-07-15 13-21-04.png|width=989,alt=\"Captura desde 2026-07-15 13-21-04.png\"!";
       List<SupportJiraWebhookHandler.WikiMarkupImageRef> refs =
-          SupportJiraWebhookHandler.extractWikiMarkupImageFilenames("before " + raw + " after");
+          SupportJiraWebhookHandler.extractWikiMarkupAttachmentRefs("before " + raw + " after");
 
       assertEquals(1, refs.size());
       assertEquals(raw, refs.get(0).token);
@@ -1298,7 +1351,7 @@ class SupportJiraWebhookHandlerTest {
     @DisplayName("Plain text with no '!...!' patterns at all yields nothing (regression)")
     void plainTextNoPatterns() {
       List<SupportJiraWebhookHandler.WikiMarkupImageRef> refs = SupportJiraWebhookHandler
-          .extractWikiMarkupImageFilenames("Thanks for reaching out, we will look into this soon.");
+          .extractWikiMarkupAttachmentRefs("Thanks for reaching out, we will look into this soon.");
 
       assertTrue(refs.isEmpty());
     }
@@ -1307,7 +1360,7 @@ class SupportJiraWebhookHandlerTest {
     @DisplayName("'!' used as normal sentence punctuation (no dot in the matched span) is not mistaken for a file")
     void exclamationPunctuationIsNotAFile() {
       List<SupportJiraWebhookHandler.WikiMarkupImageRef> refs =
-          SupportJiraWebhookHandler.extractWikiMarkupImageFilenames("Great!works! Thanks a lot!");
+          SupportJiraWebhookHandler.extractWikiMarkupAttachmentRefs("Great!works! Thanks a lot!");
 
       assertTrue(refs.isEmpty());
     }
@@ -1317,7 +1370,7 @@ class SupportJiraWebhookHandlerTest {
         + "for a file, since the filename group has no dot")
     void exclamationPunctuationWithSpacesIsNotAFile() {
       List<SupportJiraWebhookHandler.WikiMarkupImageRef> refs =
-          SupportJiraWebhookHandler.extractWikiMarkupImageFilenames("Sounds good! Let's ship it! Great work!");
+          SupportJiraWebhookHandler.extractWikiMarkupAttachmentRefs("Sounds good! Let's ship it! Great work!");
 
       assertTrue(refs.isEmpty());
     }
@@ -1325,8 +1378,64 @@ class SupportJiraWebhookHandlerTest {
     @Test
     @DisplayName("Null or empty text yields nothing")
     void nullOrEmpty() {
-      assertTrue(SupportJiraWebhookHandler.extractWikiMarkupImageFilenames(null).isEmpty());
-      assertTrue(SupportJiraWebhookHandler.extractWikiMarkupImageFilenames("").isEmpty());
+      assertTrue(SupportJiraWebhookHandler.extractWikiMarkupAttachmentRefs(null).isEmpty());
+      assertTrue(SupportJiraWebhookHandler.extractWikiMarkupAttachmentRefs("").isEmpty());
+    }
+
+    @Test
+    @DisplayName("A plain (non-embedded) attachment link '[^filename.ext]' is extracted, spaces and accents "
+        + "preserved in the filename")
+    void plainAttachmentLink() {
+      List<SupportJiraWebhookHandler.WikiMarkupImageRef> refs = SupportJiraWebhookHandler
+          .extractWikiMarkupAttachmentRefs("Va el archivo [^Hoja de cálculo sin título.xlsx] avisame");
+
+      assertEquals(1, refs.size());
+      assertEquals("Hoja de cálculo sin título.xlsx", refs.get(0).filename);
+      assertEquals("[^Hoja de cálculo sin título.xlsx]", refs.get(0).token);
+    }
+
+    @Test
+    @DisplayName("A message made up of ONLY a plain attachment link (no other text) is still extracted — "
+        + "the shape a human agent's Jira reply takes when it carries no comment, just a file")
+    void attachmentLinkOnlyMessage() {
+      List<SupportJiraWebhookHandler.WikiMarkupImageRef> refs = SupportJiraWebhookHandler
+          .extractWikiMarkupAttachmentRefs("[^2026-04-16-slo-incident-response.md]");
+
+      assertEquals(1, refs.size());
+      assertEquals("2026-04-16-slo-incident-response.md", refs.get(0).filename);
+    }
+
+    @Test
+    @DisplayName("Multiple plain attachment links in the same comment are all extracted")
+    void multiplePlainAttachmentLinks() {
+      List<SupportJiraWebhookHandler.WikiMarkupImageRef> refs = SupportJiraWebhookHandler.extractWikiMarkupAttachmentRefs(
+          "[^Hoja de cálculo sin título.xlsx] [^Hoja de cálculo sin título.csv]");
+
+      assertEquals(2, refs.size());
+      assertEquals("Hoja de cálculo sin título.xlsx", refs.get(0).filename);
+      assertEquals("Hoja de cálculo sin título.csv", refs.get(1).filename);
+    }
+
+    @Test
+    @DisplayName("Embedded image ('!...!') and plain attachment link ('[^...]') tokens in the same comment "
+        + "are BOTH extracted")
+    void mixedEmbeddedAndPlainLinkTokens() {
+      List<SupportJiraWebhookHandler.WikiMarkupImageRef> refs = SupportJiraWebhookHandler.extractWikiMarkupAttachmentRefs(
+          "!screenshot.png! and also [^notes.docx]");
+
+      assertEquals(2, refs.size());
+      assertEquals("screenshot.png", refs.get(0).filename);
+      assertEquals("notes.docx", refs.get(1).filename);
+    }
+
+    @Test
+    @DisplayName("A bracketed reference WITHOUT the leading caret ('[filename.ext]') is not a Jira attachment "
+        + "link and is not extracted — the caret is what distinguishes the syntax from plain prose brackets")
+    void bracketWithoutCaretIsNotAttachmentLink() {
+      List<SupportJiraWebhookHandler.WikiMarkupImageRef> refs = SupportJiraWebhookHandler
+          .extractWikiMarkupAttachmentRefs("See [attached.txt] for details");
+
+      assertTrue(refs.isEmpty());
     }
   }
 
@@ -1391,15 +1500,16 @@ class SupportJiraWebhookHandlerTest {
   }
 
   // -------------------------------------------------------------------------
-  // Wiki-markup embedded image: detect (extractWikiMarkupImageFilenames) → correlate
-  // (findAttachmentByFilename) → strip (stripResolvedWikiMarkupTokens) — the same composition
-  // resolveCommentAttachments/parseStandardJiraWebhook wire together, exercised here as pure
-  // functions since fetchIssueAttachments needs a real Jira token to reach the network (see the
+  // Wiki-markup attachment references (embedded image '!...!' AND plain link '[^...]'): detect
+  // (extractWikiMarkupAttachmentRefs) → correlate (findAttachmentByFilename) → strip
+  // (stripResolvedWikiMarkupTokens) — the same composition resolveCommentAttachments/
+  // parseStandardJiraWebhook wire together, exercised here as pure functions since
+  // fetchIssueAttachments needs a real Jira token to reach the network (see the
   // resolveCommentAttachments section above).
   // -------------------------------------------------------------------------
 
   @Nested
-  @DisplayName("Wiki-markup embedded image: detect, correlate, strip")
+  @DisplayName("Wiki-markup attachment references: detect, correlate, strip")
   class WikiMarkupCorrelationFlow {
 
     @Test
@@ -1413,7 +1523,7 @@ class SupportJiraWebhookHandlerTest {
               .put("mimeType", "image/png"));
 
       List<SupportJiraWebhookHandler.WikiMarkupImageRef> refs =
-          SupportJiraWebhookHandler.extractWikiMarkupImageFilenames(rawComment);
+          SupportJiraWebhookHandler.extractWikiMarkupAttachmentRefs(rawComment);
       assertEquals(1, refs.size());
 
       List<String> resolvedTokens = new ArrayList<>();
@@ -1438,7 +1548,7 @@ class SupportJiraWebhookHandlerTest {
           .put(new JSONObject().put("id", "10099").put("filename", "other.png"));
 
       List<SupportJiraWebhookHandler.WikiMarkupImageRef> refs =
-          SupportJiraWebhookHandler.extractWikiMarkupImageFilenames(rawComment);
+          SupportJiraWebhookHandler.extractWikiMarkupAttachmentRefs(rawComment);
       assertEquals(1, refs.size());
 
       List<String> resolvedTokens = new ArrayList<>();
@@ -1460,10 +1570,71 @@ class SupportJiraWebhookHandlerTest {
       String rawComment = "Thanks for the report, we're looking into it now.";
 
       List<SupportJiraWebhookHandler.WikiMarkupImageRef> refs =
-          SupportJiraWebhookHandler.extractWikiMarkupImageFilenames(rawComment);
+          SupportJiraWebhookHandler.extractWikiMarkupAttachmentRefs(rawComment);
 
       assertTrue(refs.isEmpty());
       assertEquals(rawComment, SupportJiraWebhookHandler.stripResolvedWikiMarkupTokens(rawComment, List.of()));
+    }
+
+    @Test
+    @DisplayName("(d) A plain attachment link '[^filename.ext]' correlates to a real attachment by filename "
+        + "and the token is stripped from the displayed text, for every document type the chat supports")
+    void correlatesAndStripsPlainAttachmentLinkForEverySupportedType() throws Exception {
+      // Mirrors ConversationView.jsx's ALLOWED_DOC_EXTENSIONS on the frontend (schema_forge):
+      // pdf, csv, txt, xlsx, docx, md.
+      String[][] cases = {
+          {"reporte.pdf", "application/pdf"},
+          {"Hoja de cálculo sin título.csv", "text/csv"},
+          {"notas.txt", "text/plain"},
+          {"Hoja de cálculo sin título.xlsx",
+              "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"},
+          {"documento.docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"},
+          {"2026-04-16-slo-incident-response.md", "text/markdown"},
+      };
+
+      for (String[] testCase : cases) {
+        String filename = testCase[0];
+        String mimeType = testCase[1];
+        String rawComment = "Te paso el archivo [^" + filename + "] cualquier cosa me avisas";
+        JSONArray issueAttachments = new JSONArray()
+            .put(new JSONObject().put("id", "20001").put("filename", filename).put("mimeType", mimeType));
+
+        List<SupportJiraWebhookHandler.WikiMarkupImageRef> refs =
+            SupportJiraWebhookHandler.extractWikiMarkupAttachmentRefs(rawComment);
+        assertEquals(1, refs.size(), "expected exactly one ref for " + filename);
+
+        JSONObject match = SupportJiraWebhookHandler.findAttachmentByFilename(issueAttachments, refs.get(0).filename);
+        assertNotNull(match, "expected a matching attachment for " + filename);
+        JSONObject meta = SupportJiraWebhookHandler.toAttachmentMeta(match);
+        assertEquals("20001", meta.getString("id"));
+        assertEquals(filename, meta.getString("filename"));
+        assertEquals(mimeType, meta.getString("mimeType"));
+
+        String finalText = SupportJiraWebhookHandler.stripResolvedWikiMarkupTokens(
+            rawComment, List.of(refs.get(0).token));
+        assertEquals("Te paso el archivo cualquier cosa me avisas", finalText,
+            "token for " + filename + " should be stripped from the displayed text");
+      }
+    }
+
+    @Test
+    @DisplayName("(e) A message made up of ONLY a plain attachment link strips down to empty text — the "
+        + "attachment then renders solely via message.attachments on the frontend (attachment-only message)")
+    void attachmentOnlyMessageStripsToEmptyText() throws Exception {
+      String rawComment = "[^2026-04-16-slo-incident-response.md]";
+      JSONArray issueAttachments = new JSONArray()
+          .put(new JSONObject().put("id", "20002").put("filename", "2026-04-16-slo-incident-response.md")
+              .put("mimeType", "text/markdown"));
+
+      List<SupportJiraWebhookHandler.WikiMarkupImageRef> refs =
+          SupportJiraWebhookHandler.extractWikiMarkupAttachmentRefs(rawComment);
+      JSONObject match = SupportJiraWebhookHandler.findAttachmentByFilename(issueAttachments, refs.get(0).filename);
+      assertNotNull(match);
+
+      String finalText = SupportJiraWebhookHandler.stripResolvedWikiMarkupTokens(
+          rawComment, List.of(refs.get(0).token));
+
+      assertEquals("", finalText);
     }
   }
 
@@ -1584,6 +1755,44 @@ class SupportJiraWebhookHandlerTest {
     }
 
     @Test
+    @DisplayName("An attachment-only comment (empty text, resolved attachments) is NOT dropped as "
+        + "empty_body — this is the real shape of a Jira reply that carries only a file, e.g. "
+        + "'[^report.pdf]' resolved and stripped down to '' (regression: the empty-text guard used "
+        + "to fire on text alone, discarding the attachment along with it)")
+    void storeJiraWebhookCommentPersistsAttachmentOnlyMessage() throws Exception {
+      StringWriter capture = new StringWriter();
+      HttpServletResponse response = mockResponse(capture);
+      JSONArray attachments = new JSONArray()
+          .put(new JSONObject().put("id", "30001").put("filename", "report.pdf").put("mimeType", "application/pdf"));
+      SupportJiraWebhookHandler.JiraWebhookComment comment = new SupportJiraWebhookHandler.JiraWebhookComment(
+          "SUP-23", "c4", "Agent Smith", "agent@example.com", "", "", attachments);
+
+      try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+           MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+           MockedStatic<OBProvider> providerMock = mockStatic(OBProvider.class)) {
+        OBDal obDal = mockObDal(dalMock);
+        SupportConversation conv = mockConversation("conv-88");
+        mockCriteria(obDal, SupportConversation.class, List.of(conv));
+        mockCriteria(obDal, SupportMessage.class, Collections.emptyList()); // no duplicate external_id
+        when(obDal.get(SupportConversation.class, "conv-88")).thenReturn(conv);
+        when(obDal.get(User.class, SupportConversationsServlet.SYSTEM_USER_ID)).thenReturn(mock(User.class));
+
+        OBProvider provider = mock(OBProvider.class);
+        providerMock.when(OBProvider::getInstance).thenReturn(provider);
+        SupportMessage msg = mock(SupportMessage.class);
+        when(provider.get(SupportMessage.class)).thenReturn(msg);
+
+        SupportJiraWebhookHandler.storeJiraWebhookComment(response, comment);
+
+        verify(msg).setAttachments(attachments.toString());
+      }
+
+      assertTrue(capture.toString().contains("\"status\":\"ok\""));
+      assertTrue(capture.toString().contains("conv-88"));
+      assertFalse(capture.toString().contains("empty_body"));
+    }
+
+    @Test
     @DisplayName("Standard webhook with no conversation match reports no_conversation")
     void standardWebhookNoConversation() throws Exception {
       StringWriter capture = new StringWriter();
@@ -1604,6 +1813,158 @@ class SupportJiraWebhookHandlerTest {
       }
 
       assertTrue(capture.toString().contains("no_conversation"));
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // storeJiraWebhookComment — bot-echo detection by display name (JIRA_BOT_NAME) and
+  // reporter-reply sender attribution (isReporterReply). Called directly since the method is
+  // package-private, avoiding the need to build a full JSON/query-param webhook request just to
+  // reach it.
+  // -------------------------------------------------------------------------
+
+  @Nested
+  @DisplayName("storeJiraWebhookComment — bot detection by name & reporter sender attribution")
+  class StoreJiraWebhookCommentDirect {
+
+    private SupportJiraWebhookHandler.JiraWebhookComment comment(String jiraKey, String commentId,
+        String authorName, String authorEmail, String authorAccountId, String text) {
+      return new SupportJiraWebhookHandler.JiraWebhookComment(jiraKey, commentId, authorName, authorEmail,
+          authorAccountId, text, null);
+    }
+
+    /** Stubs the DB round-trip {@code storeJiraWebhookComment} needs to actually persist a
+     * message: a matching conversation, no existing message for the external id (dedupe check),
+     * the system user lookup, and a fresh {@code SupportMessage} mock handed back by
+     * {@code OBProvider}. Returns that message mock so callers can verify what was set on it. */
+    private SupportMessage stubPersistence(OBDal obDal, MockedStatic<OBProvider> providerMock,
+        SupportConversation conv) {
+      mockCriteria(obDal, SupportConversation.class, List.of(conv));
+      mockCriteria(obDal, SupportMessage.class, Collections.emptyList());
+      when(obDal.get(User.class, SupportConversationsServlet.SYSTEM_USER_ID)).thenReturn(mock(User.class));
+      // updateConvSummary (called after a successful insert) re-fetches the conversation by id.
+      when(obDal.get(SupportConversation.class, conv.getId())).thenReturn(conv);
+      OBProvider provider = mock(OBProvider.class);
+      providerMock.when(OBProvider::getInstance).thenReturn(provider);
+      SupportMessage msg = mock(SupportMessage.class);
+      when(provider.get(SupportMessage.class)).thenReturn(msg);
+      return msg;
+    }
+
+    @Test
+    @DisplayName("Bot comment recognized by display name when the author email is empty is skipped as "
+        + "bot echo (JIRA_BOT_NAME defaults to 'Information Etendo'; JIRA_BOT_EMAIL defaults to empty in "
+        + "this test environment, so email alone could never have caught this — the real production bug "
+        + "this fixes)")
+    void botRecognizedByNameWithNoEmail() throws Exception {
+      StringWriter capture = new StringWriter();
+      HttpServletResponse response = mockResponse(capture);
+      SupportJiraWebhookHandler.JiraWebhookComment comment =
+          comment("SUP-60", "c60", "Information Etendo", "", "acc-bot", "Echo of our own comment");
+
+      SupportJiraWebhookHandler.storeJiraWebhookComment(response, comment);
+
+      assertEquals("{\"status\":\"skipped_bot\"}", capture.toString());
+    }
+
+    @Test
+    @DisplayName("A comment whose author name differs from the bot name (and whose email does not match "
+        + "either) is NOT treated as a bot echo and is persisted normally")
+    void neitherNameNorEmailMatchIsNotBot() throws Exception {
+      StringWriter capture = new StringWriter();
+      HttpServletResponse response = mockResponse(capture);
+      SupportJiraWebhookHandler.JiraWebhookComment comment =
+          comment("SUP-61", "c61", "Agent Smith", "agent@example.com", "acc-agent", "Real human reply");
+
+      try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+           MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+           MockedStatic<OBProvider> providerMock = mockStatic(OBProvider.class)) {
+        OBDal obDal = mockObDal(dalMock);
+        stubPersistence(obDal, providerMock, mockConversation("conv-61"));
+
+        SupportJiraWebhookHandler.storeJiraWebhookComment(response, comment);
+      }
+
+      assertFalse(capture.toString().contains("skipped_bot"));
+      assertTrue(capture.toString().contains("\"status\":\"ok\""));
+    }
+
+    @Test
+    @DisplayName("Reporter's own accountId matching the conversation's stored reporter accountId results "
+        + "in the message being inserted with sender=user — AND it is genuinely persisted (not skipped): "
+        + "an earlier version of this logic incorrectly filtered reporter replies out entirely; this is "
+        + "the regression test proving that no longer happens")
+    void reporterReplyIsPersistedWithUserSender() throws Exception {
+      StringWriter capture = new StringWriter();
+      HttpServletResponse response = mockResponse(capture);
+      SupportJiraWebhookHandler.JiraWebhookComment comment =
+          comment("SUP-62", "c62", "Jane Reporter", "jane@example.com", "reporter-acc-1", "Replying via email");
+
+      try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+           MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+           MockedStatic<OBProvider> providerMock = mockStatic(OBProvider.class)) {
+        OBDal obDal = mockObDal(dalMock);
+        SupportConversation conv = mockConversation("conv-62");
+        when(conv.getJiraReporterAccountId()).thenReturn("reporter-acc-1");
+        SupportMessage msg = stubPersistence(obDal, providerMock, conv);
+
+        SupportJiraWebhookHandler.storeJiraWebhookComment(response, comment);
+
+        verify(msg).setSender("user");
+      }
+
+      assertTrue(capture.toString().contains("\"status\":\"ok\""));
+      assertTrue(capture.toString().contains("conv-62"));
+    }
+
+    @Test
+    @DisplayName("accountId present but different from the conversation's reporter accountId: a genuinely "
+        + "different human agent, sender=human")
+    void nonMatchingAccountIdIsHumanSender() throws Exception {
+      StringWriter capture = new StringWriter();
+      HttpServletResponse response = mockResponse(capture);
+      SupportJiraWebhookHandler.JiraWebhookComment comment =
+          comment("SUP-63", "c63", "Agent Smith", "agent@example.com", "acc-agent", "Support reply");
+
+      try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+           MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+           MockedStatic<OBProvider> providerMock = mockStatic(OBProvider.class)) {
+        OBDal obDal = mockObDal(dalMock);
+        SupportConversation conv = mockConversation("conv-63");
+        when(conv.getJiraReporterAccountId()).thenReturn("reporter-acc-1");
+        SupportMessage msg = stubPersistence(obDal, providerMock, conv);
+
+        SupportJiraWebhookHandler.storeJiraWebhookComment(response, comment);
+
+        verify(msg).setSender("human");
+      }
+    }
+
+    @Test
+    @DisplayName("Empty accountId (e.g. the Automation query-param path) defaults to sender=human without "
+        + "throwing, even when the conversation's own reporter accountId is null (isReporterReply's "
+        + "equals() is called on the non-null comment side, so this is null-safe)")
+    void emptyAccountIdIsHumanSenderNoNpe() throws Exception {
+      StringWriter capture = new StringWriter();
+      HttpServletResponse response = mockResponse(capture);
+      SupportJiraWebhookHandler.JiraWebhookComment comment =
+          comment("SUP-64", "c64", "Agent Smith", "agent@example.com", "", "Support reply via automation");
+
+      try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+           MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+           MockedStatic<OBProvider> providerMock = mockStatic(OBProvider.class)) {
+        OBDal obDal = mockObDal(dalMock);
+        SupportConversation conv = mockConversation("conv-64");
+        // conv.getJiraReporterAccountId() defaults to null (not stubbed) — this is the case the
+        // null-safety matters for.
+        SupportMessage msg = stubPersistence(obDal, providerMock, conv);
+
+        SupportJiraWebhookHandler.storeJiraWebhookComment(response, comment);
+
+        verify(msg).setSender("human");
+      }
+
+      assertTrue(capture.toString().contains("\"status\":\"ok\""));
     }
   }
 }
