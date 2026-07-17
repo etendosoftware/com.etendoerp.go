@@ -769,8 +769,13 @@ public class NeoDefaultsService {
       MandatoryDefaultContext mCtx = new MandatoryDefaultContext(parentId, vars, conn,
           windowId, ctx, parentValues, sfFieldDefaults);
 
+      // ETP-4274: iterate ALL active columns, not only mandatory ones. Non-mandatory
+      // columns that have a genuine resolvable default (e.g. C_Currency_ID from
+      // @C_Currency_ID@) must be injected on create to reach parity with /defaults —
+      // otherwise the create path silently drops them. Mandatory-ness is passed down so
+      // the aggressive NOT-NULL safety fallbacks stay gated to mandatory columns only.
       for (Column col : adTab.getTable().getADColumnList()) {
-        if (!col.isActive() || !col.isMandatory()) {
+        if (!col.isActive()) {
           continue;
         }
         // Skip primary key columns — DAL auto-generates UUID PKs.
@@ -786,7 +791,7 @@ public class NeoDefaultsService {
         if (prop != null && prop.isAuditInfo()) {
           continue;
         }
-        injectMandatoryDefaultForColumn(body, dalEntity, col, mCtx);
+        injectMandatoryDefaultForColumn(body, dalEntity, col, mCtx, col.isMandatory());
       }
 
       // Fallback 3: run callout cascade with all fields in body.
@@ -839,11 +844,17 @@ public class NeoDefaultsService {
   }
 
   /**
-   * Attempt to inject a mandatory default value for a single column into the body.
-   * Tries field default resolution first, then session context, then safe numeric/boolean fallback.
+   * Attempt to inject a default value for a single column into the body.
+   * Tries field default resolution first, then session context, then parent values. For
+   * mandatory columns only, falls back to combo first-option preselection and a safe
+   * numeric/boolean default to avoid NOT NULL violations.
+   *
+   * @param mandatory whether the column is NOT-NULL (mandatory). Non-mandatory columns
+   *                  run only the genuine default-resolution passes and stop; the
+   *                  aggressive NOT-NULL fallbacks are gated behind this flag (ETP-4274).
    */
   private static void injectMandatoryDefaultForColumn(JSONObject body, Entity dalEntity,
-      Column col, MandatoryDefaultContext mCtx) {
+      Column col, MandatoryDefaultContext mCtx, boolean mandatory) {
     try {
       if (isAuditColumn(col)) {
         return;
@@ -865,6 +876,14 @@ public class NeoDefaultsService {
         return;
       }
       if (tryInjectFromParentValues(body, dalEntity, propName, col, mCtx.parentValues)) {
+        return;
+      }
+      // ETP-4274: non-mandatory columns stop after the genuine default-resolution passes
+      // above. Do NOT apply the combo first-option preselection or the safe-type fallback
+      // — those exist only to avoid NOT NULL violations on mandatory columns. Applying
+      // them to optional columns would over-inject (and reintroduce the kind of silent FK
+      // pick removed in ETP-3894).
+      if (!mandatory) {
         return;
       }
       // ETP-3894: tryInjectFallbackFkDefault was removed here — it silently picked the
