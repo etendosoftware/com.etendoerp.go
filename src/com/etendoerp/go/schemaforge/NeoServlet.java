@@ -19,7 +19,6 @@ import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.criterion.MatchMode;
 import org.hibernate.criterion.Restrictions;
 import org.openbravo.base.HttpBaseServlet;
-import org.openbravo.base.weld.WeldUtils;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
@@ -73,6 +72,7 @@ public class NeoServlet extends HttpBaseServlet {
   final NeoDefaultsEndpoint defaultsEndpoint = new NeoDefaultsEndpoint(this);
   final NeoProcessReportEndpoint processReportEndpoint = new NeoProcessReportEndpoint(this);
   private final BatchService batchService = new BatchService(this);
+  private final NeoSimSearchEndpoint simSearchEndpoint = new NeoSimSearchEndpoint();
 
   @Override
   public void doGet(HttpServletRequest request, HttpServletResponse response) throws IOException {
@@ -150,6 +150,20 @@ public class NeoServlet extends HttpBaseServlet {
           return;
         }
         batchService.handle(request, response);
+        return;
+      }
+
+      // Global similarity-search endpoint: GET /sws/neo/simsearch
+      //   Same trigram matching as the "SimSearch" webhook, reached through NEO's own
+      //   JWT auth instead of the Webhooks module's per-role grant table. See
+      //   NeoSimSearchEndpoint for the authorization-model rationale.
+      if ("simsearch".equals(pathInfo.specName)) {
+        if (!"GET".equals(method)) {
+          sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
+              "Simsearch endpoint only supports GET");
+          return;
+        }
+        writeResponse(response, simSearchEndpoint.handle(request));
         return;
       }
       requestRouter.handleSpecRequest(pathInfo, method, request, response);
@@ -237,51 +251,20 @@ public class NeoServlet extends HttpBaseServlet {
   /**
    * Handle request with CDI hooks discovered via Java_Qualifier.
    * The handler acts as a pre+post hook (the handler decides via convention).
+   *
+   * <p>{@code request}/{@code response} are kept in the signature for the HTTP call sites
+   * that already pass them, but the dispatch logic itself needs neither — it lives in
+   * {@link NeoServletSupport#handleWithHooks(String, NeoContext, NeoCrudHandler)} so that
+   * {@link BatchService}'s non-HTTP per-op create path can reach the exact same hook
+   * dispatch without needing servlet request/response objects it does not have.
    */
   NeoResponse handleWithHooks(String javaQualifier, NeoContext context,
       HttpServletRequest request, HttpServletResponse response) {
-    try {
-      NeoHandler handler = lookupHandler(javaQualifier);
-      if (handler == null) {
-        log.warn("No handler found for qualifier '{}', falling back to default", javaQualifier);
-        return crudHandler.handleDefault(context);
-      }
-
-      // Pre-hook
-      NeoResponse preResult = handler.handle(context);
-      if (preResult != null) {
-        context.setPreviousResult(preResult);
-        NeoResponse afterResult = handler.afterHandle(context);
-        return afterResult != null ? afterResult : preResult;
-      }
-
-      // Default service
-      NeoResponse defaultResult = crudHandler.handleDefault(context);
-
-      // Post-hook
-      context.setPreviousResult(defaultResult);
-      NeoResponse afterResult = handler.afterHandle(context);
-      return afterResult != null ? afterResult : defaultResult;
-    } catch (Exception e) {
-      log.error("Error executing hook handler: {}", javaQualifier, e);
-      return NeoResponse.error(500, "Hook handler error: " + e.getMessage());
-    }
+    return NeoServletSupport.handleWithHooks(javaQualifier, context, crudHandler);
   }
 
   NeoHandler lookupHandler(String qualifier) {
-    try {
-      for (NeoHandler handler : WeldUtils.getInstances(NeoHandler.class)) {
-        javax.inject.Named named = handler.getClass().getAnnotation(javax.inject.Named.class);
-        if (named != null && qualifier.equals(named.value())) {
-          return handler;
-        }
-      }
-      log.warn("No NeoHandler found with @Named(\"{}\")", qualifier);
-      return null;
-    } catch (Exception e) {
-      log.error("Failed to lookup handler with qualifier: {}", qualifier, e);
-      return null;
-    }
+    return NeoServletSupport.lookupHandler(qualifier);
   }
 
   void writeResponse(HttpServletResponse response, NeoResponse neoResponse)

@@ -25,6 +25,8 @@ import static org.junit.Assert.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
+import javax.enterprise.inject.Vetoed;
+
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.Test;
 import org.mockito.MockedStatic;
@@ -245,6 +247,7 @@ public class PeriodOpenCloseSupportTest {
   // ── AbstractPeriodOpenCloseHandler via test double ────────────────────────
 
   /** Minimal concrete subclass used to test the abstract template method. */
+  @Vetoed // not a CDI bean: a discoverable subclass makes @Inject of the real handler ambiguous
   private static class TestHandler extends AbstractPeriodOpenCloseHandler {
     NeoResponse doHandleResult;
     NeoResponse onErrorResult;
