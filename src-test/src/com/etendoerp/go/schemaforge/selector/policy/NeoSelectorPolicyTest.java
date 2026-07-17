@@ -28,8 +28,9 @@ import org.junit.Test;
 /**
  * Wiring tests for {@link NeoSelectorPolicy}'s context-filter registry.
  *
- * <p>Guards that {@link FinancialAccountPaymentMethodSelectorPolicy} is registered and dispatched
- * for the {@code FIN_Financial_Account} entity. Pure logic — no DB access.</p>
+ * <p>Guards that {@link FinancialAccountPaymentMethodSelectorPolicy} and
+ * {@link CurrencyIsoAllowlistSelectorPolicy} are registered and dispatched for their respective
+ * entities. Pure logic — no DB access.</p>
  */
 public class NeoSelectorPolicyTest {
 
@@ -44,6 +45,13 @@ public class NeoSelectorPolicyTest {
 
     assertTrue(filter.contains("FinancialMgmtFinAccPaymentMethod"));
     assertTrue(filter.contains("fapm.paymentMethod.id = :finAccPaymentMethodId"));
+  }
+
+  @Test
+  public void registryDispatchesCurrencyIsoAllowlistPolicy() {
+    String filter = NeoSelectorPolicy.resolveContextParamFilter("Currency", new HashMap<>(), "c");
+
+    assertTrue(filter.contains("c.iSOCode in ('EUR', 'USD', 'GBP')"));
   }
 
   @Test

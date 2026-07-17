@@ -25,6 +25,7 @@ import static org.mockito.Mockito.when;
 
 import java.math.BigDecimal;
 import java.util.Collections;
+import java.util.Map;
 
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
@@ -78,6 +79,14 @@ class WidgetBestSellersHandlerTest {
     return NeoContext.builder()
         .specName("dashboard").entityName("best-sellers")
         .httpMethod("GET").endpointType(NeoEndpointType.CRUD)
+        .build();
+  }
+
+  private NeoContext getContextWithRange(String range) {
+    return NeoContext.builder()
+        .specName("dashboard").entityName("best-sellers")
+        .httpMethod("GET").endpointType(NeoEndpointType.CRUD)
+        .queryParams(Map.of("range", range))
         .build();
   }
 
@@ -181,5 +190,23 @@ class WidgetBestSellersHandlerTest {
     assertEquals(15L, item.getLong("qty"));
     assertEquals("Kg", item.getString("uom"));
     assertEquals(25, item.getInt("trendPct"));
+  }
+
+  /**
+   * Regression test for ETP-4521: verifies that a GET request with {@code range=last30d}
+   * propagates that value to {@code WidgetQueryHelper.resolveQuery} so the trend %
+   * comparison respects the selected date range instead of a hardcoded current month.
+   */
+  @Test
+  void testHandleWithRangeParamPassesRangeToResolveQuery() throws Exception {
+    queryHelperMock.when(() -> WidgetQueryHelper.resolveQuery(any(), any(), any(), any()))
+        .thenReturn(Collections.emptyList());
+    queryHelperMock.when(() -> WidgetQueryHelper.buildDataResponse(any()))
+        .thenCallRealMethod();
+
+    handler.handle(getContextWithRange("last30d"));
+
+    queryHelperMock.verify(() -> WidgetQueryHelper.resolveQuery(
+        any(), any(), any(), org.mockito.ArgumentMatchers.eq("last30d")));
   }
 }
