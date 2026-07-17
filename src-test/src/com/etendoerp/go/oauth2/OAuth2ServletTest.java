@@ -19,6 +19,7 @@ package com.etendoerp.go.oauth2;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
@@ -34,10 +35,13 @@ import java.io.BufferedReader;
 import java.io.PrintWriter;
 import java.io.StringReader;
 import java.io.StringWriter;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.Timestamp;
+import java.util.Base64;
 
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
@@ -601,6 +605,12 @@ public class OAuth2ServletTest {
     when(findRs.getString("ad_role_id")).thenReturn("role-1");
     when(findRs.getString("etendo_client_id")).thenReturn("0");
     when(findRs.getString("client_active")).thenReturn("Y");
+    // ETP-4393 — legacy row predating the validity_seconds column: getLong()
+    // would return 0 for SQL NULL, indistinguishable from "no expiration",
+    // so the production code checks wasNull() to detect this and falls back
+    // to the default (86400 = 1 day).
+    when(findRs.getLong("validity_seconds")).thenReturn(0L);
+    when(findRs.wasNull()).thenReturn(true);
 
     PreparedStatement findPs = mock(PreparedStatement.class);
     when(findPs.executeQuery()).thenReturn(findRs);
@@ -626,9 +636,155 @@ public class OAuth2ServletTest {
     JSONObject body = new JSONObject(resp.body());
     assertNotNull(body.getString("access_token"));
     assertEquals("bearer", body.getString("token_type"));
-    assertEquals(3600, body.getInt("expires_in"));
+    assertEquals(86400, body.getInt("expires_in"));
     assertNotNull(body.getString("refresh_token"));
     assertEquals("neo:read neo:write", body.getString("scope"));
+  }
+
+  // ===================== ETP-4393 — refresh_token validity_seconds reuse =====================
+
+  @Test
+  public void tokenRefreshReusesStoredValiditySeconds() throws Exception {
+    ResponseCapture resp = mockResponse();
+    HttpServletRequest req = mockRequest("POST", "/token");
+    when(req.getContentType()).thenReturn("application/x-www-form-urlencoded");
+    when(req.getParameter("grant_type")).thenReturn("refresh_token");
+    when(req.getParameter("refresh_token")).thenReturn("valid-refresh-token");
+
+    ResultSet findRs = mock(ResultSet.class);
+    when(findRs.next()).thenReturn(true);
+    when(findRs.getString("etgo_oauth2_token_id")).thenReturn("token-1");
+    when(findRs.getString("etgo_oauth2_client_id")).thenReturn(TEST_CLIENT_DB_ID);
+    when(findRs.getString("scopes")).thenReturn("neo:read neo:write");
+    when(findRs.getString("is_revoked")).thenReturn("N");
+    when(findRs.getString("ad_user_id")).thenReturn("user-1");
+    when(findRs.getString("ad_role_id")).thenReturn("role-1");
+    when(findRs.getString("etendo_client_id")).thenReturn("0");
+    when(findRs.getString("client_active")).thenReturn("Y");
+    // Non-legacy row: the previous token was issued with a 1-week validity —
+    // the refreshed token must reuse that same value, not the default.
+    when(findRs.getLong("validity_seconds")).thenReturn(604_800L);
+    when(findRs.wasNull()).thenReturn(false);
+
+    PreparedStatement findPs = mock(PreparedStatement.class);
+    when(findPs.executeQuery()).thenReturn(findRs);
+
+    PreparedStatement revokePs = mock(PreparedStatement.class);
+    when(revokePs.executeUpdate()).thenReturn(1);
+
+    PreparedStatement insertPs = mock(PreparedStatement.class);
+    when(insertPs.executeUpdate()).thenReturn(1);
+
+    Connection conn = mock(Connection.class);
+    when(conn.prepareStatement(anyString())).thenReturn(findPs, revokePs, insertPs);
+
+    OBDal obDal = mock(OBDal.class);
+    when(obDal.getConnection()).thenReturn(conn);
+
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+
+      servlet.doPost(req, resp.response);
+    }
+
+    JSONObject body = new JSONObject(resp.body());
+    assertEquals(604_800, body.getInt("expires_in"));
+  }
+
+  @Test
+  public void tokenRefreshLegacyNullRowFallsBackTo86400() throws Exception {
+    ResponseCapture resp = mockResponse();
+    HttpServletRequest req = mockRequest("POST", "/token");
+    when(req.getContentType()).thenReturn("application/x-www-form-urlencoded");
+    when(req.getParameter("grant_type")).thenReturn("refresh_token");
+    when(req.getParameter("refresh_token")).thenReturn("valid-refresh-token");
+
+    ResultSet findRs = mock(ResultSet.class);
+    when(findRs.next()).thenReturn(true);
+    when(findRs.getString("etgo_oauth2_token_id")).thenReturn("token-1");
+    when(findRs.getString("etgo_oauth2_client_id")).thenReturn(TEST_CLIENT_DB_ID);
+    when(findRs.getString("scopes")).thenReturn("neo:read");
+    when(findRs.getString("is_revoked")).thenReturn("N");
+    when(findRs.getString("ad_user_id")).thenReturn("user-1");
+    when(findRs.getString("ad_role_id")).thenReturn("role-1");
+    when(findRs.getString("etendo_client_id")).thenReturn("0");
+    when(findRs.getString("client_active")).thenReturn("Y");
+    // Legacy row: column is SQL NULL (predates the ETP-4393 migration).
+    when(findRs.getLong("validity_seconds")).thenReturn(0L);
+    when(findRs.wasNull()).thenReturn(true);
+
+    PreparedStatement findPs = mock(PreparedStatement.class);
+    when(findPs.executeQuery()).thenReturn(findRs);
+
+    PreparedStatement revokePs = mock(PreparedStatement.class);
+    when(revokePs.executeUpdate()).thenReturn(1);
+
+    PreparedStatement insertPs = mock(PreparedStatement.class);
+    when(insertPs.executeUpdate()).thenReturn(1);
+
+    Connection conn = mock(Connection.class);
+    when(conn.prepareStatement(anyString())).thenReturn(findPs, revokePs, insertPs);
+
+    OBDal obDal = mock(OBDal.class);
+    when(obDal.getConnection()).thenReturn(conn);
+
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+
+      servlet.doPost(req, resp.response);
+    }
+
+    JSONObject body = new JSONObject(resp.body());
+    assertEquals(86400, body.getInt("expires_in"));
+  }
+
+  @Test
+  public void tokenRefreshNoExpirationOmitsExpiresIn() throws Exception {
+    ResponseCapture resp = mockResponse();
+    HttpServletRequest req = mockRequest("POST", "/token");
+    when(req.getContentType()).thenReturn("application/x-www-form-urlencoded");
+    when(req.getParameter("grant_type")).thenReturn("refresh_token");
+    when(req.getParameter("refresh_token")).thenReturn("valid-refresh-token");
+
+    ResultSet findRs = mock(ResultSet.class);
+    when(findRs.next()).thenReturn(true);
+    when(findRs.getString("etgo_oauth2_token_id")).thenReturn("token-1");
+    when(findRs.getString("etgo_oauth2_client_id")).thenReturn(TEST_CLIENT_DB_ID);
+    when(findRs.getString("scopes")).thenReturn("neo:read");
+    when(findRs.getString("is_revoked")).thenReturn("N");
+    when(findRs.getString("ad_user_id")).thenReturn("user-1");
+    when(findRs.getString("ad_role_id")).thenReturn("role-1");
+    when(findRs.getString("etendo_client_id")).thenReturn("0");
+    when(findRs.getString("client_active")).thenReturn("Y");
+    // Stored 0 = "no expiration" sentinel — must not be confused with legacy NULL.
+    when(findRs.getLong("validity_seconds")).thenReturn(0L);
+    when(findRs.wasNull()).thenReturn(false);
+
+    PreparedStatement findPs = mock(PreparedStatement.class);
+    when(findPs.executeQuery()).thenReturn(findRs);
+
+    PreparedStatement revokePs = mock(PreparedStatement.class);
+    when(revokePs.executeUpdate()).thenReturn(1);
+
+    PreparedStatement insertPs = mock(PreparedStatement.class);
+    when(insertPs.executeUpdate()).thenReturn(1);
+
+    Connection conn = mock(Connection.class);
+    when(conn.prepareStatement(anyString())).thenReturn(findPs, revokePs, insertPs);
+
+    OBDal obDal = mock(OBDal.class);
+    when(obDal.getConnection()).thenReturn(conn);
+
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+
+      servlet.doPost(req, resp.response);
+    }
+
+    JSONObject body = new JSONObject(resp.body());
+    assertNotNull(body.getString("access_token"));
+    assertFalse("expires_in must be absent when validity_seconds is 0 (no expiration)",
+        body.has("expires_in"));
   }
 
   @Test
@@ -1645,6 +1801,224 @@ public class OAuth2ServletTest {
     servlet.service(req, resp.response);
 
     verify(resp.response).setStatus(HttpServletResponse.SC_NO_CONTENT);
+  }
+
+  // ===================== ETP-4393 — normalizeValiditySeconds boundaries =====================
+
+  @Test
+  public void normalizeValiditySecondsZeroMeansNoExpiration() {
+    assertEquals(0L, OAuth2ValidityPolicy.normalizeValiditySeconds(0L));
+  }
+
+  @Test
+  public void normalizeValiditySecondsNegativeFallsBackToDefault() {
+    assertEquals(86_400L, OAuth2ValidityPolicy.normalizeValiditySeconds(-1L));
+  }
+
+  @Test
+  public void normalizeValiditySecondsAbsentSentinelFallsBackToDefault() {
+    // -1 is the sentinel OAuth2AuthorizeSupport uses for missing/blank/non-numeric input.
+    assertEquals(86_400L, OAuth2ValidityPolicy.normalizeValiditySeconds(-1L));
+  }
+
+  @Test
+  public void normalizeValiditySecondsAboveMaxIsClampedDown() {
+    assertEquals(2_592_000L, OAuth2ValidityPolicy.normalizeValiditySeconds(99_999_999L));
+  }
+
+  @Test
+  public void normalizeValiditySecondsExactlyAtMaxIsUnchanged() {
+    assertEquals(2_592_000L, OAuth2ValidityPolicy.normalizeValiditySeconds(2_592_000L));
+  }
+
+  @Test
+  public void normalizeValiditySecondsBelowMinIsClampedUp() {
+    assertEquals(300L, OAuth2ValidityPolicy.normalizeValiditySeconds(60L));
+  }
+
+  @Test
+  public void normalizeValiditySecondsExactlyAtMinIsUnchanged() {
+    assertEquals(300L, OAuth2ValidityPolicy.normalizeValiditySeconds(300L));
+  }
+
+  @Test
+  public void normalizeValiditySecondsWithinRangeIsUnchanged() {
+    assertEquals(604_800L, OAuth2ValidityPolicy.normalizeValiditySeconds(604_800L));
+  }
+
+  // ===== ETP-4393 — authorization_code grant: end-to-end validity_seconds propagation =====
+  //
+  // AUTH_CODE_STORE is private, so it cannot be seeded directly. These tests drive the real
+  // two-step flow: POST /authorize (issues the code) then POST /token (exchanges it), and
+  // assert on the expires_in field of the final token response.
+
+  @Test
+  public void authorizeCodeGrantDefaultValidityWhenParamAbsent() throws Exception {
+    Long expiresIn = runAuthorizeThenTokenExchange(null);
+    assertNotNull(expiresIn);
+    assertEquals(86_400L, expiresIn.longValue());
+  }
+
+  @Test
+  public void authorizeCodeGrantPreset1Day() throws Exception {
+    Long expiresIn = runAuthorizeThenTokenExchange("86400");
+    assertNotNull(expiresIn);
+    assertEquals(86_400L, expiresIn.longValue());
+  }
+
+  @Test
+  public void authorizeCodeGrantPreset1Week() throws Exception {
+    Long expiresIn = runAuthorizeThenTokenExchange("604800");
+    assertNotNull(expiresIn);
+    assertEquals(604_800L, expiresIn.longValue());
+  }
+
+  @Test
+  public void authorizeCodeGrantPreset1Month() throws Exception {
+    Long expiresIn = runAuthorizeThenTokenExchange("2592000");
+    assertNotNull(expiresIn);
+    assertEquals(2_592_000L, expiresIn.longValue());
+  }
+
+  @Test
+  public void authorizeCodeGrantNoExpirationOmitsExpiresIn() throws Exception {
+    Long expiresIn = runAuthorizeThenTokenExchange("0");
+    assertNull("expires_in must be absent when validity_seconds=0 (no expiration)", expiresIn);
+  }
+
+  @Test
+  public void authorizeCodeGrantInvalidNegativeFallsBackToDefault() throws Exception {
+    Long expiresIn = runAuthorizeThenTokenExchange("-42");
+    assertNotNull(expiresIn);
+    assertEquals(86_400L, expiresIn.longValue());
+  }
+
+  @Test
+  public void authorizeCodeGrantNonNumericFallsBackToDefault() throws Exception {
+    Long expiresIn = runAuthorizeThenTokenExchange("not-a-number");
+    assertNotNull(expiresIn);
+    assertEquals(86_400L, expiresIn.longValue());
+  }
+
+  @Test
+  public void authorizeCodeGrantExcessiveValueIsClampedToMax() throws Exception {
+    Long expiresIn = runAuthorizeThenTokenExchange("99999999");
+    assertNotNull(expiresIn);
+    assertEquals(2_592_000L, expiresIn.longValue());
+  }
+
+  @Test
+  public void authorizeCodeGrantBelowMinValueIsClampedToMin() throws Exception {
+    Long expiresIn = runAuthorizeThenTokenExchange("60");
+    assertNotNull(expiresIn);
+    assertEquals(300L, expiresIn.longValue());
+  }
+
+  /**
+   * Drives POST /authorize followed by POST /token (authorization_code grant) and returns
+   * the resulting {@code expires_in} value, or {@code null} when the field is absent
+   * (i.e. the token has no expiration).
+   *
+   * @param validitySecondsParam the form value sent as {@code validity_seconds} on the
+   *     /authorize request, or {@code null} to omit the parameter entirely
+   */
+  private Long runAuthorizeThenTokenExchange(String validitySecondsParam) throws Exception {
+    String codeVerifier = "test-code-verifier-" + java.util.UUID.randomUUID();
+    String codeChallenge = buildChallenge(codeVerifier);
+    String redirectUri = "https://example.com/callback";
+
+    ResponseCapture authorizeResp = mockResponse();
+    HttpServletRequest authorizeReq = mockRequest("POST", "/authorize");
+    when(authorizeReq.getContentType()).thenReturn("application/x-www-form-urlencoded");
+    when(authorizeReq.getParameter("token")).thenReturn(ADMIN_TOKEN);
+    when(authorizeReq.getParameter("client_id")).thenReturn(TEST_CLIENT_ID);
+    when(authorizeReq.getParameter("redirect_uri")).thenReturn(redirectUri);
+    when(authorizeReq.getParameter("code_challenge")).thenReturn(codeChallenge);
+    when(authorizeReq.getParameter("scope")).thenReturn("neo:read");
+    when(authorizeReq.getParameter("validity_seconds")).thenReturn(validitySecondsParam);
+
+    ResultSet clientRs = mock(ResultSet.class);
+    when(clientRs.next()).thenReturn(true);
+    when(clientRs.getString("etgo_oauth2_client_id")).thenReturn(TEST_CLIENT_DB_ID);
+    when(clientRs.getString("client_secret_hash")).thenReturn("irrelevant-hash");
+    when(clientRs.getString("scopes")).thenReturn("neo:read neo:write");
+    when(clientRs.getString("redirect_uris")).thenReturn("[\"" + redirectUri + "\"]");
+    when(clientRs.getString("ad_client_id")).thenReturn("0");
+    when(clientRs.getString("ad_user_id")).thenReturn(ADMIN_USER_ID);
+    when(clientRs.getString("ad_role_id")).thenReturn(ADMIN_ROLE_ID);
+
+    PreparedStatement findClientPs = mock(PreparedStatement.class);
+    when(findClientPs.executeQuery()).thenReturn(clientRs);
+
+    ResultSet findByIdRs = mock(ResultSet.class);
+    when(findByIdRs.next()).thenReturn(true);
+    when(findByIdRs.getString("etgo_oauth2_client_id")).thenReturn(TEST_CLIENT_DB_ID);
+
+    PreparedStatement findByIdPs = mock(PreparedStatement.class);
+    when(findByIdPs.executeQuery()).thenReturn(findByIdRs);
+
+    PreparedStatement updatePs = mock(PreparedStatement.class);
+    when(updatePs.executeUpdate()).thenReturn(1);
+
+    PreparedStatement insertPs = mock(PreparedStatement.class);
+    when(insertPs.executeUpdate()).thenReturn(1);
+
+    Connection conn = mock(Connection.class);
+    // Call order within handleAuthorizePost: findClient() is invoked twice (once from
+    // validateAuthorizeClientRequest, once directly), then handleAuthorizationCodeGrant
+    // runs SQL_FIND_CLIENT_BY_IDENTIFIER, the DCR user/role UPDATE, and finally the INSERT.
+    when(conn.prepareStatement(anyString())).thenReturn(
+        findClientPs, findClientPs, findByIdPs, updatePs, insertPs);
+
+    OBDal obDal = mock(OBDal.class);
+    when(obDal.getConnection()).thenReturn(conn);
+
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+        MockedStatic<SecureWebServicesUtils> swsMock = mockStatic(SecureWebServicesUtils.class)) {
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      DecodedJWT adminJwt = mockJwt(ADMIN_USER_ID, ADMIN_ROLE_ID);
+      swsMock.when(() -> SecureWebServicesUtils.decodeToken(ADMIN_TOKEN)).thenReturn(adminJwt);
+
+      servlet.doPost(authorizeReq, authorizeResp.response);
+
+      JSONObject authorizeBody = new JSONObject(authorizeResp.body());
+      String code = extractQueryParam(authorizeBody.getString("redirect_url"), "code");
+
+      ResponseCapture tokenResp = mockResponse();
+      HttpServletRequest tokenReq = mockRequest("POST", "/token");
+      when(tokenReq.getContentType()).thenReturn("application/x-www-form-urlencoded");
+      when(tokenReq.getParameter("grant_type")).thenReturn("authorization_code");
+      when(tokenReq.getParameter("code")).thenReturn(code);
+      when(tokenReq.getParameter("code_verifier")).thenReturn(codeVerifier);
+      when(tokenReq.getParameter("redirect_uri")).thenReturn(redirectUri);
+
+      servlet.doPost(tokenReq, tokenResp.response);
+
+      JSONObject tokenBody = new JSONObject(tokenResp.body());
+      assertNotNull(tokenBody.getString("access_token"));
+      return tokenBody.has("expires_in") ? tokenBody.getLong("expires_in") : null;
+    }
+  }
+
+  private static String buildChallenge(String verifier) throws Exception {
+    MessageDigest digest = MessageDigest.getInstance("SHA-256");
+    byte[] hash = digest.digest(verifier.getBytes(StandardCharsets.US_ASCII));
+    return Base64.getUrlEncoder().withoutPadding().encodeToString(hash);
+  }
+
+  private static String extractQueryParam(String url, String name) throws Exception {
+    int queryIndex = url.indexOf('?');
+    String query = queryIndex >= 0 ? url.substring(queryIndex + 1) : url;
+    for (String pair : query.split("&")) {
+      int eq = pair.indexOf('=');
+      if (eq < 0) {
+        continue;
+      }
+      if (pair.substring(0, eq).equals(name)) {
+        return java.net.URLDecoder.decode(pair.substring(eq + 1), "UTF-8");
+      }
+    }
+    throw new IllegalStateException("Query param not found in URL: " + name);
   }
 
   // ===================== Helpers =====================
