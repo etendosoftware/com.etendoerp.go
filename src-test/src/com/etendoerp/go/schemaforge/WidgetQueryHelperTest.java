@@ -16,13 +16,18 @@
  */
 package com.etendoerp.go.schemaforge;
 
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.lang.reflect.Field;
 import java.lang.reflect.Modifier;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Method;
+import java.util.regex.Pattern;
+import java.util.stream.Stream;
 
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
@@ -30,7 +35,9 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.MethodSource;
 import org.junit.jupiter.params.provider.NullAndEmptySource;
 import org.junit.jupiter.params.provider.ValueSource;
 
@@ -69,6 +76,44 @@ class WidgetQueryHelperTest {
     return (NeoResponse) method.invoke(null, data);
   }
 
+  /**
+   * Uses reflection to invoke the package-private rangeToSqlPrevFrom.
+   */
+  private static String invokeRangeToSqlPrevFrom(String range) throws Exception {
+    Method method = WidgetQueryHelper.class.getDeclaredMethod("rangeToSqlPrevFrom", String.class);
+    method.setAccessible(true);
+    return (String) method.invoke(null, range);
+  }
+
+  /**
+   * Uses reflection to invoke the package-private rangeToSqlPrevTo.
+   */
+  private static String invokeRangeToSqlPrevTo(String range) throws Exception {
+    Method method = WidgetQueryHelper.class.getDeclaredMethod("rangeToSqlPrevTo", String.class);
+    method.setAccessible(true);
+    return (String) method.invoke(null, range);
+  }
+
+  /**
+   * Uses reflection to read the package-private {@code rangedSql} field of a
+   * {@link WidgetQueryPolicyRegistry.WidgetQueryPolicy}.
+   */
+  private static String readRangedSql(Object policy) throws Exception {
+    Field field = policy.getClass().getDeclaredField("rangedSql");
+    field.setAccessible(true);
+    return (String) field.get(policy);
+  }
+
+  /**
+   * Invokes a package-private static factory on {@link WidgetQueryPolicyRegistry} that returns
+   * a policy (e.g. {@code bestProducts}, {@code recentInvoices}).
+   */
+  private static Object invokePolicyFactory(String factoryName) throws Exception {
+    Method method = WidgetQueryPolicyRegistry.class.getDeclaredMethod(factoryName);
+    method.setAccessible(true);
+    return method.invoke(null);
+  }
+
   @Nested
   @DisplayName("rangeToSqlDateFrom")
   class RangeToSqlDateFrom {
@@ -92,6 +137,120 @@ class WidgetQueryHelperTest {
     void unknownRangeDefaultsToLastYear() throws Exception {
       String result = invokeRangeToSqlDateFrom("custom");
       assertTrue(result.contains("12 months"));
+    }
+  }
+
+  @Nested
+  @DisplayName("rangeToSqlPrevFrom")
+  class RangeToSqlPrevFrom {
+
+    @ParameterizedTest
+    @CsvSource({
+        "last30d, '60 days'",
+        "last90d, '180 days'",
+        "mtd, month",
+        "ytd, year",
+        "lastYear, '24 months'"
+    })
+    void knownRangesProduceExpectedSql(String range, String expectedFragment) throws Exception {
+      String result = invokeRangeToSqlPrevFrom(range);
+      assertNotNull(result);
+      assertTrue(result.contains(expectedFragment),
+          "Expected '" + expectedFragment + "' in: " + result);
+    }
+
+    @Test
+    void unknownRangeDefaultsToLastYear() throws Exception {
+      String result = invokeRangeToSqlPrevFrom("custom");
+      assertTrue(result.contains("24 months"));
+    }
+  }
+
+  @Nested
+  @DisplayName("rangeToSqlPrevTo")
+  class RangeToSqlPrevTo {
+
+    @ParameterizedTest
+    @CsvSource({
+        "last30d, '30 days'",
+        "last90d, '90 days'",
+        "mtd, '1 month'",
+        "ytd, '1 year'",
+        "lastYear, '12 months'"
+    })
+    void knownRangesProduceExpectedSql(String range, String expectedFragment) throws Exception {
+      String result = invokeRangeToSqlPrevTo(range);
+      assertNotNull(result);
+      assertTrue(result.contains(expectedFragment),
+          "Expected '" + expectedFragment + "' in: " + result);
+    }
+
+    @Test
+    void unknownRangeDefaultsToLastYear() throws Exception {
+      String result = invokeRangeToSqlPrevTo("custom");
+      assertTrue(result.contains("12 months"));
+    }
+  }
+
+  @Nested
+  @DisplayName("prevTo/dateFrom consistency for rolling ranges")
+  class PrevToConsistency {
+
+    /**
+     * For rolling ranges (last30d, last90d, lastYear) the previous period's exclusive "to"
+     * boundary must equal the current period's "from" boundary, so the two periods are
+     * adjacent with no gap or overlap.
+     */
+    @ParameterizedTest
+    @ValueSource(strings = { "last30d", "last90d", "lastYear" })
+    void prevToMatchesCurrentDateFromForRollingRanges(String range) throws Exception {
+      assertEquals(invokeRangeToSqlDateFrom(range), invokeRangeToSqlPrevTo(range));
+    }
+  }
+
+  @Nested
+  @DisplayName("executeRangedQuery format contract")
+  class RangedSqlFormatContract {
+
+    /** Matches any unresolved printf-style string specifier: %s, %1$s, %2$s, etc. */
+    private final Pattern leftoverSpecifier = Pattern.compile("%\\d*\\$?s");
+
+    /** All policy factories that expose a rangedSql, crossed with every supported range key. */
+    static Stream<Arguments> policiesAndRanges() {
+      String[] factories = { "bestProducts", "bestSellers", "recentInvoices", "topClients" };
+      String[] ranges = { "last30d", "last90d", "lastYear", "mtd", "ytd", "unknownRange" };
+      Stream.Builder<Arguments> builder = Stream.builder();
+      for (String factory : factories) {
+        for (String range : ranges) {
+          builder.add(Arguments.of(factory, range));
+        }
+      }
+      return builder.build();
+    }
+
+    /**
+     * Reproduces exactly what {@link WidgetQueryHelper#executeRangedQuery} does with the SQL
+     * template: substitutes the three date expressions via {@code String.format}. This locks the
+     * format contract (template placeholders vs. the 3-arg format call) for every policy and every
+     * range, so a future placeholder mismatch fails here instead of only against a live database.
+     */
+    @ParameterizedTest(name = "{0} / {1}")
+    @MethodSource("policiesAndRanges")
+    void rangedSqlFormatsWithThreeArgsWithoutLeftoverSpecifiers(String factory, String range)
+        throws Exception {
+      String rangedSql = readRangedSql(invokePolicyFactory(factory));
+      assertNotNull(rangedSql, factory + " must expose a rangedSql template");
+
+      String formatted = assertDoesNotThrow(() -> String.format(rangedSql,
+          invokeRangeToSqlDateFrom(range),
+          invokeRangeToSqlPrevFrom(range),
+          invokeRangeToSqlPrevTo(range)),
+          "String.format must not throw for " + factory + " / " + range
+              + " (placeholder/argument mismatch)");
+
+      assertFalse(leftoverSpecifier.matcher(formatted).find(),
+          "Formatted SQL for " + factory + " / " + range
+              + " still contains an unresolved format specifier: " + formatted);
     }
   }
 
