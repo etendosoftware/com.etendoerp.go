@@ -27,6 +27,7 @@ import java.time.format.DateTimeFormatter;
 import java.time.temporal.ChronoUnit;
 import java.util.Date;
 import java.util.Map;
+import java.util.concurrent.Callable;
 import java.util.function.Consumer;
 
 import org.apache.commons.lang3.StringUtils;
@@ -37,6 +38,7 @@ import org.openbravo.base.exception.OBException;
 import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.common.currency.Currency;
 import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
 
 /**
@@ -53,29 +55,21 @@ final class FinancialAccountTransactionsSupport {
   static final String MSG_BODY_REQUIRED = "Request body is required";
 
   /**
-   * A mutating action operating on a (non-null) request body. Implementations do the DAL work and
-   * return the response; any thrown exception is translated to the standard error envelope by
-   * {@link #runMutation}.
-   */
-  @FunctionalInterface
-  interface DalAction {
-    NeoResponse run(JSONObject body) throws Exception;
-  }
-
-  /**
    * Shared wrapper for the mutating POST actions (create / update / process / reactivate / delete /
    * transfer / create-payment). Centralizes the admin-mode + try/catch/finally boilerplate that was
    * previously duplicated in each handler: validates the body is present, runs the action under
    * admin mode, and on failure rolls back and maps the exception to a 400 (business) / 500
    * (unexpected) response. {@code logContext} labels the log lines; {@code userError} is the safe
-   * message returned to the client on an unexpected error (never leaks internal details).
+   * message returned to the client on an unexpected error (never leaks internal details). The action
+   * is a {@link Callable} so it may propagate the checked {@code JSONException} the DAL/JSON layer
+   * throws; it should close over the already-validated body.
    */
   static NeoResponse runMutation(JSONObject body, String logContext, String userError,
-      DalAction action) {
+      Callable<NeoResponse> action) {
     if (body == null) return NeoResponse.error(400, MSG_BODY_REQUIRED);
     try {
       OBContext.setAdminMode(true);
-      return action.run(body);
+      return action.call();
     } catch (OBException e) {
       log.warn("{} business error: {}", logContext, e.getMessage());
       OBDal.getInstance().rollbackAndClose();
@@ -87,6 +81,18 @@ final class FinancialAccountTransactionsSupport {
     } finally {
       OBContext.restorePreviousMode();
     }
+  }
+
+  /**
+   * Resolves the currency for a mutation: the explicit {@code currencyId} from the body when given,
+   * otherwise the supplied fallback. Returns {@code null} when a given id does not resolve, so the
+   * caller can surface a 400.
+   */
+  static Currency resolveCurrency(JSONObject body, Currency fallback) {
+    String currencyId = body.optString("currencyId", null);
+    return StringUtils.isBlank(currencyId)
+        ? fallback
+        : OBDal.getInstance().get(Currency.class, currencyId);
   }
 
   /** trxType code → Classic "Transaction Type" label (unknown codes pass through). */

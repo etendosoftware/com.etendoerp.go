@@ -429,10 +429,6 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
       DIM_ORGANIZATION, DIM_BPARTNER, DIM_PROJECT, DIM_COSTCENTER, DIM_PRODUCT,
       DIM_ACTIVITY, DIM_CAMPAIGN, DIM_SALESREGION, DIM_USER1, DIM_USER2);
 
-  /**
-   * Returns the dimension keys enabled in the client's chart of accounts, in a
-   * stable display order. The UI renders the "more info" panel from this list.
-   */
   /** Navigable accounting dimensions active in the client's chart of accounts. */
   Set<String> loadActiveDimensionSet(String accountId) throws Exception {
     Set<String> enabled = new HashSet<>();
@@ -606,8 +602,9 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
    * {@link #buildTransaction(JSONObject, FIN_FinancialAccount, Currency)}.
    */
   private NeoResponse handleCreate(NeoContext context) {
-    return FinancialAccountTransactionsSupport.runMutation(context.getRequestBody(), "create",
-        "Could not create the movement. Please check logs for details.", body -> {
+    JSONObject body = context.getRequestBody();
+    return FinancialAccountTransactionsSupport.runMutation(body, ACTION_CREATE,
+        "Could not create the movement. Please check logs for details.", () -> {
           NeoResponse validationError = validateCreateBody(body);
           if (validationError != null) return validationError;
 
@@ -615,11 +612,8 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
           FIN_FinancialAccount account = OBDal.getInstance().get(FIN_FinancialAccount.class, accountId);
           if (account == null) return NeoResponse.error(400, "Financial account not found: " + accountId);
 
-          String currencyId = body.optString("currencyId", null);
-          Currency currency = StringUtils.isBlank(currencyId)
-              ? account.getCurrency()
-              : OBDal.getInstance().get(Currency.class, currencyId);
-          if (currency == null) return NeoResponse.error(400, "Currency not found: " + currencyId);
+          Currency currency = FinancialAccountTransactionsSupport.resolveCurrency(body, account.getCurrency());
+          if (currency == null) return NeoResponse.error(400, "Currency not found");
 
           FIN_FinaccTransaction trx = buildTransaction(body, account, currency);
           OBDal.getInstance().save(trx);
@@ -646,8 +640,9 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
    * it afterwards when {@code process:true} (edit + confirm in one call).
    */
   private NeoResponse handleUpdate(NeoContext context) {
-    return FinancialAccountTransactionsSupport.runMutation(context.getRequestBody(), "update",
-        "Could not update the movement. Please check logs for details.", body -> {
+    JSONObject body = context.getRequestBody();
+    return FinancialAccountTransactionsSupport.runMutation(body, ACTION_UPDATE,
+        "Could not update the movement. Please check logs for details.", () -> {
           FIN_FinaccTransaction trx = loadTransactionFromBody(body);
           if (trx == null) return NeoResponse.error(404, MSG_TRANSACTION_NOT_FOUND);
           // A posted (contabilizado) transaction is fully locked — the user must reactivate first.
@@ -656,19 +651,8 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
           }
 
           boolean processed = Boolean.TRUE.equals(trx.isProcessed());
-          if (processed) {
-            // Processed (not posted): only the "safe" fields stay editable — G/L item, accounting
-            // dimensions, description and dates. Amount, direction and status are locked (they affect
-            // the balance already applied to the account).
-            applyEditableDimensions(trx, body);
-          } else {
-            String currencyId = body.optString("currencyId", null);
-            Currency currency = StringUtils.isBlank(currencyId)
-                ? trx.getCurrency()
-                : OBDal.getInstance().get(Currency.class, currencyId);
-            if (currency == null) return NeoResponse.error(400, "Currency not found: " + currencyId);
-            applyEditableFields(trx, body, currency);
-          }
+          NeoResponse editError = applyUpdateEdits(trx, body, processed);
+          if (editError != null) return editError;
           OBDal.getInstance().save(trx);
           OBDal.getInstance().flush();
 
@@ -682,13 +666,32 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
   }
 
   /**
+   * Applies the editable fields to an updated transaction according to its state, returning a 400
+   * {@link NeoResponse} on a resolution failure or {@code null} on success. A Processed (not posted)
+   * transaction only accepts the "safe" fields — G/L item, accounting dimensions, description and
+   * dates (amount / direction / status stay locked, as they already impacted the balance); a Draft
+   * accepts the full editable set (including currency and amounts).
+   */
+  private NeoResponse applyUpdateEdits(FIN_FinaccTransaction trx, JSONObject body, boolean processed) {
+    if (processed) {
+      applyEditableDimensions(trx, body);
+      return null;
+    }
+    Currency currency = FinancialAccountTransactionsSupport.resolveCurrency(body, trx.getCurrency());
+    if (currency == null) return NeoResponse.error(400, "Currency not found");
+    applyEditableFields(trx, body, currency);
+    return null;
+  }
+
+  /**
    * Handles {@code POST ?action=create-payment} — creates and processes a FIN_Payment
    * replicating Classic's "Add Payment" (the processing auto-creates the finacc transaction).
    * Delegates the business logic to {@link AddPaymentService}.
    */
   private NeoResponse handleCreatePayment(NeoContext context) {
-    return FinancialAccountTransactionsSupport.runMutation(context.getRequestBody(), "add payment",
-        "Could not register the payment. Please check logs for details.", AddPaymentService::doAddPayment);
+    JSONObject body = context.getRequestBody();
+    return FinancialAccountTransactionsSupport.runMutation(body, "add payment",
+        "Could not register the payment. Please check logs for details.", () -> AddPaymentService.doAddPayment(body));
   }
 
   /**
@@ -725,8 +728,9 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
    * {@code "P"} (process) action. Never reimplements the processing logic.
    */
   private NeoResponse handleProcess(NeoContext context) {
-    return FinancialAccountTransactionsSupport.runMutation(context.getRequestBody(), ACTION_PROCESS,
-        "Could not process the movement. Please check logs for details.", body -> {
+    JSONObject body = context.getRequestBody();
+    return FinancialAccountTransactionsSupport.runMutation(body, ACTION_PROCESS,
+        "Could not process the movement. Please check logs for details.", () -> {
           FIN_FinaccTransaction trx = loadTransactionFromBody(body);
           if (trx == null) return NeoResponse.error(404, MSG_TRANSACTION_NOT_FOUND);
           FIN_TransactionProcess.doTransactionProcess("P", trx);
@@ -741,8 +745,9 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
    * {@link TransactionRemovalUtil#reactivate}. Never reimplements that logic.
    */
   private NeoResponse handleReactivate(NeoContext context) {
-    return FinancialAccountTransactionsSupport.runMutation(context.getRequestBody(), ACTION_REACTIVATE,
-        "Could not reactivate the movement. Please check logs for details.", body -> {
+    JSONObject body = context.getRequestBody();
+    return FinancialAccountTransactionsSupport.runMutation(body, ACTION_REACTIVATE,
+        "Could not reactivate the movement. Please check logs for details.", () -> {
           FIN_FinaccTransaction trx = loadTransactionFromBody(body);
           if (trx == null) return NeoResponse.error(404, MSG_TRANSACTION_NOT_FOUND);
           TransactionRemovalUtil.reactivate(trx);
@@ -758,8 +763,9 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
    * ({@link TransactionRemovalUtil#reactivateAndRemove}), undoing posting/reconciliation first.
    */
   private NeoResponse handleDelete(NeoContext context) {
-    return FinancialAccountTransactionsSupport.runMutation(context.getRequestBody(), ACTION_DELETE,
-        "Could not delete the movement. Please check logs for details.", body -> {
+    JSONObject body = context.getRequestBody();
+    return FinancialAccountTransactionsSupport.runMutation(body, ACTION_DELETE,
+        "Could not delete the movement. Please check logs for details.", () -> {
           FIN_FinaccTransaction trx = loadTransactionFromBody(body);
           if (trx == null) return NeoResponse.error(404, MSG_TRANSACTION_NOT_FOUND);
           if (Boolean.TRUE.equals(trx.isProcessed())) {
@@ -779,8 +785,9 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
    * paired-transaction / conversion-rate / processing logic.
    */
   private NeoResponse handleTransfer(NeoContext context) {
-    return FinancialAccountTransactionsSupport.runMutation(context.getRequestBody(), ACTION_TRANSFER,
-        "Could not transfer the funds. Please check logs for details.", this::transfer);
+    JSONObject body = context.getRequestBody();
+    return FinancialAccountTransactionsSupport.runMutation(body, ACTION_TRANSFER,
+        "Could not transfer the funds. Please check logs for details.", () -> transfer(body));
   }
 
   /**
