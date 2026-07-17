@@ -511,8 +511,9 @@ class SupportIntegrationClientTest {
     @Test
     @DisplayName("postJiraComment is a no-op when the API token is not configured (default test env)")
     void postJiraCommentNoopWhenNoToken() {
-      // support.jira.token defaults to "" in this test environment, so the early
-      // guard always short-circuits before any HTTP call is attempted.
+      // JiraConfig ships no hardcoded default for url/username/token (see its javadoc), and no
+      // test in this suite configures them, so isConfigured() is false and the early guard
+      // always short-circuits before any HTTP call is attempted.
       assertDoesNotThrow(() -> SupportIntegrationClient.postJiraComment("SUP-1", "some message", false));
     }
 
@@ -520,15 +521,14 @@ class SupportIntegrationClientTest {
      * NOT independently assertable in this suite: whether the built JSON payload actually
      * contains {@code "internal":true} vs {@code "internal":false} for the two call sites
      * ({@link SupportConversationsServlet}'s human-takeover forward passes {@code false}; its
-     * CSAT feedback branch passes {@code true}). {@code JIRA_API_TOKEN} is a {@code static final}
-     * read once from {@code support.jira.token} at class-load time (empty by default, and no
-     * test in this suite overrides it), so {@code postJiraComment} always returns before the
-     * payload string is even built — there is no seam to intercept it without either (a) a real
-     * token configured before this class first loads in the test JVM, which no per-test
-     * mechanism controls here, or (b) extracting payload construction into a separately testable
-     * pure function, a production change out of scope for a coverage-only pass. This test only
-     * documents that both boolean values are accepted without throwing; see the test-run report
-     * for this gap flagged explicitly.
+     * CSAT feedback branch passes {@code true}). Unlike before {@code JiraConfig} existed, the
+     * config is now re-read fresh on every call rather than frozen at class-load time — but
+     * setting a fake token here would just make {@code postJiraComment} attempt a real HTTP call
+     * to Jira with bad credentials, not a testable seam. Asserting the payload content would
+     * still require extracting payload construction into a separately testable pure function, a
+     * production change out of scope for a coverage-only pass. This test only documents that
+     * both boolean values are accepted without throwing; see the test-run report for this gap
+     * flagged explicitly.
      */
     @Test
     @DisplayName("postJiraComment no-ops safely for both internal=true and internal=false (payload-content "

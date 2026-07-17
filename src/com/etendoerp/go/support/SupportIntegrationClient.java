@@ -24,7 +24,6 @@ import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
-import java.util.Base64;
 import java.util.List;
 
 import org.apache.logging.log4j.LogManager;
@@ -64,13 +63,6 @@ final class SupportIntegrationClient {
   private static final String ADK_BASE_URL =
       System.getProperty("support.adk.url", "http://localhost:8000");
   private static final String ADK_APP_NAME = "agent";
-
-  private static final String JIRA_URL =
-      System.getProperty("support.jira.url", "https://etendoproject.atlassian.net");
-  private static final String JIRA_USERNAME =
-      System.getProperty("support.jira.username", "info@smfconsulting.es");
-  private static final String JIRA_API_TOKEN =
-      System.getProperty("support.jira.token", "");
 
   private static final HttpClient HTTP_CLIENT = HttpClient.newBuilder()
       .connectTimeout(Duration.ofSeconds(10))
@@ -261,8 +253,10 @@ final class SupportIntegrationClient {
 
   static void postJiraComment(String jiraKey, String userMessage, boolean internal) {
     if (jiraKey == null || jiraKey.isEmpty()) return;
-    if (JIRA_API_TOKEN.isEmpty()) {
-      log.warn("Jira comment for {} NOT sent: support.jira.token system property is empty", jiraKey);
+    JiraConfig config = JiraConfig.fromRuntime();
+    if (!config.isConfigured()) {
+      log.warn("Jira comment for {} NOT sent: Jira integration is not configured "
+          + "(support.jira.url/username/token)", jiraKey);
       return;
     }
     // Jira rejects a blank comment body with 400 ("Comment body can not be empty!") — an
@@ -274,8 +268,7 @@ final class SupportIntegrationClient {
       userMessage = "[Mensaje sin texto]";
     }
     try {
-      String credentials = Base64.getEncoder()
-          .encodeToString((JIRA_USERNAME + ":" + JIRA_API_TOKEN).getBytes(StandardCharsets.UTF_8));
+      String credentials = config.basicAuthCredentials();
 
       // Escape message for JSON
       String escaped = userMessage
@@ -292,7 +285,7 @@ final class SupportIntegrationClient {
           "}";
 
       HttpRequest req = HttpRequest.newBuilder()
-          .uri(URI.create(JIRA_URL + "/rest/api/3/issue/" + jiraKey + "/comment"))
+          .uri(URI.create(config.getUrl() + "/rest/api/3/issue/" + jiraKey + "/comment"))
           .header(HEADER_CONTENT_TYPE, CONTENT_TYPE_JSON)
           .header(HEADER_AUTHORIZATION, "Basic " + credentials)
           .POST(HttpRequest.BodyPublishers.ofString(payload, StandardCharsets.UTF_8))
@@ -342,18 +335,19 @@ final class SupportIntegrationClient {
   // ordinary edit-issue permission, which the service account already has.
   static void postJiraCsatLabel(String jiraKey, int score) {
     if (jiraKey == null || jiraKey.isEmpty()) return;
-    if (JIRA_API_TOKEN.isEmpty()) {
-      log.warn("Jira CSAT label for {} NOT sent: support.jira.token system property is empty", jiraKey);
+    JiraConfig config = JiraConfig.fromRuntime();
+    if (!config.isConfigured()) {
+      log.warn("Jira CSAT label for {} NOT sent: Jira integration is not configured "
+          + "(support.jira.url/username/token)", jiraKey);
       return;
     }
     try {
-      String credentials = Base64.getEncoder()
-          .encodeToString((JIRA_USERNAME + ":" + JIRA_API_TOKEN).getBytes(StandardCharsets.UTF_8));
+      String credentials = config.basicAuthCredentials();
 
       String payload = "{\"update\":{\"labels\":[{\"add\":\"csat-" + score + "\"}]}}";
 
       HttpRequest req = HttpRequest.newBuilder()
-          .uri(URI.create(JIRA_URL + "/rest/api/3/issue/" + jiraKey))
+          .uri(URI.create(config.getUrl() + "/rest/api/3/issue/" + jiraKey))
           .header(HEADER_CONTENT_TYPE, CONTENT_TYPE_JSON)
           .header(HEADER_AUTHORIZATION, "Basic " + credentials)
           .method("PUT", HttpRequest.BodyPublishers.ofString(payload, StandardCharsets.UTF_8))

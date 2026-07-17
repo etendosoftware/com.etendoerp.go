@@ -208,11 +208,18 @@ class SupportJiraWebhookHandlerTest {
     }
 
     @Test
-    @DisplayName("Email matching the configured Jira username (default env) returns true, case-insensitively")
+    @DisplayName("Email matching the configured Jira username returns true, case-insensitively")
     void matchesJiraUsername() {
-      // support.jira.username defaults to info@smfconsulting.es in this test environment.
-      assertTrue(SupportJiraWebhookHandler.isBotEmail("INFO@SMFCONSULTING.ES"));
-      assertTrue(SupportJiraWebhookHandler.isBotEmail("info@smfconsulting.es"));
+      // JiraConfig ships no hardcoded default username (see JiraConfig javadoc) — set it
+      // explicitly here rather than relying on one, and restore the prior value afterward so
+      // this doesn't leak into other tests in the same JVM.
+      System.setProperty(JiraConfig.PROP_USERNAME, "info@smfconsulting.es");
+      try {
+        assertTrue(SupportJiraWebhookHandler.isBotEmail("INFO@SMFCONSULTING.ES"));
+        assertTrue(SupportJiraWebhookHandler.isBotEmail("info@smfconsulting.es"));
+      } finally {
+        System.clearProperty(JiraConfig.PROP_USERNAME);
+      }
     }
 
     @Test
@@ -582,12 +589,17 @@ class SupportJiraWebhookHandlerTest {
       JSONObject issue = new JSONObject().put("fields", fields);
       JSONObject body = new JSONObject();
 
+      // JiraConfig ships no hardcoded default username (see its javadoc) — configure it
+      // explicitly so isBotEmail recognizes this address, and restore afterward.
+      System.setProperty(JiraConfig.PROP_USERNAME, "info@smfconsulting.es");
       try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
            MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
         OBDal obDal = mockObDal(dalMock);
         mockCriteria(obDal, SupportConversation.class, List.of(mockConversation("conv-1")));
 
         SupportJiraWebhookHandler.handleJiraNonCommentEvent(response, issue, body, "SUP-1");
+      } finally {
+        System.clearProperty(JiraConfig.PROP_USERNAME);
       }
 
       assertTrue(capture.toString().contains("\"status\":\"ok\""));
@@ -757,6 +769,9 @@ class SupportJiraWebhookHandlerTest {
       when(request.getParameter("action")).thenReturn("assignee_reset");
       when(request.getParameter("authorEmail")).thenReturn("info@smfconsulting.es");
 
+      // JiraConfig ships no hardcoded default username (see its javadoc) — configure it
+      // explicitly so isBotEmail recognizes this address, and restore afterward.
+      System.setProperty(JiraConfig.PROP_USERNAME, "info@smfconsulting.es");
       try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
            MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
         OBDal obDal = mockObDal(dalMock);
@@ -766,6 +781,8 @@ class SupportJiraWebhookHandlerTest {
             SupportJiraWebhookHandler.parseAutomationJiraWebhook(request, response);
 
         assertNull(result);
+      } finally {
+        System.clearProperty(JiraConfig.PROP_USERNAME);
       }
       assertTrue(capture.toString().contains("\"status\":\"ok\""));
     }

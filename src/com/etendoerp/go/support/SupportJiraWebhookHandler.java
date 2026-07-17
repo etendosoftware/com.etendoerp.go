@@ -23,13 +23,11 @@ import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
-import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
-import java.util.Base64;
 import java.util.Collections;
 import java.util.Date;
 import java.util.HashSet;
@@ -68,24 +66,18 @@ final class SupportJiraWebhookHandler {
   private static final Logger log = LogManager.getLogger(SupportJiraWebhookHandler.class);
 
   private static final String WEBHOOK_SECRET = System.getProperty("support.webhook.secret", "");
-  private static final String JIRA_BOT_EMAIL = System.getProperty("support.jira.bot.email", "");
+
+  // Jira URL/username/token/bot-identity now live in JiraConfig, shared with
+  // SupportIntegrationClient — see that class for the resolution order (system property >
+  // Openbravo.properties > env var, no hardcoded real credential as a default) and
+  // JiraConfig#isConfigured().
+  //
   // Fallback for the bot-email check: Jira Cloud omits `emailAddress` from a comment's `author`
   // object entirely for accounts whose Atlassian profile has email visibility set to private —
   // true of our integration account ("Information Etendo"), confirmed against a real captured
-  // webhook payload. JIRA_BOT_EMAIL alone therefore NEVER matches our own comments; this name
+  // webhook payload. Bot email alone therefore NEVER matches our own comments; the bot-name
   // check is what actually catches them and prevents an echo loop once comments are public
   // (a comment WE post gets picked up by the same webhook and re-inserted as if a human replied).
-  private static final String JIRA_BOT_NAME = System.getProperty("support.jira.bot.name", "Information Etendo");
-  private static final String JIRA_USERNAME =
-      System.getProperty("support.jira.username", "info@smfconsulting.es");
-
-  /** Same system properties {@link SupportIntegrationClient} reads for outbound Jira calls —
-   * duplicated here (not shared via that class) so this file stays independent of the parallel
-   * outbound-attachments work happening on {@link SupportIntegrationClient}. */
-  private static final String JIRA_URL =
-      System.getProperty("support.jira.url", "https://etendoproject.atlassian.net");
-  private static final String JIRA_API_TOKEN =
-      System.getProperty("support.jira.token", "");
 
   private static final String HEADER_WEBHOOK_SECRET = "X-Webhook-Secret";
   private static final String HEADER_AUTHORIZATION = "Authorization";
@@ -241,8 +233,9 @@ final class SupportJiraWebhookHandler {
 
   static void storeJiraWebhookComment(HttpServletResponse response, JiraWebhookComment comment)
       throws IOException, JSONException {
-    boolean isBotComment = (!JIRA_BOT_EMAIL.isEmpty() && JIRA_BOT_EMAIL.equalsIgnoreCase(comment.authorEmail))
-        || (!JIRA_BOT_NAME.isEmpty() && JIRA_BOT_NAME.equalsIgnoreCase(comment.authorName));
+    JiraConfig config = JiraConfig.fromRuntime();
+    boolean isBotComment = (!config.getBotEmail().isEmpty() && config.getBotEmail().equalsIgnoreCase(comment.authorEmail))
+        || config.getBotName().equalsIgnoreCase(comment.authorName);
     if (isBotComment) {
       SupportConversationsServlet.writeJson(response, 200, new JSONObject().put(FIELD_STATUS, "skipped_bot"));
       return;
@@ -400,8 +393,9 @@ final class SupportJiraWebhookHandler {
 
   static boolean isBotEmail(String email) {
     if (email == null || email.isEmpty()) return false;
-    return (!JIRA_BOT_EMAIL.isEmpty() && JIRA_BOT_EMAIL.equalsIgnoreCase(email))
-        || JIRA_USERNAME.equalsIgnoreCase(email);
+    JiraConfig config = JiraConfig.fromRuntime();
+    return (!config.getBotEmail().isEmpty() && config.getBotEmail().equalsIgnoreCase(email))
+        || email.equalsIgnoreCase(config.getUsername());
   }
 
   // --- Jira ADF (Atlassian Document Format) comment body parsing ---
@@ -783,14 +777,15 @@ final class SupportJiraWebhookHandler {
    * list ({@code [{id, filename, mimeType, created, ...}]}), or an empty array on any failure
    * (missing token, network error, non-200). */
   static JSONArray fetchIssueAttachments(String jiraKey) {
-    if (JIRA_API_TOKEN.isEmpty()) {
-      log.warn("Cannot resolve Jira attachments for {}: support.jira.token system property is empty", jiraKey);
+    JiraConfig config = JiraConfig.fromRuntime();
+    if (!config.isConfigured()) {
+      log.warn("Cannot resolve Jira attachments for {}: Jira integration is not configured", jiraKey);
       return new JSONArray();
     }
     try {
       HttpRequest req = HttpRequest.newBuilder()
-          .uri(URI.create(JIRA_URL + "/rest/api/3/issue/" + jiraKey + "?fields=attachment"))
-          .header(HEADER_AUTHORIZATION, "Basic " + jiraBasicAuthCredentials())
+          .uri(URI.create(config.getUrl() + "/rest/api/3/issue/" + jiraKey + "?fields=attachment"))
+          .header(HEADER_AUTHORIZATION, "Basic " + config.basicAuthCredentials())
           .timeout(Duration.ofSeconds(15))
           .GET()
           .build();
@@ -908,10 +903,6 @@ final class SupportJiraWebhookHandler {
     }
   }
 
-  static String jiraBasicAuthCredentials() {
-    return Base64.getEncoder().encodeToString((JIRA_USERNAME + ":" + JIRA_API_TOKEN).getBytes(StandardCharsets.UTF_8));
-  }
-
   // --- Authenticated attachment content proxy (used by SupportConversationsServlet) ---
 
   /** {@code GET /rest/api/3/attachment/content/{id}} — streams the raw bytes back to the caller.
@@ -920,14 +911,15 @@ final class SupportJiraWebhookHandler {
    * belongs to. Returns {@code null} on any failure (missing token, network error, non-2xx) —
    * the caller is expected to turn that into a 404/500 rather than leak Jira's error body. */
   static HttpResponse<InputStream> fetchAttachmentContent(String jiraAttachmentId) {
-    if (JIRA_API_TOKEN.isEmpty()) {
-      log.warn("Cannot proxy Jira attachment {}: support.jira.token system property is empty", jiraAttachmentId);
+    JiraConfig config = JiraConfig.fromRuntime();
+    if (!config.isConfigured()) {
+      log.warn("Cannot proxy Jira attachment {}: Jira integration is not configured", jiraAttachmentId);
       return null;
     }
     try {
       HttpRequest req = HttpRequest.newBuilder()
-          .uri(URI.create(JIRA_URL + "/rest/api/3/attachment/content/" + jiraAttachmentId))
-          .header(HEADER_AUTHORIZATION, "Basic " + jiraBasicAuthCredentials())
+          .uri(URI.create(config.getUrl() + "/rest/api/3/attachment/content/" + jiraAttachmentId))
+          .header(HEADER_AUTHORIZATION, "Basic " + config.basicAuthCredentials())
           .timeout(Duration.ofSeconds(30))
           .GET()
           .build();
