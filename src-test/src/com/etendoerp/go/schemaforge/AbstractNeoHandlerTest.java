@@ -25,6 +25,8 @@ import static org.junit.Assert.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
+import javax.enterprise.inject.Vetoed;
+
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONObject;
@@ -43,6 +45,7 @@ public class AbstractNeoHandlerTest {
   private static final Logger LOG = LogManager.getLogger(AbstractNeoHandlerTest.class);
 
   /** Minimal concrete subclass that stubs out OBContext side-effects. */
+  @Vetoed // not a CDI bean: a discoverable subclass makes @Inject of the real handler ambiguous
   private static class TestHandler extends AbstractNeoHandler {
     @Override
     public NeoResponse handle(NeoContext ctx) {
