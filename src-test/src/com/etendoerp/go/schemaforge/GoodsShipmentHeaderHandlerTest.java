@@ -708,4 +708,40 @@ public class GoodsShipmentHeaderHandlerTest {
 
     assertNull(body.opt("accountingDate"));
   }
+
+  /**
+   * Regression test for the live-reproduced ETP-4531 bug: the real React UI
+   * ({@code useEntity.js#getMethod}) always sends {@code PATCH} — never a full {@code PUT} —
+   * for edits to an EXISTING shipment, with a sparse body containing only the changed field.
+   * The original {@code POST}/{@code PUT}-only check silently skipped this case.
+   */
+  @Test
+  public void mirrorAccountingDate_patchCrudSparseBody_copiesMovementDateIntoAccountingDate()
+      throws Exception {
+    JSONObject body = new JSONObject().put("movementDate", "2026-07-15");
+    NeoContext ctx = NeoContext.builder()
+        .endpointType(NeoEndpointType.CRUD)
+        .httpMethod("PATCH")
+        .requestBody(body)
+        .build();
+
+    GoodsShipmentHeaderHandler.mirrorAccountingDate(ctx);
+
+    assertEquals("2026-07-15", body.getString("accountingDate"));
+  }
+
+  @Test
+  public void mirrorAccountingDate_patchCrud_overwritesStaleAccountingDate() throws Exception {
+    JSONObject body = new JSONObject()
+        .put("movementDate", "2026-07-15").put("accountingDate", "2026-07-17");
+    NeoContext ctx = NeoContext.builder()
+        .endpointType(NeoEndpointType.CRUD)
+        .httpMethod("PATCH")
+        .requestBody(body)
+        .build();
+
+    GoodsShipmentHeaderHandler.mirrorAccountingDate(ctx);
+
+    assertEquals("2026-07-15", body.getString("accountingDate"));
+  }
 }

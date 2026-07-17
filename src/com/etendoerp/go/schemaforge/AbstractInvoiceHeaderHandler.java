@@ -764,11 +764,18 @@ public abstract class AbstractInvoiceHeaderHandler {
    * <p>Call at the very top of each subclass's {@code handle()} override, before any other
    * logic.
    *
+   * <p><b>ETP-4531 fix:</b> must fire on {@code PATCH} as well as {@code POST}/{@code PUT} — the
+   * live React UI ({@code useEntity.js#getMethod}) always sends {@code PATCH} (a sparse,
+   * changed-fields-only body) when saving an edit to an EXISTING invoice; it never sends a full
+   * {@code PUT}. The original {@code POST}/{@code PUT}-only check meant the mirror fired on
+   * create but silently never fired on a real edit-and-save from the UI. See
+   * {@link NeoHandlerUtils#isWriteMethod}.
+   *
    * @param context the current NeoContext
    */
   protected static void mirrorAccountingDate(NeoContext context) {
     if (NeoEndpointType.CRUD.equals(context.getEndpointType())
-        && ("POST".equals(context.getHttpMethod()) || "PUT".equals(context.getHttpMethod()))) {
+        && NeoHandlerUtils.isWriteMethod(context.getHttpMethod())) {
       NeoHandlerUtils.mirrorFieldValue(context.getRequestBody(), FIELD_INVOICE_DATE, FIELD_ACCOUNTING_DATE);
     }
   }

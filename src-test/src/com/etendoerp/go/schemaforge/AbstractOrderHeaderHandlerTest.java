@@ -385,6 +385,42 @@ public class AbstractOrderHeaderHandlerTest {
     assertNull(body.opt("accountingDate"));
   }
 
+  /**
+   * Regression test for the live-reproduced ETP-4531 bug (same root cause as invoices): the
+   * real React UI ({@code useEntity.js#getMethod}) always sends {@code PATCH} — never a full
+   * {@code PUT} — for edits to an EXISTING order, with a sparse body containing only the
+   * changed field. The original {@code POST}/{@code PUT}-only check silently skipped this case.
+   */
+  @Test
+  public void mirrorAccountingDate_patchCrudSparseBody_copiesOrderDateIntoAccountingDate()
+      throws Exception {
+    JSONObject body = new JSONObject().put("orderDate", "2026-07-15");
+    NeoContext ctx = NeoContext.builder()
+        .endpointType(NeoEndpointType.CRUD)
+        .httpMethod("PATCH")
+        .requestBody(body)
+        .build();
+
+    AbstractOrderHeaderHandler.mirrorAccountingDate(ctx);
+
+    assertEquals("2026-07-15", body.getString("accountingDate"));
+  }
+
+  @Test
+  public void mirrorAccountingDate_patchCrud_overwritesStaleAccountingDate() throws Exception {
+    JSONObject body = new JSONObject()
+        .put("orderDate", "2026-07-15").put("accountingDate", "2026-07-17");
+    NeoContext ctx = NeoContext.builder()
+        .endpointType(NeoEndpointType.CRUD)
+        .httpMethod("PATCH")
+        .requestBody(body)
+        .build();
+
+    AbstractOrderHeaderHandler.mirrorAccountingDate(ctx);
+
+    assertEquals("2026-07-15", body.getString("accountingDate"));
+  }
+
   // ── helpers ───────────────────────────────────────────────────────────────
 
   private static JSONObject bodyWith(String key, String value) {

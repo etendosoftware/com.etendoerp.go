@@ -103,10 +103,14 @@ public class GoodsShipmentHeaderHandler implements NeoHandler {
    * path persists it (ETP-4531 — unified date). The user never sees or edits accountingDate
    * directly; whatever value is saved for movementDate (create or update) must also become the
    * shipment's accounting date.
+   *
+   * <p><b>ETP-4531 fix:</b> must fire on {@code PATCH} as well as {@code POST}/{@code PUT} — the
+   * live React UI ({@code useEntity.js#getMethod}) always sends {@code PATCH} for edits to an
+   * EXISTING shipment; it never sends a full {@code PUT}. See {@link NeoHandlerUtils#isWriteMethod}.
    */
   static void mirrorAccountingDate(NeoContext context) {
     if (NeoEndpointType.CRUD.equals(context.getEndpointType())
-        && ("POST".equals(context.getHttpMethod()) || "PUT".equals(context.getHttpMethod()))) {
+        && NeoHandlerUtils.isWriteMethod(context.getHttpMethod())) {
       NeoHandlerUtils.mirrorFieldValue(context.getRequestBody(), FIELD_MOVEMENT_DATE, FIELD_ACCOUNTING_DATE);
     }
   }

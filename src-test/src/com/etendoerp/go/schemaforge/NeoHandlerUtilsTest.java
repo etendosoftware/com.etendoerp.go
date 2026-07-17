@@ -275,4 +275,42 @@ public class NeoHandlerUtilsTest {
     // Must be a no-op guard: null body is a valid request-body shape to defend against.
     NeoHandlerUtils.mirrorFieldValue(null, "invoiceDate", "accountingDate");
   }
+
+  // ── ETP-4531: isWriteMethod ──────────────────────────────────────────────
+  // Regression coverage for the live bug: mirrorAccountingDate() call sites originally
+  // hardcoded POST/PUT only, missing PATCH — the exact method the real React UI
+  // (useEntity.js#getMethod) sends for every edit-and-save of an EXISTING record.
+
+  @Test
+  public void testIsWriteMethodTrueForPost() {
+    assertTrue(NeoHandlerUtils.isWriteMethod("POST"));
+  }
+
+  @Test
+  public void testIsWriteMethodTrueForPut() {
+    assertTrue(NeoHandlerUtils.isWriteMethod("PUT"));
+  }
+
+  @Test
+  public void testIsWriteMethodTrueForPatch() {
+    // This is the case the original inline POST/PUT checks in every header handler's
+    // mirrorAccountingDate() missed, causing accountingDate to never mirror on a real
+    // edit of an existing invoice/order/receipt/shipment.
+    assertTrue(NeoHandlerUtils.isWriteMethod("PATCH"));
+  }
+
+  @Test
+  public void testIsWriteMethodFalseForGet() {
+    assertTrue(!NeoHandlerUtils.isWriteMethod("GET"));
+  }
+
+  @Test
+  public void testIsWriteMethodFalseForDelete() {
+    assertTrue(!NeoHandlerUtils.isWriteMethod("DELETE"));
+  }
+
+  @Test
+  public void testIsWriteMethodFalseForNull() {
+    assertTrue(!NeoHandlerUtils.isWriteMethod(null));
+  }
 }
