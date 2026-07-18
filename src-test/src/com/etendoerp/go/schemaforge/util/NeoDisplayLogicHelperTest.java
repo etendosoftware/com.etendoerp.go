@@ -65,6 +65,7 @@ import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.utility.DimensionDisplayUtility;
+import org.openbravo.erpCommon.utility.OBLedgerUtils;
 import org.openbravo.model.ad.datamodel.Column;
 import org.openbravo.model.ad.datamodel.Table;
 import org.openbravo.model.ad.system.Client;
@@ -73,6 +74,7 @@ import org.openbravo.model.ad.ui.Field;
 import org.openbravo.model.ad.ui.Tab;
 import org.openbravo.model.common.enterprise.DocumentType;
 import org.openbravo.model.common.enterprise.Organization;
+import org.openbravo.model.financialmgmt.accounting.coa.AcctSchemaElement;
 
 import com.etendoerp.go.schemaforge.NeoResponse;
 import com.etendoerp.go.schemaforge.NeoServlet.NeoPathInfo;
@@ -969,6 +971,105 @@ class NeoDisplayLogicHelperTest {
       NeoResponse response = NeoDisplayLogicHelper.handleEvaluateDisplay(spec, pathInfo, request);
 
       assertEquals(200, response.getHttpStatus());
+    }
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // ETP-4529 follow-up: @ACCT_DIMENSION_DISPLAY@ for NON-centrally-maintained clients
+  //
+  // Root cause: for a client with acctdim_centrally_maintained = 'N', classic Etendo resolves
+  // $Element_<type> from the logged-in user's HTTP session, populated ONCE at login by
+  // LoginUtils#doLogin (which queries C_AcctSchema_Element for the org's ledger). NEO Headless's
+  // buildEvalContext() built a VariablesSecureApp via the "empty/manual instance" constructor
+  // (no HttpSession, no populated sessionAttributes -- confirmed via VariablesBase#getSessionValue
+  // falling back to an empty in-memory Map), so Utility.getContext's $-prefixed lookup ALWAYS
+  // returned "" here, making the macro permanently false for non-centrally-maintained clients
+  // regardless of GL Configuration -- confirmed live against a real invoice this ticket was
+  // reopened for (0BC614E563FC4E7EB63B6FCF9788730B / GOClient, acctdim_centrally_maintained='N').
+  //
+  // Fix: buildEvalContext now runs the SAME query LoginUtils ran at login
+  // (Attribute_data.xsql#selectAcctSchema: active C_AcctSchema_Element rows for the org's
+  // ledger), but live and scoped to the current tenant's own ledger via OBLedgerUtils#getOrgLedger
+  // + a direct OBCriteria query, instead of relying on session state that doesn't exist in this
+  // architecture.
+  // ═══════════════════════════════════════════════════════════════════════════
+  @Nested
+  @DisplayName("ETP-4529: ACCT_DIMENSION_DISPLAY macro for non-centrally-maintained clients")
+  class AcctDimensionDisplayNonCentrallyMaintainedRegressionTests {
+
+    @SuppressWarnings("unchecked")
+    private OBCriteria<AcctSchemaElement> stubActiveElementsCriteria(List<AcctSchemaElement> elements) {
+      OBCriteria<AcctSchemaElement> criteria = mock(OBCriteria.class);
+      when(obDal.createCriteria(AcctSchemaElement.class)).thenReturn(criteria);
+      when(criteria.add(any(Criterion.class))).thenReturn(criteria);
+      when(criteria.list()).thenReturn(elements);
+      return criteria;
+    }
+
+    private AcctSchemaElement elementOfType(String type) {
+      AcctSchemaElement element = mock(AcctSchemaElement.class);
+      when(element.getType()).thenReturn(type);
+      return element;
+    }
+
+    @Test
+    @DisplayName("sets $Element_<type>='Y' for active accounting-schema elements, 'N' for inactive ones")
+    void setsElementFlagsFromActiveAcctSchemaElements() throws Exception {
+      Client sysClient = mock(Client.class);
+      when(sysClient.isAcctdimCentrallyMaintained()).thenReturn(false);
+      when(obDal.get(eq(Client.class), eq("client-001"))).thenReturn(sysClient);
+
+      try (MockedStatic<OBLedgerUtils> ledgerMock = mockStatic(OBLedgerUtils.class)) {
+        ledgerMock.when(() -> OBLedgerUtils.getOrgLedger("org-001")).thenReturn("schema-001");
+        stubActiveElementsCriteria(List.of(elementOfType("PJ"), elementOfType("CC")));
+
+        Map<String, Object> ctx = NeoDisplayLogicHelper.buildEvalContext(new JSONObject());
+
+        assertEquals("Y", ctx.get("$Element_PJ"), "Project is active for this ledger");
+        assertEquals("Y", ctx.get("$Element_CC"), "Cost Center is active for this ledger");
+        assertEquals("N", ctx.get("$Element_BP"), "Business Partner was not returned as active");
+        assertEquals("N", ctx.get("$Element_PR"), "Product was not returned as active");
+      }
+    }
+
+    @Test
+    @DisplayName("toggling a dimension's isActive flips the resolved $Element_<type> flag")
+    void reflectsToggledActiveState() throws Exception {
+      Client sysClient = mock(Client.class);
+      when(sysClient.isAcctdimCentrallyMaintained()).thenReturn(false);
+      when(obDal.get(eq(Client.class), eq("client-001"))).thenReturn(sysClient);
+
+      try (MockedStatic<OBLedgerUtils> ledgerMock = mockStatic(OBLedgerUtils.class)) {
+        ledgerMock.when(() -> OBLedgerUtils.getOrgLedger("org-001")).thenReturn("schema-001");
+
+        // First evaluation: Cost Center is active.
+        stubActiveElementsCriteria(List.of(elementOfType("PJ"), elementOfType("CC")));
+        Map<String, Object> ctxBefore = NeoDisplayLogicHelper.buildEvalContext(new JSONObject());
+        assertEquals("Y", ctxBefore.get("$Element_CC"));
+
+        // Second evaluation (a fresh request): Cost Center was just deactivated in GL Configuration.
+        stubActiveElementsCriteria(List.of(elementOfType("PJ")));
+        Map<String, Object> ctxAfter = NeoDisplayLogicHelper.buildEvalContext(new JSONObject());
+        assertEquals("Y", ctxAfter.get("$Element_PJ"), "Project remains active");
+        assertEquals("N", ctxAfter.get("$Element_CC"), "Cost Center must reflect the live, current state");
+      }
+    }
+
+    @Test
+    @DisplayName("resolves all $Element_<type> flags to 'N' when the organization has no ledger")
+    void noLedgerYieldsAllFlagsFalse() throws Exception {
+      Client sysClient = mock(Client.class);
+      when(sysClient.isAcctdimCentrallyMaintained()).thenReturn(false);
+      when(obDal.get(eq(Client.class), eq("client-001"))).thenReturn(sysClient);
+
+      try (MockedStatic<OBLedgerUtils> ledgerMock = mockStatic(OBLedgerUtils.class)) {
+        ledgerMock.when(() -> OBLedgerUtils.getOrgLedger("org-001")).thenReturn(null);
+
+        Map<String, Object> ctx = NeoDisplayLogicHelper.buildEvalContext(new JSONObject());
+
+        assertEquals("N", ctx.get("$Element_PJ"));
+        assertEquals("N", ctx.get("$Element_CC"));
+      }
     }
   }
 }

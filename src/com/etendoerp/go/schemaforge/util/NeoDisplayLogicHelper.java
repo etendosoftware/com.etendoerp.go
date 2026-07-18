@@ -39,10 +39,12 @@ import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.utility.DimensionDisplayUtility;
+import org.openbravo.erpCommon.utility.OBLedgerUtils;
 import org.openbravo.erpCommon.utility.Utility;
 import org.openbravo.model.ad.datamodel.Column;
 import org.openbravo.model.ad.ui.Field;
 import org.openbravo.model.ad.ui.Tab;
+import org.openbravo.model.financialmgmt.accounting.coa.AcctSchemaElement;
 import org.openbravo.service.db.DalConnectionProvider;
 
 import com.etendoerp.go.schemaforge.NeoResponse;
@@ -253,17 +255,24 @@ public final class NeoDisplayLogicHelper {
             .getAccountingDimensionConfiguration(client);
         ctx.putAll(acctDimMap);
       } else {
-        DalConnectionProvider conn = new DalConnectionProvider(false);
-        VariablesSecureApp vars = new VariablesSecureApp(
-            obCtx.getUser().getId(),
-            obCtx.getCurrentClient().getId(),
-            obCtx.getCurrentOrganization().getId(),
-            obCtx.getRole().getId(),
-            obCtx.getLanguage().getLanguage());
+        // ETP-4529: for non-centrally-maintained clients, classic Etendo resolves
+        // $Element_<type> from the logged-in user's HTTP session, populated ONCE at login
+        // time by LoginUtils#doLogin (which queries C_AcctSchema_Element for the org's
+        // ledger and stamps "Y" into the session per active element type). NEO Headless is
+        // stateless/JWT-based — buildEvalContext's VariablesSecureApp is a fresh, empty
+        // "manual instance" (see its own Javadoc) with no HttpSession and no populated
+        // sessionAttributes, so Utility.getContext's $-prefixed lookup always returned "" here,
+        // making @ACCT_DIMENSION_DISPLAY@ permanently false for these clients regardless of
+        // configuration. Replicate the SAME query LoginUtils runs, but live and per request
+        // (scoped to the CURRENT tenant's own ledger) instead of relying on session state that
+        // doesn't exist in this architecture.
+        String acctSchemaId = OBLedgerUtils.getOrgLedger(obCtx.getCurrentOrganization().getId());
+        java.util.Set<String> activeElementTypes = acctSchemaId != null
+            ? queryActiveElementTypes(acctSchemaId)
+            : java.util.Collections.emptySet();
         String[] elements = { "MC", "AY", "OT", "AS", "CC", "U1", "U2", "PJ", "BU", "PR", "BP", "OO" };
         for (String el : elements) {
-          String key = "$Element_" + el;
-          ctx.put(key, Utility.getContext(conn, vars, key, ""));
+          ctx.put("$Element_" + el, activeElementTypes.contains(el) ? "Y" : "N");
         }
       }
       String transactionDocId = currentValues.containsKey("transactionDocument")
@@ -281,6 +290,28 @@ public final class NeoDisplayLogicHelper {
       log.debug("Could not resolve accounting dimension context: {}", e.getMessage());
     }
     return ctx;
+  }
+
+  /**
+   * Returns the {@code ElementType} of every active {@link AcctSchemaElement} row for the given
+   * accounting schema — e.g. {@code "PJ"} (Project), {@code "CC"} (Cost Center) — mirroring the
+   * query {@code LoginUtils#doLogin} runs once at classic-Etendo login time
+   * ({@code Attribute_data.xsql#selectAcctSchema}), but live and scoped to the caller's own
+   * tenant/ledger rather than cached in an HTTP session.
+   *
+   * @param acctSchemaId the accounting schema (ledger) ID to look up
+   * @return the set of active element type codes for that schema; empty if none are active
+   */
+  private static java.util.Set<String> queryActiveElementTypes(String acctSchemaId) {
+    OBCriteria<AcctSchemaElement> criteria = OBDal.getInstance().createCriteria(AcctSchemaElement.class);
+    criteria.add(Restrictions.eq(AcctSchemaElement.PROPERTY_ACCOUNTINGSCHEMA + ".id", acctSchemaId));
+    criteria.add(Restrictions.eq(AcctSchemaElement.PROPERTY_ACTIVE, true));
+    List<AcctSchemaElement> elements = criteria.list();
+    java.util.Set<String> types = new java.util.HashSet<>();
+    for (AcctSchemaElement element : elements) {
+      types.add(element.getType());
+    }
+    return types;
   }
 
   /**
