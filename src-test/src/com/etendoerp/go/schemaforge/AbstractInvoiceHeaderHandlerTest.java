@@ -139,10 +139,6 @@ public class AbstractInvoiceHeaderHandlerTest {
     public void callEnrichIsRectificative(JSONObject rec) throws Exception {
       enrichIsRectificative(rec);
     }
-
-    public NeoResponse callHandleCurrencyAfterCallout(NeoContext ctx) {
-      return handleCurrencyAfterCallout(ctx);
-    }
   }
 
   // ── ETP-4029: currency / exchange-rate hooks — test doubles ─────────────────
@@ -2624,7 +2620,7 @@ public class AbstractInvoiceHeaderHandlerTest {
         .requestBody(requestBody)
         .build();
 
-    NeoResponse result = handler.callHandleCurrencyAfterCallout(ctx);
+    NeoResponse result = handler.callHandleInvoiceAfterCallout(ctx);
 
     assertNull(result);
     assertEquals("2026-07-01", updates.getString("accountingDate"));
@@ -2645,7 +2641,7 @@ public class AbstractInvoiceHeaderHandlerTest {
         .requestBody(requestBody)
         .build();
 
-    handler.callHandleCurrencyAfterCallout(ctx);
+    handler.callHandleInvoiceAfterCallout(ctx);
 
     assertEquals("2026-07-01", updates.getString("accountingDate"));
   }
@@ -2662,7 +2658,7 @@ public class AbstractInvoiceHeaderHandlerTest {
         .requestBody(requestBody)
         .build();
 
-    handler.callHandleCurrencyAfterCallout(ctx);
+    handler.callHandleInvoiceAfterCallout(ctx);
 
     assertEquals("2026-07-05", updates.getString("accountingDate"));
   }

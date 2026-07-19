@@ -80,6 +80,7 @@ class NeoCrudHandler {
   private static final String PARAM_PARENT_ID = "parentId";
   private static final String HQL_AND_OPERATOR = " and ";
   private static final String JSON_IDENTIFIER = "_identifier";
+  private static final String FIELD_ACCOUNTING_DATE = "accountingDate";
   private static final Set<String> CONTACTS_PRECREATE_BILLING_FIELDS = new HashSet<>(
       Arrays.asList(
           "priceList",
@@ -661,8 +662,8 @@ class NeoCrudHandler {
     // `rawBody.has("accountingDate")` AFTER calling filterWriteRequest is always false,
     // because the filter already stripped it from that very same instance. Save the
     // pre-filter value first, while it still exists.
-    Object accountingDateBeforeFilter = rawBody != null ? rawBody.opt("accountingDate") : null;
-    boolean hadAccountingDate = rawBody != null && rawBody.has("accountingDate");
+    Object accountingDateBeforeFilter = rawBody != null ? rawBody.opt(FIELD_ACCOUNTING_DATE) : null;
+    boolean hadAccountingDate = rawBody != null && rawBody.has(FIELD_ACCOUNTING_DATE);
     JSONObject filteredBody = fieldFilter.filterWriteRequest(rawBody);
     // Inject lineNetAmount when absent from filteredBody (stripped by readOnly filter).
     // The frontend sends invoicedQuantity and unitPrice as editable fields, so both are
@@ -682,7 +683,7 @@ class NeoCrudHandler {
     // its DAL name via NeoFieldFilter#remapApiKeys, and DefaultJsonDataService only recognizes
     // DAL property names; injecting under the API key would silently no-op.
     if (hadAccountingDate) {
-      filteredBody.put(fieldFilter.resolveWritablePropName("accountingDate"), accountingDateBeforeFilter);
+      filteredBody.put(fieldFilter.resolveWritablePropName(FIELD_ACCOUNTING_DATE), accountingDateBeforeFilter);
     }
     String wrappedBody = wrapForSmartclient(filteredBody, dalEntityName, context.getRecordId());
     return jsonService.update(params, wrappedBody);
