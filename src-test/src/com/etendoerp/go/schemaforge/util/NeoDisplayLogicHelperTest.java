@@ -985,7 +985,8 @@ class NeoDisplayLogicHelperTest {
   // falling back to an empty in-memory Map), so Utility.getContext's $-prefixed lookup ALWAYS
   // returned "" here, making the macro permanently false for non-centrally-maintained clients
   // regardless of GL Configuration -- confirmed live against a real invoice this ticket was
-  // reopened for (0BC614E563FC4E7EB63B6FCF9788730B / GOClient, acctdim_centrally_maintained='N').
+  // reopened for: invoice 0BC614E563FC4E7EB63B6FCF9788730B, client GOClient, which has a
+  // non-centrally-maintained accounting-dimension configuration.
   //
   // Fix: buildEvalContext now runs the SAME query LoginUtils ran at login
   // (Attribute_data.xsql#selectAcctSchema: active C_AcctSchema_Element rows for the org's
