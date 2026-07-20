@@ -77,6 +77,14 @@
         <default/>
         <onCreateDefault/>
       </column>
+      <column name="PREV_JIRA_TICKET_KEY" primaryKey="false" required="false" type="VARCHAR" size="200" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="JIRA_REPORTER_ACCOUNT_ID" primaryKey="false" required="false" type="VARCHAR" size="200" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
       <foreign-key foreignTable="AD_CLIENT" name="ETGO_PORTCONVERSATION_LIENT_FK">
         <reference local="AD_CLIENT_ID" foreign="AD_CLIENT_ID"/>
       </foreign-key>

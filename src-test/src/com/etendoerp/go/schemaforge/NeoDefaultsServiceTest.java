@@ -23,6 +23,7 @@ import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doReturn;
@@ -1113,12 +1114,33 @@ public class NeoDefaultsServiceTest {
     Entity dalEntity = mock(Entity.class);
     VariablesSecureApp vars = mock(VariablesSecureApp.class);
 
+    // Inactive column — skipped by the !col.isActive() continue.
     Column inactiveCol = mockColumn("InactiveCol", true, false, false);
+    // Non-mandatory column with a real DAL property but NO resolvable default. Post-ETP-4274
+    // the loop no longer skips it on !isMandatory(); it now enters
+    // injectMandatoryDefaultForColumn and runs passes 1-3, which all fail here, so the
+    // !mandatory gate must leave it absent from the body (no combo/safe-type fallback).
     Column nonMandatoryCol = mockColumn("OptionalCol", false, false, true);
+    when(nonMandatoryCol.getDefaultValue()).thenReturn(null);
+    when(nonMandatoryCol.isLinkToParentColumn()).thenReturn(false);
+    when(nonMandatoryCol.isUseAutomaticSequence()).thenReturn(false);
+    Property optionalProp = mock(Property.class);
+    when(optionalProp.isAuditInfo()).thenReturn(false);
+    when(optionalProp.getName()).thenReturn("optional");
+    when(dalEntity.getPropertyByColumnName("OptionalCol")).thenReturn(optionalProp);
 
     when(adTab.getTable()).thenReturn(table);
     when(table.getId()).thenReturn("TABLE-1");
     when(table.getADColumnList()).thenReturn(Arrays.asList(inactiveCol, nonMandatoryCol));
+
+    OBDal obDal = mock(OBDal.class);
+    @SuppressWarnings("unchecked")
+    OBCriteria<SFField> sfFieldCriteria = mock(OBCriteria.class);
+    when(sfFieldCriteria.add(any())).thenReturn(sfFieldCriteria);
+    when(sfFieldCriteria.list()).thenReturn(Collections.emptyList());
+    when(obDal.createCriteria(SFField.class)).thenReturn(sfFieldCriteria);
+    when(sfEntity.getId()).thenReturn("entity-1");
+    when(vars.getSessionValue(anyString())).thenReturn("");
 
     NeoContext ctx = NeoContext.builder()
         .sfEntity(sfEntity)
@@ -1126,17 +1148,41 @@ public class NeoDefaultsServiceTest {
         .build();
 
     try (MockedStatic<ModelProvider> modelMock = mockStatic(ModelProvider.class);
+         MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+         MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
          MockedStatic<NeoCalloutService> calloutMock = mockStatic(NeoCalloutService.class);
          MockedStatic<NeoDefaultsCascadeHelper> cascadeMock =
-             mockStatic(NeoDefaultsCascadeHelper.class)) {
+             mockStatic(NeoDefaultsCascadeHelper.class);
+         MockedStatic<SequenceUtils> sequenceMock = mockStatic(SequenceUtils.class);
+         MockedStatic<Utility> utilityMock = mockStatic(Utility.class);
+         MockedStatic<DocTypeResolver> docTypeMock = mockStatic(DocTypeResolver.class);
+         MockedStatic<NeoSelectorService> selectorMock = mockStatic(NeoSelectorService.class);
+         MockedStatic<NeoParentValuesLoader> parentMock =
+             mockStatic(NeoParentValuesLoader.class)) {
       ModelProvider mp = mock(ModelProvider.class);
       modelMock.when(ModelProvider::getInstance).thenReturn(mp);
       when(mp.getEntityByTableId("TABLE-1")).thenReturn(dalEntity);
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      obContextMock.when(() -> OBContext.setAdminMode(true)).thenAnswer(inv -> null);
+      obContextMock.when(OBContext::restorePreviousMode).thenAnswer(inv -> null);
       calloutMock.when(() -> NeoCalloutService.buildVars(obContext, adTab)).thenReturn(vars);
+      sequenceMock.when(() -> SequenceUtils.isSequence(nonMandatoryCol)).thenReturn(false);
+      utilityMock.when(() -> Utility.getPreference(eq(vars), eq("OptionalCol"), anyString()))
+          .thenReturn(null);
+      docTypeMock.when(() -> DocTypeResolver.resolveDefaultDocTypeId(eq(nonMandatoryCol), any()))
+          .thenReturn(null);
+      parentMock.when(() -> NeoParentValuesLoader.load(adTab, null))
+          .thenReturn(java.util.Collections.emptyMap());
 
       NeoDefaultsService.injectMandatoryDefaults(body, adTab, ctx);
 
       assertEquals("Inactive/non-mandatory columns should be skipped", 0, body.length());
+      // The !mandatory gate must prevent the NOT-NULL safety fallbacks from firing on the
+      // optional column (preserves ETP-3894 — no silent combo first-pick / safe-type default).
+      selectorMock.verify(() -> NeoSelectorService.querySelectorByColumn(
+          any(), anyString(), any(), anyInt(), anyInt(), any()), never());
+      cascadeMock.verify(() -> NeoDefaultsCascadeHelper.injectSafeTypeDefault(
+          any(), anyString(), any()), never());
     }
   }
 
@@ -3309,6 +3355,260 @@ public class NeoDefaultsServiceTest {
       assertEquals(
           "Without ETGO_SF_FIELD default, AD_Column default 'DR' must be used",
           "DR", body.getString("documentStatus"));
+    }
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // injectMandatoryDefaults — ETP-4274: non-mandatory column WITH a genuine
+  // resolvable default IS injected on create (regression for the !isMandatory()
+  // early-continue that previously skipped such columns entirely)
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  @Test
+  @SuppressWarnings("unchecked")
+  public void testInjectMandatoryDefaultsNonMandatoryWithSessionDefaultIsInjected()
+      throws Exception {
+    JSONObject body = new JSONObject();
+    Tab adTab = mock(Tab.class);
+    Table table = mock(Table.class);
+    OBContext obContext = mock(OBContext.class);
+    SFEntity sfEntity = mock(SFEntity.class);
+    Entity dalEntity = mock(Entity.class);
+    VariablesSecureApp vars = mock(VariablesSecureApp.class);
+    OBDal obDal = mock(OBDal.class);
+
+    // Non-mandatory FK column whose value resolves through the session-context pass.
+    // The AD-default and parent-value passes both miss, so only the session pass
+    // supplies a value for the currency property here.
+    Column currencyCol = mock(Column.class);
+    when(currencyCol.getDBColumnName()).thenReturn("C_Currency_ID");
+    when(currencyCol.isMandatory()).thenReturn(false);
+    when(currencyCol.isActive()).thenReturn(true);
+    when(currencyCol.isKeyColumn()).thenReturn(false);
+    when(currencyCol.getDefaultValue()).thenReturn(null);
+    when(currencyCol.isLinkToParentColumn()).thenReturn(false);
+    when(currencyCol.isUseAutomaticSequence()).thenReturn(false);
+
+    Property currencyProp = mock(Property.class);
+    when(currencyProp.getName()).thenReturn("currency");
+    when(currencyProp.isAuditInfo()).thenReturn(false);
+    when(dalEntity.getPropertyByColumnName("C_Currency_ID")).thenReturn(currencyProp);
+    // tryInjectIdentifier looks up getProperty(propName); null => harmless no-op
+    when(dalEntity.getProperty("currency")).thenReturn(null);
+
+    when(adTab.getTable()).thenReturn(table);
+    when(table.getId()).thenReturn("TABLE-CUR");
+    when(table.getADColumnList()).thenReturn(Collections.singletonList(currencyCol));
+
+    // Pass 1 (resolveFieldDefault) must yield null: no AD default, no preference, no doctype.
+    // Pass 2 (session) returns the currency id under the "#C_Currency_ID" key.
+    when(vars.getSessionValue("#C_Currency_ID")).thenReturn("CUR-EUR");
+
+    OBCriteria<SFField> sfFieldCriteria = mock(OBCriteria.class);
+    when(sfFieldCriteria.add(any())).thenReturn(sfFieldCriteria);
+    when(sfFieldCriteria.list()).thenReturn(Collections.emptyList());
+    when(obDal.createCriteria(SFField.class)).thenReturn(sfFieldCriteria);
+    when(sfEntity.getId()).thenReturn("entity-cur");
+
+    NeoContext ctx = NeoContext.builder()
+        .sfEntity(sfEntity)
+        .obContext(obContext)
+        .build();
+
+    try (MockedStatic<ModelProvider> modelMock = mockStatic(ModelProvider.class);
+         MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+         MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
+         MockedStatic<NeoCalloutService> calloutMock = mockStatic(NeoCalloutService.class);
+         MockedStatic<NeoDefaultsCascadeHelper> cascadeMock =
+             mockStatic(NeoDefaultsCascadeHelper.class);
+         MockedStatic<SequenceUtils> sequenceMock = mockStatic(SequenceUtils.class);
+         MockedStatic<Utility> utilityMock = mockStatic(Utility.class);
+         MockedStatic<DocTypeResolver> docTypeMock = mockStatic(DocTypeResolver.class);
+         MockedStatic<NeoParentValuesLoader> parentMock =
+             mockStatic(NeoParentValuesLoader.class)) {
+      ModelProvider mp = mock(ModelProvider.class);
+      modelMock.when(ModelProvider::getInstance).thenReturn(mp);
+      when(mp.getEntityByTableId("TABLE-CUR")).thenReturn(dalEntity);
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      obContextMock.when(() -> OBContext.setAdminMode(true)).thenAnswer(inv -> null);
+      obContextMock.when(OBContext::restorePreviousMode).thenAnswer(inv -> null);
+      calloutMock.when(() -> NeoCalloutService.buildVars(obContext, adTab)).thenReturn(vars);
+      cascadeMock.when(() -> NeoDefaultsCascadeHelper.resolveDalEntity(sfEntity))
+          .thenReturn(dalEntity);
+      sequenceMock.when(() -> SequenceUtils.isSequence(currencyCol)).thenReturn(false);
+      utilityMock.when(() -> Utility.getPreference(eq(vars), eq("C_Currency_ID"), anyString()))
+          .thenReturn(null);
+      docTypeMock.when(() -> DocTypeResolver.resolveDefaultDocTypeId(eq(currencyCol), any()))
+          .thenReturn(null);
+      parentMock.when(() -> NeoParentValuesLoader.load(adTab, null))
+          .thenReturn(java.util.Collections.emptyMap());
+
+      NeoDefaultsService.injectMandatoryDefaults(body, adTab, ctx);
+
+      assertTrue("Non-mandatory column with a session default must be injected (ETP-4274)",
+          body.has("currency"));
+      assertEquals("CUR-EUR", body.getString("currency"));
+    }
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // injectMandatoryDefaults — ETP-4274: a mandatory column with NO genuine
+  // default still runs the safe-type fallback (NOT NULL parity is unchanged)
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  @Test
+  @SuppressWarnings("unchecked")
+  public void testInjectMandatoryDefaultsMandatoryWithoutDefaultRunsSafeTypeFallback() {
+    JSONObject body = new JSONObject();
+    Tab adTab = mock(Tab.class);
+    Table table = mock(Table.class);
+    OBContext obContext = mock(OBContext.class);
+    SFEntity sfEntity = mock(SFEntity.class);
+    Entity dalEntity = mock(Entity.class);
+    VariablesSecureApp vars = mock(VariablesSecureApp.class);
+    OBDal obDal = mock(OBDal.class);
+
+    // Mandatory non-FK column with no AD default, no session, no parent value. Passes 1-3
+    // fail; because it IS mandatory, execution must continue past the !mandatory gate and
+    // reach the NOT-NULL fallbacks (combo lookup, then injectSafeTypeDefault).
+    Column flagCol = mock(Column.class);
+    when(flagCol.getDBColumnName()).thenReturn("ProcessingStatus");
+    when(flagCol.isMandatory()).thenReturn(true);
+    when(flagCol.isActive()).thenReturn(true);
+    when(flagCol.isKeyColumn()).thenReturn(false);
+    when(flagCol.getDefaultValue()).thenReturn(null);
+    when(flagCol.isLinkToParentColumn()).thenReturn(false);
+    when(flagCol.isUseAutomaticSequence()).thenReturn(false);
+
+    Property flagProp = mock(Property.class);
+    when(flagProp.getName()).thenReturn("processingStatus");
+    when(flagProp.isAuditInfo()).thenReturn(false);
+    when(dalEntity.getPropertyByColumnName("ProcessingStatus")).thenReturn(flagProp);
+
+    when(adTab.getTable()).thenReturn(table);
+    when(table.getId()).thenReturn("TABLE-FLAG");
+    when(table.getADColumnList()).thenReturn(Collections.singletonList(flagCol));
+
+    when(vars.getSessionValue(anyString())).thenReturn("");
+
+    OBCriteria<SFField> sfFieldCriteria = mock(OBCriteria.class);
+    when(sfFieldCriteria.add(any())).thenReturn(sfFieldCriteria);
+    when(sfFieldCriteria.list()).thenReturn(Collections.emptyList());
+    when(obDal.createCriteria(SFField.class)).thenReturn(sfFieldCriteria);
+    when(sfEntity.getId()).thenReturn("entity-flag");
+
+    NeoContext ctx = NeoContext.builder()
+        .sfEntity(sfEntity)
+        .obContext(obContext)
+        .build();
+
+    try (MockedStatic<ModelProvider> modelMock = mockStatic(ModelProvider.class);
+         MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+         MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
+         MockedStatic<NeoCalloutService> calloutMock = mockStatic(NeoCalloutService.class);
+         MockedStatic<NeoDefaultsCascadeHelper> cascadeMock =
+             mockStatic(NeoDefaultsCascadeHelper.class);
+         MockedStatic<SequenceUtils> sequenceMock = mockStatic(SequenceUtils.class);
+         MockedStatic<Utility> utilityMock = mockStatic(Utility.class);
+         MockedStatic<DocTypeResolver> docTypeMock = mockStatic(DocTypeResolver.class);
+         MockedStatic<NeoSelectorService> selectorMock = mockStatic(NeoSelectorService.class);
+         MockedStatic<NeoParentValuesLoader> parentMock =
+             mockStatic(NeoParentValuesLoader.class)) {
+      ModelProvider mp = mock(ModelProvider.class);
+      modelMock.when(ModelProvider::getInstance).thenReturn(mp);
+      when(mp.getEntityByTableId("TABLE-FLAG")).thenReturn(dalEntity);
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      obContextMock.when(() -> OBContext.setAdminMode(true)).thenAnswer(inv -> null);
+      obContextMock.when(OBContext::restorePreviousMode).thenAnswer(inv -> null);
+      calloutMock.when(() -> NeoCalloutService.buildVars(obContext, adTab)).thenReturn(vars);
+      sequenceMock.when(() -> SequenceUtils.isSequence(flagCol)).thenReturn(false);
+      utilityMock.when(() -> Utility.getPreference(eq(vars), eq("ProcessingStatus"), anyString()))
+          .thenReturn(null);
+      docTypeMock.when(() -> DocTypeResolver.resolveDefaultDocTypeId(eq(flagCol), any()))
+          .thenReturn(null);
+      // Combo first-pick (pass 4) returns no combo reference, so pass 5 (safe-type) must run.
+      selectorMock.when(() -> NeoSelectorService.getBaseReferenceId(flagCol)).thenReturn("10");
+      parentMock.when(() -> NeoParentValuesLoader.load(adTab, null))
+          .thenReturn(java.util.Collections.emptyMap());
+
+      NeoDefaultsService.injectMandatoryDefaults(body, adTab, ctx);
+
+      // The mandatory column must reach the safe-type fallback — proving the !mandatory gate
+      // does NOT short-circuit mandatory columns (NOT NULL parity preserved).
+      cascadeMock.verify(() -> NeoDefaultsCascadeHelper.injectSafeTypeDefault(
+          eq(body), eq("processingStatus"), eq(flagCol)));
+    }
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // injectMandatoryDefaults — ETP-4274: a user-supplied value always wins
+  // (body.has(propName) early-return), even for a non-mandatory column
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  @Test
+  @SuppressWarnings("unchecked")
+  public void testInjectMandatoryDefaultsUserValueWinsForNonMandatoryColumn() throws Exception {
+    JSONObject body = new JSONObject();
+    body.put("currency", "USER-USD");
+
+    Tab adTab = mock(Tab.class);
+    Table table = mock(Table.class);
+    OBContext obContext = mock(OBContext.class);
+    SFEntity sfEntity = mock(SFEntity.class);
+    Entity dalEntity = mock(Entity.class);
+    VariablesSecureApp vars = mock(VariablesSecureApp.class);
+    OBDal obDal = mock(OBDal.class);
+
+    Column currencyCol = mock(Column.class);
+    when(currencyCol.getDBColumnName()).thenReturn("C_Currency_ID");
+    when(currencyCol.isMandatory()).thenReturn(false);
+    when(currencyCol.isActive()).thenReturn(true);
+    when(currencyCol.isKeyColumn()).thenReturn(false);
+
+    Property currencyProp = mock(Property.class);
+    when(currencyProp.getName()).thenReturn("currency");
+    when(currencyProp.isAuditInfo()).thenReturn(false);
+    when(dalEntity.getPropertyByColumnName("C_Currency_ID")).thenReturn(currencyProp);
+
+    when(adTab.getTable()).thenReturn(table);
+    when(table.getId()).thenReturn("TABLE-CUR");
+    when(table.getADColumnList()).thenReturn(Collections.singletonList(currencyCol));
+    // A session value exists — but the user value already in the body must win.
+    when(vars.getSessionValue("#C_Currency_ID")).thenReturn("CUR-EUR");
+
+    OBCriteria<SFField> sfFieldCriteria = mock(OBCriteria.class);
+    when(sfFieldCriteria.add(any())).thenReturn(sfFieldCriteria);
+    when(sfFieldCriteria.list()).thenReturn(Collections.emptyList());
+    when(obDal.createCriteria(SFField.class)).thenReturn(sfFieldCriteria);
+    when(sfEntity.getId()).thenReturn("entity-cur");
+
+    NeoContext ctx = NeoContext.builder()
+        .sfEntity(sfEntity)
+        .obContext(obContext)
+        .build();
+
+    try (MockedStatic<ModelProvider> modelMock = mockStatic(ModelProvider.class);
+         MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+         MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
+         MockedStatic<NeoCalloutService> calloutMock = mockStatic(NeoCalloutService.class);
+         MockedStatic<NeoDefaultsCascadeHelper> cascadeMock =
+             mockStatic(NeoDefaultsCascadeHelper.class);
+         MockedStatic<NeoParentValuesLoader> parentMock =
+             mockStatic(NeoParentValuesLoader.class)) {
+      ModelProvider mp = mock(ModelProvider.class);
+      modelMock.when(ModelProvider::getInstance).thenReturn(mp);
+      when(mp.getEntityByTableId("TABLE-CUR")).thenReturn(dalEntity);
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      obContextMock.when(() -> OBContext.setAdminMode(true)).thenAnswer(inv -> null);
+      obContextMock.when(OBContext::restorePreviousMode).thenAnswer(inv -> null);
+      calloutMock.when(() -> NeoCalloutService.buildVars(obContext, adTab)).thenReturn(vars);
+      parentMock.when(() -> NeoParentValuesLoader.load(adTab, null))
+          .thenReturn(java.util.Collections.emptyMap());
+
+      NeoDefaultsService.injectMandatoryDefaults(body, adTab, ctx);
+
+      assertEquals("User-supplied value must not be overwritten", "USER-USD",
+          body.getString("currency"));
     }
   }
 }
