@@ -18,19 +18,31 @@ package com.etendoerp.go.schemaforge;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.when;
 
 import java.math.BigDecimal;
 import java.sql.Timestamp;
 import java.time.LocalDate;
+import java.time.ZoneId;
 import java.time.ZoneOffset;
+import java.util.ArrayList;
 import java.util.Date;
+import java.util.List;
+import java.util.function.Consumer;
 
 import org.codehaus.jettison.json.JSONObject;
+import org.junit.After;
 import org.junit.Test;
+import org.mockito.MockedStatic;
+import org.mockito.Mockito;
+import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.currency.Currency;
+import org.openbravo.model.financialmgmt.gl.GLItem;
 import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
 
 /**
@@ -39,6 +51,17 @@ import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
  * request-body parsing helpers. No DB or OBBaseTest — everything is either pure or mocked.
  */
 public class FinancialAccountTransactionsSupportTest {
+
+  /**
+   * Releases the inline-mock references retained by Mockito for the mocks created in the
+   * {@code setOptionalRef} tests below (which static-mock {@link OBDal}). The module runs a single
+   * test JVM, so leaking these across the whole suite pushes the fork past its heap limit — clearing
+   * them after each test keeps the heap flat.
+   */
+  @After
+  public void clearMocks() {
+    Mockito.framework().clearInlineMocks();
+  }
 
   // ---------------------------------------------------------------
   // trxTypeClassicLabel
@@ -295,6 +318,117 @@ public class FinancialAccountTransactionsSupportTest {
   public void testParseDateInvalidIsoReturnsFallback() {
     Date fallback = new Date(123L);
     assertEquals(fallback, FinancialAccountTransactionsSupport.parseDate("not-a-date", fallback));
+  }
+
+  // ---------------------------------------------------------------
+  // parseLocalDate
+  // ---------------------------------------------------------------
+
+  /**
+   * A blank / null input returns the supplied fallback untouched, matching {@code parseDate}.
+   */
+  @Test
+  public void testParseLocalDateBlankReturnsFallback() {
+    Date fallback = new Date(0L);
+    assertEquals(fallback, FinancialAccountTransactionsSupport.parseLocalDate(null, fallback));
+    assertEquals(fallback, FinancialAccountTransactionsSupport.parseLocalDate("   ", fallback));
+  }
+
+  /**
+   * A full ISO instant ("2026-07-16T00:00:00Z") is truncated to its date part and parsed to the
+   * SERVER's local start-of-day (asserted against {@code ZoneId.systemDefault()} so the test is
+   * timezone-independent).
+   */
+  @Test
+  public void testParseLocalDateFullIsoParsedToLocalStartOfDay() {
+    Date result = FinancialAccountTransactionsSupport.parseLocalDate("2026-07-16T00:00:00Z", null);
+    long expected = LocalDate.of(2026, 7, 16)
+        .atStartOfDay(ZoneId.systemDefault()).toInstant().toEpochMilli();
+    assertEquals(expected, result.getTime());
+  }
+
+  /**
+   * A date-only value ("2026-07-16") is parsed to the server's local start-of-day.
+   */
+  @Test
+  public void testParseLocalDateDateOnlyParsedToLocalStartOfDay() {
+    Date result = FinancialAccountTransactionsSupport.parseLocalDate("2026-07-16", null);
+    long expected = LocalDate.of(2026, 7, 16)
+        .atStartOfDay(ZoneId.systemDefault()).toInstant().toEpochMilli();
+    assertEquals(expected, result.getTime());
+  }
+
+  /**
+   * An unparseable value returns the fallback (the {@code catch} branch).
+   */
+  @Test
+  public void testParseLocalDateInvalidReturnsFallback() {
+    Date fallback = new Date(456L);
+    assertEquals(fallback, FinancialAccountTransactionsSupport.parseLocalDate("not-a-date", fallback));
+  }
+
+  // ---------------------------------------------------------------
+  // setOptionalRef
+  // ---------------------------------------------------------------
+
+  /**
+   * When the key is ABSENT the reference is left unchanged — the setter is never called (and the
+   * DAL is never touched).
+   */
+  @Test
+  public void testSetOptionalRefAbsentKeyDoesNotCallSetter() {
+    JSONObject body = new JSONObject();
+    List<GLItem> captured = new ArrayList<>();
+    Consumer<GLItem> setter = captured::add;
+
+    try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      FinancialAccountTransactionsSupport.setOptionalRef(body, "glItemId", GLItem.class, setter);
+      assertEquals(0, captured.size());
+      obDalMock.verifyNoInteractions();
+    }
+  }
+
+  /**
+   * When the key is present-but-BLANK the reference is CLEARED — the setter is invoked once with
+   * {@code null} and no DAL lookup happens.
+   */
+  @Test
+  public void testSetOptionalRefBlankValueClearsReference() throws Exception {
+    JSONObject body = new JSONObject();
+    body.put("glItemId", "");
+    List<GLItem> captured = new ArrayList<>();
+    Consumer<GLItem> setter = captured::add;
+
+    try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      FinancialAccountTransactionsSupport.setOptionalRef(body, "glItemId", GLItem.class, setter);
+      assertEquals(1, captured.size());
+      assertNull(captured.get(0));
+      obDalMock.verifyNoInteractions();
+    }
+  }
+
+  /**
+   * When the key carries an id the referenced entity is loaded via {@code OBDal.get} and passed to
+   * the setter.
+   */
+  @Test
+  public void testSetOptionalRefWithIdLoadsAndSetsEntity() throws Exception {
+    JSONObject body = new JSONObject();
+    body.put("glItemId", "gl-1");
+    GLItem glItem = mock(GLItem.class);
+    List<GLItem> captured = new ArrayList<>();
+    Consumer<GLItem> setter = captured::add;
+
+    try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(eq(GLItem.class), eq("gl-1"))).thenReturn(glItem);
+
+      FinancialAccountTransactionsSupport.setOptionalRef(body, "glItemId", GLItem.class, setter);
+
+      assertEquals(1, captured.size());
+      assertSame(glItem, captured.get(0));
+    }
   }
 
   // ---------------------------------------------------------------
