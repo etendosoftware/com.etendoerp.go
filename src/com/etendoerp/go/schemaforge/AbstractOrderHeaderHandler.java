@@ -478,11 +478,7 @@ public abstract class AbstractOrderHeaderHandler implements NeoHandler {
     }
     double factor = 1.0 - discountPct / 100.0;
     double grand = order.optDouble(FIELD_GRAND_TOTAL_AMOUNT, 0.0);
-    order.put(FIELD_GRAND_TOTAL_AMOUNT, roundHalfUp(grand * factor));
-  }
-
-  private static double roundHalfUp(double value) {
-    return Math.round(value * 100.0) / 100.0;
+    order.put(FIELD_GRAND_TOTAL_AMOUNT, NeoHandlerUtils.roundHalfUp(grand * factor));
   }
 
   private void annotateListWithLinkedDocuments(JSONArray dataArr) throws Exception {

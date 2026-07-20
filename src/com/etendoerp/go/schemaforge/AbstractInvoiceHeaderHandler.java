@@ -481,13 +481,9 @@ public abstract class AbstractInvoiceHeaderHandler {
     }
     double factor = 1.0 - discountPct / 100.0;
     double grand = invoice.optDouble(FIELD_GRAND_TOTAL_AMOUNT, 0.0);
-    invoice.put(FIELD_GRAND_TOTAL_AMOUNT, roundHalfUp(grand * factor));
+    invoice.put(FIELD_GRAND_TOTAL_AMOUNT, NeoHandlerUtils.roundHalfUp(grand * factor));
     double outstanding = invoice.optDouble(FIELD_OUTSTANDING_AMOUNT, 0.0);
-    invoice.put(FIELD_OUTSTANDING_AMOUNT, roundHalfUp(outstanding * factor));
-  }
-
-  protected static double roundHalfUp(double value) {
-    return Math.round(value * 100.0) / 100.0;
+    invoice.put(FIELD_OUTSTANDING_AMOUNT, NeoHandlerUtils.roundHalfUp(outstanding * factor));
   }
 
   // ---------------------------------------------------------------------------

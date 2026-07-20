@@ -124,6 +124,15 @@ final class NeoHandlerUtils {
   }
 
   /**
+   * Rounds a double to 2 decimal places, half-up. Shared by the order/invoice pending
+   * total-discount GET-response adjustment ({@code applyTotalDiscountToRecord} in both
+   * {@code AbstractOrderHeaderHandler} and {@code AbstractInvoiceHeaderHandler}).
+   */
+  static double roundHalfUp(double value) {
+    return Math.round(value * 100.0) / 100.0;
+  }
+
+  /**
    * Collects non-blank {@code id} values from a JSON array of records.
    */
   static List<String> collectIds(JSONArray dataArr) throws Exception {
