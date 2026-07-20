@@ -238,6 +238,18 @@ public class NeoAccessHelperTest {
     assertTrue(NeoAccessHelper.hasObuiappProcessAccess("obuiapp-proc-id"));
   }
 
+  /**
+   * Code-review WARNING fix: hasObuiappProcessAccess used to call
+   * OBContext.getOBContext().getRole().getId() directly and NPE when no role was
+   * assigned, instead of denying like hasWindowAccess/hasProcessAccess do.
+   */
+  @Test
+  public void hasObuiappProcessAccess_noRoleAssigned_returnsFalse() {
+    when(context.getRole()).thenReturn(null);
+
+    assertFalse(NeoAccessHelper.hasObuiappProcessAccess("any-obuiapp-proc-id"));
+  }
+
   @SuppressWarnings("unchecked")
   @Test
   public void hasObuiappProcessAccess_roleWithAccess_returnsTrue() {

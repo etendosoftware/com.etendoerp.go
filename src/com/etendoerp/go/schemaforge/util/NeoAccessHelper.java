@@ -185,10 +185,15 @@ public final class NeoAccessHelper {
    *
    * @param processId the ID of the OBUIAPP process definition to check
    * @return {@code true} if the current role has an active OBUIAPP process-access record,
-   *         or if the role is the system administrator role
+   *         or if the role is the system administrator role; {@code false} if no role is
+   *         assigned to the current context
    */
   public static boolean hasObuiappProcessAccess(String processId) {
-    String roleId = OBContext.getOBContext().getRole().getId();
+    Role role = currentRole();
+    if (role == null) {
+      return false;
+    }
+    String roleId = role.getId();
     if ("0".equals(roleId)) {
       return true;
     }
