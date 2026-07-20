@@ -150,30 +150,44 @@ public class InvoiceExchangeRateHandler implements NeoHandler {
       return null;
     }
     try {
-      BigDecimal grandTotal = doc.getInvoice().getGrandTotalAmount();
-      // hasTotal only gates the foreignAmount<->rate cross-derivation below (dividing
-      // by a zero/missing grand total is undefined). It must NOT gate the header sync:
-      // eTGOCurrencyRate is just 1/rate and never needs the invoice total, so a
-      // lineless draft (grandTotal=0) can still set it from an edited rate.
-      boolean hasTotal = grandTotal != null && grandTotal.signum() != 0;
-      boolean rateChanged = newRate != null && !equalsDecimal(newRate, doc.getRate());
-      boolean foreignChanged = newForeign != null && !equalsDecimal(newForeign, doc.getForeignAmount());
-      BigDecimal effectiveDocRate = null;
-      if (rateChanged && newRate.signum() != 0) {
-        effectiveDocRate = newRate;
-        if (hasTotal) {
-          body.put(PROPERTY_FOREIGN_AMOUNT, grandTotal.multiply(newRate));
-        }
-      } else if (foreignChanged && newForeign.signum() != 0 && hasTotal) {
-        effectiveDocRate = newForeign.divide(grandTotal, RATE_SCALE, RoundingMode.HALF_UP);
-        body.put(PROPERTY_RATE, effectiveDocRate);
-      }
+      BigDecimal effectiveDocRate = resolveEffectiveDocRate(body, doc, newRate, newForeign);
       if (effectiveDocRate != null) {
         syncHeaderCurrencyRate(doc.getInvoice(), effectiveDocRate);
       }
     } catch (Exception e) {
       log.error("Failed to recompute derived fields on update for conversion rate doc {}", recordId, e);
       throw new OBException(e);
+    }
+    return null;
+  }
+
+  /**
+   * Determines which side of the {@code rate} / {@code foreignAmount} pair the user actually
+   * edited (comparing the incoming values against the persisted row), recomputes the counterpart
+   * into {@code body} when the invoice total allows it, and returns the resulting doc→org rate to
+   * mirror onto the header — or {@code null} when neither side changed.
+   *
+   * <p>hasTotal only gates the foreignAmount&lt;-&gt;rate cross-derivation (dividing by a
+   * zero/missing grand total is undefined). It must NOT gate the returned rate itself:
+   * eTGOCurrencyRate is just 1/rate and never needs the invoice total, so a lineless draft
+   * (grandTotal=0) still returns a rate to sync from an edited {@code rate} field.
+   */
+  private static BigDecimal resolveEffectiveDocRate(JSONObject body, ConversionRateDoc doc,
+      BigDecimal newRate, BigDecimal newForeign) throws Exception {
+    BigDecimal grandTotal = doc.getInvoice().getGrandTotalAmount();
+    boolean hasTotal = grandTotal != null && grandTotal.signum() != 0;
+    boolean rateChanged = newRate != null && !equalsDecimal(newRate, doc.getRate());
+    boolean foreignChanged = newForeign != null && !equalsDecimal(newForeign, doc.getForeignAmount());
+    if (rateChanged && newRate.signum() != 0) {
+      if (hasTotal) {
+        body.put(PROPERTY_FOREIGN_AMOUNT, grandTotal.multiply(newRate));
+      }
+      return newRate;
+    }
+    if (foreignChanged && newForeign.signum() != 0 && hasTotal) {
+      BigDecimal effectiveDocRate = newForeign.divide(grandTotal, RATE_SCALE, RoundingMode.HALF_UP);
+      body.put(PROPERTY_RATE, effectiveDocRate);
+      return effectiveDocRate;
     }
     return null;
   }
