@@ -17,6 +17,7 @@
 
 package com.etendoerp.go.schemaforge.util;
 
+import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
@@ -34,9 +35,12 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 
+import org.hibernate.criterion.Criterion;
+import org.hibernate.criterion.SimpleExpression;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
+import org.mockito.ArgumentCaptor;
 import org.mockito.MockedStatic;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
@@ -192,6 +196,96 @@ public class NeoAccessHelperTest {
     assertFalse(NeoAccessHelper.hasWindowAccess("no-row-window-id", "POST"));
     assertFalse(NeoAccessHelper.hasWindowAccess("no-row-window-id", "PUT"));
     assertFalse(NeoAccessHelper.hasWindowAccess("no-row-window-id", "DELETE"));
+  }
+
+  /**
+   * QA gap-closer: every other {@code hasWindowAccess} test stubs
+   * {@code criteria.add(any())} — proving the method returns the right boolean for a given
+   * canned {@code criteria.list()} result, but NOT that {@code findActiveWindowAccess} actually
+   * asks Hibernate for the right thing. This test captures the real {@link Criterion} instances
+   * passed to {@code criteria.add(...)} and asserts their property/value, so a regression that
+   * (for example) swapped the window-id and role-id filters, or dropped the
+   * {@code isActive = true} filter, would fail here even though the higher-level
+   * true/false-returning tests would still pass with a stub that always answers "found".
+   */
+  @SuppressWarnings("unchecked")
+  @Test
+  public void hasWindowAccess_queriesCriteriaWithWindowIdRoleIdAndActiveTrue() {
+    when(role.getId()).thenReturn("role-id-captured");
+    OBCriteria<WindowAccess> criteria = mock(OBCriteria.class);
+    when(dal.createCriteria(WindowAccess.class)).thenReturn(criteria);
+    ArgumentCaptor<Criterion> captor = ArgumentCaptor.forClass(Criterion.class);
+    when(criteria.add(captor.capture())).thenReturn(criteria);
+    when(criteria.setMaxResults(1)).thenReturn(criteria);
+    when(criteria.list()).thenReturn(Collections.emptyList());
+
+    NeoAccessHelper.hasWindowAccess("the-real-window-id", "GET");
+
+    List<Criterion> filters = captor.getAllValues();
+    assertEquals("Expected exactly 3 filters (window, role, active)", 3, filters.size());
+
+    boolean sawWindowFilter = false;
+    boolean sawRoleFilter = false;
+    boolean sawActiveFilter = false;
+    for (Criterion c : filters) {
+      SimpleExpression expr = (SimpleExpression) c;
+      if ((WindowAccess.PROPERTY_WINDOW + ".id").equals(expr.getPropertyName())) {
+        assertEquals("the-real-window-id", expr.getValue());
+        sawWindowFilter = true;
+      } else if ((WindowAccess.PROPERTY_ROLE + ".id").equals(expr.getPropertyName())) {
+        assertEquals("role-id-captured", expr.getValue());
+        sawRoleFilter = true;
+      } else if (WindowAccess.PROPERTY_ACTIVE.equals(expr.getPropertyName())) {
+        assertEquals(Boolean.TRUE, expr.getValue());
+        sawActiveFilter = true;
+      }
+    }
+    assertTrue("Missing filter on WindowAccess.window.id", sawWindowFilter);
+    assertTrue("Missing filter on WindowAccess.role.id", sawRoleFilter);
+    assertTrue("Missing filter on WindowAccess.active = true (an inactive row must "
+        + "behave as no-row-at-all, i.e. deny)", sawActiveFilter);
+  }
+
+  /**
+   * QA gap-closer: a role that has an active, full-access {@code WindowAccess} row for a
+   * DIFFERENT window than the one being requested must still be denied — the row must never
+   * leak access to a window it was not granted for. Since the Hibernate criteria itself cannot
+   * run against a real database in a unit test, this is asserted the same way as
+   * {@link #hasWindowAccess_queriesCriteriaWithWindowIdRoleIdAndActiveTrue}: by capturing the
+   * actual filter value passed for the window-id property and proving it is the REQUESTED
+   * window, not the one the role happens to have a grant for. If the implementation ever
+   * queried the wrong id (or no id at all), this filter value would not match and the test
+   * would fail — a bug this shape could otherwise slip through a criteria mock that always
+   * answers "access found" regardless of what was asked.
+   */
+  @SuppressWarnings("unchecked")
+  @Test
+  public void hasWindowAccess_roleGrantIsForDifferentWindow_stillQueriesRequestedWindowId() {
+    when(role.getId()).thenReturn("role-id-mismatch");
+    OBCriteria<WindowAccess> criteria = mock(OBCriteria.class);
+    when(dal.createCriteria(WindowAccess.class)).thenReturn(criteria);
+    ArgumentCaptor<Criterion> captor = ArgumentCaptor.forClass(Criterion.class);
+    when(criteria.add(captor.capture())).thenReturn(criteria);
+    when(criteria.setMaxResults(1)).thenReturn(criteria);
+    // The role has SOME active WindowAccess row (e.g. for a different window in real data),
+    // but the query must be scoped to "requested-window", never "role-has-access-to-this-one".
+    when(criteria.list()).thenReturn(Collections.emptyList());
+
+    boolean result = NeoAccessHelper.hasWindowAccess("requested-window", "GET");
+
+    assertFalse("A role with no active row for the REQUESTED window must be denied, "
+        + "even if it holds a WindowAccess row for some other window", result);
+
+    boolean queriedRequestedWindow = false;
+    for (Criterion c : captor.getAllValues()) {
+      SimpleExpression expr = (SimpleExpression) c;
+      if ((WindowAccess.PROPERTY_WINDOW + ".id").equals(expr.getPropertyName())) {
+        assertEquals("requested-window", expr.getValue());
+        queriedRequestedWindow = true;
+      }
+    }
+    assertTrue("findActiveWindowAccess must filter by the requested window id",
+        queriedRequestedWindow);
   }
 
   // ── hasWindowAccessForSpec (ETP-4510 BUG-3) ──────────────────────────────────
