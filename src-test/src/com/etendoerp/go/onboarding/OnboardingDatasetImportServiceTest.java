@@ -16,6 +16,7 @@
  */
 package com.etendoerp.go.onboarding;
 
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -208,6 +209,64 @@ public class OnboardingDatasetImportServiceTest {
 
     assertFalse(service.isSeedAlreadyPresent(mockClient(CLIENT_ID), mockOrganization(ORGANIZATION_ID)),
         "An empty tenant must never be reported as already seeded");
+  }
+
+  /**
+   * ETP-4428: a successful XML import that yields no {@link ImportResult} must fail loudly instead
+   * of silently reporting success — otherwise a subsequent retry would wrongly believe the seed was
+   * already imported and skip the repair.
+   */
+  @Test
+  @DisplayName("importDataset fails when the importer returns no result")
+  public void testImportDatasetFailsWhenImporterReturnsNoResult() {
+    Client client = mockClient(CLIENT_ID);
+    Organization org = mockOrganization(ORGANIZATION_ID);
+    FakeImportService service = new FakeImportService(new StubNormalizer(EMPTY_OPENBRAVO_XML),
+        client, org, null);
+
+    try {
+      service.importDataset(CLIENT_ID, ORGANIZATION_ID);
+      fail("Expected a null import result to fail");
+    } catch (OBException e) {
+      assertNotNull(e.getMessage(), "Exception message should not be null");
+      assertTrue(e.getMessage().contains("no result"),
+          "The failure must explain that the importer returned no result");
+    }
+    assertTrue(service.importXmlCalled, "importXml must have been attempted before failing");
+  }
+
+  /**
+   * ETP-4428: exercises the REAL {@code validateImportedSeed} success path (all four counts &gt; 0),
+   * which also runs the real {@code logImportedSeedSummary}. A complete seed must validate without
+   * throwing.
+   */
+  @Test
+  @DisplayName("validateImportedSeed passes when every seed entity has visible rows")
+  public void testValidateImportedSeedPassesWhenComplete() {
+    CountingImportService service = new CountingImportService(1, 1, 1, 1);
+
+    assertDoesNotThrow(() -> service.validateImportedSeed(mockClient(CLIENT_ID),
+        mockOrganization(ORGANIZATION_ID)));
+  }
+
+  /**
+   * ETP-4428: the REAL {@code validateImportedSeed} must reject an incomplete import (here, missing
+   * financial accounts) with a diagnostic that names the empty entity counts, so a broken import
+   * never passes as successful.
+   */
+  @Test
+  @DisplayName("validateImportedSeed throws with a diagnostic when a seed entity is empty")
+  public void testValidateImportedSeedThrowsWhenIncomplete() {
+    CountingImportService service = new CountingImportService(1, 1, 1, 0);
+
+    try {
+      service.validateImportedSeed(mockClient(CLIENT_ID), mockOrganization(ORGANIZATION_ID));
+      fail("Expected an incomplete seed to fail validation");
+    } catch (OBException e) {
+      assertNotNull(e.getMessage(), "Exception message should not be null");
+      assertTrue(e.getMessage().contains("financialAccounts=0"),
+          "The diagnostic must report the empty entity counts");
+    }
   }
 
   private Client mockClient(String clientId) {
