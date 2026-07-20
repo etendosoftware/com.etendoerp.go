@@ -1,0 +1,76 @@
+<?xml version="1.0"?>
+  <database name="TABLE ETGO_SURVEY_CONFIG">
+    <table name="ETGO_SURVEY_CONFIG" primaryKey="ETGO_SURVEY_CONFIG__PK">
+      <column name="ETGO_SURVEY_CONFIG_ID" primaryKey="true" required="true" type="VARCHAR" size="32" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="AD_CLIENT_ID" primaryKey="false" required="true" type="VARCHAR" size="32" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="AD_ORG_ID" primaryKey="false" required="true" type="VARCHAR" size="32" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="ISACTIVE" primaryKey="false" required="true" type="CHAR" size="1" autoIncrement="false">
+        <default><![CDATA[Y]]></default>
+        <onCreateDefault/>
+      </column>
+      <column name="CREATED" primaryKey="false" required="true" type="TIMESTAMP" size="7" autoIncrement="false">
+        <default><![CDATA[SYSDATE]]></default>
+        <onCreateDefault/>
+      </column>
+      <column name="CREATEDBY" primaryKey="false" required="true" type="VARCHAR" size="32" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="UPDATED" primaryKey="false" required="true" type="TIMESTAMP" size="7" autoIncrement="false">
+        <default><![CDATA[SYSDATE]]></default>
+        <onCreateDefault/>
+      </column>
+      <column name="UPDATEDBY" primaryKey="false" required="true" type="VARCHAR" size="32" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="GLOBAL_COOLDOWN_DAYS" primaryKey="false" required="true" type="DECIMAL" size="10,0" autoIncrement="false">
+        <default><![CDATA[30]]></default>
+        <onCreateDefault/>
+      </column>
+      <column name="DISMISSED_COOLDOWN_DAYS" primaryKey="false" required="true" type="DECIMAL" size="10,0" autoIncrement="false">
+        <default><![CDATA[21]]></default>
+        <onCreateDefault/>
+      </column>
+      <column name="MAX_PER_MONTH" primaryKey="false" required="true" type="DECIMAL" size="10,0" autoIncrement="false">
+        <default><![CDATA[2]]></default>
+        <onCreateDefault/>
+      </column>
+      <column name="NPS_MIN_AGE_DAYS" primaryKey="false" required="true" type="DECIMAL" size="10,0" autoIncrement="false">
+        <default><![CDATA[60]]></default>
+        <onCreateDefault/>
+      </column>
+      <column name="NPS_INACTIVITY_DAYS" primaryKey="false" required="true" type="DECIMAL" size="10,0" autoIncrement="false">
+        <default><![CDATA[14]]></default>
+        <onCreateDefault/>
+      </column>
+      <column name="RESPONSE_COOLDOWN_DAYS" primaryKey="false" required="true" type="DECIMAL" size="10,0" autoIncrement="false">
+        <default><![CDATA[90]]></default>
+        <onCreateDefault/>
+      </column>
+      <column name="CSAT_MIN_DOCS" primaryKey="false" required="true" type="DECIMAL" size="10,0" autoIncrement="false">
+        <default><![CDATA[5]]></default>
+        <onCreateDefault/>
+      </column>
+      <column name="CSAT_DOC_GAP" primaryKey="false" required="true" type="DECIMAL" size="10,0" autoIncrement="false">
+        <default><![CDATA[30]]></default>
+        <onCreateDefault/>
+      </column>
+      <foreign-key foreignTable="AD_ORG" name="ETGO_SURVEY_CONFIG_AD_ORG_FK">
+        <reference local="AD_ORG_ID" foreign="AD_ORG_ID"/>
+      </foreign-key>
+      <foreign-key foreignTable="AD_CLIENT" name="ETGO_SURVEYCONFIG_ADCLIENT_FK">
+        <reference local="AD_CLIENT_ID" foreign="AD_CLIENT_ID"/>
+      </foreign-key>
+      <check name="ETGO_SURVEYCONFIG_ISACTIVE_CHK"><![CDATA[ISACTIVE IN ('Y', 'N')]]></check>
+    </table>
+  </database>
