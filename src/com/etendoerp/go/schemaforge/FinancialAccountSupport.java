@@ -64,6 +64,7 @@ final class FinancialAccountSupport {
   private static final String METHOD_CASH = "Efectivo";
   private static final String METHOD_TRANSFER = "Transferencia bancaria";
   private static final String METHOD_TRANSFER_SHORT = "Transferencia";
+  private static final String METHOD_TRANSFER_EN = "Wire Transfer";
   private static final String METHOD_CHECK = "Cheque";
   private static final String METHOD_CARD = "Tarjeta";
 
@@ -221,6 +222,13 @@ final class FinancialAccountSupport {
     // disableMulticurrencyForBankTransfer, so ordinary accounts keep multicurrency enabled.
     link.setPayinIsMulticurrency(true);
     link.setPayoutIsMulticurrency(true);
+    // The PSD2 "is bank transfer" identity flag has no sane column default (falls to 'N') and
+    // is never copied from the payment method master by the entity, so runtime-created links
+    // must set it explicitly here or the transfer link is silently unidentifiable downstream
+    // (both this class's own PSD2 exception check and the checkbox shown on the account UI).
+    if (isBankTransferMethod(method)) {
+      link.setPSD2IsBankTransfer(true);
+    }
     // payinAllow/payoutAllow (true) and execution type ("M") come from the entity's
     // column defaults — Manual, allowing both receipts and payments. The reconcile/
     // automatic-use fields below do NOT have a sane default on their own (they default
@@ -246,10 +254,10 @@ final class FinancialAccountSupport {
    * invoke it unconditionally. The active-PSD2-connection condition is guaranteed by construction:
    * the call sites are exactly the points where a connection has just been established.
    *
-   * <p>The transfer link is identified the same way as the corrective R14 data-fix: the PSD2
+   * <p>The transfer link is identified the same way as the corrective R14/R15 data-fixes: the PSD2
    * extension flag {@code EM_PSD2_Is_Bank_Transfer='Y'} first, with a name fallback
-   * ({@code "Transferencia bancaria"} / {@code "Transferencia"}) because the live flag diverges
-   * from the seeded value on existing tenants.
+   * ({@code "Transferencia bancaria"} / {@code "Transferencia"} / {@code "Wire Transfer"}) because
+   * the live flag diverges from the seeded value on existing tenants.
    *
    * <p>Idempotent (only touches links still multicurrency-ON) and best-effort: the account is
    * already persisted, so any failure here is logged and swallowed rather than propagated —
@@ -287,8 +295,8 @@ final class FinancialAccountSupport {
 
   /**
    * Whether {@code method} is the bank-transfer payment method: the PSD2 extension flag
-   * {@code EM_PSD2_Is_Bank_Transfer='Y'} first, then a name fallback. Mirrors the R14 data-fix
-   * predicate.
+   * {@code EM_PSD2_Is_Bank_Transfer='Y'} first, then a name fallback (Spanish and English
+   * variants). Mirrors the R14/R15 data-fix predicates.
    */
   private static boolean isBankTransferMethod(FIN_PaymentMethod method) {
     if (method == null) {
@@ -298,6 +306,7 @@ final class FinancialAccountSupport {
       return true;
     }
     String name = method.getName();
-    return METHOD_TRANSFER.equals(name) || METHOD_TRANSFER_SHORT.equals(name);
+    return METHOD_TRANSFER.equals(name) || METHOD_TRANSFER_SHORT.equals(name)
+        || METHOD_TRANSFER_EN.equals(name);
   }
 }
