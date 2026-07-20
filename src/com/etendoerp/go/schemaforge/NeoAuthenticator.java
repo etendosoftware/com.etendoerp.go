@@ -132,6 +132,10 @@ class NeoAuthenticator {
     return NeoServletSupport.hasWindowAccess(windowId);
   }
 
+  boolean hasWindowAccess(String windowId, String httpMethod) {
+    return NeoServletSupport.hasWindowAccess(windowId, httpMethod);
+  }
+
   boolean hasProcessAccess(String processId) {
     return NeoServletSupport.hasProcessAccess(processId);
   }

@@ -169,7 +169,7 @@ class NeoRequestRouter {
   void handleWindowSpecRequest(SFSpec spec, NeoPathInfo pathInfo, String method,
       HttpServletRequest request, HttpServletResponse response) throws Exception {
     Window window = spec.getADWindow();
-    if (window != null && !servlet.authenticator.hasWindowAccess(window.getId())) {
+    if (window != null && !servlet.authenticator.hasWindowAccess(window.getId(), method)) {
       servlet.sendError(response, HttpServletResponse.SC_FORBIDDEN,
           "Access denied to window for current role");
       return;

@@ -156,6 +156,10 @@ class NeoServletSupport {
     return com.etendoerp.go.schemaforge.util.NeoAccessHelper.hasWindowAccess(windowId);
   }
 
+  static boolean hasWindowAccess(String windowId, String httpMethod) {
+    return com.etendoerp.go.schemaforge.util.NeoAccessHelper.hasWindowAccess(windowId, httpMethod);
+  }
+
   static boolean hasProcessAccess(String processId) {
     return com.etendoerp.go.schemaforge.util.NeoAccessHelper.hasProcessAccess(processId);
   }
