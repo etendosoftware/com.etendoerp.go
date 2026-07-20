@@ -26,8 +26,11 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 
@@ -42,7 +45,10 @@ import org.openbravo.model.ad.access.ProcessAccess;
 import org.openbravo.model.ad.access.WindowAccess;
 import org.openbravo.model.ad.datamodel.Column;
 import org.openbravo.model.ad.ui.Process;
+import org.openbravo.model.ad.ui.Tab;
+import org.openbravo.model.ad.ui.Window;
 
+import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFSpec;
 
 /**
@@ -186,6 +192,205 @@ public class NeoAccessHelperTest {
     assertFalse(NeoAccessHelper.hasWindowAccess("no-row-window-id", "POST"));
     assertFalse(NeoAccessHelper.hasWindowAccess("no-row-window-id", "PUT"));
     assertFalse(NeoAccessHelper.hasWindowAccess("no-row-window-id", "DELETE"));
+  }
+
+  // ── hasWindowAccessForSpec (ETP-4510 BUG-3) ──────────────────────────────────
+
+  @Test
+  public void hasWindowAccessForSpec_nullSpec_returnsFalse() {
+    when(role.getId()).thenReturn("0");
+    assertFalse(NeoAccessHelper.hasWindowAccessForSpec(null, "GET"));
+  }
+
+  @Test
+  public void hasWindowAccessForSpec_noRoleAssigned_returnsFalseRegardlessOfWindow() {
+    when(context.getRole()).thenReturn(null);
+
+    SFSpec windowedSpec = mock(SFSpec.class);
+    Window window = mock(Window.class);
+    when(window.getId()).thenReturn("window-id-1");
+    when(windowedSpec.getADWindow()).thenReturn(window);
+
+    SFSpec windowlessSpec = mock(SFSpec.class);
+    when(windowlessSpec.getADWindow()).thenReturn(null);
+
+    assertFalse(NeoAccessHelper.hasWindowAccessForSpec(windowedSpec, "GET"));
+    assertFalse(NeoAccessHelper.hasWindowAccessForSpec(windowlessSpec, "GET"));
+  }
+
+  @SuppressWarnings("unchecked")
+  @Test
+  public void hasWindowAccessForSpec_directWindow_delegatesToHasWindowAccess_allow() {
+    when(role.getId()).thenReturn("role-id-direct-window");
+    SFSpec spec = mock(SFSpec.class);
+    Window window = mock(Window.class);
+    when(window.getId()).thenReturn("direct-window-id");
+    when(spec.getADWindow()).thenReturn(window);
+
+    OBCriteria<WindowAccess> criteria = mock(OBCriteria.class);
+    when(dal.createCriteria(WindowAccess.class)).thenReturn(criteria);
+    when(criteria.add(any())).thenReturn(criteria);
+    when(criteria.setMaxResults(1)).thenReturn(criteria);
+    WindowAccess access = mock(WindowAccess.class);
+    when(criteria.list()).thenReturn(Collections.singletonList(access));
+
+    assertTrue(NeoAccessHelper.hasWindowAccessForSpec(spec, "GET"));
+  }
+
+  @SuppressWarnings("unchecked")
+  @Test
+  public void hasWindowAccessForSpec_directWindow_delegatesToHasWindowAccess_deny() {
+    when(role.getId()).thenReturn("role-id-direct-window-denied");
+    SFSpec spec = mock(SFSpec.class);
+    Window window = mock(Window.class);
+    when(window.getId()).thenReturn("direct-window-id-denied");
+    when(spec.getADWindow()).thenReturn(window);
+
+    OBCriteria<WindowAccess> criteria = mock(OBCriteria.class);
+    when(dal.createCriteria(WindowAccess.class)).thenReturn(criteria);
+    when(criteria.add(any())).thenReturn(criteria);
+    when(criteria.setMaxResults(1)).thenReturn(criteria);
+    when(criteria.list()).thenReturn(Collections.emptyList());
+
+    assertFalse(NeoAccessHelper.hasWindowAccessForSpec(spec, "GET"));
+  }
+
+  @SuppressWarnings("unchecked")
+  @Test
+  public void hasWindowAccessForSpec_windowlessSpecNoCombinationData_allowsAuthenticatedRole() {
+    when(role.getId()).thenReturn("role-id-no-combination");
+    SFSpec spec = mock(SFSpec.class);
+    when(spec.getADWindow()).thenReturn(null);
+    when(spec.getId()).thenReturn("spec-no-combination");
+
+    // No entity at all — the not-posted-documents / dashboard shape.
+    OBCriteria<SFEntity> criteria = mock(OBCriteria.class);
+    when(dal.createCriteria(SFEntity.class)).thenReturn(criteria);
+    when(criteria.add(any())).thenReturn(criteria);
+    when(criteria.list()).thenReturn(Collections.emptyList());
+
+    assertTrue(NeoAccessHelper.hasWindowAccessForSpec(spec, "GET"));
+  }
+
+  @SuppressWarnings("unchecked")
+  @Test
+  public void hasWindowAccessForSpec_windowlessSpecEntitiesWithoutTab_allowsAuthenticatedRole() {
+    when(role.getId()).thenReturn("role-id-entities-no-tab");
+    SFSpec spec = mock(SFSpec.class);
+    when(spec.getADWindow()).thenReturn(null);
+    when(spec.getId()).thenReturn("spec-entities-no-tab");
+
+    SFEntity entityWithoutTab = mock(SFEntity.class);
+    when(entityWithoutTab.getADTab()).thenReturn(null);
+
+    OBCriteria<SFEntity> criteria = mock(OBCriteria.class);
+    when(dal.createCriteria(SFEntity.class)).thenReturn(criteria);
+    when(criteria.add(any())).thenReturn(criteria);
+    when(criteria.list()).thenReturn(Collections.singletonList(entityWithoutTab));
+
+    assertTrue(NeoAccessHelper.hasWindowAccessForSpec(spec, "GET"));
+  }
+
+  @SuppressWarnings("unchecked")
+  @Test
+  public void hasWindowAccessForSpec_windowlessSpecAllConstituentWindowsAccessible_returnsTrue() {
+    when(role.getId()).thenReturn("role-id-combo-allowed");
+    SFSpec spec = mock(SFSpec.class);
+    when(spec.getADWindow()).thenReturn(null);
+    when(spec.getId()).thenReturn("spec-combo-allowed");
+
+    SFEntity entityA = entityForWindow("window-a");
+    SFEntity entityB = entityForWindow("window-b");
+
+    OBCriteria<SFEntity> entityCriteria = mock(OBCriteria.class);
+    when(dal.createCriteria(SFEntity.class)).thenReturn(entityCriteria);
+    when(entityCriteria.add(any())).thenReturn(entityCriteria);
+    when(entityCriteria.list()).thenReturn(Arrays.asList(entityA, entityB));
+
+    // Both constituent windows have an active, full-access WindowAccess row.
+    OBCriteria<WindowAccess> windowAccessCriteria = mock(OBCriteria.class);
+    when(dal.createCriteria(WindowAccess.class)).thenReturn(windowAccessCriteria);
+    when(windowAccessCriteria.add(any())).thenReturn(windowAccessCriteria);
+    when(windowAccessCriteria.setMaxResults(1)).thenReturn(windowAccessCriteria);
+    WindowAccess access = mock(WindowAccess.class);
+    when(windowAccessCriteria.list()).thenReturn(Collections.singletonList(access));
+
+    assertTrue(NeoAccessHelper.hasWindowAccessForSpec(spec, "GET"));
+  }
+
+  @SuppressWarnings("unchecked")
+  @Test
+  public void hasWindowAccessForSpec_windowlessSpecOneConstituentWindowInaccessible_returnsFalse() {
+    when(role.getId()).thenReturn("role-id-combo-partial");
+    SFSpec spec = mock(SFSpec.class);
+    when(spec.getADWindow()).thenReturn(null);
+    when(spec.getId()).thenReturn("spec-combo-partial");
+
+    SFEntity entityA = entityForWindow("window-accessible");
+    SFEntity entityB = entityForWindow("window-inaccessible");
+
+    OBCriteria<SFEntity> entityCriteria = mock(OBCriteria.class);
+    when(dal.createCriteria(SFEntity.class)).thenReturn(entityCriteria);
+    when(entityCriteria.add(any())).thenReturn(entityCriteria);
+    when(entityCriteria.list()).thenReturn(Arrays.asList(entityA, entityB));
+
+    // First WindowAccess lookup finds a row, second finds none — one inaccessible window
+    // is enough to deny the whole spec.
+    OBCriteria<WindowAccess> windowAccessCriteria = mock(OBCriteria.class);
+    when(dal.createCriteria(WindowAccess.class)).thenReturn(windowAccessCriteria);
+    when(windowAccessCriteria.add(any())).thenReturn(windowAccessCriteria);
+    when(windowAccessCriteria.setMaxResults(1)).thenReturn(windowAccessCriteria);
+    WindowAccess access = mock(WindowAccess.class);
+    when(windowAccessCriteria.list())
+        .thenReturn(Collections.singletonList(access))
+        .thenReturn(Collections.emptyList());
+
+    assertFalse(NeoAccessHelper.hasWindowAccessForSpec(spec, "GET"));
+  }
+
+  @SuppressWarnings("unchecked")
+  @Test
+  public void hasWindowAccessForSpec_windowlessSpecDedupesRepeatedWindow_checksOnce() {
+    when(role.getId()).thenReturn("role-id-combo-dedup");
+    SFSpec spec = mock(SFSpec.class);
+    when(spec.getADWindow()).thenReturn(null);
+    when(spec.getId()).thenReturn("spec-combo-dedup");
+
+    // Two entities, two different tabs, but both tabs belong to the same window.
+    SFEntity entityA = entityForWindow("shared-window");
+    SFEntity entityB = entityForWindow("shared-window");
+
+    OBCriteria<SFEntity> entityCriteria = mock(OBCriteria.class);
+    when(dal.createCriteria(SFEntity.class)).thenReturn(entityCriteria);
+    when(entityCriteria.add(any())).thenReturn(entityCriteria);
+    when(entityCriteria.list()).thenReturn(Arrays.asList(entityA, entityB));
+
+    OBCriteria<WindowAccess> windowAccessCriteria = mock(OBCriteria.class);
+    when(dal.createCriteria(WindowAccess.class)).thenReturn(windowAccessCriteria);
+    when(windowAccessCriteria.add(any())).thenReturn(windowAccessCriteria);
+    when(windowAccessCriteria.setMaxResults(1)).thenReturn(windowAccessCriteria);
+    WindowAccess access = mock(WindowAccess.class);
+    when(windowAccessCriteria.list()).thenReturn(Collections.singletonList(access));
+
+    assertTrue(NeoAccessHelper.hasWindowAccessForSpec(spec, "GET"));
+    // Dedup proof: two entities resolve to the same window ID, so the WindowAccess
+    // criteria must only be built (and checked) once — not once per entity.
+    verify(dal, times(1)).createCriteria(WindowAccess.class);
+  }
+
+  /**
+   * Builds an {@link SFEntity} mock whose {@link SFEntity#getADTab()} resolves to a
+   * {@link Tab} belonging to the given window ID — the "combination of windows" shape
+   * consumed by {@code resolveConstituentWindowIds}.
+   */
+  private static SFEntity entityForWindow(String windowId) {
+    SFEntity entity = mock(SFEntity.class);
+    Tab tab = mock(Tab.class);
+    Window window = mock(Window.class);
+    when(window.getId()).thenReturn(windowId);
+    when(tab.getWindow()).thenReturn(window);
+    when(entity.getADTab()).thenReturn(tab);
+    return entity;
   }
 
   // ── hasProcessAccess ──────────────────────────────────────────────────────

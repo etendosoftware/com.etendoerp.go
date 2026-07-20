@@ -17,7 +17,10 @@
 
 package com.etendoerp.go.schemaforge.util;
 
+import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Set;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -29,7 +32,10 @@ import org.openbravo.model.ad.access.ProcessAccess;
 import org.openbravo.model.ad.access.Role;
 import org.openbravo.model.ad.access.WindowAccess;
 import org.openbravo.model.ad.ui.Process;
+import org.openbravo.model.ad.ui.Tab;
+import org.openbravo.model.ad.ui.Window;
 
+import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFSpec;
 
 /**
@@ -97,6 +103,91 @@ public final class NeoAccessHelper {
       return Boolean.TRUE.equals(access.isEditableField());
     }
     return true;
+  }
+
+  /**
+   * Checks whether the current role has access to {@code spec} for the given HTTP method,
+   * covering both ordinary window specs and windowless/custom "combination" specs
+   * (ETP-4510 BUG-3).
+   *
+   * <p>Before this fix, {@code spec.getADWindow() == null} skipped the access check
+   * entirely for every caller — including a request with no role assigned at all, which
+   * contradicts "a user with no role assigned is denied on every window." This method
+   * closes that gap in three tiers, in priority order:</p>
+   * <ol>
+   *   <li><b>No role assigned → always deny.</b> Checked first and unconditionally,
+   *       regardless of whether the spec has a window or not.</li>
+   *   <li><b>Spec has a directly linked {@code AD_Window}</b> → delegates straight to
+   *       {@link #hasWindowAccess(String, String)} for that window.</li>
+   *   <li><b>Windowless spec ({@code spec.getADWindow() == null}):</b>
+   *     <ul>
+   *       <li>If one or more active, included {@code SFEntity} rows of this spec have a
+   *           populated {@code AD_TAB_ID} — the "combination of windows" mechanism — every
+   *           distinct constituent {@link Tab#getWindow()} (deduped) must be accessible for
+   *           {@code httpMethod}: the role needs read access to all of them for a read, or
+   *           full/write access to all of them for a write. Deny if any one is
+   *           inaccessible.</li>
+   *       <li>If NO entity has a populated {@code AD_TAB_ID} (no combination data exists at
+   *           all — the current shape of the {@code not-posted-documents} and
+   *           {@code dashboard} specs) — fall back to the pre-existing behavior and allow
+   *           any authenticated role. There is no per-window data to check against for
+   *           these specs today, and {@code AD_Window_Access} provisioning was never
+   *           modeled for them either; skipping the check here (rather than denying
+   *           everyone) avoids a hard regression for the 2 windowless specs that exist.</li>
+   *     </ul>
+   *   </li>
+   * </ol>
+   *
+   * @param spec the spec to check (may be {@code null}, in which case access is denied)
+   * @param httpMethod the HTTP method of the current request (e.g. {@code GET}, {@code POST})
+   * @return {@code true} if the current role is allowed to perform {@code httpMethod}
+   *         against {@code spec}
+   */
+  public static boolean hasWindowAccessForSpec(SFSpec spec, String httpMethod) {
+    if (spec == null || currentRole() == null) {
+      return false;
+    }
+    Window window = spec.getADWindow();
+    if (window != null) {
+      return hasWindowAccess(window.getId(), httpMethod);
+    }
+    List<String> constituentWindowIds = resolveConstituentWindowIds(spec);
+    if (constituentWindowIds.isEmpty()) {
+      // No combination data at all (e.g. not-posted-documents, dashboard): no per-window
+      // provisioning exists for these specs, so any authenticated role passes — matches
+      // the pre-existing (pre-ETP-4510-BUG-3) behavior for them.
+      return true;
+    }
+    for (String windowId : constituentWindowIds) {
+      if (!hasWindowAccess(windowId, httpMethod)) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  /**
+   * Resolves the distinct {@code AD_Window} IDs reachable through {@code spec}'s
+   * "combination of windows" — every active, included {@link SFEntity} of the spec whose
+   * {@code AD_TAB_ID} is populated, mapped to its {@link Tab#getWindow()}.
+   *
+   * @param spec the spec whose constituent windows are needed
+   * @return the distinct window IDs (insertion order), or an empty list when no entity of
+   *         this spec has a populated {@code AD_TAB_ID}
+   */
+  private static List<String> resolveConstituentWindowIds(SFSpec spec) {
+    OBCriteria<SFEntity> criteria = OBDal.getInstance().createCriteria(SFEntity.class);
+    criteria.add(Restrictions.eq(SFEntity.PROPERTY_ETGOSFSPEC + ".id", spec.getId()));
+    criteria.add(Restrictions.eq(SFEntity.PROPERTY_ISACTIVE, true));
+    criteria.add(Restrictions.eq(SFEntity.PROPERTY_ISINCLUDED, true));
+    Set<String> windowIds = new LinkedHashSet<>();
+    for (SFEntity entity : criteria.list()) {
+      Tab tab = entity.getADTab();
+      if (tab != null && tab.getWindow() != null) {
+        windowIds.add(tab.getWindow().getId());
+      }
+    }
+    return new ArrayList<>(windowIds);
   }
 
   /**

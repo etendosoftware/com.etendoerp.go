@@ -57,7 +57,6 @@ import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.datamodel.Column;
 import org.openbravo.model.ad.ui.Process;
-import org.openbravo.model.ad.ui.Window;
 
 import com.etendoerp.go.schemaforge.NeoSelectorService;
 import com.etendoerp.go.schemaforge.data.SFEntity;
@@ -260,13 +259,19 @@ class McpToolRouterSupportTest {
       accessMock.close();
     }
 
+    /**
+     * ETP-4510 BUG-3: {@code hasSpecAccess}'s "W" branch now delegates entirely to
+     * {@link NeoAccessUtils#hasWindowAccessForSpec(SFSpec, String)}, which covers both
+     * ordinary window specs and windowless/custom "combination" specs in one call —
+     * it must run unconditionally (never skipped just because {@code spec.getADWindow()}
+     * is null). The windowless tiering rules themselves are unit-tested directly on
+     * {@code NeoAccessHelperTest#hasWindowAccessForSpec}; here we only verify the
+     * delegation and method threading.
+     */
     @Test
     void windowSpecWithAccessReturnsTrue() {
       SFSpec spec = mock(SFSpec.class);
-      Window window = mock(Window.class);
-      when(spec.getADWindow()).thenReturn(window);
-      when(window.getId()).thenReturn("win-1");
-      accessMock.when(() -> NeoAccessUtils.hasWindowAccess("win-1", "GET")).thenReturn(true);
+      accessMock.when(() -> NeoAccessUtils.hasWindowAccessForSpec(spec, "GET")).thenReturn(true);
 
       assertTrue(McpToolRouterSupport.hasSpecAccess(spec, "W"));
     }
@@ -274,18 +279,23 @@ class McpToolRouterSupportTest {
     @Test
     void windowSpecWithoutAccessReturnsFalse() {
       SFSpec spec = mock(SFSpec.class);
-      Window window = mock(Window.class);
-      when(spec.getADWindow()).thenReturn(window);
-      when(window.getId()).thenReturn("win-2");
-      accessMock.when(() -> NeoAccessUtils.hasWindowAccess("win-2", "GET")).thenReturn(false);
+      accessMock.when(() -> NeoAccessUtils.hasWindowAccessForSpec(spec, "GET")).thenReturn(false);
 
       assertFalse(McpToolRouterSupport.hasSpecAccess(spec, "W"));
     }
 
+    /**
+     * ETP-4510 BUG-3: a windowless spec (spec.getADWindow() == null) no longer skips the
+     * check unconditionally — it is now routed through hasWindowAccessForSpec, which
+     * itself decides (based on combination data / no-role) whether to allow. This test
+     * only proves the delegation happens; the windowless decision logic lives in
+     * NeoAccessHelperTest.
+     */
     @Test
-    void windowSpecWithNullWindowReturnsTrue() {
+    void windowlessSpecDelegatesToHasWindowAccessForSpec() {
       SFSpec spec = mock(SFSpec.class);
       when(spec.getADWindow()).thenReturn(null);
+      accessMock.when(() -> NeoAccessUtils.hasWindowAccessForSpec(spec, "GET")).thenReturn(true);
 
       assertTrue(McpToolRouterSupport.hasSpecAccess(spec, "W"));
     }
@@ -297,11 +307,8 @@ class McpToolRouterSupportTest {
     @Test
     void twoArgOverloadDefaultsToGetMethod() {
       SFSpec spec = mock(SFSpec.class);
-      Window window = mock(Window.class);
-      when(spec.getADWindow()).thenReturn(window);
-      when(window.getId()).thenReturn("win-get");
-      accessMock.when(() -> NeoAccessUtils.hasWindowAccess("win-get", "GET")).thenReturn(true);
-      accessMock.when(() -> NeoAccessUtils.hasWindowAccess("win-get", "POST")).thenReturn(false);
+      accessMock.when(() -> NeoAccessUtils.hasWindowAccessForSpec(spec, "GET")).thenReturn(true);
+      accessMock.when(() -> NeoAccessUtils.hasWindowAccessForSpec(spec, "POST")).thenReturn(false);
 
       assertTrue(McpToolRouterSupport.hasSpecAccess(spec, "W"));
     }
@@ -309,20 +316,17 @@ class McpToolRouterSupportTest {
     /**
      * ETP-4510 (BLOCKER fix): a write-tier check (POST/PUT/DELETE) for a window spec
      * must thread the HTTP-method-equivalent through to
-     * {@link NeoAccessUtils#hasWindowAccess(String, String)} so a read-only
+     * {@link NeoAccessUtils#hasWindowAccessForSpec(SFSpec, String)} so a read-only
      * {@code AD_Window_Access} role is denied — this is the exact gap that let MCP
      * neo_create/neo_update/neo_delete/neo_batch bypass the REST tiering.
      */
     @Test
     void windowSpecWriteMethodDeniedForReadOnlyAccess() {
       SFSpec spec = mock(SFSpec.class);
-      Window window = mock(Window.class);
-      when(spec.getADWindow()).thenReturn(window);
-      when(window.getId()).thenReturn("win-ro");
-      accessMock.when(() -> NeoAccessUtils.hasWindowAccess("win-ro", "GET")).thenReturn(true);
-      accessMock.when(() -> NeoAccessUtils.hasWindowAccess("win-ro", "POST")).thenReturn(false);
-      accessMock.when(() -> NeoAccessUtils.hasWindowAccess("win-ro", "PUT")).thenReturn(false);
-      accessMock.when(() -> NeoAccessUtils.hasWindowAccess("win-ro", "DELETE")).thenReturn(false);
+      accessMock.when(() -> NeoAccessUtils.hasWindowAccessForSpec(spec, "GET")).thenReturn(true);
+      accessMock.when(() -> NeoAccessUtils.hasWindowAccessForSpec(spec, "POST")).thenReturn(false);
+      accessMock.when(() -> NeoAccessUtils.hasWindowAccessForSpec(spec, "PUT")).thenReturn(false);
+      accessMock.when(() -> NeoAccessUtils.hasWindowAccessForSpec(spec, "DELETE")).thenReturn(false);
 
       assertTrue(McpToolRouterSupport.hasSpecAccess(spec, "W", "GET"));
       assertFalse(McpToolRouterSupport.hasSpecAccess(spec, "W", "POST"));
@@ -336,13 +340,10 @@ class McpToolRouterSupportTest {
     @Test
     void windowSpecWriteMethodAllowedForFullAccess() {
       SFSpec spec = mock(SFSpec.class);
-      Window window = mock(Window.class);
-      when(spec.getADWindow()).thenReturn(window);
-      when(window.getId()).thenReturn("win-full");
-      accessMock.when(() -> NeoAccessUtils.hasWindowAccess("win-full", "GET")).thenReturn(true);
-      accessMock.when(() -> NeoAccessUtils.hasWindowAccess("win-full", "POST")).thenReturn(true);
-      accessMock.when(() -> NeoAccessUtils.hasWindowAccess("win-full", "PUT")).thenReturn(true);
-      accessMock.when(() -> NeoAccessUtils.hasWindowAccess("win-full", "DELETE")).thenReturn(true);
+      accessMock.when(() -> NeoAccessUtils.hasWindowAccessForSpec(spec, "GET")).thenReturn(true);
+      accessMock.when(() -> NeoAccessUtils.hasWindowAccessForSpec(spec, "POST")).thenReturn(true);
+      accessMock.when(() -> NeoAccessUtils.hasWindowAccessForSpec(spec, "PUT")).thenReturn(true);
+      accessMock.when(() -> NeoAccessUtils.hasWindowAccessForSpec(spec, "DELETE")).thenReturn(true);
 
       assertTrue(McpToolRouterSupport.hasSpecAccess(spec, "W", "GET"));
       assertTrue(McpToolRouterSupport.hasSpecAccess(spec, "W", "POST"));

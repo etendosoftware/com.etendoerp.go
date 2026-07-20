@@ -17,6 +17,7 @@
 
 package com.etendoerp.go.mcp;
 
+import com.etendoerp.go.schemaforge.data.SFSpec;
 import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
 
 /**
@@ -62,6 +63,21 @@ public final class NeoAccessUtils {
    */
   public static boolean hasWindowAccess(String windowId, String httpMethod) {
     return NeoAccessHelper.hasWindowAccess(windowId, httpMethod);
+  }
+
+  /**
+   * Check if the current role has access to {@code spec} for the given HTTP-method
+   * equivalent, covering both ordinary window specs and windowless/custom "combination"
+   * specs (ETP-4510 BUG-3). See
+   * {@link NeoAccessHelper#hasWindowAccessForSpec(SFSpec, String)} for the full tiering
+   * rules (no-role-denies-everywhere, direct window, or constituent-window combination).
+   *
+   * @param spec       the spec to check (may be {@code null}, in which case access is denied)
+   * @param httpMethod the HTTP-method equivalent of the MCP operation
+   * @return true if the current role may perform {@code httpMethod} against {@code spec}
+   */
+  public static boolean hasWindowAccessForSpec(SFSpec spec, String httpMethod) {
+    return NeoAccessHelper.hasWindowAccessForSpec(spec, httpMethod);
   }
 
   /**

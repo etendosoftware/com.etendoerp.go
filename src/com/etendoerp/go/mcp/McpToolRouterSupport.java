@@ -34,7 +34,6 @@ import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.datamodel.Column;
 import org.openbravo.model.ad.ui.Process;
 import org.openbravo.model.ad.ui.Tab;
-import org.openbravo.model.ad.ui.Window;
 
 import com.etendoerp.go.schemaforge.NeoResponse;
 import com.etendoerp.go.schemaforge.NeoSelectorService;
@@ -259,8 +258,12 @@ final class McpToolRouterSupport {
       return false;
     }
     if ("W".equals(specType)) {
-      Window window = spec.getADWindow();
-      return window == null || NeoAccessUtils.hasWindowAccess(window.getId(), httpMethod);
+      // ETP-4510 BUG-3: hasWindowAccessForSpec covers both ordinary window specs AND
+      // windowless/custom "combination" specs (spec.getADWindow() == null) — it must run
+      // unconditionally rather than skipping the check when there is no directly linked
+      // window, otherwise a role with no access at all (or no role assigned) could reach
+      // a windowless spec unchecked.
+      return NeoAccessUtils.hasWindowAccessForSpec(spec, httpMethod);
     }
     if ("P".equals(specType) || "R".equals(specType)) {
       Process adProcess = spec.getProcess();
