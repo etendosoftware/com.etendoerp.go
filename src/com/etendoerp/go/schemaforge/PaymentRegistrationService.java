@@ -18,6 +18,7 @@
 package com.etendoerp.go.schemaforge;
 
 import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.text.ParseException;
 import java.util.Date;
 import java.util.LinkedHashMap;
@@ -203,8 +204,10 @@ final class PaymentRegistrationService {
     DocumentType docType = resolveArApDocType(org, isReceipt);
     checkPeriodOpen(invoice, docType, paymentDate);
 
+    // Simple invoice quick-pay / bank-reconciliation path stays single-currency (guarded above by
+    // assertCurrencyMatch): rate ONE, so the transaction amount equals the payment amount.
     FIN_Payment payment = createDraftPayment(new AdvPaymentMngtDao(), isReceipt, invoice,
-        paymentMethod, account, paymentDate, amount);
+        paymentMethod, account, paymentDate, BigDecimal.ONE, amount);
     linkPSDsToPayment(pendingPSDs, payment, amount);
     processOrThrow(payment);
     return payment;
@@ -243,11 +246,10 @@ final class PaymentRegistrationService {
         crit.addOrderBy(FIN_FinancialAccount.PROPERTY_NAME, true);
 
         String allowProp = allowProperty(isReceipt);
-        Currency invoiceCurrency = invoice.getCurrency();
 
         JSONArray arr = new JSONArray();
         for (FIN_FinancialAccount acc : crit.list()) {
-          appendAccountItem(arr, acc, allowProp, invoiceCurrency);
+          appendAccountItem(arr, acc, allowProp);
         }
         JSONObject resp = new JSONObject();
         resp.put(KEY_ITEMS, arr);
@@ -272,15 +274,15 @@ final class PaymentRegistrationService {
   }
 
   /**
-   * Appends one account item if it has at least one valid payment method for the direction
-   * and its currency matches the invoice's (accounts with no currency are always kept).
+   * Appends one account item if it has at least one valid payment method for the direction.
+   * Accounts are listed regardless of currency: a foreign-currency account is settled via the
+   * conversion rate supplied by the two-step modal (see {@link #doRegisterPaymentAdvanced}), so
+   * it must remain selectable. The {@code invoiceCurrency} is no longer used to filter, but the
+   * emitted {@code currency}/{@code currencyId} fields let the UI decide when to show the
+   * conversion fields.
    */
-  private static void appendAccountItem(JSONArray arr, FIN_FinancialAccount acc, String allowProp,
-      Currency invoiceCurrency) throws Exception {
-    if (acc.getCurrency() != null && invoiceCurrency != null
-        && !acc.getCurrency().getId().equals(invoiceCurrency.getId())) {
-      return;
-    }
+  private static void appendAccountItem(JSONArray arr, FIN_FinancialAccount acc, String allowProp)
+      throws Exception {
     OBCriteria<FinAccPaymentMethod> methodCrit = OBDal.getInstance()
         .createCriteria(FinAccPaymentMethod.class);
     methodCrit.add(Restrictions.eq(FinAccPaymentMethod.PROPERTY_ACCOUNT, acc));
@@ -591,7 +593,38 @@ final class PaymentRegistrationService {
     String overpaymentAction = body.optString("overpaymentAction", null);
     boolean pis = body.optBoolean(FIELD_PIS, false);
 
-    assertCurrencyMatch(invoice.getCurrency(), account.getCurrency());
+    // Multi-currency: the payment amount is expressed in the invoice currency; when the selected
+    // account is in a different currency the modal MUST supply an explicit conversion rate. When
+    // the currencies match, the rate defaults to ONE.
+    boolean foreignCurrency = invoice.getCurrency() != null && account.getCurrency() != null
+        && !invoice.getCurrency().getId().equals(account.getCurrency().getId());
+    String rawRate = body.optString("conversionRate", "").trim();
+    BigDecimal conversionRate;
+    if (StringUtils.isBlank(rawRate)) {
+      // Defense-in-depth (B1): a genuinely foreign payment arriving with no rate would otherwise
+      // silently book amount x 1 in the account currency (e.g. 100 USD posted as 100 EUR).
+      if (foreignCurrency) {
+        return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
+            "A conversion rate is required when the invoice and account currencies differ");
+      }
+      conversionRate = BigDecimal.ONE;
+    } else {
+      try {
+        conversionRate = new BigDecimal(rawRate);
+      } catch (NumberFormatException e) {
+        return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "Invalid conversion rate format");
+      }
+    }
+    if (conversionRate.signum() <= 0) {
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
+          "Conversion rate must be greater than zero");
+    }
+    // A cross-currency rate of exactly ONE is almost certainly a missing / placeholder value —
+    // reject it too rather than book amount x 1 across two different currencies.
+    if (foreignCurrency && conversionRate.compareTo(BigDecimal.ONE) == 0) {
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
+          "A conversion rate other than 1 is required when the invoice and account currencies differ");
+    }
 
     Organization org = invoice.getOrganization();
     FIN_PaymentMethod paymentMethod = resolveRequestedMethod(
@@ -615,7 +648,7 @@ final class PaymentRegistrationService {
     String editPaymentId = body.optString(KEY_PAYMENT_ID, null);
     boolean isEdit = StringUtils.isNotBlank(editPaymentId);
     FIN_Payment payment = resolveOrCreatePayment(editPaymentId, dao, isReceipt, invoice,
-        new DraftFields(paymentMethod, account, paymentDate, cash));
+        new DraftFields(paymentMethod, account, paymentDate, conversionRate, cash));
     if (payment == null) {
       return NeoResponse.error(HttpServletResponse.SC_NOT_FOUND, MSG_PAYMENT_NOT_FOUND);
     }
@@ -639,7 +672,7 @@ final class PaymentRegistrationService {
 
   /** Groups the editable header fields applied to a fresh or reused draft (Sonar S107). */
   private record DraftFields(FIN_PaymentMethod paymentMethod, FIN_FinancialAccount account,
-      Date paymentDate, BigDecimal cash) {
+      Date paymentDate, BigDecimal rate, BigDecimal cash) {
   }
 
   /**
@@ -653,12 +686,12 @@ final class PaymentRegistrationService {
       boolean isReceipt, Invoice invoice, DraftFields fields) throws Exception {
     if (StringUtils.isBlank(editPaymentId)) {
       return createDraftPayment(dao, isReceipt, invoice, fields.paymentMethod(), fields.account(),
-          fields.paymentDate(), fields.cash());
+          fields.paymentDate(), fields.rate(), fields.cash());
     }
     FIN_Payment existing = OBDal.getInstance().get(FIN_Payment.class, editPaymentId);
     return existing != null
         ? PaymentDraftEditService.prepareEditableDraft(existing, fields.paymentMethod(),
-            fields.account(), fields.paymentDate(), fields.cash())
+            fields.account(), fields.paymentDate(), fields.rate(), fields.cash())
         : null;
   }
 
@@ -772,7 +805,12 @@ final class PaymentRegistrationService {
     return new NeoResponse(200, resp);
   }
 
-  /** Rejects multi-currency payments (no exchange-rate UI yet). */
+  /**
+   * Rejects multi-currency payments on the simple invoice quick-pay / bank-reconciliation path
+   * ({@link #registerPaymentCore}), which has no conversion-rate input. The two-step modal
+   * ({@link #doRegisterPaymentAdvanced}) instead threads a real conversion rate and does NOT call
+   * this guard.
+   */
   private static void assertCurrencyMatch(Currency invoiceCurrency, Currency accountCurrency) {
     if (invoiceCurrency != null && accountCurrency != null
         && !invoiceCurrency.getId().equals(accountCurrency.getId())) {
@@ -792,22 +830,47 @@ final class PaymentRegistrationService {
     return docType;
   }
 
-  /** Creates and persists a draft FIN_Payment (not processed yet) with its transaction amount. */
+  /**
+   * Creates and persists a draft FIN_Payment (not processed yet) with its transaction amount.
+   * The payment amount is in the invoice currency; the financial transaction amount is that
+   * amount expressed in the account currency ({@code amount * rate}, see {@link #convertedAmount}).
+   * A rate of {@link BigDecimal#ONE} (same currency) keeps the transaction amount equal to the
+   * payment amount, preserving the original single-currency behavior.
+   */
   private static FIN_Payment createDraftPayment(AdvPaymentMngtDao dao, boolean isReceipt,
       Invoice invoice, FIN_PaymentMethod paymentMethod, FIN_FinancialAccount account,
-      Date paymentDate, BigDecimal amount) throws Exception {
+      Date paymentDate, BigDecimal rate, BigDecimal amount) throws Exception {
     DocumentType docType = resolveArApDocType(invoice.getOrganization(), isReceipt);
     String docNo = FIN_Utility.getDocumentNo(docType, "FIN_Payment");
     VariablesSecureApp vars = NeoDefaultsService.buildVariablesSecureApp(OBContext.getOBContext());
     RequestContext.get().setVariableSecureApp(vars);
+    BigDecimal txnAmount = convertedAmount(amount, rate, account);
     FIN_Payment payment = dao.getNewPayment(isReceipt, invoice.getOrganization(), docType, docNo,
         invoice.getBusinessPartner(), paymentMethod, account, "0", paymentDate, "",
-        invoice.getCurrency(), BigDecimal.ONE, amount);
+        invoice.getCurrency(), rate, txnAmount);
     payment.setAmount(amount);
-    FIN_AddPayment.setFinancialTransactionAmountAndRate(null, payment, BigDecimal.ONE, amount);
+    FIN_AddPayment.setFinancialTransactionAmountAndRate(null, payment, rate, txnAmount);
     OBDal.getInstance().save(payment);
     OBDal.getInstance().flush();
     return payment;
+  }
+
+  /**
+   * The payment amount expressed in the financial account's currency: {@code amount * rate},
+   * rounded to the account currency's standard precision. When the account has no currency (or no
+   * declared precision) the product is returned unrounded. Package-visible: also used by
+   * {@link PaymentDraftEditService#reapplyDraftBasics} on the edit/confirm path so a reused draft
+   * keeps its rate. A {@code rate} of ONE returns {@code amount} rounded to precision.
+   */
+  static BigDecimal convertedAmount(BigDecimal amount, BigDecimal rate,
+      FIN_FinancialAccount account) {
+    BigDecimal converted = amount.multiply(rate);
+    Currency accountCurrency = account.getCurrency();
+    if (accountCurrency != null && accountCurrency.getStandardPrecision() != null) {
+      converted = converted.setScale(accountCurrency.getStandardPrecision().intValue(),
+          RoundingMode.HALF_UP);
+    }
+    return converted;
   }
 
   /**
