@@ -35,13 +35,33 @@ public final class NeoAccessUtils {
   }
 
   /**
-   * Check if the current role has access to the given AD_Window.
+   * Check if the current role has (read) access to the given AD_Window.
+   * <p>
+   * Equivalent to {@link #hasWindowAccess(String, String)} with a {@code GET} method —
+   * use this only for visibility/discovery checks (e.g. "is this window in the tool
+   * catalog at all"), never to gate an actual write operation.
    *
    * @param windowId AD_Window_ID to check
    * @return true if the role has an active WindowAccess record, or is System Admin
    */
   public static boolean hasWindowAccess(String windowId) {
     return NeoAccessHelper.hasWindowAccess(windowId);
+  }
+
+  /**
+   * Check if the current role has access to the given AD_Window for the given HTTP-method
+   * equivalent, enforcing the read-only vs. full-access tiering (ETP-4510). MCP tools that
+   * mutate data (create/update/delete/batch) must call this with the write-intent method
+   * ({@code POST}/{@code PUT}/{@code PATCH}/{@code DELETE}) instead of the bare 1-arg
+   * overload, so a read-only {@code AD_Window_Access} row is correctly denied.
+   *
+   * @param windowId   AD_Window_ID to check
+   * @param httpMethod the HTTP-method equivalent of the MCP operation (e.g. {@code "POST"}
+   *                   for {@code neo_create}, {@code "GET"} for read-only tools)
+   * @return true if the role is allowed to perform {@code httpMethod} on {@code windowId}
+   */
+  public static boolean hasWindowAccess(String windowId, String httpMethod) {
+    return NeoAccessHelper.hasWindowAccess(windowId, httpMethod);
   }
 
   /**

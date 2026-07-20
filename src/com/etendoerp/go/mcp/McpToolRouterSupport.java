@@ -225,7 +225,34 @@ final class McpToolRouterSupport {
     return spec != null && McpConstants.SPEC_DASHBOARD.equals(spec.getName());
   }
 
+  /**
+   * Read-tier ({@code GET}) spec access check. Use only for visibility/discovery
+   * (neo_discover, MCP resource listing) — never to gate an actual write operation;
+   * see {@link #hasSpecAccess(SFSpec, String, String)} for that.
+   */
   static boolean hasSpecAccess(SFSpec spec, String specType) {
+    return hasSpecAccess(spec, specType, "GET");
+  }
+
+  /**
+   * Checks whether the current role can perform {@code httpMethod} against {@code spec}.
+   * <p>
+   * For window specs (type {@code "W"}), enforces the read-only vs. full-access tiering
+   * (ETP-4510) via {@link NeoAccessUtils#hasWindowAccess(String, String)} — callers that
+   * gate a mutating MCP tool (neo_create/neo_update/neo_delete/neo_batch) MUST pass the
+   * write-intent method here, not the 1-arg overload, or a read-only
+   * {@code AD_Window_Access} role would be able to write through MCP even though the
+   * equivalent REST NEO Headless call correctly returns 403.
+   * <p>
+   * Process specs (type {@code "P"}/{@code "R"}) remain binary — process access has no
+   * read/write tiering — so {@code httpMethod} is ignored for them.
+   *
+   * @param spec       the spec to check (may be {@code null})
+   * @param specType   the spec's type ({@code "W"}, {@code "P"}, or {@code "R"})
+   * @param httpMethod the HTTP-method equivalent of the MCP operation being authorized
+   * @return {@code true} if the current role may perform {@code httpMethod} on {@code spec}
+   */
+  static boolean hasSpecAccess(SFSpec spec, String specType, String httpMethod) {
     // The dashboard/widget spec is not a CRUD window; it is surfaced via neo_widget,
     // never through neo_discover's W catalog (ETP-4284 / G4).
     if (isWidgetSpec(spec)) {
@@ -233,7 +260,7 @@ final class McpToolRouterSupport {
     }
     if ("W".equals(specType)) {
       Window window = spec.getADWindow();
-      return window == null || NeoAccessUtils.hasWindowAccess(window.getId());
+      return window == null || NeoAccessUtils.hasWindowAccess(window.getId(), httpMethod);
     }
     if ("P".equals(specType) || "R".equals(specType)) {
       Process adProcess = spec.getProcess();

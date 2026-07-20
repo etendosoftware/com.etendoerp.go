@@ -109,7 +109,7 @@ public class McpToolRouter {
       try {
         // Resolve spec name from tool name or arguments
         String specName = ToolRegistry.resolveSpecName(toolName, arguments);
-        authorizeSpecAccess(specName);
+        authorizeSpecAccess(specName, resolveAccessMethod(toolName));
 
         switch (toolName) {
           case "neo_discover":
@@ -789,6 +789,10 @@ public class McpToolRouter {
       // windows, and the top-level authorizeSpecAccess(null) on neo_batch is a
       // no-op. Authorise each distinct spec before any DAL work happens so an
       // LLM agent cannot smuggle writes into a spec it lacks CRUD access to.
+      // Every batch operation is a create (BatchService#processOperation only
+      // ever calls createRecord — there is no update/delete op type), so this
+      // is a write-tier ("POST") check: a read-only AD_Window_Access role must
+      // be denied here exactly as it would be for a direct neo_create call.
       java.util.Set<String> seen = new java.util.HashSet<>();
       for (int i = 0; i < operations.length(); i++) {
         JSONObject op = operations.optJSONObject(i);
@@ -797,7 +801,7 @@ public class McpToolRouter {
         }
         String specName = op.optString("spec", null);
         if (StringUtils.isNotBlank(specName) && seen.add(specName)) {
-          authorizeSpecAccess(specName);
+          authorizeSpecAccess(specName, "POST");
         }
       }
       JSONObject result = BatchService.forBatchOnly().executeBatch(operations);
@@ -953,14 +957,57 @@ public class McpToolRouter {
     return McpHookExecutor.neoResponseToMcpResult(neoResponse);
   }
 
+  /**
+   * Read-tier ({@code GET}) spec authorization. Prefer
+   * {@link #authorizeSpecAccess(String, String)} whenever the caller knows the
+   * MCP tool's write intent.
+   */
   private void authorizeSpecAccess(String specName) throws Exception {
+    authorizeSpecAccess(specName, "GET");
+  }
+
+  /**
+   * Authorizes the current role against {@code specName} for the given HTTP-method
+   * equivalent, enforcing the read-only vs. full-access {@code AD_Window_Access}
+   * tiering (ETP-4510) via {@link McpToolRouterSupport#hasSpecAccess(SFSpec, String, String)}.
+   *
+   * @param specName   the spec name resolved from the tool call (blank/{@code null} is a no-op —
+   *                   some tools, e.g. {@code neo_discover}, have no single spec to authorize)
+   * @param httpMethod the HTTP-method equivalent of the MCP operation being authorized
+   *                   (e.g. {@code "POST"} for {@code neo_create})
+   */
+  private void authorizeSpecAccess(String specName, String httpMethod) throws Exception {
     if (StringUtils.isBlank(specName)) {
       return;
     }
     SFSpec spec = McpToolRouterSupport.findActiveSpecByName(specName);
-    if (!McpToolRouterSupport.hasSpecAccess(spec, spec.getSpecType())) {
+    if (!McpToolRouterSupport.hasSpecAccess(spec, spec.getSpecType(), httpMethod)) {
       throw new SecurityException("Access denied to spec '" + specName
           + ACCESS_DENIED_FOR_CURRENT_ROLE_SUFFIX);
+    }
+  }
+
+  /**
+   * Maps an MCP tool name to the HTTP-method equivalent used for
+   * {@code AD_Window_Access} read/write tiering (ETP-4510). Mutating CRUD tools map to
+   * their REST NEO Headless counterpart; every other tool (reads, process/report
+   * execution, discovery) is treated as a read for window-access purposes — process and
+   * report access are authorized separately and are unaffected by this method string.
+   *
+   * @param toolName the MCP tool name (e.g. {@code "neo_create"})
+   * @return {@code "POST"}, {@code "PUT"}, or {@code "DELETE"} for the corresponding
+   *         mutating tool; {@code "GET"} for everything else
+   */
+  private static String resolveAccessMethod(String toolName) {
+    switch (toolName) {
+      case "neo_create":
+        return "POST";
+      case "neo_update":
+        return "PUT";
+      case "neo_delete":
+        return "DELETE";
+      default:
+        return "GET";
     }
   }
 

@@ -266,7 +266,7 @@ class McpToolRouterSupportTest {
       Window window = mock(Window.class);
       when(spec.getADWindow()).thenReturn(window);
       when(window.getId()).thenReturn("win-1");
-      accessMock.when(() -> NeoAccessUtils.hasWindowAccess("win-1")).thenReturn(true);
+      accessMock.when(() -> NeoAccessUtils.hasWindowAccess("win-1", "GET")).thenReturn(true);
 
       assertTrue(McpToolRouterSupport.hasSpecAccess(spec, "W"));
     }
@@ -277,7 +277,7 @@ class McpToolRouterSupportTest {
       Window window = mock(Window.class);
       when(spec.getADWindow()).thenReturn(window);
       when(window.getId()).thenReturn("win-2");
-      accessMock.when(() -> NeoAccessUtils.hasWindowAccess("win-2")).thenReturn(false);
+      accessMock.when(() -> NeoAccessUtils.hasWindowAccess("win-2", "GET")).thenReturn(false);
 
       assertFalse(McpToolRouterSupport.hasSpecAccess(spec, "W"));
     }
@@ -288,6 +288,82 @@ class McpToolRouterSupportTest {
       when(spec.getADWindow()).thenReturn(null);
 
       assertTrue(McpToolRouterSupport.hasSpecAccess(spec, "W"));
+    }
+
+    /**
+     * ETP-4510: the 2-arg overload defaults to a GET/read-tier check — a read-only
+     * {@code AD_Window_Access} role must still see the spec in discovery/listing.
+     */
+    @Test
+    void twoArgOverloadDefaultsToGetMethod() {
+      SFSpec spec = mock(SFSpec.class);
+      Window window = mock(Window.class);
+      when(spec.getADWindow()).thenReturn(window);
+      when(window.getId()).thenReturn("win-get");
+      accessMock.when(() -> NeoAccessUtils.hasWindowAccess("win-get", "GET")).thenReturn(true);
+      accessMock.when(() -> NeoAccessUtils.hasWindowAccess("win-get", "POST")).thenReturn(false);
+
+      assertTrue(McpToolRouterSupport.hasSpecAccess(spec, "W"));
+    }
+
+    /**
+     * ETP-4510 (BLOCKER fix): a write-tier check (POST/PUT/DELETE) for a window spec
+     * must thread the HTTP-method-equivalent through to
+     * {@link NeoAccessUtils#hasWindowAccess(String, String)} so a read-only
+     * {@code AD_Window_Access} role is denied — this is the exact gap that let MCP
+     * neo_create/neo_update/neo_delete/neo_batch bypass the REST tiering.
+     */
+    @Test
+    void windowSpecWriteMethodDeniedForReadOnlyAccess() {
+      SFSpec spec = mock(SFSpec.class);
+      Window window = mock(Window.class);
+      when(spec.getADWindow()).thenReturn(window);
+      when(window.getId()).thenReturn("win-ro");
+      accessMock.when(() -> NeoAccessUtils.hasWindowAccess("win-ro", "GET")).thenReturn(true);
+      accessMock.when(() -> NeoAccessUtils.hasWindowAccess("win-ro", "POST")).thenReturn(false);
+      accessMock.when(() -> NeoAccessUtils.hasWindowAccess("win-ro", "PUT")).thenReturn(false);
+      accessMock.when(() -> NeoAccessUtils.hasWindowAccess("win-ro", "DELETE")).thenReturn(false);
+
+      assertTrue(McpToolRouterSupport.hasSpecAccess(spec, "W", "GET"));
+      assertFalse(McpToolRouterSupport.hasSpecAccess(spec, "W", "POST"));
+      assertFalse(McpToolRouterSupport.hasSpecAccess(spec, "W", "PUT"));
+      assertFalse(McpToolRouterSupport.hasSpecAccess(spec, "W", "DELETE"));
+    }
+
+    /**
+     * ETP-4510: a full-access (read/write) role passes every method tier.
+     */
+    @Test
+    void windowSpecWriteMethodAllowedForFullAccess() {
+      SFSpec spec = mock(SFSpec.class);
+      Window window = mock(Window.class);
+      when(spec.getADWindow()).thenReturn(window);
+      when(window.getId()).thenReturn("win-full");
+      accessMock.when(() -> NeoAccessUtils.hasWindowAccess("win-full", "GET")).thenReturn(true);
+      accessMock.when(() -> NeoAccessUtils.hasWindowAccess("win-full", "POST")).thenReturn(true);
+      accessMock.when(() -> NeoAccessUtils.hasWindowAccess("win-full", "PUT")).thenReturn(true);
+      accessMock.when(() -> NeoAccessUtils.hasWindowAccess("win-full", "DELETE")).thenReturn(true);
+
+      assertTrue(McpToolRouterSupport.hasSpecAccess(spec, "W", "GET"));
+      assertTrue(McpToolRouterSupport.hasSpecAccess(spec, "W", "POST"));
+      assertTrue(McpToolRouterSupport.hasSpecAccess(spec, "W", "PUT"));
+      assertTrue(McpToolRouterSupport.hasSpecAccess(spec, "W", "DELETE"));
+    }
+
+    /**
+     * ETP-4510: process/report specs remain binary regardless of the method passed —
+     * the write-tier method string must not accidentally change process authorization.
+     */
+    @Test
+    void processSpecIgnoresHttpMethod() {
+      SFSpec spec = mock(SFSpec.class);
+      Process process = mock(Process.class);
+      when(spec.getProcess()).thenReturn(process);
+      when(process.getId()).thenReturn("proc-3");
+      accessMock.when(() -> NeoAccessUtils.hasProcessAccess("proc-3")).thenReturn(true);
+
+      assertTrue(McpToolRouterSupport.hasSpecAccess(spec, "P", "POST"));
+      assertTrue(McpToolRouterSupport.hasSpecAccess(spec, "P", "DELETE"));
     }
 
     @Test
