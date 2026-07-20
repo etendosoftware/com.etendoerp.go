@@ -57,6 +57,8 @@ public class GoodsReceiptHeaderHandler implements NeoHandler {
   private static final Logger log = LogManager.getLogger(GoodsReceiptHeaderHandler.class);
   private static final String FIELD_DOCUMENT_NO = "documentNo";
   private static final String FIELD_DOCUMENT_STATUS = "documentStatus";
+  private static final String FIELD_MOVEMENT_DATE = "movementDate";
+  private static final String FIELD_ACCOUNTING_DATE = "accountingDate";
 
   @Inject
   private NeoCloneRecordHandler cloneRecordHandler;
@@ -77,6 +79,7 @@ public class GoodsReceiptHeaderHandler implements NeoHandler {
 
   @Override
   public NeoResponse handle(NeoContext context) {
+    mirrorAccountingDate(context);
     NeoResponse posting = postingService != null ? postingService.handleAction(context) : null;
     if (posting != null) {
       return posting;
@@ -88,6 +91,24 @@ public class GoodsReceiptHeaderHandler implements NeoHandler {
     }
     return NeoHeaderActionRouter.dispatch(context,
         cloneRecordHandler, createPurchaseInvoiceHandler, createPurchaseReturnHandler);
+  }
+
+  /**
+   * Mirrors the single visible {@code movementDate} field into the hidden
+   * {@code accountingDate} field on the request body, unconditionally, before the default CRUD
+   * path persists it (ETP-4531 — unified date). The user never sees or edits accountingDate
+   * directly; whatever value is saved for movementDate (create or update) must also become the
+   * receipt's accounting date.
+   *
+   * <p><b>ETP-4531 fix:</b> must fire on {@code PATCH} as well as {@code POST}/{@code PUT} — the
+   * live React UI ({@code useEntity.js#getMethod}) always sends {@code PATCH} for edits to an
+   * EXISTING receipt; it never sends a full {@code PUT}. See {@link NeoHandlerUtils#isWriteMethod}.
+   */
+  static void mirrorAccountingDate(NeoContext context) {
+    if (NeoEndpointType.CRUD.equals(context.getEndpointType())
+        && NeoHandlerUtils.isWriteMethod(context.getHttpMethod())) {
+      NeoHandlerUtils.mirrorFieldValue(context.getRequestBody(), FIELD_MOVEMENT_DATE, FIELD_ACCOUNTING_DATE);
+    }
   }
 
   private void injectPartnerAddressIfMissing(NeoContext context) {
