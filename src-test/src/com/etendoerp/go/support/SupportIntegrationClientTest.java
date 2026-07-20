@@ -138,6 +138,99 @@ class SupportIntegrationClientTest {
     }
 
     @Test
+    @DisplayName("Attachment with data + DOCX mimeType appends inlineData part (not a placeholder)")
+    void docxAttachment() throws Exception {
+      JSONObject att = new JSONObject()
+          .put("name", "report.docx")
+          .put("mimeType", "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+          .put("data", "UEsDBA==");
+      JSONArray parts = new JSONArray();
+      SupportIntegrationClient.appendSingleAttachmentPart(parts, att);
+      assertEquals(1, parts.length());
+      JSONObject inlineData = parts.getJSONObject(0).getJSONObject("inlineData");
+      assertEquals("application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+          inlineData.getString("mimeType"));
+      assertEquals("UEsDBA==", inlineData.getString("data"));
+    }
+
+    @Test
+    @DisplayName("Attachment with data + XLSX mimeType appends inlineData part (not a placeholder)")
+    void xlsxAttachment() throws Exception {
+      JSONObject att = new JSONObject()
+          .put("name", "sheet.xlsx")
+          .put("mimeType", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+          .put("data", "UEsDBB0=");
+      JSONArray parts = new JSONArray();
+      SupportIntegrationClient.appendSingleAttachmentPart(parts, att);
+      assertEquals(1, parts.length());
+      JSONObject inlineData = parts.getJSONObject(0).getJSONObject("inlineData");
+      assertEquals("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+          inlineData.getString("mimeType"));
+      assertEquals("UEsDBB0=", inlineData.getString("data"));
+    }
+
+    @Test
+    @DisplayName("Text attachment with both text and data appends a text part AND an inlineData part")
+    void textAttachmentWithDataAppendsBothParts() throws Exception {
+      JSONObject att = new JSONObject()
+          .put("name", "data.csv")
+          .put("mimeType", "text/csv")
+          .put("text", "a,b,c")
+          .put("data", "YSxiLGM=");
+      JSONArray parts = new JSONArray();
+      SupportIntegrationClient.appendSingleAttachmentPart(parts, att);
+      assertEquals(2, parts.length());
+      String text = parts.getJSONObject(0).getString("text");
+      assertTrue(text.contains("data.csv"));
+      assertTrue(text.contains("a,b,c"));
+      JSONObject inlineData = parts.getJSONObject(1).getJSONObject("inlineData");
+      assertEquals("text/csv", inlineData.getString("mimeType"));
+      assertEquals("YSxiLGM=", inlineData.getString("data"));
+    }
+
+    @Test
+    @DisplayName("Text attachment with only text (no data, older/cached frontend) still appends a single text part")
+    void textAttachmentWithoutDataAppendsOnlyTextPart() throws Exception {
+      JSONObject att = new JSONObject()
+          .put("name", "notes.txt")
+          .put("mimeType", "text/plain")
+          .put("text", "hello world");
+      JSONArray parts = new JSONArray();
+      SupportIntegrationClient.appendSingleAttachmentPart(parts, att);
+      assertEquals(1, parts.length());
+      assertFalse(parts.getJSONObject(0).has("inlineData"));
+      String text = parts.getJSONObject(0).getString("text");
+      assertTrue(text.contains("notes.txt"));
+      assertTrue(text.contains("hello world"));
+    }
+
+    @Test
+    @DisplayName("Attachment with audio mimeType is not inlined — falls back to text placeholder")
+    void audioMimeTypeStaysUnsupported() throws Exception {
+      JSONObject att = new JSONObject()
+          .put("name", "voice.webm").put("mimeType", "audio/webm").put("data", "T2dnUw==");
+      JSONArray parts = new JSONArray();
+      SupportIntegrationClient.appendSingleAttachmentPart(parts, att);
+      assertEquals(1, parts.length());
+      assertFalse(parts.getJSONObject(0).has("inlineData"));
+      String text = parts.getJSONObject(0).getString("text");
+      assertTrue(text.contains("voice.webm"));
+    }
+
+    @Test
+    @DisplayName("Attachment with video mimeType is not inlined — falls back to text placeholder")
+    void videoMimeTypeStaysUnsupported() throws Exception {
+      JSONObject att = new JSONObject()
+          .put("name", "clip.mp4").put("mimeType", "video/mp4").put("data", "AAAAGGZ0eXA=");
+      JSONArray parts = new JSONArray();
+      SupportIntegrationClient.appendSingleAttachmentPart(parts, att);
+      assertEquals(1, parts.length());
+      assertFalse(parts.getJSONObject(0).has("inlineData"));
+      String text = parts.getJSONObject(0).getString("text");
+      assertTrue(text.contains("clip.mp4"));
+    }
+
+    @Test
     @DisplayName("Attachment with neither text nor data is skipped")
     void emptyAttachmentSkipped() throws Exception {
       JSONObject att = new JSONObject().put("name", "empty.bin").put("mimeType", "application/octet-stream");
@@ -155,6 +248,42 @@ class SupportIntegrationClientTest {
       JSONArray parts = new JSONArray();
       SupportIntegrationClient.appendAttachmentParts(parts, attachments);
       assertEquals(2, parts.length());
+    }
+
+    @Test
+    @DisplayName("Mixed image + DOCX + text-with-data attachments produce parts in the correct order")
+    void mixedAttachmentTypesInOrder() throws Exception {
+      JSONArray attachments = new JSONArray();
+      attachments.put(new JSONObject()
+          .put("name", "photo.png").put("mimeType", "image/png").put("data", "QUJD"));
+      attachments.put(new JSONObject()
+          .put("name", "report.docx")
+          .put("mimeType", "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+          .put("data", "UEsDBA=="));
+      attachments.put(new JSONObject()
+          .put("name", "data.csv").put("mimeType", "text/csv")
+          .put("text", "a,b,c").put("data", "YSxiLGM="));
+
+      JSONArray parts = new JSONArray();
+      SupportIntegrationClient.appendAttachmentParts(parts, attachments);
+
+      // image -> 1 inlineData part; docx -> 1 inlineData part; text-with-data -> text part + inlineData part
+      assertEquals(4, parts.length());
+
+      JSONObject imagePart = parts.getJSONObject(0).getJSONObject("inlineData");
+      assertEquals("image/png", imagePart.getString("mimeType"));
+
+      JSONObject docxPart = parts.getJSONObject(1).getJSONObject("inlineData");
+      assertEquals("application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+          docxPart.getString("mimeType"));
+
+      String csvText = parts.getJSONObject(2).getString("text");
+      assertTrue(csvText.contains("data.csv"));
+      assertTrue(csvText.contains("a,b,c"));
+
+      JSONObject csvInlineData = parts.getJSONObject(3).getJSONObject("inlineData");
+      assertEquals("text/csv", csvInlineData.getString("mimeType"));
+      assertEquals("YSxiLGM=", csvInlineData.getString("data"));
     }
   }
 
@@ -375,16 +504,38 @@ class SupportIntegrationClientTest {
     @Test
     @DisplayName("postJiraComment is a no-op when jiraKey is null or empty")
     void postJiraCommentNoopOnMissingKey() {
-      assertDoesNotThrow(() -> SupportIntegrationClient.postJiraComment(null, "text"));
-      assertDoesNotThrow(() -> SupportIntegrationClient.postJiraComment("", "text"));
+      assertDoesNotThrow(() -> SupportIntegrationClient.postJiraComment(null, "text", false));
+      assertDoesNotThrow(() -> SupportIntegrationClient.postJiraComment("", "text", false));
     }
 
     @Test
     @DisplayName("postJiraComment is a no-op when the API token is not configured (default test env)")
     void postJiraCommentNoopWhenNoToken() {
-      // support.jira.token defaults to "" in this test environment, so the early
-      // guard always short-circuits before any HTTP call is attempted.
-      assertDoesNotThrow(() -> SupportIntegrationClient.postJiraComment("SUP-1", "some message"));
+      // JiraConfig ships no hardcoded default for url/username/token (see its javadoc), and no
+      // test in this suite configures them, so isConfigured() is false and the early guard
+      // always short-circuits before any HTTP call is attempted.
+      assertDoesNotThrow(() -> SupportIntegrationClient.postJiraComment("SUP-1", "some message", false));
+    }
+
+    /**
+     * NOT independently assertable in this suite: whether the built JSON payload actually
+     * contains {@code "internal":true} vs {@code "internal":false} for the two call sites
+     * ({@link SupportConversationsServlet}'s human-takeover forward passes {@code false}; its
+     * CSAT feedback branch passes {@code true}). Unlike before {@code JiraConfig} existed, the
+     * config is now re-read fresh on every call rather than frozen at class-load time — but
+     * setting a fake token here would just make {@code postJiraComment} attempt a real HTTP call
+     * to Jira with bad credentials, not a testable seam. Asserting the payload content would
+     * still require extracting payload construction into a separately testable pure function, a
+     * production change out of scope for a coverage-only pass. This test only documents that
+     * both boolean values are accepted without throwing; see the test-run report for this gap
+     * flagged explicitly.
+     */
+    @Test
+    @DisplayName("postJiraComment no-ops safely for both internal=true and internal=false (payload-content "
+        + "assertion not feasible here — see Javadoc)")
+    void postJiraCommentNoopForBothInternalValues() {
+      assertDoesNotThrow(() -> SupportIntegrationClient.postJiraComment("SUP-1", "message", true));
+      assertDoesNotThrow(() -> SupportIntegrationClient.postJiraComment("SUP-1", "message", false));
     }
 
     @Test

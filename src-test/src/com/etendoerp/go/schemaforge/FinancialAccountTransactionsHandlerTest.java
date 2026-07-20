@@ -413,6 +413,8 @@ public class FinancialAccountTransactionsHandlerTest {
         "desc", "Y", "PAY-1", "ACME SL", "EUR");
     when(rs.getBigDecimal("deposit_amt")).thenReturn(new BigDecimal("100.00"));
     when(rs.getBigDecimal("payment_amt")).thenReturn(BigDecimal.ZERO);
+    // `processed` now reflects the real DB flag (column processed_flag), not the status code.
+    when(rs.getString("processed_flag")).thenReturn("Y");
 
     try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
       OBDal dal = mock(OBDal.class);
