@@ -34,6 +34,7 @@ import org.openbravo.base.exception.OBException;
 import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.base.structure.DynamicOBObject;
 import org.openbravo.dal.core.OBContext;
+import org.openbravo.dal.core.SessionHandler;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.dal.service.OBQuery;
 import org.openbravo.model.ad.system.Client;
@@ -222,6 +223,10 @@ public class DalEmailSafetyStore implements EmailSafetyStore {
       auditEntry.set(PROP_PAYLOAD, auditPayload(auditRecord).toString());
       OBDal.getInstance().save(auditEntry);
       OBDal.getInstance().flush();
+      if (TransactionalEmailService.STATUS_SENT.equals(auditRecord.getStatus())
+          && StringUtils.isNotBlank(auditRecord.getIdempotencyKey())) {
+        SessionHandler.getInstance().commitAndStart();
+      }
     } finally {
       OBContext.restorePreviousMode();
     }

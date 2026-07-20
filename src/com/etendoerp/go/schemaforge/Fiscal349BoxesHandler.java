@@ -148,14 +148,78 @@ class Fiscal349BoxesHandler extends AbstractFiscalHandler {
 
     String    orgNif      = resolveOrgNif(orgId);
     JSONArray invoicesArr = collectInvoices(purch, sales);
+    JSONArray rectifArr   = collectRectifications(corrPurch, corrSales);
 
     JSONObject root = new JSONObject();
     root.put(OPERATORS, operatorsArr);
     root.put("summary",  summary);
     root.put("invoices", invoicesArr);
+    root.put("rectifications", rectifArr);
     root.put("orgNif",   orgNif != null ? orgNif : "");
     root.put("orgName",  org.getName());
     return root;
+  }
+
+  /**
+   * Corrective (Tipo Registro 2) detail rows for the Rectificaciones tab: one row
+   * per C_Invoice_Reverse entry with AEAT349 corrective data, on the corrective
+   * invoices of the declared period. Scalar HQL — the EM_AEAT349_* module
+   * properties have no typed getters on the core ReversedInvoice class.
+   */
+  JSONArray collectRectifications(Set<Invoice> corrPurch, Set<Invoice> corrSales)
+      throws Exception {
+    JSONArray arr = new JSONArray();
+    collectRectificationRows(arr, corrPurch, "Compra");
+    collectRectificationRows(arr, corrSales, "Venta");
+    return arr;
+  }
+
+  private void collectRectificationRows(JSONArray arr, Set<Invoice> invoices, String type)
+      throws Exception {
+    if (invoices == null || invoices.isEmpty()) {
+      return;
+    }
+    SimpleDateFormat sdf = new SimpleDateFormat("yyyy-MM-dd");
+    List<Object[]> rows = OBDal.getInstance().getSession()
+        .createQuery("select i.documentNo, i.invoiceDate, bp.name, bp.taxID,"
+            + " rev.documentNo, y.fiscalYear, ri.aEAT349Period,"
+            + " ri.aEAT349BPBaseAmount, ri.aEAT349BPBaseAmountS"
+            + " from ReversedInvoices ri"
+            + " join ri.invoice i"
+            + " join i.businessPartner bp"
+            + " join ri.reversedInvoice rev"
+            + " left join ri.aEAT349CYear y"
+            + " where ri.invoice in :invs and ri.aEAT349IsCorrective = true", Object[].class)
+        .setParameterList("invs", invoices)
+        .list();
+    for (Object[] r : rows) {
+      JSONObject row = new JSONObject();
+      row.put("ref",           str(r[0]));
+      row.put("date",          dateStr(r[1], sdf));
+      row.put("type",          type);
+      row.put("party",         str(r[2]));
+      row.put("nifIva",        str(r[3]));
+      row.put("originalRef",   str(r[4]));
+      row.put("declaredYear",  str(r[5]));
+      row.put("declaredPeriod", str(r[6]));
+      row.put("baseProducts",  scaled((BigDecimal) r[7]));
+      row.put("baseServices",  scaled((BigDecimal) r[8]));
+      arr.put(row);
+    }
+  }
+
+  // Null-safe string coercion for HQL projection columns (null -> "").
+  private static String str(Object o) {
+    return o != null ? o.toString() : "";
+  }
+
+  // Null-safe date formatting for HQL projection columns (null -> "").
+  private static String dateStr(Object o, SimpleDateFormat sdf) {
+    return o != null ? sdf.format((Date) o) : "";
+  }
+
+  private static String scaled(BigDecimal v) {
+    return (v != null ? v : BigDecimal.ZERO).setScale(2, RoundingMode.HALF_UP).toString();
   }
 
   // Package-private for unit testing of the pure data→JSON transformation logic.

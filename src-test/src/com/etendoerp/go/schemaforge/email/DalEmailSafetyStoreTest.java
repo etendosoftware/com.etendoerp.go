@@ -43,6 +43,7 @@ import org.mockito.ArgumentCaptor;
 import org.mockito.MockedStatic;
 import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.dal.core.OBContext;
+import org.openbravo.dal.core.SessionHandler;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.dal.service.OBQuery;
 import org.openbravo.model.ad.system.Client;
@@ -54,7 +55,9 @@ import org.openbravo.model.common.enterprise.Organization;
 public class DalEmailSafetyStoreTest {
 
   private OBDal obDal;
+  private SessionHandler sessionHandler;
   private MockedStatic<OBDal> obDalMock;
+  private MockedStatic<SessionHandler> sessionHandlerMock;
   // ETGO_Email_Safety writes run in admin mode (setAdminMode/restorePreviousMode); mock the static
   // so the unit tests do not touch a real OBContext.
   private MockedStatic<OBContext> obContextMock;
@@ -62,8 +65,11 @@ public class DalEmailSafetyStoreTest {
   @Before
   public void setUp() {
     obDal = mock(OBDal.class);
+    sessionHandler = mock(SessionHandler.class);
     obDalMock = mockStatic(OBDal.class);
     obDalMock.when(OBDal::getInstance).thenReturn(obDal);
+    sessionHandlerMock = mockStatic(SessionHandler.class);
+    sessionHandlerMock.when(SessionHandler::getInstance).thenReturn(sessionHandler);
     obContextMock = mockStatic(OBContext.class);
     when(obDal.get(eq(Client.class), anyString())).thenReturn(mock(Client.class));
     when(obDal.get(eq(Organization.class), anyString())).thenReturn(mock(Organization.class));
@@ -73,6 +79,9 @@ public class DalEmailSafetyStoreTest {
   public void tearDown() {
     if (obDalMock != null) {
       obDalMock.close();
+    }
+    if (sessionHandlerMock != null) {
+      sessionHandlerMock.close();
     }
     if (obContextMock != null) {
       obContextMock.close();
@@ -120,6 +129,7 @@ public class DalEmailSafetyStoreTest {
     assertTrue(payload.has("recipientHash"));
     assertFalse(payload.toString().contains("person@example.com"));
     verify(obDal).flush();
+    verify(sessionHandler).commitAndStart();
   }
 
   @Test
