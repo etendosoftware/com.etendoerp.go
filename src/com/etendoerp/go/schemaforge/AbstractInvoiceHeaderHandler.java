@@ -73,6 +73,10 @@ public abstract class AbstractInvoiceHeaderHandler {
   protected static final String FIELD_TRANSACTION_DOCUMENT = "transactionDocument";
   private static final String FIELD_CURRENCY = "currency";
   private static final String FIELD_VALUE = "value";
+  private static final String FIELD_PROCESSED = "processed";
+  private static final String FIELD_TOTAL_DISCOUNT_PCT = "etgoTotalDiscount";
+  protected static final String FIELD_GRAND_TOTAL_AMOUNT = "grandTotalAmount";
+  protected static final String FIELD_OUTSTANDING_AMOUNT = "outstandingAmount";
 
   // ---------------------------------------------------------------------------
   // Abstract contract
@@ -117,6 +121,16 @@ public abstract class AbstractInvoiceHeaderHandler {
    * @return virtual-field name for the subtype
    */
   protected abstract String getInvoiceSubtypeKey();
+
+  /**
+   * Supplies the concrete handler's own {@code @Inject}-ed {@link TotalDiscountService} so
+   * {@link #applyTotalDiscountToRecord} can call {@code hasDiscountLine} without this abstract
+   * class holding a CDI-injected field itself — this class is a pure helper/base (see class
+   * Javadoc) and never injects its own collaborators.
+   *
+   * @return the subclass's injected {@link TotalDiscountService}
+   */
+  protected abstract TotalDiscountService getTotalDiscountService();
 
   // ---------------------------------------------------------------------------
   // Validation
@@ -435,6 +449,45 @@ public abstract class AbstractInvoiceHeaderHandler {
       log.warn("Could not check hasRectifications for invoice {}: {}", invoiceId, e.getMessage());
     }
     rec.put("hasRectifications", result);
+  }
+
+  /**
+   * Adjusts {@code grandTotalAmount} and {@code outstandingAmount} for a draft invoice carrying
+   * a positive {@code etgoTotalDiscount} percentage that has not yet been materialized as a real
+   * line — otherwise the list view and preview cards show the raw undiscounted total while the
+   * document is still in draft, since the discount is only materialized into a real line at
+   * Complete time via {@link TotalDiscountService}. Mirrors {@link AbstractOrderHeaderHandler}'s
+   * order-side equivalent.
+   *
+   * <p>No-op when the invoice is processed (the DB total already reflects the discount), when no
+   * discount percentage is set, or when the discount is already a real line
+   * ({@code hasDiscountLine} — e.g. an invoice created from an order that already carried the
+   * discount, via {@code InvoiceFromOrderSupport} — avoids double-counting). Mirrors the exact
+   * guard order of the original {@code SalesInvoiceHeaderHandler}-only implementation this was
+   * consolidated from: {@link #getTotalDiscountService()} is only dereferenced when {@code id}
+   * is present, matching every existing caller/test.
+   */
+  protected void applyTotalDiscountToRecord(JSONObject invoice) throws Exception {
+    if (invoice.optBoolean(FIELD_PROCESSED, false)) {
+      return;
+    }
+    double discountPct = invoice.optDouble(FIELD_TOTAL_DISCOUNT_PCT, 0.0);
+    if (discountPct <= 0.0) {
+      return;
+    }
+    String invoiceId = invoice.optString("id", null);
+    if (invoiceId != null && getTotalDiscountService().hasDiscountLine(invoiceId, true)) {
+      return;
+    }
+    double factor = 1.0 - discountPct / 100.0;
+    double grand = invoice.optDouble(FIELD_GRAND_TOTAL_AMOUNT, 0.0);
+    invoice.put(FIELD_GRAND_TOTAL_AMOUNT, roundHalfUp(grand * factor));
+    double outstanding = invoice.optDouble(FIELD_OUTSTANDING_AMOUNT, 0.0);
+    invoice.put(FIELD_OUTSTANDING_AMOUNT, roundHalfUp(outstanding * factor));
+  }
+
+  protected static double roundHalfUp(double value) {
+    return Math.round(value * 100.0) / 100.0;
   }
 
   // ---------------------------------------------------------------------------

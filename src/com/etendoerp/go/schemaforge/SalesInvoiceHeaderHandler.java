@@ -64,8 +64,6 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
 
   private static final Logger log = LogManager.getLogger(SalesInvoiceHeaderHandler.class);
 
-  private static final String FIELD_GRAND_TOTAL_AMOUNT = "grandTotalAmount";
-  private static final String FIELD_OUTSTANDING_AMOUNT = "outstandingAmount";
   private static final String FIELD_DOCUMENT_NO = "documentNo";
 
   @Inject
@@ -226,10 +224,6 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
   }
 
   /**
-   * Applies the etgoTotalDiscount factor to {@code grandTotalAmount} and {@code outstandingAmount}
-   * for draft invoices. Skips confirmed invoices and records with no positive discount.
-   */
-  /**
    * For return invoices, injects:
    * - {@code sourceReturnReceipt}: the return receipt that originated this invoice
    * - {@code sourceInvoice}: the original invoice being reversed
@@ -276,30 +270,9 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
     }
   }
 
-  private void applyTotalDiscountToRecord(JSONObject invoice) throws Exception {
-    if (invoice.optBoolean("processed", false)) {
-      return;
-    }
-    double discountPct = invoice.optDouble("etgoTotalDiscount", 0.0);
-    if (discountPct <= 0.0) {
-      return;
-    }
-    // The discount may already be materialized as a real line (e.g. invoice created from an
-    // order that already carried the discount, via InvoiceFromOrderSupport). In that case
-    // grandTotalAmount already reflects it, so applying the percentage again would double it.
-    String invoiceId = invoice.optString("id", null);
-    if (invoiceId != null && totalDiscountService.hasDiscountLine(invoiceId, true)) {
-      return;
-    }
-    double factor = 1.0 - discountPct / 100.0;
-    double grand = invoice.optDouble(FIELD_GRAND_TOTAL_AMOUNT, 0.0);
-    invoice.put(FIELD_GRAND_TOTAL_AMOUNT, roundHalfUp(grand * factor));
-    double outstanding = invoice.optDouble(FIELD_OUTSTANDING_AMOUNT, 0.0);
-    invoice.put(FIELD_OUTSTANDING_AMOUNT, roundHalfUp(outstanding * factor));
-  }
-
-  private static double roundHalfUp(double value) {
-    return Math.round(value * 100.0) / 100.0;
+  @Override
+  protected TotalDiscountService getTotalDiscountService() {
+    return totalDiscountService;
   }
 
   /**

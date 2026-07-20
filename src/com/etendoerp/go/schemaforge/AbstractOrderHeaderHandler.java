@@ -41,12 +41,17 @@ import org.openbravo.model.common.order.OrderLine;
 import org.openbravo.model.pricing.pricelist.PriceList;
 
 /**
- * Shared base for order-type header handlers (Sales Order, Purchase Order).
+ * Shared base for order-type header handlers (Sales Order, Purchase Order, Sales Quotation).
  *
  * <p>The {@code afterHandle} post-hook appends {@code hasLinkedDocuments} to every
  * record in GET responses. Single-record GETs use a LIMIT 1 query; list GETs
  * use a single batch IN query to avoid N+1. Subclasses only need to implement
  * {@code handle()} with their window-specific action dispatching.
+ *
+ * <p>The same post-hook also adjusts {@code grandTotalAmount} via {@link #applyTotalDiscountToRecord}
+ * for draft documents carrying a pending total discount — see that method's Javadoc for details.
+ * Subclasses must implement {@link #getTotalDiscountService()} to expose their injected
+ * {@link TotalDiscountService} for this purpose.
  *
  * <p>The static helper {@link #applyTotalDiscountBeforeComplete(NeoContext, TotalDiscountService, boolean)}
  * is called from the pre-hook ({@code handle()}) of each header subclass. It creates the discount
@@ -62,6 +67,19 @@ public abstract class AbstractOrderHeaderHandler implements NeoHandler {
   private static final String FIELD_VALUE = "value";
   private static final String DOC_TYPE_ORDER = "order";
   private static final String DOC_TYPE_INVOICE = "invoice";
+  private static final String FIELD_PROCESSED = "processed";
+  private static final String FIELD_TOTAL_DISCOUNT_PCT = "etgoTotalDiscount";
+  private static final String FIELD_GRAND_TOTAL_AMOUNT = "grandTotalAmount";
+  private static final String FIELD_ID = "id";
+
+  /**
+   * Supplies the concrete handler's own {@code @Inject}-ed {@link TotalDiscountService} so the
+   * shared GET-enrichment loop in {@link #afterHandle} can adjust {@code grandTotalAmount}
+   * without this abstract class holding a CDI-injected field itself — consistent with the rest
+   * of this class, where collaborators are always passed in rather than injected here (see
+   * {@link #applyTotalDiscountBeforeComplete}).
+   */
+  protected abstract TotalDiscountService getTotalDiscountService();
 
   /**
    * Creates (or re-creates) the total discount line immediately before the Complete action
@@ -413,6 +431,9 @@ public abstract class AbstractOrderHeaderHandler implements NeoHandler {
       if (dataArr == null || dataArr.length() == 0) {
         return null;
       }
+      for (int i = 0; i < dataArr.length(); i++) {
+        applyTotalDiscountToRecord(dataArr.getJSONObject(i));
+      }
       if (context.getRecordId() != null) {
         dataArr.getJSONObject(0).put("hasLinkedDocuments", checkLinkedDocuments(context.getRecordId()));
       } else {
@@ -423,6 +444,45 @@ public abstract class AbstractOrderHeaderHandler implements NeoHandler {
       log.error("Error computing hasLinkedDocuments (id={})", context.getRecordId(), e);
       return null;
     }
+  }
+
+  /**
+   * Adjusts {@code grandTotalAmount} for a draft order/quotation carrying a positive
+   * {@code etgoTotalDiscount} percentage that has not yet been materialized as a real line —
+   * the same GET-time compensation {@code SalesInvoiceHeaderHandler} already applies for
+   * invoices (list view and preview cards otherwise showed the raw undiscounted total while
+   * the document was still in draft, since the discount is only materialized into a real line
+   * at Complete time via {@link TotalDiscountService}).
+   *
+   * <p>No-op when the document is processed (the DB total already reflects the discount),
+   * when no discount percentage is set, or when the discount is already a real line
+   * ({@code hasDiscountLine} — avoids double-counting when e.g. an order was created carrying
+   * an already-materialized discount). Mirrors {@code AbstractInvoiceHeaderHandler}'s exact
+   * guard order: {@link #getTotalDiscountService()} is only dereferenced when {@code id} is
+   * present.
+   *
+   * <p>Unlike the invoice version, there is no {@code outstandingAmount} to adjust here —
+   * orders/quotations do not expose that field.
+   */
+  private void applyTotalDiscountToRecord(JSONObject order) throws Exception {
+    if (order.optBoolean(FIELD_PROCESSED, false)) {
+      return;
+    }
+    double discountPct = order.optDouble(FIELD_TOTAL_DISCOUNT_PCT, 0.0);
+    if (discountPct <= 0.0) {
+      return;
+    }
+    String orderId = order.optString(FIELD_ID, null);
+    if (orderId != null && getTotalDiscountService().hasDiscountLine(orderId, false)) {
+      return;
+    }
+    double factor = 1.0 - discountPct / 100.0;
+    double grand = order.optDouble(FIELD_GRAND_TOTAL_AMOUNT, 0.0);
+    order.put(FIELD_GRAND_TOTAL_AMOUNT, roundHalfUp(grand * factor));
+  }
+
+  private static double roundHalfUp(double value) {
+    return Math.round(value * 100.0) / 100.0;
   }
 
   private void annotateListWithLinkedDocuments(JSONArray dataArr) throws Exception {

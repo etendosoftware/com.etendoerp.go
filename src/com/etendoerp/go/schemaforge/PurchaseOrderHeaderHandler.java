@@ -70,4 +70,9 @@ public class PurchaseOrderHeaderHandler extends AbstractOrderHeaderHandler {
         createPurchaseInvoiceHandler,
         currencyOptionsHandler);
   }
+
+  @Override
+  protected TotalDiscountService getTotalDiscountService() {
+    return totalDiscountService;
+  }
 }

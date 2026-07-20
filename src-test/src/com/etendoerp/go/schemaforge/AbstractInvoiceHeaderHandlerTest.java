@@ -108,6 +108,12 @@ public class AbstractInvoiceHeaderHandlerTest {
       return "arInvoiceSubtype";
     }
 
+    @Override
+    protected TotalDiscountService getTotalDiscountService() {
+      // Not exercised by this test file — applyTotalDiscountToRecord() null-guards on this.
+      return null;
+    }
+
     public NeoResponse callValidateDocTypeLock(NeoContext ctx) {
       return validateDocTypeLock(ctx);
     }
