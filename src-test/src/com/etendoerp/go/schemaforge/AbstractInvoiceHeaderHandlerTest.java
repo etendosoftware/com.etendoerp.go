@@ -18,6 +18,7 @@
 package com.etendoerp.go.schemaforge;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
@@ -133,6 +134,10 @@ public class AbstractInvoiceHeaderHandlerTest {
 
     public NeoResponse callHandleInvoiceAfterCallout(NeoContext ctx) {
       return handleInvoiceAfterCallout(ctx);
+    }
+
+    public void callEnrichIsRectificative(JSONObject rec) throws Exception {
+      enrichIsRectificative(rec);
     }
   }
 
@@ -475,10 +480,31 @@ public class AbstractInvoiceHeaderHandlerTest {
   }
 
   @Test
-  @SuppressWarnings("unchecked")
-  public void persistOriginInvoice_withoutOriginId_onlyDeletesExistingLinks() throws Exception {
+  public void persistOriginInvoice_fieldAbsent_doesNotTouchExistingLinks() throws Exception {
+    // PATCH-like semantics: a PUT whose body omits "originInvoice" entirely must not
+    // delete existing reverse links (partial header updates would otherwise wipe them).
     JSONObject body = new JSONObject();
-    // no "originInvoice" field
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("PUT").recordId("inv-del").requestBody(body).build();
+
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
+         MockedStatic<OBProvider> providerMock = Mockito.mockStatic(OBProvider.class)) {
+
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      handler.callPersistOriginInvoice(ctx);
+
+      Mockito.verifyNoInteractions(dal);
+    }
+  }
+
+  @Test
+  @SuppressWarnings("unchecked")
+  public void persistOriginInvoice_blankOriginId_onlyDeletesExistingLinks() throws Exception {
+    // Explicitly clearing the field (present but blank) deletes the link without creating one.
+    JSONObject body = new JSONObject().put("originInvoice", "");
     NeoContext ctx = NeoContext.builder()
         .httpMethod("PUT").recordId("inv-del").requestBody(body).build();
 
@@ -665,6 +691,67 @@ public class AbstractInvoiceHeaderHandlerTest {
     JSONObject rec = new JSONObject();
     handler.callEnrichDocTypeLocked(rec);
     assertTrue(rec.getBoolean("docTypeLocked"));
+  }
+
+  // ── enrichIsRectificative — SIF column guard ─────────────────────────────────
+
+  /**
+   * When the em_etsg_isrectificative column is absent (SIF General not installed),
+   * the enrichment must report false WITHOUT querying the doctype — a failed SELECT on
+   * a missing column would abort the shared PostgreSQL transaction for the whole request.
+   */
+  @Test
+  public void enrichIsRectificative_columnAbsent_falseWithoutQuerying() throws Exception {
+    AbstractInvoiceHeaderHandler.setRectificativeColumnPresentForTests(false);
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      JSONObject rec = new JSONObject().put("transactionDocument", "dt-nc");
+
+      handler.callEnrichIsRectificative(rec);
+
+      assertFalse(rec.getBoolean("isRectificative"));
+      dalMock.verifyNoInteractions();
+    } finally {
+      AbstractInvoiceHeaderHandler.setRectificativeColumnPresentForTests(null);
+    }
+  }
+
+  @Test
+  public void enrichIsRectificative_columnPresent_readsDocTypeFlag() throws Exception {
+    AbstractInvoiceHeaderHandler.setRectificativeColumnPresentForTests(true);
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getReadOnlyInstance).thenReturn(dal);
+      Connection conn = mock(Connection.class);
+      when(dal.getConnection()).thenReturn(conn);
+      PreparedStatement ps = mock(PreparedStatement.class);
+      when(conn.prepareStatement(anyString())).thenReturn(ps);
+      ResultSet rs = mock(ResultSet.class);
+      when(ps.executeQuery()).thenReturn(rs);
+      when(rs.next()).thenReturn(true);
+      when(rs.getString(1)).thenReturn("Y");
+
+      JSONObject rec = new JSONObject().put("transactionDocument", "dt-nc");
+
+      handler.callEnrichIsRectificative(rec);
+
+      assertTrue(rec.getBoolean("isRectificative"));
+    } finally {
+      AbstractInvoiceHeaderHandler.setRectificativeColumnPresentForTests(null);
+    }
+  }
+
+  @Test
+  public void enrichIsRectificative_noDocType_false() throws Exception {
+    AbstractInvoiceHeaderHandler.setRectificativeColumnPresentForTests(true);
+    try {
+      JSONObject rec = new JSONObject();
+
+      handler.callEnrichIsRectificative(rec);
+
+      assertFalse(rec.getBoolean("isRectificative"));
+    } finally {
+      AbstractInvoiceHeaderHandler.setRectificativeColumnPresentForTests(null);
+    }
   }
 
   // ── validateLineQtyBeforeComplete — guard conditions ─────────────────────────
