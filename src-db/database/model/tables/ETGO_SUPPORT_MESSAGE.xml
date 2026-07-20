@@ -57,6 +57,10 @@
         <default/>
         <onCreateDefault/>
       </column>
+      <column name="ATTACHMENTS" primaryKey="false" required="false" type="CLOB" size="4000" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
       <foreign-key foreignTable="ETGO_SUPPORT_CONVERSATION" name="ETGO_SC_MSG_CONV_FK">
         <reference local="ETGO_SUPPORT_CONVERSATION_ID" foreign="ETGO_SUPPORT_CONVERSATION_ID"/>
       </foreign-key>

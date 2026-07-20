@@ -47,8 +47,12 @@ import java.util.Set;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 
+import java.util.Collection;
+
 import org.codehaus.jettison.json.JSONArray;
+import org.hibernate.Session;
 import org.hibernate.criterion.Criterion;
+import org.hibernate.query.Query;
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.Before;
 import org.junit.Test;
@@ -563,6 +567,116 @@ public class Fiscal349BoxesHandlerTest {
       // and would propagate an unexpected exception instead of returning fallbackReport.
       TaxReport result = handler.resolveTaxReport349("org1", "T1");
       assertSame(fallbackReport, result);
+    }
+  }
+
+  // ── collectRectifications (ETP-4404) ──────────────────────────────
+
+  /**
+   * Installs the OBDal→Session→Query chain for the scalar ReversedInvoices HQL
+   * and returns the mocked Query so tests can control {@code list()}.
+   */
+  @SuppressWarnings("unchecked")
+  private static Query<Object[]> mockRectifQuery(MockedStatic<OBDal> dalMock) {
+    OBDal obDal = mock(OBDal.class);
+    dalMock.when(OBDal::getInstance).thenReturn(obDal);
+    Session session = mock(Session.class);
+    when(obDal.getSession()).thenReturn(session);
+    Query<Object[]> query = mock(Query.class);
+    when(session.createQuery(anyString(), eq(Object[].class))).thenReturn(query);
+    when(query.setParameterList(anyString(), any(Collection.class))).thenReturn(query);
+    return query;
+  }
+
+  @Test
+  public void testCollectRectificationsEmptyAndNullSetsSkipTheQuery() throws Exception {
+    // No OBDal static mock is installed: if the empty/null guard did not
+    // short-circuit, the HQL query would hit the real (unavailable) DAL and throw.
+    JSONArray arr = handler.collectRectifications(
+        Collections.<Invoice>emptySet(), null);
+
+    assertEquals(0, arr.length());
+  }
+
+  @Test
+  public void testCollectRectificationsMapsRowKeysAndScalesAmounts() throws Exception {
+    Invoice corrective = mock(Invoice.class);
+    Set<Invoice> purch = new LinkedHashSet<>(Collections.singletonList(corrective));
+    Object[] row = {
+        "NC-01", new Date(0L), "Acme Corp", "B12345678",
+        "10000067", "2025", "1T",
+        new BigDecimal("1500.005"),  // baseProducts → HALF_UP scale 2
+        null                          // baseServices → null → 0.00
+    };
+
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      Query<Object[]> query = mockRectifQuery(dalMock);
+      when(query.list()).thenReturn(Collections.singletonList(row));
+
+      JSONArray arr = handler.collectRectifications(purch, Collections.<Invoice>emptySet());
+
+      assertEquals(1, arr.length());
+      JSONObject r = arr.getJSONObject(0);
+      assertEquals("NC-01", r.getString("ref"));
+      assertEquals(new SimpleDateFormat("yyyy-MM-dd").format(new Date(0L)), r.getString("date"));
+      assertEquals("Compra", r.getString("type"));
+      assertEquals("Acme Corp", r.getString("party"));
+      assertEquals("B12345678", r.getString("nifIva"));
+      assertEquals("10000067", r.getString("originalRef"));
+      assertEquals("2025", r.getString("declaredYear"));
+      assertEquals("1T", r.getString("declaredPeriod"));
+      assertEquals("1500.01", r.getString("baseProducts")); // HALF_UP to 2 decimals
+      assertEquals("0.00", r.getString("baseServices"));    // null → ZERO scaled
+    }
+  }
+
+  @Test
+  public void testCollectRectificationsNullScalarsFallBackToEmptyStrings() throws Exception {
+    Invoice corrective = mock(Invoice.class);
+    Set<Invoice> sales = new LinkedHashSet<>(Collections.singletonList(corrective));
+    Object[] row = { null, null, null, null, null, null, null, null, null };
+
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      Query<Object[]> query = mockRectifQuery(dalMock);
+      when(query.list()).thenReturn(Collections.singletonList(row));
+
+      JSONArray arr = handler.collectRectifications(Collections.<Invoice>emptySet(), sales);
+
+      JSONObject r = arr.getJSONObject(0);
+      assertEquals("", r.getString("ref"));
+      assertEquals("", r.getString("date"));
+      assertEquals("", r.getString("party"));
+      assertEquals("", r.getString("nifIva"));
+      assertEquals("", r.getString("originalRef"));
+      assertEquals("", r.getString("declaredYear"));
+      assertEquals("", r.getString("declaredPeriod"));
+      assertEquals("0.00", r.getString("baseProducts"));
+      assertEquals("0.00", r.getString("baseServices"));
+    }
+  }
+
+  @Test
+  public void testCollectRectificationsTypeIsCompraForPurchaseAndVentaForSales() throws Exception {
+    Invoice purchInv = mock(Invoice.class);
+    Invoice salesInv = mock(Invoice.class);
+    Set<Invoice> purch = new LinkedHashSet<>(Collections.singletonList(purchInv));
+    Set<Invoice> sales = new LinkedHashSet<>(Collections.singletonList(salesInv));
+    Object[] purchRow = { "P-1", null, null, null, null, null, null, null, null };
+    Object[] salesRow = { "S-1", null, null, null, null, null, null, null, null };
+
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      Query<Object[]> query = mockRectifQuery(dalMock);
+      // First list() serves the purchase set, second serves the sales set.
+      when(query.list()).thenReturn(
+          Collections.singletonList(purchRow), Collections.singletonList(salesRow));
+
+      JSONArray arr = handler.collectRectifications(purch, sales);
+
+      assertEquals(2, arr.length());
+      assertEquals("P-1", arr.getJSONObject(0).getString("ref"));
+      assertEquals("Compra", arr.getJSONObject(0).getString("type"));
+      assertEquals("S-1", arr.getJSONObject(1).getString("ref"));
+      assertEquals("Venta", arr.getJSONObject(1).getString("type"));
     }
   }
 }

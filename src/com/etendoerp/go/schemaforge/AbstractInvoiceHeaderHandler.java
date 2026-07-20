@@ -212,7 +212,7 @@ public abstract class AbstractInvoiceHeaderHandler {
   protected void persistOriginInvoice(NeoContext context) {
     try {
       JSONObject body = context.getRequestBody();
-      if (body == null) {
+      if (body == null || !body.has(FIELD_ORIGIN_INVOICE)) {
         return;
       }
       String originInvoiceId = body.optString(FIELD_ORIGIN_INVOICE, null);
@@ -339,6 +339,102 @@ public abstract class AbstractInvoiceHeaderHandler {
    */
   protected void enrichDocTypeLocked(JSONObject rec) throws Exception {
     rec.put("docTypeLocked", true);
+  }
+
+  /**
+   * Whether {@code c_doctype.em_etsg_isrectificative} exists in this database (the column
+   * belongs to the SIF General module, which may not be installed). Resolved lazily once:
+   * querying a missing column would abort the whole PostgreSQL transaction, poisoning the
+   * shared read-only connection for every statement that follows in the same request.
+   */
+  private static volatile Boolean rectificativeColumnPresent;
+
+  /** Test hook: force or reset (null) the cached column-presence check. */
+  static void setRectificativeColumnPresentForTests(Boolean value) {
+    rectificativeColumnPresent = value;
+  }
+
+  private static boolean isRectificativeColumnPresent() {
+    Boolean present = rectificativeColumnPresent;
+    if (present == null) {
+      synchronized (AbstractInvoiceHeaderHandler.class) {
+        present = rectificativeColumnPresent;
+        if (present == null) {
+          present = false;
+          try {
+            String sql = "SELECT 1 FROM information_schema.columns"
+                + " WHERE table_name = 'c_doctype' AND column_name = 'em_etsg_isrectificative'";
+            Connection conn = OBDal.getReadOnlyInstance().getConnection();
+            try (PreparedStatement ps = conn.prepareStatement(sql);
+                 ResultSet rs = ps.executeQuery()) {
+              present = rs.next();
+            }
+          } catch (Exception e) {
+            log.warn("Could not check for em_etsg_isrectificative column: {}", e.getMessage());
+          }
+          rectificativeColumnPresent = present;
+        }
+      }
+    }
+    return present;
+  }
+
+  /**
+   * Injects {@code isRectificative} (boolean) into the record.
+   * True when the invoice's document type has {@code EM_Etsg_Isrectificative = 'Y'}.
+   * Returns false when the invoice is a draft with no doctype selected, or when the
+   * SIF General module (owner of the column) is not installed.
+   */
+  @SuppressWarnings("java:S2077")
+  protected void enrichIsRectificative(JSONObject rec) throws Exception {
+    String docTypeId = rec.optString(FIELD_TRANSACTION_DOCUMENT, null);
+    if (StringUtils.isBlank(docTypeId) || !isRectificativeColumnPresent()) {
+      rec.put("isRectificative", false);
+      return;
+    }
+    boolean result = false;
+    try {
+      String sql = "SELECT em_etsg_isrectificative FROM c_doctype WHERE c_doctype_id = ?";
+      Connection conn = OBDal.getReadOnlyInstance().getConnection();
+      try (PreparedStatement ps = conn.prepareStatement(sql)) {
+        ps.setString(1, docTypeId);
+        try (ResultSet rs = ps.executeQuery()) {
+          if (rs.next()) {
+            result = "Y".equals(rs.getString(1));
+          }
+        }
+      }
+    } catch (Exception e) {
+      log.warn("Could not resolve isRectificative for doctype {}: {}", docTypeId, e.getMessage());
+    }
+    rec.put("isRectificative", result);
+  }
+
+  /**
+   * Injects {@code hasRectifications} (boolean) into the record.
+   * True when the invoice has one or more records in {@code C_Invoice_Reverse}.
+   * Only meaningful in detail view (single record); do not call for list responses.
+   */
+  @SuppressWarnings("java:S2077")
+  protected void enrichHasRectifications(JSONObject rec, String invoiceId) throws Exception {
+    if (StringUtils.isBlank(invoiceId)) {
+      rec.put("hasRectifications", false);
+      return;
+    }
+    boolean result = false;
+    try {
+      String sql = "SELECT 1 FROM c_invoice_reverse WHERE c_invoice_id = ? AND isactive = 'Y' LIMIT 1";
+      Connection conn = OBDal.getReadOnlyInstance().getConnection();
+      try (PreparedStatement ps = conn.prepareStatement(sql)) {
+        ps.setString(1, invoiceId);
+        try (ResultSet rs = ps.executeQuery()) {
+          result = rs.next();
+        }
+      }
+    } catch (Exception e) {
+      log.warn("Could not check hasRectifications for invoice {}: {}", invoiceId, e.getMessage());
+    }
+    rec.put("hasRectifications", result);
   }
 
   // ---------------------------------------------------------------------------
