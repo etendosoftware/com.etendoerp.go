@@ -43,7 +43,11 @@ import org.openbravo.model.common.invoice.Invoice;
  *
  * <p>On PATCH/PUT, recomputes the counterpart of the {@code rate} / {@code foreignAmount} pair
  * from the parent invoice's grand total, so a manually edited rate keeps the foreign amount in
- * sync (and vice versa) without relying on a client-side callout.
+ * sync (and vice versa) without relying on a client-side callout. It also mirrors the resulting
+ * doc→org rate back onto the invoice header's hidden {@code eTGOCurrencyRate} field — the reverse
+ * of {@code AbstractInvoiceHeaderHandler#autoCreateOrUpdateConversionRateDocument}, which keeps
+ * this same pair in sync in the other direction (header → this row) — so editing either the
+ * header currency or this tab keeps both consistent.
  *
  * <p>Registered via {@code javaQualifier = "invoiceExchangeRateHandler"} on the
  * {@code exchangeRates} entity of the sales-invoice and purchase-invoice specs.
@@ -123,7 +127,12 @@ public class InvoiceExchangeRateHandler implements NeoHandler {
    * tell which side changed from the body alone, so we compare the incoming values against the
    * persisted row and recompute the counterpart of whichever one actually changed (rate wins if
    * both changed). The recomputed value overwrites the stale one in the body before it is saved,
-   * mirroring the POST behavior and the classic {@code SE_CalculateExchangeRate} callout.
+   * mirroring the POST behavior and the classic {@code SE_CalculateExchangeRate} callout. The
+   * resulting doc→org rate is then mirrored back onto the invoice header's
+   * {@code eTGOCurrencyRate} via {@link #syncHeaderCurrencyRate(Invoice, BigDecimal)} — this header
+   * sync fires whenever {@code rate} itself was edited, even on a lineless draft invoice
+   * (grandTotal=0), since it only needs the rate, never the total. A zero/missing grand total only
+   * suppresses the foreignAmount<->rate cross-derivation (undefined when dividing by zero).
    */
   private NeoResponse handleUpdate(NeoContext context, JSONObject body) {
     String recordId = context.getRecordId();
@@ -142,21 +151,54 @@ public class InvoiceExchangeRateHandler implements NeoHandler {
     }
     try {
       BigDecimal grandTotal = doc.getInvoice().getGrandTotalAmount();
-      if (grandTotal == null || grandTotal.signum() == 0) {
-        return null;
-      }
+      // hasTotal only gates the foreignAmount<->rate cross-derivation below (dividing
+      // by a zero/missing grand total is undefined). It must NOT gate the header sync:
+      // eTGOCurrencyRate is just 1/rate and never needs the invoice total, so a
+      // lineless draft (grandTotal=0) can still set it from an edited rate.
+      boolean hasTotal = grandTotal != null && grandTotal.signum() != 0;
       boolean rateChanged = newRate != null && !equalsDecimal(newRate, doc.getRate());
       boolean foreignChanged = newForeign != null && !equalsDecimal(newForeign, doc.getForeignAmount());
+      BigDecimal effectiveDocRate = null;
       if (rateChanged && newRate.signum() != 0) {
-        body.put(PROPERTY_FOREIGN_AMOUNT, grandTotal.multiply(newRate));
-      } else if (foreignChanged && newForeign.signum() != 0) {
-        body.put(PROPERTY_RATE, newForeign.divide(grandTotal, RATE_SCALE, RoundingMode.HALF_UP));
+        effectiveDocRate = newRate;
+        if (hasTotal) {
+          body.put(PROPERTY_FOREIGN_AMOUNT, grandTotal.multiply(newRate));
+        }
+      } else if (foreignChanged && newForeign.signum() != 0 && hasTotal) {
+        effectiveDocRate = newForeign.divide(grandTotal, RATE_SCALE, RoundingMode.HALF_UP);
+        body.put(PROPERTY_RATE, effectiveDocRate);
+      }
+      if (effectiveDocRate != null) {
+        syncHeaderCurrencyRate(doc.getInvoice(), effectiveDocRate);
       }
     } catch (Exception e) {
       log.error("Failed to recompute derived fields on update for conversion rate doc {}", recordId, e);
       throw new OBException(e);
     }
     return null;
+  }
+
+  /**
+   * Reverse of {@code AbstractInvoiceHeaderHandler#autoCreateOrUpdateConversionRateDocument}:
+   * when the user edits the exchange-rate row directly, mirror the new doc→org rate back onto
+   * the invoice header's {@code eTGOCurrencyRate} (org→doc multiplier), so the header currency
+   * picker and this tab stay consistent regardless of which one the user edits.
+   *
+   * @param invoice the parent invoice, already loaded via {@code doc.getInvoice()}
+   * @param docRate the doc→org rate that was just persisted on the {@code ConversionRateDoc} row
+   */
+  private static void syncHeaderCurrencyRate(Invoice invoice, BigDecimal docRate) {
+    if (docRate == null || docRate.signum() <= 0) {
+      return;
+    }
+    OBContext.setAdminMode(true);
+    try {
+      BigDecimal headerRate = BigDecimal.ONE.divide(docRate, RATE_SCALE, RoundingMode.HALF_UP);
+      invoice.setETGOCurrencyRate(headerRate);
+      OBDal.getInstance().save(invoice);
+    } finally {
+      OBContext.restorePreviousMode();
+    }
   }
 
   /** Null-safe, scale-insensitive equality for the rate/foreignAmount change detection. */
