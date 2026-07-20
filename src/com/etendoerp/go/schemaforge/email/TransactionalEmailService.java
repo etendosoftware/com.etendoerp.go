@@ -65,6 +65,7 @@ public class TransactionalEmailService {
       "Duplicate email request suppressed by idempotency key";
   private static final String MESSAGE_THROTTLED =
       "Transactional email throttle limit exceeded";
+  private static final Object[] IDEMPOTENCY_LOCKS = createIdempotencyLocks();
   static final int HTTP_TOO_MANY_REQUESTS = 429;
   private static final Set<String> FORBIDDEN_COMMAND_FIELDS =
       Collections.unmodifiableSet(new HashSet<>(Arrays.asList(
@@ -256,13 +257,38 @@ public class TransactionalEmailService {
   private NeoResponse enforceSafetyAndSubmit(long startedAtNanos, EmailSendContext sendContext,
       EmailDeliveryPolicy deliveryPolicy) {
     String idempotencyKey = deliveryPolicy.resolveIdempotencyKey(sendContext);
+    if (StringUtils.isBlank(idempotencyKey)) {
+      return enforceSafetyAndSubmitLocked(startedAtNanos, sendContext, deliveryPolicy,
+          idempotencyKey);
+    }
+    synchronized (idempotencyLock(sendContext, idempotencyKey)) {
+      return enforceSafetyAndSubmitLocked(startedAtNanos, sendContext, deliveryPolicy,
+          idempotencyKey);
+    }
+  }
+
+  private NeoResponse enforceSafetyAndSubmitLocked(long startedAtNanos,
+      EmailSendContext sendContext, EmailDeliveryPolicy deliveryPolicy, String idempotencyKey) {
     NeoResponse safetyResponse = enforceSafetyChecks(startedAtNanos, sendContext, deliveryPolicy,
         idempotencyKey);
     if (safetyResponse != null) {
       return safetyResponse;
     }
-
     return submitProviderRequest(startedAtNanos, sendContext, idempotencyKey);
+  }
+
+  private static Object idempotencyLock(EmailSendContext sendContext, String idempotencyKey) {
+    String lockKey = sendContext.getContractName() + "|" + sendContext.getTenantId() + "|"
+        + idempotencyKey;
+    return IDEMPOTENCY_LOCKS[Math.floorMod(lockKey.hashCode(), IDEMPOTENCY_LOCKS.length)];
+  }
+
+  private static Object[] createIdempotencyLocks() {
+    Object[] locks = new Object[256];
+    for (int i = 0; i < locks.length; i++) {
+      locks[i] = new Object();
+    }
+    return locks;
   }
 
   private static String findForbiddenProviderField(JSONObject commandBody) {

@@ -24,21 +24,33 @@ import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.io.BufferedReader;
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
+import java.io.InputStream;
 import java.io.PrintWriter;
 import java.io.StringReader;
 import java.io.StringWriter;
+import java.net.http.HttpResponse;
+import java.nio.charset.StandardCharsets;
 import java.util.Collections;
 import java.util.List;
 
+import javax.servlet.ServletOutputStream;
+import javax.servlet.WriteListener;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 
+import org.json.JSONArray;
+import org.json.JSONObject;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 import org.mockito.MockedStatic;
 import org.openbravo.base.provider.OBProvider;
 import org.openbravo.dal.core.OBContext;
@@ -340,6 +352,49 @@ class SupportConversationsServletTest {
     }
 
     @Test
+    @DisplayName("Conversation summary includes jiraTicketKey when linked, so the frontend can search by "
+        + "the ticket key a customer receives in the JSM notification email")
+    void includesJiraTicketKeyWhenLinked() throws Exception {
+      StringWriter capture = new StringWriter();
+      HttpServletResponse response = mockResponse(capture);
+      HttpServletRequest request = authenticatedRequest("/conversations", null);
+
+      try (MockedStatic<SecureWebServicesUtils> swsMock = mockValidAuth();
+           MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+           MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+        OBDal obDal = mockObDal(dalMock);
+        SupportConversation conv = mockConversation("conv-2");
+        when(conv.getJiraTicketKey()).thenReturn("SUP-321");
+        mockCriteria(obDal, SupportConversation.class, List.of(conv));
+
+        new SupportConversationsServlet().doGet(request, response);
+      }
+
+      assertTrue(capture.toString().contains("\"jiraTicketKey\":\"SUP-321\""));
+    }
+
+    @Test
+    @DisplayName("Conversation summary includes an empty jiraTicketKey string (never null/omitted) when "
+        + "not linked to a Jira ticket")
+    void emptyJiraTicketKeyWhenNotLinked() throws Exception {
+      StringWriter capture = new StringWriter();
+      HttpServletResponse response = mockResponse(capture);
+      HttpServletRequest request = authenticatedRequest("/conversations", null);
+
+      try (MockedStatic<SecureWebServicesUtils> swsMock = mockValidAuth();
+           MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+           MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+        OBDal obDal = mockObDal(dalMock);
+        SupportConversation conv = mockConversation("conv-3");
+        mockCriteria(obDal, SupportConversation.class, List.of(conv));
+
+        new SupportConversationsServlet().doGet(request, response);
+      }
+
+      assertTrue(capture.toString().contains("\"jiraTicketKey\":\"\""));
+    }
+
+    @Test
     @DisplayName("A DB failure while listing returns 500")
     void dbFailure() throws Exception {
       StringWriter capture = new StringWriter();
@@ -426,6 +481,154 @@ class SupportConversationsServletTest {
       }
 
       assertTrue(capture.toString().contains("Unknown endpoint"));
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // doGet — get attachment (new Jira attachment content proxy)
+  // -------------------------------------------------------------------------
+
+  @Nested
+  @DisplayName("doGet — get attachment")
+  class DoGetAttachment {
+
+    private SupportMessage mockMessageWithAttachments(String attachmentsJson, SupportConversation conv) {
+      SupportMessage msg = mock(SupportMessage.class);
+      when(msg.getAttachments()).thenReturn(attachmentsJson);
+      when(msg.getConversation()).thenReturn(conv);
+      return msg;
+    }
+
+    private ServletOutputStream mockOutputStream(ByteArrayOutputStream sink) {
+      return new ServletOutputStream() {
+        @Override
+        public void write(int b) {
+          sink.write(b);
+        }
+
+        @Override
+        public boolean isReady() {
+          return true;
+        }
+
+        @Override
+        public void setWriteListener(WriteListener writeListener) {
+          // Not needed for this synchronous test double.
+        }
+      };
+    }
+
+    @Test
+    @DisplayName("Attachment id present in no message's attachments column: 404, no NPE")
+    void attachmentNotFoundAnywhere() throws Exception {
+      StringWriter capture = new StringWriter();
+      HttpServletResponse response = mockResponse(capture);
+      HttpServletRequest request = authenticatedRequest("/attachments/does-not-exist", null);
+
+      try (MockedStatic<SecureWebServicesUtils> swsMock = mockValidAuth();
+           MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+           MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+        OBDal obDal = mockObDal(dalMock);
+        mockCriteria(obDal, SupportMessage.class, Collections.emptyList());
+
+        new SupportConversationsServlet().doGet(request, response);
+      }
+
+      assertTrue(capture.toString().contains("Attachment not found"));
+      verify(response).setStatus(HttpServletResponse.SC_NOT_FOUND);
+    }
+
+    @Test
+    @DisplayName("Attachment owned by a conversation belonging to ANOTHER user is rejected; "
+        + "the Jira content-fetch is never attempted")
+    void attachmentOwnedByAnotherUserIsRejected() throws Exception {
+      StringWriter capture = new StringWriter();
+      HttpServletResponse response = mockResponse(capture);
+      HttpServletRequest request = authenticatedRequest("/attachments/att-1", null);
+
+      SupportConversation otherUsersConv = mock(SupportConversation.class);
+      User otherUser = mockUser("someone-else");
+      when(otherUsersConv.getUser()).thenReturn(otherUser);
+      String attachmentsJson = "[{\"id\":\"att-1\",\"filename\":\"a.png\",\"mimeType\":\"image/png\"}]";
+      SupportMessage msg = mockMessageWithAttachments(attachmentsJson, otherUsersConv);
+
+      try (MockedStatic<SecureWebServicesUtils> swsMock = mockValidAuth();
+           MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+           MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+           MockedStatic<SupportJiraWebhookHandler> jiraMock = mockStatic(SupportJiraWebhookHandler.class)) {
+        OBDal obDal = mockObDal(dalMock);
+        mockCriteria(obDal, SupportMessage.class, List.of(msg));
+
+        new SupportConversationsServlet().doGet(request, response);
+
+        jiraMock.verify(() -> SupportJiraWebhookHandler.fetchAttachmentContent(anyString()), never());
+      }
+
+      assertTrue(capture.toString().contains("Attachment not found"));
+      verify(response).setStatus(HttpServletResponse.SC_NOT_FOUND);
+    }
+
+    @Test
+    @DisplayName("Attachment owned by the requesting user's own conversation streams the correct Content-Type")
+    void attachmentOwnedByRequestingUserStreams() throws Exception {
+      HttpServletResponse response = mock(HttpServletResponse.class);
+      HttpServletRequest request = authenticatedRequest("/attachments/att-1", null);
+
+      SupportConversation ownConv = mock(SupportConversation.class);
+      User owningUser = mockUser(USER_ID);
+      when(ownConv.getUser()).thenReturn(owningUser);
+      String attachmentsJson = "[{\"id\":\"att-1\",\"filename\":\"screenshot.png\",\"mimeType\":\"image/png\"}]";
+      SupportMessage msg = mockMessageWithAttachments(attachmentsJson, ownConv);
+
+      byte[] fileBytes = "fake-image-bytes".getBytes(StandardCharsets.UTF_8);
+      @SuppressWarnings("unchecked")
+      HttpResponse<InputStream> jiraResp = mock(HttpResponse.class);
+      when(jiraResp.body()).thenReturn(new ByteArrayInputStream(fileBytes));
+
+      ByteArrayOutputStream sink = new ByteArrayOutputStream();
+      when(response.getOutputStream()).thenReturn(mockOutputStream(sink));
+
+      try (MockedStatic<SecureWebServicesUtils> swsMock = mockValidAuth();
+           MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+           MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+           MockedStatic<SupportJiraWebhookHandler> jiraMock = mockStatic(SupportJiraWebhookHandler.class)) {
+        OBDal obDal = mockObDal(dalMock);
+        mockCriteria(obDal, SupportMessage.class, List.of(msg));
+        jiraMock.when(() -> SupportJiraWebhookHandler.fetchAttachmentContent("att-1")).thenReturn(jiraResp);
+
+        new SupportConversationsServlet().doGet(request, response);
+      }
+
+      verify(response).setContentType("image/png");
+      verify(response).setStatus(HttpServletResponse.SC_OK);
+      assertEquals("fake-image-bytes", sink.toString(StandardCharsets.UTF_8));
+    }
+
+    @Test
+    @DisplayName("Jira content-fetch failure (null response) is surfaced as 404, not a 500/NPE")
+    void jiraContentFetchFailureIsNotFound() throws Exception {
+      StringWriter capture = new StringWriter();
+      HttpServletResponse response = mockResponse(capture);
+      HttpServletRequest request = authenticatedRequest("/attachments/att-1", null);
+
+      SupportConversation ownConv = mock(SupportConversation.class);
+      User owningUser = mockUser(USER_ID);
+      when(ownConv.getUser()).thenReturn(owningUser);
+      String attachmentsJson = "[{\"id\":\"att-1\",\"filename\":\"screenshot.png\",\"mimeType\":\"image/png\"}]";
+      SupportMessage msg = mockMessageWithAttachments(attachmentsJson, ownConv);
+
+      try (MockedStatic<SecureWebServicesUtils> swsMock = mockValidAuth();
+           MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+           MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+           MockedStatic<SupportJiraWebhookHandler> jiraMock = mockStatic(SupportJiraWebhookHandler.class)) {
+        OBDal obDal = mockObDal(dalMock);
+        mockCriteria(obDal, SupportMessage.class, List.of(msg));
+        jiraMock.when(() -> SupportJiraWebhookHandler.fetchAttachmentContent("att-1")).thenReturn(null);
+
+        new SupportConversationsServlet().doGet(request, response);
+      }
+
+      verify(response).setStatus(HttpServletResponse.SC_NOT_FOUND);
     }
   }
 
@@ -656,7 +859,7 @@ class SupportConversationsServletTest {
   class DoPostCreateConversation {
 
     @Test
-    @DisplayName("Missing message field returns 400")
+    @DisplayName("Missing message field with no attachments returns 400")
     void missingMessage() throws Exception {
       StringWriter capture = new StringWriter();
       HttpServletResponse response = mockResponse(capture);
@@ -666,11 +869,11 @@ class SupportConversationsServletTest {
         new SupportConversationsServlet().doPost(request, response);
       }
 
-      assertTrue(capture.toString().contains("Missing required field: message"));
+      assertTrue(capture.toString().contains("Message must have text or at least one attachment"));
     }
 
     @Test
-    @DisplayName("Blank message returns 400")
+    @DisplayName("Blank message with no attachments returns 400")
     void blankMessage() throws Exception {
       StringWriter capture = new StringWriter();
       HttpServletResponse response = mockResponse(capture);
@@ -680,7 +883,108 @@ class SupportConversationsServletTest {
         new SupportConversationsServlet().doPost(request, response);
       }
 
-      assertTrue(capture.toString().contains("must not be empty"));
+      assertTrue(capture.toString().contains("Message must have text or at least one attachment"));
+    }
+
+    @Test
+    @DisplayName("Blank message with a valid attachment is accepted (not 400)")
+    void blankMessageWithAttachmentIsAccepted() throws Exception {
+      StringWriter capture = new StringWriter();
+      HttpServletResponse response = mockResponse(capture);
+      String body = "{\"message\":\"\",\"attachments\":[{\"mimeType\":\"image/png\",\"name\":\"screenshot.png\","
+          + "\"data\":\"Zm9v\"}]}";
+      HttpServletRequest request = authenticatedRequest("/conversations", body);
+
+      try (MockedStatic<SecureWebServicesUtils> swsMock = mockValidAuth();
+           MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+           MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+           MockedStatic<OBProvider> providerMock = mockStatic(OBProvider.class);
+           MockedStatic<SessionHandler> shMock = mockSessionHandler();
+           MockedStatic<SupportIntegrationClient> sicMock = mockStatic(SupportIntegrationClient.class)) {
+        OBDal obDal = mockObDal(dalMock);
+        User authUser = mockUser(USER_ID);
+        when(obDal.get(User.class, USER_ID)).thenReturn(authUser);
+        when(obDal.get(Client.class, CLIENT_ID)).thenReturn(mock(Client.class));
+        when(obDal.get(Organization.class, ORG_ID)).thenReturn(mock(Organization.class));
+
+        SupportConversation conv = mockConversation("conv-attach-only");
+        when(conv.getLastMessage()).thenReturn("Hola! ¿En qué puedo ayudarte?");
+        when(obDal.get(SupportConversation.class, "conv-attach-only")).thenReturn(conv);
+        stubProvider(providerMock, conv, mock(SupportMessage.class));
+        mockCriteria(obDal, SupportMessage.class, Collections.emptyList());
+
+        sicMock.when(() -> SupportIntegrationClient.getUserEmail(anyString()))
+            .thenReturn("user@example.com");
+        sicMock.when(() -> SupportIntegrationClient.sendToAdk(anyString(), anyString(), anyString(), any()))
+            .thenReturn("Hola! ¿En qué puedo ayudarte?");
+
+        new SupportConversationsServlet().doPost(request, response);
+      }
+
+      String out = capture.toString();
+      assertTrue(out.contains("conv-attach-only"));
+      assertTrue(!out.contains("must have text or at least one attachment"));
+    }
+
+    @Test
+    @DisplayName("The user's own outgoing attachment is persisted as {filename, mimeType} "
+        + "(no id) and shows up in the returned message list")
+    void userMessageAttachmentsArePersisted() throws Exception {
+      StringWriter capture = new StringWriter();
+      HttpServletResponse response = mockResponse(capture);
+      String body = "{\"message\":\"\",\"attachments\":[{\"mimeType\":\"image/png\",\"name\":\"screenshot.png\","
+          + "\"data\":\"Zm9v\"}]}";
+      HttpServletRequest request = authenticatedRequest("/conversations", body);
+
+      SupportMessage userMsg = mock(SupportMessage.class);
+      when(userMsg.getAttachments())
+          .thenReturn("[{\"filename\":\"screenshot.png\",\"mimeType\":\"image/png\"}]");
+
+      try (MockedStatic<SecureWebServicesUtils> swsMock = mockValidAuth();
+           MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+           MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+           MockedStatic<OBProvider> providerMock = mockStatic(OBProvider.class);
+           MockedStatic<SessionHandler> shMock = mockSessionHandler();
+           MockedStatic<SupportIntegrationClient> sicMock = mockStatic(SupportIntegrationClient.class)) {
+        OBDal obDal = mockObDal(dalMock);
+        User authUser = mockUser(USER_ID);
+        when(obDal.get(User.class, USER_ID)).thenReturn(authUser);
+        when(obDal.get(Client.class, CLIENT_ID)).thenReturn(mock(Client.class));
+        when(obDal.get(Organization.class, ORG_ID)).thenReturn(mock(Organization.class));
+
+        SupportConversation conv = mockConversation("conv-attach-persist");
+        when(conv.getLastMessage()).thenReturn("Hola! ¿En qué puedo ayudarte?");
+        when(obDal.get(SupportConversation.class, "conv-attach-persist")).thenReturn(conv);
+        stubProvider(providerMock, conv, userMsg);
+        mockCriteria(obDal, SupportMessage.class, List.of(userMsg));
+
+        sicMock.when(() -> SupportIntegrationClient.getUserEmail(anyString()))
+            .thenReturn("user@example.com");
+        sicMock.when(() -> SupportIntegrationClient.sendToAdk(anyString(), anyString(), anyString(), any()))
+            .thenReturn("Hola! ¿En qué puedo ayudarte?");
+
+        new SupportConversationsServlet().doPost(request, response);
+
+        ArgumentCaptor<String> stored = ArgumentCaptor.forClass(String.class);
+        verify(userMsg).setAttachments(stored.capture());
+        // Parsed rather than substring-matched: org.json escapes '/' as '\/' when serializing,
+        // so a raw-string check for "image/png" is brittle against that (valid, order-preserving)
+        // quoting quirk. Parsing is immune to both escaping and key order.
+        JSONArray storedAttachments = new JSONArray(stored.getValue());
+        assertEquals(1, storedAttachments.length());
+        JSONObject storedAttachment = storedAttachments.getJSONObject(0);
+        assertEquals("screenshot.png", storedAttachment.getString("filename"));
+        assertEquals("image/png", storedAttachment.getString("mimeType"));
+        assertTrue(!storedAttachment.has("id"));
+      }
+
+      String out = capture.toString();
+      JSONArray outAttachments = new JSONObject(out).getJSONArray(FIELD_MESSAGES_LITERAL)
+          .getJSONObject(0).getJSONArray("attachments");
+      assertEquals(1, outAttachments.length());
+      JSONObject outAttachment = outAttachments.getJSONObject(0);
+      assertEquals("screenshot.png", outAttachment.getString("filename"));
+      assertEquals("image/png", outAttachment.getString("mimeType"));
     }
 
     @Test
@@ -801,7 +1105,7 @@ class SupportConversationsServletTest {
   class DoPostSendMessage {
 
     @Test
-    @DisplayName("Missing text field returns 400")
+    @DisplayName("Missing text field with no attachments returns 400")
     void missingText() throws Exception {
       StringWriter capture = new StringWriter();
       HttpServletResponse response = mockResponse(capture);
@@ -811,7 +1115,94 @@ class SupportConversationsServletTest {
         new SupportConversationsServlet().doPost(request, response);
       }
 
-      assertTrue(capture.toString().contains("Missing required field: text"));
+      assertTrue(capture.toString().contains("Message must have text or at least one attachment"));
+    }
+
+    @Test
+    @DisplayName("Empty text with a valid attachment is accepted (not 400)")
+    void emptyTextWithAttachmentIsAccepted() throws Exception {
+      StringWriter capture = new StringWriter();
+      HttpServletResponse response = mockResponse(capture);
+      String body = "{\"text\":\"\",\"attachments\":[{\"mimeType\":\"image/png\",\"name\":\"screenshot.png\","
+          + "\"data\":\"Zm9v\"}]}";
+      HttpServletRequest request = authenticatedRequest("/conversations/conv-1/messages", body);
+
+      try (MockedStatic<SecureWebServicesUtils> swsMock = mockValidAuth();
+           MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+           MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+           MockedStatic<OBProvider> providerMock = mockStatic(OBProvider.class);
+           MockedStatic<SupportIntegrationClient> sicMock = mockStatic(SupportIntegrationClient.class)) {
+        OBDal obDal = mockObDal(dalMock);
+        SupportConversation conv = mockConversation("conv-1");
+        when(conv.isHumanTakeover()).thenReturn(false);
+        when(obDal.get(SupportConversation.class, "conv-1")).thenReturn(conv);
+        stubProvider(providerMock, null, mock(SupportMessage.class));
+        mockCriteria(obDal, SupportMessage.class, Collections.emptyList());
+
+        sicMock.when(() -> SupportIntegrationClient.sendToAdk(
+                anyString(), anyString(), anyString(), any(), any()))
+            .thenReturn("Claro, veo tu adjunto");
+
+        new SupportConversationsServlet().doPost(request, response);
+      }
+
+      String out = capture.toString();
+      assertTrue(out.contains(FIELD_MESSAGES_LITERAL));
+      assertTrue(!out.contains("must have text or at least one attachment"));
+    }
+
+    @Test
+    @DisplayName("The user's own outgoing attachment on an existing conversation is persisted "
+        + "as {filename, mimeType} (no id) and shows up in the returned message list")
+    void userMessageAttachmentsArePersisted() throws Exception {
+      StringWriter capture = new StringWriter();
+      HttpServletResponse response = mockResponse(capture);
+      String body = "{\"text\":\"\",\"attachments\":[{\"mimeType\":\"image/png\",\"name\":\"screenshot.png\","
+          + "\"data\":\"Zm9v\"}]}";
+      HttpServletRequest request = authenticatedRequest("/conversations/conv-1/messages", body);
+
+      SupportMessage userMsg = mock(SupportMessage.class);
+      when(userMsg.getAttachments())
+          .thenReturn("[{\"filename\":\"screenshot.png\",\"mimeType\":\"image/png\"}]");
+
+      try (MockedStatic<SecureWebServicesUtils> swsMock = mockValidAuth();
+           MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+           MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+           MockedStatic<OBProvider> providerMock = mockStatic(OBProvider.class);
+           MockedStatic<SupportIntegrationClient> sicMock = mockStatic(SupportIntegrationClient.class)) {
+        OBDal obDal = mockObDal(dalMock);
+        SupportConversation conv = mockConversation("conv-1");
+        when(conv.isHumanTakeover()).thenReturn(false);
+        when(obDal.get(SupportConversation.class, "conv-1")).thenReturn(conv);
+        stubProvider(providerMock, null, userMsg);
+        mockCriteria(obDal, SupportMessage.class, List.of(userMsg));
+
+        sicMock.when(() -> SupportIntegrationClient.sendToAdk(
+                anyString(), anyString(), anyString(), any(), any()))
+            .thenReturn("Claro, veo tu adjunto");
+
+        new SupportConversationsServlet().doPost(request, response);
+
+        ArgumentCaptor<String> stored = ArgumentCaptor.forClass(String.class);
+        verify(userMsg).setAttachments(stored.capture());
+        // Parsed rather than substring-matched: org.json escapes '/' as '\/' when serializing,
+        // so a raw-string check for "image/png" is brittle against that (valid, order-preserving)
+        // quoting quirk. Parsing is immune to both escaping and key order.
+        JSONArray storedAttachments = new JSONArray(stored.getValue());
+        assertEquals(1, storedAttachments.length());
+        JSONObject storedAttachment = storedAttachments.getJSONObject(0);
+        assertEquals("screenshot.png", storedAttachment.getString("filename"));
+        assertEquals("image/png", storedAttachment.getString("mimeType"));
+        assertTrue(!storedAttachment.has("id"));
+      }
+
+      String out = capture.toString();
+      JSONArray outAttachments = new JSONObject(out).getJSONArray(FIELD_MESSAGES_LITERAL)
+          .getJSONObject(0).getJSONArray("attachments");
+      assertEquals(1, outAttachments.length());
+      JSONObject outAttachment = outAttachments.getJSONObject(0);
+      assertEquals("screenshot.png", outAttachment.getString("filename"));
+      assertEquals("image/png", outAttachment.getString("mimeType"));
     }
 
     @Test
@@ -909,6 +1300,89 @@ class SupportConversationsServletTest {
       }
 
       assertTrue(capture.toString().contains(FIELD_MESSAGES_LITERAL));
+    }
+
+    @Test
+    @DisplayName("Sending a message right after a reopen (no new ticket linked yet, but a previous one "
+        + "recorded) prepends the VALERIA_RESET_TICKET_CONTEXT marker to the text sent to the ADK, so its "
+        + "callbacks reset all turn-scoped ticket/escalation state and create a fresh ticket this same turn")
+    void sendMessageAfterReopenPrependsResetMarker() throws Exception {
+      StringWriter capture = new StringWriter();
+      HttpServletResponse response = mockResponse(capture);
+      HttpServletRequest request = authenticatedRequest("/conversations/conv-1/messages", "{\"text\":\"hola de nuevo\"}");
+
+      try (MockedStatic<SecureWebServicesUtils> swsMock = mockValidAuth();
+           MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+           MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+           MockedStatic<OBProvider> providerMock = mockStatic(OBProvider.class);
+           MockedStatic<SupportIntegrationClient> sicMock = mockStatic(SupportIntegrationClient.class)) {
+        OBDal obDal = mockObDal(dalMock);
+        SupportConversation conv = mockConversation("conv-1");
+        when(conv.isHumanTakeover()).thenReturn(false);
+        when(conv.getJiraTicketKey()).thenReturn(null);
+        when(conv.getPreviousJiraTicketKey()).thenReturn("SUP-OLD");
+        when(obDal.get(SupportConversation.class, "conv-1")).thenReturn(conv);
+        stubProvider(providerMock, null, mock(SupportMessage.class));
+        mockCriteria(obDal, SupportMessage.class, Collections.emptyList());
+
+        ArgumentCaptor<String> textCaptor = ArgumentCaptor.forClass(String.class);
+        sicMock.when(() -> SupportIntegrationClient.sendToAdk(
+                anyString(), anyString(), textCaptor.capture(), any(), any()))
+            .thenReturn("Bienvenido de nuevo");
+
+        new SupportConversationsServlet().doPost(request, response);
+
+        assertEquals(" VALERIA_RESET_TICKET_CONTEXT(SUP-OLD) hola de nuevo", textCaptor.getValue());
+      }
+    }
+
+    @Test
+    @DisplayName("Sending a message with an ACTIVE Jira ticket already linked does NOT prepend the reset "
+        + "marker — the self-limiting condition only fires once, on the turn right after a reopen")
+    void sendMessageWithActiveTicketDoesNotPrependResetMarker() throws Exception {
+      StringWriter capture = new StringWriter();
+      HttpServletResponse response = mockResponse(capture);
+      HttpServletRequest request = authenticatedRequest("/conversations/conv-1/messages", "{\"text\":\"hola\"}");
+
+      try (MockedStatic<SecureWebServicesUtils> swsMock = mockValidAuth();
+           MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+           MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+           MockedStatic<OBProvider> providerMock = mockStatic(OBProvider.class);
+           MockedStatic<SupportIntegrationClient> sicMock = mockStatic(SupportIntegrationClient.class)) {
+        OBDal obDal = mockObDal(dalMock);
+        SupportConversation conv = mockConversation("conv-1");
+        when(conv.isHumanTakeover()).thenReturn(false);
+        when(conv.getJiraTicketKey()).thenReturn("SUP-ACTIVE");
+        when(conv.getPreviousJiraTicketKey()).thenReturn("SUP-OLD");
+        when(obDal.get(SupportConversation.class, "conv-1")).thenReturn(conv);
+        stubProvider(providerMock, null, mock(SupportMessage.class));
+        mockCriteria(obDal, SupportMessage.class, Collections.emptyList());
+
+        ArgumentCaptor<String> textCaptor = ArgumentCaptor.forClass(String.class);
+        sicMock.when(() -> SupportIntegrationClient.sendToAdk(
+                anyString(), anyString(), textCaptor.capture(), any(), any()))
+            .thenReturn("Claro, contame más");
+
+        new SupportConversationsServlet().doPost(request, response);
+
+        assertEquals("hola", textCaptor.getValue());
+      }
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // RESET_TICKET_CONTEXT_MARKER_FORMAT
+  // -------------------------------------------------------------------------
+
+  @Nested
+  @DisplayName("RESET_TICKET_CONTEXT_MARKER_FORMAT")
+  class ResetTicketContextMarkerFormat {
+
+    @Test
+    @DisplayName("Formats the exact marker string the ADK's callbacks.py _RESET_MARKER_RE regex expects")
+    void producesExpectedMarkerString() {
+      String result = String.format(SupportConversationsServlet.RESET_TICKET_CONTEXT_MARKER_FORMAT, "SUP-42");
+      assertEquals(" VALERIA_RESET_TICKET_CONTEXT(SUP-42) ", result);
     }
   }
 
@@ -1060,6 +1534,68 @@ class SupportConversationsServletTest {
         mockCriteria(obDal, SupportMessage.class, Collections.emptyList());
 
         new SupportConversationsServlet().doPost(request, response);
+      }
+
+      assertTrue(capture.toString().contains(FIELD_MESSAGES_LITERAL));
+    }
+
+    @Test
+    @DisplayName("Reopening a conversation with an existing Jira ticket unlinks it: previousJiraTicketKey "
+        + "is set to the old key, jiraTicketKey is cleared, and humanTakeover is reset to false — so the "
+        + "ADK creates a fresh ticket on the next turn instead of continuing to comment on the resolved one")
+    void reopenUnlinksOldJiraTicketAndResetsTakeover() throws Exception {
+      StringWriter capture = new StringWriter();
+      HttpServletResponse response = mockResponse(capture);
+      HttpServletRequest request = authenticatedRequest("/conversations/conv-1/reopen", "{}");
+
+      try (MockedStatic<SecureWebServicesUtils> swsMock = mockValidAuth();
+           MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+           MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+           MockedStatic<OBProvider> providerMock = mockStatic(OBProvider.class)) {
+        OBDal obDal = mockObDal(dalMock);
+        SupportConversation conv = mockConversation("conv-1");
+        when(conv.getStatus()).thenReturn("closed");
+        when(conv.getJiraTicketKey()).thenReturn("SUP-100");
+        when(obDal.get(SupportConversation.class, "conv-1")).thenReturn(conv);
+        stubProvider(providerMock, null, mock(SupportMessage.class));
+        mockCriteria(obDal, SupportMessage.class, Collections.emptyList());
+
+        new SupportConversationsServlet().doPost(request, response);
+
+        verify(conv).setPreviousJiraTicketKey("SUP-100");
+        verify(conv).setJiraTicketKey(null);
+        verify(conv).setHumanTakeover(false);
+        verify(conv).setStatus("open");
+      }
+
+      assertTrue(capture.toString().contains(FIELD_MESSAGES_LITERAL));
+    }
+
+    @Test
+    @DisplayName("Reopening a conversation with NO existing Jira ticket does not touch previousJiraTicketKey "
+        + "(nothing to preserve) but still resets humanTakeover and status")
+    void reopenWithNoJiraTicketDoesNotSetPrevious() throws Exception {
+      StringWriter capture = new StringWriter();
+      HttpServletResponse response = mockResponse(capture);
+      HttpServletRequest request = authenticatedRequest("/conversations/conv-1/reopen", "{}");
+
+      try (MockedStatic<SecureWebServicesUtils> swsMock = mockValidAuth();
+           MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+           MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+           MockedStatic<OBProvider> providerMock = mockStatic(OBProvider.class)) {
+        OBDal obDal = mockObDal(dalMock);
+        SupportConversation conv = mockConversation("conv-1");
+        when(conv.getStatus()).thenReturn("closed");
+        when(conv.getJiraTicketKey()).thenReturn(null);
+        when(obDal.get(SupportConversation.class, "conv-1")).thenReturn(conv);
+        stubProvider(providerMock, null, mock(SupportMessage.class));
+        mockCriteria(obDal, SupportMessage.class, Collections.emptyList());
+
+        new SupportConversationsServlet().doPost(request, response);
+
+        verify(conv, never()).setPreviousJiraTicketKey(anyString());
+        verify(conv).setHumanTakeover(false);
+        verify(conv).setStatus("open");
       }
 
       assertTrue(capture.toString().contains(FIELD_MESSAGES_LITERAL));
