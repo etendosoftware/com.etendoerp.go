@@ -23,6 +23,7 @@ import static org.mockito.Mockito.*;
 
 import java.lang.reflect.Method;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -39,12 +40,17 @@ import org.mockito.MockedStatic;
 import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
 import org.openbravo.dal.core.OBContext;
+import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.ad.access.ProcessAccess;
+import org.openbravo.model.ad.access.Role;
+import org.openbravo.model.ad.access.WindowAccess;
 
 /**
  * Unit tests for {@link SFListMenu}.
  * Covers tree building, search mode, resolveType/str helpers,
- * exception handling, and edge cases.
+ * exception handling, edge cases, and role-based access filtering
+ * (ETP-4511: menu filtered by AD_Window_Access / AD_Process_Access).
  */
 @MockitoSettings(strictness = Strictness.LENIENT)
 class SFListMenuTest {
@@ -53,6 +59,8 @@ class SFListMenuTest {
     private MockedStatic<OBContext> obContextMock;
     private OBDal mockDal;
     private Session mockSession;
+    private OBContext mockContext;
+    private Role adminRole;
     private SFListMenu webhook;
     private Map<String, String> parameters;
     private Map<String, String> responseVars;
@@ -64,13 +72,67 @@ class SFListMenuTest {
 
         mockDal = mock(OBDal.class);
         mockSession = mock(Session.class);
+        mockContext = mock(OBContext.class);
+        adminRole = mock(Role.class);
 
         obDalMock.when(OBDal::getInstance).thenReturn(mockDal);
         when(mockDal.getSession()).thenReturn(mockSession);
 
+        // Default: a role with unrestricted (System Administrator) access, so all the
+        // pre-existing tree/search tests keep exercising "full access → unchanged" behavior
+        // without having to stub WindowAccess/ProcessAccess criteria individually.
+        when(adminRole.getId()).thenReturn("0");
+        when(mockContext.getRole()).thenReturn(adminRole);
+        obContextMock.when(OBContext::getOBContext).thenReturn(mockContext);
+
         webhook = new SFListMenu();
         parameters = new HashMap<>();
         responseVars = new HashMap<>();
+    }
+
+    // ── access-filtering helpers ─────────────────────────────────────────
+
+    /** Makes the current role return {@code null} (no role assigned). */
+    private void givenNoRole() {
+        when(mockContext.getRole()).thenReturn(null);
+    }
+
+    /** Makes the current role a non-admin role with the given id. */
+    private Role givenRestrictedRole(String roleId) {
+        Role role = mock(Role.class);
+        when(role.getId()).thenReturn(roleId);
+        when(mockContext.getRole()).thenReturn(role);
+        return role;
+    }
+
+    /** Stubs {@code OBDal.createCriteria(WindowAccess.class)} to return an active row (or not). */
+    @SuppressWarnings("unchecked")
+    private void stubWindowAccess(boolean hasAccess) {
+        OBCriteria<WindowAccess> criteria = mock(OBCriteria.class);
+        when(mockDal.createCriteria(WindowAccess.class)).thenReturn(criteria);
+        when(criteria.add(any())).thenReturn(criteria);
+        when(criteria.setMaxResults(1)).thenReturn(criteria);
+        if (hasAccess) {
+            WindowAccess access = mock(WindowAccess.class);
+            when(criteria.list()).thenReturn(Collections.singletonList(access));
+        } else {
+            when(criteria.list()).thenReturn(Collections.emptyList());
+        }
+    }
+
+    /** Stubs {@code OBDal.createCriteria(ProcessAccess.class)} to return an active row (or not). */
+    @SuppressWarnings("unchecked")
+    private void stubProcessAccess(boolean hasAccess) {
+        OBCriteria<ProcessAccess> criteria = mock(OBCriteria.class);
+        when(mockDal.createCriteria(ProcessAccess.class)).thenReturn(criteria);
+        when(criteria.add(any())).thenReturn(criteria);
+        when(criteria.setMaxResults(1)).thenReturn(criteria);
+        if (hasAccess) {
+            ProcessAccess access = mock(ProcessAccess.class);
+            when(criteria.list()).thenReturn(Collections.singletonList(access));
+        } else {
+            when(criteria.list()).thenReturn(Collections.emptyList());
+        }
     }
 
     @AfterEach
@@ -345,5 +407,227 @@ class SFListMenuTest {
         assertFalse(node.has("windowId"));
         assertFalse(node.has("processId"));
         assertFalse(node.has("formId"));
+    }
+
+    // ── ETP-4511: role-based access filtering ────────────────────────────
+
+    /** No role assigned → empty tree, count 0, and the DB is never even queried. */
+    @Test
+    @DisplayName("No role assigned returns empty tree without querying the DB")
+    void testNoRoleReturnsEmptyTree() throws Exception {
+        givenNoRole();
+
+        webhook.get(parameters, responseVars);
+
+        assertNull(responseVars.get(ERROR));
+        JSONObject result = new JSONObject(responseVars.get(RESULT));
+        assertEquals(0, result.getInt(COUNT));
+        assertEquals(0, result.getJSONArray("tree").length());
+        verify(mockDal, never()).getSession();
+    }
+
+    /** No role assigned → empty flat list for the search variant too. */
+    @Test
+    @DisplayName("No role assigned returns empty search list")
+    void testNoRoleReturnsEmptySearchList() throws Exception {
+        parameters.put("q", "sales");
+        givenNoRole();
+
+        webhook.get(parameters, responseVars);
+
+        assertNull(responseVars.get(ERROR));
+        JSONObject result = new JSONObject(responseVars.get(RESULT));
+        assertEquals(0, result.getInt(COUNT));
+        assertEquals(0, result.getJSONArray("tree").length());
+        verify(mockDal, never()).getSession();
+    }
+
+    /** A restricted role with access to the window keeps the window node. */
+    @Test
+    @DisplayName("Restricted role with window access keeps the window node")
+    void testRestrictedRoleWithWindowAccessKeepsNode() throws Exception {
+        givenRestrictedRole("role-with-access");
+        stubWindowAccess(true);
+
+        List<Object[]> rows = new ArrayList<>();
+        rows.add(new Object[]{"2", "0", 20, "Sales Window", "N", "W", "win1", null, null, 0});
+        stubNativeQuery(rows);
+
+        webhook.get(parameters, responseVars);
+
+        assertNull(responseVars.get(ERROR));
+        JSONObject result = new JSONObject(responseVars.get(RESULT));
+        assertEquals(1, result.getInt(COUNT));
+        assertEquals(1, result.getJSONArray("tree").length());
+    }
+
+    /** A restricted role without access to the window drops it from the tree. */
+    @Test
+    @DisplayName("Restricted role without window access drops the window node")
+    void testRestrictedRoleWithoutWindowAccessDropsNode() throws Exception {
+        givenRestrictedRole("role-without-access");
+        stubWindowAccess(false);
+
+        List<Object[]> rows = new ArrayList<>();
+        rows.add(new Object[]{"2", "0", 20, "Sales Window", "N", "W", "win1", null, null, 0});
+        stubNativeQuery(rows);
+
+        webhook.get(parameters, responseVars);
+
+        assertNull(responseVars.get(ERROR));
+        JSONObject result = new JSONObject(responseVars.get(RESULT));
+        assertEquals(0, result.getInt(COUNT));
+        assertEquals(0, result.getJSONArray("tree").length());
+    }
+
+    /** A restricted role with process access keeps the process node. */
+    @Test
+    @DisplayName("Restricted role with process access keeps the process node")
+    void testRestrictedRoleWithProcessAccessKeepsNode() throws Exception {
+        givenRestrictedRole("role-with-process-access");
+        stubProcessAccess(true);
+
+        List<Object[]> rows = new ArrayList<>();
+        rows.add(new Object[]{"5", "0", 10, "My Process", "N", "P", null, "proc5", null, 0});
+        stubNativeQuery(rows);
+
+        webhook.get(parameters, responseVars);
+
+        assertNull(responseVars.get(ERROR));
+        JSONObject result = new JSONObject(responseVars.get(RESULT));
+        assertEquals(1, result.getInt(COUNT));
+    }
+
+    /** A restricted role without process access drops the process node. */
+    @Test
+    @DisplayName("Restricted role without process access drops the process node")
+    void testRestrictedRoleWithoutProcessAccessDropsNode() throws Exception {
+        givenRestrictedRole("role-without-process-access");
+        stubProcessAccess(false);
+
+        List<Object[]> rows = new ArrayList<>();
+        rows.add(new Object[]{"5", "0", 10, "My Process", "N", "P", null, "proc5", null, 0});
+        stubNativeQuery(rows);
+
+        webhook.get(parameters, responseVars);
+
+        assertNull(responseVars.get(ERROR));
+        JSONObject result = new JSONObject(responseVars.get(RESULT));
+        assertEquals(0, result.getInt(COUNT));
+    }
+
+    /**
+     * A folder whose only child is filtered out is itself pruned; a sibling folder that keeps
+     * at least one accessible child survives.
+     */
+    @Test
+    @DisplayName("Folder with all children filtered out is pruned, folder with a kept child survives")
+    void testFolderPruningKeepsOnlyFoldersWithAccessibleChildren() throws Exception {
+        givenRestrictedRole("role-mixed-access");
+
+        // filterNode walks post-order over roots [Folder A, Folder B] in that order, and within
+        // Folder B over its children in row order. That fixes the call sequence to
+        // hasWindowAccess as: (1) Folder A's denied child, (2) Folder B's denied child,
+        // (3) Folder B's allowed child — so createCriteria(WindowAccess.class) must be stubbed
+        // to answer denied, denied, allowed in that exact order.
+        OBCriteria<WindowAccess> allowedCriteria = mock(OBCriteria.class);
+        OBCriteria<WindowAccess> deniedCriteria = mock(OBCriteria.class);
+        when(mockDal.createCriteria(WindowAccess.class))
+                .thenReturn(deniedCriteria, deniedCriteria, allowedCriteria);
+        when(allowedCriteria.add(any())).thenReturn(allowedCriteria);
+        when(allowedCriteria.setMaxResults(1)).thenReturn(allowedCriteria);
+        WindowAccess access = mock(WindowAccess.class);
+        when(allowedCriteria.list()).thenReturn(Collections.singletonList(access));
+        when(deniedCriteria.add(any())).thenReturn(deniedCriteria);
+        when(deniedCriteria.setMaxResults(1)).thenReturn(deniedCriteria);
+        when(deniedCriteria.list()).thenReturn(Collections.emptyList());
+
+        List<Object[]> rows = new ArrayList<>();
+        // Folder A (root) has only a denied window as a child → must be pruned.
+        rows.add(new Object[]{"1", "0", 10, "Folder A", "Y", null, null, null, null, 0});
+        rows.add(new Object[]{"2", "1", 10, "Denied Window", "N", "W", "win-denied", null, null, 1});
+        // Folder B (root) has one denied and one allowed child → survives with 1 child.
+        rows.add(new Object[]{"3", "0", 20, "Folder B", "Y", null, null, null, null, 0});
+        rows.add(new Object[]{"4", "3", 10, "Denied Window 2", "N", "W", "win-denied", null, null, 1});
+        rows.add(new Object[]{"5", "3", 20, "Allowed Window", "N", "W", "win-allowed", null, null, 1});
+
+        stubNativeQuery(rows);
+
+        webhook.get(parameters, responseVars);
+
+        assertNull(responseVars.get(ERROR));
+        JSONObject result = new JSONObject(responseVars.get(RESULT));
+        JSONArray tree = result.getJSONArray("tree");
+        // Only Folder B survives.
+        assertEquals(1, tree.length());
+        JSONObject folderB = tree.getJSONObject(0);
+        assertEquals("Folder B", folderB.getString("name"));
+        JSONArray children = folderB.getJSONArray("children");
+        assertEquals(1, children.length());
+        assertEquals("Allowed Window", children.getJSONObject(0).getString("name"));
+        // count = Folder B + its one surviving child.
+        assertEquals(2, result.getInt(COUNT));
+    }
+
+    /** With the default admin role (set up in {@code @BeforeEach}), the tree is unchanged from today's behavior. */
+    @Test
+    @DisplayName("Admin role sees the full tree, unchanged from today's behavior")
+    void testAdminRoleSeesFullTreeUnchanged() throws Exception {
+        List<Object[]> rows = new ArrayList<>();
+        rows.add(new Object[]{"1", "0", 10, "Menu Root", "Y", null, null, null, null, 0});
+        rows.add(new Object[]{"2", "1", 20, "Sales Window", "N", "W", "win1", null, null, 1});
+        rows.add(new Object[]{"3", "1", 30, "Some Process", "N", "P", null, "proc1", null, 1});
+
+        stubNativeQuery(rows);
+
+        webhook.get(parameters, responseVars);
+
+        assertNull(responseVars.get(ERROR));
+        JSONObject result = new JSONObject(responseVars.get(RESULT));
+        assertEquals(3, result.getInt(COUNT));
+        JSONObject root = result.getJSONArray("tree").getJSONObject(0);
+        assertEquals(2, root.getJSONArray("children").length());
+    }
+
+    /** A restricted role with search results filters out inaccessible windows from the flat list. */
+    @Test
+    @DisplayName("Search filters out windows the restricted role cannot access")
+    void testSearchFiltersInaccessibleWindow() throws Exception {
+        parameters.put("q", "sales");
+        givenRestrictedRole("role-search-restricted");
+        stubWindowAccess(false);
+
+        List<Object[]> rows = new ArrayList<>();
+        rows.add(new Object[]{"10", "Sales Order", "N", "W", "win10", null, null});
+
+        stubNativeQuery(rows);
+
+        webhook.get(parameters, responseVars);
+
+        assertNull(responseVars.get(ERROR));
+        JSONObject result = new JSONObject(responseVars.get(RESULT));
+        assertEquals(0, result.getInt(COUNT));
+        assertEquals(0, result.getJSONArray("tree").length());
+    }
+
+    /** Search results for an accessible window remain in the flat list. */
+    @Test
+    @DisplayName("Search keeps windows the restricted role can access")
+    void testSearchKeepsAccessibleWindow() throws Exception {
+        parameters.put("q", "sales");
+        givenRestrictedRole("role-search-allowed");
+        stubWindowAccess(true);
+
+        List<Object[]> rows = new ArrayList<>();
+        rows.add(new Object[]{"10", "Sales Order", "N", "W", "win10", null, null});
+
+        stubNativeQuery(rows);
+
+        webhook.get(parameters, responseVars);
+
+        assertNull(responseVars.get(ERROR));
+        JSONObject result = new JSONObject(responseVars.get(RESULT));
+        assertEquals(1, result.getInt(COUNT));
+        assertEquals(1, result.getJSONArray("tree").length());
     }
 }
