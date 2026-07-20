@@ -89,10 +89,17 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
   private static final String FIELD_SUBJECT     = "subject";
   private static final String FIELD_UNREAD      = "unread";
   private static final String FIELD_RATED       = "rated";
+  private static final String FIELD_ATTACHMENTS = "attachments";
   private static final String MSG_INTERNAL_ERROR = "Internal error";
   private static final String MSG_CONVERSATION_NOT_FOUND = "Conversation not found";
+  private static final String MSG_ATTACHMENT_NOT_FOUND = "Attachment not found";
   private static final String HEADER_INTERNAL_SECRET = "X-Internal-Secret";
   private static final String MSG_INVALID_SECRET = "Invalid secret";
+  /** Package-private: also used by {@link SupportAttachmentHelpers}. */
+  static final String FIELD_MIME_TYPE   = "mimeType";
+  /** Package-private: also used by {@link SupportAttachmentHelpers}. */
+  static final String DEFAULT_MIME_TYPE = "application/octet-stream";
+  private static final String FIELD_JIRA_TICKET_KEY = "jiraTicketKey";
 
   private static final String SENDER_AI    = "ai";
   private static final String SENDER_USER  = "user";
@@ -101,6 +108,22 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
   private static final String AI_AGENT_NAME = "ValerIA";
   private static final String AI_STUB_REPLY =
       "Hola, soy ValerIA. En este momento no puedo conectarme con el servicio de IA. Por favor intenta de nuevo en un momento.";
+
+  /** Prepended to the outgoing message text (stripped by the ADK before it ever reaches a model
+   * or gets echoed anywhere — never persisted, never shown) on the first turn after a
+   * conversation is reopened, so the ADK resets ALL of its turn-scoped ticket/escalation state
+   * (pending_escalation, human_takeover, jira_ticket_key, previous_jira_ticket_key,
+   * ticket_turn_count, description_updated, ticket_priority) for THIS SAME turn — see the
+   * {@code justReopened} block in {@link #handleSendMessage}. {@code stateDelta} sent alongside
+   * a {@code /run} call is NOT reliably visible to that same turn's ADK callbacks (verified —
+   * see {@link SupportIntegrationClient#createAdkSession}'s docstring: a first attempt at this
+   * reset relied on stateDelta for jira_ticket_key alone, and no new ticket ever got created on
+   * reopen because of it — same lag). A marker in the message text IS reliably visible
+   * immediately, since it travels as real message content rather than through the session-state
+   * layer. {@code %s} is the previous (now-superseded) Jira ticket key, so the new ticket's
+   * description/link can reference it. Must match {@code _RESET_MARKER_RE} in the ADK's
+   * {@code agent/callbacks.py}. */
+  static final String RESET_TICKET_CONTEXT_MARKER_FORMAT = " VALERIA_RESET_TICKET_CONTEXT(%s) ";
 
   private static final String WEBHOOK_SECRET =
       System.getProperty("support.webhook.secret", "");
@@ -131,6 +154,10 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
     String[] parts = pathInfo.split("/");
     if (parts.length == 4 && FIELD_CONVERSATIONS.equals(parts[1]) && FIELD_MESSAGES.equals(parts[3])) {
       handleGetMessages(response, ctx, parts[2]);
+      return;
+    }
+    if (parts.length == 3 && FIELD_ATTACHMENTS.equals(parts[1])) {
+      handleGetAttachment(response, ctx, parts[2]);
       return;
     }
 
@@ -236,15 +263,12 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
     JSONObject body = parseBody(request, response);
     if (body == null) return;
 
-    String firstMessage;
-    try {
-      firstMessage = body.getString(FIELD_MESSAGE).trim();
-    } catch (JSONException e) {
-      writeError(response, HttpServletResponse.SC_BAD_REQUEST, "Missing required field: message");
-      return;
-    }
-    if (firstMessage.isEmpty()) {
-      writeError(response, HttpServletResponse.SC_BAD_REQUEST, "Field message must not be empty");
+    String firstMessage = body.optString(FIELD_MESSAGE, "").trim();
+    JSONArray attachments = body.optJSONArray(FIELD_ATTACHMENTS);
+    boolean hasAttachments = attachments != null && attachments.length() > 0;
+    if (firstMessage.isEmpty() && !hasAttachments) {
+      writeError(response, HttpServletResponse.SC_BAD_REQUEST,
+          "Message must have text or at least one attachment");
       return;
     }
 
@@ -269,7 +293,7 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
       OBDal.getInstance().save(conv);
 
       // Insert user message
-      saveMessage(conv, SENDER_USER, "Tú", firstMessage, now, user);
+      saveMessage(conv, SENDER_USER, "Tú", firstMessage, now, user, attachments);
 
       // Commit before calling ADK so background set-ticket can see the new conversation row
       // (the ADK's callback arrives via a separate HTTP request/transaction). Uses
@@ -278,7 +302,6 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
       SessionHandler.getInstance().commitAndStart();
 
       // AI reply
-      JSONArray attachments = body.optJSONArray("attachments");
       String locale = body.optString("locale", "es");
       String userEmail = SupportIntegrationClient.getUserEmail(userId);
       SupportIntegrationClient.createAdkSession(userId, conv.getId(), locale, userEmail);
@@ -323,20 +346,52 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
     }
   }
 
+  /**
+   * Authenticated proxy for a Jira attachment's raw content ({@code GET
+   * /sws/support/attachments/:jiraAttachmentId}). Authorization mirrors every other
+   * conversation-scoped endpoint in this servlet: the attachment id must appear in some
+   * {@link SupportMessage#getAttachments()} row, and that message's conversation must belong to
+   * the requesting user ({@link #belongsToUser}) — otherwise this returns 404, same as a
+   * not-found conversation, so the endpoint does not leak whether the id exists at all.
+   * <p>
+   * The lookup itself runs in admin mode across every client (like the Jira webhook's own
+   * lookups) because the caller's JWT tenant may not be the same tenant the message was stamped
+   * with when the human agent's reply was ingested; ownership is enforced afterwards by the
+   * explicit {@code belongsToUser} check, not by client scoping.
+   */
+  private void handleGetAttachment(HttpServletResponse response, AuthContext ctx, String jiraAttachmentId)
+      throws IOException {
+    OBContext.setAdminMode(true);
+    try {
+      SupportMessage msg = SupportAttachmentHelpers.findMessageByAttachmentId(jiraAttachmentId);
+      if (msg == null || !belongsToUser(msg.getConversation(), ctx.userId)) {
+        writeError(response, HttpServletResponse.SC_NOT_FOUND, MSG_ATTACHMENT_NOT_FOUND);
+        return;
+      }
+      JSONObject meta = SupportAttachmentHelpers.findAttachmentMeta(msg, jiraAttachmentId);
+      String filename = meta != null ? meta.optString("filename", jiraAttachmentId) : jiraAttachmentId;
+      String mimeType = meta != null ? meta.optString(FIELD_MIME_TYPE, DEFAULT_MIME_TYPE)
+          : DEFAULT_MIME_TYPE;
+      SupportAttachmentHelpers.streamJiraAttachment(response, jiraAttachmentId, filename, mimeType);
+    } catch (Exception e) {
+      log.error("Error proxying Jira attachment {}", jiraAttachmentId, e);
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, MSG_INTERNAL_ERROR);
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
   private void handleSendMessage(HttpServletRequest request, HttpServletResponse response,
       AuthContext ctx, String convId) throws IOException {
     JSONObject body = parseBody(request, response);
     if (body == null) return;
 
-    String text;
-    try {
-      text = body.getString("text").trim();
-    } catch (JSONException e) {
-      writeError(response, HttpServletResponse.SC_BAD_REQUEST, "Missing required field: text");
-      return;
-    }
-    if (text.isEmpty()) {
-      writeError(response, HttpServletResponse.SC_BAD_REQUEST, "Field text must not be empty");
+    String text = body.optString("text", "").trim();
+    JSONArray attachments = body.optJSONArray(FIELD_ATTACHMENTS);
+    boolean hasAttachments = attachments != null && attachments.length() > 0;
+    if (text.isEmpty() && !hasAttachments) {
+      writeError(response, HttpServletResponse.SC_BAD_REQUEST,
+          "Message must have text or at least one attachment");
       return;
     }
 
@@ -355,14 +410,20 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
 
       User user = conv.getUser();
       Date now = new Date();
-      saveMessage(conv, SENDER_USER, "Tú", text, now, user);
+      saveMessage(conv, SENDER_USER, "Tú", text, now, user, attachments);
 
       // If ticket is assigned to a human agent, block AI response
       if (Boolean.TRUE.equals(conv.isHumanTakeover())) {
-        // Human agent is handling this — forward user message to Jira, send no AI reply
+        // Human agent is handling this — forward user message to Jira, send no AI reply.
+        // An attachment-only message (no text) needs a descriptive fallback: Jira rejects a
+        // blank comment body, so without this the message would silently never reach the ticket.
         final String finalKey = conv.getJiraTicketKey();
-        final String finalText = text;
-        new Thread(() -> SupportIntegrationClient.postJiraComment(finalKey, finalText), "jira-comment").start();
+        final String finalText = text.isEmpty()
+            ? SupportIntegrationClient.describeAttachments(attachments)
+            : text;
+        // Public: the customer will see this reflected in the portal, same as any other reply
+        // they post there directly — this is just their own message, forwarded.
+        new Thread(() -> SupportIntegrationClient.postJiraComment(finalKey, finalText, false), "jira-comment").start();
         JSONObject result = new JSONObject();
         result.put(FIELD_MESSAGES,     buildMessageArray(convId));
         result.put(FIELD_CONVERSATION, toConvSummaryJson(conv));
@@ -370,12 +431,24 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
         return;
       }
 
-      JSONArray attachments = body.optJSONArray("attachments");
       // Sync human_takeover=false into ADK session state; flag tells agent to skip Jira re-check
       JSONObject stateDelta = new JSONObject()
           .put("human_takeover", false)
           .put("human_takeover_synced", true);
-      String aiReplyText = SupportIntegrationClient.sendToAdk(userId, convId, text, attachments, stateDelta);
+      // Conversation was reopened and no new ticket has been created yet (the ADK's own session
+      // state still has the OLD, already-resolved ticket key cached — it has no idea the DB-side
+      // link was cleared). Reset ALL of the ticket-lifecycle state via the text marker (not
+      // stateDelta — see RESET_TICKET_CONTEXT_MARKER_FORMAT's javadoc) so jira_before_agent
+      // creates a fresh ticket on THIS SAME turn instead of continuing to comment on the resolved
+      // one, same as it would for a brand-new conversation. Self-limiting: once the ADK creates
+      // the new ticket it calls back into /internal/set-ticket, which sets conv.jiraTicketKey
+      // again — so this branch stops applying after the first turn.
+      String textForAdk = text;
+      if (conv.getJiraTicketKey() == null && conv.getPreviousJiraTicketKey() != null) {
+        textForAdk = String.format(RESET_TICKET_CONTEXT_MARKER_FORMAT, conv.getPreviousJiraTicketKey())
+            + textForAdk;
+      }
+      String aiReplyText = SupportIntegrationClient.sendToAdk(userId, convId, textForAdk, attachments, stateDelta);
       if (aiReplyText == null) aiReplyText = AI_STUB_REPLY;
 
       Date aiNow = new Date();
@@ -428,8 +501,9 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
       final int finalScore = score;
       final String finalComment = comment;
       new Thread(() -> {
+        // Internal: the CSAT rating/comment is for the support team, never customer-facing.
         SupportIntegrationClient.postJiraComment(finalJiraKey,
-            SupportIntegrationClient.buildFeedbackComment(finalScore, finalComment));
+            SupportIntegrationClient.buildFeedbackComment(finalScore, finalComment), true);
         SupportIntegrationClient.postJiraCsatLabel(finalJiraKey, finalScore);
       }, "jira-csat-feedback").start();
 
@@ -478,6 +552,18 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
       Date now = new Date();
       conv.setStatus(STATUS_OPEN);
       conv.setLastActivity(now);
+      // Same chat thread and ADK session on purpose — the agent keeps the full conversation
+      // history for free (it's the same session state, never reset). But the OLD Jira ticket
+      // was already resolved/closed, so we must not keep commenting on it: unlink it here
+      // (preserved as previousJiraTicketKey for traceability/context) and let the ADK create a
+      // fresh ticket on the next real turn, same as it does for a brand-new conversation (see
+      // jira_before_agent in the ADK, which only creates a ticket when state has none).
+      String oldJiraKey = conv.getJiraTicketKey();
+      if (oldJiraKey != null && !oldJiraKey.isEmpty()) {
+        conv.setPreviousJiraTicketKey(oldJiraKey);
+        conv.setJiraTicketKey(null);
+      }
+      conv.setHumanTakeover(false);
       OBDal.getInstance().save(conv);
       // System message to mark reopen in the thread
       saveMessage(conv, SENDER_AI, AI_AGENT_NAME,
@@ -579,7 +665,16 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
     JSONObject body = parseBody(request, response);
     if (body == null) return;
     String convId      = body.optString(FIELD_CONVERSATION_ID, "");
-    String jiraKey     = body.optString("jiraTicketKey", "");
+    String jiraKey     = body.optString(FIELD_JIRA_TICKET_KEY, "");
+    // Optional: the reporter's Jira accountId, resolved once at ticket-creation time (see
+    // jira_client.get_reporter_account_id on the ADK side). accountId is always present in a
+    // webhook payload regardless of the account's profile-privacy settings, unlike emailAddress
+    // (which Jira Cloud omits for private-profile accounts — confirmed true for both our own
+    // bot account AND real customer accounts in production). This is what lets
+    // SupportJiraWebhookHandler#storeJiraWebhookComment recognize "the reporter replied via
+    // email/portal to their own ticket" and display it as their own chat message (sender=
+    // "user") instead of a different human agent's reply — never filtered/skipped.
+    String reporterAccountId = body.optString("reporterAccountId", "");
     if (convId.isEmpty() || jiraKey.isEmpty()) {
       writeError(response, HttpServletResponse.SC_BAD_REQUEST, "conversationId and jiraTicketKey required");
       return;
@@ -593,6 +688,9 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
           return;
         }
         conv.setJiraTicketKey(jiraKey);
+        if (!reporterAccountId.isEmpty()) {
+          conv.setJiraReporterAccountId(reporterAccountId);
+        }
         OBDal.getInstance().save(conv);
         log.info("Linked conversation {} to Jira ticket {}", convId, jiraKey);
         writeJson(response, HttpServletResponse.SC_OK, new JSONObject().put(FIELD_STATUS, "ok"));
@@ -648,7 +746,7 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
     JSONObject body = parseBody(request, response);
     if (body == null) return;
     String convId  = body.optString(FIELD_CONVERSATION_ID, "");
-    String jiraKey = body.optString("jiraTicketKey", "");
+    String jiraKey = body.optString(FIELD_JIRA_TICKET_KEY, "");
     if (convId.isEmpty() && jiraKey.isEmpty()) {
       writeError(response, HttpServletResponse.SC_BAD_REQUEST, "conversationId or jiraTicketKey required");
       return;
@@ -696,6 +794,18 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
 
   private static void saveMessage(SupportConversation conv, String sender, String senderName,
       String text, Date timestamp, User createdBy) {
+    saveMessage(conv, sender, senderName, text, timestamp, createdBy, null);
+  }
+
+  /** Same as the 5-arg {@link #saveMessage} but also persists the sender's own outgoing
+   * attachments (request wire format {@code [{name, mimeType, data}]}) as the {@code [{filename,
+   * mimeType}]} shape the frontend's {@code AttachmentItem} already renders for Jira-sourced
+   * attachments — no {@code id}, since there is no fetchable Jira attachment id for the user's
+   * own just-sent message. Mirrors {@link SupportJiraWebhookHandler#insertJiraMessage}'s
+   * null-vs-empty convention: the column is left {@code null} (never an empty-array string) when
+   * {@code attachments} is null/empty/all-malformed. */
+  private static void saveMessage(SupportConversation conv, String sender, String senderName,
+      String text, Date timestamp, User createdBy, JSONArray attachments) {
     SupportMessage msg = OBProvider.getInstance().get(SupportMessage.class);
     msg.setNewOBObject(true);
     msg.setId(newId());
@@ -708,6 +818,10 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
     msg.setSenderName(senderName);
     msg.setText(text);
     msg.setMessageDate(timestamp);
+    String attachmentsJson = SupportAttachmentHelpers.buildOutgoingAttachmentsJson(attachments);
+    if (attachmentsJson != null) {
+      msg.setAttachments(attachmentsJson);
+    }
     OBDal.getInstance().save(msg);
   }
 
@@ -728,6 +842,9 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
     obj.put("lastMessage",  conv.getLastMessage() != null ? conv.getLastMessage() : "");
     obj.put(FIELD_UNREAD,   Boolean.TRUE.equals(conv.isUnread()));
     obj.put(FIELD_RATED,    Boolean.TRUE.equals(conv.isRated()));
+    // Customers now receive this key via the JSM ticket-notification email, so they may search
+    // for a conversation by it — see MensajesTab's search filter in SupportChatWidget.jsx.
+    obj.put(FIELD_JIRA_TICKET_KEY, conv.getJiraTicketKey() != null ? conv.getJiraTicketKey() : "");
     return obj;
   }
 
@@ -747,6 +864,7 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
       json.put("senderName",     msg.getSenderName());
       json.put("text",           msg.getText());
       json.put("timestamp",      toIso(msg.getMessageDate()));
+      json.put(FIELD_ATTACHMENTS, SupportAttachmentHelpers.parseAttachments(msg.getAttachments()));
       arr.put(json);
     }
     return arr;
