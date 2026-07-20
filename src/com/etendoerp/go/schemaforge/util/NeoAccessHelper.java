@@ -67,6 +67,24 @@ public final class NeoAccessHelper {
   }
 
   /**
+   * Checks whether {@code role} has (read) access to the given AD window.
+   *
+   * <p>Same semantics as {@link #hasWindowAccess(String)} but takes an explicit role instead of
+   * resolving it from the ambient {@link OBContext}. Use this overload when the caller has
+   * already captured the role of interest up front — e.g. before entering
+   * {@link OBContext#setAdminMode()} — so the access decision does not depend on whatever role
+   * the ambient context happens to expose at the time of the check.</p>
+   *
+   * @param role the role to check (may be {@code null}, in which case access is denied)
+   * @param windowId the ID of the AD window to check
+   * @return {@code true} if {@code role} has an active window-access record, is the System
+   *         Administrator role, or is a client-admin role for the current client
+   */
+  public static boolean hasWindowAccess(Role role, String windowId) {
+    return hasWindowAccess(role, windowId, "GET");
+  }
+
+  /**
    * Checks whether the current role has access to the given AD window for the given HTTP
    * method, enforcing the read-only vs. full-access tiering declared on {@code AD_Window_Access}.
    *
@@ -88,7 +106,23 @@ public final class NeoAccessHelper {
    *         {@code windowId}
    */
   public static boolean hasWindowAccess(String windowId, String httpMethod) {
-    Role role = currentRole();
+    return hasWindowAccess(currentRole(), windowId, httpMethod);
+  }
+
+  /**
+   * Checks whether {@code role} has access to the given AD window for the given HTTP method,
+   * enforcing the read-only vs. full-access tiering declared on {@code AD_Window_Access}.
+   *
+   * <p>Same resolution order as {@link #hasWindowAccess(String, String)}, but operates on an
+   * explicitly-supplied role rather than resolving it from the ambient {@link OBContext}. See
+   * {@link #hasWindowAccess(Role, String)} for why an explicit role matters.</p>
+   *
+   * @param role the role to check (may be {@code null}, in which case access is denied)
+   * @param windowId the ID of the AD window to check
+   * @param httpMethod the HTTP method of the current request (e.g. {@code GET}, {@code POST})
+   * @return {@code true} if {@code role} is allowed to perform {@code httpMethod} on {@code windowId}
+   */
+  public static boolean hasWindowAccess(Role role, String windowId, String httpMethod) {
     if (role == null) {
       return false;
     }
@@ -201,7 +235,22 @@ public final class NeoAccessHelper {
    *         role is the System Administrator role or a client-admin role
    */
   public static boolean hasProcessAccess(String processId) {
-    Role role = currentRole();
+    return hasProcessAccess(currentRole(), processId);
+  }
+
+  /**
+   * Checks whether {@code role} has access to the given AD process.
+   *
+   * <p>Same semantics as {@link #hasProcessAccess(String)}, but operates on an explicitly-supplied
+   * role rather than resolving it from the ambient {@link OBContext}. See
+   * {@link #hasWindowAccess(Role, String)} for why an explicit role matters.</p>
+   *
+   * @param role the role to check (may be {@code null}, in which case access is denied)
+   * @param processId the ID of the AD process to check
+   * @return {@code true} if {@code role} has an active process-access record, or is the system
+   *         administrator role
+   */
+  public static boolean hasProcessAccess(Role role, String processId) {
     if (role == null) {
       return false;
     }
