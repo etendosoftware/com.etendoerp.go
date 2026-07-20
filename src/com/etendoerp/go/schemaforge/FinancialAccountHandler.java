@@ -37,6 +37,7 @@ import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.currency.Currency;
 import org.openbravo.model.common.geography.Country;
 import org.openbravo.model.financialmgmt.accounting.coa.AcctSchema;
+import org.openbravo.model.financialmgmt.payment.FIN_FinaccTransaction;
 import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
 import org.openbravo.model.financialmgmt.payment.FIN_Reconciliation;
 import org.openbravo.model.financialmgmt.payment.MatchingAlgorithm;
@@ -76,6 +77,7 @@ public class FinancialAccountHandler implements NeoHandler {
   private static final Logger log = LogManager.getLogger(FinancialAccountHandler.class);
 
   private static final String SPEC = "financial-account";
+  private static final String METHOD_GET = "GET";
   private static final String METHOD_POST = "POST";
   private static final String METHOD_PUT = "PUT";
   private static final String METHOD_PATCH = "PATCH";
@@ -94,6 +96,14 @@ public class FinancialAccountHandler implements NeoHandler {
   private static final String FIELD_PROVIDER_CODE = "providerCode";
   private static final String FIELD_PROVIDER_NAME = "providerName";
   private static final String FIELD_PSD2_PROVIDER = "psd2Provider";
+  /** Computed flag (ETP-4530): {@code true} when the account has at least one active
+   *  {@link FIN_FinaccTransaction}. Injected into every GET row so the frontend can lock the
+   *  Currency field once real movements exist — a different, stricter condition than
+   *  {@code psd2Connected} (which only reflects bank-linkage, not transaction history). Not
+   *  backed by any AD column, so it is injected here (post-hook, after NeoFieldFilter already ran
+   *  on the generic CRUD response) rather than declared in decisions.json — the same technique
+   *  {@code SalesInvoiceHeaderHandler} uses for {@code arInvoiceSubtype}. */
+  private static final String FIELD_HAS_TRANSACTIONS = "hasTransactions";
 
   private static final String TYPE_BANK = "B";
   private static final String TYPE_CASH = "C";
@@ -160,6 +170,9 @@ public class FinancialAccountHandler implements NeoHandler {
     if (NeoEndpointType.DEFAULTS.equals(context.getEndpointType())) {
       return injectClientCurrencyDefault(context);
     }
+    if (METHOD_GET.equals(context.getHttpMethod()) && NeoEndpointType.CRUD.equals(context.getEndpointType())) {
+      return injectHasTransactions(context);
+    }
     if (!METHOD_POST.equals(context.getHttpMethod())) {
       return null;
     }
@@ -225,6 +238,44 @@ public class FinancialAccountHandler implements NeoHandler {
     } finally {
       exitAdminMode();
     }
+  }
+
+  /**
+   * Injects {@link #FIELD_HAS_TRANSACTIONS} into every row of a GET (list/getById) response —
+   * {@code true} when the account has at least one active {@link FIN_FinaccTransaction}. The
+   * frontend uses this (not {@code psd2Connected}) to lock the Currency field once the account has
+   * real movement history (ETP-4530).
+   */
+  private NeoResponse injectHasTransactions(NeoContext context) {
+    JSONArray dataArr = NeoHandlerUtils.extractGetDataArray(context);
+    if (dataArr == null) {
+      return null;
+    }
+    try {
+      enterAdminMode();
+      for (int i = 0; i < dataArr.length(); i++) {
+        JSONObject rec = dataArr.getJSONObject(i);
+        String id = StringUtils.trimToNull(rec.optString("id", null));
+        FIN_FinancialAccount account = id != null ? loadAccount(id) : null;
+        rec.put(FIELD_HAS_TRANSACTIONS, account != null && hasTransactions(account));
+      }
+      return NeoResponse.ok(context.getPreviousResult().getBody());
+    } catch (Exception e) {
+      log.error("financial-account afterHandle: failed to inject hasTransactions", e);
+      return null;
+    } finally {
+      exitAdminMode();
+    }
+  }
+
+  /** {@code true} when the account has at least one active transaction registered against it. */
+  boolean hasTransactions(FIN_FinancialAccount account) {
+    OBCriteria<FIN_FinaccTransaction> criteria =
+        OBDal.getInstance().createCriteria(FIN_FinaccTransaction.class);
+    criteria.add(Restrictions.eq(FIN_FinaccTransaction.PROPERTY_ACCOUNT, account));
+    criteria.add(Restrictions.eq(FIN_FinaccTransaction.PROPERTY_ACTIVE, true));
+    criteria.setMaxResults(1);
+    return criteria.uniqueResult() != null;
   }
 
   /** Reads the persisted record id from the generic CRUD response envelope. */

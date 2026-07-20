@@ -312,6 +312,59 @@ class NeoFieldFilterTest {
       assertTrue(result.has("priceActual"), "API key should be renamed to DAL name");
       assertFalse(result.has("unitPrice"), "API key should be removed after rename");
     }
+
+    /**
+     * ETP-4531 regression: filterWriteRequest does NOT return an independent copy when the
+     * body has no "data" envelope — it mutates the SAME JSONObject reference it's given.
+     * A caller that captures a reference to the pre-filter body (e.g. to re-inject a
+     * server-mirrored value stripped by filtering) BEFORE calling filterWriteRequest, then
+     * checks that SAME reference AFTER the call, will always see the already-filtered state —
+     * because there is only ever one object once filtering runs, not two. This is exactly what
+     * caused NeoCrudHandler#executeUpdate's original accountingDate re-injection fix to
+     * silently no-op: it read `rawBody.has("accountingDate")` after already calling
+     * `filterWriteRequest(rawBody)`, by which point `rawBody` had been stripped along with
+     * `filteredBody` (the same object). The correct fix captures the value BEFORE filtering.
+     */
+    @Test
+    @DisplayName("Mutates the input JSONObject in place (no defensive copy) when there is no data envelope")
+    void mutatesInputInPlace() throws Exception {
+      Set<String> included = new HashSet<>(Set.of("id", "name"));
+      Set<String> writable = new HashSet<>(Set.of("id", "name"));
+      NeoFieldFilter filter = activeFilter(included, writable);
+
+      JSONObject body = new JSONObject();
+      body.put("id", "1");
+      body.put("readOnlyField", "should be removed");
+
+      JSONObject result = filter.filterWriteRequest(body);
+
+      assertTrue(result == body, "filterWriteRequest must return the SAME reference, not a copy");
+      assertFalse(body.has("readOnlyField"),
+          "the original reference is stripped too — reading it after the call sees the filtered state");
+    }
+  }
+
+  @Nested
+  @DisplayName("resolveWritablePropName")
+  class ResolveWritablePropName {
+    @Test
+    @DisplayName("Resolves a remapped API key to its DAL property name")
+    void resolvesRemappedKey() throws Exception {
+      Map<String, String> apiKeyToProp = new HashMap<>();
+      apiKeyToProp.put("accountingDate", "dateAcct");
+      NeoFieldFilter filter = activeFilterWithMappings(Collections.emptySet(), Collections.emptySet(),
+          apiKeyToProp, Collections.emptyMap());
+
+      assertEquals("dateAcct", filter.resolveWritablePropName("accountingDate"));
+    }
+
+    @Test
+    @DisplayName("Returns the key unchanged when no remapping is configured")
+    void returnsUnchangedWhenNoMapping() throws Exception {
+      NeoFieldFilter filter = activeFilter(Collections.emptySet(), Collections.emptySet());
+
+      assertEquals("accountingDate", filter.resolveWritablePropName("accountingDate"));
+    }
   }
 
   @Nested

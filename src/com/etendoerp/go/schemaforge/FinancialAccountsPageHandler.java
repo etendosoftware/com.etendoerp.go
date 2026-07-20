@@ -92,6 +92,7 @@ public class FinancialAccountsPageHandler implements NeoHandler {
   private static final Logger log = LogManager.getLogger(FinancialAccountsPageHandler.class);
 
   private static final String METHOD_GET = "GET";
+  private static final String SQL_TYPE_VARCHAR = "varchar";
 
   private static final String ACCOUNTS_SQL =
       "SELECT fa.fin_financial_account_id, fa.name, fa.type, fa.currentbalance, "
@@ -115,6 +116,18 @@ public class FinancialAccountsPageHandler implements NeoHandler {
           + "   AND bs.ad_client_id = ? "
           + "   AND bs.ad_org_id = ANY (?) "
           + " GROUP BY bs.fin_financial_account_id";
+
+  /**
+   * Accounts with at least one active transaction (ETP-4530). Used by the frontend to lock the
+   * Currency field on the edit form once real movement history exists — a stricter, different
+   * condition than {@code psd2Connected} (bank-linkage only, no bearing on transaction history).
+   */
+  private static final String TRANSACTIONS_BY_ACCOUNT_SQL =
+      "SELECT DISTINCT ft.fin_financial_account_id "
+          + "  FROM fin_finacc_transaction ft "
+          + " WHERE ft.isactive = 'Y' "
+          + "   AND ft.ad_client_id = ? "
+          + "   AND ft.ad_org_id = ANY (?)";
 
   @Override
   public NeoResponse handle(NeoContext context) {
@@ -161,9 +174,10 @@ public class FinancialAccountsPageHandler implements NeoHandler {
   NeoResponse buildPayload(String clientId, Set<String> orgs) throws Exception {
     List<AccountRow> accounts = loadAccounts(clientId, orgs);
     Map<String, Integer> pendingByAccount = loadPendingByAccount(clientId, orgs);
+    Set<String> accountsWithTransactions = loadAccountsWithTransactions(clientId, orgs);
 
     JSONObject data = new JSONObject();
-    data.put("accounts", buildAccountsArray(accounts, pendingByAccount));
+    data.put("accounts", buildAccountsArray(accounts, pendingByAccount, accountsWithTransactions));
     data.put("summary", buildSummary(accounts, pendingByAccount));
 
     JSONObject responseData = new JSONObject();
@@ -182,7 +196,7 @@ public class FinancialAccountsPageHandler implements NeoHandler {
     Connection conn = OBDal.getInstance().getConnection();
     try (PreparedStatement ps = conn.prepareStatement(ACCOUNTS_SQL)) {
       ps.setString(1, clientId);
-      ps.setArray(2, conn.createArrayOf("varchar", orgs.toArray(new String[0])));
+      ps.setArray(2, conn.createArrayOf(SQL_TYPE_VARCHAR, orgs.toArray(new String[0])));
       try (ResultSet rs = ps.executeQuery()) {
         while (rs.next()) {
           AccountRow row = new AccountRow(
@@ -211,10 +225,26 @@ public class FinancialAccountsPageHandler implements NeoHandler {
     Connection conn = OBDal.getInstance().getConnection();
     try (PreparedStatement ps = conn.prepareStatement(PENDING_BY_ACCOUNT_SQL)) {
       ps.setString(1, clientId);
-      ps.setArray(2, conn.createArrayOf("varchar", orgs.toArray(new String[0])));
+      ps.setArray(2, conn.createArrayOf(SQL_TYPE_VARCHAR, orgs.toArray(new String[0])));
       try (ResultSet rs = ps.executeQuery()) {
         while (rs.next()) {
           result.put(rs.getString(1), rs.getInt(2));
+        }
+      }
+    }
+    return result;
+  }
+
+  /** Ids of accounts (within scope) that have at least one active transaction (ETP-4530). */
+  Set<String> loadAccountsWithTransactions(String clientId, Set<String> orgs) throws Exception {
+    Set<String> result = new java.util.LinkedHashSet<>();
+    Connection conn = OBDal.getInstance().getConnection();
+    try (PreparedStatement ps = conn.prepareStatement(TRANSACTIONS_BY_ACCOUNT_SQL)) {
+      ps.setString(1, clientId);
+      ps.setArray(2, conn.createArrayOf(SQL_TYPE_VARCHAR, orgs.toArray(new String[0])));
+      try (ResultSet rs = ps.executeQuery()) {
+        while (rs.next()) {
+          result.add(rs.getString(1));
         }
       }
     }
@@ -225,8 +255,8 @@ public class FinancialAccountsPageHandler implements NeoHandler {
   // Response builders (package-private to allow unit tests to drive directly)
   // ---------------------------------------------------------------------------
 
-  JSONArray buildAccountsArray(List<AccountRow> accounts, Map<String, Integer> pendingByAccount)
-      throws JSONException {
+  JSONArray buildAccountsArray(List<AccountRow> accounts, Map<String, Integer> pendingByAccount,
+      Set<String> accountsWithTransactions) throws JSONException {
     JSONArray arr = new JSONArray();
     for (AccountRow account : accounts) {
       JSONObject json = new JSONObject();
@@ -245,6 +275,7 @@ public class FinancialAccountsPageHandler implements NeoHandler {
       json.put("pendingCount", pendingByAccount.getOrDefault(account.id, 0));
       json.put("dateTolerance", account.dateTolerance);
       json.put("amountTolerance", account.amountTolerance);
+      json.put("hasTransactions", accountsWithTransactions.contains(account.id));
       arr.put(json);
     }
     return arr;
