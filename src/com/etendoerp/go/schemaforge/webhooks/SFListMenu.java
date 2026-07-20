@@ -38,15 +38,22 @@ import com.etendoerp.webhookevents.services.BaseWebhookService;
 
 /**
  * Webhook that returns the AD_Menu tree from Etendo as nested JSON, filtered by the current
- * role's window/process access (see {@code AD_Window_Access} / {@code AD_Process_Access}).
- * Uses a recursive CTE to traverse the menu hierarchy from ad_treenode/ad_menu.
+ * role's window/process access (see {@code AD_Window_Access} / {@code AD_Process_Access}), as
+ * well as {@code OBUIAPP_Process} access for menu entries whose {@code action} is
+ * {@code 'OBUIAPP_Process'} (linked via {@code AD_Menu.em_obuiapp_process_id} rather than
+ * {@code ad_window_id}/{@code ad_process_id}). Uses a recursive CTE to traverse the menu
+ * hierarchy from ad_treenode/ad_menu.
  *
  * <p>The current role is captured once, at the very top of {@link #get(Map, Map)}, before
  * {@link OBContext#setAdminMode()} is entered. Admin mode is only used to bypass row-level
  * security filters on the underlying native queries — the access decisions themselves are
  * always made against the role captured up front, never against ambient context state, so a
  * user is never able to see more than their role grants regardless of what admin mode does
- * (or does not) do to the ambient {@link OBContext}.</p>
+ * (or does not) do to the ambient {@link OBContext}. This also holds for the
+ * {@code obuiappProcessId} check, which calls {@link NeoAccessHelper#hasObuiappProcessAccess}
+ * (an ambient-role overload): {@code OBContext.setAdminMode()} never replaces an already-set
+ * context's role — it only flips the admin-mode flag used for row-filter bypass — so the role it
+ * resolves is still the one captured up front, not an admin-substituted one.</p>
  *
  * <p>A user with no role assigned gets an empty menu — the query is not even run.</p>
  *
@@ -63,14 +70,16 @@ public class SFListMenu extends BaseWebhookService {
   private static final String MENU_TREE_SQL =
       "WITH RECURSIVE menu_tree AS ("
       + "  SELECT tn.node_id, tn.parent_id, tn.seqno,"
-      + "    m.name, m.issummary, m.action, m.ad_window_id, m.ad_process_id, m.ad_form_id,"
+      + "    m.name, m.issummary, m.action, m.ad_window_id, m.ad_process_id,"
+      + "    m.em_obuiapp_process_id, m.ad_form_id,"
       + "    0 AS depth"
       + "  FROM ad_treenode tn"
       + "  JOIN ad_menu m ON m.ad_menu_id = tn.node_id"
       + "  WHERE tn.ad_tree_id = '10' AND tn.parent_id = '0' AND m.isactive = 'Y'"
       + "  UNION ALL"
       + "  SELECT tn.node_id, tn.parent_id, tn.seqno,"
-      + "    m.name, m.issummary, m.action, m.ad_window_id, m.ad_process_id, m.ad_form_id,"
+      + "    m.name, m.issummary, m.action, m.ad_window_id, m.ad_process_id,"
+      + "    m.em_obuiapp_process_id, m.ad_form_id,"
       + "    mt.depth + 1"
       + "  FROM ad_treenode tn"
       + "  JOIN ad_menu m ON m.ad_menu_id = tn.node_id"
@@ -78,13 +87,13 @@ public class SFListMenu extends BaseWebhookService {
       + "  WHERE tn.ad_tree_id = '10' AND m.isactive = 'Y'"
       + ") "
       + "SELECT node_id, parent_id, seqno, name, issummary, action,"
-      + "  ad_window_id, ad_process_id, ad_form_id, depth"
+      + "  ad_window_id, ad_process_id, em_obuiapp_process_id, ad_form_id, depth"
       + " FROM menu_tree"
       + " ORDER BY depth, parent_id, seqno";
 
   private static final String SEARCH_SQL =
       "SELECT m.ad_menu_id AS node_id, m.name, m.issummary, m.action,"
-      + "  m.ad_window_id, m.ad_process_id, m.ad_form_id"
+      + "  m.ad_window_id, m.ad_process_id, m.em_obuiapp_process_id, m.ad_form_id"
       + " FROM ad_menu m"
       + " WHERE m.isactive = 'Y' AND LOWER(m.name) LIKE :query"
       + " ORDER BY m.name";
@@ -179,7 +188,8 @@ public class SFListMenu extends BaseWebhookService {
       String action = str(row[5]);
       String windowId = str(row[6]);
       String processId = str(row[7]);
-      String formId = str(row[8]);
+      String obuiappProcessId = str(row[8]);
+      String formId = str(row[9]);
 
       JSONObject node = new JSONObject();
       node.put("id", nodeId);
@@ -188,6 +198,7 @@ public class SFListMenu extends BaseWebhookService {
 
       putIfNotEmpty(node, "windowId", windowId);
       putIfNotEmpty(node, "processId", processId);
+      putIfNotEmpty(node, "obuiappProcessId", obuiappProcessId);
       putIfNotEmpty(node, "formId", formId);
 
       // Folders always get a children array
@@ -246,7 +257,8 @@ public class SFListMenu extends BaseWebhookService {
       String action = str(row[3]);
       String windowId = str(row[4]);
       String processId = str(row[5]);
-      String formId = str(row[6]);
+      String obuiappProcessId = str(row[6]);
+      String formId = str(row[7]);
 
       JSONObject item = new JSONObject();
       item.put("id", nodeId);
@@ -255,6 +267,7 @@ public class SFListMenu extends BaseWebhookService {
 
       putIfNotEmpty(item, "windowId", windowId);
       putIfNotEmpty(item, "processId", processId);
+      putIfNotEmpty(item, "obuiappProcessId", obuiappProcessId);
       putIfNotEmpty(item, "formId", formId);
 
       // Flat list: no folder-pruning concern, just keep or drop each leaf item.
@@ -308,10 +321,15 @@ public class SFListMenu extends BaseWebhookService {
    * <p>Nodes carrying a {@code windowId} are checked via
    * {@link NeoAccessHelper#hasWindowAccess(Role, String)} (any-tier access — read-only or full —
    * is enough to appear in the menu). Nodes carrying a {@code processId} are checked via
-   * {@link NeoAccessHelper#hasProcessAccess(Role, String)}. A node carrying both must pass both
-   * checks. A node carrying neither (typically {@code report}/{@code form}/{@code other} typed
-   * nodes) is left unfiltered — out of scope for this ticket, which is about
-   * {@code AD_Window_Access}/{@code AD_Process_Access}.</p>
+   * {@link NeoAccessHelper#hasProcessAccess(Role, String)}. Nodes carrying an
+   * {@code obuiappProcessId} (menu entries with {@code action = 'OBUIAPP_Process'}, whose real
+   * link lives in {@code AD_Menu.em_obuiapp_process_id} rather than {@code ad_window_id}/
+   * {@code ad_process_id}) are checked via
+   * {@link NeoAccessHelper#hasObuiappProcessAccess(String)}. A node carrying more than one of
+   * these IDs must pass every check it carries. A node carrying none of them (typically
+   * {@code report}/{@code form}/{@code other} typed nodes with no OBUIAPP link) is left
+   * unfiltered — out of scope for this ticket, which is about
+   * {@code AD_Window_Access}/{@code AD_Process_Access}/{@code OBUIAPP} process access.</p>
    */
   private static boolean isNodeAccessible(JSONObject node, Role role) throws JSONException {
     boolean accessible = true;
@@ -320,6 +338,9 @@ public class SFListMenu extends BaseWebhookService {
     }
     if (accessible && node.has("processId")) {
       accessible = NeoAccessHelper.hasProcessAccess(role, node.getString("processId"));
+    }
+    if (accessible && node.has("obuiappProcessId")) {
+      accessible = NeoAccessHelper.hasObuiappProcessAccess(node.getString("obuiappProcessId"));
     }
     return accessible;
   }

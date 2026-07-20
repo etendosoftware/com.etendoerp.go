@@ -135,6 +135,29 @@ class SFListMenuTest {
         }
     }
 
+    /**
+     * Stubs {@code OBDal.createCriteria(org.openbravo.client.application.ProcessAccess.class)}
+     * to return an active row (or not) — used by {@code NeoAccessHelper#hasObuiappProcessAccess},
+     * which backs the {@code obuiappProcessId} check for {@code action = 'OBUIAPP_Process'} menu
+     * entries (e.g. "Not Posted Documents", "Receivables Aging Schedule"). Fully-qualified to
+     * avoid clashing with the already-imported {@code org.openbravo.model.ad.access.ProcessAccess}.
+     */
+    @SuppressWarnings("unchecked")
+    private void stubObuiappProcessAccess(boolean hasAccess) {
+        OBCriteria<org.openbravo.client.application.ProcessAccess> criteria = mock(OBCriteria.class);
+        when(mockDal.createCriteria(org.openbravo.client.application.ProcessAccess.class))
+                .thenReturn(criteria);
+        when(criteria.add(any())).thenReturn(criteria);
+        when(criteria.setMaxResults(1)).thenReturn(criteria);
+        if (hasAccess) {
+            org.openbravo.client.application.ProcessAccess access =
+                    mock(org.openbravo.client.application.ProcessAccess.class);
+            when(criteria.list()).thenReturn(Collections.singletonList(access));
+        } else {
+            when(criteria.list()).thenReturn(Collections.emptyList());
+        }
+    }
+
     @AfterEach
     void tearDown() {
         obDalMock.close();
@@ -173,8 +196,8 @@ class SFListMenuTest {
     @DisplayName("Build tree with folder and child window")
     void testBuildMenuTreeWithItems() throws Exception {
         List<Object[]> rows = new ArrayList<>();
-        rows.add(new Object[]{"1", "0", 10, "Menu Root", "Y", null, null, null, null, 0});
-        rows.add(new Object[]{"2", "1", 20, "Sales Window", "N", "W", "win1", null, null, 1});
+        rows.add(new Object[]{"1", "0", 10, "Menu Root", "Y", null, null, null, null, null, 0});
+        rows.add(new Object[]{"2", "1", 20, "Sales Window", "N", "W", "win1", null, null, null, 1});
 
         stubNativeQuery(rows);
 
@@ -205,7 +228,7 @@ class SFListMenuTest {
     @DisplayName("Build tree with process node")
     void testTreeWithProcessNode() throws Exception {
         List<Object[]> rows = new ArrayList<>();
-        rows.add(new Object[]{"5", "0", 10, "My Process", "N", "P", null, "proc5", null, 0});
+        rows.add(new Object[]{"5", "0", 10, "My Process", "N", "P", null, "proc5", null, null, 0});
 
         stubNativeQuery(rows);
 
@@ -223,7 +246,7 @@ class SFListMenuTest {
     @DisplayName("Build tree with form node")
     void testTreeWithFormNode() throws Exception {
         List<Object[]> rows = new ArrayList<>();
-        rows.add(new Object[]{"6", "0", 10, "My Form", "N", "X", null, null, "form6", 0});
+        rows.add(new Object[]{"6", "0", 10, "My Form", "N", "X", null, null, null, "form6", 0});
 
         stubNativeQuery(rows);
 
@@ -245,7 +268,7 @@ class SFListMenuTest {
         parameters.put("q", "sales");
 
         List<Object[]> rows = new ArrayList<>();
-        rows.add(new Object[]{"10", "Sales Order", "N", "W", "win10", null, null});
+        rows.add(new Object[]{"10", "Sales Order", "N", "W", "win10", null, null, null});
 
         NativeQuery<Object[]> mockQuery = stubNativeQuery(rows);
 
@@ -307,6 +330,9 @@ class SFListMenuTest {
         assertEquals("form", resolveType.invoke(null, "N", "X"));
         assertEquals("unknown", resolveType.invoke(null, "N", null));
         assertEquals("other", resolveType.invoke(null, "N", "Z"));
+        // ETP-4511: action='OBUIAPP_Process' still resolves to "other" — the fix only adds the
+        // obuiappProcessId field/access check, it does not introduce a new resolved type.
+        assertEquals("other", resolveType.invoke(null, "N", "OBUIAPP_Process"));
     }
 
     // ── str helper ──────────────────────────────────────────────────────
@@ -372,9 +398,9 @@ class SFListMenuTest {
     @DisplayName("Multi-level nested tree structure")
     void testMultiLevelNestedTree() throws Exception {
         List<Object[]> rows = new ArrayList<>();
-        rows.add(new Object[]{"1", "0", 10, "Root", "Y", null, null, null, null, 0});
-        rows.add(new Object[]{"2", "1", 10, "Level 1", "Y", null, null, null, null, 1});
-        rows.add(new Object[]{"3", "2", 10, "Level 2 Window", "N", "W", "win3", null, null, 2});
+        rows.add(new Object[]{"1", "0", 10, "Root", "Y", null, null, null, null, null, 0});
+        rows.add(new Object[]{"2", "1", 10, "Level 1", "Y", null, null, null, null, null, 1});
+        rows.add(new Object[]{"3", "2", 10, "Level 2 Window", "N", "W", "win3", null, null, null, 2});
 
         stubNativeQuery(rows);
 
@@ -396,7 +422,7 @@ class SFListMenuTest {
     @DisplayName("Nodes without IDs omit those keys")
     void testNodeWithoutOptionalIds() throws Exception {
         List<Object[]> rows = new ArrayList<>();
-        rows.add(new Object[]{"1", "0", 10, "Leaf", "N", "W", null, null, null, 0});
+        rows.add(new Object[]{"1", "0", 10, "Leaf", "N", "W", null, null, null, null, 0});
 
         stubNativeQuery(rows);
 
@@ -406,6 +432,7 @@ class SFListMenuTest {
         JSONObject node = result.getJSONArray("tree").getJSONObject(0);
         assertFalse(node.has("windowId"));
         assertFalse(node.has("processId"));
+        assertFalse(node.has("obuiappProcessId"));
         assertFalse(node.has("formId"));
     }
 
@@ -450,7 +477,7 @@ class SFListMenuTest {
         stubWindowAccess(true);
 
         List<Object[]> rows = new ArrayList<>();
-        rows.add(new Object[]{"2", "0", 20, "Sales Window", "N", "W", "win1", null, null, 0});
+        rows.add(new Object[]{"2", "0", 20, "Sales Window", "N", "W", "win1", null, null, null, 0});
         stubNativeQuery(rows);
 
         webhook.get(parameters, responseVars);
@@ -469,7 +496,7 @@ class SFListMenuTest {
         stubWindowAccess(false);
 
         List<Object[]> rows = new ArrayList<>();
-        rows.add(new Object[]{"2", "0", 20, "Sales Window", "N", "W", "win1", null, null, 0});
+        rows.add(new Object[]{"2", "0", 20, "Sales Window", "N", "W", "win1", null, null, null, 0});
         stubNativeQuery(rows);
 
         webhook.get(parameters, responseVars);
@@ -488,7 +515,7 @@ class SFListMenuTest {
         stubProcessAccess(true);
 
         List<Object[]> rows = new ArrayList<>();
-        rows.add(new Object[]{"5", "0", 10, "My Process", "N", "P", null, "proc5", null, 0});
+        rows.add(new Object[]{"5", "0", 10, "My Process", "N", "P", null, "proc5", null, null, 0});
         stubNativeQuery(rows);
 
         webhook.get(parameters, responseVars);
@@ -506,7 +533,7 @@ class SFListMenuTest {
         stubProcessAccess(false);
 
         List<Object[]> rows = new ArrayList<>();
-        rows.add(new Object[]{"5", "0", 10, "My Process", "N", "P", null, "proc5", null, 0});
+        rows.add(new Object[]{"5", "0", 10, "My Process", "N", "P", null, "proc5", null, null, 0});
         stubNativeQuery(rows);
 
         webhook.get(parameters, responseVars);
@@ -544,12 +571,12 @@ class SFListMenuTest {
 
         List<Object[]> rows = new ArrayList<>();
         // Folder A (root) has only a denied window as a child → must be pruned.
-        rows.add(new Object[]{"1", "0", 10, "Folder A", "Y", null, null, null, null, 0});
-        rows.add(new Object[]{"2", "1", 10, "Denied Window", "N", "W", "win-denied", null, null, 1});
+        rows.add(new Object[]{"1", "0", 10, "Folder A", "Y", null, null, null, null, null, 0});
+        rows.add(new Object[]{"2", "1", 10, "Denied Window", "N", "W", "win-denied", null, null, null, 1});
         // Folder B (root) has one denied and one allowed child → survives with 1 child.
-        rows.add(new Object[]{"3", "0", 20, "Folder B", "Y", null, null, null, null, 0});
-        rows.add(new Object[]{"4", "3", 10, "Denied Window 2", "N", "W", "win-denied", null, null, 1});
-        rows.add(new Object[]{"5", "3", 20, "Allowed Window", "N", "W", "win-allowed", null, null, 1});
+        rows.add(new Object[]{"3", "0", 20, "Folder B", "Y", null, null, null, null, null, 0});
+        rows.add(new Object[]{"4", "3", 10, "Denied Window 2", "N", "W", "win-denied", null, null, null, 1});
+        rows.add(new Object[]{"5", "3", 20, "Allowed Window", "N", "W", "win-allowed", null, null, null, 1});
 
         stubNativeQuery(rows);
 
@@ -574,9 +601,9 @@ class SFListMenuTest {
     @DisplayName("Admin role sees the full tree, unchanged from today's behavior")
     void testAdminRoleSeesFullTreeUnchanged() throws Exception {
         List<Object[]> rows = new ArrayList<>();
-        rows.add(new Object[]{"1", "0", 10, "Menu Root", "Y", null, null, null, null, 0});
-        rows.add(new Object[]{"2", "1", 20, "Sales Window", "N", "W", "win1", null, null, 1});
-        rows.add(new Object[]{"3", "1", 30, "Some Process", "N", "P", null, "proc1", null, 1});
+        rows.add(new Object[]{"1", "0", 10, "Menu Root", "Y", null, null, null, null, null, 0});
+        rows.add(new Object[]{"2", "1", 20, "Sales Window", "N", "W", "win1", null, null, null, 1});
+        rows.add(new Object[]{"3", "1", 30, "Some Process", "N", "P", null, "proc1", null, null, 1});
 
         stubNativeQuery(rows);
 
@@ -598,7 +625,7 @@ class SFListMenuTest {
         stubWindowAccess(false);
 
         List<Object[]> rows = new ArrayList<>();
-        rows.add(new Object[]{"10", "Sales Order", "N", "W", "win10", null, null});
+        rows.add(new Object[]{"10", "Sales Order", "N", "W", "win10", null, null, null});
 
         stubNativeQuery(rows);
 
@@ -619,7 +646,7 @@ class SFListMenuTest {
         stubWindowAccess(true);
 
         List<Object[]> rows = new ArrayList<>();
-        rows.add(new Object[]{"10", "Sales Order", "N", "W", "win10", null, null});
+        rows.add(new Object[]{"10", "Sales Order", "N", "W", "win10", null, null, null});
 
         stubNativeQuery(rows);
 
@@ -629,5 +656,132 @@ class SFListMenuTest {
         JSONObject result = new JSONObject(responseVars.get(RESULT));
         assertEquals(1, result.getInt(COUNT));
         assertEquals(1, result.getJSONArray("tree").length());
+    }
+
+    // ── ETP-4511: OBUIAPP_Process menu entries (Not Posted Documents / Aging Schedule) ──────
+    //
+    // action='OBUIAPP_Process' menu rows carry no ad_window_id/ad_process_id — their real link
+    // is AD_Menu.em_obuiapp_process_id. Before this fix isNodeAccessible() never looked at that
+    // column, so these entries always defaulted to accessible=true regardless of role. The two
+    // real production entries gated at the handler level by the sibling ETP-4510 fix are used
+    // here as concrete examples (ids/names taken from the live DB).
+
+    /**
+     * A restricted role without an active {@code AD_Menu.em_obuiapp_process_id}-backed grant
+     * (via {@code NeoAccessHelper#hasObuiappProcessAccess}) must not see the "Not Posted
+     * Documents" menu entry at all — previously this fell through {@code isNodeAccessible} as
+     * accessible=true unconditionally since it carries neither windowId nor processId.
+     */
+    @Test
+    @DisplayName("Restricted role without OBUIAPP process access drops the Not Posted Documents node")
+    void testRestrictedRoleWithoutObuiappProcessAccessDropsNotPostedDocumentsNode() throws Exception {
+        givenRestrictedRole("role-without-obuiapp-access");
+        stubObuiappProcessAccess(false);
+
+        List<Object[]> rows = new ArrayList<>();
+        rows.add(new Object[]{"3EB0F5F33ECC4FEBABD8F513E9C49521", "0", 10, "Not Posted Documents",
+                "N", "OBUIAPP_Process", null, null, "D6AB95CE52D34E1599590526115E26C6", null, 0});
+        stubNativeQuery(rows);
+
+        webhook.get(parameters, responseVars);
+
+        assertNull(responseVars.get(ERROR));
+        JSONObject result = new JSONObject(responseVars.get(RESULT));
+        assertEquals(0, result.getInt(COUNT));
+        assertEquals(0, result.getJSONArray("tree").length());
+    }
+
+    /**
+     * A restricted role WITH an active grant for the OBUIAPP process keeps the "Receivables
+     * Aging Schedule" menu entry, and the node correctly exposes {@code obuiappProcessId}.
+     */
+    @Test
+    @DisplayName("Restricted role with OBUIAPP process access keeps the Receivables Aging Schedule node")
+    void testRestrictedRoleWithObuiappProcessAccessKeepsAgingReportNode() throws Exception {
+        givenRestrictedRole("role-with-obuiapp-access");
+        stubObuiappProcessAccess(true);
+
+        List<Object[]> rows = new ArrayList<>();
+        rows.add(new Object[]{"CC226771DE354AEEAA5D69F696F1A676", "0", 10, "Receivables Aging Schedule",
+                "N", "OBUIAPP_Process", null, null, "0D37A9F6109549DEB058373EF2DAEB6A", null, 0});
+        stubNativeQuery(rows);
+
+        webhook.get(parameters, responseVars);
+
+        assertNull(responseVars.get(ERROR));
+        JSONObject result = new JSONObject(responseVars.get(RESULT));
+        assertEquals(1, result.getInt(COUNT));
+        JSONObject node = result.getJSONArray("tree").getJSONObject(0);
+        assertEquals("Receivables Aging Schedule", node.getString("name"));
+        assertEquals("other", node.getString("type"));
+        assertEquals("0D37A9F6109549DEB058373EF2DAEB6A", node.getString("obuiappProcessId"));
+    }
+
+    /**
+     * A folder whose only child is a denied {@code OBUIAPP_Process} node must itself be pruned,
+     * mirroring the existing windowId/processId folder-pruning behavior.
+     */
+    @Test
+    @DisplayName("Folder whose only child is a denied OBUIAPP_Process node is pruned")
+    void testFolderWithOnlyDeniedObuiappProcessChildIsPruned() throws Exception {
+        givenRestrictedRole("role-without-obuiapp-access-2");
+        stubObuiappProcessAccess(false);
+
+        List<Object[]> rows = new ArrayList<>();
+        rows.add(new Object[]{"1", "0", 10, "Reports Folder", "Y", null, null, null, null, null, 0});
+        rows.add(new Object[]{"3EB0F5F33ECC4FEBABD8F513E9C49521", "1", 20, "Not Posted Documents",
+                "N", "OBUIAPP_Process", null, null, "D6AB95CE52D34E1599590526115E26C6", null, 1});
+        stubNativeQuery(rows);
+
+        webhook.get(parameters, responseVars);
+
+        assertNull(responseVars.get(ERROR));
+        JSONObject result = new JSONObject(responseVars.get(RESULT));
+        assertEquals(0, result.getInt(COUNT));
+        assertEquals(0, result.getJSONArray("tree").length());
+    }
+
+    /** Search variant: OBUIAPP_Process entries are dropped for a role without access. */
+    @Test
+    @DisplayName("Search drops OBUIAPP_Process entries the restricted role cannot access")
+    void testSearchDropsInaccessibleObuiappProcessNode() throws Exception {
+        parameters.put("q", "posted");
+        givenRestrictedRole("role-search-obuiapp-denied");
+        stubObuiappProcessAccess(false);
+
+        List<Object[]> rows = new ArrayList<>();
+        rows.add(new Object[]{"3EB0F5F33ECC4FEBABD8F513E9C49521", "Not Posted Documents", "N",
+                "OBUIAPP_Process", null, null, "D6AB95CE52D34E1599590526115E26C6", null});
+        stubNativeQuery(rows);
+
+        webhook.get(parameters, responseVars);
+
+        assertNull(responseVars.get(ERROR));
+        JSONObject result = new JSONObject(responseVars.get(RESULT));
+        assertEquals(0, result.getInt(COUNT));
+        assertEquals(0, result.getJSONArray("tree").length());
+    }
+
+    /** Search variant: OBUIAPP_Process entries are kept for a role with access. */
+    @Test
+    @DisplayName("Search keeps OBUIAPP_Process entries the restricted role can access")
+    void testSearchKeepsAccessibleObuiappProcessNode() throws Exception {
+        parameters.put("q", "aging");
+        givenRestrictedRole("role-search-obuiapp-allowed");
+        stubObuiappProcessAccess(true);
+
+        List<Object[]> rows = new ArrayList<>();
+        rows.add(new Object[]{"CC226771DE354AEEAA5D69F696F1A676", "Receivables Aging Schedule", "N",
+                "OBUIAPP_Process", null, null, "0D37A9F6109549DEB058373EF2DAEB6A", null});
+        stubNativeQuery(rows);
+
+        webhook.get(parameters, responseVars);
+
+        assertNull(responseVars.get(ERROR));
+        JSONObject result = new JSONObject(responseVars.get(RESULT));
+        assertEquals(1, result.getInt(COUNT));
+        assertEquals(1, result.getJSONArray("tree").length());
+        assertEquals("0D37A9F6109549DEB058373EF2DAEB6A",
+                result.getJSONArray("tree").getJSONObject(0).getString("obuiappProcessId"));
     }
 }
