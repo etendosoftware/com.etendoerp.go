@@ -114,6 +114,80 @@ public class NeoAccessHelperTest {
     assertFalse(NeoAccessHelper.hasWindowAccess("restricted-window-id"));
   }
 
+  @Test
+  public void hasWindowAccess_noRoleAssigned_returnsFalse() {
+    when(context.getRole()).thenReturn(null);
+
+    assertFalse(NeoAccessHelper.hasWindowAccess("any-window-id"));
+    assertFalse(NeoAccessHelper.hasWindowAccess("any-window-id", "GET"));
+    assertFalse(NeoAccessHelper.hasWindowAccess("any-window-id", "POST"));
+  }
+
+  @Test
+  public void hasWindowAccess_clientAdminRole_returnsTrueForAllMethods() {
+    when(role.getId()).thenReturn("role-id-client-admin");
+    when(role.isClientAdmin()).thenReturn(true);
+
+    assertTrue(NeoAccessHelper.hasWindowAccess("some-window-id", "GET"));
+    assertTrue(NeoAccessHelper.hasWindowAccess("some-window-id", "POST"));
+    assertTrue(NeoAccessHelper.hasWindowAccess("some-window-id", "PUT"));
+    assertTrue(NeoAccessHelper.hasWindowAccess("some-window-id", "DELETE"));
+  }
+
+  @SuppressWarnings("unchecked")
+  @Test
+  public void hasWindowAccess_readOnlyRow_allowsGetButDeniesWriteMethods() {
+    when(role.getId()).thenReturn("role-id-readonly");
+    OBCriteria<WindowAccess> criteria = mock(OBCriteria.class);
+    when(dal.createCriteria(WindowAccess.class)).thenReturn(criteria);
+    when(criteria.add(any())).thenReturn(criteria);
+    when(criteria.setMaxResults(1)).thenReturn(criteria);
+    WindowAccess access = mock(WindowAccess.class);
+    when(access.isEditableField()).thenReturn(false);
+    when(criteria.list()).thenReturn(Collections.singletonList(access));
+
+    assertTrue(NeoAccessHelper.hasWindowAccess("ro-window-id", "GET"));
+    assertFalse(NeoAccessHelper.hasWindowAccess("ro-window-id", "POST"));
+    assertFalse(NeoAccessHelper.hasWindowAccess("ro-window-id", "PUT"));
+    assertFalse(NeoAccessHelper.hasWindowAccess("ro-window-id", "PATCH"));
+    assertFalse(NeoAccessHelper.hasWindowAccess("ro-window-id", "DELETE"));
+  }
+
+  @SuppressWarnings("unchecked")
+  @Test
+  public void hasWindowAccess_fullAccessRow_allowsAllMethods() {
+    when(role.getId()).thenReturn("role-id-full");
+    OBCriteria<WindowAccess> criteria = mock(OBCriteria.class);
+    when(dal.createCriteria(WindowAccess.class)).thenReturn(criteria);
+    when(criteria.add(any())).thenReturn(criteria);
+    when(criteria.setMaxResults(1)).thenReturn(criteria);
+    WindowAccess access = mock(WindowAccess.class);
+    when(access.isEditableField()).thenReturn(true);
+    when(criteria.list()).thenReturn(Collections.singletonList(access));
+
+    assertTrue(NeoAccessHelper.hasWindowAccess("full-window-id", "GET"));
+    assertTrue(NeoAccessHelper.hasWindowAccess("full-window-id", "POST"));
+    assertTrue(NeoAccessHelper.hasWindowAccess("full-window-id", "PUT"));
+    assertTrue(NeoAccessHelper.hasWindowAccess("full-window-id", "PATCH"));
+    assertTrue(NeoAccessHelper.hasWindowAccess("full-window-id", "DELETE"));
+  }
+
+  @SuppressWarnings("unchecked")
+  @Test
+  public void hasWindowAccess_noAccessRowAtAll_deniesAllMethods() {
+    when(role.getId()).thenReturn("role-id-no-row");
+    OBCriteria<WindowAccess> criteria = mock(OBCriteria.class);
+    when(dal.createCriteria(WindowAccess.class)).thenReturn(criteria);
+    when(criteria.add(any())).thenReturn(criteria);
+    when(criteria.setMaxResults(1)).thenReturn(criteria);
+    when(criteria.list()).thenReturn(Collections.emptyList());
+
+    assertFalse(NeoAccessHelper.hasWindowAccess("no-row-window-id", "GET"));
+    assertFalse(NeoAccessHelper.hasWindowAccess("no-row-window-id", "POST"));
+    assertFalse(NeoAccessHelper.hasWindowAccess("no-row-window-id", "PUT"));
+    assertFalse(NeoAccessHelper.hasWindowAccess("no-row-window-id", "DELETE"));
+  }
+
   // ── hasProcessAccess ──────────────────────────────────────────────────────
 
   @Test
@@ -147,6 +221,13 @@ public class NeoAccessHelperTest {
     when(criteria.list()).thenReturn(Collections.emptyList());
 
     assertFalse(NeoAccessHelper.hasProcessAccess("restricted-process-id"));
+  }
+
+  @Test
+  public void hasProcessAccess_noRoleAssigned_returnsFalse() {
+    when(context.getRole()).thenReturn(null);
+
+    assertFalse(NeoAccessHelper.hasProcessAccess("any-process-id"));
   }
 
   // ── hasObuiappProcessAccess ───────────────────────────────────────────────

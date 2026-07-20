@@ -318,7 +318,7 @@ class NeoRequestRouterTest {
     Window window = mock(Window.class);
     when(window.getId()).thenReturn("win-id");
     when(spec.getADWindow()).thenReturn(window);
-    when(servlet.authenticator.hasWindowAccess("win-id")).thenReturn(true);
+    when(servlet.authenticator.hasWindowAccess("win-id", "GET")).thenReturn(true);
     when(servlet.subEndpointDispatcher.handleWindowSubEndpoint(
         eq(spec), eq(pathInfo), eq("GET"), eq(request), eq(response))).thenReturn(false);
 
@@ -444,7 +444,7 @@ class NeoRequestRouterTest {
     Window window = mock(Window.class);
     when(window.getId()).thenReturn("win-id");
     when(spec.getADWindow()).thenReturn(window);
-    when(servlet.authenticator.hasWindowAccess("win-id")).thenReturn(false);
+    when(servlet.authenticator.hasWindowAccess("win-id", "GET")).thenReturn(false);
     NeoPathInfo pathInfo = new NeoPathInfo("myWindow", "myEntity", null);
 
     router.handleWindowSpecRequest(spec, pathInfo, "GET", request, response);
@@ -461,7 +461,7 @@ class NeoRequestRouterTest {
     Window window = mock(Window.class);
     when(window.getId()).thenReturn("win-id");
     when(spec.getADWindow()).thenReturn(window);
-    when(servlet.authenticator.hasWindowAccess("win-id")).thenReturn(true);
+    when(servlet.authenticator.hasWindowAccess("win-id", "GET")).thenReturn(true);
     NeoPathInfo pathInfo = new NeoPathInfo("myWindow", null, null);
 
     router.handleWindowSpecRequest(spec, pathInfo, "GET", request, response);
@@ -478,7 +478,7 @@ class NeoRequestRouterTest {
     Window window = mock(Window.class);
     when(window.getId()).thenReturn("win-id");
     when(spec.getADWindow()).thenReturn(window);
-    when(servlet.authenticator.hasWindowAccess("win-id")).thenReturn(true);
+    when(servlet.authenticator.hasWindowAccess("win-id", "POST")).thenReturn(true);
     NeoPathInfo pathInfo = new NeoPathInfo("myWindow", null, null);
 
     router.handleWindowSpecRequest(spec, pathInfo, "POST", request, response);
