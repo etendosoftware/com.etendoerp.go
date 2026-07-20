@@ -31,15 +31,27 @@ import org.hibernate.Session;
 import org.hibernate.query.NativeQuery;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.ad.access.Role;
 
+import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
 import com.etendoerp.webhookevents.services.BaseWebhookService;
 
 /**
- * Webhook that returns the full AD_Menu tree from Etendo as nested JSON.
+ * Webhook that returns the AD_Menu tree from Etendo as nested JSON, filtered by the current
+ * role's window/process access (see {@code AD_Window_Access} / {@code AD_Process_Access}).
  * Uses a recursive CTE to traverse the menu hierarchy from ad_treenode/ad_menu.
  *
- * GET /webhooks/SFListMenu         → full tree
- * GET /webhooks/SFListMenu?q=sales → flat filtered list
+ * <p>The current role is captured once, at the very top of {@link #get(Map, Map)}, before
+ * {@link OBContext#setAdminMode()} is entered. Admin mode is only used to bypass row-level
+ * security filters on the underlying native queries — the access decisions themselves are
+ * always made against the role captured up front, never against ambient context state, so a
+ * user is never able to see more than their role grants regardless of what admin mode does
+ * (or does not) do to the ambient {@link OBContext}.</p>
+ *
+ * <p>A user with no role assigned gets an empty menu — the query is not even run.</p>
+ *
+ * GET /webhooks/SFListMenu         → full tree, filtered by the current role's access
+ * GET /webhooks/SFListMenu?q=sales → flat filtered list, filtered by the current role's access
  */
 public class SFListMenu extends BaseWebhookService {
 
@@ -79,15 +91,27 @@ public class SFListMenu extends BaseWebhookService {
 
   @Override
   public void get(Map<String, String> parameter, Map<String, String> responseVars) {
+    // Capture the real current role BEFORE entering admin mode. Admin mode is only meant to
+    // bypass row-level security on the query itself; access decisions must always be made
+    // against the role that was actually resolved for this request, never against whatever
+    // the ambient OBContext happens to expose once admin mode is active.
+    Role currentRole = resolveCurrentRole();
+
+    if (currentRole == null) {
+      // No role assigned → empty menu, short-circuit before even touching the DB.
+      responseVars.put("result", emptyResult().toString());
+      return;
+    }
+
     OBContext.setAdminMode();
     try {
       String query = parameter.get("q");
 
       JSONObject result;
       if (query != null && !query.trim().isEmpty()) {
-        result = searchMenu(query.trim());
+        result = searchMenu(query.trim(), currentRole);
       } else {
-        result = buildMenuTree();
+        result = buildMenuTree(currentRole);
       }
 
       responseVars.put("result", result.toString());
@@ -101,10 +125,43 @@ public class SFListMenu extends BaseWebhookService {
   }
 
   /**
-   * Builds the full nested menu tree using a recursive CTE.
+   * Resolves the role of the current request from the ambient {@link OBContext}, tolerating a
+   * missing context. Must be called before {@link OBContext#setAdminMode()} — see the class
+   * javadoc for why.
+   *
+   * @return the current {@link Role}, or {@code null} if there is no context or no role
+   */
+  private static Role resolveCurrentRole() {
+    OBContext context = OBContext.getOBContext();
+    return context == null ? null : context.getRole();
+  }
+
+  /**
+   * Builds the empty-menu result used when the current request has no role assigned.
+   */
+  private static JSONObject emptyResult() {
+    try {
+      JSONObject result = new JSONObject();
+      result.put("tree", new JSONArray());
+      result.put("count", 0);
+      return result;
+    } catch (JSONException e) {
+      // JSONObject#put never throws for a non-null key; unreachable in practice.
+      throw new IllegalStateException("Unable to build empty menu result", e);
+    }
+  }
+
+  /**
+   * Builds the full nested menu tree using a recursive CTE, then prunes it down to the nodes
+   * {@code role} has access to.
+   *
+   * <p>Tree construction and access filtering are deliberately two separate passes: the first
+   * pass (unchanged from before this access filter existed) builds the complete tree top-down
+   * while streaming rows in a single pass; the second pass walks that tree bottom-up (post-order)
+   * to filter window/process nodes and prune folders left with zero accessible children.</p>
    */
   @SuppressWarnings("unchecked")
-  private JSONObject buildMenuTree() throws Exception {
+  private JSONObject buildMenuTree(Role role) throws Exception {
     Session session = OBDal.getInstance().getSession();
     NativeQuery<Object[]> nativeQuery = session.createNativeQuery(MENU_TREE_SQL);
     List<Object[]> rows = nativeQuery.getResultList();
@@ -156,22 +213,26 @@ public class SFListMenu extends BaseWebhookService {
       }
     }
 
+    // Second pass: post-order filter/prune against the captured role.
     JSONArray treeArray = new JSONArray();
     for (JSONObject root : roots) {
-      treeArray.put(root);
+      JSONObject filteredRoot = filterNode(root, role);
+      if (filteredRoot != null) {
+        treeArray.put(filteredRoot);
+      }
     }
 
     JSONObject result = new JSONObject();
     result.put("tree", treeArray);
-    result.put("count", rows.size());
+    result.put("count", countNodes(treeArray));
     return result;
   }
 
   /**
-   * Searches menu items by name, returns a flat list.
+   * Searches menu items by name, returns a flat list filtered by {@code role}'s access.
    */
   @SuppressWarnings("unchecked")
-  private JSONObject searchMenu(String searchTerm) throws Exception {
+  private JSONObject searchMenu(String searchTerm, Role role) throws Exception {
     Session session = OBDal.getInstance().getSession();
     NativeQuery<Object[]> nativeQuery = session.createNativeQuery(SEARCH_SQL);
     nativeQuery.setParameter("query", "%" + searchTerm.toLowerCase() + "%");
@@ -196,13 +257,87 @@ public class SFListMenu extends BaseWebhookService {
       putIfNotEmpty(item, "processId", processId);
       putIfNotEmpty(item, "formId", formId);
 
-      items.put(item);
+      // Flat list: no folder-pruning concern, just keep or drop each leaf item.
+      if (isNodeAccessible(item, role)) {
+        items.put(item);
+      }
     }
 
     JSONObject result = new JSONObject();
     result.put("tree", items);
     result.put("count", items.length());
     return result;
+  }
+
+  /**
+   * Recursively filters {@code node} against {@code role}'s access, post-order (children first).
+   *
+   * <p>Folder nodes ({@code type == "folder"}) are never filtered directly — instead their
+   * children are filtered first, and the folder itself is pruned (returns {@code null}) only if
+   * it ends up with zero accessible children. Leaf nodes are kept or dropped based on
+   * {@link #isNodeAccessible(JSONObject, Role)}.</p>
+   *
+   * @param node the node to filter (mutated in place when kept: its children array, if any, is
+   *             replaced with the filtered one)
+   * @param role the role to check access against
+   * @return {@code node} (with filtered children, if applicable) when it should be kept, or
+   *         {@code null} when it should be pruned
+   */
+  private JSONObject filterNode(JSONObject node, Role role) throws JSONException {
+    if ("folder".equals(node.getString("type"))) {
+      JSONArray children = node.has(CHILDREN) ? node.getJSONArray(CHILDREN) : new JSONArray();
+      JSONArray keptChildren = new JSONArray();
+      for (int i = 0; i < children.length(); i++) {
+        JSONObject filteredChild = filterNode(children.getJSONObject(i), role);
+        if (filteredChild != null) {
+          keptChildren.put(filteredChild);
+        }
+      }
+      if (keptChildren.length() == 0) {
+        return null;
+      }
+      node.put(CHILDREN, keptChildren);
+      return node;
+    }
+    return isNodeAccessible(node, role) ? node : null;
+  }
+
+  /**
+   * Whether {@code role} can see {@code node} in the menu.
+   *
+   * <p>Nodes carrying a {@code windowId} are checked via
+   * {@link NeoAccessHelper#hasWindowAccess(Role, String)} (any-tier access — read-only or full —
+   * is enough to appear in the menu). Nodes carrying a {@code processId} are checked via
+   * {@link NeoAccessHelper#hasProcessAccess(Role, String)}. A node carrying both must pass both
+   * checks. A node carrying neither (typically {@code report}/{@code form}/{@code other} typed
+   * nodes) is left unfiltered — out of scope for this ticket, which is about
+   * {@code AD_Window_Access}/{@code AD_Process_Access}.</p>
+   */
+  private static boolean isNodeAccessible(JSONObject node, Role role) throws JSONException {
+    boolean accessible = true;
+    if (node.has("windowId")) {
+      accessible = NeoAccessHelper.hasWindowAccess(role, node.getString("windowId"));
+    }
+    if (accessible && node.has("processId")) {
+      accessible = NeoAccessHelper.hasProcessAccess(role, node.getString("processId"));
+    }
+    return accessible;
+  }
+
+  /**
+   * Counts every node in {@code nodes}, recursively including their {@code children} arrays —
+   * used to recompute {@code count} after pruning, since the raw DB row count no longer applies.
+   */
+  private static int countNodes(JSONArray nodes) throws JSONException {
+    int count = 0;
+    for (int i = 0; i < nodes.length(); i++) {
+      JSONObject node = nodes.getJSONObject(i);
+      count++;
+      if (node.has(CHILDREN)) {
+        count += countNodes(node.getJSONArray(CHILDREN));
+      }
+    }
+    return count;
   }
 
   /**
