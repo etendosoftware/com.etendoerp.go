@@ -200,9 +200,18 @@ class McpToolRouterRouteTest {
    * setup produced before the router delegated entity lookup to the support class.
    */
   private void setupEntityLookup(SFEntity entity, Tab tab) {
+    // The 8 entity-CRUD handlers resolve the entity via resolveIncludedEntityOrExplain
+    // (ETP-4257); neo_action still uses findIncludedEntity directly. Stub BOTH so every
+    // success path keeps returning the entity regardless of the entry point.
+    supportMock.when(() -> McpToolRouterSupport.resolveIncludedEntityOrExplain(
+        any(SFSpec.class), anyString())).thenReturn(entity);
     supportMock.when(() -> McpToolRouterSupport.findIncludedEntity(anyString(), anyString()))
         .thenReturn(entity);
     when(entity.getADTab()).thenReturn(tab);
+  }
+
+  private static String contentText(JSONObject result) throws Exception {
+    return result.getJSONArray("content").getJSONObject(0).getString("text");
   }
 
   private JSONObject buildCrudArgs() throws Exception {
@@ -317,6 +326,40 @@ class McpToolRouterRouteTest {
       assertTrue(result.getBoolean("isError"));
       String text = result.getJSONArray("content").getJSONObject(0).getString("text");
       assertTrue(text.contains("Missing arguments"));
+    }
+
+    /**
+     * ETP-4257: neo_list on a CALLABLE report (R) spec no longer surfaces the opaque
+     * "Entity not found: header". End-to-end (route → handleList → shared guard) the error
+     * names the report type and points the agent at the concrete etendo_generate_ tool.
+     */
+    @Test
+    @DisplayName("neo_list on a callable report (R) spec explains the generate tool")
+    void listOnReportSpecExplainsGenerateTool() throws Exception {
+      SFSpec spec = mock(SFSpec.class);
+      when(spec.getId()).thenReturn(SPEC_ID);
+      when(spec.getName()).thenReturn("invoice-report");
+      when(spec.getSpecType()).thenReturn("R");
+      setupSpecLookup(spec);
+
+      // Run the real guard so the handler→helper path is covered; only report callability
+      // is stubbed (its own DB query is out of scope here).
+      supportMock.when(() -> McpToolRouterSupport.resolveIncludedEntityOrExplain(
+          any(SFSpec.class), anyString())).thenCallRealMethod();
+
+      try (MockedStatic<NeoReportCallability> callabilityMock =
+          mockStatic(NeoReportCallability.class)) {
+        callabilityMock.when(() -> NeoReportCallability.isReportCallable(spec)).thenReturn(true);
+
+        JSONObject result = router.route("neo_list", buildCrudArgs(), READ_SCOPES);
+
+        assertTrue(result.getBoolean("isError"));
+        String text = contentText(result);
+        assertTrue(text.contains("report type (R)"),
+            "error must state the spec is a report type: " + text);
+        assertTrue(text.contains("etendo_generate_"),
+            "error must point at the generate tool: " + text);
+      }
     }
   }
 
@@ -666,10 +709,14 @@ class McpToolRouterRouteTest {
     @Test
     @DisplayName("unknown entity returns error")
     void unknownEntityReturnsError() throws Exception {
-      SFSpec spec = mockSpec();
+      SFSpec spec = mockSpec(); // type "W"
       setupSpecLookup(spec);
 
-      // Spec resolves, but entity resolution throws OBException("Entity not found: <name>").
+      // AC-3: for a type-W spec the shared guard delegates to findIncludedEntity, preserving
+      // the "Entity not found: <name>" message for a genuinely wrong entity name. Run the real
+      // helper and let the delegate throw, exercising the W branch end-to-end.
+      supportMock.when(() -> McpToolRouterSupport.resolveIncludedEntityOrExplain(
+          any(SFSpec.class), anyString())).thenCallRealMethod();
       supportMock.when(() -> McpToolRouterSupport.findIncludedEntity(anyString(), anyString()))
           .thenThrow(new OBException("Entity not found: " + ENTITY_NAME));
 
@@ -677,7 +724,7 @@ class McpToolRouterRouteTest {
       JSONObject result = router.route("neo_list", args, READ_SCOPES);
 
       assertTrue(result.getBoolean("isError"));
-      String text = result.getJSONArray("content").getJSONObject(0).getString("text");
+      String text = contentText(result);
       assertTrue(text.contains("Entity not found"));
     }
 
@@ -688,17 +735,17 @@ class McpToolRouterRouteTest {
       SFEntity entity = mockEntity();
       setupSpecLookup(spec);
 
-      // Entity resolves but has no linked AD_Tab. The router's own getAdTabOrThrow
-      // (still private in McpToolRouter) raises "No AD_Tab linked to entity: <name>".
-      supportMock.when(() -> McpToolRouterSupport.findIncludedEntity(anyString(), anyString()))
-          .thenReturn(entity);
+      // Entity resolves (via the shared guard) but has no linked AD_Tab. The router's own
+      // getAdTabOrThrow (still private in McpToolRouter) raises "No AD_Tab linked to entity".
+      supportMock.when(() -> McpToolRouterSupport.resolveIncludedEntityOrExplain(
+          any(SFSpec.class), anyString())).thenReturn(entity);
       when(entity.getADTab()).thenReturn(null);
 
       JSONObject args = buildCrudArgs();
       JSONObject result = router.route("neo_list", args, READ_SCOPES);
 
       assertTrue(result.getBoolean("isError"));
-      String text = result.getJSONArray("content").getJSONObject(0).getString("text");
+      String text = contentText(result);
       assertTrue(text.contains("No AD_Tab"));
     }
   }
@@ -1232,6 +1279,84 @@ class McpToolRouterRouteTest {
           args, PROCESS_SCOPES_LOCAL);
 
       assertTrue(result.getBoolean("isError"));
+    }
+  }
+
+  // ── ETP-4257: entity-CRUD call-sites resolve via the shared guard ─────────
+
+  /**
+   * Every entity-CRUD handler now resolves its entity through
+   * {@code McpToolRouterSupport.resolveIncludedEntityOrExplain} instead of
+   * {@code findIncludedEntity}. These minimal tests drive each changed call-site
+   * (neo_get/create/update/delete/selectors/schema) with a resolved entity that has no
+   * AD_Tab, so the changed line executes and control exits at {@code getAdTabOrThrow} — before
+   * any DefaultJsonDataService/ModelProvider static-init dependency is touched. neo_list and
+   * neo_defaults call-sites are already covered by their own tests above.
+   */
+  @Nested
+  @DisplayName("route — entity-CRUD tools resolve via shared guard (ETP-4257)")
+  class CrudGuardCallSiteTests {
+
+    private JSONObject routeWithNoTabEntity(String tool, JSONObject args, Set<String> scopes) {
+      SFSpec spec = mockSpec(); // type "W"
+      SFEntity entity = mockEntity();
+      setupSpecLookup(spec);
+      supportMock.when(() -> McpToolRouterSupport.resolveIncludedEntityOrExplain(
+          any(SFSpec.class), anyString())).thenReturn(entity);
+      when(entity.getADTab()).thenReturn(null);
+      return router.route(tool, args, scopes);
+    }
+
+    private void assertNoTabError(JSONObject result) throws Exception {
+      assertTrue(result.getBoolean("isError"));
+      assertTrue(contentText(result).contains("No AD_Tab"));
+    }
+
+    @Test
+    @DisplayName("neo_get resolves entity via the shared guard")
+    void getResolvesViaGuard() throws Exception {
+      JSONObject args = buildCrudArgs();
+      args.put("id", "rec-1");
+      assertNoTabError(routeWithNoTabEntity("neo_get", args, READ_SCOPES));
+    }
+
+    @Test
+    @DisplayName("neo_create resolves entity via the shared guard")
+    void createResolvesViaGuard() throws Exception {
+      JSONObject args = buildCrudArgs();
+      args.put("fields", new JSONObject());
+      assertNoTabError(routeWithNoTabEntity("neo_create", args, WRITE_SCOPES));
+    }
+
+    @Test
+    @DisplayName("neo_update resolves entity via the shared guard")
+    void updateResolvesViaGuard() throws Exception {
+      JSONObject args = buildCrudArgs();
+      args.put("id", "rec-1");
+      args.put("fields", new JSONObject());
+      assertNoTabError(routeWithNoTabEntity("neo_update", args, WRITE_SCOPES));
+    }
+
+    @Test
+    @DisplayName("neo_delete resolves entity via the shared guard")
+    void deleteResolvesViaGuard() throws Exception {
+      JSONObject args = buildCrudArgs();
+      args.put("id", "rec-1");
+      assertNoTabError(routeWithNoTabEntity("neo_delete", args, WRITE_SCOPES));
+    }
+
+    @Test
+    @DisplayName("neo_selectors resolves entity via the shared guard")
+    void selectorsResolvesViaGuard() throws Exception {
+      JSONObject args = buildCrudArgs();
+      args.put("column", "C_BPartner_ID");
+      assertNoTabError(routeWithNoTabEntity("neo_selectors", args, READ_SCOPES));
+    }
+
+    @Test
+    @DisplayName("neo_schema resolves entity via the shared guard")
+    void schemaResolvesViaGuard() throws Exception {
+      assertNoTabError(routeWithNoTabEntity("neo_schema", buildCrudArgs(), READ_SCOPES));
     }
   }
 }

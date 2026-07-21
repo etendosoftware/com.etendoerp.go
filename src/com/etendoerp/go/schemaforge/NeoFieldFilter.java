@@ -311,6 +311,22 @@ public class NeoFieldFilter {
   }
 
   /**
+   * Resolves an API-level field key (e.g. {@code accountingDate}, the {@code java_qualifier}
+   * declared in {@code ETGO_SF_FIELD}) to the DAL property name {@code filterWriteRequest}
+   * actually persists (e.g. {@code dateAcct}) — the same rename {@code remapApiKeys} applies to
+   * every OTHER field in the body. Callers that re-inject a value into an already-filtered body
+   * (e.g. a server-side mirror for a read-only field that {@code filterWriteRequest} legitimately
+   * stripped from the client's own input) must use the RESOLVED name, or the DAL layer silently
+   * ignores the injected key as an unrecognized property (ETP-4531).
+   *
+   * @param apiKey the API/contract field key
+   * @return the DAL property name, or {@code apiKey} unchanged if no remapping is configured
+   */
+  public String resolveWritablePropName(String apiKey) {
+    return apiKeyToPropName.getOrDefault(apiKey, apiKey);
+  }
+
+  /**
    * Filter a POST (create) request body.
    * Allows read-only fields through because they may carry values from callouts
    * or defaults that are required for record creation (e.g., transactionDocument).

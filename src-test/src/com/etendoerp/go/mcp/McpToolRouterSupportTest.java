@@ -20,6 +20,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
@@ -469,6 +470,51 @@ class McpToolRouterSupportTest {
         assertFalse(result.getBoolean("callable"));
         assertEquals(NeoReportCallability.STATUS_NOT_CONFIGURED, result.getString("status"));
         assertTrue(result.getString("message").contains("not configured"));
+      }
+    }
+
+    /**
+     * ETP-4257: discover output for a CALLABLE report spec advertises the concrete report
+     * tool ({@code reportTool = generate_<snake>}) so the agent calls it directly instead of
+     * guessing an entity for neo_list.
+     */
+    @Test
+    void callableReportSpecEmitsReportTool() throws Exception {
+      SFSpec spec = mock(SFSpec.class);
+      when(spec.getName()).thenReturn("financial-accounts-page");
+      when(spec.getDescription()).thenReturn(null);
+
+      try (MockedStatic<NeoReportCallability> callabilityMock =
+          mockStatic(NeoReportCallability.class)) {
+        callabilityMock.when(() -> NeoReportCallability.isReportCallable(spec)).thenReturn(true);
+
+        JSONObject result = McpToolRouterSupport.buildDiscoverSpec(spec, "R", null);
+
+        assertTrue(result.getBoolean("callable"));
+        assertEquals("generate_financial_accounts_page", result.getString("reportTool"));
+      }
+    }
+
+    /**
+     * ETP-4257: a NON-callable report spec never advertises a report tool (there is none) —
+     * it keeps only the not_configured status/message.
+     */
+    @Test
+    void nonCallableReportSpecOmitsReportTool() throws Exception {
+      SFSpec spec = mock(SFSpec.class);
+      when(spec.getName()).thenReturn("invoice-report");
+      when(spec.getDescription()).thenReturn(null);
+
+      try (MockedStatic<NeoReportCallability> callabilityMock =
+          mockStatic(NeoReportCallability.class)) {
+        callabilityMock.when(() -> NeoReportCallability.isReportCallable(spec)).thenReturn(false);
+        callabilityMock.when(() -> NeoReportCallability.buildNotConfiguredMessage("invoice-report"))
+            .thenCallRealMethod();
+
+        JSONObject result = McpToolRouterSupport.buildDiscoverSpec(spec, "R", null);
+
+        assertFalse(result.getBoolean("callable"));
+        assertFalse(result.has("reportTool"));
       }
     }
 
@@ -1646,6 +1692,105 @@ class McpToolRouterSupportTest {
       McpToolRouterSupport.FieldMetadata meta = McpToolRouterSupport.loadFieldMetadata(sfEntity);
 
       assertFalse(meta.businessCriticalByColumnId.get("col-3"));
+    }
+  }
+
+  // ─── resolveIncludedEntityOrExplain (ETP-4257) ──────────────────────
+
+  /**
+   * Guard that turns the opaque {@code "Entity not found: <name>"} error into a descriptive
+   * message when an entity-CRUD tool (neo_list/get/create/...) is called on a report-type
+   * spec, while leaving type-W entity resolution unchanged.
+   */
+  @Nested
+  @DisplayName("resolveIncludedEntityOrExplain (ETP-4257)")
+  class ResolveIncludedEntityOrExplain {
+
+    @Mock private OBDal mockOBDal;
+    private MockedStatic<OBDal> obDalMock;
+
+    @BeforeEach
+    void setUp() {
+      obDalMock = mockStatic(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(mockOBDal);
+    }
+
+    @AfterEach
+    void tearDown() {
+      obDalMock.close();
+    }
+
+    /**
+     * neo_list on a CALLABLE report spec: the error names the report type and points the
+     * agent at the concrete {@code etendo_generate_<snake>} tool instead of an entity.
+     */
+    @Test
+    void callableReportSpecExplainsGenerateTool() {
+      SFSpec spec = mock(SFSpec.class);
+      when(spec.getSpecType()).thenReturn("R");
+      when(spec.getName()).thenReturn("financial-accounts-page");
+
+      try (MockedStatic<NeoReportCallability> callabilityMock =
+          mockStatic(NeoReportCallability.class)) {
+        callabilityMock.when(() -> NeoReportCallability.isReportCallable(spec)).thenReturn(true);
+
+        org.openbravo.base.exception.OBException ex = assertThrows(
+            org.openbravo.base.exception.OBException.class,
+            () -> McpToolRouterSupport.resolveIncludedEntityOrExplain(spec, "header"));
+
+        assertTrue(ex.getMessage().contains("report type (R)"),
+            "message must state the spec is a report type: " + ex.getMessage());
+        assertTrue(ex.getMessage().contains("etendo_generate_financial_accounts_page"),
+            "message must name the concrete report tool: " + ex.getMessage());
+      }
+    }
+
+    /**
+     * neo_list on a NON-callable report spec: the error is the stable ETP-4255
+     * not_configured_for_report_generation message.
+     */
+    @Test
+    void nonCallableReportSpecExplainsNotConfigured() {
+      SFSpec spec = mock(SFSpec.class);
+      when(spec.getSpecType()).thenReturn("R");
+      when(spec.getName()).thenReturn("aging-report");
+
+      try (MockedStatic<NeoReportCallability> callabilityMock =
+          mockStatic(NeoReportCallability.class)) {
+        callabilityMock.when(() -> NeoReportCallability.isReportCallable(spec)).thenReturn(false);
+        callabilityMock.when(() -> NeoReportCallability.buildNotConfiguredMessage("aging-report"))
+            .thenCallRealMethod();
+
+        org.openbravo.base.exception.OBException ex = assertThrows(
+            org.openbravo.base.exception.OBException.class,
+            () -> McpToolRouterSupport.resolveIncludedEntityOrExplain(spec, "header"));
+
+        assertTrue(ex.getMessage().contains("not configured for Etendo Go/MCP report"),
+            "message must be the ETP-4255 not-configured text: " + ex.getMessage());
+      }
+    }
+
+    /**
+     * Regression (AC-3): a type-W spec resolves its included entity exactly as before —
+     * the guard only fires for report specs, never for windows.
+     */
+    @Test
+    @SuppressWarnings("unchecked")
+    void windowSpecResolvesEntityUnchanged() {
+      SFSpec spec = mock(SFSpec.class);
+      when(spec.getSpecType()).thenReturn("W");
+      when(spec.getId()).thenReturn("spec-w-1");
+
+      SFEntity entity = mock(SFEntity.class);
+      OBCriteria<SFEntity> crit = mock(OBCriteria.class);
+      when(mockOBDal.createCriteria(SFEntity.class)).thenReturn(crit);
+      when(crit.add(org.mockito.ArgumentMatchers.any())).thenReturn(crit);
+      when(crit.setMaxResults(1)).thenReturn(crit);
+      when(crit.list()).thenReturn(List.of(entity));
+
+      SFEntity result = McpToolRouterSupport.resolveIncludedEntityOrExplain(spec, "header");
+
+      assertEquals(entity, result);
     }
   }
 

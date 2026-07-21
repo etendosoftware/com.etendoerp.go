@@ -222,4 +222,53 @@ final class NeoHandlerUtils {
     }
     return candidates.isEmpty() ? null : candidates.get(0);
   }
+
+  /**
+   * Mirrors {@code sourceField}'s value from {@code body} into {@code targetField},
+   * unconditionally overwriting any existing value already there.
+   *
+   * <p>ETP-4531 (unified date): several postable documents expose a single visible date field
+   * to the user while the underlying data model still carries two columns (e.g. document date
+   * + accounting date). Whatever value is saved for the visible field must also become the
+   * hidden field's value — this is the single source of truth going forward, not a
+   * fill-if-absent default like {@link #injectReturnDocType}. Table/window-agnostic: no field
+   * names are hardcoded here, callers supply them.
+   *
+   * @param body        the request body to mutate in place; may be {@code null}
+   * @param sourceField the field whose value is copied; no-op if absent from {@code body}
+   * @param targetField the field overwritten with {@code sourceField}'s value
+   */
+  static void mirrorFieldValue(JSONObject body, String sourceField, String targetField) {
+    if (body == null || !body.has(sourceField)) {
+      return;
+    }
+    try {
+      body.put(targetField, body.opt(sourceField));
+    } catch (Exception e) {
+      log.debug("Could not mirror '{}' into '{}': {}", sourceField, targetField, e.getMessage());
+    }
+  }
+
+  /**
+   * True when {@code method} is one of the CRUD methods that create or persist a change to a
+   * record ({@code POST}, {@code PUT}, {@code PATCH}) — as opposed to {@code GET}/{@code DELETE},
+   * which read or remove but never write field values.
+   *
+   * <p>ETP-4531 root cause: every {@code mirrorAccountingDate()} call site originally hardcoded
+   * {@code "POST".equals(method) || "PUT".equals(method)} inline, once per header handler
+   * (invoices, orders, receipts, shipments). The live React app's {@code useEntity.js} save flow
+   * always sends {@code PATCH} for edits to an EXISTING record (see {@code getMethod(isNew)}) —
+   * a full {@code PUT} is never issued by the UI — so the mirror silently never fired on any
+   * update, only on create. Centralizing the method check here means it only needs to be
+   * correct in one place; the four call sites in {@code AbstractInvoiceHeaderHandler},
+   * {@code AbstractOrderHeaderHandler}, {@code GoodsReceiptHeaderHandler} and
+   * {@code GoodsShipmentHeaderHandler} all now delegate to this method instead of repeating
+   * (and potentially re-diverging on) the method list.
+   *
+   * @param method the HTTP method from {@code NeoContext#getHttpMethod()}
+   * @return {@code true} for POST, PUT, or PATCH
+   */
+  static boolean isWriteMethod(String method) {
+    return "POST".equals(method) || "PUT".equals(method) || "PATCH".equals(method);
+  }
 }
