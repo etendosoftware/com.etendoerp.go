@@ -129,16 +129,18 @@ class NeoExchangeRateService {
       String clientId, String orgId,
       java.time.LocalDate date) throws java.sql.SQLException {
 
+    // Include the client's own rates and the shared system ('0') rates. A client-specific rate
+    // wins over the system rate (ad_client_id DESC picks the tenant row before '0' under LIMIT 1).
     String sql =
         "SELECT multiplyrate FROM c_conversion_rate"
       + " WHERE c_currency_id = ?"
       + " AND c_currency_id_to = ?"
       + " AND isactive = 'Y'"
-      + " AND ad_client_id = ?"
+      + " AND ad_client_id IN ('0', ?)"
       + " AND (ad_org_id = '0' OR ad_org_id = ?)"
       + " AND validfrom <= ?"
       + " AND (validto IS NULL OR validto >= ?)"
-      + " ORDER BY validfrom DESC"
+      + " ORDER BY ad_client_id DESC, validfrom DESC"
       + " LIMIT 1";
 
     try (PreparedStatement ps = conn.prepareStatement(sql)) {

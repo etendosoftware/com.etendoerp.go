@@ -75,6 +75,45 @@ final class McpToolRouterSupport {
     return results.get(0);
   }
 
+  /**
+   * Resolve an included entity for an entity-CRUD tool (neo_list/get/create/update/delete/
+   * selectors/defaults/schema), or throw a descriptive error when the spec cannot expose
+   * listable entities.
+   *
+   * <p>Report-type specs (specType {@code "R"}) expose no CRUD entities, so a bare
+   * {@code findIncludedEntity} would surface an opaque {@code "Entity not found: <name>"}
+   * (ETP-4257). Instead this guard fires before the entity lookup and explains what the spec
+   * is and what to do:</p>
+   * <ul>
+   *   <li>callable report (NEO-native handler, ETP-4255) → point the agent at the
+   *       {@code etendo_generate_<snake>} report tool;</li>
+   *   <li>non-callable report → the stable {@link NeoReportCallability#buildNotConfiguredMessage}
+   *       {@code not_configured_for_report_generation} text.</li>
+   * </ul>
+   *
+   * <p>Type-W (and any non-R) specs are unaffected: the call delegates to
+   * {@link #findIncludedEntity(String, String)}, preserving the existing
+   * {@code "Entity not found: <name>"} message for a genuinely wrong entity name.</p>
+   *
+   * @param spec       the resolved active spec (already found by {@link #findActiveSpecByName})
+   * @param entityName the requested entity name
+   * @return the matching included {@link SFEntity} for a non-report spec
+   * @throws OBException with a descriptive message for a report-type spec, or when the entity
+   *                     name does not match an included entity on a non-report spec
+   */
+  static SFEntity resolveIncludedEntityOrExplain(SFSpec spec, String entityName) {
+    if ("R".equals(spec.getSpecType())) {
+      if (NeoReportCallability.isReportCallable(spec)) {
+        String snakeTool = McpConstants.GENERATE_PREFIX + ToolRegistry.kebabToSnake(spec.getName());
+        throw new OBException("Spec '" + spec.getName() + "' is a report type (R) and does not "
+            + "expose listable entities. Use the etendo_" + snakeTool
+            + " tool to produce this report.");
+      }
+      throw new OBException(NeoReportCallability.buildNotConfiguredMessage(spec.getName()));
+    }
+    return findIncludedEntity(spec.getId(), entityName);
+  }
+
   static List<SFEntity> listIncludedEntities(String specId) {
     OBCriteria<SFEntity> criteria = OBDal.getInstance().createCriteria(SFEntity.class);
     criteria.add(Restrictions.eq(SFEntity.PROPERTY_ETGOSFSPEC + ".id", specId));
@@ -226,7 +265,12 @@ final class McpToolRouterSupport {
       specObj.put("isReport", true);
       boolean callable = NeoReportCallability.isReportCallable(spec);
       specObj.put("callable", callable);
-      if (!callable) {
+      if (callable) {
+        // Surface the concrete report tool so the agent can call it directly instead of
+        // guessing an entity for neo_list (ETP-4257). Client sees it as etendo_<reportTool>.
+        specObj.put("reportTool",
+            McpConstants.GENERATE_PREFIX + ToolRegistry.kebabToSnake(spec.getName()));
+      } else {
         specObj.put("status", NeoReportCallability.STATUS_NOT_CONFIGURED);
         specObj.put("message", NeoReportCallability.buildNotConfiguredMessage(spec.getName()));
       }

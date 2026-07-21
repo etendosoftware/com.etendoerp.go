@@ -62,6 +62,32 @@ public abstract class AbstractOrderHeaderHandler implements NeoHandler {
   private static final String FIELD_VALUE = "value";
   private static final String DOC_TYPE_ORDER = "order";
   private static final String DOC_TYPE_INVOICE = "invoice";
+  private static final String FIELD_ORDER_DATE = "orderDate";
+  private static final String FIELD_ACCOUNTING_DATE = "accountingDate";
+
+  /**
+   * Mirrors the single visible {@code orderDate} field into the hidden {@code accountingDate}
+   * field on the request body, unconditionally, before the default CRUD path persists it
+   * (ETP-4531 — unified date). The user never sees or edits accountingDate directly; whatever
+   * value is saved for orderDate (create or update) must also become the order's accounting
+   * date.
+   *
+   * <p>Call at the very top of each subclass's {@code handle()} override, before any other
+   * logic.
+   *
+   * <p><b>ETP-4531 fix:</b> must fire on {@code PATCH} as well as {@code POST}/{@code PUT} — the
+   * live React UI ({@code useEntity.js#getMethod}) always sends {@code PATCH} (a sparse,
+   * changed-fields-only body) when saving an edit to an EXISTING order; it never sends a full
+   * {@code PUT}. See {@link NeoHandlerUtils#isWriteMethod}.
+   *
+   * @param context the current NeoContext
+   */
+  static void mirrorAccountingDate(NeoContext context) {
+    if (NeoEndpointType.CRUD.equals(context.getEndpointType())
+        && NeoHandlerUtils.isWriteMethod(context.getHttpMethod())) {
+      NeoHandlerUtils.mirrorFieldValue(context.getRequestBody(), FIELD_ORDER_DATE, FIELD_ACCOUNTING_DATE);
+    }
+  }
 
   /**
    * Creates (or re-creates) the total discount line immediately before the Complete action
