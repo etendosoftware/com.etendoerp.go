@@ -47,9 +47,9 @@ import com.etendoerp.psd2.bank.integration.utils.BankIntegrationConstants;
  * with their bank and chosen which Salt Edge account to link, so its name and currency are taken
  * from that Salt Edge account.
  *
- * <p>The mandatory-field set mirrors the proven programmatic creation in
- * {@code com.etendoerp.go.onboarding.steps.SeedReferenceDataStep} (balances and credit limit
- * default to zero), plus a default matching algorithm so reconciliation has one to work with.
+ * <p>The mandatory-field set mirrors the proven programmatic financial-account creation used
+ * during onboarding seed provisioning (balances and credit limit default to zero), plus a default
+ * matching algorithm so reconciliation has one to work with.
  * No accounting account is set on purpose — the user configures it later from Edit account; the
  * account is usable for import and reconciliation without it.
  */

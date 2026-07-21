@@ -250,14 +250,14 @@ class EtendoGoJwtSupportTest {
     }
 
     @Test
-    @DisplayName("star organization helpers use DAL queries")
+    @DisplayName("findStarOrgId returns the star org id, falling back to '0' when absent")
     void starOrganizationHelpers() {
       Organization star = mock(Organization.class);
       when(star.getId()).thenReturn("star-org-id");
       when(obDal.createQuery(eq(Organization.class), anyString())).thenReturn(organizationQuery);
       when(organizationQuery.uniqueResult()).thenReturn(star).thenReturn(null);
 
-      assertTrue(EtendoGoJwtSupport.hasStarOrganization("client-1"));
+      assertEquals("star-org-id", EtendoGoJwtSupport.findStarOrgId("client-1"));
       assertEquals("0", EtendoGoJwtSupport.findStarOrgId("client-1"));
       verify(organizationQuery, times(2)).setNamedParameter("clientId", "client-1");
       verify(organizationQuery, times(2)).setNamedParameter("starOrgValue", "*");

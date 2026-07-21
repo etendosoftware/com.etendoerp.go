@@ -761,7 +761,7 @@ public class EtendoGoJwtServletCoverageTest {
   }
 
   @Test
-  public void onboardingExistingIncompleteClientStreamsFailure() throws Exception {
+  public void onboardingExistingClientOwnedByAnotherAccountStreamsFailure() throws Exception {
     ResponseCapture resp = mockResponse();
     HttpServletRequest req = jsonRequest("/onboarding",
         "{\"clientName\":\"Acme\",\"currency\":\"EUR\",\"language\":\"en_US\"}");
@@ -777,10 +777,10 @@ public class EtendoGoJwtServletCoverageTest {
           .thenReturn("user@test.com");
       dalMock.when(() -> EtendoGoJwtDalHelper.findCurrencyByIsoCode("EUR"))
           .thenReturn(currency);
-      // Existing client that is missing its star organization -> incomplete branch.
+      // Existing client owned by ANOTHER account -> resume refused (tenant isolation, ETP-4428).
       supportMock.when(() -> EtendoGoJwtSupport.findClientIdByName("Acme"))
           .thenReturn("client-1");
-      supportMock.when(() -> EtendoGoJwtSupport.hasStarOrganization("client-1"))
+      dalMock.when(() -> EtendoGoJwtDalHelper.clientBelongsToAccountEmail("client-1", "user@test.com"))
           .thenReturn(false);
 
       servlet.doPost(req, resp.response);
@@ -789,7 +789,7 @@ public class EtendoGoJwtServletCoverageTest {
     // NDJSON stream: the servlet sets 200 before streaming, then emits a failure result line.
     String ndjson = resp.body();
     assertTrue(ndjson.contains("\"success\":false"));
-    assertTrue(ndjson.contains("incomplete"));
+    assertTrue(ndjson.contains("already in use"));
   }
 
   @Test
@@ -811,7 +811,7 @@ public class EtendoGoJwtServletCoverageTest {
           .thenReturn(currency);
       supportMock.when(() -> EtendoGoJwtSupport.findClientIdByName("Acme"))
           .thenReturn("client-1");
-      supportMock.when(() -> EtendoGoJwtSupport.hasStarOrganization("client-1"))
+      dalMock.when(() -> EtendoGoJwtDalHelper.clientBelongsToAccountEmail("client-1", "user@test.com"))
           .thenReturn(true);
       // No admin user-role for the resolved client -> resolveAdminContextData fails.
       dalMock.when(() -> EtendoGoJwtDalHelper.findClientAdminUserRole("client-1"))
@@ -852,7 +852,7 @@ public class EtendoGoJwtServletCoverageTest {
           .thenReturn(currency);
       supportMock.when(() -> EtendoGoJwtSupport.findClientIdByName("Acme"))
           .thenReturn("client-1");
-      supportMock.when(() -> EtendoGoJwtSupport.hasStarOrganization("client-1"))
+      dalMock.when(() -> EtendoGoJwtDalHelper.clientBelongsToAccountEmail("client-1", "user@test.com"))
           .thenReturn(true);
       dalMock.when(() -> EtendoGoJwtDalHelper.findClientAdminUserRole("client-1"))
           .thenReturn(adminUserRole);

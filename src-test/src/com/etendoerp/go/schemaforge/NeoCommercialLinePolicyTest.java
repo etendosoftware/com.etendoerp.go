@@ -19,6 +19,7 @@ package com.etendoerp.go.schemaforge;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertTrue;
 
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.Test;
@@ -168,5 +169,133 @@ public class NeoCommercialLinePolicyTest {
     NeoCommercialLinePolicy.normalizeOrderLineSelectorPriceMapping(body, false, "Net PL");
 
     assertEquals(0.0, body.getDouble("grossUnitPrice"), DELTA);
+  }
+
+  // ── injectGrossAmountIfMissing (invoice lines) ────────────────────────────
+
+  @Test
+  public void testInjectGross_nullBody_doesNotThrow() {
+    NeoCommercialLinePolicy.injectGrossAmountIfMissing(null);
+  }
+
+  /** Non-numeric quantity → NumberFormatException is swallowed, nothing injected. */
+  @Test
+  public void testInjectGross_nonNumericQuantity_nothingInjected() throws Exception {
+    JSONObject body = new JSONObject()
+        .put("invoicedQuantity", "not-a-number")
+        .put("grossUnitPrice", 10.0);
+
+    NeoCommercialLinePolicy.injectGrossAmountIfMissing(body);
+
+    assertFalse(body.has("grossAmount"));
+  }
+
+  @Test
+  public void testInjectGross_zeroQuantity_nothingInjected() throws Exception {
+    JSONObject body = new JSONObject()
+        .put("invoicedQuantity", "0")
+        .put("grossUnitPrice", 10.0);
+
+    NeoCommercialLinePolicy.injectGrossAmountIfMissing(body);
+
+    assertFalse(body.has("grossAmount"));
+  }
+
+  /**
+   * A positive net amount with no tax needs no gross recomputation → skip entirely.
+   * Guards the "already has a usable net, no tax" short-circuit (no DB fetch).
+   */
+  @Test
+  public void testInjectGross_netAmountPresentNoTax_nothingInjected() throws Exception {
+    JSONObject body = new JSONObject()
+        .put("invoicedQuantity", "2")
+        .put("lineNetAmount", 100.0)
+        .put("tax", "");
+
+    NeoCommercialLinePolicy.injectGrossAmountIfMissing(body);
+
+    assertFalse(body.has("grossAmount"));
+  }
+
+  /** grossUnitPrice provided → grossAmount = grossUnitPrice × qty (no DB access). */
+  @Test
+  public void testInjectGross_grossUnitPriceProvided_usedDirectly() throws Exception {
+    JSONObject body = new JSONObject()
+        .put("invoicedQuantity", "3")
+        .put("grossUnitPrice", 5.0)
+        .put("tax", "");
+
+    NeoCommercialLinePolicy.injectGrossAmountIfMissing(body);
+
+    assertEquals(15.0, body.getDouble("grossAmount"), DELTA);
+  }
+
+  /**
+   * No gross price and no net amount → the computed value is NaN → nothing injected.
+   * This exercises the NaN guard without ever reaching the tax-rate DB fallback.
+   */
+  @Test
+  public void testInjectGross_noGrossNoNet_nanGuardSkipsInjection() throws Exception {
+    JSONObject body = new JSONObject()
+        .put("invoicedQuantity", "2")
+        .put("tax", "");
+
+    NeoCommercialLinePolicy.injectGrossAmountIfMissing(body);
+
+    assertFalse(body.has("grossAmount"));
+  }
+
+  // ── injectLineNetAmountIfMissing ──────────────────────────────────────────
+
+  @Test
+  public void testInjectLineNet_nullBody_doesNotThrow() {
+    NeoCommercialLinePolicy.injectLineNetAmountIfMissing(null);
+  }
+
+  /** Non-numeric quantity → NumberFormatException swallowed, nothing injected. */
+  @Test
+  public void testInjectLineNet_nonNumericQuantity_nothingInjected() throws Exception {
+    JSONObject body = new JSONObject()
+        .put("invoicedQuantity", "x")
+        .put("unitPrice", 10.0);
+
+    NeoCommercialLinePolicy.injectLineNetAmountIfMissing(body);
+
+    assertFalse(body.has("lineNetAmount"));
+  }
+
+  @Test
+  public void testInjectLineNet_zeroUnitPrice_nothingInjected() throws Exception {
+    JSONObject body = new JSONObject()
+        .put("invoicedQuantity", "2")
+        .put("unitPrice", 0.0);
+
+    NeoCommercialLinePolicy.injectLineNetAmountIfMissing(body);
+
+    assertFalse(body.has("lineNetAmount"));
+  }
+
+  @Test
+  public void testInjectLineNet_computesQtyTimesUnitPrice() throws Exception {
+    JSONObject body = new JSONObject()
+        .put("invoicedQuantity", "4")
+        .put("unitPrice", 25.0);
+
+    NeoCommercialLinePolicy.injectLineNetAmountIfMissing(body);
+
+    assertEquals(100.0, body.getDouble("lineNetAmount"), DELTA);
+    assertTrue(body.has("lineNetAmount"));
+  }
+
+  /** Non-numeric orderedQuantity → NFE branch of injectLineGrossAmountIfMissing. */
+  @Test
+  public void testInjectLineGross_nonNumericQuantity_nothingInjected() throws Exception {
+    JSONObject body = new JSONObject()
+        .put("orderedQuantity", "abc")
+        .put("unitPrice", 10.0);
+
+    NeoCommercialLinePolicy.injectLineGrossAmountIfMissing(body);
+
+    assertFalse(body.has("lineGrossAmount"));
   }
 }

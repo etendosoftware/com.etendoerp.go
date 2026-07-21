@@ -33,8 +33,7 @@ import org.openbravo.dal.service.OBDal;
  *
  * <p>It is invoked as the final action of {@code EtendoGoJwtServlet.ensureOnboardingDataset}, before
  * {@code commitDalChanges("onboarding")}, so the baseline row is part of the same atomic onboarding
- * commit. This service is the single source of truth for baseline registration (the live wiring goes
- * through the service chain, not the inert {@code OnboardingStep} classes).</p>
+ * commit. This service is the single source of truth for baseline registration.</p>
  *
  * <h3>Row shape (non-negotiable, System-owned)</h3>
  * {@code ad_client_id='0'}, {@code ad_org_id='0'} (the ledger is System-owned so only the System
