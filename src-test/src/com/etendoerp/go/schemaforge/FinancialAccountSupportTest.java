@@ -20,6 +20,7 @@ package com.etendoerp.go.schemaforge;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
@@ -28,6 +29,9 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.math.BigDecimal;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.List;
 
 import org.junit.After;
 import org.junit.Test;
@@ -532,5 +536,259 @@ public class FinancialAccountSupportTest {
       verify(dal, never()).save(any());
       verify(dal, never()).flush();
     }
+  }
+
+  /**
+   * Regression (ETP-4503): every runtime-created link is born multicurrency-ON. A new Cash link must
+   * set both {@code payinIsMulticurrency} and {@code payoutIsMulticurrency} to {@code true} (the
+   * PSD2 bank-transfer exception is applied afterwards, only on PSD2-connected Bank accounts).
+   */
+  @Test
+  public void testAssignDefaultPaymentMethodsSetsMulticurrencyOnNewLink() {
+    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    when(account.getType()).thenReturn("C");
+    when(account.getClient()).thenReturn(mock(Client.class));
+    when(account.getOrganization()).thenReturn(mock(Organization.class));
+    FIN_PaymentMethod cash = mock(FIN_PaymentMethod.class);
+    FinAccPaymentMethod link = mock(FinAccPaymentMethod.class);
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+        MockedStatic<OBProvider> obProvider = mockStatic(OBProvider.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+
+      @SuppressWarnings("unchecked")
+      OBCriteria<FIN_PaymentMethod> methodCriteria = mock(OBCriteria.class);
+      when(dal.createCriteria(FIN_PaymentMethod.class)).thenReturn(methodCriteria);
+      when(methodCriteria.uniqueResult()).thenReturn(cash);
+
+      @SuppressWarnings("unchecked")
+      OBCriteria<FinAccPaymentMethod> linkCriteria = mock(OBCriteria.class);
+      when(dal.createCriteria(FinAccPaymentMethod.class)).thenReturn(linkCriteria);
+      when(linkCriteria.uniqueResult()).thenReturn(null);
+
+      OBProvider provider = mock(OBProvider.class);
+      obProvider.when(OBProvider::getInstance).thenReturn(provider);
+      when(provider.get(FinAccPaymentMethod.class)).thenReturn(link);
+
+      FinancialAccountSupport.assignDefaultPaymentMethods(account);
+
+      verify(link).setPayinIsMulticurrency(true);
+      verify(link).setPayoutIsMulticurrency(true);
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // disableMulticurrencyForBankTransfer (ETP-4503)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * On a Bank account, the bank-transfer link identified by the PSD2 flag
+   * ({@code EM_PSD2_Is_Bank_Transfer='Y'}) has both multicurrency columns turned OFF; the Cheque and
+   * Tarjeta links are left completely untouched (AC#2). save + flush happen once for the change.
+   */
+  @Test
+  public void testDisableMulticurrencyForBankTransferByFlagDisablesTransferOnly() {
+    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    when(account.getType()).thenReturn(TYPE_BANK);
+
+    FIN_PaymentMethod transferMethod = mock(FIN_PaymentMethod.class);
+    when(transferMethod.isPSD2IsBankTransfer()).thenReturn(Boolean.TRUE);
+    FIN_PaymentMethod checkMethod = mock(FIN_PaymentMethod.class);
+    when(checkMethod.getName()).thenReturn("Cheque");
+    FIN_PaymentMethod cardMethod = mock(FIN_PaymentMethod.class);
+    when(cardMethod.getName()).thenReturn("Tarjeta");
+
+    FinAccPaymentMethod transferLink = mock(FinAccPaymentMethod.class);
+    when(transferLink.getPaymentMethod()).thenReturn(transferMethod);
+    when(transferLink.isPayinIsMulticurrency()).thenReturn(Boolean.TRUE);
+    when(transferLink.isPayoutIsMulticurrency()).thenReturn(Boolean.TRUE);
+    FinAccPaymentMethod checkLink = mock(FinAccPaymentMethod.class);
+    when(checkLink.getPaymentMethod()).thenReturn(checkMethod);
+    FinAccPaymentMethod cardLink = mock(FinAccPaymentMethod.class);
+    when(cardLink.getPaymentMethod()).thenReturn(cardMethod);
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      stubLinkList(dal, Arrays.asList(transferLink, checkLink, cardLink));
+
+      FinancialAccountSupport.disableMulticurrencyForBankTransfer(account);
+
+      verify(transferLink).setPayinIsMulticurrency(false);
+      verify(transferLink).setPayoutIsMulticurrency(false);
+      verify(dal).save(transferLink);
+      verify(dal).flush();
+      verify(checkLink, never()).setPayinIsMulticurrency(anyBoolean());
+      verify(checkLink, never()).setPayoutIsMulticurrency(anyBoolean());
+      verify(cardLink, never()).setPayinIsMulticurrency(anyBoolean());
+      verify(cardLink, never()).setPayoutIsMulticurrency(anyBoolean());
+      verify(dal, never()).save(checkLink);
+      verify(dal, never()).save(cardLink);
+    }
+  }
+
+  /**
+   * When the PSD2 flag is absent (live GOClient DB diverges from the seeded value), the transfer link
+   * is still identified by the name fallback {@code "Transferencia bancaria"} and disabled. Only
+   * pay-in is ON here, exercising the first branch of the multicurrency OR guard.
+   */
+  @Test
+  public void testDisableMulticurrencyForBankTransferByNameFallbackFullName() {
+    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    when(account.getType()).thenReturn(TYPE_BANK);
+
+    FIN_PaymentMethod transferMethod = mock(FIN_PaymentMethod.class);
+    // isPSD2IsBankTransfer() left unstubbed (returns null) -> falls through to the name check.
+    when(transferMethod.getName()).thenReturn("Transferencia bancaria");
+
+    FinAccPaymentMethod transferLink = mock(FinAccPaymentMethod.class);
+    when(transferLink.getPaymentMethod()).thenReturn(transferMethod);
+    when(transferLink.isPayinIsMulticurrency()).thenReturn(Boolean.TRUE);
+    when(transferLink.isPayoutIsMulticurrency()).thenReturn(Boolean.FALSE);
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      stubLinkList(dal, Collections.singletonList(transferLink));
+
+      FinancialAccountSupport.disableMulticurrencyForBankTransfer(account);
+
+      verify(transferLink).setPayinIsMulticurrency(false);
+      verify(transferLink).setPayoutIsMulticurrency(false);
+      verify(dal).save(transferLink);
+      verify(dal).flush();
+    }
+  }
+
+  /**
+   * The short-name fallback {@code "Transferencia"} is also recognized. Only pay-out is ON here,
+   * exercising the second branch of the multicurrency OR guard.
+   */
+  @Test
+  public void testDisableMulticurrencyForBankTransferByNameFallbackShortName() {
+    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    when(account.getType()).thenReturn(TYPE_BANK);
+
+    FIN_PaymentMethod transferMethod = mock(FIN_PaymentMethod.class);
+    when(transferMethod.getName()).thenReturn("Transferencia");
+
+    FinAccPaymentMethod transferLink = mock(FinAccPaymentMethod.class);
+    when(transferLink.getPaymentMethod()).thenReturn(transferMethod);
+    when(transferLink.isPayinIsMulticurrency()).thenReturn(Boolean.FALSE);
+    when(transferLink.isPayoutIsMulticurrency()).thenReturn(Boolean.TRUE);
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      stubLinkList(dal, Collections.singletonList(transferLink));
+
+      FinancialAccountSupport.disableMulticurrencyForBankTransfer(account);
+
+      verify(transferLink).setPayinIsMulticurrency(false);
+      verify(transferLink).setPayoutIsMulticurrency(false);
+      verify(dal).flush();
+    }
+  }
+
+  /** A Cash account ({@code type='C'}) is not a Bank account: the method returns before any DAL use. */
+  @Test
+  public void testDisableMulticurrencyForBankTransferCashAccountIsNoOp() {
+    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    when(account.getType()).thenReturn("C");
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      FinancialAccountSupport.disableMulticurrencyForBankTransfer(account);
+      obDal.verifyNoInteractions();
+    }
+  }
+
+  /** A Card account ({@code type='CA'}) is not a Bank account: the method returns before any DAL use. */
+  @Test
+  public void testDisableMulticurrencyForBankTransferCardAccountIsNoOp() {
+    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    when(account.getType()).thenReturn("CA");
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      FinancialAccountSupport.disableMulticurrencyForBankTransfer(account);
+      obDal.verifyNoInteractions();
+    }
+  }
+
+  /** A null account short-circuits without touching the DAL. */
+  @Test
+  public void testDisableMulticurrencyForBankTransferNullAccountIsNoOp() {
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      FinancialAccountSupport.disableMulticurrencyForBankTransfer(null);
+      obDal.verifyNoInteractions();
+    }
+  }
+
+  /**
+   * Idempotent: when the transfer link is already multicurrency-OFF (both columns FALSE), a
+   * (re-)invocation makes no change — no setter, no save, no flush (AC#5).
+   */
+  @Test
+  public void testDisableMulticurrencyForBankTransferIdempotentWhenAlreadyOff() {
+    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    when(account.getType()).thenReturn(TYPE_BANK);
+
+    FIN_PaymentMethod transferMethod = mock(FIN_PaymentMethod.class);
+    when(transferMethod.getName()).thenReturn("Transferencia bancaria");
+    FinAccPaymentMethod transferLink = mock(FinAccPaymentMethod.class);
+    when(transferLink.getPaymentMethod()).thenReturn(transferMethod);
+    when(transferLink.isPayinIsMulticurrency()).thenReturn(Boolean.FALSE);
+    when(transferLink.isPayoutIsMulticurrency()).thenReturn(Boolean.FALSE);
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      stubLinkList(dal, Collections.singletonList(transferLink));
+
+      FinancialAccountSupport.disableMulticurrencyForBankTransfer(account);
+
+      verify(transferLink, never()).setPayinIsMulticurrency(anyBoolean());
+      verify(transferLink, never()).setPayoutIsMulticurrency(anyBoolean());
+      verify(dal, never()).save(any());
+      verify(dal, never()).flush();
+    }
+  }
+
+  /**
+   * Best-effort: the account is already persisted, so any failure inside the helper is logged and
+   * swallowed rather than propagated (mirroring {@code assignDefaultPaymentMethods}). A DAL blow-up
+   * must not escape, and nothing is flushed.
+   */
+  @Test
+  public void testDisableMulticurrencyForBankTransferSwallowsException() {
+    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    when(account.getType()).thenReturn(TYPE_BANK);
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.createCriteria(FinAccPaymentMethod.class))
+          .thenThrow(new RuntimeException("boom"));
+
+      // Must not propagate — the enclosing try/catch inside the helper swallows it.
+      FinancialAccountSupport.disableMulticurrencyForBankTransfer(account);
+
+      verify(dal, never()).flush();
+      verify(dal, never()).save(any());
+    }
+  }
+
+  /**
+   * Stubs {@code dal.createCriteria(FinAccPaymentMethod.class)} so
+   * {@code disableMulticurrencyForBankTransfer} iterates the given links via {@code criteria.list()}
+   * instead of hitting a real Hibernate session.
+   */
+  @SuppressWarnings("unchecked")
+  private static OBCriteria<FinAccPaymentMethod> stubLinkList(OBDal dal,
+      List<FinAccPaymentMethod> links) {
+    OBCriteria<FinAccPaymentMethod> crit = mock(OBCriteria.class);
+    when(dal.createCriteria(FinAccPaymentMethod.class)).thenReturn(crit);
+    when(crit.list()).thenReturn(links);
+    return crit;
   }
 }

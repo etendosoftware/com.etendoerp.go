@@ -209,18 +209,21 @@ public class CurrencyOptionsHandler implements NeoHandler {
   private Map<String, double[]> queryDirectRates(Connection conn, String orgCurrencyId,
       String clientId, String orgId, java.sql.Date sqlDate) throws java.sql.SQLException {
     Map<String, double[]> rateMap = new LinkedHashMap<>();
+    // Include the client's own rates and the shared system ('0') rates. Rows are collected into a
+    // map keyed by currency (last write wins), so ad_client_id ASC writes the '0' row first and the
+    // client-specific row last, letting a tenant rate override the system rate for the same currency.
     String sql =
         "SELECT cr.c_currency_id_to AS cid, cr.multiplyrate"
       + " FROM c_conversion_rate cr"
       + " JOIN c_currency c ON c.c_currency_id = cr.c_currency_id_to"
       + " WHERE cr.c_currency_id = ?"
-      + " AND cr.ad_client_id = ?"
+      + " AND cr.ad_client_id IN ('0', ?)"
       + " AND (cr.ad_org_id = '0' OR cr.ad_org_id = ?)"
       + " AND cr.isactive = 'Y'"
       + " AND c.isactive = 'Y'"
       + " AND cr.validfrom <= ?"
       + " AND (cr.validto IS NULL OR cr.validto >= ?)"
-      + " ORDER BY c.iso_code";
+      + " ORDER BY c.iso_code, cr.ad_client_id ASC";
     try (PreparedStatement ps = conn.prepareStatement(sql)) {
       ps.setString(1, orgCurrencyId);
       ps.setString(2, clientId);
@@ -240,18 +243,20 @@ public class CurrencyOptionsHandler implements NeoHandler {
       Map<String, double[]> rateMap, String clientId, String orgId,
       java.sql.Date sqlDate) throws java.sql.SQLException {
     Map<String, double[]> inverseMap = new LinkedHashMap<>();
+    // Include the client's own rates and the shared system ('0') rates; ad_client_id ASC lets a
+    // tenant rate override the system rate for the same currency (map keyed by currency, last wins).
     String sql =
         "SELECT cr.c_currency_id AS cid, cr.multiplyrate AS inv_rate"
       + " FROM c_conversion_rate cr"
       + " JOIN c_currency c ON c.c_currency_id = cr.c_currency_id"
       + " WHERE cr.c_currency_id_to = ?"
-      + " AND cr.ad_client_id = ?"
+      + " AND cr.ad_client_id IN ('0', ?)"
       + " AND (cr.ad_org_id = '0' OR cr.ad_org_id = ?)"
       + " AND cr.isactive = 'Y'"
       + " AND c.isactive = 'Y'"
       + " AND cr.validfrom <= ?"
       + " AND (cr.validto IS NULL OR cr.validto >= ?)"
-      + " ORDER BY c.iso_code";
+      + " ORDER BY c.iso_code, cr.ad_client_id ASC";
     try (PreparedStatement ps = conn.prepareStatement(sql)) {
       ps.setString(1, orgCurrencyId);
       ps.setString(2, clientId);
