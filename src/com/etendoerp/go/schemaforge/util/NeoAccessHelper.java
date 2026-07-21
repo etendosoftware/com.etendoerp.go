@@ -247,8 +247,8 @@ public final class NeoAccessHelper {
    *
    * @param role the role to check (may be {@code null}, in which case access is denied)
    * @param processId the ID of the AD process to check
-   * @return {@code true} if {@code role} has an active process-access record, or is the system
-   *         administrator role
+   * @return {@code true} if {@code role} has an active process-access record, is the System
+   *         Administrator role, or is a client-admin role for the current client
    */
   public static boolean hasProcessAccess(Role role, String processId) {
     if (role == null) {
@@ -260,7 +260,7 @@ public final class NeoAccessHelper {
     String roleId = role.getId();
     OBCriteria<ProcessAccess> criteria = OBDal.getInstance().createCriteria(ProcessAccess.class);
     criteria.add(Restrictions.eq(ProcessAccess.PROPERTY_PROCESS + ".id", processId));
-    criteria.add(Restrictions.eq(ProcessAccess.PROPERTY_ROLE + ".id", roleId));
+    criteria.add(Restrictions.eq(ProcessAccess.PROPERTY_ROLE + ".id", role.getId()));
     criteria.add(Restrictions.eq(ProcessAccess.PROPERTY_ACTIVE, true));
     criteria.setMaxResults(1);
     return !criteria.list().isEmpty();
@@ -342,8 +342,8 @@ public final class NeoAccessHelper {
    *
    * @param role the role to check (may be {@code null}, in which case access is denied)
    * @param processId the ID of the OBUIAPP process definition to check
-   * @return {@code true} if {@code role} has an active OBUIAPP process-access record, or is
-   *         the system administrator role
+   * @return {@code true} if {@code role} has an active OBUIAPP process-access record, is the
+   *         System Administrator role, or is a client-admin role for the current client
    */
   public static boolean hasObuiappProcessAccess(Role role, String processId) {
     if (role == null) {
@@ -359,7 +359,7 @@ public final class NeoAccessHelper {
         org.openbravo.client.application.ProcessAccess.PROPERTY_OBUIAPPPROCESS + ".id",
         processId));
     criteria.add(Restrictions.eq(
-        org.openbravo.client.application.ProcessAccess.PROPERTY_ROLE + ".id", roleId));
+        org.openbravo.client.application.ProcessAccess.PROPERTY_ROLE + ".id", role.getId()));
     criteria.add(Restrictions.eq(
         org.openbravo.client.application.ProcessAccess.PROPERTY_ACTIVE, true));
     criteria.setMaxResults(1);

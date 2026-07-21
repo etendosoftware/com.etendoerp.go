@@ -105,6 +105,22 @@ class SFListMenuTest {
         return role;
     }
 
+    /**
+     * Makes the current role a client-admin role (not the literal System Administrator role,
+     * {@code Role.isClientAdmin() == true}) with the given id. Used to prove the ETP-4511 fix:
+     * {@code NeoAccessHelper#hasProcessAccess(Role, String)} and
+     * {@code #hasObuiappProcessAccess(Role, String)} must bypass via
+     * {@code isAdminOrClientAdmin(role)}, the same way {@code hasWindowAccess(Role, String,
+     * String)} already does, instead of only checking {@code "0".equals(roleId)}.
+     */
+    private Role givenClientAdminRole(String roleId) {
+        Role role = mock(Role.class);
+        when(role.getId()).thenReturn(roleId);
+        when(role.isClientAdmin()).thenReturn(true);
+        when(mockContext.getRole()).thenReturn(role);
+        return role;
+    }
+
     /** Stubs {@code OBDal.createCriteria(WindowAccess.class)} to return an active row (or not). */
     @SuppressWarnings("unchecked")
     private void stubWindowAccess(boolean hasAccess) {
@@ -544,6 +560,33 @@ class SFListMenuTest {
     }
 
     /**
+     * ETP-4511 bug fix: {@code isNodeAccessible} calls the Role-parameterized
+     * {@code NeoAccessHelper#hasProcessAccess(Role, String)} overload, which — before this fix —
+     * only bypassed for the literal System Administrator role ({@code "0"}), NOT a client-admin
+     * role. A client-admin role must see the process node even with no explicit
+     * {@code AD_Process_Access} grant. {@code stubProcessAccess} is deliberately never called
+     * here: if the fix regressed, the fallthrough to the unstubbed
+     * {@code createCriteria(ProcessAccess.class)} would NPE, failing this test loudly instead of
+     * silently hiding the menu item.
+     */
+    @Test
+    @DisplayName("Client-admin role keeps the process node without an explicit ProcessAccess grant")
+    void testClientAdminRoleKeepsProcessNodeWithoutExplicitGrant() throws Exception {
+        givenClientAdminRole("role-client-admin-process");
+
+        List<Object[]> rows = new ArrayList<>();
+        rows.add(new Object[]{"5", "0", 10, "My Process", "N", "P", null, "proc5", null, null, 0});
+        stubNativeQuery(rows);
+
+        webhook.get(parameters, responseVars);
+
+        assertNull(responseVars.get(ERROR));
+        JSONObject result = new JSONObject(responseVars.get(RESULT));
+        assertEquals(1, result.getInt(COUNT));
+        assertEquals(1, result.getJSONArray("tree").length());
+    }
+
+    /**
      * A folder whose only child is filtered out is itself pruned; a sibling folder that keeps
      * at least one accessible child survives.
      */
@@ -714,6 +757,37 @@ class SFListMenuTest {
         JSONObject node = result.getJSONArray("tree").getJSONObject(0);
         assertEquals("Receivables Aging Schedule", node.getString("name"));
         assertEquals("other", node.getString("type"));
+        assertEquals("0D37A9F6109549DEB058373EF2DAEB6A", node.getString("obuiappProcessId"));
+    }
+
+    /**
+     * ETP-4511 bug fix (second instance of the same gap): {@code isNodeAccessible}'s OBUIAPP
+     * branch calls {@code NeoAccessHelper#hasObuiappProcessAccess(Role, String)}, which — before
+     * this fix — mirrored {@code hasProcessAccess(Role, String)}'s bug and only bypassed for the
+     * literal System Administrator role ({@code "0"}), not a client-admin role. A client-admin
+     * role must see the "Receivables Aging Schedule" node with no explicit OBUIAPP
+     * {@code ProcessAccess} grant. {@code stubObuiappProcessAccess} is deliberately never called
+     * here: if the fix regressed, the fallthrough to the unstubbed
+     * {@code createCriteria(org.openbravo.client.application.ProcessAccess.class)} would NPE,
+     * failing this test loudly instead of silently hiding the menu item.
+     */
+    @Test
+    @DisplayName("Client-admin role keeps the Receivables Aging Schedule node without an explicit grant")
+    void testClientAdminRoleKeepsObuiappProcessNodeWithoutExplicitGrant() throws Exception {
+        givenClientAdminRole("role-client-admin-obuiapp");
+
+        List<Object[]> rows = new ArrayList<>();
+        rows.add(new Object[]{"CC226771DE354AEEAA5D69F696F1A676", "0", 10, "Receivables Aging Schedule",
+                "N", "OBUIAPP_Process", null, null, "0D37A9F6109549DEB058373EF2DAEB6A", null, 0});
+        stubNativeQuery(rows);
+
+        webhook.get(parameters, responseVars);
+
+        assertNull(responseVars.get(ERROR));
+        JSONObject result = new JSONObject(responseVars.get(RESULT));
+        assertEquals(1, result.getInt(COUNT));
+        JSONObject node = result.getJSONArray("tree").getJSONObject(0);
+        assertEquals("Receivables Aging Schedule", node.getString("name"));
         assertEquals("0D37A9F6109549DEB058373EF2DAEB6A", node.getString("obuiappProcessId"));
     }
 

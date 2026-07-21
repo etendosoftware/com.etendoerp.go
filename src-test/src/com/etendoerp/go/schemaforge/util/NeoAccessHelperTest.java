@@ -546,6 +546,95 @@ public class NeoAccessHelperTest {
     assertTrue(NeoAccessHelper.hasProcessAccess("process-id-no-grant-row"));
   }
 
+  // ── hasProcessAccess(Role, String) — ETP-4511 client-admin bypass gap ───────
+  //
+  // Finding: SFListMenu.isNodeAccessible calls the Role-parameterized overloads (not the
+  // ambient-role ones), so a client-admin role bypass had to live here too, mirroring
+  // hasWindowAccess(Role, String, String)'s isAdminOrClientAdmin(role) check. Before the fix
+  // this overload only checked "0".equals(roleId), so a client-admin role with no explicit
+  // ProcessAccess grant would fall through to the DB criteria and could be incorrectly denied.
+
+  @Test
+  public void hasProcessAccessRoleParam_adminRole_returnsTrue() {
+    org.openbravo.model.ad.access.Role explicitRole = mock(org.openbravo.model.ad.access.Role.class);
+    when(explicitRole.getId()).thenReturn("0");
+
+    assertTrue(NeoAccessHelper.hasProcessAccess(explicitRole, "process-id-abc"));
+  }
+
+  @Test
+  public void hasProcessAccessRoleParam_nullRole_returnsFalse() {
+    assertFalse(NeoAccessHelper.hasProcessAccess((org.openbravo.model.ad.access.Role) null, "any-process-id"));
+  }
+
+  /**
+   * The core fix under test: a client-admin role (not the literal System Administrator role)
+   * must bypass the {@code ProcessAccess} check entirely. Crucially, {@code OBDal.createCriteria}
+   * is never stubbed for {@code ProcessAccess.class} here — if the implementation regressed to
+   * only checking {@code "0".equals(roleId)}, it would fall through to the unstubbed criteria
+   * path and NPE (Mockito's default for an unstubbed {@code createCriteria} call returns
+   * {@code null}), failing this test loudly instead of silently under-granting access.
+   */
+  @Test
+  public void hasProcessAccessRoleParam_clientAdminRole_returnsTrueWithoutTouchingDb() {
+    org.openbravo.model.ad.access.Role explicitRole = mock(org.openbravo.model.ad.access.Role.class);
+    when(explicitRole.getId()).thenReturn("role-id-client-admin");
+    when(explicitRole.isClientAdmin()).thenReturn(true);
+
+    assertTrue(NeoAccessHelper.hasProcessAccess(explicitRole, "process-id-client-admin"));
+  }
+
+  @SuppressWarnings("unchecked")
+  @Test
+  public void hasProcessAccessRoleParam_roleWithAccess_returnsTrue() {
+    org.openbravo.model.ad.access.Role explicitRole = mock(org.openbravo.model.ad.access.Role.class);
+    when(explicitRole.getId()).thenReturn("role-id-proc-explicit");
+    OBCriteria<ProcessAccess> criteria = mock(OBCriteria.class);
+    when(dal.createCriteria(ProcessAccess.class)).thenReturn(criteria);
+    when(criteria.add(any())).thenReturn(criteria);
+    when(criteria.setMaxResults(1)).thenReturn(criteria);
+    ProcessAccess access = mock(ProcessAccess.class);
+    when(criteria.list()).thenReturn(Collections.singletonList(access));
+
+    assertTrue(NeoAccessHelper.hasProcessAccess(explicitRole, "allowed-process-id-explicit"));
+  }
+
+  @SuppressWarnings("unchecked")
+  @Test
+  public void hasProcessAccessRoleParam_roleWithoutAccess_returnsFalse() {
+    org.openbravo.model.ad.access.Role explicitRole = mock(org.openbravo.model.ad.access.Role.class);
+    when(explicitRole.getId()).thenReturn("role-id-noprocess-explicit");
+    OBCriteria<ProcessAccess> criteria = mock(OBCriteria.class);
+    when(dal.createCriteria(ProcessAccess.class)).thenReturn(criteria);
+    when(criteria.add(any())).thenReturn(criteria);
+    when(criteria.setMaxResults(1)).thenReturn(criteria);
+    when(criteria.list()).thenReturn(Collections.emptyList());
+
+    assertFalse(NeoAccessHelper.hasProcessAccess(explicitRole, "restricted-process-id-explicit"));
+  }
+
+  /**
+   * Mirrors {@code hasObuiappProcessAccessRoleParam_ignoresAdminAmbientContext_...}: proves the
+   * decision is based solely on the passed-in role, not the ambient {@link OBContext}.
+   */
+  @SuppressWarnings("unchecked")
+  @Test
+  public void hasProcessAccessRoleParam_ignoresAdminAmbientContext_deniesRestrictedExplicitRole() {
+    // Ambient context: admin role — would short-circuit to true if consulted.
+    when(role.getId()).thenReturn("0");
+
+    org.openbravo.model.ad.access.Role explicitRole = mock(org.openbravo.model.ad.access.Role.class);
+    when(explicitRole.getId()).thenReturn("role-id-restricted-explicit-proc");
+    OBCriteria<ProcessAccess> criteria = mock(OBCriteria.class);
+    when(dal.createCriteria(ProcessAccess.class)).thenReturn(criteria);
+    when(criteria.add(any())).thenReturn(criteria);
+    when(criteria.setMaxResults(1)).thenReturn(criteria);
+    when(criteria.list()).thenReturn(Collections.emptyList());
+
+    assertFalse("Must decide from the explicit role, not the ambient admin context",
+        NeoAccessHelper.hasProcessAccess(explicitRole, "some-process-id"));
+  }
+
   // ── hasObuiappProcessAccess ───────────────────────────────────────────────
 
   @Test
@@ -632,6 +721,24 @@ public class NeoAccessHelperTest {
   @Test
   public void hasObuiappProcessAccessRoleParam_nullRole_returnsFalse() {
     assertFalse(NeoAccessHelper.hasObuiappProcessAccess((org.openbravo.model.ad.access.Role) null, "any-obuiapp-proc-id"));
+  }
+
+  /**
+   * ETP-4511 fix: a client-admin role (not the literal System Administrator role) must bypass
+   * the {@code ProcessAccess} (OBUIAPP) check entirely, mirroring
+   * {@code hasWindowAccess(Role, String, String)}'s {@code isAdminOrClientAdmin(role)} check.
+   * {@code OBDal.createCriteria} is never stubbed for the OBUIAPP {@code ProcessAccess} class
+   * here — if the implementation regressed to only checking {@code "0".equals(roleId)}, it
+   * would fall through to the unstubbed criteria path and NPE, failing this test loudly instead
+   * of silently under-granting access.
+   */
+  @Test
+  public void hasObuiappProcessAccessRoleParam_clientAdminRole_returnsTrueWithoutTouchingDb() {
+    org.openbravo.model.ad.access.Role explicitRole = mock(org.openbravo.model.ad.access.Role.class);
+    when(explicitRole.getId()).thenReturn("role-id-client-admin-obuiapp");
+    when(explicitRole.isClientAdmin()).thenReturn(true);
+
+    assertTrue(NeoAccessHelper.hasObuiappProcessAccess(explicitRole, "obuiapp-proc-id-client-admin"));
   }
 
   @SuppressWarnings("unchecked")
