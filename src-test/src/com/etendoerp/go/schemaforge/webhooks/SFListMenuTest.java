@@ -880,13 +880,13 @@ class SFListMenuTest {
     void testObuiappProcessCheckUsesCapturedRoleNotReResolvedAmbientRole() throws Exception {
         Role restrictedRole = mock(Role.class);
         when(restrictedRole.getId()).thenReturn("role-captured-restricted");
-        Role adminRole = mock(Role.class);
-        when(adminRole.getId()).thenReturn("0");
+        Role ambientAdminRole = mock(Role.class);
+        when(ambientAdminRole.getId()).thenReturn("0");
 
         java.util.concurrent.atomic.AtomicInteger callCount =
                 new java.util.concurrent.atomic.AtomicInteger(0);
         when(mockContext.getRole()).thenAnswer(invocation ->
-                callCount.getAndIncrement() == 0 ? restrictedRole : adminRole);
+                callCount.getAndIncrement() == 0 ? restrictedRole : ambientAdminRole);
 
         // The restricted (captured) role has no active OBUIAPP grant.
         stubObuiappProcessAccess(false);
