@@ -743,17 +743,83 @@ NEO Headless enforces security at multiple levels:
 
 2. **OBContext enforcement:** The JWT claims (`ad_user_id`, `ad_role_id`, `ad_org_id`, `m_warehouse_id`, `ad_client_id`) are used to create a full `OBContext`, which is set for the duration of the request. All DAL queries respect the user's organization and client access.
 
-3. **Window access control:** For window specs, the servlet checks `ADWindowAccess` for the current role. If the role does not have access to the window, the request returns `403 Forbidden`.
+3. **Window access control (tiered read/write):** `NeoAccessHelper.hasWindowAccess(windowId, httpMethod)` resolves access in this order:
+   1. No role assigned on the request → deny.
+   2. System Administrator role (`"0"`) or any role with `AD_Role.is_client_admin = 'Y'` → always allowed, any method.
+   3. No active `AD_Window_Access` row for role+window → deny.
+   4. An active row exists: `GET` is always allowed; `POST`/`PUT`/`PATCH`/`DELETE` are allowed only when the row's `IsReadWrite` flag is `true` — a read-only `AD_Window_Access` row grants visibility but denies writes.
 
-4. **Process access control:** For process specs and button actions, the servlet checks `ADProcessAccess` for the current role before execution. Denied requests return `403 Forbidden`.
+   Denied requests return `403 Forbidden`. This is enforced identically at both entry points into window data: the REST servlet (`NeoRequestRouter.handleWindowSpecRequest`) and the MCP tool router (`McpToolRouter`, which maps `neo_create`→`POST`, `neo_update`→`PUT`, `neo_delete`→`DELETE`, everything else→`GET` before calling the same helper).
 
-5. **Method-level control:** Each HTTP method must be explicitly enabled on the entity record. Disabled methods return `405 Method Not Allowed`.
+4. **Windowless/custom spec access ("combination" specs):** a spec with no single backing `AD_Window` (`spec.getADWindow() == null`) can't be checked against one window ID, so `NeoAccessHelper.hasWindowAccessForSpec(spec, httpMethod)` applies three tiers, in priority order:
+   1. No role assigned → deny, unconditionally.
+   2. The spec's `SFEntity` children resolve — via their `AD_Tab` — to one or more real `AD_Window`s (a "combination" of windows) → the role must have `hasWindowAccess` (for the same `httpMethod`) to **every** one of them; deny if any single one is inaccessible.
+   3. No entity has a populated `AD_Tab` at all (no combination data exists — the current shape of the `dashboard` and `not-posted-documents` specs) → fall back to allowing any authenticated role. There is no per-window `AD_Window_Access` provisioning for these specs today, so denying everyone would be a regression rather than a fix.
 
-6. **Field-level control:** Only fields with `ISINCLUDED = 'Y'` participate in selector listings and button action discovery.
+   Wired into `NeoRequestRouter`, `ToolRegistry#addWindowSpec`, `NeoDiscoveryHelper#isSpecAccessible`, and the MCP support layer (`McpToolRouterSupport`) — anywhere a spec's accessibility needs resolving without assuming a single `AD_Window`. Before this fix (ETP-4510 BUG-3), a windowless spec skipped the access check entirely, even for a request with no role assigned at all.
+
+5. **Process access control:** For process specs and button actions, the servlet checks `ADProcessAccess` for the current role before execution — binary, no read/write tiering: any active row grants full execute access. A request with no role assigned is denied the same as an unrecognized role. Denied requests return `403 Forbidden`.
+
+6. **OBUIAPP process access for report handlers:** two report-type specs (`not-posted-documents`, `aging-receivable`) have no `AD_Process` and no backing `AD_Window`, and previously had zero access control. Their `NeoHandler.handle()` now gates access via `NeoAccessHelper.hasObuiappProcessAccess(processId)` against the real OBUIAPP process, resolved through the `AD_Menu.em_obuiapp_process_id` FK (never by name-matching).
+
+7. **Method-level control:** Each HTTP method must be explicitly enabled on the entity record. Disabled methods return `405 Method Not Allowed`.
+
+8. **Field-level control:** Only fields with `ISINCLUDED = 'Y'` participate in selector listings and button action discovery.
+
+**Known limitations (ETP-4596):** 7 of the 8 `SPEC_TYPE = 'R'` report specs have no classic-process mapping and still have no handler-level access control. Separately, the MCP tool catalog/discovery layer (`ToolRegistry`, `NeoDiscoveryHelper`, `McpToolRouterSupport`) still exposes the *existence* of process-null specs to any authenticated caller regardless of role — metadata-only exposure; actual data access is blocked wherever a handler-level gate exists. Both gaps are tracked in ETP-4596, not fixed by ETP-4510/ETP-4511.
 
 ---
 
-## 8. Testing
+## 8. Navigation Menu (SFListMenu Webhook)
+
+`SFListMenu` (`GET /webhooks/SFListMenu`) returns the `AD_Menu` tree — or a flat filtered search with `?q=` — as JSON, pruned down to what the requesting role can actually reach. It is the role-filtered menu-tree webhook, correctly implemented and available for any client to consume. Unlike the `/sws/neo/*` endpoints above, it lives in the Webhooks module infrastructure, alongside the `SFUpsertSpec`/`SFPopulateSpec` configuration webhooks (§5.1), not under the NEO servlet.
+
+> **Note:** the Go SPA sidebar (`tools/app-shell` in `etendo_schema_forge`) does not consume this webhook yet — it still renders navigation from a static `menu.json` mock, so role-based menu filtering is not yet reflected in the running frontend. Tracked as ETP-4598.
+
+**Endpoints:**
+
+| Pattern | Method | Description |
+|---------|--------|-------------|
+| `/webhooks/SFListMenu` | GET | Full nested menu tree, filtered by the current role's access |
+| `/webhooks/SFListMenu?q=<term>` | GET | Flat list of menu entries whose name matches `<term>` (case-insensitive substring), same filtering |
+
+**Response shape:**
+
+```json
+{
+  "tree": [
+    {
+      "id": "...", "name": "Sales", "type": "folder",
+      "children": [
+        { "id": "...", "name": "Sales Order", "type": "window", "windowId": "143" }
+      ]
+    }
+  ],
+  "count": 2
+}
+```
+
+`type` is derived from `AD_Menu.issummary`/`action`: `folder` (summary node), `window` (`action = 'W'`), `process` (`action = 'P'`), `report` (`action = 'R'`), `form` (`action = 'X'`), or `other`. Leaf nodes carry whichever of `windowId`, `processId`, `obuiappProcessId`, `formId` applies; folders carry `children` instead.
+
+**Access filtering:** the requesting role is captured once, at the very top of the request, *before* the servlet enters `OBContext.setAdminMode()` — admin mode is only used to bypass row-level security on the underlying native SQL queries that build the tree, never to decide access. A request with no role assigned gets `{"tree": [], "count": 0}` immediately, without even querying the database.
+
+Once the role is known, each node is checked (a node must pass every check it carries):
+
+| Node carries | Checked via | Notes |
+|---|---|---|
+| `windowId` | `NeoAccessHelper.hasWindowAccess(role, windowId)` | Any tier (read-only or full) is enough to appear in the menu — the menu answers "is this reachable at all", not "can I write to it". |
+| `processId` | `NeoAccessHelper.hasProcessAccess(role, processId)` | Binary, as in §7. |
+| `obuiappProcessId` | `NeoAccessHelper.hasObuiappProcessAccess(processId)` | Covers `action = 'OBUIAPP_Process'` menu entries, linked via `AD_Menu.em_obuiapp_process_id` rather than `ad_window_id`/`ad_process_id`. This closes the gap where the two OBUIAPP-gated report specs (§7 item 6) were still fully visible in the menu even though their handlers now reject unauthorized requests. |
+
+A node carrying none of these IDs (typically a `report`/`form`/`other` node with no OBUIAPP link) is left unfiltered — filtering those is out of scope for this change.
+
+Folder nodes are never filtered directly: their children are filtered first (post-order), and the folder itself is dropped from the tree only if it ends up with zero accessible children. `count` is recomputed after pruning — it does not reflect the raw row count from the DB.
+
+**Explicitly out of scope:** this endpoint controls what appears *in the menu*. It does not block direct/deep-link navigation to a window the role has no access to — that gap is tracked separately as ETP-4520.
+
+---
+
+## 9. Testing
 
 The module includes unit tests that run without a backend:
 
@@ -764,12 +830,13 @@ The module includes unit tests that run without a backend:
 | `NeoResponseTest` | -- | Static builders (`ok`, `created`, `noContent`, `error`), custom headers. |
 | `NeoServletTabFilterTest` | -- | Parent-child HQL where clause generation. |
 | `NeoPreviewFileServiceTest` | ~250 | Validation (invalid JSON, blank fields), GET miss/hit, POST INSERT/UPDATE paths, DELETE miss/hit. All without a live DB via `MockedStatic<OBDal>` + `MockedStatic<OBContext>`. |
+| `SFListMenuTest` | -- | Tree building/pruning, flat search, role-based filtering (window/process/OBUIAPP-process nodes), no-role → empty menu, multi-level nesting. |
 
 Tests are located in `src-test/src/com/etendoerp/go/schemaforge/`.
 
 ---
 
-## 9. Future Considerations
+## 10. Future Considerations
 
 **Granular override registry.** The current hook mechanism uses a single `javaQualifier` on the entity level. A dedicated override table (per-method, per-entity granularity) would allow more precise hook targeting without requiring a custom handler to inspect the HTTP method internally.
 
