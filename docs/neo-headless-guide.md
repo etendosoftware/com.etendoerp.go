@@ -911,6 +911,20 @@ El `recordId` de la URL se inyecta automaticamente como `inpRecordId` en los par
 > **HTTP 200** con `{name, type:"report", callable:false, status:"not_configured_for_report_generation", message}`,
 > identico a `neo_discover` y a la herramienta de reporte de MCP. La integracion de jsreport
 > queda fuera del alcance de ETP-4255.
+>
+> **ETP-4257 — herramientas CRUD de MCP sobre specs `R`.** Un spec `R` no expone entidades
+> listables, por lo que `neo_list`/`neo_get`/`neo_create`/`neo_update`/`neo_delete`/
+> `neo_selectors`/`neo_defaults`/`neo_schema` **no** devuelven ya el opaco `Entity not found:
+> <entity>`. En su lugar el guard (`McpToolRouterSupport.resolveIncludedEntityOrExplain`)
+> explica que el spec es de tipo reporte:
+> - **callable** (respaldado por handler NEO-native): `Spec '<name>' is a report type (R) and
+>   does not expose listable entities. Use the etendo_generate_<snake> tool to produce this
+>   report.`
+> - **no callable**: el mismo mensaje `not_configured_for_report_generation` de arriba.
+>
+> Ademas, `neo_discover` añade en cada spec `R` **callable** el campo `reportTool =
+> generate_<snake>` (el cliente lo ve como `etendo_generate_<snake>`), para que el agente
+> invoque directamente la herramienta de reporte en vez de adivinar una entidad.
 
 El `NeoReportService` genera reportes Jasper desde specs tipo `R`.
 

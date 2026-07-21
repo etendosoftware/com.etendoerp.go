@@ -606,6 +606,12 @@ public class FinancialAccountPsd2Handler implements NeoHandler {
       OBDal.getInstance().save(finAcc);
     }
     disableAutomaticWithdrawnForTransferMethod(finAcc);
+    // ETP-4503: a Bank account connected to PSD2 must have multicurrency OFF on its bank-transfer
+    // payment-method link (exception to the "multicurrency ON by default" rule). Shared by both
+    // the create-and-link and link-existing paths — linkAccount is the single choke point where
+    // the PSD2 connection has just been established. The Bank-type gate lives in the helper, so
+    // this is safe to call unconditionally (Card accounts and non-transfer links are no-ops).
+    FinancialAccountSupport.disableMulticurrencyForBankTransfer(finAcc);
     return warning;
   }
 
