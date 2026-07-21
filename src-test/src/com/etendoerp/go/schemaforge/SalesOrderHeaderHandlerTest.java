@@ -163,6 +163,168 @@ public class SalesOrderHeaderHandlerTest {
     assertNull(new SalesOrderHeaderHandler().afterHandle(ctx));
   }
 
+  // ── total discount adjustment (ETP-4029 follow-up: same gap as invoices) ──
+  //
+  // afterHandle() always runs the hasLinkedDocuments DB check after the discount loop (single
+  // LIMIT-1 query for detail, one batch query for list) — every test below mocks OBDal minimally
+  // (no linked documents found) purely to keep that unconditional step from touching a real DB,
+  // exactly like the existing single-record/list-GET tests further down in this file.
+
+  /**
+   * Creates a {@link SalesOrderHeaderHandler} with its {@code totalDiscountService} field
+   * replaced by the provided mock via reflection, bypassing CDI in the unit-test context.
+   */
+  private static SalesOrderHeaderHandler handlerWithTotalDiscountMock(
+      TotalDiscountService mock) throws Exception {
+    SalesOrderHeaderHandler handler = new SalesOrderHeaderHandler();
+    Field field = SalesOrderHeaderHandler.class.getDeclaredField("totalDiscountService");
+    field.setAccessible(true);
+    field.set(handler, mock);
+    return handler;
+  }
+
+  private static JSONObject orderRecordWithDiscount(boolean processed, double discount,
+      double grandTotal) throws JSONException {
+    return new JSONObject().put("id", "order-disc-1").put("processed", processed).put(
+        "etgoTotalDiscount", discount).put("grandTotalAmount", grandTotal);
+  }
+
+  /** Stubs OBDal so the DB-backed hasLinkedDocuments check finds nothing, for either flow. */
+  private static void stubNoLinkedDocuments(MockedStatic<OBDal> obDalMock) throws Exception {
+    OBDal dal = mock(OBDal.class);
+    obDalMock.when(OBDal::getInstance).thenReturn(dal);
+    Connection conn = mock(Connection.class);
+    when(dal.getConnection()).thenReturn(conn);
+    PreparedStatement ps = mock(PreparedStatement.class);
+    when(conn.prepareStatement(anyString())).thenReturn(ps);
+    ResultSet rs = mock(ResultSet.class);
+    when(ps.executeQuery()).thenReturn(rs);
+    when(rs.next()).thenReturn(false);
+  }
+
+  /**
+   * Verifies that a processed order is not adjusted — TotalDiscountService already
+   * materialized the discount line in the DB at completion time.
+   */
+  @Test
+  public void testAfterHandleSkipsProcessedOrderWithDiscount() throws Exception {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      stubNoLinkedDocuments(obDalMock);
+      JSONObject body = new JSONObject().put("response",
+          new JSONObject().put("data", new JSONArray().put(orderRecordWithDiscount(true, 10.0, 198.99))));
+      NeoContext ctx = getCtxWithId("order-disc-1");
+      ctx.setPreviousResult(NeoResponse.ok(body));
+
+      NeoResponse result = new SalesOrderHeaderHandler().afterHandle(ctx);
+
+      double grand = result.getBody().getJSONObject("response").getJSONArray("data").getJSONObject(0)
+          .getDouble("grandTotalAmount");
+      assertEquals(198.99, grand, 0.001);
+    }
+  }
+
+  /**
+   * Verifies that a draft order with no total discount (etgoTotalDiscount=0) is not modified.
+   */
+  @Test
+  public void testAfterHandleSkipsDraftOrderWithNoDiscount() throws Exception {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      stubNoLinkedDocuments(obDalMock);
+      JSONObject body = new JSONObject().put("response",
+          new JSONObject().put("data", new JSONArray().put(orderRecordWithDiscount(false, 0.0, 221.10))));
+      NeoContext ctx = getCtxWithId("order-disc-1");
+      ctx.setPreviousResult(NeoResponse.ok(body));
+
+      NeoResponse result = new SalesOrderHeaderHandler().afterHandle(ctx);
+
+      double grand = result.getBody().getJSONObject("response").getJSONArray("data").getJSONObject(0)
+          .getDouble("grandTotalAmount");
+      assertEquals(221.10, grand, 0.001);
+    }
+  }
+
+  /**
+   * Verifies that a draft order whose discount is already materialized as a real line is NOT
+   * adjusted a second time.
+   */
+  @Test
+  public void testAfterHandleSkipsDraftOrderWithMaterializedDiscountLine() throws Exception {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      stubNoLinkedDocuments(obDalMock);
+      TotalDiscountService mockService = mock(TotalDiscountService.class);
+      when(mockService.hasDiscountLine("order-disc-1", false)).thenReturn(true);
+      SalesOrderHeaderHandler handler = handlerWithTotalDiscountMock(mockService);
+
+      JSONObject body = new JSONObject().put("response",
+          new JSONObject().put("data", new JSONArray().put(orderRecordWithDiscount(false, 10.0, 198.99))));
+      NeoContext ctx = getCtxWithId("order-disc-1");
+      ctx.setPreviousResult(NeoResponse.ok(body));
+
+      NeoResponse result = handler.afterHandle(ctx);
+
+      double grand = result.getBody().getJSONObject("response").getJSONArray("data").getJSONObject(0)
+          .getDouble("grandTotalAmount");
+      assertEquals(198.99, grand, 0.001);
+    }
+  }
+
+  /**
+   * Verifies that a draft order with etgoTotalDiscount=10 and grandTotalAmount=221.10 is
+   * adjusted to 198.99 (221.10 x 0.90, rounded to 2 decimals) — the exact scenario reproduced
+   * manually against the running app (order #1000207, product 201.00 + 21% tax, 10% discount).
+   * Uses a mocked service since the record carries an "id" (unlike the guard-condition tests
+   * above, which never reach {@code hasDiscountLine} because the discount is 0 or the order is
+   * processed).
+   */
+  @Test
+  public void testAfterHandleAdjustsGrandTotalForDraftOrderWithDiscount() throws Exception {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      stubNoLinkedDocuments(obDalMock);
+      TotalDiscountService mockService = mock(TotalDiscountService.class);
+      when(mockService.hasDiscountLine("order-disc-1", false)).thenReturn(false);
+      SalesOrderHeaderHandler handler = handlerWithTotalDiscountMock(mockService);
+
+      JSONObject body = new JSONObject().put("response",
+          new JSONObject().put("data", new JSONArray().put(orderRecordWithDiscount(false, 10.0, 221.10))));
+      NeoContext ctx = getCtxWithId("order-disc-1");
+      ctx.setPreviousResult(NeoResponse.ok(body));
+
+      NeoResponse result = handler.afterHandle(ctx);
+
+      double grand = result.getBody().getJSONObject("response").getJSONArray("data").getJSONObject(0)
+          .getDouble("grandTotalAmount");
+      assertEquals(198.99, grand, 0.005);
+    }
+  }
+
+  /**
+   * Verifies that every record in a list response is adjusted independently when each carries
+   * its own positive discount.
+   */
+  @Test
+  public void testAfterHandleAdjustsAllRecordsInListResponse() throws Exception {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      stubNoLinkedDocuments(obDalMock);
+      TotalDiscountService mockService = mock(TotalDiscountService.class);
+      SalesOrderHeaderHandler handler = handlerWithTotalDiscountMock(mockService);
+
+      JSONArray data = new JSONArray()
+          .put(new JSONObject().put("id", "order-1").put("processed", false).put("etgoTotalDiscount", 10.0)
+              .put("grandTotalAmount", 100.0))
+          .put(new JSONObject().put("id", "order-2").put("processed", false).put("etgoTotalDiscount", 20.0)
+              .put("grandTotalAmount", 200.0));
+      JSONObject body = new JSONObject().put("response", new JSONObject().put("data", data));
+      NeoContext ctx = listCtx();
+      ctx.setPreviousResult(NeoResponse.ok(body));
+
+      NeoResponse result = handler.afterHandle(ctx);
+
+      JSONArray resultData = result.getBody().getJSONObject("response").getJSONArray("data");
+      assertEquals(90.0, resultData.getJSONObject(0).getDouble("grandTotalAmount"), 0.001);
+      assertEquals(160.0, resultData.getJSONObject(1).getDouble("grandTotalAmount"), 0.001);
+    }
+  }
+
   // ── single-record GET ──────────────────────────────────────────────────────
 
   /**

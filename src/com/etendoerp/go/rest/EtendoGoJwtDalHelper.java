@@ -241,17 +241,61 @@ final class EtendoGoJwtDalHelper {
     flushAndCommitDalChanges();
   }
 
+  /**
+   * Returns {@code true} when the given client is owned by the account identified by
+   * {@code accountEmail}, i.e. it has an active user whose username is the account email or an
+   * {@code email+suffix} variant of it — the same ownership criterion used by
+   * {@link #findEnvironmentUsersByAccountEmail}. Used by onboarding to decide whether an existing
+   * same-named client may be resumed (ETP-4428): a name collision with another account's client
+   * must never be resumable.
+   *
+   * <p>The {@code email+suffix} match is a bounded prefix LIKE: the account email is treated as a
+   * literal (its {@code %}, {@code _} and {@code \} are escaped and the LIKE declares
+   * {@code escape '\'}), so an attacker cannot register a wildcard-bearing email (e.g. {@code "%"})
+   * to make the prefix branch match users owned by another account. This is what preserves tenant
+   * isolation for the resume decision.</p>
+   */
+  static boolean clientBelongsToAccountEmail(String clientId, String accountEmail) {
+    OBQuery<User> query = OBDal.getInstance().createQuery(User.class,
+        "as user where user.client.id = :" + PARAM_CLIENT_ID
+            + " and (user.username = :" + PARAM_ACCOUNT_EMAIL
+            + " or user.username like :" + PARAM_ACCOUNT_PREFIX + " escape '\\') "
+            + "and user.active = true");
+    query.setNamedParameter(PARAM_CLIENT_ID, clientId);
+    query.setNamedParameter(PARAM_ACCOUNT_EMAIL, accountEmail);
+    query.setNamedParameter(PARAM_ACCOUNT_PREFIX, escapeLikeWildcards(accountEmail) + "+%");
+    query.setFilterOnReadableClients(false);
+    query.setFilterOnReadableOrganization(false);
+    query.setMaxResult(1);
+    return query.uniqueResult() != null;
+  }
+
   static List<User> findEnvironmentUsersByAccountEmail(String accountEmail) {
     OBQuery<User> query = OBDal.getInstance().createQuery(User.class,
         "as user where (user.username = :" + PARAM_ACCOUNT_EMAIL
-            + " or user.username like :" + PARAM_ACCOUNT_PREFIX + ") "
+            + " or user.username like :" + PARAM_ACCOUNT_PREFIX + " escape '\\') "
             + "and user.active = true and user.client.active = true and user.client.id <> '0' "
             + "order by user.client.creationDate, user.creationDate");
     query.setNamedParameter(PARAM_ACCOUNT_EMAIL, accountEmail);
-    query.setNamedParameter(PARAM_ACCOUNT_PREFIX, accountEmail + "+%");
+    query.setNamedParameter(PARAM_ACCOUNT_PREFIX, escapeLikeWildcards(accountEmail) + "+%");
     query.setFilterOnReadableClients(false);
     query.setFilterOnReadableOrganization(false);
     return query.list();
+  }
+
+  /**
+   * Escapes the SQL/HQL LIKE wildcards ({@code %} and {@code _}) and the escape character itself
+   * ({@code \}) in {@code value} so it can be embedded as a literal fragment in a LIKE pattern.
+   * The backslash must be escaped first to avoid double-escaping the wildcard replacements.
+   * Callers must pair the escaped value with an {@code escape '\'} clause in the LIKE, otherwise
+   * the backslashes are treated as literals and the wildcards are NOT neutralized.
+   *
+   * @param value
+   *     the raw value to embed inside a LIKE pattern
+   * @return the value with LIKE wildcards escaped for use with {@code escape '\'}
+   */
+  private static String escapeLikeWildcards(String value) {
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_");
   }
 
   static List<Organization> findNonStarOrganizations(String clientId) {

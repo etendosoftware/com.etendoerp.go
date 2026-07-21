@@ -72,9 +72,11 @@ public abstract class AbstractInvoiceHeaderHandler {
   protected static final String FIELD_ORIGIN_INVOICE       = "originInvoice";
   protected static final String FIELD_TRANSACTION_DOCUMENT = "transactionDocument";
   private static final String FIELD_CURRENCY = "currency";
-  private static final String FIELD_INVOICE_DATE = "invoiceDate";
-  private static final String FIELD_ACCOUNTING_DATE = "accountingDate";
   private static final String FIELD_VALUE = "value";
+  private static final String FIELD_PROCESSED = "processed";
+  private static final String FIELD_TOTAL_DISCOUNT_PCT = "etgoTotalDiscount";
+  protected static final String FIELD_GRAND_TOTAL_AMOUNT = "grandTotalAmount";
+  protected static final String FIELD_OUTSTANDING_AMOUNT = "outstandingAmount";
 
   // ---------------------------------------------------------------------------
   // Abstract contract
@@ -119,6 +121,16 @@ public abstract class AbstractInvoiceHeaderHandler {
    * @return virtual-field name for the subtype
    */
   protected abstract String getInvoiceSubtypeKey();
+
+  /**
+   * Supplies the concrete handler's own {@code @Inject}-ed {@link TotalDiscountService} so
+   * {@link #applyTotalDiscountToRecord} can call {@code hasDiscountLine} without this abstract
+   * class holding a CDI-injected field itself — this class is a pure helper/base (see class
+   * Javadoc) and never injects its own collaborators.
+   *
+   * @return the subclass's injected {@link TotalDiscountService}
+   */
+  protected abstract TotalDiscountService getTotalDiscountService();
 
   // ---------------------------------------------------------------------------
   // Validation
@@ -439,6 +451,41 @@ public abstract class AbstractInvoiceHeaderHandler {
     rec.put("hasRectifications", result);
   }
 
+  /**
+   * Adjusts {@code grandTotalAmount} and {@code outstandingAmount} for a draft invoice carrying
+   * a positive {@code etgoTotalDiscount} percentage that has not yet been materialized as a real
+   * line — otherwise the list view and preview cards show the raw undiscounted total while the
+   * document is still in draft, since the discount is only materialized into a real line at
+   * Complete time via {@link TotalDiscountService}. Mirrors {@link AbstractOrderHeaderHandler}'s
+   * order-side equivalent.
+   *
+   * <p>No-op when the invoice is processed (the DB total already reflects the discount), when no
+   * discount percentage is set, or when the discount is already a real line
+   * ({@code hasDiscountLine} — e.g. an invoice created from an order that already carried the
+   * discount, via {@code InvoiceFromOrderSupport} — avoids double-counting). Mirrors the exact
+   * guard order of the original {@code SalesInvoiceHeaderHandler}-only implementation this was
+   * consolidated from: {@link #getTotalDiscountService()} is only dereferenced when {@code id}
+   * is present, matching every existing caller/test.
+   */
+  protected void applyTotalDiscountToRecord(JSONObject invoice) throws Exception {
+    if (invoice.optBoolean(FIELD_PROCESSED, false)) {
+      return;
+    }
+    double discountPct = invoice.optDouble(FIELD_TOTAL_DISCOUNT_PCT, 0.0);
+    if (discountPct <= 0.0) {
+      return;
+    }
+    String invoiceId = invoice.optString("id", null);
+    if (invoiceId != null && getTotalDiscountService().hasDiscountLine(invoiceId, true)) {
+      return;
+    }
+    double factor = 1.0 - discountPct / 100.0;
+    double grand = invoice.optDouble(FIELD_GRAND_TOTAL_AMOUNT, 0.0);
+    invoice.put(FIELD_GRAND_TOTAL_AMOUNT, NeoHandlerUtils.roundHalfUp(grand * factor));
+    double outstanding = invoice.optDouble(FIELD_OUTSTANDING_AMOUNT, 0.0);
+    invoice.put(FIELD_OUTSTANDING_AMOUNT, NeoHandlerUtils.roundHalfUp(outstanding * factor));
+  }
+
   // ---------------------------------------------------------------------------
   // Completion (documentAction=CO) — routes through the ProcessInvoiceHook chain
   // ---------------------------------------------------------------------------
@@ -750,35 +797,11 @@ public abstract class AbstractInvoiceHeaderHandler {
   // ---------------------------------------------------------------------------
   // Unified date (ETP-4531)
   // ---------------------------------------------------------------------------
-
-  /**
-   * Mirrors the single visible {@code invoiceDate} field into the hidden {@code accountingDate}
-   * field on the request body, unconditionally, before the default CRUD path
-   * ({@code NeoCrudHandler#handleDefault}) reads and persists it.
-   *
-   * <p>ETP-4531 (unified date): the user never sees or edits {@code accountingDate} directly —
-   * whatever value is saved for {@code invoiceDate} (create or update) must also become the
-   * invoice's accounting date. This is an explicit, guaranteed server-side mirror, independent
-   * of whatever the classic Etendo callout cascade does in the interactive edit path.
-   *
-   * <p>Call at the very top of each subclass's {@code handle()} override, before any other
-   * logic.
-   *
-   * <p><b>ETP-4531 fix:</b> must fire on {@code PATCH} as well as {@code POST}/{@code PUT} — the
-   * live React UI ({@code useEntity.js#getMethod}) always sends {@code PATCH} (a sparse,
-   * changed-fields-only body) when saving an edit to an EXISTING invoice; it never sends a full
-   * {@code PUT}. The original {@code POST}/{@code PUT}-only check meant the mirror fired on
-   * create but silently never fired on a real edit-and-save from the UI. See
-   * {@link NeoHandlerUtils#isWriteMethod}.
-   *
-   * @param context the current NeoContext
-   */
-  protected static void mirrorAccountingDate(NeoContext context) {
-    if (NeoEndpointType.CRUD.equals(context.getEndpointType())
-        && NeoHandlerUtils.isWriteMethod(context.getHttpMethod())) {
-      NeoHandlerUtils.mirrorFieldValue(context.getRequestBody(), FIELD_INVOICE_DATE, FIELD_ACCOUNTING_DATE);
-    }
-  }
+  //
+  // The mirrorAccountingDate(NeoContext, String, String) logic itself lives in
+  // NeoHandlerUtils — shared with AbstractOrderHeaderHandler — see
+  // NeoHandlerUtils#mirrorAccountingDate. Call sites here invoke it with
+  // ("invoiceDate", "accountingDate").
 
   /**
    * Shared {@code afterCallout} body: blocks callout-driven currency updates and appends an

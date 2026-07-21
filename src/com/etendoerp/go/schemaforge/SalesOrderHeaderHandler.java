@@ -66,4 +66,9 @@ public class SalesOrderHeaderHandler extends AbstractOrderHeaderHandler {
         createDraftInvoiceHandler,
         currencyOptionsHandler);
   }
+
+  @Override
+  protected TotalDiscountService getTotalDiscountService() {
+    return totalDiscountService;
+  }
 }

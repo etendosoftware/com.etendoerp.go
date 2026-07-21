@@ -17,6 +17,7 @@
 
 package com.etendoerp.go.schemaforge;
 
+import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
@@ -35,6 +36,7 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 
+import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.Test;
 import org.mockito.MockedStatic;
@@ -709,6 +711,130 @@ public class SalesQuotationHeaderHandlerTest {
       NeoResponse result = handler.afterHandle(ctx);
 
       assertNull(result);
+    }
+  }
+
+  // ── afterHandle GET — total discount adjustment (ETP-4029 follow-up) ─────
+  //
+  // Exercised through the inherited AbstractOrderHeaderHandler#afterHandle GET path — this
+  // handler's own afterHandle only adds the Convertquotation currency-rate transfer, then
+  // delegates via super.afterHandle(context), same as the order handlers.
+
+  private static SalesQuotationHeaderHandler handlerWithTotalDiscountMock(
+      TotalDiscountService svc) throws Exception {
+    SalesQuotationHeaderHandler handler = new SalesQuotationHeaderHandler();
+    setField(handler, "totalDiscountService", svc);
+    return handler;
+  }
+
+  private static NeoContext getCtx(String recordId) {
+    return NeoContext.builder()
+        .httpMethod("GET").endpointType(NeoEndpointType.CRUD).recordId(recordId).build();
+  }
+
+  private static JSONObject quotationRecordWithDiscount(boolean processed, double discount,
+      double grandTotal) throws Exception {
+    return new JSONObject().put("id", "quot-disc-1").put("processed", processed).put(
+        "etgoTotalDiscount", discount).put("grandTotalAmount", grandTotal);
+  }
+
+  /** Stubs OBDal so the DB-backed hasLinkedDocuments check (run unconditionally after the
+   *  discount loop) finds nothing, keeping these tests focused on the discount math. */
+  private static void stubNoLinkedDocuments(MockedStatic<OBDal> obDalMock) throws Exception {
+    OBDal dal = mock(OBDal.class);
+    obDalMock.when(OBDal::getInstance).thenReturn(dal);
+    Connection conn = mock(Connection.class);
+    when(dal.getConnection()).thenReturn(conn);
+    PreparedStatement ps = mock(PreparedStatement.class);
+    when(conn.prepareStatement(anyString())).thenReturn(ps);
+    ResultSet rs = mock(ResultSet.class);
+    when(ps.executeQuery()).thenReturn(rs);
+    when(rs.next()).thenReturn(false);
+  }
+
+  @Test
+  public void testAfterHandle_processedQuotation_notAdjusted() throws Exception {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      stubNoLinkedDocuments(obDalMock);
+      JSONObject body = new JSONObject().put("response",
+          new JSONObject().put("data", new JSONArray().put(
+              quotationRecordWithDiscount(true, 10.0, 198.99))));
+      NeoContext ctx = getCtx("quot-disc-1");
+      ctx.setPreviousResult(NeoResponse.ok(body));
+
+      NeoResponse result = new SalesQuotationHeaderHandler().afterHandle(ctx);
+
+      double grand = result.getBody().getJSONObject("response").getJSONArray("data").getJSONObject(0)
+          .getDouble("grandTotalAmount");
+      assertEquals(198.99, grand, 0.001);
+    }
+  }
+
+  @Test
+  public void testAfterHandle_draftQuotationWithNoDiscount_notAdjusted() throws Exception {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      stubNoLinkedDocuments(obDalMock);
+      JSONObject body = new JSONObject().put("response",
+          new JSONObject().put("data", new JSONArray().put(
+              quotationRecordWithDiscount(false, 0.0, 221.10))));
+      NeoContext ctx = getCtx("quot-disc-1");
+      ctx.setPreviousResult(NeoResponse.ok(body));
+
+      NeoResponse result = new SalesQuotationHeaderHandler().afterHandle(ctx);
+
+      double grand = result.getBody().getJSONObject("response").getJSONArray("data").getJSONObject(0)
+          .getDouble("grandTotalAmount");
+      assertEquals(221.10, grand, 0.001);
+    }
+  }
+
+  @Test
+  public void testAfterHandle_draftQuotationWithMaterializedDiscountLine_notAdjustedTwice()
+      throws Exception {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      stubNoLinkedDocuments(obDalMock);
+      TotalDiscountService mockService = mock(TotalDiscountService.class);
+      when(mockService.hasDiscountLine("quot-disc-1", false)).thenReturn(true);
+      SalesQuotationHeaderHandler handler = handlerWithTotalDiscountMock(mockService);
+
+      JSONObject body = new JSONObject().put("response",
+          new JSONObject().put("data", new JSONArray().put(
+              quotationRecordWithDiscount(false, 10.0, 198.99))));
+      NeoContext ctx = getCtx("quot-disc-1");
+      ctx.setPreviousResult(NeoResponse.ok(body));
+
+      NeoResponse result = handler.afterHandle(ctx);
+
+      double grand = result.getBody().getJSONObject("response").getJSONArray("data").getJSONObject(0)
+          .getDouble("grandTotalAmount");
+      assertEquals(198.99, grand, 0.001);
+    }
+  }
+
+  /**
+   * Verifies that a draft quotation with etgoTotalDiscount=10 and grandTotalAmount=221.10 is
+   * adjusted to 198.99 (221.10 x 0.90) via the shared AbstractOrderHeaderHandler logic — the
+   * same gap confirmed manually on sales-order #1000207 before this fix.
+   */
+  @Test
+  public void testAfterHandle_draftQuotationWithDiscount_adjustsGrandTotal() throws Exception {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      stubNoLinkedDocuments(obDalMock);
+      TotalDiscountService mockService = mock(TotalDiscountService.class);
+      when(mockService.hasDiscountLine("quot-disc-1", false)).thenReturn(false);
+      SalesQuotationHeaderHandler handler = handlerWithTotalDiscountMock(mockService);
+
+      JSONObject body = new JSONObject().put("response",
+          new JSONObject().put("data", new JSONArray().put(
+              quotationRecordWithDiscount(false, 10.0, 221.10))));
+      NeoContext ctx = getCtx("quot-disc-1");
+      ctx.setPreviousResult(NeoResponse.ok(body));
+
+      NeoResponse result = handler.afterHandle(ctx);
+
+      double grand = result.getBody().getJSONObject("response").getJSONArray("data").getJSONObject(0)
+          .getDouble("grandTotalAmount");
+      assertEquals(198.99, grand, 0.005);
     }
   }
 }

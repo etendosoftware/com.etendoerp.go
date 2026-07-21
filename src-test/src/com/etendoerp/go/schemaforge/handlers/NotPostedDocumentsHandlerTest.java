@@ -24,6 +24,7 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 import java.util.Collections;
@@ -49,6 +50,7 @@ import org.openbravo.model.common.enterprise.Organization;
 import com.etendoerp.go.schemaforge.NeoContext;
 import com.etendoerp.go.schemaforge.NeoEndpointType;
 import com.etendoerp.go.schemaforge.NeoResponse;
+import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
 
 /**
  * Unit tests for {@link NotPostedDocumentsHandler}.
@@ -65,6 +67,43 @@ import com.etendoerp.go.schemaforge.NeoResponse;
 @RunWith(MockitoJUnitRunner.Silent.class)
 public class NotPostedDocumentsHandlerTest {
 
+  /** Stubs {@code NeoAccessHelper.hasObuiappProcessAccess} to grant access for the "not-posted-documents" process. */
+  private MockedStatic<NeoAccessHelper> mockAccessGranted() {
+    MockedStatic<NeoAccessHelper> accessMock = mockStatic(NeoAccessHelper.class);
+    accessMock.when(() -> NeoAccessHelper.hasObuiappProcessAccess(
+        NotPostedDocumentsHandler.NOT_POSTED_DOCUMENTS_PROCESS_ID)).thenReturn(true);
+    return accessMock;
+  }
+
+  // ── handle — access control guard (ETP-4510 follow-up) ────────────────────────
+
+  /**
+   * When the current role does not have {@code hasObuiappProcessAccess} for the "Not Posted
+   * Documents" OBUIAPP process, {@code handle} must deny with a 403 before doing anything else
+   * — in particular, it must never reach {@code postingService}, since that would mean business
+   * logic ran despite the caller lacking access.
+   */
+  @Test
+  public void handleReturns403WhenAccessDenied() {
+    NotPostedDocumentsHandler handler = new NotPostedDocumentsHandler();
+    DocumentPostingService service = mock(DocumentPostingService.class);
+    handler.setPostingService(service);
+
+    try (MockedStatic<NeoAccessHelper> accessMock = mockStatic(NeoAccessHelper.class)) {
+      accessMock.when(() -> NeoAccessHelper.hasObuiappProcessAccess(
+          NotPostedDocumentsHandler.NOT_POSTED_DOCUMENTS_PROCESS_ID)).thenReturn(false);
+
+      NeoContext ctx = mock(NeoContext.class);
+      // Deliberately not stubbing getEndpointType()/getFieldName(): the guard must short-circuit
+      // before any of that is read.
+      NeoResponse resp = handler.handle(ctx);
+
+      assertNotNull(resp);
+      assertEquals(403, resp.getHttpStatus());
+      verifyNoInteractions(service);
+    }
+  }
+
   @Test
   public void carriesNotPostedDocumentsNamedQualifier() {
     Named named = NotPostedDocumentsHandler.class.getAnnotation(Named.class);
@@ -74,141 +113,155 @@ public class NotPostedDocumentsHandlerTest {
 
   @Test
   public void handleReturnsNullForUnknownEndpointType() {
-    NotPostedDocumentsHandler handler = new NotPostedDocumentsHandler();
-    NeoContext ctx = mock(NeoContext.class);
-    when(ctx.getEndpointType()).thenReturn(null);
+    try (MockedStatic<NeoAccessHelper> accessMock = mockAccessGranted()) {
+      NotPostedDocumentsHandler handler = new NotPostedDocumentsHandler();
+      NeoContext ctx = mock(NeoContext.class);
+      when(ctx.getEndpointType()).thenReturn(null);
 
-    assertNull(handler.handle(ctx));
+      assertNull(handler.handle(ctx));
+    }
   }
 
   @Test
   public void handleActionReturnsNullForUnknownAction() {
-    NotPostedDocumentsHandler handler = new NotPostedDocumentsHandler();
-    NeoContext ctx = mock(NeoContext.class);
-    when(ctx.getEndpointType()).thenReturn(NeoEndpointType.ACTION);
-    when(ctx.getFieldName()).thenReturn("unknown-action");
+    try (MockedStatic<NeoAccessHelper> accessMock = mockAccessGranted()) {
+      NotPostedDocumentsHandler handler = new NotPostedDocumentsHandler();
+      NeoContext ctx = mock(NeoContext.class);
+      when(ctx.getEndpointType()).thenReturn(NeoEndpointType.ACTION);
+      when(ctx.getFieldName()).thenReturn("unknown-action");
 
-    assertNull(handler.handle(ctx));
+      assertNull(handler.handle(ctx));
+    }
   }
 
   @Test
   public void handleSinglePostReturns200OnSuccess() throws Exception {
-    NotPostedDocumentsHandler handler = new NotPostedDocumentsHandler();
-    DocumentPostingService service = mock(DocumentPostingService.class);
-    handler.setPostingService(service);
+    try (MockedStatic<NeoAccessHelper> accessMock = mockAccessGranted()) {
+      NotPostedDocumentsHandler handler = new NotPostedDocumentsHandler();
+      DocumentPostingService service = mock(DocumentPostingService.class);
+      handler.setPostingService(service);
 
-    when(service.post("318", "REC-1"))
-        .thenReturn(new DocumentPostingService.PostResult(true, "posted"));
+      when(service.post("318", "REC-1"))
+          .thenReturn(new DocumentPostingService.PostResult(true, "posted"));
 
-    JSONObject body = new JSONObject();
-    body.put("tableId", "318");
-    body.put("recordId", "REC-1");
+      JSONObject body = new JSONObject();
+      body.put("tableId", "318");
+      body.put("recordId", "REC-1");
 
-    NeoContext ctx = mock(NeoContext.class);
-    when(ctx.getEndpointType()).thenReturn(NeoEndpointType.ACTION);
-    when(ctx.getFieldName()).thenReturn("post");
-    when(ctx.getRequestBody()).thenReturn(body);
+      NeoContext ctx = mock(NeoContext.class);
+      when(ctx.getEndpointType()).thenReturn(NeoEndpointType.ACTION);
+      when(ctx.getFieldName()).thenReturn("post");
+      when(ctx.getRequestBody()).thenReturn(body);
 
-    NeoResponse resp = handler.handle(ctx);
+      NeoResponse resp = handler.handle(ctx);
 
-    assertNotNull(resp);
-    assertEquals(200, resp.getHttpStatus());
+      assertNotNull(resp);
+      assertEquals(200, resp.getHttpStatus());
+    }
   }
 
   @Test
   public void handleSinglePostReturns422OnFailure() throws Exception {
-    NotPostedDocumentsHandler handler = new NotPostedDocumentsHandler();
-    DocumentPostingService service = mock(DocumentPostingService.class);
-    handler.setPostingService(service);
+    try (MockedStatic<NeoAccessHelper> accessMock = mockAccessGranted()) {
+      NotPostedDocumentsHandler handler = new NotPostedDocumentsHandler();
+      DocumentPostingService service = mock(DocumentPostingService.class);
+      handler.setPostingService(service);
 
-    when(service.post("318", "REC-1"))
-        .thenReturn(new DocumentPostingService.PostResult(false, "Posting failed"));
+      when(service.post("318", "REC-1"))
+          .thenReturn(new DocumentPostingService.PostResult(false, "Posting failed"));
 
-    JSONObject body = new JSONObject();
-    body.put("tableId", "318");
-    body.put("recordId", "REC-1");
+      JSONObject body = new JSONObject();
+      body.put("tableId", "318");
+      body.put("recordId", "REC-1");
 
-    NeoContext ctx = mock(NeoContext.class);
-    when(ctx.getEndpointType()).thenReturn(NeoEndpointType.ACTION);
-    when(ctx.getFieldName()).thenReturn("post");
-    when(ctx.getRequestBody()).thenReturn(body);
+      NeoContext ctx = mock(NeoContext.class);
+      when(ctx.getEndpointType()).thenReturn(NeoEndpointType.ACTION);
+      when(ctx.getFieldName()).thenReturn("post");
+      when(ctx.getRequestBody()).thenReturn(body);
 
-    NeoResponse resp = handler.handle(ctx);
+      NeoResponse resp = handler.handle(ctx);
 
-    assertNotNull(resp);
-    assertEquals(422, resp.getHttpStatus());
+      assertNotNull(resp);
+      assertEquals(422, resp.getHttpStatus());
+    }
   }
 
   @Test
   public void handleBulkPostAggregatesResults() throws Exception {
-    NotPostedDocumentsHandler handler = new NotPostedDocumentsHandler();
-    DocumentPostingService service = mock(DocumentPostingService.class);
-    handler.setPostingService(service);
+    try (MockedStatic<NeoAccessHelper> accessMock = mockAccessGranted()) {
+      NotPostedDocumentsHandler handler = new NotPostedDocumentsHandler();
+      DocumentPostingService service = mock(DocumentPostingService.class);
+      handler.setPostingService(service);
 
-    when(service.post("318", "REC-1"))
-        .thenReturn(new DocumentPostingService.PostResult(true, "ok"));
-    when(service.post("319", "REC-2"))
-        .thenReturn(new DocumentPostingService.PostResult(false, "err"));
+      when(service.post("318", "REC-1"))
+          .thenReturn(new DocumentPostingService.PostResult(true, "ok"));
+      when(service.post("319", "REC-2"))
+          .thenReturn(new DocumentPostingService.PostResult(false, "err"));
 
-    JSONObject row1 = new JSONObject();
-    row1.put("tableId", "318");
-    row1.put("recordId", "REC-1");
-    JSONObject row2 = new JSONObject();
-    row2.put("tableId", "319");
-    row2.put("recordId", "REC-2");
-    JSONArray rows = new JSONArray();
-    rows.put(row1);
-    rows.put(row2);
-    JSONObject body = new JSONObject();
-    body.put("rows", rows);
+      JSONObject row1 = new JSONObject();
+      row1.put("tableId", "318");
+      row1.put("recordId", "REC-1");
+      JSONObject row2 = new JSONObject();
+      row2.put("tableId", "319");
+      row2.put("recordId", "REC-2");
+      JSONArray rows = new JSONArray();
+      rows.put(row1);
+      rows.put(row2);
+      JSONObject body = new JSONObject();
+      body.put("rows", rows);
 
-    NeoContext ctx = mock(NeoContext.class);
-    when(ctx.getEndpointType()).thenReturn(NeoEndpointType.ACTION);
-    when(ctx.getFieldName()).thenReturn("bulk-post");
-    when(ctx.getRequestBody()).thenReturn(body);
+      NeoContext ctx = mock(NeoContext.class);
+      when(ctx.getEndpointType()).thenReturn(NeoEndpointType.ACTION);
+      when(ctx.getFieldName()).thenReturn("bulk-post");
+      when(ctx.getRequestBody()).thenReturn(body);
 
-    NeoResponse resp = handler.handle(ctx);
+      NeoResponse resp = handler.handle(ctx);
 
-    assertNotNull(resp);
-    assertEquals(200, resp.getHttpStatus());
-    assertEquals(1, resp.getBody().getInt("ok"));
-    assertEquals(2, resp.getBody().getInt("total"));
+      assertNotNull(resp);
+      assertEquals(200, resp.getHttpStatus());
+      assertEquals(1, resp.getBody().getInt("ok"));
+      assertEquals(2, resp.getBody().getInt("total"));
+    }
   }
 
   @Test
   public void handleReturns500WhenPostBodyIsMissingRequiredFields() throws Exception {
-    NotPostedDocumentsHandler handler = new NotPostedDocumentsHandler();
-    DocumentPostingService service = mock(DocumentPostingService.class);
-    handler.setPostingService(service);
+    try (MockedStatic<NeoAccessHelper> accessMock = mockAccessGranted()) {
+      NotPostedDocumentsHandler handler = new NotPostedDocumentsHandler();
+      DocumentPostingService service = mock(DocumentPostingService.class);
+      handler.setPostingService(service);
 
-    // Missing "tableId" and "recordId" → getString() throws JSONException → caught → 500
-    NeoContext ctx = mock(NeoContext.class);
-    when(ctx.getEndpointType()).thenReturn(NeoEndpointType.ACTION);
-    when(ctx.getFieldName()).thenReturn("post");
-    when(ctx.getRequestBody()).thenReturn(new JSONObject());
+      // Missing "tableId" and "recordId" → getString() throws JSONException → caught → 500
+      NeoContext ctx = mock(NeoContext.class);
+      when(ctx.getEndpointType()).thenReturn(NeoEndpointType.ACTION);
+      when(ctx.getFieldName()).thenReturn("post");
+      when(ctx.getRequestBody()).thenReturn(new JSONObject());
 
-    NeoResponse resp = handler.handle(ctx);
+      NeoResponse resp = handler.handle(ctx);
 
-    assertNotNull(resp);
-    assertEquals(500, resp.getHttpStatus());
+      assertNotNull(resp);
+      assertEquals(500, resp.getHttpStatus());
+    }
   }
 
   @Test
   public void handleReturns500WhenBulkPostBodyIsMissingRows() throws Exception {
-    NotPostedDocumentsHandler handler = new NotPostedDocumentsHandler();
-    DocumentPostingService service = mock(DocumentPostingService.class);
-    handler.setPostingService(service);
+    try (MockedStatic<NeoAccessHelper> accessMock = mockAccessGranted()) {
+      NotPostedDocumentsHandler handler = new NotPostedDocumentsHandler();
+      DocumentPostingService service = mock(DocumentPostingService.class);
+      handler.setPostingService(service);
 
-    // Missing "rows" key → getJSONArray() throws JSONException → caught → 500
-    NeoContext ctx = mock(NeoContext.class);
-    when(ctx.getEndpointType()).thenReturn(NeoEndpointType.ACTION);
-    when(ctx.getFieldName()).thenReturn("bulk-post");
-    when(ctx.getRequestBody()).thenReturn(new JSONObject());
+      // Missing "rows" key → getJSONArray() throws JSONException → caught → 500
+      NeoContext ctx = mock(NeoContext.class);
+      when(ctx.getEndpointType()).thenReturn(NeoEndpointType.ACTION);
+      when(ctx.getFieldName()).thenReturn("bulk-post");
+      when(ctx.getRequestBody()).thenReturn(new JSONObject());
 
-    NeoResponse resp = handler.handle(ctx);
+      NeoResponse resp = handler.handle(ctx);
 
-    assertNotNull(resp);
-    assertEquals(500, resp.getHttpStatus());
+      assertNotNull(resp);
+      assertEquals(500, resp.getHttpStatus());
+    }
   }
 
   // ── buildRow — APRM filtering + tableId enrichment ────────────────────────────

@@ -263,6 +263,33 @@ public class SalesInvoiceHeaderHandlerTest {
     assertEquals(470.63, grand, 0.001);
   }
 
+  /**
+   * Verifies that a draft invoice whose discount is already materialized as a real line (e.g.
+   * created from an order that already carried the discount, via InvoiceFromOrderSupport) is NOT
+   * adjusted a second time — grandTotalAmount already reflects the discount in this case, so
+   * re-applying the percentage would double-count it.
+   */
+  @Test
+  public void testAfterHandleSkipsDraftWithMaterializedDiscountLine() throws Exception {
+    TotalDiscountService mockTotalDiscountService = mock(TotalDiscountService.class);
+    when(mockTotalDiscountService.hasDiscountLine("inv-with-line", true)).thenReturn(true);
+    SalesInvoiceHeaderHandler handler = handlerWithTotalDiscountMock(mockTotalDiscountService);
+
+    JSONObject invoice = new JSONObject().put("id", "inv-with-line").put("processed", false).put(
+        "etgoTotalDiscount", 10.0).put("grandTotalAmount", 11.88).put("outstandingAmount", 11.88);
+    JSONObject body = new JSONObject().put("response",
+        new JSONObject().put("data", new JSONArray().put(invoice)));
+    NeoContext ctx = getCtx();
+    ctx.setPreviousResult(NeoResponse.ok(body));
+
+    NeoResponse result = handler.afterHandle(ctx);
+
+    assertNotNull(result);
+    double grand = result.getBody().getJSONObject("response").getJSONArray("data").getJSONObject(0).getDouble(
+        "grandTotalAmount");
+    assertEquals(11.88, grand, 0.001);
+  }
+
   // ── afterHandle() adjustment ───────────────────────────────────────────────
 
   /**

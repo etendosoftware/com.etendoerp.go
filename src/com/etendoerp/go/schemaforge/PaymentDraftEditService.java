@@ -140,13 +140,13 @@ final class PaymentDraftEditService {
    */
   static FIN_Payment prepareEditableDraft(FIN_Payment existing,
       FIN_PaymentMethod paymentMethod, FIN_FinancialAccount account, Date paymentDate,
-      BigDecimal cash) {
+      BigDecimal rate, BigDecimal cash) {
     if (isPaymentProcessed(existing)) {
       throw new OBException("Cannot edit a processed payment");
     }
     reverseConsumedCredit(existing);
     removeCreditOwnedDetails(existing);
-    reapplyDraftBasics(existing, paymentMethod, account, paymentDate, cash);
+    reapplyDraftBasics(existing, paymentMethod, account, paymentDate, rate, cash);
     return existing;
   }
 
@@ -242,14 +242,22 @@ final class PaymentDraftEditService {
     return null;
   }
 
-  /** Re-sets the editable header basics on the reused draft, mirroring {@code createDraftPayment}. */
+  /**
+   * Re-sets the editable header basics on the reused draft, mirroring {@code createDraftPayment}.
+   * The financial transaction amount is the payment amount converted to the account currency
+   * ({@code amount * rate}, rounded to the account precision by
+   * {@link PaymentCurrencyConverter#convertedAmount}), so editing/confirming a draft keeps its
+   * conversion rate. A rate of {@link BigDecimal#ONE} (same currency) preserves the original
+   * single-currency behavior.
+   */
   private static void reapplyDraftBasics(FIN_Payment payment, FIN_PaymentMethod paymentMethod,
-      FIN_FinancialAccount account, Date paymentDate, BigDecimal amount) {
+      FIN_FinancialAccount account, Date paymentDate, BigDecimal rate, BigDecimal amount) {
     payment.setPaymentDate(paymentDate);
     payment.setAccount(account);
     payment.setPaymentMethod(paymentMethod);
     payment.setAmount(amount);
-    FIN_AddPayment.setFinancialTransactionAmountAndRate(null, payment, BigDecimal.ONE, amount);
+    BigDecimal txnAmount = PaymentCurrencyConverter.convertedAmount(amount, rate, account);
+    FIN_AddPayment.setFinancialTransactionAmountAndRate(null, payment, rate, txnAmount);
     OBDal.getInstance().save(payment);
     OBDal.getInstance().flush();
   }
