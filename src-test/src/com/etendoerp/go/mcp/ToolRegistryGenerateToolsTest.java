@@ -21,6 +21,8 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.any;
+import static org.mockito.Mockito.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.when;
@@ -86,6 +88,14 @@ class ToolRegistryGenerateToolsTest {
     obDalMock = mockStatic(OBDal.class);
     accessMock = mockStatic(NeoAccessUtils.class);
     obDalMock.when(OBDal::getInstance).thenReturn(mockOBDal);
+    // ETP-4510 BUG-3: addWindowSpec now routes every spec (windowed or windowless)
+    // through hasWindowAccessForSpec instead of short-circuiting on a null AD_Window.
+    // Default all specs to accessible here so the many pre-existing tests that build a
+    // windowless spec (spec.getADWindow() == null) without caring about access keep
+    // passing; tests that specifically exercise the access-denied path override this
+    // default with a spec-specific stub.
+    accessMock.when(() -> NeoAccessUtils.hasWindowAccessForSpec(any(), anyString()))
+        .thenReturn(true);
     registry = new ToolRegistry();
   }
 
@@ -240,10 +250,11 @@ class ToolRegistryGenerateToolsTest {
   class WindowSpecTests {
 
     @Test
-    @DisplayName("window spec with null AD_Window is always accessible")
-    void windowSpecNullWindowAlwaysAccessible() {
+    @DisplayName("window spec with null AD_Window is accessible when hasWindowAccessForSpec grants it")
+    void windowSpecNullWindowAllowedProceedsNormally() {
       SFSpec spec = createWindowSpec(SPEC_SALES_ORDER);
       when(spec.getADWindow()).thenReturn(null);
+      accessMock.when(() -> NeoAccessUtils.hasWindowAccessForSpec(spec, "GET")).thenReturn(true);
       mockSpecCriteria(List.of(spec));
 
       List<McpToolDefinition> tools = registry.generateTools(scopesOf("neo:read"));
@@ -256,11 +267,40 @@ class ToolRegistryGenerateToolsTest {
       assertTrue(names.contains("neo_schema"));
     }
 
+    /**
+     * ETP-4510 BUG-3 (cycle 3): before this fix, {@code addWindowSpec} short-circuited on
+     * {@code spec.getADWindow() == null}, granting access to every windowless/combination
+     * spec unconditionally — including a caller with no role assigned. Verifies that a
+     * windowless spec denied by {@code hasWindowAccessForSpec} is now correctly excluded
+     * from the CRUD spec catalog instead of silently allowed.
+     */
+    @Test
+    @DisplayName("window spec with null AD_Window is excluded when hasWindowAccessForSpec denies it")
+    void windowSpecNullWindowDeniedIsExcluded() {
+      SFSpec spec = createWindowSpec(SPEC_SALES_ORDER);
+      when(spec.getADWindow()).thenReturn(null);
+      accessMock.when(() -> NeoAccessUtils.hasWindowAccessForSpec(spec, "GET")).thenReturn(false);
+      mockSpecCriteria(List.of(spec));
+
+      List<McpToolDefinition> tools = registry.generateTools(scopesOf("neo:read"));
+      List<String> names = toolNames(tools);
+
+      // No CRUD tools since there are no accessible window specs; only the
+      // read-scope baseline tools (neo_discover + docs + neo_widget) are present.
+      assertFalse(names.contains("neo_list"));
+      assertFalse(names.contains("neo_get"));
+      assertFalse(names.contains("neo_create"));
+      assertTrue(names.contains("neo_discover"));
+      assertTrue(names.contains("docs"));
+      assertTrue(names.contains(McpConstants.TOOL_NEO_WIDGET));
+      assertEquals(3, tools.size());
+    }
+
     @Test
     @DisplayName("window spec with accessible AD_Window is included")
     void windowSpecWithAccessibleWindow() {
       SFSpec spec = createWindowSpecWithWindow(SPEC_SALES_ORDER, WINDOW_ID);
-      accessMock.when(() -> NeoAccessUtils.hasWindowAccess(WINDOW_ID)).thenReturn(true);
+      accessMock.when(() -> NeoAccessUtils.hasWindowAccessForSpec(spec, "GET")).thenReturn(true);
       mockSpecCriteria(List.of(spec));
 
       List<McpToolDefinition> tools = registry.generateTools(scopesOf("neo:read"));
@@ -272,7 +312,7 @@ class ToolRegistryGenerateToolsTest {
     @DisplayName("window spec with denied AD_Window is excluded")
     void windowSpecWithDeniedWindow() {
       SFSpec spec = createWindowSpecWithWindow(SPEC_SALES_ORDER, WINDOW_ID);
-      accessMock.when(() -> NeoAccessUtils.hasWindowAccess(WINDOW_ID)).thenReturn(false);
+      accessMock.when(() -> NeoAccessUtils.hasWindowAccessForSpec(spec, "GET")).thenReturn(false);
       mockSpecCriteria(List.of(spec));
 
       List<McpToolDefinition> tools = registry.generateTools(scopesOf("neo:read"));

@@ -88,6 +88,10 @@ public class McpToolRouter {
   private static final String ACCESS_DENIED_FOR_CURRENT_ROLE_SUFFIX = "' for current role";
   /** OBPreference property name holding the optional Context7 API token. */
   static final String PREF_CONTEXT7_TOKEN = "ETGO_Context7Token";
+  private static final String HTTP_METHOD_GET = "GET";
+  private static final String HTTP_METHOD_POST = "POST";
+  private static final String HTTP_METHOD_PUT = "PUT";
+  private static final String HTTP_METHOD_DELETE = "DELETE";
 
 
   /**
@@ -109,7 +113,7 @@ public class McpToolRouter {
       try {
         // Resolve spec name from tool name or arguments
         String specName = ToolRegistry.resolveSpecName(toolName, arguments);
-        authorizeSpecAccess(specName);
+        authorizeSpecAccess(specName, resolveAccessMethod(toolName));
 
         switch (toolName) {
           case "neo_discover":
@@ -408,7 +412,7 @@ public class McpToolRouter {
     NeoContext ctx = NeoContext.builder()
         .specName(specName)
         .entityName(entityName)
-        .httpMethod("POST")
+        .httpMethod(HTTP_METHOD_POST)
         .adTab(adTab)
         .sfEntity(sfEntity)
         .obContext(OBContext.getOBContext())
@@ -451,7 +455,7 @@ public class McpToolRouter {
     // Run the entity's NeoHandler pre-hook (parity with the REST CRUD path): it may
     // validate and mutate filteredBody (e.g. inject derived FK values) before persist.
     NeoHandler handler = McpHookExecutor.resolveEntityHandler(sfEntity);
-    NeoContext hookCtx = McpHookExecutor.buildHookContext(specName, entityName, "POST", null, filteredBody, adTab, sfEntity);
+    NeoContext hookCtx = McpHookExecutor.buildHookContext(specName, entityName, HTTP_METHOD_POST, null, filteredBody, adTab, sfEntity);
     JSONObject preHookResult = McpHookExecutor.runPreHook(handler, hookCtx);
     if (preHookResult != null) {
       return preHookResult;
@@ -504,7 +508,7 @@ public class McpToolRouter {
 
     // Run the entity's NeoHandler pre-hook (parity with the REST CRUD path).
     NeoHandler handler = McpHookExecutor.resolveEntityHandler(sfEntity);
-    NeoContext hookCtx = McpHookExecutor.buildHookContext(specName, entityName, "PUT", recordId, filteredBody, adTab, sfEntity);
+    NeoContext hookCtx = McpHookExecutor.buildHookContext(specName, entityName, HTTP_METHOD_PUT, recordId, filteredBody, adTab, sfEntity);
     JSONObject preHookResult = McpHookExecutor.runPreHook(handler, hookCtx);
     if (preHookResult != null) {
       return preHookResult;
@@ -554,7 +558,7 @@ public class McpToolRouter {
     // Run the entity's NeoHandler pre-hook (parity with the REST CRUD path). A
     // handler may fully handle the delete (e.g. a soft-archive) or reject it.
     NeoHandler handler = McpHookExecutor.resolveEntityHandler(sfEntity);
-    NeoContext hookCtx = McpHookExecutor.buildHookContext(specName, entityName, "DELETE", recordId, null, adTab, sfEntity);
+    NeoContext hookCtx = McpHookExecutor.buildHookContext(specName, entityName, HTTP_METHOD_DELETE, recordId, null, adTab, sfEntity);
     JSONObject preHookResult = McpHookExecutor.runPreHook(handler, hookCtx);
     if (preHookResult != null) {
       return preHookResult;
@@ -601,7 +605,7 @@ public class McpToolRouter {
     // Find the AD_Column by DB column name or DAL property name (field name from schema)
     Entity dalEntity = ModelProvider.getInstance()
       .getEntityByTableName(adTab.getTable().getDBTableName());
-    Column adColumn = McpToolRouterSupport.findColumn(adTab, columnName, dalEntity);
+    Column adColumn = McpSchemaFieldBuilder.findColumn(adTab, columnName, dalEntity);
 
     if (adColumn == null) {
       throw new IllegalArgumentException("Column not found in table: " + columnName);
@@ -649,7 +653,7 @@ public class McpToolRouter {
     NeoContext ctx = NeoContext.builder()
         .specName(specName)
         .entityName(entityName)
-        .httpMethod("GET")
+        .httpMethod(HTTP_METHOD_GET)
         .adTab(adTab)
         .sfEntity(sfEntity)
         .obContext(OBContext.getOBContext())
@@ -706,11 +710,11 @@ public class McpToolRouter {
     Entity dalEntity = ModelProvider.getInstance()
         .getEntityByTableName(adTab.getTable().getDBTableName());
 
-    McpToolRouterSupport.FieldMetadata fieldMetadata =
-        McpToolRouterSupport.loadFieldMetadata(sfEntity);
+    McpSchemaFieldBuilder.FieldMetadata fieldMetadata =
+        McpSchemaFieldBuilder.loadFieldMetadata(sfEntity);
     Map<String, String> promptByColumnId =
-        McpToolRouterSupport.loadPromptByColumnId(sfEntity);
-    JSONArray fieldsArray = McpToolRouterSupport.buildSchemaFieldsArray(adTab, dalEntity,
+        McpSchemaFieldBuilder.loadPromptByColumnId(sfEntity);
+    JSONArray fieldsArray = McpSchemaFieldBuilder.buildSchemaFieldsArray(adTab, dalEntity,
         fieldMetadata.visibilityByColumnId, fieldMetadata.businessCriticalByColumnId,
         promptByColumnId, SYSTEM_COLUMNS, SELECTOR_REFS);
 
@@ -723,16 +727,16 @@ public class McpToolRouter {
     // Methods from SFEntity config
     JSONArray methods = new JSONArray();
     if (Boolean.TRUE.equals(sfEntity.isGet()) || Boolean.TRUE.equals(sfEntity.isGetByID())) {
-      methods.put("GET");
+      methods.put(HTTP_METHOD_GET);
     }
     if (Boolean.TRUE.equals(sfEntity.isPost())) {
-      methods.put("POST");
+      methods.put(HTTP_METHOD_POST);
     }
     if (Boolean.TRUE.equals(sfEntity.isPut())) {
-      methods.put("PUT");
+      methods.put(HTTP_METHOD_PUT);
     }
     if (Boolean.TRUE.equals(sfEntity.isDelete())) {
-      methods.put("DELETE");
+      methods.put(HTTP_METHOD_DELETE);
     }
     entitySchema.put("methods", methods);
     entitySchema.put("fields", fieldsArray);
@@ -753,11 +757,11 @@ public class McpToolRouter {
   }
 
   static String mapColumnTypeStatic(String refId) {
-    return McpToolRouterSupport.mapColumnType(refId);
+    return McpSchemaFieldBuilder.mapColumnType(refId);
   }
 
   static String mapSelectorTypeStatic(String refId) {
-    return McpToolRouterSupport.mapSelectorType(refId);
+    return McpSchemaFieldBuilder.mapSelectorType(refId);
   }
 
   // ── neo_batch ─────────────────────────────────────────────────────────
@@ -789,6 +793,10 @@ public class McpToolRouter {
       // windows, and the top-level authorizeSpecAccess(null) on neo_batch is a
       // no-op. Authorise each distinct spec before any DAL work happens so an
       // LLM agent cannot smuggle writes into a spec it lacks CRUD access to.
+      // Every batch operation is a create (BatchService#processOperation only
+      // ever calls createRecord — there is no update/delete op type), so this
+      // is a write-tier ("POST") check: a read-only AD_Window_Access role must
+      // be denied here exactly as it would be for a direct neo_create call.
       java.util.Set<String> seen = new java.util.HashSet<>();
       for (int i = 0; i < operations.length(); i++) {
         JSONObject op = operations.optJSONObject(i);
@@ -797,7 +805,7 @@ public class McpToolRouter {
         }
         String specName = op.optString("spec", null);
         if (StringUtils.isNotBlank(specName) && seen.add(specName)) {
-          authorizeSpecAccess(specName);
+          authorizeSpecAccess(specName, HTTP_METHOD_POST);
         }
       }
       JSONObject result = BatchService.forBatchOnly().executeBatch(operations);
@@ -940,7 +948,7 @@ public class McpToolRouter {
     NeoContext ctx = NeoContext.builder()
         .specName(specName)
         .entityName(reportEntity.getName())
-        .httpMethod("POST")
+        .httpMethod(HTTP_METHOD_POST)
         .requestBody(parameters)
         .sfEntity(reportEntity)
         .obContext(OBContext.getOBContext())
@@ -953,14 +961,57 @@ public class McpToolRouter {
     return McpHookExecutor.neoResponseToMcpResult(neoResponse);
   }
 
+  /**
+   * Read-tier ({@code GET}) spec authorization. Prefer
+   * {@link #authorizeSpecAccess(String, String)} whenever the caller knows the
+   * MCP tool's write intent.
+   */
   private void authorizeSpecAccess(String specName) throws Exception {
+    authorizeSpecAccess(specName, HTTP_METHOD_GET);
+  }
+
+  /**
+   * Authorizes the current role against {@code specName} for the given HTTP-method
+   * equivalent, enforcing the read-only vs. full-access {@code AD_Window_Access}
+   * tiering (ETP-4510) via {@link McpToolRouterSupport#hasSpecAccess(SFSpec, String, String)}.
+   *
+   * @param specName   the spec name resolved from the tool call (blank/{@code null} is a no-op —
+   *                   some tools, e.g. {@code neo_discover}, have no single spec to authorize)
+   * @param httpMethod the HTTP-method equivalent of the MCP operation being authorized
+   *                   (e.g. {@code "POST"} for {@code neo_create})
+   */
+  private void authorizeSpecAccess(String specName, String httpMethod) throws Exception {
     if (StringUtils.isBlank(specName)) {
       return;
     }
     SFSpec spec = McpToolRouterSupport.findActiveSpecByName(specName);
-    if (!McpToolRouterSupport.hasSpecAccess(spec, spec.getSpecType())) {
+    if (!McpToolRouterSupport.hasSpecAccess(spec, spec.getSpecType(), httpMethod)) {
       throw new SecurityException("Access denied to spec '" + specName
           + ACCESS_DENIED_FOR_CURRENT_ROLE_SUFFIX);
+    }
+  }
+
+  /**
+   * Maps an MCP tool name to the HTTP-method equivalent used for
+   * {@code AD_Window_Access} read/write tiering (ETP-4510). Mutating CRUD tools map to
+   * their REST NEO Headless counterpart; every other tool (reads, process/report
+   * execution, discovery) is treated as a read for window-access purposes — process and
+   * report access are authorized separately and are unaffected by this method string.
+   *
+   * @param toolName the MCP tool name (e.g. {@code "neo_create"})
+   * @return {@code "POST"}, {@code "PUT"}, or {@code "DELETE"} for the corresponding
+   *         mutating tool; {@code "GET"} for everything else
+   */
+  private static String resolveAccessMethod(String toolName) {
+    switch (toolName) {
+      case "neo_create":
+        return HTTP_METHOD_POST;
+      case "neo_update":
+        return HTTP_METHOD_PUT;
+      case "neo_delete":
+        return HTTP_METHOD_DELETE;
+      default:
+        return HTTP_METHOD_GET;
     }
   }
 

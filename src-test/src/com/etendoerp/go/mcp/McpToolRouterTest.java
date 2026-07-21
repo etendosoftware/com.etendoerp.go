@@ -21,7 +21,9 @@ import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
+import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.when;
 
 import java.util.Collections;
 import java.util.HashSet;
@@ -33,6 +35,8 @@ import org.junit.Test;
 import org.mockito.MockedStatic;
 import org.openbravo.base.exception.OBSecurityException;
 import org.openbravo.dal.core.OBContext;
+
+import com.etendoerp.go.schemaforge.data.SFSpec;
 
 /**
  * Unit tests for {@link McpToolRouter} static helpers, MCP content formatting,
@@ -736,6 +740,90 @@ public class McpToolRouterTest {
     }
   }
 
+  // ── route() — ETP-4510 write-tier enforcement (MCP BLOCKER fix) ───────
+
+  /**
+   * Router-level regression test for the ETP-4510 code-review BLOCKER: MCP write
+   * tools (neo_create/neo_update/neo_delete) must deny a role whose
+   * {@code AD_Window_Access} row is read-only, exactly like the REST NEO Headless
+   * path does. Before the fix, {@code route()} authorized every tool call through
+   * the 1-arg (GET-tier) {@code hasWindowAccess}, so a read-only role could still
+   * mutate data via MCP.
+   */
+  @Test
+  public void testRouteDeniesWriteToolsForReadOnlyWindowAccess() throws Exception {
+    McpToolRouter router = new McpToolRouter();
+    Set<String> wildcard = Set.of("neo:*");
+    SFSpec spec = mock(SFSpec.class);
+
+    String[] writeTools = {TOOL_NEO_CREATE, TOOL_NEO_UPDATE, TOOL_NEO_DELETE};
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+        MockedStatic<McpToolRouterSupport> supportMock = mockStatic(McpToolRouterSupport.class)) {
+      ctxMock.when(OBContext::setAdminMode).thenAnswer(inv -> null);
+      ctxMock.when(OBContext::restorePreviousMode).thenAnswer(inv -> null);
+      when(spec.getSpecType()).thenReturn("W");
+      supportMock.when(() -> McpToolRouterSupport.findActiveSpecByName(SPEC_SALES_ORDER))
+          .thenReturn(spec);
+      // Read-only role: GET (discovery/list) is allowed, every write method is denied —
+      // this is what a real read-only AD_Window_Access row now produces via
+      // NeoAccessHelper.hasWindowAccess(windowId, httpMethod).
+      supportMock.when(() -> McpToolRouterSupport.hasSpecAccess(spec, "W", "GET"))
+          .thenReturn(true);
+      supportMock.when(() -> McpToolRouterSupport.hasSpecAccess(spec, "W", "POST"))
+          .thenReturn(false);
+      supportMock.when(() -> McpToolRouterSupport.hasSpecAccess(spec, "W", "PUT"))
+          .thenReturn(false);
+      supportMock.when(() -> McpToolRouterSupport.hasSpecAccess(spec, "W", "DELETE"))
+          .thenReturn(false);
+
+      for (String tool : writeTools) {
+        JSONObject args = new JSONObject().put("spec", SPEC_SALES_ORDER);
+        JSONObject result = router.route(tool, args, wildcard);
+
+        assertTrue("Expected " + tool + " to be denied for a read-only window",
+            result.optBoolean(FIELD_IS_ERROR, false));
+        String errorText = result.getJSONArray(FIELD_CONTENT).getJSONObject(0).getString("text");
+        assertTrue(tool + " should be denied with an access-denied message, got: " + errorText,
+            errorText.contains("Access denied"));
+      }
+    }
+  }
+
+  /**
+   * Companion to {@link #testRouteDeniesWriteToolsForReadOnlyWindowAccess}: the same
+   * read-only window must still pass authorization for a read tool (neo_list), proving
+   * the fix only tightens writes and does not regress reads.
+   */
+  @Test
+  public void testRouteAllowsReadToolsForReadOnlyWindowAccess() throws Exception {
+    McpToolRouter router = new McpToolRouter();
+    Set<String> wildcard = Set.of("neo:*");
+    SFSpec spec = mock(SFSpec.class);
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+        MockedStatic<McpToolRouterSupport> supportMock = mockStatic(McpToolRouterSupport.class)) {
+      ctxMock.when(OBContext::setAdminMode).thenAnswer(inv -> null);
+      ctxMock.when(OBContext::restorePreviousMode).thenAnswer(inv -> null);
+      when(spec.getSpecType()).thenReturn("W");
+      supportMock.when(() -> McpToolRouterSupport.findActiveSpecByName(SPEC_SALES_ORDER))
+          .thenReturn(spec);
+      supportMock.when(() -> McpToolRouterSupport.hasSpecAccess(spec, "W", "GET"))
+          .thenReturn(true);
+
+      JSONObject args = new JSONObject().put("spec", SPEC_SALES_ORDER);
+      JSONObject result = router.route(TOOL_NEO_LIST, args, wildcard);
+
+      // Authorization passed (no SecurityException) — any remaining error is about
+      // missing DAL/entity resolution, never "Access denied".
+      if (result.optBoolean(FIELD_IS_ERROR, false)) {
+        String errorText = result.getJSONArray(FIELD_CONTENT).getJSONObject(0).getString("text");
+        assertFalse("neo_list should not be blocked by access control for a read-only window, "
+            + "got: " + errorText, errorText.contains("Access denied"));
+      }
+    }
+  }
+
   // ── route() — null args for each tool type ────────────────────────────
 
   /**
@@ -976,7 +1064,7 @@ public class McpToolRouterTest {
     assertFalse(McpToolRouterSupport.isMandatoryValueMissing(body, "someField"));
   }
 
-  // ── McpToolRouterSupport.mapColumnType exhaustive test ────────────────
+  // ── McpSchemaFieldBuilder.mapColumnType exhaustive test ────────────────
 
   /** Tests that all known reference IDs are mapped exhaustively via support class. */
   @Test
@@ -984,46 +1072,46 @@ public class McpToolRouterTest {
     String[] stringRefs = {"10", "14", "34"};
     for (String ref : stringRefs) {
       assertEquals("string for ref " + ref, "string",
-          McpToolRouterSupport.mapColumnType(ref));
+          McpSchemaFieldBuilder.mapColumnType(ref));
     }
 
     String[] numberRefs = {"11", "22", "29", "12", "800008", "800019"};
     for (String ref : numberRefs) {
       assertEquals("number for ref " + ref, "number",
-          McpToolRouterSupport.mapColumnType(ref));
+          McpSchemaFieldBuilder.mapColumnType(ref));
     }
 
-    assertEquals("boolean", McpToolRouterSupport.mapColumnType("20"));
-    assertEquals("date", McpToolRouterSupport.mapColumnType("15"));
-    assertEquals("datetime", McpToolRouterSupport.mapColumnType("16"));
-    assertEquals("time", McpToolRouterSupport.mapColumnType("24"));
-    assertEquals("button", McpToolRouterSupport.mapColumnType("28"));
-    assertEquals("list", McpToolRouterSupport.mapColumnType("17"));
-    assertEquals("id", McpToolRouterSupport.mapColumnType("13"));
+    assertEquals("boolean", McpSchemaFieldBuilder.mapColumnType("20"));
+    assertEquals("date", McpSchemaFieldBuilder.mapColumnType("15"));
+    assertEquals("datetime", McpSchemaFieldBuilder.mapColumnType("16"));
+    assertEquals("time", McpSchemaFieldBuilder.mapColumnType("24"));
+    assertEquals("button", McpSchemaFieldBuilder.mapColumnType("28"));
+    assertEquals("list", McpSchemaFieldBuilder.mapColumnType("17"));
+    assertEquals("id", McpSchemaFieldBuilder.mapColumnType("13"));
 
-    assertEquals("foreignKey", McpToolRouterSupport.mapColumnType("19"));
-    assertEquals("foreignKey", McpToolRouterSupport.mapColumnType("18"));
-    assertEquals("foreignKey", McpToolRouterSupport.mapColumnType("30"));
+    assertEquals("foreignKey", McpSchemaFieldBuilder.mapColumnType("19"));
+    assertEquals("foreignKey", McpSchemaFieldBuilder.mapColumnType("18"));
+    assertEquals("foreignKey", McpSchemaFieldBuilder.mapColumnType("30"));
 
-    assertEquals("string", McpToolRouterSupport.mapColumnType("99999"));
-    assertEquals("string", McpToolRouterSupport.mapColumnType(null));
+    assertEquals("string", McpSchemaFieldBuilder.mapColumnType("99999"));
+    assertEquals("string", McpSchemaFieldBuilder.mapColumnType(null));
   }
 
-  // ── McpToolRouterSupport.mapSelectorType exhaustive test ──────────────
+  // ── McpSchemaFieldBuilder.mapSelectorType exhaustive test ──────────────
 
   /** Tests that all selector type mappings are correct via support class. */
   @Test
   public void testMapSelectorTypeExhaustiveSwitch() {
-    assertEquals("TableDir", McpToolRouterSupport.mapSelectorType("19"));
-    assertEquals("Table", McpToolRouterSupport.mapSelectorType("18"));
-    assertEquals("Search", McpToolRouterSupport.mapSelectorType("30"));
-    assertEquals("OBUISEL", McpToolRouterSupport.mapSelectorType(
+    assertEquals("TableDir", McpSchemaFieldBuilder.mapSelectorType("19"));
+    assertEquals("Table", McpSchemaFieldBuilder.mapSelectorType("18"));
+    assertEquals("Search", McpSchemaFieldBuilder.mapSelectorType("30"));
+    assertEquals("OBUISEL", McpSchemaFieldBuilder.mapSelectorType(
         "95E2A8B50A254B2AAE6774B8C2F28120"));
 
-    assertNull(McpToolRouterSupport.mapSelectorType(null));
-    assertNull(McpToolRouterSupport.mapSelectorType("10"));
-    assertNull(McpToolRouterSupport.mapSelectorType("20"));
-    assertNull(McpToolRouterSupport.mapSelectorType("unknown"));
+    assertNull(McpSchemaFieldBuilder.mapSelectorType(null));
+    assertNull(McpSchemaFieldBuilder.mapSelectorType("10"));
+    assertNull(McpSchemaFieldBuilder.mapSelectorType("20"));
+    assertNull(McpSchemaFieldBuilder.mapSelectorType("unknown"));
   }
 
   // ── McpToolException ──────────────────────────────────────────────────

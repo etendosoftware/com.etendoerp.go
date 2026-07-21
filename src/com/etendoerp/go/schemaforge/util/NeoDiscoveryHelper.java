@@ -285,8 +285,7 @@ public final class NeoDiscoveryHelper {
   private static boolean isSpecAccessible(SFSpec spec) {
     String specType = spec.getSpecType();
     if ("W".equals(specType)) {
-      Window specWindow = spec.getADWindow();
-      return specWindow == null || NeoAccessHelper.hasWindowAccess(specWindow.getId());
+      return NeoAccessHelper.hasWindowAccessForSpec(spec, "GET");
     }
     if ("P".equals(specType) || "R".equals(specType)) {
       Process adProcess = NeoAccessHelper.resolveProcess(spec);

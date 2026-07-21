@@ -418,7 +418,7 @@ public class McpResourceProvider {
       JSONObject fieldObj = new JSONObject();
       fieldObj.put("name", column.getDBColumnName());
       fieldObj.put("label", column.getName());
-      fieldObj.put("type", McpToolRouterSupport.mapColumnType(refId));
+      fieldObj.put("type", McpSchemaFieldBuilder.mapColumnType(refId));
       fieldObj.put("readOnly", Boolean.TRUE.equals(field.isReadOnly()));
       fieldObj.put("required", column.isMandatory());
 
@@ -429,10 +429,10 @@ public class McpResourceProvider {
       }
 
       // Selector info for FK references
-      boolean hasSelector = McpToolRouterSupport.mapSelectorType(refId) != null;
+      boolean hasSelector = McpSchemaFieldBuilder.mapSelectorType(refId) != null;
       if (hasSelector) {
         fieldObj.put("hasSelector", true);
-        fieldObj.put("selectorType", McpToolRouterSupport.mapSelectorType(refId));
+        fieldObj.put("selectorType", McpSchemaFieldBuilder.mapSelectorType(refId));
       }
 
       arr.put(fieldObj);

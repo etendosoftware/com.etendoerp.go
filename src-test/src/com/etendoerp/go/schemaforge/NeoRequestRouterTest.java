@@ -318,7 +318,7 @@ class NeoRequestRouterTest {
     Window window = mock(Window.class);
     when(window.getId()).thenReturn("win-id");
     when(spec.getADWindow()).thenReturn(window);
-    when(servlet.authenticator.hasWindowAccess("win-id")).thenReturn(true);
+    when(servlet.authenticator.hasWindowAccessForSpec(spec, "GET")).thenReturn(true);
     when(servlet.subEndpointDispatcher.handleWindowSubEndpoint(
         eq(spec), eq(pathInfo), eq("GET"), eq(request), eq(response))).thenReturn(false);
 
@@ -444,12 +444,56 @@ class NeoRequestRouterTest {
     Window window = mock(Window.class);
     when(window.getId()).thenReturn("win-id");
     when(spec.getADWindow()).thenReturn(window);
-    when(servlet.authenticator.hasWindowAccess("win-id")).thenReturn(false);
+    when(servlet.authenticator.hasWindowAccessForSpec(spec, "GET")).thenReturn(false);
     NeoPathInfo pathInfo = new NeoPathInfo("myWindow", "myEntity", null);
 
     router.handleWindowSpecRequest(spec, pathInfo, "GET", request, response);
 
     verify(servlet).sendError(eq(response), eq(HttpServletResponse.SC_FORBIDDEN), anyString());
+  }
+
+  /**
+   * ETP-4510 BUG-3: before this fix, {@code spec.getADWindow() == null} skipped the
+   * access check entirely, for every role including one with no role assigned at all.
+   * Verifies the router now always asks {@code hasWindowAccessForSpec} — even for a
+   * windowless spec — and honors a denial with a 403, rather than silently allowing it.
+   *
+   * <p>PR #747 review-comment fix: also pins the exact 403 message text. This path is the
+   * windowless/"combination" branch of {@code hasWindowAccessForSpec} — there is no single
+   * window being checked — so the message must NOT claim "Access denied to window", which
+   * would be misleading here. It is phrased at the spec level instead, so it reads correctly
+   * for both windowed and windowless specs. Captured explicitly (not {@code anyString()}) so
+   * a regression back to the "window" wording fails this test.</p>
+   */
+  @Test
+  void testHandleWindowSpecWindowlessSpecStillChecksAccess() throws Exception {
+    SFSpec spec = mock(SFSpec.class);
+    when(spec.getADWindow()).thenReturn(null);
+    when(servlet.authenticator.hasWindowAccessForSpec(spec, "GET")).thenReturn(false);
+    NeoPathInfo pathInfo = new NeoPathInfo("myWindow", "myEntity", null);
+
+    router.handleWindowSpecRequest(spec, pathInfo, "GET", request, response);
+
+    ArgumentCaptor<String> messageCaptor = ArgumentCaptor.forClass(String.class);
+    verify(servlet).sendError(eq(response), eq(HttpServletResponse.SC_FORBIDDEN),
+        messageCaptor.capture());
+    assertEquals("Access denied to spec for current role", messageCaptor.getValue());
+  }
+
+  /**
+   * Companion: a windowless spec for which hasWindowAccessForSpec grants access (e.g. no
+   * combination data + an authenticated role) proceeds normally, past the access gate.
+   */
+  @Test
+  void testHandleWindowSpecWindowlessSpecAllowedProceedsNormally() throws Exception {
+    SFSpec spec = mock(SFSpec.class);
+    when(spec.getADWindow()).thenReturn(null);
+    when(servlet.authenticator.hasWindowAccessForSpec(spec, "GET")).thenReturn(true);
+    NeoPathInfo pathInfo = new NeoPathInfo("myWindow", null, null);
+
+    router.handleWindowSpecRequest(spec, pathInfo, "GET", request, response);
+
+    verify(servlet.discoveryHandler).handleSpecDescribe(response, spec);
   }
 
   /**
@@ -461,7 +505,7 @@ class NeoRequestRouterTest {
     Window window = mock(Window.class);
     when(window.getId()).thenReturn("win-id");
     when(spec.getADWindow()).thenReturn(window);
-    when(servlet.authenticator.hasWindowAccess("win-id")).thenReturn(true);
+    when(servlet.authenticator.hasWindowAccessForSpec(spec, "GET")).thenReturn(true);
     NeoPathInfo pathInfo = new NeoPathInfo("myWindow", null, null);
 
     router.handleWindowSpecRequest(spec, pathInfo, "GET", request, response);
@@ -478,7 +522,7 @@ class NeoRequestRouterTest {
     Window window = mock(Window.class);
     when(window.getId()).thenReturn("win-id");
     when(spec.getADWindow()).thenReturn(window);
-    when(servlet.authenticator.hasWindowAccess("win-id")).thenReturn(true);
+    when(servlet.authenticator.hasWindowAccessForSpec(spec, "POST")).thenReturn(true);
     NeoPathInfo pathInfo = new NeoPathInfo("myWindow", null, null);
 
     router.handleWindowSpecRequest(spec, pathInfo, "POST", request, response);
