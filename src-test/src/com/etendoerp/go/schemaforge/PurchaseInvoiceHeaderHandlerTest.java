@@ -65,7 +65,11 @@ import org.openbravo.model.common.invoice.Invoice;
  * <ul>
  *   <li>{@code afterHandle()} early-exit paths (non-GET, null/empty data).</li>
  *   <li>{@code afterHandle()} single-record enrichment — linked receipts query.</li>
- *   <li>{@code afterHandle()} list mode — no enrichment (recordId is null).</li>
+ *   <li>{@code afterHandle()} list mode — total-discount adjustment applies to every record, but
+ *       the detail-only enrichments (linked receipts, origin invoice, subtype, etc.) do not
+ *       (recordId is null).</li>
+ *   <li>{@code afterHandle()} total-discount adjustment for draft invoices (grandTotalAmount /
+ *       outstandingAmount), inherited from {@link AbstractInvoiceHeaderHandler}.</li>
  *   <li>DB error resilience in enrichLinkedReceipts.</li>
  * </ul>
  */
@@ -143,6 +147,94 @@ public class PurchaseInvoiceHeaderHandlerTest {
     NeoResponse result = handler.afterHandle(ctx);
     assertNotNull(result);
     assertEquals(200, result.getHttpStatus());
+  }
+
+  // ── afterHandle — total discount adjustment (ETP-4029 follow-up) ─────────
+
+  private static JSONObject invoiceRecord(boolean processed, double discount, double grandTotal,
+      double outstanding) throws Exception {
+    return new JSONObject().put("id", "pinv-1").put("processed", processed).put(
+        "etgoTotalDiscount", discount).put("grandTotalAmount", grandTotal).put(
+        "outstandingAmount", outstanding);
+  }
+
+  private static NeoContext getCtx() {
+    return NeoContext.builder().httpMethod("GET").endpointType(NeoEndpointType.CRUD).build();
+  }
+
+  @Test
+  public void afterHandle_processedInvoice_notAdjusted() throws Exception {
+    JSONObject body = new JSONObject().put("response",
+        new JSONObject().put("data", new JSONArray().put(invoiceRecord(true, 10.0, 470.63, 470.63))));
+    NeoContext ctx = getCtx();
+    ctx.setPreviousResult(NeoResponse.ok(body));
+
+    NeoResponse result = handler.afterHandle(ctx);
+
+    double grand = result.getBody().getJSONObject("response").getJSONArray("data").getJSONObject(0)
+        .getDouble("grandTotalAmount");
+    assertEquals(470.63, grand, 0.001);
+  }
+
+  @Test
+  public void afterHandle_draftWithNoDiscount_notAdjusted() throws Exception {
+    JSONObject body = new JSONObject().put("response",
+        new JSONObject().put("data", new JSONArray().put(invoiceRecord(false, 0.0, 470.63, 470.63))));
+    NeoContext ctx = getCtx();
+    ctx.setPreviousResult(NeoResponse.ok(body));
+
+    NeoResponse result = handler.afterHandle(ctx);
+
+    double grand = result.getBody().getJSONObject("response").getJSONArray("data").getJSONObject(0)
+        .getDouble("grandTotalAmount");
+    assertEquals(470.63, grand, 0.001);
+  }
+
+  @Test
+  public void afterHandle_draftWithMaterializedDiscountLine_notAdjustedTwice() throws Exception {
+    when(totalDiscountService.hasDiscountLine("pinv-1", true)).thenReturn(true);
+    JSONObject body = new JSONObject().put("response",
+        new JSONObject().put("data", new JSONArray().put(invoiceRecord(false, 10.0, 108.90, 108.90))));
+    NeoContext ctx = getCtx();
+    ctx.setPreviousResult(NeoResponse.ok(body));
+
+    NeoResponse result = handler.afterHandle(ctx);
+
+    double grand = result.getBody().getJSONObject("response").getJSONArray("data").getJSONObject(0)
+        .getDouble("grandTotalAmount");
+    assertEquals(108.90, grand, 0.001);
+  }
+
+  @Test
+  public void afterHandle_draftWithDiscount_adjustsGrandTotalAndOutstanding() throws Exception {
+    JSONObject body = new JSONObject().put("response",
+        new JSONObject().put("data", new JSONArray().put(invoiceRecord(false, 10.0, 121.00, 121.00))));
+    NeoContext ctx = getCtx();
+    ctx.setPreviousResult(NeoResponse.ok(body));
+
+    NeoResponse result = handler.afterHandle(ctx);
+
+    JSONObject rec = result.getBody().getJSONObject("response").getJSONArray("data").getJSONObject(0);
+    assertEquals(108.90, rec.getDouble("grandTotalAmount"), 0.005);
+    assertEquals(108.90, rec.getDouble("outstandingAmount"), 0.005);
+  }
+
+  @Test
+  public void afterHandle_listMode_adjustsDiscountForEveryRecord() throws Exception {
+    JSONArray data = new JSONArray()
+        .put(new JSONObject().put("id", "pinv-1").put("processed", false).put("etgoTotalDiscount", 10.0)
+            .put("grandTotalAmount", 100.0).put("outstandingAmount", 100.0))
+        .put(new JSONObject().put("id", "pinv-2").put("processed", false).put("etgoTotalDiscount", 20.0)
+            .put("grandTotalAmount", 200.0).put("outstandingAmount", 200.0));
+    JSONObject body = new JSONObject().put("response", new JSONObject().put("data", data));
+    NeoContext ctx = getCtx();
+    ctx.setPreviousResult(NeoResponse.ok(body));
+
+    NeoResponse result = handler.afterHandle(ctx);
+
+    JSONArray resultData = result.getBody().getJSONObject("response").getJSONArray("data");
+    assertEquals(90.0, resultData.getJSONObject(0).getDouble("grandTotalAmount"), 0.001);
+    assertEquals(160.0, resultData.getJSONObject(1).getDouble("grandTotalAmount"), 0.001);
   }
 
   // ── afterHandle — single record, enrichLinkedReceipts ────────────────────
