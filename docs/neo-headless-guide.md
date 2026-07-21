@@ -1232,7 +1232,9 @@ Dos specs de tipo reporte (`not-posted-documents`, `aging-receivable`) no tienen
 
 ## 19. Menu de Navegacion (SFListMenu)
 
-`SFListMenu` (`GET /webhooks/SFListMenu`) expone el arbol de `AD_Menu` -- o una busqueda plana filtrada con `?q=` -- como JSON, podado a lo que el role del request puede alcanzar. Es el webhook que alimenta el menu de navegacion del SPA. A diferencia de los endpoints `/sws/neo/*` de las secciones anteriores, vive en la infraestructura de Webhooks, junto a `SFUpsertSpec`/`SFPopulateSpec` (§5), no bajo el servlet de NEO.
+`SFListMenu` (`GET /webhooks/SFListMenu`) expone el arbol de `AD_Menu` -- o una busqueda plana filtrada con `?q=` -- como JSON, podado a lo que el role del request puede alcanzar. Es el webhook de menu filtrado por role, correctamente implementado y disponible para que cualquier cliente lo consuma. A diferencia de los endpoints `/sws/neo/*` de las secciones anteriores, vive en la infraestructura de Webhooks, junto a `SFUpsertSpec`/`SFPopulateSpec` (§5), no bajo el servlet de NEO.
+
+> **Nota:** el sidebar del SPA de Go (`tools/app-shell` en `etendo_schema_forge`) todavia no consume este webhook -- sigue renderizando la navegacion desde un mock estatico `menu.json`, asi que el filtrado de menu por role todavia no se refleja en el frontend en ejecucion. Trackeado como ETP-4598.
 
 ### Endpoints
 

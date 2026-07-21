@@ -761,7 +761,9 @@ NEO Headless enforces security at multiple levels:
 
 ## 8. Navigation Menu (SFListMenu Webhook)
 
-`SFListMenu` (`GET /webhooks/SFListMenu`) returns the `AD_Menu` tree — or a flat filtered search with `?q=` — as JSON, pruned down to what the requesting role can actually reach. It is the menu the client SPA renders. Unlike the `/sws/neo/*` endpoints above, it lives in the Webhooks module infrastructure, alongside the `SFUpsertSpec`/`SFPopulateSpec` configuration webhooks (§5.1), not under the NEO servlet.
+`SFListMenu` (`GET /webhooks/SFListMenu`) returns the `AD_Menu` tree — or a flat filtered search with `?q=` — as JSON, pruned down to what the requesting role can actually reach. It is the role-filtered menu-tree webhook, correctly implemented and available for any client to consume. Unlike the `/sws/neo/*` endpoints above, it lives in the Webhooks module infrastructure, alongside the `SFUpsertSpec`/`SFPopulateSpec` configuration webhooks (§5.1), not under the NEO servlet.
+
+> **Note:** the Go SPA sidebar (`tools/app-shell` in `etendo_schema_forge`) does not consume this webhook yet — it still renders navigation from a static `menu.json` mock, so role-based menu filtering is not yet reflected in the running frontend. Tracked as ETP-4598.
 
 **Endpoints:**
 
