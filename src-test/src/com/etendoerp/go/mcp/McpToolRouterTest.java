@@ -1064,7 +1064,7 @@ public class McpToolRouterTest {
     assertFalse(McpToolRouterSupport.isMandatoryValueMissing(body, "someField"));
   }
 
-  // ── McpToolRouterSupport.mapColumnType exhaustive test ────────────────
+  // ── McpSchemaFieldBuilder.mapColumnType exhaustive test ────────────────
 
   /** Tests that all known reference IDs are mapped exhaustively via support class. */
   @Test
@@ -1072,46 +1072,46 @@ public class McpToolRouterTest {
     String[] stringRefs = {"10", "14", "34"};
     for (String ref : stringRefs) {
       assertEquals("string for ref " + ref, "string",
-          McpToolRouterSupport.mapColumnType(ref));
+          McpSchemaFieldBuilder.mapColumnType(ref));
     }
 
     String[] numberRefs = {"11", "22", "29", "12", "800008", "800019"};
     for (String ref : numberRefs) {
       assertEquals("number for ref " + ref, "number",
-          McpToolRouterSupport.mapColumnType(ref));
+          McpSchemaFieldBuilder.mapColumnType(ref));
     }
 
-    assertEquals("boolean", McpToolRouterSupport.mapColumnType("20"));
-    assertEquals("date", McpToolRouterSupport.mapColumnType("15"));
-    assertEquals("datetime", McpToolRouterSupport.mapColumnType("16"));
-    assertEquals("time", McpToolRouterSupport.mapColumnType("24"));
-    assertEquals("button", McpToolRouterSupport.mapColumnType("28"));
-    assertEquals("list", McpToolRouterSupport.mapColumnType("17"));
-    assertEquals("id", McpToolRouterSupport.mapColumnType("13"));
+    assertEquals("boolean", McpSchemaFieldBuilder.mapColumnType("20"));
+    assertEquals("date", McpSchemaFieldBuilder.mapColumnType("15"));
+    assertEquals("datetime", McpSchemaFieldBuilder.mapColumnType("16"));
+    assertEquals("time", McpSchemaFieldBuilder.mapColumnType("24"));
+    assertEquals("button", McpSchemaFieldBuilder.mapColumnType("28"));
+    assertEquals("list", McpSchemaFieldBuilder.mapColumnType("17"));
+    assertEquals("id", McpSchemaFieldBuilder.mapColumnType("13"));
 
-    assertEquals("foreignKey", McpToolRouterSupport.mapColumnType("19"));
-    assertEquals("foreignKey", McpToolRouterSupport.mapColumnType("18"));
-    assertEquals("foreignKey", McpToolRouterSupport.mapColumnType("30"));
+    assertEquals("foreignKey", McpSchemaFieldBuilder.mapColumnType("19"));
+    assertEquals("foreignKey", McpSchemaFieldBuilder.mapColumnType("18"));
+    assertEquals("foreignKey", McpSchemaFieldBuilder.mapColumnType("30"));
 
-    assertEquals("string", McpToolRouterSupport.mapColumnType("99999"));
-    assertEquals("string", McpToolRouterSupport.mapColumnType(null));
+    assertEquals("string", McpSchemaFieldBuilder.mapColumnType("99999"));
+    assertEquals("string", McpSchemaFieldBuilder.mapColumnType(null));
   }
 
-  // ── McpToolRouterSupport.mapSelectorType exhaustive test ──────────────
+  // ── McpSchemaFieldBuilder.mapSelectorType exhaustive test ──────────────
 
   /** Tests that all selector type mappings are correct via support class. */
   @Test
   public void testMapSelectorTypeExhaustiveSwitch() {
-    assertEquals("TableDir", McpToolRouterSupport.mapSelectorType("19"));
-    assertEquals("Table", McpToolRouterSupport.mapSelectorType("18"));
-    assertEquals("Search", McpToolRouterSupport.mapSelectorType("30"));
-    assertEquals("OBUISEL", McpToolRouterSupport.mapSelectorType(
+    assertEquals("TableDir", McpSchemaFieldBuilder.mapSelectorType("19"));
+    assertEquals("Table", McpSchemaFieldBuilder.mapSelectorType("18"));
+    assertEquals("Search", McpSchemaFieldBuilder.mapSelectorType("30"));
+    assertEquals("OBUISEL", McpSchemaFieldBuilder.mapSelectorType(
         "95E2A8B50A254B2AAE6774B8C2F28120"));
 
-    assertNull(McpToolRouterSupport.mapSelectorType(null));
-    assertNull(McpToolRouterSupport.mapSelectorType("10"));
-    assertNull(McpToolRouterSupport.mapSelectorType("20"));
-    assertNull(McpToolRouterSupport.mapSelectorType("unknown"));
+    assertNull(McpSchemaFieldBuilder.mapSelectorType(null));
+    assertNull(McpSchemaFieldBuilder.mapSelectorType("10"));
+    assertNull(McpSchemaFieldBuilder.mapSelectorType("20"));
+    assertNull(McpSchemaFieldBuilder.mapSelectorType("unknown"));
   }
 
   // ── McpToolException ──────────────────────────────────────────────────

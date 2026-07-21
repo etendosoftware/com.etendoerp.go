@@ -605,7 +605,7 @@ public class McpToolRouter {
     // Find the AD_Column by DB column name or DAL property name (field name from schema)
     Entity dalEntity = ModelProvider.getInstance()
       .getEntityByTableName(adTab.getTable().getDBTableName());
-    Column adColumn = McpToolRouterSupport.findColumn(adTab, columnName, dalEntity);
+    Column adColumn = McpSchemaFieldBuilder.findColumn(adTab, columnName, dalEntity);
 
     if (adColumn == null) {
       throw new IllegalArgumentException("Column not found in table: " + columnName);
@@ -710,11 +710,11 @@ public class McpToolRouter {
     Entity dalEntity = ModelProvider.getInstance()
         .getEntityByTableName(adTab.getTable().getDBTableName());
 
-    McpToolRouterSupport.FieldMetadata fieldMetadata =
-        McpToolRouterSupport.loadFieldMetadata(sfEntity);
+    McpSchemaFieldBuilder.FieldMetadata fieldMetadata =
+        McpSchemaFieldBuilder.loadFieldMetadata(sfEntity);
     Map<String, String> promptByColumnId =
-        McpToolRouterSupport.loadPromptByColumnId(sfEntity);
-    JSONArray fieldsArray = McpToolRouterSupport.buildSchemaFieldsArray(adTab, dalEntity,
+        McpSchemaFieldBuilder.loadPromptByColumnId(sfEntity);
+    JSONArray fieldsArray = McpSchemaFieldBuilder.buildSchemaFieldsArray(adTab, dalEntity,
         fieldMetadata.visibilityByColumnId, fieldMetadata.businessCriticalByColumnId,
         promptByColumnId, SYSTEM_COLUMNS, SELECTOR_REFS);
 
@@ -757,11 +757,11 @@ public class McpToolRouter {
   }
 
   static String mapColumnTypeStatic(String refId) {
-    return McpToolRouterSupport.mapColumnType(refId);
+    return McpSchemaFieldBuilder.mapColumnType(refId);
   }
 
   static String mapSelectorTypeStatic(String refId) {
-    return McpToolRouterSupport.mapSelectorType(refId);
+    return McpSchemaFieldBuilder.mapSelectorType(refId);
   }
 
   // ── neo_batch ─────────────────────────────────────────────────────────
