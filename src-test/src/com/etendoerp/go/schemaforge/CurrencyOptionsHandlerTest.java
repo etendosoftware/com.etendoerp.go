@@ -22,6 +22,7 @@ import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.lang.reflect.Method;
@@ -35,6 +36,7 @@ import java.util.Map;
 
 import org.codehaus.jettison.json.JSONArray;
 import org.junit.Test;
+import org.mockito.ArgumentCaptor;
 
 /**
  * Pure unit tests for {@link CurrencyOptionsHandler}: the Connection-based private logic that
@@ -114,6 +116,66 @@ public class CurrencyOptionsHandlerTest {
     assertEquals(2, result.size());
     assertEquals(1.16, result.get("EUR-ID")[0], 0.0001);
     assertEquals(0.85, result.get("GBP-ID")[0], 0.0001);
+  }
+
+  @Test
+  public void testQueryDirectRatesSqlIncludesSystemClientRatesWithTenantPriority() throws Exception {
+    // ETP-4474 regression: queryDirectRates must include both the tenant's rates and the shared
+    // system ('0') rates, ordered ad_client_id ASC so the '0' row is written first and the tenant
+    // row overwrites it in the map (last-write-wins → tenant wins).
+    CurrencyOptionsHandler handler = new CurrencyOptionsHandler();
+    Connection conn = mock(Connection.class);
+    ResultSet rs = mock(ResultSet.class);
+    wirePreparedStatement(conn, rs);
+    when(rs.next()).thenReturn(false);
+
+    invokeQueryDirectRates(handler, conn, "USD-ID", "client-1", "org-1", DATE);
+
+    ArgumentCaptor<String> sqlCaptor = ArgumentCaptor.forClass(String.class);
+    verify(conn).prepareStatement(sqlCaptor.capture());
+    String sql = sqlCaptor.getValue();
+    assertTrue(sql.contains("cr.ad_client_id IN ('0', ?)"));
+    assertTrue(sql.contains("ORDER BY c.iso_code, cr.ad_client_id ASC"));
+  }
+
+  @Test
+  public void testMergeInverseRatesSqlIncludesSystemClientRatesWithTenantPriority() throws Exception {
+    // ETP-4474 regression: the inverse-rate query mirrors the same system+tenant scoping and ASC
+    // ordering as the direct query.
+    CurrencyOptionsHandler handler = new CurrencyOptionsHandler();
+    Connection conn = mock(Connection.class);
+    ResultSet rs = mock(ResultSet.class);
+    wirePreparedStatement(conn, rs);
+    when(rs.next()).thenReturn(false); // no inverse rows → no ISO resolution query issued
+
+    invokeMergeInverseRates(handler, conn, "USD-ID", new LinkedHashMap<>(), "client-1", "org-1", DATE);
+
+    ArgumentCaptor<String> sqlCaptor = ArgumentCaptor.forClass(String.class);
+    verify(conn).prepareStatement(sqlCaptor.capture());
+    String sql = sqlCaptor.getValue();
+    assertTrue(sql.contains("cr.ad_client_id IN ('0', ?)"));
+    assertTrue(sql.contains("ORDER BY c.iso_code, cr.ad_client_id ASC"));
+  }
+
+  @Test
+  public void testQueryDirectRatesTenantRowOverridesSystemRowForSameCurrency() throws Exception {
+    // ETP-4474 regression: with ad_client_id ASC the '0' (system) row for a currency is written
+    // first and the tenant row for the SAME currency overwrites it — the map keeps the tenant value.
+    CurrencyOptionsHandler handler = new CurrencyOptionsHandler();
+    Connection conn = mock(Connection.class);
+    ResultSet rs = mock(ResultSet.class);
+    wirePreparedStatement(conn, rs);
+
+    // Two rows, same currency id: system rate 1.10 first, tenant rate 1.16 second (ASC ordering)
+    when(rs.next()).thenReturn(true, true, false);
+    when(rs.getString("cid")).thenReturn("EUR-ID", "EUR-ID");
+    when(rs.getDouble("multiplyrate")).thenReturn(1.10, 1.16);
+
+    Map<String, double[]> result = invokeQueryDirectRates(handler, conn, "USD-ID", "client-1", "org-1", DATE);
+
+    // Last write (tenant) wins, single entry for the currency
+    assertEquals(1, result.size());
+    assertEquals(1.16, result.get("EUR-ID")[0], 0.0001);
   }
 
   @Test

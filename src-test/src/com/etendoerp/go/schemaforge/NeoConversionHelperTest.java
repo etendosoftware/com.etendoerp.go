@@ -68,6 +68,17 @@ public class NeoConversionHelperTest {
   }
 
   @Test
+  public void buildSqlIncludesSystemClientRatesWithTenantPriority() {
+    // ETP-4474 regression: a GO tenant must see both its own rates and the shared system ('0')
+    // rates, with the tenant rate winning (ad_client_id DESC picks the tenant row under LIMIT 1).
+    String template = "SELECT {AMOUNT} FROM c_invoice i";
+    String result = NeoConversionHelper.buildSql(template, "102");
+
+    assertTrue(result.contains("ad_client_id IN ('0', i.ad_client_id)"));
+    assertTrue(result.contains("ORDER BY cr.ad_client_id DESC"));
+  }
+
+  @Test
   public void constantsExist() {
     assertNotNull(NeoConversionHelper.PARAM_ORG_CURRENCY_ID);
     assertNotNull(NeoConversionHelper.AMOUNT_PLACEHOLDER);

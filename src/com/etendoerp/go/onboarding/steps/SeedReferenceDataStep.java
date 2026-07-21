@@ -471,8 +471,10 @@ public class SeedReferenceDataStep implements OnboardingStep {
     method.setPayoutExecutionType("M");
     method.setPayinDeferred(false);
     method.setPayoutDeferred(false);
-    method.setPayinIsMulticurrency(false);
-    method.setPayoutIsMulticurrency(false);
+    // Multicurrency ON by default (ETP-4503) — kept in lockstep with the GOClient sampledata
+    // (FIN_PAYMENTMETHOD.xml) and the R14 corrective data-fix.
+    method.setPayinIsMulticurrency(true);
+    method.setPayoutIsMulticurrency(true);
     method.setUponDepositUse(uponDepositUse);
     method.setUponWithdrawalUse(uponWithdrawalUse);
     if (wireTransfer) {
@@ -502,8 +504,12 @@ public class SeedReferenceDataStep implements OnboardingStep {
     fapm.setPayoutExecutionType("M");
     fapm.setPayinDeferred(false);
     fapm.setPayoutDeferred(false);
-    fapm.setPayinIsMulticurrency(false);
-    fapm.setPayoutIsMulticurrency(false);
+    // Multicurrency ON by default (ETP-4503) — kept in lockstep with the GOClient sampledata
+    // (FIN_FINACC_PAYMENTMETHOD.xml) and the R14 corrective data-fix. The PSD2 bank-transfer
+    // exception is applied at runtime (FinancialAccountPsd2Handler), not here — the seeded Bank
+    // account has no PSD2 connection, so its transfer link is correctly multicurrency-ON.
+    fapm.setPayinIsMulticurrency(true);
+    fapm.setPayoutIsMulticurrency(true);
     fapm.setDefault(false);
     fapm.setPayinInvoicepaidstatus("RPR");
     fapm.setPayoutInvoicepaidstatus("PPM");
