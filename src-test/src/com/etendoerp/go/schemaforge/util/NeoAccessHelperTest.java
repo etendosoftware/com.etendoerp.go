@@ -529,6 +529,23 @@ public class NeoAccessHelperTest {
     assertFalse(NeoAccessHelper.hasProcessAccess("any-process-id"));
   }
 
+  /**
+   * PR #747 review-comment fix: {@code hasProcessAccess} used to bypass only for role id
+   * {@code "0"}, not for a client-admin role, contradicting "Administrator always has full
+   * access" (Administrator = role 0 OR {@code AD_Role.is_client_admin = 'Y'}). Proves the
+   * bypass itself — not merely "it happened to have a grant row" — by never stubbing
+   * {@code OBDal.createCriteria(ProcessAccess.class)} at all: if the implementation fell
+   * through to the DB lookup instead of short-circuiting on the client-admin check, this
+   * mock would return {@code null} and the call would NPE, failing the test.
+   */
+  @Test
+  public void hasProcessAccess_clientAdminRole_returnsTrueWithoutGrantRow() {
+    when(role.getId()).thenReturn("role-id-client-admin-proc");
+    when(role.isClientAdmin()).thenReturn(true);
+
+    assertTrue(NeoAccessHelper.hasProcessAccess("process-id-no-grant-row"));
+  }
+
   // ── hasObuiappProcessAccess ───────────────────────────────────────────────
 
   @Test
@@ -547,6 +564,22 @@ public class NeoAccessHelperTest {
     when(context.getRole()).thenReturn(null);
 
     assertFalse(NeoAccessHelper.hasObuiappProcessAccess("any-obuiapp-proc-id"));
+  }
+
+  /**
+   * PR #747 review-comment fix: same gap as {@code hasProcessAccess} — this now matters in
+   * practice because {@code NotPostedDocumentsHandler}/{@code AgingReportHandler} gate their
+   * entire report on this method, so a client-admin user was incorrectly denied. Proves the
+   * bypass (not a coincidental grant row) the same way: never stubbing
+   * {@code OBDal.createCriteria(ProcessAccess.class)}, so falling through to the DB lookup
+   * would NPE instead of returning {@code true}.
+   */
+  @Test
+  public void hasObuiappProcessAccess_clientAdminRole_returnsTrueWithoutGrantRow() {
+    when(role.getId()).thenReturn("role-id-client-admin-obuiapp");
+    when(role.isClientAdmin()).thenReturn(true);
+
+    assertTrue(NeoAccessHelper.hasObuiappProcessAccess("obuiapp-proc-id-no-grant-row"));
   }
 
   @SuppressWarnings("unchecked")

@@ -457,6 +457,13 @@ class NeoRequestRouterTest {
    * access check entirely, for every role including one with no role assigned at all.
    * Verifies the router now always asks {@code hasWindowAccessForSpec} — even for a
    * windowless spec — and honors a denial with a 403, rather than silently allowing it.
+   *
+   * <p>PR #747 review-comment fix: also pins the exact 403 message text. This path is the
+   * windowless/"combination" branch of {@code hasWindowAccessForSpec} — there is no single
+   * window being checked — so the message must NOT claim "Access denied to window", which
+   * would be misleading here. It is phrased at the spec level instead, so it reads correctly
+   * for both windowed and windowless specs. Captured explicitly (not {@code anyString()}) so
+   * a regression back to the "window" wording fails this test.</p>
    */
   @Test
   void testHandleWindowSpecWindowlessSpecStillChecksAccess() throws Exception {
@@ -467,7 +474,10 @@ class NeoRequestRouterTest {
 
     router.handleWindowSpecRequest(spec, pathInfo, "GET", request, response);
 
-    verify(servlet).sendError(eq(response), eq(HttpServletResponse.SC_FORBIDDEN), anyString());
+    ArgumentCaptor<String> messageCaptor = ArgumentCaptor.forClass(String.class);
+    verify(servlet).sendError(eq(response), eq(HttpServletResponse.SC_FORBIDDEN),
+        messageCaptor.capture());
+    assertEquals("Access denied to spec for current role", messageCaptor.getValue());
   }
 
   /**

@@ -197,17 +197,18 @@ public final class NeoAccessHelper {
    * {@code ProcessAccess} row grants full access to execute the process.</p>
    *
    * @param processId the ID of the AD process to check
-   * @return {@code true} if the current role has an active process-access record, or if the role is the system administrator role
+   * @return {@code true} if the current role has an active process-access record, or if the
+   *         role is the System Administrator role or a client-admin role
    */
   public static boolean hasProcessAccess(String processId) {
     Role role = currentRole();
     if (role == null) {
       return false;
     }
-    String roleId = role.getId();
-    if ("0".equals(roleId)) {
+    if (isAdminOrClientAdmin(role)) {
       return true;
     }
+    String roleId = role.getId();
     OBCriteria<ProcessAccess> criteria = OBDal.getInstance().createCriteria(ProcessAccess.class);
     criteria.add(Restrictions.eq(ProcessAccess.PROPERTY_PROCESS + ".id", processId));
     criteria.add(Restrictions.eq(ProcessAccess.PROPERTY_ROLE + ".id", roleId));
@@ -276,18 +277,18 @@ public final class NeoAccessHelper {
    *
    * @param processId the ID of the OBUIAPP process definition to check
    * @return {@code true} if the current role has an active OBUIAPP process-access record,
-   *         or if the role is the system administrator role; {@code false} if no role is
-   *         assigned to the current context
+   *         or if the role is the System Administrator role or a client-admin role;
+   *         {@code false} if no role is assigned to the current context
    */
   public static boolean hasObuiappProcessAccess(String processId) {
     Role role = currentRole();
     if (role == null) {
       return false;
     }
-    String roleId = role.getId();
-    if ("0".equals(roleId)) {
+    if (isAdminOrClientAdmin(role)) {
       return true;
     }
+    String roleId = role.getId();
     OBCriteria<org.openbravo.client.application.ProcessAccess> criteria = OBDal.getInstance()
         .createCriteria(org.openbravo.client.application.ProcessAccess.class);
     criteria.add(Restrictions.eq(
