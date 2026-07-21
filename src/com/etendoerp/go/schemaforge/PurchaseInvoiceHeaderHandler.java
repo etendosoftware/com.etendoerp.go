@@ -95,7 +95,7 @@ public class PurchaseInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler i
 
   @Override
   public NeoResponse handle(NeoContext context) {
-    mirrorAccountingDate(context);
+    NeoHandlerUtils.mirrorAccountingDate(context, "invoiceDate", "accountingDate");
     NeoResponse posting = postingService != null ? postingService.handleAction(context) : null;
     if (posting != null) {
       return posting;

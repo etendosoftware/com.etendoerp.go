@@ -2681,7 +2681,7 @@ public class AbstractInvoiceHeaderHandlerTest {
         .requestBody(body)
         .build();
 
-    AbstractInvoiceHeaderHandler.mirrorAccountingDate(ctx);
+    NeoHandlerUtils.mirrorAccountingDate(ctx, "invoiceDate", "accountingDate");
 
     assertEquals("2026-07-01", body.getString("accountingDate"));
   }
@@ -2696,7 +2696,7 @@ public class AbstractInvoiceHeaderHandlerTest {
         .requestBody(body)
         .build();
 
-    AbstractInvoiceHeaderHandler.mirrorAccountingDate(ctx);
+    NeoHandlerUtils.mirrorAccountingDate(ctx, "invoiceDate", "accountingDate");
 
     assertEquals("2026-07-10", body.getString("accountingDate"));
   }
@@ -2710,7 +2710,7 @@ public class AbstractInvoiceHeaderHandlerTest {
         .requestBody(body)
         .build();
 
-    AbstractInvoiceHeaderHandler.mirrorAccountingDate(ctx);
+    NeoHandlerUtils.mirrorAccountingDate(ctx, "invoiceDate", "accountingDate");
 
     assertTrue(!body.has("accountingDate"));
   }
@@ -2724,7 +2724,7 @@ public class AbstractInvoiceHeaderHandlerTest {
         .requestBody(body)
         .build();
 
-    AbstractInvoiceHeaderHandler.mirrorAccountingDate(ctx);
+    NeoHandlerUtils.mirrorAccountingDate(ctx, "invoiceDate", "accountingDate");
 
     assertTrue(!body.has("accountingDate"));
   }
@@ -2751,7 +2751,7 @@ public class AbstractInvoiceHeaderHandlerTest {
         .requestBody(body)
         .build();
 
-    AbstractInvoiceHeaderHandler.mirrorAccountingDate(ctx);
+    NeoHandlerUtils.mirrorAccountingDate(ctx, "invoiceDate", "accountingDate");
 
     assertEquals("2026-07-15", body.getString("accountingDate"));
   }
@@ -2767,7 +2767,7 @@ public class AbstractInvoiceHeaderHandlerTest {
         .requestBody(body)
         .build();
 
-    AbstractInvoiceHeaderHandler.mirrorAccountingDate(ctx);
+    NeoHandlerUtils.mirrorAccountingDate(ctx, "invoiceDate", "accountingDate");
 
     assertEquals("2026-07-15", body.getString("accountingDate"));
   }
@@ -2784,7 +2784,7 @@ public class AbstractInvoiceHeaderHandlerTest {
         .requestBody(body)
         .build();
 
-    AbstractInvoiceHeaderHandler.mirrorAccountingDate(ctx);
+    NeoHandlerUtils.mirrorAccountingDate(ctx, "invoiceDate", "accountingDate");
 
     assertTrue(!body.has("accountingDate"));
   }
