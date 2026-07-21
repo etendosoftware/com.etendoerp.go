@@ -55,6 +55,7 @@ import org.openbravo.model.common.currency.Currency;
 import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.common.geography.Country;
 import org.openbravo.model.financialmgmt.accounting.coa.AcctSchema;
+import org.openbravo.model.financialmgmt.payment.FIN_FinaccTransaction;
 import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
 import org.openbravo.model.financialmgmt.payment.FIN_Reconciliation;
 import org.openbravo.model.financialmgmt.payment.MatchingAlgorithm;
@@ -860,6 +861,129 @@ public class FinancialAccountHandlerTest {
     doThrow(new RuntimeException("boom")).when(handler).loadAccount(ACC_ID);
 
     assertNull(handler.afterHandle(ctx));
+  }
+
+  // ── afterHandle: GET+CRUD injects hasTransactions (ETP-4530) ─────────────
+  //
+  // The frontend locks the Currency field once an account has real movement
+  // history. Since FIN_FinaccTransaction has no bearing on the generic CRUD
+  // response, the flag is injected here as a post-hook over every row of a
+  // GET (list/getById) response for the financial-account spec.
+
+  /**
+   * A GET/CRUD response with two rows gets {@code hasTransactions} injected per row: {@code true}
+   * for the account with a registered transaction, {@code false} for the one without.
+   */
+  @Test
+  public void testAfterHandleGetCrudInjectsHasTransactionsPerRow() throws Exception {
+    NeoContext ctx = mock(NeoContext.class);
+    when(ctx.getSpecName()).thenReturn(SPEC);
+    when(ctx.getHttpMethod()).thenReturn("GET");
+    when(ctx.getEndpointType()).thenReturn(NeoEndpointType.CRUD);
+
+    JSONObject row1 = new JSONObject().put("id", ACC_ID);
+    JSONObject row2 = new JSONObject().put("id", "acc-2");
+    JSONObject response = new JSONObject().put("data", new JSONArray().put(row1).put(row2));
+    JSONObject body = new JSONObject().put("response", response);
+    when(ctx.getPreviousResult()).thenReturn(new NeoResponse(200, body));
+
+    FIN_FinancialAccount acc1 = mock(FIN_FinancialAccount.class);
+    FIN_FinancialAccount acc2 = mock(FIN_FinancialAccount.class);
+    doReturn(acc1).when(handler).loadAccount(ACC_ID);
+    doReturn(acc2).when(handler).loadAccount("acc-2");
+    doReturn(true).when(handler).hasTransactions(acc1);
+    doReturn(false).when(handler).hasTransactions(acc2);
+
+    NeoResponse out = handler.afterHandle(ctx);
+
+    assertEquals(200, out.getHttpStatus());
+    JSONArray outArr = out.getBody().getJSONObject("response").getJSONArray("data");
+    assertTrue("account with a registered transaction locks the Currency field",
+        outArr.getJSONObject(0).getBoolean("hasTransactions"));
+    assertFalse("account without transactions leaves the Currency field editable",
+        outArr.getJSONObject(1).getBoolean("hasTransactions"));
+  }
+
+  /** A row with no {@code id} gets {@code hasTransactions=false} without hitting the DAL. */
+  @Test
+  public void testAfterHandleGetCrudRowWithoutIdGetsFalseWithoutLoadingAccount() throws Exception {
+    NeoContext ctx = mock(NeoContext.class);
+    when(ctx.getSpecName()).thenReturn(SPEC);
+    when(ctx.getHttpMethod()).thenReturn("GET");
+    when(ctx.getEndpointType()).thenReturn(NeoEndpointType.CRUD);
+
+    JSONObject rowNoId = new JSONObject().put("name", "row without id");
+    JSONObject response = new JSONObject().put("data", new JSONArray().put(rowNoId));
+    JSONObject body = new JSONObject().put("response", response);
+    when(ctx.getPreviousResult()).thenReturn(new NeoResponse(200, body));
+
+    NeoResponse out = handler.afterHandle(ctx);
+
+    JSONArray outArr = out.getBody().getJSONObject("response").getJSONArray("data");
+    assertFalse(outArr.getJSONObject(0).getBoolean("hasTransactions"));
+    verify(handler, never()).loadAccount(any());
+  }
+
+  /** A GET/CRUD response with no data array (empty list) is left untouched (returns null). */
+  @Test
+  public void testAfterHandleGetCrudWithNoDataReturnsNull() {
+    NeoContext ctx = mock(NeoContext.class);
+    when(ctx.getSpecName()).thenReturn(SPEC);
+    when(ctx.getHttpMethod()).thenReturn("GET");
+    when(ctx.getEndpointType()).thenReturn(NeoEndpointType.CRUD);
+    when(ctx.getPreviousResult()).thenReturn(null);
+
+    assertNull(handler.afterHandle(ctx));
+    verify(handler, never()).loadAccount(any());
+  }
+
+  /** A non-CRUD GET (e.g. SELECTOR) is not touched by the hasTransactions injection. */
+  @Test
+  public void testAfterHandleGetNonCrudEndpointSkipsInjection() {
+    NeoContext ctx = mock(NeoContext.class);
+    when(ctx.getSpecName()).thenReturn(SPEC);
+    when(ctx.getHttpMethod()).thenReturn("GET");
+    when(ctx.getEndpointType()).thenReturn(NeoEndpointType.SELECTOR);
+
+    assertNull(handler.afterHandle(ctx));
+    verify(handler, never()).loadAccount(any());
+  }
+
+  /** hasTransactions(FIN_FinancialAccount) real body: true when the criteria finds a row. */
+  @Test
+  public void testHasTransactionsReturnsTrueWhenCriteriaFindsActiveTransaction() {
+    FinancialAccountHandler h = new FinancialAccountHandler();
+    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      @SuppressWarnings("unchecked")
+      OBCriteria<FIN_FinaccTransaction> criteria = mock(OBCriteria.class);
+      when(dal.createCriteria(FIN_FinaccTransaction.class)).thenReturn(criteria);
+      when(criteria.uniqueResult()).thenReturn(mock(FIN_FinaccTransaction.class));
+
+      assertTrue(h.hasTransactions(account));
+      verify(criteria).setMaxResults(1);
+    }
+  }
+
+  /** hasTransactions(FIN_FinancialAccount) real body: false when the criteria finds no row. */
+  @Test
+  public void testHasTransactionsReturnsFalseWhenCriteriaFindsNoActiveTransaction() {
+    FinancialAccountHandler h = new FinancialAccountHandler();
+    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      @SuppressWarnings("unchecked")
+      OBCriteria<FIN_FinaccTransaction> criteria = mock(OBCriteria.class);
+      when(dal.createCriteria(FIN_FinaccTransaction.class)).thenReturn(criteria);
+      when(criteria.uniqueResult()).thenReturn(null);
+
+      assertFalse(h.hasTransactions(account));
+    }
   }
 
   // ── extractCreatedId (real body) ──────────────────────────────────────────

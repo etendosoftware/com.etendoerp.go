@@ -72,6 +72,8 @@ public abstract class AbstractInvoiceHeaderHandler {
   protected static final String FIELD_ORIGIN_INVOICE       = "originInvoice";
   protected static final String FIELD_TRANSACTION_DOCUMENT = "transactionDocument";
   private static final String FIELD_CURRENCY = "currency";
+  private static final String FIELD_INVOICE_DATE = "invoiceDate";
+  private static final String FIELD_ACCOUNTING_DATE = "accountingDate";
   private static final String FIELD_VALUE = "value";
   private static final String FIELD_PROCESSED = "processed";
   private static final String FIELD_TOTAL_DISCOUNT_PCT = "etgoTotalDiscount";
@@ -794,12 +796,51 @@ public abstract class AbstractInvoiceHeaderHandler {
     }
   }
 
+  // ---------------------------------------------------------------------------
+  // Unified date (ETP-4531)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Mirrors the single visible {@code invoiceDate} field into the hidden {@code accountingDate}
+   * field on the request body, unconditionally, before the default CRUD path
+   * ({@code NeoCrudHandler#handleDefault}) reads and persists it.
+   *
+   * <p>ETP-4531 (unified date): the user never sees or edits {@code accountingDate} directly —
+   * whatever value is saved for {@code invoiceDate} (create or update) must also become the
+   * invoice's accounting date. This is an explicit, guaranteed server-side mirror, independent
+   * of whatever the classic Etendo callout cascade does in the interactive edit path.
+   *
+   * <p>Call at the very top of each subclass's {@code handle()} override, before any other
+   * logic.
+   *
+   * <p><b>ETP-4531 fix:</b> must fire on {@code PATCH} as well as {@code POST}/{@code PUT} — the
+   * live React UI ({@code useEntity.js#getMethod}) always sends {@code PATCH} (a sparse,
+   * changed-fields-only body) when saving an edit to an EXISTING invoice; it never sends a full
+   * {@code PUT}. The original {@code POST}/{@code PUT}-only check meant the mirror fired on
+   * create but silently never fired on a real edit-and-save from the UI. See
+   * {@link NeoHandlerUtils#isWriteMethod}.
+   *
+   * @param context the current NeoContext
+   */
+  protected static void mirrorAccountingDate(NeoContext context) {
+    if (NeoEndpointType.CRUD.equals(context.getEndpointType())
+        && NeoHandlerUtils.isWriteMethod(context.getHttpMethod())) {
+      NeoHandlerUtils.mirrorFieldValue(context.getRequestBody(), FIELD_INVOICE_DATE, FIELD_ACCOUNTING_DATE);
+    }
+  }
+
   /**
    * Shared {@code afterCallout} body: blocks callout-driven currency updates and appends an
-   * exchange-rate warning when the user directly changes the invoice currency (ETP-4029), and
-   * blocks callout-driven document type updates on an already-saved invoice (ETP-4535). Identical
-   * for both {@link PurchaseInvoiceHeaderHandler} and {@link SalesInvoiceHeaderHandler} — each
-   * subclass's {@code afterCallout()} override should just delegate here.
+   * exchange-rate warning when the user directly changes the invoice currency (ETP-4029); and
+   * blocks callout-driven document type updates on an already-saved invoice (ETP-4535).
+   *
+   * <p>{@code accountingDate} cascades from {@code invoiceDate} via the classic Etendo callout
+   * ({@code SE_Invoice_AccountingDate}) are intentionally left untouched — ETP-4531 now requires
+   * the single visible date to be mirrored into {@code accountingDate} on save, so that cascade
+   * is exactly the behavior wanted.
+   *
+   * <p>Identical for both {@link PurchaseInvoiceHeaderHandler} and {@link SalesInvoiceHeaderHandler}
+   * — each subclass's {@code afterCallout()} override should just delegate here.
    */
   protected NeoResponse handleInvoiceAfterCallout(NeoContext context) {
     try {
