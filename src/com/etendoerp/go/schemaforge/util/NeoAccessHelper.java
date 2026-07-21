@@ -330,7 +330,22 @@ public final class NeoAccessHelper {
    *         {@code false} if no role is assigned to the current context
    */
   public static boolean hasObuiappProcessAccess(String processId) {
-    Role role = currentRole();
+    return hasObuiappProcessAccess(currentRole(), processId);
+  }
+
+  /**
+   * Checks whether {@code role} has access to the given OBUIAPP process definition.
+   *
+   * <p>Same semantics as {@link #hasObuiappProcessAccess(String)}, but operates on an
+   * explicitly-supplied role rather than resolving it from the ambient {@link OBContext}. See
+   * {@link #hasWindowAccess(Role, String)} for why an explicit role matters.</p>
+   *
+   * @param role the role to check (may be {@code null}, in which case access is denied)
+   * @param processId the ID of the OBUIAPP process definition to check
+   * @return {@code true} if {@code role} has an active OBUIAPP process-access record, or is
+   *         the system administrator role
+   */
+  public static boolean hasObuiappProcessAccess(Role role, String processId) {
     if (role == null) {
       return false;
     }

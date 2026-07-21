@@ -50,10 +50,10 @@ import com.etendoerp.webhookevents.services.BaseWebhookService;
  * always made against the role captured up front, never against ambient context state, so a
  * user is never able to see more than their role grants regardless of what admin mode does
  * (or does not) do to the ambient {@link OBContext}. This also holds for the
- * {@code obuiappProcessId} check, which calls {@link NeoAccessHelper#hasObuiappProcessAccess}
- * (an ambient-role overload): {@code OBContext.setAdminMode()} never replaces an already-set
- * context's role — it only flips the admin-mode flag used for row-filter bypass — so the role it
- * resolves is still the one captured up front, not an admin-substituted one.</p>
+ * {@code obuiappProcessId} check, which calls the role-parameterized
+ * {@link NeoAccessHelper#hasObuiappProcessAccess(Role, String)} overload with the captured
+ * role — matching the window/process branches — rather than an ambient-role overload that
+ * would re-resolve the role from {@link OBContext#getOBContext()} at check time.</p>
  *
  * <p>A user with no role assigned gets an empty menu — the query is not even run.</p>
  *
@@ -337,7 +337,9 @@ public class SFListMenu extends BaseWebhookService {
    * {@code obuiappProcessId} (menu entries with {@code action = 'OBUIAPP_Process'}, whose real
    * link lives in {@code AD_Menu.em_obuiapp_process_id} rather than {@code ad_window_id}/
    * {@code ad_process_id}) are checked via
-   * {@link NeoAccessHelper#hasObuiappProcessAccess(String)}. A node carrying more than one of
+   * {@link NeoAccessHelper#hasObuiappProcessAccess(Role, String)}, using this method's {@code role}
+   * parameter — the same captured-role guarantee the windowId/processId checks above already
+   * follow. A node carrying more than one of
    * these IDs must pass every check it carries. A node carrying none of them (typically
    * {@code report}/{@code form}/{@code other} typed nodes with no OBUIAPP link) is left
    * unfiltered — out of scope for this ticket, which is about
@@ -352,7 +354,7 @@ public class SFListMenu extends BaseWebhookService {
       accessible = NeoAccessHelper.hasProcessAccess(role, node.getString(PROCESS_ID));
     }
     if (accessible && node.has(OBUIAPP_PROCESS_ID)) {
-      accessible = NeoAccessHelper.hasObuiappProcessAccess(node.getString(OBUIAPP_PROCESS_ID));
+      accessible = NeoAccessHelper.hasObuiappProcessAccess(role, node.getString(OBUIAPP_PROCESS_ID));
     }
     return accessible;
   }

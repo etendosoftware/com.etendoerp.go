@@ -784,4 +784,51 @@ class SFListMenuTest {
         assertEquals("0D37A9F6109549DEB058373EF2DAEB6A",
                 result.getJSONArray("tree").getJSONObject(0).getString("obuiappProcessId"));
     }
+
+    /**
+     * GitHub PR #748 review fix: before this fix, {@code isNodeAccessible}'s OBUIAPP branch
+     * called the ambient-role {@code NeoAccessHelper#hasObuiappProcessAccess(String)} overload,
+     * which re-resolves the role from {@code OBContext.getOBContext().getRole()} at check time
+     * instead of using the role captured once at the top of {@code get(Map, Map)} — unlike the
+     * windowId/processId branches, which already used the role-parameterized overloads.
+     *
+     * <p>This test proves the fix: the ambient context is stubbed to return a RESTRICTED role
+     * (no OBUIAPP grant) on its first invocation — the one {@code resolveCurrentRole()} makes at
+     * the top of {@code get(Map, Map)} — and an ADMIN role (id {@code "0"}, which would
+     * short-circuit to "always allowed") on every subsequent invocation. Before the fix, the
+     * OBUIAPP check would re-read the ambient context and see the admin role, incorrectly
+     * keeping the node. After the fix, the check uses only the role captured on the first call
+     * (restricted, no grant) and never re-reads the ambient context at all, so the node must be
+     * dropped.</p>
+     */
+    @Test
+    @DisplayName("OBUIAPP check uses the role captured at request start, ignoring a differing ambient role")
+    void testObuiappProcessCheckUsesCapturedRoleNotReResolvedAmbientRole() throws Exception {
+        Role restrictedRole = mock(Role.class);
+        when(restrictedRole.getId()).thenReturn("role-captured-restricted");
+        Role adminRole = mock(Role.class);
+        when(adminRole.getId()).thenReturn("0");
+
+        java.util.concurrent.atomic.AtomicInteger callCount =
+                new java.util.concurrent.atomic.AtomicInteger(0);
+        when(mockContext.getRole()).thenAnswer(invocation ->
+                callCount.getAndIncrement() == 0 ? restrictedRole : adminRole);
+
+        // The restricted (captured) role has no active OBUIAPP grant.
+        stubObuiappProcessAccess(false);
+
+        List<Object[]> rows = new ArrayList<>();
+        rows.add(new Object[]{"3EB0F5F33ECC4FEBABD8F513E9C49521", "0", 10, "Not Posted Documents",
+                "N", "OBUIAPP_Process", null, null, "D6AB95CE52D34E1599590526115E26C6", null, 0});
+        stubNativeQuery(rows);
+
+        webhook.get(parameters, responseVars);
+
+        assertNull(responseVars.get(ERROR));
+        JSONObject result = new JSONObject(responseVars.get(RESULT));
+        assertEquals(0, result.getInt(COUNT),
+                "Node must be dropped using the captured (restricted) role, "
+                        + "not a later-resolved ambient admin role");
+        assertEquals(0, result.getJSONArray("tree").length());
+    }
 }

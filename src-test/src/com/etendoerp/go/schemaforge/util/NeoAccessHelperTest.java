@@ -612,6 +612,108 @@ public class NeoAccessHelperTest {
     assertFalse(NeoAccessHelper.hasObuiappProcessAccess("restricted-obuiapp-id"));
   }
 
+  // ── hasObuiappProcessAccess(Role, String) — GitHub PR #748 review fix ───────
+  //
+  // Finding: the OBUIAPP-process branch in SFListMenu.isNodeAccessible used to call the
+  // ambient-role hasObuiappProcessAccess(String) even though the window/process branches in
+  // the very same method already used role-parameterized overloads with the explicitly
+  // captured role. These tests prove the new hasObuiappProcessAccess(Role, String) overload
+  // decides purely from the passed-in role and never falls back to (or is influenced by)
+  // whatever OBContext.getOBContext().getRole() happens to expose ambiently.
+
+  @Test
+  public void hasObuiappProcessAccessRoleParam_adminRole_returnsTrue() {
+    org.openbravo.model.ad.access.Role explicitRole = mock(org.openbravo.model.ad.access.Role.class);
+    when(explicitRole.getId()).thenReturn("0");
+
+    assertTrue(NeoAccessHelper.hasObuiappProcessAccess(explicitRole, "obuiapp-proc-id"));
+  }
+
+  @Test
+  public void hasObuiappProcessAccessRoleParam_nullRole_returnsFalse() {
+    assertFalse(NeoAccessHelper.hasObuiappProcessAccess((org.openbravo.model.ad.access.Role) null, "any-obuiapp-proc-id"));
+  }
+
+  @SuppressWarnings("unchecked")
+  @Test
+  public void hasObuiappProcessAccessRoleParam_roleWithAccess_returnsTrue() {
+    org.openbravo.model.ad.access.Role explicitRole = mock(org.openbravo.model.ad.access.Role.class);
+    when(explicitRole.getId()).thenReturn("role-id-obuiapp-explicit");
+    OBCriteria<org.openbravo.client.application.ProcessAccess> criteria = mock(OBCriteria.class);
+    when(dal.createCriteria(org.openbravo.client.application.ProcessAccess.class))
+        .thenReturn(criteria);
+    when(criteria.add(any())).thenReturn(criteria);
+    when(criteria.setMaxResults(1)).thenReturn(criteria);
+    org.openbravo.client.application.ProcessAccess access =
+        mock(org.openbravo.client.application.ProcessAccess.class);
+    when(criteria.list()).thenReturn(Collections.singletonList(access));
+
+    assertTrue(NeoAccessHelper.hasObuiappProcessAccess(explicitRole, "allowed-obuiapp-proc-id"));
+  }
+
+  @SuppressWarnings("unchecked")
+  @Test
+  public void hasObuiappProcessAccessRoleParam_roleWithoutAccess_returnsFalse() {
+    org.openbravo.model.ad.access.Role explicitRole = mock(org.openbravo.model.ad.access.Role.class);
+    when(explicitRole.getId()).thenReturn("role-id-noobuiapp-explicit");
+    OBCriteria<org.openbravo.client.application.ProcessAccess> criteria = mock(OBCriteria.class);
+    when(dal.createCriteria(org.openbravo.client.application.ProcessAccess.class))
+        .thenReturn(criteria);
+    when(criteria.add(any())).thenReturn(criteria);
+    when(criteria.setMaxResults(1)).thenReturn(criteria);
+    when(criteria.list()).thenReturn(Collections.emptyList());
+
+    assertFalse(
+        NeoAccessHelper.hasObuiappProcessAccess(explicitRole, "restricted-obuiapp-id-explicit"));
+  }
+
+  /**
+   * QA gap-closer proving the fix for the PR #748 review finding: the ambient
+   * {@link OBContext} is stubbed to expose an ADMIN role (id {@code "0"}, which would grant
+   * access unconditionally), while the EXPLICIT role passed in has no OBUIAPP grant at all.
+   * If the implementation ever fell back to (or was influenced by) the ambient context —
+   * exactly what the original bug did — this would incorrectly return {@code true}. It must
+   * return {@code false}, proving the decision is based solely on the passed-in role.
+   */
+  @SuppressWarnings("unchecked")
+  @Test
+  public void hasObuiappProcessAccessRoleParam_ignoresAdminAmbientContext_deniesRestrictedExplicitRole() {
+    // Ambient context: admin role — would short-circuit to true if consulted.
+    when(role.getId()).thenReturn("0");
+
+    // Explicit role: restricted, no active grant.
+    org.openbravo.model.ad.access.Role explicitRole = mock(org.openbravo.model.ad.access.Role.class);
+    when(explicitRole.getId()).thenReturn("role-id-restricted-explicit");
+    OBCriteria<org.openbravo.client.application.ProcessAccess> criteria = mock(OBCriteria.class);
+    when(dal.createCriteria(org.openbravo.client.application.ProcessAccess.class))
+        .thenReturn(criteria);
+    when(criteria.add(any())).thenReturn(criteria);
+    when(criteria.setMaxResults(1)).thenReturn(criteria);
+    when(criteria.list()).thenReturn(Collections.emptyList());
+
+    assertFalse("Must decide from the explicit role, not the ambient admin context",
+        NeoAccessHelper.hasObuiappProcessAccess(explicitRole, "some-obuiapp-proc-id"));
+  }
+
+  /**
+   * Mirror of the previous test in the opposite direction: the ambient context is a
+   * restricted role with no grant (which would deny if consulted), while the explicit role
+   * passed in is the System Administrator role. The explicit role must win, returning
+   * {@code true}.
+   */
+  @Test
+  public void hasObuiappProcessAccessRoleParam_ignoresRestrictedAmbientContext_allowsAdminExplicitRole() {
+    // Ambient context: restricted, non-admin role.
+    when(role.getId()).thenReturn("role-id-restricted-ambient");
+
+    // Explicit role: System Administrator — must be allowed regardless of ambient context.
+    org.openbravo.model.ad.access.Role explicitRole = mock(org.openbravo.model.ad.access.Role.class);
+    when(explicitRole.getId()).thenReturn("0");
+
+    assertTrue("Must decide from the explicit admin role, not the ambient restricted context",
+        NeoAccessHelper.hasObuiappProcessAccess(explicitRole, "some-obuiapp-proc-id"));
+  }
+
   // ── resolveDefaultPostProcess ─────────────────────────────────────────────
 
   @Test
