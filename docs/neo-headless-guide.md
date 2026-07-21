@@ -194,6 +194,7 @@ Representa un tab (window specs) o el proceso mismo (process specs).
 | `ISDELETE` | CHAR(1) | Habilitar DELETE. |
 | `JAVA_QUALIFIER` | VARCHAR | CDI `@Named` qualifier para un `NeoHandler` custom. |
 | `SEQNO` | NUMERIC | Orden de procesamiento/display. |
+| `PRECONDITIONS` | CLOB (Text) | JSON de preconditions por proceso, validado antes de ejecutar un proceso. Ver [NEO Headless Extensibility Guide § 1.5 Process Precondition Validation](../../../schema_forge/docs/neo-headless-extensibility.md#15-process-precondition-validation) (repo `schema_forge`). Ref AD `Text` (14), igual que `AGENT_PROMPT` en `ETGO_SF_SPEC`. |
 
 **Constraint unico:** `(ETGO_SF_SPEC_ID, NAME)`
 
