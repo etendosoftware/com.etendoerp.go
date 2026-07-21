@@ -351,6 +351,38 @@ class PaymentRegistrationServiceAdvancedTest {
   }
 
   @Test
+  @DisplayName("Credit sources are filtered by the invoice currency: both the abono and the "
+      + "accumulated-credit queries bind :cur to the invoice's currency id")
+  @SuppressWarnings("unchecked")
+  void testListCreditSourcesFilteredByInvoiceCurrency() throws Exception {
+    NeoContext context = creditSourcesContext();
+    stubInvoiceWithBp();
+    // invoice.getCurrency() → currency (CURRENCY_ID) is wired by the global setUp stubs.
+
+    Query<FIN_PaymentScheduleDetail> abonoQuery = mock(Query.class);
+    when(session.createQuery(anyString(), eq(FIN_PaymentScheduleDetail.class)))
+        .thenReturn(abonoQuery);
+    when(abonoQuery.setParameter(anyString(), any())).thenReturn(abonoQuery);
+    when(abonoQuery.setMaxResults(anyInt())).thenReturn(abonoQuery);
+    when(abonoQuery.list()).thenReturn(Collections.emptyList());
+
+    Query<FIN_Payment> creditQuery = mock(Query.class);
+    when(session.createQuery(anyString(), eq(FIN_Payment.class))).thenReturn(creditQuery);
+    when(creditQuery.setParameter(anyString(), any())).thenReturn(creditQuery);
+    when(creditQuery.setMaxResults(anyInt())).thenReturn(creditQuery);
+    when(creditQuery.list()).thenReturn(Collections.emptyList());
+
+    NeoResponse response = PaymentCreditSourcesService.handleListCreditSources(context, true);
+
+    assertEquals(200, response.getHttpStatus());
+    // Both source kinds must be restricted to the invoice currency — cross-currency credit
+    // cannot be applied. The row filtering is enforced by the HQL predicate on :cur; here we
+    // assert the predicate is bound to the invoice's own currency id.
+    verify(abonoQuery).setParameter("cur", CURRENCY_ID);
+    verify(creditQuery).setParameter("cur", CURRENCY_ID);
+  }
+
+  @Test
   @DisplayName("Credit sources for an invoice without a business partner returns empty")
   void testListCreditSourcesNoBusinessPartnerReturnsEmpty() throws Exception {
     NeoContext context = creditSourcesContext();
@@ -569,6 +601,126 @@ class PaymentRegistrationServiceAdvancedTest {
         any(), any(), eq("P"), eq(newPayment), eq("")), times(1));
     finAddPaymentMock.verify(
         () -> FIN_AddPayment.createRefundPayment(any(), any(), any(), any(), any()), never());
+  }
+
+  // ════════════════════════════════════════════════════════════════════════
+  // doRegisterPaymentAdvanced - multi-currency (conversion rate)
+  // ════════════════════════════════════════════════════════════════════════
+
+  @Test
+  @DisplayName("A foreign-currency account applies the supplied rate to the financial transaction "
+      + "amount (100 USD x 0.92 = 92.00 EUR) and no longer throws")
+  void testAdvancedForeignCurrencyAppliesConversionRate() throws Exception {
+    stubAdvancedBasics();
+    stubPendingPSDs(new BigDecimal("100.00"));
+
+    // Account is EUR (precision 2), invoice is USD → foreign: the modal sends conversionRate=0.92.
+    Currency accountCurrency = mock(Currency.class);
+    when(accountCurrency.getId()).thenReturn("EUR-ID");
+    when(accountCurrency.getStandardPrecision()).thenReturn(2L);
+    when(account.getCurrency()).thenReturn(accountCurrency);
+
+    JSONObject body = advancedBody("100.00", CONFIRM).put("conversionRate", "0.92");
+
+    NeoResponse response = PaymentRegistrationService.doRegisterPaymentAdvanced(
+        INVOICE_ID, body, true);
+
+    assertEquals(201, response.getHttpStatus());
+    // Payment amount stays in invoice currency (100.00); the financial-transaction amount is the
+    // account-currency conversion 100.00 x 0.92 = 92.00, rounded to the account precision (2).
+    finAddPaymentMock.verify(() -> FIN_AddPayment.setFinancialTransactionAmountAndRate(
+        any(), eq(newPayment), eq(new BigDecimal("0.92")), eq(new BigDecimal("92.00"))));
+    // The payment is created in the invoice currency with the supplied rate + converted amount.
+    AdvPaymentMngtDao dao = daoConstruction.constructed().get(0);
+    verify(dao).getNewPayment(anyBoolean(), any(), any(), any(), any(), any(), any(), any(),
+        any(), any(), eq(currency), eq(new BigDecimal("0.92")), eq(new BigDecimal("92.00")));
+  }
+
+  @Test
+  @DisplayName("A same-currency account defaults the conversion rate to ONE (transaction amount "
+      + "equals the payment amount)")
+  void testAdvancedSameCurrencyDefaultsRateToOne() throws Exception {
+    stubAdvancedBasics();
+    stubPendingPSDs(new BigDecimal("100.00"));
+    // Account currency == invoice currency, no conversionRate in the body → rate ONE.
+
+    JSONObject body = advancedBody("100.00", CONFIRM);
+
+    NeoResponse response = PaymentRegistrationService.doRegisterPaymentAdvanced(
+        INVOICE_ID, body, true);
+
+    assertEquals(201, response.getHttpStatus());
+    finAddPaymentMock.verify(() -> FIN_AddPayment.setFinancialTransactionAmountAndRate(
+        any(), eq(newPayment), eq(BigDecimal.ONE), eq(new BigDecimal("100"))));
+  }
+
+  @Test
+  @DisplayName("A non-positive conversion rate is rejected with 400 before any payment is created")
+  void testAdvancedRejectsNonPositiveConversionRate() throws Exception {
+    stubAdvancedBasics();
+
+    JSONObject body = advancedBody("100.00", CONFIRM).put("conversionRate", "0");
+
+    NeoResponse response = PaymentRegistrationService.doRegisterPaymentAdvanced(
+        INVOICE_ID, body, true);
+
+    assertEquals(400, response.getHttpStatus());
+    finAddPaymentMock.verify(() -> FIN_AddPayment.processPayment(
+        any(), any(), anyString(), any(), anyString()), never());
+  }
+
+  @Test
+  @DisplayName("A malformed conversion rate is rejected with 400")
+  void testAdvancedRejectsMalformedConversionRate() throws Exception {
+    stubAdvancedBasics();
+
+    JSONObject body = advancedBody("100.00", CONFIRM).put("conversionRate", "abc");
+
+    NeoResponse response = PaymentRegistrationService.doRegisterPaymentAdvanced(
+        INVOICE_ID, body, true);
+
+    assertEquals(400, response.getHttpStatus());
+    finAddPaymentMock.verify(() -> FIN_AddPayment.processPayment(
+        any(), any(), anyString(), any(), anyString()), never());
+  }
+
+  @Test
+  @DisplayName("Defense-in-depth (B1): a foreign-currency payment with NO conversion rate is "
+      + "rejected with 400 instead of silently booking amount x 1")
+  void testAdvancedForeignCurrencyMissingRateRejected() throws Exception {
+    stubAdvancedBasics();
+    // Account is EUR, invoice is the global USD currency → foreign, but no conversionRate sent.
+    Currency accountCurrency = mock(Currency.class);
+    when(accountCurrency.getId()).thenReturn("EUR-ID");
+    when(account.getCurrency()).thenReturn(accountCurrency);
+
+    JSONObject body = advancedBody("100.00", CONFIRM); // conversionRate absent
+
+    NeoResponse response = PaymentRegistrationService.doRegisterPaymentAdvanced(
+        INVOICE_ID, body, true);
+
+    assertEquals(400, response.getHttpStatus());
+    finAddPaymentMock.verify(() -> FIN_AddPayment.processPayment(
+        any(), any(), anyString(), any(), anyString()), never());
+  }
+
+  @Test
+  @DisplayName("Defense-in-depth (B1): a foreign-currency payment with an explicit rate of ONE is "
+      + "rejected with 400 (placeholder value, not a real cross-currency rate)")
+  void testAdvancedForeignCurrencyRateOfOneRejected() throws Exception {
+    stubAdvancedBasics();
+    Currency accountCurrency = mock(Currency.class);
+    when(accountCurrency.getId()).thenReturn("EUR-ID");
+    when(account.getCurrency()).thenReturn(accountCurrency);
+
+    JSONObject body = advancedBody("100.00", CONFIRM).put("conversionRate", "1");
+
+    NeoResponse response = PaymentRegistrationService.doRegisterPaymentAdvanced(
+        INVOICE_ID, body, true);
+
+    assertEquals(400, response.getHttpStatus());
+    finAddPaymentMock.verify(() -> FIN_AddPayment.processPayment(
+        any(), any(), anyString(), any(), anyString()), never());
   }
 
   // ════════════════════════════════════════════════════════════════════════
