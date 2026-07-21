@@ -246,7 +246,7 @@ final class PaymentDraftEditService {
    * Re-sets the editable header basics on the reused draft, mirroring {@code createDraftPayment}.
    * The financial transaction amount is the payment amount converted to the account currency
    * ({@code amount * rate}, rounded to the account precision by
-   * {@link PaymentRegistrationService#convertedAmount}), so editing/confirming a draft keeps its
+   * {@link PaymentCurrencyConverter#convertedAmount}), so editing/confirming a draft keeps its
    * conversion rate. A rate of {@link BigDecimal#ONE} (same currency) preserves the original
    * single-currency behavior.
    */
@@ -256,7 +256,7 @@ final class PaymentDraftEditService {
     payment.setAccount(account);
     payment.setPaymentMethod(paymentMethod);
     payment.setAmount(amount);
-    BigDecimal txnAmount = PaymentRegistrationService.convertedAmount(amount, rate, account);
+    BigDecimal txnAmount = PaymentCurrencyConverter.convertedAmount(amount, rate, account);
     FIN_AddPayment.setFinancialTransactionAmountAndRate(null, payment, rate, txnAmount);
     OBDal.getInstance().save(payment);
     OBDal.getInstance().flush();
