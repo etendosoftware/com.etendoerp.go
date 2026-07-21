@@ -97,6 +97,9 @@
       <foreign-key foreignTable="ETGO_SF_SPEC" name="ETGO_SF_ENT_SPEC_FK">
         <reference local="ETGO_SF_SPEC_ID" foreign="ETGO_SF_SPEC_ID"/>
       </foreign-key>
+      <foreign-key foreignTable="AD_TAB" name="ETGO_SF_ENT_TAB_FK">
+        <reference local="AD_TAB_ID" foreign="AD_TAB_ID"/>
+      </foreign-key>
       <unique name="ETGO_SF_ENTITY_SPEC_NAME_UQ">
         <unique-column name="ETGO_SF_SPEC_ID"/>
         <unique-column name="NAME"/>
