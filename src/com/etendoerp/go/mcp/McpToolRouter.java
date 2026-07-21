@@ -88,6 +88,10 @@ public class McpToolRouter {
   private static final String ACCESS_DENIED_FOR_CURRENT_ROLE_SUFFIX = "' for current role";
   /** OBPreference property name holding the optional Context7 API token. */
   static final String PREF_CONTEXT7_TOKEN = "ETGO_Context7Token";
+  private static final String HTTP_METHOD_GET = "GET";
+  private static final String HTTP_METHOD_POST = "POST";
+  private static final String HTTP_METHOD_PUT = "PUT";
+  private static final String HTTP_METHOD_DELETE = "DELETE";
 
 
   /**
@@ -408,7 +412,7 @@ public class McpToolRouter {
     NeoContext ctx = NeoContext.builder()
         .specName(specName)
         .entityName(entityName)
-        .httpMethod("POST")
+        .httpMethod(HTTP_METHOD_POST)
         .adTab(adTab)
         .sfEntity(sfEntity)
         .obContext(OBContext.getOBContext())
@@ -451,7 +455,7 @@ public class McpToolRouter {
     // Run the entity's NeoHandler pre-hook (parity with the REST CRUD path): it may
     // validate and mutate filteredBody (e.g. inject derived FK values) before persist.
     NeoHandler handler = McpHookExecutor.resolveEntityHandler(sfEntity);
-    NeoContext hookCtx = McpHookExecutor.buildHookContext(specName, entityName, "POST", null, filteredBody, adTab, sfEntity);
+    NeoContext hookCtx = McpHookExecutor.buildHookContext(specName, entityName, HTTP_METHOD_POST, null, filteredBody, adTab, sfEntity);
     JSONObject preHookResult = McpHookExecutor.runPreHook(handler, hookCtx);
     if (preHookResult != null) {
       return preHookResult;
@@ -504,7 +508,7 @@ public class McpToolRouter {
 
     // Run the entity's NeoHandler pre-hook (parity with the REST CRUD path).
     NeoHandler handler = McpHookExecutor.resolveEntityHandler(sfEntity);
-    NeoContext hookCtx = McpHookExecutor.buildHookContext(specName, entityName, "PUT", recordId, filteredBody, adTab, sfEntity);
+    NeoContext hookCtx = McpHookExecutor.buildHookContext(specName, entityName, HTTP_METHOD_PUT, recordId, filteredBody, adTab, sfEntity);
     JSONObject preHookResult = McpHookExecutor.runPreHook(handler, hookCtx);
     if (preHookResult != null) {
       return preHookResult;
@@ -554,7 +558,7 @@ public class McpToolRouter {
     // Run the entity's NeoHandler pre-hook (parity with the REST CRUD path). A
     // handler may fully handle the delete (e.g. a soft-archive) or reject it.
     NeoHandler handler = McpHookExecutor.resolveEntityHandler(sfEntity);
-    NeoContext hookCtx = McpHookExecutor.buildHookContext(specName, entityName, "DELETE", recordId, null, adTab, sfEntity);
+    NeoContext hookCtx = McpHookExecutor.buildHookContext(specName, entityName, HTTP_METHOD_DELETE, recordId, null, adTab, sfEntity);
     JSONObject preHookResult = McpHookExecutor.runPreHook(handler, hookCtx);
     if (preHookResult != null) {
       return preHookResult;
@@ -649,7 +653,7 @@ public class McpToolRouter {
     NeoContext ctx = NeoContext.builder()
         .specName(specName)
         .entityName(entityName)
-        .httpMethod("GET")
+        .httpMethod(HTTP_METHOD_GET)
         .adTab(adTab)
         .sfEntity(sfEntity)
         .obContext(OBContext.getOBContext())
@@ -723,16 +727,16 @@ public class McpToolRouter {
     // Methods from SFEntity config
     JSONArray methods = new JSONArray();
     if (Boolean.TRUE.equals(sfEntity.isGet()) || Boolean.TRUE.equals(sfEntity.isGetByID())) {
-      methods.put("GET");
+      methods.put(HTTP_METHOD_GET);
     }
     if (Boolean.TRUE.equals(sfEntity.isPost())) {
-      methods.put("POST");
+      methods.put(HTTP_METHOD_POST);
     }
     if (Boolean.TRUE.equals(sfEntity.isPut())) {
-      methods.put("PUT");
+      methods.put(HTTP_METHOD_PUT);
     }
     if (Boolean.TRUE.equals(sfEntity.isDelete())) {
-      methods.put("DELETE");
+      methods.put(HTTP_METHOD_DELETE);
     }
     entitySchema.put("methods", methods);
     entitySchema.put("fields", fieldsArray);
@@ -801,7 +805,7 @@ public class McpToolRouter {
         }
         String specName = op.optString("spec", null);
         if (StringUtils.isNotBlank(specName) && seen.add(specName)) {
-          authorizeSpecAccess(specName, "POST");
+          authorizeSpecAccess(specName, HTTP_METHOD_POST);
         }
       }
       JSONObject result = BatchService.forBatchOnly().executeBatch(operations);
@@ -944,7 +948,7 @@ public class McpToolRouter {
     NeoContext ctx = NeoContext.builder()
         .specName(specName)
         .entityName(reportEntity.getName())
-        .httpMethod("POST")
+        .httpMethod(HTTP_METHOD_POST)
         .requestBody(parameters)
         .sfEntity(reportEntity)
         .obContext(OBContext.getOBContext())
@@ -963,7 +967,7 @@ public class McpToolRouter {
    * MCP tool's write intent.
    */
   private void authorizeSpecAccess(String specName) throws Exception {
-    authorizeSpecAccess(specName, "GET");
+    authorizeSpecAccess(specName, HTTP_METHOD_GET);
   }
 
   /**
@@ -1001,13 +1005,13 @@ public class McpToolRouter {
   private static String resolveAccessMethod(String toolName) {
     switch (toolName) {
       case "neo_create":
-        return "POST";
+        return HTTP_METHOD_POST;
       case "neo_update":
-        return "PUT";
+        return HTTP_METHOD_PUT;
       case "neo_delete":
-        return "DELETE";
+        return HTTP_METHOD_DELETE;
       default:
-        return "GET";
+        return HTTP_METHOD_GET;
     }
   }
 
