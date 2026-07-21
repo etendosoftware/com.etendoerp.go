@@ -18,6 +18,7 @@ package com.etendoerp.go.oauth2;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.eq;
@@ -25,6 +26,8 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import java.lang.reflect.Constructor;
+import java.lang.reflect.Modifier;
 import java.util.Collections;
 import java.util.LinkedHashSet;
 import java.util.Set;
@@ -47,6 +50,17 @@ import com.etendoerp.go.oauth2.OAuth2AuthorizeSupport.AuthorizeRequestData;
 class OAuth2AuthorizeSupportTest {
 
   private static final String APPLICATION_JSON = "application/json";
+
+  @Test
+  @DisplayName("is a utility class with a private, side-effect-free constructor")
+  void utilityClassHasPrivateConstructor() throws Exception {
+    Constructor<OAuth2AuthorizeSupport> constructor =
+        OAuth2AuthorizeSupport.class.getDeclaredConstructor();
+    assertTrue(Modifier.isPrivate(constructor.getModifiers()),
+        "OAuth2AuthorizeSupport must not be instantiable from outside");
+    constructor.setAccessible(true);
+    assertNotNull(constructor.newInstance());
+  }
 
   @Nested
   @DisplayName("parseAuthorizeRequest")
