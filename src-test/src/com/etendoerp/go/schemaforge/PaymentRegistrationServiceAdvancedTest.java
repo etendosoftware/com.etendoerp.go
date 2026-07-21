@@ -651,7 +651,7 @@ class PaymentRegistrationServiceAdvancedTest {
 
     assertEquals(201, response.getHttpStatus());
     finAddPaymentMock.verify(() -> FIN_AddPayment.setFinancialTransactionAmountAndRate(
-        any(), eq(newPayment), eq(BigDecimal.ONE), eq(new BigDecimal("100.00"))));
+        any(), eq(newPayment), eq(BigDecimal.ONE), eq(new BigDecimal("100"))));
   }
 
   @Test
