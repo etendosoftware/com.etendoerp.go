@@ -260,7 +260,7 @@ public final class NeoAccessHelper {
     String roleId = role.getId();
     OBCriteria<ProcessAccess> criteria = OBDal.getInstance().createCriteria(ProcessAccess.class);
     criteria.add(Restrictions.eq(ProcessAccess.PROPERTY_PROCESS + ".id", processId));
-    criteria.add(Restrictions.eq(ProcessAccess.PROPERTY_ROLE + ".id", role.getId()));
+    criteria.add(Restrictions.eq(ProcessAccess.PROPERTY_ROLE + ".id", roleId));
     criteria.add(Restrictions.eq(ProcessAccess.PROPERTY_ACTIVE, true));
     criteria.setMaxResults(1);
     return !criteria.list().isEmpty();
@@ -359,7 +359,7 @@ public final class NeoAccessHelper {
         org.openbravo.client.application.ProcessAccess.PROPERTY_OBUIAPPPROCESS + ".id",
         processId));
     criteria.add(Restrictions.eq(
-        org.openbravo.client.application.ProcessAccess.PROPERTY_ROLE + ".id", role.getId()));
+        org.openbravo.client.application.ProcessAccess.PROPERTY_ROLE + ".id", roleId));
     criteria.add(Restrictions.eq(
         org.openbravo.client.application.ProcessAccess.PROPERTY_ACTIVE, true));
     criteria.setMaxResults(1);
