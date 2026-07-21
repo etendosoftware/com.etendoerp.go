@@ -67,6 +67,18 @@ public class SFListMenu extends BaseWebhookService {
   /** JSON key used for the nested children array in menu tree nodes. */
   private static final String CHILDREN = "children";
 
+  /** JSON key used for a menu node's linked AD_Window id. */
+  private static final String WINDOW_ID = "windowId";
+
+  /** JSON key used for a menu node's linked AD_Process id. */
+  private static final String PROCESS_ID = "processId";
+
+  /** JSON key used for a menu node's linked OBUIAPP_Process id. */
+  private static final String OBUIAPP_PROCESS_ID = "obuiappProcessId";
+
+  /** JSON key used for the accessible node count in a menu result. */
+  private static final String COUNT = "count";
+
   private static final String MENU_TREE_SQL =
       "WITH RECURSIVE menu_tree AS ("
       + "  SELECT tn.node_id, tn.parent_id, tn.seqno,"
@@ -152,7 +164,7 @@ public class SFListMenu extends BaseWebhookService {
     try {
       JSONObject result = new JSONObject();
       result.put("tree", new JSONArray());
-      result.put("count", 0);
+      result.put(COUNT, 0);
       return result;
     } catch (JSONException e) {
       // JSONObject#put never throws for a non-null key; unreachable in practice.
@@ -196,9 +208,9 @@ public class SFListMenu extends BaseWebhookService {
       node.put("name", name);
       node.put("type", resolveType(isSummary, action));
 
-      putIfNotEmpty(node, "windowId", windowId);
-      putIfNotEmpty(node, "processId", processId);
-      putIfNotEmpty(node, "obuiappProcessId", obuiappProcessId);
+      putIfNotEmpty(node, WINDOW_ID, windowId);
+      putIfNotEmpty(node, PROCESS_ID, processId);
+      putIfNotEmpty(node, OBUIAPP_PROCESS_ID, obuiappProcessId);
       putIfNotEmpty(node, "formId", formId);
 
       // Folders always get a children array
@@ -235,7 +247,7 @@ public class SFListMenu extends BaseWebhookService {
 
     JSONObject result = new JSONObject();
     result.put("tree", treeArray);
-    result.put("count", countNodes(treeArray));
+    result.put(COUNT, countNodes(treeArray));
     return result;
   }
 
@@ -265,9 +277,9 @@ public class SFListMenu extends BaseWebhookService {
       item.put("name", name);
       item.put("type", resolveType(isSummary, action));
 
-      putIfNotEmpty(item, "windowId", windowId);
-      putIfNotEmpty(item, "processId", processId);
-      putIfNotEmpty(item, "obuiappProcessId", obuiappProcessId);
+      putIfNotEmpty(item, WINDOW_ID, windowId);
+      putIfNotEmpty(item, PROCESS_ID, processId);
+      putIfNotEmpty(item, OBUIAPP_PROCESS_ID, obuiappProcessId);
       putIfNotEmpty(item, "formId", formId);
 
       // Flat list: no folder-pruning concern, just keep or drop each leaf item.
@@ -278,7 +290,7 @@ public class SFListMenu extends BaseWebhookService {
 
     JSONObject result = new JSONObject();
     result.put("tree", items);
-    result.put("count", items.length());
+    result.put(COUNT, items.length());
     return result;
   }
 
@@ -333,14 +345,14 @@ public class SFListMenu extends BaseWebhookService {
    */
   private static boolean isNodeAccessible(JSONObject node, Role role) throws JSONException {
     boolean accessible = true;
-    if (node.has("windowId")) {
-      accessible = NeoAccessHelper.hasWindowAccess(role, node.getString("windowId"));
+    if (node.has(WINDOW_ID)) {
+      accessible = NeoAccessHelper.hasWindowAccess(role, node.getString(WINDOW_ID));
     }
-    if (accessible && node.has("processId")) {
-      accessible = NeoAccessHelper.hasProcessAccess(role, node.getString("processId"));
+    if (accessible && node.has(PROCESS_ID)) {
+      accessible = NeoAccessHelper.hasProcessAccess(role, node.getString(PROCESS_ID));
     }
-    if (accessible && node.has("obuiappProcessId")) {
-      accessible = NeoAccessHelper.hasObuiappProcessAccess(node.getString("obuiappProcessId"));
+    if (accessible && node.has(OBUIAPP_PROCESS_ID)) {
+      accessible = NeoAccessHelper.hasObuiappProcessAccess(node.getString(OBUIAPP_PROCESS_ID));
     }
     return accessible;
   }
