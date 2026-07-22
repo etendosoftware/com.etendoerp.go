@@ -96,7 +96,7 @@ public class SFWindowAccessMap extends BaseWebhookService {
     // SFListMenu's identical convention for why: access decisions must always be made against
     // the role actually resolved for this request, never against whatever the ambient
     // OBContext happens to expose once admin mode is active.
-    Role currentRole = resolveCurrentRole();
+    Role currentRole = NeoAccessHelper.resolveCurrentRole();
 
     if (currentRole == null) {
       responseVars.put("result", emptyResult().toString());
@@ -113,18 +113,6 @@ public class SFWindowAccessMap extends BaseWebhookService {
     } finally {
       OBContext.restorePreviousMode();
     }
-  }
-
-  /**
-   * Resolves the role of the current request from the ambient {@link OBContext}, tolerating a
-   * missing context. Must be called before {@link OBContext#setAdminMode()} — see the class
-   * javadoc for why.
-   *
-   * @return the current {@link Role}, or {@code null} if there is no context or no role
-   */
-  private static Role resolveCurrentRole() {
-    OBContext context = OBContext.getOBContext();
-    return context == null ? null : context.getRole();
   }
 
   /**
