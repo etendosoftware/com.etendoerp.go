@@ -53,7 +53,7 @@ import org.openbravo.model.financialmgmt.payment.FIN_PaymentSchedule;
  * {@link ReconciliationFlowSupport#createInvoicePayments}. Only the validation/rejection paths are
  * exercised here: they return a {@link NeoResponse} before any DAL write, so they are reachable by
  * mocking {@link OBDal#get} alone. The happy path (which delegates to
- * {@code PaymentRegistrationService.registerReconciliationPaymentMultiCurrency} — draft-payment
+ * {@code ReconciliationPaymentService.registerReconciliationPaymentMultiCurrency} — draft-payment
  * creation, {@code processOrThrow}, transaction persistence) needs an integration harness and is
  * documented as not covered here.
  *

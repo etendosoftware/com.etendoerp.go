@@ -38,6 +38,8 @@ import org.openbravo.model.financialmgmt.payment.FIN_PaymentSchedule;
 
 final class ReconciliationFlowSupport {
 
+  private static final String FIELD_INVOICE_ID = "invoiceId";
+
   private ReconciliationFlowSupport() {
   }
 
@@ -55,14 +57,25 @@ final class ReconciliationFlowSupport {
       return createForeignInvoicePayment(account, line, invoiceSpecs, lineAmount, isReceipt,
           operationIds, tolerance);
     }
+    return createSameCurrencyInvoicePayments(account, line, invoiceSpecs, operationIds, tolerance,
+        lineAmount, isReceipt);
+  }
 
+  /**
+   * Same-currency path: allocates the line amount across one or more invoices (possibly a partial
+   * match, with the remainder reported as an error). Extracted from {@link #createInvoicePayments}
+   * to keep its cognitive complexity under the Sonar limit (S3776).
+   */
+  private static NeoResponse createSameCurrencyInvoicePayments(FIN_FinancialAccount account,
+      FIN_BankStatementLine line, JSONArray invoiceSpecs, List<String> operationIds,
+      BigDecimal tolerance, BigDecimal lineAmount, boolean isReceipt) throws Exception {
     BigDecimal remaining = lineAmount.abs();
     for (int i = 0; i < invoiceSpecs.length(); i++) {
       if (remaining.compareTo(tolerance) <= 0) {
         break;
       }
       JSONObject spec = invoiceSpecs.getJSONObject(i);
-      String invoiceId = spec.optString("invoiceId", null);
+      String invoiceId = spec.optString(FIELD_INVOICE_ID, null);
       String scheduleId = spec.optString("scheduleId", null);
       if (StringUtils.isBlank(invoiceId) || StringUtils.isBlank(scheduleId)) {
         return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
@@ -109,7 +122,7 @@ final class ReconciliationFlowSupport {
     }
     for (int i = 0; i < invoiceSpecs.length(); i++) {
       JSONObject spec = invoiceSpecs.optJSONObject(i);
-      String invoiceId = spec != null ? spec.optString("invoiceId", null) : null;
+      String invoiceId = spec != null ? spec.optString(FIELD_INVOICE_ID, null) : null;
       if (StringUtils.isBlank(invoiceId)) {
         continue;
       }
@@ -137,7 +150,7 @@ final class ReconciliationFlowSupport {
           "Multi-currency reconciliation supports a single invoice per statement line.");
     }
     JSONObject spec = invoiceSpecs.getJSONObject(0);
-    String invoiceId = spec.optString("invoiceId", null);
+    String invoiceId = spec.optString(FIELD_INVOICE_ID, null);
     String scheduleId = spec.optString("scheduleId", null);
     if (StringUtils.isBlank(invoiceId) || StringUtils.isBlank(scheduleId)) {
       return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
@@ -160,7 +173,7 @@ final class ReconciliationFlowSupport {
       return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
           "The statement line amount is zero; nothing to reconcile.");
     }
-    FIN_Payment payment = PaymentRegistrationService.registerReconciliationPaymentMultiCurrency(
+    FIN_Payment payment = ReconciliationPaymentService.registerReconciliationPaymentMultiCurrency(
         invoice, schedule, outstanding, accountAmount, line.getTransactionDate(), account,
         isReceipt);
     List<FIN_FinaccTransaction> txns = payment.getFINFinaccTransactionList();

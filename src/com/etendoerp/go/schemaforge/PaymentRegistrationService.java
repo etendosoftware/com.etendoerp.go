@@ -205,76 +205,17 @@ final class PaymentRegistrationService {
     // Simple invoice quick-pay / bank-reconciliation path stays single-currency (guarded above by
     // PaymentCurrencyConverter.assertCurrencyMatch): rate ONE, so the transaction amount equals
     // the payment amount.
-    FIN_Payment payment = createDraftPayment(new AdvPaymentMngtDao(), isReceipt, invoice,
-        paymentMethod, account, paymentDate, BigDecimal.ONE, amount);
+    FIN_Payment payment = createDraftPayment(
+        new DraftPaymentRequest(new AdvPaymentMngtDao(), isReceipt, invoice, paymentMethod, account,
+            paymentDate),
+        BigDecimal.ONE, amount);
     linkPSDsToPayment(pendingPSDs, payment, amount);
     processOrThrow(payment);
     return payment;
   }
 
-  /**
-   * Bank-reconciliation multi-currency variant of {@link #registerPaymentCore}: fully settles the
-   * invoice outstanding ({@code amount}, in the invoice currency) while booking the financial
-   * transaction for the exact statement-line amount ({@code accountAmount}, in the account
-   * currency). The conversion rate is derived from the two amounts (see
-   * {@link PaymentCurrencyConverter#derivedRate}) so the transaction reconciles against the bank
-   * statement to the cent. Requires the resolved payment method to be multi-currency enabled for
-   * the direction; a PSD2 bank-transfer method (multi-currency disabled by ETP-4503) is rejected
-   * with a clear error rather than a cryptic Core failure. Used only when the invoice and account
-   * currencies differ; the same-currency path stays on {@link #registerPaymentCore}.
-   */
-  static FIN_Payment registerReconciliationPaymentMultiCurrency(Invoice invoice,
-      FIN_PaymentSchedule schedule, BigDecimal amount, BigDecimal accountAmount, Date paymentDate,
-      FIN_FinancialAccount account, boolean isReceipt) throws Exception {
-
-    List<FIN_PaymentScheduleDetail> pendingPSDs = findPendingPSDs(schedule.getId());
-    if (pendingPSDs.isEmpty()) {
-      throw new OBException(MSG_NO_PENDING_PSD);
-    }
-
-    Organization org = invoice.getOrganization();
-
-    FIN_PaymentMethod paymentMethod = resolvePaymentMethod(account, invoice, isReceipt);
-    if (paymentMethod == null) {
-      throw new OBException("No payment method configured for this financial account. "
-          + "Please configure a payment method in the financial account settings.");
-    }
-    assertMethodMultiCurrency(account, paymentMethod, isReceipt);
-
-    DocumentType docType = resolveArApDocType(org, isReceipt);
-    checkPeriodOpen(invoice, docType, paymentDate);
-
-    BigDecimal rate = PaymentCurrencyConverter.derivedRate(amount, accountAmount);
-    FIN_Payment payment = createDraftPayment(new AdvPaymentMngtDao(), isReceipt, invoice,
-        paymentMethod, account, paymentDate, rate, amount, accountAmount);
-    linkPSDsToPayment(pendingPSDs, payment, amount);
-    processOrThrow(payment);
-    return payment;
-  }
-
-  /**
-   * Ensures the account link for {@code method} in the given direction is flagged multi-currency
-   * (payin/payout). Used by the reconciliation multi-currency path so a foreign-currency settlement
-   * is rejected with a clear message when the method is single-currency (e.g. a PSD2 bank-transfer
-   * method disabled by {@link FinancialAccountSupport#disableMulticurrencyForBankTransfer}).
-   */
-  private static void assertMethodMultiCurrency(FIN_FinancialAccount account,
-      FIN_PaymentMethod method, boolean isReceipt) {
-    OBCriteria<FinAccPaymentMethod> crit = OBDal.getInstance()
-        .createCriteria(FinAccPaymentMethod.class);
-    crit.add(Restrictions.eq(FinAccPaymentMethod.PROPERTY_ACCOUNT, account));
-    crit.add(Restrictions.eq(FinAccPaymentMethod.PROPERTY_PAYMENTMETHOD, method));
-    crit.setMaxResults(1);
-    List<FinAccPaymentMethod> links = crit.list();
-    boolean multiCurrency = !links.isEmpty() && (isReceipt
-        ? Boolean.TRUE.equals(links.get(0).isPayinIsMulticurrency())
-        : Boolean.TRUE.equals(links.get(0).isPayoutIsMulticurrency()));
-    if (!multiCurrency) {
-      throw new OBException("The payment method '" + method.getName() + "' on this account is not "
-          + "enabled for multi-currency, so an invoice in a different currency cannot be reconciled "
-          + "against it.");
-    }
-  }
+  // Bank-reconciliation multi-currency payment registration moved to
+  // ReconciliationPaymentService (Sonar S1200: too many methods in this class).
 
   // ─── ACCOUNTS: return accounts compatible with the invoice's org ───────────
 
@@ -724,8 +665,10 @@ final class PaymentRegistrationService {
   private static FIN_Payment resolveOrCreatePayment(String editPaymentId, AdvPaymentMngtDao dao,
       boolean isReceipt, Invoice invoice, DraftFields fields) throws Exception {
     if (StringUtils.isBlank(editPaymentId)) {
-      return createDraftPayment(dao, isReceipt, invoice, fields.paymentMethod(), fields.account(),
-          fields.paymentDate(), fields.rate(), fields.cash());
+      return createDraftPayment(
+          new DraftPaymentRequest(dao, isReceipt, invoice, fields.paymentMethod(), fields.account(),
+              fields.paymentDate()),
+          fields.rate(), fields.cash());
     }
     FIN_Payment existing = OBDal.getInstance().get(FIN_Payment.class, editPaymentId);
     return existing != null
@@ -844,14 +787,27 @@ final class PaymentRegistrationService {
     return new NeoResponse(200, resp);
   }
 
-  /** Resolves the ARR (receipts) / APP (payments) document type for the org, or throws. */
-  private static DocumentType resolveArApDocType(Organization org, boolean isReceipt) {
+  /**
+   * Resolves the ARR (receipts) / APP (payments) document type for the org, or throws.
+   * Package-visible: also used by {@link ReconciliationPaymentService}.
+   */
+  static DocumentType resolveArApDocType(Organization org, boolean isReceipt) {
     DocumentType docType = FIN_Utility.getDocumentType(org, isReceipt ? "ARR" : "APP");
     if (docType == null) {
       throw new OBException("Document type for " + (isReceipt ? "Receipts (ARR)" : "Payments (APP)")
           + " not found for the organization.");
     }
     return docType;
+  }
+
+  /**
+   * Groups the entities + header fields a draft-payment creation needs (Sonar S107 — the plain
+   * parameter list grew past the 7-parameter limit once the reconciliation multi-currency path
+   * needed the same constructor). Package-visible: also built by
+   * {@link ReconciliationPaymentService#registerReconciliationPaymentMultiCurrency}.
+   */
+  record DraftPaymentRequest(AdvPaymentMngtDao dao, boolean isReceipt, Invoice invoice,
+      FIN_PaymentMethod paymentMethod, FIN_FinancialAccount account, Date paymentDate) {
   }
 
   /**
@@ -862,31 +818,29 @@ final class PaymentRegistrationService {
    * currency) keeps the transaction amount equal to the payment amount, preserving the original
    * single-currency behavior.
    */
-  private static FIN_Payment createDraftPayment(AdvPaymentMngtDao dao, boolean isReceipt,
-      Invoice invoice, FIN_PaymentMethod paymentMethod, FIN_FinancialAccount account,
-      Date paymentDate, BigDecimal rate, BigDecimal amount) throws Exception {
-    BigDecimal txnAmount = PaymentCurrencyConverter.convertedAmount(amount, rate, account);
-    return createDraftPayment(dao, isReceipt, invoice, paymentMethod, account, paymentDate, rate,
-        amount, txnAmount);
+  private static FIN_Payment createDraftPayment(DraftPaymentRequest req, BigDecimal rate,
+      BigDecimal amount) throws Exception {
+    BigDecimal txnAmount = PaymentCurrencyConverter.convertedAmount(amount, rate, req.account());
+    return createDraftPayment(req, rate, amount, txnAmount);
   }
 
   /**
    * Draft-payment creation with an explicit financial-transaction amount (in the account currency)
    * rather than deriving it from {@code amount * rate}. The bank-reconciliation multi-currency path
-   * ({@link ReconciliationFlowSupport#createInvoicePayments}) uses this so the transaction is booked
-   * for the exact statement-line amount and reconciles against the bank statement to the cent;
-   * {@code rate} is the derived rate stored on the payment for the GL conversion record.
+   * ({@link ReconciliationPaymentService#registerReconciliationPaymentMultiCurrency}) uses this so
+   * the transaction is booked for the exact statement-line amount and reconciles against the bank
+   * statement to the cent; {@code rate} is the derived rate stored on the payment for the GL
+   * conversion record. Package-visible: also called by {@link ReconciliationPaymentService}.
    */
-  private static FIN_Payment createDraftPayment(AdvPaymentMngtDao dao, boolean isReceipt,
-      Invoice invoice, FIN_PaymentMethod paymentMethod, FIN_FinancialAccount account,
-      Date paymentDate, BigDecimal rate, BigDecimal amount, BigDecimal txnAmount) throws Exception {
-    DocumentType docType = resolveArApDocType(invoice.getOrganization(), isReceipt);
+  static FIN_Payment createDraftPayment(DraftPaymentRequest req, BigDecimal rate,
+      BigDecimal amount, BigDecimal txnAmount) throws Exception {
+    DocumentType docType = resolveArApDocType(req.invoice().getOrganization(), req.isReceipt());
     String docNo = FIN_Utility.getDocumentNo(docType, "FIN_Payment");
     VariablesSecureApp vars = NeoDefaultsService.buildVariablesSecureApp(OBContext.getOBContext());
     RequestContext.get().setVariableSecureApp(vars);
-    FIN_Payment payment = dao.getNewPayment(isReceipt, invoice.getOrganization(), docType, docNo,
-        invoice.getBusinessPartner(), paymentMethod, account, "0", paymentDate, "",
-        invoice.getCurrency(), rate, txnAmount);
+    FIN_Payment payment = req.dao().getNewPayment(req.isReceipt(), req.invoice().getOrganization(),
+        docType, docNo, req.invoice().getBusinessPartner(), req.paymentMethod(), req.account(), "0",
+        req.paymentDate(), "", req.invoice().getCurrency(), rate, txnAmount);
     payment.setAmount(amount);
     FIN_AddPayment.setFinancialTransactionAmountAndRate(null, payment, rate, txnAmount);
     OBDal.getInstance().save(payment);
@@ -938,8 +892,9 @@ final class PaymentRegistrationService {
   /**
    * Validates that the accounting period is open for the given payment date.
    * Mirrors Classic's AddPaymentActionHandler check.
+   * Package-visible: also used by {@link ReconciliationPaymentService}.
    */
-  private static void checkPeriodOpen(Invoice invoice, DocumentType docType, Date paymentDate) {
+  static void checkPeriodOpen(Invoice invoice, DocumentType docType, Date paymentDate) {
     try {
       OrganizationStructureProvider osp = OBContext.getOBContext()
           .getOrganizationStructureProvider(invoice.getClient().getId());
@@ -970,8 +925,9 @@ final class PaymentRegistrationService {
   /**
    * Resolves the payment method to use, based on the financial account's configuration.
    * Priority: invoice's own method (if valid for the account), else first valid method, else null.
+   * Package-visible: also used by {@link ReconciliationPaymentService}.
    */
-  private static FIN_PaymentMethod resolvePaymentMethod(FIN_FinancialAccount account,
+  static FIN_PaymentMethod resolvePaymentMethod(FIN_FinancialAccount account,
       Invoice invoice, boolean isReceipt) {
 
     FIN_PaymentMethod invoiceMethod = resolveInvoiceMethod(invoice);
@@ -1011,7 +967,8 @@ final class PaymentRegistrationService {
     return !crit.list().isEmpty();
   }
 
-  private static void linkPSDsToPayment(List<FIN_PaymentScheduleDetail> psds,
+  /** Package-visible: also used by {@link ReconciliationPaymentService}. */
+  static void linkPSDsToPayment(List<FIN_PaymentScheduleDetail> psds,
       FIN_Payment payment, BigDecimal amount) {
     BigDecimal remaining = amount;
     for (FIN_PaymentScheduleDetail psd : psds) {
@@ -1024,7 +981,8 @@ final class PaymentRegistrationService {
     }
   }
 
-  private static List<FIN_PaymentScheduleDetail> findPendingPSDs(String scheduleId) {
+  /** Package-visible: also used by {@link ReconciliationPaymentService}. */
+  static List<FIN_PaymentScheduleDetail> findPendingPSDs(String scheduleId) {
     OBCriteria<FIN_PaymentScheduleDetail> criteria = OBDal.getInstance()
         .createCriteria(FIN_PaymentScheduleDetail.class);
     criteria.add(Restrictions.eq(
