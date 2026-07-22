@@ -815,7 +815,32 @@ A node carrying none of these IDs (typically a `report`/`form`/`other` node with
 
 Folder nodes are never filtered directly: their children are filtered first (post-order), and the folder itself is dropped from the tree only if it ends up with zero accessible children. `count` is recomputed after pruning — it does not reflect the raw row count from the DB.
 
-**Explicitly out of scope:** this endpoint controls what appears *in the menu*. It does not block direct/deep-link navigation to a window the role has no access to — that gap is tracked separately as ETP-4520.
+**Explicitly out of scope:** this endpoint controls what appears *in the menu*. It does not block direct/deep-link navigation to a window the role has no access to — that reactive gap remains open. The proactive counterpart — telling the frontend up front what tier it has for every window, before it renders anything — is `SFWindowAccessMap`, described next (ETP-4520).
+
+---
+
+## 8b. Proactive Window-Access Map (SFWindowAccessMap Webhook)
+
+`SFWindowAccessMap` (`GET /webhooks/SFWindowAccessMap`) reports, for the current authenticated user/role, its access tier for every window it has an explicit grant for, plus whether it may see accounting-sensitive data — so the frontend can adapt *before* rendering instead of discovering a `403` reactively per-request (§7 item 3). It lives in the same Webhooks module infrastructure as `SFListMenu`, not under the NEO servlet.
+
+**Response shape:**
+
+```json
+{
+  "windowAccess": { "111": "full", "268": "read-only" },
+  "capabilities": { "showAccountingFields": true }
+}
+```
+
+`windowAccess` keys are `AD_Window_ID`s; a window with no active `AD_Window_Access` row for the role is simply absent — the frontend treats a missing key as `"none"`.
+
+**Resolution order** (mirrors `NeoAccessHelper.hasWindowAccess(Role, String, String)`, §7 item 3):
+
+1. No role assigned → `{"windowAccess": {}, "capabilities": {}}`, without querying the database — same convention as `SFListMenu`: the role is captured once, at the very top of the request, before the servlet enters `OBContext.setAdminMode()`.
+2. System Administrator role (`"0"`) or a client-admin role (`NeoAccessHelper.isAdminOrClientAdmin(Role)`, now `public` specifically so this webhook can reuse it) → every distinct `AD_Window` backing an active, `SPEC_TYPE = 'W'` `ETGO_SF_SPEC` resolves to `"full"`, and `capabilities.showAccountingFields` is always `true` — the column is never even queried for this branch.
+3. Otherwise, for every active `AD_Window_Access` row the role has: `IsReadWrite = true` → `"full"`; `IsReadWrite = false` → `"read-only"`. `capabilities.showAccountingFields` is read directly off the new `AD_Role.EM_ETGO_Show_Acct_Fields` boolean extension column (ETP-4520) for the resolved role, via a native SQL lookup rather than the DAL entity model (the column was added straight to the physical table and is not yet mapped as a typed entity property).
+
+**`AD_Role.EM_ETGO_Show_Acct_Fields`:** a Yes/No extension column added by this module (`AD_Column_ID = A0F2D12B5B4A48C2855EE73E3E93E274`, default `N`) and exposed as a real field (`AD_Field_ID = 98C71197D0744EED96856A497E49F159`) on the classic `AD_Role` window/tab, so a functional consultant can toggle it like any other role attribute. It gates accounting-sensitive field/tab visibility in Etendo GO — e.g. the `Posted` status pill on invoice windows and the financial-account edit form's "Cuentas contables" tab — independently of per-window `AD_Window_Access`.
 
 ---
 
@@ -831,6 +856,7 @@ The module includes unit tests that run without a backend:
 | `NeoServletTabFilterTest` | -- | Parent-child HQL where clause generation. |
 | `NeoPreviewFileServiceTest` | ~250 | Validation (invalid JSON, blank fields), GET miss/hit, POST INSERT/UPDATE paths, DELETE miss/hit. All without a live DB via `MockedStatic<OBDal>` + `MockedStatic<OBContext>`. |
 | `SFListMenuTest` | -- | Tree building/pruning, flat search, role-based filtering (window/process/OBUIAPP-process nodes), no-role → empty menu, multi-level nesting. |
+| `SFWindowAccessMapTest` | -- | Role-based windowAccess resolution (full/read-only/absent), no-role → both maps empty, admin/client-admin bypass → full access to every active Etendo GO window + every capability true, `showAccountingFields` true/false/unset/missing-role. |
 
 Tests are located in `src-test/src/com/etendoerp/go/schemaforge/`.
 

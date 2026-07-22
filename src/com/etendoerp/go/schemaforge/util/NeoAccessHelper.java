@@ -282,10 +282,15 @@ public final class NeoAccessHelper {
    * System Administrator role ({@code "0"}), or a per-client "GO Admin" role
    * ({@code AD_Role.is_client_admin = 'Y'}).
    *
+   * <p>Public so callers outside this class that need the same admin/client-admin bypass
+   * semantics — e.g. {@code SFWindowAccessMap}, which reports "full access to every window" and
+   * "every capability true" for these roles instead of resolving them one {@code AD_Window_Access}
+   * row at a time — can reuse this exact resolution instead of re-implementing it.</p>
+   *
    * @param role the role to evaluate (never {@code null})
    * @return {@code true} if this role always has full access
    */
-  private static boolean isAdminOrClientAdmin(Role role) {
+  public static boolean isAdminOrClientAdmin(Role role) {
     return "0".equals(role.getId()) || Boolean.TRUE.equals(role.isClientAdmin());
   }
 
