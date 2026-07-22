@@ -20,8 +20,9 @@
 16. [Customizacion con NeoHandler (Hooks CDI)](#16-customizacion-con-neohandler-hooks-cdi)
 17. [OpenAPI Auto-Generado](#17-openapi-auto-generado)
 18. [Seguridad](#18-seguridad)
-19. [Testing](#19-testing)
-20. [Troubleshooting](#20-troubleshooting)
+19. [Menu de Navegacion (SFListMenu)](#19-menu-de-navegacion-sflistmenu)
+20. [Testing](#20-testing)
+21. [Troubleshooting](#21-troubleshooting)
 
 ---
 
@@ -130,8 +131,9 @@ Busca `ETGO_SF_Spec` activo por nombre. Si no existe: `404 Not Found`.
 Busca `ETGO_SF_Entity` activa dentro del spec. Verifica que el metodo HTTP este habilitado (ISGET, ISPOST, etc). Si no: `405 Method Not Allowed`.
 
 ### Etapa 6: Control de Acceso
-- Window specs: verifica `ADWindowAccess` para el role actual
-- Process specs: verifica `ADProcessAccess` para el role actual
+- Window specs: `NeoAccessHelper.hasWindowAccess(role, windowId, httpMethod)` verifica `AD_Window_Access` con tiering lectura/escritura (ver §18)
+- Windowless/custom specs (sin `AD_Window` directo): `hasWindowAccessForSpec(spec, httpMethod)` resuelve una "combinacion" de ventanas, o cae a permitir cualquier role autenticado (ver §18)
+- Process specs: verifica `AD_Process_Access` para el role actual (binario, sin tiering)
 - Si denegado: `403 Forbidden`
 
 ### Etapa 7: Hook Discovery (opcional)
@@ -912,6 +914,20 @@ El `recordId` de la URL se inyecta automaticamente como `inpRecordId` en los par
 > **HTTP 200** con `{name, type:"report", callable:false, status:"not_configured_for_report_generation", message}`,
 > identico a `neo_discover` y a la herramienta de reporte de MCP. La integracion de jsreport
 > queda fuera del alcance de ETP-4255.
+>
+> **ETP-4257 — herramientas CRUD de MCP sobre specs `R`.** Un spec `R` no expone entidades
+> listables, por lo que `neo_list`/`neo_get`/`neo_create`/`neo_update`/`neo_delete`/
+> `neo_selectors`/`neo_defaults`/`neo_schema` **no** devuelven ya el opaco `Entity not found:
+> <entity>`. En su lugar el guard (`McpToolRouterSupport.resolveIncludedEntityOrExplain`)
+> explica que el spec es de tipo reporte:
+> - **callable** (respaldado por handler NEO-native): `Spec '<name>' is a report type (R) and
+>   does not expose listable entities. Use the etendo_generate_<snake> tool to produce this
+>   report.`
+> - **no callable**: el mismo mensaje `not_configured_for_report_generation` de arriba.
+>
+> Ademas, `neo_discover` añade en cada spec `R` **callable** el campo `reportTool =
+> generate_<snake>` (el cliente lo ve como `etendo_generate_<snake>`), para que el agente
+> invoque directamente la herramienta de reporte en vez de adivinar una entidad.
 
 El `NeoReportService` genera reportes Jasper desde specs tipo `R`.
 
@@ -1176,15 +1192,104 @@ Neo Headless aplica seguridad en multiples capas:
 |------|-----------|------------|
 | Autenticacion | JWT bearer token via SecureWebServices | 401 |
 | OBContext | Claims JWT -> OBContext completo. Todas las queries DAL respetan org/client access | -- |
-| Window access | Verifica `ADWindowAccess` para el role actual | 403 |
-| Process access | Verifica `ADProcessAccess` antes de ejecucion | 403 |
+| Window access (tiered) | `NeoAccessHelper.hasWindowAccess(role, windowId, httpMethod)` verifica `AD_Window_Access` con tiering lectura/escritura | 403 |
+| Windowless/custom spec access | `NeoAccessHelper.hasWindowAccessForSpec(spec, httpMethod)` -- ver detalle abajo | 403 |
+| Process access | Verifica `AD_Process_Access` antes de ejecucion (binario, sin tiering) | 403 |
+| OBUIAPP process access | `NeoAccessHelper.hasObuiappProcessAccess(processId)` -- usado por handlers de reportes sin `AD_Process` propio | 403 |
 | Method-level | Cada metodo HTTP debe estar habilitado en entity record | 405 |
 | Field-level | Solo campos con `ISINCLUDED = 'Y'` participan. Read-only fields no se escriben | -- |
 | Error sanitization | Mensajes de error de autenticacion se sanitizan para no exponer detalles internos | -- |
 
+### Window access: lectura vs escritura
+
+`hasWindowAccess` resuelve en este orden:
+
+1. Sin role asignado en el request -> deniega.
+2. Role System Administrator (`"0"`) o cualquier role con `AD_Role.is_client_admin = 'Y'` -> siempre permitido, cualquier metodo.
+3. Sin fila activa de `AD_Window_Access` para role+window -> deniega.
+4. Existe una fila activa: `GET` siempre permitido; `POST`/`PUT`/`PATCH`/`DELETE` solo si el flag `IsReadWrite` de esa fila es `true` -- una fila de solo-lectura otorga visibilidad pero deniega escritura.
+
+Este check se aplica identico en los dos puntos de entrada a datos de ventana: el servlet REST (`NeoRequestRouter.handleWindowSpecRequest`) y el router de tools MCP (`McpToolRouter`, que mapea `neo_create`->`POST`, `neo_update`->`PUT`, `neo_delete`->`DELETE`, el resto->`GET` antes de llamar al mismo helper).
+
+### Windowless/custom specs ("combinacion" de ventanas)
+
+Un spec sin un `AD_Window` unico (`spec.getADWindow() == null`, ej. specs 100% custom) no se puede chequear contra un solo window ID. `hasWindowAccessForSpec(spec, httpMethod)` resuelve en 3 niveles, en este orden de prioridad:
+
+1. Sin role asignado -> deniega, siempre e incondicionalmente.
+2. Las `SFEntity` del spec resuelven (via su `AD_Tab`) a una o mas `AD_Window` reales (una "combinacion") -> el role necesita `hasWindowAccess` (para el mismo `httpMethod`) sobre **todas** ellas; deniega si falta el acceso a alguna.
+3. Ninguna entity tiene `AD_Tab` poblado (no hay datos de combinacion -- la forma actual de los specs `dashboard` y `not-posted-documents`) -> cae a permitir cualquier role autenticado. No existe modelo de `AD_Window_Access` por-ventana para estos specs hoy, asi que denegar a todos seria una regresion, no un fix.
+
+Usado en `NeoRequestRouter`, `ToolRegistry#addWindowSpec`, `NeoDiscoveryHelper#isSpecAccessible` y la capa de soporte MCP (`McpToolRouterSupport`) -- cualquier lugar que necesite resolver si un spec es accesible sin asumir un unico `AD_Window`. Antes de este fix (ETP-4510 BUG-3), un spec sin ventana se saltaba el chequeo por completo, incluso para un request sin ningun role asignado.
+
+### Reportes sin `AD_Process` propio
+
+Dos specs de tipo reporte (`not-posted-documents`, `aging-receivable`) no tienen `AD_Process` ni `AD_Window` propio, y antes no tenian ningun control de acceso. Ahora su `NeoHandler.handle()` verifica `hasObuiappProcessAccess(processId)` contra el proceso OBUIAPP real, resuelto via el FK `AD_Menu.em_obuiapp_process_id` (nunca por name-matching).
+
+### Limitaciones conocidas (ETP-4596)
+
+7 de los 8 specs `SPEC_TYPE = 'R'` sin mapping a un proceso clasico todavia no tienen control de acceso a nivel handler. Por separado, el catalogo de tools MCP y el discovery (`ToolRegistry`, `NeoDiscoveryHelper`, `McpToolRouterSupport`) siguen exponiendo la *existencia* de specs sin proceso a cualquier caller autenticado sin importar el role -- exposicion de metadata unicamente; el acceso a datos real sigue bloqueado donde exista un gate a nivel handler. Ambos gaps estan trackeados en ETP-4596, no resueltos por ETP-4510/ETP-4511.
+
 ---
 
-## 19. Testing
+## 19. Menu de Navegacion (SFListMenu)
+
+`SFListMenu` (`GET /webhooks/SFListMenu`) expone el arbol de `AD_Menu` -- o una busqueda plana filtrada con `?q=` -- como JSON, podado a lo que el role del request puede alcanzar. Es el webhook de menu filtrado por role, correctamente implementado y disponible para que cualquier cliente lo consuma. A diferencia de los endpoints `/sws/neo/*` de las secciones anteriores, vive en la infraestructura de Webhooks, junto a `SFUpsertSpec`/`SFPopulateSpec` (§5), no bajo el servlet de NEO.
+
+> **Nota:** el sidebar del SPA de Go (`tools/app-shell` en `etendo_schema_forge`) todavia no consume este webhook -- sigue renderizando la navegacion desde un mock estatico `menu.json`, asi que el filtrado de menu por role todavia no se refleja en el frontend en ejecucion. Trackeado como ETP-4598.
+
+### Endpoints
+
+```bash
+# Arbol completo, filtrado por el role actual
+curl -X GET https://tu-etendo/webhooks/SFListMenu \
+  -H "Authorization: Bearer <jwt>"
+
+# Busqueda plana por nombre, mismo filtrado
+curl -X GET "https://tu-etendo/webhooks/SFListMenu?q=sales" \
+  -H "Authorization: Bearer <jwt>"
+```
+
+Response (arbol):
+
+```json
+{
+  "tree": [
+    {
+      "id": "...", "name": "Sales", "type": "folder",
+      "children": [
+        { "id": "...", "name": "Sales Order", "type": "window", "windowId": "143" }
+      ]
+    }
+  ],
+  "count": 2
+}
+```
+
+`type` sale de `AD_Menu.issummary`/`action`: `folder` (nodo summary), `window` (`action='W'`), `process` (`action='P'`), `report` (`action='R'`), `form` (`action='X'`), u `other`. Cada nodo hoja lleva el/los ID que le correspondan (`windowId`, `processId`, `obuiappProcessId`, `formId`); las carpetas llevan `children` en su lugar.
+
+### Filtrado por acceso
+
+El role del request se captura una sola vez, al principio del metodo `get()`, **antes** de entrar a `OBContext.setAdminMode()` -- admin mode solo se usa para saltar row-level security en las queries nativas que arman el arbol, nunca para decidir acceso. Un request sin role asignado recibe `{"tree": [], "count": 0}` de inmediato, sin siquiera consultar la base.
+
+Con el role resuelto, cada nodo se valida (debe pasar todos los checks que le apliquen):
+
+| El nodo lleva | Se valida via | Notas |
+|---|---|---|
+| `windowId` | `NeoAccessHelper.hasWindowAccess(role, windowId)` | Cualquier tier (solo-lectura o full) alcanza para aparecer en el menu -- el menu responde "es esto alcanzable", no "puedo escribir esto". |
+| `processId` | `NeoAccessHelper.hasProcessAccess(role, processId)` | Binario, como en §18. |
+| `obuiappProcessId` | `NeoAccessHelper.hasObuiappProcessAccess(processId)` | Cubre entries con `action = 'OBUIAPP_Process'`, enlazados via `AD_Menu.em_obuiapp_process_id` (no `ad_window_id`/`ad_process_id`). Cierra el gap donde los dos report specs gateados por OBUIAPP (§18) seguian siendo visibles en el menu aunque su handler ya rechazara el request. |
+
+Un nodo que no lleva ninguno de esos IDs (tipicamente `report`/`form`/`other` sin link a OBUIAPP) queda sin filtrar -- filtrar esos casos queda fuera de alcance de este cambio.
+
+Las carpetas nunca se filtran directamente: primero se filtran sus hijos (post-order), y la carpeta se elimina del arbol solo si termina sin hijos accesibles. `count` se recalcula despues del pruning (no refleja el conteo crudo de filas de la DB).
+
+### Fuera de alcance
+
+Este endpoint controla que aparece **en el menu**. No bloquea la navegacion directa/deep-link a una ventana sin acceso -- eso esta trackeado por separado en ETP-4520.
+
+---
+
+## 20. Testing
 
 Tests unitarios en `src-test/src/com/etendoerp/go/schemaforge/`:
 
@@ -1201,10 +1306,11 @@ Tests unitarios en `src-test/src/com/etendoerp/go/schemaforge/`:
 | `SFUpsertFieldTest` | Webhook de upsert field |
 | `SFListWindowsTest` | Webhook de listar ventanas |
 | `SFListProcessesTest` | Webhook de listar procesos |
+| `SFListMenuTest` | Webhook de menu de navegacion: build/pruning del arbol, busqueda plana, filtrado por role (nodos window/process/OBUIAPP-process), role sin acceso -> menu vacio, arbol multi-nivel |
 
 ---
 
-## 20. Troubleshooting
+## 21. Troubleshooting
 
 ### 401 Unauthorized
 - Verificar que el token JWT es valido y no expirado
@@ -1212,7 +1318,15 @@ Tests unitarios en `src-test/src/com/etendoerp/go/schemaforge/`:
 
 ### 403 Forbidden
 - El role del usuario no tiene acceso a la ventana/proceso
-- Verificar `ADWindowAccess` / `ADProcessAccess` para el role
+- Verificar `AD_Window_Access` / `AD_Process_Access` para el role
+- Para ventanas: una fila de `AD_Window_Access` de solo-lectura permite `GET` pero deniega `POST`/`PUT`/`PATCH`/`DELETE` -- revisar el flag `IsReadWrite` (ver §18)
+- Para specs sin `AD_Window` directo (windowless/custom): revisar `hasWindowAccessForSpec` -- puede requerir acceso a varias ventanas "combinadas" a la vez (ver §18)
+
+### El menu no muestra una ventana/proceso esperado
+- El role no tiene una fila activa de `AD_Window_Access`/`AD_Process_Access` para ese item (ver §19) -- alcanza con acceso de solo-lectura, no hace falta `IsReadWrite`
+- Si es un entry con `action = 'OBUIAPP_Process'`, revisar `AD_Menu.em_obuiapp_process_id` y `hasObuiappProcessAccess`
+- Un request sin ningun role asignado recibe el menu vacio (`{"tree": [], "count": 0}`), no un error
+- Una carpeta desaparece del arbol si todos sus hijos quedaron filtrados -- revisar el acceso de los hijos, no de la carpeta misma
 
 ### 404 Not Found
 - Verificar que el spec existe y esta activo (`ISACTIVE = 'Y'`)

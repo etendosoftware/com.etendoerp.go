@@ -91,7 +91,7 @@ public class OAuth2ClientPolicyTest {
     OAuth2AuthorizeSupport.AuthorizeRequestData request =
         new OAuth2AuthorizeSupport.AuthorizeRequestData(
             "token", "client", "http://127.0.0.1/callback", "challenge", "state",
-            "neo:read");
+            "neo:read", -1L);
     OAuth2Servlet.AuthCodeData codeData = OAuth2AuthorizeSupport.buildAuthCodeData(
         request,
         "user",

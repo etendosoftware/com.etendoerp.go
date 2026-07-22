@@ -77,6 +77,9 @@
       <foreign-key foreignTable="AD_PROCESS" name="ETGO_SF_SPEC_PROC_FK">
         <reference local="AD_PROCESS_ID" foreign="AD_PROCESS_ID"/>
       </foreign-key>
+      <foreign-key foreignTable="AD_WINDOW" name="ETGO_SF_SPEC_WIN_FK">
+        <reference local="AD_WINDOW_ID" foreign="AD_WINDOW_ID"/>
+      </foreign-key>
       <check name="ETGO_SF_SPEC_ISACTIVE"><![CDATA[ISACTIVE IN ('Y', 'N')]]></check>
     </table>
   </database>

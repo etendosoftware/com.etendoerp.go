@@ -88,14 +88,17 @@ final class PaymentCreditSourcesService {
           return PaymentRegistrationService.itemsResponse(new JSONArray());
         }
         String bpId = invoice.getBusinessPartner().getId();
+        // Only credits in the invoice's own currency can be applied to it (the modal has no
+        // cross-currency credit conversion), so both source kinds are filtered by it.
+        String curId = invoice.getCurrency() != null ? invoice.getCurrency().getId() : null;
         // Editing a draft: add its own consumption back in, so sources it is already using
         // show their "as if this draft didn't exist" availability and stay in the list even
         // if fully consumed by it — letting the modal re-check them.
         String editPaymentId = context.getRequestBody() != null
             ? context.getRequestBody().optString(FIELD_EDIT_PAYMENT_ID, null) : null;
         List<DatedSource> sources = new ArrayList<>();
-        collectAbonoSources(sources, bpId, invoiceId, isReceipt, editPaymentId);
-        collectAccumulatedCredit(sources, bpId, isReceipt, editPaymentId);
+        collectAbonoSources(sources, bpId, invoiceId, curId, isReceipt, editPaymentId);
+        collectAccumulatedCredit(sources, bpId, curId, isReceipt, editPaymentId);
         // Merge both kinds into a single list ordered by each row's own date — invoice
         // date for saldo a favor (abono), payment date for credit — most recent first.
         // The two kinds are NOT grouped separately; they interleave by date. Reversing
@@ -137,18 +140,20 @@ final class PaymentCreditSourcesService {
    * used), so the edit modal can keep showing and re-checking it.
    */
   private static void collectAbonoSources(List<DatedSource> sources, String bpId, String invoiceId,
-      boolean isReceipt, String editPaymentId) throws Exception {
+      String curId, boolean isReceipt, String editPaymentId) throws Exception {
     String hql = "select psd from FIN_Payment_ScheduleDetail psd "
         + "where psd.invoicePaymentSchedule.invoice.businessPartner.id = :bp "
         + "and psd.invoicePaymentSchedule.invoice.salesTransaction = :receipt "
         + "and psd.paymentDetails is null and psd.amount < 0 "
         + "and psd.invoicePaymentSchedule.invoice.id <> :inv "
+        + "and psd.invoicePaymentSchedule.invoice.currency.id = :cur "
         + "order by psd.invoicePaymentSchedule.invoice.invoiceDate desc";
     List<FIN_PaymentScheduleDetail> abonos = OBDal.getInstance().getSession()
         .createQuery(hql, FIN_PaymentScheduleDetail.class)
         .setParameter("bp", bpId)
         .setParameter(KEY_RECEIPT, isReceipt)
         .setParameter("inv", invoiceId)
+        .setParameter("cur", curId)
         .setMaxResults(50)
         .list();
     for (FIN_PaymentScheduleDetail psd : abonos) {
@@ -193,18 +198,20 @@ final class PaymentCreditSourcesService {
    * stays listed even if fully consumed by it, letting the modal re-check it).
    */
   private static void collectAccumulatedCredit(List<DatedSource> sources, String bpId,
-      boolean isReceipt, String editPaymentId) throws Exception {
+      String curId, boolean isReceipt, String editPaymentId) throws Exception {
     boolean editing = StringUtils.isNotBlank(editPaymentId);
     // While editing, the strict ">0" filter would hide a source THIS draft fully consumed —
     // fetch unfiltered and apply the (draft-adjusted) avail>0 check in Java instead.
     String hql = "select p from FIN_Payment p "
         + "where p.businessPartner.id = :bp and p.receipt = :receipt "
+        + "and p.currency.id = :cur "
         + (editing ? "" : "and (coalesce(p.generatedCredit, 0) - coalesce(p.usedCredit, 0)) > 0 ")
         + "order by p.paymentDate desc";
     List<FIN_Payment> credits = OBDal.getInstance().getSession()
         .createQuery(hql, FIN_Payment.class)
         .setParameter("bp", bpId)
         .setParameter(KEY_RECEIPT, isReceipt)
+        .setParameter("cur", curId)
         .setMaxResults(50)
         .list();
     for (FIN_Payment src : credits) {

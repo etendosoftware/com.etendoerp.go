@@ -70,6 +70,46 @@ The current execution classes remain in `com.etendoerp.go.schemaforge` to avoid 
 
 New OAuth2 validation rules should prefer `OAuth2ClientPolicy` when they are pure policy decisions. Endpoint parsing/rendering should prefer a support class instead of increasing `OAuth2Servlet` method count or cognitive complexity.
 
+### Authorize-grant token validity policy
+
+The Authorization Code + PKCE flow (the grant used by the `/authorize` consent screen that guards `/sws/mcp`) lets the user choose how long the issued access token stays valid. The choice travels as a `validity_seconds` field and is enforced by a small policy in `OAuth2Servlet`.
+
+**Wire contract — `POST /oauth2/authorize`.** In addition to the existing PKCE fields (`token`, `client_id`, `redirect_uri`, `code_challenge`, `state`, `scope`), the consent request may carry:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `validity_seconds` | integer (seconds) | Requested access-token lifetime. `0` = **no expiration**. Absent, blank, or non-numeric → treated as *absent* and falls back to the default. |
+
+`OAuth2AuthorizeSupport` parses the value from both a JSON body (`optLong`) and a form parameter, using a negative marker (`VALIDITY_SECONDS_ABSENT`) when the field is missing or unparseable so that "absent" is distinguishable from an explicit `0`.
+
+**Normalization / clamping — `OAuth2Servlet.normalizeValiditySeconds`.** The requested value is normalized once, at authorize time, before being embedded in the authorization-code payload:
+
+| Constant (`OAuth2Servlet`) | Value | Rule |
+|---|---|---|
+| `VALIDITY_NO_EXPIRATION` | `0` | `0` is preserved as-is → token never expires. |
+| `DEFAULT_AUTHORIZE_VALIDITY_SECONDS` | `86_400` (1 day) | Absent/blank/non-numeric (negative marker) → default. |
+| `MAX_AUTHORIZE_VALIDITY_SECONDS` | `2_592_000` (30 days) | Requests above the max are clamped down (logged at INFO). |
+| `MIN_AUTHORIZE_VALIDITY_SECONDS` | `300` (5 minutes) | Positive requests below the min are clamped up (logged at INFO). |
+
+**Token issuance.** When the authorization code is exchanged, the normalized validity is applied:
+
+- `EXPIRES_AT` is set to `now + validity_seconds` for a finite lifetime, or `NULL` when the validity is `0` (no expiration).
+- The chosen validity is persisted on the token row (`VALIDITY_SECONDS`) so it can be reused later.
+- The token response omits `expires_in` entirely when the token never expires; otherwise `expires_in` equals the granted validity in seconds.
+
+**Refresh reuse.** A `refresh_token` grant does **not** reset the lifetime to the default: it reads the originally granted `VALIDITY_SECONDS` off the stored token and recomputes `EXPIRES_AT` from it (a `NULL`/unset stored value falls back to `DEFAULT_AUTHORIZE_VALIDITY_SECONDS`). A never-expiring token therefore stays never-expiring across refreshes, and `expires_in` is likewise omitted from the refresh response.
+
+**Scope.** This policy applies only to the `authorization_code` (and its `refresh_token`) grant. The `client_credentials` (M2M) grant is out of scope and keeps its fixed `TOKEN_EXPIRY_SECONDS` (3600s) TTL.
+
+**Persistence.** Both columns live on `ETGO_OAUTH2_TOKEN`:
+
+| Column | Type | Notes |
+|---|---|---|
+| `EXPIRES_AT` | `TIMESTAMP`, nullable | `NULL` means the token never expires. |
+| `VALIDITY_SECONDS` | `DECIMAL(20,0)`, nullable | Granted validity in seconds (`0` = no expiration); reused on refresh. |
+
+New validity-related policy belongs with these constants and `normalizeValiditySeconds` in `OAuth2Servlet`, not scattered across the flow.
+
 ## Sonar and PR validation script
 
 `run-sonar.sh` now defaults to PR-scoped validation:

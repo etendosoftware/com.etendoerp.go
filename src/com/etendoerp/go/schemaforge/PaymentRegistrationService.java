@@ -46,7 +46,6 @@ import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.utility.OBDateUtils;
 import org.openbravo.erpCommon.utility.OBError;
 import org.openbravo.erpCommon.utility.OBMessageUtils;
-import org.openbravo.model.common.currency.Currency;
 import org.openbravo.model.common.enterprise.DocumentType;
 import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.common.invoice.Invoice;
@@ -185,7 +184,7 @@ final class PaymentRegistrationService {
       BigDecimal amount, Date paymentDate, FIN_FinancialAccount account, boolean isReceipt)
       throws Exception {
 
-    assertCurrencyMatch(invoice.getCurrency(), account.getCurrency());
+    PaymentCurrencyConverter.assertCurrencyMatch(invoice.getCurrency(), account.getCurrency());
 
     List<FIN_PaymentScheduleDetail> pendingPSDs = findPendingPSDs(schedule.getId());
     if (pendingPSDs.isEmpty()) {
@@ -203,8 +202,11 @@ final class PaymentRegistrationService {
     DocumentType docType = resolveArApDocType(org, isReceipt);
     checkPeriodOpen(invoice, docType, paymentDate);
 
+    // Simple invoice quick-pay / bank-reconciliation path stays single-currency (guarded above by
+    // PaymentCurrencyConverter.assertCurrencyMatch): rate ONE, so the transaction amount equals
+    // the payment amount.
     FIN_Payment payment = createDraftPayment(new AdvPaymentMngtDao(), isReceipt, invoice,
-        paymentMethod, account, paymentDate, amount);
+        paymentMethod, account, paymentDate, BigDecimal.ONE, amount);
     linkPSDsToPayment(pendingPSDs, payment, amount);
     processOrThrow(payment);
     return payment;
@@ -243,11 +245,10 @@ final class PaymentRegistrationService {
         crit.addOrderBy(FIN_FinancialAccount.PROPERTY_NAME, true);
 
         String allowProp = allowProperty(isReceipt);
-        Currency invoiceCurrency = invoice.getCurrency();
 
         JSONArray arr = new JSONArray();
         for (FIN_FinancialAccount acc : crit.list()) {
-          appendAccountItem(arr, acc, allowProp, invoiceCurrency);
+          appendAccountItem(arr, acc, allowProp);
         }
         JSONObject resp = new JSONObject();
         resp.put(KEY_ITEMS, arr);
@@ -272,15 +273,15 @@ final class PaymentRegistrationService {
   }
 
   /**
-   * Appends one account item if it has at least one valid payment method for the direction
-   * and its currency matches the invoice's (accounts with no currency are always kept).
+   * Appends one account item if it has at least one valid payment method for the direction.
+   * Accounts are listed regardless of currency: a foreign-currency account is settled via the
+   * conversion rate supplied by the two-step modal (see {@link #doRegisterPaymentAdvanced}), so
+   * it must remain selectable. The {@code invoiceCurrency} is no longer used to filter, but the
+   * emitted {@code currency}/{@code currencyId} fields let the UI decide when to show the
+   * conversion fields.
    */
-  private static void appendAccountItem(JSONArray arr, FIN_FinancialAccount acc, String allowProp,
-      Currency invoiceCurrency) throws Exception {
-    if (acc.getCurrency() != null && invoiceCurrency != null
-        && !acc.getCurrency().getId().equals(invoiceCurrency.getId())) {
-      return;
-    }
+  private static void appendAccountItem(JSONArray arr, FIN_FinancialAccount acc, String allowProp)
+      throws Exception {
     OBCriteria<FinAccPaymentMethod> methodCrit = OBDal.getInstance()
         .createCriteria(FinAccPaymentMethod.class);
     methodCrit.add(Restrictions.eq(FinAccPaymentMethod.PROPERTY_ACCOUNT, acc));
@@ -591,7 +592,14 @@ final class PaymentRegistrationService {
     String overpaymentAction = body.optString("overpaymentAction", null);
     boolean pis = body.optBoolean(FIELD_PIS, false);
 
-    assertCurrencyMatch(invoice.getCurrency(), account.getCurrency());
+    // Multi-currency: resolve (and validate) the conversion rate — foreign accounts require an
+    // explicit positive rate; same-currency defaults to ONE. See PaymentCurrencyConverter.
+    PaymentCurrencyConverter.RateResolution rr =
+        PaymentCurrencyConverter.resolveConversionRate(body, invoice, account);
+    if (rr.error() != null) {
+      return rr.error();
+    }
+    BigDecimal conversionRate = rr.rate();
 
     Organization org = invoice.getOrganization();
     FIN_PaymentMethod paymentMethod = resolveRequestedMethod(
@@ -615,7 +623,7 @@ final class PaymentRegistrationService {
     String editPaymentId = body.optString(KEY_PAYMENT_ID, null);
     boolean isEdit = StringUtils.isNotBlank(editPaymentId);
     FIN_Payment payment = resolveOrCreatePayment(editPaymentId, dao, isReceipt, invoice,
-        new DraftFields(paymentMethod, account, paymentDate, cash));
+        new DraftFields(paymentMethod, account, paymentDate, conversionRate, cash));
     if (payment == null) {
       return NeoResponse.error(HttpServletResponse.SC_NOT_FOUND, MSG_PAYMENT_NOT_FOUND);
     }
@@ -639,7 +647,7 @@ final class PaymentRegistrationService {
 
   /** Groups the editable header fields applied to a fresh or reused draft (Sonar S107). */
   private record DraftFields(FIN_PaymentMethod paymentMethod, FIN_FinancialAccount account,
-      Date paymentDate, BigDecimal cash) {
+      Date paymentDate, BigDecimal rate, BigDecimal cash) {
   }
 
   /**
@@ -653,12 +661,12 @@ final class PaymentRegistrationService {
       boolean isReceipt, Invoice invoice, DraftFields fields) throws Exception {
     if (StringUtils.isBlank(editPaymentId)) {
       return createDraftPayment(dao, isReceipt, invoice, fields.paymentMethod(), fields.account(),
-          fields.paymentDate(), fields.cash());
+          fields.paymentDate(), fields.rate(), fields.cash());
     }
     FIN_Payment existing = OBDal.getInstance().get(FIN_Payment.class, editPaymentId);
     return existing != null
         ? PaymentDraftEditService.prepareEditableDraft(existing, fields.paymentMethod(),
-            fields.account(), fields.paymentDate(), fields.cash())
+            fields.account(), fields.paymentDate(), fields.rate(), fields.cash())
         : null;
   }
 
@@ -772,16 +780,6 @@ final class PaymentRegistrationService {
     return new NeoResponse(200, resp);
   }
 
-  /** Rejects multi-currency payments (no exchange-rate UI yet). */
-  private static void assertCurrencyMatch(Currency invoiceCurrency, Currency accountCurrency) {
-    if (invoiceCurrency != null && accountCurrency != null
-        && !invoiceCurrency.getId().equals(accountCurrency.getId())) {
-      throw new OBException("The selected account currency (" + accountCurrency.getISOCode()
-          + ") does not match the invoice currency (" + invoiceCurrency.getISOCode()
-          + "). Multi-currency payments must be processed from Etendo Classic.");
-    }
-  }
-
   /** Resolves the ARR (receipts) / APP (payments) document type for the org, or throws. */
   private static DocumentType resolveArApDocType(Organization org, boolean isReceipt) {
     DocumentType docType = FIN_Utility.getDocumentType(org, isReceipt ? "ARR" : "APP");
@@ -792,19 +790,27 @@ final class PaymentRegistrationService {
     return docType;
   }
 
-  /** Creates and persists a draft FIN_Payment (not processed yet) with its transaction amount. */
+  /**
+   * Creates and persists a draft FIN_Payment (not processed yet) with its transaction amount.
+   * The payment amount is in the invoice currency; the financial transaction amount is that
+   * amount expressed in the account currency ({@code amount * rate}, see
+   * {@link PaymentCurrencyConverter#convertedAmount}). A rate of {@link BigDecimal#ONE} (same
+   * currency) keeps the transaction amount equal to the payment amount, preserving the original
+   * single-currency behavior.
+   */
   private static FIN_Payment createDraftPayment(AdvPaymentMngtDao dao, boolean isReceipt,
       Invoice invoice, FIN_PaymentMethod paymentMethod, FIN_FinancialAccount account,
-      Date paymentDate, BigDecimal amount) throws Exception {
+      Date paymentDate, BigDecimal rate, BigDecimal amount) throws Exception {
     DocumentType docType = resolveArApDocType(invoice.getOrganization(), isReceipt);
     String docNo = FIN_Utility.getDocumentNo(docType, "FIN_Payment");
     VariablesSecureApp vars = NeoDefaultsService.buildVariablesSecureApp(OBContext.getOBContext());
     RequestContext.get().setVariableSecureApp(vars);
+    BigDecimal txnAmount = PaymentCurrencyConverter.convertedAmount(amount, rate, account);
     FIN_Payment payment = dao.getNewPayment(isReceipt, invoice.getOrganization(), docType, docNo,
         invoice.getBusinessPartner(), paymentMethod, account, "0", paymentDate, "",
-        invoice.getCurrency(), BigDecimal.ONE, amount);
+        invoice.getCurrency(), rate, txnAmount);
     payment.setAmount(amount);
-    FIN_AddPayment.setFinancialTransactionAmountAndRate(null, payment, BigDecimal.ONE, amount);
+    FIN_AddPayment.setFinancialTransactionAmountAndRate(null, payment, rate, txnAmount);
     OBDal.getInstance().save(payment);
     OBDal.getInstance().flush();
     return payment;

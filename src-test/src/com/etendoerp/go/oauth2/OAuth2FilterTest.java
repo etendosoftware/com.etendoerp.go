@@ -347,6 +347,30 @@ class OAuth2FilterTest {
     verify(httpResponse, never()).setStatus(HttpServletResponse.SC_UNAUTHORIZED);
   }
 
+  // ── doFilter: no-expiration token (ETP-4393 validity_seconds=0) ───────────
+
+  /**
+   * ETP-4393 — a token issued with {@code validity_seconds=0} (no expiration) stores a
+   * null {@code expires_at}. Verifies the filter treats a null expiry as "never expired"
+   * and passes the request through, distinct from {@link #doFilterExpiredToken()} which
+   * covers the opposite (a past, non-null expiry).
+   */
+  @Test
+  @DisplayName("doFilter: null expires_at (no expiration) is treated as valid")
+  void doFilterNullExpiresAtTokenIsValid() throws Exception {
+    when(httpRequest.getMethod()).thenReturn("POST");
+    when(httpRequest.getHeader("Authorization")).thenReturn("Bearer no-expiration-token");
+    oAuth2UtilsMock.when(() -> OAuth2Utils.hashToken("no-expiration-token"))
+        .thenReturn("hashed-no-expiration");
+
+    mockLookupReturningValid("user-1", "role-1", "client-1", "neo:read");
+
+    filter.doFilter(httpRequest, httpResponse, filterChain);
+
+    verify(filterChain).doFilter(httpRequest, httpResponse);
+    verify(httpResponse, never()).setStatus(HttpServletResponse.SC_UNAUTHORIZED);
+  }
+
   // ── doFilter: exception during validation returns 500 ─────────────────────
 
   /**

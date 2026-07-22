@@ -144,6 +144,11 @@ public class SalesQuotationHeaderHandler extends AbstractOrderHeaderHandler {
     return super.afterHandle(context);
   }
 
+  @Override
+  protected TotalDiscountService getTotalDiscountService() {
+    return totalDiscountService;
+  }
+
   private void transferCurrencyRateToNewOrder(String quotationId) {
     if (quotationId == null || quotationId.isEmpty()) {
       return;

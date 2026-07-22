@@ -84,12 +84,14 @@ public class NeoConversionHelper {
     + "(SELECT cr.multiplyrate FROM c_conversion_rate cr"
     + " WHERE cr.c_currency_id = i.c_currency_id"
     + " AND cr.c_currency_id_to = :orgCurrencyId"
-    + " AND cr.ad_client_id = i.ad_client_id"
+    // Include the invoice client's own rates and the shared system ('0') rates; a client-specific
+    // rate wins over the system rate (ad_client_id DESC picks the tenant row first under LIMIT 1).
+    + " AND cr.ad_client_id IN ('0', i.ad_client_id)"
     + " AND (cr.ad_org_id = '0' OR cr.ad_org_id = i.ad_org_id)"
     + " AND cr.isactive = 'Y'"
     + " AND cr.validfrom <= date_trunc('day', i.dateinvoiced)"
     + " AND (cr.validto IS NULL OR cr.validto >= date_trunc('day', i.dateinvoiced))"
-    + " ORDER BY cr.validfrom DESC LIMIT 1),"
+    + " ORDER BY cr.ad_client_id DESC, cr.validfrom DESC LIMIT 1),"
     + "CASE WHEN i.c_currency_id = :orgCurrencyId THEN 1.0 ELSE NULL END)";
 
   private NeoConversionHelper() {

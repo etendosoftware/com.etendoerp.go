@@ -57,7 +57,7 @@ import com.etendoerp.go.schemaforge.data.SFSpec;
  * {@code AD_WINDOW} nor any {@code AD_ROLE} row, so it cannot trigger {@code AD_ROLE_TRG}'s
  * destructive access rebuild.</p>
  *
- * <p>The grant logic mirrors {@code CreateRoleStep} (the onboarding step) exactly, so freshly
+ * <p>The grant logic mirrors the onboarding role-access provisioning exactly, so freshly
  * onboarded tenants and self-healed existing tenants converge on the same access set.</p>
  */
 @ApplicationScoped
@@ -68,7 +68,7 @@ public class NeoAccessStartup implements ApplicationInitializer {
 
   private static final Logger log = LogManager.getLogger(NeoAccessStartup.class);
 
-  /** Organization assigned to granted access rows, matching {@code CreateRoleStep} (org '0'). */
+  /** Organization assigned to granted access rows, matching onboarding role-access grants (org '0'). */
   private static final String ORG_ZERO = "0";
   private static final String SYSTEM_CLIENT = "0";
 

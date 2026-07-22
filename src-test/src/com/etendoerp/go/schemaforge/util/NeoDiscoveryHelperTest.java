@@ -170,7 +170,7 @@ class NeoDiscoveryHelperTest {
       when(entityCriteria.list()).thenReturn(Collections.singletonList(entity));
 
       try (MockedStatic<NeoAccessHelper> accessMock = mockStatic(NeoAccessHelper.class)) {
-        accessMock.when(() -> NeoAccessHelper.hasWindowAccess("win-1")).thenReturn(true);
+        accessMock.when(() -> NeoAccessHelper.hasWindowAccessForSpec(spec, "GET")).thenReturn(true);
 
         NeoResponse response = NeoDiscoveryHelper.handleDiscovery();
 
@@ -255,7 +255,7 @@ class NeoDiscoveryHelperTest {
       when(specCriteria.list()).thenReturn(Collections.singletonList(spec));
 
       try (MockedStatic<NeoAccessHelper> accessMock = mockStatic(NeoAccessHelper.class)) {
-        accessMock.when(() -> NeoAccessHelper.hasWindowAccess("win-secret")).thenReturn(false);
+        accessMock.when(() -> NeoAccessHelper.hasWindowAccessForSpec(spec, "GET")).thenReturn(false);
 
         NeoResponse response = NeoDiscoveryHelper.handleDiscovery();
 
@@ -288,7 +288,7 @@ class NeoDiscoveryHelperTest {
     }
 
     @Test
-    @DisplayName("should allow spec with null window (accessible by default)")
+    @DisplayName("should allow spec with null window when hasWindowAccessForSpec grants it")
     void shouldAllowSpecWithNullWindow() throws Exception {
       SFSpec spec = createMockSpec("spec1", "Open", "W", "Open spec");
       when(spec.getADWindow()).thenReturn(null);
@@ -302,10 +302,41 @@ class NeoDiscoveryHelperTest {
       when(dal.createCriteria(SFEntity.class)).thenReturn(entityCriteria);
       when(entityCriteria.list()).thenReturn(Collections.emptyList());
 
-      NeoResponse response = NeoDiscoveryHelper.handleDiscovery();
+      try (MockedStatic<NeoAccessHelper> accessMock = mockStatic(NeoAccessHelper.class)) {
+        accessMock.when(() -> NeoAccessHelper.hasWindowAccessForSpec(spec, "GET")).thenReturn(true);
 
-      assertEquals(200, response.getHttpStatus());
-      assertEquals(1, response.getBody().getJSONArray("specs").length());
+        NeoResponse response = NeoDiscoveryHelper.handleDiscovery();
+
+        assertEquals(200, response.getHttpStatus());
+        assertEquals(1, response.getBody().getJSONArray("specs").length());
+      }
+    }
+
+    /**
+     * ETP-4510 BUG-3 (cycle 3): before this fix, {@code isSpecAccessible} short-circuited on
+     * {@code specWindow == null}, granting access to every windowless/combination spec
+     * unconditionally in the discovery listing — including a caller with no role assigned.
+     * Verifies a windowless spec denied by {@code hasWindowAccessForSpec} is now correctly
+     * excluded from the discovery response instead of silently allowed.
+     */
+    @Test
+    @DisplayName("should skip spec with null window when hasWindowAccessForSpec denies it")
+    void shouldSkipSpecWithNullWindowWhenDenied() throws Exception {
+      SFSpec spec = createMockSpec("spec1", "Locked", "W", "Locked spec");
+      when(spec.getADWindow()).thenReturn(null);
+
+      OBCriteria<SFSpec> specCriteria = mockCriteria();
+      when(dal.createCriteria(SFSpec.class)).thenReturn(specCriteria);
+      when(specCriteria.list()).thenReturn(Collections.singletonList(spec));
+
+      try (MockedStatic<NeoAccessHelper> accessMock = mockStatic(NeoAccessHelper.class)) {
+        accessMock.when(() -> NeoAccessHelper.hasWindowAccessForSpec(spec, "GET")).thenReturn(false);
+
+        NeoResponse response = NeoDiscoveryHelper.handleDiscovery();
+
+        assertEquals(200, response.getHttpStatus());
+        assertEquals(0, response.getBody().getJSONArray("specs").length());
+      }
     }
 
     @Test
