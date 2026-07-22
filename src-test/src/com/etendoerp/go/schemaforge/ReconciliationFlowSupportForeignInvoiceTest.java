@@ -105,13 +105,18 @@ class ReconciliationFlowSupportForeignInvoiceTest {
 
   private FIN_FinancialAccount account(String currencyId) {
     FIN_FinancialAccount acc = mock(FIN_FinancialAccount.class);
-    when(acc.getCurrency()).thenReturn(currencyId == null ? null : currency(currencyId));
+    // The Currency mock must be fully built (its own when/thenReturn completed) BEFORE opening
+    // acc.getCurrency()'s stub — nesting an unrelated when(...) inside a pending thenReturn(...)
+    // argument throws Mockito's UnfinishedStubbingException.
+    Currency cur = currencyId == null ? null : currency(currencyId);
+    when(acc.getCurrency()).thenReturn(cur);
     return acc;
   }
 
   private Invoice invoice(String id, String currencyId) {
     Invoice inv = mock(Invoice.class);
-    when(inv.getCurrency()).thenReturn(currency(currencyId));
+    Currency cur = currency(currencyId);
+    when(inv.getCurrency()).thenReturn(cur);
     when(obDal.get(eq(Invoice.class), eq(id))).thenReturn(inv);
     return inv;
   }
