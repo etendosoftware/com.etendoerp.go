@@ -1,0 +1,10 @@
+<?xml version="1.0"?>
+  <database name="MODIFIED TABLE AD_ROLE">
+    <table name="AD_ROLE" primaryKey="AD_ROLE_KEY">
+      <column name="EM_ETGO_SHOW_ACCT_FIELDS" primaryKey="false" required="true" type="CHAR" size="1" autoIncrement="false">
+        <default><![CDATA[N]]></default>
+        <onCreateDefault/>
+      </column>
+      <check name="EM_ETGO_SHOW_ACCT_FIELDS_CHK"><![CDATA[EM_ETGO_SHOW_ACCT_FIELDS IN ('Y', 'N')]]></check>
+    </table>
+  </database>
