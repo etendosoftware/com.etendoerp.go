@@ -132,10 +132,6 @@ final class EtendoGoJwtSupport {
     return client == null ? null : client.getId();
   }
 
-  static boolean hasStarOrganization(String clientId) {
-    return findStarOrganization(clientId) != null;
-  }
-
   static String buildClientUsername(String accountEmail, String clientName) {
     if (findActiveUserByUsername(accountEmail) == null) {
       return accountEmail;

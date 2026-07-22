@@ -124,6 +124,15 @@ final class NeoHandlerUtils {
   }
 
   /**
+   * Rounds a double to 2 decimal places, half-up. Shared by the order/invoice pending
+   * total-discount GET-response adjustment ({@code applyTotalDiscountToRecord} in both
+   * {@code AbstractOrderHeaderHandler} and {@code AbstractInvoiceHeaderHandler}).
+   */
+  static double roundHalfUp(double value) {
+    return Math.round(value * 100.0) / 100.0;
+  }
+
+  /**
    * Collects non-blank {@code id} values from a JSON array of records.
    */
   static List<String> collectIds(JSONArray dataArr) throws Exception {
@@ -270,5 +279,21 @@ final class NeoHandlerUtils {
    */
   static boolean isWriteMethod(String method) {
     return "POST".equals(method) || "PUT".equals(method) || "PATCH".equals(method);
+  }
+
+  /**
+   * Mirrors {@code sourceField} into {@code targetField} on a CRUD write request — the shared
+   * body behind each header handler's {@code mirrorAccountingDate} (ETP-4531). Extracted out of
+   * {@code AbstractInvoiceHeaderHandler} to keep that class under the Sonar method-count limit
+   * (S1448); {@code AbstractOrderHeaderHandler} keeps its own copy.
+   *
+   * @param context     the current NeoContext
+   * @param sourceField the visible date field whose value is copied
+   * @param targetField the hidden field overwritten with {@code sourceField}'s value
+   */
+  static void mirrorAccountingDate(NeoContext context, String sourceField, String targetField) {
+    if (NeoEndpointType.CRUD.equals(context.getEndpointType()) && isWriteMethod(context.getHttpMethod())) {
+      mirrorFieldValue(context.getRequestBody(), sourceField, targetField);
+    }
   }
 }

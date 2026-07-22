@@ -29,6 +29,7 @@ import org.openbravo.base.exception.OBException;
 import org.openbravo.dal.core.OBContext;
 
 import com.auth0.jwt.interfaces.DecodedJWT;
+import com.etendoerp.go.schemaforge.data.SFSpec;
 import com.etendoerp.go.schemaforge.util.NeoLanguage;
 import com.smf.securewebservices.utils.SecureWebServicesUtils;
 
@@ -130,6 +131,14 @@ class NeoAuthenticator {
 
   boolean hasWindowAccess(String windowId) {
     return NeoServletSupport.hasWindowAccess(windowId);
+  }
+
+  boolean hasWindowAccess(String windowId, String httpMethod) {
+    return NeoServletSupport.hasWindowAccess(windowId, httpMethod);
+  }
+
+  boolean hasWindowAccessForSpec(SFSpec spec, String httpMethod) {
+    return NeoServletSupport.hasWindowAccessForSpec(spec, httpMethod);
   }
 
   boolean hasProcessAccess(String processId) {

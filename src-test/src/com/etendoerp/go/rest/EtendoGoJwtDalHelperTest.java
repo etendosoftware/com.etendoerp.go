@@ -17,6 +17,7 @@
 package com.etendoerp.go.rest;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -512,6 +513,51 @@ class EtendoGoJwtDalHelperTest {
       Organization result = EtendoGoJwtDalHelper.findFirstOrganization("CLIENT-2");
 
       assertNull(result);
+    }
+  }
+
+  @Nested
+  @DisplayName("clientBelongsToAccountEmail (ETP-4428 resume ownership check)")
+  class ClientBelongsToAccountEmail {
+
+    @Mock private OBQuery<User> query;
+
+    @Test
+    @DisplayName("returns true when an owning user is found for the client")
+    void returnsTrueWhenOwningUserFound() {
+      when(obDal.createQuery(eq(User.class), anyString())).thenReturn(query);
+      when(query.uniqueResult()).thenReturn(mock(User.class));
+
+      assertTrue(EtendoGoJwtDalHelper.clientBelongsToAccountEmail("CLIENT-1", "user@example.com"));
+      verify(query).setNamedParameter("clientId", "CLIENT-1");
+      verify(query).setNamedParameter("accountEmail", "user@example.com");
+      verify(query).setNamedParameter("accountPrefix", "user@example.com+%");
+      verify(query).setMaxResult(1);
+    }
+
+    @Test
+    @DisplayName("returns false when no owning user matches (name owned by another account)")
+    void returnsFalseWhenNoOwningUser() {
+      when(obDal.createQuery(eq(User.class), anyString())).thenReturn(query);
+      when(query.uniqueResult()).thenReturn(null);
+
+      assertFalse(EtendoGoJwtDalHelper.clientBelongsToAccountEmail("CLIENT-1", "user@example.com"));
+    }
+
+    @Test
+    @DisplayName("escapes LIKE wildcards in the prefix so a crafted email cannot match another tenant (ETP-4428 HIGH)")
+    void escapesLikeWildcardsInPrefix() {
+      when(obDal.createQuery(eq(User.class), anyString())).thenReturn(query);
+      when(query.uniqueResult()).thenReturn(null);
+
+      // A crafted email carrying LIKE wildcards ('_' and '%') must be neutralised in the prefix
+      // bind: each wildcard is escaped with '\' (paired with the query's `escape '\'` clause) so it
+      // is matched literally and cannot broaden the LIKE into another account's usernames. The
+      // exact-equality branch keeps the raw value; only the LIKE prefix is escaped.
+      EtendoGoJwtDalHelper.clientBelongsToAccountEmail("CLIENT-1", "a_b%@x.com");
+
+      verify(query).setNamedParameter("accountEmail", "a_b%@x.com");
+      verify(query).setNamedParameter("accountPrefix", "a\\_b\\%@x.com+%");
     }
   }
 }

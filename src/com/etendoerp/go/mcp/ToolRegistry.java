@@ -31,7 +31,6 @@ import org.hibernate.criterion.Restrictions;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.ui.Process;
-import org.openbravo.model.ad.ui.Window;
 
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFField;
@@ -140,8 +139,7 @@ public class ToolRegistry {
     if (McpToolRouterSupport.isWidgetSpec(spec)) {
       return;
     }
-    Window window = spec.getADWindow();
-    if (window == null || NeoAccessUtils.hasWindowAccess(window.getId())) {
+    if (NeoAccessUtils.hasWindowAccessForSpec(spec, "GET")) {
       accessibleWindowSpecs.add(spec.getName());
     }
   }

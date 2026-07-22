@@ -21,19 +21,35 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 import java.lang.reflect.Method;
+import java.util.Arrays;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
 
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.mockito.MockedStatic;
+import org.openbravo.base.model.Entity;
+import org.openbravo.base.model.ModelProvider;
+import org.openbravo.base.model.Property;
+import org.openbravo.dal.service.OBCriteria;
+import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.ad.datamodel.Column;
+import org.openbravo.model.ad.datamodel.Table;
 
+import com.etendoerp.go.schemaforge.data.SFField;
 import com.etendoerp.go.schemaforge.selector.meta.SelectorMeta;
 import com.etendoerp.go.schemaforge.selector.policy.NeoSelectorPolicy;
 
@@ -224,6 +240,309 @@ class NeoSelectorServiceTest {
 
     assertNotNull(captured[0]);
     assertFalse(captured[0].containsKey("language"));
+  }
+
+  // --------------------------------------------------------------------
+  // matchesPropertyName — resolve a selector identifier by DAL property
+  // name (in addition to the DB column name). See ETP-4058.
+  // --------------------------------------------------------------------
+
+  private static final String PRICE_LIST_COLUMN = "M_PriceList_ID";
+  private static final String PRICE_LIST_PROPERTY = "priceList";
+
+  private static Column mockColumn(String dbColumnName) {
+    Column column = mock(Column.class);
+    when(column.getDBColumnName()).thenReturn(dbColumnName);
+    return column;
+  }
+
+  private static Entity mockEntityWithProperty(String dbColumnName, String propertyName) {
+    Entity entity = mock(Entity.class);
+    Property property = mock(Property.class);
+    when(property.getName()).thenReturn(propertyName);
+    when(entity.getPropertyByColumnName(dbColumnName)).thenReturn(property);
+    return entity;
+  }
+
+  /** The DAL property name resolves the FK column (priceList -> M_PriceList_ID). */
+  @Test
+  @DisplayName("matchesPropertyName resolves the FK column by DAL property name")
+  void testMatchesPropertyNameByProperty() {
+    Column column = mockColumn(PRICE_LIST_COLUMN);
+    Entity entity = mockEntityWithProperty(PRICE_LIST_COLUMN, PRICE_LIST_PROPERTY);
+
+    assertTrue(NeoSelectorService.matchesPropertyName(entity, column, PRICE_LIST_PROPERTY));
+  }
+
+  /** Property-name matching is case-insensitive. */
+  @Test
+  @DisplayName("matchesPropertyName is case-insensitive")
+  void testMatchesPropertyNameCaseInsensitive() {
+    Column column = mockColumn(PRICE_LIST_COLUMN);
+    Entity entity = mockEntityWithProperty(PRICE_LIST_COLUMN, PRICE_LIST_PROPERTY);
+
+    assertTrue(NeoSelectorService.matchesPropertyName(entity, column, "PRICELIST"));
+  }
+
+  /** An identifier that matches neither the property nor the column returns false. */
+  @Test
+  @DisplayName("matchesPropertyName returns false for an unknown identifier")
+  void testMatchesPropertyNameUnknownIdentifier() {
+    Column column = mockColumn(PRICE_LIST_COLUMN);
+    Entity entity = mockEntityWithProperty(PRICE_LIST_COLUMN, PRICE_LIST_PROPERTY);
+
+    assertFalse(NeoSelectorService.matchesPropertyName(entity, column, "banana"));
+  }
+
+  /** A null DAL entity or column is handled defensively (no NPE, returns false). */
+  @Test
+  @DisplayName("matchesPropertyName returns false for null entity or column")
+  void testMatchesPropertyNameNullArguments() {
+    Column column = mockColumn(PRICE_LIST_COLUMN);
+
+    assertFalse(NeoSelectorService.matchesPropertyName(null, column, PRICE_LIST_PROPERTY));
+    assertFalse(NeoSelectorService.matchesPropertyName(mock(Entity.class), null, PRICE_LIST_PROPERTY));
+  }
+
+  /** A property lookup that throws is swallowed and treated as no match. */
+  @Test
+  @DisplayName("matchesPropertyName returns false when property lookup throws")
+  void testMatchesPropertyNameSwallowsException() {
+    Column column = mockColumn(PRICE_LIST_COLUMN);
+    Entity entity = mock(Entity.class);
+    when(entity.getPropertyByColumnName(PRICE_LIST_COLUMN))
+        .thenThrow(new RuntimeException("model not mapped"));
+
+    assertFalse(NeoSelectorService.matchesPropertyName(entity, column, PRICE_LIST_PROPERTY));
+  }
+
+  // --------------------------------------------------------------------
+  // findFieldByColumnName / findFieldByPropertyName — resolve an SFField by
+  // DB column name (fast path) with a DAL property-name fallback. See
+  // ETP-4058. Both methods are private static and invoked via reflection.
+  // --------------------------------------------------------------------
+
+  private static final String BPARTNER_COLUMN = "C_BPartner_ID";
+  private static final String BPARTNER_PROPERTY = "businessPartner";
+  private static final String PRICE_LIST_TABLE = "M_PriceList";
+  private static final String ENTITY_ID = "entity-1";
+
+  private static Column mockColumnWithTable(String dbColumnName, String dbTableName) {
+    Column column = mock(Column.class);
+    when(column.getDBColumnName()).thenReturn(dbColumnName);
+    Table table = mock(Table.class);
+    when(table.getDBTableName()).thenReturn(dbTableName);
+    when(column.getTable()).thenReturn(table);
+    return column;
+  }
+
+  private static SFField mockFieldWithColumn(Column column) {
+    SFField field = mock(SFField.class);
+    when(field.getADColumn()).thenReturn(column);
+    return field;
+  }
+
+  /** Stub the fluent SFField criteria chain and return the shared criteria mock. */
+  @SuppressWarnings("unchecked")
+  private static OBCriteria<SFField> stubFieldCriteria(OBDal obDalMock) {
+    OBCriteria<SFField> criteria = mock(OBCriteria.class);
+    when(obDalMock.createCriteria(SFField.class)).thenReturn(criteria);
+    when(criteria.add(any())).thenReturn(criteria);
+    when(criteria.setMaxResults(anyInt())).thenReturn(criteria);
+    return criteria;
+  }
+
+  /** Fast path: an exact DB column-name match returns the first result directly. */
+  @Test
+  @DisplayName("findFieldByColumnName returns the first result on a fast-path column match")
+  void testFindFieldByColumnNameFastPathHit() throws Exception {
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      OBDal obDalMock = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(obDalMock);
+      OBCriteria<SFField> criteria = stubFieldCriteria(obDalMock);
+
+      SFField expected = mock(SFField.class);
+      when(criteria.list()).thenReturn(Collections.singletonList(expected));
+
+      SFField result = invokeFindFieldByColumnName(ENTITY_ID, PRICE_LIST_COLUMN);
+
+      assertSame(expected, result);
+    }
+  }
+
+  /** Fast path miss falls back to property-name resolution and returns the match. */
+  @Test
+  @DisplayName("findFieldByColumnName falls back to property-name resolution when the column match is empty")
+  void testFindFieldByColumnNameFallbackHit() throws Exception {
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+        MockedStatic<ModelProvider> modelProvider = mockStatic(ModelProvider.class)) {
+      OBDal obDalMock = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(obDalMock);
+      OBCriteria<SFField> criteria = stubFieldCriteria(obDalMock);
+
+      Column column = mockColumnWithTable(PRICE_LIST_COLUMN, PRICE_LIST_TABLE);
+      SFField field = mockFieldWithColumn(column);
+      // First list() is the empty fast-path result, second is the fallback scan.
+      when(criteria.list())
+          .thenReturn(Collections.emptyList())
+          .thenReturn(Collections.singletonList(field));
+
+      ModelProvider mpMock = mock(ModelProvider.class);
+      modelProvider.when(ModelProvider::getInstance).thenReturn(mpMock);
+      Entity dalEntity = mockEntityWithProperty(PRICE_LIST_COLUMN, PRICE_LIST_PROPERTY);
+      when(mpMock.getEntityByTableName(PRICE_LIST_TABLE)).thenReturn(dalEntity);
+
+      SFField result = invokeFindFieldByColumnName(ENTITY_ID, PRICE_LIST_PROPERTY);
+
+      assertSame(field, result);
+    }
+  }
+
+  /** Fast path miss and an empty fallback scan yield null. */
+  @Test
+  @DisplayName("findFieldByColumnName returns null when neither column nor property matches")
+  void testFindFieldByColumnNameNoMatch() throws Exception {
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      OBDal obDalMock = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(obDalMock);
+      OBCriteria<SFField> criteria = stubFieldCriteria(obDalMock);
+
+      when(criteria.list())
+          .thenReturn(Collections.emptyList())
+          .thenReturn(Collections.emptyList());
+
+      SFField result = invokeFindFieldByColumnName(ENTITY_ID, "unknown");
+
+      assertNull(result);
+    }
+  }
+
+  /** A field with a null AD_Column is skipped; a later matching field is returned. */
+  @Test
+  @DisplayName("findFieldByPropertyName skips fields with a null AD_Column")
+  void testFindFieldByPropertyNameSkipsNullColumn() throws Exception {
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+        MockedStatic<ModelProvider> modelProvider = mockStatic(ModelProvider.class)) {
+      OBDal obDalMock = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(obDalMock);
+      OBCriteria<SFField> criteria = stubFieldCriteria(obDalMock);
+
+      SFField nullColumnField = mockFieldWithColumn(null);
+      Column column = mockColumnWithTable(PRICE_LIST_COLUMN, PRICE_LIST_TABLE);
+      SFField matchField = mockFieldWithColumn(column);
+      when(criteria.list()).thenReturn(Arrays.asList(nullColumnField, matchField));
+
+      ModelProvider mpMock = mock(ModelProvider.class);
+      modelProvider.when(ModelProvider::getInstance).thenReturn(mpMock);
+      Entity dalEntity = mockEntityWithProperty(PRICE_LIST_COLUMN, PRICE_LIST_PROPERTY);
+      when(mpMock.getEntityByTableName(PRICE_LIST_TABLE)).thenReturn(dalEntity);
+
+      SFField result = invokeFindFieldByPropertyName(ENTITY_ID, PRICE_LIST_PROPERTY);
+
+      assertSame(matchField, result);
+    }
+  }
+
+  /** The DAL entity is resolved once (on the first field with a column) and reused. */
+  @Test
+  @DisplayName("findFieldByPropertyName resolves the DAL entity once and reuses it")
+  void testFindFieldByPropertyNameResolvesEntityOnce() throws Exception {
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+        MockedStatic<ModelProvider> modelProvider = mockStatic(ModelProvider.class)) {
+      OBDal obDalMock = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(obDalMock);
+      OBCriteria<SFField> criteria = stubFieldCriteria(obDalMock);
+
+      // First field carries the table used to resolve the DAL entity; the second
+      // field only needs its column name (entity already resolved and reused).
+      Column firstColumn = mockColumnWithTable(BPARTNER_COLUMN, PRICE_LIST_TABLE);
+      Column secondColumn = mockColumn(PRICE_LIST_COLUMN);
+      SFField firstField = mockFieldWithColumn(firstColumn);
+      SFField secondField = mockFieldWithColumn(secondColumn);
+      when(criteria.list()).thenReturn(Arrays.asList(firstField, secondField));
+
+      ModelProvider mpMock = mock(ModelProvider.class);
+      modelProvider.when(ModelProvider::getInstance).thenReturn(mpMock);
+      Entity dalEntity = mock(Entity.class);
+      Property bpProperty = mock(Property.class);
+      when(bpProperty.getName()).thenReturn(BPARTNER_PROPERTY);
+      Property priceListProperty = mock(Property.class);
+      when(priceListProperty.getName()).thenReturn(PRICE_LIST_PROPERTY);
+      when(dalEntity.getPropertyByColumnName(BPARTNER_COLUMN)).thenReturn(bpProperty);
+      when(dalEntity.getPropertyByColumnName(PRICE_LIST_COLUMN)).thenReturn(priceListProperty);
+      when(mpMock.getEntityByTableName(PRICE_LIST_TABLE)).thenReturn(dalEntity);
+
+      SFField result = invokeFindFieldByPropertyName(ENTITY_ID, PRICE_LIST_PROPERTY);
+
+      assertSame(secondField, result);
+      verify(mpMock, times(1)).getEntityByTableName(anyString());
+    }
+  }
+
+  /** No field property matches the identifier, so null is returned. */
+  @Test
+  @DisplayName("findFieldByPropertyName returns null when no property matches")
+  void testFindFieldByPropertyNameNoMatch() throws Exception {
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+        MockedStatic<ModelProvider> modelProvider = mockStatic(ModelProvider.class)) {
+      OBDal obDalMock = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(obDalMock);
+      OBCriteria<SFField> criteria = stubFieldCriteria(obDalMock);
+
+      Column column = mockColumnWithTable(PRICE_LIST_COLUMN, PRICE_LIST_TABLE);
+      SFField field = mockFieldWithColumn(column);
+      when(criteria.list()).thenReturn(Collections.singletonList(field));
+
+      ModelProvider mpMock = mock(ModelProvider.class);
+      modelProvider.when(ModelProvider::getInstance).thenReturn(mpMock);
+      Entity dalEntity = mockEntityWithProperty(PRICE_LIST_COLUMN, PRICE_LIST_PROPERTY);
+      when(mpMock.getEntityByTableName(PRICE_LIST_TABLE)).thenReturn(dalEntity);
+
+      SFField result = invokeFindFieldByPropertyName(ENTITY_ID, "banana");
+
+      assertNull(result);
+    }
+  }
+
+  /** Property-name matching is case-insensitive (PRICELIST -> priceList). */
+  @Test
+  @DisplayName("findFieldByPropertyName matches the identifier case-insensitively")
+  void testFindFieldByPropertyNameCaseInsensitive() throws Exception {
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+        MockedStatic<ModelProvider> modelProvider = mockStatic(ModelProvider.class)) {
+      OBDal obDalMock = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(obDalMock);
+      OBCriteria<SFField> criteria = stubFieldCriteria(obDalMock);
+
+      Column column = mockColumnWithTable(PRICE_LIST_COLUMN, PRICE_LIST_TABLE);
+      SFField field = mockFieldWithColumn(column);
+      when(criteria.list()).thenReturn(Collections.singletonList(field));
+
+      ModelProvider mpMock = mock(ModelProvider.class);
+      modelProvider.when(ModelProvider::getInstance).thenReturn(mpMock);
+      Entity dalEntity = mockEntityWithProperty(PRICE_LIST_COLUMN, PRICE_LIST_PROPERTY);
+      when(mpMock.getEntityByTableName(PRICE_LIST_TABLE)).thenReturn(dalEntity);
+
+      SFField result = invokeFindFieldByPropertyName(ENTITY_ID, "PRICELIST");
+
+      assertSame(field, result);
+    }
+  }
+
+  private static SFField invokeFindFieldByColumnName(String entityId, String columnName)
+      throws Exception {
+    Method m = NeoSelectorService.class.getDeclaredMethod("findFieldByColumnName",
+        String.class, String.class);
+    m.setAccessible(true);
+    return (SFField) m.invoke(null, entityId, columnName);
+  }
+
+  private static SFField invokeFindFieldByPropertyName(String entityId, String identifier)
+      throws Exception {
+    Method m = NeoSelectorService.class.getDeclaredMethod("findFieldByPropertyName",
+        String.class, String.class);
+    m.setAccessible(true);
+    return (SFField) m.invoke(null, entityId, identifier);
   }
 
   @SuppressWarnings("unchecked")

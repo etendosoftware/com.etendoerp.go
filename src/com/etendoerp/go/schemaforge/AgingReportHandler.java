@@ -42,6 +42,8 @@ import org.openbravo.model.common.currency.Currency;
 import org.openbravo.model.financialmgmt.accounting.coa.AcctSchema;
 import org.openbravo.service.db.DalConnectionProvider;
 
+import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
+
 /**
  * NeoHandler that wraps the existing AgingDao to return aging schedule data as JSON.
  * Reuses all existing Etendo business logic for aging bucket calculations.
@@ -79,6 +81,16 @@ public class AgingReportHandler implements NeoHandler {
   private static final String PARAM_BP_ID        = "bPartnerId";
   private static final String PARAM_ORG_ID       = "orgId";
   private static final String PARAM_SHOW_DETAILS = "showDetails";
+
+  /**
+   * OBUIAPP process id for the classic "Aging Balance Process Definition for Receivables"
+   * process. This is the process this spec must gate access on — confirmed via the real
+   * {@code AD_Menu.em_obuiapp_process_id} foreign key on {@code AD_Menu} row
+   * {@code CC226771DE354AEEAA5D69F696F1A676} ("Aging Balance Process Definition for
+   * Receivables"), not by name-matching. Do not repoint this constant at a different-looking
+   * process without re-confirming that same FK chain (ETP-4510, follow-up to BUG-3).
+   */
+  private static final String AGING_RECEIVABLE_PROCESS_ID = "0D37A9F6109549DEB058373EF2DAEB6A";
 
   // -------------------------------------------------------------------------
   // Inner value types
@@ -138,6 +150,9 @@ public class AgingReportHandler implements NeoHandler {
 
   @Override
   public NeoResponse handle(NeoContext context) {
+    if (!NeoAccessHelper.hasObuiappProcessAccess(AGING_RECEIVABLE_PROCESS_ID)) {
+      return NeoResponse.error(403, "Access denied");
+    }
     String method = context.getHttpMethod();
     if ("GET".equals(method)) {
       return describeReport();

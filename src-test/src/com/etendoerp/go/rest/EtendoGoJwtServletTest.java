@@ -133,6 +133,26 @@ public class EtendoGoJwtServletTest {
   }
 
   @Test
+  public void registerInvalidEmailFormatReturnsBadRequest() throws Exception {
+    // ETP-4428: /register now rejects malformed emails (e.g. a bare LIKE wildcard "%") before the
+    // account is created — closes the tenant-isolation vector at the source.
+    ResponseCapture resp = mockResponse();
+    HttpServletRequest req = mockRequest("/register");
+    when(req.getContentType()).thenReturn("application/json");
+    JSONObject body = new JSONObject();
+    body.put("email", "%");
+    body.put("password", "Str0ng!Pass1");
+    body.put("name", "Test");
+    when(req.getReader()).thenReturn(new BufferedReader(new StringReader(body.toString())));
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class)) {
+      servlet.doPost(req, resp.response);
+    }
+
+    assertEquals(400, resp.status);
+  }
+
+  @Test
   public void registerWeakPasswordReturnsWeakPasswordError() throws Exception {
     ResponseCapture resp = mockResponse();
     HttpServletRequest req = mockRequest("/register");
