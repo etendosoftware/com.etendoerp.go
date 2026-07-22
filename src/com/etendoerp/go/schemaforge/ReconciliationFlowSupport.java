@@ -46,6 +46,16 @@ final class ReconciliationFlowSupport {
       BigDecimal tolerance) throws Exception {
     BigDecimal lineAmount = nullSafe(line.getCramount()).subtract(nullSafe(line.getDramount()));
     boolean isReceipt = lineAmount.signum() >= 0;
+
+    // Multi-currency: when a selected invoice is in a currency other than the account's, amounts
+    // cannot be summed across currencies, so this iteration supports a single invoice fully settled
+    // by the line. The rate is derived from the two amounts (statement line in account currency ÷
+    // invoice outstanding in invoice currency); the same-currency path below is unchanged.
+    if (hasForeignInvoice(account, invoiceSpecs)) {
+      return createForeignInvoicePayment(account, line, invoiceSpecs, lineAmount, isReceipt,
+          operationIds, tolerance);
+    }
+
     BigDecimal remaining = lineAmount.abs();
     for (int i = 0; i < invoiceSpecs.length(); i++) {
       if (remaining.compareTo(tolerance) <= 0) {
@@ -85,6 +95,81 @@ final class ReconciliationFlowSupport {
           "The selected invoices do not cover the statement line amount. Remaining: "
               + remaining.toPlainString());
     }
+    return null;
+  }
+
+  /**
+   * True when any selected invoice is in a currency different from the account's. Accounts without
+   * a declared currency keep the legacy single-currency behavior (returns false).
+   */
+  private static boolean hasForeignInvoice(FIN_FinancialAccount account, JSONArray invoiceSpecs) {
+    String accountCurrencyId = account.getCurrency() != null ? account.getCurrency().getId() : null;
+    if (accountCurrencyId == null) {
+      return false;
+    }
+    for (int i = 0; i < invoiceSpecs.length(); i++) {
+      JSONObject spec = invoiceSpecs.optJSONObject(i);
+      String invoiceId = spec != null ? spec.optString("invoiceId", null) : null;
+      if (StringUtils.isBlank(invoiceId)) {
+        continue;
+      }
+      Invoice invoice = org.openbravo.dal.service.OBDal.getInstance().get(Invoice.class, invoiceId);
+      if (invoice != null && invoice.getCurrency() != null
+          && !accountCurrencyId.equals(invoice.getCurrency().getId())) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Multi-currency reconciliation: a single foreign-currency invoice fully settled by the statement
+   * line. Generates the payment in the invoice currency (cancelling the outstanding) and the
+   * financial transaction in the account currency (the exact line amount) with the derived
+   * conversion rate. Restricted to one invoice — mixing currencies across several invoices under a
+   * single line is out of scope for this iteration.
+   */
+  private static NeoResponse createForeignInvoicePayment(FIN_FinancialAccount account,
+      FIN_BankStatementLine line, JSONArray invoiceSpecs, BigDecimal lineAmount, boolean isReceipt,
+      List<String> operationIds, BigDecimal tolerance) throws Exception {
+    if (invoiceSpecs.length() != 1) {
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
+          "Multi-currency reconciliation supports a single invoice per statement line.");
+    }
+    JSONObject spec = invoiceSpecs.getJSONObject(0);
+    String invoiceId = spec.optString("invoiceId", null);
+    String scheduleId = spec.optString("scheduleId", null);
+    if (StringUtils.isBlank(invoiceId) || StringUtils.isBlank(scheduleId)) {
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
+          "invoiceId and scheduleId are required for each invoice");
+    }
+    Invoice invoice = org.openbravo.dal.service.OBDal.getInstance().get(Invoice.class, invoiceId);
+    FIN_PaymentSchedule schedule = org.openbravo.dal.service.OBDal.getInstance()
+        .get(FIN_PaymentSchedule.class, scheduleId);
+    if (invoice == null || schedule == null) {
+      return NeoResponse.error(HttpServletResponse.SC_NOT_FOUND,
+          "Invoice or payment schedule not found: " + invoiceId);
+    }
+    BigDecimal outstanding = nullSafe(schedule.getOutstandingAmount()).abs();
+    BigDecimal accountAmount = lineAmount.abs();
+    if (outstanding.compareTo(tolerance) <= 0) {
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
+          "The selected invoice has no outstanding amount to settle.");
+    }
+    if (accountAmount.compareTo(tolerance) <= 0) {
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
+          "The statement line amount is zero; nothing to reconcile.");
+    }
+    FIN_Payment payment = PaymentRegistrationService.registerReconciliationPaymentMultiCurrency(
+        invoice, schedule, outstanding, accountAmount, line.getTransactionDate(), account,
+        isReceipt);
+    List<FIN_FinaccTransaction> txns = payment.getFINFinaccTransactionList();
+    if (txns.isEmpty()) {
+      return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
+          "Payment did not produce a transaction: " + payment.getId());
+    }
+    ReactivationSupport.markAutoCreated(txns.get(0));
+    operationIds.add(txns.get(0).getId());
     return null;
   }
 

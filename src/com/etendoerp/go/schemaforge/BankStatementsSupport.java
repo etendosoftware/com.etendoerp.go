@@ -21,6 +21,8 @@ import java.math.BigDecimal;
 import java.sql.ResultSet;
 import java.sql.Timestamp;
 import java.time.Instant;
+import java.time.LocalDate;
+import java.time.ZoneId;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
@@ -246,7 +248,18 @@ public final class BankStatementsSupport {
   }
 
   /**
-   * Parses an ISO-8601 instant (e.g. {@code 2026-06-04T00:00:00Z}).
+   * Parses an ISO-8601 instant (e.g. {@code 2026-06-04T00:00:00Z}) sent by the frontend as UTC
+   * midnight for a chosen calendar day (see {@code ManualStatementModal.jsx}'s {@code toIsoUtc}: it
+   * deliberately picks UTC midnight so the calendar day survives regardless of the caller's
+   * timezone). Returns midnight of that SAME calendar day in the server's own timezone, not the
+   * verbatim instant: {@code statementdate}/{@code datetrx} are {@code timestamp without time zone}
+   * columns, so persisting the raw UTC instant lets the server's offset shift the stored literal —
+   * on a UTC-negative server (e.g. America/Argentina/Cordoba, UTC-3) {@code 2026-07-22T00:00:00Z}
+   * would land as {@code 2026-07-21 21:00:00}, a day early, and every payment/transaction created
+   * from that statement line (via {@code line.getTransactionDate()}) would inherit the wrong day.
+   * Re-anchoring to the server zone here keeps the stored value consistent with other date-only
+   * columns (e.g. {@code C_Invoice.dateinvoiced}), which are never round-tripped through a UTC ISO
+   * string in the first place.
    *
    * @param iso      the ISO-8601 instant string to parse (may be {@code null}/blank)
    * @param fallback the value to return when {@code iso} is blank or unparseable
@@ -255,7 +268,8 @@ public final class BankStatementsSupport {
   public static Date parseIsoDate(String iso, Date fallback) {
     if (StringUtils.isBlank(iso)) return fallback;
     try {
-      return Date.from(Instant.parse(iso));
+      LocalDate calendarDay = Instant.parse(iso).atZone(ZoneOffset.UTC).toLocalDate();
+      return Date.from(calendarDay.atStartOfDay(ZoneId.systemDefault()).toInstant());
     } catch (Exception e) {
       return fallback;
     }

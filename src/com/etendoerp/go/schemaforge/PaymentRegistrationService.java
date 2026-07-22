@@ -212,6 +212,70 @@ final class PaymentRegistrationService {
     return payment;
   }
 
+  /**
+   * Bank-reconciliation multi-currency variant of {@link #registerPaymentCore}: fully settles the
+   * invoice outstanding ({@code amount}, in the invoice currency) while booking the financial
+   * transaction for the exact statement-line amount ({@code accountAmount}, in the account
+   * currency). The conversion rate is derived from the two amounts (see
+   * {@link PaymentCurrencyConverter#derivedRate}) so the transaction reconciles against the bank
+   * statement to the cent. Requires the resolved payment method to be multi-currency enabled for
+   * the direction; a PSD2 bank-transfer method (multi-currency disabled by ETP-4503) is rejected
+   * with a clear error rather than a cryptic Core failure. Used only when the invoice and account
+   * currencies differ; the same-currency path stays on {@link #registerPaymentCore}.
+   */
+  static FIN_Payment registerReconciliationPaymentMultiCurrency(Invoice invoice,
+      FIN_PaymentSchedule schedule, BigDecimal amount, BigDecimal accountAmount, Date paymentDate,
+      FIN_FinancialAccount account, boolean isReceipt) throws Exception {
+
+    List<FIN_PaymentScheduleDetail> pendingPSDs = findPendingPSDs(schedule.getId());
+    if (pendingPSDs.isEmpty()) {
+      throw new OBException(MSG_NO_PENDING_PSD);
+    }
+
+    Organization org = invoice.getOrganization();
+
+    FIN_PaymentMethod paymentMethod = resolvePaymentMethod(account, invoice, isReceipt);
+    if (paymentMethod == null) {
+      throw new OBException("No payment method configured for this financial account. "
+          + "Please configure a payment method in the financial account settings.");
+    }
+    assertMethodMultiCurrency(account, paymentMethod, isReceipt);
+
+    DocumentType docType = resolveArApDocType(org, isReceipt);
+    checkPeriodOpen(invoice, docType, paymentDate);
+
+    BigDecimal rate = PaymentCurrencyConverter.derivedRate(amount, accountAmount);
+    FIN_Payment payment = createDraftPayment(new AdvPaymentMngtDao(), isReceipt, invoice,
+        paymentMethod, account, paymentDate, rate, amount, accountAmount);
+    linkPSDsToPayment(pendingPSDs, payment, amount);
+    processOrThrow(payment);
+    return payment;
+  }
+
+  /**
+   * Ensures the account link for {@code method} in the given direction is flagged multi-currency
+   * (payin/payout). Used by the reconciliation multi-currency path so a foreign-currency settlement
+   * is rejected with a clear message when the method is single-currency (e.g. a PSD2 bank-transfer
+   * method disabled by {@link FinancialAccountSupport#disableMulticurrencyForBankTransfer}).
+   */
+  private static void assertMethodMultiCurrency(FIN_FinancialAccount account,
+      FIN_PaymentMethod method, boolean isReceipt) {
+    OBCriteria<FinAccPaymentMethod> crit = OBDal.getInstance()
+        .createCriteria(FinAccPaymentMethod.class);
+    crit.add(Restrictions.eq(FinAccPaymentMethod.PROPERTY_ACCOUNT, account));
+    crit.add(Restrictions.eq(FinAccPaymentMethod.PROPERTY_PAYMENTMETHOD, method));
+    crit.setMaxResults(1);
+    List<FinAccPaymentMethod> links = crit.list();
+    boolean multiCurrency = !links.isEmpty() && (isReceipt
+        ? Boolean.TRUE.equals(links.get(0).isPayinIsMulticurrency())
+        : Boolean.TRUE.equals(links.get(0).isPayoutIsMulticurrency()));
+    if (!multiCurrency) {
+      throw new OBException("The payment method '" + method.getName() + "' on this account is not "
+          + "enabled for multi-currency, so an invoice in a different currency cannot be reconciled "
+          + "against it.");
+    }
+  }
+
   // ─── ACCOUNTS: return accounts compatible with the invoice's org ───────────
 
   /**
@@ -801,11 +865,25 @@ final class PaymentRegistrationService {
   private static FIN_Payment createDraftPayment(AdvPaymentMngtDao dao, boolean isReceipt,
       Invoice invoice, FIN_PaymentMethod paymentMethod, FIN_FinancialAccount account,
       Date paymentDate, BigDecimal rate, BigDecimal amount) throws Exception {
+    BigDecimal txnAmount = PaymentCurrencyConverter.convertedAmount(amount, rate, account);
+    return createDraftPayment(dao, isReceipt, invoice, paymentMethod, account, paymentDate, rate,
+        amount, txnAmount);
+  }
+
+  /**
+   * Draft-payment creation with an explicit financial-transaction amount (in the account currency)
+   * rather than deriving it from {@code amount * rate}. The bank-reconciliation multi-currency path
+   * ({@link ReconciliationFlowSupport#createInvoicePayments}) uses this so the transaction is booked
+   * for the exact statement-line amount and reconciles against the bank statement to the cent;
+   * {@code rate} is the derived rate stored on the payment for the GL conversion record.
+   */
+  private static FIN_Payment createDraftPayment(AdvPaymentMngtDao dao, boolean isReceipt,
+      Invoice invoice, FIN_PaymentMethod paymentMethod, FIN_FinancialAccount account,
+      Date paymentDate, BigDecimal rate, BigDecimal amount, BigDecimal txnAmount) throws Exception {
     DocumentType docType = resolveArApDocType(invoice.getOrganization(), isReceipt);
     String docNo = FIN_Utility.getDocumentNo(docType, "FIN_Payment");
     VariablesSecureApp vars = NeoDefaultsService.buildVariablesSecureApp(OBContext.getOBContext());
     RequestContext.get().setVariableSecureApp(vars);
-    BigDecimal txnAmount = PaymentCurrencyConverter.convertedAmount(amount, rate, account);
     FIN_Payment payment = dao.getNewPayment(isReceipt, invoice.getOrganization(), docType, docNo,
         invoice.getBusinessPartner(), paymentMethod, account, "0", paymentDate, "",
         invoice.getCurrency(), rate, txnAmount);

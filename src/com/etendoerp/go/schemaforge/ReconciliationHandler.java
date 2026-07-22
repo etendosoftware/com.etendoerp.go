@@ -261,10 +261,13 @@ public class ReconciliationHandler implements NeoHandler {
           + "       COALESCE(inv.documentno, '') AS documentno,"
           + "       inv.dateinvoiced AS invoicedate,"
           + "       COALESCE(bp.name, '') AS partner_name,"
+          + "       inv.c_currency_id AS currency_id,"
+          + "       COALESCE(cur.iso_code, '') AS currency_iso,"
           + "       SUM(psd.amount) AS outstanding"
           + "  FROM fin_payment_scheduledetail psd"
           + "  JOIN fin_payment_schedule ps ON ps.fin_payment_schedule_id = psd.fin_payment_schedule_invoice"
           + "  JOIN c_invoice inv ON inv.c_invoice_id = ps.c_invoice_id"
+          + "  LEFT JOIN c_currency cur ON cur.c_currency_id = inv.c_currency_id"
           + "  LEFT JOIN c_bpartner bp ON bp.c_bpartner_id = inv.c_bpartner_id"
           + " WHERE psd.fin_payment_detail_id IS NULL"
           + "   AND inv.docstatus = 'CO'"
@@ -274,7 +277,7 @@ public class ReconciliationHandler implements NeoHandler {
           + "   AND (CAST(? AS date) IS NULL OR inv.dateinvoiced >= ?)"
           + "   AND (CAST(? AS date) IS NULL OR inv.dateinvoiced <= ?)"
           + " GROUP BY ps.fin_payment_schedule_id, inv.c_invoice_id, inv.documentno,"
-          + "          inv.dateinvoiced, bp.name"
+          + "          inv.dateinvoiced, bp.name, inv.c_currency_id, cur.iso_code"
           + " HAVING SUM(psd.amount) > 0"
           + " ORDER BY inv.dateinvoiced ASC, inv.documentno ASC";
 
@@ -592,6 +595,10 @@ public class ReconciliationHandler implements NeoHandler {
           row.put("invoiceId", rs.getString("c_invoice_id"));
           row.put("scheduleId", rs.getString("fin_payment_schedule_id"));
           row.put("isReceipt", isReceipt);
+          // Invoice currency so the UI can flag documents in a currency other than the account's
+          // (multi-currency reconciliation) — see ReconciliationSplitPanel currency badge.
+          row.put("currency", StringUtils.trimToEmpty(rs.getString("currency_iso")));
+          row.put("currencyId", rs.getString("currency_id"));
           candidates.put(row);
         }
       }

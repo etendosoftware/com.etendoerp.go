@@ -124,4 +124,24 @@ final class PaymentCurrencyConverter {
     }
     return converted;
   }
+
+  /** Scale used for a derived reconciliation rate (matches the C_Conversion_Rate multiplyrate). */
+  private static final int DERIVED_RATE_SCALE = 12;
+
+  /**
+   * The conversion rate realized by a bank-reconciliation match, derived from the two known
+   * amounts: {@code accountAmount / paymentAmount}. In reconciliation the statement line (expressed
+   * in the account currency, {@code accountAmount}) is ground truth for what actually settled the
+   * invoice outstanding ({@code paymentAmount}, in the invoice currency), so the rate follows from
+   * the amounts rather than a C_Conversion_Rate lookup — guaranteeing the financial transaction
+   * reconciles exactly against the statement, with no exchange-difference residual. Booked on the
+   * payment for the GL conversion record; the transaction amount itself is the exact
+   * {@code accountAmount}, not {@code paymentAmount * rate}, so double rounding cannot drift it.
+   */
+  static BigDecimal derivedRate(BigDecimal paymentAmount, BigDecimal accountAmount) {
+    if (paymentAmount == null || paymentAmount.signum() == 0) {
+      throw new OBException("Cannot derive a conversion rate for a zero invoice amount");
+    }
+    return accountAmount.divide(paymentAmount, DERIVED_RATE_SCALE, RoundingMode.HALF_UP);
+  }
 }
