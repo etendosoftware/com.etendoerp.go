@@ -64,8 +64,6 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
 
   private static final Logger log = LogManager.getLogger(SalesInvoiceHeaderHandler.class);
 
-  private static final String FIELD_GRAND_TOTAL_AMOUNT = "grandTotalAmount";
-  private static final String FIELD_OUTSTANDING_AMOUNT = "outstandingAmount";
   private static final String FIELD_DOCUMENT_NO = "documentNo";
 
   @Inject
@@ -99,6 +97,7 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
 
   @Override
   public NeoResponse handle(NeoContext context) {
+    NeoHandlerUtils.mirrorAccountingDate(context, "invoiceDate", "accountingDate");
     NeoResponse posting = postingService != null ? postingService.handleAction(context) : null;
     if (posting != null) {
       return posting;
@@ -125,13 +124,14 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
   }
 
   /**
-   * Post-callout hook (ETP-4029): blocks callout-driven currency updates and appends an
-   * exchange-rate warning when the user directly changes the invoice currency. Mirrors
+   * Post-callout hook: blocks callout-driven currency updates and appends an exchange-rate
+   * warning when the user directly changes the invoice currency (ETP-4029), and blocks
+   * callout-driven document type updates once the invoice has been saved (ETP-4535). Mirrors
    * {@code AbstractOrderHeaderHandler#afterCallout}.
    */
   @Override
   public NeoResponse afterCallout(NeoContext context) {
-    return handleCurrencyAfterCallout(context);
+    return handleInvoiceAfterCallout(context);
   }
 
   /**
@@ -165,6 +165,8 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
         JSONObject rec = dataArr.getJSONObject(0);
         enrichSourceInvoice(rec, context.getRecordId());
         enrichDocTypeLocked(rec);
+        enrichIsRectificative(rec);
+        enrichHasRectifications(rec, context.getRecordId());
         enrichLinkedShipments(rec, context.getRecordId());
       }
       TbaiSyncStatusInjector.inject(dataArr);
@@ -223,10 +225,6 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
   }
 
   /**
-   * Applies the etgoTotalDiscount factor to {@code grandTotalAmount} and {@code outstandingAmount}
-   * for draft invoices. Skips confirmed invoices and records with no positive discount.
-   */
-  /**
    * For return invoices, injects:
    * - {@code sourceReturnReceipt}: the return receipt that originated this invoice
    * - {@code sourceInvoice}: the original invoice being reversed
@@ -273,23 +271,9 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
     }
   }
 
-  private void applyTotalDiscountToRecord(JSONObject invoice) throws Exception {
-    if (invoice.optBoolean("processed", false)) {
-      return;
-    }
-    double discountPct = invoice.optDouble("etgoTotalDiscount", 0.0);
-    if (discountPct <= 0.0) {
-      return;
-    }
-    double factor = 1.0 - discountPct / 100.0;
-    double grand = invoice.optDouble(FIELD_GRAND_TOTAL_AMOUNT, 0.0);
-    invoice.put(FIELD_GRAND_TOTAL_AMOUNT, roundHalfUp(grand * factor));
-    double outstanding = invoice.optDouble(FIELD_OUTSTANDING_AMOUNT, 0.0);
-    invoice.put(FIELD_OUTSTANDING_AMOUNT, roundHalfUp(outstanding * factor));
-  }
-
-  private static double roundHalfUp(double value) {
-    return Math.round(value * 100.0) / 100.0;
+  @Override
+  protected TotalDiscountService getTotalDiscountService() {
+    return totalDiscountService;
   }
 
   /**
@@ -297,17 +281,24 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
    * Finds all sales shipments (M_InOut) whose lines are referenced by the invoice's
    * C_InvoiceLine.M_InOutLine_ID. Covers invoices created directly from a shipment
    * (standalone or via-order), where the native process always populates M_InOutLine_ID.
+   *
+   * <p>Joins C_DocType to expose {@code isReturn}, the actual discriminator between a
+   * regular delivery and a customer return: M_InOut.MovementType is NOT usable for this
+   * (see M_INOUT_TRG_PROV.xml) — it only ever takes 'C-' for every sales-side movement
+   * (shipments AND returns alike) or 'V+' for purchase-side, never branching on
+   * C_DocType.IsReturn. ETP-4534.</p>
    */
   @SuppressWarnings("java:S2077")
   private void enrichLinkedShipments(JSONObject rec, String invoiceId) {
     String sql =
-        "SELECT DISTINCT io.m_inout_id, io.documentno, io.docstatus, io.movementtype " +
+        "SELECT DISTINCT io.m_inout_id, io.documentno, io.docstatus, io.movementtype, dt.isreturn " +
         "FROM c_invoiceline il " +
         "JOIN m_inoutline iol ON (" +
         "  iol.m_inoutline_id = il.m_inoutline_id " +
         "  OR (il.m_inoutline_id IS NULL AND il.c_orderline_id IS NOT NULL AND iol.c_orderline_id = il.c_orderline_id)" +
         ") " +
         "JOIN m_inout io ON io.m_inout_id = iol.m_inout_id " +
+        "JOIN c_doctype dt ON dt.c_doctype_id = io.c_doctype_id " +
         "WHERE il.c_invoice_id = ? AND il.isactive = 'Y' " +
         "  AND io.isactive = 'Y' AND io.docstatus NOT IN ('VO','CL') " +
         "  AND io.issotrx = 'Y'";
@@ -322,6 +313,7 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
           s.put(FIELD_DOCUMENT_NO, rs.getString(2));
           s.put("documentStatus", rs.getString(3));
           s.put("movementType", rs.getString(4));
+          s.put("isReturn", "Y".equalsIgnoreCase(rs.getString(5)));
           shipments.put(s);
         }
       }

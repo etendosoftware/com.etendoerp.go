@@ -25,7 +25,6 @@ import javax.servlet.http.HttpServletResponse;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.model.ad.ui.Process;
-import org.openbravo.model.ad.ui.Window;
 
 import com.etendoerp.go.schemaforge.NeoServlet.NeoPathInfo;
 import com.etendoerp.go.schemaforge.data.SFSpec;
@@ -168,10 +167,16 @@ class NeoRequestRouter {
    */
   void handleWindowSpecRequest(SFSpec spec, NeoPathInfo pathInfo, String method,
       HttpServletRequest request, HttpServletResponse response) throws Exception {
-    Window window = spec.getADWindow();
-    if (window != null && !servlet.authenticator.hasWindowAccess(window.getId())) {
+    // ETP-4510 BUG-3: hasWindowAccessForSpec covers both ordinary window specs AND
+    // windowless/custom "combination" specs (spec.getADWindow() == null) — it must run
+    // unconditionally rather than being skipped when there is no directly linked window,
+    // otherwise a role with no access at all (or no role assigned) could reach a
+    // windowless spec unchecked. The denial message is phrased at the spec level (not
+    // "window") because it must be accurate for both cases: a windowless/combination spec
+    // has no single window being checked.
+    if (!servlet.authenticator.hasWindowAccessForSpec(spec, method)) {
       servlet.sendError(response, HttpServletResponse.SC_FORBIDDEN,
-          "Access denied to window for current role");
+          "Access denied to spec for current role");
       return;
     }
     if (pathInfo.entityName == null) {

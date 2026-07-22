@@ -293,10 +293,11 @@ public class InvoiceExchangeRateHandlerTest {
     return doc;
   }
 
-  private static void stubDocLookup(MockedStatic<OBDal> obDal, ConversionRateDoc doc) {
+  private static OBDal stubDocLookup(MockedStatic<OBDal> obDal, ConversionRateDoc doc) {
     OBDal dal = mock(OBDal.class);
     obDal.when(OBDal::getInstance).thenReturn(dal);
     when(dal.get(ConversionRateDoc.class, "DOC1")).thenReturn(doc);
+    return dal;
   }
 
   @Test
@@ -361,6 +362,64 @@ public class InvoiceExchangeRateHandlerTest {
     }
   }
 
+  // ----- handle() update: reverse sync to invoice.eTGOCurrencyRate -----
+
+  @Test
+  public void testHandleUpdateSyncsHeaderRateWhenRateChanged() throws Exception {
+    // rate edited 0.5 -> 0.9 (doc->org). Header eTGOCurrencyRate (org->doc) must become 1/0.9.
+    JSONObject body = new JSONObject();
+    body.put("rate", "0.9");
+    ConversionRateDoc doc = docWith(new BigDecimal("100"), new BigDecimal("0.5"), new BigDecimal("50"));
+    try (MockedStatic<OBContext> obCtx = Mockito.mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDal = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = stubDocLookup(obDal, doc);
+
+      assertNull(handler.handle(crudPatch("DOC1", body)));
+
+      org.mockito.ArgumentCaptor<BigDecimal> captor = org.mockito.ArgumentCaptor.forClass(BigDecimal.class);
+      Mockito.verify(doc.getInvoice()).setETGOCurrencyRate(captor.capture());
+      assertEquals(0, captor.getValue().compareTo(BigDecimal.ONE.divide(new BigDecimal("0.9"), 12, java.math.RoundingMode.HALF_UP)));
+      Mockito.verify(dal).save(doc.getInvoice());
+    }
+  }
+
+  @Test
+  public void testHandleUpdateSyncsHeaderRateWhenForeignAmountChanged() throws Exception {
+    // grandTotal=100, foreignAmount edited 50 -> 60 => recomputed docRate = 0.6.
+    JSONObject body = new JSONObject();
+    body.put("foreignAmount", "60");
+    ConversionRateDoc doc = docWith(new BigDecimal("100"), new BigDecimal("0.5"), new BigDecimal("50"));
+    try (MockedStatic<OBContext> obCtx = Mockito.mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDal = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = stubDocLookup(obDal, doc);
+
+      assertNull(handler.handle(crudPatch("DOC1", body)));
+
+      org.mockito.ArgumentCaptor<BigDecimal> captor = org.mockito.ArgumentCaptor.forClass(BigDecimal.class);
+      Mockito.verify(doc.getInvoice()).setETGOCurrencyRate(captor.capture());
+      assertEquals(0, captor.getValue().compareTo(BigDecimal.ONE.divide(new BigDecimal("0.6"), 12, java.math.RoundingMode.HALF_UP)));
+      Mockito.verify(dal).save(doc.getInvoice());
+    }
+  }
+
+  @Test
+  public void testHandleUpdateDoesNotSyncHeaderRateWhenNothingChanged() throws Exception {
+    // Same rate/foreignAmount as already persisted — no recompute, so no header write either.
+    JSONObject body = new JSONObject();
+    body.put("rate", "5");
+    body.put("foreignAmount", 500);
+    ConversionRateDoc doc = docWith(new BigDecimal("100"), new BigDecimal("5"), new BigDecimal("500"));
+    try (MockedStatic<OBContext> obCtx = Mockito.mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDal = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = stubDocLookup(obDal, doc);
+
+      assertNull(handler.handle(crudPatch("DOC1", body)));
+
+      Mockito.verify(doc.getInvoice(), Mockito.never()).setETGOCurrencyRate(Mockito.any());
+      Mockito.verify(dal, Mockito.never()).save(Mockito.any());
+    }
+  }
+
   @Test
   public void testHandleUpdateIgnoresMissingRecordId() throws Exception {
     JSONObject body = new JSONObject();
@@ -378,7 +437,10 @@ public class InvoiceExchangeRateHandlerTest {
   }
 
   @Test
-  public void testHandleUpdateIgnoresZeroGrandTotal() throws Exception {
+  public void testHandleUpdateSkipsForeignAmountRecomputeWithZeroGrandTotal() throws Exception {
+    // A zero grand total (e.g. a lineless draft invoice) makes foreignAmount = grandTotal
+    // * rate meaningless to recompute — it must NOT be touched. This does not mean the
+    // whole update is a no-op: see testHandleUpdateSyncsHeaderRateEvenWithZeroGrandTotal.
     JSONObject body = new JSONObject();
     body.put("rate", "5");
     try (MockedStatic<OBContext> obCtx = Mockito.mockStatic(OBContext.class);
@@ -387,6 +449,47 @@ public class InvoiceExchangeRateHandlerTest {
 
       assertNull(handler.handle(crudPatch("DOC1", body)));
       assertFalse(body.has("foreignAmount"));
+    }
+  }
+
+  @Test
+  public void testHandleUpdateSyncsHeaderRateEvenWithZeroGrandTotal() throws Exception {
+    // ETP-4029 regression: editing Rate directly on a lineless draft invoice (grandTotal=0,
+    // e.g. right after creating it, before adding any line) must still sync the header's
+    // eTGOCurrencyRate — that only needs the rate itself, never the invoice total. The
+    // original bug returned before this ever ran whenever grandTotal was zero.
+    JSONObject body = new JSONObject();
+    body.put("rate", "5");
+    ConversionRateDoc doc = docWith(BigDecimal.ZERO, new BigDecimal("2"), BigDecimal.ZERO);
+    try (MockedStatic<OBContext> obCtx = Mockito.mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDal = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = stubDocLookup(obDal, doc);
+
+      assertNull(handler.handle(crudPatch("DOC1", body)));
+
+      org.mockito.ArgumentCaptor<BigDecimal> captor = org.mockito.ArgumentCaptor.forClass(BigDecimal.class);
+      Mockito.verify(doc.getInvoice()).setETGOCurrencyRate(captor.capture());
+      assertEquals(0, captor.getValue().compareTo(BigDecimal.ONE.divide(new BigDecimal("5"), 12, java.math.RoundingMode.HALF_UP)));
+      Mockito.verify(dal).save(doc.getInvoice());
+      assertFalse(body.has("foreignAmount"));
+    }
+  }
+
+  @Test
+  public void testHandleUpdateForeignAmountAloneCannotDeriveRateWithZeroGrandTotal() throws Exception {
+    // The reverse direction genuinely cannot work with no total: rate = foreignAmount /
+    // grandTotal is a division by zero. Neither rate nor the header sync should fire.
+    JSONObject body = new JSONObject();
+    body.put("foreignAmount", "10");
+    ConversionRateDoc doc = docWith(BigDecimal.ZERO, new BigDecimal("2"), BigDecimal.ZERO);
+    try (MockedStatic<OBContext> obCtx = Mockito.mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDal = Mockito.mockStatic(OBDal.class)) {
+      stubDocLookup(obDal, doc);
+
+      assertNull(handler.handle(crudPatch("DOC1", body)));
+
+      assertFalse(body.has("rate"));
+      Mockito.verify(doc.getInvoice(), Mockito.never()).setETGOCurrencyRate(Mockito.any());
     }
   }
 

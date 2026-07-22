@@ -25,14 +25,12 @@ import javax.servlet.http.HttpServletResponse;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
-import org.hibernate.criterion.Restrictions;
 import org.openbravo.base.exception.OBException;
 import org.openbravo.dal.core.OBContext;
-import org.openbravo.dal.service.OBCriteria;
-import org.openbravo.dal.service.OBDal;
-import org.openbravo.model.ad.system.Language;
 
 import com.auth0.jwt.interfaces.DecodedJWT;
+import com.etendoerp.go.schemaforge.data.SFSpec;
+import com.etendoerp.go.schemaforge.util.NeoLanguage;
 import com.smf.securewebservices.utils.SecureWebServicesUtils;
 
 /**
@@ -124,29 +122,23 @@ class NeoAuthenticator {
    * explicit app locale wins and nothing else does.
    */
   private void applyRequestLanguage(HttpServletRequest request) {
-    String code = request.getHeader("Accept-Language");
-    if (code == null || !code.trim().matches("[a-z]{2}_[A-Z]{2}")) {
-      return;
-    }
-    try {
-      OBContext.setAdminMode(true);
-      OBCriteria<Language> crit = OBDal.getInstance().createCriteria(Language.class);
-      crit.add(Restrictions.eq(Language.PROPERTY_LANGUAGE, code.trim()));
-      crit.add(Restrictions.eq(Language.PROPERTY_ACTIVE, true));
-      crit.setMaxResults(1);
-      Language language = (Language) crit.uniqueResult();
-      if (language != null) {
-        OBContext.getOBContext().setLanguage(language);
-      }
-    } catch (Exception e) {
-      log.warn("Could not apply requested language '{}': {}", code, e.getMessage());
-    } finally {
-      OBContext.restorePreviousMode();
-    }
+    // Validation + AD_Language lookup live in the shared NeoLanguage helper so the
+    // same "GO locale of the request" is used by selectors (ETP-4304) and messages
+    // (ETP-4306). Only well-formed, active xx_YY codes are honored; otherwise the
+    // context default stands.
+    NeoLanguage.applyToContext(request.getHeader("Accept-Language"));
   }
 
   boolean hasWindowAccess(String windowId) {
     return NeoServletSupport.hasWindowAccess(windowId);
+  }
+
+  boolean hasWindowAccess(String windowId, String httpMethod) {
+    return NeoServletSupport.hasWindowAccess(windowId, httpMethod);
+  }
+
+  boolean hasWindowAccessForSpec(SFSpec spec, String httpMethod) {
+    return NeoServletSupport.hasWindowAccessForSpec(spec, httpMethod);
   }
 
   boolean hasProcessAccess(String processId) {

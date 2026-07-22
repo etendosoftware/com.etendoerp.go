@@ -15,6 +15,8 @@ import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.criterion.MatchMode;
 import org.hibernate.criterion.Restrictions;
 import org.openbravo.base.model.Entity;
+import org.openbravo.base.model.ModelProvider;
+import org.openbravo.base.model.Property;
 import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
@@ -27,6 +29,7 @@ import com.etendoerp.go.schemaforge.selector.meta.SelectorContextResolver;
 import com.etendoerp.go.schemaforge.selector.meta.SelectorDescriptorResolver;
 import com.etendoerp.go.schemaforge.selector.meta.SelectorMeta;
 import com.etendoerp.go.schemaforge.selector.policy.NeoSelectorPolicy;
+import com.etendoerp.go.schemaforge.util.NeoLocatorSelectorHelper;
 
 /**
  * Generic dynamic selector service for FK fields.
@@ -150,7 +153,7 @@ public class NeoSelectorService {
       }
       if (column == null) {
         return NeoResponse.error(404,
-            "Field not found or not included: " + columnName);
+            "Field not found or not included (checked column and property name): " + columnName);
       }
 
       return querySelectorByColumn(entity, column, columnName, search, limit, offset, contextParams);
@@ -180,6 +183,15 @@ public class NeoSelectorService {
   }
 
   private static NeoResponse querySelectorByColumn(SFEntity sourceEntity, Column column, String columnName,
+      String search, int limit, int offset, Map<String, String> contextParams) {
+    NeoResponse result = resolveSelectorResponse(
+        sourceEntity, column, columnName, search, limit, offset, contextParams);
+    // Generic post-processing: collapse M_Locator storage-bin labels into their parent
+    // warehouse name for every window. Fail-safe — leaves the response untouched on error.
+    return NeoLocatorSelectorHelper.rewriteLocatorLabels(result, column);
+  }
+
+  private static NeoResponse resolveSelectorResponse(SFEntity sourceEntity, Column column, String columnName,
       String search, int limit, int offset, Map<String, String> contextParams) {
     try {
       int safeLimit = normalizeLimit(limit);
@@ -320,6 +332,9 @@ public class NeoSelectorService {
 
   private static SFField findFieldByColumnName(String entityId,
       String columnName) {
+    // Fast path: exact DB column name match (for example "M_PriceList_ID").
+    // Kept as-is for backward compatibility with clients that use column-name
+    // selector URLs.
     OBCriteria<SFField> criteria = OBDal.getInstance().createCriteria(SFField.class);
     criteria.add(Restrictions.eq(SFField.PROPERTY_ETGOSFENTITY + ".id", entityId));
     criteria.add(Restrictions.eq(SFField.PROPERTY_ISACTIVE, true));
@@ -328,7 +343,63 @@ public class NeoSelectorService {
     criteria.add(Restrictions.eq("col." + Column.PROPERTY_DBCOLUMNNAME, columnName));
     criteria.setMaxResults(1);
     List<SFField> results = criteria.list();
-    return results.isEmpty() ? null : results.get(0);
+    if (!results.isEmpty()) {
+      return results.get(0);
+    }
+    // Fallback: the identifier may be the DAL property name (for example
+    // "priceList" instead of "M_PriceList_ID"). Records, defaults and callouts
+    // all key off property names; this brings the selector endpoint in line
+    // with them and with the MCP path (McpToolRouterSupport#findColumn). See
+    // ETP-4058.
+    return findFieldByPropertyName(entityId, columnName);
+  }
+
+  private static SFField findFieldByPropertyName(String entityId, String identifier) {
+    OBCriteria<SFField> criteria = OBDal.getInstance().createCriteria(SFField.class);
+    criteria.add(Restrictions.eq(SFField.PROPERTY_ETGOSFENTITY + ".id", entityId));
+    criteria.add(Restrictions.eq(SFField.PROPERTY_ISACTIVE, true));
+    criteria.add(Restrictions.eq(SFField.PROPERTY_ISINCLUDED, true));
+    // All SFFields of one SF entity map to columns of the same AD table, so the
+    // DAL entity is resolved once (on the first field with a column) and reused.
+    Entity dalEntity = null;
+    for (SFField field : criteria.list()) {
+      Column column = field.getADColumn();
+      if (column == null) {
+        continue;
+      }
+      if (dalEntity == null) {
+        dalEntity = ModelProvider.getInstance()
+            .getEntityByTableName(column.getTable().getDBTableName());
+      }
+      if (matchesPropertyName(dalEntity, column, identifier)) {
+        return field;
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Whether {@code identifier} matches the DAL property name of {@code column}
+   * within {@code dalEntity} (case-insensitive). Mirrors the property-name
+   * resolution used by the MCP path
+   * ({@code McpToolRouterSupport#findColumn}). Fail-safe: null arguments or a
+   * model lookup failure yield {@code false}.
+   *
+   * @param dalEntity the DAL entity that owns the column, or {@code null}
+   * @param column the AD column to resolve the property name for, or {@code null}
+   * @param identifier the selector identifier from the request URL
+   * @return {@code true} when the column's DAL property name equals the identifier
+   */
+  static boolean matchesPropertyName(Entity dalEntity, Column column, String identifier) {
+    if (dalEntity == null || column == null) {
+      return false;
+    }
+    try {
+      Property prop = dalEntity.getPropertyByColumnName(column.getDBColumnName());
+      return prop != null && prop.getName().equalsIgnoreCase(identifier);
+    } catch (Exception ignored) {
+      return false;
+    }
   }
 
 

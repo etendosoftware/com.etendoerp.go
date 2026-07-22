@@ -18,6 +18,7 @@
 package com.etendoerp.go.schemaforge;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
@@ -40,6 +41,8 @@ import java.util.List;
 import java.util.Map;
 
 import javax.servlet.http.HttpServletResponse;
+
+import javax.enterprise.inject.Vetoed;
 
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
@@ -86,6 +89,7 @@ public class AbstractInvoiceHeaderHandlerTest {
    * Minimal concrete subclass — AR-style classification (ARC→NC, ARI_RM→DEV).
    * Exposes all protected methods as public for direct testing.
    */
+  @Vetoed // not a CDI bean: a discoverable subclass makes @Inject of the real handler ambiguous
   private static class TestHandler extends AbstractInvoiceHeaderHandler {
     @Override
     protected String classifyDocType(DocumentType dt) {
@@ -102,6 +106,12 @@ public class AbstractInvoiceHeaderHandlerTest {
     @Override
     protected String getInvoiceSubtypeKey() {
       return "arInvoiceSubtype";
+    }
+
+    @Override
+    protected TotalDiscountService getTotalDiscountService() {
+      // Not exercised by this test file — applyTotalDiscountToRecord() null-guards on this.
+      return null;
     }
 
     public NeoResponse callValidateDocTypeLock(NeoContext ctx) {
@@ -126,6 +136,14 @@ public class AbstractInvoiceHeaderHandlerTest {
 
     public void callEnrichDocTypeLocked(JSONObject rec) throws Exception {
       enrichDocTypeLocked(rec);
+    }
+
+    public NeoResponse callHandleInvoiceAfterCallout(NeoContext ctx) {
+      return handleInvoiceAfterCallout(ctx);
+    }
+
+    public void callEnrichIsRectificative(JSONObject rec) throws Exception {
+      enrichIsRectificative(rec);
     }
   }
 
@@ -468,10 +486,31 @@ public class AbstractInvoiceHeaderHandlerTest {
   }
 
   @Test
-  @SuppressWarnings("unchecked")
-  public void persistOriginInvoice_withoutOriginId_onlyDeletesExistingLinks() throws Exception {
+  public void persistOriginInvoice_fieldAbsent_doesNotTouchExistingLinks() throws Exception {
+    // PATCH-like semantics: a PUT whose body omits "originInvoice" entirely must not
+    // delete existing reverse links (partial header updates would otherwise wipe them).
     JSONObject body = new JSONObject();
-    // no "originInvoice" field
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("PUT").recordId("inv-del").requestBody(body).build();
+
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
+         MockedStatic<OBProvider> providerMock = Mockito.mockStatic(OBProvider.class)) {
+
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      handler.callPersistOriginInvoice(ctx);
+
+      Mockito.verifyNoInteractions(dal);
+    }
+  }
+
+  @Test
+  @SuppressWarnings("unchecked")
+  public void persistOriginInvoice_blankOriginId_onlyDeletesExistingLinks() throws Exception {
+    // Explicitly clearing the field (present but blank) deletes the link without creating one.
+    JSONObject body = new JSONObject().put("originInvoice", "");
     NeoContext ctx = NeoContext.builder()
         .httpMethod("PUT").recordId("inv-del").requestBody(body).build();
 
@@ -658,6 +697,67 @@ public class AbstractInvoiceHeaderHandlerTest {
     JSONObject rec = new JSONObject();
     handler.callEnrichDocTypeLocked(rec);
     assertTrue(rec.getBoolean("docTypeLocked"));
+  }
+
+  // ── enrichIsRectificative — SIF column guard ─────────────────────────────────
+
+  /**
+   * When the em_etsg_isrectificative column is absent (SIF General not installed),
+   * the enrichment must report false WITHOUT querying the doctype — a failed SELECT on
+   * a missing column would abort the shared PostgreSQL transaction for the whole request.
+   */
+  @Test
+  public void enrichIsRectificative_columnAbsent_falseWithoutQuerying() throws Exception {
+    AbstractInvoiceHeaderHandler.setRectificativeColumnPresentForTests(false);
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      JSONObject rec = new JSONObject().put("transactionDocument", "dt-nc");
+
+      handler.callEnrichIsRectificative(rec);
+
+      assertFalse(rec.getBoolean("isRectificative"));
+      dalMock.verifyNoInteractions();
+    } finally {
+      AbstractInvoiceHeaderHandler.setRectificativeColumnPresentForTests(null);
+    }
+  }
+
+  @Test
+  public void enrichIsRectificative_columnPresent_readsDocTypeFlag() throws Exception {
+    AbstractInvoiceHeaderHandler.setRectificativeColumnPresentForTests(true);
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getReadOnlyInstance).thenReturn(dal);
+      Connection conn = mock(Connection.class);
+      when(dal.getConnection()).thenReturn(conn);
+      PreparedStatement ps = mock(PreparedStatement.class);
+      when(conn.prepareStatement(anyString())).thenReturn(ps);
+      ResultSet rs = mock(ResultSet.class);
+      when(ps.executeQuery()).thenReturn(rs);
+      when(rs.next()).thenReturn(true);
+      when(rs.getString(1)).thenReturn("Y");
+
+      JSONObject rec = new JSONObject().put("transactionDocument", "dt-nc");
+
+      handler.callEnrichIsRectificative(rec);
+
+      assertTrue(rec.getBoolean("isRectificative"));
+    } finally {
+      AbstractInvoiceHeaderHandler.setRectificativeColumnPresentForTests(null);
+    }
+  }
+
+  @Test
+  public void enrichIsRectificative_noDocType_false() throws Exception {
+    AbstractInvoiceHeaderHandler.setRectificativeColumnPresentForTests(true);
+    try {
+      JSONObject rec = new JSONObject();
+
+      handler.callEnrichIsRectificative(rec);
+
+      assertFalse(rec.getBoolean("isRectificative"));
+    } finally {
+      AbstractInvoiceHeaderHandler.setRectificativeColumnPresentForTests(null);
+    }
   }
 
   // ── validateLineQtyBeforeComplete — guard conditions ─────────────────────────
@@ -1312,6 +1412,283 @@ public class AbstractInvoiceHeaderHandlerTest {
 
     assertEquals("unchanged", updates.getString("otherField"));
     assertTrue(!updates.has("currency"));
+  }
+
+  // ── ETP-4535: blockCalloutDocTypeUpdateIfLocked ──────────────────────────────
+
+  @Test
+  public void blockCalloutDocTypeUpdateIfLocked_unsavedInvoice_doesNotStrip() throws Exception {
+    // recordId is null (new record, not yet saved) — callout-driven doc type defaults are legit.
+    JSONObject updates = new JSONObject().put("transactionDocument", "dt-nc");
+
+    AbstractInvoiceHeaderHandler.blockCalloutDocTypeUpdateIfLocked(updates, "businessPartner", null);
+
+    assertEquals("dt-nc", updates.getString("transactionDocument"));
+  }
+
+  @Test
+  public void blockCalloutDocTypeUpdateIfLocked_blankRecordId_doesNotStrip() throws Exception {
+    JSONObject updates = new JSONObject().put("transactionDocument", "dt-nc");
+
+    AbstractInvoiceHeaderHandler.blockCalloutDocTypeUpdateIfLocked(updates, "businessPartner", "");
+
+    assertEquals("dt-nc", updates.getString("transactionDocument"));
+  }
+
+  @Test
+  public void blockCalloutDocTypeUpdateIfLocked_savedNcInvoice_stripsUpdate() throws Exception {
+    // BP callout on a saved Credit Note (NC) invoice — must not silently revert to org default.
+    JSONObject updates = new JSONObject().put("transactionDocument", "dt-fac-default").put("otherField", "x");
+
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      Invoice invoice = mock(Invoice.class);
+      when(dal.get(Invoice.class, "inv-nc-saved")).thenReturn(invoice);
+      when(invoice.getDocumentNo()).thenReturn("NC-001");
+
+      AbstractInvoiceHeaderHandler.blockCalloutDocTypeUpdateIfLocked(
+          updates, "businessPartner", "inv-nc-saved");
+
+      assertTrue(!updates.has("transactionDocument"));
+      assertTrue(updates.has("otherField"));
+    }
+  }
+
+  @Test
+  public void blockCalloutDocTypeUpdateIfLocked_savedDevInvoice_stripsUpdate() throws Exception {
+    // BP callout on a saved Return Invoice (DEV) — same protection as NC.
+    JSONObject updates = new JSONObject().put("transactionDocument", "dt-fac-default");
+
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      Invoice invoice = mock(Invoice.class);
+      when(dal.get(Invoice.class, "inv-dev-saved")).thenReturn(invoice);
+      when(invoice.getDocumentNo()).thenReturn("DEV-001");
+
+      AbstractInvoiceHeaderHandler.blockCalloutDocTypeUpdateIfLocked(
+          updates, "businessPartner", "inv-dev-saved");
+
+      assertTrue(!updates.has("transactionDocument"));
+    }
+  }
+
+  @Test
+  public void blockCalloutDocTypeUpdateIfLocked_invoiceHasNoDocumentNo_doesNotStrip() throws Exception {
+    // Draft invoice with a recordId already assigned (rare, but not "saved" per documentNo rule).
+    JSONObject updates = new JSONObject().put("transactionDocument", "dt-nc");
+
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      Invoice invoice = mock(Invoice.class);
+      when(dal.get(Invoice.class, "inv-draft")).thenReturn(invoice);
+      when(invoice.getDocumentNo()).thenReturn(null);
+
+      AbstractInvoiceHeaderHandler.blockCalloutDocTypeUpdateIfLocked(
+          updates, "businessPartner", "inv-draft");
+
+      assertEquals("dt-nc", updates.getString("transactionDocument"));
+    }
+  }
+
+  @Test
+  public void blockCalloutDocTypeUpdateIfLocked_invoiceNotFound_doesNotStrip() throws Exception {
+    JSONObject updates = new JSONObject().put("transactionDocument", "dt-nc");
+
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(Invoice.class, "inv-missing")).thenReturn(null);
+
+      AbstractInvoiceHeaderHandler.blockCalloutDocTypeUpdateIfLocked(
+          updates, "businessPartner", "inv-missing");
+
+      assertEquals("dt-nc", updates.getString("transactionDocument"));
+    }
+  }
+
+  @Test
+  public void blockCalloutDocTypeUpdateIfLocked_transactionDocumentIsTheTriggerField_keepsIt()
+      throws Exception {
+    // The user is directly changing the document type — never strip it in that case,
+    // even on a saved invoice.
+    JSONObject updates = new JSONObject().put("transactionDocument", "dt-user-chosen");
+
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      AbstractInvoiceHeaderHandler.blockCalloutDocTypeUpdateIfLocked(
+          updates, "transactionDocument", "inv-saved");
+
+      assertEquals("dt-user-chosen", updates.getString("transactionDocument"));
+      Mockito.verifyNoInteractions(dal);
+    }
+  }
+
+  @Test
+  public void blockCalloutDocTypeUpdateIfLocked_nullUpdates_doesNotThrow() {
+    AbstractInvoiceHeaderHandler.blockCalloutDocTypeUpdateIfLocked(null, "businessPartner", "inv-1");
+  }
+
+  @Test
+  public void blockCalloutDocTypeUpdateIfLocked_updatesWithoutDocTypeKey_noop() throws Exception {
+    JSONObject updates = new JSONObject().put("otherField", "unchanged");
+
+    AbstractInvoiceHeaderHandler.blockCalloutDocTypeUpdateIfLocked(
+        updates, "businessPartner", "inv-saved");
+
+    assertEquals("unchanged", updates.getString("otherField"));
+    assertTrue(!updates.has("transactionDocument"));
+  }
+
+  @Test
+  public void blockCalloutDocTypeUpdateIfLocked_dbException_doesNotStrip() throws Exception {
+    JSONObject updates = new JSONObject().put("transactionDocument", "dt-nc");
+
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(Invoice.class, "inv-err")).thenThrow(new RuntimeException("DB error"));
+
+      AbstractInvoiceHeaderHandler.blockCalloutDocTypeUpdateIfLocked(
+          updates, "businessPartner", "inv-err");
+
+      // Fail-safe: on error, the update is left untouched rather than blocked.
+      assertEquals("dt-nc", updates.getString("transactionDocument"));
+    }
+  }
+
+  // ── ETP-4535: handleInvoiceAfterCallout — integration with extractCalloutFields ─
+
+  @Test
+  public void handleInvoiceAfterCallout_bpCalloutOnUnsavedInvoice_keepsDocType() throws Exception {
+    // Realistic callout-shaped NeoContext: NeoCalloutEndpoint.handleCallout never calls
+    // .recordId(...) on the builder (the callout URL carries no record-id segment). Here
+    // formState also carries no "id" (brand-new, unsaved invoice), so the resolved record id
+    // is null and the callout-driven default must be allowed through.
+    JSONObject requestBody = new JSONObject().put("field", "businessPartner");
+    JSONObject updates = new JSONObject().put("transactionDocument", "dt-fac-default");
+    JSONObject prevBody = new JSONObject().put("updates", updates);
+    NeoResponse prevResult = new NeoResponse(200, prevBody);
+
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("POST")
+        .requestBody(requestBody)
+        .previousResult(prevResult)
+        .build();
+
+    NeoResponse result = handler.callHandleInvoiceAfterCallout(ctx);
+
+    assertNull(result);
+    assertEquals("dt-fac-default", updates.getString("transactionDocument"));
+  }
+
+  /**
+   * Regression test for ETP-4535 (reject-cycle 1 fix): constructs the {@link NeoContext} the way
+   * {@code NeoCalloutEndpoint.handleCallout} actually builds it in production — NO
+   * {@code .recordId(...)} on the builder — with the saved invoice's id present only inside
+   * {@code requestBody.formState.id}, exactly as the frontend echoes the currently-loaded
+   * record's id (callout URLs carry no record-id path segment). Proves
+   * {@link AbstractInvoiceHeaderHandler#handleInvoiceAfterCallout} actually resolves the record id
+   * via {@code formState} and strips the callout-driven {@code transactionDocument} update on a
+   * saved NC invoice — not just the extracted static {@code blockCalloutDocTypeUpdateIfLocked}
+   * method in isolation (which the pre-existing unit tests below already cover with a hand-built
+   * id, a valid input for that method but not representative of how a real callout arrives).
+   */
+  @Test
+  public void handleInvoiceAfterCallout_bpCalloutOnSavedNcInvoice_stripsDocType() throws Exception {
+    JSONObject formState = new JSONObject().put("id", "inv-nc-saved");
+    JSONObject requestBody = new JSONObject()
+        .put("field", "businessPartner")
+        .put("formState", formState);
+    JSONObject updates = new JSONObject().put("transactionDocument", "dt-fac-default");
+    JSONObject prevBody = new JSONObject().put("updates", updates);
+    NeoResponse prevResult = new NeoResponse(200, prevBody);
+
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("POST") // callouts are always dispatched as POST — NeoCalloutEndpoint#handleCallout
+        .requestBody(requestBody)
+        .previousResult(prevResult)
+        .build();
+
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      Invoice invoice = mock(Invoice.class);
+      when(dal.get(Invoice.class, "inv-nc-saved")).thenReturn(invoice);
+      when(invoice.getDocumentNo()).thenReturn("NC-001");
+
+      NeoResponse result = handler.callHandleInvoiceAfterCallout(ctx);
+
+      assertNull(result);
+      assertTrue(!updates.has("transactionDocument"));
+    }
+  }
+
+  /**
+   * Defensive-fallback branch of {@code resolveCalloutRecordId}: if some other (non-callout)
+   * dispatch path populates {@code context.getRecordId()} directly and {@code formState} carries
+   * no {@code id}, the guard must still fire from that fallback.
+   */
+  @Test
+  public void handleInvoiceAfterCallout_recordIdFallbackWithoutFormState_stripsDocType()
+      throws Exception {
+    JSONObject requestBody = new JSONObject().put("field", "businessPartner");
+    JSONObject updates = new JSONObject().put("transactionDocument", "dt-fac-default");
+    JSONObject prevBody = new JSONObject().put("updates", updates);
+    NeoResponse prevResult = new NeoResponse(200, prevBody);
+
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("PUT")
+        .recordId("inv-nc-saved")
+        .requestBody(requestBody)
+        .previousResult(prevResult)
+        .build();
+
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      Invoice invoice = mock(Invoice.class);
+      when(dal.get(Invoice.class, "inv-nc-saved")).thenReturn(invoice);
+      when(invoice.getDocumentNo()).thenReturn("NC-001");
+
+      NeoResponse result = handler.callHandleInvoiceAfterCallout(ctx);
+
+      assertNull(result);
+      assertTrue(!updates.has("transactionDocument"));
+    }
+  }
+
+  @Test
+  public void handleInvoiceAfterCallout_transactionDocumentIsTrigger_keepsDocType() throws Exception {
+    // The user is directly picking the document type via its own field — never strip it,
+    // regardless of whether the invoice is saved. Realistic callout shape: id via formState.
+    JSONObject formState = new JSONObject().put("id", "inv-nc-saved");
+    JSONObject requestBody = new JSONObject()
+        .put("field", "transactionDocument")
+        .put("formState", formState);
+    JSONObject updates = new JSONObject().put("transactionDocument", "dt-user-chosen");
+    JSONObject prevBody = new JSONObject().put("updates", updates);
+    NeoResponse prevResult = new NeoResponse(200, prevBody);
+
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("POST")
+        .requestBody(requestBody)
+        .previousResult(prevResult)
+        .build();
+
+    NeoResponse result = handler.callHandleInvoiceAfterCallout(ctx);
+
+    assertNull(result);
+    assertEquals("dt-user-chosen", updates.getString("transactionDocument"));
   }
 
   // ── ETP-4029: checkExchangeRateWarning ───────────────────────────────────────
@@ -2230,5 +2607,185 @@ public class AbstractInvoiceHeaderHandlerTest {
 
       verify(dal).get(Invoice.class, "inv-put");
     }
+  }
+
+  // ── ETP-4531: handleInvoiceAfterCallout lets accountingDate cascade through ─
+
+  @Test
+  public void handleInvoiceAfterCallout_letsAccountingDateCascadeFromOtherTrigger()
+      throws Exception {
+    // ETP-4531 (unified date): the classic invoiceDate -> accountingDate cascade is no
+    // longer blocked — a businessPartner-triggered callout may still carry an unrelated
+    // accountingDate update through untouched.
+    JSONObject updates = new JSONObject()
+        .put("accountingDate", "2026-07-01").put("businessPartner", "bp-1");
+    JSONObject calloutBody = new JSONObject().put("updates", updates);
+    JSONObject requestBody = new JSONObject().put("field", "businessPartner").put("value", "bp-1");
+    NeoContext ctx = NeoContext.builder()
+        .previousResult(new NeoResponse(200, calloutBody))
+        .requestBody(requestBody)
+        .build();
+
+    NeoResponse result = handler.callHandleInvoiceAfterCallout(ctx);
+
+    assertNull(result);
+    assertEquals("2026-07-01", updates.getString("accountingDate"));
+    assertTrue(updates.has("businessPartner"));
+  }
+
+  @Test
+  public void handleInvoiceAfterCallout_letsAccountingDateCascadeFromInvoiceDateTrigger()
+      throws Exception {
+    // Mirrors the live C_Invoice.DateInvoiced -> SifInvoiceOperationDateCallout (extends
+    // SE_Invoice_AccountingDate) coupling: this is now exactly the desired behavior — the
+    // single visible date (invoiceDate) must mirror into accountingDate on save.
+    JSONObject updates = new JSONObject().put("accountingDate", "2026-07-01");
+    JSONObject calloutBody = new JSONObject().put("updates", updates);
+    JSONObject requestBody = new JSONObject().put("field", "invoiceDate").put("value", "2026-07-01");
+    NeoContext ctx = NeoContext.builder()
+        .previousResult(new NeoResponse(200, calloutBody))
+        .requestBody(requestBody)
+        .build();
+
+    handler.callHandleInvoiceAfterCallout(ctx);
+
+    assertEquals("2026-07-01", updates.getString("accountingDate"));
+  }
+
+  @Test
+  public void handleInvoiceAfterCallout_keepsAccountingDateWhenItIsTheTriggerField()
+      throws Exception {
+    JSONObject updates = new JSONObject().put("accountingDate", "2026-07-05");
+    JSONObject calloutBody = new JSONObject().put("updates", updates);
+    JSONObject requestBody = new JSONObject()
+        .put("field", "accountingDate").put("value", "2026-07-05");
+    NeoContext ctx = NeoContext.builder()
+        .previousResult(new NeoResponse(200, calloutBody))
+        .requestBody(requestBody)
+        .build();
+
+    handler.callHandleInvoiceAfterCallout(ctx);
+
+    assertEquals("2026-07-05", updates.getString("accountingDate"));
+  }
+
+  // ── ETP-4531: mirrorAccountingDate (unified date, server-side mirror) ───────
+
+  @Test
+  public void mirrorAccountingDate_postCrud_copiesInvoiceDateIntoAccountingDate()
+      throws Exception {
+    JSONObject body = new JSONObject().put("invoiceDate", "2026-07-01");
+    NeoContext ctx = NeoContext.builder()
+        .endpointType(NeoEndpointType.CRUD)
+        .httpMethod("POST")
+        .requestBody(body)
+        .build();
+
+    NeoHandlerUtils.mirrorAccountingDate(ctx, "invoiceDate", "accountingDate");
+
+    assertEquals("2026-07-01", body.getString("accountingDate"));
+  }
+
+  @Test
+  public void mirrorAccountingDate_putCrud_overwritesStaleAccountingDate() throws Exception {
+    JSONObject body = new JSONObject()
+        .put("invoiceDate", "2026-07-10").put("accountingDate", "2026-01-01");
+    NeoContext ctx = NeoContext.builder()
+        .endpointType(NeoEndpointType.CRUD)
+        .httpMethod("PUT")
+        .requestBody(body)
+        .build();
+
+    NeoHandlerUtils.mirrorAccountingDate(ctx, "invoiceDate", "accountingDate");
+
+    assertEquals("2026-07-10", body.getString("accountingDate"));
+  }
+
+  @Test
+  public void mirrorAccountingDate_nonCrudEndpoint_doesNotMutateBody() throws Exception {
+    JSONObject body = new JSONObject().put("invoiceDate", "2026-07-01");
+    NeoContext ctx = NeoContext.builder()
+        .endpointType(NeoEndpointType.ACTION)
+        .httpMethod("POST")
+        .requestBody(body)
+        .build();
+
+    NeoHandlerUtils.mirrorAccountingDate(ctx, "invoiceDate", "accountingDate");
+
+    assertTrue(!body.has("accountingDate"));
+  }
+
+  @Test
+  public void mirrorAccountingDate_getMethod_doesNotMutateBody() throws Exception {
+    JSONObject body = new JSONObject().put("invoiceDate", "2026-07-01");
+    NeoContext ctx = NeoContext.builder()
+        .endpointType(NeoEndpointType.CRUD)
+        .httpMethod("GET")
+        .requestBody(body)
+        .build();
+
+    NeoHandlerUtils.mirrorAccountingDate(ctx, "invoiceDate", "accountingDate");
+
+    assertTrue(!body.has("accountingDate"));
+  }
+
+  /**
+   * Regression test for the live-reproduced bug: editing just the date on an EXISTING invoice
+   * and saving through the real React UI sends a {@code PATCH} with a SPARSE body containing
+   * only the changed field ({@code useEntity.js#buildPatchPayload} diffs {@code editing} against
+   * {@code selected} and sends only what changed — never a full record, and never a {@code PUT}).
+   * The original {@code mirrorAccountingDate()} checked only {@code POST}/{@code PUT}, so this
+   * exact request shape silently never mirrored {@code accountingDate} on update — reproduced
+   * against invoice {@code 0BC614E563FC4E7EB63B6FCF9788730B}: DateInvoiced updated to
+   * 2026-07-15 but DateAcct stayed at the stale create-time value of 2026-07-17.
+   */
+  @Test
+  public void mirrorAccountingDate_patchCrudSparseBody_copiesInvoiceDateIntoAccountingDate()
+      throws Exception {
+    // Sparse body: exactly what useEntity.js's buildPatchPayload sends for a date-only edit —
+    // no other header fields, unlike the multi-field bodies the original POST/PUT tests used.
+    JSONObject body = new JSONObject().put("invoiceDate", "2026-07-15");
+    NeoContext ctx = NeoContext.builder()
+        .endpointType(NeoEndpointType.CRUD)
+        .httpMethod("PATCH")
+        .requestBody(body)
+        .build();
+
+    NeoHandlerUtils.mirrorAccountingDate(ctx, "invoiceDate", "accountingDate");
+
+    assertEquals("2026-07-15", body.getString("accountingDate"));
+  }
+
+  @Test
+  public void mirrorAccountingDate_patchCrud_overwritesStaleAccountingDate() throws Exception {
+    // Mirrors the real DB state before the fix: accountingDate present but stale from create.
+    JSONObject body = new JSONObject()
+        .put("invoiceDate", "2026-07-15").put("accountingDate", "2026-07-17");
+    NeoContext ctx = NeoContext.builder()
+        .endpointType(NeoEndpointType.CRUD)
+        .httpMethod("PATCH")
+        .requestBody(body)
+        .build();
+
+    NeoHandlerUtils.mirrorAccountingDate(ctx, "invoiceDate", "accountingDate");
+
+    assertEquals("2026-07-15", body.getString("accountingDate"));
+  }
+
+  @Test
+  public void mirrorAccountingDate_patchCrudUnrelatedFieldOnly_doesNotAddAccountingDate()
+      throws Exception {
+    // A PATCH that doesn't touch invoiceDate at all (e.g. only businessPartner changed) must
+    // stay a no-op — mirroring must not fabricate an accountingDate out of nowhere.
+    JSONObject body = new JSONObject().put("businessPartner", "someBpId");
+    NeoContext ctx = NeoContext.builder()
+        .endpointType(NeoEndpointType.CRUD)
+        .httpMethod("PATCH")
+        .requestBody(body)
+        .build();
+
+    NeoHandlerUtils.mirrorAccountingDate(ctx, "invoiceDate", "accountingDate");
+
+    assertTrue(!body.has("accountingDate"));
   }
 }

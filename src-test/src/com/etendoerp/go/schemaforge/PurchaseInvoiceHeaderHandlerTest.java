@@ -65,7 +65,11 @@ import org.openbravo.model.common.invoice.Invoice;
  * <ul>
  *   <li>{@code afterHandle()} early-exit paths (non-GET, null/empty data).</li>
  *   <li>{@code afterHandle()} single-record enrichment — linked receipts query.</li>
- *   <li>{@code afterHandle()} list mode — no enrichment (recordId is null).</li>
+ *   <li>{@code afterHandle()} list mode — total-discount adjustment applies to every record, but
+ *       the detail-only enrichments (linked receipts, origin invoice, subtype, etc.) do not
+ *       (recordId is null).</li>
+ *   <li>{@code afterHandle()} total-discount adjustment for draft invoices (grandTotalAmount /
+ *       outstandingAmount), inherited from {@link AbstractInvoiceHeaderHandler}.</li>
  *   <li>DB error resilience in enrichLinkedReceipts.</li>
  * </ul>
  */
@@ -143,6 +147,94 @@ public class PurchaseInvoiceHeaderHandlerTest {
     NeoResponse result = handler.afterHandle(ctx);
     assertNotNull(result);
     assertEquals(200, result.getHttpStatus());
+  }
+
+  // ── afterHandle — total discount adjustment (ETP-4029 follow-up) ─────────
+
+  private static JSONObject invoiceRecord(boolean processed, double discount, double grandTotal,
+      double outstanding) throws Exception {
+    return new JSONObject().put("id", "pinv-1").put("processed", processed).put(
+        "etgoTotalDiscount", discount).put("grandTotalAmount", grandTotal).put(
+        "outstandingAmount", outstanding);
+  }
+
+  private static NeoContext getCtx() {
+    return NeoContext.builder().httpMethod("GET").endpointType(NeoEndpointType.CRUD).build();
+  }
+
+  @Test
+  public void afterHandle_processedInvoice_notAdjusted() throws Exception {
+    JSONObject body = new JSONObject().put("response",
+        new JSONObject().put("data", new JSONArray().put(invoiceRecord(true, 10.0, 470.63, 470.63))));
+    NeoContext ctx = getCtx();
+    ctx.setPreviousResult(NeoResponse.ok(body));
+
+    NeoResponse result = handler.afterHandle(ctx);
+
+    double grand = result.getBody().getJSONObject("response").getJSONArray("data").getJSONObject(0)
+        .getDouble("grandTotalAmount");
+    assertEquals(470.63, grand, 0.001);
+  }
+
+  @Test
+  public void afterHandle_draftWithNoDiscount_notAdjusted() throws Exception {
+    JSONObject body = new JSONObject().put("response",
+        new JSONObject().put("data", new JSONArray().put(invoiceRecord(false, 0.0, 470.63, 470.63))));
+    NeoContext ctx = getCtx();
+    ctx.setPreviousResult(NeoResponse.ok(body));
+
+    NeoResponse result = handler.afterHandle(ctx);
+
+    double grand = result.getBody().getJSONObject("response").getJSONArray("data").getJSONObject(0)
+        .getDouble("grandTotalAmount");
+    assertEquals(470.63, grand, 0.001);
+  }
+
+  @Test
+  public void afterHandle_draftWithMaterializedDiscountLine_notAdjustedTwice() throws Exception {
+    when(totalDiscountService.hasDiscountLine("pinv-1", true)).thenReturn(true);
+    JSONObject body = new JSONObject().put("response",
+        new JSONObject().put("data", new JSONArray().put(invoiceRecord(false, 10.0, 108.90, 108.90))));
+    NeoContext ctx = getCtx();
+    ctx.setPreviousResult(NeoResponse.ok(body));
+
+    NeoResponse result = handler.afterHandle(ctx);
+
+    double grand = result.getBody().getJSONObject("response").getJSONArray("data").getJSONObject(0)
+        .getDouble("grandTotalAmount");
+    assertEquals(108.90, grand, 0.001);
+  }
+
+  @Test
+  public void afterHandle_draftWithDiscount_adjustsGrandTotalAndOutstanding() throws Exception {
+    JSONObject body = new JSONObject().put("response",
+        new JSONObject().put("data", new JSONArray().put(invoiceRecord(false, 10.0, 121.00, 121.00))));
+    NeoContext ctx = getCtx();
+    ctx.setPreviousResult(NeoResponse.ok(body));
+
+    NeoResponse result = handler.afterHandle(ctx);
+
+    JSONObject rec = result.getBody().getJSONObject("response").getJSONArray("data").getJSONObject(0);
+    assertEquals(108.90, rec.getDouble("grandTotalAmount"), 0.005);
+    assertEquals(108.90, rec.getDouble("outstandingAmount"), 0.005);
+  }
+
+  @Test
+  public void afterHandle_listMode_adjustsDiscountForEveryRecord() throws Exception {
+    JSONArray data = new JSONArray()
+        .put(new JSONObject().put("id", "pinv-1").put("processed", false).put("etgoTotalDiscount", 10.0)
+            .put("grandTotalAmount", 100.0).put("outstandingAmount", 100.0))
+        .put(new JSONObject().put("id", "pinv-2").put("processed", false).put("etgoTotalDiscount", 20.0)
+            .put("grandTotalAmount", 200.0).put("outstandingAmount", 200.0));
+    JSONObject body = new JSONObject().put("response", new JSONObject().put("data", data));
+    NeoContext ctx = getCtx();
+    ctx.setPreviousResult(NeoResponse.ok(body));
+
+    NeoResponse result = handler.afterHandle(ctx);
+
+    JSONArray resultData = result.getBody().getJSONObject("response").getJSONArray("data");
+    assertEquals(90.0, resultData.getJSONObject(0).getDouble("grandTotalAmount"), 0.001);
+    assertEquals(160.0, resultData.getJSONObject(1).getDouble("grandTotalAmount"), 0.001);
   }
 
   // ── afterHandle — single record, enrichLinkedReceipts ────────────────────
@@ -425,12 +517,21 @@ public class PurchaseInvoiceHeaderHandlerTest {
   }
 
   /**
-   * When validateLineQtyBeforeComplete passes, validateDocTypeLock passes, and
-   * validateOriginInvoiceRequired blocks (NC subtype without origin invoice),
-   * handle() returns 400 from origin invoice validation.
+   * Regression for ETP-4496: saving a Purchase Invoice with Document Type = Credit Note
+   * (APC category / NC subtype) without an Origin Invoice must NOT be blocked at save time.
+   * {@code validateOriginInvoiceRequired} is no longer invoked from {@code handle()}'s CRUD
+   * path — Etendo Classic treats the origin invoice as optional, and ETP-4036 had already
+   * deliberately removed this exact save-time block, until a later shared-code refactor
+   * (ETP-4035) accidentally reintroduced it.
+   *
+   * <p>With that call gone, the request falls through validateLineQtyBeforeComplete (no
+   * documentAction=CO), applyTotalDiscountBeforeComplete/completeInvoiceIfNeeded (same reason),
+   * and validateDocTypeLock (not a PUT), reaching {@code NeoHeaderActionRouter.dispatch}, where
+   * none of the mocked downstream handlers answer — proving handle() never short-circuits with
+   * a 400 from origin invoice validation.
    */
   @Test
-  public void handle_originInvoiceRequiredForNcSubtype_returns400() throws Exception {
+  public void handle_creditNoteWithoutOriginInvoice_doesNotBlock() throws Exception {
     JSONObject body = new JSONObject()
         .put("transactionDocument", "dt-apc");
     // no originInvoice field
@@ -441,21 +542,32 @@ public class PurchaseInvoiceHeaderHandlerTest {
         .requestBody(body)
         .build();
 
-    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
-      OBDal dal = mock(OBDal.class);
-      dalMock.when(OBDal::getInstance).thenReturn(dal);
+    NeoResponse result = handler.handle(ctx);
 
-      org.openbravo.model.common.enterprise.DocumentType dt =
-          mock(org.openbravo.model.common.enterprise.DocumentType.class);
-      when(dt.getDocumentCategory()).thenReturn("APC");
-      when(dal.get(org.openbravo.model.common.enterprise.DocumentType.class, "dt-apc"))
-          .thenReturn(dt);
+    assertNull("origin-invoice validation must no longer block Credit Note save", result);
+  }
 
-      NeoResponse result = handler.handle(ctx);
+  /**
+   * Regression for ETP-4496: the same removed call site also used to block Purchase Return
+   * Invoices (API category + isReturn / DEV subtype) without an Origin Invoice. Confirms the
+   * fix is not NC-specific — saving a Return Invoice without an origin invoice must not be
+   * blocked either.
+   */
+  @Test
+  public void handle_returnInvoiceWithoutOriginInvoice_doesNotBlock() throws Exception {
+    JSONObject body = new JSONObject()
+        .put("transactionDocument", "dt-api-return");
+    // no originInvoice field
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("POST")
+        .endpointType(NeoEndpointType.CRUD)
+        .recordId(null)
+        .requestBody(body)
+        .build();
 
-      assertNotNull(result);
-      assertEquals(HttpServletResponse.SC_BAD_REQUEST, result.getHttpStatus());
-    }
+    NeoResponse result = handler.handle(ctx);
+
+    assertNull("origin-invoice validation must no longer block Return Invoice save", result);
   }
 
   /**

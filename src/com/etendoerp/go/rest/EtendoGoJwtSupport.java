@@ -132,10 +132,6 @@ final class EtendoGoJwtSupport {
     return client == null ? null : client.getId();
   }
 
-  static boolean hasStarOrganization(String clientId) {
-    return findStarOrganization(clientId) != null;
-  }
-
   static String buildClientUsername(String accountEmail, String clientName) {
     if (findActiveUserByUsername(accountEmail) == null) {
       return accountEmail;
@@ -175,6 +171,22 @@ final class EtendoGoJwtSupport {
     orgObj.put("id", orgId);
     orgObj.put("name", orgName);
     return orgObj;
+  }
+
+  /**
+   * Sets the display name of the client admin user (looked up by username) to the
+   * given full name. No-op when the name is blank or the user is not found. The
+   * change is saved on the current DAL transaction (committed by the caller).
+   */
+  static void applyClientAdminDisplayName(String username, String fullName) {
+    if (fullName == null || fullName.isBlank()) {
+      return;
+    }
+    User user = findActiveUserByUsername(username);
+    if (user != null) {
+      user.setName(fullName);
+      OBDal.getInstance().save(user);
+    }
   }
 
   private static User findActiveUserByUsername(String username) {

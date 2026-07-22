@@ -50,7 +50,10 @@ import com.etendoerp.go.schemaforge.handlers.DocumentPostingService;
  *
  * <p>Before the Complete action (documentAction=CO), creates the total discount line.
  * Delegates to {@link TotalDiscountService} via the shared helper in
- * {@link AbstractOrderHeaderHandler}.
+ * {@link AbstractOrderHeaderHandler}. While still in draft, every GET response (list and
+ * detail) has {@code grandTotalAmount} / {@code outstandingAmount} adjusted for a pending total
+ * discount not yet materialized as a real line — see
+ * {@link AbstractInvoiceHeaderHandler#applyTotalDiscountToRecord}.
  *
  * <p>Subtype resolution for AP invoices:
  * <ul>
@@ -92,6 +95,7 @@ public class PurchaseInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler i
 
   @Override
   public NeoResponse handle(NeoContext context) {
+    NeoHandlerUtils.mirrorAccountingDate(context, "invoiceDate", "accountingDate");
     NeoResponse posting = postingService != null ? postingService.handleAction(context) : null;
     if (posting != null) {
       return posting;
@@ -112,10 +116,6 @@ public class PurchaseInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler i
       if (lockError != null) {
         return lockError;
       }
-      NeoResponse originError = validateOriginInvoiceRequired(context);
-      if (originError != null) {
-        return originError;
-      }
     }
     return NeoHeaderActionRouter.dispatch(
         context,
@@ -127,13 +127,14 @@ public class PurchaseInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler i
   }
 
   /**
-   * Post-callout hook (ETP-4029): blocks callout-driven currency updates and appends an
-   * exchange-rate warning when the user directly changes the invoice currency. Mirrors
+   * Post-callout hook: blocks callout-driven currency updates and appends an exchange-rate
+   * warning when the user directly changes the invoice currency (ETP-4029), and blocks
+   * callout-driven document type updates once the invoice has been saved (ETP-4535). Mirrors
    * {@code AbstractOrderHeaderHandler#afterCallout}.
    */
   @Override
   public NeoResponse afterCallout(NeoContext context) {
-    return handleCurrencyAfterCallout(context);
+    return handleInvoiceAfterCallout(context);
   }
 
   @Override
@@ -152,18 +153,28 @@ public class PurchaseInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler i
         return null;
       }
       JSONObject body = context.getPreviousResult().getBody();
+      for (int i = 0; i < dataArr.length(); i++) {
+        applyTotalDiscountToRecord(dataArr.getJSONObject(i));
+      }
       if (context.getRecordId() != null) {
         JSONObject rec = dataArr.getJSONObject(0);
         enrichLinkedReceipts(rec, context.getRecordId());
         enrichOriginInvoice(rec, context.getRecordId());
         enrichInvoiceSubtype(rec, getInvoiceSubtypeKey());
         enrichDocTypeLocked(rec);
+        enrichIsRectificative(rec);
+        enrichHasRectifications(rec, context.getRecordId());
       }
       return NeoResponse.ok(body);
     } catch (Exception e) {
       log.error("Error enriching purchase invoice", e);
       return null;
     }
+  }
+
+  @Override
+  protected TotalDiscountService getTotalDiscountService() {
+    return totalDiscountService;
   }
 
   // ---------------------------------------------------------------------------

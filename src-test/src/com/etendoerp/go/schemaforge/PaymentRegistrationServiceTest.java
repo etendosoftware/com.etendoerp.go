@@ -61,6 +61,7 @@ import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.common.invoice.Invoice;
 import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
 import org.openbravo.model.financialmgmt.payment.FIN_Payment;
+import org.openbravo.model.financialmgmt.payment.FIN_Payment_Credit;
 import org.openbravo.model.financialmgmt.payment.FIN_PaymentMethod;
 import org.openbravo.model.financialmgmt.payment.FIN_PaymentSchedule;
 import org.openbravo.model.financialmgmt.payment.FIN_PaymentScheduleDetail;
@@ -114,6 +115,15 @@ class PaymentRegistrationServiceTest {
     when(pisPaymentCriteria.add(any(Criterion.class))).thenReturn(pisPaymentCriteria);
     when(pisPaymentCriteria.setMaxResults(anyInt())).thenReturn(pisPaymentCriteria);
     when(pisPaymentCriteria.uniqueResult()).thenReturn(null);
+
+    // paymentListItem also calls creditSourcesUsedByPayment for every non-processed row, which
+    // queries FIN_Payment_Credit — stub it here once so every test gets a real, non-null
+    // OBCriteria (with an empty result, i.e. "consumes no credit") instead of Mockito's default
+    // null, same reasoning as the PisPayment stub above.
+    OBCriteria<FIN_Payment_Credit> creditCriteria = mock(OBCriteria.class);
+    when(obDal.createCriteria(FIN_Payment_Credit.class)).thenReturn(creditCriteria);
+    when(creditCriteria.add(any(Criterion.class))).thenReturn(creditCriteria);
+    when(creditCriteria.list()).thenReturn(Collections.emptyList());
   }
 
   @AfterEach
@@ -895,12 +905,14 @@ class PaymentRegistrationServiceTest {
   }
 
   /**
-   * Verifies that an account whose currency differs from the invoice's currency is
-   * excluded entirely from {@code items} — not merely missing currency fields.
+   * Verifies that an account whose currency differs from the invoice's currency is now LISTED
+   * (multi-currency support): the two-step modal supplies a conversion rate, so foreign-currency
+   * accounts must remain selectable. The account still carries its {@code currency}/{@code
+   * currencyId} fields so the UI can decide when to show the conversion fields.
    */
   @Test
   @SuppressWarnings("unchecked")
-  void testHandleListAccountsExcludesAccountWithMismatchedCurrency() throws Exception {
+  void testHandleListAccountsIncludesAccountWithDifferentCurrency() throws Exception {
     NeoContext context = NeoContext.builder()
         .recordId("inv-1")
         .httpMethod("GET")
@@ -924,14 +936,16 @@ class PaymentRegistrationServiceTest {
     when(obContext.getOrganizationStructureProvider("client-1")).thenReturn(osp);
     when(osp.getNaturalTree("org-1")).thenReturn(new HashSet<>(Collections.singleton("org-1")));
 
-    // Account with a different currency (EUR) than the invoice (USD) — must be excluded.
-    FIN_FinancialAccount mismatchedAccount = mock(FIN_FinancialAccount.class);
-    when(mismatchedAccount.getId()).thenReturn("acc-eur");
+    // Account with a different currency (EUR) than the invoice (USD) — must now be included.
+    FIN_FinancialAccount foreignAccount = mock(FIN_FinancialAccount.class);
+    when(foreignAccount.getId()).thenReturn("acc-eur");
+    when(foreignAccount.getName()).thenReturn("EUR Account");
     Currency accCurrency = mock(Currency.class);
     when(accCurrency.getId()).thenReturn("EUR-ID");
-    when(mismatchedAccount.getCurrency()).thenReturn(accCurrency);
+    when(accCurrency.getISOCode()).thenReturn("EUR");
+    when(foreignAccount.getCurrency()).thenReturn(accCurrency);
 
-    // Account with a null currency — must still be included regardless of invoice currency.
+    // Account with a null currency — also included.
     FIN_FinancialAccount nullCurrencyAccount = mock(FIN_FinancialAccount.class);
     when(nullCurrencyAccount.getId()).thenReturn("acc-null-currency");
     when(nullCurrencyAccount.getName()).thenReturn("No Currency Account");
@@ -943,10 +957,9 @@ class PaymentRegistrationServiceTest {
     when(accountCriteria.add(any(Criterion.class))).thenReturn(accountCriteria);
     when(accountCriteria.addOrderBy(anyString(), anyBoolean())).thenReturn(accountCriteria);
     when(accountCriteria.list())
-        .thenReturn(Arrays.asList(mismatchedAccount, nullCurrencyAccount));
+        .thenReturn(Arrays.asList(foreignAccount, nullCurrencyAccount));
 
-    // Only the null-currency account should reach the method lookup (the mismatched
-    // account returns early in appendAccountItem before querying FinAccPaymentMethod).
+    // Both accounts reach the method lookup now (no early currency return).
     FinAccPaymentMethod finAccMethod = mock(FinAccPaymentMethod.class);
     FIN_PaymentMethod paymentMethod = mock(FIN_PaymentMethod.class);
     when(paymentMethod.getId()).thenReturn("pm-cash");
@@ -962,11 +975,15 @@ class PaymentRegistrationServiceTest {
 
     assertEquals(200, response.getHttpStatus());
     JSONObject body = response.getBody();
-    assertEquals(1, body.getInt("totalCount"),
-        "mismatched-currency account must be excluded entirely, only the null-currency one remains");
+    assertEquals(2, body.getInt("totalCount"),
+        "foreign-currency account must now be listed alongside the null-currency one");
     JSONArray items = body.getJSONArray("items");
-    assertEquals(1, items.length());
-    assertEquals("acc-null-currency", items.getJSONObject(0).getString("id"));
+    assertEquals(2, items.length());
+    JSONObject foreignItem = items.getJSONObject(0);
+    assertEquals("acc-eur", foreignItem.getString("id"));
+    assertEquals("EUR", foreignItem.getString("currency"),
+        "the foreign account must still expose its ISO currency for the UI conversion fields");
+    assertEquals("EUR-ID", foreignItem.getString("currencyId"));
   }
 
   /**

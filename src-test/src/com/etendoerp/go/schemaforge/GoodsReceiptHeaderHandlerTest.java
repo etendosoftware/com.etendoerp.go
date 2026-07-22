@@ -501,4 +501,92 @@ public class GoodsReceiptHeaderHandlerTest {
           recWithoutId.opt("invoiceStatus"));
     }
   }
+
+  // NOTE (ETP-4531): GoodsReceiptHeaderHandler previously overrode afterCallout() solely to
+  // block a callout-driven accountingDate update (the movementDate -> accountingDate
+  // cascade). The unified-date requirement now wants that cascade to happen, so the override
+  // was removed entirely — the handler falls back to NeoHandler's default no-op afterCallout.
+  // There is no handler-specific afterCallout behavior left here to test.
+
+  // ── ETP-4531: mirrorAccountingDate (unified date, server-side mirror) ───────
+
+  @Test
+  public void mirrorAccountingDate_postCrud_copiesMovementDateIntoAccountingDate()
+      throws Exception {
+    JSONObject body = new JSONObject().put("movementDate", "2026-07-01");
+    NeoContext ctx = NeoContext.builder()
+        .endpointType(NeoEndpointType.CRUD)
+        .httpMethod("POST")
+        .requestBody(body)
+        .build();
+
+    GoodsReceiptHeaderHandler.mirrorAccountingDate(ctx);
+
+    assertEquals("2026-07-01", body.getString("accountingDate"));
+  }
+
+  @Test
+  public void mirrorAccountingDate_putCrud_overwritesStaleAccountingDate() throws Exception {
+    JSONObject body = new JSONObject()
+        .put("movementDate", "2026-07-10").put("accountingDate", "2026-01-01");
+    NeoContext ctx = NeoContext.builder()
+        .endpointType(NeoEndpointType.CRUD)
+        .httpMethod("PUT")
+        .requestBody(body)
+        .build();
+
+    GoodsReceiptHeaderHandler.mirrorAccountingDate(ctx);
+
+    assertEquals("2026-07-10", body.getString("accountingDate"));
+  }
+
+  @Test
+  public void mirrorAccountingDate_getMethod_doesNotMutateBody() throws Exception {
+    JSONObject body = new JSONObject().put("movementDate", "2026-07-01");
+    NeoContext ctx = NeoContext.builder()
+        .endpointType(NeoEndpointType.CRUD)
+        .httpMethod("GET")
+        .requestBody(body)
+        .build();
+
+    GoodsReceiptHeaderHandler.mirrorAccountingDate(ctx);
+
+    assertNull(body.opt("accountingDate"));
+  }
+
+  /**
+   * Regression test for the live-reproduced ETP-4531 bug: the real React UI
+   * ({@code useEntity.js#getMethod}) always sends {@code PATCH} — never a full {@code PUT} —
+   * for edits to an EXISTING receipt, with a sparse body containing only the changed field.
+   * The original {@code POST}/{@code PUT}-only check silently skipped this case.
+   */
+  @Test
+  public void mirrorAccountingDate_patchCrudSparseBody_copiesMovementDateIntoAccountingDate()
+      throws Exception {
+    JSONObject body = new JSONObject().put("movementDate", "2026-07-15");
+    NeoContext ctx = NeoContext.builder()
+        .endpointType(NeoEndpointType.CRUD)
+        .httpMethod("PATCH")
+        .requestBody(body)
+        .build();
+
+    GoodsReceiptHeaderHandler.mirrorAccountingDate(ctx);
+
+    assertEquals("2026-07-15", body.getString("accountingDate"));
+  }
+
+  @Test
+  public void mirrorAccountingDate_patchCrud_overwritesStaleAccountingDate() throws Exception {
+    JSONObject body = new JSONObject()
+        .put("movementDate", "2026-07-15").put("accountingDate", "2026-07-17");
+    NeoContext ctx = NeoContext.builder()
+        .endpointType(NeoEndpointType.CRUD)
+        .httpMethod("PATCH")
+        .requestBody(body)
+        .build();
+
+    GoodsReceiptHeaderHandler.mirrorAccountingDate(ctx);
+
+    assertEquals("2026-07-15", body.getString("accountingDate"));
+  }
 }

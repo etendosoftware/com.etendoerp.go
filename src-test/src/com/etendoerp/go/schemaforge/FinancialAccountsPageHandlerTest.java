@@ -159,9 +159,11 @@ public class FinancialAccountsPageHandlerTest {
         account("acc-1", "BBVA", "B", new BigDecimal("1500.00"), "EUR"));
     Map<String, Integer> pending = new LinkedHashMap<>();
     pending.put("acc-1", 4);
+    Set<String> withTransactions = Collections.singleton("acc-1");
 
     doReturn(accounts).when(handler).loadAccounts(eq(CLIENT_ID), eq(ORGS));
     doReturn(pending).when(handler).loadPendingByAccount(eq(CLIENT_ID), eq(ORGS));
+    doReturn(withTransactions).when(handler).loadAccountsWithTransactions(eq(CLIENT_ID), eq(ORGS));
 
     NeoResponse response = handler.buildPayload(CLIENT_ID, ORGS);
 
@@ -171,10 +173,39 @@ public class FinancialAccountsPageHandlerTest {
     JSONObject data = body.getJSONObject("response").getJSONObject("data");
     assertEquals(1, data.getJSONArray("accounts").length());
     assertEquals(4, data.getJSONArray("accounts").getJSONObject(0).getInt("pendingCount"));
+    assertTrue("account with a registered transaction serialises hasTransactions=true",
+        data.getJSONArray("accounts").getJSONObject(0).getBoolean("hasTransactions"));
     assertNotNull("summary present", data.optJSONObject("summary"));
 
     verify(handler).loadAccounts(CLIENT_ID, ORGS);
     verify(handler).loadPendingByAccount(CLIENT_ID, ORGS);
+    verify(handler).loadAccountsWithTransactions(CLIENT_ID, ORGS);
+  }
+
+  /**
+   * Verifies the counterpart of {@link #testBuildPayloadAssemblesEnvelopeAndDelegatesToLoaders}:
+   * when {@code loadAccountsWithTransactions} returns a set that does NOT contain the account,
+   * the envelope serialises {@code hasTransactions=false} for it — the common case for a
+   * freshly-created account with no movement history yet.
+   *
+   * @throws Exception if the stubbed loaders or JSON envelope inspection fails
+   */
+  @Test
+  public void testBuildPayloadEmitsHasTransactionsFalseWhenAccountHasNoTransactions()
+      throws Exception {
+    List<AccountRow> accounts = Arrays.asList(
+        account("acc-1", "BBVA", "B", new BigDecimal("1500.00"), "EUR"));
+
+    doReturn(accounts).when(handler).loadAccounts(eq(CLIENT_ID), eq(ORGS));
+    doReturn(Collections.emptyMap()).when(handler).loadPendingByAccount(eq(CLIENT_ID), eq(ORGS));
+    doReturn(Collections.emptySet()).when(handler)
+        .loadAccountsWithTransactions(eq(CLIENT_ID), eq(ORGS));
+
+    NeoResponse response = handler.buildPayload(CLIENT_ID, ORGS);
+
+    JSONObject data = response.getBody().getJSONObject("response").getJSONObject("data");
+    assertFalse("account with no registered transactions serialises hasTransactions=false",
+        data.getJSONArray("accounts").getJSONObject(0).getBoolean("hasTransactions"));
   }
 
   // ── buildSummary() ───────────────────────────────────────────────────────
@@ -292,7 +323,8 @@ public class FinancialAccountsPageHandlerTest {
     List<AccountRow> accounts = Arrays.asList(
         account("acc-1", "BBVA", "B", new BigDecimal("100.00"), "EUR"));
 
-    JSONArray arr = handler.buildAccountsArray(accounts, Collections.emptyMap());
+    JSONArray arr = handler.buildAccountsArray(accounts, Collections.emptyMap(),
+        Collections.emptySet());
     assertEquals(1, arr.length());
     JSONObject row = arr.getJSONObject(0);
     assertEquals("acc-1", row.getString("id"));
@@ -301,6 +333,8 @@ public class FinancialAccountsPageHandlerTest {
     assertEquals("EUR", row.getString("currencyIso"));
     assertEquals(0, row.getInt("pendingCount"));
     assertFalse(row.getBoolean("isDefault"));
+    assertFalse("account absent from the transactions set serialises hasTransactions=false",
+        row.getBoolean("hasTransactions"));
   }
 
   /**
@@ -319,7 +353,7 @@ public class FinancialAccountsPageHandlerTest {
     Map<String, Integer> pendingByAccount = new HashMap<>();
     pendingByAccount.put("acc-1", 7);
 
-    JSONArray arr = handler.buildAccountsArray(accounts, pendingByAccount);
+    JSONArray arr = handler.buildAccountsArray(accounts, pendingByAccount, Collections.emptySet());
     assertEquals(7, arr.getJSONObject(0).getInt("pendingCount"));
   }
 
@@ -337,7 +371,8 @@ public class FinancialAccountsPageHandlerTest {
         new Currency(currencyId("EUR"), "EUR"), "", false);
     card.maskedPan = "**** **** **** 1234";
 
-    JSONArray arr = handler.buildAccountsArray(Arrays.asList(card), Collections.emptyMap());
+    JSONArray arr = handler.buildAccountsArray(Arrays.asList(card), Collections.emptyMap(),
+        Collections.emptySet());
     JSONObject row = arr.getJSONObject(0);
     assertEquals("CA", row.getString("type"));
     assertEquals("**** **** **** 1234", row.getString("maskedPan"));
@@ -358,7 +393,7 @@ public class FinancialAccountsPageHandlerTest {
     AccountRow offline = account("acc-2", "Caja manual", "B", new BigDecimal("0.00"), "EUR");
 
     JSONArray arr = handler.buildAccountsArray(Arrays.asList(connected, offline),
-        Collections.emptyMap());
+        Collections.emptyMap(), Collections.emptySet());
 
     assertEquals(2, arr.length());
     assertTrue("connected account serialises psd2Connected=true",
@@ -461,7 +496,8 @@ public class FinancialAccountsPageHandlerTest {
         account("acc-1", "BBVA", "B", new BigDecimal("100.00"), "EUR"),
         inactiveAccount("acc-2", "Santander Cerrada", "B", new BigDecimal("0.00"), "EUR"));
 
-    JSONArray arr = handler.buildAccountsArray(accounts, Collections.emptyMap());
+    JSONArray arr = handler.buildAccountsArray(accounts, Collections.emptyMap(),
+        Collections.emptySet());
 
     assertEquals(2, arr.length());
     assertTrue("active account serialises active=true", arr.getJSONObject(0).getBoolean("active"));
@@ -778,7 +814,8 @@ public class FinancialAccountsPageHandlerTest {
     List<AccountRow> accounts = Arrays.asList(
         account("acc-tol", "BBVA", "B", new BigDecimal("100.00"), "EUR"));
 
-    JSONArray arr = handler.buildAccountsArray(accounts, Collections.emptyMap());
+    JSONArray arr = handler.buildAccountsArray(accounts, Collections.emptyMap(),
+        Collections.emptySet());
 
     JSONObject row = arr.getJSONObject(0);
     assertTrue("dateTolerance field must be present", row.has("dateTolerance"));
@@ -801,12 +838,128 @@ public class FinancialAccountsPageHandlerTest {
     acc.dateTolerance = 7;
     acc.amountTolerance = new BigDecimal("1.50");
 
-    JSONArray arr = handler.buildAccountsArray(Arrays.asList(acc), Collections.emptyMap());
+    JSONArray arr = handler.buildAccountsArray(Arrays.asList(acc), Collections.emptyMap(),
+        Collections.emptySet());
 
     JSONObject row = arr.getJSONObject(0);
     assertEquals("custom dateTolerance serialised", 7, row.getInt("dateTolerance"));
     assertEquals("custom amountTolerance serialised",
         0, new BigDecimal("1.50").compareTo(new BigDecimal(row.getString("amountTolerance"))));
+  }
+
+  // ── hasTransactions flag (ETP-4530) ──────────────────────────────────────
+
+  /**
+   * Verifies that {@code buildAccountsArray()} serialises {@code hasTransactions} per row from
+   * the {@code accountsWithTransactions} set: an id present in the set serialises {@code true},
+   * one absent serialises {@code false}. The frontend uses this (ETP-4530) to lock the Currency
+   * field once an account has real movement history, so both branches must be exercised.
+   *
+   * @throws Exception
+   *     if the JSON traversal fails
+   */
+  @Test
+  public void testBuildAccountsArrayEmitsHasTransactionsFlag() throws Exception {
+    AccountRow withHistory = account("acc-1", "BBVA", "B", new BigDecimal("100.00"), "EUR");
+    AccountRow withoutHistory = account("acc-2", "Caja nueva", "C", new BigDecimal("0.00"), "EUR");
+    Set<String> accountsWithTransactions = Collections.singleton("acc-1");
+
+    JSONArray arr = handler.buildAccountsArray(Arrays.asList(withHistory, withoutHistory),
+        Collections.emptyMap(), accountsWithTransactions);
+
+    assertEquals(2, arr.length());
+    assertTrue("account with registered transactions serialises hasTransactions=true",
+        arr.getJSONObject(0).getBoolean("hasTransactions"));
+    assertFalse("account with no registered transactions serialises hasTransactions=false",
+        arr.getJSONObject(1).getBoolean("hasTransactions"));
+  }
+
+  /**
+   * Verifies that an empty {@code accountsWithTransactions} set (the common case — no account
+   * in scope has any movement yet) leaves every row's {@code hasTransactions} as {@code false}.
+   *
+   * @throws Exception
+   *     if the JSON traversal fails
+   */
+  @Test
+  public void testBuildAccountsArrayHasTransactionsFalseWhenSetEmpty() throws Exception {
+    List<AccountRow> accounts = Arrays.asList(
+        account("acc-1", "BBVA", "B", new BigDecimal("100.00"), "EUR"),
+        account("acc-2", "Caja", "C", new BigDecimal("0.00"), "EUR"));
+
+    JSONArray arr = handler.buildAccountsArray(accounts, Collections.emptyMap(),
+        Collections.emptySet());
+
+    assertFalse(arr.getJSONObject(0).getBoolean("hasTransactions"));
+    assertFalse(arr.getJSONObject(1).getBoolean("hasTransactions"));
+  }
+
+  // ── loadAccountsWithTransactions() ───────────────────────────────────────
+
+  /**
+   * Verifies that {@code loadAccountsWithTransactions} returns the set of account ids read from
+   * column 1 of the result set, and that the SQL bind parameters are the client id and the org
+   * array — mirroring the other two loaders' seam contract.
+   *
+   * @throws Exception
+   *     if the mocked JDBC chain fails
+   */
+  @Test
+  public void testLoadAccountsWithTransactionsReturnsIdsFromResultSet() throws Exception {
+    Connection conn = mock(Connection.class);
+    PreparedStatement ps = mock(PreparedStatement.class);
+    ResultSet rs = mock(ResultSet.class);
+    Array orgArray = mock(Array.class);
+
+    when(conn.prepareStatement(anyString())).thenReturn(ps);
+    when(conn.createArrayOf(eq("varchar"), any())).thenReturn(orgArray);
+    when(ps.executeQuery()).thenReturn(rs);
+    when(rs.next()).thenReturn(true, true, false);
+    when(rs.getString(1)).thenReturn("acc-1", "acc-3");
+
+    try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.getConnection()).thenReturn(conn);
+
+      Set<String> result = handler.loadAccountsWithTransactions(CLIENT_ID, ORGS);
+
+      assertEquals(2, result.size());
+      assertTrue("acc-1 must be present", result.contains("acc-1"));
+      assertTrue("acc-3 must be present", result.contains("acc-3"));
+      verify(ps).setString(1, CLIENT_ID);
+      verify(ps).setArray(2, orgArray);
+    }
+  }
+
+  /**
+   * Verifies that {@code loadAccountsWithTransactions} returns an empty set when no account in
+   * scope has any active transaction — the state of a freshly-onboarded client.
+   *
+   * @throws Exception
+   *     if the mocked JDBC chain fails
+   */
+  @Test
+  public void testLoadAccountsWithTransactionsReturnsEmptySetWhenResultSetEmpty()
+      throws Exception {
+    Connection conn = mock(Connection.class);
+    PreparedStatement ps = mock(PreparedStatement.class);
+    ResultSet rs = mock(ResultSet.class);
+
+    when(conn.prepareStatement(anyString())).thenReturn(ps);
+    when(conn.createArrayOf(eq("varchar"), any())).thenReturn(mock(Array.class));
+    when(ps.executeQuery()).thenReturn(rs);
+    when(rs.next()).thenReturn(false);
+
+    try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.getConnection()).thenReturn(conn);
+
+      Set<String> result = handler.loadAccountsWithTransactions(CLIENT_ID, ORGS);
+
+      assertTrue("expected empty set", result.isEmpty());
+    }
   }
 
   // ── nullSafeBigDecimal() helper ──────────────────────────────────────────

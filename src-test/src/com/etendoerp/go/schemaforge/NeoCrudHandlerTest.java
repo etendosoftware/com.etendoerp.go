@@ -1197,6 +1197,56 @@ class NeoCrudHandlerTest {
     }
 
     @Test
+    @DisplayName("Returns 409 when translated message reports a duplicate-key violation")
+    void returns409ForDuplicateKeyMessage() throws Exception {
+      JSONObject error = new JSONObject();
+      error.put("message", "@BPNameSearchKeyUnique@");
+      JSONObject inner = new JSONObject();
+      inner.put("status", -1);
+      inner.put("error", error);
+      JSONObject json = new JSONObject();
+      json.put("response", inner);
+
+      String duplicateKeyMessage = "There is already a Business Partner with the same "
+          + "(Client, Organization, Search Key). (Client, Organization, Search Key) must be "
+          + "unique. You must change the values entered.";
+
+      try (MockedStatic<org.openbravo.erpCommon.utility.OBMessageUtils> msgMock =
+          Mockito.mockStatic(org.openbravo.erpCommon.utility.OBMessageUtils.class)) {
+        msgMock.when(() -> org.openbravo.erpCommon.utility.OBMessageUtils.messageBD(
+            org.mockito.ArgumentMatchers.anyString())).thenReturn(duplicateKeyMessage);
+
+        NeoResponse result = invokeCheckResponse(json);
+
+        assertNotNull(result);
+        assertEquals(HttpServletResponse.SC_CONFLICT, result.getHttpStatus());
+      }
+    }
+
+    @Test
+    @DisplayName("Returns 500 (not 409) when translated message does not report a duplicate key)")
+    void returns500ForNonDuplicateFailureMessage() throws Exception {
+      JSONObject error = new JSONObject();
+      error.put("message", "@GenericDatabaseError@");
+      JSONObject inner = new JSONObject();
+      inner.put("status", -1);
+      inner.put("error", error);
+      JSONObject json = new JSONObject();
+      json.put("response", inner);
+
+      try (MockedStatic<org.openbravo.erpCommon.utility.OBMessageUtils> msgMock =
+          Mockito.mockStatic(org.openbravo.erpCommon.utility.OBMessageUtils.class)) {
+        msgMock.when(() -> org.openbravo.erpCommon.utility.OBMessageUtils.messageBD(
+            org.mockito.ArgumentMatchers.anyString())).thenReturn("Database connection lost");
+
+        NeoResponse result = invokeCheckResponse(json);
+
+        assertNotNull(result);
+        assertEquals(HttpServletResponse.SC_INTERNAL_SERVER_ERROR, result.getHttpStatus());
+      }
+    }
+
+    @Test
     @DisplayName("Returns 400 for validation error status")
     void returns400ForValidationError() throws Exception {
       JSONObject inner = new JSONObject();

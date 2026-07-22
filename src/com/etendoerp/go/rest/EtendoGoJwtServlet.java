@@ -67,6 +67,7 @@ import com.etendoerp.go.onboarding.OnboardingPeriodControlService;
 import com.etendoerp.go.onboarding.OnboardingPsd2SyncService;
 import com.etendoerp.go.onboarding.OnboardingSequenceGeneratorService;
 import com.etendoerp.go.schemaforge.data.Account;
+import com.etendoerp.go.schemaforge.email.EmailContractCommandSupport;
 import com.smf.securewebservices.utils.SecureWebServicesUtils;
 
 /**
@@ -285,6 +286,13 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     if (email.isEmpty() || password.isEmpty() || name.isEmpty()) {
       writeError(response, HttpServletResponse.SC_BAD_REQUEST,
           "Fields email, password, and name must not be empty");
+      return;
+    }
+    // Defense in depth: reject anything that is not a well-formed email. This blocks control
+    // characters and bare LIKE wildcards (e.g. "%") from ever reaching the account store, which
+    // together with the escaped ownership LIKE keeps tenant isolation intact (ETP-4428).
+    if (!EmailContractCommandSupport.isValidEmail(email)) {
+      writeError(response, HttpServletResponse.SC_BAD_REQUEST, "Invalid email format");
       return;
     }
     if (!PasswordPolicy.isStrong(password)) {
@@ -1055,9 +1063,12 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
         return;
       }
 
-      Boolean organizationCreated = ensureOrganization(writer, onboardingRequest.clientName, clientId,
+      // The returned flag (created vs. already-existing) is no longer used to gate downstream
+      // steps — the provisioning chain reconciles unconditionally (ETP-4428). A null return still
+      // signals a failure that already emitted its own progress/result line.
+      Boolean organizationResolved = ensureOrganization(writer, onboardingRequest.clientName, clientId,
           adminContext, currencyId);
-      if (organizationCreated == null) {
+      if (organizationResolved == null) {
         return;
       }
 
@@ -1069,7 +1080,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
         return;
       }
 
-      if (!ensureOnboardingDataset(writer, clientId, orgId, organizationCreated,
+      if (!ensureOnboardingDataset(writer, clientId, orgId,
           adminContext.adminUserId, adminContext.adminRoleId, onboardingRequest)) {
         return;
       }
@@ -1108,7 +1119,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
         log.warn("Onboarding stream to client was lost before the result line was delivered "
             + "(likely a CloudFront/proxy response timeout). The environment may have been "
             + "created successfully server-side, but the UI will report a false failure. "
-            + "accountEmail={}", accountEmail);
+            + "accountEmail={}", maskEmail(accountEmail));
       }
     }
   }
@@ -1223,6 +1234,10 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       // Country drives the org's tax resolution; default to Spain (ES) when the form omits it.
       data.countryCode = body.optString("countryCode", "ES").trim();
       data.address = body.optString("address", "").trim();
+      // Full name of the person onboarding. Optional in the payload; when present
+      // it becomes the display name of the client admin user (otherwise Etendo's
+      // InitialClientSetup leaves it as the username/email).
+      data.fullName = body.optString("fullName", "").trim();
       return data;
     } catch (JSONException e) {
         String message = e.getMessage() != null && e.getMessage().contains(FIELD_CLIENT_NAME)
@@ -1258,6 +1273,23 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     return vars;
   }
 
+  /**
+   * Masks an email for logging so no PII lands in the logs: keeps the first character of the local
+   * part plus the domain (e.g. {@code r***@corp.com}). Null/blank/malformed inputs collapse to a
+   * safe placeholder. Enough to correlate a lost-stream warning without recording the address.
+   */
+  static String maskEmail(String email) {
+    String trimmed = StringUtils.trimToNull(email);
+    if (trimmed == null) {
+      return "(unknown)";
+    }
+    int at = trimmed.indexOf('@');
+    if (at <= 0) {
+      return trimmed.charAt(0) + "***";
+    }
+    return trimmed.charAt(0) + "***" + trimmed.substring(at);
+  }
+
   private String resolveOrCreateClient(PrintWriter writer, VariablesSecureApp vars,
       String accountEmail, OnboardingRequestData requestData, String currencyId,
       String adminPassword) throws Exception {
@@ -1265,23 +1297,32 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
         "Creating client: " + requestData.clientName + "...");
     String clientId = EtendoGoJwtSupport.findClientIdByName(requestData.clientName);
     if (clientId != null) {
-      return validateExistingClient(writer, requestData.clientName, clientId) ? clientId : null;
+      return validateExistingClient(writer, requestData.clientName, clientId, accountEmail)
+          ? clientId : null;
     }
 
     String clientUser = EtendoGoJwtSupport.buildClientUsername(accountEmail, requestData.clientName);
     if (!createClient(vars, currencyId, requestData.clientName, clientUser, adminPassword, writer)) {
       return null;
     }
+    // InitialClientSetup names the admin AD_User after its username (the email).
+    // Override it with the full name entered during onboarding so the app shows
+    // the person's name instead of their email. No-op when fullName is blank.
+    EtendoGoJwtSupport.applyClientAdminDisplayName(clientUser, requestData.fullName);
     return EtendoGoJwtSupport.findClientIdByName(requestData.clientName);
   }
 
   private boolean validateExistingClient(PrintWriter writer, String clientName,
-      String clientId) {
-    if (!EtendoGoJwtSupport.hasStarOrganization(clientId)) {
+      String clientId, String accountEmail) {
+    // ETP-4428: an existing same-named client is resumable ONLY when it belongs to this account.
+    // A previous partial onboarding leaves the client behind (with its org/role/user) but missing
+    // downstream provisioning; re-entering it lets the idempotent chain reconcile what is missing.
+    // A name collision with ANOTHER account's client must never be resumable (tenant isolation).
+    if (!EtendoGoJwtDalHelper.clientBelongsToAccountEmail(clientId, accountEmail)) {
       sendProgress(writer, PROGRESS_CLIENT, PROGRESS_ERROR,
-          "Client '" + clientName + "' exists but is incomplete. Use a different name.");
+          "Company name '" + clientName + "' is already in use. Use a different name.");
       sendFinalResult(writer, false,
-          "A previous attempt left '" + clientName + "' in an incomplete state. Please choose a different company name.");
+          "The company name '" + clientName + "' is already in use. Please choose a different company name.");
       return false;
     }
     sendProgress(writer, PROGRESS_CLIENT, "done", "Client already exists, resuming...");
@@ -1372,20 +1413,24 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     return organization != null ? organization.getId() : null;
   }
 
+  /**
+   * Runs the tenant-provisioning chain under a reconcile model (ETP-4428): every step is
+   * idempotent or self-guarding, so the full chain runs unconditionally. On a retry after a
+   * partial failure this repairs whatever is missing and no-ops what already exists. Previously
+   * the dataset/accounting/period-control steps were gated on whether the organization had just
+   * been created, which left a resumed tenant (client+org survive the rollback, dataset does not)
+   * without seed data, ledger or fiscal periods.
+   */
   boolean ensureOnboardingDataset(PrintWriter writer, String clientId, String orgId,
-      boolean importRequired, String adminUserId, String adminRoleId,
+      String adminUserId, String adminRoleId,
       OnboardingRequestData requestData) {
-    if (importRequired && !importOnboardingDataset(writer, clientId, orgId)) {
+    if (!importOnboardingDataset(writer, clientId, orgId)) {
       return false;
     }
-    if (!importRequired) {
-      sendProgress(writer, PROGRESS_DATASET, "done",
-          "Existing organization detected, skipping onboarding dataset import");
-    }
-    if (importRequired && !wireAccounting(writer, clientId, orgId, adminUserId, adminRoleId)) {
+    if (!wireAccounting(writer, clientId, orgId, adminUserId, adminRoleId)) {
       return false;
     }
-    if (importRequired && !wirePeriodControl(writer, clientId, orgId, adminUserId, adminRoleId)) {
+    if (!wirePeriodControl(writer, clientId, orgId, adminUserId, adminRoleId)) {
       return false;
     }
     if (!generateOnboardingSequences(writer, clientId, orgId, adminUserId, adminRoleId)) {
@@ -1400,7 +1445,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     if (!wireOrgInfo(writer, clientId, orgId, adminUserId, adminRoleId, requestData)) {
       return false;
     }
-    if (!ensureDefaultCustomer(writer, clientId, orgId, adminUserId, adminRoleId, importRequired)) {
+    if (!ensureDefaultCustomer(writer, clientId, orgId, adminUserId, adminRoleId)) {
       return false;
     }
     if (!schedulePsd2Sync(writer, clientId, orgId, adminUserId, adminRoleId)) {
@@ -1549,7 +1594,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   }
 
   boolean ensureDefaultCustomer(PrintWriter writer, String clientId, String orgId,
-      String adminUserId, String adminRoleId, boolean importRequired) {
+      String adminUserId, String adminRoleId) {
     sendProgress(writer, PROGRESS_CUSTOMER, PROGRESS_IN_PROGRESS,
         "Creating default customer...");
     try {
@@ -1557,11 +1602,11 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
           adminRoleId);
       // A2: provision the per-BP posting accounts now that the default customer exists. wireAccounting
       // ran earlier (before any business partner existed), so C_BP_CUSTOMER_ACCT would otherwise stay
-      // empty. Gated on importRequired because the ledger it copies defaults from comes from the import.
-      if (importRequired) {
-        onboardingAccountingWiringService.wireBusinessPartnerAccounts(clientId, orgId, adminUserId,
-            adminRoleId);
-      }
+      // empty. Idempotent (NOT-EXISTS-guarded), so it runs unconditionally under the reconcile
+      // model (ETP-4428): the ledger it copies defaults from is guaranteed present because
+      // wireAccounting ran earlier in the same chain.
+      onboardingAccountingWiringService.wireBusinessPartnerAccounts(clientId, orgId, adminUserId,
+          adminRoleId);
       sendProgress(writer, PROGRESS_CUSTOMER, "done", "Default customer ready");
       return true;
     } catch (Exception e) {
@@ -1882,6 +1927,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     private String language;
     private String countryCode;
     private String address;
+    private String fullName;
   }
 
   private static class AdminContextData {

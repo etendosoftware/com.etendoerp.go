@@ -73,6 +73,10 @@ public abstract class AbstractInvoiceHeaderHandler {
   protected static final String FIELD_TRANSACTION_DOCUMENT = "transactionDocument";
   private static final String FIELD_CURRENCY = "currency";
   private static final String FIELD_VALUE = "value";
+  private static final String FIELD_PROCESSED = "processed";
+  private static final String FIELD_TOTAL_DISCOUNT_PCT = "etgoTotalDiscount";
+  protected static final String FIELD_GRAND_TOTAL_AMOUNT = "grandTotalAmount";
+  protected static final String FIELD_OUTSTANDING_AMOUNT = "outstandingAmount";
 
   // ---------------------------------------------------------------------------
   // Abstract contract
@@ -117,6 +121,16 @@ public abstract class AbstractInvoiceHeaderHandler {
    * @return virtual-field name for the subtype
    */
   protected abstract String getInvoiceSubtypeKey();
+
+  /**
+   * Supplies the concrete handler's own {@code @Inject}-ed {@link TotalDiscountService} so
+   * {@link #applyTotalDiscountToRecord} can call {@code hasDiscountLine} without this abstract
+   * class holding a CDI-injected field itself — this class is a pure helper/base (see class
+   * Javadoc) and never injects its own collaborators.
+   *
+   * @return the subclass's injected {@link TotalDiscountService}
+   */
+  protected abstract TotalDiscountService getTotalDiscountService();
 
   // ---------------------------------------------------------------------------
   // Validation
@@ -212,7 +226,7 @@ public abstract class AbstractInvoiceHeaderHandler {
   protected void persistOriginInvoice(NeoContext context) {
     try {
       JSONObject body = context.getRequestBody();
-      if (body == null) {
+      if (body == null || !body.has(FIELD_ORIGIN_INVOICE)) {
         return;
       }
       String originInvoiceId = body.optString(FIELD_ORIGIN_INVOICE, null);
@@ -339,6 +353,137 @@ public abstract class AbstractInvoiceHeaderHandler {
    */
   protected void enrichDocTypeLocked(JSONObject rec) throws Exception {
     rec.put("docTypeLocked", true);
+  }
+
+  /**
+   * Whether {@code c_doctype.em_etsg_isrectificative} exists in this database (the column
+   * belongs to the SIF General module, which may not be installed). Resolved lazily once:
+   * querying a missing column would abort the whole PostgreSQL transaction, poisoning the
+   * shared read-only connection for every statement that follows in the same request.
+   */
+  private static volatile Boolean rectificativeColumnPresent;
+
+  /** Test hook: force or reset (null) the cached column-presence check. */
+  static void setRectificativeColumnPresentForTests(Boolean value) {
+    rectificativeColumnPresent = value;
+  }
+
+  private static boolean isRectificativeColumnPresent() {
+    Boolean present = rectificativeColumnPresent;
+    if (present == null) {
+      synchronized (AbstractInvoiceHeaderHandler.class) {
+        present = rectificativeColumnPresent;
+        if (present == null) {
+          present = false;
+          try {
+            String sql = "SELECT 1 FROM information_schema.columns"
+                + " WHERE table_name = 'c_doctype' AND column_name = 'em_etsg_isrectificative'";
+            Connection conn = OBDal.getReadOnlyInstance().getConnection();
+            try (PreparedStatement ps = conn.prepareStatement(sql);
+                 ResultSet rs = ps.executeQuery()) {
+              present = rs.next();
+            }
+          } catch (Exception e) {
+            log.warn("Could not check for em_etsg_isrectificative column: {}", e.getMessage());
+          }
+          rectificativeColumnPresent = present;
+        }
+      }
+    }
+    return present;
+  }
+
+  /**
+   * Injects {@code isRectificative} (boolean) into the record.
+   * True when the invoice's document type has {@code EM_Etsg_Isrectificative = 'Y'}.
+   * Returns false when the invoice is a draft with no doctype selected, or when the
+   * SIF General module (owner of the column) is not installed.
+   */
+  @SuppressWarnings("java:S2077")
+  protected void enrichIsRectificative(JSONObject rec) throws Exception {
+    String docTypeId = rec.optString(FIELD_TRANSACTION_DOCUMENT, null);
+    if (StringUtils.isBlank(docTypeId) || !isRectificativeColumnPresent()) {
+      rec.put("isRectificative", false);
+      return;
+    }
+    boolean result = false;
+    try {
+      String sql = "SELECT em_etsg_isrectificative FROM c_doctype WHERE c_doctype_id = ?";
+      Connection conn = OBDal.getReadOnlyInstance().getConnection();
+      try (PreparedStatement ps = conn.prepareStatement(sql)) {
+        ps.setString(1, docTypeId);
+        try (ResultSet rs = ps.executeQuery()) {
+          if (rs.next()) {
+            result = "Y".equals(rs.getString(1));
+          }
+        }
+      }
+    } catch (Exception e) {
+      log.warn("Could not resolve isRectificative for doctype {}: {}", docTypeId, e.getMessage());
+    }
+    rec.put("isRectificative", result);
+  }
+
+  /**
+   * Injects {@code hasRectifications} (boolean) into the record.
+   * True when the invoice has one or more records in {@code C_Invoice_Reverse}.
+   * Only meaningful in detail view (single record); do not call for list responses.
+   */
+  @SuppressWarnings("java:S2077")
+  protected void enrichHasRectifications(JSONObject rec, String invoiceId) throws Exception {
+    if (StringUtils.isBlank(invoiceId)) {
+      rec.put("hasRectifications", false);
+      return;
+    }
+    boolean result = false;
+    try {
+      String sql = "SELECT 1 FROM c_invoice_reverse WHERE c_invoice_id = ? AND isactive = 'Y' LIMIT 1";
+      Connection conn = OBDal.getReadOnlyInstance().getConnection();
+      try (PreparedStatement ps = conn.prepareStatement(sql)) {
+        ps.setString(1, invoiceId);
+        try (ResultSet rs = ps.executeQuery()) {
+          result = rs.next();
+        }
+      }
+    } catch (Exception e) {
+      log.warn("Could not check hasRectifications for invoice {}: {}", invoiceId, e.getMessage());
+    }
+    rec.put("hasRectifications", result);
+  }
+
+  /**
+   * Adjusts {@code grandTotalAmount} and {@code outstandingAmount} for a draft invoice carrying
+   * a positive {@code etgoTotalDiscount} percentage that has not yet been materialized as a real
+   * line — otherwise the list view and preview cards show the raw undiscounted total while the
+   * document is still in draft, since the discount is only materialized into a real line at
+   * Complete time via {@link TotalDiscountService}. Mirrors {@link AbstractOrderHeaderHandler}'s
+   * order-side equivalent.
+   *
+   * <p>No-op when the invoice is processed (the DB total already reflects the discount), when no
+   * discount percentage is set, or when the discount is already a real line
+   * ({@code hasDiscountLine} — e.g. an invoice created from an order that already carried the
+   * discount, via {@code InvoiceFromOrderSupport} — avoids double-counting). Mirrors the exact
+   * guard order of the original {@code SalesInvoiceHeaderHandler}-only implementation this was
+   * consolidated from: {@link #getTotalDiscountService()} is only dereferenced when {@code id}
+   * is present, matching every existing caller/test.
+   */
+  protected void applyTotalDiscountToRecord(JSONObject invoice) throws Exception {
+    if (invoice.optBoolean(FIELD_PROCESSED, false)) {
+      return;
+    }
+    double discountPct = invoice.optDouble(FIELD_TOTAL_DISCOUNT_PCT, 0.0);
+    if (discountPct <= 0.0) {
+      return;
+    }
+    String invoiceId = invoice.optString("id", null);
+    if (invoiceId != null && getTotalDiscountService().hasDiscountLine(invoiceId, true)) {
+      return;
+    }
+    double factor = 1.0 - discountPct / 100.0;
+    double grand = invoice.optDouble(FIELD_GRAND_TOTAL_AMOUNT, 0.0);
+    invoice.put(FIELD_GRAND_TOTAL_AMOUNT, NeoHandlerUtils.roundHalfUp(grand * factor));
+    double outstanding = invoice.optDouble(FIELD_OUTSTANDING_AMOUNT, 0.0);
+    invoice.put(FIELD_OUTSTANDING_AMOUNT, NeoHandlerUtils.roundHalfUp(outstanding * factor));
   }
 
   // ---------------------------------------------------------------------------
@@ -572,6 +717,48 @@ public abstract class AbstractInvoiceHeaderHandler {
   }
 
   /**
+   * Removes a callout-pushed {@code transactionDocument} key from the callout {@code updates} map
+   * once the invoice has already been saved. Document type is only ever changed by the user
+   * directly (or defaulted at first-save time) — a business-partner (or other) callout must not
+   * silently revert NC/DEV subtypes back to the org's default document type after save (ETP-4535).
+   *
+   * <p>Unlike {@link #blockCalloutCurrencyUpdate}, which blocks ANY callout-driven overwrite, this
+   * guard only applies once the invoice has a {@code documentNo} — choosing a document type via
+   * BP-driven defaults before the first save is legitimate and must not be blocked. Mirrors the
+   * "not yet saved, allow" rule already enforced client-side (PUT edits) by
+   * {@link #validateDocTypeLock}.
+   *
+   * <p>Call from each subclass's {@code afterCallout()} override.
+   *
+   * @param updates      the callout response's {@code updates} object; may be {@code null}
+   * @param triggerField the field that triggered the callout (from the request body)
+   * @param recordId     the invoice's record id from the current context; may be {@code null} for
+   *                     a new (unsaved) record
+   */
+  protected static void blockCalloutDocTypeUpdateIfLocked(JSONObject updates, String triggerField,
+      String recordId) {
+    if (updates == null || !updates.has(FIELD_TRANSACTION_DOCUMENT)
+        || FIELD_TRANSACTION_DOCUMENT.equals(triggerField)) {
+      return;
+    }
+    if (StringUtils.isBlank(recordId)) {
+      return; // not yet saved — allow callout-driven doc type defaults
+    }
+    try {
+      Invoice invoice = OBDal.getInstance().get(Invoice.class, recordId);
+      if (invoice == null || StringUtils.isBlank(invoice.getDocumentNo())) {
+        return; // not yet saved — allow
+      }
+      updates.remove(FIELD_TRANSACTION_DOCUMENT);
+      log.debug("[ETP-4535] Removed callout-driven document type update on saved invoice {} (trigger={})",
+          recordId, triggerField);
+    } catch (Exception e) {
+      log.warn("[ETP-4535] Could not evaluate document type lock for invoice {}: {}",
+          recordId, e.getMessage());
+    }
+  }
+
+  /**
    * Appends a {@code WARNING} message to the callout response body when the user directly
    * changes the invoice's {@code currency} field and no {@code C_Conversion_Rate} exists for
    * (docCurrency → orgCurrency, invoiceDate). Mirrors
@@ -607,13 +794,29 @@ public abstract class AbstractInvoiceHeaderHandler {
     }
   }
 
+  // ---------------------------------------------------------------------------
+  // Unified date (ETP-4531)
+  // ---------------------------------------------------------------------------
+  //
+  // The mirrorAccountingDate(NeoContext, String, String) logic itself lives in
+  // NeoHandlerUtils — shared with AbstractOrderHeaderHandler — see
+  // NeoHandlerUtils#mirrorAccountingDate. Call sites here invoke it with
+  // ("invoiceDate", "accountingDate").
+
   /**
-   * Shared {@code afterCallout} body (ETP-4029): blocks callout-driven currency updates and
-   * appends an exchange-rate warning when the user directly changes the invoice currency.
-   * Identical for both {@link PurchaseInvoiceHeaderHandler} and {@link SalesInvoiceHeaderHandler}
+   * Shared {@code afterCallout} body: blocks callout-driven currency updates and appends an
+   * exchange-rate warning when the user directly changes the invoice currency (ETP-4029); and
+   * blocks callout-driven document type updates on an already-saved invoice (ETP-4535).
+   *
+   * <p>{@code accountingDate} cascades from {@code invoiceDate} via the classic Etendo callout
+   * ({@code SE_Invoice_AccountingDate}) are intentionally left untouched — ETP-4531 now requires
+   * the single visible date to be mirrored into {@code accountingDate} on save, so that cascade
+   * is exactly the behavior wanted.
+   *
+   * <p>Identical for both {@link PurchaseInvoiceHeaderHandler} and {@link SalesInvoiceHeaderHandler}
    * — each subclass's {@code afterCallout()} override should just delegate here.
    */
-  protected NeoResponse handleCurrencyAfterCallout(NeoContext context) {
+  protected NeoResponse handleInvoiceAfterCallout(NeoContext context) {
     try {
       NeoHandlerUtils.CalloutFields fields = NeoHandlerUtils.extractCalloutFields(context);
       if (fields == null) {
@@ -621,10 +824,44 @@ public abstract class AbstractInvoiceHeaderHandler {
       }
       blockCalloutCurrencyUpdate(fields.updates(), fields.triggerField());
       checkExchangeRateWarning(fields.body(), fields.requestBody(), fields.formState(), fields.triggerField());
+      String recordId = resolveCalloutRecordId(context, fields.formState());
+      blockCalloutDocTypeUpdateIfLocked(fields.updates(), fields.triggerField(), recordId);
     } catch (Exception e) {
-      log.warn("[ETP-4029] afterCallout failed (non-fatal): {}", e.getMessage());
+      log.warn("[ETP-4029/ETP-4535] afterCallout failed (non-fatal): {}", e.getMessage());
     }
     return null; // mutations applied in-place; dispatcher merges nothing extra
+  }
+
+  /**
+   * Resolves the invoice's record id for a callout request.
+   *
+   * <p>Callout URLs carry no record-id path segment — {@code NeoServletSupport.parseSubEndpointPath}
+   * matches the callout route as a literal {@code {specName}/{entityName}/callout} 3-segment path
+   * with the record-id segment hardcoded {@code null}, and {@link NeoCalloutEndpoint#handleCallout}
+   * never calls {@code .recordId(...)} on the {@link NeoContext} builder. So
+   * {@link NeoContext#getRecordId()} is always {@code null} for a real callout, and the currently
+   * loaded record's id must instead be read from the callout's echoed {@code formState.id} — the
+   * same idiom already used by {@code InventoryLineHandler#afterCallout} (formState null-guard +
+   * {@code optString("id", ...)}) and {@code CalloutRequestBuilder#injectParentId}
+   * ({@code formState.has("id")} before reading).
+   *
+   * <p>{@code context.getRecordId()} is checked first as a defensive fallback for any future/other
+   * dispatch path that DOES populate it (e.g. a non-callout invocation of this shared method), but
+   * for the real production callout path it is always blank and {@code formState.id} is what fires.
+   *
+   * @param context   the current NeoContext
+   * @param formState the callout's {@code formState} object; may be {@code null}
+   * @return the resolved invoice record id, or {@code null} if neither source has one
+   */
+  private static String resolveCalloutRecordId(NeoContext context, JSONObject formState) {
+    String recordId = context.getRecordId();
+    if (StringUtils.isNotBlank(recordId)) {
+      return recordId;
+    }
+    if (formState == null) {
+      return null;
+    }
+    return StringUtils.trimToNull(formState.optString("id", null));
   }
 
   /**

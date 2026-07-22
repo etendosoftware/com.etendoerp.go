@@ -53,6 +53,119 @@ class WidgetQueryPolicyRegistryTest {
   }
 
   // -----------------------------------------------------------------
+  // bestProducts()/bestSellers() rangedSql — regression tests for ETP-4521
+  // The old rangedSql ignored the ?range= param for the trend comparison:
+  // curr_period/prev_period were hardcoded to "date_trunc('month', NOW())"
+  // and a MAX(dateinvoiced) subselect, so the trend % never respected the
+  // selected date range. These tests verify the replacement uses the
+  // parameterized period placeholders (%1$s/%2$s/%3$s) instead.
+  // -----------------------------------------------------------------
+
+  /**
+   * Verifies that the best-products rangedSql no longer hardcodes the current-month
+   * boundary and no longer uses the prev-month MAX(dateinvoiced) subselect, using the
+   * parameterized period placeholders instead.
+   */
+  @Test
+  void bestProductsRangedSqlUsesParameterizedPeriodsNotHardcodedMonth() {
+    WidgetQueryPolicyRegistry.WidgetQueryPolicy policy = WidgetQueryPolicyRegistry.bestProducts();
+
+    assertFalse(policy.rangedSql.contains("date_trunc('month', NOW())"),
+        "rangedSql must not hardcode the current-month boundary (regression guard)");
+    assertFalse(policy.rangedSql.contains("date_trunc('month', dateinvoiced) <"),
+        "rangedSql must not use the old prev-month MAX(dateinvoiced) subselect (regression guard)");
+    assertTrue(policy.rangedSql.contains(">= %2$s"),
+        "rangedSql must filter the previous period's lower bound via %2$s");
+    assertTrue(policy.rangedSql.contains("< %3$s"),
+        "rangedSql must filter the previous period's exclusive upper bound via %3$s");
+  }
+
+  /**
+   * Verifies that the best-sellers rangedSql no longer hardcodes the current-month
+   * boundary and no longer uses the prev-month MAX(dateinvoiced) subselect, using the
+   * parameterized period placeholders instead.
+   */
+  @Test
+  void bestSellersRangedSqlUsesParameterizedPeriodsNotHardcodedMonth() {
+    WidgetQueryPolicyRegistry.WidgetQueryPolicy policy = WidgetQueryPolicyRegistry.bestSellers();
+
+    assertFalse(policy.rangedSql.contains("date_trunc('month', NOW())"),
+        "rangedSql must not hardcode the current-month boundary (regression guard)");
+    assertFalse(policy.rangedSql.contains("date_trunc('month', dateinvoiced) <"),
+        "rangedSql must not use the old prev-month MAX(dateinvoiced) subselect (regression guard)");
+    assertTrue(policy.rangedSql.contains(">= %2$s"),
+        "rangedSql must filter the previous period's lower bound via %2$s");
+    assertTrue(policy.rangedSql.contains("< %3$s"),
+        "rangedSql must filter the previous period's exclusive upper bound via %3$s");
+  }
+
+  /**
+   * Regression guard for the future-dated-invoice leak: verifies that the best-products
+   * rangedSql bounds the CURRENT period with an upper limit ({@code i.dateinvoiced <= NOW()})
+   * so invoices dated in the future do not inflate the current-period figures.
+   */
+  @Test
+  void bestProductsRangedSqlBoundsCurrentPeriodUpperLimitToNow() {
+    WidgetQueryPolicyRegistry.WidgetQueryPolicy policy = WidgetQueryPolicyRegistry.bestProducts();
+
+    assertTrue(policy.rangedSql.contains("i.dateinvoiced <= NOW()"),
+        "rangedSql must bound the current period with i.dateinvoiced <= NOW() (future-date leak guard)");
+    assertFalse(policy.rangedSql.contains("date_trunc('month', NOW())"),
+        "rangedSql must not hardcode the current-month boundary (regression guard)");
+    assertTrue(policy.rangedSql.contains(">= %2$s"),
+        "rangedSql must filter the previous period's lower bound via %2$s");
+    assertTrue(policy.rangedSql.contains("< %3$s"),
+        "rangedSql must filter the previous period's exclusive upper bound via %3$s");
+  }
+
+  /**
+   * Regression guard for the future-dated-invoice leak: verifies that the best-sellers
+   * rangedSql bounds the CURRENT period with an upper limit ({@code i.dateinvoiced <= NOW()})
+   * so invoices dated in the future do not inflate the current-period figures.
+   */
+  @Test
+  void bestSellersRangedSqlBoundsCurrentPeriodUpperLimitToNow() {
+    WidgetQueryPolicyRegistry.WidgetQueryPolicy policy = WidgetQueryPolicyRegistry.bestSellers();
+
+    assertTrue(policy.rangedSql.contains("i.dateinvoiced <= NOW()"),
+        "rangedSql must bound the current period with i.dateinvoiced <= NOW() (future-date leak guard)");
+    assertFalse(policy.rangedSql.contains("date_trunc('month', NOW())"),
+        "rangedSql must not hardcode the current-month boundary (regression guard)");
+    assertTrue(policy.rangedSql.contains(">= %2$s"),
+        "rangedSql must filter the previous period's lower bound via %2$s");
+    assertTrue(policy.rangedSql.contains("< %3$s"),
+        "rangedSql must filter the previous period's exclusive upper bound via %3$s");
+  }
+
+  /**
+   * Verifies that the best-products fallbackSql (no range param) is unaffected by the fix
+   * and still uses the current-month/MAX(dateinvoiced) comparison logic.
+   */
+  @Test
+  void bestProductsFallbackSqlStillUsesMonthAndMaxDateLogic() {
+    WidgetQueryPolicyRegistry.WidgetQueryPolicy policy = WidgetQueryPolicyRegistry.bestProducts();
+
+    assertTrue(policy.fallbackSql.contains("date_trunc('month', i.dateinvoiced) = ("),
+        "fallbackSql must keep comparing against the latest invoiced month via MAX(dateinvoiced)");
+    assertTrue(policy.fallbackSql.contains("date_trunc('month', dateinvoiced) <"),
+        "fallbackSql must keep the prev-month MAX(dateinvoiced) subselect");
+  }
+
+  /**
+   * Verifies that the best-sellers fallbackSql (no range param) is unaffected by the fix
+   * and still uses the current-month/MAX(dateinvoiced) comparison logic.
+   */
+  @Test
+  void bestSellersFallbackSqlStillUsesMonthAndMaxDateLogic() {
+    WidgetQueryPolicyRegistry.WidgetQueryPolicy policy = WidgetQueryPolicyRegistry.bestSellers();
+
+    assertTrue(policy.fallbackSql.contains("date_trunc('month', i.dateinvoiced) = ("),
+        "fallbackSql must keep comparing against the latest invoiced month via MAX(dateinvoiced)");
+    assertTrue(policy.fallbackSql.contains("date_trunc('month', dateinvoiced) <"),
+        "fallbackSql must keep the prev-month MAX(dateinvoiced) subselect");
+  }
+
+  // -----------------------------------------------------------------
   // recentInvoices() — regression tests for ETP-4004
   // The old handler had a hardcoded "CURRENT_DATE - '7 days'" that
   // ignored the ?range= param. These tests verify the replacement uses

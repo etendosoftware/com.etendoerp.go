@@ -78,18 +78,21 @@ class McpResourceProviderTest {
 
   private MockedStatic<OBDal> obDalMock;
   private MockedStatic<McpToolRouterSupport> routerSupportMock;
+  private MockedStatic<McpSchemaFieldBuilder> schemaFieldBuilderMock;
 
   @BeforeEach
   void setUp() {
     provider = new McpResourceProvider();
     obDalMock = mockStatic(OBDal.class);
     routerSupportMock = mockStatic(McpToolRouterSupport.class);
+    schemaFieldBuilderMock = mockStatic(McpSchemaFieldBuilder.class);
 
     obDalMock.when(OBDal::getInstance).thenReturn(obDal);
   }
 
   @AfterEach
   void tearDown() {
+    schemaFieldBuilderMock.close();
     routerSupportMock.close();
     obDalMock.close();
   }
@@ -663,9 +666,9 @@ class McpResourceProviderTest {
           .thenReturn(Collections.singletonList(entity));
       routerSupportMock.when(() -> McpToolRouterSupport.buildMethodsArray(entity))
           .thenReturn(new JSONArray().put("GET").put("POST"));
-      routerSupportMock.when(() -> McpToolRouterSupport.mapColumnType("13"))
+      schemaFieldBuilderMock.when(() -> McpSchemaFieldBuilder.mapColumnType("13"))
           .thenReturn("id");
-      routerSupportMock.when(() -> McpToolRouterSupport.mapSelectorType("13"))
+      schemaFieldBuilderMock.when(() -> McpSchemaFieldBuilder.mapSelectorType("13"))
           .thenReturn(null);
 
       mockFieldCriteria(Collections.singletonList(field));
@@ -703,9 +706,9 @@ class McpResourceProviderTest {
           .thenReturn(Collections.singletonList(entity));
       routerSupportMock.when(() -> McpToolRouterSupport.buildMethodsArray(entity))
           .thenReturn(new JSONArray().put("GET"));
-      routerSupportMock.when(() -> McpToolRouterSupport.mapColumnType("30"))
+      schemaFieldBuilderMock.when(() -> McpSchemaFieldBuilder.mapColumnType("30"))
           .thenReturn("selector");
-      routerSupportMock.when(() -> McpToolRouterSupport.mapSelectorType("30"))
+      schemaFieldBuilderMock.when(() -> McpSchemaFieldBuilder.mapSelectorType("30"))
           .thenReturn("TableDir");
 
       mockFieldCriteria(Collections.singletonList(field));
@@ -738,9 +741,9 @@ class McpResourceProviderTest {
           .thenReturn(Collections.singletonList(entity));
       routerSupportMock.when(() -> McpToolRouterSupport.buildMethodsArray(entity))
           .thenReturn(new JSONArray().put("GET"));
-      routerSupportMock.when(() -> McpToolRouterSupport.mapColumnType("20"))
+      schemaFieldBuilderMock.when(() -> McpSchemaFieldBuilder.mapColumnType("20"))
           .thenReturn("boolean");
-      routerSupportMock.when(() -> McpToolRouterSupport.mapSelectorType("20"))
+      schemaFieldBuilderMock.when(() -> McpSchemaFieldBuilder.mapSelectorType("20"))
           .thenReturn(null);
 
       mockFieldCriteria(Collections.singletonList(field));

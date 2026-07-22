@@ -61,6 +61,7 @@ import com.etendoerp.go.schemaforge.telemetry.NeoTelemetryService;
 import com.etendoerp.go.schemaforge.util.NeoCrudHelper;
 import com.etendoerp.go.schemaforge.util.NeoErrorSanitizer;
 import com.etendoerp.go.schemaforge.util.NeoListIdentifierHelper;
+import com.etendoerp.go.schemaforge.util.NeoLocatorIdentifierHelper;
 import com.etendoerp.go.schemaforge.util.NeoTypeCoercionHelper;
 
 /**
@@ -79,6 +80,7 @@ class NeoCrudHandler {
   private static final String PARAM_PARENT_ID = "parentId";
   private static final String HQL_AND_OPERATOR = " and ";
   private static final String JSON_IDENTIFIER = "_identifier";
+  private static final String FIELD_ACCOUNTING_DATE = "accountingDate";
   private static final Set<String> CONTACTS_PRECREATE_BILLING_FIELDS = new HashSet<>(
       Arrays.asList(
           "priceList",
@@ -260,7 +262,15 @@ class NeoCrudHandler {
       return buildMissingRequiredFieldsResponse(e);
     } catch (Exception e) {
       log.error("Error in default handler for {} {}", context.getHttpMethod(), context.getEntityName(), e);
-      return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR, NeoErrorSanitizer.sanitize(e));
+      // A unique-constraint violation is a data conflict, not a server failure — the
+      // client sent a value that already exists, which is a 409, never a 500. Reusing
+      // this same classification is also what keeps the message worded consistently
+      // with NeoErrorSanitizer.DUPLICATE_KEY_ERROR (see its javadoc for why the import
+      // UI depends on that exact wording).
+      int status = NeoErrorSanitizer.isDuplicateKeyViolation(e)
+          ? HttpServletResponse.SC_CONFLICT
+          : HttpServletResponse.SC_INTERNAL_SERVER_ERROR;
+      return NeoResponse.error(status, NeoErrorSanitizer.sanitize(e));
     }
   }
 
@@ -414,6 +424,7 @@ class NeoCrudHandler {
     fieldFilter.filterGetResponse(responseJson);
     if ("GET".equals(context.getHttpMethod()) && context.getSfEntity() != null) {
       NeoListIdentifierHelper.enrichListIdentifiers(responseJson, context.getSfEntity());
+      NeoLocatorIdentifierHelper.enrichLocatorIdentifiers(responseJson, context.getSfEntity());
     }
     return NeoResponse.ok(responseJson);
   }
@@ -455,8 +466,18 @@ class NeoCrudHandler {
           ? innerResponse.getJSONObject(JsonConstants.RESPONSE_ERROR)
               .optString("message", "Write operation failed")
           : "Write operation failed";
-      return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
-          OBMessageUtils.messageBD(errMsg));
+      String translated = OBMessageUtils.messageBD(errMsg);
+      // DefaultJsonDataService catches a unique-constraint violation internally and
+      // returns it as a normal RPC failure response (this branch), never as a thrown
+      // exception — so NeoErrorSanitizer.isDuplicateKeyViolation(Throwable), which only
+      // inspects real exceptions, can't see it. Etendo's own translated message already
+      // contains "must be unique" for this case, so that's what isDuplicateKeyMessage
+      // checks instead. Same reasoning as the catch-all in handleDefault(): a duplicate
+      // key is a data conflict (409), not a server failure (500).
+      int httpStatus = NeoErrorSanitizer.isDuplicateKeyMessage(translated)
+          ? HttpServletResponse.SC_CONFLICT
+          : HttpServletResponse.SC_INTERNAL_SERVER_ERROR;
+      return NeoResponse.error(httpStatus, translated);
     }
     if (status == JsonConstants.RPCREQUEST_STATUS_VALIDATION_ERROR) {
       return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, responseJson);
@@ -632,7 +653,18 @@ class NeoCrudHandler {
   private String executeUpdate(NeoContext context, String dalEntityName,
       NeoFieldFilter fieldFilter, DefaultJsonDataService jsonService,
       Map<String, String> params) throws Exception {
-    JSONObject filteredBody = fieldFilter.filterWriteRequest(context.getRequestBody());
+    JSONObject rawBody = context.getRequestBody();
+    // ETP-4531: capture accountingDate BEFORE filtering — filterWriteRequest/filterBody
+    // does NOT return an independent copy, it mutates `rawBody` in place (filterRecord strips
+    // non-writable keys directly from the same JSONObject reference it's given, when there's
+    // no "data" wrapper to unwrap into a different object first). So `rawBody` and
+    // `filteredBody` below end up being the SAME object once filtering runs — reading
+    // `rawBody.has("accountingDate")` AFTER calling filterWriteRequest is always false,
+    // because the filter already stripped it from that very same instance. Save the
+    // pre-filter value first, while it still exists.
+    Object accountingDateBeforeFilter = rawBody != null ? rawBody.opt(FIELD_ACCOUNTING_DATE) : null;
+    boolean hadAccountingDate = rawBody != null && rawBody.has(FIELD_ACCOUNTING_DATE);
+    JSONObject filteredBody = fieldFilter.filterWriteRequest(rawBody);
     // Inject lineNetAmount when absent from filteredBody (stripped by readOnly filter).
     // The frontend sends invoicedQuantity and unitPrice as editable fields, so both are
     // available here to compute the correct net amount even for products where SL_Invoice_Amt
@@ -640,6 +672,19 @@ class NeoCrudHandler {
     NeoCommercialLinePolicy.injectLineNetAmountIfMissing(filteredBody);
     NeoCommercialLinePolicy.injectGrossAmountIfMissing(filteredBody);
     NeoCommercialLinePolicy.injectLineGrossAmountIfMissing(filteredBody);
+    // ETP-4531: re-apply accountingDate now that filtering (which stripped it, correctly, as a
+    // read-only field the CLIENT should never write directly) has run. Each header handler's
+    // handle() pre-hook (e.g. AbstractInvoiceHeaderHandler#mirrorAccountingDate) mirrors the
+    // document date into this field before this method runs; filterCreateRequest (used on
+    // POST) already allows read-only fields through for exactly this reason ("they may carry
+    // values from callouts or defaults") — PATCH/PUT's stricter writableFields filter needs
+    // the same carve-out here. Uses the resolved DAL property name (e.g. "dateAcct"), not the
+    // API key ("accountingDate") — filterWriteRequest already remapped every other field to
+    // its DAL name via NeoFieldFilter#remapApiKeys, and DefaultJsonDataService only recognizes
+    // DAL property names; injecting under the API key would silently no-op.
+    if (hadAccountingDate) {
+      filteredBody.put(fieldFilter.resolveWritablePropName(FIELD_ACCOUNTING_DATE), accountingDateBeforeFilter);
+    }
     String wrappedBody = wrapForSmartclient(filteredBody, dalEntityName, context.getRecordId());
     return jsonService.update(params, wrappedBody);
   }

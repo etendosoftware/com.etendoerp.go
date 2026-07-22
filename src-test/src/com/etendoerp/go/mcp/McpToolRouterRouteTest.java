@@ -185,12 +185,18 @@ class McpToolRouterRouteTest {
    * Prime the (statically mocked) support class so spec resolution returns {@code spec}.
    * The router delegates BOTH {@code authorizeSpecAccess} and every handler's spec lookup
    * to {@link McpToolRouterSupport#findActiveSpecByName}, so stubbing that one method covers
-   * the whole route. {@code hasSpecAccess} is also stubbed to grant access by default.
+   * the whole route. {@code hasSpecAccess} is also stubbed to grant access by default —
+   * both the 2-arg (GET-tier, used by neo_discover) and the 3-arg, method-aware overload
+   * (ETP-4510: used by {@code authorizeSpecAccess} for every route() call, including reads)
+   * so a {@code mockStatic()} on {@link McpToolRouterSupport} doesn't silently deny every
+   * mutating tool call by falling through to the unstubbed-static default of {@code false}.
    */
   private void setupSpecLookup(SFSpec spec) {
     supportMock.when(() -> McpToolRouterSupport.findActiveSpecByName(anyString()))
         .thenReturn(spec);
     supportMock.when(() -> McpToolRouterSupport.hasSpecAccess(any(), anyString()))
+        .thenReturn(true);
+    supportMock.when(() -> McpToolRouterSupport.hasSpecAccess(any(), anyString(), anyString()))
         .thenReturn(true);
   }
 
@@ -200,9 +206,18 @@ class McpToolRouterRouteTest {
    * setup produced before the router delegated entity lookup to the support class.
    */
   private void setupEntityLookup(SFEntity entity, Tab tab) {
+    // The 8 entity-CRUD handlers resolve the entity via resolveIncludedEntityOrExplain
+    // (ETP-4257); neo_action still uses findIncludedEntity directly. Stub BOTH so every
+    // success path keeps returning the entity regardless of the entry point.
+    supportMock.when(() -> McpToolRouterSupport.resolveIncludedEntityOrExplain(
+        any(SFSpec.class), anyString())).thenReturn(entity);
     supportMock.when(() -> McpToolRouterSupport.findIncludedEntity(anyString(), anyString()))
         .thenReturn(entity);
     when(entity.getADTab()).thenReturn(tab);
+  }
+
+  private static String contentText(JSONObject result) throws Exception {
+    return result.getJSONArray("content").getJSONObject(0).getString("text");
   }
 
   private JSONObject buildCrudArgs() throws Exception {
@@ -225,6 +240,10 @@ class McpToolRouterRouteTest {
       setupSpecLookup(spec);
       supportMock.when(() -> McpToolRouterSupport.hasSpecAccess(any(), anyString()))
           .thenReturn(false);
+      // route() authorizes neo_list (a GET-tier tool) through the 3-arg overload —
+      // override the setupSpecLookup() default (true) back to denied for this method.
+      supportMock.when(() -> McpToolRouterSupport.hasSpecAccess(any(), anyString(), anyString()))
+          .thenReturn(false);
 
       JSONObject args = buildCrudArgs();
       JSONObject result = router.route("neo_list", args, READ_SCOPES);
@@ -232,6 +251,218 @@ class McpToolRouterRouteTest {
       assertTrue(result.getBoolean("isError"));
       String text = result.getJSONArray("content").getJSONObject(0).getString("text");
       assertTrue(text.contains("Access denied"));
+    }
+  }
+
+  // ── ETP-4510 write-tier authorization (code-review BUG-2) ─────────────
+
+  /**
+   * Integration-level regression coverage for the ETP-4510 code-review BUG-2 gap: the
+   * only pre-existing {@code route()} authorization test used {@code neo_list} (a
+   * GET/read-tier tool). Nothing exercised {@code route()} denying a WRITE tool
+   * (neo_create/neo_update/neo_delete) for a read-only-access role at the integration
+   * level — only the unit-level {@code McpToolRouterSupportTest#hasSpecAccess} tests did.
+   * <p>
+   * These tests drive the real {@code McpToolRouter#route} entry point end to end
+   * (argument building, {@code resolveAccessMethod}, {@code authorizeSpecAccess}) with
+   * only {@link McpToolRouterSupport#hasSpecAccess(SFSpec, String, String)} stubbed to
+   * mimic a role whose {@code AD_Window_Access} row is read-only: GET tier is granted,
+   * every write tier is denied.
+   */
+  @Nested
+  @DisplayName("route — write-tier authorization (ETP-4510)")
+  class WriteTierAuthorizationTests {
+
+    /** Read-only role: GET passes, every write method is denied. */
+    private void setupReadOnlyAccess(SFSpec spec) {
+      supportMock.when(() -> McpToolRouterSupport.findActiveSpecByName(anyString()))
+          .thenReturn(spec);
+      supportMock.when(() -> McpToolRouterSupport.hasSpecAccess(spec, "W", "GET"))
+          .thenReturn(true);
+      supportMock.when(() -> McpToolRouterSupport.hasSpecAccess(spec, "W", "POST"))
+          .thenReturn(false);
+      supportMock.when(() -> McpToolRouterSupport.hasSpecAccess(spec, "W", "PUT"))
+          .thenReturn(false);
+      supportMock.when(() -> McpToolRouterSupport.hasSpecAccess(spec, "W", "DELETE"))
+          .thenReturn(false);
+    }
+
+    @Test
+    @DisplayName("neo_create is denied for a read-only-access role")
+    void createDeniedForReadOnlyRole() throws Exception {
+      SFSpec spec = mockSpec();
+      setupReadOnlyAccess(spec);
+
+      JSONObject result = router.route("neo_create", buildCrudArgs(), WRITE_SCOPES);
+
+      assertTrue(result.getBoolean("isError"));
+      String text = result.getJSONArray("content").getJSONObject(0).getString("text");
+      assertTrue(text.contains("Access denied"));
+    }
+
+    @Test
+    @DisplayName("neo_update is denied for a read-only-access role")
+    void updateDeniedForReadOnlyRole() throws Exception {
+      SFSpec spec = mockSpec();
+      setupReadOnlyAccess(spec);
+
+      JSONObject args = buildCrudArgs();
+      args.put("id", "rec-1");
+      args.put("fields", new JSONObject());
+
+      JSONObject result = router.route("neo_update", args, WRITE_SCOPES);
+
+      assertTrue(result.getBoolean("isError"));
+      String text = result.getJSONArray("content").getJSONObject(0).getString("text");
+      assertTrue(text.contains("Access denied"));
+    }
+
+    @Test
+    @DisplayName("neo_delete is denied for a read-only-access role")
+    void deleteDeniedForReadOnlyRole() throws Exception {
+      SFSpec spec = mockSpec();
+      setupReadOnlyAccess(spec);
+
+      JSONObject args = buildCrudArgs();
+      args.put("id", "rec-1");
+
+      JSONObject result = router.route("neo_delete", args, WRITE_SCOPES);
+
+      assertTrue(result.getBoolean("isError"));
+      String text = result.getJSONArray("content").getJSONObject(0).getString("text");
+      assertTrue(text.contains("Access denied"));
+    }
+
+    /**
+     * Companion to the three denial tests above: the exact same read-only-access role
+     * must still be able to reach the read handlers (neo_list, neo_get) — proving the
+     * ETP-4510 fix only tightens writes and does not regress reads.
+     * <p>
+     * Deliberately omits a required argument (entity/id) rather than driving the handler
+     * all the way through, mirroring {@code ListTests#listMissingEntityReturnsError} /
+     * {@code GetTests#getMissingIdReturnsError} — {@code DefaultJsonDataService} has a
+     * static initializer that needs a live servlet container (see this class's javadoc),
+     * so a full success run isn't reachable here. What matters for this regression test
+     * is that the failure is the argument-validation error, never "Access denied" —
+     * proving authorization was passed before validation ran.
+     */
+    @Test
+    @DisplayName("neo_list still passes authorization for the same read-only-access role")
+    void listAllowedForReadOnlyRole() throws Exception {
+      SFSpec spec = mockSpec();
+      setupReadOnlyAccess(spec);
+
+      JSONObject args = new JSONObject();
+      args.put("spec", SPEC_NAME);
+      // "entity" intentionally omitted — proves we got past authorization into validateArgs.
+
+      JSONObject result = router.route("neo_list", args, READ_SCOPES);
+
+      assertTrue(result.getBoolean("isError"));
+      String text = result.getJSONArray("content").getJSONObject(0).getString("text");
+      assertFalse(text.contains("Access denied"),
+          "neo_list must not be blocked by access control for a read-only role, got: " + text);
+      assertTrue(text.contains("entity"));
+    }
+
+    @Test
+    @DisplayName("neo_get still passes authorization for the same read-only-access role")
+    void getAllowedForReadOnlyRole() throws Exception {
+      SFSpec spec = mockSpec();
+      setupReadOnlyAccess(spec);
+
+      JSONObject args = buildCrudArgs();
+      // "id" intentionally omitted — proves we got past authorization into validateArgs.
+
+      JSONObject result = router.route("neo_get", args, READ_SCOPES);
+
+      assertTrue(result.getBoolean("isError"));
+      String text = result.getJSONArray("content").getJSONObject(0).getString("text");
+      assertFalse(text.contains("Access denied"),
+          "neo_get must not be blocked by access control for a read-only role, got: " + text);
+      assertTrue(text.contains("id"));
+    }
+  }
+
+  // ── neo_batch access control (ETP-4510 code-review BUG-2b) ────────────
+
+  /**
+   * {@code handleBatch}'s per-operation {@code authorizeSpecAccess(specName, "POST")} loop
+   * (added by the ETP-4510 BLOCKER fix) had zero test coverage anywhere. Every
+   * {@code BatchService#processOperation} op is a create (there is no update/delete op
+   * type), so batch authorization is always write-tier ("POST").
+   */
+  @Nested
+  @DisplayName("handleBatch — access control (ETP-4510)")
+  class BatchAccessTests {
+
+    private JSONObject buildBatchArgs() throws Exception {
+      JSONObject op = new JSONObject();
+      op.put("id", "op1");
+      op.put("spec", SPEC_NAME);
+      op.put("entity", ENTITY_NAME);
+      op.put("body", new JSONObject());
+
+      JSONArray operations = new JSONArray();
+      operations.put(op);
+
+      JSONObject args = new JSONObject();
+      args.put("operations", operations);
+      return args;
+    }
+
+    @Test
+    @DisplayName("a read-only-access role's batch create operation is denied")
+    void batchDeniedForReadOnlyRole() throws Exception {
+      SFSpec spec = mockSpec();
+      supportMock.when(() -> McpToolRouterSupport.findActiveSpecByName(SPEC_NAME))
+          .thenReturn(spec);
+      supportMock.when(() -> McpToolRouterSupport.hasSpecAccess(spec, "W", "POST"))
+          .thenReturn(false);
+
+      try (MockedStatic<com.etendoerp.go.schemaforge.BatchService> batchMock =
+          mockStatic(com.etendoerp.go.schemaforge.BatchService.class)) {
+        com.etendoerp.go.schemaforge.BatchService mockBatch =
+            mock(com.etendoerp.go.schemaforge.BatchService.class);
+        batchMock.when(com.etendoerp.go.schemaforge.BatchService::forBatchOnly)
+            .thenReturn(mockBatch);
+
+        JSONObject result = router.handleBatch(buildBatchArgs());
+
+        assertTrue(result.getBoolean("isError"));
+        String text = result.getJSONArray("content").getJSONObject(0).getString("text");
+        assertTrue(text.contains("Access denied"));
+        // The denial must short-circuit before any DAL work — BatchService must never
+        // be reached once authorizeSpecAccess throws.
+        org.mockito.Mockito.verify(mockBatch, org.mockito.Mockito.never())
+            .executeBatch(any());
+      }
+    }
+
+    @Test
+    @DisplayName("a full-access role's batch create operation reaches BatchService")
+    void batchAllowedForFullAccessRole() throws Exception {
+      SFSpec spec = mockSpec();
+      supportMock.when(() -> McpToolRouterSupport.findActiveSpecByName(SPEC_NAME))
+          .thenReturn(spec);
+      supportMock.when(() -> McpToolRouterSupport.hasSpecAccess(spec, "W", "POST"))
+          .thenReturn(true);
+
+      try (MockedStatic<com.etendoerp.go.schemaforge.BatchService> batchMock =
+          mockStatic(com.etendoerp.go.schemaforge.BatchService.class)) {
+        com.etendoerp.go.schemaforge.BatchService mockBatch =
+            mock(com.etendoerp.go.schemaforge.BatchService.class);
+        batchMock.when(com.etendoerp.go.schemaforge.BatchService::forBatchOnly)
+            .thenReturn(mockBatch);
+        JSONObject batchResult = new JSONObject();
+        batchResult.put("committed", true);
+        when(mockBatch.executeBatch(any())).thenReturn(batchResult);
+
+        JSONObject result = router.handleBatch(buildBatchArgs());
+
+        assertFalse(result.has("isError"));
+        org.mockito.Mockito.verify(mockBatch).executeBatch(any());
+      }
     }
   }
 
@@ -317,6 +548,40 @@ class McpToolRouterRouteTest {
       assertTrue(result.getBoolean("isError"));
       String text = result.getJSONArray("content").getJSONObject(0).getString("text");
       assertTrue(text.contains("Missing arguments"));
+    }
+
+    /**
+     * ETP-4257: neo_list on a CALLABLE report (R) spec no longer surfaces the opaque
+     * "Entity not found: header". End-to-end (route → handleList → shared guard) the error
+     * names the report type and points the agent at the concrete etendo_generate_ tool.
+     */
+    @Test
+    @DisplayName("neo_list on a callable report (R) spec explains the generate tool")
+    void listOnReportSpecExplainsGenerateTool() throws Exception {
+      SFSpec spec = mock(SFSpec.class);
+      when(spec.getId()).thenReturn(SPEC_ID);
+      when(spec.getName()).thenReturn("invoice-report");
+      when(spec.getSpecType()).thenReturn("R");
+      setupSpecLookup(spec);
+
+      // Run the real guard so the handler→helper path is covered; only report callability
+      // is stubbed (its own DB query is out of scope here).
+      supportMock.when(() -> McpToolRouterSupport.resolveIncludedEntityOrExplain(
+          any(SFSpec.class), anyString())).thenCallRealMethod();
+
+      try (MockedStatic<NeoReportCallability> callabilityMock =
+          mockStatic(NeoReportCallability.class)) {
+        callabilityMock.when(() -> NeoReportCallability.isReportCallable(spec)).thenReturn(true);
+
+        JSONObject result = router.route("neo_list", buildCrudArgs(), READ_SCOPES);
+
+        assertTrue(result.getBoolean("isError"));
+        String text = contentText(result);
+        assertTrue(text.contains("report type (R)"),
+            "error must state the spec is a report type: " + text);
+        assertTrue(text.contains("etendo_generate_"),
+            "error must point at the generate tool: " + text);
+      }
     }
   }
 
@@ -666,10 +931,14 @@ class McpToolRouterRouteTest {
     @Test
     @DisplayName("unknown entity returns error")
     void unknownEntityReturnsError() throws Exception {
-      SFSpec spec = mockSpec();
+      SFSpec spec = mockSpec(); // type "W"
       setupSpecLookup(spec);
 
-      // Spec resolves, but entity resolution throws OBException("Entity not found: <name>").
+      // AC-3: for a type-W spec the shared guard delegates to findIncludedEntity, preserving
+      // the "Entity not found: <name>" message for a genuinely wrong entity name. Run the real
+      // helper and let the delegate throw, exercising the W branch end-to-end.
+      supportMock.when(() -> McpToolRouterSupport.resolveIncludedEntityOrExplain(
+          any(SFSpec.class), anyString())).thenCallRealMethod();
       supportMock.when(() -> McpToolRouterSupport.findIncludedEntity(anyString(), anyString()))
           .thenThrow(new OBException("Entity not found: " + ENTITY_NAME));
 
@@ -677,7 +946,7 @@ class McpToolRouterRouteTest {
       JSONObject result = router.route("neo_list", args, READ_SCOPES);
 
       assertTrue(result.getBoolean("isError"));
-      String text = result.getJSONArray("content").getJSONObject(0).getString("text");
+      String text = contentText(result);
       assertTrue(text.contains("Entity not found"));
     }
 
@@ -688,17 +957,17 @@ class McpToolRouterRouteTest {
       SFEntity entity = mockEntity();
       setupSpecLookup(spec);
 
-      // Entity resolves but has no linked AD_Tab. The router's own getAdTabOrThrow
-      // (still private in McpToolRouter) raises "No AD_Tab linked to entity: <name>".
-      supportMock.when(() -> McpToolRouterSupport.findIncludedEntity(anyString(), anyString()))
-          .thenReturn(entity);
+      // Entity resolves (via the shared guard) but has no linked AD_Tab. The router's own
+      // getAdTabOrThrow (still private in McpToolRouter) raises "No AD_Tab linked to entity".
+      supportMock.when(() -> McpToolRouterSupport.resolveIncludedEntityOrExplain(
+          any(SFSpec.class), anyString())).thenReturn(entity);
       when(entity.getADTab()).thenReturn(null);
 
       JSONObject args = buildCrudArgs();
       JSONObject result = router.route("neo_list", args, READ_SCOPES);
 
       assertTrue(result.getBoolean("isError"));
-      String text = result.getJSONArray("content").getJSONObject(0).getString("text");
+      String text = contentText(result);
       assertTrue(text.contains("No AD_Tab"));
     }
   }
@@ -1232,6 +1501,84 @@ class McpToolRouterRouteTest {
           args, PROCESS_SCOPES_LOCAL);
 
       assertTrue(result.getBoolean("isError"));
+    }
+  }
+
+  // ── ETP-4257: entity-CRUD call-sites resolve via the shared guard ─────────
+
+  /**
+   * Every entity-CRUD handler now resolves its entity through
+   * {@code McpToolRouterSupport.resolveIncludedEntityOrExplain} instead of
+   * {@code findIncludedEntity}. These minimal tests drive each changed call-site
+   * (neo_get/create/update/delete/selectors/schema) with a resolved entity that has no
+   * AD_Tab, so the changed line executes and control exits at {@code getAdTabOrThrow} — before
+   * any DefaultJsonDataService/ModelProvider static-init dependency is touched. neo_list and
+   * neo_defaults call-sites are already covered by their own tests above.
+   */
+  @Nested
+  @DisplayName("route — entity-CRUD tools resolve via shared guard (ETP-4257)")
+  class CrudGuardCallSiteTests {
+
+    private JSONObject routeWithNoTabEntity(String tool, JSONObject args, Set<String> scopes) {
+      SFSpec spec = mockSpec(); // type "W"
+      SFEntity entity = mockEntity();
+      setupSpecLookup(spec);
+      supportMock.when(() -> McpToolRouterSupport.resolveIncludedEntityOrExplain(
+          any(SFSpec.class), anyString())).thenReturn(entity);
+      when(entity.getADTab()).thenReturn(null);
+      return router.route(tool, args, scopes);
+    }
+
+    private void assertNoTabError(JSONObject result) throws Exception {
+      assertTrue(result.getBoolean("isError"));
+      assertTrue(contentText(result).contains("No AD_Tab"));
+    }
+
+    @Test
+    @DisplayName("neo_get resolves entity via the shared guard")
+    void getResolvesViaGuard() throws Exception {
+      JSONObject args = buildCrudArgs();
+      args.put("id", "rec-1");
+      assertNoTabError(routeWithNoTabEntity("neo_get", args, READ_SCOPES));
+    }
+
+    @Test
+    @DisplayName("neo_create resolves entity via the shared guard")
+    void createResolvesViaGuard() throws Exception {
+      JSONObject args = buildCrudArgs();
+      args.put("fields", new JSONObject());
+      assertNoTabError(routeWithNoTabEntity("neo_create", args, WRITE_SCOPES));
+    }
+
+    @Test
+    @DisplayName("neo_update resolves entity via the shared guard")
+    void updateResolvesViaGuard() throws Exception {
+      JSONObject args = buildCrudArgs();
+      args.put("id", "rec-1");
+      args.put("fields", new JSONObject());
+      assertNoTabError(routeWithNoTabEntity("neo_update", args, WRITE_SCOPES));
+    }
+
+    @Test
+    @DisplayName("neo_delete resolves entity via the shared guard")
+    void deleteResolvesViaGuard() throws Exception {
+      JSONObject args = buildCrudArgs();
+      args.put("id", "rec-1");
+      assertNoTabError(routeWithNoTabEntity("neo_delete", args, WRITE_SCOPES));
+    }
+
+    @Test
+    @DisplayName("neo_selectors resolves entity via the shared guard")
+    void selectorsResolvesViaGuard() throws Exception {
+      JSONObject args = buildCrudArgs();
+      args.put("column", "C_BPartner_ID");
+      assertNoTabError(routeWithNoTabEntity("neo_selectors", args, READ_SCOPES));
+    }
+
+    @Test
+    @DisplayName("neo_schema resolves entity via the shared guard")
+    void schemaResolvesViaGuard() throws Exception {
+      assertNoTabError(routeWithNoTabEntity("neo_schema", buildCrudArgs(), READ_SCOPES));
     }
   }
 }

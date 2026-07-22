@@ -11,6 +11,7 @@ import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.openbravo.base.exception.OBException;
+import org.openbravo.base.weld.WeldUtils;
 import org.hibernate.criterion.MatchMode;
 import org.hibernate.criterion.Restrictions;
 import org.openbravo.dal.core.OBContext;
@@ -84,6 +85,64 @@ class NeoServletSupport {
     }
   }
 
+  /**
+   * Dispatch to a CDI-discovered {@link NeoHandler} by {@code Java_Qualifier}, running the
+   * default CRUD service as either the sole result (no handler / handler declines via a
+   * {@code null} pre-hook) or as the wrapped "default service" step between the handler's
+   * pre- and post-hooks. Mirrors {@link NeoServlet#handleWithHooks} exactly, but takes a
+   * {@link NeoCrudHandler} directly instead of an {@code HttpServletRequest}/
+   * {@code HttpServletResponse} pair — neither of which the original method actually reads
+   * in its body. This lets non-HTTP callers (namely {@link BatchService}, which documents
+   * itself as running "without going through HTTP") honor a custom handler too: before this,
+   * {@code BatchService#createRecord} always called {@link NeoCrudHandler#handleDefault}
+   * directly, silently skipping any entity's configured Java_Qualifier — for an entity whose
+   * handler owns nested-record creation logic the generic CRUD path knows nothing about
+   * (e.g. Contacts' {@code locationAddress}, which creates a C_Location the join entity's
+   * own fields never expose), the record was created with none of the handler's real logic
+   * applied, silently violating downstream NOT NULL constraints.
+   */
+  static NeoResponse handleWithHooks(String javaQualifier, NeoContext context, NeoCrudHandler crudHandler) {
+    try {
+      NeoHandler handler = lookupHandler(javaQualifier);
+      if (handler == null) {
+        log.warn("No handler found for qualifier '{}', falling back to default", javaQualifier);
+        return crudHandler.handleDefault(context);
+      }
+
+      NeoResponse preResult = handler.handle(context);
+      if (preResult != null) {
+        context.setPreviousResult(preResult);
+        NeoResponse afterResult = handler.afterHandle(context);
+        return afterResult != null ? afterResult : preResult;
+      }
+
+      NeoResponse defaultResult = crudHandler.handleDefault(context);
+
+      context.setPreviousResult(defaultResult);
+      NeoResponse afterResult = handler.afterHandle(context);
+      return afterResult != null ? afterResult : defaultResult;
+    } catch (Exception e) {
+      log.error("Error executing hook handler: {}", javaQualifier, e);
+      return NeoResponse.error(500, "Hook handler error: " + e.getMessage());
+    }
+  }
+
+  static NeoHandler lookupHandler(String qualifier) {
+    try {
+      for (NeoHandler handler : WeldUtils.getInstances(NeoHandler.class)) {
+        javax.inject.Named named = handler.getClass().getAnnotation(javax.inject.Named.class);
+        if (named != null && qualifier.equals(named.value())) {
+          return handler;
+        }
+      }
+      log.warn("No NeoHandler found with @Named(\"{}\")", qualifier);
+      return null;
+    } catch (Exception e) {
+      log.error("Failed to lookup handler with qualifier: {}", qualifier, e);
+      return null;
+    }
+  }
+
   static SFSpec findSpec(String specName) {
     OBCriteria<SFSpec> criteria = OBDal.getInstance().createCriteria(SFSpec.class);
     criteria.add(Restrictions.ilike(SFSpec.PROPERTY_NAME, specName, MatchMode.EXACT));
@@ -95,6 +154,14 @@ class NeoServletSupport {
 
   static boolean hasWindowAccess(String windowId) {
     return com.etendoerp.go.schemaforge.util.NeoAccessHelper.hasWindowAccess(windowId);
+  }
+
+  static boolean hasWindowAccess(String windowId, String httpMethod) {
+    return com.etendoerp.go.schemaforge.util.NeoAccessHelper.hasWindowAccess(windowId, httpMethod);
+  }
+
+  static boolean hasWindowAccessForSpec(SFSpec spec, String httpMethod) {
+    return com.etendoerp.go.schemaforge.util.NeoAccessHelper.hasWindowAccessForSpec(spec, httpMethod);
   }
 
   static boolean hasProcessAccess(String processId) {
