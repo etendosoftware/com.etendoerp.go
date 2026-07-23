@@ -24,7 +24,13 @@ import javax.servlet.http.HttpServletResponse;
 
 import org.apache.commons.lang3.StringUtils;
 import org.codehaus.jettison.json.JSONObject;
+import org.hibernate.criterion.Restrictions;
 import org.openbravo.base.exception.OBException;
+import org.openbravo.dal.service.OBCriteria;
+import org.openbravo.dal.service.OBDal;
+import org.openbravo.financial.FinancialUtils;
+import org.openbravo.model.common.currency.ConversionRate;
+import org.openbravo.model.common.currency.ConversionRateDoc;
 import org.openbravo.model.common.currency.Currency;
 import org.openbravo.model.common.invoice.Invoice;
 import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
@@ -125,23 +131,84 @@ final class PaymentCurrencyConverter {
     return converted;
   }
 
-  /** Scale used for a derived reconciliation rate (matches the C_Conversion_Rate multiplyrate). */
-  private static final int DERIVED_RATE_SCALE = 12;
+  /**
+   * The conversion rate to use for a bank-reconciliation payment against {@code invoice}, expressed
+   * invoice-currency → account-currency: the invoice's own document-level exchange rate
+   * ({@link ConversionRateDoc}, set when the invoice was issued or via the frontend's
+   * {@code CurrencyRatePicker}) when one exists for the exact currency pair, otherwise the general
+   * {@code C_Conversion_Rate} spot rate for the invoice date. Mirrors the precedence
+   * {@link InvoiceExchangeRateValidator} uses to gate invoice completion — document rate wins over
+   * the general table. Returns {@link BigDecimal#ONE} when the currencies already match. Throws
+   * {@link OBException} when the currencies differ and neither source has a rate, since booking the
+   * payment would otherwise silently use a wrong (or undefined) conversion.
+   */
+  static BigDecimal resolveInvoiceRate(Invoice invoice, FIN_FinancialAccount account) {
+    Currency from = invoice.getCurrency();
+    Currency to = account.getCurrency();
+    if (from == null || to == null || from.getId().equals(to.getId())) {
+      return BigDecimal.ONE;
+    }
+    BigDecimal docRate = documentRate(invoice, from, to);
+    if (docRate != null) {
+      return docRate;
+    }
+    BigDecimal generalRate = generalRate(invoice, from, to);
+    if (generalRate != null) {
+      return generalRate;
+    }
+    throw new OBException("No exchange rate available to reconcile invoice "
+        + invoice.getDocumentNo() + " (" + from.getISOCode() + " -> " + to.getISOCode() + ")");
+  }
 
   /**
-   * The conversion rate realized by a bank-reconciliation match, derived from the two known
-   * amounts: {@code accountAmount / paymentAmount}. In reconciliation the statement line (expressed
-   * in the account currency, {@code accountAmount}) is ground truth for what actually settled the
-   * invoice outstanding ({@code paymentAmount}, in the invoice currency), so the rate follows from
-   * the amounts rather than a C_Conversion_Rate lookup — guaranteeing the financial transaction
-   * reconciles exactly against the statement, with no exchange-difference residual. Booked on the
-   * payment for the GL conversion record; the transaction amount itself is the exact
-   * {@code accountAmount}, not {@code paymentAmount * rate}, so double rounding cannot drift it.
+   * The invoice's own document-level rate for the exact {@code from -> to} pair, or {@code null}
+   * when none is set (or it is zero). Mirrors
+   * {@code InvoiceExchangeRateValidator.hasDocumentRate}, returning the rate value instead of a
+   * boolean.
    */
-  static BigDecimal derivedRate(BigDecimal paymentAmount, BigDecimal accountAmount) {
-    if (paymentAmount == null || paymentAmount.signum() == 0) {
-      throw new OBException("Cannot derive a conversion rate for a zero invoice amount");
+  private static BigDecimal documentRate(Invoice invoice, Currency from, Currency to) {
+    OBCriteria<ConversionRateDoc> crit = OBDal.getInstance().createCriteria(ConversionRateDoc.class);
+    crit.add(Restrictions.eq(ConversionRateDoc.PROPERTY_INVOICE, invoice));
+    crit.add(Restrictions.eq(ConversionRateDoc.PROPERTY_CURRENCY, from));
+    crit.add(Restrictions.eq(ConversionRateDoc.PROPERTY_TOCURRENCY, to));
+    crit.setFilterOnReadableClients(false);
+    crit.setFilterOnReadableOrganization(false);
+    for (ConversionRateDoc rateDoc : crit.list()) {
+      BigDecimal rate = rateDoc.getRate();
+      if (rate != null && rate.signum() != 0) {
+        return rate;
+      }
     }
-    return accountAmount.divide(paymentAmount, DERIVED_RATE_SCALE, RoundingMode.HALF_UP);
+    return null;
+  }
+
+  /**
+   * The general {@code C_Conversion_Rate} spot rate for the invoice date, or {@code null} when
+   * none is configured (or it is zero, which would otherwise divide-by-zero downstream).
+   */
+  private static BigDecimal generalRate(Invoice invoice, Currency from, Currency to) {
+    if (invoice.getInvoiceDate() == null) {
+      return null;
+    }
+    ConversionRate rate = FinancialUtils.getConversionRate(invoice.getInvoiceDate(), from, to,
+        invoice.getOrganization(), invoice.getClient());
+    if (rate == null) {
+      return null;
+    }
+    BigDecimal multiplyRate = rate.getMultipleRateBy();
+    return multiplyRate != null && multiplyRate.signum() != 0 ? multiplyRate : null;
+  }
+
+  /**
+   * The invoice-currency amount that, converted at {@code rate}, produces {@code baseAmount} in the
+   * account currency — the inverse of {@link #convertedAmount}. Used when a statement line only
+   * partially settles an invoice: the invoice-currency payment amount is derived from the portion
+   * of the line consumed, rounded to the invoice currency's own precision.
+   */
+  static BigDecimal invoiceAmountFor(BigDecimal baseAmount, BigDecimal rate, Currency invoiceCurrency) {
+    int scale = invoiceCurrency != null && invoiceCurrency.getStandardPrecision() != null
+        ? invoiceCurrency.getStandardPrecision().intValue()
+        : 2;
+    return baseAmount.divide(rate, scale, RoundingMode.HALF_UP);
   }
 }

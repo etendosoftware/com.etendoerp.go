@@ -9,7 +9,7 @@
  * "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, either express or
  * implied. See the License for the specific language governing rights
  * and limitations under the License.
- * All portions are Copyright (C) 2021-2026 FUTIT SERVICES, S.L
+ * All portions are Copyright © 2021-2026 FUTIT SERVICES, S.L
  * All Rights Reserved.
  * Contributor(s): Futit Services S.L.
  * *************************************************************************
@@ -18,7 +18,9 @@
 package com.etendoerp.go.schemaforge;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
@@ -41,34 +43,50 @@ import org.mockito.MockedStatic;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
+import org.openbravo.base.exception.OBException;
+import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.common.currency.ConversionRateDoc;
 import org.openbravo.model.common.currency.Currency;
 import org.openbravo.model.common.invoice.Invoice;
 import org.openbravo.model.financialmgmt.payment.FIN_BankStatementLine;
 import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
+import org.openbravo.model.financialmgmt.payment.FIN_PaymentMethod;
 import org.openbravo.model.financialmgmt.payment.FIN_PaymentSchedule;
 
 /**
- * DB-free unit tests for the ETP-4502 multi-currency (foreign-invoice) branch of
- * {@link ReconciliationFlowSupport#createInvoicePayments}. Only the validation/rejection paths are
- * exercised here: they return a {@link NeoResponse} before any DAL write, so they are reachable by
- * mocking {@link OBDal#get} alone. The happy path (which delegates to
- * {@code ReconciliationPaymentService.registerReconciliationPaymentMultiCurrency} — draft-payment
- * creation, {@code processOrThrow}, transaction persistence) needs an integration harness and is
- * documented as not covered here.
+ * DB-free unit tests for {@link ReconciliationFlowSupport#createInvoicePayments}, covering the
+ * ETP-4502 iteration-2 behavior: a statement line can now be allocated across MULTIPLE invoices of
+ * possibly different currencies (the old single-foreign-invoice restriction is gone — every invoice
+ * is settled through the same greedy, possibly-partial allocation, with its own currency converted
+ * via {@link PaymentCurrencyConverter#resolveInvoiceRate}), and an optional {@code paymentMethodId}
+ * is resolved once up front via {@link FIN_PaymentMethod}.
  *
- * <p>The foreign branch is entered when the account has a currency and at least one selected
- * invoice is in a different currency ({@code hasForeignInvoice}). Account currency is {@code USD};
- * a foreign invoice is {@code EUR}; a same-currency invoice is {@code USD}.
+ * <p>Only the validation/rejection paths — those that return (or throw) before any DAL write — are
+ * exercised here: they are reachable by mocking {@link OBDal#get}/{@code createCriteria} alone. The
+ * happy path (which delegates to {@code ReconciliationPaymentService.registerReconciliationPayment}
+ * — draft-payment creation, {@code processOrThrow}, transaction persistence) needs an integration
+ * harness (OBBaseTest) and is NOT covered here, same limitation the original test documented.
+ *
+ * <p>Account currency is {@code USD}; a foreign invoice is {@code EUR}/{@code GBP}; a same-currency
+ * invoice is {@code USD}.
  *
  * <p>Edge cases covered ({@code >= 3} required):
  * <ul>
- *   <li>more than one foreign invoice under a single line -> 400 (single-invoice restriction)</li>
- *   <li>foreign invoice with a blank scheduleId -> 400</li>
- *   <li>foreign invoice/schedule not found in the DAL -> 404</li>
- *   <li>foreign invoice with zero outstanding -> 400</li>
- *   <li>foreign invoice with a zero-amount statement line -> 400</li>
- *   <li>same-currency zero line -> legacy path, returns null (NOT the foreign zero-line error)</li>
+ *   <li>blank scheduleId → 400 "scheduleId"</li>
+ *   <li>invoice/schedule not found → 404</li>
+ *   <li>a zero-outstanding invoice is silently skipped (no dedicated 400); the overall line still
+ *       ends up unresolved → 400 "do not cover" (NOT an "outstanding" specific message anymore)</li>
+ *   <li>a zero-amount statement line short-circuits to {@code null} immediately, even with a foreign
+ *       invoice queued — the invoice is never even looked up (no per-invoice zero-line 400 anymore)
+ *       </li>
+ *   <li>multiple invoices of different currencies under one line no longer hit the old
+ *       "single invoice" 400 — both are evaluated and the final rejection (when it happens) is the
+ *       generic coverage message</li>
+ *   <li>an unresolvable {@code paymentMethodId} throws {@link OBException} (bubbles up, not a 400)</li>
+ *   <li>a blank/null {@code paymentMethodId} skips resolution — legacy zero-line behavior unchanged
+ *       </li>
+ *   <li>same-currency zero line → legacy path, returns {@code null}</li>
  * </ul>
  */
 @ExtendWith(MockitoExtension.class)
@@ -77,6 +95,7 @@ class ReconciliationFlowSupportForeignInvoiceTest {
 
   private static final String ACCOUNT_CURRENCY = "USD";
   private static final String FOREIGN_CURRENCY = "EUR";
+  private static final String OTHER_FOREIGN_CURRENCY = "GBP";
   private static final BigDecimal TOLERANCE = new BigDecimal("0.01");
 
   @Mock
@@ -117,6 +136,7 @@ class ReconciliationFlowSupportForeignInvoiceTest {
     Invoice inv = mock(Invoice.class);
     Currency cur = currency(currencyId);
     when(inv.getCurrency()).thenReturn(cur);
+    when(inv.getDocumentNo()).thenReturn(id);
     when(obDal.get(eq(Invoice.class), eq(id))).thenReturn(inv);
     return inv;
   }
@@ -160,35 +180,28 @@ class ReconciliationFlowSupportForeignInvoiceTest {
     return resp.getBody().getJSONObject("error").getString("message");
   }
 
+  /**
+   * Stubs {@code OBDal.getInstance().createCriteria(ConversionRateDoc.class).list()} so any foreign
+   * invoice's {@link PaymentCurrencyConverter#resolveInvoiceRate} resolves via the document-rate
+   * path (no {@code FinancialUtils} mocking needed) instead of NPE-ing on an unstubbed criteria.
+   */
+  @SuppressWarnings("unchecked")
+  private void stubDocumentRate(String rate) {
+    OBCriteria<ConversionRateDoc> crit = mock(OBCriteria.class);
+    ConversionRateDoc doc = mock(ConversionRateDoc.class);
+    when(doc.getRate()).thenReturn(new BigDecimal(rate));
+    when(crit.list()).thenReturn(List.of(doc));
+    when(obDal.createCriteria(ConversionRateDoc.class)).thenReturn(crit);
+  }
+
   // ── tests ────────────────────────────────────────────────────────────────
 
   /**
-   * Two foreign invoices under one statement line are rejected: multi-currency reconciliation only
-   * supports a single invoice per line.
+   * A single invoice with a blank scheduleId is rejected with 400 (field validation runs before any
+   * invoice/schedule lookup, so no currency handling is involved).
    */
   @Test
-  void moreThanOneForeignInvoice_returns400() throws Exception {
-    FIN_FinancialAccount acc = account(ACCOUNT_CURRENCY);
-    invoice("inv-1", FOREIGN_CURRENCY);
-    invoice("inv-2", FOREIGN_CURRENCY);
-    FIN_BankStatementLine bsl = line("100", "0");
-    JSONArray invoiceSpecs = specs(spec("inv-1", "sch-1"), spec("inv-2", "sch-2"));
-    List<String> operationIds = new ArrayList<>();
-
-    NeoResponse resp = ReconciliationFlowSupport.createInvoicePayments(
-        acc, bsl, invoiceSpecs, operationIds, TOLERANCE);
-
-    assertEquals(400, resp.getHttpStatus());
-    assertTrue(message(resp).contains("single invoice"), message(resp));
-    assertTrue(operationIds.isEmpty(), "no operation should be produced on rejection");
-  }
-
-  /**
-   * A single foreign invoice with a blank scheduleId is rejected with 400 (the invoiceId is present,
-   * so the foreign branch is entered, then per-invoice field validation fails).
-   */
-  @Test
-  void singleForeignInvoice_missingScheduleId_returns400() throws Exception {
+  void singleInvoice_missingScheduleId_returns400() throws Exception {
     FIN_FinancialAccount acc = account(ACCOUNT_CURRENCY);
     invoice("inv-1", FOREIGN_CURRENCY);
     FIN_BankStatementLine bsl = line("100", "0");
@@ -196,17 +209,18 @@ class ReconciliationFlowSupportForeignInvoiceTest {
     List<String> operationIds = new ArrayList<>();
 
     NeoResponse resp = ReconciliationFlowSupport.createInvoicePayments(
-        acc, bsl, invoiceSpecs, operationIds, TOLERANCE);
+        acc, bsl, invoiceSpecs, operationIds, TOLERANCE, null);
 
     assertEquals(400, resp.getHttpStatus());
     assertTrue(message(resp).contains("scheduleId"), message(resp));
   }
 
   /**
-   * When the payment schedule cannot be loaded, the foreign path returns 404.
+   * When the payment schedule cannot be loaded, the path returns 404 (also before any currency
+   * conversion is attempted).
    */
   @Test
-  void singleForeignInvoice_scheduleNotFound_returns404() throws Exception {
+  void singleInvoice_scheduleNotFound_returns404() throws Exception {
     FIN_FinancialAccount acc = account(ACCOUNT_CURRENCY);
     invoice("inv-1", FOREIGN_CURRENCY);
     // no schedule stubbed for "sch-missing" -> OBDal.get returns null
@@ -215,54 +229,88 @@ class ReconciliationFlowSupportForeignInvoiceTest {
     List<String> operationIds = new ArrayList<>();
 
     NeoResponse resp = ReconciliationFlowSupport.createInvoicePayments(
-        acc, bsl, invoiceSpecs, operationIds, TOLERANCE);
+        acc, bsl, invoiceSpecs, operationIds, TOLERANCE, null);
 
     assertEquals(404, resp.getHttpStatus());
   }
 
   /**
-   * A foreign invoice whose schedule has zero outstanding is rejected: there is nothing to settle.
+   * A same-currency invoice whose schedule has zero outstanding is silently skipped inside
+   * {@code settleInvoice} (the {@code allocateBase <= tolerance} early return) — there is no
+   * dedicated "outstanding" 400 anymore. Since the line amount is not otherwise covered, the loop
+   * still ends with the generic "do not cover" rejection.
    */
   @Test
-  void singleForeignInvoice_zeroOutstanding_returns400() throws Exception {
+  void singleInvoice_zeroOutstanding_skippedThenRejectedAsInsufficientCoverage() throws Exception {
     FIN_FinancialAccount acc = account(ACCOUNT_CURRENCY);
-    invoice("inv-1", FOREIGN_CURRENCY);
+    invoice("inv-1", ACCOUNT_CURRENCY);
     schedule("sch-1", "0");
     FIN_BankStatementLine bsl = line("100", "0");
     JSONArray invoiceSpecs = specs(spec("inv-1", "sch-1"));
     List<String> operationIds = new ArrayList<>();
 
     NeoResponse resp = ReconciliationFlowSupport.createInvoicePayments(
-        acc, bsl, invoiceSpecs, operationIds, TOLERANCE);
+        acc, bsl, invoiceSpecs, operationIds, TOLERANCE, null);
 
     assertEquals(400, resp.getHttpStatus());
-    assertTrue(message(resp).toLowerCase().contains("outstanding"), message(resp));
+    assertTrue(message(resp).toLowerCase().contains("do not cover"), message(resp));
+    assertFalse(message(resp).toLowerCase().contains("outstanding"), message(resp));
+    assertTrue(operationIds.isEmpty());
   }
 
   /**
-   * A foreign invoice with a positive outstanding but a zero-amount statement line is rejected:
-   * there is nothing on the bank side to reconcile.
+   * A zero-amount statement line now short-circuits to {@code null} immediately (the for-loop
+   * condition {@code remaining > tolerance} is false from the start), even when a foreign-currency
+   * invoice is queued — the invoice is never even looked up. This replaces the old per-invoice
+   * "statement line is zero" 400.
    */
   @Test
-  void singleForeignInvoice_zeroLineAmount_returns400() throws Exception {
+  void zeroLineAmount_withForeignInvoiceQueued_shortCircuitsToNullWithoutLookingUpTheInvoice() throws Exception {
     FIN_FinancialAccount acc = account(ACCOUNT_CURRENCY);
-    invoice("inv-1", FOREIGN_CURRENCY);
-    schedule("sch-1", "30");
+    // Deliberately do NOT stub "inv-1" via the invoice() helper's OBDal.get — if the code looked it
+    // up, obDal.get would return null and the invoice/schedule-not-found 404 branch would fire
+    // instead of null, so this also proves the invoice lookup never happens.
     FIN_BankStatementLine bsl = line("0", "0");
     JSONArray invoiceSpecs = specs(spec("inv-1", "sch-1"));
     List<String> operationIds = new ArrayList<>();
 
     NeoResponse resp = ReconciliationFlowSupport.createInvoicePayments(
-        acc, bsl, invoiceSpecs, operationIds, TOLERANCE);
+        acc, bsl, invoiceSpecs, operationIds, TOLERANCE, null);
 
-    assertEquals(400, resp.getHttpStatus());
-    assertTrue(message(resp).toLowerCase().contains("zero"), message(resp));
+    assertNull(resp, "a zero-amount line should short-circuit before any invoice lookup");
+    assertTrue(operationIds.isEmpty());
   }
 
   /**
-   * Contrast case: a same-currency invoice does NOT enter the foreign branch. With a zero-amount
-   * line and a matching currency, the legacy path short-circuits (remaining {@code <=} tolerance)
-   * and returns {@code null} (success/no-op) rather than the foreign "statement line is zero" 400.
+   * Two invoices of DIFFERENT currencies under a single line are now both evaluated in the loop
+   * (the old "single invoice" restriction is gone). Both have zero outstanding, so both are
+   * skipped, and the final rejection is the generic coverage message — critically NOT the removed
+   * "single invoice" error.
+   */
+  @Test
+  void multipleInvoicesOfDifferentCurrencies_bothEvaluated_noSingleInvoiceRestriction() throws Exception {
+    FIN_FinancialAccount acc = account(ACCOUNT_CURRENCY);
+    invoice("inv-1", FOREIGN_CURRENCY);
+    invoice("inv-2", OTHER_FOREIGN_CURRENCY);
+    schedule("sch-1", "0");
+    schedule("sch-2", "0");
+    stubDocumentRate("1.1"); // lets resolveInvoiceRate resolve for both foreign invoices
+    FIN_BankStatementLine bsl = line("100", "0");
+    JSONArray invoiceSpecs = specs(spec("inv-1", "sch-1"), spec("inv-2", "sch-2"));
+    List<String> operationIds = new ArrayList<>();
+
+    NeoResponse resp = ReconciliationFlowSupport.createInvoicePayments(
+        acc, bsl, invoiceSpecs, operationIds, TOLERANCE, null);
+
+    assertEquals(400, resp.getHttpStatus());
+    assertTrue(message(resp).toLowerCase().contains("do not cover"), message(resp));
+    assertFalse(message(resp).toLowerCase().contains("single invoice"), message(resp));
+    assertTrue(operationIds.isEmpty());
+  }
+
+  /**
+   * Contrast case: a same-currency invoice under a zero-amount line short-circuits to {@code null}
+   * (success/no-op), exactly like the foreign case above — currency no longer changes this behavior.
    */
   @Test
   void sameCurrencyZeroLine_takesLegacyPath_returnsNull() throws Exception {
@@ -273,26 +321,81 @@ class ReconciliationFlowSupportForeignInvoiceTest {
     List<String> operationIds = new ArrayList<>();
 
     NeoResponse resp = ReconciliationFlowSupport.createInvoicePayments(
-        acc, bsl, invoiceSpecs, operationIds, TOLERANCE);
+        acc, bsl, invoiceSpecs, operationIds, TOLERANCE, null);
 
-    assertNull(resp, "same-currency zero line should not hit the foreign rejection path");
+    assertNull(resp, "same-currency zero line should not hit any rejection path");
     assertTrue(operationIds.isEmpty());
   }
 
   /**
-   * An account with no declared currency keeps legacy behavior: the foreign branch is skipped even
-   * when the invoice has a currency, so a zero line short-circuits to {@code null}.
+   * An account with no declared currency keeps legacy behavior: with a zero-amount line, the result
+   * is still {@code null} regardless of the queued invoice's currency.
    */
   @Test
-  void accountWithoutCurrency_neverForeign_returnsNull() throws Exception {
+  void accountWithoutCurrency_zeroLine_returnsNull() throws Exception {
     FIN_FinancialAccount acc = account(null);
-    invoice("inv-1", FOREIGN_CURRENCY);
     FIN_BankStatementLine bsl = line("0", "0");
     JSONArray invoiceSpecs = specs(spec("inv-1", "sch-1"));
     List<String> operationIds = new ArrayList<>();
 
     NeoResponse resp = ReconciliationFlowSupport.createInvoicePayments(
-        acc, bsl, invoiceSpecs, operationIds, TOLERANCE);
+        acc, bsl, invoiceSpecs, operationIds, TOLERANCE, null);
+
+    assertNull(resp);
+  }
+
+  // ── paymentMethodId resolution ───────────────────────────────────────────
+
+  /**
+   * A {@code paymentMethodId} that does not resolve to an existing {@link FIN_PaymentMethod} makes
+   * {@code resolveChosenMethod} throw {@link OBException} — this happens up front, before the
+   * invoice loop, so it bubbles up as a thrown exception rather than a returned {@link NeoResponse}.
+   */
+  @Test
+  void paymentMethodId_doesNotResolve_throwsOBException() throws JSONException {
+    FIN_FinancialAccount acc = account(ACCOUNT_CURRENCY);
+    FIN_BankStatementLine bsl = line("100", "0");
+    JSONArray invoiceSpecs = specs(spec("inv-1", "sch-1"));
+    List<String> operationIds = new ArrayList<>();
+    // obDal.get(FIN_PaymentMethod.class, "pm-missing") is unstubbed -> returns null by default.
+
+    assertThrows(OBException.class, () -> ReconciliationFlowSupport.createInvoicePayments(
+        acc, bsl, invoiceSpecs, operationIds, TOLERANCE, "pm-missing"));
+  }
+
+  /**
+   * A blank {@code paymentMethodId} skips resolution entirely — legacy (pre-ETP-4502-iteration-2)
+   * behavior is unchanged: a zero-amount line still short-circuits to {@code null}.
+   */
+  @Test
+  void paymentMethodId_blank_skipsResolution_legacyBehaviorUnchanged() throws Exception {
+    FIN_FinancialAccount acc = account(ACCOUNT_CURRENCY);
+    FIN_BankStatementLine bsl = line("0", "0");
+    JSONArray invoiceSpecs = specs(spec("inv-1", "sch-1"));
+    List<String> operationIds = new ArrayList<>();
+
+    NeoResponse resp = ReconciliationFlowSupport.createInvoicePayments(
+        acc, bsl, invoiceSpecs, operationIds, TOLERANCE, "");
+
+    assertNull(resp);
+  }
+
+  /**
+   * A {@code paymentMethodId} that DOES resolve does not itself change the outcome of an otherwise
+   * zero-amount line — it is only carried forward into payment creation on the (unmockable) happy
+   * path. This proves resolution succeeding doesn't throw and doesn't short-circuit differently.
+   */
+  @Test
+  void paymentMethodId_resolves_zeroLineStillShortCircuitsToNull() throws Exception {
+    FIN_FinancialAccount acc = account(ACCOUNT_CURRENCY);
+    FIN_PaymentMethod method = mock(FIN_PaymentMethod.class);
+    when(obDal.get(eq(FIN_PaymentMethod.class), eq("pm-1"))).thenReturn(method);
+    FIN_BankStatementLine bsl = line("0", "0");
+    JSONArray invoiceSpecs = specs(spec("inv-1", "sch-1"));
+    List<String> operationIds = new ArrayList<>();
+
+    NeoResponse resp = ReconciliationFlowSupport.createInvoicePayments(
+        acc, bsl, invoiceSpecs, operationIds, TOLERANCE, "pm-1");
 
     assertNull(resp);
   }

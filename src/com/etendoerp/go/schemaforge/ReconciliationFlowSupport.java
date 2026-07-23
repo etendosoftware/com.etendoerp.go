@@ -29,11 +29,14 @@ import javax.servlet.http.HttpServletResponse;
 import org.apache.commons.lang3.StringUtils;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
+import org.openbravo.base.exception.OBException;
+import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.invoice.Invoice;
 import org.openbravo.model.financialmgmt.payment.FIN_BankStatementLine;
 import org.openbravo.model.financialmgmt.payment.FIN_FinaccTransaction;
 import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
 import org.openbravo.model.financialmgmt.payment.FIN_Payment;
+import org.openbravo.model.financialmgmt.payment.FIN_PaymentMethod;
 import org.openbravo.model.financialmgmt.payment.FIN_PaymentSchedule;
 
 final class ReconciliationFlowSupport {
@@ -43,65 +46,34 @@ final class ReconciliationFlowSupport {
   private ReconciliationFlowSupport() {
   }
 
+  /**
+   * Allocates the statement line across one or more selected invoices, possibly a mix of
+   * currencies (ETP-4502 iteration 2): each invoice's outstanding is converted to the account
+   * currency via its own exchange rate (see {@link PaymentCurrencyConverter#resolveInvoiceRate};
+   * {@link BigDecimal#ONE} when the currencies already match, so the same-currency behavior is
+   * unchanged) before being allocated against the remaining line amount — the same greedy,
+   * possibly-partial allocation the same-currency flow always used, generalized to convert each
+   * invoice's share. {@code paymentMethodId}, when present, is the single payment method the user
+   * picked in the reconciliation modal, applied to every invoice payment this call creates (an
+   * already-existing transaction selected via {@code operationIds} keeps its own payment/method
+   * untouched — see {@link #validateOperations}).
+   */
   static NeoResponse createInvoicePayments(FIN_FinancialAccount account,
       FIN_BankStatementLine line, JSONArray invoiceSpecs, List<String> operationIds,
-      BigDecimal tolerance) throws Exception {
+      BigDecimal tolerance, String paymentMethodId) throws Exception {
+    FIN_PaymentMethod chosenMethod = resolveChosenMethod(paymentMethodId);
+
     BigDecimal lineAmount = nullSafe(line.getCramount()).subtract(nullSafe(line.getDramount()));
     boolean isReceipt = lineAmount.signum() >= 0;
-
-    // Multi-currency: when a selected invoice is in a currency other than the account's, amounts
-    // cannot be summed across currencies, so this iteration supports a single invoice fully settled
-    // by the line. The rate is derived from the two amounts (statement line in account currency ÷
-    // invoice outstanding in invoice currency); the same-currency path below is unchanged.
-    if (hasForeignInvoice(account, invoiceSpecs)) {
-      return createForeignInvoicePayment(account, line, invoiceSpecs, lineAmount, isReceipt,
-          operationIds, tolerance);
-    }
-    return createSameCurrencyInvoicePayments(account, line, invoiceSpecs, operationIds, tolerance,
-        lineAmount, isReceipt);
-  }
-
-  /**
-   * Same-currency path: allocates the line amount across one or more invoices (possibly a partial
-   * match, with the remainder reported as an error). Extracted from {@link #createInvoicePayments}
-   * to keep its cognitive complexity under the Sonar limit (S3776).
-   */
-  private static NeoResponse createSameCurrencyInvoicePayments(FIN_FinancialAccount account,
-      FIN_BankStatementLine line, JSONArray invoiceSpecs, List<String> operationIds,
-      BigDecimal tolerance, BigDecimal lineAmount, boolean isReceipt) throws Exception {
     BigDecimal remaining = lineAmount.abs();
-    for (int i = 0; i < invoiceSpecs.length(); i++) {
-      if (remaining.compareTo(tolerance) <= 0) {
-        break;
+
+    for (int i = 0; i < invoiceSpecs.length() && remaining.compareTo(tolerance) > 0; i++) {
+      SettlementOutcome outcome = settleInvoice(account, line, invoiceSpecs.getJSONObject(i),
+          isReceipt, chosenMethod, operationIds, remaining, tolerance);
+      if (outcome.error() != null) {
+        return outcome.error();
       }
-      JSONObject spec = invoiceSpecs.getJSONObject(i);
-      String invoiceId = spec.optString(FIELD_INVOICE_ID, null);
-      String scheduleId = spec.optString("scheduleId", null);
-      if (StringUtils.isBlank(invoiceId) || StringUtils.isBlank(scheduleId)) {
-        return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
-            "invoiceId and scheduleId are required for each invoice");
-      }
-      Invoice invoice = org.openbravo.dal.service.OBDal.getInstance().get(Invoice.class, invoiceId);
-      FIN_PaymentSchedule schedule = org.openbravo.dal.service.OBDal.getInstance()
-          .get(FIN_PaymentSchedule.class, scheduleId);
-      if (invoice == null || schedule == null) {
-        return NeoResponse.error(HttpServletResponse.SC_NOT_FOUND,
-            "Invoice or payment schedule not found: " + invoiceId);
-      }
-      BigDecimal outstanding = nullSafe(schedule.getOutstandingAmount()).abs();
-      BigDecimal allocate = remaining.min(outstanding);
-      if (allocate.compareTo(tolerance) > 0) {
-        FIN_Payment payment = PaymentRegistrationService.registerPaymentCore(
-            invoice, schedule, allocate, line.getTransactionDate(), account, isReceipt);
-        List<FIN_FinaccTransaction> txns = payment.getFINFinaccTransactionList();
-        if (txns.isEmpty()) {
-          return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
-              "Payment did not produce a transaction: " + payment.getId());
-        }
-        ReactivationSupport.markAutoCreated(txns.get(0));
-        operationIds.add(txns.get(0).getId());
-        remaining = remaining.subtract(allocate);
-      }
+      remaining = outcome.remaining();
     }
     if (remaining.compareTo(tolerance) > 0) {
       return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
@@ -111,79 +83,78 @@ final class ReconciliationFlowSupport {
     return null;
   }
 
-  /**
-   * True when any selected invoice is in a currency different from the account's. Accounts without
-   * a declared currency keep the legacy single-currency behavior (returns false).
-   */
-  private static boolean hasForeignInvoice(FIN_FinancialAccount account, JSONArray invoiceSpecs) {
-    String accountCurrencyId = account.getCurrency() != null ? account.getCurrency().getId() : null;
-    if (accountCurrencyId == null) {
-      return false;
+  /** The method named by {@code paymentMethodId}, or {@code null} when none was chosen. */
+  private static FIN_PaymentMethod resolveChosenMethod(String paymentMethodId) {
+    if (StringUtils.isBlank(paymentMethodId)) {
+      return null;
     }
-    for (int i = 0; i < invoiceSpecs.length(); i++) {
-      JSONObject spec = invoiceSpecs.optJSONObject(i);
-      String invoiceId = spec != null ? spec.optString(FIELD_INVOICE_ID, null) : null;
-      if (StringUtils.isBlank(invoiceId)) {
-        continue;
-      }
-      Invoice invoice = org.openbravo.dal.service.OBDal.getInstance().get(Invoice.class, invoiceId);
-      if (invoice != null && invoice.getCurrency() != null
-          && !accountCurrencyId.equals(invoice.getCurrency().getId())) {
-        return true;
-      }
+    FIN_PaymentMethod method = OBDal.getInstance().get(FIN_PaymentMethod.class, paymentMethodId);
+    if (method == null) {
+      throw new OBException("Payment method not found: " + paymentMethodId);
     }
-    return false;
+    return method;
   }
 
   /**
-   * Multi-currency reconciliation: a single foreign-currency invoice fully settled by the statement
-   * line. Generates the payment in the invoice currency (cancelling the outstanding) and the
-   * financial transaction in the account currency (the exact line amount) with the derived
-   * conversion rate. Restricted to one invoice — mixing currencies across several invoices under a
-   * single line is out of scope for this iteration.
+   * Outcome of settling one invoice spec against the remaining line amount: either the updated
+   * {@code remaining} (with {@code error} null), or a {@code error} response to return verbatim
+   * (with {@code remaining} unchanged). Exactly one meaning applies at a time.
    */
-  private static NeoResponse createForeignInvoicePayment(FIN_FinancialAccount account,
-      FIN_BankStatementLine line, JSONArray invoiceSpecs, BigDecimal lineAmount, boolean isReceipt,
-      List<String> operationIds, BigDecimal tolerance) throws Exception {
-    if (invoiceSpecs.length() != 1) {
-      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
-          "Multi-currency reconciliation supports a single invoice per statement line.");
-    }
-    JSONObject spec = invoiceSpecs.getJSONObject(0);
+  private record SettlementOutcome(BigDecimal remaining, NeoResponse error) {
+  }
+
+  /**
+   * Settles one invoice spec against {@code remaining} (in the account currency): converts its
+   * outstanding via its own exchange rate (see
+   * {@link PaymentCurrencyConverter#resolveInvoiceRate}; {@link BigDecimal#ONE} when the
+   * currencies already match), allocates whatever of {@code remaining} it can absorb — fully or
+   * partially, same greedy allocation the same-currency flow always used — and registers the
+   * payment. Extracted from {@link #createInvoicePayments} to keep its cognitive complexity under
+   * the Sonar limit (S3776).
+   */
+  private static SettlementOutcome settleInvoice(FIN_FinancialAccount account,
+      FIN_BankStatementLine line, JSONObject spec, boolean isReceipt,
+      FIN_PaymentMethod chosenMethod, List<String> operationIds, BigDecimal remaining,
+      BigDecimal tolerance) throws Exception {
     String invoiceId = spec.optString(FIELD_INVOICE_ID, null);
     String scheduleId = spec.optString("scheduleId", null);
     if (StringUtils.isBlank(invoiceId) || StringUtils.isBlank(scheduleId)) {
-      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
-          "invoiceId and scheduleId are required for each invoice");
+      return new SettlementOutcome(remaining, NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
+          "invoiceId and scheduleId are required for each invoice"));
     }
-    Invoice invoice = org.openbravo.dal.service.OBDal.getInstance().get(Invoice.class, invoiceId);
-    FIN_PaymentSchedule schedule = org.openbravo.dal.service.OBDal.getInstance()
-        .get(FIN_PaymentSchedule.class, scheduleId);
+    Invoice invoice = OBDal.getInstance().get(Invoice.class, invoiceId);
+    FIN_PaymentSchedule schedule = OBDal.getInstance().get(FIN_PaymentSchedule.class, scheduleId);
     if (invoice == null || schedule == null) {
-      return NeoResponse.error(HttpServletResponse.SC_NOT_FOUND,
-          "Invoice or payment schedule not found: " + invoiceId);
+      return new SettlementOutcome(remaining, NeoResponse.error(HttpServletResponse.SC_NOT_FOUND,
+          "Invoice or payment schedule not found: " + invoiceId));
     }
+
     BigDecimal outstanding = nullSafe(schedule.getOutstandingAmount()).abs();
-    BigDecimal accountAmount = lineAmount.abs();
-    if (outstanding.compareTo(tolerance) <= 0) {
-      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
-          "The selected invoice has no outstanding amount to settle.");
+    BigDecimal rate = PaymentCurrencyConverter.resolveInvoiceRate(invoice, account);
+    BigDecimal outstandingBase = PaymentCurrencyConverter.convertedAmount(outstanding, rate, account);
+    BigDecimal allocateBase = remaining.min(outstandingBase);
+    if (allocateBase.compareTo(tolerance) <= 0) {
+      return new SettlementOutcome(remaining, null);
     }
-    if (accountAmount.compareTo(tolerance) <= 0) {
-      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
-          "The statement line amount is zero; nothing to reconcile.");
-    }
-    FIN_Payment payment = ReconciliationPaymentService.registerReconciliationPaymentMultiCurrency(
-        invoice, schedule, outstanding, accountAmount, line.getTransactionDate(), account,
-        isReceipt);
+
+    boolean fullSettlement = allocateBase.compareTo(outstandingBase) >= 0;
+    BigDecimal paymentAmount = fullSettlement
+        ? outstanding
+        : PaymentCurrencyConverter.invoiceAmountFor(allocateBase, rate, invoice.getCurrency());
+    BigDecimal txnAmount = PaymentCurrencyConverter.convertedAmount(paymentAmount, rate, account);
+
+    FIN_Payment payment = ReconciliationPaymentService.registerReconciliationPayment(
+        invoice, schedule, paymentAmount, txnAmount, rate, line.getTransactionDate(), account,
+        isReceipt, chosenMethod);
     List<FIN_FinaccTransaction> txns = payment.getFINFinaccTransactionList();
     if (txns.isEmpty()) {
-      return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
-          "Payment did not produce a transaction: " + payment.getId());
+      return new SettlementOutcome(remaining,
+          NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
+              "Payment did not produce a transaction: " + payment.getId()));
     }
     ReactivationSupport.markAutoCreated(txns.get(0));
     operationIds.add(txns.get(0).getId());
-    return null;
+    return new SettlementOutcome(remaining.subtract(txnAmount), null);
   }
 
   static NeoResponse validateOperations(List<String> operationIds, String accountId,

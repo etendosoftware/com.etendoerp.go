@@ -804,7 +804,7 @@ final class PaymentRegistrationService {
    * Groups the entities + header fields a draft-payment creation needs (Sonar S107 — the plain
    * parameter list grew past the 7-parameter limit once the reconciliation multi-currency path
    * needed the same constructor). Package-visible: also built by
-   * {@link ReconciliationPaymentService#registerReconciliationPaymentMultiCurrency}.
+   * {@link ReconciliationPaymentService#registerReconciliationPayment}.
    */
   record DraftPaymentRequest(AdvPaymentMngtDao dao, boolean isReceipt, Invoice invoice,
       FIN_PaymentMethod paymentMethod, FIN_FinancialAccount account, Date paymentDate) {
@@ -826,11 +826,12 @@ final class PaymentRegistrationService {
 
   /**
    * Draft-payment creation with an explicit financial-transaction amount (in the account currency)
-   * rather than deriving it from {@code amount * rate}. The bank-reconciliation multi-currency path
-   * ({@link ReconciliationPaymentService#registerReconciliationPaymentMultiCurrency}) uses this so
-   * the transaction is booked for the exact statement-line amount and reconciles against the bank
-   * statement to the cent; {@code rate} is the derived rate stored on the payment for the GL
-   * conversion record. Package-visible: also called by {@link ReconciliationPaymentService}.
+   * rather than deriving it from {@code amount * rate}. The bank-reconciliation path
+   * ({@link ReconciliationPaymentService#registerReconciliationPayment}) uses this so the
+   * transaction is booked for the exact amount the caller allocated to this invoice — the invoice
+   * amount times its own exchange rate, per {@link PaymentCurrencyConverter#resolveInvoiceRate} —
+   * even when that differs from the statement line. Package-visible: also called by
+   * {@link ReconciliationPaymentService}.
    */
   static FIN_Payment createDraftPayment(DraftPaymentRequest req, BigDecimal rate,
       BigDecimal amount, BigDecimal txnAmount) throws Exception {
@@ -867,7 +868,8 @@ final class PaymentRegistrationService {
     }
   }
 
-  private static String allowProperty(boolean isReceipt) {
+  /** Package-visible: also used by {@link ReconciliationPaymentService}. */
+  static String allowProperty(boolean isReceipt) {
     return isReceipt
         ? FinAccPaymentMethod.PROPERTY_PAYINALLOW
         : FinAccPaymentMethod.PROPERTY_PAYOUTALLOW;
@@ -955,8 +957,12 @@ final class PaymentRegistrationService {
     return invoiceMethod;
   }
 
-  /** True when {@code method} is configured for {@code account} in the given direction. */
-  private static boolean isMethodAllowed(FIN_FinancialAccount account, FIN_PaymentMethod method,
+  /**
+   * True when {@code method} is configured for {@code account} in the given direction.
+   * Package-visible: also used by {@link ReconciliationPaymentService} to validate a user-chosen
+   * reconciliation payment method.
+   */
+  static boolean isMethodAllowed(FIN_FinancialAccount account, FIN_PaymentMethod method,
       String allowProp) {
     OBCriteria<FinAccPaymentMethod> crit = OBDal.getInstance()
         .createCriteria(FinAccPaymentMethod.class);

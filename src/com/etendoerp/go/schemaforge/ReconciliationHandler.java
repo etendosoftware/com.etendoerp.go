@@ -67,6 +67,7 @@ import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.utility.OBError;
 import org.openbravo.model.common.businesspartner.BusinessPartner;
 import org.openbravo.model.common.enterprise.Organization;
+import org.openbravo.model.common.invoice.Invoice;
 import org.openbravo.model.financialmgmt.gl.GLItem;
 import org.openbravo.model.financialmgmt.payment.FIN_BankStatement;
 import org.openbravo.model.financialmgmt.payment.FIN_BankStatementLine;
@@ -597,8 +598,17 @@ public class ReconciliationHandler implements NeoHandler {
           row.put("isReceipt", isReceipt);
           // Invoice currency so the UI can flag documents in a currency other than the account's
           // (multi-currency reconciliation) — see ReconciliationSplitPanel currency badge.
-          row.put("currency", StringUtils.trimToEmpty(rs.getString("currency_iso")));
+          String candidateCurrencyIso = StringUtils.trimToEmpty(rs.getString("currency_iso"));
+          row.put("currency", candidateCurrencyIso);
           row.put("currencyId", rs.getString("currency_id"));
+          // Foreign-currency invoice: also emit its equivalent in the account currency (the rate
+          // used when actually reconciling) so the panel can show a EUR-style total alongside the
+          // foreign amount. A missing rate is not fatal — the row simply keeps only the foreign
+          // amount and the panel falls back to showing that alone.
+          if (account.getCurrency() != null
+              && !account.getCurrency().getISOCode().equals(candidateCurrencyIso)) {
+            appendAccountEquivalent(row, rs.getString("c_invoice_id"), account, signed);
+          }
           candidates.put(row);
         }
       }
@@ -607,6 +617,30 @@ public class ReconciliationHandler implements NeoHandler {
     data.put(ACTION_CANDIDATES, candidates);
     data.put(KEY_COUNTS, CandidatesSupport.candidateCounts(accountId, dateFrom, dateTo));
     return envelope(data);
+  }
+
+  /**
+   * Appends {@code rate}, {@code amountBase} (= {@code signedAmount × rate}) and
+   * {@code baseCurrency} to a foreign-currency invoice candidate row, using the SAME rate source
+   * reconciling this invoice would use ({@link PaymentCurrencyConverter#resolveInvoiceRate}). Swallows
+   * a missing-rate failure — the row is still usable for reconciliation (the rate is re-resolved
+   * then), it just can't preview a EUR-style equivalent up front.
+   */
+  private void appendAccountEquivalent(JSONObject row, String invoiceId, FIN_FinancialAccount account,
+      BigDecimal signedAmount) {
+    try {
+      Invoice invoice = OBDal.getInstance().get(Invoice.class, invoiceId);
+      if (invoice == null) {
+        return;
+      }
+      BigDecimal rate = PaymentCurrencyConverter.resolveInvoiceRate(invoice, account);
+      row.put("rate", rate);
+      row.put("amountBase", PaymentCurrencyConverter.convertedAmount(signedAmount, rate, account));
+      row.put("baseCurrency", account.getCurrency().getISOCode());
+    } catch (Exception e) {
+      log.debug("No exchange rate available to preview invoice {} in the account currency: {}",
+          invoiceId, e.getMessage());
+    }
   }
 
   /**
@@ -714,9 +748,12 @@ public class ReconciliationHandler implements NeoHandler {
 
     // Pay each selected unpaid invoice (creates payment + auto-creates its transaction); the new
     // transaction ids join operationIds so the standard reconcile below matches them to the line.
+    // paymentMethodId is the single method chosen in the reconciliation modal, applied to every
+    // invoice payment created here — an already-existing transaction (operationIds) keeps its own.
     if (hasInvoices) {
+      String paymentMethodId = body.optString("paymentMethodId", null);
       NeoResponse invError = ReconciliationFlowSupport.createInvoicePayments(
-          account, line, invoiceSpecs, operationIds, TOLERANCE);
+          account, line, invoiceSpecs, operationIds, TOLERANCE, paymentMethodId);
       if (invError != null) {
         return invError;
       }

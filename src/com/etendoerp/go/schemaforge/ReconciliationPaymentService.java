@@ -37,7 +37,7 @@ import org.openbravo.model.financialmgmt.payment.FIN_PaymentScheduleDetail;
 import org.openbravo.model.financialmgmt.payment.FinAccPaymentMethod;
 
 /**
- * Bank-reconciliation multi-currency payment registration. Split out of
+ * Bank-reconciliation payment registration — same-currency and cross-currency alike. Split out of
  * {@link PaymentRegistrationService} to keep that class under the method-count limit
  * (Sonar S1200); reuses its draft-payment plumbing via package-visible helpers.
  */
@@ -47,20 +47,29 @@ final class ReconciliationPaymentService {
   }
 
   /**
-   * Bank-reconciliation multi-currency variant of {@link PaymentRegistrationService#registerPaymentCore}:
-   * fully settles the invoice outstanding ({@code amount}, in the invoice currency) while booking
-   * the financial transaction for the exact statement-line amount ({@code accountAmount}, in the
-   * account currency). The conversion rate is derived from the two amounts (see
-   * {@link PaymentCurrencyConverter#derivedRate}) so the transaction reconciles against the bank
-   * statement to the cent. Requires the resolved payment method to be multi-currency enabled for
-   * the direction; a PSD2 bank-transfer method (multi-currency disabled by ETP-4503) is rejected
-   * with a clear error rather than a cryptic Core failure. Used only when the invoice and account
-   * currencies differ; the same-currency path stays on
-   * {@link PaymentRegistrationService#registerPaymentCore}.
+   * Registers a bank-reconciliation payment against an invoice installment, in either the same
+   * currency as the account ({@code rate} = {@link BigDecimal#ONE}) or a different one. The payment
+   * is created for {@code paymentAmount} (invoice currency) and the financial transaction is booked
+   * for the exact {@code accountAmount} (account currency) — the caller
+   * ({@link ReconciliationFlowSupport}) computes {@code accountAmount} as
+   * {@code paymentAmount × rate}, per the "invoice amount times its own exchange rate" contract:
+   * the rate comes from the invoice's own exchange rate (see
+   * {@link PaymentCurrencyConverter#resolveInvoiceRate}), not from what the statement line happens
+   * to carry, so a mismatch between the two settles the invoice correctly and simply leaves the
+   * difference unreconciled on the statement line (handled by the caller's remaining-amount check).
+   *
+   * <p>{@code chosenMethod}, when non-null, is the payment method the user picked in the
+   * reconciliation modal (one method for the whole match); validated against the account/direction.
+   * When {@code null}, the method is auto-resolved exactly as the simple invoice quick-pay path
+   * does (see {@link PaymentRegistrationService#registerPaymentCore}). A cross-currency settlement
+   * additionally requires the resolved method to be multi-currency enabled; a PSD2 bank-transfer
+   * method (multi-currency disabled by ETP-4503) is rejected with a clear error rather than a
+   * cryptic Core failure.
    */
-  static FIN_Payment registerReconciliationPaymentMultiCurrency(Invoice invoice,
-      FIN_PaymentSchedule schedule, BigDecimal amount, BigDecimal accountAmount, Date paymentDate,
-      FIN_FinancialAccount account, boolean isReceipt) throws Exception {
+  static FIN_Payment registerReconciliationPayment(Invoice invoice, FIN_PaymentSchedule schedule,
+      BigDecimal paymentAmount, BigDecimal accountAmount, BigDecimal rate, Date paymentDate,
+      FIN_FinancialAccount account, boolean isReceipt, FIN_PaymentMethod chosenMethod)
+      throws Exception {
 
     List<FIN_PaymentScheduleDetail> pendingPSDs =
         PaymentRegistrationService.findPendingPSDs(schedule.getId());
@@ -69,31 +78,53 @@ final class ReconciliationPaymentService {
     }
 
     Organization org = invoice.getOrganization();
+    boolean crossCurrency = invoice.getCurrency() != null && account.getCurrency() != null
+        && !invoice.getCurrency().getId().equals(account.getCurrency().getId());
 
+    FIN_PaymentMethod paymentMethod = resolveMethod(account, invoice, isReceipt, chosenMethod);
+    if (crossCurrency) {
+      assertMethodMultiCurrency(account, paymentMethod, isReceipt);
+    }
+
+    DocumentType docType = PaymentRegistrationService.resolveArApDocType(org, isReceipt);
+    PaymentRegistrationService.checkPeriodOpen(invoice, docType, paymentDate);
+
+    FIN_Payment payment = PaymentRegistrationService.createDraftPayment(
+        new PaymentRegistrationService.DraftPaymentRequest(new AdvPaymentMngtDao(), isReceipt,
+            invoice, paymentMethod, account, paymentDate),
+        rate, paymentAmount, accountAmount);
+    PaymentRegistrationService.linkPSDsToPayment(pendingPSDs, payment, paymentAmount);
+    PaymentRegistrationService.processOrThrow(payment);
+    return payment;
+  }
+
+  /**
+   * The user-chosen method (validated against the account/direction) when one was picked in the
+   * reconciliation modal, otherwise the auto-resolved default
+   * ({@link PaymentRegistrationService#resolvePaymentMethod}).
+   */
+  private static FIN_PaymentMethod resolveMethod(FIN_FinancialAccount account, Invoice invoice,
+      boolean isReceipt, FIN_PaymentMethod chosenMethod) {
+    if (chosenMethod != null) {
+      if (!PaymentRegistrationService.isMethodAllowed(account, chosenMethod,
+          PaymentRegistrationService.allowProperty(isReceipt))) {
+        throw new OBException("The payment method '" + chosenMethod.getName() + "' is not "
+            + "configured for this financial account.");
+      }
+      return chosenMethod;
+    }
     FIN_PaymentMethod paymentMethod =
         PaymentRegistrationService.resolvePaymentMethod(account, invoice, isReceipt);
     if (paymentMethod == null) {
       throw new OBException("No payment method configured for this financial account. "
           + "Please configure a payment method in the financial account settings.");
     }
-    assertMethodMultiCurrency(account, paymentMethod, isReceipt);
-
-    DocumentType docType = PaymentRegistrationService.resolveArApDocType(org, isReceipt);
-    PaymentRegistrationService.checkPeriodOpen(invoice, docType, paymentDate);
-
-    BigDecimal rate = PaymentCurrencyConverter.derivedRate(amount, accountAmount);
-    FIN_Payment payment = PaymentRegistrationService.createDraftPayment(
-        new PaymentRegistrationService.DraftPaymentRequest(new AdvPaymentMngtDao(), isReceipt,
-            invoice, paymentMethod, account, paymentDate),
-        rate, amount, accountAmount);
-    PaymentRegistrationService.linkPSDsToPayment(pendingPSDs, payment, amount);
-    PaymentRegistrationService.processOrThrow(payment);
-    return payment;
+    return paymentMethod;
   }
 
   /**
    * Ensures the account link for {@code method} in the given direction is flagged multi-currency
-   * (payin/payout). Used by the reconciliation multi-currency path so a foreign-currency settlement
+   * (payin/payout). Used by the reconciliation cross-currency path so a foreign-currency settlement
    * is rejected with a clear message when the method is single-currency (e.g. a PSD2 bank-transfer
    * method disabled by {@link FinancialAccountSupport#disableMulticurrencyForBankTransfer}).
    */
