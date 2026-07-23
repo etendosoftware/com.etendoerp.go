@@ -176,4 +176,80 @@ class NeoCsvExportServiceTest {
     // Only the header line (plus the leading BOM); no data rows.
     assertFalse(csv.replace("﻿", "").trim().contains("\n"), csv);
   }
+
+  @Test
+  void neutralizesFormulaInjectionInCsvExport() throws Exception {
+    CapturingResponse cap = new CapturingResponse();
+    JSONArray rows = new JSONArray().put(new JSONObject()
+        .put("equals", "=1+1")
+        .put("plus", "+1+1")
+        .put("minus", "-cmd|' /C calc'!A0")
+        .put("at", "@SUM(1,2)")
+        .put("tab", "\t=1+1")
+        .put("cr", "\r=1+1")
+        .put("safe", "Normal Value"));
+    NeoResponse res = envelope("statements", rows);
+
+    boolean handled = NeoCsvExportService.tryExport(
+        res,
+        params("export", "csv",
+            "columns", "equals:Equals|plus:Plus|minus:Minus|at:At|tab:Tab|cr:Cr|safe:Safe"),
+        cap.response);
+
+    assertTrue(handled);
+    String csv = cap.csv();
+    assertTrue(csv.contains("\"'=1+1\""), csv);
+    assertTrue(csv.contains("\"'+1+1\""), csv);
+    assertTrue(csv.contains("\"'-cmd|' /C calc'!A0\""), csv);
+    assertTrue(csv.contains("\"'@SUM(1,2)\""), csv);
+    assertTrue(csv.contains("\"'\t=1+1\""), csv);
+    assertTrue(csv.contains("\"'\r=1+1\""), csv);
+    assertTrue(csv.contains("\"Normal Value\""), csv);
+  }
+
+  @Test
+  void neutralizesFormulaMarkersHiddenBehindLeadingWhitespaceOrLineFeed() throws Exception {
+    CapturingResponse cap = new CapturingResponse();
+    JSONArray rows = new JSONArray().put(new JSONObject()
+        .put("spaces", "   =1+1")
+        .put("lf", "\n=1+1")
+        .put("safe", "  Normal Value"));
+    NeoResponse res = envelope("statements", rows);
+
+    boolean handled = NeoCsvExportService.tryExport(
+        res,
+        params("export", "csv", "columns", "spaces:Spaces|lf:Lf|safe:Safe"),
+        cap.response);
+
+    assertTrue(handled);
+    String csv = cap.csv();
+    // A marker hiding behind leading spaces or a line feed is still caught.
+    assertTrue(csv.contains("\"'   =1+1\""), csv);
+    assertTrue(csv.contains("\"'\n=1+1\""), csv);
+    // Leading whitespace with no formula marker behind it is left untouched.
+    assertTrue(csv.contains("\"  Normal Value\""), csv);
+  }
+
+  @Test
+  void handlesNegativeNumbersAndAlreadyNeutralizedValuesWithoutDoublePrefixing() throws Exception {
+    CapturingResponse cap = new CapturingResponse();
+    JSONArray rows = new JSONArray().put(new JSONObject()
+        .put("negative", "-500.00")
+        .put("prefixed", "'=1+1"));
+    NeoResponse res = envelope("statements", rows);
+
+    boolean handled = NeoCsvExportService.tryExport(
+        res,
+        params("export", "csv", "columns", "negative:Negative|prefixed:Prefixed"),
+        cap.response);
+
+    assertTrue(handled);
+    String csv = cap.csv();
+    // Negative numbers are also neutralized (documented trade-off: rendered as text in Excel);
+    // "-CMD" must be caught, so a bare leading "-" cannot be exempted.
+    assertTrue(csv.contains("\"'-500.00\""), csv);
+    // A value already safely prefixed with an apostrophe is not prefixed a second time.
+    assertTrue(csv.contains("\"'=1+1\""), csv);
+    assertFalse(csv.contains("''=1+1"), csv);
+  }
 }
