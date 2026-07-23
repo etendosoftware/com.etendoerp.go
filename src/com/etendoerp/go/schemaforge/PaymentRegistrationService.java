@@ -925,8 +925,22 @@ final class PaymentRegistrationService {
   }
 
   /**
-   * Resolves the payment method to use, based on the financial account's configuration.
-   * Priority: invoice's own method (if valid for the account), else first valid method, else null.
+   * Resolves the payment method to use, based on the financial account's configuration. Priority
+   * mirrors Classic's {@code TransactionAddPaymentDefaultValues.getDefaultPaymentMethod} (the
+   * Match-Statement "Add Payment" popup), with one deliberate deviation:
+   * <ol>
+   *   <li>the invoice's own method (or its business partner's) — <b>but only when it validates
+   *       against THIS reconciliation account</b> ({@link #isMethodAllowed}). Classic instead
+   *       validates the BP's method against the BP's OWN linked financial account, which can
+   *       default a method that isn't even configured on the account being reconciled — reproduced
+   *       live in Classic (BP configured with "Efectivo", reconciliation account only has
+   *       Cheque/Transferencia/Tarjeta): the popup still defaults to Efectivo, and creating the
+   *       payment then fails with "Selected payment method doesn't exist". Validating against this
+   *       account instead avoids that failure mode entirely;</li>
+   *   <li>otherwise, the account's method flagged {@link FinAccPaymentMethod#isDefault()} for the
+   *       direction — mirrors Classic's account-level fallback exactly;</li>
+   *   <li>otherwise, any other method configured for the direction, else {@code null}.</li>
+   * </ol>
    * Package-visible: also used by {@link ReconciliationPaymentService}.
    */
   static FIN_PaymentMethod resolvePaymentMethod(FIN_FinancialAccount account,
@@ -943,6 +957,13 @@ final class PaymentRegistrationService {
         .createCriteria(FinAccPaymentMethod.class);
     fallback.add(Restrictions.eq(FinAccPaymentMethod.PROPERTY_ACCOUNT, account));
     fallback.add(Restrictions.eq(allowProp, Boolean.TRUE));
+    // The account's own default-for-this-direction method wins over an arbitrary one — matches
+    // Classic's account-level fallback in TransactionAddPaymentDefaultValues. When none is
+    // flagged default, break the tie by name so the pick is deterministic — Classic's own
+    // equivalent has no secondary order at all, so which one it returns there is arbitrary
+    // (DB/insertion order); we don't want that same non-determinism here.
+    fallback.addOrderBy(FinAccPaymentMethod.PROPERTY_DEFAULT, false);
+    fallback.addOrderBy(FinAccPaymentMethod.PROPERTY_PAYMENTMETHOD + "." + FIN_PaymentMethod.PROPERTY_NAME, true);
     fallback.setMaxResults(1);
     List<FinAccPaymentMethod> methods = fallback.list();
     return methods.isEmpty() ? null : methods.get(0).getPaymentMethod();
