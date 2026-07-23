@@ -82,6 +82,7 @@ public class NeoProcessService {
   public static final String MESSAGE = "message";
   public static final String PROCESS_TYPE = "processType";
   public static final String INP_RECORD_ID = "inpRecordId";
+  public static final String RECORD_ID = "recordId";
   public static final String INP_TAB_ID = "inpTabId";
   public static final String STATUS = "status";
   public static final String ERROR = "error";
@@ -115,7 +116,7 @@ public class NeoProcessService {
         if (validationError != null) {
           return validationError;
         }
-        NeoResponse preconditionError = validatePreconditions(process, params);
+        NeoResponse preconditionError = NeoProcessPreconditionService.validate(process, params);
         if (preconditionError != null) {
           return preconditionError;
         }
@@ -775,7 +776,7 @@ public class NeoProcessService {
       JSONObject params) throws Exception {
 
     try (RequestContextScope ignored = pushRequestContextVars()) {
-      String recordId = params.optString("recordId",
+      String recordId = params.optString(RECORD_ID,
           params.optString(INP_RECORD_ID, null));
 
       if (recordId == null || recordId.isBlank()) {
@@ -798,7 +799,7 @@ public class NeoProcessService {
       Iterator<String> keys = params.keys();
       while (keys.hasNext()) {
         String key = keys.next();
-        if ("recordId".equals(key) || INP_RECORD_ID.equals(key)
+        if (RECORD_ID.equals(key) || INP_RECORD_ID.equals(key)
             || INP_TAB_ID.equals(key) || "docAction".equals(key)) {
           continue;
         }
@@ -904,113 +905,6 @@ public class NeoProcessService {
       }
     }
     return null;
-  }
-
-  // ---- Precondition validation (ETP-4275) ----
-
-  /**
-   * Validates the record-level preconditions declared on {@code ETGO_SF_ENTITY.preconditions}
-   * for the process being executed. This is the single generic choke-point that returns a
-   * structured {@code PRECONDITIONS_UNMET} 400 <em>before</em> the legacy process fires, so
-   * clients get an explicit list of missing NEO fields instead of an opaque late PL/pgSQL
-   * error. No process-specific logic lives here — everything is driven by the declared data.
-   *
-   * <p>No-ops (returns {@code null}, i.e. continue) when there is no tab context, no matching
-   * {@link SFEntity}, or no resolvable record — standalone process-specs already rely on
-   * {@link #validateMandatoryParams}. Any unexpected error is swallowed (fail-open) so the
-   * legacy guards remain the backstop and process execution is never blocked by validator bugs.
-   *
-   * @param process the process about to run
-   * @param params  the request params (must carry {@code inpTabId} and a record id to apply)
-   * @return a structured 400 {@link NeoResponse} when preconditions are unmet, else {@code null}
-   */
-  private static NeoResponse validatePreconditions(Process process, JSONObject params) {
-    try {
-      String tabId = params.optString(INP_TAB_ID, params.optString("tabId", null));
-      if (StringUtils.isBlank(tabId)) {
-        return null;
-      }
-      SFEntity entity = resolveSfEntityByTab(tabId);
-      if (entity == null || entity.getADTab() == null || entity.getADTab().getTable() == null) {
-        return null;
-      }
-      Tab tab = entity.getADTab();
-      String recordId = resolvePreconditionRecordId(params, tab);
-      if (StringUtils.isBlank(recordId)) {
-        return null;
-      }
-      BaseOBObject record = OBDal.getInstance().get(tab.getTable().getName(), recordId);
-      if (record == null) {
-        return null;
-      }
-      List<String> missing = NeoProcessPreconditionValidator
-          .findUnmetPreconditions(process, entity, record, params);
-      if (missing != null && !missing.isEmpty()) {
-        return buildPreconditionsUnmetResponse(new PreconditionsUnmetException(missing));
-      }
-      return null;
-    } catch (Exception e) {
-      log.warn("Precondition validation skipped due to error for process {}: {}",
-          process.getName(), e.getMessage());
-      return null;
-    }
-  }
-
-  private static SFEntity resolveSfEntityByTab(String tabId) {
-    OBCriteria<SFEntity> criteria = OBDal.getInstance().createCriteria(SFEntity.class);
-    criteria.add(Restrictions.eq(SFEntity.PROPERTY_ADTAB + ".id", tabId));
-    criteria.add(Restrictions.eq(SFEntity.PROPERTY_ISACTIVE, true));
-    criteria.setMaxResults(1);
-    return (SFEntity) criteria.uniqueResult();
-  }
-
-  private static String resolvePreconditionRecordId(JSONObject params, Tab tab) {
-    String recordId = params.optString("recordId",
-        params.optString(INP_RECORD_ID, null));
-    if (StringUtils.isNotBlank(recordId)) {
-      return recordId;
-    }
-    if (tab.getTable() == null) {
-      return null;
-    }
-    for (Column col : tab.getTable().getADColumnList()) {
-      if (Boolean.TRUE.equals(col.isKeyColumn())) {
-        return params.optString(col.getDBColumnName(), null);
-      }
-    }
-    return null;
-  }
-
-  /**
-   * Builds the structured 400 response returned when a process is rejected because declared
-   * preconditions are not met. Body shape:
-   * <pre>{
-   *   "error": {
-   *     "code": "PRECONDITIONS_UNMET",
-   *     "status": 400,
-   *     "message": "Preconditions not met",
-   *     "missing": ["usableLifeMonths", "currency"]
-   *   }
-   * }</pre>
-   */
-  private static NeoResponse buildPreconditionsUnmetResponse(PreconditionsUnmetException e) {
-    try {
-      JSONArray missingArr = new JSONArray();
-      for (String field : e.getMissing()) {
-        missingArr.put(field);
-      }
-      JSONObject errorObj = new JSONObject();
-      errorObj.put("code", PreconditionsUnmetException.ERROR_CODE);
-      errorObj.put(STATUS, 400);
-      errorObj.put(MESSAGE, "Preconditions not met");
-      errorObj.put("missing", missingArr);
-      JSONObject body = new JSONObject();
-      body.put(ERROR, errorObj);
-      return NeoResponse.error(400, body);
-    } catch (JSONException fallback) {
-      log.warn("Could not build PRECONDITIONS_UNMET body: {}", fallback.getMessage());
-      return NeoResponse.error(400, PreconditionsUnmetException.ERROR_CODE);
-    }
   }
 
   // ---- Result translation ----

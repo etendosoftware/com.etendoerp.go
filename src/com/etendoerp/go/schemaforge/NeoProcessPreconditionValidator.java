@@ -72,17 +72,17 @@ public final class NeoProcessPreconditionValidator {
 
   /**
    * Returns the NEO field names whose precondition is unmet for {@code process} on
-   * {@code record}. Returns an empty list when there are no declarations for the
+   * {@code targetRecord}. Returns an empty list when there are no declarations for the
    * process, when the entity has no preconditions, or when all preconditions hold.
    *
-   * @param process the process about to be executed
-   * @param entity  the {@link SFEntity} whose {@code preconditions} declaration governs the check
-   * @param record  the target record the process operates on
-   * @param params  the request params (checked before the record for a submitted value)
+   * @param process      the process about to be executed
+   * @param entity       the {@link SFEntity} whose {@code preconditions} declaration governs the check
+   * @param targetRecord the target record the process operates on
+   * @param params       the request params (checked before the record for a submitted value)
    * @return unmet NEO field (DAL property) names; never {@code null}
    */
   public static List<String> findUnmetPreconditions(Process process, SFEntity entity,
-      BaseOBObject record, JSONObject params) {
+      BaseOBObject targetRecord, JSONObject params) {
     List<String> missing = new ArrayList<>();
     if (process == null || entity == null) {
       return missing;
@@ -98,42 +98,54 @@ public final class NeoProcessPreconditionValidator {
         return missing;
       }
       JSONArray rules = byProcess.getJSONArray(processId);
-      collectMissing(processId, rules, record, params, missing);
+      collectMissing(processId, rules, targetRecord, params, missing);
     } catch (JSONException e) {
       log.warn("Invalid preconditions JSON on entity {}: {}", safeEntityId(entity), e.getMessage());
     }
     return missing;
   }
 
-  private static void collectMissing(String processId, JSONArray rules, BaseOBObject record,
+  private static void collectMissing(String processId, JSONArray rules, BaseOBObject targetRecord,
       JSONObject params, List<String> missing) throws JSONException {
     for (int i = 0; i < rules.length(); i++) {
-      JSONObject rule = rules.optJSONObject(i);
-      if (rule == null) {
-        continue;
-      }
-      String field = rule.optString(FIELD, null);
-      if (field == null || field.trim().isEmpty()) {
-        continue;
-      }
-      String requiredWhen = rule.optString(REQUIRED_WHEN, null);
-      if (requiredWhen != null && !requiredWhen.trim().isEmpty()
-          && !PreconditionConditionEvaluator.evaluate(requiredWhen,
-              prop -> resolveValue(prop, record, params))) {
-        // Condition present and false → precondition does not apply.
-        continue;
-      }
-      if (record != null && !isKnownProperty(record, field)) {
-        // Config error (typo / unknown property), not an unmet precondition.
-        // Fail open: never block a process on a misconfigured rule.
-        log.warn("Skipping precondition for process {}: field '{}' is not a known property of "
-            + "entity {}", processId, field, safeRecordEntityName(record));
-        continue;
-      }
-      if (isFieldEmpty(field, record, params)) {
-        missing.add(field);
+      String unmet = unmetField(processId, rules.optJSONObject(i), targetRecord, params);
+      if (unmet != null) {
+        missing.add(unmet);
       }
     }
+  }
+
+  /**
+   * Evaluates a single precondition rule and returns the NEO field name when it is unmet, or
+   * {@code null} when the rule does not apply, is misconfigured (fail-open), or is satisfied.
+   */
+  private static String unmetField(String processId, JSONObject rule, BaseOBObject targetRecord,
+      JSONObject params) {
+    if (rule == null) {
+      return null;
+    }
+    String field = rule.optString(FIELD, null);
+    if (field == null || field.trim().isEmpty()) {
+      return null;
+    }
+    String requiredWhen = rule.optString(REQUIRED_WHEN, null);
+    if (requiredWhen != null && !requiredWhen.trim().isEmpty()
+        && !PreconditionConditionEvaluator.evaluate(requiredWhen,
+            prop -> resolveValue(prop, targetRecord, params))) {
+      // Condition present and false → precondition does not apply.
+      return null;
+    }
+    if (targetRecord != null && !isKnownProperty(targetRecord, field)) {
+      // Config error (typo / unknown property), not an unmet precondition.
+      // Fail open: never block a process on a misconfigured rule.
+      log.warn("Skipping precondition for process {}: field '{}' is not a known property of "
+          + "entity {}", processId, field, safeRecordEntityName(targetRecord));
+      return null;
+    }
+    if (isFieldEmpty(field, targetRecord, params)) {
+      return field;
+    }
+    return null;
   }
 
   /**
@@ -143,17 +155,17 @@ public final class NeoProcessPreconditionValidator {
    * returns {@code true} so the downstream value check still runs and genuinely-empty
    * known fields stay reported.
    */
-  private static boolean isKnownProperty(BaseOBObject record, String field) {
+  private static boolean isKnownProperty(BaseOBObject targetRecord, String field) {
     try {
-      return record.getEntity().hasProperty(field);
+      return targetRecord.getEntity().hasProperty(field);
     } catch (Exception e) {
       return true;
     }
   }
 
-  private static String safeRecordEntityName(BaseOBObject record) {
+  private static String safeRecordEntityName(BaseOBObject targetRecord) {
     try {
-      return record.getEntity().getName();
+      return targetRecord.getEntity().getName();
     } catch (Exception e) {
       return "<unknown>";
     }
@@ -180,15 +192,15 @@ public final class NeoProcessPreconditionValidator {
    * Resolves a {@code @prop@} reference used in a {@code requiredWhen} condition.
    * Prefers a non-null submitted value in {@code params}, else the record property.
    */
-  private static String resolveValue(String prop, BaseOBObject record, JSONObject params) {
+  private static String resolveValue(String prop, BaseOBObject targetRecord, JSONObject params) {
     if (params != null && params.has(prop) && !params.isNull(prop)) {
       return params.optString(prop, null);
     }
-    if (record == null) {
+    if (targetRecord == null) {
       return null;
     }
     try {
-      return valueToString(record.get(prop));
+      return valueToString(targetRecord.get(prop));
     } catch (Exception e) {
       return null;
     }
@@ -198,11 +210,11 @@ public final class NeoProcessPreconditionValidator {
    * A field is considered present when EITHER the request params or the record hold a
    * non-empty value for it.
    */
-  private static boolean isFieldEmpty(String field, BaseOBObject record, JSONObject params) {
+  private static boolean isFieldEmpty(String field, BaseOBObject targetRecord, JSONObject params) {
     if (paramHasValue(params, field)) {
       return false;
     }
-    return !recordHasValue(record, field);
+    return !recordHasValue(targetRecord, field);
   }
 
   private static boolean paramHasValue(JSONObject params, String field) {
@@ -213,13 +225,13 @@ public final class NeoProcessPreconditionValidator {
     return !(value instanceof String) || !((String) value).trim().isEmpty();
   }
 
-  private static boolean recordHasValue(BaseOBObject record, String field) {
-    if (record == null) {
+  private static boolean recordHasValue(BaseOBObject targetRecord, String field) {
+    if (targetRecord == null) {
       return false;
     }
     Object value;
     try {
-      value = record.get(field);
+      value = targetRecord.get(field);
     } catch (Exception e) {
       return false;
     }

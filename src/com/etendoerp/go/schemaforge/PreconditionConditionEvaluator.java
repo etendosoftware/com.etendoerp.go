@@ -20,7 +20,7 @@ package com.etendoerp.go.schemaforge;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
-import java.util.function.Function;
+import java.util.function.UnaryOperator;
 
 /**
  * Small, self-contained, server-side evaluator for precondition {@code requiredWhen}
@@ -57,7 +57,7 @@ final class PreconditionConditionEvaluator {
    * @param resolver   resolves a {@code @prop@} name to its String value (may return null)
    * @return the boolean value of the expression
    */
-  static boolean evaluate(String expression, Function<String, String> resolver) {
+  static boolean evaluate(String expression, UnaryOperator<String> resolver) {
     if (expression == null) {
       return true;
     }
@@ -68,7 +68,7 @@ final class PreconditionConditionEvaluator {
     return evaluateOr(expr, resolver);
   }
 
-  private static boolean evaluateOr(String expr, Function<String, String> resolver) {
+  private static boolean evaluateOr(String expr, UnaryOperator<String> resolver) {
     for (String part : splitTopLevel(expr, "||")) {
       if (evaluateAnd(part, resolver)) {
         return true;
@@ -77,7 +77,7 @@ final class PreconditionConditionEvaluator {
     return false;
   }
 
-  private static boolean evaluateAnd(String expr, Function<String, String> resolver) {
+  private static boolean evaluateAnd(String expr, UnaryOperator<String> resolver) {
     for (String part : splitTopLevel(expr, "&&", "&")) {
       if (!evaluateComparison(part, resolver)) {
         return false;
@@ -86,7 +86,7 @@ final class PreconditionConditionEvaluator {
     return true;
   }
 
-  private static boolean evaluateComparison(String part, Function<String, String> resolver) {
+  private static boolean evaluateComparison(String part, UnaryOperator<String> resolver) {
     String p = part.trim();
     if (p.isEmpty()) {
       // Neutral term (e.g. a trailing operator artifact) — do not fail the AND chain.
@@ -115,18 +115,31 @@ final class PreconditionConditionEvaluator {
     return Objects.equals(l, r);
   }
 
-  private static String resolveOperand(String token, Function<String, String> resolver) {
+  private static String resolveOperand(String token, UnaryOperator<String> resolver) {
     String t = token.trim();
-    if (t.length() >= 2
-        && ((t.charAt(0) == '\'' && t.charAt(t.length() - 1) == '\'')
-            || (t.charAt(0) == '"' && t.charAt(t.length() - 1) == '"'))) {
+    if (isQuoted(t)) {
       return t.substring(1, t.length() - 1);
     }
-    if (t.length() >= 2 && t.charAt(0) == '@' && t.charAt(t.length() - 1) == '@') {
+    if (isFieldRef(t)) {
       String prop = t.substring(1, t.length() - 1);
       return resolver == null ? null : resolver.apply(prop);
     }
     return t;
+  }
+
+  /** True when {@code t} is wrapped in matching single or double quotes. */
+  private static boolean isQuoted(String t) {
+    if (t.length() < 2) {
+      return false;
+    }
+    char first = t.charAt(0);
+    char last = t.charAt(t.length() - 1);
+    return (first == '\'' && last == '\'') || (first == '"' && last == '"');
+  }
+
+  /** True when {@code t} is a {@code @prop@} field reference. */
+  private static boolean isFieldRef(String t) {
+    return t.length() >= 2 && t.charAt(0) == '@' && t.charAt(t.length() - 1) == '@';
   }
 
   /**
@@ -140,14 +153,9 @@ final class PreconditionConditionEvaluator {
         if (c == quote) {
           quote = 0;
         }
-        continue;
-      }
-      if (c == '\'' || c == '"') {
+      } else if (c == '\'' || c == '"') {
         quote = c;
-        continue;
-      }
-      char next = expr.charAt(i + 1);
-      if ((c == '=' || c == '!') && next == '=') {
+      } else if ((c == '=' || c == '!') && expr.charAt(i + 1) == '=') {
         return new Operator(c == '=' ? "==" : "!=", i);
       }
     }
@@ -172,22 +180,20 @@ final class PreconditionConditionEvaluator {
           quote = 0;
         }
         i++;
-        continue;
-      }
-      if (c == '\'' || c == '"') {
+      } else if (c == '\'' || c == '"') {
         quote = c;
         current.append(c);
         i++;
-        continue;
-      }
-      String matched = longestMatch(expr, i, delimiters);
-      if (matched != null) {
-        parts.add(current.toString());
-        current.setLength(0);
-        i += matched.length();
       } else {
-        current.append(c);
-        i++;
+        String matched = longestMatch(expr, i, delimiters);
+        if (matched != null) {
+          parts.add(current.toString());
+          current.setLength(0);
+          i += matched.length();
+        } else {
+          current.append(c);
+          i++;
+        }
       }
     }
     parts.add(current.toString());

@@ -26,7 +26,7 @@ import static org.mockito.Mockito.when;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.function.Function;
+import java.util.function.UnaryOperator;
 
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.Test;
@@ -75,16 +75,16 @@ public class NeoProcessPreconditionValidatorTest {
 
   @Test
   public void allPreconditionsMetReturnsEmpty() {
-    // MO-scheduled, TI calc type: usableLifeMonths required and present; currency present;
-    // usableLifeYears rule skipped (amortize != YE).
-    BaseOBObject record = mock(BaseOBObject.class);
-    when(record.get("calculateType")).thenReturn("TI");
-    when(record.get("amortize")).thenReturn("MO");
-    when(record.get("usableLifeMonths")).thenReturn(24L);
-    when(record.get("currency")).thenReturn("EUR");
+    // With an MO schedule and TI calc type, usableLifeMonths is required and present, currency
+    // is present, and the usableLifeYears rule is skipped because amortize is not YE.
+    BaseOBObject targetRecord = mock(BaseOBObject.class);
+    when(targetRecord.get("calculateType")).thenReturn("TI");
+    when(targetRecord.get("amortize")).thenReturn("MO");
+    when(targetRecord.get("usableLifeMonths")).thenReturn(24L);
+    when(targetRecord.get("currency")).thenReturn("EUR");
 
     List<String> missing = NeoProcessPreconditionValidator.findUnmetPreconditions(
-        mockProcess(), mockEntity(ASSETS_PRECONDITIONS), record, new JSONObject());
+        mockProcess(), mockEntity(ASSETS_PRECONDITIONS), targetRecord, new JSONObject());
 
     assertNotNull(missing);
     assertTrue("Expected no unmet preconditions, got " + missing, missing.isEmpty());
@@ -93,14 +93,14 @@ public class NeoProcessPreconditionValidatorTest {
   @Test
   public void oneUnmetPreconditionReturnsThatField() {
     // usableLifeMonths NULL with calc != PE and amortize != YE => rule applies and is unmet.
-    BaseOBObject record = mock(BaseOBObject.class);
-    when(record.get("calculateType")).thenReturn("TI");
-    when(record.get("amortize")).thenReturn("MO");
-    when(record.get("usableLifeMonths")).thenReturn(null);
-    when(record.get("currency")).thenReturn("EUR");
+    BaseOBObject targetRecord = mock(BaseOBObject.class);
+    when(targetRecord.get("calculateType")).thenReturn("TI");
+    when(targetRecord.get("amortize")).thenReturn("MO");
+    when(targetRecord.get("usableLifeMonths")).thenReturn(null);
+    when(targetRecord.get("currency")).thenReturn("EUR");
 
     List<String> missing = NeoProcessPreconditionValidator.findUnmetPreconditions(
-        mockProcess(), mockEntity(ASSETS_PRECONDITIONS), record, new JSONObject());
+        mockProcess(), mockEntity(ASSETS_PRECONDITIONS), targetRecord, new JSONObject());
 
     assertEquals(1, missing.size());
     assertEquals("usableLifeMonths", missing.get(0));
@@ -109,14 +109,14 @@ public class NeoProcessPreconditionValidatorTest {
   @Test
   public void multipleUnmetPreconditionsReturnAll() {
     // usableLifeMonths NULL (rule applies) + currency NULL (unconditional) => both missing.
-    BaseOBObject record = mock(BaseOBObject.class);
-    when(record.get("calculateType")).thenReturn("TI");
-    when(record.get("amortize")).thenReturn("MO");
-    when(record.get("usableLifeMonths")).thenReturn(null);
-    when(record.get("currency")).thenReturn(null);
+    BaseOBObject targetRecord = mock(BaseOBObject.class);
+    when(targetRecord.get("calculateType")).thenReturn("TI");
+    when(targetRecord.get("amortize")).thenReturn("MO");
+    when(targetRecord.get("usableLifeMonths")).thenReturn(null);
+    when(targetRecord.get("currency")).thenReturn(null);
 
     List<String> missing = NeoProcessPreconditionValidator.findUnmetPreconditions(
-        mockProcess(), mockEntity(ASSETS_PRECONDITIONS), record, new JSONObject());
+        mockProcess(), mockEntity(ASSETS_PRECONDITIONS), targetRecord, new JSONObject());
 
     assertEquals(2, missing.size());
     assertTrue(missing.contains("usableLifeMonths"));
@@ -127,15 +127,15 @@ public class NeoProcessPreconditionValidatorTest {
   public void requiredWhenFalseRuleIsSkipped() {
     // YE schedule: usableLifeMonths rule (amortize != YE) is FALSE and must be skipped even
     // though usableLifeMonths is NULL; usableLifeYears rule (amortize == YE) applies and is met.
-    BaseOBObject record = mock(BaseOBObject.class);
-    when(record.get("calculateType")).thenReturn("TI");
-    when(record.get("amortize")).thenReturn("YE");
-    when(record.get("usableLifeMonths")).thenReturn(null);
-    when(record.get("usableLifeYears")).thenReturn(5L);
-    when(record.get("currency")).thenReturn("EUR");
+    BaseOBObject targetRecord = mock(BaseOBObject.class);
+    when(targetRecord.get("calculateType")).thenReturn("TI");
+    when(targetRecord.get("amortize")).thenReturn("YE");
+    when(targetRecord.get("usableLifeMonths")).thenReturn(null);
+    when(targetRecord.get("usableLifeYears")).thenReturn(5L);
+    when(targetRecord.get("currency")).thenReturn("EUR");
 
     List<String> missing = NeoProcessPreconditionValidator.findUnmetPreconditions(
-        mockProcess(), mockEntity(ASSETS_PRECONDITIONS), record, new JSONObject());
+        mockProcess(), mockEntity(ASSETS_PRECONDITIONS), targetRecord, new JSONObject());
 
     assertTrue("usableLifeMonths rule should have been skipped, got " + missing, missing.isEmpty());
   }
@@ -143,15 +143,15 @@ public class NeoProcessPreconditionValidatorTest {
   @Test
   public void yearlyScheduleMissingUsableLifeYearsIsReported() {
     // YE schedule with usableLifeYears NULL => the amortize == YE rule applies and is unmet.
-    BaseOBObject record = mock(BaseOBObject.class);
-    when(record.get("calculateType")).thenReturn("TI");
-    when(record.get("amortize")).thenReturn("YE");
-    when(record.get("usableLifeMonths")).thenReturn(null);
-    when(record.get("usableLifeYears")).thenReturn(null);
-    when(record.get("currency")).thenReturn("EUR");
+    BaseOBObject targetRecord = mock(BaseOBObject.class);
+    when(targetRecord.get("calculateType")).thenReturn("TI");
+    when(targetRecord.get("amortize")).thenReturn("YE");
+    when(targetRecord.get("usableLifeMonths")).thenReturn(null);
+    when(targetRecord.get("usableLifeYears")).thenReturn(null);
+    when(targetRecord.get("currency")).thenReturn("EUR");
 
     List<String> missing = NeoProcessPreconditionValidator.findUnmetPreconditions(
-        mockProcess(), mockEntity(ASSETS_PRECONDITIONS), record, new JSONObject());
+        mockProcess(), mockEntity(ASSETS_PRECONDITIONS), targetRecord, new JSONObject());
 
     assertEquals(1, missing.size());
     assertEquals("usableLifeYears", missing.get(0));
@@ -159,51 +159,51 @@ public class NeoProcessPreconditionValidatorTest {
 
   @Test
   public void noDeclaredPreconditionsForProcessReturnsEmpty() {
-    BaseOBObject record = mock(BaseOBObject.class);
+    BaseOBObject targetRecord = mock(BaseOBObject.class);
     // Declaration exists but for a different process id.
     SFEntity entity = mockEntity("{ \"999999\": [ { \"field\": \"currency\" } ] }");
 
     List<String> missing = NeoProcessPreconditionValidator.findUnmetPreconditions(
-        mockProcess(), entity, record, new JSONObject());
+        mockProcess(), entity, targetRecord, new JSONObject());
 
     assertTrue(missing.isEmpty());
   }
 
   @Test
   public void nullPreconditionsColumnReturnsEmpty() {
-    BaseOBObject record = mock(BaseOBObject.class);
+    BaseOBObject targetRecord = mock(BaseOBObject.class);
     List<String> missing = NeoProcessPreconditionValidator.findUnmetPreconditions(
-        mockProcess(), mockEntity(null), record, new JSONObject());
+        mockProcess(), mockEntity(null), targetRecord, new JSONObject());
     assertTrue(missing.isEmpty());
   }
 
   @Test
   public void nullProcessOrEntityReturnsEmpty() {
-    BaseOBObject record = mock(BaseOBObject.class);
+    BaseOBObject targetRecord = mock(BaseOBObject.class);
     assertTrue(NeoProcessPreconditionValidator
-        .findUnmetPreconditions(null, mockEntity(ASSETS_PRECONDITIONS), record, new JSONObject())
+        .findUnmetPreconditions(null, mockEntity(ASSETS_PRECONDITIONS), targetRecord, new JSONObject())
         .isEmpty());
     assertTrue(NeoProcessPreconditionValidator
-        .findUnmetPreconditions(mockProcess(), null, record, new JSONObject())
+        .findUnmetPreconditions(mockProcess(), null, targetRecord, new JSONObject())
         .isEmpty());
   }
 
   @Test
   public void malformedPreconditionsJsonReturnsEmpty() {
-    BaseOBObject record = mock(BaseOBObject.class);
+    BaseOBObject targetRecord = mock(BaseOBObject.class);
     List<String> missing = NeoProcessPreconditionValidator.findUnmetPreconditions(
-        mockProcess(), mockEntity("{ not valid json"), record, new JSONObject());
+        mockProcess(), mockEntity("{ not valid json"), targetRecord, new JSONObject());
     assertTrue(missing.isEmpty());
   }
 
   @Test
   public void paramValueSatisfiesPreconditionOverRecord() {
     // Record has no currency, but the request params supply it => precondition met.
-    BaseOBObject record = mock(BaseOBObject.class);
-    when(record.get("calculateType")).thenReturn("PE");
-    when(record.get("amortize")).thenReturn("YE");
-    when(record.get("usableLifeYears")).thenReturn(5L);
-    when(record.get("currency")).thenReturn(null);
+    BaseOBObject targetRecord = mock(BaseOBObject.class);
+    when(targetRecord.get("calculateType")).thenReturn("PE");
+    when(targetRecord.get("amortize")).thenReturn("YE");
+    when(targetRecord.get("usableLifeYears")).thenReturn(5L);
+    when(targetRecord.get("currency")).thenReturn(null);
 
     JSONObject params = new JSONObject();
     try {
@@ -213,7 +213,7 @@ public class NeoProcessPreconditionValidatorTest {
     }
 
     List<String> missing = NeoProcessPreconditionValidator.findUnmetPreconditions(
-        mockProcess(), mockEntity(ASSETS_PRECONDITIONS), record, params);
+        mockProcess(), mockEntity(ASSETS_PRECONDITIONS), targetRecord, params);
 
     assertTrue("currency supplied via params should satisfy the rule, got " + missing,
         missing.isEmpty());
@@ -222,16 +222,16 @@ public class NeoProcessPreconditionValidatorTest {
   // ===================== unknown-property fail-open =====================
 
   /**
-   * Stubs {@code record.getEntity()} to return a mocked {@link Entity} whose
+   * Stubs {@code targetRecord.getEntity()} to return a mocked {@link Entity} whose
    * {@code hasProperty(field)} answers according to {@code known}. Required because the
    * validator now consults the record's entity model on every field check; a bare
    * {@code mock(BaseOBObject.class)} would return a {@code null} entity and force the
    * fail-open NPE fallback, masking the property lookup under test.
    */
-  private static void stubEntityHasProperty(BaseOBObject record, String field, boolean known) {
+  private static void stubEntityHasProperty(BaseOBObject targetRecord, String field, boolean known) {
     Entity entity = mock(Entity.class);
     when(entity.hasProperty(field)).thenReturn(known);
-    when(record.getEntity()).thenReturn(entity);
+    when(targetRecord.getEntity()).thenReturn(entity);
   }
 
   @Test
@@ -239,18 +239,18 @@ public class NeoProcessPreconditionValidatorTest {
     // Regression: a rule naming a property the entity does NOT have is a config typo, not an
     // unmet precondition. It must be logged and skipped (fail open), never reported missing —
     // even though the requiredWhen holds and the record has no such value.
-    BaseOBObject record = mock(BaseOBObject.class);
-    when(record.get("calculateType")).thenReturn("TI");
-    when(record.get("amortize")).thenReturn("MO");
-    when(record.get("nonExistentField")).thenReturn(null);
-    stubEntityHasProperty(record, "nonExistentField", false);
+    BaseOBObject targetRecord = mock(BaseOBObject.class);
+    when(targetRecord.get("calculateType")).thenReturn("TI");
+    when(targetRecord.get("amortize")).thenReturn("MO");
+    when(targetRecord.get("nonExistentField")).thenReturn(null);
+    stubEntityHasProperty(targetRecord, "nonExistentField", false);
 
     SFEntity entity = mockEntity(
         "{ \"800125\": [ { \"field\": \"nonExistentField\", "
         + "\"requiredWhen\": \"@calculateType@ != 'PE' && @amortize@ != 'YE'\" } ] }");
 
     List<String> missing = NeoProcessPreconditionValidator.findUnmetPreconditions(
-        mockProcess(), entity, record, new JSONObject());
+        mockProcess(), entity, targetRecord, new JSONObject());
 
     assertNotNull(missing);
     assertFalse("Unknown precondition field must be skipped (fail open), got " + missing,
@@ -264,14 +264,14 @@ public class NeoProcessPreconditionValidatorTest {
     // Positive control: the fix narrows behavior only for UNKNOWN properties. A field that IS a
     // known property of the entity but is empty on the record must still be reported missing,
     // proving genuine missing-value detection was not weakened.
-    BaseOBObject record = mock(BaseOBObject.class);
-    when(record.get("currency")).thenReturn(null);
-    stubEntityHasProperty(record, "currency", true);
+    BaseOBObject targetRecord = mock(BaseOBObject.class);
+    when(targetRecord.get("currency")).thenReturn(null);
+    stubEntityHasProperty(targetRecord, "currency", true);
 
     SFEntity entity = mockEntity("{ \"800125\": [ { \"field\": \"currency\" } ] }");
 
     List<String> missing = NeoProcessPreconditionValidator.findUnmetPreconditions(
-        mockProcess(), entity, record, new JSONObject());
+        mockProcess(), entity, targetRecord, new JSONObject());
 
     assertEquals(1, missing.size());
     assertEquals("currency", missing.get(0));
@@ -279,7 +279,7 @@ public class NeoProcessPreconditionValidatorTest {
 
   // ===================== condition evaluator =====================
 
-  private static Function<String, String> resolver(Map<String, String> values) {
+  private static UnaryOperator<String> resolver(Map<String, String> values) {
     return values::get;
   }
 
