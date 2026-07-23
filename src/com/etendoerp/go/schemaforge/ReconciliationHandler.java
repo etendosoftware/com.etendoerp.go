@@ -25,6 +25,7 @@ import static com.etendoerp.go.schemaforge.ReconciliationSupport.envelope;
 import static com.etendoerp.go.schemaforge.ReconciliationSupport.formatDate;
 import static com.etendoerp.go.schemaforge.ReconciliationSupport.nullSafe;
 import static com.etendoerp.go.schemaforge.ReconciliationSupport.readOperationIds;
+import static com.etendoerp.go.schemaforge.ReconciliationSupport.signedAmount;
 
 import java.math.BigDecimal;
 import java.sql.Connection;
@@ -775,11 +776,11 @@ public class ReconciliationHandler implements NeoHandler {
   private NeoResponse compose(FIN_FinancialAccount account, FIN_BankStatementLine line,
       List<String> operationIds) throws Exception {
     FIN_Reconciliation rec = addNewDraftReconciliation(account);
-    // 1:N grouping (option B): tag the original line with a fresh match-group id BEFORE the
-    // match so the split sub-lines inherit it (DalUtil.copy copies all EM_ properties). The
-    // UI re-groups the resulting sub-lines by this id. Only needed when more than one operation
-    // is linked (a single operation produces no split worth grouping).
-    if (operationIds.size() > 1) {
+    // Grouping (option B): tag the original line with a fresh match-group id BEFORE the match so
+    // the split sub-lines inherit it (DalUtil.copy copies all EM_ properties). The UI re-groups
+    // the resulting sub-lines by this id. Only needed when the match will actually split the
+    // line — see willSplitLine.
+    if (willSplitLine(line, operationIds)) {
       tagMatchGroup(line);
     }
     matchBankStatementLine(line, operationIds, rec);
@@ -1341,6 +1342,40 @@ public class ReconciliationHandler implements NeoHandler {
 
   void doRollbackAndClose() {
     OBDal.getInstance().rollbackAndClose();
+  }
+
+  /**
+   * Whether matching {@code operationIds} against {@code line} will make Core's
+   * {@code APRM_MatchingUtility} clone the line into a reconciled portion plus a new pending
+   * remainder. Two independent triggers:
+   * <ul>
+   *   <li>More than one operation: Core's list overload chains through them one at a time,
+   *       reassigning the working line to each split's remainder — with N &gt; 1 operations at
+   *       least one split always happens, even when their amounts sum exactly to the line
+   *       (e.g. line=150 matched to 100 + 50 still splits once, on the first operation).</li>
+   *   <li>Exactly one operation whose amount does not exactly equal the line amount: a single
+   *       partial invoice/transaction match (e.g. line=100 matched to a 53.24 invoice) also
+   *       causes a split — this is the case a plain {@code operationIds.size() > 1} check used
+   *       to miss, leaving the pending remainder as an ungrouped, seemingly-separate line.</li>
+   * </ul>
+   * An empty {@code operationIds} (e.g. an invoice selection that settled nothing) never splits.
+   *
+   * @param line         the statement line about to be matched
+   * @param operationIds the transaction ids about to be matched against it (pre-existing and/or
+   *                     invoice-derived)
+   * @return {@code true} if Core is expected to split {@code line} for this match
+   */
+  boolean willSplitLine(FIN_BankStatementLine line, List<String> operationIds) {
+    if (operationIds.isEmpty()) {
+      return false;
+    }
+    if (operationIds.size() > 1) {
+      return true;
+    }
+    BigDecimal lineAmount = nullSafe(line.getCramount()).subtract(nullSafe(line.getDramount()));
+    FIN_FinaccTransaction trx = loadTransaction(operationIds.get(0));
+    BigDecimal opAmount = trx == null ? BigDecimal.ZERO : signedAmount(trx);
+    return lineAmount.abs().compareTo(opAmount.abs()) != 0;
   }
 
   /**

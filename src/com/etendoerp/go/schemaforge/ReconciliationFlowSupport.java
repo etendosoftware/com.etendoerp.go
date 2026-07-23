@@ -57,6 +57,20 @@ final class ReconciliationFlowSupport {
    * picked in the reconciliation modal, applied to every invoice payment this call creates (an
    * already-existing transaction selected via {@code operationIds} keeps its own payment/method
    * untouched — see {@link #validateOperations}).
+   *
+   * <p>The selected invoices may settle LESS than the line (e.g. a 100 line matched to a single
+   * 60 invoice): the invoice-derived transaction id joins {@code operationIds} same as any
+   * pre-existing one, and the caller's {@link #validateOperations} + Core's own
+   * {@code matchBankStatementLine}/{@code splitBankStatementLine} — already relied on for the
+   * existing-transaction path — split the line into a reconciled portion and a new pending
+   * remainder, exactly as they already do when the user picks an existing transaction smaller
+   * than the line. Over-covering the line is impossible by construction: each invoice only ever
+   * absorbs {@code remaining.min(outstandingBase)}, so {@code remaining} can never go negative.
+   *
+   * <p>The one case still rejected: none of the selected invoices settled anything at all (e.g.
+   * every one of them already has zero outstanding — a stale/already-paid selection). That is
+   * not a legitimate partial match, just a selection that accomplishes nothing, so it is still
+   * reported as the same "do not cover" 400 rather than silently succeeding as a no-op.
    */
   static NeoResponse createInvoicePayments(FIN_FinancialAccount account,
       FIN_BankStatementLine line, JSONArray invoiceSpecs, List<String> operationIds,
@@ -65,7 +79,8 @@ final class ReconciliationFlowSupport {
 
     BigDecimal lineAmount = nullSafe(line.getCramount()).subtract(nullSafe(line.getDramount()));
     boolean isReceipt = lineAmount.signum() >= 0;
-    BigDecimal remaining = lineAmount.abs();
+    BigDecimal startingRemaining = lineAmount.abs();
+    BigDecimal remaining = startingRemaining;
 
     for (int i = 0; i < invoiceSpecs.length() && remaining.compareTo(tolerance) > 0; i++) {
       SettlementOutcome outcome = settleInvoice(account, line, invoiceSpecs.getJSONObject(i),
@@ -75,7 +90,12 @@ final class ReconciliationFlowSupport {
       }
       remaining = outcome.remaining();
     }
-    if (remaining.compareTo(tolerance) > 0) {
+    // Only flag "nothing consumed" when there was actually something to consume — a genuinely
+    // zero-amount line has nothing to allocate in the first place and should succeed as a no-op
+    // (matches the same-currency zero-line contrast case below), not be reported as a failed
+    // selection.
+    if (startingRemaining.compareTo(tolerance) > 0
+        && remaining.compareTo(startingRemaining) == 0) {
       return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
           "The selected invoices do not cover the statement line amount. Remaining: "
               + remaining.toPlainString());

@@ -113,9 +113,15 @@ public final class BankStatementsSupport {
     row.put("glItemName",     StringUtils.trimToEmpty(rs.getString("glitem_name")));
     row.put("in",     credit);
     row.put("out",    debit);
-    row.put(FIELD_AMOUNT, credit.subtract(debit));
+    BigDecimal amount = credit.subtract(debit);
+    row.put(FIELD_AMOUNT, amount);
     boolean matched = rs.getString("fin_finacc_transaction_id") != null;
     row.put("matched", matched);
+    // Per-row reconcile status/pending amount — the seed that mergeSubLineIntoHead accumulates
+    // across a match group's physical rows (see there for why a group needs this instead of the
+    // plain `matched` flag once a partial match is involved).
+    row.put("reconcileStatus", matched ? "RECONCILED" : "PENDING");
+    row.put("pendingAmount", matched ? BigDecimal.ZERO : amount);
     // 1:N reconcile group (option B): split sub-lines share this id so they can be re-grouped.
     row.put("matchGroupId", StringUtils.trimToEmpty(rs.getString("em_etgo_match_group_id")));
     row.put("txns", buildLineTxns(rs, matched));
@@ -153,7 +159,17 @@ public final class BankStatementsSupport {
     return result;
   }
 
-  /** Appends the txns of {@code line} into {@code head} and accumulates in/out/amount. */
+  /**
+   * Appends the txns of {@code line} into {@code head} and accumulates in/out/amount/
+   * pendingAmount, recomputing the group's overall {@code reconcileStatus}.
+   *
+   * <p>A match group can legitimately end up PARTIAL, not just PENDING/RECONCILED: e.g. a 100
+   * line matched to a single 53.24 invoice reconciles that portion in full and leaves a 46.76
+   * pending remainder as a second physical sub-line (same {@code matchGroupId}) — this merges
+   * both back into ONE display row carrying the original 100 total, a 46.76 {@code pendingAmount},
+   * and {@code reconcileStatus: "PARTIAL"}, instead of showing two unrelated-looking rows (see
+   * ETP-4502 iteration 4).
+   */
   private static void mergeSubLineIntoHead(JSONObject head, JSONObject line) throws JSONException {
     JSONArray headTxns = head.optJSONArray("txns");
     if (headTxns == null) {
@@ -169,10 +185,16 @@ public final class BankStatementsSupport {
     head.put("in", jsonBigDecimal(head, "in").add(jsonBigDecimal(line, "in")));
     head.put("out", jsonBigDecimal(head, "out").add(jsonBigDecimal(line, "out")));
     head.put(FIELD_AMOUNT, jsonBigDecimal(head, FIELD_AMOUNT).add(jsonBigDecimal(line, FIELD_AMOUNT)));
-    // The merged group is reconciled only while it still carries transactions. After a reactivate
-    // the sub-lines keep the match-group tag but lose their transaction, so deriving "matched" from
-    // the accumulated txns (instead of forcing true) lets the line fall back to "not reconciled".
-    head.put("matched", headTxns.length() > 0);
+    head.put("pendingAmount", jsonBigDecimal(head, "pendingAmount").add(jsonBigDecimal(line, "pendingAmount")));
+    // The merged group is reconciled only while it still carries transactions AND nothing is left
+    // pending. After a reactivate the sub-lines keep the match-group tag but lose their
+    // transaction, so deriving status from the accumulated txns/pendingAmount (instead of forcing
+    // RECONCILED) lets the group correctly fall back to PARTIAL/PENDING.
+    boolean anyMatched = headTxns.length() > 0;
+    boolean fullyCovered = jsonBigDecimal(head, "pendingAmount").signum() == 0;
+    String status = !anyMatched ? "PENDING" : (fullyCovered ? "RECONCILED" : "PARTIAL");
+    head.put("reconcileStatus", status);
+    head.put("matched", "RECONCILED".equals(status));
   }
 
   private static BigDecimal jsonBigDecimal(JSONObject o, String key) {

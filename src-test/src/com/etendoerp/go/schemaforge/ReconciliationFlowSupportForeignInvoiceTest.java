@@ -22,6 +22,8 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
@@ -50,7 +52,9 @@ import org.openbravo.model.common.currency.ConversionRateDoc;
 import org.openbravo.model.common.currency.Currency;
 import org.openbravo.model.common.invoice.Invoice;
 import org.openbravo.model.financialmgmt.payment.FIN_BankStatementLine;
+import org.openbravo.model.financialmgmt.payment.FIN_FinaccTransaction;
 import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
+import org.openbravo.model.financialmgmt.payment.FIN_Payment;
 import org.openbravo.model.financialmgmt.payment.FIN_PaymentMethod;
 import org.openbravo.model.financialmgmt.payment.FIN_PaymentSchedule;
 
@@ -62,11 +66,14 @@ import org.openbravo.model.financialmgmt.payment.FIN_PaymentSchedule;
  * via {@link PaymentCurrencyConverter#resolveInvoiceRate}), and an optional {@code paymentMethodId}
  * is resolved once up front via {@link FIN_PaymentMethod}.
  *
- * <p>Only the validation/rejection paths — those that return (or throw) before any DAL write — are
- * exercised here: they are reachable by mocking {@link OBDal#get}/{@code createCriteria} alone. The
- * happy path (which delegates to {@code ReconciliationPaymentService.registerReconciliationPayment}
- * — draft-payment creation, {@code processOrThrow}, transaction persistence) needs an integration
- * harness (OBBaseTest) and is NOT covered here, same limitation the original test documented.
+ * <p>Most tests here exercise the validation/rejection paths — those that return (or throw) before
+ * any DAL write — reachable by mocking {@link OBDal#get}/{@code createCriteria} alone. The one
+ * exception is {@link #singleInvoice_partialCoverage_nowSucceedsAndLeavesPendingRemainder()}, which
+ * additionally mocks the static {@code ReconciliationPaymentService.registerReconciliationPayment}
+ * (a simple static-method-only final class, same shape as {@code OBDal}) so the ETP-4502
+ * iteration-2 "partial coverage now succeeds" happy path can be asserted without a full
+ * OBBaseTest/integration harness (draft-payment creation, {@code processOrThrow}, and transaction
+ * persistence themselves remain uncovered here, same limitation the original test documented).
  *
  * <p>Account currency is {@code USD}; a foreign invoice is {@code EUR}/{@code GBP}; a same-currency
  * invoice is {@code USD}.
@@ -102,16 +109,19 @@ class ReconciliationFlowSupportForeignInvoiceTest {
   private OBDal obDal;
 
   private MockedStatic<OBDal> obDalMock;
+  private MockedStatic<ReconciliationPaymentService> reconciliationPaymentServiceMock;
 
   @BeforeEach
   void setUp() {
     obDalMock = mockStatic(OBDal.class);
     obDalMock.when(OBDal::getInstance).thenReturn(obDal);
+    reconciliationPaymentServiceMock = mockStatic(ReconciliationPaymentService.class);
   }
 
   @AfterEach
   void tearDown() {
     obDalMock.close();
+    reconciliationPaymentServiceMock.close();
   }
 
   // ── helpers ──────────────────────────────────────────────────────────────
@@ -398,5 +408,49 @@ class ReconciliationFlowSupportForeignInvoiceTest {
         acc, bsl, invoiceSpecs, operationIds, TOLERANCE, "pm-1");
 
     assertNull(resp);
+  }
+
+  // ── ETP-4502 iteration 2: partial coverage now succeeds ─────────────────
+
+  /**
+   * A single same-currency invoice whose outstanding (60) is LESS than the statement line (100) no
+   * longer hits the "do not cover" 400 (the pre-relaxation behavior): {@code settleInvoice} fully
+   * settles the invoice (60 &lt;= remaining) and the loop ends with {@code remaining} (40) different
+   * from {@code startingRemaining} (100), so the method returns {@code null} (success) and leaves the
+   * new transaction id in {@code operationIds} for the caller's {@code validateOperations} +
+   * Core's own {@code matchBankStatementLine}/{@code splitBankStatementLine} to split the line into a
+   * reconciled 60 portion and a new pending 40 remainder — exactly as documented on
+   * {@link ReconciliationFlowSupport#createInvoicePayments}.
+   *
+   * <p>{@code ReconciliationPaymentService.registerReconciliationPayment} is mocked (statically,
+   * mirroring the {@code OBDal} mock above) since it internally touches
+   * {@code AdvPaymentMngtDao}/{@code FIN_AddPayment}/Hibernate and is not exercisable at the unit
+   * level; it is stubbed to return a payment with exactly one finacc transaction, matching what a
+   * real settlement produces.
+   */
+  @Test
+  void singleInvoice_partialCoverage_nowSucceedsAndLeavesPendingRemainder() throws Exception {
+    FIN_FinancialAccount acc = account(ACCOUNT_CURRENCY);
+    invoice("inv-1", ACCOUNT_CURRENCY);
+    schedule("sch-1", "60");
+    FIN_BankStatementLine bsl = line("100", "0");
+    JSONArray invoiceSpecs = specs(spec("inv-1", "sch-1"));
+    List<String> operationIds = new ArrayList<>();
+
+    FIN_FinaccTransaction txn = mock(FIN_FinaccTransaction.class);
+    when(txn.getId()).thenReturn("txn-1");
+    FIN_Payment payment = mock(FIN_Payment.class);
+    when(payment.getFINFinaccTransactionList()).thenReturn(List.of(txn));
+    reconciliationPaymentServiceMock
+        .when(() -> ReconciliationPaymentService.registerReconciliationPayment(
+            any(), any(), any(), any(), any(), any(), any(), anyBoolean(), any()))
+        .thenReturn(payment);
+
+    NeoResponse resp = ReconciliationFlowSupport.createInvoicePayments(
+        acc, bsl, invoiceSpecs, operationIds, TOLERANCE, null);
+
+    assertNull(resp, "an invoice settling less than the line should now succeed, not 400");
+    assertEquals(1, operationIds.size());
+    assertEquals("txn-1", operationIds.get(0));
   }
 }

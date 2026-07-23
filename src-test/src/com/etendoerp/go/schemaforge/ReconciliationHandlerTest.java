@@ -558,6 +558,58 @@ public class ReconciliationHandlerTest {
   }
 
   /**
+   * Regression for the "Ejemplo 100" bug: a SINGLE operation that only partially covers the
+   * line (e.g. a 100.00 line matched to a lone 53.24 invoice/transaction) still makes Core split
+   * the line into a reconciled portion plus a pending remainder — so it must be tagged with a
+   * match-group id just like a 1:N match, even though {@code operationIds.size() == 1}.
+   *
+   * @throws Exception if building the reconcile body or stubbing the seams fails
+   */
+  @Test
+  public void testReconcileGroupSingleOperationPartialMatchTagsMatchGroup() throws Exception {
+    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    FIN_BankStatementLine line = lineFor(ACC_ID, new BigDecimal("100.00"), BigDecimal.ZERO, null);
+    FIN_FinaccTransaction trx = trxFor(ACC_ID, new BigDecimal("53.24"), BigDecimal.ZERO, null);
+    FIN_Reconciliation rec = mock(FIN_Reconciliation.class);
+    when(rec.getId()).thenReturn("rec-3");
+
+    doReturn(account).when(handler).loadAccount(ACC_ID);
+    doReturn(line).when(handler).loadLine(LINE_ID);
+    doReturn(trx).when(handler).loadTransaction("t1");
+    doNothing().when(handler).tagMatchGroup(any());
+    stubReconciliationCompose(rec, "Success");
+
+    NeoResponse response = handler.reconcileGroup(reconcileBody(ACC_ID, LINE_ID, "t1"));
+
+    assertEquals(201, response.getHttpStatus());
+    // A single-operation PARTIAL match still splits the line in Core → must be tagged.
+    verify(handler).tagMatchGroup(line);
+  }
+
+  /**
+   * {@code willSplitLine} never splits when there is nothing to match against.
+   */
+  @Test
+  public void testWillSplitLineEmptyOperationsReturnsFalse() {
+    FIN_BankStatementLine line = lineFor(ACC_ID, new BigDecimal("100.00"), BigDecimal.ZERO, null);
+
+    assertFalse(handler.willSplitLine(line, java.util.Collections.emptyList()));
+  }
+
+  /**
+   * A single operation id that no longer resolves to a transaction (e.g. stale/removed) is
+   * treated as a zero-amount operation, so a non-zero line is considered a partial match that
+   * will split.
+   */
+  @Test
+  public void testWillSplitLineSingleOperationMissingTransactionTreatedAsPartial() {
+    FIN_BankStatementLine line = lineFor(ACC_ID, new BigDecimal("100.00"), BigDecimal.ZERO, null);
+    doReturn(null).when(handler).loadTransaction("t-missing");
+
+    assertTrue(handler.willSplitLine(line, java.util.Collections.singletonList("t-missing")));
+  }
+
+  /**
    * An operation that belongs to another account is rejected with a 400.
    *
    * @throws Exception if building the reconcile body or stubbing the seams fails
