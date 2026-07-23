@@ -93,9 +93,9 @@ public class NeoProcessPreconditionServiceTest {
   public void validateReturnsPreconditionsUnmetWhenFieldMissing() throws Exception {
     OBDal obdal = mock(OBDal.class);
     stubEntity(obdal, CURRENCY_RULE);
-    BaseOBObject record = mock(BaseOBObject.class);
-    when(record.get("currency")).thenReturn(null);
-    when(obdal.get(ENTITY_NAME, "A1")).thenReturn(record);
+    BaseOBObject targetRecord = mock(BaseOBObject.class);
+    when(targetRecord.get("currency")).thenReturn(null);
+    when(obdal.get(ENTITY_NAME, "A1")).thenReturn(targetRecord);
 
     try (MockedStatic<OBDal> obDalStatic = mockStatic(OBDal.class)) {
       obDalStatic.when(OBDal::getInstance).thenReturn(obdal);
@@ -116,9 +116,9 @@ public class NeoProcessPreconditionServiceTest {
   public void validateReturnsNullWhenAllPreconditionsMet() throws Exception {
     OBDal obdal = mock(OBDal.class);
     stubEntity(obdal, CURRENCY_RULE);
-    BaseOBObject record = mock(BaseOBObject.class);
-    when(record.get("currency")).thenReturn("EUR");
-    when(obdal.get(ENTITY_NAME, "A1")).thenReturn(record);
+    BaseOBObject targetRecord = mock(BaseOBObject.class);
+    when(targetRecord.get("currency")).thenReturn("EUR");
+    when(obdal.get(ENTITY_NAME, "A1")).thenReturn(targetRecord);
 
     try (MockedStatic<OBDal> obDalStatic = mockStatic(OBDal.class)) {
       obDalStatic.when(OBDal::getInstance).thenReturn(obdal);
