@@ -506,20 +506,16 @@ class NeoCrudHandler {
     // defaults. The callout cascade is allowed to refine missing/derived fields, but it must
     // not overwrite values the user explicitly chose (e.g. paymentTerms manually changed in
     // the form after a businessPartner callout already ran).
-    Set<String> userSubmittedFields = new HashSet<>();
-    if (filteredBody != null) {
-      Iterator<String> userKeyIter = filteredBody.keys();
-      while (userKeyIter.hasNext()) {
-        userSubmittedFields.add(userKeyIter.next());
-      }
-    }
+    Set<String> userSubmittedFields = NeoCrudHelper.snapshotBodyFields(filteredBody);
     long perfTotalStart = System.nanoTime();
     long perfStart = perfTotalStart;
     // runCascade=false: the cascade is run explicitly right after by executePostCalloutCascade,
     // so we skip the duplicated pass embedded in injectMandatoryDefaults.
     NeoDefaultsService.injectMandatoryDefaults(filteredBody, adTab, context, parentIdValue, false);
     long perfInjectDefaults = System.nanoTime();
-    executePostCalloutCascade(filteredBody, adTab, context, parentIdValue, userSubmittedFields);
+    Set<String> protectedCalloutFields = NeoCrudHelper.snapshotMandatoryBodyFields(filteredBody, adTab);
+    protectedCalloutFields.addAll(userSubmittedFields);
+    executePostCalloutCascade(filteredBody, adTab, context, parentIdValue, protectedCalloutFields);
     long perfCalloutCascade = System.nanoTime();
     NeoCommercialLinePolicy.injectProductDerivedUomIfMissing(filteredBody);
     NeoCommercialLinePolicy.injectGrossAmountIfMissing(filteredBody);

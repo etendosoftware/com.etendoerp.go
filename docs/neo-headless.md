@@ -205,6 +205,12 @@ Returns a single record. Requires either `ISGET` or `ISGETBYID` to be enabled.
 
 Request body is JSON. Delegated to DataSourceServlet's POST handler.
 
+Before persistence, NEO resolves defaults and executes the header-tab callout cascade. Values
+explicitly supplied by the client and values injected for mandatory AD columns are protected from
+callout updates. Defaults for non-mandatory columns remain eligible for callout-derived updates.
+This keeps an explicit or mandatory system default from being replaced by an unrelated selector
+callout while preserving normal dependent-field derivation.
+
 **PUT / PATCH update** -- `PUT|PATCH /{specName}/{entityName}/{recordId}`
 
 Both PUT and PATCH are delegated to DataSourceServlet's PUT handler internally. PATCH is handled via a `service()` override that intercepts the PATCH method at the Servlet API level.
