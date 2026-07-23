@@ -73,6 +73,10 @@ public class PriceListHeaderHandler implements NeoHandler {
   private static final int MAX_SCHEMA_NAME_LENGTH = 60;
   private static final String DEFAULT_SCHEMA_NAME = "Esquema de Lista de Precios";
   private static final String MSG_CANNOT_DEACTIVATE_DEFAULT = "ETGO_PriceListCannotDeactivateDefault";
+  private static final String METHOD_GET = "GET";
+  private static final String METHOD_POST = "POST";
+  private static final String METHOD_PATCH = "PATCH";
+  private static final String METHOD_PUT = "PUT";
 
   private final Logger log = LogManager.getLogger(getClass());
 
@@ -82,11 +86,11 @@ public class PriceListHeaderHandler implements NeoHandler {
       return null;
     }
     String method = context.getHttpMethod();
-    if ("POST".equals(method)) {
+    if (METHOD_POST.equals(method)) {
       injectOrgCurrency(context);
       return null;
     }
-    if (("PATCH".equals(method) || "PUT".equals(method))
+    if ((METHOD_PATCH.equals(method) || METHOD_PUT.equals(method))
         && isExplicitlyDeactivating(context.getRequestBody())) {
       return blockDeactivatingDefault(context);
     }
@@ -173,8 +177,8 @@ public class PriceListHeaderHandler implements NeoHandler {
       return null;
     }
     String method = context.getHttpMethod();
-    if (!"GET".equals(method) && !"POST".equals(method)
-        && !"PATCH".equals(method) && !"PUT".equals(method)) {
+    if (!METHOD_GET.equals(method) && !METHOD_POST.equals(method)
+        && !METHOD_PATCH.equals(method) && !METHOD_PUT.equals(method)) {
       return null;
     }
     try {
@@ -187,9 +191,9 @@ public class PriceListHeaderHandler implements NeoHandler {
       if (dataArr == null || dataArr.length() == 0) {
         return null;
       }
-      if ("POST".equals(method)) {
+      if (METHOD_POST.equals(method)) {
         ensureDefaultVersionForFirstRecord(dataArr);
-      } else if ("PATCH".equals(method) || "PUT".equals(method)) {
+      } else if (METHOD_PATCH.equals(method) || METHOD_PUT.equals(method)) {
         syncVersionNameForFirstRecord(dataArr);
       }
       annotateRecords(context, dataArr);

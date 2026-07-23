@@ -511,11 +511,11 @@ public class PriceListHeaderHandlerTest {
 
       assertNotNull(result);
       assertEquals(200, result.getHttpStatus());
-      JSONObject record = result.getBody()
+      JSONObject savedRecord = result.getBody()
           .getJSONObject("response").getJSONArray("data")
           .getJSONObject(0);
-      assertEquals("v-1", record.getString("priceListVersion"));
-      assertEquals(7L, record.getLong("etgoProductcount"));
+      assertEquals("v-1", savedRecord.getString("priceListVersion"));
+      assertEquals(7L, savedRecord.getLong("etgoProductcount"));
     }
   }
 
