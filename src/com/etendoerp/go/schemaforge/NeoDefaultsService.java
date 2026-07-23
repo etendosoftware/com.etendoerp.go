@@ -132,6 +132,10 @@ public class NeoDefaultsService {
 
         List<SFField> sequenceSFFields = new ArrayList<>();
         JSONObject defaults = new JSONObject();
+        // ETP-4258: track fields resolved from a genuine configured default so the callout
+        // cascade below cannot overwrite them (e.g. asset calculateType="TI" must survive the
+        // SL_Depreciate callout that would otherwise derive "PE" from the auto-picked group).
+        Set<String> intentionalDefaults = new HashSet<>();
 
         for (SFField sfField : fields) {
           Column adColumn = sfField.getADColumn();
@@ -152,6 +156,13 @@ public class NeoDefaultsService {
             String sfFieldDefault = sfField.getDefaultValue();
             Object resolvedValue = resolveFieldDefault(adColumn, parentId, vars, conn, windowId,
                 ctx, sfFieldDefault);
+            // ETP-4258: a non-null value here is a genuine configured default (level 1) — record
+            // it so the callout cascade in applyCascadeAndResolveTab treats it as protected. The
+            // combo first-option fallback applied inside applyDefaultWithComboFallback (level 4)
+            // is intentionally NOT recorded: it is the callout anchor, free to be refined.
+            if (resolvedValue != null) {
+              intentionalDefaults.add(propertyName);
+            }
             // For combo-style references (TableDir/Table/List) with no explicit default,
             // mirror FIC parity and preselect the first available option. Search-type
             // references (ref 30, OBUISEL) are excluded by resolveFirstComboOption, so
@@ -201,7 +212,7 @@ public class NeoDefaultsService {
 
         // Keep cascade enabled for /defaults to preserve the compatibility behavior chosen
         // for this merge: dependent defaults should still be derived during form bootstrap.
-        Tab adTab = applyCascadeAndResolveTab(ctx, sequenceFields, defaults);
+        Tab adTab = applyCascadeAndResolveTab(ctx, sequenceFields, defaults, intentionalDefaults);
 
         // ETP-3894: FK preselection is intentionally disabled. Mandatory FKs without an
         // explicit AD_Column default / ETGO_SF_FIELD default / session value / parent value
@@ -313,14 +324,17 @@ public class NeoDefaultsService {
   }
 
   private static @Nullable Tab applyCascadeAndResolveTab(NeoContext ctx, JSONArray sequenceFields,
-      JSONObject defaults) throws JSONException {
+      JSONObject defaults, Set<String> protectedFields) throws JSONException {
     Tab adTab = ctx.getAdTab();
     Set<String> seqFieldSet = new HashSet<>();
     for (int i = 0; i < sequenceFields.length(); i++) {
       seqFieldSet.add(sequenceFields.getString(i));
     }
     if (adTab != null) {
-      NeoDefaultsCascadeHelper.executeCalloutCascade(ctx, adTab, defaults, seqFieldSet);
+      // ETP-4258: pass the configured-default fields as protected so callouts (e.g.
+      // SL_Depreciate) cannot overwrite them during the /defaults cascade.
+      NeoDefaultsCascadeHelper.executeCalloutCascade(ctx, adTab, defaults, seqFieldSet,
+          protectedFields != null ? protectedFields : java.util.Collections.emptySet());
     }
 
     // Re-apply C_DocTypeTarget_ID from the tab's HQL subtype filter (e.g. sOSubType LIKE 'OB'
@@ -720,12 +734,12 @@ public class NeoDefaultsService {
    * @param adTab   the AD_Tab for the entity being created
    * @param ctx     the NeoContext with OBContext and spec/entity info
    */
-  public static void injectMandatoryDefaults(JSONObject body, Tab adTab, NeoContext ctx) {
-    injectMandatoryDefaults(body, adTab, ctx, null, true);
+  public static Set<String> injectMandatoryDefaults(JSONObject body, Tab adTab, NeoContext ctx) {
+    return injectMandatoryDefaults(body, adTab, ctx, null, true);
   }
 
-  public static void injectMandatoryDefaults(JSONObject body, Tab adTab, NeoContext ctx, String parentId) {
-    injectMandatoryDefaults(body, adTab, ctx, parentId, true);
+  public static Set<String> injectMandatoryDefaults(JSONObject body, Tab adTab, NeoContext ctx, String parentId) {
+    return injectMandatoryDefaults(body, adTab, ctx, parentId, true);
   }
 
   /**
@@ -742,17 +756,25 @@ public class NeoDefaultsService {
    * @param runCascade whether to run the trailing callout cascade after column iteration.
    *                   Set to {@code false} when the caller will run the cascade explicitly
    *                   right after, to avoid duplicating the (expensive) cascade pass.
+   * @return the set of DAL property names that were injected from an INTENTIONAL source
+   *         (levels 1-3: configured ETGO_SF_FIELD/AD_Column default, session context, or
+   *         parent value). ETP-4258: the caller must add these to the callout-cascade
+   *         protected set so a callout output (e.g. SL_Depreciate returning PE/N derived
+   *         from the auto-picked asset group) cannot clobber a configured default (TI/Y).
+   *         The NOT-NULL safety fallbacks (level 4 auto-picked FK, level 5 safe-type
+   *         placeholder) are deliberately EXCLUDED — callouts must remain free to fill them.
    */
-  public static void injectMandatoryDefaults(JSONObject body, Tab adTab, NeoContext ctx,
+  public static Set<String> injectMandatoryDefaults(JSONObject body, Tab adTab, NeoContext ctx,
       String parentId, boolean runCascade) {
+    Set<String> intentionalDefaults = new HashSet<>();
     if (body == null || adTab == null || ctx == null) {
-      return;
+      return intentionalDefaults;
     }
     try {
       Entity dalEntity = ModelProvider.getInstance()
           .getEntityByTableId(adTab.getTable().getId());
       if (dalEntity == null) {
-        return;
+        return intentionalDefaults;
       }
 
       // Build resolution infrastructure once for all columns
@@ -791,7 +813,8 @@ public class NeoDefaultsService {
         if (prop != null && prop.isAuditInfo()) {
           continue;
         }
-        injectMandatoryDefaultForColumn(body, dalEntity, col, mCtx, col.isMandatory());
+        injectMandatoryDefaultForColumn(body, dalEntity, col, mCtx, col.isMandatory(),
+            intentionalDefaults);
       }
 
       // Fallback 3: run callout cascade with all fields in body.
@@ -807,6 +830,7 @@ public class NeoDefaultsService {
       log.error("Error injecting mandatory defaults for tab {}: {}",
           adTab.getName(), e.getMessage(), e);
     }
+    return intentionalDefaults;
   }
 
   /**
@@ -852,9 +876,14 @@ public class NeoDefaultsService {
    * @param mandatory whether the column is NOT-NULL (mandatory). Non-mandatory columns
    *                  run only the genuine default-resolution passes and stop; the
    *                  aggressive NOT-NULL fallbacks are gated behind this flag (ETP-4274).
+   * @param intentionalDefaults out-param collector: this method adds {@code propName} to it
+   *                  whenever the value was injected from an INTENTIONAL source (levels 1-3:
+   *                  configured default, session context, parent value). The level-4
+   *                  auto-picked FK and level-5 safe-type placeholder are NOT recorded, so
+   *                  callouts stay free to overwrite those (ETP-4258).
    */
   private static void injectMandatoryDefaultForColumn(JSONObject body, Entity dalEntity,
-      Column col, MandatoryDefaultContext mCtx, boolean mandatory) {
+      Column col, MandatoryDefaultContext mCtx, boolean mandatory, Set<String> intentionalDefaults) {
     try {
       if (isAuditColumn(col)) {
         return;
@@ -870,12 +899,15 @@ public class NeoDefaultsService {
       }
 
       if (tryResolveFieldDefault(body, propName, col, mCtx)) {
+        intentionalDefaults.add(propName);
         return;
       }
       if (tryInjectFromSession(body, dalEntity, propName, col, mCtx)) {
+        intentionalDefaults.add(propName);
         return;
       }
       if (tryInjectFromParentValues(body, dalEntity, propName, col, mCtx.parentValues)) {
+        intentionalDefaults.add(propName);
         return;
       }
       // ETP-4274: non-mandatory columns stop after the genuine default-resolution passes

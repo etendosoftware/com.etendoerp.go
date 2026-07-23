@@ -517,9 +517,20 @@ class NeoCrudHandler {
     long perfStart = perfTotalStart;
     // runCascade=false: the cascade is run explicitly right after by executePostCalloutCascade,
     // so we skip the duplicated pass embedded in injectMandatoryDefaults.
-    NeoDefaultsService.injectMandatoryDefaults(filteredBody, adTab, context, parentIdValue, false);
+    // ETP-4258: injectMandatoryDefaults returns the props it filled from an INTENTIONAL source
+    // (configured default / session / parent). Those must join userSubmittedFields in the
+    // callout-cascade protected set, otherwise a callout (e.g. SL_Depreciate deriving PE/N from
+    // the auto-picked asset group) overwrites the configured default (TI/Y). The NOT-NULL
+    // safety placeholders (levels 4-5) are deliberately absent from the returned set, so
+    // callouts remain free to fill them.
+    Set<String> intentionalDefaults = NeoDefaultsService.injectMandatoryDefaults(
+        filteredBody, adTab, context, parentIdValue, false);
     long perfInjectDefaults = System.nanoTime();
-    executePostCalloutCascade(filteredBody, adTab, context, parentIdValue, userSubmittedFields);
+    // Do NOT mutate userSubmittedFields — it is reused below by findMissingMandatoryFields and
+    // must keep meaning "only the fields the user actually sent".
+    Set<String> calloutProtectedFields = new HashSet<>(userSubmittedFields);
+    calloutProtectedFields.addAll(intentionalDefaults);
+    executePostCalloutCascade(filteredBody, adTab, context, parentIdValue, calloutProtectedFields);
     long perfCalloutCascade = System.nanoTime();
     NeoCommercialLinePolicy.injectProductDerivedUomIfMissing(filteredBody);
     NeoCommercialLinePolicy.injectGrossAmountIfMissing(filteredBody);

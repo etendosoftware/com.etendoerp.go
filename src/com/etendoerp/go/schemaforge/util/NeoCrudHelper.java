@@ -208,9 +208,16 @@ public class NeoCrudHelper {
         userSubmittedFields.add(userKeyIter.next());
       }
     }
-    NeoDefaultsService.injectMandatoryDefaults(filteredBody, adTab, context, parentIdValue);
+    // ETP-4258: union the props injected from an INTENTIONAL source (configured default /
+    // session / parent) with the user-submitted keys, so the callout cascade cannot overwrite
+    // a configured default (e.g. asset calculateType="TI" clobbered to "PE" by SL_Depreciate).
+    // NOT-NULL safety placeholders (levels 4-5) are excluded from the returned set on purpose.
+    Set<String> intentionalDefaults = NeoDefaultsService.injectMandatoryDefaults(
+        filteredBody, adTab, context, parentIdValue);
+    Set<String> calloutProtectedFields = new HashSet<>(userSubmittedFields);
+    calloutProtectedFields.addAll(intentionalDefaults);
 
-    executePostCalloutCascade(filteredBody, adTab, context, parentIdValue, userSubmittedFields);
+    executePostCalloutCascade(filteredBody, adTab, context, parentIdValue, calloutProtectedFields);
 
     String wrappedBody = NeoTypeCoercionHelper.wrapForSmartclient(
         filteredBody, dalEntityName, null);
