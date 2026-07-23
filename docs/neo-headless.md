@@ -772,6 +772,11 @@ NEO Headless enforces security at multiple levels:
 
 8. **Method-level control:** Each HTTP method must be explicitly enabled on the entity record. Disabled methods return `405 Method Not Allowed`.
 
+   MCP `neo_discover` mirrors this configuration per entity through its `methods` array and
+   `readOnly` flag. `readOnly: true` means at least one read method is enabled and no POST, PUT,
+   PATCH, or DELETE method is enabled, so agents must not attempt a write even when the parent
+   window spec is otherwise available.
+
 9. **Field-level control:** Only fields with `ISINCLUDED = 'Y'` participate in selector listings and button action discovery.
 
 **Known limitations (ETP-4596):** 7 of the 8 `SPEC_TYPE = 'R'` report specs have no classic-process mapping and still have no handler-level access control. Separately, the MCP tool catalog/discovery layer (`ToolRegistry`, `NeoDiscoveryHelper`, `McpToolRouterSupport`) still exposes the *existence* of process-null specs to any authenticated caller regardless of role — metadata-only exposure; actual data access is blocked wherever a handler-level gate exists. Both gaps are tracked in ETP-4596, not fixed by ETP-4510/ETP-4511.
