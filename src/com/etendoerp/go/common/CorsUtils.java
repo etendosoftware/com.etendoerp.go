@@ -77,7 +77,15 @@ public final class CorsUtils {
     }
   }
 
-  private static boolean isAllowedOrigin(HttpServletRequest request, String origin) {
+  /**
+   * Whether the given origin is allowlisted for the current request (same-origin, default
+   * allowlist, or configured origins). Exposed for reuse by the session CSRF/origin check.
+   *
+   * @param request current HTTP request
+   * @param origin  the origin to validate (e.g. from the {@code Origin} or {@code Referer} header)
+   * @return {@code true} if the origin is allowed
+   */
+  public static boolean isAllowedOrigin(HttpServletRequest request, String origin) {
     String requestOrigin = buildRequestOrigin(request);
     if (origin.equals(requestOrigin) || DEFAULT_ALLOWED_ORIGINS.contains(origin)) {
       return true;
