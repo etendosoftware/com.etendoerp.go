@@ -98,9 +98,9 @@
         <index-column name="AD_USER_ID"/>
         <index-column name="LAST_ACTIVITY"/>
       </index>
+      <check name="ETGO_HUMAN_TAKEOVER_CHK"><![CDATA[HUMAN_TAKEOVER IN ('Y', 'N')]]></check>
+      <check name="ETGO_RATED_CHK"><![CDATA[RATED IN ('Y', 'N')]]></check>
       <check name="ETGO_TCONVERSATION_VE_CHK"><![CDATA[ISACTIVE IN ('Y', 'N')]]></check>
-      <check name="HUMAN_TAKEOVER_CHK"><![CDATA[HUMAN_TAKEOVER IN ('Y', 'N')]]></check>
-      <check name="RATED_CHK"><![CDATA[RATED IN ('Y', 'N')]]></check>
-      <check name="UNREAD_CHK"><![CDATA[UNREAD IN ('Y', 'N')]]></check>
+      <check name="ETGO_UNREAD_CHK"><![CDATA[UNREAD IN ('Y', 'N')]]></check>
     </table>
   </database>
