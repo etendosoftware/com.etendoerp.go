@@ -245,7 +245,7 @@ class NeoCsvExportServiceTest {
 
     assertTrue(handled);
     String csv = cap.csv();
-    // Negative numbers are also neutralized (documented trade-off: rendered as text in Excel);
+    // Negative numbers are also neutralized (documented trade-off: rendered as text in Excel).
     // "-CMD" must be caught, so a bare leading "-" cannot be exempted.
     assertTrue(csv.contains("\"'-500.00\""), csv);
     // A value already safely prefixed with an apostrophe is not prefixed a second time.

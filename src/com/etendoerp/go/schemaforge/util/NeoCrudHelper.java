@@ -252,6 +252,9 @@ public class NeoCrudHelper {
    * Snapshots the fields currently present in a create payload. Callout protection uses a
    * post-default snapshot so mandatory defaults cannot be overwritten, while validation keeps
    * its separate pre-default user-submitted snapshot.
+   *
+   * @param body the create payload to snapshot; {@code null} yields an empty set
+   * @return the set of field names currently present in {@code body}
    */
   public static Set<String> snapshotBodyFields(JSONObject body) {
     Set<String> fields = new HashSet<>();
@@ -265,7 +268,15 @@ public class NeoCrudHelper {
     return fields;
   }
 
-  /** Returns the present fields backed by mandatory columns, after their defaults are injected. */
+  /**
+   * Returns the present fields backed by mandatory columns, after their defaults are injected.
+   *
+   * @param body the create payload, already carrying mandatory-default values; {@code null}
+   *     yields an empty set
+   * @param adTab the tab whose mandatory columns are checked against {@code body}; {@code null}
+   *     (or a tab without a table) yields an empty set
+   * @return the set of DAL property names backed by a mandatory column present in {@code body}
+   */
   public static Set<String> snapshotMandatoryBodyFields(JSONObject body, Tab adTab) {
     Set<String> fields = new HashSet<>();
     if (body == null || adTab == null || adTab.getTable() == null) {
