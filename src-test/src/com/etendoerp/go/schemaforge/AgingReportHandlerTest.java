@@ -262,6 +262,32 @@ class AgingReportHandlerTest {
     }
 
     @Test
+    @DisplayName("Unresolvable organization returns an actionable 400")
+    void unresolvableOrganizationReturns400() throws Exception {
+      OBDal dal = mock(OBDal.class);
+      try (MockedStatic<NeoAccessHelper> accessMock = mockAccessGranted();
+           MockedStatic<FIN_Utility> paymentStatusMock = mockStatic(FIN_Utility.class);
+           MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class);
+           MockedConstruction<AgingDao> daoConstruction = mockConstruction(AgingDao.class)) {
+        paymentStatusMock.when(FIN_Utility::getListPaymentConfirmed)
+            .thenReturn(Collections.singletonList("RPR"));
+        obDalMock.when(OBDal::getInstance).thenReturn(dal);
+        when(dal.get(Organization.class, "org-id")).thenReturn(null);
+
+        JSONObject body = new JSONObject();
+        body.put("recOrPay", "RECEIVABLES");
+        body.put("orgId", "org-id");
+        NeoResponse result = handler.handle(
+            NeoContext.builder().httpMethod("POST").requestBody(body).build());
+
+        assertEquals(400, result.getHttpStatus());
+        assertTrue(result.getBody().getJSONObject("error").getString("message")
+            .contains("organization context"));
+        assertTrue(daoConstruction.constructed().isEmpty());
+      }
+    }
+
+    @Test
     @DisplayName("Missing organization tree returns an actionable 422")
     void missingOrganizationTreeReturns422() throws Exception {
       OBDal dal = mock(OBDal.class);
