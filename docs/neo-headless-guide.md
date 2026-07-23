@@ -21,6 +21,7 @@
 17. [OpenAPI Auto-Generado](#17-openapi-auto-generado)
 18. [Seguridad](#18-seguridad)
 19. [Menu de Navegacion (SFListMenu)](#19-menu-de-navegacion-sflistmenu)
+    - [19b. Mapa Proactivo de Acceso a Ventanas (SFWindowAccessMap)](#19b-mapa-proactivo-de-acceso-a-ventanas-sfwindowaccessmap)
 20. [Testing](#20-testing)
 21. [Troubleshooting](#21-troubleshooting)
 
@@ -1285,7 +1286,41 @@ Las carpetas nunca se filtran directamente: primero se filtran sus hijos (post-o
 
 ### Fuera de alcance
 
-Este endpoint controla que aparece **en el menu**. No bloquea la navegacion directa/deep-link a una ventana sin acceso -- eso esta trackeado por separado en ETP-4520.
+Este endpoint controla que aparece **en el menu**. No bloquea la navegacion directa/deep-link a una ventana sin acceso -- ese gap reactivo se mantiene abierto. El contrapunto proactivo -- decirle al frontend de antemano que tier tiene para cada ventana, antes de renderizar nada -- es `SFWindowAccessMap`, descrito a continuacion (ETP-4520).
+
+---
+
+## 19b. Mapa Proactivo de Acceso a Ventanas (SFWindowAccessMap)
+
+`SFWindowAccessMap` (`GET /webhooks/SFWindowAccessMap`) informa, para el usuario/role autenticado actual, su tier de acceso para cada ventana con una concesion explicita, mas si puede ver datos sensibles de contabilidad -- asi el frontend se adapta *antes* de renderizar en vez de descubrir un `403` reactivamente por-request (§18). Vive en la misma infraestructura de Webhooks que `SFListMenu`, no bajo el servlet NEO.
+
+### Endpoint
+
+```bash
+curl -X GET https://tu-etendo/webhooks/SFWindowAccessMap \
+  -H "Authorization: Bearer <jwt>"
+```
+
+Response:
+
+```json
+{
+  "windowAccess": { "111": "full", "268": "read-only" },
+  "capabilities": { "showAccountingFields": true }
+}
+```
+
+Las keys de `windowAccess` son `AD_Window_ID`s; una ventana sin fila activa de `AD_Window_Access` para el role simplemente no aparece -- el frontend trata una key ausente como `"none"`.
+
+### Orden de resolucion
+
+Igual que `NeoAccessHelper.hasWindowAccess(Role, String, String)` (§18):
+
+1. Sin role asignado -> `{"windowAccess": {}, "capabilities": {}}`, sin consultar la base -- misma convencion que `SFListMenu`: el role se captura una sola vez, al principio del request, antes de entrar a `OBContext.setAdminMode()`.
+2. Role System Administrator (`"0"`) o client-admin (`NeoAccessHelper.isAdminOrClientAdmin(Role)`, ahora `public` justamente para que este webhook lo reutilice) -> cada `AD_Window` distinto detras de un `ETGO_SF_SPEC` activo con `SPEC_TYPE = 'W'` resuelve a `"full"`, y `capabilities.showAccountingFields` es siempre `true` -- la columna ni siquiera se consulta en esta rama.
+3. Si no, para cada fila activa de `AD_Window_Access` del role: `IsReadWrite = true` -> `"full"`; `IsReadWrite = false` -> `"read-only"`. `capabilities.showAccountingFields` se lee directo de la nueva columna extension `AD_Role.EM_ETGO_Show_Acct_Fields` (boolean, ETP-4520) para el role resuelto, via SQL nativo (la columna se agrego directo a la tabla fisica y todavia no esta mapeada como property tipada del entity DAL).
+
+**`AD_Role.EM_ETGO_Show_Acct_Fields`:** columna extension Yes/No agregada por este modulo (`AD_Column_ID = A0F2D12B5B4A48C2855EE73E3E93E274`, default `N`) y expuesta como campo real (`AD_Field_ID = 98C71197D0744EED96856A497E49F159`) en la ventana/tab clasica de `AD_Role`, para que un consultor funcional la togglee como cualquier otro atributo del role. Gatea la visibilidad de campos/tabs sensibles a contabilidad en Etendo GO -- ej. el status pill `Posted` en ventanas de facturas y la tab "Cuentas contables" del formulario de edicion de financial-account -- independiente del `AD_Window_Access` por-ventana.
 
 ---
 
@@ -1307,6 +1342,7 @@ Tests unitarios en `src-test/src/com/etendoerp/go/schemaforge/`:
 | `SFListWindowsTest` | Webhook de listar ventanas |
 | `SFListProcessesTest` | Webhook de listar procesos |
 | `SFListMenuTest` | Webhook de menu de navegacion: build/pruning del arbol, busqueda plana, filtrado por role (nodos window/process/OBUIAPP-process), role sin acceso -> menu vacio, arbol multi-nivel |
+| `SFWindowAccessMapTest` | Resolucion de windowAccess por role (full/read-only/ausente), sin role -> ambos mapas vacios, bypass admin/client-admin -> full access a toda ventana activa de Etendo GO + toda capability true, `showAccountingFields` true/false/no-seteado/sin-role |
 
 ---
 
