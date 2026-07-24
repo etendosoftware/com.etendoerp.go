@@ -464,6 +464,61 @@ public class AutoMatchSupportTest {
   }
 
   /**
+   * ETP-4502 iteration 5: a PARTIAL group must expose the id of its pending remainder sub-line as
+   * {@code remainderLineId} — the sub-line the UI reconciles the rest of the line against. The
+   * first UNMATCHED sub-line wins; here the matched 53.24 sub-line is the group head (no
+   * remainderLineId) and the 46.76 pending one contributes it.
+   *
+   * @throws Exception if building the JSON line objects fails
+   */
+  @Test
+  public void testMergeMatchGroupsPartialExposesRemainderLineId() throws Exception {
+    JSONObject txnA = new JSONObject().put("id", "T1").put("amount", "53.24");
+    JSONObject matchedSub = line("L1", "GRP-PARTIAL", "53.24", "53.24", "0.00", true);
+    matchedSub.put("txns", new JSONArray().put(txnA));
+    JSONObject pendingSub = line("L2", "GRP-PARTIAL", "46.76", "46.76", "0.00", false);
+
+    JSONArray input = new JSONArray();
+    input.put(matchedSub);
+    input.put(pendingSub);
+
+    JSONArray result = BankStatementsSupport.mergeMatchGroups(input);
+
+    assertEquals(1, result.length());
+    JSONObject merged = result.getJSONObject(0);
+    assertEquals("PARTIAL", merged.getString("reconcileStatus"));
+    // The remainder is the pending sub-line, not the matched head.
+    assertEquals("L2", merged.getString("remainderLineId"));
+  }
+
+  /**
+   * ETP-4502 iteration 5: a fully RECONCILED group (every sub-line matched) has no pending
+   * remainder, so it must NOT carry a {@code remainderLineId}.
+   *
+   * @throws Exception if building the JSON line objects fails
+   */
+  @Test
+  public void testMergeMatchGroupsFullyReconciledHasNoRemainderLineId() throws Exception {
+    JSONObject txnA = new JSONObject().put("id", "T1").put("amount", "60.00");
+    JSONObject txnB = new JSONObject().put("id", "T2").put("amount", "40.00");
+    JSONObject subA = line("L1", "GRP-FULL", "60.00", "60.00", "0.00", true);
+    subA.put("txns", new JSONArray().put(txnA));
+    JSONObject subB = line("L2", "GRP-FULL", "40.00", "40.00", "0.00", true);
+    subB.put("txns", new JSONArray().put(txnB));
+
+    JSONArray input = new JSONArray();
+    input.put(subA);
+    input.put(subB);
+
+    JSONArray result = BankStatementsSupport.mergeMatchGroups(input);
+
+    assertEquals(1, result.length());
+    JSONObject merged = result.getJSONObject(0);
+    assertEquals("RECONCILED", merged.getString("reconcileStatus"));
+    assertFalse(merged.has("remainderLineId"));
+  }
+
+  /**
    * When neither sub-line in a match group is matched (no txns at all), the merged group stays
    * PENDING — the defensive branch of the new status-derivation logic.
    *

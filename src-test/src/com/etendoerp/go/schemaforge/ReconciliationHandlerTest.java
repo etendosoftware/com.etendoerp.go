@@ -50,7 +50,9 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
+import com.etendoerp.payment.removal.util.PaymentRemovalUtil;
 import com.etendoerp.payment.removal.util.ReconciliationRemovalUtil;
+import com.etendoerp.payment.removal.util.TransactionRemovalUtil;
 
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
@@ -1978,6 +1980,358 @@ public class ReconciliationHandlerTest {
     doReturn(null).when(handler).loadLine(LINE_ID);
     NeoResponse response = handler.reactivate(reactivateBody(ACC_ID, LINE_ID));
     assertEquals(404, response.getHttpStatus());
+  }
+
+  // ── removeOperation (bulk / single un-reconcile, ETP-4502) ───────────────────
+
+  /**
+   * Builds a removeOperation body with the new {@code transactionIds[]} contract:
+   * {@code { financialAccountId, statementLineId, transactionIds: [...] }}. When no ids are given
+   * the {@code transactionIds} key is omitted (missing/empty case).
+   */
+  private JSONObject removeBody(String accountId, String lineId, String... transactionIds)
+      throws Exception {
+    JSONObject b = new JSONObject()
+        .put("financialAccountId", accountId)
+        .put("statementLineId", lineId);
+    if (transactionIds != null && transactionIds.length > 0) {
+      JSONArray arr = new JSONArray();
+      for (String id : transactionIds) {
+        arr.put(id);
+      }
+      b.put("transactionIds", arr);
+    }
+    return b;
+  }
+
+  /** Builds a body using the legacy single {@code transactionId} key (readTransactionIds fallback). */
+  private JSONObject removeBodySingle(String accountId, String lineId, String transactionId)
+      throws Exception {
+    return new JSONObject()
+        .put("financialAccountId", accountId)
+        .put("statementLineId", lineId)
+        .put("transactionId", transactionId);
+  }
+
+  /** A transaction mock carrying an id (needed for the coversAll set membership check). */
+  private FIN_FinaccTransaction txnWithId(String id) {
+    FIN_FinaccTransaction t = mock(FIN_FinaccTransaction.class);
+    when(t.getId()).thenReturn(id);
+    return t;
+  }
+
+  /**
+   * Builds a reconciliation belonging to {@link #ACC_ID}, carrying the metadata the period guard
+   * reads ({@code client}, {@code organization}, {@code entity.tableId}, {@code transactionDate}),
+   * and grouping exactly the given transactions (each wired back to this reconciliation).
+   */
+  private FIN_Reconciliation recWith(String recId, FIN_FinaccTransaction... txns) {
+    FIN_Reconciliation rec = mock(FIN_Reconciliation.class);
+    when(rec.getId()).thenReturn(recId);
+    FIN_FinancialAccount recAcc = mock(FIN_FinancialAccount.class);
+    when(recAcc.getId()).thenReturn(ACC_ID);
+    when(rec.getAccount()).thenReturn(recAcc);
+    Client client = mock(Client.class);
+    when(client.getId()).thenReturn(CLIENT_ID);
+    Organization org = mock(Organization.class);
+    when(org.getId()).thenReturn(ORG_ID);
+    when(rec.getClient()).thenReturn(client);
+    when(rec.getOrganization()).thenReturn(org);
+    when(rec.getTransactionDate()).thenReturn(null);
+    Entity entity = mock(Entity.class);
+    when(entity.getTableId()).thenReturn("TBL-1");
+    when(rec.getEntity()).thenReturn(entity);
+    List<FIN_FinaccTransaction> list = new ArrayList<>();
+    for (FIN_FinaccTransaction t : txns) {
+      when(t.getReconciliation()).thenReturn(rec);
+      list.add(t);
+    }
+    when(rec.getFINFinaccTransactionList()).thenReturn(list);
+    return rec;
+  }
+
+  /** Stubs {@code loadAccount}/{@code loadLine} (line belongs to ACC_ID) + {@code loadTransaction}. */
+  private FIN_FinancialAccount wireLoads(FIN_FinaccTransaction... loadable) {
+    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    FIN_BankStatementLine line = lineFor(ACC_ID, new BigDecimal("100.00"), BigDecimal.ZERO,
+        loadable.length > 0 ? loadable[0] : null);
+    doReturn(account).when(handler).loadAccount(ACC_ID);
+    doReturn(line).when(handler).loadLine(LINE_ID);
+    for (FIN_FinaccTransaction t : loadable) {
+      doReturn(t).when(handler).loadTransaction(t.getId());
+    }
+    return account;
+  }
+
+  /**
+   * A single id that is the ONLY transaction of the reconciliation → coversAll → whole-line undo
+   * ({@code undoReconciliation} + {@code normalizeReactivatedMatchGroup}), never the per-transaction
+   * detach. The response echoes the {@code transactionIds[]} array.
+   *
+   * @throws Exception if building the body or stubbing the seams fails
+   */
+  @Test
+  public void testRemoveOperationSingleCoversAllDelegatesToUndo() throws Exception {
+    FIN_FinaccTransaction t1 = txnWithId("T1");
+    FIN_Reconciliation rec = recWith("rec-1", t1);
+    List<FIN_FinaccTransaction> snapshot = rec.getFINFinaccTransactionList();
+    wireLoads(t1);
+    doNothing().when(handler).checkPeriod(any(), any(), any(), any());
+    doNothing().when(handler).undoReconciliation(any(), any(), any());
+    doReturn(mock(FIN_BankStatementLine.class)).when(handler).normalizeReactivatedMatchGroup(any());
+
+    NeoResponse response;
+    try (MockedStatic<ReconciliationRemovalUtil> recUtil = mockStatic(ReconciliationRemovalUtil.class)) {
+      recUtil.when(() -> ReconciliationRemovalUtil.getDraftReconciliation(any()))
+          .thenReturn(Collections.emptyList());
+      response = handler.removeOperation(removeBody(ACC_ID, LINE_ID, "T1"));
+      recUtil.verify(() -> ReconciliationRemovalUtil.removeTransactionFromReconciliation(any()), never());
+    }
+
+    assertEquals(200, response.getHttpStatus());
+    JSONObject data = response.getBody().getJSONObject("response").getJSONObject("data");
+    assertTrue(data.getBoolean("removed"));
+    assertEquals(1, data.getJSONArray("transactionIds").length());
+    assertEquals("T1", data.getJSONArray("transactionIds").getString(0));
+    verify(handler).undoReconciliation(any(), eq(rec), eq(snapshot));
+    verify(handler).normalizeReactivatedMatchGroup(any());
+  }
+
+  /**
+   * The legacy single {@code transactionId} body still works (readTransactionIds fallback): one of N
+   * → subset → {@code removeTransactionFromReconciliation} + {@code PaymentRemovalUtil} for the
+   * auto-created payment; the other transaction stays reconciled, no whole-line undo.
+   *
+   * @throws Exception if building the body or stubbing the seams fails
+   */
+  @Test
+  public void testRemoveOperationSingleIdFallbackSubsetReversesPayment() throws Exception {
+    FIN_FinaccTransaction t1 = txnWithId("T1");
+    FIN_FinaccTransaction t2 = txnWithId("T2");
+    recWith("rec-1", t1, t2);
+    FIN_Payment payment = mock(FIN_Payment.class);
+    when(t1.getFinPayment()).thenReturn(payment);
+    wireLoads(t1, t2);
+    doNothing().when(handler).checkPeriod(any(), any(), any(), any());
+    doReturn(true).when(handler).isAutoCreated(t1);
+    // normalizeReactivatedMatchGroup runs once at the end of every success path.
+    doReturn(mock(FIN_BankStatementLine.class)).when(handler).normalizeReactivatedMatchGroup(any());
+
+    NeoResponse response;
+    try (MockedStatic<ReconciliationRemovalUtil> recUtil = mockStatic(ReconciliationRemovalUtil.class);
+        MockedStatic<PaymentRemovalUtil> payUtil = mockStatic(PaymentRemovalUtil.class);
+        MockedStatic<TransactionRemovalUtil> trxUtil = mockStatic(TransactionRemovalUtil.class)) {
+      recUtil.when(() -> ReconciliationRemovalUtil.getDraftReconciliation(any()))
+          .thenReturn(Collections.emptyList());
+      response = handler.removeOperation(removeBodySingle(ACC_ID, LINE_ID, "T1"));
+
+      recUtil.verify(() -> ReconciliationRemovalUtil.removeTransactionFromReconciliation(t1));
+      payUtil.verify(() -> PaymentRemovalUtil.reactivateAndRemove(payment));
+      trxUtil.verify(() -> TransactionRemovalUtil.reactivateAndRemove(anyString()), never());
+    }
+
+    assertEquals(200, response.getHttpStatus());
+    verify(handler, never()).undoReconciliation(any(), any(), any());
+    verify(handler).normalizeReactivatedMatchGroup(any());
+  }
+
+  /**
+   * {@code transactionIds} = ALL of N → coversAll → whole-line undo (never the per-transaction
+   * detach), regardless of how many docs the group has.
+   *
+   * @throws Exception if building the body or stubbing the seams fails
+   */
+  @Test
+  public void testRemoveOperationAllIdsCoversAllDelegatesToUndo() throws Exception {
+    FIN_FinaccTransaction t1 = txnWithId("T1");
+    FIN_FinaccTransaction t2 = txnWithId("T2");
+    FIN_Reconciliation rec = recWith("rec-1", t1, t2);
+    List<FIN_FinaccTransaction> snapshot = rec.getFINFinaccTransactionList();
+    wireLoads(t1, t2);
+    doNothing().when(handler).checkPeriod(any(), any(), any(), any());
+    doNothing().when(handler).undoReconciliation(any(), any(), any());
+    doReturn(mock(FIN_BankStatementLine.class)).when(handler).normalizeReactivatedMatchGroup(any());
+
+    NeoResponse response;
+    try (MockedStatic<ReconciliationRemovalUtil> recUtil = mockStatic(ReconciliationRemovalUtil.class)) {
+      recUtil.when(() -> ReconciliationRemovalUtil.getDraftReconciliation(any()))
+          .thenReturn(Collections.emptyList());
+      response = handler.removeOperation(removeBody(ACC_ID, LINE_ID, "T1", "T2"));
+      recUtil.verify(() -> ReconciliationRemovalUtil.removeTransactionFromReconciliation(any()), never());
+    }
+
+    assertEquals(200, response.getHttpStatus());
+    verify(handler).undoReconciliation(any(), eq(rec), eq(snapshot));
+    verify(handler).normalizeReactivatedMatchGroup(any());
+  }
+
+  /**
+   * {@code transactionIds} = a SUBSET of N → per-transaction detach loop: each selected transaction
+   * is removed from the reconciliation, the auto-created one's payment reversed, the pre-existing one
+   * only detached; the unselected transaction is left untouched (no whole-line undo).
+   *
+   * @throws Exception if building the body or stubbing the seams fails
+   */
+  @Test
+  public void testRemoveOperationSubsetLoopsPerTransaction() throws Exception {
+    FIN_FinaccTransaction t1 = txnWithId("T1"); // selected, auto-created
+    FIN_FinaccTransaction t2 = txnWithId("T2"); // selected, pre-existing
+    FIN_FinaccTransaction t3 = txnWithId("T3"); // NOT selected → group not fully covered
+    recWith("rec-1", t1, t2, t3);
+    FIN_Payment payment = mock(FIN_Payment.class);
+    when(t1.getFinPayment()).thenReturn(payment);
+    wireLoads(t1, t2, t3);
+    doNothing().when(handler).checkPeriod(any(), any(), any(), any());
+    doReturn(true).when(handler).isAutoCreated(t1);
+    doReturn(false).when(handler).isAutoCreated(t2);
+    doReturn(mock(FIN_BankStatementLine.class)).when(handler).normalizeReactivatedMatchGroup(any());
+
+    NeoResponse response;
+    try (MockedStatic<ReconciliationRemovalUtil> recUtil = mockStatic(ReconciliationRemovalUtil.class);
+        MockedStatic<PaymentRemovalUtil> payUtil = mockStatic(PaymentRemovalUtil.class);
+        MockedStatic<TransactionRemovalUtil> trxUtil = mockStatic(TransactionRemovalUtil.class)) {
+      recUtil.when(() -> ReconciliationRemovalUtil.getDraftReconciliation(any()))
+          .thenReturn(Collections.emptyList());
+      response = handler.removeOperation(removeBody(ACC_ID, LINE_ID, "T1", "T2"));
+
+      // Both selected transactions detached; only t1 (auto) has its payment reversed.
+      recUtil.verify(() -> ReconciliationRemovalUtil.removeTransactionFromReconciliation(t1));
+      recUtil.verify(() -> ReconciliationRemovalUtil.removeTransactionFromReconciliation(t2));
+      recUtil.verify(() -> ReconciliationRemovalUtil.removeTransactionFromReconciliation(t3), never());
+      payUtil.verify(() -> PaymentRemovalUtil.reactivateAndRemove(payment));
+    }
+
+    assertEquals(200, response.getHttpStatus());
+    verify(handler, never()).undoReconciliation(any(), any(), any());
+    verify(handler).normalizeReactivatedMatchGroup(any());
+  }
+
+  /**
+   * A line reconciled in several steps has MULTIPLE reconciliations in the same match group. The
+   * selection is grouped by reconciliation and each handled independently: {@code rec1} (only txnA)
+   * is fully covered → whole-reconciliation undo; {@code rec2} (txnB + txnC, only B selected) is
+   * partially covered → per-transaction detach of B (C untouched). {@code normalizeReactivatedMatch
+   * Group} runs once at the very end. This is the case the old "different reconciliations → 400"
+   * rejection used to (wrongly) block.
+   *
+   * @throws Exception if building the body or stubbing the seams fails
+   */
+  @Test
+  public void testRemoveOperationMultipleReconciliationsHandledIndependently() throws Exception {
+    FIN_FinaccTransaction tA = txnWithId("A");
+    FIN_FinaccTransaction tB = txnWithId("B");
+    FIN_FinaccTransaction tC = txnWithId("C");
+    FIN_Reconciliation rec1 = recWith("rec-1", tA);          // fully covered by the selection
+    List<FIN_FinaccTransaction> rec1Snapshot = rec1.getFINFinaccTransactionList();
+    recWith("rec-2", tB, tC);                                // only B selected → partial
+    wireLoads(tA, tB, tC);
+    doNothing().when(handler).checkPeriod(any(), any(), any(), any());
+    doNothing().when(handler).undoReconciliation(any(), any(), any());
+    doReturn(false).when(handler).isAutoCreated(tB);
+    doReturn(mock(FIN_BankStatementLine.class)).when(handler).normalizeReactivatedMatchGroup(any());
+
+    NeoResponse response;
+    try (MockedStatic<ReconciliationRemovalUtil> recUtil = mockStatic(ReconciliationRemovalUtil.class);
+        MockedStatic<PaymentRemovalUtil> payUtil = mockStatic(PaymentRemovalUtil.class);
+        MockedStatic<TransactionRemovalUtil> trxUtil = mockStatic(TransactionRemovalUtil.class)) {
+      recUtil.when(() -> ReconciliationRemovalUtil.getDraftReconciliation(any()))
+          .thenReturn(Collections.emptyList());
+      response = handler.removeOperation(removeBody(ACC_ID, LINE_ID, "A", "B"));
+
+      // rec2 partial: only B detached, C left untouched. rec1 takes the whole-reconciliation undo,
+      // so A is NOT individually detached.
+      recUtil.verify(() -> ReconciliationRemovalUtil.removeTransactionFromReconciliation(tB));
+      recUtil.verify(() -> ReconciliationRemovalUtil.removeTransactionFromReconciliation(tC), never());
+      recUtil.verify(() -> ReconciliationRemovalUtil.removeTransactionFromReconciliation(tA), never());
+    }
+
+    assertEquals(200, response.getHttpStatus());
+    // rec1 fully covered → its whole reconciliation is undone.
+    verify(handler).undoReconciliation(any(), eq(rec1), eq(rec1Snapshot));
+    // The match-group collapse happens exactly once, after all reconciliations are processed.
+    verify(handler).normalizeReactivatedMatchGroup(any());
+  }
+
+  /**
+   * A closed accounting period makes the {@code checkPeriod} seam throw an OBException; the handler
+   * maps it to a 409 and touches neither the detach nor the undo path.
+   *
+   * @throws Exception if building the body or stubbing the seams fails
+   */
+  @Test
+  public void testRemoveOperationClosedPeriodReturns409() throws Exception {
+    FIN_FinaccTransaction t1 = txnWithId("T1");
+    FIN_FinaccTransaction t2 = txnWithId("T2");
+    recWith("rec-1", t1, t2);
+    wireLoads(t1, t2);
+    doThrow(new OBException("Period closed")).when(handler).checkPeriod(any(), any(), any(), any());
+
+    NeoResponse response = handler.removeOperation(removeBody(ACC_ID, LINE_ID, "T1"));
+
+    assertEquals(409, response.getHttpStatus());
+    assertTrue(response.getBody().getJSONObject("error").getString("message")
+        .contains("period is closed"));
+    verify(handler, never()).undoReconciliation(any(), any(), any());
+  }
+
+  /**
+   * A transaction whose {@code getReconciliation()} is null is not reconciled: 409, no undo/detach.
+   *
+   * @throws Exception if building the body or stubbing the seams fails
+   */
+  @Test
+  public void testRemoveOperationTransactionNotReconciledReturns409() throws Exception {
+    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    FIN_FinaccTransaction trx = mock(FIN_FinaccTransaction.class);
+    when(trx.getId()).thenReturn("T1");
+    when(trx.getReconciliation()).thenReturn(null);
+    FIN_BankStatementLine line = lineFor(ACC_ID, new BigDecimal("100.00"), BigDecimal.ZERO, trx);
+    doReturn(account).when(handler).loadAccount(ACC_ID);
+    doReturn(line).when(handler).loadLine(LINE_ID);
+    doReturn(trx).when(handler).loadTransaction("T1");
+
+    NeoResponse response = handler.removeOperation(removeBody(ACC_ID, LINE_ID, "T1"));
+
+    assertEquals(409, response.getHttpStatus());
+    assertTrue(response.getBody().getJSONObject("error").getString("message")
+        .contains("not linked to a reconciliation"));
+    verify(handler, never()).undoReconciliation(any(), any(), any());
+  }
+
+  /**
+   * A transaction whose reconciliation belongs to ANOTHER financial account is rejected with a 400.
+   *
+   * @throws Exception if building the body or stubbing the seams fails
+   */
+  @Test
+  public void testRemoveOperationTransactionOfAnotherAccountReturns400() throws Exception {
+    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    FIN_FinaccTransaction trx = txnWithId("T1");
+    FIN_Reconciliation rec = mock(FIN_Reconciliation.class);
+    when(rec.getId()).thenReturn("rec-1");
+    FIN_FinancialAccount otherAcc = mock(FIN_FinancialAccount.class);
+    when(otherAcc.getId()).thenReturn(OTHER_ACC);
+    when(rec.getAccount()).thenReturn(otherAcc);
+    when(trx.getReconciliation()).thenReturn(rec);
+    FIN_BankStatementLine line = lineFor(ACC_ID, new BigDecimal("100.00"), BigDecimal.ZERO, trx);
+    doReturn(account).when(handler).loadAccount(ACC_ID);
+    doReturn(line).when(handler).loadLine(LINE_ID);
+    doReturn(trx).when(handler).loadTransaction("T1");
+
+    NeoResponse response = handler.removeOperation(removeBody(ACC_ID, LINE_ID, "T1"));
+
+    assertEquals(400, response.getHttpStatus());
+    assertTrue(response.getBody().getJSONObject("error").getString("message")
+        .contains("do not belong to the financial account"));
+    verify(handler, never()).undoReconciliation(any(), any(), any());
+  }
+
+  /** removeOperation with no transaction ids at all is rejected with a 400 before any load. */
+  @Test
+  public void testRemoveOperationMissingIdsReturns400() throws Exception {
+    NeoResponse response = handler.removeOperation(removeBody(ACC_ID, LINE_ID));
+    assertEquals(400, response.getHttpStatus());
+    verify(handler, never()).loadAccount(any());
   }
 
   /** Reactivating an ETGO split group merges its unmatched siblings back into one physical line. */

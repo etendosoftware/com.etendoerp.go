@@ -60,6 +60,9 @@ final class ReactivationSupport {
   /** Module extension column flagging finacc transactions auto-created by the reconcile flow. */
   static final String COL_AUTO_CREATED = "EM_ETGO_Auto_Created";
 
+  /** Module extension column holding a bank-statement line's amount still pending to reconcile. */
+  static final String COL_PENDING_AMOUNT = "EM_ETGO_Pending_Amount";
+
   private ReactivationSupport() {
   }
 

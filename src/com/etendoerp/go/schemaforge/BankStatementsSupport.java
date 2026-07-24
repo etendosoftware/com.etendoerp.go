@@ -119,9 +119,11 @@ public final class BankStatementsSupport {
     row.put("matched", matched);
     // Per-row reconcile status/pending amount — the seed that mergeSubLineIntoHead accumulates
     // across a match group's physical rows (see there for why a group needs this instead of the
-    // plain `matched` flag once a partial match is involved).
+    // plain `matched` flag once a partial match is involved). pendingAmount comes from the persisted
+    // EM_ETGO_Pending_Amount column (maintained by BankStatementLinePendingAmountHandler) so this
+    // view and the reconciliation-tab pending-lines view share a single source of truth.
     row.put("reconcileStatus", matched ? "RECONCILED" : "PENDING");
-    row.put("pendingAmount", matched ? BigDecimal.ZERO : amount);
+    row.put("pendingAmount", nullSafeBigDecimal(rs.getBigDecimal("em_etgo_pending_amount")));
     // 1:N reconcile group (option B): split sub-lines share this id so they can be re-grouped.
     row.put("matchGroupId", StringUtils.trimToEmpty(rs.getString("em_etgo_match_group_id")));
     row.put("txns", buildLineTxns(rs, matched));
@@ -150,6 +152,11 @@ public final class BankStatementsSupport {
         // Lines without a group, or the first occurrence of a group, pass through as-is.
         if (StringUtils.isNotBlank(groupId)) {
           heads.put(groupId, line);
+          // If the group's head sub-line is itself the pending remainder, it is the line the UI
+          // reconciles the rest against (see remainderLineId below).
+          if (!line.optBoolean("matched", false)) {
+            line.put("remainderLineId", line.optString("id"));
+          }
         }
         result.put(line);
       } else {
@@ -186,6 +193,12 @@ public final class BankStatementsSupport {
     head.put("out", jsonBigDecimal(head, "out").add(jsonBigDecimal(line, "out")));
     head.put(FIELD_AMOUNT, jsonBigDecimal(head, FIELD_AMOUNT).add(jsonBigDecimal(line, FIELD_AMOUNT)));
     head.put("pendingAmount", jsonBigDecimal(head, "pendingAmount").add(jsonBigDecimal(line, "pendingAmount")));
+    // Remember the group's pending remainder sub-line (first unmatched one wins) — the UI reconciles
+    // the rest of the line against it (ETP-4502 iteration 5). Additive; consumers that don't need it
+    // (imported-statements view) simply ignore it.
+    if (StringUtils.isBlank(head.optString("remainderLineId", "")) && !line.optBoolean("matched", false)) {
+      head.put("remainderLineId", line.optString("id"));
+    }
     // The merged group is reconciled only while it still carries transactions AND nothing is left
     // pending. After a reactivate the sub-lines keep the match-group tag but lose their
     // transaction, so deriving status from the accumulated txns/pendingAmount (instead of forcing
@@ -390,6 +403,10 @@ public final class BankStatementsSupport {
     t.put(FIELD_AMOUNT, nullSafeBigDecimal(rs.getBigDecimal("txn_amount")));
     t.put("paymentId", StringUtils.trimToEmpty(rs.getString("txn_payment_id")));
     t.put("paymentIsReceipt", StringUtils.trimToEmpty(rs.getString("txn_payment_isreceipt")));
+    // Whether the reconcile flow auto-created this transaction's payment (invoice settlement) — the
+    // per-item un-reconcile ("desvincular") uses it to decide whether removing it also reverses a
+    // payment and restores the invoice to unpaid. See ETP-4502 iteration 5.
+    t.put("autoCreated", "Y".equalsIgnoreCase(StringUtils.trimToEmpty(rs.getString("txn_auto_created"))));
     txns.put(t);
     return txns;
   }

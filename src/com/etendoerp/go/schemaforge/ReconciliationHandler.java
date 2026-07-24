@@ -151,6 +151,7 @@ public class ReconciliationHandler implements NeoHandler {
   private static final String ACTION_AUTO_MATCH = "autoMatch";
   private static final String ACTION_APPLY_SUGGESTIONS = "applySuggestions";
   private static final String ACTION_REACTIVATE = "reactivate";
+  private static final String ACTION_REMOVE_OPERATION = "removeOperation";
 
   /** Match level recorded on the reconciliation lines produced by this handler. */
   private static final String MATCH_LEVEL_MANUAL = "MANUALMATCH";
@@ -169,6 +170,7 @@ public class ReconciliationHandler implements NeoHandler {
   private static final String MSG_STATEMENT_LINE_NOT_FOUND = "Statement line not found: ";
   private static final String KEY_FINANCIAL_ACCOUNT_ID = "financialAccountId";
   private static final String KEY_STATEMENT_LINE_ID = "statementLineId";
+  private static final String KEY_TRANSACTION_ID = "transactionId";
   private static final String KEY_ID = "id";
   private static final String KEY_DATE = "date";
   private static final String KEY_AMOUNT = "amount";
@@ -199,10 +201,31 @@ public class ReconciliationHandler implements NeoHandler {
           + "       COALESCE(bsl.referenceno, '') AS reference_no,"
           + "       CASE WHEN bsl.fin_finacc_transaction_id IS NULL THEN 'pending' ELSE 'reconciled' END AS line_status,"
           + "       COALESCE(bsl.em_etgo_match_group_id, '') AS match_group_id,"
-          + "       COALESCE(bsl.cramount, 0) - COALESCE(bsl.dramount, 0) AS amount"
+          + "       COALESCE(bsl.cramount, 0) AS cramount,"
+          + "       COALESCE(bsl.dramount, 0) AS dramount,"
+          + "       COALESCE(bsl.em_etgo_pending_amount, 0) AS em_etgo_pending_amount,"
+          + "       COALESCE(bsl.cramount, 0) - COALESCE(bsl.dramount, 0) AS amount,"
+          + "       bsl.fin_finacc_transaction_id,"
+          // Linked transaction columns (aliased exactly as BankStatementsSupport.buildLineTxns reads
+          // them) so the reconciliation-tab line carries the same txns[] contract as the
+          // imported-statements view — the right-panel "conciliado" block renders/unlinks them.
+          + "       COALESCE(fp.documentno, '') AS txn_documentno,"
+          + "       ft.statementdate            AS txn_date,"
+          + "       COALESCE(tbp.name, pbp.name, '') AS txn_contact,"
+          + "       COALESCE(ft.description, fp.description, '') AS txn_description,"
+          + "       ft.trxtype                  AS txn_trxtype,"
+          + "       ft.status                   AS txn_status,"
+          + "       CASE WHEN ft.trxtype = 'BPD' THEN ft.depositamt ELSE -ft.paymentamt END AS txn_amount,"
+          + "       ft.fin_payment_id           AS txn_payment_id,"
+          + "       fp.isreceipt                AS txn_payment_isreceipt,"
+          + "       COALESCE(ft.em_etgo_auto_created, 'N') AS txn_auto_created"
           + "  FROM fin_bankstatementline bsl"
           + "  JOIN fin_bankstatement bs ON bs.fin_bankstatement_id = bsl.fin_bankstatement_id"
           + "  LEFT JOIN c_bpartner bp ON bp.c_bpartner_id = bsl.c_bpartner_id"
+          + "  LEFT JOIN fin_finacc_transaction ft ON ft.fin_finacc_transaction_id = bsl.fin_finacc_transaction_id"
+          + "  LEFT JOIN fin_payment fp ON fp.fin_payment_id = ft.fin_payment_id"
+          + "  LEFT JOIN c_bpartner tbp ON tbp.c_bpartner_id = ft.c_bpartner_id"
+          + "  LEFT JOIN c_bpartner pbp ON pbp.c_bpartner_id = fp.c_bpartner_id"
           + " WHERE bsl.isactive = 'Y'"
           + "   AND bs.isactive = 'Y'"
           // Draft statements (processed = 'N') are not reconcilable yet, so their
@@ -307,6 +330,9 @@ public class ReconciliationHandler implements NeoHandler {
     if (METHOD_POST.equals(method) && ACTION_REACTIVATE.equals(action)) {
       return handleReactivate(context);
     }
+    if (METHOD_POST.equals(method) && ACTION_REMOVE_OPERATION.equals(action)) {
+      return handleRemoveOperation(context);
+    }
     // Any other request (generic list / getById of the W spec) flows through.
     return null;
   }
@@ -384,13 +410,12 @@ public class ReconciliationHandler implements NeoHandler {
       }
       try (ResultSet rs = ps.executeQuery()) {
         while (rs.next()) {
+          BigDecimal credit = nullSafe(rs.getBigDecimal("cramount"));
+          BigDecimal debit = nullSafe(rs.getBigDecimal("dramount"));
           BigDecimal amount = nullSafe(rs.getBigDecimal(KEY_AMOUNT));
           String lineId = rs.getString("fin_bankstatementline_id");
-          boolean reconciled = STATUS_RECONCILED
+          boolean matched = STATUS_RECONCILED
               .equalsIgnoreCase(StringUtils.trimToEmpty(rs.getString("line_status")));
-          String state = reconciled ? STATUS_RECONCILED
-              : AutoMatchSupport.classifyPendingLine(account, lineId, rules,
-                  pendingDateTolDays, pendingAmtTolPct);
 
           JSONObject row = new JSONObject();
           row.put(KEY_ID, lineId);
@@ -398,13 +423,20 @@ public class ReconciliationHandler implements NeoHandler {
           row.put(KEY_DESCRIPTION, StringUtils.trimToEmpty(rs.getString(KEY_DESCRIPTION)));
           row.put(KEY_PARTNER_NAME, StringUtils.trimToEmpty(rs.getString(COL_PARTNER_NAME)));
           row.put("referenceNo", StringUtils.trimToEmpty(rs.getString("reference_no")));
-          // Coarse status kept for backward compatibility (pending|reconciled).
-          row.put(KEY_STATUS, reconciled ? STATUS_RECONCILED : STATUS_PENDING);
-          // Fine-grained state for the left-panel filter (pending|suggested|byRule|difference|reconciled).
-          row.put("state", state);
+          row.put(KEY_AMOUNT, amount);
+          // Same per-row shape as BankStatementsSupport.mapLineRow so mergeMatchGroups derives the
+          // group's reconcileStatus/pendingAmount/txns identically to the imported-statements view.
+          // The physical row's pending amount comes from the persisted EM_ETGO_Pending_Amount column
+          // (maintained by BankStatementLinePendingAmountHandler). `state` is NOT computed here — it
+          // is derived per merged (logical) line in the post-merge loop below.
+          row.put("in", credit);
+          row.put("out", debit);
+          row.put("matched", matched);
+          row.put("pendingAmount", nullSafe(rs.getBigDecimal("em_etgo_pending_amount")));
+          row.put("reconcileStatus", matched ? "RECONCILED" : "PENDING");
           // 1:N group id (option B): sub-lines of the same reconcile group share this value.
           row.put("matchGroupId", StringUtils.trimToEmpty(rs.getString("match_group_id")));
-          row.put(KEY_AMOUNT, amount);
+          row.put("txns", BankStatementsSupport.buildLineTxns(rs, matched));
           rawLines.put(row);
         }
       }
@@ -417,8 +449,33 @@ public class ReconciliationHandler implements NeoHandler {
     Map<String, Integer> counts = AutoMatchSupport.newCounts();
     for (int i = 0; i < lines.length(); i++) {
       JSONObject row = lines.getJSONObject(i);
-      total = total.add(nullSafe(new BigDecimal(row.optString(KEY_AMOUNT, "0"))));
-      String state = row.optString("state", STATUS_PENDING);
+      BigDecimal amount = nullSafe(new BigDecimal(row.optString(KEY_AMOUNT, "0")));
+      total = total.add(amount);
+      // Reconciled/pending amounts + progress % for the left "Progreso" bar and the right block.
+      BigDecimal pending = nullSafe(new BigDecimal(row.optString("pendingAmount", "0")));
+      BigDecimal reconciled = amount.subtract(pending);
+      row.put("reconciledAmount", reconciled);
+      int pct = amount.signum() == 0 ? 0
+          : (int) Math.round(reconciled.abs().doubleValue() / amount.abs().doubleValue() * 100.0);
+      row.put("reconciledPct", pct);
+      // Derive the fine-grained state per merged (logical) line. A PARTIAL group stays in the
+      // pending universe (shows under the "Pendiente" filter, counted as pending) but is visibly
+      // partial via the progress bar; a fully-pending line is classified as before.
+      String recStatus = row.optString("reconcileStatus", "PENDING");
+      String state;
+      if ("RECONCILED".equals(recStatus)) {
+        state = STATUS_RECONCILED;
+        row.put(KEY_STATUS, STATUS_RECONCILED);
+      } else if ("PARTIAL".equals(recStatus)) {
+        state = STATUS_PENDING;
+        row.put(KEY_STATUS, STATUS_PENDING);
+        row.put("partial", true);
+      } else {
+        state = AutoMatchSupport.classifyPendingLine(account, row.optString(KEY_ID), rules,
+            pendingDateTolDays, pendingAmtTolPct);
+        row.put(KEY_STATUS, STATUS_PENDING);
+      }
+      row.put("state", state);
       counts.put("all", counts.get("all") + 1);
       counts.put(state, counts.getOrDefault(state, 0) + 1);
     }
@@ -779,8 +836,11 @@ public class ReconciliationHandler implements NeoHandler {
     // Grouping (option B): tag the original line with a fresh match-group id BEFORE the match so
     // the split sub-lines inherit it (DalUtil.copy copies all EM_ properties). The UI re-groups
     // the resulting sub-lines by this id. Only needed when the match will actually split the
-    // line — see willSplitLine.
-    if (willSplitLine(line, operationIds)) {
+    // line — see willSplitLine. If the line already carries a group id (we're reconciling the
+    // pending remainder of an EXISTING partial group), reuse it so the new match stays in the same
+    // group instead of fragmenting into a fresh one (ETP-4502 iteration 5).
+    if (willSplitLine(line, operationIds)
+        && StringUtils.isBlank(ReactivationSupport.readMatchGroupId(line))) {
       tagMatchGroup(line);
     }
     matchBankStatementLine(line, operationIds, rec);
@@ -1096,6 +1156,172 @@ public class ReconciliationHandler implements NeoHandler {
     data.put(KEY_STATEMENT_LINE_ID, statementLineId);
     data.put("updatedBalance", updatedBalance);
     return envelope(data);
+  }
+
+  private NeoResponse handleRemoveOperation(NeoContext context) {
+    JSONObject body = context.getRequestBody();
+    if (body == null) {
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, MSG_BODY_REQUIRED);
+    }
+    try {
+      OBContext.setAdminMode(true);
+      return removeOperation(body);
+    } catch (OBException e) {
+      log.warn("removeOperation business error: {}", e.getMessage());
+      doRollbackAndClose();
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, e.getMessage());
+    } catch (Exception e) {
+      log.error("removeOperation failed", e);
+      doRollbackAndClose();
+      return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR, MSG_INTERNAL_SERVER_ERROR);
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  /**
+   * Un-reconciles one OR MORE operations ("desvincular") from a statement line's reconciliation,
+   * leaving any non-selected operations reconciled. Body:
+   * {@code { financialAccountId, statementLineId, transactionIds: [...] }} (a single
+   * {@code transactionId} is also accepted for the per-row button).
+   *
+   * <p>Branch on whether the selection covers the WHOLE reconciliation:
+   * <ul>
+   *   <li><b>All operations selected</b> (or the reconciliation's only one): undoing them equals a
+   *       whole-line reactivate, so it delegates to {@link #undoReconciliation} +
+   *       {@link #normalizeReactivatedMatchGroup} — deletes the reconciliation, reverses the
+   *       auto-created payments (invoices back to unpaid) and collapses the split sub-lines into one
+   *       pending line.</li>
+   *   <li><b>A subset</b>: for each selected transaction,
+   *       {@link ReconciliationRemovalUtil#removeTransactionFromReconciliation} detaches it and
+   *       re-processes the reconciliation so the rest stay reconciled (the document is kept); an
+   *       auto-created payment is then reversed via {@link PaymentRemovalUtil#reactivateAndRemove}
+   *       (or {@link TransactionRemovalUtil#reactivateAndRemove} for a rule transaction), a
+   *       pre-existing transaction is only un-reconciled.</li>
+   * </ul>
+   * Each freed sub-line keeps its match-group id and amount; its {@code EM_ETGO_Pending_Amount} is
+   * re-set by {@link BankStatementLinePendingAmountHandler}, so {@code mergeMatchGroups} folds it
+   * back into the line's remaining on the next {@code pendingLines} load. See ETP-4502 iteration 5.
+   */
+  NeoResponse removeOperation(JSONObject body) throws Exception {
+    String accountId = body.optString(KEY_FINANCIAL_ACCOUNT_ID, null);
+    String statementLineId = body.optString(KEY_STATEMENT_LINE_ID, null);
+    List<String> transactionIds = readTransactionIds(body);
+    if (StringUtils.isBlank(accountId) || StringUtils.isBlank(statementLineId)
+        || transactionIds.isEmpty()) {
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
+          "financialAccountId, statementLineId and at least one transactionId are required");
+    }
+
+    FIN_FinancialAccount account = loadAccount(accountId);
+    if (account == null) {
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, MSG_ACCOUNT_NOT_FOUND + accountId);
+    }
+    FIN_BankStatementLine line = loadLine(statementLineId);
+    if (line == null) {
+      return NeoResponse.error(HttpServletResponse.SC_NOT_FOUND,
+          MSG_STATEMENT_LINE_NOT_FOUND + statementLineId);
+    }
+    if (!belongsToAccount(line, accountId)) {
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
+          "Statement line does not belong to the financial account");
+    }
+
+    // Resolve + validate every selected transaction and GROUP them by their reconciliation. A line
+    // reconciled in several steps (e.g. its remainder matched later against another invoice) ends up
+    // with MORE THAN ONE reconciliation sharing the same match group, so each reconciliation is
+    // handled independently below.
+    java.util.Map<String, FIN_Reconciliation> recById = new java.util.LinkedHashMap<>();
+    java.util.Map<String, List<FIN_FinaccTransaction>> selectedByRec = new java.util.LinkedHashMap<>();
+    for (String id : transactionIds) {
+      FIN_FinaccTransaction trx = loadTransaction(id);
+      if (trx == null) {
+        return NeoResponse.error(HttpServletResponse.SC_NOT_FOUND, "Transaction not found: " + id);
+      }
+      FIN_Reconciliation r = trx.getReconciliation();
+      if (r == null) {
+        return NeoResponse.error(HttpServletResponse.SC_CONFLICT,
+            "Transaction is not linked to a reconciliation");
+      }
+      if (r.getAccount() == null || !accountId.equals(r.getAccount().getId())) {
+        return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
+            "The selected operations do not belong to the financial account");
+      }
+      recById.putIfAbsent(r.getId(), r);
+      selectedByRec.computeIfAbsent(r.getId(), (k) -> new ArrayList<>()).add(trx);
+    }
+
+    // Accounting-period guard (same as reactivate): refuse to undo into a closed period, on any of
+    // the affected reconciliations.
+    for (FIN_Reconciliation r : recById.values()) {
+      try {
+        checkPeriod(r.getClient().getId(), r.getOrganization().getId(),
+            r.getEntity().getTableId(), r.getTransactionDate());
+      } catch (OBException e) {
+        log.warn("removeOperation blocked by closed period for reconciliation {}: {}", r.getId(),
+            e.getMessage());
+        return NeoResponse.error(HttpServletResponse.SC_CONFLICT,
+            "The accounting period is closed and the operation cannot be un-reconciled: "
+                + e.getMessage());
+      }
+    }
+
+    // Per reconciliation: if the selection covers ALL of its transactions, undo the whole
+    // reconciliation (payment removal); otherwise detach just the selected ones (the rest stay).
+    for (java.util.Map.Entry<String, FIN_Reconciliation> entry : recById.entrySet()) {
+      FIN_Reconciliation r = entry.getValue();
+      List<FIN_FinaccTransaction> selForRec = selectedByRec.get(entry.getKey());
+      List<FIN_FinaccTransaction> allOfRec = new ArrayList<>(r.getFINFinaccTransactionList());
+      java.util.Set<String> selIds = new java.util.HashSet<>();
+      for (FIN_FinaccTransaction t : selForRec) {
+        selIds.add(t.getId());
+      }
+      boolean coversRec = allOfRec.stream().allMatch((t) -> selIds.contains(t.getId()));
+      if (coversRec) {
+        undoReconciliation(account, r, allOfRec);
+      } else {
+        for (FIN_FinaccTransaction trx : selForRec) {
+          boolean auto = isAutoCreated(trx);
+          FIN_Payment payment = auto ? trx.getFinPayment() : null;
+          ReconciliationRemovalUtil.removeTransactionFromReconciliation(trx);
+          if (auto && payment != null) {
+            PaymentRemovalUtil.reactivateAndRemove(payment);
+          } else if (auto) {
+            TransactionRemovalUtil.reactivateAndRemove(trx.getId());
+          }
+        }
+      }
+    }
+    // Collapse the split sub-lines back into a single pending line if the whole group is now
+    // unmatched (no-ops when some sub-lines are still reconciled).
+    normalizeReactivatedMatchGroup(line);
+
+    BigDecimal updatedBalance = ReactivationSupport.currentBalance(account);
+    JSONObject data = new JSONObject();
+    data.put("removed", true);
+    data.put(KEY_STATEMENT_LINE_ID, statementLineId);
+    data.put("transactionIds", new JSONArray(transactionIds));
+    data.put("updatedBalance", updatedBalance);
+    return envelope(data);
+  }
+
+  /** Reads {@code transactionIds[]} from the body, falling back to a single {@code transactionId}. */
+  private List<String> readTransactionIds(JSONObject body) {
+    List<String> ids = new ArrayList<>();
+    JSONArray arr = body.optJSONArray("transactionIds");
+    if (arr != null) {
+      for (int i = 0; i < arr.length(); i++) {
+        String id = StringUtils.trimToNull(arr.optString(i, null));
+        if (id != null && !ids.contains(id)) {
+          ids.add(id);
+        }
+      }
+    }
+    String single = StringUtils.trimToNull(body.optString(KEY_TRANSACTION_ID, null));
+    if (ids.isEmpty() && single != null) {
+      ids.add(single);
+    }
+    return ids;
   }
 
   /**
