@@ -28,24 +28,28 @@ public interface GoSessionStore {
   /**
    * Insert a new session row.
    *
-   * @param record the record to persist
+   * @param sessionRecord the record to persist
    */
-  void save(GoSessionRecord record);
+  void save(GoSessionRecord sessionRecord);
 
   /**
    * Persist mutations to an existing session row (e.g. revocation).
    *
-   * @param record the record to update
+   * @param sessionRecord the record to update
    */
-  void update(GoSessionRecord record);
+  void update(GoSessionRecord sessionRecord);
 
   /**
+   * Look up a session by the hash of its opaque session token.
+   *
    * @param sessionTokenHash SHA-256 hash of the opaque session token
    * @return the matching record, or {@code null} if none
    */
   GoSessionRecord findByTokenHash(String sessionTokenHash);
 
   /**
+   * Look up a session by the hash of its opaque refresh token.
+   *
    * @param refreshTokenHash SHA-256 hash of the opaque refresh token
    * @return the matching record, or {@code null} if none
    */

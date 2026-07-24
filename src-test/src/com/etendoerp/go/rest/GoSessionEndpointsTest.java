@@ -147,9 +147,9 @@ public class GoSessionEndpointsTest {
 
   @Test
   public void logoutWithValidCsrfRevokesAndClearsCookie() throws Exception {
-    GoSessionRecord record = new GoSessionRecord();
-    record.setCsrfToken(CSRF);
-    when(goSessionService.resolve("tok")).thenReturn(record);
+    GoSessionRecord sessionRecord = new GoSessionRecord();
+    sessionRecord.setCsrfToken(CSRF);
+    when(goSessionService.resolve("tok")).thenReturn(sessionRecord);
 
     CapturedResponse resp = new CapturedResponse();
     try (MockedStatic<OBContext> ctx = mockStatic(OBContext.class)) {
@@ -158,14 +158,14 @@ public class GoSessionEndpointsTest {
 
     assertEquals(204, resp.status);
     assertTrue(resp.cookie(GoSessionSecurity.COOKIE_NAME).contains("Max-Age=0"));
-    verify(goSessionService).revoke(record);
+    verify(goSessionService).revoke(sessionRecord);
   }
 
   @Test
   public void logoutWithoutCsrfIsForbiddenAndDoesNotRevoke() throws Exception {
-    GoSessionRecord record = new GoSessionRecord();
-    record.setCsrfToken(CSRF);
-    when(goSessionService.resolve("tok")).thenReturn(record);
+    GoSessionRecord sessionRecord = new GoSessionRecord();
+    sessionRecord.setCsrfToken(CSRF);
+    when(goSessionService.resolve("tok")).thenReturn(sessionRecord);
 
     CapturedResponse resp = new CapturedResponse();
     try (MockedStatic<OBContext> ctx = mockStatic(OBContext.class)) {
@@ -178,10 +178,10 @@ public class GoSessionEndpointsTest {
 
   @Test
   public void restoreReturnsAccountAndCsrf() throws Exception {
-    GoSessionRecord record = new GoSessionRecord();
-    record.setAccountId("ACC1");
-    record.setCsrfToken(CSRF);
-    when(goSessionService.resolve("tok")).thenReturn(record);
+    GoSessionRecord sessionRecord = new GoSessionRecord();
+    sessionRecord.setAccountId("ACC1");
+    sessionRecord.setCsrfToken(CSRF);
+    when(goSessionService.resolve("tok")).thenReturn(sessionRecord);
 
     Account account = mock(Account.class);
     when(account.getId()).thenReturn("ACC1");
@@ -213,15 +213,15 @@ public class GoSessionEndpointsTest {
 
   @Test
   public void restoreIncludesSelectedEnvironment() throws Exception {
-    GoSessionRecord record = new GoSessionRecord();
-    record.setAccountId("ACC1");
-    record.setCsrfToken(CSRF);
-    record.setUserId("U1");
-    record.setRoleId("R1");
-    record.setCtxClientId("C1");
-    record.setCtxOrgId("O1");
-    record.setWarehouseId("W1");
-    when(goSessionService.resolve("tok")).thenReturn(record);
+    GoSessionRecord sessionRecord = new GoSessionRecord();
+    sessionRecord.setAccountId("ACC1");
+    sessionRecord.setCsrfToken(CSRF);
+    sessionRecord.setUserId("U1");
+    sessionRecord.setRoleId("R1");
+    sessionRecord.setCtxClientId("C1");
+    sessionRecord.setCtxOrgId("O1");
+    sessionRecord.setWarehouseId("W1");
+    when(goSessionService.resolve("tok")).thenReturn(sessionRecord);
 
     Account account = mock(Account.class);
     when(account.getId()).thenReturn("ACC1");
@@ -264,10 +264,10 @@ public class GoSessionEndpointsTest {
 
   @Test
   public void environmentWithoutCsrfIsForbidden() throws Exception {
-    GoSessionRecord record = new GoSessionRecord();
-    record.setAccountId("ACC1");
-    record.setCsrfToken(CSRF);
-    when(goSessionService.resolve("tok")).thenReturn(record);
+    GoSessionRecord sessionRecord = new GoSessionRecord();
+    sessionRecord.setAccountId("ACC1");
+    sessionRecord.setCsrfToken(CSRF);
+    when(goSessionService.resolve("tok")).thenReturn(sessionRecord);
 
     CapturedResponse resp = new CapturedResponse();
     try (MockedStatic<OBContext> ctx = mockStatic(OBContext.class)) {
@@ -279,10 +279,10 @@ public class GoSessionEndpointsTest {
 
   @Test
   public void environmentWithUnownedUserIsForbidden() throws Exception {
-    GoSessionRecord record = new GoSessionRecord();
-    record.setAccountId("ACC1");
-    record.setCsrfToken(CSRF);
-    when(goSessionService.resolve("tok")).thenReturn(record);
+    GoSessionRecord sessionRecord = new GoSessionRecord();
+    sessionRecord.setAccountId("ACC1");
+    sessionRecord.setCsrfToken(CSRF);
+    when(goSessionService.resolve("tok")).thenReturn(sessionRecord);
 
     Account account = mock(Account.class);
     when(account.getEmail()).thenReturn(EMAIL);
@@ -302,10 +302,10 @@ public class GoSessionEndpointsTest {
 
   @Test
   public void environmentRotatesSessionAndStoresContext() throws Exception {
-    GoSessionRecord record = new GoSessionRecord();
-    record.setAccountId("ACC1");
-    record.setCsrfToken(CSRF);
-    when(goSessionService.resolve("tok")).thenReturn(record);
+    GoSessionRecord sessionRecord = new GoSessionRecord();
+    sessionRecord.setAccountId("ACC1");
+    sessionRecord.setCsrfToken(CSRF);
+    when(goSessionService.resolve("tok")).thenReturn(sessionRecord);
 
     Account account = mock(Account.class);
     when(account.getEmail()).thenReturn(EMAIL);

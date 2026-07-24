@@ -71,22 +71,22 @@ public class GoSessionAuthenticatorTest {
 
   @Test
   public void validSessionOnSafeMethodIsAuthenticated() {
-    GoSessionRecord record = recordWithCsrf(CSRF);
+    GoSessionRecord sessionRecord = recordWithCsrf(CSRF);
     GoSessionService service = mock(GoSessionService.class);
-    when(service.resolve(RAW_TOKEN)).thenReturn(record);
+    when(service.resolve(RAW_TOKEN)).thenReturn(sessionRecord);
     HttpServletRequest req = mockRequest("GET", RAW_TOKEN, null, null);
 
     GoSessionAuthResult result = new GoSessionAuthenticator(service).authenticate(req);
 
     assertEquals(GoSessionAuthResult.Status.AUTHENTICATED, result.getStatus());
-    assertSame(record, result.getRecord());
+    assertSame(sessionRecord, result.getRecord());
   }
 
   @Test
   public void validSessionOnUnsafeMethodWithValidCsrfIsAuthenticated() {
-    GoSessionRecord record = recordWithCsrf(CSRF);
+    GoSessionRecord sessionRecord = recordWithCsrf(CSRF);
     GoSessionService service = mock(GoSessionService.class);
-    when(service.resolve(RAW_TOKEN)).thenReturn(record);
+    when(service.resolve(RAW_TOKEN)).thenReturn(sessionRecord);
     HttpServletRequest req = mockRequest("POST", RAW_TOKEN, APP_ORIGIN, CSRF);
 
     GoSessionAuthResult result = new GoSessionAuthenticator(service).authenticate(req);
@@ -96,9 +96,9 @@ public class GoSessionAuthenticatorTest {
 
   @Test
   public void validSessionOnUnsafeMethodWithoutCsrfFailsCsrf() {
-    GoSessionRecord record = recordWithCsrf(CSRF);
+    GoSessionRecord sessionRecord = recordWithCsrf(CSRF);
     GoSessionService service = mock(GoSessionService.class);
-    when(service.resolve(RAW_TOKEN)).thenReturn(record);
+    when(service.resolve(RAW_TOKEN)).thenReturn(sessionRecord);
     HttpServletRequest req = mockRequest("POST", RAW_TOKEN, APP_ORIGIN, null);
 
     GoSessionAuthResult result = new GoSessionAuthenticator(service).authenticate(req);
@@ -108,9 +108,9 @@ public class GoSessionAuthenticatorTest {
 
   @Test
   public void validSessionOnUnsafeMethodWithForeignOriginFailsCsrf() {
-    GoSessionRecord record = recordWithCsrf(CSRF);
+    GoSessionRecord sessionRecord = recordWithCsrf(CSRF);
     GoSessionService service = mock(GoSessionService.class);
-    when(service.resolve(RAW_TOKEN)).thenReturn(record);
+    when(service.resolve(RAW_TOKEN)).thenReturn(sessionRecord);
     HttpServletRequest req = mockRequest("POST", RAW_TOKEN, "https://evil.example.test", CSRF);
 
     GoSessionAuthResult result = new GoSessionAuthenticator(service).authenticate(req);
@@ -119,9 +119,9 @@ public class GoSessionAuthenticatorTest {
   }
 
   private static GoSessionRecord recordWithCsrf(String csrf) {
-    GoSessionRecord record = new GoSessionRecord();
-    record.setCsrfToken(csrf);
-    return record;
+    GoSessionRecord sessionRecord = new GoSessionRecord();
+    sessionRecord.setCsrfToken(csrf);
+    return sessionRecord;
   }
 
   private static HttpServletRequest mockRequest(String method, String cookieValue, String origin,

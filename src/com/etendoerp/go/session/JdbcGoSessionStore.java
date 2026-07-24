@@ -63,51 +63,51 @@ public class JdbcGoSessionStore implements GoSessionStore {
   private static final String FIND_BY_ROTATED_FROM_SQL = SELECT_COLUMNS + "WHERE rotated_from_id = ?";
 
   @Override
-  public void save(GoSessionRecord record) {
+  public void save(GoSessionRecord sessionRecord) {
     OBDal.getInstance().getSession().doWork(connection -> {
       try (PreparedStatement ps = connection.prepareStatement(INSERT_SQL)) {
-        ps.setString(1, record.getId());
-        ps.setString(2, record.getAccountId());
-        ps.setString(3, record.getSessionTokenHash());
-        ps.setString(4, record.getCsrfToken());
-        ps.setString(5, record.getRefreshTokenHash());
-        ps.setString(6, record.getAuthMethod());
-        ps.setString(7, record.getUserId());
-        ps.setString(8, record.getRoleId());
-        ps.setString(9, record.getCtxClientId());
-        ps.setString(10, record.getCtxOrgId());
-        ps.setString(11, record.getWarehouseId());
-        ps.setTimestamp(12, toTimestamp(record.getExpiresAt()));
-        ps.setTimestamp(13, toTimestamp(record.getAbsoluteExpiresAt()));
-        ps.setString(14, record.isRevoked() ? "Y" : "N");
-        ps.setString(15, record.getRotatedFromId());
-        ps.setString(16, record.getUserAgent());
-        ps.setString(17, record.getIpHash());
+        ps.setString(1, sessionRecord.getId());
+        ps.setString(2, sessionRecord.getAccountId());
+        ps.setString(3, sessionRecord.getSessionTokenHash());
+        ps.setString(4, sessionRecord.getCsrfToken());
+        ps.setString(5, sessionRecord.getRefreshTokenHash());
+        ps.setString(6, sessionRecord.getAuthMethod());
+        ps.setString(7, sessionRecord.getUserId());
+        ps.setString(8, sessionRecord.getRoleId());
+        ps.setString(9, sessionRecord.getCtxClientId());
+        ps.setString(10, sessionRecord.getCtxOrgId());
+        ps.setString(11, sessionRecord.getWarehouseId());
+        ps.setTimestamp(12, toTimestamp(sessionRecord.getExpiresAt()));
+        ps.setTimestamp(13, toTimestamp(sessionRecord.getAbsoluteExpiresAt()));
+        ps.setString(14, sessionRecord.isRevoked() ? "Y" : "N");
+        ps.setString(15, sessionRecord.getRotatedFromId());
+        ps.setString(16, sessionRecord.getUserAgent());
+        ps.setString(17, sessionRecord.getIpHash());
         ps.executeUpdate();
       }
     });
   }
 
   @Override
-  public void update(GoSessionRecord record) {
+  public void update(GoSessionRecord sessionRecord) {
     OBDal.getInstance().getSession().doWork(connection -> {
       try (PreparedStatement ps = connection.prepareStatement(UPDATE_SQL)) {
-        ps.setString(1, record.getSessionTokenHash());
-        ps.setString(2, record.getCsrfToken());
-        ps.setString(3, record.getRefreshTokenHash());
-        ps.setString(4, record.getAuthMethod());
-        ps.setString(5, record.getUserId());
-        ps.setString(6, record.getRoleId());
-        ps.setString(7, record.getCtxClientId());
-        ps.setString(8, record.getCtxOrgId());
-        ps.setString(9, record.getWarehouseId());
-        ps.setTimestamp(10, toTimestamp(record.getExpiresAt()));
-        ps.setTimestamp(11, toTimestamp(record.getAbsoluteExpiresAt()));
-        ps.setString(12, record.isRevoked() ? "Y" : "N");
-        ps.setString(13, record.getRotatedFromId());
-        ps.setString(14, record.getUserAgent());
-        ps.setString(15, record.getIpHash());
-        ps.setString(16, record.getId());
+        ps.setString(1, sessionRecord.getSessionTokenHash());
+        ps.setString(2, sessionRecord.getCsrfToken());
+        ps.setString(3, sessionRecord.getRefreshTokenHash());
+        ps.setString(4, sessionRecord.getAuthMethod());
+        ps.setString(5, sessionRecord.getUserId());
+        ps.setString(6, sessionRecord.getRoleId());
+        ps.setString(7, sessionRecord.getCtxClientId());
+        ps.setString(8, sessionRecord.getCtxOrgId());
+        ps.setString(9, sessionRecord.getWarehouseId());
+        ps.setTimestamp(10, toTimestamp(sessionRecord.getExpiresAt()));
+        ps.setTimestamp(11, toTimestamp(sessionRecord.getAbsoluteExpiresAt()));
+        ps.setString(12, sessionRecord.isRevoked() ? "Y" : "N");
+        ps.setString(13, sessionRecord.getRotatedFromId());
+        ps.setString(14, sessionRecord.getUserAgent());
+        ps.setString(15, sessionRecord.getIpHash());
+        ps.setString(16, sessionRecord.getId());
         ps.executeUpdate();
       }
     });
@@ -143,25 +143,25 @@ public class JdbcGoSessionStore implements GoSessionStore {
   }
 
   private static GoSessionRecord mapRow(ResultSet rs) throws java.sql.SQLException {
-    GoSessionRecord record = new GoSessionRecord();
-    record.setId(rs.getString("etgo_go_session_id"));
-    record.setAccountId(rs.getString("etgo_account_id"));
-    record.setSessionTokenHash(rs.getString("session_token_hash"));
-    record.setCsrfToken(rs.getString("csrf_token"));
-    record.setRefreshTokenHash(rs.getString("refresh_token_hash"));
-    record.setAuthMethod(rs.getString("auth_method"));
-    record.setUserId(rs.getString("ad_user_id"));
-    record.setRoleId(rs.getString("ad_role_id"));
-    record.setCtxClientId(rs.getString("ctx_client_id"));
-    record.setCtxOrgId(rs.getString("ctx_org_id"));
-    record.setWarehouseId(rs.getString("m_warehouse_id"));
-    record.setExpiresAt(toInstant(rs.getTimestamp("expires_at")));
-    record.setAbsoluteExpiresAt(toInstant(rs.getTimestamp("absolute_expires_at")));
-    record.setRevoked("Y".equals(rs.getString("is_revoked")));
-    record.setRotatedFromId(rs.getString("rotated_from_id"));
-    record.setUserAgent(rs.getString("user_agent"));
-    record.setIpHash(rs.getString("ip_hash"));
-    return record;
+    GoSessionRecord sessionRecord = new GoSessionRecord();
+    sessionRecord.setId(rs.getString("etgo_go_session_id"));
+    sessionRecord.setAccountId(rs.getString("etgo_account_id"));
+    sessionRecord.setSessionTokenHash(rs.getString("session_token_hash"));
+    sessionRecord.setCsrfToken(rs.getString("csrf_token"));
+    sessionRecord.setRefreshTokenHash(rs.getString("refresh_token_hash"));
+    sessionRecord.setAuthMethod(rs.getString("auth_method"));
+    sessionRecord.setUserId(rs.getString("ad_user_id"));
+    sessionRecord.setRoleId(rs.getString("ad_role_id"));
+    sessionRecord.setCtxClientId(rs.getString("ctx_client_id"));
+    sessionRecord.setCtxOrgId(rs.getString("ctx_org_id"));
+    sessionRecord.setWarehouseId(rs.getString("m_warehouse_id"));
+    sessionRecord.setExpiresAt(toInstant(rs.getTimestamp("expires_at")));
+    sessionRecord.setAbsoluteExpiresAt(toInstant(rs.getTimestamp("absolute_expires_at")));
+    sessionRecord.setRevoked("Y".equals(rs.getString("is_revoked")));
+    sessionRecord.setRotatedFromId(rs.getString("rotated_from_id"));
+    sessionRecord.setUserAgent(rs.getString("user_agent"));
+    sessionRecord.setIpHash(rs.getString("ip_hash"));
+    return sessionRecord;
   }
 
   private static Timestamp toTimestamp(Instant instant) {

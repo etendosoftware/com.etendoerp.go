@@ -105,13 +105,13 @@ class NeoAuthenticator {
    * but sourcing the environment from the session record instead of JWT claims. Throws when no
    * environment has been selected on the session yet.
    */
-  private void applySessionContext(HttpServletRequest request, GoSessionRecord record) {
-    if (StringUtils.isAnyBlank(record.getUserId(), record.getRoleId(), record.getCtxOrgId(),
-        record.getCtxClientId())) {
+  private void applySessionContext(HttpServletRequest request, GoSessionRecord sessionRecord) {
+    if (StringUtils.isAnyBlank(sessionRecord.getUserId(), sessionRecord.getRoleId(), sessionRecord.getCtxOrgId(),
+        sessionRecord.getCtxClientId())) {
       throw new OBException("Session has no environment selected");
     }
-    OBContext context = SecureWebServicesUtils.createContext(record.getUserId(), record.getRoleId(),
-        record.getCtxOrgId(), record.getWarehouseId(), record.getCtxClientId());
+    OBContext context = SecureWebServicesUtils.createContext(sessionRecord.getUserId(), sessionRecord.getRoleId(),
+        sessionRecord.getCtxOrgId(), sessionRecord.getWarehouseId(), sessionRecord.getCtxClientId());
     OBContext.setOBContext(context);
     OBContext.setOBContextInSession(request, context);
     applyRequestLanguage(request);

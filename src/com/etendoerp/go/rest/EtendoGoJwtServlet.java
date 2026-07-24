@@ -128,6 +128,16 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private static final String FIELD_ACCOUNT = "account";
   private static final String FIELD_AUTH_METHOD = "authMethod";
   private static final String FIELD_LANGUAGE = "language";
+  private static final String FIELD_CSRF_TOKEN = "csrfToken";
+  private static final String FIELD_USER_ID = "userId";
+  private static final String HEADER_CONTENT_TYPE_OPTIONS = "X-Content-Type-Options";
+  private static final String VALUE_NOSNIFF = "nosniff";
+  private static final String HEADER_CACHE_CONTROL = "Cache-Control";
+  private static final String VALUE_NO_STORE = "no-store";
+  private static final String HEADER_SET_COOKIE = "Set-Cookie";
+  private static final String MSG_CSRF_VALIDATION_FAILED = "CSRF validation failed";
+  private static final String PATH_SESSION = "/session";
+  private static final String ERROR_UNKNOWN_ENDPOINT = "Unknown endpoint: ";
   private static final String STATUS_SUCCESS = FIELD_SUCCESS;
   private static final String INVALID_JSON_BODY = "Invalid JSON body";
   private static final String INTERNAL_ERROR = "Internal error";
@@ -237,10 +247,10 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       handleEnvironments(request, response);
     } else if (isPath(path, "/login")) {
       handleEnvironmentLogin(request, response);
-    } else if (isPath(path, "/session")) {
+    } else if (isPath(path, PATH_SESSION)) {
       handleSessionRestore(request, response);
     } else {
-      writeError(response, HttpServletResponse.SC_NOT_FOUND, "Unknown endpoint: " + path);
+      writeError(response, HttpServletResponse.SC_NOT_FOUND, ERROR_UNKNOWN_ENDPOINT + path);
     }
   }
 
@@ -252,7 +262,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       handleRegister(request, response);
     } else if (isPath(path, "/login")) {
       handleLogin(request, response);
-    } else if (isPath(path, "/session")) {
+    } else if (isPath(path, PATH_SESSION)) {
       handleSessionCreate(request, response);
     } else if (isPath(path, "/session/environment")) {
       handleSessionEnvironment(request, response);
@@ -273,17 +283,17 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     } else if (isPath(path, "/onboarding")) {
       handleOnboarding(request, response);
     } else {
-      writeError(response, HttpServletResponse.SC_NOT_FOUND, "Unknown endpoint: " + path);
+      writeError(response, HttpServletResponse.SC_NOT_FOUND, ERROR_UNKNOWN_ENDPOINT + path);
     }
   }
 
   @Override
   public void doDelete(HttpServletRequest request, HttpServletResponse response) throws IOException {
     String path = request.getPathInfo();
-    if (isPath(path, "/session")) {
+    if (isPath(path, PATH_SESSION)) {
       handleSessionDelete(request, response);
     } else {
-      writeError(response, HttpServletResponse.SC_NOT_FOUND, "Unknown endpoint: " + path);
+      writeError(response, HttpServletResponse.SC_NOT_FOUND, ERROR_UNKNOWN_ENDPOINT + path);
     }
   }
 
@@ -1049,7 +1059,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       return;
     }
 
-    String userId = request.getParameter("userId");
+    String userId = request.getParameter(FIELD_USER_ID);
     if (userId == null || userId.isEmpty()) {
       writeError(response, HttpServletResponse.SC_BAD_REQUEST, "Missing userId parameter");
       return;
@@ -1127,7 +1137,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     response.setStatus(HttpServletResponse.SC_OK);
     response.setContentType("application/x-ndjson");
     response.setCharacterEncoding(UTF_8);
-    response.setHeader("X-Content-Type-Options", "nosniff");
+    response.setHeader(HEADER_CONTENT_TYPE_OPTIONS, VALUE_NOSNIFF);
     PrintWriter writer = response.getWriter();
 
     // Generate a random password for the admin user
@@ -2001,7 +2011,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
         return;
       }
 
-      IssuedGoSession issued = goSessionService.create(account.getId(), "password",
+      IssuedGoSession issued = goSessionService.create(account.getId(), FIELD_PASSWORD,
           request.getHeader("User-Agent"), null);
       writeSessionResponse(response, HttpServletResponse.SC_OK, account, issued);
     } catch (RuntimeException e) {
@@ -2030,15 +2040,15 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
 
       GoSessionAuthResult auth = new GoSessionAuthenticator(goSessionService).authenticate(request);
       if (auth.getStatus() == GoSessionAuthResult.Status.CSRF_FAILED) {
-        writeError(response, HttpServletResponse.SC_FORBIDDEN, "CSRF validation failed");
+        writeError(response, HttpServletResponse.SC_FORBIDDEN, MSG_CSRF_VALIDATION_FAILED);
         return;
       }
       if (auth.isAuthenticated()) {
         goSessionService.revoke(auth.getRecord());
       }
       clearSessionCookies(response);
-      response.setHeader("Cache-Control", "no-store");
-      response.setHeader("X-Content-Type-Options", "nosniff");
+      response.setHeader(HEADER_CACHE_CONTROL, VALUE_NO_STORE);
+      response.setHeader(HEADER_CONTENT_TYPE_OPTIONS, VALUE_NOSNIFF);
       response.setStatus(HttpServletResponse.SC_NO_CONTENT);
     } catch (RuntimeException e) {
       EtendoGoDalHelper.rollbackDalChanges("session delete", e, log);
@@ -2066,7 +2076,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       writeError(response, HttpServletResponse.SC_BAD_REQUEST, INVALID_JSON_BODY);
       return;
     }
-    String userId = body.optString("userId", "").trim();
+    String userId = body.optString(FIELD_USER_ID, "").trim();
     if (userId.isEmpty()) {
       writeError(response, HttpServletResponse.SC_BAD_REQUEST, "Missing userId");
       return;
@@ -2078,16 +2088,16 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
 
       GoSessionAuthResult auth = new GoSessionAuthenticator(goSessionService).authenticate(request);
       if (auth.getStatus() == GoSessionAuthResult.Status.CSRF_FAILED) {
-        writeError(response, HttpServletResponse.SC_FORBIDDEN, "CSRF validation failed");
+        writeError(response, HttpServletResponse.SC_FORBIDDEN, MSG_CSRF_VALIDATION_FAILED);
         return;
       }
       if (!auth.isAuthenticated()) {
         writeError(response, HttpServletResponse.SC_UNAUTHORIZED, INVALID_OR_EXPIRED_TOKEN);
         return;
       }
-      GoSessionRecord record = auth.getRecord();
+      GoSessionRecord sessionRecord = auth.getRecord();
 
-      Account account = EtendoGoJwtDalHelper.findActiveAccountById(record.getAccountId());
+      Account account = EtendoGoJwtDalHelper.findActiveAccountById(sessionRecord.getAccountId());
       if (account == null) {
         writeError(response, HttpServletResponse.SC_UNAUTHORIZED, INVALID_OR_EXPIRED_TOKEN);
         return;
@@ -2112,23 +2122,23 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       // so the session stores exactly the user/role/client/org/warehouse the JWT layer would.
       DecodedJWT context = SecureWebServicesUtils.decodeToken(
           SecureWebServicesUtils.generateToken(user, role));
-      record.setUserId(context.getClaim("user").asString());
-      record.setRoleId(context.getClaim("role").asString());
-      record.setCtxClientId(context.getClaim("client").asString());
-      record.setCtxOrgId(context.getClaim("organization").asString());
-      record.setWarehouseId(context.getClaim("warehouse").asString());
+      sessionRecord.setUserId(context.getClaim("user").asString());
+      sessionRecord.setRoleId(context.getClaim("role").asString());
+      sessionRecord.setCtxClientId(context.getClaim(PROGRESS_CLIENT).asString());
+      sessionRecord.setCtxOrgId(context.getClaim(PROGRESS_ORGANIZATION).asString());
+      sessionRecord.setWarehouseId(context.getClaim("warehouse").asString());
 
-      IssuedGoSession rotated = goSessionService.rotate(record);
+      IssuedGoSession rotated = goSessionService.rotate(sessionRecord);
 
       setSessionCookies(response, rotated);
-      response.setHeader("Cache-Control", "no-store");
-      response.setHeader("X-Content-Type-Options", "nosniff");
+      response.setHeader(HEADER_CACHE_CONTROL, VALUE_NO_STORE);
+      response.setHeader(HEADER_CONTENT_TYPE_OPTIONS, VALUE_NOSNIFF);
 
       JSONObject result = new JSONObject();
       result.put(FIELD_STATUS, STATUS_SUCCESS);
       result.put("environment", buildSessionEnvironment(rotated.getRecord()));
       result.put("roleList", roleListData.roleArray);
-      result.put("csrfToken", rotated.getCsrfToken());
+      result.put(FIELD_CSRF_TOKEN, rotated.getCsrfToken());
       writeResponse(response, HttpServletResponse.SC_OK, result);
     } catch (RuntimeException e) {
       EtendoGoDalHelper.rollbackDalChanges("session environment", e, log);
@@ -2162,8 +2172,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
         writeError(response, HttpServletResponse.SC_UNAUTHORIZED, INVALID_OR_EXPIRED_TOKEN);
         return;
       }
-      GoSessionRecord record = auth.getRecord();
-      Account account = EtendoGoJwtDalHelper.findActiveAccountById(record.getAccountId());
+      GoSessionRecord sessionRecord = auth.getRecord();
+      Account account = EtendoGoJwtDalHelper.findActiveAccountById(sessionRecord.getAccountId());
       if (account == null) {
         writeError(response, HttpServletResponse.SC_UNAUTHORIZED, INVALID_OR_EXPIRED_TOKEN);
         return;
@@ -2177,11 +2187,11 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       JSONObject result = new JSONObject();
       result.put(FIELD_STATUS, STATUS_SUCCESS);
       result.put(FIELD_ACCOUNT, accountJson);
-      result.put("environment", buildSessionEnvironment(record));
-      result.put("csrfToken", record.getCsrfToken());
+      result.put("environment", buildSessionEnvironment(sessionRecord));
+      result.put(FIELD_CSRF_TOKEN, sessionRecord.getCsrfToken());
 
-      response.setHeader("Cache-Control", "no-store");
-      response.setHeader("X-Content-Type-Options", "nosniff");
+      response.setHeader(HEADER_CACHE_CONTROL, VALUE_NO_STORE);
+      response.setHeader(HEADER_CONTENT_TYPE_OPTIONS, VALUE_NOSNIFF);
       writeResponse(response, HttpServletResponse.SC_OK, result);
     } catch (RuntimeException e) {
       log.error("Database error during session restore", e);
@@ -2198,16 +2208,16 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    * Build the environment block of a restore response: the selected {@code user/role/client/org/
    * warehouse}, or {@code null} when no environment has been entered yet on this session.
    */
-  private static Object buildSessionEnvironment(GoSessionRecord record) throws JSONException {
-    if (record.getUserId() == null) {
+  private static Object buildSessionEnvironment(GoSessionRecord sessionRecord) throws JSONException {
+    if (sessionRecord.getUserId() == null) {
       return JSONObject.NULL;
     }
     JSONObject env = new JSONObject();
-    env.put("userId", record.getUserId());
-    env.put("roleId", record.getRoleId());
-    env.put("clientId", record.getCtxClientId());
-    env.put("orgId", record.getCtxOrgId());
-    env.put("warehouseId", record.getWarehouseId());
+    env.put(FIELD_USER_ID, sessionRecord.getUserId());
+    env.put("roleId", sessionRecord.getRoleId());
+    env.put("clientId", sessionRecord.getCtxClientId());
+    env.put("orgId", sessionRecord.getCtxOrgId());
+    env.put("warehouseId", sessionRecord.getWarehouseId());
     return env;
   }
 
@@ -2225,7 +2235,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       OBContext.setAdminMode(true);
 
       if (!GoSessionSecurity.isOriginAllowed(request)) {
-        writeError(response, HttpServletResponse.SC_FORBIDDEN, "CSRF validation failed");
+        writeError(response, HttpServletResponse.SC_FORBIDDEN, MSG_CSRF_VALIDATION_FAILED);
         return;
       }
       String rawRefresh = extractRefreshToken(request);
@@ -2237,12 +2247,12 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       }
 
       setSessionCookies(response, rotated);
-      response.setHeader("Cache-Control", "no-store");
-      response.setHeader("X-Content-Type-Options", "nosniff");
+      response.setHeader(HEADER_CACHE_CONTROL, VALUE_NO_STORE);
+      response.setHeader(HEADER_CONTENT_TYPE_OPTIONS, VALUE_NOSNIFF);
 
       JSONObject result = new JSONObject();
       result.put(FIELD_STATUS, STATUS_SUCCESS);
-      result.put("csrfToken", rotated.getCsrfToken());
+      result.put(FIELD_CSRF_TOKEN, rotated.getCsrfToken());
       writeResponse(response, HttpServletResponse.SC_OK, result);
     } catch (RuntimeException e) {
       EtendoGoDalHelper.rollbackDalChanges("session refresh", e, log);
@@ -2257,13 +2267,13 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   }
 
   private void setSessionCookies(HttpServletResponse response, IssuedGoSession issued) {
-    response.addHeader("Set-Cookie", GoSessionSecurity.buildSessionCookie(issued.getSessionToken()));
-    response.addHeader("Set-Cookie", GoSessionSecurity.buildRefreshCookie(issued.getRefreshToken()));
+    response.addHeader(HEADER_SET_COOKIE, GoSessionSecurity.buildSessionCookie(issued.getSessionToken()));
+    response.addHeader(HEADER_SET_COOKIE, GoSessionSecurity.buildRefreshCookie(issued.getRefreshToken()));
   }
 
   private void clearSessionCookies(HttpServletResponse response) {
-    response.addHeader("Set-Cookie", GoSessionSecurity.buildExpiredSessionCookie());
-    response.addHeader("Set-Cookie", GoSessionSecurity.buildExpiredRefreshCookie());
+    response.addHeader(HEADER_SET_COOKIE, GoSessionSecurity.buildExpiredSessionCookie());
+    response.addHeader(HEADER_SET_COOKIE, GoSessionSecurity.buildExpiredRefreshCookie());
   }
 
   private static String extractRefreshToken(HttpServletRequest request) {
@@ -2287,8 +2297,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private void writeSessionResponse(HttpServletResponse response, int status, Account account,
       IssuedGoSession issued) throws IOException, JSONException {
     setSessionCookies(response, issued);
-    response.setHeader("Cache-Control", "no-store");
-    response.setHeader("X-Content-Type-Options", "nosniff");
+    response.setHeader(HEADER_CACHE_CONTROL, VALUE_NO_STORE);
+    response.setHeader(HEADER_CONTENT_TYPE_OPTIONS, VALUE_NOSNIFF);
 
     JSONObject accountJson = new JSONObject();
     accountJson.put("id", account.getId());
@@ -2298,7 +2308,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     JSONObject result = new JSONObject();
     result.put(FIELD_STATUS, STATUS_SUCCESS);
     result.put(FIELD_ACCOUNT, accountJson);
-    result.put("csrfToken", issued.getCsrfToken());
+    result.put(FIELD_CSRF_TOKEN, issued.getCsrfToken());
     writeResponse(response, status, result);
   }
 

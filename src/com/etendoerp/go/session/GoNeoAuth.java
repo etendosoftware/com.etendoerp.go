@@ -24,6 +24,7 @@ package com.etendoerp.go.session;
  */
 public final class GoNeoAuth {
 
+  /** The authentication action the servlet must take for the current request. */
   public enum Action {
     /** A valid cookie session resolved — reconstruct {@code OBContext} from it. */
     USE_SESSION,
@@ -41,6 +42,8 @@ public final class GoNeoAuth {
   }
 
   /**
+   * Decide how to proceed given the cookie authentication outcome and whether legacy Bearer is on.
+   *
    * @param status              the cookie authentication outcome
    * @param legacyBearerEnabled whether the legacy Bearer path is still accepted
    * @return the action the caller must take

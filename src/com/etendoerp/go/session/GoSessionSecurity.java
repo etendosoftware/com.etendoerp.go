@@ -114,6 +114,8 @@ public final class GoSessionSecurity {
   }
 
   /**
+   * Report whether an HTTP method is state-changing and therefore subject to CSRF checks.
+   *
    * @param method the HTTP method
    * @return {@code true} for methods that do not change state and are exempt from CSRF checks
    */

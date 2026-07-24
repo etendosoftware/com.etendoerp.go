@@ -45,10 +45,22 @@ public class GoSessionService {
   private final Duration idleTimeout;
   private final Duration absoluteTimeout;
 
+  /**
+   * Create a service with the default idle (30 min) and absolute (12 h) timeouts.
+   *
+   * @param store the persistence port for session records
+   */
   public GoSessionService(GoSessionStore store) {
     this(store, DEFAULT_IDLE_TIMEOUT, DEFAULT_ABSOLUTE_TIMEOUT);
   }
 
+  /**
+   * Create a service with explicit idle and absolute session timeouts.
+   *
+   * @param store           the persistence port for session records
+   * @param idleTimeout     the inactivity window after which a session expires
+   * @param absoluteTimeout the maximum session lifetime regardless of activity
+   */
   public GoSessionService(GoSessionStore store, Duration idleTimeout, Duration absoluteTimeout) {
     this.store = store;
     this.idleTimeout = idleTimeout;
@@ -70,38 +82,38 @@ public class GoSessionService {
     String rawRefresh = OAuth2Utils.generateSecureToken();
     String csrf = OAuth2Utils.generateSecureToken();
 
-    GoSessionRecord record = new GoSessionRecord();
-    record.setId(newId());
-    record.setAccountId(accountId);
-    record.setSessionTokenHash(OAuth2Utils.hashToken(rawToken));
-    record.setRefreshTokenHash(OAuth2Utils.hashToken(rawRefresh));
-    record.setCsrfToken(csrf);
-    record.setAuthMethod(authMethod);
-    record.setExpiresAt(now.plus(idleTimeout));
-    record.setAbsoluteExpiresAt(now.plus(absoluteTimeout));
-    record.setRevoked(false);
-    record.setUserAgent(userAgent);
-    record.setIpHash(ipHash);
+    GoSessionRecord sessionRecord = new GoSessionRecord();
+    sessionRecord.setId(newId());
+    sessionRecord.setAccountId(accountId);
+    sessionRecord.setSessionTokenHash(OAuth2Utils.hashToken(rawToken));
+    sessionRecord.setRefreshTokenHash(OAuth2Utils.hashToken(rawRefresh));
+    sessionRecord.setCsrfToken(csrf);
+    sessionRecord.setAuthMethod(authMethod);
+    sessionRecord.setExpiresAt(now.plus(idleTimeout));
+    sessionRecord.setAbsoluteExpiresAt(now.plus(absoluteTimeout));
+    sessionRecord.setRevoked(false);
+    sessionRecord.setUserAgent(userAgent);
+    sessionRecord.setIpHash(ipHash);
 
-    store.save(record);
-    return new IssuedGoSession(rawToken, rawRefresh, csrf, record);
+    store.save(sessionRecord);
+    return new IssuedGoSession(rawToken, rawRefresh, csrf, sessionRecord);
   }
 
   /**
    * Resolve the active session behind a plaintext session token.
    *
    * @param rawSessionToken the plaintext token from the cookie
-   * @return the active, non-revoked, non-expired record, or {@code null}
+   * @return the active, non-revoked, non-expired sessionRecord, or {@code null}
    */
   public GoSessionRecord resolve(String rawSessionToken) {
     if (StringUtils.isBlank(rawSessionToken)) {
       return null;
     }
-    GoSessionRecord record = store.findByTokenHash(OAuth2Utils.hashToken(rawSessionToken));
-    if (record == null || record.isRevoked() || isExpired(record)) {
+    GoSessionRecord sessionRecord = store.findByTokenHash(OAuth2Utils.hashToken(rawSessionToken));
+    if (sessionRecord == null || sessionRecord.isRevoked() || isExpired(sessionRecord)) {
       return null;
     }
-    return record;
+    return sessionRecord;
   }
 
   /**
@@ -155,60 +167,60 @@ public class GoSessionService {
     if (StringUtils.isBlank(rawRefreshToken)) {
       return null;
     }
-    GoSessionRecord record = store.findByRefreshTokenHash(OAuth2Utils.hashToken(rawRefreshToken));
-    if (record == null) {
+    GoSessionRecord sessionRecord = store.findByRefreshTokenHash(OAuth2Utils.hashToken(rawRefreshToken));
+    if (sessionRecord == null) {
       return null;
     }
-    if (record.isRevoked()) {
+    if (sessionRecord.isRevoked()) {
       // This refresh token was already consumed (rotated away or logged out): treat as replay and
       // revoke the entire family so a stolen refresh cannot be used.
-      revokeFamily(record);
+      revokeFamily(sessionRecord);
       return null;
     }
-    if (isAbsoluteExpired(record)) {
-      revoke(record);
+    if (isAbsoluteExpired(sessionRecord)) {
+      revoke(sessionRecord);
       return null;
     }
-    return rotate(record);
+    return rotate(sessionRecord);
   }
 
   /**
    * Invalidate a session server-side (logout).
    *
-   * @param record the record to revoke
+   * @param sessionRecord the record to revoke
    */
-  public void revoke(GoSessionRecord record) {
-    if (record == null || record.isRevoked()) {
+  public void revoke(GoSessionRecord sessionRecord) {
+    if (sessionRecord == null || sessionRecord.isRevoked()) {
       return;
     }
-    record.setRevoked(true);
-    store.update(record);
+    sessionRecord.setRevoked(true);
+    store.update(sessionRecord);
   }
 
-  private void revokeFamily(GoSessionRecord record) {
-    if (record == null) {
+  private void revokeFamily(GoSessionRecord sessionRecord) {
+    if (sessionRecord == null) {
       return;
     }
-    if (!record.isRevoked()) {
-      record.setRevoked(true);
-      store.update(record);
+    if (!sessionRecord.isRevoked()) {
+      sessionRecord.setRevoked(true);
+      store.update(sessionRecord);
     }
-    GoSessionRecord descendant = store.findByRotatedFromId(record.getId());
+    GoSessionRecord descendant = store.findByRotatedFromId(sessionRecord.getId());
     if (descendant != null) {
       revokeFamily(descendant);
     }
   }
 
-  private boolean isExpired(GoSessionRecord record) {
-    return isIdleExpired(record) || isAbsoluteExpired(record);
+  private boolean isExpired(GoSessionRecord sessionRecord) {
+    return isIdleExpired(sessionRecord) || isAbsoluteExpired(sessionRecord);
   }
 
-  private boolean isIdleExpired(GoSessionRecord record) {
-    return record.getExpiresAt() == null || Instant.now().isAfter(record.getExpiresAt());
+  private boolean isIdleExpired(GoSessionRecord sessionRecord) {
+    return sessionRecord.getExpiresAt() == null || Instant.now().isAfter(sessionRecord.getExpiresAt());
   }
 
-  private boolean isAbsoluteExpired(GoSessionRecord record) {
-    return record.getAbsoluteExpiresAt() == null || Instant.now().isAfter(record.getAbsoluteExpiresAt());
+  private boolean isAbsoluteExpired(GoSessionRecord sessionRecord) {
+    return sessionRecord.getAbsoluteExpiresAt() == null || Instant.now().isAfter(sessionRecord.getAbsoluteExpiresAt());
   }
 
   private static String newId() {

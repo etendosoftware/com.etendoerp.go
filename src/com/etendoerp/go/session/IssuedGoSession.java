@@ -28,14 +28,22 @@ public class IssuedGoSession {
   private final String sessionToken;
   private final String refreshToken;
   private final String csrfToken;
-  private final GoSessionRecord record;
+  private final GoSessionRecord sessionRecord;
 
+  /**
+   * Bundle the freshly issued plaintext tokens with the persisted session record.
+   *
+   * @param sessionToken  the plaintext opaque session token (for the {@code __Host-} cookie)
+   * @param refreshToken  the plaintext opaque refresh token
+   * @param csrfToken     the CSRF token bound to this session
+   * @param sessionRecord the persisted session record (holds only hashes)
+   */
   public IssuedGoSession(String sessionToken, String refreshToken, String csrfToken,
-      GoSessionRecord record) {
+      GoSessionRecord sessionRecord) {
     this.sessionToken = sessionToken;
     this.refreshToken = refreshToken;
     this.csrfToken = csrfToken;
-    this.record = record;
+    this.sessionRecord = sessionRecord;
   }
 
   /** @return the plaintext opaque session token (for the {@code __Host-} cookie) */
@@ -55,6 +63,6 @@ public class IssuedGoSession {
 
   /** @return the persisted session record (holds only hashes) */
   public GoSessionRecord getRecord() {
-    return record;
+    return sessionRecord;
   }
 }

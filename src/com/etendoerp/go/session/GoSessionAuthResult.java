@@ -27,41 +27,57 @@ package com.etendoerp.go.session;
  */
 public final class GoSessionAuthResult {
 
+  /** The four possible outcomes of resolving the session cookie. */
   public enum Status { NO_SESSION, UNAUTHENTICATED, CSRF_FAILED, AUTHENTICATED }
 
   private final Status status;
-  private final GoSessionRecord record;
+  private final GoSessionRecord sessionRecord;
 
-  private GoSessionAuthResult(Status status, GoSessionRecord record) {
+  private GoSessionAuthResult(Status status, GoSessionRecord sessionRecord) {
     this.status = status;
-    this.record = record;
+    this.sessionRecord = sessionRecord;
   }
 
+  /** @return a result meaning no session cookie was present */
   public static GoSessionAuthResult noSession() {
     return new GoSessionAuthResult(Status.NO_SESSION, null);
   }
 
+  /** @return a result meaning a cookie was present but the session is invalid/expired/revoked */
   public static GoSessionAuthResult unauthenticated() {
     return new GoSessionAuthResult(Status.UNAUTHENTICATED, null);
   }
 
+  /** @return a result meaning a valid session failed the CSRF/Origin check on an unsafe method */
   public static GoSessionAuthResult csrfFailed() {
     return new GoSessionAuthResult(Status.CSRF_FAILED, null);
   }
 
-  public static GoSessionAuthResult authenticated(GoSessionRecord record) {
-    return new GoSessionAuthResult(Status.AUTHENTICATED, record);
+  /**
+   * Builds an authenticated result wrapping the resolved session.
+   *
+   * @param sessionRecord the resolved session record
+   * @return a result carrying the authenticated session
+   */
+  public static GoSessionAuthResult authenticated(GoSessionRecord sessionRecord) {
+    return new GoSessionAuthResult(Status.AUTHENTICATED, sessionRecord);
   }
 
+  /** @return the outcome of resolving the session cookie */
   public Status getStatus() {
     return status;
   }
 
-  /** @return the resolved session record when {@link #getStatus()} is {@code AUTHENTICATED}, else {@code null} */
+  /**
+   * Returns the resolved session record when authenticated.
+   *
+   * @return the resolved session record when {@link #getStatus()} is {@code AUTHENTICATED}, else {@code null}
+   */
   public GoSessionRecord getRecord() {
-    return record;
+    return sessionRecord;
   }
 
+  /** @return {@code true} when the request carries a valid, authenticated session */
   public boolean isAuthenticated() {
     return status == Status.AUTHENTICATED;
   }

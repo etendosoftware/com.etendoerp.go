@@ -34,6 +34,11 @@ public class GoSessionAuthenticator {
 
   private final GoSessionService sessionService;
 
+  /**
+   * Create an authenticator backed by the given session service.
+   *
+   * @param sessionService the service used to resolve opaque session tokens
+   */
   public GoSessionAuthenticator(GoSessionService sessionService) {
     this.sessionService = sessionService;
   }
@@ -49,14 +54,14 @@ public class GoSessionAuthenticator {
     if (rawToken == null) {
       return GoSessionAuthResult.noSession();
     }
-    GoSessionRecord record = sessionService.resolve(rawToken);
-    if (record == null) {
+    GoSessionRecord sessionRecord = sessionService.resolve(rawToken);
+    if (sessionRecord == null) {
       return GoSessionAuthResult.unauthenticated();
     }
-    if (!GoSessionSecurity.isUnsafeRequestAuthorized(request, record.getCsrfToken())) {
+    if (!GoSessionSecurity.isUnsafeRequestAuthorized(request, sessionRecord.getCsrfToken())) {
       return GoSessionAuthResult.csrfFailed();
     }
-    return GoSessionAuthResult.authenticated(record);
+    return GoSessionAuthResult.authenticated(sessionRecord);
   }
 
   private static String extractSessionToken(HttpServletRequest request) {

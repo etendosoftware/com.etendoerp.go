@@ -171,12 +171,12 @@ public class GoSessionServiceTest {
     private final List<GoSessionRecord> records = new ArrayList<>();
 
     @Override
-    public void save(GoSessionRecord record) {
-      records.add(record);
+    public void save(GoSessionRecord sessionRecord) {
+      records.add(sessionRecord);
     }
 
     @Override
-    public void update(GoSessionRecord record) {
+    public void update(GoSessionRecord sessionRecord) {
       // Records are held by reference, so mutations are already visible; no-op for the fake.
     }
 
