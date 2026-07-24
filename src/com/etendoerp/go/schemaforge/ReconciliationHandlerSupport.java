@@ -71,30 +71,29 @@ final class ReconciliationHandlerSupport {
     // utility class — no instances
   }
 
-  /** The body-consuming business method behind a POST action route. */
-  @FunctionalInterface
-  private interface BodyAction {
-    NeoResponse apply(JSONObject body) throws Exception;
-  }
+  private static final String ACTION_RECONCILE_GROUP = "reconcileGroup";
+  private static final String ACTION_APPLY_SUGGESTIONS = "applySuggestions";
+  private static final String ACTION_REACTIVATE = "reactivate";
+  private static final String ACTION_REMOVE_OPERATION = "removeOperation";
 
   // ---------------------------------------------------------------------------
   // POST action dispatch wrappers (OBContext admin mode + rollback boilerplate)
   // ---------------------------------------------------------------------------
 
   static NeoResponse handleReconcileGroup(ReconciliationHandler handler, NeoContext context) {
-    return runPostAction(handler, context, "reconcileGroup", handler::reconcileGroup);
+    return runPostAction(handler, context, ACTION_RECONCILE_GROUP);
   }
 
   static NeoResponse handleApplySuggestions(ReconciliationHandler handler, NeoContext context) {
-    return runPostAction(handler, context, "applySuggestions", handler::applySuggestions);
+    return runPostAction(handler, context, ACTION_APPLY_SUGGESTIONS);
   }
 
   static NeoResponse handleReactivate(ReconciliationHandler handler, NeoContext context) {
-    return runPostAction(handler, context, "reactivate", handler::reactivate);
+    return runPostAction(handler, context, ACTION_REACTIVATE);
   }
 
   static NeoResponse handleRemoveOperation(ReconciliationHandler handler, NeoContext context) {
-    return runPostAction(handler, context, "removeOperation", handler::removeOperation);
+    return runPostAction(handler, context, ACTION_REMOVE_OPERATION);
   }
 
   /**
@@ -104,7 +103,7 @@ final class ReconciliationHandlerSupport {
    * wrappers this replaced.
    */
   private static NeoResponse runPostAction(ReconciliationHandler handler, NeoContext context,
-      String action, BodyAction bodyAction) {
+      String action) {
     JSONObject body = context.getRequestBody();
     if (body == null) {
       return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
@@ -112,7 +111,7 @@ final class ReconciliationHandlerSupport {
     }
     try {
       OBContext.setAdminMode(true);
-      return bodyAction.apply(body);
+      return callHandlerAction(handler, action, body);
     } catch (OBException e) {
       log.warn("{} business error: {}", action, e.getMessage());
       handler.doRollbackAndClose();
@@ -124,6 +123,37 @@ final class ReconciliationHandlerSupport {
           ReconciliationHandler.MSG_INTERNAL_SERVER_ERROR);
     } finally {
       OBContext.restorePreviousMode();
+    }
+  }
+
+  /**
+   * Runs the named business method on the handler. Translating its bare {@code throws Exception}
+   * here — a business {@link OBException} propagates unwrapped (mapped to 400 by {@link
+   * #runPostAction}); anything else is wrapped in a dedicated checked {@link
+   * ReconciliationActionException} (mapped to 500) — is what lets every dispatch seam avoid a
+   * generic {@code throws} (Sonar java:S112). Behavior is identical to the previous method-reference
+   * dispatch.
+   */
+  private static NeoResponse callHandlerAction(ReconciliationHandler handler, String action,
+      JSONObject body) throws ReconciliationActionException {
+    try {
+      switch (action) {
+        case ACTION_RECONCILE_GROUP:
+          return handler.reconcileGroup(body);
+        case ACTION_APPLY_SUGGESTIONS:
+          return handler.applySuggestions(body);
+        case ACTION_REACTIVATE:
+          return handler.reactivate(body);
+        case ACTION_REMOVE_OPERATION:
+          return handler.removeOperation(body);
+        default:
+          throw new ReconciliationActionException(
+              new IllegalArgumentException("Unknown reconciliation action: " + action));
+      }
+    } catch (OBException | ReconciliationActionException e) {
+      throw e;
+    } catch (Exception e) {
+      throw new ReconciliationActionException(e);
     }
   }
 
