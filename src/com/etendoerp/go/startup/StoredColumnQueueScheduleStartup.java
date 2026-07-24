@@ -28,7 +28,6 @@ import org.apache.logging.log4j.Logger;
 import org.hibernate.criterion.Restrictions;
 import org.openbravo.base.provider.OBProvider;
 import org.openbravo.base.secureApp.VariablesSecureApp;
-import org.openbravo.client.kernel.ApplicationInitializer;
 import org.openbravo.client.kernel.ComponentProvider;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
@@ -75,7 +74,7 @@ import org.openbravo.scheduling.ProcessContext;
  */
 @ApplicationScoped
 @ComponentProvider.Qualifier(StoredColumnQueueScheduleStartup.QUALIFIER)
-public class StoredColumnQueueScheduleStartup implements ApplicationInitializer {
+public class StoredColumnQueueScheduleStartup extends SessionAwareStartup {
 
   static final String QUALIFIER = "com.etendoerp.go.startup.StoredColumnQueueScheduleStartup";
 
@@ -101,57 +100,24 @@ public class StoredColumnQueueScheduleStartup implements ApplicationInitializer 
   /** Drain every 5 minutes. */
   private static final Long INTERVAL_MINUTES = 5L;
 
-  /** Poll interval while waiting for the DB session info to be initialized. */
-  private static final long SESSION_POLL_MS = 100L;
-  /** Hard cap before proceeding regardless of session-info state. */
-  private static final long SESSION_WAIT_TIMEOUT_MS = 60_000L;
-
   /** Poll interval while waiting for the scheduler to leave standby. */
   private static final long SCHEDULER_POLL_MS = 500L;
   /** Hard cap waiting for the scheduler to become active (it starts a few seconds after the app). */
   private static final long SCHEDULER_WAIT_TIMEOUT_MS = 120_000L;
 
   @Override
-  public void initialize() {
-    // Run asynchronously so we never block (nor fail) the application startup sequence, and so we
-    // can wait for SessionInfo to be initialized before borrowing a DAL connection (borrowing one
-    // too early hits the ad_context_info temp-table problem). Mirrors NeoAccessStartup.
-    Thread worker = new Thread(this::runSafely, "StoredColumnQueueScheduleStartup-schedule");
-    worker.setDaemon(true);
-    worker.start();
+  protected Logger log() {
+    return log;
   }
 
-  private void runSafely() {
-    try {
-      waitForSessionInfoInitialized();
-      ensureScheduled();
-    } catch (Exception e) {
-      // Startup self-healing must never break the application: log and continue.
-      log.error("StoredColumnQueueScheduleStartup: failed to ensure queue drain is scheduled;"
-          + " skipping.", e);
-      try {
-        OBDal.getInstance().rollbackAndClose();
-      } catch (Exception rollbackError) {
-        log.debug("StoredColumnQueueScheduleStartup: rollback after failure also failed.",
-            rollbackError);
-      }
-    }
+  @Override
+  protected String name() {
+    return "StoredColumnQueueScheduleStartup";
   }
 
-  private void waitForSessionInfoInitialized() {
-    long deadline = System.currentTimeMillis() + SESSION_WAIT_TIMEOUT_MS;
-    while (!SessionInfo.isInitialized() && System.currentTimeMillis() < deadline) {
-      try {
-        Thread.sleep(SESSION_POLL_MS);
-      } catch (InterruptedException e) {
-        Thread.currentThread().interrupt();
-        return;
-      }
-    }
-    if (!SessionInfo.isInitialized()) {
-      log.warn("StoredColumnQueueScheduleStartup: SessionInfo not initialized after {} ms;"
-          + " proceeding anyway.", SESSION_WAIT_TIMEOUT_MS);
-    }
+  @Override
+  protected void runPass() {
+    ensureScheduled();
   }
 
   /**
