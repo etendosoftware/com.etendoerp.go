@@ -477,7 +477,10 @@ class NeoCrudHandler {
       int httpStatus = NeoErrorSanitizer.isDuplicateKeyMessage(translated)
           ? HttpServletResponse.SC_CONFLICT
           : HttpServletResponse.SC_INTERNAL_SERVER_ERROR;
-      return NeoResponse.error(httpStatus, translated);
+      // Defence-in-depth: a DAL/validator failure message can carry a raw object toString
+      // (e.g. a List-reference "one of the following values: pkg.Class@hex ..."). Strip it
+      // before it reaches the client — the leak itself is built upstream in core (ETP-4668).
+      return NeoResponse.error(httpStatus, NeoErrorSanitizer.redactObjectReferences(translated));
     }
     if (status == JsonConstants.RPCREQUEST_STATUS_VALIDATION_ERROR) {
       return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, responseJson);
