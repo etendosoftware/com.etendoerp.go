@@ -53,6 +53,7 @@ import org.openbravo.model.ad.access.User;
 import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.enterprise.Organization;
 
+import com.auth0.jwt.interfaces.DecodedJWT;
 import com.etendoerp.go.common.EtendoGoCorsServlet;
 import com.etendoerp.go.common.ProtocolErrorAdapters;
 import com.etendoerp.go.common.PublicUrlResolver;
@@ -252,6 +253,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       handleLogin(request, response);
     } else if (isPath(path, "/session")) {
       handleSessionCreate(request, response);
+    } else if (isPath(path, "/session/environment")) {
+      handleSessionEnvironment(request, response);
     } else if (ssoProvider != null) {
       handleSsoLogin(ssoProvider, request, response);
     } else if (isPath(path, "/password-reset/request")) {
@@ -1985,6 +1988,102 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       log.error("Database error during session delete", e);
       writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
           "Logout failed due to a server error");
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  /**
+   * POST /sws/go/session/environment
+   * Body: { "userId": "..." }
+   * Enters an environment: verifies the user belongs to the account, resolves the full context
+   * (user/role/client/org/warehouse) and rotates the session with that context stored. Returns
+   * { status, environment, roleList, csrfToken } plus a rotated cookie. Unsafe method → CSRF required.
+   */
+  private void handleSessionEnvironment(HttpServletRequest request, HttpServletResponse response)
+      throws IOException {
+    JSONObject body;
+    try {
+      body = readJsonBody(request);
+    } catch (JSONException e) {
+      writeError(response, HttpServletResponse.SC_BAD_REQUEST, INVALID_JSON_BODY);
+      return;
+    }
+    String userId = body.optString("userId", "").trim();
+    if (userId.isEmpty()) {
+      writeError(response, HttpServletResponse.SC_BAD_REQUEST, "Missing userId");
+      return;
+    }
+
+    try {
+      OBContext.setOBContext("0", "0", "0", "0");
+      OBContext.setAdminMode(true);
+
+      GoSessionAuthResult auth = new GoSessionAuthenticator(goSessionService).authenticate(request);
+      if (auth.getStatus() == GoSessionAuthResult.Status.CSRF_FAILED) {
+        writeError(response, HttpServletResponse.SC_FORBIDDEN, "CSRF validation failed");
+        return;
+      }
+      if (!auth.isAuthenticated()) {
+        writeError(response, HttpServletResponse.SC_UNAUTHORIZED, INVALID_OR_EXPIRED_TOKEN);
+        return;
+      }
+      GoSessionRecord record = auth.getRecord();
+
+      Account account = EtendoGoJwtDalHelper.findActiveAccountById(record.getAccountId());
+      if (account == null) {
+        writeError(response, HttpServletResponse.SC_UNAUTHORIZED, INVALID_OR_EXPIRED_TOKEN);
+        return;
+      }
+      if (!EtendoGoJwtSupport.isEnvironmentUserOwnedByAccount(account.getEmail(), userId)) {
+        writeError(response, HttpServletResponse.SC_FORBIDDEN,
+            "User does not belong to this account");
+        return;
+      }
+
+      User user = OBDal.getInstance().get(User.class, userId);
+      if (user == null) {
+        writeError(response, HttpServletResponse.SC_NOT_FOUND, "User not found");
+        return;
+      }
+      EtendoGoJwtSupport.RoleListData roleListData = EtendoGoJwtSupport.loadRoleListData(userId);
+      Role role = roleListData.firstRoleId != null
+          ? OBDal.getInstance().get(Role.class, roleListData.firstRoleId)
+          : null;
+
+      // Reuse the platform's context derivation: generate the environment JWT and read its claims,
+      // so the session stores exactly the user/role/client/org/warehouse the JWT layer would.
+      DecodedJWT context = SecureWebServicesUtils.decodeToken(
+          SecureWebServicesUtils.generateToken(user, role));
+      record.setUserId(context.getClaim("user").asString());
+      record.setRoleId(context.getClaim("role").asString());
+      record.setCtxClientId(context.getClaim("client").asString());
+      record.setCtxOrgId(context.getClaim("organization").asString());
+      record.setWarehouseId(context.getClaim("warehouse").asString());
+
+      IssuedGoSession rotated = goSessionService.rotate(record);
+
+      response.setHeader("Set-Cookie",
+          GoSessionSecurity.buildSessionCookie(rotated.getSessionToken()));
+      response.setHeader("Cache-Control", "no-store");
+      response.setHeader("X-Content-Type-Options", "nosniff");
+
+      JSONObject result = new JSONObject();
+      result.put(FIELD_STATUS, STATUS_SUCCESS);
+      result.put("environment", buildSessionEnvironment(rotated.getRecord()));
+      result.put("roleList", roleListData.roleArray);
+      result.put("csrfToken", rotated.getCsrfToken());
+      writeResponse(response, HttpServletResponse.SC_OK, result);
+    } catch (RuntimeException e) {
+      EtendoGoDalHelper.rollbackDalChanges("session environment", e, log);
+      log.error("Database error during environment switch", e);
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, SERVER_ERROR);
+    } catch (JSONException e) {
+      log.error("JSON error during environment switch", e);
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, INTERNAL_ERROR);
+    } catch (Exception e) {
+      log.error("Token generation error during environment switch", e);
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, "Environment switch failed");
     } finally {
       OBContext.restorePreviousMode();
     }

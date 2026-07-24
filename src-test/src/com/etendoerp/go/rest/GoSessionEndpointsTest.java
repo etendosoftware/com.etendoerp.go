@@ -55,6 +55,14 @@ import com.etendoerp.go.session.GoSessionRecord;
 import com.etendoerp.go.session.GoSessionSecurity;
 import com.etendoerp.go.session.GoSessionService;
 import com.etendoerp.go.session.IssuedGoSession;
+import org.codehaus.jettison.json.JSONArray;
+import org.mockito.ArgumentCaptor;
+import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.ad.access.Role;
+import org.openbravo.model.ad.access.User;
+import com.auth0.jwt.interfaces.Claim;
+import com.auth0.jwt.interfaces.DecodedJWT;
+import com.smf.securewebservices.utils.SecureWebServicesUtils;
 
 /**
  * Unit tests for the {@code /sws/go/session} endpoints (ETP-4575, slice 4a.i). {@link GoSessionService}
@@ -234,6 +242,150 @@ public class GoSessionEndpointsTest {
     HttpServletRequest req = mock(HttpServletRequest.class);
     when(req.getMethod()).thenReturn("GET");
     when(req.getPathInfo()).thenReturn(path);
+    if (cookieValue != null) {
+      when(req.getCookies()).thenReturn(
+          new Cookie[] { new Cookie(GoSessionSecurity.COOKIE_NAME, cookieValue) });
+    } else {
+      when(req.getCookies()).thenReturn(null);
+    }
+    return req;
+  }
+
+  @Test
+  public void environmentMissingUserIdReturns400() throws Exception {
+    CapturedResponse resp = new CapturedResponse();
+    servlet.doPost(postEnv("{}", "tok", CSRF), resp.response);
+    assertEquals(400, resp.status);
+  }
+
+  @Test
+  public void environmentWithoutCsrfIsForbidden() throws Exception {
+    GoSessionRecord record = new GoSessionRecord();
+    record.setAccountId("ACC1");
+    record.setCsrfToken(CSRF);
+    when(goSessionService.resolve("tok")).thenReturn(record);
+
+    CapturedResponse resp = new CapturedResponse();
+    try (MockedStatic<OBContext> ctx = mockStatic(OBContext.class)) {
+      servlet.doPost(postEnv(new JSONObject().put("userId", "U1").toString(), "tok", null),
+          resp.response);
+    }
+    assertEquals(403, resp.status);
+  }
+
+  @Test
+  public void environmentWithUnownedUserIsForbidden() throws Exception {
+    GoSessionRecord record = new GoSessionRecord();
+    record.setAccountId("ACC1");
+    record.setCsrfToken(CSRF);
+    when(goSessionService.resolve("tok")).thenReturn(record);
+
+    Account account = mock(Account.class);
+    when(account.getEmail()).thenReturn(EMAIL);
+
+    CapturedResponse resp = new CapturedResponse();
+    try (MockedStatic<OBContext> ctx = mockStatic(OBContext.class);
+        MockedStatic<EtendoGoJwtDalHelper> dal = mockStatic(EtendoGoJwtDalHelper.class);
+        MockedStatic<EtendoGoJwtSupport> supp = mockStatic(EtendoGoJwtSupport.class)) {
+      dal.when(() -> EtendoGoJwtDalHelper.findActiveAccountById("ACC1")).thenReturn(account);
+      supp.when(() -> EtendoGoJwtSupport.isEnvironmentUserOwnedByAccount(any(), eq("U1")))
+          .thenReturn(false);
+      servlet.doPost(postEnv(new JSONObject().put("userId", "U1").toString(), "tok", CSRF),
+          resp.response);
+    }
+    assertEquals(403, resp.status);
+  }
+
+  @Test
+  public void environmentRotatesSessionAndStoresContext() throws Exception {
+    GoSessionRecord record = new GoSessionRecord();
+    record.setAccountId("ACC1");
+    record.setCsrfToken(CSRF);
+    when(goSessionService.resolve("tok")).thenReturn(record);
+
+    Account account = mock(Account.class);
+    when(account.getEmail()).thenReturn(EMAIL);
+
+    EtendoGoJwtSupport.RoleListData roleListData = new EtendoGoJwtSupport.RoleListData();
+    roleListData.firstRoleId = "R1";
+    roleListData.roleArray = new JSONArray().put(new JSONObject().put("id", "R1"));
+
+    User user = mock(User.class);
+    Role role = mock(Role.class);
+    OBDal obDal = mock(OBDal.class);
+    when(obDal.get(User.class, "U1")).thenReturn(user);
+    when(obDal.get(Role.class, "R1")).thenReturn(role);
+
+    DecodedJWT decoded = mock(DecodedJWT.class);
+    Claim userClaim = claim("U1");
+    Claim roleClaim = claim("R1");
+    Claim clientClaim = claim("C1");
+    Claim orgClaim = claim("O1");
+    Claim warehouseClaim = claim("W1");
+    when(decoded.getClaim("user")).thenReturn(userClaim);
+    when(decoded.getClaim("role")).thenReturn(roleClaim);
+    when(decoded.getClaim("client")).thenReturn(clientClaim);
+    when(decoded.getClaim("organization")).thenReturn(orgClaim);
+    when(decoded.getClaim("warehouse")).thenReturn(warehouseClaim);
+
+    GoSessionRecord rotatedRecord = new GoSessionRecord();
+    rotatedRecord.setUserId("U1");
+    rotatedRecord.setRoleId("R1");
+    rotatedRecord.setCtxClientId("C1");
+    rotatedRecord.setCtxOrgId("O1");
+    rotatedRecord.setWarehouseId("W1");
+    IssuedGoSession rotated = new IssuedGoSession("newtok", "newref", "newcsrf", rotatedRecord);
+    when(goSessionService.rotate(any())).thenReturn(rotated);
+
+    CapturedResponse resp = new CapturedResponse();
+    try (MockedStatic<OBContext> ctx = mockStatic(OBContext.class);
+        MockedStatic<EtendoGoJwtDalHelper> dal = mockStatic(EtendoGoJwtDalHelper.class);
+        MockedStatic<EtendoGoJwtSupport> supp = mockStatic(EtendoGoJwtSupport.class);
+        MockedStatic<OBDal> obDalStatic = mockStatic(OBDal.class);
+        MockedStatic<SecureWebServicesUtils> sws = mockStatic(SecureWebServicesUtils.class)) {
+      dal.when(() -> EtendoGoJwtDalHelper.findActiveAccountById("ACC1")).thenReturn(account);
+      supp.when(() -> EtendoGoJwtSupport.isEnvironmentUserOwnedByAccount(any(), eq("U1")))
+          .thenReturn(true);
+      supp.when(() -> EtendoGoJwtSupport.loadRoleListData("U1")).thenReturn(roleListData);
+      obDalStatic.when(OBDal::getInstance).thenReturn(obDal);
+      sws.when(() -> SecureWebServicesUtils.generateToken(user, role)).thenReturn("jwt");
+      sws.when(() -> SecureWebServicesUtils.decodeToken("jwt")).thenReturn(decoded);
+
+      servlet.doPost(postEnv(new JSONObject().put("userId", "U1").toString(), "tok", CSRF),
+          resp.response);
+    }
+
+    assertEquals(200, resp.status);
+    assertTrue(resp.headers.get("Set-Cookie").startsWith(GoSessionSecurity.COOKIE_NAME + "=newtok"));
+    JSONObject body = new JSONObject(resp.body.toString());
+    assertEquals("newcsrf", body.getString("csrfToken"));
+    assertTrue(body.has("roleList"));
+    assertEquals("U1", body.getJSONObject("environment").getString("userId"));
+    assertEquals("O1", body.getJSONObject("environment").getString("orgId"));
+
+    ArgumentCaptor<GoSessionRecord> captor = ArgumentCaptor.forClass(GoSessionRecord.class);
+    verify(goSessionService).rotate(captor.capture());
+    assertEquals("U1", captor.getValue().getUserId());
+    assertEquals("C1", captor.getValue().getCtxClientId());
+  }
+
+  private static Claim claim(String value) {
+    Claim c = mock(Claim.class);
+    when(c.asString()).thenReturn(value);
+    return c;
+  }
+
+  private static HttpServletRequest postEnv(String bodyJson, String cookieValue, String csrf)
+      throws Exception {
+    HttpServletRequest req = mock(HttpServletRequest.class);
+    when(req.getMethod()).thenReturn("POST");
+    when(req.getPathInfo()).thenReturn("/session/environment");
+    when(req.getContentType()).thenReturn("application/json");
+    when(req.getReader()).thenReturn(new BufferedReader(new StringReader(bodyJson)));
+    when(req.getHeader("Origin")).thenReturn(ORIGIN);
+    when(req.getHeader("Referer")).thenReturn(null);
+    when(req.getHeader(GoSessionSecurity.CSRF_HEADER)).thenReturn(csrf);
+    when(req.getRequestURL()).thenReturn(new StringBuffer(ORIGIN + "/sws/go/session/environment"));
     if (cookieValue != null) {
       when(req.getCookies()).thenReturn(
           new Cookie[] { new Cookie(GoSessionSecurity.COOKIE_NAME, cookieValue) });
