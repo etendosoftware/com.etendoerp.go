@@ -176,6 +176,56 @@ public class GoodsReceiptNoStockCompletionIntegrationTest extends WeldBaseTest {
     }
   }
 
+  /**
+   * Reproduces the LIVE production repro found when re-verifying this fix: the frontend does
+   * NOT omit {@code storageBin} from the create payload — it sends the raw, unresolved AD
+   * default literal {@code "@OnHandLocatorDefault@"} (confirmed via the live Tomcat log's
+   * {@code NeoFieldFilter} "body recibido" entry). handle() must recognize that literal as
+   * "not a real value" and override it, exactly as {@link #testCompletionSucceedsWhenHandlerInjectsDefaultLocator()}
+   * proves for a genuinely missing key.
+   */
+  @Test
+  public void testCompletionSucceedsWhenHandlerOverridesUnresolvedTokenLiteral() throws Exception {
+    OBContext.setOBContext(USER_ID, ROLE_ID, CLIENT_ID, ORG_ID);
+    OBContext.setAdminMode(true);
+    try {
+      Product unstockedProduct = cloneUnstockedProduct("ETP4671NoStockC");
+      ShipmentInOut receipt = cloneDraftReceiptHeader("ETP4671RcptC");
+
+      // Exact body shape observed live: storageBin is PRESENT, holding the raw AD default
+      // token — not absent, not null. A naive "is the key missing?" guard would skip
+      // injection here and let the literal reach persistence.
+      JSONObject createBody = new JSONObject()
+          .put("parentId", receipt.getId())
+          .put("product", unstockedProduct.getId())
+          .put("storageBin", "@OnHandLocatorDefault@");
+      NeoContext ctx = NeoContext.builder()
+          .httpMethod("POST")
+          .endpointType(NeoEndpointType.CRUD)
+          .requestBody(createBody)
+          .build();
+
+      new GoodsReceiptLineHandler().handle(ctx);
+
+      assertEquals("An unresolved '@Token@' literal must be overridden, not treated as an "
+          + "already-supplied real value",
+          EXPECTED_DEFAULT_LOCATOR_ID, createBody.getString("storageBin"));
+
+      addReceiptLine(receipt, unstockedProduct, new BigDecimal("10"),
+          createBody.getString("storageBin"));
+
+      completeReceipt(receipt);
+      OBDal.getInstance().refresh(receipt);
+
+      assertEquals("Completion must succeed once the fix overrides the unresolved token, "
+          + "matching the real browser repro (create product, add line, save)",
+          "CO", receipt.getDocumentStatus());
+    } finally {
+      OBDal.getInstance().rollbackAndClose();
+      OBContext.restorePreviousMode();
+    }
+  }
+
   // ── helpers ────────────────────────────────────────────────────────────────
 
   private static Product cloneUnstockedProduct(String namePrefix) {
