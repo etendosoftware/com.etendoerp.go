@@ -289,4 +289,50 @@ public class GoodsReceiptLineHandlerTest {
           "loc-default-wh1", body.getString("storageBin"));
     }
   }
+
+  /**
+   * Reproduces the LIVE production crash found when re-verifying this fix (ETP-4671): the
+   * frontend's generated {@code addLineFields.hidden} merge (DetailView.jsx) copies the raw,
+   * UNRESOLVED AD_Column default literal ({@code "@OnHandLocatorDefault@"}) straight into the
+   * create payload for any hidden field the row never touched — confirmed via the live Tomcat
+   * log: {@code [REMAP] body recibido: {..., "storageBin":"@OnHandLocatorDefault@", ...}}.
+   * The original guard ({@code StringUtils.isNotBlank(...)}) treated that literal as an
+   * "already supplied" value and skipped injection entirely, so the line was persisted with
+   * {@code M_Locator_ID='@OnHandLocatorDefault@'} — not a real id — and
+   * {@code DefaultJsonDataService} rejected it with "New object Locator(null) ... refered to
+   * but not present in the import set". handle() must recognize this unresolved-token shape
+   * and override it exactly as if the field were absent.
+   */
+  @SuppressWarnings("unchecked")
+  @Test
+  public void testHandlePostOverridesUnresolvedTokenStorageBin() throws Exception {
+    JSONObject body = new JSONObject().put("parentId", "receipt-1").put("product", "prod-unstocked")
+        .put("storageBin", "@OnHandLocatorDefault@");
+    NeoContext ctx = NeoContext.builder().httpMethod("POST").endpointType(NeoEndpointType.CRUD)
+        .requestBody(body).build();
+
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      ShipmentInOut header = mock(ShipmentInOut.class);
+      Warehouse warehouse = mock(Warehouse.class);
+      Locator locator = mock(Locator.class);
+      when(dal.get(eq(ShipmentInOut.class), eq("receipt-1"))).thenReturn(header);
+      when(header.getWarehouse()).thenReturn(warehouse);
+      when(warehouse.getId()).thenReturn("wh-1");
+      when(locator.getId()).thenReturn("loc-default-wh1");
+      OBCriteria criteria = mock(OBCriteria.class);
+      when(dal.createCriteria(Locator.class)).thenReturn(criteria);
+      when(criteria.add(any())).thenReturn(criteria);
+      when(criteria.addOrder(any())).thenReturn(criteria);
+      when(criteria.setMaxResults(1)).thenReturn(criteria);
+      when(criteria.uniqueResult()).thenReturn(locator);
+
+      assertNull(HANDLER.handle(ctx));
+      assertEquals("An unresolved '@Token@' literal reaching storageBin is not a real user "
+          + "value — it must be overridden with the warehouse's default locator, not treated "
+          + "as already supplied",
+          "loc-default-wh1", body.getString("storageBin"));
+    }
+  }
 }
