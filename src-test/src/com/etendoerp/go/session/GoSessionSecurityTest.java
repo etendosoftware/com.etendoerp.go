@@ -60,6 +60,27 @@ public class GoSessionSecurityTest {
   }
 
   @Test
+  public void refreshCookieHasHostPrefixAndSecurityAttributes() {
+    String cookie = GoSessionSecurity.buildRefreshCookie("refresh-value");
+
+    assertTrue(cookie.startsWith("__Host-go_refresh=refresh-value"));
+    assertTrue(cookie.contains("Secure"));
+    assertTrue(cookie.contains("HttpOnly"));
+    assertTrue(cookie.contains("Path=/"));
+    assertTrue(cookie.contains("SameSite=Lax"));
+    assertFalse(cookie.contains("Domain="));
+    assertFalse(cookie.contains("Max-Age"));
+  }
+
+  @Test
+  public void expiredRefreshCookieClearsWithMaxAgeZero() {
+    String cookie = GoSessionSecurity.buildExpiredRefreshCookie();
+
+    assertTrue(cookie.startsWith("__Host-go_refresh="));
+    assertTrue(cookie.contains("Max-Age=0"));
+  }
+
+  @Test
   public void expiredCookieClearsWithMaxAgeZero() {
     String cookie = GoSessionSecurity.buildExpiredSessionCookie();
 

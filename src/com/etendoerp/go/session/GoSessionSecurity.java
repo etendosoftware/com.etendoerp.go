@@ -47,6 +47,9 @@ public final class GoSessionSecurity {
   /** Session cookie name. The {@code __Host-} prefix forces {@code Secure}, {@code Path=/} and no {@code Domain}. */
   public static final String COOKIE_NAME = "__Host-go_session";
 
+  /** One-time refresh cookie name; host-locked like the session cookie. */
+  public static final String REFRESH_COOKIE_NAME = "__Host-go_refresh";
+
   /** Header carrying the session-bound CSRF token on unsafe methods. */
   public static final String CSRF_HEADER = "X-Go-CSRF";
 
@@ -67,10 +70,7 @@ public final class GoSessionSecurity {
    * @throws IllegalArgumentException if {@code tokenValue} is blank
    */
   public static String buildSessionCookie(String tokenValue) {
-    if (StringUtils.isBlank(tokenValue)) {
-      throw new IllegalArgumentException("Session token value must not be blank");
-    }
-    return COOKIE_NAME + "=" + tokenValue + COOKIE_ATTRIBUTES;
+    return buildCookie(COOKIE_NAME, tokenValue);
   }
 
   /**
@@ -79,7 +79,38 @@ public final class GoSessionSecurity {
    * @return the expiring {@code Set-Cookie} header value
    */
   public static String buildExpiredSessionCookie() {
-    return COOKIE_NAME + "=" + COOKIE_ATTRIBUTES + "; Max-Age=0";
+    return buildExpiredCookie(COOKIE_NAME);
+  }
+
+  /**
+   * Build the {@code Set-Cookie} value carrying the opaque one-time refresh token.
+   *
+   * @param tokenValue the opaque refresh token value (never its hash)
+   * @return the {@code Set-Cookie} header value
+   * @throws IllegalArgumentException if {@code tokenValue} is blank
+   */
+  public static String buildRefreshCookie(String tokenValue) {
+    return buildCookie(REFRESH_COOKIE_NAME, tokenValue);
+  }
+
+  /**
+   * Build the {@code Set-Cookie} value that clears the refresh cookie on logout.
+   *
+   * @return the expiring {@code Set-Cookie} header value
+   */
+  public static String buildExpiredRefreshCookie() {
+    return buildExpiredCookie(REFRESH_COOKIE_NAME);
+  }
+
+  private static String buildCookie(String name, String tokenValue) {
+    if (StringUtils.isBlank(tokenValue)) {
+      throw new IllegalArgumentException("Cookie value must not be blank");
+    }
+    return name + "=" + tokenValue + COOKIE_ATTRIBUTES;
+  }
+
+  private static String buildExpiredCookie(String name) {
+    return name + "=" + COOKIE_ATTRIBUTES + "; Max-Age=0";
   }
 
   /**

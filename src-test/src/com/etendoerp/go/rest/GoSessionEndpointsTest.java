@@ -37,8 +37,10 @@ import java.io.StringReader;
 import java.io.StringWriter;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
+import java.util.ArrayList;
 import java.util.Base64;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 import javax.servlet.http.Cookie;
@@ -104,8 +106,9 @@ public class GoSessionEndpointsTest {
     }
 
     assertEquals(200, resp.status);
-    String setCookie = resp.headers.get("Set-Cookie");
+    String setCookie = resp.cookie(GoSessionSecurity.COOKIE_NAME);
     assertNotNull(setCookie);
+    assertNotNull("refresh cookie must be set too", resp.cookie(GoSessionSecurity.REFRESH_COOKIE_NAME));
     assertTrue(setCookie.startsWith(GoSessionSecurity.COOKIE_NAME + "=sess-token-xyz"));
     assertTrue(setCookie.contains("HttpOnly"));
     assertTrue(setCookie.contains("Secure"));
@@ -153,7 +156,7 @@ public class GoSessionEndpointsTest {
     }
 
     assertEquals(204, resp.status);
-    assertTrue(resp.headers.get("Set-Cookie").contains("Max-Age=0"));
+    assertTrue(resp.cookie(GoSessionSecurity.COOKIE_NAME).contains("Max-Age=0"));
     verify(goSessionService).revoke(record);
   }
 
@@ -356,7 +359,7 @@ public class GoSessionEndpointsTest {
     }
 
     assertEquals(200, resp.status);
-    assertTrue(resp.headers.get("Set-Cookie").startsWith(GoSessionSecurity.COOKIE_NAME + "=newtok"));
+    assertTrue(resp.cookie(GoSessionSecurity.COOKIE_NAME).startsWith(GoSessionSecurity.COOKIE_NAME + "=newtok"));
     JSONObject body = new JSONObject(resp.body.toString());
     assertEquals("newcsrf", body.getString("csrfToken"));
     assertTrue(body.has("roleList"));
@@ -395,6 +398,83 @@ public class GoSessionEndpointsTest {
     return req;
   }
 
+  @Test
+  public void refreshRotatesAndSetsNewCookies() throws Exception {
+    IssuedGoSession rotated = new IssuedGoSession("newtok", "newref", "newcsrf", new GoSessionRecord());
+    when(goSessionService.refresh("rtok")).thenReturn(rotated);
+
+    CapturedResponse resp = new CapturedResponse();
+    try (MockedStatic<OBContext> ctx = mockStatic(OBContext.class)) {
+      servlet.doPost(postRefresh("rtok"), resp.response);
+    }
+
+    assertEquals(200, resp.status);
+    assertTrue(resp.cookie(GoSessionSecurity.COOKIE_NAME)
+        .startsWith(GoSessionSecurity.COOKIE_NAME + "=newtok"));
+    assertTrue(resp.cookie(GoSessionSecurity.REFRESH_COOKIE_NAME)
+        .startsWith(GoSessionSecurity.REFRESH_COOKIE_NAME + "=newref"));
+    assertEquals("newcsrf", new JSONObject(resp.body.toString()).getString("csrfToken"));
+  }
+
+  @Test
+  public void refreshWithoutCookieReturns401() throws Exception {
+    CapturedResponse resp = new CapturedResponse();
+    try (MockedStatic<OBContext> ctx = mockStatic(OBContext.class)) {
+      servlet.doPost(postRefresh(null), resp.response);
+    }
+    assertEquals(401, resp.status);
+    verify(goSessionService, never()).refresh(anyString());
+  }
+
+  @Test
+  public void refreshWithInvalidTokenReturns401AndClearsCookies() throws Exception {
+    when(goSessionService.refresh("rtok")).thenReturn(null);
+
+    CapturedResponse resp = new CapturedResponse();
+    try (MockedStatic<OBContext> ctx = mockStatic(OBContext.class)) {
+      servlet.doPost(postRefresh("rtok"), resp.response);
+    }
+
+    assertEquals(401, resp.status);
+    assertTrue(resp.cookie(GoSessionSecurity.COOKIE_NAME).contains("Max-Age=0"));
+  }
+
+  @Test
+  public void refreshWithForeignOriginIsForbidden() throws Exception {
+    HttpServletRequest req = mock(HttpServletRequest.class);
+    when(req.getMethod()).thenReturn("POST");
+    when(req.getPathInfo()).thenReturn("/session/refresh");
+    when(req.getHeader("Origin")).thenReturn("https://evil.example.test");
+    when(req.getHeader("Referer")).thenReturn(null);
+    when(req.getRequestURL()).thenReturn(new StringBuffer(ORIGIN + "/sws/go/session/refresh"));
+    when(req.getCookies()).thenReturn(
+        new Cookie[] { new Cookie(GoSessionSecurity.REFRESH_COOKIE_NAME, "rtok") });
+
+    CapturedResponse resp = new CapturedResponse();
+    try (MockedStatic<OBContext> ctx = mockStatic(OBContext.class)) {
+      servlet.doPost(req, resp.response);
+    }
+
+    assertEquals(403, resp.status);
+    verify(goSessionService, never()).refresh(anyString());
+  }
+
+  private static HttpServletRequest postRefresh(String refreshCookieValue) {
+    HttpServletRequest req = mock(HttpServletRequest.class);
+    when(req.getMethod()).thenReturn("POST");
+    when(req.getPathInfo()).thenReturn("/session/refresh");
+    when(req.getHeader("Origin")).thenReturn(ORIGIN);
+    when(req.getHeader("Referer")).thenReturn(null);
+    when(req.getRequestURL()).thenReturn(new StringBuffer(ORIGIN + "/sws/go/session/refresh"));
+    if (refreshCookieValue != null) {
+      when(req.getCookies()).thenReturn(
+          new Cookie[] { new Cookie(GoSessionSecurity.REFRESH_COOKIE_NAME, refreshCookieValue) });
+    } else {
+      when(req.getCookies()).thenReturn(null);
+    }
+    return req;
+  }
+
   private static String storedHash(String password) throws Exception {
     byte[] salt = new byte[16];
     MessageDigest md = MessageDigest.getInstance("SHA-256");
@@ -425,10 +505,11 @@ public class GoSessionEndpointsTest {
     return req;
   }
 
-  /** Mock {@link HttpServletResponse} that captures status, headers and the written body. */
+  /** Mock {@link HttpServletResponse} that captures status, headers, {@code Set-Cookie}s and body. */
   private static final class CapturedResponse {
     final HttpServletResponse response = mock(HttpServletResponse.class);
     final Map<String, String> headers = new HashMap<>();
+    final List<String> setCookies = new ArrayList<>();
     final StringWriter body = new StringWriter();
     int status;
 
@@ -439,6 +520,12 @@ public class GoSessionEndpointsTest {
           return null;
         }).when(response).setHeader(anyString(), anyString());
         doAnswer(inv -> {
+          if ("Set-Cookie".equals(inv.<String>getArgument(0))) {
+            setCookies.add(inv.getArgument(1));
+          }
+          return null;
+        }).when(response).addHeader(anyString(), anyString());
+        doAnswer(inv -> {
           status = inv.getArgument(0);
           return null;
         }).when(response).setStatus(anyInt());
@@ -446,6 +533,11 @@ public class GoSessionEndpointsTest {
       } catch (Exception e) {
         throw new IllegalStateException(e);
       }
+    }
+
+    /** The {@code Set-Cookie} value for the given cookie name, or {@code null}. */
+    String cookie(String name) {
+      return setCookies.stream().filter(c -> c.startsWith(name + "=")).findFirst().orElse(null);
     }
   }
 }

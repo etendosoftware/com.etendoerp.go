@@ -34,6 +34,7 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.time.Instant;
 
+import javax.servlet.http.Cookie;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 
@@ -255,6 +256,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       handleSessionCreate(request, response);
     } else if (isPath(path, "/session/environment")) {
       handleSessionEnvironment(request, response);
+    } else if (isPath(path, "/session/refresh")) {
+      handleSessionRefresh(request, response);
     } else if (ssoProvider != null) {
       handleSsoLogin(ssoProvider, request, response);
     } else if (isPath(path, "/password-reset/request")) {
@@ -1979,7 +1982,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       if (auth.isAuthenticated()) {
         goSessionService.revoke(auth.getRecord());
       }
-      response.setHeader("Set-Cookie", GoSessionSecurity.buildExpiredSessionCookie());
+      clearSessionCookies(response);
       response.setHeader("Cache-Control", "no-store");
       response.setHeader("X-Content-Type-Options", "nosniff");
       response.setStatus(HttpServletResponse.SC_NO_CONTENT);
@@ -2063,8 +2066,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
 
       IssuedGoSession rotated = goSessionService.rotate(record);
 
-      response.setHeader("Set-Cookie",
-          GoSessionSecurity.buildSessionCookie(rotated.getSessionToken()));
+      setSessionCookies(response, rotated);
       response.setHeader("Cache-Control", "no-store");
       response.setHeader("X-Content-Type-Options", "nosniff");
 
@@ -2156,13 +2158,81 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   }
 
   /**
+   * POST /sws/go/session/refresh
+   * Rotates the session from the one-time refresh cookie and issues fresh session + refresh cookies.
+   * Protected by same-origin ({@code SameSite=Lax} + {@code Origin}) rather than a CSRF token, since
+   * the session may already be expired when refresh runs. A replayed/expired refresh clears the
+   * cookies and returns 401.
+   */
+  private void handleSessionRefresh(HttpServletRequest request, HttpServletResponse response)
+      throws IOException {
+    try {
+      OBContext.setOBContext("0", "0", "0", "0");
+      OBContext.setAdminMode(true);
+
+      if (!GoSessionSecurity.isOriginAllowed(request)) {
+        writeError(response, HttpServletResponse.SC_FORBIDDEN, "CSRF validation failed");
+        return;
+      }
+      String rawRefresh = extractRefreshToken(request);
+      IssuedGoSession rotated = rawRefresh == null ? null : goSessionService.refresh(rawRefresh);
+      if (rotated == null) {
+        clearSessionCookies(response);
+        writeError(response, HttpServletResponse.SC_UNAUTHORIZED, INVALID_OR_EXPIRED_TOKEN);
+        return;
+      }
+
+      setSessionCookies(response, rotated);
+      response.setHeader("Cache-Control", "no-store");
+      response.setHeader("X-Content-Type-Options", "nosniff");
+
+      JSONObject result = new JSONObject();
+      result.put(FIELD_STATUS, STATUS_SUCCESS);
+      result.put("csrfToken", rotated.getCsrfToken());
+      writeResponse(response, HttpServletResponse.SC_OK, result);
+    } catch (RuntimeException e) {
+      EtendoGoDalHelper.rollbackDalChanges("session refresh", e, log);
+      log.error("Database error during session refresh", e);
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, SERVER_ERROR);
+    } catch (JSONException e) {
+      log.error("JSON error during session refresh", e);
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, INTERNAL_ERROR);
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  private void setSessionCookies(HttpServletResponse response, IssuedGoSession issued) {
+    response.addHeader("Set-Cookie", GoSessionSecurity.buildSessionCookie(issued.getSessionToken()));
+    response.addHeader("Set-Cookie", GoSessionSecurity.buildRefreshCookie(issued.getRefreshToken()));
+  }
+
+  private void clearSessionCookies(HttpServletResponse response) {
+    response.addHeader("Set-Cookie", GoSessionSecurity.buildExpiredSessionCookie());
+    response.addHeader("Set-Cookie", GoSessionSecurity.buildExpiredRefreshCookie());
+  }
+
+  private static String extractRefreshToken(HttpServletRequest request) {
+    Cookie[] cookies = request.getCookies();
+    if (cookies == null) {
+      return null;
+    }
+    for (Cookie cookie : cookies) {
+      if (GoSessionSecurity.REFRESH_COOKIE_NAME.equals(cookie.getName())) {
+        return StringUtils.trimToNull(cookie.getValue());
+      }
+    }
+    return null;
+  }
+
+  /**
    * Write a session response: sets the opaque {@code __Host-} cookie plus {@code no-store} and
    * {@code nosniff} headers, and returns { status, account, csrfToken }. The session token itself
    * is never placed in the body.
    */
   private void writeSessionResponse(HttpServletResponse response, int status, Account account,
       IssuedGoSession issued) throws IOException, JSONException {
-    response.setHeader("Set-Cookie", GoSessionSecurity.buildSessionCookie(issued.getSessionToken()));
+    setSessionCookies(response, issued);
     response.setHeader("Cache-Control", "no-store");
     response.setHeader("X-Content-Type-Options", "nosniff");
 
