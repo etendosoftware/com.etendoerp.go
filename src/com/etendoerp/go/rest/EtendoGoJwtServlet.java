@@ -258,6 +258,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       handleSessionEnvironment(request, response);
     } else if (isPath(path, "/session/refresh")) {
       handleSessionRefresh(request, response);
+    } else if (path != null && path.startsWith("/session/sso/")) {
+      handleSessionCreateSso(path.substring("/session/sso/".length()), request, response);
     } else if (ssoProvider != null) {
       handleSsoLogin(ssoProvider, request, response);
     } else if (isPath(path, "/password-reset/request")) {
@@ -458,33 +460,10 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       OBContext.setOBContext("0", "0", "0", "0");
       OBContext.setAdminMode(true);
 
-      Account account = EtendoGoJwtDalHelper.findActiveAccountBySsoIdentity(
-          assertion.getProvider(), assertion.getSubject());
-      if (account == null) {
-        account = EtendoGoJwtDalHelper.findActiveAccountByEmail(assertion.getEmail());
-        if (account != null) {
-          if (!assertion.isEmailAuthoritative()) {
-            writeError(response, HttpServletResponse.SC_CONFLICT,
-                "Account requires explicit linking before SSO login");
-            return;
-          }
-          if (!EtendoGoJwtDalHelper.linkSsoIdentityIfCompatible(account,
-              assertion.getProvider(), assertion.getSubject(), assertion.getEmail())) {
-            writeError(response, HttpServletResponse.SC_CONFLICT,
-                "Account is already linked to a different SSO identity");
-            return;
-          }
-        }
-      }
-
       String sessionToken = generateToken();
-      Date loginAt = new Date();
+      Account account = resolveSsoAccount(assertion, sessionToken, response);
       if (account == null) {
-        account = EtendoGoJwtDalHelper.createSsoAccount(assertion.getEmail(), assertion.getName(),
-            assertion.getProvider(), assertion.getSubject(), assertion.getEmail(), sessionToken,
-            loginAt);
-      } else {
-        EtendoGoJwtDalHelper.updateSsoSession(account, assertion.getEmail(), sessionToken, loginAt);
+        return;
       }
 
       JSONObject accountJson = new JSONObject();
@@ -507,6 +486,81 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     } catch (JSONException e) {
       EtendoGoDalHelper.rollbackDalChanges("SSO login response", e, log);
       log.error("JSON error building SSO login response", e);
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, INTERNAL_ERROR);
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  /**
+   * Resolve (find, link, or create) the account for a verified SSO assertion under the current
+   * admin context, storing {@code sessionToken} as its platform token. Writes a 409 and returns
+   * {@code null} on a linking conflict. Shared by the legacy SSO login and the cookie SSO create.
+   */
+  private Account resolveSsoAccount(EtendoGoSsoAssertion assertion, String sessionToken,
+      HttpServletResponse response) throws IOException {
+    Account account = EtendoGoJwtDalHelper.findActiveAccountBySsoIdentity(
+        assertion.getProvider(), assertion.getSubject());
+    if (account == null) {
+      account = EtendoGoJwtDalHelper.findActiveAccountByEmail(assertion.getEmail());
+      if (account != null) {
+        if (!assertion.isEmailAuthoritative()) {
+          writeError(response, HttpServletResponse.SC_CONFLICT,
+              "Account requires explicit linking before SSO login");
+          return null;
+        }
+        if (!EtendoGoJwtDalHelper.linkSsoIdentityIfCompatible(account,
+            assertion.getProvider(), assertion.getSubject(), assertion.getEmail())) {
+          writeError(response, HttpServletResponse.SC_CONFLICT,
+              "Account is already linked to a different SSO identity");
+          return null;
+        }
+      }
+    }
+    Date loginAt = new Date();
+    if (account == null) {
+      return EtendoGoJwtDalHelper.createSsoAccount(assertion.getEmail(), assertion.getName(),
+          assertion.getProvider(), assertion.getSubject(), assertion.getEmail(), sessionToken,
+          loginAt);
+    }
+    EtendoGoJwtDalHelper.updateSsoSession(account, assertion.getEmail(), sessionToken, loginAt);
+    return account;
+  }
+
+  /**
+   * POST /sws/go/session/sso/{provider}
+   * SSO variant of session create: verifies the provider assertion, resolves the account and issues
+   * the {@code __Host-} session + refresh cookies. The platform token is never returned to JS.
+   */
+  private void handleSessionCreateSso(String provider, HttpServletRequest request,
+      HttpServletResponse response) throws IOException {
+    String rawBody = readRawBody(request);
+    EtendoGoSsoAssertion assertion;
+    try {
+      assertion = ssoProviderRegistry.verify(provider, request, rawBody);
+    } catch (EtendoGoSsoAssertionException e) {
+      writeError(response, e.getStatusCode(), e.getMessage());
+      return;
+    }
+
+    try {
+      OBContext.setOBContext("0", "0", "0", "0");
+      OBContext.setAdminMode(true);
+
+      Account account = resolveSsoAccount(assertion, generateToken(), response);
+      if (account == null) {
+        return;
+      }
+      IssuedGoSession issued = goSessionService.create(account.getId(), "sso",
+          request.getHeader("User-Agent"), null);
+      writeSessionResponse(response, HttpServletResponse.SC_OK, account, issued);
+    } catch (RuntimeException e) {
+      EtendoGoDalHelper.rollbackDalChanges("session SSO create", e, log);
+      log.error("Database error during SSO session create", e);
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
+          "Session creation failed due to a server error");
+    } catch (JSONException e) {
+      log.error("JSON error building SSO session response", e);
       writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, INTERNAL_ERROR);
     } finally {
       OBContext.restorePreviousMode();

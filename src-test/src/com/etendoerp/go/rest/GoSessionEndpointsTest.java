@@ -80,8 +80,9 @@ public class GoSessionEndpointsTest {
   private static final String CSRF = "csrf-token-value-123456";
 
   private final GoSessionService goSessionService = mock(GoSessionService.class);
+  private final EtendoGoSsoProviderRegistry ssoRegistry = mock(EtendoGoSsoProviderRegistry.class);
   private final EtendoGoJwtServlet servlet = new EtendoGoJwtServlet(
-      mock(TransactionalAuthEmailSender.class), new EtendoGoSsoProviderRegistry(), goSessionService);
+      mock(TransactionalAuthEmailSender.class), ssoRegistry, goSessionService);
 
   @Test
   public void createSetsHostCookieAndDoesNotLeakTokenInBody() throws Exception {
@@ -370,6 +371,41 @@ public class GoSessionEndpointsTest {
     verify(goSessionService).rotate(captor.capture());
     assertEquals("U1", captor.getValue().getUserId());
     assertEquals("C1", captor.getValue().getCtxClientId());
+  }
+
+  @Test
+  public void createViaSsoSetsCookieWithoutLeakingToken() throws Exception {
+    EtendoGoSsoAssertion assertion = mock(EtendoGoSsoAssertion.class);
+    when(assertion.getProvider()).thenReturn("google");
+    when(assertion.getSubject()).thenReturn("sub-1");
+    when(assertion.getEmail()).thenReturn(EMAIL);
+    when(assertion.getName()).thenReturn("SSO User");
+    when(ssoRegistry.verify(eq("google"), any(), anyString())).thenReturn(assertion);
+
+    Account account = mock(Account.class);
+    when(account.getId()).thenReturn("ACC1");
+    when(account.getEmail()).thenReturn(EMAIL);
+    when(account.getName()).thenReturn("SSO User");
+
+    IssuedGoSession issued = new IssuedGoSession("sess-sso", "ref-sso", "csrf-sso",
+        new GoSessionRecord());
+    when(goSessionService.create(eq("ACC1"), eq("sso"), any(), any())).thenReturn(issued);
+
+    CapturedResponse resp = new CapturedResponse();
+    try (MockedStatic<OBContext> ctx = mockStatic(OBContext.class);
+        MockedStatic<EtendoGoJwtDalHelper> dal = mockStatic(EtendoGoJwtDalHelper.class)) {
+      dal.when(() -> EtendoGoJwtDalHelper.findActiveAccountBySsoIdentity("google", "sub-1"))
+          .thenReturn(account);
+      servlet.doPost(jsonPost("/session/sso/google",
+          new JSONObject().put("credential", "google-id-token")), resp.response);
+    }
+
+    assertEquals(200, resp.status);
+    assertNotNull(resp.cookie(GoSessionSecurity.COOKIE_NAME));
+    assertNotNull(resp.cookie(GoSessionSecurity.REFRESH_COOKIE_NAME));
+    JSONObject body = new JSONObject(resp.body.toString());
+    assertFalse("platform token must NOT be in the body", body.has("token"));
+    assertEquals("csrf-sso", body.getString("csrfToken"));
   }
 
   private static Claim claim(String value) {

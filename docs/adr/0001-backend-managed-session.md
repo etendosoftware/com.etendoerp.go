@@ -116,11 +116,18 @@ Set-Cookie: __Host-go_session=<opaque>; Secure; HttpOnly; Path=/; SameSite=Lax
 
 | Method + path | Replaces | Request | Response to JS | Effect |
 |---|---|---|---|---|
-| `POST /sws/go/session` | `/login`, `/sso/{provider}` | `{emailOrUsername,password}` **or** `{provider,credential}` | `{account, csrfToken}` + `Set-Cookie` | create session; **no token in body** |
+| `POST /sws/go/session` | `/login` | `{email,password}` | `{account, csrfToken}` + `Set-Cookie` ×2 | create session (password); **no token in body** |
+| `POST /sws/go/session/sso/{provider}` | `/sso/{provider}` | provider raw body (e.g. `{credential}`) | `{account, csrfToken}` + `Set-Cookie` ×2 | create session (SSO); **no token in body** |
 | `GET /sws/go/session` | client-side restore from `sf_auth_*` | — (cookie) | `{account, environment, roleList, csrfToken}` | restore context after reload |
-| `POST /sws/go/session/environment` | `GET /login?userId=` | `{userId}` | `{environment, csrfToken}` | select environment + **rotate** session |
-| `POST /sws/go/session/refresh` | — (did not exist) | — (cookie + CSRF) | `{csrfToken}` + new cookie | rotate one-time identifier |
-| `DELETE /sws/go/session` | client-only logout | — (cookie + CSRF) | `204` + expired cookie | **server-side invalidation** |
+| `POST /sws/go/session/environment` | `GET /login?userId=` | `{userId}` | `{environment, roleList, csrfToken}` + rotated cookies | select environment + **rotate** session |
+| `POST /sws/go/session/refresh` | — (did not exist) | — (refresh cookie, Origin-checked) | `{csrfToken}` + new cookies | rotate one-time identifier |
+| `DELETE /sws/go/session` | client-only logout | — (cookie + CSRF) | `204` + expired cookies | **server-side invalidation** |
+
+> **Cookies:** two host-locked cookies are issued together — `__Host-go_session` (session) and `__Host-go_refresh`
+> (one-time refresh), both `Secure; HttpOnly; Path=/; SameSite=Lax`. `refresh` is protected by
+> same-origin (SameSite + Origin) rather than a CSRF token, since the session may be expired when it runs.
+> SSO create is a dedicated sub-route (`/session/sso/{provider}`) rather than a body-shape branch on
+> `POST /session`, to avoid a double read of the raw request body needed by provider verification.
 
 - `onboarding`, `change-password`, `password-reset` keep their behavior but authenticate via the
   session cookie instead of the platform Bearer.
