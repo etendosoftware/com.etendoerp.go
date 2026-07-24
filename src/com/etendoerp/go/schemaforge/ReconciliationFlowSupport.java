@@ -47,6 +47,19 @@ final class ReconciliationFlowSupport {
   }
 
   /**
+   * The inputs of {@link #settleInvoice} that stay constant across every invoice spec of a single
+   * {@link #createInvoicePayments} call, grouped into one value (Sonar S107): the target
+   * {@code account} and statement {@code line}, the resolved direction ({@code isReceipt}), the
+   * user-chosen {@code chosenMethod} (may be {@code null}), the growing {@code operationIds}
+   * accumulator and the amount {@code tolerance}. The per-invoice varying arguments ({@code spec}
+   * and {@code remaining}) stay as explicit parameters.
+   */
+  private record InvoiceSettlementContext(FIN_FinancialAccount account, FIN_BankStatementLine line,
+      boolean isReceipt, FIN_PaymentMethod chosenMethod, List<String> operationIds,
+      BigDecimal tolerance) {
+  }
+
+  /**
    * Allocates the statement line across one or more selected invoices, possibly a mix of
    * currencies (ETP-4502 iteration 2): each invoice's outstanding is converted to the account
    * currency via its own exchange rate (see {@link PaymentCurrencyConverter#resolveInvoiceRate};
@@ -82,9 +95,10 @@ final class ReconciliationFlowSupport {
     BigDecimal startingRemaining = lineAmount.abs();
     BigDecimal remaining = startingRemaining;
 
+    InvoiceSettlementContext ctx = new InvoiceSettlementContext(account, line, isReceipt,
+        chosenMethod, operationIds, tolerance);
     for (int i = 0; i < invoiceSpecs.length() && remaining.compareTo(tolerance) > 0; i++) {
-      SettlementOutcome outcome = settleInvoice(account, line, invoiceSpecs.getJSONObject(i),
-          isReceipt, chosenMethod, operationIds, remaining, tolerance);
+      SettlementOutcome outcome = settleInvoice(ctx, invoiceSpecs.getJSONObject(i), remaining);
       if (outcome.error() != null) {
         return outcome.error();
       }
@@ -132,10 +146,14 @@ final class ReconciliationFlowSupport {
    * payment. Extracted from {@link #createInvoicePayments} to keep its cognitive complexity under
    * the Sonar limit (S3776).
    */
-  private static SettlementOutcome settleInvoice(FIN_FinancialAccount account,
-      FIN_BankStatementLine line, JSONObject spec, boolean isReceipt,
-      FIN_PaymentMethod chosenMethod, List<String> operationIds, BigDecimal remaining,
-      BigDecimal tolerance) throws Exception {
+  private static SettlementOutcome settleInvoice(InvoiceSettlementContext ctx, JSONObject spec,
+      BigDecimal remaining) throws Exception {
+    FIN_FinancialAccount account = ctx.account();
+    FIN_BankStatementLine line = ctx.line();
+    boolean isReceipt = ctx.isReceipt();
+    FIN_PaymentMethod chosenMethod = ctx.chosenMethod();
+    List<String> operationIds = ctx.operationIds();
+    BigDecimal tolerance = ctx.tolerance();
     String invoiceId = spec.optString(FIELD_INVOICE_ID, null);
     String scheduleId = spec.optString("scheduleId", null);
     if (StringUtils.isBlank(invoiceId) || StringUtils.isBlank(scheduleId)) {
@@ -164,8 +182,9 @@ final class ReconciliationFlowSupport {
     BigDecimal txnAmount = PaymentCurrencyConverter.convertedAmount(paymentAmount, rate, account);
 
     FIN_Payment payment = ReconciliationPaymentService.registerReconciliationPayment(
-        invoice, schedule, paymentAmount, txnAmount, rate, line.getTransactionDate(), account,
-        isReceipt, chosenMethod);
+        new ReconciliationPaymentService.ReconciliationPaymentRequest(invoice, schedule,
+            paymentAmount, txnAmount, rate, line.getTransactionDate(), account, isReceipt,
+            chosenMethod));
     List<FIN_FinaccTransaction> txns = payment.getFINFinaccTransactionList();
     if (txns.isEmpty()) {
       return new SettlementOutcome(remaining,

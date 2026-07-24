@@ -115,7 +115,7 @@ class PaymentCurrencyConverterTest {
 
   private static Currency currencyWithPrecision(String id, Integer precision) {
     Currency c = currency(id);
-    when(c.getStandardPrecision()).thenReturn(precision == null ? null : BigDecimal.valueOf(precision));
+    when(c.getStandardPrecision()).thenReturn(precision == null ? null : Long.valueOf(precision));
     return c;
   }
 

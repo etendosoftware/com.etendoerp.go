@@ -47,6 +47,18 @@ final class ReconciliationPaymentService {
   }
 
   /**
+   * The closely-related inputs of {@link #registerReconciliationPayment(ReconciliationPaymentRequest)}
+   * grouped into a single value (Sonar S107): the invoice installment being settled ({@code invoice}
+   * + {@code schedule}), the two amounts ({@code paymentAmount} in invoice currency,
+   * {@code accountAmount} in account currency) with their {@code rate}, and the booking context
+   * ({@code paymentDate}, {@code account}, {@code isReceipt}, {@code chosenMethod}).
+   */
+  record ReconciliationPaymentRequest(Invoice invoice, FIN_PaymentSchedule schedule,
+      BigDecimal paymentAmount, BigDecimal accountAmount, BigDecimal rate, Date paymentDate,
+      FIN_FinancialAccount account, boolean isReceipt, FIN_PaymentMethod chosenMethod) {
+  }
+
+  /**
    * Registers a bank-reconciliation payment against an invoice installment, in either the same
    * currency as the account ({@code rate} = {@link BigDecimal#ONE}) or a different one. The payment
    * is created for {@code paymentAmount} (invoice currency) and the financial transaction is booked
@@ -66,10 +78,17 @@ final class ReconciliationPaymentService {
    * method (multi-currency disabled by ETP-4503) is rejected with a clear error rather than a
    * cryptic Core failure.
    */
-  static FIN_Payment registerReconciliationPayment(Invoice invoice, FIN_PaymentSchedule schedule,
-      BigDecimal paymentAmount, BigDecimal accountAmount, BigDecimal rate, Date paymentDate,
-      FIN_FinancialAccount account, boolean isReceipt, FIN_PaymentMethod chosenMethod)
+  static FIN_Payment registerReconciliationPayment(ReconciliationPaymentRequest req)
       throws Exception {
+    Invoice invoice = req.invoice();
+    FIN_PaymentSchedule schedule = req.schedule();
+    BigDecimal paymentAmount = req.paymentAmount();
+    BigDecimal accountAmount = req.accountAmount();
+    BigDecimal rate = req.rate();
+    Date paymentDate = req.paymentDate();
+    FIN_FinancialAccount account = req.account();
+    boolean isReceipt = req.isReceipt();
+    FIN_PaymentMethod chosenMethod = req.chosenMethod();
 
     List<FIN_PaymentScheduleDetail> pendingPSDs =
         PaymentRegistrationService.findPendingPSDs(schedule.getId());

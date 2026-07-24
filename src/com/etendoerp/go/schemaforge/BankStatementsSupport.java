@@ -55,6 +55,14 @@ public final class BankStatementsSupport {
   /** JSON/SQL key for the bank-statement-line description field. */
   static final String FIELD_DESCRIPTION = "description";
 
+  /** JSON keys / reconcile-status codes reused across rows — extracted to satisfy Sonar S1192. */
+  private static final String KEY_MATCHED = "matched";
+  private static final String STATUS_RECONCILED = "RECONCILED";
+  private static final String STATUS_PENDING = "PENDING";
+  private static final String STATUS_PARTIAL = "PARTIAL";
+  private static final String KEY_PENDING_AMOUNT = "pendingAmount";
+  private static final String KEY_REMAINDER_LINE_ID = "remainderLineId";
+
   // Cached result of the C43 column existence check (null = not yet checked).
   private static volatile Boolean c43DescColumn;
 
@@ -116,14 +124,14 @@ public final class BankStatementsSupport {
     BigDecimal amount = credit.subtract(debit);
     row.put(FIELD_AMOUNT, amount);
     boolean matched = rs.getString("fin_finacc_transaction_id") != null;
-    row.put("matched", matched);
+    row.put(KEY_MATCHED, matched);
     // Per-row reconcile status/pending amount — the seed that mergeSubLineIntoHead accumulates
     // across a match group's physical rows (see there for why a group needs this instead of the
     // plain `matched` flag once a partial match is involved). pendingAmount comes from the persisted
     // EM_ETGO_Pending_Amount column (maintained by BankStatementLinePendingAmountHandler) so this
     // view and the reconciliation-tab pending-lines view share a single source of truth.
-    row.put("reconcileStatus", matched ? "RECONCILED" : "PENDING");
-    row.put("pendingAmount", nullSafeBigDecimal(rs.getBigDecimal("em_etgo_pending_amount")));
+    row.put("reconcileStatus", matched ? STATUS_RECONCILED : STATUS_PENDING);
+    row.put(KEY_PENDING_AMOUNT, nullSafeBigDecimal(rs.getBigDecimal("em_etgo_pending_amount")));
     // 1:N reconcile group (option B): split sub-lines share this id so they can be re-grouped.
     row.put("matchGroupId", StringUtils.trimToEmpty(rs.getString("em_etgo_match_group_id")));
     row.put("txns", buildLineTxns(rs, matched));
@@ -154,8 +162,8 @@ public final class BankStatementsSupport {
           heads.put(groupId, line);
           // If the group's head sub-line is itself the pending remainder, it is the line the UI
           // reconciles the rest against (see remainderLineId below).
-          if (!line.optBoolean("matched", false)) {
-            line.put("remainderLineId", line.optString("id"));
+          if (!line.optBoolean(KEY_MATCHED, false)) {
+            line.put(KEY_REMAINDER_LINE_ID, line.optString("id"));
           }
         }
         result.put(line);
@@ -192,22 +200,31 @@ public final class BankStatementsSupport {
     head.put("in", jsonBigDecimal(head, "in").add(jsonBigDecimal(line, "in")));
     head.put("out", jsonBigDecimal(head, "out").add(jsonBigDecimal(line, "out")));
     head.put(FIELD_AMOUNT, jsonBigDecimal(head, FIELD_AMOUNT).add(jsonBigDecimal(line, FIELD_AMOUNT)));
-    head.put("pendingAmount", jsonBigDecimal(head, "pendingAmount").add(jsonBigDecimal(line, "pendingAmount")));
+    head.put(KEY_PENDING_AMOUNT,
+        jsonBigDecimal(head, KEY_PENDING_AMOUNT).add(jsonBigDecimal(line, KEY_PENDING_AMOUNT)));
     // Remember the group's pending remainder sub-line (first unmatched one wins) — the UI reconciles
     // the rest of the line against it (ETP-4502 iteration 5). Additive; consumers that don't need it
     // (imported-statements view) simply ignore it.
-    if (StringUtils.isBlank(head.optString("remainderLineId", "")) && !line.optBoolean("matched", false)) {
-      head.put("remainderLineId", line.optString("id"));
+    if (StringUtils.isBlank(head.optString(KEY_REMAINDER_LINE_ID, ""))
+        && !line.optBoolean(KEY_MATCHED, false)) {
+      head.put(KEY_REMAINDER_LINE_ID, line.optString("id"));
     }
     // The merged group is reconciled only while it still carries transactions AND nothing is left
     // pending. After a reactivate the sub-lines keep the match-group tag but lose their
     // transaction, so deriving status from the accumulated txns/pendingAmount (instead of forcing
     // RECONCILED) lets the group correctly fall back to PARTIAL/PENDING.
     boolean anyMatched = headTxns.length() > 0;
-    boolean fullyCovered = jsonBigDecimal(head, "pendingAmount").signum() == 0;
-    String status = !anyMatched ? "PENDING" : (fullyCovered ? "RECONCILED" : "PARTIAL");
+    boolean fullyCovered = jsonBigDecimal(head, KEY_PENDING_AMOUNT).signum() == 0;
+    String status;
+    if (!anyMatched) {
+      status = STATUS_PENDING;
+    } else if (fullyCovered) {
+      status = STATUS_RECONCILED;
+    } else {
+      status = STATUS_PARTIAL;
+    }
     head.put("reconcileStatus", status);
-    head.put("matched", "RECONCILED".equals(status));
+    head.put(KEY_MATCHED, STATUS_RECONCILED.equals(status));
   }
 
   private static BigDecimal jsonBigDecimal(JSONObject o, String key) {
@@ -240,9 +257,9 @@ public final class BankStatementsSupport {
    * @return one of {@code "PENDING"}, {@code "PARTIAL"} or {@code "RECONCILED"}
    */
   public static String deriveStatementStatus(int lineCount, int matchedCount) {
-    if (lineCount == 0 || matchedCount == 0) return "PENDING";
-    if (matchedCount >= lineCount) return "RECONCILED";
-    return "PARTIAL";
+    if (lineCount == 0 || matchedCount == 0) return STATUS_PENDING;
+    if (matchedCount >= lineCount) return STATUS_RECONCILED;
+    return STATUS_PARTIAL;
   }
 
   /**

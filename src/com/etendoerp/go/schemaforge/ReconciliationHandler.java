@@ -68,7 +68,6 @@ import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.utility.OBError;
 import org.openbravo.model.common.businesspartner.BusinessPartner;
 import org.openbravo.model.common.enterprise.Organization;
-import org.openbravo.model.common.invoice.Invoice;
 import org.openbravo.model.financialmgmt.gl.GLItem;
 import org.openbravo.model.financialmgmt.payment.FIN_BankStatement;
 import org.openbravo.model.financialmgmt.payment.FIN_BankStatementLine;
@@ -163,30 +162,38 @@ public class ReconciliationHandler implements NeoHandler {
   /** Tolerance applied when comparing the line amount to the sum of operations. */
   private static final BigDecimal TOLERANCE = new BigDecimal("0.01");
 
-  /** JSON keys / messages reused across rows — extracted to satisfy Sonar S1192. */
+  /**
+   * JSON keys / messages reused across rows — extracted to satisfy Sonar S1192. Some are
+   * package-private (not {@code private}) so the sibling {@link ReconciliationHandlerSupport}
+   * helpers extracted from this handler can reuse the exact same keys/messages.
+   */
   private static final String MSG_MISSING_PARAM = "Missing required parameter: ";
   private static final String MSG_ACCOUNT_NOT_FOUND = "Financial account not found: ";
-  private static final String MSG_BODY_REQUIRED = "Request body is required";
+  static final String MSG_BODY_REQUIRED = "Request body is required";
   private static final String MSG_STATEMENT_LINE_NOT_FOUND = "Statement line not found: ";
   private static final String KEY_FINANCIAL_ACCOUNT_ID = "financialAccountId";
   private static final String KEY_STATEMENT_LINE_ID = "statementLineId";
-  private static final String KEY_TRANSACTION_ID = "transactionId";
-  private static final String KEY_ID = "id";
+  static final String KEY_TRANSACTION_ID = "transactionId";
+  static final String KEY_ID = "id";
   private static final String KEY_DATE = "date";
-  private static final String KEY_AMOUNT = "amount";
-  private static final String KEY_STATUS = "status";
+  static final String KEY_AMOUNT = "amount";
+  static final String KEY_STATUS = "status";
   private static final String KEY_DOCUMENT_NO = "documentNo";
   private static final String KEY_PARTNER_NAME = "partnerName";
   private static final String KEY_DESCRIPTION = "description";
   private static final String KEY_PENDING_BALANCE = "pendingBalance";
   private static final String KEY_SUGGESTED = "suggested";
   private static final String COL_PARTNER_NAME = "partner_name";
-  private static final String KEY_COUNTS = "counts";
-  private static final String KEY_TOTAL = "total";
+  static final String KEY_COUNTS = "counts";
+  static final String KEY_TOTAL = "total";
   private static final String SQL_VARCHAR = "varchar";
   private static final String KEY_GROUPS = "groups";
-  private static final String STATUS_PENDING = "pending";
-  private static final String MSG_INTERNAL_SERVER_ERROR = "Internal Server Error";
+  static final String STATUS_PENDING = "pending";
+  static final String MSG_INTERNAL_SERVER_ERROR = "Internal Server Error";
+  /** Reused error message + JSON key — extracted to satisfy Sonar S1192 (each appears 3×). */
+  private static final String MSG_LINE_NOT_IN_ACCOUNT =
+      "Statement line does not belong to the financial account";
+  private static final String KEY_UPDATED_BALANCE = "updatedBalance";
 
   /**
    * Pending bank-statement lines (panel left): unmatched lines of the account,
@@ -236,7 +243,7 @@ public class ReconciliationHandler implements NeoHandler {
           + "   AND bs.ad_org_id = ANY (?)";
 
   /** Status filter codes accepted by {@code pendingLines}. */
-  private static final String STATUS_RECONCILED = "reconciled";
+  static final String STATUS_RECONCILED = "reconciled";
 
   private static final String PENDING_LINES_ORDER =
       " ORDER BY bsl.datetrx ASC, bsl.line ASC";
@@ -322,16 +329,16 @@ public class ReconciliationHandler implements NeoHandler {
       return handleAutoMatch(context);
     }
     if (METHOD_POST.equals(method) && ACTION_RECONCILE_GROUP.equals(action)) {
-      return handleReconcileGroup(context);
+      return ReconciliationHandlerSupport.handleReconcileGroup(this, context);
     }
     if (METHOD_POST.equals(method) && ACTION_APPLY_SUGGESTIONS.equals(action)) {
-      return handleApplySuggestions(context);
+      return ReconciliationHandlerSupport.handleApplySuggestions(this, context);
     }
     if (METHOD_POST.equals(method) && ACTION_REACTIVATE.equals(action)) {
-      return handleReactivate(context);
+      return ReconciliationHandlerSupport.handleReactivate(this, context);
     }
     if (METHOD_POST.equals(method) && ACTION_REMOVE_OPERATION.equals(action)) {
-      return handleRemoveOperation(context);
+      return ReconciliationHandlerSupport.handleRemoveOperation(this, context);
     }
     // Any other request (generic list / getById of the W spec) flows through.
     return null;
@@ -445,48 +452,8 @@ public class ReconciliationHandler implements NeoHandler {
     // Collapse the split sub-lines of a 1:N reconciliation into a single line, so a group shows as
     // one reconciled entry (same as the imported-statements view) instead of N separate sub-lines.
     JSONArray lines = BankStatementsSupport.mergeMatchGroups(rawLines);
-    BigDecimal total = BigDecimal.ZERO;
-    Map<String, Integer> counts = AutoMatchSupport.newCounts();
-    for (int i = 0; i < lines.length(); i++) {
-      JSONObject row = lines.getJSONObject(i);
-      BigDecimal amount = nullSafe(new BigDecimal(row.optString(KEY_AMOUNT, "0")));
-      total = total.add(amount);
-      // Reconciled/pending amounts + progress % for the left "Progreso" bar and the right block.
-      BigDecimal pending = nullSafe(new BigDecimal(row.optString("pendingAmount", "0")));
-      BigDecimal reconciled = amount.subtract(pending);
-      row.put("reconciledAmount", reconciled);
-      int pct = amount.signum() == 0 ? 0
-          : (int) Math.round(reconciled.abs().doubleValue() / amount.abs().doubleValue() * 100.0);
-      row.put("reconciledPct", pct);
-      // Derive the fine-grained state per merged (logical) line. A PARTIAL group stays in the
-      // pending universe (shows under the "Pendiente" filter, counted as pending) but is visibly
-      // partial via the progress bar; a fully-pending line is classified as before.
-      String recStatus = row.optString("reconcileStatus", "PENDING");
-      String state;
-      if ("RECONCILED".equals(recStatus)) {
-        state = STATUS_RECONCILED;
-        row.put(KEY_STATUS, STATUS_RECONCILED);
-      } else if ("PARTIAL".equals(recStatus)) {
-        state = STATUS_PENDING;
-        row.put(KEY_STATUS, STATUS_PENDING);
-        row.put("partial", true);
-      } else {
-        state = AutoMatchSupport.classifyPendingLine(account, row.optString(KEY_ID), rules,
-            pendingDateTolDays, pendingAmtTolPct);
-        row.put(KEY_STATUS, STATUS_PENDING);
-      }
-      row.put("state", state);
-      counts.put("all", counts.get("all") + 1);
-      counts.put(state, counts.getOrDefault(state, 0) + 1);
-    }
-    JSONObject countsJson = new JSONObject();
-    for (Map.Entry<String, Integer> entry : counts.entrySet()) {
-      countsJson.put(entry.getKey(), entry.getValue());
-    }
-    JSONObject data = new JSONObject();
-    data.put("lines", lines);
-    data.put(KEY_TOTAL, total);
-    data.put(KEY_COUNTS, countsJson);
+    JSONObject data = ReconciliationHandlerSupport.summarizePendingLines(
+        lines, account, rules, pendingDateTolDays, pendingAmtTolPct);
     return envelope(data);
   }
 
@@ -609,15 +576,7 @@ public class ReconciliationHandler implements NeoHandler {
     FIN_FinancialAccount account = loadAccount(accountId);
     // Direction: the UI's transaction-type selector passes docType (receipts → sales/Y,
     // payments → purchase/N). Fall back to the selected line's sign when no docType is given.
-    Boolean receipt;
-    if (StringUtils.isNotBlank(docType)) {
-      receipt = "Y".equals(docTypeToIsReceipt(docType));
-    } else {
-      FIN_BankStatementLine line = StringUtils.isNotBlank(lineId) ? loadLine(lineId) : null;
-      int sign = line != null
-          ? nullSafe(line.getCramount()).subtract(nullSafe(line.getDramount())).signum() : 0;
-      receipt = sign == 0 ? null : sign > 0;
-    }
+    Boolean receipt = ReconciliationHandlerSupport.resolveInvoiceDirection(this, docType, lineId);
     if (account == null || receipt == null) {
       JSONObject empty = new JSONObject();
       empty.put(ACTION_CANDIDATES, candidates);
@@ -665,7 +624,8 @@ public class ReconciliationHandler implements NeoHandler {
           // amount and the panel falls back to showing that alone.
           if (account.getCurrency() != null
               && !account.getCurrency().getISOCode().equals(candidateCurrencyIso)) {
-            appendAccountEquivalent(row, rs.getString("c_invoice_id"), account, signed);
+            ReconciliationHandlerSupport.appendAccountEquivalent(
+                row, rs.getString("c_invoice_id"), account, signed);
           }
           candidates.put(row);
         }
@@ -675,30 +635,6 @@ public class ReconciliationHandler implements NeoHandler {
     data.put(ACTION_CANDIDATES, candidates);
     data.put(KEY_COUNTS, CandidatesSupport.candidateCounts(accountId, dateFrom, dateTo));
     return envelope(data);
-  }
-
-  /**
-   * Appends {@code rate}, {@code amountBase} (= {@code signedAmount × rate}) and
-   * {@code baseCurrency} to a foreign-currency invoice candidate row, using the SAME rate source
-   * reconciling this invoice would use ({@link PaymentCurrencyConverter#resolveInvoiceRate}). Swallows
-   * a missing-rate failure — the row is still usable for reconciliation (the rate is re-resolved
-   * then), it just can't preview a EUR-style equivalent up front.
-   */
-  private void appendAccountEquivalent(JSONObject row, String invoiceId, FIN_FinancialAccount account,
-      BigDecimal signedAmount) {
-    try {
-      Invoice invoice = OBDal.getInstance().get(Invoice.class, invoiceId);
-      if (invoice == null) {
-        return;
-      }
-      BigDecimal rate = PaymentCurrencyConverter.resolveInvoiceRate(invoice, account);
-      row.put("rate", rate);
-      row.put("amountBase", PaymentCurrencyConverter.convertedAmount(signedAmount, rate, account));
-      row.put("baseCurrency", account.getCurrency().getISOCode());
-    } catch (Exception e) {
-      log.debug("No exchange rate available to preview invoice {} in the account currency: {}",
-          invoiceId, e.getMessage());
-    }
   }
 
   /**
@@ -747,27 +683,6 @@ public class ReconciliationHandler implements NeoHandler {
   // POST reconcileGroup
   // ---------------------------------------------------------------------------
 
-  private NeoResponse handleReconcileGroup(NeoContext context) {
-    JSONObject body = context.getRequestBody();
-    if (body == null) {
-      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, MSG_BODY_REQUIRED);
-    }
-    try {
-      OBContext.setAdminMode(true);
-      return reconcileGroup(body);
-    } catch (OBException e) {
-      log.warn("reconcileGroup business error: {}", e.getMessage());
-      doRollbackAndClose();
-      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, e.getMessage());
-    } catch (Exception e) {
-      log.error("reconcileGroup failed", e);
-      doRollbackAndClose();
-      return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR, MSG_INTERNAL_SERVER_ERROR);
-    } finally {
-      OBContext.restorePreviousMode();
-    }
-  }
-
   NeoResponse reconcileGroup(JSONObject body) throws Exception {
     String accountId = body.optString(KEY_FINANCIAL_ACCOUNT_ID, null);
     String statementLineId = body.optString(KEY_STATEMENT_LINE_ID, null);
@@ -797,7 +712,7 @@ public class ReconciliationHandler implements NeoHandler {
     }
     if (!belongsToAccount(line, accountId)) {
       return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
-          "Statement line does not belong to the financial account");
+          MSG_LINE_NOT_IN_ACCOUNT);
     }
     if (line.getFinancialAccountTransaction() != null) {
       return NeoResponse.error(HttpServletResponse.SC_CONFLICT,
@@ -855,7 +770,7 @@ public class ReconciliationHandler implements NeoHandler {
     JSONArray lineIds = new JSONArray();
     lineIds.put(line.getId());
     data.put("lineIds", lineIds);
-    data.put("updatedBalance", nullSafe(rec.getEndingBalance()));
+    data.put(KEY_UPDATED_BALANCE, nullSafe(rec.getEndingBalance()));
     return NeoResponse.createdWithData(data);
   }
 
@@ -940,27 +855,6 @@ public class ReconciliationHandler implements NeoHandler {
   // ---------------------------------------------------------------------------
   // POST applySuggestions (commit — creates payments + reconciles)
   // ---------------------------------------------------------------------------
-
-  private NeoResponse handleApplySuggestions(NeoContext context) {
-    JSONObject body = context.getRequestBody();
-    if (body == null) {
-      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, MSG_BODY_REQUIRED);
-    }
-    try {
-      OBContext.setAdminMode(true);
-      return applySuggestions(body);
-    } catch (OBException e) {
-      log.warn("applySuggestions business error: {}", e.getMessage());
-      doRollbackAndClose();
-      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, e.getMessage());
-    } catch (Exception e) {
-      log.error("applySuggestions failed", e);
-      doRollbackAndClose();
-      return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR, MSG_INTERNAL_SERVER_ERROR);
-    } finally {
-      OBContext.restorePreviousMode();
-    }
-  }
 
   NeoResponse applySuggestions(JSONObject body) throws Exception {
     String accountId = body.optString(KEY_FINANCIAL_ACCOUNT_ID, null);
@@ -1053,27 +947,6 @@ public class ReconciliationHandler implements NeoHandler {
   // POST reactivate (undo a reconciliation for a single statement line)
   // ---------------------------------------------------------------------------
 
-  private NeoResponse handleReactivate(NeoContext context) {
-    JSONObject body = context.getRequestBody();
-    if (body == null) {
-      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, MSG_BODY_REQUIRED);
-    }
-    try {
-      OBContext.setAdminMode(true);
-      return reactivate(body);
-    } catch (OBException e) {
-      log.warn("reactivate business error: {}", e.getMessage());
-      doRollbackAndClose();
-      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, e.getMessage());
-    } catch (Exception e) {
-      log.error("reactivate failed", e);
-      doRollbackAndClose();
-      return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR, MSG_INTERNAL_SERVER_ERROR);
-    } finally {
-      OBContext.restorePreviousMode();
-    }
-  }
-
   /**
    * Reactivates (undoes) the reconciliation that links a single statement line. Delegates ALL
    * reactivation logic to the {@code com.etendoerp.payment.removal} module — this handler never
@@ -1115,7 +988,7 @@ public class ReconciliationHandler implements NeoHandler {
     }
     if (!belongsToAccount(line, accountId)) {
       return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
-          "Statement line does not belong to the financial account");
+          MSG_LINE_NOT_IN_ACCOUNT);
     }
 
     FIN_FinaccTransaction trx = line.getFinancialAccountTransaction();
@@ -1154,29 +1027,8 @@ public class ReconciliationHandler implements NeoHandler {
     JSONObject data = new JSONObject();
     data.put("reactivated", true);
     data.put(KEY_STATEMENT_LINE_ID, statementLineId);
-    data.put("updatedBalance", updatedBalance);
+    data.put(KEY_UPDATED_BALANCE, updatedBalance);
     return envelope(data);
-  }
-
-  private NeoResponse handleRemoveOperation(NeoContext context) {
-    JSONObject body = context.getRequestBody();
-    if (body == null) {
-      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, MSG_BODY_REQUIRED);
-    }
-    try {
-      OBContext.setAdminMode(true);
-      return removeOperation(body);
-    } catch (OBException e) {
-      log.warn("removeOperation business error: {}", e.getMessage());
-      doRollbackAndClose();
-      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, e.getMessage());
-    } catch (Exception e) {
-      log.error("removeOperation failed", e);
-      doRollbackAndClose();
-      return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR, MSG_INTERNAL_SERVER_ERROR);
-    } finally {
-      OBContext.restorePreviousMode();
-    }
   }
 
   /**
@@ -1206,7 +1058,7 @@ public class ReconciliationHandler implements NeoHandler {
   NeoResponse removeOperation(JSONObject body) throws Exception {
     String accountId = body.optString(KEY_FINANCIAL_ACCOUNT_ID, null);
     String statementLineId = body.optString(KEY_STATEMENT_LINE_ID, null);
-    List<String> transactionIds = readTransactionIds(body);
+    List<String> transactionIds = ReconciliationHandlerSupport.readTransactionIds(body);
     if (StringUtils.isBlank(accountId) || StringUtils.isBlank(statementLineId)
         || transactionIds.isEmpty()) {
       return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
@@ -1224,74 +1076,30 @@ public class ReconciliationHandler implements NeoHandler {
     }
     if (!belongsToAccount(line, accountId)) {
       return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
-          "Statement line does not belong to the financial account");
+          MSG_LINE_NOT_IN_ACCOUNT);
     }
 
-    // Resolve + validate every selected transaction and GROUP them by their reconciliation. A line
-    // reconciled in several steps (e.g. its remainder matched later against another invoice) ends up
-    // with MORE THAN ONE reconciliation sharing the same match group, so each reconciliation is
-    // handled independently below.
+    // Resolve + validate every selected transaction and GROUP them by their reconciliation, guard
+    // against closed accounting periods, then perform the per-reconciliation removal. Each step is
+    // delegated to ReconciliationHandlerSupport (extracted to keep this method's cognitive
+    // complexity and this class's method count under the Sonar limits); the DAL/period seams are
+    // invoked back through this handler instance so the unit-test spies keep intercepting them. A
+    // line reconciled in several steps can span MORE THAN ONE reconciliation sharing the same match
+    // group, so each is handled independently.
     java.util.Map<String, FIN_Reconciliation> recById = new java.util.LinkedHashMap<>();
     java.util.Map<String, List<FIN_FinaccTransaction>> selectedByRec = new java.util.LinkedHashMap<>();
-    for (String id : transactionIds) {
-      FIN_FinaccTransaction trx = loadTransaction(id);
-      if (trx == null) {
-        return NeoResponse.error(HttpServletResponse.SC_NOT_FOUND, "Transaction not found: " + id);
-      }
-      FIN_Reconciliation r = trx.getReconciliation();
-      if (r == null) {
-        return NeoResponse.error(HttpServletResponse.SC_CONFLICT,
-            "Transaction is not linked to a reconciliation");
-      }
-      if (r.getAccount() == null || !accountId.equals(r.getAccount().getId())) {
-        return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
-            "The selected operations do not belong to the financial account");
-      }
-      recById.putIfAbsent(r.getId(), r);
-      selectedByRec.computeIfAbsent(r.getId(), (k) -> new ArrayList<>()).add(trx);
+    NeoResponse groupError = ReconciliationHandlerSupport.groupSelectedByReconciliation(
+        this, accountId, transactionIds, recById, selectedByRec);
+    if (groupError != null) {
+      return groupError;
     }
+    NeoResponse periodError = ReconciliationHandlerSupport.guardOpenPeriods(this, recById.values());
+    if (periodError != null) {
+      return periodError;
+    }
+    ReconciliationHandlerSupport.removeSelectedFromReconciliations(
+        this, account, recById, selectedByRec);
 
-    // Accounting-period guard (same as reactivate): refuse to undo into a closed period, on any of
-    // the affected reconciliations.
-    for (FIN_Reconciliation r : recById.values()) {
-      try {
-        checkPeriod(r.getClient().getId(), r.getOrganization().getId(),
-            r.getEntity().getTableId(), r.getTransactionDate());
-      } catch (OBException e) {
-        log.warn("removeOperation blocked by closed period for reconciliation {}: {}", r.getId(),
-            e.getMessage());
-        return NeoResponse.error(HttpServletResponse.SC_CONFLICT,
-            "The accounting period is closed and the operation cannot be un-reconciled: "
-                + e.getMessage());
-      }
-    }
-
-    // Per reconciliation: if the selection covers ALL of its transactions, undo the whole
-    // reconciliation (payment removal); otherwise detach just the selected ones (the rest stay).
-    for (java.util.Map.Entry<String, FIN_Reconciliation> entry : recById.entrySet()) {
-      FIN_Reconciliation r = entry.getValue();
-      List<FIN_FinaccTransaction> selForRec = selectedByRec.get(entry.getKey());
-      List<FIN_FinaccTransaction> allOfRec = new ArrayList<>(r.getFINFinaccTransactionList());
-      java.util.Set<String> selIds = new java.util.HashSet<>();
-      for (FIN_FinaccTransaction t : selForRec) {
-        selIds.add(t.getId());
-      }
-      boolean coversRec = allOfRec.stream().allMatch((t) -> selIds.contains(t.getId()));
-      if (coversRec) {
-        undoReconciliation(account, r, allOfRec);
-      } else {
-        for (FIN_FinaccTransaction trx : selForRec) {
-          boolean auto = isAutoCreated(trx);
-          FIN_Payment payment = auto ? trx.getFinPayment() : null;
-          ReconciliationRemovalUtil.removeTransactionFromReconciliation(trx);
-          if (auto && payment != null) {
-            PaymentRemovalUtil.reactivateAndRemove(payment);
-          } else if (auto) {
-            TransactionRemovalUtil.reactivateAndRemove(trx.getId());
-          }
-        }
-      }
-    }
     // Collapse the split sub-lines back into a single pending line if the whole group is now
     // unmatched (no-ops when some sub-lines are still reconciled).
     normalizeReactivatedMatchGroup(line);
@@ -1301,27 +1109,8 @@ public class ReconciliationHandler implements NeoHandler {
     data.put("removed", true);
     data.put(KEY_STATEMENT_LINE_ID, statementLineId);
     data.put("transactionIds", new JSONArray(transactionIds));
-    data.put("updatedBalance", updatedBalance);
+    data.put(KEY_UPDATED_BALANCE, updatedBalance);
     return envelope(data);
-  }
-
-  /** Reads {@code transactionIds[]} from the body, falling back to a single {@code transactionId}. */
-  private List<String> readTransactionIds(JSONObject body) {
-    List<String> ids = new ArrayList<>();
-    JSONArray arr = body.optJSONArray("transactionIds");
-    if (arr != null) {
-      for (int i = 0; i < arr.length(); i++) {
-        String id = StringUtils.trimToNull(arr.optString(i, null));
-        if (id != null && !ids.contains(id)) {
-          ids.add(id);
-        }
-      }
-    }
-    String single = StringUtils.trimToNull(body.optString(KEY_TRANSACTION_ID, null));
-    if (ids.isEmpty() && single != null) {
-      ids.add(single);
-    }
-    return ids;
   }
 
   /**

@@ -1669,14 +1669,17 @@ public class ReconciliationHandlerTest {
     when(schedule.getOutstandingAmount()).thenReturn(new BigDecimal("100.00"));
 
     try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
-        MockedStatic<PaymentRegistrationService> prs =
-            mockStatic(PaymentRegistrationService.class)) {
+        MockedStatic<ReconciliationPaymentService> rps =
+            mockStatic(ReconciliationPaymentService.class)) {
       OBDal dal = mock(OBDal.class);
       obDal.when(OBDal::getInstance).thenReturn(dal);
       when(dal.get(Invoice.class, "INV-1")).thenReturn(invoice);
       when(dal.get(FIN_PaymentSchedule.class, "PS-1")).thenReturn(schedule);
-      prs.when(() -> PaymentRegistrationService.registerPaymentCore(
-          eq(invoice), eq(schedule), any(), any(), eq(account), eq(true))).thenReturn(payment);
+      // Mock the whole reconciliation-payment seam (as ReconciliationFlowSupportForeignInvoiceTest
+      // does): the real registerReconciliationPayment calls findPendingPSDs/createDraftPayment,
+      // which are unavailable in a unit test.
+      rps.when(() -> ReconciliationPaymentService.registerReconciliationPayment(any()))
+          .thenReturn(payment);
 
       NeoResponse response = handler.reconcileGroup(invoiceReconcileBody(ACC_ID, LINE_ID,
           "INV-1", "PS-1"));
@@ -1689,21 +1692,30 @@ public class ReconciliationHandlerTest {
   }
 
   /**
-   * A reconcileGroup whose selected invoices do not cover the statement line amount is rejected
-   * with a 400 ("do not cover").
+   * A reconcileGroup whose selected invoices contribute NOTHING to the statement line (every
+   * selected installment already has zero outstanding) is rejected with a 400 ("do not cover").
+   *
+   * <p>Note: a genuinely PARTIAL invoice (e.g. 40 of a 100 line) is no longer a 400 — since
+   * ETP-4502 iteration 2 the backend settles that portion and splits the remainder, so the "do not
+   * cover" guard in {@code createInvoicePayments} only fires when the whole selection consumes
+   * nothing ({@code remaining == startingRemaining}). A zero-outstanding schedule is that
+   * zero-consumption case: {@code allocateBase <= tolerance} short-circuits {@code settleInvoice}
+   * before any payment is created, so {@code remaining} stays at the full line amount.
    *
    * @throws Exception if building the body or stubbing the seams fails
    */
   @Test
   public void testReconcileGroupWithInvoiceInsufficientOutstandingReturns400() throws Exception {
     FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
-    // Line needs 100.00 but the invoice only covers 40.00 → 60.00 remaining → reject.
+    // Line needs 100.00 but the selected installment has 0 outstanding → nothing consumed → reject.
     FIN_BankStatementLine line = lineFor(ACC_ID, new BigDecimal("100.00"), BigDecimal.ZERO, null);
     when(line.getTransactionDate()).thenReturn(null);
 
     doReturn(account).when(handler).loadAccount(ACC_ID);
     doReturn(line).when(handler).loadLine(LINE_ID);
 
+    // Kept but never reached: with a zero-outstanding schedule settleInvoice short-circuits before
+    // registerReconciliationPayment, so this stub is harmless (see class note on the guard).
     FIN_FinaccTransaction createdTxn = trxFor(ACC_ID, new BigDecimal("40.00"), BigDecimal.ZERO, null);
     when(createdTxn.getId()).thenReturn("T-INV");
     FIN_Payment payment = mock(FIN_Payment.class);
@@ -1711,25 +1723,89 @@ public class ReconciliationHandlerTest {
 
     Invoice invoice = mock(Invoice.class);
     FIN_PaymentSchedule schedule = mock(FIN_PaymentSchedule.class);
-    when(schedule.getOutstandingAmount()).thenReturn(new BigDecimal("40.00"));
+    when(schedule.getOutstandingAmount()).thenReturn(BigDecimal.ZERO);
 
     try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
-        MockedStatic<PaymentRegistrationService> prs =
-            mockStatic(PaymentRegistrationService.class)) {
+        MockedStatic<ReconciliationPaymentService> rps =
+            mockStatic(ReconciliationPaymentService.class)) {
       OBDal dal = mock(OBDal.class);
       obDal.when(OBDal::getInstance).thenReturn(dal);
       when(dal.get(Invoice.class, "INV-1")).thenReturn(invoice);
       when(dal.get(FIN_PaymentSchedule.class, "PS-1")).thenReturn(schedule);
-      prs.when(() -> PaymentRegistrationService.registerPaymentCore(
-          eq(invoice), eq(schedule), any(), any(), eq(account), eq(true))).thenReturn(payment);
+      rps.when(() -> ReconciliationPaymentService.registerReconciliationPayment(any()))
+          .thenReturn(payment);
 
       NeoResponse response = handler.reconcileGroup(invoiceReconcileBody(ACC_ID, LINE_ID,
           "INV-1", "PS-1"));
 
       assertEquals(400, response.getHttpStatus());
       assertTrue(response.getBody().getJSONObject("error").getString("message").contains("do not cover"));
-      // The line is never reconciled when the invoices are insufficient.
+      // The line is never reconciled when the invoices cover nothing.
       verify(handler, never()).addNewDraftReconciliation(any());
+    }
+  }
+
+  /**
+   * PARTIAL invoice coverage SUCCEEDS (ETP-4502 iteration 2): a 100.00 line reconciled against an
+   * invoice whose outstanding is only 40.00 settles that 40.00 portion — a payment (and its
+   * auto-created transaction) for 40.00 is created and reconciled against the line, leaving a 60.00
+   * pending remainder — and returns 201. This is the complement of
+   * {@link #testReconcileGroupWithInvoiceInsufficientOutstandingReturns400}: the "do not cover" 400
+   * fires only when the selection consumes NOTHING (zero outstanding), NOT for a genuine partial.
+   *
+   * <p>Flow (verified by reading {@code settleInvoice}/{@code createInvoicePayments}/{@code
+   * validateOperations}): {@code allocateBase = min(remaining 100, outstandingBase 40) = 40 >
+   * tolerance} → payment created (mocked seam) → {@code remaining} 100 → 60 → {@code
+   * createInvoicePayments} returns null (60 != startingRemaining 100, so no "do not cover") →
+   * {@code validateOperations} allows the within-line partial (|40| <= |100|) → {@code compose} →
+   * 201. The 40-of-100 match splits the line, so {@code willSplitLine} is true and {@code compose}
+   * evaluates {@code readMatchGroupId}/{@code tagMatchGroup} — both fully exception-guarded, so they
+   * are no-ops here without a live model.
+   *
+   * @throws Exception if building the body or stubbing the seams fails
+   */
+  @Test
+  public void testReconcileGroupWithInvoicePartialCoverageReconcilesRemainderPending()
+      throws Exception {
+    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    FIN_BankStatementLine line = lineFor(ACC_ID, new BigDecimal("100.00"), BigDecimal.ZERO, null);
+    when(line.getTransactionDate()).thenReturn(null);
+    FIN_Reconciliation rec = mock(FIN_Reconciliation.class);
+    when(rec.getId()).thenReturn("rec-inv-partial");
+
+    doReturn(account).when(handler).loadAccount(ACC_ID);
+    doReturn(line).when(handler).loadLine(LINE_ID);
+
+    // The payment auto-creates a transaction (T-INV) for the settled portion (+40.00).
+    FIN_FinaccTransaction createdTxn = trxFor(ACC_ID, new BigDecimal("40.00"), BigDecimal.ZERO, null);
+    when(createdTxn.getId()).thenReturn("T-INV");
+    FIN_Payment payment = mock(FIN_Payment.class);
+    when(payment.getFINFinaccTransactionList()).thenReturn(Collections.singletonList(createdTxn));
+    doReturn(createdTxn).when(handler).loadTransaction("T-INV");
+    stubReconciliationCompose(rec, "Success");
+
+    Invoice invoice = mock(Invoice.class);
+    FIN_PaymentSchedule schedule = mock(FIN_PaymentSchedule.class);
+    // Invoice outstanding (40.00) is LESS than the line (100.00) → partial settlement, not a 400.
+    when(schedule.getOutstandingAmount()).thenReturn(new BigDecimal("40.00"));
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+        MockedStatic<ReconciliationPaymentService> rps =
+            mockStatic(ReconciliationPaymentService.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(Invoice.class, "INV-1")).thenReturn(invoice);
+      when(dal.get(FIN_PaymentSchedule.class, "PS-1")).thenReturn(schedule);
+      rps.when(() -> ReconciliationPaymentService.registerReconciliationPayment(any()))
+          .thenReturn(payment);
+
+      NeoResponse response = handler.reconcileGroup(invoiceReconcileBody(ACC_ID, LINE_ID,
+          "INV-1", "PS-1"));
+
+      assertEquals(201, response.getHttpStatus());
+      // The 40.00 auto-created transaction is reconciled against the line (remainder stays pending).
+      verify(handler).matchBankStatementLine(eq(line),
+          argThat(ops -> ops.contains("T-INV")), eq(rec));
     }
   }
 
@@ -2058,7 +2134,10 @@ public class ReconciliationHandlerTest {
     doReturn(account).when(handler).loadAccount(ACC_ID);
     doReturn(line).when(handler).loadLine(LINE_ID);
     for (FIN_FinaccTransaction t : loadable) {
-      doReturn(t).when(handler).loadTransaction(t.getId());
+      // Hoist the id out of the stubbing chain: calling t.getId() (a mock method) as the argument
+      // WHILE .when(handler)... is mid-record trips Mockito's UnfinishedStubbingException.
+      String tid = t.getId();
+      doReturn(t).when(handler).loadTransaction(tid);
     }
     return account;
   }

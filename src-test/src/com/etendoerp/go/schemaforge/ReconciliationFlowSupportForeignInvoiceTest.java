@@ -23,7 +23,6 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
@@ -442,8 +441,7 @@ class ReconciliationFlowSupportForeignInvoiceTest {
     FIN_Payment payment = mock(FIN_Payment.class);
     when(payment.getFINFinaccTransactionList()).thenReturn(List.of(txn));
     reconciliationPaymentServiceMock
-        .when(() -> ReconciliationPaymentService.registerReconciliationPayment(
-            any(), any(), any(), any(), any(), any(), any(), anyBoolean(), any()))
+        .when(() -> ReconciliationPaymentService.registerReconciliationPayment(any()))
         .thenReturn(payment);
 
     NeoResponse resp = ReconciliationFlowSupport.createInvoicePayments(
