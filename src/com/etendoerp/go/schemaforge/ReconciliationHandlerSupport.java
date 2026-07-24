@@ -315,29 +315,67 @@ final class ReconciliationHandlerSupport {
    */
   static void removeSelectedFromReconciliations(ReconciliationHandler handler,
       FIN_FinancialAccount account, Map<String, FIN_Reconciliation> recById,
-      Map<String, List<FIN_FinaccTransaction>> selectedByRec) throws Exception {
+      Map<String, List<FIN_FinaccTransaction>> selectedByRec)
+      throws ReconciliationRemovalException {
     for (Map.Entry<String, FIN_Reconciliation> entry : recById.entrySet()) {
       FIN_Reconciliation r = entry.getValue();
       List<FIN_FinaccTransaction> selForRec = selectedByRec.get(entry.getKey());
-      List<FIN_FinaccTransaction> allOfRec = new ArrayList<>(r.getFINFinaccTransactionList());
-      Set<String> selIds = new HashSet<>();
-      for (FIN_FinaccTransaction t : selForRec) {
-        selIds.add(t.getId());
-      }
-      boolean coversRec = allOfRec.stream().allMatch(t -> selIds.contains(t.getId()));
-      if (coversRec) {
-        handler.undoReconciliation(account, r, allOfRec);
+      if (coversReconciliation(r, selForRec)) {
+        undoWholeReconciliation(handler, account, r);
       } else {
-        for (FIN_FinaccTransaction trx : selForRec) {
-          boolean auto = handler.isAutoCreated(trx);
-          FIN_Payment payment = auto ? trx.getFinPayment() : null;
-          ReconciliationRemovalUtil.removeTransactionFromReconciliation(trx);
-          if (auto && payment != null) {
-            PaymentRemovalUtil.reactivateAndRemove(payment);
-          } else if (auto) {
-            TransactionRemovalUtil.reactivateAndRemove(trx.getId());
-          }
+        detachSelected(handler, selForRec);
+      }
+    }
+  }
+
+  /** True when {@code selForRec} contains every transaction currently in the reconciliation. */
+  private static boolean coversReconciliation(FIN_Reconciliation r,
+      List<FIN_FinaccTransaction> selForRec) {
+    Set<String> selIds = new HashSet<>();
+    for (FIN_FinaccTransaction t : selForRec) {
+      selIds.add(t.getId());
+    }
+    return r.getFINFinaccTransactionList().stream().allMatch(t -> selIds.contains(t.getId()));
+  }
+
+  /**
+   * Undoes the whole reconciliation (payment removal), preserving the servlet mapping: a business
+   * {@link OBException} propagates unwrapped (→ 400), any other failure is wrapped in a dedicated
+   * checked exception (→ 500), never a bare generic {@code throws} (Sonar java:S112).
+   */
+  private static void undoWholeReconciliation(ReconciliationHandler handler,
+      FIN_FinancialAccount account, FIN_Reconciliation r) throws ReconciliationRemovalException {
+    try {
+      handler.undoReconciliation(account, r, new ArrayList<>(r.getFINFinaccTransactionList()));
+    } catch (OBException e) {
+      throw e;
+    } catch (Exception e) {
+      throw new ReconciliationRemovalException(e);
+    }
+  }
+
+  /**
+   * Detaches just the selected transactions (the rest of the reconciliation stays): removes each
+   * from its reconciliation and, for an auto-created payment, reverses it. Same mapping contract as
+   * {@link #undoWholeReconciliation} — {@link OBException} unwrapped (→ 400), everything else
+   * wrapped (→ 500).
+   */
+  private static void detachSelected(ReconciliationHandler handler,
+      List<FIN_FinaccTransaction> selForRec) throws ReconciliationRemovalException {
+    for (FIN_FinaccTransaction trx : selForRec) {
+      boolean auto = handler.isAutoCreated(trx);
+      FIN_Payment payment = auto ? trx.getFinPayment() : null;
+      try {
+        ReconciliationRemovalUtil.removeTransactionFromReconciliation(trx);
+        if (auto && payment != null) {
+          PaymentRemovalUtil.reactivateAndRemove(payment);
+        } else if (auto) {
+          TransactionRemovalUtil.reactivateAndRemove(trx.getId());
         }
+      } catch (OBException e) {
+        throw e;
+      } catch (Exception e) {
+        throw new ReconciliationRemovalException(e);
       }
     }
   }
