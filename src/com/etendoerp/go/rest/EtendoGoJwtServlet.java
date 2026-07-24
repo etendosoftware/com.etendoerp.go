@@ -68,6 +68,12 @@ import com.etendoerp.go.onboarding.OnboardingPsd2SyncService;
 import com.etendoerp.go.onboarding.OnboardingSequenceGeneratorService;
 import com.etendoerp.go.schemaforge.data.Account;
 import com.etendoerp.go.schemaforge.email.EmailContractCommandSupport;
+import com.etendoerp.go.session.GoSessionAuthResult;
+import com.etendoerp.go.session.GoSessionAuthenticator;
+import com.etendoerp.go.session.GoSessionSecurity;
+import com.etendoerp.go.session.GoSessionService;
+import com.etendoerp.go.session.IssuedGoSession;
+import com.etendoerp.go.session.JdbcGoSessionStore;
 import com.smf.securewebservices.utils.SecureWebServicesUtils;
 
 /**
@@ -177,6 +183,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       new OnboardingPsd2SyncService();
   private final TransactionalAuthEmailSender authEmailSender;
   private final EtendoGoSsoProviderRegistry ssoProviderRegistry;
+  private final GoSessionService goSessionService;
 
   /**
    * Creates the default servlet wired to the runtime transactional auth email sender.
@@ -197,8 +204,14 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
 
   EtendoGoJwtServlet(TransactionalAuthEmailSender authEmailSender,
       EtendoGoSsoProviderRegistry ssoProviderRegistry) {
+    this(authEmailSender, ssoProviderRegistry, new GoSessionService(new JdbcGoSessionStore()));
+  }
+
+  EtendoGoJwtServlet(TransactionalAuthEmailSender authEmailSender,
+      EtendoGoSsoProviderRegistry ssoProviderRegistry, GoSessionService goSessionService) {
     this.authEmailSender = authEmailSender;
     this.ssoProviderRegistry = ssoProviderRegistry;
+    this.goSessionService = goSessionService;
   }
 
   // --- HTTP method dispatchers ---
@@ -234,6 +247,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       handleRegister(request, response);
     } else if (isPath(path, "/login")) {
       handleLogin(request, response);
+    } else if (isPath(path, "/session")) {
+      handleSessionCreate(request, response);
     } else if (ssoProvider != null) {
       handleSsoLogin(ssoProvider, request, response);
     } else if (isPath(path, "/password-reset/request")) {
@@ -246,6 +261,16 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       handleSaveOnboardingDraft(request, response);
     } else if (isPath(path, "/onboarding")) {
       handleOnboarding(request, response);
+    } else {
+      writeError(response, HttpServletResponse.SC_NOT_FOUND, "Unknown endpoint: " + path);
+    }
+  }
+
+  @Override
+  public void doDelete(HttpServletRequest request, HttpServletResponse response) throws IOException {
+    String path = request.getPathInfo();
+    if (isPath(path, "/session")) {
+      handleSessionDelete(request, response);
     } else {
       writeError(response, HttpServletResponse.SC_NOT_FOUND, "Unknown endpoint: " + path);
     }
@@ -1872,6 +1897,117 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       log.error("JSON error building password reset request response", e);
       writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, INTERNAL_ERROR);
     }
+  }
+
+  /**
+   * POST /sws/go/session
+   * Body: { "email": "...", "password": "..." }
+   * Creates a backend-managed session: verifies the password, issues an opaque {@code __Host-}
+   * session cookie and returns { status, account, csrfToken }. The session token is never returned
+   * in the body (SEC-10). Legacy /login stays available during the migration window.
+   */
+  private void handleSessionCreate(HttpServletRequest request, HttpServletResponse response)
+      throws IOException {
+    JSONObject body;
+    try {
+      body = readJsonBody(request);
+    } catch (JSONException e) {
+      writeError(response, HttpServletResponse.SC_BAD_REQUEST, INVALID_JSON_BODY);
+      return;
+    }
+
+    String email;
+    String password;
+    try {
+      email = body.getString(FIELD_EMAIL).trim().toLowerCase();
+      password = body.getString(FIELD_PASSWORD);
+    } catch (JSONException e) {
+      writeError(response, HttpServletResponse.SC_BAD_REQUEST,
+          "Missing required fields: email, password");
+      return;
+    }
+
+    try {
+      OBContext.setOBContext("0", "0", "0", "0");
+      OBContext.setAdminMode(true);
+
+      Account account = EtendoGoJwtDalHelper.findActiveAccountByEmail(email);
+      if (account == null || !EtendoGoJwtDalHelper.hasLocalPassword(account)
+          || !verifyPassword(password, account.getPasswordHash())) {
+        writeError(response, HttpServletResponse.SC_UNAUTHORIZED, "Invalid credentials");
+        return;
+      }
+
+      IssuedGoSession issued = goSessionService.create(account.getId(), "password",
+          request.getHeader("User-Agent"), null);
+      writeSessionResponse(response, HttpServletResponse.SC_OK, account, issued);
+    } catch (RuntimeException e) {
+      EtendoGoDalHelper.rollbackDalChanges("session create", e, log);
+      log.error("Database error during session create", e);
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
+          "Session creation failed due to a server error");
+    } catch (JSONException e) {
+      log.error("JSON error building session response", e);
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, INTERNAL_ERROR);
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  /**
+   * DELETE /sws/go/session
+   * Invalidates the current session server-side and clears the cookie. Idempotent — always clears
+   * the cookie even without a valid session. As an unsafe method it requires the CSRF proof.
+   */
+  private void handleSessionDelete(HttpServletRequest request, HttpServletResponse response)
+      throws IOException {
+    try {
+      OBContext.setOBContext("0", "0", "0", "0");
+      OBContext.setAdminMode(true);
+
+      GoSessionAuthResult auth = new GoSessionAuthenticator(goSessionService).authenticate(request);
+      if (auth.getStatus() == GoSessionAuthResult.Status.CSRF_FAILED) {
+        writeError(response, HttpServletResponse.SC_FORBIDDEN, "CSRF validation failed");
+        return;
+      }
+      if (auth.isAuthenticated()) {
+        goSessionService.revoke(auth.getRecord());
+      }
+      response.setHeader("Set-Cookie", GoSessionSecurity.buildExpiredSessionCookie());
+      response.setHeader("Cache-Control", "no-store");
+      response.setHeader("X-Content-Type-Options", "nosniff");
+      response.setStatus(HttpServletResponse.SC_NO_CONTENT);
+    } catch (RuntimeException e) {
+      EtendoGoDalHelper.rollbackDalChanges("session delete", e, log);
+      log.error("Database error during session delete", e);
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
+          "Logout failed due to a server error");
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  /**
+   * Write a session response: sets the opaque {@code __Host-} cookie plus {@code no-store} and
+   * {@code nosniff} headers, and returns { status, account, csrfToken }. The session token itself
+   * is never placed in the body.
+   */
+  private void writeSessionResponse(HttpServletResponse response, int status, Account account,
+      IssuedGoSession issued) throws IOException, JSONException {
+    response.setHeader("Set-Cookie", GoSessionSecurity.buildSessionCookie(issued.getSessionToken()));
+    response.setHeader("Cache-Control", "no-store");
+    response.setHeader("X-Content-Type-Options", "nosniff");
+
+    JSONObject accountJson = new JSONObject();
+    accountJson.put("id", account.getId());
+    accountJson.put(FIELD_EMAIL, account.getEmail());
+    accountJson.put("name", account.getName());
+
+    JSONObject result = new JSONObject();
+    result.put(FIELD_STATUS, STATUS_SUCCESS);
+    result.put(FIELD_ACCOUNT, accountJson);
+    result.put("csrfToken", issued.getCsrfToken());
+    writeResponse(response, status, result);
   }
 
   /**
