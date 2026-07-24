@@ -16,12 +16,24 @@
  */
 package com.etendoerp.go.schemaforge;
 
+import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.Test;
+import org.mockito.MockedStatic;
+import org.mockito.Mockito;
+import org.openbravo.dal.service.OBCriteria;
+import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.common.enterprise.Locator;
+import org.openbravo.model.common.enterprise.Warehouse;
+import org.openbravo.model.materialmgmt.transaction.ShipmentInOut;
 
 /**
  * Unit tests for {@link GoodsReceiptLineHandler} (ETP-4671).
@@ -126,5 +138,155 @@ public class GoodsReceiptLineHandlerTest {
         prevBody.getJSONObject("updates").has("movementQuantity"));
     assertTrue("Unrelated fields (e.g. uOM) must be preserved",
         prevBody.getJSONObject("updates").has("uOM"));
+  }
+
+  // ── handle() — storageBin default injection (Bug 1a) ──────────────────────
+
+  /**
+   * handle() POST with a blank request body must be a no-op (no DB access, no exception).
+   */
+  @Test
+  public void testHandlePostWithNullBodyIsNoOp() {
+    NeoContext ctx = NeoContext.builder().httpMethod("POST").endpointType(NeoEndpointType.CRUD).build();
+    assertNull(HANDLER.handle(ctx));
+  }
+
+  /**
+   * handle() POST must not touch storageBin when the create request already supplies one
+   * (explicit user selection, or a line imported from a Purchase Order).
+   */
+  @Test
+  public void testHandlePostDoesNotOverrideExplicitStorageBin() throws Exception {
+    JSONObject body = new JSONObject().put("parentId", "receipt-1").put("storageBin", "loc-explicit");
+    NeoContext ctx = NeoContext.builder().httpMethod("POST").endpointType(NeoEndpointType.CRUD)
+        .requestBody(body).build();
+
+    assertNull(HANDLER.handle(ctx));
+    assertEquals("loc-explicit", body.getString("storageBin"));
+  }
+
+  /**
+   * handle() POST with an empty parentId must not inject a locator (nothing to resolve the
+   * warehouse from).
+   */
+  @Test
+  public void testHandlePostWithEmptyParentIdDoesNotInjectLocator() throws Exception {
+    JSONObject body = new JSONObject().put("product", "prod-1");
+    NeoContext ctx = NeoContext.builder().httpMethod("POST").endpointType(NeoEndpointType.CRUD)
+        .requestBody(body).build();
+
+    assertNull(HANDLER.handle(ctx));
+    assertFalse(body.has("storageBin"));
+  }
+
+  /**
+   * handle() POST must not inject a locator when the parent Goods Receipt header cannot be
+   * found.
+   */
+  @Test
+  public void testHandlePostDoesNotInjectLocatorWhenHeaderNotFound() throws Exception {
+    JSONObject body = new JSONObject().put("parentId", "receipt-missing");
+    NeoContext ctx = NeoContext.builder().httpMethod("POST").endpointType(NeoEndpointType.CRUD)
+        .requestBody(body).build();
+
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(eq(ShipmentInOut.class), eq("receipt-missing"))).thenReturn(null);
+
+      assertNull(HANDLER.handle(ctx));
+      assertFalse(body.has("storageBin"));
+    }
+  }
+
+  /**
+   * handle() POST must not inject a locator when the receipt header has no warehouse set.
+   */
+  @Test
+  public void testHandlePostDoesNotInjectLocatorWhenWarehouseIsNull() throws Exception {
+    JSONObject body = new JSONObject().put("parentId", "receipt-1");
+    NeoContext ctx = NeoContext.builder().httpMethod("POST").endpointType(NeoEndpointType.CRUD)
+        .requestBody(body).build();
+
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      ShipmentInOut header = mock(ShipmentInOut.class);
+      when(dal.get(eq(ShipmentInOut.class), eq("receipt-1"))).thenReturn(header);
+      when(header.getWarehouse()).thenReturn(null);
+
+      assertNull(HANDLER.handle(ctx));
+      assertFalse(body.has("storageBin"));
+    }
+  }
+
+  /**
+   * handle() POST must not inject a locator when the warehouse has no default active locator
+   * configured (the "no locator found" fallback must leave storageBin unset rather than throw).
+   */
+  @SuppressWarnings("unchecked")
+  @Test
+  public void testHandlePostDoesNotInjectLocatorWhenNoneConfiguredForWarehouse() throws Exception {
+    JSONObject body = new JSONObject().put("parentId", "receipt-1");
+    NeoContext ctx = NeoContext.builder().httpMethod("POST").endpointType(NeoEndpointType.CRUD)
+        .requestBody(body).build();
+
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      ShipmentInOut header = mock(ShipmentInOut.class);
+      Warehouse warehouse = mock(Warehouse.class);
+      when(dal.get(eq(ShipmentInOut.class), eq("receipt-1"))).thenReturn(header);
+      when(header.getWarehouse()).thenReturn(warehouse);
+      when(warehouse.getId()).thenReturn("wh-1");
+      OBCriteria criteria = mock(OBCriteria.class);
+      when(dal.createCriteria(Locator.class)).thenReturn(criteria);
+      when(criteria.add(any())).thenReturn(criteria);
+      when(criteria.addOrder(any())).thenReturn(criteria);
+      when(criteria.setMaxResults(1)).thenReturn(criteria);
+      when(criteria.uniqueResult()).thenReturn(null);
+
+      assertNull(HANDLER.handle(ctx));
+      assertFalse(body.has("storageBin"));
+    }
+  }
+
+  /**
+   * Reproduces ETP-4671 bug 1a: a manually-added receipt line for a product with NO prior stock
+   * never gets a {@code storageBin} (the raw AD default, "the locator where this product
+   * already has stock", resolves to nothing) — so completion later fails with
+   * {@code InoutLineWithoutLocator}. handle() must default storageBin to the receiving
+   * warehouse's own default active locator, exactly like {@link InventoryLineHandler} already
+   * does for Physical Inventory lines.
+   */
+  @SuppressWarnings("unchecked")
+  @Test
+  public void testHandlePostInjectsWarehouseDefaultLocatorWhenStorageBinMissing() throws Exception {
+    JSONObject body = new JSONObject().put("parentId", "receipt-1").put("product", "prod-unstocked");
+    NeoContext ctx = NeoContext.builder().httpMethod("POST").endpointType(NeoEndpointType.CRUD)
+        .requestBody(body).build();
+
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      ShipmentInOut header = mock(ShipmentInOut.class);
+      Warehouse warehouse = mock(Warehouse.class);
+      Locator locator = mock(Locator.class);
+      when(dal.get(eq(ShipmentInOut.class), eq("receipt-1"))).thenReturn(header);
+      when(header.getWarehouse()).thenReturn(warehouse);
+      when(warehouse.getId()).thenReturn("wh-1");
+      when(locator.getId()).thenReturn("loc-default-wh1");
+      OBCriteria criteria = mock(OBCriteria.class);
+      when(dal.createCriteria(Locator.class)).thenReturn(criteria);
+      when(criteria.add(any())).thenReturn(criteria);
+      when(criteria.addOrder(any())).thenReturn(criteria);
+      when(criteria.setMaxResults(1)).thenReturn(criteria);
+      when(criteria.uniqueResult()).thenReturn(locator);
+
+      assertNull(HANDLER.handle(ctx));
+      assertEquals("Unstocked-product receipt lines must still get a valid warehouse locator, "
+          + "or completion fails with InoutLineWithoutLocator regardless of prior stock",
+          "loc-default-wh1", body.getString("storageBin"));
+    }
   }
 }
