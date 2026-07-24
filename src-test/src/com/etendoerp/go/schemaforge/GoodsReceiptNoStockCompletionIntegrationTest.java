@@ -17,6 +17,7 @@
 package com.etendoerp.go.schemaforge;
 
 import static org.hamcrest.Matchers.equalTo;
+import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertThat;
 import static org.junit.Assert.fail;
 
@@ -26,6 +27,7 @@ import java.util.Date;
 import java.util.List;
 
 import org.apache.commons.lang3.StringUtils;
+import org.codehaus.jettison.json.JSONObject;
 import org.junit.Test;
 import org.openbravo.base.weld.test.WeldBaseTest;
 import org.openbravo.dal.core.DalUtil;
@@ -44,6 +46,13 @@ import org.openbravo.service.db.CallStoredProcedure;
  * a Goods Receipt actually completes for a manually-added line whose product has zero prior
  * stock — the exact repro from the ticket ("create a product with NO stock, add it as a line,
  * try to confirm/complete the document").
+ *
+ * <p>Two scenarios: {@link #testCompletionFailsWhenUnstockedReceiptLineHasNoLocator()} builds
+ * the line the way today's (pre-fix) create path leaves it — no locator at all — and confirms
+ * completion is rejected. {@link #testCompletionSucceedsWhenHandlerInjectsDefaultLocator()}
+ * builds the exact same scenario but routes line creation through the real
+ * {@link GoodsReceiptLineHandler#handle(NeoContext)} POST pre-hook first, and confirms
+ * completion now succeeds.
  *
  * <h3>What this test is — and is NOT — proving</h3>
  * {@code M_INOUT_POST}'s own {@code InoutLineWithoutLocator} rejection (see
@@ -117,6 +126,52 @@ public class GoodsReceiptNoStockCompletionIntegrationTest extends WeldBaseTest {
         OBDal.getInstance().rollbackAndClose();
       }
     } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  /**
+   * Same repro as above, but this time the line is created the way {@code NeoCrudHandler} would
+   * really do it: {@link GoodsReceiptLineHandler#handle(NeoContext)} — the actual POST pre-hook
+   * added in a prior commit — runs on the create request body BEFORE the line is persisted.
+   * It must inject the receiving warehouse's own default active locator, and completion must
+   * then succeed.
+   */
+  @Test
+  public void testCompletionSucceedsWhenHandlerInjectsDefaultLocator() throws Exception {
+    OBContext.setOBContext(USER_ID, ROLE_ID, CLIENT_ID, ORG_ID);
+    OBContext.setAdminMode(true);
+    try {
+      Product unstockedProduct = cloneUnstockedProduct("ETP4671NoStockB");
+      ShipmentInOut receipt = cloneDraftReceiptHeader("ETP4671RcptB");
+
+      // Simulate the real NEO create-line request: parentId + product, no storageBin —
+      // exactly the payload the frontend sends for a manually-added row.
+      JSONObject createBody = new JSONObject()
+          .put("parentId", receipt.getId())
+          .put("product", unstockedProduct.getId());
+      NeoContext ctx = NeoContext.builder()
+          .httpMethod("POST")
+          .endpointType(NeoEndpointType.CRUD)
+          .requestBody(createBody)
+          .build();
+
+      new GoodsReceiptLineHandler().handle(ctx);
+
+      assertEquals("GoodsReceiptLineHandler.handle() must default storageBin to the receiving "
+          + "warehouse's own default active locator when the product has no prior stock",
+          EXPECTED_DEFAULT_LOCATOR_ID, createBody.getString("storageBin"));
+
+      addReceiptLine(receipt, unstockedProduct, new BigDecimal("5"),
+          createBody.getString("storageBin"));
+
+      completeReceipt(receipt);
+      OBDal.getInstance().refresh(receipt);
+
+      assertEquals("Completion must succeed once the fix supplies a locator, even though the "
+          + "product had zero prior stock", "CO", receipt.getDocumentStatus());
+    } finally {
+      OBDal.getInstance().rollbackAndClose();
       OBContext.restorePreviousMode();
     }
   }
