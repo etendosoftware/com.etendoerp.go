@@ -17,6 +17,8 @@
 
 package com.etendoerp.go.schemaforge;
 
+import java.util.regex.Pattern;
+
 import javax.inject.Named;
 
 import org.apache.commons.lang3.StringUtils;
@@ -67,6 +69,12 @@ public class GoodsReceiptLineHandler extends AbstractInOutLineHandler {
   private static final String FIELD_STORAGE_BIN = "storageBin";
   private static final String FIELD_MOVEMENT_QUANTITY = "movementQuantity";
   private static final String PARAM_PARENT_ID = "parentId";
+  // Matches an unresolved raw AD default literal such as "@OnHandLocatorDefault@". The
+  // generated frontend's addLineFields.hidden merge (DetailView.jsx) copies a hidden field's
+  // contract-level defaultValue verbatim into the create payload whenever the row never
+  // touched it — with no guard against tokens that were never actually resolved client-side.
+  // A value shaped like this is never a real Locator id, so it must be treated as absent.
+  private static final Pattern UNRESOLVED_TOKEN = Pattern.compile("^@[^@]+@$");
 
   @Override
   public NeoResponse handle(NeoContext context) {
@@ -87,12 +95,19 @@ public class GoodsReceiptLineHandler extends AbstractInOutLineHandler {
 
   /**
    * Sets {@code storageBin} to the receiving warehouse's default locator when the create
-   * request did not already supply one (e.g. manual line entry for a product with no prior
-   * stock). Never overrides an explicit value coming from the user or from the
-   * "Import from Purchase Order" flow.
+   * request did not already supply a REAL one. Treats both a genuinely absent/blank value and
+   * an unresolved {@code @Token@}-shaped literal (see {@link #UNRESOLVED_TOKEN}) as "missing" —
+   * confirmed live (ETP-4671): the frontend sends the literal string
+   * {@code "@OnHandLocatorDefault@"} for a manually-added line whose product has no prior
+   * stock, and that string is never a real Locator id. Never overrides a genuine explicit value
+   * coming from the user or from the "Import from Purchase Order" flow.
    */
   private void injectDefaultLocatorIfMissing(JSONObject body) throws Exception {
-    if (body == null || StringUtils.isNotBlank(body.optString(FIELD_STORAGE_BIN, null))) {
+    if (body == null) {
+      return;
+    }
+    String existing = body.optString(FIELD_STORAGE_BIN, null);
+    if (StringUtils.isNotBlank(existing) && !UNRESOLVED_TOKEN.matcher(existing).matches()) {
       return;
     }
     String parentId = body.optString(PARAM_PARENT_ID, "");
