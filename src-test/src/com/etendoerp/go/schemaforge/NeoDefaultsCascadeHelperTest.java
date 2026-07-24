@@ -359,6 +359,188 @@ public class NeoDefaultsCascadeHelperTest {
   }
 
   // ===================================================================
+  // ETP-4258 — configured defaults protected from callout overwrite
+  //
+  // These tests exercise the exact protection contract the ETP-4258 fix relies
+  // on: a field in {@code protectedFields} that already holds a non-empty value
+  // must survive a conflicting callout update, while any field NOT in
+  // {@code protectedFields} (including NOT-NULL safety placeholders that levels
+  // 4-5 leave unprotected) must remain overwritable by the callout output.
+  // ===================================================================
+
+  private static void invokeMergeWithProtected(JSONObject calloutBody, JSONObject formState,
+      JSONObject defaults, Set<String> protectedFields) throws Exception {
+    NeoDefaultsService.CalloutCascadeResult result = new NeoDefaultsService.CalloutCascadeResult();
+    mergeCalloutUpdatesMethod().invoke(null,
+        calloutBody, formState, defaults, new HashSet<>(),
+        null, result, new HashSet<>(), protectedFields);
+  }
+
+  private static JSONObject calloutBodyWithTwoFields(String f1, Object v1, String f2, Object v2)
+      throws Exception {
+    JSONObject u1 = new JSONObject();
+    u1.put("value", v1);
+    JSONObject u2 = new JSONObject();
+    u2.put("value", v2);
+    JSONObject updates = new JSONObject();
+    updates.put(f1, u1);
+    updates.put(f2, u2);
+    JSONObject body = new JSONObject();
+    body.put("updates", updates);
+    return body;
+  }
+
+  /**
+   * Case 1 — the canonical asset regression: a configured {@code calculateType="TI"} and
+   * {@code depreciate=true} must not be clobbered by the SL_Depreciate callout deriving
+   * {@code PE}/{@code false} from the auto-picked asset group when both are protected.
+   */
+  @Test
+  public void testAssetConfiguredDefaultsSurviveDepreciateCallout() throws Exception {
+    try (MockedStatic<NeoCalloutService> calloutMock = mockStatic(NeoCalloutService.class)) {
+      calloutMock.when(() -> NeoCalloutService.resolveCallout(any(), anyString()))
+          .thenReturn(null);
+
+      JSONObject defaults = new JSONObject();
+      defaults.put("calculateType", "TI");
+      defaults.put("depreciate", true);
+      JSONObject formState = new JSONObject();
+      formState.put("calculateType", "TI");
+      formState.put("depreciate", true);
+
+      JSONObject calloutBody =
+          calloutBodyWithTwoFields("calculateType", "PE", "depreciate", false);
+
+      Set<String> protectedFields = new HashSet<>();
+      protectedFields.add("calculateType");
+      protectedFields.add("depreciate");
+
+      invokeMergeWithProtected(calloutBody, formState, defaults, protectedFields);
+
+      assertEquals("Configured calculateType must survive the callout", "TI",
+          defaults.get("calculateType"));
+      assertTrue("Configured depreciate must survive the callout",
+          defaults.getBoolean("depreciate"));
+    }
+  }
+
+  /**
+   * Case 2 — multi-entity proof (GL journal): the same protection applies to an entity other
+   * than assets. A configured {@code dateAcct} must not be overwritten by a callout update.
+   */
+  @Test
+  public void testGlJournalConfiguredDateAcctSurvivesCallout() throws Exception {
+    try (MockedStatic<NeoCalloutService> calloutMock = mockStatic(NeoCalloutService.class)) {
+      calloutMock.when(() -> NeoCalloutService.resolveCallout(any(), anyString()))
+          .thenReturn(null);
+
+      JSONObject defaults = new JSONObject();
+      defaults.put("dateAcct", "2026-01-15");
+      defaults.put("dateDoc", "2026-01-15");
+      JSONObject formState = new JSONObject();
+      formState.put("dateAcct", "2026-01-15");
+      formState.put("dateDoc", "2026-01-15");
+
+      JSONObject calloutBody = calloutBodyWith("dateAcct", "2026-02-28", null);
+
+      Set<String> protectedFields = new HashSet<>();
+      protectedFields.add("dateAcct");
+      protectedFields.add("dateDoc");
+
+      invokeMergeWithProtected(calloutBody, formState, defaults, protectedFields);
+
+      assertEquals("Configured dateAcct must survive the callout on a non-asset entity",
+          "2026-01-15", defaults.get("dateAcct"));
+    }
+  }
+
+  /**
+   * Case 3 — negative guard: a NOT-NULL safety placeholder (levels 4-5) is NOT in
+   * {@code protectedFields}, so a real callout-derived value MUST overwrite it. This is the
+   * explicitly-forbidden regression — placeholders must remain overwritable.
+   */
+  @Test
+  public void testUnprotectedPlaceholderIsOverwrittenByCallout() throws Exception {
+    try (MockedStatic<NeoCalloutService> calloutMock = mockStatic(NeoCalloutService.class)) {
+      calloutMock.when(() -> NeoCalloutService.resolveCallout(any(), anyString()))
+          .thenReturn(null);
+
+      JSONObject defaults = new JSONObject();
+      defaults.put("someAmount", 0); // level-5 NOT-NULL placeholder, unprotected
+      JSONObject formState = new JSONObject();
+      formState.put("someAmount", 0);
+
+      JSONObject calloutBody = calloutBodyWith("someAmount", "150.00", null);
+
+      // Empty protected set — placeholder must remain overwritable.
+      invokeMergeWithProtected(calloutBody, formState, defaults, new HashSet<>());
+
+      assertEquals("Unprotected placeholder must be overwritten by the callout output",
+          "150.00", defaults.get("someAmount"));
+    }
+  }
+
+  /**
+   * Case 4 — a field protected because the user explicitly submitted it must not be
+   * overwritten by a callout-derived value.
+   */
+  @Test
+  public void testUserSubmittedValueSurvivesCallout() throws Exception {
+    try (MockedStatic<NeoCalloutService> calloutMock = mockStatic(NeoCalloutService.class)) {
+      calloutMock.when(() -> NeoCalloutService.resolveCallout(any(), anyString()))
+          .thenReturn(null);
+
+      JSONObject defaults = new JSONObject();
+      defaults.put("description", "User typed note");
+      JSONObject formState = new JSONObject();
+      formState.put("description", "User typed note");
+
+      JSONObject calloutBody = calloutBodyWith("description", "Auto-generated", null);
+
+      Set<String> protectedFields = new HashSet<>();
+      protectedFields.add("description");
+
+      invokeMergeWithProtected(calloutBody, formState, defaults, protectedFields);
+
+      assertEquals("Explicit user value must not be overwritten by the callout",
+          "User typed note", defaults.get("description"));
+    }
+  }
+
+  /**
+   * Case 5 — selectivity: protection only shields the protected field. A non-conflicting
+   * callout output (a field absent from {@code protectedFields}) is still applied, so the
+   * callout keeps working for every other field it derives.
+   */
+  @Test
+  public void testNonProtectedCalloutOutputStillApplied() throws Exception {
+    try (MockedStatic<NeoCalloutService> calloutMock = mockStatic(NeoCalloutService.class)) {
+      calloutMock.when(() -> NeoCalloutService.resolveCallout(any(), anyString()))
+          .thenReturn(null);
+
+      JSONObject defaults = new JSONObject();
+      defaults.put("calculateType", "TI");
+      defaults.put("accountingSchema", "SCH1");
+      JSONObject formState = new JSONObject();
+      formState.put("calculateType", "TI");
+      formState.put("accountingSchema", "SCH1");
+
+      JSONObject calloutBody =
+          calloutBodyWithTwoFields("calculateType", "PE", "accountingSchema", "SCH2");
+
+      // Only calculateType is protected — the callout must still update accountingSchema.
+      Set<String> protectedFields = new HashSet<>();
+      protectedFields.add("calculateType");
+
+      invokeMergeWithProtected(calloutBody, formState, defaults, protectedFields);
+
+      assertEquals("Protected field must be kept", "TI", defaults.get("calculateType"));
+      assertEquals("Non-protected callout output must still be applied", "SCH2",
+          defaults.get("accountingSchema"));
+    }
+  }
+
+  // ===================================================================
   // mergeCalloutCombos
   // ===================================================================
 

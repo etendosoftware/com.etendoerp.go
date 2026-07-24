@@ -1004,7 +1004,7 @@ public class NeoDefaultsServiceTest {
       assertEquals(200, response.getHttpStatus());
       // Verify cascade was called
       cascadeMock.verify(() -> NeoDefaultsCascadeHelper.executeCalloutCascade(
-          eq(ctx), eq(adTab), any(JSONObject.class), any(Set.class)));
+          eq(ctx), eq(adTab), any(JSONObject.class), any(Set.class), any(Set.class)));
       // Verify DocTypeResolver reapply was called
       docTypeMock.verify(() -> DocTypeResolver.reapplyDocTypeFromTabFilter(
           any(JSONObject.class), eq(adTab), eq(ctx)));
@@ -1358,6 +1358,235 @@ public class NeoDefaultsServiceTest {
       NeoDefaultsService.injectMandatoryDefaults(body, adTab, ctx);
 
       assertEquals("Body should remain empty when dalEntity is null", 0, body.length());
+    }
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // injectMandatoryDefaults — ETP-4258 collector semantics: the returned Set contains
+  // only props injected from an INTENTIONAL source (levels 1-3). The level-4 auto-picked
+  // combo FK is deliberately EXCLUDED so callouts remain free to refine it.
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  @Test
+  @SuppressWarnings("unchecked")
+  public void testInjectMandatoryDefaultsCollectsIntentionalExcludesAutoPickedFk()
+      throws Exception {
+    JSONObject body = new JSONObject();
+    Tab adTab = mock(Tab.class);
+    Table table = mock(Table.class);
+    OBContext obContext = mock(OBContext.class);
+    SFEntity sfEntity = mock(SFEntity.class);
+    Entity dalEntity = mock(Entity.class);
+    VariablesSecureApp vars = mock(VariablesSecureApp.class);
+
+    // Level-2 (session) column — must be RECORDED in the returned set.
+    Column sessionCol = mockColumn("SessionField", true, false, true);
+    when(sessionCol.getDefaultValue()).thenReturn(null);
+    when(sessionCol.isLinkToParentColumn()).thenReturn(false);
+    when(sessionCol.isUseAutomaticSequence()).thenReturn(false);
+    Property sessionProp = mock(Property.class);
+    when(sessionProp.isAuditInfo()).thenReturn(false);
+    when(sessionProp.getName()).thenReturn("sessionField");
+    when(dalEntity.getPropertyByColumnName("SessionField")).thenReturn(sessionProp);
+
+    // Level-4 (combo first-option auto-pick) column — must be EXCLUDED from the returned set.
+    Column comboCol = mockColumn("ComboField", true, false, true);
+    when(comboCol.getDefaultValue()).thenReturn(null);
+    when(comboCol.isLinkToParentColumn()).thenReturn(false);
+    when(comboCol.isUseAutomaticSequence()).thenReturn(false);
+    Property comboProp = mock(Property.class);
+    when(comboProp.isAuditInfo()).thenReturn(false);
+    when(comboProp.getName()).thenReturn("comboField");
+    when(dalEntity.getPropertyByColumnName("ComboField")).thenReturn(comboProp);
+
+    when(adTab.getTable()).thenReturn(table);
+    when(table.getId()).thenReturn("TABLE-1");
+    when(table.getADColumnList()).thenReturn(Arrays.asList(sessionCol, comboCol));
+
+    OBDal obDal = mock(OBDal.class);
+    @SuppressWarnings("unchecked")
+    OBCriteria<SFField> sfFieldCriteria = mock(OBCriteria.class);
+    when(sfFieldCriteria.add(any())).thenReturn(sfFieldCriteria);
+    when(sfFieldCriteria.list()).thenReturn(Collections.emptyList());
+    when(obDal.createCriteria(SFField.class)).thenReturn(sfFieldCriteria);
+    when(sfEntity.getId()).thenReturn("entity-1");
+
+    // Session lookups: only SessionField resolves; ComboField stays unresolved.
+    when(vars.getSessionValue("#SessionField")).thenReturn("SESS-VALUE");
+    when(vars.getSessionValue("#ComboField")).thenReturn(null);
+    when(vars.getSessionValue("ComboField")).thenReturn(null);
+
+    NeoContext ctx = NeoContext.builder()
+        .sfEntity(sfEntity)
+        .obContext(obContext)
+        .build();
+
+    try (MockedStatic<ModelProvider> modelMock = mockStatic(ModelProvider.class);
+         MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+         MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
+         MockedStatic<NeoCalloutService> calloutMock = mockStatic(NeoCalloutService.class);
+         MockedStatic<NeoDefaultsCascadeHelper> cascadeMock =
+             mockStatic(NeoDefaultsCascadeHelper.class);
+         MockedStatic<SequenceUtils> sequenceMock = mockStatic(SequenceUtils.class);
+         MockedStatic<Utility> utilityMock = mockStatic(Utility.class);
+         MockedStatic<DocTypeResolver> docTypeMock = mockStatic(DocTypeResolver.class);
+         MockedStatic<NeoSelectorService> selectorMock = mockStatic(NeoSelectorService.class);
+         MockedStatic<NeoParentValuesLoader> parentMock =
+             mockStatic(NeoParentValuesLoader.class)) {
+      ModelProvider mp = mock(ModelProvider.class);
+      modelMock.when(ModelProvider::getInstance).thenReturn(mp);
+      when(mp.getEntityByTableId("TABLE-1")).thenReturn(dalEntity);
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      obContextMock.when(() -> OBContext.setAdminMode(true)).thenAnswer(inv -> null);
+      obContextMock.when(OBContext::restorePreviousMode).thenAnswer(inv -> null);
+      calloutMock.when(() -> NeoCalloutService.buildVars(obContext, adTab)).thenReturn(vars);
+      sequenceMock.when(() -> SequenceUtils.isSequence(any())).thenReturn(false);
+      utilityMock.when(() -> Utility.getPreference(eq(vars), anyString(), anyString()))
+          .thenReturn(null);
+      docTypeMock.when(() -> DocTypeResolver.resolveDefaultDocTypeId(any(), any()))
+          .thenReturn(null);
+      parentMock.when(() -> NeoParentValuesLoader.load(adTab, null))
+          .thenReturn(Collections.emptyMap());
+
+      // ComboField resolves as a combo (List) first-option auto-pick (level 4).
+      selectorMock.when(() -> NeoSelectorService.getBaseReferenceId(comboCol))
+          .thenReturn(NeoSelectorService.REF_LIST);
+      selectorMock.when(() -> NeoSelectorService.hasObuiselSelector(comboCol))
+          .thenReturn(false);
+      JSONObject selBody = new JSONObject();
+      JSONArray items = new JSONArray();
+      JSONObject item = new JSONObject();
+      item.put("id", "OPT1");
+      items.put(item);
+      selBody.put("items", items);
+      selectorMock.when(() -> NeoSelectorService.querySelectorByColumn(
+              eq(comboCol), eq("ComboField"), any(), eq(1), eq(0), any()))
+          .thenReturn(NeoResponse.ok(selBody));
+
+      // runCascade=false: focus on the collector, skip the post-inject cascade.
+      Set<String> intentional =
+          NeoDefaultsService.injectMandatoryDefaults(body, adTab, ctx, null, false);
+
+      assertTrue("Level-2 session default must be recorded as intentional",
+          intentional.contains("sessionField"));
+      assertFalse("Level-4 auto-picked combo FK must be EXCLUDED from the intentional set",
+          intentional.contains("comboField"));
+      // Sanity: the combo value was in fact injected (proving level 4 fired), just not recorded.
+      assertEquals("Session default value injected", "SESS-VALUE", body.getString("sessionField"));
+      assertEquals("Combo first-option auto-picked into body", "OPT1",
+          body.getString("comboField"));
+    }
+  }
+
+  /**
+   * ETP-4258 canonical regression path: a LEVEL-1 configured default (resolved via
+   * {@code tryResolveFieldDefault} — the {@code ETGO_SF_FIELD}/AD_Column default, e.g.
+   * {@code calculateType="TI"}) MUST be recorded in the returned intentional set, while a
+   * LEVEL-5 safe-type NOT-NULL placeholder ({@code injectSafeTypeDefault}) MUST be EXCLUDED.
+   *
+   * <p>Note: {@code NeoDefaultsCascadeHelper} is mocked, so {@code injectSafeTypeDefault} is a
+   * no-op and does not populate the body. Instead of asserting the placeholder's value in the
+   * body, this verifies the level-5 path was actually invoked for the column AND that the
+   * column is absent from the returned set — which is the regression guard that matters.</p>
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  public void testInjectMandatoryDefaultsRecordsConfiguredDefaultExcludesSafeTypePlaceholder()
+      throws Exception {
+    JSONObject body = new JSONObject();
+    Tab adTab = mock(Tab.class);
+    Table table = mock(Table.class);
+    OBContext obContext = mock(OBContext.class);
+    SFEntity sfEntity = mock(SFEntity.class);
+    Entity dalEntity = mock(Entity.class);
+    VariablesSecureApp vars = mock(VariablesSecureApp.class);
+
+    // Level-1 (configured AD_Column default "TI") column — must be RECORDED.
+    Column configuredCol = mockColumn("CalculateType", true, false, true);
+    when(configuredCol.getDefaultValue()).thenReturn("TI");
+    when(configuredCol.isLinkToParentColumn()).thenReturn(false);
+    when(configuredCol.isUseAutomaticSequence()).thenReturn(false);
+    Property configuredProp = mock(Property.class);
+    when(configuredProp.isAuditInfo()).thenReturn(false);
+    when(configuredProp.getName()).thenReturn("calculateType");
+    when(dalEntity.getPropertyByColumnName("CalculateType")).thenReturn(configuredProp);
+
+    // Level-5 (safe-type NOT-NULL placeholder) column — must be EXCLUDED. No default, no
+    // session, no parent, and not a combo reference → falls through to injectSafeTypeDefault.
+    Column safeCol = mockColumn("SafeTypeField", true, false, true);
+    when(safeCol.getDefaultValue()).thenReturn(null);
+    when(safeCol.isLinkToParentColumn()).thenReturn(false);
+    when(safeCol.isUseAutomaticSequence()).thenReturn(false);
+    Property safeProp = mock(Property.class);
+    when(safeProp.isAuditInfo()).thenReturn(false);
+    when(safeProp.getName()).thenReturn("safeTypeField");
+    when(dalEntity.getPropertyByColumnName("SafeTypeField")).thenReturn(safeProp);
+
+    when(adTab.getTable()).thenReturn(table);
+    when(table.getId()).thenReturn("TABLE-1");
+    when(table.getADColumnList()).thenReturn(Arrays.asList(configuredCol, safeCol));
+
+    OBDal obDal = mock(OBDal.class);
+    @SuppressWarnings("unchecked")
+    OBCriteria<SFField> sfFieldCriteria = mock(OBCriteria.class);
+    when(sfFieldCriteria.add(any())).thenReturn(sfFieldCriteria);
+    when(sfFieldCriteria.list()).thenReturn(Collections.emptyList());
+    when(obDal.createCriteria(SFField.class)).thenReturn(sfFieldCriteria);
+    when(sfEntity.getId()).thenReturn("entity-1");
+
+    // No session values for either column — level 1 wins for the configured one; the safe-type
+    // one exhausts levels 1-4 and lands on injectSafeTypeDefault.
+    when(vars.getSessionValue(anyString())).thenReturn(null);
+
+    NeoContext ctx = NeoContext.builder()
+        .sfEntity(sfEntity)
+        .obContext(obContext)
+        .build();
+
+    try (MockedStatic<ModelProvider> modelMock = mockStatic(ModelProvider.class);
+         MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+         MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
+         MockedStatic<NeoCalloutService> calloutMock = mockStatic(NeoCalloutService.class);
+         MockedStatic<NeoDefaultsCascadeHelper> cascadeMock =
+             mockStatic(NeoDefaultsCascadeHelper.class);
+         MockedStatic<SequenceUtils> sequenceMock = mockStatic(SequenceUtils.class);
+         MockedStatic<Utility> utilityMock = mockStatic(Utility.class);
+         MockedStatic<DocTypeResolver> docTypeMock = mockStatic(DocTypeResolver.class);
+         MockedStatic<NeoSelectorService> selectorMock = mockStatic(NeoSelectorService.class);
+         MockedStatic<NeoParentValuesLoader> parentMock =
+             mockStatic(NeoParentValuesLoader.class)) {
+      ModelProvider mp = mock(ModelProvider.class);
+      modelMock.when(ModelProvider::getInstance).thenReturn(mp);
+      when(mp.getEntityByTableId("TABLE-1")).thenReturn(dalEntity);
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      obContextMock.when(() -> OBContext.setAdminMode(true)).thenAnswer(inv -> null);
+      obContextMock.when(OBContext::restorePreviousMode).thenAnswer(inv -> null);
+      calloutMock.when(() -> NeoCalloutService.buildVars(obContext, adTab)).thenReturn(vars);
+      sequenceMock.when(() -> SequenceUtils.isSequence(any())).thenReturn(false);
+      utilityMock.when(() -> Utility.getPreference(eq(vars), anyString(), anyString()))
+          .thenReturn(null);
+      docTypeMock.when(() -> DocTypeResolver.resolveDefaultDocTypeId(any(), any()))
+          .thenReturn(null);
+      parentMock.when(() -> NeoParentValuesLoader.load(adTab, null))
+          .thenReturn(Collections.emptyMap());
+      // Level-1 resolution: AD_Column default "TI" resolves through Utility.getDefault.
+      utilityMock.when(() -> Utility.getDefault(any(), eq(vars), eq("CalculateType"), eq("TI"),
+              anyString(), eq("")))
+          .thenReturn("TI");
+
+      // runCascade=false: focus on the collector, skip the post-inject cascade.
+      Set<String> intentional =
+          NeoDefaultsService.injectMandatoryDefaults(body, adTab, ctx, null, false);
+
+      assertTrue("Level-1 configured default must be recorded as intentional",
+          intentional.contains("calculateType"));
+      assertEquals("Configured default value injected into body", "TI",
+          body.getString("calculateType"));
+      assertFalse("Level-5 safe-type placeholder must be EXCLUDED from the intentional set",
+          intentional.contains("safeTypeField"));
+      // Prove the level-5 path was actually taken for the safe-type column.
+      cascadeMock.verify(() -> NeoDefaultsCascadeHelper.injectSafeTypeDefault(
+          eq(body), eq("safeTypeField"), eq(safeCol)));
     }
   }
 

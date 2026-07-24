@@ -725,6 +725,22 @@ POST /sws/neo/{specName}/{entityName}/callout
 - `JSEXECUTE` se ignora (no aplica en contexto REST)
 - El `formState` puede enviar nombres OBDal property (ej: `orderDate`) - se mapean automaticamente a formato inp (ej: `inpdateordered`)
 
+### Precedencia sobre defaults configurados (ETP-4258)
+
+Durante la creacion de un registro (POST) y en el bootstrap de `/defaults`, un campo inyectado desde una fuente de default **intencional** queda protegido y **no puede ser sobrescrito** por la salida de un callout. Esto corrige un bug previo en el que los defaults configurados eran pisados por el callout al crear.
+
+Niveles de origen del valor:
+
+- **Protegidos (niveles 1-3)** — el callout NO los pisa:
+  1. Default configurado (`ETGO_SF_FIELD` default / expression de default de `AD_Column`)
+  2. Valor de contexto de sesion (`#Column`)
+  3. Valor heredado del padre
+- **No protegidos (niveles 4-5)** — el callout SI puede rellenarlos/refinarlos:
+  4. FK auto-elegida como primer valor del combo (el ancla del callout)
+  5. Placeholders de seguridad NOT NULL (`0`/`false` via default por tipo)
+
+Ejemplo: al crear un activo sin `calculateType`/`depreciate`, ahora persiste el `TI/true` configurado (ETP-4229) en lugar del `PE/false` que el callout `SL_Depreciate` derivaria del grupo de activo auto-elegido.
+
 ---
 
 ## 11. Pipeline de Defaults
