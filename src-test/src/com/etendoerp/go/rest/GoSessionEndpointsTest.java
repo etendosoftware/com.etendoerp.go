@@ -164,6 +164,85 @@ public class GoSessionEndpointsTest {
     verify(goSessionService, never()).revoke(any());
   }
 
+  @Test
+  public void restoreReturnsAccountAndCsrf() throws Exception {
+    GoSessionRecord record = new GoSessionRecord();
+    record.setAccountId("ACC1");
+    record.setCsrfToken(CSRF);
+    when(goSessionService.resolve("tok")).thenReturn(record);
+
+    Account account = mock(Account.class);
+    when(account.getId()).thenReturn("ACC1");
+    when(account.getEmail()).thenReturn(EMAIL);
+    when(account.getName()).thenReturn("User");
+
+    CapturedResponse resp = new CapturedResponse();
+    try (MockedStatic<OBContext> ctx = mockStatic(OBContext.class);
+        MockedStatic<EtendoGoJwtDalHelper> dal = mockStatic(EtendoGoJwtDalHelper.class)) {
+      dal.when(() -> EtendoGoJwtDalHelper.findActiveAccountById("ACC1")).thenReturn(account);
+      servlet.doGet(getRequest("/session", "tok"), resp.response);
+    }
+
+    assertEquals(200, resp.status);
+    JSONObject body = new JSONObject(resp.body.toString());
+    assertEquals(CSRF, body.getString("csrfToken"));
+    assertTrue(body.has("account"));
+    assertTrue("no environment selected yet", body.isNull("environment"));
+  }
+
+  @Test
+  public void restoreWithoutCookieReturns401() throws Exception {
+    CapturedResponse resp = new CapturedResponse();
+    try (MockedStatic<OBContext> ctx = mockStatic(OBContext.class)) {
+      servlet.doGet(getRequest("/session", null), resp.response);
+    }
+    assertEquals(401, resp.status);
+  }
+
+  @Test
+  public void restoreIncludesSelectedEnvironment() throws Exception {
+    GoSessionRecord record = new GoSessionRecord();
+    record.setAccountId("ACC1");
+    record.setCsrfToken(CSRF);
+    record.setUserId("U1");
+    record.setRoleId("R1");
+    record.setCtxClientId("C1");
+    record.setCtxOrgId("O1");
+    record.setWarehouseId("W1");
+    when(goSessionService.resolve("tok")).thenReturn(record);
+
+    Account account = mock(Account.class);
+    when(account.getId()).thenReturn("ACC1");
+    when(account.getEmail()).thenReturn(EMAIL);
+    when(account.getName()).thenReturn("User");
+
+    CapturedResponse resp = new CapturedResponse();
+    try (MockedStatic<OBContext> ctx = mockStatic(OBContext.class);
+        MockedStatic<EtendoGoJwtDalHelper> dal = mockStatic(EtendoGoJwtDalHelper.class)) {
+      dal.when(() -> EtendoGoJwtDalHelper.findActiveAccountById("ACC1")).thenReturn(account);
+      servlet.doGet(getRequest("/session", "tok"), resp.response);
+    }
+
+    assertEquals(200, resp.status);
+    JSONObject env = new JSONObject(resp.body.toString()).getJSONObject("environment");
+    assertEquals("U1", env.getString("userId"));
+    assertEquals("R1", env.getString("roleId"));
+    assertEquals("O1", env.getString("orgId"));
+  }
+
+  private static HttpServletRequest getRequest(String path, String cookieValue) {
+    HttpServletRequest req = mock(HttpServletRequest.class);
+    when(req.getMethod()).thenReturn("GET");
+    when(req.getPathInfo()).thenReturn(path);
+    if (cookieValue != null) {
+      when(req.getCookies()).thenReturn(
+          new Cookie[] { new Cookie(GoSessionSecurity.COOKIE_NAME, cookieValue) });
+    } else {
+      when(req.getCookies()).thenReturn(null);
+    }
+    return req;
+  }
+
   private static String storedHash(String password) throws Exception {
     byte[] salt = new byte[16];
     MessageDigest md = MessageDigest.getInstance("SHA-256");

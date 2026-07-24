@@ -78,6 +78,14 @@ final class EtendoGoJwtDalHelper {
     return query.uniqueResult();
   }
 
+  static Account findActiveAccountById(String accountId) {
+    if (accountId == null) {
+      return null;
+    }
+    Account account = OBDal.getInstance().get(Account.class, accountId);
+    return account != null && account.isActive() ? account : null;
+  }
+
   static Account findActiveAccountByToken(String token) {
     OBQuery<Account> query = OBDal.getInstance().createQuery(Account.class,
         "as account where account.sessionToken = :" + PARAM_TOKEN + ACTIVE_ACCOUNT_FILTER);

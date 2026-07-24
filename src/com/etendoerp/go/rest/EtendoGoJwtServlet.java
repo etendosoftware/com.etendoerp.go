@@ -70,6 +70,7 @@ import com.etendoerp.go.schemaforge.data.Account;
 import com.etendoerp.go.schemaforge.email.EmailContractCommandSupport;
 import com.etendoerp.go.session.GoSessionAuthResult;
 import com.etendoerp.go.session.GoSessionAuthenticator;
+import com.etendoerp.go.session.GoSessionRecord;
 import com.etendoerp.go.session.GoSessionSecurity;
 import com.etendoerp.go.session.GoSessionService;
 import com.etendoerp.go.session.IssuedGoSession;
@@ -234,6 +235,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       handleEnvironments(request, response);
     } else if (isPath(path, "/login")) {
       handleEnvironmentLogin(request, response);
+    } else if (isPath(path, "/session")) {
+      handleSessionRestore(request, response);
     } else {
       writeError(response, HttpServletResponse.SC_NOT_FOUND, "Unknown endpoint: " + path);
     }
@@ -1985,6 +1988,72 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     } finally {
       OBContext.restorePreviousMode();
     }
+  }
+
+  /**
+   * GET /sws/go/session
+   * Restores the account and current environment context from the session cookie. Safe method — no
+   * CSRF required. Returns { status, account, environment|null, csrfToken }; 401 when there is no
+   * live session.
+   */
+  private void handleSessionRestore(HttpServletRequest request, HttpServletResponse response)
+      throws IOException {
+    try {
+      OBContext.setOBContext("0", "0", "0", "0");
+      OBContext.setAdminMode(true);
+
+      GoSessionAuthResult auth = new GoSessionAuthenticator(goSessionService).authenticate(request);
+      if (!auth.isAuthenticated()) {
+        writeError(response, HttpServletResponse.SC_UNAUTHORIZED, INVALID_OR_EXPIRED_TOKEN);
+        return;
+      }
+      GoSessionRecord record = auth.getRecord();
+      Account account = EtendoGoJwtDalHelper.findActiveAccountById(record.getAccountId());
+      if (account == null) {
+        writeError(response, HttpServletResponse.SC_UNAUTHORIZED, INVALID_OR_EXPIRED_TOKEN);
+        return;
+      }
+
+      JSONObject accountJson = new JSONObject();
+      accountJson.put("id", account.getId());
+      accountJson.put(FIELD_EMAIL, account.getEmail());
+      accountJson.put("name", account.getName());
+
+      JSONObject result = new JSONObject();
+      result.put(FIELD_STATUS, STATUS_SUCCESS);
+      result.put(FIELD_ACCOUNT, accountJson);
+      result.put("environment", buildSessionEnvironment(record));
+      result.put("csrfToken", record.getCsrfToken());
+
+      response.setHeader("Cache-Control", "no-store");
+      response.setHeader("X-Content-Type-Options", "nosniff");
+      writeResponse(response, HttpServletResponse.SC_OK, result);
+    } catch (RuntimeException e) {
+      log.error("Database error during session restore", e);
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, SERVER_ERROR);
+    } catch (JSONException e) {
+      log.error("JSON error during session restore", e);
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, INTERNAL_ERROR);
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  /**
+   * Build the environment block of a restore response: the selected {@code user/role/client/org/
+   * warehouse}, or {@code null} when no environment has been entered yet on this session.
+   */
+  private static Object buildSessionEnvironment(GoSessionRecord record) throws JSONException {
+    if (record.getUserId() == null) {
+      return JSONObject.NULL;
+    }
+    JSONObject env = new JSONObject();
+    env.put("userId", record.getUserId());
+    env.put("roleId", record.getRoleId());
+    env.put("clientId", record.getCtxClientId());
+    env.put("orgId", record.getCtxOrgId());
+    env.put("warehouseId", record.getWarehouseId());
+    return env;
   }
 
   /**
