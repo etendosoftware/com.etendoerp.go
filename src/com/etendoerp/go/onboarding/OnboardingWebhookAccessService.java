@@ -39,7 +39,7 @@ import com.etendoerp.webhookevents.data.DefinedwebhookRole;
  * com.etendoerp.webhookevents} itself: a role with no active grant row for a given webhook gets a
  * hard 401 calling it, regardless of what that webhook's own internal logic would have returned.
  * GOClient's reference roles are granted via {@code
- * referencedata/sampledata/GOClient/SMFWHE_DEFINEDWEBHOOK_ROLE.xml}, but nothing provisions an
+ * referencedata/sampledata/GOClient/SMFWHE_DEFINEDWEBHOOK_ROLE.xml}. Nothing provisions an
  * equivalent grant for a freshly onboarded tenant's own auto-created admin role — so every real
  * onboarded tenant's frontend gets a 401 calling {@code GET /webhooks/SFWindowAccessMap}, which
  * {@code AuthContext} (ETP-4520, {@code app-shell-core}) correctly treats as fail-closed (empty
