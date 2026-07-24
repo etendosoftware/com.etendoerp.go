@@ -1,0 +1,18 @@
+<?xml version="1.0"?>
+  <database name="FUNCTION ETGO_SCD_PRODUCTS_BY_PLVERSION">
+    <function name="ETGO_SCD_PRODUCTS_BY_PLVERSION" type="NULL" volatility="STABLE">
+      <parameter name="p_new" type="VARCHAR" mode="in">
+        <default/>
+      </parameter>
+      <parameter name="p_old" type="VARCHAR" mode="in">
+        <default/>
+      </parameter>
+      <parameter name="product_id" type="VARCHAR" mode="out">
+        <default/>
+      </parameter>
+      <body><![CDATA[SELECT DISTINCT pp.m_product_id
+  FROM m_productprice pp
+  WHERE pp.m_pricelist_version_id = p_new OR pp.m_pricelist_version_id = p_old
+]]></body>
+    </function>
+  </database>
