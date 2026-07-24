@@ -93,7 +93,9 @@ final class NeoCommercialLinePolicy {
     double unitPrice = body.optDouble("unitPrice", 0);
     // unitPrice (PriceActual) = PriceList × (1 − discount/100): already post-discount.
     // Do NOT apply discountFactor again — that would double the discount.
-    double baseNetAmt = unitPrice > 0 ? unitPrice * qty : 0;
+    // ETP-4567: a negative unitPrice is a legitimate line (frontend now allows negative
+    // qty/price) — only skip when unitPrice is genuinely absent (zero).
+    double baseNetAmt = unitPrice != 0 ? unitPrice * qty : 0;
     String taxId = body.optString("tax", "");
     double computed = resolveGrossAmount(body.optDouble(FIELD_GROSS_UNIT_PRICE, 0), qty, baseNetAmt, taxId);
     if (Double.isNaN(computed)) {
@@ -211,7 +213,9 @@ final class NeoCommercialLinePolicy {
     if (grossUnitPrice > 0) {
       return grossUnitPrice * qty;
     }
-    if (baseNetAmt <= 0) {
+    // ETP-4567: baseNetAmt is legitimately negative for a negative-qty/price line
+    // (the frontend now allows both). Only exact zero is indeterminate.
+    if (baseNetAmt == 0) {
       return Double.NaN;
     }
     double rate = (taxId == null || taxId.isEmpty()) ? 0 : fetchTaxRate(taxId);
