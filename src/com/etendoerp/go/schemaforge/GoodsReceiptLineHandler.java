@@ -19,16 +19,36 @@ package com.etendoerp.go.schemaforge;
 
 import javax.inject.Named;
 
+import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONObject;
+import org.hibernate.criterion.Order;
+import org.hibernate.criterion.Restrictions;
+import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.common.enterprise.Locator;
+import org.openbravo.model.materialmgmt.transaction.ShipmentInOut;
 
 /**
  * NeoHandler for the Goods Receipt line entity ({@code goodsReceiptLine}).
  *
  * <p>Extends {@link AbstractInOutLineHandler} for the behavior shared with Goods Shipment
- * (invoice-line linking, order/invoice qty and product-code enrichment on GET), and adds one
- * receipt-only fix (ETP-4671):
+ * (invoice-line linking, order/invoice qty and product-code enrichment on GET), and adds two
+ * receipt-only fixes (ETP-4671):
+ *
+ * <h3>POST (create) — pre-hook: default {@code storageBin} to the warehouse's default locator</h3>
+ * {@code M_InOutLine.M_Locator_ID} (the {@code storageBin} field) is declared in
+ * {@code decisions.json} with {@code form: false} — it is never shown to the user in this
+ * window. Its raw AD default ({@code @OnHandLocatorDefault@}) resolves to the locator where the
+ * product <em>already</em> has stock, which is the right idea for Goods Shipment (you can only
+ * ship from where stock exists) but wrong for a purchase receipt: a brand-new product with zero
+ * on-hand stock resolves to nothing, {@code M_Locator_ID} stays {@code NULL}, and the classic
+ * {@code M_INOUT_POST} completion procedure then rejects the document with
+ * {@code InoutLineWithoutLocator} — regardless of {@code IsSOTrx}. This hook defaults the
+ * locator to the receiving warehouse's own default active {@code M_Locator} (the same "default
+ * locator for a warehouse" concept {@link InventoryLineHandler} already uses for Physical
+ * Inventory), so confirmation succeeds for unstocked products too. An explicit
+ * user/import-supplied {@code storageBin} is never overridden.
  *
  * <h3>Callout post-hook: strip stock-derived {@code movementQuantity}</h3>
  * The classic {@code SL_InOutLine_Product} callout (shared by every {@code M_InOutLine}-based
@@ -44,7 +64,75 @@ import org.codehaus.jettison.json.JSONObject;
 public class GoodsReceiptLineHandler extends AbstractInOutLineHandler {
 
   private static final Logger log = LogManager.getLogger(GoodsReceiptLineHandler.class);
+  private static final String FIELD_STORAGE_BIN = "storageBin";
   private static final String FIELD_MOVEMENT_QUANTITY = "movementQuantity";
+  private static final String PARAM_PARENT_ID = "parentId";
+
+  @Override
+  public NeoResponse handle(NeoContext context) {
+    NeoResponse parentResult = super.handle(context);
+    if (parentResult != null) {
+      return parentResult;
+    }
+    if (context != null && NeoEndpointType.CRUD.equals(context.getEndpointType())
+        && "POST".equalsIgnoreCase(context.getHttpMethod())) {
+      try {
+        injectDefaultLocatorIfMissing(context.getRequestBody());
+      } catch (Exception e) {
+        log.warn("[GoodsReceiptLineHandler] Could not default storageBin: {}", e.getMessage(), e);
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Sets {@code storageBin} to the receiving warehouse's default locator when the create
+   * request did not already supply one (e.g. manual line entry for a product with no prior
+   * stock). Never overrides an explicit value coming from the user or from the
+   * "Import from Purchase Order" flow.
+   */
+  private void injectDefaultLocatorIfMissing(JSONObject body) throws Exception {
+    if (body == null || StringUtils.isNotBlank(body.optString(FIELD_STORAGE_BIN, null))) {
+      return;
+    }
+    String parentId = body.optString(PARAM_PARENT_ID, "");
+    if (parentId.isEmpty()) {
+      return;
+    }
+    ShipmentInOut header = OBDal.getInstance().get(ShipmentInOut.class, parentId);
+    if (header == null || header.getWarehouse() == null) {
+      return;
+    }
+    String locatorId = resolveDefaultLocatorForWarehouse(header.getWarehouse().getId());
+    if (locatorId != null) {
+      body.put(FIELD_STORAGE_BIN, locatorId);
+      log.debug("[GoodsReceiptLineHandler] POST: defaulted storageBin={} warehouse={}",
+          locatorId, header.getWarehouse().getId());
+    }
+  }
+
+  /**
+   * Returns the default active {@code M_Locator} for a warehouse, or {@code null} when none is
+   * configured. Mirrors {@link InventoryLineHandler}'s locator lookup, scoped down to just the
+   * id since the receipt line only needs {@code storageBin}.
+   */
+  @SuppressWarnings("unchecked")
+  private static String resolveDefaultLocatorForWarehouse(String warehouseId) {
+    try {
+      Locator locator = (Locator) OBDal.getInstance().createCriteria(Locator.class)
+          .add(Restrictions.eq(Locator.PROPERTY_WAREHOUSE + ".id", warehouseId))
+          .add(Restrictions.eq(Locator.PROPERTY_DEFAULT, true))
+          .add(Restrictions.eq(Locator.PROPERTY_ACTIVE, true))
+          .addOrder(Order.asc(Locator.PROPERTY_SEARCHKEY))
+          .setMaxResults(1)
+          .uniqueResult();
+      return locator != null ? locator.getId() : null;
+    } catch (Exception e) {
+      log.debug("[GoodsReceiptLineHandler] Could not resolve default locator for warehouse {}: {}",
+          warehouseId, e.getMessage());
+      return null;
+    }
+  }
 
   /**
    * Strips the stock-derived {@code movementQuantity} update that {@code SL_InOutLine_Product}
