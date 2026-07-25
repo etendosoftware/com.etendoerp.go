@@ -286,10 +286,11 @@ class SFRolesOverviewTest extends BaseWebhookTest {
 
         // First role queried (GOClient Admin) gets 2 rows for the same user -> count 1;
         // every subsequent role gets 0 rows.
-        // (Rows are built as plain local statements, NOT inlined into the when(...).thenReturn(...)
-        // call below -- nesting further when(...) stubbing calls as arguments to an outer,
-        // not-yet-completed when(...).thenReturn(...) chain trips Mockito's
-        // UnfinishedStubbingException.)
+        // The row lists are assigned to local variables first and only then handed to the
+        // stubbed list call below, rather than being constructed inline as an argument to
+        // that stub. Building a further Mockito stub expression inline, nested inside the
+        // arguments of an outer stub expression that has not finished being defined yet,
+        // trips Mockito's UnfinishedStubbingException.
         List<UserRoles> adminRoleRows = Arrays.asList(mockUserRolesRow("user-1"), mockUserRolesRow("user-1"));
         OBCriteria<UserRoles> userRolesCriteria = mockCriteria(UserRoles.class);
         when(userRolesCriteria.list()).thenReturn(
