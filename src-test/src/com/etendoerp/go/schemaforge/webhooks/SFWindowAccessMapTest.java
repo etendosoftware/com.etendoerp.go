@@ -45,13 +45,17 @@ import org.openbravo.model.ad.access.WindowAccess;
 import org.openbravo.model.ad.ui.Window;
 
 import com.etendoerp.go.schemaforge.data.SFSpec;
+import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
 
 /**
  * Unit tests for {@link SFWindowAccessMap}.
  * Covers no-role/empty-map short-circuiting, admin/client-admin bypass (full access to every
- * active Etendo GO window + every capability true), and role-based resolution of both the
- * per-window access tier (from {@code AD_Window_Access.IsReadWrite}) and the
- * {@code showAccountingFields} capability (from {@code AD_Role.EM_ETGO_Show_Acct_Fields}).
+ * active Etendo GO window + every capability true), and role-based resolution of the
+ * per-window access tier (from {@code AD_Window_Access.IsReadWrite}), the
+ * {@code showAccountingFields} capability (from {@code AD_Role.EM_ETGO_Show_Acct_Fields}), and
+ * the {@code isAdminOrClientAdmin} capability (ETP-4513 — mirrors
+ * {@link NeoAccessHelper#isAdminOrClientAdmin} back to the frontend so it can gate admin-only
+ * menu entries like "Configuración &gt; Roles" up front).
  */
 @MockitoSettings(strictness = Strictness.LENIENT)
 class SFWindowAccessMapTest {
@@ -217,6 +221,7 @@ class SFWindowAccessMapTest {
         assertEquals("full", windowAccess.getString("win-1"));
         assertEquals("full", windowAccess.getString("win-2"));
         assertTrue(result.getJSONObject("capabilities").getBoolean("showAccountingFields"));
+        assertTrue(result.getJSONObject("capabilities").getBoolean("isAdminOrClientAdmin"));
         // Admin bypass never needs the accounting-column lookup.
         verify(mockDal, never()).getSession();
     }
@@ -239,6 +244,7 @@ class SFWindowAccessMapTest {
         assertEquals(1, windowAccess.length());
         assertEquals("full", windowAccess.getString("win-only"));
         assertTrue(result.getJSONObject("capabilities").getBoolean("showAccountingFields"));
+        assertTrue(result.getJSONObject("capabilities").getBoolean("isAdminOrClientAdmin"));
     }
 
     /** Duplicate windows across multiple specs are deduplicated in the admin-bypass map. */
@@ -393,6 +399,28 @@ class SFWindowAccessMapTest {
         assertNull(responseVars.get(ERROR));
         JSONObject result = new JSONObject(responseVars.get(RESULT));
         assertFalse(result.getJSONObject("capabilities").getBoolean("showAccountingFields"));
+    }
+
+    // ── restricted role: isAdminOrClientAdmin capability (ETP-4513) ──────
+
+    /**
+     * A restricted (non-bypass) role always resolves {@code isAdminOrClientAdmin: false} —
+     * reaching this branch at all already proves {@link NeoAccessHelper#isAdminOrClientAdmin}
+     * returned {@code false} for the request's role, so the capability mirrors that back to the
+     * frontend instead of re-deriving it a second time.
+     */
+    @Test
+    @DisplayName("Restricted role resolves isAdminOrClientAdmin false")
+    void testIsAdminOrClientAdminFalseForRestrictedRole() throws Exception {
+        givenRestrictedRole("role-not-admin");
+        stubWindowAccessRows(Collections.emptyList());
+        stubShowAcctFieldsQuery(Collections.singletonList("N"));
+
+        webhook.get(parameters, responseVars);
+
+        assertNull(responseVars.get(ERROR));
+        JSONObject result = new JSONObject(responseVars.get(RESULT));
+        assertFalse(result.getJSONObject("capabilities").getBoolean("isAdminOrClientAdmin"));
     }
 
     // ── exception handling ────────────────────────────────────────────────

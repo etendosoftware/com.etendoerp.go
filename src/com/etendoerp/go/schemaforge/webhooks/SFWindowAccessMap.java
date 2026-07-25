@@ -58,13 +58,21 @@ import com.etendoerp.webhookevents.services.BaseWebhookService;
  *   <li>Admin/client-admin bypass ({@link NeoAccessHelper#isAdminOrClientAdmin(Role)}) → every
  *       active Etendo GO window (every distinct {@code AD_Window} backing an active,
  *       {@code SPEC_TYPE = 'W'} {@code ETGO_SF_SPEC}) resolves to {@code "full"}, and
- *       {@code capabilities.showAccountingFields} is always {@code true}.</li>
+ *       {@code capabilities.showAccountingFields} / {@code capabilities.isAdminOrClientAdmin}
+ *       are both always {@code true}.</li>
  *   <li>Otherwise, for every active {@code AD_Window_Access} row the role has: {@code
  *       IsReadWrite = true} → {@code "full"}; {@code IsReadWrite = false} → {@code "read-only"}.
  *       A window with no active row is simply absent from the map — the frontend treats a
  *       missing key as {@code "none"}. {@code capabilities.showAccountingFields} is read
- *       directly off {@code AD_Role.EM_ETGO_Show_Acct_Fields} for the resolved role.</li>
+ *       directly off {@code AD_Role.EM_ETGO_Show_Acct_Fields} for the resolved role, and
+ *       {@code capabilities.isAdminOrClientAdmin} is {@code false} (this branch is only reached
+ *       when the bypass check above already failed).</li>
  * </ol>
+ *
+ * <p>{@code capabilities.isAdminOrClientAdmin} (ETP-4513) is the proactive signal the frontend
+ * uses to decide whether to show admin-only settings entries — e.g. the "Configuración &gt;
+ * Roles" menu item, backed by {@code SFRolesOverview} — up front, instead of showing them to
+ * every role and handling denial only once the page itself loads.</p>
  *
  * GET /webhooks/SFWindowAccessMap
  */
@@ -80,6 +88,9 @@ public class SFWindowAccessMap extends BaseWebhookService {
 
   /** JSON key used for the accounting-visibility capability. */
   private static final String SHOW_ACCOUNTING_FIELDS = "showAccountingFields";
+
+  /** JSON key used for the admin/client-admin capability (ETP-4513). */
+  private static final String IS_ADMIN_OR_CLIENT_ADMIN = "isAdminOrClientAdmin";
 
   /** Access-tier value for a role with full (read+write) access to a window. */
   private static final String FULL = "full";
@@ -143,9 +154,11 @@ public class SFWindowAccessMap extends BaseWebhookService {
         windowAccess.put(windowId, FULL);
       }
       capabilities.put(SHOW_ACCOUNTING_FIELDS, true);
+      capabilities.put(IS_ADMIN_OR_CLIENT_ADMIN, true);
     } else {
       populateWindowAccessForRole(role, windowAccess);
       capabilities.put(SHOW_ACCOUNTING_FIELDS, resolveShowAccountingFields(role));
+      capabilities.put(IS_ADMIN_OR_CLIENT_ADMIN, false);
     }
 
     JSONObject result = new JSONObject();
