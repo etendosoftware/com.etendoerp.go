@@ -289,9 +289,11 @@ public final class NeoAccessHelper {
    * ({@code AD_Role.is_client_admin = 'Y'}).
    *
    * <p>Public so callers outside this class that need the same admin/client-admin bypass
-   * semantics — e.g. {@code SFWindowAccessMap}, which reports "full access to every window" and
+   * semantics can reuse this exact resolution instead of re-implementing it — e.g.
+   * {@code SFWindowAccessMap} (ETP-4520), which reports "full access to every window" and
    * "every capability true" for these roles instead of resolving them one {@code AD_Window_Access}
-   * row at a time — can reuse this exact resolution instead of re-implementing it.</p>
+   * row at a time; and {@code SFRolesOverview} (ETP-4513), a cross-role aggregate webhook that
+   * must answer "is the CALLER an admin" rather than "does the caller's role reach window X".</p>
    *
    * @param role the role to evaluate (never {@code null})
    * @return {@code true} if this role always has full access
