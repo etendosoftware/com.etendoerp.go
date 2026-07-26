@@ -284,8 +284,8 @@ class SFRolesOverviewTest extends BaseWebhookTest {
         OBCriteria<WindowAccess> windowAccessCriteria = mockCriteria(WindowAccess.class);
         when(windowAccessCriteria.list()).thenReturn(Collections.emptyList());
 
-        // First role queried (GOClient Admin) gets 2 rows for the same user -> count 1;
-        // every subsequent role gets 0 rows.
+        // The first role queried, GOClient Admin, receives two rows for the same user, which
+        // should count as a single distinct user. Every subsequent role receives zero rows.
         // The row lists are assigned to local variables first and only then handed to the
         // stubbed list call below, rather than being constructed inline as an argument to
         // that stub. Building a further Mockito stub expression inline, nested inside the
