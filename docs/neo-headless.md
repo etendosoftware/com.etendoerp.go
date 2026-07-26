@@ -828,7 +828,7 @@ Folder nodes are never filtered directly: their children are filtered first (pos
 ```json
 {
   "windowAccess": { "111": "full", "268": "read-only" },
-  "capabilities": { "showAccountingFields": true }
+  "capabilities": { "showAccountingFields": true, "isAdminOrClientAdmin": true }
 }
 ```
 
@@ -837,10 +837,63 @@ Folder nodes are never filtered directly: their children are filtered first (pos
 **Resolution order** (mirrors `NeoAccessHelper.hasWindowAccess(Role, String, String)`, §7 item 3):
 
 1. No role assigned → `{"windowAccess": {}, "capabilities": {}}`, without querying the database — same convention as `SFListMenu`: the role is captured once, at the very top of the request, before the servlet enters `OBContext.setAdminMode()`.
-2. System Administrator role (`"0"`) or a client-admin role (`NeoAccessHelper.isAdminOrClientAdmin(Role)`, now `public` specifically so this webhook can reuse it) → every distinct `AD_Window` backing an active, `SPEC_TYPE = 'W'` `ETGO_SF_SPEC` resolves to `"full"`, and `capabilities.showAccountingFields` is always `true` — the column is never even queried for this branch.
-3. Otherwise, for every active `AD_Window_Access` row the role has: `IsReadWrite = true` → `"full"`; `IsReadWrite = false` → `"read-only"`. `capabilities.showAccountingFields` is read directly off the new `AD_Role.EM_ETGO_Show_Acct_Fields` boolean extension column (ETP-4520) for the resolved role, via a native SQL lookup rather than the DAL entity model (the column was added straight to the physical table and is not yet mapped as a typed entity property).
+2. System Administrator role (`"0"`) or a client-admin role (`NeoAccessHelper.isAdminOrClientAdmin(Role)`, now `public` specifically so this webhook can reuse it) → every distinct `AD_Window` backing an active, `SPEC_TYPE = 'W'` `ETGO_SF_SPEC` resolves to `"full"`, and `capabilities.showAccountingFields` / `capabilities.isAdminOrClientAdmin` are both always `true` — the accounting column is never even queried for this branch.
+3. Otherwise, for every active `AD_Window_Access` row the role has: `IsReadWrite = true` → `"full"`; `IsReadWrite = false` → `"read-only"`. `capabilities.showAccountingFields` is read directly off the new `AD_Role.EM_ETGO_Show_Acct_Fields` boolean extension column (ETP-4520) for the resolved role, via a native SQL lookup rather than the DAL entity model (the column was added straight to the physical table and is not yet mapped as a typed entity property). `capabilities.isAdminOrClientAdmin` is always `false` in this branch — reaching it at all already proves the bypass check in step 2 failed for this role.
 
 **`AD_Role.EM_ETGO_Show_Acct_Fields`:** a Yes/No extension column added by this module (`AD_Column_ID = A0F2D12B5B4A48C2855EE73E3E93E274`, default `N`) and exposed as a real field (`AD_Field_ID = 98C71197D0744EED96856A497E49F159`) on the classic `AD_Role` window/tab, so a functional consultant can toggle it like any other role attribute. It gates accounting-sensitive field/tab visibility in Etendo GO — e.g. the `Posted` status pill on invoice windows and the financial-account edit form's "Cuentas contables" tab — independently of per-window `AD_Window_Access`.
+
+**`capabilities.isAdminOrClientAdmin`** (ETP-4513) is the proactive signal the frontend uses to decide whether to show admin-only settings entries — e.g. the "Configuración > Roles" menu item, backed by `SFRolesOverview` (§8c) — up front, instead of showing them to every role and handling denial only once the page itself loads.
+
+---
+
+## 8c. Roles Overview (SFRolesOverview Webhook)
+
+`SFRolesOverview` (`GET /webhooks/SFRolesOverview`) returns, for an admin/client-admin caller only, a cross-role aggregate for GOClient's 5 fixed roles (ETP-4513 — "Configuración > Roles"): each role's display name, raw `AD_Role.description`, count of distinct assigned users (`AD_User_Roles`), and the list of Etendo GO windows it can reach (`AD_Window_Access`, intersected with the windows Etendo GO actually exposes today). It lives in the same Webhooks module infrastructure as `SFListMenu`/`SFWindowAccessMap`, not under the NEO servlet.
+
+Unlike `SFWindowAccessMap`, which answers "what can the CURRENT caller's own role reach", this endpoint is a cross-role aggregate: it always returns data for all 5 GOClient roles regardless of which one the caller happens to be using. That is exactly why it is gated to admin/client-admin callers only.
+
+**Endpoint:**
+
+| Pattern | Method | Description |
+|---------|--------|-------------|
+| `/webhooks/SFRolesOverview` | GET | Per-role aggregate (user count + reachable windows) for all 5 GOClient roles |
+
+**Response shape:**
+
+```json
+{
+  "roles": [
+    {
+      "id": "9B8D736190724807AB256DC95F20EC5E",
+      "name": "GOClient Admin",
+      "rawDescription": "*** Please, do not edit this role. Use Copy Record instead ***",
+      "userCount": 2,
+      "windows": [
+        { "id": "143", "name": "Sales Order", "tier": "full" },
+        { "id": "259", "name": "Business Partner", "tier": "read-only" }
+      ]
+    }
+  ]
+}
+```
+
+**Access gate:** the current role is captured once, at the very top of `get(Map, Map)`, before the servlet enters `OBContext.setAdminMode()` — same convention as `SFListMenu`/`SFWindowAccessMap`: admin mode is only used to bypass row-level security on the underlying queries, never to decide access. A request with no role assigned, or a role that is not admin/client-admin (`NeoAccessHelper.isAdminOrClientAdmin(Role)`), gets `{"roles": []}` immediately, without querying a single `Role` — mirroring `SFListMenu`'s "deny silently, don't 403" convention for this webhook family.
+
+**`rawDescription` is NOT display copy.** `AD_Role.description` is boilerplate for 4 of the 5 GOClient roles today (`"*** Please, do not edit this role. Use Copy Record instead ***"`) — this backend has no i18n awareness, so it cannot produce user-facing copy itself. The field is returned only as a raw/debug fallback; the frontend (`RolesOverviewPage.jsx` in `etendo_schema_forge`) maps each of the 5 known role ids to its own curated, i18n-keyed description (`roleDescGoClientAdmin`, `roleDescFinance`, etc. in `en_US.json`/`es_ES.json`) instead of rendering this field.
+
+**The 5 role IDs** are GOClient's fixed, well-known roles (seeded in ETP-3504 phases 1/2 — see `artifacts/user/decisions.json` in `etendo_schema_forge`'s `defaultRole.enumValues` for the same 5 ids/names) and are intentionally hardcoded in `SFRolesOverview.GOCLIENT_ROLE_IDS` rather than derived from a client/role-name heuristic:
+
+| Role | `AD_Role_ID` |
+|------|--------------|
+| GOClient Admin | `9B8D736190724807AB256DC95F20EC5E` |
+| Finance | `127AE77FE2994067B7FE6495FC21D51E` |
+| Sales | `2A159DF4F4B944A6AA903202AD35B545` |
+| Purchasing | `A826430F723E4C1B9A53EBB0746A98C0` |
+| Inventory | `55E05A4B43514A029D6FB6B8D94B49D4` |
+
+A role id that fails to resolve (missing/renamed) is skipped defensively — the other 4 roles are still returned rather than failing the whole request.
+
+**`windows` intersection:** a role's native `AD_Window_Access` rows are filtered down to windows Etendo GO actually exposes today — every distinct `AD_Window` backing an active, `SPEC_TYPE = 'W'` `ETGO_SF_SPEC` — so inherited/legacy grants to native-only Etendo windows don't leak into this "assigned windows" view. Each entry's `tier` resolves the same way as `SFWindowAccessMap`: `IsReadWrite = true` → `"full"`, `IsReadWrite = false` → `"read-only"`. The array is sorted by window name.
 
 ---
 
@@ -856,7 +909,8 @@ The module includes unit tests that run without a backend:
 | `NeoServletTabFilterTest` | -- | Parent-child HQL where clause generation. |
 | `NeoPreviewFileServiceTest` | ~250 | Validation (invalid JSON, blank fields), GET miss/hit, POST INSERT/UPDATE paths, DELETE miss/hit. All without a live DB via `MockedStatic<OBDal>` + `MockedStatic<OBContext>`. |
 | `SFListMenuTest` | -- | Tree building/pruning, flat search, role-based filtering (window/process/OBUIAPP-process nodes), no-role → empty menu, multi-level nesting. |
-| `SFWindowAccessMapTest` | -- | Role-based windowAccess resolution (full/read-only/absent), no-role → both maps empty, admin/client-admin bypass → full access to every active Etendo GO window + every capability true, `showAccountingFields` true/false/unset/missing-role. |
+| `SFWindowAccessMapTest` | -- | Role-based windowAccess resolution (full/read-only/absent), no-role → both maps empty, admin/client-admin bypass → full access to every active Etendo GO window + every capability true, `showAccountingFields` true/false/unset/missing-role, `isAdminOrClientAdmin` true on bypass / false for a restricted role. |
+| `SFRolesOverviewTest` | -- | Admin/client-admin access gate (no role, restricted role, System Administrator, client-admin), all 5 roles returned in `GOCLIENT_ROLE_IDS` order with id/name/rawDescription, missing/renamed role id skipped gracefully, distinct-user-count aggregation, GO-window intersection (native-only windows excluded), tier resolution (full/read-only), exception handling. |
 
 Tests are located in `src-test/src/com/etendoerp/go/schemaforge/`.
 
