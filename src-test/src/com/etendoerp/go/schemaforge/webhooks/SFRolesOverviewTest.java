@@ -197,6 +197,27 @@ class SFRolesOverviewTest extends BaseWebhookTest {
         verify(obDal, never()).get(eq(Role.class), anyString());
     }
 
+    /**
+     * The gate must key off {@link com.etendoerp.go.schemaforge.util.NeoAccessHelper
+     * #isAdminOrClientAdmin(Role)} only — never off whether the caller's own role id happens to
+     * be one of the 5 {@code GOCLIENT_ROLE_IDS} this endpoint aggregates over. A caller
+     * authenticated AS the Finance role (one of the 5 known ids, but not admin/client-admin)
+     * must be denied exactly like any other restricted role, not granted a partial/wrong
+     * response just because its id is "recognized" elsewhere in this class.
+     */
+    @Test
+    @DisplayName("Caller authenticated as one of the 5 GOClient roles (Finance), but not admin/client-admin, is still denied")
+    void testCallerIsAGoClientRoleButNotAdminIsStillDenied() throws Exception {
+        givenRestrictedCallerRole(FINANCE_ROLE_ID);
+
+        webhook.get(parameters, responseVars);
+
+        assertNull(responseVars.get(ERROR));
+        JSONObject result = new JSONObject(responseVars.get(RESULT));
+        assertEquals(0, result.getJSONArray("roles").length());
+        verify(obDal, never()).get(eq(Role.class), anyString());
+    }
+
     @Test
     @DisplayName("System Administrator caller (role id '0') passes the gate")
     void testSystemAdminCallerPassesGate() throws Exception {
@@ -304,6 +325,33 @@ class SFRolesOverviewTest extends BaseWebhookTest {
         JSONObject result = new JSONObject(responseVars.get(RESULT));
         JSONObject adminRole = result.getJSONArray("roles").getJSONObject(0);
         assertEquals(1, adminRole.getInt("userCount"));
+    }
+
+    /**
+     * A role with zero active {@code AD_User_Roles} rows AND zero active
+     * {@code AD_Window_Access} rows (e.g. a newly-provisioned or misconfigured GOClient role
+     * that hasn't been assigned any users or windows yet) must degrade gracefully to
+     * {@code userCount: 0} and an empty {@code windows} array for EVERY one of the 5 roles —
+     * not throw, and not silently omit the role from the response.
+     */
+    @Test
+    @DisplayName("A role with zero users and zero window-access rows degrades to userCount=0 and an empty windows array, not an error")
+    void testRoleWithNoUsersAndNoWindowAccessDegradesGracefully() throws Exception {
+        givenSystemAdminCallerRole();
+        givenAllFiveGoClientRolesResolve();
+        stubBaselineQueries(Collections.emptyList());
+
+        webhook.get(parameters, responseVars);
+
+        assertNull(responseVars.get(ERROR));
+        JSONObject result = new JSONObject(responseVars.get(RESULT));
+        JSONArray roles = result.getJSONArray("roles");
+        assertEquals(5, roles.length());
+        for (int i = 0; i < roles.length(); i++) {
+            JSONObject role = roles.getJSONObject(i);
+            assertEquals(0, role.getInt("userCount"), "userCount for role " + role.getString("id"));
+            assertEquals(0, role.getJSONArray("windows").length(), "windows for role " + role.getString("id"));
+        }
     }
 
     // ── window list: GO-window intersection + tier resolution ───────────
