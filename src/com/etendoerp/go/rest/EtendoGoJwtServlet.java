@@ -67,7 +67,6 @@ import com.etendoerp.go.onboarding.OnboardingPeriodControlService;
 import com.etendoerp.go.onboarding.OnboardingRoleProvisioningService;
 import com.etendoerp.go.onboarding.OnboardingPsd2SyncService;
 import com.etendoerp.go.onboarding.OnboardingSequenceGeneratorService;
-import com.etendoerp.go.onboarding.OnboardingWebhookAccessService;
 import com.etendoerp.go.schemaforge.data.Account;
 import com.etendoerp.go.schemaforge.email.EmailContractCommandSupport;
 import com.smf.securewebservices.utils.SecureWebServicesUtils;
@@ -132,7 +131,6 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private static final String PROGRESS_CLIENT = "client";
   private static final String PROGRESS_ERROR = "error";
   private static final String PROGRESS_ORGANIZATION = "organization";
-  private static final String PROGRESS_WEBHOOK_ACCESS = "webhookAccess";
   private static final String PROGRESS_ROLES = "roles";
   private static final String PROGRESS_DATASET = "dataset";
   private static final String PROGRESS_ACCOUNTING = "accounting";
@@ -161,8 +159,6 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       "fiscalIdValue", "address", "sector" };
 
   OnboardingDatasetImportService onboardingDatasetImportService = new OnboardingDatasetImportService();
-  OnboardingWebhookAccessService onboardingWebhookAccessService =
-      new OnboardingWebhookAccessService();
   OnboardingRoleProvisioningService onboardingRoleProvisioningService =
       new OnboardingRoleProvisioningService();
   OnboardingAccountingWiringService onboardingAccountingWiringService =
@@ -1071,10 +1067,6 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
         return;
       }
 
-      if (!ensureWebhookAccess(writer, clientId, adminContext.adminUserId, adminContext.adminRoleId)) {
-        return;
-      }
-
       if (!ensureRoles(writer, clientId, adminContext.adminUserId, adminContext.adminRoleId)) {
         return;
       }
@@ -1383,33 +1375,10 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   }
 
   /**
-   * Grants the new tenant's admin role access to the {@code SFWindowAccessMap} Defined Webhook —
-   * without this, ETP-4520's fail-closed frontend access-control feature blocks every generated
-   * window's detail/create/edit view for this tenant. See {@link OnboardingWebhookAccessService}.
-   */
-  private boolean ensureWebhookAccess(PrintWriter writer, String clientId, String adminUserId,
-      String adminRoleId) {
-    sendProgress(writer, PROGRESS_WEBHOOK_ACCESS, PROGRESS_IN_PROGRESS,
-        "Granting webhook access...");
-    try {
-      onboardingWebhookAccessService.wire(clientId, adminUserId, adminRoleId);
-      sendProgress(writer, PROGRESS_WEBHOOK_ACCESS, "done", "Webhook access granted");
-      return true;
-    } catch (Exception e) {
-      EtendoGoDalHelper.rollbackDalChanges("onboarding webhook-access wiring", e, log);
-      String errorMessage = e.getMessage() != null ? e.getMessage()
-          : "Webhook access wiring failed";
-      sendProgress(writer, PROGRESS_WEBHOOK_ACCESS, PROGRESS_ERROR, errorMessage);
-      sendFinalResult(writer, false, errorMessage);
-      return false;
-    }
-  }
-
-  /**
    * ETP-4515 (Phase 7) — clones GOClient's Finance/Sales/Purchasing/Inventory roles (plus their
-   * AD_Window_Access and webhook grants) onto the tenant. Runs right after {@link
-   * #ensureWebhookAccess}, for the same reason it needs no organization yet: roles are
-   * client-wide. See {@link OnboardingRoleProvisioningService} for the full rationale.
+   * AD_Window_Access) onto the tenant. Runs right after client/organization resolution since it
+   * needs no organization yet: roles are client-wide. See {@link OnboardingRoleProvisioningService}
+   * for the full rationale.
    */
   private boolean ensureRoles(PrintWriter writer, String clientId, String adminUserId,
       String adminRoleId) {

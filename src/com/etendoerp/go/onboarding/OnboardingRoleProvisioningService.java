@@ -32,21 +32,18 @@ import org.openbravo.model.ad.access.Role;
 import org.openbravo.model.ad.access.WindowAccess;
 import org.openbravo.model.ad.system.Client;
 
-import com.etendoerp.webhookevents.data.DefinedWebHook;
-import com.etendoerp.webhookevents.data.DefinedwebhookRole;
-
 /**
  * ETP-4515 (Phase 7, folded into ETP-4520) — clones GOClient's Finance/Sales/Purchasing/Inventory
- * roles onto a freshly onboarded tenant when missing, then grants every one of the tenant's
- * active roles dispatch access to {@code SFListMenu}/{@code SFWindowAccessMap}/
- * {@code SFRolesOverview}.
+ * roles onto a freshly onboarded tenant when missing.
  *
  * <p>This is the preventive (onboarding-time) counterpart of the corrective data-fix {@code
  * cli/src/data-fixes/sql/20260727T114306Z__R16-tenant-roles-and-webhook-access.sql} in
- * {@code etendo_schema_forge} — same GOClient-as-template logic, same three effects (role clone,
- * {@code AD_Window_Access} backfill, webhook-role grant), so a tenant onboarded from here on needs
- * no corrective run at all. See {@code santo_roles_handoff_phase7.md} and {@code
- * docs/etendo-ad/onboarding-gaps.md} §H2 in the functional repo for the full gap writeup.
+ * {@code etendo_schema_forge} (role clone + {@code AD_Window_Access} backfill; that data-fix's
+ * webhook-grant step, and this service's own former webhook-grant step, are both obsolete now that
+ * {@code SFListMenu}/{@code SFWindowAccessMap}/{@code SFRolesOverview} are reached through the NEO
+ * pseudo-spec bridge instead of the Webhooks module — see {@code neo-headless.md} §4.10–4.11). See
+ * {@code santo_roles_handoff_phase7.md} and {@code docs/etendo-ad/onboarding-gaps.md} §H2 in the
+ * functional repo for the full gap writeup.
  *
  * <p>Without this, a real onboarded tenant has exactly one role (its auto-created admin role) —
  * the ETP-4512 "assign one of 5 predefined roles" UI has nothing else to offer, and role-based
@@ -62,8 +59,7 @@ import com.etendoerp.webhookevents.data.DefinedwebhookRole;
  * <p>Deliberately does NOT require an organization id (unlike, e.g., {@link
  * OnboardingPeriodControlService}): roles are client-wide ({@code AD_Role.AD_Org_ID} is always
  * {@code '0'} on every GOClient template row), so this step can run as soon as the client itself
- * exists — no organization needed yet. Wired into {@code EtendoGoJwtServlet}'s onboarding chain
- * right after the existing {@code ensureWebhookAccess} step, for the same reason.
+ * exists — no organization needed yet.
  */
 public class OnboardingRoleProvisioningService extends OnboardingContextSupport {
 
@@ -75,17 +71,12 @@ public class OnboardingRoleProvisioningService extends OnboardingContextSupport 
   /** The 4 non-admin roles cloned from GOClient; the 5th (admin) already exists on every tenant. */
   private static final String[] ROLE_NAMES = { "Finance", "Sales", "Purchasing", "Inventory" };
 
-  /** Defined Webhooks every active role of the tenant is granted dispatch access to. */
-  private static final String[] WEBHOOK_NAMES =
-      { "SFListMenu", "SFWindowAccessMap", "SFRolesOverview" };
-
-  /** {@code AD_Org_ID} used for both the cloned roles and the webhook grants — the "*" org. */
+  /** {@code AD_Org_ID} used for the cloned roles — the "*" org. */
   private static final String STAR_ORG_ID = "0";
 
   /**
    * Clones the 4 missing GOClient roles (with their {@code AD_Window_Access}) onto {@code
-   * clientId} and grants every one of its active roles webhook dispatch access. Idempotent: safe
-   * to call on every onboarding run (including a resumed/retried one).
+   * clientId}. Idempotent: safe to call on every onboarding run (including a resumed/retried one).
    *
    * @param clientId    target client identifier
    * @param adminUserId administrator user for DAL context
@@ -103,7 +94,6 @@ public class OnboardingRoleProvisioningService extends OnboardingContextSupport 
         for (String roleName : ROLE_NAMES) {
           ensureRoleCloned(clientId, roleName);
         }
-        grantWebhookAccessToAllActiveRoles(clientId);
         flushChanges();
       } finally {
         exitAdminMode();
@@ -238,67 +228,6 @@ public class OnboardingRoleProvisioningService extends OnboardingContextSupport 
     access.setWindow(source.getWindow());
     access.setEditableField(source.isEditableField());
     OBDal.getInstance().save(access);
-  }
-
-  /**
-   * Grants every active role of {@code clientId} a {@code SMFWHE_DEFINEDWEBHOOK_ROLE} row for
-   * each of {@link #WEBHOOK_NAMES} it doesn't already have — mirrors Step 3 of the corrective
-   * data-fix, so it covers the tenant's admin role too (not just the 4 roles cloned above), and
-   * is safe to re-run.
-   */
-  private void grantWebhookAccessToAllActiveRoles(String clientId) {
-    for (Role role : resolveActiveRolesForClient(clientId)) {
-      for (String webhookName : WEBHOOK_NAMES) {
-        if (hasActiveGrant(role.getId(), webhookName)) {
-          continue;
-        }
-        DefinedWebHook webhook = resolveWebhookByName(webhookName);
-        if (webhook == null) {
-          throw new OBException("Webhook '" + webhookName + "' not found — cannot grant tenant access");
-        }
-        createWebhookGrant(clientId, role, webhook);
-      }
-    }
-  }
-
-  /** Seam for tests: resolves every active role of {@code clientId}. */
-  @SuppressWarnings("unchecked")
-  protected List<Role> resolveActiveRolesForClient(String clientId) {
-    OBCriteria<Role> criteria = OBDal.getInstance().createCriteria(Role.class);
-    criteria.setFilterOnReadableClients(false);
-    criteria.setFilterOnReadableOrganization(false);
-    criteria.add(Restrictions.eq(Role.PROPERTY_CLIENT + ".id", clientId));
-    criteria.add(Restrictions.eq(Role.PROPERTY_ACTIVE, true));
-    return criteria.list();
-  }
-
-  /** Seam for tests: whether {@code roleId} already has an active grant for {@code webhookName}. */
-  protected boolean hasActiveGrant(String roleId, String webhookName) {
-    OBCriteria<DefinedwebhookRole> criteria =
-        OBDal.getInstance().createCriteria(DefinedwebhookRole.class);
-    criteria.setFilterOnReadableClients(false);
-    criteria.setFilterOnReadableOrganization(false);
-    criteria.add(Restrictions.eq(DefinedwebhookRole.PROPERTY_ROLE + ".id", roleId));
-    criteria.add(Restrictions.eq(DefinedwebhookRole.PROPERTY_ACTIVE, true));
-    criteria.createAlias(DefinedwebhookRole.PROPERTY_SMFWHEDEFINEDWEBHOOK, "webhook");
-    criteria.add(Restrictions.eq("webhook.name", webhookName));
-    criteria.setMaxResults(1);
-    return criteria.uniqueResult() != null;
-  }
-
-  /** Seam for tests: resolves a Defined Webhook definition row by name. */
-  protected DefinedWebHook resolveWebhookByName(String webhookName) {
-    OBCriteria<DefinedWebHook> criteria = OBDal.getInstance().createCriteria(DefinedWebHook.class);
-    criteria.setFilterOnReadableClients(false);
-    criteria.setFilterOnReadableOrganization(false);
-    criteria.add(Restrictions.eq(DefinedWebHook.PROPERTY_NAME, webhookName));
-    criteria.setMaxResults(1);
-    return (DefinedWebHook) criteria.uniqueResult();
-  }
-
-  /** Seam for tests: builds and saves one webhook-role grant row. */
-  protected void createWebhookGrant(String clientId, Role role, DefinedWebHook webhook) {
-    OBDal.getInstance().save(buildWebhookGrant(clientId, STAR_ORG_ID, role, webhook));
   }
 
   @Override
