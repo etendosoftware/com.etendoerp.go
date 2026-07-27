@@ -17,7 +17,6 @@
 package com.etendoerp.go.onboarding;
 
 import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
@@ -37,15 +36,11 @@ import org.openbravo.dal.core.OBContext;
 import org.openbravo.model.ad.access.Role;
 import org.openbravo.model.ad.access.WindowAccess;
 
-import com.etendoerp.webhookevents.data.DefinedWebHook;
-
 /**
  * Unit tests for {@link OnboardingRoleProvisioningService}.
  *
- * <p>Follows the established onboarding-service test pattern (see {@code
- * OnboardingWebhookAccessServiceTest}): a {@code TestableService} subclass overrides every
- * protected DB "seam" method so no real database is touched by the {@code wire()} orchestration
- * tests.
+ * <p>A {@code TestableService} subclass overrides every protected DB "seam" method so no real
+ * database is touched by the {@code wire()} orchestration tests.
  */
 public class OnboardingRoleProvisioningServiceTest {
 
@@ -144,56 +139,7 @@ public class OnboardingRoleProvisioningServiceTest {
   }
 
   // ---------------------------------------------------------------------------
-  // 3. Webhook grants — every active role, every webhook, idempotent
-  // ---------------------------------------------------------------------------
-
-  @Test
-  public void testWireGrantsAllThreeWebhooksToEveryActiveRole() {
-    TestableService service = new TestableService();
-    Role adminRole = namedRole("Admin");
-    service.activeRolesForClient.add(adminRole);
-
-    service.wire("CLIENT-1", "USER-1", "ROLE-1");
-
-    // 4 cloned roles + 1 pre-existing admin role = 5 roles, 3 webhooks each = 15 grants.
-    assertEquals(15, service.createdGrants.size());
-  }
-
-  @Test
-  public void testWireSkipsGrantWhenRoleAlreadyHasIt() {
-    TestableService service = new TestableService();
-    Role adminRole = namedRole("Admin");
-    service.activeRolesForClient.add(adminRole);
-    service.alreadyGranted.add(adminRole.getId() + "|SFListMenu");
-
-    service.wire("CLIENT-1", "USER-1", "ROLE-1");
-
-    assertFalse("the already-granted pair must not be re-created",
-        service.createdGrants.contains(adminRole.getId() + "|SFListMenu"));
-    // 14 remaining (15 total minus the 1 already granted).
-    assertEquals(14, service.createdGrants.size());
-  }
-
-  @Test
-  public void testWireSkipsGrantWhenWebhookDefinitionIsMissing() {
-    TestableService service = new TestableService();
-    Role adminRole = namedRole("Admin");
-    service.activeRolesForClient.add(adminRole);
-    // A not-yet-migrated webhook (e.g. SFRolesOverview on a branch that hasn't added its
-    // SMFWHE_DEFINEDWEBHOOK row yet) must not abort onboarding — see the corrective SQL
-    // data-fix this mirrors, whose WHERE w.name IN (...) join silently omits it too.
-    service.missingWebhookName = "SFRolesOverview";
-
-    service.wire("CLIENT-1", "USER-1", "ROLE-1");
-
-    // 4 cloned roles + 1 pre-existing admin role = 5 roles, 2 available webhooks each = 10 grants.
-    assertEquals(10, service.createdGrants.size());
-    assertTrue("no grant should exist for the missing webhook",
-        service.createdGrants.stream().noneMatch(g -> g.endsWith("|SFRolesOverview")));
-  }
-
-  // ---------------------------------------------------------------------------
-  // 4. Context handling
+  // 3. Context handling
   // ---------------------------------------------------------------------------
 
   @Test
@@ -276,12 +222,8 @@ public class OnboardingRoleProvisioningServiceTest {
     final Map<String, String> writtenShowAcctFields = new HashMap<>();
     final List<String> clonedRoleNames = new ArrayList<>();
     final Set<String> windowAccessClonedFor = new HashSet<>();
-    final List<Role> activeRolesForClient = new ArrayList<>();
-    final Set<String> alreadyGranted = new HashSet<>();
-    final Set<String> createdGrants = new HashSet<>();
 
     String missingTemplateRoleName;
-    String missingWebhookName;
     boolean flushed;
 
     private final Map<String, Role> clonedByName = new HashMap<>();
@@ -336,33 +278,6 @@ public class OnboardingRoleProvisioningServiceTest {
       // cloned without needing real WindowAccess rows.
       windowAccessClonedFor.add(role.getName());
       return new ArrayList<>();
-    }
-
-    @Override
-    protected List<Role> resolveActiveRolesForClient(String clientId) {
-      List<Role> all = new ArrayList<>(activeRolesForClient);
-      all.addAll(clonedByName.values());
-      return all;
-    }
-
-    @Override
-    protected boolean hasActiveGrant(String roleId, String webhookName) {
-      return alreadyGranted.contains(roleId + "|" + webhookName);
-    }
-
-    @Override
-    protected DefinedWebHook resolveWebhookByName(String webhookName) {
-      if (webhookName.equals(missingWebhookName)) {
-        return null;
-      }
-      DefinedWebHook webhook = mock(DefinedWebHook.class);
-      when(webhook.getName()).thenReturn(webhookName);
-      return webhook;
-    }
-
-    @Override
-    protected void createWebhookGrant(String clientId, Role role, DefinedWebHook webhook) {
-      createdGrants.add(role.getId() + "|" + webhook.getName());
     }
   }
 }

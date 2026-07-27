@@ -1234,19 +1234,19 @@ Dos specs de tipo reporte (`not-posted-documents`, `aging-receivable`) no tienen
 
 ## 19. Menu de Navegacion (SFListMenu)
 
-`SFListMenu` (`GET /webhooks/SFListMenu`) expone el arbol de `AD_Menu` -- o una busqueda plana filtrada con `?q=` -- como JSON, podado a lo que el role del request puede alcanzar. Es el webhook de menu filtrado por role, correctamente implementado y disponible para que cualquier cliente lo consuma. A diferencia de los endpoints `/sws/neo/*` de las secciones anteriores, vive en la infraestructura de Webhooks, junto a `SFUpsertSpec`/`SFPopulateSpec` (§5), no bajo el servlet de NEO.
+`SFListMenu` (`GET /webhooks/SFListMenu`, o preferentemente `GET /sws/neo/listmenu` -- ver `neo-headless.md` §4.10) expone el arbol de `AD_Menu` -- o una busqueda plana filtrada con `?q=` -- como JSON, podado a lo que el role del request puede alcanzar. Es el webhook de menu filtrado por role, correctamente implementado y disponible para que cualquier cliente lo consuma. El webhook en si esta escrito junto a `SFUpsertSpec`/`SFPopulateSpec` (§5) en la infraestructura de Webhooks, pero el SPA de Go lo alcanza via el NEO pseudo-spec bridge (`neo-headless.md` §4.10), no directamente por `/webhooks/SFListMenu`.
 
-> **Nota:** el sidebar del SPA de Go (`tools/app-shell` en `etendo_schema_forge`) todavia no consume este webhook -- sigue renderizando la navegacion desde un mock estatico `menu.json`, asi que el filtrado de menu por role todavia no se refleja en el frontend en ejecucion. Trackeado como ETP-4598.
+> **Nota:** el sidebar del SPA de Go (`tools/app-shell` en `etendo_schema_forge`) ahora consume este webhook (`useRoleMenu()` -> `lib/menuTree.js`) para calcular que entradas de menu puede ver el role actual -- pero solo para *filtrar*: la estructura, labels e iconos del arbol siguen viniendo de un `menu.json` estatico; `useRoleMenu()` solo extrae el set de ids permitidos del arbol devuelto para ocultar/mostrar las entradas estaticas correspondientes. Que el arbol renderizado refleje tambien la forma (orden, agrupamiento, anidado) de la respuesta de este webhook sigue pendiente -- trackeado como ETP-4598.
 
 ### Endpoints
 
 ```bash
-# Arbol completo, filtrado por el role actual
-curl -X GET https://tu-etendo/webhooks/SFListMenu \
+# Arbol completo, filtrado por el role actual (via NEO, preferido)
+curl -X GET https://tu-etendo/sws/neo/listmenu \
   -H "Authorization: Bearer <jwt>"
 
 # Busqueda plana por nombre, mismo filtrado
-curl -X GET "https://tu-etendo/webhooks/SFListMenu?q=sales" \
+curl -X GET "https://tu-etendo/sws/neo/listmenu?q=sales" \
   -H "Authorization: Bearer <jwt>"
 ```
 
@@ -1292,12 +1292,12 @@ Este endpoint controla que aparece **en el menu**. No bloquea la navegacion dire
 
 ## 19b. Mapa Proactivo de Acceso a Ventanas (SFWindowAccessMap)
 
-`SFWindowAccessMap` (`GET /webhooks/SFWindowAccessMap`) informa, para el usuario/role autenticado actual, su tier de acceso para cada ventana con una concesion explicita, mas si puede ver datos sensibles de contabilidad -- asi el frontend se adapta *antes* de renderizar en vez de descubrir un `403` reactivamente por-request (§18). Vive en la misma infraestructura de Webhooks que `SFListMenu`, no bajo el servlet NEO.
+`SFWindowAccessMap` (`GET /webhooks/SFWindowAccessMap`, o preferentemente `GET /sws/neo/windowaccessmap` -- ver `neo-headless.md` §4.10) informa, para el usuario/role autenticado actual, su tier de acceso para cada ventana con una concesion explicita, mas si puede ver datos sensibles de contabilidad -- asi el frontend se adapta *antes* de renderizar en vez de descubrir un `403` reactivamente por-request (§18). El webhook esta escrito en la misma infraestructura de Webhooks que `SFListMenu`, pero el SPA de Go lo alcanza via el NEO pseudo-spec bridge.
 
 ### Endpoint
 
 ```bash
-curl -X GET https://tu-etendo/webhooks/SFWindowAccessMap \
+curl -X GET https://tu-etendo/sws/neo/windowaccessmap \
   -H "Authorization: Bearer <jwt>"
 ```
 
