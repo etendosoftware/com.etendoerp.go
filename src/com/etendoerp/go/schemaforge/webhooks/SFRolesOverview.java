@@ -216,9 +216,9 @@ public class SFRolesOverview extends BaseWebhookService {
     criteria.add(Restrictions.eq(Role.PROPERTY_ACTIVE, true));
     criteria.add(Restrictions.or(
         Restrictions.eq(Role.PROPERTY_CLIENTADMIN, true),
-        Restrictions.in(Role.PROPERTY_NAME, FIXED_ROLE_NAMES)));
+        Restrictions.in(Role.PROPERTY_NAME, (Object[]) FIXED_ROLE_NAMES)));
 
-    List<Role> fixedNameOrder = Arrays.asList(FIXED_ROLE_NAMES);
+    List<String> fixedNameOrder = Arrays.asList(FIXED_ROLE_NAMES);
     List<Role> roles = new ArrayList<>((List<Role>) criteria.list());
     roles.sort((a, b) -> {
       boolean aAdmin = Boolean.TRUE.equals(a.isClientAdmin());
