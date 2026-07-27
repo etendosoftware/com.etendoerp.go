@@ -362,10 +362,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       sendAuthEmailBestEffort("new-account",
           () -> authEmailSender.sendNewAccount(account, normalizedLanguage));
 
-      JSONObject accountJson = new JSONObject();
-      accountJson.put("id", account.getId());
-      accountJson.put(FIELD_EMAIL, account.getEmail());
-      accountJson.put("name", account.getName());
+      JSONObject accountJson = buildAccountJson(account);
 
       JSONObject result = new JSONObject();
       result.put(FIELD_STATUS, STATUS_SUCCESS);
@@ -426,10 +423,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       String sessionToken = generateToken();
       EtendoGoJwtDalHelper.updateSessionToken(account, sessionToken);
 
-      JSONObject accountJson = new JSONObject();
-      accountJson.put("id", account.getId());
-      accountJson.put(FIELD_EMAIL, account.getEmail());
-      accountJson.put("name", account.getName());
+      JSONObject accountJson = buildAccountJson(account);
 
       JSONObject result = new JSONObject();
       result.put(FIELD_STATUS, STATUS_SUCCESS);
@@ -476,10 +470,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
         return;
       }
 
-      JSONObject accountJson = new JSONObject();
-      accountJson.put("id", account.getId());
-      accountJson.put(FIELD_EMAIL, account.getEmail());
-      accountJson.put("name", account.getName());
+      JSONObject accountJson = buildAccountJson(account);
 
       JSONObject result = new JSONObject();
       result.put(FIELD_STATUS, STATUS_SUCCESS);
@@ -760,10 +751,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       sendAuthEmailBestEffort("password-changed",
           () -> authEmailSender.sendPasswordChanged(account));
 
-      JSONObject accountJson = new JSONObject();
-      accountJson.put("id", account.getId());
-      accountJson.put(FIELD_EMAIL, account.getEmail());
-      accountJson.put("name", account.getName());
+      JSONObject accountJson = buildAccountJson(account);
 
       JSONObject result = new JSONObject();
       result.put(FIELD_STATUS, STATUS_SUCCESS);
@@ -2179,10 +2167,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
         return;
       }
 
-      JSONObject accountJson = new JSONObject();
-      accountJson.put("id", account.getId());
-      accountJson.put(FIELD_EMAIL, account.getEmail());
-      accountJson.put("name", account.getName());
+      JSONObject accountJson = buildAccountJson(account);
 
       JSONObject result = new JSONObject();
       result.put(FIELD_STATUS, STATUS_SUCCESS);
@@ -2290,6 +2275,18 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   }
 
   /**
+   * Build the standard {@code {id, email, name}} JSON projection of an account, shared by every
+   * endpoint that returns account data.
+   */
+  private static JSONObject buildAccountJson(Account account) throws JSONException {
+    JSONObject accountJson = new JSONObject();
+    accountJson.put("id", account.getId());
+    accountJson.put(FIELD_EMAIL, account.getEmail());
+    accountJson.put("name", account.getName());
+    return accountJson;
+  }
+
+  /**
    * Write a session response: sets the opaque {@code __Host-} cookie plus {@code no-store} and
    * {@code nosniff} headers, and returns { status, account, csrfToken }. The session token itself
    * is never placed in the body.
@@ -2300,10 +2297,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     response.setHeader(HEADER_CACHE_CONTROL, VALUE_NO_STORE);
     response.setHeader(HEADER_CONTENT_TYPE_OPTIONS, VALUE_NOSNIFF);
 
-    JSONObject accountJson = new JSONObject();
-    accountJson.put("id", account.getId());
-    accountJson.put(FIELD_EMAIL, account.getEmail());
-    accountJson.put("name", account.getName());
+    JSONObject accountJson = buildAccountJson(account);
 
     JSONObject result = new JSONObject();
     result.put(FIELD_STATUS, STATUS_SUCCESS);

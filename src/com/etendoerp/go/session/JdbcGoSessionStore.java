@@ -18,6 +18,7 @@ package com.etendoerp.go.session;
 
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
+import java.sql.SQLException;
 import java.sql.Timestamp;
 import java.time.Instant;
 
@@ -68,21 +69,7 @@ public class JdbcGoSessionStore implements GoSessionStore {
       try (PreparedStatement ps = connection.prepareStatement(INSERT_SQL)) {
         ps.setString(1, sessionRecord.getId());
         ps.setString(2, sessionRecord.getAccountId());
-        ps.setString(3, sessionRecord.getSessionTokenHash());
-        ps.setString(4, sessionRecord.getCsrfToken());
-        ps.setString(5, sessionRecord.getRefreshTokenHash());
-        ps.setString(6, sessionRecord.getAuthMethod());
-        ps.setString(7, sessionRecord.getUserId());
-        ps.setString(8, sessionRecord.getRoleId());
-        ps.setString(9, sessionRecord.getCtxClientId());
-        ps.setString(10, sessionRecord.getCtxOrgId());
-        ps.setString(11, sessionRecord.getWarehouseId());
-        ps.setTimestamp(12, toTimestamp(sessionRecord.getExpiresAt()));
-        ps.setTimestamp(13, toTimestamp(sessionRecord.getAbsoluteExpiresAt()));
-        ps.setString(14, sessionRecord.isRevoked() ? "Y" : "N");
-        ps.setString(15, sessionRecord.getRotatedFromId());
-        ps.setString(16, sessionRecord.getUserAgent());
-        ps.setString(17, sessionRecord.getIpHash());
+        bindMutableFields(ps, 3, sessionRecord);
         ps.executeUpdate();
       }
     });
@@ -92,25 +79,38 @@ public class JdbcGoSessionStore implements GoSessionStore {
   public void update(GoSessionRecord sessionRecord) {
     OBDal.getInstance().getSession().doWork(connection -> {
       try (PreparedStatement ps = connection.prepareStatement(UPDATE_SQL)) {
-        ps.setString(1, sessionRecord.getSessionTokenHash());
-        ps.setString(2, sessionRecord.getCsrfToken());
-        ps.setString(3, sessionRecord.getRefreshTokenHash());
-        ps.setString(4, sessionRecord.getAuthMethod());
-        ps.setString(5, sessionRecord.getUserId());
-        ps.setString(6, sessionRecord.getRoleId());
-        ps.setString(7, sessionRecord.getCtxClientId());
-        ps.setString(8, sessionRecord.getCtxOrgId());
-        ps.setString(9, sessionRecord.getWarehouseId());
-        ps.setTimestamp(10, toTimestamp(sessionRecord.getExpiresAt()));
-        ps.setTimestamp(11, toTimestamp(sessionRecord.getAbsoluteExpiresAt()));
-        ps.setString(12, sessionRecord.isRevoked() ? "Y" : "N");
-        ps.setString(13, sessionRecord.getRotatedFromId());
-        ps.setString(14, sessionRecord.getUserAgent());
-        ps.setString(15, sessionRecord.getIpHash());
-        ps.setString(16, sessionRecord.getId());
+        int nextIndex = bindMutableFields(ps, 1, sessionRecord);
+        ps.setString(nextIndex, sessionRecord.getId());
         ps.executeUpdate();
       }
     });
+  }
+
+  /**
+   * Bind the mutable session columns (everything but the id/account, which differ between insert
+   * and update) starting at {@code startIndex}, shared by {@link #save} and {@link #update}.
+   *
+   * @return the next unused parameter index
+   */
+  private static int bindMutableFields(PreparedStatement ps, int startIndex,
+      GoSessionRecord sessionRecord) throws SQLException {
+    int i = startIndex;
+    ps.setString(i++, sessionRecord.getSessionTokenHash());
+    ps.setString(i++, sessionRecord.getCsrfToken());
+    ps.setString(i++, sessionRecord.getRefreshTokenHash());
+    ps.setString(i++, sessionRecord.getAuthMethod());
+    ps.setString(i++, sessionRecord.getUserId());
+    ps.setString(i++, sessionRecord.getRoleId());
+    ps.setString(i++, sessionRecord.getCtxClientId());
+    ps.setString(i++, sessionRecord.getCtxOrgId());
+    ps.setString(i++, sessionRecord.getWarehouseId());
+    ps.setTimestamp(i++, toTimestamp(sessionRecord.getExpiresAt()));
+    ps.setTimestamp(i++, toTimestamp(sessionRecord.getAbsoluteExpiresAt()));
+    ps.setString(i++, sessionRecord.isRevoked() ? "Y" : "N");
+    ps.setString(i++, sessionRecord.getRotatedFromId());
+    ps.setString(i++, sessionRecord.getUserAgent());
+    ps.setString(i++, sessionRecord.getIpHash());
+    return i;
   }
 
   @Override
