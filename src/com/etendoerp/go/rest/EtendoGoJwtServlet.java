@@ -125,6 +125,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private static final String FIELD_AUTH_METHOD = "authMethod";
   private static final String FIELD_LANGUAGE = "language";
   private static final String FIELD_PAYMENT_TOKEN = "paymentToken";
+  private static final String FIELD_ACCOUNT_EMAIL = "accountEmail";
   private static final String FIELD_ERROR = "error";
   private static final String ERROR_PAYMENT_REQUIRED = "payment_required";
   // javax.servlet.http.HttpServletResponse predates RFC 7231 and has no 402 constant.
@@ -910,7 +911,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   /**
    * GET /sws/go/environments
    * Header: Authorization: Bearer <session_token>
-   * Returns 200 with environments linked to the account.
+   * Returns 200 with environments linked to the account, each carrying its plan
+   * ("free" | "productive"), plus the account email as the flag-targeting identity.
    * Links via AD_User.username matching the account email.
    */
   private void handleEnvironments(HttpServletRequest request, HttpServletResponse response)
@@ -948,6 +950,11 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
 
       JSONObject result = new JSONObject();
       result.put("environments", envArray);
+      // The account email is the backend's feature-flag targeting key. Returned here (ETP-4686) so
+      // the web client can target on the same identity without a second round trip to /me: the only
+      // account identity it persists is the ERP admin username of the selected environment, which
+      // would bucket the same user differently once a targeting-aware provider is wired up.
+      result.put(FIELD_ACCOUNT_EMAIL, account.getEmail());
       writeResponse(response, HttpServletResponse.SC_OK, result);
     } catch (RuntimeException e) {
       log.error("Database error in /environments", e);

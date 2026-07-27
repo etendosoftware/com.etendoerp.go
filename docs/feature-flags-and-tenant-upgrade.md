@@ -61,9 +61,22 @@ Accepted affirmatives: `true`, `Y`, `yes`, `1`. Accepted negatives: `false`, `N`
 
 Because flags come from configuration, this provider serves **environment-level rollout, not
 per-user targeting**. The evaluation context is accepted for API compatibility and passed through,
-but does not affect the result. Per-user bucketing arrives with the hosted provider; the targeting
-key is already the account email, matching what the web client uses, so both ends will bucket a
-given user identically once it does.
+but does not affect the result. Per-user bucketing arrives with the hosted provider.
+
+### Targeting key
+
+The backend targets on the **account email**. The web client must use the same value or the two ends
+will bucket the same user differently.
+
+This needs care, because the only account identity the client persists (`sf_auth_user`) is written
+by `buildEnvironmentSessionStorage` in `@etendosoftware/etendo-go-core` as
+`env.adminUserName || env.adminUser` — the **ERP admin username of the selected environment**, not
+the account email. Targeting on that would silently disagree with the backend.
+
+So `GET /sws/go/environments` returns the account email at the top level (see §3), letting the client
+target correctly from a call it already makes rather than a second round trip to `/me`. This is inert
+while the properties provider ignores the evaluation context, but it must be honoured the moment a
+targeting-aware provider is wired up.
 
 ### Failure behaviour — never block, never fail, default false
 
@@ -159,18 +172,30 @@ resume stays free even if the payload carried a token.
 
 ### Exposure in `/environments`
 
-Each item in the `GET /sws/go/environments` response carries an additional field:
+The `GET /sws/go/environments` response gained two additive fields:
 
 ```json
 {
-  "clientId": "…", "clientName": "…", "orgId": "…", "orgName": "…",
-  "adminUserId": "…", "adminUser": "…", "adminUserName": "…",
-  "plan": "free"
+  "environments": [
+    {
+      "clientId": "…", "clientName": "…", "orgId": "…", "orgName": "…",
+      "adminUserId": "…", "adminUser": "…", "adminUserName": "…",
+      "plan": "free"
+    }
+  ],
+  "accountEmail": "user@example.com"
 }
 ```
 
-`plan` is `"free"` or `"productive"`. The addition is backward compatible — clients that ignore the
-field are unaffected — and it lets the environment picker badge each tenant.
+- **`plan`** (per environment) is `"free"` or `"productive"`, for badging each tenant in the picker.
+- **`accountEmail`** (top level) is the flag-targeting identity described in §1.
+
+Both are backward compatible; clients that ignore them are unaffected.
+
+> **Open item — the plan badge is not yet rendered.** The environment picker (`EnvSelectStep.jsx`)
+> lives in `@etendosoftware/etendo-go-core`, not in the functional repo, so consuming `plan` needs a
+> change and version bump on the core side. The backend field is stable and shipped; the UI side is
+> waiting on that pickup.
 
 ## 4. When the hosted control plane lands
 
