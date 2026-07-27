@@ -17,6 +17,9 @@
 
 package com.etendoerp.go.featureflags;
 
+import java.util.Locale;
+import java.util.Optional;
+
 import org.apache.commons.lang3.StringUtils;
 
 import com.etendoerp.go.common.GoRuntimeProperties;
@@ -68,8 +71,8 @@ public class PropertiesFeatureProvider implements dev.openfeature.sdk.FeaturePro
     if (configured == null) {
       return defaultResult(defaultValue);
     }
-    Boolean parsed = parseBoolean(configured);
-    if (parsed == null) {
+    Optional<Boolean> parsed = parseBoolean(configured);
+    if (!parsed.isPresent()) {
       return ProviderEvaluation.<Boolean>builder()
           .value(defaultValue)
           .reason(REASON_DEFAULT)
@@ -78,7 +81,7 @@ public class PropertiesFeatureProvider implements dev.openfeature.sdk.FeaturePro
           .build();
     }
     return ProviderEvaluation.<Boolean>builder()
-        .value(parsed)
+        .value(parsed.get())
         .reason(REASON_STATIC)
         .build();
   }
@@ -127,22 +130,28 @@ public class PropertiesFeatureProvider implements dev.openfeature.sdk.FeaturePro
    * {@code ETGO_FLAG_TENANT_UPGRADE}.
    */
   static String toEnvName(String flagKey) {
-    return ENV_PREFIX + flagKey.toUpperCase(java.util.Locale.ROOT).replaceAll("[^A-Z0-9]", "_");
+    return ENV_PREFIX + flagKey.toUpperCase(Locale.ROOT).replaceAll("[^A-Z0-9]", "_");
   }
 
   /**
    * Accepts only explicit affirmatives and negatives. Anything else is a configuration mistake and
    * is reported as a parse error rather than silently read as false, which would make a typo
    * indistinguishable from an intentionally disabled flag.
+   *
+   * <p>Returns an {@link Optional} rather than a nullable {@code Boolean} so the "not parseable"
+   * case cannot reach a caller that unboxes it into a NullPointerException.
+   *
+   * @param value the configured value
+   * @return the parsed flag state, or empty when the value is neither affirmative nor negative
    */
-  private static Boolean parseBoolean(String value) {
+  private static Optional<Boolean> parseBoolean(String value) {
     if (StringUtils.equalsAnyIgnoreCase(value, "true", "Y", "yes", "1")) {
-      return Boolean.TRUE;
+      return Optional.of(Boolean.TRUE);
     }
     if (StringUtils.equalsAnyIgnoreCase(value, "false", "N", "no", "0")) {
-      return Boolean.FALSE;
+      return Optional.of(Boolean.FALSE);
     }
-    return null;
+    return Optional.empty();
   }
 
   private static <T> ProviderEvaluation<T> defaultResult(T defaultValue) {
