@@ -18,24 +18,25 @@
 package com.etendoerp.go.schemaforge.telemetry;
 
 import org.apache.commons.lang3.StringUtils;
-import org.apache.logging.log4j.LogManager;
-import org.apache.logging.log4j.Logger;
+
+import com.etendoerp.go.common.GoRuntimeProperties;
 
 /**
  * Runtime Mixpanel configuration for backend telemetry.
  */
 public final class MixpanelNeoTelemetryConfig {
 
-  private static final Logger log = LogManager.getLogger(MixpanelNeoTelemetryConfig.class);
+  // Public because backend feature flags target the same Mixpanel project and therefore reuse the
+  // project token and API host rather than defining settings of their own.
+  public static final String PROP_TOKEN = "etendo.go.mixpanel.token";
+  public static final String PROP_API_HOST = "etendo.go.mixpanel.apiHost";
+  public static final String ENV_TOKEN = "ETGO_MIXPANEL_TOKEN";
+  public static final String ENV_API_HOST = "ETGO_MIXPANEL_API_HOST";
 
   static final String PROP_ENABLED = "etendo.go.mixpanel.enabled";
-  static final String PROP_TOKEN = "etendo.go.mixpanel.token";
-  static final String PROP_API_HOST = "etendo.go.mixpanel.apiHost";
   static final String PROP_TIMEOUT_MS = "etendo.go.mixpanel.timeoutMs";
   static final String PROP_DISTINCT_ID = "etendo.go.mixpanel.distinctId";
   static final String ENV_ENABLED = "ETGO_MIXPANEL_ENABLED";
-  static final String ENV_TOKEN = "ETGO_MIXPANEL_TOKEN";
-  static final String ENV_API_HOST = "ETGO_MIXPANEL_API_HOST";
   static final String ENV_TIMEOUT_MS = "ETGO_MIXPANEL_TIMEOUT_MS";
   static final String ENV_DISTINCT_ID = "ETGO_MIXPANEL_DISTINCT_ID";
   static final String DEFAULT_API_HOST = "https://api-eu.mixpanel.com";
@@ -72,12 +73,13 @@ public final class MixpanelNeoTelemetryConfig {
    * @return runtime backend Mixpanel configuration
    */
   public static MixpanelNeoTelemetryConfig fromRuntime() {
-    boolean enabled = isTruthy(readConfigValue(PROP_ENABLED, ENV_ENABLED, "true"));
-    String token = readConfigValue(PROP_TOKEN, ENV_TOKEN, null);
-    String apiHost = readConfigValue(PROP_API_HOST, ENV_API_HOST, DEFAULT_API_HOST);
-    String distinctId = readConfigValue(PROP_DISTINCT_ID, ENV_DISTINCT_ID, DEFAULT_DISTINCT_ID);
-    int timeoutMs = parseTimeout(readConfigValue(PROP_TIMEOUT_MS, ENV_TIMEOUT_MS,
-        String.valueOf(DEFAULT_TIMEOUT_MS)));
+    boolean enabled = GoRuntimeProperties.readBoolean(PROP_ENABLED, ENV_ENABLED, true);
+    String token = GoRuntimeProperties.readValue(PROP_TOKEN, ENV_TOKEN, null);
+    String apiHost = GoRuntimeProperties.readValue(PROP_API_HOST, ENV_API_HOST, DEFAULT_API_HOST);
+    String distinctId = GoRuntimeProperties.readValue(PROP_DISTINCT_ID, ENV_DISTINCT_ID,
+        DEFAULT_DISTINCT_ID);
+    int timeoutMs = GoRuntimeProperties.readInt(PROP_TIMEOUT_MS, ENV_TIMEOUT_MS,
+        DEFAULT_TIMEOUT_MS);
     return new MixpanelNeoTelemetryConfig(enabled, token, apiHost, distinctId, timeoutMs);
   }
 
@@ -105,38 +107,4 @@ public final class MixpanelNeoTelemetryConfig {
     return timeoutMs;
   }
 
-  private static String readConfigValue(String propertyName, String envName, String defaultValue) {
-    String systemValue = StringUtils.trimToNull(System.getProperty(propertyName));
-    if (systemValue != null) {
-      return systemValue;
-    }
-    String openbravoValue = readOpenbravoProperty(propertyName);
-    if (openbravoValue != null) {
-      return openbravoValue;
-    }
-    String envValue = StringUtils.trimToNull(System.getenv(envName));
-    return envValue != null ? envValue : defaultValue;
-  }
-
-  private static String readOpenbravoProperty(String propertyName) {
-    try {
-      return StringUtils.trimToNull(org.openbravo.base.session.OBPropertiesProvider.getInstance()
-          .getOpenbravoProperties().getProperty(propertyName));
-    } catch (Exception e) {
-      log.debug("Could not read Openbravo property {}: {}", propertyName, e.getMessage(), e);
-      return null;
-    }
-  }
-
-  private static boolean isTruthy(String value) {
-    return "true".equalsIgnoreCase(value) || "Y".equalsIgnoreCase(value);
-  }
-
-  private static int parseTimeout(String rawTimeout) {
-    try {
-      return Integer.parseInt(rawTimeout);
-    } catch (NumberFormatException e) {
-      return DEFAULT_TIMEOUT_MS;
-    }
-  }
 }

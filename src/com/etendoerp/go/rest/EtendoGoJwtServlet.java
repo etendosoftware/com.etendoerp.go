@@ -56,6 +56,10 @@ import org.openbravo.model.common.enterprise.Organization;
 import com.etendoerp.go.common.EtendoGoCorsServlet;
 import com.etendoerp.go.common.ProtocolErrorAdapters;
 import com.etendoerp.go.common.PublicUrlResolver;
+import com.etendoerp.go.featureflags.FeatureFlagContext;
+import com.etendoerp.go.featureflags.GoFeatureFlags;
+import com.etendoerp.go.payment.TenantPaywallService;
+import com.etendoerp.go.payment.TenantPlanService;
 import com.etendoerp.go.onboarding.OnboardingBaselineService;
 import com.etendoerp.go.onboarding.OnboardingAccountingWiringService;
 import com.etendoerp.go.onboarding.OnboardingDatasetImportService;
@@ -86,7 +90,8 @@ import com.smf.securewebservices.utils.SecureWebServicesUtils;
  *   GET  /sws/go/onboarding/draft  — Get the saved onboarding wizard draft (requires session token)
  *   POST /sws/go/onboarding/draft  — Save or clear the onboarding wizard draft (requires session token)
  *   GET  /sws/go/me           — Get current account info (requires session token)
- *   GET  /sws/go/environments — List environments for the account (requires session token)
+ *   GET  /sws/go/environments — List environments for the account (requires session token),
+ *                               each carrying its plan ("free" | "productive")
  *   GET  /sws/go/login?userId=X — Get an Etendo JWT for an AD_User (requires session token + ownership)
  *
  * Auth model: session token in Authorization header ("Bearer <token>").
@@ -119,6 +124,12 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private static final String FIELD_ACCOUNT = "account";
   private static final String FIELD_AUTH_METHOD = "authMethod";
   private static final String FIELD_LANGUAGE = "language";
+  private static final String FIELD_PAYMENT_TOKEN = "paymentToken";
+  private static final String FIELD_ERROR = "error";
+  private static final String ERROR_PAYMENT_REQUIRED = "payment_required";
+  // javax.servlet.http.HttpServletResponse predates RFC 7231 and has no 402 constant.
+  private static final int SC_PAYMENT_REQUIRED = 402;
+  private static final String ZERO_ID = "0";
   private static final String STATUS_SUCCESS = FIELD_SUCCESS;
   private static final String INVALID_JSON_BODY = "Invalid JSON body";
   private static final String INTERNAL_ERROR = "Internal error";
@@ -175,6 +186,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       new OnboardingBaselineService();
   OnboardingPsd2SyncService onboardingPsd2SyncService =
       new OnboardingPsd2SyncService();
+  TenantPaywallService tenantPaywallService = new TenantPaywallService();
+  TenantPlanService tenantPlanService = new TenantPlanService();
   private final TransactionalAuthEmailSender authEmailSender;
   private final EtendoGoSsoProviderRegistry ssoProviderRegistry;
 
@@ -1004,12 +1017,19 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   /**
    * POST /sws/go/onboarding
    * Header: Authorization: Bearer <session_token>
-   * Body: { "clientName": "...", "currency": "EUR", "language": "es_ES", "countryCode": "ES" }
+   * Body: { "clientName": "...", "currency": "EUR", "language": "es_ES", "countryCode": "ES",
+   *         "paymentToken": "mock-paid-..." }
    *
    * Creates a new Etendo environment (AD_Client + AD_Org) using the existing
    * InitialClientSetup and InitialOrgSetup business utilities.
    *
    * Streams NDJSON progress lines to the frontend.
+   *
+   * <p>When the {@code tenant-upgrade} flag is on, an account that already owns a tenant must
+   * supply an accepted {@code paymentToken} to create an additional one; otherwise the request is
+   * refused with HTTP 402 and {@code {"error":"payment_required"}} before any provisioning starts.
+   * The flag defaults to off, and a first tenant is always free. See
+   * {@code docs/feature-flags-and-tenant-upgrade.md}.
    */
   private void handleOnboarding(HttpServletRequest request, HttpServletResponse response)
       throws IOException {
@@ -1032,6 +1052,24 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
 
     String currencyId = resolveCurrencyId(onboardingRequest.currencyIso, response);
     if (currencyId == null) {
+      return;
+    }
+
+    // Paywall (ETP-4686). Runs before the NDJSON stream opens and before any provisioning, so a
+    // refused request leaves no half-created tenant behind and can still answer with a plain
+    // JSON error instead of a stream. The backend is authoritative here: the /upgrade page in the
+    // web client shows the checkout, but this check is what actually gates tenant creation.
+    boolean paidUpgrade;
+    try {
+      PaywallOutcome paywall = evaluatePaywall(accountEmail, onboardingRequest);
+      if (paywall.decision.isBlocked()) {
+        writePaymentRequiredError(response, paywall.decision);
+        return;
+      }
+      paidUpgrade = paywall.paid;
+    } catch (RuntimeException e) {
+      log.error("Paywall evaluation failed for onboarding", e);
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, SERVER_ERROR);
       return;
     }
 
@@ -1061,6 +1099,12 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       AdminContextData adminContext = resolveAdminContextData(clientId, writer);
       if (adminContext == null) {
         return;
+      }
+
+      if (paidUpgrade) {
+        // Written inside the onboarding transaction so the marker commits with the tenant, or is
+        // rolled back with it. A tenant is never left provisioned but unmarked.
+        tenantPlanService.markProductive(clientId, adminContext.starOrgId);
       }
 
       // The returned flag (created vs. already-existing) is no longer used to gate downstream
@@ -1172,6 +1216,73 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     }
   }
 
+  /**
+   * Resolves the paywall decision for an onboarding request (ETP-4686).
+   *
+   * <p>Reads the {@code tenant-upgrade} flag from the backend flag provider — the authoritative
+   * evaluation, independent of whatever the web client decided — and combines it with what the
+   * account already owns. The two ownership lookups only run while the flag is on, so with the flag
+   * off this method costs nothing and always allows the request, exactly as before the feature.
+   */
+  private PaywallOutcome evaluatePaywall(String accountEmail,
+      OnboardingRequestData onboardingRequest) {
+    if (!isTenantUpgradeEnabled(accountEmail)) {
+      return new PaywallOutcome(TenantPaywallService.Decision.ALLOWED, false);
+    }
+    OBContext.setOBContext(ZERO_ID, ZERO_ID, ZERO_ID, ZERO_ID);
+    OBContext.setAdminMode(true);
+    try {
+      boolean ownsTenant = EtendoGoJwtDalHelper.countTenantsOwnedByAccountEmail(accountEmail) > 0;
+      boolean resuming = isResumingOwnedTenant(onboardingRequest.clientName, accountEmail);
+      TenantPaywallService.Decision decision = tenantPaywallService.decide(true, ownsTenant,
+          resuming, onboardingRequest.paymentToken);
+      // Only a request that actually had to clear the paywall counts as a paid upgrade. A first
+      // tenant, or a resume, stays on the free plan even if the payload carried a token.
+      boolean paid = !decision.isBlocked() && ownsTenant && !resuming;
+      return new PaywallOutcome(decision, paid);
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  /**
+   * Evaluates the {@code tenant-upgrade} flag for this account. Targets on the account email, the
+   * same targeting key the web client uses, so both ends bucket a given user identically.
+   */
+  private boolean isTenantUpgradeEnabled(String accountEmail) {
+    return GoFeatureFlags.isEnabled(GoFeatureFlags.FLAG_TENANT_UPGRADE,
+        FeatureFlagContext.forAccount(accountEmail));
+  }
+
+  /**
+   * Tells a resume of an existing tenant from a request for a new one. A company name that already
+   * resolves to a client this account owns is the retry path {@code validateExistingClient} handles
+   * downstream — provisioning it again reconciles what is missing rather than creating a tenant, so
+   * it must not be charged a second time.
+   */
+  private boolean isResumingOwnedTenant(String clientName, String accountEmail) {
+    String existingClientId = EtendoGoJwtSupport.findClientIdByName(clientName);
+    return existingClientId != null
+        && EtendoGoJwtDalHelper.clientBelongsToAccountEmail(existingClientId, accountEmail);
+  }
+
+  private void writePaymentRequiredError(HttpServletResponse response,
+      TenantPaywallService.Decision decision) throws IOException {
+    String message = decision == TenantPaywallService.Decision.PAYMENT_DECLINED
+        ? "The payment was declined. Use a different payment method and try again."
+        : "Creating an additional environment requires a payment. Complete the checkout and retry.";
+    JSONObject body = new JSONObject();
+    try {
+      body.put(FIELD_ERROR, ERROR_PAYMENT_REQUIRED);
+      body.put(FIELD_MESSAGE, message);
+    } catch (JSONException e) {
+      log.error("Could not build the payment-required response", e);
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, INTERNAL_ERROR);
+      return;
+    }
+    writeResponse(response, SC_PAYMENT_REQUIRED, body);
+  }
+
   private String resolveOnboardingAccountEmail(String token, HttpServletResponse response)
       throws IOException {
     String accountEmail = null;
@@ -1238,6 +1349,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       // it becomes the display name of the client admin user (otherwise Etendo's
       // InitialClientSetup leaves it as the username/email).
       data.fullName = body.optString("fullName", "").trim();
+      data.paymentToken = body.optString(FIELD_PAYMENT_TOKEN, "").trim();
       return data;
     } catch (JSONException e) {
         String message = e.getMessage() != null && e.getMessage().contains(FIELD_CLIENT_NAME)
@@ -1928,11 +2040,28 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     private String countryCode;
     private String address;
     private String fullName;
+    // Present only when the paid second-tenant flow issued one (ETP-4686). Ignored while the
+    // tenant-upgrade flag is off and for an account's first tenant.
+    private String paymentToken;
   }
 
   private static class AdminContextData {
     private String adminRoleId;
     private String adminUserId;
     private String starOrgId;
+  }
+
+  /**
+   * Paywall verdict for one onboarding request: whether it may proceed, and whether it proceeded by
+   * paying (which is what marks the resulting tenant productive).
+   */
+  private static class PaywallOutcome {
+    private final TenantPaywallService.Decision decision;
+    private final boolean paid;
+
+    PaywallOutcome(TenantPaywallService.Decision decision, boolean paid) {
+      this.decision = decision;
+      this.paid = paid;
+    }
   }
 }
