@@ -63,6 +63,9 @@ final class ReactivationSupport {
   /** Module extension column holding a bank-statement line's amount still pending to reconcile. */
   static final String COL_PENDING_AMOUNT = "EM_ETGO_Pending_Amount";
 
+  /** Stand-in for a missing id in log messages, so logging never dereferences a null record. */
+  private static final String NULL_ID = "<null>";
+
   private ReactivationSupport() {
   }
 
@@ -87,7 +90,7 @@ final class ReactivationSupport {
       return value != null ? StringUtils.trimToNull(String.valueOf(value)) : null;
     } catch (Exception e) {
       log.debug("Could not read match-group id on line {}: {}",
-          line != null ? line.getId() : "<null>", e.getMessage());
+          line != null ? line.getId() : NULL_ID, e.getMessage());
       return null;
     }
   }
@@ -120,7 +123,7 @@ final class ReactivationSupport {
         line.set(prop.getName(), null);
       }
     } catch (Exception e) {
-      log.warn("Could not clear match-group id on line {}", line != null ? line.getId() : "<null>", e);
+      log.warn("Could not clear match-group id on line {}", line != null ? line.getId() : NULL_ID, e);
     }
   }
 
@@ -174,7 +177,7 @@ final class ReactivationSupport {
       // not null-check its account, so dereferencing it here would turn this decorative helper's
       // "degrade to 0" into a 500.
       log.debug("Could not count draft reconciliations for account {}: {}",
-          account != null ? account.getId() : "<null>", e.getMessage());
+          account != null ? account.getId() : NULL_ID, e.getMessage());
       return 0;
     }
   }

@@ -101,6 +101,116 @@ final class ReconciliationHandlerSupport {
     return runPostAction(handler, context, ACTION_REACTIVATE_SELECTED);
   }
 
+  // ---------------------------------------------------------------------------
+  // GET action dispatch wrappers (param reading + admin mode + error mapping)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Reads the query params, runs the builder in admin mode and maps any failure to a 500 — the
+   * read-only counterpart of {@link #runPostAction}. These live here, next to the POST wrappers, so
+   * {@link ReconciliationHandler} stays under the Sonar per-class method limit (java:S1448); the
+   * {@code build*} methods they delegate to remain on the handler as test seams.
+   */
+  static NeoResponse handlePendingLines(ReconciliationHandler handler, NeoContext context) {
+    Map<String, String> qp = context.getQueryParams();
+    String accountId = qp != null ? qp.get(ReconciliationHandler.PARAM_ACCOUNT_ID) : null;
+    if (StringUtils.isBlank(accountId)) {
+      return missingParam(ReconciliationHandler.PARAM_ACCOUNT_ID);
+    }
+    try {
+      OBContext.setAdminMode(true);
+      String clientId = OBContext.getOBContext().getCurrentClient().getId();
+      Set<String> orgs = ReconciliationSupport.accessibleOrgs(
+          OBContext.getOBContext().getCurrentOrganization().getId());
+      return handler.buildPendingLines(accountId, clientId, orgs, qp);
+    } catch (Exception e) {
+      log.error("Error building pendingLines for account {}", accountId, e);
+      return internalError();
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  /** {@link #handlePendingLines} for the candidates list; branches on {@code kind=invoices}. */
+  static NeoResponse handleCandidates(ReconciliationHandler handler, NeoContext context) {
+    Map<String, String> qp = context.getQueryParams();
+    String accountId = qp != null ? qp.get(ReconciliationHandler.PARAM_ACCOUNT_ID) : null;
+    if (StringUtils.isBlank(accountId)) {
+      return missingParam(ReconciliationHandler.PARAM_ACCOUNT_ID);
+    }
+    String lineId = qp != null ? qp.get(ReconciliationHandler.PARAM_LINE_ID) : null;
+    String docType = qp != null ? qp.get(ReconciliationHandler.PARAM_DOC_TYPE) : null;
+    String kind = qp != null ? qp.get(ReconciliationHandler.PARAM_KIND) : null;
+    String dateFrom = qp != null ? qp.get(ReconciliationHandler.PARAM_DATE_FROM) : null;
+    String dateTo = qp != null ? qp.get(ReconciliationHandler.PARAM_DATE_TO) : null;
+    try {
+      OBContext.setAdminMode(true);
+      if (ReconciliationHandler.KIND_INVOICES.equalsIgnoreCase(kind)) {
+        return handler.buildInvoiceCandidates(accountId, lineId, docType, dateFrom, dateTo);
+      }
+      return handler.buildCandidates(accountId, lineId, docType, dateFrom, dateTo);
+    } catch (Exception e) {
+      log.error("Error building candidates for account {}", accountId, e);
+      return internalError();
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  /** {@link #handlePendingLines} for the automatch preview (never mutates data). */
+  static NeoResponse handleAutoMatch(ReconciliationHandler handler, NeoContext context) {
+    Map<String, String> qp = context.getQueryParams();
+    String accountId = qp != null ? qp.get(ReconciliationHandler.PARAM_ACCOUNT_ID) : null;
+    if (StringUtils.isBlank(accountId)) {
+      return missingParam(ReconciliationHandler.PARAM_ACCOUNT_ID);
+    }
+    try {
+      OBContext.setAdminMode(true);
+      return handler.buildAutoMatch(accountId);
+    } catch (Exception e) {
+      log.error("Error building autoMatch for account {}", accountId, e);
+      return internalError();
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  /**
+   * Reverses one matched transaction's auto-created movement (or restores its "not cleared" status)
+   * as the last cleanup step of {@code ReconciliationHandler.undoReconciliation}. Catches and logs
+   * its own failure instead of aborting that loop: Core's reversal utilities commit mid-flow, so a
+   * failure on transaction K does not roll back 1..K-1 — aborting would only leave K+1..N unprocessed
+   * too, compounding the inconsistency. The reconciliation itself is already undone by the time this
+   * runs, so a failed reversal here is a rare, logged, individually-recoverable leftover.
+   */
+  static void reverseMatchedTransaction(ReconciliationHandler handler, FIN_FinaccTransaction t) {
+    try {
+      if (handler.isAutoCreated(t)) {
+        FIN_Payment payment = t.getFinPayment();
+        if (payment != null) {
+          PaymentRemovalUtil.reactivateAndRemove(payment);
+        } else {
+          TransactionRemovalUtil.reactivateAndRemove(t.getId());
+        }
+      } else {
+        ReactivationSupport.restoreNotClearedStatus(t);
+      }
+    } catch (Exception e) {
+      log.error("Failed to reverse the auto-created movement for transaction {} while undoing a "
+          + "reconciliation; the reconciliation itself was already undone.", t.getId(), e);
+    }
+  }
+
+  private static NeoResponse missingParam(String param) {
+    return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
+        ReconciliationHandler.MSG_MISSING_PARAM + param);
+  }
+
+  private static NeoResponse internalError() {
+    return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
+        ReconciliationHandler.MSG_INTERNAL_SERVER_ERROR);
+  }
+
   /**
    * Shared dispatch envelope for the mutating POST actions: rejects an empty body, runs the action
    * in admin mode, maps a business {@link OBException} to 400 (+rollback) and any other failure to

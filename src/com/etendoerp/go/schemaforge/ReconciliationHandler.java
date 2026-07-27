@@ -135,13 +135,13 @@ public class ReconciliationHandler implements NeoHandler {
   private static final String METHOD_POST = "POST";
 
   private static final String PARAM_ACTION = "action";
-  private static final String PARAM_ACCOUNT_ID = "accountId";
-  private static final String PARAM_LINE_ID = "lineId";
-  private static final String PARAM_DOC_TYPE = "docType";
-  private static final String PARAM_KIND = "kind";
-  private static final String KIND_INVOICES = "invoices";
-  private static final String PARAM_DATE_FROM = "dateFrom";
-  private static final String PARAM_DATE_TO = "dateTo";
+  static final String PARAM_ACCOUNT_ID = "accountId";
+  static final String PARAM_LINE_ID = "lineId";
+  static final String PARAM_DOC_TYPE = "docType";
+  static final String PARAM_KIND = "kind";
+  static final String KIND_INVOICES = "invoices";
+  static final String PARAM_DATE_FROM = "dateFrom";
+  static final String PARAM_DATE_TO = "dateTo";
   private static final String PARAM_Q = "q";
 
   private static final String ACTION_PENDING_LINES = "pendingLines";
@@ -152,6 +152,32 @@ public class ReconciliationHandler implements NeoHandler {
   private static final String ACTION_REACTIVATE = "reactivate";
   private static final String ACTION_REMOVE_OPERATION = "removeOperation";
   private static final String ACTION_REACTIVATE_SELECTED = "reactivateSelected";
+
+  /** One route of the {@code ?action=} dispatcher. */
+  @FunctionalInterface
+  private interface ActionRoute {
+    NeoResponse apply(ReconciliationHandler handler, NeoContext context);
+  }
+
+  /**
+   * {@code "<httpMethod> <action>"} → its route, so {@link #handle(NeoContext)} stays a single lookup
+   * however many actions this handler grows (Sonar java:S3776). Unknown keys fall through to the
+   * generic spec handling, exactly as the previous if-chain's final {@code return null} did.
+   */
+  private static final Map<String, ActionRoute> ROUTES = Map.of(
+      METHOD_GET + " " + ACTION_PENDING_LINES,
+      ReconciliationHandlerSupport::handlePendingLines,
+      METHOD_GET + " " + ACTION_CANDIDATES, ReconciliationHandlerSupport::handleCandidates,
+      METHOD_GET + " " + ACTION_AUTO_MATCH, ReconciliationHandlerSupport::handleAutoMatch,
+      METHOD_POST + " " + ACTION_RECONCILE_GROUP,
+      ReconciliationHandlerSupport::handleReconcileGroup,
+      METHOD_POST + " " + ACTION_APPLY_SUGGESTIONS,
+      ReconciliationHandlerSupport::handleApplySuggestions,
+      METHOD_POST + " " + ACTION_REACTIVATE, ReconciliationHandlerSupport::handleReactivate,
+      METHOD_POST + " " + ACTION_REMOVE_OPERATION,
+      ReconciliationHandlerSupport::handleRemoveOperation,
+      METHOD_POST + " " + ACTION_REACTIVATE_SELECTED,
+      ReconciliationHandlerSupport::handleReactivateSelected);
 
   /** Match level recorded on the reconciliation lines produced by this handler. */
   private static final String MATCH_LEVEL_MANUAL = "MANUALMATCH";
@@ -168,7 +194,7 @@ public class ReconciliationHandler implements NeoHandler {
    * package-private (not {@code private}) so the sibling {@link ReconciliationHandlerSupport}
    * helpers extracted from this handler can reuse the exact same keys/messages.
    */
-  private static final String MSG_MISSING_PARAM = "Missing required parameter: ";
+  static final String MSG_MISSING_PARAM = "Missing required parameter: ";
   private static final String MSG_ACCOUNT_NOT_FOUND = "Financial account not found: ";
   static final String MSG_BODY_REQUIRED = "Request body is required";
   private static final String MSG_STATEMENT_LINE_NOT_FOUND = "Statement line not found: ";
@@ -333,62 +359,18 @@ public class ReconciliationHandler implements NeoHandler {
 
   @Override
   public NeoResponse handle(NeoContext context) {
-    String method = context.getHttpMethod();
     Map<String, String> qp = context.getQueryParams();
     String action = qp != null ? qp.get(PARAM_ACTION) : null;
-
-    if (METHOD_GET.equals(method) && ACTION_PENDING_LINES.equals(action)) {
-      return handlePendingLines(context);
-    }
-    if (METHOD_GET.equals(method) && ACTION_CANDIDATES.equals(action)) {
-      return handleCandidates(context);
-    }
-    if (METHOD_GET.equals(method) && ACTION_AUTO_MATCH.equals(action)) {
-      return handleAutoMatch(context);
-    }
-    if (METHOD_POST.equals(method) && ACTION_RECONCILE_GROUP.equals(action)) {
-      return ReconciliationHandlerSupport.handleReconcileGroup(this, context);
-    }
-    if (METHOD_POST.equals(method) && ACTION_APPLY_SUGGESTIONS.equals(action)) {
-      return ReconciliationHandlerSupport.handleApplySuggestions(this, context);
-    }
-    if (METHOD_POST.equals(method) && ACTION_REACTIVATE.equals(action)) {
-      return ReconciliationHandlerSupport.handleReactivate(this, context);
-    }
-    if (METHOD_POST.equals(method) && ACTION_REMOVE_OPERATION.equals(action)) {
-      return ReconciliationHandlerSupport.handleRemoveOperation(this, context);
-    }
-    if (METHOD_POST.equals(method) && ACTION_REACTIVATE_SELECTED.equals(action)) {
-      return ReconciliationHandlerSupport.handleReactivateSelected(this, context);
-    }
+    // "<method> <action>" → its route. A single map lookup instead of one branch per action keeps
+    // this dispatcher flat as actions keep being added (Sonar java:S3776).
+    ActionRoute route = ROUTES.get(context.getHttpMethod() + " " + action);
     // Any other request (generic list / getById of the W spec) flows through.
-    return null;
+    return route != null ? route.apply(this, context) : null;
   }
 
   // ---------------------------------------------------------------------------
   // GET pendingLines
   // ---------------------------------------------------------------------------
-
-  private NeoResponse handlePendingLines(NeoContext context) {
-    Map<String, String> qp = context.getQueryParams();
-    String accountId = qp != null ? qp.get(PARAM_ACCOUNT_ID) : null;
-    if (StringUtils.isBlank(accountId)) {
-      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
-          MSG_MISSING_PARAM + PARAM_ACCOUNT_ID);
-    }
-    try {
-      OBContext.setAdminMode(true);
-      String clientId = OBContext.getOBContext().getCurrentClient().getId();
-      Set<String> orgs = ReconciliationSupport.accessibleOrgs(
-          OBContext.getOBContext().getCurrentOrganization().getId());
-      return buildPendingLines(accountId, clientId, orgs, qp);
-    } catch (Exception e) {
-      log.error("Error building pendingLines for account {}", accountId, e);
-      return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR, MSG_INTERNAL_SERVER_ERROR);
-    } finally {
-      OBContext.restorePreviousMode();
-    }
-  }
 
   NeoResponse buildPendingLines(String accountId, String clientId, Set<String> orgs,
       Map<String, String> filters) throws Exception {
@@ -499,32 +481,6 @@ public class ReconciliationHandler implements NeoHandler {
   // ---------------------------------------------------------------------------
   // GET candidates
   // ---------------------------------------------------------------------------
-
-  private NeoResponse handleCandidates(NeoContext context) {
-    Map<String, String> qp = context.getQueryParams();
-    String accountId = qp != null ? qp.get(PARAM_ACCOUNT_ID) : null;
-    if (StringUtils.isBlank(accountId)) {
-      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
-          MSG_MISSING_PARAM + PARAM_ACCOUNT_ID);
-    }
-    String lineId = qp != null ? qp.get(PARAM_LINE_ID) : null;
-    String docType = qp != null ? qp.get(PARAM_DOC_TYPE) : null;
-    String kind = qp != null ? qp.get(PARAM_KIND) : null;
-    String dateFrom = qp != null ? qp.get(PARAM_DATE_FROM) : null;
-    String dateTo = qp != null ? qp.get(PARAM_DATE_TO) : null;
-    try {
-      OBContext.setAdminMode(true);
-      if (KIND_INVOICES.equalsIgnoreCase(kind)) {
-        return buildInvoiceCandidates(accountId, lineId, docType, dateFrom, dateTo);
-      }
-      return buildCandidates(accountId, lineId, docType, dateFrom, dateTo);
-    } catch (Exception e) {
-      log.error("Error building candidates for account {}", accountId, e);
-      return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR, MSG_INTERNAL_SERVER_ERROR);
-    } finally {
-      OBContext.restorePreviousMode();
-    }
-  }
 
   NeoResponse buildCandidates(String accountId, String lineId, String docType,
       String dateFrom, String dateTo) throws Exception {
@@ -989,24 +945,6 @@ public class ReconciliationHandler implements NeoHandler {
   // GET autoMatch (preview — does not mutate any data)
   // ---------------------------------------------------------------------------
 
-  private NeoResponse handleAutoMatch(NeoContext context) {
-    Map<String, String> qp = context.getQueryParams();
-    String accountId = qp != null ? qp.get(PARAM_ACCOUNT_ID) : null;
-    if (StringUtils.isBlank(accountId)) {
-      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
-          MSG_MISSING_PARAM + PARAM_ACCOUNT_ID);
-    }
-    try {
-      OBContext.setAdminMode(true);
-      return buildAutoMatch(accountId);
-    } catch (Exception e) {
-      log.error("Error building autoMatch for account {}", accountId, e);
-      return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR, MSG_INTERNAL_SERVER_ERROR);
-    } finally {
-      OBContext.restorePreviousMode();
-    }
-  }
-
   NeoResponse buildAutoMatch(String accountId) throws Exception {
     FIN_FinancialAccount account = loadAccount(accountId);
     if (account == null) {
@@ -1379,7 +1317,7 @@ public class ReconciliationHandler implements NeoHandler {
       ReactivationSupport.unmatchBankStatementLine(t);
     }
     for (FIN_FinaccTransaction t : matched) {
-      reverseMatchedTransaction(t);
+      ReconciliationHandlerSupport.reverseMatchedTransaction(this, t);
     }
   }
 
@@ -1394,23 +1332,6 @@ public class ReconciliationHandler implements NeoHandler {
    * so a failed reversal here is a rare, logged, individually-recoverable leftover, not a half-undone
    * reconciliation.
    */
-  private void reverseMatchedTransaction(FIN_FinaccTransaction t) {
-    try {
-      if (isAutoCreated(t)) {
-        FIN_Payment payment = t.getFinPayment();
-        if (payment != null) {
-          PaymentRemovalUtil.reactivateAndRemove(payment);
-        } else {
-          TransactionRemovalUtil.reactivateAndRemove(t.getId());
-        }
-      } else {
-        ReactivationSupport.restoreNotClearedStatus(t);
-      }
-    } catch (Exception e) {
-      log.error("Failed to reverse the auto-created movement for transaction {} while undoing a "
-          + "reconciliation; the reconciliation itself was already undone.", t.getId(), e);
-    }
-  }
 
   /**
    * After a group reconciliation is reactivated, its split sub-lines remain physically duplicated

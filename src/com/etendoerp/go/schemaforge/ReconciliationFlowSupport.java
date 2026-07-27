@@ -201,31 +201,12 @@ final class ReconciliationFlowSupport {
       FIN_BankStatementLine line, Function<String, FIN_FinaccTransaction> transactionLoader,
       BigDecimal tolerance) {
     BigDecimal opSum = BigDecimal.ZERO;
-    // A "Reactivar"-ed line stays matched to its transactions while its reconciliation sits in draft,
-    // so those transactions legitimately still carry that reconciliation — re-confirming them is the
-    // point of the action. Anything hanging off a DIFFERENT (or processed) reconciliation is still a
-    // conflict.
-    FIN_Reconciliation ownDraft = line != null && line.getFinancialAccountTransaction() != null
-        ? line.getFinancialAccountTransaction().getReconciliation()
-        : null;
-    String ownDraftId = ownDraft != null && !ownDraft.isProcessed() ? ownDraft.getId() : null;
+    String ownDraftId = ownDraftIdOf(line);
     for (String opId : operationIds) {
       FIN_FinaccTransaction trx = transactionLoader.apply(opId);
-      if (trx == null) {
-        return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
-            "Operation not found: " + opId);
-      }
-      if (trx.getAccount() == null || !accountId.equals(trx.getAccount().getId())) {
-        return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
-            "Operation does not belong to the financial account: " + opId);
-      }
-      // Reject any transaction that carries a reconciliation, UNLESS it is this line's own draft.
-      // Compared from ownDraftId outwards so a reconciliation with a null id (defensive: never in a
-      // real DB, but reachable via mocks) still rejects instead of throwing.
-      FIN_Reconciliation trxRec = trx.getReconciliation();
-      if (trxRec != null && (ownDraftId == null || !ownDraftId.equals(trxRec.getId()))) {
-        return NeoResponse.error(HttpServletResponse.SC_CONFLICT,
-            "Operation is already reconciled: " + opId);
+      NeoResponse opError = validateOperation(trx, opId, accountId, ownDraftId);
+      if (opError != null) {
+        return opError;
       }
       opSum = opSum.add(signedAmount(trx));
     }
@@ -238,6 +219,42 @@ final class ReconciliationFlowSupport {
           "The selected operations (" + opSum.toPlainString()
               + ") exceed the statement line amount (" + lineAmount.toPlainString()
               + "). Operations can match part of the line but not exceed it.");
+    }
+    return null;
+  }
+
+  /**
+   * The id of the line's OWN unprocessed ("Reactivar"-ed) reconciliation, or {@code null} when the
+   * line is unmatched or its reconciliation is already processed. Those transactions legitimately
+   * still carry that reconciliation — re-confirming them is the whole point of that action.
+   */
+  private static String ownDraftIdOf(FIN_BankStatementLine line) {
+    FIN_Reconciliation ownDraft = line != null && line.getFinancialAccountTransaction() != null
+        ? line.getFinancialAccountTransaction().getReconciliation()
+        : null;
+    return ownDraft != null && !ownDraft.isProcessed() ? ownDraft.getId() : null;
+  }
+
+  /**
+   * Per-operation guards: it must exist, belong to {@code accountId}, and be free — i.e. carry no
+   * reconciliation other than the line's own draft ({@code ownDraftId}). Returns the verbatim error
+   * response, or {@code null} when the operation is valid.
+   */
+  private static NeoResponse validateOperation(FIN_FinaccTransaction trx, String opId,
+      String accountId, String ownDraftId) {
+    if (trx == null) {
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "Operation not found: " + opId);
+    }
+    if (trx.getAccount() == null || !accountId.equals(trx.getAccount().getId())) {
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
+          "Operation does not belong to the financial account: " + opId);
+    }
+    // Compared from ownDraftId outwards so a reconciliation with a null id (defensive: never in a
+    // real DB, but reachable via mocks) still rejects instead of throwing.
+    FIN_Reconciliation trxRec = trx.getReconciliation();
+    if (trxRec != null && (ownDraftId == null || !ownDraftId.equals(trxRec.getId()))) {
+      return NeoResponse.error(HttpServletResponse.SC_CONFLICT,
+          "Operation is already reconciled: " + opId);
     }
     return null;
   }
