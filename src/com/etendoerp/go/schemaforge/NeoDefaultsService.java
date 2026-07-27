@@ -733,11 +733,25 @@ public class NeoDefaultsService {
    * @param body    the filtered request body — columns already present are skipped
    * @param adTab   the AD_Tab for the entity being created
    * @param ctx     the NeoContext with OBContext and spec/entity info
+   * @return the set of DAL property names injected from an INTENTIONAL source (levels 1-3);
+   *         see the {@code (body, adTab, ctx, parentId, runCascade)} overload for details.
    */
   public static Set<String> injectMandatoryDefaults(JSONObject body, Tab adTab, NeoContext ctx) {
     return injectMandatoryDefaults(body, adTab, ctx, null, true);
   }
 
+  /**
+   * Injects missing mandatory default values into a create payload, resolving the trailing
+   * callout cascade. Convenience overload that forwards to the
+   * {@code (body, adTab, ctx, parentId, runCascade)} variant with {@code runCascade=true}.
+   *
+   * @param body     the filtered request body — columns already present are skipped
+   * @param adTab    the AD_Tab for the entity being created
+   * @param ctx      the NeoContext with OBContext and spec/entity info
+   * @param parentId optional parent record id used for child-tab defaults
+   * @return the set of DAL property names injected from an INTENTIONAL source (levels 1-3);
+   *         see the {@code (body, adTab, ctx, parentId, runCascade)} overload for details.
+   */
   public static Set<String> injectMandatoryDefaults(JSONObject body, Tab adTab, NeoContext ctx, String parentId) {
     return injectMandatoryDefaults(body, adTab, ctx, parentId, true);
   }
