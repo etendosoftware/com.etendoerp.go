@@ -34,9 +34,11 @@ import org.apache.commons.lang3.StringUtils;
  *
  * <p>This is the only mock in the upgrade flow; the flag evaluation, the paywall decision and the
  * plan marker are all real. Swapping this class for a gateway client is <em>necessary but not
- * sufficient</em> to take real payments: the replay gap (one token can create N tenants) and the
- * check-then-act gap in the paywall (two concurrent onboarding calls both pass) have to close with
- * it. See {@code docs/feature-flags-and-tenant-upgrade.md} §2.
+ * sufficient</em> to take real payments. Three gaps have to close with it: replay (one token can
+ * create N tenants), check-then-act in the paywall (two concurrent onboarding calls both pass), and
+ * the absence of atomicity between payment and provisioning (provisioning can fail after the gate
+ * passes, leaving a captured charge with no tenant and no refund or idempotency path). See
+ * {@code docs/feature-flags-and-tenant-upgrade.md} §2.
  */
 public class MockPaymentService {
 

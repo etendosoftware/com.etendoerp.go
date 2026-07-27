@@ -1257,8 +1257,14 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   }
 
   /**
-   * Evaluates the {@code tenant-upgrade} flag for this account. Targets on the account email, the
-   * same targeting key the web client uses, so both ends bucket a given user identically.
+   * Evaluates the {@code tenant-upgrade} flag for this account, targeting on the account email.
+   *
+   * <p><strong>The web client does not currently target on the same value.</strong> It targets on
+   * {@code sf_auth_user}, which the core writes as the ERP admin username of the selected
+   * environment. The two ends therefore bucket a given user differently. This is inert while the
+   * provider ignores the evaluation context, but it must be closed <em>before</em> any
+   * targeting-aware provider is installed — see the targeting-key precondition in
+   * {@code docs/feature-flags-and-tenant-upgrade.md} §1 and §4.
    */
   private boolean isTenantUpgradeEnabled(String accountEmail) {
     return GoFeatureFlags.isEnabled(GoFeatureFlags.FLAG_TENANT_UPGRADE,

@@ -181,7 +181,7 @@ backend only ever sees an approved-shaped token or none at all.
 What is real today: the flag evaluation, the paywall decision, and the plan marker.
 
 Taking real payments is therefore **more than swapping this class**. A gateway client replaces the
-shape check, but at least two further gaps have to close with it:
+shape check, but three further gaps have to close with it:
 
 - **Replay.** The token is never consumed, so one approved payment can create N tenants. A real flow
   needs the token marked as spent, or bound to a single tenant creation.
@@ -189,6 +189,13 @@ shape check, but at least two further gaps have to close with it:
   with no lock in between. Two concurrent `POST /sws/go/onboarding` calls both pass the gate. A real
   flow needs the ownership check and the creation to be atomic, or a uniqueness constraint that
   catches the loser.
+- **No atomicity between payment and provisioning.** The paywall passes, then provisioning runs and
+  can still fail — its `catch` rolls the DAL changes back and reports failure. With a real gateway
+  that is a captured charge with no tenant, and there is no refund, retry-with-credit or idempotency
+  path anywhere in this flow. The easiest way to trigger it is an oversized `clientName`: nothing
+  bounds its length on either end (`parseOnboardingRequest` only rejects the empty string), so it
+  fails deep inside provisioning, well past the gate. A real flow needs the charge to be authorized
+  before provisioning and captured only after it succeeds, or a compensating refund on failure.
 
 ## 3. The plan marker
 
