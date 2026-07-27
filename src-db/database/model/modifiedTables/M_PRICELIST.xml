@@ -1,0 +1,9 @@
+<?xml version="1.0"?>
+  <database name="MODIFIED TABLE M_PRICELIST">
+    <table name="M_PRICELIST" primaryKey="M_PRICELIST_KEY">
+      <column name="EM_ETGO_PRODUCTCOUNT" primaryKey="false" required="false" type="DECIMAL" size="10,0" autoIncrement="false">
+        <default><![CDATA[0]]></default>
+        <onCreateDefault/>
+      </column>
+    </table>
+  </database>

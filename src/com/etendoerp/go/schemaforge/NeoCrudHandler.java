@@ -917,8 +917,9 @@ class NeoCrudHandler {
         predicates.add("(" + parentFilter + ")");
       }
     }
-    if (StringUtils.isNotBlank(search)) {
-      predicates.add("LOWER(CAST(e." + resolvedProperty + " AS string)) LIKE :search");
+    String searchPredicate = buildDistinctSearchPredicate(prop, resolvedProperty, search);
+    if (searchPredicate != null) {
+      predicates.add(searchPredicate);
     }
 
     StringBuilder where = new StringBuilder(" as e where ")
@@ -929,7 +930,7 @@ class NeoCrudHandler {
       OBQuery<BaseOBObject> obQuery = OBDal.getInstance()
           .createQuery(dalEntityName, where.toString());
       obQuery.setSelectClause("DISTINCT e." + resolvedProperty);
-      if (StringUtils.isNotBlank(search)) {
+      if (searchPredicate != null) {
         obQuery.setNamedParameter("search", "%" + search.toLowerCase() + "%");
       }
       obQuery.setFirstResult(startRow);
@@ -995,6 +996,50 @@ class NeoCrudHandler {
       }
     }
     return null;
+  }
+
+  /**
+   * Builds the HQL LIKE predicate for {@code _distinctSearch} against the resolved
+   * property.
+   * <p>
+   * Scalar (primitive) properties are searched by casting the column value itself —
+   * {@code CAST(e.status AS string)}. Relation (foreign-key) properties cannot be
+   * meaningfully cast to string: {@code CAST(e.productCategory AS string)} does not
+   * resolve to the related record's display text, so it silently matches nothing
+   * (or throws, depending on dialect). For those, the search is redirected to the
+   * target entity's identifier properties instead — e.g.
+   * {@code LOWER(CAST(e.productCategory.name AS string)) LIKE :search} — mirroring
+   * how {@link BaseOBObject#getIdentifier()} resolves a record's display text.
+   * <p>
+   * Returns {@code null} (no predicate, search term ignored) when there is no
+   * search term, or when a relation's target entity exposes no usable identifier
+   * property, so the request still succeeds instead of failing with an HQL error.
+   */
+  private static String buildDistinctSearchPredicate(Property prop, String resolvedProperty, String search) {
+    if (StringUtils.isBlank(search)) {
+      return null;
+    }
+    if (prop.isPrimitive()) {
+      return "LOWER(CAST(e." + resolvedProperty + " AS string)) LIKE :search";
+    }
+    Entity targetEntity = prop.getTargetEntity();
+    if (targetEntity == null) {
+      return null;
+    }
+    List<Property> idProps = targetEntity.getIdentifierProperties();
+    if (idProps == null || idProps.isEmpty()) {
+      return null;
+    }
+    List<String> clauses = new ArrayList<>();
+    for (Property idProp : idProps) {
+      if (idProp.isPrimitive()) {
+        clauses.add("LOWER(CAST(e." + resolvedProperty + "." + idProp.getName() + " AS string)) LIKE :search");
+      }
+    }
+    if (clauses.isEmpty()) {
+      return null;
+    }
+    return "(" + String.join(" OR ", clauses) + ")";
   }
 
   /**
