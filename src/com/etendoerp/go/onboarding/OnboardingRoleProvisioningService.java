@@ -175,15 +175,23 @@ public class OnboardingRoleProvisioningService extends OnboardingContextSupport 
     return role;
   }
 
-  /** Seam for tests: reads {@code EM_ETGO_Show_Acct_Fields} for {@code roleId} via native SQL. */
+  /**
+   * Seam for tests: reads {@code EM_ETGO_Show_Acct_Fields} for {@code roleId} via native SQL.
+   * Result type is deliberately {@code Object}, not {@code String}: Hibernate maps a
+   * PostgreSQL {@code char(1)} column to {@link Character} for a plain scalar native query (no
+   * explicit {@code addScalar} type), and a generics-erased {@code List<String>.get(0)} would
+   * throw {@code ClassCastException: Character cannot be cast to String} on any real row —
+   * exactly the failure hit onboarding a real tenant, since this method is only exercised live
+   * once a role actually exists to read the column from.
+   */
   @SuppressWarnings("unchecked")
   protected String readShowAcctFields(String roleId) {
     Session session = OBDal.getInstance().getSession();
-    NativeQuery<String> query = session.createNativeQuery(
+    NativeQuery<Object> query = session.createNativeQuery(
         "SELECT em_etgo_show_acct_fields FROM ad_role WHERE ad_role_id = :roleId");
     query.setParameter("roleId", roleId);
-    List<String> results = query.getResultList();
-    return results.isEmpty() ? "N" : results.get(0);
+    List<Object> results = query.getResultList();
+    return results.isEmpty() || results.get(0) == null ? "N" : results.get(0).toString();
   }
 
   /** Seam for tests: writes {@code EM_ETGO_Show_Acct_Fields} for {@code roleId} via native SQL. */

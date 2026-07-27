@@ -214,10 +214,14 @@ public class SFWindowAccessMap extends BaseWebhookService {
    */
   private static boolean resolveShowAccountingFields(Role role) {
     Session session = OBDal.getInstance().getSession();
-    NativeQuery<String> query = session.createNativeQuery(
+    // Result type is deliberately Object, not String: Hibernate maps a PostgreSQL char(1) column
+    // to Character for a plain scalar native query (no explicit addScalar type), and a
+    // generics-erased List<String>.get(0) throws ClassCastException: Character cannot be cast to
+    // String on any real row (confirmed live, ETP-4515 onboarding — same query shape).
+    NativeQuery<Object> query = session.createNativeQuery(
         "SELECT em_etgo_show_acct_fields FROM ad_role WHERE ad_role_id = :roleId");
     query.setParameter("roleId", role.getId());
-    List<String> results = query.getResultList();
-    return !results.isEmpty() && "Y".equals(results.get(0));
+    List<Object> results = query.getResultList();
+    return !results.isEmpty() && results.get(0) != null && "Y".equals(results.get(0).toString());
   }
 }

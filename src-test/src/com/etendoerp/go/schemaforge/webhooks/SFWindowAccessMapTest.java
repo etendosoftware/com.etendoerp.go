@@ -160,12 +160,18 @@ class SFWindowAccessMapTest {
         return spec;
     }
 
-    /** Stubs the native SQL lookup of {@code AD_Role.EM_ETGO_Show_Acct_Fields} for any role. */
+    /**
+     * Stubs the native SQL lookup of {@code AD_Role.EM_ETGO_Show_Acct_Fields} for any role.
+     * Accepts {@code List<?>}, not {@code List<String>}: real Hibernate returns {@link Character}
+     * elements for this {@code char(1)} column (see {@code testShowAccountingFieldsHandlesRealCharacterResult}
+     * below), and this helper needs to be able to simulate that faithfully, not just the
+     * String-typed shape most other tests use.
+     */
     @SuppressWarnings("unchecked")
-    private NativeQuery<String> stubShowAcctFieldsQuery(List<String> resultRows) {
+    private NativeQuery<String> stubShowAcctFieldsQuery(List<?> resultRows) {
         NativeQuery<String> mockQuery = mock(NativeQuery.class);
         when(mockSession.createNativeQuery(anyString())).thenReturn(mockQuery);
-        when(mockQuery.getResultList()).thenReturn(resultRows);
+        when(mockQuery.getResultList()).thenReturn((List<String>) resultRows);
         return mockQuery;
     }
 
@@ -331,6 +337,29 @@ class SFWindowAccessMapTest {
         JSONObject result = new JSONObject(responseVars.get(RESULT));
         assertTrue(result.getJSONObject("capabilities").getBoolean("showAccountingFields"));
         verify(query).setParameter("roleId", "role-acct-y");
+    }
+
+    /**
+     * Regression test for a live onboarding failure (2026-07-27): Hibernate's native-query result
+     * for a PostgreSQL {@code char(1)} column with no explicit {@code addScalar} type comes back
+     * as {@link Character}, not {@link String} — a plain {@code List<String>.get(0)} throws
+     * {@code ClassCastException: Character cannot be cast to String} via generics-erasure the
+     * instant a real row is returned. Every other test in this file stubs a {@code String} (e.g.
+     * {@code "Y"}), which happens to also satisfy {@code Object.toString()} and so would NOT have
+     * caught this — this test stubs a real {@link Character} to prove the fix actually handles it.
+     */
+    @Test
+    @DisplayName("Role with EM_ETGO_Show_Acct_Fields returned as a real Character (not String) still resolves correctly")
+    void testShowAccountingFieldsHandlesRealCharacterResult() throws Exception {
+        givenRestrictedRole("role-acct-char");
+        stubWindowAccessRows(Collections.emptyList());
+        stubShowAcctFieldsQuery(Collections.singletonList(Character.valueOf('Y')));
+
+        webhook.get(parameters, responseVars);
+
+        assertNull(responseVars.get(ERROR));
+        JSONObject result = new JSONObject(responseVars.get(RESULT));
+        assertTrue(result.getJSONObject("capabilities").getBoolean("showAccountingFields"));
     }
 
     /**
