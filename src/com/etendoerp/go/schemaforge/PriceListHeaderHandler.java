@@ -20,24 +20,29 @@ package com.etendoerp.go.schemaforge;
 import java.time.LocalDate;
 import java.time.Year;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
 import javax.inject.Named;
+import javax.servlet.http.HttpServletResponse;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
+import org.hibernate.criterion.Projections;
 import org.hibernate.criterion.Restrictions;
 import org.openbravo.base.provider.OBProvider;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.utility.OBCurrencyUtils;
+import org.openbravo.erpCommon.utility.OBMessageUtils;
 import org.openbravo.model.pricing.pricelist.PriceList;
 import org.openbravo.model.pricing.pricelist.PriceListSchema;
 import org.openbravo.model.pricing.pricelist.PriceListVersion;
+import org.openbravo.model.pricing.pricelist.ProductPrice;
 
 /**
  * NeoHandler for the Price List header entity.
@@ -63,15 +68,72 @@ public class PriceListHeaderHandler implements NeoHandler {
 
   private static final String FIELD_PRICE_LIST_VERSION = "priceListVersion";
   private static final String FIELD_CURRENCY = "currency";
+  private static final String FIELD_PRODUCT_COUNT = "etgoProductcount";
+  private static final String FIELD_ACTIVE = "active";
   private static final int MAX_SCHEMA_NAME_LENGTH = 60;
   private static final String DEFAULT_SCHEMA_NAME = "Esquema de Lista de Precios";
+  private static final String MSG_CANNOT_DEACTIVATE_DEFAULT = "ETGO_PriceListCannotDeactivateDefault";
+  private static final String METHOD_GET = "GET";
+  private static final String METHOD_POST = "POST";
+  private static final String METHOD_PATCH = "PATCH";
+  private static final String METHOD_PUT = "PUT";
 
   private final Logger log = LogManager.getLogger(getClass());
 
   @Override
   public NeoResponse handle(NeoContext context) {
-    if (context != null && "POST".equals(context.getHttpMethod())) {
+    if (context == null) {
+      return null;
+    }
+    String method = context.getHttpMethod();
+    if (METHOD_POST.equals(method)) {
       injectOrgCurrency(context);
+      return null;
+    }
+    if ((METHOD_PATCH.equals(method) || METHOD_PUT.equals(method))
+        && isExplicitlyDeactivating(context.getRequestBody())) {
+      return blockDeactivatingDefault(context);
+    }
+    return null;
+  }
+
+  /**
+   * ETP-4592: a tariff marked as the organization's default cannot be deactivated — it must
+   * be un-marked as default first (a separate, explicit action). Only short-circuits when the
+   * request explicitly turns {@code active} off; requests that don't touch it (or that also
+   * flip {@code active} back on) fall through unaffected.
+   */
+  private static boolean isExplicitlyDeactivating(JSONObject body) {
+    if (body == null || !body.has(FIELD_ACTIVE)) {
+      return false;
+    }
+    Object value = body.opt(FIELD_ACTIVE);
+    if (value instanceof Boolean) {
+      return !(Boolean) value;
+    }
+    if (value instanceof String) {
+      return "false".equalsIgnoreCase((String) value) || "N".equalsIgnoreCase((String) value);
+    }
+    return false;
+  }
+
+  private NeoResponse blockDeactivatingDefault(NeoContext context) {
+    String recordId = context.getRecordId();
+    if (recordId == null) {
+      return null;
+    }
+    PriceList priceList = OBDal.getInstance().get(PriceList.class, recordId);
+    if (priceList != null && Boolean.TRUE.equals(priceList.isDefault())) {
+      // messageBD reads the AD_Message base text (English) — same catalog pattern as
+      // BusinessPartnerHandler / ContactsLocationAddressHandler, instead of a literal
+      // string. Translation to the active locale happens on the FRONTEND, not here:
+      // tools/app-shell/src/lib/backendErrors.js maps this exact English string to an
+      // i18n key. That match is exact-string (see BACKEND_ERROR_MAP), so the AD_Message
+      // MSGTEXT for ETGO_PriceListCannotDeactivateDefault must stay English and stay
+      // byte-for-byte identical to the map's key — do NOT add an AD_Message_Trl es_ES row
+      // for this message, it would silently break the frontend match.
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
+          OBMessageUtils.messageBD(MSG_CANNOT_DEACTIVATE_DEFAULT));
     }
     return null;
   }
@@ -115,8 +177,8 @@ public class PriceListHeaderHandler implements NeoHandler {
       return null;
     }
     String method = context.getHttpMethod();
-    if (!"GET".equals(method) && !"POST".equals(method)
-        && !"PATCH".equals(method) && !"PUT".equals(method)) {
+    if (!METHOD_GET.equals(method) && !METHOD_POST.equals(method)
+        && !METHOD_PATCH.equals(method) && !METHOD_PUT.equals(method)) {
       return null;
     }
     try {
@@ -129,9 +191,9 @@ public class PriceListHeaderHandler implements NeoHandler {
       if (dataArr == null || dataArr.length() == 0) {
         return null;
       }
-      if ("POST".equals(method)) {
+      if (METHOD_POST.equals(method)) {
         ensureDefaultVersionForFirstRecord(dataArr);
-      } else if ("PATCH".equals(method) || "PUT".equals(method)) {
+      } else if (METHOD_PATCH.equals(method) || METHOD_PUT.equals(method)) {
         syncVersionNameForFirstRecord(dataArr);
       }
       annotateRecords(context, dataArr);
@@ -147,7 +209,9 @@ public class PriceListHeaderHandler implements NeoHandler {
   private void annotateRecords(NeoContext context, JSONArray dataArr) throws Exception {
     if (context.getRecordId() != null || dataArr.length() == 1) {
       JSONObject rec = dataArr.getJSONObject(0);
-      rec.put(FIELD_PRICE_LIST_VERSION, resolveVersionId(rec.optString("id", null)));
+      String versionId = resolveVersionId(rec.optString("id", null));
+      rec.put(FIELD_PRICE_LIST_VERSION, versionId);
+      rec.put(FIELD_PRODUCT_COUNT, countProductsForVersion(versionId));
     } else {
       annotateBatch(dataArr);
     }
@@ -161,11 +225,67 @@ public class PriceListHeaderHandler implements NeoHandler {
     }
     Map<String, String> versionByPriceListId = PriceListVersionResolver
         .findSingleVersionIds(priceListIds);
+    Map<String, Long> countByVersionId = countProductsByVersionIds(
+        new ArrayList<>(versionByPriceListId.values()));
     for (JSONObject rec : records) {
       String plId = rec.optString("id", null);
-      rec.put(FIELD_PRICE_LIST_VERSION,
-          plId != null ? versionByPriceListId.getOrDefault(plId, "") : "");
+      String versionId = plId != null ? versionByPriceListId.get(plId) : null;
+      rec.put(FIELD_PRICE_LIST_VERSION, versionId != null ? versionId : "");
+      rec.put(FIELD_PRODUCT_COUNT,
+          versionId != null ? countByVersionId.getOrDefault(versionId, 0L) : 0L);
     }
+  }
+
+  // ── product count (ETP-4592) ─────────────────────────────────────────────
+  // Computed on every response instead of read from a stored column: M_ProductPrice
+  // rows can be added/removed through many paths (UI, imports, batch processes, direct
+  // SQL), and a stored counter would need every one of them to keep it in sync. Recomputing
+  // here has a small query cost but can never go stale.
+
+  /**
+   * Counts the active {@link ProductPrice} rows for a single price list version.
+   *
+   * @param versionId
+   *     the {@code M_PriceList_Version_ID}, possibly {@code null}/empty
+   * @return the number of active product prices, or {@code 0} if the version is unknown
+   */
+  private static long countProductsForVersion(String versionId) {
+    if (versionId == null || versionId.isEmpty()) {
+      return 0L;
+    }
+    OBCriteria<ProductPrice> crit = OBDal.getInstance().createCriteria(ProductPrice.class);
+    crit.add(Restrictions.eq(ProductPrice.PROPERTY_PRICELISTVERSION + ".id", versionId));
+    crit.add(Restrictions.eq(ProductPrice.PROPERTY_ACTIVE, true));
+    crit.setProjection(Projections.rowCount());
+    Object result = crit.uniqueResult();
+    return result instanceof Number ? ((Number) result).longValue() : 0L;
+  }
+
+  /**
+   * Counts active {@link ProductPrice} rows for a batch of price list versions in a single
+   * grouped query, avoiding N+1 for list GET responses.
+   *
+   * @param versionIds
+   *     the {@code M_PriceList_Version_ID} values to count for
+   * @return map of {@code versionId → count}; versions with no product prices are absent
+   */
+  @SuppressWarnings("unchecked")
+  private static Map<String, Long> countProductsByVersionIds(List<String> versionIds) {
+    Map<String, Long> counts = new HashMap<>();
+    if (versionIds == null || versionIds.isEmpty()) {
+      return counts;
+    }
+    OBCriteria<ProductPrice> crit = OBDal.getInstance().createCriteria(ProductPrice.class);
+    crit.add(Restrictions.in(ProductPrice.PROPERTY_PRICELISTVERSION + ".id", versionIds));
+    crit.add(Restrictions.eq(ProductPrice.PROPERTY_ACTIVE, true));
+    crit.setProjection(
+        Projections.projectionList().add(Projections.groupProperty(ProductPrice.PROPERTY_PRICELISTVERSION + ".id")).add(
+            Projections.rowCount()));
+    List<Object[]> rows = (List<Object[]>) (List<?>) crit.list();
+    for (Object[] row : rows) {
+      counts.put((String) row[0], (Long) row[1]);
+    }
+    return counts;
   }
 
   private static List<JSONObject> extractRecords(JSONArray dataArr) throws Exception {
