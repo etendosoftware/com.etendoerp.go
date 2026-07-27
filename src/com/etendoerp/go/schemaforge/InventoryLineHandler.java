@@ -21,6 +21,8 @@ import javax.inject.Named;
 
 import java.math.BigDecimal;
 
+import javax.servlet.http.HttpServletResponse;
+
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -29,8 +31,10 @@ import org.hibernate.criterion.Order;
 import org.hibernate.criterion.Restrictions;
 import org.hibernate.query.NativeQuery;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.erpCommon.utility.OBMessageUtils;
 import org.openbravo.model.common.enterprise.Locator;
 import org.openbravo.model.common.enterprise.Warehouse;
+import org.openbravo.model.common.plm.Product;
 import org.openbravo.model.materialmgmt.transaction.InventoryCount;
 import org.openbravo.model.materialmgmt.transaction.InventoryCountLine;
 
@@ -54,6 +58,7 @@ public class InventoryLineHandler implements NeoHandler {
 
   private static final Logger log = LogManager.getLogger(InventoryLineHandler.class);
   private static final String BOOK_QTY_FIELD = "bookQuantity";
+  private static final String PRODUCT_TYPE_SERVICE = "S";
 
   @Override
   public NeoResponse handle(NeoContext context) {
@@ -70,6 +75,10 @@ public class InventoryLineHandler implements NeoHandler {
     if (body == null) {
       return null;
     }
+    NeoResponse rejection = validateNotServiceProduct(context, body, isPatch);
+    if (rejection != null) {
+      return rejection;
+    }
     try {
       if (isPost) {
         handlePostPreHook(body);
@@ -80,6 +89,43 @@ public class InventoryLineHandler implements NeoHandler {
       log.warn("[InventoryLineHandler] Pre-hook error ({}): {}", method, e.getMessage(), e);
     }
     return null;
+  }
+
+  /**
+   * Rejects the request with HTTP 400 when it references a Service-type {@code Product}
+   * (ETP-4606) — service products are not stockable and must never generate a physical
+   * inventory count line. Defense-in-depth: the corresponding product selector is also
+   * filtered (see {@code selector.policy.GoodsMovementProductSelectorPolicy}), but any flow
+   * that still attempts to persist one is blocked here.
+   */
+  private static NeoResponse validateNotServiceProduct(NeoContext context, JSONObject body, boolean isPatch) {
+    String productId = resolveProductId(body);
+    if (productId == null && isPatch) {
+      productId = resolvePersistedProductId(context.getRecordId());
+    }
+    if (productId == null) {
+      return null;
+    }
+    Product product = OBDal.getInstance().get(Product.class, productId);
+    if (product == null) {
+      return null;
+    }
+    if (PRODUCT_TYPE_SERVICE.equals(product.getProductType())) {
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, OBMessageUtils.messageBD("ETGO_ProductNotStockable"));
+    }
+    return null;
+  }
+
+  /** Resolves the product already persisted on an existing inventory line, for PATCH requests. */
+  private static String resolvePersistedProductId(String lineId) {
+    if (StringUtils.isBlank(lineId)) {
+      return null;
+    }
+    InventoryCountLine line = OBDal.getInstance().get(InventoryCountLine.class, lineId);
+    if (line == null || line.getProduct() == null) {
+      return null;
+    }
+    return line.getProduct().getId();
   }
 
   @Override
