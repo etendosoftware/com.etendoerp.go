@@ -879,59 +879,6 @@ public class EtendoGoJwtServletCoverageTest {
   }
 
   @Test
-  public void onboardingWebhookAccessFailureRollsBackAndStreamsFailure() throws Exception {
-    ResponseCapture resp = mockResponse();
-    HttpServletRequest req = jsonRequest("/onboarding",
-        "{\"clientName\":\"Acme\",\"currency\":\"EUR\",\"language\":\"en_US\"}");
-    when(req.getHeader("Authorization")).thenReturn("Bearer valid-token");
-
-    Currency currency = mock(Currency.class);
-    when(currency.getId()).thenReturn("currency-1");
-
-    UserRoles adminUserRole = mock(UserRoles.class);
-    Role role = mock(Role.class);
-    when(role.getId()).thenReturn("role-1");
-    User contact = mock(User.class);
-    when(contact.getId()).thenReturn("user-1");
-    when(adminUserRole.getRole()).thenReturn(role);
-    when(adminUserRole.getUserContact()).thenReturn(contact);
-
-    OnboardingWebhookAccessService webhookAccessService = mock(OnboardingWebhookAccessService.class);
-    doThrow(new RuntimeException("webhook access db error")).when(webhookAccessService)
-        .wire(anyString(), anyString(), anyString());
-    servlet.onboardingWebhookAccessService = webhookAccessService;
-    servlet.onboardingRoleProvisioningService = mock(OnboardingRoleProvisioningService.class);
-
-    try (var ctxMock = mockStatic(OBContext.class);
-         var supportMock = mockStatic(EtendoGoJwtSupport.class);
-         var dalMock = mockStatic(EtendoGoJwtDalHelper.class);
-         var rollbackMock = mockStatic(EtendoGoDalHelper.class)) {
-      supportMock.when(() -> EtendoGoJwtSupport.requireAccountEmail("valid-token"))
-          .thenReturn("user@test.com");
-      dalMock.when(() -> EtendoGoJwtDalHelper.findCurrencyByIsoCode("EUR"))
-          .thenReturn(currency);
-      supportMock.when(() -> EtendoGoJwtSupport.findClientIdByName("Acme"))
-          .thenReturn("client-1");
-      dalMock.when(() -> EtendoGoJwtDalHelper.clientBelongsToAccountEmail("client-1", "user@test.com"))
-          .thenReturn(true);
-      dalMock.when(() -> EtendoGoJwtDalHelper.findClientAdminUserRole("client-1"))
-          .thenReturn(adminUserRole);
-
-      servlet.doPost(req, resp.response);
-
-      rollbackMock.verify(() -> EtendoGoDalHelper.rollbackDalChanges(
-          eq("onboarding webhook-access wiring"), any(), any()));
-      // The chain must stop here — the roles step (and everything after it) never runs.
-      supportMock.verify(() -> EtendoGoJwtSupport.findStarOrgId(any()), never());
-    }
-
-    String ndjson = resp.body();
-    assertTrue(ndjson.contains("\"step\":\"webhookAccess\""));
-    assertTrue(ndjson.contains("\"success\":false"));
-    assertTrue(ndjson.contains("webhook access db error"));
-  }
-
-  @Test
   public void onboardingRolesFailureRollsBackAndStreamsFailure() throws Exception {
     ResponseCapture resp = mockResponse();
     HttpServletRequest req = jsonRequest("/onboarding",
@@ -954,7 +901,6 @@ public class EtendoGoJwtServletCoverageTest {
     // A null-message exception exercises the "no message" default-text branch.
     doThrow(new RuntimeException()).when(roleProvisioningService)
         .wire(anyString(), anyString(), anyString());
-    servlet.onboardingWebhookAccessService = mock(OnboardingWebhookAccessService.class);
     servlet.onboardingRoleProvisioningService = roleProvisioningService;
 
     try (var ctxMock = mockStatic(OBContext.class);
