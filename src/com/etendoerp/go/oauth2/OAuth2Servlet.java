@@ -52,6 +52,12 @@ import com.auth0.jwt.interfaces.DecodedJWT;
 import com.etendoerp.go.common.CorsUtils;
 import com.etendoerp.go.common.ProtocolErrorAdapters;
 import com.etendoerp.go.common.PublicUrlResolver;
+import com.etendoerp.go.session.GoLegacyBearer;
+import com.etendoerp.go.session.GoSessionAuthResult;
+import com.etendoerp.go.session.GoSessionAuthenticator;
+import com.etendoerp.go.session.GoSessionRecord;
+import com.etendoerp.go.session.GoSessionService;
+import com.etendoerp.go.session.JdbcGoSessionStore;
 import com.smf.securewebservices.utils.SecureWebServicesUtils;
 
 /**
@@ -73,6 +79,15 @@ import com.smf.securewebservices.utils.SecureWebServicesUtils;
 public class OAuth2Servlet extends HttpBaseServlet {
 
   private static final Logger log = LogManager.getLogger(OAuth2Servlet.class);
+  private final GoSessionService goSessionService;
+
+  public OAuth2Servlet() {
+    this(new GoSessionService(new JdbcGoSessionStore()));
+  }
+
+  OAuth2Servlet(GoSessionService goSessionService) {
+    this.goSessionService = goSessionService;
+  }
 
   private static final int TOKEN_EXPIRY_SECONDS = 3600;
   private static final int AUTH_CODE_EXPIRY_MS = 300_000; // 5 minutes
@@ -915,7 +930,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
       Set<String> requestedScopes =
           OAuth2ClientPolicy.parseScopes(authorizeRequest.scope, VALID_SCOPES);
       Set<String> allowedScopes = OAuth2ClientPolicy.parseScopes(client.scopes, VALID_SCOPES);
-      DecodedJWT jwt = authenticateJwt(authorizeRequest.jwtToken);
+      AuthorizePrincipal principal = authenticateAuthorizeRequest(request, authorizeRequest);
 
       String authCode = OAuth2Utils.generateAuthCode();
       String codeHash = OAuth2Utils.hashToken(authCode);
@@ -923,8 +938,8 @@ public class OAuth2Servlet extends HttpBaseServlet {
 
       AuthCodeData codeData = OAuth2AuthorizeSupport.buildAuthCodeData(
           authorizeRequest,
-          jwt.getClaim("user").asString(),
-          jwt.getClaim("role").asString(),
+          principal.userId,
+          principal.roleId,
           requestedScopes,
           allowedScopes,
           WILDCARD_SCOPE,
@@ -1399,11 +1414,6 @@ public class OAuth2Servlet extends HttpBaseServlet {
 
   private boolean validateAuthorizePostRequest(HttpServletResponse response,
       OAuth2AuthorizeSupport.AuthorizeRequestData authorizeRequest) throws IOException, SQLException {
-    if (authorizeRequest.jwtToken == null || authorizeRequest.jwtToken.isEmpty()) {
-      writeError(response, HttpServletResponse.SC_BAD_REQUEST, ERROR_INVALID_REQUEST,
-          "JWT token is required");
-      return false;
-    }
     if (authorizeRequest.codeChallenge == null || authorizeRequest.codeChallenge.isEmpty()) {
       writeError(response, HttpServletResponse.SC_BAD_REQUEST, ERROR_INVALID_REQUEST,
           "code_challenge is required");
@@ -1411,6 +1421,43 @@ public class OAuth2Servlet extends HttpBaseServlet {
     }
     return validateAuthorizeClientRequest(
         response, authorizeRequest.clientId, authorizeRequest.redirectUri, authorizeRequest.scope);
+  }
+
+  private AuthorizePrincipal authenticateAuthorizeRequest(HttpServletRequest request,
+      OAuth2AuthorizeSupport.AuthorizeRequestData authorizeRequest) throws AuthException {
+    GoSessionAuthResult sessionAuth = new GoSessionAuthenticator(goSessionService).authenticate(request);
+    if (sessionAuth.getStatus() == GoSessionAuthResult.Status.CSRF_FAILED) {
+      throw new AuthException(HttpServletResponse.SC_FORBIDDEN, "CSRF validation failed");
+    }
+    if (sessionAuth.getStatus() == GoSessionAuthResult.Status.UNAUTHENTICATED) {
+      throw new AuthException(HttpServletResponse.SC_UNAUTHORIZED, "Invalid or expired session");
+    }
+    if (sessionAuth.isAuthenticated()) {
+      GoSessionRecord record = sessionAuth.getRecord();
+      if (StringUtils.isAnyBlank(record.getUserId(), record.getRoleId())) {
+        throw new AuthException(HttpServletResponse.SC_FORBIDDEN,
+            "Session has no environment selected");
+      }
+      return new AuthorizePrincipal(record.getUserId(), record.getRoleId());
+    }
+    if (!GoLegacyBearer.isEnabled() || StringUtils.isBlank(authorizeRequest.jwtToken)) {
+      throw new AuthException(HttpServletResponse.SC_UNAUTHORIZED,
+          "Session authentication is required");
+    }
+    GoLegacyBearer.recordUse();
+    DecodedJWT jwt = authenticateJwt(authorizeRequest.jwtToken);
+    return new AuthorizePrincipal(jwt.getClaim("user").asString(),
+        jwt.getClaim("role").asString());
+  }
+
+  private static final class AuthorizePrincipal {
+    private final String userId;
+    private final String roleId;
+
+    private AuthorizePrincipal(String userId, String roleId) {
+      this.userId = userId;
+      this.roleId = roleId;
+    }
   }
 
 

@@ -155,6 +155,17 @@ public class GoSessionServiceTest {
   }
 
   @Test
+  public void concurrentRefreshLoserCannotIssueSecondSession() {
+    IssuedGoSession original = service.create(ACCOUNT_ID, "password", null, null);
+    store.rejectNextRotation = true;
+
+    IssuedGoSession rejected = service.refresh(original.getRefreshToken());
+
+    assertNull("a caller that loses the atomic consume must not issue a session", rejected);
+    assertEquals(1, store.records.size());
+  }
+
+  @Test
   public void logoutRevokesSession() {
     IssuedGoSession issued = service.create(ACCOUNT_ID, "password", null, null);
 
@@ -169,6 +180,7 @@ public class GoSessionServiceTest {
   private static final class InMemoryGoSessionStore implements GoSessionStore {
 
     private final List<GoSessionRecord> records = new ArrayList<>();
+    private boolean rejectNextRotation;
 
     @Override
     public void save(GoSessionRecord sessionRecord) {
@@ -178,6 +190,22 @@ public class GoSessionServiceTest {
     @Override
     public void update(GoSessionRecord sessionRecord) {
       // Records are held by reference, so mutations are already visible; no-op for the fake.
+    }
+
+    @Override
+    public synchronized boolean rotateAtomically(GoSessionRecord current,
+        GoSessionRecord successor) {
+      if (rejectNextRotation) {
+        rejectNextRotation = false;
+        current.setRevoked(true);
+        return false;
+      }
+      if (current.isRevoked()) {
+        return false;
+      }
+      current.setRevoked(true);
+      records.add(successor);
+      return true;
     }
 
     @Override

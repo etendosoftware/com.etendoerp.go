@@ -146,6 +146,36 @@ public class GoSessionEndpointsTest {
   }
 
   @Test
+  public void sessionRegisterCreatesCookieWithoutLeakingLegacyToken() throws Exception {
+    Account account = mock(Account.class);
+    when(account.getId()).thenReturn("ACC1");
+    when(account.getEmail()).thenReturn(EMAIL);
+    when(account.getName()).thenReturn("User");
+    IssuedGoSession issued = new IssuedGoSession(
+        "session-register", "refresh-register", "csrf-register", new GoSessionRecord());
+    when(goSessionService.create(eq("ACC1"), eq("password"), any(), any())).thenReturn(issued);
+
+    CapturedResponse resp = new CapturedResponse();
+    try (MockedStatic<OBContext> ctx = mockStatic(OBContext.class);
+        MockedStatic<EtendoGoJwtDalHelper> dal = mockStatic(EtendoGoJwtDalHelper.class)) {
+      dal.when(() -> EtendoGoJwtDalHelper.findActiveAccountByEmail(EMAIL)).thenReturn(null);
+      dal.when(() -> EtendoGoJwtDalHelper.createAccount(eq(EMAIL), anyString(), eq("User"),
+          anyString())).thenReturn(account);
+
+      servlet.doPost(jsonPost("/session/register", new JSONObject()
+          .put("email", EMAIL)
+          .put("password", PASSWORD)
+          .put("name", "User")), resp.response);
+    }
+
+    assertEquals(201, resp.status);
+    assertNotNull(resp.cookie(GoSessionSecurity.COOKIE_NAME));
+    JSONObject body = new JSONObject(resp.body.toString());
+    assertFalse(body.has("token"));
+    assertEquals("csrf-register", body.getString("csrfToken"));
+  }
+
+  @Test
   public void logoutWithValidCsrfRevokesAndClearsCookie() throws Exception {
     GoSessionRecord sessionRecord = new GoSessionRecord();
     sessionRecord.setCsrfToken(CSRF);
@@ -212,6 +242,42 @@ public class GoSessionEndpointsTest {
   }
 
   @Test
+  public void meAcceptsCookieSessionWithoutBearer() throws Exception {
+    GoSessionRecord sessionRecord = new GoSessionRecord();
+    sessionRecord.setAccountId("ACC1");
+    sessionRecord.setCsrfToken(CSRF);
+    when(goSessionService.resolve("tok")).thenReturn(sessionRecord);
+    Account account = mock(Account.class);
+    when(account.getId()).thenReturn("ACC1");
+    when(account.getEmail()).thenReturn(EMAIL);
+    when(account.getName()).thenReturn("User");
+
+    CapturedResponse resp = new CapturedResponse();
+    try (MockedStatic<OBContext> ctx = mockStatic(OBContext.class);
+        MockedStatic<EtendoGoJwtDalHelper> dal = mockStatic(EtendoGoJwtDalHelper.class)) {
+      dal.when(() -> EtendoGoJwtDalHelper.findActiveAccountById("ACC1")).thenReturn(account);
+      servlet.doGet(getRequest("/me", "tok"), resp.response);
+    }
+
+    assertEquals(200, resp.status);
+    assertEquals(EMAIL, new JSONObject(resp.body.toString()).getString("email"));
+  }
+
+  @Test
+  public void meRejectsLegacyBearerWhenMigrationFlagIsOff() throws Exception {
+    System.setProperty("etgo.legacy.bearer.enabled", "false");
+    HttpServletRequest req = getRequest("/me", null);
+    when(req.getHeader("Authorization")).thenReturn("Bearer legacy-platform-token");
+    CapturedResponse resp = new CapturedResponse();
+    try (MockedStatic<OBContext> ctx = mockStatic(OBContext.class)) {
+      servlet.doGet(req, resp.response);
+    } finally {
+      System.clearProperty("etgo.legacy.bearer.enabled");
+    }
+    assertEquals(401, resp.status);
+  }
+
+  @Test
   public void restoreIncludesSelectedEnvironment() throws Exception {
     GoSessionRecord sessionRecord = new GoSessionRecord();
     sessionRecord.setAccountId("ACC1");
@@ -229,17 +295,24 @@ public class GoSessionEndpointsTest {
     when(account.getName()).thenReturn("User");
 
     CapturedResponse resp = new CapturedResponse();
+    EtendoGoJwtSupport.RoleListData roleListData = new EtendoGoJwtSupport.RoleListData();
+    roleListData.roleArray = new JSONArray().put(new JSONObject().put("id", "R1"));
+
     try (MockedStatic<OBContext> ctx = mockStatic(OBContext.class);
-        MockedStatic<EtendoGoJwtDalHelper> dal = mockStatic(EtendoGoJwtDalHelper.class)) {
+        MockedStatic<EtendoGoJwtDalHelper> dal = mockStatic(EtendoGoJwtDalHelper.class);
+        MockedStatic<EtendoGoJwtSupport> support = mockStatic(EtendoGoJwtSupport.class)) {
       dal.when(() -> EtendoGoJwtDalHelper.findActiveAccountById("ACC1")).thenReturn(account);
+      support.when(() -> EtendoGoJwtSupport.loadRoleListData("U1")).thenReturn(roleListData);
       servlet.doGet(getRequest("/session", "tok"), resp.response);
     }
 
     assertEquals(200, resp.status);
-    JSONObject env = new JSONObject(resp.body.toString()).getJSONObject("environment");
+    JSONObject body = new JSONObject(resp.body.toString());
+    JSONObject env = body.getJSONObject("environment");
     assertEquals("U1", env.getString("userId"));
     assertEquals("R1", env.getString("roleId"));
     assertEquals("O1", env.getString("orgId"));
+    assertEquals("R1", body.getJSONArray("roleList").getJSONObject(0).getString("id"));
   }
 
   private static HttpServletRequest getRequest(String path, String cookieValue) {
@@ -312,7 +385,9 @@ public class GoSessionEndpointsTest {
 
     EtendoGoJwtSupport.RoleListData roleListData = new EtendoGoJwtSupport.RoleListData();
     roleListData.firstRoleId = "R1";
-    roleListData.roleArray = new JSONArray().put(new JSONObject().put("id", "R1"));
+    roleListData.roleArray = new JSONArray().put(new JSONObject()
+        .put("id", "R1")
+        .put("orgList", new JSONArray().put(new JSONObject().put("id", "O1"))));
 
     User user = mock(User.class);
     Role role = mock(Role.class);
@@ -355,7 +430,10 @@ public class GoSessionEndpointsTest {
       sws.when(() -> SecureWebServicesUtils.generateToken(user, role)).thenReturn("jwt");
       sws.when(() -> SecureWebServicesUtils.decodeToken("jwt")).thenReturn(decoded);
 
-      servlet.doPost(postEnv(new JSONObject().put("userId", "U1").toString(), "tok", CSRF),
+      servlet.doPost(postEnv(new JSONObject()
+              .put("userId", "U1")
+              .put("roleId", "R1")
+              .put("orgId", "O1").toString(), "tok", CSRF),
           resp.response);
     }
 

@@ -674,8 +674,8 @@ public class EtendoGoJwtServletCoverageTest {
     when(req.getHeader("Authorization")).thenReturn("Bearer valid-token");
 
     try (var ctxMock = mockStatic(OBContext.class);
-         var supportMock = mockStatic(EtendoGoJwtSupport.class)) {
-      supportMock.when(() -> EtendoGoJwtSupport.requireAccountEmail("valid-token"))
+         var dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
+      dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByToken("valid-token"))
           .thenThrow(new RuntimeException("db down"));
 
       servlet.doPost(req, resp.response);
@@ -690,10 +690,12 @@ public class EtendoGoJwtServletCoverageTest {
     HttpServletRequest req = jsonRequest("/onboarding", "{}");
     when(req.getHeader("Authorization")).thenReturn("Bearer valid-token");
 
+    Account account = mock(Account.class);
+    when(account.getEmail()).thenReturn("user@test.com");
     try (var ctxMock = mockStatic(OBContext.class);
-         var supportMock = mockStatic(EtendoGoJwtSupport.class)) {
-      supportMock.when(() -> EtendoGoJwtSupport.requireAccountEmail("valid-token"))
-          .thenReturn("user@test.com");
+         var dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
+      dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByToken("valid-token"))
+          .thenReturn(account);
 
       servlet.doPost(req, resp.response);
     }
@@ -708,10 +710,12 @@ public class EtendoGoJwtServletCoverageTest {
     HttpServletRequest req = jsonRequest("/onboarding", "{\"clientName\":\"  \"}");
     when(req.getHeader("Authorization")).thenReturn("Bearer valid-token");
 
+    Account account = mock(Account.class);
+    when(account.getEmail()).thenReturn("user@test.com");
     try (var ctxMock = mockStatic(OBContext.class);
-         var supportMock = mockStatic(EtendoGoJwtSupport.class)) {
-      supportMock.when(() -> EtendoGoJwtSupport.requireAccountEmail("valid-token"))
-          .thenReturn("user@test.com");
+         var dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
+      dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByToken("valid-token"))
+          .thenReturn(account);
 
       servlet.doPost(req, resp.response);
     }
@@ -727,10 +731,12 @@ public class EtendoGoJwtServletCoverageTest {
     when(req.getContentType()).thenReturn("application/json");
     when(req.getReader()).thenReturn(new BufferedReader(new StringReader("not json")));
 
+    Account account = mock(Account.class);
+    when(account.getEmail()).thenReturn("user@test.com");
     try (var ctxMock = mockStatic(OBContext.class);
-         var supportMock = mockStatic(EtendoGoJwtSupport.class)) {
-      supportMock.when(() -> EtendoGoJwtSupport.requireAccountEmail("valid-token"))
-          .thenReturn("user@test.com");
+         var dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
+      dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByToken("valid-token"))
+          .thenReturn(account);
 
       servlet.doPost(req, resp.response);
     }
@@ -745,11 +751,12 @@ public class EtendoGoJwtServletCoverageTest {
         "{\"clientName\":\"Acme\",\"currency\":\"XYZ\"}");
     when(req.getHeader("Authorization")).thenReturn("Bearer valid-token");
 
+    Account account = mock(Account.class);
+    when(account.getEmail()).thenReturn("user@test.com");
     try (var ctxMock = mockStatic(OBContext.class);
-         var supportMock = mockStatic(EtendoGoJwtSupport.class);
          var dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
-      supportMock.when(() -> EtendoGoJwtSupport.requireAccountEmail("valid-token"))
-          .thenReturn("user@test.com");
+      dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByToken("valid-token"))
+          .thenReturn(account);
       dalMock.when(() -> EtendoGoJwtDalHelper.findCurrencyByIsoCode("XYZ"))
           .thenReturn(null);
 
@@ -769,12 +776,14 @@ public class EtendoGoJwtServletCoverageTest {
 
     Currency currency = mock(Currency.class);
     when(currency.getId()).thenReturn("currency-1");
+    Account account = mock(Account.class);
+    when(account.getEmail()).thenReturn("user@test.com");
 
     try (var ctxMock = mockStatic(OBContext.class);
          var supportMock = mockStatic(EtendoGoJwtSupport.class);
          var dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
-      supportMock.when(() -> EtendoGoJwtSupport.requireAccountEmail("valid-token"))
-          .thenReturn("user@test.com");
+      dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByToken("valid-token"))
+          .thenReturn(account);
       dalMock.when(() -> EtendoGoJwtDalHelper.findCurrencyByIsoCode("EUR"))
           .thenReturn(currency);
       // Existing client owned by ANOTHER account -> resume refused (tenant isolation, ETP-4428).
@@ -801,12 +810,14 @@ public class EtendoGoJwtServletCoverageTest {
 
     Currency currency = mock(Currency.class);
     when(currency.getId()).thenReturn("currency-1");
+    Account account = mock(Account.class);
+    when(account.getEmail()).thenReturn("user@test.com");
 
     try (var ctxMock = mockStatic(OBContext.class);
          var supportMock = mockStatic(EtendoGoJwtSupport.class);
          var dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
-      supportMock.when(() -> EtendoGoJwtSupport.requireAccountEmail("valid-token"))
-          .thenReturn("user@test.com");
+      dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByToken("valid-token"))
+          .thenReturn(account);
       dalMock.when(() -> EtendoGoJwtDalHelper.findCurrencyByIsoCode("EUR"))
           .thenReturn(currency);
       supportMock.when(() -> EtendoGoJwtSupport.findClientIdByName("Acme"))
@@ -834,6 +845,8 @@ public class EtendoGoJwtServletCoverageTest {
 
     Currency currency = mock(Currency.class);
     when(currency.getId()).thenReturn("currency-1");
+    Account account = mock(Account.class);
+    when(account.getEmail()).thenReturn("user@test.com");
 
     UserRoles adminUserRole = mock(UserRoles.class);
     Role role = mock(Role.class);
@@ -846,8 +859,8 @@ public class EtendoGoJwtServletCoverageTest {
     try (var ctxMock = mockStatic(OBContext.class);
          var supportMock = mockStatic(EtendoGoJwtSupport.class);
          var dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
-      supportMock.when(() -> EtendoGoJwtSupport.requireAccountEmail("valid-token"))
-          .thenReturn("user@test.com");
+      dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByToken("valid-token"))
+          .thenReturn(account);
       dalMock.when(() -> EtendoGoJwtDalHelper.findCurrencyByIsoCode("EUR"))
           .thenReturn(currency);
       supportMock.when(() -> EtendoGoJwtSupport.findClientIdByName("Acme"))

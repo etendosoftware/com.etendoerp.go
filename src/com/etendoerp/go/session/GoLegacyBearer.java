@@ -56,7 +56,7 @@ public final class GoLegacyBearer {
   /** Record (count + log) one legacy Bearer authentication, for measuring the migration window. */
   public static void recordUse() {
     long count = USE_COUNT.incrementAndGet();
-    log.info("Legacy Bearer authentication accepted on NEO (cumulative count={})", count);
+    log.info("Legacy Bearer authentication accepted (cumulative count={})", count);
   }
 
   /** @return the number of legacy Bearer authentications recorded since startup */

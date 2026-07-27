@@ -150,9 +150,9 @@ public class GoSessionService {
     next.setUserAgent(current.getUserAgent());
     next.setIpHash(current.getIpHash());
 
-    current.setRevoked(true);
-    store.update(current);
-    store.save(next);
+    if (!store.rotateAtomically(current, next)) {
+      return null;
+    }
     return new IssuedGoSession(rawToken, rawRefresh, csrf, next);
   }
 
@@ -181,7 +181,13 @@ public class GoSessionService {
       revoke(sessionRecord);
       return null;
     }
-    return rotate(sessionRecord);
+    IssuedGoSession rotated = rotate(sessionRecord);
+    if (rotated == null) {
+      GoSessionRecord consumed = store.findByRefreshTokenHash(
+          OAuth2Utils.hashToken(rawRefreshToken));
+      revokeFamily(consumed);
+    }
+    return rotated;
   }
 
   /**

@@ -130,6 +130,9 @@
       <unique name="ETGO_GOS_REFHASH_UQ">
         <unique-column name="REFRESH_TOKEN_HASH"/>
       </unique>
+      <unique name="ETGO_GOS_ROTATEDFROM_UQ">
+        <unique-column name="ROTATED_FROM_ID"/>
+      </unique>
       <check name="ETGO_GOS_ISACTIVE"><![CDATA[ISACTIVE IN ('Y', 'N')]]></check>
       <check name="ETGO_GOS_ISREVOKED"><![CDATA[IS_REVOKED IN ('Y', 'N')]]></check>
       <check name="ETGO_GOS_AUTHMETHOD"><![CDATA[AUTH_METHOD IN ('password', 'sso')]]></check>

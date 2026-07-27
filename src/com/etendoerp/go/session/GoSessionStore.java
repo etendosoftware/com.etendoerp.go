@@ -40,6 +40,18 @@ public interface GoSessionStore {
   void update(GoSessionRecord sessionRecord);
 
   /**
+   * Atomically consume an active session and insert its rotated successor.
+   *
+   * <p>The implementation must only revoke {@code current} when it is still active. Concurrent
+   * callers racing with the same record must result in exactly one successful rotation.
+   *
+   * @param current the active record being consumed
+   * @param successor the freshly generated successor
+   * @return {@code true} when this caller won the rotation race
+   */
+  boolean rotateAtomically(GoSessionRecord current, GoSessionRecord successor);
+
+  /**
    * Look up a session by the hash of its opaque session token.
    *
    * @param sessionTokenHash SHA-256 hash of the opaque session token

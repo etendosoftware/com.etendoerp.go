@@ -1016,8 +1016,8 @@ public class EtendoGoJwtServletTest {
     when(req.getHeader("Authorization")).thenReturn("Bearer bad-token");
 
     try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
-         MockedStatic<EtendoGoJwtSupport> supportMock = mockStatic(EtendoGoJwtSupport.class)) {
-      supportMock.when(() -> EtendoGoJwtSupport.requireAccountEmail("bad-token"))
+         MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
+      dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByToken("bad-token"))
           .thenReturn(null);
 
       servlet.doPost(req, resp.response);

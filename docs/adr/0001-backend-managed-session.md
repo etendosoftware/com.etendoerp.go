@@ -117,9 +117,10 @@ Set-Cookie: __Host-go_session=<opaque>; Secure; HttpOnly; Path=/; SameSite=Lax
 | Method + path | Replaces | Request | Response to JS | Effect |
 |---|---|---|---|---|
 | `POST /sws/go/session` | `/login` | `{email,password}` | `{account, csrfToken}` + `Set-Cookie` ×2 | create session (password); **no token in body** |
+| `POST /sws/go/session/register` | `/register` | `{email,password,name,language?}` | `{account, csrfToken}` + `Set-Cookie` ×2 | register + create session; **no token in body** |
 | `POST /sws/go/session/sso/{provider}` | `/sso/{provider}` | provider raw body (e.g. `{credential}`) | `{account, csrfToken}` + `Set-Cookie` ×2 | create session (SSO); **no token in body** |
 | `GET /sws/go/session` | client-side restore from `sf_auth_*` | — (cookie) | `{account, environment, roleList, csrfToken}` | restore context after reload |
-| `POST /sws/go/session/environment` | `GET /login?userId=` | `{userId}` | `{environment, roleList, csrfToken}` + rotated cookies | select environment + **rotate** session |
+| `POST /sws/go/session/environment` | `GET /login?userId=` | `{userId,roleId?,orgId?}` | `{environment, roleList, csrfToken}` + rotated cookies | validate context, select environment/role/org + **rotate** session |
 | `POST /sws/go/session/refresh` | — (did not exist) | — (refresh cookie, Origin-checked) | `{csrfToken}` + new cookies | rotate one-time identifier |
 | `DELETE /sws/go/session` | client-only logout | — (cookie + CSRF) | `204` + expired cookies | **server-side invalidation** |
 
@@ -143,9 +144,10 @@ Set-Cookie: __Host-go_session=<opaque>; Secure; HttpOnly; Path=/; SameSite=Lax
 
 ### D7 — Legacy Bearer during rollout (measured, reversible)
 
-Behind a **feature flag**, the backend keeps accepting the legacy Bearer paths and **counts** how
-many requests still use them, so we can measure the window and turn it off after the forced
-re-login. Flag OFF ⇒ legacy Bearer ⇒ `401`. Removed after the migration window.
+Behind a **feature flag**, the backend keeps accepting both legacy browser Bearer paths (platform
+account token and environment JWT) and **counts** how many requests still use them, so we can
+measure the window and turn it off after the forced re-login. Flag OFF ⇒ legacy Bearer ⇒ `401`.
+OAuth2/MCP access tokens issued to external clients are separate credentials and remain supported.
 
 ---
 
@@ -162,7 +164,7 @@ sequenceDiagram
     GO->>GO: verifyPassword (salted SHA-256)
     GO->>DB: insert session (token_hash, csrf, ctx=account defaults)
     GO-->>B: 200 {account, csrfToken} + Set-Cookie __Host-go_session
-    B->>GO: POST /sws/go/session/environment {userId} (cookie + X-Go-CSRF)
+    B->>GO: POST /sws/go/session/environment {userId,roleId?,orgId?} (cookie + X-Go-CSRF)
     GO->>DB: rotate session, set env ctx (user/role/org/client/wh)
     GO-->>B: 200 {environment, csrfToken} + Set-Cookie (rotated)
     B->>GO: GET /sws/neo/... (cookie only)

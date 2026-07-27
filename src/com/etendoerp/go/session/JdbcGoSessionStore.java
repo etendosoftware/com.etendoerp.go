@@ -53,6 +53,10 @@ public class JdbcGoSessionStore implements GoSessionStore {
       + "user_agent = ?, ip_hash = ?, updated = now(), updatedby = '0' "
       + "WHERE etgo_go_session_id = ?";
 
+  private static final String REVOKE_ACTIVE_SQL =
+      "UPDATE etgo_go_session SET is_revoked = 'Y', updated = now(), updatedby = '0' "
+      + "WHERE etgo_go_session_id = ? AND is_revoked = 'N'";
+
   private static final String SELECT_COLUMNS =
       "SELECT etgo_go_session_id, etgo_account_id, session_token_hash, csrf_token, refresh_token_hash, "
       + "auth_method, ad_user_id, ad_role_id, ctx_client_id, ctx_org_id, m_warehouse_id, "
@@ -83,6 +87,26 @@ public class JdbcGoSessionStore implements GoSessionStore {
         ps.setString(nextIndex, sessionRecord.getId());
         ps.executeUpdate();
       }
+    });
+  }
+
+  @Override
+  public boolean rotateAtomically(GoSessionRecord current, GoSessionRecord successor) {
+    return OBDal.getInstance().getSession().doReturningWork(connection -> {
+      try (PreparedStatement revoke = connection.prepareStatement(REVOKE_ACTIVE_SQL)) {
+        revoke.setString(1, current.getId());
+        if (revoke.executeUpdate() != 1) {
+          return false;
+        }
+      }
+      try (PreparedStatement insert = connection.prepareStatement(INSERT_SQL)) {
+        insert.setString(1, successor.getId());
+        insert.setString(2, successor.getAccountId());
+        bindMutableFields(insert, 3, successor);
+        insert.executeUpdate();
+      }
+      current.setRevoked(true);
+      return true;
     });
   }
 
