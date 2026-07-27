@@ -27,10 +27,6 @@ import org.openbravo.model.ad.ui.Tab;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFSpec;
 import com.etendoerp.go.schemaforge.util.NeoErrorSanitizer;
-import com.etendoerp.go.schemaforge.webhooks.SFListMenu;
-import com.etendoerp.go.schemaforge.webhooks.SFRolesOverview;
-import com.etendoerp.go.schemaforge.webhooks.SFWindowAccessMap;
-import com.etendoerp.webhookevents.services.BaseWebhookService;
 import com.smf.securewebservices.SWSConfig;
 
 /**
@@ -78,6 +74,8 @@ public class NeoServlet extends HttpBaseServlet {
   private final BatchService batchService = new BatchService(this);
   private final NeoSimSearchEndpoint simSearchEndpoint = new NeoSimSearchEndpoint();
   private final NeoGoWebhookBridge goWebhookBridge = new NeoGoWebhookBridge(this);
+  private final NeoPseudoSpecDispatcher pseudoSpecDispatcher =
+      new NeoPseudoSpecDispatcher(this, batchService, simSearchEndpoint, goWebhookBridge);
 
   @Override
   public void doGet(HttpServletRequest request, HttpServletResponse response) throws IOException {
@@ -143,7 +141,7 @@ public class NeoServlet extends HttpBaseServlet {
         return;
       }
 
-      if (handlePseudoSpec(pathInfo, method, request, response)) {
+      if (pseudoSpecDispatcher.handle(pathInfo, method, request, response)) {
         return;
       }
       requestRouter.handleSpecRequest(pathInfo, method, request, response);
@@ -153,86 +151,6 @@ public class NeoServlet extends HttpBaseServlet {
     } finally {
       OBContext.restorePreviousMode();
     }
-  }
-
-  /**
-   * Dispatches NEO's global pseudo-specs — endpoints that bypass ETGO_SF_SPEC/ETGO_SF_ENTITY
-   * resolution entirely (batch, simsearch, and Etendo GO's own webhook-bridge endpoints).
-   * Extracted out of {@link #processRequest} to keep that method's cognitive complexity in
-   * check. Returns {@code true} once one of them has handled the request (response already
-   * written), so the caller knows to return without falling through to spec/entity resolution.
-   */
-  private boolean handlePseudoSpec(NeoPathInfo pathInfo, String method,
-      HttpServletRequest request, HttpServletResponse response) throws IOException {
-    // Generic transactional batch endpoint: POST /sws/neo/batch
-    //   Runs an ordered list of CRUD ops in one OBDal transaction with
-    //   $ref:<opId> substitution between ops. Same primitive is consumed by
-    //   the React UI (composite-document ingest) and external agents (MCP).
-    //   Find-or-create logic stays with the caller — no per-window server code.
-    if ("batch".equals(pathInfo.specName)) {
-      return dispatchBatch(method, request, response);
-    }
-
-    // Global similarity-search endpoint: GET /sws/neo/simsearch
-    //   Same trigram matching as the "SimSearch" webhook, reached through NEO's own
-    //   JWT auth instead of the Webhooks module's per-role grant table. See
-    //   NeoSimSearchEndpoint for the authorization-model rationale.
-    if ("simsearch".equals(pathInfo.specName)) {
-      return dispatchSimSearch(method, request, response);
-    }
-
-    // Etendo GO's own webhooks, reached through NEO's own JWT auth instead of the Webhooks
-    // module's per-role SMFWHE_DEFINEDWEBHOOK_ROLE grant table (wiped by update.database — see
-    // NeoGoWebhookBridge's class javadoc for the full rationale). A fixed, explicit allow-list,
-    // never a generic "call any webhook by name" passthrough — bypassing the grant gate for a
-    // third-party module's webhook is not this bridge's call to make.
-    if ("listmenu".equals(pathInfo.specName)) {
-      return dispatchGoWebhook("Listmenu", method, request, response, new SFListMenu());
-    }
-    if ("windowaccessmap".equals(pathInfo.specName)) {
-      return dispatchGoWebhook("Windowaccessmap", method, request, response, new SFWindowAccessMap());
-    }
-    if ("rolesoverview".equals(pathInfo.specName)) {
-      return dispatchGoWebhook("Rolesoverview", method, request, response, new SFRolesOverview());
-    }
-    return false;
-  }
-
-  private boolean dispatchBatch(String method, HttpServletRequest request,
-      HttpServletResponse response) throws IOException {
-    if (!"POST".equals(method)) {
-      sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
-          "Batch endpoint only supports POST");
-      return true;
-    }
-    batchService.handle(request, response);
-    return true;
-  }
-
-  private boolean dispatchSimSearch(String method, HttpServletRequest request,
-      HttpServletResponse response) throws IOException {
-    if (!"GET".equals(method)) {
-      sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
-          "Simsearch endpoint only supports GET");
-      return true;
-    }
-    writeResponse(response, simSearchEndpoint.handle(request));
-    return true;
-  }
-
-  /**
-   * Dispatches one of Etendo GO's own webhooks through {@link #goWebhookBridge} instead of the
-   * Webhooks module's HTTP path — see {@link NeoGoWebhookBridge}'s class javadoc for why.
-   */
-  private boolean dispatchGoWebhook(String endpointName, String method, HttpServletRequest request,
-      HttpServletResponse response, BaseWebhookService webhook) throws IOException {
-    if (!"GET".equals(method)) {
-      sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
-          endpointName + " endpoint only supports GET");
-      return true;
-    }
-    writeResponse(response, goWebhookBridge.handle(request, webhook));
-    return true;
   }
 
   private boolean isDocumentDownloadPath(String pathInfo) {
