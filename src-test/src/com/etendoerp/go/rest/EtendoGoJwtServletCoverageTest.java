@@ -57,6 +57,7 @@ import org.openbravo.model.common.currency.Currency;
 import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.dal.service.OBDal;
 
+import com.etendoerp.go.onboarding.OnboardingRoleProvisioningService;
 import com.etendoerp.go.onboarding.OnboardingWebhookAccessService;
 import com.etendoerp.go.schemaforge.data.Account;
 import com.smf.securewebservices.utils.SecureWebServicesUtils;
@@ -843,9 +844,11 @@ public class EtendoGoJwtServletCoverageTest {
     when(contact.getId()).thenReturn("user-1");
     when(adminUserRole.getRole()).thenReturn(role);
     when(adminUserRole.getUserContact()).thenReturn(contact);
-    // Real admin-role resolution reaches ensureWebhookAccess() before the organization step this
-    // test targets; stub it out so the (unmocked-here) OBDal calls inside the real service never run.
+    // Real admin-role resolution reaches ensureWebhookAccess() and ensureRoles() before the
+    // organization step this test targets; stub both out so the (unmocked-here) OBDal calls
+    // inside the real services never run.
     servlet.onboardingWebhookAccessService = mock(OnboardingWebhookAccessService.class);
+    servlet.onboardingRoleProvisioningService = mock(OnboardingRoleProvisioningService.class);
 
     try (var ctxMock = mockStatic(OBContext.class);
          var supportMock = mockStatic(EtendoGoJwtSupport.class);
