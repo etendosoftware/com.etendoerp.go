@@ -219,8 +219,11 @@ final class ReconciliationFlowSupport {
         return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
             "Operation does not belong to the financial account: " + opId);
       }
-      if (trx.getReconciliation() != null
-          && !trx.getReconciliation().getId().equals(ownDraftId)) {
+      // Reject any transaction that carries a reconciliation, UNLESS it is this line's own draft.
+      // Compared from ownDraftId outwards so a reconciliation with a null id (defensive: never in a
+      // real DB, but reachable via mocks) still rejects instead of throwing.
+      FIN_Reconciliation trxRec = trx.getReconciliation();
+      if (trxRec != null && (ownDraftId == null || !ownDraftId.equals(trxRec.getId()))) {
         return NeoResponse.error(HttpServletResponse.SC_CONFLICT,
             "Operation is already reconciled: " + opId);
       }

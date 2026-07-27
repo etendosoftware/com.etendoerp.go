@@ -19,6 +19,7 @@ package com.etendoerp.go.schemaforge;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -26,6 +27,7 @@ import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.doThrow;
@@ -50,6 +52,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import com.etendoerp.payment.removal.util.PaymentRemovalUtil;
 import com.etendoerp.payment.removal.util.ReconciliationRemovalUtil;
@@ -2262,6 +2265,94 @@ public class ReconciliationHandlerTest {
   }
 
   /**
+   * Models the DB state TRANSITION that {@code removeOperation}'s outcome report reads as ground
+   * truth, instead of hard-wiring only its END state.
+   *
+   * <p>{@code removeOperation} reads {@code trx.getReconciliation()} twice per requested id, with
+   * OPPOSITE expectations. The PRE-check ({@code ReconciliationHandlerSupport
+   * #groupSelectedByReconciliation}) needs it NON-null: a transaction that carries no reconciliation
+   * is rejected up front with a 409 "Transaction is not linked to a reconciliation", before anything
+   * is removed. The POST-check needs it NULL, since that is what proves the removal actually went
+   * through (Core's removal utilities commit mid-flow and the removal loops no longer throw, so "no
+   * exception" is not evidence). A flat {@code when(t.getReconciliation()).thenReturn(null)} only
+   * satisfies the second and makes the whole action abort at the first guard; positional stubbing
+   * ({@code thenReturn(rec, null)}) would be brittle, since how many reads happen in between varies
+   * per test and per branch.
+   *
+   * <p>So each transaction answers {@code rec} until a latch is flipped by whichever seam actually
+   * frees it in production — Core's per-transaction detach on the subset path (see
+   * {@link ReconciliationHandlerTest#freeOnDetach}) or the whole-reconciliation
+   * {@code undoReconciliation} seam on the coversAll path (see
+   * {@link ReconciliationHandlerTest#freeOnUndo}) — exactly mirroring the state change the
+   * post-check is designed to observe.
+   */
+  private static final class RemovalState {
+
+    private final Map<FIN_FinaccTransaction, AtomicBoolean> latches = new HashMap<>();
+    private final Set<FIN_FinaccTransaction> permanentlyLinked = new HashSet<>();
+
+    /**
+     * Declares a transaction whose removal DOES take effect: {@code getReconciliation()} answers
+     * {@code rec} while the pre-check runs, then {@code null} once the freeing seam has run.
+     */
+    void linkedUntilFreed(FIN_FinaccTransaction txn, FIN_Reconciliation rec) {
+      AtomicBoolean latch = new AtomicBoolean(false);
+      latches.put(txn, latch);
+      when(txn.getReconciliation()).thenAnswer(inv -> latch.get() ? null : rec);
+    }
+
+    /**
+     * Declares a transaction whose removal silently does NOT take effect (Core logged and swallowed
+     * an internal error, so the DB state is unchanged): it keeps the reconciliation {@code recWith}
+     * wired even after being handed to a removal seam. That is the state the handler must report as
+     * failed.
+     */
+    void staysLinked(FIN_FinaccTransaction txn) {
+      permanentlyLinked.add(txn);
+    }
+
+    /**
+     * The effect of a removal seam on {@code txn}. A transaction declared via
+     * {@link #staysLinked(FIN_FinaccTransaction)} is deliberately left linked; one that was never
+     * declared at all is a test-wiring bug, so it fails loudly instead of silently no-op'ing.
+     */
+    void free(FIN_FinaccTransaction txn) {
+      if (permanentlyLinked.contains(txn)) {
+        return;
+      }
+      AtomicBoolean latch = latches.get(txn);
+      assertNotNull("transaction was handed to a removal seam but never declared via "
+          + "RemovalState.linkedUntilFreed/staysLinked", latch);
+      latch.set(true);
+    }
+  }
+
+  /**
+   * Subset path: Core's per-transaction detach frees the transaction it is handed, so the handler's
+   * post-check reads it as genuinely un-reconciled.
+   */
+  private void freeOnDetach(RemovalState state, MockedStatic<ReconciliationRemovalUtil> recUtil) {
+    recUtil.when(() -> ReconciliationRemovalUtil.removeTransactionFromReconciliation(any()))
+        .thenAnswer(inv -> {
+          state.free(inv.getArgument(0));
+          return true;
+        });
+  }
+
+  /**
+   * coversAll path: the whole reconciliation is undone, so EVERY transaction handed to the seam
+   * loses it at once. Replaces the plain {@code doNothing()} stub of the same seam.
+   */
+  private void freeOnUndo(RemovalState state) throws Exception {
+    doAnswer(inv -> {
+      for (FIN_FinaccTransaction t : inv.<List<FIN_FinaccTransaction>>getArgument(2)) {
+        state.free(t);
+      }
+      return null;
+    }).when(handler).undoReconciliation(any(), any(), any());
+  }
+
+  /**
    * A single id that is the ONLY transaction of the reconciliation → coversAll → whole-line undo
    * ({@code undoReconciliation} + {@code normalizeReactivatedMatchGroup}), never the per-transaction
    * detach. The response echoes the {@code transactionIds[]} array.
@@ -2276,10 +2367,12 @@ public class ReconciliationHandlerTest {
     wireLoads(t1);
     // removeOperation's post-check re-fetches each requested transaction and reads its ACTUAL
     // getReconciliation() state (ground truth, since Core commits mid-flow and the removal loops no
-    // longer throw). Simulate the successful post-removal DB state: no longer linked.
-    when(t1.getReconciliation()).thenReturn(null);
+    // longer throw). Model the TRANSITION, not just the end state: T1 stays linked for the pre-check
+    // that runs first and is freed by the undo seam (see RemovalState).
+    RemovalState state = new RemovalState();
+    state.linkedUntilFreed(t1, rec);
     doNothing().when(handler).checkPeriod(any(), any(), any(), any());
-    doNothing().when(handler).undoReconciliation(any(), any(), any());
+    freeOnUndo(state);
     doReturn(mock(FIN_BankStatementLine.class)).when(handler).normalizeReactivatedMatchGroup(any());
 
     NeoResponse response;
@@ -2322,8 +2415,10 @@ public class ReconciliationHandlerTest {
     FIN_Payment payment = mock(FIN_Payment.class);
     when(t1.getFinPayment()).thenReturn(payment);
     wireLoads(t1, t2);
-    // Only T1 was requested — the post-check only re-checks requested ids. Simulate it succeeded.
-    when(t1.getReconciliation()).thenReturn(null);
+    // Only T1 was requested — the post-check only re-checks requested ids. It stays linked for the
+    // pre-check and is freed by its detach (T2 keeps recWith's link: it was never selected).
+    RemovalState state = new RemovalState();
+    state.linkedUntilFreed(t1, rec);
     doNothing().when(handler).checkPeriod(any(), any(), any(), any());
     doReturn(true).when(handler).isAutoCreated(t1);
     // normalizeReactivatedMatchGroup runs once at the end of every success path.
@@ -2344,6 +2439,7 @@ public class ReconciliationHandlerTest {
       when(dal.get(FIN_Reconciliation.class, "rec-1")).thenReturn(rec);
       recUtil.when(() -> ReconciliationRemovalUtil.getDraftReconciliation(any()))
           .thenReturn(Collections.emptyList());
+      freeOnDetach(state, recUtil);
       response = handler.removeOperation(removeBodySingle(ACC_ID, LINE_ID, "T1"));
 
       recUtil.verify(() -> ReconciliationRemovalUtil.removeTransactionFromReconciliation(t1));
@@ -2374,11 +2470,13 @@ public class ReconciliationHandlerTest {
     FIN_Reconciliation rec = recWith("rec-1", t1, t2);
     List<FIN_FinaccTransaction> snapshot = rec.getFINFinaccTransactionList();
     wireLoads(t1, t2);
-    // Both requested ids are re-checked by the post-check loop — simulate they both succeeded.
-    when(t1.getReconciliation()).thenReturn(null);
-    when(t2.getReconciliation()).thenReturn(null);
+    // Both requested ids are re-checked by the post-check loop — both stay linked for the pre-check
+    // and are freed together by the whole-reconciliation undo.
+    RemovalState state = new RemovalState();
+    state.linkedUntilFreed(t1, rec);
+    state.linkedUntilFreed(t2, rec);
     doNothing().when(handler).checkPeriod(any(), any(), any(), any());
-    doNothing().when(handler).undoReconciliation(any(), any(), any());
+    freeOnUndo(state);
     doReturn(mock(FIN_BankStatementLine.class)).when(handler).normalizeReactivatedMatchGroup(any());
 
     NeoResponse response;
@@ -2420,9 +2518,11 @@ public class ReconciliationHandlerTest {
     FIN_Payment payment = mock(FIN_Payment.class);
     when(t1.getFinPayment()).thenReturn(payment);
     wireLoads(t1, t2, t3);
-    // Both requested ids (T1, T2) are re-checked by the post-check loop — simulate success for both.
-    when(t1.getReconciliation()).thenReturn(null);
-    when(t2.getReconciliation()).thenReturn(null);
+    // Both requested ids (T1, T2) are re-checked by the post-check loop — both stay linked for the
+    // pre-check and are freed by their own detach. T3 was never selected, so it keeps recWith's link.
+    RemovalState state = new RemovalState();
+    state.linkedUntilFreed(t1, rec);
+    state.linkedUntilFreed(t2, rec);
     doNothing().when(handler).checkPeriod(any(), any(), any(), any());
     doReturn(true).when(handler).isAutoCreated(t1);
     doReturn(false).when(handler).isAutoCreated(t2);
@@ -2443,6 +2543,7 @@ public class ReconciliationHandlerTest {
       when(dal.get(FIN_Reconciliation.class, "rec-1")).thenReturn(rec);
       recUtil.when(() -> ReconciliationRemovalUtil.getDraftReconciliation(any()))
           .thenReturn(Collections.emptyList());
+      freeOnDetach(state, recUtil);
       response = handler.removeOperation(removeBody(ACC_ID, LINE_ID, "T1", "T2"));
 
       // Both selected transactions detached; only t1 (auto) has its payment reversed.
@@ -2491,11 +2592,13 @@ public class ReconciliationHandlerTest {
     when(t2.getFinPayment()).thenReturn(p2);
     when(t3.getFinPayment()).thenReturn(p3);
     wireLoads(t1, t2, t3, t4);
-    // The three requested ids (T1, T2, T3) are re-checked by the post-check loop — simulate all
-    // three succeeded (t4 was never requested, so its state is irrelevant here).
-    when(t1.getReconciliation()).thenReturn(null);
-    when(t2.getReconciliation()).thenReturn(null);
-    when(t3.getReconciliation()).thenReturn(null);
+    // The three requested ids (T1, T2, T3) are re-checked by the post-check loop — each stays linked
+    // for the pre-check and is freed by its own detach, so all three come back as removed (t4 was
+    // never requested, so its state is irrelevant here).
+    RemovalState state = new RemovalState();
+    state.linkedUntilFreed(t1, rec);
+    state.linkedUntilFreed(t2, rec);
+    state.linkedUntilFreed(t3, rec);
     doNothing().when(handler).checkPeriod(any(), any(), any(), any());
     doReturn(true).when(handler).isAutoCreated(t1);
     doReturn(true).when(handler).isAutoCreated(t2);
@@ -2516,6 +2619,7 @@ public class ReconciliationHandlerTest {
       when(dal.get(FIN_Reconciliation.class, "rec-1")).thenReturn(rec);
       recUtil.when(() -> ReconciliationRemovalUtil.getDraftReconciliation(any()))
           .thenReturn(Collections.emptyList());
+      freeOnDetach(state, recUtil);
 
       response = handler.removeOperation(removeBody(ACC_ID, LINE_ID, "T1", "T2", "T3"));
 
@@ -2577,12 +2681,14 @@ public class ReconciliationHandlerTest {
     doReturn(false).when(handler).isAutoCreated(t2);
     doReturn(false).when(handler).isAutoCreated(t3);
     doReturn(mock(FIN_BankStatementLine.class)).when(handler).normalizeReactivatedMatchGroup(any());
-    // Post-removal ground truth: T1/T2 genuinely detached (no longer linked); T3's detach silently
-    // failed inside Core (still reconciled) — the loop that processes it never aborts nor rethrows.
-    when(t1.getReconciliation()).thenReturn(null);
-    when(t2.getReconciliation()).thenReturn(null);
-    // t3.getReconciliation() keeps returning `rec` (its stub from recWith) — simulating "still
-    // reconciled" ground truth.
+    // Post-removal ground truth, modelled as the real TRANSITION: all three are linked while the
+    // pre-check runs (otherwise the whole action 409s before removing anything), then T1/T2 are
+    // genuinely detached by their removal while T3's detach silently fails inside Core (it stays
+    // reconciled) — the loop that processes it never aborts nor rethrows.
+    RemovalState state = new RemovalState();
+    state.linkedUntilFreed(t1, rec);
+    state.linkedUntilFreed(t2, rec);
+    state.staysLinked(t3);
 
     NeoResponse response;
     try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
@@ -2596,6 +2702,7 @@ public class ReconciliationHandlerTest {
       when(dal.get(FIN_Reconciliation.class, "rec-1")).thenReturn(rec);
       recUtil.when(() -> ReconciliationRemovalUtil.getDraftReconciliation(any()))
           .thenReturn(Collections.emptyList());
+      freeOnDetach(state, recUtil);
 
       response = handler.removeOperation(removeBody(ACC_ID, LINE_ID, "T1", "T2", "T3"));
     }
@@ -2639,11 +2746,14 @@ public class ReconciliationHandlerTest {
     List<FIN_FinaccTransaction> rec1Snapshot = rec1.getFINFinaccTransactionList();
     FIN_Reconciliation rec2 = recWith("rec-2", tB, tC);       // only B selected → partial
     wireLoads(tA, tB, tC);
-    // Both requested ids (A, B) are re-checked by the post-check loop — simulate both succeeded.
-    when(tA.getReconciliation()).thenReturn(null);
-    when(tB.getReconciliation()).thenReturn(null);
+    // Both requested ids (A, B) are re-checked by the post-check loop. Each stays linked for the
+    // pre-check and is freed by the seam its own branch uses: A by rec1's whole-reconciliation undo,
+    // B by its per-transaction detach in rec2.
+    RemovalState state = new RemovalState();
+    state.linkedUntilFreed(tA, rec1);
+    state.linkedUntilFreed(tB, rec2);
     doNothing().when(handler).checkPeriod(any(), any(), any(), any());
-    doNothing().when(handler).undoReconciliation(any(), any(), any());
+    freeOnUndo(state);
     doReturn(false).when(handler).isAutoCreated(tB);
     doReturn(mock(FIN_BankStatementLine.class)).when(handler).normalizeReactivatedMatchGroup(any());
 
@@ -2662,6 +2772,7 @@ public class ReconciliationHandlerTest {
       when(dal.get(FIN_Reconciliation.class, "rec-2")).thenReturn(rec2);
       recUtil.when(() -> ReconciliationRemovalUtil.getDraftReconciliation(any()))
           .thenReturn(Collections.emptyList());
+      freeOnDetach(state, recUtil);
       response = handler.removeOperation(removeBody(ACC_ID, LINE_ID, "A", "B"));
 
       // rec2 partial: only B detached, C left untouched. rec1 takes the whole-reconciliation undo,
@@ -2719,11 +2830,14 @@ public class ReconciliationHandlerTest {
     List<FIN_FinaccTransaction> recASnapshot = recA.getFINFinaccTransactionList();
     List<FIN_FinaccTransaction> recBSnapshot = recB.getFINFinaccTransactionList();
     wireLoads(tA, tB);
-    // Both requested ids (A, B) are re-checked by the post-check loop — simulate both succeeded.
-    when(tA.getReconciliation()).thenReturn(null);
-    when(tB.getReconciliation()).thenReturn(null);
+    // Both requested ids (A, B) are re-checked by the post-check loop. Each stays linked for the
+    // pre-check and is freed by the undo of ITS OWN reconciliation, so a per-reconciliation outcome
+    // is observable — a single shared flag would not distinguish the two undos.
+    RemovalState state = new RemovalState();
+    state.linkedUntilFreed(tA, recA);
+    state.linkedUntilFreed(tB, recB);
     doNothing().when(handler).checkPeriod(any(), any(), any(), any());
-    doNothing().when(handler).undoReconciliation(any(), any(), any());
+    freeOnUndo(state);
     doReturn(mock(FIN_BankStatementLine.class)).when(handler).normalizeReactivatedMatchGroup(any());
 
     NeoResponse response;
