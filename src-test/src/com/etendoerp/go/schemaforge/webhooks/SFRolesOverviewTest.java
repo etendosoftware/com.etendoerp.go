@@ -39,6 +39,7 @@ import org.openbravo.model.ad.access.Role;
 import org.openbravo.model.ad.access.User;
 import org.openbravo.model.ad.access.UserRoles;
 import org.openbravo.model.ad.access.WindowAccess;
+import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.ad.ui.Window;
 
 import com.etendoerp.go.schemaforge.data.SFSpec;
@@ -47,21 +48,22 @@ import com.etendoerp.go.schemaforge.data.SFSpec;
  * Unit tests for {@link SFRolesOverview}.
  *
  * <p>Covers: the admin/client-admin access gate (ETP-4513's key security requirement — this
- * webhook returns cross-role aggregate data no ordinary role should see), the per-role
- * user-count and window-list aggregation, the Etendo-GO-window intersection (a role's native
- * {@code AD_Window_Access} rows are filtered down to windows Etendo GO actually exposes), tier
- * resolution (full vs read-only), a missing/renamed role id being skipped defensively, and
- * exception handling.</p>
+ * webhook returns cross-role aggregate data no ordinary role should see), tenant-relative role
+ * resolution (2026-07-27 fix — the calling tenant's own client-admin + 4 named roles, NOT
+ * GOClient's hardcoded ids, see {@link SFRolesOverview}'s class javadoc for the live bug this
+ * closes), per-role user-count and window-list aggregation, the Etendo-GO-window intersection (a
+ * role's native {@code AD_Window_Access} rows are filtered down to windows Etendo GO actually
+ * exposes), tier resolution (full vs read-only), and exception handling.</p>
  */
 @MockitoSettings(strictness = Strictness.LENIENT)
 class SFRolesOverviewTest extends BaseWebhookTest {
 
-    /** Same order as {@code SFRolesOverview.GOCLIENT_ROLE_IDS}. */
-    private static final String ADMIN_ROLE_ID = "9B8D736190724807AB256DC95F20EC5E";
-    private static final String FINANCE_ROLE_ID = "127AE77FE2994067B7FE6495FC21D51E";
-    private static final String SALES_ROLE_ID = "2A159DF4F4B944A6AA903202AD35B545";
-    private static final String PURCHASING_ROLE_ID = "A826430F723E4C1B9A53EBB0746A98C0";
-    private static final String INVENTORY_ROLE_ID = "55E05A4B43514A029D6FB6B8D94B49D4";
+    private static final String CLIENT_ID = "tenant-client-1";
+    private static final String ADMIN_ROLE_ID = "tenant-admin-role";
+    private static final String FINANCE_ROLE_ID = "tenant-finance-role";
+    private static final String SALES_ROLE_ID = "tenant-sales-role";
+    private static final String PURCHASING_ROLE_ID = "tenant-purchasing-role";
+    private static final String INVENTORY_ROLE_ID = "tenant-inventory-role";
 
     private SFRolesOverview webhook;
 
@@ -77,46 +79,54 @@ class SFRolesOverviewTest extends BaseWebhookTest {
         when(obContext.getRole()).thenReturn(null);
     }
 
-    /** Makes the ambient current role a non-admin, non-client-admin role. */
+    /** Makes the ambient current role a non-admin, non-client-admin role in {@code CLIENT_ID}. */
     private void givenRestrictedCallerRole(String roleId) {
-        Role callerRole = mock(Role.class);
-        when(callerRole.getId()).thenReturn(roleId);
-        when(callerRole.isClientAdmin()).thenReturn(false);
+        Role callerRole = mockRole(roleId, "restricted", false);
         when(obContext.getRole()).thenReturn(callerRole);
     }
 
     /** Makes the ambient current role the literal System Administrator role ({@code "0"}). */
     private void givenSystemAdminCallerRole() {
-        Role callerRole = mock(Role.class);
-        when(callerRole.getId()).thenReturn("0");
+        Role callerRole = mockRole("0", "System Administrator", false);
         when(obContext.getRole()).thenReturn(callerRole);
     }
 
     /** Makes the ambient current role a per-client "GO Admin" (client-admin) role. */
     private void givenClientAdminCallerRole(String roleId) {
-        Role callerRole = mock(Role.class);
-        when(callerRole.getId()).thenReturn(roleId);
-        when(callerRole.isClientAdmin()).thenReturn(true);
+        Role callerRole = mockRole(roleId, "Client Admin caller", true);
         when(obContext.getRole()).thenReturn(callerRole);
     }
 
-    /** Stubs {@code OBDal.get(Role.class, id)} to resolve a mock GOClient role. */
-    private Role mockGoClientRole(String id, String name, String description) {
-        Role r = mock(Role.class);
-        when(r.getId()).thenReturn(id);
-        when(r.getName()).thenReturn(name);
-        when(r.getDescription()).thenReturn(description);
-        when(obDal.get(Role.class, id)).thenReturn(r);
-        return r;
+    /** Builds a mock {@link Role} with a client bound to {@link #CLIENT_ID}. */
+    private Role mockRole(String id, String name, boolean isClientAdmin) {
+        Role role = mock(Role.class);
+        Client client = mock(Client.class);
+        when(client.getId()).thenReturn(CLIENT_ID);
+        when(role.getId()).thenReturn(id);
+        when(role.getName()).thenReturn(name);
+        when(role.getClient()).thenReturn(client);
+        when(role.isClientAdmin()).thenReturn(isClientAdmin);
+        return role;
     }
 
-    /** Stubs all 5 GOClient roles resolving to a minimal mock, so tests can focus on one. */
-    private void givenAllFiveGoClientRolesResolve() {
-        mockGoClientRole(ADMIN_ROLE_ID, "GOClient Admin", "GOClient Admin");
-        mockGoClientRole(FINANCE_ROLE_ID, "Finance", "Etendo Go system role");
-        mockGoClientRole(SALES_ROLE_ID, "Sales", "Etendo Go system role");
-        mockGoClientRole(PURCHASING_ROLE_ID, "Purchasing", "Etendo Go system role");
-        mockGoClientRole(INVENTORY_ROLE_ID, "Inventory", "Etendo Go system role");
+    /**
+     * Stubs the tenant-role-resolution {@code OBCriteria<Role>} to return exactly the given
+     * roles (in whatever order supplied — {@link SFRolesOverview} sorts them itself, so tests
+     * that care about ordering pass them scrambled and assert on the response order).
+     */
+    private void stubTenantRoles(List<Role> roles) {
+        OBCriteria<Role> roleCriteria = mockCriteria(Role.class);
+        when(roleCriteria.list()).thenReturn(roles);
+    }
+
+    /** The tenant's standard 5 roles, admin first, matching {@code SFRolesOverview}'s own order. */
+    private List<Role> standardTenantRoles() {
+        return Arrays.asList(
+                mockRole(ADMIN_ROLE_ID, "RolesPresa Admin", true),
+                mockRole(FINANCE_ROLE_ID, "Finance", false),
+                mockRole(SALES_ROLE_ID, "Sales", false),
+                mockRole(PURCHASING_ROLE_ID, "Purchasing", false),
+                mockRole(INVENTORY_ROLE_ID, "Inventory", false));
     }
 
     private Window mockWindow(String id, String name) {
@@ -149,18 +159,20 @@ class SFRolesOverviewTest extends BaseWebhookTest {
 
     /**
      * Stubs {@code SFSpec} criteria (the Etendo-GO-window resolution query) to return specs
-     * backing {@code windows}, and stubs the {@code UserRoles}/{@code WindowAccess} criteria to
-     * return {@code emptyList} for every one of the 5 per-role queries — the common baseline for
-     * tests that only care about one role's data (set that role's rows individually afterward).
+     * backing {@code goWindows}, the tenant-role criteria to return {@code roles}, and the
+     * {@code UserRoles}/{@code WindowAccess} criteria to return {@code emptyList} for every
+     * per-role query — the common baseline for tests that only care about one role's data (set
+     * that role's rows individually afterward via a fresh {@code thenReturn} sequence).
      */
-    @SuppressWarnings("unchecked")
-    private void stubBaselineQueries(List<Window> goWindows) {
+    private void stubBaselineQueries(List<Role> roles, List<Window> goWindows) {
         OBCriteria<SFSpec> specCriteria = mockCriteria(SFSpec.class);
         List<SFSpec> specs = new java.util.ArrayList<>();
         for (Window w : goWindows) {
             specs.add(mockGoWindowSpec(w));
         }
         when(specCriteria.list()).thenReturn(specs);
+
+        stubTenantRoles(roles);
 
         OBCriteria<UserRoles> userRolesCriteria = mockCriteria(UserRoles.class);
         when(userRolesCriteria.list()).thenReturn(Collections.emptyList());
@@ -172,7 +184,7 @@ class SFRolesOverviewTest extends BaseWebhookTest {
     // ── access gate ──────────────────────────────────────────────────────
 
     @Test
-    @DisplayName("No caller role returns empty roles array without querying any role")
+    @DisplayName("No caller role returns empty roles array without resolving any tenant role")
     void testNoCallerRoleReturnsEmptyRoles() throws Exception {
         givenNoCallerRole();
 
@@ -181,7 +193,7 @@ class SFRolesOverviewTest extends BaseWebhookTest {
         assertNull(responseVars.get(ERROR));
         JSONObject result = new JSONObject(responseVars.get(RESULT));
         assertEquals(0, result.getJSONArray("roles").length());
-        verify(obDal, never()).get(eq(Role.class), anyString());
+        verify(obDal, never()).createCriteria(Role.class);
     }
 
     @Test
@@ -194,20 +206,19 @@ class SFRolesOverviewTest extends BaseWebhookTest {
         assertNull(responseVars.get(ERROR));
         JSONObject result = new JSONObject(responseVars.get(RESULT));
         assertEquals(0, result.getJSONArray("roles").length());
-        verify(obDal, never()).get(eq(Role.class), anyString());
+        verify(obDal, never()).createCriteria(Role.class);
     }
 
     /**
      * The gate must key off {@link com.etendoerp.go.schemaforge.util.NeoAccessHelper
      * #isAdminOrClientAdmin(Role)} only — never off whether the caller's own role id happens to
-     * be one of the 5 {@code GOCLIENT_ROLE_IDS} this endpoint aggregates over. A caller
-     * authenticated AS the Finance role (one of the 5 known ids, but not admin/client-admin)
-     * must be denied exactly like any other restricted role, not granted a partial/wrong
-     * response just because its id is "recognized" elsewhere in this class.
+     * be one of the tenant's own 5 fixed roles. A caller authenticated AS the Finance role (one
+     * of the 5 fixed roles, but not admin/client-admin) must be denied exactly like any other
+     * restricted role.
      */
     @Test
-    @DisplayName("Caller authenticated as one of the 5 GOClient roles (Finance), but not admin/client-admin, is still denied")
-    void testCallerIsAGoClientRoleButNotAdminIsStillDenied() throws Exception {
+    @DisplayName("Caller authenticated as one of the tenant's 5 fixed roles (Finance), but not admin/client-admin, is still denied")
+    void testCallerIsAFixedRoleButNotAdminIsStillDenied() throws Exception {
         givenRestrictedCallerRole(FINANCE_ROLE_ID);
 
         webhook.get(parameters, responseVars);
@@ -215,15 +226,14 @@ class SFRolesOverviewTest extends BaseWebhookTest {
         assertNull(responseVars.get(ERROR));
         JSONObject result = new JSONObject(responseVars.get(RESULT));
         assertEquals(0, result.getJSONArray("roles").length());
-        verify(obDal, never()).get(eq(Role.class), anyString());
+        verify(obDal, never()).createCriteria(Role.class);
     }
 
     @Test
     @DisplayName("System Administrator caller (role id '0') passes the gate")
     void testSystemAdminCallerPassesGate() throws Exception {
         givenSystemAdminCallerRole();
-        givenAllFiveGoClientRolesResolve();
-        stubBaselineQueries(Collections.emptyList());
+        stubBaselineQueries(standardTenantRoles(), Collections.emptyList());
 
         webhook.get(parameters, responseVars);
 
@@ -235,9 +245,8 @@ class SFRolesOverviewTest extends BaseWebhookTest {
     @Test
     @DisplayName("Client-admin caller (is_client_admin='Y', non-zero id) passes the gate")
     void testClientAdminCallerPassesGate() throws Exception {
-        givenClientAdminCallerRole("some-client-admin-role");
-        givenAllFiveGoClientRolesResolve();
-        stubBaselineQueries(Collections.emptyList());
+        givenClientAdminCallerRole(ADMIN_ROLE_ID);
+        stubBaselineQueries(standardTenantRoles(), Collections.emptyList());
 
         webhook.get(parameters, responseVars);
 
@@ -246,49 +255,87 @@ class SFRolesOverviewTest extends BaseWebhookTest {
         assertEquals(5, result.getJSONArray("roles").length());
     }
 
-    // ── role shape / ordering ────────────────────────────────────────────
+    // ── tenant-relative resolution (2026-07-27 fix) ──────────────────────
 
+    /**
+     * Regression test for the live RolesPresa bug: the role-resolution query must be scoped to
+     * the CALLER's own client, not a hardcoded GOClient id list. Verified here by asserting the
+     * criteria was built against {@code Role.class} at all (the old code never queried a Role
+     * criteria — it used {@code OBDal.get(Role.class, hardcodedId)} instead) and that the
+     * returned roles' own ids (this tenant's, not GOClient's) come through untouched.
+     */
     @Test
-    @DisplayName("All 5 roles are returned in GOCLIENT_ROLE_IDS order with id/name/description")
-    void testAllFiveRolesReturnedInOrder() throws Exception {
-        givenSystemAdminCallerRole();
-        givenAllFiveGoClientRolesResolve();
-        stubBaselineQueries(Collections.emptyList());
-
-        webhook.get(parameters, responseVars);
-
-        JSONObject result = new JSONObject(responseVars.get(RESULT));
-        JSONArray roles = result.getJSONArray("roles");
-        assertEquals(5, roles.length());
-
-        assertEquals(ADMIN_ROLE_ID, roles.getJSONObject(0).getString("id"));
-        assertEquals("GOClient Admin", roles.getJSONObject(0).getString("name"));
-        assertEquals(FINANCE_ROLE_ID, roles.getJSONObject(1).getString("id"));
-        assertEquals("Finance", roles.getJSONObject(1).getString("name"));
-        assertEquals(SALES_ROLE_ID, roles.getJSONObject(2).getString("id"));
-        assertEquals(PURCHASING_ROLE_ID, roles.getJSONObject(3).getString("id"));
-        assertEquals(INVENTORY_ROLE_ID, roles.getJSONObject(4).getString("id"));
-        assertEquals("Etendo Go system role", roles.getJSONObject(4).getString("rawDescription"));
-    }
-
-    @Test
-    @DisplayName("A GOClient role id that fails to resolve is skipped, the other 4 still returned")
-    void testMissingRoleIsSkippedGracefully() throws Exception {
-        givenSystemAdminCallerRole();
-        // Only 4 of the 5 resolve; ADMIN_ROLE_ID is deliberately left unstubbed -> OBDal.get(...) returns null.
-        mockGoClientRole(FINANCE_ROLE_ID, "Finance", "d");
-        mockGoClientRole(SALES_ROLE_ID, "Sales", "d");
-        mockGoClientRole(PURCHASING_ROLE_ID, "Purchasing", "d");
-        mockGoClientRole(INVENTORY_ROLE_ID, "Inventory", "d");
-        stubBaselineQueries(Collections.emptyList());
+    @DisplayName("Roles are resolved via a client-scoped criteria query, not hardcoded GOClient ids")
+    void testRolesResolvedViaClientScopedCriteria() throws Exception {
+        givenClientAdminCallerRole(ADMIN_ROLE_ID);
+        stubBaselineQueries(standardTenantRoles(), Collections.emptyList());
 
         webhook.get(parameters, responseVars);
 
         assertNull(responseVars.get(ERROR));
         JSONObject result = new JSONObject(responseVars.get(RESULT));
         JSONArray roles = result.getJSONArray("roles");
-        assertEquals(4, roles.length());
-        assertEquals(FINANCE_ROLE_ID, roles.getJSONObject(0).getString("id"));
+        assertEquals(5, roles.length());
+        verify(obDal).createCriteria(Role.class);
+        // None of these ids match the old hardcoded GOClient constants — proves the response
+        // reflects THIS tenant's own roles, not GOClient's.
+        assertEquals(ADMIN_ROLE_ID, roles.getJSONObject(0).getString("id"));
+    }
+
+    /**
+     * A tenant missing one of its 4 fixed-name roles (e.g. provisioning ran before it existed)
+     * simply gets fewer entries — there is no per-id null-skip branch anymore (that was an
+     * artifact of the old hardcoded-id-list design); the criteria naturally returns only what
+     * exists for this client.
+     */
+    @Test
+    @DisplayName("A tenant with fewer than 5 matching roles returns exactly what exists, not an error")
+    void testFewerThanFiveRolesReturnsWhatExists() throws Exception {
+        givenSystemAdminCallerRole();
+        List<Role> onlyFour = Arrays.asList(
+                mockRole(ADMIN_ROLE_ID, "RolesPresa Admin", true),
+                mockRole(FINANCE_ROLE_ID, "Finance", false),
+                mockRole(SALES_ROLE_ID, "Sales", false),
+                mockRole(PURCHASING_ROLE_ID, "Purchasing", false));
+        stubBaselineQueries(onlyFour, Collections.emptyList());
+
+        webhook.get(parameters, responseVars);
+
+        assertNull(responseVars.get(ERROR));
+        JSONObject result = new JSONObject(responseVars.get(RESULT));
+        assertEquals(4, result.getJSONArray("roles").length());
+    }
+
+    // ── role shape / ordering ────────────────────────────────────────────
+
+    @Test
+    @DisplayName("Roles are returned admin-first, then Finance/Sales/Purchasing/Inventory, regardless of query order")
+    void testRolesSortedAdminFirstThenFixedNameOrder() throws Exception {
+        givenSystemAdminCallerRole();
+        // Deliberately scrambled — SFRolesOverview must sort these itself, not trust query order.
+        List<Role> scrambled = Arrays.asList(
+                mockRole(INVENTORY_ROLE_ID, "Inventory", false),
+                mockRole(FINANCE_ROLE_ID, "Finance", false),
+                mockRole(ADMIN_ROLE_ID, "RolesPresa Admin", true),
+                mockRole(PURCHASING_ROLE_ID, "Purchasing", false),
+                mockRole(SALES_ROLE_ID, "Sales", false));
+        stubBaselineQueries(scrambled, Collections.emptyList());
+
+        webhook.get(parameters, responseVars);
+
+        JSONObject result = new JSONObject(responseVars.get(RESULT));
+        JSONArray roles = result.getJSONArray("roles");
+        assertEquals(5, roles.length());
+        assertEquals(ADMIN_ROLE_ID, roles.getJSONObject(0).getString("id"));
+        assertTrue(roles.getJSONObject(0).getBoolean("isClientAdmin"));
+        assertEquals(FINANCE_ROLE_ID, roles.getJSONObject(1).getString("id"));
+        assertEquals(SALES_ROLE_ID, roles.getJSONObject(2).getString("id"));
+        assertEquals(PURCHASING_ROLE_ID, roles.getJSONObject(3).getString("id"));
+        assertEquals(INVENTORY_ROLE_ID, roles.getJSONObject(4).getString("id"));
+        for (int i = 1; i < roles.length(); i++) {
+            assertFalse(roles.getJSONObject(i).getBoolean("isClientAdmin"),
+                    "Only the admin role (index 0) should carry isClientAdmin=true");
+        }
     }
 
     // ── user count aggregation ───────────────────────────────────────────
@@ -297,21 +344,16 @@ class SFRolesOverviewTest extends BaseWebhookTest {
     @DisplayName("User count reflects distinct users only (duplicate rows for same user count once)")
     void testUserCountCountsDistinctUsersOnly() throws Exception {
         givenSystemAdminCallerRole();
-        givenAllFiveGoClientRolesResolve();
 
         OBCriteria<SFSpec> specCriteria = mockCriteria(SFSpec.class);
         when(specCriteria.list()).thenReturn(Collections.emptyList());
+        stubTenantRoles(standardTenantRoles());
 
         OBCriteria<WindowAccess> windowAccessCriteria = mockCriteria(WindowAccess.class);
         when(windowAccessCriteria.list()).thenReturn(Collections.emptyList());
 
-        // The first role queried, GOClient Admin, receives two rows for the same user, which
-        // should count as a single distinct user. Every subsequent role receives zero rows.
-        // The row lists are assigned to local variables first and only then handed to the
-        // stubbed list call below, rather than being constructed inline as an argument to
-        // that stub. Building a further Mockito stub expression inline, nested inside the
-        // arguments of an outer stub expression that has not finished being defined yet,
-        // trips Mockito's UnfinishedStubbingException.
+        // The first role queried (admin, sorted first), receives two rows for the same user,
+        // which should count as a single distinct user. Every subsequent role receives zero rows.
         List<UserRoles> adminRoleRows = Arrays.asList(mockUserRolesRow("user-1"), mockUserRolesRow("user-1"));
         OBCriteria<UserRoles> userRolesCriteria = mockCriteria(UserRoles.class);
         when(userRolesCriteria.list()).thenReturn(
@@ -329,17 +371,16 @@ class SFRolesOverviewTest extends BaseWebhookTest {
 
     /**
      * A role with zero active {@code AD_User_Roles} rows AND zero active
-     * {@code AD_Window_Access} rows (e.g. a newly-provisioned or misconfigured GOClient role
-     * that hasn't been assigned any users or windows yet) must degrade gracefully to
-     * {@code userCount: 0} and an empty {@code windows} array for EVERY one of the 5 roles —
-     * not throw, and not silently omit the role from the response.
+     * {@code AD_Window_Access} rows (e.g. a newly-provisioned role that hasn't been assigned any
+     * users or windows yet) must degrade gracefully to {@code userCount: 0} and an empty
+     * {@code windows} array for EVERY one of the 5 roles — not throw, and not silently omit the
+     * role from the response.
      */
     @Test
     @DisplayName("A role with zero users and zero window-access rows degrades to userCount=0 and an empty windows array, not an error")
     void testRoleWithNoUsersAndNoWindowAccessDegradesGracefully() throws Exception {
         givenSystemAdminCallerRole();
-        givenAllFiveGoClientRolesResolve();
-        stubBaselineQueries(Collections.emptyList());
+        stubBaselineQueries(standardTenantRoles(), Collections.emptyList());
 
         webhook.get(parameters, responseVars);
 
@@ -360,7 +401,7 @@ class SFRolesOverviewTest extends BaseWebhookTest {
     @DisplayName("A window not backed by an active Etendo-GO spec is excluded from the windows list")
     void testWindowOutsideEtendoGoSetIsExcluded() throws Exception {
         givenSystemAdminCallerRole();
-        givenAllFiveGoClientRolesResolve();
+        stubTenantRoles(standardTenantRoles());
 
         Window goWindow = mockWindow("go-win-1", "Sales Order");
         Window nativeOnlyWindow = mockWindow("native-win-99", "Native Only Window");
@@ -396,7 +437,7 @@ class SFRolesOverviewTest extends BaseWebhookTest {
     @DisplayName("Window tier resolves to full for IsReadWrite=true and read-only otherwise")
     void testWindowTierResolution() throws Exception {
         givenSystemAdminCallerRole();
-        givenAllFiveGoClientRolesResolve();
+        stubTenantRoles(standardTenantRoles());
 
         Window fullWindow = mockWindow("win-full", "A Full Window");
         Window readOnlyWindow = mockWindow("win-ro", "B Read Only Window");
@@ -435,11 +476,12 @@ class SFRolesOverviewTest extends BaseWebhookTest {
     void testExceptionSetsError() {
         givenSystemAdminCallerRole();
         // Let the Etendo-GO-window resolution (SFSpec criteria) succeed first, so the thrown
-        // exception below is unambiguously coming from the per-role Role lookup, not an
+        // exception below is unambiguously coming from the tenant-role resolution, not an
         // incidental NPE from an unstubbed SFSpec criteria.
         OBCriteria<SFSpec> specCriteria = mockCriteria(SFSpec.class);
         when(specCriteria.list()).thenReturn(Collections.emptyList());
-        when(obDal.get(eq(Role.class), anyString())).thenThrow(new RuntimeException("DB error"));
+        OBCriteria<Role> roleCriteria = mockCriteria(Role.class);
+        when(roleCriteria.list()).thenThrow(new RuntimeException("DB error"));
 
         webhook.get(parameters, responseVars);
 

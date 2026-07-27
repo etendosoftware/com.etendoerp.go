@@ -18,6 +18,7 @@
 package com.etendoerp.go.schemaforge.webhooks;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -42,40 +43,50 @@ import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
 import com.etendoerp.webhookevents.services.BaseWebhookService;
 
 /**
- * Webhook that returns, for an admin caller, an aggregate overview of GOClient's 5 fixed roles
- * (ETP-4513 — "Configuración &gt; Roles"): each role's display name, raw AD description, count
- * of assigned users ({@code AD_User_Roles}), and the list of Etendo GO windows it can reach
- * ({@code AD_Window_Access}, intersected with the windows Etendo GO actually exposes today —
- * see {@link #resolveActiveEtendoGoWindowIds()}).
+ * Webhook that returns, for an admin caller, an aggregate overview of the CALLING TENANT's 5
+ * fixed roles (ETP-4513 — "Configuración &gt; Roles"): each role's display name, raw AD
+ * description, count of assigned users ({@code AD_User_Roles}), and the list of Etendo GO
+ * windows it can reach ({@code AD_Window_Access}, intersected with the windows Etendo GO
+ * actually exposes today — see {@link #resolveActiveEtendoGoWindowIds()}).
  *
  * <p>Unlike {@code SFWindowAccessMap}, which answers "what can the CURRENT caller's own role
  * reach" for any authenticated role, this endpoint is a cross-role aggregate: it always returns
- * data for all 5 roles regardless of which one the caller happens to be using. That is exactly
- * why it is gated to admin/client-admin callers only
+ * data for all 5 of the caller's OWN tenant's roles, regardless of which one the caller happens
+ * to be using. That is exactly why it is gated to admin/client-admin callers only
  * ({@link NeoAccessHelper#isAdminOrClientAdmin(Role)}) — a regular role has no legitimate reason
  * to see every other role's user count and window list. Anyone else (including a request with
  * no role assigned) gets an empty {@code roles} array, mirroring {@link SFListMenu}'s "deny
  * silently, don't 403" convention for this webhook family.</p>
  *
+ * <p><b>Tenant-relative role resolution (fixed 2026-07-27, was GOClient-hardcoded).</b> The
+ * original implementation always returned GOClient's 5 specific {@code AD_Role_ID}s, regardless
+ * of the caller's own client — harmless while GOClient was the only tenant with these roles at
+ * all, but broken the moment ETP-4515/4516 (Phase 7) gave every tenant its own equivalent role
+ * set: a non-GOClient admin would see GOClient's role NAMES (their ids happened to still resolve
+ * via a direct {@code OBDal.get()} by PK, which bypasses client filtering) but EMPTY user
+ * counts/windows, because the dependent {@code UserRoles}/{@code WindowAccess} queries silently
+ * filtered out GOClient's rows as unreadable from the caller's own (different) client context —
+ * a live, reproducible bug (RolesPresa tenant, 2026-07-27). Now resolves the 4 fixed-name roles
+ * (Finance/Sales/Purchasing/Inventory) plus whichever role has {@code is_client_admin='Y'} WITHIN
+ * {@code currentRole.getClient()} — the same "resolve by name + is_client_admin, scoped to
+ * :client_id" approach already used by {@code OnboardingRoleProvisioningService} and
+ * {@code R16-tenant-roles-and-webhook-access.sql} in {@code etendo_schema_forge}. Every
+ * OBCriteria below explicitly disables readable-client/org filtering (matching every sibling
+ * webhook in this package) so cross-tenant filtering can never silently empty a same-tenant
+ * result again.</p>
+ *
  * <p><b>{@code rawDescription} is NOT display copy.</b> {@code AD_Role.description} is
  * boilerplate for 4 of the 5 GOClient roles today ({@code "*** Please, do not edit this role.
  * Use Copy Record instead ***"}) — this backend has no i18n awareness, so it cannot produce
  * user-facing copy itself. The field is returned only as a raw/debug fallback; the frontend
- * (`RolesOverviewPage.jsx`) maps each of the 5 known role ids to its own curated,
- * i18n-keyed description (`roleDescGoClientAdmin`, `roleDescFinance`, etc. in
- * `en_US.json`/`es_ES.json`) instead of rendering this field.</p>
+ * (`RolesOverviewPage.jsx`) maps the 4 fixed role NAMES (and the {@code isClientAdmin} flag for
+ * the 5th) to curated, i18n-keyed copy instead of rendering this field.</p>
  *
  * <p>The current role is captured once, at the very top of {@link #get(Map, Map)}, before
  * {@link OBContext#setAdminMode()} is entered — the same convention {@link SFListMenu} follows
- * and for the same reason: admin mode is only used to bypass row-level security on the
- * underlying queries, never to decide access.</p>
- *
- * <p>The 5 role IDs are GOClient's fixed, well-known roles (seeded in ETP-3504 phases 1/2 —
- * see {@code artifacts/user/decisions.json} in {@code etendo_schema_forge}'s
- * {@code defaultRole.enumValues} for the same 5 ids/names) and are intentionally hardcoded
- * rather than derived from a client/role-name heuristic, matching this class's "fixed roles"
- * acceptance criterion and the existing {@code DEFAULT_POST_PROCESS_ID} convention in
- * {@link NeoAccessHelper} for other well-known, non-configurable AD ids.</p>
+ * and for the same reason: access decisions must always be made against the role actually
+ * resolved for this request, never against whatever the ambient OBContext happens to expose
+ * once admin mode is active.</p>
  *
  * GET /webhooks/SFRolesOverview
  */
@@ -98,6 +109,13 @@ public class SFRolesOverview extends BaseWebhookService {
    */
   private static final String RAW_DESCRIPTION = "rawDescription";
 
+  /**
+   * JSON key marking the tenant's client-admin role — its NAME varies per tenant (e.g.
+   * "RolesPresa Admin" vs "GOClient Admin"), so the frontend needs this flag to render it with
+   * generic "Administrator" copy instead of the literal AD_Role.name.
+   */
+  private static final String IS_CLIENT_ADMIN = "isClientAdmin";
+
   /** JSON key for a role's assigned-user count. */
   private static final String USER_COUNT = "userCount";
 
@@ -117,18 +135,12 @@ public class SFRolesOverview extends BaseWebhookService {
   private static final String SPEC_TYPE_WINDOW = "W";
 
   /**
-   * GOClient's 5 fixed roles (ETP-3504 phases 1/2), in the display order this endpoint should
-   * return them. See {@code artifacts/user/decisions.json}'s {@code defaultRole.enumValues} in
-   * {@code etendo_schema_forge} for the same ids/names, and do not add/remove entries here
-   * without updating that file too.
+   * The 4 fixed non-admin role names every tenant gets (ETP-4515/4516), in the display order
+   * this endpoint returns them (after the client-admin role, which always sorts first). Mirrors
+   * {@code OnboardingRoleProvisioningService.ROLE_NAMES} / R16's role list in
+   * {@code etendo_schema_forge} — keep in lockstep.
    */
-  private static final String[] GOCLIENT_ROLE_IDS = {
-      "9B8D736190724807AB256DC95F20EC5E", // GOClient Admin
-      "127AE77FE2994067B7FE6495FC21D51E", // Finance
-      "2A159DF4F4B944A6AA903202AD35B545", // Sales
-      "A826430F723E4C1B9A53EBB0746A98C0", // Purchasing
-      "55E05A4B43514A029D6FB6B8D94B49D4", // Inventory
-  };
+  private static final String[] FIXED_ROLE_NAMES = { "Finance", "Sales", "Purchasing", "Inventory" };
 
   @Override
   public void get(Map<String, String> parameter, Map<String, String> responseVars) {
@@ -145,7 +157,7 @@ public class SFRolesOverview extends BaseWebhookService {
 
     OBContext.setAdminMode();
     try {
-      JSONObject result = buildRolesOverview();
+      JSONObject result = buildRolesOverview(currentRole.getClient().getId());
       responseVars.put("result", result.toString());
     } catch (Exception e) {
       log.error("Error in SFRolesOverview", e);
@@ -171,18 +183,16 @@ public class SFRolesOverview extends BaseWebhookService {
   }
 
   /**
-   * Builds the {@code roles} array for all 5 GOClient roles, in {@link #GOCLIENT_ROLE_IDS}
-   * order.
+   * Builds the {@code roles} array for {@code clientId}'s own 5 fixed roles: the client-admin
+   * role first, then the 4 named roles in {@link #FIXED_ROLE_NAMES} order.
    */
-  private JSONObject buildRolesOverview() throws JSONException {
+  private JSONObject buildRolesOverview(String clientId) throws JSONException {
     Set<String> goWindowIds = resolveActiveEtendoGoWindowIds();
+    List<Role> tenantRoles = resolveTenantRoles(clientId);
 
     JSONArray roles = new JSONArray();
-    for (String roleId : GOCLIENT_ROLE_IDS) {
-      JSONObject roleJson = buildRoleJson(roleId, goWindowIds);
-      if (roleJson != null) {
-        roles.put(roleJson);
-      }
+    for (Role role : tenantRoles) {
+      roles.put(buildRoleJson(role, goWindowIds));
     }
 
     JSONObject result = new JSONObject();
@@ -191,21 +201,45 @@ public class SFRolesOverview extends BaseWebhookService {
   }
 
   /**
-   * Builds a single role's JSON entry, or {@code null} if the role id cannot be resolved
-   * (defensive — a GOClient role should always exist, but a missing/renamed id must not break
-   * the whole endpoint for the other 4 roles).
+   * Resolves {@code clientId}'s own client-admin role plus its 4 {@link #FIXED_ROLE_NAMES}
+   * roles, ordered admin-first then {@link #FIXED_ROLE_NAMES} order. Scoped strictly to
+   * {@code clientId} — a tenant's own role NAMES (not GOClient's specific ids) are what's
+   * universal across tenants (see {@code OnboardingRoleProvisioningService}), so this is the
+   * same resolution strategy as the rest of the role-provisioning feature.
    */
-  private JSONObject buildRoleJson(String roleId, Set<String> goWindowIds) throws JSONException {
-    Role role = OBDal.getInstance().get(Role.class, roleId);
-    if (role == null) {
-      log.warn("GOClient role {} not found; skipping it in SFRolesOverview.", roleId);
-      return null;
-    }
+  @SuppressWarnings("unchecked")
+  private List<Role> resolveTenantRoles(String clientId) {
+    OBCriteria<Role> criteria = OBDal.getInstance().createCriteria(Role.class);
+    criteria.setFilterOnReadableClients(false);
+    criteria.setFilterOnReadableOrganization(false);
+    criteria.add(Restrictions.eq(Role.PROPERTY_CLIENT + ".id", clientId));
+    criteria.add(Restrictions.eq(Role.PROPERTY_ACTIVE, true));
+    criteria.add(Restrictions.or(
+        Restrictions.eq(Role.PROPERTY_CLIENTADMIN, true),
+        Restrictions.in(Role.PROPERTY_NAME, FIXED_ROLE_NAMES)));
 
+    List<Role> fixedNameOrder = Arrays.asList(FIXED_ROLE_NAMES);
+    List<Role> roles = new ArrayList<>((List<Role>) criteria.list());
+    roles.sort((a, b) -> {
+      boolean aAdmin = Boolean.TRUE.equals(a.isClientAdmin());
+      boolean bAdmin = Boolean.TRUE.equals(b.isClientAdmin());
+      if (aAdmin != bAdmin) {
+        return aAdmin ? -1 : 1;
+      }
+      return Integer.compare(fixedNameOrder.indexOf(a.getName()), fixedNameOrder.indexOf(b.getName()));
+    });
+    return roles;
+  }
+
+  /**
+   * Builds a single role's JSON entry.
+   */
+  private JSONObject buildRoleJson(Role role, Set<String> goWindowIds) throws JSONException {
     JSONObject roleJson = new JSONObject();
     roleJson.put(ID, role.getId());
     roleJson.put(NAME, role.getName());
     roleJson.put(RAW_DESCRIPTION, role.getDescription());
+    roleJson.put(IS_CLIENT_ADMIN, Boolean.TRUE.equals(role.isClientAdmin()));
     roleJson.put(USER_COUNT, countActiveUsers(role));
     roleJson.put(WINDOWS, buildWindowsJson(role, goWindowIds));
     return roleJson;
@@ -217,6 +251,8 @@ public class SFRolesOverview extends BaseWebhookService {
   @SuppressWarnings("unchecked")
   private int countActiveUsers(Role role) {
     OBCriteria<UserRoles> criteria = OBDal.getInstance().createCriteria(UserRoles.class);
+    criteria.setFilterOnReadableClients(false);
+    criteria.setFilterOnReadableOrganization(false);
     criteria.add(Restrictions.eq(UserRoles.PROPERTY_ROLE + ".id", role.getId()));
     criteria.add(Restrictions.eq(UserRoles.PROPERTY_ACTIVE, true));
 
@@ -238,6 +274,8 @@ public class SFRolesOverview extends BaseWebhookService {
   @SuppressWarnings("unchecked")
   private JSONArray buildWindowsJson(Role role, Set<String> goWindowIds) throws JSONException {
     OBCriteria<WindowAccess> criteria = OBDal.getInstance().createCriteria(WindowAccess.class);
+    criteria.setFilterOnReadableClients(false);
+    criteria.setFilterOnReadableOrganization(false);
     criteria.add(Restrictions.eq(WindowAccess.PROPERTY_ROLE + ".id", role.getId()));
     criteria.add(Restrictions.eq(WindowAccess.PROPERTY_ACTIVE, true));
 
@@ -282,6 +320,8 @@ public class SFRolesOverview extends BaseWebhookService {
   @SuppressWarnings("unchecked")
   private Set<String> resolveActiveEtendoGoWindowIds() {
     OBCriteria<SFSpec> criteria = OBDal.getInstance().createCriteria(SFSpec.class);
+    criteria.setFilterOnReadableClients(false);
+    criteria.setFilterOnReadableOrganization(false);
     criteria.add(Restrictions.eq(SFSpec.PROPERTY_ISACTIVE, true));
     criteria.add(Restrictions.eq(SFSpec.PROPERTY_SPECTYPE, SPEC_TYPE_WINDOW));
 
