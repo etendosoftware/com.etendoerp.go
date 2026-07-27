@@ -342,14 +342,34 @@ final class ReconciliationHandlerSupport {
    * Per reconciliation: if the selection covers ALL of its transactions, undo the whole
    * reconciliation (payment removal); otherwise detach just the selected ones (the rest stay).
    * Extracted from {@code ReconciliationHandler.removeOperation}.
+   *
+   * <p>When the selection spans MULTIPLE reconciliations on the same account, processing one of
+   * them ({@code undoWholeReconciliation} / {@code detachSelected} both call into Core's {@code
+   * removeTransactionFromReconciliation}/{@code undoReconciliation}, which reprocess EVERY draft
+   * reconciliation of the whole account, not just the one being handled) can churn the Hibernate
+   * session and leave a reconciliation instance captured earlier — at grouping time, before any
+   * processing — stale/detached. A later {@code save} on it then collides with the session's
+   * freshly-reprocessed copy ({@code NonUniqueObjectException}). So each iteration re-fetches its
+   * reconciliation fresh by id right before deciding/dispatching, never carrying the
+   * grouping-time instance into a later iteration (same fix already applied per-transaction in
+   * {@link #detachSelected}).
+   *
+   * <p>Neither branch below throws anymore: Core's removal utilities ({@code
+   * PaymentRemovalUtil#reactivateAndRemove}) commit mid-flow ({@code
+   * SessionHandler#commitAndStart}), so a failure on reconciliation/transaction K does NOT roll
+   * back what 1..K-1 already persisted — aborting the rest of the batch on that failure would only
+   * leave K+1..N unprocessed too, compounding the inconsistency instead of limiting it. So every
+   * unit is attempted regardless of an earlier one's outcome; {@code
+   * ReconciliationHandler.removeOperation} re-checks the ACTUAL post-state of every requested
+   * transaction afterward (whether it is still linked to a reconciliation) rather than trusting
+   * "no exception was thrown", and reports exactly what succeeded and what didn't.
    */
   static void removeSelectedFromReconciliations(ReconciliationHandler handler,
       FIN_FinancialAccount account, Map<String, FIN_Reconciliation> recById,
-      Map<String, List<FIN_FinaccTransaction>> selectedByRec)
-      throws ReconciliationRemovalException {
-    for (Map.Entry<String, FIN_Reconciliation> entry : recById.entrySet()) {
-      FIN_Reconciliation r = entry.getValue();
-      List<FIN_FinaccTransaction> selForRec = selectedByRec.get(entry.getKey());
+      Map<String, List<FIN_FinaccTransaction>> selectedByRec) {
+    for (String recId : recById.keySet()) {
+      FIN_Reconciliation r = OBDal.getInstance().get(FIN_Reconciliation.class, recId);
+      List<FIN_FinaccTransaction> selForRec = selectedByRec.get(recId);
       if (coversReconciliation(r, selForRec)) {
         undoWholeReconciliation(handler, account, r);
       } else {
@@ -369,43 +389,55 @@ final class ReconciliationHandlerSupport {
   }
 
   /**
-   * Undoes the whole reconciliation (payment removal), preserving the servlet mapping: a business
-   * {@link OBException} propagates unwrapped (→ 400), any other failure is wrapped in a dedicated
-   * checked exception (→ 500), never a bare generic {@code throws} (Sonar java:S112).
+   * Undoes the whole reconciliation (payment removal). Logs and swallows a failure instead of
+   * aborting the caller's per-reconciliation loop — see {@link #removeSelectedFromReconciliations}
+   * for why: the caller re-checks the real outcome afterward rather than relying on this throwing.
    */
   private static void undoWholeReconciliation(ReconciliationHandler handler,
-      FIN_FinancialAccount account, FIN_Reconciliation r) throws ReconciliationRemovalException {
+      FIN_FinancialAccount account, FIN_Reconciliation r) {
     try {
       handler.undoReconciliation(account, r, new ArrayList<>(r.getFINFinaccTransactionList()));
-    } catch (OBException e) {
-      throw e;
     } catch (Exception e) {
-      throw new ReconciliationRemovalException(e);
+      log.error("Failed to undo reconciliation {}; some of its transactions may remain "
+          + "reconciled — the caller reports the actual per-transaction outcome.", r.getId(), e);
     }
   }
 
   /**
    * Detaches just the selected transactions (the rest of the reconciliation stays): removes each
-   * from its reconciliation and, for an auto-created payment, reverses it. Same mapping contract as
-   * {@link #undoWholeReconciliation} — {@link OBException} unwrapped (→ 400), everything else
-   * wrapped (→ 500).
+   * from its reconciliation and, for an auto-created payment, reverses it.
+   *
+   * <p>Each removal reactivates and reprocesses the whole reconciliation ({@code
+   * FIN_ReconciliationProcess}), which mutates the Hibernate session; a transaction instance loaded
+   * up front therefore goes stale/detached after the first iteration and a later {@code save} on it
+   * collides with the freshly-loaded persistent copy ({@code NonUniqueObjectException} — only the
+   * first of N un-reconciled). So we snapshot the ids and re-fetch each transaction fresh right
+   * before detaching it, never carrying an instance across an iteration.
+   *
+   * <p>A failure on one id is logged and swallowed rather than propagated, so the remaining ids in
+   * {@code selForRec} still get attempted — see {@link #removeSelectedFromReconciliations} for why.
    */
   private static void detachSelected(ReconciliationHandler handler,
-      List<FIN_FinaccTransaction> selForRec) throws ReconciliationRemovalException {
-    for (FIN_FinaccTransaction trx : selForRec) {
-      boolean auto = handler.isAutoCreated(trx);
-      FIN_Payment payment = auto ? trx.getFinPayment() : null;
+      List<FIN_FinaccTransaction> selForRec) {
+    List<String> ids = new ArrayList<>();
+    for (FIN_FinaccTransaction t : selForRec) {
+      ids.add(t.getId());
+    }
+    for (String id : ids) {
       try {
+        FIN_FinaccTransaction trx = OBDal.getInstance().get(FIN_FinaccTransaction.class, id);
+        boolean auto = handler.isAutoCreated(trx);
+        FIN_Payment payment = auto ? trx.getFinPayment() : null;
         ReconciliationRemovalUtil.removeTransactionFromReconciliation(trx);
         if (auto && payment != null) {
           PaymentRemovalUtil.reactivateAndRemove(payment);
         } else if (auto) {
-          TransactionRemovalUtil.reactivateAndRemove(trx.getId());
+          TransactionRemovalUtil.reactivateAndRemove(id);
         }
-      } catch (OBException e) {
-        throw e;
       } catch (Exception e) {
-        throw new ReconciliationRemovalException(e);
+        log.error("Failed to detach transaction {} from its reconciliation; earlier detaches in "
+            + "this batch are not rolled back (Core commits mid-flow) — continuing with the rest.",
+            id, e);
       }
     }
   }

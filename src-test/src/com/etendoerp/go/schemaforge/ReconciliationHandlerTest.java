@@ -34,6 +34,7 @@ import static org.mockito.Mockito.mockConstruction;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -2155,12 +2156,23 @@ public class ReconciliationHandlerTest {
     FIN_Reconciliation rec = recWith("rec-1", t1);
     List<FIN_FinaccTransaction> snapshot = rec.getFINFinaccTransactionList();
     wireLoads(t1);
+    // removeOperation's post-check re-fetches each requested transaction and reads its ACTUAL
+    // getReconciliation() state (ground truth, since Core commits mid-flow and the removal loops no
+    // longer throw). Simulate the successful post-removal DB state: no longer linked.
+    when(t1.getReconciliation()).thenReturn(null);
     doNothing().when(handler).checkPeriod(any(), any(), any(), any());
     doNothing().when(handler).undoReconciliation(any(), any(), any());
     doReturn(mock(FIN_BankStatementLine.class)).when(handler).normalizeReactivatedMatchGroup(any());
 
     NeoResponse response;
-    try (MockedStatic<ReconciliationRemovalUtil> recUtil = mockStatic(ReconciliationRemovalUtil.class)) {
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+        MockedStatic<ReconciliationRemovalUtil> recUtil = mockStatic(ReconciliationRemovalUtil.class)) {
+      // removeSelectedFromReconciliations now re-fetches each reconciliation fresh by id right
+      // before dispatching it (avoids Hibernate staleness across reconciliations); the re-fetch
+      // must return the exact mock the test built expectations on.
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(FIN_Reconciliation.class, "rec-1")).thenReturn(rec);
       recUtil.when(() -> ReconciliationRemovalUtil.getDraftReconciliation(any()))
           .thenReturn(Collections.emptyList());
       response = handler.removeOperation(removeBody(ACC_ID, LINE_ID, "T1"));
@@ -2172,6 +2184,7 @@ public class ReconciliationHandlerTest {
     assertTrue(data.getBoolean("removed"));
     assertEquals(1, data.getJSONArray("transactionIds").length());
     assertEquals("T1", data.getJSONArray("transactionIds").getString(0));
+    assertEquals(0, data.getJSONArray("failedTransactionIds").length());
     verify(handler).undoReconciliation(any(), eq(rec), eq(snapshot));
     verify(handler).normalizeReactivatedMatchGroup(any());
   }
@@ -2187,19 +2200,30 @@ public class ReconciliationHandlerTest {
   public void testRemoveOperationSingleIdFallbackSubsetReversesPayment() throws Exception {
     FIN_FinaccTransaction t1 = txnWithId("T1");
     FIN_FinaccTransaction t2 = txnWithId("T2");
-    recWith("rec-1", t1, t2);
+    FIN_Reconciliation rec = recWith("rec-1", t1, t2);
     FIN_Payment payment = mock(FIN_Payment.class);
     when(t1.getFinPayment()).thenReturn(payment);
     wireLoads(t1, t2);
+    // Only T1 was requested — the post-check only re-checks requested ids. Simulate it succeeded.
+    when(t1.getReconciliation()).thenReturn(null);
     doNothing().when(handler).checkPeriod(any(), any(), any(), any());
     doReturn(true).when(handler).isAutoCreated(t1);
     // normalizeReactivatedMatchGroup runs once at the end of every success path.
     doReturn(mock(FIN_BankStatementLine.class)).when(handler).normalizeReactivatedMatchGroup(any());
 
     NeoResponse response;
-    try (MockedStatic<ReconciliationRemovalUtil> recUtil = mockStatic(ReconciliationRemovalUtil.class);
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+        MockedStatic<ReconciliationRemovalUtil> recUtil = mockStatic(ReconciliationRemovalUtil.class);
         MockedStatic<PaymentRemovalUtil> payUtil = mockStatic(PaymentRemovalUtil.class);
         MockedStatic<TransactionRemovalUtil> trxUtil = mockStatic(TransactionRemovalUtil.class)) {
+      // detachSelected re-fetches each selected transaction fresh by id (avoids Hibernate stale
+      // instances); removeSelectedFromReconciliations ALSO re-fetches the reconciliation itself
+      // fresh by id right before the coversReconciliation check — both re-fetches must return the
+      // same mocks the test wired.
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(FIN_FinaccTransaction.class, "T1")).thenReturn(t1);
+      when(dal.get(FIN_Reconciliation.class, "rec-1")).thenReturn(rec);
       recUtil.when(() -> ReconciliationRemovalUtil.getDraftReconciliation(any()))
           .thenReturn(Collections.emptyList());
       response = handler.removeOperation(removeBodySingle(ACC_ID, LINE_ID, "T1"));
@@ -2210,6 +2234,11 @@ public class ReconciliationHandlerTest {
     }
 
     assertEquals(200, response.getHttpStatus());
+    JSONObject data = response.getBody().getJSONObject("response").getJSONObject("data");
+    assertTrue(data.getBoolean("removed"));
+    assertEquals(1, data.getJSONArray("transactionIds").length());
+    assertEquals("T1", data.getJSONArray("transactionIds").getString(0));
+    assertEquals(0, data.getJSONArray("failedTransactionIds").length());
     verify(handler, never()).undoReconciliation(any(), any(), any());
     verify(handler).normalizeReactivatedMatchGroup(any());
   }
@@ -2227,12 +2256,21 @@ public class ReconciliationHandlerTest {
     FIN_Reconciliation rec = recWith("rec-1", t1, t2);
     List<FIN_FinaccTransaction> snapshot = rec.getFINFinaccTransactionList();
     wireLoads(t1, t2);
+    // Both requested ids are re-checked by the post-check loop — simulate they both succeeded.
+    when(t1.getReconciliation()).thenReturn(null);
+    when(t2.getReconciliation()).thenReturn(null);
     doNothing().when(handler).checkPeriod(any(), any(), any(), any());
     doNothing().when(handler).undoReconciliation(any(), any(), any());
     doReturn(mock(FIN_BankStatementLine.class)).when(handler).normalizeReactivatedMatchGroup(any());
 
     NeoResponse response;
-    try (MockedStatic<ReconciliationRemovalUtil> recUtil = mockStatic(ReconciliationRemovalUtil.class)) {
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+        MockedStatic<ReconciliationRemovalUtil> recUtil = mockStatic(ReconciliationRemovalUtil.class)) {
+      // Re-fetched fresh by id right before the coversReconciliation check — must return the same
+      // mock the test built expectations on.
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(FIN_Reconciliation.class, "rec-1")).thenReturn(rec);
       recUtil.when(() -> ReconciliationRemovalUtil.getDraftReconciliation(any()))
           .thenReturn(Collections.emptyList());
       response = handler.removeOperation(removeBody(ACC_ID, LINE_ID, "T1", "T2"));
@@ -2240,6 +2278,10 @@ public class ReconciliationHandlerTest {
     }
 
     assertEquals(200, response.getHttpStatus());
+    JSONObject data = response.getBody().getJSONObject("response").getJSONObject("data");
+    assertTrue(data.getBoolean("removed"));
+    assertEquals(2, data.getJSONArray("transactionIds").length());
+    assertEquals(0, data.getJSONArray("failedTransactionIds").length());
     verify(handler).undoReconciliation(any(), eq(rec), eq(snapshot));
     verify(handler).normalizeReactivatedMatchGroup(any());
   }
@@ -2256,19 +2298,31 @@ public class ReconciliationHandlerTest {
     FIN_FinaccTransaction t1 = txnWithId("T1"); // selected, auto-created
     FIN_FinaccTransaction t2 = txnWithId("T2"); // selected, pre-existing
     FIN_FinaccTransaction t3 = txnWithId("T3"); // NOT selected → group not fully covered
-    recWith("rec-1", t1, t2, t3);
+    FIN_Reconciliation rec = recWith("rec-1", t1, t2, t3);
     FIN_Payment payment = mock(FIN_Payment.class);
     when(t1.getFinPayment()).thenReturn(payment);
     wireLoads(t1, t2, t3);
+    // Both requested ids (T1, T2) are re-checked by the post-check loop — simulate success for both.
+    when(t1.getReconciliation()).thenReturn(null);
+    when(t2.getReconciliation()).thenReturn(null);
     doNothing().when(handler).checkPeriod(any(), any(), any(), any());
     doReturn(true).when(handler).isAutoCreated(t1);
     doReturn(false).when(handler).isAutoCreated(t2);
     doReturn(mock(FIN_BankStatementLine.class)).when(handler).normalizeReactivatedMatchGroup(any());
 
     NeoResponse response;
-    try (MockedStatic<ReconciliationRemovalUtil> recUtil = mockStatic(ReconciliationRemovalUtil.class);
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+        MockedStatic<ReconciliationRemovalUtil> recUtil = mockStatic(ReconciliationRemovalUtil.class);
         MockedStatic<PaymentRemovalUtil> payUtil = mockStatic(PaymentRemovalUtil.class);
         MockedStatic<TransactionRemovalUtil> trxUtil = mockStatic(TransactionRemovalUtil.class)) {
+      // detachSelected re-fetches each selected transaction fresh by id; removeSelectedFromRecon-
+      // ciliations ALSO re-fetches the reconciliation itself right before the coversReconciliation
+      // check — both re-fetches must return the same mocks the test wired.
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(FIN_FinaccTransaction.class, "T1")).thenReturn(t1);
+      when(dal.get(FIN_FinaccTransaction.class, "T2")).thenReturn(t2);
+      when(dal.get(FIN_Reconciliation.class, "rec-1")).thenReturn(rec);
       recUtil.when(() -> ReconciliationRemovalUtil.getDraftReconciliation(any()))
           .thenReturn(Collections.emptyList());
       response = handler.removeOperation(removeBody(ACC_ID, LINE_ID, "T1", "T2"));
@@ -2281,8 +2335,171 @@ public class ReconciliationHandlerTest {
     }
 
     assertEquals(200, response.getHttpStatus());
+    JSONObject data = response.getBody().getJSONObject("response").getJSONObject("data");
+    assertTrue(data.getBoolean("removed"));
+    assertEquals(2, data.getJSONArray("transactionIds").length());
+    assertEquals(0, data.getJSONArray("failedTransactionIds").length());
     verify(handler, never()).undoReconciliation(any(), any(), any());
     verify(handler).normalizeReactivatedMatchGroup(any());
+  }
+
+  /**
+   * Regression for the bulk-un-reconcile bug where only the FIRST of N selected transactions was
+   * removed: {@code detachSelected} used to loop over the pre-loaded {@code FIN_FinaccTransaction}
+   * instances, but each removal reprocesses the whole reconciliation and churns the Hibernate
+   * session, so the 2nd..Nth pre-loaded instances went stale and the next removal died on a
+   * {@code NonUniqueObjectException}. The fix snapshots the ids and RE-FETCHES each transaction
+   * fresh by id inside the loop.
+   *
+   * <p>This test selects 3 (of 4) auto-created transactions in one reconciliation (coversRec false
+   * → subset detach path) and asserts {@code removeTransactionFromReconciliation} runs exactly 3
+   * times (once per selected id) and the response echoes all 3 ids. It FAILS against the old
+   * loop-over-instances code (only the first removal succeeds) and PASSES against the re-fetch code.
+   *
+   * @throws Exception if building the body or stubbing the seams fails
+   */
+  @Test
+  public void testRemoveOperationSubsetRemovesAllSelectedNotJustFirst() throws Exception {
+    FIN_FinaccTransaction t1 = txnWithId("T1");
+    FIN_FinaccTransaction t2 = txnWithId("T2");
+    FIN_FinaccTransaction t3 = txnWithId("T3");
+    FIN_FinaccTransaction t4 = txnWithId("T4"); // NOT selected → coversRec is false → subset path
+    FIN_Reconciliation rec = recWith("rec-1", t1, t2, t3, t4);
+    // All three selected transactions are auto-created payments.
+    FIN_Payment p1 = mock(FIN_Payment.class);
+    FIN_Payment p2 = mock(FIN_Payment.class);
+    FIN_Payment p3 = mock(FIN_Payment.class);
+    when(t1.getFinPayment()).thenReturn(p1);
+    when(t2.getFinPayment()).thenReturn(p2);
+    when(t3.getFinPayment()).thenReturn(p3);
+    wireLoads(t1, t2, t3, t4);
+    // The three requested ids (T1, T2, T3) are re-checked by the post-check loop — simulate all
+    // three succeeded (t4 was never requested, so its state is irrelevant here).
+    when(t1.getReconciliation()).thenReturn(null);
+    when(t2.getReconciliation()).thenReturn(null);
+    when(t3.getReconciliation()).thenReturn(null);
+    doNothing().when(handler).checkPeriod(any(), any(), any(), any());
+    doReturn(true).when(handler).isAutoCreated(t1);
+    doReturn(true).when(handler).isAutoCreated(t2);
+    doReturn(true).when(handler).isAutoCreated(t3);
+    doReturn(mock(FIN_BankStatementLine.class)).when(handler).normalizeReactivatedMatchGroup(any());
+
+    NeoResponse response;
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+        MockedStatic<ReconciliationRemovalUtil> recUtil = mockStatic(ReconciliationRemovalUtil.class);
+        MockedStatic<PaymentRemovalUtil> payUtil = mockStatic(PaymentRemovalUtil.class)) {
+      // The fix re-fetches each selected transaction fresh by id — stub every one. The enclosing
+      // reconciliation is ALSO re-fetched fresh right before the coversReconciliation check.
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(FIN_FinaccTransaction.class, "T1")).thenReturn(t1);
+      when(dal.get(FIN_FinaccTransaction.class, "T2")).thenReturn(t2);
+      when(dal.get(FIN_FinaccTransaction.class, "T3")).thenReturn(t3);
+      when(dal.get(FIN_Reconciliation.class, "rec-1")).thenReturn(rec);
+      recUtil.when(() -> ReconciliationRemovalUtil.getDraftReconciliation(any()))
+          .thenReturn(Collections.emptyList());
+
+      response = handler.removeOperation(removeBody(ACC_ID, LINE_ID, "T1", "T2", "T3"));
+
+      // The core regression assertion: ALL three selected transactions are detached, not just the
+      // first — one removeTransactionFromReconciliation per selected id.
+      recUtil.verify(() -> ReconciliationRemovalUtil.removeTransactionFromReconciliation(any()),
+          times(3));
+      recUtil.verify(() -> ReconciliationRemovalUtil.removeTransactionFromReconciliation(t4), never());
+      // Each auto-created payment is reversed (3 of them).
+      payUtil.verify(() -> PaymentRemovalUtil.reactivateAndRemove(any()), times(3));
+    }
+
+    assertEquals(200, response.getHttpStatus());
+    verify(handler, never()).undoReconciliation(any(), any(), any());
+    JSONObject data = response.getBody().getJSONObject("response").getJSONObject("data");
+    assertTrue(data.getBoolean("removed"));
+    JSONArray removedIds = data.getJSONArray("transactionIds");
+    assertEquals(3, removedIds.length());
+    java.util.List<String> ids = new ArrayList<>();
+    for (int i = 0; i < removedIds.length(); i++) {
+      ids.add(removedIds.getString(i));
+    }
+    assertTrue(ids.containsAll(Arrays.asList("T1", "T2", "T3")));
+    assertEquals(0, data.getJSONArray("failedTransactionIds").length());
+  }
+
+  /**
+   * Regression pinning the "never report total failure when part of the batch actually succeeded"
+   * contract — the core behavioral fix from the investigation of a real Tomcat
+   * {@code NonUniqueObjectException}/partial-commit bug the user hit. Core's own removal utilities
+   * ({@code PaymentRemovalUtil.reactivateAndRemove}) commit mid-flow ({@code
+   * SessionHandler#commitAndStart}), so when un-reconciling several transactions in one request, an
+   * item failing partway through does NOT roll back the items that already succeeded — yet the
+   * handler used to report a blanket error/success without checking. The fix never aborts the removal
+   * loops on one item's failure and, afterward, RE-CHECKS the real DB state of every requested
+   * transaction ({@code trx.getReconciliation() == null} → genuinely removed; non-null → still
+   * reconciled, i.e. failed) instead of trusting "no exception was thrown".
+   *
+   * <p>Selects 3 (of 4) transactions in one reconciliation (subset detach path). T1/T2 end up with
+   * {@code getReconciliation() == null} (simulating a successful detach); T3 KEEPS its non-null
+   * {@code getReconciliation()} (simulating Core's reversal logged-and-swallowed an internal error
+   * for that one — the DB state is unchanged). Asserts the HTTP status is STILL a success envelope
+   * (200/201 — no exception ever propagates, that is the whole point), {@code removed} is
+   * {@code false} (not everything succeeded), {@code transactionIds} contains exactly T1/T2, and
+   * {@code failedTransactionIds} contains exactly T3.
+   *
+   * @throws Exception if building the body or stubbing the seams fails
+   */
+  @Test
+  public void testRemoveOperationPartialFailureReportsAccurateOutcome() throws Exception {
+    FIN_FinaccTransaction t1 = txnWithId("T1"); // will succeed
+    FIN_FinaccTransaction t2 = txnWithId("T2"); // will succeed
+    FIN_FinaccTransaction t3 = txnWithId("T3"); // will silently fail (Core swallowed an error)
+    FIN_FinaccTransaction t4 = txnWithId("T4"); // NOT selected → coversRec is false → subset path
+    FIN_Reconciliation rec = recWith("rec-1", t1, t2, t3, t4);
+    wireLoads(t1, t2, t3, t4);
+    doNothing().when(handler).checkPeriod(any(), any(), any(), any());
+    doReturn(false).when(handler).isAutoCreated(t1);
+    doReturn(false).when(handler).isAutoCreated(t2);
+    doReturn(false).when(handler).isAutoCreated(t3);
+    doReturn(mock(FIN_BankStatementLine.class)).when(handler).normalizeReactivatedMatchGroup(any());
+    // Post-removal ground truth: T1/T2 genuinely detached (no longer linked); T3's detach silently
+    // failed inside Core (still reconciled) — the loop that processes it never aborts nor rethrows.
+    when(t1.getReconciliation()).thenReturn(null);
+    when(t2.getReconciliation()).thenReturn(null);
+    // t3.getReconciliation() keeps returning `rec` (its stub from recWith) — simulating "still
+    // reconciled" ground truth.
+
+    NeoResponse response;
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+        MockedStatic<ReconciliationRemovalUtil> recUtil = mockStatic(ReconciliationRemovalUtil.class);
+        MockedStatic<PaymentRemovalUtil> payUtil = mockStatic(PaymentRemovalUtil.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(FIN_FinaccTransaction.class, "T1")).thenReturn(t1);
+      when(dal.get(FIN_FinaccTransaction.class, "T2")).thenReturn(t2);
+      when(dal.get(FIN_FinaccTransaction.class, "T3")).thenReturn(t3);
+      when(dal.get(FIN_Reconciliation.class, "rec-1")).thenReturn(rec);
+      recUtil.when(() -> ReconciliationRemovalUtil.getDraftReconciliation(any()))
+          .thenReturn(Collections.emptyList());
+
+      response = handler.removeOperation(removeBody(ACC_ID, LINE_ID, "T1", "T2", "T3"));
+    }
+
+    // The whole point: no exception propagates — still a normal success envelope, never a blanket
+    // error, even though one of the three items did not actually go through.
+    assertEquals(200, response.getHttpStatus());
+    JSONObject data = response.getBody().getJSONObject("response").getJSONObject("data");
+    assertFalse(data.getBoolean("removed"));
+
+    JSONArray removedIds = data.getJSONArray("transactionIds");
+    assertEquals(2, removedIds.length());
+    List<String> removed = new ArrayList<>();
+    for (int i = 0; i < removedIds.length(); i++) {
+      removed.add(removedIds.getString(i));
+    }
+    assertTrue(removed.containsAll(Arrays.asList("T1", "T2")));
+    assertFalse(removed.contains("T3"));
+
+    JSONArray failedIds = data.getJSONArray("failedTransactionIds");
+    assertEquals(1, failedIds.length());
+    assertEquals("T3", failedIds.getString(0));
   }
 
   /**
@@ -2302,17 +2519,29 @@ public class ReconciliationHandlerTest {
     FIN_FinaccTransaction tC = txnWithId("C");
     FIN_Reconciliation rec1 = recWith("rec-1", tA);          // fully covered by the selection
     List<FIN_FinaccTransaction> rec1Snapshot = rec1.getFINFinaccTransactionList();
-    recWith("rec-2", tB, tC);                                // only B selected → partial
+    FIN_Reconciliation rec2 = recWith("rec-2", tB, tC);       // only B selected → partial
     wireLoads(tA, tB, tC);
+    // Both requested ids (A, B) are re-checked by the post-check loop — simulate both succeeded.
+    when(tA.getReconciliation()).thenReturn(null);
+    when(tB.getReconciliation()).thenReturn(null);
     doNothing().when(handler).checkPeriod(any(), any(), any(), any());
     doNothing().when(handler).undoReconciliation(any(), any(), any());
     doReturn(false).when(handler).isAutoCreated(tB);
     doReturn(mock(FIN_BankStatementLine.class)).when(handler).normalizeReactivatedMatchGroup(any());
 
     NeoResponse response;
-    try (MockedStatic<ReconciliationRemovalUtil> recUtil = mockStatic(ReconciliationRemovalUtil.class);
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+        MockedStatic<ReconciliationRemovalUtil> recUtil = mockStatic(ReconciliationRemovalUtil.class);
         MockedStatic<PaymentRemovalUtil> payUtil = mockStatic(PaymentRemovalUtil.class);
         MockedStatic<TransactionRemovalUtil> trxUtil = mockStatic(TransactionRemovalUtil.class)) {
+      // Only rec2's B goes through detachSelected (re-fetched fresh by id); A takes the undo path.
+      // removeSelectedFromReconciliations now re-fetches EACH reconciliation fresh by id right
+      // before dispatching it — stub both, returning the exact mocks the test built.
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(FIN_FinaccTransaction.class, "B")).thenReturn(tB);
+      when(dal.get(FIN_Reconciliation.class, "rec-1")).thenReturn(rec1);
+      when(dal.get(FIN_Reconciliation.class, "rec-2")).thenReturn(rec2);
       recUtil.when(() -> ReconciliationRemovalUtil.getDraftReconciliation(any()))
           .thenReturn(Collections.emptyList());
       response = handler.removeOperation(removeBody(ACC_ID, LINE_ID, "A", "B"));
@@ -2325,10 +2554,95 @@ public class ReconciliationHandlerTest {
     }
 
     assertEquals(200, response.getHttpStatus());
+    JSONObject data = response.getBody().getJSONObject("response").getJSONObject("data");
+    assertTrue(data.getBoolean("removed"));
+    assertEquals(2, data.getJSONArray("transactionIds").length());
+    assertEquals(0, data.getJSONArray("failedTransactionIds").length());
     // rec1 fully covered → its whole reconciliation is undone.
     verify(handler).undoReconciliation(any(), eq(rec1), eq(rec1Snapshot));
     // The match-group collapse happens exactly once, after all reconciliations are processed.
     verify(handler).normalizeReactivatedMatchGroup(any());
+  }
+
+  /**
+   * Regression for the SECOND {@code NonUniqueObjectException} in bulk un-reconcile — this one
+   * across RECONCILIATIONS rather than across transactions within one (the bug the per-transaction
+   * fix in {@code detachSelected} did not cover). Bulk-un-reconciling ALL lines at once can span
+   * MULTIPLE {@code FIN_Reconciliation} records, each fully covered by the selection (the
+   * "coversAll"/{@code undoWholeReconciliation} branch for both). Both {@code
+   * ReconciliationRemovalUtil.removeTransactionFromReconciliation} (used by {@code detachSelected})
+   * and {@code handler.undoReconciliation} (used by {@code undoWholeReconciliation}) call Core's
+   * {@code getDraftReconciliation}/{@code processAllReconciliationInDraft} internally, which
+   * reprocess EVERY draft reconciliation of the WHOLE ACCOUNT as a side effect — not just the one
+   * being handled. So processing reconciliation #1 in the loop could silently touch/reprocess
+   * reconciliation #2's session state, leaving the #2 instance captured earlier — at grouping time,
+   * before any processing — stale, so a later {@code save} on it collided with the session's fresh
+   * copy.
+   *
+   * <p>The fix re-fetches EACH reconciliation fresh right before dispatching it (instead of reusing
+   * the instance cached in {@code recById} at grouping time). This test selects two SEPARATE,
+   * fully-covered reconciliations and asserts {@code undoReconciliation} runs exactly twice — once
+   * per reconciliation — with the response echoing every transaction id from both. It FAILS against
+   * the old cached-instance loop (a stale rec1/rec2 read at grouping time) — in a real Hibernate
+   * session this dies with a {@code NonUniqueObjectException} on the second reconciliation, though a
+   * pure-mock unit test cannot reproduce that exception itself; the observable proxy here is that
+   * the fix's fresh-fetch contract is exercised via the {@code OBDal.get(FIN_Reconciliation.class,
+   * id)} stubs — and PASSES against the re-fetch code.
+   *
+   * @throws Exception if building the body or stubbing the seams fails
+   */
+  @Test
+  public void testRemoveOperationMultipleReconciliationsAllCoveredEachUndoneIndependently()
+      throws Exception {
+    FIN_FinaccTransaction tA = txnWithId("A");
+    FIN_FinaccTransaction tB = txnWithId("B");
+    FIN_Reconciliation recA = recWith("rec-A", tA); // fully covered by the selection
+    FIN_Reconciliation recB = recWith("rec-B", tB); // fully covered by the selection
+    List<FIN_FinaccTransaction> recASnapshot = recA.getFINFinaccTransactionList();
+    List<FIN_FinaccTransaction> recBSnapshot = recB.getFINFinaccTransactionList();
+    wireLoads(tA, tB);
+    // Both requested ids (A, B) are re-checked by the post-check loop — simulate both succeeded.
+    when(tA.getReconciliation()).thenReturn(null);
+    when(tB.getReconciliation()).thenReturn(null);
+    doNothing().when(handler).checkPeriod(any(), any(), any(), any());
+    doNothing().when(handler).undoReconciliation(any(), any(), any());
+    doReturn(mock(FIN_BankStatementLine.class)).when(handler).normalizeReactivatedMatchGroup(any());
+
+    NeoResponse response;
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+        MockedStatic<ReconciliationRemovalUtil> recUtil = mockStatic(ReconciliationRemovalUtil.class)) {
+      // Each reconciliation is re-fetched fresh by id right before dispatching — stub both.
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(FIN_Reconciliation.class, "rec-A")).thenReturn(recA);
+      when(dal.get(FIN_Reconciliation.class, "rec-B")).thenReturn(recB);
+      recUtil.when(() -> ReconciliationRemovalUtil.getDraftReconciliation(any()))
+          .thenReturn(Collections.emptyList());
+
+      response = handler.removeOperation(removeBody(ACC_ID, LINE_ID, "A", "B"));
+
+      // Neither reconciliation takes the per-transaction detach path — both are fully covered.
+      recUtil.verify(() -> ReconciliationRemovalUtil.removeTransactionFromReconciliation(any()), never());
+    }
+
+    assertEquals(200, response.getHttpStatus());
+    // Each fully-covered reconciliation is undone independently — once per reconciliation, not just
+    // the first one processed.
+    verify(handler, times(2)).undoReconciliation(any(), any(), any());
+    verify(handler).undoReconciliation(any(), eq(recA), eq(recASnapshot));
+    verify(handler).undoReconciliation(any(), eq(recB), eq(recBSnapshot));
+    verify(handler).normalizeReactivatedMatchGroup(any());
+
+    JSONObject data = response.getBody().getJSONObject("response").getJSONObject("data");
+    assertTrue(data.getBoolean("removed"));
+    JSONArray removedIds = data.getJSONArray("transactionIds");
+    assertEquals(2, removedIds.length());
+    List<String> ids = new ArrayList<>();
+    for (int i = 0; i < removedIds.length(); i++) {
+      ids.add(removedIds.getString(i));
+    }
+    assertTrue(ids.containsAll(Arrays.asList("A", "B")));
+    assertEquals(0, data.getJSONArray("failedTransactionIds").length());
   }
 
   /**
@@ -2604,5 +2918,76 @@ public class ReconciliationHandlerTest {
       // 3) inflow already correct → never re-written (idempotent).
       verify(inflowOk, never()).setStatus(anyString());
     }
+  }
+
+  /**
+   * Exercises {@code undoReconciliation}'s REAL (unstubbed) body — every other {@code
+   * removeOperation} test stubs it away wholesale via the spy, so this is the one place the new
+   * {@code reverseMatchedTransaction} resilience (extracted private method, ETP-4502 bulk-un-
+   * reconcile partial-commit fix) actually runs. Core's {@code PaymentRemovalUtil.reactivateAndRemove}
+   * commits mid-flow, so a failure reversing ONE matched transaction's auto-created payment must NOT
+   * abort the loop — the remaining matched transactions still get processed (here, a second, kept
+   * transaction still has its "not cleared" status restored), and {@code undoReconciliation} itself
+   * must return normally (the exception is caught + logged inside {@code reverseMatchedTransaction},
+   * never propagated).
+   *
+   * @throws Exception if the mocked seams fail
+   */
+  @Test
+  public void testUndoReconciliationContinuesAfterOneReversalFailure() throws Exception {
+    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    FIN_Reconciliation rec = mock(FIN_Reconciliation.class);
+
+    // 1) auto-created transaction whose payment reversal FAILS (Core throws mid-flow).
+    FIN_FinaccTransaction txnAutoFails = mock(FIN_FinaccTransaction.class);
+    FIN_Payment payment = mock(FIN_Payment.class);
+    when(txnAutoFails.getFinPayment()).thenReturn(payment);
+    doReturn(true).when(handler).isAutoCreated(txnAutoFails);
+
+    // 2) a SECOND, kept (non-auto-created) transaction stuck in the wrong "not cleared" status —
+    // must still be restored even though transaction #1 (processed first) failed.
+    FIN_FinaccTransaction txnKept = mock(FIN_FinaccTransaction.class);
+    when(txnKept.getDepositAmount()).thenReturn(new BigDecimal("25.30"));
+    when(txnKept.getPaymentAmount()).thenReturn(BigDecimal.ZERO);
+    when(txnKept.getStatus()).thenReturn("PWNC");
+    doReturn(false).when(handler).isAutoCreated(txnKept);
+
+    List<FIN_FinaccTransaction> matched = Arrays.asList(txnAutoFails, txnKept);
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+        MockedStatic<ReconciliationRemovalUtil> recUtil = mockStatic(ReconciliationRemovalUtil.class);
+        MockedStatic<PaymentRemovalUtil> payUtil = mockStatic(PaymentRemovalUtil.class)) {
+      recUtil.when(() -> ReconciliationRemovalUtil.getDraftReconciliation(any()))
+          .thenReturn(Collections.emptyList());
+      recUtil.when(() -> ReconciliationRemovalUtil.processAllReconciliationInDraft(any()))
+          .thenAnswer(inv -> null);
+      recUtil.when(() -> ReconciliationRemovalUtil.reactivateAndRemoveReconciliation(any()))
+          .thenAnswer(inv -> null);
+      // Core's own reversal utility throws for the first (auto-created) transaction.
+      payUtil.when(() -> PaymentRemovalUtil.reactivateAndRemove(payment))
+          .thenThrow(new RuntimeException("boom — Core reversal failed mid-flow"));
+
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+
+      @SuppressWarnings("unchecked")
+      org.openbravo.dal.service.OBCriteria<FIN_BankStatementLine> crit =
+          mock(org.openbravo.dal.service.OBCriteria.class);
+      when(dal.createCriteria(FIN_BankStatementLine.class)).thenReturn(crit);
+      when(crit.add(any())).thenReturn(crit);
+      when(crit.setMaxResults(eq(1))).thenReturn(crit);
+      when(crit.uniqueResult()).thenReturn(null);
+      doNothing().when(dal).save(any());
+
+      // Must NOT throw: reverseMatchedTransaction catches+logs its own failure.
+      handler.undoReconciliation(account, rec, matched);
+
+      // The failing reversal was attempted...
+      payUtil.verify(() -> PaymentRemovalUtil.reactivateAndRemove(payment));
+    }
+
+    // ...and the loop continued: the SECOND matched transaction was still processed despite the
+    // first one's reversal failure (no abort).
+    verify(txnKept).setStatus("RDNC");
   }
 }

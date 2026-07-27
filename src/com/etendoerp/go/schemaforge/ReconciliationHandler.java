@@ -1100,15 +1100,33 @@ public class ReconciliationHandler implements NeoHandler {
     ReconciliationHandlerSupport.removeSelectedFromReconciliations(
         this, account, recById, selectedByRec);
 
+    // Core's own removal utilities commit mid-flow (SessionHandler#commitAndStart), so a failure
+    // partway through the batch does not roll back what already persisted, and
+    // removeSelectedFromReconciliations no longer aborts on one failure (see its javadoc). Re-check
+    // each requested transaction's ACTUAL state — whether it is still linked to a reconciliation —
+    // rather than trusting "no exception was thrown", so the response never claims total failure
+    // when part of the batch genuinely went through.
+    List<String> removedIds = new ArrayList<>();
+    List<String> failedIds = new ArrayList<>();
+    for (String id : transactionIds) {
+      FIN_FinaccTransaction trx = loadTransaction(id);
+      if (trx == null || trx.getReconciliation() == null) {
+        removedIds.add(id);
+      } else {
+        failedIds.add(id);
+      }
+    }
+
     // Collapse the split sub-lines back into a single pending line if the whole group is now
     // unmatched (no-ops when some sub-lines are still reconciled).
     normalizeReactivatedMatchGroup(line);
 
     BigDecimal updatedBalance = ReactivationSupport.currentBalance(account);
     JSONObject data = new JSONObject();
-    data.put("removed", true);
+    data.put("removed", failedIds.isEmpty());
     data.put(KEY_STATEMENT_LINE_ID, statementLineId);
-    data.put("transactionIds", new JSONArray(transactionIds));
+    data.put("transactionIds", new JSONArray(removedIds));
+    data.put("failedTransactionIds", new JSONArray(failedIds));
     data.put(KEY_UPDATED_BALANCE, updatedBalance);
     return envelope(data);
   }
@@ -1148,6 +1166,23 @@ public class ReconciliationHandler implements NeoHandler {
       ReactivationSupport.unmatchBankStatementLine(t);
     }
     for (FIN_FinaccTransaction t : matched) {
+      reverseMatchedTransaction(t);
+    }
+  }
+
+  /**
+   * Reverses one matched transaction's auto-created movement (or restores its "not cleared" status)
+   * as the last cleanup step of undoing a reconciliation. Catches and logs its own failure instead
+   * of letting it abort {@link #undoReconciliation}'s loop: Core's reversal utilities ({@link
+   * PaymentRemovalUtil#reactivateAndRemove}) commit mid-flow, so a failure on transaction K does not
+   * roll back transactions 1..K-1 that already committed — aborting here would only leave K+1..N
+   * unprocessed too, compounding the inconsistency instead of limiting it. The reconciliation itself
+   * is already undone by the time this runs (see {@code reactivateAndRemoveReconciliation} above),
+   * so a failed reversal here is a rare, logged, individually-recoverable leftover, not a half-undone
+   * reconciliation.
+   */
+  private void reverseMatchedTransaction(FIN_FinaccTransaction t) {
+    try {
       if (isAutoCreated(t)) {
         FIN_Payment payment = t.getFinPayment();
         if (payment != null) {
@@ -1158,6 +1193,9 @@ public class ReconciliationHandler implements NeoHandler {
       } else {
         ReactivationSupport.restoreNotClearedStatus(t);
       }
+    } catch (Exception e) {
+      log.error("Failed to reverse the auto-created movement for transaction {} while undoing a "
+          + "reconciliation; the reconciliation itself was already undone.", t.getId(), e);
     }
   }
 
