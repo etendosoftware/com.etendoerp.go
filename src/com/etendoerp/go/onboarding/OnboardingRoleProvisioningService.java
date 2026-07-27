@@ -245,6 +245,13 @@ public class OnboardingRoleProvisioningService extends OnboardingContextSupport 
    * each of {@link #WEBHOOK_NAMES} it doesn't already have — mirrors Step 3 of the corrective
    * data-fix, so it covers the tenant's admin role too (not just the 4 roles cloned above), and
    * is safe to re-run.
+   *
+   * <p>A webhook name with no matching {@code SMFWHE_DEFINEDWEBHOOK} row is skipped, not fatal:
+   * the corrective SQL data-fix this mirrors does a {@code WHERE w.name IN (...)} join, which
+   * silently omits any name not yet present in the table — a not-yet-migrated webhook (e.g.
+   * {@code SFRolesOverview} landing in a later branch/release) must not abort onboarding for
+   * every other grant and the 4 cloned roles above. The corrective data-fix remains the backstop
+   * that grants the missed webhook once its definition exists.
    */
   private void grantWebhookAccessToAllActiveRoles(String clientId) {
     for (Role role : resolveActiveRolesForClient(clientId)) {
@@ -254,7 +261,9 @@ public class OnboardingRoleProvisioningService extends OnboardingContextSupport 
         }
         DefinedWebHook webhook = resolveWebhookByName(webhookName);
         if (webhook == null) {
-          throw new OBException("Webhook '" + webhookName + "' not found — cannot grant tenant access");
+          log.warn("Webhook '{}' not found — skipping grant for role {} of client {}",
+              webhookName, role.getId(), clientId);
+          continue;
         }
         createWebhookGrant(clientId, role, webhook);
       }

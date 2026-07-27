@@ -175,16 +175,21 @@ public class OnboardingRoleProvisioningServiceTest {
   }
 
   @Test
-  public void testWireFailsWhenWebhookDefinitionIsMissing() {
+  public void testWireSkipsGrantWhenWebhookDefinitionIsMissing() {
     TestableService service = new TestableService();
+    Role adminRole = namedRole("Admin");
+    service.activeRolesForClient.add(adminRole);
+    // A not-yet-migrated webhook (e.g. SFRolesOverview on a branch that hasn't added its
+    // SMFWHE_DEFINEDWEBHOOK row yet) must not abort onboarding — see the corrective SQL
+    // data-fix this mirrors, whose WHERE w.name IN (...) join silently omits it too.
     service.missingWebhookName = "SFRolesOverview";
 
-    try {
-      service.wire("CLIENT-1", "USER-1", "ROLE-1");
-      fail("Expected missing webhook definition to fail");
-    } catch (OBException e) {
-      assertTrue(e.getMessage().contains("SFRolesOverview"));
-    }
+    service.wire("CLIENT-1", "USER-1", "ROLE-1");
+
+    // 4 cloned roles + 1 pre-existing admin role = 5 roles, 2 available webhooks each = 10 grants.
+    assertEquals(10, service.createdGrants.size());
+    assertTrue("no grant should exist for the missing webhook",
+        service.createdGrants.stream().noneMatch(g -> g.endsWith("|SFRolesOverview")));
   }
 
   // ---------------------------------------------------------------------------
