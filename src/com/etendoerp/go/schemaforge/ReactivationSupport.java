@@ -160,6 +160,26 @@ final class ReactivationSupport {
   }
 
   /**
+   * How many reconciliations of {@code account} are currently in draft (unprocessed). Core allows
+   * only ONE editable reconciliation per account, so a non-zero count means the next "Reactivar" will
+   * have to CONFIRM that draft first — surfaced by {@code pendingLines} so the UI can warn up front.
+   * Decorative: degrades to {@code 0} instead of failing the response.
+   */
+  static int draftCount(FIN_FinancialAccount account) {
+    try {
+      List<FIN_Reconciliation> drafts = ReconciliationRemovalUtil.getDraftReconciliation(account);
+      return drafts != null ? drafts.size() : 0;
+    } catch (Exception e) {
+      // Log the id defensively (same as readMatchGroupId/clearMatchGroupId): buildPendingLines does
+      // not null-check its account, so dereferencing it here would turn this decorative helper's
+      // "degrade to 0" into a 500.
+      log.debug("Could not count draft reconciliations for account {}: {}",
+          account != null ? account.getId() : "<null>", e.getMessage());
+      return 0;
+    }
+  }
+
+  /**
    * Current balance of the account after the reactivation: the ending balance of its most recent
    * remaining reconciliation, or {@code 0} when none remains. Decorative — never fails the response.
    */

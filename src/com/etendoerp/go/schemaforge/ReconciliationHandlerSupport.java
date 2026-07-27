@@ -75,6 +75,7 @@ final class ReconciliationHandlerSupport {
   private static final String ACTION_APPLY_SUGGESTIONS = "applySuggestions";
   private static final String ACTION_REACTIVATE = "reactivate";
   private static final String ACTION_REMOVE_OPERATION = "removeOperation";
+  private static final String ACTION_REACTIVATE_SELECTED = "reactivateSelected";
 
   // ---------------------------------------------------------------------------
   // POST action dispatch wrappers (OBContext admin mode + rollback boilerplate)
@@ -94,6 +95,10 @@ final class ReconciliationHandlerSupport {
 
   static NeoResponse handleRemoveOperation(ReconciliationHandler handler, NeoContext context) {
     return runPostAction(handler, context, ACTION_REMOVE_OPERATION);
+  }
+
+  static NeoResponse handleReactivateSelected(ReconciliationHandler handler, NeoContext context) {
+    return runPostAction(handler, context, ACTION_REACTIVATE_SELECTED);
   }
 
   /**
@@ -146,6 +151,8 @@ final class ReconciliationHandlerSupport {
           return handler.reactivate(body);
         case ACTION_REMOVE_OPERATION:
           return handler.removeOperation(body);
+        case ACTION_REACTIVATE_SELECTED:
+          return handler.reactivateSelected(body);
         default:
           throw new ReconciliationActionException(
               new IllegalArgumentException("Unknown reconciliation action: " + action));
@@ -439,6 +446,92 @@ final class ReconciliationHandlerSupport {
             + "this batch are not rolled back (Core commits mid-flow) — continuing with the rest.",
             id, e);
       }
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // reactivateSelected helpers ("Reactivar" — the lightweight un-reconcile)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Per reconciliation: the lightweight un-reconcile. Where {@link
+   * #removeSelectedFromReconciliations} always ends up DELETING the {@code FIN_Reconciliation}, this
+   * returns it to DRAFT and keeps it — Core's plain {@code reactivate} (action {@code "R"}) only sets
+   * {@code processed = false} / {@code DR} and touches nothing else, so the statement line keeps its
+   * transaction and the transaction keeps its reconciliation. Nothing has to be un-linked or
+   * remembered: the line simply reads as pending (its reconciliation is unprocessed) with its own
+   * transactions pre-selected, and confirming re-processes that same document.
+   *
+   * <p>Auto-created movements in the checked set are still fully deleted first (same {@code
+   * com.etendoerp.payment.removal} utilities as {@code removeOperation}) — a payment that only existed
+   * to back this reconciliation has nothing worth preserving in a draft. When the WHOLE selection is
+   * auto-created there is nothing left to keep either, so it falls back to the delete behavior.
+   *
+   * <p>Same non-aborting resilience as {@link #removeSelectedFromReconciliations}: Core commits
+   * mid-flow, so one unit's failure is logged and the batch continues; the caller re-checks the real
+   * post-state per transaction.
+   */
+  static int reactivateSelectedFromReconciliations(ReconciliationHandler handler,
+      FIN_FinancialAccount account, Map<String, FIN_Reconciliation> recById,
+      Map<String, List<FIN_FinaccTransaction>> selectedByRec) {
+    int autoConfirmed = 0;
+    for (String recId : recById.keySet()) {
+      List<FIN_FinaccTransaction> selForRec = selectedByRec.get(recId);
+      List<FIN_FinaccTransaction> autoCreated = new ArrayList<>();
+      boolean anyKept = false;
+      for (FIN_FinaccTransaction t : selForRec) {
+        if (handler.isAutoCreated(t)) {
+          autoCreated.add(t);
+        } else {
+          anyKept = true;
+        }
+      }
+      // Nothing pre-existing to preserve as a draft → same end state as "Desconciliar".
+      if (!anyKept) {
+        FIN_Reconciliation fresh = OBDal.getInstance().get(FIN_Reconciliation.class, recId);
+        if (coversReconciliation(fresh, selForRec)) {
+          undoWholeReconciliation(handler, account, fresh);
+        } else {
+          detachSelected(handler, selForRec);
+        }
+        continue;
+      }
+      detachSelected(handler, autoCreated);
+      autoConfirmed += reactivateToDraft(account, recId);
+    }
+    return autoConfirmed;
+  }
+
+  /**
+   * Core's plain reactivate — reactivate WITHOUT the delete that {@code
+   * reactivateAndRemoveReconciliation} chains onto it. Leaves the {@code FIN_Reconciliation} row in
+   * place, un-processed, with its transactions and their statement lines still linked.
+   *
+   * <p>Core only lets ONE reconciliation be editable per account: its reactivate action rejects with
+   * "Draft Reconciliation already exists…" when the account already has an unprocessed one. So any
+   * pre-existing draft is processed first — the same ordering pre-step {@code undoReconciliation}
+   * already performs for exactly this reason, and what the {@code payment.removal} module's own
+   * Classic "Reactivate Reconciliation" button does too.
+   *
+   * @return how many pre-existing drafts had to be confirmed to make room. Non-zero means a line the
+   *     user had left pending by an EARLIER "Reactivar" on this account is now reconciled again — an
+   *     unavoidable consequence of Core's one-editable-reconciliation rule, which the caller surfaces
+   *     in the response so the UI can warn about it instead of letting it happen silently.
+   */
+  private static int reactivateToDraft(FIN_FinancialAccount account, String recId) {
+    try {
+      List<FIN_Reconciliation> drafts = ReconciliationRemovalUtil.getDraftReconciliation(account);
+      int confirmed = drafts != null ? drafts.size() : 0;
+      ReconciliationRemovalUtil.processAllReconciliationInDraft(drafts);
+      FIN_Reconciliation fresh = OBDal.getInstance().get(FIN_Reconciliation.class, recId);
+      if (fresh != null) {
+        ReconciliationRemovalUtil.reactivate(fresh);
+      }
+      return confirmed;
+    } catch (Exception e) {
+      log.error("Failed to reactivate reconciliation {} to draft; it stays processed, so its lines "
+          + "still read as reconciled — the caller reports it as failed.", recId, e);
+      return 0;
     }
   }
 }

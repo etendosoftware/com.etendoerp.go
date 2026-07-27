@@ -151,6 +151,7 @@ public class ReconciliationHandler implements NeoHandler {
   private static final String ACTION_APPLY_SUGGESTIONS = "applySuggestions";
   private static final String ACTION_REACTIVATE = "reactivate";
   private static final String ACTION_REMOVE_OPERATION = "removeOperation";
+  private static final String ACTION_REACTIVATE_SELECTED = "reactivateSelected";
 
   /** Match level recorded on the reconciliation lines produced by this handler. */
   private static final String MATCH_LEVEL_MANUAL = "MANUALMATCH";
@@ -206,7 +207,17 @@ public class ReconciliationHandler implements NeoHandler {
           + "       %s AS description,"
           + "       COALESCE(bp.name, NULLIF(bsl.bpartnername, ''), '') AS partner_name,"
           + "       COALESCE(bsl.referenceno, '') AS reference_no,"
-          + "       CASE WHEN bsl.fin_finacc_transaction_id IS NULL THEN 'pending' ELSE 'reconciled' END AS line_status,"
+          // A line counts as reconciled only when its transaction belongs to a PROCESSED
+          // reconciliation. "Reactivar" (Core's plain reactivate) sets the reconciliation back to
+          // draft WITHOUT touching the line→transaction or transaction→reconciliation links, so such
+          // a line is functionally un-confirmed and must return to the pending pool — where its own
+          // transactions come back pre-selected and confirming just processes that same draft.
+          + "       CASE WHEN bsl.fin_finacc_transaction_id IS NULL"
+          + "                 OR COALESCE(rec.processed, 'N') = 'N' THEN 'pending'"
+          + "            ELSE 'reconciled' END AS line_status,"
+          + "       CASE WHEN COALESCE(rec.processed, 'N') = 'N'"
+          + "            THEN COALESCE(rec.fin_reconciliation_id, '') ELSE '' END"
+          + "                                   AS draft_reconciliation_id,"
           + "       COALESCE(bsl.em_etgo_match_group_id, '') AS match_group_id,"
           + "       COALESCE(bsl.cramount, 0) AS cramount,"
           + "       COALESCE(bsl.dramount, 0) AS dramount,"
@@ -230,6 +241,7 @@ public class ReconciliationHandler implements NeoHandler {
           + "  JOIN fin_bankstatement bs ON bs.fin_bankstatement_id = bsl.fin_bankstatement_id"
           + "  LEFT JOIN c_bpartner bp ON bp.c_bpartner_id = bsl.c_bpartner_id"
           + "  LEFT JOIN fin_finacc_transaction ft ON ft.fin_finacc_transaction_id = bsl.fin_finacc_transaction_id"
+          + "  LEFT JOIN fin_reconciliation rec ON rec.fin_reconciliation_id = ft.fin_reconciliation_id"
           + "  LEFT JOIN fin_payment fp ON fp.fin_payment_id = ft.fin_payment_id"
           + "  LEFT JOIN c_bpartner tbp ON tbp.c_bpartner_id = ft.c_bpartner_id"
           + "  LEFT JOIN c_bpartner pbp ON pbp.c_bpartner_id = fp.c_bpartner_id"
@@ -270,9 +282,15 @@ public class ReconciliationHandler implements NeoHandler {
           + "  FROM fin_finacc_transaction ft"
           + "  LEFT JOIN fin_payment fp ON fp.fin_payment_id = ft.fin_payment_id"
           + "  LEFT JOIN c_bpartner bp ON bp.c_bpartner_id = COALESCE(ft.c_bpartner_id, fp.c_bpartner_id)"
-          + " WHERE ft.fin_reconciliation_id IS NULL"
+          // Normally only free transactions are candidates (unreconciled + not already cleared). The
+          // second branch covers a "Reactivar"-ed line: its transactions stay linked to the now-DRAFT
+          // reconciliation AND keep their cleared (RPPC) status, so both filters must be bypassed for
+          // them — they have to be offered (pre-selected) for the line they are still matched to.
+          // Bind: that draft reconciliation id, or NULL for every other line (branch matches
+          // nothing, behavior unchanged).
+          + " WHERE ((ft.fin_reconciliation_id IS NULL AND ft.status <> 'RPPC')"
+          + "        OR ft.fin_reconciliation_id = ?)"
           + "   AND ft.processed = 'Y'"
-          + "   AND ft.status <> 'RPPC'"
           + "   AND ft.fin_financial_account_id = ?"
           + "   AND (CAST(? AS date) IS NULL OR ft.statementdate >= ?)"
           + "   AND (CAST(? AS date) IS NULL OR ft.statementdate <= ?)";
@@ -339,6 +357,9 @@ public class ReconciliationHandler implements NeoHandler {
     }
     if (METHOD_POST.equals(method) && ACTION_REMOVE_OPERATION.equals(action)) {
       return ReconciliationHandlerSupport.handleRemoveOperation(this, context);
+    }
+    if (METHOD_POST.equals(method) && ACTION_REACTIVATE_SELECTED.equals(action)) {
+      return ReconciliationHandlerSupport.handleReactivateSelected(this, context);
     }
     // Any other request (generic list / getById of the W spec) flows through.
     return null;
@@ -438,9 +459,20 @@ public class ReconciliationHandler implements NeoHandler {
           // is derived per merged (logical) line in the post-merge loop below.
           row.put("in", credit);
           row.put("out", debit);
+          String draftRecId =
+              StringUtils.trimToEmpty(rs.getString("draft_reconciliation_id"));
           row.put("matched", matched);
-          row.put("pendingAmount", nullSafe(rs.getBigDecimal("em_etgo_pending_amount")));
+          // EM_ETGO_Pending_Amount is 0 while a transaction is linked, but a "Reactivar"-ed line
+          // keeps that link even though nothing is confirmed — so report its FULL amount as pending
+          // (progress 0 %, no bar) instead of the stored 0 (which would read as 100 % reconciled).
+          row.put("pendingAmount", StringUtils.isNotBlank(draftRecId) ? amount
+              : nullSafe(rs.getBigDecimal("em_etgo_pending_amount")));
           row.put("reconcileStatus", matched ? "RECONCILED" : "PENDING");
+          // Non-empty only while this line's transaction hangs off a DRAFT reconciliation, i.e. the
+          // line was "Reactivar"-ed: it shows as pending, but its own transactions are already
+          // matched to it, so the candidates panel pre-selects them and confirming re-processes this
+          // very reconciliation instead of composing a new one.
+          row.put("draftReconciliationId", draftRecId);
           // 1:N group id (option B): sub-lines of the same reconcile group share this value.
           row.put("matchGroupId", StringUtils.trimToEmpty(rs.getString("match_group_id")));
           row.put("txns", BankStatementsSupport.buildLineTxns(rs, matched));
@@ -454,6 +486,12 @@ public class ReconciliationHandler implements NeoHandler {
     JSONArray lines = BankStatementsSupport.mergeMatchGroups(rawLines);
     JSONObject data = ReconciliationHandlerSupport.summarizePendingLines(
         lines, account, rules, pendingDateTolDays, pendingAmtTolPct);
+    // How many reconciliations of this account are currently in draft. Core allows only ONE editable
+    // reconciliation per account, so a non-zero value means a "Reactivar" will first CONFIRM that
+    // draft — the UI warns about it up front, in the confirm dialog, instead of after the fact.
+    // Deliberately not derived from `lines` (those are date/status filtered, so an off-screen draft
+    // would be missed).
+    data.put("draftReconciliationCount", ReactivationSupport.draftCount(account));
     return envelope(data);
   }
 
@@ -492,9 +530,15 @@ public class ReconciliationHandler implements NeoHandler {
       String dateFrom, String dateTo) throws Exception {
     FIN_BankStatementLine selectedLine =
         StringUtils.isNotBlank(lineId) ? loadLine(lineId) : null;
-    // A reconciled line is read-only: return ONLY the movement(s) already linked to it (its 1:1
-    // transaction, or every transaction of its 1:N match group) — never the unreconciled pool.
-    if (selectedLine != null && selectedLine.getFinancialAccountTransaction() != null) {
+    // "Reactivar" leaves the line linked to its transaction while the reconciliation goes back to
+    // draft. Such a line is NOT reconciled — it is pending re-confirmation, so it must get the full
+    // editable candidate list (with its own transactions pre-selected below), not the read-only
+    // linked-movements view.
+    FIN_Reconciliation draftRec = draftReconciliationOf(selectedLine);
+    if (selectedLine != null && selectedLine.getFinancialAccountTransaction() != null
+        && draftRec == null) {
+      // A reconciled line is read-only: return ONLY the movement(s) already linked to it (its 1:1
+      // transaction, or every transaction of its 1:N match group) — never the unreconciled pool.
       return CandidatesSupport.buildLinkedTransactions(lineId);
     }
 
@@ -502,7 +546,17 @@ public class ReconciliationHandler implements NeoHandler {
     int candidateDateTolDays = candidateTols[0].intValue();
     BigDecimal candidateAmtTolPct = candidateTols[1];
 
+    // Its own (still-linked) transactions are filtered out of the normal candidate pool, so surface
+    // them explicitly and pre-select them: confirming then re-processes this same draft.
+    Set<String> draftTxnIds = new HashSet<>();
+    if (draftRec != null) {
+      for (FIN_FinaccTransaction t : draftRec.getFINFinaccTransactionList()) {
+        draftTxnIds.add(t.getId());
+      }
+    }
+
     Set<String> suggestedIds = suggestedTransactionIds(accountId, lineId, candidateDateTolDays);
+    suggestedIds.addAll(draftTxnIds);
     // 1:N: if the selected line amount equals the sum of a signal group (same logic the automatch
     // uses), pre-mark ALL of its operations as suggested — not only a single 1:1 standard match.
     if (selectedLine != null) {
@@ -531,6 +585,8 @@ public class ReconciliationHandler implements NeoHandler {
     sql.append(CANDIDATES_ORDER);
     try (PreparedStatement ps = conn.prepareStatement(sql.toString())) {
       int idx = 1;
+      // NULL for every normal line — that OR branch then matches nothing.
+      ps.setString(idx++, draftRec != null ? draftRec.getId() : null);
       ps.setString(idx++, accountId);
       idx = bindDateRange(ps, idx, dateFrom, dateTo);
       if (filterDocType) {
@@ -679,6 +735,105 @@ public class ReconciliationHandler implements NeoHandler {
     return ids;
   }
 
+  /**
+   * The DRAFT reconciliation a line is still matched to, or {@code null} when the line is unmatched
+   * or its reconciliation is already processed.
+   *
+   * <p>This is the whole "Reactivar" state: Core's plain reactivate (action {@code "R"}) only flips
+   * the reconciliation to {@code processed = false} / {@code DR} — it never touches the line's
+   * {@code financialAccountTransaction} nor the transaction's {@code reconciliation}, so every link
+   * survives and the state is fully derivable from the data (no marker column needed). Such a line is
+   * un-confirmed: it belongs in the pending pool, with its own transactions pre-selected.
+   * Package-private test seam.
+   */
+  FIN_Reconciliation draftReconciliationOf(FIN_BankStatementLine line) {
+    if (line == null || line.getFinancialAccountTransaction() == null) {
+      return null;
+    }
+    FIN_Reconciliation rec = line.getFinancialAccountTransaction().getReconciliation();
+    return rec != null && !rec.isProcessed() ? rec : null;
+  }
+
+  /**
+   * "Reactivar" — the lightweight un-reconcile, the alternate action behind the same
+   * "Desconciliar (N)" split button. Instead of deleting the {@code FIN_Reconciliation} (what
+   * {@link #removeOperation(JSONObject)} does), it returns the document to DRAFT via Core's plain
+   * {@code reactivate}, leaving every link intact: the statement line keeps its transaction, the
+   * transaction keeps its reconciliation. The line then shows as pending (see
+   * {@code PENDING_LINES_SQL}) with those transactions pre-selected, so confirming "Conciliar" simply
+   * re-processes this same reconciliation (see {@link #reprocessDraftIfAlreadyMatched}).
+   *
+   * <p>Auto-created movements in the checked selection are still fully deleted — a payment that only
+   * existed to back this reconciliation has nothing worth preserving in a draft — reusing the very
+   * same {@code com.etendoerp.payment.removal} utilities as {@code removeOperation}.
+   */
+  NeoResponse reactivateSelected(JSONObject body) throws Exception {
+    String accountId = body.optString(KEY_FINANCIAL_ACCOUNT_ID, null);
+    String statementLineId = body.optString(KEY_STATEMENT_LINE_ID, null);
+    List<String> transactionIds = ReconciliationHandlerSupport.readTransactionIds(body);
+    if (StringUtils.isBlank(accountId) || StringUtils.isBlank(statementLineId)
+        || transactionIds.isEmpty()) {
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
+          "financialAccountId, statementLineId and at least one transactionId are required");
+    }
+
+    FIN_FinancialAccount account = loadAccount(accountId);
+    if (account == null) {
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, MSG_ACCOUNT_NOT_FOUND + accountId);
+    }
+    FIN_BankStatementLine line = loadLine(statementLineId);
+    if (line == null) {
+      return NeoResponse.error(HttpServletResponse.SC_NOT_FOUND,
+          MSG_STATEMENT_LINE_NOT_FOUND + statementLineId);
+    }
+    if (!belongsToAccount(line, accountId)) {
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, MSG_LINE_NOT_IN_ACCOUNT);
+    }
+
+    Map<String, FIN_Reconciliation> recById = new java.util.LinkedHashMap<>();
+    Map<String, List<FIN_FinaccTransaction>> selectedByRec = new java.util.LinkedHashMap<>();
+    NeoResponse groupError = ReconciliationHandlerSupport.groupSelectedByReconciliation(
+        this, accountId, transactionIds, recById, selectedByRec);
+    if (groupError != null) {
+      return groupError;
+    }
+    NeoResponse periodError = ReconciliationHandlerSupport.guardOpenPeriods(this, recById.values());
+    if (periodError != null) {
+      return periodError;
+    }
+    int autoConfirmedDrafts = ReconciliationHandlerSupport.reactivateSelectedFromReconciliations(
+        this, account, recById, selectedByRec);
+
+    // Same partial-batch rationale as removeOperation (Core commits mid-flow), but the success
+    // condition differs: a KEPT transaction stays linked to its now-draft reconciliation on purpose,
+    // so what proves the action worked is the reconciliation no longer being processed — or the
+    // transaction being gone entirely (the auto-created ones).
+    List<String> doneIds = new ArrayList<>();
+    List<String> failedIds = new ArrayList<>();
+    for (String id : transactionIds) {
+      FIN_FinaccTransaction trx = loadTransaction(id);
+      FIN_Reconciliation rec = trx != null ? trx.getReconciliation() : null;
+      if (trx == null || rec == null || !rec.isProcessed()) {
+        doneIds.add(id);
+      } else {
+        failedIds.add(id);
+      }
+    }
+
+    BigDecimal updatedBalance = ReactivationSupport.currentBalance(account);
+    JSONObject data = new JSONObject();
+    data.put("reactivated", failedIds.isEmpty());
+    data.put(KEY_STATEMENT_LINE_ID, statementLineId);
+    data.put("transactionIds", new JSONArray(doneIds));
+    data.put("failedTransactionIds", new JSONArray(failedIds));
+    // > 0 when a pre-existing draft had to be confirmed to make room (Core allows one editable
+    // reconciliation per account), i.e. a line left pending by an earlier "Reactivar" is reconciled
+    // again. Surfaced so the UI can warn instead of letting it happen silently.
+    data.put("autoConfirmedDrafts", autoConfirmedDrafts);
+    data.put(KEY_UPDATED_BALANCE, updatedBalance);
+    return envelope(data);
+  }
+
   // ---------------------------------------------------------------------------
   // POST reconcileGroup
   // ---------------------------------------------------------------------------
@@ -714,7 +869,11 @@ public class ReconciliationHandler implements NeoHandler {
       return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
           MSG_LINE_NOT_IN_ACCOUNT);
     }
-    if (line.getFinancialAccountTransaction() != null) {
+    // A "Reactivar"-ed line keeps its transaction link while its reconciliation sits in draft, so the
+    // link alone no longer proves the line is reconciled — only a PROCESSED reconciliation does.
+    // Re-confirming such a line is the whole point of that action (compose then re-processes the same
+    // draft via reprocessDraftIfAlreadyMatched), so it must not be rejected here.
+    if (line.getFinancialAccountTransaction() != null && draftReconciliationOf(line) == null) {
       return NeoResponse.error(HttpServletResponse.SC_CONFLICT,
           "Statement line is already reconciled");
     }
@@ -747,6 +906,13 @@ public class ReconciliationHandler implements NeoHandler {
    */
   private NeoResponse compose(FIN_FinancialAccount account, FIN_BankStatementLine line,
       List<String> operationIds) throws Exception {
+    // A "Reactivar"-ed line is still matched to its transactions; only its reconciliation went back
+    // to draft. Re-confirming that same set must PROCESS that document, not build a new one (Core
+    // would reject the transactions — they are not free — and the draft would be orphaned).
+    NeoResponse reprocessed = reprocessDraftIfAlreadyMatched(line, operationIds);
+    if (reprocessed != null) {
+      return reprocessed;
+    }
     FIN_Reconciliation rec = addNewDraftReconciliation(account);
     // Grouping (option B): tag the original line with a fresh match-group id BEFORE the match so
     // the split sub-lines inherit it (DalUtil.copy copies all EM_ properties). The UI re-groups
@@ -771,6 +937,51 @@ public class ReconciliationHandler implements NeoHandler {
     lineIds.put(line.getId());
     data.put("lineIds", lineIds);
     data.put(KEY_UPDATED_BALANCE, nullSafe(rec.getEndingBalance()));
+    return NeoResponse.createdWithData(data);
+  }
+
+  /**
+   * The "Reactivar" round-trip. When {@code line} is still matched to a DRAFT reconciliation and the
+   * confirmed {@code operationIds} are exactly that reconciliation's transactions — the common case,
+   * the user just confirmed the pre-checked candidates — nothing has to be re-linked at all: Core's
+   * reactivate never broke a link, so simply PROCESS that same document and return its response.
+   *
+   * <p>When the selection differs (the user (un)checked something) the draft cannot be reused: its
+   * transactions must be freed or the new match would be rejected, and Core does not clean up
+   * leftover drafts on this path. So it is discarded properly
+   * ({@code reactivateAndRemoveReconciliation}) and {@code null} is returned, letting the caller
+   * compose a brand-new reconciliation.
+   *
+   * <p>Returns {@code null} (no-op) when the line is not in the "Reactivar" state, i.e. on every
+   * normal reconcile. Package-private test seam.
+   */
+  NeoResponse reprocessDraftIfAlreadyMatched(FIN_BankStatementLine line, List<String> operationIds)
+      throws Exception {
+    FIN_Reconciliation draft = draftReconciliationOf(line);
+    if (draft == null) {
+      return null;
+    }
+    Set<String> draftTxnIds = new HashSet<>();
+    for (FIN_FinaccTransaction t : draft.getFINFinaccTransactionList()) {
+      draftTxnIds.add(t.getId());
+    }
+    if (!draftTxnIds.equals(new HashSet<>(operationIds))) {
+      ReconciliationRemovalUtil.reactivateAndRemoveReconciliation(draft);
+      return null;
+    }
+
+    OBError result = processReconciliation(draft);
+    if (result != null && "Error".equalsIgnoreCase(result.getType())) {
+      doRollbackAndClose();
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, result.getMessage());
+    }
+
+    JSONObject data = new JSONObject();
+    data.put("reconciliationId", draft.getId());
+    JSONArray lineIds = new JSONArray();
+    lineIds.put(line.getId());
+    data.put("lineIds", lineIds);
+    data.put(KEY_UPDATED_BALANCE, nullSafe(draft.getEndingBalance()));
     return NeoResponse.createdWithData(data);
   }
 
@@ -905,7 +1116,9 @@ public class ReconciliationHandler implements NeoHandler {
       return NeoResponse.error(HttpServletResponse.SC_NOT_FOUND,
           MSG_STATEMENT_LINE_NOT_FOUND + statementLineId);
     }
-    if (line.getFinancialAccountTransaction() != null) {
+    // Same exemption as reconcileGroup: a line whose reconciliation is still in draft ("Reactivar")
+    // keeps its transaction link but is NOT reconciled yet.
+    if (line.getFinancialAccountTransaction() != null && draftReconciliationOf(line) == null) {
       return NeoResponse.error(HttpServletResponse.SC_CONFLICT,
           "Statement line is already reconciled: " + statementLineId);
     }
