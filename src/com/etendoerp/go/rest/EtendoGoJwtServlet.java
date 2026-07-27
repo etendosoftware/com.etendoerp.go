@@ -135,6 +135,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private static final String FIELD_LANGUAGE = "language";
   private static final String FIELD_CSRF_TOKEN = "csrfToken";
   private static final String FIELD_USER_ID = "userId";
+  private static final String FIELD_ROLE_LIST = "roleList";
+  private static final String HEADER_USER_AGENT = "User-Agent";
   private static final String HEADER_CONTENT_TYPE_OPTIONS = "X-Content-Type-Options";
   private static final String VALUE_NOSNIFF = "nosniff";
   private static final String HEADER_CACHE_CONTROL = "Cache-Control";
@@ -382,7 +384,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
 
       if (createCookieSession) {
         IssuedGoSession issued = goSessionService.create(account.getId(), FIELD_PASSWORD,
-            request.getHeader("User-Agent"), null);
+            request.getHeader(HEADER_USER_AGENT), null);
         writeSessionResponse(response, HttpServletResponse.SC_CREATED, account, issued);
       } else {
         JSONObject result = new JSONObject();
@@ -574,7 +576,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
         return;
       }
       IssuedGoSession issued = goSessionService.create(account.getId(), "sso",
-          request.getHeader("User-Agent"), null);
+          request.getHeader(HEADER_USER_AGENT), null);
       writeSessionResponse(response, HttpServletResponse.SC_OK, account, issued);
     } catch (RuntimeException e) {
       EtendoGoDalHelper.rollbackDalChanges("session SSO create", e, log);
@@ -1179,18 +1181,17 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       writeError(response, HttpServletResponse.SC_UNAUTHORIZED, INVALID_AUTHORIZATION_HEADER);
       return;
     }
-    AuthenticatedAccount authenticated;
+    AuthenticatedAccount authenticated = null;
     try {
       authenticated = resolveAuthenticatedAccountContext(request, response);
-      if (authenticated == null) {
-        return;
-      }
     } catch (RuntimeException e) {
       log.error("Database error validating token for onboarding", e);
       writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, SERVER_ERROR);
-      return;
     } finally {
       OBContext.restorePreviousMode();
+    }
+    if (authenticated == null) {
+      return;
     }
     String accountId = authenticated.account.getId();
     String accountEmail = authenticated.account.getEmail();
@@ -1359,7 +1360,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
 
       JSONObject result = new JSONObject();
       result.put(FIELD_TOKEN, jwtToken);
-      result.put("roleList", roleListData.roleArray);
+      result.put(FIELD_ROLE_LIST, roleListData.roleArray);
       writeResponse(response, HttpServletResponse.SC_OK, result);
     } finally {
       OBContext.restorePreviousMode();
@@ -2063,7 +2064,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       }
 
       IssuedGoSession issued = goSessionService.create(account.getId(), FIELD_PASSWORD,
-          request.getHeader("User-Agent"), null);
+          request.getHeader(HEADER_USER_AGENT), null);
       writeSessionResponse(response, HttpServletResponse.SC_OK, account, issued);
     } catch (RuntimeException e) {
       EtendoGoDalHelper.rollbackDalChanges("session create", e, log);
@@ -2167,22 +2168,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
         return;
       }
       EtendoGoJwtSupport.RoleListData roleListData = EtendoGoJwtSupport.loadRoleListData(userId);
-      String roleId = requestedRoleId.isEmpty() ? roleListData.firstRoleId : requestedRoleId;
-      JSONObject selectedRole = findRole(roleListData.roleArray, roleId);
-      if (roleId == null || selectedRole == null) {
-        writeError(response, HttpServletResponse.SC_FORBIDDEN,
-            "Requested role is not available to this user");
-        return;
-      }
-      if (!requestedOrgId.isEmpty() && !roleContainsOrganization(selectedRole, requestedOrgId)) {
-        writeError(response, HttpServletResponse.SC_FORBIDDEN,
-            "Requested organization is not available to this role");
-        return;
-      }
-      Role role = OBDal.getInstance().get(Role.class, roleId);
+      Role role = resolveRequestedRole(roleListData, requestedRoleId, requestedOrgId, response);
       if (role == null) {
-        writeError(response, HttpServletResponse.SC_FORBIDDEN,
-            "Requested role is not available to this user");
         return;
       }
 
@@ -2195,9 +2182,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       sessionRecord.setCtxClientId(context.getClaim(PROGRESS_CLIENT).asString());
       String generatedOrgId = context.getClaim(PROGRESS_ORGANIZATION).asString();
       sessionRecord.setCtxOrgId(requestedOrgId.isEmpty() ? generatedOrgId : requestedOrgId);
-      sessionRecord.setWarehouseId(requestedOrgId.isEmpty() || requestedOrgId.equals(generatedOrgId)
-          ? context.getClaim("warehouse").asString()
-          : findWarehouseForOrganization(requestedOrgId));
+      sessionRecord.setWarehouseId(resolveWarehouseId(requestedOrgId, generatedOrgId, context));
 
       IssuedGoSession rotated = goSessionService.rotate(sessionRecord);
       if (rotated == null) {
@@ -2213,7 +2198,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       JSONObject result = new JSONObject();
       result.put(FIELD_STATUS, STATUS_SUCCESS);
       result.put("environment", buildSessionEnvironment(rotated.getRecord()));
-      result.put("roleList", roleListData.roleArray);
+      result.put(FIELD_ROLE_LIST, roleListData.roleArray);
       result.put(FIELD_CSRF_TOKEN, rotated.getCsrfToken());
       writeResponse(response, HttpServletResponse.SC_OK, result);
     } catch (RuntimeException e) {
@@ -2256,6 +2241,48 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       }
     }
     return false;
+  }
+
+  /**
+   * Resolve and validate the requested role (and, if given, organization) for an environment
+   * switch: defaults to the user's first role when none is requested, checks the role is one of
+   * the user's own, and that the requested organization (if any) belongs to that role. Writes the
+   * matching error response and returns {@code null} when the request is invalid.
+   */
+  private Role resolveRequestedRole(EtendoGoJwtSupport.RoleListData roleListData,
+      String requestedRoleId, String requestedOrgId, HttpServletResponse response)
+      throws IOException, JSONException {
+    String roleId = requestedRoleId.isEmpty() ? roleListData.firstRoleId : requestedRoleId;
+    JSONObject selectedRole = findRole(roleListData.roleArray, roleId);
+    if (roleId == null || selectedRole == null) {
+      writeError(response, HttpServletResponse.SC_FORBIDDEN,
+          "Requested role is not available to this user");
+      return null;
+    }
+    if (!requestedOrgId.isEmpty() && !roleContainsOrganization(selectedRole, requestedOrgId)) {
+      writeError(response, HttpServletResponse.SC_FORBIDDEN,
+          "Requested organization is not available to this role");
+      return null;
+    }
+    Role role = OBDal.getInstance().get(Role.class, roleId);
+    if (role == null) {
+      writeError(response, HttpServletResponse.SC_FORBIDDEN,
+          "Requested role is not available to this user");
+    }
+    return role;
+  }
+
+  /**
+   * Resolve the session's warehouse: the JWT-generated default when no organization was explicitly
+   * requested (or it matches the default), otherwise an active warehouse under the requested
+   * organization.
+   */
+  private static String resolveWarehouseId(String requestedOrgId, String generatedOrgId,
+      DecodedJWT context) {
+    if (requestedOrgId.isEmpty() || requestedOrgId.equals(generatedOrgId)) {
+      return context.getClaim("warehouse").asString();
+    }
+    return findWarehouseForOrganization(requestedOrgId);
   }
 
   /**
@@ -2307,7 +2334,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       result.put(FIELD_STATUS, STATUS_SUCCESS);
       result.put(FIELD_ACCOUNT, accountJson);
       result.put("environment", buildSessionEnvironment(sessionRecord));
-      result.put("roleList", loadSessionRoleList(sessionRecord));
+      result.put(FIELD_ROLE_LIST, loadSessionRoleList(sessionRecord));
       result.put(FIELD_CSRF_TOKEN, sessionRecord.getCsrfToken());
 
       response.setHeader(HEADER_CACHE_CONTROL, VALUE_NO_STORE);

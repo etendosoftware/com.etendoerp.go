@@ -52,13 +52,8 @@ import com.auth0.jwt.interfaces.DecodedJWT;
 import com.etendoerp.go.common.CorsUtils;
 import com.etendoerp.go.common.ProtocolErrorAdapters;
 import com.etendoerp.go.common.PublicUrlResolver;
-import com.etendoerp.go.session.GoLegacyBearer;
-import com.etendoerp.go.session.GoSessionAuthResult;
-import com.etendoerp.go.session.GoSessionAuthenticator;
-import com.etendoerp.go.session.GoSessionRecord;
 import com.etendoerp.go.session.GoSessionService;
 import com.etendoerp.go.session.JdbcGoSessionStore;
-import com.smf.securewebservices.utils.SecureWebServicesUtils;
 
 /**
  * OAuth2 servlet handling token issuance, client CRUD, revocation, and introspection.
@@ -81,6 +76,9 @@ public class OAuth2Servlet extends HttpBaseServlet {
   private static final Logger log = LogManager.getLogger(OAuth2Servlet.class);
   private final GoSessionService goSessionService;
 
+  /**
+   * Creates the default servlet wired to a real, JDBC-backed session service.
+   */
   public OAuth2Servlet() {
     this(new GoSessionService(new JdbcGoSessionStore()));
   }
@@ -115,7 +113,6 @@ public class OAuth2Servlet extends HttpBaseServlet {
     private static final String SCOPE_NEO_WRITE = "neo:write";
     private static final String SCOPE_NEO_PROCESS = "neo:process";
     private static final String SCOPE_NEO_REPORT = "neo:report";
-  private static final String ADMIN_ROLE_ID = "0";
     private static final String FIELD_ID = "id";
     private static final String FIELD_CLIENT_ID = "clientId";
     private static final String FIELD_CLIENT_ID_REQUEST = "client_id";
@@ -443,7 +440,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
   private void handleListClients(HttpServletRequest request, HttpServletResponse response)
       throws IOException {
     try {
-      requireAdmin(request);
+      OAuth2RequestAuthenticator.requireAdmin(request);
 
       Connection conn = OBDal.getInstance().getConnection();
       JSONArray clients = new JSONArray();
@@ -486,7 +483,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
   private void handleCreateClient(HttpServletRequest request, HttpServletResponse response)
       throws IOException {
     try {
-      DecodedJWT jwt = requireAdmin(request);
+      DecodedJWT jwt = OAuth2RequestAuthenticator.requireAdmin(request);
       String adminUserId = jwt.getClaim("user").asString();
 
       JSONObject body = parseJsonBody(request);
@@ -566,7 +563,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
   private void handleUpdateClient(HttpServletRequest request, HttpServletResponse response,
       String id) throws IOException {
     try {
-      DecodedJWT jwt = requireAdmin(request);
+      DecodedJWT jwt = OAuth2RequestAuthenticator.requireAdmin(request);
       String adminUserId = jwt.getClaim("user").asString();
 
       JSONObject body = parseJsonBody(request);
@@ -636,7 +633,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
   private void handleDeleteClient(HttpServletRequest request, HttpServletResponse response,
       String id) throws IOException {
     try {
-      requireAdmin(request);
+      OAuth2RequestAuthenticator.requireAdmin(request);
 
       Connection conn = OBDal.getInstance().getConnection();
 
@@ -684,7 +681,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
   private void handleRegenerateSecret(HttpServletRequest request, HttpServletResponse response,
       String id) throws IOException {
     try {
-      DecodedJWT jwt = requireAdmin(request);
+      DecodedJWT jwt = OAuth2RequestAuthenticator.requireAdmin(request);
       String adminUserId = jwt.getClaim("user").asString();
 
       // Check if caller wants to revoke existing tokens
@@ -752,7 +749,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
   private void handleRevoke(HttpServletRequest request, HttpServletResponse response)
       throws IOException {
     try {
-      requireAdmin(request);
+      OAuth2RequestAuthenticator.requireAdmin(request);
 
       JSONObject body = parseJsonBody(request);
       String clientIdentifier = body.optString(FIELD_CLIENT_ID, null);
@@ -795,7 +792,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
   private void handleIntrospect(HttpServletRequest request, HttpServletResponse response)
       throws IOException {
     try {
-      requireAdmin(request);
+      OAuth2RequestAuthenticator.requireAdmin(request);
 
       JSONObject body = parseJsonBody(request);
       String token = body.optString(FIELD_TOKEN, null);
@@ -930,7 +927,9 @@ public class OAuth2Servlet extends HttpBaseServlet {
       Set<String> requestedScopes =
           OAuth2ClientPolicy.parseScopes(authorizeRequest.scope, VALID_SCOPES);
       Set<String> allowedScopes = OAuth2ClientPolicy.parseScopes(client.scopes, VALID_SCOPES);
-      AuthorizePrincipal principal = authenticateAuthorizeRequest(request, authorizeRequest);
+      OAuth2RequestAuthenticator.AuthorizePrincipal principal =
+          OAuth2RequestAuthenticator.authenticateAuthorizeRequest(goSessionService, request,
+              authorizeRequest);
 
       String authCode = OAuth2Utils.generateAuthCode();
       String codeHash = OAuth2Utils.hashToken(authCode);
@@ -1369,48 +1368,8 @@ public class OAuth2Servlet extends HttpBaseServlet {
   }
 
   // --- Auth helpers ---
-
-  /**
-   * Authenticate a JWT Bearer token from the Authorization header.
-   *
-   * @param request the HTTP request
-   * @return decoded JWT
-   * @throws AuthException if authentication fails
-   */
-  private DecodedJWT authenticateJwt(HttpServletRequest request) throws AuthException {
-    String authHeader = request.getHeader("Authorization");
-    if (authHeader == null || !authHeader.startsWith("Bearer ")) {
-      throw new AuthException(HttpServletResponse.SC_UNAUTHORIZED,
-          "Missing or invalid Authorization header");
-    }
-    return authenticateJwt(authHeader.substring(7));
-  }
-
-  private DecodedJWT authenticateJwt(String token) throws AuthException {
-    try {
-      return SecureWebServicesUtils.decodeToken(token);
-    } catch (Exception e) {
-      log.warn("JWT authentication failed: {}", e.getMessage());
-      throw new AuthException(HttpServletResponse.SC_UNAUTHORIZED, "Invalid or expired JWT token");
-    }
-  }
-
-  /**
-   * Authenticate JWT and verify the caller has System Administrator role (roleId = "0").
-   *
-   * @param request the HTTP request
-   * @return decoded JWT
-   * @throws AuthException if authentication or authorization fails
-   */
-  private DecodedJWT requireAdmin(HttpServletRequest request) throws AuthException {
-    DecodedJWT jwt = authenticateJwt(request);
-    String roleId = jwt.getClaim("role").asString();
-    if (!ADMIN_ROLE_ID.equals(roleId)) {
-      throw new AuthException(HttpServletResponse.SC_FORBIDDEN,
-          "System Administrator role required");
-    }
-    return jwt;
-  }
+  // JWT/admin-role authentication and the authorize-endpoint principal resolution live in
+  // OAuth2RequestAuthenticator (extracted to keep this class under the method-count limit).
 
   private boolean validateAuthorizePostRequest(HttpServletResponse response,
       OAuth2AuthorizeSupport.AuthorizeRequestData authorizeRequest) throws IOException, SQLException {
@@ -1422,45 +1381,6 @@ public class OAuth2Servlet extends HttpBaseServlet {
     return validateAuthorizeClientRequest(
         response, authorizeRequest.clientId, authorizeRequest.redirectUri, authorizeRequest.scope);
   }
-
-  private AuthorizePrincipal authenticateAuthorizeRequest(HttpServletRequest request,
-      OAuth2AuthorizeSupport.AuthorizeRequestData authorizeRequest) throws AuthException {
-    GoSessionAuthResult sessionAuth = new GoSessionAuthenticator(goSessionService).authenticate(request);
-    if (sessionAuth.getStatus() == GoSessionAuthResult.Status.CSRF_FAILED) {
-      throw new AuthException(HttpServletResponse.SC_FORBIDDEN, "CSRF validation failed");
-    }
-    if (sessionAuth.getStatus() == GoSessionAuthResult.Status.UNAUTHENTICATED) {
-      throw new AuthException(HttpServletResponse.SC_UNAUTHORIZED, "Invalid or expired session");
-    }
-    if (sessionAuth.isAuthenticated()) {
-      GoSessionRecord record = sessionAuth.getRecord();
-      if (StringUtils.isAnyBlank(record.getUserId(), record.getRoleId())) {
-        throw new AuthException(HttpServletResponse.SC_FORBIDDEN,
-            "Session has no environment selected");
-      }
-      return new AuthorizePrincipal(record.getUserId(), record.getRoleId());
-    }
-    if (!GoLegacyBearer.isEnabled() || StringUtils.isBlank(authorizeRequest.jwtToken)) {
-      throw new AuthException(HttpServletResponse.SC_UNAUTHORIZED,
-          "Session authentication is required");
-    }
-    GoLegacyBearer.recordUse();
-    DecodedJWT jwt = authenticateJwt(authorizeRequest.jwtToken);
-    return new AuthorizePrincipal(jwt.getClaim("user").asString(),
-        jwt.getClaim("role").asString());
-  }
-
-  private static final class AuthorizePrincipal {
-    private final String userId;
-    private final String roleId;
-
-    private AuthorizePrincipal(String userId, String roleId) {
-      this.userId = userId;
-      this.roleId = roleId;
-    }
-  }
-
-
 
   private boolean validateAuthorizeClientRequest(HttpServletResponse response, String clientId,
       String redirectUri, String scope) throws IOException, SQLException {
@@ -1661,9 +1581,10 @@ public class OAuth2Servlet extends HttpBaseServlet {
   }
 
   /**
-   * Exception for authentication/authorization failures with HTTP status codes.
+   * Exception for authentication/authorization failures with HTTP status codes. Package-visible so
+   * {@link OAuth2RequestAuthenticator} can throw it.
    */
-  private static class AuthException extends Exception {
+  static class AuthException extends Exception {
     final int statusCode;
 
     AuthException(int statusCode, String message) {
