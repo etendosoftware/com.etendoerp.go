@@ -568,6 +568,66 @@ does not resolve to a readable entity, `405` for any method other than `GET`.
 
 ---
 
+### 4.10 NEO Pseudo-Spec Bridge for Etendo GO's Own Webhooks
+
+```
+GET /sws/neo/listmenu[?q=<term>]
+GET /sws/neo/windowaccessmap
+GET /sws/neo/rolesoverview
+Authorization: Bearer {token}
+```
+
+`NeoGoWebhookBridge` runs `SFListMenu`/`SFWindowAccessMap`/`SFRolesOverview` (§8, §8b, §8c) through
+NEO's own JWT authentication instead of the Webhooks module's HTTP dispatch — the same pattern
+`NeoSimSearchEndpoint` (§4.9) already used for `SimSearch`. Each of these three pseudo-specs
+constructs the corresponding `BaseWebhookService` and calls its unchanged `get(Map, Map)` method
+directly; the response body is the exact `{"result": "<value>"}` / `{"error": "<message>"}` shape
+the Webhooks module itself produces (verified by disassembling `WebhookServiceHandler.buildResponse`
+in `webhookevents-3.1.0.jar`), so callers only need their request URL updated, never their
+response-parsing logic. All three still work at their original `/webhooks/SFListMenu` /
+`/webhooks/SFWindowAccessMap` / `/webhooks/SFRolesOverview` paths too — the Webhooks module dispatch
+was not removed — but `/sws/neo/*` is the path the Go SPA (`tools/app-shell` in
+`etendo_schema_forge`) actually calls, and no `SMFWHE_DEFINEDWEBHOOK_ROLE` grant is required for it.
+
+Each webhook's own access rule is unaffected and still enforced inside its `get()` — see §8/§8b/§8c
+for what each one checks (`NeoAccessHelper.isAdminOrClientAdmin`, window/process access checks,
+etc.). Non-`GET` requests get `405`; a webhook that throws gets `500` with the exception message.
+
+### 4.11 NEO Pseudo-Spec Bridge Pattern (preferred for new Etendo-GO-authored webhooks)
+
+**Any new webhook authored for Etendo GO itself (not a third-party module) should default to this
+NEO pseudo-spec bridge instead of the Webhooks module's `/webhooks/*` + `SMFWHE_DEFINEDWEBHOOK_ROLE`
+grant.** The reason is entirely about that grant table, not about the Webhooks module being wrong in
+general: `SMFWHE_DEFINEDWEBHOOK_ROLE` is reset to its XML-only baseline every time `update.database`
+runs, silently wiping any tenant-specific grant an onboarding step or data-fix had inserted. A
+webhook reached only through `/webhooks/*` therefore needs an ongoing, per-tenant, per-role
+provisioning process to keep working across environment rebuilds — exactly the pain that produced
+the `R16` data-fix in `etendo_schema_forge` (`cli/src/data-fixes/sql/20260727T114306Z__R16-tenant-
+roles-and-webhook-access.sql`) before this pattern existed. A request reaching any `/sws/neo/*` path
+only needs a valid NEO bearer token; no separate per-role grant is possible or needed.
+
+**No security is weakened by this pattern.** Entity/window/process-level access is still whatever
+the webhook's own `get()` already enforces (`NeoAccessHelper`, `OBContext.getEntityAccessChecker()`,
+etc.) — the bridge only changes *how the request reaches that code*, not what the code is allowed to
+do once it gets there.
+
+**How to add a new one:**
+1. Write the webhook as a normal `BaseWebhookService` (`get(Map<String,String> parameter, Map<String,String> responseVars)`,
+   `responseVars.put("result", ...)` / `.put("error", ...)`) — no special interface needed.
+2. Add one `if ("<pseudo-spec-name>".equals(pathInfo.specName))` branch to `NeoServlet.processRequest`,
+   alongside the `listmenu`/`windowaccessmap`/`rolesoverview`/`simsearch`/`batch` branches, calling
+   `goWebhookBridge.handle(request, new YourWebhook())`.
+3. Do **not** make the bridge itself dispatch by name generically — keep it an explicit allow-list
+   (see `NeoGoWebhookBridge`'s class javadoc for why: bypassing the grant gate for a *third-party*
+   module's webhook is not this bridge's call to make, only Etendo GO's own).
+
+See `NeoGoWebhookBridge.java` and `NeoSimSearchEndpoint.java` for the two existing implementations,
+and `etendo_schema_forge/docs/neo-headless-extensibility.md` for the sibling `NeoHandler` CDI-hook
+pattern (a different extension point — request enrichment/validation hooks on existing CRUD/process
+specs — not a replacement for this one).
+
+---
+
 ## 5. Configuration
 
 ### 5.1 Creating a Spec
@@ -772,16 +832,16 @@ NEO Headless enforces security at multiple levels:
 
 ## 8. Navigation Menu (SFListMenu Webhook)
 
-`SFListMenu` (`GET /webhooks/SFListMenu`) returns the `AD_Menu` tree — or a flat filtered search with `?q=` — as JSON, pruned down to what the requesting role can actually reach. It is the role-filtered menu-tree webhook, correctly implemented and available for any client to consume. Unlike the `/sws/neo/*` endpoints above, it lives in the Webhooks module infrastructure, alongside the `SFUpsertSpec`/`SFPopulateSpec` configuration webhooks (§5.1), not under the NEO servlet.
+`SFListMenu` (`GET /webhooks/SFListMenu`, or preferably `GET /sws/neo/listmenu` — §4.10) returns the `AD_Menu` tree — or a flat filtered search with `?q=` — as JSON, pruned down to what the requesting role can actually reach. It is the role-filtered menu-tree webhook, correctly implemented and available for any client to consume. The webhook itself is authored alongside the `SFUpsertSpec`/`SFPopulateSpec` configuration webhooks (§5.1) in the Webhooks module infrastructure, but the Go SPA reaches it through the NEO pseudo-spec bridge (§4.10), not `/webhooks/SFListMenu` directly.
 
-> **Note:** the Go SPA sidebar (`tools/app-shell` in `etendo_schema_forge`) does not consume this webhook yet — it still renders navigation from a static `menu.json` mock, so role-based menu filtering is not yet reflected in the running frontend. Tracked as ETP-4598.
+> **Note:** the Go SPA sidebar (`tools/app-shell` in `etendo_schema_forge`) now consumes this webhook (`useRoleMenu()` → `lib/menuTree.js`) to compute which menu entries the current role may see — but only for *filtering*: the tree's structure, labels, and icons still come from a static `menu.json`, and `useRoleMenu()` only extracts the set of allowed `windowId`/`processId`/`obuiappProcessId`s from the fetched tree to hide/show the corresponding static entries. Fully driving the rendered tree's shape (order, grouping, nesting) from this webhook's response, rather than only its ids, is still open — tracked as ETP-4598.
 
 **Endpoints:**
 
 | Pattern | Method | Description |
 |---------|--------|-------------|
-| `/webhooks/SFListMenu` | GET | Full nested menu tree, filtered by the current role's access |
-| `/webhooks/SFListMenu?q=<term>` | GET | Flat list of menu entries whose name matches `<term>` (case-insensitive substring), same filtering |
+| `/webhooks/SFListMenu` (legacy) / `/sws/neo/listmenu` (preferred) | GET | Full nested menu tree, filtered by the current role's access |
+| `/webhooks/SFListMenu?q=<term>` (legacy) / `/sws/neo/listmenu?q=<term>` (preferred) | GET | Flat list of menu entries whose name matches `<term>` (case-insensitive substring), same filtering |
 
 **Response shape:**
 
@@ -821,7 +881,7 @@ Folder nodes are never filtered directly: their children are filtered first (pos
 
 ## 8b. Proactive Window-Access Map (SFWindowAccessMap Webhook)
 
-`SFWindowAccessMap` (`GET /webhooks/SFWindowAccessMap`) reports, for the current authenticated user/role, its access tier for every window it has an explicit grant for, plus whether it may see accounting-sensitive data — so the frontend can adapt *before* rendering instead of discovering a `403` reactively per-request (§7 item 3). It lives in the same Webhooks module infrastructure as `SFListMenu`, not under the NEO servlet.
+`SFWindowAccessMap` (`GET /webhooks/SFWindowAccessMap`, or preferably `GET /sws/neo/windowaccessmap` — §4.10) reports, for the current authenticated user/role, its access tier for every window it has an explicit grant for, plus whether it may see accounting-sensitive data — so the frontend can adapt *before* rendering instead of discovering a `403` reactively per-request (§7 item 3). The webhook is authored in the same Webhooks module infrastructure as `SFListMenu`, but the Go SPA reaches it through the NEO pseudo-spec bridge (§4.10).
 
 **Response shape:**
 
@@ -848,7 +908,7 @@ Folder nodes are never filtered directly: their children are filtered first (pos
 
 ## 8c. Roles Overview (SFRolesOverview Webhook)
 
-`SFRolesOverview` (`GET /webhooks/SFRolesOverview`) returns, for an admin/client-admin caller only, a cross-role aggregate for GOClient's 5 fixed roles (ETP-4513 — "Configuración > Roles"): each role's display name, raw `AD_Role.description`, count of distinct assigned users (`AD_User_Roles`), and the list of Etendo GO windows it can reach (`AD_Window_Access`, intersected with the windows Etendo GO actually exposes today). It lives in the same Webhooks module infrastructure as `SFListMenu`/`SFWindowAccessMap`, not under the NEO servlet.
+`SFRolesOverview` (`GET /webhooks/SFRolesOverview`, or preferably `GET /sws/neo/rolesoverview` — §4.10) returns, for an admin/client-admin caller only, a cross-role aggregate for GOClient's 5 fixed roles (ETP-4513 — "Configuración > Roles"): each role's display name, raw `AD_Role.description`, count of distinct assigned users (`AD_User_Roles`), and the list of Etendo GO windows it can reach (`AD_Window_Access`, intersected with the windows Etendo GO actually exposes today). The webhook is authored in the same Webhooks module infrastructure as `SFListMenu`/`SFWindowAccessMap`, but the Go SPA (`RolesOverviewPage.jsx`) reaches it through the NEO pseudo-spec bridge (§4.10).
 
 Unlike `SFWindowAccessMap`, which answers "what can the CURRENT caller's own role reach", this endpoint is a cross-role aggregate: it always returns data for all 5 GOClient roles regardless of which one the caller happens to be using. That is exactly why it is gated to admin/client-admin callers only.
 
@@ -856,7 +916,7 @@ Unlike `SFWindowAccessMap`, which answers "what can the CURRENT caller's own rol
 
 | Pattern | Method | Description |
 |---------|--------|-------------|
-| `/webhooks/SFRolesOverview` | GET | Per-role aggregate (user count + reachable windows) for all 5 GOClient roles |
+| `/webhooks/SFRolesOverview` (legacy) / `/sws/neo/rolesoverview` (preferred) | GET | Per-role aggregate (user count + reachable windows) for all 5 GOClient roles |
 
 **Response shape:**
 
