@@ -27,6 +27,9 @@ import org.openbravo.model.ad.ui.Tab;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFSpec;
 import com.etendoerp.go.schemaforge.util.NeoErrorSanitizer;
+import com.etendoerp.go.schemaforge.webhooks.SFListMenu;
+import com.etendoerp.go.schemaforge.webhooks.SFRolesOverview;
+import com.etendoerp.go.schemaforge.webhooks.SFWindowAccessMap;
 import com.smf.securewebservices.SWSConfig;
 
 /**
@@ -73,6 +76,7 @@ public class NeoServlet extends HttpBaseServlet {
   final NeoProcessReportEndpoint processReportEndpoint = new NeoProcessReportEndpoint(this);
   private final BatchService batchService = new BatchService(this);
   private final NeoSimSearchEndpoint simSearchEndpoint = new NeoSimSearchEndpoint();
+  private final NeoGoWebhookBridge goWebhookBridge = new NeoGoWebhookBridge(this);
 
   @Override
   public void doGet(HttpServletRequest request, HttpServletResponse response) throws IOException {
@@ -164,6 +168,39 @@ public class NeoServlet extends HttpBaseServlet {
           return;
         }
         writeResponse(response, simSearchEndpoint.handle(request));
+        return;
+      }
+
+      // Etendo GO's own webhooks, reached through NEO's own JWT auth instead of the Webhooks
+      // module's per-role SMFWHE_DEFINEDWEBHOOK_ROLE grant table (wiped by update.database — see
+      // NeoGoWebhookBridge's class javadoc for the full rationale). A fixed, explicit allow-list,
+      // never a generic "call any webhook by name" passthrough — bypassing the grant gate for a
+      // third-party module's webhook is not this bridge's call to make.
+      if ("listmenu".equals(pathInfo.specName)) {
+        if (!"GET".equals(method)) {
+          sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
+              "Listmenu endpoint only supports GET");
+          return;
+        }
+        writeResponse(response, goWebhookBridge.handle(request, new SFListMenu()));
+        return;
+      }
+      if ("windowaccessmap".equals(pathInfo.specName)) {
+        if (!"GET".equals(method)) {
+          sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
+              "Windowaccessmap endpoint only supports GET");
+          return;
+        }
+        writeResponse(response, goWebhookBridge.handle(request, new SFWindowAccessMap()));
+        return;
+      }
+      if ("rolesoverview".equals(pathInfo.specName)) {
+        if (!"GET".equals(method)) {
+          sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
+              "Rolesoverview endpoint only supports GET");
+          return;
+        }
+        writeResponse(response, goWebhookBridge.handle(request, new SFRolesOverview()));
         return;
       }
       requestRouter.handleSpecRequest(pathInfo, method, request, response);
