@@ -63,20 +63,42 @@ Because flags come from configuration, this provider serves **environment-level 
 per-user targeting**. The evaluation context is accepted for API compatibility and passed through,
 but does not affect the result. Per-user bucketing arrives with the hosted provider.
 
-### Targeting key
+### Targeting key — OPEN, must be settled before a targeting-aware provider lands
 
 The backend targets on the **account email**. The web client must use the same value or the two ends
-will bucket the same user differently.
+will bucket the same user differently. **This is not yet resolved on the client side**, deliberately.
 
-This needs care, because the only account identity the client persists (`sf_auth_user`) is written
-by `buildEnvironmentSessionStorage` in `@etendosoftware/etendo-go-core` as
-`env.adminUserName || env.adminUser` — the **ERP admin username of the selected environment**, not
-the account email. Targeting on that would silently disagree with the backend.
+The client does not persist the account email. The only account identity it stores (`sf_auth_user`)
+is written by `buildEnvironmentSessionStorage` in `@etendosoftware/etendo-go-core` as
+`env.adminUserName || env.adminUser` — the **ERP admin username of the selected environment**.
+Targeting on that would silently disagree with the backend.
 
-So `GET /sws/go/environments` returns the account email at the top level (see §3), letting the client
-target correctly from a call it already makes rather than a second round trip to `/me`. This is inert
-while the properties provider ignores the evaluation context, but it must be honoured the moment a
-targeting-aware provider is wired up.
+The backend now returns the account email at the top level of `GET /sws/go/environments` (see §3).
+That is necessary but **not sufficient**, for two reasons found during integration:
+
+1. **The core helper discards it.** `fetchEnvironments` in `@etendosoftware/etendo-go-core` ends with
+   `return data.environments || []`, so anything outside that array never reaches the caller. Reading
+   `accountEmail` requires a direct `fetch` rather than the helper — which is the default path.
+2. **Scope mismatch.** The OpenFeature evaluation context has to be set **app-wide at bootstrap**,
+   before any gated UI renders — the flag decides whether the `/upgrade` entry point is shown at all,
+   so it is evaluated long before anyone reaches that page. Setting the context from `/upgrade` would
+   make a user who visits it bucket on email and a user who never does bucket on username: the same
+   user bucketing differently depending on navigation history. That is worse than being uniformly
+   wrong, because it disappears into aggregates instead of showing up as a clean skew.
+   Compounding it, the call needs `sf_platform_token`, which is not in `ENVIRONMENT_SESSION_KEYS` and
+   is not present in every app-shell session, so even a bootstrap-time fetch would yield email for
+   some sessions and username for others.
+
+A correct fix needs **one identity available for every session at bootstrap** — most likely
+persisting the account email at login, which is core-owned code. Note that the account email is also
+derivable server-side from an authenticated AD_User (the environment username is the account email,
+optionally with a `+suffix`), so a JWT-authenticated backend lookup is a viable alternative if
+persisting at login is unattractive; it would need care because an email may legitimately contain
+`+`.
+
+This is inert while the properties provider ignores the evaluation context. It becomes load-bearing
+the moment a targeting-aware provider is wired up, and must be settled then. Full client-side
+reasoning is in `docs/feature-flags.md` in the functional repo.
 
 ### Failure behaviour — never block, never fail, default false
 
@@ -192,6 +214,11 @@ The `GET /sws/go/environments` response gained two additive fields:
 
 Both are backward compatible; clients that ignore them are unaffected.
 
+> **`accountEmail` is invisible through the core helper.** `fetchEnvironments` in
+> `@etendosoftware/etendo-go-core` returns `data.environments || []`, so it drops every top-level
+> field. A consumer using the helper sees nothing and gets no error. Reading `accountEmail` needs a
+> direct `fetch`. See §1 for why surfacing it is necessary but not sufficient.
+
 > **Open item — the plan badge is not yet rendered.** The environment picker (`EnvSelectStep.jsx`)
 > lives in `@etendosoftware/etendo-go-core`, not in the functional repo, so consuming `plan` needs a
 > change and version bump on the core side. The backend field is stable and shipped; the UI side is
@@ -210,7 +237,10 @@ Checklist for the follow-up that replaces local configuration with Mixpanel Feat
 3. Configure it for **local** evaluation with polling. Run the initial definitions fetch on a daemon
    thread — it is a blocking HTTP call, and doing it inline would make the first flag evaluation in
    a JVM wait on Mixpanel.
-4. Watch for an `org.json` classpath collision. `mixpanel-java` parses definitions with
+4. **Settle the targeting key first** (§1). Until the client has one account identity available for
+   every session at bootstrap, turning on a targeting-aware provider will bucket the same user
+   differently on each end. This is the one item that must be closed *before* the swap, not after.
+5. Watch for an `org.json` classpath collision. `mixpanel-java` parses definitions with
    `org.json:json`, while `WebContent/WEB-INF/lib` already ships a legacy Eclipse-repackaged
    `org.json-1.0.0.v201011060100.jar`. Both provide the same package and the winner depends on
    classloader ordering. It degrades safely — the fetch and parse are inside catch-all handlers, so

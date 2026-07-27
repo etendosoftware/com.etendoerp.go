@@ -950,10 +950,12 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
 
       JSONObject result = new JSONObject();
       result.put("environments", envArray);
-      // The account email is the backend's feature-flag targeting key. Returned here (ETP-4686) so
-      // the web client can target on the same identity without a second round trip to /me: the only
-      // account identity it persists is the ERP admin username of the selected environment, which
-      // would bucket the same user differently once a targeting-aware provider is wired up.
+      // The account email is the backend's feature-flag targeting key. Returned here (ETP-4686)
+      // because the only account identity the web client persists is the ERP admin username of the
+      // selected environment, which would bucket the same user differently once a targeting-aware
+      // provider is wired up. Note this is necessary but NOT sufficient: the core's
+      // fetchEnvironments helper drops top-level fields, and the client needs one identity at
+      // bootstrap rather than per page. See docs/feature-flags-and-tenant-upgrade.md §1.
       result.put(FIELD_ACCOUNT_EMAIL, account.getEmail());
       writeResponse(response, HttpServletResponse.SC_OK, result);
     } catch (RuntimeException e) {
