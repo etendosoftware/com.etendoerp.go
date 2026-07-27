@@ -20,13 +20,10 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.hibernate.criterion.Restrictions;
 import org.openbravo.base.exception.OBException;
-import org.openbravo.base.provider.OBProvider;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.access.Role;
-import org.openbravo.model.ad.system.Client;
-import org.openbravo.model.common.enterprise.Organization;
 
 import com.etendoerp.webhookevents.data.DefinedWebHook;
 import com.etendoerp.webhookevents.data.DefinedwebhookRole;
@@ -134,22 +131,7 @@ public class OnboardingWebhookAccessService extends OnboardingContextSupport {
 
   /** Seam for tests: builds and saves the new grant row. */
   protected void createGrant(String clientId, Role role, DefinedWebHook webhook) {
-    Client client = OBDal.getInstance().get(Client.class, clientId);
-    Organization starOrg = resolveOrganization(STAR_ORG_ID);
-    DefinedwebhookRole grant = OBProvider.getInstance().get(DefinedwebhookRole.class);
-    grant.setClient(client);
-    grant.setOrganization(starOrg);
-    grant.setActive(true);
-    grant.setRole(role);
-    grant.setSmfwheDefinedwebhook(webhook);
-    grant.setModuleID(webhook.getModule());
-    OBDal.getInstance().save(grant);
-  }
-
-  private void requirePresent(String value, String label) {
-    if (value == null || value.isEmpty()) {
-      throw new OBException("Missing " + label + " for " + contextSubject());
-    }
+    OBDal.getInstance().save(buildWebhookGrant(clientId, STAR_ORG_ID, role, webhook));
   }
 
   @Override

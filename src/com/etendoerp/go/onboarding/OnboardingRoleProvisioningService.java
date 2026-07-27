@@ -290,22 +290,7 @@ public class OnboardingRoleProvisioningService extends OnboardingContextSupport 
 
   /** Seam for tests: builds and saves one webhook-role grant row. */
   protected void createWebhookGrant(String clientId, Role role, DefinedWebHook webhook) {
-    Client client = OBDal.getInstance().get(Client.class, clientId);
-    DefinedwebhookRole grant = OBProvider.getInstance().get(DefinedwebhookRole.class);
-    grant.setNewOBObject(true);
-    grant.setClient(client);
-    grant.setOrganization(resolveOrganization(STAR_ORG_ID));
-    grant.setActive(true);
-    grant.setRole(role);
-    grant.setSmfwheDefinedwebhook(webhook);
-    grant.setModuleID(webhook.getModule());
-    OBDal.getInstance().save(grant);
-  }
-
-  private void requirePresent(String value, String label) {
-    if (value == null || value.isEmpty()) {
-      throw new OBException("Missing " + label + " for " + contextSubject());
-    }
+    OBDal.getInstance().save(buildWebhookGrant(clientId, STAR_ORG_ID, role, webhook));
   }
 
   @Override

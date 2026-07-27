@@ -17,9 +17,15 @@
 package com.etendoerp.go.onboarding;
 
 import org.openbravo.base.exception.OBException;
+import org.openbravo.base.provider.OBProvider;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.ad.access.Role;
+import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.enterprise.Organization;
+
+import com.etendoerp.webhookevents.data.DefinedWebHook;
+import com.etendoerp.webhookevents.data.DefinedwebhookRole;
 
 /**
  * Shared DAL and execution-context scaffolding for the onboarding provisioning services.
@@ -76,9 +82,28 @@ public abstract class OnboardingContextSupport {
     requirePresent(adminRoleId, "admin role");
   }
 
-  private void requirePresent(String value, String label) {
+  protected void requirePresent(String value, String label) {
     if (value == null || value.isEmpty()) {
       throw new OBException("Missing " + label + " for " + contextSubject());
     }
+  }
+
+  /**
+   * Builds (but does not save) a {@code SMFWHE_DEFINEDWEBHOOK_ROLE} grant row for {@code role} on
+   * {@code webhook}. Shared by every onboarding service that grants webhook dispatch access
+   * ({@link OnboardingWebhookAccessService}, {@link OnboardingRoleProvisioningService}) so the
+   * six-field grant shape has exactly one definition.
+   */
+  protected DefinedwebhookRole buildWebhookGrant(String clientId, String orgId, Role role,
+      DefinedWebHook webhook) {
+    Client client = OBDal.getInstance().get(Client.class, clientId);
+    DefinedwebhookRole grant = OBProvider.getInstance().get(DefinedwebhookRole.class);
+    grant.setClient(client);
+    grant.setOrganization(resolveOrganization(orgId));
+    grant.setActive(true);
+    grant.setRole(role);
+    grant.setSmfwheDefinedwebhook(webhook);
+    grant.setModuleID(webhook.getModule());
+    return grant;
   }
 }
