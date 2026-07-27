@@ -1259,11 +1259,15 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   /**
    * Evaluates the {@code tenant-upgrade} flag for this account, targeting on the account email.
    *
-   * <p><strong>The web client does not currently target on the same value.</strong> It targets on
+   * <p><strong>The web client does not yet target on the same value.</strong> It targets on
    * {@code sf_auth_user}, which the core writes as the ERP admin username of the selected
-   * environment. The two ends therefore bucket a given user differently. This is inert while the
-   * provider ignores the evaluation context, but it must be closed <em>before</em> any
-   * targeting-aware provider is installed — see the targeting-key precondition in
+   * environment, so the two ends currently bucket a given user differently.
+   *
+   * <p>ETP-4693 supplies the resolution path: {@code GET /sws/neo/session} now returns
+   * {@code accountId} and {@code accountEmail} for the authenticated user, which is the identity
+   * this method targets on. The divergence closes once the web client consumes them — that half is
+   * still open, so do <em>not</em> read this as resolved. It must be closed before any
+   * targeting-aware provider is installed; see the targeting-key precondition in
    * {@code docs/feature-flags-and-tenant-upgrade.md} §1 and §4.
    */
   private boolean isTenantUpgradeEnabled(String accountEmail) {

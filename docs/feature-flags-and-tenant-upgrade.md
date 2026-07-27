@@ -89,16 +89,16 @@ That is necessary but **not sufficient**, for two reasons found during integrati
    is not present in every app-shell session, so even a bootstrap-time fetch would yield email for
    some sessions and username for others.
 
-A correct fix needs **one identity available for every session at bootstrap** — most likely
-persisting the account email at login, which is core-owned code. Note that the account email is also
-derivable server-side from an authenticated AD_User (the environment username is the account email,
-optionally with a `+suffix`), so a JWT-authenticated backend lookup is a viable alternative if
-persisting at login is unattractive; it would need care because an email may legitimately contain
-`+`.
+**Resolution path (ETP-4693), backend half shipped.** `GET /sws/neo/session` now returns
+`accountId` and `accountEmail` for the authenticated user, resolved server-side (see §5). That
+endpoint is served by this module and consumed by app-shell code directly, not through the core npm
+package, so it needs no core change and no version bump — which is what unblocked this after the
+`/environments` route stalled on the core helper dropping top-level fields.
 
-This is inert while the properties provider ignores the evaluation context. It becomes load-bearing
-the moment a targeting-aware provider is wired up, and must be settled then. Full client-side
-reasoning is in `docs/feature-flags.md` in the functional repo.
+**This is not closed until the web client consumes them.** The backend now exposes the identity; the
+frontend half is the remaining scope. Until it lands, the two ends still bucket differently and no
+targeting-aware provider should be installed. Full client-side reasoning is in `docs/feature-flags.md`
+in the functional repo.
 
 ### Failure behaviour — never block, never fail, default false
 
@@ -276,7 +276,59 @@ Checklist for the follow-up that replaces local configuration with Mixpanel Feat
    if the legacy classes win, definitions never become ready and every flag reads `false` — but that
    looks identical to the flag simply being off, so check it first if flags never turn on.
 
-## 5. Source map
+## 5. The session identity endpoint (ETP-4693)
+
+`GET /sws/neo/session` carries the platform account identity of the authenticated user, additively:
+
+```json
+{
+  "currencyCode": "EUR",
+  "currencyId": "…", "currencyStandardPrecision": 2,
+  "yourCompanyDocumentImageId": "…",
+  "organization": { "...": "..." },
+  "accountId": "A1B2C3…",
+  "accountEmail": "user@example.com"
+}
+```
+
+**Both fields are omitted — not null, not empty — when the session's AD_User has no `ETGO_ACCOUNT`.**
+A hand-created ERP user or a system user is an ordinary case, not an error. Consumers must treat
+absence as "unknown identity" and never as a match: an empty-string sentinel would be
+indistinguishable from a real value to a targeting rule, which is exactly the silent-mismatch class
+of bug this whole item exists to avoid.
+
+### Naming
+
+The fields are `accountId` / `accountEmail` and they mean **`ETGO_ACCOUNT`**. Do not reuse
+`account_id`: in the Mixpanel observability layer that name already means the **AD_Client (tenant)**
+id. Emitting it here would silently merge two different identities across both analytics and
+targeting rules. `NeoSessionAccountIdentityTest` asserts the snake_case names are never emitted, so
+the convention is enforced rather than merely documented.
+
+### How the account is resolved
+
+`com.etendoerp.go.common.GoAccountResolver` maps the authenticated AD_User back to its account. This
+is the reverse of what onboarding does: onboarding names the environment user after the account
+email, appending a client-derived suffix when that username is taken
+(`EtendoGoJwtSupport.buildClientUsername`):
+
+```
+first environment   -> user@example.com
+later environments  -> user@example.com+acmeltd
+```
+
+The resolver tries an exact email match first, then strips the suffix and retries. It splits on the
+**last** `+`, which is exact: the suffix alphabet is `[a-z0-9]` only — the client name is lowercased
+and stripped of everything else — so the suffix can never contain a `+`. A plus-addressed account
+therefore still resolves correctly (`user+tag@example.com+acmeltd` → `user+tag@example.com`).
+Splitting on the *first* `+` would corrupt precisely those users, and would look like a rare
+unexplained mismatch rather than a bug.
+
+Both lookups are exact-match, so no LIKE pattern is built from user-controlled text and there are no
+wildcards to escape. Failures degrade to "no identity" rather than propagating — session enrichment
+must never break the session.
+
+## 6. Source map
 
 | Concern | Class |
 |---------|-------|
