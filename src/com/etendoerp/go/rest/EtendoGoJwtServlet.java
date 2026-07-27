@@ -1111,8 +1111,10 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       }
 
       if (paidUpgrade) {
-        // Written inside the onboarding transaction so the marker commits with the tenant, or is
-        // rolled back with it. A tenant is never left provisioned but unmarked.
+        // Joins the onboarding transaction, so a successful marker commits with the tenant. It is
+        // best-effort in the other direction: markProductive swallows its own failures, so a tenant
+        // can commit unmarked and read back as free, rather than have provisioning rolled back over
+        // a plan marker.
         tenantPlanService.markProductive(clientId, adminContext.starOrgId);
       }
 

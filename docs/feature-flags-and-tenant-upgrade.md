@@ -169,10 +169,26 @@ no external call is made; the token's shape decides:
 | `mock-declined`, or any other value | Declined |
 | absent / blank | Missing |
 
-The web client simulates a decline with card `4000000000000002` and then sends `mock-declined`; the
-backend only ever validates the token's shape. The flag evaluation, the paywall gate and the plan
-marker are all real, so replacing this class with a gateway client is the single change needed to
-take real payments.
+**The token is client-mintable and not single-use.** The backend validates its *shape* and nothing
+else: it does not call a provider, does not consume the token, and does not bind it to a nonce, an
+account, or an amount. Anyone can construct a string matching `mock-paid-<hex>`, and the same value
+is accepted any number of times.
+
+`mock-declined` is declared for contract completeness but is **never transmitted**. The web client
+simulates a decline with card `4000000000000002` and returns before issuing any request, so the
+backend only ever sees an approved-shaped token or none at all.
+
+What is real today: the flag evaluation, the paywall decision, and the plan marker.
+
+Taking real payments is therefore **more than swapping this class**. A gateway client replaces the
+shape check, but at least two further gaps have to close with it:
+
+- **Replay.** The token is never consumed, so one approved payment can create N tenants. A real flow
+  needs the token marked as spent, or bound to a single tenant creation.
+- **Check-then-act.** The paywall reads ownership, and provisioning creates the client afterwards,
+  with no lock in between. Two concurrent `POST /sws/go/onboarding` calls both pass the gate. A real
+  flow needs the ownership check and the creation to be atomic, or a uniqueness constraint that
+  catches the loser.
 
 ## 3. The plan marker
 
@@ -188,9 +204,15 @@ Absence of the preference means `free`. Every tenant provisioned before this fea
 (unpaid) tenant, reads back as free without a migration.
 
 The marker is written inside the onboarding transaction, right after the admin context is resolved,
-so it commits with the tenant or rolls back with it — a tenant is never left provisioned but
-unmarked. Only a request that actually had to clear the paywall counts as paid: a first tenant or a
-resume stays free even if the payload carried a token.
+so a successful write commits with the tenant. It is best-effort in the other direction:
+`markProductive` swallows its own failures, so **a paid tenant can commit unmarked and read back as
+free** rather than have provisioning rolled back over a plan marker. That trade is deliberate — the
+marker is commercial metadata, not part of the tenant's functional provisioning — but it means the
+plan is not a guaranteed record of payment, and reconciling one is a billing concern rather than
+something this write can promise.
+
+Only a request that actually had to clear the paywall counts as paid: a first tenant or a resume
+stays free even if the payload carried a token.
 
 ### Exposure in `/environments`
 

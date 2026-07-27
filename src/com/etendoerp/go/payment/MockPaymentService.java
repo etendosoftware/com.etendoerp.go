@@ -25,12 +25,18 @@ import org.apache.commons.lang3.StringUtils;
  * Stand-in payment provider for the paid second-tenant flow.
  *
  * <p>No money moves and no external call is made: the token's <em>shape</em> decides the outcome.
- * A token matching {@code mock-paid-<hex>} is treated as settled; anything else — including the
- * explicit {@code mock-declined} the web client sends after a simulated card decline — is rejected.
+ * A token matching {@code mock-paid-<hex>} is treated as settled; anything else is rejected.
  *
- * <p>This is the only mock in the upgrade flow. The paywall gate, the flag evaluation and the plan
- * marker are all real, so replacing this class with a gateway client is the single change needed to
- * take real payments.
+ * <p>The token is client-mintable and <strong>not single-use</strong>. It is never consumed and is
+ * bound to no nonce, account or amount, so the same value is accepted any number of times.
+ * {@code mock-declined} is declared for contract completeness but is never transmitted — the web
+ * client returns before issuing a request when a card is declined.
+ *
+ * <p>This is the only mock in the upgrade flow; the flag evaluation, the paywall decision and the
+ * plan marker are all real. Swapping this class for a gateway client is <em>necessary but not
+ * sufficient</em> to take real payments: the replay gap (one token can create N tenants) and the
+ * check-then-act gap in the paywall (two concurrent onboarding calls both pass) have to close with
+ * it. See {@code docs/feature-flags-and-tenant-upgrade.md} §2.
  */
 public class MockPaymentService {
 
