@@ -18,15 +18,12 @@
 package com.etendoerp.go.schemaforge;
 
 import javax.inject.Named;
-import javax.servlet.http.HttpServletResponse;
 
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.dal.service.OBDal;
-import org.openbravo.erpCommon.utility.OBMessageUtils;
-import org.openbravo.model.common.plm.Product;
 import org.openbravo.model.materialmgmt.transaction.InternalMovementLine;
 
 /**
@@ -52,8 +49,6 @@ public class GoodsMovementLineHandler extends AbstractNeoHandler {
   private static final Logger log = LogManager.getLogger(GoodsMovementLineHandler.class);
 
   private static final String SPEC = "goodsMovementLineHandler";
-  private static final String FIELD_PRODUCT = "product";
-  private static final String PRODUCT_TYPE_SERVICE = "S";
 
   @Override
   public NeoResponse handle(NeoContext context) {
@@ -63,42 +58,12 @@ public class GoodsMovementLineHandler extends AbstractNeoHandler {
   /**
    * Validates a create (POST) or update (PUT) / inline patch (PATCH) before generic CRUD.
    * Returns {@code null} when the request is valid (CRUD proceeds), or a {@link NeoResponse}
-   * error to reject it.
+   * error to reject it. See {@link ServiceProductGuard} for the shared Service-product rule.
    */
   NeoResponse validateWrite(NeoContext context, JSONObject body) {
-    String productId = resolveProductId(body);
-    if (productId == null && METHOD_PATCH.equals(context.getHttpMethod())) {
-      // A PATCH may not carry the product field at all (e.g. only quantity changed);
-      // fall back to the product already persisted on the line.
-      productId = resolvePersistedProductId(context.getRecordId());
-    }
-    if (productId == null) {
-      // No product referenced by this request: let the generic CRUD / other validations
-      // handle the missing-required-field case.
-      return null;
-    }
-
-    Product product = OBDal.getInstance().get(Product.class, productId);
-    if (product == null) {
-      // Unknown product id: let the generic CRUD produce the canonical FK error.
-      return null;
-    }
-    if (PRODUCT_TYPE_SERVICE.equals(product.getProductType())) {
-      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, OBMessageUtils.messageBD("ETGO_ProductNotStockable"));
-    }
-    return null;
-  }
-
-  /** Reads the product id from the request body, whether sent as an object or a plain id string. */
-  private static String resolveProductId(JSONObject body) {
-    Object productVal = body.opt(FIELD_PRODUCT);
-    if (productVal instanceof JSONObject) {
-      return StringUtils.trimToNull(((JSONObject) productVal).optString("id"));
-    }
-    if (productVal instanceof String) {
-      return StringUtils.trimToNull((String) productVal);
-    }
-    return null;
+    boolean isPatch = METHOD_PATCH.equals(context.getHttpMethod());
+    return ServiceProductGuard.rejectIfServiceProduct(body, isPatch,
+        () -> resolvePersistedProductId(context.getRecordId()));
   }
 
   /** Resolves the product already persisted on an existing movement line, for PATCH requests. */

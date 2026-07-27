@@ -18,13 +18,10 @@
 package com.etendoerp.go.schemaforge;
 
 import javax.inject.Named;
-import javax.servlet.http.HttpServletResponse;
 
 import org.apache.commons.lang3.StringUtils;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.dal.service.OBDal;
-import org.openbravo.erpCommon.utility.OBMessageUtils;
-import org.openbravo.model.common.plm.Product;
 import org.openbravo.model.materialmgmt.transaction.InternalConsumptionLine;
 
 /**
@@ -49,8 +46,6 @@ import org.openbravo.model.materialmgmt.transaction.InternalConsumptionLine;
 @Named("internalConsumptionLineHandler")
 public class InternalConsumptionLineHandler implements NeoHandler {
 
-  private static final String PRODUCT_TYPE_SERVICE = "S";
-
   @Override
   public NeoResponse handle(NeoContext context) {
     if (context.getEndpointType() != NeoEndpointType.CRUD) {
@@ -66,38 +61,13 @@ public class InternalConsumptionLineHandler implements NeoHandler {
     if (body == null) {
       return null;
     }
-    String productId = resolveProductId(body);
-    if (productId == null && isPatch) {
-      productId = resolvePersistedProductId(context.getRecordId());
-    }
-    if (productId == null) {
-      return null;
-    }
-    Product product = OBDal.getInstance().get(Product.class, productId);
-    if (product == null) {
-      return null;
-    }
-    if (PRODUCT_TYPE_SERVICE.equals(product.getProductType())) {
-      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, OBMessageUtils.messageBD("ETGO_ProductNotStockable"));
-    }
-    return null;
+    return ServiceProductGuard.rejectIfServiceProduct(body, isPatch,
+        () -> resolvePersistedProductId(context.getRecordId()));
   }
 
   @Override
   public NeoResponse afterHandle(NeoContext context) {
     // Warehouse-name enrichment is now handled generically for all locator FKs.
-    return null;
-  }
-
-  /** Reads the product id from the request body, whether sent as an object or a plain id string. */
-  private static String resolveProductId(JSONObject body) {
-    Object productVal = body.opt("product");
-    if (productVal instanceof JSONObject) {
-      return StringUtils.trimToNull(((JSONObject) productVal).optString("id"));
-    }
-    if (productVal instanceof String) {
-      return StringUtils.trimToNull((String) productVal);
-    }
     return null;
   }
 
