@@ -76,12 +76,10 @@ dependencies {
     implementation('com.etendoerp:accounting.dimensions.assets.template:[3.0.0,)')
     implementation('com.etendoerp:payment.removal:[3.0.0,)')
     implementation('com.google.api-client:google-api-client:2.8.1')
-    // Feature flags: OpenFeature is the application-facing API, Mixpanel is the control plane.
-    // mixpanel-java is pinned above the 1.8.0 the provider declares because the exposure-event
-    // executor (which keeps exposure HTTP off the request thread) only exists from 1.9.0.
+    // Feature flags: OpenFeature is the application-facing API. The control plane is currently a
+    // local properties-backed provider; see docs/feature-flags-and-tenant-upgrade.md for the
+    // single registration point a hosted provider replaces.
     implementation('dev.openfeature:sdk:1.20.1')
-    implementation('com.mixpanel:mixpanel-java-openfeature:0.1.1')
-    implementation('com.mixpanel:mixpanel-java:1.9.0')
     compileOnly 'io.swagger.core.v3:swagger-models:2.1.13'
     compileOnly 'org.apache.commons:commons-lang3:3.12.0'
     testImplementation 'junit:junit:4.13.2'

@@ -8,11 +8,11 @@ commercial plan is recorded.
 
 | Layer | Choice |
 |-------|--------|
-| Application API | **OpenFeature** — `dev.openfeature:sdk:1.20.1` |
-| Control plane | **Mixpanel Feature Flags**, via the official `com.mixpanel:mixpanel-java-openfeature:0.1.1` provider |
-| Evaluation | **Local**, with background polling of flag definitions |
+| Application API | **OpenFeature** — `dev.openfeature:sdk:1.20.1` (the real SDK, not a lookalike) |
+| Control plane | **Local configuration**, via `PropertiesFeatureProvider` |
+| Evaluation | In-process. No network call, no background thread, no polling. |
 
-Application code never imports an OpenFeature or Mixpanel type. It calls one entry point:
+Application code never imports an OpenFeature type. It calls one entry point:
 
 ```java
 boolean enabled = GoFeatureFlags.isEnabled(
@@ -20,55 +20,66 @@ boolean enabled = GoFeatureFlags.isEnabled(
     FeatureFlagContext.forAccount(accountEmail));
 ```
 
-Swapping the control plane is therefore a change confined to `GoFeatureFlags`.
+The hosted control plane (Mixpanel Feature Flags with local evaluation and polling, per team plan
+§5.6) is **deliberately deferred**. Standing up OpenFeature first means the migration later is a
+provider swap rather than a rewrite of every call site.
 
-`mixpanel-java` is pinned to `1.9.0`, above the `1.8.0` the provider declares, because the exposure
-executor described below only exists from 1.9.0.
+### The swap point
 
-### Local evaluation and polling
+`GoFeatureFlags.createProvider()` is the **only** place that decides which provider backs the API:
 
-The provider is installed in local-evaluation mode. Flag definitions are fetched from Mixpanel once
-at startup and then refreshed by a daemon poller; every evaluation is an in-memory rule match. **No
-request ever makes a network call to decide a flag.**
+```java
+private static FeatureProvider createProvider() {
+  return new PropertiesFeatureProvider();
+}
+```
 
-The initial fetch is a blocking HTTP call, so `GoFeatureFlags` runs it — and the polling schedule it
-installs — on a daemon thread (`etendo-go-flags-init`). The first flag evaluation in a JVM therefore
-never waits on Mixpanel.
+Moving to a hosted control plane means returning a different `FeatureProvider` from that one method,
+plus adding its dependency in `build.gradle`. Nothing else in `GoFeatureFlags`, nothing else in the
+package, and no caller anywhere changes.
 
-Mixpanel also records an *exposure* event per evaluation. Left alone the provider posts that event
-synchronously on the evaluating thread, which would add HTTP latency to every flag check.
-`GoFeatureFlags` supplies a bounded, daemon-backed `exposureExecutor` (capacity 1000, discard on
-overflow) so exposure never blocks or fails a request. Exposure is analytics, not correctness.
+Keep it that way. Provider-specific concerns — credentials, polling schedules, caches, retry and
+staleness handling — belong **inside** the provider. Any provider bound here must honour the
+guarantees below: never block the calling thread on I/O, never throw, and resolve to the caller's
+default when it cannot answer.
+
+The provider is bound to the OpenFeature **domain** `etendo-go` rather than the global default
+provider, so this module cannot clobber a provider installed by another module.
+
+### Configuration
+
+A flag `my-flag` is read from `etendo.go.flags.my-flag`, resolved in priority order: JVM system
+property, `Openbravo.properties`, environment variable `ETGO_FLAG_MY_FLAG` (uppercased, every
+non-alphanumeric character replaced by `_`). See `com.etendoerp.go.common.GoRuntimeProperties`.
+
+| Flag | Property | Environment variable | Default |
+|------|----------|---------------------|---------|
+| `tenant-upgrade` | `etendo.go.flags.tenant-upgrade` | `ETGO_FLAG_TENANT_UPGRADE` | absent ⇒ **`false`** |
+
+Accepted affirmatives: `true`, `Y`, `yes`, `1`. Accepted negatives: `false`, `N`, `no`, `0`
+(case-insensitive).
+
+Because flags come from configuration, this provider serves **environment-level rollout, not
+per-user targeting**. The evaluation context is accepted for API compatibility and passed through,
+but does not affect the result. Per-user bucketing arrives with the hosted provider; the targeting
+key is already the account email, matching what the web client uses, so both ends will bucket a
+given user identically once it does.
 
 ### Failure behaviour — never block, never fail, default false
 
 | Situation | Result |
 |-----------|--------|
-| Token missing, or flags disabled | Provider never installed; every flag resolves to its code default |
-| Provider unreachable at startup | Definitions not ready → default returned (`PROVIDER_NOT_READY`); the poller keeps retrying |
-| A later poll fails | Last-known definitions are retained and keep serving; definitions are only ever replaced by a **successful** fetch |
+| Flag not configured | Code default (`false`) |
+| Flag configured with a non-boolean value | Code default, with a `PARSE_ERROR` on the evaluation so a typo is visible rather than silently reading as "disabled" |
+| Provider registration failed | No provider bound; every flag resolves to its default |
 | Unknown flag key, type mismatch, unexpected error | Default |
 
 The code default for `tenant-upgrade` is **`false`**, so with no configuration at all the product
 behaves exactly as it did before this feature.
 
-### Configuration
-
-The project token and API host are shared with backend Mixpanel telemetry — flags and telemetry
-target the same Mixpanel project. Each setting resolves from, in priority order: JVM system
-property, `Openbravo.properties`, environment variable (see
-`com.etendoerp.go.common.GoRuntimeProperties`).
-
-| Property | Environment variable | Default | Meaning |
-|----------|---------------------|---------|---------|
-| `etendo.go.mixpanel.token` | `ETGO_MIXPANEL_TOKEN` | — | Mixpanel project token. **Absent ⇒ flags disabled.** |
-| `etendo.go.mixpanel.apiHost` | `ETGO_MIXPANEL_API_HOST` | `api-eu.mixpanel.com` | Mixpanel host. A full `https://…` URL is accepted and normalized to a bare host. |
-| `etendo.go.featureflags.enabled` | `ETGO_FEATUREFLAGS_ENABLED` | `true` | Master switch for backend flag evaluation. |
-| `etendo.go.featureflags.pollingIntervalSeconds` | `ETGO_FEATUREFLAGS_POLLING_INTERVAL_SECONDS` | `60` | Definition refresh cadence. |
-| `etendo.go.featureflags.requestTimeoutSeconds` | `ETGO_FEATUREFLAGS_REQUEST_TIMEOUT_SECONDS` | `10` | HTTP timeout for the definitions fetch. |
-
-The provider is bound to the OpenFeature **domain** `etendo-go` rather than the global default
-provider, so this module cannot clobber a provider installed by another module.
+Only boolean flags are backed by configuration. The other OpenFeature types return the caller's
+default with a `TYPE_MISMATCH` rather than pretending to resolve, so a future typed flag fails
+visibly instead of silently reading as an empty string or zero.
 
 ### Backend evaluation is authoritative
 
@@ -161,24 +172,32 @@ Each item in the `GET /sws/go/environments` response carries an additional field
 `plan` is `"free"` or `"productive"`. The addition is backward compatible — clients that ignore the
 field are unaffected — and it lets the environment picker badge each tenant.
 
-## 4. Operational note — `org.json` on the classpath
+## 4. When the hosted control plane lands
 
-`mixpanel-java` parses flag definitions with `org.json:json`, while `WebContent/WEB-INF/lib` already
-ships a legacy Eclipse-repackaged `org.json-1.0.0.v201011060100.jar`. Two jars therefore provide the
-same `org.json` package and the winner depends on classloader ordering.
+Checklist for the follow-up that replaces local configuration with Mixpanel Feature Flags:
 
-This is contained rather than dangerous: the Mixpanel definition fetch and parse are wrapped in
-catch-all handlers, so if the legacy classes win, definitions simply never become ready and every
-flag resolves to its default (`false`) — the same as the flag being off. If flags read as
-permanently disabled in a deployment where the token is set, this classpath collision is the first
-thing to check.
+1. Add `com.mixpanel:mixpanel-java-openfeature` and `com.mixpanel:mixpanel-java` to
+   `build.gradle`. Pin `mixpanel-java` at **1.9.0 or later** — the `exposureExecutor` builder
+   option, which keeps Mixpanel's per-evaluation exposure event off the request thread, does not
+   exist in the 1.8.0 the provider declares. Without it every flag check does a synchronous HTTP
+   POST.
+2. Return the Mixpanel provider from `GoFeatureFlags.createProvider()`. Nothing else changes.
+3. Configure it for **local** evaluation with polling. Run the initial definitions fetch on a daemon
+   thread — it is a blocking HTTP call, and doing it inline would make the first flag evaluation in
+   a JVM wait on Mixpanel.
+4. Watch for an `org.json` classpath collision. `mixpanel-java` parses definitions with
+   `org.json:json`, while `WebContent/WEB-INF/lib` already ships a legacy Eclipse-repackaged
+   `org.json-1.0.0.v201011060100.jar`. Both provide the same package and the winner depends on
+   classloader ordering. It degrades safely — the fetch and parse are inside catch-all handlers, so
+   if the legacy classes win, definitions never become ready and every flag reads `false` — but that
+   looks identical to the flag simply being off, so check it first if flags never turn on.
 
 ## 5. Source map
 
 | Concern | Class |
 |---------|-------|
-| Flag entry point, provider install, failure policy | `com.etendoerp.go.featureflags.GoFeatureFlags` |
-| Flag configuration | `com.etendoerp.go.featureflags.GoFeatureFlagsConfig` |
+| Flag entry point, provider swap point, failure policy | `com.etendoerp.go.featureflags.GoFeatureFlags` |
+| Local configuration-backed provider | `com.etendoerp.go.featureflags.PropertiesFeatureProvider` |
 | Vendor-neutral targeting context | `com.etendoerp.go.featureflags.FeatureFlagContext` |
 | Shared property resolution (system → Openbravo → env) | `com.etendoerp.go.common.GoRuntimeProperties` |
 | Paywall decision | `com.etendoerp.go.payment.TenantPaywallService` |

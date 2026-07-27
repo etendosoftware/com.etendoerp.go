@@ -26,17 +26,14 @@ import com.etendoerp.go.common.GoRuntimeProperties;
  */
 public final class MixpanelNeoTelemetryConfig {
 
-  // Public because backend feature flags target the same Mixpanel project and therefore reuse the
-  // project token and API host rather than defining settings of their own.
-  public static final String PROP_TOKEN = "etendo.go.mixpanel.token";
-  public static final String PROP_API_HOST = "etendo.go.mixpanel.apiHost";
-  public static final String ENV_TOKEN = "ETGO_MIXPANEL_TOKEN";
-  public static final String ENV_API_HOST = "ETGO_MIXPANEL_API_HOST";
-
   static final String PROP_ENABLED = "etendo.go.mixpanel.enabled";
+  static final String PROP_TOKEN = "etendo.go.mixpanel.token";
+  static final String PROP_API_HOST = "etendo.go.mixpanel.apiHost";
   static final String PROP_TIMEOUT_MS = "etendo.go.mixpanel.timeoutMs";
   static final String PROP_DISTINCT_ID = "etendo.go.mixpanel.distinctId";
   static final String ENV_ENABLED = "ETGO_MIXPANEL_ENABLED";
+  static final String ENV_TOKEN = "ETGO_MIXPANEL_TOKEN";
+  static final String ENV_API_HOST = "ETGO_MIXPANEL_API_HOST";
   static final String ENV_TIMEOUT_MS = "ETGO_MIXPANEL_TIMEOUT_MS";
   static final String ENV_DISTINCT_ID = "ETGO_MIXPANEL_DISTINCT_ID";
   static final String DEFAULT_API_HOST = "https://api-eu.mixpanel.com";

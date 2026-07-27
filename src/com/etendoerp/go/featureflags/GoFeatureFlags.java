@@ -18,45 +18,42 @@
 package com.etendoerp.go.featureflags;
 
 import java.util.Map;
-import java.util.concurrent.LinkedBlockingQueue;
-import java.util.concurrent.ThreadPoolExecutor;
-import java.util.concurrent.TimeUnit;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
-import com.mixpanel.mixpanelapi.MixpanelAPI;
-import com.mixpanel.mixpanelapi.featureflags.config.LocalFlagsConfig;
-import com.mixpanel.mixpanelapi.featureflags.provider.LocalFlagsProvider;
-import com.mixpanel.openfeature.MixpanelProvider;
-
 import dev.openfeature.sdk.Client;
+import dev.openfeature.sdk.FeatureProvider;
 import dev.openfeature.sdk.MutableContext;
 import dev.openfeature.sdk.OpenFeatureAPI;
 
 /**
  * Backend feature-flag entry point for Etendo Go.
  *
- * <p><strong>Application API:</strong> OpenFeature (dev.openfeature:sdk).
- * <strong>Control plane:</strong> Mixpanel Feature Flags, through the official
- * {@code com.mixpanel:mixpanel-java-openfeature} provider. Application code only ever calls
- * {@link #isEnabled(String, FeatureFlagContext)}, so swapping the control plane is a change
- * confined to this class.
+ * <p><strong>Application API:</strong> OpenFeature (dev.openfeature:sdk). Application code only ever
+ * calls {@link #isEnabled(String, FeatureFlagContext)} and never sees an OpenFeature type, so the
+ * control plane behind it can change without touching a single caller.
  *
- * <p><strong>Evaluation is local.</strong> The Mixpanel provider is installed in local-evaluation
- * mode: flag definitions are fetched once and then refreshed by a daemon poller (default every 60s),
- * and each evaluation is an in-memory rule match. No request ever performs a network call to decide
- * a flag.
+ * <p><strong>Control plane:</strong> currently {@link PropertiesFeatureProvider} — flags come from
+ * local configuration ({@code etendo.go.flags.<flag-key>}), evaluated in-process with no network
+ * call, no background thread and no polling.
  *
- * <p><strong>Failure behaviour — never block, never fail, default false.</strong>
+ * <p><strong>Swap point.</strong> {@link #createProvider()} is the <em>only</em> place that decides
+ * which provider backs the API. Moving to a hosted control plane (Mixpanel Feature Flags with local
+ * evaluation and polling, per the team plan) means returning a different {@code FeatureProvider}
+ * from that one method, plus adding its dependency in {@code build.gradle}. Nothing else in this
+ * class, this package, or any caller changes. Keep it that way: provider-specific configuration,
+ * scheduling and failure handling belong inside the provider, not here.
+ *
+ * <p><strong>Failure behaviour — never block, never fail, default false.</strong> A flag check runs
+ * inside request handling, so it must not be able to slow down or break a request:
  * <ul>
- *   <li>Token missing or flags disabled → the provider is never installed and every flag resolves
- *       to its code default.</li>
- *   <li>Provider unreachable on startup → definitions are not ready, the provider returns the
- *       default (PROVIDER_NOT_READY) and the poller keeps retrying in the background.</li>
- *   <li>A later poll fails → the previously fetched definitions are retained and keep serving.
- *       Definitions are only ever replaced by a successful fetch.</li>
- *   <li>Unknown flag key, type mismatch, or any unexpected error → the default.</li>
+ *   <li>Flag not configured → the code default ({@code false}).</li>
+ *   <li>Flag configured with a non-boolean value → the code default, with the provider reporting a
+ *       parse error rather than silently reading the typo as false.</li>
+ *   <li>Provider registration failed → no provider is bound and every flag resolves to its
+ *       default.</li>
+ *   <li>Any unexpected error during evaluation → the default.</li>
  * </ul>
  *
  * <p>Backend evaluation is authoritative for permissions, data and processes. The web client
@@ -70,13 +67,12 @@ public final class GoFeatureFlags {
   public static final String FLAG_TENANT_UPGRADE = "tenant-upgrade";
 
   /**
-   * OpenFeature domain the Mixpanel provider is bound to. Using a domain instead of the global
-   * default provider keeps this module from clobbering any provider another module installs.
+   * OpenFeature domain the provider is bound to. Using a domain instead of the global default
+   * provider keeps this module from clobbering a provider installed by another module.
    */
   static final String OPENFEATURE_DOMAIN = "etendo-go";
 
   private static final Object INIT_LOCK = new Object();
-  private static final int EXPOSURE_QUEUE_CAPACITY = 1000;
 
   private static volatile Client openFeatureClient;
   private static volatile boolean initializationAttempted;
@@ -87,7 +83,7 @@ public final class GoFeatureFlags {
   /**
    * Evaluates a boolean flag, defaulting to {@code false}.
    *
-   * @param flagKey the flag key as defined in Mixpanel (e.g. {@link #FLAG_TENANT_UPGRADE})
+   * @param flagKey the flag key (e.g. {@link #FLAG_TENANT_UPGRADE})
    * @param context targeting information for this evaluation
    * @return {@code true} only when the control plane positively resolves the flag to true
    */
@@ -97,7 +93,8 @@ public final class GoFeatureFlags {
       return false;
     }
     try {
-      return Boolean.TRUE.equals(client.getBooleanValue(flagKey, false, toEvaluationContext(context)));
+      return Boolean.TRUE.equals(
+          client.getBooleanValue(flagKey, false, toEvaluationContext(context)));
     } catch (Exception e) {
       // The OpenFeature client already absorbs provider errors into the default value; this guard
       // exists so an unexpected failure can never propagate into the caller's request handling.
@@ -108,8 +105,23 @@ public final class GoFeatureFlags {
   }
 
   /**
-   * Resets the memoized provider so the next evaluation re-reads the runtime configuration.
-   * Intended for tests and for a configuration reload; production code evaluates flags directly.
+   * Builds the provider backing flag evaluation.
+   *
+   * <p><strong>This is the swap point for the control plane.</strong> Return a different
+   * {@code FeatureProvider} here — for example a Mixpanel provider configured for local evaluation
+   * with background polling — and the whole module picks it up with no other change. Whatever
+   * provider is returned must honour the guarantees documented on this class: never block the
+   * calling thread on I/O, never throw, and resolve to the caller's default when it cannot answer.
+   *
+   * @return the provider to bind to the {@value #OPENFEATURE_DOMAIN} domain
+   */
+  private static FeatureProvider createProvider() {
+    return new PropertiesFeatureProvider();
+  }
+
+  /**
+   * Resets the memoized provider so the next evaluation re-reads configuration. Intended for tests
+   * and for a configuration reload; production code evaluates flags directly.
    */
   static void reset() {
     synchronized (INIT_LOCK) {
@@ -126,75 +138,25 @@ public final class GoFeatureFlags {
     synchronized (INIT_LOCK) {
       if (!initializationAttempted) {
         initializationAttempted = true;
-        openFeatureClient = install(GoFeatureFlagsConfig.fromRuntime());
+        openFeatureClient = install();
       }
       return openFeatureClient;
     }
   }
 
-  private static Client install(GoFeatureFlagsConfig config) {
-    if (!config.isConfigured()) {
-      log.info("Etendo Go feature flags are not configured (enabled={}, token present={}); "
-          + "all flags resolve to their code defaults", config.isEnabled(),
-          config.getProjectToken() != null);
-      return null;
-    }
+  private static Client install() {
     try {
-      MixpanelAPI mixpanel = new MixpanelAPI(buildLocalFlagsConfig(config));
-      LocalFlagsProvider localFlags = mixpanel.getLocalFlags();
-      startPollingAsync(localFlags);
       OpenFeatureAPI api = OpenFeatureAPI.getInstance();
-      api.setProvider(OPENFEATURE_DOMAIN, new MixpanelProvider(localFlags));
-      log.info("Etendo Go feature flags installed (host={}, pollingIntervalSeconds={})",
-          config.getApiHost(), config.getPollingIntervalSeconds());
+      FeatureProvider provider = createProvider();
+      api.setProvider(OPENFEATURE_DOMAIN, provider);
+      log.info("Etendo Go feature flags installed using provider '{}'",
+          provider.getMetadata().getName());
       return api.getClient(OPENFEATURE_DOMAIN);
     } catch (Exception e) {
-      log.error("Could not install the Mixpanel feature-flag provider; all flags resolve to their "
-          + "code defaults", e);
+      log.error("Could not install the feature-flag provider; all flags resolve to their code "
+          + "defaults", e);
       return null;
     }
-  }
-
-  private static LocalFlagsConfig buildLocalFlagsConfig(GoFeatureFlagsConfig config) {
-    return LocalFlagsConfig.builder()
-        .projectToken(config.getProjectToken())
-        .apiHost(config.getApiHost())
-        .requestTimeoutSeconds(config.getRequestTimeoutSeconds())
-        .exposureExecutor(newExposureExecutor())
-        .enablePolling(true)
-        .pollingIntervalSeconds(config.getPollingIntervalSeconds())
-        .build();
-  }
-
-  /**
-   * Runs the initial definitions fetch — a blocking HTTP call — and the polling schedule it
-   * installs on a daemon thread. Doing it inline would make the first flag evaluation of a JVM wait
-   * on Mixpanel, which is exactly what an authoritative backend check must never do.
-   */
-  private static void startPollingAsync(LocalFlagsProvider localFlags) {
-    Thread starter = new Thread(localFlags::startPollingForDefinitions,
-        "etendo-go-flags-init");
-    starter.setDaemon(true);
-    starter.start();
-  }
-
-  /**
-   * Executor for Mixpanel exposure events. Without one the provider posts an exposure event
-   * synchronously on the evaluating thread, adding HTTP latency to every flag check. Exposure is
-   * analytics, not correctness, so the queue is bounded and overflow is discarded rather than
-   * allowed to grow or to push back on the caller.
-   */
-  private static ThreadPoolExecutor newExposureExecutor() {
-    ThreadPoolExecutor executor = new ThreadPoolExecutor(1, 1, 0L, TimeUnit.MILLISECONDS,
-        new LinkedBlockingQueue<>(EXPOSURE_QUEUE_CAPACITY),
-        runnable -> {
-          Thread thread = new Thread(runnable, "etendo-go-flags-exposure");
-          thread.setDaemon(true);
-          return thread;
-        },
-        new ThreadPoolExecutor.DiscardPolicy());
-    executor.allowCoreThreadTimeOut(false);
-    return executor;
   }
 
   private static MutableContext toEvaluationContext(FeatureFlagContext context) {
