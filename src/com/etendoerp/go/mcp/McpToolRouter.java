@@ -714,9 +714,12 @@ public class McpToolRouter {
         McpSchemaFieldBuilder.loadFieldMetadata(sfEntity);
     Map<String, String> promptByColumnId =
         McpSchemaFieldBuilder.loadPromptByColumnId(sfEntity);
+    Map<String, String> requiredWhenByField =
+        McpSchemaFieldBuilder.loadPreconditionRequirements(sfEntity);
     JSONArray fieldsArray = McpSchemaFieldBuilder.buildSchemaFieldsArray(adTab, dalEntity,
         fieldMetadata.visibilityByColumnId, fieldMetadata.businessCriticalByColumnId,
         promptByColumnId, SYSTEM_COLUMNS, SELECTOR_REFS);
+    McpSchemaFieldBuilder.applyPreconditionRequirements(fieldsArray, requiredWhenByField);
 
     // Build entity schema
     JSONObject entitySchema = new JSONObject();
