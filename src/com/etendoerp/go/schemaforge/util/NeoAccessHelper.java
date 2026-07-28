@@ -106,7 +106,7 @@ public final class NeoAccessHelper {
    *         {@code windowId}
    */
   public static boolean hasWindowAccess(String windowId, String httpMethod) {
-    return hasWindowAccess(currentRole(), windowId, httpMethod);
+    return hasWindowAccess(resolveCurrentRole(), windowId, httpMethod);
   }
 
   /**
@@ -178,7 +178,7 @@ public final class NeoAccessHelper {
    *         against {@code spec}
    */
   public static boolean hasWindowAccessForSpec(SFSpec spec, String httpMethod) {
-    if (spec == null || currentRole() == null) {
+    if (spec == null || resolveCurrentRole() == null) {
       return false;
     }
     Window window = spec.getADWindow();
@@ -235,7 +235,7 @@ public final class NeoAccessHelper {
    *         role is the System Administrator role or a client-admin role
    */
   public static boolean hasProcessAccess(String processId) {
-    return hasProcessAccess(currentRole(), processId);
+    return hasProcessAccess(resolveCurrentRole(), processId);
   }
 
   /**
@@ -270,9 +270,15 @@ public final class NeoAccessHelper {
    * Resolves the current role from the {@link OBContext}, tolerating a missing context or
    * a request with no role assigned.
    *
+   * <p>Public so callers that must capture the role explicitly before entering
+   * {@link OBContext#setAdminMode()} — e.g. {@code SFWindowAccessMap} and {@code SFListMenu},
+   * which both need the role resolved from the ambient context up front, never re-resolved once
+   * admin mode is active — can reuse this exact resolution instead of each keeping its own
+   * private copy.</p>
+   *
    * @return the current {@link Role}, or {@code null} if there is no context or no role
    */
-  private static Role currentRole() {
+  public static Role resolveCurrentRole() {
     OBContext context = OBContext.getOBContext();
     return context == null ? null : context.getRole();
   }
@@ -282,10 +288,17 @@ public final class NeoAccessHelper {
    * System Administrator role ({@code "0"}), or a per-client "GO Admin" role
    * ({@code AD_Role.is_client_admin = 'Y'}).
    *
+   * <p>Public so callers outside this class that need the same admin/client-admin bypass
+   * semantics can reuse this exact resolution instead of re-implementing it — e.g.
+   * {@code SFWindowAccessMap} (ETP-4520), which reports "full access to every window" and
+   * "every capability true" for these roles instead of resolving them one {@code AD_Window_Access}
+   * row at a time; and {@code SFRolesOverview} (ETP-4513), a cross-role aggregate webhook that
+   * must answer "is the CALLER an admin" rather than "does the caller's role reach window X".</p>
+   *
    * @param role the role to evaluate (never {@code null})
    * @return {@code true} if this role always has full access
    */
-  private static boolean isAdminOrClientAdmin(Role role) {
+  public static boolean isAdminOrClientAdmin(Role role) {
     return "0".equals(role.getId()) || Boolean.TRUE.equals(role.isClientAdmin());
   }
 
@@ -330,7 +343,7 @@ public final class NeoAccessHelper {
    *         {@code false} if no role is assigned to the current context
    */
   public static boolean hasObuiappProcessAccess(String processId) {
-    return hasObuiappProcessAccess(currentRole(), processId);
+    return hasObuiappProcessAccess(resolveCurrentRole(), processId);
   }
 
   /**
