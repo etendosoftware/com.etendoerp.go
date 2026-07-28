@@ -76,7 +76,7 @@ public abstract class OnboardingContextSupport {
     requirePresent(adminRoleId, "admin role");
   }
 
-  private void requirePresent(String value, String label) {
+  protected void requirePresent(String value, String label) {
     if (value == null || value.isEmpty()) {
       throw new OBException("Missing " + label + " for " + contextSubject());
     }
