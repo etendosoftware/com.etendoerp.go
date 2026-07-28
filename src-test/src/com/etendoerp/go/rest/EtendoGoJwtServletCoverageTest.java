@@ -922,8 +922,11 @@ public class EtendoGoJwtServletCoverageTest {
 
       rollbackMock.verify(() -> EtendoGoDalHelper.rollbackDalChanges(
           eq("onboarding role provisioning"), any(), any()));
-      // The chain must stop here — the organization step never runs.
-      supportMock.verify(() -> EtendoGoJwtSupport.findStarOrgId(any()), never());
+      // The chain must stop here — ensureOrganization (the actual org-creation step, which
+      // runs after roles) never fires. findStarOrgId is NOT part of that later step: it runs
+      // earlier, inside resolveAdminContextData, to resolve the OBContext org needed before
+      // role provisioning can run at all — so it always runs regardless of this failure.
+      supportMock.verify(() -> EtendoGoJwtSupport.organizationExists(any()), never());
     }
 
     String ndjson = resp.body();
