@@ -165,17 +165,18 @@ public class NeoSessionService {
    * @throws JSONException on serialization failure
    */
   static void putAccountIdentity(JSONObject body) throws JSONException {
-    Optional<Account> account;
+    // Starts empty so a failed lookup needs no early return of its own: it falls
+    // through to the same absent-account path as a session that simply has none.
+    Optional<Account> account = Optional.empty();
     try {
       OBContext.setAdminMode(true);
       User user = OBContext.getOBContext().getUser();
-      account = user == null
-          ? Optional.empty()
-          : GoAccountResolver.findAccountByUsername(user.getUsername());
+      if (user != null) {
+        account = GoAccountResolver.findAccountByUsername(user.getUsername());
+      }
     } catch (RuntimeException e) {
       // Identity is an enrichment of the session payload: never fail the session over it.
       log.warn("Could not resolve the account identity for the session: {}", e.getMessage(), e);
-      return;
     } finally {
       OBContext.restorePreviousMode();
     }
