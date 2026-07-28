@@ -916,12 +916,15 @@ public class EtendoGoJwtServletCoverageTest {
         .wire(anyString(), anyString(), anyString());
     servlet.onboardingRoleProvisioningService = roleProvisioningService;
 
+    Account account = mock(Account.class);
+    when(account.getEmail()).thenReturn("user@test.com");
+
     try (var ctxMock = mockStatic(OBContext.class);
          var supportMock = mockStatic(EtendoGoJwtSupport.class);
          var dalMock = mockStatic(EtendoGoJwtDalHelper.class);
          var rollbackMock = mockStatic(EtendoGoDalHelper.class)) {
-      supportMock.when(() -> EtendoGoJwtSupport.requireAccountEmail("valid-token"))
-          .thenReturn("user@test.com");
+      dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByToken("valid-token"))
+          .thenReturn(account);
       dalMock.when(() -> EtendoGoJwtDalHelper.findCurrencyByIsoCode("EUR"))
           .thenReturn(currency);
       supportMock.when(() -> EtendoGoJwtSupport.findClientIdByName("Acme"))
