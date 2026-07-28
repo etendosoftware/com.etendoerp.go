@@ -11,3 +11,4 @@ This directory stores module-specific technical documentation for `com.etendoerp
 - `onboarding-flow.md` — the five-step `ensureOnboardingDataset` pipeline (dataset → sequences → orgReady → fiscal → customer), service responsibilities, included-tables rationale, and NDJSON event format.
 - `transactional-email-contracts.md` — runtime endpoint, executor/provider boundary, and server-side provider configuration for transactional email contracts.
 - `document-email-contract-implementation.md` — step-by-step Java guide for adding document-send transactional email contracts.
+- `aeat-303-submit-endpoint.md` — `POST /neo/fiscal303/submit` contract (AEAT Modelo 303 electronic submission, ETP-4456 Phase 2): request/response shapes, error codes, the idempotency guard, certificate flow, and known gaps.
