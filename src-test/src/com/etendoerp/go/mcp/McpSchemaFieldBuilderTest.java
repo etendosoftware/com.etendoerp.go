@@ -1011,4 +1011,101 @@ class McpSchemaFieldBuilderTest {
       assertFalse(meta.businessCriticalByColumnId.get("col-3"));
     }
   }
+
+  // ─── loadPreconditionRequirements / applyPreconditionRequirement (ETP-4276) ──
+
+  @Nested
+  @DisplayName("precondition-derived userRequired")
+  class PreconditionRequirement {
+
+    private final String assetsPreconditions =
+        "{ \"800125\": ["
+        + "{ \"field\": \"usableLifeMonths\", \"requiredWhen\": \"@calculateType@ != 'PE' && @amortize@ != 'YE'\" },"
+        + "{ \"field\": \"usableLifeYears\",  \"requiredWhen\": \"@amortize@ == 'YE'\" },"
+        + "{ \"field\": \"currency\" }"
+        + "] }";
+
+    private SFEntity entityWith(String preconditionsJson) {
+      SFEntity entity = mock(SFEntity.class);
+      when(entity.get("preconditions")).thenReturn(preconditionsJson);
+      return entity;
+    }
+
+    @Test
+    @DisplayName("loads requirements keyed by field, preserving conditions")
+    void loadsRequirementsKeyedByField() {
+      Map<String, String> req =
+          McpSchemaFieldBuilder.loadPreconditionRequirements(entityWith(assetsPreconditions));
+      assertEquals(3, req.size());
+      assertEquals("@calculateType@ != 'PE' && @amortize@ != 'YE'", req.get("usableLifeMonths"));
+      assertEquals("@amortize@ == 'YE'", req.get("usableLifeYears"));
+      assertTrue(req.containsKey("currency"));
+      assertTrue(req.get("currency").isEmpty(), "currency is unconditional => empty condition");
+    }
+
+    @Test
+    @DisplayName("null entity yields an empty map")
+    void nullEntityYieldsEmptyMap() {
+      assertTrue(McpSchemaFieldBuilder.loadPreconditionRequirements(null).isEmpty());
+    }
+
+    @Test
+    @DisplayName("null or blank preconditions yield an empty map")
+    void nullOrBlankYieldsEmpty() {
+      assertTrue(McpSchemaFieldBuilder.loadPreconditionRequirements(entityWith(null)).isEmpty());
+      assertTrue(McpSchemaFieldBuilder.loadPreconditionRequirements(entityWith("   ")).isEmpty());
+    }
+
+    @Test
+    @DisplayName("malformed preconditions fail open to an empty map")
+    void malformedFailsOpen() {
+      assertTrue(McpSchemaFieldBuilder.loadPreconditionRequirements(
+          entityWith("{ not valid json")).isEmpty());
+    }
+
+    @Test
+    @DisplayName("apply flags userRequired and surfaces the conditional requiredWhen")
+    void applyFlagsUserRequired() throws Exception {
+      Map<String, String> req =
+          McpSchemaFieldBuilder.loadPreconditionRequirements(entityWith(assetsPreconditions));
+
+      JSONObject conditional = new JSONObject();
+      McpSchemaFieldBuilder.applyPreconditionRequirement(conditional, "usableLifeMonths", req);
+      assertTrue(conditional.getBoolean("userRequired"));
+      assertEquals("@calculateType@ != 'PE' && @amortize@ != 'YE'",
+          conditional.getString("requiredWhen"));
+
+      JSONObject unconditional = new JSONObject();
+      McpSchemaFieldBuilder.applyPreconditionRequirement(unconditional, "currency", req);
+      assertTrue(unconditional.getBoolean("userRequired"));
+      assertFalse(unconditional.has("requiredWhen"),
+          "unconditional field must not carry requiredWhen");
+
+      JSONObject untouched = new JSONObject();
+      McpSchemaFieldBuilder.applyPreconditionRequirement(untouched, "someOtherField", req);
+      assertFalse(untouched.has("userRequired"),
+          "field not named in preconditions must be left untouched");
+    }
+
+    @Test
+    @DisplayName("applyPreconditionRequirements overlays every field of a built array")
+    void applyOverArray() throws Exception {
+      Map<String, String> req =
+          McpSchemaFieldBuilder.loadPreconditionRequirements(entityWith(assetsPreconditions));
+      JSONArray fields = new JSONArray();
+      fields.put(new JSONObject().put("name", "usableLifeMonths"));
+      fields.put(new JSONObject().put("name", "currency"));
+      fields.put(new JSONObject().put("name", "assetValue"));
+
+      McpSchemaFieldBuilder.applyPreconditionRequirements(fields, req);
+
+      assertTrue(fields.getJSONObject(0).getBoolean("userRequired"));
+      assertEquals("@calculateType@ != 'PE' && @amortize@ != 'YE'",
+          fields.getJSONObject(0).getString("requiredWhen"));
+      assertTrue(fields.getJSONObject(1).getBoolean("userRequired"));
+      assertFalse(fields.getJSONObject(1).has("requiredWhen"));
+      assertFalse(fields.getJSONObject(2).has("userRequired"),
+          "field not in preconditions must be left untouched");
+    }
+  }
 }
