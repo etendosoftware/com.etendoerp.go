@@ -17,6 +17,7 @@
 
 package com.etendoerp.go.schemaforge.handlers;
 
+import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNull;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
@@ -30,6 +31,8 @@ import static org.mockito.Mockito.when;
 import java.util.Collections;
 import java.util.List;
 
+import org.codehaus.jettison.json.JSONArray;
+import org.codehaus.jettison.json.JSONObject;
 import org.junit.Test;
 import org.mockito.MockedStatic;
 import org.openbravo.base.provider.OBProvider;
@@ -44,18 +47,28 @@ import org.openbravo.model.common.enterprise.Organization;
 
 import com.etendoerp.go.schemaforge.NeoContext;
 import com.etendoerp.go.schemaforge.NeoEndpointType;
+import com.etendoerp.go.schemaforge.NeoResponse;
 
 /**
- * Unit tests for {@link UserRoleAssignmentHandler} (ETP-4512).
+ * Unit tests for {@link UserRoleAssignmentHandler} — two independent post-hook concerns on the
+ * {@code user} entity's single {@code JAVA_QUALIFIER} slot (see the handler's class javadoc).
  *
- * <p>Covers the method/endpoint guard clauses in {@link UserRoleAssignmentHandler#afterHandle},
- * the happy path where a brand-new {@code AD_User_Roles} row is created for a user with none yet,
- * the role-change path (existing row for a different role is removed, exactly one new row
- * exists for the new role), the idempotency guarantee (already in sync -> no writes at all), the
- * role-cleared path ({@code Default_Ad_Role_ID} set to {@code null} -> existing row removed, no
- * new row created), and that {@code GET} requests and unresolvable users never touch
- * {@code AD_User_Roles}. {@link UserRoleAssignmentHandler#handle} is always a pre-hook no-op and
- * is asserted separately.
+ * <p>Role sync (ETP-4512): covers the method/endpoint guard clauses in
+ * {@link UserRoleAssignmentHandler#afterHandle}, the happy path where a brand-new
+ * {@code AD_User_Roles} row is created for a user with none yet, the role-change path (existing
+ * row for a different role is removed, exactly one new row exists for the new role), the
+ * idempotency guarantee (already in sync -> no writes at all), the role-cleared path
+ * ({@code Default_Ad_Role_ID} set to {@code null} -> existing row removed, no new row created),
+ * and that unresolvable users never touch {@code AD_User_Roles}.
+ *
+ * <p>Bootstrap-user hiding (2026-07-27): covers that a {@code user} list GET has the "Admin"
+ * ({@code id="100"}) and "System" ({@code id="0"}) rows removed with {@code totalRows} adjusted,
+ * that a list with neither present is left untouched, that a single-record GET (whose
+ * {@code data} is a lone object, not an array) is never altered, and that a missing/malformed
+ * previous result degrades to a no-op rather than throwing.
+ *
+ * <p>{@link UserRoleAssignmentHandler#handle} is always a pre-hook no-op and is asserted
+ * separately.
  */
 public class UserRoleAssignmentHandlerTest {
 
@@ -100,6 +113,95 @@ public class UserRoleAssignmentHandlerTest {
       assertNull(handler.afterHandle(ctx));
       obCtxMock.verify(() -> OBContext.setAdminMode(anyBoolean()), never());
     }
+  }
+
+  // ─── afterHandle: bootstrap-user hiding on a `user` list GET ─────────────────
+
+  private static JSONObject buildListResponseBody(String... userIds) throws Exception {
+    JSONArray data = new JSONArray();
+    for (String id : userIds) {
+      JSONObject row = new JSONObject();
+      row.put("id", id);
+      data.put(row);
+    }
+    JSONObject inner = new JSONObject();
+    inner.put("data", data);
+    inner.put("totalRows", userIds.length);
+    JSONObject body = new JSONObject();
+    body.put("response", inner);
+    return body;
+  }
+
+  @Test
+  public void afterHandleRemovesAdminAndSystemBootstrapUsersFromListResponse() throws Exception {
+    UserRoleAssignmentHandler handler = new UserRoleAssignmentHandler();
+    JSONObject body = buildListResponseBody("0", "100", "real-user-1", "real-user-2");
+    NeoContext ctx = NeoContext.builder()
+        .endpointType(NeoEndpointType.CRUD)
+        .httpMethod("GET")
+        .previousResult(NeoResponse.ok(body))
+        .build();
+
+    assertNull(handler.afterHandle(ctx));
+
+    JSONObject inner = body.getJSONObject("response");
+    JSONArray data = inner.getJSONArray("data");
+    assertEquals(2, data.length());
+    assertEquals("real-user-1", data.getJSONObject(0).getString("id"));
+    assertEquals("real-user-2", data.getJSONObject(1).getString("id"));
+    assertEquals(2, inner.getInt("totalRows"));
+  }
+
+  @Test
+  public void afterHandleLeavesListResponseUntouchedWhenNoBootstrapUsersPresent() throws Exception {
+    UserRoleAssignmentHandler handler = new UserRoleAssignmentHandler();
+    JSONObject body = buildListResponseBody("real-user-1", "real-user-2");
+    NeoContext ctx = NeoContext.builder()
+        .endpointType(NeoEndpointType.CRUD)
+        .httpMethod("GET")
+        .previousResult(NeoResponse.ok(body))
+        .build();
+
+    assertNull(handler.afterHandle(ctx));
+
+    JSONObject inner = body.getJSONObject("response");
+    assertEquals(2, inner.getJSONArray("data").length());
+    assertEquals(2, inner.getInt("totalRows"));
+  }
+
+  @Test
+  public void afterHandleIgnoresSingleRecordGetResponseShape() throws Exception {
+    // A single-record GET's "response" has a lone JSON object under "data", not an array —
+    // optJSONArray naturally no-ops there, so this must never throw or alter the body.
+    UserRoleAssignmentHandler handler = new UserRoleAssignmentHandler();
+    JSONObject singleRecord = new JSONObject();
+    singleRecord.put("id", "100");
+    JSONObject inner = new JSONObject();
+    inner.put("data", singleRecord);
+    JSONObject body = new JSONObject();
+    body.put("response", inner);
+    NeoContext ctx = NeoContext.builder()
+        .endpointType(NeoEndpointType.CRUD)
+        .httpMethod("GET")
+        .previousResult(NeoResponse.ok(body))
+        .build();
+
+    assertNull(handler.afterHandle(ctx));
+
+    assertEquals("100", body.getJSONObject("response").getJSONObject("data").getString("id"));
+  }
+
+  @Test
+  public void afterHandleSwallowsExceptionWhenPreviousResultIsMissing() {
+    // No previousResult set at all (defensive — should never happen for a real CRUD GET, but
+    // hideBootstrapUsers must degrade to a no-op rather than throw).
+    UserRoleAssignmentHandler handler = new UserRoleAssignmentHandler();
+    NeoContext ctx = NeoContext.builder()
+        .endpointType(NeoEndpointType.CRUD)
+        .httpMethod("GET")
+        .build();
+
+    assertNull(handler.afterHandle(ctx));
   }
 
   @Test
