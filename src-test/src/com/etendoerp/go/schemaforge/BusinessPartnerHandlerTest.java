@@ -180,6 +180,28 @@ class BusinessPartnerHandlerTest {
     assertEquals("Empresa Test", body.getString("searchKey"));
   }
 
+  /**
+   * Regression (ETP-4156): {@code C_BPartner.Value} is {@code VARCHAR(40)} while
+   * {@code Name} has 60, so a long commercial name must be truncated before it is used as
+   * the placeholder searchKey — otherwise the save fails with
+   * "Value too long. Length 48, maximum allowed 40". The app-shell used to pre-truncate
+   * this client-side; the guard now lives here.
+   */
+  @Test
+  void testHandlePostTruncatesInjectedSearchKeyToColumnLength() throws Exception {
+    String longName = "Comercializadora Internacional de Suministros Generales";
+    JSONObject body = new JSONObject();
+    body.put("name", longName);
+    when(ctx.getHttpMethod()).thenReturn("POST");
+    when(ctx.getRequestBody()).thenReturn(body);
+
+    handler.handle(ctx);
+
+    assertEquals(40, body.getString("searchKey").length());
+    assertEquals(longName.substring(0, 40), body.getString("searchKey"));
+    assertEquals(longName, body.getString("name"), "name itself must not be truncated");
+  }
+
   // ── handle() — POST: billing field stripping ─────────────────────────────────
 
   /**

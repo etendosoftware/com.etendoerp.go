@@ -75,6 +75,8 @@ public class BusinessPartnerHandler implements NeoHandler {
   private static final String FIELD_SEARCH_KEY = "searchKey";
   private static final String FIELD_NAME = "name";
   private static final String SQLSTATE_UNIQUE_VIOLATION = "23505";
+  /** {@code C_BPartner.Value} is {@code VARCHAR(40)}. */
+  private static final int SEARCH_KEY_MAX_LENGTH = 40;
 
   private static final Set<String> PRECREATE_BILLING_FIELDS = Set.of("priceList", "paymentMethod", "paymentTerms",
       "account", "customerBlocking", "purchasePricelist", "pOPaymentMethod", "pOPaymentTerms", "pOFinancialAccount",
@@ -242,7 +244,12 @@ public class BusinessPartnerHandler implements NeoHandler {
         stripPreCreateBillingDefaults(body);
         String name = body.optString(FIELD_NAME, null);
         if (StringUtils.isNotBlank(name) && !body.has(FIELD_SEARCH_KEY)) {
-          body.put(FIELD_SEARCH_KEY, name);
+          // C_BPartner.Value is VARCHAR(40) while Name has 60, so a long commercial name
+          // cannot be used verbatim as the placeholder ("Value too long. Length 48,
+          // maximum allowed 40"). afterHandle() replaces it with em_etgo_identifier
+          // anyway, so truncating here is lossless. ETP-4156: the app-shell used to
+          // pre-truncate this client-side, which masked the missing guard.
+          body.put(FIELD_SEARCH_KEY, StringUtils.substring(name, 0, SEARCH_KEY_MAX_LENGTH));
         }
       }
     } catch (Exception e) {
