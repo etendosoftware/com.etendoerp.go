@@ -52,7 +52,7 @@ import org.openbravo.model.financialmgmt.payment.MatchingAlgorithm;
 
 /**
  * Mockito-driven unit tests for {@link FinancialAccountSupport}, the helper that creates
- * {@link FIN_FinancialAccount} records programmatically for the PSD2 "connect first, create after"
+ * {@link FIN_FinancialAccount} records programmatically for the bank connection "connect first, create after"
  * flow (case 2) and resolves a {@link Currency} from its ISO code.
  *
  * <p>Strategy: both methods are pure DAL orchestration, so the static {@link OBProvider},
@@ -541,7 +541,7 @@ public class FinancialAccountSupportTest {
   /**
    * Regression (ETP-4503): every runtime-created link is born multicurrency-ON. A new Cash link must
    * set both {@code payinIsMulticurrency} and {@code payoutIsMulticurrency} to {@code true} (the
-   * PSD2 bank-transfer exception is applied afterwards, only on PSD2-connected Bank accounts).
+   * bank-transfer exception is applied afterwards, only on bank-connected Bank accounts).
    */
   @Test
   public void testAssignDefaultPaymentMethodsSetsMulticurrencyOnNewLink() {

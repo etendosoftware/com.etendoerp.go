@@ -17,11 +17,11 @@
 
 package com.etendoerp.go.schemaforge;
 
-import static com.etendoerp.go.schemaforge.Psd2HandlerTestSupport.ACCOUNT_ID;
-import static com.etendoerp.go.schemaforge.Psd2HandlerTestSupport.PARAM_ACCOUNT_ID;
-import static com.etendoerp.go.schemaforge.Psd2HandlerTestSupport.PARAM_ACTION;
-import static com.etendoerp.go.schemaforge.Psd2HandlerTestSupport.getContext;
-import static com.etendoerp.go.schemaforge.Psd2HandlerTestSupport.singleParam;
+import static com.etendoerp.go.schemaforge.BankConnectionHandlerTestSupport.ACCOUNT_ID;
+import static com.etendoerp.go.schemaforge.BankConnectionHandlerTestSupport.PARAM_ACCOUNT_ID;
+import static com.etendoerp.go.schemaforge.BankConnectionHandlerTestSupport.PARAM_ACTION;
+import static com.etendoerp.go.schemaforge.BankConnectionHandlerTestSupport.getContext;
+import static com.etendoerp.go.schemaforge.BankConnectionHandlerTestSupport.singleParam;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
@@ -52,7 +52,7 @@ import com.etendoerp.psd2.bank.integration.data.FinaccConnection;
 import com.etendoerp.psd2.bank.integration.utils.SaltEdgeAccountLinkHelper;
 
 /**
- * Unit tests for {@link FinancialAccountPsd2Handler} request routing and the GET {@code status}
+ * Unit tests for {@link FinancialAccountBankConnectionHandler} request routing and the GET {@code status}
  * action.
  *
  * <p>The handler enters admin mode through the static {@link OBContext} (not a seam), so every
@@ -65,15 +65,15 @@ import com.etendoerp.psd2.bank.integration.utils.SaltEdgeAccountLinkHelper;
  * generic Exception → 500 translations (both rollback).
  */
 @RunWith(MockitoJUnitRunner.Silent.class)
-public class FinancialAccountPsd2HandlerRoutingTest {
+public class FinancialAccountBankConnectionHandlerRoutingTest {
 
   private static final String ACTION_STATUS = "status";
 
-  private FinancialAccountPsd2Handler handler;
+  private FinancialAccountBankConnectionHandler handler;
 
   @Before
   public void setUp() {
-    handler = spy(new FinancialAccountPsd2Handler());
+    handler = spy(new FinancialAccountBankConnectionHandler());
     doNothing().when(handler).doRollbackAndClose();
   }
 
@@ -142,7 +142,7 @@ public class FinancialAccountPsd2HandlerRoutingTest {
   }
 
   /**
-   * GET status on a connected account (PSD2 connection status {@code CO}) maps {@code connected}
+   * GET status on a connected account (bank connection status {@code CO}) maps {@code connected}
    * to true and exposes the connection's provider/scopes when a {@link FinaccConnection} exists.
    */
   @Test
@@ -175,7 +175,7 @@ public class FinancialAccountPsd2HandlerRoutingTest {
   }
 
   /**
-   * GET status on a disconnected account (no PSD2 connection status, no {@link FinaccConnection})
+   * GET status on a disconnected account (no bank connection status, no {@link FinaccConnection})
    * maps {@code connected} to false and omits the connection-only fields.
    */
   @Test

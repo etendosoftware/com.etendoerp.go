@@ -297,7 +297,7 @@ final class PaymentRegistrationService {
       item.put("currency", acc.getCurrency().getISOCode());
       item.put("currencyId", acc.getCurrency().getId());
     }
-    item.put("psd2Connected", BankIntegrationConstants.FA_CONNECTION_STATUS_CONNECTED
+    item.put("bankConnected", BankIntegrationConstants.FA_CONNECTION_STATUS_CONNECTED
         .equals(acc.getPSD2ConnectionStatus()));
     if (acc.getPSD2CardNumber() != null) {
       item.put("maskedPan", acc.getPSD2CardNumber());
@@ -406,7 +406,7 @@ final class PaymentRegistrationService {
     }
     // A linked PSD2_PIS_PAYMENT row means this payment was initiated through the Salt Edge PIS
     // flow (this popup), not just a manually-recorded bank transfer — surfaced in the SPA's
-    // payment history as a "Realizado vía PSD2" badge. PisPayment is a plain DAL entity (no
+    // payment history as a "Realizado vía banco" badge. PisPayment is a plain DAL entity (no
     // PSD2-module method needed), so this is queried directly here.
     item.put(KEY_VIA_PIS, PisPaymentService.hasLinkedPisPayment(p));
     // Only a draft can be re-opened for editing — expose which credit/abono sources it is
