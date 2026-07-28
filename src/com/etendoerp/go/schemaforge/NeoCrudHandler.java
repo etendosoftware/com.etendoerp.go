@@ -80,6 +80,7 @@ class NeoCrudHandler {
   private static final String PARAM_PARENT_ID = "parentId";
   private static final String HQL_AND_OPERATOR = " and ";
   private static final String JSON_IDENTIFIER = "_identifier";
+  private static final String FIELD_ACCOUNTING_DATE = "accountingDate";
   private static final Set<String> CONTACTS_PRECREATE_BILLING_FIELDS = new HashSet<>(
       Arrays.asList(
           "priceList",
@@ -652,7 +653,18 @@ class NeoCrudHandler {
   private String executeUpdate(NeoContext context, String dalEntityName,
       NeoFieldFilter fieldFilter, DefaultJsonDataService jsonService,
       Map<String, String> params) throws Exception {
-    JSONObject filteredBody = fieldFilter.filterWriteRequest(context.getRequestBody());
+    JSONObject rawBody = context.getRequestBody();
+    // ETP-4531: capture accountingDate BEFORE filtering — filterWriteRequest/filterBody
+    // does NOT return an independent copy, it mutates `rawBody` in place (filterRecord strips
+    // non-writable keys directly from the same JSONObject reference it's given, when there's
+    // no "data" wrapper to unwrap into a different object first). So `rawBody` and
+    // `filteredBody` below end up being the SAME object once filtering runs — reading
+    // `rawBody.has("accountingDate")` AFTER calling filterWriteRequest is always false,
+    // because the filter already stripped it from that very same instance. Save the
+    // pre-filter value first, while it still exists.
+    Object accountingDateBeforeFilter = rawBody != null ? rawBody.opt(FIELD_ACCOUNTING_DATE) : null;
+    boolean hadAccountingDate = rawBody != null && rawBody.has(FIELD_ACCOUNTING_DATE);
+    JSONObject filteredBody = fieldFilter.filterWriteRequest(rawBody);
     // Inject lineNetAmount when absent from filteredBody (stripped by readOnly filter).
     // The frontend sends invoicedQuantity and unitPrice as editable fields, so both are
     // available here to compute the correct net amount even for products where SL_Invoice_Amt
@@ -660,6 +672,19 @@ class NeoCrudHandler {
     NeoCommercialLinePolicy.injectLineNetAmountIfMissing(filteredBody);
     NeoCommercialLinePolicy.injectGrossAmountIfMissing(filteredBody);
     NeoCommercialLinePolicy.injectLineGrossAmountIfMissing(filteredBody);
+    // ETP-4531: re-apply accountingDate now that filtering (which stripped it, correctly, as a
+    // read-only field the CLIENT should never write directly) has run. Each header handler's
+    // handle() pre-hook (e.g. AbstractInvoiceHeaderHandler#mirrorAccountingDate) mirrors the
+    // document date into this field before this method runs; filterCreateRequest (used on
+    // POST) already allows read-only fields through for exactly this reason ("they may carry
+    // values from callouts or defaults") — PATCH/PUT's stricter writableFields filter needs
+    // the same carve-out here. Uses the resolved DAL property name (e.g. "dateAcct"), not the
+    // API key ("accountingDate") — filterWriteRequest already remapped every other field to
+    // its DAL name via NeoFieldFilter#remapApiKeys, and DefaultJsonDataService only recognizes
+    // DAL property names; injecting under the API key would silently no-op.
+    if (hadAccountingDate) {
+      filteredBody.put(fieldFilter.resolveWritablePropName(FIELD_ACCOUNTING_DATE), accountingDateBeforeFilter);
+    }
     String wrappedBody = wrapForSmartclient(filteredBody, dalEntityName, context.getRecordId());
     return jsonService.update(params, wrappedBody);
   }
@@ -893,8 +918,9 @@ class NeoCrudHandler {
         predicates.add("(" + parentFilter + ")");
       }
     }
-    if (StringUtils.isNotBlank(search)) {
-      predicates.add("LOWER(CAST(e." + resolvedProperty + " AS string)) LIKE :search");
+    String searchPredicate = buildDistinctSearchPredicate(prop, resolvedProperty, search);
+    if (searchPredicate != null) {
+      predicates.add(searchPredicate);
     }
 
     StringBuilder where = new StringBuilder(" as e where ")
@@ -905,7 +931,7 @@ class NeoCrudHandler {
       OBQuery<BaseOBObject> obQuery = OBDal.getInstance()
           .createQuery(dalEntityName, where.toString());
       obQuery.setSelectClause("DISTINCT e." + resolvedProperty);
-      if (StringUtils.isNotBlank(search)) {
+      if (searchPredicate != null) {
         obQuery.setNamedParameter("search", "%" + search.toLowerCase() + "%");
       }
       obQuery.setFirstResult(startRow);
@@ -971,6 +997,50 @@ class NeoCrudHandler {
       }
     }
     return null;
+  }
+
+  /**
+   * Builds the HQL LIKE predicate for {@code _distinctSearch} against the resolved
+   * property.
+   * <p>
+   * Scalar (primitive) properties are searched by casting the column value itself —
+   * {@code CAST(e.status AS string)}. Relation (foreign-key) properties cannot be
+   * meaningfully cast to string: {@code CAST(e.productCategory AS string)} does not
+   * resolve to the related record's display text, so it silently matches nothing
+   * (or throws, depending on dialect). For those, the search is redirected to the
+   * target entity's identifier properties instead — e.g.
+   * {@code LOWER(CAST(e.productCategory.name AS string)) LIKE :search} — mirroring
+   * how {@link BaseOBObject#getIdentifier()} resolves a record's display text.
+   * <p>
+   * Returns {@code null} (no predicate, search term ignored) when there is no
+   * search term, or when a relation's target entity exposes no usable identifier
+   * property, so the request still succeeds instead of failing with an HQL error.
+   */
+  private static String buildDistinctSearchPredicate(Property prop, String resolvedProperty, String search) {
+    if (StringUtils.isBlank(search)) {
+      return null;
+    }
+    if (prop.isPrimitive()) {
+      return "LOWER(CAST(e." + resolvedProperty + " AS string)) LIKE :search";
+    }
+    Entity targetEntity = prop.getTargetEntity();
+    if (targetEntity == null) {
+      return null;
+    }
+    List<Property> idProps = targetEntity.getIdentifierProperties();
+    if (idProps == null || idProps.isEmpty()) {
+      return null;
+    }
+    List<String> clauses = new ArrayList<>();
+    for (Property idProp : idProps) {
+      if (idProp.isPrimitive()) {
+        clauses.add("LOWER(CAST(e." + resolvedProperty + "." + idProp.getName() + " AS string)) LIKE :search");
+      }
+    }
+    if (clauses.isEmpty()) {
+      return null;
+    }
+    return "(" + String.join(" OR ", clauses) + ")";
   }
 
   /**

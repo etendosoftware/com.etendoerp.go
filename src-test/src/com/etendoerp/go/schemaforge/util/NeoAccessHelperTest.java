@@ -17,6 +17,7 @@
 
 package com.etendoerp.go.schemaforge.util;
 
+import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
@@ -26,14 +27,20 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 
+import org.hibernate.criterion.Criterion;
+import org.hibernate.criterion.SimpleExpression;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
+import org.mockito.ArgumentCaptor;
 import org.mockito.MockedStatic;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
@@ -42,7 +49,10 @@ import org.openbravo.model.ad.access.ProcessAccess;
 import org.openbravo.model.ad.access.WindowAccess;
 import org.openbravo.model.ad.datamodel.Column;
 import org.openbravo.model.ad.ui.Process;
+import org.openbravo.model.ad.ui.Tab;
+import org.openbravo.model.ad.ui.Window;
 
+import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFSpec;
 
 /**
@@ -114,6 +124,369 @@ public class NeoAccessHelperTest {
     assertFalse(NeoAccessHelper.hasWindowAccess("restricted-window-id"));
   }
 
+  @Test
+  public void hasWindowAccess_noRoleAssigned_returnsFalse() {
+    when(context.getRole()).thenReturn(null);
+
+    assertFalse(NeoAccessHelper.hasWindowAccess("any-window-id"));
+    assertFalse(NeoAccessHelper.hasWindowAccess("any-window-id", "GET"));
+    assertFalse(NeoAccessHelper.hasWindowAccess("any-window-id", "POST"));
+  }
+
+  @Test
+  public void hasWindowAccess_clientAdminRole_returnsTrueForAllMethods() {
+    when(role.getId()).thenReturn("role-id-client-admin");
+    when(role.isClientAdmin()).thenReturn(true);
+
+    assertTrue(NeoAccessHelper.hasWindowAccess("some-window-id", "GET"));
+    assertTrue(NeoAccessHelper.hasWindowAccess("some-window-id", "POST"));
+    assertTrue(NeoAccessHelper.hasWindowAccess("some-window-id", "PUT"));
+    assertTrue(NeoAccessHelper.hasWindowAccess("some-window-id", "DELETE"));
+  }
+
+  @SuppressWarnings("unchecked")
+  @Test
+  public void hasWindowAccess_readOnlyRow_allowsGetButDeniesWriteMethods() {
+    when(role.getId()).thenReturn("role-id-readonly");
+    OBCriteria<WindowAccess> criteria = mock(OBCriteria.class);
+    when(dal.createCriteria(WindowAccess.class)).thenReturn(criteria);
+    when(criteria.add(any())).thenReturn(criteria);
+    when(criteria.setMaxResults(1)).thenReturn(criteria);
+    WindowAccess access = mock(WindowAccess.class);
+    when(access.isEditableField()).thenReturn(false);
+    when(criteria.list()).thenReturn(Collections.singletonList(access));
+
+    assertTrue(NeoAccessHelper.hasWindowAccess("ro-window-id", "GET"));
+    assertFalse(NeoAccessHelper.hasWindowAccess("ro-window-id", "POST"));
+    assertFalse(NeoAccessHelper.hasWindowAccess("ro-window-id", "PUT"));
+    assertFalse(NeoAccessHelper.hasWindowAccess("ro-window-id", "PATCH"));
+    assertFalse(NeoAccessHelper.hasWindowAccess("ro-window-id", "DELETE"));
+  }
+
+  @SuppressWarnings("unchecked")
+  @Test
+  public void hasWindowAccess_fullAccessRow_allowsAllMethods() {
+    when(role.getId()).thenReturn("role-id-full");
+    OBCriteria<WindowAccess> criteria = mock(OBCriteria.class);
+    when(dal.createCriteria(WindowAccess.class)).thenReturn(criteria);
+    when(criteria.add(any())).thenReturn(criteria);
+    when(criteria.setMaxResults(1)).thenReturn(criteria);
+    WindowAccess access = mock(WindowAccess.class);
+    when(access.isEditableField()).thenReturn(true);
+    when(criteria.list()).thenReturn(Collections.singletonList(access));
+
+    assertTrue(NeoAccessHelper.hasWindowAccess("full-window-id", "GET"));
+    assertTrue(NeoAccessHelper.hasWindowAccess("full-window-id", "POST"));
+    assertTrue(NeoAccessHelper.hasWindowAccess("full-window-id", "PUT"));
+    assertTrue(NeoAccessHelper.hasWindowAccess("full-window-id", "PATCH"));
+    assertTrue(NeoAccessHelper.hasWindowAccess("full-window-id", "DELETE"));
+  }
+
+  @SuppressWarnings("unchecked")
+  @Test
+  public void hasWindowAccess_noAccessRowAtAll_deniesAllMethods() {
+    when(role.getId()).thenReturn("role-id-no-row");
+    OBCriteria<WindowAccess> criteria = mock(OBCriteria.class);
+    when(dal.createCriteria(WindowAccess.class)).thenReturn(criteria);
+    when(criteria.add(any())).thenReturn(criteria);
+    when(criteria.setMaxResults(1)).thenReturn(criteria);
+    when(criteria.list()).thenReturn(Collections.emptyList());
+
+    assertFalse(NeoAccessHelper.hasWindowAccess("no-row-window-id", "GET"));
+    assertFalse(NeoAccessHelper.hasWindowAccess("no-row-window-id", "POST"));
+    assertFalse(NeoAccessHelper.hasWindowAccess("no-row-window-id", "PUT"));
+    assertFalse(NeoAccessHelper.hasWindowAccess("no-row-window-id", "DELETE"));
+  }
+
+  /**
+   * QA gap-closer: every other {@code hasWindowAccess} test stubs
+   * {@code criteria.add(any())} — proving the method returns the right boolean for a given
+   * canned {@code criteria.list()} result, but NOT that {@code findActiveWindowAccess} actually
+   * asks Hibernate for the right thing. This test captures the real {@link Criterion} instances
+   * passed to {@code criteria.add(...)} and asserts their property/value, so a regression that
+   * (for example) swapped the window-id and role-id filters, or dropped the
+   * {@code isActive = true} filter, would fail here even though the higher-level
+   * true/false-returning tests would still pass with a stub that always answers "found".
+   */
+  @SuppressWarnings("unchecked")
+  @Test
+  public void hasWindowAccess_queriesCriteriaWithWindowIdRoleIdAndActiveTrue() {
+    when(role.getId()).thenReturn("role-id-captured");
+    OBCriteria<WindowAccess> criteria = mock(OBCriteria.class);
+    when(dal.createCriteria(WindowAccess.class)).thenReturn(criteria);
+    ArgumentCaptor<Criterion> captor = ArgumentCaptor.forClass(Criterion.class);
+    when(criteria.add(captor.capture())).thenReturn(criteria);
+    when(criteria.setMaxResults(1)).thenReturn(criteria);
+    when(criteria.list()).thenReturn(Collections.emptyList());
+
+    NeoAccessHelper.hasWindowAccess("the-real-window-id", "GET");
+
+    List<Criterion> filters = captor.getAllValues();
+    assertEquals("Expected exactly 3 filters (window, role, active)", 3, filters.size());
+
+    boolean sawWindowFilter = false;
+    boolean sawRoleFilter = false;
+    boolean sawActiveFilter = false;
+    for (Criterion c : filters) {
+      SimpleExpression expr = (SimpleExpression) c;
+      if ((WindowAccess.PROPERTY_WINDOW + ".id").equals(expr.getPropertyName())) {
+        assertEquals("the-real-window-id", expr.getValue());
+        sawWindowFilter = true;
+      } else if ((WindowAccess.PROPERTY_ROLE + ".id").equals(expr.getPropertyName())) {
+        assertEquals("role-id-captured", expr.getValue());
+        sawRoleFilter = true;
+      } else if (WindowAccess.PROPERTY_ACTIVE.equals(expr.getPropertyName())) {
+        assertEquals(Boolean.TRUE, expr.getValue());
+        sawActiveFilter = true;
+      }
+    }
+    assertTrue("Missing filter on WindowAccess.window.id", sawWindowFilter);
+    assertTrue("Missing filter on WindowAccess.role.id", sawRoleFilter);
+    assertTrue("Missing filter on WindowAccess.active = true (an inactive row must "
+        + "behave as no-row-at-all, i.e. deny)", sawActiveFilter);
+  }
+
+  /**
+   * QA gap-closer: a role that has an active, full-access {@code WindowAccess} row for a
+   * DIFFERENT window than the one being requested must still be denied — the row must never
+   * leak access to a window it was not granted for. Since the Hibernate criteria itself cannot
+   * run against a real database in a unit test, this is asserted the same way as
+   * {@link #hasWindowAccess_queriesCriteriaWithWindowIdRoleIdAndActiveTrue}: by capturing the
+   * actual filter value passed for the window-id property and proving it is the REQUESTED
+   * window, not the one the role happens to have a grant for. If the implementation ever
+   * queried the wrong id (or no id at all), this filter value would not match and the test
+   * would fail — a bug this shape could otherwise slip through a criteria mock that always
+   * answers "access found" regardless of what was asked.
+   */
+  @SuppressWarnings("unchecked")
+  @Test
+  public void hasWindowAccess_roleGrantIsForDifferentWindow_stillQueriesRequestedWindowId() {
+    when(role.getId()).thenReturn("role-id-mismatch");
+    OBCriteria<WindowAccess> criteria = mock(OBCriteria.class);
+    when(dal.createCriteria(WindowAccess.class)).thenReturn(criteria);
+    ArgumentCaptor<Criterion> captor = ArgumentCaptor.forClass(Criterion.class);
+    when(criteria.add(captor.capture())).thenReturn(criteria);
+    when(criteria.setMaxResults(1)).thenReturn(criteria);
+    // The role has SOME active WindowAccess row (e.g. for a different window in real data),
+    // but the query must be scoped to "requested-window", never "role-has-access-to-this-one".
+    when(criteria.list()).thenReturn(Collections.emptyList());
+
+    boolean result = NeoAccessHelper.hasWindowAccess("requested-window", "GET");
+
+    assertFalse("A role with no active row for the REQUESTED window must be denied, "
+        + "even if it holds a WindowAccess row for some other window", result);
+
+    boolean queriedRequestedWindow = false;
+    for (Criterion c : captor.getAllValues()) {
+      SimpleExpression expr = (SimpleExpression) c;
+      if ((WindowAccess.PROPERTY_WINDOW + ".id").equals(expr.getPropertyName())) {
+        assertEquals("requested-window", expr.getValue());
+        queriedRequestedWindow = true;
+      }
+    }
+    assertTrue("findActiveWindowAccess must filter by the requested window id",
+        queriedRequestedWindow);
+  }
+
+  // ── hasWindowAccessForSpec (ETP-4510 BUG-3) ──────────────────────────────────
+
+  @Test
+  public void hasWindowAccessForSpec_nullSpec_returnsFalse() {
+    when(role.getId()).thenReturn("0");
+    assertFalse(NeoAccessHelper.hasWindowAccessForSpec(null, "GET"));
+  }
+
+  @Test
+  public void hasWindowAccessForSpec_noRoleAssigned_returnsFalseRegardlessOfWindow() {
+    when(context.getRole()).thenReturn(null);
+
+    SFSpec windowedSpec = mock(SFSpec.class);
+    Window window = mock(Window.class);
+    when(window.getId()).thenReturn("window-id-1");
+    when(windowedSpec.getADWindow()).thenReturn(window);
+
+    SFSpec windowlessSpec = mock(SFSpec.class);
+    when(windowlessSpec.getADWindow()).thenReturn(null);
+
+    assertFalse(NeoAccessHelper.hasWindowAccessForSpec(windowedSpec, "GET"));
+    assertFalse(NeoAccessHelper.hasWindowAccessForSpec(windowlessSpec, "GET"));
+  }
+
+  @SuppressWarnings("unchecked")
+  @Test
+  public void hasWindowAccessForSpec_directWindow_delegatesToHasWindowAccess_allow() {
+    when(role.getId()).thenReturn("role-id-direct-window");
+    SFSpec spec = mock(SFSpec.class);
+    Window window = mock(Window.class);
+    when(window.getId()).thenReturn("direct-window-id");
+    when(spec.getADWindow()).thenReturn(window);
+
+    OBCriteria<WindowAccess> criteria = mock(OBCriteria.class);
+    when(dal.createCriteria(WindowAccess.class)).thenReturn(criteria);
+    when(criteria.add(any())).thenReturn(criteria);
+    when(criteria.setMaxResults(1)).thenReturn(criteria);
+    WindowAccess access = mock(WindowAccess.class);
+    when(criteria.list()).thenReturn(Collections.singletonList(access));
+
+    assertTrue(NeoAccessHelper.hasWindowAccessForSpec(spec, "GET"));
+  }
+
+  @SuppressWarnings("unchecked")
+  @Test
+  public void hasWindowAccessForSpec_directWindow_delegatesToHasWindowAccess_deny() {
+    when(role.getId()).thenReturn("role-id-direct-window-denied");
+    SFSpec spec = mock(SFSpec.class);
+    Window window = mock(Window.class);
+    when(window.getId()).thenReturn("direct-window-id-denied");
+    when(spec.getADWindow()).thenReturn(window);
+
+    OBCriteria<WindowAccess> criteria = mock(OBCriteria.class);
+    when(dal.createCriteria(WindowAccess.class)).thenReturn(criteria);
+    when(criteria.add(any())).thenReturn(criteria);
+    when(criteria.setMaxResults(1)).thenReturn(criteria);
+    when(criteria.list()).thenReturn(Collections.emptyList());
+
+    assertFalse(NeoAccessHelper.hasWindowAccessForSpec(spec, "GET"));
+  }
+
+  @SuppressWarnings("unchecked")
+  @Test
+  public void hasWindowAccessForSpec_windowlessSpecNoCombinationData_allowsAuthenticatedRole() {
+    when(role.getId()).thenReturn("role-id-no-combination");
+    SFSpec spec = mock(SFSpec.class);
+    when(spec.getADWindow()).thenReturn(null);
+    when(spec.getId()).thenReturn("spec-no-combination");
+
+    // No entity at all — the not-posted-documents / dashboard shape.
+    OBCriteria<SFEntity> criteria = mock(OBCriteria.class);
+    when(dal.createCriteria(SFEntity.class)).thenReturn(criteria);
+    when(criteria.add(any())).thenReturn(criteria);
+    when(criteria.list()).thenReturn(Collections.emptyList());
+
+    assertTrue(NeoAccessHelper.hasWindowAccessForSpec(spec, "GET"));
+  }
+
+  @SuppressWarnings("unchecked")
+  @Test
+  public void hasWindowAccessForSpec_windowlessSpecEntitiesWithoutTab_allowsAuthenticatedRole() {
+    when(role.getId()).thenReturn("role-id-entities-no-tab");
+    SFSpec spec = mock(SFSpec.class);
+    when(spec.getADWindow()).thenReturn(null);
+    when(spec.getId()).thenReturn("spec-entities-no-tab");
+
+    SFEntity entityWithoutTab = mock(SFEntity.class);
+    when(entityWithoutTab.getADTab()).thenReturn(null);
+
+    OBCriteria<SFEntity> criteria = mock(OBCriteria.class);
+    when(dal.createCriteria(SFEntity.class)).thenReturn(criteria);
+    when(criteria.add(any())).thenReturn(criteria);
+    when(criteria.list()).thenReturn(Collections.singletonList(entityWithoutTab));
+
+    assertTrue(NeoAccessHelper.hasWindowAccessForSpec(spec, "GET"));
+  }
+
+  @SuppressWarnings("unchecked")
+  @Test
+  public void hasWindowAccessForSpec_windowlessSpecAllConstituentWindowsAccessible_returnsTrue() {
+    when(role.getId()).thenReturn("role-id-combo-allowed");
+    SFSpec spec = mock(SFSpec.class);
+    when(spec.getADWindow()).thenReturn(null);
+    when(spec.getId()).thenReturn("spec-combo-allowed");
+
+    SFEntity entityA = entityForWindow("window-a");
+    SFEntity entityB = entityForWindow("window-b");
+
+    OBCriteria<SFEntity> entityCriteria = mock(OBCriteria.class);
+    when(dal.createCriteria(SFEntity.class)).thenReturn(entityCriteria);
+    when(entityCriteria.add(any())).thenReturn(entityCriteria);
+    when(entityCriteria.list()).thenReturn(Arrays.asList(entityA, entityB));
+
+    // Both constituent windows have an active, full-access WindowAccess row.
+    OBCriteria<WindowAccess> windowAccessCriteria = mock(OBCriteria.class);
+    when(dal.createCriteria(WindowAccess.class)).thenReturn(windowAccessCriteria);
+    when(windowAccessCriteria.add(any())).thenReturn(windowAccessCriteria);
+    when(windowAccessCriteria.setMaxResults(1)).thenReturn(windowAccessCriteria);
+    WindowAccess access = mock(WindowAccess.class);
+    when(windowAccessCriteria.list()).thenReturn(Collections.singletonList(access));
+
+    assertTrue(NeoAccessHelper.hasWindowAccessForSpec(spec, "GET"));
+  }
+
+  @SuppressWarnings("unchecked")
+  @Test
+  public void hasWindowAccessForSpec_windowlessSpecOneConstituentWindowInaccessible_returnsFalse() {
+    when(role.getId()).thenReturn("role-id-combo-partial");
+    SFSpec spec = mock(SFSpec.class);
+    when(spec.getADWindow()).thenReturn(null);
+    when(spec.getId()).thenReturn("spec-combo-partial");
+
+    SFEntity entityA = entityForWindow("window-accessible");
+    SFEntity entityB = entityForWindow("window-inaccessible");
+
+    OBCriteria<SFEntity> entityCriteria = mock(OBCriteria.class);
+    when(dal.createCriteria(SFEntity.class)).thenReturn(entityCriteria);
+    when(entityCriteria.add(any())).thenReturn(entityCriteria);
+    when(entityCriteria.list()).thenReturn(Arrays.asList(entityA, entityB));
+
+    // First WindowAccess lookup finds a row, second finds none — one inaccessible window
+    // is enough to deny the whole spec.
+    OBCriteria<WindowAccess> windowAccessCriteria = mock(OBCriteria.class);
+    when(dal.createCriteria(WindowAccess.class)).thenReturn(windowAccessCriteria);
+    when(windowAccessCriteria.add(any())).thenReturn(windowAccessCriteria);
+    when(windowAccessCriteria.setMaxResults(1)).thenReturn(windowAccessCriteria);
+    WindowAccess access = mock(WindowAccess.class);
+    when(windowAccessCriteria.list())
+        .thenReturn(Collections.singletonList(access))
+        .thenReturn(Collections.emptyList());
+
+    assertFalse(NeoAccessHelper.hasWindowAccessForSpec(spec, "GET"));
+  }
+
+  @SuppressWarnings("unchecked")
+  @Test
+  public void hasWindowAccessForSpec_windowlessSpecDedupesRepeatedWindow_checksOnce() {
+    when(role.getId()).thenReturn("role-id-combo-dedup");
+    SFSpec spec = mock(SFSpec.class);
+    when(spec.getADWindow()).thenReturn(null);
+    when(spec.getId()).thenReturn("spec-combo-dedup");
+
+    // Two entities, two different tabs, but both tabs belong to the same window.
+    SFEntity entityA = entityForWindow("shared-window");
+    SFEntity entityB = entityForWindow("shared-window");
+
+    OBCriteria<SFEntity> entityCriteria = mock(OBCriteria.class);
+    when(dal.createCriteria(SFEntity.class)).thenReturn(entityCriteria);
+    when(entityCriteria.add(any())).thenReturn(entityCriteria);
+    when(entityCriteria.list()).thenReturn(Arrays.asList(entityA, entityB));
+
+    OBCriteria<WindowAccess> windowAccessCriteria = mock(OBCriteria.class);
+    when(dal.createCriteria(WindowAccess.class)).thenReturn(windowAccessCriteria);
+    when(windowAccessCriteria.add(any())).thenReturn(windowAccessCriteria);
+    when(windowAccessCriteria.setMaxResults(1)).thenReturn(windowAccessCriteria);
+    WindowAccess access = mock(WindowAccess.class);
+    when(windowAccessCriteria.list()).thenReturn(Collections.singletonList(access));
+
+    assertTrue(NeoAccessHelper.hasWindowAccessForSpec(spec, "GET"));
+    // Dedup proof: two entities resolve to the same window ID, so the WindowAccess
+    // criteria must only be built (and checked) once — not once per entity.
+    verify(dal, times(1)).createCriteria(WindowAccess.class);
+  }
+
+  /**
+   * Builds an {@link SFEntity} mock whose {@link SFEntity#getADTab()} resolves to a
+   * {@link Tab} belonging to the given window ID — the "combination of windows" shape
+   * consumed by {@code resolveConstituentWindowIds}.
+   */
+  private static SFEntity entityForWindow(String windowId) {
+    SFEntity entity = mock(SFEntity.class);
+    Tab tab = mock(Tab.class);
+    Window window = mock(Window.class);
+    when(window.getId()).thenReturn(windowId);
+    when(tab.getWindow()).thenReturn(window);
+    when(entity.getADTab()).thenReturn(tab);
+    return entity;
+  }
+
   // ── hasProcessAccess ──────────────────────────────────────────────────────
 
   @Test
@@ -149,12 +522,153 @@ public class NeoAccessHelperTest {
     assertFalse(NeoAccessHelper.hasProcessAccess("restricted-process-id"));
   }
 
+  @Test
+  public void hasProcessAccess_noRoleAssigned_returnsFalse() {
+    when(context.getRole()).thenReturn(null);
+
+    assertFalse(NeoAccessHelper.hasProcessAccess("any-process-id"));
+  }
+
+  /**
+   * PR #747 review-comment fix: {@code hasProcessAccess} used to bypass only for role id
+   * {@code "0"}, not for a client-admin role, contradicting "Administrator always has full
+   * access" (Administrator = role 0 OR {@code AD_Role.is_client_admin = 'Y'}). Proves the
+   * bypass itself — not merely "it happened to have a grant row" — by never stubbing
+   * {@code OBDal.createCriteria(ProcessAccess.class)} at all: if the implementation fell
+   * through to the DB lookup instead of short-circuiting on the client-admin check, this
+   * mock would return {@code null} and the call would NPE, failing the test.
+   */
+  @Test
+  public void hasProcessAccess_clientAdminRole_returnsTrueWithoutGrantRow() {
+    when(role.getId()).thenReturn("role-id-client-admin-proc");
+    when(role.isClientAdmin()).thenReturn(true);
+
+    assertTrue(NeoAccessHelper.hasProcessAccess("process-id-no-grant-row"));
+  }
+
+  // ── hasProcessAccess(Role, String) — ETP-4511 client-admin bypass gap ───────
+  //
+  // Finding: SFListMenu.isNodeAccessible calls the Role-parameterized overloads (not the
+  // ambient-role ones), so a client-admin role bypass had to live here too, mirroring
+  // hasWindowAccess(Role, String, String)'s isAdminOrClientAdmin(role) check. Before the fix
+  // this overload only checked "0".equals(roleId), so a client-admin role with no explicit
+  // ProcessAccess grant would fall through to the DB criteria and could be incorrectly denied.
+
+  @Test
+  public void hasProcessAccessRoleParam_adminRole_returnsTrue() {
+    org.openbravo.model.ad.access.Role explicitRole = mock(org.openbravo.model.ad.access.Role.class);
+    when(explicitRole.getId()).thenReturn("0");
+
+    assertTrue(NeoAccessHelper.hasProcessAccess(explicitRole, "process-id-abc"));
+  }
+
+  @Test
+  public void hasProcessAccessRoleParam_nullRole_returnsFalse() {
+    assertFalse(NeoAccessHelper.hasProcessAccess((org.openbravo.model.ad.access.Role) null, "any-process-id"));
+  }
+
+  /**
+   * The core fix under test: a client-admin role (not the literal System Administrator role)
+   * must bypass the {@code ProcessAccess} check entirely. Crucially, {@code OBDal.createCriteria}
+   * is never stubbed for {@code ProcessAccess.class} here — if the implementation regressed to
+   * only checking {@code "0".equals(roleId)}, it would fall through to the unstubbed criteria
+   * path and NPE (Mockito's default for an unstubbed {@code createCriteria} call returns
+   * {@code null}), failing this test loudly instead of silently under-granting access.
+   */
+  @Test
+  public void hasProcessAccessRoleParam_clientAdminRole_returnsTrueWithoutTouchingDb() {
+    org.openbravo.model.ad.access.Role explicitRole = mock(org.openbravo.model.ad.access.Role.class);
+    when(explicitRole.getId()).thenReturn("role-id-client-admin");
+    when(explicitRole.isClientAdmin()).thenReturn(true);
+
+    assertTrue(NeoAccessHelper.hasProcessAccess(explicitRole, "process-id-client-admin"));
+  }
+
+  @SuppressWarnings("unchecked")
+  @Test
+  public void hasProcessAccessRoleParam_roleWithAccess_returnsTrue() {
+    org.openbravo.model.ad.access.Role explicitRole = mock(org.openbravo.model.ad.access.Role.class);
+    when(explicitRole.getId()).thenReturn("role-id-proc-explicit");
+    OBCriteria<ProcessAccess> criteria = mock(OBCriteria.class);
+    when(dal.createCriteria(ProcessAccess.class)).thenReturn(criteria);
+    when(criteria.add(any())).thenReturn(criteria);
+    when(criteria.setMaxResults(1)).thenReturn(criteria);
+    ProcessAccess access = mock(ProcessAccess.class);
+    when(criteria.list()).thenReturn(Collections.singletonList(access));
+
+    assertTrue(NeoAccessHelper.hasProcessAccess(explicitRole, "allowed-process-id-explicit"));
+  }
+
+  @SuppressWarnings("unchecked")
+  @Test
+  public void hasProcessAccessRoleParam_roleWithoutAccess_returnsFalse() {
+    org.openbravo.model.ad.access.Role explicitRole = mock(org.openbravo.model.ad.access.Role.class);
+    when(explicitRole.getId()).thenReturn("role-id-noprocess-explicit");
+    OBCriteria<ProcessAccess> criteria = mock(OBCriteria.class);
+    when(dal.createCriteria(ProcessAccess.class)).thenReturn(criteria);
+    when(criteria.add(any())).thenReturn(criteria);
+    when(criteria.setMaxResults(1)).thenReturn(criteria);
+    when(criteria.list()).thenReturn(Collections.emptyList());
+
+    assertFalse(NeoAccessHelper.hasProcessAccess(explicitRole, "restricted-process-id-explicit"));
+  }
+
+  /**
+   * Mirrors {@code hasObuiappProcessAccessRoleParam_ignoresAdminAmbientContext_...}: proves the
+   * decision is based solely on the passed-in role, not the ambient {@link OBContext}.
+   */
+  @SuppressWarnings("unchecked")
+  @Test
+  public void hasProcessAccessRoleParam_ignoresAdminAmbientContext_deniesRestrictedExplicitRole() {
+    // Ambient context: admin role — would short-circuit to true if consulted.
+    when(role.getId()).thenReturn("0");
+
+    org.openbravo.model.ad.access.Role explicitRole = mock(org.openbravo.model.ad.access.Role.class);
+    when(explicitRole.getId()).thenReturn("role-id-restricted-explicit-proc");
+    OBCriteria<ProcessAccess> criteria = mock(OBCriteria.class);
+    when(dal.createCriteria(ProcessAccess.class)).thenReturn(criteria);
+    when(criteria.add(any())).thenReturn(criteria);
+    when(criteria.setMaxResults(1)).thenReturn(criteria);
+    when(criteria.list()).thenReturn(Collections.emptyList());
+
+    assertFalse("Must decide from the explicit role, not the ambient admin context",
+        NeoAccessHelper.hasProcessAccess(explicitRole, "some-process-id"));
+  }
+
   // ── hasObuiappProcessAccess ───────────────────────────────────────────────
 
   @Test
   public void hasObuiappProcessAccess_adminRole_returnsTrue() {
     when(role.getId()).thenReturn("0");
     assertTrue(NeoAccessHelper.hasObuiappProcessAccess("obuiapp-proc-id"));
+  }
+
+  /**
+   * Code-review WARNING fix: hasObuiappProcessAccess used to call
+   * OBContext.getOBContext().getRole().getId() directly and NPE when no role was
+   * assigned, instead of denying like hasWindowAccess/hasProcessAccess do.
+   */
+  @Test
+  public void hasObuiappProcessAccess_noRoleAssigned_returnsFalse() {
+    when(context.getRole()).thenReturn(null);
+
+    assertFalse(NeoAccessHelper.hasObuiappProcessAccess("any-obuiapp-proc-id"));
+  }
+
+  /**
+   * PR #747 review-comment fix: same gap as {@code hasProcessAccess} — this now matters in
+   * practice because {@code NotPostedDocumentsHandler}/{@code AgingReportHandler} gate their
+   * entire report on this method, so a client-admin user was incorrectly denied. Proves the
+   * bypass (not a coincidental grant row) the same way: never stubbing
+   * {@code OBDal.createCriteria(ProcessAccess.class)}, so falling through to the DB lookup
+   * would NPE instead of returning {@code true}.
+   */
+  @Test
+  public void hasObuiappProcessAccess_clientAdminRole_returnsTrueWithoutGrantRow() {
+    when(role.getId()).thenReturn("role-id-client-admin-obuiapp");
+    when(role.isClientAdmin()).thenReturn(true);
+
+    assertTrue(NeoAccessHelper.hasObuiappProcessAccess("obuiapp-proc-id-no-grant-row"));
   }
 
   @SuppressWarnings("unchecked")
@@ -185,6 +699,126 @@ public class NeoAccessHelperTest {
     when(criteria.list()).thenReturn(Collections.emptyList());
 
     assertFalse(NeoAccessHelper.hasObuiappProcessAccess("restricted-obuiapp-id"));
+  }
+
+  // ── hasObuiappProcessAccess(Role, String) — GitHub PR #748 review fix ───────
+  //
+  // Finding: the OBUIAPP-process branch in SFListMenu.isNodeAccessible used to call the
+  // ambient-role hasObuiappProcessAccess(String) even though the window/process branches in
+  // the very same method already used role-parameterized overloads with the explicitly
+  // captured role. These tests prove the new hasObuiappProcessAccess(Role, String) overload
+  // decides purely from the passed-in role and never falls back to (or is influenced by)
+  // whatever OBContext.getOBContext().getRole() happens to expose ambiently.
+
+  @Test
+  public void hasObuiappProcessAccessRoleParam_adminRole_returnsTrue() {
+    org.openbravo.model.ad.access.Role explicitRole = mock(org.openbravo.model.ad.access.Role.class);
+    when(explicitRole.getId()).thenReturn("0");
+
+    assertTrue(NeoAccessHelper.hasObuiappProcessAccess(explicitRole, "obuiapp-proc-id"));
+  }
+
+  @Test
+  public void hasObuiappProcessAccessRoleParam_nullRole_returnsFalse() {
+    assertFalse(NeoAccessHelper.hasObuiappProcessAccess((org.openbravo.model.ad.access.Role) null, "any-obuiapp-proc-id"));
+  }
+
+  /**
+   * ETP-4511 fix: a client-admin role (not the literal System Administrator role) must bypass
+   * the {@code ProcessAccess} (OBUIAPP) check entirely, mirroring
+   * {@code hasWindowAccess(Role, String, String)}'s {@code isAdminOrClientAdmin(role)} check.
+   * {@code OBDal.createCriteria} is never stubbed for the OBUIAPP {@code ProcessAccess} class
+   * here — if the implementation regressed to only checking {@code "0".equals(roleId)}, it
+   * would fall through to the unstubbed criteria path and NPE, failing this test loudly instead
+   * of silently under-granting access.
+   */
+  @Test
+  public void hasObuiappProcessAccessRoleParam_clientAdminRole_returnsTrueWithoutTouchingDb() {
+    org.openbravo.model.ad.access.Role explicitRole = mock(org.openbravo.model.ad.access.Role.class);
+    when(explicitRole.getId()).thenReturn("role-id-client-admin-obuiapp");
+    when(explicitRole.isClientAdmin()).thenReturn(true);
+
+    assertTrue(NeoAccessHelper.hasObuiappProcessAccess(explicitRole, "obuiapp-proc-id-client-admin"));
+  }
+
+  @SuppressWarnings("unchecked")
+  @Test
+  public void hasObuiappProcessAccessRoleParam_roleWithAccess_returnsTrue() {
+    org.openbravo.model.ad.access.Role explicitRole = mock(org.openbravo.model.ad.access.Role.class);
+    when(explicitRole.getId()).thenReturn("role-id-obuiapp-explicit");
+    OBCriteria<org.openbravo.client.application.ProcessAccess> criteria = mock(OBCriteria.class);
+    when(dal.createCriteria(org.openbravo.client.application.ProcessAccess.class))
+        .thenReturn(criteria);
+    when(criteria.add(any())).thenReturn(criteria);
+    when(criteria.setMaxResults(1)).thenReturn(criteria);
+    org.openbravo.client.application.ProcessAccess access =
+        mock(org.openbravo.client.application.ProcessAccess.class);
+    when(criteria.list()).thenReturn(Collections.singletonList(access));
+
+    assertTrue(NeoAccessHelper.hasObuiappProcessAccess(explicitRole, "allowed-obuiapp-proc-id"));
+  }
+
+  @SuppressWarnings("unchecked")
+  @Test
+  public void hasObuiappProcessAccessRoleParam_roleWithoutAccess_returnsFalse() {
+    org.openbravo.model.ad.access.Role explicitRole = mock(org.openbravo.model.ad.access.Role.class);
+    when(explicitRole.getId()).thenReturn("role-id-noobuiapp-explicit");
+    OBCriteria<org.openbravo.client.application.ProcessAccess> criteria = mock(OBCriteria.class);
+    when(dal.createCriteria(org.openbravo.client.application.ProcessAccess.class))
+        .thenReturn(criteria);
+    when(criteria.add(any())).thenReturn(criteria);
+    when(criteria.setMaxResults(1)).thenReturn(criteria);
+    when(criteria.list()).thenReturn(Collections.emptyList());
+
+    assertFalse(
+        NeoAccessHelper.hasObuiappProcessAccess(explicitRole, "restricted-obuiapp-id-explicit"));
+  }
+
+  /**
+   * QA gap-closer proving the fix for the PR #748 review finding: the ambient
+   * {@link OBContext} is stubbed to expose an ADMIN role (id {@code "0"}, which would grant
+   * access unconditionally), while the EXPLICIT role passed in has no OBUIAPP grant at all.
+   * If the implementation ever fell back to (or was influenced by) the ambient context —
+   * exactly what the original bug did — this would incorrectly return {@code true}. It must
+   * return {@code false}, proving the decision is based solely on the passed-in role.
+   */
+  @SuppressWarnings("unchecked")
+  @Test
+  public void hasObuiappProcessAccessRoleParam_ignoresAdminAmbientContext_deniesRestrictedExplicitRole() {
+    // Ambient context: admin role — would short-circuit to true if consulted.
+    when(role.getId()).thenReturn("0");
+
+    // Explicit role: restricted, no active grant.
+    org.openbravo.model.ad.access.Role explicitRole = mock(org.openbravo.model.ad.access.Role.class);
+    when(explicitRole.getId()).thenReturn("role-id-restricted-explicit");
+    OBCriteria<org.openbravo.client.application.ProcessAccess> criteria = mock(OBCriteria.class);
+    when(dal.createCriteria(org.openbravo.client.application.ProcessAccess.class))
+        .thenReturn(criteria);
+    when(criteria.add(any())).thenReturn(criteria);
+    when(criteria.setMaxResults(1)).thenReturn(criteria);
+    when(criteria.list()).thenReturn(Collections.emptyList());
+
+    assertFalse("Must decide from the explicit role, not the ambient admin context",
+        NeoAccessHelper.hasObuiappProcessAccess(explicitRole, "some-obuiapp-proc-id"));
+  }
+
+  /**
+   * Mirror of the previous test in the opposite direction: the ambient context is a
+   * restricted role with no grant (which would deny if consulted), while the explicit role
+   * passed in is the System Administrator role. The explicit role must win, returning
+   * {@code true}.
+   */
+  @Test
+  public void hasObuiappProcessAccessRoleParam_ignoresRestrictedAmbientContext_allowsAdminExplicitRole() {
+    // Ambient context: restricted, non-admin role.
+    when(role.getId()).thenReturn("role-id-restricted-ambient");
+
+    // Explicit role: System Administrator — must be allowed regardless of ambient context.
+    org.openbravo.model.ad.access.Role explicitRole = mock(org.openbravo.model.ad.access.Role.class);
+    when(explicitRole.getId()).thenReturn("0");
+
+    assertTrue("Must decide from the explicit admin role, not the ambient restricted context",
+        NeoAccessHelper.hasObuiappProcessAccess(explicitRole, "some-obuiapp-proc-id"));
   }
 
   // ── resolveDefaultPostProcess ─────────────────────────────────────────────

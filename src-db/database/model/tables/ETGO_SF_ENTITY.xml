@@ -85,6 +85,10 @@
         <default><![CDATA[10]]></default>
         <onCreateDefault/>
       </column>
+      <column name="PRECONDITIONS" primaryKey="false" required="false" type="CLOB" size="4000" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
       <foreign-key foreignTable="AD_CLIENT" name="ETGO_SF_ENT_CLI_FK">
         <reference local="AD_CLIENT_ID" foreign="AD_CLIENT_ID"/>
       </foreign-key>
@@ -96,6 +100,9 @@
       </foreign-key>
       <foreign-key foreignTable="ETGO_SF_SPEC" name="ETGO_SF_ENT_SPEC_FK">
         <reference local="ETGO_SF_SPEC_ID" foreign="ETGO_SF_SPEC_ID"/>
+      </foreign-key>
+      <foreign-key foreignTable="AD_TAB" name="ETGO_SF_ENT_TAB_FK">
+        <reference local="AD_TAB_ID" foreign="AD_TAB_ID"/>
       </foreign-key>
       <unique name="ETGO_SF_ENTITY_SPEC_NAME_UQ">
         <unique-column name="ETGO_SF_SPEC_ID"/>

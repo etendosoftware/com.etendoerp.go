@@ -16,14 +16,16 @@
  */
 package com.etendoerp.go.rest;
 
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertFalse;
-import static org.junit.Assert.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.fail;
 
 import java.io.PrintWriter;
 import java.io.StringWriter;
 
-import org.junit.Test;
+import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Test;
 import org.openbravo.base.exception.OBException;
 import org.openbravo.service.db.ImportResult;
 
@@ -67,7 +69,7 @@ public class EtendoGoJwtServletOnboardingDatasetTest {
         baselineService);
     StringWriter output = new StringWriter();
 
-    boolean ready = servlet.ensureOnboardingDataset(new PrintWriter(output), "CLIENT-1", "ORG-1", true,
+    boolean ready = servlet.ensureOnboardingDataset(new PrintWriter(output), "CLIENT-1", "ORG-1",
         "USER-1", "ROLE-1", null);
 
     String ndjson = output.toString();
@@ -100,7 +102,7 @@ public class EtendoGoJwtServletOnboardingDatasetTest {
         new FailingSequenceGeneratorService("broken sequences"));
     StringWriter output = new StringWriter();
 
-    boolean ready = servlet.ensureOnboardingDataset(new PrintWriter(output), "CLIENT-1", "ORG-1", true,
+    boolean ready = servlet.ensureOnboardingDataset(new PrintWriter(output), "CLIENT-1", "ORG-1",
         "USER-1", "ROLE-1", null);
 
     String ndjson = output.toString();
@@ -120,7 +122,7 @@ public class EtendoGoJwtServletOnboardingDatasetTest {
         new FailingDefaultCustomerService("broken customer"), baselineService);
     StringWriter output = new StringWriter();
 
-    boolean ready = servlet.ensureOnboardingDataset(new PrintWriter(output), "CLIENT-1", "ORG-1", true,
+    boolean ready = servlet.ensureOnboardingDataset(new PrintWriter(output), "CLIENT-1", "ORG-1",
         "USER-1", "ROLE-1", null);
 
     String ndjson = output.toString();
@@ -148,7 +150,8 @@ public class EtendoGoJwtServletOnboardingDatasetTest {
   }
 
   @Test
-  public void testEnsureOnboardingDatasetSkipsImportAndStillSeedsCustomer() {
+  @DisplayName("reconcile model always runs the dataset import (ETP-4428)")
+  public void testEnsureOnboardingDatasetAlwaysRunsImportUnderReconcile() {
     CountingImportService importService = new CountingImportService();
     CountingSequenceGeneratorService sequenceService = new CountingSequenceGeneratorService();
     CountingDefaultCustomerService customerService = new CountingDefaultCustomerService();
@@ -158,18 +161,20 @@ public class EtendoGoJwtServletOnboardingDatasetTest {
         baselineService);
     StringWriter output = new StringWriter();
 
-    boolean ready = servlet.ensureOnboardingDataset(new PrintWriter(output), "CLIENT-1", "ORG-1", false,
+    boolean ready = servlet.ensureOnboardingDataset(new PrintWriter(output), "CLIENT-1", "ORG-1",
         "USER-1", "ROLE-1", null);
 
     String ndjson = output.toString();
     assertTrue(ready);
-    assertEquals(0, importService.importCount);
+    // ETP-4428: there is no flag-based skip anymore — the servlet always invokes the import, and
+    // idempotency (skip-if-already-present) is handled inside OnboardingDatasetImportService.
+    assertEquals(1, importService.importCount);
     assertEquals(1, sequenceService.generateCount);
     assertEquals(1, customerService.seedCount);
     assertEquals(1, baselineService.registerCount);
     assertTrue(ndjson.contains("\"step\":\"dataset\""));
     assertTrue(ndjson.contains("\"status\":\"done\""));
-    assertTrue(ndjson.contains("skipping onboarding dataset import"));
+    assertFalse(ndjson.contains("skipping onboarding dataset import"));
     assertTrue(ndjson.contains("Default customer ready"));
     assertTrue(ndjson.contains("Data-fix baseline registered"));
   }
@@ -182,7 +187,7 @@ public class EtendoGoJwtServletOnboardingDatasetTest {
         new CountingFiscalDataSetupService(), new CountingDefaultCustomerService());
     StringWriter output = new StringWriter();
 
-    boolean ready = servlet.ensureOnboardingDataset(new PrintWriter(output), "CLIENT-1", "ORG-1", true,
+    boolean ready = servlet.ensureOnboardingDataset(new PrintWriter(output), "CLIENT-1", "ORG-1",
         "USER-1", "ROLE-1", null);
 
     String ndjson = output.toString();
@@ -206,7 +211,7 @@ public class EtendoGoJwtServletOnboardingDatasetTest {
         new CountingFiscalDataSetupService(), new CountingDefaultCustomerService());
     StringWriter output = new StringWriter();
 
-    boolean ready = servlet.ensureOnboardingDataset(new PrintWriter(output), "CLIENT-1", "ORG-1", true,
+    boolean ready = servlet.ensureOnboardingDataset(new PrintWriter(output), "CLIENT-1", "ORG-1",
         "USER-1", "ROLE-1", null);
 
     String ndjson = output.toString();
@@ -225,7 +230,7 @@ public class EtendoGoJwtServletOnboardingDatasetTest {
         fiscalService, new CountingDefaultCustomerService());
     StringWriter output = new StringWriter();
 
-    boolean ready = servlet.ensureOnboardingDataset(new PrintWriter(output), "CLIENT-1", "ORG-1", true,
+    boolean ready = servlet.ensureOnboardingDataset(new PrintWriter(output), "CLIENT-1", "ORG-1",
         "USER-1", "ROLE-1", null);
 
     String ndjson = output.toString();
@@ -252,7 +257,7 @@ public class EtendoGoJwtServletOnboardingDatasetTest {
         baselineService);
     StringWriter output = new StringWriter();
 
-    boolean ready = servlet.ensureOnboardingDataset(new PrintWriter(output), "CLIENT-1", "ORG-1", true,
+    boolean ready = servlet.ensureOnboardingDataset(new PrintWriter(output), "CLIENT-1", "ORG-1",
         "USER-1", "ROLE-1", null);
 
     String ndjson = output.toString();
@@ -275,9 +280,9 @@ public class EtendoGoJwtServletOnboardingDatasetTest {
     StringWriter output = new StringWriter();
 
     try {
-      servlet.ensureOnboardingDataset(new PrintWriter(output), "CLIENT-1", "ORG-1", true,
+      servlet.ensureOnboardingDataset(new PrintWriter(output), "CLIENT-1", "ORG-1",
           "USER-1", "ROLE-1", null);
-      org.junit.Assert.fail("Expected baseline failure to propagate");
+      fail("Expected baseline failure to propagate");
     } catch (OBException e) {
       assertEquals("broken baseline", e.getMessage());
     }
@@ -298,7 +303,7 @@ public class EtendoGoJwtServletOnboardingDatasetTest {
         new CountingDefaultCustomerService(), baselineService);
     StringWriter output = new StringWriter();
 
-    boolean ready = servlet.ensureOnboardingDataset(new PrintWriter(output), "CLIENT-1", "ORG-1", true,
+    boolean ready = servlet.ensureOnboardingDataset(new PrintWriter(output), "CLIENT-1", "ORG-1",
         "USER-1", "ROLE-1", null);
 
     assertFalse(ready);
@@ -313,7 +318,7 @@ public class EtendoGoJwtServletOnboardingDatasetTest {
         new CountingDefaultCustomerService());
     StringWriter output = new StringWriter();
 
-    boolean ready = servlet.ensureOnboardingDataset(new PrintWriter(output), "CLIENT-1", "ORG-1", true,
+    boolean ready = servlet.ensureOnboardingDataset(new PrintWriter(output), "CLIENT-1", "ORG-1",
         "USER-1", "ROLE-1", null);
 
     String ndjson = output.toString();
@@ -332,7 +337,7 @@ public class EtendoGoJwtServletOnboardingDatasetTest {
         fiscalService, new CountingDefaultCustomerService());
     StringWriter output = new StringWriter();
 
-    boolean ready = servlet.ensureOnboardingDataset(new PrintWriter(output), "CLIENT-1", "ORG-1", true,
+    boolean ready = servlet.ensureOnboardingDataset(new PrintWriter(output), "CLIENT-1", "ORG-1",
         "USER-1", "ROLE-1", null);
 
     assertFalse(ready);

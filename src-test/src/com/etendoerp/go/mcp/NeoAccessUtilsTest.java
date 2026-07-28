@@ -63,6 +63,23 @@ class NeoAccessUtilsTest {
   }
 
   @Test
+  @DisplayName("hasWindowAccess(id, method) delegates to the 2-arg NeoAccessHelper overload")
+  void hasWindowAccessWithMethodDelegatesTrue() {
+    accessHelperMock.when(() -> NeoAccessHelper.hasWindowAccess("win-789", "POST"))
+        .thenReturn(true);
+    assertTrue(NeoAccessUtils.hasWindowAccess("win-789", "POST"));
+  }
+
+  @Test
+  @DisplayName("hasWindowAccess(id, method) returns false when helper denies the write method "
+      + "(ETP-4510 read-only tiering)")
+  void hasWindowAccessWithMethodDelegatesFalse() {
+    accessHelperMock.when(() -> NeoAccessHelper.hasWindowAccess("win-789", "POST"))
+        .thenReturn(false);
+    assertFalse(NeoAccessUtils.hasWindowAccess("win-789", "POST"));
+  }
+
+  @Test
   @DisplayName("hasProcessAccess delegates to NeoAccessHelper and returns true")
   void hasProcessAccessDelegatesTrue() {
     accessHelperMock.when(() -> NeoAccessHelper.hasProcessAccess("proc-1")).thenReturn(true);

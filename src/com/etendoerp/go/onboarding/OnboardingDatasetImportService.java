@@ -56,9 +56,15 @@ public class OnboardingDatasetImportService {
   /**
    * Normalizes and imports the onboarding dataset for the given client and organization.
    *
+   * <p>Idempotent (ETP-4428): if the curated seed is already fully present for the tenant, the
+   * import is skipped and {@code null} is returned. This makes a retry after a partial onboarding
+   * failure safe — re-importing would otherwise duplicate products, warehouses, price lists and
+   * financial accounts.</p>
+   *
    * @param clientId the target client identifier
    * @param orgId the target organization identifier
-   * @return the import result returned by the Openbravo data import service
+   * @return the import result returned by the Openbravo data import service, or {@code null} when
+   *     the seed was already present and the import was skipped
    */
   public ImportResult importDataset(String clientId, String orgId) {
     Client client = resolveClient(clientId);
@@ -69,6 +75,12 @@ public class OnboardingDatasetImportService {
     Organization organization = resolveOrganization(orgId);
     if (organization == null) {
       throw new OBException("Organization not found with ID: " + orgId);
+    }
+
+    if (isSeedAlreadyPresent(client, organization)) {
+      log.info("Onboarding dataset already present for client {}/org {}; skipping re-import "
+          + "(idempotent resume)", clientId, orgId);
+      return null;
     }
 
     String xml = normalizer.buildDatasetXml(orgId);
@@ -145,6 +157,18 @@ public class OnboardingDatasetImportService {
           + ", priceLists=" + summary.totalPriceLists()
           + ", financialAccounts=" + summary.totalFinancialAccounts() + "]");
     }
+  }
+
+  /**
+   * Returns {@code true} when the curated seed is already fully present for the tenant, i.e. there
+   * is at least one product, warehouse, price list and financial account visible to the target
+   * organization (system-org rows included). Mirrors the success condition of
+   * {@link #validateImportedSeed} and is used to make {@link #importDataset} idempotent on retry.
+   */
+  protected boolean isSeedAlreadyPresent(Client client, Organization organization) {
+    SeedVisibilitySummary summary = buildSeedVisibilitySummary(client, organization);
+    return summary.totalProducts() > 0 && summary.totalWarehouses() > 0
+        && summary.totalPriceLists() > 0 && summary.totalFinancialAccounts() > 0;
   }
 
   private SeedVisibilitySummary buildSeedVisibilitySummary(Client client, Organization organization) {

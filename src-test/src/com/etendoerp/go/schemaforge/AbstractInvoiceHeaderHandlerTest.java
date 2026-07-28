@@ -108,6 +108,12 @@ public class AbstractInvoiceHeaderHandlerTest {
       return "arInvoiceSubtype";
     }
 
+    @Override
+    protected TotalDiscountService getTotalDiscountService() {
+      // Not exercised by this test file — applyTotalDiscountToRecord() null-guards on this.
+      return null;
+    }
+
     public NeoResponse callValidateDocTypeLock(NeoContext ctx) {
       return validateDocTypeLock(ctx);
     }
@@ -2601,5 +2607,185 @@ public class AbstractInvoiceHeaderHandlerTest {
 
       verify(dal).get(Invoice.class, "inv-put");
     }
+  }
+
+  // ── ETP-4531: handleInvoiceAfterCallout lets accountingDate cascade through ─
+
+  @Test
+  public void handleInvoiceAfterCallout_letsAccountingDateCascadeFromOtherTrigger()
+      throws Exception {
+    // ETP-4531 (unified date): the classic invoiceDate -> accountingDate cascade is no
+    // longer blocked — a businessPartner-triggered callout may still carry an unrelated
+    // accountingDate update through untouched.
+    JSONObject updates = new JSONObject()
+        .put("accountingDate", "2026-07-01").put("businessPartner", "bp-1");
+    JSONObject calloutBody = new JSONObject().put("updates", updates);
+    JSONObject requestBody = new JSONObject().put("field", "businessPartner").put("value", "bp-1");
+    NeoContext ctx = NeoContext.builder()
+        .previousResult(new NeoResponse(200, calloutBody))
+        .requestBody(requestBody)
+        .build();
+
+    NeoResponse result = handler.callHandleInvoiceAfterCallout(ctx);
+
+    assertNull(result);
+    assertEquals("2026-07-01", updates.getString("accountingDate"));
+    assertTrue(updates.has("businessPartner"));
+  }
+
+  @Test
+  public void handleInvoiceAfterCallout_letsAccountingDateCascadeFromInvoiceDateTrigger()
+      throws Exception {
+    // Mirrors the live C_Invoice.DateInvoiced -> SifInvoiceOperationDateCallout (extends
+    // SE_Invoice_AccountingDate) coupling: this is now exactly the desired behavior — the
+    // single visible date (invoiceDate) must mirror into accountingDate on save.
+    JSONObject updates = new JSONObject().put("accountingDate", "2026-07-01");
+    JSONObject calloutBody = new JSONObject().put("updates", updates);
+    JSONObject requestBody = new JSONObject().put("field", "invoiceDate").put("value", "2026-07-01");
+    NeoContext ctx = NeoContext.builder()
+        .previousResult(new NeoResponse(200, calloutBody))
+        .requestBody(requestBody)
+        .build();
+
+    handler.callHandleInvoiceAfterCallout(ctx);
+
+    assertEquals("2026-07-01", updates.getString("accountingDate"));
+  }
+
+  @Test
+  public void handleInvoiceAfterCallout_keepsAccountingDateWhenItIsTheTriggerField()
+      throws Exception {
+    JSONObject updates = new JSONObject().put("accountingDate", "2026-07-05");
+    JSONObject calloutBody = new JSONObject().put("updates", updates);
+    JSONObject requestBody = new JSONObject()
+        .put("field", "accountingDate").put("value", "2026-07-05");
+    NeoContext ctx = NeoContext.builder()
+        .previousResult(new NeoResponse(200, calloutBody))
+        .requestBody(requestBody)
+        .build();
+
+    handler.callHandleInvoiceAfterCallout(ctx);
+
+    assertEquals("2026-07-05", updates.getString("accountingDate"));
+  }
+
+  // ── ETP-4531: mirrorAccountingDate (unified date, server-side mirror) ───────
+
+  @Test
+  public void mirrorAccountingDate_postCrud_copiesInvoiceDateIntoAccountingDate()
+      throws Exception {
+    JSONObject body = new JSONObject().put("invoiceDate", "2026-07-01");
+    NeoContext ctx = NeoContext.builder()
+        .endpointType(NeoEndpointType.CRUD)
+        .httpMethod("POST")
+        .requestBody(body)
+        .build();
+
+    NeoHandlerUtils.mirrorAccountingDate(ctx, "invoiceDate", "accountingDate");
+
+    assertEquals("2026-07-01", body.getString("accountingDate"));
+  }
+
+  @Test
+  public void mirrorAccountingDate_putCrud_overwritesStaleAccountingDate() throws Exception {
+    JSONObject body = new JSONObject()
+        .put("invoiceDate", "2026-07-10").put("accountingDate", "2026-01-01");
+    NeoContext ctx = NeoContext.builder()
+        .endpointType(NeoEndpointType.CRUD)
+        .httpMethod("PUT")
+        .requestBody(body)
+        .build();
+
+    NeoHandlerUtils.mirrorAccountingDate(ctx, "invoiceDate", "accountingDate");
+
+    assertEquals("2026-07-10", body.getString("accountingDate"));
+  }
+
+  @Test
+  public void mirrorAccountingDate_nonCrudEndpoint_doesNotMutateBody() throws Exception {
+    JSONObject body = new JSONObject().put("invoiceDate", "2026-07-01");
+    NeoContext ctx = NeoContext.builder()
+        .endpointType(NeoEndpointType.ACTION)
+        .httpMethod("POST")
+        .requestBody(body)
+        .build();
+
+    NeoHandlerUtils.mirrorAccountingDate(ctx, "invoiceDate", "accountingDate");
+
+    assertTrue(!body.has("accountingDate"));
+  }
+
+  @Test
+  public void mirrorAccountingDate_getMethod_doesNotMutateBody() throws Exception {
+    JSONObject body = new JSONObject().put("invoiceDate", "2026-07-01");
+    NeoContext ctx = NeoContext.builder()
+        .endpointType(NeoEndpointType.CRUD)
+        .httpMethod("GET")
+        .requestBody(body)
+        .build();
+
+    NeoHandlerUtils.mirrorAccountingDate(ctx, "invoiceDate", "accountingDate");
+
+    assertTrue(!body.has("accountingDate"));
+  }
+
+  /**
+   * Regression test for the live-reproduced bug: editing just the date on an EXISTING invoice
+   * and saving through the real React UI sends a {@code PATCH} with a SPARSE body containing
+   * only the changed field ({@code useEntity.js#buildPatchPayload} diffs {@code editing} against
+   * {@code selected} and sends only what changed — never a full record, and never a {@code PUT}).
+   * The original {@code mirrorAccountingDate()} checked only {@code POST}/{@code PUT}, so this
+   * exact request shape silently never mirrored {@code accountingDate} on update — reproduced
+   * against invoice {@code 0BC614E563FC4E7EB63B6FCF9788730B}: DateInvoiced updated to
+   * 2026-07-15 but DateAcct stayed at the stale create-time value of 2026-07-17.
+   */
+  @Test
+  public void mirrorAccountingDate_patchCrudSparseBody_copiesInvoiceDateIntoAccountingDate()
+      throws Exception {
+    // Sparse body: exactly what useEntity.js's buildPatchPayload sends for a date-only edit —
+    // no other header fields, unlike the multi-field bodies the original POST/PUT tests used.
+    JSONObject body = new JSONObject().put("invoiceDate", "2026-07-15");
+    NeoContext ctx = NeoContext.builder()
+        .endpointType(NeoEndpointType.CRUD)
+        .httpMethod("PATCH")
+        .requestBody(body)
+        .build();
+
+    NeoHandlerUtils.mirrorAccountingDate(ctx, "invoiceDate", "accountingDate");
+
+    assertEquals("2026-07-15", body.getString("accountingDate"));
+  }
+
+  @Test
+  public void mirrorAccountingDate_patchCrud_overwritesStaleAccountingDate() throws Exception {
+    // Mirrors the real DB state before the fix: accountingDate present but stale from create.
+    JSONObject body = new JSONObject()
+        .put("invoiceDate", "2026-07-15").put("accountingDate", "2026-07-17");
+    NeoContext ctx = NeoContext.builder()
+        .endpointType(NeoEndpointType.CRUD)
+        .httpMethod("PATCH")
+        .requestBody(body)
+        .build();
+
+    NeoHandlerUtils.mirrorAccountingDate(ctx, "invoiceDate", "accountingDate");
+
+    assertEquals("2026-07-15", body.getString("accountingDate"));
+  }
+
+  @Test
+  public void mirrorAccountingDate_patchCrudUnrelatedFieldOnly_doesNotAddAccountingDate()
+      throws Exception {
+    // A PATCH that doesn't touch invoiceDate at all (e.g. only businessPartner changed) must
+    // stay a no-op — mirroring must not fabricate an accountingDate out of nowhere.
+    JSONObject body = new JSONObject().put("businessPartner", "someBpId");
+    NeoContext ctx = NeoContext.builder()
+        .endpointType(NeoEndpointType.CRUD)
+        .httpMethod("PATCH")
+        .requestBody(body)
+        .build();
+
+    NeoHandlerUtils.mirrorAccountingDate(ctx, "invoiceDate", "accountingDate");
+
+    assertTrue(!body.has("accountingDate"));
   }
 }

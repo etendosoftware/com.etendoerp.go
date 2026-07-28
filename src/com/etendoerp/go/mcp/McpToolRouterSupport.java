@@ -17,9 +17,7 @@
 
 package com.etendoerp.go.mcp;
 
-import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
 
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
@@ -34,14 +32,10 @@ import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.datamodel.Column;
 import org.openbravo.model.ad.ui.Process;
 import org.openbravo.model.ad.ui.Tab;
-import org.openbravo.model.ad.ui.Window;
 
 import com.etendoerp.go.schemaforge.NeoResponse;
-import com.etendoerp.go.schemaforge.NeoSelectorService;
-import com.etendoerp.go.schemaforge.data.SFField;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFSpec;
-import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
 import com.etendoerp.go.schemaforge.util.NeoReportCallability;
 
 final class McpToolRouterSupport {
@@ -73,6 +67,45 @@ final class McpToolRouterSupport {
       throw new OBException("Entity not found: " + entityName);
     }
     return results.get(0);
+  }
+
+  /**
+   * Resolve an included entity for an entity-CRUD tool (neo_list/get/create/update/delete/
+   * selectors/defaults/schema), or throw a descriptive error when the spec cannot expose
+   * listable entities.
+   *
+   * <p>Report-type specs (specType {@code "R"}) expose no CRUD entities, so a bare
+   * {@code findIncludedEntity} would surface an opaque {@code "Entity not found: <name>"}
+   * (ETP-4257). Instead this guard fires before the entity lookup and explains what the spec
+   * is and what to do:</p>
+   * <ul>
+   *   <li>callable report (NEO-native handler, ETP-4255) → point the agent at the
+   *       {@code etendo_generate_<snake>} report tool;</li>
+   *   <li>non-callable report → the stable {@link NeoReportCallability#buildNotConfiguredMessage}
+   *       {@code not_configured_for_report_generation} text.</li>
+   * </ul>
+   *
+   * <p>Type-W (and any non-R) specs are unaffected: the call delegates to
+   * {@link #findIncludedEntity(String, String)}, preserving the existing
+   * {@code "Entity not found: <name>"} message for a genuinely wrong entity name.</p>
+   *
+   * @param spec       the resolved active spec (already found by {@link #findActiveSpecByName})
+   * @param entityName the requested entity name
+   * @return the matching included {@link SFEntity} for a non-report spec
+   * @throws OBException with a descriptive message for a report-type spec, or when the entity
+   *                     name does not match an included entity on a non-report spec
+   */
+  static SFEntity resolveIncludedEntityOrExplain(SFSpec spec, String entityName) {
+    if ("R".equals(spec.getSpecType())) {
+      if (NeoReportCallability.isReportCallable(spec)) {
+        String snakeTool = McpConstants.GENERATE_PREFIX + ToolRegistry.kebabToSnake(spec.getName());
+        throw new OBException("Spec '" + spec.getName() + "' is a report type (R) and does not "
+            + "expose listable entities. Use the etendo_" + snakeTool
+            + " tool to produce this report.");
+      }
+      throw new OBException(NeoReportCallability.buildNotConfiguredMessage(spec.getName()));
+    }
+    return findIncludedEntity(spec.getId(), entityName);
   }
 
   static List<SFEntity> listIncludedEntities(String specId) {
@@ -115,64 +148,6 @@ final class McpToolRouterSupport {
     return methods;
   }
 
-  static String mapColumnType(String refId) {
-    if (refId == null) {
-      return McpConstants.TYPE_STRING;
-    }
-    switch (refId) {
-      case "10":
-      case "14":
-      case "34":
-        return McpConstants.TYPE_STRING;
-      case "11":
-      case "22":
-      case "29":
-      case "12":
-      case "800008":
-      case "800019":
-        return "number";
-      case "20":
-        return "boolean";
-      case "15":
-        return "date";
-      case "16":
-        return "datetime";
-      case "24":
-        return "time";
-      case "28":
-        return "button";
-      case "17":
-        return "list";
-      case "13":
-        return "id";
-      case "19":
-      case "18":
-      case "30":
-      case NeoSelectorService.REF_OBUISEL:
-        return "foreignKey";
-      default:
-        return McpConstants.TYPE_STRING;
-    }
-  }
-
-  static String mapSelectorType(String refId) {
-    if (refId == null) {
-      return null;
-    }
-    switch (refId) {
-      case "19":
-        return "TableDir";
-      case "18":
-        return "Table";
-      case "30":
-        return "Search";
-      case NeoSelectorService.REF_OBUISEL:
-        return "OBUISEL";
-      default:
-        return null;
-    }
-  }
-
   /**
    * Identify the spec whose entities are handler-backed business widgets rather than
    * CRUD windows (gap G4, ETP-4284). These entities have no {@code AD_Tab}, so the
@@ -186,15 +161,46 @@ final class McpToolRouterSupport {
     return spec != null && McpConstants.SPEC_DASHBOARD.equals(spec.getName());
   }
 
+  /**
+   * Read-tier ({@code GET}) spec access check. Use only for visibility/discovery
+   * (neo_discover, MCP resource listing) — never to gate an actual write operation;
+   * see {@link #hasSpecAccess(SFSpec, String, String)} for that.
+   */
   static boolean hasSpecAccess(SFSpec spec, String specType) {
+    return hasSpecAccess(spec, specType, "GET");
+  }
+
+  /**
+   * Checks whether the current role can perform {@code httpMethod} against {@code spec}.
+   * <p>
+   * For window specs (type {@code "W"}), enforces the read-only vs. full-access tiering
+   * (ETP-4510) via {@link NeoAccessUtils#hasWindowAccess(String, String)} — callers that
+   * gate a mutating MCP tool (neo_create/neo_update/neo_delete/neo_batch) MUST pass the
+   * write-intent method here, not the 1-arg overload, or a read-only
+   * {@code AD_Window_Access} role would be able to write through MCP even though the
+   * equivalent REST NEO Headless call correctly returns 403.
+   * <p>
+   * Process specs (type {@code "P"}/{@code "R"}) remain binary — process access has no
+   * read/write tiering — so {@code httpMethod} is ignored for them.
+   *
+   * @param spec       the spec to check (may be {@code null})
+   * @param specType   the spec's type ({@code "W"}, {@code "P"}, or {@code "R"})
+   * @param httpMethod the HTTP-method equivalent of the MCP operation being authorized
+   * @return {@code true} if the current role may perform {@code httpMethod} on {@code spec}
+   */
+  static boolean hasSpecAccess(SFSpec spec, String specType, String httpMethod) {
     // The dashboard/widget spec is not a CRUD window; it is surfaced via neo_widget,
     // never through neo_discover's W catalog (ETP-4284 / G4).
     if (isWidgetSpec(spec)) {
       return false;
     }
     if ("W".equals(specType)) {
-      Window window = spec.getADWindow();
-      return window == null || NeoAccessUtils.hasWindowAccess(window.getId());
+      // ETP-4510 BUG-3: hasWindowAccessForSpec covers both ordinary window specs AND
+      // windowless/custom "combination" specs (spec.getADWindow() == null) — it must run
+      // unconditionally rather than skipping the check when there is no directly linked
+      // window, otherwise a role with no access at all (or no role assigned) could reach
+      // a windowless spec unchecked.
+      return NeoAccessUtils.hasWindowAccessForSpec(spec, httpMethod);
     }
     if ("P".equals(specType) || "R".equals(specType)) {
       Process adProcess = spec.getProcess();
@@ -226,218 +232,17 @@ final class McpToolRouterSupport {
       specObj.put("isReport", true);
       boolean callable = NeoReportCallability.isReportCallable(spec);
       specObj.put("callable", callable);
-      if (!callable) {
+      if (callable) {
+        // Surface the concrete report tool so the agent can call it directly instead of
+        // guessing an entity for neo_list (ETP-4257). Client sees it as etendo_<reportTool>.
+        specObj.put("reportTool",
+            McpConstants.GENERATE_PREFIX + ToolRegistry.kebabToSnake(spec.getName()));
+      } else {
         specObj.put("status", NeoReportCallability.STATUS_NOT_CONFIGURED);
         specObj.put("message", NeoReportCallability.buildNotConfiguredMessage(spec.getName()));
       }
     }
     return specObj;
-  }
-
-  static Column findColumn(Tab adTab, String columnName, Entity dalEntity) {
-    for (Column col : adTab.getTable().getADColumnList()) {
-      if (col.getDBColumnName().equalsIgnoreCase(columnName)) {
-        return col;
-      }
-    }
-    if (dalEntity == null) {
-      return null;
-    }
-    for (Column col : adTab.getTable().getADColumnList()) {
-      try {
-        Property prop = dalEntity.getPropertyByColumnName(col.getDBColumnName());
-        if (prop != null && prop.getName().equalsIgnoreCase(columnName)) {
-          return col;
-        }
-      } catch (Exception ignored) {
-        // Column not mappable to property
-      }
-    }
-    return null;
-  }
-
-  /**
-   * Loads all SFField rows for the given entity in a single query and returns
-   * both the visibility map and the businessCritical map, keyed by AD_COLUMN_ID.
-   * Callers that need both maps should use this to avoid a second DB round-trip.
-   */
-  static FieldMetadata loadFieldMetadata(SFEntity sfEntity) {
-    Map<String, String> visibilityByColumnId = new HashMap<>();
-    Map<String, Boolean> businessCriticalByColumnId = new HashMap<>();
-    OBCriteria<SFField> fieldCrit = OBDal.getInstance().createCriteria(SFField.class);
-    fieldCrit.add(Restrictions.eq(SFField.PROPERTY_ETGOSFENTITY + ".id", sfEntity.getId()));
-    fieldCrit.add(Restrictions.eq(SFField.PROPERTY_ISACTIVE, true));
-    for (SFField sfField : fieldCrit.list()) {
-      Column adCol = sfField.getADColumn();
-      if (adCol == null) {
-        continue;
-      }
-      String colId = (String) adCol.getId();
-      String visibility = (String) sfField.get("visibility");
-      if (visibility != null && !visibility.trim().isEmpty()) {
-        visibilityByColumnId.put(colId, visibility.trim());
-      }
-      Boolean isBusinessCritical = sfField.isBusinessCritical();
-      businessCriticalByColumnId.put(colId, Boolean.TRUE.equals(isBusinessCritical));
-    }
-    return new FieldMetadata(visibilityByColumnId, businessCriticalByColumnId);
-  }
-
-  static final class FieldMetadata {
-    final Map<String, String> visibilityByColumnId;
-    final Map<String, Boolean> businessCriticalByColumnId;
-
-    FieldMetadata(Map<String, String> visibilityByColumnId,
-        Map<String, Boolean> businessCriticalByColumnId) {
-      this.visibilityByColumnId = visibilityByColumnId;
-      this.businessCriticalByColumnId = businessCriticalByColumnId;
-    }
-  }
-
-  static Map<String, String> loadPromptByColumnId(SFEntity sfEntity) {
-    Map<String, String> promptByColumnId = new HashMap<>();
-    OBCriteria<SFField> fieldCrit = OBDal.getInstance().createCriteria(SFField.class);
-    fieldCrit.add(Restrictions.eq(SFField.PROPERTY_ETGOSFENTITY + ".id", sfEntity.getId()));
-    fieldCrit.add(Restrictions.eq(SFField.PROPERTY_ISACTIVE, true));
-    for (SFField sfField : fieldCrit.list()) {
-      Column adCol = sfField.getADColumn();
-      String prompt = sfField.getAgentPrompt();
-      if (adCol != null && prompt != null && !prompt.trim().isEmpty()) {
-        promptByColumnId.put((String) adCol.getId(), prompt.trim());
-      }
-    }
-    return promptByColumnId;
-  }
-
-  static JSONArray buildSchemaFieldsArray(Tab adTab, Entity dalEntity,
-      Map<String, String> visibilityByColumnId, Map<String, Boolean> businessCriticalByColumnId,
-      Map<String, String> promptByColumnId,
-      java.util.Set<String> systemColumns, java.util.Set<String> selectorRefs) throws JSONException {
-    JSONArray fieldsArray = new JSONArray();
-    for (Column col : adTab.getTable().getADColumnList()) {
-      if (shouldIncludeSchemaColumn(col, systemColumns)) {
-        fieldsArray.put(buildSchemaField(col, adTab, dalEntity, visibilityByColumnId,
-            businessCriticalByColumnId, promptByColumnId, selectorRefs));
-      }
-    }
-    return fieldsArray;
-  }
-
-  private static boolean shouldIncludeSchemaColumn(Column col, java.util.Set<String> systemColumns) {
-    return col.isActive() && !systemColumns.contains(col.getDBColumnName().toUpperCase());
-  }
-
-  private static JSONObject buildSchemaField(Column col, Tab adTab, Entity dalEntity,
-      Map<String, String> visibilityByColumnId, Map<String, Boolean> businessCriticalByColumnId,
-      Map<String, String> promptByColumnId,
-      java.util.Set<String> selectorRefs) throws JSONException {
-    String dbColName = col.getDBColumnName();
-    String refId = col.getReference() != null ? (String) col.getReference().getId() : null;
-    String type = mapColumnType(refId);
-    JSONObject fieldObj = new JSONObject();
-    fieldObj.put("name", resolvePropertyName(dalEntity, dbColName));
-    fieldObj.put("column", dbColName);
-    fieldObj.put("label", col.getName());
-    fieldObj.put("type", type);
-    fieldObj.put("required", col.isMandatory());
-    fieldObj.put("readOnly", isReadOnlyColumn(adTab, col));
-    addDefaultExpression(fieldObj, col);
-    addVisibility(fieldObj, visibilityByColumnId.get((String) col.getId()), col.isMandatory());
-    boolean isBusinessCritical = Boolean.TRUE.equals(
-        businessCriticalByColumnId.get((String) col.getId()));
-    fieldObj.put("businessCritical", isBusinessCritical);
-    addAgentPrompt(fieldObj, promptByColumnId.get((String) col.getId()));
-    addSelectorInfo(fieldObj, refId, selectorRefs);
-    if ("button".equals(type)) {
-      addButtonInfo(fieldObj, col);
-    }
-    return fieldObj;
-  }
-
-  private static void addAgentPrompt(JSONObject fieldObj, String agentPrompt) throws JSONException {
-    if (agentPrompt != null && !agentPrompt.trim().isEmpty()) {
-      fieldObj.put("agentPrompt", agentPrompt.trim());
-    }
-  }
-
-  private static void addButtonInfo(JSONObject fieldObj, Column col) throws JSONException {
-    fieldObj.put("triggerValue", "Y");
-    fieldObj.put("action", col.getDBColumnName());
-    fieldObj.put("invokeVia", "neo_action");
-    // Resolve process info — mirror NeoButtonActionHelper / NeoProcessService logic
-    Process classicProcess = col.getProcess();
-    org.openbravo.client.application.Process obuiappProcess = col.getOBUIAPPProcess();
-    if (classicProcess == null && obuiappProcess == null) {
-      obuiappProcess = NeoAccessHelper.resolveFallbackObuiappProcess(col);
-    }
-    if (obuiappProcess != null) {
-      fieldObj.put("processType", "OBUIAPP");
-      String name = obuiappProcess.getName();
-      fieldObj.put("processName", name != null ? name : "");
-      fieldObj.put("processId", obuiappProcess.getId());
-    } else if (classicProcess != null) {
-      fieldObj.put("processType", "Classic");
-      String name = classicProcess.getName();
-      fieldObj.put("processName", name != null ? name : "");
-      fieldObj.put("processId", classicProcess.getId());
-    }
-    // If no process resolved: triggerValue/action/invokeVia already set, omit process fields
-  }
-
-  private static String resolvePropertyName(Entity dalEntity, String dbColName) {
-    if (dalEntity == null) {
-      return dbColName;
-    }
-    try {
-      Property prop = dalEntity.getPropertyByColumnName(dbColName);
-      return prop != null ? prop.getName() : dbColName;
-    } catch (Exception ignored) {
-      return dbColName;
-    }
-  }
-
-  private static boolean isReadOnlyColumn(Tab adTab, Column col) {
-    String dbColName = col.getDBColumnName();
-    String expectedPK = adTab.getTable().getDBTableName() + "_ID";
-    return expectedPK.equalsIgnoreCase(dbColName)
-        || "DocumentNo".equalsIgnoreCase(dbColName)
-        || Boolean.TRUE.equals(col.isUseAutomaticSequence());
-  }
-
-  private static void addDefaultExpression(JSONObject fieldObj, Column col) throws JSONException {
-    String defaultExpr = col.getDefaultValue();
-    if (defaultExpr == null || defaultExpr.trim().isEmpty()) {
-      return;
-    }
-    defaultExpr = defaultExpr.trim();
-    boolean isLegacyZeroFkSentinel = "0".equals(defaultExpr)
-        && col.getDBColumnName().toUpperCase().endsWith("_ID");
-    if (isLegacyZeroFkSentinel) {
-      // "0" is a legacy AD placeholder meaning "resolve via callout/session logic" — it is not a
-      // usable FK value. The resolved value is tenant-scoped (per client/org), so it must never be
-      // baked into this structural schema; report shape/format only and point to neo_defaults.
-      fieldObj.put("defaultSource", "server");
-      fieldObj.put("defaultFormat", "32-char hex ID (FK)");
-      fieldObj.put("defaultHint", "Resolved per-tenant at request time — call neo_defaults to get the value");
-      return;
-    }
-    fieldObj.put("defaultExpression", defaultExpr);
-  }
-
-  private static void addVisibility(JSONObject fieldObj, String visibility, boolean mandatory)
-      throws JSONException {
-    if (visibility != null) {
-      fieldObj.put("visibility", visibility);
-      fieldObj.put("userRequired", "editable".equals(visibility) && mandatory);
-    }
-  }
-
-  private static void addSelectorInfo(JSONObject fieldObj, String refId,
-      java.util.Set<String> selectorRefs) throws JSONException {
-    if (refId != null && selectorRefs.contains(refId)) {
-      fieldObj.put("hasSelector", true);
-      fieldObj.put("selectorType", mapSelectorType(refId));
-    }
   }
 
   static Property resolveMandatoryProperty(Tab adTab, Entity dalEntity, Column col,

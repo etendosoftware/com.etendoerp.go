@@ -62,6 +62,7 @@ public class PurchaseOrderHeaderHandler extends AbstractOrderHeaderHandler {
 
   @Override
   public NeoResponse handle(NeoContext context) {
+    AbstractOrderHeaderHandler.mirrorAccountingDate(context);
     AbstractOrderHeaderHandler.applyTotalDiscountBeforeComplete(context, totalDiscountService, false);
     return NeoHeaderActionRouter.dispatch(
         context,
@@ -69,5 +70,10 @@ public class PurchaseOrderHeaderHandler extends AbstractOrderHeaderHandler {
         createGoodsReceiptHandler,
         createPurchaseInvoiceHandler,
         currencyOptionsHandler);
+  }
+
+  @Override
+  protected TotalDiscountService getTotalDiscountService() {
+    return totalDiscountService;
   }
 }
