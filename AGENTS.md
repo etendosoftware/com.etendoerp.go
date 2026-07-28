@@ -29,3 +29,6 @@ Recent history follows `Feature ETP-1234: Short imperative summary`. Keep that f
 
 ## Security & Configuration Tips
 Do not place credentials in `build.gradle`; the file explicitly warns against it. Keep environment-specific values outside the module and review OAuth2, JWT, and MCP changes carefully because they affect authentication and exposed endpoints.
+
+## Adding a New Etendo GO Webhook
+Default to the NEO pseudo-spec bridge (`NeoGoWebhookBridge`, `NeoServlet`) instead of exposing it only through the Webhooks module's `/webhooks/*` + `SMFWHE_DEFINEDWEBHOOK_ROLE` grant — that table is wiped by `update.database` on every rebuild. See `docs/neo-headless.md` §4.10–4.11 for the pattern and how to wire a new one in.
