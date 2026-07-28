@@ -66,7 +66,6 @@ import com.etendoerp.go.onboarding.OnboardingMarkOrgReadyService;
 import com.etendoerp.go.onboarding.OnboardingPeriodControlService;
 import com.etendoerp.go.onboarding.OnboardingBankConnectionSyncService;
 import com.etendoerp.go.onboarding.OnboardingRoleProvisioningService;
-import com.etendoerp.go.onboarding.OnboardingPsd2SyncService;
 import com.etendoerp.go.onboarding.OnboardingSequenceGeneratorService;
 import com.etendoerp.go.schemaforge.data.Account;
 import com.etendoerp.go.schemaforge.email.EmailContractCommandSupport;
