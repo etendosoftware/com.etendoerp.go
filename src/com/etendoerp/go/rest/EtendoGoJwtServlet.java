@@ -68,6 +68,7 @@ import com.etendoerp.go.onboarding.OnboardingFiscalDataSetupService;
 import com.etendoerp.go.onboarding.OnboardingOrgInfoService;
 import com.etendoerp.go.onboarding.OnboardingMarkOrgReadyService;
 import com.etendoerp.go.onboarding.OnboardingPeriodControlService;
+import com.etendoerp.go.onboarding.OnboardingRoleProvisioningService;
 import com.etendoerp.go.onboarding.OnboardingPsd2SyncService;
 import com.etendoerp.go.onboarding.OnboardingSequenceGeneratorService;
 import com.etendoerp.go.schemaforge.data.Account;
@@ -142,6 +143,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private static final String PROGRESS_CLIENT = "client";
   private static final String PROGRESS_ERROR = "error";
   private static final String PROGRESS_ORGANIZATION = "organization";
+  private static final String PROGRESS_ROLES = "roles";
   private static final String PROGRESS_DATASET = "dataset";
   private static final String PROGRESS_ACCOUNTING = "accounting";
   private static final String PROGRESS_PERIOD_CONTROL = "periodControl";
@@ -169,6 +171,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       "fiscalIdValue", "address", "sector" };
 
   OnboardingDatasetImportService onboardingDatasetImportService = new OnboardingDatasetImportService();
+  OnboardingRoleProvisioningService onboardingRoleProvisioningService =
+      new OnboardingRoleProvisioningService();
   OnboardingAccountingWiringService onboardingAccountingWiringService =
       new OnboardingAccountingWiringService();
   OnboardingPeriodControlService onboardingPeriodControlService =
@@ -1110,6 +1114,10 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
         return;
       }
 
+      if (!ensureRoles(writer, clientId, adminContext.adminUserId, adminContext.adminRoleId)) {
+        return;
+      }
+
       if (paidUpgrade) {
         // Joins the onboarding transaction, so a successful marker commits with the tenant. It is
         // best-effort in the other direction: markProductive swallows its own failures, so a tenant
@@ -1497,6 +1505,30 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     data.starOrgId = EtendoGoJwtSupport.findStarOrgId(clientId);
     OBContext.setOBContext(data.adminUserId, data.adminRoleId, clientId, data.starOrgId);
     return data;
+  }
+
+  /**
+   * ETP-4515 (Phase 7) — clones GOClient's Finance/Sales/Purchasing/Inventory roles (plus their
+   * AD_Window_Access) onto the tenant. Runs right after client/organization resolution since it
+   * needs no organization yet: roles are client-wide. See {@link OnboardingRoleProvisioningService}
+   * for the full rationale.
+   */
+  private boolean ensureRoles(PrintWriter writer, String clientId, String adminUserId,
+      String adminRoleId) {
+    sendProgress(writer, PROGRESS_ROLES, PROGRESS_IN_PROGRESS,
+        "Provisioning Finance/Sales/Purchasing/Inventory roles...");
+    try {
+      onboardingRoleProvisioningService.wire(clientId, adminUserId, adminRoleId);
+      sendProgress(writer, PROGRESS_ROLES, "done", "Roles provisioned");
+      return true;
+    } catch (Exception e) {
+      EtendoGoDalHelper.rollbackDalChanges("onboarding role provisioning", e, log);
+      String errorMessage = e.getMessage() != null ? e.getMessage()
+          : "Role provisioning failed";
+      sendProgress(writer, PROGRESS_ROLES, PROGRESS_ERROR, errorMessage);
+      sendFinalResult(writer, false, errorMessage);
+      return false;
+    }
   }
 
   private Boolean ensureOrganization(PrintWriter writer, String clientName,
