@@ -148,7 +148,12 @@ public final class GoFeatureFlags {
     try {
       OpenFeatureAPI api = OpenFeatureAPI.getInstance();
       FeatureProvider provider = createProvider();
-      api.setProvider(OPENFEATURE_DOMAIN, provider);
+      // Blocking install: setProvider() alone returns before the provider is
+      // ready to evaluate, so the first read after installing can still hit the
+      // previous provider and silently answer with the code default. For a flag
+      // that gates authorisation, "not ready yet" and "disabled" must never be
+      // the same observable outcome.
+      api.setProviderAndWait(OPENFEATURE_DOMAIN, provider);
       log.info("Etendo Go feature flags installed using provider '{}'",
           provider.getMetadata().getName());
       return api.getClient(OPENFEATURE_DOMAIN);
