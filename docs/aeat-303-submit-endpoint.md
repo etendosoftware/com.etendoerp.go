@@ -41,7 +41,7 @@ Body (JSON):
 
 | Field | Required | Notes |
 |---|---|---|
-| `testMode` | no (default `false`) | `true` routes to ServValiDos (validation only, no cert, no persistence); `false` routes to production `PresBasicaDos` |
+| `testMode` | no (default `false`) | `true` routes to ServValiDos (validation only, no cert, no declaration-record persistence — see "Persistence" below, which now also covers the test-mode PDF attach); `false` routes to production `PresBasicaDos` |
 | `idi` | no (default `ES`) | Justificante language: `ES`/`EN`/`CA`/`GL`/`VA` |
 | `nrc` | no | Only forwarded to AEAT when the declaration type is `I` (ingreso) — see `resolveNrcForSubmission` below; ignored for any other type even if present in the body |
 | `presenterNif` / `presenterName` | **required for production**, ignored in test mode | NIF/name of the certificate holder — AEAT's Firma No Criptográfica verifies these against the certificate. The frontend defaults them from the same org-identification data (`orgIdent`) already used for file generation, but they're editable in `AeatSubmitFlow`'s confirm screen in case the certificate holder differs from the declarant |
@@ -80,7 +80,7 @@ current DB state, exactly like a fresh "Generar fichero").
 | Value | Meaning |
 |---|---|
 | `SUCCESS` | Production submission accepted by the AEAT |
-| `TEST_SUCCESS` | ServValiDos validation accepted (declaration NOT filed — no persistence, see below) |
+| `TEST_SUCCESS` | ServValiDos validation accepted (declaration NOT filed — `DeclarationStatus`/`DeclarationFileName` untouched; the returned PDF is now still attached under a `TEST-`-prefixed filename, see "Persistence" below) |
 | `ERROR` | Either a pre-flight failure (see `errorCode` table) or an AEAT-side rejection/error |
 
 `declarationData` is always populated (from `AEAT303DeclarationDataExtractor.extract(fileContent)`
@@ -202,6 +202,20 @@ locales) instead of dumping the generic AEAT error list, and — like `MISSING_P
 to a generated justificante filename, `FileExternal` set to `false`, saved and committed. Test-mode
 submissions (success or error) and failed production submissions never touch the declaration row —
 matching Classic's "test submissions leave no trace" rule.
+
+`handleSubmit` branches on success: `testMode ? attachTestJustificante(...) :
+persistSuccessfulSubmission(...)`. **`attachTestJustificante` (ETP-4456, 2026-07-28)** attaches the
+AEAT-returned PDF to the declaration for a successful test-mode (`TEST_SUCCESS`) submission too —
+under a distinct filename, `"TEST-justificante-303-<year>-<period>.pdf"`, so it's unambiguous in the
+attachments list — by calling the same existing `attachJustificante(...)` helper `
+persistSuccessfulSubmission` uses. It does **not** call any setter on the declaration and never
+saves/commits it: `DeclarationStatus`/`DeclarationFileName`/`FileExternal` remain exactly as they
+were before the request, preserving the "test submissions leave no trace" rule stated above at the
+record level — only the attachment (a side effect of `AttachImplementationManager`, not of the
+declaration entity itself) is new. See the "Justificante" tab section in
+`../../../schema_forge/docs/generated-custom-windows/fiscal-models.md` and the "Phase 2.2" section
+in the plan doc for the frontend wiring that surfaces this (the `receiptRefreshTick` refresh, since
+test mode has no status change to key off of).
 
 ### Known gaps (deliberate follow-ups, not bugs)
 
