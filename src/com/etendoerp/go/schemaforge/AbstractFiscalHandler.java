@@ -60,22 +60,8 @@ abstract class AbstractFiscalHandler {
 
   void handle(String entityName, String method, HttpServletRequest request,
       HttpServletResponse response) throws IOException {
-    if (DECLARATIONS.equals(entityName)) {
-      try {
-        declHandler.handleDeclarations(method, request, response);
-      } catch (Exception e) {
-        log.error("Error in /" + getModelKey() + "/declarations", e);
-        servlet.sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, e.getMessage());
-      }
-      return;
-    }
-    if (INCIDENTS.equals(entityName)) {
-      try {
-        declHandler.handleIncidents(method, request, response);
-      } catch (Exception e) {
-        log.error("Error in /" + getModelKey() + "/incidents", e);
-        servlet.sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, e.getMessage());
-      }
+    if (DECLARATIONS.equals(entityName) || INCIDENTS.equals(entityName)) {
+      delegateToDeclHandler(entityName, method, request, response);
       return;
     }
     if (!isKnownEntity(entityName)) {
@@ -120,6 +106,26 @@ abstract class AbstractFiscalHandler {
       log.error("Unexpected error in /" + getModelKey() + "/" + entityName, e);
       servlet.sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
           "An internal error occurred.");
+    }
+  }
+
+  /**
+   * Runs the {@link FiscalDeclCrudHandler} delegate for "declarations" or "incidents" — both of
+   * which bypass {@link #isKnownEntity}/the year-period gate entirely — and translates any
+   * failure into a 500, sharing the error-message format so it's defined once rather than once
+   * per entity.
+   */
+  private void delegateToDeclHandler(String entityName, String method, HttpServletRequest request,
+      HttpServletResponse response) throws IOException {
+    try {
+      if (DECLARATIONS.equals(entityName)) {
+        declHandler.handleDeclarations(method, request, response);
+      } else {
+        declHandler.handleIncidents(method, request, response);
+      }
+    } catch (Exception e) {
+      log.error("Error in /" + getModelKey() + "/" + entityName, e);
+      servlet.sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, e.getMessage());
     }
   }
 

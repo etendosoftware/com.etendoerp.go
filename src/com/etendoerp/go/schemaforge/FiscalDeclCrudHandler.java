@@ -85,6 +85,8 @@ class FiscalDeclCrudHandler {
   private static final String FILE_EXTERNAL_KEY = "fileExternal";
   private static final String CODE_KEY          = "code";
   private static final String MESSAGE_KEY       = "message";
+  private static final String MISSING_ID_PARAM  = "Missing param: id";
+  private static final String DECL_NOT_FOUND_PREFIX = "Declaration not found: ";
 
   private final NeoServlet servlet;
 
@@ -102,9 +104,9 @@ class FiscalDeclCrudHandler {
     } else if ("POST".equals(method)) {
       handleDeclPost(request, response);
     } else if ("PUT".equals(method)) {
-      handleDeclPut(clientId, request, response);
+      handleDeclPut(request, response);
     } else if ("DELETE".equals(method)) {
-      handleDeclDelete(clientId, request, response);
+      handleDeclDelete(request, response);
     } else {
       servlet.sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
           "Unsupported method for /fiscal303/declarations: " + method);
@@ -152,12 +154,11 @@ class FiscalDeclCrudHandler {
     response.getWriter().write(created.toString());
   }
 
-  private void handleDeclPut(String clientId, HttpServletRequest request,
-      HttpServletResponse response) throws Exception {
-    String id    = request.getParameter("id");
-    String orgId = OBContext.getOBContext().getCurrentOrganization().getId();
-    if (id == null || id.isEmpty()) {
-      servlet.sendError(response, HttpServletResponse.SC_BAD_REQUEST, "Missing param: id");
+  private void handleDeclPut(HttpServletRequest request, HttpServletResponse response)
+      throws Exception {
+    String id = request.getParameter("id");
+    BaseOBObject decl = resolveOwnedDeclaration(id, response);
+    if (decl == null) {
       return;
     }
     JSONObject body      = readJsonBody(request);
@@ -169,13 +170,6 @@ class FiscalDeclCrudHandler {
     String  fileName     = hasFileName && !body.isNull(FILE_NAME_KEY)
         ? body.getString(FILE_NAME_KEY) : null;
 
-    BaseOBObject decl = OBDal.getInstance().get(ENTITY_FISCAL_DECL, id);
-    if (decl == null || !clientId.equals(getRelatedId(decl, PROPERTY_CLIENT))
-        || !orgId.equals(getRelatedId(decl, PROPERTY_ORGANIZATION))) {
-      servlet.sendError(response, HttpServletResponse.SC_NOT_FOUND,
-          "Declaration not found: " + id);
-      return;
-    }
     if (hasStatus)   decl.set(PROPERTY_DECLARATION_STATUS, status);
     if (hasFileExt)  decl.set(PROPERTY_FILE_EXTERNAL, fileExternal);
     if (hasFileName) decl.set(PROPERTY_DECLARATION_FILE_NAME, fileName);
@@ -184,24 +178,45 @@ class FiscalDeclCrudHandler {
     response.getWriter().write("{\"ok\":true}");
   }
 
-  private void handleDeclDelete(String clientId, HttpServletRequest request,
-      HttpServletResponse response) throws Exception {
-    String id    = request.getParameter("id");
-    String orgId = OBContext.getOBContext().getCurrentOrganization().getId();
-    if (id == null || id.isEmpty()) {
-      servlet.sendError(response, HttpServletResponse.SC_BAD_REQUEST, "Missing param: id");
-      return;
-    }
-    BaseOBObject decl = OBDal.getInstance().get(ENTITY_FISCAL_DECL, id);
-    if (decl == null || !clientId.equals(getRelatedId(decl, PROPERTY_CLIENT))
-        || !orgId.equals(getRelatedId(decl, PROPERTY_ORGANIZATION))) {
-      servlet.sendError(response, HttpServletResponse.SC_NOT_FOUND,
-          "Declaration not found: " + id);
+  private void handleDeclDelete(HttpServletRequest request, HttpServletResponse response)
+      throws Exception {
+    String id = request.getParameter("id");
+    BaseOBObject decl = resolveOwnedDeclaration(id, response);
+    if (decl == null) {
       return;
     }
     OBDal.getInstance().remove(decl);
     OBDal.getInstance().commitAndClose();
     response.getWriter().write("{\"ok\":true}");
+  }
+
+  /**
+   * Resolves a declaration by id and verifies it belongs to the current client/organization,
+   * sending the appropriate error response itself (400 for a missing id, 404 for not-found or
+   * wrong-owner) and returning {@code null} in either case. Shared by {@link #handleDeclPut},
+   * {@link #handleDeclDelete} and {@link #handleIncidents} — the three entry points that resolve
+   * a single declaration by id before doing anything else. Deliberately checks {@code id} for
+   * blank BEFORE touching {@link OBContext}, so a missing-id request never depends on an AD
+   * context being available (matches the pre-existing {@code handleIncidents} behavior; the two
+   * legacy callers already resolved client/org unconditionally via their own
+   * {@link #handleDeclarations} dispatcher, so recomputing them here is a harmless no-op for
+   * them).
+   */
+  private BaseOBObject resolveOwnedDeclaration(String id, HttpServletResponse response)
+      throws Exception {
+    if (StringUtils.isBlank(id)) {
+      servlet.sendError(response, HttpServletResponse.SC_BAD_REQUEST, MISSING_ID_PARAM);
+      return null;
+    }
+    String clientId = OBContext.getOBContext().getCurrentClient().getId();
+    String orgId    = OBContext.getOBContext().getCurrentOrganization().getId();
+    BaseOBObject decl = OBDal.getInstance().get(ENTITY_FISCAL_DECL, id);
+    if (decl == null || !clientId.equals(getRelatedId(decl, PROPERTY_CLIENT))
+        || !orgId.equals(getRelatedId(decl, PROPERTY_ORGANIZATION))) {
+      servlet.sendError(response, HttpServletResponse.SC_NOT_FOUND, DECL_NOT_FOUND_PREFIX + id);
+      return null;
+    }
+    return decl;
   }
 
   /**
@@ -221,17 +236,8 @@ class FiscalDeclCrudHandler {
       return;
     }
     String id = request.getParameter("id");
-    if (StringUtils.isBlank(id)) {
-      servlet.sendError(response, HttpServletResponse.SC_BAD_REQUEST, "Missing param: id");
-      return;
-    }
-    String clientId = OBContext.getOBContext().getCurrentClient().getId();
-    String orgId    = OBContext.getOBContext().getCurrentOrganization().getId();
-    BaseOBObject decl = OBDal.getInstance().get(ENTITY_FISCAL_DECL, id);
-    if (decl == null || !clientId.equals(getRelatedId(decl, PROPERTY_CLIENT))
-        || !orgId.equals(getRelatedId(decl, PROPERTY_ORGANIZATION))) {
-      servlet.sendError(response, HttpServletResponse.SC_NOT_FOUND,
-          "Declaration not found: " + id);
+    BaseOBObject decl = resolveOwnedDeclaration(id, response);
+    if (decl == null) {
       return;
     }
     JSONArray arr = new JSONArray();

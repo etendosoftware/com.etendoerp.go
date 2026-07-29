@@ -384,17 +384,7 @@ class Fiscal303BoxesHandler extends AbstractFiscalHandler {
       return;
     }
 
-    // Persisted on EVERY submission attempt — test mode and production alike — per explicit
-    // product decision (ETP-4456): delete-then-reinsert so the "Incidencias" tab always reflects
-    // only the LATEST attempt's AEAT errors, never a stale accumulation from a prior try. An
-    // empty errors list (the success case) simply leaves the declaration with no incident rows.
-    // Best-effort: a persistence failure here must never mask the actual submission outcome
-    // already computed above.
-    try {
-      replaceIncidents(decl, result.getErrors());
-    } catch (Exception e) {
-      log.error("Could not persist AEAT incidents for declaration " + declId, e);
-    }
+    persistIncidentsBestEffort(decl, declId, result);
 
     if (result.isSuccessful()) {
       if (testMode) {
@@ -421,6 +411,24 @@ class Fiscal303BoxesHandler extends AbstractFiscalHandler {
    */
   static String resolveNrcForSubmission(String declarationType, String nrc) {
     return DECLARATION_TYPE_INGRESO.equals(declarationType) ? StringUtils.defaultString(nrc) : "";
+  }
+
+  /**
+   * Persists (delete-then-reinsert) {@code result}'s AEAT error list into
+   * {@code ETGO_Fiscal_Decl_Incident} for {@code decl} — called on EVERY submission attempt
+   * (test mode and production alike) by {@link #handleSubmit}, per explicit product decision
+   * (ETP-4456), so the "Incidencias" tab always reflects only the LATEST attempt, never a stale
+   * accumulation from a prior try. An empty error list (the success case) simply leaves the
+   * declaration with no incident rows. Best-effort: a persistence failure here is logged and must
+   * never mask the actual submission outcome {@code handleSubmit} already computed.
+   */
+  private void persistIncidentsBestEffort(FiscalDecl decl, String declId,
+      AEAT303SubmissionResult result) {
+    try {
+      replaceIncidents(decl, result.getErrors());
+    } catch (Exception e) {
+      log.error("Could not persist AEAT incidents for declaration " + declId, e);
+    }
   }
 
   /**
