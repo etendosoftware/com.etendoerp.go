@@ -384,6 +384,18 @@ class Fiscal303BoxesHandler extends AbstractFiscalHandler {
       return;
     }
 
+    // Persisted on EVERY submission attempt — test mode and production alike — per explicit
+    // product decision (ETP-4456): delete-then-reinsert so the "Incidencias" tab always reflects
+    // only the LATEST attempt's AEAT errors, never a stale accumulation from a prior try. An
+    // empty errors list (the success case) simply leaves the declaration with no incident rows.
+    // Best-effort: a persistence failure here must never mask the actual submission outcome
+    // already computed above.
+    try {
+      replaceIncidents(decl, result.getErrors());
+    } catch (Exception e) {
+      log.error("Could not persist AEAT incidents for declaration " + declId, e);
+    }
+
     if (result.isSuccessful()) {
       if (testMode) {
         attachTestJustificante(decl, org, data, result);

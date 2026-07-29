@@ -55,10 +55,13 @@ import org.junit.Test;
 import org.mockito.ArgumentCaptor;
 import org.mockito.MockedConstruction;
 import org.mockito.MockedStatic;
+import org.openbravo.base.provider.OBProvider;
+import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.client.application.attachment.AttachImplementationManager;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.dal.service.OBQuery;
 import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.financialmgmt.accounting.coa.AcctSchema;
@@ -986,6 +989,110 @@ public class Fiscal303SubmitHandlerTest {
       attachMock.verify(NeoAttachmentsHelper::getAttachManager, never());
       verify(decl, never()).setDeclarationStatus(anyString());
       verify(obDal, never()).save(decl);
+    }
+  }
+
+  // ── AEAT incidents persistence (ETP-4456) ──────────────────────────────────────────────
+  //
+  // handleSubmit must persist result.getErrors() into ETGO_Fiscal_Decl_Incident on EVERY
+  // attempt — test mode and production, success or failure — via
+  // AbstractFiscalHandler#replaceIncidents -> FiscalDeclCrudHandler#replaceIncidents. These
+  // tests stub the OBQuery/OBProvider plumbing that method uses so its side effects (delete
+  // existing rows, insert one per error) are directly observable.
+
+  @SuppressWarnings("unchecked")
+  @Test
+  public void testHandleSubmit_testModeAeatError_persistsIncidents() throws Exception {
+    HttpServletResponse res = responseCapturing(new StringWriter());
+    HttpServletRequest req = requestFor("2026", "T2", "decl-1", "{\"testMode\":true}");
+    Fiscal303BoxesHandler h = new Fiscal303BoxesHandler(mock(NeoServlet.class));
+    FiscalDecl decl = matchingDecl("client1", "org1");
+    when(decl.getId()).thenReturn("decl-1");
+
+    AEAT303SubmissionResult errorResult = new AEAT303SubmissionResult();
+    errorResult.setStatus(AEAT303SubmissionResult.Status.ERROR);
+    errorResult.setTestMode(true);
+    errorResult.addError("35068 - El resultado a ingresar es distinto de cero.");
+    errorResult.addError("E010124 - Para periodo mensual de 01 a 11.");
+
+    BaseOBObject staleInc = mock(BaseOBObject.class);
+    BaseOBObject newInc = mock(BaseOBObject.class);
+
+    try (MockedStatic<OBContext> ctxMock = mockContext("client1", "org1");
+        MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+        MockedStatic<OBProvider> providerMock = mockStatic(OBProvider.class);
+        MockedConstruction<AEAT303SubmissionService> serviceMock =
+            mockConstruction(AEAT303SubmissionService.class,
+                (mockService, ctx) -> when(
+                    mockService.submitValidation(anyString(), anyString(), anyString(), anyString()))
+                    .thenReturn(errorResult))) {
+      OBDal obDal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      when(obDal.get(FiscalDecl.class, "decl-1")).thenReturn(decl);
+      when(obDal.get(Organization.class, "org1")).thenReturn(mock(Organization.class));
+      stubFileGeneration(obDal);
+
+      OBQuery<BaseOBObject> incQuery = mock(OBQuery.class);
+      when(obDal.createQuery(eq("ETGO_Fiscal_Decl_Incident"), anyString())).thenReturn(incQuery);
+      when(incQuery.list()).thenReturn(Collections.singletonList(staleInc));
+      OBProvider provider = mock(OBProvider.class);
+      providerMock.when(OBProvider::getInstance).thenReturn(provider);
+      when(provider.get("ETGO_Fiscal_Decl_Incident")).thenReturn(newInc);
+
+      h.handle("submit", "POST", req, res);
+
+      // Existing (prior-attempt) row deleted, one new row inserted per AEAT error.
+      verify(obDal).remove(staleInc);
+      verify(obDal, times(2)).save(newInc);
+      verify(newInc).set("code", "35068");
+      verify(newInc).set("message", "El resultado a ingresar es distinto de cero.");
+      verify(newInc).set("code", "E010124");
+      verify(newInc).set("message", "Para periodo mensual de 01 a 11.");
+    }
+  }
+
+  @SuppressWarnings("unchecked")
+  @Test
+  public void testHandleSubmit_testModeSuccess_clearsIncidentsWithNoInsert() throws Exception {
+    HttpServletResponse res = responseCapturing(new StringWriter());
+    HttpServletRequest req = requestFor("2026", "T2", "decl-1", "{\"testMode\":true}");
+    Fiscal303BoxesHandler h = new Fiscal303BoxesHandler(mock(NeoServlet.class));
+    FiscalDecl decl = matchingDecl("client1", "org1");
+    when(decl.getId()).thenReturn("decl-1");
+
+    AEAT303SubmissionResult successResult = new AEAT303SubmissionResult();
+    successResult.setStatus(AEAT303SubmissionResult.Status.SUCCESS);
+    successResult.setTestMode(true);
+    // No errors added — the success case.
+
+    BaseOBObject staleIncFromPriorFailedAttempt = mock(BaseOBObject.class);
+
+    AttachImplementationManager aim = mock(AttachImplementationManager.class);
+    try (MockedStatic<OBContext> ctxMock = mockContext("client1", "org1");
+        MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+        MockedStatic<NeoAttachmentsHelper> attachMock = mockAttachInfra(aim);
+        MockedConstruction<AEAT303SubmissionService> serviceMock =
+            mockConstruction(AEAT303SubmissionService.class,
+                (mockService, ctx) -> when(
+                    mockService.submitValidation(anyString(), anyString(), anyString(), anyString()))
+                    .thenReturn(successResult))) {
+      OBDal obDal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      when(obDal.get(FiscalDecl.class, "decl-1")).thenReturn(decl);
+      when(obDal.get(Organization.class, "org1")).thenReturn(mock(Organization.class));
+      stubFileGeneration(obDal);
+
+      OBQuery<BaseOBObject> incQuery = mock(OBQuery.class);
+      when(obDal.createQuery(eq("ETGO_Fiscal_Decl_Incident"), anyString())).thenReturn(incQuery);
+      // Simulates a row left over from a previous FAILED attempt — must be deleted even though
+      // this attempt succeeds, so the tab ends up empty rather than showing stale errors.
+      when(incQuery.list()).thenReturn(Collections.singletonList(staleIncFromPriorFailedAttempt));
+
+      h.handle("submit", "POST", req, res);
+
+      verify(obDal).remove(staleIncFromPriorFailedAttempt);
+      // Empty errors list -> delete only, nothing (re)inserted.
+      verify(obDal, never()).save(argThat(o -> o != decl && o != null && o != staleIncFromPriorFailedAttempt));
     }
   }
 

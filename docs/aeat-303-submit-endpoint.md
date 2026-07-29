@@ -217,6 +217,35 @@ declaration entity itself) is new. See the "Justificante" tab section in
 in the plan doc for the frontend wiring that surfaces this (the `receiptRefreshTick` refresh, since
 test mode has no status change to key off of).
 
+### AEAT validation errors — persisted on every attempt (`ETGO_Fiscal_Decl_Incident`, ETP-4456)
+
+Unlike the declaration-record mutation above (production-success only), `handleSubmit` persists
+the AEAT-reported error list on **every** submission attempt — test mode and production, success
+or failure alike — via `replaceIncidents(decl, result.getErrors())` (`AbstractFiscalHandler` →
+`FiscalDeclCrudHandler#replaceIncidents`), called right after `result` is obtained, unconditionally
+(not gated by `result.isSuccessful()`). `replaceIncidents` always deletes every existing
+`ETGO_Fiscal_Decl_Incident` row for the declaration first, then inserts one row per entry in
+`result.getErrors()` (each a raw `"CODE - message"` AEAT string, split via
+`FiscalDeclCrudHandler#splitAeatError`). A successful attempt has an empty error list, so the
+declaration simply ends up with zero incident rows — no separate success-path branch needed.
+Best-effort: wrapped in its own try/catch in `handleSubmit`, logged on failure, never allowed to
+mask the actual submission response already computed.
+
+**New table `ETGO_Fiscal_Decl_Incident`:** `ETGO_Fiscal_Decl_Incident_ID` (PK, VARCHAR32) + the
+standard client/org/audit columns + `ETGO_Fiscal_Decl_ID` (FK to `ETGO_Fiscal_Decl`, Java property
+`fiscalDeclaration`) + `CODE` (VARCHAR, the AEAT error code, e.g. `35068` or `E010124`) + `MESSAGE`
+(long text — AEAT's free-text error description).
+
+**New read endpoint:** `GET /fiscal303/incidents?id=<declId>` (also reachable as
+`/fiscal349/incidents` for free — same generic table, only 303 writes to it today) → ownership-
+checked the same way as `/fiscal303/declarations`, returns `{"data":[{"code","message"}, ...]}`.
+Consumed by the frontend's "Incidencias" tab — see the "Incidencias" tab section in
+`../../../schema_forge/docs/generated-custom-windows/fiscal-models.md`.
+
+**Semantics:** incidents are **replaced, not appended** — a second attempt with different AEAT
+errors fully replaces the first attempt's rows. A successful attempt (test or production) always
+leaves the declaration's incidents empty.
+
 ### Known gaps (deliberate follow-ups, not bugs)
 
 1. **CSV / registry / justificante numbers are not persisted.** They are returned to the frontend
@@ -260,6 +289,7 @@ note.
 | `GET` | `/fiscal303/boxes?year=&period=` | `Fiscal303BoxesHandler.handleBoxes` |
 | `GET` | `/fiscal303/generate?year=&period=&tipo=` | `Fiscal303BoxesHandler.handleGenerate` |
 | `POST` | `/fiscal303/submit?year=&period=&tipo=&id=` | `Fiscal303BoxesHandler.handleSubmit` (this doc) |
+| `GET` | `/fiscal303/incidents?id=` | `FiscalDeclCrudHandler.handleIncidents` — persisted AEAT errors (ETP-4456) |
 | `GET` | `/fiscal303/modified?year=&period=&since=` | `Fiscal303BoxesHandler.handleModified` |
 | `POST` | `/certificate` | `NeoCertificateHelper` — certificate storage used by this endpoint's production path |
 

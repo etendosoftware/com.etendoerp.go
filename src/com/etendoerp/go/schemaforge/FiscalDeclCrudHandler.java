@@ -17,10 +17,14 @@
 package com.etendoerp.go.schemaforge;
 
 import java.io.BufferedReader;
+import java.util.List;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 
+import org.apache.commons.lang3.StringUtils;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.base.provider.OBProvider;
@@ -44,6 +48,31 @@ class FiscalDeclCrudHandler {
   static final String PROPERTY_DECLARATION_FILE_NAME = "declarationFileName";
   static final String PROPERTY_FILE_EXTERNAL = "fileExternal";
 
+  /**
+   * Entity name (= DB table name) for the AEAT validation-error rows persisted on every Modelo
+   * 303 submission attempt (see {@link Fiscal303BoxesHandler#handleSubmit} /
+   * {@link #replaceIncidents}). Referenced by its raw entity-name string rather than a generated
+   * entity class — {@code OBDal.createQuery(String, ...)} resolves it dynamically, so this code
+   * has no compile-time dependency on a {@code src-gen} class for the table.
+   */
+  static final String ENTITY_FISCAL_DECL_INCIDENT = "ETGO_Fiscal_Decl_Incident";
+  /**
+   * Java property name for the FK column back to {@code ETGO_Fiscal_Decl}. Etendo derives this
+   * from the AD_Element name assigned when the column is created via {@code /etendo:alter-db}
+   * (element name "Fiscal Declaration" -&gt; property {@code fiscalDeclaration}) — verify this
+   * against the generated entity once the table is actually created; a mismatch here fails at
+   * runtime (HQL parse error on {@link #queryIncidents}), not at compile time.
+   */
+  static final String PROPERTY_INCIDENT_DECL = "fiscalDeclaration";
+  static final String PROPERTY_INCIDENT_CODE = "code";
+  static final String PROPERTY_INCIDENT_MESSAGE = "message";
+
+  /** Matches a raw AEAT error string as {@code "<code> - <message>"}, e.g. {@code "35068 - El
+   * resultado a ingresar..."} or {@code "E010124 - Para periodo mensual..."} — the code token is
+   * always non-whitespace, alphanumeric. Falls back to an empty code when a string doesn't match
+   * (defensive: AEAT's error format is not contractually guaranteed). */
+  private static final Pattern AEAT_ERROR_PATTERN = Pattern.compile("^(\\S+)\\s*-\\s*(.+)$");
+
   private static final String PROPERTY_CLIENT = "client";
   private static final String PROPERTY_ORGANIZATION = "organization";
   private static final String PROPERTY_CREATED_BY = "createdBy";
@@ -54,6 +83,8 @@ class FiscalDeclCrudHandler {
   private static final String STATUS_KEY        = "status";
   private static final String FILE_NAME_KEY     = "fileName";
   private static final String FILE_EXTERNAL_KEY = "fileExternal";
+  private static final String CODE_KEY          = "code";
+  private static final String MESSAGE_KEY       = "message";
 
   private final NeoServlet servlet;
 
@@ -171,6 +202,101 @@ class FiscalDeclCrudHandler {
     OBDal.getInstance().remove(decl);
     OBDal.getInstance().commitAndClose();
     response.getWriter().write("{\"ok\":true}");
+  }
+
+  /**
+   * Handles {@code GET /fiscal303/incidents?id=<declId>} (also reachable, harmlessly, as
+   * {@code /fiscal349/incidents} — the underlying table is generic across models, but only the
+   * Modelo 303 telematic submission flow writes to it today): returns the AEAT validation-error
+   * rows currently persisted for the declaration, as {@code {"data":[{"code","message"}, ...]}}.
+   * Read-only — the write path lives in {@link #replaceIncidents}, called from
+   * {@code Fiscal303BoxesHandler#handleSubmit} on every submission attempt.
+   */
+  void handleIncidents(String method, HttpServletRequest request, HttpServletResponse response)
+      throws Exception {
+    response.setContentType(JSON_CONTENT_TYPE);
+    if (!"GET".equals(method)) {
+      servlet.sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
+          "Unsupported method for /fiscal303/incidents: " + method);
+      return;
+    }
+    String id = request.getParameter("id");
+    if (StringUtils.isBlank(id)) {
+      servlet.sendError(response, HttpServletResponse.SC_BAD_REQUEST, "Missing param: id");
+      return;
+    }
+    String clientId = OBContext.getOBContext().getCurrentClient().getId();
+    String orgId    = OBContext.getOBContext().getCurrentOrganization().getId();
+    BaseOBObject decl = OBDal.getInstance().get(ENTITY_FISCAL_DECL, id);
+    if (decl == null || !clientId.equals(getRelatedId(decl, PROPERTY_CLIENT))
+        || !orgId.equals(getRelatedId(decl, PROPERTY_ORGANIZATION))) {
+      servlet.sendError(response, HttpServletResponse.SC_NOT_FOUND,
+          "Declaration not found: " + id);
+      return;
+    }
+    JSONArray arr = new JSONArray();
+    for (BaseOBObject inc : queryIncidents(id)) {
+      JSONObject o = new JSONObject();
+      o.put(CODE_KEY,    asString(inc.get(PROPERTY_INCIDENT_CODE)));
+      o.put(MESSAGE_KEY, asString(inc.get(PROPERTY_INCIDENT_MESSAGE)));
+      arr.put(o);
+    }
+    JSONObject out = new JSONObject();
+    out.put("data", arr);
+    response.getWriter().write(out.toString());
+  }
+
+  /** All {@code ETGO_Fiscal_Decl_Incident} rows for {@code declId}, oldest first. */
+  private List<BaseOBObject> queryIncidents(String declId) {
+    OBQuery<BaseOBObject> query = OBDal.getInstance().createQuery(ENTITY_FISCAL_DECL_INCIDENT,
+        PROPERTY_INCIDENT_DECL + ".id = :declId order by created asc");
+    query.setNamedParameter("declId", declId);
+    return query.list();
+  }
+
+  /**
+   * Deletes every existing incident row for {@code decl}, then inserts one row per entry in
+   * {@code errors} (each parsed via {@link #splitAeatError}). Called on EVERY submission attempt
+   * (test mode and production alike) by {@code Fiscal303BoxesHandler#handleSubmit}, regardless of
+   * whether the attempt succeeded — an empty {@code errors} list is the success case and simply
+   * leaves the declaration with no incident rows after the delete step. Self-contained (commits
+   * its own transaction), matching the convention already used by {@link #handleDeclPost}/
+   * {@link #handleDeclPut}/{@link #handleDeclDelete} in this class.
+   */
+  void replaceIncidents(BaseOBObject decl, List<String> errors) {
+    String declId = String.valueOf(decl.getId());
+    for (BaseOBObject inc : queryIncidents(declId)) {
+      OBDal.getInstance().remove(inc);
+    }
+    for (String raw : errors) {
+      String[] parsed = splitAeatError(raw);
+      BaseOBObject inc = (BaseOBObject) OBProvider.getInstance().get(ENTITY_FISCAL_DECL_INCIDENT);
+      inc.set(PROPERTY_CLIENT, OBContext.getOBContext().getCurrentClient());
+      inc.set(PROPERTY_ORGANIZATION, OBContext.getOBContext().getCurrentOrganization());
+      inc.set(PROPERTY_CREATED_BY, OBContext.getOBContext().getUser());
+      inc.set(PROPERTY_UPDATED_BY, OBContext.getOBContext().getUser());
+      inc.set(PROPERTY_INCIDENT_DECL, decl);
+      inc.set(PROPERTY_INCIDENT_CODE, parsed[0]);
+      inc.set(PROPERTY_INCIDENT_MESSAGE, parsed[1]);
+      OBDal.getInstance().save(inc);
+    }
+    OBDal.getInstance().commitAndClose();
+  }
+
+  /**
+   * Splits a raw AEAT error string ({@code "35068 - El resultado a ingresar..."} or
+   * {@code "E010124 - Para periodo mensual..."}) into {@code [code, message]}. Falls back to an
+   * empty code with the whole string as the message when it doesn't match the expected shape —
+   * AEAT's error format is not contractually guaranteed, and a malformed entry should still be
+   * persisted (visible to the user) rather than dropped.
+   */
+  static String[] splitAeatError(String raw) {
+    if (raw == null) {
+      return new String[] { "", "" };
+    }
+    String trimmed = raw.trim();
+    Matcher m = AEAT_ERROR_PATTERN.matcher(trimmed);
+    return m.matches() ? new String[] { m.group(1), m.group(2) } : new String[] { "", trimmed };
   }
 
   JSONObject declToJson(BaseOBObject decl) throws Exception {

@@ -30,6 +30,7 @@ import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.criterion.Order;
 import org.hibernate.criterion.Restrictions;
 import org.openbravo.base.exception.OBException;
+import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
@@ -43,6 +44,7 @@ abstract class AbstractFiscalHandler {
   protected static final Logger log = Logger.getLogger(AbstractFiscalHandler.class);
 
   protected static final String DECLARATIONS = "declarations";
+  protected static final String INCIDENTS    = "incidents";
   protected static final String MODIFIED     = "modified";
   protected static final String PERIOD_KEY   = "period";
   protected static final String SINCE_KEY    = "since";
@@ -63,6 +65,15 @@ abstract class AbstractFiscalHandler {
         declHandler.handleDeclarations(method, request, response);
       } catch (Exception e) {
         log.error("Error in /" + getModelKey() + "/declarations", e);
+        servlet.sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, e.getMessage());
+      }
+      return;
+    }
+    if (INCIDENTS.equals(entityName)) {
+      try {
+        declHandler.handleIncidents(method, request, response);
+      } catch (Exception e) {
+        log.error("Error in /" + getModelKey() + "/incidents", e);
         servlet.sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, e.getMessage());
       }
       return;
@@ -121,6 +132,18 @@ abstract class AbstractFiscalHandler {
       HttpServletRequest request, HttpServletResponse response) throws FiscalHandlerException;
 
   protected abstract String getModelKey();
+
+  /**
+   * Replaces the persisted AEAT validation-error rows ({@code ETGO_Fiscal_Decl_Incident}) for a
+   * declaration: deletes every existing row for it, then inserts one row per entry in
+   * {@code errors} (parsed as {@code "CODE - message"}). Called by {@link Fiscal303BoxesHandler}
+   * on EVERY submission attempt (test and production alike) — an empty {@code errors} list simply
+   * leaves the declaration with no incident rows. See {@link FiscalDeclCrudHandler#replaceIncidents}
+   * for the persistence details (shared with the read path, {@code GET /fiscal303/incidents}).
+   */
+  protected void replaceIncidents(BaseOBObject decl, List<String> errors) {
+    declHandler.replaceIncidents(decl, errors);
+  }
 
   // ── shared helpers ────────────────────────────────────────────────
 
