@@ -464,8 +464,17 @@ public class NeoDefaultsService {
           dbColumnName, request.ctx);
     }
 
-    defaultExpr = defaultExpr.trim();
+    return resolveNonEmptyDefaultExpr(defaultExpr.trim(), adColumn, dbColumnName, request);
+  }
 
+  /**
+   * Resolves a non-blank AD_Column/ETGO_SF_FIELD default expression, once the early
+   * NEO-specific cases (IsActive, link-to-parent, sequence) have already been ruled out
+   * by {@link #resolveFieldDefault(FieldDefaultRequest)}. Extracted to keep that method's
+   * cognitive complexity within SonarQube's limit — pure extraction, no behavior change.
+   */
+  private static Object resolveNonEmptyDefaultExpr(String defaultExpr, Column adColumn,
+      String dbColumnName, FieldDefaultRequest request) {
     // Handle empty-string literal
     if ("\"\"".equals(defaultExpr)) {
       return "";
