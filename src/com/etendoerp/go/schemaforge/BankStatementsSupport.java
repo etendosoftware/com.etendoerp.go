@@ -21,6 +21,8 @@ import java.math.BigDecimal;
 import java.sql.ResultSet;
 import java.sql.Timestamp;
 import java.time.Instant;
+import java.time.LocalDate;
+import java.time.ZoneId;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
@@ -52,6 +54,14 @@ public final class BankStatementsSupport {
 
   /** JSON/SQL key for the bank-statement-line description field. */
   static final String FIELD_DESCRIPTION = "description";
+
+  /** JSON keys / reconcile-status codes reused across rows — extracted to satisfy Sonar S1192. */
+  private static final String KEY_MATCHED = "matched";
+  private static final String STATUS_RECONCILED = "RECONCILED";
+  private static final String STATUS_PENDING = "PENDING";
+  private static final String STATUS_PARTIAL = "PARTIAL";
+  private static final String KEY_PENDING_AMOUNT = "pendingAmount";
+  private static final String KEY_REMAINDER_LINE_ID = "remainderLineId";
 
   // Cached result of the C43 column existence check (null = not yet checked).
   private static volatile Boolean c43DescColumn;
@@ -111,9 +121,17 @@ public final class BankStatementsSupport {
     row.put("glItemName",     StringUtils.trimToEmpty(rs.getString("glitem_name")));
     row.put("in",     credit);
     row.put("out",    debit);
-    row.put(FIELD_AMOUNT, credit.subtract(debit));
+    BigDecimal amount = credit.subtract(debit);
+    row.put(FIELD_AMOUNT, amount);
     boolean matched = rs.getString("fin_finacc_transaction_id") != null;
-    row.put("matched", matched);
+    row.put(KEY_MATCHED, matched);
+    // Per-row reconcile status/pending amount — the seed that mergeSubLineIntoHead accumulates
+    // across a match group's physical rows (see there for why a group needs this instead of the
+    // plain `matched` flag once a partial match is involved). pendingAmount comes from the persisted
+    // EM_ETGO_Pending_Amount column (maintained by BankStatementLinePendingAmountHandler) so this
+    // view and the reconciliation-tab pending-lines view share a single source of truth.
+    row.put("reconcileStatus", matched ? STATUS_RECONCILED : STATUS_PENDING);
+    row.put(KEY_PENDING_AMOUNT, nullSafeBigDecimal(rs.getBigDecimal("em_etgo_pending_amount")));
     // 1:N reconcile group (option B): split sub-lines share this id so they can be re-grouped.
     row.put("matchGroupId", StringUtils.trimToEmpty(rs.getString("em_etgo_match_group_id")));
     row.put("txns", buildLineTxns(rs, matched));
@@ -142,6 +160,11 @@ public final class BankStatementsSupport {
         // Lines without a group, or the first occurrence of a group, pass through as-is.
         if (StringUtils.isNotBlank(groupId)) {
           heads.put(groupId, line);
+          // If the group's head sub-line is itself the pending remainder, it is the line the UI
+          // reconciles the rest against (see remainderLineId below).
+          if (!line.optBoolean(KEY_MATCHED, false)) {
+            line.put(KEY_REMAINDER_LINE_ID, line.optString("id"));
+          }
         }
         result.put(line);
       } else {
@@ -151,7 +174,17 @@ public final class BankStatementsSupport {
     return result;
   }
 
-  /** Appends the txns of {@code line} into {@code head} and accumulates in/out/amount. */
+  /**
+   * Appends the txns of {@code line} into {@code head} and accumulates in/out/amount/
+   * pendingAmount, recomputing the group's overall {@code reconcileStatus}.
+   *
+   * <p>A match group can legitimately end up PARTIAL, not just PENDING/RECONCILED: e.g. a 100
+   * line matched to a single 53.24 invoice reconciles that portion in full and leaves a 46.76
+   * pending remainder as a second physical sub-line (same {@code matchGroupId}) — this merges
+   * both back into ONE display row carrying the original 100 total, a 46.76 {@code pendingAmount},
+   * and {@code reconcileStatus: "PARTIAL"}, instead of showing two unrelated-looking rows (see
+   * ETP-4502 iteration 4).
+   */
   private static void mergeSubLineIntoHead(JSONObject head, JSONObject line) throws JSONException {
     JSONArray headTxns = head.optJSONArray("txns");
     if (headTxns == null) {
@@ -167,10 +200,31 @@ public final class BankStatementsSupport {
     head.put("in", jsonBigDecimal(head, "in").add(jsonBigDecimal(line, "in")));
     head.put("out", jsonBigDecimal(head, "out").add(jsonBigDecimal(line, "out")));
     head.put(FIELD_AMOUNT, jsonBigDecimal(head, FIELD_AMOUNT).add(jsonBigDecimal(line, FIELD_AMOUNT)));
-    // The merged group is reconciled only while it still carries transactions. After a reactivate
-    // the sub-lines keep the match-group tag but lose their transaction, so deriving "matched" from
-    // the accumulated txns (instead of forcing true) lets the line fall back to "not reconciled".
-    head.put("matched", headTxns.length() > 0);
+    head.put(KEY_PENDING_AMOUNT,
+        jsonBigDecimal(head, KEY_PENDING_AMOUNT).add(jsonBigDecimal(line, KEY_PENDING_AMOUNT)));
+    // Remember the group's pending remainder sub-line (first unmatched one wins) — the UI reconciles
+    // the rest of the line against it (ETP-4502 iteration 5). Additive; consumers that don't need it
+    // (imported-statements view) simply ignore it.
+    if (StringUtils.isBlank(head.optString(KEY_REMAINDER_LINE_ID, ""))
+        && !line.optBoolean(KEY_MATCHED, false)) {
+      head.put(KEY_REMAINDER_LINE_ID, line.optString("id"));
+    }
+    // The merged group is reconciled only while it still carries transactions AND nothing is left
+    // pending. After a reactivate the sub-lines keep the match-group tag but lose their
+    // transaction, so deriving status from the accumulated txns/pendingAmount (instead of forcing
+    // RECONCILED) lets the group correctly fall back to PARTIAL/PENDING.
+    boolean anyMatched = headTxns.length() > 0;
+    boolean fullyCovered = jsonBigDecimal(head, KEY_PENDING_AMOUNT).signum() == 0;
+    String status;
+    if (!anyMatched) {
+      status = STATUS_PENDING;
+    } else if (fullyCovered) {
+      status = STATUS_RECONCILED;
+    } else {
+      status = STATUS_PARTIAL;
+    }
+    head.put("reconcileStatus", status);
+    head.put(KEY_MATCHED, STATUS_RECONCILED.equals(status));
   }
 
   private static BigDecimal jsonBigDecimal(JSONObject o, String key) {
@@ -203,9 +257,9 @@ public final class BankStatementsSupport {
    * @return one of {@code "PENDING"}, {@code "PARTIAL"} or {@code "RECONCILED"}
    */
   public static String deriveStatementStatus(int lineCount, int matchedCount) {
-    if (lineCount == 0 || matchedCount == 0) return "PENDING";
-    if (matchedCount >= lineCount) return "RECONCILED";
-    return "PARTIAL";
+    if (lineCount == 0 || matchedCount == 0) return STATUS_PENDING;
+    if (matchedCount >= lineCount) return STATUS_RECONCILED;
+    return STATUS_PARTIAL;
   }
 
   /**
@@ -246,7 +300,18 @@ public final class BankStatementsSupport {
   }
 
   /**
-   * Parses an ISO-8601 instant (e.g. {@code 2026-06-04T00:00:00Z}).
+   * Parses an ISO-8601 instant (e.g. {@code 2026-06-04T00:00:00Z}) sent by the frontend as UTC
+   * midnight for a chosen calendar day (see {@code ManualStatementModal.jsx}'s {@code toIsoUtc}: it
+   * deliberately picks UTC midnight so the calendar day survives regardless of the caller's
+   * timezone). Returns midnight of that SAME calendar day in the server's own timezone, not the
+   * verbatim instant: {@code statementdate}/{@code datetrx} are {@code timestamp without time zone}
+   * columns, so persisting the raw UTC instant lets the server's offset shift the stored literal —
+   * on a UTC-negative server (e.g. America/Argentina/Cordoba, UTC-3) {@code 2026-07-22T00:00:00Z}
+   * would land as {@code 2026-07-21 21:00:00}, a day early, and every payment/transaction created
+   * from that statement line (via {@code line.getTransactionDate()}) would inherit the wrong day.
+   * Re-anchoring to the server zone here keeps the stored value consistent with other date-only
+   * columns (e.g. {@code C_Invoice.dateinvoiced}), which are never round-tripped through a UTC ISO
+   * string in the first place.
    *
    * @param iso      the ISO-8601 instant string to parse (may be {@code null}/blank)
    * @param fallback the value to return when {@code iso} is blank or unparseable
@@ -255,7 +320,8 @@ public final class BankStatementsSupport {
   public static Date parseIsoDate(String iso, Date fallback) {
     if (StringUtils.isBlank(iso)) return fallback;
     try {
-      return Date.from(Instant.parse(iso));
+      LocalDate calendarDay = Instant.parse(iso).atZone(ZoneOffset.UTC).toLocalDate();
+      return Date.from(calendarDay.atStartOfDay(ZoneId.systemDefault()).toInstant());
     } catch (Exception e) {
       return fallback;
     }
@@ -354,6 +420,10 @@ public final class BankStatementsSupport {
     t.put(FIELD_AMOUNT, nullSafeBigDecimal(rs.getBigDecimal("txn_amount")));
     t.put("paymentId", StringUtils.trimToEmpty(rs.getString("txn_payment_id")));
     t.put("paymentIsReceipt", StringUtils.trimToEmpty(rs.getString("txn_payment_isreceipt")));
+    // Whether the reconcile flow auto-created this transaction's payment (invoice settlement) — the
+    // per-item un-reconcile ("desvincular") uses it to decide whether removing it also reverses a
+    // payment and restores the invoice to unpaid. See ETP-4502 iteration 5.
+    t.put("autoCreated", "Y".equalsIgnoreCase(StringUtils.trimToEmpty(rs.getString("txn_auto_created"))));
     txns.put(t);
     return txns;
   }
