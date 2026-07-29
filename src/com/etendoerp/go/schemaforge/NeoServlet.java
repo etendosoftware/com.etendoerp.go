@@ -59,7 +59,12 @@ public class NeoServlet extends HttpBaseServlet {
   private final NeoBuiltInEndpointHandler builtInEndpointHandler =
       new NeoBuiltInEndpointHandler(this, discoveryHandler);
   final NeoButtonHandler buttonHandler = new NeoButtonHandler();
-  final NeoDisplayLogicHandler displayLogicHandler = new NeoDisplayLogicHandler();
+  // NOTE: evaluate-display is routed through NeoDisplayLogicHelper (a static utility, see
+  // NeoSubEndpointDispatcher.handleEvaluateDisplaySubEndpoint), not through NeoDisplayLogicHandler.
+  // The latter's buildEvalContext()/resolveAccountingDimensions() never set $IsAcctDimCentrally,
+  // so @ACCT_DIMENSION_DISPLAY@ macros always evaluated false for centrally-maintained clients.
+  // See ETP-4529. NeoDisplayLogicHandler is left in place (with its own tests) as a known-dead
+  // class pending a follow-up cleanup decision -- not deleted as part of this fix.
   // Package-private so sibling collaborators (BatchService) can dispatch through
   // the same default CRUD pipeline without going via HTTP.
   final NeoCrudHandler crudHandler = new NeoCrudHandler(this);
