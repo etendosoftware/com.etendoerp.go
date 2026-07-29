@@ -60,6 +60,12 @@ final class ReactivationSupport {
   /** Module extension column flagging finacc transactions auto-created by the reconcile flow. */
   static final String COL_AUTO_CREATED = "EM_ETGO_Auto_Created";
 
+  /** Module extension column holding a bank-statement line's amount still pending to reconcile. */
+  static final String COL_PENDING_AMOUNT = "EM_ETGO_Pending_Amount";
+
+  /** Stand-in for a missing id in log messages, so logging never dereferences a null record. */
+  private static final String NULL_ID = "<null>";
+
   private ReactivationSupport() {
   }
 
@@ -84,7 +90,7 @@ final class ReactivationSupport {
       return value != null ? StringUtils.trimToNull(String.valueOf(value)) : null;
     } catch (Exception e) {
       log.debug("Could not read match-group id on line {}: {}",
-          line != null ? line.getId() : "<null>", e.getMessage());
+          line != null ? line.getId() : NULL_ID, e.getMessage());
       return null;
     }
   }
@@ -117,7 +123,7 @@ final class ReactivationSupport {
         line.set(prop.getName(), null);
       }
     } catch (Exception e) {
-      log.warn("Could not clear match-group id on line {}", line != null ? line.getId() : "<null>", e);
+      log.warn("Could not clear match-group id on line {}", line != null ? line.getId() : NULL_ID, e);
     }
   }
 
@@ -153,6 +159,26 @@ final class ReactivationSupport {
     if (bsl != null) {
       bsl.setFinancialAccountTransaction(null);
       OBDal.getInstance().save(bsl);
+    }
+  }
+
+  /**
+   * How many reconciliations of {@code account} are currently in draft (unprocessed). Core allows
+   * only ONE editable reconciliation per account, so a non-zero count means the next "Reactivar" will
+   * have to CONFIRM that draft first — surfaced by {@code pendingLines} so the UI can warn up front.
+   * Decorative: degrades to {@code 0} instead of failing the response.
+   */
+  static int draftCount(FIN_FinancialAccount account) {
+    try {
+      List<FIN_Reconciliation> drafts = ReconciliationRemovalUtil.getDraftReconciliation(account);
+      return drafts != null ? drafts.size() : 0;
+    } catch (Exception e) {
+      // Log the id defensively (same as readMatchGroupId/clearMatchGroupId): buildPendingLines does
+      // not null-check its account, so dereferencing it here would turn this decorative helper's
+      // "degrade to 0" into a 500.
+      log.debug("Could not count draft reconciliations for account {}: {}",
+          account != null ? account.getId() : NULL_ID, e.getMessage());
+      return 0;
     }
   }
 

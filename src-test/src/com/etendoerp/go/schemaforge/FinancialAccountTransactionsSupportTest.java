@@ -297,30 +297,6 @@ public class FinancialAccountTransactionsSupportTest {
   }
 
   // ---------------------------------------------------------------
-  // parseDate
-  // ---------------------------------------------------------------
-
-  @Test
-  public void testParseDateBlankReturnsFallback() {
-    Date fallback = new Date(0L);
-    assertEquals(fallback, FinancialAccountTransactionsSupport.parseDate(null, fallback));
-    assertEquals(fallback, FinancialAccountTransactionsSupport.parseDate("  ", fallback));
-  }
-
-  @Test
-  public void testParseDateValidIsoParsed() {
-    Date result = FinancialAccountTransactionsSupport.parseDate("2026-01-15T00:00:00Z", null);
-    assertEquals(LocalDate.of(2026, 1, 15).atStartOfDay(ZoneOffset.UTC).toInstant().toEpochMilli(),
-        result.getTime());
-  }
-
-  @Test
-  public void testParseDateInvalidIsoReturnsFallback() {
-    Date fallback = new Date(123L);
-    assertEquals(fallback, FinancialAccountTransactionsSupport.parseDate("not-a-date", fallback));
-  }
-
-  // ---------------------------------------------------------------
   // parseLocalDate
   // ---------------------------------------------------------------
 

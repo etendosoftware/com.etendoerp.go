@@ -32,7 +32,9 @@ import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.base.exception.OBException;
+import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.erpCommon.utility.OBCurrencyUtils;
 import org.openbravo.erpCommon.utility.OBMessageUtils;
 
 /**
@@ -83,6 +85,7 @@ public class BusinessPartnerHandler extends AbstractPersonNameHandler {
   private static final String FIELD_FIRSTNAME = "etgoFirstname";
   private static final String FIELD_LASTNAME = "etgoLastname";
   private static final String FIELD_EMAIL = "etgoEmail";
+  private static final String FIELD_CURRENCY = "bPCurrencyID";
 
   @Override
   protected String firstnameField() {
@@ -239,12 +242,45 @@ public class BusinessPartnerHandler extends AbstractPersonNameHandler {
           // pre-truncate this client-side, which masked the missing guard.
           body.put(FIELD_SEARCH_KEY, StringUtils.substring(name, 0, SEARCH_KEY_MAX_LENGTH));
         }
+        injectOrgCurrency(ctx, body);
       }
     } catch (Exception e) {
       log.error("BusinessPartnerHandler: error in handle()", e);
       throw new OBException("Error processing BusinessPartner name derivation", e);
     }
     return null;
+  }
+
+  /**
+   * A new Business Partner (contact) with no currency breaks purchase invoice confirmation
+   * later on ({@code ProcessInvoiceUtil} in the core validates {@code businessPartner
+   * .getCurrency() == null} with no fallback). When a create request omits the currency
+   * field, resolve and inject the organization's currency so {@code BP_Currency_ID} is
+   * populated deterministically instead of relying on a session default that may be null.
+   * Never overwrites a currency the caller explicitly set.
+   */
+  private void injectOrgCurrency(NeoContext ctx, JSONObject body) {
+    if (body.has(FIELD_CURRENCY) && StringUtils.isNotBlank(body.optString(FIELD_CURRENCY, null))) {
+      return;
+    }
+    OBContext obContext = ctx.getObContext();
+    if (obContext == null || obContext.getCurrentOrganization() == null) {
+      return;
+    }
+    try {
+      OBContext.setAdminMode();
+      try {
+        String orgId = obContext.getCurrentOrganization().getId();
+        String currencyId = OBCurrencyUtils.getOrgCurrency(orgId);
+        if (StringUtils.isNotBlank(currencyId)) {
+          body.put(FIELD_CURRENCY, currencyId);
+        }
+      } finally {
+        OBContext.restorePreviousMode();
+      }
+    } catch (Exception e) {
+      log.warn("BusinessPartnerHandler: could not inject organization currency", e);
+    }
   }
 
   private void stripPreCreateBillingDefaults(JSONObject body) {

@@ -269,6 +269,7 @@ public class BankStatementsHandler implements NeoHandler {
           + "       bsl.cramount,"
           + "       bsl.dramount,"
           + "       bsl.em_etgo_match_group_id,"
+          + "       COALESCE(bsl.em_etgo_pending_amount, 0) AS em_etgo_pending_amount,"
           + "       bsl.fin_finacc_transaction_id,"
           // Linked financial-account transaction (1:1 today; the frontend models it
           // as a txns[] array so a future 1:N only changes this query). Same field
@@ -281,7 +282,8 @@ public class BankStatementsHandler implements NeoHandler {
           + "       ft.status                   AS txn_status,"
           + "       CASE WHEN ft.trxtype = 'BPD' THEN ft.depositamt ELSE -ft.paymentamt END AS txn_amount,"
           + "       ft.fin_payment_id           AS txn_payment_id,"
-          + "       fp.isreceipt                AS txn_payment_isreceipt"
+          + "       fp.isreceipt                AS txn_payment_isreceipt,"
+          + "       COALESCE(ft.em_etgo_auto_created, 'N') AS txn_auto_created"
           + "  FROM fin_bankstatementline bsl"
           + "  LEFT JOIN c_bpartner bp ON bp.c_bpartner_id = bsl.c_bpartner_id"
           + "  LEFT JOIN c_glitem gl ON gl.c_glitem_id = bsl.c_glitem_id"
