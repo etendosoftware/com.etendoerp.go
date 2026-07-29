@@ -39,6 +39,7 @@ import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
+import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.base.model.Entity;
 import org.openbravo.base.model.ModelProvider;
@@ -78,6 +79,7 @@ class NeoCrudHandler {
   private static final String METHOD_DELETE = "DELETE";
   private static final String METHOD_PATCH = "PATCH";
   private static final String PARAM_PARENT_ID = "parentId";
+  private static final String CRITERIA_PARAM = "criteria";
   private static final String HQL_AND_OPERATOR = " and ";
   private static final String JSON_IDENTIFIER = "_identifier";
   private static final String FIELD_ACCOUNTING_DATE = "accountingDate";
@@ -323,6 +325,8 @@ class NeoCrudHandler {
     if (context.getQueryParams() != null) {
       params.putAll(context.getQueryParams());
     }
+
+    normalizeBooleanCriteria(params, dalEntityName);
 
     String parentId = context.getQueryParams() != null
         ? context.getQueryParams().get(PARAM_PARENT_ID)
@@ -973,6 +977,89 @@ class NeoCrudHandler {
         predicates.add("(" + tabWhere + ")");
       }
     }
+  }
+
+  /**
+   * Rewrites the char {@code "Y"}/{@code "N"} filter value to a real boolean for any criterion
+   * whose target property is a genuine {@link Boolean} DAL type.
+   *
+   * <p>The frontend serializes every boolean list column to {@code "Y"}/{@code "N"} (see
+   * gridQuery.js booleanLabel mode). That is correct for AD button/list columns the DAL exposes
+   * as {@code String} (e.g. {@code Posted}), which core matches verbatim. But for columns exposed
+   * as an actual {@code Boolean} property (Yes/No reference, e.g. {@code IsDefault}), core
+   * {@code AdvancedQueryBuilder} coerces the value with {@code Boolean.valueOf("Y") == false},
+   * silently inverting the filter. Here we translate {@code "Y"/"N"} to {@code true/false} for
+   * Boolean-typed properties only; String columns and non-{@code Y/N} values are left untouched,
+   * so raw {@code true}/{@code false} keeps working. ETP-4705.
+   */
+  private void normalizeBooleanCriteria(Map<String, String> params, String dalEntityName) {
+    String criteria = params.get(CRITERIA_PARAM);
+    if (StringUtils.isBlank(criteria)) {
+      return;
+    }
+    Entity entityDef = ModelProvider.getInstance().getEntity(dalEntityName);
+    if (entityDef == null) {
+      return;
+    }
+    try {
+      JSONArray arr = new JSONArray(criteria);
+      if (normalizeBooleanCriteriaArray(arr, entityDef)) {
+        params.put(CRITERIA_PARAM, arr.toString());
+      }
+    } catch (JSONException e) {
+      // Not a JSON array (e.g. a single object or an unexpected shape) — leave it untouched
+      // rather than risk corrupting a criteria format we do not recognize.
+      log.debug("Skipping boolean-criteria normalization; criteria is not a JSON array: {}",
+          e.getMessage());
+    }
+  }
+
+  /**
+   * Walks a criteria array, normalizing flat clauses and recursing into nested {@code and}/{@code
+   * or} composites. Returns true if any clause was rewritten.
+   */
+  boolean normalizeBooleanCriteriaArray(JSONArray arr, Entity entityDef)
+      throws JSONException {
+    boolean changed = false;
+    for (int i = 0; i < arr.length(); i++) {
+      JSONObject clause = arr.optJSONObject(i);
+      if (clause == null) {
+        continue;
+      }
+      JSONArray nested = clause.optJSONArray("criteria");
+      if (nested != null) {
+        changed |= normalizeBooleanCriteriaArray(nested, entityDef);
+        continue;
+      }
+      changed |= normalizeBooleanClause(clause, entityDef);
+    }
+    return changed;
+  }
+
+  /**
+   * Rewrites a single flat criterion's {@code "Y"}/{@code "N"} value to {@code true}/{@code false}
+   * when its target property is a Boolean DAL type. Returns true if the clause was rewritten.
+   */
+  boolean normalizeBooleanClause(JSONObject clause, Entity entityDef)
+      throws JSONException {
+    String fieldName = clause.optString("fieldName", null);
+    if (StringUtils.isBlank(fieldName)) {
+      return false;
+    }
+    Object value = clause.opt("value");
+    if (!(value instanceof String)) {
+      return false;
+    }
+    String str = ((String) value).trim();
+    if (!("Y".equalsIgnoreCase(str) || "N".equalsIgnoreCase(str))) {
+      return false;
+    }
+    Property prop = resolveDistinctProperty(entityDef, fieldName);
+    if (prop == null || Boolean.class != prop.getPrimitiveObjectType()) {
+      return false;
+    }
+    clause.put("value", "Y".equalsIgnoreCase(str));
+    return true;
   }
 
   /**
