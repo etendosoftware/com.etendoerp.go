@@ -185,6 +185,100 @@ final class McpSchemaFieldBuilder {
     return promptByColumnId;
   }
 
+  /**
+   * Loads the per-field precondition requirement declared on {@code ETGO_SF_ENTITY.preconditions}
+   * (ETP-4275). Returns a map keyed by NEO field (DAL property) name whose value is the rule's
+   * {@code requiredWhen} condition, or an empty string when the field is unconditionally required.
+   * Requirements are aggregated across all processes (a field required by any process is
+   * reported); an unconditional rule wins over a conditional one for the same field.
+   *
+   * <p>{@code neo_schema} uses this to proactively signal {@code userRequired} to the agent, so it
+   * does not have to discover the requirement by hitting the runtime process gate
+   * ({@code NeoProcessPreconditionValidator}) — the two layers share this single declaration.</p>
+   */
+  static Map<String, String> loadPreconditionRequirements(SFEntity sfEntity) {
+    Map<String, String> requiredWhenByField = new HashMap<>();
+    if (sfEntity == null) {
+      return requiredWhenByField;
+    }
+    Object raw;
+    try {
+      raw = sfEntity.get("preconditions");
+    } catch (Exception e) {
+      // Column not present in the runtime model yet (pre-migration) → no requirements.
+      return requiredWhenByField;
+    }
+    if (raw == null || raw.toString().trim().isEmpty()) {
+      return requiredWhenByField;
+    }
+    try {
+      JSONObject byProcess = new JSONObject(raw.toString());
+      java.util.Iterator<?> processIds = byProcess.keys();
+      while (processIds.hasNext()) {
+        JSONArray rules = byProcess.optJSONArray((String) processIds.next());
+        if (rules != null) {
+          collectFieldRequirements(rules, requiredWhenByField);
+        }
+      }
+    } catch (JSONException e) {
+      // Malformed declaration → fail open (no proactive signal); the runtime gate still guards.
+      return new HashMap<>();
+    }
+    return requiredWhenByField;
+  }
+
+  private static void collectFieldRequirements(JSONArray rules, Map<String, String> out) {
+    for (int i = 0; i < rules.length(); i++) {
+      JSONObject rule = rules.optJSONObject(i);
+      String field = rule == null ? null : rule.optString("field", null);
+      if (field != null && !field.trim().isEmpty()) {
+        String requiredWhen = rule.optString("requiredWhen", "");
+        requiredWhen = requiredWhen == null ? "" : requiredWhen.trim();
+        String existing = out.get(field);
+        if (existing == null || requiredWhen.isEmpty()) {
+          out.put(field, requiredWhen);
+        }
+      }
+    }
+  }
+
+  /**
+   * Applies the precondition-derived requirement to a field's schema. When the field is named in
+   * {@code requiredWhenByField} it is flagged {@code userRequired: true}; a non-empty condition is
+   * surfaced as {@code requiredWhen} so the agent knows the requirement is conditional. Mirrors
+   * the runtime enforcement in {@code NeoProcessPreconditionValidator}.
+   */
+  static void applyPreconditionRequirement(JSONObject fieldObj, String propName,
+      Map<String, String> requiredWhenByField) throws JSONException {
+    if (propName == null || !requiredWhenByField.containsKey(propName)) {
+      return;
+    }
+    fieldObj.put("userRequired", true);
+    String requiredWhen = requiredWhenByField.get(propName);
+    if (requiredWhen != null && !requiredWhen.trim().isEmpty()) {
+      fieldObj.put("requiredWhen", requiredWhen.trim());
+    }
+  }
+
+  /**
+   * Overlays the precondition-derived requirement onto every field of an already-built schema
+   * array (see {@link #applyPreconditionRequirement}). Applied as a post-processing pass by the
+   * caller so the array/field builders keep their original parameter budget (Sonar S107) and this
+   * overlay stays independently unit-testable.
+   */
+  static void applyPreconditionRequirements(JSONArray fieldsArray,
+      Map<String, String> requiredWhenByField) throws JSONException {
+    if (fieldsArray == null || requiredWhenByField.isEmpty()) {
+      return;
+    }
+    for (int i = 0; i < fieldsArray.length(); i++) {
+      JSONObject field = fieldsArray.optJSONObject(i);
+      if (field != null) {
+        applyPreconditionRequirement(field, field.optString("name", null), requiredWhenByField);
+      }
+    }
+  }
+
   static JSONArray buildSchemaFieldsArray(Tab adTab, Entity dalEntity,
       Map<String, String> visibilityByColumnId, Map<String, Boolean> businessCriticalByColumnId,
       Map<String, String> promptByColumnId,
