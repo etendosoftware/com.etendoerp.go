@@ -174,11 +174,15 @@ public class DocumentPostingServiceTest {
 
     try (MockedStatic<OBContext> obc = mockStatic(OBContext.class);
         MockedStatic<AcctServer> acctStatic = mockStatic(AcctServer.class);
-        MockedStatic<OBDal> obDalStatic = mockStatic(OBDal.class)) {
+        MockedStatic<OBDal> obDalStatic = mockStatic(OBDal.class);
+        MockedStatic<OBMessageUtils> msgMock = mockStatic(OBMessageUtils.class)) {
       stubObContext(obc);
       acctStatic.when(() -> AcctServer.get(anyString(), anyString(), anyString(), any(ConnectionProvider.class)))
           .thenReturn(acct);
       obDalStatic.when(OBDal::getInstance).thenReturn(obDal);
+      // Real AD_MESSAGE (ETGO_InvalidAccountBpAndGroup) catalog text — see AD_MESSAGE.xml.
+      msgMock.when(() -> OBMessageUtils.messageBD("ETGO_InvalidAccountBpAndGroup"))
+          .thenReturn("(Business Partner: @bpName@, BP Group: @bpGroup@)");
 
       DocumentPostingService.PostResult r = svc.post("318", "rec-1", conn);
 
@@ -186,6 +190,8 @@ public class DocumentPostingServiceTest {
       assertTrue(r.message().contains("Account could not be found."));
       assertTrue(r.message().contains("Fernet Branca S.A."));
       assertTrue(r.message().contains("Proveedores Generales"));
+      assertTrue(r.message()
+          .contains("(Business Partner: Fernet Branca S.A., BP Group: Proveedores Generales)"));
     }
   }
 

@@ -30,6 +30,7 @@ import org.openbravo.dal.service.OBDal;
 import org.openbravo.database.ConnectionProvider;
 import org.openbravo.erpCommon.ad_forms.AcctServer;
 import org.openbravo.erpCommon.utility.OBError;
+import org.openbravo.erpCommon.utility.OBMessageUtils;
 import org.openbravo.financial.ResetAccounting;
 import org.openbravo.model.common.businesspartner.BusinessPartner;
 import org.openbravo.model.common.businesspartner.Category;
@@ -52,6 +53,11 @@ import com.etendoerp.go.schemaforge.NeoResponse;
 public class DocumentPostingService {
 
   private static final Logger log = LogManager.getLogger(DocumentPostingService.class);
+
+  /** AD_MESSAGE searchkey for the BP + BP Group enrichment (both resolvable). */
+  private static final String MSG_INVALID_ACCOUNT_BP_AND_GROUP = "ETGO_InvalidAccountBpAndGroup";
+  /** AD_MESSAGE searchkey for the BP-only enrichment fallback (no BP Group). */
+  private static final String MSG_INVALID_ACCOUNT_BP_ONLY = "ETGO_InvalidAccountBpOnly";
 
   /** Result of a post/unpost attempt. */
   public record PostResult(boolean ok, String message) {
@@ -218,8 +224,11 @@ public class DocumentPostingService {
       }
       Category bpGroup = bp.getBusinessPartnerCategory();
       return bpGroup != null
-          ? String.format("(Business Partner: %s, BP Group: %s)", bp.getName(), bpGroup.getName())
-          : String.format("(Business Partner: %s)", bp.getName());
+          ? OBMessageUtils.messageBD(MSG_INVALID_ACCOUNT_BP_AND_GROUP)
+              .replace("@bpName@", bp.getName())
+              .replace("@bpGroup@", bpGroup.getName())
+          : OBMessageUtils.messageBD(MSG_INVALID_ACCOUNT_BP_ONLY)
+              .replace("@bpName@", bp.getName());
     } catch (Exception e) {
       log.debug("Could not resolve Business Partner detail for account error, bpartnerId={}", bpartnerId, e);
       return null;
