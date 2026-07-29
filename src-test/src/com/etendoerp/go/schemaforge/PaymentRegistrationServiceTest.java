@@ -28,6 +28,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.math.BigDecimal;
@@ -446,6 +447,113 @@ class PaymentRegistrationServiceTest {
     assertEquals(400, response.getHttpStatus());
     assertTrue(response.getBody().getJSONObject("error").getString("message")
         .contains("No pending payment schedule details"));
+  }
+
+  // ========================================================================
+  // resolvePaymentMethod tests (direct calls - package-visible static method)
+  //
+  // These exercise PaymentRegistrationService#resolvePaymentMethod directly instead of going
+  // through doRegisterPayment, since the method is package-visible and this test class lives in
+  // the same package. This keeps the tests focused on the priority logic itself without having
+  // to also stub the rest of the doRegisterPayment flow (period check, draft payment creation).
+  // ========================================================================
+
+  /**
+   * Verifies that the account-fallback branch orders {@code FinAccPaymentMethod} by
+   * {@link FinAccPaymentMethod#PROPERTY_DEFAULT} descending before taking the first result, so
+   * the account's own default-for-direction method wins over an arbitrary one (mirrors Classic's
+   * account-level fallback in {@code TransactionAddPaymentDefaultValues}).
+   *
+   * <p><b>Limitation:</b> this only proves the ORDER BY clause is requested with the correct
+   * property and direction (via {@code verify(...)}). It cannot prove that a real database
+   * actually returns the default-flagged row first - that behavioral guarantee requires a live-DB
+   * integration test (e.g. OBBaseTest), which is out of scope for this Mockito-based unit test.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  void testResolvePaymentMethodFallbackOrdersByAccountDefaultFlag() {
+    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    Invoice invoice = mock(Invoice.class);
+
+    // No invoice/BP payment method at all, so resolveInvoiceMethod returns null and the
+    // fallback branch is reached directly (no isMethodAllowed call in between).
+    when(invoice.getPaymentMethod()).thenReturn(null);
+    when(invoice.getBusinessPartner()).thenReturn(null);
+
+    FIN_PaymentMethod defaultMethod = mock(FIN_PaymentMethod.class);
+    FinAccPaymentMethod defaultFapm = mock(FinAccPaymentMethod.class);
+    when(defaultFapm.getPaymentMethod()).thenReturn(defaultMethod);
+
+    OBCriteria<FinAccPaymentMethod> fallbackCriteria = mock(OBCriteria.class);
+    when(obDal.createCriteria(FinAccPaymentMethod.class)).thenReturn(fallbackCriteria);
+    when(fallbackCriteria.add(any(Criterion.class))).thenReturn(fallbackCriteria);
+    when(fallbackCriteria.addOrderBy(anyString(), anyBoolean())).thenReturn(fallbackCriteria);
+    when(fallbackCriteria.setMaxResults(1)).thenReturn(fallbackCriteria);
+    when(fallbackCriteria.list()).thenReturn(Collections.singletonList(defaultFapm));
+
+    FIN_PaymentMethod result =
+        PaymentRegistrationService.resolvePaymentMethod(account, invoice, true);
+
+    assertEquals(defaultMethod, result);
+    verify(fallbackCriteria).addOrderBy(FinAccPaymentMethod.PROPERTY_DEFAULT, false);
+  }
+
+  /**
+   * Regression test for the bug reproduced live in Etendo Classic: the business partner (or
+   * invoice) has its own payment method configured (e.g. "Efectivo"/Cash), but that method is NOT
+   * configured on the reconciliation account (which only allows Cheque/Transferencia/Tarjeta).
+   *
+   * <p>Classic's {@code TransactionAddPaymentDefaultValues.getDefaultPaymentMethod} validates the
+   * BP's method against the BP's OWN linked financial account instead of the account actually
+   * being reconciled, so it still defaults the popup to the BP's method - and creating the payment
+   * then fails with "Selected payment method doesn't exist". This test proves the fix: the
+   * invoice/BP method is validated against THIS account via {@link
+   * PaymentRegistrationService#isMethodAllowed}, and when it is not allowed, resolution falls
+   * through to the account-fallback branch instead of returning the disallowed method.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  void testResolvePaymentMethodInvoiceMethodNotAllowedFallsBackToAccountDefault() {
+    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    Invoice invoice = mock(Invoice.class);
+
+    FIN_PaymentMethod cashMethod = mock(FIN_PaymentMethod.class);
+    when(invoice.getPaymentMethod()).thenReturn(cashMethod);
+
+    // isMethodAllowed(account, cashMethod, ...) criteria: Cash is NOT configured for this
+    // account, so the criteria returns no rows.
+    OBCriteria<FinAccPaymentMethod> allowedCheckCriteria = mock(OBCriteria.class);
+    // Fallback criteria: the account's own default-for-direction method (Transferencia).
+    OBCriteria<FinAccPaymentMethod> fallbackCriteria = mock(OBCriteria.class);
+
+    when(obDal.createCriteria(FinAccPaymentMethod.class))
+        .thenReturn(allowedCheckCriteria)
+        .thenReturn(fallbackCriteria);
+
+    when(allowedCheckCriteria.add(any(Criterion.class))).thenReturn(allowedCheckCriteria);
+    when(allowedCheckCriteria.setMaxResults(1)).thenReturn(allowedCheckCriteria);
+    when(allowedCheckCriteria.list()).thenReturn(Collections.emptyList());
+
+    FIN_PaymentMethod transferMethod = mock(FIN_PaymentMethod.class);
+    FinAccPaymentMethod transferFapm = mock(FinAccPaymentMethod.class);
+    when(transferFapm.getPaymentMethod()).thenReturn(transferMethod);
+
+    when(fallbackCriteria.add(any(Criterion.class))).thenReturn(fallbackCriteria);
+    when(fallbackCriteria.addOrderBy(anyString(), anyBoolean())).thenReturn(fallbackCriteria);
+    when(fallbackCriteria.setMaxResults(1)).thenReturn(fallbackCriteria);
+    when(fallbackCriteria.list()).thenReturn(Collections.singletonList(transferFapm));
+
+    FIN_PaymentMethod result =
+        PaymentRegistrationService.resolvePaymentMethod(account, invoice, true);
+
+    assertEquals(transferMethod, result,
+        "the disallowed invoice/BP method must NOT be returned; resolution must fall through "
+            + "to the account-fallback branch instead");
+    assertTrue(result != cashMethod,
+        "the resolved method must not be the invoice's own method, since it isn't allowed "
+            + "for this account");
+    verify(allowedCheckCriteria).list();
+    verify(fallbackCriteria).addOrderBy(FinAccPaymentMethod.PROPERTY_DEFAULT, false);
   }
 
   // ========================================================================
