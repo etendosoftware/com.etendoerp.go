@@ -78,6 +78,7 @@ import org.openbravo.service.json.JsonConstants;
 
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFSpec;
+import com.etendoerp.go.schemaforge.util.NeoDistinctFetchSupport;
 import com.etendoerp.go.schemaforge.util.NeoTypeCoercionHelper;
 
 /**
@@ -1469,7 +1470,7 @@ class NeoCrudHandlerTest {
   class ToDistinctEntry {
 
     private JSONObject invokeToDistinctEntry(Object value) throws Exception {
-      Method method = NeoCrudHandler.class.getDeclaredMethod("toDistinctEntry", Object.class);
+      Method method = NeoDistinctFetchSupport.class.getDeclaredMethod("toDistinctEntry", Object.class);
       method.setAccessible(true);
       return (JSONObject) method.invoke(null, value);
     }
@@ -1568,7 +1569,7 @@ class NeoCrudHandlerTest {
 
     private Property invokeResolveDistinctProperty(Entity entityDef, String fieldName)
         throws Exception {
-      Method method = NeoCrudHandler.class.getDeclaredMethod(
+      Method method = NeoDistinctFetchSupport.class.getDeclaredMethod(
           "resolveDistinctProperty", Entity.class, String.class);
       method.setAccessible(true);
       return (Property) method.invoke(null, entityDef, fieldName);

@@ -60,6 +60,7 @@ import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFSpec;
 import com.etendoerp.go.schemaforge.telemetry.NeoTelemetryService;
 import com.etendoerp.go.schemaforge.util.NeoCrudHelper;
+import com.etendoerp.go.schemaforge.util.NeoDistinctFetchSupport;
 import com.etendoerp.go.schemaforge.util.NeoErrorSanitizer;
 import com.etendoerp.go.schemaforge.util.NeoListIdentifierHelper;
 import com.etendoerp.go.schemaforge.util.NeoLocatorIdentifierHelper;
@@ -81,7 +82,6 @@ class NeoCrudHandler {
   private static final String PARAM_PARENT_ID = "parentId";
   private static final String CRITERIA_PARAM = "criteria";
   private static final String HQL_AND_OPERATOR = " and ";
-  private static final String JSON_IDENTIFIER = "_identifier";
   private static final String FIELD_ACCOUNTING_DATE = "accountingDate";
   private static final Set<String> CONTACTS_PRECREATE_BILLING_FIELDS = new HashSet<>(
       Arrays.asList(
@@ -891,7 +891,7 @@ class NeoCrudHandler {
       return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
           "Unknown DAL entity: " + dalEntityName);
     }
-    Property prop = resolveDistinctProperty(entityDef, fieldName);
+    Property prop = NeoDistinctFetchSupport.resolveDistinctProperty(entityDef, fieldName);
     if (prop == null) {
       return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
           "Unknown field '" + fieldName + "' on entity " + dalEntityName);
@@ -922,7 +922,7 @@ class NeoCrudHandler {
         predicates.add("(" + parentFilter + ")");
       }
     }
-    String searchPredicate = buildDistinctSearchPredicate(prop, resolvedProperty, search);
+    String searchPredicate = NeoDistinctFetchSupport.buildDistinctSearchPredicate(prop, resolvedProperty, search);
     if (searchPredicate != null) {
       predicates.add(searchPredicate);
     }
@@ -947,7 +947,7 @@ class NeoCrudHandler {
 
       JSONArray data = new JSONArray();
       for (Object value : page) {
-        data.put(toDistinctEntry(value));
+        data.put(NeoDistinctFetchSupport.toDistinctEntry(value));
       }
 
       JSONObject payload = new JSONObject();
@@ -1026,12 +1026,12 @@ class NeoCrudHandler {
       if (clause == null) {
         continue;
       }
-      JSONArray nested = clause.optJSONArray("criteria");
+      JSONArray nested = clause.optJSONArray(CRITERIA_PARAM);
       if (nested != null) {
         changed |= normalizeBooleanCriteriaArray(nested, entityDef);
-        continue;
+      } else {
+        changed |= normalizeBooleanClause(clause, entityDef);
       }
-      changed |= normalizeBooleanClause(clause, entityDef);
     }
     return changed;
   }
@@ -1054,114 +1054,11 @@ class NeoCrudHandler {
     if (!("Y".equalsIgnoreCase(str) || "N".equalsIgnoreCase(str))) {
       return false;
     }
-    Property prop = resolveDistinctProperty(entityDef, fieldName);
+    Property prop = NeoDistinctFetchSupport.resolveDistinctProperty(entityDef, fieldName);
     if (prop == null || Boolean.class != prop.getPrimitiveObjectType()) {
       return false;
     }
     clause.put("value", "Y".equalsIgnoreCase(str));
     return true;
-  }
-
-  /**
-   * Resolves a distinct field name against the DAL entity, trying the raw name
-   * first and falling back to case-insensitive matches against property names
-   * and AD column names.
-   */
-  private static Property resolveDistinctProperty(Entity entityDef, String fieldName) {
-    if (entityDef == null) {
-      return null;
-    }
-    Property direct = entityDef.getProperty(fieldName, false);
-    if (direct != null) {
-      return direct;
-    }
-    for (Property p : entityDef.getProperties()) {
-      if (p.getName().equalsIgnoreCase(fieldName)) {
-        return p;
-      }
-      if (p.getColumnName() != null && p.getColumnName().equalsIgnoreCase(fieldName)) {
-        return p;
-      }
-    }
-    return null;
-  }
-
-  /**
-   * Builds the HQL LIKE predicate for {@code _distinctSearch} against the resolved
-   * property.
-   * <p>
-   * Scalar (primitive) properties are searched by casting the column value itself —
-   * {@code CAST(e.status AS string)}. Relation (foreign-key) properties cannot be
-   * meaningfully cast to string: {@code CAST(e.productCategory AS string)} does not
-   * resolve to the related record's display text, so it silently matches nothing
-   * (or throws, depending on dialect). For those, the search is redirected to the
-   * target entity's identifier properties instead — e.g.
-   * {@code LOWER(CAST(e.productCategory.name AS string)) LIKE :search} — mirroring
-   * how {@link BaseOBObject#getIdentifier()} resolves a record's display text.
-   * <p>
-   * Returns {@code null} (no predicate, search term ignored) when there is no
-   * search term, or when a relation's target entity exposes no usable identifier
-   * property, so the request still succeeds instead of failing with an HQL error.
-   */
-  private static String buildDistinctSearchPredicate(Property prop, String resolvedProperty, String search) {
-    if (StringUtils.isBlank(search)) {
-      return null;
-    }
-    if (prop.isPrimitive()) {
-      return "LOWER(CAST(e." + resolvedProperty + " AS string)) LIKE :search";
-    }
-    Entity targetEntity = prop.getTargetEntity();
-    if (targetEntity == null) {
-      return null;
-    }
-    List<Property> idProps = targetEntity.getIdentifierProperties();
-    if (idProps == null || idProps.isEmpty()) {
-      return null;
-    }
-    List<String> clauses = new ArrayList<>();
-    for (Property idProp : idProps) {
-      if (idProp.isPrimitive()) {
-        clauses.add("LOWER(CAST(e." + resolvedProperty + "." + idProp.getName() + " AS string)) LIKE :search");
-      }
-    }
-    if (clauses.isEmpty()) {
-      return null;
-    }
-    return "(" + String.join(" OR ", clauses) + ")";
-  }
-
-  /**
-   * Builds a {@code {"id": ..., "_identifier": ...}} entry for a single distinct
-   * value. Scalar values (String enum codes, numbers, dates) use the stringified
-   * value for both fields so the frontend can render a label without a second
-   * lookup. FK references expose the target entity's id and its DAL identifier.
-   */
-  private static JSONObject toDistinctEntry(Object value) {
-    JSONObject entry = new JSONObject();
-    try {
-      if (value == null) {
-        entry.put("id", "");
-        entry.put(JSON_IDENTIFIER, "");
-      } else if (value instanceof BaseOBObject) {
-        BaseOBObject bob = (BaseOBObject) value;
-        Object id = bob.getId();
-        String idStr = id == null ? "" : id.toString();
-        String identifier;
-        try {
-          identifier = bob.getIdentifier();
-        } catch (Exception e) {
-          identifier = idStr;
-        }
-        entry.put("id", idStr);
-        entry.put(JSON_IDENTIFIER, StringUtils.isBlank(identifier) ? idStr : identifier);
-      } else {
-        String str = value.toString();
-        entry.put("id", str);
-        entry.put(JSON_IDENTIFIER, str);
-      }
-    } catch (Exception e) {
-      log.error("Failed to serialize distinct entry: {}", e.getMessage(), e);
-    }
-    return entry;
   }
 }
