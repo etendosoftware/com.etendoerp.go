@@ -28,6 +28,8 @@ import org.openbravo.base.model.Entity;
 import org.openbravo.base.model.ModelProvider;
 import org.openbravo.base.model.Property;
 import org.openbravo.client.kernel.KernelUtils;
+import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.ad.datamodel.Column;
 import org.openbravo.model.ad.ui.Tab;
 import org.openbravo.service.json.JsonConstants;
 import org.openbravo.client.application.ApplicationUtils;
@@ -136,11 +138,23 @@ public final class NeoTypeCoercionHelper {
     }
   }
 
+  /** AD_Reference id for the "List" reference type (fixed AD_Ref_List codes). */
+  private static final String REFERENCE_ID_LIST = "17";
+
   public static void coerceField(Entity entity, String key, String strVal,
       Map<String, Object> coerced) {
     try {
       Property prop = entity.getProperty(key);
       if (prop == null || !prop.isPrimitive()) {
+        return;
+      }
+      // List-reference columns (e.g. Invoicegrouping, a 15-digit binary code) can have a
+      // primitive object type of BigDecimal/Long even though their real domain is a fixed
+      // set of opaque AD_Ref_List string codes, often all-digit ones. Numerically parsing
+      // such a code collapses leading zeros/length (e.g. "000000000000000" -> 0), producing
+      // a value that matches none of the column's actual list options. Skip coercion for
+      // these columns; their values must be passed through verbatim.
+      if (isListReferenceProperty(prop)) {
         return;
       }
       Class<?> type = prop.getPrimitiveObjectType();
@@ -158,6 +172,25 @@ public final class NeoTypeCoercionHelper {
       }
     } catch (Exception ignored) {
       log.debug("Skipping string coercion for key {}: {}", key, ignored.getMessage());
+    }
+  }
+
+  /**
+   * Returns true if the given DAL property maps to an AD_Column whose reference is the
+   * "List" type (fixed AD_Ref_List codes), as opposed to a genuine numeric/boolean column.
+   */
+  private static boolean isListReferenceProperty(Property prop) {
+    try {
+      if (prop.getColumnId() == null) {
+        return false;
+      }
+      Column adColumn = OBDal.getInstance().get(Column.class, prop.getColumnId());
+      return adColumn != null && adColumn.getReference() != null
+          && REFERENCE_ID_LIST.equals(adColumn.getReference().getId());
+    } catch (Exception e) {
+      log.debug("Could not resolve reference type for property {}: {}",
+          prop.getName(), e.getMessage());
+      return false;
     }
   }
 

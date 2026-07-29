@@ -477,6 +477,16 @@ public class NeoDefaultsService {
           request.windowId, adColumn, request.parentValues);
     }
 
+    // List-reference columns (AD_Reference_ID = "17") with a pure literal default (no "@"
+    // context/preference token) must return that literal verbatim. Their AD_Ref_List values
+    // are opaque codes — often all-digit strings like "000000000000000" (see Invoicegrouping,
+    // a 15-digit binary code) — and Utility.getDefault treats a plain literal as a numeric
+    // candidate, collapsing it to "0" and losing the leading zeros / length. That produces a
+    // value that matches none of the column's real AD_Ref_List entries.
+    if (!defaultExpr.contains("@") && isListReference(adColumn)) {
+      return defaultExpr;
+    }
+
     // Delegate to Utility.getDefault for all other cases:
     // - Literal values (no @ signs)
     // - Context variables (@#AD_Org_ID@, @#Date@, etc.)
@@ -490,6 +500,20 @@ public class NeoDefaultsService {
     }
 
     return null;
+  }
+
+  /**
+   * AD_Reference id for the "List" reference type (fixed, pre-defined AD_Ref_List values).
+   */
+  private static final String REFERENCE_ID_LIST = "17";
+
+  /**
+   * Returns true if the column's reference is the "List" type — a fixed set of AD_Ref_List
+   * codes, as opposed to a numeric (Integer/Amount/Quantity) or Search/TableDir reference.
+   */
+  private static boolean isListReference(Column adColumn) {
+    return adColumn.getReference() != null
+        && REFERENCE_ID_LIST.equals(adColumn.getReference().getId());
   }
 
   /**
@@ -1010,8 +1034,13 @@ public class NeoDefaultsService {
     // Coerce numeric String defaults to their proper Java type so DAL validation passes.
     // SQL defaults (e.g. lineNo from COALESCE(MAX(Line),0)+10) arrive as String from rs.getString().
     // Non-FK numeric columns must be Long or BigDecimal — never String — when handed to the DAL.
+    // List-reference columns (e.g. Invoicegrouping, a 15-digit binary code) are excluded: their
+    // AD_Ref_List values are opaque codes that happen to look numeric, and parsing them as
+    // BigDecimal collapses leading zeros/length (e.g. "000000000000000" -> 0L), producing a
+    // value that matches none of the column's real list options.
     Object valueToStore = resolved;
-    if (resolved instanceof String && !col.getDBColumnName().toUpperCase().endsWith("_ID")) {
+    if (resolved instanceof String && !col.getDBColumnName().toUpperCase().endsWith("_ID")
+        && !isListReference(col)) {
       String strVal = ((String) resolved).trim();
       try {
         valueToStore = new java.math.BigDecimal(strVal).longValueExact();
