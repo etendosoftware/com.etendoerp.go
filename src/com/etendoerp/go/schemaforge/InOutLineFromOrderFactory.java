@@ -44,6 +44,15 @@ final class InOutLineFromOrderFactory {
    * <p>Returning {@code null} (instead of throwing or returning ZERO with a
    * separate flag) keeps the caller loop tight: "fetch qty, skip if null,
    * otherwise create line".
+   *
+   * <p><b>ETP-4722:</b> ordered/delivered quantities can be NEGATIVE since
+   * ETP-4567 removed the old {@code min: 0} constraint on order lines (e.g.
+   * a return-style line on a Purchase Order or Sales Order). "Pending" then
+   * means "not yet delivered in either direction", so the line must be kept
+   * whenever {@code pending} is non-zero — not only when it's strictly
+   * positive. A strictly-positive check silently dropped every
+   * negative-quantity line from the generated Goods Receipt / Goods
+   * Shipment, because {@code pending} for such a line is itself negative.
    */
   static BigDecimal pendingQuantityFor(OrderLine orderLine) {
     if (!orderLine.isActive() || orderLine.getProduct() == null || orderLine.getUOM() == null) {
@@ -56,7 +65,7 @@ final class InOutLineFromOrderFactory {
     BigDecimal deliveredQty = orderLine.getDeliveredQuantity() != null
         ? orderLine.getDeliveredQuantity() : BigDecimal.ZERO;
     BigDecimal pending = orderedQty.subtract(deliveredQty);
-    return pending.compareTo(BigDecimal.ZERO) > 0 ? pending : null;
+    return pending.compareTo(BigDecimal.ZERO) != 0 ? pending : null;
   }
 
   /**
