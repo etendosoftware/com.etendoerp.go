@@ -326,31 +326,10 @@ public class FinancialAccountHandler implements NeoHandler {
 
     Set<String> visibleIds = new java.util.LinkedHashSet<>();
     for (int i = 0; i < dataArr.length(); i++) {
-      JSONObject rec = dataArr.getJSONObject(i);
-      String id = StringUtils.trimToNull(rec.optString("id", null));
-      // A row with no id cannot be correlated with the loaders; keep the historical
-      // contract (the flag is always present, defaulting to false) instead of omitting it.
-      rec.put(FIELD_HAS_TRANSACTIONS, id != null && withTransactions.contains(id));
-      if (id == null) {
-        continue;
+      String correlatedId = enrichRecord(dataArr.getJSONObject(i), byId, pendingByAccount, withTransactions);
+      if (correlatedId != null) {
+        visibleIds.add(correlatedId);
       }
-      rec.put(FIELD_PENDING_COUNT, pendingByAccount.getOrDefault(id, 0));
-      // isNull() first: optString() on a JSON null yields the literal "null" string,
-      // which the list would render as text under the account type.
-      rec.put(FIELD_IBAN_ALIAS, rec.isNull(FIELD_IBAN) ? "" : rec.optString(FIELD_IBAN, ""));
-
-      FinancialAccountsPageHandler.AccountRow row = byId.get(id);
-      if (row == null) {
-        continue;
-      }
-      rec.put(FIELD_PSD2_CONNECTED, row.psd2Connected);
-      rec.put(FIELD_PSD2_PENDING, row.psd2Pending);
-      rec.put(FIELD_CURRENCY_ISO, row.currency.iso);
-      rec.put(FIELD_CURRENCY_ID, row.currency.id);
-      rec.put(FIELD_IS_DEFAULT, row.isDefault);
-      rec.put(FIELD_MASKED_PAN, row.maskedPan);
-      rec.put(FIELD_ACTIVE, row.active);
-      visibleIds.add(id);
     }
 
     // Iterate `byId` (loader order: isdefault DESC, name ASC) rather than the CRUD's
@@ -367,6 +346,45 @@ public class FinancialAccountHandler implements NeoHandler {
     if (envelope != null) {
       envelope.put(FIELD_SUMMARY, loaders.buildSummary(visible, pendingByAccount));
     }
+  }
+
+  /**
+   * Enriches ONE GET row with the derived list fields, using the already-loaded lookups.
+   *
+   * <p>Extracted from {@link #injectDerivedFields}'s loop so the two ways a row can fail to
+   * correlate — no id at all, or an id the account loader does not know — read as guard
+   * clauses instead of the two {@code continue} statements they used to be (Sonar S135
+   * allows at most one per loop).
+   *
+   * @return the account id when the row correlated with the loaders and therefore counts
+   *         towards {@code summary}, or {@code null} when it did not.
+   */
+  private String enrichRecord(JSONObject rec, Map<String, FinancialAccountsPageHandler.AccountRow> byId,
+      Map<String, Integer> pendingByAccount, Set<String> withTransactions) throws JSONException {
+    String id = StringUtils.trimToNull(rec.optString("id", null));
+    // A row with no id cannot be correlated with the loaders; keep the historical
+    // contract (the flag is always present, defaulting to false) instead of omitting it.
+    rec.put(FIELD_HAS_TRANSACTIONS, id != null && withTransactions.contains(id));
+    if (id == null) {
+      return null;
+    }
+    rec.put(FIELD_PENDING_COUNT, pendingByAccount.getOrDefault(id, 0));
+    // isNull() first: optString() on a JSON null yields the literal "null" string,
+    // which the list would render as text under the account type.
+    rec.put(FIELD_IBAN_ALIAS, rec.isNull(FIELD_IBAN) ? "" : rec.optString(FIELD_IBAN, ""));
+
+    FinancialAccountsPageHandler.AccountRow row = byId.get(id);
+    if (row == null) {
+      return null;
+    }
+    rec.put(FIELD_PSD2_CONNECTED, row.psd2Connected);
+    rec.put(FIELD_PSD2_PENDING, row.psd2Pending);
+    rec.put(FIELD_CURRENCY_ISO, row.currency.iso);
+    rec.put(FIELD_CURRENCY_ID, row.currency.id);
+    rec.put(FIELD_IS_DEFAULT, row.isDefault);
+    rec.put(FIELD_MASKED_PAN, row.maskedPan);
+    rec.put(FIELD_ACTIVE, row.active);
+    return id;
   }
 
   /**
