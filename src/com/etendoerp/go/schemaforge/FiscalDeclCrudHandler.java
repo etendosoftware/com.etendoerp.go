@@ -17,6 +17,7 @@
 package com.etendoerp.go.schemaforge;
 
 import java.io.BufferedReader;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -53,9 +54,12 @@ class FiscalDeclCrudHandler {
    * 303 submission attempt (see {@link Fiscal303BoxesHandler#handleSubmit} /
    * {@link #replaceIncidents}). Referenced by its raw entity-name string rather than a generated
    * entity class — {@code OBDal.createQuery(String, ...)} resolves it dynamically, so this code
-   * has no compile-time dependency on a {@code src-gen} class for the table.
+   * has no compile-time dependency on a {@code src-gen} class for the table. Must match
+   * {@code AD_Table.tablename} exactly (case-sensitive) — Postgres folds unquoted identifiers to
+   * lowercase on {@code CREATE TABLE}, so this is {@code etgo_fiscal_decl_incident}, not the
+   * mixed-case name passed to the table-creation webhook.
    */
-  static final String ENTITY_FISCAL_DECL_INCIDENT = "ETGO_Fiscal_Decl_Incident";
+  static final String ENTITY_FISCAL_DECL_INCIDENT = "etgo_fiscal_decl_incident";
   /**
    * Java property name for the FK column back to {@code ETGO_Fiscal_Decl}. Etendo derives this
    * from the AD_Element name assigned when the column is created via {@code /etendo:alter-db}
@@ -261,12 +265,16 @@ class FiscalDeclCrudHandler {
   }
 
   /**
-   * Deletes every existing incident row for {@code decl}, then inserts one row per entry in
-   * {@code errors} (each parsed via {@link #splitAeatError}). Called on EVERY submission attempt
-   * (test mode and production alike) by {@code Fiscal303BoxesHandler#handleSubmit}, regardless of
-   * whether the attempt succeeded — an empty {@code errors} list is the success case and simply
-   * leaves the declaration with no incident rows after the delete step. Self-contained (commits
-   * its own transaction), matching the convention already used by {@link #handleDeclPost}/
+   * Deletes every existing incident row for {@code decl}, then inserts one row per DISTINCT
+   * entry in {@code errors} (each parsed via {@link #splitAeatError}) — AEAT's own ServValiDos
+   * test/validation response has been observed repeating the exact same error string more than
+   * once (e.g. {@code E010063} twice for the same declaration); deduplicating here (order
+   * preserved) keeps the Incidencias tab showing one row per distinct problem rather than
+   * faithfully mirroring AEAT's duplication. Called on EVERY submission attempt (test mode and
+   * production alike) by {@code Fiscal303BoxesHandler#handleSubmit}, regardless of whether the
+   * attempt succeeded — an empty {@code errors} list is the success case and simply leaves the
+   * declaration with no incident rows after the delete step. Self-contained (commits its own
+   * transaction), matching the convention already used by {@link #handleDeclPost}/
    * {@link #handleDeclPut}/{@link #handleDeclDelete} in this class.
    */
   void replaceIncidents(BaseOBObject decl, List<String> errors) {
@@ -274,7 +282,7 @@ class FiscalDeclCrudHandler {
     for (BaseOBObject inc : queryIncidents(declId)) {
       OBDal.getInstance().remove(inc);
     }
-    for (String raw : errors) {
+    for (String raw : new LinkedHashSet<>(errors)) {
       String[] parsed = splitAeatError(raw);
       BaseOBObject inc = (BaseOBObject) OBProvider.getInstance().get(ENTITY_FISCAL_DECL_INCIDENT);
       inc.set(PROPERTY_CLIENT, OBContext.getOBContext().getCurrentClient());
