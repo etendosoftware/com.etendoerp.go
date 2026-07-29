@@ -42,6 +42,7 @@ import org.openbravo.dal.service.OBDal;
 import org.openbravo.database.ConnectionProvider;
 import org.openbravo.erpCommon.ad_forms.AcctServer;
 import org.openbravo.erpCommon.utility.OBError;
+import org.openbravo.erpCommon.utility.OBMessageUtils;
 import org.openbravo.financial.ResetAccounting;
 import org.openbravo.model.ad.access.User;
 import org.openbravo.model.ad.system.Client;
@@ -185,6 +186,104 @@ public class DocumentPostingServiceTest {
       assertTrue(r.message().contains("Account could not be found."));
       assertTrue(r.message().contains("Fernet Branca S.A."));
       assertTrue(r.message().contains("Proveedores Generales"));
+    }
+  }
+
+  /**
+   * ETP-4706: the Business Partner / BP Group enrichment text must be resolved from the
+   * {@code AD_MESSAGE} catalog via {@code OBMessageUtils.messageBD} — the same pattern used by
+   * sibling handlers ({@code PriceListHeaderHandler}, {@code AbstractInvoiceHeaderHandler}) —
+   * instead of a hardcoded Java {@code String.format} literal. This is proven by mocking
+   * {@code messageBD} to return templates that do NOT match the old literal English wording: if
+   * the production code still built the string with {@code String.format}, this assertion would
+   * fail because the mocked catalog text would never appear in the result.
+   */
+  @Test
+  public void postEnrichesInvalidAccountMessageViaMessageCatalogWhenGroupPresent() throws Exception {
+    DocumentPostingService svc = new DocumentPostingService();
+
+    ConnectionProvider conn = mock(ConnectionProvider.class);
+    Connection con = mock(Connection.class);
+    when(conn.getTransactionConnection()).thenReturn(con);
+
+    AcctServer acct = mock(AcctServer.class);
+    acct.errors = 1;
+    acct.C_BPartner_ID = "bp-1";
+    when(acct.post(anyString(), eq(false), any(), any(), any())).thenReturn(true);
+    when(acct.getStatus()).thenReturn(AcctServer.STATUS_InvalidAccount);
+    OBError err = new OBError();
+    err.setMessage("Account could not be found.");
+    when(acct.getMessageResult()).thenReturn(err);
+
+    BusinessPartner bp = mock(BusinessPartner.class);
+    when(bp.getName()).thenReturn("Fernet Branca S.A.");
+    Category bpGroup = mock(Category.class);
+    when(bpGroup.getName()).thenReturn("Proveedores Generales");
+    when(bp.getBusinessPartnerCategory()).thenReturn(bpGroup);
+
+    OBDal obDal = mock(OBDal.class);
+    when(obDal.get(BusinessPartner.class, "bp-1")).thenReturn(bp);
+
+    try (MockedStatic<OBContext> obc = mockStatic(OBContext.class);
+        MockedStatic<AcctServer> acctStatic = mockStatic(AcctServer.class);
+        MockedStatic<OBDal> obDalStatic = mockStatic(OBDal.class);
+        MockedStatic<OBMessageUtils> msgMock = mockStatic(OBMessageUtils.class)) {
+      stubObContext(obc);
+      acctStatic.when(() -> AcctServer.get(anyString(), anyString(), anyString(), any(ConnectionProvider.class)))
+          .thenReturn(acct);
+      obDalStatic.when(OBDal::getInstance).thenReturn(obDal);
+      msgMock.when(() -> OBMessageUtils.messageBD("ETGO_InvalidAccountBpAndGroup"))
+          .thenReturn("[[CATALOG bp=@bpName@ group=@bpGroup@]]");
+
+      DocumentPostingService.PostResult r = svc.post("318", "rec-1", conn);
+
+      assertFalse(r.ok());
+      assertTrue(r.message().contains("Account could not be found."));
+      assertTrue(r.message().contains("[[CATALOG bp=Fernet Branca S.A. group=Proveedores Generales]]"));
+    }
+  }
+
+  /** Same as above, for the no-group fallback message key. */
+  @Test
+  public void postEnrichesInvalidAccountMessageViaMessageCatalogWhenGroupAbsent() throws Exception {
+    DocumentPostingService svc = new DocumentPostingService();
+
+    ConnectionProvider conn = mock(ConnectionProvider.class);
+    Connection con = mock(Connection.class);
+    when(conn.getTransactionConnection()).thenReturn(con);
+
+    AcctServer acct = mock(AcctServer.class);
+    acct.errors = 1;
+    acct.C_BPartner_ID = "bp-1";
+    when(acct.post(anyString(), eq(false), any(), any(), any())).thenReturn(true);
+    when(acct.getStatus()).thenReturn(AcctServer.STATUS_InvalidAccount);
+    OBError err = new OBError();
+    err.setMessage("Account could not be found.");
+    when(acct.getMessageResult()).thenReturn(err);
+
+    BusinessPartner bp = mock(BusinessPartner.class);
+    when(bp.getName()).thenReturn("Fernet Branca S.A.");
+    when(bp.getBusinessPartnerCategory()).thenReturn(null);
+
+    OBDal obDal = mock(OBDal.class);
+    when(obDal.get(BusinessPartner.class, "bp-1")).thenReturn(bp);
+
+    try (MockedStatic<OBContext> obc = mockStatic(OBContext.class);
+        MockedStatic<AcctServer> acctStatic = mockStatic(AcctServer.class);
+        MockedStatic<OBDal> obDalStatic = mockStatic(OBDal.class);
+        MockedStatic<OBMessageUtils> msgMock = mockStatic(OBMessageUtils.class)) {
+      stubObContext(obc);
+      acctStatic.when(() -> AcctServer.get(anyString(), anyString(), anyString(), any(ConnectionProvider.class)))
+          .thenReturn(acct);
+      obDalStatic.when(OBDal::getInstance).thenReturn(obDal);
+      msgMock.when(() -> OBMessageUtils.messageBD("ETGO_InvalidAccountBpOnly"))
+          .thenReturn("[[CATALOG bp=@bpName@]]");
+
+      DocumentPostingService.PostResult r = svc.post("318", "rec-1", conn);
+
+      assertFalse(r.ok());
+      assertTrue(r.message().contains("Account could not be found."));
+      assertTrue(r.message().contains("[[CATALOG bp=Fernet Branca S.A.]]"));
     }
   }
 
