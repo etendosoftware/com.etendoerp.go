@@ -72,6 +72,8 @@ final class NeoCsvExportService {
   // UTF-8 BOM so spreadsheet apps (Excel) detect the encoding and render accents.
   private static final String UTF8_BOM = "\uFEFF";
   private static final String CRLF = "\r\n";
+  // Spreadsheet formula triggers per CWE-1236; a leading match is neutralized with an apostrophe.
+  private static final String FORMULA_TRIGGER_CHARS = "=+-@";
 
   private NeoCsvExportService() {
   }
@@ -234,10 +236,29 @@ final class NeoCsvExportService {
     return iso.substring(8, 10) + "-" + iso.substring(5, 7) + "-" + iso.substring(0, 4);
   }
 
-  /** RFC 4180 field: always quoted, with inner quotes doubled. */
+  /**
+   * RFC 4180 field: always quoted, with inner quotes doubled. Neutralizes spreadsheet formula
+   * injection by prepending a single quote when starting with formula trigger characters.
+   */
   private static String csvField(String value) {
     String safe = value == null ? "" : value;
+    if (isFormulaInjection(safe)) {
+      safe = "'" + safe;
+    }
     return "\"" + safe.replace("\"", "\"\"") + "\"";
+  }
+
+  /**
+   * A cell is formula-sensitive when its first non-whitespace character is a spreadsheet
+   * formula trigger ({@code = + - @}). Leading whitespace/control characters (space, tab, CR,
+   * LF) are skipped first so a marker cannot hide behind them.
+   */
+  private static boolean isFormulaInjection(String value) {
+    int i = 0;
+    while (i < value.length() && Character.isWhitespace(value.charAt(i))) {
+      i++;
+    }
+    return i < value.length() && FORMULA_TRIGGER_CHARS.indexOf(value.charAt(i)) >= 0;
   }
 
   private static List<Column> parseColumns(String spec) {
