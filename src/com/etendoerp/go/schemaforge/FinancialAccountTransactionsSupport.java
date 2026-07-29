@@ -190,15 +190,6 @@ final class FinancialAccountTransactionsSupport {
     }
   }
 
-  static Date parseDate(String iso, Date fallback) {
-    if (StringUtils.isBlank(iso)) return fallback;
-    try {
-      return Date.from(Instant.parse(iso));
-    } catch (Exception e) {
-      return fallback;
-    }
-  }
-
   /**
    * Parses a civil (date-only) value like {@code "2026-07-16"} or {@code "2026-07-16T00:00:00Z"}
    * into a {@link Date} at the SERVER's local start-of-day. Using local midnight (instead of UTC

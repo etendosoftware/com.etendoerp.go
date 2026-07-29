@@ -23,6 +23,8 @@ import static org.junit.Assert.assertSame;
 import java.math.BigDecimal;
 import java.sql.Timestamp;
 import java.time.Instant;
+import java.time.LocalDate;
+import java.time.ZoneId;
 import java.util.Date;
 
 import org.junit.Test;
@@ -111,9 +113,23 @@ public class BankStatementsSupportTest {
   }
 
   @Test
-  public void parseIsoDateParsesValidInstant() {
-    Date expected = Date.from(Instant.parse("2026-06-04T00:00:00Z"));
+  public void parseIsoDateAnchorsToServerMidnightOnTheSameCalendarDay() {
+    // The frontend sends UTC midnight for the day the user picked (see ManualStatementModal.jsx's
+    // toIsoUtc). The stored value must be midnight of that SAME calendar day in the server's own
+    // timezone — not the verbatim UTC instant — so it survives round-tripping through a
+    // `timestamp without time zone` column without shifting to the previous day on a
+    // UTC-negative server (the ETP-4502 bug this guards against).
+    Date expected = Date.from(LocalDate.of(2026, 6, 4).atStartOfDay(ZoneId.systemDefault()).toInstant());
     assertEquals(expected, BankStatementsSupport.parseIsoDate("2026-06-04T00:00:00Z", new Date(0L)));
+  }
+
+  @Test
+  public void parseIsoDateUsesTheUtcCalendarDayEvenWithANonMidnightInstant() {
+    // A non-midnight instant still anchors to whatever calendar day it falls on in UTC — the
+    // frontend always sends midnight, but the parser's contract is defined by the UTC date, not
+    // the time-of-day component.
+    Date expected = Date.from(LocalDate.of(2026, 6, 4).atStartOfDay(ZoneId.systemDefault()).toInstant());
+    assertEquals(expected, BankStatementsSupport.parseIsoDate("2026-06-04T23:59:59Z", new Date(0L)));
   }
 
   // ── parseAmount ──────────────────────────────────────────────────────────
