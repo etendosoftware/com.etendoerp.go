@@ -178,8 +178,10 @@ class Fiscal303BoxesHandler extends AbstractFiscalHandler {
    * STRUCTURAL_PARAMS}) is forwarded verbatim into {@code inputParams} — these are the
    * AEAT-protocol-named identification/box-override params the frontend builds via its own
    * {@code IDENT_PARAM_MAP}/{@code BOX_PARAM_MAP} (e.g. {@code IBAN}, {@code BIC},
-   * {@code Special_Compensations}). Some declaration types (D/G/I/V/U/X) hard-require
-   * {@code IBAN} downstream in {@code AEAT303Report2014} — omitting it there throws.</p>
+   * {@code Special_Compensations}). Only declaration types {@code U}/{@code D}/{@code X}
+   * (Domiciliación / Devolución / Devolución transferencia extranjero) accept or require
+   * {@code IBAN} downstream in {@code AEAT303Report2014} — sending it for any other tipo (e.g.
+   * {@code I}) is rejected by AEAT with error {@code EDID065}.</p>
    *
    * @return the raw result map from {@code OBTL_TaxReport_I#generateElectronicFile}, with the
    *         flat file content under key {@code "file"}
