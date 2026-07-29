@@ -43,6 +43,7 @@ import com.etendoerp.go.schemaforge.NeoContext;
 import com.etendoerp.go.schemaforge.NeoEndpointType;
 import com.etendoerp.go.schemaforge.NeoHandler;
 import com.etendoerp.go.schemaforge.NeoResponse;
+import com.etendoerp.go.schemaforge.RectificativeDocTypeFlagService;
 import com.smf.ticketbai.data.TbaiConfig;
 
 /**
@@ -110,6 +111,8 @@ public class TbaiConfigSequenceHandler implements NeoHandler {
   private static final long SEQUENCE_START_NO = 1L;
   private static final long SEQUENCE_INCREMENT_BY = 1L;
 
+  private RectificativeDocTypeFlagService rectificativeService = new RectificativeDocTypeFlagService();
+
   /** No pre-hook behavior: this handler only reacts after the config record is persisted. */
   @Override
   public NeoResponse handle(NeoContext context) {
@@ -141,7 +144,14 @@ public class TbaiConfigSequenceHandler implements NeoHandler {
     } catch (Exception e) {
       log.warn("TbaiConfigSequenceHandler.afterHandle error: {}", e.getMessage(), e);
     }
-    return null;
+    // ETP-4536: flag the client's rectificative document types and sequences (own admin-mode /
+    // error handling). Independent of the TBAI chaining side effect above.
+    return rectificativeService.applyAfterConfigSave(context);
+  }
+
+  /** Package-private seam so unit tests can inject a mocked rectificative service. */
+  void setRectificativeService(RectificativeDocTypeFlagService rectificativeService) {
+    this.rectificativeService = rectificativeService;
   }
 
   /**

@@ -61,6 +61,8 @@ public class VerifactuConfigReadyHandler implements NeoHandler {
   private static final String METHOD_PUT = "PUT";
   private static final String METHOD_PATCH = "PATCH";
 
+  private RectificativeDocTypeFlagService rectificativeService = new RectificativeDocTypeFlagService();
+
   private static final String SELECT_IS_READY_SQL =
       "SELECT is_ready, in_vfactu_system FROM etvfac_verifactu_config "
           + "WHERE etvfac_verifactu_config_id = :id";
@@ -88,25 +90,28 @@ public class VerifactuConfigReadyHandler implements NeoHandler {
     }
 
     String recordId = resolveRecordId(context, method);
-    if (StringUtils.isBlank(recordId)) {
-      // Nothing to key the update on — the parent create/update already succeeded, so we
-      // just skip the auto-fill rather than fail the request.
-      return null;
-    }
-
-    try {
-      OBContext.setAdminMode(true);
+    if (StringUtils.isNotBlank(recordId)) {
       try {
-        markReadyIfNeeded(recordId);
-      } finally {
-        OBContext.restorePreviousMode();
+        OBContext.setAdminMode(true);
+        try {
+          markReadyIfNeeded(recordId);
+        } finally {
+          OBContext.restorePreviousMode();
+        }
+      } catch (Exception e) {
+        log.error("Error auto-filling Verifactu adoption date for record {}: {}",
+            recordId, e.getMessage(), e);
       }
-    } catch (Exception e) {
-      log.error("Error auto-filling Verifactu adoption date for record {}: {}",
-          recordId, e.getMessage(), e);
     }
-    // Best-effort side effect: never replace the original CRUD response.
-    return null;
+    // ETP-4536: flag the client's rectificative document types and sequences. Client-wide, so it
+    // runs regardless of whether the record id above could be resolved. Own admin-mode / error
+    // handling; returns warnings in the response or null to keep the original CRUD response.
+    return rectificativeService.applyAfterConfigSave(context);
+  }
+
+  /** Package-private seam so unit tests can inject a mocked rectificative service. */
+  void setRectificativeService(RectificativeDocTypeFlagService rectificativeService) {
+    this.rectificativeService = rectificativeService;
   }
 
   /**
