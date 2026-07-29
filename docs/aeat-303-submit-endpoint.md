@@ -217,34 +217,42 @@ declaration entity itself) is new. See the "Justificante" tab section in
 in the plan doc for the frontend wiring that surfaces this (the `receiptRefreshTick` refresh, since
 test mode has no status change to key off of).
 
-### AEAT validation errors — persisted on every attempt (`ETGO_Fiscal_Decl_Incident`, ETP-4456)
+### AEAT validation errors and warnings — persisted on every attempt (`ETGO_Fiscal_Decl_Incident`, ETP-4456)
 
 Unlike the declaration-record mutation above (production-success only), `handleSubmit` persists
-the AEAT-reported error list on **every** submission attempt — test mode and production, success
-or failure alike — via `replaceIncidents(decl, result.getErrors())` (`AbstractFiscalHandler` →
+BOTH the AEAT-reported error list AND warning list on **every** submission attempt — test mode and
+production, success or failure alike — via
+`replaceIncidents(decl, result.getErrors(), result.getWarnings())` (`AbstractFiscalHandler` →
 `FiscalDeclCrudHandler#replaceIncidents`), called right after `result` is obtained, unconditionally
 (not gated by `result.isSuccessful()`). `replaceIncidents` always deletes every existing
 `ETGO_Fiscal_Decl_Incident` row for the declaration first, then inserts one row per entry in
-`result.getErrors()` (each a raw `"CODE - message"` AEAT string, split via
-`FiscalDeclCrudHandler#splitAeatError`). A successful attempt has an empty error list, so the
-declaration simply ends up with zero incident rows — no separate success-path branch needed.
-Best-effort: wrapped in its own try/catch in `handleSubmit`, logged on failure, never allowed to
-mask the actual submission response already computed.
+`result.getErrors()` (tagged `severity = "block"`) followed by one row per entry in
+`result.getWarnings()` (tagged `severity = "warn"`) — each a raw `"CODE - message"` AEAT string,
+split via `FiscalDeclCrudHandler#splitAeatError`. Deduplication is applied independently per
+severity group — an error and a warning sharing the exact same raw text are persisted as two
+distinct rows, never collapsed. A successful attempt has both lists empty, so the declaration
+simply ends up with zero incident rows — no separate success-path branch needed. Best-effort:
+wrapped in its own try/catch in `handleSubmit`, logged on failure, never allowed to mask the
+actual submission response already computed.
 
-**New table `ETGO_Fiscal_Decl_Incident`:** `ETGO_Fiscal_Decl_Incident_ID` (PK, VARCHAR32) + the
+**Table `ETGO_Fiscal_Decl_Incident`:** `ETGO_Fiscal_Decl_Incident_ID` (PK, VARCHAR32) + the
 standard client/org/audit columns + `ETGO_Fiscal_Decl_ID` (FK to `ETGO_Fiscal_Decl`, Java property
 `fiscalDeclaration`) + `CODE` (VARCHAR, the AEAT error code, e.g. `35068` or `E010124`) + `MESSAGE`
-(long text — AEAT's free-text error description).
+(long text — AEAT's free-text error description) + `SEVERITY` (VARCHAR(200), added in this
+increment — `"block"` for errors, `"warn"` for warnings; a row with no/blank value defaults to
+`"block"` via `FiscalDeclCrudHandler#resolveSeverity`, covering rows persisted before this column
+existed).
 
-**New read endpoint:** `GET /fiscal303/incidents?id=<declId>` (also reachable as
-`/fiscal349/incidents` for free — same generic table, only 303 writes to it today) → ownership-
-checked the same way as `/fiscal303/declarations`, returns `{"data":[{"code","message"}, ...]}`.
-Consumed by the frontend's "Incidencias" tab — see the "Incidencias" tab section in
+**Read endpoint:** `GET /fiscal303/incidents?id=<declId>` (also reachable as `/fiscal349/incidents`
+for free — same generic table, only 303 writes to it today) → ownership-checked the same way as
+`/fiscal303/declarations`, returns `{"data":[{"code","message","severity"}, ...]}`. Consumed by the
+frontend's "Incidencias" tab — see the "Incidencias" tab section in
 `../../../schema_forge/docs/generated-custom-windows/fiscal-models.md`.
 
 **Semantics:** incidents are **replaced, not appended** — a second attempt with different AEAT
-errors fully replaces the first attempt's rows. A successful attempt (test or production) always
-leaves the declaration's incidents empty.
+errors/warnings fully replaces the first attempt's rows, for both severities together. A
+successful attempt (test or production) with no errors and no warnings always leaves the
+declaration's incidents empty.
 
 ### Known gaps (deliberate follow-ups, not bugs)
 

@@ -45,6 +45,10 @@
         <default/>
         <onCreateDefault/>
       </column>
+      <column name="SEVERITY" primaryKey="false" required="true" type="VARCHAR" size="200" autoIncrement="false">
+        <default><![CDATA[block]]></default>
+        <onCreateDefault/>
+      </column>
       <foreign-key foreignTable="AD_CLIENT" name="ETGO_CALDECLINCIDENT_LIENT_FK">
         <reference local="AD_CLIENT_ID" foreign="AD_CLIENT_ID"/>
       </foreign-key>

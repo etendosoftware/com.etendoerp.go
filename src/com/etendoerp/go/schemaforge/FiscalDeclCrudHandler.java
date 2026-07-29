@@ -70,6 +70,19 @@ class FiscalDeclCrudHandler {
   static final String PROPERTY_INCIDENT_DECL = "fiscalDeclaration";
   static final String PROPERTY_INCIDENT_CODE = "code";
   static final String PROPERTY_INCIDENT_MESSAGE = "message";
+  /**
+   * Java property for the {@code severity} column added to {@code ETGO_Fiscal_Decl_Incident}
+   * (ETP-4456, AEAT warnings persistence) — distinguishes AEAT blocking errors from non-blocking
+   * warnings ({@code avisos}/{@code advertencias}). Values are exactly {@link #SEVERITY_BLOCK} /
+   * {@link #SEVERITY_WARN} — chosen to match the frontend's existing severity vocabulary
+   * ({@code IncidentsTab}, {@code fiscalModelsUtils.js}) verbatim, so no translation/mapping layer
+   * is needed on either side of the wire.
+   */
+  static final String PROPERTY_INCIDENT_SEVERITY = "severity";
+  /** Blocking AEAT error — matches {@code AEAT303SubmissionResult#getErrors()}. */
+  static final String SEVERITY_BLOCK = "block";
+  /** Non-blocking AEAT warning — matches {@code AEAT303SubmissionResult#getWarnings()}. */
+  static final String SEVERITY_WARN = "warn";
 
   /** Matches a raw AEAT error string as {@code "<code> - <message>"}, e.g. {@code "35068 - El
    * resultado a ingresar..."} or {@code "E010124 - Para periodo mensual..."} — the code token is
@@ -89,6 +102,7 @@ class FiscalDeclCrudHandler {
   private static final String FILE_EXTERNAL_KEY = "fileExternal";
   private static final String CODE_KEY          = "code";
   private static final String MESSAGE_KEY       = "message";
+  private static final String SEVERITY_KEY      = "severity";
   private static final String MISSING_ID_PARAM  = "Missing param: id";
   private static final String DECL_NOT_FOUND_PREFIX = "Declaration not found: ";
 
@@ -226,9 +240,12 @@ class FiscalDeclCrudHandler {
   /**
    * Handles {@code GET /fiscal303/incidents?id=<declId>} (also reachable, harmlessly, as
    * {@code /fiscal349/incidents} — the underlying table is generic across models, but only the
-   * Modelo 303 telematic submission flow writes to it today): returns the AEAT validation-error
-   * rows currently persisted for the declaration, as {@code {"data":[{"code","message"}, ...]}}.
-   * Read-only — the write path lives in {@link #replaceIncidents}, called from
+   * Modelo 303 telematic submission flow writes to it today): returns the AEAT validation rows
+   * currently persisted for the declaration, as
+   * {@code {"data":[{"code","message","severity"}, ...]}} — {@code severity} is either
+   * {@link #SEVERITY_BLOCK} (AEAT error) or {@link #SEVERITY_WARN} (AEAT warning/aviso), added in
+   * ETP-4456 so the "Incidencias" tab can render the two distinctly instead of assuming every row
+   * is blocking. Read-only — the write path lives in {@link #replaceIncidents}, called from
    * {@code Fiscal303BoxesHandler#handleSubmit} on every submission attempt.
    */
   void handleIncidents(String method, HttpServletRequest request, HttpServletResponse response)
@@ -247,13 +264,24 @@ class FiscalDeclCrudHandler {
     JSONArray arr = new JSONArray();
     for (BaseOBObject inc : queryIncidents(id)) {
       JSONObject o = new JSONObject();
-      o.put(CODE_KEY,    asString(inc.get(PROPERTY_INCIDENT_CODE)));
-      o.put(MESSAGE_KEY, asString(inc.get(PROPERTY_INCIDENT_MESSAGE)));
+      o.put(CODE_KEY,     asString(inc.get(PROPERTY_INCIDENT_CODE)));
+      o.put(MESSAGE_KEY,  asString(inc.get(PROPERTY_INCIDENT_MESSAGE)));
+      o.put(SEVERITY_KEY, resolveSeverity(inc));
       arr.put(o);
     }
     JSONObject out = new JSONObject();
     out.put("data", arr);
     response.getWriter().write(out.toString());
+  }
+
+  /**
+   * Reads the persisted {@code severity} value, defaulting to {@link #SEVERITY_BLOCK} for any row
+   * that predates this column (blank/null) — preserves the pre-ETP-4456 behavior for old rows
+   * rather than surfacing an empty string to the frontend.
+   */
+  private static String resolveSeverity(BaseOBObject inc) {
+    String severity = asString(inc.get(PROPERTY_INCIDENT_SEVERITY));
+    return StringUtils.isNotBlank(severity) ? severity : SEVERITY_BLOCK;
   }
 
   /** All {@code ETGO_Fiscal_Decl_Incident} rows for {@code declId}, oldest first. */
@@ -266,23 +294,47 @@ class FiscalDeclCrudHandler {
 
   /**
    * Deletes every existing incident row for {@code decl}, then inserts one row per DISTINCT
-   * entry in {@code errors} (each parsed via {@link #splitAeatError}) — AEAT's own ServValiDos
-   * test/validation response has been observed repeating the exact same error string more than
-   * once (e.g. {@code E010063} twice for the same declaration); deduplicating here (order
-   * preserved) keeps the Incidencias tab showing one row per distinct problem rather than
-   * faithfully mirroring AEAT's duplication. Called on EVERY submission attempt (test mode and
-   * production alike) by {@code Fiscal303BoxesHandler#handleSubmit}, regardless of whether the
-   * attempt succeeded — an empty {@code errors} list is the success case and simply leaves the
-   * declaration with no incident rows after the delete step. Self-contained (commits its own
+   * entry in {@code errors} (tagged {@link #SEVERITY_BLOCK}) followed by one row per DISTINCT
+   * entry in {@code warnings} (tagged {@link #SEVERITY_WARN}) — each parsed via
+   * {@link #splitAeatError}. AEAT's own ServValiDos test/validation response has been observed
+   * repeating the exact same error string more than once (e.g. {@code E010063} twice for the same
+   * declaration); deduplicating here (order preserved, {@link LinkedHashSet}) keeps the
+   * Incidencias tab showing one row per distinct problem rather than faithfully mirroring AEAT's
+   * duplication. Dedup is applied INDEPENDENTLY per list — an error and a warning that happen to
+   * share the exact same {@code "CODE - message"} text are NOT collapsed into a single row, since
+   * they represent two distinct severities of the same underlying finding.
+   *
+   * <p>Called on EVERY submission attempt (test mode and production alike) by
+   * {@code Fiscal303BoxesHandler#handleSubmit}, regardless of whether the attempt succeeded — a
+   * successful submission with no errors and no warnings is the success case and simply leaves
+   * the declaration with no incident rows after the delete step. Self-contained (commits its own
    * transaction), matching the convention already used by {@link #handleDeclPost}/
    * {@link #handleDeclPut}/{@link #handleDeclDelete} in this class.
+   *
+   * @param errors   raw AEAT error strings ({@code "CODE - message"}), persisted as
+   *                 {@link #SEVERITY_BLOCK}. Never {@code null} (pass {@link java.util.Collections#emptyList()}).
+   * @param warnings raw AEAT warning strings ({@code "CODE - message"}), persisted as
+   *                 {@link #SEVERITY_WARN}. Never {@code null} (pass {@link java.util.Collections#emptyList()}).
    */
-  void replaceIncidents(BaseOBObject decl, List<String> errors) {
+  void replaceIncidents(BaseOBObject decl, List<String> errors, List<String> warnings) {
     String declId = String.valueOf(decl.getId());
     for (BaseOBObject inc : queryIncidents(declId)) {
       OBDal.getInstance().remove(inc);
     }
-    for (String raw : new LinkedHashSet<>(errors)) {
+    insertIncidents(decl, errors, SEVERITY_BLOCK);
+    insertIncidents(decl, warnings, SEVERITY_WARN);
+    OBDal.getInstance().commitAndClose();
+  }
+
+  /**
+   * Inserts one {@code ETGO_Fiscal_Decl_Incident} row per DISTINCT (order-preserving) entry in
+   * {@code rawEntries}, tagged with {@code severity}. Shared insertion logic for both the error
+   * and warning groups in {@link #replaceIncidents} — deliberately does NOT touch existing rows
+   * (the caller is responsible for the delete step), so calling it twice with different severities
+   * accumulates rather than replaces.
+   */
+  private void insertIncidents(BaseOBObject decl, List<String> rawEntries, String severity) {
+    for (String raw : new LinkedHashSet<>(rawEntries)) {
       String[] parsed = splitAeatError(raw);
       BaseOBObject inc = (BaseOBObject) OBProvider.getInstance().get(ENTITY_FISCAL_DECL_INCIDENT);
       inc.set(PROPERTY_CLIENT, OBContext.getOBContext().getCurrentClient());
@@ -292,9 +344,9 @@ class FiscalDeclCrudHandler {
       inc.set(PROPERTY_INCIDENT_DECL, decl);
       inc.set(PROPERTY_INCIDENT_CODE, parsed[0]);
       inc.set(PROPERTY_INCIDENT_MESSAGE, parsed[1]);
+      inc.set(PROPERTY_INCIDENT_SEVERITY, severity);
       OBDal.getInstance().save(inc);
     }
-    OBDal.getInstance().commitAndClose();
   }
 
   /**

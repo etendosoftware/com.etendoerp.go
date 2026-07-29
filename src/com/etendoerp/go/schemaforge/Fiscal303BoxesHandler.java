@@ -414,18 +414,20 @@ class Fiscal303BoxesHandler extends AbstractFiscalHandler {
   }
 
   /**
-   * Persists (delete-then-reinsert) {@code result}'s AEAT error list into
+   * Persists (delete-then-reinsert) {@code result}'s AEAT error AND warning lists into
    * {@code ETGO_Fiscal_Decl_Incident} for {@code decl} — called on EVERY submission attempt
    * (test mode and production alike) by {@link #handleSubmit}, per explicit product decision
    * (ETP-4456), so the "Incidencias" tab always reflects only the LATEST attempt, never a stale
-   * accumulation from a prior try. An empty error list (the success case) simply leaves the
-   * declaration with no incident rows. Best-effort: a persistence failure here is logged and must
-   * never mask the actual submission outcome {@code handleSubmit} already computed.
+   * accumulation from a prior try. Errors are tagged {@code block}, warnings {@code warn} (see
+   * {@link FiscalDeclCrudHandler#replaceIncidents}). Empty error AND warning lists (the clean
+   * success case) simply leave the declaration with no incident rows. Best-effort: a persistence
+   * failure here is logged and must never mask the actual submission outcome {@code handleSubmit}
+   * already computed.
    */
   private void persistIncidentsBestEffort(FiscalDecl decl, String declId,
       AEAT303SubmissionResult result) {
     try {
-      replaceIncidents(decl, result.getErrors());
+      replaceIncidents(decl, result.getErrors(), result.getWarnings());
     } catch (Exception e) {
       log.error("Could not persist AEAT incidents for declaration " + declId, e);
     }

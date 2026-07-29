@@ -39,6 +39,7 @@ import java.io.PrintWriter;
 import java.io.StringReader;
 import java.io.StringWriter;
 import java.math.BigDecimal;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
@@ -1093,6 +1094,114 @@ public class Fiscal303SubmitHandlerTest {
       verify(obDal).remove(staleIncFromPriorFailedAttempt);
       // Empty errors list -> delete only, nothing (re)inserted.
       verify(obDal, never()).save(argThat(o -> o != decl && o != null && o != staleIncFromPriorFailedAttempt));
+    }
+  }
+
+  /**
+   * A submission whose AEAT response carries BOTH errors and warnings (e.g. a validation attempt
+   * that is rejected but also returns informational avisos) must persist both groups, tagged with
+   * the correct severity — {@code result.getErrors()} as {@code block}, {@code
+   * result.getWarnings()} as {@code warn}. End-to-end via {@code handle("submit", ...)}, matching
+   * {@link #testHandleSubmit_testModeAeatError_persistsIncidents} but exercising the previously
+   * discarded warnings channel.
+   */
+  @SuppressWarnings("unchecked")
+  @Test
+  public void testHandleSubmit_testModeAeatErrorAndWarning_persistsBothSeverities() throws Exception {
+    HttpServletResponse res = responseCapturing(new StringWriter());
+    HttpServletRequest req = requestFor("2026", "T2", "decl-1", "{\"testMode\":true}");
+    Fiscal303BoxesHandler h = new Fiscal303BoxesHandler(mock(NeoServlet.class));
+    FiscalDecl decl = matchingDecl("client1", "org1");
+    when(decl.getId()).thenReturn("decl-1");
+
+    AEAT303SubmissionResult mixedResult = new AEAT303SubmissionResult();
+    mixedResult.setStatus(AEAT303SubmissionResult.Status.ERROR);
+    mixedResult.setTestMode(true);
+    mixedResult.addError("35068 - El resultado a ingresar es distinto de cero.");
+    mixedResult.addWarning("A001 - Aviso informativo AEAT.");
+
+    BaseOBObject newInc = mock(BaseOBObject.class);
+
+    try (MockedStatic<OBContext> ctxMock = mockContext("client1", "org1");
+        MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+        MockedStatic<OBProvider> providerMock = mockStatic(OBProvider.class);
+        MockedConstruction<AEAT303SubmissionService> serviceMock =
+            mockConstruction(AEAT303SubmissionService.class,
+                (mockService, ctx) -> when(
+                    mockService.submitValidation(anyString(), anyString(), anyString(), anyString()))
+                    .thenReturn(mixedResult))) {
+      OBDal obDal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      when(obDal.get(FiscalDecl.class, "decl-1")).thenReturn(decl);
+      when(obDal.get(Organization.class, "org1")).thenReturn(mock(Organization.class));
+      stubFileGeneration(obDal);
+
+      OBQuery<BaseOBObject> incQuery = mock(OBQuery.class);
+      when(obDal.createQuery(eq(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL_INCIDENT), anyString())).thenReturn(incQuery);
+      when(incQuery.list()).thenReturn(Collections.emptyList());
+      OBProvider provider = mock(OBProvider.class);
+      providerMock.when(OBProvider::getInstance).thenReturn(provider);
+      when(provider.get(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL_INCIDENT)).thenReturn(newInc);
+
+      h.handle("submit", "POST", req, res);
+
+      verify(obDal, times(2)).save(newInc);
+      verify(newInc).set("code", "35068");
+      verify(newInc).set(FiscalDeclCrudHandler.PROPERTY_INCIDENT_SEVERITY,
+          FiscalDeclCrudHandler.SEVERITY_BLOCK);
+      verify(newInc).set("code", "A001");
+      verify(newInc).set("message", "Aviso informativo AEAT.");
+      verify(newInc).set(FiscalDeclCrudHandler.PROPERTY_INCIDENT_SEVERITY,
+          FiscalDeclCrudHandler.SEVERITY_WARN);
+    }
+  }
+
+  /**
+   * A subsequent successful attempt (no errors, no warnings) after a prior mixed attempt must
+   * clear BOTH severities — not just the blocking ones. Regression guard for a partial-clear bug
+   * (e.g. only deleting {@code block} rows and leaving stale {@code warn} rows behind).
+   */
+  @SuppressWarnings("unchecked")
+  @Test
+  public void testHandleSubmit_successAfterMixedAttempt_clearsBothSeverities() throws Exception {
+    HttpServletResponse res = responseCapturing(new StringWriter());
+    HttpServletRequest req = requestFor("2026", "T2", "decl-1", "{\"testMode\":true}");
+    Fiscal303BoxesHandler h = new Fiscal303BoxesHandler(mock(NeoServlet.class));
+    FiscalDecl decl = matchingDecl("client1", "org1");
+    when(decl.getId()).thenReturn("decl-1");
+
+    AEAT303SubmissionResult successResult = new AEAT303SubmissionResult();
+    successResult.setStatus(AEAT303SubmissionResult.Status.SUCCESS);
+    successResult.setTestMode(true);
+    // No errors, no warnings added — the clean success case.
+
+    BaseOBObject staleBlockInc = mock(BaseOBObject.class);
+    BaseOBObject staleWarnInc = mock(BaseOBObject.class);
+
+    try (MockedStatic<OBContext> ctxMock = mockContext("client1", "org1");
+        MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+        MockedConstruction<AEAT303SubmissionService> serviceMock =
+            mockConstruction(AEAT303SubmissionService.class,
+                (mockService, ctx) -> when(
+                    mockService.submitValidation(anyString(), anyString(), anyString(), anyString()))
+                    .thenReturn(successResult))) {
+      OBDal obDal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      when(obDal.get(FiscalDecl.class, "decl-1")).thenReturn(decl);
+      when(obDal.get(Organization.class, "org1")).thenReturn(mock(Organization.class));
+      stubFileGeneration(obDal);
+
+      OBQuery<BaseOBObject> incQuery = mock(OBQuery.class);
+      when(obDal.createQuery(eq(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL_INCIDENT), anyString())).thenReturn(incQuery);
+      // Simulates rows of BOTH severities left over from the prior mixed attempt.
+      when(incQuery.list()).thenReturn(Arrays.asList(staleBlockInc, staleWarnInc));
+
+      h.handle("submit", "POST", req, res);
+
+      verify(obDal).remove(staleBlockInc);
+      verify(obDal).remove(staleWarnInc);
+      verify(obDal, never()).save(argThat(o -> o != decl && o != null
+          && o != staleBlockInc && o != staleWarnInc));
     }
   }
 

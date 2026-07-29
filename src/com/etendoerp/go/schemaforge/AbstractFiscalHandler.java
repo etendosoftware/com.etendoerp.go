@@ -140,15 +140,17 @@ abstract class AbstractFiscalHandler {
   protected abstract String getModelKey();
 
   /**
-   * Replaces the persisted AEAT validation-error rows ({@code ETGO_Fiscal_Decl_Incident}) for a
+   * Replaces the persisted AEAT validation rows ({@code ETGO_Fiscal_Decl_Incident}) for a
    * declaration: deletes every existing row for it, then inserts one row per entry in
-   * {@code errors} (parsed as {@code "CODE - message"}). Called by {@link Fiscal303BoxesHandler}
-   * on EVERY submission attempt (test and production alike) — an empty {@code errors} list simply
-   * leaves the declaration with no incident rows. See {@link FiscalDeclCrudHandler#replaceIncidents}
-   * for the persistence details (shared with the read path, {@code GET /fiscal303/incidents}).
+   * {@code errors} (severity {@code block}) followed by one row per entry in {@code warnings}
+   * (severity {@code warn}), both parsed as {@code "CODE - message"}. Called by
+   * {@link Fiscal303BoxesHandler} on EVERY submission attempt (test and production alike) — empty
+   * {@code errors} and {@code warnings} lists simply leave the declaration with no incident rows.
+   * See {@link FiscalDeclCrudHandler#replaceIncidents} for the persistence details (shared with
+   * the read path, {@code GET /fiscal303/incidents}).
    */
-  protected void replaceIncidents(BaseOBObject decl, List<String> errors) {
-    declHandler.replaceIncidents(decl, errors);
+  protected void replaceIncidents(BaseOBObject decl, List<String> errors, List<String> warnings) {
+    declHandler.replaceIncidents(decl, errors, warnings);
   }
 
   // ── shared helpers ────────────────────────────────────────────────
