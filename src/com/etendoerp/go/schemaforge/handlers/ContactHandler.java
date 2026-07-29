@@ -16,10 +16,6 @@
  */
 package com.etendoerp.go.schemaforge.handlers;
 
-import java.sql.Connection;
-import java.sql.PreparedStatement;
-import java.sql.ResultSet;
-
 import javax.inject.Named;
 
 import org.apache.commons.lang3.StringUtils;
@@ -27,10 +23,9 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.base.exception.OBException;
-import org.openbravo.dal.service.OBDal;
 
+import com.etendoerp.go.schemaforge.AbstractPersonNameHandler;
 import com.etendoerp.go.schemaforge.NeoContext;
-import com.etendoerp.go.schemaforge.NeoHandler;
 import com.etendoerp.go.schemaforge.NeoResponse;
 
 /**
@@ -42,8 +37,9 @@ import com.etendoerp.go.schemaforge.NeoResponse;
  * <ul>
  *   <li><b>{@code name}</b> — {@code AD_User.Name} is mandatory but declared
  *       {@code readOnly / form: false} in {@code decisions.json}. Derived as
- *       {@code firstName + " " + lastName} when the effective name is blank
- *       (body value on POST, persisted value on PATCH/PUT).</li>
+ *       {@code firstName + " " + lastName} by {@link AbstractPersonNameHandler#deriveName}
+ *       when the effective name is blank (body value on POST, persisted value on
+ *       PATCH/PUT).</li>
  *   <li><b>{@code username}</b> — {@code AD_User.Username} is AD-mandatory and is not
  *       declared as a Schema Forge field at all, so
  *       {@code NeoHiddenMandatoryDefaultsResolver} cannot resolve it (the column has no
@@ -72,26 +68,47 @@ import com.etendoerp.go.schemaforge.NeoResponse;
  * <p>Registered via {@code JAVA_QUALIFIER = 'contactHandler'} on the ETGO_SF_ENTITY
  * record for the contacts spec's {@code contact} entity.
  *
- * @see com.etendoerp.go.schemaforge.BusinessPartnerHandler the sibling hook that does the
- *     equivalent derivation for {@code C_BPartner}
+ * @see com.etendoerp.go.schemaforge.BusinessPartnerHandler the sibling hook that derives the
+ *     same way for {@code C_BPartner}
  */
 @Named("contactHandler")
-public class ContactHandler implements NeoHandler {
+public class ContactHandler extends AbstractPersonNameHandler {
 
   private static final Logger log = LogManager.getLogger(ContactHandler.class);
 
-  private static final String FIELD_NAME = "name";
   private static final String FIELD_USERNAME = "username";
   private static final String FIELD_FIRSTNAME = "firstName";
   private static final String FIELD_LASTNAME = "lastName";
+
+  private static final String METHOD_POST = "POST";
 
   /** {@code AD_User.Name} and {@code AD_User.Username} are both {@code NVARCHAR(60)}. */
   private static final int MAX_LENGTH = 60;
 
   @Override
+  protected String firstnameField() {
+    return FIELD_FIRSTNAME;
+  }
+
+  @Override
+  protected String lastnameField() {
+    return FIELD_LASTNAME;
+  }
+
+  @Override
+  protected String persistedNamePartsSql() {
+    return "SELECT name, firstname, lastname FROM ad_user WHERE ad_user_id = ?";
+  }
+
+  @Override
+  protected int maxNameLength() {
+    return MAX_LENGTH;
+  }
+
+  @Override
   public NeoResponse handle(NeoContext ctx) {
     String method = ctx.getHttpMethod();
-    boolean isWrite = "POST".equals(method) || "PATCH".equals(method) || "PUT".equals(method);
+    boolean isWrite = METHOD_POST.equals(method) || "PATCH".equals(method) || "PUT".equals(method);
     if (!isWrite) {
       return null;
     }
@@ -101,7 +118,7 @@ public class ContactHandler implements NeoHandler {
     }
     try {
       deriveName(ctx, body);
-      if ("POST".equals(method)) {
+      if (METHOD_POST.equals(method)) {
         deriveUsername(body);
       }
     } catch (Exception e) {
@@ -109,47 +126,6 @@ public class ContactHandler implements NeoHandler {
       throw new OBException("Error processing Contact name derivation", e);
     }
     return null;
-  }
-
-  /**
-   * Derives {@code name} from the first/last name parts when the effective name is blank.
-   * A name that is already set is left untouched.
-   */
-  private void deriveName(NeoContext ctx, JSONObject body) throws Exception {
-    boolean hasFirstname = body.has(FIELD_FIRSTNAME);
-    boolean hasLastname = body.has(FIELD_LASTNAME);
-    if (!hasFirstname && !hasLastname) {
-      return;
-    }
-
-    String firstname;
-    String lastname;
-
-    if ("POST".equals(ctx.getHttpMethod())) {
-      if (StringUtils.isNotBlank(body.optString(FIELD_NAME, null))) {
-        return;
-      }
-      firstname = StringUtils.trimToEmpty(body.optString(FIELD_FIRSTNAME, ""));
-      lastname = StringUtils.trimToEmpty(body.optString(FIELD_LASTNAME, ""));
-    } else {
-      String recordId = ctx.getRecordId();
-      if (StringUtils.isBlank(recordId)) {
-        return;
-      }
-      // persisted = [name, firstname, lastname]
-      String[] persisted = queryPersistedNameParts(recordId);
-      if (StringUtils.isNotBlank(persisted[0])) {
-        return;
-      }
-      // The body value wins over the persisted one for each part it carries.
-      firstname = hasFirstname ? StringUtils.trimToEmpty(body.optString(FIELD_FIRSTNAME, "")) : persisted[1];
-      lastname = hasLastname ? StringUtils.trimToEmpty(body.optString(FIELD_LASTNAME, "")) : persisted[2];
-    }
-
-    String derived = buildFullName(firstname, lastname);
-    if (StringUtils.isNotBlank(derived)) {
-      body.put(FIELD_NAME, truncate(derived));
-    }
   }
 
   /**
@@ -163,37 +139,6 @@ public class ContactHandler implements NeoHandler {
     if (StringUtils.isBlank(name)) {
       return;
     }
-    body.put(FIELD_USERNAME, truncate(name));
-  }
-
-  /**
-   * Concatenates the non-blank parts separated by a single space.
-   */
-  private static String buildFullName(String firstname, String lastname) {
-    String combined = (firstname + " " + lastname).trim();
-    return combined.replaceAll("\\s{2,}", " ");
-  }
-
-  private static String truncate(String value) {
-    return value.length() > MAX_LENGTH ? value.substring(0, MAX_LENGTH) : value;
-  }
-
-  /**
-   * Returns {@code [name, firstname, lastname]} for the given {@code AD_User} record, or
-   * three empty strings when the record does not exist.
-   */
-  private static String[] queryPersistedNameParts(String recordId) throws Exception {
-    Connection conn = OBDal.getInstance().getConnection();
-    try (PreparedStatement ps = conn.prepareStatement(
-        "SELECT name, firstname, lastname FROM ad_user WHERE ad_user_id = ?")) {
-      ps.setString(1, recordId);
-      try (ResultSet rs = ps.executeQuery()) {
-        if (rs.next()) {
-          return new String[]{ StringUtils.trimToEmpty(rs.getString(1)),
-              StringUtils.trimToEmpty(rs.getString(2)), StringUtils.trimToEmpty(rs.getString(3)) };
-        }
-      }
-    }
-    return new String[]{ "", "", "" };
+    body.put(FIELD_USERNAME, truncateToMaxNameLength(name));
   }
 }
