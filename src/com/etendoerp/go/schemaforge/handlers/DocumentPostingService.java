@@ -20,15 +20,19 @@ package com.etendoerp.go.schemaforge.handlers;
 import java.sql.Connection;
 import java.util.HashMap;
 
+import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.base.secureApp.VariablesSecureApp;
 import org.openbravo.dal.core.OBContext;
+import org.openbravo.dal.service.OBDal;
 import org.openbravo.database.ConnectionProvider;
 import org.openbravo.erpCommon.ad_forms.AcctServer;
 import org.openbravo.erpCommon.utility.OBError;
 import org.openbravo.financial.ResetAccounting;
+import org.openbravo.model.common.businesspartner.BusinessPartner;
+import org.openbravo.model.common.businesspartner.Category;
 import org.openbravo.service.db.DalConnectionProvider;
 
 import com.etendoerp.go.schemaforge.NeoContext;
@@ -150,7 +154,11 @@ public class DocumentPostingService {
       JSONObject body = new JSONObject();
       body.put("success", result.ok());
       body.put("message", result.message());
-      return result.ok() ? NeoResponse.ok(body) : NeoResponse.error(422, body.toString());
+      // NOTE: pass the JSONObject itself, NOT body.toString() — that String would bind to the
+      // NeoResponse.error(int, String) overload, which wraps it as a nested error.message
+      // string instead of sending this flat body, silently discarding the real message from
+      // every NEO client that only reads a top-level `message` field (ETP-4706).
+      return result.ok() ? NeoResponse.ok(body) : NeoResponse.error(422, body);
     } catch (Exception e) {
       log.error("Posting action error for record {}", context.getRecordId(), e);
       return NeoResponse.error(500, "Posting action error");
@@ -164,10 +172,58 @@ public class DocumentPostingService {
 
   private static String errorMessageOf(AcctServer acct) {
     OBError result = acct.getMessageResult();
-    if (result != null && result.getMessage() != null && !result.getMessage().isEmpty()) {
-      return result.getMessage();
+    String message = (result != null && result.getMessage() != null && !result.getMessage().isEmpty())
+        ? result.getMessage()
+        : "Posting failed";
+    return enrichWithFailingEntity(acct, message);
+  }
+
+  /**
+   * Core Etendo's accounting engine ({@link AcctServer}) does not always populate which entity
+   * caused an "account could not be found" failure: {@code DocInOut#createFact} (and other
+   * {@code Doc*} subclasses) can leave an account null and fall through to
+   * {@code AcctServer#post}'s generic {@code setMessageResult(conn, vars, getStatus(), "")}
+   * fallback with no parameters, which resolves to the bare {@code @InvalidAccount@} message
+   * ("Account could not be found.") — no account type, no owning entity, nothing to grep server
+   * logs for. This enriches that specific, generic status with the transaction's Business
+   * Partner and BP Group, resolved generically from the public {@code C_BPartner_ID} that
+   * {@link AcctServer} sets for every document type it posts (not specific to Goods Receipts or
+   * to the Not-Invoiced-Receipts account type — any document/account-type combination that hits
+   * this same fallback benefits). Other statuses already carry their own detailed message from
+   * core Etendo and are left untouched.
+   *
+   * @param acct
+   *     the {@link AcctServer} instance after a failed {@code post()} call.
+   * @param baseMessage
+   *     the message already resolved from {@code acct.getMessageResult()}.
+   * @return {@code baseMessage}, optionally suffixed with resolvable Business Partner / BP Group
+   *     detail.
+   */
+  private static String enrichWithFailingEntity(AcctServer acct, String baseMessage) {
+    if (acct == null || !AcctServer.STATUS_InvalidAccount.equals(acct.getStatus())) {
+      return baseMessage;
     }
-    return "Posting failed";
+    String detail = resolveBusinessPartnerDetail(acct.C_BPartner_ID);
+    return detail != null ? baseMessage + " " + detail : baseMessage;
+  }
+
+  private static String resolveBusinessPartnerDetail(String bpartnerId) {
+    if (StringUtils.isBlank(bpartnerId)) {
+      return null;
+    }
+    try {
+      BusinessPartner bp = OBDal.getInstance().get(BusinessPartner.class, bpartnerId);
+      if (bp == null) {
+        return null;
+      }
+      Category bpGroup = bp.getBusinessPartnerCategory();
+      return bpGroup != null
+          ? String.format("(Business Partner: %s, BP Group: %s)", bp.getName(), bpGroup.getName())
+          : String.format("(Business Partner: %s)", bp.getName());
+    } catch (Exception e) {
+      log.debug("Could not resolve Business Partner detail for account error, bpartnerId={}", bpartnerId, e);
+      return null;
+    }
   }
 
   private static void rollbackQuietly(ConnectionProvider conn, Connection con) {

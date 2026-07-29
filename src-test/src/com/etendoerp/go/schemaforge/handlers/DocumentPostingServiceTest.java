@@ -38,12 +38,15 @@ import org.junit.runner.RunWith;
 import org.mockito.MockedStatic;
 import org.mockito.junit.MockitoJUnitRunner;
 import org.openbravo.dal.core.OBContext;
+import org.openbravo.dal.service.OBDal;
 import org.openbravo.database.ConnectionProvider;
 import org.openbravo.erpCommon.ad_forms.AcctServer;
 import org.openbravo.erpCommon.utility.OBError;
 import org.openbravo.financial.ResetAccounting;
 import org.openbravo.model.ad.access.User;
 import org.openbravo.model.ad.system.Client;
+import org.openbravo.model.common.businesspartner.BusinessPartner;
+import org.openbravo.model.common.businesspartner.Category;
 import org.openbravo.model.common.enterprise.Organization;
 
 import com.etendoerp.go.schemaforge.NeoContext;
@@ -132,6 +135,87 @@ public class DocumentPostingServiceTest {
       DocumentPostingService.PostResult r = svc.post("259", "rec-1", conn);
 
       assertFalse(r.ok());
+    }
+  }
+
+  /**
+   * ETP-4706: when {@code AcctServer} fails with {@code STATUS_InvalidAccount} and no entity
+   * detail (core Etendo's own generic fallback — see {@link DocumentPostingService}'s
+   * {@code enrichWithFailingEntity} javadoc), the message must be enriched with the Business
+   * Partner / BP Group resolved from {@code AcctServer.C_BPartner_ID} so a person diagnosing an
+   * "account not configured" gap does not have to grep server logs to find them.
+   */
+  @Test
+  public void postEnrichesInvalidAccountMessageWithBusinessPartnerDetail() throws Exception {
+    DocumentPostingService svc = new DocumentPostingService();
+
+    ConnectionProvider conn = mock(ConnectionProvider.class);
+    Connection con = mock(Connection.class);
+    when(conn.getTransactionConnection()).thenReturn(con);
+
+    AcctServer acct = mock(AcctServer.class);
+    acct.errors = 1;
+    acct.C_BPartner_ID = "bp-1";
+    when(acct.post(anyString(), eq(false), any(), any(), any())).thenReturn(true);
+    when(acct.getStatus()).thenReturn(AcctServer.STATUS_InvalidAccount);
+    OBError err = new OBError();
+    err.setMessage("Account could not be found.");
+    when(acct.getMessageResult()).thenReturn(err);
+
+    BusinessPartner bp = mock(BusinessPartner.class);
+    when(bp.getName()).thenReturn("Fernet Branca S.A.");
+    Category bpGroup = mock(Category.class);
+    when(bpGroup.getName()).thenReturn("Proveedores Generales");
+    when(bp.getBusinessPartnerCategory()).thenReturn(bpGroup);
+
+    OBDal obDal = mock(OBDal.class);
+    when(obDal.get(BusinessPartner.class, "bp-1")).thenReturn(bp);
+
+    try (MockedStatic<OBContext> obc = mockStatic(OBContext.class);
+        MockedStatic<AcctServer> acctStatic = mockStatic(AcctServer.class);
+        MockedStatic<OBDal> obDalStatic = mockStatic(OBDal.class)) {
+      stubObContext(obc);
+      acctStatic.when(() -> AcctServer.get(anyString(), anyString(), anyString(), any(ConnectionProvider.class)))
+          .thenReturn(acct);
+      obDalStatic.when(OBDal::getInstance).thenReturn(obDal);
+
+      DocumentPostingService.PostResult r = svc.post("318", "rec-1", conn);
+
+      assertFalse(r.ok());
+      assertTrue(r.message().contains("Account could not be found."));
+      assertTrue(r.message().contains("Fernet Branca S.A."));
+      assertTrue(r.message().contains("Proveedores Generales"));
+    }
+  }
+
+  /** Non-InvalidAccount failures already carry their own detailed message; leave them untouched. */
+  @Test
+  public void postDoesNotEnrichMessageWhenStatusIsNotInvalidAccount() throws Exception {
+    DocumentPostingService svc = new DocumentPostingService();
+
+    ConnectionProvider conn = mock(ConnectionProvider.class);
+    Connection con = mock(Connection.class);
+    when(conn.getTransactionConnection()).thenReturn(con);
+
+    AcctServer acct = mock(AcctServer.class);
+    acct.errors = 1;
+    acct.C_BPartner_ID = "bp-1";
+    when(acct.post(anyString(), eq(false), any(), any(), any())).thenReturn(true);
+    when(acct.getStatus()).thenReturn(AcctServer.STATUS_PeriodClosed);
+    OBError err = new OBError();
+    err.setMessage("Period is closed.");
+    when(acct.getMessageResult()).thenReturn(err);
+
+    try (MockedStatic<OBContext> obc = mockStatic(OBContext.class);
+        MockedStatic<AcctServer> acctStatic = mockStatic(AcctServer.class)) {
+      stubObContext(obc);
+      acctStatic.when(() -> AcctServer.get(anyString(), anyString(), anyString(), any(ConnectionProvider.class)))
+          .thenReturn(acct);
+
+      DocumentPostingService.PostResult r = svc.post("318", "rec-1", conn);
+
+      assertFalse(r.ok());
+      assertEquals("Period is closed.", r.message());
     }
   }
 
