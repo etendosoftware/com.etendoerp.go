@@ -25,6 +25,7 @@ import org.openbravo.base.provider.OBProvider;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.erpCommon.utility.OBCurrencyUtils;
 import org.openbravo.model.ad.access.User;
 import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.businesspartner.BusinessPartner;
@@ -84,9 +85,10 @@ public class OnboardingDefaultCustomerService {
         }
 
         // A customer with no currency is not fully set up for invoicing. The dataset import does not
-        // seed one for this synthetic BP, so default it to EUR here. Idempotent: existing customers
+        // seed one for this synthetic BP, so default it to the organization's currency here (falling
+        // back to EUR only if the organization has none configured). Idempotent: existing customers
         // that already carry a currency are left untouched.
-        ensureDefaultCustomerCurrency(customer);
+        ensureDefaultCustomerCurrency(customer, organization);
         // A customer with no address cannot be used on a Sales Invoice (no bill-to/ship-to). The
         // dataset import never creates one for this synthetic BP, so provision it here. Idempotent:
         // re-runs (and customers created before this fix) get exactly one location.
@@ -203,20 +205,37 @@ public class OnboardingDefaultCustomerService {
   }
 
   /**
-   * Ensures the default customer has a currency, defaulting it to EUR. No-op when one is already
-   * set, so customers created before this wiring (or with an explicit currency) are left untouched.
+   * Ensures the default customer has a currency, preferring the organization's own currency
+   * (see {@link OBCurrencyUtils#getOrgCurrency(String)}) and falling back to the hardcoded EUR
+   * default only when the organization has no currency configured at all. No-op when the
+   * customer already has a currency, so customers created before this wiring (or with an
+   * explicit currency) are left untouched.
    */
-  protected void ensureDefaultCustomerCurrency(BusinessPartner customer) {
+  protected void ensureDefaultCustomerCurrency(BusinessPartner customer, Organization organization) {
     if (customer.getCurrency() != null) {
       return;
     }
-    Currency currency = resolveDefaultCurrency();
+    Currency currency = resolveOrgCurrency(organization);
+    if (currency == null) {
+      currency = resolveDefaultCurrency();
+    }
     if (currency == null) {
       throw new OBException(
           "Currency " + DEFAULT_CUSTOMER_CURRENCY_ISO + " not found for onboarding default customer");
     }
     customer.setCurrency(currency);
     OBDal.getInstance().save(customer);
+  }
+
+  protected Currency resolveOrgCurrency(Organization organization) {
+    if (organization == null) {
+      return null;
+    }
+    String currencyId = OBCurrencyUtils.getOrgCurrency(organization.getId());
+    if (currencyId == null || currencyId.isEmpty()) {
+      return null;
+    }
+    return OBDal.getInstance().get(Currency.class, currencyId);
   }
 
   protected Currency resolveDefaultCurrency() {
