@@ -1033,11 +1033,11 @@ public class Fiscal303SubmitHandlerTest {
       stubFileGeneration(obDal);
 
       OBQuery<BaseOBObject> incQuery = mock(OBQuery.class);
-      when(obDal.createQuery(eq("ETGO_Fiscal_Decl_Incident"), anyString())).thenReturn(incQuery);
+      when(obDal.createQuery(eq(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL_INCIDENT), anyString())).thenReturn(incQuery);
       when(incQuery.list()).thenReturn(Collections.singletonList(staleInc));
       OBProvider provider = mock(OBProvider.class);
       providerMock.when(OBProvider::getInstance).thenReturn(provider);
-      when(provider.get("ETGO_Fiscal_Decl_Incident")).thenReturn(newInc);
+      when(provider.get(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL_INCIDENT)).thenReturn(newInc);
 
       h.handle("submit", "POST", req, res);
 
@@ -1083,7 +1083,7 @@ public class Fiscal303SubmitHandlerTest {
       stubFileGeneration(obDal);
 
       OBQuery<BaseOBObject> incQuery = mock(OBQuery.class);
-      when(obDal.createQuery(eq("ETGO_Fiscal_Decl_Incident"), anyString())).thenReturn(incQuery);
+      when(obDal.createQuery(eq(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL_INCIDENT), anyString())).thenReturn(incQuery);
       // Simulates a row left over from a previous FAILED attempt — must be deleted even though
       // this attempt succeeds, so the tab ends up empty rather than showing stale errors.
       when(incQuery.list()).thenReturn(Collections.singletonList(staleIncFromPriorFailedAttempt));
