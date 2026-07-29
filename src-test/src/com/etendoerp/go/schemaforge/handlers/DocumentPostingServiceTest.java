@@ -380,4 +380,42 @@ public class DocumentPostingServiceTest {
     assertNotNull(resp);
     assertEquals(422, resp.getHttpStatus());
   }
+
+  /**
+   * ETP-4706 repro: a failed post must surface its real message as a flat top-level
+   * {@code message} field, e.g. {@code {"success":false,"message":"Account could not be found."}}
+   * — exactly the body NEO Headless returned for a Goods Receipt whose Business Partner Group was
+   * missing its Not-Invoiced-Receipts account. Before the fix, {@code handleAction} passed
+   * {@code body.toString()} into the {@code NeoResponse.error(int, String)} overload, which wraps
+   * the whole JSON string as a nested {@code error.message} instead of sending the flat body — so
+   * the frontend's plain {@code body.message} lookup found nothing and fell back to the HTTP
+   * reason phrase ("Unprocessable Entity" for a 422), which is what actually reached the user
+   * instead of the real accounting error.
+   */
+  @Test
+  public void handleActionReturnsFlatMessageBodyWhenPostFails() throws Exception {
+    DocumentPostingService svc = new DocumentPostingService() {
+      @Override
+      public PostResult post(String tableId, String recordId) {
+        return new PostResult(false, "Account could not be found.");
+      }
+    };
+
+    Tab tab = mock(Tab.class);
+    Table table = mock(Table.class);
+    when(table.getId()).thenReturn("318");
+    when(tab.getTable()).thenReturn(table);
+
+    NeoContext ctx = mock(NeoContext.class);
+    when(ctx.getEndpointType()).thenReturn(NeoEndpointType.ACTION);
+    when(ctx.getFieldName()).thenReturn("post");
+    when(ctx.getAdTab()).thenReturn(tab);
+    when(ctx.getRecordId()).thenReturn("rec-1");
+
+    NeoResponse resp = svc.handleAction(ctx);
+
+    assertEquals(422, resp.getHttpStatus());
+    assertFalse(resp.getBody().getBoolean("success"));
+    assertEquals("Account could not be found.", resp.getBody().getString("message"));
+  }
 }
