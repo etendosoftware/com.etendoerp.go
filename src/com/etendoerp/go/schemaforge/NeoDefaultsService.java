@@ -464,8 +464,17 @@ public class NeoDefaultsService {
           dbColumnName, request.ctx);
     }
 
-    defaultExpr = defaultExpr.trim();
+    return resolveNonEmptyDefaultExpr(defaultExpr.trim(), adColumn, dbColumnName, request);
+  }
 
+  /**
+   * Resolves a non-blank AD_Column/ETGO_SF_FIELD default expression, once the early
+   * NEO-specific cases (IsActive, link-to-parent, sequence) have already been ruled out
+   * by {@link #resolveFieldDefault(FieldDefaultRequest)}. Extracted to keep that method's
+   * cognitive complexity within SonarQube's limit — pure extraction, no behavior change.
+   */
+  private static Object resolveNonEmptyDefaultExpr(String defaultExpr, Column adColumn,
+      String dbColumnName, FieldDefaultRequest request) {
     // Handle empty-string literal
     if ("\"\"".equals(defaultExpr)) {
       return "";
@@ -475,6 +484,16 @@ public class NeoDefaultsService {
     if (defaultExpr.startsWith("@SQL=")) {
       return NeoDefaultsSqlHelper.resolveSQLDefault(defaultExpr, request.vars, request.conn,
           request.windowId, adColumn, request.parentValues);
+    }
+
+    // List-reference columns (AD_Reference_ID = "17") with a pure literal default (no "@"
+    // context/preference token) must return that literal verbatim. Their AD_Ref_List values
+    // are opaque codes — often all-digit strings like "000000000000000" (see Invoicegrouping,
+    // a 15-digit binary code) — and Utility.getDefault treats a plain literal as a numeric
+    // candidate, collapsing it to "0" and losing the leading zeros / length. That produces a
+    // value that matches none of the column's real AD_Ref_List entries.
+    if (!defaultExpr.contains("@") && isListReference(adColumn)) {
+      return defaultExpr;
     }
 
     // Delegate to Utility.getDefault for all other cases:
@@ -490,6 +509,20 @@ public class NeoDefaultsService {
     }
 
     return null;
+  }
+
+  /**
+   * AD_Reference id for the "List" reference type (fixed, pre-defined AD_Ref_List values).
+   */
+  private static final String REFERENCE_ID_LIST = "17";
+
+  /**
+   * Returns true if the column's reference is the "List" type — a fixed set of AD_Ref_List
+   * codes, as opposed to a numeric (Integer/Amount/Quantity) or Search/TableDir reference.
+   */
+  private static boolean isListReference(Column adColumn) {
+    return adColumn.getReference() != null
+        && REFERENCE_ID_LIST.equals(adColumn.getReference().getId());
   }
 
   /**
