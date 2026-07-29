@@ -18,8 +18,6 @@
 package com.etendoerp.go.common;
 
 import org.apache.commons.lang3.StringUtils;
-import org.apache.logging.log4j.LogManager;
-import org.apache.logging.log4j.Logger;
 
 /**
  * Instance-wide currency number-formatting configuration (thousands/decimal separators).
@@ -30,8 +28,6 @@ import org.apache.logging.log4j.Logger;
  * one source instead of two independently hardcoded values.
  */
 public final class NeoCurrencyFormatConfig {
-
-  private static final Logger log = LogManager.getLogger(NeoCurrencyFormatConfig.class);
 
   static final String PROP_THOUSANDS = "currency.thousandsSeparator";
   static final String PROP_DECIMAL = "currency.decimalSeparator";
@@ -60,8 +56,8 @@ public final class NeoCurrencyFormatConfig {
    * @return runtime currency-format configuration
    */
   public static NeoCurrencyFormatConfig fromRuntime() {
-    String thousands = readConfigValue(PROP_THOUSANDS, ENV_THOUSANDS, DEFAULT_THOUSANDS);
-    String decimal = readConfigValue(PROP_DECIMAL, ENV_DECIMAL, DEFAULT_DECIMAL);
+    String thousands = ConfigPropertyReader.readConfigValue(PROP_THOUSANDS, ENV_THOUSANDS, DEFAULT_THOUSANDS);
+    String decimal = ConfigPropertyReader.readConfigValue(PROP_DECIMAL, ENV_DECIMAL, DEFAULT_DECIMAL);
     return new NeoCurrencyFormatConfig(thousands, decimal);
   }
 
@@ -71,28 +67,5 @@ public final class NeoCurrencyFormatConfig {
 
   public String getDecimalSeparator() {
     return decimalSeparator;
-  }
-
-  private static String readConfigValue(String propertyName, String envName, String defaultValue) {
-    String systemValue = StringUtils.trimToNull(System.getProperty(propertyName));
-    if (systemValue != null) {
-      return systemValue;
-    }
-    String openbravoValue = readOpenbravoProperty(propertyName);
-    if (openbravoValue != null) {
-      return openbravoValue;
-    }
-    String envValue = StringUtils.trimToNull(System.getenv(envName));
-    return envValue != null ? envValue : defaultValue;
-  }
-
-  private static String readOpenbravoProperty(String propertyName) {
-    try {
-      return StringUtils.trimToNull(org.openbravo.base.session.OBPropertiesProvider.getInstance()
-          .getOpenbravoProperties().getProperty(propertyName));
-    } catch (Exception e) {
-      log.debug("Could not read Openbravo property {}: {}", propertyName, e.getMessage(), e);
-      return null;
-    }
   }
 }
