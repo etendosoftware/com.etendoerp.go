@@ -19,6 +19,11 @@ package com.etendoerp.go.schemaforge;
 
 import javax.inject.Named;
 
+import org.apache.commons.lang3.StringUtils;
+import org.codehaus.jettison.json.JSONObject;
+import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.materialmgmt.transaction.InternalConsumptionLine;
+
 /**
  * NeoHandler for the {@code internalConsumptionLine} entity.
  *
@@ -28,8 +33,13 @@ import javax.inject.Named;
  * ({@code NeoSelectorService} → {@code NeoLocatorSelectorHelper}) and CRUD pipeline
  * ({@code NeoCrudHandler} → {@code NeoLocatorIdentifierHelper}).
  *
- * <p>Both hooks are therefore intentional no-ops: everything passes through to the default
- * service unchanged. The class (and its {@code JAVA_QUALIFIER = 'internalConsumptionLineHandler'}
+ * <p>The remaining responsibility is the write pre-hook added for ETP-4606: a line cannot
+ * reference a Service-type {@code Product} — service products are not stockable and must never
+ * generate an inventory movement. Defense-in-depth: the corresponding product selector is also
+ * filtered (see {@code selector.policy.GoodsMovementProductSelectorPolicy}), but any flow that
+ * still attempts to persist one (API call, bulk import, stale form state) is blocked here.
+ *
+ * <p>The class (and its {@code JAVA_QUALIFIER = 'internalConsumptionLineHandler'}
  * registration on ETGO_SF_ENTITY record {@code 1EB67B71AE6445F787649951DFAEE661}) is kept so the
  * existing DB configuration keeps resolving to a valid bean.
  */
@@ -38,12 +48,38 @@ public class InternalConsumptionLineHandler implements NeoHandler {
 
   @Override
   public NeoResponse handle(NeoContext context) {
-    return null;
+    if (context.getEndpointType() != NeoEndpointType.CRUD) {
+      return null;
+    }
+    String method = context.getHttpMethod();
+    boolean isPost = "POST".equalsIgnoreCase(method);
+    boolean isPatch = "PATCH".equalsIgnoreCase(method);
+    if (!isPost && !isPatch) {
+      return null;
+    }
+    JSONObject body = context.getRequestBody();
+    if (body == null) {
+      return null;
+    }
+    return ServiceProductGuard.rejectIfServiceProduct(body, isPatch,
+        () -> resolvePersistedProductId(context.getRecordId()));
   }
 
   @Override
   public NeoResponse afterHandle(NeoContext context) {
     // Warehouse-name enrichment is now handled generically for all locator FKs.
     return null;
+  }
+
+  /** Resolves the product already persisted on an existing consumption line, for PATCH requests. */
+  private static String resolvePersistedProductId(String lineId) {
+    if (StringUtils.isBlank(lineId)) {
+      return null;
+    }
+    InternalConsumptionLine line = OBDal.getInstance().get(InternalConsumptionLine.class, lineId);
+    if (line == null || line.getProduct() == null) {
+      return null;
+    }
+    return line.getProduct().getId();
   }
 }

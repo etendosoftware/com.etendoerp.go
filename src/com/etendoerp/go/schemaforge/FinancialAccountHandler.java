@@ -63,7 +63,7 @@ import com.etendoerp.psd2.bank.integration.utils.BankIntegrationUtils;
  * <p>Request body uses the DAL property names of {@code FIN_Financial_Account}:
  * {@code { "name", "currency", "type"?, "iBAN"?, "swiftCode"? }}.
  * {@code type} is {@code 'B'} (Bank, default), {@code 'C'} (Cash) or
- * {@code 'CA'} (Card). PSD2 / "Con conexión" wiring is out of scope (T3).
+ * {@code 'CA'} (Card). Bank connection / "Con conexión" wiring is out of scope (T3).
  *
  * <p>The pre-hook does NOT persist the record itself: on create/update it
  * validates and then <b>mutates the request body</b> (injecting {@code country}
@@ -94,7 +94,7 @@ public class FinancialAccountHandler implements NeoHandler {
   private static final String FIELD_SWIFT_CODE = "swiftCode";
   private static final String FIELD_COUNTRY = "country";
   private static final String FIELD_MATCHING_ALGORITHM = "matchingAlgorithm";
-  /** Salt Edge provider chosen at offline creation (optional); persisted so a later PSD2 connect
+  /** Salt Edge provider chosen at offline creation (optional); persisted so a later bank connect
    *  can preselect that bank. {@link #FIELD_PSD2_PROVIDER} is the DAL FK property the generic CRUD
    *  resolves by id (mirrors how {@link #FIELD_COUNTRY} is injected). */
   private static final String FIELD_PROVIDER_CODE = "providerCode";
@@ -103,7 +103,7 @@ public class FinancialAccountHandler implements NeoHandler {
   /** Computed flag (ETP-4530): {@code true} when the account has at least one active
    *  {@link FIN_FinaccTransaction}. Injected into every GET row so the frontend can lock the
    *  Currency field once real movements exist — a different, stricter condition than
-   *  {@code psd2Connected} (which only reflects bank-linkage, not transaction history). Not
+   *  {@code bankConnected} (which only reflects bank-linkage, not transaction history). Not
    *  backed by any AD column, so it is injected here (post-hook, after NeoFieldFilter already ran
    *  on the generic CRUD response) rather than declared in decisions.json — the same technique
    *  {@code SalesInvoiceHeaderHandler} uses for {@code arInvoiceSubtype}. */
@@ -279,7 +279,7 @@ public class FinancialAccountHandler implements NeoHandler {
   /**
    * Injects {@link #FIELD_HAS_TRANSACTIONS} into every row of a GET (list/getById) response —
    * {@code true} when the account has at least one active {@link FIN_FinaccTransaction}. The
-   * frontend uses this (not {@code psd2Connected}) to lock the Currency field once the account has
+   * frontend uses this (not {@code bankConnected}) to lock the Currency field once the account has
    * real movement history (ETP-4530).
    */
   private NeoResponse injectHasTransactions(NeoContext context) {
@@ -463,7 +463,7 @@ public class FinancialAccountHandler implements NeoHandler {
 
     // Persist the chosen Salt Edge provider (offline "with bank selected" flow): upsert the
     // provider and inject the FK so the account remembers its bank. The account stays offline —
-    // this is metadata only — but a later PSD2 connect can then preselect that provider.
+    // this is metadata only — but a later bank connect can then preselect that provider.
     enrichProvider(body, type);
 
     // Inject the country derived from the IBAN before the insert — the trigger
