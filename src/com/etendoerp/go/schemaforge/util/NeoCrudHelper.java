@@ -201,16 +201,12 @@ public class NeoCrudHelper {
     JSONObject filteredBody = fieldFilter.filterCreateRequest(requestBody);
     // Snapshot user-submitted keys before injectMandatoryDefaults adds backend defaults so
     // the callout cascade cannot overwrite values the user explicitly set.
-    Set<String> userSubmittedFields = new HashSet<>();
-    if (filteredBody != null) {
-      Iterator<String> userKeyIter = filteredBody.keys();
-      while (userKeyIter.hasNext()) {
-        userSubmittedFields.add(userKeyIter.next());
-      }
-    }
+    Set<String> userSubmittedFields = snapshotBodyFields(filteredBody);
     NeoDefaultsService.injectMandatoryDefaults(filteredBody, adTab, context, parentIdValue);
 
-    executePostCalloutCascade(filteredBody, adTab, context, parentIdValue, userSubmittedFields);
+    Set<String> protectedCalloutFields = snapshotMandatoryBodyFields(filteredBody, adTab);
+    protectedCalloutFields.addAll(userSubmittedFields);
+    executePostCalloutCascade(filteredBody, adTab, context, parentIdValue, protectedCalloutFields);
 
     String wrappedBody = NeoTypeCoercionHelper.wrapForSmartclient(
         filteredBody, dalEntityName, null);
@@ -250,6 +246,54 @@ public class NeoCrudHelper {
       }
     }
     return parentIdValue;
+  }
+
+  /**
+   * Snapshots the fields currently present in a create payload. Callout protection uses a
+   * post-default snapshot so mandatory defaults cannot be overwritten, while validation keeps
+   * its separate pre-default user-submitted snapshot.
+   *
+   * @param body the create payload to snapshot; {@code null} yields an empty set
+   * @return the set of field names currently present in {@code body}
+   */
+  public static Set<String> snapshotBodyFields(JSONObject body) {
+    Set<String> fields = new HashSet<>();
+    if (body == null) {
+      return fields;
+    }
+    Iterator<String> keys = body.keys();
+    while (keys.hasNext()) {
+      fields.add(keys.next());
+    }
+    return fields;
+  }
+
+  /**
+   * Returns the present fields backed by mandatory columns, after their defaults are injected.
+   *
+   * @param body the create payload, already carrying mandatory-default values; {@code null}
+   *     yields an empty set
+   * @param adTab the tab whose mandatory columns are checked against {@code body}; {@code null}
+   *     (or a tab without a table) yields an empty set
+   * @return the set of DAL property names backed by a mandatory column present in {@code body}
+   */
+  public static Set<String> snapshotMandatoryBodyFields(JSONObject body, Tab adTab) {
+    Set<String> fields = new HashSet<>();
+    if (body == null || adTab == null || adTab.getTable() == null) {
+      return fields;
+    }
+    Entity entity = ModelProvider.getInstance().getEntityByTableId(adTab.getTable().getId());
+    if (entity == null) {
+      return fields;
+    }
+    for (Column column : adTab.getTable().getADColumnList()) {
+      Property property = entity.getPropertyByColumnName(column.getDBColumnName());
+      String fieldName = property != null ? property.getName() : null;
+      if (column.isMandatory() && fieldName != null && body.has(fieldName)) {
+        fields.add(fieldName);
+      }
+    }
+    return fields;
   }
 
   /**

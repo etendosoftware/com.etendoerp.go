@@ -842,7 +842,7 @@ class PaymentRegistrationServiceAdvancedTest {
     stubAdvancedBasics();
     stubPendingPSDs(new BigDecimal("100.00"));
 
-    // PIS eligibility: connected PSD2 account, transfer method, EUR invoice.
+    // PIS eligibility: bank-connected account, transfer method, EUR invoice.
     when(account.getPSD2ConnectionStatus())
         .thenReturn(BankIntegrationConstants.FA_CONNECTION_STATUS_CONNECTED);
     when(method.getName()).thenReturn("Bank Transfer");
@@ -888,11 +888,11 @@ class PaymentRegistrationServiceAdvancedTest {
   }
 
   /**
-   * A {@code pis=true} confirm against a NON-PSD2-connected account fails eligibility before any
+   * A {@code pis=true} confirm against an account with no bank connection fails eligibility before any
    * payment is processed: {@code validatePisEligibility} throws {@link OBException}.
    */
   @Test
-  @DisplayName("PIS confirm rejects a non-PSD2-connected account before processing")
+  @DisplayName("PIS confirm rejects an account with no bank connection before processing")
   void testAdvancedPisRejectsUnconnectedAccount() throws Exception {
     stubAdvancedBasics();
     when(account.getPSD2ConnectionStatus()).thenReturn("NC");
@@ -1391,7 +1391,7 @@ class PaymentRegistrationServiceAdvancedTest {
 
   /**
    * Stubs {@code PisPaymentService.hasLinkedPisPayment} (called by every {@code paymentListItem})
-   * to report no linked PSD2 payment, so {@code handleListPayments} tests don't NPE on the
+   * to report no linked PIS payment, so {@code handleListPayments} tests don't NPE on the
    * unrelated {@code PisPayment} criteria.
    */
   @SuppressWarnings("unchecked")

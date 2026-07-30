@@ -27,12 +27,12 @@ import org.junit.Test;
 import com.etendoerp.psd2.bank.integration.utils.BankIntegrationConstants;
 
 /**
- * Unit tests for {@link FinancialAccountPsd2Support#connectedAccountName}, guarding against a
+ * Unit tests for {@link FinancialAccountBankConnectionSupport#connectedAccountName}, guarding against a
  * regression where "{providerName} - {accountName}" could exceed the 60-char limit of
  * {@code FIN_Financial_Account.name} (observed with "Societe Generale Luxembourg Corporate
  * (Sandbox) - LU900610000012600EUR", 70 chars, thrown by the OBDal length validator on save).
  */
-public class FinancialAccountPsd2SupportNameTest {
+public class FinancialAccountBankConnectionSupportNameTest {
 
   private static JSONObject nodeWithName(String accountName) throws JSONException {
     JSONObject node = new JSONObject();
@@ -42,7 +42,7 @@ public class FinancialAccountPsd2SupportNameTest {
 
   @Test
   public void combinedNameWithinLimitIsReturnedAsIs() throws JSONException {
-    String result = FinancialAccountPsd2Support.connectedAccountName("BBVA", nodeWithName("ES1234567890"),
+    String result = FinancialAccountBankConnectionSupport.connectedAccountName("BBVA", nodeWithName("ES1234567890"),
         "EUR");
     assertEquals("BBVA - ES1234567890", result);
   }
@@ -54,7 +54,7 @@ public class FinancialAccountPsd2SupportNameTest {
     assertTrue("precondition: reproduces the reported 70-char overflow",
         (providerName + " - " + accountName).length() > 60);
 
-    String result = FinancialAccountPsd2Support.connectedAccountName(providerName, nodeWithName(accountName), "EUR");
+    String result = FinancialAccountBankConnectionSupport.connectedAccountName(providerName, nodeWithName(accountName), "EUR");
 
     assertEquals(60, result.length());
     assertEquals("Societe Generale Luxembourg Corporate - LU900610000012600EUR", result);
@@ -64,7 +64,7 @@ public class FinancialAccountPsd2SupportNameTest {
   public void oversizedAccountNameAloneIsTruncatedWithoutProvider() throws JSONException {
     String hugeAccountName = "A".repeat(80);
 
-    String result = FinancialAccountPsd2Support.connectedAccountName("Bank", nodeWithName(hugeAccountName), "EUR");
+    String result = FinancialAccountBankConnectionSupport.connectedAccountName("Bank", nodeWithName(hugeAccountName), "EUR");
 
     assertEquals(60, result.length());
     assertEquals(hugeAccountName.substring(0, 60), result);
@@ -72,13 +72,13 @@ public class FinancialAccountPsd2SupportNameTest {
 
   @Test
   public void missingAccountNameFallsBackToProviderName() throws JSONException {
-    String result = FinancialAccountPsd2Support.connectedAccountName("BBVA", new JSONObject(), "EUR");
+    String result = FinancialAccountBankConnectionSupport.connectedAccountName("BBVA", new JSONObject(), "EUR");
     assertEquals("BBVA", result);
   }
 
   @Test
   public void missingProviderAndAccountNameFallsBackToCurrencyLabel() throws JSONException {
-    String result = FinancialAccountPsd2Support.connectedAccountName(null, new JSONObject(), "EUR");
+    String result = FinancialAccountBankConnectionSupport.connectedAccountName(null, new JSONObject(), "EUR");
     assertEquals("EUR account", result);
   }
 }

@@ -697,7 +697,7 @@ class PisPaymentServiceTest {
 
   /**
    * The non-overpaid path ({@code funds == invoiceApplied}): no credit PSD is created, the
-   * payment is processed to PPM, the bank transfer is initiated through the PSD2 bridge, and the
+   * payment is processed to PPM, the bank transfer is initiated through the bank connection bridge, and the
    * response carries the Salt Edge payment URL, the local PIS payment id, and status "requested".
    */
   @Test
