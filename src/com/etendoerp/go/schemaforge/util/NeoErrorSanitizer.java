@@ -50,6 +50,28 @@ public final class NeoErrorSanitizer {
 
   private static final String SQLSTATE_UNIQUE_VIOLATION = "23505";
 
+  /**
+   * Matches a default Java {@code Object.toString()} rendering
+   * ({@code fully.qualified.ClassName@hexHash}, inner classes included via {@code $}), e.g.
+   * {@code com.etendoerp.redis.interfaces.CachedSet@55b0cf12}. Requires at least a two-segment
+   * package before the class name and a hex suffix after {@code @}, so ordinary text (emails,
+   * dotted version strings) is not matched.
+   *
+   * <p>The package-segment group is capped at {@link #MAX_PACKAGE_SEGMENTS} repetitions
+   * (SonarQube java:S5998): Java's regex engine matches group repetition recursively, so an
+   * unbounded {@code {2,}} here would let an attacker-controlled message (e.g. one reflected
+   * into an exception) with thousands of {@code .}-separated tokens exhaust the stack. No real
+   * fully-qualified Java class name comes close to the cap.</p>
+   */
+  private static final int MAX_PACKAGE_SEGMENTS = 20;
+
+  private static final java.util.regex.Pattern OBJECT_TOSTRING_PATTERN =
+      java.util.regex.Pattern.compile(
+          "(?:[A-Za-z_$][A-Za-z0-9_$]*\\.){2," + MAX_PACKAGE_SEGMENTS
+              + "}[A-Za-z_$][A-Za-z0-9_$]*@[0-9a-fA-F]+");
+
+  static final String REDACTED_OBJECT = "[value]";
+
   private NeoErrorSanitizer() {
   }
 
@@ -74,7 +96,28 @@ public final class NeoErrorSanitizer {
       }
       current = current.getCause();
     }
-    return t == null ? GENERIC_DB_ERROR : t.getMessage();
+    return t == null ? GENERIC_DB_ERROR : redactObjectReferences(t.getMessage());
+  }
+
+  /**
+   * Replaces every default Java {@code toString()} reference
+   * ({@code fully.qualified.ClassName@hexHash}) in {@code message} with {@link #REDACTED_OBJECT},
+   * so an internal object identity can never leak into an HTTP response body verbatim.
+   *
+   * <p>Openbravo/Hibernate validators occasionally interpolate a raw collection object into a
+   * message — e.g. a List-reference failure renders as {@code "... should be one of the following
+   * values: com.etendoerp.redis.interfaces.CachedSet@55b0cf12 but it is value 0"}. This strips the
+   * leaked token while leaving the rest of the (already-translated) message intact and readable.
+   * ETP-4668.</p>
+   *
+   * @param message the error message to redact; may be {@code null}
+   * @return the message with any object-identity token replaced, or {@code null} if input was null
+   */
+  public static String redactObjectReferences(String message) {
+    if (message == null) {
+      return null;
+    }
+    return OBJECT_TOSTRING_PATTERN.matcher(message).replaceAll(REDACTED_OBJECT);
   }
 
   /**

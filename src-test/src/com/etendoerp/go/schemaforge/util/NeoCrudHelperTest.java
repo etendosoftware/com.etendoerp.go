@@ -30,6 +30,7 @@ import static org.mockito.Mockito.when;
 
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -520,6 +521,51 @@ class NeoCrudHelperTest {
   @Nested
   @DisplayName("executePostCalloutCascade")
   class ExecutePostCalloutCascade {
+
+    @Test
+    @DisplayName("should snapshot mandatory defaults as protected callout fields")
+    void shouldSnapshotMandatoryDefaultsAsProtectedCalloutFields() throws Exception {
+      JSONObject body = new JSONObject();
+      body.put("assetCategory", "group-id");
+      body.put("calculateType", "TI");
+      body.put("depreciate", true);
+
+      Table table = mock(Table.class);
+      Column calculateType = mock(Column.class);
+      when(calculateType.getDBColumnName()).thenReturn("A_CALCULATE_TYPE");
+      when(calculateType.isMandatory()).thenReturn(true);
+      Column depreciate = mock(Column.class);
+      when(depreciate.getDBColumnName()).thenReturn("ISDEPRECIATED");
+      when(depreciate.isMandatory()).thenReturn(true);
+      Column assetCategory = mock(Column.class);
+      when(assetCategory.getDBColumnName()).thenReturn("A_ASSET_GROUP_ID");
+      when(assetCategory.isMandatory()).thenReturn(true);
+      Column derived = mock(Column.class);
+      when(derived.getDBColumnName()).thenReturn("DERIVED_BY_CALLOUT");
+      when(derived.isMandatory()).thenReturn(false);
+      when(adTab.getTable()).thenReturn(table);
+      when(table.getADColumnList()).thenReturn(
+          Arrays.asList(calculateType, depreciate, assetCategory, derived));
+
+      Entity entity = mock(Entity.class);
+      Property calculateTypeProperty = mock(Property.class);
+      when(calculateTypeProperty.getName()).thenReturn("calculateType");
+      Property depreciateProperty = mock(Property.class);
+      when(depreciateProperty.getName()).thenReturn("depreciate");
+      when(entity.getPropertyByColumnName("A_CALCULATE_TYPE")).thenReturn(calculateTypeProperty);
+      when(entity.getPropertyByColumnName("ISDEPRECIATED")).thenReturn(depreciateProperty);
+      try (MockedStatic<ModelProvider> modelProviderMock = mockStatic(ModelProvider.class)) {
+        ModelProvider modelProvider = mock(ModelProvider.class);
+        modelProviderMock.when(ModelProvider::getInstance).thenReturn(modelProvider);
+        when(modelProvider.getEntityByTableId(any())).thenReturn(entity);
+        Set<String> protectedFields = NeoCrudHelper.snapshotMandatoryBodyFields(body, adTab);
+
+        assertTrue(protectedFields.contains("calculateType"));
+        assertTrue(protectedFields.contains("depreciate"));
+        assertFalse(protectedFields.contains("derivedByCallout"),
+            "A non-mandatory field must remain callout-derivable");
+      }
+    }
 
     @Test
     @DisplayName("should skip cascade when adTab is null")

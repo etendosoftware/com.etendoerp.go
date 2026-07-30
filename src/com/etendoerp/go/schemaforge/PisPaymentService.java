@@ -370,7 +370,7 @@ final class PisPaymentService {
    *
    * <p>Processing does not create a financial transaction here because the account's transfer
    * payment method had its {@code Automatic Deposit/Withdrawn} flags cleared when the account was
-   * connected to PSD2 from Etendo Go (see {@code FinancialAccountPsd2Handler} §2b). The bank
+   * connected to its bank from Etendo Go (see {@code FinancialAccountBankConnectionHandler} §2b). The bank
    * transaction is created only once Salt Edge confirms execution, by the PSD2 module's own
    * {@code PisPaymentCallback} → {@code PISTransactionUtils} (idempotent). This mirrors Classic,
    * whose "Generate Bank Payment" process requires {@code Status='PPM'} and
@@ -463,14 +463,14 @@ final class PisPaymentService {
 
   /**
    * Validates that {@code account}/{@code paymentMethod}/{@code invoice} are eligible for a
-   * real PIS bank transfer: the account must be PSD2-connected, the payment method must be a
+   * real PIS bank transfer: the account must have a bank connection, the payment method must be a
    * bank transfer, and the invoice currency must be one PIS supports (EUR → SEPA, GBP → FPS).
    */
   static void validatePisEligibility(FIN_FinancialAccount account,
       FIN_PaymentMethod paymentMethod, Invoice invoice) {
     if (!BankIntegrationConstants.FA_CONNECTION_STATUS_CONNECTED
         .equals(account.getPSD2ConnectionStatus())) {
-      throw new OBException("The selected financial account is not connected to PSD2. "
+      throw new OBException("The selected financial account has no bank connection. "
           + "Connect it to your bank via Salt Edge before paying by bank transfer.");
     }
     if (!isTransferMethod(paymentMethod)) {
@@ -488,7 +488,7 @@ final class PisPaymentService {
    * so eligibility is inferred from the method's display name containing "transfer" (EN) or
    * "transferencia" (ES), case-insensitive. Fragile against renamed/localized payment methods —
    * revisit if Etendo core ever exposes a proper type flag. Same heuristic is used in
-   * {@link FinancialAccountPsd2Handler}.
+   * {@link FinancialAccountBankConnectionHandler}.
    */
   private static boolean isTransferMethod(FIN_PaymentMethod method) {
     if (method == null || method.getName() == null) {
@@ -515,7 +515,7 @@ final class PisPaymentService {
   /**
    * True when {@code payment} has an associated {@code PSD2_PIS_PAYMENT} row, meaning it was
    * initiated through the Salt Edge PIS flow rather than just recorded as a manual bank
-   * transfer — surfaced in the SPA's payment history as a "Realizado vía PSD2" badge.
+   * transfer — surfaced in the SPA's payment history as a "Realizado vía banco" badge.
    * {@code PisPayment} is a plain DAL entity, so no PSD2-module method is needed for this.
    */
   static boolean hasLinkedPisPayment(FIN_Payment p) {
