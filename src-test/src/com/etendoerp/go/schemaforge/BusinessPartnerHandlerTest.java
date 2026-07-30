@@ -605,6 +605,131 @@ class BusinessPartnerHandlerTest {
     }
   }
 
+  // ── afterHandle() — ETP-4565: vendor/customer posting-account backfill on PATCH/PUT ──
+
+  /**
+   * Reproduces ETP-4565: Classic's {@code c_bpartner_trg} only auto-creates
+   * {@code C_BP_Vendor_Acct} on {@code TG_OP='INSERT'}, so flipping {@code isVendor} to Y on an
+   * already-persisted BP via PATCH never gets its posting-account row (confirmed live on a real
+   * tenant). When the PATCH body touches the {@code vendor} field, {@code afterHandle()} must run
+   * the backfill INSERT bound to the record id, and must NOT touch the customer-side statement.
+   */
+  @Test
+  void testAfterHandlePatchWithVendorFieldBackfillsVendorAcctRow() throws Exception {
+    JSONObject body = buildResponseBody();
+    NeoResponse prevResult = mock(NeoResponse.class);
+    when(prevResult.getBody()).thenReturn(body);
+    when(ctx.getHttpMethod()).thenReturn("PATCH");
+    when(ctx.getPreviousResult()).thenReturn(prevResult);
+    when(ctx.getRecordId()).thenReturn("BP_ID_1");
+    JSONObject requestBody = new JSONObject();
+    requestBody.put("vendor", true);
+    when(ctx.getRequestBody()).thenReturn(requestBody);
+
+    Connection connMock = mock(Connection.class);
+    PreparedStatement psVendor = mock(PreparedStatement.class);
+    when(connMock.prepareStatement(argThat(s -> s != null && s.contains("c_bp_vendor_acct"))))
+        .thenReturn(psVendor);
+
+    try (MockedStatic<OBDal> mDal = mockStatic(OBDal.class)) {
+      OBDal obDalMock = mock(OBDal.class);
+      when(obDalMock.getConnection()).thenReturn(connMock);
+      mDal.when(OBDal::getInstance).thenReturn(obDalMock);
+
+      handler.afterHandle(ctx);
+
+      verify(psVendor).setString(1, "BP_ID_1");
+      verify(psVendor).executeUpdate();
+      verify(connMock, never())
+          .prepareStatement(argThat(s -> s != null && s.contains("c_bp_customer_acct")));
+    }
+  }
+
+  /**
+   * Symmetric case: PATCH body touches {@code customer} — {@code afterHandle()} must run the
+   * customer-side backfill INSERT and must NOT touch the vendor-side statement.
+   */
+  @Test
+  void testAfterHandlePatchWithCustomerFieldBackfillsCustomerAcctRow() throws Exception {
+    JSONObject body = buildResponseBody();
+    NeoResponse prevResult = mock(NeoResponse.class);
+    when(prevResult.getBody()).thenReturn(body);
+    when(ctx.getHttpMethod()).thenReturn("PUT");
+    when(ctx.getPreviousResult()).thenReturn(prevResult);
+    when(ctx.getRecordId()).thenReturn("BP_ID_2");
+    JSONObject requestBody = new JSONObject();
+    requestBody.put("customer", true);
+    when(ctx.getRequestBody()).thenReturn(requestBody);
+
+    Connection connMock = mock(Connection.class);
+    PreparedStatement psCustomer = mock(PreparedStatement.class);
+    when(connMock.prepareStatement(argThat(s -> s != null && s.contains("c_bp_customer_acct"))))
+        .thenReturn(psCustomer);
+
+    try (MockedStatic<OBDal> mDal = mockStatic(OBDal.class)) {
+      OBDal obDalMock = mock(OBDal.class);
+      when(obDalMock.getConnection()).thenReturn(connMock);
+      mDal.when(OBDal::getInstance).thenReturn(obDalMock);
+
+      handler.afterHandle(ctx);
+
+      verify(psCustomer).setString(1, "BP_ID_2");
+      verify(psCustomer).executeUpdate();
+      verify(connMock, never())
+          .prepareStatement(argThat(s -> s != null && s.contains("c_bp_vendor_acct")));
+    }
+  }
+
+  /**
+   * When the PATCH body touches neither {@code vendor} nor {@code customer}, the handler must
+   * skip the backfill entirely — no DB access at all — so ordinary field updates (e.g. address,
+   * email) never pay for the extra lookup. Deliberately does NOT mock {@link OBDal}: if the guard
+   * were broken, the real static call would blow up this unit test instead of silently no-op'ing.
+   */
+  @Test
+  void testAfterHandlePatchWithoutVendorOrCustomerFieldsSkipsBackfill() throws Exception {
+    JSONObject body = buildResponseBody();
+    NeoResponse prevResult = mock(NeoResponse.class);
+    when(prevResult.getBody()).thenReturn(body);
+    when(ctx.getHttpMethod()).thenReturn("PATCH");
+    when(ctx.getPreviousResult()).thenReturn(prevResult);
+    when(ctx.getRecordId()).thenReturn("BP_ID_3");
+    JSONObject requestBody = new JSONObject();
+    requestBody.put("etgoEmail", "a@b.com");
+    when(ctx.getRequestBody()).thenReturn(requestBody);
+
+    handler.afterHandle(ctx);
+    // No assertion beyond "did not throw" — reaching this line without an exception proves
+    // OBDal.getInstance() was never invoked in this unmocked-static context.
+  }
+
+  /**
+   * A failure inside the backfill (e.g. a transient DB error) must be logged and swallowed, never
+   * propagated out of {@code afterHandle()} — the surrounding searchKey/VIES logic on the same
+   * request must not be sacrificed because of this best-effort backfill.
+   */
+  @Test
+  void testAfterHandlePatchVendorBackfillFailureIsSwallowed() throws Exception {
+    JSONObject body = buildResponseBody();
+    NeoResponse prevResult = mock(NeoResponse.class);
+    when(prevResult.getBody()).thenReturn(body);
+    when(ctx.getHttpMethod()).thenReturn("PATCH");
+    when(ctx.getPreviousResult()).thenReturn(prevResult);
+    when(ctx.getRecordId()).thenReturn("BP_ID_4");
+    JSONObject requestBody = new JSONObject();
+    requestBody.put("vendor", true);
+    when(ctx.getRequestBody()).thenReturn(requestBody);
+
+    try (MockedStatic<OBDal> mDal = mockStatic(OBDal.class)) {
+      OBDal obDalMock = mock(OBDal.class);
+      when(obDalMock.getConnection()).thenThrow(new RuntimeException("connection pool exhausted"));
+      mDal.when(OBDal::getInstance).thenReturn(obDalMock);
+
+      // Must not throw.
+      handler.afterHandle(ctx);
+    }
+  }
+
   // ── afterHandle() — GET: contact email fallback ──────────────────────────────
 
   /**
