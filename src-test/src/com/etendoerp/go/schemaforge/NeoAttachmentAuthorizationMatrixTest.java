@@ -20,6 +20,7 @@ package com.etendoerp.go.schemaforge;
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
@@ -186,6 +187,8 @@ public class NeoAttachmentAuthorizationMatrixTest {
       NeoAttachmentsHelper.handleDownload(MISSING_ATTACHMENT_ID, missingResponse);
     }
     verify(missingResponse).setStatus(HttpServletResponse.SC_NOT_FOUND);
+    assertTrue("The 404 must carry an error body, unlike the unauthorized case below",
+        missingSink.toString().contains("Attachment not found"));
 
     // Existing but unauthorized ID → 200 with content. The difference is the oracle.
     ByteArrayOutputStream written = new ByteArrayOutputStream();
