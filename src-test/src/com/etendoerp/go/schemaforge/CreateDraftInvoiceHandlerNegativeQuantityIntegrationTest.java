@@ -100,6 +100,12 @@ public class CreateDraftInvoiceHandlerNegativeQuantityIntegrationTest extends OB
   public void setUp() {
     OBContext.setOBContext(TestConstants.Users.ADMIN, TestConstants.Roles.FB_GRP_ADMIN,
         TestConstants.Clients.FB_GRP, TestConstants.Orgs.ESP);
+    // Pre-warm EntityAccessChecker outside the Hibernate flush callback (OBInterceptor.onSave):
+    // triggering its lazy setAdminMode()/restorePreviousMode() init from inside the first
+    // OBDal.save() intermittently left admin mode unbalanced (ETP-4722). Same idiom as
+    // EvaluationTest#testOrderEvaluation (Issue 12575) for tests that save Order/OrderLine directly.
+    addReadWriteAccess(Order.class);
+    addReadWriteAccess(OrderLine.class);
   }
 
   @After
