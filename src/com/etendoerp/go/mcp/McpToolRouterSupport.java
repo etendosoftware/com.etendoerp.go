@@ -123,6 +123,12 @@ final class McpToolRouterSupport {
       JSONObject item = new JSONObject();
       item.put("name", entity.getName());
       item.put("methods", buildMethodsArray(entity));
+      // Entity-level agent guidance (ETP-4278), additive to the spec-level and
+      // per-field prompts. Emitted only when set so untagged entities stay lean.
+      String agentPrompt = entity.getAgentPrompt();
+      if (agentPrompt != null && !agentPrompt.trim().isEmpty()) {
+        item.put("agentPrompt", agentPrompt.trim());
+      }
       entities.put(item);
     }
     return entities;
