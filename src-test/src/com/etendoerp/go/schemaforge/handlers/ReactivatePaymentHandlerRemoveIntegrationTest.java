@@ -99,7 +99,7 @@ import com.etendoerp.payment.removal.util.PaymentRemovalUtil;
  * {@code org.hibernate.boot.MappingNotFoundException: Mapping (RESOURCE) not found :
  * org/openbravo/base/model/Table.hbm.xml} for OTHER tests
  * ({@code com.etendoerp.go.mcp.NeoWidgetMcpIntegrationTest},
- * {@code com.etendoerp.go.onboarding.OnboardingPsd2SyncServiceTest}) — that turned out to be
+ * {@code com.etendoerp.go.onboarding.OnboardingBankConnectionSyncServiceTest}) — that turned out to be
  * specific to those tests, not a blanket sandbox failure: THIS test's {@code OBBaseTest} DAL
  * layer initialized successfully and executed against the real local DB (that is how the two
  * trigger issues above were found). Re-run this test after any future change to {@link

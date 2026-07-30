@@ -464,8 +464,17 @@ public class NeoDefaultsService {
           dbColumnName, request.ctx);
     }
 
-    defaultExpr = defaultExpr.trim();
+    return resolveNonEmptyDefaultExpr(defaultExpr.trim(), adColumn, dbColumnName, request);
+  }
 
+  /**
+   * Resolves a non-blank AD_Column/ETGO_SF_FIELD default expression, once the early
+   * NEO-specific cases (IsActive, link-to-parent, sequence) have already been ruled out
+   * by {@link #resolveFieldDefault(FieldDefaultRequest)}. Extracted to keep that method's
+   * cognitive complexity within SonarQube's limit — pure extraction, no behavior change.
+   */
+  private static Object resolveNonEmptyDefaultExpr(String defaultExpr, Column adColumn,
+      String dbColumnName, FieldDefaultRequest request) {
     // Handle empty-string literal
     if ("\"\"".equals(defaultExpr)) {
       return "";
@@ -475,6 +484,16 @@ public class NeoDefaultsService {
     if (defaultExpr.startsWith("@SQL=")) {
       return NeoDefaultsSqlHelper.resolveSQLDefault(defaultExpr, request.vars, request.conn,
           request.windowId, adColumn, request.parentValues);
+    }
+
+    // List-reference columns (AD_Reference_ID = "17") with a pure literal default (no "@"
+    // context/preference token) must return that literal verbatim. Their AD_Ref_List values
+    // are opaque codes — often all-digit strings like "000000000000000" (see Invoicegrouping,
+    // a 15-digit binary code) — and Utility.getDefault treats a plain literal as a numeric
+    // candidate, collapsing it to "0" and losing the leading zeros / length. That produces a
+    // value that matches none of the column's real AD_Ref_List entries.
+    if (!defaultExpr.contains("@") && isListReference(adColumn)) {
+      return defaultExpr;
     }
 
     // Delegate to Utility.getDefault for all other cases:
@@ -490,6 +509,20 @@ public class NeoDefaultsService {
     }
 
     return null;
+  }
+
+  /**
+   * AD_Reference id for the "List" reference type (fixed, pre-defined AD_Ref_List values).
+   */
+  private static final String REFERENCE_ID_LIST = "17";
+
+  /**
+   * Returns true if the column's reference is the "List" type — a fixed set of AD_Ref_List
+   * codes, as opposed to a numeric (Integer/Amount/Quantity) or Search/TableDir reference.
+   */
+  private static boolean isListReference(Column adColumn) {
+    return adColumn.getReference() != null
+        && REFERENCE_ID_LIST.equals(adColumn.getReference().getId());
   }
 
   /**
@@ -869,13 +902,13 @@ public class NeoDefaultsService {
         return;
       }
 
-      if (tryResolveFieldDefault(body, propName, col, mCtx)) {
+      if (tryResolveFieldDefault(body, propName, col, mCtx, prop)) {
         return;
       }
-      if (tryInjectFromSession(body, dalEntity, propName, col, mCtx)) {
+      if (tryInjectFromSession(body, dalEntity, propName, col, mCtx, prop)) {
         return;
       }
-      if (tryInjectFromParentValues(body, dalEntity, propName, col, mCtx.parentValues)) {
+      if (tryInjectFromParentValues(body, dalEntity, propName, col, mCtx.parentValues, prop)) {
         return;
       }
       // ETP-4274: non-mandatory columns stop after the genuine default-resolution passes
@@ -915,7 +948,7 @@ public class NeoDefaultsService {
    * @return true if a value was injected, false otherwise
    */
   private static boolean tryResolveFieldDefault(JSONObject body, String propName, Column col,
-      MandatoryDefaultContext mCtx) {
+      MandatoryDefaultContext mCtx, Property prop) {
     try {
       // Look up the ETGO_SF_FIELD override for this column (null if not configured)
       String sfFieldDefault = mCtx.sfFieldDefaults.get(
@@ -925,7 +958,7 @@ public class NeoDefaultsService {
           .withSfFieldDefault(sfFieldDefault)
           .withParentValues(mCtx.parentValues));
       if (resolved != null) {
-        applyResolvedDefault(body, col, propName, resolved, mCtx.neoCtx);
+        applyResolvedDefault(body, col, propName, resolved, mCtx.neoCtx, prop);
         tryInjectIdentifier(body,
             NeoDefaultsCascadeHelper.resolveDalEntity(mCtx.neoCtx.getSfEntity()),
             propName, body.opt(propName));
@@ -944,7 +977,7 @@ public class NeoDefaultsService {
    * Returns true if a value was found and injected, false otherwise.
    */
   private static boolean tryInjectFromSession(JSONObject body, Entity dalEntity, String propName,
-      Column col, MandatoryDefaultContext mCtx) {
+      Column col, MandatoryDefaultContext mCtx, Property prop) {
     try {
       String dbColName = col.getDBColumnName();
       VariablesSecureApp vars = mCtx.vars;
@@ -953,7 +986,7 @@ public class NeoDefaultsService {
         fromSession = vars.getSessionValue(dbColName);
       }
       if (fromSession != null && !fromSession.isEmpty()) {
-        applyResolvedDefault(body, col, propName, fromSession, mCtx.neoCtx);
+        applyResolvedDefault(body, col, propName, fromSession, mCtx.neoCtx, prop);
         tryInjectIdentifier(body, dalEntity, propName, body.opt(propName));
         log.debug("Injected from session context: {} = {}", propName, body.opt(propName));
         return true;
@@ -965,7 +998,7 @@ public class NeoDefaultsService {
   }
 
   private static boolean tryInjectFromParentValues(JSONObject body, Entity dalEntity,
-      String propName, Column col, Map<String, Object> parentValues) {
+      String propName, Column col, Map<String, Object> parentValues, Property prop) {
     if (parentValues == null || parentValues.isEmpty()) {
       return false;
     }
@@ -979,7 +1012,7 @@ public class NeoDefaultsService {
       return false;
     }
     try {
-      applyResolvedDefault(body, col, propName, value, null);
+      applyResolvedDefault(body, col, propName, value, null, prop);
       tryInjectIdentifier(body, dalEntity, propName, body.opt(propName));
       log.debug("Injected parent fallback default: {} = {}", propName, body.opt(propName));
       return true;
@@ -990,7 +1023,7 @@ public class NeoDefaultsService {
   }
 
   private static void applyResolvedDefault(JSONObject body, Column col,
-      String propName, Object resolved, NeoContext ctx) throws Exception {
+      String propName, Object resolved, NeoContext ctx, Property prop) throws Exception {
     if (resolved == null) {
       return;
     }
@@ -1009,26 +1042,60 @@ public class NeoDefaultsService {
     }
     // Coerce numeric String defaults to their proper Java type so DAL validation passes.
     // SQL defaults (e.g. lineNo from COALESCE(MAX(Line),0)+10) arrive as String from rs.getString().
-    // Non-FK numeric columns must be Long or BigDecimal — never String — when handed to the DAL.
+    // The target type is decided by the DAL property, NOT by the column name: a String property
+    // whose default happens to be all digits (e.g. a List-reference code like
+    // BusinessPartner.invoiceGrouping = "000000000000000") must stay a String — coercing it to a
+    // number corrupts the value and fails the List-reference validator (ETP-4668). Mirrors the
+    // type check in NeoTypeCoercionHelper.coerceField used on the create path.
     Object valueToStore = resolved;
-    if (resolved instanceof String && !col.getDBColumnName().toUpperCase().endsWith("_ID")) {
-      String strVal = ((String) resolved).trim();
-      try {
-        valueToStore = new java.math.BigDecimal(strVal).longValueExact();
-      } catch (ArithmeticException ae) {
-        // Has fractional part — store as BigDecimal
-        try {
-          valueToStore = new java.math.BigDecimal(strVal);
-        } catch (Exception ignored) {
-          log.debug("Could not parse '{}' as BigDecimal, keeping as String", strVal);
-        }
-      } catch (Exception ignored) {
-        // Not numeric — keep as String (e.g. status flags, doc numbers)
-      }
+    if (resolved instanceof String && isNumericProperty(prop)) {
+      valueToStore = coerceNumericStringToPropertyType((String) resolved, prop);
     }
     body.put(propName, valueToStore);
     log.debug("[NEO-DEFAULTS] {} = {} ({})", propName, valueToStore,
         valueToStore == null ? "null" : valueToStore.getClass().getSimpleName());
+  }
+
+  /**
+   * True when the DAL property is a primitive numeric type ({@link java.math.BigDecimal},
+   * {@link Long} or {@link Integer}). FK (non-primitive) and String properties return false, so
+   * their String defaults are never coerced to numbers — the fix for ETP-4668, where an all-digit
+   * List-reference code on a String property was silently turned into a number.
+   */
+  private static boolean isNumericProperty(Property prop) {
+    if (prop == null || !prop.isPrimitive()) {
+      return false;
+    }
+    Class<?> type = prop.getPrimitiveObjectType();
+    return type != null
+        && (java.math.BigDecimal.class.isAssignableFrom(type)
+            || Long.class.isAssignableFrom(type)
+            || Integer.class.isAssignableFrom(type));
+  }
+
+  /**
+   * Coerces a numeric String default to the exact Java type declared by the DAL property,
+   * mirroring {@link com.etendoerp.go.schemaforge.util.NeoTypeCoercionHelper#coerceField}. If the
+   * string cannot be parsed as that numeric type the original String is returned unchanged.
+   */
+  private static Object coerceNumericStringToPropertyType(String resolved, Property prop) {
+    String strVal = resolved.trim();
+    try {
+      Class<?> type = prop.getPrimitiveObjectType();
+      if (java.math.BigDecimal.class.isAssignableFrom(type)) {
+        return new java.math.BigDecimal(strVal);
+      }
+      if (Long.class.isAssignableFrom(type)) {
+        return new java.math.BigDecimal(strVal).longValue();
+      }
+      if (Integer.class.isAssignableFrom(type)) {
+        return Integer.parseInt(strVal);
+      }
+    } catch (Exception ex) {
+      log.debug("Could not coerce '{}' to numeric type for property {}: keeping as String — {}",
+          strVal, prop.getName(), ex.getMessage());
+    }
+    return resolved;
   }
 
   private static boolean isAuditColumn(Column col) {

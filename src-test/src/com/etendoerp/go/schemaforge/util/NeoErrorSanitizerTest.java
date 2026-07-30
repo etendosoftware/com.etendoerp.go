@@ -166,6 +166,55 @@ public class NeoErrorSanitizerTest {
     assertTrue(NeoErrorSanitizer.isDuplicateKeyViolation(wrapper));
   }
 
+  // ── redactObjectReferences — object-toString leak stripping (ETP-4668) ──────
+
+  @Test
+  public void redactObjectReferences_null_returnsNull() {
+    assertNull(NeoErrorSanitizer.redactObjectReferences(null));
+  }
+
+  @Test
+  public void redactObjectReferences_listReferenceLeak_isStripped() {
+    String leaked = "value is not valid, it should be one of the following values: "
+        + "com.etendoerp.redis.interfaces.CachedSet@55b0cf12 but it is value 0";
+    String safe = NeoErrorSanitizer.redactObjectReferences(leaked);
+    assertFalse("raw object reference must not survive", safe.contains("CachedSet@55b0cf12"));
+    assertFalse("package path must not survive", safe.contains("com.etendoerp.redis"));
+    assertTrue("surrounding message must be preserved",
+        safe.contains("one of the following values:") && safe.contains("but it is value 0"));
+    assertEquals("value is not valid, it should be one of the following values: "
+        + NeoErrorSanitizer.REDACTED_OBJECT + " but it is value 0", safe);
+  }
+
+  @Test
+  public void redactObjectReferences_innerClassLeak_isStripped() {
+    String leaked = "rejected: org.openbravo.dal.core.OBContext$Session@1a2b3c4d";
+    String safe = NeoErrorSanitizer.redactObjectReferences(leaked);
+    assertFalse(safe.contains("@1a2b3c4d"));
+    assertEquals("rejected: " + NeoErrorSanitizer.REDACTED_OBJECT, safe);
+  }
+
+  @Test
+  public void redactObjectReferences_cleanMessage_isUnchanged() {
+    String clean = "Business Partner value must be unique.";
+    assertEquals(clean, NeoErrorSanitizer.redactObjectReferences(clean));
+  }
+
+  @Test
+  public void redactObjectReferences_emailAndVersion_notFalsePositives() {
+    String msg = "contact user@example.com about release 1.2.3 built earlier";
+    assertEquals(msg, NeoErrorSanitizer.redactObjectReferences(msg));
+  }
+
+  @Test
+  public void sanitize_plainExceptionWithObjectLeak_isRedacted() {
+    String leaked = "should be one of the following values: "
+        + "com.etendoerp.redis.interfaces.CachedSet@55b0cf12 but it is value 0";
+    String safe = NeoErrorSanitizer.sanitize(new RuntimeException(leaked));
+    assertFalse(safe.contains("CachedSet@55b0cf12"));
+    assertTrue(safe.contains(NeoErrorSanitizer.REDACTED_OBJECT));
+  }
+
   // Inner classes whose names contain the patterns checked by isDbException.
   // getName() returns the binary name, e.g. "...NeoErrorSanitizerTest$FakeSQLException",
   // which contains "SQLException" as a substring.
