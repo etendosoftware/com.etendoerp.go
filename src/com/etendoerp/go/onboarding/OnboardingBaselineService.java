@@ -86,7 +86,7 @@ public class OnboardingBaselineService {
    * Use the exact UTC timestamp prefix of the last incorporated .sql file, e.g.:
    * {@code "20260617T120000Z"} matches {@code 20260617T120000Z__R7-tax-accounts.sql}.</p>
    *
-   * Current watermark: R13 amortization-table-active (2026-07-08).
+   * Current watermark: R17 rectificativa-doctype-sequence (2026-07-30).
    *
    * <p><b>Note (2026-07-06):</b> the sibling in-flight branch {@code feat/bp-category-preventive}
    * (ETP-4402) independently bumps this same constant to {@code 2026-07-01T12:00:00Z} for its
@@ -94,8 +94,15 @@ public class OnboardingBaselineService {
    * {@code 2026-07-06T12:00:00Z} for {@code R10-accounting-schema-dimensions}. Multiple in-flight
    * branches touch this single line — expect merge conflicts when they converge; always resolve to
    * the LATEST timestamp so no fix's cutoff is lost.</p>
+   *
+   * <p><b>Note (2026-07-30, ETP-4737):</b> bumped from R13's {@code 2026-07-08T10:00:00Z} to
+   * R17's {@code 2026-07-30T18:00:00Z}. Fixes R14/R15/R16 in between are dataset-only or
+   * non-provisioning (no CUT bump needed per their own doc — see
+   * {@code onboarding-and-datafixes-map.md} §4); R17 is the first fix since R13 whose preventive
+   * counterpart is a new onboarding action (the two "Factura Rectificativa" doc types/sequences),
+   * so this is the first bump since R13.</p>
    */
-  private static final Instant ONBOARDING_PROVISIONED_THROUGH = Instant.parse("2026-07-08T10:00:00Z");
+  private static final Instant ONBOARDING_PROVISIONED_THROUGH = Instant.parse("2026-07-30T18:00:00Z");
 
   private static final String SQL_INSERT_BASELINE = ""
       + "INSERT INTO etgo_data_fix_history ("
