@@ -16,19 +16,34 @@
  */
 package com.etendoerp.go.schemaforge;
 
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNull;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
+
+import javax.servlet.http.HttpServletResponse;
 
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.Test;
+import org.mockito.MockedStatic;
+import org.mockito.Mockito;
+import org.openbravo.dal.service.OBDal;
+import org.openbravo.erpCommon.utility.OBMessageUtils;
+import org.openbravo.model.common.plm.Product;
+import org.openbravo.model.materialmgmt.transaction.InternalConsumptionLine;
 
 /**
  * Unit tests for {@link InternalConsumptionLineHandler}.
  *
- * <p>The handler is now an intentional no-op: warehouse-name enrichment for locator FKs is
- * handled generically for all windows by the shared selector and CRUD pipelines
- * ({@code NeoLocatorSelectorHelper} / {@code NeoLocatorIdentifierHelper}). These tests only
- * pin the no-op contract so the handler never double-rewrites or short-circuits the response.
+ * <p>Warehouse-name enrichment for locator FKs is handled generically for all windows by the
+ * shared selector and CRUD pipelines ({@code NeoLocatorSelectorHelper} /
+ * {@code NeoLocatorIdentifierHelper}) — those tests only pin the no-op contract for that part.
+ *
+ * <p>The remaining responsibility, covered below, is the write pre-hook added for ETP-4606: a
+ * line cannot reference a Service-type {@code Product}.
  */
 public class InternalConsumptionLineHandlerTest {
 
@@ -87,5 +102,106 @@ public class InternalConsumptionLineHandlerTest {
         .fieldName("C_BPartner_ID")
         .build();
     assertNull(HANDLER.afterHandle(ctx));
+  }
+
+  // ── handle() — Service product rejection (ETP-4606) ───────────────────────────
+
+  /**
+   * handle() POST must reject with HTTP 400 when the product sent in the body is Service-type.
+   */
+  @Test
+  public void testHandleRejectsServiceProductOnPost() throws Exception {
+    JSONObject body = new JSONObject().put("product", "prod-service");
+    NeoContext ctx = NeoContext.builder().httpMethod("POST").endpointType(NeoEndpointType.CRUD).requestBody(body).build();
+
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+        MockedStatic<OBMessageUtils> messageUtilsMock = Mockito.mockStatic(OBMessageUtils.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      Product product = mock(Product.class);
+      when(product.getProductType()).thenReturn("S");
+      when(dal.get(eq(Product.class), eq("prod-service"))).thenReturn(product);
+      messageUtilsMock.when(() -> OBMessageUtils.messageBD("ETGO_ProductNotStockable"))
+          .thenReturn("This product is of type Service and cannot be used in inventory movements.");
+
+      NeoResponse response = HANDLER.handle(ctx);
+
+      assertEquals(HttpServletResponse.SC_BAD_REQUEST, response.getHttpStatus());
+      assertFalse(response.getBody().getJSONObject("error").getString("message").isEmpty());
+    }
+  }
+
+  /**
+   * handle() PATCH must reject with HTTP 400 when the body has no product field but the line
+   * already persisted a Service-type product.
+   */
+  @Test
+  public void testHandleRejectsServiceProductOnPatchWithPersistedProduct() {
+    NeoContext ctx = mock(NeoContext.class);
+    when(ctx.getEndpointType()).thenReturn(NeoEndpointType.CRUD);
+    when(ctx.getHttpMethod()).thenReturn("PATCH");
+    when(ctx.getRequestBody()).thenReturn(new JSONObject());
+    when(ctx.getRecordId()).thenReturn("line-1");
+
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+        MockedStatic<OBMessageUtils> messageUtilsMock = Mockito.mockStatic(OBMessageUtils.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      InternalConsumptionLine line = mock(InternalConsumptionLine.class);
+      Product product = mock(Product.class);
+      when(product.getId()).thenReturn("prod-service");
+      when(product.getProductType()).thenReturn("S");
+      when(line.getProduct()).thenReturn(product);
+      when(dal.get(eq(InternalConsumptionLine.class), eq("line-1"))).thenReturn(line);
+      when(dal.get(eq(Product.class), eq("prod-service"))).thenReturn(product);
+      messageUtilsMock.when(() -> OBMessageUtils.messageBD("ETGO_ProductNotStockable"))
+          .thenReturn("This product is of type Service and cannot be used in inventory movements.");
+
+      NeoResponse response = HANDLER.handle(ctx);
+
+      assertEquals(HttpServletResponse.SC_BAD_REQUEST, response.getHttpStatus());
+    }
+  }
+
+  /**
+   * handle() must let a non-Service product through unchanged (default CRUD path runs).
+   */
+  @Test
+  public void testHandleAllowsNonServiceProductToProceed() throws Exception {
+    JSONObject body = new JSONObject().put("product", "prod-item");
+    NeoContext ctx = NeoContext.builder().httpMethod("POST").endpointType(NeoEndpointType.CRUD).requestBody(body).build();
+
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      Product product = mock(Product.class);
+      when(product.getProductType()).thenReturn("I");
+      when(dal.get(eq(Product.class), eq("prod-item"))).thenReturn(product);
+
+      assertNull(HANDLER.handle(ctx));
+    }
+  }
+
+  /**
+   * handle() must be a no-op when the request body carries no product at all (e.g. only other
+   * fields changed on PATCH) and the line has none persisted either.
+   */
+  @Test
+  public void testHandleIsNoOpWhenNoProductCanBeResolved() {
+    NeoContext ctx = mock(NeoContext.class);
+    when(ctx.getEndpointType()).thenReturn(NeoEndpointType.CRUD);
+    when(ctx.getHttpMethod()).thenReturn("PATCH");
+    when(ctx.getRequestBody()).thenReturn(new JSONObject());
+    when(ctx.getRecordId()).thenReturn("line-1");
+
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      InternalConsumptionLine line = mock(InternalConsumptionLine.class);
+      when(line.getProduct()).thenReturn(null);
+      when(dal.get(eq(InternalConsumptionLine.class), eq("line-1"))).thenReturn(line);
+
+      assertNull(HANDLER.handle(ctx));
+    }
   }
 }

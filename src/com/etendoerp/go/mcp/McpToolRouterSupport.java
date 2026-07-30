@@ -120,12 +120,34 @@ final class McpToolRouterSupport {
   static JSONArray buildEntitySummaryArray(String specId) throws JSONException {
     JSONArray entities = new JSONArray();
     for (SFEntity entity : listIncludedEntities(specId)) {
-      JSONObject item = new JSONObject();
-      item.put("name", entity.getName());
-      item.put("methods", buildMethodsArray(entity));
-      entities.put(item);
+      entities.put(buildDiscoverEntity(entity));
     }
     return entities;
+  }
+
+  /**
+   * Builds the entity metadata returned by {@code neo_discover}.
+   *
+   * <p>The {@code readOnly} flag is derived from the entity's configured mutation methods rather
+   * than its name, so it applies consistently to handler-backed GET-only entities and any future
+   * system-data entity configured without POST, PUT, PATCH, or DELETE support.
+   */
+  static JSONObject buildDiscoverEntity(SFEntity entity) throws JSONException {
+    JSONObject item = new JSONObject();
+    item.put("name", entity.getName());
+    item.put("methods", buildMethodsArray(entity));
+    item.put("readOnly", isReadOnlyEntity(entity));
+    return item;
+  }
+
+  /** Returns whether an entity declares at least one read method and no supported mutation method. */
+  static boolean isReadOnlyEntity(SFEntity entity) {
+    boolean canRead = Boolean.TRUE.equals(entity.isGet()) || Boolean.TRUE.equals(entity.isGetByID());
+    return canRead
+        && !Boolean.TRUE.equals(entity.isPost())
+        && !Boolean.TRUE.equals(entity.isPut())
+        && !Boolean.TRUE.equals(entity.isPatch())
+        && !Boolean.TRUE.equals(entity.isDelete());
   }
 
   static JSONArray buildMethodsArray(SFEntity entity) {

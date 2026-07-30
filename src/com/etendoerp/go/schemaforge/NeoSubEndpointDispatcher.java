@@ -27,6 +27,7 @@ import org.codehaus.jettison.json.JSONObject;
 import com.etendoerp.go.schemaforge.NeoServlet.NeoPathInfo;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFSpec;
+import com.etendoerp.go.schemaforge.util.NeoDisplayLogicHelper;
 
 /**
  * Routes window sub-endpoint requests (selectors, actions, evaluate-display,
@@ -107,9 +108,14 @@ class NeoSubEndpointDispatcher {
           "Method not allowed. Use POST.");
       return true;
     }
+    // Routed through NeoDisplayLogicHelper (not the package's NeoDisplayLogicHandler) because
+    // the helper's buildEvalContext() correctly sets $IsAcctDimCentrally, resolves
+    // DimensionDisplayUtility.getAccountingDimensionConfiguration() for centrally-maintained
+    // clients, and resolves DOCBASETYPE -- all required for @ACCT_DIMENSION_DISPLAY@ display
+    // logic macros to evaluate correctly. See ETP-4529.
     return handleHookedSubEndpoint(new HookedSubEndpointRequest(spec, pathInfo.entityName,
         NeoEndpointType.EVALUATE_DISPLAY, null, method, null,
-        () -> servlet.displayLogicHandler.handleEvaluateDisplay(spec, pathInfo, request)), response);
+        () -> NeoDisplayLogicHelper.handleEvaluateDisplay(spec, pathInfo, request)), response);
   }
 
   private boolean handleCalloutSubEndpoint(SFSpec spec, NeoPathInfo pathInfo, String method,
