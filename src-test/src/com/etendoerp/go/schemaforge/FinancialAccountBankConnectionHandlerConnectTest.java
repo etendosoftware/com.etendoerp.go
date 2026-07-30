@@ -17,13 +17,13 @@
 
 package com.etendoerp.go.schemaforge;
 
-import static com.etendoerp.go.schemaforge.Psd2HandlerTestSupport.ACCOUNT_ID;
-import static com.etendoerp.go.schemaforge.Psd2HandlerTestSupport.API_KEY;
-import static com.etendoerp.go.schemaforge.Psd2HandlerTestSupport.CONNECTION_ID;
-import static com.etendoerp.go.schemaforge.Psd2HandlerTestSupport.ORIGIN;
-import static com.etendoerp.go.schemaforge.Psd2HandlerTestSupport.PARAM_ACCOUNT_ID;
-import static com.etendoerp.go.schemaforge.Psd2HandlerTestSupport.postContext;
-import static com.etendoerp.go.schemaforge.Psd2HandlerTestSupport.stubObContext;
+import static com.etendoerp.go.schemaforge.BankConnectionHandlerTestSupport.ACCOUNT_ID;
+import static com.etendoerp.go.schemaforge.BankConnectionHandlerTestSupport.API_KEY;
+import static com.etendoerp.go.schemaforge.BankConnectionHandlerTestSupport.CONNECTION_ID;
+import static com.etendoerp.go.schemaforge.BankConnectionHandlerTestSupport.ORIGIN;
+import static com.etendoerp.go.schemaforge.BankConnectionHandlerTestSupport.PARAM_ACCOUNT_ID;
+import static com.etendoerp.go.schemaforge.BankConnectionHandlerTestSupport.postContext;
+import static com.etendoerp.go.schemaforge.BankConnectionHandlerTestSupport.stubObContext;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -62,7 +62,7 @@ import com.etendoerp.psd2.bank.integration.utils.BankIntegrationUtils;
 import com.etendoerp.psd2.bank.integration.utils.SaltEdgeAccountLinkHelper;
 
 /**
- * Unit tests for the {@link FinancialAccountPsd2Handler} POST {@code connect}, {@code reconnect}
+ * Unit tests for the {@link FinancialAccountBankConnectionHandler} POST {@code connect}, {@code reconnect}
  * and {@code disconnect} actions.
  *
  * <p>{@code connect} reads the request {@code Origin} header (via {@link RequestContext}) to build
@@ -71,19 +71,19 @@ import com.etendoerp.psd2.bank.integration.utils.SaltEdgeAccountLinkHelper;
  * seam is stubbed on a spy.
  */
 @RunWith(MockitoJUnitRunner.Silent.class)
-public class FinancialAccountPsd2HandlerConnectTest {
+public class FinancialAccountBankConnectionHandlerConnectTest {
 
-  private static final String CALLBACK = "/financial-account/psd2-callback";
+  private static final String CALLBACK = "/financial-account/bank-connection-callback";
   private static final String ACTION_CONNECT = "connect";
   private static final String ACTION_RECONNECT = "reconnect";
   private static final String ACTION_DISCONNECT = "disconnect";
   private static final String CONNECT_URL = "https://saltedge.example/connect/abc";
 
-  private FinancialAccountPsd2Handler handler;
+  private FinancialAccountBankConnectionHandler handler;
 
   @Before
   public void setUp() {
-    handler = spy(new FinancialAccountPsd2Handler());
+    handler = spy(new FinancialAccountBankConnectionHandler());
     doNothing().when(handler).doRollbackAndClose();
   }
 
@@ -249,7 +249,7 @@ public class FinancialAccountPsd2HandlerConnectTest {
    * (ETP-4406) the handler also restores {@code Automatic Withdrawn} on the account's transfer
    * payment method(s); this account has none, so that restore is a no-op — the empty
    * {@code FinAccPaymentMethod} criteria is stubbed so it does not hit a real Hibernate session.
-   * The transfer-restore behavior itself is covered in {@code FinancialAccountPsd2HandlerLinkTest}.
+   * The transfer-restore behavior itself is covered in {@code FinancialAccountBankConnectionHandlerLinkTest}.
    */
   @Test
   public void testDisconnectReturnsHelperResult() throws Exception {

@@ -63,9 +63,9 @@ import org.openbravo.service.db.DalConnectionProvider;
  * immediate activation cannot run, the row's {@code SCH} status means Etendo's scheduler still picks
  * it up on the next initialization.
  */
-public class OnboardingPsd2SyncService {
+public class OnboardingBankConnectionSyncService {
 
-  private static final Logger log = LogManager.getLogger(OnboardingPsd2SyncService.class);
+  private static final Logger log = LogManager.getLogger(OnboardingBankConnectionSyncService.class);
 
   /** Search key of the PSD2 "Get Bank Statements" AD_Process (module com.etendoerp.psd2.bank.integration). */
   static final String PSD2_PROCESS_KEY = "PSD2_GetBankStatements";
@@ -77,7 +77,7 @@ public class OnboardingPsd2SyncService {
   private static final String CHANNEL_SCHEDULER = "Process Scheduler";
   private static final String DEFAULT_LANGUAGE = "en_US";
   private static final String DESCRIPTION =
-      "PSD2 automatic bank statement synchronization (Etendo GO onboarding)";
+      "Automatic bank statement synchronization (Etendo GO onboarding)";
 
   /** Sync window lower bound (inclusive), in hours. */
   private static final int SYNC_WINDOW_START_HOUR = 3;
@@ -88,7 +88,7 @@ public class OnboardingPsd2SyncService {
   private static final SecureRandom RANDOM = new SecureRandom();
 
   /**
-   * Creates the per-client daily PSD2 statement-sync schedule if it does not already exist. Runs
+   * Creates the per-client daily bank statement-sync schedule if it does not already exist. Runs
    * inside the onboarding transaction; the row is flushed but committed by the caller. Idempotent:
    * a second onboarding of the same client reuses the existing request.
    *
@@ -98,7 +98,7 @@ public class OnboardingPsd2SyncService {
    * @param adminRoleId administrator role used for the process security context
    * @return the AD_Process_Request id, or {@code null} when the PSD2 process is not installed
    */
-  public String schedulePsd2StatementSync(String clientId, String orgId, String adminUserId,
+  public String scheduleBankConnectionStatementSync(String clientId, String orgId, String adminUserId,
       String adminRoleId) {
     OBContext.setAdminMode(true);
     try {
@@ -112,13 +112,13 @@ public class OnboardingPsd2SyncService {
       }
       ProcessRequest existing = findExistingRequest(clientId, process);
       if (existing != null) {
-        log.debug("PSD2 statement-sync request already exists for client {} — skipping", clientId);
+        log.debug("Bank statement-sync request already exists for client {} — skipping", clientId);
         return existing.getId();
       }
       ProcessRequest request = buildRequest(clientId, orgId, adminUserId, adminRoleId, process);
       OBDal.getInstance().save(request);
       OBDal.getInstance().flush();
-      log.info("Created PSD2 statement-sync schedule {} for client {}", request.getId(), clientId);
+      log.info("Created bank statement-sync schedule {} for client {}", request.getId(), clientId);
       return request.getId();
     } finally {
       OBContext.restorePreviousMode();
@@ -148,9 +148,10 @@ public class OnboardingPsd2SyncService {
       VariablesSecureApp vars = ProcessContext.newInstance(request.getOpenbravoContext()).toVars();
       DalConnectionProvider conn = new DalConnectionProvider(false);
       OBScheduler.getInstance().schedule(requestId, ProcessBundle.request(requestId, vars, conn));
-      log.info("Activated PSD2 statement-sync schedule {} for client {}", requestId, clientId);
+      log.info("Activated bank statement-sync schedule {} for client {}", requestId, clientId);
     } catch (Exception e) {
-      log.warn("Could not immediately activate PSD2 schedule for client {} (it will be picked up "
+      log.warn("Could not immediately activate the bank statement-sync schedule for client {} "
+          + "(it will be picked up "
           + "on the next scheduler initialization): {}", clientId, e.getMessage());
     } finally {
       OBContext.restorePreviousMode();

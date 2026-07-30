@@ -140,6 +140,83 @@ class McpToolRouterSupportTest {
     }
   }
 
+  // ─── buildDiscoverEntity ────────────────────────────────────────────
+
+  @Test
+  @DisplayName("neo_discover marks bp-stats and bp-trend as read-only")
+  void getOnlyBusinessPartnerEntitiesAreExplicitlyReadOnly() throws Exception {
+    assertReadOnlyDiscoverEntity(getOnlyEntity("bp-stats"));
+    assertReadOnlyDiscoverEntity(getOnlyEntity("bp-trend"));
+  }
+
+  @Test
+  @DisplayName("neo_discover keeps writable tax data mutable")
+  void writableSystemDataEntityIsNotMarkedReadOnly() throws Exception {
+    SFEntity tax = writableEntity("tax");
+
+    JSONObject discovered = McpToolRouterSupport.buildDiscoverEntity(tax);
+
+    assertFalse(discovered.getBoolean("readOnly"));
+    assertTrue(arrayContains(discovered.getJSONArray("methods"), "POST"));
+  }
+
+  @Test
+  @DisplayName("neo_discover marks every individually writable entity as mutable")
+  void eachMutationMethodPreventsReadOnly() throws Exception {
+    assertMutableDiscoverEntity(entityWithMethods("post-only", true, false, true, false, false, false));
+    assertMutableDiscoverEntity(entityWithMethods("put-only", true, false, false, true, false, false));
+    assertMutableDiscoverEntity(entityWithMethods("patch-only", true, false, false, false, true, false));
+    assertMutableDiscoverEntity(entityWithMethods("delete-only", true, false, false, false, false, true));
+  }
+
+  @Test
+  @DisplayName("neo_discover does not label a fully disabled entity read-only")
+  void entityWithoutReadOrWriteMethodsIsNotMarkedReadOnly() throws Exception {
+    SFEntity disabled = entityWithMethods("disabled", false, false, false, false, false, false);
+
+    JSONObject discovered = McpToolRouterSupport.buildDiscoverEntity(disabled);
+
+    assertFalse(discovered.getBoolean("readOnly"));
+  }
+
+  private SFEntity getOnlyEntity(String name) {
+    return entityWithMethods(name, true, false, false, false, false, false);
+  }
+
+  private SFEntity writableEntity(String name) {
+    return entityWithMethods(name, true, true, true, true, true, true);
+  }
+
+  private SFEntity entityWithMethods(String name, boolean get, boolean getById, boolean post,
+      boolean put, boolean patch, boolean delete) {
+    SFEntity entity = mock(SFEntity.class);
+    when(entity.getName()).thenReturn(name);
+    when(entity.isGet()).thenReturn(get);
+    when(entity.isGetByID()).thenReturn(getById);
+    when(entity.isPost()).thenReturn(post);
+    when(entity.isPut()).thenReturn(put);
+    when(entity.isPatch()).thenReturn(patch);
+    when(entity.isDelete()).thenReturn(delete);
+    return entity;
+  }
+
+  private void assertReadOnlyDiscoverEntity(SFEntity entity) throws Exception {
+    JSONObject discovered = McpToolRouterSupport.buildDiscoverEntity(entity);
+
+    assertTrue(discovered.getBoolean("readOnly"));
+    JSONArray methods = discovered.getJSONArray("methods");
+    assertEquals(1, methods.length());
+    assertTrue(arrayContains(methods, "GET"));
+    assertFalse(arrayContains(methods, "POST"));
+    assertFalse(arrayContains(methods, "PUT"));
+    assertFalse(arrayContains(methods, "PATCH"));
+    assertFalse(arrayContains(methods, "DELETE"));
+  }
+
+  private void assertMutableDiscoverEntity(SFEntity entity) throws Exception {
+    assertFalse(McpToolRouterSupport.buildDiscoverEntity(entity).getBoolean("readOnly"));
+  }
+
   // ─── hasSpecAccess ──────────────────────────────────────────────────
 
   @Nested
