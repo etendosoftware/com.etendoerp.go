@@ -63,7 +63,7 @@ final class PisPaymentBridge {
    * App-shell SPA route the Salt Edge popup is returned to after SCA. It is a tiny page that just
    * closes the popup (the "Add payment" modal already polls the payment status), so the user lands
    * back on the invoice instead of the Classic-styled shared bank-auth result page. Mirrors the
-   * AIS connect flow's {@code /financial-account/psd2-callback}.
+   * AIS connect flow's {@code /financial-account/bank-connection-callback}.
    */
   private static final String PIS_CALLBACK_PATH = "/financial-account/pis-callback";
 
@@ -120,7 +120,7 @@ final class PisPaymentBridge {
 
   /**
    * Builds the app-shell return URL from the request {@code Origin} header (falling back to
-   * {@code Referer}), mirroring {@code FinancialAccountPsd2Handler#resolveAppShellOrigin}. Returns
+   * {@code Referer}), mirroring {@code FinancialAccountBankConnectionHandler#resolveAppShellOrigin}. Returns
    * {@code null} when the origin can't be resolved, so the caller keeps the default callback.
    */
   private static String resolveGoReturnUrl(HttpServletRequest request) {
@@ -129,7 +129,7 @@ final class PisPaymentBridge {
     }
     String origin = StringUtils.trimToNull(request.getHeader("Origin"));
     if (origin == null) {
-      origin = FinancialAccountPsd2Support.originFromReferer(request.getHeader("Referer"));
+      origin = FinancialAccountBankConnectionSupport.originFromReferer(request.getHeader("Referer"));
     }
     if (origin == null) {
       return null;

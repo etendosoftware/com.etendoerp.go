@@ -61,7 +61,7 @@ import com.google.common.cache.CacheBuilder;
  * reusing the PSD2 module's public helpers. The account selection and success UI are native to
  * the app-shell; the only browser popup is the Salt Edge bank login itself.
  *
- * <p>URL base: {@code /sws/neo/financial-account-psd2}. Actions (via {@code ?action=}):
+ * <p>URL base: {@code /sws/neo/financial-account-bank-connection}. Actions (via {@code ?action=}):
  * <ul>
  *   <li>{@code GET status&financialAccountId=} — connection status for the Edit panel / kebab.</li>
  *   <li>{@code GET accounts&connectionId=&type=[&financialAccountId=]} — bank accounts found for a
@@ -81,10 +81,10 @@ import com.google.common.cache.CacheBuilder;
  *       statementGrouping?}} — updates the import configuration on the FA.</li>
  * </ul>
  */
-@Named("financial-account-psd2")
-public class FinancialAccountPsd2Handler implements NeoHandler {
+@Named("financial-account-bank-connection")
+public class FinancialAccountBankConnectionHandler implements NeoHandler {
 
-  private static final Logger log = LogManager.getLogger(FinancialAccountPsd2Handler.class);
+  private static final Logger log = LogManager.getLogger(FinancialAccountBankConnectionHandler.class);
 
   /**
    * Provider catalog cache keyed by {@code clientId|country}, so the bank picker does not hit the
@@ -119,7 +119,7 @@ public class FinancialAccountPsd2Handler implements NeoHandler {
   private static final String ACTION_IMPORT_SETTINGS = "import-settings";
 
   /** SPA route the Salt Edge popup returns to; it relays the connection id and closes itself. */
-  private static final String CALLBACK_PATH = "/financial-account/psd2-callback";
+  private static final String CALLBACK_PATH = "/financial-account/bank-connection-callback";
 
   // Response / body JSON keys (extracted to satisfy Sonar S1192).
   private static final String KEY_CONNECT_URL = "connectUrl";
@@ -170,11 +170,11 @@ public class FinancialAccountPsd2Handler implements NeoHandler {
       return NeoResponse.error(405, "Method not allowed.");
     } catch (OBException e) {
       doRollbackAndClose();
-      log.warn("financial-account-psd2 business error ({}): {}", action, e.getMessage());
+      log.warn("financial-account-bank-connection business error ({}): {}", action, e.getMessage());
       return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, e.getMessage());
     } catch (Exception e) {
       doRollbackAndClose();
-      log.error("financial-account-psd2 error ({})", action, e);
+      log.error("financial-account-bank-connection error ({})", action, e);
       return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR, "Internal Server Error");
     } finally {
       OBContext.restorePreviousMode();
@@ -211,7 +211,7 @@ public class FinancialAccountPsd2Handler implements NeoHandler {
   // ---------------------------------------------------------------------------
 
   private NeoResponse handleStatus(NeoContext context) throws JSONException {
-    String accountId = FinancialAccountPsd2Support.queryParam(context, PARAM_ACCOUNT_ID);
+    String accountId = FinancialAccountBankConnectionSupport.queryParam(context, PARAM_ACCOUNT_ID);
     FIN_FinancialAccount finAcc = loadAccount(accountId);
     if (finAcc == null) {
       return NeoResponse.error(404, MSG_ACCOUNT_NOT_FOUND);
@@ -224,19 +224,19 @@ public class FinancialAccountPsd2Handler implements NeoHandler {
     data.put(KEY_SALT_EDGE_ACCOUNT_ID, finAcc.getPSD2SaltEdgeAccountID());
     data.put("maskedPan", finAcc.getPSD2CardNumber());
     data.put(KEY_IMPORT_FROM_DATE,
-        FinancialAccountPsd2Support.formatDate(finAcc.getPSD2ImportFromDate()));
+        FinancialAccountBankConnectionSupport.formatDate(finAcc.getPSD2ImportFromDate()));
     data.put(KEY_IMPORT_TO_DATE,
-        FinancialAccountPsd2Support.formatDate(finAcc.getPSD2ImportToDate()));
+        FinancialAccountBankConnectionSupport.formatDate(finAcc.getPSD2ImportToDate()));
     data.put(KEY_STATEMENT_GROUPING, finAcc.getPSD2StatementFrequency());
     if (connection != null) {
       Date expiresAt = connection.getConsentExpiresAt();
       data.put(ACTION_STATUS, connection.getConnectionStatus());
       data.put(KEY_PROVIDER_NAME, connection.getProviderName());
       data.put("scopes", connection.getFetchScopes());
-      data.put("consentExpiresAt", FinancialAccountPsd2Support.formatInstant(expiresAt));
-      data.put("daysUntilExpires", FinancialAccountPsd2Support.daysUntil(expiresAt));
+      data.put("consentExpiresAt", FinancialAccountBankConnectionSupport.formatInstant(expiresAt));
+      data.put("daysUntilExpires", FinancialAccountBankConnectionSupport.daysUntil(expiresAt));
     }
-    return FinancialAccountPsd2Support.okData(data);
+    return FinancialAccountBankConnectionSupport.okData(data);
   }
 
   // ---------------------------------------------------------------------------
@@ -244,9 +244,9 @@ public class FinancialAccountPsd2Handler implements NeoHandler {
   // ---------------------------------------------------------------------------
 
   private NeoResponse handleAccounts(NeoContext context) throws JSONException {
-    String connectionId = FinancialAccountPsd2Support.queryParam(context, PARAM_CONNECTION_ID);
-    String type = FinancialAccountPsd2Support.queryParam(context, PARAM_TYPE);
-    String accountId = FinancialAccountPsd2Support.queryParam(context, PARAM_ACCOUNT_ID);
+    String connectionId = FinancialAccountBankConnectionSupport.queryParam(context, PARAM_CONNECTION_ID);
+    String type = FinancialAccountBankConnectionSupport.queryParam(context, PARAM_TYPE);
+    String accountId = FinancialAccountBankConnectionSupport.queryParam(context, PARAM_ACCOUNT_ID);
     if (StringUtils.isBlank(connectionId)) {
       return NeoResponse.error(400, MSG_MISSING + PARAM_CONNECTION_ID);
     }
@@ -278,7 +278,7 @@ public class FinancialAccountPsd2Handler implements NeoHandler {
       row.put(KEY_NAME, node.optString(BankIntegrationConstants.NAME, ""));
       row.put(KEY_CURRENCY, node.optString(BankIntegrationConstants.CURRENCY_CODE, ""));
       row.put(KEY_NATURE, node.optString(BankIntegrationConstants.NATURE, ""));
-      row.put(KEY_IBAN, FinancialAccountPsd2Support.ibanOf(node));
+      row.put(KEY_IBAN, FinancialAccountBankConnectionSupport.ibanOf(node));
       out.put(row);
     }
     JSONObject data = new JSONObject();
@@ -291,10 +291,10 @@ public class FinancialAccountPsd2Handler implements NeoHandler {
       String providerCode = details.optString(BankIntegrationConstants.PROVIDER_CODE, "");
       if (StringUtils.isNotBlank(providerCode)) {
         data.put(KEY_PROVIDER_LOGO,
-            FinancialAccountPsd2Support.fetchProviderLogo(providerCode, apiKey));
+            FinancialAccountBankConnectionSupport.fetchProviderLogo(providerCode, apiKey));
       }
     }
-    return FinancialAccountPsd2Support.okData(data);
+    return FinancialAccountBankConnectionSupport.okData(data);
   }
 
   // ---------------------------------------------------------------------------
@@ -303,9 +303,9 @@ public class FinancialAccountPsd2Handler implements NeoHandler {
 
   private NeoResponse handleProviders(NeoContext context) throws JSONException {
     String country = StringUtils.defaultIfBlank(
-        FinancialAccountPsd2Support.queryParam(context, PARAM_COUNTRY),
+        FinancialAccountBankConnectionSupport.queryParam(context, PARAM_COUNTRY),
         DEFAULT_PROVIDER_COUNTRY);
-    String q = StringUtils.trimToNull(FinancialAccountPsd2Support.queryParam(context, PARAM_Q));
+    String q = StringUtils.trimToNull(FinancialAccountBankConnectionSupport.queryParam(context, PARAM_Q));
 
     JSONArray all = cachedProviders(country);
     JSONArray providers = new JSONArray();
@@ -321,7 +321,7 @@ public class FinancialAccountPsd2Handler implements NeoHandler {
     JSONObject out = new JSONObject();
     out.put(KEY_PROVIDERS, providers);
     out.put(PARAM_COUNTRY, country);
-    return FinancialAccountPsd2Support.okData(out);
+    return FinancialAccountBankConnectionSupport.okData(out);
   }
 
   /**
@@ -387,7 +387,7 @@ public class FinancialAccountPsd2Handler implements NeoHandler {
     // Case 1 (existing account): if the account already knows its bank — e.g. the provider was
     // chosen when it was created offline — preselect it so the Salt Edge widget skips the bank
     // picker and opens that provider's login directly. Otherwise show the full provider selection.
-    String accountId = FinancialAccountPsd2Support.bodyString(
+    String accountId = FinancialAccountBankConnectionSupport.bodyString(
         context.getRequestBody(), PARAM_ACCOUNT_ID);
     Provider provider = null;
     if (accountId != null) {
@@ -400,7 +400,7 @@ public class FinancialAccountPsd2Handler implements NeoHandler {
     String connectUrl = BankIntegrationUtils.createSaltEdgeConnection(apiKey, returnTo, provider);
     JSONObject data = new JSONObject();
     data.put(KEY_CONNECT_URL, connectUrl);
-    return FinancialAccountPsd2Support.okData(data);
+    return FinancialAccountBankConnectionSupport.okData(data);
   }
 
   // ---------------------------------------------------------------------------
@@ -408,10 +408,10 @@ public class FinancialAccountPsd2Handler implements NeoHandler {
   // ---------------------------------------------------------------------------
 
   private NeoResponse handleLink(NeoContext context) throws JSONException {
-    JSONObject body = FinancialAccountPsd2Support.requireBody(context);
-    String accountId = FinancialAccountPsd2Support.bodyString(body, PARAM_ACCOUNT_ID);
-    String connectionId = FinancialAccountPsd2Support.bodyString(body, PARAM_CONNECTION_ID);
-    String saltEdgeAccountId = FinancialAccountPsd2Support.bodyString(
+    JSONObject body = FinancialAccountBankConnectionSupport.requireBody(context);
+    String accountId = FinancialAccountBankConnectionSupport.bodyString(body, PARAM_ACCOUNT_ID);
+    String connectionId = FinancialAccountBankConnectionSupport.bodyString(body, PARAM_CONNECTION_ID);
+    String saltEdgeAccountId = FinancialAccountBankConnectionSupport.bodyString(
         body, PARAM_SALT_EDGE_ACCOUNT_ID);
     if (StringUtils.isAnyBlank(accountId, connectionId, saltEdgeAccountId)) {
       return NeoResponse.error(400, MSG_MISSING + "financialAccountId/connectionId/saltEdgeAccountId");
@@ -422,7 +422,7 @@ public class FinancialAccountPsd2Handler implements NeoHandler {
     }
     String apiKey = SaltEdgeAccountLinkHelper.getApiKeyForFinAcc(finAcc);
     JSONArray accounts = BankIntegrationUtils.getSaltEdgeAccountsForConnection(connectionId, apiKey);
-    JSONObject node = FinancialAccountPsd2Support.findAccountNode(accounts, saltEdgeAccountId);
+    JSONObject node = FinancialAccountBankConnectionSupport.findAccountNode(accounts, saltEdgeAccountId);
     if (node == null) {
       return NeoResponse.error(404, "Selected bank account not found in the connection");
     }
@@ -432,7 +432,7 @@ public class FinancialAccountPsd2Handler implements NeoHandler {
     data.put("linked", true);
     data.put(PARAM_ACCOUNT_ID, finAcc.getId());
     data.put(KEY_WARNING, warning);
-    return FinancialAccountPsd2Support.okData(data);
+    return FinancialAccountBankConnectionSupport.okData(data);
   }
 
   // ---------------------------------------------------------------------------
@@ -440,10 +440,10 @@ public class FinancialAccountPsd2Handler implements NeoHandler {
   // ---------------------------------------------------------------------------
 
   private NeoResponse handleCreateAndLink(NeoContext context) throws JSONException {
-    JSONObject body = FinancialAccountPsd2Support.requireBody(context);
-    String type = FinancialAccountPsd2Support.bodyString(body, PARAM_TYPE);
-    String connectionId = FinancialAccountPsd2Support.bodyString(body, PARAM_CONNECTION_ID);
-    String saltEdgeAccountId = FinancialAccountPsd2Support.bodyString(
+    JSONObject body = FinancialAccountBankConnectionSupport.requireBody(context);
+    String type = FinancialAccountBankConnectionSupport.bodyString(body, PARAM_TYPE);
+    String connectionId = FinancialAccountBankConnectionSupport.bodyString(body, PARAM_CONNECTION_ID);
+    String saltEdgeAccountId = FinancialAccountBankConnectionSupport.bodyString(
         body, PARAM_SALT_EDGE_ACCOUNT_ID);
     if (StringUtils.isAnyBlank(type, connectionId, saltEdgeAccountId)) {
       return NeoResponse.error(400, MSG_MISSING + "type/connectionId/saltEdgeAccountId");
@@ -451,7 +451,7 @@ public class FinancialAccountPsd2Handler implements NeoHandler {
 
     String apiKey = BankIntegrationUtils.getPsd2ApiKey(currentClient());
     JSONArray accounts = BankIntegrationUtils.getSaltEdgeAccountsForConnection(connectionId, apiKey);
-    JSONObject node = FinancialAccountPsd2Support.findAccountNode(accounts, saltEdgeAccountId);
+    JSONObject node = FinancialAccountBankConnectionSupport.findAccountNode(accounts, saltEdgeAccountId);
     if (node == null) {
       return NeoResponse.error(404, "Selected bank account not found in the connection");
     }
@@ -462,7 +462,7 @@ public class FinancialAccountPsd2Handler implements NeoHandler {
       return NeoResponse.error(400, "Unsupported currency: " + currencyCode);
     }
     JSONObject details = BankIntegrationUtils.getSaltEdgeConnectionDetails(connectionId, apiKey);
-    String name = FinancialAccountPsd2Support.connectedAccountName(
+    String name = FinancialAccountBankConnectionSupport.connectedAccountName(
         details.optString(BankIntegrationConstants.PROVIDER_NAME, null), node, currencyCode);
 
     FIN_FinancialAccount finAcc = FinancialAccountSupport.createAccount(currentClient(),
@@ -485,8 +485,8 @@ public class FinancialAccountPsd2Handler implements NeoHandler {
   // ---------------------------------------------------------------------------
 
   private NeoResponse handleReconnect(NeoContext context) throws JSONException {
-    JSONObject body = FinancialAccountPsd2Support.requireBody(context);
-    String accountId = FinancialAccountPsd2Support.bodyString(body, PARAM_ACCOUNT_ID);
+    JSONObject body = FinancialAccountBankConnectionSupport.requireBody(context);
+    String accountId = FinancialAccountBankConnectionSupport.bodyString(body, PARAM_ACCOUNT_ID);
     FIN_FinancialAccount finAcc = loadAccount(accountId);
     if (finAcc == null) {
       return NeoResponse.error(404, MSG_ACCOUNT_NOT_FOUND);
@@ -497,12 +497,12 @@ public class FinancialAccountPsd2Handler implements NeoHandler {
     }
     String apiKey = SaltEdgeAccountLinkHelper.getApiKeyForFinAcc(finAcc);
     String returnTo = resolveAppShellOrigin() + CALLBACK_PATH;
-    JSONArray scopes = FinancialAccountPsd2Support.defaultFetchScopes();
+    JSONArray scopes = FinancialAccountBankConnectionSupport.defaultFetchScopes();
     String reconnectUrl = BankIntegrationUtils.reconnectSaltEdgeConnection(
         connection.getSaltEdgeConnection(), apiKey, returnTo, scopes);
     JSONObject data = new JSONObject();
     data.put(KEY_RECONNECT_URL, reconnectUrl);
-    return FinancialAccountPsd2Support.okData(data);
+    return FinancialAccountBankConnectionSupport.okData(data);
   }
 
   // ---------------------------------------------------------------------------
@@ -510,22 +510,22 @@ public class FinancialAccountPsd2Handler implements NeoHandler {
   // ---------------------------------------------------------------------------
 
   private NeoResponse handleDisconnect(NeoContext context) throws JSONException {
-    JSONObject body = FinancialAccountPsd2Support.requireBody(context);
-    String accountId = FinancialAccountPsd2Support.bodyString(body, PARAM_ACCOUNT_ID);
+    JSONObject body = FinancialAccountBankConnectionSupport.requireBody(context);
+    String accountId = FinancialAccountBankConnectionSupport.bodyString(body, PARAM_ACCOUNT_ID);
     FIN_FinancialAccount finAcc = loadAccount(accountId);
     if (finAcc == null) {
       return NeoResponse.error(404, MSG_ACCOUNT_NOT_FOUND);
     }
     boolean disconnected = SaltEdgeAccountLinkHelper.disconnectFinancialAccount(finAcc);
     if (disconnected) {
-      // Mirror of the connect-time clear: with PSD2 (and its PIS callback) gone, the transfer
-      // method must auto-create the FIN_Finacc_Transaction on processing again, like any
-      // non-PSD2 account. Scoped to this Etendo Go bridge only — never Classic's flow.
+      // Mirror of the connect-time clear: with the bank connection (and its PIS callback) gone,
+      // the transfer method must auto-create the FIN_Finacc_Transaction on processing again, like
+      // any unconnected account. Scoped to this Etendo Go bridge only — never Classic's flow.
       restoreAutomaticWithdrawnForTransferMethod(finAcc);
     }
     JSONObject data = new JSONObject();
     data.put("disconnected", disconnected);
-    return FinancialAccountPsd2Support.okData(data);
+    return FinancialAccountBankConnectionSupport.okData(data);
   }
 
   // ---------------------------------------------------------------------------
@@ -533,8 +533,8 @@ public class FinancialAccountPsd2Handler implements NeoHandler {
   // ---------------------------------------------------------------------------
 
   private NeoResponse handleSync(NeoContext context) throws JSONException {
-    JSONObject body = FinancialAccountPsd2Support.requireBody(context);
-    String accountId = FinancialAccountPsd2Support.bodyString(body, PARAM_ACCOUNT_ID);
+    JSONObject body = FinancialAccountBankConnectionSupport.requireBody(context);
+    String accountId = FinancialAccountBankConnectionSupport.bodyString(body, PARAM_ACCOUNT_ID);
     FIN_FinancialAccount finAcc = loadAccount(accountId);
     if (finAcc == null) {
       return NeoResponse.error(404, MSG_ACCOUNT_NOT_FOUND);
@@ -546,7 +546,7 @@ public class FinancialAccountPsd2Handler implements NeoHandler {
     JSONObject data = new JSONObject();
     data.put(ACTION_STATUS, status);
     data.put("message", messages.toString().trim());
-    return FinancialAccountPsd2Support.okData(data);
+    return FinancialAccountBankConnectionSupport.okData(data);
   }
 
   // ---------------------------------------------------------------------------
@@ -554,29 +554,29 @@ public class FinancialAccountPsd2Handler implements NeoHandler {
   // ---------------------------------------------------------------------------
 
   private NeoResponse handleImportSettings(NeoContext context) throws JSONException {
-    JSONObject body = FinancialAccountPsd2Support.requireBody(context);
-    String accountId = FinancialAccountPsd2Support.bodyString(body, PARAM_ACCOUNT_ID);
+    JSONObject body = FinancialAccountBankConnectionSupport.requireBody(context);
+    String accountId = FinancialAccountBankConnectionSupport.bodyString(body, PARAM_ACCOUNT_ID);
     FIN_FinancialAccount finAcc = loadAccount(accountId);
     if (finAcc == null) {
       return NeoResponse.error(404, MSG_ACCOUNT_NOT_FOUND);
     }
     if (body.has(KEY_IMPORT_FROM_DATE)) {
-      finAcc.setPSD2ImportFromDate(FinancialAccountPsd2Support.parseDate(
-          FinancialAccountPsd2Support.bodyString(body, KEY_IMPORT_FROM_DATE)));
+      finAcc.setPSD2ImportFromDate(FinancialAccountBankConnectionSupport.parseDate(
+          FinancialAccountBankConnectionSupport.bodyString(body, KEY_IMPORT_FROM_DATE)));
     }
     if (body.has(KEY_IMPORT_TO_DATE)) {
-      finAcc.setPSD2ImportToDate(FinancialAccountPsd2Support.parseDate(
-          FinancialAccountPsd2Support.bodyString(body, KEY_IMPORT_TO_DATE)));
+      finAcc.setPSD2ImportToDate(FinancialAccountBankConnectionSupport.parseDate(
+          FinancialAccountBankConnectionSupport.bodyString(body, KEY_IMPORT_TO_DATE)));
     }
     if (body.has(KEY_STATEMENT_GROUPING)) {
       finAcc.setPSD2StatementFrequency(
-          FinancialAccountPsd2Support.bodyString(body, KEY_STATEMENT_GROUPING));
+          FinancialAccountBankConnectionSupport.bodyString(body, KEY_STATEMENT_GROUPING));
     }
     OBDal.getInstance().save(finAcc);
     OBDal.getInstance().flush();
     JSONObject data = new JSONObject();
     data.put("saved", true);
-    return FinancialAccountPsd2Support.okData(data);
+    return FinancialAccountBankConnectionSupport.okData(data);
   }
 
   // ---------------------------------------------------------------------------
@@ -590,7 +590,7 @@ public class FinancialAccountPsd2Handler implements NeoHandler {
     LinkAccountData data = new LinkAccountData(
         providerCode,
         providerName,
-        FinancialAccountPsd2Support.extractFetchScopes(details),
+        FinancialAccountBankConnectionSupport.extractFetchScopes(details),
         details.optString(BankIntegrationConstants.STATUS, null),
         SaltEdgeAccountLinkHelper.resolveConsentExpiresAt(details, apiKey));
     String warning = SaltEdgeAccountLinkHelper.linkAccountToFinancialAccount(finAcc, saltEdgeAccountId,
@@ -600,16 +600,16 @@ public class FinancialAccountPsd2Handler implements NeoHandler {
     // Provider and set it on the financial account. Without this the "Bank Provider" field stays
     // empty for accounts connected from the SPA, unlike the classic connect flow. See ETP-4097.
     com.etendoerp.psd2.bank.integration.data.Provider provider =
-        FinancialAccountPsd2Support.resolveProvider(providerCode, providerName, apiKey);
+        FinancialAccountBankConnectionSupport.resolveProvider(providerCode, providerName, apiKey);
     if (provider != null) {
       finAcc.setPsd2Provider(provider);
       OBDal.getInstance().save(finAcc);
     }
     disableAutomaticWithdrawnForTransferMethod(finAcc);
-    // ETP-4503: a Bank account connected to PSD2 must have multicurrency OFF on its bank-transfer
-    // payment-method link (exception to the "multicurrency ON by default" rule). Shared by both
-    // the create-and-link and link-existing paths — linkAccount is the single choke point where
-    // the PSD2 connection has just been established. The Bank-type gate lives in the helper, so
+    // ETP-4503: a Bank account with a bank connection must have multicurrency OFF on its
+    // bank-transfer payment-method link (exception to the "multicurrency ON by default" rule).
+    // Shared by both the create-and-link and link-existing paths — linkAccount is the single choke
+    // point where the bank connection has just been established. The Bank-type gate is in the helper, so
     // this is safe to call unconditionally (Card accounts and non-transfer links are no-ops).
     FinancialAccountSupport.disableMulticurrencyForBankTransfer(finAcc);
     return warning;
@@ -617,13 +617,13 @@ public class FinancialAccountPsd2Handler implements NeoHandler {
 
   /**
    * Scope note (ETP-4406): this is called ONLY from this Etendo Go bridge, never from Classic's
-   * own PSD2 connect flow (Classic calls {@link SaltEdgeAccountLinkHelper} directly through its
+   * own bank connect flow (Classic calls {@link SaltEdgeAccountLinkHelper} directly through its
    * own action handlers in the PSD2 module, which this method never touches). Etendo Go is
    * introducing a new payment flow where the bank transaction is created by the PIS callback
    * once Salt Edge confirms execution, not by the local "process payment" step — so once an
-   * account is connected to PSD2 via this SPA, its transfer payment method(s) must stop
-   * auto-creating a {@code FIN_Finacc_Transaction} on save, or the transaction would be created
-   * twice (once locally, once by the PSD2 callback). Classic's flow is untouched and keeps
+   * account has a bank connection established via this SPA, its transfer payment method(s) must
+   * stop auto-creating a {@code FIN_Finacc_Transaction} on save, or the transaction would be
+   * created twice (once locally, once by the PIS callback). Classic's flow is untouched and keeps
    * creating transactions the way it always has.
    * <p>
    * Only {@code Automatic Withdrawn} (Payment OUT) is cleared — PIS only initiates outbound
@@ -640,10 +640,10 @@ public class FinancialAccountPsd2Handler implements NeoHandler {
 
   /**
    * Inverse of {@link #disableAutomaticWithdrawnForTransferMethod}, run when an account is
-   * disconnected from PSD2 via this Etendo Go bridge: re-enables {@code Automatic Withdrawn} on the
-   * account's transfer payment method(s) so that, with no PIS callback in play anymore, processing
-   * a payment once again auto-creates its {@code FIN_Finacc_Transaction} the way it does for any
-   * non-PSD2 account. Restores to {@code true} — the master {@code FIN_PaymentMethod} default for
+   * disconnected from its bank via this Etendo Go bridge: re-enables {@code Automatic Withdrawn} on
+   * the account's transfer payment method(s) so that, with no PIS callback in play anymore,
+   * processing a payment once again auto-creates its {@code FIN_Finacc_Transaction} the way it does
+   * for any unconnected account. Restores to {@code true} — the {@code FIN_PaymentMethod} default for
    * transfers — since the connect-time clear does not record the prior per-account value.
    */
   private void restoreAutomaticWithdrawnForTransferMethod(FIN_FinancialAccount finAcc) {
@@ -675,7 +675,7 @@ public class FinancialAccountPsd2Handler implements NeoHandler {
     }
     if (updated > 0) {
       OBDal.getInstance().flush();
-      log.info("PSD2 (Etendo Go): {} Automatic Withdrawn on {} transfer payment method "
+      log.info("Bank connection (Etendo Go): {} Automatic Withdrawn on {} transfer payment method "
           + "row(s) for account {}", verb, updated, finAcc.getId());
     }
   }
@@ -683,21 +683,21 @@ public class FinancialAccountPsd2Handler implements NeoHandler {
   /**
    * Builds the app-shell origin the Salt Edge popup must return to, from the request {@code Origin}
    * header (falling back to {@code Referer}). The popup must land on the same origin that opened
-   * it so the {@code /financial-account/psd2-callback} route can relay the connection id back to
+   * it so the {@code /financial-account/bank-connection-callback} route can relay the connection id back to
    * the opener; therefore the origin is read from the request, never supplied by the client body.
    */
   private String resolveAppShellOrigin() {
     HttpServletRequest request = RequestContext.get() != null
         ? RequestContext.get().getRequest() : null;
     if (request == null) {
-      throw new OBException("Cannot resolve the application origin for the PSD2 callback");
+      throw new OBException("Cannot resolve the application origin for the bank connection callback");
     }
     String origin = StringUtils.trimToNull(request.getHeader("Origin"));
     if (origin == null) {
-      origin = FinancialAccountPsd2Support.originFromReferer(request.getHeader("Referer"));
+      origin = FinancialAccountBankConnectionSupport.originFromReferer(request.getHeader("Referer"));
     }
     if (origin == null) {
-      throw new OBException("Missing Origin header for the PSD2 callback");
+      throw new OBException("Missing Origin header for the bank connection callback");
     }
     return StringUtils.removeEnd(origin, "/");
   }
