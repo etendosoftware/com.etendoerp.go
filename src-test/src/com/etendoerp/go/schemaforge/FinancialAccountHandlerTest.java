@@ -879,8 +879,8 @@ public class FinancialAccountHandlerTest {
   //
   //   1. `hasTransactions` (ETP-4530) — the frontend locks the Currency field once the
   //      account has real movement history.
-  //   2. The accounts-list derived fields (ETP-4658) — pendingCount, psd2Connected,
-  //      psd2Pending, currencyIso/currencyId, isDefault, maskedPan, active and the
+  //   2. The accounts-list derived fields (ETP-4658) — pendingCount, bankConnected,
+  //      bankConnectionPending, currencyIso/currencyId, isDefault, maskedPan, active and the
   //      lowercase `iban` alias — plus a collection-level `summary` sibling of
   //      `response.data` for the list sidebar. These used to be computed by the bespoke
   //      `financial-accounts-page` R spec; the W spec is now the single source of truth.
@@ -946,8 +946,9 @@ public class FinancialAccountHandlerTest {
 
   /**
    * Every derived field the accounts list needs is injected per row: the transaction flag,
-   * the pending counter, the PSD2 flags, the currency pair, the default/archived flags, the
-   * masked card number and the lowercase {@code iban} alias of the contract's {@code iBAN}.
+   * the pending counter, the bank-connection flags, the currency pair, the default/archived
+   * flags, the masked card number and the lowercase {@code iban} alias of the contract's
+   * {@code iBAN}.
    */
   @Test
   public void testAfterHandleGetCrudInjectsDerivedListFieldsPerRow() throws Exception {
@@ -956,7 +957,7 @@ public class FinancialAccountHandlerTest {
     NeoContext ctx = getCrudContext(new JSONArray().put(row1).put(row2));
 
     FinancialAccountsPageHandler.AccountRow loaded1 = accountRow(ACC_ID, "1500.00", EUR_ID, "EUR", true);
-    loaded1.psd2Connected = true;
+    loaded1.bankConnected = true;
     FinancialAccountsPageHandler.AccountRow loaded2 = accountRow("acc-2", "0.00", "100", "USD", false);
     loaded2.active = false;
     loaded2.maskedPan = "**** 4321";
@@ -975,9 +976,9 @@ public class FinancialAccountHandlerTest {
       assertTrue("account with a registered transaction locks the Currency field",
           first.getBoolean("hasTransactions"));
       assertEquals(4, first.getInt("pendingCount"));
-      assertTrue(first.getBoolean("psd2Connected"));
-      assertFalse("psd2Pending is never computed server-side yet",
-          first.getBoolean("psd2Pending"));
+      assertTrue(first.getBoolean("bankConnected"));
+      assertFalse("bankConnectionPending is never computed server-side yet",
+          first.getBoolean("bankConnectionPending"));
       assertEquals("EUR", first.getString("currencyIso"));
       assertEquals(EUR_ID, first.getString("currencyId"));
       assertTrue(first.getBoolean("isDefault"));
@@ -988,7 +989,7 @@ public class FinancialAccountHandlerTest {
       assertFalse("account without transactions leaves the Currency field editable",
           second.getBoolean("hasTransactions"));
       assertEquals("no pending statement lines defaults to 0", 0, second.getInt("pendingCount"));
-      assertFalse(second.getBoolean("psd2Connected"));
+      assertFalse(second.getBoolean("bankConnected"));
       assertEquals("USD", second.getString("currencyIso"));
       assertFalse("archived accounts are flagged so the Inactivas filter can find them",
           second.getBoolean("active"));
@@ -1110,7 +1111,7 @@ public class FinancialAccountHandlerTest {
       assertTrue(out0.getBoolean("hasTransactions"));
       assertEquals(0, out0.getInt("pendingCount"));
       assertEquals(ES_IBAN, out0.getString("iban"));
-      assertFalse("loader-only column", out0.has("psd2Connected"));
+      assertFalse("loader-only column", out0.has("bankConnected"));
       assertFalse("loader-only column", out0.has("active"));
     }
   }

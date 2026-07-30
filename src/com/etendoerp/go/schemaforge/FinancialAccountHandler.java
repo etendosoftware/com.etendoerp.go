@@ -123,9 +123,9 @@ public class FinancialAccountHandler implements NeoHandler {
   /** Unreconciled statement lines for the account — drives the "Por conciliar (N)" pill. */
   private static final String FIELD_PENDING_COUNT = "pendingCount";
   /** {@code EM_PSD2_Connection_Status = 'CO'} — drives the "Sincronizado / Sin conexión" badge. */
-  private static final String FIELD_PSD2_CONNECTED = "psd2Connected";
+  private static final String FIELD_BANK_CONNECTED = "bankConnected";
   /** Reserved for the sync badge; never computed server-side (mirrors the R spec's constant false). */
-  private static final String FIELD_PSD2_PENDING = "psd2Pending";
+  private static final String FIELD_BANK_CONNECTION_PENDING = "bankConnectionPending";
   /** Currency ISO code, from the {@code c_currency} join. The contract only carries the FK. */
   private static final String FIELD_CURRENCY_ISO = "currencyIso";
   private static final String FIELD_CURRENCY_ID = "currencyId";
@@ -377,8 +377,8 @@ public class FinancialAccountHandler implements NeoHandler {
     if (row == null) {
       return null;
     }
-    rec.put(FIELD_PSD2_CONNECTED, row.psd2Connected);
-    rec.put(FIELD_PSD2_PENDING, row.psd2Pending);
+    rec.put(FIELD_BANK_CONNECTED, row.bankConnected);
+    rec.put(FIELD_BANK_CONNECTION_PENDING, row.bankConnectionPending);
     rec.put(FIELD_CURRENCY_ISO, row.currency.iso);
     rec.put(FIELD_CURRENCY_ID, row.currency.id);
     rec.put(FIELD_IS_DEFAULT, row.isDefault);
