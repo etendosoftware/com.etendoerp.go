@@ -755,6 +755,8 @@ Para cada campo incluido (IsIncluded=Y) de la entity, resuelve en este orden:
    - Alternativas separadas por coma (`@#Var1@,@#Var2@,literal`)
    - Literales sin `@` (ej: `"DR"`, `"N"`, `"0"`)
 
+**Exception — List reference columns (AD_Reference_ID=17):** a literal without `@` on a List column is returned as-is, without going through `Utility.getDefault()`. AD_Ref_List values are opaque codes that are sometimes all-digit strings (e.g. `Invoicegrouping` on `C_BPartner`, a 15-digit binary code like `"000000000000000"`) — `Utility.getDefault()` treats them as numeric candidates and collapses leading zeros/length (`"000000000000000"` -> `"0"`), producing a value that matches no real `AD_Ref_List` entry. For the same reason, `applyResolvedDefault` (post-resolution BigDecimal/Long coercion) and `NeoTypeCoercionHelper.coerceField` (coercion on the create payload) also exclude List columns from their numeric coercion, even though `Property.getPrimitiveObjectType()` reports a numeric type for them (see ETP-4700).
+
 ### Bridge VariablesSecureApp
 
 Como Neo Headless autentica via JWT y no tiene HttpSession, construye un `VariablesSecureApp` bridge desde `OBContext` con:
