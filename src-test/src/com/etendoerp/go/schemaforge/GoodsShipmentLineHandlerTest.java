@@ -19,6 +19,7 @@ package com.etendoerp.go.schemaforge;
 
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -361,5 +362,29 @@ public class GoodsShipmentLineHandlerTest {
       // fetchLineData swallowed the exception and returned empty map → ok() is returned
       assertNotNull(result);
     }
+  }
+
+  // ── afterCallout() regression (ETP-4671) ──────────────────────────────────
+
+  /**
+   * Regression guard for ETP-4671: {@link GoodsReceiptLineHandler} was given an
+   * {@code afterCallout()} override that strips the stock-derived {@code movementQuantity}
+   * update coming from the shared {@code SL_InOutLine_Product} callout, because a purchase
+   * receipt's quantity has nothing to do with what is already on hand. Goods Shipment is the
+   * opposite case — picking from existing stock is the correct, intended behavior for a
+   * shipment — so {@link GoodsShipmentLineHandler} must NOT get this override:
+   * {@code movementQuantity} must keep passing through untouched.
+   */
+  @Test
+  public void testAfterCalloutDoesNotStripMovementQuantity() throws Exception {
+    JSONObject updates = new JSONObject().put("movementQuantity", new JSONObject().put("value", 50));
+    JSONObject prevBody = new JSONObject().put("updates", updates);
+    NeoContext ctx = NeoContext.builder().endpointType(NeoEndpointType.CALLOUT)
+        .previousResult(NeoResponse.ok(prevBody)).build();
+
+    assertNull(new GoodsShipmentLineHandler().afterCallout(ctx));
+    assertTrue("Goods Shipment must keep picking movementQuantity from on-hand stock — only "
+        + "Goods Receipt's own handler strips it",
+        prevBody.getJSONObject("updates").has("movementQuantity"));
   }
 }

@@ -17,16 +17,16 @@
 
 package com.etendoerp.go.schemaforge;
 
-import static com.etendoerp.go.schemaforge.Psd2HandlerTestSupport.ACCOUNT_ID;
-import static com.etendoerp.go.schemaforge.Psd2HandlerTestSupport.API_KEY;
-import static com.etendoerp.go.schemaforge.Psd2HandlerTestSupport.CONNECTION_ID;
-import static com.etendoerp.go.schemaforge.Psd2HandlerTestSupport.ORIGIN;
-import static com.etendoerp.go.schemaforge.Psd2HandlerTestSupport.PARAM_ACCOUNT_ID;
-import static com.etendoerp.go.schemaforge.Psd2HandlerTestSupport.PARAM_CONNECTION_ID;
-import static com.etendoerp.go.schemaforge.Psd2HandlerTestSupport.PARAM_TYPE;
-import static com.etendoerp.go.schemaforge.Psd2HandlerTestSupport.SALT_EDGE_ACCOUNT_ID;
-import static com.etendoerp.go.schemaforge.Psd2HandlerTestSupport.postContext;
-import static com.etendoerp.go.schemaforge.Psd2HandlerTestSupport.stubObContext;
+import static com.etendoerp.go.schemaforge.BankConnectionHandlerTestSupport.ACCOUNT_ID;
+import static com.etendoerp.go.schemaforge.BankConnectionHandlerTestSupport.API_KEY;
+import static com.etendoerp.go.schemaforge.BankConnectionHandlerTestSupport.CONNECTION_ID;
+import static com.etendoerp.go.schemaforge.BankConnectionHandlerTestSupport.ORIGIN;
+import static com.etendoerp.go.schemaforge.BankConnectionHandlerTestSupport.PARAM_ACCOUNT_ID;
+import static com.etendoerp.go.schemaforge.BankConnectionHandlerTestSupport.PARAM_CONNECTION_ID;
+import static com.etendoerp.go.schemaforge.BankConnectionHandlerTestSupport.PARAM_TYPE;
+import static com.etendoerp.go.schemaforge.BankConnectionHandlerTestSupport.SALT_EDGE_ACCOUNT_ID;
+import static com.etendoerp.go.schemaforge.BankConnectionHandlerTestSupport.postContext;
+import static com.etendoerp.go.schemaforge.BankConnectionHandlerTestSupport.stubObContext;
 import static org.junit.Assert.assertEquals;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
@@ -70,8 +70,8 @@ import com.etendoerp.psd2.bank.integration.utils.BankIntegrationUtils;
 import com.etendoerp.psd2.bank.integration.utils.SaltEdgeAccountLinkHelper;
 
 /**
- * Unit tests for the ETP-4503 multicurrency wiring in {@link FinancialAccountPsd2Handler}: when a
- * Bank account is connected to PSD2 (the {@code link} and {@code createAndLink} paths, both routed
+ * Unit tests for the ETP-4503 multicurrency wiring in {@link FinancialAccountBankConnectionHandler}: when a
+ * Bank account is connected to its bank (the {@code link} and {@code createAndLink} paths, both routed
  * through the private {@code linkAccount} choke point), the handler must disable multicurrency on
  * the account's bank-transfer payment-method link via
  * {@link FinancialAccountSupport#disableMulticurrencyForBankTransfer}. The {@code reconnect} path
@@ -89,21 +89,21 @@ import com.etendoerp.psd2.bank.integration.utils.SaltEdgeAccountLinkHelper;
  * </ul>
  */
 @RunWith(MockitoJUnitRunner.Silent.class)
-public class FinancialAccountPsd2HandlerMulticurrencyTest {
+public class FinancialAccountBankConnectionHandlerMulticurrencyTest {
 
   private static final String ACTION_LINK = "link";
   private static final String ACTION_CREATE_AND_LINK = "createAndLink";
   private static final String ACTION_RECONNECT = "reconnect";
-  private static final String CALLBACK = "/financial-account/psd2-callback";
+  private static final String CALLBACK = "/financial-account/bank-connection-callback";
   private static final String TYPE_BANK = "B";
   private static final String METHOD_TRANSFER = "Transferencia bancaria";
   private static final String METHOD_CASH = "Efectivo";
 
-  private FinancialAccountPsd2Handler handler;
+  private FinancialAccountBankConnectionHandler handler;
 
   @Before
   public void setUp() {
-    handler = spy(new FinancialAccountPsd2Handler());
+    handler = spy(new FinancialAccountBankConnectionHandler());
     doNothing().when(handler).doRollbackAndClose();
   }
 

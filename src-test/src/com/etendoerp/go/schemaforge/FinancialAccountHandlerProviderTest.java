@@ -46,7 +46,7 @@ import com.etendoerp.psd2.bank.integration.utils.BankIntegrationUtils;
 
 /**
  * Mockito-driven unit tests for {@link FinancialAccountHandler#validateAndEnrichCreate} focused on
- * the {@code enrichProvider} step added by the PSD2 bridge (offline "with bank selected" flow).
+ * the {@code enrichProvider} step added by the bank connection bridge (offline "with bank selected" flow).
  *
  * <p>Split out of {@link FinancialAccountHandlerTest} so that file (already at the Sonar
  * 35-method-per-class ceiling) is not pushed over it. Strategy mirrors the sibling file: spy the

@@ -17,6 +17,7 @@
 package com.etendoerp.go.schemaforge;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -45,7 +46,10 @@ import org.mockito.MockedStatic;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
+import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.erpCommon.utility.OBCurrencyUtils;
+import org.openbravo.model.common.enterprise.Organization;
 
 /**
  * Unit tests for {@link BusinessPartnerHandler}.
@@ -220,6 +224,103 @@ class BusinessPartnerHandlerTest {
     assertNull(body.optString("priceList", null));
     assertNull(body.optString("priceList$_identifier", null));
     assertNull(body.optString("paymentMethod", null));
+  }
+
+  // ── handle() — POST: org currency injection (ETP-4649) ───────────────────────
+
+  /**
+   * A new Business Partner with no currency breaks purchase invoice confirmation later on. When
+   * the POST body omits {@code bPCurrencyID}, the handler must resolve and inject the
+   * organization's currency.
+   */
+  @Test
+  void testHandlePostInjectsOrgCurrencyWhenMissing() throws Exception {
+    JSONObject body = new JSONObject();
+    body.put("name", "Empresa Test");
+    when(ctx.getHttpMethod()).thenReturn("POST");
+    when(ctx.getRequestBody()).thenReturn(body);
+
+    OBContext obContext = mock(OBContext.class);
+    Organization org = mock(Organization.class);
+    when(org.getId()).thenReturn("ORG1");
+    when(obContext.getCurrentOrganization()).thenReturn(org);
+    when(ctx.getObContext()).thenReturn(obContext);
+
+    try (MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
+        MockedStatic<OBCurrencyUtils> curMock = mockStatic(OBCurrencyUtils.class)) {
+      curMock.when(() -> OBCurrencyUtils.getOrgCurrency("ORG1")).thenReturn("CUR1");
+
+      handler.handle(ctx);
+
+      assertEquals("CUR1", body.getString("bPCurrencyID"));
+    }
+  }
+
+  /**
+   * A POST that already carries {@code bPCurrencyID} must be left untouched — the org-currency
+   * resolver is never invoked, so an explicit caller value is never overwritten.
+   */
+  @Test
+  void testHandlePostKeepsExplicitCurrency() throws Exception {
+    JSONObject body = new JSONObject();
+    body.put("name", "Empresa Test");
+    body.put("bPCurrencyID", "EXISTING");
+    when(ctx.getHttpMethod()).thenReturn("POST");
+    when(ctx.getRequestBody()).thenReturn(body);
+
+    try (MockedStatic<OBCurrencyUtils> curMock = mockStatic(OBCurrencyUtils.class)) {
+      handler.handle(ctx);
+
+      assertEquals("EXISTING", body.getString("bPCurrencyID"));
+      curMock.verifyNoInteractions();
+    }
+  }
+
+  /**
+   * When the org currency cannot be resolved (e.g. the organization has none configured), the
+   * body is left without {@code bPCurrencyID} and no exception propagates.
+   */
+  @Test
+  void testHandlePostLeavesCurrencyUnsetWhenUnresolved() throws Exception {
+    JSONObject body = new JSONObject();
+    body.put("name", "Empresa Test");
+    when(ctx.getHttpMethod()).thenReturn("POST");
+    when(ctx.getRequestBody()).thenReturn(body);
+
+    OBContext obContext = mock(OBContext.class);
+    Organization org = mock(Organization.class);
+    when(org.getId()).thenReturn("ORG1");
+    when(obContext.getCurrentOrganization()).thenReturn(org);
+    when(ctx.getObContext()).thenReturn(obContext);
+
+    try (MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
+        MockedStatic<OBCurrencyUtils> curMock = mockStatic(OBCurrencyUtils.class)) {
+      curMock.when(() -> OBCurrencyUtils.getOrgCurrency("ORG1")).thenReturn(null);
+
+      handler.handle(ctx);
+
+      assertFalse(body.has("bPCurrencyID"));
+    }
+  }
+
+  /**
+   * When the NEO context has no {@code OBContext} at all (defensive guard), currency injection
+   * is skipped without throwing.
+   */
+  @Test
+  void testHandlePostSkipsCurrencyInjectionWhenObContextIsNull() throws Exception {
+    JSONObject body = new JSONObject();
+    body.put("name", "Empresa Test");
+    when(ctx.getHttpMethod()).thenReturn("POST");
+    when(ctx.getRequestBody()).thenReturn(body);
+    when(ctx.getObContext()).thenReturn(null);
+
+    try (MockedStatic<OBCurrencyUtils> curMock = mockStatic(OBCurrencyUtils.class)) {
+      handler.handle(ctx);
+
+      assertFalse(body.has("bPCurrencyID"));
+      curMock.verifyNoInteractions();
+    }
   }
 
   /**

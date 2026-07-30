@@ -17,14 +17,14 @@
 
 package com.etendoerp.go.schemaforge;
 
-import static com.etendoerp.go.schemaforge.Psd2HandlerTestSupport.API_KEY;
-import static com.etendoerp.go.schemaforge.Psd2HandlerTestSupport.CONNECTION_ID;
-import static com.etendoerp.go.schemaforge.Psd2HandlerTestSupport.PARAM_ACTION;
-import static com.etendoerp.go.schemaforge.Psd2HandlerTestSupport.PARAM_CONNECTION_ID;
-import static com.etendoerp.go.schemaforge.Psd2HandlerTestSupport.PARAM_TYPE;
-import static com.etendoerp.go.schemaforge.Psd2HandlerTestSupport.getContext;
-import static com.etendoerp.go.schemaforge.Psd2HandlerTestSupport.singleParam;
-import static com.etendoerp.go.schemaforge.Psd2HandlerTestSupport.stubObContext;
+import static com.etendoerp.go.schemaforge.BankConnectionHandlerTestSupport.API_KEY;
+import static com.etendoerp.go.schemaforge.BankConnectionHandlerTestSupport.CONNECTION_ID;
+import static com.etendoerp.go.schemaforge.BankConnectionHandlerTestSupport.PARAM_ACTION;
+import static com.etendoerp.go.schemaforge.BankConnectionHandlerTestSupport.PARAM_CONNECTION_ID;
+import static com.etendoerp.go.schemaforge.BankConnectionHandlerTestSupport.PARAM_TYPE;
+import static com.etendoerp.go.schemaforge.BankConnectionHandlerTestSupport.getContext;
+import static com.etendoerp.go.schemaforge.BankConnectionHandlerTestSupport.singleParam;
+import static com.etendoerp.go.schemaforge.BankConnectionHandlerTestSupport.stubObContext;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
@@ -54,7 +54,7 @@ import com.etendoerp.psd2.bank.integration.utils.BankIntegrationUtils;
 import com.etendoerp.psd2.bank.integration.utils.SaltEdgeAccountLinkHelper;
 
 /**
- * Unit tests for the {@link FinancialAccountPsd2Handler} GET {@code accounts} and {@code providers}
+ * Unit tests for the {@link FinancialAccountBankConnectionHandler} GET {@code accounts} and {@code providers}
  * actions (the read/query paths feeding the SPA selection modal and bank picker).
  *
  * <p>The Salt Edge calls are delegated to static helpers, all mocked here. The provider catalog is
@@ -62,7 +62,7 @@ import com.etendoerp.psd2.bank.integration.utils.SaltEdgeAccountLinkHelper;
  * keep the cache hits/misses isolated across the suite.
  */
 @RunWith(MockitoJUnitRunner.Silent.class)
-public class FinancialAccountPsd2HandlerQueryTest {
+public class FinancialAccountBankConnectionHandlerQueryTest {
 
   private static final String ACTION_ACCOUNTS = "accounts";
   private static final String ACTION_PROVIDERS = "providers";
@@ -75,11 +75,11 @@ public class FinancialAccountPsd2HandlerQueryTest {
   private static final String SANTANDER = "Banco Santander";
   private static final String BBVA = "BBVA";
 
-  private FinancialAccountPsd2Handler handler;
+  private FinancialAccountBankConnectionHandler handler;
 
   @Before
   public void setUp() {
-    handler = spy(new FinancialAccountPsd2Handler());
+    handler = spy(new FinancialAccountBankConnectionHandler());
     doNothing().when(handler).doRollbackAndClose();
   }
 

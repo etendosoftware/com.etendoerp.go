@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+# .githooks/commit-msg
+# Stamps the commit message with the Hooks-Verified trailer when the pre-commit
+# checks actually ran and passed for this exact tree. See lib/hooks-proof.sh.
+set -e
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+. "$SCRIPT_DIR/lib/hooks-proof.sh"
+
+MSG_FILE="$1"
+
+# Always drop any pre-existing trailer first: on `--amend` the old one refers to
+# the previous tree, and a copy-pasted one from another commit must not survive.
+if grep -qE "^${HOOKS_TRAILER_KEY}:" "$MSG_FILE" 2>/dev/null; then
+  grep -vE "^${HOOKS_TRAILER_KEY}:" "$MSG_FILE" > "$MSG_FILE.tmp" && mv "$MSG_FILE.tmp" "$MSG_FILE"
+fi
+
+PROOF="$(hooks_read_proof || true)"
+if [ -z "$PROOF" ]; then
+  # No proof: pre-commit did not run (hooks not installed, or --no-verify).
+  # Do not stamp — pre-push and CI will flag it.
+  echo "⚠️  commit-msg: no pre-commit proof found; commit will NOT be stamped."
+  echo "   It will be rejected on push and by the CI hooks check."
+  exit 0
+fi
+
+read -r PROOF_TREE PROOF_VER <<< "$PROOF"
+TREE="$(git write-tree)"
+
+if [ "$PROOF_TREE" != "$TREE" ]; then
+  # The staged content changed after pre-commit validated it.
+  echo "⚠️  commit-msg: staged tree changed after pre-commit ran; not stamping."
+  hooks_clear_proof
+  exit 0
+fi
+
+FP="$(hooks_fingerprint "$TREE" "$PROOF_VER")"
+
+# Append as a trailer: blank line separator only if the message does not already
+# end with one, so `git interpret-trailers` semantics are preserved.
+[ -n "$(tail -c1 "$MSG_FILE")" ] && printf '\n' >> "$MSG_FILE"
+printf '\n%s: %s %s %s\n' "$HOOKS_TRAILER_KEY" "$HOOKS_PROOF_FORMAT" "$PROOF_VER" "$FP" >> "$MSG_FILE"
+
+hooks_clear_proof
+exit 0
