@@ -22,7 +22,12 @@ if [ "$HOOKS_VERIFY_SKIP" != "1" ]; then
     if [ "$remote_sha" = "0000000000000000000000000000000000000000" ]; then
       RANGE="$(git rev-list "$local_sha" --not --remotes)"
     else
-      RANGE="$(git rev-list "${remote_sha}..${local_sha}")"
+      # Same `--not --remotes` guard as the new-branch case above, and for the
+      # same reason. Without it, merging the epic into a task branch pulls every
+      # epic commit that is not yet on this branch's remote into the range —
+      # including the ones that predate this check — and the push is refused for
+      # history the branch neither authored nor can legitimately rewrite.
+      RANGE="$(git rev-list "${remote_sha}..${local_sha}" --not --remotes)"
     fi
     for sha in $RANGE; do
       hooks_verify_commit "$sha" || UNVERIFIED="$UNVERIFIED $sha"
