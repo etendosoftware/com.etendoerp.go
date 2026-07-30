@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# .githooks/pre-commit
+# Fast local checks + records the Hooks-Verified proof consumed by commit-msg.
+# The heavy validations (JUnit, Sonar) run in pre-push, not here.
+set -e
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+. "$SCRIPT_DIR/lib/hooks-proof.sh"
+
+# Guard: never commit conflict markers.
+if git diff --cached --name-only --diff-filter=ACM -z \
+   | xargs -0 -r grep -lE '^(<<<<<<<|>>>>>>>) ' 2>/dev/null | grep -q .; then
+  echo "❌ ERROR: staged files contain merge-conflict markers."
+  exit 1
+fi
+
+hooks_write_proof
+exit 0

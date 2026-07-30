@@ -358,7 +358,7 @@ public class FinancialAccountsPageHandlerTest {
   }
 
   /**
-   * Verifies that {@code buildAccountsArray()} serialises the PSD2 masked card
+   * Verifies that {@code buildAccountsArray()} serialises the masked card
    * number (column {@code EM_PSD2_Masked_Pan}) into the row's {@code maskedPan}
    * field so the UI can show it under a card account's type.
    *
@@ -379,38 +379,38 @@ public class FinancialAccountsPageHandlerTest {
   }
 
   /**
-   * Verifies that {@code buildAccountsArray()} emits the {@code psd2Connected} flag for each row:
-   * an account with an active PSD2 connection serialises {@code true}, one without serialises
+   * Verifies that {@code buildAccountsArray()} emits the {@code bankConnected} flag for each row:
+   * an account with an active bank connection serialises {@code true}, one without serialises
    * {@code false}. The UI uses this to show the "Conectado" badge on the account card.
    *
    * @throws Exception
    *     if the JSON traversal fails
    */
   @Test
-  public void testBuildAccountsArrayEmitsPsd2ConnectedFlag() throws Exception {
-    AccountRow connected = account("acc-1", "BBVA PSD2", "B", new BigDecimal("100.00"), "EUR");
-    connected.psd2Connected = true;
+  public void testBuildAccountsArrayEmitsBankConnectedFlag() throws Exception {
+    AccountRow connected = account("acc-1", "BBVA Bank", "B", new BigDecimal("100.00"), "EUR");
+    connected.bankConnected = true;
     AccountRow offline = account("acc-2", "Caja manual", "B", new BigDecimal("0.00"), "EUR");
 
     JSONArray arr = handler.buildAccountsArray(Arrays.asList(connected, offline),
         Collections.emptyMap(), Collections.emptySet());
 
     assertEquals(2, arr.length());
-    assertTrue("connected account serialises psd2Connected=true",
-        arr.getJSONObject(0).getBoolean("psd2Connected"));
-    assertFalse("offline account serialises psd2Connected=false",
-        arr.getJSONObject(1).getBoolean("psd2Connected"));
+    assertTrue("connected account serialises bankConnected=true",
+        arr.getJSONObject(0).getBoolean("bankConnected"));
+    assertFalse("offline account serialises bankConnected=false",
+        arr.getJSONObject(1).getBoolean("bankConnected"));
   }
 
   /**
    * Verifies that {@code loadAccounts()} maps column 11 ({@code em_psd2_connection_status}) to the
-   * {@code psd2Connected} flag: {@code 'CO'} (connected) → true, any other value → false.
+   * {@code bankConnected} flag: {@code 'CO'} (connected) → true, any other value → false.
    *
    * @throws Exception
    *     if the mocked JDBC chain fails
    */
   @Test
-  public void testLoadAccountsMapsPsd2ConnectionStatus() throws Exception {
+  public void testLoadAccountsMapsBankConnectionStatus() throws Exception {
     Connection conn = mock(Connection.class);
     PreparedStatement ps = mock(PreparedStatement.class);
     ResultSet rs = mock(ResultSet.class);
@@ -433,8 +433,8 @@ public class FinancialAccountsPageHandlerTest {
       List<AccountRow> rows = handler.loadAccounts(CLIENT_ID, ORGS);
 
       assertEquals(2, rows.size());
-      assertTrue("'CO' maps to psd2Connected=true", rows.get(0).psd2Connected);
-      assertFalse("non-'CO' maps to psd2Connected=false", rows.get(1).psd2Connected);
+      assertTrue("'CO' maps to bankConnected=true", rows.get(0).bankConnected);
+      assertFalse("non-'CO' maps to bankConnected=false", rows.get(1).bankConnected);
     }
   }
 

@@ -1,0 +1,25 @@
+<?xml version="1.0"?>
+  <database name="FUNCTION ETGO_PRODUCT_PURCHASE_PRICE">
+    <function name="ETGO_PRODUCT_PURCHASE_PRICE" type="NUMERIC" volatility="STABLE">
+      <parameter name="p_m_product_id" type="VARCHAR" mode="in">
+        <default/>
+      </parameter>
+      <body><![CDATA[v_price NUMERIC;
+BEGIN
+  SELECT pp.pricestd INTO v_price
+  FROM   m_productprice pp
+  JOIN   m_pricelist_version plv ON plv.m_pricelist_version_id = pp.m_pricelist_version_id
+  JOIN   m_pricelist pl          ON pl.m_pricelist_id          = plv.m_pricelist_id
+  WHERE  pp.m_product_id = p_m_product_id
+    AND  pl.issopricelist = 'N'
+  ORDER  BY (pl.isdefault = 'Y')      DESC,
+            (plv.validfrom <= now())  DESC,
+            plv.validfrom             DESC,
+            pp.m_productprice_id       ASC
+  LIMIT 1;
+
+  RETURN v_price;
+END ETGO_PRODUCT_PURCHASE_PRICE
+]]></body>
+    </function>
+  </database>

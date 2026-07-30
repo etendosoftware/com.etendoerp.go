@@ -48,15 +48,15 @@ import org.openbravo.model.ad.ui.ProcessRequest;
 import org.openbravo.model.common.enterprise.Organization;
 
 /**
- * Unit tests for {@link OnboardingPsd2SyncService}.
+ * Unit tests for {@link OnboardingBankConnectionSyncService}.
  *
  * <p>The protected seams ({@code resolveProcess}, {@code findExistingRequest}, {@code buildObContext})
  * are stubbed via a Mockito spy so the tests assert only the service's orchestration: the skip / idempotent
  * branches, the scheduling field values written on a fresh request, and the best-effort error swallowing of
- * {@link OnboardingPsd2SyncService#activateSchedule(String)}.
+ * {@link OnboardingBankConnectionSyncService#activateSchedule(String)}.
  */
 @RunWith(MockitoJUnitRunner.Silent.class)
-public class OnboardingPsd2SyncServiceTest {
+public class OnboardingBankConnectionSyncServiceTest {
 
   private static final String CLIENT_ID = "client-1";
   private static final String ORG_ID = "org-1";
@@ -73,16 +73,16 @@ public class OnboardingPsd2SyncServiceTest {
 
   /** When the PSD2 process is not installed, the schedule is skipped and nothing is persisted. */
   @Test
-  public void schedulePsd2StatementSyncSkipsWhenProcessNotFound() {
-    OnboardingPsd2SyncService service = spy(new OnboardingPsd2SyncService());
-    doReturn(null).when(service).resolveProcess(OnboardingPsd2SyncService.PSD2_PROCESS_KEY);
+  public void scheduleBankConnectionStatementSyncSkipsWhenProcessNotFound() {
+    OnboardingBankConnectionSyncService service = spy(new OnboardingBankConnectionSyncService());
+    doReturn(null).when(service).resolveProcess(OnboardingBankConnectionSyncService.PSD2_PROCESS_KEY);
 
     try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
         MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
       OBDal dal = mock(OBDal.class);
       obDal.when(OBDal::getInstance).thenReturn(dal);
 
-      String result = service.schedulePsd2StatementSync(CLIENT_ID, ORG_ID, ADMIN_USER_ID, ADMIN_ROLE_ID);
+      String result = service.scheduleBankConnectionStatementSync(CLIENT_ID, ORG_ID, ADMIN_USER_ID, ADMIN_ROLE_ID);
 
       assertNull(result);
       verify(dal, never()).save(any());
@@ -91,12 +91,12 @@ public class OnboardingPsd2SyncServiceTest {
 
   /** A second onboarding of the same client reuses the existing request without persisting a new row. */
   @Test
-  public void schedulePsd2StatementSyncIsIdempotent() {
-    OnboardingPsd2SyncService service = spy(new OnboardingPsd2SyncService());
+  public void scheduleBankConnectionStatementSyncIsIdempotent() {
+    OnboardingBankConnectionSyncService service = spy(new OnboardingBankConnectionSyncService());
     Process process = mock(Process.class);
     ProcessRequest existing = mock(ProcessRequest.class);
     when(existing.getId()).thenReturn(EXISTING_REQUEST_ID);
-    doReturn(process).when(service).resolveProcess(OnboardingPsd2SyncService.PSD2_PROCESS_KEY);
+    doReturn(process).when(service).resolveProcess(OnboardingBankConnectionSyncService.PSD2_PROCESS_KEY);
     doReturn(existing).when(service).findExistingRequest(CLIENT_ID, process);
 
     try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
@@ -104,7 +104,7 @@ public class OnboardingPsd2SyncServiceTest {
       OBDal dal = mock(OBDal.class);
       obDal.when(OBDal::getInstance).thenReturn(dal);
 
-      String result = service.schedulePsd2StatementSync(CLIENT_ID, ORG_ID, ADMIN_USER_ID, ADMIN_ROLE_ID);
+      String result = service.scheduleBankConnectionStatementSync(CLIENT_ID, ORG_ID, ADMIN_USER_ID, ADMIN_ROLE_ID);
 
       assertEquals(EXISTING_REQUEST_ID, result);
       verify(dal, never()).save(any());
@@ -113,10 +113,10 @@ public class OnboardingPsd2SyncServiceTest {
 
   /** A fresh schedule is built with the daily 03:00–06:00 scheduling fields, then saved and flushed once. */
   @Test
-  public void schedulePsd2StatementSyncCreatesRequestWithSchedulingFields() {
-    OnboardingPsd2SyncService service = spy(new OnboardingPsd2SyncService());
+  public void scheduleBankConnectionStatementSyncCreatesRequestWithSchedulingFields() {
+    OnboardingBankConnectionSyncService service = spy(new OnboardingBankConnectionSyncService());
     Process process = mock(Process.class);
-    doReturn(process).when(service).resolveProcess(OnboardingPsd2SyncService.PSD2_PROCESS_KEY);
+    doReturn(process).when(service).resolveProcess(OnboardingBankConnectionSyncService.PSD2_PROCESS_KEY);
     doReturn(null).when(service).findExistingRequest(CLIENT_ID, process);
     doReturn(OB_CONTEXT).when(service)
         .buildObContext(CLIENT_ID, ORG_ID, ADMIN_USER_ID, ADMIN_ROLE_ID);
@@ -146,7 +146,7 @@ public class OnboardingPsd2SyncServiceTest {
       when(dal.get(Organization.class, ORG_ID)).thenReturn(mock(Organization.class));
       when(dal.get(User.class, ADMIN_USER_ID)).thenReturn(mock(User.class));
 
-      String result = service.schedulePsd2StatementSync(CLIENT_ID, ORG_ID, ADMIN_USER_ID, ADMIN_ROLE_ID);
+      String result = service.scheduleBankConnectionStatementSync(CLIENT_ID, ORG_ID, ADMIN_USER_ID, ADMIN_ROLE_ID);
 
       assertEquals(NEW_REQUEST_ID, result);
       assertEquals("S", request.getTiming());
@@ -170,9 +170,9 @@ public class OnboardingPsd2SyncServiceTest {
   /** activateSchedule is best-effort: an error resolving the process is swallowed, never propagated. */
   @Test
   public void activateScheduleSwallowsErrors() {
-    OnboardingPsd2SyncService service = spy(new OnboardingPsd2SyncService());
+    OnboardingBankConnectionSyncService service = spy(new OnboardingBankConnectionSyncService());
     doThrow(new RuntimeException("boom")).when(service)
-        .resolveProcess(OnboardingPsd2SyncService.PSD2_PROCESS_KEY);
+        .resolveProcess(OnboardingBankConnectionSyncService.PSD2_PROCESS_KEY);
 
     try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class)) {
       service.activateSchedule(CLIENT_ID);

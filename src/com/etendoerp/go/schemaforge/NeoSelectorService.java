@@ -231,14 +231,40 @@ public class NeoSelectorService {
       String filterAlias = resolveFilterAlias(meta);
       String combinedFilter = buildCombinedFilter(
           column, validationFilter, filterAlias);
+      Map<String, String> selectorContextParams = withSourceEntityName(contextParams, sourceEntity);
       NeoResponse selectorResult = executeSelectorQuery(
-          meta, search, safeLimit, safeOffset, contextOrganizationId, combinedFilter, contextParams);
-      return enrichProductSelectorIfNeeded(selectorResult, meta, contextParams);
+          meta, search, safeLimit, safeOffset, contextOrganizationId, combinedFilter, selectorContextParams);
+      return enrichProductSelectorIfNeeded(selectorResult, meta, selectorContextParams);
 
     } catch (Exception e) {
       log.error("Error querying selector by column {}", columnName, e);
       return NeoResponse.error(500, e.getMessage());
     }
+  }
+
+  /**
+   * Internal context param key carrying the requesting Schema Forge entity's name (e.g.
+   * {@code movementLine}). Not a real request parameter — injected here so {@code
+   * SelectorContextPolicy} implementations can scope a filter to a specific source window/tab
+   * without the generic target entity name (e.g. {@code Product}) being enough on its own.
+   * See {@link com.etendoerp.go.schemaforge.selector.policy.GoodsMovementProductSelectorPolicy}.
+   */
+  public static final String SOURCE_ENTITY_NAME_PARAM = "_sourceEntityName";
+
+  /**
+   * Returns a copy of {@code contextParams} augmented with the requesting entity's name, without
+   * mutating the caller's map. When {@code sourceEntity} is {@code null} (e.g. the MCP layer,
+   * which resolves selectors directly by column) the original params are reused unchanged.
+   */
+  private static Map<String, String> withSourceEntityName(Map<String, String> contextParams,
+      SFEntity sourceEntity) {
+    if (sourceEntity == null || StringUtils.isBlank(sourceEntity.getName())) {
+      return contextParams;
+    }
+    Map<String, String> augmented = new HashMap<>(
+        contextParams != null ? contextParams : Collections.emptyMap());
+    augmented.put(SOURCE_ENTITY_NAME_PARAM, sourceEntity.getName());
+    return augmented;
   }
 
   private static int normalizeLimit(int limit) {
