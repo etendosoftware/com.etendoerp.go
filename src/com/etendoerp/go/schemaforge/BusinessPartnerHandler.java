@@ -86,6 +86,44 @@ public class BusinessPartnerHandler extends AbstractPersonNameHandler {
   private static final String FIELD_LASTNAME = "etgoLastname";
   private static final String FIELD_EMAIL = "etgoEmail";
   private static final String FIELD_CURRENCY = "bPCurrencyID";
+  private static final String FIELD_CUSTOMER = "customer";
+  private static final String FIELD_VENDOR = "vendor";
+
+  // ETP-4565 posting-account backfill (see provisionMissingBpAcctRows()): mirrors
+  // OnboardingAccountingWiringService.BP_CUSTOMER_ACCT_SQL/BP_VENDOR_ACCT_SQL, but scoped to a
+  // single already-persisted business partner (bound by ? = c_bpartner_id) instead of a
+  // client-wide sweep, and driven by AD_Org_AcctSchema/ad_isorgincluded off the BP's OWN org
+  // (mirroring c_bpartner_trg's own org-tree resolution) rather than a single onboarding-time
+  // schema id.
+  private static final String BP_CUSTOMER_ACCT_FOR_BP_SQL =
+      "INSERT INTO c_bp_customer_acct ("
+      + "  c_bp_customer_acct_id, ad_client_id, ad_org_id, isactive, created, createdby, updated, updatedby,"
+      + "  c_bpartner_id, c_acctschema_id, c_receivable_acct, c_prepayment_acct) "
+      + "SELECT get_uuid(), bp.ad_client_id, bp.ad_org_id, 'Y', now(), '0', now(), '0',"
+      + "  bp.c_bpartner_id, d.c_acctschema_id, d.c_receivable_acct, d.c_prepayment_acct "
+      + "FROM c_bpartner bp"
+      + "  JOIN ad_org_acctschema oa ON oa.ad_client_id = bp.ad_client_id AND oa.isactive = 'Y'"
+      + "  JOIN c_acctschema_default d ON d.c_acctschema_id = oa.c_acctschema_id "
+      + "WHERE bp.c_bpartner_id = ? AND bp.iscustomer = 'Y'"
+      + "  AND (ad_isorgincluded(oa.ad_org_id, bp.ad_org_id, bp.ad_client_id) <> -1"
+      + "    OR ad_isorgincluded(bp.ad_org_id, oa.ad_org_id, bp.ad_client_id) <> -1)"
+      + "  AND NOT EXISTS (SELECT 1 FROM c_bp_customer_acct a"
+      + "    WHERE a.c_bpartner_id = bp.c_bpartner_id AND a.c_acctschema_id = d.c_acctschema_id)";
+
+  private static final String BP_VENDOR_ACCT_FOR_BP_SQL =
+      "INSERT INTO c_bp_vendor_acct ("
+      + "  c_bp_vendor_acct_id, ad_client_id, ad_org_id, isactive, created, createdby, updated, updatedby,"
+      + "  c_bpartner_id, c_acctschema_id, v_liability_acct, v_prepayment_acct) "
+      + "SELECT get_uuid(), bp.ad_client_id, bp.ad_org_id, 'Y', now(), '0', now(), '0',"
+      + "  bp.c_bpartner_id, d.c_acctschema_id, d.v_liability_acct, d.v_prepayment_acct "
+      + "FROM c_bpartner bp"
+      + "  JOIN ad_org_acctschema oa ON oa.ad_client_id = bp.ad_client_id AND oa.isactive = 'Y'"
+      + "  JOIN c_acctschema_default d ON d.c_acctschema_id = oa.c_acctschema_id "
+      + "WHERE bp.c_bpartner_id = ? AND bp.isvendor = 'Y'"
+      + "  AND (ad_isorgincluded(oa.ad_org_id, bp.ad_org_id, bp.ad_client_id) <> -1"
+      + "    OR ad_isorgincluded(bp.ad_org_id, oa.ad_org_id, bp.ad_client_id) <> -1)"
+      + "  AND NOT EXISTS (SELECT 1 FROM c_bp_vendor_acct a"
+      + "    WHERE a.c_bpartner_id = bp.c_bpartner_id AND a.c_acctschema_id = d.c_acctschema_id)";
 
   @Override
   protected String firstnameField() {
@@ -317,6 +355,11 @@ public class BusinessPartnerHandler extends AbstractPersonNameHandler {
             modified = true;
           }
         }
+      } else {
+        // PUT/PATCH: flipping vendor/customer to Y on an already-persisted BP never runs through
+        // c_bpartner_trg (it only fires on TG_OP='INSERT'), so backfill whichever posting-account
+        // row is now missing. See provisionMissingBpAcctRows() for the full rationale (ETP-4565).
+        provisionMissingBpAcctRows(ctx);
       }
 
       modified |= injectViesMessage(body);
@@ -324,6 +367,49 @@ public class BusinessPartnerHandler extends AbstractPersonNameHandler {
     } catch (Exception e) {
       log.error("BusinessPartnerHandler: error in afterHandle()", e);
       return null;
+    }
+  }
+
+  /**
+   * ETP-4565 — closes the "vendor/customer flag flipped after creation" accounting gap.
+   *
+   * <p>Classic's native {@code c_bpartner_trg} trigger auto-creates {@code C_BP_Customer_Acct}/
+   * {@code C_BP_Vendor_Acct} rows unconditionally for every new {@code C_BPartner}, but ONLY on
+   * {@code TG_OP='INSERT'} — flipping {@code IsCustomer}/{@code IsVendor} from N to Y on an
+   * already-persisted BP via {@code UPDATE} never creates the newly-relevant row (confirmed live:
+   * a BP created as customer-only, later updated to also be a vendor, is left with a permanently
+   * empty Vendor accounting tab). This backfills whichever row is missing, right after a
+   * successful PUT/PATCH, only when the request actually touched the {@code vendor}/{@code
+   * customer} flag — so the common case (updating unrelated fields) never pays for the extra
+   * lookup. Mirrors {@code OnboardingAccountingWiringService}'s posting-account backfill idiom:
+   * default accounts copied from {@code C_AcctSchema_Default}, one row per {@code AcctSchema}
+   * wired to the BP's own org (via {@code AD_Org_AcctSchema} / {@code ad_isorgincluded}), guarded
+   * by {@code NOT EXISTS} so it is idempotent and a no-op once the row exists.
+   */
+  private void provisionMissingBpAcctRows(NeoContext ctx) {
+    JSONObject requestBody = ctx.getRequestBody();
+    String recordId = ctx.getRecordId();
+    if (requestBody == null || StringUtils.isBlank(recordId)) {
+      return;
+    }
+    try {
+      if (requestBody.has(FIELD_CUSTOMER)) {
+        runBpAcctBackfill(BP_CUSTOMER_ACCT_FOR_BP_SQL, recordId);
+      }
+      if (requestBody.has(FIELD_VENDOR)) {
+        runBpAcctBackfill(BP_VENDOR_ACCT_FOR_BP_SQL, recordId);
+      }
+    } catch (Exception e) {
+      log.warn("BusinessPartnerHandler: could not backfill customer/vendor posting accounts for bp={}",
+          recordId, e);
+    }
+  }
+
+  private static void runBpAcctBackfill(String sql, String recordId) throws SQLException {
+    Connection conn = OBDal.getInstance().getConnection();
+    try (PreparedStatement ps = conn.prepareStatement(sql)) {
+      ps.setString(1, recordId);
+      ps.executeUpdate();
     }
   }
 
