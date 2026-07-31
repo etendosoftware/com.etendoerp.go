@@ -690,6 +690,110 @@ public class AbstractInvoiceHeaderHandlerTest {
     }
   }
 
+  /**
+   * ETP-4738 follow-up: a Factura Rectificativa (docbasetype ARI, not ARC/ARI_RM — so {@code
+   * classifyDocType} alone resolves it to FAC) with a negative total must still be DISPLAY-
+   * reclassified as "NC" so the grid "Pendiente de pago" badge and detail topbar show
+   * "Saldo a favor", exactly like a legacy AR Credit Memo.
+   */
+  @Test
+  public void enrichInvoiceSubtype_rectificativeDocTypeNegativeTotal_setsNcSubtype() throws Exception {
+    JSONObject rec = new JSONObject()
+        .put("transactionDocument", "dt-rect")
+        .put("grandTotalAmount", -27.83);
+    RectificativeDocTypeSupport.setRectificativeColumnPresentForTests(true);
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      DocumentType dt = mock(DocumentType.class);
+      when(dt.getDocumentCategory()).thenReturn("ARI"); // plain invoice base type, not ARC/ARI_RM
+      when(dal.get(DocumentType.class, "dt-rect")).thenReturn(dt);
+
+      OBDal readOnlyDal = mock(OBDal.class);
+      dalMock.when(OBDal::getReadOnlyInstance).thenReturn(readOnlyDal);
+      Connection conn = mock(Connection.class);
+      when(readOnlyDal.getConnection()).thenReturn(conn);
+      PreparedStatement ps = mock(PreparedStatement.class);
+      when(conn.prepareStatement(anyString())).thenReturn(ps);
+      ResultSet rs = mock(ResultSet.class);
+      when(ps.executeQuery()).thenReturn(rs);
+      when(rs.next()).thenReturn(true);
+      when(rs.getString(1)).thenReturn("Y");
+
+      handler.callEnrichInvoiceSubtype(rec, "arInvoiceSubtype");
+
+      assertEquals("NC", rec.getString("arInvoiceSubtype"));
+    } finally {
+      RectificativeDocTypeSupport.setRectificativeColumnPresentForTests(null);
+    }
+  }
+
+  /** A Factura Rectificativa with a POSITIVE total stays FAC — only a negative total is saldo a favor. */
+  @Test
+  public void enrichInvoiceSubtype_rectificativeDocTypePositiveTotal_staysFacSubtype() throws Exception {
+    JSONObject rec = new JSONObject()
+        .put("transactionDocument", "dt-rect")
+        .put("grandTotalAmount", 27.83);
+    RectificativeDocTypeSupport.setRectificativeColumnPresentForTests(true);
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      DocumentType dt = mock(DocumentType.class);
+      when(dt.getDocumentCategory()).thenReturn("ARI");
+      when(dal.get(DocumentType.class, "dt-rect")).thenReturn(dt);
+
+      OBDal readOnlyDal = mock(OBDal.class);
+      dalMock.when(OBDal::getReadOnlyInstance).thenReturn(readOnlyDal);
+      Connection conn = mock(Connection.class);
+      when(readOnlyDal.getConnection()).thenReturn(conn);
+      PreparedStatement ps = mock(PreparedStatement.class);
+      when(conn.prepareStatement(anyString())).thenReturn(ps);
+      ResultSet rs = mock(ResultSet.class);
+      when(ps.executeQuery()).thenReturn(rs);
+      when(rs.next()).thenReturn(true);
+      when(rs.getString(1)).thenReturn("Y");
+
+      handler.callEnrichInvoiceSubtype(rec, "arInvoiceSubtype");
+
+      assertEquals("FAC", rec.getString("arInvoiceSubtype"));
+    } finally {
+      RectificativeDocTypeSupport.setRectificativeColumnPresentForTests(null);
+    }
+  }
+
+  /** A plain (non-rectificative) invoice with a negative total is NOT reclassified — the flag decides. */
+  @Test
+  public void enrichInvoiceSubtype_nonRectificativeNegativeTotal_staysFacSubtype() throws Exception {
+    JSONObject rec = new JSONObject()
+        .put("transactionDocument", "dt-plain")
+        .put("grandTotalAmount", -27.83);
+    RectificativeDocTypeSupport.setRectificativeColumnPresentForTests(true);
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      DocumentType dt = mock(DocumentType.class);
+      when(dt.getDocumentCategory()).thenReturn("ARI");
+      when(dal.get(DocumentType.class, "dt-plain")).thenReturn(dt);
+
+      OBDal readOnlyDal = mock(OBDal.class);
+      dalMock.when(OBDal::getReadOnlyInstance).thenReturn(readOnlyDal);
+      Connection conn = mock(Connection.class);
+      when(readOnlyDal.getConnection()).thenReturn(conn);
+      PreparedStatement ps = mock(PreparedStatement.class);
+      when(conn.prepareStatement(anyString())).thenReturn(ps);
+      ResultSet rs = mock(ResultSet.class);
+      when(ps.executeQuery()).thenReturn(rs);
+      when(rs.next()).thenReturn(true);
+      when(rs.getString(1)).thenReturn("N");
+
+      handler.callEnrichInvoiceSubtype(rec, "arInvoiceSubtype");
+
+      assertEquals("FAC", rec.getString("arInvoiceSubtype"));
+    } finally {
+      RectificativeDocTypeSupport.setRectificativeColumnPresentForTests(null);
+    }
+  }
+
   // ── enrichDocTypeLocked ──────────────────────────────────────────────────────
 
   @Test

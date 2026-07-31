@@ -26,7 +26,9 @@ import org.openbravo.advpaymentmngt.process.FIN_AddPayment;
 import org.openbravo.advpaymentmngt.process.FIN_PaymentProcess;
 import org.openbravo.base.exception.OBException;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.common.invoice.Invoice;
 import org.openbravo.model.financialmgmt.payment.FIN_Payment;
+import org.openbravo.model.financialmgmt.payment.FIN_PaymentDetail;
 import org.openbravo.model.financialmgmt.payment.FIN_PaymentScheduleDetail;
 
 /**
@@ -35,7 +37,8 @@ import org.openbravo.model.financialmgmt.payment.FIN_PaymentScheduleDetail;
  *   - 'credit' (accumulated credit): Classic's used-credit mechanism
  *     ({@code setUsedCredit} + {@link FIN_PaymentProcess#linkCreditPayment}) on the
  *     source payment — it must NOT be re-linked as a detail (it is already paid).
- *   - 'abono' (credit memo / return): linked as a negative invoice payment detail.
+ *   - 'abono' (Factura Rectificativa with a negative total, ETP-4738): linked as a
+ *     negative invoice payment detail.
  */
 final class PaymentCreditConsumer {
 
@@ -89,7 +92,7 @@ final class PaymentCreditConsumer {
     return use;
   }
 
-  /** Consumes a credit memo / return by linking its PSD as a negative detail. */
+  /** Consumes a Factura Rectificativa "saldo a favor" by linking its PSD as a negative detail. */
   private static BigDecimal consumeAbono(FIN_Payment payment, String psdId, BigDecimal use) {
     if (StringUtils.isBlank(psdId)) {
       return BigDecimal.ZERO;
@@ -98,8 +101,39 @@ final class PaymentCreditConsumer {
     if (psd == null) {
       throw new OBException("Credit source not found: " + psdId);
     }
+    validateAbonoEligible(payment, psd);
     FIN_AddPayment.updatePaymentDetail(psd, payment, use.negate(), false);
     return use;
+  }
+
+  /**
+   * Rejects a "saldo a favor" PSD that is not (ETP-4738) a Factura Rectificativa with a negative
+   * total — the selector only ever offers such PSDs, but nothing stops a crafted request from
+   * sending an arbitrary {@code psdId}.
+   *
+   * <p>Skipped when {@code psd} is already linked to the payment being registered/edited: it was
+   * validated when originally consumed, and the edit modal must be able to re-save a draft that
+   * consumed a legacy (pre-ETP-4738) source without being locked out by a rule introduced later.
+   */
+  private static void validateAbonoEligible(FIN_Payment payment, FIN_PaymentScheduleDetail psd) {
+    FIN_PaymentDetail existingLink = psd.getPaymentDetails();
+    if (existingLink != null && existingLink.getFinPayment() != null
+        && existingLink.getFinPayment().getId().equals(payment.getId())) {
+      return;
+    }
+    Invoice invoice = psd.getInvoicePaymentSchedule() != null
+        ? psd.getInvoicePaymentSchedule().getInvoice() : null;
+    if (invoice == null) {
+      throw new OBException("Credit source not found: " + psd.getId());
+    }
+    String docTypeId = invoice.getTransactionDocument() != null
+        ? invoice.getTransactionDocument().getId() : null;
+    boolean negativeTotal = invoice.getGrandTotalAmount() != null
+        && invoice.getGrandTotalAmount().signum() < 0;
+    if (!negativeTotal || !RectificativeDocTypeSupport.isRectificativeDocType(docTypeId)) {
+      throw new OBException(
+          "Credit source is not an eligible Factura Rectificativa: " + psd.getId());
+    }
   }
 
   /** Parses a strictly-positive amount, returning null for blank/invalid/non-positive input. */
