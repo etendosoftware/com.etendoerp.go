@@ -89,12 +89,27 @@ public class BusinessPartnerHandler extends AbstractPersonNameHandler {
   private static final String FIELD_CUSTOMER = "customer";
   private static final String FIELD_VENDOR = "vendor";
 
-  // ETP-4565 posting-account backfill (see provisionMissingBpAcctRows()): mirrors
-  // OnboardingAccountingWiringService.BP_CUSTOMER_ACCT_SQL/BP_VENDOR_ACCT_SQL, but scoped to a
-  // single already-persisted business partner (bound by ? = c_bpartner_id) instead of a
-  // client-wide sweep, and driven by AD_Org_AcctSchema/ad_isorgincluded off the BP's OWN org
-  // (mirroring c_bpartner_trg's own org-tree resolution) rather than a single onboarding-time
-  // schema id.
+  // ETP-4565 posting-account backfill (see provisionMissingBpAcctRows()): scoped to a single
+  // already-persisted business partner (bound by ? = c_bpartner_id) instead of a client-wide
+  // sweep, and driven by AD_Org_AcctSchema/ad_isorgincluded off the BP's OWN org (mirroring
+  // c_bpartner_trg's own org-tree resolution).
+  //
+  // Account source: c_bpartner_trg (src-db/database/model/triggers/C_BPARTNER_TRG.xml, lines
+  // 59-75) resolves C_BP_Customer_Acct/C_BP_Vendor_Acct EXCLUSIVELY from the BP's own
+  // C_BP_Group_Acct row (joined on d1.C_BP_Group_ID = :new.C_BP_Group_ID) — never from
+  // C_AcctSchema_Default. That generic table is only used by the trigger's separate Employee
+  // branch (C_BP_Employee_Acct), which is group-independent. C_BP_Group_Acct itself is always
+  // seeded per-group from C_AcctSchema_Default at onboarding time
+  // (OnboardingAccountingWiringService.BP_GROUP_ACCT_SQL) and can subsequently be overridden per
+  // group (see e.g. overrideAcreedorGroupAccounts() there) — so joining on the group is the ONLY
+  // way to pick up those overrides; joining on the schema default silently ignores them. There is
+  // no legitimate fallback to C_AcctSchema_Default in the trigger for these two tables, so this
+  // backfill does not fall back to it either. Note this SQL is NOT a mirror of an existing
+  // idiom that's already proven safe at runtime: OnboardingAccountingWiringService's own
+  // BP_CUSTOMER_ACCT_SQL/BP_VENDOR_ACCT_SQL (which DO read C_AcctSchema_Default) are a documented
+  // no-op at onboarding time (no C_BPartner rows exist yet) — this is the first place this
+  // resolution logic actually executes against live, already-accounted data, so it must match the
+  // trigger's real semantics rather than that onboarding-time simplification.
   private static final String BP_CUSTOMER_ACCT_FOR_BP_SQL =
       "INSERT INTO c_bp_customer_acct ("
       + "  c_bp_customer_acct_id, ad_client_id, ad_org_id, isactive, created, createdby, updated, updatedby,"
@@ -103,7 +118,7 @@ public class BusinessPartnerHandler extends AbstractPersonNameHandler {
       + "  bp.c_bpartner_id, d.c_acctschema_id, d.c_receivable_acct, d.c_prepayment_acct "
       + "FROM c_bpartner bp"
       + "  JOIN ad_org_acctschema oa ON oa.ad_client_id = bp.ad_client_id AND oa.isactive = 'Y'"
-      + "  JOIN c_acctschema_default d ON d.c_acctschema_id = oa.c_acctschema_id "
+      + "  JOIN c_bp_group_acct d ON d.c_acctschema_id = oa.c_acctschema_id AND d.c_bp_group_id = bp.c_bp_group_id "
       + "WHERE bp.c_bpartner_id = ? AND bp.iscustomer = 'Y'"
       + "  AND (ad_isorgincluded(oa.ad_org_id, bp.ad_org_id, bp.ad_client_id) <> -1"
       + "    OR ad_isorgincluded(bp.ad_org_id, oa.ad_org_id, bp.ad_client_id) <> -1)"
@@ -118,7 +133,7 @@ public class BusinessPartnerHandler extends AbstractPersonNameHandler {
       + "  bp.c_bpartner_id, d.c_acctschema_id, d.v_liability_acct, d.v_prepayment_acct "
       + "FROM c_bpartner bp"
       + "  JOIN ad_org_acctschema oa ON oa.ad_client_id = bp.ad_client_id AND oa.isactive = 'Y'"
-      + "  JOIN c_acctschema_default d ON d.c_acctschema_id = oa.c_acctschema_id "
+      + "  JOIN c_bp_group_acct d ON d.c_acctschema_id = oa.c_acctschema_id AND d.c_bp_group_id = bp.c_bp_group_id "
       + "WHERE bp.c_bpartner_id = ? AND bp.isvendor = 'Y'"
       + "  AND (ad_isorgincluded(oa.ad_org_id, bp.ad_org_id, bp.ad_client_id) <> -1"
       + "    OR ad_isorgincluded(bp.ad_org_id, oa.ad_org_id, bp.ad_client_id) <> -1)"
@@ -379,12 +394,13 @@ public class BusinessPartnerHandler extends AbstractPersonNameHandler {
    * already-persisted BP via {@code UPDATE} never creates the newly-relevant row (confirmed live:
    * a BP created as customer-only, later updated to also be a vendor, is left with a permanently
    * empty Vendor accounting tab). This backfills whichever row is missing, right after a
-   * successful PUT/PATCH, only when the request actually touched the {@code vendor}/{@code
-   * customer} flag — so the common case (updating unrelated fields) never pays for the extra
-   * lookup. Mirrors {@code OnboardingAccountingWiringService}'s posting-account backfill idiom:
-   * default accounts copied from {@code C_AcctSchema_Default}, one row per {@code AcctSchema}
-   * wired to the BP's own org (via {@code AD_Org_AcctSchema} / {@code ad_isorgincluded}), guarded
-   * by {@code NOT EXISTS} so it is idempotent and a no-op once the row exists.
+   * successful PUT/PATCH, only when the request actually flips the {@code vendor}/{@code
+   * customer} flag to {@code true} — so the common case (updating unrelated fields, or explicitly
+   * unsetting the flag) never pays for the extra lookup. Posting accounts are sourced from the
+   * BP's own {@code C_BP_Group_Acct} row (via {@code C_BPartner.C_BP_Group_ID}), one row per
+   * {@code AcctSchema} wired to the BP's own org (via {@code AD_Org_AcctSchema} / {@code
+   * ad_isorgincluded}), guarded by {@code NOT EXISTS} so it is idempotent and a no-op once the row
+   * exists — see the account-source rationale on {@link #BP_CUSTOMER_ACCT_FOR_BP_SQL}.
    */
   private void provisionMissingBpAcctRows(NeoContext ctx) {
     JSONObject requestBody = ctx.getRequestBody();
@@ -393,10 +409,10 @@ public class BusinessPartnerHandler extends AbstractPersonNameHandler {
       return;
     }
     try {
-      if (requestBody.has(FIELD_CUSTOMER)) {
+      if (requestBody.has(FIELD_CUSTOMER) && requestBody.optBoolean(FIELD_CUSTOMER, false)) {
         runBpAcctBackfill(BP_CUSTOMER_ACCT_FOR_BP_SQL, recordId);
       }
-      if (requestBody.has(FIELD_VENDOR)) {
+      if (requestBody.has(FIELD_VENDOR) && requestBody.optBoolean(FIELD_VENDOR, false)) {
         runBpAcctBackfill(BP_VENDOR_ACCT_FOR_BP_SQL, recordId);
       }
     } catch (Exception e) {
