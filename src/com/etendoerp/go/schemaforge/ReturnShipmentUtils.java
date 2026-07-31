@@ -173,13 +173,32 @@ final class ReturnShipmentUtils {
   // Document type lookup – shared between both return header handlers
   // ---------------------------------------------------------------------------
 
+  /**
+   * Resolves the document type to use for an auto-generated return invoice, scoped to the
+   * given organization (falling back to org {@code '0'}, then to the first active candidate).
+   *
+   * @param orgId               the shipment/receipt's organization id
+   * @param docCategory         the {@code DocBaseType} to match (e.g. {@code "ARC"}, {@code "APC"})
+   * @param isSales             whether to match sales-side ({@code true}) or purchase-side document types
+   * @param requireReturn       whether the doc type must have {@code IsReturn = requireReturn}
+   * @param requireRectificative
+   *     when {@code true}, additionally requires {@code EM_Etsg_Isrectificative = 'Y'} (ETP-4737
+   *     unified "Factura Rectificativa" type) — this is how the new rectificative doc type is
+   *     distinguished from a legacy doc type sharing the same {@code docCategory}. Silently
+   *     ignored (no-op) when the column is not present in this database (SIF General module not
+   *     installed — see {@link RectificativeSupport#isColumnPresent()}), so the lookup degrades
+   *     gracefully to the plain category-based match in deployments without the module.
+   */
   static DocumentType findReturnDocTypeForOrg(String orgId, String docCategory,
-      boolean isSales, boolean requireReturn) {
+      boolean isSales, boolean requireReturn, boolean requireRectificative) {
     OBCriteria<DocumentType> crit = OBDal.getInstance().createCriteria(DocumentType.class)
         .add(Restrictions.eq(DocumentType.PROPERTY_DOCUMENTCATEGORY, docCategory))
         .add(Restrictions.eq(DocumentType.PROPERTY_SALESTRANSACTION, isSales))
         .add(Restrictions.eq(DocumentType.PROPERTY_ACTIVE, true));
     crit.add(Restrictions.eq(DocumentType.PROPERTY_RETURN, requireReturn));
+    if (requireRectificative && RectificativeSupport.isColumnPresent()) {
+      crit.add(Restrictions.eq(DocumentType.PROPERTY_ETSGISRECTIFICATIVE, true));
+    }
     crit.addOrderBy(DocumentType.PROPERTY_DEFAULT, false);
     List<DocumentType> candidates = crit.list();
     for (DocumentType dt : candidates) {

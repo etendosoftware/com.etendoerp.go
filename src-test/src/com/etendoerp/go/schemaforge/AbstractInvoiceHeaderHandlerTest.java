@@ -86,19 +86,16 @@ import org.openbravo.model.common.invoice.ReversedInvoice;
 public class AbstractInvoiceHeaderHandlerTest {
 
   /**
-   * Minimal concrete subclass — AR-style classification (ARC→NC, ARI_RM→DEV).
-   * Exposes all protected methods as public for direct testing.
+   * Minimal concrete subclass — AR-style classification (ARC/ARI_RM → RECTIFICATIVA, ETP-4737
+   * unified subtype). Exposes all protected methods as public for direct testing.
    */
   @Vetoed // not a CDI bean: a discoverable subclass makes @Inject of the real handler ambiguous
   private static class TestHandler extends AbstractInvoiceHeaderHandler {
     @Override
     protected String classifyDocType(DocumentType dt) {
       String cat = dt.getDocumentCategory();
-      if ("ARC".equals(cat)) {
-        return SUBTYPE_NC;
-      }
-      if ("ARI_RM".equals(cat)) {
-        return SUBTYPE_DEV;
+      if ("ARC".equals(cat) || "ARI_RM".equals(cat)) {
+        return SUBTYPE_RECTIFICATIVA;
       }
       return SUBTYPE_FAC;
     }
@@ -338,7 +335,7 @@ public class AbstractInvoiceHeaderHandlerTest {
   }
 
   @Test
-  public void validateOriginInvoiceRequired_ncSubtypeWithOrigin_returnsNull() throws Exception {
+  public void validateOriginInvoiceRequired_rectificativaViaArcWithOrigin_returnsNull() throws Exception {
     JSONObject body = new JSONObject()
         .put("transactionDocument", "dt-arc")
         .put("originInvoice", "inv-origin-1");
@@ -357,7 +354,7 @@ public class AbstractInvoiceHeaderHandlerTest {
   }
 
   @Test
-  public void validateOriginInvoiceRequired_ncSubtypeWithoutOrigin_returns400WithCreditNoteLabel() throws Exception {
+  public void validateOriginInvoiceRequired_rectificativaViaArcWithoutOrigin_returns400WithLabel() throws Exception {
     JSONObject body = new JSONObject().put("transactionDocument", "dt-arc");
     NeoContext ctx = NeoContext.builder().httpMethod("PUT").requestBody(body).build();
 
@@ -372,12 +369,12 @@ public class AbstractInvoiceHeaderHandlerTest {
       NeoResponse result = handler.callValidateOriginInvoiceRequired(ctx);
       assertNotNull(result);
       assertEquals(HttpServletResponse.SC_BAD_REQUEST, result.getHttpStatus());
-      assertTrue(result.getBody().toString().contains("Credit Note"));
+      assertTrue(result.getBody().toString().contains("Rectificative Invoice"));
     }
   }
 
   @Test
-  public void validateOriginInvoiceRequired_devSubtypeWithoutOrigin_returns400WithReturnInvoiceLabel() throws Exception {
+  public void validateOriginInvoiceRequired_rectificativaViaAriRmWithoutOrigin_returns400WithLabel() throws Exception {
     JSONObject body = new JSONObject().put("transactionDocument", "dt-ari-rm");
     NeoContext ctx = NeoContext.builder().httpMethod("POST").requestBody(body).build();
 
@@ -392,7 +389,7 @@ public class AbstractInvoiceHeaderHandlerTest {
       NeoResponse result = handler.callValidateOriginInvoiceRequired(ctx);
       assertNotNull(result);
       assertEquals(HttpServletResponse.SC_BAD_REQUEST, result.getHttpStatus());
-      assertTrue(result.getBody().toString().contains("Return Invoice"));
+      assertTrue(result.getBody().toString().contains("Rectificative Invoice"));
     }
   }
 
@@ -673,7 +670,7 @@ public class AbstractInvoiceHeaderHandlerTest {
   }
 
   @Test
-  public void enrichInvoiceSubtype_arcDocTypeId_setsNcSubtype() throws Exception {
+  public void enrichInvoiceSubtype_arcDocTypeId_setsRectificativaSubtype() throws Exception {
     JSONObject rec = new JSONObject().put("transactionDocument", "dt-arc");
 
     try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
@@ -686,7 +683,7 @@ public class AbstractInvoiceHeaderHandlerTest {
 
       handler.callEnrichInvoiceSubtype(rec, "arInvoiceSubtype");
 
-      assertEquals("NC", rec.getString("arInvoiceSubtype"));
+      assertEquals("RECTIFICATIVA", rec.getString("arInvoiceSubtype"));
     }
   }
 

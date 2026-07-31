@@ -55,10 +55,10 @@ import com.etendoerp.go.schemaforge.handlers.DocumentPostingService;
  * discount not yet materialized as a real line — see
  * {@link AbstractInvoiceHeaderHandler#applyTotalDiscountToRecord}.
  *
- * <p>Subtype resolution for AP invoices:
+ * <p>Subtype resolution for AP invoices (ETP-4737 — unified "Factura Rectificativa"):
  * <ul>
- *   <li>{@code APC} → NC (Credit Note)</li>
- *   <li>{@code API} + isReturn → DEV (Return Invoice)</li>
+ *   <li>{@code EM_Etsg_Isrectificative = 'Y'} → RECTIFICATIVA (new unified type)</li>
+ *   <li>legacy fallback — {@code APC} (Credit Note) or {@code API} + isReturn (Return Invoice) → RECTIFICATIVA</li>
  *   <li>otherwise → FAC (Standard Invoice)</li>
  * </ul>
  */
@@ -181,12 +181,19 @@ public class PurchaseInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler i
   // AP-specific subtype resolution
   // ---------------------------------------------------------------------------
 
-  /** {@inheritDoc} AP: APC → NC, API+isReturn → DEV, otherwise FAC. */
+  /**
+   * {@inheritDoc} AP: {@code EM_Etsg_Isrectificative = 'Y'} (ETP-4737 unified "Factura
+   * Rectificativa") → RECTIFICATIVA; legacy fallback for pre-existing invoices — APC (Credit
+   * Note) or API+isReturn (Return Invoice) → RECTIFICATIVA; otherwise FAC.
+   */
   @Override
   protected String classifyDocType(DocumentType dt) {
+    if (RectificativeSupport.isRectificative(dt)) {
+      return SUBTYPE_RECTIFICATIVA;
+    }
     String category = dt.getDocumentCategory();
-    if ("APC".equals(category)) return SUBTYPE_NC;
-    if ("API".equals(category) && Boolean.TRUE.equals(dt.isReturn())) return SUBTYPE_DEV;
+    if ("APC".equals(category)) return SUBTYPE_RECTIFICATIVA;
+    if ("API".equals(category) && Boolean.TRUE.equals(dt.isReturn())) return SUBTYPE_RECTIFICATIVA;
     return SUBTYPE_FAC;
   }
 

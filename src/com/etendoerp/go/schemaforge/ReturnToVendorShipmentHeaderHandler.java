@@ -293,11 +293,13 @@ public class ReturnToVendorShipmentHeaderHandler implements NeoHandler {
               "No product lines in this return shipment");
         }
 
+        // ETP-4737: resolves the unified "Factura Rectificativa" (API + isRectificative) doc
+        // type, replacing the legacy plain-APC ("AP CreditMemo") lookup.
         DocumentType docType = ReturnShipmentUtils.findReturnDocTypeForOrg(
-            returnDoc.getOrganization().getId(), "APC", false, false);
+            returnDoc.getOrganization().getId(), "API", false, false, true);
         if (docType == null) {
           return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
-              "No AP CreditMemo document type (APC) found for this organization");
+              "No rectificative invoice document type found for this organization");
         }
 
         Invoice sourceInvoice = ReturnShipmentUtils.findSourceInvoice(lines);

@@ -574,7 +574,7 @@ public class SalesInvoiceHeaderHandlerTest {
   }
 
   @Test
-  public void resolveSubtype_arcCategory_returnsNc() {
+  public void resolveSubtype_arcCategory_returnsRectificativa() {
     try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
       OBDal dal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(dal);
@@ -584,12 +584,12 @@ public class SalesInvoiceHeaderHandlerTest {
       when(dal.get(DocumentType.class, "dt-arc")).thenReturn(dt);
 
       TestableSalesHandler h = new TestableSalesHandler();
-      assertEquals("NC", h.callResolveSubtype("dt-arc"));
+      assertEquals("RECTIFICATIVA", h.callResolveSubtype("dt-arc"));
     }
   }
 
   @Test
-  public void resolveSubtype_ariRmCategory_returnsDev() {
+  public void resolveSubtype_ariRmCategory_returnsRectificativa() {
     try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
       OBDal dal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(dal);
@@ -599,7 +599,55 @@ public class SalesInvoiceHeaderHandlerTest {
       when(dal.get(DocumentType.class, "dt-ari-rm")).thenReturn(dt);
 
       TestableSalesHandler h = new TestableSalesHandler();
-      assertEquals("DEV", h.callResolveSubtype("dt-ari-rm"));
+      assertEquals("RECTIFICATIVA", h.callResolveSubtype("dt-ari-rm"));
+    }
+  }
+
+  /**
+   * ETP-4737: the new unified rectificative doc type is driven primarily by the
+   * {@code EM_Etsg_Isrectificative} flag, independent of {@code documentCategory} — proven here
+   * with an otherwise-FAC category ("ARI", standard AR invoice) that only classifies as
+   * RECTIFICATIVA because the flag is set.
+   */
+  @Test
+  public void resolveSubtype_rectificativeFlagSet_returnsRectificativaRegardlessOfCategory() {
+    AbstractInvoiceHeaderHandler.setRectificativeColumnPresentForTests(true);
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      DocumentType dt = mock(DocumentType.class);
+      when(dt.getDocumentCategory()).thenReturn("ARI");
+      when(dt.isEtsgIsRectificative()).thenReturn(true);
+      when(dal.get(DocumentType.class, "dt-new-rectificativa")).thenReturn(dt);
+
+      TestableSalesHandler h = new TestableSalesHandler();
+      assertEquals("RECTIFICATIVA", h.callResolveSubtype("dt-new-rectificativa"));
+    } finally {
+      AbstractInvoiceHeaderHandler.setRectificativeColumnPresentForTests(null);
+    }
+  }
+
+  /**
+   * When the rectificative column is not present (SIF General not installed), classification
+   * falls back to the legacy category-based rule even though the mock would otherwise report the
+   * flag as set — {@link RectificativeSupport#isRectificative} must short-circuit to false.
+   */
+  @Test
+  public void resolveSubtype_rectificativeColumnAbsent_fallsBackToCategory() {
+    AbstractInvoiceHeaderHandler.setRectificativeColumnPresentForTests(false);
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      DocumentType dt = mock(DocumentType.class);
+      when(dt.getDocumentCategory()).thenReturn("ARI");
+      when(dal.get(DocumentType.class, "dt-ari-no-column")).thenReturn(dt);
+
+      TestableSalesHandler h = new TestableSalesHandler();
+      assertEquals("FAC", h.callResolveSubtype("dt-ari-no-column"));
+    } finally {
+      AbstractInvoiceHeaderHandler.setRectificativeColumnPresentForTests(null);
     }
   }
 
@@ -663,11 +711,11 @@ public class SalesInvoiceHeaderHandlerTest {
   }
 
   /**
-   * Verifies that grandTotalAmount and outstandingAmount are negated for NC (credit memo)
-   * subtype records when amounts are positive.
+   * Verifies that grandTotalAmount and outstandingAmount are negated for RECTIFICATIVA (via
+   * legacy ARC / Credit Memo category) subtype records when amounts are positive.
    */
   @Test
-  public void afterHandle_ncSubtype_negatesPositiveAmounts() throws Exception {
+  public void afterHandle_rectificativaViaArc_negatesPositiveAmounts() throws Exception {
     JSONObject body = invoiceBodyWithDocType("dt-arc", 150.0, 100.0);
     NeoContext ctx = getCtx(); // list mode — no recordId, no enrichSourceInvoice call
     ctx.setPreviousResult(NeoResponse.ok(body));
@@ -683,18 +731,18 @@ public class SalesInvoiceHeaderHandlerTest {
 
       assertNotNull(result);
       JSONObject rec = result.getBody().getJSONObject("response").getJSONArray("data").getJSONObject(0);
-      assertEquals("NC", rec.getString("arInvoiceSubtype"));
+      assertEquals("RECTIFICATIVA", rec.getString("arInvoiceSubtype"));
       assertEquals(-150.0, rec.getDouble("grandTotalAmount"), 0.001);
       assertEquals(-100.0, rec.getDouble("outstandingAmount"), 0.001);
     }
   }
 
   /**
-   * Verifies that grandTotalAmount and outstandingAmount are negated for DEV (return invoice)
-   * subtype records when amounts are positive.
+   * Verifies that grandTotalAmount and outstandingAmount are negated for RECTIFICATIVA (via
+   * legacy ARI_RM / Return Invoice category) subtype records when amounts are positive.
    */
   @Test
-  public void afterHandle_devSubtype_negatesPositiveAmounts() throws Exception {
+  public void afterHandle_rectificativaViaAriRm_negatesPositiveAmounts() throws Exception {
     JSONObject body = invoiceBodyWithDocType("dt-ari-rm", 200.0, 200.0);
     NeoContext ctx = getCtx(); // list mode
     ctx.setPreviousResult(NeoResponse.ok(body));
@@ -710,7 +758,7 @@ public class SalesInvoiceHeaderHandlerTest {
 
       assertNotNull(result);
       JSONObject rec = result.getBody().getJSONObject("response").getJSONArray("data").getJSONObject(0);
-      assertEquals("DEV", rec.getString("arInvoiceSubtype"));
+      assertEquals("RECTIFICATIVA", rec.getString("arInvoiceSubtype"));
       assertEquals(-200.0, rec.getDouble("grandTotalAmount"), 0.001);
       assertEquals(-200.0, rec.getDouble("outstandingAmount"), 0.001);
     }
@@ -720,7 +768,7 @@ public class SalesInvoiceHeaderHandlerTest {
    * Verifies that non-positive amounts are NOT negated — the guard {@code grand > 0} must hold.
    */
   @Test
-  public void afterHandle_ncSubtype_doesNotNegateZeroOrNegativeAmounts() throws Exception {
+  public void afterHandle_rectificativaSubtype_doesNotNegateZeroOrNegativeAmounts() throws Exception {
     JSONObject body = invoiceBodyWithDocType("dt-arc", 0.0, -50.0);
     NeoContext ctx = getCtx();
     ctx.setPreviousResult(NeoResponse.ok(body));

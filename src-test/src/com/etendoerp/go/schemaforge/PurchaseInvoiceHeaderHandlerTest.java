@@ -309,7 +309,7 @@ public class PurchaseInvoiceHeaderHandlerTest {
   }
 
   @Test
-  public void resolveSubtype_apcCategory_returnsNc() {
+  public void resolveSubtype_apcCategory_returnsRectificativa() {
     try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
       OBDal dal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(dal);
@@ -319,12 +319,12 @@ public class PurchaseInvoiceHeaderHandlerTest {
       when(dal.get(DocumentType.class, "dt-apc")).thenReturn(dt);
 
       TestablePurchaseHandler h = new TestablePurchaseHandler();
-      assertEquals("NC", h.callResolveSubtype("dt-apc"));
+      assertEquals("RECTIFICATIVA", h.callResolveSubtype("dt-apc"));
     }
   }
 
   @Test
-  public void resolveSubtype_apiWithIsReturn_returnsDev() {
+  public void resolveSubtype_apiWithIsReturn_returnsRectificativa() {
     try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
       OBDal dal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(dal);
@@ -335,7 +335,57 @@ public class PurchaseInvoiceHeaderHandlerTest {
       when(dal.get(DocumentType.class, "dt-api-return")).thenReturn(dt);
 
       TestablePurchaseHandler h = new TestablePurchaseHandler();
-      assertEquals("DEV", h.callResolveSubtype("dt-api-return"));
+      assertEquals("RECTIFICATIVA", h.callResolveSubtype("dt-api-return"));
+    }
+  }
+
+  /**
+   * ETP-4737: the new unified rectificative doc type is driven primarily by the
+   * {@code EM_Etsg_Isrectificative} flag, independent of {@code documentCategory} — proven here
+   * with an otherwise-FAC category ("API", no isReturn) that only classifies as RECTIFICATIVA
+   * because the flag is set.
+   */
+  @Test
+  public void resolveSubtype_rectificativeFlagSet_returnsRectificativaRegardlessOfCategory() {
+    AbstractInvoiceHeaderHandler.setRectificativeColumnPresentForTests(true);
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      DocumentType dt = mock(DocumentType.class);
+      when(dt.getDocumentCategory()).thenReturn("API");
+      when(dt.isReturn()).thenReturn(false);
+      when(dt.isEtsgIsRectificative()).thenReturn(true);
+      when(dal.get(DocumentType.class, "dt-new-rectificativa")).thenReturn(dt);
+
+      TestablePurchaseHandler h = new TestablePurchaseHandler();
+      assertEquals("RECTIFICATIVA", h.callResolveSubtype("dt-new-rectificativa"));
+    } finally {
+      AbstractInvoiceHeaderHandler.setRectificativeColumnPresentForTests(null);
+    }
+  }
+
+  /**
+   * When the rectificative column is not present (SIF General not installed), classification
+   * falls back to the legacy category-based rule even though the mock would otherwise report the
+   * flag as set.
+   */
+  @Test
+  public void resolveSubtype_rectificativeColumnAbsent_fallsBackToCategory() {
+    AbstractInvoiceHeaderHandler.setRectificativeColumnPresentForTests(false);
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      DocumentType dt = mock(DocumentType.class);
+      when(dt.getDocumentCategory()).thenReturn("API");
+      when(dt.isReturn()).thenReturn(false);
+      when(dal.get(DocumentType.class, "dt-api-no-column")).thenReturn(dt);
+
+      TestablePurchaseHandler h = new TestablePurchaseHandler();
+      assertEquals("FAC", h.callResolveSubtype("dt-api-no-column"));
+    } finally {
+      AbstractInvoiceHeaderHandler.setRectificativeColumnPresentForTests(null);
     }
   }
 

@@ -281,11 +281,13 @@ public class ReturnMaterialReceiptHeaderHandler implements NeoHandler {
           return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "No product lines in this receipt");
         }
 
+        // ETP-4737: resolves the unified "Factura Rectificativa" (ARI + isRectificative) doc
+        // type, replacing the legacy ARI_RM ("Return Material Sales Invoice") lookup.
         DocumentType docType = ReturnShipmentUtils.findReturnDocTypeForOrg(
-            receipt.getOrganization().getId(), "ARI_RM", true, true);
+            receipt.getOrganization().getId(), "ARI", true, false, true);
         if (docType == null) {
           return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
-              "No return invoice document type (ARI_RM) found for this organization");
+              "No rectificative invoice document type found for this organization");
         }
 
         Invoice sourceInvoice = ReturnShipmentUtils.findSourceInvoice(lines);
