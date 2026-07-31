@@ -49,6 +49,7 @@ import org.openbravo.service.json.JsonConstants;
 import com.etendoerp.go.schemaforge.AmortizationPlanService;
 import com.etendoerp.go.schemaforge.BatchService;
 import com.etendoerp.go.schemaforge.util.NeoButtonActionHelper;
+import com.etendoerp.go.schemaforge.util.NeoLanguage;
 import com.etendoerp.go.schemaforge.NeoContext;
 import com.etendoerp.go.schemaforge.NeoDefaultsService;
 import com.etendoerp.go.schemaforge.NeoFieldFilter;
@@ -265,6 +266,7 @@ public class McpToolRouter {
     JSONObject result = new JSONObject();
     result.put("specs", specsArray);
     result.put("count", specsArray.length());
+    result.put("guidance", McpToolRouterSupport.buildDocsGuidance());
     return wrapAsTextContent(result.toString(2));
   }
 
@@ -365,6 +367,14 @@ public class McpToolRouter {
       return wrapAsErrorContent(error);
     }
 
+    // IMP-5: a get-by-id that matched nothing comes back as {data:[], status:0} — a
+    // success-looking empty result. Translate it into an explicit, machine-detectable
+    // not-found so the agent can tell "not found" from "empty match" and self-correct.
+    if (McpToolRouterSupport.isEmptySuccessResult(responseJson)) {
+      return wrapAsErrorContent(
+          McpToolRouterSupport.buildNotFoundError(specName, entityName, recordId).toString(2));
+    }
+
     fieldFilter.filterGetResponse(responseJson);
 
     return wrapAsTextContent(responseJson.toString(2));
@@ -446,10 +456,16 @@ public class McpToolRouter {
     // Validate mandatory fields before insert — return structured error matching neo_schema contract
     JSONArray missingFields = validateMandatoryFields(filteredBody, adTab, dalEntity);
     if (missingFields.length() > 0) {
+      // IMP-5: stable machine-detectable code + status so the agent can distinguish an
+      // "invalid write" from a "server error"; the human text moves to `detail`, and the
+      // existing `missingFields`/`hint` guidance is preserved.
       JSONObject errorObj = new JSONObject();
-      errorObj.put(McpConstants.KEY_ERROR, "Missing required fields that could not be auto-resolved");
+      errorObj.put(McpConstants.KEY_STATUS, McpConstants.STATUS_UNPROCESSABLE);
+      errorObj.put(McpConstants.KEY_ERROR, McpConstants.ERROR_VALIDATION);
+      errorObj.put(McpConstants.KEY_DETAIL, "Missing required fields that could not be auto-resolved");
       errorObj.put("missingFields", missingFields);
       errorObj.put("hint", "Provide these fields in the request, or use neo_selectors to find valid values for foreignKey fields");
+      errorObj.put(McpConstants.KEY_SEE_ALSO, McpConstants.SEE_ALSO_WRITING);
       return wrapAsErrorContent(errorObj.toString(2));
     }
 
@@ -593,7 +609,16 @@ public class McpToolRouter {
    * Also supports parentContext for child selectors that depend on header values.
    */
   private JSONObject handleSelectors(String specName, JSONObject args) throws Exception {
-    McpToolRouterSupport.validateArgs(args, McpConstants.PARAM_ENTITY, McpConstants.PARAM_COLUMN);
+    // IMP-8: accept `field` as an alias for the canonical `column` argument so the natural
+    // first-try call shape succeeds instead of failing on a missing-argument error.
+    McpToolRouterSupport.aliasArg(args, McpConstants.PARAM_FIELD, McpConstants.PARAM_COLUMN);
+    McpToolRouterSupport.validateArgs(args, McpConstants.PARAM_ENTITY);
+    if (args == null || !args.has(McpConstants.PARAM_COLUMN)
+        || args.isNull(McpConstants.PARAM_COLUMN)) {
+      // Self-correcting error (IMP-8): name the expected key and the accepted alias.
+      throw new IllegalArgumentException("Missing required argument: 'column' (the FK field "
+          + "name, e.g. \"businessPartner\"). You may also pass it as 'field'.");
+    }
 
     String entityName = args.getString(McpConstants.PARAM_ENTITY);
     String columnName = args.getString(McpConstants.PARAM_COLUMN);
@@ -721,6 +746,10 @@ public class McpToolRouter {
         fieldMetadata.visibilityByColumnId, fieldMetadata.businessCriticalByColumnId,
         promptByColumnId, SYSTEM_COLUMNS, SELECTOR_REFS);
     McpSchemaFieldBuilder.applyPreconditionRequirements(fieldsArray, requiredWhenByField);
+    // IMP-1: overlay clean, localized labels + one-line descriptions from AD_Field so the agent
+    // sees "SII Description" instead of the raw AD_Column name "EM_Aeatsii_Descripcion_Sii".
+    McpSchemaFieldBuilder.applyCuratedLabels(fieldsArray,
+        McpSchemaFieldBuilder.loadFieldLabels(adTab, NeoLanguage.currentCode()));
 
     // Build entity schema
     JSONObject entitySchema = new JSONObject();

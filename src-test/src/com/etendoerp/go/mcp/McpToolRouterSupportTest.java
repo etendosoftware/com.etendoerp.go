@@ -1002,6 +1002,131 @@ class McpToolRouterSupportTest {
     }
   }
 
+  // ─── aliasArg (IMP-8) ───────────────────────────────────────────────
+
+  @Nested
+  @DisplayName("aliasArg")
+  class AliasArg {
+
+    @Test
+    @DisplayName("copies alias onto canonical when canonical is absent")
+    void copiesAliasWhenCanonicalAbsent() throws Exception {
+      JSONObject args = new JSONObject().put("field", "businessPartner");
+      McpToolRouterSupport.aliasArg(args, "field", "column");
+      assertEquals("businessPartner", args.getString("column"));
+    }
+
+    @Test
+    @DisplayName("canonical wins when both keys are present")
+    void canonicalWinsWhenBothPresent() throws Exception {
+      JSONObject args = new JSONObject().put("field", "aaa").put("column", "bbb");
+      McpToolRouterSupport.aliasArg(args, "field", "column");
+      assertEquals("bbb", args.getString("column"));
+    }
+
+    @Test
+    @DisplayName("no-op when alias is absent")
+    void noopWhenAliasAbsent() {
+      JSONObject args = new JSONObject();
+      McpToolRouterSupport.aliasArg(args, "field", "column");
+      assertFalse(args.has("column"));
+    }
+
+    @Test
+    @DisplayName("null args is a no-op (does not throw)")
+    void nullArgsIsNoop() {
+      McpToolRouterSupport.aliasArg(null, "field", "column");
+    }
+  }
+
+  // ─── isEmptySuccessResult (IMP-5) ───────────────────────────────────
+
+  @Nested
+  @DisplayName("isEmptySuccessResult")
+  class IsEmptySuccessResult {
+
+    private JSONObject wrap(JSONObject inner) throws Exception {
+      return new JSONObject().put("response", inner);
+    }
+
+    @Test
+    @DisplayName("true for a success with an empty data array")
+    void trueForSuccessEmptyData() throws Exception {
+      JSONObject inner = new JSONObject().put("status", 0).put("data", new JSONArray());
+      assertTrue(McpToolRouterSupport.isEmptySuccessResult(wrap(inner)));
+    }
+
+    @Test
+    @DisplayName("false when data has rows")
+    void falseWhenDataHasRows() throws Exception {
+      JSONObject inner = new JSONObject().put("status", 0)
+          .put("data", new JSONArray().put(new JSONObject().put("id", "X")));
+      assertFalse(McpToolRouterSupport.isEmptySuccessResult(wrap(inner)));
+    }
+
+    @Test
+    @DisplayName("false on a failure status even with empty data")
+    void falseOnFailureStatus() throws Exception {
+      JSONObject inner = new JSONObject().put("status", -1).put("data", new JSONArray());
+      assertFalse(McpToolRouterSupport.isEmptySuccessResult(wrap(inner)));
+    }
+
+    @Test
+    @DisplayName("false when there is no response wrapper")
+    void falseWhenNoResponseWrapper() {
+      assertFalse(McpToolRouterSupport.isEmptySuccessResult(new JSONObject()));
+    }
+
+    @Test
+    @DisplayName("false for null input")
+    void falseForNull() {
+      assertFalse(McpToolRouterSupport.isEmptySuccessResult(null));
+    }
+  }
+
+  // ─── buildNotFoundError (IMP-5) ─────────────────────────────────────
+
+  @Nested
+  @DisplayName("buildNotFoundError")
+  class BuildNotFoundError {
+
+    @Test
+    @DisplayName("wraps a 404 not_found body with a descriptive detail")
+    void wrapsNotFoundBody() throws Exception {
+      JSONObject inner = McpToolRouterSupport
+          .buildNotFoundError("sales-invoice", "header", "NONEXISTENT123")
+          .getJSONObject("response");
+      assertEquals(404, inner.getInt("status"));
+      assertEquals("not_found", inner.getString("error"));
+      assertTrue(inner.getString("detail").contains("sales-invoice/header"));
+      assertTrue(inner.getString("detail").contains("NONEXISTENT123"));
+    }
+
+    @Test
+    @DisplayName("points the agent to a docs recipe via seeAlso (IMP-10)")
+    void includesSeeAlsoPointer() throws Exception {
+      JSONObject inner = McpToolRouterSupport
+          .buildNotFoundError("sales-invoice", "header", "NONEXISTENT123")
+          .getJSONObject("response");
+      assertEquals("docs(topic:\"reading records\")", inner.getString("seeAlso"));
+    }
+  }
+
+  // ─── buildDocsGuidance (IMP-10) ─────────────────────────────────────
+
+  @Nested
+  @DisplayName("buildDocsGuidance")
+  class BuildDocsGuidance {
+
+    @Test
+    @DisplayName("advertises the docs tool with a recipe hint")
+    void advertisesDocsTool() throws Exception {
+      JSONObject guidance = McpToolRouterSupport.buildDocsGuidance();
+      assertEquals("docs", guidance.getString("tool"));
+      assertTrue(guidance.getString("hint").toLowerCase().contains("docs(topic"));
+    }
+  }
+
   // ─── Helper ─────────────────────────────────────────────────────────
 
   private static boolean arrayContains(JSONArray array, String value) {

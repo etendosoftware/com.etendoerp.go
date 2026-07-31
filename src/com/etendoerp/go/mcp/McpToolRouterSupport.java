@@ -33,6 +33,8 @@ import org.openbravo.model.ad.datamodel.Column;
 import org.openbravo.model.ad.ui.Process;
 import org.openbravo.model.ad.ui.Tab;
 
+import org.openbravo.service.json.JsonConstants;
+
 import com.etendoerp.go.schemaforge.NeoResponse;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFSpec;
@@ -497,5 +499,99 @@ final class McpToolRouterSupport {
         throw new IllegalArgumentException("Missing required argument: " + key);
       }
     }
+  }
+
+  /**
+   * Copy an alias argument onto its canonical key when the canonical key is absent (IMP-8).
+   * <p>
+   * Lets a natural first-try call shape succeed instead of failing on a missing-argument
+   * error. Used by {@code neo_selectors} to accept {@code field} as an alias for the
+   * canonical {@code column} argument. The canonical key wins when both are present, and a
+   * blank/null alias is ignored so it never shadows a required-argument check.
+   *
+   * @param args      the tool arguments (may be {@code null} — then this is a no-op)
+   * @param aliasKey  the accepted alias argument name (e.g. {@code "field"})
+   * @param canonical the canonical argument name the handler reads (e.g. {@code "column"})
+   */
+  static void aliasArg(JSONObject args, String aliasKey, String canonical) {
+    if (args == null || args.has(canonical) || !args.has(aliasKey) || args.isNull(aliasKey)) {
+      return;
+    }
+    try {
+      args.put(canonical, args.get(aliasKey));
+    } catch (JSONException e) {
+      // args.get(aliasKey) cannot throw here — has()/!isNull() already gated it.
+      throw new OBException("Could not alias argument '" + aliasKey + "' to '" + canonical + "'", e);
+    }
+  }
+
+  /**
+   * Detect a {@link org.openbravo.service.json.DefaultJsonDataService} fetch that returned a
+   * successful but empty {@code data} array (IMP-5).
+   * <p>
+   * A get-by-id that matches no record comes back as {@code {response:{data:[], status:0}}},
+   * which is indistinguishable from a legitimate success — {@code status 0} reads as OK. This
+   * is the ambiguous not-found signal the MCP must translate into an explicit error so an agent
+   * can self-correct. Only meaningful for get-by-id: an empty {@code neo_list} is a valid
+   * result, never a not-found.
+   *
+   * @param responseJson the parsed DefaultJsonDataService response (may be {@code null})
+   * @return {@code true} when the response is a success carrying zero rows
+   */
+  static boolean isEmptySuccessResult(JSONObject responseJson) {
+    if (responseJson == null) {
+      return false;
+    }
+    JSONObject inner = responseJson.optJSONObject(JsonConstants.RESPONSE_RESPONSE);
+    if (inner == null) {
+      return false;
+    }
+    if (inner.optInt(JsonConstants.RESPONSE_STATUS, Integer.MIN_VALUE)
+        != JsonConstants.RPCREQUEST_STATUS_SUCCESS) {
+      return false;
+    }
+    JSONArray data = inner.optJSONArray(JsonConstants.RESPONSE_DATA);
+    return data == null || data.length() == 0;
+  }
+
+  /**
+   * Build an explicit, machine-detectable not-found error body for a get-by-id (IMP-5).
+   * <p>
+   * Replaces the ambiguous {@code {data:[], status:0}} success shape with a clear
+   * {@code {response:{status:404, error:"not_found", detail:"…"}}} so an agent can tell
+   * "not found" from "empty match" purely from the response.
+   *
+   * @param specName   the spec name from the tool call
+   * @param entityName the entity name from the tool call
+   * @param recordId   the id that matched no record
+   * @return the wrapped not-found error object
+   * @throws JSONException never in practice (all values are plain strings/ints)
+   */
+  static JSONObject buildNotFoundError(String specName, String entityName, String recordId)
+      throws JSONException {
+    JSONObject inner = new JSONObject();
+    inner.put(McpConstants.KEY_STATUS, McpConstants.STATUS_NOT_FOUND);
+    inner.put(McpConstants.KEY_ERROR, McpConstants.ERROR_NOT_FOUND);
+    inner.put(McpConstants.KEY_DETAIL,
+        "No " + specName + "/" + entityName + " with id " + recordId);
+    inner.put(McpConstants.KEY_SEE_ALSO, McpConstants.SEE_ALSO_READING);
+    JSONObject wrapper = new JSONObject();
+    wrapper.put(JsonConstants.RESPONSE_RESPONSE, inner);
+    return wrapper;
+  }
+
+  /**
+   * Builds the guidance object advertised by {@code neo_discover} so a cold agent is routed to the
+   * {@code docs} tool for ready-to-run recipes (IMP-10). Shape:
+   * {@code {"tool":"docs","hint":"Call docs(topic:…) for ready-to-run recipes per task."}}.
+   *
+   * @return the guidance object
+   * @throws JSONException never in practice (all values are plain strings)
+   */
+  static JSONObject buildDocsGuidance() throws JSONException {
+    JSONObject guidance = new JSONObject();
+    guidance.put(McpConstants.KEY_TOOL, McpConstants.TOOL_DOCS);
+    guidance.put(McpConstants.KEY_HINT, McpConstants.GUIDANCE_DOCS_HINT);
+    return guidance;
   }
 }

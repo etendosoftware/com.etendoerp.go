@@ -1108,4 +1108,72 @@ class McpSchemaFieldBuilderTest {
           "field not in preconditions must be left untouched");
     }
   }
+
+  // ─── applyCuratedLabels (IMP-1) ─────────────────────────────────────
+
+  @Nested
+  @DisplayName("applyCuratedLabels")
+  class ApplyCuratedLabels {
+
+    private JSONArray sampleFields() throws Exception {
+      JSONArray fields = new JSONArray();
+      fields.put(new JSONObject()
+          .put("name", "siiDescription").put("column", "EM_Aeatsii_Descripcion_Sii")
+          .put("label", "EM_Aeatsii_Descripcion_Sii"));
+      fields.put(new JSONObject()
+          .put("name", "costCenter").put("column", "User1_ID").put("label", "1st Dimension"));
+      return fields;
+    }
+
+    @Test
+    @DisplayName("overwrites the raw label and adds a description, keyed by column")
+    void overlaysLabelAndDescription() throws Exception {
+      JSONArray fields = sampleFields();
+      Map<String, String[]> labels = new HashMap<>();
+      labels.put("EM_AEATSII_DESCRIPCION_SII",
+          new String[] { "SII Description", "Operation description to send to SII." });
+
+      McpSchemaFieldBuilder.applyCuratedLabels(fields, labels);
+
+      assertEquals("SII Description", fields.getJSONObject(0).getString("label"));
+      assertEquals("Operation description to send to SII.",
+          fields.getJSONObject(0).getString("description"));
+    }
+
+    @Test
+    @DisplayName("leaves fields with no matching column untouched")
+    void leavesUnmatchedFieldsUntouched() throws Exception {
+      JSONArray fields = sampleFields();
+      Map<String, String[]> labels = new HashMap<>();
+      labels.put("EM_AEATSII_DESCRIPCION_SII", new String[] { "SII Description", "desc" });
+
+      McpSchemaFieldBuilder.applyCuratedLabels(fields, labels);
+
+      assertEquals("1st Dimension", fields.getJSONObject(1).getString("label"));
+      assertFalse(fields.getJSONObject(1).has("description"));
+    }
+
+    @Test
+    @DisplayName("a blank label or description leaves the existing value in place")
+    void blankValuesAreIgnored() throws Exception {
+      JSONArray fields = sampleFields();
+      Map<String, String[]> labels = new HashMap<>();
+      labels.put("USER1_ID", new String[] { "  ", "" });
+
+      McpSchemaFieldBuilder.applyCuratedLabels(fields, labels);
+
+      assertEquals("1st Dimension", fields.getJSONObject(1).getString("label"));
+      assertFalse(fields.getJSONObject(1).has("description"));
+    }
+
+    @Test
+    @DisplayName("null/empty overlay map is a no-op")
+    void emptyMapIsNoop() throws Exception {
+      JSONArray fields = sampleFields();
+      McpSchemaFieldBuilder.applyCuratedLabels(fields, new HashMap<>());
+      assertEquals("EM_Aeatsii_Descripcion_Sii", fields.getJSONObject(0).getString("label"));
+      McpSchemaFieldBuilder.applyCuratedLabels(fields, null);
+      assertEquals("EM_Aeatsii_Descripcion_Sii", fields.getJSONObject(0).getString("label"));
+    }
+  }
 }
