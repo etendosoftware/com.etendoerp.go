@@ -20,6 +20,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.Mockito.doThrow;
@@ -42,6 +43,7 @@ import org.codehaus.jettison.json.JSONObject;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
 import org.mockito.MockedStatic;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.mockito.junit.jupiter.MockitoSettings;
@@ -701,6 +703,131 @@ class BusinessPartnerHandlerTest {
     handler.afterHandle(ctx);
     // No assertion beyond "did not throw" — reaching this line without an exception proves
     // OBDal.getInstance() was never invoked in this unmocked-static context.
+  }
+
+  /**
+   * Reproduces the PR #804 review BLOCKER: {@code c_bpartner_trg} (the native Classic trigger,
+   * {@code src-db/database/model/triggers/C_BPARTNER_TRG.xml} lines 59-75) resolves
+   * {@code C_BP_Vendor_Acct}/{@code C_BP_Customer_Acct} posting accounts EXCLUSIVELY from the BP's
+   * own {@code C_BP_Group_Acct} row (joined on the BP's {@code C_BP_Group_ID}) — never from the
+   * generic, client-wide {@code C_AcctSchema_Default} table (that table only feeds the trigger's
+   * separate, group-independent Employee branch). A BP group can carry account overrides that
+   * diverge from the schema default (see {@code OnboardingAccountingWiringService
+   * .overrideAcreedorGroupAccounts()} — e.g. the "Acreedor" group overrides {@code v_liability_acct}
+   * to {@code 41000000}); sourcing from the schema default instead of the group silently wires the
+   * WRONG account for any BP in such a group. The backfill SQL must therefore join
+   * {@code c_bp_group_acct} keyed by {@code c_bp_group_id}, and must NOT reference
+   * {@code c_acctschema_default} at all.
+   */
+  @Test
+  void testAfterHandlePatchVendorBackfillSourcesAccountFromBpGroupAcctNotSchemaDefault() throws Exception {
+    JSONObject body = buildResponseBody();
+    NeoResponse prevResult = mock(NeoResponse.class);
+    when(prevResult.getBody()).thenReturn(body);
+    when(ctx.getHttpMethod()).thenReturn("PATCH");
+    when(ctx.getPreviousResult()).thenReturn(prevResult);
+    when(ctx.getRecordId()).thenReturn("BP_ID_5");
+    JSONObject requestBody = new JSONObject();
+    requestBody.put("vendor", true);
+    when(ctx.getRequestBody()).thenReturn(requestBody);
+
+    Connection connMock = mock(Connection.class);
+    PreparedStatement psVendor = mock(PreparedStatement.class);
+    ArgumentCaptor<String> sqlCaptor = ArgumentCaptor.forClass(String.class);
+    when(connMock.prepareStatement(sqlCaptor.capture())).thenReturn(psVendor);
+
+    try (MockedStatic<OBDal> mDal = mockStatic(OBDal.class)) {
+      OBDal obDalMock = mock(OBDal.class);
+      when(obDalMock.getConnection()).thenReturn(connMock);
+      mDal.when(OBDal::getInstance).thenReturn(obDalMock);
+
+      handler.afterHandle(ctx);
+    }
+
+    String sql = sqlCaptor.getValue().toLowerCase();
+    assertTrue(sql.contains("c_bp_group_acct"),
+        "vendor backfill SQL must source posting accounts from c_bp_group_acct (the BP's own"
+            + " group), matching c_bpartner_trg — was:\n" + sql);
+    assertTrue(sql.contains("c_bp_group_id"),
+        "vendor backfill SQL must key the c_bp_group_acct lookup by the BP's own c_bp_group_id"
+            + " — was:\n" + sql);
+    assertFalse(sql.contains("c_acctschema_default"),
+        "vendor backfill SQL must NOT source posting accounts from the generic client-wide"
+            + " c_acctschema_default — that silently ignores per-group account overrides"
+            + " (e.g. the Acreedor group's v_liability_acct override) — was:\n" + sql);
+  }
+
+  /**
+   * Symmetric case for the customer-side backfill statement.
+   */
+  @Test
+  void testAfterHandlePatchCustomerBackfillSourcesAccountFromBpGroupAcctNotSchemaDefault() throws Exception {
+    JSONObject body = buildResponseBody();
+    NeoResponse prevResult = mock(NeoResponse.class);
+    when(prevResult.getBody()).thenReturn(body);
+    when(ctx.getHttpMethod()).thenReturn("PUT");
+    when(ctx.getPreviousResult()).thenReturn(prevResult);
+    when(ctx.getRecordId()).thenReturn("BP_ID_6");
+    JSONObject requestBody = new JSONObject();
+    requestBody.put("customer", true);
+    when(ctx.getRequestBody()).thenReturn(requestBody);
+
+    Connection connMock = mock(Connection.class);
+    PreparedStatement psCustomer = mock(PreparedStatement.class);
+    ArgumentCaptor<String> sqlCaptor = ArgumentCaptor.forClass(String.class);
+    when(connMock.prepareStatement(sqlCaptor.capture())).thenReturn(psCustomer);
+
+    try (MockedStatic<OBDal> mDal = mockStatic(OBDal.class)) {
+      OBDal obDalMock = mock(OBDal.class);
+      when(obDalMock.getConnection()).thenReturn(connMock);
+      mDal.when(OBDal::getInstance).thenReturn(obDalMock);
+
+      handler.afterHandle(ctx);
+    }
+
+    String sql = sqlCaptor.getValue().toLowerCase();
+    assertTrue(sql.contains("c_bp_group_acct"),
+        "customer backfill SQL must source posting accounts from c_bp_group_acct (the BP's own"
+            + " group), matching c_bpartner_trg — was:\n" + sql);
+    assertTrue(sql.contains("c_bp_group_id"),
+        "customer backfill SQL must key the c_bp_group_acct lookup by the BP's own c_bp_group_id"
+            + " — was:\n" + sql);
+    assertFalse(sql.contains("c_acctschema_default"),
+        "customer backfill SQL must NOT source posting accounts from the generic client-wide"
+            + " c_acctschema_default — that silently ignores per-group account overrides"
+            + " — was:\n" + sql);
+  }
+
+  /**
+   * S1 follow-up: a PATCH that explicitly sets {@code vendor: false} (e.g. un-flagging a BP as a
+   * vendor) must NOT run the backfill lookup — only a flip TO {@code true} ever needs a new
+   * posting-account row. {@link OBDal} IS mocked here (unlike the sibling "no vendor/customer
+   * key at all" test) so the assertion can positively prove no statement was ever prepared,
+   * rather than relying on the surrounding try/catch to swallow an unmocked static call either
+   * way — that would pass identically whether or not the guard actually exists.
+   */
+  @Test
+  void testAfterHandlePatchWithVendorFieldExplicitlyFalseSkipsBackfill() throws Exception {
+    JSONObject body = buildResponseBody();
+    NeoResponse prevResult = mock(NeoResponse.class);
+    when(prevResult.getBody()).thenReturn(body);
+    when(ctx.getHttpMethod()).thenReturn("PATCH");
+    when(ctx.getPreviousResult()).thenReturn(prevResult);
+    when(ctx.getRecordId()).thenReturn("BP_ID_7");
+    JSONObject requestBody = new JSONObject();
+    requestBody.put("vendor", false);
+    when(ctx.getRequestBody()).thenReturn(requestBody);
+
+    Connection connMock = mock(Connection.class);
+    try (MockedStatic<OBDal> mDal = mockStatic(OBDal.class)) {
+      OBDal obDalMock = mock(OBDal.class);
+      when(obDalMock.getConnection()).thenReturn(connMock);
+      mDal.when(OBDal::getInstance).thenReturn(obDalMock);
+
+      handler.afterHandle(ctx);
+
+      verify(connMock, never()).prepareStatement(anyString());
+    }
   }
 
   /**
