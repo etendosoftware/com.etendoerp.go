@@ -19,6 +19,7 @@ package com.etendoerp.go.mcp;
 
 import java.util.HashMap;
 import java.util.Map;
+import java.util.TreeSet;
 
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
@@ -334,6 +335,7 @@ final class McpSchemaFieldBuilder {
     fieldObj.put("triggerValue", "Y");
     fieldObj.put("action", col.getDBColumnName());
     fieldObj.put("invokeVia", "neo_action");
+    addActionValues(fieldObj, col);
     // Resolve process info — mirror NeoButtonActionHelper / NeoProcessService logic
     Process classicProcess = col.getProcess();
     org.openbravo.client.application.Process obuiappProcess = col.getOBUIAPPProcess();
@@ -352,6 +354,48 @@ final class McpSchemaFieldBuilder {
       fieldObj.put("processId", classicProcess.getId());
     }
     // If no process resolved: triggerValue/action/invokeVia already set, omit process fields
+  }
+
+  /**
+   * Emit the discrete values a list-backed button accepts, plus the parameter name they
+   * travel under (ETP-4285).
+   *
+   * <p>A button column whose {@code AD_Reference_Value_ID} points at a list reference (e.g.
+   * {@code C_Order.DocAction} → "Order_Document Action") has a closed value set. Without it an
+   * agent sees the button but cannot know that {@code CO} books the document, nor that the
+   * chosen value must be sent as {@code parameters.docAction}. Buttons with no reference value
+   * — most process buttons ({@code Processing}, {@code CopyFrom}, {@code Calculate_Promotions}
+   * …) — are left untouched.</p>
+   *
+   * <p>The emitted list is the full <em>active</em> AD list, which is deliberately broader than
+   * what is legal for a given document in a given state: AD does not model the state machine.
+   * Which value applies when is per-window judgement and travels in the field's
+   * {@code agentPrompt} (see {@code docs/decisions-reference.md}), not in this generic layer.</p>
+   *
+   * <p>Sorted by value because {@link NeoSelectorService#getListLabels} returns an unordered
+   * map — a stable schema is easier to diff, cache and assert on.</p>
+   *
+   * @param fieldObj the field object being built, mutated in place
+   * @param col      the button AD column
+   */
+  private static void addActionValues(JSONObject fieldObj, Column col) throws JSONException {
+    org.openbravo.model.ad.domain.Reference listRef = col.getReferenceSearchKey();
+    if (listRef == null) {
+      return;
+    }
+    Map<String, String> labels = NeoSelectorService.getListLabels((String) listRef.getId());
+    if (labels == null || labels.isEmpty()) {
+      return;
+    }
+    JSONArray values = new JSONArray();
+    for (String value : new TreeSet<>(labels.keySet())) {
+      JSONObject entry = new JSONObject();
+      entry.put("value", value);
+      entry.put("label", labels.get(value));
+      values.put(entry);
+    }
+    fieldObj.put(McpConstants.KEY_ACTION_VALUES, values);
+    fieldObj.put(McpConstants.KEY_ACTION_PARAMETER, McpConstants.PARAM_DOC_ACTION);
   }
 
   private static String resolvePropertyName(Entity dalEntity, String dbColName) {
