@@ -236,7 +236,7 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
     String sql =
         "SELECT DISTINCT " +
         "  ret.M_InOut_ID AS ret_id, ret.DocumentNo AS ret_doc, ret.DocStatus AS ret_status, " +
-        "  orig_i.C_Invoice_ID AS inv_id, orig_i.DocumentNo AS inv_doc " +
+        "  orig_i.C_Invoice_ID AS inv_id, orig_i.DocumentNo AS inv_doc, orig_i.DateInvoiced " +
         "FROM C_InvoiceLine il " +
         "JOIN M_InOutLine ret_line ON ret_line.M_InOutLine_ID = il.M_InOutLine_ID " +
         "JOIN M_InOut ret ON ret.M_InOut_ID = ret_line.M_InOut_ID " +
