@@ -4,7 +4,7 @@
       <parameter name="p_m_product_id" type="VARCHAR" mode="in">
         <default/>
       </parameter>
-      <body><![CDATA[v_price NUMERIC;
+      <body><![CDATA[v_price NUMBER;
 BEGIN
   SELECT pp.pricestd INTO v_price
   FROM   m_productprice pp
