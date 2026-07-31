@@ -98,6 +98,13 @@ public class CreateDraftInvoiceHandlerNegativeQuantityIntegrationTest extends OB
 
   @Before
   public void setUp() {
+    // Defensive reset: OBContext's admin-mode stack is a per-thread static, and Gradle test
+    // workers reuse the same thread across unrelated test classes. If some other test earlier
+    // in the run leaked a setAdminMode() without its matching restorePreviousMode(), OBBaseTest's
+    // finished() check blames whichever test happens to run next (ETP-4722 CI flake, seen again
+    // after the ETP-4722 pre-warm fix below with no code change on our side). Start from a known-
+    // clean stack so this test is never blamed for another test's imbalance.
+    OBContext.clearAdminModeStack();
     OBContext.setOBContext(TestConstants.Users.ADMIN, TestConstants.Roles.FB_GRP_ADMIN,
         TestConstants.Clients.FB_GRP, TestConstants.Orgs.ESP);
     // Pre-warm EntityAccessChecker outside the Hibernate flush callback (OBInterceptor.onSave):
