@@ -18,15 +18,13 @@
 package com.etendoerp.go.schemaforge.telemetry;
 
 import org.apache.commons.lang3.StringUtils;
-import org.apache.logging.log4j.LogManager;
-import org.apache.logging.log4j.Logger;
+
+import com.etendoerp.go.common.ConfigPropertyReader;
 
 /**
  * Runtime Mixpanel configuration for backend telemetry.
  */
 public final class MixpanelNeoTelemetryConfig {
-
-  private static final Logger log = LogManager.getLogger(MixpanelNeoTelemetryConfig.class);
 
   static final String PROP_ENABLED = "etendo.go.mixpanel.enabled";
   static final String PROP_TOKEN = "etendo.go.mixpanel.token";
@@ -72,11 +70,11 @@ public final class MixpanelNeoTelemetryConfig {
    * @return runtime backend Mixpanel configuration
    */
   public static MixpanelNeoTelemetryConfig fromRuntime() {
-    boolean enabled = isTruthy(readConfigValue(PROP_ENABLED, ENV_ENABLED, "true"));
-    String token = readConfigValue(PROP_TOKEN, ENV_TOKEN, null);
-    String apiHost = readConfigValue(PROP_API_HOST, ENV_API_HOST, DEFAULT_API_HOST);
-    String distinctId = readConfigValue(PROP_DISTINCT_ID, ENV_DISTINCT_ID, DEFAULT_DISTINCT_ID);
-    int timeoutMs = parseTimeout(readConfigValue(PROP_TIMEOUT_MS, ENV_TIMEOUT_MS,
+    boolean enabled = isTruthy(ConfigPropertyReader.readConfigValue(PROP_ENABLED, ENV_ENABLED, "true"));
+    String token = ConfigPropertyReader.readConfigValue(PROP_TOKEN, ENV_TOKEN, null);
+    String apiHost = ConfigPropertyReader.readConfigValue(PROP_API_HOST, ENV_API_HOST, DEFAULT_API_HOST);
+    String distinctId = ConfigPropertyReader.readConfigValue(PROP_DISTINCT_ID, ENV_DISTINCT_ID, DEFAULT_DISTINCT_ID);
+    int timeoutMs = parseTimeout(ConfigPropertyReader.readConfigValue(PROP_TIMEOUT_MS, ENV_TIMEOUT_MS,
         String.valueOf(DEFAULT_TIMEOUT_MS)));
     return new MixpanelNeoTelemetryConfig(enabled, token, apiHost, distinctId, timeoutMs);
   }
@@ -103,29 +101,6 @@ public final class MixpanelNeoTelemetryConfig {
 
   public int getTimeoutMs() {
     return timeoutMs;
-  }
-
-  private static String readConfigValue(String propertyName, String envName, String defaultValue) {
-    String systemValue = StringUtils.trimToNull(System.getProperty(propertyName));
-    if (systemValue != null) {
-      return systemValue;
-    }
-    String openbravoValue = readOpenbravoProperty(propertyName);
-    if (openbravoValue != null) {
-      return openbravoValue;
-    }
-    String envValue = StringUtils.trimToNull(System.getenv(envName));
-    return envValue != null ? envValue : defaultValue;
-  }
-
-  private static String readOpenbravoProperty(String propertyName) {
-    try {
-      return StringUtils.trimToNull(org.openbravo.base.session.OBPropertiesProvider.getInstance()
-          .getOpenbravoProperties().getProperty(propertyName));
-    } catch (Exception e) {
-      log.debug("Could not read Openbravo property {}: {}", propertyName, e.getMessage(), e);
-      return null;
-    }
   }
 
   private static boolean isTruthy(String value) {
