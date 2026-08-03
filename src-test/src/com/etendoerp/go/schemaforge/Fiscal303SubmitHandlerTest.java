@@ -1098,6 +1098,82 @@ public class Fiscal303SubmitHandlerTest {
   }
 
   /**
+   * MEDIUM bug closed (Sentinel finding, ETP-4456): every incidents-persistence test above this
+   * point uses {@code testMode:true}. Both existing production-mode tests
+   * ({@code testHandleSubmit_productionHappyPath_updatesDeclarationStatus} /
+   * {@code testHandleSubmit_productionAeatError_doesNotMutateDeclaration}) never stub the
+   * incidents-persistence DAL calls ({@code OBProvider}/the incidents {@code OBQuery}), so an NPE
+   * inside {@code persistIncidentsBestEffort} for a production call is silently swallowed by its
+   * best-effort {@code catch} — those tests would pass identically whether or not production-mode
+   * incident persistence actually works. This test properly stubs the incidents plumbing (mirroring
+   * {@link #testHandleSubmit_testModeAeatError_persistsIncidents}) for a PRODUCTION submission that
+   * gets an AEAT rejection with both errors and warnings, and verifies — via explicit mock
+   * verification, not a vacuous assertion — that both are actually persisted with the correct
+   * severities. Closes the coverage gap for real.
+   */
+  @SuppressWarnings("unchecked")
+  @Test
+  public void testHandleSubmit_productionAeatErrorAndWarning_persistsBothSeverities()
+      throws Exception {
+    HttpServletResponse res = responseCapturing(new StringWriter());
+    HttpServletRequest req = requestFor("2026", "T2", "decl-1",
+        "{\"testMode\":false,\"presenterNif\":\"B12345678\",\"presenterName\":\"ACME SA\"}");
+    Fiscal303BoxesHandler h = new Fiscal303BoxesHandler(mock(NeoServlet.class));
+    FiscalDecl decl = matchingDecl("client1", "org1");
+    when(decl.getId()).thenReturn("decl-1");
+
+    AEAT303SubmissionResult mixedResult = new AEAT303SubmissionResult();
+    mixedResult.setStatus(AEAT303SubmissionResult.Status.ERROR);
+    mixedResult.setTestMode(false);
+    mixedResult.addError("E0100803 - Razon social del Declarante.");
+    mixedResult.addWarning("A001 - Aviso informativo AEAT.");
+
+    BaseOBObject staleInc = mock(BaseOBObject.class);
+    BaseOBObject newInc = mock(BaseOBObject.class);
+
+    try (MockedStatic<OBContext> ctxMock = mockContext("client1", "org1");
+        MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+        MockedStatic<OBProvider> providerMock = mockStatic(OBProvider.class);
+        MockedConstruction<AEAT303SubmissionService> serviceMock =
+            mockConstruction(AEAT303SubmissionService.class, (mockService, ctx) -> {
+              when(mockService.hasOrgCertificate(any())).thenReturn(true);
+              when(mockService.submitProduction(any())).thenReturn(mixedResult);
+            })) {
+      OBDal obDal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      when(obDal.get(FiscalDecl.class, "decl-1")).thenReturn(decl);
+      when(obDal.get(Organization.class, "org1")).thenReturn(mock(Organization.class));
+      stubFileGeneration(obDal);
+
+      OBQuery<BaseOBObject> incQuery = mock(OBQuery.class);
+      when(obDal.createQuery(eq(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL_INCIDENT), anyString()))
+          .thenReturn(incQuery);
+      // Simulates a row left over from a prior attempt — must be deleted regardless of mode.
+      when(incQuery.list()).thenReturn(Collections.singletonList(staleInc));
+      OBProvider provider = mock(OBProvider.class);
+      providerMock.when(OBProvider::getInstance).thenReturn(provider);
+      when(provider.get(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL_INCIDENT)).thenReturn(newInc);
+
+      h.handle("submit", "POST", req, res);
+
+      verify(obDal).remove(staleInc);
+      verify(obDal, times(2)).save(newInc);
+      verify(newInc).set(FiscalDeclCrudHandler.PROPERTY_INCIDENT_CODE, "E0100803");
+      verify(newInc).set(FiscalDeclCrudHandler.PROPERTY_INCIDENT_MESSAGE,
+          "Razon social del Declarante.");
+      verify(newInc).set(FiscalDeclCrudHandler.PROPERTY_INCIDENT_SEVERITY,
+          FiscalDeclCrudHandler.SEVERITY_BLOCK);
+      verify(newInc).set(FiscalDeclCrudHandler.PROPERTY_INCIDENT_CODE, "A001");
+      verify(newInc).set(FiscalDeclCrudHandler.PROPERTY_INCIDENT_MESSAGE,
+          "Aviso informativo AEAT.");
+      verify(newInc).set(FiscalDeclCrudHandler.PROPERTY_INCIDENT_SEVERITY,
+          FiscalDeclCrudHandler.SEVERITY_WARN);
+      // A failed production submission must never mutate the declaration itself.
+      verify(decl, never()).setDeclarationStatus(anyString());
+    }
+  }
+
+  /**
    * A submission whose AEAT response carries BOTH errors and warnings (e.g. a validation attempt
    * that is rejected but also returns informational avisos) must persist both groups, tagged with
    * the correct severity — {@code result.getErrors()} as {@code block}, {@code
@@ -1202,6 +1278,130 @@ public class Fiscal303SubmitHandlerTest {
       verify(obDal).remove(staleWarnInc);
       verify(obDal, never()).save(argThat(o -> o != decl && o != null
           && o != staleBlockInc && o != staleWarnInc));
+    }
+  }
+
+  // ── Transaction atomicity — single consolidated commit (ETP-4456) ─────────────────────────
+  //
+  // Before this fix, a successful submission could trigger up to 3 independent
+  // commitAndClose() calls: one inside persistIncidentsBestEffort (via the committing
+  // FiscalDeclCrudHandler#replaceIncidents), one inside persistSuccessfulSubmission, and one
+  // inside attachJustificante. A process death between any two of those could leave a reachable
+  // partial state (e.g. incidents persisted but the declaration status/attachment not updated).
+  // The fix routes everything through the no-commit variants and a single, final
+  // commitSubmissionBestEffort(declId) call. These two tests exercise a FULL success path —
+  // incidents write (with a warning, so insertIncidents actually runs) + the status/attachment
+  // write + the PDF attach — for both production and test mode, and assert commitAndClose() is
+  // invoked exactly ONCE for the whole call, not 2-3 times.
+
+  @SuppressWarnings("unchecked")
+  @Test
+  public void testHandleSubmit_productionFullSuccessPath_commitsExactlyOnce() throws Exception {
+    HttpServletResponse res = responseCapturing(new StringWriter());
+    HttpServletRequest req = requestFor("2026", "T2", "decl-1",
+        "{\"testMode\":false,\"presenterNif\":\"B12345678\",\"presenterName\":\"ACME SA\"}");
+    Fiscal303BoxesHandler h = new Fiscal303BoxesHandler(mock(NeoServlet.class));
+    FiscalDecl decl = matchingDecl("client1", "org1");
+    when(decl.getId()).thenReturn("decl-1");
+
+    AEAT303SubmissionResult prodResult = new AEAT303SubmissionResult();
+    prodResult.setStatus(AEAT303SubmissionResult.Status.SUCCESS);
+    prodResult.setTestMode(false);
+    prodResult.setCsv("CSV999");
+    prodResult.setPdfContent("real-pdf".getBytes());
+    // A success can still carry AEAT warnings (avisos) — exercises insertIncidents for real
+    // rather than the "empty lists, delete-only" branch.
+    prodResult.addWarning("A001 - Aviso informativo AEAT.");
+
+    BaseOBObject newInc = mock(BaseOBObject.class);
+    AttachImplementationManager aim = mock(AttachImplementationManager.class);
+    try (MockedStatic<OBContext> ctxMock = mockContext("client1", "org1");
+        MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+        MockedStatic<OBProvider> providerMock = mockStatic(OBProvider.class);
+        MockedStatic<NeoAttachmentsHelper> attachMock = mockAttachInfra(aim);
+        MockedConstruction<AEAT303SubmissionService> serviceMock =
+            mockConstruction(AEAT303SubmissionService.class, (mockService, ctx) -> {
+              when(mockService.hasOrgCertificate(any())).thenReturn(true);
+              when(mockService.submitProduction(any())).thenReturn(prodResult);
+            })) {
+      OBDal obDal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      when(obDal.get(FiscalDecl.class, "decl-1")).thenReturn(decl);
+      when(obDal.get(Organization.class, "org1")).thenReturn(mock(Organization.class));
+      stubFileGeneration(obDal);
+
+      OBQuery<BaseOBObject> incQuery = mock(OBQuery.class);
+      when(obDal.createQuery(eq(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL_INCIDENT), anyString()))
+          .thenReturn(incQuery);
+      when(incQuery.list()).thenReturn(Collections.emptyList());
+      OBProvider provider = mock(OBProvider.class);
+      providerMock.when(OBProvider::getInstance).thenReturn(provider);
+      when(provider.get(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL_INCIDENT)).thenReturn(newInc);
+
+      h.handle("submit", "POST", req, res);
+
+      // All three write paths actually ran...
+      verify(decl).setDeclarationStatus("submitted_ack");
+      verify(obDal).save(decl);
+      verify(aim).upload(any(), eq("tab-1"), any(), any(), any(File.class));
+      verify(newInc).set(FiscalDeclCrudHandler.PROPERTY_INCIDENT_SEVERITY,
+          FiscalDeclCrudHandler.SEVERITY_WARN);
+      // ...but they all share ONE consolidated commit, not one each.
+      verify(obDal, times(1)).commitAndClose();
+    }
+  }
+
+  @SuppressWarnings("unchecked")
+  @Test
+  public void testHandleSubmit_testModeFullSuccessPath_commitsExactlyOnce() throws Exception {
+    HttpServletResponse res = responseCapturing(new StringWriter());
+    HttpServletRequest req = requestFor("2026", "T2", "decl-1", "{\"testMode\":true}");
+    Fiscal303BoxesHandler h = new Fiscal303BoxesHandler(mock(NeoServlet.class));
+    FiscalDecl decl = matchingDecl("client1", "org1");
+    when(decl.getId()).thenReturn("decl-1");
+
+    AEAT303SubmissionResult validationResult = new AEAT303SubmissionResult();
+    validationResult.setStatus(AEAT303SubmissionResult.Status.SUCCESS);
+    validationResult.setTestMode(true);
+    validationResult.setPdfContent("draft-pdf".getBytes());
+    validationResult.addWarning("A001 - Aviso informativo AEAT.");
+
+    BaseOBObject newInc = mock(BaseOBObject.class);
+    AttachImplementationManager aim = mock(AttachImplementationManager.class);
+    try (MockedStatic<OBContext> ctxMock = mockContext("client1", "org1");
+        MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+        MockedStatic<OBProvider> providerMock = mockStatic(OBProvider.class);
+        MockedStatic<NeoAttachmentsHelper> attachMock = mockAttachInfra(aim);
+        MockedConstruction<AEAT303SubmissionService> serviceMock =
+            mockConstruction(AEAT303SubmissionService.class,
+                (mockService, ctx) -> when(
+                    mockService.submitValidation(anyString(), anyString(), anyString(), anyString()))
+                    .thenReturn(validationResult))) {
+      OBDal obDal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      when(obDal.get(FiscalDecl.class, "decl-1")).thenReturn(decl);
+      when(obDal.get(Organization.class, "org1")).thenReturn(mock(Organization.class));
+      stubFileGeneration(obDal);
+
+      OBQuery<BaseOBObject> incQuery = mock(OBQuery.class);
+      when(obDal.createQuery(eq(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL_INCIDENT), anyString()))
+          .thenReturn(incQuery);
+      when(incQuery.list()).thenReturn(Collections.emptyList());
+      OBProvider provider = mock(OBProvider.class);
+      providerMock.when(OBProvider::getInstance).thenReturn(provider);
+      when(provider.get(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL_INCIDENT)).thenReturn(newInc);
+
+      h.handle("submit", "POST", req, res);
+
+      // Attach + incidents write ran, declaration itself stays untouched (test mode)...
+      ArgumentCaptor<File> fileCaptor = ArgumentCaptor.forClass(File.class);
+      verify(aim).upload(any(), eq("tab-1"), any(), any(), fileCaptor.capture());
+      assertTrue(fileCaptor.getValue().getName().startsWith("TEST-justificante-303-"));
+      verify(decl, never()).setDeclarationStatus(anyString());
+      verify(newInc).set(FiscalDeclCrudHandler.PROPERTY_INCIDENT_SEVERITY,
+          FiscalDeclCrudHandler.SEVERITY_WARN);
+      // ...but everything still shares ONE consolidated commit.
+      verify(obDal, times(1)).commitAndClose();
     }
   }
 
