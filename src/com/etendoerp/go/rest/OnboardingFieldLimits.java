@@ -67,10 +67,12 @@ public final class OnboardingFieldLimits {
   }
 
   /**
-   * Returns the first violated limit, or {@code null} when every value fits.
+   * Finds the first field whose value exceeds its limit. Checks are evaluated in the order given,
+   * so the caller controls which field a user is asked to fix first.
    *
    * @param fieldsAndValues
    *     flattened triples of {@code field name, value, max length}
+   * @return the first violated limit, or {@code null} when every value fits
    * @throws IllegalArgumentException
    *     when the varargs are not a whole number of triples
    */
@@ -89,7 +91,16 @@ public final class OnboardingFieldLimits {
     return null;
   }
 
-  /** True when {@code value} is longer than {@code max}. A null/blank value never violates. */
+  /**
+   * Tells whether a value is too long for its column. The limit is inclusive: a value of exactly
+   * {@code max} characters fits.
+   *
+   * @param value
+   *     the value to measure; {@code null} is treated as empty and never violates
+   * @param max
+   *     the maximum accepted length, in characters
+   * @return {@code true} when {@code value} is longer than {@code max}
+   */
   public static boolean exceeds(String value, int max) {
     return StringUtils.length(value) > max;
   }

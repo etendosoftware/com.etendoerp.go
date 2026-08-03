@@ -158,9 +158,11 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private static final String FIELD_DRAFT_STEP = "step";
   private static final String FIELD_DRAFT_FORM = "form";
   private static final int ONBOARDING_DRAFT_MAX_LENGTH = 4000;
-  private static final String[] ONBOARDING_DRAFT_FORM_FIELDS = { "fullName", "businessType",
+  private static final String FIELD_FULL_NAME = "fullName";
+  private static final String FIELD_ADDRESS = "address";
+  private static final String[] ONBOARDING_DRAFT_FORM_FIELDS = { FIELD_FULL_NAME, "businessType",
       FIELD_CLIENT_NAME, "currency", FIELD_LANGUAGE, "countryCode", "fiscalIdType",
-      "fiscalIdValue", "address", "sector" };
+      "fiscalIdValue", FIELD_ADDRESS, "sector" };
 
   OnboardingDatasetImportService onboardingDatasetImportService = new OnboardingDatasetImportService();
   OnboardingRoleProvisioningService onboardingRoleProvisioningService =
@@ -1255,18 +1257,18 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       data.language = body.optString(FIELD_LANGUAGE, "en_US").trim();
       // Country drives the org's tax resolution; default to Spain (ES) when the form omits it.
       data.countryCode = body.optString("countryCode", "ES").trim();
-      data.address = body.optString("address", "").trim();
+      data.address = body.optString(FIELD_ADDRESS, "").trim();
       // Full name of the person onboarding. Optional in the payload; when present
       // it becomes the display name of the client admin user (otherwise Etendo's
       // InitialClientSetup leaves it as the username/email).
-      data.fullName = body.optString("fullName", "").trim();
+      data.fullName = body.optString(FIELD_FULL_NAME, "").trim();
       // ETP-4665: validate before the NDJSON stream opens. Past this point a length overflow
       // surfaces as a DAL ValidationException halfway through tenant creation, which rolls the
       // transaction back and reports the opaque "@CreateClientFailed@".
       OnboardingFieldLimits.LengthViolation violation = OnboardingFieldLimits.firstViolation(
           FIELD_CLIENT_NAME, data.clientName, OnboardingFieldLimits.CLIENT_NAME,
-          "fullName", data.fullName, OnboardingFieldLimits.FULL_NAME,
-          "address", data.address, OnboardingFieldLimits.ADDRESS);
+          FIELD_FULL_NAME, data.fullName, OnboardingFieldLimits.FULL_NAME,
+          FIELD_ADDRESS, data.address, OnboardingFieldLimits.ADDRESS);
       if (violation != null) {
         writeFieldTooLongError(response, violation);
         return null;
