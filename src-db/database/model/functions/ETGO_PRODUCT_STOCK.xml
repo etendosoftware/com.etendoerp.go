@@ -4,7 +4,7 @@
       <parameter name="p_m_product_id" type="VARCHAR" mode="in">
         <default/>
       </parameter>
-      <body><![CDATA[v_qty NUMERIC;
+      <body><![CDATA[v_qty NUMBER;
 BEGIN
   SELECT COALESCE(SUM(sd.qtyonhand), 0) INTO v_qty
   FROM   m_storage_detail sd
