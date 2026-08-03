@@ -22,7 +22,7 @@ handler) — both green.
 ### Request
 
 ```
-POST /neo/fiscal303/submit?year=<YYYY>&period=<1T..4T|01..12>&tipo=<C|I|V|U|G|N>&id=<declId>
+POST /neo/fiscal303/submit?year=<YYYY>&period=<1T..4T|01..12>&tipo=<C|D|I|U|V|X|G|N>&id=<declId>
 Content-Type: application/json
 ```
 
@@ -30,7 +30,7 @@ Content-Type: application/json
 |---|---|---|
 | `year` | yes | Fiscal year, same convention as `/fiscal303/generate`/`/fiscal303/boxes` |
 | `period` | yes | Period (quarterly `1T`..`4T` or monthly), same convention as sibling entities |
-| `tipo` | yes | AEAT declaration-type letter code the frontend already computes (`C`/`I`/`V`/`U`/`G`, default `N` for zero-result) |
+| `tipo` | yes | AEAT declaration-type letter code the frontend already computes (`C`/`D`/`I`/`U`/`V`/`X`/`G`, default `N` for zero-result). `D`/`X` were silently dropped to `N` by `resolveDeclType` until an ETP-4456 "Phase 3" audit fix (commit `cc7870a1`, 2026-08-03) — see the plan doc's "Phase 3 — Audit-driven bug fixes" section |
 | `id` | yes | `ETGO_Fiscal_Decl` id of the declaration being submitted — resolved and ownership-checked against the current client/org before anything else runs |
 
 Body (JSON):
@@ -199,9 +199,9 @@ locales) instead of dumping the generic AEAT error list, and — like `MISSING_P
 
 **Only a successful PRODUCTION submission mutates the declaration record**
 (`persistSuccessfulSubmission`): `DeclarationStatus` → `submitted_ack`, `DeclarationFileName` set
-to a generated justificante filename, `FileExternal` set to `false`, saved and committed. Test-mode
-submissions (success or error) and failed production submissions never touch the declaration row —
-matching Classic's "test submissions leave no trace" rule.
+to a generated justificante filename, `FileExternal` set to `false`, staged via `decl.save()`.
+Test-mode submissions (success or error) and failed production submissions never touch the
+declaration row — matching Classic's "test submissions leave no trace" rule.
 
 `handleSubmit` branches on success: `testMode ? attachTestJustificante(...) :
 persistSuccessfulSubmission(...)`. **`attachTestJustificante` (ETP-4456, 2026-07-28)** attaches the
@@ -209,13 +209,25 @@ AEAT-returned PDF to the declaration for a successful test-mode (`TEST_SUCCESS`)
 under a distinct filename, `"TEST-justificante-303-<year>-<period>.pdf"`, so it's unambiguous in the
 attachments list — by calling the same existing `attachJustificante(...)` helper `
 persistSuccessfulSubmission` uses. It does **not** call any setter on the declaration and never
-saves/commits it: `DeclarationStatus`/`DeclarationFileName`/`FileExternal` remain exactly as they
-were before the request, preserving the "test submissions leave no trace" rule stated above at the
+saves it: `DeclarationStatus`/`DeclarationFileName`/`FileExternal` remain exactly as they were
+before the request, preserving the "test submissions leave no trace" rule stated above at the
 record level — only the attachment (a side effect of `AttachImplementationManager`, not of the
 declaration entity itself) is new. See the "Justificante" tab section in
 `../../../schema_forge/docs/generated-custom-windows/fiscal-models.md` and the "Phase 2.2" section
 in the plan doc for the frontend wiring that surfaces this (the `receiptRefreshTick` refresh, since
 test mode has no status change to key off of).
+
+**Single atomic commit (ETP-4456 "Phase 3" fix, commit `abf40953`, 2026-08-03).** Earlier revisions
+of `handleSubmit` issued up to 3 independent commits (incidents, declaration status, attachment) —
+an audit found this let a mid-process failure leave a reachable partial state (e.g. incidents
+persisted but the status/attachment write never happening). Fixed by moving every write onto one
+shared, uncommitted `OBDal` transaction: `persistIncidentsBestEffort` and
+`persistSuccessfulSubmission`/`attachTestJustificante` all stage their changes without committing,
+and `handleSubmit` commits exactly once at the end via `commitSubmissionBestEffort(declId)` (a
+single `OBDal.getInstance().commitAndClose()`, itself best-effort — a commit failure is logged and
+never re-thrown, since the AEAT submission itself already succeeded or failed independently of
+persistence). This does not change any response shape or behavior described above — only the
+transaction boundary.
 
 ### AEAT validation errors and warnings — persisted on every attempt (`ETGO_Fiscal_Decl_Incident`, ETP-4456)
 
@@ -241,7 +253,8 @@ standard client/org/audit columns + `ETGO_Fiscal_Decl_ID` (FK to `ETGO_Fiscal_De
 (long text — AEAT's free-text error description) + `SEVERITY` (VARCHAR(200), added in this
 increment — `"block"` for errors, `"warn"` for warnings; a row with no/blank value defaults to
 `"block"` via `FiscalDeclCrudHandler#resolveSeverity`, covering rows persisted before this column
-existed).
+existed). As of ETP-4456 "Phase 3" (commit `7b4ec136`, 2026-08-03), the column also carries a DB
+`CHECK` constraint restricting stored values to `block`/`warn` only.
 
 **Read endpoint:** `GET /fiscal303/incidents?id=<declId>` (also reachable as `/fiscal349/incidents`
 for free — same generic table, only 303 writes to it today) → ownership-checked the same way as
