@@ -59,7 +59,12 @@ public class NeoServlet extends HttpBaseServlet {
   private final NeoBuiltInEndpointHandler builtInEndpointHandler =
       new NeoBuiltInEndpointHandler(this, discoveryHandler);
   final NeoButtonHandler buttonHandler = new NeoButtonHandler();
-  final NeoDisplayLogicHandler displayLogicHandler = new NeoDisplayLogicHandler();
+  // NOTE: evaluate-display is routed through NeoDisplayLogicHelper (a static utility, see
+  // NeoSubEndpointDispatcher.handleEvaluateDisplaySubEndpoint), not through NeoDisplayLogicHandler.
+  // The latter's buildEvalContext()/resolveAccountingDimensions() never set $IsAcctDimCentrally,
+  // so @ACCT_DIMENSION_DISPLAY@ macros always evaluated false for centrally-maintained clients.
+  // See ETP-4529. NeoDisplayLogicHandler is left in place (with its own tests) as a known-dead
+  // class pending a follow-up cleanup decision -- not deleted as part of this fix.
   // Package-private so sibling collaborators (BatchService) can dispatch through
   // the same default CRUD pipeline without going via HTTP.
   final NeoCrudHandler crudHandler = new NeoCrudHandler(this);
@@ -73,6 +78,9 @@ public class NeoServlet extends HttpBaseServlet {
   final NeoProcessReportEndpoint processReportEndpoint = new NeoProcessReportEndpoint(this);
   private final BatchService batchService = new BatchService(this);
   private final NeoSimSearchEndpoint simSearchEndpoint = new NeoSimSearchEndpoint();
+  private final NeoGoWebhookBridge goWebhookBridge = new NeoGoWebhookBridge(this);
+  private final NeoPseudoSpecDispatcher pseudoSpecDispatcher =
+      new NeoPseudoSpecDispatcher(this, batchService, simSearchEndpoint, goWebhookBridge);
 
   @Override
   public void doGet(HttpServletRequest request, HttpServletResponse response) throws IOException {
@@ -138,32 +146,7 @@ public class NeoServlet extends HttpBaseServlet {
         return;
       }
 
-      // Generic transactional batch endpoint: POST /sws/neo/batch
-      //   Runs an ordered list of CRUD ops in one OBDal transaction with
-      //   $ref:<opId> substitution between ops. Same primitive is consumed by
-      //   the React UI (composite-document ingest) and external agents (MCP).
-      //   Find-or-create logic stays with the caller — no per-window server code.
-      if ("batch".equals(pathInfo.specName)) {
-        if (!"POST".equals(method)) {
-          sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
-              "Batch endpoint only supports POST");
-          return;
-        }
-        batchService.handle(request, response);
-        return;
-      }
-
-      // Global similarity-search endpoint: GET /sws/neo/simsearch
-      //   Same trigram matching as the "SimSearch" webhook, reached through NEO's own
-      //   JWT auth instead of the Webhooks module's per-role grant table. See
-      //   NeoSimSearchEndpoint for the authorization-model rationale.
-      if ("simsearch".equals(pathInfo.specName)) {
-        if (!"GET".equals(method)) {
-          sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
-              "Simsearch endpoint only supports GET");
-          return;
-        }
-        writeResponse(response, simSearchEndpoint.handle(request));
+      if (pseudoSpecDispatcher.handle(pathInfo, method, request, response)) {
         return;
       }
       requestRouter.handleSpecRequest(pathInfo, method, request, response);

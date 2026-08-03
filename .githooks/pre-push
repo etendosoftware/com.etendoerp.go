@@ -9,6 +9,47 @@ CORE_DIR="$(cd -- "$MODULE_DIR/../.." && pwd)"
 
 echo "==> Running pre-push checks..."
 
+# ----------------------------------------------------------------------------
+# Hooks-Verified: every commit being pushed must carry a valid trailer, proving
+# the pre-commit hooks were installed and ran for that exact tree.
+# Set HOOKS_VERIFY_SKIP=1 to bypass (e.g. when pushing imported/legacy history).
+# ----------------------------------------------------------------------------
+if [ "$HOOKS_VERIFY_SKIP" != "1" ]; then
+  . "$SCRIPT_DIR/lib/hooks-proof.sh"
+  UNVERIFIED=""
+  while read -r _local_ref local_sha _remote_ref remote_sha; do
+    [ "$local_sha" = "0000000000000000000000000000000000000000" ] && continue
+    if [ "$remote_sha" = "0000000000000000000000000000000000000000" ]; then
+      RANGE="$(git rev-list "$local_sha" --not --remotes)"
+    else
+      # Same `--not --remotes` guard as the new-branch case above, and for the
+      # same reason. Without it, merging the epic into a task branch pulls every
+      # epic commit that is not yet on this branch's remote into the range —
+      # including the ones that predate this check — and the push is refused for
+      # history the branch neither authored nor can legitimately rewrite.
+      RANGE="$(git rev-list "${remote_sha}..${local_sha}" --not --remotes)"
+    fi
+    for sha in $RANGE; do
+      hooks_verify_commit "$sha" || UNVERIFIED="$UNVERIFIED $sha"
+    done
+  done
+
+  if [ -n "$UNVERIFIED" ]; then
+    echo "❌ ERROR: commits without a valid '${HOOKS_TRAILER_KEY}' trailer:"
+    for sha in $UNVERIFIED; do
+      printf '     %s  %s\n' "$(git rev-parse --short "$sha")" "$(git log -1 --format=%s "$sha")"
+    done
+    echo ""
+    echo "   The git hooks were not active when those commits were made."
+    echo "   Fix: git config core.hooksPath .githooks   (see .githooks/README.md)"
+    echo "        git rebase --exec 'git commit --amend --no-edit' <base>"
+    echo "   Bypass (discouraged): HOOKS_VERIFY_SKIP=1 git push"
+    exit 1
+  fi
+  echo "✔ Hooks-Verified trailer present on all pushed commits."
+fi
+
+
 # Path where run-sonar.sh writes a copy-pasteable handoff prompt when the
 # Quality Gate fails. Cleared up-front so a stale file from a previous run is
 # never shown for an unrelated failure.
@@ -44,6 +85,11 @@ SPIN_FRAMES=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
 
 # Per-step duration cache (used as ETA baseline across runs). Under tmp/ → gitignored.
 DURATIONS_FILE="$MODULE_DIR/tmp/pre-push/durations"
+
+# Content-addressed step cache (inert unless PRE_PUSH_CACHE=1 — see the file).
+# Mirrored verbatim from etendo_schema_forge; edit in one repo and sync.
+# shellcheck source=lib/step-cache.sh
+. "$SCRIPT_DIR/lib/step-cache.sh"
 LAST_DURATION=0
 
 # Look up the last recorded duration (seconds) for a step key, or 0.
@@ -133,7 +179,15 @@ run_step() {
   local run_dir="$3"
   local log_file="$4"
   local cmd="$5"
+  local cache_key="${6:-}"
   local abs_log="$MODULE_DIR/$log_file"
+
+  # A hit means every input this step reads is byte-identical to the last time it
+  # passed. Announced loudly and never silently.
+  if step_cache_lookup "$step_num" "$cache_key"; then
+    echo "==> [$step_num/3] $step_name... CACHED (inputs unchanged since it last passed)"
+    return 0
+  fi
 
   echo "==> [$step_num/3] $step_name..."
 
@@ -146,8 +200,10 @@ run_step() {
 
   if [ $exit_status -eq 0 ]; then
     echo "==> [$step_num/3] $step_name... SUCCESS ✅ (${LAST_DURATION}s)"
+    step_cache_store "$step_num" "$cache_key"
   else
     echo "==> [$step_num/3] $step_name... FAILED ❌ (${LAST_DURATION}s)"
+    step_cache_invalidate "$step_num"
     echo ""
     # If the step produced a ready-to-use handoff prompt (e.g. the Sonar gate),
     # print it IN FULL to the console so the developer sees exactly what to fix.
@@ -223,9 +279,21 @@ check_base_conflicts
 
 # 1. Validate sourcedata XML record order + constraints (mirrors CI's
 # xml-order-check.yml). Cheap and fails fast before the expensive tests/Sonar.
-run_step "1" "Validating sourcedata XML order/constraints" "$MODULE_DIR" "tmp/pre-push/xml-check.log" "./check-etgo-xml.sh"
+# The XML check reads the committed sourcedata and its own script, and shells out
+# to python3. The python fingerprint imports pyexpat on purpose: when it is broken
+# (Homebrew python@3.14) the fingerprint FAILS, the key comes back empty and the
+# step runs. An identical XML tree genuinely produces different verdicts under a
+# broken and a working interpreter, so caching across them would be a lie.
+STEP1_KEY="$(step_cache_compute \
+  "py-$(python3 -c 'import sys,pyexpat;print(sys.version.split()[0],pyexpat.version_info)' 2>/dev/null || echo BROKEN)" \
+  src-db/database/sourcedata check-etgo-xml.sh)"
+run_step "1" "Validating sourcedata XML order/constraints" "$MODULE_DIR" "tmp/pre-push/xml-check.log" "./check-etgo-xml.sh" "$STEP1_KEY"
 
 # 2. Run JUnit / Gradle tests
+# Step 2 is deliberately NOT keyed. It runs `./gradlew test` in $CORE_DIR, so its
+# real input set is the whole etendo_core build, not just this module's sources.
+# A key built from the module alone would miss a core change and produce a false
+# pass. Gradle already maintains its own up-to-date checks for this.
 run_step "2" "Running JUnit/Gradle tests" "$CORE_DIR" "tmp/pre-push/junit-tests.log" "./gradlew test --tests \"com.etendoerp.go.*\""
 
 # 3. Run SonarQube Quality Gate

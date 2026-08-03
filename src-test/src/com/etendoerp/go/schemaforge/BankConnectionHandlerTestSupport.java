@@ -29,20 +29,20 @@ import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.enterprise.Organization;
 
 /**
- * Shared test fixtures for the {@link FinancialAccountPsd2Handler} test classes. The handler is one
+ * Shared test fixtures for the {@link FinancialAccountBankConnectionHandler} test classes. The handler is one
  * large action router, so its tests are split into focused classes (routing, query, connect, link)
  * to stay under the Sonar 35-method-per-class limit; this support type factors out the duplicated
  * mock-building so no near-identical setup is repeated across them (Sonar duplication gate).
  *
  * <p>It is intentionally NOT a {@code *Test} class, so the runner does not pick it up as a suite.
  */
-final class Psd2HandlerTestSupport {
+final class BankConnectionHandlerTestSupport {
 
   static final String CLIENT_ID = "23C59575B9CF467C9620760EB255B389";
   static final String ACCOUNT_ID = "FA-001";
   static final String CONNECTION_ID = "SE-CONN-001";
   static final String SALT_EDGE_ACCOUNT_ID = "SE-ACC-001";
-  static final String API_KEY = "psd2-api-key";
+  static final String API_KEY = "bank-connection-api-key";
   static final String ORIGIN = "https://app.etendo.cloud";
 
   static final String PARAM_ACTION = "action";
@@ -50,7 +50,7 @@ final class Psd2HandlerTestSupport {
   static final String PARAM_CONNECTION_ID = "connectionId";
   static final String PARAM_TYPE = "type";
 
-  private Psd2HandlerTestSupport() {
+  private BankConnectionHandlerTestSupport() {
   }
 
   /** Builds a NeoContext mock for a GET request carrying the given query params. */

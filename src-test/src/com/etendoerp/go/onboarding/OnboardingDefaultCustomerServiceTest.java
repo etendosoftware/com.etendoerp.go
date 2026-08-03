@@ -35,6 +35,7 @@ import org.openbravo.base.provider.OBProvider;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.erpCommon.utility.OBCurrencyUtils;
 import org.openbravo.model.ad.access.User;
 import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.businesspartner.BusinessPartner;
@@ -215,7 +216,7 @@ public class OnboardingDefaultCustomerServiceTest {
     OBDal dal = mock(OBDal.class);
     try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
       obDal.when(OBDal::getInstance).thenReturn(dal);
-      service.ensureDefaultCustomerCurrency(customer);
+      service.ensureDefaultCustomerCurrency(customer, null);
     }
 
     verify(customer, never()).setCurrency(any());
@@ -237,7 +238,67 @@ public class OnboardingDefaultCustomerServiceTest {
 
     try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
       obDal.when(OBDal::getInstance).thenReturn(dal);
-      service.ensureDefaultCustomerCurrency(customer);
+      service.ensureDefaultCustomerCurrency(customer, null);
+    }
+
+    verify(customer).setCurrency(eur);
+    verify(dal).save(customer);
+  }
+
+  /**
+   * ETP-4649: when the organization has a currency configured, {@code ensureDefaultCustomerCurrency}
+   * must use it — the hardcoded EUR fallback (queried via the {@code Currency} criteria) must never
+   * be consulted.
+   */
+  @Test
+  public void testEnsureDefaultCustomerCurrencyUsesOrgCurrencyWhenAvailable() {
+    OnboardingDefaultCustomerService service = new OnboardingDefaultCustomerService();
+    BusinessPartner customer = mock(BusinessPartner.class);
+    when(customer.getCurrency()).thenReturn(null);
+    Organization organization = mock(Organization.class);
+    when(organization.getId()).thenReturn("ORG-1");
+    Currency orgCurrency = mock(Currency.class);
+
+    OBDal dal = mock(OBDal.class);
+    when(dal.get(Currency.class, "CUR-1")).thenReturn(orgCurrency);
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+        MockedStatic<OBCurrencyUtils> obCurrency = mockStatic(OBCurrencyUtils.class)) {
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      obCurrency.when(() -> OBCurrencyUtils.getOrgCurrency("ORG-1")).thenReturn("CUR-1");
+      service.ensureDefaultCustomerCurrency(customer, organization);
+    }
+
+    verify(customer).setCurrency(orgCurrency);
+    verify(dal).save(customer);
+    verify(dal, never()).createCriteria(Currency.class);
+  }
+
+  /**
+   * ETP-4649: when the organization has NO currency configured (empty/null resolution), the
+   * existing EUR fallback must still kick in — same behavior as before the org-currency wiring
+   * was added, now made explicit with a real (non-null) {@link Organization}.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  public void testEnsureDefaultCustomerCurrencyFallsBackToEurWhenOrgHasNoCurrency() {
+    OnboardingDefaultCustomerService service = new OnboardingDefaultCustomerService();
+    BusinessPartner customer = mock(BusinessPartner.class);
+    when(customer.getCurrency()).thenReturn(null);
+    Organization organization = mock(Organization.class);
+    when(organization.getId()).thenReturn("ORG-1");
+    Currency eur = mock(Currency.class);
+
+    OBDal dal = mock(OBDal.class);
+    OBCriteria<Currency> crit = mock(OBCriteria.class);
+    when(dal.createCriteria(Currency.class)).thenReturn(crit);
+    when(crit.uniqueResult()).thenReturn(eur);
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+        MockedStatic<OBCurrencyUtils> obCurrency = mockStatic(OBCurrencyUtils.class)) {
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      obCurrency.when(() -> OBCurrencyUtils.getOrgCurrency("ORG-1")).thenReturn(null);
+      service.ensureDefaultCustomerCurrency(customer, organization);
     }
 
     verify(customer).setCurrency(eur);
@@ -258,7 +319,7 @@ public class OnboardingDefaultCustomerServiceTest {
 
     try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
       obDal.when(OBDal::getInstance).thenReturn(dal);
-      service.ensureDefaultCustomerCurrency(customer);
+      service.ensureDefaultCustomerCurrency(customer, null);
       fail("Expected currency-not-found failure");
     } catch (OBException e) {
       assertTrue(e.getMessage().contains("not found for onboarding default customer"));
@@ -690,7 +751,7 @@ public class OnboardingDefaultCustomerServiceTest {
     // counts keeps the wiring connected to ensureDefaultCustomer (the OBDal logic itself is
     // covered by integration tests).
     @Override
-    protected void ensureDefaultCustomerCurrency(BusinessPartner customer) {
+    protected void ensureDefaultCustomerCurrency(BusinessPartner customer, Organization organization) {
       currencyWiringCount++;
     }
 

@@ -64,7 +64,8 @@ import com.etendoerp.go.onboarding.OnboardingFiscalDataSetupService;
 import com.etendoerp.go.onboarding.OnboardingOrgInfoService;
 import com.etendoerp.go.onboarding.OnboardingMarkOrgReadyService;
 import com.etendoerp.go.onboarding.OnboardingPeriodControlService;
-import com.etendoerp.go.onboarding.OnboardingPsd2SyncService;
+import com.etendoerp.go.onboarding.OnboardingBankConnectionSyncService;
+import com.etendoerp.go.onboarding.OnboardingRoleProvisioningService;
 import com.etendoerp.go.onboarding.OnboardingSequenceGeneratorService;
 import com.etendoerp.go.schemaforge.data.Account;
 import com.etendoerp.go.schemaforge.email.EmailContractCommandSupport;
@@ -130,6 +131,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private static final String PROGRESS_CLIENT = "client";
   private static final String PROGRESS_ERROR = "error";
   private static final String PROGRESS_ORGANIZATION = "organization";
+  private static final String PROGRESS_ROLES = "roles";
   private static final String PROGRESS_DATASET = "dataset";
   private static final String PROGRESS_ACCOUNTING = "accounting";
   private static final String PROGRESS_PERIOD_CONTROL = "periodControl";
@@ -139,7 +141,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private static final String PROGRESS_CUSTOMER = "customer";
   private static final String PROGRESS_ORG_INFO = "orgInfo";
   private static final String PROGRESS_BASELINE = "baseline";
-  private static final String PROGRESS_PSD2_SYNC = "psd2Sync";
+  private static final String PROGRESS_BANK_CONNECTION_SYNC = "bankConnectionSync";
   private static final String LEGAL_WITH_ACCOUNTING_ORG_TYPE_ID = "1";
   private static final long PASSWORD_RESET_TTL_SECONDS = 30 * 60L;
   private static final String PASSWORD_RESET_NEUTRAL_MESSAGE =
@@ -157,6 +159,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       "fiscalIdValue", "address", "sector" };
 
   OnboardingDatasetImportService onboardingDatasetImportService = new OnboardingDatasetImportService();
+  OnboardingRoleProvisioningService onboardingRoleProvisioningService =
+      new OnboardingRoleProvisioningService();
   OnboardingAccountingWiringService onboardingAccountingWiringService =
       new OnboardingAccountingWiringService();
   OnboardingPeriodControlService onboardingPeriodControlService =
@@ -173,8 +177,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       new OnboardingDefaultCustomerService();
   OnboardingBaselineService onboardingBaselineService =
       new OnboardingBaselineService();
-  OnboardingPsd2SyncService onboardingPsd2SyncService =
-      new OnboardingPsd2SyncService();
+  OnboardingBankConnectionSyncService onboardingBankConnectionSyncService =
+      new OnboardingBankConnectionSyncService();
   private final TransactionalAuthEmailSender authEmailSender;
   private final EtendoGoSsoProviderRegistry ssoProviderRegistry;
 
@@ -1063,6 +1067,10 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
         return;
       }
 
+      if (!ensureRoles(writer, clientId, adminContext.adminUserId, adminContext.adminRoleId)) {
+        return;
+      }
+
       // The returned flag (created vs. already-existing) is no longer used to gate downstream
       // steps — the provisioning chain reconciles unconditionally (ETP-4428). A null return still
       // signals a failure that already emitted its own progress/result line.
@@ -1086,10 +1094,10 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       }
 
       EtendoGoDalHelper.commitDalChanges("onboarding", log);
-      // Activate the PSD2 statement-sync schedule now that its row is committed and therefore
+      // Activate the bank statement-sync schedule now that its row is committed and therefore
       // visible to the scheduler's own DB connection. Best-effort: internally swallows failures
       // and the SCH row is still picked up on the next scheduler initialization.
-      onboardingPsd2SyncService.activateSchedule(clientId);
+      onboardingBankConnectionSyncService.activateSchedule(clientId);
       Account account = findAccountForCommittedOnboarding(token, accountEmail);
       clearOnboardingDraftBestEffort(account);
       String normalizedLanguage = StringUtils.trimToNull(onboardingRequest.language);
@@ -1366,6 +1374,30 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     return data;
   }
 
+  /**
+   * ETP-4515 (Phase 7) — clones GOClient's Finance/Sales/Purchasing/Inventory roles (plus their
+   * AD_Window_Access) onto the tenant. Runs right after client/organization resolution since it
+   * needs no organization yet: roles are client-wide. See {@link OnboardingRoleProvisioningService}
+   * for the full rationale.
+   */
+  private boolean ensureRoles(PrintWriter writer, String clientId, String adminUserId,
+      String adminRoleId) {
+    sendProgress(writer, PROGRESS_ROLES, PROGRESS_IN_PROGRESS,
+        "Provisioning Finance/Sales/Purchasing/Inventory roles...");
+    try {
+      onboardingRoleProvisioningService.wire(clientId, adminUserId, adminRoleId);
+      sendProgress(writer, PROGRESS_ROLES, "done", "Roles provisioned");
+      return true;
+    } catch (Exception e) {
+      EtendoGoDalHelper.rollbackDalChanges("onboarding role provisioning", e, log);
+      String errorMessage = e.getMessage() != null ? e.getMessage()
+          : "Role provisioning failed";
+      sendProgress(writer, PROGRESS_ROLES, PROGRESS_ERROR, errorMessage);
+      sendFinalResult(writer, false, errorMessage);
+      return false;
+    }
+  }
+
   private Boolean ensureOrganization(PrintWriter writer, String clientName,
       String clientId, AdminContextData adminContext, String currencyId) {
     sendProgress(writer, PROGRESS_ORGANIZATION, PROGRESS_IN_PROGRESS,
@@ -1448,7 +1480,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     if (!ensureDefaultCustomer(writer, clientId, orgId, adminUserId, adminRoleId)) {
       return false;
     }
-    if (!schedulePsd2Sync(writer, clientId, orgId, adminUserId, adminRoleId)) {
+    if (!scheduleBankConnectionSync(writer, clientId, orgId, adminUserId, adminRoleId)) {
       return false;
     }
     // Final action before commitDalChanges: stamp the tenant's data-fix baseline so it lands in the
@@ -1636,21 +1668,22 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   }
 
   /**
-   * Creates the per-client daily PSD2 "Get Bank Statements" schedule (idempotent). Non-fatal: a
+   * Creates the per-client daily bank statement-sync schedule, backed by the PSD2 module's
+   * "Get Bank Statements" process (idempotent). Non-fatal: a
    * failure here must never block onboarding, so it is logged and reported as skipped rather than
    * aborting. The Quartz job is activated after the commit (see {@code handleOnboarding}); even if
    * activation does not run, the {@code SCH} row is picked up on the next scheduler initialization.
    */
-  boolean schedulePsd2Sync(PrintWriter writer, String clientId, String orgId,
+  boolean scheduleBankConnectionSync(PrintWriter writer, String clientId, String orgId,
       String adminUserId, String adminRoleId) {
-    sendProgress(writer, PROGRESS_PSD2_SYNC, PROGRESS_IN_PROGRESS,
+    sendProgress(writer, PROGRESS_BANK_CONNECTION_SYNC, PROGRESS_IN_PROGRESS,
         "Scheduling automatic bank statement sync...");
     try {
-      onboardingPsd2SyncService.schedulePsd2StatementSync(clientId, orgId, adminUserId, adminRoleId);
-      sendProgress(writer, PROGRESS_PSD2_SYNC, "done", "Automatic bank statement sync scheduled");
+      onboardingBankConnectionSyncService.scheduleBankConnectionStatementSync(clientId, orgId, adminUserId, adminRoleId);
+      sendProgress(writer, PROGRESS_BANK_CONNECTION_SYNC, "done", "Automatic bank statement sync scheduled");
     } catch (Exception e) {
-      log.warn("Could not schedule PSD2 statement sync for client {}: {}", clientId, e.getMessage());
-      sendProgress(writer, PROGRESS_PSD2_SYNC, "done", "Automatic bank statement sync skipped");
+      log.warn("Could not schedule bank statement sync for client {}: {}", clientId, e.getMessage());
+      sendProgress(writer, PROGRESS_BANK_CONNECTION_SYNC, "done", "Automatic bank statement sync skipped");
     }
     return true;
   }

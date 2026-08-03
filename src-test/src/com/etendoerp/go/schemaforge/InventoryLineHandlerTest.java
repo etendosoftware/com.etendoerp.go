@@ -29,6 +29,8 @@ import static org.mockito.Mockito.when;
 
 import java.math.BigDecimal;
 
+import javax.servlet.http.HttpServletResponse;
+
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.dal.service.OBCriteria;
 import org.hibernate.Session;
@@ -37,6 +39,7 @@ import org.junit.Test;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.erpCommon.utility.OBMessageUtils;
 import org.openbravo.model.common.enterprise.Locator;
 import org.openbravo.model.common.enterprise.Warehouse;
 import org.openbravo.model.materialmgmt.transaction.InventoryCount;
@@ -339,8 +342,18 @@ public class InventoryLineHandlerTest {
   public void testHandlePostWithEmptyParentIdIsNoOp() throws Exception {
     JSONObject body = new JSONObject().put("product", "prod-1");
     NeoContext ctx = NeoContext.builder().httpMethod("POST").endpointType(NeoEndpointType.CRUD).requestBody(body).build();
-    assertNull(HANDLER.handle(ctx));
-    assertFalse(body.has("storageBin"));
+
+    // The Service-product guard (ETP-4606) resolves the product on every POST/PATCH, before the
+    // parentId no-op check runs — so OBDal must be mocked here too now, even though this test
+    // only cares about the parentId branch.
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(eq(Product.class), eq("prod-1"))).thenReturn(null);
+
+      assertNull(HANDLER.handle(ctx));
+      assertFalse(body.has("storageBin"));
+    }
   }
 
   /**
@@ -558,6 +571,89 @@ public class InventoryLineHandlerTest {
       assertNull(HANDLER.afterCallout(ctx));
       assertEquals(55.0,
           prevBody.getJSONObject("updates").getJSONObject("bookQuantity").getDouble("value"), 0.001);
+    }
+  }
+
+  // ── handle() — Service product rejection (ETP-4606) ───────────────────────────
+
+  /**
+   * handle() POST must reject with HTTP 400 when the product sent in the body is Service-type,
+   * without running the storageBin/bookQuantity pre-hook.
+   */
+  @Test
+  public void testHandleRejectsServiceProductOnPost() throws Exception {
+    JSONObject body = new JSONObject().put("product", "prod-service");
+    NeoContext ctx = NeoContext.builder().httpMethod("POST").endpointType(NeoEndpointType.CRUD).requestBody(body).build();
+
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+        MockedStatic<OBMessageUtils> messageUtilsMock = Mockito.mockStatic(OBMessageUtils.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      Product product = mock(Product.class);
+      when(product.getProductType()).thenReturn("S");
+      when(dal.get(eq(Product.class), eq("prod-service"))).thenReturn(product);
+      messageUtilsMock.when(() -> OBMessageUtils.messageBD("ETGO_ProductNotStockable"))
+          .thenReturn("This product is of type Service and cannot be used in inventory movements.");
+
+      NeoResponse response = HANDLER.handle(ctx);
+
+      assertEquals(HttpServletResponse.SC_BAD_REQUEST, response.getHttpStatus());
+      assertFalse(response.getBody().getJSONObject("error").getString("message").isEmpty());
+      assertFalse(body.has("storageBin"));
+    }
+  }
+
+  /**
+   * handle() PATCH must reject with HTTP 400 when the body has no product field but the line
+   * already persisted a Service-type product.
+   */
+  @Test
+  public void testHandleRejectsServiceProductOnPatchWithPersistedProduct() {
+    NeoContext ctx = mock(NeoContext.class);
+    when(ctx.getEndpointType()).thenReturn(NeoEndpointType.CRUD);
+    when(ctx.getHttpMethod()).thenReturn("PATCH");
+    when(ctx.getRequestBody()).thenReturn(new JSONObject());
+    when(ctx.getRecordId()).thenReturn("line-1");
+
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+        MockedStatic<OBMessageUtils> messageUtilsMock = Mockito.mockStatic(OBMessageUtils.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      InventoryCountLine line = mock(InventoryCountLine.class);
+      Product product = mock(Product.class);
+      when(product.getId()).thenReturn("prod-service");
+      when(product.getProductType()).thenReturn("S");
+      when(line.getProduct()).thenReturn(product);
+      when(dal.get(eq(InventoryCountLine.class), eq("line-1"))).thenReturn(line);
+      when(dal.get(eq(Product.class), eq("prod-service"))).thenReturn(product);
+      messageUtilsMock.when(() -> OBMessageUtils.messageBD("ETGO_ProductNotStockable"))
+          .thenReturn("This product is of type Service and cannot be used in inventory movements.");
+
+      NeoResponse response = HANDLER.handle(ctx);
+
+      assertEquals(HttpServletResponse.SC_BAD_REQUEST, response.getHttpStatus());
+    }
+  }
+
+  /**
+   * handle() must let a non-Service product through to the existing pre-hook logic unchanged.
+   */
+  @Test
+  public void testHandleAllowsNonServiceProductToProceed() throws Exception {
+    JSONObject body = new JSONObject().put("product", "prod-item");
+    NeoContext ctx = NeoContext.builder().httpMethod("POST").endpointType(NeoEndpointType.CRUD).requestBody(body).build();
+
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      Product product = mock(Product.class);
+      when(product.getProductType()).thenReturn("I");
+      when(dal.get(eq(Product.class), eq("prod-item"))).thenReturn(product);
+
+      // No parentId in body: handlePostPreHook is a no-op, so a null result confirms the
+      // Service-product guard did not short-circuit the request.
+      assertNull(HANDLER.handle(ctx));
+      assertFalse(body.has("storageBin"));
     }
   }
 }

@@ -1,0 +1,30 @@
+name: Hooks Verification
+
+# Verifies that every commit in the PR was created with the git hooks active
+# (Hooks-Verified trailer, stamped by commit-msg after pre-commit passes).
+#
+# This is the enforcement half of the scheme: the pre-push check only protects
+# developers who already have the hooks installed, so it cannot catch someone
+# who never enabled them. This job can't be bypassed with --no-verify.
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+    branches: [main, develop, 'epic/**']
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Verify Hooks-Verified trailer on all PR commits
+        env:
+          # Roll-out guard: only commits authored on/after this date are enforced,
+          # so existing history does not have to be rewritten.
+          HOOKS_ENFORCE_SINCE: '2026-07-30'
+        run: |
+          git fetch --no-tags origin "${{ github.base_ref }}"
+          ./scripts/verify-hooks-trailer.sh "origin/${{ github.base_ref }}" HEAD

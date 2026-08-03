@@ -5,5 +5,9 @@
         <default/>
         <onCreateDefault/>
       </column>
+      <column name="EM_ETGO_PENDING_AMOUNT" primaryKey="false" required="true" type="DECIMAL" autoIncrement="false">
+        <default><![CDATA[0]]></default>
+        <onCreateDefault/>
+      </column>
     </table>
   </database>

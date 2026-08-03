@@ -82,6 +82,7 @@ public class NeoProcessService {
   public static final String MESSAGE = "message";
   public static final String PROCESS_TYPE = "processType";
   public static final String INP_RECORD_ID = "inpRecordId";
+  public static final String RECORD_ID = "recordId";
   public static final String INP_TAB_ID = "inpTabId";
   public static final String STATUS = "status";
   public static final String ERROR = "error";
@@ -114,6 +115,10 @@ public class NeoProcessService {
         NeoResponse validationError = validateMandatoryParams(process, params);
         if (validationError != null) {
           return validationError;
+        }
+        NeoResponse preconditionError = NeoProcessPreconditionService.validate(process, params);
+        if (preconditionError != null) {
+          return preconditionError;
         }
         return executeResolvedProcess(process, params);
       } finally {
@@ -771,7 +776,7 @@ public class NeoProcessService {
       JSONObject params) throws Exception {
 
     try (RequestContextScope ignored = pushRequestContextVars()) {
-      String recordId = params.optString("recordId",
+      String recordId = params.optString(RECORD_ID,
           params.optString(INP_RECORD_ID, null));
 
       if (recordId == null || recordId.isBlank()) {
@@ -794,7 +799,7 @@ public class NeoProcessService {
       Iterator<String> keys = params.keys();
       while (keys.hasNext()) {
         String key = keys.next();
-        if ("recordId".equals(key) || INP_RECORD_ID.equals(key)
+        if (RECORD_ID.equals(key) || INP_RECORD_ID.equals(key)
             || INP_TAB_ID.equals(key) || "docAction".equals(key)) {
           continue;
         }

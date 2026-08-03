@@ -32,7 +32,9 @@ import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.base.exception.OBException;
+import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.erpCommon.utility.OBCurrencyUtils;
 import org.openbravo.erpCommon.utility.OBMessageUtils;
 
 /**
@@ -68,13 +70,14 @@ import org.openbravo.erpCommon.utility.OBMessageUtils;
  * ETGO_SF_ENTITY record for the contacts spec's businessPartner entity.
  */
 @Named("businessPartnerHandler")
-public class BusinessPartnerHandler implements NeoHandler {
+public class BusinessPartnerHandler extends AbstractPersonNameHandler {
 
   private static final Logger log = LogManager.getLogger(BusinessPartnerHandler.class);
   private static final String RESPONSE_KEY = "response";
   private static final String FIELD_SEARCH_KEY = "searchKey";
-  private static final String FIELD_NAME = "name";
   private static final String SQLSTATE_UNIQUE_VIOLATION = "23505";
+  /** {@code C_BPartner.Value} is {@code VARCHAR(40)}. */
+  private static final int SEARCH_KEY_MAX_LENGTH = 40;
 
   private static final Set<String> PRECREATE_BILLING_FIELDS = Set.of("priceList", "paymentMethod", "paymentTerms",
       "account", "customerBlocking", "purchasePricelist", "pOPaymentMethod", "pOPaymentTerms", "pOFinancialAccount",
@@ -82,31 +85,21 @@ public class BusinessPartnerHandler implements NeoHandler {
   private static final String FIELD_FIRSTNAME = "etgoFirstname";
   private static final String FIELD_LASTNAME = "etgoLastname";
   private static final String FIELD_EMAIL = "etgoEmail";
+  private static final String FIELD_CURRENCY = "bPCurrencyID";
 
-  /**
-   * Concatenates non-blank parts separated by a single space.
-   */
-  private static String buildFullName(String firstname, String lastname) {
-    String combined = (firstname + " " + lastname).trim();
-    return combined.replaceAll("\\s{2,}", " ");
+  @Override
+  protected String firstnameField() {
+    return FIELD_FIRSTNAME;
   }
 
-  /**
-   * Returns [name, em_etgo_firstname, em_etgo_lastname] for the given record.
-   */
-  private static String[] queryPersistedNameParts(String recordId) throws Exception {
-    Connection conn = OBDal.getInstance().getConnection();
-    try (PreparedStatement ps = conn.prepareStatement(
-        "SELECT name, em_etgo_firstname, em_etgo_lastname" + "  FROM c_bpartner WHERE c_bpartner_id = ?")) {
-      ps.setString(1, recordId);
-      try (ResultSet rs = ps.executeQuery()) {
-        if (rs.next()) {
-          return new String[]{ StringUtils.trimToEmpty(rs.getString(1)), StringUtils.trimToEmpty(
-              rs.getString(2)), StringUtils.trimToEmpty(rs.getString(3)) };
-        }
-      }
-    }
-    return new String[]{ "", "", "" };
+  @Override
+  protected String lastnameField() {
+    return FIELD_LASTNAME;
+  }
+
+  @Override
+  protected String persistedNamePartsSql() {
+    return "SELECT name, em_etgo_firstname, em_etgo_lastname FROM c_bpartner WHERE c_bpartner_id = ?";
   }
 
   /**
@@ -236,14 +229,20 @@ public class BusinessPartnerHandler implements NeoHandler {
       return null;
     }
     try {
-      deriveNameFromPerson(ctx, body);
+      deriveName(ctx, body);
 
       if ("POST".equals(method)) {
         stripPreCreateBillingDefaults(body);
         String name = body.optString(FIELD_NAME, null);
         if (StringUtils.isNotBlank(name) && !body.has(FIELD_SEARCH_KEY)) {
-          body.put(FIELD_SEARCH_KEY, name);
+          // C_BPartner.Value is VARCHAR(40) while Name has 60, so a long commercial name
+          // cannot be used verbatim as the placeholder ("Value too long. Length 48,
+          // maximum allowed 40"). afterHandle() replaces it with em_etgo_identifier
+          // anyway, so truncating here is lossless. ETP-4156: the app-shell used to
+          // pre-truncate this client-side, which masked the missing guard.
+          body.put(FIELD_SEARCH_KEY, StringUtils.substring(name, 0, SEARCH_KEY_MAX_LENGTH));
         }
+        injectOrgCurrency(ctx, body);
       }
     } catch (Exception e) {
       log.error("BusinessPartnerHandler: error in handle()", e);
@@ -252,59 +251,42 @@ public class BusinessPartnerHandler implements NeoHandler {
     return null;
   }
 
+  /**
+   * A new Business Partner (contact) with no currency breaks purchase invoice confirmation
+   * later on ({@code ProcessInvoiceUtil} in the core validates {@code businessPartner
+   * .getCurrency() == null} with no fallback). When a create request omits the currency
+   * field, resolve and inject the organization's currency so {@code BP_Currency_ID} is
+   * populated deterministically instead of relying on a session default that may be null.
+   * Never overwrites a currency the caller explicitly set.
+   */
+  private void injectOrgCurrency(NeoContext ctx, JSONObject body) {
+    if (body.has(FIELD_CURRENCY) && StringUtils.isNotBlank(body.optString(FIELD_CURRENCY, null))) {
+      return;
+    }
+    OBContext obContext = ctx.getObContext();
+    if (obContext == null || obContext.getCurrentOrganization() == null) {
+      return;
+    }
+    try {
+      OBContext.setAdminMode();
+      try {
+        String orgId = obContext.getCurrentOrganization().getId();
+        String currencyId = OBCurrencyUtils.getOrgCurrency(orgId);
+        if (StringUtils.isNotBlank(currencyId)) {
+          body.put(FIELD_CURRENCY, currencyId);
+        }
+      } finally {
+        OBContext.restorePreviousMode();
+      }
+    } catch (Exception e) {
+      log.warn("BusinessPartnerHandler: could not inject organization currency", e);
+    }
+  }
+
   private void stripPreCreateBillingDefaults(JSONObject body) {
     for (String key : PRECREATE_BILLING_FIELDS) {
       body.remove(key);
       body.remove(key + "$_identifier");
-    }
-  }
-
-  /**
-   * Derives {@code name} from {@code etgoFirstname} + {@code etgoLastname} when:
-   * <ul>
-   *   <li>At least one of the name parts is present in the request body.</li>
-   *   <li>The effective {@code name} is blank (body value for POST; DB value for PATCH/PUT).</li>
-   * </ul>
-   * If {@code name} already has a value it is left untouched.
-   */
-  private void deriveNameFromPerson(NeoContext ctx, JSONObject body) throws Exception {
-    boolean hasFirstname = body.has(FIELD_FIRSTNAME);
-    boolean hasLastname = body.has(FIELD_LASTNAME);
-    if (!hasFirstname && !hasLastname) {
-      return;
-    }
-
-    String firstname;
-    String lastname;
-
-    if ("POST".equals(ctx.getHttpMethod())) {
-      // New record: name must be absent or blank to auto-fill.
-      if (StringUtils.isNotBlank(body.optString(FIELD_NAME, null))) {
-        return;
-      }
-      firstname = StringUtils.trimToEmpty(body.optString(FIELD_FIRSTNAME, ""));
-      lastname = StringUtils.trimToEmpty(body.optString(FIELD_LASTNAME, ""));
-    } else {
-      // PATCH / PUT: check the persisted name; if already set, respect it.
-      String recordId = ctx.getRecordId();
-      if (StringUtils.isBlank(recordId)) {
-        return;
-      }
-      String[] persisted = queryPersistedNameParts(recordId);
-      // persisted[0] = name, persisted[1] = firstname, persisted[2] = lastname
-      if (StringUtils.isNotBlank(persisted[0])) {
-        return;
-      }
-      // Merge: body value takes precedence over persisted value for each part.
-      firstname = hasFirstname ? StringUtils.trimToEmpty(body.optString(FIELD_FIRSTNAME, "")) : StringUtils.trimToEmpty(
-          persisted[1]);
-      lastname = hasLastname ? StringUtils.trimToEmpty(body.optString(FIELD_LASTNAME, "")) : StringUtils.trimToEmpty(
-          persisted[2]);
-    }
-
-    String derived = buildFullName(firstname, lastname);
-    if (StringUtils.isNotBlank(derived)) {
-      body.put(FIELD_NAME, derived);
     }
   }
 
