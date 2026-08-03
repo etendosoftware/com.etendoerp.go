@@ -143,6 +143,10 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private static final String PROGRESS_BASELINE = "baseline";
   private static final String PROGRESS_BANK_CONNECTION_SYNC = "bankConnectionSync";
   private static final String LEGAL_WITH_ACCOUNTING_ORG_TYPE_ID = "1";
+  // Stable codes for provisioning failures whose underlying message is an unresolved AD message
+  // key. Mirrored by the frontend's onboarding/errorMessages.js (ETP-4665).
+  private static final String ERROR_CODE_CLIENT_CREATION_FAILED = "CLIENT_CREATION_FAILED";
+  private static final String ERROR_CODE_ORG_CREATION_FAILED = "ORG_CREATION_FAILED";
   private static final long PASSWORD_RESET_TTL_SECONDS = 30 * 60L;
   private static final String PASSWORD_RESET_NEUTRAL_MESSAGE =
       "If an account exists for that email, password reset instructions will be sent.";
@@ -297,6 +301,16 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     // together with the escaped ownership LIKE keeps tenant isolation intact (ETP-4428).
     if (!EmailContractCommandSupport.isValidEmail(email)) {
       writeError(response, HttpServletResponse.SC_BAD_REQUEST, "Invalid email format");
+      return;
+    }
+    // ETP-4665: the email later becomes AD_USER.USERNAME/NAME (60) during provisioning, so an
+    // over-long address is only detected halfway through tenant creation. Reject it at signup.
+    OnboardingFieldLimits.LengthViolation violation = OnboardingFieldLimits.firstViolation(
+        FIELD_EMAIL, email, OnboardingFieldLimits.EMAIL,
+        "name", name, OnboardingFieldLimits.ACCOUNT_NAME,
+        FIELD_PASSWORD, password, OnboardingFieldLimits.PASSWORD);
+    if (violation != null) {
+      writeFieldTooLongError(response, violation);
       return;
     }
     if (!PasswordPolicy.isStrong(password)) {
@@ -1246,6 +1260,17 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       // it becomes the display name of the client admin user (otherwise Etendo's
       // InitialClientSetup leaves it as the username/email).
       data.fullName = body.optString("fullName", "").trim();
+      // ETP-4665: validate before the NDJSON stream opens. Past this point a length overflow
+      // surfaces as a DAL ValidationException halfway through tenant creation, which rolls the
+      // transaction back and reports the opaque "@CreateClientFailed@".
+      OnboardingFieldLimits.LengthViolation violation = OnboardingFieldLimits.firstViolation(
+          FIELD_CLIENT_NAME, data.clientName, OnboardingFieldLimits.CLIENT_NAME,
+          "fullName", data.fullName, OnboardingFieldLimits.FULL_NAME,
+          "address", data.address, OnboardingFieldLimits.ADDRESS);
+      if (violation != null) {
+        writeFieldTooLongError(response, violation);
+        return null;
+      }
       return data;
     } catch (JSONException e) {
         String message = e.getMessage() != null && e.getMessage().contains(FIELD_CLIENT_NAME)
@@ -1344,11 +1369,16 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
         adminPassword, "", "Account", "Calendar", false, null, false, false, false,
         false, false);
     if (!"Success".equals(clientResult.getType())) {
+      // InitialClientSetup reports failures as UNRESOLVED AD message keys ("@CreateClientFailed@")
+      // whose text says nothing about the actual cause — the real exception only reaches the
+      // server log. Keep the raw value here for diagnostics and hand the client a stable code it
+      // can localize (ETP-4665).
       String errorMsg = clientResult.getMessage() != null
           ? clientResult.getMessage()
           : "Client creation failed";
+      log.error("Client creation failed for '{}': {}", clientName, errorMsg);
       sendProgress(writer, PROGRESS_CLIENT, PROGRESS_ERROR, errorMsg);
-      sendFinalResult(writer, false, errorMsg);
+      sendFinalResult(writer, false, errorMsg, ERROR_CODE_CLIENT_CREATION_FAILED);
       return false;
     }
     sendProgress(writer, PROGRESS_CLIENT, "done", "Client created successfully");
@@ -1429,11 +1459,13 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
         LEGAL_WITH_ACCOUNTING_ORG_TYPE_ID, starOrgId, null, "", "", false, null, currencyId,
         false, false, false, false, false);
     if (!"Success".equals(orgResult.getType())) {
+      // Same as createClient: InitialOrgSetup yields raw AD keys such as "@CreateOrgFailed@".
       String errorMsg = orgResult.getMessage() != null
           ? orgResult.getMessage()
           : "Organization creation failed";
+      log.error("Organization creation failed for '{}': {}", clientName, errorMsg);
       sendProgress(writer, PROGRESS_ORGANIZATION, PROGRESS_ERROR, errorMsg);
-      sendFinalResult(writer, false, errorMsg);
+      sendFinalResult(writer, false, errorMsg, ERROR_CODE_ORG_CREATION_FAILED);
       return false;
     }
     sendProgress(writer, PROGRESS_ORGANIZATION, "done", "Organization created successfully");
@@ -1719,11 +1751,26 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    * Write the final NDJSON result line.
    */
   void sendFinalResult(PrintWriter writer, boolean success, String message) {
+    sendFinalResult(writer, success, message, null);
+  }
+
+  /**
+   * Write the final NDJSON result line, tagged with a stable error code.
+   *
+   * <p>Provisioning failures carry unresolved Etendo AD message keys (e.g.
+   * {@code @CreateClientFailed@}) that the UI cannot translate and must never display. The code
+   * gives the client something stable to localize, while {@code message} stays in the payload for
+   * non-UI callers and logs (ETP-4665).
+   */
+  void sendFinalResult(PrintWriter writer, boolean success, String message, String code) {
     try {
       JSONObject result = new JSONObject();
       result.put("type", "result");
       result.put(FIELD_SUCCESS, success);
       result.put(FIELD_MESSAGE, message);
+      if (code != null) {
+        result.put(FIELD_CODE, code);
+      }
       result.put(FIELD_TIMESTAMP, Instant.now().toString());
       writer.println(result.toString());
       writer.flush();
@@ -1950,6 +1997,31 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       writeResponse(response, HttpServletResponse.SC_BAD_REQUEST, envelope);
     } catch (JSONException e) {
       log.error("JSON error building weak-password response", e);
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, INTERNAL_ERROR);
+    }
+  }
+
+  /**
+   * Write a length rejection as HTTP 400 with the same machine-readable envelope used by
+   * {@link #writeWeakPasswordError}: {@code { "error": { "code": "FIELD_TOO_LONG", "field": "...",
+   * "max": 60, "message": "..." } } }. The client localizes it from the code and {@code max}; the
+   * English {@code message} is only a fallback for non-UI callers (ETP-4665).
+   */
+  private void writeFieldTooLongError(HttpServletResponse response,
+      OnboardingFieldLimits.LengthViolation violation) throws IOException {
+    try {
+      JSONObject error = new JSONObject();
+      error.put(FIELD_CODE, OnboardingFieldLimits.ERROR_CODE);
+      error.put("field", violation.field());
+      error.put("max", violation.max());
+      error.put(FIELD_MESSAGE,
+          String.format("Field %s must not exceed %d characters", violation.field(),
+              violation.max()));
+      JSONObject envelope = new JSONObject();
+      envelope.put(PROGRESS_ERROR, error);
+      writeResponse(response, HttpServletResponse.SC_BAD_REQUEST, envelope);
+    } catch (JSONException e) {
+      log.error("JSON error building field-too-long response", e);
       writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, INTERNAL_ERROR);
     }
   }
