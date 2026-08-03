@@ -39,6 +39,7 @@ final class McpConstants {
   static final String TYPE_OBJECT = "object";
   static final String KEY_PROPERTIES = "properties";
   static final String KEY_DESCRIPTION = "description";
+  static final String KEY_LABEL = "label";
   static final String GENERATE_PREFIX = "generate_";
   // Action result JSON keys
   static final String KEY_ERROR = "error";

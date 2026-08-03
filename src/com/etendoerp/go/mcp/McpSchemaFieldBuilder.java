@@ -395,7 +395,7 @@ final class McpSchemaFieldBuilder {
       return;
     }
     if (StringUtils.isNotBlank(labelDesc[0])) {
-      field.put("label", labelDesc[0]);
+      field.put(McpConstants.KEY_LABEL, labelDesc[0]);
     }
     if (StringUtils.isNotBlank(labelDesc[1])) {
       field.put(McpConstants.KEY_DESCRIPTION, labelDesc[1]);
@@ -430,7 +430,7 @@ final class McpSchemaFieldBuilder {
     JSONObject fieldObj = new JSONObject();
     fieldObj.put("name", resolvePropertyName(dalEntity, dbColName));
     fieldObj.put("column", dbColName);
-    fieldObj.put("label", col.getName());
+    fieldObj.put(McpConstants.KEY_LABEL, col.getName());
     fieldObj.put("type", type);
     fieldObj.put("required", col.isMandatory());
     fieldObj.put("readOnly", isReadOnlyColumn(adTab, col));
