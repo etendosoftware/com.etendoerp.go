@@ -19,7 +19,7 @@ package com.etendoerp.go.schemaforge.telemetry;
 
 import org.apache.commons.lang3.StringUtils;
 
-import com.etendoerp.go.common.GoRuntimeProperties;
+import com.etendoerp.go.common.ConfigPropertyReader;
 
 /**
  * Runtime Mixpanel configuration for backend telemetry.
@@ -70,13 +70,12 @@ public final class MixpanelNeoTelemetryConfig {
    * @return runtime backend Mixpanel configuration
    */
   public static MixpanelNeoTelemetryConfig fromRuntime() {
-    boolean enabled = GoRuntimeProperties.readBoolean(PROP_ENABLED, ENV_ENABLED, true);
-    String token = GoRuntimeProperties.readValue(PROP_TOKEN, ENV_TOKEN, null);
-    String apiHost = GoRuntimeProperties.readValue(PROP_API_HOST, ENV_API_HOST, DEFAULT_API_HOST);
-    String distinctId = GoRuntimeProperties.readValue(PROP_DISTINCT_ID, ENV_DISTINCT_ID,
-        DEFAULT_DISTINCT_ID);
-    int timeoutMs = GoRuntimeProperties.readInt(PROP_TIMEOUT_MS, ENV_TIMEOUT_MS,
-        DEFAULT_TIMEOUT_MS);
+    boolean enabled = isTruthy(ConfigPropertyReader.readConfigValue(PROP_ENABLED, ENV_ENABLED, "true"));
+    String token = ConfigPropertyReader.readConfigValue(PROP_TOKEN, ENV_TOKEN, null);
+    String apiHost = ConfigPropertyReader.readConfigValue(PROP_API_HOST, ENV_API_HOST, DEFAULT_API_HOST);
+    String distinctId = ConfigPropertyReader.readConfigValue(PROP_DISTINCT_ID, ENV_DISTINCT_ID, DEFAULT_DISTINCT_ID);
+    int timeoutMs = parseTimeout(ConfigPropertyReader.readConfigValue(PROP_TIMEOUT_MS, ENV_TIMEOUT_MS,
+        String.valueOf(DEFAULT_TIMEOUT_MS)));
     return new MixpanelNeoTelemetryConfig(enabled, token, apiHost, distinctId, timeoutMs);
   }
 
@@ -104,4 +103,15 @@ public final class MixpanelNeoTelemetryConfig {
     return timeoutMs;
   }
 
+  private static boolean isTruthy(String value) {
+    return "true".equalsIgnoreCase(value) || "Y".equalsIgnoreCase(value);
+  }
+
+  private static int parseTimeout(String rawTimeout) {
+    try {
+      return Integer.parseInt(rawTimeout);
+    } catch (NumberFormatException e) {
+      return DEFAULT_TIMEOUT_MS;
+    }
+  }
 }

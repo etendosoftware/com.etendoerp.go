@@ -17,10 +17,8 @@
 
 package com.etendoerp.go.common;
 
-import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
-import org.openbravo.base.session.OBPropertiesProvider;
 
 /**
  * Resolves Etendo Go runtime configuration values from the three sources the module supports,
@@ -29,6 +27,10 @@ import org.openbravo.base.session.OBPropertiesProvider;
  * <p>Reading {@code Openbravo.properties} is best-effort: outside a fully initialized Openbravo
  * runtime (unit tests, early startup) the provider throws, and the lookup falls through to the
  * environment variable and finally the supplied default.
+ *
+ * <p>The precedence itself lives in {@link ConfigPropertyReader}, the shared resolver the NEO
+ * config classes already delegate to. This class adds only the typed ({@code boolean} /
+ * {@code int}) readers the feature-flag plumbing needs on top of it.
  */
 public final class GoRuntimeProperties {
 
@@ -47,16 +49,7 @@ public final class GoRuntimeProperties {
    * @return the resolved value, or {@code defaultValue} when unset in every source
    */
   public static String readValue(String propertyName, String envName, String defaultValue) {
-    String systemValue = StringUtils.trimToNull(System.getProperty(propertyName));
-    if (systemValue != null) {
-      return systemValue;
-    }
-    String openbravoValue = readOpenbravoProperty(propertyName);
-    if (openbravoValue != null) {
-      return openbravoValue;
-    }
-    String envValue = StringUtils.trimToNull(System.getenv(envName));
-    return envValue != null ? envValue : defaultValue;
+    return ConfigPropertyReader.readConfigValue(propertyName, envName, defaultValue);
   }
 
   /**
@@ -89,16 +82,6 @@ public final class GoRuntimeProperties {
     } catch (NumberFormatException e) {
       log.debug("Non-numeric value for {}: {}", propertyName, value);
       return defaultValue;
-    }
-  }
-
-  private static String readOpenbravoProperty(String propertyName) {
-    try {
-      return StringUtils.trimToNull(OBPropertiesProvider.getInstance()
-          .getOpenbravoProperties().getProperty(propertyName));
-    } catch (Exception e) {
-      log.debug("Could not read Openbravo property {}: {}", propertyName, e.getMessage(), e);
-      return null;
     }
   }
 }
