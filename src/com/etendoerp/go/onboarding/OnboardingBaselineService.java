@@ -86,7 +86,7 @@ public class OnboardingBaselineService {
    * Use the exact UTC timestamp prefix of the last incorporated .sql file, e.g.:
    * {@code "20260617T120000Z"} matches {@code 20260617T120000Z__R7-tax-accounts.sql}.</p>
    *
-   * Current watermark: R13 amortization-table-active (2026-07-08).
+   * Current watermark: R20 default-standard-costing-rule (2026-08-03).
    *
    * <p><b>Note (2026-07-06):</b> the sibling in-flight branch {@code feat/bp-category-preventive}
    * (ETP-4402) independently bumps this same constant to {@code 2026-07-01T12:00:00Z} for its
@@ -94,8 +94,19 @@ public class OnboardingBaselineService {
    * {@code 2026-07-06T12:00:00Z} for {@code R10-accounting-schema-dimensions}. Multiple in-flight
    * branches touch this single line — expect merge conflicts when they converge; always resolve to
    * the LATEST timestamp so no fix's cutoff is lost.</p>
+   *
+   * <p><b>Note (2026-08-03, ETP-4760):</b> bumped from {@code 2026-07-08T10:00:00Z} (R13) to
+   * {@code 2026-08-03T18:00:00Z} (R20) — {@code M_COSTING_RULE} added to
+   * {@link OnboardingDatasetDefinition}'s {@code INCLUDED_TABLES} and its bundled sample row fixed
+   * to the Standard algorithm (was Average), so a new tenant is born with one active, validated
+   * Standard costing rule instead of zero rules. Sibling schema_forge tickets around this same
+   * timestamp (R18 stuck-average-cost-anchor / ETP-4736, R19 locator-inventory-status / ETP-4761)
+   * were checked in THIS repo (com.etendoerp.go) — no branch was found touching this constant as of
+   * this session (ETP-4736's own note says its preventive front was deliberately not shipped; ETP-
+   * 4761's Java-side change, if any, was not visible from here). Confirm on merge that
+   * {@code 2026-08-03T18:00:00Z} is still the latest value regardless.</p>
    */
-  private static final Instant ONBOARDING_PROVISIONED_THROUGH = Instant.parse("2026-07-08T10:00:00Z");
+  private static final Instant ONBOARDING_PROVISIONED_THROUGH = Instant.parse("2026-08-03T18:00:00Z");
 
   private static final String SQL_INSERT_BASELINE = ""
       + "INSERT INTO etgo_data_fix_history ("

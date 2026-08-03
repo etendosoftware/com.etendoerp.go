@@ -345,6 +345,28 @@ public class OnboardingDatasetNormalizerTest {
   }
 
   /**
+   * ETP-4760 (R20, gap J1, 2026-08-03): verifies that a freshly-provisioned tenant is born with one
+   * active, validated {@code M_Costing_Rule} using the Standard algorithm — not zero rules (the real
+   * gap: {@code M_COSTING_RULE} was never in {@code INCLUDED_TABLES}, so every onboarded tenant
+   * inherited NOTHING, not Average) and not the Average algorithm the bundled sample row used to
+   * carry. Regression guard against the table being dropped from {@code INCLUDED_TABLES} again, or
+   * the sample row's algorithm reverting to Average.
+   */
+  @Test
+  public void testNormalizerIncludesValidatedStandardCostingRule() {
+    String xml = pathBackedNormalizer().buildDatasetXml();
+
+    assertTrue("M_Costing_Rule row (id 6278C7936B7743898D12928D0E935CC6) missing — table must be "
+        + "in INCLUDED_TABLES", xml.contains("6278C7936B7743898D12928D0E935CC6"));
+    assertTrue("Standard Algorithm id missing on the seeded costing rule",
+        xml.contains("6A39D8B46CD94FE682D48758D3B7726B"));
+    assertFalse("Average Algorithm id must NOT be the seeded costing rule's algorithm",
+        xml.contains("B069080A0AE149A79CF1FA0E24F16AB6"));
+    assertTrue("isvalidated must be Y on the seeded costing rule",
+        xml.contains("<isvalidated>Y</isvalidated>"));
+  }
+
+  /**
    * Verifies that non-primitive reference columns route their raw value through the injected
    * {@link OnboardingDatasetNormalizer.ReferenceIdResolver} and emit the resolver-returned id rather
    * than the raw code. The {@code AD_LANGUAGE} column on {@code C_ELEMENTVALUE_TRL} is an
