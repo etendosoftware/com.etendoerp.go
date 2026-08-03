@@ -23,14 +23,19 @@ import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.Test;
+import org.mockito.MockedStatic;
+import org.openbravo.dal.core.OBContext;
+import org.openbravo.model.ad.ui.Tab;
 
 import com.etendoerp.go.schemaforge.NeoContext;
+import com.etendoerp.go.schemaforge.NeoEndpointType;
 import com.etendoerp.go.schemaforge.NeoHandler;
 import com.etendoerp.go.schemaforge.NeoResponse;
 import com.etendoerp.go.schemaforge.data.SFEntity;
@@ -41,8 +46,9 @@ import com.etendoerp.go.schemaforge.data.SFEntity;
  * Tests cover the pure-logic methods that require no DAL session:
  * {@code neoResponseToMcpResult}, {@code runPreHook}, {@code runPostHook}, and
  * the early-exit paths of {@code resolveEntityHandler} (blank/null qualifier).
- * The CDI lookup path of {@code resolveEntityHandler} and {@code buildHookContext}
- * (which calls {@code OBContext.getOBContext()}) are covered by integration tests.
+ * The CDI lookup path of {@code resolveEntityHandler} is covered by integration tests.
+ * {@code buildActionHookContext} is covered here with a statically mocked
+ * {@code OBContext}; the CRUD/DEFAULTS context builders remain integration-covered.
  */
 public class McpHookExecutorTest {
 
@@ -256,5 +262,34 @@ public class McpHookExecutorTest {
     NeoHandler result = McpHookExecutor.resolveEntityHandler(sfEntity);
 
     assertNull(result);
+  }
+
+  // ── buildActionHookContext (ETP-4285) ─────────────────────────────────
+
+  @Test
+  public void testBuildActionHookContextSetsActionEndpointTypeAndFieldName() throws Exception {
+    SFEntity sfEntity = mock(SFEntity.class);
+    Tab adTab = mock(Tab.class);
+    JSONObject params = new JSONObject();
+    params.put("docAction", "CO");
+
+    try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class)) {
+      obContextMock.when(OBContext::getOBContext).thenReturn(null);
+
+      NeoContext ctx = McpHookExecutor.buildActionHookContext("sales-order", "header",
+          "REC-1", "documentAction", params, adTab, sfEntity);
+
+      // endpointType + fieldName are exactly what handlers branch on, e.g.
+      // AbstractOrderHeaderHandler.isActionDocumentActionComplete.
+      assertEquals(NeoEndpointType.ACTION, ctx.getEndpointType());
+      assertEquals("documentAction", ctx.getFieldName());
+      assertEquals("POST", ctx.getHttpMethod());
+      assertEquals("REC-1", ctx.getRecordId());
+      assertEquals("sales-order", ctx.getSpecName());
+      assertEquals("header", ctx.getEntityName());
+      assertEquals("CO", ctx.getRequestBody().getString("docAction"));
+      assertEquals(adTab, ctx.getAdTab());
+      assertEquals(sfEntity, ctx.getSfEntity());
+    }
   }
 }
