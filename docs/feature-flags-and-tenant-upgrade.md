@@ -335,7 +335,8 @@ must never break the session.
 | Flag entry point, provider swap point, failure policy | `com.etendoerp.go.featureflags.GoFeatureFlags` |
 | Local configuration-backed provider | `com.etendoerp.go.featureflags.PropertiesFeatureProvider` |
 | Vendor-neutral targeting context | `com.etendoerp.go.featureflags.FeatureFlagContext` |
-| Shared property resolution (system → Openbravo → env) | `com.etendoerp.go.common.GoRuntimeProperties` |
+| Typed flag/property readers (`boolean`, `int`) | `com.etendoerp.go.common.GoRuntimeProperties` |
+| Shared property resolution (system → Openbravo → env) | `com.etendoerp.go.common.ConfigPropertyReader` |
 | Paywall decision | `com.etendoerp.go.payment.TenantPaywallService` |
 | Payment token validation (mock) | `com.etendoerp.go.payment.MockPaymentService` |
 | Plan read/write | `com.etendoerp.go.payment.TenantPlanService` |
