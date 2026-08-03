@@ -59,5 +59,6 @@
         <reference local="AD_ORG_ID" foreign="AD_ORG_ID"/>
       </foreign-key>
       <check name="ETGO_CALDECLINCIDENT_CTIVE_CHK"><![CDATA[ISACTIVE IN ('Y', 'N')]]></check>
+      <check name="ETGO_FDI_SEVERITY_CHK"><![CDATA[SEVERITY IN ('block', 'warn')]]></check>
     </table>
   </database>
