@@ -512,7 +512,11 @@ public class NotPostedDocumentsHandler implements NeoHandler {
     JSONObject resp = new JSONObject();
     resp.put(KEY_SUCCESS, result.ok());
     resp.put("message", result.message());
-    return result.ok() ? NeoResponse.ok(resp) : NeoResponse.error(422, resp.toString());
+    // Pass the JSONObject itself (not resp.toString()) — the String overload of
+    // NeoResponse.error wraps it as a nested error.message string instead of sending this flat
+    // body, silently discarding the real message from any client reading a top-level `message`
+    // field (same bug class as DocumentPostingService#handleAction, ETP-4706).
+    return result.ok() ? NeoResponse.ok(resp) : NeoResponse.error(422, resp);
   }
 
   private NeoResponse handleBulkPost(JSONObject body) throws Exception {

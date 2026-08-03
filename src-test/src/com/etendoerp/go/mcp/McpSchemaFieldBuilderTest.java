@@ -817,6 +817,134 @@ class McpSchemaFieldBuilderTest {
       assertEquals("Processed", result.getString("action"));
       assertEquals("neo_action", result.getString("invokeVia"));
     }
+
+    @Test
+    @DisplayName("listBackedButtonEmitsSortedActionValuesAndParameter")
+    void listBackedButtonEmitsSortedActionValuesAndParameter() throws Exception {
+      org.openbravo.model.ad.datamodel.Column col = mock(
+          org.openbravo.model.ad.datamodel.Column.class);
+      org.openbravo.model.ad.domain.Reference listRef = mock(
+          org.openbravo.model.ad.domain.Reference.class);
+      Process classicProcess = mock(Process.class);
+
+      when(col.getDBColumnName()).thenReturn("DocAction");
+      when(col.getProcess()).thenReturn(classicProcess);
+      when(col.getOBUIAPPProcess()).thenReturn(null);
+      when(classicProcess.getName()).thenReturn("Process Order");
+      when(classicProcess.getId()).thenReturn("CLASSIC-PROC-001");
+      when(col.getReferenceSearchKey()).thenReturn(listRef);
+      when(listRef.getId()).thenReturn("ORDER-DOCACTION-REF");
+
+      // Unordered on purpose: getListLabels returns a HashMap.
+      Map<String, String> labels = new HashMap<>();
+      labels.put("VO", "Void");
+      labels.put("CO", "Book");
+      labels.put("CL", "Close");
+
+      try (MockedStatic<NeoSelectorService> selectorMock = mockStatic(NeoSelectorService.class)) {
+        selectorMock.when(() -> NeoSelectorService.getListLabels("ORDER-DOCACTION-REF"))
+            .thenReturn(labels);
+
+        JSONObject fieldObj = new JSONObject();
+        invokeStatic("addButtonInfo",
+            new Class<?>[]{ JSONObject.class, org.openbravo.model.ad.datamodel.Column.class },
+            fieldObj, col);
+
+        assertEquals("docAction", fieldObj.getString("actionParameter"));
+        JSONArray values = fieldObj.getJSONArray("actionValues");
+        assertEquals(3, values.length());
+        assertEquals("CL", values.getJSONObject(0).getString("value"));
+        assertEquals("Close", values.getJSONObject(0).getString("label"));
+        assertEquals("CO", values.getJSONObject(1).getString("value"));
+        assertEquals("Book", values.getJSONObject(1).getString("label"));
+        assertEquals("VO", values.getJSONObject(2).getString("value"));
+      }
+    }
+
+    @Test
+    @DisplayName("buttonWithoutListReferenceOmitsActionValues")
+    void buttonWithoutListReferenceOmitsActionValues() throws Exception {
+      org.openbravo.model.ad.datamodel.Column col = mock(
+          org.openbravo.model.ad.datamodel.Column.class);
+
+      when(col.getDBColumnName()).thenReturn("Processing");
+      when(col.getProcess()).thenReturn(null);
+      when(col.getOBUIAPPProcess()).thenReturn(null);
+      when(col.getReferenceSearchKey()).thenReturn(null);
+      accessHelperMock.when(
+          () -> NeoAccessHelper.resolveFallbackObuiappProcess(col)).thenReturn(null);
+
+      JSONObject fieldObj = new JSONObject();
+      invokeStatic("addButtonInfo",
+          new Class<?>[]{ JSONObject.class, org.openbravo.model.ad.datamodel.Column.class },
+          fieldObj, col);
+
+      assertFalse(fieldObj.has("actionValues"));
+      assertFalse(fieldObj.has("actionParameter"));
+    }
+
+    @Test
+    @DisplayName("buttonWhoseListLookupReturnsNullOmitsActionValues")
+    void buttonWhoseListLookupReturnsNullOmitsActionValues() throws Exception {
+      org.openbravo.model.ad.datamodel.Column col = mock(
+          org.openbravo.model.ad.datamodel.Column.class);
+      org.openbravo.model.ad.domain.Reference listRef = mock(
+          org.openbravo.model.ad.domain.Reference.class);
+
+      when(col.getDBColumnName()).thenReturn("DocAction");
+      when(col.getProcess()).thenReturn(null);
+      when(col.getOBUIAPPProcess()).thenReturn(null);
+      when(col.getReferenceSearchKey()).thenReturn(listRef);
+      when(listRef.getId()).thenReturn("NULL-REF");
+      accessHelperMock.when(
+          () -> NeoAccessHelper.resolveFallbackObuiappProcess(col)).thenReturn(null);
+
+      try (MockedStatic<NeoSelectorService> selectorMock = mockStatic(NeoSelectorService.class)) {
+        // getListLabels swallows its own exceptions and is declared to return a map, but a
+        // null return must not NPE the schema build — the field simply omits actionValues.
+        selectorMock.when(() -> NeoSelectorService.getListLabels("NULL-REF")).thenReturn(null);
+
+        JSONObject fieldObj = new JSONObject();
+        invokeStatic("addButtonInfo",
+            new Class<?>[]{ JSONObject.class, org.openbravo.model.ad.datamodel.Column.class },
+            fieldObj, col);
+
+        assertFalse(fieldObj.has("actionValues"));
+        assertFalse(fieldObj.has("actionParameter"));
+        // The rest of the button metadata is still emitted.
+        assertEquals("neo_action", fieldObj.getString("invokeVia"));
+      }
+    }
+
+    @Test
+    @DisplayName("buttonWithEmptyListOmitsActionValues")
+    void buttonWithEmptyListOmitsActionValues() throws Exception {
+      org.openbravo.model.ad.datamodel.Column col = mock(
+          org.openbravo.model.ad.datamodel.Column.class);
+      org.openbravo.model.ad.domain.Reference listRef = mock(
+          org.openbravo.model.ad.domain.Reference.class);
+
+      when(col.getDBColumnName()).thenReturn("DocAction");
+      when(col.getProcess()).thenReturn(null);
+      when(col.getOBUIAPPProcess()).thenReturn(null);
+      when(col.getReferenceSearchKey()).thenReturn(listRef);
+      when(listRef.getId()).thenReturn("EMPTY-REF");
+      accessHelperMock.when(
+          () -> NeoAccessHelper.resolveFallbackObuiappProcess(col)).thenReturn(null);
+
+      try (MockedStatic<NeoSelectorService> selectorMock = mockStatic(NeoSelectorService.class)) {
+        selectorMock.when(() -> NeoSelectorService.getListLabels("EMPTY-REF"))
+            .thenReturn(new HashMap<>());
+
+        JSONObject fieldObj = new JSONObject();
+        invokeStatic("addButtonInfo",
+            new Class<?>[]{ JSONObject.class, org.openbravo.model.ad.datamodel.Column.class },
+            fieldObj, col);
+
+        assertFalse(fieldObj.has("actionValues"));
+        assertFalse(fieldObj.has("actionParameter"));
+      }
+    }
   }
 
   // ─── buildSchemaField — businessCritical flag ───────────────────────

@@ -183,6 +183,9 @@ public class NotPostedDocumentsHandlerTest {
 
       assertNotNull(resp);
       assertEquals(422, resp.getHttpStatus());
+      // ETP-4706: same double-encoding bug class as DocumentPostingService#handleAction — the
+      // message must be a flat top-level field, not re-wrapped/escaped inside error.message.
+      assertEquals("Posting failed", resp.getBody().getString("message"));
     }
   }
 
