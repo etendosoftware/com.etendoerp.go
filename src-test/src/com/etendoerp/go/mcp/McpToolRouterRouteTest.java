@@ -25,6 +25,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.when;
 
 import java.util.ArrayList;
@@ -40,6 +41,7 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.MockedStatic;
 import org.mockito.junit.jupiter.MockitoExtension;
@@ -1391,6 +1393,148 @@ class McpToolRouterRouteTest {
       String text = result.getJSONArray("content").getJSONObject(0).getString("text");
       JSONObject body = new JSONObject(text);
       assertEquals("warning", body.getString("processResult"));
+    }
+
+    @Test
+    @DisplayName("neo_action runs the entity NeoHandler hooks around the button action")
+    void actionRunsEntityHandlerHooks() throws Exception {
+      SFSpec spec = mockSpec();
+      SFEntity entity = mockEntity();
+      Tab tab = mockTab();
+      setupSpecLookup(spec);
+      setupEntityLookup(entity, tab);
+
+      JSONObject responseBody = new JSONObject();
+      responseBody.put("status", "success");
+      responseBody.put("message", "Process completed successfully");
+      buttonActionMock.when(() ->
+          NeoButtonActionHelper.executeButtonActionCore(eq(entity), eq(RECORD_ID),
+              eq(ACTION_NAME), any()))
+          .thenReturn(NeoResponse.ok(responseBody));
+
+      try (MockedStatic<McpHookExecutor> hookMock = mockStatic(McpHookExecutor.class)) {
+        router.route("neo_action", buildActionArgs(), ACTION_SCOPES);
+
+        // The REST action path wraps the button action in the entity's NeoHandler
+        // (NeoSubEndpointDispatcher.handleHookedSubEndpoint with NeoEndpointType.ACTION),
+        // exactly as neo_create/neo_update/neo_delete already do on the MCP side. Without
+        // the same wrapping here, completing a document over MCP silently skips handler
+        // logic the UI executes — e.g. AbstractOrderHeaderHandler's pre-CO total-discount
+        // line, or GlJournalHeaderHandler's interception of the contextless classic
+        // dispatch that would otherwise NPE inside FIN_AddPaymentFromJournal (ETP-4285).
+        hookMock.verify(() -> McpHookExecutor.resolveEntityHandler(entity));
+        hookMock.verify(() -> McpHookExecutor.runPreHook(any(), any()));
+        hookMock.verify(() -> McpHookExecutor.runPostHook(any(), any(), any()));
+      }
+    }
+
+    @Test
+    @DisplayName("neo_action builds an ACTION hook context carrying the action name")
+    void actionBuildsActionHookContextWithActionName() throws Exception {
+      SFSpec spec = mockSpec();
+      SFEntity entity = mockEntity();
+      Tab tab = mockTab();
+      setupSpecLookup(spec);
+      setupEntityLookup(entity, tab);
+
+      JSONObject responseBody = new JSONObject();
+      responseBody.put("status", "success");
+      buttonActionMock.when(() ->
+          NeoButtonActionHelper.executeButtonActionCore(eq(entity), eq(RECORD_ID),
+              eq(ACTION_NAME), any()))
+          .thenReturn(NeoResponse.ok(responseBody));
+
+      try (MockedStatic<McpHookExecutor> hookMock = mockStatic(McpHookExecutor.class)) {
+        router.route("neo_action", buildActionArgs(), ACTION_SCOPES);
+
+        hookMock.verify(() -> McpHookExecutor.buildActionHookContext(
+            eq(SPEC_NAME), eq(ENTITY_NAME), eq(RECORD_ID), eq(ACTION_NAME),
+            any(), eq(tab), eq(entity)));
+      }
+    }
+
+    @Test
+    @DisplayName("neo_action pre-hook result short-circuits without firing the process")
+    void actionPreHookShortCircuitsWithoutFiringTheProcess() throws Exception {
+      SFSpec spec = mockSpec();
+      SFEntity entity = mockEntity();
+      Tab tab = mockTab();
+      setupSpecLookup(spec);
+      setupEntityLookup(entity, tab);
+
+      JSONObject hookResult = McpToolRouter.wrapAsErrorContent("Order has no lines");
+
+      try (MockedStatic<McpHookExecutor> hookMock = mockStatic(McpHookExecutor.class)) {
+        hookMock.when(() -> McpHookExecutor.runPreHook(any(), any())).thenReturn(hookResult);
+
+        JSONObject result = router.route("neo_action", buildActionArgs(), ACTION_SCOPES);
+
+        assertTrue(result.getBoolean("isError"));
+        assertTrue(contentText(result).contains("Order has no lines"));
+        buttonActionMock.verify(() -> NeoButtonActionHelper.executeButtonActionCore(
+            any(), any(), any(), any()), never());
+      }
+    }
+
+    @Test
+    @DisplayName("neo_action forwards the caller's parameters object to the process")
+    void actionForwardsCallerParametersToProcess() throws Exception {
+      SFSpec spec = mockSpec();
+      SFEntity entity = mockEntity();
+      Tab tab = mockTab();
+      setupSpecLookup(spec);
+      setupEntityLookup(entity, tab);
+
+      JSONObject responseBody = new JSONObject();
+      responseBody.put("status", "success");
+      buttonActionMock.when(() ->
+          NeoButtonActionHelper.executeButtonActionCore(eq(entity), eq(RECORD_ID),
+              eq(ACTION_NAME), any()))
+          .thenReturn(NeoResponse.ok(responseBody));
+
+      // The documented way to complete a document: the chosen action value travels under
+      // the key neo_schema advertises as 'actionParameter' (ETP-4285).
+      JSONObject args = buildActionArgs();
+      JSONObject parameters = new JSONObject();
+      parameters.put("docAction", "CO");
+      args.put("parameters", parameters);
+
+      ArgumentCaptor<JSONObject> paramsCaptor = ArgumentCaptor.forClass(JSONObject.class);
+
+      router.route("neo_action", args, ACTION_SCOPES);
+
+      buttonActionMock.verify(() -> NeoButtonActionHelper.executeButtonActionCore(
+          eq(entity), eq(RECORD_ID), eq(ACTION_NAME), paramsCaptor.capture()));
+      assertEquals("CO", paramsCaptor.getValue().getString("docAction"));
+    }
+
+    @Test
+    @DisplayName("neo_action post-hook result replaces the default action result")
+    void actionPostHookReplacesResult() throws Exception {
+      SFSpec spec = mockSpec();
+      SFEntity entity = mockEntity();
+      Tab tab = mockTab();
+      setupSpecLookup(spec);
+      setupEntityLookup(entity, tab);
+
+      JSONObject responseBody = new JSONObject();
+      responseBody.put("status", "success");
+      buttonActionMock.when(() ->
+          NeoButtonActionHelper.executeButtonActionCore(eq(entity), eq(RECORD_ID),
+              eq(ACTION_NAME), any()))
+          .thenReturn(NeoResponse.ok(responseBody));
+
+      JSONObject replaced = McpToolRouter.wrapAsTextContent("{\"processResult\":\"warning\"}");
+
+      try (MockedStatic<McpHookExecutor> hookMock = mockStatic(McpHookExecutor.class)) {
+        hookMock.when(() -> McpHookExecutor.runPreHook(any(), any())).thenReturn(null);
+        hookMock.when(() -> McpHookExecutor.runPostHook(any(), any(), any()))
+            .thenReturn(replaced);
+
+        JSONObject result = router.route("neo_action", buildActionArgs(), ACTION_SCOPES);
+
+        assertTrue(contentText(result).contains("warning"));
+      }
     }
   }
 
