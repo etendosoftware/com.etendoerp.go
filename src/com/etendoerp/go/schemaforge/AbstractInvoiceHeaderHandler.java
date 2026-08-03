@@ -452,6 +452,56 @@ public abstract class AbstractInvoiceHeaderHandler {
   }
 
   /**
+   * Injects {@code hasExemptTaxes} (boolean) into the record, replicating the SII module's
+   * {@code ExemptTaxes#invoiceHasExemptTaxes}: {@code true} when ANY active invoice LINE references
+   * a tax rate flagged {@code IsTaxExempt = 'Y'}. Deliberately does NOT consider c_invoicetax rows
+   * — see the detection comment in {@link #enrichHasExemptTaxes} (they linger in Go drafts).
+   *
+   * <p>The frontend SIF tab uses this to gate the exemption-cause field: it is only editable when
+   * the invoice actually carries exempt taxes (Classic parity, ETP-4751 Block B), and shows the
+   * "should indicate an exemption cause" warning when exempt taxes are present but no cause is set.
+   *
+   * <p>Applies to both sales and purchase invoices — {@code ExemptTaxes} itself gates its
+   * <em>auto-fill</em> to sales only, but the plain {@code invoiceHasExemptTaxes} computation this
+   * mirrors is direction-agnostic, and the field is served on both header entities so the shared
+   * SIF tab can gate uniformly. Only meaningful in detail view (single record); do not call for
+   * list responses. Fail-safe: any DB/JSON error leaves {@code hasExemptTaxes = false}.
+   *
+   * @param rec the invoice record JSON object; modified in-place
+   * @param invoiceId the primary key of the invoice being enriched
+   */
+  @SuppressWarnings("java:S2077")
+  protected void enrichHasExemptTaxes(JSONObject rec, String invoiceId) throws Exception {
+    if (StringUtils.isBlank(invoiceId)) {
+      rec.put("hasExemptTaxes", false);
+      return;
+    }
+    boolean result = false;
+    try {
+      // Detect exempt taxes ONLY via active invoice LINES (c_invoiceline -> c_tax). Do NOT add a
+      // c_invoicetax UNION branch back in: in Etendo GO draft invoices NEO CRUD does not recompute
+      // or remove c_invoicetax rows when lines change or are deleted, so those rows LINGER. A
+      // c_invoicetax-based check therefore returns exempt=true even after the exempt line has been
+      // removed, leaving hasExemptTaxes stuck at true and the SIF exemption field editable forever
+      // (ETP-4751). The active lines are the reliable current source of truth.
+      String sql =
+          "SELECT 1 FROM c_invoiceline il JOIN c_tax t ON t.c_tax_id = il.c_tax_id"
+        + " WHERE il.c_invoice_id = ? AND il.isactive = 'Y' AND t.istaxexempt = 'Y'"
+        + " LIMIT 1";
+      Connection conn = OBDal.getReadOnlyInstance().getConnection();
+      try (PreparedStatement ps = conn.prepareStatement(sql)) {
+        ps.setString(1, invoiceId);
+        try (ResultSet rs = ps.executeQuery()) {
+          result = rs.next();
+        }
+      }
+    } catch (Exception e) {
+      log.warn("Could not check hasExemptTaxes for invoice {}: {}", invoiceId, e.getMessage());
+    }
+    rec.put("hasExemptTaxes", result);
+  }
+
+  /**
    * Adjusts {@code grandTotalAmount} and {@code outstandingAmount} for a draft invoice carrying
    * a positive {@code etgoTotalDiscount} percentage that has not yet been materialized as a real
    * line — otherwise the list view and preview cards show the raw undiscounted total while the
