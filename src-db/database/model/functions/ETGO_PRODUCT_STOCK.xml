@@ -1,0 +1,17 @@
+<?xml version="1.0"?>
+  <database name="FUNCTION ETGO_PRODUCT_STOCK">
+    <function name="ETGO_PRODUCT_STOCK" type="NUMERIC" volatility="STABLE">
+      <parameter name="p_m_product_id" type="VARCHAR" mode="in">
+        <default/>
+      </parameter>
+      <body><![CDATA[v_qty NUMBER;
+BEGIN
+  SELECT COALESCE(SUM(sd.qtyonhand), 0) INTO v_qty
+  FROM   m_storage_detail sd
+  WHERE  sd.m_product_id = p_m_product_id;
+
+  RETURN COALESCE(v_qty, 0);
+END ETGO_PRODUCT_STOCK
+]]></body>
+    </function>
+  </database>

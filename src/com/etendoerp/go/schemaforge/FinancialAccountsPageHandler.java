@@ -120,7 +120,7 @@ public class FinancialAccountsPageHandler implements NeoHandler {
   /**
    * Accounts with at least one active transaction (ETP-4530). Used by the frontend to lock the
    * Currency field on the edit form once real movement history exists — a stricter, different
-   * condition than {@code psd2Connected} (bank-linkage only, no bearing on transaction history).
+   * condition than {@code bankConnected} (bank-linkage only, no bearing on transaction history).
    */
   private static final String TRANSACTIONS_BY_ACCOUNT_SQL =
       "SELECT DISTINCT ft.fin_financial_account_id "
@@ -209,7 +209,7 @@ public class FinancialAccountsPageHandler implements NeoHandler {
               "Y".equals(rs.getString(8)));
           row.active = "Y".equals(rs.getString(9));
           row.maskedPan = StringUtils.trimToEmpty(rs.getString(10));
-          row.psd2Connected = "CO".equals(rs.getString(11));
+          row.bankConnected = "CO".equals(rs.getString(11));
           row.dateTolerance = rs.getInt(12);
           BigDecimal amtTol = rs.getBigDecimal(13);
           row.amountTolerance = amtTol != null ? amtTol : BigDecimal.ZERO;
@@ -268,8 +268,8 @@ public class FinancialAccountsPageHandler implements NeoHandler {
       json.put("currencyIso", account.currency.iso);
       json.put("iban", account.iban);
       json.put("maskedPan", account.maskedPan);
-      json.put("psd2Connected", account.psd2Connected);
-      json.put("psd2Pending", account.psd2Pending);
+      json.put("bankConnected", account.bankConnected);
+      json.put("bankConnectionPending", account.bankConnectionPending);
       json.put("isDefault", account.isDefault);
       json.put("active", account.active);
       json.put("pendingCount", pendingByAccount.getOrDefault(account.id, 0));
@@ -354,10 +354,10 @@ public class FinancialAccountsPageHandler implements NeoHandler {
     boolean active = true;
     /** PSD2 masked card number (column {@code EM_PSD2_Masked_Pan}); blank for non-card accounts. Set by the loader. */
     String maskedPan = "";
-    /** Whether the account has an active PSD2 connection ({@code EM_PSD2_Connection_Status = 'CO'}). Set by the loader. */
-    boolean psd2Connected = false;
-    /** Whether a PSD2 sync is pending. Not tracked server-side yet; reserved for the list sync badge. */
-    boolean psd2Pending = false;
+    /** Whether the account has an active bank connection ({@code EM_PSD2_Connection_Status = 'CO'}). Set by the loader. */
+    boolean bankConnected = false;
+    /** Whether a bank sync is pending. Not tracked server-side yet; reserved for the list sync badge. */
+    boolean bankConnectionPending = false;
     /** Days of margin allowed between bank line and transaction dates. Default 3. */
     int dateTolerance = 3;
     /** Maximum % difference allowed when matching amounts. Default 0 (exact match). */
