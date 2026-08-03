@@ -237,13 +237,16 @@ public class OnboardingAccountingWiringServiceTest {
   // ---------------------------------------------------------------------------------------------
 
   @Test
-  public void testProvisionEntityPostingAccountsRunsSixInsertsWithClientAndSchemaId() {
+  public void testProvisionEntityPostingAccountsRunsEightInsertsWithClientAndSchemaId() {
     // Use a double that records inserts but keeps the REAL provisionEntityPostingAccounts body,
-    // so the six runEntityAcctInsert calls (and their ordering of clientId/schemaId) are exercised.
-    // ensureAcreedorPrepaymentAccount()/overrideAcreedorGroupAccounts() are stubbed by
+    // so the eight runEntityAcctInsert calls (and their ordering of clientId/schemaId) are
+    // exercised. ensureAcreedorPrepaymentAccount()/overrideAcreedorGroupAccounts() are stubbed by
     // InsertRecordingService: they bypass the runEntityAcctInsert seam and hit
     // OBDal.getInstance().getSession() directly, so leaving them real would reach an uninitialized
     // Hibernate session in this pure-unit test.
+    //
+    // ETP-4565: count went from six to eight when the financial-account and warehouse posting-
+    // account backfills were added (see the dedicated test below for their SQL content).
     InsertRecordingService service = new InsertRecordingService();
     Client client = mock(Client.class);
     when(client.getId()).thenReturn("C1");
@@ -252,7 +255,7 @@ public class OnboardingAccountingWiringServiceTest {
 
     service.provisionEntityPostingAccounts(client, ledger);
 
-    assertEquals("six per-entity posting inserts", 6, service.acctInserts.size());
+    assertEquals("eight per-entity posting inserts", 8, service.acctInserts.size());
     for (AcctInsert insert : service.acctInserts) {
       assertEquals("C1", insert.clientId);
       assertEquals("S1", insert.schemaId);
@@ -262,6 +265,42 @@ public class OnboardingAccountingWiringServiceTest {
         service.ensureAcreedorPrepaymentAccountCount);
     assertEquals("Acreedor group posting-account override must run once", 1,
         service.overrideAcreedorGroupAccountsCount);
+  }
+
+  /**
+   * ETP-4565 — reproduces the confirmed 0% auto-creation gap for {@code financial-account} and
+   * {@code warehouse}: {@code FIN_FINANCIAL_ACCOUNT} and {@code M_WAREHOUSE} are bulk-imported by
+   * the onboarding dataset importer (triggers disabled during that import — see
+   * {@code OnboardingDatasetDefinition.INCLUDED_TABLES}), so their native {@code _trg} triggers
+   * never fire for the bundled template rows ("Caja"/"Cuenta de Banco"/"Tarjeta",
+   * "Almacen GO"/"Almacén Secundario"). Every other included entity in this same method
+   * (BP group, product category, BP customer/vendor, product, tax) already gets a matching
+   * backfill {@code runEntityAcctInsert} call right here; {@code FIN_Financial_Account_Acct} and
+   * {@code M_Warehouse_Acct} do not, which is the gap this ticket closes.
+   */
+  @Test
+  public void testProvisionEntityPostingAccountsIncludesFinancialAccountAndWarehouseInserts() {
+    InsertRecordingService service = new InsertRecordingService();
+    Client client = mock(Client.class);
+    when(client.getId()).thenReturn("C1");
+    AcctSchema ledger = mock(AcctSchema.class);
+    when(ledger.getId()).thenReturn("S1");
+
+    service.provisionEntityPostingAccounts(client, ledger);
+
+    boolean hasFinancialAccountInsert = service.acctInserts.stream()
+        .anyMatch(insert -> insert.sql.toLowerCase(java.util.Locale.ROOT)
+            .contains("fin_financial_account_acct"));
+    boolean hasWarehouseInsert = service.acctInserts.stream()
+        .anyMatch(insert -> insert.sql.toLowerCase(java.util.Locale.ROOT)
+            .contains("m_warehouse_acct"));
+
+    assertTrue("must provision FIN_Financial_Account_Acct rows so new financial accounts inherit"
+        + " default posting accounts from the Esquema Contable", hasFinancialAccountInsert);
+    assertTrue("must provision M_Warehouse_Acct rows so new warehouses inherit default posting"
+        + " accounts from the Esquema Contable", hasWarehouseInsert);
+    assertEquals("eight per-entity posting inserts (six pre-existing + financial-account +"
+        + " warehouse)", 8, service.acctInserts.size());
   }
 
   // ---------------------------------------------------------------------------------------------
