@@ -302,7 +302,7 @@ public class McpToolRouter {
 
     // Apply filters as where clause
     if (filters != null && filters.length() > 0) {
-      String whereClause = McpToolRouterSupport.buildWhereFromFilters(filters, adTab, log);
+      String whereClause = McpToolRouterSupport.buildWhereFromFilters(filters, adTab, sfEntity, log);
       if (StringUtils.isNotBlank(whereClause)) {
         params.put(JsonConstants.WHERE_AND_FILTER_CLAUSE, whereClause);
         params.put(JsonConstants.USE_ALIAS, "true");
@@ -333,6 +333,10 @@ public class McpToolRouter {
 
     // Apply field filtering
     fieldFilter.filterGetResponse(responseJson);
+
+    // IMP-2: optional projection — explicit `fields:[...]` or view:"summary". No-op when neither
+    // is present, so the default returns every column.
+    McpToolRouterSupport.applyProjection(responseJson, args, sfEntity, adTab);
 
     return wrapAsTextContent(responseJson.toString(2));
   }
@@ -376,6 +380,9 @@ public class McpToolRouter {
     }
 
     fieldFilter.filterGetResponse(responseJson);
+
+    // IMP-2: optional projection — explicit `fields:[...]` or view:"summary".
+    McpToolRouterSupport.applyProjection(responseJson, args, sfEntity, adTab);
 
     return wrapAsTextContent(responseJson.toString(2));
   }
@@ -703,6 +710,18 @@ public class McpToolRouter {
       }
     }
 
+    // IMP-7: optional lean/grouped view. Without `view` (or view=full) the flat response is
+    // returned unchanged; grouped/minimal split writable defaults (confirm) from server-managed
+    // compliance flags so the agent isn't buried under ~65 columns it should never touch.
+    String view = args.optString(McpDefaultsView.PARAM_VIEW, null);
+    if (McpDefaultsView.isGroupingView(view) && neoResponse.getHttpStatus() < 400
+        && neoResponse.getBody() != null) {
+      java.util.Set<String> editable =
+          McpToolRouterSupport.editablePropertyNames(sfEntity, adTab);
+      neoResponse = NeoResponse.ok(
+          McpDefaultsView.apply(neoResponse.getBody(), editable, view));
+    }
+
     return McpHookExecutor.neoResponseToMcpResult(neoResponse);
   }
 
@@ -772,6 +791,15 @@ public class McpToolRouter {
       methods.put(HTTP_METHOD_DELETE);
     }
     entitySchema.put("methods", methods);
+
+    // Named business filters (ETP-4601): advertise the spec's hand-authored {status:"<name>"}
+    // filters so the agent can discover them instead of guessing. Only the name/label/description
+    // are exposed — the HQL where fragment stays server-side.
+    JSONArray namedFilters = McpNamedFilters.describe(sfEntity.getNamedFilters());
+    if (namedFilters.length() > 0) {
+      entitySchema.put("namedFilters", namedFilters);
+    }
+
     entitySchema.put("fields", fieldsArray);
     entitySchema.put("fieldCount", fieldsArray.length());
 
