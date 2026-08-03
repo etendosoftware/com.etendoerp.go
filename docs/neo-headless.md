@@ -771,7 +771,20 @@ last-resort pattern, not a default — only reach for it once you've confirmed (
 | `NeoResponse.ok(JSONObject)` | 200 | Success with body. |
 | `NeoResponse.created(JSONObject)` | 201 | Created with body. |
 | `NeoResponse.noContent()` | 204 | Success, no body. |
-| `NeoResponse.error(int, String)` | (given) | Error with `{"error": {"message": "...", "status": N}}`. |
+| `NeoResponse.error(int, String)` | (given) | Wraps `message` in the nested envelope `{"error": {"message": "...", "status": N}}`. |
+| `NeoResponse.error(int, JSONObject)` | (given) | Sends `body` **verbatim**, unwrapped — for a handler that already builds its own flat response shape (e.g. `{"success": ..., "message": ...}`). |
+
+**⚠️ Overload pitfall (ETP-4706):** `error(int, String)` and `error(int, JSONObject)` produce very
+different response shapes, and the compiler will silently pick the `String` overload if you pass
+`body.toString()` instead of `body` — turning your flat `{"success", "message"}` object into a
+message *string* nested one level deeper as `{"error": {"message": "{\"success\":...}", "status": N}}`.
+`DocumentPostingService#handleAction` and `NotPostedDocumentsHandler#buildPostResponse` both hit
+this: they had already built a flat JSON body and called `NeoResponse.error(422, body.toString())`,
+so every client reading a top-level `message` field silently got the stringified JSON blob instead
+(masked further because most clients then fell back to `res.statusText`, e.g. "Unprocessable
+Entity", not a JSON-parse error). Fixed by passing `body` directly. When a handler already owns its
+response shape, call `error(status, JSONObject)`; only call `error(status, String)` when you want the
+standard nested envelope built for you.
 
 Responses support custom headers via `withHeader(name, value)`.
 

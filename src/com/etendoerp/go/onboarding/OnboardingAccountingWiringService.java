@@ -516,22 +516,27 @@ public class OnboardingAccountingWiringService extends OnboardingContextSupport 
 
   /**
    * Provisions the per-entity posting accounts (Gap A2) for the tenant's business-partner groups,
-   * product categories, customers, vendors and products.
+   * product categories, customers, vendors, products, financial accounts and warehouses.
    *
    * <p>Etendo's posting engine ({@code AcctServer}) does NOT fall back to {@code C_ACCTSCHEMA_DEFAULT}
    * to resolve the accounts of these entities: posting an invoice fails with
    * {@code Account Not Defined For …} (or {@code IllegalStateException} for the per-BP/product
    * lookups) unless dedicated rows exist in {@code C_BP_GROUP_ACCT}, {@code M_PRODUCT_CATEGORY_ACCT},
-   * {@code C_BP_CUSTOMER_ACCT}, {@code C_BP_VENDOR_ACCT} and {@code M_PRODUCT_ACCT}. The dataset
-   * import brings in the groups/categories/products but not these derived posting rows, so they are
-   * created here, right after the ledger is wired.
+   * {@code C_BP_CUSTOMER_ACCT}, {@code C_BP_VENDOR_ACCT}, {@code M_PRODUCT_ACCT},
+   * {@code FIN_FINANCIAL_ACCOUNT_ACCT} and {@code M_WAREHOUSE_ACCT}. The dataset import brings in the
+   * groups/categories/products/financial-accounts/warehouses but not these derived posting rows, so
+   * they are created here, right after the ledger is wired.
    *
    * <p>This mirrors step 11 of the {@code R1-chart-of-accounts} corrective data-fix one-for-one
    * (same column lists, same {@code NOT EXISTS} guards, {@code ad_org_id} inherited from each source
    * entity, defaults copied from the single {@code C_ACCTSCHEMA_DEFAULT} row). It is set-based and
    * idempotent: each statement skips entities that already have a row for this schema, so re-running
    * onboarding never double-inserts. Entities created AFTER onboarding still need their own posting
-   * rows at creation time (separate concern, not covered here).
+   * rows at creation time — for {@code FIN_FINANCIAL_ACCOUNT}/{@code M_WAREHOUSE} that later case is
+   * already covered by Classic's own {@code fin_financial_account_trg}/{@code m_warehouse_trg}
+   * triggers (verified live: every non-onboarding financial account and warehouse in this tenant base
+   * already has its posting row); those triggers just never fire for the rows the dataset importer
+   * inserts with triggers disabled, which is exactly the gap this method backfills (ETP-4565).
    *
    * <p>NOTE: at this point in the onboarding chain the only business partners are those carried by
    * the dataset import (none — {@code C_BPARTNER} is not imported), so the customer/vendor inserts
@@ -553,6 +558,8 @@ public class OnboardingAccountingWiringService extends OnboardingContextSupport 
     runEntityAcctInsert(BP_VENDOR_ACCT_SQL, clientId, schemaId);
     runEntityAcctInsert(PRODUCT_ACCT_SQL, clientId, schemaId);
     runEntityAcctInsert(TAX_ACCT_SQL, clientId, schemaId);
+    runEntityAcctInsert(FIN_FINANCIAL_ACCOUNT_ACCT_SQL, clientId, schemaId);
+    runEntityAcctInsert(WAREHOUSE_ACCT_SQL, clientId, schemaId);
   }
 
   /**
@@ -955,6 +962,53 @@ public class OnboardingAccountingWiringService extends OnboardingContextSupport 
       + "  AND d.t_due_acct IS NOT NULL AND d.t_credit_acct IS NOT NULL "
       + "  AND NOT EXISTS (SELECT 1 FROM c_tax_acct a"
       + "    WHERE a.c_tax_id = t.c_tax_id AND a.c_acctschema_id = :schemaId)";
+
+  // Financial-account posting accounts (ETP-4565): FIN_FINANCIAL_ACCOUNT is bulk-imported by the
+  // dataset importer with triggers disabled (see OnboardingDatasetDefinition.INCLUDED_TABLES), so
+  // Classic's own fin_financial_account_trg AFTER INSERT trigger — which otherwise auto-provisions
+  // this exact row for every LIVE financial-account creation — never fires for the bundled template
+  // accounts ("Caja", "Cuenta de Banco", "Tarjeta"). This statement mirrors that trigger's own
+  // column mapping one-for-one: the asset account resolves to CB_Asset_Acct for cash-type accounts
+  // (type='C') and B_Asset_Acct for every other type, and that same resolved value is reused for
+  // fin_deposit_acct/fin_withdrawal_acct/fin_out_clear_acct/fin_in_clear_acct, exactly as the trigger
+  // does (fin_debit_acct/fin_credit_acct are left NULL, also matching the trigger).
+  private static final String FIN_FINANCIAL_ACCOUNT_ACCT_SQL =
+      "INSERT INTO fin_financial_account_acct ("
+      + "  fin_financial_account_acct_id, ad_client_id, ad_org_id, isactive, created, createdby,"
+      + "  updated, updatedby, fin_financial_account_id, c_acctschema_id,"
+      + "  fin_deposit_acct, fin_withdrawal_acct, fin_out_clear_acct, fin_in_clear_acct,"
+      + "  fin_bankfee_acct, fin_bankrevaluationgain_acct, fin_bankrevaluationloss_acct,"
+      + "  fin_out_intransit_acct, fin_in_intransit_acct) "
+      + "SELECT get_uuid(), :clientId, f.ad_org_id, 'Y', now(), '0', now(), '0',"
+      + "  f.fin_financial_account_id, :schemaId,"
+      + "  CASE WHEN f.type = 'C' THEN d.cb_asset_acct ELSE d.b_asset_acct END,"
+      + "  CASE WHEN f.type = 'C' THEN d.cb_asset_acct ELSE d.b_asset_acct END,"
+      + "  CASE WHEN f.type = 'C' THEN d.cb_asset_acct ELSE d.b_asset_acct END,"
+      + "  CASE WHEN f.type = 'C' THEN d.cb_asset_acct ELSE d.b_asset_acct END,"
+      + "  d.b_expense_acct, d.b_revaluationgain_acct, d.b_revaluationloss_acct,"
+      + "  d.b_intransit_acct, d.b_intransit_acct "
+      + "FROM fin_financial_account f, c_acctschema_default d "
+      + "WHERE f.ad_client_id = :clientId AND d.c_acctschema_id = :schemaId "
+      + "  AND NOT EXISTS (SELECT 1 FROM fin_financial_account_acct a"
+      + "    WHERE a.fin_financial_account_id = f.fin_financial_account_id"
+      + "      AND a.c_acctschema_id = :schemaId)";
+
+  // Warehouse posting accounts (ETP-4565): M_WAREHOUSE is bulk-imported by the dataset importer
+  // with triggers disabled (same INCLUDED_TABLES gap as FIN_FINANCIAL_ACCOUNT above), so Classic's
+  // own m_warehouse_trg AFTER INSERT trigger never fires for the bundled template warehouses
+  // ("Almacen GO", "Almacén Secundario"). Column mapping mirrors that trigger one-for-one.
+  private static final String WAREHOUSE_ACCT_SQL =
+      "INSERT INTO m_warehouse_acct ("
+      + "  m_warehouse_acct_id, ad_client_id, ad_org_id, isactive, created, createdby, updated,"
+      + "  updatedby, m_warehouse_id, c_acctschema_id,"
+      + "  w_inventory_acct, w_differences_acct, w_revaluation_acct, w_invactualadjust_acct) "
+      + "SELECT get_uuid(), :clientId, w.ad_org_id, 'Y', now(), '0', now(), '0',"
+      + "  w.m_warehouse_id, :schemaId,"
+      + "  d.w_inventory_acct, d.w_differences_acct, d.w_revaluation_acct, d.w_invactualadjust_acct "
+      + "FROM m_warehouse w, c_acctschema_default d "
+      + "WHERE w.ad_client_id = :clientId AND d.c_acctschema_id = :schemaId "
+      + "  AND NOT EXISTS (SELECT 1 FROM m_warehouse_acct a"
+      + "    WHERE a.m_warehouse_id = w.m_warehouse_id AND a.c_acctschema_id = :schemaId)";
 
   protected Tree resolveTenantElementValueTree(Client client) {
     OBCriteria<Tree> criteria = OBDal.getInstance().createCriteria(Tree.class);
