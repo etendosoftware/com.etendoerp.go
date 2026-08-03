@@ -126,7 +126,15 @@ public class GoodsReceiptNoStockCompletionIntegrationTest extends WeldBaseTest {
         OBDal.getInstance().rollbackAndClose();
       }
     } finally {
-      OBContext.restorePreviousMode();
+      // Completion above is EXPECTED to fail, and a stored-procedure call that throws can
+      // leave its own admin-mode push on the stack, so a single restorePreviousMode() does
+      // not always unwind it and OBBaseTest then fails the test for leaking admin mode.
+      // Drain the stack, as ReactivatePaymentHandlerRemoveIntegrationTest#rollbackChanges
+      // does. The two sibling tests complete successfully, never leak, and keep the single
+      // restore below.
+      while (OBContext.getOBContext() != null && OBContext.getOBContext().isInAdministratorMode()) {
+        OBContext.restorePreviousMode();
+      }
     }
   }
 

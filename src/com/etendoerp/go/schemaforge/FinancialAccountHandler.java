@@ -17,8 +17,12 @@
 
 package com.etendoerp.go.schemaforge;
 
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 
 import javax.inject.Named;
 import javax.servlet.http.HttpServletResponse;
@@ -104,6 +108,38 @@ public class FinancialAccountHandler implements NeoHandler {
    *  on the generic CRUD response) rather than declared in decisions.json — the same technique
    *  {@code SalesInvoiceHeaderHandler} uses for {@code arInvoiceSubtype}. */
   private static final String FIELD_HAS_TRANSACTIONS = "hasTransactions";
+
+  /* ---------------------------------------------------------------------------
+   * Derived list fields (ETP-4658 follow-up): the accounts list used to be served
+   * by the bespoke `financial-accounts-page` R spec, which computed these in SQL
+   * while the generic W CRUD knew nothing about them. That split meant any other
+   * consumer of the standard spec got incomplete data. They are injected here so
+   * the W spec is the single source of truth; the loaders are reused verbatim from
+   * {@link FinancialAccountsPageHandler} (same package) rather than duplicating SQL.
+   *
+   * All of these MUST be injected post-hook: `NeoFieldFilter` strips every key that
+   * is not a declared field, and it runs before afterHandle.
+   * --------------------------------------------------------------------------- */
+  /** Unreconciled statement lines for the account — drives the "Por conciliar (N)" pill. */
+  private static final String FIELD_PENDING_COUNT = "pendingCount";
+  /** {@code EM_PSD2_Connection_Status = 'CO'} — drives the "Sincronizado / Sin conexión" badge. */
+  private static final String FIELD_BANK_CONNECTED = "bankConnected";
+  /** Reserved for the sync badge; never computed server-side (mirrors the R spec's constant false). */
+  private static final String FIELD_BANK_CONNECTION_PENDING = "bankConnectionPending";
+  /** Currency ISO code, from the {@code c_currency} join. The contract only carries the FK. */
+  private static final String FIELD_CURRENCY_ISO = "currencyIso";
+  private static final String FIELD_CURRENCY_ID = "currencyId";
+  private static final String FIELD_IS_DEFAULT = "isDefault";
+  private static final String FIELD_MASKED_PAN = "maskedPan";
+  /** Archived-vs-active flag. {@code Isactive} has no ETGO_SF_FIELD row on this entity, so the
+   *  generic CRUD response would not carry it — but the list's "Inactivas" filter needs it. */
+  private static final String FIELD_ACTIVE = "active";
+  /** Lowercase alias of the contract's {@code iBAN}. The contract name is a mechanical
+   *  derivation of the AD column ({@code Iban} → {@code iBAN}) and cannot be overridden from
+   *  decisions.json, so the list-friendly spelling is aliased here. */
+  private static final String FIELD_IBAN_ALIAS = "iban";
+  /** Collection-level aggregates for the list sidebar, attached as a sibling of `response.data`. */
+  private static final String FIELD_SUMMARY = "summary";
 
   private static final String TYPE_BANK = "B";
   private static final String TYPE_CASH = "C";
@@ -253,19 +289,111 @@ public class FinancialAccountHandler implements NeoHandler {
     }
     try {
       enterAdminMode();
-      for (int i = 0; i < dataArr.length(); i++) {
-        JSONObject rec = dataArr.getJSONObject(i);
-        String id = StringUtils.trimToNull(rec.optString("id", null));
-        FIN_FinancialAccount account = id != null ? loadAccount(id) : null;
-        rec.put(FIELD_HAS_TRANSACTIONS, account != null && hasTransactions(account));
-      }
+      injectDerivedFields(context, dataArr);
       return NeoResponse.ok(context.getPreviousResult().getBody());
     } catch (Exception e) {
-      log.error("financial-account afterHandle: failed to inject hasTransactions", e);
+      log.error("financial-account afterHandle: failed to inject derived list fields", e);
       return null;
     } finally {
       exitAdminMode();
     }
+  }
+
+  /**
+   * Enriches every GET row with the fields the accounts list needs but no AD column provides,
+   * and attaches the collection-level {@code summary} used by the list sidebar.
+   *
+   * <p>All three data loaders run <b>once</b> for the whole page (a Map/Set lookup per row),
+   * reusing {@link FinancialAccountsPageHandler}'s SQL verbatim. The previous implementation
+   * issued two queries <i>per row</i> just for {@code hasTransactions}.
+   *
+   * <p>The summary deliberately aggregates only the rows present in <b>this</b> response rather
+   * than the loader's own universe: the generic CRUD already applied the role's readable-org and
+   * window-access filters, so aggregating anything wider would show totals for accounts the caller
+   * cannot see.
+   */
+  private void injectDerivedFields(NeoContext context, JSONArray dataArr) throws Exception {
+    FinancialAccountsPageHandler loaders = pageLoaders();
+    String clientId = OBContext.getOBContext().getCurrentClient().getId();
+    Set<String> orgs = loaders.accessibleOrgs(OBContext.getOBContext().getCurrentOrganization().getId());
+
+    Map<String, FinancialAccountsPageHandler.AccountRow> byId = new LinkedHashMap<>();
+    for (FinancialAccountsPageHandler.AccountRow row : loaders.loadAccounts(clientId, orgs)) {
+      byId.put(row.id, row);
+    }
+    Map<String, Integer> pendingByAccount = loaders.loadPendingByAccount(clientId, orgs);
+    Set<String> withTransactions = loaders.loadAccountsWithTransactions(clientId, orgs);
+
+    Set<String> visibleIds = new java.util.LinkedHashSet<>();
+    for (int i = 0; i < dataArr.length(); i++) {
+      String correlatedId = enrichRecord(dataArr.getJSONObject(i), byId, pendingByAccount, withTransactions);
+      if (correlatedId != null) {
+        visibleIds.add(correlatedId);
+      }
+    }
+
+    // Iterate `byId` (loader order: isdefault DESC, name ASC) rather than the CRUD's
+    // row order, so `summary.byCurrency` keeps the same sequence the accounts-page
+    // handler produced and the sidebar's currency list does not visibly reorder.
+    List<FinancialAccountsPageHandler.AccountRow> visible = new ArrayList<>();
+    for (Map.Entry<String, FinancialAccountsPageHandler.AccountRow> entry : byId.entrySet()) {
+      if (visibleIds.contains(entry.getKey())) {
+        visible.add(entry.getValue());
+      }
+    }
+
+    JSONObject envelope = context.getPreviousResult().getBody().optJSONObject("response");
+    if (envelope != null) {
+      envelope.put(FIELD_SUMMARY, loaders.buildSummary(visible, pendingByAccount));
+    }
+  }
+
+  /**
+   * Enriches ONE GET row with the derived list fields, using the already-loaded lookups.
+   *
+   * <p>Extracted from {@link #injectDerivedFields}'s loop so the two ways a row can fail to
+   * correlate — no id at all, or an id the account loader does not know — read as guard
+   * clauses instead of the two {@code continue} statements they used to be (Sonar S135
+   * allows at most one per loop).
+   *
+   * @return the account id when the row correlated with the loaders and therefore counts
+   *         towards {@code summary}, or {@code null} when it did not.
+   */
+  private String enrichRecord(JSONObject rec, Map<String, FinancialAccountsPageHandler.AccountRow> byId,
+      Map<String, Integer> pendingByAccount, Set<String> withTransactions) throws JSONException {
+    String id = StringUtils.trimToNull(rec.optString("id", null));
+    // A row with no id cannot be correlated with the loaders; keep the historical
+    // contract (the flag is always present, defaulting to false) instead of omitting it.
+    rec.put(FIELD_HAS_TRANSACTIONS, id != null && withTransactions.contains(id));
+    if (id == null) {
+      return null;
+    }
+    rec.put(FIELD_PENDING_COUNT, pendingByAccount.getOrDefault(id, 0));
+    // isNull() first: optString() on a JSON null yields the literal "null" string,
+    // which the list would render as text under the account type.
+    rec.put(FIELD_IBAN_ALIAS, rec.isNull(FIELD_IBAN) ? "" : rec.optString(FIELD_IBAN, ""));
+
+    FinancialAccountsPageHandler.AccountRow row = byId.get(id);
+    if (row == null) {
+      return null;
+    }
+    rec.put(FIELD_BANK_CONNECTED, row.bankConnected);
+    rec.put(FIELD_BANK_CONNECTION_PENDING, row.bankConnectionPending);
+    rec.put(FIELD_CURRENCY_ISO, row.currency.iso);
+    rec.put(FIELD_CURRENCY_ID, row.currency.id);
+    rec.put(FIELD_IS_DEFAULT, row.isDefault);
+    rec.put(FIELD_MASKED_PAN, row.maskedPan);
+    rec.put(FIELD_ACTIVE, row.active);
+    return id;
+  }
+
+  /**
+   * Seam for the SQL loaders shared with the accounts-page handler. Package-private and
+   * overridable so unit tests can stub the three queries without a live connection —
+   * same convention as {@link #loadAccount(String)} and {@code hasOpenReconciliations}.
+   */
+  FinancialAccountsPageHandler pageLoaders() {
+    return new FinancialAccountsPageHandler();
   }
 
   /** {@code true} when the account has at least one active transaction registered against it. */
