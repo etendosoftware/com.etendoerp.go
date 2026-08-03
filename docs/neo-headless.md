@@ -634,6 +634,206 @@ specs — not a replacement for this one).
 
 ---
 
+### 4.12 MCP Tool Ergonomics (Wave 3 — ETP-4601)
+
+The MCP tool layer (`/sws/neo/mcp`, routed by `McpToolRouter`) exposes the same specs described
+above to AI agents as JSON-RPC tools (`neo_discover`, `neo_schema`, `neo_create`, `neo_update`, …).
+Wave 3 of the MCP improvements adds three agent-ergonomics features on top of that surface. Each is
+additive and backwards-compatible: an existing caller that ignores the new parameter/field sees the
+exact same responses as before.
+
+#### 4.12.1 `neo_schema({view:"actions"})` — actions-only projection (IMP-6)
+
+`neo_schema` normally returns the full field dump for an entity — for a compliance-heavy window this
+can be ~97 fields, most of which an agent does not need when its only goal is to find out *which
+buttons/processes it can trigger* on that entity. The optional `view` parameter collapses the
+response down to the callable actions.
+
+`view` is an enum whose only accepted value is `"actions"` (matched case-insensitively). Omitting it
+— or passing anything else — is a no-op: the caller keeps receiving the full, unchanged schema.
+
+**Request:**
+
+```json
+{
+  "tool": "neo_schema",
+  "arguments": {
+    "spec": "sales-order",
+    "entity": "header",
+    "view": "actions"
+  }
+}
+```
+
+**Response** (`{spec, entity, actions, actionCount}` — the full `fields` array is dropped):
+
+```json
+{
+  "spec": "sales-order",
+  "entity": "header",
+  "actions": [
+    {
+      "name": "completeAction",
+      "label": "Complete",
+      "type": "button",
+      "invokeVia": "neo_action",
+      "action": "completeAction",
+      "processType": "OBUIAPP",
+      "processName": "Complete",
+      "processId": "ABC123..."
+    },
+    {
+      "name": "cancelAction",
+      "label": "Cancel Document",
+      "type": "button",
+      "invokeVia": "neo_action",
+      "action": "cancelAction",
+      "processType": "OBUIAPP",
+      "processName": "Cancel Document",
+      "processId": "..."
+    }
+  ],
+  "actionCount": 2
+}
+```
+
+Behavior details (`McpActionsView`):
+
+- The view is a **pure re-shape** of the field array `neo_schema` already builds
+  (`McpSchemaFieldBuilder.buildSchemaFieldsArray`) — it simply filters down to the `type:"button"`
+  entries, in their original order. No additional DAL/model access is performed.
+- Each returned action is already fully self-describing: `invokeVia:"neo_action"` plus `action`,
+  `processType`, `processName`, and `processId` tell the agent exactly how to invoke it via
+  `neo_action` — no follow-up `neo_schema` call on the full entity is required.
+- An entity with no button fields returns `"actions": []` and `"actionCount": 0` (never `null`).
+
+**When to use it:** the agent knows the entity and only wants the menu of things it can *do* to a
+record (complete, cancel, post, …), not the full editable/read-only column list.
+
+#### 4.12.2 `neo_discover` → `primaryEntity` — the root entity of a window spec (IMP-9)
+
+A window spec (`SPEC_TYPE = 'W'`) can include several entities (Header, Lines, …). To create a
+document an agent must create the **root/header** record first, then attach child rows. Previously it
+had to infer which included entity was the header by calling `neo_schema` on each. `neo_discover` now
+surfaces that directly: each window spec that has entities carries a `primaryEntity` field naming the
+root entity.
+
+**Response fragment** (`handleDiscover` → `McpToolRouterSupport.buildDiscoverSpec`):
+
+```json
+{
+  "name": "sales-order",
+  "type": "W",
+  "description": "Sales Order",
+  "primaryEntity": "header",
+  "entities": [
+    { "name": "header", "methods": ["GET", "POST", "PUT", "DELETE"], "readOnly": false },
+    { "name": "lines",  "methods": ["GET", "POST", "PUT", "DELETE"], "readOnly": false }
+  ]
+}
+```
+
+Resolution rules (`McpToolRouterSupport.resolvePrimaryEntityName`):
+
+- **Authoritative signal:** the included entity whose linked `AD_Tab` has `tabLevel == 0` is the
+  header (the same convention `McpToolRouter.resolveParentFK` relies on). `SFEntity` carries no
+  parent column, so hierarchy is read off the linked `AD_Tab`.
+- **Fallback:** when no included entity has a level-0 tab — or an entity has no linked tab at all
+  (handler-backed entities) — the first included entity by ascending `seqNo` is used.
+- `primaryEntity` is only ever emitted **alongside `entities`**, i.e. for `W` specs. Process (`P`)
+  and report (`R`) specs never carry it.
+- A spec with no included entities yields `null`, and the key is omitted from the response entirely.
+
+#### 4.12.3 FK-by-name resolution on `neo_create` / `neo_update` (IMP-4)
+
+Historically every foreign-key field in a write body required the exact 32-character record id,
+forcing an agent to call `neo_selectors` first even for an obvious single-match lookup. Wave 3 lets a
+write body pass a **human search string** for an FK field; the router resolves it to the real record
+id server-side before persisting, via the same selector path `neo_selectors` uses
+(`NeoSelectorService.querySelectorByColumn`, limit 10). This runs for both `neo_create` and
+`neo_update` (`McpFkResolver.resolveFkNames`, invoked from `handleCreate` and `handleUpdate`).
+
+**Request** — `businessPartner` given by name instead of id:
+
+```json
+{
+  "tool": "neo_create",
+  "arguments": {
+    "spec": "sales-order",
+    "entity": "header",
+    "businessPartner": "Acme Corp",
+    "orderDate": "2026-08-03"
+  }
+}
+```
+
+If exactly one business partner matches `"Acme Corp"`, the resolver replaces the value in place with
+that record's id and the create proceeds normally.
+
+**Which values are resolved, and which are passed through untouched:**
+
+- A value is treated as an already-valid id — and left untouched — when it is exactly **32 hex
+  characters** (`[0-9A-Fa-f]{32}`, upper/lower/mixed case). `looksLikeId` matches `95E2A8B5…`; it
+  rejects a 31-char string, a string with a non-hex char, an empty string, and `null`.
+- Only FK fields are considered: a key is resolved only if it maps to a DAL property that is a
+  non-primitive association with a target entity. Non-FK fields, non-string values, and empty strings
+  are never touched.
+
+**Outcomes by selector match count** (`decideOutcome`):
+
+| Matches | Outcome | Effect |
+|---------|---------|--------|
+| 0 | `NOT_FOUND` | Returns a structured `not_found` error; the write is rejected. |
+| 1 | `RESOLVED` | Value replaced in place with the matched record id; write proceeds. |
+| >1 | `AMBIGUOUS` | Returns a structured `ambiguous_fk` error carrying the candidate list; the write is rejected. |
+
+Both error shapes are returned as an MCP error content payload with HTTP-style
+`status: 422` (`STATUS_UNPROCESSABLE`) and a `field` naming the offending key:
+
+**Not found:**
+
+```json
+{
+  "status": 422,
+  "error": "not_found",
+  "detail": "No match for 'businessPartner'='Acme Corp'. Use neo_selectors to search, or pass the exact record id instead.",
+  "field": "businessPartner"
+}
+```
+
+**Ambiguous** (`candidates` is the raw selector `items` array, capped at the selector limit of 10):
+
+```json
+{
+  "status": 422,
+  "error": "ambiguous_fk",
+  "detail": "'businessPartner'='Acme' matched 3 records. Pick one of the candidates' ids, or narrow the search text.",
+  "field": "businessPartner",
+  "candidates": [
+    { "id": "…", "name": "Acme Corp" },
+    { "id": "…", "name": "Acme Industries" },
+    { "id": "…", "name": "Acme Logistics" }
+  ]
+}
+```
+
+> **Known limitation — selector context.** The selector context passed to the resolver is built from
+> the `AD_Tab` alone (`McpSelectorContextHelper.buildSelectorContextParams(null, adTab)` — window
+> sales/purchase context, business-partner role). It does **not** synthesize `recordContext` /
+> `parentContext` from the in-flight body, because that would require resolving fields in dependency
+> order (e.g. `priceList` needs `businessPartner` resolved first). A **dependent** FK — such as
+> `partnerAddress` depending on `businessPartner` — may therefore match more records than a
+> context-aware `neo_selectors` call would, and can return a false `ambiguous_fk`. When that happens,
+> resolve the dependent field explicitly via `neo_selectors` with an explicit `recordContext` and
+> pass its resulting id.
+
+If the selector lookup itself fails (HTTP status ≥ 400 or a null body) or no `AD_Column` can be
+resolved for the key, the resolver logs a warning/debug line and leaves the value as-is rather than
+failing the write — the downstream DAL then surfaces its own validation error for the unresolved
+reference.
+
+---
+
 ## 5. Configuration
 
 ### 5.1 Creating a Spec
