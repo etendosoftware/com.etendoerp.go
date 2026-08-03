@@ -96,6 +96,7 @@ public class PurchaseInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler i
   @Override
   public NeoResponse handle(NeoContext context) {
     NeoHandlerUtils.mirrorAccountingDate(context, "invoiceDate", "accountingDate");
+    captureOriginInvoice(context);
     NeoResponse posting = postingService != null ? postingService.handleAction(context) : null;
     if (posting != null) {
       return posting;
@@ -141,9 +142,12 @@ public class PurchaseInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler i
   public NeoResponse afterHandle(NeoContext context) {
     autoCreateOrUpdateConversionRateDocument(context);
     try {
-      // POST/PUT: persist origin invoice relationship after the record is saved
+      // POST/PUT/PATCH: persist origin invoice relationship after the record is saved.
+      // ETP-4737 fix: the ImportFromSourceInvoiceModal.afterImport hook links via a PATCH
+      // (not POST/PUT), which this condition previously excluded — the origin-invoice link
+      // was silently never persisted for that flow (confirmed empty C_Invoice_Reverse table).
       if (NeoEndpointType.CRUD.equals(context.getEndpointType())
-          && ("POST".equals(context.getHttpMethod()) || "PUT".equals(context.getHttpMethod()))) {
+          && NeoHandlerUtils.isWriteMethod(context.getHttpMethod())) {
         persistOriginInvoice(context);
       }
 

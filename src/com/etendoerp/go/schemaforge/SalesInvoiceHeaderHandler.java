@@ -98,6 +98,7 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
   @Override
   public NeoResponse handle(NeoContext context) {
     NeoHandlerUtils.mirrorAccountingDate(context, "invoiceDate", "accountingDate");
+    captureOriginInvoice(context);
     NeoResponse posting = postingService != null ? postingService.handleAction(context) : null;
     if (posting != null) {
       return posting;
@@ -142,6 +143,14 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
   @Override
   public NeoResponse afterHandle(NeoContext context) {
     autoCreateOrUpdateConversionRateDocument(context);
+    // POST/PUT/PATCH: persist origin invoice relationship after the record is saved.
+    // Mirrors PurchaseInvoiceHeaderHandler#afterHandle (ETP-4737) — the manual
+    // "Import from Source Invoice" flow links a rectificativa back to its source via
+    // C_Invoice_Reverse, same mechanism shared through AbstractInvoiceHeaderHandler.
+    if (NeoEndpointType.CRUD.equals(context.getEndpointType())
+        && NeoHandlerUtils.isWriteMethod(context.getHttpMethod())) {
+      persistOriginInvoice(context);
+    }
     if (!"GET".equals(context.getHttpMethod()) || !NeoEndpointType.CRUD.equals(context.getEndpointType())) {
       return null;
     }
@@ -164,6 +173,7 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
       if (context.getRecordId() != null) {
         JSONObject rec = dataArr.getJSONObject(0);
         enrichSourceInvoice(rec, context.getRecordId());
+        enrichOriginInvoice(rec, context.getRecordId());
         enrichDocTypeLocked(rec);
         enrichIsRectificative(rec);
         enrichHasRectifications(rec, context.getRecordId());

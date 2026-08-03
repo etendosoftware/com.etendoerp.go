@@ -83,6 +83,16 @@ public abstract class AbstractInvoiceHeaderHandler {
   protected static final String FIELD_GRAND_TOTAL_AMOUNT = "grandTotalAmount";
   protected static final String FIELD_OUTSTANDING_AMOUNT = "outstandingAmount";
 
+  // ETP-4737: captured by captureOriginInvoice() (called from each subclass's handle(), the
+  // pre-hook) and consumed by persistOriginInvoice() (called from afterHandle(), the post-hook)
+  // — see the capture-site comment on captureOriginInvoice for why this can't just be re-read
+  // from context.getRequestBody() in afterHandle(). Concrete subclasses are @Named-only CDI
+  // beans, defaulting to @Dependent scope, and NeoServletSupport#handleWithHooks calls handle()
+  // then afterHandle() on the SAME handler instance for a given request, so a plain instance
+  // field on this shared base class safely carries state between them.
+  private String pendingOriginInvoiceId;
+  private boolean originInvoiceCaptured;
+
   // ---------------------------------------------------------------------------
   // Abstract contract
   // ---------------------------------------------------------------------------
@@ -224,20 +234,49 @@ public abstract class AbstractInvoiceHeaderHandler {
   // ---------------------------------------------------------------------------
 
   /**
-   * Persists the origin-invoice relationship to {@code C_Invoice_Reverse} after a POST or PUT.
-   * Deletes any existing link for this invoice before creating the new one (or leaves it deleted
-   * if {@code originInvoice} is absent/blank in the request body).
+   * Captures and strips {@code originInvoice} from the raw request body BEFORE the generic
+   * field filter runs, so {@link #persistOriginInvoice} can still use it later in
+   * {@code afterHandle()}. Must be called from each subclass's {@code handle()} (the pre-hook),
+   * e.g. alongside the existing {@code NeoHandlerUtils.mirrorAccountingDate(...)} call.
+   *
+   * <p>{@code originInvoice} is not a decisions.json/contract field, so
+   * {@code NeoFieldFilter#filterCreateRequest}/{@code filterWriteRequest} would otherwise
+   * silently drop it before {@code afterHandle()} got a chance to read it back from
+   * {@code context.getRequestBody()} — the link was never actually persisted (confirmed via an
+   * empty {@code C_Invoice_Reverse} table) despite {@code persistOriginInvoice} looking correct
+   * in isolation. Same reasoning as the {@code parentId} carve-out at the top of
+   * {@code NeoCrudHandler#executePostCreate}.
+   *
+   * @param context
+   *     the current request context
+   */
+  protected void captureOriginInvoice(NeoContext context) {
+    if (!NeoHandlerUtils.isWriteMethod(context.getHttpMethod())) {
+      return;
+    }
+    JSONObject body = context.getRequestBody();
+    if (body != null && body.has(FIELD_ORIGIN_INVOICE)) {
+      pendingOriginInvoiceId = body.optString(FIELD_ORIGIN_INVOICE, null);
+      originInvoiceCaptured = true;
+      body.remove(FIELD_ORIGIN_INVOICE);
+    }
+  }
+
+  /**
+   * Persists the origin-invoice relationship to {@code C_Invoice_Reverse} after a POST or PUT,
+   * using the value {@link #captureOriginInvoice} captured from the raw request body before the
+   * generic field filter stripped it. Deletes any existing link for this invoice before creating
+   * the new one (or leaves it deleted if {@code originInvoice} was absent/blank).
    *
    * @param context
    *     the current request context
    */
   protected void persistOriginInvoice(NeoContext context) {
     try {
-      JSONObject body = context.getRequestBody();
-      if (body == null || !body.has(FIELD_ORIGIN_INVOICE)) {
+      if (!originInvoiceCaptured) {
         return;
       }
-      String originInvoiceId = body.optString(FIELD_ORIGIN_INVOICE, null);
+      String originInvoiceId = pendingOriginInvoiceId;
 
       String invoiceId = resolveInvoiceIdFromContext(context);
       if (StringUtils.isBlank(invoiceId)) {

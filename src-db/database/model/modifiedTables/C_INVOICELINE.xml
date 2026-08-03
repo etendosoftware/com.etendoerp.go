@@ -1,7 +1,11 @@
 <?xml version="1.0"?>
   <database name="MODIFIED TABLE C_INVOICELINE">
     <table name="C_INVOICELINE" primaryKey="C_INVOICELINE_KEY">
-      <column name="EM_ETGO_DISCOUNT" primaryKey="false" required="false" type="DECIMAL" autoIncrement="false">
+      <column name="EM_ETGO_DISCOUNT" primaryKey="false" required="false" type="DECIMAL" size="22,0" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="EM_ETGO_SOURCE_INVOICELINE_ID" primaryKey="false" required="false" type="VARCHAR" size="32" autoIncrement="false">
         <default/>
         <onCreateDefault/>
       </column>
