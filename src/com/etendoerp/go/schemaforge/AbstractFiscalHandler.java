@@ -153,6 +153,17 @@ abstract class AbstractFiscalHandler {
     declHandler.replaceIncidents(decl, errors, warnings);
   }
 
+  /**
+   * Same as {@link #replaceIncidents} but does not commit — used by
+   * {@link Fiscal303BoxesHandler#handleSubmit} so the incidents write shares a single
+   * transaction with the declaration status/attachment write that follows it (ETP-4456
+   * atomicity fix). See {@link FiscalDeclCrudHandler#replaceIncidentsNoCommit}.
+   */
+  protected void replaceIncidentsNoCommit(BaseOBObject decl, List<String> errors,
+      List<String> warnings) {
+    declHandler.replaceIncidentsNoCommit(decl, errors, warnings);
+  }
+
   // ── shared helpers ────────────────────────────────────────────────
 
   protected void handleModified(String orgId, int year, String period, Date since,

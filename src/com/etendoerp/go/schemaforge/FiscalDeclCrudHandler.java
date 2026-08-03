@@ -311,19 +311,37 @@ class FiscalDeclCrudHandler {
    * transaction), matching the convention already used by {@link #handleDeclPost}/
    * {@link #handleDeclPut}/{@link #handleDeclDelete} in this class.
    *
+   * <p><b>Not used by {@code Fiscal303BoxesHandler#handleSubmit} anymore</b> — that caller uses
+   * {@link #replaceIncidentsNoCommit} instead, so the incidents write and the subsequent
+   * declaration status/attachment write share ONE transaction (ETP-4456 atomicity fix: a process
+   * death between two independent commits used to leave a reachable partial state). This method
+   * stays available, self-contained, for any other/future caller that wants the incidents
+   * replace as its own standalone transaction.
+   *
    * @param errors   raw AEAT error strings ({@code "CODE - message"}), persisted as
    *                 {@link #SEVERITY_BLOCK}. Never {@code null} (pass {@link java.util.Collections#emptyList()}).
    * @param warnings raw AEAT warning strings ({@code "CODE - message"}), persisted as
    *                 {@link #SEVERITY_WARN}. Never {@code null} (pass {@link java.util.Collections#emptyList()}).
    */
   void replaceIncidents(BaseOBObject decl, List<String> errors, List<String> warnings) {
+    replaceIncidentsNoCommit(decl, errors, warnings);
+    OBDal.getInstance().commitAndClose();
+  }
+
+  /**
+   * Same delete-then-reinsert logic as {@link #replaceIncidents}, but deliberately leaves the
+   * commit to the caller — used by {@code Fiscal303BoxesHandler#handleSubmit} so the incidents
+   * write and the declaration status/attachment write that follows it land in a single
+   * {@code commitAndClose()} (ETP-4456 atomicity fix; see the "OBDal transactions: single DB
+   * transaction, all-or-nothing rollback" principle in the project's CLAUDE.md).
+   */
+  void replaceIncidentsNoCommit(BaseOBObject decl, List<String> errors, List<String> warnings) {
     String declId = String.valueOf(decl.getId());
     for (BaseOBObject inc : queryIncidents(declId)) {
       OBDal.getInstance().remove(inc);
     }
     insertIncidents(decl, errors, SEVERITY_BLOCK);
     insertIncidents(decl, warnings, SEVERITY_WARN);
-    OBDal.getInstance().commitAndClose();
   }
 
   /**

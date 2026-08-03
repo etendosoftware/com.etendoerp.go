@@ -273,7 +273,11 @@ class Fiscal303BoxesHandler extends AbstractFiscalHandler {
    * {@code fileExternal} change — but DOES attach the returned PDF as a clearly test-labeled
    * artifact via {@link #attachTestJustificante}, so the user can review it from the same
    * Justificante tab without it being confusable with a real justificante. Failed submissions
-   * (either mode) never mutate the declaration and never attach anything.</p>
+   * (either mode) never mutate the declaration and never attach anything. The AEAT-incidents
+   * write ({@link #persistIncidentsBestEffort}) and this status/attachment write share ONE
+   * transaction — a single {@link #commitSubmissionBestEffort} call at the end of this method,
+   * not two-to-three independent commits — so a mid-process failure can't leave a reachable
+   * partial state (ETP-4456 atomicity fix).</p>
    *
    * <p><b>Resubmission guard:</b> a production submission is rejected outright ({@code
    * ALREADY_SUBMITTED}, no call to the AEAT) when the declaration's status is already {@code
@@ -394,7 +398,27 @@ class Fiscal303BoxesHandler extends AbstractFiscalHandler {
       }
     }
 
+    commitSubmissionBestEffort(declId);
+
     writeJson(response, HttpServletResponse.SC_OK, buildSubmissionResultJson(result, data));
+  }
+
+  /**
+   * Single commit boundary for the whole submission write path (ETP-4456 atomicity fix): the
+   * incidents replace ({@link #persistIncidentsBestEffort}) and, on success, the declaration
+   * status/attachment write ({@link #persistSuccessfulSubmission} / {@link
+   * #attachTestJustificante}) now all land in this ONE {@code commitAndClose()} instead of the
+   * previous 2-3 independent commits — a process death between those used to leave a reachable
+   * partial state (e.g. incidents persisted but the declaration status/attachment not updated,
+   * or vice versa). Best-effort by design: a failure here is logged but must never fail or mask
+   * the submission result already computed and about to be written to the caller.
+   */
+  private void commitSubmissionBestEffort(String declId) {
+    try {
+      OBDal.getInstance().commitAndClose();
+    } catch (Exception e) {
+      log.error("Could not commit AEAT 303 submission persistence for declaration " + declId, e);
+    }
   }
 
   /** True when the declaration exists and belongs to the current client/organization. */
@@ -419,15 +443,17 @@ class Fiscal303BoxesHandler extends AbstractFiscalHandler {
    * (test mode and production alike) by {@link #handleSubmit}, per explicit product decision
    * (ETP-4456), so the "Incidencias" tab always reflects only the LATEST attempt, never a stale
    * accumulation from a prior try. Errors are tagged {@code block}, warnings {@code warn} (see
-   * {@link FiscalDeclCrudHandler#replaceIncidents}). Empty error AND warning lists (the clean
-   * success case) simply leave the declaration with no incident rows. Best-effort: a persistence
-   * failure here is logged and must never mask the actual submission outcome {@code handleSubmit}
-   * already computed.
+   * {@link FiscalDeclCrudHandler#replaceIncidentsNoCommit}). Empty error AND warning lists (the
+   * clean success case) simply leave the declaration with no incident rows. Best-effort: a
+   * persistence failure here is logged and must never mask the actual submission outcome
+   * {@code handleSubmit} already computed. Uses the no-commit variant deliberately — the actual
+   * commit happens once, later, in {@link #commitSubmissionBestEffort}, together with the
+   * declaration status/attachment write (ETP-4456 atomicity fix).
    */
   private void persistIncidentsBestEffort(FiscalDecl decl, String declId,
       AEAT303SubmissionResult result) {
     try {
-      replaceIncidents(decl, result.getErrors(), result.getWarnings());
+      replaceIncidentsNoCommit(decl, result.getErrors(), result.getWarnings());
     } catch (Exception e) {
       log.error("Could not persist AEAT incidents for declaration " + declId, e);
     }
@@ -439,6 +465,11 @@ class Fiscal303BoxesHandler extends AbstractFiscalHandler {
    * attached (best-effort — see {@link #attachJustificante}). Never called for test-mode results
    * (see {@link #attachTestJustificante} for that path, which attaches the PDF too but never
    * touches the declaration record) or failed submissions (see {@link #handleSubmit}).
+   *
+   * <p>Deliberately does NOT commit — {@code decl.save()} here and the attachment write in
+   * {@link #attachJustificante} land in the same transaction as the incidents write, committed
+   * once by {@link #commitSubmissionBestEffort} at the end of {@link #handleSubmit} (ETP-4456
+   * atomicity fix).</p>
    */
   private void persistSuccessfulSubmission(FiscalDecl decl, Organization org,
       AEAT303DeclarationData data, AEAT303SubmissionResult result) {
@@ -449,7 +480,6 @@ class Fiscal303BoxesHandler extends AbstractFiscalHandler {
       decl.setDeclarationFileName(fileName);
       decl.setFileExternal(false);
       OBDal.getInstance().save(decl);
-      OBDal.getInstance().commitAndClose();
     } catch (Exception e) {
       log.error("Could not update declaration " + decl.getId()
           + " after a successful AEAT 303 submission", e);
@@ -503,6 +533,12 @@ class Fiscal303BoxesHandler extends AbstractFiscalHandler {
    * persists. It remains best-effort regardless of that: an attach failure here never blocks or
    * rolls back the submission response, which is why the PDF is always also returned inline
    * (base64) in the API response.</p>
+   *
+   * <p>Deliberately does NOT commit — {@code AttachImplementationManager#upload} itself never
+   * commits (same as every other {@code /neo/attachments} caller in this module), and this
+   * method now relies on {@link #commitSubmissionBestEffort} to commit once, together with the
+   * incidents write and (for production) the declaration status write, instead of its own
+   * independent transaction (ETP-4456 atomicity fix).</p>
    */
   private void attachJustificante(FiscalDecl decl, Organization org, String fileName,
       byte[] pdfContent) {
@@ -528,7 +564,6 @@ class Fiscal303BoxesHandler extends AbstractFiscalHandler {
       Files.write(pdfPath, pdfContent);
       NeoAttachmentsHelper.getAttachManager()
           .upload(new HashMap<>(), tabId, decl.getId(), org.getId(), pdfPath.toFile());
-      OBDal.getInstance().commitAndClose();
     } catch (Exception e) {
       log.error("Could not attach the AEAT 303 justificante PDF to declaration " + decl.getId(), e);
     } finally {
