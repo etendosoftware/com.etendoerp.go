@@ -130,6 +130,33 @@ final class McpToolRouterSupport {
   }
 
   /**
+   * Resolve the root ("header") entity of a window spec for {@code neo_discover} (IMP-9), so an
+   * agent knows which entity to create first without calling {@code neo_schema} on each one.
+   * <p>
+   * Authoritative signal: {@code AD_Tab.tabLevel == 0} marks the header tab (same convention
+   * {@link McpToolRouter#resolveParentFK} relies on). {@code SFEntity} carries no parent column,
+   * so hierarchy can only be read off the linked {@code AD_Tab}. Falls back to the first entity
+   * by {@code seqNo} ({@link #listIncludedEntities} already orders ascending) when no included
+   * entity has a level-0 tab, or when an entity has no linked tab at all (handler-backed entities).
+   *
+   * @param specId the spec's id
+   * @return the primary entity's name, or {@code null} when the spec includes no entities
+   */
+  static String resolvePrimaryEntityName(String specId) {
+    List<SFEntity> entities = listIncludedEntities(specId);
+    if (entities.isEmpty()) {
+      return null;
+    }
+    for (SFEntity entity : entities) {
+      Tab tab = entity.getADTab();
+      if (tab != null && tab.getTabLevel() != null && tab.getTabLevel() == 0) {
+        return entity.getName();
+      }
+    }
+    return entities.get(0).getName();
+  }
+
+  /**
    * Builds the entity metadata returned by {@code neo_discover}.
    *
    * <p>The {@code readOnly} flag is derived from the entity's configured mutation methods rather
@@ -241,8 +268,8 @@ final class McpToolRouterSupport {
     return true;
   }
 
-  static JSONObject buildDiscoverSpec(SFSpec spec, String specType, JSONArray entities)
-      throws Exception {
+  static JSONObject buildDiscoverSpec(SFSpec spec, String specType, JSONArray entities,
+      String primaryEntity) throws Exception {
     JSONObject specObj = new JSONObject();
     specObj.put("name", spec.getName());
     specObj.put("type", specType);
@@ -255,6 +282,9 @@ final class McpToolRouterSupport {
     }
     if (entities != null) {
       specObj.put("entities", entities);
+      if (primaryEntity != null) {
+        specObj.put("primaryEntity", primaryEntity);
+      }
     }
     if ("R".equals(specType)) {
       // Report callability is truthful (ETP-4255): a report spec is callable only when it

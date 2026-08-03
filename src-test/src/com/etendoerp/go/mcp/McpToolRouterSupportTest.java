@@ -424,7 +424,7 @@ class McpToolRouterSupportTest {
       when(spec.getName()).thenReturn("sales-order");
       when(spec.getDescription()).thenReturn("Sales Order");
 
-      JSONObject result = McpToolRouterSupport.buildDiscoverSpec(spec, "W", null);
+      JSONObject result = McpToolRouterSupport.buildDiscoverSpec(spec, "W", null, null);
       assertEquals("sales-order", result.getString("name"));
       assertEquals("W", result.getString("type"));
       assertEquals("Sales Order", result.getString("description"));
@@ -436,7 +436,7 @@ class McpToolRouterSupportTest {
       when(spec.getName()).thenReturn("test");
       when(spec.getDescription()).thenReturn(null);
 
-      JSONObject result = McpToolRouterSupport.buildDiscoverSpec(spec, "W", null);
+      JSONObject result = McpToolRouterSupport.buildDiscoverSpec(spec, "W", null, null);
       assertFalse(result.has("description"));
     }
 
@@ -448,7 +448,7 @@ class McpToolRouterSupportTest {
       JSONArray entities = new JSONArray();
       entities.put(new JSONObject().put("name", "header"));
 
-      JSONObject result = McpToolRouterSupport.buildDiscoverSpec(spec, "W", entities);
+      JSONObject result = McpToolRouterSupport.buildDiscoverSpec(spec, "W", entities, "header");
       assertTrue(result.has("entities"));
       assertEquals(1, result.getJSONArray("entities").length());
     }
@@ -459,8 +459,49 @@ class McpToolRouterSupportTest {
       when(spec.getName()).thenReturn("test");
       when(spec.getDescription()).thenReturn(null);
 
-      JSONObject result = McpToolRouterSupport.buildDiscoverSpec(spec, "W", null);
+      JSONObject result = McpToolRouterSupport.buildDiscoverSpec(spec, "W", null, null);
       assertFalse(result.has("entities"));
+    }
+
+    /**
+     * IMP-9: {@code primaryEntity} is derived and passed in by the caller (handleDiscover), not
+     * computed inside buildDiscoverSpec — this method stays DAL-free (ETP-4601 regression fix).
+     * When entities are provided and a primaryEntity is given, it is surfaced.
+     */
+    @Test
+    void primaryEntityIsIncludedWhenProvidedAlongsideEntities() throws Exception {
+      SFSpec spec = mock(SFSpec.class);
+      when(spec.getName()).thenReturn("test");
+      when(spec.getDescription()).thenReturn(null);
+      JSONArray entities = new JSONArray();
+      entities.put(new JSONObject().put("name", "header"));
+
+      JSONObject result = McpToolRouterSupport.buildDiscoverSpec(spec, "W", entities, "header");
+      assertEquals("header", result.getString("primaryEntity"));
+    }
+
+    /** A null primaryEntity (e.g. a spec with no included entities) omits the key entirely. */
+    @Test
+    void nullPrimaryEntityOmitsKey() throws Exception {
+      SFSpec spec = mock(SFSpec.class);
+      when(spec.getName()).thenReturn("test");
+      when(spec.getDescription()).thenReturn(null);
+      JSONArray entities = new JSONArray();
+      entities.put(new JSONObject().put("name", "header"));
+
+      JSONObject result = McpToolRouterSupport.buildDiscoverSpec(spec, "W", entities, null);
+      assertFalse(result.has("primaryEntity"));
+    }
+
+    /** A primaryEntity is only ever surfaced alongside entities — never for a non-W spec. */
+    @Test
+    void primaryEntityIgnoredWhenEntitiesNull() throws Exception {
+      SFSpec spec = mock(SFSpec.class);
+      when(spec.getName()).thenReturn("test");
+      when(spec.getDescription()).thenReturn(null);
+
+      JSONObject result = McpToolRouterSupport.buildDiscoverSpec(spec, "W", null, "header");
+      assertFalse(result.has("primaryEntity"));
     }
 
     @Test
@@ -473,7 +514,7 @@ class McpToolRouterSupportTest {
           mockStatic(NeoReportCallability.class)) {
         callabilityMock.when(() -> NeoReportCallability.isReportCallable(spec)).thenReturn(true);
 
-        JSONObject result = McpToolRouterSupport.buildDiscoverSpec(spec, "R", null);
+        JSONObject result = McpToolRouterSupport.buildDiscoverSpec(spec, "R", null, null);
         assertTrue(result.getBoolean("isReport"));
       }
     }
@@ -492,7 +533,7 @@ class McpToolRouterSupportTest {
           mockStatic(NeoReportCallability.class)) {
         callabilityMock.when(() -> NeoReportCallability.isReportCallable(spec)).thenReturn(true);
 
-        JSONObject result = McpToolRouterSupport.buildDiscoverSpec(spec, "R", null);
+        JSONObject result = McpToolRouterSupport.buildDiscoverSpec(spec, "R", null, null);
 
         assertTrue(result.getBoolean("isReport"));
         assertTrue(result.getBoolean("callable"));
@@ -517,7 +558,7 @@ class McpToolRouterSupportTest {
         callabilityMock.when(() -> NeoReportCallability.buildNotConfiguredMessage("invoice-report"))
             .thenCallRealMethod();
 
-        JSONObject result = McpToolRouterSupport.buildDiscoverSpec(spec, "R", null);
+        JSONObject result = McpToolRouterSupport.buildDiscoverSpec(spec, "R", null, null);
 
         assertTrue(result.getBoolean("isReport"));
         assertFalse(result.getBoolean("callable"));
@@ -541,7 +582,7 @@ class McpToolRouterSupportTest {
           mockStatic(NeoReportCallability.class)) {
         callabilityMock.when(() -> NeoReportCallability.isReportCallable(spec)).thenReturn(true);
 
-        JSONObject result = McpToolRouterSupport.buildDiscoverSpec(spec, "R", null);
+        JSONObject result = McpToolRouterSupport.buildDiscoverSpec(spec, "R", null, null);
 
         assertTrue(result.getBoolean("callable"));
         assertEquals("generate_financial_accounts_page", result.getString("reportTool"));
@@ -564,7 +605,7 @@ class McpToolRouterSupportTest {
         callabilityMock.when(() -> NeoReportCallability.buildNotConfiguredMessage("invoice-report"))
             .thenCallRealMethod();
 
-        JSONObject result = McpToolRouterSupport.buildDiscoverSpec(spec, "R", null);
+        JSONObject result = McpToolRouterSupport.buildDiscoverSpec(spec, "R", null, null);
 
         assertFalse(result.getBoolean("callable"));
         assertFalse(result.has("reportTool"));
@@ -577,7 +618,7 @@ class McpToolRouterSupportTest {
       when(spec.getName()).thenReturn("order");
       when(spec.getDescription()).thenReturn(null);
 
-      JSONObject result = McpToolRouterSupport.buildDiscoverSpec(spec, "W", null);
+      JSONObject result = McpToolRouterSupport.buildDiscoverSpec(spec, "W", null, null);
       assertFalse(result.has("isReport"));
     }
 
@@ -588,7 +629,7 @@ class McpToolRouterSupportTest {
       when(spec.getDescription()).thenReturn(null);
       when(spec.getAgentPrompt()).thenReturn("Always confirm before completing the order.");
 
-      JSONObject result = McpToolRouterSupport.buildDiscoverSpec(spec, "W", null);
+      JSONObject result = McpToolRouterSupport.buildDiscoverSpec(spec, "W", null, null);
       assertEquals("Always confirm before completing the order.", result.getString("agentPrompt"));
     }
 
@@ -599,7 +640,7 @@ class McpToolRouterSupportTest {
       when(spec.getDescription()).thenReturn(null);
       when(spec.getAgentPrompt()).thenReturn("   ");
 
-      JSONObject result = McpToolRouterSupport.buildDiscoverSpec(spec, "W", null);
+      JSONObject result = McpToolRouterSupport.buildDiscoverSpec(spec, "W", null, null);
       assertFalse(result.has("agentPrompt"));
     }
 
@@ -610,7 +651,7 @@ class McpToolRouterSupportTest {
       when(spec.getDescription()).thenReturn(null);
       when(spec.getAgentPrompt()).thenReturn(null);
 
-      JSONObject result = McpToolRouterSupport.buildDiscoverSpec(spec, "W", null);
+      JSONObject result = McpToolRouterSupport.buildDiscoverSpec(spec, "W", null, null);
       assertFalse(result.has("agentPrompt"));
     }
   }

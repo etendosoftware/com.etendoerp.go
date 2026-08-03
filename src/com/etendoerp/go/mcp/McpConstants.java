@@ -52,6 +52,8 @@ final class McpConstants {
   static final String ERROR_NOT_FOUND = "not_found";
   /** Machine-detectable error code for a write rejected on missing required fields (IMP-5). */
   static final String ERROR_VALIDATION = "validation_error";
+  /** Machine-detectable error code for an FK-by-name resolution matching more than one record (IMP-4). */
+  static final String ERROR_AMBIGUOUS_FK = "ambiguous_fk";
   /** HTTP-style status for a not-found result (IMP-5). */
   static final int STATUS_NOT_FOUND = 404;
   /** HTTP-style status for a validation failure on a write (IMP-5). */

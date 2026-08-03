@@ -259,7 +259,13 @@ public class McpToolRouter {
       String specType = spec.getSpecType();
       if (McpToolRouterSupport.hasSpecAccess(spec, specType)) {
         JSONArray entities = "W".equals(specType) ? buildEntitySummaryArray(spec.getId()) : null;
-        specsArray.put(McpToolRouterSupport.buildDiscoverSpec(spec, specType, entities));
+        // IMP-9: derived here (not inside buildDiscoverSpec) so that method stays DAL-free —
+        // handleDiscover already runs in the live/admin OBContext buildEntitySummaryArray needs.
+        String primaryEntity = "W".equals(specType)
+            ? McpToolRouterSupport.resolvePrimaryEntityName(spec.getId())
+            : null;
+        specsArray.put(
+            McpToolRouterSupport.buildDiscoverSpec(spec, specType, entities, primaryEntity));
       }
     }
 
@@ -413,6 +419,20 @@ public class McpToolRouter {
     // too restrictive for MCP where AI agents need to set any valid column.
     JSONObject filteredBody = mapFieldsToDalProperties(fields, adTab);
 
+    // Hoisted so both FK-by-name resolution (IMP-4, below) and the sentinel/coercion passes
+    // further down share one DAL entity lookup.
+    Entity dalEntity = ModelProvider.getInstance()
+        .getEntityByTableId(adTab.getTable().getId());
+
+    // IMP-4: resolve FK-by-name search strings (e.g. businessPartner:"Acme Corp") into real
+    // record ids before anything downstream touches them. A value that already looks like an id
+    // is left untouched. See McpFkResolver's class javadoc for the selector-context limitation.
+    JSONObject fkError = McpFkResolver.resolveFkNames(filteredBody, dalEntity, adTab,
+        McpSelectorContextHelper.buildSelectorContextParams(null, adTab), log);
+    if (fkError != null) {
+      return wrapAsErrorContent(fkError.toString(2));
+    }
+
     // Snapshot user-provided fields BEFORE callout cascade can overwrite them.
     // Callouts derive dependent fields (e.g. product → tax, UOM) and may reset them
     // to sentinel "0" even when the user explicitly provided valid values.
@@ -451,8 +471,6 @@ public class McpToolRouter {
     // Fix FK sentinel values: "0" is a UI-level sentinel (means "not yet set") that can't
     // go through the DAL as an entity reference. Replace with a real value from the body
     // when possible (e.g. documentType="0" -> copy from transactionDocument), or remove.
-    Entity dalEntity = ModelProvider.getInstance()
-        .getEntityByTableId(adTab.getTable().getId());
     resolveFkSentinels(filteredBody, dalEntity);
 
     // Coerce string values to proper JSON types expected by the DAL (Long, BigDecimal, Boolean).
@@ -529,6 +547,16 @@ public class McpToolRouter {
 
     // MCP: accept all valid table columns from AI agents
     JSONObject filteredBody = mapFieldsToDalProperties(fields, adTab);
+
+    // IMP-4: resolve FK-by-name search strings before persist (mirrors handleCreate). handleUpdate
+    // has no other coercion pass, so this is the only place the shared resolver is invoked here.
+    Entity dalEntity = ModelProvider.getInstance()
+        .getEntityByTableId(adTab.getTable().getId());
+    JSONObject fkError = McpFkResolver.resolveFkNames(filteredBody, dalEntity, adTab,
+        McpSelectorContextHelper.buildSelectorContextParams(null, adTab), log);
+    if (fkError != null) {
+      return wrapAsErrorContent(fkError.toString(2));
+    }
 
     // Run the entity's NeoHandler pre-hook (parity with the REST CRUD path).
     NeoHandler handler = McpHookExecutor.resolveEntityHandler(sfEntity);
@@ -769,6 +797,14 @@ public class McpToolRouter {
     // sees "SII Description" instead of the raw AD_Column name "EM_Aeatsii_Descripcion_Sii".
     McpSchemaFieldBuilder.applyCuratedLabels(fieldsArray,
         McpSchemaFieldBuilder.loadFieldLabels(adTab, NeoLanguage.currentCode()));
+
+    // IMP-6: an explicit view:"actions" collapses the full field dump down to the callable
+    // buttons/processes only — a no-op for any other (or omitted) view.
+    String view = args.optString(McpActionsView.PARAM_VIEW, null);
+    if (McpActionsView.isActionsView(view)) {
+      return wrapAsTextContent(
+          McpActionsView.buildResponse(specName, entityName, fieldsArray).toString(2));
+    }
 
     // Build entity schema
     JSONObject entitySchema = new JSONObject();

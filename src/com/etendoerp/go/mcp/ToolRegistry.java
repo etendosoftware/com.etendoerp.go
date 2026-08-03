@@ -601,6 +601,13 @@ public class ToolRegistry {
     props.put("spec", enumProp("Spec name (use neo_discover to find available specs)", specNames));
     props.put(McpConstants.PARAM_ENTITY,
       stringProp("Entity name within the spec (e.g. 'Header', 'Lines')"));
+    props.put(McpActionsView.PARAM_VIEW, enumProp(
+        "Optional response shape. Omit for the full field dump (default, unchanged). "
+            + "\"actions\" returns only the callable buttons/processes ({name, label, "
+            + "invokeVia:\"neo_action\", action, processName, processId, ...}) instead of the "
+            + "full ~97-field schema — use it when you only need to know what can be triggered "
+            + "on this entity, not every column.",
+        List.of(McpActionsView.VIEW_ACTIONS)));
 
     return new McpToolDefinition(
         "neo_schema",
@@ -608,7 +615,8 @@ public class ToolRegistry {
             + "read-only flag, default values, visibility (editable/readOnly/system/discarded), "
             + "and which fields have FK selectors. Call this BEFORE neo_create to know which "
             + "fields exist and which are required. Only fields with userRequired=true need to "
-            + "be provided — system fields are auto-derived by Etendo callouts.",
+            + "be provided — system fields are auto-derived by Etendo callouts. Pass "
+            + "view:\"actions\" to get only the callable buttons/processes instead.",
         buildObjectSchema(props, List.of("spec", "entity")));
   }
 
