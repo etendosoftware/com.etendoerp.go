@@ -86,7 +86,7 @@ public class OnboardingBaselineService {
    * Use the exact UTC timestamp prefix of the last incorporated .sql file, e.g.:
    * {@code "20260617T120000Z"} matches {@code 20260617T120000Z__R7-tax-accounts.sql}.</p>
    *
-   * Current watermark: R13 amortization-table-active (2026-07-08).
+   * Current watermark: R19 locator-inventory-status (2026-08-03).
    *
    * <p><b>Note (2026-07-06):</b> the sibling in-flight branch {@code feat/bp-category-preventive}
    * (ETP-4402) independently bumps this same constant to {@code 2026-07-01T12:00:00Z} for its
@@ -94,8 +94,15 @@ public class OnboardingBaselineService {
    * {@code 2026-07-06T12:00:00Z} for {@code R10-accounting-schema-dimensions}. Multiple in-flight
    * branches touch this single line — expect merge conflicts when they converge; always resolve to
    * the LATEST timestamp so no fix's cutoff is lost.</p>
+   *
+   * <p><b>Note (2026-08-03, ETP-4761):</b> several OTHER in-flight branches (R14..R18, up to
+   * {@code 2026-08-03T14:00:00Z}) were found in the repo's full commit history
+   * ({@code git rev-list --all}) but are not yet merged into this branch's tree — this bump only
+   * asserts that ETP-4761's own preventive fix (gap I1, locator inventory status) is incorporated as
+   * of this branch. Expect the same "resolve to the latest timestamp" merge conflict as above when
+   * those branches converge.</p>
    */
-  private static final Instant ONBOARDING_PROVISIONED_THROUGH = Instant.parse("2026-07-08T10:00:00Z");
+  private static final Instant ONBOARDING_PROVISIONED_THROUGH = Instant.parse("2026-08-03T16:00:00Z");
 
   private static final String SQL_INSERT_BASELINE = ""
       + "INSERT INTO etgo_data_fix_history ("
