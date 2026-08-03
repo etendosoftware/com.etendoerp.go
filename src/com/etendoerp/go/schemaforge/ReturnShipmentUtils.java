@@ -545,8 +545,14 @@ final class ReturnShipmentUtils {
         ? invoice.getCurrency().getStandardPrecision().intValue() : 2;
     long lineNo = 10;
     for (ShipmentInOutLine retLine : lines) {
+      // ETP-4737: the rectificative invoice line must always come out negative regardless of
+      // which sign convention the SOURCE return document uses for movementQuantity — Sales
+      // (RFC Receipt) stores it positive, but Purchases (RTV Shipment) already stores it
+      // negative, so a blind .negate() flipped Purchase-side rectificativas back to positive
+      // (e.g. REC-1000007). abs().negate() forces the correct sign either way without touching
+      // the return document's own movementQuantity/convention.
       BigDecimal qty = retLine.getMovementQuantity() != null
-          ? retLine.getMovementQuantity().negate() : BigDecimal.ZERO;
+          ? retLine.getMovementQuantity().abs().negate() : BigDecimal.ZERO;
       if (retLine.getProduct() == null || qty.compareTo(BigDecimal.ZERO) == 0) continue;
       buildAndSaveInvoiceLine(invoice, retLine, qty, precision, lineNo, createDraftInvoiceHandler);
       lineNo += 10;
