@@ -47,6 +47,18 @@ final class McpConstants {
   static final String KEY_PROCESS_RESULT = "processResult";
   static final String KEY_PROCESS_MESSAGE = "processMessage";
 
+  // Button-action metadata surfaced by neo_schema (ETP-4285)
+  /**
+   * Key under which a list-backed button's chosen value travels in {@code neo_action}'s
+   * {@code parameters}. Consumed by {@code NeoProcessService.setDocAction}, which writes it
+   * onto the record before the process runs.
+   */
+  static final String PARAM_DOC_ACTION = "docAction";
+  /** {@code neo_schema} key listing the discrete values a button accepts. */
+  static final String KEY_ACTION_VALUES = "actionValues";
+  /** {@code neo_schema} key naming the parameter the chosen value must go under. */
+  static final String KEY_ACTION_PARAMETER = "actionParameter";
+
   static final String LABEL_SPEC_NAME = "Spec name";
   static final String LABEL_ENTITY_NAME = "Entity name within the spec";
   static final String LABEL_ENTITY_NAME_WITH_EXAMPLE =
