@@ -28,16 +28,23 @@ import org.hibernate.Session;
 import org.hibernate.criterion.SimpleExpression;
 import org.hibernate.query.Query;
 import org.junit.Test;
+import org.mockito.ArgumentCaptor;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.enterprise.DocumentType;
 import org.openbravo.model.common.enterprise.Organization;
+import org.openbravo.model.common.invoice.Invoice;
+import org.openbravo.model.common.invoice.InvoiceLine;
+import org.openbravo.model.common.plm.Product;
+import org.openbravo.model.financialmgmt.tax.TaxRate;
+import org.openbravo.model.materialmgmt.transaction.ShipmentInOutLine;
 
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
@@ -361,6 +368,97 @@ public class ReturnShipmentUtilsTest {
           "org-1", "APC", false, false, true);
 
       assertNull(result);
+    }
+  }
+
+  // ── addReturnInvoiceLines (ETP-4737) — Sales-vs-Purchase sign asymmetry ──────
+  //
+  // Sales-side return receipts (RFC Receipt) store movementQuantity POSITIVE; Purchase-side
+  // return shipments (RTV Shipment) already store it NEGATIVE. The rectificative invoice line
+  // must ALWAYS come out negative regardless of the source's own sign convention. The old
+  // `.negate()` was correct for Sales but flipped Purchase-side quantities back to positive
+  // (confirmed live on REC-1000007) — fixed to `.abs().negate()`.
+
+  /**
+   * Builds the minimal mock graph for {@code addReturnInvoiceLines} / {@code buildAndSaveInvoiceLine}
+   * with every optional branch short-circuited: {@code invoice.getPriceList()} is null and
+   * {@code retLine.getCanceledInoutLine()} is null so neither price-resolution branch fires, the
+   * built {@link InvoiceLine} already carries a non-zero unit price and a non-null tax so
+   * {@code resolveApplicableTax}'s live {@code Tax.get()} lookup is never reached. Captures the
+   * {@code qty} argument passed to {@code createShipmentInvoiceLine} and asserts it against
+   * {@code expectedQty}.
+   */
+  private void assertAddReturnInvoiceLinesProducesQty(BigDecimal movementQty, BigDecimal expectedQty) {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      Invoice invoice = mock(Invoice.class);
+      when(invoice.getPriceList()).thenReturn(null);
+
+      ShipmentInOutLine retLine = mock(ShipmentInOutLine.class);
+      when(retLine.getMovementQuantity()).thenReturn(movementQty);
+      Product product = mock(Product.class);
+      when(retLine.getProduct()).thenReturn(product);
+      when(retLine.getCanceledInoutLine()).thenReturn(null);
+
+      CreateDraftInvoiceHandler createDraftInvoiceHandler = mock(CreateDraftInvoiceHandler.class);
+      InvoiceLine il = mock(InvoiceLine.class);
+      when(il.getUnitPrice()).thenReturn(new BigDecimal("10.00"));
+      TaxRate tax = mock(TaxRate.class);
+      when(il.getTax()).thenReturn(tax);
+
+      ArgumentCaptor<BigDecimal> qtyCaptor = ArgumentCaptor.forClass(BigDecimal.class);
+      when(createDraftInvoiceHandler.createShipmentInvoiceLine(
+          eq(invoice), eq(retLine), qtyCaptor.capture(), anyLong()))
+          .thenReturn(il);
+
+      ReturnShipmentUtils.addReturnInvoiceLines(
+          invoice, Collections.singletonList(retLine), createDraftInvoiceHandler);
+
+      assertEquals(0, expectedQty.compareTo(qtyCaptor.getValue()));
+      verify(il).setGoodsShipmentLine(retLine);
+      verify(dal).save(il);
+    }
+  }
+
+  /** Sales-side: source movementQuantity is POSITIVE → invoice line qty must come out negative. */
+  @Test
+  public void addReturnInvoiceLines_salesPositiveMovementQty_producesNegativeInvoicedQty() {
+    assertAddReturnInvoiceLinesProducesQty(new BigDecimal("5"), new BigDecimal("-5"));
+  }
+
+  /**
+   * Purchase-side regression: source movementQuantity is already NEGATIVE (RTV Shipment
+   * convention) → invoice line qty must STILL come out negative. Before the fix
+   * ({@code .negate()} instead of {@code .abs().negate()}), this flipped back to positive.
+   */
+  @Test
+  public void addReturnInvoiceLines_purchaseNegativeMovementQty_stillProducesNegativeInvoicedQty() {
+    assertAddReturnInvoiceLinesProducesQty(new BigDecimal("-5"), new BigDecimal("-5"));
+  }
+
+  /** {@code null} movementQuantity is treated as zero and the line is skipped entirely. */
+  @Test
+  public void addReturnInvoiceLines_nullMovementQty_lineSkipped() {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      ShipmentInOutLine retLine = mock(ShipmentInOutLine.class);
+      when(retLine.getMovementQuantity()).thenReturn(null);
+      Product product = mock(Product.class);
+      when(retLine.getProduct()).thenReturn(product);
+
+      Invoice invoice = mock(Invoice.class);
+      CreateDraftInvoiceHandler createDraftInvoiceHandler = mock(CreateDraftInvoiceHandler.class);
+
+      ReturnShipmentUtils.addReturnInvoiceLines(
+          invoice, Collections.singletonList(retLine), createDraftInvoiceHandler);
+
+      verify(createDraftInvoiceHandler, never())
+          .createShipmentInvoiceLine(any(), any(), any(), anyLong());
+      verify(dal, never()).save(any(InvoiceLine.class));
     }
   }
 }

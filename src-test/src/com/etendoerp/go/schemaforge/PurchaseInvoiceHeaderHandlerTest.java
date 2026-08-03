@@ -653,6 +653,10 @@ public class PurchaseInvoiceHeaderHandlerTest {
         .recordId("inv-put-ah")
         .requestBody(body)
         .build();
+    // ETP-4737: persistOriginInvoice now only acts on the value captureOriginInvoice() captured
+    // in handle() (the pre-hook) — call it here too so this test actually exercises the persist
+    // path instead of vacuously hitting the "not captured" early-return.
+    handler.captureOriginInvoice(ctx);
 
     try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
          MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class)) {
@@ -675,6 +679,64 @@ public class PurchaseInvoiceHeaderHandlerTest {
 
       NeoResponse result = handler.afterHandle(ctx);
       assertNull(result);
+
+      // persistOriginInvoice actually ran for PUT: it looked up the invoice and its existing
+      // reverse links (an empty originInvoice value only deletes, never creates, a link).
+      // atLeastOnce(): autoCreateOrUpdateConversionRateDocument (called unconditionally earlier
+      // in afterHandle()) also does its own dal.get(Invoice.class, recordId) lookup.
+      Mockito.verify(dal, Mockito.atLeastOnce()).get(Invoice.class, "inv-put-ah");
+      Mockito.verify(dal).createCriteria(org.openbravo.model.common.invoice.ReversedInvoice.class);
+    }
+  }
+
+  /**
+   * ETP-4737 regression: the write-method guard around {@code persistOriginInvoice} used to be
+   * {@code "POST".equals(method) || "PUT".equals(method)}, which silently excluded PATCH — but
+   * {@code ImportFromSourceInvoiceModal.afterImport} (schema_forge frontend) always links the
+   * origin invoice via a PATCH, not POST/PUT. Fixed to {@code NeoHandlerUtils.isWriteMethod},
+   * which includes PATCH. This test proves PATCH now reaches {@code persistOriginInvoice} (it
+   * would previously have skipped straight past it, leaving {@code C_Invoice_Reverse} empty).
+   */
+  @Test
+  public void afterHandle_patchCrud_callsPersistAndReturnsNull() throws Exception {
+    JSONObject body = new JSONObject().put("originInvoice", "");
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("PATCH")
+        .endpointType(NeoEndpointType.CRUD)
+        .recordId("inv-patch-ah")
+        .requestBody(body)
+        .build();
+    // Mirrors the real handle() pre-hook so persistOriginInvoice has a captured value to act on.
+    handler.captureOriginInvoice(ctx);
+
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class)) {
+      ctxMock.when(() -> OBContext.setAdminMode(anyBoolean())).thenAnswer(i -> null);
+      ctxMock.when(OBContext::restorePreviousMode).thenAnswer(i -> null);
+
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      Invoice invoice = mock(Invoice.class);
+      when(dal.get(Invoice.class, "inv-patch-ah")).thenReturn(invoice);
+
+      @SuppressWarnings("unchecked")
+      org.openbravo.dal.service.OBCriteria<org.openbravo.model.common.invoice.ReversedInvoice>
+          criteria = mock(org.openbravo.dal.service.OBCriteria.class);
+      when(dal.createCriteria(org.openbravo.model.common.invoice.ReversedInvoice.class))
+          .thenReturn(criteria);
+      when(criteria.add(any())).thenReturn(criteria);
+      when(criteria.list()).thenReturn(java.util.Collections.emptyList());
+
+      NeoResponse result = handler.afterHandle(ctx);
+      assertNull(result);
+
+      // persistOriginInvoice actually ran for PATCH: it looked up the invoice and its existing
+      // reverse links (an empty originInvoice value only deletes, never creates, a link).
+      // atLeastOnce(): autoCreateOrUpdateConversionRateDocument (called unconditionally earlier
+      // in afterHandle()) also does its own dal.get(Invoice.class, recordId) lookup.
+      Mockito.verify(dal, Mockito.atLeastOnce()).get(Invoice.class, "inv-patch-ah");
+      Mockito.verify(dal).createCriteria(org.openbravo.model.common.invoice.ReversedInvoice.class);
     }
   }
 
