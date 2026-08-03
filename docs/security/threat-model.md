@@ -17,7 +17,7 @@
 | ADR | Repo | Covers |
 |---|---|---|
 | ADR-0001 (`feature/ETP-4575`, PR #777) | `com.etendoerp.go` | Backend-managed opaque cookie session (SEC-10) |
-| [ADR-0002](../../../../schema_forge/docs/adr/0002-edge-security-headers.md) | `schema_forge` | CSP + hardening headers at the edge (SEC-08, SEC-09, SEC-13) |
+| [ADR-0002](../adr/0002-edge-security-headers.md) | `com.etendoerp.go` (implementation owned by `schema_forge`) | CSP + hardening headers at the edge (SEC-08, SEC-09, SEC-13) |
 | [ADR-0003](../adr/0003-attachment-authorization.md) | `com.etendoerp.go` | Centralized attachment authorization (SEC-11b, SEC-12) |
 | [ADR-0004](../adr/0004-csv-formula-neutralization.md) | `com.etendoerp.go` | Spreadsheet formula neutralization (SEC-04) |
 
