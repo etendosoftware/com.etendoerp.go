@@ -629,12 +629,15 @@ class Fiscal303BoxesHandler extends AbstractFiscalHandler {
 
   /**
    * Maps a frontend AEAT letter code to the declaration type used by
-   * {@code AEAT303_Utility.getCheckedInputParameter}. Accepted codes: C, I, V, U, G.
+   * {@code AEAT303_Utility.getCheckedInputParameter}. Accepted codes: C, D, I, U, V, X, G —
+   * all 7 options the frontend's {@code TIPO_DECLARACION_FIELD} exposes, each backed by its own
+   * {@code Declaration_<letter>} search key in
+   * {@code 303_Report_Tax_Parameters.xml} (org.openbravo.module.aeat303.es).
    * Anything else (null, empty, unknown alias) falls back to "N" (zero result).
    */
   static String resolveDeclType(String tipo) {
-    if ("C".equals(tipo) || "I".equals(tipo) || "V".equals(tipo)
-        || "U".equals(tipo) || "G".equals(tipo)) {
+    if ("C".equals(tipo) || "D".equals(tipo) || "I".equals(tipo) || "U".equals(tipo)
+        || "V".equals(tipo) || "X".equals(tipo) || "G".equals(tipo)) {
       return tipo;
     }
     return "N";
