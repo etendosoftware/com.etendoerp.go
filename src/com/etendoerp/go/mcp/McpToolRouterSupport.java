@@ -524,23 +524,23 @@ final class McpToolRouterSupport {
         JSONArray bounds = operators.optJSONArray(op);
         if (bounds == null || bounds.length() != 2) {
           log.warn("Filter '{}' between operator needs a [from, to] array, ignoring", key);
-          continue;
+        } else {
+          appendAnd(where);
+          where.append("e.").append(prop.getName()).append(" between ")
+              .append(McpBusinessFilters.formatHqlValue(type, prop.isPrimitive(), bounds.get(0)))
+              .append(" and ")
+              .append(McpBusinessFilters.formatHqlValue(type, prop.isPrimitive(), bounds.get(1)));
         }
-        appendAnd(where);
-        where.append("e.").append(prop.getName()).append(" between ")
-            .append(McpBusinessFilters.formatHqlValue(type, prop.isPrimitive(), bounds.get(0)))
-            .append(" and ")
-            .append(McpBusinessFilters.formatHqlValue(type, prop.isPrimitive(), bounds.get(1)));
-        continue;
+      } else {
+        String sql = McpBusinessFilters.operatorToSql(op);
+        if (sql == null) {
+          log.warn("Filter '{}' has unknown operator '{}', ignoring", key, op);
+        } else {
+          appendAnd(where);
+          where.append("e.").append(prop.getName()).append(' ').append(sql).append(' ')
+              .append(McpBusinessFilters.formatHqlValue(type, prop.isPrimitive(), operators.get(op)));
+        }
       }
-      String sql = McpBusinessFilters.operatorToSql(op);
-      if (sql == null) {
-        log.warn("Filter '{}' has unknown operator '{}', ignoring", key, op);
-        continue;
-      }
-      appendAnd(where);
-      where.append("e.").append(prop.getName()).append(' ').append(sql).append(' ')
-          .append(McpBusinessFilters.formatHqlValue(type, prop.isPrimitive(), operators.get(op)));
     }
   }
 
@@ -600,7 +600,12 @@ final class McpToolRouterSupport {
     crit.add(Restrictions.eq(SFField.PROPERTY_ISACTIVE, true));
     for (SFField sfField : crit.list()) {
       Column col = sfField.getADColumn();
-      if (col == null || !isEditableField(sfField)) {
+      // editable = included in the spec and not read-only. Mirrors mapVisibility() in
+      // push-to-neo.js: editable is the only visibility yielding isIncluded='Y', isReadOnly='N'
+      // (readOnly/system are included but read-only; discarded is excluded).
+      boolean editable = Boolean.TRUE.equals(sfField.isIncluded())
+          && !Boolean.TRUE.equals(sfField.isReadOnly());
+      if (col == null || !editable) {
         continue;
       }
       Property prop = dalEntity.getPropertyByColumnName(col.getDBColumnName(), false);
@@ -609,17 +614,6 @@ final class McpToolRouterSupport {
       }
     }
     return result;
-  }
-
-  /**
-   * An {@code editable} field in Schema Forge terms: included in the spec and not read-only. Mirrors
-   * {@code mapVisibility()} in {@code push-to-neo.js}, where {@code editable} is the only visibility
-   * that yields {@code isIncluded='Y', isReadOnly='N'} ({@code readOnly}/{@code system} are included
-   * but read-only; {@code discarded} is excluded).
-   */
-  private static boolean isEditableField(SFField sfField) {
-    return Boolean.TRUE.equals(sfField.isIncluded())
-        && !Boolean.TRUE.equals(sfField.isReadOnly());
   }
 
   /**
@@ -639,16 +633,12 @@ final class McpToolRouterSupport {
     crit.add(Restrictions.eq(SFField.PROPERTY_ETGOSFENTITY + ".id", sfEntity.getId()));
     crit.add(Restrictions.eq(SFField.PROPERTY_ISACTIVE, true));
     for (SFField sfField : crit.list()) {
-      if (!Boolean.TRUE.equals(sfField.isBusinessCritical())) {
-        continue;
-      }
       Column col = sfField.getADColumn();
-      if (col == null) {
-        continue;
-      }
-      Property prop = dalEntity.getPropertyByColumnName(col.getDBColumnName(), false);
-      if (prop != null) {
-        result.add(prop.getName());
+      if (Boolean.TRUE.equals(sfField.isBusinessCritical()) && col != null) {
+        Property prop = dalEntity.getPropertyByColumnName(col.getDBColumnName(), false);
+        if (prop != null) {
+          result.add(prop.getName());
+        }
       }
     }
     return result;

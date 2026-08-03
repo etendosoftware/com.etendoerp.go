@@ -828,9 +828,9 @@ public class McpToolRouter {
     }
     entitySchema.put("methods", methods);
 
-    // Named business filters (ETP-4601): advertise the spec's hand-authored {status:"<name>"}
-    // filters so the agent can discover them instead of guessing. Only the name/label/description
-    // are exposed — the HQL where fragment stays server-side.
+    // Named business filters (ETP-4601): advertise the spec's hand-authored status filters,
+    // each keyed by name, so the agent can discover them instead of guessing. Only the
+    // name/label/description are exposed — the HQL where fragment stays server-side.
     JSONArray namedFilters = McpNamedFilters.describe(sfEntity.getNamedFilters());
     if (namedFilters.length() > 0) {
       entitySchema.put("namedFilters", namedFilters);

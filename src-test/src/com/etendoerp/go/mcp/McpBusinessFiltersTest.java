@@ -32,6 +32,9 @@ import org.junit.jupiter.api.Test;
  * Unit tests for {@link McpBusinessFilters} — the pure, DAL-free building blocks of the IMP-3
  * business-query filters ({@code neo_list} range operators + named document statuses).
  */
+// Test methods live in the @Nested inner classes below; S2187 only inspects
+// the outer class for @Test methods, hence the suppression.
+@SuppressWarnings("java:S2187")
 @DisplayName("McpBusinessFilters")
 class McpBusinessFiltersTest {
 

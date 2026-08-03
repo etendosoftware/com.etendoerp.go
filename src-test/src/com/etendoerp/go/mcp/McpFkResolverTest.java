@@ -30,6 +30,9 @@ import org.junit.jupiter.api.Test;
  * (selector lookup, body mutation) needs a live instance and is exercised manually/via the MCP
  * validation bot instead.
  */
+// Test methods live in the @Nested inner classes below; S2187 only inspects
+// the outer class for @Test methods, hence the suppression.
+@SuppressWarnings("java:S2187")
 @DisplayName("McpFkResolver")
 class McpFkResolverTest {
 

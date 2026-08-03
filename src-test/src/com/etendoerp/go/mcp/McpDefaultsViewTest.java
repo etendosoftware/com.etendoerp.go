@@ -34,6 +34,9 @@ import org.junit.jupiter.api.Test;
  * Unit tests for {@link McpDefaultsView} — the pure re-shaper behind the {@code neo_defaults}
  * {@code view} argument (IMP-7). No DAL/model access, so these run without a live instance.
  */
+// Test methods live in the @Nested inner classes below; S2187 only inspects
+// the outer class for @Test methods, hence the suppression.
+@SuppressWarnings("java:S2187")
 @DisplayName("McpDefaultsView")
 class McpDefaultsViewTest {
 

@@ -32,6 +32,9 @@ import org.junit.jupiter.api.Test;
  * {@code NAMED_FILTERS} JSON that {@code neo_list} exposes as {@code {status:"<name>"}} filters
  * (ETP-4601).
  */
+// Test methods live in the @Nested inner classes below; S2187 only inspects
+// the outer class for @Test methods, hence the suppression.
+@SuppressWarnings("java:S2187")
 @DisplayName("McpNamedFilters")
 class McpNamedFiltersTest {
 

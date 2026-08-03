@@ -372,24 +372,33 @@ final class McpSchemaFieldBuilder {
       return;
     }
     for (int i = 0; i < fieldsArray.length(); i++) {
-      JSONObject field = fieldsArray.optJSONObject(i);
-      if (field == null) {
-        continue;
-      }
-      String column = field.optString("column", null);
-      if (column == null) {
-        continue;
-      }
-      String[] labelDesc = labelsByColumn.get(column.toUpperCase());
-      if (labelDesc == null) {
-        continue;
-      }
-      if (StringUtils.isNotBlank(labelDesc[0])) {
-        field.put("label", labelDesc[0]);
-      }
-      if (StringUtils.isNotBlank(labelDesc[1])) {
-        field.put(McpConstants.KEY_DESCRIPTION, labelDesc[1]);
-      }
+      overlayCuratedLabel(fieldsArray.optJSONObject(i), labelsByColumn);
+    }
+  }
+
+  /**
+   * Overlay a single field's curated label/description (helper for {@link #applyCuratedLabels}).
+   * Returns early — leaving the field untouched — when the field, its {@code column}, or a matching
+   * curated entry is absent, or when the curated value is blank.
+   */
+  private static void overlayCuratedLabel(JSONObject field, Map<String, String[]> labelsByColumn)
+      throws JSONException {
+    if (field == null) {
+      return;
+    }
+    String column = field.optString("column", null);
+    if (column == null) {
+      return;
+    }
+    String[] labelDesc = labelsByColumn.get(column.toUpperCase());
+    if (labelDesc == null) {
+      return;
+    }
+    if (StringUtils.isNotBlank(labelDesc[0])) {
+      field.put("label", labelDesc[0]);
+    }
+    if (StringUtils.isNotBlank(labelDesc[1])) {
+      field.put(McpConstants.KEY_DESCRIPTION, labelDesc[1]);
     }
   }
 

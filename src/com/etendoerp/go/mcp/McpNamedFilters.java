@@ -69,18 +69,26 @@ final class McpNamedFilters {
       return result;
     }
     for (int i = 0; i < arr.length(); i++) {
-      JSONObject entry = arr.optJSONObject(i);
-      if (entry == null) {
-        continue;
-      }
-      String name = StringUtils.trimToEmpty(entry.optString(KEY_NAME, null));
-      String where = StringUtils.trimToEmpty(entry.optString(KEY_WHERE, null));
-      if (name.isEmpty() || where.isEmpty() || result.containsKey(name)) {
-        continue;
-      }
-      result.put(name, where);
+      collectWhereEntry(arr.optJSONObject(i), result);
     }
     return result;
+  }
+
+  /**
+   * Add one {@code name -> where} entry to {@code result} (helper for {@link #parseWhereByName}).
+   * Returns early — adding nothing — when the entry is absent, its {@code name}/{@code where} is
+   * blank, or its name was already seen (first wins).
+   */
+  private static void collectWhereEntry(JSONObject entry, Map<String, String> result) {
+    if (entry == null) {
+      return;
+    }
+    String name = StringUtils.trimToEmpty(entry.optString(KEY_NAME, null));
+    String where = StringUtils.trimToEmpty(entry.optString(KEY_WHERE, null));
+    if (name.isEmpty() || where.isEmpty() || result.containsKey(name)) {
+      return;
+    }
+    result.put(name, where);
   }
 
   /**
@@ -95,28 +103,39 @@ final class McpNamedFilters {
       return out;
     }
     for (int i = 0; i < arr.length(); i++) {
-      JSONObject entry = arr.optJSONObject(i);
-      if (entry == null) {
-        continue;
+      JSONObject doc = describeEntry(arr.optJSONObject(i));
+      if (doc != null) {
+        out.put(doc);
       }
-      String name = StringUtils.trimToEmpty(entry.optString(KEY_NAME, null));
-      String where = StringUtils.trimToEmpty(entry.optString(KEY_WHERE, null));
-      if (name.isEmpty() || where.isEmpty()) {
-        continue;
-      }
-      JSONObject doc = new JSONObject();
-      doc.put(KEY_NAME, name);
-      String label = StringUtils.trimToNull(entry.optString(KEY_LABEL, null));
-      if (label != null) {
-        doc.put(KEY_LABEL, label);
-      }
-      String description = StringUtils.trimToNull(entry.optString(KEY_DESCRIPTION, null));
-      if (description != null) {
-        doc.put(KEY_DESCRIPTION, description);
-      }
-      out.put(doc);
     }
     return out;
+  }
+
+  /**
+   * Build one filter descriptor (name, optional label/description) for {@link #describe}. Returns
+   * {@code null} — so the caller skips it — when the entry is absent or its {@code name}/{@code where}
+   * is blank. The {@code where} fragment itself is intentionally never emitted.
+   */
+  private static JSONObject describeEntry(JSONObject entry) throws JSONException {
+    if (entry == null) {
+      return null;
+    }
+    String name = StringUtils.trimToEmpty(entry.optString(KEY_NAME, null));
+    String where = StringUtils.trimToEmpty(entry.optString(KEY_WHERE, null));
+    if (name.isEmpty() || where.isEmpty()) {
+      return null;
+    }
+    JSONObject doc = new JSONObject();
+    doc.put(KEY_NAME, name);
+    String label = StringUtils.trimToNull(entry.optString(KEY_LABEL, null));
+    if (label != null) {
+      doc.put(KEY_LABEL, label);
+    }
+    String description = StringUtils.trimToNull(entry.optString(KEY_DESCRIPTION, null));
+    if (description != null) {
+      doc.put(KEY_DESCRIPTION, description);
+    }
+    return doc;
   }
 
   private static JSONArray parseArray(String json) {

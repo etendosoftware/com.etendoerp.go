@@ -259,7 +259,9 @@ public class ToolRegistry {
   // ── Discovery tool ─────────────────────────────────────────────────────
 
   private McpToolDefinition buildDiscoverTool() {
-    Map<String, Object> schema = buildSchema(McpConstants.TYPE_OBJECT,
+    Map<String, Object> schema = new LinkedHashMap<>();
+    schema.put("type", McpConstants.TYPE_OBJECT);
+    schema.put(McpConstants.KEY_DESCRIPTION,
         "Discover all available NEO Headless API specs and their entities");
     schema.put(McpConstants.KEY_PROPERTIES, new HashMap<>());
     return new McpToolDefinition(
@@ -716,15 +718,6 @@ public class ToolRegistry {
   }
 
   // ── JSON Schema builder helpers ────────────────────────────────────────
-
-  private Map<String, Object> buildSchema(String type, String description) {
-    Map<String, Object> schema = new LinkedHashMap<>();
-    schema.put("type", type);
-    if (description != null) {
-      schema.put(McpConstants.KEY_DESCRIPTION, description);
-    }
-    return schema;
-  }
 
   private Map<String, Object> buildObjectSchema(Map<String, Object> properties,
       List<String> required) {
