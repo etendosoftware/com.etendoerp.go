@@ -54,6 +54,7 @@ import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.currency.Currency;
 import org.openbravo.model.common.enterprise.Organization;
 
+import com.etendoerp.go.payment.TenantPlanService;
 import com.etendoerp.go.schemaforge.data.Account;
 
 /**
@@ -396,8 +397,8 @@ class EtendoGoJwtDalHelperTest {
     }
 
     @Test
-    @DisplayName("all seven fields are populated")
-    void allSevenFieldsPopulated() throws Exception {
+    @DisplayName("all eight fields are populated")
+    void allEightFieldsPopulated() throws Exception {
       when(client.getId()).thenReturn("C-2");
       when(client.getName()).thenReturn("Client Two");
       when(organization.getId()).thenReturn("O-2");
@@ -408,7 +409,22 @@ class EtendoGoJwtDalHelperTest {
 
       JSONObject result = EtendoGoJwtDalHelper.buildEnvironmentJson(client, organization, environmentUser);
 
-      assertEquals(7, result.length());
+      // Seven original fields plus the plan badge added by ETP-4686.
+      assertEquals(8, result.length());
+    }
+
+    @Test
+    @DisplayName("reports the free plan when the tenant carries no plan marker")
+    void reportsFreePlanWithoutMarker() throws Exception {
+      when(client.getId()).thenReturn("C-3");
+      when(client.getName()).thenReturn("Client Three");
+      when(environmentUser.getId()).thenReturn("U-3");
+      when(environmentUser.getUsername()).thenReturn("user@three.com");
+      when(environmentUser.getName()).thenReturn("User Three");
+
+      JSONObject result = EtendoGoJwtDalHelper.buildEnvironmentJson(client, null, environmentUser);
+
+      assertEquals(TenantPlanService.PLAN_FREE, result.getString("plan"));
     }
   }
 
