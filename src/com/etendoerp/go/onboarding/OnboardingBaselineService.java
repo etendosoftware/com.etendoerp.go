@@ -86,7 +86,7 @@ public class OnboardingBaselineService {
    * Use the exact UTC timestamp prefix of the last incorporated .sql file, e.g.:
    * {@code "20260617T120000Z"} matches {@code 20260617T120000Z__R7-tax-accounts.sql}.</p>
    *
-   * Current watermark: R19 locator-inventory-status (2026-08-03).
+   * Current watermark: R20 default-standard-costing-rule (2026-08-03).
    *
    * <p><b>Note (2026-07-06):</b> the sibling in-flight branch {@code feat/bp-category-preventive}
    * (ETP-4402) independently bumps this same constant to {@code 2026-07-01T12:00:00Z} for its
@@ -95,14 +95,30 @@ public class OnboardingBaselineService {
    * branches touch this single line — expect merge conflicts when they converge; always resolve to
    * the LATEST timestamp so no fix's cutoff is lost.</p>
    *
-   * <p><b>Note (2026-08-03, ETP-4761):</b> several OTHER in-flight branches (R14..R18, up to
-   * {@code 2026-08-03T14:00:00Z}) were found in the repo's full commit history
-   * ({@code git rev-list --all}) but are not yet merged into this branch's tree — this bump only
-   * asserts that ETP-4761's own preventive fix (gap I1, locator inventory status) is incorporated as
-   * of this branch. Expect the same "resolve to the latest timestamp" merge conflict as above when
-   * those branches converge.</p>
+   * <p><b>Note (2026-08-03, ETP-4761):</b> gap I1 — the bundled locators in
+   * {@code M_LOCATOR.xml} now ship {@code M_INVENTORYSTATUS_ID='2'} ("Available") instead of
+   * {@code '0'} ("Undefined-OverIssue"), so a new tenant is no longer born with storage bins that
+   * allow negative stock. That preventive front alone put the watermark at
+   * {@code 2026-08-03T16:00:00Z} (R19).</p>
+   *
+   * <p><b>Note (2026-08-03, ETP-4760):</b> gap J1 — {@code M_COSTING_RULE} added to
+   * {@link OnboardingDatasetDefinition}'s {@code INCLUDED_TABLES} and its bundled sample row fixed
+   * to the Standard algorithm (was Average), so a new tenant is born with one active, validated
+   * Standard costing rule instead of zero rules. This is the later of the two, hence the value
+   * below.</p>
+   *
+   * <p><b>Note (2026-08-03, merge block ETP-4766):</b> the two notes above landed on separate
+   * branches, each bumping this constant (R19 → {@code 16:00:00Z}, R20 → {@code 18:00:00Z}).
+   * Resolved to the LATEST per the rule above; the watermark now covers BOTH preventive fronts.
+   * R18 (stuck-average-cost-anchor / ETP-4736, {@code 2026-08-03T14:00:00Z}) also falls below the
+   * cutoff even though it deliberately shipped NO preventive front — this is intentional and
+   * harmless: a newborn tenant has no products or transactions, so R18's {@code @check} would
+   * resolve to {@code SKIPPED_NOT_NEEDED} anyway, the same terminal state as being skipped. Should
+   * gap H3 ever surface later in that tenant's life, R18 must be forced with
+   * {@code --fix R18-stuck-average-cost-anchor --client <id>} — which is equally true for any
+   * tenant, since the runner never revisits an already-PROCESSED fix.</p>
    */
-  private static final Instant ONBOARDING_PROVISIONED_THROUGH = Instant.parse("2026-08-03T16:00:00Z");
+  private static final Instant ONBOARDING_PROVISIONED_THROUGH = Instant.parse("2026-08-03T18:00:00Z");
 
   private static final String SQL_INSERT_BASELINE = ""
       + "INSERT INTO etgo_data_fix_history ("
