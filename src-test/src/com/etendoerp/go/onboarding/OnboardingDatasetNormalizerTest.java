@@ -32,6 +32,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.Date;
 import java.util.concurrent.atomic.AtomicReference;
 
 import org.hibernate.criterion.Criterion;
@@ -400,6 +401,66 @@ public class OnboardingDatasetNormalizerTest {
     assertEquals("ADLanguage", observedTargetEntityName.get());
     assertTrue(xml.contains("<adLanguage id=\"140\""));
     assertFalse(xml.contains("es_ES"));
+  }
+
+  /**
+   * ETP-4760 follow-up (dual-importer date-format conflict, 2026-08-04): a bundled sample-data XML
+   * value shaped for {@code org.apache.ddlutils.io.converters.TimestampConverter}
+   * ({@code java.sql.Timestamp.valueOf()}, plain "yyyy-MM-dd HH:mm:ss[.f]") must be reformatted by
+   * the normalizer into the strict ISO "yyyy-MM-dd'T'HH:mm:ss.S'Z'" shape the RUNTIME onboarding
+   * importer's {@code DateDomainType}/{@code DatetimeDomainType} require — the ddlutils installer
+   * and this runtime path have OPPOSITE format requirements for the identical literal, verified
+   * empirically both ways (see the .sql header comment on M_COSTING_RULE.xml and
+   * docs/etendo-ad/tenant-remediation-knowledge.md). This test proves the reformatting happens for
+   * a genuinely date-typed property ({@link Property#getPrimitiveType()} returning
+   * {@code Date.class}) without needing a live DAL model.
+   */
+  @Test
+  public void testNormalizerReformatsDdlutilsShapedDateTimeValueToStrictIso() throws Exception {
+    Path sampleDir = Files.createTempDirectory("onboarding-datetime-reformat");
+    Files.write(sampleDir.resolve("M_COSTING_RULE.xml"),
+        ("<data>"
+            + "<M_COSTING_RULE>"
+            + "<M_COSTING_RULE_ID><![CDATA[ROW1]]></M_COSTING_RULE_ID>"
+            + "<DATEFROM><![CDATA[2025-12-31 03:00:00.0]]></DATEFROM>"
+            + "</M_COSTING_RULE>"
+            + "</data>").getBytes(StandardCharsets.UTF_8));
+
+    OnboardingDatasetNormalizer normalizer = new OnboardingDatasetNormalizer(
+        sampleDir, this::mockEntityWithDateTimeColumn);
+
+    String xml = normalizer.buildDatasetXml();
+
+    assertTrue("Expected the strict ISO T/Z shape in the runtime-only output",
+        xml.contains("2025-12-31T03:00:00.0Z"));
+    assertFalse("The ddlutils-shaped source value must not leak through unchanged",
+        xml.contains("2025-12-31 03:00:00.0<"));
+  }
+
+  /**
+   * Companion regression: a non-date primitive value (e.g. a plain string/id column) must never be
+   * touched by the ddlutils-to-ISO reformatting, even if it happens to look date-shaped.
+   */
+  @Test
+  public void testNormalizerLeavesNonDateTimeValuesUnchanged() throws Exception {
+    Path sampleDir = Files.createTempDirectory("onboarding-non-datetime-passthrough");
+    Files.write(sampleDir.resolve("M_COSTING_RULE.xml"),
+        ("<data>"
+            + "<M_COSTING_RULE>"
+            + "<M_COSTING_RULE_ID><![CDATA[ROW1]]></M_COSTING_RULE_ID>"
+            + "<NAME><![CDATA[2025-12-31 03:00:00.0]]></NAME>"
+            + "</M_COSTING_RULE>"
+            + "</data>").getBytes(StandardCharsets.UTF_8));
+
+    OnboardingDatasetNormalizer normalizer = new OnboardingDatasetNormalizer(
+        sampleDir, this::mockEntityForTable);
+
+    String xml = normalizer.buildDatasetXml();
+
+    assertTrue("A non-date column's value must pass through completely unchanged",
+        xml.contains("2025-12-31 03:00:00.0"));
+    assertFalse("A non-date column's value must never be reformatted to the T/Z shape",
+        xml.contains("2025-12-31T03:00:00.0Z"));
   }
 
   // ---------------------------------------------------------------------------------------------
@@ -817,6 +878,37 @@ public class OnboardingDatasetNormalizerTest {
               : mockProperty(tableName, columnName);
         });
     return entity;
+  }
+
+  /**
+   * Builds an entity whose {@code DATEFROM} column reports a {@code java.util.Date} primitive
+   * type via {@link Property#getPrimitiveType()}, so the ddlutils-to-ISO reformatting branch in
+   * {@code OnboardingDatasetNormalizer} is exercised without a live DAL model. Every other column
+   * behaves like the default {@link #mockProperty(String, String)}.
+   */
+  private Entity mockEntityWithDateTimeColumn(String tableName) {
+    Entity entity = mock(Entity.class);
+    when(entity.getName()).thenReturn(toLowerCamel(tableName));
+    when(entity.getTableName()).thenReturn(tableName);
+    when(entity.isOrganizationEnabled()).thenReturn(false);
+    when(entity.getPropertyByColumnName(anyString(), eq(false)))
+        .thenAnswer(invocation -> {
+          String columnName = invocation.getArgument(0);
+          return "DATEFROM".equals(columnName)
+              ? mockDateTimeProperty(columnName)
+              : mockProperty(tableName, columnName);
+        });
+    return entity;
+  }
+
+  private Property mockDateTimeProperty(String columnName) {
+    Property property = mock(Property.class);
+    when(property.getName()).thenReturn(toLowerCamel(columnName));
+    when(property.isId()).thenReturn(false);
+    when(property.isOneToMany()).thenReturn(false);
+    when(property.isPrimitive()).thenReturn(true);
+    when(property.getPrimitiveType()).thenReturn(Date.class);
+    return property;
   }
 
   private Property mockProperty(String tableName, String columnName) {

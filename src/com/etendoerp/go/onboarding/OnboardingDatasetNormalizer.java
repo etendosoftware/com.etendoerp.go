@@ -26,12 +26,15 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.Date;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 import javax.xml.XMLConstants;
 import javax.xml.parsers.DocumentBuilder;
@@ -70,6 +73,16 @@ public class OnboardingDatasetNormalizer {
   private static final String RESOURCE_PATH_SEPARATOR = "/";
   private static final String CLASS_LOADER_REQUIRED = "classLoader is required";
   private static final String AD_ORG_ID_COLUMN = "AD_ORG_ID";
+
+  /**
+   * Matches a plain, ddlutils-shaped timestamp literal ("yyyy-MM-dd HH:mm:ss[.f...]") as bundled
+   * sample-data XML files carry them (required by {@code org.apache.ddlutils.io.converters
+   * .TimestampConverter}'s {@code java.sql.Timestamp.valueOf()} at install time via {@code
+   * org.openbravo.ddlutils.task.ImportSampledata}). Group 1 is the date part, group 2 the
+   * time-of-day part (with optional fractional seconds).
+   */
+  private static final Pattern DDLUTILS_TIMESTAMP_SHAPE =
+      Pattern.compile("^(\\d{4}-\\d{2}-\\d{2}) (\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?)$");
 
   private final SourceFileProvider sourceFileProvider;
   private final EntityResolver entityResolver;
@@ -266,11 +279,46 @@ public class OnboardingDatasetNormalizer {
       String rawValue) {
     Element propertyElement = output.createElement(property.getName());
     if (property.isPrimitive()) {
-      propertyElement.setTextContent(rawValue);
+      propertyElement.setTextContent(normalizeDateTimeValueIfNeeded(property, rawValue));
     } else {
       propertyElement.setAttribute("id", resolveReferenceId(property, rawValue));
     }
     entityElement.appendChild(propertyElement);
+  }
+
+  /**
+   * Reformats a ddlutils-shaped ("yyyy-MM-dd HH:mm:ss[.f...]") date/timestamp value into the
+   * strict ISO "yyyy-MM-dd'T'HH:mm:ss.S'Z'" shape required by the RUNTIME onboarding importer's
+   * {@code org.openbravo.base.model.domaintype.DateDomainType}/{@code DatetimeDomainType} (ETP-4760).
+   *
+   * <p>Bundled sample-data XML files have TWO independent consumers with OPPOSITE format
+   * requirements for the exact same literal: {@code org.openbravo.ddlutils.task.ImportSampledata}
+   * (the install-time seeder) requires the plain space-separated shape ({@code
+   * java.sql.Timestamp.valueOf()}, which rejects a "T"/"Z" ISO shape), while this runtime importer
+   * requires the opposite (no space-separated fallback for {@code DatetimeDomainType}, the
+   * "DateTime" AD_Reference_ID=16 type). No single literal in the SOURCE file satisfies both, so
+   * this reformatting is applied ONLY to this in-memory, runtime-only copy of the value — the
+   * bundled XML file itself is never rewritten and keeps the ddlutils-compatible shape.
+   *
+   * <p>A value that is not a plain date/timestamp property (checked via {@link
+   * Property#getPrimitiveType()}, which is {@code null} for non-date properties and for any
+   * property whose domain type a caller has not fully stubbed) or does not match the ddlutils
+   * shape (e.g. already ISO, blank, non-date text) is returned unchanged.
+   *
+   * @param property the property the raw value belongs to
+   * @param rawValue the raw value read from the bundled XML, already trimmed
+   * @return the reformatted value when applicable, otherwise {@code rawValue} unchanged
+   */
+  private String normalizeDateTimeValueIfNeeded(Property property, String rawValue) {
+    Class<?> primitiveType = property.getPrimitiveType();
+    if (primitiveType == null || !Date.class.isAssignableFrom(primitiveType)) {
+      return rawValue;
+    }
+    Matcher matcher = DDLUTILS_TIMESTAMP_SHAPE.matcher(rawValue);
+    if (!matcher.matches()) {
+      return rawValue;
+    }
+    return matcher.group(1) + "T" + matcher.group(2) + "Z";
   }
 
   private void appendOrganizationReferenceIfNeeded(Document output, Element entityElement, Entity entity,
