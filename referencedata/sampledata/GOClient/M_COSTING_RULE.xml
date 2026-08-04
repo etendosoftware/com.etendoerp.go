@@ -17,7 +17,20 @@
   <WAREHOUSE_DIMENSION><![CDATA[N]]></WAREHOUSE_DIMENSION>
   <ISVALIDATED><![CDATA[Y]]></ISVALIDATED>
   <PROCESS_RULE><![CDATA[N]]></PROCESS_RULE>
-  <DATEFROM><![CDATA[2025-12-31 03:00:00.0]]></DATEFROM>
+  <!-- ETP-4760 (2026-08-04): DATEFROM MUST use the strict "yyyy-MM-dd'T'HH:mm:ss.S'Z'" shape
+       (literal T and literal Z, no timezone offset) -- DatetimeDomainType.createFromString
+       (org.openbravo.base.model.domaintype.DatetimeDomainType, used for AD_Reference_ID=16
+       "DateTime" columns, which DATEFROM is) has NO space-separated fallback, unlike
+       DateDomainType (AD_Reference_ID=15 "Date", e.g. C_Period.StartDate/EndDate) which silently
+       tolerates a trailing " HH:mm:ss.S" and parses only the date prefix. The previous
+       space-separated value ("2025-12-31 03:00:00.0") threw
+       "java.text.ParseException: Unparseable date" the first time this table was actually
+       imported (M_COSTING_RULE was never in INCLUDED_TABLES before this ticket) -- see
+       docs/etendo-ad/tenant-remediation-knowledge.md for the full root-cause writeup. The date
+       itself (2025-12-31, safely before any real tenant's creation date) is intentional: it
+       backdates the rule so it covers a fresh tenant's entire history from day one, mirroring
+       the corrective R20 data-fix's own `datefrom = AD_Client.created` choice. -->
+  <DATEFROM><![CDATA[2025-12-31T03:00:00.0Z]]></DATEFROM>
   <BACKDATEDTRXSFIXED><![CDATA[N]]></BACKDATEDTRXSFIXED>
   <BACKDATEDTRXSFIXEDPROCESS><![CDATA[N]]></BACKDATEDTRXSFIXEDPROCESS>
 </M_COSTING_RULE>
