@@ -300,7 +300,7 @@ run_step "2" "Running JUnit/Gradle tests" "$CORE_DIR" "tmp/pre-push/junit-tests.
 # --fail-on-gate makes run-sonar.sh exit non-zero when the Quality Gate is in
 # ERROR, so this step (and the push) is blocked exactly when CI's gate would fail.
 if [ -n "$BASE_REF" ]; then
-  SONAR_CMD="./run-sonar.sh --base-ref \"$BASE_REF\" --fail-on-gate"
+  SONAR_CMD="./run-sonar.sh --base-ref \"$BASE_REF\" --fail-on-gate --compare-coverage"
 else
   SONAR_CMD="./run-sonar.sh --all-issues --fail-on-gate"
 fi

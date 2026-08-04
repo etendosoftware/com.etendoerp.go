@@ -113,6 +113,45 @@ final class McpHookExecutor {
   }
 
   /**
+   * Build the {@link NeoContext} for the ACTION endpoint hook (ETP-4285).
+   *
+   * <p>Mirrors what the REST path passes on
+   * {@code POST /sws/neo/{spec}/{entity}/{id}/action/{name}}
+   * ({@code NeoSubEndpointDispatcher.handleHookedSubEndpoint}), so a button action fired
+   * through MCP reaches the entity's handler with the same shape the UI produces.
+   * {@code endpointType=ACTION} plus {@code fieldName=actionName} are the two values handlers
+   * branch on — see {@code AbstractOrderHeaderHandler.isActionDocumentActionComplete}, which
+   * then reads the action value from the request body ({@code fieldValues.documentAction},
+   * root {@code docAction}, or root {@code documentAction}).</p>
+   *
+   * @param specName   the spec that owns the entity
+   * @param entityName the entity that owns the button field
+   * @param recordId   the record the action targets
+   * @param actionName the button field name as passed to {@code neo_action}, e.g.
+   *                   {@code documentAction}
+   * @param params     the MCP {@code parameters} object, used as the request body; must not be
+   *                   {@code null} so a handler can read and mutate it
+   * @param adTab      the entity's AD tab, may be {@code null} for tab-less entities
+   * @param sfEntity   the entity configuration
+   * @return a NeoContext with {@code endpointType=ACTION} and {@code httpMethod=POST}
+   */
+  static NeoContext buildActionHookContext(String specName, String entityName, String recordId,
+      String actionName, JSONObject params, Tab adTab, SFEntity sfEntity) {
+    return NeoContext.builder()
+        .specName(specName)
+        .entityName(entityName)
+        .httpMethod("POST")
+        .recordId(recordId)
+        .requestBody(params)
+        .adTab(adTab)
+        .sfEntity(sfEntity)
+        .obContext(OBContext.getOBContext())
+        .endpointType(NeoEndpointType.ACTION)
+        .fieldName(actionName)
+        .build();
+  }
+
+  /**
    * Run the entity hook's pre-phase. Returns an MCP result to short-circuit to
    * write (a validation error, or a handler that fully handled the request such
    * as a soft-archive on DELETE), or {@code null} to proceed with generic
