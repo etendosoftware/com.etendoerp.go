@@ -95,6 +95,13 @@ public class OnboardingBaselineService {
    * branches touch this single line — expect merge conflicts when they converge; always resolve to
    * the LATEST timestamp so no fix's cutoff is lost.</p>
    *
+   * <p><b>Note (2026-07-30, ETP-4737):</b> bumped from R13's {@code 2026-07-08T10:00:00Z} to
+   * R17's {@code 2026-07-30T18:00:00Z}. Fixes R14/R15/R16 in between are dataset-only or
+   * non-provisioning (no CUT bump needed per their own doc — see
+   * {@code onboarding-and-datafixes-map.md} §4); R17 is the first fix since R13 whose preventive
+   * counterpart is a new onboarding action (the two "Factura Rectificativa" doc types/sequences),
+   * so this is the first bump since R13.</p>
+   *
    * <p><b>Note (2026-08-03, ETP-4761):</b> gap I1 — the bundled locators in
    * {@code M_LOCATOR.xml} now ship {@code M_INVENTORYSTATUS_ID='2'} ("Available") instead of
    * {@code '0'} ("Undefined-OverIssue"), so a new tenant is no longer born with storage bins that
@@ -116,7 +123,11 @@ public class OnboardingBaselineService {
    * resolve to {@code SKIPPED_NOT_NEEDED} anyway, the same terminal state as being skipped. Should
    * gap H3 ever surface later in that tenant's life, R18 must be forced with
    * {@code --fix R18-stuck-average-cost-anchor --client <id>} — which is equally true for any
-   * tenant, since the runner never revisits an already-PROCESSED fix.</p>
+   * tenant, since the runner never revisits an already-PROCESSED fix.
+   * R17 (rectificativa-doctype-sequence / ETP-4737, {@code 2026-07-30T18:00:00Z}) also merged in
+   * here and likewise falls below the cutoff — correctly so: it DOES ship a preventive front, so a
+   * newborn tenant is already provisioned with the two "Factura Rectificativa" doc types and their
+   * {@code REC-} sequences and must skip the corrective fix.</p>
    */
   private static final Instant ONBOARDING_PROVISIONED_THROUGH = Instant.parse("2026-08-03T18:00:00Z");
 
