@@ -836,6 +836,12 @@ public class McpToolRouter {
    * </ul>
    * A validation or process error surfaces as {@code processResult: "error"} with
    * a descriptive {@code processMessage} — it is never swallowed.
+   * <p>
+   * Runs the entity's {@link NeoHandler} pre/post hooks around the action, matching the REST
+   * action path ({@code NeoSubEndpointDispatcher.handleHookedSubEndpoint} with
+   * {@code NeoEndpointType.ACTION}). A pre-hook {@link NeoResponse} short-circuits before the
+   * process is fired; the post-hook may replace the result. Without this parity, completing a
+   * document over MCP would skip handler logic the UI executes (ETP-4285).
    */
   JSONObject handleAction(String specName, JSONObject args) throws Exception {
     McpToolRouterSupport.validateArgs(args, McpConstants.PARAM_ENTITY, "id", "action");
@@ -848,8 +854,20 @@ public class McpToolRouter {
     SFSpec spec = McpToolRouterSupport.findActiveSpecByName(specName);
     SFEntity sfEntity = McpToolRouterSupport.findIncludedEntity(spec.getId(), entityName);
 
+    // The body object is shared with executeButtonActionCore on purpose, so a handler that
+    // normalizes or injects the action value is honoured by the process call that follows —
+    // the same contract the REST path gives handlers.
+    JSONObject actionParams = parameters != null ? parameters : new JSONObject();
+    NeoHandler handler = McpHookExecutor.resolveEntityHandler(sfEntity);
+    NeoContext hookCtx = McpHookExecutor.buildActionHookContext(specName, entityName, recordId,
+        actionName, actionParams, sfEntity.getADTab(), sfEntity);
+    JSONObject preHookResult = McpHookExecutor.runPreHook(handler, hookCtx);
+    if (preHookResult != null) {
+      return preHookResult;
+    }
+
     NeoResponse neoResponse = NeoButtonActionHelper.executeButtonActionCore(
-        sfEntity, recordId, actionName, parameters);
+        sfEntity, recordId, actionName, actionParams);
 
     JSONObject actionResult = McpToolRouterSupport.mapNeoResponseToActionResult(neoResponse);
 
@@ -862,6 +880,13 @@ public class McpToolRouter {
             "Request failed with HTTP status " + neoResponse.getHttpStatus());
       }
       return wrapAsErrorContent(actionResult.toString(2));
+    }
+
+    // Post-hook only on the success path, mirroring handleCreate/handleUpdate, which both
+    // return early on error before runPostHook.
+    JSONObject postHookResult = McpHookExecutor.runPostHook(handler, hookCtx, actionResult);
+    if (postHookResult != null) {
+      return postHookResult;
     }
 
     return wrapAsTextContent(actionResult.toString(2));

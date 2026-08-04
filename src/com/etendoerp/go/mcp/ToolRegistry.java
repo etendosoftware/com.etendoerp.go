@@ -587,12 +587,21 @@ public class ToolRegistry {
     props.put("action", stringProp(
         "Column name of the button field to trigger (e.g. 'Processed', 'Processing')"));
     props.put(McpConstants.PARAM_PARAMETERS, objectProp(
-        "Optional JSON parameters to pass to the process (e.g. docAction value)"));
+        "Process parameters. For a list-backed button, put the chosen value under the key "
+            + "named by the field's 'actionParameter' — e.g. {\"docAction\": \"CO\"}"));
 
     return new McpToolDefinition(
         "neo_action",
         "Fire a type:button action on a record and return the process result. "
-            + "Use neo_schema to discover available button fields and their action names. "
+            + "Call neo_schema first: each button field carries 'action' (the name to pass "
+            + "here), and list-backed buttons also carry 'actionValues' (the values it "
+            + "accepts, e.g. CO=Book / VO=Void / RE=Reactivate for documentAction) and "
+            + "'actionParameter' (the key to put the chosen value under in 'parameters'). "
+            + "Example — complete a draft sales order: {spec:'sales-order', entity:'header', "
+            + "id:'<orderId>', action:'documentAction', parameters:{docAction:'CO'}}. "
+            + "Which values are legal depends on the record's current state (e.g. "
+            + "documentStatus): read the field's 'agentPrompt' for the document's workflow "
+            + "rules, and neo_get the record first if unsure. "
             + "Returns {processResult: success|error|warning, processMessage: ...}.",
         buildObjectSchema(props,
             List.of("spec", McpConstants.PARAM_ENTITY, "id", "action")));
