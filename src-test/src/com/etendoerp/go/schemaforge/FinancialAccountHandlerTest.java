@@ -19,10 +19,12 @@ package com.etendoerp.go.schemaforge;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.doThrow;
@@ -34,9 +36,14 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import java.math.BigDecimal;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
@@ -90,6 +97,7 @@ import org.openbravo.model.financialmgmt.payment.MatchingAlgorithm;
 public class FinancialAccountHandlerTest {
 
   private static final String SPEC = "financial-account";
+  private static final String CLIENT_ID = "23C59575B9CF467C9620760EB255B389";
   private static final String EUR_ID = "102";
   private static final String ACC_ID = "acc-1";
   private static final String ES_IBAN = "ES9121000418450200051332";
@@ -863,65 +871,249 @@ public class FinancialAccountHandlerTest {
     assertNull(handler.afterHandle(ctx));
   }
 
-  // ── afterHandle: GET+CRUD injects hasTransactions (ETP-4530) ─────────────
+  // ── afterHandle: GET+CRUD injects the derived list fields (ETP-4530 / ETP-4658) ──
   //
-  // The frontend locks the Currency field once an account has real movement
-  // history. Since FIN_FinaccTransaction has no bearing on the generic CRUD
-  // response, the flag is injected here as a post-hook over every row of a
-  // GET (list/getById) response for the financial-account spec.
+  // Two things are injected post-hook over every row of a GET (list/getById) response for
+  // this spec, because NeoFieldFilter strips anything that is not a declared field and runs
+  // BEFORE afterHandle:
+  //
+  //   1. `hasTransactions` (ETP-4530) — the frontend locks the Currency field once the
+  //      account has real movement history.
+  //   2. The accounts-list derived fields (ETP-4658) — pendingCount, bankConnected,
+  //      bankConnectionPending, currencyIso/currencyId, isDefault, maskedPan, active and the
+  //      lowercase `iban` alias — plus a collection-level `summary` sibling of
+  //      `response.data` for the list sidebar. These used to be computed by the bespoke
+  //      `financial-accounts-page` R spec; the W spec is now the single source of truth.
+  //
+  // The three SQL loaders are reached through the package-private `pageLoaders()` seam and
+  // run ONCE for the whole page (Map/Set lookup per row) — the previous implementation
+  // issued two queries PER ROW just for `hasTransactions`. Tests therefore stub
+  // `pageLoaders()` with a spy whose loader seams are stubbed, letting the real
+  // `buildSummary` aggregate the fixture rows.
 
-  /**
-   * A GET/CRUD response with two rows gets {@code hasTransactions} injected per row: {@code true}
-   * for the account with a registered transaction, {@code false} for the one without.
-   */
-  @Test
-  public void testAfterHandleGetCrudInjectsHasTransactionsPerRow() throws Exception {
-    NeoContext ctx = mock(NeoContext.class);
-    when(ctx.getSpecName()).thenReturn(SPEC);
-    when(ctx.getHttpMethod()).thenReturn("GET");
-    when(ctx.getEndpointType()).thenReturn(NeoEndpointType.CRUD);
+  private static final String ORG_ID = "root-org";
+  private static final Set<String> ORGS = new HashSet<>(Arrays.asList("0", ORG_ID));
 
-    JSONObject row1 = new JSONObject().put("id", ACC_ID);
-    JSONObject row2 = new JSONObject().put("id", "acc-2");
-    JSONObject response = new JSONObject().put("data", new JSONArray().put(row1).put(row2));
-    JSONObject body = new JSONObject().put("response", response);
-    when(ctx.getPreviousResult()).thenReturn(new NeoResponse(200, body));
-
-    FIN_FinancialAccount acc1 = mock(FIN_FinancialAccount.class);
-    FIN_FinancialAccount acc2 = mock(FIN_FinancialAccount.class);
-    doReturn(acc1).when(handler).loadAccount(ACC_ID);
-    doReturn(acc2).when(handler).loadAccount("acc-2");
-    doReturn(true).when(handler).hasTransactions(acc1);
-    doReturn(false).when(handler).hasTransactions(acc2);
-
-    NeoResponse out = handler.afterHandle(ctx);
-
-    assertEquals(200, out.getHttpStatus());
-    JSONArray outArr = out.getBody().getJSONObject("response").getJSONArray("data");
-    assertTrue("account with a registered transaction locks the Currency field",
-        outArr.getJSONObject(0).getBoolean("hasTransactions"));
-    assertFalse("account without transactions leaves the Currency field editable",
-        outArr.getJSONObject(1).getBoolean("hasTransactions"));
+  /** Builds an AccountRow fixture with the loader-set flags the list needs. */
+  private static FinancialAccountsPageHandler.AccountRow accountRow(String id, String balance,
+      String currencyId, String currencyIso, boolean isDefault) {
+    return new FinancialAccountsPageHandler.AccountRow(id, "name-" + id, "B",
+        new BigDecimal(balance),
+        new FinancialAccountsPageHandler.Currency(currencyId, currencyIso),
+        "ES1200000000000000000001", isDefault);
   }
 
-  /** A row with no {@code id} gets {@code hasTransactions=false} without hitting the DAL. */
-  @Test
-  public void testAfterHandleGetCrudRowWithoutIdGetsFalseWithoutLoadingAccount() throws Exception {
+  /** A GET/CRUD context whose previous result is the given generic-CRUD envelope. */
+  private NeoContext getCrudContext(JSONArray rows) throws Exception {
     NeoContext ctx = mock(NeoContext.class);
     when(ctx.getSpecName()).thenReturn(SPEC);
     when(ctx.getHttpMethod()).thenReturn("GET");
     when(ctx.getEndpointType()).thenReturn(NeoEndpointType.CRUD);
-
-    JSONObject rowNoId = new JSONObject().put("name", "row without id");
-    JSONObject response = new JSONObject().put("data", new JSONArray().put(rowNoId));
-    JSONObject body = new JSONObject().put("response", response);
+    JSONObject body = new JSONObject().put("response", new JSONObject().put("data", rows));
     when(ctx.getPreviousResult()).thenReturn(new NeoResponse(200, body));
+    return ctx;
+  }
 
-    NeoResponse out = handler.afterHandle(ctx);
+  /**
+   * Installs a spied {@link FinancialAccountsPageHandler} as the {@code pageLoaders()} seam
+   * with its three SQL loaders stubbed. {@code buildSummary} is deliberately left real so the
+   * aggregation the sidebar renders is exercised end-to-end.
+   */
+  private FinancialAccountsPageHandler stubLoaders(List<FinancialAccountsPageHandler.AccountRow> rows,
+      Map<String, Integer> pending, Set<String> withTransactions) throws Exception {
+    FinancialAccountsPageHandler loaders = spy(new FinancialAccountsPageHandler());
+    doReturn(ORGS).when(loaders).accessibleOrgs(ORG_ID);
+    doReturn(rows).when(loaders).loadAccounts(eq(CLIENT_ID), eq(ORGS));
+    doReturn(pending).when(loaders).loadPendingByAccount(eq(CLIENT_ID), eq(ORGS));
+    doReturn(withTransactions).when(loaders).loadAccountsWithTransactions(eq(CLIENT_ID), eq(ORGS));
+    doReturn(loaders).when(handler).pageLoaders();
+    return loaders;
+  }
 
-    JSONArray outArr = out.getBody().getJSONObject("response").getJSONArray("data");
-    assertFalse(outArr.getJSONObject(0).getBoolean("hasTransactions"));
-    verify(handler, never()).loadAccount(any());
+  /** Stubs the OBContext statics the injection reads for the client/org filter. */
+  private MockedStatic<OBContext> mockSessionContext() {
+    MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
+    OBContext obCtx = mock(OBContext.class);
+    Client client = mock(Client.class);
+    when(client.getId()).thenReturn(CLIENT_ID);
+    Organization org = mock(Organization.class);
+    when(org.getId()).thenReturn(ORG_ID);
+    when(obCtx.getCurrentClient()).thenReturn(client);
+    when(obCtx.getCurrentOrganization()).thenReturn(org);
+    obContext.when(OBContext::getOBContext).thenReturn(obCtx);
+    return obContext;
+  }
+
+  /**
+   * Every derived field the accounts list needs is injected per row: the transaction flag,
+   * the pending counter, the bank-connection flags, the currency pair, the default/archived
+   * flags, the masked card number and the lowercase {@code iban} alias of the contract's
+   * {@code iBAN}.
+   */
+  @Test
+  public void testAfterHandleGetCrudInjectsDerivedListFieldsPerRow() throws Exception {
+    JSONObject row1 = new JSONObject().put("id", ACC_ID).put("iBAN", ES_IBAN);
+    JSONObject row2 = new JSONObject().put("id", "acc-2").put("iBAN", "");
+    NeoContext ctx = getCrudContext(new JSONArray().put(row1).put(row2));
+
+    FinancialAccountsPageHandler.AccountRow loaded1 = accountRow(ACC_ID, "1500.00", EUR_ID, "EUR", true);
+    loaded1.bankConnected = true;
+    FinancialAccountsPageHandler.AccountRow loaded2 = accountRow("acc-2", "0.00", "100", "USD", false);
+    loaded2.active = false;
+    loaded2.maskedPan = "**** 4321";
+
+    Map<String, Integer> pending = new LinkedHashMap<>();
+    pending.put(ACC_ID, 4);
+
+    try (MockedStatic<OBContext> obContext = mockSessionContext()) {
+      stubLoaders(Arrays.asList(loaded1, loaded2), pending, Collections.singleton(ACC_ID));
+
+      NeoResponse out = handler.afterHandle(ctx);
+
+      assertEquals(200, out.getHttpStatus());
+      JSONArray outArr = out.getBody().getJSONObject("response").getJSONArray("data");
+      JSONObject first = outArr.getJSONObject(0);
+      assertTrue("account with a registered transaction locks the Currency field",
+          first.getBoolean("hasTransactions"));
+      assertEquals(4, first.getInt("pendingCount"));
+      assertTrue(first.getBoolean("bankConnected"));
+      assertFalse("bankConnectionPending is never computed server-side yet",
+          first.getBoolean("bankConnectionPending"));
+      assertEquals("EUR", first.getString("currencyIso"));
+      assertEquals(EUR_ID, first.getString("currencyId"));
+      assertTrue(first.getBoolean("isDefault"));
+      assertTrue(first.getBoolean("active"));
+      assertEquals("lowercase alias of the contract's iBAN", ES_IBAN, first.getString("iban"));
+
+      JSONObject second = outArr.getJSONObject(1);
+      assertFalse("account without transactions leaves the Currency field editable",
+          second.getBoolean("hasTransactions"));
+      assertEquals("no pending statement lines defaults to 0", 0, second.getInt("pendingCount"));
+      assertFalse(second.getBoolean("bankConnected"));
+      assertEquals("USD", second.getString("currencyIso"));
+      assertFalse("archived accounts are flagged so the Inactivas filter can find them",
+          second.getBoolean("active"));
+      assertEquals("**** 4321", second.getString("maskedPan"));
+    }
+  }
+
+  /**
+   * The N+1 fix: the three loaders run ONCE for the whole page regardless of how many rows
+   * the generic CRUD returned, and the per-row work is a Map/Set lookup.
+   */
+  @Test
+  public void testAfterHandleGetCrudRunsEachLoaderOnceForTheWholePage() throws Exception {
+    JSONArray rows = new JSONArray()
+        .put(new JSONObject().put("id", ACC_ID))
+        .put(new JSONObject().put("id", "acc-2"))
+        .put(new JSONObject().put("id", "acc-3"));
+    NeoContext ctx = getCrudContext(rows);
+
+    try (MockedStatic<OBContext> obContext = mockSessionContext()) {
+      FinancialAccountsPageHandler loaders = stubLoaders(
+          Arrays.asList(
+              accountRow(ACC_ID, "10.00", EUR_ID, "EUR", false),
+              accountRow("acc-2", "20.00", EUR_ID, "EUR", false),
+              accountRow("acc-3", "30.00", EUR_ID, "EUR", false)),
+          Collections.emptyMap(), Collections.emptySet());
+
+      handler.afterHandle(ctx);
+
+      verify(loaders, times(1)).loadAccounts(CLIENT_ID, ORGS);
+      verify(loaders, times(1)).loadPendingByAccount(CLIENT_ID, ORGS);
+      verify(loaders, times(1)).loadAccountsWithTransactions(CLIENT_ID, ORGS);
+      // The legacy per-row DAL seams must not be reached at all any more.
+      verify(handler, never()).loadAccount(any());
+      verify(handler, never()).hasTransactions(any());
+    }
+  }
+
+  /**
+   * The collection-level {@code summary} is attached as a SIBLING of {@code response.data}
+   * (NEO serialises the handler body verbatim, and the frontend reads it through
+   * {@code useEntity}'s {@code meta}). It aggregates only the ACTIVE rows present in this
+   * response, so archived accounts never skew the sidebar totals.
+   */
+  @Test
+  public void testAfterHandleGetCrudAttachesSummarySiblingOverVisibleActiveRows() throws Exception {
+    JSONArray rows = new JSONArray()
+        .put(new JSONObject().put("id", ACC_ID))
+        .put(new JSONObject().put("id", "acc-2"))
+        .put(new JSONObject().put("id", "acc-archived"));
+    NeoContext ctx = getCrudContext(rows);
+
+    FinancialAccountsPageHandler.AccountRow eur = accountRow(ACC_ID, "1000.00", EUR_ID, "EUR", true);
+    FinancialAccountsPageHandler.AccountRow usd = accountRow("acc-2", "250.00", "100", "USD", false);
+    FinancialAccountsPageHandler.AccountRow archived = accountRow("acc-archived", "999.00", EUR_ID, "EUR", false);
+    archived.active = false;
+
+    Map<String, Integer> pending = new LinkedHashMap<>();
+    pending.put(ACC_ID, 3);
+
+    try (MockedStatic<OBContext> obContext = mockSessionContext()) {
+      stubLoaders(Arrays.asList(eur, usd, archived), pending, Collections.emptySet());
+
+      NeoResponse out = handler.afterHandle(ctx);
+
+      JSONObject envelope = out.getBody().getJSONObject("response");
+      JSONObject summary = envelope.optJSONObject("summary");
+      assertNotNull("summary must sit next to response.data", summary);
+      // 1000 + 250; the archived 999 is excluded.
+      assertEquals(new BigDecimal("1250.00"), new BigDecimal(summary.getString("totalBalance")));
+      assertEquals(2, summary.getJSONArray("byCurrency").length());
+      assertEquals(1, summary.getJSONObject("pending").getInt("accountsWithPending"));
+      // The rows themselves are still there — the summary is additive.
+      assertEquals(3, envelope.getJSONArray("data").length());
+    }
+  }
+
+  /**
+   * A row with no {@code id} cannot be correlated with the loaders, so it keeps the
+   * historical contract — {@code hasTransactions} is always present, defaulting to
+   * {@code false} — and gets none of the id-keyed derived fields.
+   */
+  @Test
+  public void testAfterHandleGetCrudRowWithoutIdGetsHasTransactionsFalseOnly() throws Exception {
+    JSONObject rowNoId = new JSONObject().put("name", "row without id");
+    NeoContext ctx = getCrudContext(new JSONArray().put(rowNoId));
+
+    try (MockedStatic<OBContext> obContext = mockSessionContext()) {
+      stubLoaders(Collections.emptyList(), Collections.emptyMap(), Collections.emptySet());
+
+      NeoResponse out = handler.afterHandle(ctx);
+
+      JSONObject out0 = out.getBody().getJSONObject("response").getJSONArray("data").getJSONObject(0);
+      assertFalse(out0.getBoolean("hasTransactions"));
+      assertFalse("no id → nothing to correlate a pending counter with", out0.has("pendingCount"));
+      assertFalse(out0.has("currencyIso"));
+      assertFalse(out0.has("active"));
+      verify(handler, never()).loadAccount(any());
+    }
+  }
+
+  /**
+   * A row the loaders do not know about (e.g. visible to the generic CRUD but filtered out
+   * of the loader's own query) still gets the id-keyed basics — the transaction flag, the
+   * pending counter and the {@code iban} alias — but none of the loader-only columns.
+   */
+  @Test
+  public void testAfterHandleGetCrudRowUnknownToLoadersKeepsIdKeyedFieldsOnly() throws Exception {
+    JSONObject row = new JSONObject().put("id", "acc-orphan").put("iBAN", ES_IBAN);
+    NeoContext ctx = getCrudContext(new JSONArray().put(row));
+
+    try (MockedStatic<OBContext> obContext = mockSessionContext()) {
+      stubLoaders(Collections.emptyList(), Collections.emptyMap(),
+          Collections.singleton("acc-orphan"));
+
+      NeoResponse out = handler.afterHandle(ctx);
+
+      JSONObject out0 = out.getBody().getJSONObject("response").getJSONArray("data").getJSONObject(0);
+      assertTrue(out0.getBoolean("hasTransactions"));
+      assertEquals(0, out0.getInt("pendingCount"));
+      assertEquals(ES_IBAN, out0.getString("iban"));
+      assertFalse("loader-only column", out0.has("bankConnected"));
+      assertFalse("loader-only column", out0.has("active"));
+    }
   }
 
   /** A GET/CRUD response with no data array (empty list) is left untouched (returns null). */
@@ -934,10 +1126,10 @@ public class FinancialAccountHandlerTest {
     when(ctx.getPreviousResult()).thenReturn(null);
 
     assertNull(handler.afterHandle(ctx));
-    verify(handler, never()).loadAccount(any());
+    verify(handler, never()).pageLoaders();
   }
 
-  /** A non-CRUD GET (e.g. SELECTOR) is not touched by the hasTransactions injection. */
+  /** A non-CRUD GET (e.g. SELECTOR) is not touched by the derived-field injection. */
   @Test
   public void testAfterHandleGetNonCrudEndpointSkipsInjection() {
     NeoContext ctx = mock(NeoContext.class);
@@ -946,7 +1138,29 @@ public class FinancialAccountHandlerTest {
     when(ctx.getEndpointType()).thenReturn(NeoEndpointType.SELECTOR);
 
     assertNull(handler.afterHandle(ctx));
+    verify(handler, never()).pageLoaders();
     verify(handler, never()).loadAccount(any());
+  }
+
+  /**
+   * A loader failure must never break the GET: the generic CRUD response is already valid,
+   * so the hook logs and returns null (leaving the un-enriched rows) instead of a 500.
+   */
+  @Test
+  public void testAfterHandleGetCrudSwallowsLoaderFailure() throws Exception {
+    NeoContext ctx = getCrudContext(new JSONArray().put(new JSONObject().put("id", ACC_ID)));
+
+    try (MockedStatic<OBContext> obContext = mockSessionContext()) {
+      doThrow(new RuntimeException("boom")).when(handler).pageLoaders();
+
+      assertNull(handler.afterHandle(ctx));
+    }
+  }
+
+  /** pageLoaders() real body: hands back a usable loader instance. */
+  @Test
+  public void testPageLoadersReturnsAnAccountsPageHandler() {
+    assertNotNull(new FinancialAccountHandler().pageLoaders());
   }
 
   /** hasTransactions(FIN_FinancialAccount) real body: true when the criteria finds a row. */

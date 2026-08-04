@@ -19,7 +19,6 @@ package com.etendoerp.go.schemaforge;
 
 import static com.etendoerp.go.schemaforge.FinancialAccountTransactionsSupport.buildPaymentLabel;
 import static com.etendoerp.go.schemaforge.FinancialAccountTransactionsSupport.optBigDecimal;
-import static com.etendoerp.go.schemaforge.FinancialAccountTransactionsSupport.parseDate;
 import static com.etendoerp.go.schemaforge.FinancialAccountTransactionsSupport.parseLocalDate;
 import static com.etendoerp.go.schemaforge.FinancialAccountTransactionsSupport.resolveConversionRate;
 import static com.etendoerp.go.schemaforge.FinancialAccountTransactionsSupport.setOptionalRef;
@@ -838,7 +837,7 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
     BigDecimal bankFeeTo = withFee ? nullSafeBigDecimal(optBigDecimal(body, "bankFeeTo")) : BigDecimal.ZERO;
     String description = body.optString(FIELD_DESCRIPTION, null);
     if (StringUtils.isBlank(description)) description = DEFAULT_TRANSFER_DESCRIPTION;
-    Date transferDate = parseDate(body.optString("transferDate", null), null);
+    Date transferDate = parseLocalDate(body.optString("transferDate", null), null);
 
     doTransfer(transferDate, source, dest, glItem, amount, conversionRate, bankFeeFrom,
         bankFeeTo, description);

@@ -17,15 +17,15 @@
 
 package com.etendoerp.go.schemaforge;
 
-import static com.etendoerp.go.schemaforge.Psd2HandlerTestSupport.ACCOUNT_ID;
-import static com.etendoerp.go.schemaforge.Psd2HandlerTestSupport.API_KEY;
-import static com.etendoerp.go.schemaforge.Psd2HandlerTestSupport.CONNECTION_ID;
-import static com.etendoerp.go.schemaforge.Psd2HandlerTestSupport.PARAM_ACCOUNT_ID;
-import static com.etendoerp.go.schemaforge.Psd2HandlerTestSupport.PARAM_CONNECTION_ID;
-import static com.etendoerp.go.schemaforge.Psd2HandlerTestSupport.PARAM_TYPE;
-import static com.etendoerp.go.schemaforge.Psd2HandlerTestSupport.SALT_EDGE_ACCOUNT_ID;
-import static com.etendoerp.go.schemaforge.Psd2HandlerTestSupport.postContext;
-import static com.etendoerp.go.schemaforge.Psd2HandlerTestSupport.stubObContext;
+import static com.etendoerp.go.schemaforge.BankConnectionHandlerTestSupport.ACCOUNT_ID;
+import static com.etendoerp.go.schemaforge.BankConnectionHandlerTestSupport.API_KEY;
+import static com.etendoerp.go.schemaforge.BankConnectionHandlerTestSupport.CONNECTION_ID;
+import static com.etendoerp.go.schemaforge.BankConnectionHandlerTestSupport.PARAM_ACCOUNT_ID;
+import static com.etendoerp.go.schemaforge.BankConnectionHandlerTestSupport.PARAM_CONNECTION_ID;
+import static com.etendoerp.go.schemaforge.BankConnectionHandlerTestSupport.PARAM_TYPE;
+import static com.etendoerp.go.schemaforge.BankConnectionHandlerTestSupport.SALT_EDGE_ACCOUNT_ID;
+import static com.etendoerp.go.schemaforge.BankConnectionHandlerTestSupport.postContext;
+import static com.etendoerp.go.schemaforge.BankConnectionHandlerTestSupport.stubObContext;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -67,7 +67,7 @@ import com.etendoerp.psd2.bank.integration.utils.BankIntegrationUtils;
 import com.etendoerp.psd2.bank.integration.utils.SaltEdgeAccountLinkHelper;
 
 /**
- * Unit tests for the {@link FinancialAccountPsd2Handler} POST {@code link}, {@code createAndLink},
+ * Unit tests for the {@link FinancialAccountBankConnectionHandler} POST {@code link}, {@code createAndLink},
  * {@code sync} and {@code import-settings} actions (the write paths).
  *
  * <p>Linking is delegated to {@link SaltEdgeAccountLinkHelper}; account creation is delegated to
@@ -75,18 +75,18 @@ import com.etendoerp.psd2.bank.integration.utils.SaltEdgeAccountLinkHelper;
  * handler's orchestration and response envelope.
  */
 @RunWith(MockitoJUnitRunner.Silent.class)
-public class FinancialAccountPsd2HandlerLinkTest {
+public class FinancialAccountBankConnectionHandlerLinkTest {
 
   private static final String LINK_WARNING = "consent expires soon";
   private static final String ACTION_LINK = "link";
   private static final String ACTION_CREATE_AND_LINK = "createAndLink";
   private static final String ACTION_DISCONNECT = "disconnect";
 
-  private FinancialAccountPsd2Handler handler;
+  private FinancialAccountBankConnectionHandler handler;
 
   @Before
   public void setUp() {
-    handler = spy(new FinancialAccountPsd2Handler());
+    handler = spy(new FinancialAccountBankConnectionHandler());
     doNothing().when(handler).doRollbackAndClose();
   }
 

@@ -342,8 +342,8 @@ public class AutoMatchSupportTest {
    */
   @Test
   public void testMergeMatchGroupsBlankGroupIdPassThrough() throws Exception {
-    JSONObject l1 = line("L1", "", "100.00", "100.00", "0.00");
-    JSONObject l2 = line("L2", "", "50.00", "0.00", "50.00");
+    JSONObject l1 = line("L1", "", "100.00", "100.00", "0.00", true);
+    JSONObject l2 = line("L2", "", "50.00", "0.00", "50.00", true);
     JSONArray input = new JSONArray();
     input.put(l1);
     input.put(l2);
@@ -367,10 +367,10 @@ public class AutoMatchSupportTest {
     JSONObject txnA = new JSONObject().put("id", "T1").put("amount", "100.00");
     JSONObject txnB = new JSONObject().put("id", "T2").put("amount", "50.00");
 
-    JSONObject l1 = line("L1", "GRP-1", "100.00", "100.00", "0.00");
+    JSONObject l1 = line("L1", "GRP-1", "100.00", "100.00", "0.00", true);
     l1.put("txns", new JSONArray().put(txnA));
 
-    JSONObject l2 = line("L2", "GRP-1", "50.00", "50.00", "0.00");
+    JSONObject l2 = line("L2", "GRP-1", "50.00", "50.00", "0.00", true);
     l2.put("txns", new JSONArray().put(txnB));
 
     JSONArray input = new JSONArray();
@@ -387,6 +387,9 @@ public class AutoMatchSupportTest {
     // Both transactions are present in the merged txns array.
     JSONArray txns = merged.getJSONArray("txns");
     assertEquals(2, txns.length());
+    // Both sub-lines were fully matched (no pending remainder) → group is RECONCILED.
+    assertEquals("RECONCILED", merged.getString("reconcileStatus"));
+    assertTrue(merged.getBoolean("matched"));
   }
 
   /**
@@ -397,11 +400,11 @@ public class AutoMatchSupportTest {
    */
   @Test
   public void testMergeMatchGroupsThreeSubLinesAllMerge() throws Exception {
-    JSONObject l1 = line("L1", "GRP-X", "40.00", "40.00", "0.00");
+    JSONObject l1 = line("L1", "GRP-X", "40.00", "40.00", "0.00", true);
     l1.put("txns", new JSONArray().put(new JSONObject().put("id", "T1")));
-    JSONObject l2 = line("L2", "GRP-X", "30.00", "30.00", "0.00");
+    JSONObject l2 = line("L2", "GRP-X", "30.00", "30.00", "0.00", true);
     l2.put("txns", new JSONArray().put(new JSONObject().put("id", "T2")));
-    JSONObject l3 = line("L3", "GRP-X", "30.00", "30.00", "0.00");
+    JSONObject l3 = line("L3", "GRP-X", "30.00", "30.00", "0.00", true);
     l3.put("txns", new JSONArray().put(new JSONObject().put("id", "T3")));
 
     JSONArray input = new JSONArray();
@@ -417,6 +420,125 @@ public class AutoMatchSupportTest {
     assertEquals(0, new BigDecimal("100.00").compareTo(new BigDecimal(merged.getString("amount"))));
     assertEquals(3, merged.getJSONArray("txns").length());
     assertTrue(merged.getBoolean("matched"));
+    assertEquals("RECONCILED", merged.getString("reconcileStatus"));
+  }
+
+  /**
+   * Regression for the "Ejemplo 100" bug (ETP-4502 iteration 4): a single-operation PARTIAL
+   * match splits the line into a matched sub-line (53.24, has a txn) and a pending remainder
+   * sub-line (46.76, no txn) sharing the same matchGroupId. The merged display row must show the
+   * original 100.00 total, {@code reconcileStatus: "PARTIAL"}, {@code matched: false}, the 46.76
+   * pendingAmount, and only the ONE real transaction (not a phantom second one).
+   *
+   * @throws Exception if building the JSON line objects fails
+   */
+  @Test
+  public void testMergeMatchGroupsPartialMatchYieldsPartialStatusAndPendingAmount()
+      throws Exception {
+    JSONObject txnA = new JSONObject().put("id", "T1").put("amount", "53.24");
+
+    JSONObject matchedSub = line("L1", "GRP-PARTIAL", "53.24", "53.24", "0.00", true);
+    matchedSub.put("txns", new JSONArray().put(txnA));
+
+    // Pending remainder: not matched, no txns (default empty array from the helper), and its own
+    // pendingAmount equals its own amount.
+    JSONObject pendingSub = line("L2", "GRP-PARTIAL", "46.76", "46.76", "0.00", false);
+
+    JSONArray input = new JSONArray();
+    input.put(matchedSub);
+    input.put(pendingSub);
+
+    JSONArray result = BankStatementsSupport.mergeMatchGroups(input);
+
+    assertEquals(1, result.length());
+    JSONObject merged = result.getJSONObject(0);
+    assertEquals(0, new BigDecimal("100.00").compareTo(new BigDecimal(merged.getString("in"))));
+    assertEquals(0, new BigDecimal("100.00").compareTo(new BigDecimal(merged.getString("amount"))));
+    assertEquals("PARTIAL", merged.getString("reconcileStatus"));
+    assertFalse(merged.getBoolean("matched"));
+    assertEquals(0,
+        new BigDecimal("46.76").compareTo(new BigDecimal(merged.getString("pendingAmount"))));
+    JSONArray txns = merged.getJSONArray("txns");
+    assertEquals(1, txns.length());
+    assertEquals("T1", txns.getJSONObject(0).getString("id"));
+  }
+
+  /**
+   * ETP-4502 iteration 5: a PARTIAL group must expose the id of its pending remainder sub-line as
+   * {@code remainderLineId} — the sub-line the UI reconciles the rest of the line against. The
+   * first UNMATCHED sub-line wins; here the matched 53.24 sub-line is the group head (no
+   * remainderLineId) and the 46.76 pending one contributes it.
+   *
+   * @throws Exception if building the JSON line objects fails
+   */
+  @Test
+  public void testMergeMatchGroupsPartialExposesRemainderLineId() throws Exception {
+    JSONObject txnA = new JSONObject().put("id", "T1").put("amount", "53.24");
+    JSONObject matchedSub = line("L1", "GRP-PARTIAL", "53.24", "53.24", "0.00", true);
+    matchedSub.put("txns", new JSONArray().put(txnA));
+    JSONObject pendingSub = line("L2", "GRP-PARTIAL", "46.76", "46.76", "0.00", false);
+
+    JSONArray input = new JSONArray();
+    input.put(matchedSub);
+    input.put(pendingSub);
+
+    JSONArray result = BankStatementsSupport.mergeMatchGroups(input);
+
+    assertEquals(1, result.length());
+    JSONObject merged = result.getJSONObject(0);
+    assertEquals("PARTIAL", merged.getString("reconcileStatus"));
+    // The remainder is the pending sub-line, not the matched head.
+    assertEquals("L2", merged.getString("remainderLineId"));
+  }
+
+  /**
+   * ETP-4502 iteration 5: a fully RECONCILED group (every sub-line matched) has no pending
+   * remainder, so it must NOT carry a {@code remainderLineId}.
+   *
+   * @throws Exception if building the JSON line objects fails
+   */
+  @Test
+  public void testMergeMatchGroupsFullyReconciledHasNoRemainderLineId() throws Exception {
+    JSONObject txnA = new JSONObject().put("id", "T1").put("amount", "60.00");
+    JSONObject txnB = new JSONObject().put("id", "T2").put("amount", "40.00");
+    JSONObject subA = line("L1", "GRP-FULL", "60.00", "60.00", "0.00", true);
+    subA.put("txns", new JSONArray().put(txnA));
+    JSONObject subB = line("L2", "GRP-FULL", "40.00", "40.00", "0.00", true);
+    subB.put("txns", new JSONArray().put(txnB));
+
+    JSONArray input = new JSONArray();
+    input.put(subA);
+    input.put(subB);
+
+    JSONArray result = BankStatementsSupport.mergeMatchGroups(input);
+
+    assertEquals(1, result.length());
+    JSONObject merged = result.getJSONObject(0);
+    assertEquals("RECONCILED", merged.getString("reconcileStatus"));
+    assertFalse(merged.has("remainderLineId"));
+  }
+
+  /**
+   * When neither sub-line in a match group is matched (no txns at all), the merged group stays
+   * PENDING — the defensive branch of the new status-derivation logic.
+   *
+   * @throws Exception if building the JSON line objects fails
+   */
+  @Test
+  public void testMergeMatchGroupsNeitherSubLineMatchedYieldsPendingStatus() throws Exception {
+    JSONObject l1 = line("L1", "GRP-NONE", "60.00", "60.00", "0.00", false);
+    JSONObject l2 = line("L2", "GRP-NONE", "40.00", "40.00", "0.00", false);
+
+    JSONArray input = new JSONArray();
+    input.put(l1);
+    input.put(l2);
+
+    JSONArray result = BankStatementsSupport.mergeMatchGroups(input);
+
+    assertEquals(1, result.length());
+    JSONObject merged = result.getJSONObject(0);
+    assertEquals("PENDING", merged.getString("reconcileStatus"));
+    assertFalse(merged.getBoolean("matched"));
   }
 
   // ---------------------------------------------------------------------------
@@ -444,16 +566,25 @@ public class AutoMatchSupportTest {
     return account;
   }
 
-  /** Builds a minimal statement-line JSONObject for mergeMatchGroups tests. */
-  private static JSONObject line(String id, String groupId, String amount, String in, String out)
-      throws Exception {
+  /**
+   * Builds a minimal statement-line JSONObject for mergeMatchGroups tests, mirroring the real
+   * per-row contract produced by {@link BankStatementsSupport#mapLineRow}: a matched row has
+   * {@code pendingAmount: 0} and {@code reconcileStatus: "RECONCILED"}; an unmatched row's
+   * {@code pendingAmount} equals its own {@code amount} and {@code reconcileStatus: "PENDING"}.
+   * Callers add a {@code txns} entry afterwards for matched sub-lines; unmatched sub-lines keep
+   * the default empty {@code txns} array.
+   */
+  private static JSONObject line(String id, String groupId, String amount, String in, String out,
+      boolean matched) throws Exception {
     JSONObject o = new JSONObject();
     o.put("id", id);
     o.put("matchGroupId", groupId);
     o.put("amount", amount);
     o.put("in", in);
     o.put("out", out);
-    o.put("matched", false);
+    o.put("matched", matched);
+    o.put("reconcileStatus", matched ? "RECONCILED" : "PENDING");
+    o.put("pendingAmount", matched ? "0.00" : amount);
     o.put("txns", new JSONArray());
     return o;
   }

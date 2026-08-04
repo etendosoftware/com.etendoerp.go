@@ -205,6 +205,12 @@ Returns a single record. Requires either `ISGET` or `ISGETBYID` to be enabled.
 
 Request body is JSON. Delegated to DataSourceServlet's POST handler.
 
+Before persistence, NEO resolves defaults and executes the header-tab callout cascade. Values
+explicitly supplied by the client and values injected for mandatory AD columns are protected from
+callout updates. Defaults for non-mandatory columns remain eligible for callout-derived updates.
+This keeps an explicit or mandatory system default from being replaced by an unrelated selector
+callout while preserving normal dependent-field derivation.
+
 **PUT / PATCH update** -- `PUT|PATCH /{specName}/{entityName}/{recordId}`
 
 Both PUT and PATCH are delegated to DataSourceServlet's PUT handler internally. PATCH is handled via a `service()` override that intercepts the PATCH method at the Servlet API level.
@@ -765,7 +771,20 @@ last-resort pattern, not a default — only reach for it once you've confirmed (
 | `NeoResponse.ok(JSONObject)` | 200 | Success with body. |
 | `NeoResponse.created(JSONObject)` | 201 | Created with body. |
 | `NeoResponse.noContent()` | 204 | Success, no body. |
-| `NeoResponse.error(int, String)` | (given) | Error with `{"error": {"message": "...", "status": N}}`. |
+| `NeoResponse.error(int, String)` | (given) | Wraps `message` in the nested envelope `{"error": {"message": "...", "status": N}}`. |
+| `NeoResponse.error(int, JSONObject)` | (given) | Sends `body` **verbatim**, unwrapped — for a handler that already builds its own flat response shape (e.g. `{"success": ..., "message": ...}`). |
+
+**⚠️ Overload pitfall (ETP-4706):** `error(int, String)` and `error(int, JSONObject)` produce very
+different response shapes, and the compiler will silently pick the `String` overload if you pass
+`body.toString()` instead of `body` — turning your flat `{"success", "message"}` object into a
+message *string* nested one level deeper as `{"error": {"message": "{\"success\":...}", "status": N}}`.
+`DocumentPostingService#handleAction` and `NotPostedDocumentsHandler#buildPostResponse` both hit
+this: they had already built a flat JSON body and called `NeoResponse.error(422, body.toString())`,
+so every client reading a top-level `message` field silently got the stringified JSON blob instead
+(masked further because most clients then fell back to `res.statusText`, e.g. "Unprocessable
+Entity", not a JSON-parse error). Fixed by passing `body` directly. When a handler already owns its
+response shape, call `error(status, JSONObject)`; only call `error(status, String)` when you want the
+standard nested envelope built for you.
 
 Responses support custom headers via `withHeader(name, value)`.
 
@@ -822,9 +841,16 @@ NEO Headless enforces security at multiple levels:
 
 6. **OBUIAPP process access for report handlers:** two report-type specs (`not-posted-documents`, `aging-receivable`) have no `AD_Process` and no backing `AD_Window`, and previously had zero access control. Their `NeoHandler.handle()` now gates access via `NeoAccessHelper.hasObuiappProcessAccess(processId)` against the real OBUIAPP process, resolved through the `AD_Menu.em_obuiapp_process_id` FK (never by name-matching).
 
-7. **Method-level control:** Each HTTP method must be explicitly enabled on the entity record. Disabled methods return `405 Method Not Allowed`.
+7. **Aging report prerequisites:** before `aging-receivable` delegates to Core's `AgingDao`, its NEO handler validates the resolved organization, organization tree, accounting schema/currency, and confirmed-payment-status reference. A missing derived prerequisite returns an actionable `400` or `422`; it does not surface as a generic `500` from the Core DAO.
 
-8. **Field-level control:** Only fields with `ISINCLUDED = 'Y'` participate in selector listings and button action discovery.
+8. **Method-level control:** Each HTTP method must be explicitly enabled on the entity record. Disabled methods return `405 Method Not Allowed`.
+
+   MCP `neo_discover` mirrors this configuration per entity through its `methods` array and
+   `readOnly` flag. `readOnly: true` means at least one read method is enabled and no POST, PUT,
+   PATCH, or DELETE method is enabled, so agents must not attempt a write even when the parent
+   window spec is otherwise available.
+
+9. **Field-level control:** Only fields with `ISINCLUDED = 'Y'` participate in selector listings and button action discovery.
 
 **Known limitations (ETP-4596):** 7 of the 8 `SPEC_TYPE = 'R'` report specs have no classic-process mapping and still have no handler-level access control. Separately, the MCP tool catalog/discovery layer (`ToolRegistry`, `NeoDiscoveryHelper`, `McpToolRouterSupport`) still exposes the *existence* of process-null specs to any authenticated caller regardless of role — metadata-only exposure; actual data access is blocked wherever a handler-level gate exists. Both gaps are tracked in ETP-4596, not fixed by ETP-4510/ETP-4511.
 

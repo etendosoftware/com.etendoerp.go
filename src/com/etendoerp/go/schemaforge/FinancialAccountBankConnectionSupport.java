@@ -42,16 +42,16 @@ import com.etendoerp.psd2.bank.integration.data.Provider;
 import com.etendoerp.psd2.bank.integration.utils.BankIntegrationConstants;
 import com.etendoerp.psd2.bank.integration.utils.BankIntegrationUtils;
 
-final class FinancialAccountPsd2Support {
+final class FinancialAccountBankConnectionSupport {
 
-  private static final Logger log = LogManager.getLogger(FinancialAccountPsd2Support.class);
+  private static final Logger log = LogManager.getLogger(FinancialAccountBankConnectionSupport.class);
 
   private static final String KEY_DATA = "data";
   private static final String KEY_LOGO_URL = "logo_url";
   private static final int NAME_MAX_LENGTH = 60;
   private static final String NAME_SEPARATOR = " - ";
 
-  private FinancialAccountPsd2Support() {
+  private FinancialAccountBankConnectionSupport() {
   }
 
   static String extractFetchScopes(JSONObject details) {

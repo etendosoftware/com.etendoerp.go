@@ -32,6 +32,8 @@ import org.junit.Test;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.dal.service.OBQuery;
+import org.openbravo.model.common.businesspartner.BusinessPartner;
 import org.openbravo.model.financialmgmt.payment.FIN_FinaccTransaction;
 import org.openbravo.model.financialmgmt.payment.FIN_Payment;
 import org.openbravo.model.financialmgmt.payment.FIN_PaymentDetail;
@@ -99,7 +101,7 @@ import com.etendoerp.payment.removal.util.PaymentRemovalUtil;
  * {@code org.hibernate.boot.MappingNotFoundException: Mapping (RESOURCE) not found :
  * org/openbravo/base/model/Table.hbm.xml} for OTHER tests
  * ({@code com.etendoerp.go.mcp.NeoWidgetMcpIntegrationTest},
- * {@code com.etendoerp.go.onboarding.OnboardingPsd2SyncServiceTest}) — that turned out to be
+ * {@code com.etendoerp.go.onboarding.OnboardingBankConnectionSyncServiceTest}) — that turned out to be
  * specific to those tests, not a blanket sandbox failure: THIS test's {@code OBBaseTest} DAL
  * layer initialized successfully and executed against the real local DB (that is how the two
  * trigger issues above were found). Re-run this test after any future change to {@link
@@ -192,6 +194,25 @@ public class ReactivatePaymentHandlerRemoveIntegrationTest extends OBBaseTest {
    * exercises everything else for real: the {@code aprm_fin_pmt_detail_check_trg} trigger
    * genuinely blocking (then, post-reactivate, genuinely allowing) the detail-row deletes, and
    * the real final {@code PaymentRemovalUtil.remove(payment)} call.
+   *
+   * <p><b>Reject-cycle 4 note — a second, independent trigger for the same "No request object
+   * set" symptom.</b> Excluding reconciled payments (above) was not sufficient: this test still
+   * failed intermittently with the identical-looking error, but from a completely different call
+   * site. {@code FIN_PaymentProcess} (invoked by {@code PaymentRemovalUtil.reactivate()} via
+   * {@code FIN_AddPayment.processPayment()}) recomputes credit-conversion amounts through {@code
+   * FIN_Utility.getConversionRatePrecision(RequestContext.get().getVariablesSecureApp())}
+   * whenever the candidate payment's currency differs from its Business Partner's currency —
+   * this branch fires for the "R" reactivation action itself, independent of reconciliation
+   * status. The original {@link #findIsolatedProcessedAppliedPaymentDetailForTestClient} scanned
+   * only the first {@link #CANDIDATE_SCAN_LIMIT} rows client-side with no {@code ORDER BY}, so
+   * whichever row Postgres happened to return first could be a currency-mismatched one —
+   * explaining why this failed locally but never in CI or for other developers (different
+   * physical row order per environment), and why a client-side scan window alone would not have
+   * been a reliable fix (only ~1% of this client's candidate rows qualify, so a small window
+   * often misses all of them regardless of order). Fixed by moving every isolation condition —
+   * including the currency-match check — into the query itself, in {@link
+   * #ISOLATED_PROCESSED_CANDIDATE_WHERE}, ordered deterministically by id, so candidate selection
+   * is now reproducible across environments and does not depend on scan-window luck.
    */
   @Test
   public void reactivatesProcessedPaymentThenRemovesItAgainstRealSession() throws Exception {
@@ -227,40 +248,65 @@ public class ReactivatePaymentHandlerRemoveIntegrationTest extends OBBaseTest {
     }
   }
 
+  /**
+   * Reject-cycle 4 finding: candidate selection for this test must not merely scan the first
+   * {@link #CANDIDATE_SCAN_LIMIT} {@code FIN_PaymentDetail} rows for the client (in whatever
+   * order the DB happens to return, or even in id order) and filter them client-side — for
+   * {@link #TEST_CLIENT_ID} only ~1% of ~2,500 candidate rows satisfy all four isolation
+   * conditions below, so a small client-side scan window reliably misses them, and an unordered
+   * one made the outcome depend on physical row order (different per environment — the "fails
+   * locally, never in CI" symptom). All four conditions are instead pushed into the HQL WHERE
+   * clause so the DB itself finds a qualifying row, deterministically (ordered by id), with no
+   * scan-window guesswork:
+   * <ol>
+   *   <li>{@code processed = true} (the case this test exercises: reactivate a processed
+   *       payment)
+   *   <li>no {@code FIN_FinaccTransaction} linked to the payment — i.e. not reconciled, the
+   *       exact same query {@code Utilities.getTransactionFromPayment} in {@code
+   *       PaymentRemovalUtil.reactivate()} uses, confirmed identical by reading
+   *       {@code com.etendoerp.payment.removal.util.Utilities#getTransactionFromPayment}
+   *   <li>no {@code FIN_PaymentPropDetail} rows on any of its schedule details — so the
+   *       processed-Payment-Proposal trigger guard doesn't fire (see class javadoc)
+   *   <li>payment currency matches its Business Partner's currency (or the BP/currency is
+   *       unset) — see {@link #ISOLATED_PROCESSED_CANDIDATE_WHERE} javadoc below for why this
+   *       is required
+   * </ol>
+   */
+  private static final String ISOLATED_PROCESSED_CANDIDATE_WHERE =
+      // "as e where" declares the "e" alias used throughout — OBQuery only recognizes a leading
+      // alias declaration, not a bare "e." reference (see OBQuery#createQuery / the identical
+      // pattern in NeoSelectorExecutionHelper#appendSimpleSearchFilter).
+      "as e where e." + FIN_PaymentDetail.PROPERTY_CLIENT + ".id = :clientId "
+          + "AND e." + FIN_PaymentDetail.PROPERTY_FINPAYMENT + "." + FIN_Payment.PROPERTY_PROCESSED
+          + " = true "
+          + "AND EXISTS (SELECT 1 FROM " + FIN_PaymentScheduleDetail.ENTITY_NAME + " psd WHERE psd."
+          + FIN_PaymentScheduleDetail.PROPERTY_PAYMENTDETAILS + " = e) "
+          // Not reconciled — mirrors Utilities#getTransactionFromPayment exactly (see javadoc).
+          + "AND NOT EXISTS (SELECT 1 FROM " + FIN_FinaccTransaction.ENTITY_NAME + " t WHERE t."
+          + FIN_FinaccTransaction.PROPERTY_FINPAYMENT + " = e." + FIN_PaymentDetail.PROPERTY_FINPAYMENT
+          + ") "
+          // No FIN_PaymentPropDetail rows on any schedule detail of this payment detail.
+          + "AND NOT EXISTS (SELECT 1 FROM " + FIN_PaymentScheduleDetail.ENTITY_NAME + " psd2 JOIN psd2."
+          + FIN_PaymentScheduleDetail.PROPERTY_FINPAYMENTPROPDETAILLIST + " ppd WHERE psd2."
+          + FIN_PaymentScheduleDetail.PROPERTY_PAYMENTDETAILS + " = e) "
+          // Reject-cycle 4: currency conversion during reactivation needs a live HTTP
+          // RequestContext (see FIN_PaymentProcess.java ~L869-891/1604-1609) unavailable in
+          // OBBaseTest — exclude currency-mismatched candidates, unrelated to reconciliation.
+          + "AND (e." + FIN_PaymentDetail.PROPERTY_FINPAYMENT + "." + FIN_Payment.PROPERTY_BUSINESSPARTNER
+          + " IS NULL OR e." + FIN_PaymentDetail.PROPERTY_FINPAYMENT + "."
+          + FIN_Payment.PROPERTY_BUSINESSPARTNER + "." + BusinessPartner.PROPERTY_CURRENCY
+          + " IS NULL OR e." + FIN_PaymentDetail.PROPERTY_FINPAYMENT + "."
+          + FIN_Payment.PROPERTY_BUSINESSPARTNER + "." + BusinessPartner.PROPERTY_CURRENCY + " = e."
+          + FIN_PaymentDetail.PROPERTY_FINPAYMENT + "." + FIN_Payment.PROPERTY_CURRENCY + ") "
+          + "ORDER BY e." + FIN_PaymentDetail.PROPERTY_ID;
+
   private FIN_PaymentDetail findIsolatedProcessedAppliedPaymentDetailForTestClient() {
-    OBCriteria<FIN_PaymentDetail> criteria =
-        OBDal.getInstance().createCriteria(FIN_PaymentDetail.class);
-    criteria.add(Restrictions.eq(FIN_PaymentDetail.PROPERTY_CLIENT + ".id", TEST_CLIENT_ID));
-    criteria.add(Restrictions.isNotEmpty(FIN_PaymentDetail.PROPERTY_FINPAYMENTSCHEDULEDETAILLIST));
-    criteria.setMaxResults(CANDIDATE_SCAN_LIMIT);
-
-    for (FIN_PaymentDetail candidate : criteria.list()) {
-      if (isIsolatedProcessedCandidate(candidate)) {
-        return candidate;
-      }
-    }
-    return null;
-  }
-
-  private static boolean isIsolatedProcessedCandidate(FIN_PaymentDetail candidate) {
-    FIN_Payment payment = candidate.getFinPayment();
-    if (payment == null || !Boolean.TRUE.equals(payment.isProcessed())) {
-      return false;
-    }
-    for (FIN_PaymentScheduleDetail scheduleDetail : candidate.getFINPaymentScheduleDetailList()) {
-      if (!scheduleDetail.getFINPaymentPropDetailList().isEmpty()) {
-        return false;
-      }
-    }
-    return !isReconciled(payment);
-  }
-
-  private static boolean isReconciled(FIN_Payment payment) {
-    OBCriteria<FIN_FinaccTransaction> criteria =
-        OBDal.getInstance().createCriteria(FIN_FinaccTransaction.class);
-    criteria.add(Restrictions.eq(FIN_FinaccTransaction.PROPERTY_FINPAYMENT, payment));
-    criteria.setMaxResults(1);
-    return criteria.uniqueResult() != null;
+    OBQuery<FIN_PaymentDetail> query = OBDal.getInstance()
+        .createQuery(FIN_PaymentDetail.class, ISOLATED_PROCESSED_CANDIDATE_WHERE);
+    query.setNamedParameter("clientId", TEST_CLIENT_ID);
+    query.setMaxResult(1);
+    List<FIN_PaymentDetail> results = query.list();
+    return results.isEmpty() ? null : results.get(0);
   }
 
   /**
