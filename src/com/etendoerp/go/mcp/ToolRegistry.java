@@ -86,15 +86,21 @@ public class ToolRegistry {
     criteria.addOrder(Order.asc(SFSpec.PROPERTY_NAME));
     List<SFSpec> specs = criteria.list();
 
-    // Collect accessible window spec names for CRUD tool enum
+    // Collect the spec enum each CRUD tool can actually satisfy. Read tools share every
+    // accessible W spec; write tools are split per verb so a mixed spec is never advertised
+    // by a tool for which it has no enabled entity method (ETP-4254 AC#4).
     List<String> accessibleWindowSpecs = new ArrayList<>();
+    List<String> creatableWindowSpecs = new ArrayList<>();
+    List<String> updatableWindowSpecs = new ArrayList<>();
+    List<String> deletableWindowSpecs = new ArrayList<>();
 
     for (SFSpec spec : specs) {
-      processSpec(spec, accessibleWindowSpecs, tools, permissions);
+      processSpec(spec, accessibleWindowSpecs, creatableWindowSpecs, updatableWindowSpecs,
+          deletableWindowSpecs, tools, permissions);
     }
 
-    // Register CRUD tools once with enum of accessible spec names
-    registerCrudTools(tools, accessibleWindowSpecs, permissions);
+    registerCrudTools(tools, accessibleWindowSpecs, creatableWindowSpecs,
+        updatableWindowSpecs, deletableWindowSpecs, permissions);
 
     log.debug("Generated {} MCP tools for scopes {}", tools.size(), scopes);
     return tools;
@@ -110,11 +116,14 @@ public class ToolRegistry {
   }
 
   private void processSpec(SFSpec spec, List<String> accessibleWindowSpecs,
-      List<McpToolDefinition> tools, ScopePermissions permissions) {
+      List<String> creatableWindowSpecs, List<String> updatableWindowSpecs,
+      List<String> deletableWindowSpecs, List<McpToolDefinition> tools,
+      ScopePermissions permissions) {
     try {
       String specType = spec.getSpecType();
       if ("W".equals(specType)) {
-        addWindowSpec(spec, accessibleWindowSpecs);
+        addWindowSpec(spec, accessibleWindowSpecs, creatableWindowSpecs,
+            updatableWindowSpecs, deletableWindowSpecs);
         return;
       }
       if ("P".equals(specType) && hasProcessAccess(spec) && permissions.canProcess) {
@@ -133,14 +142,33 @@ public class ToolRegistry {
     }
   }
 
-  private void addWindowSpec(SFSpec spec, List<String> accessibleWindowSpecs) {
-    // The dashboard/widget spec is handler-backed (no AD_Tab) and is exposed via the
-    // neo_widget tool, so it must not pollute the CRUD spec enum (ETP-4284 / G4).
-    if (McpToolRouterSupport.isWidgetSpec(spec)) {
+  private void addWindowSpec(SFSpec spec, List<String> accessibleWindowSpecs,
+      List<String> creatableWindowSpecs, List<String> updatableWindowSpecs,
+      List<String> deletableWindowSpecs) {
+    // A spec with neither a CRUD nor an action surface (the dashboard's widgets) is exposed
+    // via the neo_widget tool and must not pollute the CRUD spec enum (ETP-4284 / G4).
+    // ETP-4254 made this data-driven instead of matching the literal "dashboard" name. A
+    // tab-less spec that still serves actions (not-posted-documents) is NOT excluded — it
+    // belongs in accessibleWindowSpecs so neo_action can still offer it.
+    if (McpToolRouterSupport.isCatalogExcludedSpec(spec)) {
       return;
     }
-    if (NeoAccessUtils.hasWindowAccessForSpec(spec, "GET")) {
-      accessibleWindowSpecs.add(spec.getName());
+    if (!NeoAccessUtils.hasWindowAccessForSpec(spec, "GET")) {
+      return;
+    }
+    accessibleWindowSpecs.add(spec.getName());
+
+    // Split the write catalog per method. A spec with one PUT/PATCH entity but no POST or
+    // DELETE entity (monitor-verifactu) belongs only in neo_update; a shared "writable"
+    // enum would incorrectly advertise it to neo_create and neo_delete.
+    if (McpToolRouterSupport.hasEntityWithMethod(spec, "POST")) {
+      creatableWindowSpecs.add(spec.getName());
+    }
+    if (McpToolRouterSupport.hasEntityWithMethod(spec, "PUT")) {
+      updatableWindowSpecs.add(spec.getName());
+    }
+    if (McpToolRouterSupport.hasEntityWithMethod(spec, "DELETE")) {
+      deletableWindowSpecs.add(spec.getName());
     }
   }
 
@@ -149,8 +177,28 @@ public class ToolRegistry {
     return adProcess == null || NeoAccessUtils.hasProcessAccess(adProcess.getId());
   }
 
+  /**
+   * Register the shared CRUD tools once, with the spec enum each group is entitled to.
+   *
+   * <p>ETP-4254 splits the enum by capability:</p>
+   * <ul>
+   *   <li>{@code accessibleWindowSpecs} — every readable window spec. Used by the read tools
+   *       AND by {@code neo_action}: button actions/processes are served by the
+   *       {@code /action/*} sub-endpoint, which is deliberately NOT gated by the
+   *       {@code ETGO_SF_ENTITY} method flags, so a read-only-CRUD monitor window can still
+   *       legitimately fire an action.</li>
+   *   <li>{@code creatableWindowSpecs}/{@code updatableWindowSpecs}/
+   *       {@code deletableWindowSpecs} — specs with at least one entity enabling the exact
+   *       verb each MCP write tool uses. This matters for mixed specs: monitor-verifactu has
+   *       PUT/PATCH on one entity but no POST or DELETE, so only neo_update may offer it.</li>
+   * </ul>
+   *
+   * <p>{@code neo_batch} takes no spec enum (its operations name their spec inline); its
+   * per-entity gate is enforced at runtime in {@code BatchService#createRecord}.</p>
+   */
   private void registerCrudTools(List<McpToolDefinition> tools, List<String> accessibleWindowSpecs,
-      ScopePermissions permissions) {
+      List<String> creatableWindowSpecs, List<String> updatableWindowSpecs,
+      List<String> deletableWindowSpecs, ScopePermissions permissions) {
     // Register the amortization plan tool independently of window specs availability:
     // it is a built-in endpoint that does not require a window spec to be accessible.
     if (permissions.canProcess) {
@@ -168,9 +216,15 @@ public class ToolRegistry {
       tools.add(buildSchemaTool(accessibleWindowSpecs));
     }
     if (permissions.canWrite) {
-      tools.add(buildCreateTool(accessibleWindowSpecs));
-      tools.add(buildUpdateTool(accessibleWindowSpecs));
-      tools.add(buildDeleteTool(accessibleWindowSpecs));
+      if (!creatableWindowSpecs.isEmpty()) {
+        tools.add(buildCreateTool(creatableWindowSpecs));
+      }
+      if (!updatableWindowSpecs.isEmpty()) {
+        tools.add(buildUpdateTool(updatableWindowSpecs));
+      }
+      if (!deletableWindowSpecs.isEmpty()) {
+        tools.add(buildDeleteTool(deletableWindowSpecs));
+      }
       tools.add(buildBatchTool());
       tools.add(buildActionTool(accessibleWindowSpecs));
     }

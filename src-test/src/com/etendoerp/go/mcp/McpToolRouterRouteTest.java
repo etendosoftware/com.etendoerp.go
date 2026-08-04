@@ -20,6 +20,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
@@ -502,14 +503,18 @@ class McpToolRouterRouteTest {
       supportMock.when(() -> McpToolRouterSupport.hasSpecAccess(eq(spec), eq("W")))
           .thenReturn(true);
 
-      supportMock.when(() -> McpToolRouterSupport.buildEntitySummaryArray(SPEC_ID))
+      // ETP-4254: handleDiscover now loads the included entities once and feeds both the
+      // summary array and the spec-level readOnly marker from that single list.
+      supportMock.when(() -> McpToolRouterSupport.listIncludedEntities(SPEC_ID))
+          .thenReturn(Collections.emptyList());
+      supportMock.when(() -> McpToolRouterSupport.buildEntitySummaryArray(anyList()))
           .thenReturn(new JSONArray());
 
       JSONObject discoverSpec = new JSONObject();
       discoverSpec.put("name", SPEC_NAME);
       discoverSpec.put("type", "window");
-      supportMock.when(() -> McpToolRouterSupport.buildDiscoverSpec(eq(spec), eq("W"), any()))
-          .thenReturn(discoverSpec);
+      supportMock.when(() -> McpToolRouterSupport.buildDiscoverSpec(
+          eq(spec), eq("W"), any(), any())).thenReturn(discoverSpec);
 
       JSONObject result = router.route("neo_discover", null, READ_SCOPES);
 
@@ -671,6 +676,135 @@ class McpToolRouterRouteTest {
       JSONObject result = router.route("neo_delete", args, WRITE_SCOPES);
 
       assertTrue(result.getBoolean("isError"));
+    }
+  }
+
+  // ── ETP-4254 entity method-flag gate on the MCP write path ────────────
+
+  /**
+   * ETP-4254: the MCP write handlers resolve the entity and go straight to
+   * {@code DefaultJsonDataService}, so before this fix they never consulted the
+   * {@code ETGO_SF_ENTITY} method flags that the REST CRUD path enforces with a {@code 405}.
+   * Turning the mutation flags off on a monitor/log window therefore blocked the React UI
+   * while leaving an MCP agent free to write — and made {@code neo_discover}'s
+   * {@code readOnly: true} a lie.
+   *
+   * <p>These tests run the REAL {@code requireMethodEnabled} (same {@code thenCallRealMethod}
+   * seam already used for {@code validateArgs}) so the refusal text is asserted end to end
+   * through {@code route()}.</p>
+   */
+  @Nested
+  @DisplayName("route — entity method-flag gate (ETP-4254)")
+  class MethodFlagGateTests {
+
+    @BeforeEach
+    void enableRealGate() {
+      supportMock.when(() -> McpToolRouterSupport.requireMethodEnabled(
+          any(), any(), anyString())).thenCallRealMethod();
+    }
+
+    /** A monitor/log entity: readable, every mutation flag off. */
+    private SFEntity readOnlyEntity() {
+      SFEntity entity = mockEntity();
+      when(entity.isGet()).thenReturn(true);
+      when(entity.isGetByID()).thenReturn(true);
+      when(entity.isPost()).thenReturn(false);
+      when(entity.isPut()).thenReturn(false);
+      when(entity.isPatch()).thenReturn(false);
+      when(entity.isDelete()).thenReturn(false);
+      return entity;
+    }
+
+    private SFEntity writableEntity() {
+      SFEntity entity = mockEntity();
+      when(entity.isGet()).thenReturn(true);
+      when(entity.isGetByID()).thenReturn(true);
+      when(entity.isPost()).thenReturn(true);
+      when(entity.isPut()).thenReturn(true);
+      when(entity.isPatch()).thenReturn(true);
+      when(entity.isDelete()).thenReturn(true);
+      return entity;
+    }
+
+    private String routeAndGetText(String toolName, JSONObject args) throws Exception {
+      JSONObject result = router.route(toolName, args, WRITE_SCOPES);
+      return result.getJSONArray("content").getJSONObject(0).getString("text");
+    }
+
+    private JSONObject createArgs() throws Exception {
+      JSONObject args = buildCrudArgs();
+      args.put("fields", new JSONObject());
+      return args;
+    }
+
+    private JSONObject updateArgs() throws Exception {
+      JSONObject args = createArgs();
+      args.put("id", "rec-1");
+      return args;
+    }
+
+    private JSONObject deleteArgs() throws Exception {
+      JSONObject args = buildCrudArgs();
+      args.put("id", "rec-1");
+      return args;
+    }
+
+    @Test
+    @DisplayName("neo_create is refused on a read-only entity")
+    void createRefusedOnReadOnlyEntity() throws Exception {
+      SFSpec spec = mockSpec();
+      setupSpecLookup(spec);
+      setupEntityLookup(readOnlyEntity(), null);
+
+      String text = routeAndGetText("neo_create", createArgs());
+
+      assertTrue(text.contains("does not enable POST"), text);
+      assertTrue(text.contains("read-only"), text);
+    }
+
+    @Test
+    @DisplayName("neo_update is refused on a read-only entity")
+    void updateRefusedOnReadOnlyEntity() throws Exception {
+      SFSpec spec = mockSpec();
+      setupSpecLookup(spec);
+      setupEntityLookup(readOnlyEntity(), null);
+
+      String text = routeAndGetText("neo_update", updateArgs());
+
+      assertTrue(text.contains("does not enable PUT"), text);
+    }
+
+    @Test
+    @DisplayName("neo_delete is refused on a read-only entity")
+    void deleteRefusedOnReadOnlyEntity() throws Exception {
+      SFSpec spec = mockSpec();
+      setupSpecLookup(spec);
+      setupEntityLookup(readOnlyEntity(), null);
+
+      String text = routeAndGetText("neo_delete", deleteArgs());
+
+      assertTrue(text.contains("does not enable DELETE"), text);
+    }
+
+    /**
+     * Companion to the three refusals: a writable entity must get PAST the gate. The entity is
+     * given a null AD_Tab on purpose so the call then fails in {@code getAdTabOrThrow} — the
+     * next step after the gate — instead of reaching {@code DefaultJsonDataService}, whose
+     * static initialiser needs a servlet container (see this class's javadoc). What matters is
+     * that the failure is the AD_Tab error and never the method-flag refusal, mirroring
+     * {@code WriteTierAuthorizationTests#listAllowedForReadOnlyRole}.
+     */
+    @Test
+    @DisplayName("a writable entity passes the gate")
+    void writableEntityPassesTheGate() throws Exception {
+      SFSpec spec = mockSpec();
+      setupSpecLookup(spec);
+      setupEntityLookup(writableEntity(), null);
+
+      String text = routeAndGetText("neo_create", createArgs());
+
+      assertFalse(text.contains("does not enable"), text);
+      assertTrue(text.contains("No AD_Tab linked to entity"), text);
     }
   }
 
