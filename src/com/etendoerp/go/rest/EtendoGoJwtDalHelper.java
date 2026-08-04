@@ -17,7 +17,9 @@
 package com.etendoerp.go.rest;
 
 import java.util.Date;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 
 import org.apache.commons.lang3.StringUtils;
 import org.codehaus.jettison.json.JSONException;
@@ -31,6 +33,7 @@ import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.currency.Currency;
 import org.openbravo.model.common.enterprise.Organization;
 
+import com.etendoerp.go.payment.TenantPlanService;
 import com.etendoerp.go.schemaforge.data.Account;
 
 final class EtendoGoJwtDalHelper {
@@ -57,6 +60,7 @@ final class EtendoGoJwtDalHelper {
   private static final String FIELD_ADMIN_USER_ID = "adminUserId";
   private static final String FIELD_ADMIN_USER = "adminUser";
   private static final String FIELD_ADMIN_USER_NAME = "adminUserName";
+  private static final String FIELD_PLAN = "plan";
   private static final String PROPERTY_PASSWORD_CHANGED = Account.PROPERTY_PASSWORDCHANGED;
   private static final String PROPERTY_RESET_TOKEN_CONSUMED = Account.PROPERTY_RESETTOKENCONSUMED;
   private static final String PROPERTY_RESET_TOKEN_EXPIRES = Account.PROPERTY_RESETTOKENEXPIRES;
@@ -65,6 +69,7 @@ final class EtendoGoJwtDalHelper {
   private static final String PROPERTY_EXTERNAL_SUBJECT = Account.PROPERTY_EXTERNALSUBJECT;
   private static final String PROPERTY_EXTERNAL_EMAIL = Account.PROPERTY_EXTERNALEMAIL;
   private static final String PROPERTY_LAST_SSO_LOGIN = Account.PROPERTY_LASTSSOLOGIN;
+  private static final TenantPlanService TENANT_PLAN_SERVICE = new TenantPlanService();
 
   private EtendoGoJwtDalHelper() {
   }
@@ -310,6 +315,22 @@ final class EtendoGoJwtDalHelper {
     return query.list();
   }
 
+  /**
+   * Counts the distinct tenants (AD_Clients) the account owns, using the same username-match rule
+   * as {@link #findEnvironmentUsersByAccountEmail}. This is what the onboarding paywall reads to
+   * tell a first (free) tenant from an additional (paid) one.
+   *
+   * @param accountEmail the authenticated account email
+   * @return the number of distinct clients linked to the account
+   */
+  static int countTenantsOwnedByAccountEmail(String accountEmail) {
+    Set<String> clientIds = new HashSet<>();
+    for (User environmentUser : findEnvironmentUsersByAccountEmail(accountEmail)) {
+      clientIds.add(environmentUser.getClient().getId());
+    }
+    return clientIds.size();
+  }
+
   static JSONObject buildEnvironmentJson(Client client, Organization organization, User environmentUser)
       throws JSONException {
     JSONObject env = new JSONObject();
@@ -320,6 +341,9 @@ final class EtendoGoJwtDalHelper {
     env.put(FIELD_ADMIN_USER_ID, environmentUser.getId());
     env.put(FIELD_ADMIN_USER, environmentUser.getUsername());
     env.put(FIELD_ADMIN_USER_NAME, environmentUser.getName());
+    // Additive since ETP-4686 so the environment picker can badge the plan. Older clients that
+    // ignore the field keep working, and a tenant with no plan marker reads back as free.
+    env.put(FIELD_PLAN, TENANT_PLAN_SERVICE.resolvePlan(client.getId()));
     return env;
   }
 
