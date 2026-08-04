@@ -51,7 +51,7 @@ class FiscalDeclCrudHandler {
 
   /**
    * Entity name (= DB table name) for the AEAT validation-error rows persisted on every Modelo
-   * 303 submission attempt (see {@link Fiscal303BoxesHandler#handleSubmit} /
+   * 303 submission attempt (see {@link Fiscal303SubmissionSupport#handleSubmit} /
    * {@link #replaceIncidents}). Referenced by its raw entity-name string rather than a generated
    * entity class — {@code OBDal.createQuery(String, ...)} resolves it dynamically, so this code
    * has no compile-time dependency on a {@code src-gen} class for the table. Must match
@@ -89,21 +89,26 @@ class FiscalDeclCrudHandler {
    * always non-whitespace, alphanumeric. Falls back to an empty code when a string doesn't match
    * (defensive: AEAT's error format is not contractually guaranteed).
    *
-   * <p>Every quantifier is possessive ({@code ++}/{@code *+}) rather than greedy — a SonarQube
-   * hotspot (java:S5852, ReDoS/backtracking) was raised against the original greedy form
-   * ({@code ^(\S+)\s*-\s*(.+)$}). Analysis: {@code \S+} and the {@code \s*} that follows it sit on
-   * strictly complementary character classes (a char is either whitespace or not), so there is no
-   * combinatorial ambiguity between them — the original pattern's worst case was already linear in
-   * input length, not exponential. The one spot with any real ambiguity is {@code \s*} directly
-   * followed by {@code .+} (both can match a whitespace char), which resolved in at most one
-   * backtrack step since {@code .+} only needs a single character back to reach {@code $}.
-   * Switching every quantifier to possessive removes backtracking entirely regardless — the
-   * safer, standard Java fix for this class of finding, and provably O(n) by construction rather
-   * than by argument. It does not change the match result for the format this pattern is meant to
-   * parse ({@code "<code> - <message>"}, always pre-{@link String#trim()}med by {@link
-   * #splitAeatError} before matching); the existing "no-dash" fallback in {@link #splitAeatError}
-   * still applies unchanged to anything that doesn't match. Reviewed for ETP-4456. */
-  private static final Pattern AEAT_ERROR_PATTERN = Pattern.compile("^(\\S++)\\s*+-\\s*+(.++)$");
+   * <p><b>SonarQube hotspot (java:S5852, ReDoS/backtracking) reviewed for ETP-4456 — not
+   * exploitable, kept as-is.</b> {@code \S+} and the {@code \s*} that follows it sit on strictly
+   * complementary character classes (a char is either whitespace or not), so there is no
+   * combinatorial ambiguity between them: {@code \S+} only ever backtracks by giving back
+   * characters it itself consumed (all non-whitespace, by definition), and each backtrack step is
+   * an O(1) check for the literal {@code -}, so the worst case (e.g. a long run of non-whitespace
+   * with no matching dash at all) is linear in input length, not exponential. The one spot with
+   * any real ambiguity is {@code \s*} directly followed by {@code .+} (both can match a whitespace
+   * char), which resolves in at most one backtrack step since {@code .+} only needs to give back a
+   * single character to reach {@code $}. An earlier attempt to "harden" this with possessive
+   * quantifiers ({@code \S++\s*+-\s*+.++}) was REVERTED (code review, ETP-4456): possessive
+   * quantifiers forbid backtracking entirely, which silently changes the match result for inputs
+   * like {@code "35068-El resultado..."} (no space before the dash) — the greedy version finds the
+   * split by backtracking {@code \S+} back through the dash itself (the dash is non-whitespace, so
+   * {@code \S+} initially swallows it too); the possessive version can never give that dash back,
+   * so it fails to match and falls back to an empty code. The 4 pre-existing {@code
+   * splitAeatError} tests all use {@code "CODE - message"} (space on both sides of the dash) and
+   * did not catch this — a regression test covering the no-space format (e.g. {@code
+   * "35068-mensaje"}) is recommended before touching this pattern again. */
+  private static final Pattern AEAT_ERROR_PATTERN = Pattern.compile("^(\\S+)\\s*-\\s*(.+)$");
 
   private static final String PROPERTY_CLIENT = "client";
   private static final String PROPERTY_ORGANIZATION = "organization";

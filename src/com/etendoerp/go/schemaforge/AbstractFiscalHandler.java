@@ -155,7 +155,7 @@ abstract class AbstractFiscalHandler {
 
   /**
    * Same as {@link #replaceIncidents} but does not commit — used by
-   * {@link Fiscal303BoxesHandler#handleSubmit} so the incidents write shares a single
+   * {@link Fiscal303SubmissionSupport#handleSubmit} so the incidents write shares a single
    * transaction with the declaration status/attachment write that follows it (ETP-4456
    * atomicity fix). See {@link FiscalDeclCrudHandler#replaceIncidentsNoCommit}.
    */
