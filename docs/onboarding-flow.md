@@ -73,6 +73,7 @@ names that the import step processes. Key entries and their rationale:
 | `C_DOCTYPE` | Document types (invoice, order, etc.) |
 | `C_PAYMENTTERM` | Payment terms required for invoicing |
 | `AD_SEQUENCE` / `GL_CATEGORY` | Document-number sequences and GL categories |
+| `M_COSTING_RULE` | Without a costing rule a new tenant computes cost for zero transactions (`M_Transaction.iscostcalculated` stuck `'N'`); the bundled row seeds a validated Standard rule (ETP-4760) |
 
 ## NDJSON Progress Events
 
