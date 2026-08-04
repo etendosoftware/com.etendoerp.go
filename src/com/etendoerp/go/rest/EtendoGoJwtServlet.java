@@ -1239,23 +1239,13 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       return;
     }
 
-    // Paywall (ETP-4686). Runs before the NDJSON stream opens and before any provisioning, so a
-    // refused request leaves no half-created tenant behind and can still answer with a plain
-    // JSON error instead of a stream. The backend is authoritative here: the /upgrade page in the
-    // web client shows the checkout, but this check is what actually gates tenant creation.
-    boolean paidUpgrade;
-    try {
-      PaywallOutcome paywall = evaluatePaywall(accountEmail, onboardingRequest);
-      if (paywall.decision.isBlocked()) {
-        writePaymentRequiredError(response, paywall.decision);
-        return;
-      }
-      paidUpgrade = paywall.paid;
-    } catch (RuntimeException e) {
-      log.error("Paywall evaluation failed for onboarding", e);
-      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, SERVER_ERROR);
+    // null means the paywall refused the request (or failed) and already answered; unboxed into a
+    // primitive right after the guard so the later check is not a boxed-Boolean condition.
+    Boolean paywallOutcome = resolvePaywallOutcome(accountEmail, onboardingRequest, response);
+    if (paywallOutcome == null) {
       return;
     }
+    boolean paidUpgrade = paywallOutcome;
 
     // Set up NDJSON streaming
     response.setStatus(HttpServletResponse.SC_OK);
@@ -1345,16 +1335,48 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       heartbeat.shutdownNow();
       OBContext.restorePreviousMode();
       writer.flush();
-      // PrintWriter swallows IOExceptions (broken pipe): when CloudFront or any proxy
-      // hits its response timeout it silently drops the client mid-stream while the
-      // backend keeps running to completion (and commits). checkError() is the only
-      // way to detect it. Surface it explicitly so it stops being invisible in the logs.
-      if (writer.checkError()) {
-        log.warn("Onboarding stream to client was lost before the result line was delivered "
-            + "(likely a CloudFront/proxy response timeout). The environment may have been "
-            + "created successfully server-side, but the UI will report a false failure. "
-            + "accountEmail={}", maskEmail(accountEmail));
+      warnIfOnboardingStreamLost(writer, accountEmail);
+    }
+  }
+
+  /**
+   * Paywall gate (ETP-4686). Runs before the NDJSON stream opens and before any provisioning, so a
+   * refused request leaves no half-created tenant behind and can still answer with a plain JSON
+   * error instead of a stream. The backend is authoritative here: the /upgrade page in the web
+   * client shows the checkout, but this check is what actually gates tenant creation.
+   *
+   * @return whether the account paid for an upgrade, or {@code null} when the request was refused
+   *     or evaluation failed. In the {@code null} case the error response has already been written,
+   *     so the caller must return without opening the stream.
+   */
+  private Boolean resolvePaywallOutcome(String accountEmail, OnboardingRequestData onboardingRequest,
+      HttpServletResponse response) throws IOException {
+    try {
+      PaywallOutcome paywall = evaluatePaywall(accountEmail, onboardingRequest);
+      if (paywall.decision.isBlocked()) {
+        writePaymentRequiredError(response, paywall.decision);
+        return null;
       }
+      return paywall.paid;
+    } catch (RuntimeException e) {
+      log.error("Paywall evaluation failed for onboarding", e);
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, SERVER_ERROR);
+      return null;
+    }
+  }
+
+  /**
+   * PrintWriter swallows IOExceptions (broken pipe): when CloudFront or any proxy hits its response
+   * timeout it silently drops the client mid-stream while the backend keeps running to completion
+   * (and commits). {@code checkError()} is the only way to detect it. Surface it explicitly so it
+   * stops being invisible in the logs.
+   */
+  private void warnIfOnboardingStreamLost(PrintWriter writer, String accountEmail) {
+    if (writer.checkError()) {
+      log.warn("Onboarding stream to client was lost before the result line was delivered "
+          + "(likely a CloudFront/proxy response timeout). The environment may have been "
+          + "created successfully server-side, but the UI will report a false failure. "
+          + "accountEmail={}", maskEmail(accountEmail));
     }
   }
 
