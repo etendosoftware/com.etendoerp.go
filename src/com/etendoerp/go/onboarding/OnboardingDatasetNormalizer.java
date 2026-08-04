@@ -16,16 +16,8 @@
  */
 package com.etendoerp.go.onboarding;
 
-import java.io.BufferedReader;
-import java.io.IOException;
 import java.io.InputStream;
-import java.io.InputStreamReader;
-import java.io.StringWriter;
-import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.ArrayList;
-import java.util.Comparator;
 import java.util.Date;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -36,27 +28,18 @@ import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-import javax.xml.XMLConstants;
 import javax.xml.parsers.DocumentBuilder;
-import javax.xml.parsers.DocumentBuilderFactory;
-import javax.xml.transform.OutputKeys;
-import javax.xml.transform.Transformer;
-import javax.xml.transform.TransformerFactory;
-import javax.xml.transform.dom.DOMSource;
-import javax.xml.transform.stream.StreamResult;
 
-import org.hibernate.criterion.Restrictions;
 import org.openbravo.base.exception.OBException;
 import org.openbravo.base.model.Entity;
-import org.openbravo.base.model.ModelProvider;
 import org.openbravo.base.model.Property;
-import org.openbravo.dal.service.OBCriteria;
-import org.openbravo.dal.service.OBDal;
-import org.openbravo.model.ad.system.Language;
 import org.w3c.dom.Document;
 import org.w3c.dom.Element;
 import org.w3c.dom.Node;
 import org.w3c.dom.NodeList;
+
+import com.etendoerp.go.onboarding.OnboardingSourceFiles.SourceFile;
+import com.etendoerp.go.onboarding.OnboardingSourceFiles.SourceFileProvider;
 
 /**
  * Converts GOClient sourcedata into Openbravo entity XML so it can be consumed by
@@ -64,13 +47,6 @@ import org.w3c.dom.NodeList;
  */
 public class OnboardingDatasetNormalizer {
 
-  private static final String SAMPLE_DATA_RESOURCE_ROOT =
-      "com/etendoerp/go/onboarding/sampledata";
-  private static final String SAMPLE_DATA_RESOURCE_DIRECTORY =
-      SAMPLE_DATA_RESOURCE_ROOT + "/GOClient";
-  private static final String SAMPLE_DATA_INDEX_RESOURCE =
-      SAMPLE_DATA_RESOURCE_ROOT + "/index.txt";
-  private static final String RESOURCE_PATH_SEPARATOR = "/";
   private static final String CLASS_LOADER_REQUIRED = "classLoader is required";
   private static final String AD_ORG_ID_COLUMN = "AD_ORG_ID";
 
@@ -91,18 +67,19 @@ public class OnboardingDatasetNormalizer {
    * Creates a normalizer that reads the packaged GOClient sourcedata from the runtime classpath.
    */
   public OnboardingDatasetNormalizer() {
-    this(classpathSourceFileProvider(defaultClassLoader()), modelProviderEntityResolver());
+    this(OnboardingSourceFiles.classpathSourceFileProvider(OnboardingSourceFiles.defaultClassLoader()),
+        OnboardingDefaultResolvers.modelProviderEntityResolver());
   }
 
   OnboardingDatasetNormalizer(ClassLoader classLoader, EntityResolver entityResolver) {
-    this(classpathSourceFileProvider(Objects.requireNonNull(classLoader, CLASS_LOADER_REQUIRED)),
-        entityResolver);
+    this(OnboardingSourceFiles.classpathSourceFileProvider(
+        Objects.requireNonNull(classLoader, CLASS_LOADER_REQUIRED)), entityResolver);
   }
 
   OnboardingDatasetNormalizer(ClassLoader classLoader, EntityResolver entityResolver,
       ReferenceIdResolver referenceIdResolver) {
-    this(classpathSourceFileProvider(Objects.requireNonNull(classLoader, CLASS_LOADER_REQUIRED)),
-        entityResolver, referenceIdResolver);
+    this(OnboardingSourceFiles.classpathSourceFileProvider(
+        Objects.requireNonNull(classLoader, CLASS_LOADER_REQUIRED)), entityResolver, referenceIdResolver);
   }
 
   /**
@@ -111,23 +88,23 @@ public class OnboardingDatasetNormalizer {
    * @param sampleDataDirectory the directory that contains the GOClient sourcedata XML files
    */
   public OnboardingDatasetNormalizer(Path sampleDataDirectory) {
-    this(sampleDataDirectory, modelProviderEntityResolver());
+    this(sampleDataDirectory, OnboardingDefaultResolvers.modelProviderEntityResolver());
   }
 
   OnboardingDatasetNormalizer(Path sampleDataDirectory, EntityResolver entityResolver) {
-    this(directorySourceFileProvider(Objects.requireNonNull(sampleDataDirectory,
+    this(OnboardingSourceFiles.directorySourceFileProvider(Objects.requireNonNull(sampleDataDirectory,
         "sampleDataDirectory is required")), entityResolver);
   }
 
   OnboardingDatasetNormalizer(Path sampleDataDirectory, EntityResolver entityResolver,
       ReferenceIdResolver referenceIdResolver) {
-    this(directorySourceFileProvider(Objects.requireNonNull(sampleDataDirectory,
+    this(OnboardingSourceFiles.directorySourceFileProvider(Objects.requireNonNull(sampleDataDirectory,
         "sampleDataDirectory is required")), entityResolver, referenceIdResolver);
   }
 
   private OnboardingDatasetNormalizer(SourceFileProvider sourceFileProvider,
       EntityResolver entityResolver) {
-    this(sourceFileProvider, entityResolver, dalReferenceIdResolver());
+    this(sourceFileProvider, entityResolver, OnboardingDefaultResolvers.dalReferenceIdResolver());
   }
 
   private OnboardingDatasetNormalizer(SourceFileProvider sourceFileProvider,
@@ -155,7 +132,7 @@ public class OnboardingDatasetNormalizer {
    * @return the normalized Openbravo XML ready to be imported
    */
   public String buildDatasetXml(String targetOrganizationId) {
-    DocumentBuilder builder = newDocumentBuilder();
+    DocumentBuilder builder = OnboardingDatasetXmlSupport.newDocumentBuilder();
     Document output = builder.newDocument();
     Element root = output.createElement("Openbravo");
     root.setAttribute("xmlns:xsi", "http://www.w3.org/2001/XMLSchema-instance");
@@ -163,16 +140,16 @@ public class OnboardingDatasetNormalizer {
 
     // Per-build state so repeated calls never leak excluded ids into one another.
     RowExclusionFilter rowExclusionFilter = new RowExclusionFilter();
-    for (SourceFile sourceFile : listIncludedSourceFiles()) {
+    for (SourceFile sourceFile : sourceFileProvider.listIncludedSourceFiles()) {
       appendEntities(sourceFile, builder, output, root, targetOrganizationId, rowExclusionFilter);
     }
 
-    return toXml(output);
+    return OnboardingDatasetXmlSupport.toXml(output);
   }
 
   private void appendEntities(SourceFile sourceFile, DocumentBuilder builder, Document output, Element root,
       String targetOrganizationId, RowExclusionFilter rowExclusionFilter) {
-    Entity entity = resolveEntity(tableName(sourceFile.fileName));
+    Entity entity = resolveEntity(OnboardingSourceFiles.tableName(sourceFile.fileName));
     try (InputStream inputStream = sourceFile.openStream()) {
       Document source = builder.parse(inputStream);
       NodeList childNodes = source.getDocumentElement().getChildNodes();
@@ -355,204 +332,12 @@ public class OnboardingDatasetNormalizer {
     return referenceIdResolver.resolve(targetEntityName, rawValue);
   }
 
-  /**
-   * DAL-backed reference resolver. Language codes are resolved to their installed
-   * {@code AD_Language} DAL id (cached per build); all other references pass through unchanged.
-   */
-  private static ReferenceIdResolver dalReferenceIdResolver() {
-    Map<String, String> languageIdByCode = new HashMap<>();
-    return (targetEntityName, rawValue) -> {
-      if (!Language.ENTITY_NAME.equals(targetEntityName)) {
-        return rawValue;
-      }
-      return languageIdByCode.computeIfAbsent(rawValue,
-          OnboardingDatasetNormalizer::resolveInstalledLanguageId);
-    };
-  }
-
-  private static String resolveInstalledLanguageId(String languageCode) {
-    OBCriteria<Language> criteria = OBDal.getInstance().createCriteria(Language.class);
-    criteria.setFilterOnReadableClients(false);
-    criteria.setFilterOnReadableOrganization(false);
-    criteria.add(Restrictions.eq(Language.PROPERTY_LANGUAGE, languageCode));
-    criteria.setMaxResults(1);
-    Language language = (Language) criteria.uniqueResult();
-    if (language == null) {
-      throw new OBException("Onboarding dataset references language '" + languageCode
-          + "' which is not installed in this Etendo instance");
-    }
-    return language.getId();
-  }
-
   private Entity resolveEntity(String tableName) {
     Entity entity = entityResolver.resolve(tableName);
     if (entity == null) {
       throw new OBException("Table " + tableName + " is not mapped in the runtime model");
     }
     return entity;
-  }
-
-  private static ClassLoader defaultClassLoader() {
-    ClassLoader contextClassLoader = Thread.currentThread().getContextClassLoader();
-    return contextClassLoader != null
-        ? contextClassLoader
-        : OnboardingDatasetNormalizer.class.getClassLoader();
-  }
-
-
-  private static EntityResolver modelProviderEntityResolver() {
-    return tableName -> ModelProvider.getInstance().getEntityByTableName(tableName);
-  }
-
-  private List<SourceFile> listIncludedSourceFiles() {
-    return sourceFileProvider.listIncludedSourceFiles();
-  }
-
-  private static SourceFileProvider directorySourceFileProvider(Path sampleDataDirectory) {
-    return () -> {
-      List<SourceFile> files = new ArrayList<>();
-      try (var stream = Files.list(sampleDataDirectory)) {
-        stream.filter(Files::isRegularFile)
-            .filter(path -> path.getFileName().toString().endsWith(".xml"))
-            .filter(path -> OnboardingDatasetDefinition.shouldIncludeTable(
-                tableName(path.getFileName().toString())))
-            .sorted(Comparator.comparing(path -> path.getFileName().toString()))
-            .forEach(path -> files.add(new SourceFile(path.getFileName().toString(),
-                () -> openFileSystemSourceFile(path))));
-      } catch (Exception e) {
-        throw new OnboardingDatasetNormalizationException(
-            "Failed to list onboarding sourcedata in " + sampleDataDirectory, e);
-      }
-      return files;
-    };
-  }
-
-  private static SourceFileProvider classpathSourceFileProvider(ClassLoader classLoader) {
-    Objects.requireNonNull(classLoader, CLASS_LOADER_REQUIRED);
-    return () -> {
-      List<SourceFile> files = new ArrayList<>();
-      for (String fileName : readBundledSourceFileNames(classLoader)) {
-        if (fileName.endsWith(".xml")
-            && OnboardingDatasetDefinition.shouldIncludeTable(tableName(fileName))) {
-          files.add(new SourceFile(fileName, () -> openBundledSourceFile(classLoader, fileName)));
-        }
-      }
-      files.sort(Comparator.comparing(sourceFile -> sourceFile.fileName));
-      return files;
-    };
-  }
-
-  private static List<String> readBundledSourceFileNames(ClassLoader classLoader) {
-    try (InputStream inputStream = classLoader.getResourceAsStream(SAMPLE_DATA_INDEX_RESOURCE)) {
-      if (inputStream == null) {
-        throw new OnboardingDatasetNormalizationException(
-            "Bundled GOClient sampledata index not found on the classpath: "
-                + SAMPLE_DATA_INDEX_RESOURCE);
-      }
-
-      List<String> fileNames = new ArrayList<>();
-      try (BufferedReader reader = new BufferedReader(
-          new InputStreamReader(inputStream, StandardCharsets.UTF_8))) {
-        String line;
-        while ((line = reader.readLine()) != null) {
-          String fileName = line.trim();
-          if (!fileName.isEmpty()) {
-            fileNames.add(fileName);
-          }
-        }
-      }
-
-      if (fileNames.isEmpty()) {
-        throw new OnboardingDatasetNormalizationException(
-            "Bundled GOClient sampledata index is empty: " + SAMPLE_DATA_INDEX_RESOURCE);
-      }
-      return fileNames;
-    } catch (IOException e) {
-      throw new OnboardingDatasetNormalizationException(
-          "Failed to read bundled GOClient sampledata index " + SAMPLE_DATA_INDEX_RESOURCE, e);
-    }
-  }
-
-  private static InputStream openFileSystemSourceFile(Path path) throws SourceFileAccessException {
-    try {
-      return Files.newInputStream(path);
-    } catch (IOException e) {
-      throw new SourceFileAccessException(
-          "Failed to open onboarding sourcedata file " + path.getFileName(), e);
-    }
-  }
-
-  private static InputStream openBundledSourceFile(ClassLoader classLoader, String fileName)
-      throws SourceFileAccessException {
-    String resourcePath = String.join(RESOURCE_PATH_SEPARATOR, SAMPLE_DATA_RESOURCE_DIRECTORY, fileName);
-    InputStream inputStream = classLoader.getResourceAsStream(resourcePath);
-    if (inputStream == null) {
-      throw new SourceFileAccessException(
-          "Bundled GOClient sampledata file not found on the classpath: " + resourcePath);
-    }
-    return inputStream;
-  }
-
-  private static String tableName(String sourceFileName) {
-    int suffix = sourceFileName.lastIndexOf('.');
-    return suffix == -1 ? sourceFileName : sourceFileName.substring(0, suffix);
-  }
-
-  private DocumentBuilder newDocumentBuilder() {
-    try {
-      DocumentBuilderFactory factory = DocumentBuilderFactory.newInstance();
-      factory.setNamespaceAware(false);
-      factory.setFeature(XMLConstants.FEATURE_SECURE_PROCESSING, true);
-      factory.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true);
-      factory.setFeature("http://xml.org/sax/features/external-general-entities", false);
-      factory.setFeature("http://xml.org/sax/features/external-parameter-entities", false);
-      factory.setFeature("http://apache.org/xml/features/nonvalidating/load-external-dtd", false);
-      setAttributeIfSupported(factory, XMLConstants.ACCESS_EXTERNAL_DTD, "");
-      setAttributeIfSupported(factory, XMLConstants.ACCESS_EXTERNAL_SCHEMA, "");
-      factory.setXIncludeAware(false);
-      factory.setExpandEntityReferences(false);
-      return factory.newDocumentBuilder();
-    } catch (Exception e) {
-      throw new OnboardingDatasetNormalizationException(
-          "Failed to create a secure XML parser for onboarding sourcedata", e);
-    }
-  }
-
-  private String toXml(Document document) {
-    try {
-      TransformerFactory transformerFactory = TransformerFactory.newInstance();
-      transformerFactory.setFeature(XMLConstants.FEATURE_SECURE_PROCESSING, true);
-      setAttributeIfSupported(transformerFactory, XMLConstants.ACCESS_EXTERNAL_DTD, "");
-      setAttributeIfSupported(transformerFactory, XMLConstants.ACCESS_EXTERNAL_STYLESHEET, "");
-      Transformer transformer = transformerFactory.newTransformer();
-      transformer.setOutputProperty(OutputKeys.ENCODING, StandardCharsets.UTF_8.name());
-      transformer.setOutputProperty(OutputKeys.INDENT, "yes");
-      transformer.setOutputProperty(OutputKeys.OMIT_XML_DECLARATION, "no");
-      StringWriter writer = new StringWriter();
-      transformer.transform(new DOMSource(document), new StreamResult(writer));
-      return writer.toString();
-    } catch (Exception e) {
-      throw new OnboardingDatasetNormalizationException(
-          "Failed to serialize onboarding dataset XML", e);
-    }
-  }
-
-  private void setAttributeIfSupported(DocumentBuilderFactory factory, String attribute,
-      String value) {
-    try {
-      factory.setAttribute(attribute, value);
-    } catch (IllegalArgumentException ignored) {
-      // Older XML implementations may not expose these JAXP attributes.
-    }
-  }
-
-  private void setAttributeIfSupported(TransformerFactory factory, String attribute,
-      String value) {
-    try {
-      factory.setAttribute(attribute, value);
-    } catch (IllegalArgumentException ignored) {
-      // Older XML implementations may not expose these JAXP attributes.
-    }
   }
 
   /**
@@ -585,41 +370,6 @@ public class OnboardingDatasetNormalizer {
     String resolve(String targetEntityName, String rawValue);
   }
 
-
-  @FunctionalInterface
-  private interface SourceFileProvider {
-    List<SourceFile> listIncludedSourceFiles();
-  }
-
-  @FunctionalInterface
-  private interface SourceFileOpener {
-    InputStream open() throws SourceFileAccessException;
-  }
-
-  private static final class SourceFile {
-    private final String fileName;
-    private final SourceFileOpener opener;
-
-    private SourceFile(String fileName, SourceFileOpener opener) {
-      this.fileName = Objects.requireNonNull(fileName, "fileName is required");
-      this.opener = Objects.requireNonNull(opener, "opener is required");
-    }
-
-    private InputStream openStream() throws SourceFileAccessException {
-      return opener.open();
-    }
-  }
-  private static final class SourceFileAccessException extends IOException {
-    private static final long serialVersionUID = 1L;
-
-    private SourceFileAccessException(String message) {
-      super(message);
-    }
-
-    private SourceFileAccessException(String message, Throwable cause) {
-      super(message, cause);
-    }
-  }
 
   private static final class RowConversionState {
     private String rowId;
