@@ -17,9 +17,11 @@
 
 package com.etendoerp.go.schemaforge;
 
+import java.io.BufferedReader;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
+import java.util.UUID;
 
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
@@ -49,9 +51,10 @@ import com.etendoerp.go.common.CorsUtils;
  * ETGO_Survey_Canned_Resp). Read-only, single global row — not client-scoped.
  *
  * URL:
- *   GET /sws/survey-config/
+ *   GET  /sws/survey-config/
+ *   POST /sws/survey-config/response
  *
- * Response:
+ * GET Response:
  *   {
  *     "globalCooldownDays": 30, "dismissedCooldownDays": 21, "maxPerMonth": 2,
  *     "npsMinAgeDays": 60, "npsInactivityDays": 14, "responseCooldownDays": 90,
@@ -64,6 +67,18 @@ import com.etendoerp.go.common.CorsUtils;
  *
  * Falls back to schema_forge's own VITE_SURVEY_* / hardcoded defaults when this
  * endpoint is unreachable or returns no config row — see survey-config.js.
+ *
+ * POST /sws/survey-config/response (ETP-4352 GDPR remediation): persists the actual NPS/CSAT
+ * free-text feedback server-side, in {@code ETGO_Survey_Response}, so product can still read it
+ * without it ever reaching Mixpanel. Mirrors the same request/data shape the frontend used to
+ * send to Mixpanel (score + feedback + tags), but keeps it here instead — the Mixpanel event now
+ * only carries a {@code hasComment} boolean (see SURVEY_RESPONDED in events.js), the same pattern
+ * {@code SupportConversationsServlet#handleSubmitRating} already applies for support-chat CSAT.
+ *
+ * Request body:
+ *   { "surveyKey": "nps", "score": 9, "feedback": "free text, optional", "tags": ["fast","easy"] }
+ *
+ * Response: { "status": "ok" }
  */
 public class SurveyConfigServlet extends HttpBaseServlet {
 
@@ -80,9 +95,16 @@ public class SurveyConfigServlet extends HttpBaseServlet {
       + " FROM etgo_survey_canned_resp WHERE isactive='Y'"
       + " ORDER BY survey_key, language, line_no";
 
+  private static final String FIELD_SURVEY_KEY = "surveyKey";
+  private static final String FIELD_SCORE = "score";
+  private static final String FIELD_FEEDBACK = "feedback";
+  private static final String FIELD_TAGS = "tags";
+  private static final String FIELD_STATUS = "status";
+  private static final String RESPONSE_PATH = "/response";
+
   @Override
   public void doGet(HttpServletRequest request, HttpServletResponse response) throws IOException {
-    CorsUtils.apply(request, response, "GET, OPTIONS", "Authorization, Content-Type", null, false);
+    CorsUtils.apply(request, response, "GET, POST, OPTIONS", "Authorization, Content-Type", null, false);
 
     try {
       NeoServletSupport.authenticateJwt(request);
@@ -113,9 +135,141 @@ public class SurveyConfigServlet extends HttpBaseServlet {
   }
 
   @Override
+  public void doPost(HttpServletRequest request, HttpServletResponse response) throws IOException {
+    CorsUtils.apply(request, response, "GET, POST, OPTIONS", "Authorization, Content-Type", null, false);
+
+    String pathInfo = request.getPathInfo();
+    if (pathInfo == null || !(RESPONSE_PATH.equals(pathInfo) || (RESPONSE_PATH + "/").equals(pathInfo))) {
+      sendError(response, HttpServletResponse.SC_NOT_FOUND, "Unknown endpoint: " + pathInfo);
+      return;
+    }
+
+    OBContext ctx;
+    try {
+      ctx = NeoServletSupport.authenticateJwt(request);
+    } catch (OBException e) {
+      log.warn("Unauthorized SurveyConfig response submission: {}", e.getMessage());
+      sendError(response, HttpServletResponse.SC_UNAUTHORIZED, e.getMessage());
+      return;
+    } catch (Exception e) {
+      log.warn("Unauthorized SurveyConfig response submission: {}", e.getMessage());
+      sendError(response, HttpServletResponse.SC_UNAUTHORIZED, "Invalid or expired token");
+      return;
+    }
+
+    handleSubmitResponse(request, response, ctx);
+  }
+
+  @Override
   public void doOptions(HttpServletRequest request, HttpServletResponse response) throws IOException {
-    CorsUtils.apply(request, response, "GET, OPTIONS", "Authorization, Content-Type", null, false);
+    CorsUtils.apply(request, response, "GET, POST, OPTIONS", "Authorization, Content-Type", null, false);
     response.setStatus(HttpServletResponse.SC_NO_CONTENT);
+  }
+
+  /**
+   * Persists a submitted NPS/CSAT survey response — the free-text feedback is stored here and
+   * ONLY here (never forwarded to Mixpanel, see useSurveyEngine.js's handleRespond, which now
+   * sends a hasComment boolean to the analytics channel instead). Fire-and-forget from the
+   * frontend's point of view, same as SupportConversationsServlet#handleSubmitRating persists the
+   * support-chat CSAT rating/comment.
+   */
+  private void handleSubmitResponse(HttpServletRequest request, HttpServletResponse response, OBContext ctx)
+      throws IOException {
+    JSONObject body = parseBody(request, response);
+    if (body == null) return;
+
+    String surveyKey = body.optString(FIELD_SURVEY_KEY, "").trim();
+    if (surveyKey.isEmpty()) {
+      sendError(response, HttpServletResponse.SC_BAD_REQUEST, "Missing required field: " + FIELD_SURVEY_KEY);
+      return;
+    }
+
+    Integer score = body.has(FIELD_SCORE) && !body.isNull(FIELD_SCORE) ? body.optInt(FIELD_SCORE) : null;
+    String feedbackTrimmed = body.optString(FIELD_FEEDBACK, "").trim();
+    String feedback = feedbackTrimmed.isEmpty() ? null : feedbackTrimmed;
+    String tags = joinTags(body.optJSONArray(FIELD_TAGS));
+
+    try {
+      OBContext.setAdminMode();
+      try {
+        // score/feedback/tags are individually nullable (a CSAT response may have no comment,
+        // a dismissed-then-reopened NPS may have no score yet). Hibernate's generic
+        // setParameter(name, Object) cannot infer a JDBC type from a null value on a native
+        // query, so absent fields are inlined as the SQL literal NULL instead of bound — the
+        // inlined tokens are always one of the two fixed strings below, never request input.
+        NativeQuery<?> insert = OBDal.getInstance().getSession()
+            .createNativeQuery(buildInsertResponseSql(score, feedback, tags));
+        insert.setParameter("id", UUID.randomUUID().toString().replace("-", ""));
+        insert.setParameter("clientId", ctx.getCurrentClient().getId());
+        insert.setParameter("orgId", ctx.getCurrentOrganization().getId());
+        insert.setParameter("actorId", ctx.getUser().getId());
+        insert.setParameter(FIELD_SURVEY_KEY, surveyKey);
+        if (score != null) insert.setParameter(FIELD_SCORE, score);
+        if (feedback != null) insert.setParameter(FIELD_FEEDBACK, feedback);
+        if (tags != null) insert.setParameter(FIELD_TAGS, tags);
+        insert.executeUpdate();
+      } finally {
+        OBContext.restorePreviousMode();
+      }
+
+      JSONObject result = new JSONObject();
+      result.put(FIELD_STATUS, "ok");
+      response.setStatus(HttpServletResponse.SC_CREATED);
+      response.setContentType(ContentType.APPLICATION_JSON.getMimeType());
+      response.setCharacterEncoding(StandardCharsets.UTF_8.name());
+      response.getWriter().write(result.toString());
+    } catch (Exception e) {
+      log.error("Error persisting survey response for survey '{}': {}", surveyKey, e.getMessage(), e);
+      sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
+          "An internal error occurred while saving the survey response.");
+    }
+  }
+
+  /** Builds the INSERT for one survey response, inlining a fixed {@code NULL} SQL literal (never
+   * request-controlled) for each optional column that has no value, instead of binding null via
+   * {@link NativeQuery#setParameter}. */
+  private static String buildInsertResponseSql(Integer score, String feedback, String tags) {
+    String scoreExpr = score != null ? ":" + FIELD_SCORE : "NULL";
+    String feedbackExpr = feedback != null ? ":" + FIELD_FEEDBACK : "NULL";
+    String tagsExpr = tags != null ? ":" + FIELD_TAGS : "NULL";
+    return "INSERT INTO etgo_survey_response"
+        + " (etgo_survey_response_id, ad_client_id, ad_org_id, isactive,"
+        + "  created, createdby, updated, updatedby,"
+        + "  survey_key, ad_user_id, score, feedback_text, tags, response_date)"
+        + " VALUES"
+        + " (:id, :clientId, :orgId, 'Y',"
+        + "  now(), :actorId, now(), :actorId,"
+        + "  :" + FIELD_SURVEY_KEY + ", :actorId, " + scoreExpr + ", " + feedbackExpr + ", " + tagsExpr + ", now())";
+  }
+
+  /** Flattens a JSON string array into a comma-separated value for the {@code tags} column (same
+   * shape the frontend previously sent to Mixpanel as {@code tags.join(',')}). Returns null (not
+   * an empty string) when absent/empty so the column stores a real NULL. */
+  private static String joinTags(JSONArray tagsArr) {
+    if (tagsArr == null || tagsArr.length() == 0) return null;
+    StringBuilder sb = new StringBuilder();
+    for (int i = 0; i < tagsArr.length(); i++) {
+      if (sb.length() > 0) sb.append(',');
+      sb.append(tagsArr.optString(i, ""));
+    }
+    return sb.length() > 0 ? sb.toString() : null;
+  }
+
+  /** Parse request body, writing a 400 response on malformed JSON (returns null in that case so
+   * the caller can bail out immediately — mirrors SupportConversationsServlet#parseBody). */
+  private JSONObject parseBody(HttpServletRequest request, HttpServletResponse response)
+      throws IOException {
+    StringBuilder sb = new StringBuilder();
+    try (BufferedReader reader = request.getReader()) {
+      String line;
+      while ((line = reader.readLine()) != null) sb.append(line);
+    }
+    try {
+      return new JSONObject(sb.toString());
+    } catch (JSONException e) {
+      sendError(response, HttpServletResponse.SC_BAD_REQUEST, "Invalid JSON body");
+      return null;
+    }
   }
 
   @SuppressWarnings("unchecked")
