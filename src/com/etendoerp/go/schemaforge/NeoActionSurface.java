@@ -56,6 +56,27 @@ public final class NeoActionSurface {
   }
 
   /**
+   * Resolves a {@code Java_Qualifier} to its registered {@link NeoHandler}.
+   *
+   * <p>Exists as a seam so tests can supply a fake resolver instead of
+   * {@code mockStatic(NeoServletSupport.class)}. Mocking that class statically instruments a
+   * type that sits next to the DAL bootstrap, and the whole module's test suite shares one JVM
+   * (no {@code maxParallelForks}/{@code forkEvery} configured) — so a static mock there is a
+   * cross-class pollution risk, not a local test detail.</p>
+   */
+  @FunctionalInterface
+  interface HandlerResolver {
+    /**
+     * @param qualifier the entity's {@code Java_Qualifier}
+     * @return the registered handler, or {@code null} when none matches
+     */
+    NeoHandler resolve(String qualifier);
+  }
+
+  /** The production resolver: CDI lookup by {@code @Named} qualifier. */
+  private static final HandlerResolver CDI_RESOLVER = NeoServletSupport::lookupHandler;
+
+  /**
    * Reports whether the entity's handler declares that it answers ACTION requests.
    *
    * @param entity the SF entity to probe (may be {@code null})
@@ -63,6 +84,17 @@ public final class NeoActionSurface {
    *         {@code false} only on positive evidence that its handler serves none
    */
   public static boolean hasActionSurface(SFEntity entity) {
+    return hasActionSurface(entity, CDI_RESOLVER);
+  }
+
+  /**
+   * Same as {@link #hasActionSurface(SFEntity)} with an explicit handler resolver.
+   *
+   * @param entity   the SF entity to probe (may be {@code null})
+   * @param resolver resolves a qualifier to its handler
+   * @return {@code true} when the entity has (or may have) an {@code /action} route
+   */
+  static boolean hasActionSurface(SFEntity entity, HandlerResolver resolver) {
     if (entity == null) {
       return true;
     }
@@ -74,7 +106,7 @@ public final class NeoActionSurface {
       return false;
     }
     try {
-      NeoHandler handler = NeoServletSupport.lookupHandler(qualifier);
+      NeoHandler handler = resolver.resolve(qualifier);
       if (handler == null) {
         log.warn("No NeoHandler registered for qualifier '{}' — assuming an action surface",
             qualifier);
@@ -95,9 +127,20 @@ public final class NeoActionSurface {
    * @return {@code true} when at least one entity has (or may have) an action route
    */
   public static boolean hasActionSurface(List<SFEntity> entities) {
+    return hasActionSurface(entities, CDI_RESOLVER);
+  }
+
+  /**
+   * Same as {@link #hasActionSurface(List)} with an explicit handler resolver.
+   *
+   * @param entities the spec's active, included entities (may be {@code null} or empty)
+   * @param resolver resolves a qualifier to its handler
+   * @return {@code true} when at least one entity has (or may have) an action route
+   */
+  static boolean hasActionSurface(List<SFEntity> entities, HandlerResolver resolver) {
     if (entities == null || entities.isEmpty()) {
       return false;
     }
-    return entities.stream().anyMatch(NeoActionSurface::hasActionSurface);
+    return entities.stream().anyMatch(entity -> hasActionSurface(entity, resolver));
   }
 }
