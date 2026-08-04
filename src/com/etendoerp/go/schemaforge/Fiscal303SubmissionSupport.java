@@ -20,6 +20,9 @@ import java.io.BufferedReader;
 import java.io.File;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.FileAttribute;
+import java.nio.file.attribute.PosixFilePermission;
+import java.nio.file.attribute.PosixFilePermissions;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -509,20 +512,16 @@ class Fiscal303SubmissionSupport {
 
     Path tempDir = null;
     try {
-      // Files.createTempDirectory (unlike a hand-rolled File.mkdir()/createTempFile() pair) creates
-      // the directory with owner-only access out of the box: per the java.nio.file.Files javadoc,
-      // when no FileAttribute is passed, the default provider creates it "with permissions that
-      // most platforms use for created directories", and Files.createTempDirectory in particular is
-      // documented as designed to be at least as restrictive as (and on POSIX, more restrictive
-      // than) File.createTempFile — the exact hand-rolled pattern SonarQube's java:S5443 rule is
-      // written to catch, where the OS umask decides the final mode. On POSIX systems this resolves
-      // to 0700 (owner rwx only), so no other OS user — let alone another application — can list,
-      // read, or write into it before the PDF is written and the directory is removed in the
-      // `finally` block below. No fixed, predictable, or shared/world-writable path (e.g. a static
-      // name under /tmp) is ever used. Reviewed for ETP-4456: this hotspot is a false positive given
-      // the API already in use; a human still needs to mark it "Safe" in the SonarQube dashboard — a
-      // code comment cannot flip hotspot review status via the API.
-      tempDir = Files.createTempDirectory("aeat303go");
+      // SonarQube java:S5443 (ETP-4456): the rule's own "Sensitive Code Example" is exactly
+      // Files.createTempDirectory(prefix) with no explicit FileAttribute — even though the JDK's
+      // implicit default happens to be 0700 on POSIX today, that default is not declared in this
+      // code, so the rule's documented "Compliant Solution" is to pass the permissions explicitly.
+      // Etendo GO's production runtime is Linux-only and every CI workflow for this module runs on
+      // ubuntu-latest, so PosixFilePermissions is safe to use unconditionally here (no non-POSIX
+      // execution path exists for this module).
+      FileAttribute<Set<PosixFilePermission>> ownerOnly =
+          PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rwx------"));
+      tempDir = Files.createTempDirectory("aeat303go", ownerOnly);
       Path pdfPath = tempDir.resolve(fileName);
       Files.write(pdfPath, pdfContent);
       NeoAttachmentsHelper.getAttachManager()
