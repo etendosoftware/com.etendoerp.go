@@ -1239,13 +1239,12 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       return;
     }
 
-    // null means the paywall refused the request (or failed) and already answered; unboxed into a
-    // primitive right after the guard so the later check is not a boxed-Boolean condition.
-    Boolean paywallOutcome = resolvePaywallOutcome(accountEmail, onboardingRequest, response);
-    if (paywallOutcome == null) {
+    // REFUSED means the paywall blocked the request (or evaluation failed) and already answered.
+    PaywallGate paywallGate = resolvePaywallOutcome(accountEmail, onboardingRequest, response);
+    if (paywallGate == PaywallGate.REFUSED) {
       return;
     }
-    boolean paidUpgrade = paywallOutcome;
+    boolean paidUpgrade = paywallGate == PaywallGate.PAID;
 
     // Set up NDJSON streaming
     response.setStatus(HttpServletResponse.SC_OK);
@@ -1340,28 +1339,37 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   }
 
   /**
+   * Outcome of the paywall gate. Three explicit states instead of a nullable {@code Boolean}: the
+   * "keep going" answer still has to carry whether the account paid, and {@link #REFUSED} means the
+   * error response was already written, so the caller must return without opening the stream.
+   */
+  private enum PaywallGate {
+    PAID, FREE, REFUSED
+  }
+
+  /**
    * Paywall gate (ETP-4686). Runs before the NDJSON stream opens and before any provisioning, so a
    * refused request leaves no half-created tenant behind and can still answer with a plain JSON
    * error instead of a stream. The backend is authoritative here: the /upgrade page in the web
    * client shows the checkout, but this check is what actually gates tenant creation.
    *
-   * @return whether the account paid for an upgrade, or {@code null} when the request was refused
-   *     or evaluation failed. In the {@code null} case the error response has already been written,
-   *     so the caller must return without opening the stream.
+   * @return {@link PaywallGate#PAID} or {@link PaywallGate#FREE} to continue, or
+   *     {@link PaywallGate#REFUSED} when the request was blocked or evaluation failed — in which
+   *     case the error response has already been written.
    */
-  private Boolean resolvePaywallOutcome(String accountEmail, OnboardingRequestData onboardingRequest,
-      HttpServletResponse response) throws IOException {
+  private PaywallGate resolvePaywallOutcome(String accountEmail,
+      OnboardingRequestData onboardingRequest, HttpServletResponse response) throws IOException {
     try {
       PaywallOutcome paywall = evaluatePaywall(accountEmail, onboardingRequest);
       if (paywall.decision.isBlocked()) {
         writePaymentRequiredError(response, paywall.decision);
-        return null;
+        return PaywallGate.REFUSED;
       }
-      return paywall.paid;
+      return paywall.paid ? PaywallGate.PAID : PaywallGate.FREE;
     } catch (RuntimeException e) {
       log.error("Paywall evaluation failed for onboarding", e);
       writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, SERVER_ERROR);
-      return null;
+      return PaywallGate.REFUSED;
     }
   }
 
