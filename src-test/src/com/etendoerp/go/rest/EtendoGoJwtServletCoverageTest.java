@@ -552,7 +552,11 @@ public class EtendoGoJwtServletCoverageTest {
     }
 
     assertEquals(200, resp.status);
-    assertEquals(2, new JSONObject(resp.body()).getJSONArray("environments").length());
+    JSONObject body = new JSONObject(resp.body());
+    assertEquals(2, body.getJSONArray("environments").length());
+    // The account email is the backend's flag-targeting key, returned so the web client can target
+    // on the same identity without a second call to /me (ETP-4686).
+    assertEquals("user@test.com", body.getString("accountEmail"));
   }
 
   @Test
