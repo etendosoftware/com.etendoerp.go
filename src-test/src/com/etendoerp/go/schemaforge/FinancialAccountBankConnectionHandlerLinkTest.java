@@ -21,6 +21,7 @@ import static com.etendoerp.go.schemaforge.BankConnectionHandlerTestSupport.ACCO
 import static com.etendoerp.go.schemaforge.BankConnectionHandlerTestSupport.API_KEY;
 import static com.etendoerp.go.schemaforge.BankConnectionHandlerTestSupport.CONNECTION_ID;
 import static com.etendoerp.go.schemaforge.BankConnectionHandlerTestSupport.PARAM_ACCOUNT_ID;
+import static com.etendoerp.go.schemaforge.BankConnectionHandlerTestSupport.PARAM_PERMANENT_DELETION;
 import static com.etendoerp.go.schemaforge.BankConnectionHandlerTestSupport.PARAM_CONNECTION_ID;
 import static com.etendoerp.go.schemaforge.BankConnectionHandlerTestSupport.PARAM_TYPE;
 import static com.etendoerp.go.schemaforge.BankConnectionHandlerTestSupport.SALT_EDGE_ACCOUNT_ID;
@@ -742,7 +743,7 @@ public class FinancialAccountBankConnectionHandlerLinkTest {
             mockStatic(SaltEdgeAccountLinkHelper.class);
         MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
       stubObContext(obContext);
-      linkHelper.when(() -> SaltEdgeAccountLinkHelper.disconnectFinancialAccount(finAcc))
+      linkHelper.when(() -> SaltEdgeAccountLinkHelper.disconnectFinancialAccount(finAcc, true))
           .thenReturn(true);
 
       OBDal dal = mock(OBDal.class);
@@ -782,7 +783,7 @@ public class FinancialAccountBankConnectionHandlerLinkTest {
             mockStatic(SaltEdgeAccountLinkHelper.class);
         MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
       stubObContext(obContext);
-      linkHelper.when(() -> SaltEdgeAccountLinkHelper.disconnectFinancialAccount(finAcc))
+      linkHelper.when(() -> SaltEdgeAccountLinkHelper.disconnectFinancialAccount(finAcc, true))
           .thenReturn(true);
 
       OBDal dal = mock(OBDal.class);
@@ -822,7 +823,7 @@ public class FinancialAccountBankConnectionHandlerLinkTest {
         MockedStatic<SaltEdgeAccountLinkHelper> linkHelper =
             mockStatic(SaltEdgeAccountLinkHelper.class)) {
       stubObContext(obContext);
-      linkHelper.when(() -> SaltEdgeAccountLinkHelper.disconnectFinancialAccount(finAcc))
+      linkHelper.when(() -> SaltEdgeAccountLinkHelper.disconnectFinancialAccount(finAcc, true))
           .thenReturn(false);
 
       NeoResponse response = handler.handle(postContext(ACTION_DISCONNECT, body));
@@ -834,10 +835,53 @@ public class FinancialAccountBankConnectionHandlerLinkTest {
     }
   }
 
+  /**
+   * A <b>soft</b> disconnect (ETP-4764) deactivates the connection but keeps the Salt Edge link,
+   * so {@code Automatic Withdrawn} must NOT be restored: the account is still bank-backed and a
+   * reconnect would immediately have to clear the flag again. The account is recognized as still
+   * linked by its non-blank Salt Edge id, which the soft path preserves.
+   */
+  @Test
+  public void testSoftDisconnectDoesNotRestoreAutomaticWithdrawn() throws Exception {
+    JSONObject body = new JSONObject()
+        .put(PARAM_ACCOUNT_ID, ACCOUNT_ID)
+        .put(PARAM_PERMANENT_DELETION, false);
+    FIN_FinancialAccount finAcc = mock(FIN_FinancialAccount.class);
+    when(finAcc.getPSD2SaltEdgeAccountID()).thenReturn("SE-ACC-001");
+    doReturn(finAcc).when(handler).loadAccount(ACCOUNT_ID);
+
+    FIN_PaymentMethod transferMethod = mock(FIN_PaymentMethod.class);
+    FinAccPaymentMethod transferFapm = mock(FinAccPaymentMethod.class);
+
+    try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
+        MockedStatic<SaltEdgeAccountLinkHelper> linkHelper =
+            mockStatic(SaltEdgeAccountLinkHelper.class)) {
+      stubObContext(obContext);
+      linkHelper.when(() -> SaltEdgeAccountLinkHelper.disconnectFinancialAccount(finAcc, false))
+          .thenReturn(true);
+
+      NeoResponse response = handler.handle(postContext(ACTION_DISCONNECT, body));
+
+      assertEquals(200, response.getHttpStatus());
+      assertTrue(dataOf(response).getBoolean("disconnected"));
+      assertTrue(dataOf(response).getBoolean("reconnectable"));
+      // The restore path is never entered, so the transfer method is untouched.
+      verify(transferFapm, never()).setAutomaticWithdrawn(anyBoolean());
+      verify(transferMethod, never()).getName();
+    }
+  }
+
   // ── helpers ───────────────────────────────────────────────────────────────
 
+  /**
+   * Body for a <b>permanent</b> disconnect. The {@code Automatic Withdrawn} restore covered by
+   * this class only runs on the permanent path (ETP-4764): after a soft disconnect the bank link
+   * survives, so re-enabling the transfer method would just have to be undone on reconnect.
+   */
   private static JSONObject disconnectBody() throws Exception {
-    return new JSONObject().put(PARAM_ACCOUNT_ID, ACCOUNT_ID);
+    return new JSONObject()
+        .put(PARAM_ACCOUNT_ID, ACCOUNT_ID)
+        .put(PARAM_PERMANENT_DELETION, true);
   }
 
   private static JSONObject linkBody() throws Exception {

@@ -99,7 +99,8 @@ public class FinancialAccountsPageHandler implements NeoHandler {
           + "       fa.c_currency_id, cur.iso_code, fa.iban, fa.isdefault, fa.isactive, "
           + "       fa.em_psd2_masked_pan, fa.em_psd2_connection_status, "
           + "       COALESCE(fa.em_etgo_date_tolerance, 3), "
-          + "       COALESCE(fa.em_etgo_amount_tolerance, 0) "
+          + "       COALESCE(fa.em_etgo_amount_tolerance, 0), "
+          + "       fa.em_psd2_salt_edge_account_id "
           + "  FROM fin_financial_account fa "
           + "  JOIN c_currency cur ON cur.c_currency_id = fa.c_currency_id "
           + " WHERE fa.ad_client_id = ? "
@@ -213,6 +214,8 @@ public class FinancialAccountsPageHandler implements NeoHandler {
           row.dateTolerance = rs.getInt(12);
           BigDecimal amtTol = rs.getBigDecimal(13);
           row.amountTolerance = amtTol != null ? amtTol : BigDecimal.ZERO;
+          row.bankReconnectable = !row.bankConnected
+              && StringUtils.isNotBlank(rs.getString(14));
           rows.add(row);
         }
       }
@@ -269,6 +272,7 @@ public class FinancialAccountsPageHandler implements NeoHandler {
       json.put("iban", account.iban);
       json.put("maskedPan", account.maskedPan);
       json.put("bankConnected", account.bankConnected);
+      json.put("bankReconnectable", account.bankReconnectable);
       json.put("bankConnectionPending", account.bankConnectionPending);
       json.put("isDefault", account.isDefault);
       json.put("active", account.active);
@@ -356,6 +360,15 @@ public class FinancialAccountsPageHandler implements NeoHandler {
     String maskedPan = "";
     /** Whether the account has an active bank connection ({@code EM_PSD2_Connection_Status = 'CO'}). Set by the loader. */
     boolean bankConnected = false;
+    /**
+     * Whether the account was soft-disconnected and can be revived through the reconnect flow:
+     * not currently connected, yet still holding its Salt Edge link
+     * ({@code EM_PSD2_Salt_Edge_Account_ID} is set). A permanent deletion clears that column, so
+     * this stays {@code false} there. Kept as its own flag rather than turning
+     * {@code bankConnected} into a tri-state, because the SPA checks
+     * {@code bankConnected === true} in several places. Set by the loader.
+     */
+    boolean bankReconnectable = false;
     /** Whether a bank sync is pending. Not tracked server-side yet; reserved for the list sync badge. */
     boolean bankConnectionPending = false;
     /** Days of margin allowed between bank line and transaction dates. Default 3. */

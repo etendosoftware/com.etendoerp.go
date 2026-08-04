@@ -124,6 +124,8 @@ public class FinancialAccountHandler implements NeoHandler {
   private static final String FIELD_PENDING_COUNT = "pendingCount";
   /** {@code EM_PSD2_Connection_Status = 'CO'} — drives the "Sincronizado / Sin conexión" badge. */
   private static final String FIELD_BANK_CONNECTED = "bankConnected";
+  /** Soft-disconnected but still linked to Salt Edge — drives the "Reconectar" action. */
+  private static final String FIELD_BANK_RECONNECTABLE = "bankReconnectable";
   /** Reserved for the sync badge; never computed server-side (mirrors the R spec's constant false). */
   private static final String FIELD_BANK_CONNECTION_PENDING = "bankConnectionPending";
   /** Currency ISO code, from the {@code c_currency} join. The contract only carries the FK. */
@@ -378,6 +380,7 @@ public class FinancialAccountHandler implements NeoHandler {
       return null;
     }
     rec.put(FIELD_BANK_CONNECTED, row.bankConnected);
+    rec.put(FIELD_BANK_RECONNECTABLE, row.bankReconnectable);
     rec.put(FIELD_BANK_CONNECTION_PENDING, row.bankConnectionPending);
     rec.put(FIELD_CURRENCY_ISO, row.currency.iso);
     rec.put(FIELD_CURRENCY_ID, row.currency.id);
