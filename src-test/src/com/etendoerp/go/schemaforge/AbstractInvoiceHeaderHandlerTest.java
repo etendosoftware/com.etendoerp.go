@@ -147,7 +147,7 @@ public class AbstractInvoiceHeaderHandlerTest {
     }
 
     public void callEnrichHasExemptTaxes(JSONObject rec, String id) throws Exception {
-      enrichHasExemptTaxes(rec, id);
+      InvoiceExemptTaxes.enrich(rec, id);
     }
   }
 
