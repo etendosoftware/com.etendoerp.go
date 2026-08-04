@@ -143,6 +143,23 @@ public class OnboardingDatasetNormalizerTest {
     assertFalse(xml.contains("<cBpartnerLocation>"));
   }
 
+  /**
+   * Regression guard for ETP-4761 (gap I1): both bundled GOClient locators must ship with
+   * {@code M_INVENTORYSTATUS_ID = '2'} ("Available", {@code OVERISSUE='N'}) so a freshly onboarded
+   * tenant cannot post negative stock from day one. The prior value, {@code '0'}
+   * ("Undefined-OverIssue", {@code OVERISSUE='Y'}), is the root cause documented in
+   * {@code docs/etendo-ad/onboarding-gaps.md} §I1 — assert it is gone, not merely that '2' appears,
+   * so a partial revert (only one of the two locators fixed) still fails this test.
+   */
+  @Test
+  public void testNormalizerLocatorsDefaultToAvailableInventoryStatus() {
+    String xml = pathBackedNormalizer().buildDatasetXml();
+
+    assertTrue(xml.contains("<mLocator"));
+    assertTrue(xml.contains("<mInventorystatusId>2</mInventorystatusId>"));
+    assertFalse(xml.contains("<mInventorystatusId>0</mInventorystatusId>"));
+  }
+
   @Test
   public void testNormalizerBuildsEmptyDatasetWithoutUnsupportedJaxpFailures() throws Exception {
     Path emptySampleDataDir = Files.createTempDirectory("onboarding-empty-sampledata");
