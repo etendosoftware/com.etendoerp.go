@@ -17,6 +17,7 @@
 package com.etendoerp.go.rest;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -933,6 +934,103 @@ public class EtendoGoJwtServletCoverageTest {
     assertTrue(ndjson.contains("\"step\":\"roles\""));
     assertTrue(ndjson.contains("\"success\":false"));
     assertTrue(ndjson.contains("Role provisioning failed"));
+  }
+
+  // ===================== applySocialName() — ETP-4749 =====================
+  //
+  // AD_Org.SocialName ("Nombre comercial" in the Organization settings window) was never
+  // set anywhere in the onboarding flow — InitialOrgSetup/InitialSetupUtility (Etendo core)
+  // only set Name/SearchKey. applySocialName() reuses the same clientName already used for
+  // Name (which the wizard's CompanyStep.jsx already resolves to the user's Full Name for
+  // Freelancers, since that business type has no separate Company Name field) and persists
+  // it once, right after organization creation succeeds — never as part of
+  // OnboardingOrgInfoService's idempotent reconcile chain, so a resumed/retried onboarding
+  // call never overwrites a "Nombre comercial" the user already edited by hand.
+
+  @Test
+  public void applySocialNameSetsSocialNameAndSavesWhenOrganizationFound() {
+    Organization org = mock(Organization.class);
+    OBDal dal = mock(OBDal.class);
+
+    try (var dalHelperMock = mockStatic(EtendoGoJwtDalHelper.class);
+         var obDalMock = mockStatic(OBDal.class)) {
+      dalHelperMock.when(() -> EtendoGoJwtDalHelper.findFirstOrganization("client-1"))
+          .thenReturn(org);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      boolean result = servlet.applySocialName("client-1", "Acme Corp");
+
+      assertTrue(result);
+      verify(org).setSocialName("Acme Corp");
+      verify(dal).save(org);
+      verify(dal).flush();
+    }
+  }
+
+  @Test
+  public void applySocialNameUsesTheFreelancerFullNameFallbackAlreadyResolvedByTheWizard() {
+    // CompanyStep.jsx (schema_forge_core/packages/etendo-go-core) already resolves clientName
+    // to the Freelancer's Full Name before this ever reaches Java — applySocialName has no
+    // businessType branching of its own, it just persists whatever clientName it is given.
+    Organization org = mock(Organization.class);
+    OBDal dal = mock(OBDal.class);
+
+    try (var dalHelperMock = mockStatic(EtendoGoJwtDalHelper.class);
+         var obDalMock = mockStatic(OBDal.class)) {
+      dalHelperMock.when(() -> EtendoGoJwtDalHelper.findFirstOrganization("client-1"))
+          .thenReturn(org);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      boolean result = servlet.applySocialName("client-1", "Jane Freelancer");
+
+      assertTrue(result);
+      verify(org).setSocialName("Jane Freelancer");
+    }
+  }
+
+  @Test
+  public void applySocialNameReturnsFalseAndDoesNotSaveWhenOrganizationNotFound() {
+    OBDal dal = mock(OBDal.class);
+
+    try (var dalHelperMock = mockStatic(EtendoGoJwtDalHelper.class);
+         var obDalMock = mockStatic(OBDal.class)) {
+      dalHelperMock.when(() -> EtendoGoJwtDalHelper.findFirstOrganization("client-1"))
+          .thenReturn(null);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      boolean result = servlet.applySocialName("client-1", "Acme Corp");
+
+      assertFalse(result);
+      verify(dal, never()).save(any());
+      verify(dal, never()).flush();
+    }
+  }
+
+  @Test
+  public void applySocialNameHasNoBlankGuardUnlikeApplyTaxId() {
+    // Unlike OnboardingOrgInfoService.applyTaxId() (a deliberate no-op on blank, because
+    // Tax ID is genuinely optional), the clientName reaching this method is guaranteed
+    // non-blank by parseOnboardingRequest()'s upstream validation (FIELD_CLIENT_NAME must
+    // not be empty — see parseOnboardingRequest's own validation branch). This method
+    // intentionally carries no blank guard of its own: a blank value would still be
+    // persisted as-is. Locking this in so a future "harmonize with applyTaxId" refactor
+    // doesn't silently mask an upstream validation bug behind a no-op here.
+    Organization org = mock(Organization.class);
+    OBDal dal = mock(OBDal.class);
+
+    try (var dalHelperMock = mockStatic(EtendoGoJwtDalHelper.class);
+         var obDalMock = mockStatic(OBDal.class)) {
+      dalHelperMock.when(() -> EtendoGoJwtDalHelper.findFirstOrganization("client-1"))
+          .thenReturn(org);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      boolean result = servlet.applySocialName("client-1", "");
+
+      assertTrue(result);
+      verify(org).setSocialName("");
+      verify(dal).save(org);
+      verify(dal).flush();
+    }
   }
 
   // ===================== Helpers =====================

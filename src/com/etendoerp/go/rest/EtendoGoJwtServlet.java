@@ -1246,6 +1246,9 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       // it becomes the display name of the client admin user (otherwise Etendo's
       // InitialClientSetup leaves it as the username/email).
       data.fullName = body.optString("fullName", "").trim();
+      // Tax ID (ETP-4749): optional in the wizard, so a blank value here is expected and
+      // must not fail the request — wireOrgInfo() only persists it when non-blank.
+      data.taxId = body.optString("fiscalIdValue", "").trim();
       return data;
     } catch (JSONException e) {
         String message = e.getMessage() != null && e.getMessage().contains(FIELD_CLIENT_NAME)
@@ -1436,7 +1439,41 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       sendFinalResult(writer, false, errorMsg);
       return false;
     }
+    // ETP-4749: AD_Org.SocialName ("Nombre comercial" in the Organization settings window)
+    // was never set anywhere in the onboarding flow — InitialOrgSetup/InitialSetupUtility
+    // (Etendo core) only set Name/SearchKey. The wizard has no separate "trade name" field,
+    // so reuse the same clientName already used for Name — it already resolves to the
+    // user's Full Name for Freelancers (CompanyStep.jsx has no Company Name field for
+    // that business type). A missing SocialName write here must not fail an otherwise
+    // successful organization creation; log and move on.
+    applySocialName(clientId, clientName);
     sendProgress(writer, PROGRESS_ORGANIZATION, "done", "Organization created successfully");
+    return true;
+  }
+
+  /**
+   * Sets {@code AD_Org.SocialName} from the onboarding {@code clientName}, once, right after
+   * organization creation succeeds. Deliberately NOT part of {@link OnboardingOrgInfoService}'s
+   * idempotent reconcile chain (which re-runs on every resumed/retried onboarding call): a
+   * resumed tenant may already have had its "Nombre comercial" edited by hand in the
+   * Organization settings window, and re-running this on every retry would silently overwrite
+   * that edit. Organization creation itself only happens once (guarded by
+   * {@code organizationExists()} in {@link #ensureOrganization}), so this call site shares the
+   * same one-time guarantee.
+   *
+   * @return {@code true} when the organization was found and updated; {@code false} otherwise
+   *     (logged, non-fatal — the organization itself was already created successfully).
+   */
+  boolean applySocialName(String clientId, String clientName) {
+    Organization org = EtendoGoJwtDalHelper.findFirstOrganization(clientId);
+    if (org == null) {
+      log.warn("applySocialName: no organization found for client {} right after creation",
+          clientId);
+      return false;
+    }
+    org.setSocialName(clientName);
+    OBDal.getInstance().save(org);
+    OBDal.getInstance().flush();
     return true;
   }
 
@@ -1611,8 +1648,9 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     try {
       String countryCode = requestData != null ? requestData.countryCode : null;
       String address = requestData != null ? requestData.address : null;
+      String taxId = requestData != null ? requestData.taxId : null;
       onboardingOrgInfoService.ensureOrgInfo(clientId, orgId, adminUserId, adminRoleId,
-          countryCode, address);
+          countryCode, address, taxId);
       sendProgress(writer, PROGRESS_ORG_INFO, "done", "Organization address ready");
       return true;
     } catch (Exception e) {
@@ -1961,6 +1999,9 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     private String countryCode;
     private String address;
     private String fullName;
+    // Optional Tax ID from the wizard's "Details to start invoicing" step (ETP-4749).
+    // Same JSON key as ONBOARDING_DRAFT_FORM_FIELDS ("fiscalIdValue") for consistency.
+    private String taxId;
   }
 
   private static class AdminContextData {
