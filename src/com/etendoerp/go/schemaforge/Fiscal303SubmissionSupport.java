@@ -272,7 +272,7 @@ class Fiscal303SubmissionSupport {
       }
       fileContent = fileObj.toString();
     } catch (Exception e) {
-      owner.log.error("Could not generate the 303 electronic file for submission (decl=" + declId
+      AbstractFiscalHandler.log.error("Could not generate the 303 electronic file for submission (decl=" + declId
           + ")", e);
       writeJson(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
           owner.buildFailureJson(testMode, ERR_SUBMISSION_FAILED,
@@ -301,7 +301,7 @@ class Fiscal303SubmissionSupport {
             .build());
       }
     } catch (OBException e) {
-      owner.log.error("AEAT 303 submission failed (decl=" + declId + ")", e);
+      AbstractFiscalHandler.log.error("AEAT 303 submission failed (decl=" + declId + ")", e);
       writeJson(response, HttpServletResponse.SC_BAD_GATEWAY,
           owner.buildFailureJson(testMode, ERR_SUBMISSION_FAILED, e.getMessage()));
       return;
@@ -382,7 +382,7 @@ class Fiscal303SubmissionSupport {
     try {
       OBDal.getInstance().commitAndClose();
     } catch (Exception e) {
-      owner.log.error("Could not commit AEAT 303 submission persistence for declaration "
+      AbstractFiscalHandler.log.error("Could not commit AEAT 303 submission persistence for declaration "
           + declId, e);
     }
   }
@@ -405,7 +405,7 @@ class Fiscal303SubmissionSupport {
     try {
       owner.replaceIncidentsNoCommit(decl, result.getErrors(), result.getWarnings());
     } catch (Exception e) {
-      owner.log.error("Could not persist AEAT incidents for declaration " + declId, e);
+      AbstractFiscalHandler.log.error("Could not persist AEAT incidents for declaration " + declId, e);
     }
   }
 
@@ -431,7 +431,7 @@ class Fiscal303SubmissionSupport {
       decl.setFileExternal(false);
       OBDal.getInstance().save(decl);
     } catch (Exception e) {
-      owner.log.error("Could not update declaration " + decl.getId()
+      AbstractFiscalHandler.log.error("Could not update declaration " + decl.getId()
           + " after a successful AEAT 303 submission", e);
     }
 
@@ -497,11 +497,11 @@ class Fiscal303SubmissionSupport {
       String tableId = NeoAttachmentsHelper.resolveTableId(FiscalDecl.TABLE_NAME);
       tabId = NeoAttachmentsHelper.resolveTabId(tableId, null);
     } catch (Exception e) {
-      owner.log.warn("Could not resolve an AD_Tab for " + FiscalDecl.TABLE_NAME + " attachments", e);
+      AbstractFiscalHandler.log.warn("Could not resolve an AD_Tab for " + FiscalDecl.TABLE_NAME + " attachments", e);
       tabId = null;
     }
     if (tabId == null) {
-      owner.log.warn("No AD_Tab configured for " + FiscalDecl.TABLE_NAME + " attachments yet — the "
+      AbstractFiscalHandler.log.warn("No AD_Tab configured for " + FiscalDecl.TABLE_NAME + " attachments yet — the "
           + "AEAT 303 justificante PDF for declaration " + decl.getId() + " was not persisted as "
           + "an attachment (it is still returned inline in the API response).");
       return;
@@ -528,7 +528,7 @@ class Fiscal303SubmissionSupport {
       NeoAttachmentsHelper.getAttachManager()
           .upload(new HashMap<>(), tabId, decl.getId(), org.getId(), pdfPath.toFile());
     } catch (Exception e) {
-      owner.log.error("Could not attach the AEAT 303 justificante PDF to declaration "
+      AbstractFiscalHandler.log.error("Could not attach the AEAT 303 justificante PDF to declaration "
           + decl.getId(), e);
     } finally {
       cleanupTempDir(tempDir);
@@ -548,7 +548,7 @@ class Fiscal303SubmissionSupport {
       }
       Files.deleteIfExists(tempDir);
     } catch (Exception e) {
-      owner.log.warn("Could not clean up temporary directory " + tempDir, e);
+      AbstractFiscalHandler.log.warn("Could not clean up temporary directory " + tempDir, e);
     }
   }
 
