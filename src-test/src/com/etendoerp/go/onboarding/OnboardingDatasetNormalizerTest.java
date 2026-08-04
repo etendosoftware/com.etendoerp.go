@@ -24,6 +24,7 @@ import static org.junit.Assert.fail;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.when;
@@ -907,7 +908,7 @@ public class OnboardingDatasetNormalizerTest {
     when(property.isId()).thenReturn(false);
     when(property.isOneToMany()).thenReturn(false);
     when(property.isPrimitive()).thenReturn(true);
-    when(property.getPrimitiveType()).thenReturn(Date.class);
+    doReturn(Date.class).when(property).getPrimitiveType();
     return property;
   }
 
