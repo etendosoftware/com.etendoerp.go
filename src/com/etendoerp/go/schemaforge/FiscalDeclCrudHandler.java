@@ -87,8 +87,23 @@ class FiscalDeclCrudHandler {
   /** Matches a raw AEAT error string as {@code "<code> - <message>"}, e.g. {@code "35068 - El
    * resultado a ingresar..."} or {@code "E010124 - Para periodo mensual..."} — the code token is
    * always non-whitespace, alphanumeric. Falls back to an empty code when a string doesn't match
-   * (defensive: AEAT's error format is not contractually guaranteed). */
-  private static final Pattern AEAT_ERROR_PATTERN = Pattern.compile("^(\\S+)\\s*-\\s*(.+)$");
+   * (defensive: AEAT's error format is not contractually guaranteed).
+   *
+   * <p>Every quantifier is possessive ({@code ++}/{@code *+}) rather than greedy — a SonarQube
+   * hotspot (java:S5852, ReDoS/backtracking) was raised against the original greedy form
+   * ({@code ^(\S+)\s*-\s*(.+)$}). Analysis: {@code \S+} and the {@code \s*} that follows it sit on
+   * strictly complementary character classes (a char is either whitespace or not), so there is no
+   * combinatorial ambiguity between them — the original pattern's worst case was already linear in
+   * input length, not exponential. The one spot with any real ambiguity is {@code \s*} directly
+   * followed by {@code .+} (both can match a whitespace char), which resolved in at most one
+   * backtrack step since {@code .+} only needs a single character back to reach {@code $}.
+   * Switching every quantifier to possessive removes backtracking entirely regardless — the
+   * safer, standard Java fix for this class of finding, and provably O(n) by construction rather
+   * than by argument. It does not change the match result for the format this pattern is meant to
+   * parse ({@code "<code> - <message>"}, always pre-{@link String#trim()}med by {@link
+   * #splitAeatError} before matching); the existing "no-dash" fallback in {@link #splitAeatError}
+   * still applies unchanged to anything that doesn't match. Reviewed for ETP-4456. */
+  private static final Pattern AEAT_ERROR_PATTERN = Pattern.compile("^(\\S++)\\s*+-\\s*+(.++)$");
 
   private static final String PROPERTY_CLIENT = "client";
   private static final String PROPERTY_ORGANIZATION = "organization";
