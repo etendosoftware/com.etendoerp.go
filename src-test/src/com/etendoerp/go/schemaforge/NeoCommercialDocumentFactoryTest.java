@@ -430,6 +430,106 @@ public class NeoCommercialDocumentFactoryTest {
     }
   }
 
+  // ── ETP-4028 — currency inheritance (EM_Etgo_Currency_ID is mandatory) ───
+
+  /**
+   * Verifies that {@code createReturnReceiptHeader} copies the source shipment's
+   * {@code EM_Etgo_Currency_ID} onto the new return receipt, since the column is
+   * mandatory on {@code M_InOut} and this factory method builds the header directly
+   * (no DocFin/DocType currency resolution happens elsewhere in the return flow).
+   */
+  @Test
+  public void testCreateReturnReceiptHeaderInheritsCurrencyFromSource() {
+    try (MockedStatic<OBProvider> obProviderMock = Mockito.mockStatic(OBProvider.class)) {
+      ShipmentInOut source = mock(ShipmentInOut.class);
+      Currency sourceCurrency = mock(Currency.class);
+      when(source.getEtgoCurrency()).thenReturn(sourceCurrency);
+
+      ShipmentInOut newReturn = mock(ShipmentInOut.class);
+      OBProvider provider = mock(OBProvider.class);
+      obProviderMock.when(OBProvider::getInstance).thenReturn(provider);
+      when(provider.get(ShipmentInOut.class)).thenReturn(newReturn);
+
+      ShipmentInOut result = NeoCommercialDocumentFactory.createReturnReceiptHeader(
+          source, mock(DocumentType.class));
+
+      assertSame(newReturn, result);
+      verify(newReturn).setEtgoCurrency(sourceCurrency);
+    }
+  }
+
+  /**
+   * Verifies that {@code createShipmentReceiptHeader(Order, ...)} inherits the new
+   * shipment/receipt's currency from the source order's currency, not the business
+   * partner's or price list's.
+   */
+  @Test
+  public void testCreateShipmentReceiptHeaderFromOrderInheritsOrderCurrency() {
+    try (MockedStatic<OBProvider> obProviderMock = Mockito.mockStatic(OBProvider.class)) {
+      Order order = mock(Order.class);
+      Currency orderCurrency = mock(Currency.class);
+      when(order.getCurrency()).thenReturn(orderCurrency);
+
+      ShipmentInOut newShipment = mock(ShipmentInOut.class);
+      OBProvider provider = mock(OBProvider.class);
+      obProviderMock.when(OBProvider::getInstance).thenReturn(provider);
+      when(provider.get(ShipmentInOut.class)).thenReturn(newShipment);
+
+      NeoCommercialDocumentFactory.createShipmentReceiptHeader(
+          order, mock(DocumentType.class), true, "C+");
+
+      verify(newShipment).setEtgoCurrency(orderCurrency);
+    }
+  }
+
+  /**
+   * Verifies that the {@code createShipmentReceiptHeader(ShipmentInOut, ...)} overload
+   * inherits the new shipment's currency from the source shipment's currency (not from
+   * any linked order), matching the "shipment-from-invoice" and "clone" style flows that
+   * call this overload.
+   */
+  @Test
+  public void testCreateShipmentReceiptHeaderFromShipmentInheritsSourceCurrency() {
+    try (MockedStatic<OBProvider> obProviderMock = Mockito.mockStatic(OBProvider.class)) {
+      ShipmentInOut source = mock(ShipmentInOut.class);
+      Currency sourceCurrency = mock(Currency.class);
+      when(source.getEtgoCurrency()).thenReturn(sourceCurrency);
+
+      ShipmentInOut newShipment = mock(ShipmentInOut.class);
+      OBProvider provider = mock(OBProvider.class);
+      obProviderMock.when(OBProvider::getInstance).thenReturn(provider);
+      when(provider.get(ShipmentInOut.class)).thenReturn(newShipment);
+
+      NeoCommercialDocumentFactory.createShipmentReceiptHeader(
+          source, mock(DocumentType.class), true, "C+");
+
+      verify(newShipment).setEtgoCurrency(sourceCurrency);
+    }
+  }
+
+  /**
+   * Verifies that {@code createShipmentFromInvoiceHeader} inherits the new shipment's
+   * currency from the source invoice's currency.
+   */
+  @Test
+  public void testCreateShipmentFromInvoiceHeaderInheritsInvoiceCurrency() {
+    try (MockedStatic<OBProvider> obProviderMock = Mockito.mockStatic(OBProvider.class)) {
+      Invoice invoice = mock(Invoice.class);
+      Currency invoiceCurrency = mock(Currency.class);
+      when(invoice.getCurrency()).thenReturn(invoiceCurrency);
+
+      ShipmentInOut newShipment = mock(ShipmentInOut.class);
+      OBProvider provider = mock(OBProvider.class);
+      obProviderMock.when(OBProvider::getInstance).thenReturn(provider);
+      when(provider.get(ShipmentInOut.class)).thenReturn(newShipment);
+
+      NeoCommercialDocumentFactory.createShipmentFromInvoiceHeader(
+          invoice, mock(DocumentType.class), true, "M+", mock(Warehouse.class));
+
+      verify(newShipment).setEtgoCurrency(invoiceCurrency);
+    }
+  }
+
   // ── createInvoiceFromReceiptHeader ──────────────────────────────────────
 
   @Test
@@ -444,12 +544,11 @@ public class NeoCommercialDocumentFactoryTest {
       DocumentType docType = mock(DocumentType.class);
       PriceList priceList = mock(PriceList.class);
       Currency currency = mock(Currency.class);
-      when(priceList.getCurrency()).thenReturn(currency);
       PaymentTerm paymentTerm = mock(PaymentTerm.class);
       FIN_PaymentMethod paymentMethod = mock(FIN_PaymentMethod.class);
 
       Invoice result = NeoCommercialDocumentFactory.createInvoiceFromReceiptHeader(
-          receipt, docType, priceList, paymentTerm, paymentMethod);
+          receipt, docType, priceList, paymentTerm, paymentMethod, currency);
 
       assertSame(invoice, result);
       verify(invoice).setDocumentType(docType);
@@ -464,6 +563,38 @@ public class NeoCommercialDocumentFactoryTest {
       verify(invoice).setDocumentNo("<*>");
       verify(invoice).setSummedLineAmount(BigDecimal.ZERO);
       verify(invoice).setGrandTotalAmount(BigDecimal.ZERO);
+    }
+  }
+
+  /**
+   * ETP-4028: the invoice's currency must come from the explicit {@code currency}
+   * parameter (the receipt's own {@code EM_Etgo_Currency_ID}) — never from
+   * {@code priceList.getCurrency()}, which can diverge once the user edits the
+   * receipt's currency in draft (e.g. no purchase price list exists in that currency).
+   */
+  @Test
+  public void testCreateInvoiceFromReceiptHeaderUsesExplicitCurrencyNotPriceListCurrency() {
+    try (MockedStatic<OBProvider> obProviderMock = Mockito.mockStatic(OBProvider.class)) {
+      OBProvider provider = mock(OBProvider.class);
+      obProviderMock.when(OBProvider::getInstance).thenReturn(provider);
+      Invoice invoice = mock(Invoice.class);
+      when(provider.get(Invoice.class)).thenReturn(invoice);
+
+      ShipmentInOut receipt = mock(ShipmentInOut.class);
+      DocumentType docType = mock(DocumentType.class);
+      PriceList priceList = mock(PriceList.class);
+      Currency priceListCurrency = mock(Currency.class);
+      when(priceList.getCurrency()).thenReturn(priceListCurrency);
+      Currency receiptCurrency = mock(Currency.class);
+      PaymentTerm paymentTerm = mock(PaymentTerm.class);
+      FIN_PaymentMethod paymentMethod = mock(FIN_PaymentMethod.class);
+
+      NeoCommercialDocumentFactory.createInvoiceFromReceiptHeader(
+          receipt, docType, priceList, paymentTerm, paymentMethod, receiptCurrency);
+
+      verify(invoice).setCurrency(receiptCurrency);
+      verify(invoice, Mockito.never()).setCurrency(priceListCurrency);
+      verify(priceList, Mockito.never()).getCurrency();
     }
   }
 }

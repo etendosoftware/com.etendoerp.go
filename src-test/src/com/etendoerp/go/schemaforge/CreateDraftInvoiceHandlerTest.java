@@ -1023,7 +1023,8 @@ public class CreateDraftInvoiceHandlerTest {
     String checkedSpecName;
 
     @Override
-    protected Invoice createFromOrder(String orderId, Map<String, BigDecimal> lineOverrides) {
+    protected Invoice createFromOrder(String orderId, Map<String, BigDecimal> lineOverrides,
+        String priceListId) {
       if (createFailure != null) {
         throw createFailure;
       }
@@ -1032,7 +1033,8 @@ public class CreateDraftInvoiceHandlerTest {
     }
 
     @Override
-    protected Invoice createFromShipments(List<String> shipmentIds, Map<String, BigDecimal> lineOverrides) {
+    protected Invoice createFromShipments(List<String> shipmentIds, Map<String, BigDecimal> lineOverrides,
+        String priceListId) {
       if (createFailure != null) {
         throw createFailure;
       }
@@ -1734,7 +1736,7 @@ public class CreateDraftInvoiceHandlerTest {
           .put("orderedQuantity", "2"));
 
       Map<String, BigDecimal> overrides = Collections.singletonMap("ol-1", new BigDecimal("2"));
-      Invoice result = handler.createFromOrder("order-10", overrides);
+      Invoice result = handler.createFromOrder("order-10", overrides, null);
 
       assertSame(invoice, result);
       assertEquals(overrides, handler.receivedOverrides);
@@ -1750,6 +1752,338 @@ public class CreateDraftInvoiceHandlerTest {
       verify(process).createInvoiceLinesFromDocumentLines(eq(handler.selectedLines), eq(invoice), eq(OrderLine.class));
       verify(session).refresh(invoice);
       verify(dal, Mockito.atLeastOnce()).flush();
+    }
+  }
+
+  // ─── applyPriceListOverride (ETP-4028) — exercised via createFromOrder ─────
+  //
+  // applyPriceListOverride() itself is private, so it is exercised through the
+  // createFromOrder() entry point using the same CreateFromOrderHandler test
+  // double as testCreateFromOrderPersistsHeaderAndDelegatesLines.
+
+  /**
+   * Verifies that when {@code priceListId} is blank/null, {@code invoice.setPriceList(...)}
+   * is never called with anything other than the order's own price list — i.e. the popup
+   * override is a no-op and the invoice keeps whatever the order/header defaulted to.
+   */
+  @Test
+  public void testCreateFromOrderNullPriceListIdDoesNotOverridePriceList() throws JSONException {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+        MockedStatic<OBProvider> obProviderMock = Mockito.mockStatic(OBProvider.class);
+        MockedStatic<OBContext> obContextMock = Mockito.mockStatic(OBContext.class);
+        MockedStatic<WeldUtils> weldUtilsMock = Mockito.mockStatic(WeldUtils.class)) {
+      OBDal dal = mock(OBDal.class);
+      Session session = mock(Session.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      Order order = mockOrderWithHeaderData();
+      when(dal.get(eq(Order.class), eq("order-pl-null"))).thenReturn(order);
+      when(dal.getSession()).thenReturn(session);
+
+      OBProvider provider = mock(OBProvider.class);
+      Invoice invoice = mock(Invoice.class);
+      when(invoice.getId()).thenReturn("invoice-pl-null");
+      obProviderMock.when(OBProvider::getInstance).thenReturn(provider);
+      when(provider.get(Invoice.class)).thenReturn(invoice);
+
+      OBContext obCtx = mock(OBContext.class);
+      org.openbravo.model.ad.access.User user = mock(org.openbravo.model.ad.access.User.class);
+      when(user.getId()).thenReturn("user-pl-null");
+      when(obCtx.getUser()).thenReturn(user);
+      obContextMock.when(OBContext::getOBContext).thenReturn(obCtx);
+
+      NativeQuery linkQuery = mock(NativeQuery.class);
+      when(session.createNativeQuery(anyString())).thenReturn(linkQuery);
+      when(linkQuery.setParameter(anyString(), any())).thenReturn(linkQuery);
+      when(linkQuery.executeUpdate()).thenReturn(0);
+
+      CreateInvoiceLinesFromProcess process = mock(CreateInvoiceLinesFromProcess.class);
+      weldUtilsMock.when(() -> WeldUtils.getInstanceFromStaticBeanManager(CreateInvoiceLinesFromProcess.class))
+          .thenReturn(process);
+
+      CreateFromOrderHandler handler = new CreateFromOrderHandler();
+      handler.resolvedDocType = mock(DocumentType.class);
+      handler.selectedLines = new JSONArray().put(new JSONObject()
+          .put("id", "ol-1").put("orderedQuantity", "1"));
+
+      handler.createFromOrder("order-pl-null", Collections.emptyMap(), null);
+
+      // Header creation always sets the order's own price list; no override call is made.
+      verify(invoice, Mockito.times(1)).setPriceList(any(PriceList.class));
+      verify(invoice).setPriceList(order.getPriceList());
+      verify(dal, never()).get(eq(PriceList.class), anyString());
+    }
+  }
+
+  /**
+   * Verifies that when {@code priceListId} resolves to an active {@link PriceList},
+   * {@code invoice.setPriceList(...)} is called with that resolved price list — overriding
+   * whatever the header derivation set from the order.
+   */
+  @Test
+  public void testCreateFromOrderValidPriceListIdOverridesInvoicePriceList() throws JSONException {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+        MockedStatic<OBProvider> obProviderMock = Mockito.mockStatic(OBProvider.class);
+        MockedStatic<OBContext> obContextMock = Mockito.mockStatic(OBContext.class);
+        MockedStatic<WeldUtils> weldUtilsMock = Mockito.mockStatic(WeldUtils.class)) {
+      OBDal dal = mock(OBDal.class);
+      Session session = mock(Session.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      Order order = mockOrderWithHeaderData();
+      when(dal.get(eq(Order.class), eq("order-pl-valid"))).thenReturn(order);
+      when(dal.getSession()).thenReturn(session);
+
+      PriceList overridePriceList = mock(PriceList.class);
+      when(dal.get(eq(PriceList.class), eq("pl-tarifa-1"))).thenReturn(overridePriceList);
+
+      OBProvider provider = mock(OBProvider.class);
+      Invoice invoice = mock(Invoice.class);
+      when(invoice.getId()).thenReturn("invoice-pl-valid");
+      obProviderMock.when(OBProvider::getInstance).thenReturn(provider);
+      when(provider.get(Invoice.class)).thenReturn(invoice);
+
+      OBContext obCtx = mock(OBContext.class);
+      org.openbravo.model.ad.access.User user = mock(org.openbravo.model.ad.access.User.class);
+      when(user.getId()).thenReturn("user-pl-valid");
+      when(obCtx.getUser()).thenReturn(user);
+      obContextMock.when(OBContext::getOBContext).thenReturn(obCtx);
+
+      NativeQuery linkQuery = mock(NativeQuery.class);
+      when(session.createNativeQuery(anyString())).thenReturn(linkQuery);
+      when(linkQuery.setParameter(anyString(), any())).thenReturn(linkQuery);
+      when(linkQuery.executeUpdate()).thenReturn(0);
+
+      CreateInvoiceLinesFromProcess process = mock(CreateInvoiceLinesFromProcess.class);
+      weldUtilsMock.when(() -> WeldUtils.getInstanceFromStaticBeanManager(CreateInvoiceLinesFromProcess.class))
+          .thenReturn(process);
+
+      CreateFromOrderHandler handler = new CreateFromOrderHandler();
+      handler.resolvedDocType = mock(DocumentType.class);
+      handler.selectedLines = new JSONArray().put(new JSONObject()
+          .put("id", "ol-1").put("orderedQuantity", "1"));
+
+      handler.createFromOrder("order-pl-valid", Collections.emptyMap(), "pl-tarifa-1");
+
+      verify(invoice).setPriceList(overridePriceList);
+    }
+  }
+
+  /**
+   * Verifies that when {@code priceListId} does not resolve to any {@link PriceList} record
+   * (OBDal returns null), no exception is thrown and {@code invoice.setPriceList(...)} is
+   * never called with anything other than the order's own price list.
+   */
+  @Test
+  public void testCreateFromOrderUnresolvedPriceListIdDoesNotThrowOrOverride() throws JSONException {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+        MockedStatic<OBProvider> obProviderMock = Mockito.mockStatic(OBProvider.class);
+        MockedStatic<OBContext> obContextMock = Mockito.mockStatic(OBContext.class);
+        MockedStatic<WeldUtils> weldUtilsMock = Mockito.mockStatic(WeldUtils.class)) {
+      OBDal dal = mock(OBDal.class);
+      Session session = mock(Session.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      Order order = mockOrderWithHeaderData();
+      when(dal.get(eq(Order.class), eq("order-pl-missing"))).thenReturn(order);
+      when(dal.getSession()).thenReturn(session);
+      when(dal.get(eq(PriceList.class), eq("pl-does-not-exist"))).thenReturn(null);
+
+      OBProvider provider = mock(OBProvider.class);
+      Invoice invoice = mock(Invoice.class);
+      when(invoice.getId()).thenReturn("invoice-pl-missing");
+      obProviderMock.when(OBProvider::getInstance).thenReturn(provider);
+      when(provider.get(Invoice.class)).thenReturn(invoice);
+
+      OBContext obCtx = mock(OBContext.class);
+      org.openbravo.model.ad.access.User user = mock(org.openbravo.model.ad.access.User.class);
+      when(user.getId()).thenReturn("user-pl-missing");
+      when(obCtx.getUser()).thenReturn(user);
+      obContextMock.when(OBContext::getOBContext).thenReturn(obCtx);
+
+      NativeQuery linkQuery = mock(NativeQuery.class);
+      when(session.createNativeQuery(anyString())).thenReturn(linkQuery);
+      when(linkQuery.setParameter(anyString(), any())).thenReturn(linkQuery);
+      when(linkQuery.executeUpdate()).thenReturn(0);
+
+      CreateInvoiceLinesFromProcess process = mock(CreateInvoiceLinesFromProcess.class);
+      weldUtilsMock.when(() -> WeldUtils.getInstanceFromStaticBeanManager(CreateInvoiceLinesFromProcess.class))
+          .thenReturn(process);
+
+      CreateFromOrderHandler handler = new CreateFromOrderHandler();
+      handler.resolvedDocType = mock(DocumentType.class);
+      handler.selectedLines = new JSONArray().put(new JSONObject()
+          .put("id", "ol-1").put("orderedQuantity", "1"));
+
+      Invoice result = handler.createFromOrder("order-pl-missing", Collections.emptyMap(), "pl-does-not-exist");
+
+      assertSame(invoice, result);
+      verify(invoice, Mockito.times(1)).setPriceList(any(PriceList.class));
+      verify(invoice).setPriceList(order.getPriceList());
+    }
+  }
+
+  // ─── applyCurrencyOverride (ETP-4314) — exercised via createFromOrder(4-arg) ──
+  //
+  // applyCurrencyOverride() itself is private, so it is exercised through the
+  // 4-arg createFromOrder() entry point using the same CreateFromOrderHandler test
+  // double as the price-list override tests above.
+
+  /**
+   * Verifies that when {@code currencyId} is blank/null, {@code invoice.setCurrency(...)}
+   * is never called with anything other than the order's own currency — i.e. the
+   * shipment-currency override is a no-op and the invoice keeps whatever the order's
+   * header derivation set.
+   */
+  @Test
+  public void testCreateFromOrderNullCurrencyIdDoesNotOverrideCurrency() throws JSONException {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+        MockedStatic<OBProvider> obProviderMock = Mockito.mockStatic(OBProvider.class);
+        MockedStatic<OBContext> obContextMock = Mockito.mockStatic(OBContext.class);
+        MockedStatic<WeldUtils> weldUtilsMock = Mockito.mockStatic(WeldUtils.class)) {
+      OBDal dal = mock(OBDal.class);
+      Session session = mock(Session.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      Order order = mockOrderWithHeaderData();
+      when(dal.get(eq(Order.class), eq("order-cur-null"))).thenReturn(order);
+      when(dal.getSession()).thenReturn(session);
+
+      OBProvider provider = mock(OBProvider.class);
+      Invoice invoice = mock(Invoice.class);
+      when(invoice.getId()).thenReturn("invoice-cur-null");
+      obProviderMock.when(OBProvider::getInstance).thenReturn(provider);
+      when(provider.get(Invoice.class)).thenReturn(invoice);
+
+      OBContext obCtx = mock(OBContext.class);
+      org.openbravo.model.ad.access.User user = mock(org.openbravo.model.ad.access.User.class);
+      when(user.getId()).thenReturn("user-cur-null");
+      when(obCtx.getUser()).thenReturn(user);
+      obContextMock.when(OBContext::getOBContext).thenReturn(obCtx);
+
+      NativeQuery linkQuery = mock(NativeQuery.class);
+      when(session.createNativeQuery(anyString())).thenReturn(linkQuery);
+      when(linkQuery.setParameter(anyString(), any())).thenReturn(linkQuery);
+      when(linkQuery.executeUpdate()).thenReturn(0);
+
+      CreateInvoiceLinesFromProcess process = mock(CreateInvoiceLinesFromProcess.class);
+      weldUtilsMock.when(() -> WeldUtils.getInstanceFromStaticBeanManager(CreateInvoiceLinesFromProcess.class))
+          .thenReturn(process);
+
+      CreateFromOrderHandler handler = new CreateFromOrderHandler();
+      handler.resolvedDocType = mock(DocumentType.class);
+      handler.selectedLines = new JSONArray().put(new JSONObject()
+          .put("id", "ol-1").put("orderedQuantity", "1"));
+
+      handler.createFromOrder("order-cur-null", Collections.emptyMap(), null, null);
+
+      // Header creation always sets the order's own currency; no override call is made.
+      verify(invoice, Mockito.times(1)).setCurrency(any(Currency.class));
+      verify(invoice).setCurrency(order.getCurrency());
+      verify(dal, never()).get(eq(Currency.class), anyString());
+    }
+  }
+
+  /**
+   * Verifies that when {@code currencyId} resolves to an active {@link Currency},
+   * {@code invoice.setCurrency(...)} is called with that resolved currency —
+   * overriding whatever the header derivation set from the order.
+   */
+  @Test
+  public void testCreateFromOrderValidCurrencyIdOverridesInvoiceCurrency() throws JSONException {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+        MockedStatic<OBProvider> obProviderMock = Mockito.mockStatic(OBProvider.class);
+        MockedStatic<OBContext> obContextMock = Mockito.mockStatic(OBContext.class);
+        MockedStatic<WeldUtils> weldUtilsMock = Mockito.mockStatic(WeldUtils.class)) {
+      OBDal dal = mock(OBDal.class);
+      Session session = mock(Session.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      Order order = mockOrderWithHeaderData();
+      when(dal.get(eq(Order.class), eq("order-cur-valid"))).thenReturn(order);
+      when(dal.getSession()).thenReturn(session);
+
+      Currency overrideCurrency = mock(Currency.class);
+      when(dal.get(eq(Currency.class), eq("cur-eur"))).thenReturn(overrideCurrency);
+
+      OBProvider provider = mock(OBProvider.class);
+      Invoice invoice = mock(Invoice.class);
+      when(invoice.getId()).thenReturn("invoice-cur-valid");
+      obProviderMock.when(OBProvider::getInstance).thenReturn(provider);
+      when(provider.get(Invoice.class)).thenReturn(invoice);
+
+      OBContext obCtx = mock(OBContext.class);
+      org.openbravo.model.ad.access.User user = mock(org.openbravo.model.ad.access.User.class);
+      when(user.getId()).thenReturn("user-cur-valid");
+      when(obCtx.getUser()).thenReturn(user);
+      obContextMock.when(OBContext::getOBContext).thenReturn(obCtx);
+
+      NativeQuery linkQuery = mock(NativeQuery.class);
+      when(session.createNativeQuery(anyString())).thenReturn(linkQuery);
+      when(linkQuery.setParameter(anyString(), any())).thenReturn(linkQuery);
+      when(linkQuery.executeUpdate()).thenReturn(0);
+
+      CreateInvoiceLinesFromProcess process = mock(CreateInvoiceLinesFromProcess.class);
+      weldUtilsMock.when(() -> WeldUtils.getInstanceFromStaticBeanManager(CreateInvoiceLinesFromProcess.class))
+          .thenReturn(process);
+
+      CreateFromOrderHandler handler = new CreateFromOrderHandler();
+      handler.resolvedDocType = mock(DocumentType.class);
+      handler.selectedLines = new JSONArray().put(new JSONObject()
+          .put("id", "ol-1").put("orderedQuantity", "1"));
+
+      handler.createFromOrder("order-cur-valid", Collections.emptyMap(), null, "cur-eur");
+
+      verify(invoice).setCurrency(overrideCurrency);
+    }
+  }
+
+  /**
+   * Verifies that when {@code currencyId} does not resolve to any {@link Currency} record
+   * (OBDal returns null), no exception is thrown and {@code invoice.setCurrency(...)} is
+   * never called with anything other than the order's own currency.
+   */
+  @Test
+  public void testCreateFromOrderUnresolvedCurrencyIdDoesNotThrowOrOverride() throws JSONException {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+        MockedStatic<OBProvider> obProviderMock = Mockito.mockStatic(OBProvider.class);
+        MockedStatic<OBContext> obContextMock = Mockito.mockStatic(OBContext.class);
+        MockedStatic<WeldUtils> weldUtilsMock = Mockito.mockStatic(WeldUtils.class)) {
+      OBDal dal = mock(OBDal.class);
+      Session session = mock(Session.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      Order order = mockOrderWithHeaderData();
+      when(dal.get(eq(Order.class), eq("order-cur-missing"))).thenReturn(order);
+      when(dal.getSession()).thenReturn(session);
+      when(dal.get(eq(Currency.class), eq("cur-does-not-exist"))).thenReturn(null);
+
+      OBProvider provider = mock(OBProvider.class);
+      Invoice invoice = mock(Invoice.class);
+      when(invoice.getId()).thenReturn("invoice-cur-missing");
+      obProviderMock.when(OBProvider::getInstance).thenReturn(provider);
+      when(provider.get(Invoice.class)).thenReturn(invoice);
+
+      OBContext obCtx = mock(OBContext.class);
+      org.openbravo.model.ad.access.User user = mock(org.openbravo.model.ad.access.User.class);
+      when(user.getId()).thenReturn("user-cur-missing");
+      when(obCtx.getUser()).thenReturn(user);
+      obContextMock.when(OBContext::getOBContext).thenReturn(obCtx);
+
+      NativeQuery linkQuery = mock(NativeQuery.class);
+      when(session.createNativeQuery(anyString())).thenReturn(linkQuery);
+      when(linkQuery.setParameter(anyString(), any())).thenReturn(linkQuery);
+      when(linkQuery.executeUpdate()).thenReturn(0);
+
+      CreateInvoiceLinesFromProcess process = mock(CreateInvoiceLinesFromProcess.class);
+      weldUtilsMock.when(() -> WeldUtils.getInstanceFromStaticBeanManager(CreateInvoiceLinesFromProcess.class))
+          .thenReturn(process);
+
+      CreateFromOrderHandler handler = new CreateFromOrderHandler();
+      handler.resolvedDocType = mock(DocumentType.class);
+      handler.selectedLines = new JSONArray().put(new JSONObject()
+          .put("id", "ol-1").put("orderedQuantity", "1"));
+
+      Invoice result = handler.createFromOrder("order-cur-missing", Collections.emptyMap(), null,
+          "cur-does-not-exist");
+
+      assertSame(invoice, result);
+      verify(invoice, Mockito.times(1)).setCurrency(any(Currency.class));
+      verify(invoice).setCurrency(order.getCurrency());
     }
   }
 
@@ -1864,7 +2198,7 @@ public class CreateDraftInvoiceHandlerTest {
           .put("id", "ol-X")
           .put("orderedQuantity", "1"));
 
-      handler.createFromOrder("order-X", Collections.emptyMap());
+      handler.createFromOrder("order-X", Collections.emptyMap(), null);
 
       // Capture the SQL and assert it has the right shape.
       ArgumentCaptor<String> sqlCaptor = ArgumentCaptor.forClass(String.class);
@@ -1897,7 +2231,7 @@ public class CreateDraftInvoiceHandlerTest {
       CreateFromOrderHandler handler = new CreateFromOrderHandler();
       handler.selectedLines = new JSONArray();
 
-      handler.createFromOrder("order-11", Collections.emptyMap());
+      handler.createFromOrder("order-11", Collections.emptyMap(), null);
     }
   }
 
@@ -1919,7 +2253,7 @@ public class CreateDraftInvoiceHandlerTest {
       handler.invoiceHeader = invoice;
       Map<String, BigDecimal> overrides = Collections.singletonMap("sl-1", new BigDecimal("4"));
 
-      Invoice result = handler.createFromShipments(Arrays.asList("ship-10", "ship-20"), overrides);
+      Invoice result = handler.createFromShipments(Arrays.asList("ship-10", "ship-20"), overrides, null);
 
       assertSame(invoice, result);
       assertEquals(Arrays.asList(first, second), handler.receivedShipments);
@@ -1927,6 +2261,35 @@ public class CreateDraftInvoiceHandlerTest {
       assertSame(invoice, handler.receivedInvoice);
       verify(dal).save(invoice);
       verify(dal).flush();
+    }
+  }
+
+  /**
+   * Verifies that the multi-shipment path of {@code createFromShipments} also applies the
+   * price-list override (ETP-4028) — same {@code applyPriceListOverride} helper used by
+   * {@code createFromOrder}, called before {@code OBDal.save(invoice)}.
+   */
+  @Test
+  public void testCreateFromShipmentsMultiShipmentAppliesPriceListOverride() {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      PriceList overridePriceList = mock(PriceList.class);
+      when(dal.get(eq(PriceList.class), eq("pl-shipments-1"))).thenReturn(overridePriceList);
+
+      ShipmentInOut first = mock(ShipmentInOut.class);
+      ShipmentInOut second = mock(ShipmentInOut.class);
+      Invoice invoice = mock(Invoice.class);
+
+      CreateFromShipmentsHandler handler = new CreateFromShipmentsHandler();
+      handler.shipmentsToReturn = Arrays.asList(first, second);
+      handler.invoiceHeader = invoice;
+
+      handler.createFromShipments(Arrays.asList("ship-30", "ship-40"),
+          Collections.emptyMap(), "pl-shipments-1");
+
+      verify(invoice).setPriceList(overridePriceList);
     }
   }
 
@@ -1959,12 +2322,14 @@ public class CreateDraftInvoiceHandlerTest {
       when(linkedOrder.getPaymentTerms()).thenReturn(paymentTerm);
       when(linkedOrder.getPaymentMethod()).thenReturn(paymentMethod);
 
+      Currency shipmentCurrency = mock(Currency.class);
       ShipmentInOut shipment = mock(ShipmentInOut.class);
       when(shipment.getClient()).thenReturn(client);
       when(shipment.getOrganization()).thenReturn(organization);
       when(shipment.getBusinessPartner()).thenReturn(businessPartner);
       when(shipment.getPartnerAddress()).thenReturn(null);
       when(shipment.getSalesOrder()).thenReturn(linkedOrder);
+      when(shipment.getEtgoCurrency()).thenReturn(shipmentCurrency);
 
       InvoiceHeaderHandler handler = new InvoiceHeaderHandler();
       Invoice result = handler.createInvoiceHeaderFromShipment(shipment, Collections.singletonList(shipment));
@@ -1973,11 +2338,15 @@ public class CreateDraftInvoiceHandlerTest {
       verify(invoice).setDocumentType(invoiceDocType);
       verify(invoice).setTransactionDocument(invoiceDocType);
       verify(invoice).setPriceList(priceList);
-      verify(invoice).setCurrency(currency);
       verify(invoice).setPaymentTerms(paymentTerm);
       verify(invoice).setPaymentMethod(paymentMethod);
       verify(invoice).setSalesOrder(linkedOrder);
       verify(invoice).setBusinessPartner(businessPartner);
+      // ETP-4028/ETP-4314: the invoice's currency is unconditionally overwritten
+      // with the shipment's OWN currency at the end of the method — it may diverge
+      // from linkedOrder.getCurrency() (set earlier) once the user edits the
+      // shipment's currency in draft, so the shipment's currency must win.
+      verify(invoice).setCurrency(shipmentCurrency);
     }
   }
 
@@ -2004,12 +2373,14 @@ public class CreateDraftInvoiceHandlerTest {
       when(businessPartner.getPaymentTerms()).thenReturn(paymentTerm);
       when(businessPartner.getPaymentMethod()).thenReturn(paymentMethod);
 
+      Currency shipmentCurrency = mock(Currency.class);
       ShipmentInOut shipment = mock(ShipmentInOut.class);
       when(shipment.getClient()).thenReturn(mock(Client.class));
       when(shipment.getOrganization()).thenReturn(organization);
       when(shipment.getBusinessPartner()).thenReturn(businessPartner);
       when(shipment.getPartnerAddress()).thenReturn(null);
       when(shipment.getSalesOrder()).thenReturn(null);
+      when(shipment.getEtgoCurrency()).thenReturn(shipmentCurrency);
 
       InvoiceHeaderHandler handler = new InvoiceHeaderHandler();
       handler.docTypeToReturn = mock(DocumentType.class);
@@ -2019,10 +2390,13 @@ public class CreateDraftInvoiceHandlerTest {
       assertSame(invoice, result);
       assertEquals("org-20", handler.requestedOrgId);
       verify(invoice).setPriceList(priceList);
-      verify(invoice).setCurrency(currency);
       verify(invoice).setPaymentTerms(paymentTerm);
       verify(invoice).setPaymentMethod(paymentMethod);
       verify(invoice, never()).setSalesOrder(any(Order.class));
+      // ETP-4028/ETP-4314: even in the no-order (BP-default) branch, the invoice's
+      // currency must end up being the shipment's OWN currency, not the BP's
+      // price-list currency set earlier in this same branch.
+      verify(invoice).setCurrency(shipmentCurrency);
     }
   }
 
@@ -2506,7 +2880,8 @@ public class CreateDraftInvoiceHandlerTest {
       }
 
       @Override
-      protected Invoice createFromOrder(String orderId, Map<String, BigDecimal> lineOverrides) {
+      protected Invoice createFromOrder(String orderId, Map<String, BigDecimal> lineOverrides,
+          String priceListId, String currencyId) {
         orderPathCalled[0] = true;
         assertEquals("order-linked", orderId);
         return expectedInvoice;
@@ -2525,7 +2900,7 @@ public class CreateDraftInvoiceHandlerTest {
     };
 
     Invoice result = handler.createFromShipments(
-        Collections.singletonList("ship-single"), Collections.emptyMap());
+        Collections.singletonList("ship-single"), Collections.emptyMap(), null);
     assertSame(expectedInvoice, result);
     assertTrue("Single-shipment-with-order path must delegate to createFromOrder",
         orderPathCalled[0]);
@@ -2571,7 +2946,7 @@ public class CreateDraftInvoiceHandlerTest {
       }
     };
 
-    handler.createFromShipments(Collections.singletonList("ship-cap"), overrides);
+    handler.createFromShipments(Collections.singletonList("ship-cap"), overrides, null);
   }
 
   // ── computePendingQtyPerLine (1-arg) delegates to 2-arg ─────────────────────
