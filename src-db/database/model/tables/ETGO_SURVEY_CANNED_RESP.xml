@@ -33,10 +33,6 @@
         <default/>
         <onCreateDefault/>
       </column>
-      <column name="SURVEY_KEY" primaryKey="false" required="true" type="VARCHAR" size="60" autoIncrement="false">
-        <default/>
-        <onCreateDefault/>
-      </column>
       <column name="LANGUAGE" primaryKey="false" required="true" type="VARCHAR" size="60" autoIncrement="false">
         <default/>
         <onCreateDefault/>
@@ -53,11 +49,26 @@
         <default><![CDATA[10]]></default>
         <onCreateDefault/>
       </column>
+      <column name="ETGO_SURVEY_TYPE_ID" primaryKey="false" required="false" type="VARCHAR" size="32" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="MIN_SCORE" primaryKey="false" required="false" type="DECIMAL" size="10,0" autoIncrement="false">
+        <default><![CDATA[1]]></default>
+        <onCreateDefault/>
+      </column>
+      <column name="MAX_SCORE" primaryKey="false" required="false" type="DECIMAL" size="10,0" autoIncrement="false">
+        <default><![CDATA[3]]></default>
+        <onCreateDefault/>
+      </column>
       <foreign-key foreignTable="AD_ORG" name="ETGO_SURVEYCANNEDRESP_ADORG_FK">
         <reference local="AD_ORG_ID" foreign="AD_ORG_ID"/>
       </foreign-key>
       <foreign-key foreignTable="AD_CLIENT" name="ETGO_VEYCANNEDRESP_LIENT_FK">
         <reference local="AD_CLIENT_ID" foreign="AD_CLIENT_ID"/>
+      </foreign-key>
+      <foreign-key foreignTable="ETGO_SURVEY_TYPE" name="ETGO_VEYCANNEDRESP_VEYTYPE_FK">
+        <reference local="ETGO_SURVEY_TYPE_ID" foreign="ETGO_SURVEY_TYPE_ID"/>
       </foreign-key>
       <check name="ETGO_VEYCANNEDRESP_CTIVE_CHK"><![CDATA[ISACTIVE IN ('Y', 'N')]]></check>
     </table>

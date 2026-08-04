@@ -45,26 +45,6 @@
         <default><![CDATA[2]]></default>
         <onCreateDefault/>
       </column>
-      <column name="NPS_MIN_AGE_DAYS" primaryKey="false" required="true" type="DECIMAL" size="10,0" autoIncrement="false">
-        <default><![CDATA[60]]></default>
-        <onCreateDefault/>
-      </column>
-      <column name="NPS_INACTIVITY_DAYS" primaryKey="false" required="true" type="DECIMAL" size="10,0" autoIncrement="false">
-        <default><![CDATA[14]]></default>
-        <onCreateDefault/>
-      </column>
-      <column name="RESPONSE_COOLDOWN_DAYS" primaryKey="false" required="true" type="DECIMAL" size="10,0" autoIncrement="false">
-        <default><![CDATA[90]]></default>
-        <onCreateDefault/>
-      </column>
-      <column name="CSAT_MIN_DOCS" primaryKey="false" required="true" type="DECIMAL" size="10,0" autoIncrement="false">
-        <default><![CDATA[5]]></default>
-        <onCreateDefault/>
-      </column>
-      <column name="CSAT_DOC_GAP" primaryKey="false" required="true" type="DECIMAL" size="10,0" autoIncrement="false">
-        <default><![CDATA[30]]></default>
-        <onCreateDefault/>
-      </column>
       <foreign-key foreignTable="AD_ORG" name="ETGO_SURVEY_CONFIG_AD_ORG_FK">
         <reference local="AD_ORG_ID" foreign="AD_ORG_ID"/>
       </foreign-key>

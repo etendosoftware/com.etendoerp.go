@@ -69,9 +69,10 @@ import org.openbravo.model.common.enterprise.Organization;
  * Unit tests for {@link SurveyConfigServlet}.
  *
  * <p>Covers: doOptions 204, doGet JWT-auth guards (OBException / generic
- * Exception -&gt; 401), the happy-path response shape (numeric config fields
- * plus canned responses grouped by survey/language), the empty-config-row
- * case, internal-error handling (500), and (ETP-4352 GDPR remediation) doPost
+ * Exception -&gt; 401), the happy-path response shape (global settings,
+ * per-survey config grouped by survey key, and canned responses grouped by
+ * survey/language with their score range), the empty-row cases,
+ * internal-error handling (500), and (ETP-4352 GDPR remediation) doPost
  * {@code /response} — persisting a submitted survey response server-side.
  */
 @ExtendWith(MockitoExtension.class)
@@ -91,7 +92,10 @@ class SurveyConfigServletTest {
 
   @Mock
   @SuppressWarnings("rawtypes")
-  private NativeQuery configQuery;
+  private NativeQuery globalQuery;
+  @Mock
+  @SuppressWarnings("rawtypes")
+  private NativeQuery surveyTypesQuery;
   @Mock
   @SuppressWarnings("rawtypes")
   private NativeQuery cannedQuery;
@@ -121,10 +125,11 @@ class SurveyConfigServletTest {
     obDalMock.when(OBDal::getInstance).thenReturn(obDal);
     when(obDal.getSession()).thenReturn(session);
 
-    // First createNativeQuery() call is the config query, second is the canned-response query.
-    when(session.createNativeQuery(anyString())).thenReturn(configQuery, cannedQuery);
+    // createNativeQuery() calls happen in order: global settings, survey types, canned responses.
+    when(session.createNativeQuery(anyString())).thenReturn(globalQuery, surveyTypesQuery, cannedQuery);
 
-    when(configQuery.list()).thenReturn(Collections.emptyList());
+    when(globalQuery.list()).thenReturn(Collections.emptyList());
+    when(surveyTypesQuery.list()).thenReturn(Collections.emptyList());
     when(cannedQuery.list()).thenReturn(Collections.emptyList());
   }
 
@@ -228,11 +233,11 @@ class SurveyConfigServletTest {
   class DoGetSuccessTests {
 
     @Test
-    @DisplayName("returns all 8 numeric fields from the config row")
-    void returnsNumericConfig() throws Exception {
+    @DisplayName("returns all 3 global fields from the settings row")
+    void returnsGlobalConfig() throws Exception {
       authenticated();
-      when(configQuery.list()).thenReturn(List.<Object[]>of(
-          new Object[]{ 30, 21, 2, 60, 14, 90, 5, 30 }
+      when(globalQuery.list()).thenReturn(List.<Object[]>of(
+          new Object[]{ 30, 21, 2 }
       ));
 
       servlet.doGet(request, response);
@@ -242,36 +247,80 @@ class SurveyConfigServletTest {
       assertEquals(30, result.getInt("globalCooldownDays"));
       assertEquals(21, result.getInt("dismissedCooldownDays"));
       assertEquals(2, result.getInt("maxPerMonth"));
-      assertEquals(60, result.getInt("npsMinAgeDays"));
-      assertEquals(14, result.getInt("npsInactivityDays"));
-      assertEquals(90, result.getInt("responseCooldownDays"));
-      assertEquals(5, result.getInt("csatMinDocs"));
-      assertEquals(30, result.getInt("csatDocGap"));
     }
 
     @Test
-    @DisplayName("omits numeric fields entirely when no config row exists")
+    @DisplayName("omits global fields entirely when no settings row exists")
     void omitsConfigWhenNoRow() throws Exception {
       authenticated();
-      when(configQuery.list()).thenReturn(Collections.emptyList());
+      when(globalQuery.list()).thenReturn(Collections.emptyList());
 
       servlet.doGet(request, response);
 
       JSONObject result = new JSONObject(getResponseBody());
       assertFalse(result.has("globalCooldownDays"));
-      // canned is always present (possibly empty), config fields are not.
+      // perSurvey/canned are always present (possibly empty), global fields are not.
+      assertTrue(result.has("perSurvey"));
       assertTrue(result.has("canned"));
     }
 
     @Test
-    @DisplayName("groups canned responses by survey key and language")
+    @DisplayName("groups survey-type rows by key, omitting fields the survey doesn't use")
+    void groupsSurveyTypes() throws Exception {
+      authenticated();
+      when(surveyTypesQuery.list()).thenReturn(List.<Object[]>of(
+          new Object[]{ "nps", 60, 14, null, null, 90, "Y" },
+          new Object[]{ "csat_invoicing", null, null, 5, 30, 90, "Y" }
+      ));
+
+      servlet.doGet(request, response);
+
+      JSONObject result = new JSONObject(getResponseBody());
+      JSONObject perSurvey = result.getJSONObject("perSurvey");
+
+      JSONObject nps = perSurvey.getJSONObject("nps");
+      assertEquals(60, nps.getInt("minAccountAgeDays"));
+      assertEquals(14, nps.getInt("inactivityGuardDays"));
+      assertEquals(90, nps.getInt("responseCooldownDays"));
+      assertFalse(nps.has("minDocuments"));
+      assertFalse(nps.has("documentGap"));
+      assertTrue(nps.getBoolean("enabled"));
+
+      JSONObject invoicing = perSurvey.getJSONObject("csat_invoicing");
+      assertEquals(5, invoicing.getInt("minDocuments"));
+      assertEquals(30, invoicing.getInt("documentGap"));
+      assertFalse(invoicing.has("minAccountAgeDays"));
+      assertFalse(invoicing.has("inactivityGuardDays"));
+      assertTrue(invoicing.getBoolean("enabled"));
+    }
+
+    @Test
+    @DisplayName("reports enabled=false for an isactive='N' survey-type row instead of omitting it")
+    void reportsDisabledSurveyType() throws Exception {
+      authenticated();
+      when(surveyTypesQuery.list()).thenReturn(List.<Object[]>of(
+          new Object[]{ "csat_order", 60, 14, 5, 30, 90, "N" }
+      ));
+
+      servlet.doGet(request, response);
+
+      JSONObject result = new JSONObject(getResponseBody());
+      JSONObject order = result.getJSONObject("perSurvey").getJSONObject("csat_order");
+      assertFalse(order.getBoolean("enabled"));
+      // Tuning fields are still reported alongside the disable flag — the frontend must not
+      // need them (a disabled survey never runs isEligible), but they aren't hidden either.
+      assertEquals(5, order.getInt("minDocuments"));
+    }
+
+    @Test
+    @DisplayName("groups canned responses by survey key and language, carrying the score range")
     void groupsCannedResponses() throws Exception {
       authenticated();
       when(cannedQuery.list()).thenReturn(List.<Object[]>of(
-          new Object[]{ "csat_invoicing", "en_US", "🐢", "Too slow" },
-          new Object[]{ "csat_invoicing", "en_US", "🤔", "Hard to use" },
-          new Object[]{ "csat_invoicing", "es_ES", "🐢", "Es lento" },
-          new Object[]{ "csat_order", "en_US", "🔍", "Couldn't find the product" }
+          new Object[]{ "csat_invoicing", "en_US", "🐢", "Too slow", 1, 3 },
+          new Object[]{ "csat_invoicing", "en_US", "🤔", "Hard to use", 1, 2 },
+          new Object[]{ "csat_invoicing", "es_ES", "🐢", "Es lento", 1, 3 },
+          new Object[]{ "csat_order", "en_US", "🔍", "Couldn't find the product", 1, 3 }
       ));
 
       servlet.doGet(request, response);
@@ -282,7 +331,9 @@ class SurveyConfigServletTest {
       JSONArray invoicingEn = canned.getJSONObject("csat_invoicing").getJSONArray("en_US");
       assertEquals(2, invoicingEn.length());
       assertEquals("Too slow", invoicingEn.getJSONObject(0).getString("text"));
+      assertEquals(3, invoicingEn.getJSONObject(0).getInt("maxScore"));
       assertEquals("Hard to use", invoicingEn.getJSONObject(1).getString("text"));
+      assertEquals(2, invoicingEn.getJSONObject(1).getInt("maxScore"));
 
       JSONArray invoicingEs = canned.getJSONObject("csat_invoicing").getJSONArray("es_ES");
       assertEquals(1, invoicingEs.length());
@@ -291,6 +342,7 @@ class SurveyConfigServletTest {
       JSONArray orderEn = canned.getJSONObject("csat_order").getJSONArray("en_US");
       assertEquals(1, orderEn.length());
       assertEquals("Couldn't find the product", orderEn.getJSONObject(0).getString("text"));
+      assertEquals(1, orderEn.getJSONObject(0).getInt("minScore"));
     }
 
     @Test
