@@ -1115,6 +1115,7 @@
 <!--3EF4B2A1016E44D6884908220B69BC2B-->  <ISPATCH><![CDATA[Y]]></ISPATCH>
 <!--3EF4B2A1016E44D6884908220B69BC2B-->  <ISDELETE><![CDATA[Y]]></ISDELETE>
 <!--3EF4B2A1016E44D6884908220B69BC2B-->  <SEQNO><![CDATA[110]]></SEQNO>
+<!--3EF4B2A1016E44D6884908220B69BC2B-->  <AGENT_PROMPT><![CDATA[The `bankAccount` entity holds a contact's (business partner / BP) OWN bank accounts (Etendo table C_BP_BankAccount): the contact's IBAN, SWIFT/BIC and account number used to store their payment/bank details. These are NOT the company's own cash/bank/card accounts — for those (FIN_Financial_Account) use the `financial-account` spec (`account` entity) instead.]]></AGENT_PROMPT>
 <!--3EF4B2A1016E44D6884908220B69BC2B--></ETGO_SF_ENTITY>
 
 <!--4064EAC2CD3F4AE091C9EFA6691B35EC--><ETGO_SF_ENTITY>
@@ -3657,6 +3658,7 @@
 <!--BE3EAEED69644E56B0ECDCFE4A7E9BC1-->  <ISDELETE><![CDATA[Y]]></ISDELETE>
 <!--BE3EAEED69644E56B0ECDCFE4A7E9BC1-->  <JAVA_QUALIFIER><![CDATA[financialAccountHeaderHandler]]></JAVA_QUALIFIER>
 <!--BE3EAEED69644E56B0ECDCFE4A7E9BC1-->  <SEQNO><![CDATA[10]]></SEQNO>
+<!--BE3EAEED69644E56B0ECDCFE4A7E9BC1-->  <AGENT_PROMPT><![CDATA[The `account` entity represents the company's OWN financial accounts (Etendo table FIN_Financial_Account): its bank, cash and card accounts (required fields: name, currency, type), including their IBAN, SWIFT/BIC and account number. These are NOT a contact's bank details — for a contact's (business partner / BP) bank account (C_BP_BankAccount) use the `contacts` spec (`bankAccount` entity) instead.]]></AGENT_PROMPT>
 <!--BE3EAEED69644E56B0ECDCFE4A7E9BC1--></ETGO_SF_ENTITY>
 
 <!--BE79CE1718074339AE35BE6DDD829308--><ETGO_SF_ENTITY>

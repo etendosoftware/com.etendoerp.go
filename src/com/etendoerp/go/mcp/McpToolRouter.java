@@ -249,6 +249,7 @@ public class McpToolRouter {
   private JSONObject handleDiscover() throws Exception {
     OBCriteria<SFSpec> specCriteria = OBDal.getInstance().createCriteria(SFSpec.class);
     specCriteria.add(Restrictions.eq(SFSpec.PROPERTY_ISACTIVE, true));
+    specCriteria.add(Restrictions.eq(SFSpec.PROPERTY_SHOWINMCP, true));
     specCriteria.addOrder(Order.asc(SFSpec.PROPERTY_NAME));
     List<SFSpec> allSpecs = specCriteria.list();
 

@@ -54,6 +54,7 @@ final class McpToolRouterSupport {
     OBCriteria<SFSpec> criteria = OBDal.getInstance().createCriteria(SFSpec.class);
     criteria.add(Restrictions.eq(SFSpec.PROPERTY_NAME, specName));
     criteria.add(Restrictions.eq(SFSpec.PROPERTY_ISACTIVE, true));
+    criteria.add(Restrictions.eq(SFSpec.PROPERTY_SHOWINMCP, true));
     criteria.setMaxResults(1);
     List<SFSpec> results = criteria.list();
     if (results.isEmpty()) {
@@ -157,6 +158,12 @@ final class McpToolRouterSupport {
     item.put("name", entity.getName());
     item.put("methods", buildMethodsArray(entity));
     item.put("readOnly", isReadOnlyEntity(entity));
+    // Entity-level agent guidance (ETP-4278), additive to the spec-level and
+    // per-field prompts. Emitted only when set so untagged entities stay lean.
+    String agentPrompt = entity.getAgentPrompt();
+    if (agentPrompt != null && !agentPrompt.trim().isEmpty()) {
+      item.put("agentPrompt", agentPrompt.trim());
+    }
     return item;
   }
 
