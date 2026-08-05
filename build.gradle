@@ -54,28 +54,6 @@ sourceSets {
             srcDirs 'etendo-resources'
         }
     }
-    test {
-        java {
-            srcDirs 'src-test/src'
-        }
-    }
-}
-
-// The Etendo core classes (OBDal, OBContext, JSONObject, AD model entities, etc.) are made
-// available to this module's 'main' sourceSet by the platform's build tooling (com.etendoerp.gradleplugin)
-// via an 'afterEvaluate' hook, outside the normal Gradle dependency configuration graph — so the
-// 'test' sourceSet does not inherit them the way it would with a plain 'implementation' dependency.
-// Bridge the two classpaths once the platform tooling has finished augmenting 'main'.
-afterEvaluate {
-    sourceSets.test.compileClasspath += sourceSets.main.compileClasspath
-    sourceSets.test.runtimeClasspath += sourceSets.main.runtimeClasspath
-    // Some tests extend the platform's shared integration-test base classes
-    // (e.g. org.openbravo.test.base.OBBaseTest), which live only in the root
-    // project's own test sourceSet output — not published as a jar.
-    sourceSets.test.compileClasspath += rootProject.sourceSets.test.output
-    sourceSets.test.compileClasspath += rootProject.sourceSets.test.compileClasspath
-    sourceSets.test.runtimeClasspath += rootProject.sourceSets.test.output
-    sourceSets.test.runtimeClasspath += rootProject.sourceSets.test.runtimeClasspath
 }
 
 /**
@@ -112,8 +90,4 @@ dependencies {
     testRuntimeOnly 'org.junit.vintage:junit-vintage-engine:5.9.2'
     testImplementation 'org.mockito:mockito-core:5.2.0'
     testImplementation 'org.mockito:mockito-junit-jupiter:5.2.0'
-}
-
-tasks.named('test') {
-    useJUnitPlatform()
 }
