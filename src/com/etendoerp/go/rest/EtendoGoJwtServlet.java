@@ -166,6 +166,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private static final String PROGRESS_ORG_INFO = "orgInfo";
   private static final String PROGRESS_BASELINE = "baseline";
   private static final String PROGRESS_BANK_CONNECTION_SYNC = "bankConnectionSync";
+  private static final String PROGRESS_BP_GROUP_ACCT_PATCH = "bpGroupAcctPatch";
   private static final String LEGAL_WITH_ACCOUNTING_ORG_TYPE_ID = "1";
   private static final long PASSWORD_RESET_TTL_SECONDS = 30 * 60L;
   private static final String PASSWORD_RESET_NEUTRAL_MESSAGE =
@@ -1638,6 +1639,15 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     if (!scheduleBankConnectionSync(writer, clientId, orgId, adminUserId, adminRoleId)) {
       return false;
     }
+    // ETP-4720: patch the 5 C_BP_Group_Acct columns neither the core c_bp_group_trg() trigger nor
+    // OnboardingAccountingWiringService's own BP_GROUP_ACCT_SQL populate. Runs LAST among the
+    // provisioning steps (right before the data-fix baseline) since it only needs C_BP_Group and
+    // C_AcctSchema_Default, both already provisioned by step 1 -- see
+    // OnboardingAccountingWiringService#patchBpGroupAcctMissingColumns for the full root-cause
+    // explanation and its lockstep corrective twin (R21-bp-group-acct-remaining-columns.sql).
+    if (!patchBpGroupAcctMissingColumns(writer, clientId, orgId, adminUserId, adminRoleId)) {
+      return false;
+    }
     // Final action before commitDalChanges: stamp the tenant's data-fix baseline so it lands in the
     // same atomic onboarding commit. A genuine SQL error propagates (not caught here) so the outer
     // handleOnboarding catch rolls back cleanly; the expected ON CONFLICT->0-rows case is benign.
@@ -1800,6 +1810,33 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       String errorMessage = e.getMessage() != null ? e.getMessage()
           : "Default customer creation failed";
       sendProgress(writer, PROGRESS_CUSTOMER, PROGRESS_ERROR, errorMessage);
+      sendFinalResult(writer, false, errorMessage);
+      return false;
+    }
+  }
+
+  /**
+   * Patches any {@code C_BP_Group_Acct} row still missing one of the 5 columns that neither the
+   * core {@code c_bp_group_trg()} trigger nor {@code OnboardingAccountingWiringService}'s own
+   * {@code BP_GROUP_ACCT_SQL} populate (ETP-4720) — see
+   * {@code OnboardingAccountingWiringService#patchBpGroupAcctMissingColumns} for the full
+   * explanation and its corrective twin ({@code R21-bp-group-acct-remaining-columns.sql}).
+   */
+  boolean patchBpGroupAcctMissingColumns(PrintWriter writer, String clientId, String orgId,
+      String adminUserId, String adminRoleId) {
+    sendProgress(writer, PROGRESS_BP_GROUP_ACCT_PATCH, PROGRESS_IN_PROGRESS,
+        "Patching business-partner group posting accounts...");
+    try {
+      onboardingAccountingWiringService.patchBpGroupAcctMissingColumns(clientId, orgId,
+          adminUserId, adminRoleId);
+      sendProgress(writer, PROGRESS_BP_GROUP_ACCT_PATCH, "done",
+          "Business-partner group posting accounts patched");
+      return true;
+    } catch (Exception e) {
+      EtendoGoDalHelper.rollbackDalChanges("onboarding bp-group-acct patch", e, log);
+      String errorMessage = e.getMessage() != null ? e.getMessage()
+          : "Business-partner group posting-account patch failed";
+      sendProgress(writer, PROGRESS_BP_GROUP_ACCT_PATCH, PROGRESS_ERROR, errorMessage);
       sendFinalResult(writer, false, errorMessage);
       return false;
     }
