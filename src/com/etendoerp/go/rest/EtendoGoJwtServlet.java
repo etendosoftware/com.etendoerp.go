@@ -177,6 +177,11 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private static final String CODE_INVALID_CREDENTIALS = "INVALID_CREDENTIALS";
   private static final String CODE_LOGIN_SERVER_ERROR = "LOGIN_SERVER_ERROR";
   private static final String CODE_INTERNAL_ERROR = "INTERNAL_ERROR";
+  // ETP-4575 — the 5-arg writeError repeats each message as both `message` and
+  // `userMessage`, so every call site duplicated its literal twice (Sonar S1192).
+  private static final String INVALID_CREDENTIALS = "Invalid credentials";
+  private static final String MISSING_EMAIL_PASSWORD =
+      "Missing required fields: email, password";
   private static final String PROGRESS_IN_PROGRESS = "in_progress";
   private static final String PROGRESS_CLIENT = "client";
   private static final String PROGRESS_ERROR = "error";
@@ -465,8 +470,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       password = body.getString(FIELD_PASSWORD);
     } catch (JSONException e) {
       writeError(response, HttpServletResponse.SC_BAD_REQUEST, CODE_LOGIN_MISSING_FIELDS,
-          "Missing required fields: email, password",
-          "Missing required fields: email, password");
+          MISSING_EMAIL_PASSWORD, MISSING_EMAIL_PASSWORD);
       return;
     }
 
@@ -478,7 +482,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       if (account == null || !EtendoGoJwtDalHelper.hasLocalPassword(account)
           || !verifyPassword(password, account.getPasswordHash())) {
         writeError(response, HttpServletResponse.SC_UNAUTHORIZED, CODE_INVALID_CREDENTIALS,
-            "Invalid credentials", "Invalid credentials");
+            INVALID_CREDENTIALS, INVALID_CREDENTIALS);
         return;
       }
 
@@ -2286,8 +2290,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       email = body.getString(FIELD_EMAIL).trim().toLowerCase();
       password = body.getString(FIELD_PASSWORD);
     } catch (JSONException e) {
-      writeError(response, HttpServletResponse.SC_BAD_REQUEST,
-          "Missing required fields: email, password");
+      writeError(response, HttpServletResponse.SC_BAD_REQUEST, MISSING_EMAIL_PASSWORD);
       return;
     }
 
@@ -2298,7 +2301,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       Account account = EtendoGoJwtDalHelper.findActiveAccountByEmail(email);
       if (account == null || !EtendoGoJwtDalHelper.hasLocalPassword(account)
           || !verifyPassword(password, account.getPasswordHash())) {
-        writeError(response, HttpServletResponse.SC_UNAUTHORIZED, "Invalid credentials");
+        writeError(response, HttpServletResponse.SC_UNAUTHORIZED, INVALID_CREDENTIALS);
         return;
       }
 
