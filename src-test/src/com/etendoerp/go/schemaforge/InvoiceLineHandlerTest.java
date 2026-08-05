@@ -336,6 +336,85 @@ class InvoiceLineHandlerTest {
       }
     }
 
+    // ── ETP-4737: sourceInvoiceLineId capture + strip (Import from Source Invoice) ──
+    //
+    // sourceInvoiceLineId is a virtual signal field (not in decisions.json/contract) for the
+    // "Import from Source Invoice" popup. It must be captured + stripped from the raw POST body
+    // BEFORE the generic field filter runs, or afterHandle()'s persistSourceInvoiceLine would
+    // silently find nothing left to persist (same bypass-the-filter pattern as
+    // AbstractInvoiceHeaderHandler#captureOriginInvoice).
+
+    @Test
+    @DisplayName("POST body with sourceInvoiceLineId only (no invoicedQuantity) is stripped, handle returns null")
+    void postSourceInvoiceLineIdCapturedAndStripped() throws Exception {
+      JSONObject body = new JSONObject().put("sourceInvoiceLineId", "source-line-1");
+
+      NeoContext ctx = NeoContext.builder()
+          .specName("sales-invoice").entityName("lines")
+          .httpMethod("POST").endpointType(NeoEndpointType.CRUD)
+          .requestBody(body).build();
+
+      assertNull(handler.handle(ctx));
+      assertEquals(false, body.has("sourceInvoiceLineId"));
+    }
+
+    @Test
+    @DisplayName("PATCH body with sourceInvoiceLineId is NOT stripped (capture is POST-only)")
+    void patchSourceInvoiceLineIdNotStripped() throws Exception {
+      JSONObject body = new JSONObject().put("sourceInvoiceLineId", "source-line-2");
+
+      NeoContext ctx = NeoContext.builder()
+          .specName("sales-invoice").entityName("lines")
+          .httpMethod("PATCH").endpointType(NeoEndpointType.CRUD)
+          .requestBody(body).build();
+
+      assertNull(handler.handle(ctx));
+      assertEquals("source-line-2", body.getString("sourceInvoiceLineId"));
+    }
+
+    @Test
+    @DisplayName("POST body without sourceInvoiceLineId: nothing breaks, returns null")
+    void postBodyWithoutSourceInvoiceLineIdDoesNotCrash() throws Exception {
+      JSONObject body = new JSONObject().put("someOtherField", "value");
+
+      NeoContext ctx = NeoContext.builder()
+          .specName("sales-invoice").entityName("lines")
+          .httpMethod("POST").endpointType(NeoEndpointType.CRUD)
+          .requestBody(body).build();
+
+      assertNull(handler.handle(ctx));
+      assertEquals(true, body.has("someOtherField"));
+    }
+
+    @Test
+    @DisplayName("POST body with both sourceInvoiceLineId and invoicedQuantity: field is stripped, invoicedQuantity logic still runs")
+    void postBothFieldsPresent_sourceLineIdStrippedInvoicedQtyLogicStillRuns() throws Exception {
+      JSONObject body = new JSONObject()
+          .put("sourceInvoiceLineId", "source-line-3")
+          .put("parentId", "invoice-ret-src")
+          .put("invoicedQuantity", 5.0);
+
+      try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+        OBDal dal = mock(OBDal.class);
+        dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+        Invoice invoice = mock(Invoice.class);
+        DocumentType docType = mock(DocumentType.class);
+        when(dal.get(Invoice.class, "invoice-ret-src")).thenReturn(invoice);
+        when(invoice.getTransactionDocument()).thenReturn(docType);
+        when(docType.isReturn()).thenReturn(true);
+
+        NeoContext ctx = NeoContext.builder()
+            .specName("sales-invoice").entityName("lines")
+            .httpMethod("POST").endpointType(NeoEndpointType.CRUD)
+            .requestBody(body).build();
+
+        assertNull(handler.handle(ctx));
+        assertEquals(false, body.has("sourceInvoiceLineId"));
+        assertEquals(-5.0, body.getDouble("invoicedQuantity"), 0.001);
+      }
+    }
+
     @Test
     @DisplayName("PUT method triggers same auto-negate logic as POST")
     void putMethodTriggersAutoNegate() throws Exception {
@@ -630,6 +709,108 @@ class InvoiceLineHandlerTest {
         when(dal.get(InvoiceLine.class, "line-err")).thenThrow(new RuntimeException("DB down"));
 
         assertNull(handler.afterHandle(ctx));
+      }
+    }
+
+    // ── ETP-4737: persistSourceInvoiceLine — consumes the value captured in handle() ──
+
+    /**
+     * End-to-end roundtrip on the SAME handler instance: handle() captures + strips
+     * sourceInvoiceLineId from the raw POST body, afterHandle() then persists it onto the newly
+     * created line via the self-referencing FK ({@code EM_Etgo_Source_Invoiceline_ID}). This is
+     * the exact regression the fix addresses — before it, the generic field filter stripped the
+     * value before afterHandle() ever got a chance to read it, making the persist a permanent
+     * silent no-op (confirmed via an empty column in production before the fix).
+     */
+    @Test
+    @DisplayName("POST: sourceInvoiceLineId captured in handle() is persisted in afterHandle() (ETP-4737)")
+    void postPersistsCapturedSourceInvoiceLineId() throws Exception {
+      JSONObject createBody = new JSONObject().put("sourceInvoiceLineId", "src-line-1");
+      NeoContext createCtx = NeoContext.builder()
+          .specName("sales-invoice").entityName("lines")
+          .httpMethod("POST").endpointType(NeoEndpointType.CRUD)
+          .requestBody(createBody).build();
+
+      assertNull(handler.handle(createCtx));
+      assertEquals(false, createBody.has("sourceInvoiceLineId"));
+
+      JSONObject createdLine = new JSONObject().put("id", "new-line-1");
+      JSONArray dataArray = new JSONArray().put(createdLine);
+      JSONObject response = new JSONObject().put("data", dataArray);
+      JSONObject respBody = new JSONObject().put("response", response);
+      NeoResponse prevResult = new NeoResponse(201, respBody);
+
+      NeoContext afterCtx = NeoContext.builder()
+          .specName("sales-invoice").entityName("lines")
+          .httpMethod("POST").endpointType(NeoEndpointType.CRUD)
+          .recordId(null).previousResult(prevResult).build();
+
+      try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+           MockedStatic<AbstractInvoiceHeaderHandler> headerMock =
+               mockStatic(AbstractInvoiceHeaderHandler.class)) {
+        OBDal dal = mock(OBDal.class);
+        dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+        InvoiceLine newLine = mock(InvoiceLine.class);
+        Invoice parentInvoice = mock(Invoice.class);
+        when(dal.get(InvoiceLine.class, "new-line-1")).thenReturn(newLine);
+        when(newLine.getInvoice()).thenReturn(parentInvoice);
+        when(parentInvoice.getId()).thenReturn("invoice-parent-src");
+        headerMock.when(() ->
+            AbstractInvoiceHeaderHandler.autoCreateOrUpdateConversionRateDocument(anyString()))
+            .thenAnswer(inv -> null);
+
+        InvoiceLine sourceLine = mock(InvoiceLine.class);
+        when(dal.get(InvoiceLine.class, "src-line-1")).thenReturn(sourceLine);
+
+        assertNull(handler.afterHandle(afterCtx));
+
+        Mockito.verify(newLine).setETGOSourceInvoiceLine(sourceLine);
+        Mockito.verify(dal).save(newLine);
+        Mockito.verify(dal).flush();
+      }
+    }
+
+    /**
+     * When the body never carried sourceInvoiceLineId, {@code pendingSourceInvoiceLineId} stays
+     * null and {@code persistSourceInvoiceLine} must no-op without touching OBDal for the source
+     * line lookup — no exception, nothing persisted.
+     */
+    @Test
+    @DisplayName("POST: no sourceInvoiceLineId captured — afterHandle persist step is a no-op")
+    void postWithoutCapturedSourceInvoiceLineIdSkipsPersist() throws Exception {
+      JSONObject createdLine = new JSONObject().put("id", "new-line-2");
+      JSONArray dataArray = new JSONArray().put(createdLine);
+      JSONObject response = new JSONObject().put("data", dataArray);
+      JSONObject respBody = new JSONObject().put("response", response);
+      NeoResponse prevResult = new NeoResponse(201, respBody);
+
+      NeoContext afterCtx = NeoContext.builder()
+          .specName("sales-invoice").entityName("lines")
+          .httpMethod("POST").endpointType(NeoEndpointType.CRUD)
+          .recordId(null).previousResult(prevResult).build();
+
+      try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+           MockedStatic<AbstractInvoiceHeaderHandler> headerMock =
+               mockStatic(AbstractInvoiceHeaderHandler.class)) {
+        OBDal dal = mock(OBDal.class);
+        dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+        InvoiceLine newLine = mock(InvoiceLine.class);
+        Invoice parentInvoice = mock(Invoice.class);
+        when(dal.get(InvoiceLine.class, "new-line-2")).thenReturn(newLine);
+        when(newLine.getInvoice()).thenReturn(parentInvoice);
+        when(parentInvoice.getId()).thenReturn("invoice-parent-nosrc");
+        headerMock.when(() ->
+            AbstractInvoiceHeaderHandler.autoCreateOrUpdateConversionRateDocument(anyString()))
+            .thenAnswer(inv -> null);
+
+        // NOTE: handle() was never called on this fresh handler instance — pendingSourceInvoiceLineId
+        // is at its default (null) value, exactly like a real line save that never carried the field.
+        assertNull(handler.afterHandle(afterCtx));
+
+        Mockito.verify(newLine, never()).setETGOSourceInvoiceLine(any());
+        Mockito.verify(dal, never()).save(newLine);
       }
     }
   }
