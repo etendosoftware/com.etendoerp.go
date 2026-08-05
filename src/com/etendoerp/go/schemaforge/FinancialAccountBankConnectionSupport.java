@@ -89,6 +89,10 @@ final class FinancialAccountBankConnectionSupport {
       String apiKey) {
     String name = StringUtils.defaultIfBlank(providerName, providerCode);
     BigDecimal maxFetchInterval = BigDecimal.valueOf(90);
+    // The provider details response already carries logo_url alongside name/max_fetch_interval —
+    // reading it here means the logo is persisted the moment an account connects, without
+    // waiting for the scheduled catalog sync (SyncBankProviders, in the psd2 module) to run.
+    String logoUrl = null;
     try {
       String endpoint = BankIntegrationConstants.SALT_EDGE_MIDDLEWARE_URL + "providers/" + providerCode
           + "?include_ais_fields=true&include_pis_fields=true&include_credentials_fields=false"
@@ -101,12 +105,13 @@ final class FinancialAccountBankConnectionSupport {
         if (interval > 0) {
           maxFetchInterval = BigDecimal.valueOf(interval);
         }
+        logoUrl = data.optString(BankIntegrationConstants.LOGO_URL, null);
       }
     } catch (Exception e) {
       log.warn("Could not fetch provider {} from Salt Edge, registering with fallback values: {}",
           providerCode, e.getMessage());
     }
-    return BankIntegrationUtils.upsertProvider(providerCode, name, maxFetchInterval);
+    return BankIntegrationUtils.upsertProvider(providerCode, name, maxFetchInterval, logoUrl);
   }
 
   static String connectedAccountName(String providerName, JSONObject node, String currencyCode) {

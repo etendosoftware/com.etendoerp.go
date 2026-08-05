@@ -34,6 +34,7 @@ import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
@@ -43,6 +44,7 @@ import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import java.math.BigDecimal;
 import java.util.Collections;
 import java.util.List;
 
@@ -565,6 +567,75 @@ public class FinancialAccountBankConnectionHandlerLinkTest {
       // setPsd2Provider must be called with the resolved provider.
       verify(finAcc).setPsd2Provider(provider);
       verify(dal).save(finAcc);
+    }
+  }
+
+  /**
+   * When the provider is not found locally, {@code resolveProvider} falls through to
+   * {@code fetchAndRegisterProvider}, which fetches the full provider details from Salt Edge and
+   * must forward {@code logo_url} to {@code upsertProvider} — this is what lets the account list
+   * show the real bank logo instead of the generic icon (ETP-4764 follow-up), and it must not
+   * wait for the scheduled catalog sync in the psd2 module to populate it.
+   */
+  @Test
+  public void testLinkAccountRegistersNewProviderWithLogoUrl() throws Exception {
+    JSONObject body = linkBody();
+    FIN_FinancialAccount finAcc = mock(FIN_FinancialAccount.class);
+    when(finAcc.getId()).thenReturn(ACCOUNT_ID);
+    doReturn(finAcc).when(handler).loadAccount(ACCOUNT_ID);
+
+    JSONArray nodes = new JSONArray().put(new JSONObject().put("id", SALT_EDGE_ACCOUNT_ID));
+    JSONObject details = new JSONObject()
+        .put("provider_name", "BBVA")
+        .put("provider_code", "bbva");
+
+    String logoUrl = "https://cdn.saltedge.com/bank_icons/bbva.png";
+    JSONObject providerData = new JSONObject()
+        .put("name", "BBVA")
+        .put("max_fetch_interval", 90)
+        .put("logo_url", logoUrl);
+    JSONObject providerResponse = new JSONObject().put("data", providerData);
+
+    Provider registeredProvider = mock(Provider.class);
+
+    try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
+        MockedStatic<BankIntegrationUtils> utils = mockStatic(BankIntegrationUtils.class);
+        MockedStatic<SaltEdgeAccountLinkHelper> linkHelper =
+            mockStatic(SaltEdgeAccountLinkHelper.class);
+        MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      stubObContext(obContext);
+      linkHelper.when(() -> SaltEdgeAccountLinkHelper.getApiKeyForFinAcc(finAcc)).thenReturn(API_KEY);
+      utils.when(() -> BankIntegrationUtils.getSaltEdgeAccountsForConnection(CONNECTION_ID, API_KEY))
+          .thenReturn(nodes);
+      utils.when(() -> BankIntegrationUtils.getSaltEdgeConnectionDetails(CONNECTION_ID, API_KEY))
+          .thenReturn(details);
+      linkHelper.when(() -> SaltEdgeAccountLinkHelper.resolveConsentExpiresAt(any(), anyString()))
+          .thenReturn(null);
+      linkHelper.when(() -> SaltEdgeAccountLinkHelper.linkAccountToFinancialAccount(any(), any(),
+          any(), any(), any())).thenReturn("");
+      utils.when(() -> BankIntegrationUtils.makeSaltEdgeRequest(eq("GET"), isNull(), anyString(),
+          eq(API_KEY))).thenReturn(providerResponse);
+      utils.when(() -> BankIntegrationUtils.upsertProvider("bbva", "BBVA",
+          BigDecimal.valueOf(90), logoUrl)).thenReturn(registeredProvider);
+
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      @SuppressWarnings("unchecked")
+      OBCriteria<Provider> criteria = mock(OBCriteria.class);
+      when(dal.createCriteria(Provider.class)).thenReturn(criteria);
+      when(criteria.add(any())).thenReturn(criteria);
+      when(criteria.setMaxResults(1)).thenReturn(criteria);
+      // Not found locally — resolveProvider must fetch and register it.
+      when(criteria.uniqueResult()).thenReturn(null);
+      doNothing().when(dal).save(finAcc);
+      stubFinAccPaymentMethods(dal, Collections.emptyList());
+
+      NeoResponse response = handler.handle(postContext(ACTION_LINK, body));
+
+      assertEquals(200, response.getHttpStatus());
+      utils.verify(() -> BankIntegrationUtils.upsertProvider("bbva", "BBVA",
+          BigDecimal.valueOf(90), logoUrl));
+      verify(finAcc).setPsd2Provider(registeredProvider);
     }
   }
 
