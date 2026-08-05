@@ -377,6 +377,17 @@ public abstract class AbstractInvoiceHeaderHandler {
    * Injects the invoice subtype virtual field ({@link #getInvoiceSubtypeKey()}) into the record
    * by resolving the current {@code transactionDocument} value via {@link #resolveSubtype(String)}.
    *
+   * <p>ETP-4738: a plain-invoice-category Factura Rectificativa (flagged via
+   * {@code EM_Etsg_Isrectificative}, so not already resolved to {@code SUBTYPE_RECTIFICATIVA} by
+   * document category) with a negative total is reclassified here for DISPLAY purposes only (grid
+   * "Pendiente de pago" badge, detail topbar credit pill), so it renders the same "Saldo a favor"
+   * treatment. That reclassification is deliberately NOT folded into {@link #classifyDocType} /
+   * {@link #resolveSubtype}: those are also used by {@link #validateOriginInvoiceRequired} to
+   * require the {@code originInvoice} field on save, but a rectificativa links its corrected
+   * invoice via {@code C_Invoice_Reverse} (the "Reversed Invoices" tab), not {@code
+   * originInvoice} — reusing the same subtype there would incorrectly block saving every Factura
+   * Rectificativa.
+   *
    * @param rec
    *     the invoice record JSON object; modified in-place
    * @param key
@@ -387,27 +398,15 @@ public abstract class AbstractInvoiceHeaderHandler {
   protected void enrichInvoiceSubtype(JSONObject rec, String key) throws Exception {
     String docTypeId = rec.optString(FIELD_TRANSACTION_DOCUMENT, null);
     String subtype = resolveSubtype(docTypeId);
-    if (SUBTYPE_FAC.equals(subtype) && isRectificativeCreditRow(rec, docTypeId)) {
+    // Short-circuit order matters: RectificativeSupport.isRectificative() hits the DB, so it must
+    // stay behind both the cheap subtype check and the in-memory negative-total check — otherwise
+    // every row of a list response pays for an extra doc-type fetch.
+    if (SUBTYPE_FAC.equals(subtype)
+        && rec.optDouble(FIELD_GRAND_TOTAL_AMOUNT, 0.0) < 0
+        && RectificativeSupport.isRectificative(docTypeId)) {
       subtype = SUBTYPE_RECTIFICATIVA;
     }
     rec.put(key, subtype);
-  }
-
-  /**
-   * True when {@code rec} is a plain-invoice-category Factura Rectificativa (ETP-4737/4738,
-   * flagged via {@code EM_Etsg_Isrectificative}, not already resolved to {@code
-   * SUBTYPE_RECTIFICATIVA} by document category) with a negative total — reclassified for
-   * DISPLAY purposes only (grid "Pendiente de pago" badge, detail topbar credit pill), so it
-   * renders the same "Saldo a favor" treatment. Deliberately NOT folded into {@link
-   * #classifyDocType} / {@link #resolveSubtype}: those are also used by {@link
-   * #validateOriginInvoiceRequired} to require the {@code originInvoice} field on save, but a
-   * rectificativa links its corrected invoice via {@code C_Invoice_Reverse} (the "Reversed
-   * Invoices" tab), not {@code originInvoice} — reusing the same subtype there would incorrectly
-   * block saving every Factura Rectificativa.
-   */
-  private boolean isRectificativeCreditRow(JSONObject rec, String docTypeId) {
-    return rec.optDouble(FIELD_GRAND_TOTAL_AMOUNT, 0.0) < 0
-        && RectificativeSupport.isRectificative(docTypeId);
   }
 
   /**
