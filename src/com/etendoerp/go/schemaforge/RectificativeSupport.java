@@ -104,15 +104,18 @@ final class RectificativeSupport {
   }
 
   /**
-   * Id-based overload of {@link #isRectificative(DocumentType)}, for call sites (e.g. {@code
+   * Id-based counterpart of {@link #isRectificative(DocumentType)}, for call sites (e.g. {@code
    * PaymentCreditConsumer}, {@link AbstractInvoiceHeaderHandler#enrichInvoiceSubtype}) that only
-   * have the document type id at hand and would otherwise pay for a full {@link DocumentType}
-   * fetch just to read one flag.
+   * have the document type id at hand.
+   *
+   * <p>Deliberately NOT an overload named {@code isRectificative}: {@link DocumentType} and
+   * {@link String} are unrelated reference types, so a plain {@code isRectificative(null)} call
+   * would be ambiguous and fail to compile.
    *
    * @param docTypeId the document type id to inspect, may be {@code null}/blank
    * @return {@code true} only when the column exists and the flag is set
    */
-  static boolean isRectificative(String docTypeId) {
+  static boolean isRectificativeDocType(String docTypeId) {
     if (StringUtils.isBlank(docTypeId) || !isColumnPresent()) {
       return false;
     }

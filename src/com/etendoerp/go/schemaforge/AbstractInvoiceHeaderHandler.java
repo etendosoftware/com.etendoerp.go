@@ -398,12 +398,12 @@ public abstract class AbstractInvoiceHeaderHandler {
   protected void enrichInvoiceSubtype(JSONObject rec, String key) throws Exception {
     String docTypeId = rec.optString(FIELD_TRANSACTION_DOCUMENT, null);
     String subtype = resolveSubtype(docTypeId);
-    // Short-circuit order matters: RectificativeSupport.isRectificative() hits the DB, so it must
-    // stay behind both the cheap subtype check and the in-memory negative-total check — otherwise
-    // every row of a list response pays for an extra doc-type fetch.
+    // Short-circuit order matters: isRectificativeDocType() hits the DB, so it must stay behind
+    // both the cheap subtype check and the in-memory negative-total check — otherwise every row
+    // of a list response pays for an extra doc-type fetch.
     if (SUBTYPE_FAC.equals(subtype)
         && rec.optDouble(FIELD_GRAND_TOTAL_AMOUNT, 0.0) < 0
-        && RectificativeSupport.isRectificative(docTypeId)) {
+        && RectificativeSupport.isRectificativeDocType(docTypeId)) {
       subtype = SUBTYPE_RECTIFICATIVA;
     }
     rec.put(key, subtype);

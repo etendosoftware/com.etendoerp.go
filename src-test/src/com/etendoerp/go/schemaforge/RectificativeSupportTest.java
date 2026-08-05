@@ -40,7 +40,7 @@ import org.openbravo.model.common.enterprise.DocumentType;
 
 /**
  * Unit tests for {@link RectificativeSupport} (ETP-4737, plus the ETP-4738 "saldo a favor"
- * additions: {@link RectificativeSupport#isRectificative(String)} and
+ * additions: {@link RectificativeSupport#isRectificativeDocType(String)} and
  * {@link RectificativeSupport#resolveRectificativeDocTypes}).
  *
  * <p>Covers {@link RectificativeSupport#isRectificative(DocumentType)}, using the
@@ -97,28 +97,28 @@ public class RectificativeSupportTest {
     assertFalse(RectificativeSupport.isRectificative(dt));
   }
 
-  // ── isRectificative(String docTypeId) — id-based overload (ETP-4738) ────────
+  // ── isRectificativeDocType(String docTypeId) — id-based lookup (ETP-4738) ───
 
   @Test
-  public void isRectificativeById_blankId_falseWithoutQuerying() {
+  public void isRectificativeDocType_blankId_falseWithoutQuerying() {
     RectificativeSupport.setColumnPresentForTests(true);
     try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
-      assertFalse(RectificativeSupport.isRectificative(" "));
+      assertFalse(RectificativeSupport.isRectificativeDocType(" "));
       dalMock.verifyNoInteractions();
     }
   }
 
   @Test
-  public void isRectificativeById_columnAbsent_falseWithoutQuerying() {
+  public void isRectificativeDocType_columnAbsent_falseWithoutQuerying() {
     RectificativeSupport.setColumnPresentForTests(false);
     try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
-      assertFalse(RectificativeSupport.isRectificative("dt-1"));
+      assertFalse(RectificativeSupport.isRectificativeDocType("dt-1"));
       dalMock.verifyNoInteractions();
     }
   }
 
   @Test
-  public void isRectificativeById_columnPresent_delegatesToEntityLookup() {
+  public void isRectificativeDocType_columnPresent_delegatesToEntityLookup() {
     RectificativeSupport.setColumnPresentForTests(true);
     try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
       OBDal dal = mock(OBDal.class);
@@ -127,7 +127,7 @@ public class RectificativeSupportTest {
       when(dal.get(DocumentType.class, "dt-1")).thenReturn(dt);
       when(dt.isEtsgIsRectificative()).thenReturn(true);
 
-      assertTrue(RectificativeSupport.isRectificative("dt-1"));
+      assertTrue(RectificativeSupport.isRectificativeDocType("dt-1"));
     }
   }
 

@@ -224,7 +224,7 @@ class PaymentRegistrationServiceAdvancedTest {
     rectSupportMock = mockStatic(RectificativeSupport.class);
     rectSupportMock.when(() -> RectificativeSupport.resolveRectificativeDocTypes(anyString(), anyBoolean()))
         .thenReturn(Collections.singletonList("rect-dt-default"));
-    rectSupportMock.when(() -> RectificativeSupport.isRectificative(anyString()))
+    rectSupportMock.when(() -> RectificativeSupport.isRectificativeDocType(anyString()))
         .thenReturn(true);
 
     // ── common entity stubs ──────────────────────────────────────────────────

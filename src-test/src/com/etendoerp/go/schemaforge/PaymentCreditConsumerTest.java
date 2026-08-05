@@ -131,7 +131,7 @@ class PaymentCreditConsumerTest {
       + "as a negative payment detail")
   void consumeAbono_eligibleRectificativeNegativeTotal_linksNegativeDetail() throws Exception {
     when(invoice.getGrandTotalAmount()).thenReturn(new BigDecimal("-30.00"));
-    rectSupportMock.when(() -> RectificativeSupport.isRectificative(DOC_TYPE_ID))
+    rectSupportMock.when(() -> RectificativeSupport.isRectificativeDocType(DOC_TYPE_ID))
         .thenReturn(true);
 
     BigDecimal funded = PaymentCreditConsumer.consume(payment, abonoSource(new BigDecimal("30")));
@@ -145,7 +145,7 @@ class PaymentCreditConsumerTest {
   @DisplayName("An abono whose invoice total is NOT negative is rejected (ETP-4738)")
   void consumeAbono_positiveTotal_throwsOBException() throws Exception {
     when(invoice.getGrandTotalAmount()).thenReturn(new BigDecimal("30.00"));
-    rectSupportMock.when(() -> RectificativeSupport.isRectificative(DOC_TYPE_ID))
+    rectSupportMock.when(() -> RectificativeSupport.isRectificativeDocType(DOC_TYPE_ID))
         .thenReturn(true);
 
     JSONArray sources = abonoSource(new BigDecimal("30"));
@@ -159,7 +159,7 @@ class PaymentCreditConsumerTest {
       + "(ETP-4738), even with a negative total")
   void consumeAbono_nonRectificativeDocType_throwsOBException() throws Exception {
     when(invoice.getGrandTotalAmount()).thenReturn(new BigDecimal("-30.00"));
-    rectSupportMock.when(() -> RectificativeSupport.isRectificative(DOC_TYPE_ID))
+    rectSupportMock.when(() -> RectificativeSupport.isRectificativeDocType(DOC_TYPE_ID))
         .thenReturn(false);
 
     JSONArray sources = abonoSource(new BigDecimal("30"));
@@ -183,7 +183,7 @@ class PaymentCreditConsumerTest {
   void consumeAbono_alreadyLinkedToSamePayment_bypassesValidation() throws Exception {
     // Deliberately ineligible: positive total AND non-rectificative doc type.
     when(invoice.getGrandTotalAmount()).thenReturn(new BigDecimal("30.00"));
-    rectSupportMock.when(() -> RectificativeSupport.isRectificative(DOC_TYPE_ID))
+    rectSupportMock.when(() -> RectificativeSupport.isRectificativeDocType(DOC_TYPE_ID))
         .thenReturn(false);
 
     FIN_PaymentDetail existingLink = mock(FIN_PaymentDetail.class);
@@ -202,7 +202,7 @@ class PaymentCreditConsumerTest {
       + "to the payment currently consuming it)")
   void consumeAbono_linkedToDifferentPayment_stillValidates() throws Exception {
     when(invoice.getGrandTotalAmount()).thenReturn(new BigDecimal("30.00"));
-    rectSupportMock.when(() -> RectificativeSupport.isRectificative(DOC_TYPE_ID))
+    rectSupportMock.when(() -> RectificativeSupport.isRectificativeDocType(DOC_TYPE_ID))
         .thenReturn(false);
 
     FIN_Payment otherPayment = mock(FIN_Payment.class);
