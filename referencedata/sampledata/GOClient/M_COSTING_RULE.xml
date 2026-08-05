@@ -9,11 +9,32 @@
   <UPDATED><![CDATA[2026-04-07 15:21:19.547]]></UPDATED>
   <UPDATEDBY><![CDATA[100]]></UPDATEDBY>
   <ISACTIVE><![CDATA[Y]]></ISACTIVE>
-  <M_COSTING_ALGORITHM_ID><![CDATA[B069080A0AE149A79CF1FA0E24F16AB6]]></M_COSTING_ALGORITHM_ID>
+  <!-- ETP-4760 (2026-08-03): Standard, not Average — new tenants must default to Standard
+       costing. M_COSTING_RULE only reaches new tenants once this table is in
+       OnboardingDatasetDefinition.INCLUDED_TABLES (added the same day). -->
+  <M_COSTING_ALGORITHM_ID><![CDATA[6A39D8B46CD94FE682D48758D3B7726B]]></M_COSTING_ALGORITHM_ID>
   <ORG_DIMENSION><![CDATA[N]]></ORG_DIMENSION>
   <WAREHOUSE_DIMENSION><![CDATA[N]]></WAREHOUSE_DIMENSION>
   <ISVALIDATED><![CDATA[Y]]></ISVALIDATED>
   <PROCESS_RULE><![CDATA[N]]></PROCESS_RULE>
+  <!-- ETP-4760 (2026-08-04): KEEP this space-separated ddlutils shape here in the SOURCE file.
+       This file has TWO independent consumers: (1) org.openbravo.ddlutils.task.ImportSampledata
+       (Ant "import.sample.data", the install-time seeder that runs during smartbuild/
+       update.database) reads it via org.apache.ddlutils.io.converters.TimestampConverter, which
+       calls java.sql.Timestamp.valueOf(), which is STRICT and requires exactly
+       "yyyy-mm-dd hh:mm:ss[.f...]" and REJECTS a "T"/"Z" ISO shape; (2) the runtime
+       com.etendoerp.go onboarding importer
+       (OnboardingDatasetNormalizer -> DataImportService -> DatetimeDomainType, since DATEFROM is
+       AD_Reference_ID=16 "DateTime") requires the OPPOSITE: only the strict
+       "yyyy-MM-dd'T'HH:mm:ss.S'Z'" shape, no space-separated fallback. No single literal
+       satisfies both (verified empirically both ways). The date itself (2025-12-31, safely before
+       any real tenant's creation date) is intentional: it backdates the rule so it covers a fresh
+       tenant's entire history from day one, mirroring the corrective R20 data-fix's own
+       datefrom = AD_Client.created choice. The FORMAT conflict is resolved in CODE, not data: see
+       OnboardingDatasetNormalizer's ddlutils-to-ISO reformatting pass (only applied to the
+       runtime-only in-memory copy, never to this file) and
+       docs/etendo-ad/tenant-remediation-knowledge.md for the full writeup. Do NOT change this
+       value's format back to "T"/"Z"; that breaks ImportSampledata instead. -->
   <DATEFROM><![CDATA[2025-12-31 03:00:00.0]]></DATEFROM>
   <BACKDATEDTRXSFIXED><![CDATA[N]]></BACKDATEDTRXSFIXED>
   <BACKDATEDTRXSFIXEDPROCESS><![CDATA[N]]></BACKDATEDTRXSFIXEDPROCESS>

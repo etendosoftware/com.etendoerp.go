@@ -139,6 +139,18 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private static final String INVALID_AUTHORIZATION_HEADER =
       "Missing or invalid Authorization header";
   private static final String INVALID_OR_EXPIRED_TOKEN = "Invalid or expired token";
+  // ETP-4664 — stable, machine-readable codes for register/login errors, so the
+  // frontend can translate by code instead of showing the raw English message.
+  private static final String CODE_INVALID_REQUEST = "INVALID_REQUEST";
+  private static final String CODE_REGISTER_MISSING_FIELDS = "REGISTER_MISSING_FIELDS";
+  private static final String CODE_REGISTER_EMPTY_FIELDS = "REGISTER_EMPTY_FIELDS";
+  private static final String CODE_INVALID_EMAIL_FORMAT = "INVALID_EMAIL_FORMAT";
+  private static final String CODE_EMAIL_ALREADY_REGISTERED = "EMAIL_ALREADY_REGISTERED";
+  private static final String CODE_REGISTER_SERVER_ERROR = "REGISTER_SERVER_ERROR";
+  private static final String CODE_LOGIN_MISSING_FIELDS = "LOGIN_MISSING_FIELDS";
+  private static final String CODE_INVALID_CREDENTIALS = "INVALID_CREDENTIALS";
+  private static final String CODE_LOGIN_SERVER_ERROR = "LOGIN_SERVER_ERROR";
+  private static final String CODE_INTERNAL_ERROR = "INTERNAL_ERROR";
   private static final String PROGRESS_IN_PROGRESS = "in_progress";
   private static final String PROGRESS_CLIENT = "client";
   private static final String PROGRESS_ERROR = "error";
@@ -282,7 +294,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     try {
       body = readJsonBody(request);
     } catch (JSONException e) {
-      writeError(response, HttpServletResponse.SC_BAD_REQUEST, INVALID_JSON_BODY);
+      writeError(response, HttpServletResponse.SC_BAD_REQUEST, CODE_INVALID_REQUEST,
+          INVALID_JSON_BODY, INVALID_JSON_BODY);
       return;
     }
 
@@ -296,13 +309,15 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       name = body.getString("name").trim();
       language = body.optString(FIELD_LANGUAGE, "").trim();
     } catch (JSONException e) {
-      writeError(response, HttpServletResponse.SC_BAD_REQUEST,
+      writeError(response, HttpServletResponse.SC_BAD_REQUEST, CODE_REGISTER_MISSING_FIELDS,
+          "Missing required fields: email, password, name",
           "Missing required fields: email, password, name");
       return;
     }
 
     if (email.isEmpty() || password.isEmpty() || name.isEmpty()) {
-      writeError(response, HttpServletResponse.SC_BAD_REQUEST,
+      writeError(response, HttpServletResponse.SC_BAD_REQUEST, CODE_REGISTER_EMPTY_FIELDS,
+          "Fields email, password, and name must not be empty",
           "Fields email, password, and name must not be empty");
       return;
     }
@@ -310,7 +325,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     // characters and bare LIKE wildcards (e.g. "%") from ever reaching the account store, which
     // together with the escaped ownership LIKE keeps tenant isolation intact (ETP-4428).
     if (!EmailContractCommandSupport.isValidEmail(email)) {
-      writeError(response, HttpServletResponse.SC_BAD_REQUEST, "Invalid email format");
+      writeError(response, HttpServletResponse.SC_BAD_REQUEST, CODE_INVALID_EMAIL_FORMAT,
+          "Invalid email format", "Invalid email format");
       return;
     }
     if (!PasswordPolicy.isStrong(password)) {
@@ -323,7 +339,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       OBContext.setAdminMode(true);
 
       if (EtendoGoJwtDalHelper.findActiveAccountByEmail(email) != null) {
-        writeError(response, HttpServletResponse.SC_BAD_REQUEST, "Email already registered");
+        writeError(response, HttpServletResponse.SC_BAD_REQUEST, CODE_EMAIL_ALREADY_REGISTERED,
+            "Email already registered", "Email already registered");
         return;
       }
 
@@ -348,11 +365,12 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     } catch (RuntimeException e) {
       EtendoGoDalHelper.rollbackDalChanges("account registration", e, log);
       log.error("Database error during account registration", e);
-      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
-          "Registration failed due to a server error");
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, CODE_REGISTER_SERVER_ERROR,
+          "Registration failed due to a server error", "Registration failed due to a server error");
     } catch (JSONException e) {
       log.error("JSON error building register response", e);
-      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, INTERNAL_ERROR);
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, CODE_INTERNAL_ERROR,
+          INTERNAL_ERROR, INTERNAL_ERROR);
     } finally {
       OBContext.restorePreviousMode();
     }
@@ -369,7 +387,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     try {
       body = readJsonBody(request);
     } catch (JSONException e) {
-      writeError(response, HttpServletResponse.SC_BAD_REQUEST, INVALID_JSON_BODY);
+      writeError(response, HttpServletResponse.SC_BAD_REQUEST, CODE_INVALID_REQUEST,
+          INVALID_JSON_BODY, INVALID_JSON_BODY);
       return;
     }
 
@@ -379,7 +398,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       email = body.getString(FIELD_EMAIL).trim().toLowerCase();
       password = body.getString(FIELD_PASSWORD);
     } catch (JSONException e) {
-      writeError(response, HttpServletResponse.SC_BAD_REQUEST,
+      writeError(response, HttpServletResponse.SC_BAD_REQUEST, CODE_LOGIN_MISSING_FIELDS,
+          "Missing required fields: email, password",
           "Missing required fields: email, password");
       return;
     }
@@ -391,7 +411,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       Account account = EtendoGoJwtDalHelper.findActiveAccountByEmail(email);
       if (account == null || !EtendoGoJwtDalHelper.hasLocalPassword(account)
           || !verifyPassword(password, account.getPasswordHash())) {
-        writeError(response, HttpServletResponse.SC_UNAUTHORIZED, "Invalid credentials");
+        writeError(response, HttpServletResponse.SC_UNAUTHORIZED, CODE_INVALID_CREDENTIALS,
+            "Invalid credentials", "Invalid credentials");
         return;
       }
 
@@ -412,11 +433,12 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     } catch (RuntimeException e) {
       EtendoGoDalHelper.rollbackDalChanges("login", e, log);
       log.error("Database error during login", e);
-      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
-          "Login failed due to a server error");
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, CODE_LOGIN_SERVER_ERROR,
+          "Login failed due to a server error", "Login failed due to a server error");
     } catch (JSONException e) {
       log.error("JSON error building login response", e);
-      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, INTERNAL_ERROR);
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, CODE_INTERNAL_ERROR,
+          INTERNAL_ERROR, INTERNAL_ERROR);
     } finally {
       OBContext.restorePreviousMode();
     }
@@ -2065,6 +2087,30 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
         FIELD_MESSAGE,
         FIELD_STATUS,
         PROGRESS_ERROR);
+  }
+
+  /**
+   * Write a stable, machine-readable register/login error envelope: {@code
+   * { "error": { "code": "...", "message": "...", "userMessage": "...", "status": N } } }.
+   *
+   * ETP-4664 — lets the frontend translate the error by {@code code} instead of
+   * showing the raw (English) {@code message}/{@code userMessage} text.
+   */
+  private void writeError(HttpServletResponse response, int status, String code, String message,
+      String userMessage) throws IOException {
+    try {
+      JSONObject error = new JSONObject();
+      error.put(FIELD_CODE, code);
+      error.put(FIELD_MESSAGE, message);
+      error.put(FIELD_USER_MESSAGE, userMessage);
+      error.put(FIELD_STATUS, status);
+      JSONObject envelope = new JSONObject();
+      envelope.put(PROGRESS_ERROR, error);
+      writeResponse(response, status, envelope);
+    } catch (JSONException e) {
+      log.error("JSON error building error response", e);
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, INTERNAL_ERROR);
+    }
   }
 
   /**
