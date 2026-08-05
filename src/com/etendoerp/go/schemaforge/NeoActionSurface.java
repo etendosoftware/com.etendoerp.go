@@ -60,13 +60,16 @@ public final class NeoActionSurface {
    *
    * <p>Exists as a seam so tests can supply a fake resolver instead of
    * {@code mockStatic(NeoServletSupport.class)}. Mocking that class statically instruments a
-   * type that sits next to the DAL bootstrap, and the whole module's test suite shares one JVM
-   * (no {@code maxParallelForks}/{@code forkEvery} configured) — so a static mock there is a
-   * cross-class pollution risk, not a local test detail.</p>
+   * type that sits next to the DAL bootstrap, and Gradle distributes this module's test classes
+   * across shared test workers, so a static mock there is a cross-class pollution risk rather
+   * than a local test detail. ETP-4766 had to move a DAL integration test into its own JVM for
+   * exactly this reason — see {@code docs/test-jvm-isolation.md}.</p>
    */
   @FunctionalInterface
   interface HandlerResolver {
     /**
+     * Looks up the handler registered under the given qualifier.
+     *
      * @param qualifier the entity's {@code Java_Qualifier}
      * @return the registered handler, or {@code null} when none matches
      */

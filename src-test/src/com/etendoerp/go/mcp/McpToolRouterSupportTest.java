@@ -234,10 +234,10 @@ class McpToolRouterSupportTest {
     @BeforeEach
     void setUp() {
       accessMock = mockStatic(NeoAccessUtils.class);
-      // ETP-4254: the "W" branch now also consults isHandlerOnlySpec, which queries
-      // ETGO_SF_ENTITY. Default every spec to "no included entities" — i.e. no evidence of a
-      // handler-only spec — so the pre-existing access-tiering assertions below are unchanged;
-      // the handler-only test overrides this stub with real entities.
+      // ETP-4254: the "W" branch now also consults isCatalogExcludedSpec, which queries
+      // ETGO_SF_ENTITY. Default every spec to "no included entities", meaning no evidence of a
+      // handler-only spec, so the pre-existing access-tiering assertions below stay unchanged.
+      // The catalog-exclusion tests override this stub with real entities.
       obDalMock = mockStatic(OBDal.class);
       OBDal obDal = mock(OBDal.class);
       obDalMock.when(OBDal::getInstance).thenReturn(obDal);
