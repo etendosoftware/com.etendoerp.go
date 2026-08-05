@@ -16,7 +16,10 @@
   <X><![CDATA[0]]></X>
   <Y><![CDATA[0]]></Y>
   <Z><![CDATA[0]]></Z>
-  <M_INVENTORYSTATUS_ID><![CDATA[0]]></M_INVENTORYSTATUS_ID>
+  <!-- ETP-4761 (gap I1): fixed system id '2' = "Available" (OVERISSUE='N'). Was '0' =
+       "Undefined-OverIssue" (OVERISSUE='Y'), which let new tenants post negative stock
+       from day one. See docs/etendo-ad/onboarding-gaps.md §I1. -->
+  <M_INVENTORYSTATUS_ID><![CDATA[2]]></M_INVENTORYSTATUS_ID>
   <CHANGE_STATUS><![CDATA[N]]></CHANGE_STATUS>
   <ISVIRTUAL><![CDATA[N]]></ISVIRTUAL>
 </M_LOCATOR>
@@ -37,7 +40,10 @@
   <X><![CDATA[0]]></X>
   <Y><![CDATA[0]]></Y>
   <Z><![CDATA[0]]></Z>
-  <M_INVENTORYSTATUS_ID><![CDATA[0]]></M_INVENTORYSTATUS_ID>
+  <!-- ETP-4761 (gap I1): fixed system id '2' = "Available" (OVERISSUE='N'). Was '0' =
+       "Undefined-OverIssue" (OVERISSUE='Y'), which let new tenants post negative stock
+       from day one. See docs/etendo-ad/onboarding-gaps.md §I1. -->
+  <M_INVENTORYSTATUS_ID><![CDATA[2]]></M_INVENTORYSTATUS_ID>
   <CHANGE_STATUS><![CDATA[N]]></CHANGE_STATUS>
   <ISVIRTUAL><![CDATA[N]]></ISVIRTUAL>
 </M_LOCATOR>

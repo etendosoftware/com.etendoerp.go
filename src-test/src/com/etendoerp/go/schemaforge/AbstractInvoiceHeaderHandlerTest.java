@@ -86,19 +86,16 @@ import org.openbravo.model.common.invoice.ReversedInvoice;
 public class AbstractInvoiceHeaderHandlerTest {
 
   /**
-   * Minimal concrete subclass — AR-style classification (ARC→NC, ARI_RM→DEV).
-   * Exposes all protected methods as public for direct testing.
+   * Minimal concrete subclass — AR-style classification (ARC/ARI_RM → RECTIFICATIVA, ETP-4737
+   * unified subtype). Exposes all protected methods as public for direct testing.
    */
   @Vetoed // not a CDI bean: a discoverable subclass makes @Inject of the real handler ambiguous
   private static class TestHandler extends AbstractInvoiceHeaderHandler {
     @Override
     protected String classifyDocType(DocumentType dt) {
       String cat = dt.getDocumentCategory();
-      if ("ARC".equals(cat)) {
-        return SUBTYPE_NC;
-      }
-      if ("ARI_RM".equals(cat)) {
-        return SUBTYPE_DEV;
+      if ("ARC".equals(cat) || "ARI_RM".equals(cat)) {
+        return SUBTYPE_RECTIFICATIVA;
       }
       return SUBTYPE_FAC;
     }
@@ -122,8 +119,18 @@ public class AbstractInvoiceHeaderHandlerTest {
       return validateOriginInvoiceRequired(ctx);
     }
 
+    public void callCaptureOriginInvoice(NeoContext ctx) {
+      captureOriginInvoice(ctx);
+    }
+
     public void callPersistOriginInvoice(NeoContext ctx) {
       persistOriginInvoice(ctx);
+    }
+
+    /** Exposes both capture + persist as a single roundtrip, mirroring real handle()→afterHandle(). */
+    public void callCaptureThenPersistOriginInvoice(NeoContext captureCtx, NeoContext persistCtx) {
+      captureOriginInvoice(captureCtx);
+      persistOriginInvoice(persistCtx);
     }
 
     public void callEnrichOriginInvoice(JSONObject rec, String id) throws Exception {
@@ -342,7 +349,7 @@ public class AbstractInvoiceHeaderHandlerTest {
   }
 
   @Test
-  public void validateOriginInvoiceRequired_ncSubtypeWithOrigin_returnsNull() throws Exception {
+  public void validateOriginInvoiceRequired_rectificativaViaArcWithOrigin_returnsNull() throws Exception {
     JSONObject body = new JSONObject()
         .put("transactionDocument", "dt-arc")
         .put("originInvoice", "inv-origin-1");
@@ -361,7 +368,7 @@ public class AbstractInvoiceHeaderHandlerTest {
   }
 
   @Test
-  public void validateOriginInvoiceRequired_ncSubtypeWithoutOrigin_returns400WithCreditNoteLabel() throws Exception {
+  public void validateOriginInvoiceRequired_rectificativaViaArcWithoutOrigin_returns400WithLabel() throws Exception {
     JSONObject body = new JSONObject().put("transactionDocument", "dt-arc");
     NeoContext ctx = NeoContext.builder().httpMethod("PUT").requestBody(body).build();
 
@@ -376,12 +383,12 @@ public class AbstractInvoiceHeaderHandlerTest {
       NeoResponse result = handler.callValidateOriginInvoiceRequired(ctx);
       assertNotNull(result);
       assertEquals(HttpServletResponse.SC_BAD_REQUEST, result.getHttpStatus());
-      assertTrue(result.getBody().toString().contains("Credit Note"));
+      assertTrue(result.getBody().toString().contains("Rectificative Invoice"));
     }
   }
 
   @Test
-  public void validateOriginInvoiceRequired_devSubtypeWithoutOrigin_returns400WithReturnInvoiceLabel() throws Exception {
+  public void validateOriginInvoiceRequired_rectificativaViaAriRmWithoutOrigin_returns400WithLabel() throws Exception {
     JSONObject body = new JSONObject().put("transactionDocument", "dt-ari-rm");
     NeoContext ctx = NeoContext.builder().httpMethod("POST").requestBody(body).build();
 
@@ -396,7 +403,7 @@ public class AbstractInvoiceHeaderHandlerTest {
       NeoResponse result = handler.callValidateOriginInvoiceRequired(ctx);
       assertNotNull(result);
       assertEquals(HttpServletResponse.SC_BAD_REQUEST, result.getHttpStatus());
-      assertTrue(result.getBody().toString().contains("Return Invoice"));
+      assertTrue(result.getBody().toString().contains("Rectificative Invoice"));
     }
   }
 
@@ -414,6 +421,150 @@ public class AbstractInvoiceHeaderHandlerTest {
     }
   }
 
+  // ── captureOriginInvoice (ETP-4737) ──────────────────────────────────────────
+  //
+  // Regression coverage: originInvoice is a virtual signal field (not in decisions.json/
+  // contract), so NeoFieldFilter#filterCreateRequest/filterWriteRequest would silently strip it
+  // BEFORE afterHandle() got a chance to read it back — the link was never actually persisted
+  // (confirmed via an empty C_Invoice_Reverse table) despite persistOriginInvoice looking correct
+  // in isolation. The fix reads+strips it here, in handle() (the pre-hook), before the filter runs.
+
+  @Test
+  public void captureOriginInvoice_readOnly_doesNotCapture() {
+    NeoContext ctx = NeoContext.builder().httpMethod("GET").build();
+    handler.callCaptureOriginInvoice(ctx);
+    // Nothing to assert directly (no getter) — proven indirectly: persistOriginInvoice must be a
+    // no-op afterwards since capture never ran (originInvoiceCaptured stays false).
+    handler.callPersistOriginInvoice(NeoContext.builder().httpMethod("GET").recordId("inv-x").build());
+  }
+
+  @Test
+  public void captureOriginInvoice_nullBody_doesNothingWithoutException() {
+    NeoContext ctx = NeoContext.builder().httpMethod("POST").requestBody(null).build();
+    handler.callCaptureOriginInvoice(ctx); // must not throw
+  }
+
+  @Test
+  public void captureOriginInvoice_bodyWithoutOriginInvoice_doesNotStripOrCaptureAnything()
+      throws Exception {
+    JSONObject body = new JSONObject().put("someOtherField", "value");
+    NeoContext ctx = NeoContext.builder().httpMethod("POST").requestBody(body).build();
+
+    handler.callCaptureOriginInvoice(ctx);
+
+    // body is untouched — the field was never there to strip
+    assertTrue(body.has("someOtherField"));
+    assertFalse(body.has("originInvoice"));
+  }
+
+  /**
+   * POST: originInvoice is captured and stripped from the raw body before the generic field
+   * filter would run — {@code body.has("originInvoice")} must be false immediately after.
+   */
+  @Test
+  public void captureOriginInvoice_postWithOriginInvoice_capturesAndStripsFromBody()
+      throws Exception {
+    JSONObject body = new JSONObject().put("originInvoice", "origin-inv-99");
+    NeoContext ctx = NeoContext.builder().httpMethod("POST").requestBody(body).build();
+
+    handler.callCaptureOriginInvoice(ctx);
+
+    assertFalse(body.has("originInvoice"));
+  }
+
+  /** PUT behaves the same as POST — both are write methods per {@code isWriteMethod}. */
+  @Test
+  public void captureOriginInvoice_putWithOriginInvoice_capturesAndStripsFromBody()
+      throws Exception {
+    JSONObject body = new JSONObject().put("originInvoice", "origin-inv-put");
+    NeoContext ctx = NeoContext.builder().httpMethod("PUT").requestBody(body).build();
+
+    handler.callCaptureOriginInvoice(ctx);
+
+    assertFalse(body.has("originInvoice"));
+  }
+
+  /**
+   * PATCH: same underlying {@code NeoHandlerUtils.isWriteMethod} guard used by
+   * {@code PurchaseInvoiceHeaderHandler#afterHandle}'s write-method check (ETP-4737 Fix —
+   * previously {@code "POST".equals(method) || "PUT".equals(method)} excluded PATCH, which is
+   * exactly what {@code ImportFromSourceInvoiceModal.afterImport} sends). Confirms PATCH is
+   * accepted here too, not excluded.
+   */
+  @Test
+  public void captureOriginInvoice_patchWithOriginInvoice_capturesAndStripsFromBody()
+      throws Exception {
+    JSONObject body = new JSONObject().put("originInvoice", "origin-inv-patch");
+    NeoContext ctx = NeoContext.builder().httpMethod("PATCH").requestBody(body).build();
+
+    handler.callCaptureOriginInvoice(ctx);
+
+    assertFalse(body.has("originInvoice"));
+  }
+
+  @Test
+  public void captureOriginInvoice_deleteMethod_doesNotCapture() throws Exception {
+    JSONObject body = new JSONObject().put("originInvoice", "origin-inv-del");
+    NeoContext ctx = NeoContext.builder().httpMethod("DELETE").requestBody(body).build();
+
+    handler.callCaptureOriginInvoice(ctx);
+
+    // DELETE is not a write method — body must be left untouched
+    assertTrue(body.has("originInvoice"));
+  }
+
+  /**
+   * End-to-end roundtrip proving the captured value actually survives into
+   * {@code persistOriginInvoice} on the SAME handler instance — this is the behavior the
+   * capture-before-filtering fix depends on (a plain instance field carrying state from
+   * {@code handle()} to {@code afterHandle()}, safe because {@code @Named}-only handlers are
+   * {@code @Dependent}-scoped and both methods run on one instance per request).
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  public void captureOriginInvoice_thenPersistOriginInvoice_persistsCapturedValue()
+      throws Exception {
+    JSONObject body = new JSONObject().put("originInvoice", "origin-captured-1");
+    NeoContext captureCtx = NeoContext.builder().httpMethod("PATCH").requestBody(body).build();
+    NeoContext persistCtx = NeoContext.builder()
+        .httpMethod("PATCH").recordId("inv-captured-1").requestBody(body).build();
+
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
+         MockedStatic<OBProvider> providerMock = Mockito.mockStatic(OBProvider.class)) {
+
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      Invoice invoice = mock(Invoice.class);
+      Invoice origin = mock(Invoice.class);
+      Client client = mock(Client.class);
+      Organization org = mock(Organization.class);
+      when(dal.get(Invoice.class, "inv-captured-1")).thenReturn(invoice);
+      when(dal.get(Invoice.class, "origin-captured-1")).thenReturn(origin);
+      when(invoice.getClient()).thenReturn(client);
+      when(invoice.getOrganization()).thenReturn(org);
+
+      OBCriteria<ReversedInvoice> criteria = mock(OBCriteria.class);
+      when(dal.createCriteria(ReversedInvoice.class)).thenReturn(criteria);
+      when(criteria.add(any())).thenReturn(criteria);
+      when(criteria.list()).thenReturn(Collections.emptyList());
+
+      OBProvider provider = mock(OBProvider.class);
+      providerMock.when(OBProvider::getInstance).thenReturn(provider);
+      ReversedInvoice link = mock(ReversedInvoice.class);
+      when(provider.get(ReversedInvoice.class)).thenReturn(link);
+
+      // Note: body was already stripped by captureOriginInvoke in a real flow, but
+      // persistOriginInvoice never re-reads the body — only the captured instance field.
+      handler.callCaptureThenPersistOriginInvoice(captureCtx, persistCtx);
+
+      verify(dal).save(link);
+      verify(link).setReversedInvoice(origin);
+      verify(dal).flush();
+    }
+  }
+
   // ── persistOriginInvoice ─────────────────────────────────────────────────────
 
   @Test
@@ -425,6 +576,8 @@ public class AbstractInvoiceHeaderHandlerTest {
       OBDal dal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(dal);
 
+      // Mirrors the real handle() -> afterHandle() sequence: capture is a no-op on a null body.
+      handler.callCaptureOriginInvoice(ctx);
       handler.callPersistOriginInvoice(ctx);
 
       Mockito.verifyNoInteractions(dal);
@@ -443,6 +596,9 @@ public class AbstractInvoiceHeaderHandlerTest {
       OBDal dal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(dal);
 
+      // Capture first (as handle() would), so persistOriginInvoice actually has a captured value
+      // to work with and this test genuinely exercises the "no previousResult" early-return.
+      handler.callCaptureOriginInvoice(ctx);
       handler.callPersistOriginInvoice(ctx);
 
       Mockito.verify(dal, Mockito.never()).flush();
@@ -482,6 +638,9 @@ public class AbstractInvoiceHeaderHandlerTest {
       ReversedInvoice link = mock(ReversedInvoice.class);
       when(provider.get(ReversedInvoice.class)).thenReturn(link);
 
+      // ETP-4737: persistOriginInvoice now reads the captured instance field, not the (already
+      // filter-stripped) request body — capture must run first, exactly as handle() does.
+      handler.callCaptureOriginInvoice(ctx);
       handler.callPersistOriginInvoice(ctx);
 
       verify(dal).save(link);
@@ -504,6 +663,8 @@ public class AbstractInvoiceHeaderHandlerTest {
       OBDal dal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(dal);
 
+      // Capture is a no-op (field absent) — originInvoiceCaptured stays false.
+      handler.callCaptureOriginInvoice(ctx);
       handler.callPersistOriginInvoice(ctx);
 
       Mockito.verifyNoInteractions(dal);
@@ -534,6 +695,9 @@ public class AbstractInvoiceHeaderHandlerTest {
       when(criteria.add(any())).thenReturn(criteria);
       when(criteria.list()).thenReturn(Collections.singletonList(existing));
 
+      // Present-but-blank still counts as "captured" (body.has(...) is true for "") — the field
+      // is stripped and originInvoiceCaptured flips true, exactly like a real blank-clear PUT.
+      handler.callCaptureOriginInvoice(ctx);
       handler.callPersistOriginInvoice(ctx);
 
       verify(dal).remove(existing);
@@ -585,6 +749,8 @@ public class AbstractInvoiceHeaderHandlerTest {
       ReversedInvoice link = mock(ReversedInvoice.class);
       when(provider.get(ReversedInvoice.class)).thenReturn(link);
 
+      // POST: originInvoice is only in the pre-filter body — capture it first, same as handle().
+      handler.callCaptureOriginInvoice(ctx);
       handler.callPersistOriginInvoice(ctx);
 
       verify(dal).save(link);
@@ -677,7 +843,7 @@ public class AbstractInvoiceHeaderHandlerTest {
   }
 
   @Test
-  public void enrichInvoiceSubtype_arcDocTypeId_setsNcSubtype() throws Exception {
+  public void enrichInvoiceSubtype_arcDocTypeId_setsRectificativaSubtype() throws Exception {
     JSONObject rec = new JSONObject().put("transactionDocument", "dt-arc");
 
     try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
@@ -690,7 +856,7 @@ public class AbstractInvoiceHeaderHandlerTest {
 
       handler.callEnrichInvoiceSubtype(rec, "arInvoiceSubtype");
 
-      assertEquals("NC", rec.getString("arInvoiceSubtype"));
+      assertEquals("RECTIFICATIVA", rec.getString("arInvoiceSubtype"));
     }
   }
 

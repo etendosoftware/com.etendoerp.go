@@ -40,15 +40,15 @@ import com.etendoerp.go.schemaforge.handlers.DocumentPostingService;
  * <p>Extends {@link AbstractInvoiceHeaderHandler} to inherit shared document-type-lock
  * enforcement and GET enrichment logic.
  *
- * <p>Subtype resolution for AR invoices:
+ * <p>Subtype resolution for AR invoices (ETP-4737 — unified "Factura Rectificativa"):
  * <ul>
- *   <li>{@code ARC} → NC (Credit Memo)</li>
- *   <li>{@code ARI_RM} → DEV (Return Invoice)</li>
+ *   <li>{@code EM_Etsg_Isrectificative = 'Y'} → RECTIFICATIVA (new unified type)</li>
+ *   <li>legacy fallback — {@code ARC} (Credit Memo) or {@code ARI_RM} (Return Invoice) → RECTIFICATIVA</li>
  *   <li>otherwise → FAC (Standard Invoice)</li>
  * </ul>
  *
  * <p>GET enrichment injects {@code arInvoiceSubtype} into every record (list and detail)
- * and negates {@code grandTotalAmount} / {@code outstandingAmount} for NC and DEV subtypes.
+ * and negates {@code grandTotalAmount} / {@code outstandingAmount} for RECTIFICATIVA subtype.
  * {@code docTypeLocked} is injected only in detail-view responses.
  *
  * <p>Dispatches custom ACTION requests:
@@ -98,6 +98,7 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
   @Override
   public NeoResponse handle(NeoContext context) {
     NeoHandlerUtils.mirrorAccountingDate(context, "invoiceDate", "accountingDate");
+    captureOriginInvoice(context);
     NeoResponse posting = postingService != null ? postingService.handleAction(context) : null;
     if (posting != null) {
       return posting;
@@ -142,6 +143,14 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
   @Override
   public NeoResponse afterHandle(NeoContext context) {
     autoCreateOrUpdateConversionRateDocument(context);
+    // POST/PUT/PATCH: persist origin invoice relationship after the record is saved.
+    // Mirrors PurchaseInvoiceHeaderHandler#afterHandle (ETP-4737) — the manual
+    // "Import from Source Invoice" flow links a rectificativa back to its source via
+    // C_Invoice_Reverse, same mechanism shared through AbstractInvoiceHeaderHandler.
+    if (NeoEndpointType.CRUD.equals(context.getEndpointType())
+        && NeoHandlerUtils.isWriteMethod(context.getHttpMethod())) {
+      persistOriginInvoice(context);
+    }
     if (!"GET".equals(context.getHttpMethod()) || !NeoEndpointType.CRUD.equals(context.getEndpointType())) {
       return null;
     }
@@ -164,6 +173,7 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
       if (context.getRecordId() != null) {
         JSONObject rec = dataArr.getJSONObject(0);
         enrichSourceInvoice(rec, context.getRecordId());
+        enrichOriginInvoice(rec, context.getRecordId());
         enrichDocTypeLocked(rec);
         enrichIsRectificative(rec);
         enrichHasRectifications(rec, context.getRecordId());
@@ -182,12 +192,20 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
   // AR-specific subtype resolution
   // ---------------------------------------------------------------------------
 
-  /** {@inheritDoc} AR: ARC → NC, ARI_RM → DEV, otherwise FAC. */
+  /**
+   * {@inheritDoc} AR: {@code EM_Etsg_Isrectificative = 'Y'} (ETP-4737 unified "Factura
+   * Rectificativa") → RECTIFICATIVA; legacy fallback for pre-existing invoices — ARC (Credit
+   * Memo) or ARI_RM (Return Material Sales Invoice) → RECTIFICATIVA; otherwise FAC.
+   */
   @Override
   protected String classifyDocType(DocumentType dt) {
+    if (RectificativeSupport.isRectificative(dt)) {
+      return SUBTYPE_RECTIFICATIVA;
+    }
     String category = dt.getDocumentCategory();
-    if ("ARC".equals(category)) return SUBTYPE_NC;
-    if ("ARI_RM".equals(category)) return SUBTYPE_DEV;
+    if ("ARC".equals(category) || "ARI_RM".equals(category)) {
+      return SUBTYPE_RECTIFICATIVA;
+    }
     return SUBTYPE_FAC;
   }
 
@@ -206,13 +224,13 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
   // ---------------------------------------------------------------------------
 
   /**
-   * Negates {@code grandTotalAmount} and {@code outstandingAmount} for credit memo (NC) and
-   * return invoice (DEV) records. Credit instruments represent money owed to the customer,
-   * so amounts are displayed as negative in the list.
+   * Negates {@code grandTotalAmount} and {@code outstandingAmount} for rectificative invoice
+   * (RECTIFICATIVA — ETP-4737 unified Credit Memo / Return Invoice) records. Credit instruments
+   * represent money owed to the customer, so amounts are displayed as negative in the list.
    */
   private void applyAmountNegationForCredit(JSONObject rec) throws Exception {
     String subtype = rec.optString(getInvoiceSubtypeKey(), SUBTYPE_FAC);
-    if (!SUBTYPE_NC.equals(subtype) && !SUBTYPE_DEV.equals(subtype)) {
+    if (!SUBTYPE_RECTIFICATIVA.equals(subtype)) {
       return;
     }
     double grand = rec.optDouble(FIELD_GRAND_TOTAL_AMOUNT, 0.0);
