@@ -86,7 +86,24 @@ public class OnboardingBaselineService {
    * Use the exact UTC timestamp prefix of the last incorporated .sql file, e.g.:
    * {@code "20260617T120000Z"} matches {@code 20260617T120000Z__R7-tax-accounts.sql}.</p>
    *
-   * Current watermark: R20 default-standard-costing-rule (2026-08-03).
+   * Current watermark: R22 fin-account-warehouse-acct (2026-08-05).
+   *
+   * <p><b>Note (2026-08-05, ETP-4743):</b> bumped from R20's {@code 2026-08-03T18:00:00Z} to
+   * R22's {@code 2026-08-05T14:00:00Z}. Gap A2c — {@code FIN_FINANCIAL_ACCOUNT} and
+   * {@code M_WAREHOUSE} are bulk-imported by the dataset importer with triggers disabled, so
+   * neither ever got its {@code *_Acct} row via the standard core AFTER-INSERT triggers.
+   * ETP-4565 already shipped the preventive fix for this ({@code FIN_FINANCIAL_ACCOUNT_ACCT_SQL}
+   * / {@code WAREHOUSE_ACCT_SQL} in {@code OnboardingAccountingWiringService}, called from
+   * {@code provisionEntityPostingAccounts}) but deliberately did NOT bump this constant at the
+   * time, since the corrective {@code .sql} twin did not exist yet (bumping the CUT without its
+   * matching fix already in the repo would silently skip the gap for new tenants). ETP-4743 adds
+   * that corrective fix ({@code R22-fin-account-warehouse-acct}) for already-onboarded tenants,
+   * so this bump now closes the loop: new tenants are already provisioned correctly by the live
+   * ETP-4565 code, and the runner correctly skips R22 for them via this watermark. Note this
+   * bump is one commit AHEAD of the unmerged {@code feature/ETP-4720} branch, which independently
+   * claims {@code R21} at {@code 2026-08-05T12:00:00Z} — expect (and resolve to the later
+   * timestamp on) a merge conflict on this line when the two branches converge, per the standing
+   * rule below.</p>
    *
    * <p><b>Note (2026-07-06):</b> the sibling in-flight branch {@code feat/bp-category-preventive}
    * (ETP-4402) independently bumps this same constant to {@code 2026-07-01T12:00:00Z} for its
@@ -129,7 +146,7 @@ public class OnboardingBaselineService {
    * newborn tenant is already provisioned with the two "Factura Rectificativa" doc types and their
    * {@code REC-} sequences and must skip the corrective fix.</p>
    */
-  private static final Instant ONBOARDING_PROVISIONED_THROUGH = Instant.parse("2026-08-03T18:00:00Z");
+  private static final Instant ONBOARDING_PROVISIONED_THROUGH = Instant.parse("2026-08-05T14:00:00Z");
 
   private static final String SQL_INSERT_BASELINE = ""
       + "INSERT INTO etgo_data_fix_history ("
