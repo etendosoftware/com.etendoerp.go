@@ -317,7 +317,7 @@ public class PurchaseInvoiceHeaderHandlerTest {
   }
 
   @Test
-  public void resolveSubtype_apcCategory_returnsNc() {
+  public void resolveSubtype_apcCategory_returnsRectificativa() {
     try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
       OBDal dal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(dal);
@@ -327,12 +327,12 @@ public class PurchaseInvoiceHeaderHandlerTest {
       when(dal.get(DocumentType.class, "dt-apc")).thenReturn(dt);
 
       TestablePurchaseHandler h = new TestablePurchaseHandler();
-      assertEquals("NC", h.callResolveSubtype("dt-apc"));
+      assertEquals("RECTIFICATIVA", h.callResolveSubtype("dt-apc"));
     }
   }
 
   @Test
-  public void resolveSubtype_apiWithIsReturn_returnsDev() {
+  public void resolveSubtype_apiWithIsReturn_returnsRectificativa() {
     try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
       OBDal dal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(dal);
@@ -343,7 +343,57 @@ public class PurchaseInvoiceHeaderHandlerTest {
       when(dal.get(DocumentType.class, "dt-api-return")).thenReturn(dt);
 
       TestablePurchaseHandler h = new TestablePurchaseHandler();
-      assertEquals("DEV", h.callResolveSubtype("dt-api-return"));
+      assertEquals("RECTIFICATIVA", h.callResolveSubtype("dt-api-return"));
+    }
+  }
+
+  /**
+   * ETP-4737: the new unified rectificative doc type is driven primarily by the
+   * {@code EM_Etsg_Isrectificative} flag, independent of {@code documentCategory} — proven here
+   * with an otherwise-FAC category ("API", no isReturn) that only classifies as RECTIFICATIVA
+   * because the flag is set.
+   */
+  @Test
+  public void resolveSubtype_rectificativeFlagSet_returnsRectificativaRegardlessOfCategory() {
+    AbstractInvoiceHeaderHandler.setRectificativeColumnPresentForTests(true);
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      DocumentType dt = mock(DocumentType.class);
+      when(dt.getDocumentCategory()).thenReturn("API");
+      when(dt.isReturn()).thenReturn(false);
+      when(dt.isEtsgIsRectificative()).thenReturn(true);
+      when(dal.get(DocumentType.class, "dt-new-rectificativa")).thenReturn(dt);
+
+      TestablePurchaseHandler h = new TestablePurchaseHandler();
+      assertEquals("RECTIFICATIVA", h.callResolveSubtype("dt-new-rectificativa"));
+    } finally {
+      AbstractInvoiceHeaderHandler.setRectificativeColumnPresentForTests(null);
+    }
+  }
+
+  /**
+   * When the rectificative column is not present (SIF General not installed), classification
+   * falls back to the legacy category-based rule even though the mock would otherwise report the
+   * flag as set.
+   */
+  @Test
+  public void resolveSubtype_rectificativeColumnAbsent_fallsBackToCategory() {
+    AbstractInvoiceHeaderHandler.setRectificativeColumnPresentForTests(false);
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      DocumentType dt = mock(DocumentType.class);
+      when(dt.getDocumentCategory()).thenReturn("API");
+      when(dt.isReturn()).thenReturn(false);
+      when(dal.get(DocumentType.class, "dt-api-no-column")).thenReturn(dt);
+
+      TestablePurchaseHandler h = new TestablePurchaseHandler();
+      assertEquals("FAC", h.callResolveSubtype("dt-api-no-column"));
+    } finally {
+      AbstractInvoiceHeaderHandler.setRectificativeColumnPresentForTests(null);
     }
   }
 
@@ -611,6 +661,10 @@ public class PurchaseInvoiceHeaderHandlerTest {
         .recordId("inv-put-ah")
         .requestBody(body)
         .build();
+    // ETP-4737: persistOriginInvoice now only acts on the value captureOriginInvoice() captured
+    // in handle() (the pre-hook) — call it here too so this test actually exercises the persist
+    // path instead of vacuously hitting the "not captured" early-return.
+    handler.captureOriginInvoice(ctx);
 
     try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
          MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class)) {
@@ -633,6 +687,64 @@ public class PurchaseInvoiceHeaderHandlerTest {
 
       NeoResponse result = handler.afterHandle(ctx);
       assertNull(result);
+
+      // persistOriginInvoice actually ran for PUT: it looked up the invoice and its existing
+      // reverse links (an empty originInvoice value only deletes, never creates, a link).
+      // atLeastOnce(): autoCreateOrUpdateConversionRateDocument (called unconditionally earlier
+      // in afterHandle()) also does its own dal.get(Invoice.class, recordId) lookup.
+      Mockito.verify(dal, Mockito.atLeastOnce()).get(Invoice.class, "inv-put-ah");
+      Mockito.verify(dal).createCriteria(org.openbravo.model.common.invoice.ReversedInvoice.class);
+    }
+  }
+
+  /**
+   * ETP-4737 regression: the write-method guard around {@code persistOriginInvoice} used to be
+   * {@code "POST".equals(method) || "PUT".equals(method)}, which silently excluded PATCH — but
+   * {@code ImportFromSourceInvoiceModal.afterImport} (schema_forge frontend) always links the
+   * origin invoice via a PATCH, not POST/PUT. Fixed to {@code NeoHandlerUtils.isWriteMethod},
+   * which includes PATCH. This test proves PATCH now reaches {@code persistOriginInvoice} (it
+   * would previously have skipped straight past it, leaving {@code C_Invoice_Reverse} empty).
+   */
+  @Test
+  public void afterHandle_patchCrud_callsPersistAndReturnsNull() throws Exception {
+    JSONObject body = new JSONObject().put("originInvoice", "");
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("PATCH")
+        .endpointType(NeoEndpointType.CRUD)
+        .recordId("inv-patch-ah")
+        .requestBody(body)
+        .build();
+    // Mirrors the real handle() pre-hook so persistOriginInvoice has a captured value to act on.
+    handler.captureOriginInvoice(ctx);
+
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class)) {
+      ctxMock.when(() -> OBContext.setAdminMode(anyBoolean())).thenAnswer(i -> null);
+      ctxMock.when(OBContext::restorePreviousMode).thenAnswer(i -> null);
+
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      Invoice invoice = mock(Invoice.class);
+      when(dal.get(Invoice.class, "inv-patch-ah")).thenReturn(invoice);
+
+      @SuppressWarnings("unchecked")
+      org.openbravo.dal.service.OBCriteria<org.openbravo.model.common.invoice.ReversedInvoice>
+          criteria = mock(org.openbravo.dal.service.OBCriteria.class);
+      when(dal.createCriteria(org.openbravo.model.common.invoice.ReversedInvoice.class))
+          .thenReturn(criteria);
+      when(criteria.add(any())).thenReturn(criteria);
+      when(criteria.list()).thenReturn(java.util.Collections.emptyList());
+
+      NeoResponse result = handler.afterHandle(ctx);
+      assertNull(result);
+
+      // persistOriginInvoice actually ran for PATCH: it looked up the invoice and its existing
+      // reverse links (an empty originInvoice value only deletes, never creates, a link).
+      // atLeastOnce(): autoCreateOrUpdateConversionRateDocument (called unconditionally earlier
+      // in afterHandle()) also does its own dal.get(Invoice.class, recordId) lookup.
+      Mockito.verify(dal, Mockito.atLeastOnce()).get(Invoice.class, "inv-patch-ah");
+      Mockito.verify(dal).createCriteria(org.openbravo.model.common.invoice.ReversedInvoice.class);
     }
   }
 

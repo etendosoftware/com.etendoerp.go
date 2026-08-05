@@ -143,7 +143,7 @@ class PaymentRegistrationServiceAdvancedTest {
   private MockedStatic<NeoDefaultsService> neoDefaultsMock;
   private MockedStatic<RequestContext> requestContextMock;
   private MockedStatic<PaymentRemovalUtil> paymentRemovalUtilMock;
-  private MockedStatic<RectificativeDocTypeSupport> rectDocTypeMock;
+  private MockedStatic<RectificativeSupport> rectSupportMock;
   private MockedConstruction<AdvPaymentMngtDao> daoConstruction;
   private MockedConstruction<DalConnectionProvider> connConstruction;
 
@@ -221,10 +221,10 @@ class PaymentRegistrationServiceAdvancedTest {
     // result so every pre-existing abono-listing/consumption test (written before this doc-type
     // restriction existed) keeps exercising the same HQL/consume path unchanged. Tests that
     // specifically exercise the whitelist restriction re-stub this per-test.
-    rectDocTypeMock = mockStatic(RectificativeDocTypeSupport.class);
-    rectDocTypeMock.when(() -> RectificativeDocTypeSupport.resolveRectificativeDocTypes(anyString(), anyBoolean()))
+    rectSupportMock = mockStatic(RectificativeSupport.class);
+    rectSupportMock.when(() -> RectificativeSupport.resolveRectificativeDocTypes(anyString(), anyBoolean()))
         .thenReturn(Collections.singletonList("rect-dt-default"));
-    rectDocTypeMock.when(() -> RectificativeDocTypeSupport.isRectificativeDocType(anyString()))
+    rectSupportMock.when(() -> RectificativeSupport.isRectificative(anyString()))
         .thenReturn(true);
 
     // ── common entity stubs ──────────────────────────────────────────────────
@@ -263,7 +263,7 @@ class PaymentRegistrationServiceAdvancedTest {
   void tearDown() {
     closeQuietly(daoConstruction);
     closeQuietly(connConstruction);
-    closeQuietly(rectDocTypeMock);
+    closeQuietly(rectSupportMock);
     closeQuietly(paymentRemovalUtilMock);
     closeQuietly(requestContextMock);
     closeQuietly(neoDefaultsMock);
@@ -548,7 +548,7 @@ class PaymentRegistrationServiceAdvancedTest {
   void testListCreditSourcesAbonoRestrictedToRectificativeDocTypes() throws Exception {
     NeoContext context = creditSourcesContext();
     stubInvoiceWithBp();
-    rectDocTypeMock.when(() -> RectificativeDocTypeSupport.resolveRectificativeDocTypes(
+    rectSupportMock.when(() -> RectificativeSupport.resolveRectificativeDocTypes(
         CLIENT_ID, true)).thenReturn(Arrays.asList("dt-1", "dt-2"));
 
     Query<FIN_PaymentScheduleDetail> abonoQuery = mock(Query.class);
@@ -575,7 +575,7 @@ class PaymentRegistrationServiceAdvancedTest {
   void testListCreditSourcesNoRectificativeDocTypeConfiguredSkipsAbonoQuery() throws Exception {
     NeoContext context = creditSourcesContext();
     stubInvoiceWithBp();
-    rectDocTypeMock.when(() -> RectificativeDocTypeSupport.resolveRectificativeDocTypes(
+    rectSupportMock.when(() -> RectificativeSupport.resolveRectificativeDocTypes(
         anyString(), anyBoolean())).thenReturn(Collections.emptyList());
     stubCreditQuery(Collections.emptyList());
 
@@ -597,7 +597,7 @@ class PaymentRegistrationServiceAdvancedTest {
     NeoResponse response = PaymentCreditSourcesService.handleListCreditSources(context, false);
 
     assertEquals(200, response.getHttpStatus());
-    rectDocTypeMock.verify(() -> RectificativeDocTypeSupport.resolveRectificativeDocTypes(
+    rectSupportMock.verify(() -> RectificativeSupport.resolveRectificativeDocTypes(
         CLIENT_ID, false));
   }
 
@@ -609,7 +609,7 @@ class PaymentRegistrationServiceAdvancedTest {
     String editPaymentId = "draft-being-edited";
     NeoContext context = creditSourcesContextWithEditPaymentId(editPaymentId);
     stubInvoiceWithBp();
-    rectDocTypeMock.when(() -> RectificativeDocTypeSupport.resolveRectificativeDocTypes(
+    rectSupportMock.when(() -> RectificativeSupport.resolveRectificativeDocTypes(
         anyString(), anyBoolean())).thenReturn(Collections.emptyList());
     stubCreditQuery(Collections.emptyList());
 

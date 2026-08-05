@@ -130,7 +130,7 @@ final class PaymentCreditConsumer {
         ? invoice.getTransactionDocument().getId() : null;
     boolean negativeTotal = invoice.getGrandTotalAmount() != null
         && invoice.getGrandTotalAmount().signum() < 0;
-    if (!negativeTotal || !RectificativeDocTypeSupport.isRectificativeDocType(docTypeId)) {
+    if (!negativeTotal || !RectificativeSupport.isRectificative(docTypeId)) {
       throw new OBException(
           "Credit source is not an eligible Factura Rectificativa: " + psd.getId());
     }

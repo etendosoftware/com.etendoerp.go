@@ -168,7 +168,7 @@ final class PaymentCreditSourcesService {
    * ({@code c_doctype.em_etsg_isrectificative = 'Y'}).
    *
    * <p>The rectificative doc types are resolved once per call via {@link
-   * RectificativeDocTypeSupport#resolveRectificativeDocTypes}, scoped to the invoice's own
+   * RectificativeSupport#resolveRectificativeDocTypes}, scoped to the invoice's own
    * client and transaction side, and bound as an {@code in (:rectDocTypes)} HQL parameter —
    * never fetched unrestricted and filtered afterwards, since {@code setMaxResults(50)} would
    * then truncate before the restriction is applied. When no rectificative doc type is
@@ -183,7 +183,7 @@ final class PaymentCreditSourcesService {
   private static List<FIN_PaymentScheduleDetail> pendingAbonos(Invoice invoice,
       boolean isReceipt) {
     String clientId = invoice.getClient() != null ? invoice.getClient().getId() : null;
-    List<String> rectDocTypes = RectificativeDocTypeSupport.resolveRectificativeDocTypes(
+    List<String> rectDocTypes = RectificativeSupport.resolveRectificativeDocTypes(
         clientId, isReceipt);
     if (rectDocTypes.isEmpty()) {
       return Collections.emptyList();

@@ -94,6 +94,7 @@ public class McpResourceProvider {
   private List<SFSpec> listActiveSpecs() {
     OBCriteria<SFSpec> criteria = OBDal.getInstance().createCriteria(SFSpec.class);
     criteria.add(Restrictions.eq(SFSpec.PROPERTY_ISACTIVE, true));
+    criteria.add(Restrictions.eq(SFSpec.PROPERTY_SHOWINMCP, true));
     criteria.addOrder(Order.asc(SFSpec.PROPERTY_NAME));
     return criteria.list();
   }
@@ -174,6 +175,7 @@ public class McpResourceProvider {
   private JSONObject readSpecsList() throws Exception {
     OBCriteria<SFSpec> criteria = OBDal.getInstance().createCriteria(SFSpec.class);
     criteria.add(Restrictions.eq(SFSpec.PROPERTY_ISACTIVE, true));
+    criteria.add(Restrictions.eq(SFSpec.PROPERTY_SHOWINMCP, true));
     criteria.addOrder(Order.asc(SFSpec.PROPERTY_NAME));
     List<SFSpec> specs = criteria.list();
 

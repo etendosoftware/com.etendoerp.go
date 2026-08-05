@@ -66,8 +66,13 @@ public abstract class AbstractInvoiceHeaderHandler {
   private static final Logger log = LogManager.getLogger(AbstractInvoiceHeaderHandler.class);
 
   protected static final String SUBTYPE_FAC = "FAC";
-  protected static final String SUBTYPE_NC  = "NC";
-  protected static final String SUBTYPE_DEV = "DEV";
+  /**
+   * Unified rectificative subtype (ETP-4737 "Factura Rectificativa") — collapses the former
+   * {@code NC} (Credit Note) and {@code DEV} (Return Invoice) subtypes into one, since both sides
+   * (AR and AP) now use a single document type for manual corrections AND auto-generation from a
+   * Goods Return.
+   */
+  protected static final String SUBTYPE_RECTIFICATIVA = "RECTIFICATIVA";
 
   protected static final String FIELD_ORIGIN_INVOICE       = "originInvoice";
   protected static final String FIELD_TRANSACTION_DOCUMENT = "transactionDocument";
@@ -78,17 +83,27 @@ public abstract class AbstractInvoiceHeaderHandler {
   protected static final String FIELD_GRAND_TOTAL_AMOUNT = "grandTotalAmount";
   protected static final String FIELD_OUTSTANDING_AMOUNT = "outstandingAmount";
 
+  // ETP-4737: captured by captureOriginInvoice() (called from each subclass's handle(), the
+  // pre-hook) and consumed by persistOriginInvoice() (called from afterHandle(), the post-hook)
+  // — see the capture-site comment on captureOriginInvoice for why this can't just be re-read
+  // from context.getRequestBody() in afterHandle(). Concrete subclasses are @Named-only CDI
+  // beans, defaulting to @Dependent scope, and NeoServletSupport#handleWithHooks calls handle()
+  // then afterHandle() on the SAME handler instance for a given request, so a plain instance
+  // field on this shared base class safely carries state between them.
+  private String pendingOriginInvoiceId;
+  private boolean originInvoiceCaptured;
+
   // ---------------------------------------------------------------------------
   // Abstract contract
   // ---------------------------------------------------------------------------
 
   /**
-   * Returns the invoice subtype ("FAC", "NC", or "DEV") for the given document-type ID.
+   * Returns the invoice subtype ("FAC" or "RECTIFICATIVA") for the given document-type ID.
    * Handles null/blank IDs and DB lookup errors; delegates category-to-subtype mapping
    * to {@link #classifyDocType(DocumentType)}.
    *
    * @param docTypeId the ID of the selected document type, may be null/blank
-   * @return one of {@code SUBTYPE_FAC}, {@code SUBTYPE_NC}, {@code SUBTYPE_DEV}
+   * @return one of {@code SUBTYPE_FAC}, {@code SUBTYPE_RECTIFICATIVA}
    */
   protected final String resolveSubtype(String docTypeId) {
     if (StringUtils.isBlank(docTypeId)) {
@@ -106,11 +121,14 @@ public abstract class AbstractInvoiceHeaderHandler {
   }
 
   /**
-   * Maps the resolved {@link DocumentType} to a subtype constant.
-   * AR invoices check ARC/ARI_RM; AP invoices check APC/API+isReturn.
+   * Maps the resolved {@link DocumentType} to a subtype constant. Driven primarily by
+   * {@code EM_Etsg_Isrectificative} (ETP-4737 unified "Factura Rectificativa" type — see
+   * {@link RectificativeSupport#isRectificative(DocumentType)}), with a legacy category-based
+   * fallback (AR: ARC/ARI_RM; AP: APC/API+isReturn) so invoices already using the old Credit
+   * Note / Return Invoice document types keep classifying correctly.
    *
    * @param dt the loaded document type (never null)
-   * @return one of {@code SUBTYPE_FAC}, {@code SUBTYPE_NC}, {@code SUBTYPE_DEV}
+   * @return one of {@code SUBTYPE_FAC}, {@code SUBTYPE_RECTIFICATIVA}
    */
   protected abstract String classifyDocType(DocumentType dt);
 
@@ -175,7 +193,8 @@ public abstract class AbstractInvoiceHeaderHandler {
 
   /**
    * Requires {@code originInvoice} in the request body when the selected document type resolves
-   * to NC (Credit Note) or DEV (Return Invoice).
+   * to {@code RECTIFICATIVA} (ETP-4737 unified rectificative invoice — formerly the separate
+   * {@code NC}/Credit Note and {@code DEV}/Return Invoice subtypes).
    *
    * @param context
    *     the current request context
@@ -200,9 +219,8 @@ public abstract class AbstractInvoiceHeaderHandler {
       }
       String originId = body.optString(FIELD_ORIGIN_INVOICE, null);
       if (StringUtils.isBlank(originId)) {
-        String label = SUBTYPE_NC.equals(subtype) ? "Credit Note" : "Return Invoice";
         return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
-            label + " requires an origin invoice.");
+            "Rectificative Invoice requires an origin invoice.");
       }
     } catch (Exception e) {
       log.warn("Could not validate origin invoice for invoice {}: {}",
@@ -216,20 +234,49 @@ public abstract class AbstractInvoiceHeaderHandler {
   // ---------------------------------------------------------------------------
 
   /**
-   * Persists the origin-invoice relationship to {@code C_Invoice_Reverse} after a POST or PUT.
-   * Deletes any existing link for this invoice before creating the new one (or leaves it deleted
-   * if {@code originInvoice} is absent/blank in the request body).
+   * Captures and strips {@code originInvoice} from the raw request body BEFORE the generic
+   * field filter runs, so {@link #persistOriginInvoice} can still use it later in
+   * {@code afterHandle()}. Must be called from each subclass's {@code handle()} (the pre-hook),
+   * e.g. alongside the existing {@code NeoHandlerUtils.mirrorAccountingDate(...)} call.
+   *
+   * <p>{@code originInvoice} is not a decisions.json/contract field, so
+   * {@code NeoFieldFilter#filterCreateRequest}/{@code filterWriteRequest} would otherwise
+   * silently drop it before {@code afterHandle()} got a chance to read it back from
+   * {@code context.getRequestBody()} — the link was never actually persisted (confirmed via an
+   * empty {@code C_Invoice_Reverse} table) despite {@code persistOriginInvoice} looking correct
+   * in isolation. Same reasoning as the {@code parentId} carve-out at the top of
+   * {@code NeoCrudHandler#executePostCreate}.
+   *
+   * @param context
+   *     the current request context
+   */
+  protected void captureOriginInvoice(NeoContext context) {
+    if (!NeoHandlerUtils.isWriteMethod(context.getHttpMethod())) {
+      return;
+    }
+    JSONObject body = context.getRequestBody();
+    if (body != null && body.has(FIELD_ORIGIN_INVOICE)) {
+      pendingOriginInvoiceId = body.optString(FIELD_ORIGIN_INVOICE, null);
+      originInvoiceCaptured = true;
+      body.remove(FIELD_ORIGIN_INVOICE);
+    }
+  }
+
+  /**
+   * Persists the origin-invoice relationship to {@code C_Invoice_Reverse} after a POST or PUT,
+   * using the value {@link #captureOriginInvoice} captured from the raw request body before the
+   * generic field filter stripped it. Deletes any existing link for this invoice before creating
+   * the new one (or leaves it deleted if {@code originInvoice} was absent/blank).
    *
    * @param context
    *     the current request context
    */
   protected void persistOriginInvoice(NeoContext context) {
     try {
-      JSONObject body = context.getRequestBody();
-      if (body == null || !body.has(FIELD_ORIGIN_INVOICE)) {
+      if (!originInvoiceCaptured) {
         return;
       }
-      String originInvoiceId = body.optString(FIELD_ORIGIN_INVOICE, null);
+      String originInvoiceId = pendingOriginInvoiceId;
 
       String invoiceId = resolveInvoiceIdFromContext(context);
       if (StringUtils.isBlank(invoiceId)) {
@@ -341,25 +388,26 @@ public abstract class AbstractInvoiceHeaderHandler {
     String docTypeId = rec.optString(FIELD_TRANSACTION_DOCUMENT, null);
     String subtype = resolveSubtype(docTypeId);
     if (SUBTYPE_FAC.equals(subtype) && isRectificativeCreditRow(rec, docTypeId)) {
-      subtype = SUBTYPE_NC;
+      subtype = SUBTYPE_RECTIFICATIVA;
     }
     rec.put(key, subtype);
   }
 
   /**
-   * True when {@code rec} is a Factura Rectificativa (ETP-4737/4738) with a negative total —
-   * reclassified as "NC" for DISPLAY purposes only (grid "Pendiente de pago" badge, detail
-   * topbar credit pill), so it renders the same "Saldo a favor" treatment the legacy AR/AP
-   * Credit Memo document types got. Deliberately NOT folded into {@link #classifyDocType} /
-   * {@link #resolveSubtype}: those are also used by {@link #validateOriginInvoiceRequired} to
-   * require the {@code originInvoice} field on save, but a rectificativa links its corrected
-   * invoice via {@code C_Invoice_Reverse} (the "Reversed Invoices" tab), not {@code
-   * originInvoice} — reusing the same subtype there would incorrectly block saving every
-   * Factura Rectificativa.
+   * True when {@code rec} is a plain-invoice-category Factura Rectificativa (ETP-4737/4738,
+   * flagged via {@code EM_Etsg_Isrectificative}, not already resolved to {@code
+   * SUBTYPE_RECTIFICATIVA} by document category) with a negative total — reclassified for
+   * DISPLAY purposes only (grid "Pendiente de pago" badge, detail topbar credit pill), so it
+   * renders the same "Saldo a favor" treatment. Deliberately NOT folded into {@link
+   * #classifyDocType} / {@link #resolveSubtype}: those are also used by {@link
+   * #validateOriginInvoiceRequired} to require the {@code originInvoice} field on save, but a
+   * rectificativa links its corrected invoice via {@code C_Invoice_Reverse} (the "Reversed
+   * Invoices" tab), not {@code originInvoice} — reusing the same subtype there would incorrectly
+   * block saving every Factura Rectificativa.
    */
   private boolean isRectificativeCreditRow(JSONObject rec, String docTypeId) {
     return rec.optDouble(FIELD_GRAND_TOTAL_AMOUNT, 0.0) < 0
-        && RectificativeDocTypeSupport.isRectificativeDocType(docTypeId);
+        && RectificativeSupport.isRectificative(docTypeId);
   }
 
   /**
@@ -376,12 +424,12 @@ public abstract class AbstractInvoiceHeaderHandler {
   }
 
   /**
-   * Test hook: force or reset (null) the cached column-presence check. Delegates to {@link
-   * RectificativeDocTypeSupport}, the single source of truth shared with the ETP-4738 "saldo a
-   * favor" filter.
+   * Test hook: force or reset (null) the cached {@code em_etsg_isrectificative} column-presence
+   * check shared via {@link RectificativeSupport} (the single source of truth for this flag,
+   * also used by the ETP-4738 "saldo a favor" filter).
    */
   static void setRectificativeColumnPresentForTests(Boolean value) {
-    RectificativeDocTypeSupport.setRectificativeColumnPresentForTests(value);
+    RectificativeSupport.setColumnPresentForTests(value);
   }
 
   /**
@@ -392,7 +440,26 @@ public abstract class AbstractInvoiceHeaderHandler {
    */
   protected void enrichIsRectificative(JSONObject rec) throws Exception {
     String docTypeId = rec.optString(FIELD_TRANSACTION_DOCUMENT, null);
-    rec.put("isRectificative", RectificativeDocTypeSupport.isRectificativeDocType(docTypeId));
+    if (StringUtils.isBlank(docTypeId) || !RectificativeSupport.isColumnPresent()) {
+      rec.put("isRectificative", false);
+      return;
+    }
+    boolean result = false;
+    try {
+      String sql = "SELECT em_etsg_isrectificative FROM c_doctype WHERE c_doctype_id = ?";
+      Connection conn = OBDal.getReadOnlyInstance().getConnection();
+      try (PreparedStatement ps = conn.prepareStatement(sql)) {
+        ps.setString(1, docTypeId);
+        try (ResultSet rs = ps.executeQuery()) {
+          if (rs.next()) {
+            result = "Y".equals(rs.getString(1));
+          }
+        }
+      }
+    } catch (Exception e) {
+      log.warn("Could not resolve isRectificative for doctype {}: {}", docTypeId, e.getMessage());
+    }
+    rec.put("isRectificative", result);
   }
 
   /**
