@@ -41,6 +41,7 @@ import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
 import com.etendoerp.psd2.bank.integration.data.Provider;
 import com.etendoerp.psd2.bank.integration.utils.BankIntegrationConstants;
 import com.etendoerp.psd2.bank.integration.utils.BankIntegrationUtils;
+import com.etendoerp.psd2.bank.integration.utils.ProviderCatalogUtils;
 
 final class FinancialAccountBankConnectionSupport {
 
@@ -111,7 +112,7 @@ final class FinancialAccountBankConnectionSupport {
       log.warn("Could not fetch provider {} from Salt Edge, registering with fallback values: {}",
           providerCode, e.getMessage());
     }
-    return BankIntegrationUtils.upsertProvider(providerCode, name, maxFetchInterval, logoUrl);
+    return ProviderCatalogUtils.upsertProvider(providerCode, name, maxFetchInterval, logoUrl);
   }
 
   static String connectedAccountName(String providerName, JSONObject node, String currencyCode) {

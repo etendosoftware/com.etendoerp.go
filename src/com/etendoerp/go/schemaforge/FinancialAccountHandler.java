@@ -47,7 +47,7 @@ import org.openbravo.model.financialmgmt.payment.FIN_Reconciliation;
 import org.openbravo.model.financialmgmt.payment.MatchingAlgorithm;
 
 import com.etendoerp.psd2.bank.integration.data.Provider;
-import com.etendoerp.psd2.bank.integration.utils.BankIntegrationUtils;
+import com.etendoerp.psd2.bank.integration.utils.ProviderCatalogUtils;
 
 /**
  * NeoHandler that powers the financial-account window as a generic W (CRUD) spec
@@ -497,7 +497,7 @@ public class FinancialAccountHandler implements NeoHandler {
     String providerCode = body.optString(FIELD_PROVIDER_CODE, "").trim();
     if (TYPE_BANK.equals(type) && StringUtils.isNotBlank(providerCode)) {
       String providerName = body.optString(FIELD_PROVIDER_NAME, providerCode).trim();
-      Provider provider = BankIntegrationUtils.upsertProvider(providerCode, providerName, null);
+      Provider provider = ProviderCatalogUtils.upsertProvider(providerCode, providerName, null);
       OBDal.getInstance().flush();
       body.put(FIELD_PSD2_PROVIDER, provider.getId());
     }

@@ -67,6 +67,7 @@ import org.openbravo.model.financialmgmt.payment.FinAccPaymentMethod;
 
 import com.etendoerp.psd2.bank.integration.data.Provider;
 import com.etendoerp.psd2.bank.integration.utils.BankIntegrationUtils;
+import com.etendoerp.psd2.bank.integration.utils.ProviderCatalogUtils;
 import com.etendoerp.psd2.bank.integration.utils.SaltEdgeAccountLinkHelper;
 
 /**
@@ -600,6 +601,7 @@ public class FinancialAccountBankConnectionHandlerLinkTest {
 
     try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
         MockedStatic<BankIntegrationUtils> utils = mockStatic(BankIntegrationUtils.class);
+        MockedStatic<ProviderCatalogUtils> catalog = mockStatic(ProviderCatalogUtils.class);
         MockedStatic<SaltEdgeAccountLinkHelper> linkHelper =
             mockStatic(SaltEdgeAccountLinkHelper.class);
         MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
@@ -615,7 +617,7 @@ public class FinancialAccountBankConnectionHandlerLinkTest {
           any(), any(), any())).thenReturn("");
       utils.when(() -> BankIntegrationUtils.makeSaltEdgeRequest(eq("GET"), isNull(), anyString(),
           eq(API_KEY))).thenReturn(providerResponse);
-      utils.when(() -> BankIntegrationUtils.upsertProvider("bbva", "BBVA",
+      catalog.when(() -> ProviderCatalogUtils.upsertProvider("bbva", "BBVA",
           BigDecimal.valueOf(90), logoUrl)).thenReturn(registeredProvider);
 
       OBDal dal = mock(OBDal.class);
@@ -633,7 +635,7 @@ public class FinancialAccountBankConnectionHandlerLinkTest {
       NeoResponse response = handler.handle(postContext(ACTION_LINK, body));
 
       assertEquals(200, response.getHttpStatus());
-      utils.verify(() -> BankIntegrationUtils.upsertProvider("bbva", "BBVA",
+      catalog.verify(() -> ProviderCatalogUtils.upsertProvider("bbva", "BBVA",
           BigDecimal.valueOf(90), logoUrl));
       verify(finAcc).setPsd2Provider(registeredProvider);
     }
