@@ -307,12 +307,15 @@ class EtendoGoJwtSupportTest {
       when(obDal.createQuery(eq(User.class), anyString())).thenReturn(userQuery);
       when(userQuery.uniqueResult()).thenReturn(mock(User.class));
 
-      // 50-char email leaves room for "+" plus 9 characters of company name.
+      // A 49-char email leaves 60 - (49 + 1) = 10 characters for the company suffix,
+      // so "extremelylongcompanynamesl" is cut down to "extremelyl".
       String email = "a".repeat(40) + "@test.com";
+      assertEquals(49, email.length());
+
       String username = EtendoGoJwtSupport.buildClientUsername(email, "Extremely Long Company Name SL");
 
       assertEquals(OnboardingFieldLimits.EMAIL, username.length());
-      assertEquals(email + "+extremely", username);
+      assertEquals(email + "+extremelyl", username);
     }
 
     @Test
