@@ -23,6 +23,7 @@ import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
@@ -30,6 +31,7 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import java.lang.reflect.Method;
 import java.math.BigDecimal;
 import java.util.Arrays;
 import java.util.Collections;
@@ -52,6 +54,7 @@ import org.openbravo.base.provider.OBProvider;
 import org.openbravo.base.weld.WeldUtils;
 import org.openbravo.common.actionhandler.createlinesfromprocess.CreateInvoiceLinesFromProcess;
 import org.openbravo.dal.core.OBContext;
+import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.businesspartner.BusinessPartner;
@@ -62,6 +65,7 @@ import org.openbravo.model.common.invoice.Invoice;
 import org.openbravo.model.common.order.Order;
 import org.openbravo.model.common.order.OrderLine;
 import org.openbravo.model.common.plm.Product;
+import org.openbravo.model.common.uom.UOM;
 import org.openbravo.model.financialmgmt.payment.FIN_PaymentMethod;
 import org.openbravo.model.materialmgmt.transaction.ShipmentInOut;
 import org.openbravo.model.materialmgmt.transaction.ShipmentInOutLine;
@@ -572,6 +576,365 @@ public class CreatePurchaseInvoiceHandlerTest {
 
       Invoice result = handler.createFromOrder("po-noop");
       assertSame(invoice, result);
+    }
+  }
+
+  // ─── resolvePriceListOverride / applyPriceListOverride (ETP-4028) ─────────
+  //
+  // Both are private helpers with no protected seam, so they are exercised via
+  // reflection — the same convention already used elsewhere in this codebase
+  // (see e.g. McpSchemaFieldBuilderTest) for private-method coverage.
+
+  private static Object invokeResolvePriceListOverride(CreatePurchaseInvoiceHandler handler,
+      JSONObject body) throws Exception {
+    Method method = CreatePurchaseInvoiceHandler.class.getDeclaredMethod(
+        "resolvePriceListOverride", JSONObject.class);
+    method.setAccessible(true);
+    return method.invoke(handler, body);
+  }
+
+  private static void invokeApplyPriceListOverride(CreatePurchaseInvoiceHandler handler,
+      Invoice invoice, JSONObject body) throws Exception {
+    Method method = CreatePurchaseInvoiceHandler.class.getDeclaredMethod(
+        "applyPriceListOverride", Invoice.class, JSONObject.class);
+    method.setAccessible(true);
+    method.invoke(handler, invoice, body);
+  }
+
+  @Test
+  public void resolvePriceListOverride_nullBody_returnsNull() throws Exception {
+    assertNull(invokeResolvePriceListOverride(new CreatePurchaseInvoiceHandler(), null));
+  }
+
+  @Test
+  public void resolvePriceListOverride_missingKey_returnsNull() throws Exception {
+    JSONObject body = new JSONObject();
+    assertNull(invokeResolvePriceListOverride(new CreatePurchaseInvoiceHandler(), body));
+  }
+
+  @Test
+  public void resolvePriceListOverride_blankPriceListId_returnsNull() throws Exception {
+    JSONObject body = new JSONObject().put("priceListId", "   ");
+    assertNull(invokeResolvePriceListOverride(new CreatePurchaseInvoiceHandler(), body));
+  }
+
+  @Test
+  public void resolvePriceListOverride_validId_returnsResolvedPriceList() throws Exception {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      PriceList priceList = mock(PriceList.class);
+      when(dal.get(PriceList.class, "pl-42")).thenReturn(priceList);
+
+      JSONObject body = new JSONObject().put("priceListId", "pl-42");
+      Object result = invokeResolvePriceListOverride(new CreatePurchaseInvoiceHandler(), body);
+
+      assertSame(priceList, result);
+    }
+  }
+
+  @Test
+  public void resolvePriceListOverride_idDoesNotResolve_returnsNull() throws Exception {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(PriceList.class, "pl-missing")).thenReturn(null);
+
+      JSONObject body = new JSONObject().put("priceListId", "pl-missing");
+      assertNull(invokeResolvePriceListOverride(new CreatePurchaseInvoiceHandler(), body));
+    }
+  }
+
+  @Test
+  public void applyPriceListOverride_nullResolution_neverCallsSetPriceList() throws Exception {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      Invoice invoice = mock(Invoice.class);
+      invokeApplyPriceListOverride(new CreatePurchaseInvoiceHandler(), invoice, null);
+
+      verify(invoice, never()).setPriceList(any(PriceList.class));
+    }
+  }
+
+  @Test
+  public void applyPriceListOverride_resolvedPriceList_callsSetPriceList() throws Exception {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      PriceList priceList = mock(PriceList.class);
+      when(dal.get(PriceList.class, "pl-99")).thenReturn(priceList);
+
+      Invoice invoice = mock(Invoice.class);
+      JSONObject body = new JSONObject().put("priceListId", "pl-99");
+      invokeApplyPriceListOverride(new CreatePurchaseInvoiceHandler(), invoice, body);
+
+      verify(invoice).setPriceList(priceList);
+    }
+  }
+
+  // ─── createFromReceiptNoPo (ETP-4028 — price-list override) ───────────────
+
+  private static ShipmentInOut receiptNoPoWith(BusinessPartner bp, ShipmentInOutLine... lines) {
+    ShipmentInOut receipt = mock(ShipmentInOut.class);
+    when(receipt.getBusinessPartner()).thenReturn(bp);
+    when(receipt.getClient()).thenReturn(mock(Client.class));
+    when(receipt.getMaterialMgmtShipmentInOutLineList()).thenReturn(Arrays.asList(lines));
+    return receipt;
+  }
+
+  /** Stubs the OBDal.createCriteria(DocumentType.class) chain used by findAPInvoiceDocType. */
+  @SuppressWarnings("unchecked")
+  private static void stubApInvoiceDocType(OBDal dal, DocumentType docType) {
+    OBCriteria<DocumentType> criteria = mock(OBCriteria.class);
+    when(dal.createCriteria(DocumentType.class)).thenReturn(criteria);
+    when(criteria.add(any())).thenReturn(criteria);
+    when(criteria.addOrderBy(anyString(), anyBoolean())).thenReturn(criteria);
+    when(criteria.setMaxResults(1)).thenReturn(criteria);
+    when(criteria.list()).thenReturn(Collections.singletonList(docType));
+  }
+
+  private static ShipmentInOutLine mockNoPoLine(BigDecimal movementQty) {
+    ShipmentInOutLine rl = mock(ShipmentInOutLine.class);
+    when(rl.getId()).thenReturn("rl-nopo-1");
+    when(rl.isActive()).thenReturn(true);
+    when(rl.getProduct()).thenReturn(mock(Product.class));
+    when(rl.getUOM()).thenReturn(mock(UOM.class));
+    when(rl.getMovementQuantity()).thenReturn(movementQty);
+    return rl;
+  }
+
+  /**
+   * Verifies that the backward-compatible 2-arg {@code createFromReceiptNoPo} overload
+   * behaves identically to calling the 3-arg version with {@code body=null}: the invoice
+   * ends up with the business partner's purchase price list, since there is no override
+   * to apply.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  public void createFromReceiptNoPo_twoArgOverload_fallsBackToBusinessPartnerPriceList() {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+        MockedStatic<OBProvider> obProviderMock = Mockito.mockStatic(OBProvider.class);
+        MockedStatic<WeldUtils> weldUtilsMock = Mockito.mockStatic(WeldUtils.class)) {
+
+      OBDal dal = mock(OBDal.class);
+      Session session = mock(Session.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.getSession()).thenReturn(session);
+
+      BusinessPartner bp = mock(BusinessPartner.class);
+      PriceList bpPriceList = mock(PriceList.class);
+      when(bp.getPurchasePricelist()).thenReturn(bpPriceList);
+      when(bp.getPOPaymentTerms()).thenReturn(mock(PaymentTerm.class));
+      when(bp.getPOPaymentMethod()).thenReturn(mock(FIN_PaymentMethod.class));
+
+      ShipmentInOut receipt = receiptNoPoWith(bp, mockNoPoLine(BigDecimal.valueOf(2)));
+      // ETP-4028: the invoice's currency comes from the receipt's own currency,
+      // never from the (possibly absent) purchase price list's currency.
+      Currency receiptCurrency = mock(Currency.class);
+      when(receipt.getEtgoCurrency()).thenReturn(receiptCurrency);
+
+      DocumentType docType = mock(DocumentType.class);
+      stubApInvoiceDocType(dal, docType);
+
+      OBProvider provider = mock(OBProvider.class);
+      Invoice invoice = mock(Invoice.class);
+      when(invoice.getDocumentNo()).thenReturn("AP-NOPO-1");
+      obProviderMock.when(OBProvider::getInstance).thenReturn(provider);
+      when(provider.get(Invoice.class)).thenReturn(invoice);
+
+      CreateInvoiceLinesFromProcess process = mock(CreateInvoiceLinesFromProcess.class);
+      weldUtilsMock.when(() -> WeldUtils.getInstanceFromStaticBeanManager(CreateInvoiceLinesFromProcess.class))
+          .thenReturn(process);
+
+      Invoice result = new CreatePurchaseInvoiceHandler()
+          .createFromReceiptNoPo(receipt, Collections.emptyMap());
+
+      assertSame(invoice, result);
+      verify(invoice).setPriceList(bpPriceList);
+      verify(invoice).setCurrency(receiptCurrency);
+    }
+  }
+
+  /**
+   * Verifies that when the request body carries a valid {@code priceListId}, the 3-arg
+   * {@code createFromReceiptNoPo} overload uses that price list INSTEAD of the business
+   * partner's purchase price list.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  public void createFromReceiptNoPo_threeArg_bodyPriceListOverridesBusinessPartnerDefault() throws JSONException {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+        MockedStatic<OBProvider> obProviderMock = Mockito.mockStatic(OBProvider.class);
+        MockedStatic<WeldUtils> weldUtilsMock = Mockito.mockStatic(WeldUtils.class)) {
+
+      OBDal dal = mock(OBDal.class);
+      Session session = mock(Session.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.getSession()).thenReturn(session);
+
+      BusinessPartner bp = mock(BusinessPartner.class);
+      PriceList bpPriceList = mock(PriceList.class);
+      when(bp.getPurchasePricelist()).thenReturn(bpPriceList);
+      when(bp.getPOPaymentTerms()).thenReturn(mock(PaymentTerm.class));
+      when(bp.getPOPaymentMethod()).thenReturn(mock(FIN_PaymentMethod.class));
+
+      PriceList overridePriceList = mock(PriceList.class);
+      when(dal.get(PriceList.class, "pl-override")).thenReturn(overridePriceList);
+
+      ShipmentInOut receipt = receiptNoPoWith(bp, mockNoPoLine(BigDecimal.valueOf(3)));
+      // ETP-4028: the invoice's currency comes from the receipt's own currency,
+      // never from the (user-selected) override price list's currency.
+      Currency receiptCurrency = mock(Currency.class);
+      when(receipt.getEtgoCurrency()).thenReturn(receiptCurrency);
+
+      DocumentType docType = mock(DocumentType.class);
+      stubApInvoiceDocType(dal, docType);
+
+      OBProvider provider = mock(OBProvider.class);
+      Invoice invoice = mock(Invoice.class);
+      when(invoice.getDocumentNo()).thenReturn("AP-NOPO-2");
+      obProviderMock.when(OBProvider::getInstance).thenReturn(provider);
+      when(provider.get(Invoice.class)).thenReturn(invoice);
+
+      CreateInvoiceLinesFromProcess process = mock(CreateInvoiceLinesFromProcess.class);
+      weldUtilsMock.when(() -> WeldUtils.getInstanceFromStaticBeanManager(CreateInvoiceLinesFromProcess.class))
+          .thenReturn(process);
+
+      JSONObject body = new JSONObject().put("priceListId", "pl-override");
+      Invoice result = new CreatePurchaseInvoiceHandler()
+          .createFromReceiptNoPo(receipt, Collections.emptyMap(), body);
+
+      assertSame(invoice, result);
+      verify(invoice).setPriceList(overridePriceList);
+      verify(invoice).setCurrency(receiptCurrency);
+      verify(invoice, never()).setPriceList(bpPriceList);
+    }
+  }
+
+  /**
+   * Verifies that when the body is present but {@code priceListId} is absent/blank, the
+   * 3-arg overload falls back to the business partner's purchase price list — same as the
+   * 2-arg overload.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  public void createFromReceiptNoPo_threeArg_blankPriceListIdFallsBackToBusinessPartnerDefault() throws JSONException {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+        MockedStatic<OBProvider> obProviderMock = Mockito.mockStatic(OBProvider.class);
+        MockedStatic<WeldUtils> weldUtilsMock = Mockito.mockStatic(WeldUtils.class)) {
+
+      OBDal dal = mock(OBDal.class);
+      Session session = mock(Session.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.getSession()).thenReturn(session);
+
+      BusinessPartner bp = mock(BusinessPartner.class);
+      PriceList bpPriceList = mock(PriceList.class);
+      when(bp.getPurchasePricelist()).thenReturn(bpPriceList);
+      when(bp.getPOPaymentTerms()).thenReturn(mock(PaymentTerm.class));
+      when(bp.getPOPaymentMethod()).thenReturn(mock(FIN_PaymentMethod.class));
+
+      ShipmentInOut receipt = receiptNoPoWith(bp, mockNoPoLine(BigDecimal.valueOf(1)));
+      // ETP-4028: the invoice's currency comes from the receipt's own currency,
+      // never from the (possibly absent) purchase price list's currency.
+      Currency receiptCurrency = mock(Currency.class);
+      when(receipt.getEtgoCurrency()).thenReturn(receiptCurrency);
+
+      DocumentType docType = mock(DocumentType.class);
+      stubApInvoiceDocType(dal, docType);
+
+      OBProvider provider = mock(OBProvider.class);
+      Invoice invoice = mock(Invoice.class);
+      when(invoice.getDocumentNo()).thenReturn("AP-NOPO-3");
+      obProviderMock.when(OBProvider::getInstance).thenReturn(provider);
+      when(provider.get(Invoice.class)).thenReturn(invoice);
+
+      CreateInvoiceLinesFromProcess process = mock(CreateInvoiceLinesFromProcess.class);
+      weldUtilsMock.when(() -> WeldUtils.getInstanceFromStaticBeanManager(CreateInvoiceLinesFromProcess.class))
+          .thenReturn(process);
+
+      JSONObject body = new JSONObject().put("priceListId", "");
+      Invoice result = new CreatePurchaseInvoiceHandler()
+          .createFromReceiptNoPo(receipt, Collections.emptyMap(), body);
+
+      assertSame(invoice, result);
+      verify(invoice).setPriceList(bpPriceList);
+      verify(invoice).setCurrency(receiptCurrency);
+    }
+  }
+
+  // ─── createFromReceipt — linked-PO branch (ETP-4028 / ETP-4314) ───────────
+
+  /**
+   * Verifies that the linked-PO branch of {@code createFromReceipt} overrides the
+   * invoice's currency with the receipt's own {@code EM_Etgo_Currency_ID} — read
+   * BEFORE the receipt/its lines are evicted from the Hibernate session (a lazy FK
+   * read on a detached entity would throw {@code LazyInitializationException}) —
+   * rather than the linked purchase order's currency.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  public void createFromReceipt_linkedPo_setsCurrencyFromReceiptBeforeEvict() throws JSONException {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+        MockedStatic<OBProvider> obProviderMock = Mockito.mockStatic(OBProvider.class);
+        MockedStatic<OBContext> obContextMock = Mockito.mockStatic(OBContext.class);
+        MockedStatic<WeldUtils> weldUtilsMock = Mockito.mockStatic(WeldUtils.class)) {
+
+      OBDal dal = mock(OBDal.class);
+      Session session = mock(Session.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.getSession()).thenReturn(session);
+
+      Order linkedOrder = mockOrderWithHeaderData();
+      when(linkedOrder.getId()).thenReturn("po-linked");
+
+      OrderLine ol = mock(OrderLine.class);
+      when(ol.getId()).thenReturn("ol-1");
+      Product product = mock(Product.class);
+      when(product.getId()).thenReturn("prod-1");
+      ShipmentInOutLine rl = mockReceiptLine("rl-1", true, product, BigDecimal.valueOf(3), ol);
+
+      Currency receiptCurrency = mock(Currency.class);
+      ShipmentInOut receipt = mock(ShipmentInOut.class);
+      when(receipt.getSalesOrder()).thenReturn(linkedOrder);
+      when(receipt.getMaterialMgmtShipmentInOutLineList()).thenReturn(Collections.singletonList(rl));
+      when(receipt.getEtgoCurrency()).thenReturn(receiptCurrency);
+      when(dal.get(eq(ShipmentInOut.class), eq("receipt-linked-po"))).thenReturn(receipt);
+
+      NativeQuery linkQuery = mock(NativeQuery.class);
+      when(session.createNativeQuery(anyString())).thenReturn(linkQuery);
+      when(linkQuery.setParameter(anyString(), any())).thenReturn(linkQuery);
+      when(linkQuery.executeUpdate()).thenReturn(1);
+
+      OBContext ctx = mock(OBContext.class);
+      org.openbravo.model.ad.access.User user = mock(org.openbravo.model.ad.access.User.class);
+      when(user.getId()).thenReturn("user-receipt");
+      when(ctx.getUser()).thenReturn(user);
+      obContextMock.when(OBContext::getOBContext).thenReturn(ctx);
+
+      OBProvider provider = mock(OBProvider.class);
+      Invoice invoice = mock(Invoice.class);
+      // Avoid ensureDocumentNo() falling through to the real (unmocked) Utility helper.
+      when(invoice.getDocumentNo()).thenReturn("AP-RECEIPT-1");
+      obProviderMock.when(OBProvider::getInstance).thenReturn(provider);
+      when(provider.get(Invoice.class)).thenReturn(invoice);
+
+      CreateInvoiceLinesFromProcess process = mock(CreateInvoiceLinesFromProcess.class);
+      weldUtilsMock.when(() -> WeldUtils.getInstanceFromStaticBeanManager(CreateInvoiceLinesFromProcess.class))
+          .thenReturn(process);
+
+      TestableHandler handler = new TestableHandler();
+      handler.docTypeToReturn = mock(DocumentType.class);
+
+      Invoice result = handler.createFromReceipt("receipt-linked-po", null);
+
+      assertSame(invoice, result);
+      verify(invoice).setCurrency(receiptCurrency);
+      // The lazy FK read that produces receiptCurrency must happen before eviction.
+      verify(session).evict(rl);
+      verify(session).evict(receipt);
     }
   }
 }

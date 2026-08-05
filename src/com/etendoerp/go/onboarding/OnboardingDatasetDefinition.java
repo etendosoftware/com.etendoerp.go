@@ -81,6 +81,7 @@ public final class OnboardingDatasetDefinition {
       "FIN_MATCHING_ALGORITHM",
       "FIN_PAYMENTMETHOD",
       "GL_CATEGORY",
+      "M_COSTING_RULE",
       "M_DISCOUNTSCHEMA",
       "M_LOCATOR",
       "M_PRICELIST",

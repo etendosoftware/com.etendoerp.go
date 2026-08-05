@@ -70,6 +70,11 @@ public class InventoryLineHandler implements NeoHandler {
     if (body == null) {
       return null;
     }
+    NeoResponse rejection = ServiceProductGuard.rejectIfServiceProduct(body, isPatch,
+        () -> resolvePersistedProductId(context.getRecordId()));
+    if (rejection != null) {
+      return rejection;
+    }
     try {
       if (isPost) {
         handlePostPreHook(body);
@@ -80,6 +85,18 @@ public class InventoryLineHandler implements NeoHandler {
       log.warn("[InventoryLineHandler] Pre-hook error ({}): {}", method, e.getMessage(), e);
     }
     return null;
+  }
+
+  /** Resolves the product already persisted on an existing inventory line, for PATCH requests. */
+  private static String resolvePersistedProductId(String lineId) {
+    if (StringUtils.isBlank(lineId)) {
+      return null;
+    }
+    InventoryCountLine line = OBDal.getInstance().get(InventoryCountLine.class, lineId);
+    if (line == null || line.getProduct() == null) {
+      return null;
+    }
+    return line.getProduct().getId();
   }
 
   @Override
@@ -168,7 +185,7 @@ public class InventoryLineHandler implements NeoHandler {
       return;
     }
     body.put("storageBin", locInfo.locatorId);
-    String productId = resolveProductId(body);
+    String productId = ServiceProductGuard.resolveProductId(body);
     if (productId != null) {
       double qty = queryProductStock(locInfo.warehouseId, productId);
       body.put(BOOK_QTY_FIELD, qty);
@@ -193,7 +210,7 @@ public class InventoryLineHandler implements NeoHandler {
     if (line == null || line.getPhysInventory() == null) {
       return;
     }
-    String productId = resolveProductId(body);
+    String productId = ServiceProductGuard.resolveProductId(body);
     if (productId == null) {
       if (line.getProduct() == null) {
         return;
@@ -211,17 +228,6 @@ public class InventoryLineHandler implements NeoHandler {
     OBDal.getInstance().flush();
     log.debug("[InventoryLineHandler] PATCH: bookQuantity={} product={} warehouse={}",
         qty, productId, locInfo.warehouseId);
-  }
-
-  private static String resolveProductId(JSONObject body) {
-    Object productVal = body.opt("product");
-    if (productVal instanceof JSONObject) {
-      return StringUtils.trimToNull(((JSONObject) productVal).optString("id"));
-    }
-    if (productVal instanceof String) {
-      return StringUtils.trimToNull((String) productVal);
-    }
-    return null;
   }
 
   // ── helpers ──────────────────────────────────────────────────────────

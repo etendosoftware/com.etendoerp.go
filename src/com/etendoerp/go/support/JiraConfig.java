@@ -20,10 +20,7 @@ package com.etendoerp.go.support;
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
 
-import org.apache.commons.lang3.StringUtils;
-import org.apache.logging.log4j.LogManager;
-import org.apache.logging.log4j.Logger;
-import org.openbravo.base.session.OBPropertiesProvider;
+import com.etendoerp.go.common.ConfigPropertyReader;
 
 /**
  * Jira integration configuration shared by {@link SupportIntegrationClient} (outbound calls)
@@ -38,8 +35,6 @@ import org.openbravo.base.session.OBPropertiesProvider;
  * {@code EtendoGoGoogleIdentityVerifier} elsewhere in this module.
  */
 final class JiraConfig {
-
-  private static final Logger log = LogManager.getLogger(JiraConfig.class);
 
   static final String PROP_URL = "support.jira.url";
   static final String PROP_USERNAME = "support.jira.username";
@@ -78,11 +73,11 @@ final class JiraConfig {
    * time. */
   static JiraConfig fromRuntime() {
     return new JiraConfig(
-        readConfigValue(PROP_URL, ENV_URL, null),
-        readConfigValue(PROP_USERNAME, ENV_USERNAME, null),
-        readConfigValue(PROP_TOKEN, ENV_TOKEN, null),
-        readConfigValue(PROP_BOT_EMAIL, ENV_BOT_EMAIL, null),
-        readConfigValue(PROP_BOT_NAME, ENV_BOT_NAME, DEFAULT_BOT_NAME));
+        ConfigPropertyReader.readConfigValue(PROP_URL, ENV_URL, null),
+        ConfigPropertyReader.readConfigValue(PROP_USERNAME, ENV_USERNAME, null),
+        ConfigPropertyReader.readConfigValue(PROP_TOKEN, ENV_TOKEN, null),
+        ConfigPropertyReader.readConfigValue(PROP_BOT_EMAIL, ENV_BOT_EMAIL, null),
+        ConfigPropertyReader.readConfigValue(PROP_BOT_NAME, ENV_BOT_NAME, DEFAULT_BOT_NAME));
   }
 
   /** True once URL, username, and token are all present. Callers must check this before making
@@ -116,26 +111,4 @@ final class JiraConfig {
     return Base64.getEncoder().encodeToString((username + ":" + apiToken).getBytes(StandardCharsets.UTF_8));
   }
 
-  private static String readConfigValue(String propertyName, String envName, String defaultValue) {
-    String systemValue = StringUtils.trimToNull(System.getProperty(propertyName));
-    if (systemValue != null) {
-      return systemValue;
-    }
-    String openbravoValue = readOpenbravoProperty(propertyName);
-    if (openbravoValue != null) {
-      return openbravoValue;
-    }
-    String envValue = StringUtils.trimToNull(System.getenv(envName));
-    return envValue != null ? envValue : defaultValue;
-  }
-
-  private static String readOpenbravoProperty(String propertyName) {
-    try {
-      return StringUtils.trimToNull(OBPropertiesProvider.getInstance()
-          .getOpenbravoProperties().getProperty(propertyName));
-    } catch (Exception e) {
-      log.debug("Could not read Openbravo property {}: {}", propertyName, e.getMessage(), e);
-      return null;
-    }
-  }
 }

@@ -56,6 +56,10 @@ import org.openbravo.model.common.enterprise.Organization;
 import com.etendoerp.go.common.EtendoGoCorsServlet;
 import com.etendoerp.go.common.ProtocolErrorAdapters;
 import com.etendoerp.go.common.PublicUrlResolver;
+import com.etendoerp.go.featureflags.FeatureFlagContext;
+import com.etendoerp.go.featureflags.GoFeatureFlags;
+import com.etendoerp.go.payment.TenantPaywallService;
+import com.etendoerp.go.payment.TenantPlanService;
 import com.etendoerp.go.onboarding.OnboardingBaselineService;
 import com.etendoerp.go.onboarding.OnboardingAccountingWiringService;
 import com.etendoerp.go.onboarding.OnboardingDatasetImportService;
@@ -64,8 +68,8 @@ import com.etendoerp.go.onboarding.OnboardingFiscalDataSetupService;
 import com.etendoerp.go.onboarding.OnboardingOrgInfoService;
 import com.etendoerp.go.onboarding.OnboardingMarkOrgReadyService;
 import com.etendoerp.go.onboarding.OnboardingPeriodControlService;
+import com.etendoerp.go.onboarding.OnboardingBankConnectionSyncService;
 import com.etendoerp.go.onboarding.OnboardingRoleProvisioningService;
-import com.etendoerp.go.onboarding.OnboardingPsd2SyncService;
 import com.etendoerp.go.onboarding.OnboardingSequenceGeneratorService;
 import com.etendoerp.go.schemaforge.data.Account;
 import com.etendoerp.go.schemaforge.email.EmailContractCommandSupport;
@@ -87,7 +91,8 @@ import com.smf.securewebservices.utils.SecureWebServicesUtils;
  *   GET  /sws/go/onboarding/draft  — Get the saved onboarding wizard draft (requires session token)
  *   POST /sws/go/onboarding/draft  — Save or clear the onboarding wizard draft (requires session token)
  *   GET  /sws/go/me           — Get current account info (requires session token)
- *   GET  /sws/go/environments — List environments for the account (requires session token)
+ *   GET  /sws/go/environments — List environments for the account (requires session token),
+ *                               each carrying its plan ("free" | "productive")
  *   GET  /sws/go/login?userId=X — Get an Etendo JWT for an AD_User (requires session token + ownership)
  *
  * Auth model: session token in Authorization header ("Bearer <token>").
@@ -120,6 +125,13 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private static final String FIELD_ACCOUNT = "account";
   private static final String FIELD_AUTH_METHOD = "authMethod";
   private static final String FIELD_LANGUAGE = "language";
+  private static final String FIELD_PAYMENT_TOKEN = "paymentToken";
+  private static final String FIELD_ACCOUNT_EMAIL = "accountEmail";
+  private static final String FIELD_ERROR = "error";
+  private static final String ERROR_PAYMENT_REQUIRED = "payment_required";
+  // javax.servlet.http.HttpServletResponse predates RFC 7231 and has no 402 constant.
+  private static final int SC_PAYMENT_REQUIRED = 402;
+  private static final String ZERO_ID = "0";
   private static final String STATUS_SUCCESS = FIELD_SUCCESS;
   private static final String INVALID_JSON_BODY = "Invalid JSON body";
   private static final String INTERNAL_ERROR = "Internal error";
@@ -127,6 +139,18 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private static final String INVALID_AUTHORIZATION_HEADER =
       "Missing or invalid Authorization header";
   private static final String INVALID_OR_EXPIRED_TOKEN = "Invalid or expired token";
+  // ETP-4664 — stable, machine-readable codes for register/login errors, so the
+  // frontend can translate by code instead of showing the raw English message.
+  private static final String CODE_INVALID_REQUEST = "INVALID_REQUEST";
+  private static final String CODE_REGISTER_MISSING_FIELDS = "REGISTER_MISSING_FIELDS";
+  private static final String CODE_REGISTER_EMPTY_FIELDS = "REGISTER_EMPTY_FIELDS";
+  private static final String CODE_INVALID_EMAIL_FORMAT = "INVALID_EMAIL_FORMAT";
+  private static final String CODE_EMAIL_ALREADY_REGISTERED = "EMAIL_ALREADY_REGISTERED";
+  private static final String CODE_REGISTER_SERVER_ERROR = "REGISTER_SERVER_ERROR";
+  private static final String CODE_LOGIN_MISSING_FIELDS = "LOGIN_MISSING_FIELDS";
+  private static final String CODE_INVALID_CREDENTIALS = "INVALID_CREDENTIALS";
+  private static final String CODE_LOGIN_SERVER_ERROR = "LOGIN_SERVER_ERROR";
+  private static final String CODE_INTERNAL_ERROR = "INTERNAL_ERROR";
   private static final String PROGRESS_IN_PROGRESS = "in_progress";
   private static final String PROGRESS_CLIENT = "client";
   private static final String PROGRESS_ERROR = "error";
@@ -141,7 +165,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private static final String PROGRESS_CUSTOMER = "customer";
   private static final String PROGRESS_ORG_INFO = "orgInfo";
   private static final String PROGRESS_BASELINE = "baseline";
-  private static final String PROGRESS_PSD2_SYNC = "psd2Sync";
+  private static final String PROGRESS_BANK_CONNECTION_SYNC = "bankConnectionSync";
   private static final String LEGAL_WITH_ACCOUNTING_ORG_TYPE_ID = "1";
   private static final long PASSWORD_RESET_TTL_SECONDS = 30 * 60L;
   private static final String PASSWORD_RESET_NEUTRAL_MESSAGE =
@@ -177,8 +201,10 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       new OnboardingDefaultCustomerService();
   OnboardingBaselineService onboardingBaselineService =
       new OnboardingBaselineService();
-  OnboardingPsd2SyncService onboardingPsd2SyncService =
-      new OnboardingPsd2SyncService();
+  OnboardingBankConnectionSyncService onboardingBankConnectionSyncService =
+      new OnboardingBankConnectionSyncService();
+  TenantPaywallService tenantPaywallService = new TenantPaywallService();
+  TenantPlanService tenantPlanService = new TenantPlanService();
   private final TransactionalAuthEmailSender authEmailSender;
   private final EtendoGoSsoProviderRegistry ssoProviderRegistry;
 
@@ -268,7 +294,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     try {
       body = readJsonBody(request);
     } catch (JSONException e) {
-      writeError(response, HttpServletResponse.SC_BAD_REQUEST, INVALID_JSON_BODY);
+      writeError(response, HttpServletResponse.SC_BAD_REQUEST, CODE_INVALID_REQUEST,
+          INVALID_JSON_BODY, INVALID_JSON_BODY);
       return;
     }
 
@@ -282,13 +309,15 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       name = body.getString("name").trim();
       language = body.optString(FIELD_LANGUAGE, "").trim();
     } catch (JSONException e) {
-      writeError(response, HttpServletResponse.SC_BAD_REQUEST,
+      writeError(response, HttpServletResponse.SC_BAD_REQUEST, CODE_REGISTER_MISSING_FIELDS,
+          "Missing required fields: email, password, name",
           "Missing required fields: email, password, name");
       return;
     }
 
     if (email.isEmpty() || password.isEmpty() || name.isEmpty()) {
-      writeError(response, HttpServletResponse.SC_BAD_REQUEST,
+      writeError(response, HttpServletResponse.SC_BAD_REQUEST, CODE_REGISTER_EMPTY_FIELDS,
+          "Fields email, password, and name must not be empty",
           "Fields email, password, and name must not be empty");
       return;
     }
@@ -296,7 +325,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     // characters and bare LIKE wildcards (e.g. "%") from ever reaching the account store, which
     // together with the escaped ownership LIKE keeps tenant isolation intact (ETP-4428).
     if (!EmailContractCommandSupport.isValidEmail(email)) {
-      writeError(response, HttpServletResponse.SC_BAD_REQUEST, "Invalid email format");
+      writeError(response, HttpServletResponse.SC_BAD_REQUEST, CODE_INVALID_EMAIL_FORMAT,
+          "Invalid email format", "Invalid email format");
       return;
     }
     if (!PasswordPolicy.isStrong(password)) {
@@ -309,7 +339,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       OBContext.setAdminMode(true);
 
       if (EtendoGoJwtDalHelper.findActiveAccountByEmail(email) != null) {
-        writeError(response, HttpServletResponse.SC_BAD_REQUEST, "Email already registered");
+        writeError(response, HttpServletResponse.SC_BAD_REQUEST, CODE_EMAIL_ALREADY_REGISTERED,
+            "Email already registered", "Email already registered");
         return;
       }
 
@@ -334,11 +365,12 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     } catch (RuntimeException e) {
       EtendoGoDalHelper.rollbackDalChanges("account registration", e, log);
       log.error("Database error during account registration", e);
-      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
-          "Registration failed due to a server error");
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, CODE_REGISTER_SERVER_ERROR,
+          "Registration failed due to a server error", "Registration failed due to a server error");
     } catch (JSONException e) {
       log.error("JSON error building register response", e);
-      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, INTERNAL_ERROR);
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, CODE_INTERNAL_ERROR,
+          INTERNAL_ERROR, INTERNAL_ERROR);
     } finally {
       OBContext.restorePreviousMode();
     }
@@ -355,7 +387,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     try {
       body = readJsonBody(request);
     } catch (JSONException e) {
-      writeError(response, HttpServletResponse.SC_BAD_REQUEST, INVALID_JSON_BODY);
+      writeError(response, HttpServletResponse.SC_BAD_REQUEST, CODE_INVALID_REQUEST,
+          INVALID_JSON_BODY, INVALID_JSON_BODY);
       return;
     }
 
@@ -365,7 +398,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       email = body.getString(FIELD_EMAIL).trim().toLowerCase();
       password = body.getString(FIELD_PASSWORD);
     } catch (JSONException e) {
-      writeError(response, HttpServletResponse.SC_BAD_REQUEST,
+      writeError(response, HttpServletResponse.SC_BAD_REQUEST, CODE_LOGIN_MISSING_FIELDS,
+          "Missing required fields: email, password",
           "Missing required fields: email, password");
       return;
     }
@@ -377,7 +411,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       Account account = EtendoGoJwtDalHelper.findActiveAccountByEmail(email);
       if (account == null || !EtendoGoJwtDalHelper.hasLocalPassword(account)
           || !verifyPassword(password, account.getPasswordHash())) {
-        writeError(response, HttpServletResponse.SC_UNAUTHORIZED, "Invalid credentials");
+        writeError(response, HttpServletResponse.SC_UNAUTHORIZED, CODE_INVALID_CREDENTIALS,
+            "Invalid credentials", "Invalid credentials");
         return;
       }
 
@@ -398,11 +433,12 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     } catch (RuntimeException e) {
       EtendoGoDalHelper.rollbackDalChanges("login", e, log);
       log.error("Database error during login", e);
-      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
-          "Login failed due to a server error");
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, CODE_LOGIN_SERVER_ERROR,
+          "Login failed due to a server error", "Login failed due to a server error");
     } catch (JSONException e) {
       log.error("JSON error building login response", e);
-      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, INTERNAL_ERROR);
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, CODE_INTERNAL_ERROR,
+          INTERNAL_ERROR, INTERNAL_ERROR);
     } finally {
       OBContext.restorePreviousMode();
     }
@@ -901,7 +937,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   /**
    * GET /sws/go/environments
    * Header: Authorization: Bearer <session_token>
-   * Returns 200 with environments linked to the account.
+   * Returns 200 with environments linked to the account, each carrying its plan
+   * ("free" | "productive"), plus the account email as the flag-targeting identity.
    * Links via AD_User.username matching the account email.
    */
   private void handleEnvironments(HttpServletRequest request, HttpServletResponse response)
@@ -939,6 +976,13 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
 
       JSONObject result = new JSONObject();
       result.put("environments", envArray);
+      // The account email is the backend's feature-flag targeting key. Returned here (ETP-4686)
+      // because the only account identity the web client persists is the ERP admin username of the
+      // selected environment, which would bucket the same user differently once a targeting-aware
+      // provider is wired up. Note this is necessary but NOT sufficient: the core's
+      // fetchEnvironments helper drops top-level fields, and the client needs one identity at
+      // bootstrap rather than per page. See docs/feature-flags-and-tenant-upgrade.md §1.
+      result.put(FIELD_ACCOUNT_EMAIL, account.getEmail());
       writeResponse(response, HttpServletResponse.SC_OK, result);
     } catch (RuntimeException e) {
       log.error("Database error in /environments", e);
@@ -1008,12 +1052,19 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   /**
    * POST /sws/go/onboarding
    * Header: Authorization: Bearer <session_token>
-   * Body: { "clientName": "...", "currency": "EUR", "language": "es_ES", "countryCode": "ES" }
+   * Body: { "clientName": "...", "currency": "EUR", "language": "es_ES", "countryCode": "ES",
+   *         "paymentToken": "mock-paid-..." }
    *
    * Creates a new Etendo environment (AD_Client + AD_Org) using the existing
    * InitialClientSetup and InitialOrgSetup business utilities.
    *
    * Streams NDJSON progress lines to the frontend.
+   *
+   * <p>When the {@code tenant-upgrade} flag is on, an account that already owns a tenant must
+   * supply an accepted {@code paymentToken} to create an additional one; otherwise the request is
+   * refused with HTTP 402 and {@code {"error":"payment_required"}} before any provisioning starts.
+   * The flag defaults to off, and a first tenant is always free. See
+   * {@code docs/feature-flags-and-tenant-upgrade.md}.
    */
   private void handleOnboarding(HttpServletRequest request, HttpServletResponse response)
       throws IOException {
@@ -1036,6 +1087,24 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
 
     String currencyId = resolveCurrencyId(onboardingRequest.currencyIso, response);
     if (currencyId == null) {
+      return;
+    }
+
+    // Paywall (ETP-4686). Runs before the NDJSON stream opens and before any provisioning, so a
+    // refused request leaves no half-created tenant behind and can still answer with a plain
+    // JSON error instead of a stream. The backend is authoritative here: the /upgrade page in the
+    // web client shows the checkout, but this check is what actually gates tenant creation.
+    boolean paidUpgrade;
+    try {
+      PaywallOutcome paywall = evaluatePaywall(accountEmail, onboardingRequest);
+      if (paywall.decision.isBlocked()) {
+        writePaymentRequiredError(response, paywall.decision);
+        return;
+      }
+      paidUpgrade = paywall.paid;
+    } catch (RuntimeException e) {
+      log.error("Paywall evaluation failed for onboarding", e);
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, SERVER_ERROR);
       return;
     }
 
@@ -1071,6 +1140,14 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
         return;
       }
 
+      if (paidUpgrade) {
+        // Joins the onboarding transaction, so a successful marker commits with the tenant. It is
+        // best-effort in the other direction: markProductive swallows its own failures, so a tenant
+        // can commit unmarked and read back as free, rather than have provisioning rolled back over
+        // a plan marker.
+        tenantPlanService.markProductive(clientId, adminContext.starOrgId);
+      }
+
       // The returned flag (created vs. already-existing) is no longer used to gate downstream
       // steps — the provisioning chain reconciles unconditionally (ETP-4428). A null return still
       // signals a failure that already emitted its own progress/result line.
@@ -1094,10 +1171,10 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       }
 
       EtendoGoDalHelper.commitDalChanges("onboarding", log);
-      // Activate the PSD2 statement-sync schedule now that its row is committed and therefore
+      // Activate the bank statement-sync schedule now that its row is committed and therefore
       // visible to the scheduler's own DB connection. Best-effort: internally swallows failures
       // and the SCH row is still picked up on the next scheduler initialization.
-      onboardingPsd2SyncService.activateSchedule(clientId);
+      onboardingBankConnectionSyncService.activateSchedule(clientId);
       Account account = findAccountForCommittedOnboarding(token, accountEmail);
       clearOnboardingDraftBestEffort(account);
       String normalizedLanguage = StringUtils.trimToNull(onboardingRequest.language);
@@ -1180,6 +1257,83 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     }
   }
 
+  /**
+   * Resolves the paywall decision for an onboarding request (ETP-4686).
+   *
+   * <p>Reads the {@code tenant-upgrade} flag from the backend flag provider — the authoritative
+   * evaluation, independent of whatever the web client decided — and combines it with what the
+   * account already owns. The two ownership lookups only run while the flag is on, so with the flag
+   * off this method costs nothing and always allows the request, exactly as before the feature.
+   */
+  private PaywallOutcome evaluatePaywall(String accountEmail,
+      OnboardingRequestData onboardingRequest) {
+    if (!isTenantUpgradeEnabled(accountEmail)) {
+      return new PaywallOutcome(TenantPaywallService.Decision.ALLOWED, false);
+    }
+    OBContext.setOBContext(ZERO_ID, ZERO_ID, ZERO_ID, ZERO_ID);
+    OBContext.setAdminMode(true);
+    try {
+      boolean ownsTenant = EtendoGoJwtDalHelper.countTenantsOwnedByAccountEmail(accountEmail) > 0;
+      boolean resuming = isResumingOwnedTenant(onboardingRequest.clientName, accountEmail);
+      TenantPaywallService.Decision decision = tenantPaywallService.decide(true, ownsTenant,
+          resuming, onboardingRequest.paymentToken);
+      // Only a request that actually had to clear the paywall counts as a paid upgrade. A first
+      // tenant, or a resume, stays on the free plan even if the payload carried a token.
+      boolean paid = !decision.isBlocked() && ownsTenant && !resuming;
+      return new PaywallOutcome(decision, paid);
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  /**
+   * Evaluates the {@code tenant-upgrade} flag for this account, targeting on the account email.
+   *
+   * <p><strong>The web client does not yet target on the same value.</strong> It targets on
+   * {@code sf_auth_user}, which the core writes as the ERP admin username of the selected
+   * environment, so the two ends currently bucket a given user differently.
+   *
+   * <p>ETP-4693 supplies the resolution path: {@code GET /sws/neo/session} now returns
+   * {@code accountId} and {@code accountEmail} for the authenticated user, which is the identity
+   * this method targets on. The divergence closes once the web client consumes them — that half is
+   * still open, so do <em>not</em> read this as resolved. It must be closed before any
+   * targeting-aware provider is installed; see the targeting-key precondition in
+   * {@code docs/feature-flags-and-tenant-upgrade.md} §1 and §4.
+   */
+  private boolean isTenantUpgradeEnabled(String accountEmail) {
+    return GoFeatureFlags.isEnabled(GoFeatureFlags.FLAG_TENANT_UPGRADE,
+        FeatureFlagContext.forAccount(accountEmail));
+  }
+
+  /**
+   * Tells a resume of an existing tenant from a request for a new one. A company name that already
+   * resolves to a client this account owns is the retry path {@code validateExistingClient} handles
+   * downstream — provisioning it again reconciles what is missing rather than creating a tenant, so
+   * it must not be charged a second time.
+   */
+  private boolean isResumingOwnedTenant(String clientName, String accountEmail) {
+    String existingClientId = EtendoGoJwtSupport.findClientIdByName(clientName);
+    return existingClientId != null
+        && EtendoGoJwtDalHelper.clientBelongsToAccountEmail(existingClientId, accountEmail);
+  }
+
+  private void writePaymentRequiredError(HttpServletResponse response,
+      TenantPaywallService.Decision decision) throws IOException {
+    String message = decision == TenantPaywallService.Decision.PAYMENT_DECLINED
+        ? "The payment was declined. Use a different payment method and try again."
+        : "Creating an additional environment requires a payment. Complete the checkout and retry.";
+    JSONObject body = new JSONObject();
+    try {
+      body.put(FIELD_ERROR, ERROR_PAYMENT_REQUIRED);
+      body.put(FIELD_MESSAGE, message);
+    } catch (JSONException e) {
+      log.error("Could not build the payment-required response", e);
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, INTERNAL_ERROR);
+      return;
+    }
+    writeResponse(response, SC_PAYMENT_REQUIRED, body);
+  }
+
   private String resolveOnboardingAccountEmail(String token, HttpServletResponse response)
       throws IOException {
     String accountEmail = null;
@@ -1246,6 +1400,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       // it becomes the display name of the client admin user (otherwise Etendo's
       // InitialClientSetup leaves it as the username/email).
       data.fullName = body.optString("fullName", "").trim();
+      data.paymentToken = body.optString(FIELD_PAYMENT_TOKEN, "").trim();
       return data;
     } catch (JSONException e) {
         String message = e.getMessage() != null && e.getMessage().contains(FIELD_CLIENT_NAME)
@@ -1480,7 +1635,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     if (!ensureDefaultCustomer(writer, clientId, orgId, adminUserId, adminRoleId)) {
       return false;
     }
-    if (!schedulePsd2Sync(writer, clientId, orgId, adminUserId, adminRoleId)) {
+    if (!scheduleBankConnectionSync(writer, clientId, orgId, adminUserId, adminRoleId)) {
       return false;
     }
     // Final action before commitDalChanges: stamp the tenant's data-fix baseline so it lands in the
@@ -1668,21 +1823,22 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   }
 
   /**
-   * Creates the per-client daily PSD2 "Get Bank Statements" schedule (idempotent). Non-fatal: a
+   * Creates the per-client daily bank statement-sync schedule, backed by the PSD2 module's
+   * "Get Bank Statements" process (idempotent). Non-fatal: a
    * failure here must never block onboarding, so it is logged and reported as skipped rather than
    * aborting. The Quartz job is activated after the commit (see {@code handleOnboarding}); even if
    * activation does not run, the {@code SCH} row is picked up on the next scheduler initialization.
    */
-  boolean schedulePsd2Sync(PrintWriter writer, String clientId, String orgId,
+  boolean scheduleBankConnectionSync(PrintWriter writer, String clientId, String orgId,
       String adminUserId, String adminRoleId) {
-    sendProgress(writer, PROGRESS_PSD2_SYNC, PROGRESS_IN_PROGRESS,
+    sendProgress(writer, PROGRESS_BANK_CONNECTION_SYNC, PROGRESS_IN_PROGRESS,
         "Scheduling automatic bank statement sync...");
     try {
-      onboardingPsd2SyncService.schedulePsd2StatementSync(clientId, orgId, adminUserId, adminRoleId);
-      sendProgress(writer, PROGRESS_PSD2_SYNC, "done", "Automatic bank statement sync scheduled");
+      onboardingBankConnectionSyncService.scheduleBankConnectionStatementSync(clientId, orgId, adminUserId, adminRoleId);
+      sendProgress(writer, PROGRESS_BANK_CONNECTION_SYNC, "done", "Automatic bank statement sync scheduled");
     } catch (Exception e) {
-      log.warn("Could not schedule PSD2 statement sync for client {}: {}", clientId, e.getMessage());
-      sendProgress(writer, PROGRESS_PSD2_SYNC, "done", "Automatic bank statement sync skipped");
+      log.warn("Could not schedule bank statement sync for client {}: {}", clientId, e.getMessage());
+      sendProgress(writer, PROGRESS_BANK_CONNECTION_SYNC, "done", "Automatic bank statement sync skipped");
     }
     return true;
   }
@@ -1934,6 +2090,30 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   }
 
   /**
+   * Write a stable, machine-readable register/login error envelope: {@code
+   * { "error": { "code": "...", "message": "...", "userMessage": "...", "status": N } } }.
+   *
+   * ETP-4664 — lets the frontend translate the error by {@code code} instead of
+   * showing the raw (English) {@code message}/{@code userMessage} text.
+   */
+  private void writeError(HttpServletResponse response, int status, String code, String message,
+      String userMessage) throws IOException {
+    try {
+      JSONObject error = new JSONObject();
+      error.put(FIELD_CODE, code);
+      error.put(FIELD_MESSAGE, message);
+      error.put(FIELD_USER_MESSAGE, userMessage);
+      error.put(FIELD_STATUS, status);
+      JSONObject envelope = new JSONObject();
+      envelope.put(PROGRESS_ERROR, error);
+      writeResponse(response, status, envelope);
+    } catch (JSONException e) {
+      log.error("JSON error building error response", e);
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, INTERNAL_ERROR);
+    }
+  }
+
+  /**
    * Write the weak-password rejection as HTTP 400 with a stable, machine-readable
    * envelope: {@code { "error": { "code": "WEAK_PASSWORD", "message": "...",
    * "userMessage": "..." } } }.
@@ -1960,11 +2140,28 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     private String countryCode;
     private String address;
     private String fullName;
+    // Present only when the paid second-tenant flow issued one (ETP-4686). Ignored while the
+    // tenant-upgrade flag is off and for an account's first tenant.
+    private String paymentToken;
   }
 
   private static class AdminContextData {
     private String adminRoleId;
     private String adminUserId;
     private String starOrgId;
+  }
+
+  /**
+   * Paywall verdict for one onboarding request: whether it may proceed, and whether it proceeded by
+   * paying (which is what marks the resulting tenant productive).
+   */
+  private static class PaywallOutcome {
+    private final TenantPaywallService.Decision decision;
+    private final boolean paid;
+
+    PaywallOutcome(TenantPaywallService.Decision decision, boolean paid) {
+      this.decision = decision;
+      this.paid = paid;
+    }
   }
 }

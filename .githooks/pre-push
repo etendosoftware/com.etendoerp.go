@@ -9,6 +9,47 @@ CORE_DIR="$(cd -- "$MODULE_DIR/../.." && pwd)"
 
 echo "==> Running pre-push checks..."
 
+# ----------------------------------------------------------------------------
+# Hooks-Verified: every commit being pushed must carry a valid trailer, proving
+# the pre-commit hooks were installed and ran for that exact tree.
+# Set HOOKS_VERIFY_SKIP=1 to bypass (e.g. when pushing imported/legacy history).
+# ----------------------------------------------------------------------------
+if [ "$HOOKS_VERIFY_SKIP" != "1" ]; then
+  . "$SCRIPT_DIR/lib/hooks-proof.sh"
+  UNVERIFIED=""
+  while read -r _local_ref local_sha _remote_ref remote_sha; do
+    [ "$local_sha" = "0000000000000000000000000000000000000000" ] && continue
+    if [ "$remote_sha" = "0000000000000000000000000000000000000000" ]; then
+      RANGE="$(git rev-list "$local_sha" --not --remotes)"
+    else
+      # Same `--not --remotes` guard as the new-branch case above, and for the
+      # same reason. Without it, merging the epic into a task branch pulls every
+      # epic commit that is not yet on this branch's remote into the range —
+      # including the ones that predate this check — and the push is refused for
+      # history the branch neither authored nor can legitimately rewrite.
+      RANGE="$(git rev-list "${remote_sha}..${local_sha}" --not --remotes)"
+    fi
+    for sha in $RANGE; do
+      hooks_verify_commit "$sha" || UNVERIFIED="$UNVERIFIED $sha"
+    done
+  done
+
+  if [ -n "$UNVERIFIED" ]; then
+    echo "❌ ERROR: commits without a valid '${HOOKS_TRAILER_KEY}' trailer:"
+    for sha in $UNVERIFIED; do
+      printf '     %s  %s\n' "$(git rev-parse --short "$sha")" "$(git log -1 --format=%s "$sha")"
+    done
+    echo ""
+    echo "   The git hooks were not active when those commits were made."
+    echo "   Fix: git config core.hooksPath .githooks   (see .githooks/README.md)"
+    echo "        git rebase --exec 'git commit --amend --no-edit' <base>"
+    echo "   Bypass (discouraged): HOOKS_VERIFY_SKIP=1 git push"
+    exit 1
+  fi
+  echo "✔ Hooks-Verified trailer present on all pushed commits."
+fi
+
+
 # Path where run-sonar.sh writes a copy-pasteable handoff prompt when the
 # Quality Gate fails. Cleared up-front so a stale file from a previous run is
 # never shown for an unrelated failure.
@@ -259,7 +300,7 @@ run_step "2" "Running JUnit/Gradle tests" "$CORE_DIR" "tmp/pre-push/junit-tests.
 # --fail-on-gate makes run-sonar.sh exit non-zero when the Quality Gate is in
 # ERROR, so this step (and the push) is blocked exactly when CI's gate would fail.
 if [ -n "$BASE_REF" ]; then
-  SONAR_CMD="./run-sonar.sh --base-ref \"$BASE_REF\" --fail-on-gate"
+  SONAR_CMD="./run-sonar.sh --base-ref \"$BASE_REF\" --fail-on-gate --compare-coverage"
 else
   SONAR_CMD="./run-sonar.sh --all-issues --fail-on-gate"
 fi
