@@ -17,6 +17,8 @@
 
 package com.etendoerp.go.schemaforge;
 
+import java.util.Optional;
+
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONException;
@@ -24,12 +26,15 @@ import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.utility.OBCurrencyUtils;
+import org.openbravo.model.ad.access.User;
 import org.openbravo.model.ad.system.ClientInformation;
 import org.openbravo.model.ad.utility.Image;
 import org.openbravo.model.common.currency.Currency;
 import org.openbravo.model.common.enterprise.OrganizationInformation;
 import org.openbravo.model.common.geography.Location;
 
+import com.etendoerp.go.common.GoAccountResolver;
+import com.etendoerp.go.schemaforge.data.Account;
 import com.etendoerp.go.schemaforge.util.NeoAddressHelper;
 
 /**
@@ -48,9 +53,17 @@ import com.etendoerp.go.schemaforge.util.NeoAddressHelper;
  *     "address1": "Pg. de Gracia, 123 2º-1ª",
  *     "address2": null,
  *     "cityLine": "08009 - Barcelona (BARCELONA)"
- *   }
+ *   },
+ *   "accountId":    "A1B2C3...",
+ *   "accountEmail": "user@example.com"
  * }
  * </pre>
+ *
+ * <p>{@code accountId} and {@code accountEmail} identify the platform account
+ * ({@code ETGO_ACCOUNT}) behind the authenticated user, resolved server-side (ETP-4693). They are
+ * the identity feature-flag targeting uses, so the web client can target the same value the backend
+ * does. Both are <strong>omitted</strong> — not null, not empty — when the session's user has no
+ * platform account. See {@code docs/feature-flags-and-tenant-upgrade.md} §1.
  *
  * Currency resolution order (via {@code OBCurrencyUtils.getOrgCurrency()}):
  * <ol>
@@ -77,6 +90,11 @@ public class NeoSessionService {
   private static final String KEY_ORG_ADDRESS1 = "address1";
   private static final String KEY_ORG_ADDRESS2 = "address2";
   private static final String KEY_ORG_CITY_LINE = "cityLine";
+  // ETGO_ACCOUNT identity (ETP-4693). Deliberately NOT named account_id: in the Mixpanel
+  // observability layer that name already means the AD_Client (tenant) id, and reusing it would
+  // silently merge two different identities in both analytics and flag-targeting rules.
+  private static final String KEY_ACCOUNT_ID = "accountId";
+  private static final String KEY_ACCOUNT_EMAIL = "accountEmail";
 
   private NeoSessionService() {
     // utility class — no instances
@@ -124,11 +142,49 @@ public class NeoSessionService {
       body.put(KEY_YOUR_COMPANY_DOCUMENT_IMAGE_ID,
           yourCompanyDocumentImageId != null ? yourCompanyDocumentImageId : JSONObject.NULL);
       body.put(KEY_ORGANIZATION, organization != null ? organization : JSONObject.NULL);
+      putAccountIdentity(body);
       return NeoResponse.ok(body);
     } catch (JSONException e) {
       log.error("Failed to serialize session response", e);
       return NeoResponse.error(500, "Failed to serialize session response");
     }
+  }
+
+  /**
+   * Adds the platform account identity of the authenticated user to the session payload.
+   *
+   * <p>Both fields are <strong>omitted entirely</strong> when the session's AD_User has no
+   * {@code ETGO_ACCOUNT} behind it — a hand-created ERP user or a system user is an ordinary case,
+   * not an error, and an empty-string sentinel would be indistinguishable from a real value to a
+   * targeting rule. Consumers must treat absence as "unknown identity", never as a match.
+   *
+   * <p>This is what lets the web client target feature flags on the same identity the backend
+   * targets. Resolution is server-side from the authenticated user; the client never supplies it.
+   *
+   * @param body the session payload being built
+   * @throws JSONException on serialization failure
+   */
+  static void putAccountIdentity(JSONObject body) throws JSONException {
+    // Starts empty so a failed lookup needs no early return of its own: it falls
+    // through to the same absent-account path as a session that simply has none.
+    Optional<Account> account = Optional.empty();
+    try {
+      OBContext.setAdminMode(true);
+      User user = OBContext.getOBContext().getUser();
+      if (user != null) {
+        account = GoAccountResolver.findAccountByUsername(user.getUsername());
+      }
+    } catch (RuntimeException e) {
+      // Identity is an enrichment of the session payload: never fail the session over it.
+      log.warn("Could not resolve the account identity for the session: {}", e.getMessage(), e);
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+    if (!account.isPresent()) {
+      return;
+    }
+    body.put(KEY_ACCOUNT_ID, account.get().getId());
+    body.put(KEY_ACCOUNT_EMAIL, account.get().getEmail());
   }
 
   /**

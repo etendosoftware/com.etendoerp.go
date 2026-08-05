@@ -77,7 +77,7 @@ import org.openbravo.model.materialmgmt.transaction.ShipmentInOutLine;
  *   <li>{@code handleAvailableShipments()} — missing businessPartner, SQL empty, SQL with rows.</li>
  *   <li>{@code handleAvailableShipmentLines()} — missing shipmentId, SQL empty, SQL with rows.</li>
  *   <li>{@code handleCreateReturnInvoice()} — missing recordId, receipt not found,
- *       receipt not completed, no product lines, no ARI_RM doc type.</li>
+ *       receipt not completed, no product lines, no rectificative (ARI) doc type.</li>
  *   <li>{@code afterHandle()} — guard conditions, no-id enrichment, SQL empty path,
  *       SQL with rows (addShipmentToMap + addInvoiceToMap), and outer-catch path.</li>
  * </ul>

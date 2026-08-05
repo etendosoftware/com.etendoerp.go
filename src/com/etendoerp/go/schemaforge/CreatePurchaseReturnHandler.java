@@ -113,6 +113,8 @@ public class CreatePurchaseReturnHandler implements NeoHandler {
         returnReceipt.setMovementDate(today);
         returnReceipt.setAccountingDate(today);
         returnReceipt.setCompletelyInvoiced(false);
+        // ETP-4028: EM_Etgo_Currency_ID is mandatory on M_InOut — every new record must carry it.
+        returnReceipt.setEtgoCurrency(original.getEtgoCurrency());
         returnReceipt.setCreatedBy(currentUser);
         returnReceipt.setUpdatedBy(currentUser);
         returnReceipt.setCreationDate(new Date());
