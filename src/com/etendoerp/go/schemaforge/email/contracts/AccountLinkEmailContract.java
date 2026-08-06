@@ -85,6 +85,11 @@ final class AccountLinkEmailContract implements EmailContract {
     if (!editsRejection.isAllowed()) {
       return editsRejection;
     }
+    EmailAuthorizationResult messageRejection =
+        EmailContractCommandSupport.rejectMessageEditsIfPresent(command);
+    if (!messageRejection.isAllowed()) {
+      return messageRejection;
+    }
     EmailAuthorizationResult validation = configuredLinkPath == null
         ? EmailContractCommandSupport.validateCommand(command,
             EmailContractCommandSupport.FIELD_ACCOUNT_ID,
