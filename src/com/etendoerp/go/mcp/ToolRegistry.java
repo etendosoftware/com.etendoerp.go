@@ -625,8 +625,11 @@ public class ToolRegistry {
             + "and which fields have FK selectors. Call this BEFORE neo_create to know which "
             + "fields exist and which are required — and prefer view:\"create\", which returns "
             + "only the fields you may send, already split into required/optional. Only fields "
-            + "with userRequired=true need to be provided: a field that is mandatory but carries "
-            + "a default is filled by the server, so it is NOT userRequired. System fields are "
+            + "with userRequired=true need to be provided: a field that is mandatory but that the "
+            + "server can already resolve a value for — from an AD default, a session preference, "
+            + "the business partner's configuration, or a callout — is filled by the server, so it "
+            + "is NOT userRequired. In view:\"create\" those appear under optional with "
+            + "serverDefaulted=true. System fields are "
             + "auto-derived by Etendo callouts. Pass view:\"actions\" for the callable "
             + "buttons/processes instead.",
         buildObjectSchema(props, List.of("spec", "entity")));

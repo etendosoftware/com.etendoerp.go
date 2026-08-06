@@ -18,6 +18,7 @@
 package com.etendoerp.go.mcp;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
@@ -812,8 +813,10 @@ public class McpToolRouter {
     // required/optional. 157 fields / 62 kB on sales-invoice/header collapses to the handful that
     // are the agent's to decide — the full response exceeds the client's token limit outright.
     if (McpSchemaCreateView.isCreateView(view)) {
-      return wrapAsTextContent(
-          McpSchemaCreateView.buildResponse(specName, entityName, fieldsArray).toString(2));
+      return wrapAsTextContent(McpSchemaCreateView
+          .buildResponse(specName, entityName, fieldsArray,
+              serverDefaultedNames(specName, entityName, adTab, sfEntity))
+          .toString(2));
     }
     // IMP-12: fields:[…] — an explicit whitelist, for an agent that already knows what it wants.
     // Unmatched names are echoed back rather than dropped in silence (cf. IMP-18).
@@ -872,6 +875,46 @@ public class McpToolRouter {
         + "modifying records.");
 
     return wrapAsTextContent(entitySchema.toString(2));
+  }
+
+  /**
+   * Names {@code neo_defaults} already resolves a value for, so {@code view:"create"} can demote
+   * them out of {@code required} (IMP-12 §11.2).
+   *
+   * <p>The static {@code userRequired} rule can only see {@code AD_Column.DefaultValue}, which is an
+   * incomplete proxy for "the server will supply this": on {@code sales-invoice/header} four of the
+   * six fields it reports as required ({@code transactionDocument}, {@code paymentMethod},
+   * {@code paymentTerms}, {@code priceList}) carry no column default yet are resolved at runtime
+   * from session preferences, the business partner's configuration, or an AD callout. Asking the
+   * agent for them is asking the user for something Etendo already knows.</p>
+   *
+   * <p>This costs one defaults resolution, paid <b>only</b> when {@code view:"create"} is requested
+   * — the default response and {@code view:"actions"} are untouched. Resolution is best-effort: any
+   * failure falls back to the static rule (an over-reported {@code required} field is a worse
+   * answer, not a broken one), so a schema call never fails because of the cross-check.</p>
+   */
+  private static Set<String> serverDefaultedNames(String specName, String entityName, Tab adTab,
+      SFEntity sfEntity) {
+    try {
+      NeoContext ctx = NeoContext.builder()
+          .specName(specName)
+          .entityName(entityName)
+          .httpMethod(HTTP_METHOD_GET)
+          .adTab(adTab)
+          .sfEntity(sfEntity)
+          .obContext(OBContext.getOBContext())
+          .queryParams(new HashMap<>())
+          .build();
+      NeoResponse defaults = NeoDefaultsService.resolveDefaults(ctx, null);
+      if (defaults == null || defaults.getHttpStatus() >= 400) {
+        return Collections.emptySet();
+      }
+      return McpSchemaCreateView.resolvedDefaultNames(defaults.getBody());
+    } catch (Exception e) {
+      log.warn("neo_schema view:create could not resolve defaults for {}/{}; falling back to the "
+          + "AD_Column.DefaultValue rule", specName, entityName, e);
+      return Collections.emptySet();
+    }
   }
 
   static String mapColumnTypeStatic(String refId) {

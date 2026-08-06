@@ -37,9 +37,10 @@ import org.codehaus.jettison.json.JSONObject;
  * <p>Two independent projections, both additive — omitting them leaves the response untouched:
  * <ul>
  *   <li><b>{@code view:"create"}</b> — only fields the agent may actually supply, in two groups:
- *       {@code required} ({@code userRequired}) and {@code optional} (the rest, so an agent can still
- *       enrich the record). Both are filtered through
- *       {@link McpSchemaFieldBuilder#isAgentSuppliable} first.</li>
+ *       {@code required} (mandatory <i>and</i> unresolved by anything else) and {@code optional} (the
+ *       rest, so an agent can still enrich the record). Both are filtered through
+ *       {@link McpSchemaFieldBuilder#isAgentSuppliable} first. Membership of {@code required} is
+ *       cross-checked against {@code neo_defaults} — see {@link #resolvedDefaultNames}.</li>
  *   <li><b>{@code fields:[…]}</b> — an explicit whitelist of descriptor names, for an agent that
  *       already knows what it wants and needs the shape of those fields only.</li>
  * </ul>
@@ -92,8 +93,11 @@ final class McpSchemaCreateView {
 
   static final String CREATE_HINT =
       "Every field listed here is one you may send to neo_create. Fields under 'required' MUST be "
-      + "provided — they are mandatory and nothing else supplies them. Fields under 'optional' are "
-      + "accepted but not needed. Anything omitted from this view is either auto-derived, read-only "
+      + "provided — they are mandatory and neither an AD default nor neo_defaults resolves a value "
+      + "for them, so nothing else supplies them. Fields under 'optional' are accepted but not "
+      + "needed; those carrying serverDefaulted=true are mandatory in Etendo but the server already "
+      + "has a value for them, so do not ask the user — send one only to override it. "
+      + "Anything omitted from this view is either auto-derived, read-only "
       + "or excluded — do not send it, and do not call neo_schema again to look for it. Fields with "
       + "hasSelector=true take a record id: resolve it with neo_selectors, or pass the display name "
       + "and let the server resolve it. Fields with businessCritical=true carry core business data — "
@@ -108,6 +112,50 @@ final class McpSchemaCreateView {
     return VIEW_CREATE.equalsIgnoreCase(view);
   }
 
+  private static final String KEY_SERVER_DEFAULTED = "serverDefaulted";
+  private static final String KEY_METADATA = "metadata";
+  private static final String IDENTIFIER_SUFFIX = "$_identifier";
+
+  /**
+   * The field names {@code neo_defaults} resolves a usable value for, read off its response body.
+   *
+   * <p><b>Why this cannot be derived from the schema.</b> {@link McpSchemaFieldBuilder#addVisibility}
+   * asks {@code AD_Column.DefaultValue} whether the server will supply a field, and that is an
+   * incomplete proxy. Measured on {@code sales-invoice/header}: four of the six fields the static rule
+   * calls {@code userRequired} — {@code transactionDocument}, {@code paymentMethod},
+   * {@code paymentTerms}, {@code priceList} — have no {@code AD_Column.DefaultValue} at all, yet
+   * {@code NeoDefaultsService} resolves each of them from session preferences, the business partner's
+   * own configuration, or an AD callout. Claiming the agent must provide them is the same
+   * aspirational-hint defect IMP-11 was about, so the authoritative source has to be asked directly.
+   *
+   * <p>An empty string does <b>not</b> count. {@code partnerAddress} comes back as {@code ""}: the
+   * server knows the field exists and could not resolve it, which is precisely the case where the
+   * agent must still supply a value.
+   *
+   * @param defaultsBody the body of {@code NeoDefaultsService.resolveDefaults}, or {@code null} when
+   *     defaults could not be resolved — in which case the static rule stands unchanged
+   */
+  static Set<String> resolvedDefaultNames(JSONObject defaultsBody) {
+    Set<String> resolved = new HashSet<>();
+    if (defaultsBody == null) {
+      return resolved;
+    }
+    Iterator<?> keys = defaultsBody.keys();
+    while (keys.hasNext()) {
+      String key = String.valueOf(keys.next());
+      if (KEY_METADATA.equals(key) || key.endsWith(IDENTIFIER_SUFFIX)) {
+        continue;
+      }
+      Object value = defaultsBody.opt(key);
+      if (value == null || JSONObject.NULL.equals(value)
+          || (value instanceof String && ((String) value).trim().isEmpty())) {
+        continue;
+      }
+      resolved.add(key);
+    }
+    return resolved;
+  }
+
   /**
    * Builds the {@code neo_schema({view:"create"})} response:
    * {@code {spec, entity, required[], optional[], requiredCount, optionalCount, hint}}.
@@ -117,11 +165,17 @@ final class McpSchemaCreateView {
    *
    * @param fields the array built by {@link McpSchemaFieldBuilder#buildSchemaFieldsArray}, with the
    *     IMP-1 labels and the precondition requirements already applied
+   * @param serverResolved names {@code neo_defaults} resolves a value for
+   *     ({@link #resolvedDefaultNames}). A field in this set is demoted to {@code optional} and
+   *     flagged {@code serverDefaulted}, however mandatory AD says it is — otherwise {@code required}
+   *     would tell the agent to interrogate the user for a value the server already has. Pass an
+   *     empty set to fall back to the static {@code userRequired} rule alone.
    */
-  static JSONObject buildResponse(String specName, String entityName, JSONArray fields)
-      throws JSONException {
+  static JSONObject buildResponse(String specName, String entityName, JSONArray fields,
+      Set<String> serverResolved) throws JSONException {
     JSONArray required = new JSONArray();
     JSONArray optional = new JSONArray();
+    Set<String> resolved = serverResolved == null ? Set.of() : serverResolved;
     if (fields != null) {
       for (int i = 0; i < fields.length(); i++) {
         JSONObject field = fields.optJSONObject(i);
@@ -130,10 +184,18 @@ final class McpSchemaCreateView {
             || !McpSchemaFieldBuilder.isAgentSuppliable(field)) {
           continue;
         }
-        if (field.optBoolean(McpSchemaFieldBuilder.KEY_USER_REQUIRED, false)) {
-          required.put(slim(field));
+        JSONObject emitted = slim(field);
+        // Guard the null name explicitly: Set.of() throws on contains(null).
+        String name = field.optString(KEY_NAME, null);
+        if (name != null && resolved.contains(name)) {
+          // Distinguish "optional because nobody needs it" from "optional because the server fills
+          // it" — the second is the one the agent must not ask the user about.
+          emitted.put(KEY_SERVER_DEFAULTED, true);
+          optional.put(emitted);
+        } else if (field.optBoolean(McpSchemaFieldBuilder.KEY_USER_REQUIRED, false)) {
+          required.put(emitted);
         } else {
-          optional.put(slim(field));
+          optional.put(emitted);
         }
       }
     }
