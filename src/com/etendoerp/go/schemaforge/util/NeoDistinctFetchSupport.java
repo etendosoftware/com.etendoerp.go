@@ -195,11 +195,11 @@ public final class NeoDistinctFetchSupport {
         .createQuery(hql, BaseOBObject.class)
         .setParameterList("ids", idStrings)
         .list();
-    for (BaseOBObject record : records) {
-      Object id = record.getId();
+    for (BaseOBObject bob : records) {
+      Object id = bob.getId();
       if (id != null) {
         String idStr = id.toString();
-        identifiers.put(idStr, safeIdentifier(record, idStr));
+        identifiers.put(idStr, safeIdentifier(bob, idStr));
       }
     }
     return identifiers;

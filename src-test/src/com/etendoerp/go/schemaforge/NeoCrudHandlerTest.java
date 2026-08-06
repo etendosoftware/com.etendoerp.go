@@ -2197,7 +2197,6 @@ class NeoCrudHandlerTest {
 
         @SuppressWarnings("unchecked")
         OBQuery<BaseOBObject> obQuery = mock(OBQuery.class);
-        ArgumentCaptor<String> selectClauseCaptor = ArgumentCaptor.forClass(String.class);
         ArgumentCaptor<String> whereCaptor = ArgumentCaptor.forClass(String.class);
         when(dal.createQuery(eq("Invoice"), whereCaptor.capture())).thenReturn(obQuery);
 
