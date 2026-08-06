@@ -233,8 +233,8 @@ class NeoRequestRouterTest {
     when(spec.getSpecType()).thenReturn("R");
     when(spec.getId()).thenReturn("spec-id");
     when(spec.getName()).thenReturn("myReport");
-    // ETP-4596: the report dispatch now gates on hasReportSpecAccess before anything else;
-    // this test is about the not-configured path, not access, so allow it through.
+    // ETP-4596: report dispatch now checks report-spec access before anything else.
+    // This test covers the not-configured path only, so access is stubbed to pass.
     when(servlet.authenticator.hasReportSpecAccess(spec, "GET")).thenReturn(true);
 
     supportMock.when(() -> NeoServletSupport.findSpec("myReport")).thenReturn(spec);
