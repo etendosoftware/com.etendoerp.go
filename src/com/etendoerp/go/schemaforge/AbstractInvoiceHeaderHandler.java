@@ -488,6 +488,7 @@ public abstract class AbstractInvoiceHeaderHandler {
     rec.put("hasRectifications", result);
   }
 
+
   /**
    * Adjusts {@code grandTotalAmount} and {@code outstandingAmount} for a draft invoice carrying
    * a positive {@code etgoTotalDiscount} percentage that has not yet been materialized as a real
