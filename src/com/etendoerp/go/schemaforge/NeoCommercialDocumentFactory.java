@@ -23,6 +23,7 @@ import java.util.List;
 import org.hibernate.criterion.Restrictions;
 import org.openbravo.base.provider.OBProvider;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.common.currency.Currency;
 import org.openbravo.model.common.enterprise.DocumentType;
 import org.openbravo.model.common.enterprise.Locator;
 import org.openbravo.model.common.enterprise.Warehouse;
@@ -55,18 +56,21 @@ final class NeoCommercialDocumentFactory {
     ret.setProcessed(false);
     ret.setDocumentStatus("DR");
     ret.setMovementType("C-");
+    // ETP-4028: EM_Etgo_Currency_ID is mandatory on M_InOut — every new record must carry it.
+    ret.setEtgoCurrency(source.getEtgoCurrency());
     return ret;
   }
 
   private NeoCommercialDocumentFactory() {
   }
 
-  /** Returns the first active MMS (Goods Shipment) document type for the given client, or null. */
+  /** Returns the first active, non-return MMS (Goods Shipment) document type for the given client, or null. */
   static DocumentType findShipmentDocType(Client client) {
     List<DocumentType> results = OBDal.getInstance().createCriteria(DocumentType.class)
         .add(Restrictions.eq(DocumentType.PROPERTY_CLIENT, client))
         .add(Restrictions.eq(DocumentType.PROPERTY_DOCUMENTCATEGORY, "MMS"))
         .add(Restrictions.eq(DocumentType.PROPERTY_SALESTRANSACTION, true))
+        .add(Restrictions.eq(DocumentType.PROPERTY_RETURN, false))
         .add(Restrictions.eq(DocumentType.PROPERTY_ACTIVE, true))
         .setMaxResults(1)
         .list();
@@ -107,6 +111,8 @@ final class NeoCommercialDocumentFactory {
     shipment.setProcessed(false);
     shipment.setDocumentStatus("DR");
     shipment.setMovementType(movementType);
+    // ETP-4028: the shipment/receipt inherits the currency from its source order.
+    shipment.setEtgoCurrency(order.getCurrency());
     return shipment;
   }
 
@@ -128,6 +134,8 @@ final class NeoCommercialDocumentFactory {
     shipment.setProcessed(false);
     shipment.setDocumentStatus("DR");
     shipment.setMovementType(movementType);
+    // ETP-4028: EM_Etgo_Currency_ID is mandatory on M_InOut — every new record must carry it.
+    shipment.setEtgoCurrency(source.getEtgoCurrency());
     return shipment;
   }
 
@@ -147,6 +155,8 @@ final class NeoCommercialDocumentFactory {
     shipment.setProcessed(false);
     shipment.setDocumentStatus("DR");
     shipment.setMovementType(movementType);
+    // ETP-4028: EM_Etgo_Currency_ID is mandatory on M_InOut — every new record must carry it.
+    shipment.setEtgoCurrency(invoice.getCurrency());
     return shipment;
   }
 
@@ -157,7 +167,7 @@ final class NeoCommercialDocumentFactory {
    */
   static Invoice createInvoiceFromReceiptHeader(ShipmentInOut receipt,
       DocumentType invoiceDocType, PriceList priceList,
-      PaymentTerm paymentTerms, FIN_PaymentMethod paymentMethod) {
+      PaymentTerm paymentTerms, FIN_PaymentMethod paymentMethod, Currency currency) {
     Invoice invoice = OBProvider.getInstance().get(Invoice.class);
     invoice.setClient(receipt.getClient());
     invoice.setOrganization(receipt.getOrganization());
@@ -171,7 +181,10 @@ final class NeoCommercialDocumentFactory {
     invoice.setBusinessPartner(receipt.getBusinessPartner());
     invoice.setPartnerAddress(receipt.getPartnerAddress());
     invoice.setPriceList(priceList);
-    invoice.setCurrency(priceList.getCurrency());
+    // ETP-4028: the invoice's currency is always inherited from the receipt's own
+    // (editable-until-confirmed) currency, never from the price list — those can
+    // diverge (e.g. no purchase price list exists in the receipt's currency).
+    invoice.setCurrency(currency);
     invoice.setPaymentTerms(paymentTerms);
     invoice.setPaymentMethod(paymentMethod);
     invoice.setSummedLineAmount(BigDecimal.ZERO);

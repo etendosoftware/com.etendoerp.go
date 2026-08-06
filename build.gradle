@@ -90,3 +90,79 @@ dependencies {
     testImplementation 'org.mockito:mockito-core:5.2.0'
     testImplementation 'org.mockito:mockito-junit-jupiter:5.2.0'
 }
+
+/**
+ * ETP-4766 — run DAL-backed integration tests in their own JVM.
+ *
+ * <p>{@code ReactivatePaymentHandlerRemoveIntegrationTest} extends {@code OBBaseTest}, whose
+ * {@code @BeforeClass} initializes the DAL layer. When it shares a Gradle test worker with the
+ * mocked handler tests that run before it, the Apache JDBC pool singleton is left without a
+ * datasource, and DAL initialization dies with:</p>
+ *
+ * <pre>
+ *   OBException: Failed to load reference classes
+ *    └─ NPE: DataSource.getConnection() — "datasource" is null
+ *       at OBBaseTest.staticInitializeDalLayer(OBBaseTest.java:447)
+ * </pre>
+ *
+ * <p>This is state leaking across classes inside one JVM, not a missing database: the other
+ * {@code OBBaseTest} subclasses in this module initialize the DAL fine in the very same run. It
+ * surfaced when this merge block added enough test classes to change how Gradle distributes them
+ * across workers, which is also why it reproduces identically instead of coming and going.</p>
+ *
+ * <p>The fix isolates the affected class into its own {@code Test} task with {@code forkEvery = 1},
+ * so it always gets a pristine JVM. It is wired as {@code finalizedBy} the root {@code test} task
+ * rather than as a separate CI step, so it keeps running in Jenkins without touching the pipeline
+ * definition, and its failures still fail the build. JaCoCo coverage is preserved: the root
+ * {@code jacocoRootReport} globs {@code build/jacoco/ ** /*.exec}, which picks up the new task's
+ * execution data automatically.</p>
+ *
+ * <p>The root {@code test} task is contributed by the Etendo Gradle plugin and has no editable
+ * source in this repository, so both the exclusion and the new task are declared here against
+ * {@code rootProject}.</p>
+ */
+// Declared as a local so the closures below capture it lexically, instead of relying on
+// property resolution against a delegate that is the root project / the task, not this module.
+def isolatedDalTests = [
+        '**/ReactivatePaymentHandlerRemoveIntegrationTest.class',
+]
+
+rootProject.afterEvaluate { rootProj ->
+    def rootTest = rootProj.tasks.findByName('test')
+    if (rootTest == null) {
+        return
+    }
+
+    isolatedDalTests.each { pattern -> rootTest.exclude(pattern) }
+
+    def isolated = rootProj.tasks.findByName('goIsolatedDalTest')
+    if (isolated == null) {
+        isolated = rootProj.tasks.create('goIsolatedDalTest', Test) { Test t ->
+            t.group = 'verification'
+            t.description = 'Runs com.etendoerp.go DAL integration tests one per JVM (see modules/com.etendoerp.go/build.gradle).'
+
+            t.testClassesDirs = rootTest.testClassesDirs
+            t.classpath = rootTest.classpath
+
+            // A fresh JVM per class — the whole point of this task.
+            t.forkEvery = 1
+            t.maxParallelForks = 1
+
+            t.useJUnitPlatform()
+            isolatedDalTests.each { pattern -> t.include(pattern) }
+
+            // Nothing to run is not an error: the module may be absent from a given build.
+            t.filter.failOnNoMatchingTests = false
+
+            // Inherit the root task's environment so the DAL sees the same DB settings.
+            t.systemProperties = rootTest.systemProperties
+            t.jvmArgs = rootTest.jvmArgs
+            t.minHeapSize = rootTest.minHeapSize
+            t.maxHeapSize = rootTest.maxHeapSize
+            t.workingDir = rootTest.workingDir
+            t.environment(rootTest.environment)
+        }
+    }
+
+    rootTest.finalizedBy isolated
+}

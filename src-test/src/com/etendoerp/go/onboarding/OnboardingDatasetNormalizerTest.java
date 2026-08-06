@@ -24,6 +24,7 @@ import static org.junit.Assert.fail;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.when;
@@ -32,6 +33,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.Date;
 import java.util.concurrent.atomic.AtomicReference;
 
 import org.hibernate.criterion.Criterion;
@@ -141,6 +143,23 @@ public class OnboardingDatasetNormalizerTest {
 
     assertFalse(xml.contains("<cBpartner>"));
     assertFalse(xml.contains("<cBpartnerLocation>"));
+  }
+
+  /**
+   * Regression guard for ETP-4761 (gap I1): both bundled GOClient locators must ship with
+   * {@code M_INVENTORYSTATUS_ID = '2'} ("Available", {@code OVERISSUE='N'}) so a freshly onboarded
+   * tenant cannot post negative stock from day one. The prior value, {@code '0'}
+   * ("Undefined-OverIssue", {@code OVERISSUE='Y'}), is the root cause documented in
+   * {@code docs/etendo-ad/onboarding-gaps.md} §I1 — assert it is gone, not merely that '2' appears,
+   * so a partial revert (only one of the two locators fixed) still fails this test.
+   */
+  @Test
+  public void testNormalizerLocatorsDefaultToAvailableInventoryStatus() {
+    String xml = pathBackedNormalizer().buildDatasetXml();
+
+    assertTrue(xml.contains("<mLocator"));
+    assertTrue(xml.contains("<mInventorystatusId>2</mInventorystatusId>"));
+    assertFalse(xml.contains("<mInventorystatusId>0</mInventorystatusId>"));
   }
 
   @Test
@@ -345,6 +364,28 @@ public class OnboardingDatasetNormalizerTest {
   }
 
   /**
+   * ETP-4760 (R20, gap J1, 2026-08-03): verifies that a freshly-provisioned tenant is born with one
+   * active, validated {@code M_Costing_Rule} using the Standard algorithm — not zero rules (the real
+   * gap: {@code M_COSTING_RULE} was never in {@code INCLUDED_TABLES}, so every onboarded tenant
+   * inherited NOTHING, not Average) and not the Average algorithm the bundled sample row used to
+   * carry. Regression guard against the table being dropped from {@code INCLUDED_TABLES} again, or
+   * the sample row's algorithm reverting to Average.
+   */
+  @Test
+  public void testNormalizerIncludesValidatedStandardCostingRule() {
+    String xml = pathBackedNormalizer().buildDatasetXml();
+
+    assertTrue("M_Costing_Rule row (id 6278C7936B7743898D12928D0E935CC6) missing — table must be "
+        + "in INCLUDED_TABLES", xml.contains("6278C7936B7743898D12928D0E935CC6"));
+    assertTrue("Standard Algorithm id missing on the seeded costing rule",
+        xml.contains("6A39D8B46CD94FE682D48758D3B7726B"));
+    assertFalse("Average Algorithm id must NOT be the seeded costing rule's algorithm",
+        xml.contains("B069080A0AE149A79CF1FA0E24F16AB6"));
+    assertTrue("isvalidated must be Y on the seeded costing rule",
+        xml.contains("<isvalidated>Y</isvalidated>"));
+  }
+
+  /**
    * Verifies that non-primitive reference columns route their raw value through the injected
    * {@link OnboardingDatasetNormalizer.ReferenceIdResolver} and emit the resolver-returned id rather
    * than the raw code. The {@code AD_LANGUAGE} column on {@code C_ELEMENTVALUE_TRL} is an
@@ -378,6 +419,66 @@ public class OnboardingDatasetNormalizerTest {
     assertEquals("ADLanguage", observedTargetEntityName.get());
     assertTrue(xml.contains("<adLanguage id=\"140\""));
     assertFalse(xml.contains("es_ES"));
+  }
+
+  /**
+   * ETP-4760 follow-up (dual-importer date-format conflict, 2026-08-04): a bundled sample-data XML
+   * value shaped for {@code org.apache.ddlutils.io.converters.TimestampConverter}
+   * ({@code java.sql.Timestamp.valueOf()}, plain "yyyy-MM-dd HH:mm:ss[.f]") must be reformatted by
+   * the normalizer into the strict ISO "yyyy-MM-dd'T'HH:mm:ss.S'Z'" shape the RUNTIME onboarding
+   * importer's {@code DateDomainType}/{@code DatetimeDomainType} require — the ddlutils installer
+   * and this runtime path have OPPOSITE format requirements for the identical literal, verified
+   * empirically both ways (see the .sql header comment on M_COSTING_RULE.xml and
+   * docs/etendo-ad/tenant-remediation-knowledge.md). This test proves the reformatting happens for
+   * a genuinely date-typed property ({@link Property#getPrimitiveType()} returning
+   * {@code Date.class}) without needing a live DAL model.
+   */
+  @Test
+  public void testNormalizerReformatsDdlutilsShapedDateTimeValueToStrictIso() throws Exception {
+    Path sampleDir = Files.createTempDirectory("onboarding-datetime-reformat");
+    Files.write(sampleDir.resolve("M_COSTING_RULE.xml"),
+        ("<data>"
+            + "<M_COSTING_RULE>"
+            + "<M_COSTING_RULE_ID><![CDATA[ROW1]]></M_COSTING_RULE_ID>"
+            + "<DATEFROM><![CDATA[2025-12-31 03:00:00.0]]></DATEFROM>"
+            + "</M_COSTING_RULE>"
+            + "</data>").getBytes(StandardCharsets.UTF_8));
+
+    OnboardingDatasetNormalizer normalizer = new OnboardingDatasetNormalizer(
+        sampleDir, this::mockEntityWithDateTimeColumn);
+
+    String xml = normalizer.buildDatasetXml();
+
+    assertTrue("Expected the strict ISO T/Z shape in the runtime-only output",
+        xml.contains("2025-12-31T03:00:00.0Z"));
+    assertFalse("The ddlutils-shaped source value must not leak through unchanged",
+        xml.contains("2025-12-31 03:00:00.0<"));
+  }
+
+  /**
+   * Companion regression: a non-date primitive value (e.g. a plain string/id column) must never be
+   * touched by the ddlutils-to-ISO reformatting, even if it happens to look date-shaped.
+   */
+  @Test
+  public void testNormalizerLeavesNonDateTimeValuesUnchanged() throws Exception {
+    Path sampleDir = Files.createTempDirectory("onboarding-non-datetime-passthrough");
+    Files.write(sampleDir.resolve("M_COSTING_RULE.xml"),
+        ("<data>"
+            + "<M_COSTING_RULE>"
+            + "<M_COSTING_RULE_ID><![CDATA[ROW1]]></M_COSTING_RULE_ID>"
+            + "<NAME><![CDATA[2025-12-31 03:00:00.0]]></NAME>"
+            + "</M_COSTING_RULE>"
+            + "</data>").getBytes(StandardCharsets.UTF_8));
+
+    OnboardingDatasetNormalizer normalizer = new OnboardingDatasetNormalizer(
+        sampleDir, this::mockEntityForTable);
+
+    String xml = normalizer.buildDatasetXml();
+
+    assertTrue("A non-date column's value must pass through completely unchanged",
+        xml.contains("2025-12-31 03:00:00.0"));
+    assertFalse("A non-date column's value must never be reformatted to the T/Z shape",
+        xml.contains("2025-12-31T03:00:00.0Z"));
   }
 
   // ---------------------------------------------------------------------------------------------
@@ -795,6 +896,37 @@ public class OnboardingDatasetNormalizerTest {
               : mockProperty(tableName, columnName);
         });
     return entity;
+  }
+
+  /**
+   * Builds an entity whose {@code DATEFROM} column reports a {@code java.util.Date} primitive
+   * type via {@link Property#getPrimitiveType()}, so the ddlutils-to-ISO reformatting branch in
+   * {@code OnboardingDatasetNormalizer} is exercised without a live DAL model. Every other column
+   * behaves like the default {@link #mockProperty(String, String)}.
+   */
+  private Entity mockEntityWithDateTimeColumn(String tableName) {
+    Entity entity = mock(Entity.class);
+    when(entity.getName()).thenReturn(toLowerCamel(tableName));
+    when(entity.getTableName()).thenReturn(tableName);
+    when(entity.isOrganizationEnabled()).thenReturn(false);
+    when(entity.getPropertyByColumnName(anyString(), eq(false)))
+        .thenAnswer(invocation -> {
+          String columnName = invocation.getArgument(0);
+          return "DATEFROM".equals(columnName)
+              ? mockDateTimeProperty(columnName)
+              : mockProperty(tableName, columnName);
+        });
+    return entity;
+  }
+
+  private Property mockDateTimeProperty(String columnName) {
+    Property property = mock(Property.class);
+    when(property.getName()).thenReturn(toLowerCamel(columnName));
+    when(property.isId()).thenReturn(false);
+    when(property.isOneToMany()).thenReturn(false);
+    when(property.isPrimitive()).thenReturn(true);
+    doReturn(Date.class).when(property).getPrimitiveType();
+    return property;
   }
 
   private Property mockProperty(String tableName, String columnName) {
