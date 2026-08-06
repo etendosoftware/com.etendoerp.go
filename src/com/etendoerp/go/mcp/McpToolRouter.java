@@ -314,7 +314,7 @@ public class McpToolRouter {
 
     // Apply filters as where clause
     if (filters != null && filters.length() > 0) {
-      String whereClause = McpToolRouterSupport.buildWhereFromFilters(filters, adTab, sfEntity, log);
+      String whereClause = McpQuerySupport.buildWhereFromFilters(filters, adTab, sfEntity, log);
       if (StringUtils.isNotBlank(whereClause)) {
         params.put(JsonConstants.WHERE_AND_FILTER_CLAUSE, whereClause);
         params.put(JsonConstants.USE_ALIAS, "true");
@@ -348,7 +348,7 @@ public class McpToolRouter {
 
     // IMP-2: optional projection — explicit `fields:[...]` or view:"summary". No-op when neither
     // is present, so the default returns every column.
-    McpToolRouterSupport.applyProjection(responseJson, args, sfEntity, adTab);
+    McpQuerySupport.applyProjection(responseJson, args, sfEntity, adTab);
 
     return wrapAsTextContent(responseJson.toString(2));
   }
@@ -394,7 +394,7 @@ public class McpToolRouter {
     fieldFilter.filterGetResponse(responseJson);
 
     // IMP-2: optional projection — explicit `fields:[...]` or view:"summary".
-    McpToolRouterSupport.applyProjection(responseJson, args, sfEntity, adTab);
+    McpQuerySupport.applyProjection(responseJson, args, sfEntity, adTab);
 
     return wrapAsTextContent(responseJson.toString(2));
   }
@@ -760,7 +760,7 @@ public class McpToolRouter {
     if (McpDefaultsView.isGroupingView(view) && neoResponse.getHttpStatus() < 400
         && neoResponse.getBody() != null) {
       java.util.Set<String> editable =
-          McpToolRouterSupport.editablePropertyNames(sfEntity, adTab);
+          McpQuerySupport.editablePropertyNames(sfEntity, adTab);
       neoResponse = NeoResponse.ok(
           McpDefaultsView.apply(neoResponse.getBody(), editable, view));
     }
