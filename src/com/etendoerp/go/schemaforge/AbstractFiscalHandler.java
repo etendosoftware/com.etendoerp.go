@@ -30,6 +30,7 @@ import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.criterion.Order;
 import org.hibernate.criterion.Restrictions;
 import org.openbravo.base.exception.OBException;
+import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
@@ -43,6 +44,7 @@ abstract class AbstractFiscalHandler {
   protected static final Logger log = Logger.getLogger(AbstractFiscalHandler.class);
 
   protected static final String DECLARATIONS = "declarations";
+  protected static final String INCIDENTS    = "incidents";
   protected static final String MODIFIED     = "modified";
   protected static final String PERIOD_KEY   = "period";
   protected static final String SINCE_KEY    = "since";
@@ -58,13 +60,8 @@ abstract class AbstractFiscalHandler {
 
   void handle(String entityName, String method, HttpServletRequest request,
       HttpServletResponse response) throws IOException {
-    if (DECLARATIONS.equals(entityName)) {
-      try {
-        declHandler.handleDeclarations(method, request, response);
-      } catch (Exception e) {
-        log.error("Error in /" + getModelKey() + "/declarations", e);
-        servlet.sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, e.getMessage());
-      }
+    if (DECLARATIONS.equals(entityName) || INCIDENTS.equals(entityName)) {
+      delegateToDeclHandler(entityName, method, request, response);
       return;
     }
     if (!isKnownEntity(entityName)) {
@@ -112,6 +109,26 @@ abstract class AbstractFiscalHandler {
     }
   }
 
+  /**
+   * Runs the {@link FiscalDeclCrudHandler} delegate for "declarations" or "incidents" — both of
+   * which bypass {@link #isKnownEntity}/the year-period gate entirely — and translates any
+   * failure into a 500, sharing the error-message format so it's defined once rather than once
+   * per entity.
+   */
+  private void delegateToDeclHandler(String entityName, String method, HttpServletRequest request,
+      HttpServletResponse response) throws IOException {
+    try {
+      if (DECLARATIONS.equals(entityName)) {
+        declHandler.handleDeclarations(method, request, response);
+      } else {
+        declHandler.handleIncidents(method, request, response);
+      }
+    } catch (Exception e) {
+      log.error("Error in /" + getModelKey() + "/" + entityName, e);
+      servlet.sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, e.getMessage());
+    }
+  }
+
   protected abstract boolean isKnownEntity(String entityName);
 
   @SuppressWarnings("java:S1172")
@@ -121,6 +138,31 @@ abstract class AbstractFiscalHandler {
       HttpServletRequest request, HttpServletResponse response) throws FiscalHandlerException;
 
   protected abstract String getModelKey();
+
+  /**
+   * Replaces the persisted AEAT validation rows ({@code ETGO_Fiscal_Decl_Incident}) for a
+   * declaration: deletes every existing row for it, then inserts one row per entry in
+   * {@code errors} (severity {@code block}) followed by one row per entry in {@code warnings}
+   * (severity {@code warn}), both parsed as {@code "CODE - message"}. Called by
+   * {@link Fiscal303BoxesHandler} on EVERY submission attempt (test and production alike) — empty
+   * {@code errors} and {@code warnings} lists simply leave the declaration with no incident rows.
+   * See {@link FiscalDeclCrudHandler#replaceIncidents} for the persistence details (shared with
+   * the read path, {@code GET /fiscal303/incidents}).
+   */
+  protected void replaceIncidents(BaseOBObject decl, List<String> errors, List<String> warnings) {
+    declHandler.replaceIncidents(decl, errors, warnings);
+  }
+
+  /**
+   * Same as {@link #replaceIncidents} but does not commit — used by
+   * {@link Fiscal303SubmissionSupport#handleSubmit} so the incidents write shares a single
+   * transaction with the declaration status/attachment write that follows it (ETP-4456
+   * atomicity fix). See {@link FiscalDeclCrudHandler#replaceIncidentsNoCommit}.
+   */
+  protected void replaceIncidentsNoCommit(BaseOBObject decl, List<String> errors,
+      List<String> warnings) {
+    declHandler.replaceIncidentsNoCommit(decl, errors, warnings);
+  }
 
   // ── shared helpers ────────────────────────────────────────────────
 
