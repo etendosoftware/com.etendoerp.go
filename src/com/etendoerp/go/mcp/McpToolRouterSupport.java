@@ -39,6 +39,7 @@ import com.etendoerp.go.schemaforge.NeoResponse;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFField;
 import com.etendoerp.go.schemaforge.data.SFSpec;
+import com.etendoerp.go.schemaforge.util.NeoDateFormat;
 import com.etendoerp.go.schemaforge.util.NeoReportCallability;
 
 final class McpToolRouterSupport {
@@ -366,9 +367,39 @@ final class McpToolRouterSupport {
         body.put(key, new java.math.BigDecimal(strVal));
       } else if (type == Boolean.class) {
         body.put(key, "Y".equalsIgnoreCase(strVal) || "true".equalsIgnoreCase(strVal));
+      } else if (type != null && java.util.Date.class.isAssignableFrom(type)) {
+        coerceDateFieldValue(body, key, prop, strVal, log);
       }
     } catch (Exception e) {
       log.debug("Could not coerce field {} value '{}': {}", key, strVal, e.getMessage());
+    }
+  }
+
+  /**
+   * Normalize a date-typed write value to the canonical ISO wire format (ETP-4793 / IMP-16).
+   *
+   * <p>The DAL parses date strings with a <b>lenient</b> {@code SimpleDateFormat}
+   * ({@code JsonUtils.createDateFormat}), so a {@code dd-MM-yyyy} value does not fail — it is
+   * reinterpreted, and {@code "06-08-2026"} persists as year <b>0012</b>. That happens even
+   * when the agent sends no date at all, because {@code McpToolRouter} re-runs
+   * {@code injectMandatoryDefaults} before the save and the server's own default arrives in
+   * that format. This branch is the last point where the value can still be repaired.
+   *
+   * <p>An unrecognised shape is left untouched on purpose: it then reaches the lenient parser
+   * or fails there loudly, which is the pre-existing behaviour. Silently substituting a date
+   * we had to guess would be worse than either.
+   */
+  private static void coerceDateFieldValue(JSONObject body, String key, Property prop,
+      String strVal, org.apache.logging.log4j.Logger log) throws JSONException {
+    String canonical = NeoDateFormat.toCanonical(strVal, prop.isDatetime());
+    if (canonical == null) {
+      log.warn("[MCP] Unrecognized date format for '{}': '{}' passed through unchanged",
+          key, strVal);
+      return;
+    }
+    if (!canonical.equals(strVal)) {
+      log.info("[MCP] Normalized date '{}': '{}' -> '{}'", key, strVal, canonical);
+      body.put(key, canonical);
     }
   }
 

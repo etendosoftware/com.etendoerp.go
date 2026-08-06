@@ -430,7 +430,9 @@ public class ToolRegistry {
             + "for this record type, then build the fields object by overriding only the values "
             + "the user actually wants to change on top of that base — instead of asking the "
             + "user for every field or guessing values that already have a sensible default "
-            + "(document number, dates, prices, etc.).",
+            + "(document number, dates, prices, etc.). "
+            + "Dates must be ISO-8601: 'YYYY-MM-DD' for date fields and "
+            + "'YYYY-MM-DDTHH:MM:SS' for datetime fields. No other format is supported.",
         buildObjectSchema(props,
           List.of("spec", McpConstants.PARAM_ENTITY, McpConstants.PARAM_FIELDS)));
   }
@@ -444,7 +446,9 @@ public class ToolRegistry {
 
     return new McpToolDefinition(
         "neo_update",
-        "Update an existing record in a NEO Headless API spec.",
+        "Update an existing record in a NEO Headless API spec. "
+            + "Dates must be ISO-8601: 'YYYY-MM-DD' for date fields and "
+            + "'YYYY-MM-DDTHH:MM:SS' for datetime fields. No other format is supported.",
         buildObjectSchema(props,
           List.of("spec", McpConstants.PARAM_ENTITY, "id", McpConstants.PARAM_FIELDS)));
   }
@@ -522,7 +526,9 @@ public class ToolRegistry {
             + "instead of asking the user for every value from scratch. neo_create will still "
             + "auto-fill any field you omit, but calling this first lets you see the full base "
             + "dataset up front. Pass view:\"minimal\" (or \"grouped\") to collapse server-managed "
-            + "compliance flags and focus on the fields you actually confirm.",
+            + "compliance flags and focus on the fields you actually confirm. "
+            + "Date values come back ISO-8601 ('YYYY-MM-DD', or 'YYYY-MM-DDTHH:MM:SS' for "
+            + "datetime fields) and can be passed straight back to neo_create unchanged.",
         buildObjectSchema(props, List.of("spec", McpConstants.PARAM_ENTITY)));
   }
 

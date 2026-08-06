@@ -169,6 +169,21 @@ public final class NeoTypeCoercionHelper {
         coerced.put(key, Integer.parseInt(strVal));
       } else if (Boolean.class.isAssignableFrom(type)) {
         coerced.put(key, "Y".equals(strVal) || "true".equalsIgnoreCase(strVal));
+      } else if (java.util.Date.class.isAssignableFrom(type)) {
+        // ETP-4793 / IMP-16: the DAL parses dates with a lenient SimpleDateFormat
+        // (JsonUtils.createDateFormat), so a dd-MM-yyyy value is silently reinterpreted
+        // instead of rejected — "06-08-2026" persists as year 0012. This is the same class
+        // of bug the numeric comment above describes, and it fires even when the caller sends
+        // no date, because injectMandatoryDefaults re-resolves the server default first.
+        // An unrecognised shape is passed through verbatim: guessing a date is worse than
+        // letting the existing (loud or lenient) parser handle it.
+        String canonical = NeoDateFormat.toCanonical(strVal, prop.isDatetime());
+        if (canonical == null) {
+          log.warn("[NEO] Unrecognized date format for '{}': '{}' passed through unchanged",
+              key, strVal);
+        } else if (!canonical.equals(strVal)) {
+          coerced.put(key, canonical);
+        }
       }
     } catch (Exception ignored) {
       log.debug("Skipping string coercion for key {}: {}", key, ignored.getMessage());

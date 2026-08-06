@@ -1,8 +1,6 @@
 package com.etendoerp.go.schemaforge;
 
-import java.text.SimpleDateFormat;
 import java.util.ArrayList;
-import java.util.Date;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
@@ -38,6 +36,7 @@ import org.openbravo.service.db.DalConnectionProvider;
 
 import com.etendoerp.go.schemaforge.data.SFField;
 import com.etendoerp.go.schemaforge.data.SFSpec;
+import com.etendoerp.go.schemaforge.util.NeoDateFormat;
 import com.etendoerp.sequences.SequenceUtils;
 
 /**
@@ -62,7 +61,6 @@ import com.etendoerp.sequences.SequenceUtils;
 public class NeoDefaultsService {
 
   private static final Logger log = LogManager.getLogger(NeoDefaultsService.class);
-  private static final String DATE_FORMAT = "yyyy-MM-dd";
   private static final String KEY_UPDATES = "updates";
   private static final String KEY_COMBOS = "combos";
   private static final String LOG_SEQUENCE_PREVIEW_FAILURE = "Could not generate sequence preview for {}: {}";
@@ -227,6 +225,14 @@ public class NeoDefaultsService {
                 .withIdentifierInjector(NeoDefaultsService::tryInjectIdentifier)
                 .withSfFieldColumns(sfFieldColumns));
 
+        // ETP-4793 / IMP-16: normalize every date-valued default to the canonical ISO wire
+        // format. Done here, once, after all three passes and the cascade, rather than
+        // per-field: the cascade consumes `defaults` as callout input, and running before it
+        // would change what the legacy callouts receive. Running after leaves that boundary
+        // byte-for-byte as it is today (CalloutRequestBuilder.reformatDateParams converts ISO
+        // back to the UI pattern, and is a no-op on values already in it).
+        canonicalizeDateDefaults(defaults, dalEntity);
+
         // Build response
         JSONObject response = new JSONObject();
         response.put("defaults", defaults);
@@ -264,6 +270,78 @@ public class NeoDefaultsService {
       defaults.put(propertyName, resolvedValue);
       // For FK fields, also inject $_identifier so selectors display the label, not the ID
       tryInjectIdentifier(defaults, dalEntity, propertyName, resolvedValue);
+    }
+  }
+
+  /**
+   * Rewrite every date-valued entry of {@code defaults} into the canonical ISO wire format
+   * (ETP-4793 / IMP-16).
+   *
+   * <p>Defaults reach this map in up to three different shapes: {@code dd-MM-yyyy} from any
+   * {@code @#Date@} expression (core's {@code DateTimeData.today} hardcodes it), ISO from a
+   * date callout whose return path {@code NeoCalloutService.normalizeUpdateDatesToIso} already
+   * normalized, and occasionally a raw Postgres timestamp from an {@code @SQL=} default. The
+   * response is a wire contract with two consumers that both read ISO — the DAL write path
+   * ({@code JsonUtils.createDateFormat}) and the React form ({@code dateOnly.js}) — so any
+   * other shape is a defect regardless of which consumer notices first.
+   *
+   * <p>A value the canonicalizer does not recognise is left <b>verbatim</b> and logged at WARN.
+   * Blanking or dropping it would turn a formatting problem into a missing mandatory field,
+   * and an unrecognised shape is a signal that this method needs a new case — not that the
+   * value is worthless.
+   *
+   * @param defaults  the resolved defaults object, mutated in place
+   * @param dalEntity the DAL entity used to tell date properties from everything else; a
+   *                  {@code null} entity makes this a no-op
+   */
+  private static void canonicalizeDateDefaults(JSONObject defaults, Entity dalEntity) {
+    if (defaults == null || dalEntity == null) {
+      return;
+    }
+    Iterator<?> keys = defaults.keys();
+    Map<String, String> rewritten = new HashMap<>();
+    while (keys.hasNext()) {
+      String key = String.valueOf(keys.next());
+      Object value = defaults.opt(key);
+      if (!(value instanceof String) || ((String) value).isEmpty()) {
+        continue;
+      }
+      try {
+        Property prop = dalEntity.getProperty(key);
+        if (prop == null || !prop.isPrimitive()) {
+          continue;
+        }
+        Class<?> type = prop.getPrimitiveObjectType();
+        if (type == null || !java.util.Date.class.isAssignableFrom(type)) {
+          continue;
+        }
+        String raw = (String) value;
+        boolean datetime = prop.isDatetime();
+        if (NeoDateFormat.isCanonical(raw, datetime)) {
+          continue;
+        }
+        String canonical = NeoDateFormat.toCanonical(raw, datetime);
+        if (canonical == null) {
+          log.warn("[NEO] Unrecognized date format for default '{}' on {}: '{}' left as-is",
+              key, dalEntity.getName(), raw);
+          continue;
+        }
+        rewritten.put(key, canonical);
+      } catch (Exception e) {
+        // getProperty throws for keys that are not properties at all ($_identifier companions).
+        log.debug("Skipping date canonicalization for key {}: {}", key, e.getMessage());
+      }
+    }
+    for (Map.Entry<String, String> entry : rewritten.entrySet()) {
+      try {
+        defaults.put(entry.getKey(), entry.getValue());
+      } catch (JSONException e) {
+        log.debug("Could not store canonical date for {}: {}", entry.getKey(), e.getMessage());
+      }
+    }
+    if (!rewritten.isEmpty()) {
+      log.info("[NEO] canonicalizeDateDefaults: normalized {} date fields on {}: {}",
+          rewritten.size(), dalEntity.getName(), rewritten.keySet());
     }
   }
 
@@ -701,9 +779,7 @@ public class NeoDefaultsService {
    * a purchase pricelist on a sales window.
    *
    * <p>Delegates the session-variable population (including {@code IsSOTrx}) to the shared
-   * {@link NeoCalloutService#buildVars(OBContext, Tab)} builder, and layers caching + the
-   * {@code #Date} variable on top. The cache key includes the resolved {@code isSOTrx} value
-   * so a sales-window entry is not served to a purchase-window caller within the TTL.
+   * {@link NeoCalloutService#buildVars(OBContext, Tab)} builder.
    *
    * @param obContext the current OBContext containing user, role, org, and warehouse info
    * @param adTab     the AD_Tab whose window provides the IsSOTrx flag. Pass {@code null}
@@ -713,12 +789,16 @@ public class NeoDefaultsService {
   public static VariablesSecureApp buildVariablesSecureApp(OBContext obContext, Tab adTab) {
     // The shared builder pulls identity + number-format vars from
     // NeoSessionVarsCache and applies per-tab IsSOTrx on a fresh
-    // VariablesSecureApp, so there is no need for a per-call cache here. #Date
-    // changes daily and is intentionally NOT cached: we set it per request.
-    VariablesSecureApp vars = NeoCalloutService.buildVars(obContext, adTab);
-    vars.setSessionValue("#Date",
-        new SimpleDateFormat(DATE_FORMAT).format(new Date()));
-    return vars;
+    // VariablesSecureApp, so there is no need for a per-call cache here.
+    //
+    // ETP-4793 / IMP-16: this method used to also seed an ISO "#Date" session value here.
+    // That was dead code. Core never reads the session for it: Utility.getContext
+    // special-cases the name (Utility.java:410) and returns DateTimeData.today(conn), whose
+    // generated .xsql implementation formats with a hardcoded "dd-MM-yyyy". So every
+    // @#Date@ default arrives in that format no matter what is in the session, and the
+    // canonicalization has to happen on the resolved value instead — see
+    // canonicalizeDateDefaults below.
+    return NeoCalloutService.buildVars(obContext, adTab);
   }
 
   /**

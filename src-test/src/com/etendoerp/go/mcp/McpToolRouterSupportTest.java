@@ -797,6 +797,64 @@ class McpToolRouterSupportTest {
       McpToolRouterSupport.coercePrimitiveFieldValue(body, "name", prop, log);
       assertEquals("", body.getString("name"));
     }
+
+    /**
+     * ETP-4793 / IMP-16. The MCP write path has its own coercer, independent of the REST one in
+     * {@code NeoTypeCoercionHelper} — two implementations that must agree on dates, since a
+     * {@code dd-MM-yyyy} value reaching the lenient DAL parser persists as year 0012 rather than
+     * failing. These tests exist on both sides on purpose, so the pair cannot drift silently.
+     */
+    @Test
+    @DisplayName("normalizes a dd-MM-yyyy date to ISO — the year-0012 regression")
+    void coercesUiPatternDateToIso() throws Exception {
+      Property prop = mock(Property.class);
+      when(prop.getPrimitiveObjectType()).thenReturn((Class) java.util.Date.class);
+      when(prop.isDatetime()).thenReturn(false);
+      JSONObject body = new JSONObject();
+      body.put("orderDate", "06-08-2026");
+
+      McpToolRouterSupport.coercePrimitiveFieldValue(body, "orderDate", prop, log);
+      assertEquals("2026-08-06", body.getString("orderDate"));
+    }
+
+    @Test
+    @DisplayName("leaves an already-ISO date byte-for-byte unchanged")
+    void isoDateUnchanged() throws Exception {
+      Property prop = mock(Property.class);
+      when(prop.getPrimitiveObjectType()).thenReturn((Class) java.util.Date.class);
+      when(prop.isDatetime()).thenReturn(false);
+      JSONObject body = new JSONObject();
+      body.put("orderDate", "2026-08-06");
+
+      McpToolRouterSupport.coercePrimitiveFieldValue(body, "orderDate", prop, log);
+      assertEquals("2026-08-06", body.getString("orderDate"));
+    }
+
+    @Test
+    @DisplayName("a datetime property keeps its time component")
+    void datetimeKeepsTime() throws Exception {
+      Property prop = mock(Property.class);
+      when(prop.getPrimitiveObjectType()).thenReturn((Class) java.util.Date.class);
+      when(prop.isDatetime()).thenReturn(true);
+      JSONObject body = new JSONObject();
+      body.put("movementDate", "2026-08-06 18:55:31.567837+00");
+
+      McpToolRouterSupport.coercePrimitiveFieldValue(body, "movementDate", prop, log);
+      assertEquals("2026-08-06T18:55:31", body.getString("movementDate"));
+    }
+
+    @Test
+    @DisplayName("an unrecognized date shape is passed through verbatim, not blanked")
+    void unrecognizedDateIsLeftAlone() throws Exception {
+      Property prop = mock(Property.class);
+      when(prop.getPrimitiveObjectType()).thenReturn((Class) java.util.Date.class);
+      when(prop.isDatetime()).thenReturn(false);
+      JSONObject body = new JSONObject();
+      body.put("orderDate", "06/08/2026");
+
+      McpToolRouterSupport.coercePrimitiveFieldValue(body, "orderDate", prop, log);
+      assertEquals("06/08/2026", body.getString("orderDate"));
+    }
   }
 
   // ─── buildMissingFieldInfo ──────────────────────────────────────────

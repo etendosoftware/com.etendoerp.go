@@ -234,6 +234,56 @@ Optional query params (all but `export` are optional):
 
 The export is intercepted at the two points where list responses are written: `NeoCrudHandler.handleWindowEntityCrud` (generic CRUD + entity-qualifier handlers) and `NeoRequestRouter.handleReportSpecRequest` (single-segment custom handlers such as `bank-statements`). Output is built fully in server memory from the rows the handler already returns, so large lists are streamed by the server rather than assembled in the browser.
 
+#### 4.3.1 Date format contract (ETP-4793 / IMP-16)
+
+**NEO speaks ISO-8601 dates in both directions**, on the REST API and over MCP:
+
+| Property kind | Wire format | Example |
+|---|---|---|
+| Date | `yyyy-MM-dd` | `2026-08-06` |
+| DateTime | `yyyy-MM-dd'T'HH:mm:ss` | `2026-08-06T18:55:31` |
+
+That is not a preference, it is what the layers on both sides parse: the DAL
+(`JsonUtils.createDateFormat` → `JsonToDataConverter`) on the way in, and the React form
+(`dateOnly.js`, `date-field.jsx`) on the way out.
+
+Three things inside Etendo nevertheless produce non-ISO date strings, so NEO normalizes:
+
+- **`@#Date@` defaults are always `dd-MM-yyyy`.** Core `Utility.getContext` special-cases the name
+  (`Utility.java:410`) and returns `DateTimeData.today(conn)`, a generated `.xsql` method whose
+  output format is **hardcoded**. No session value, locale or `dateFormat.java` setting can change
+  it — an earlier attempt to override it via `vars.setSessionValue("#Date", …)` was dead code and
+  has been removed.
+- **The `dateFormat.java` UI pattern**, when a value crosses a legacy boundary.
+- **Raw Postgres timestamps** from `@SQL=` defaults (`yyyy-MM-dd HH:mm:ss.ffffff+00`).
+
+Why this is a correctness issue and not cosmetics: `JsonUtils.createDateFormat()` calls
+`setLenient(true)`, so a `dd-MM-yyyy` value is **not rejected** — it is reinterpreted. `06-08-2026`
+persists as year **0012** and `24-06-2026` as `0029-12-17`. It also happens when the caller sends
+no date at all, because both write paths (`McpToolRouter`, `NeoCrudHandler`) re-run
+`injectMandatoryDefaults` immediately before saving, so the bad value is server-produced.
+
+`NeoDateFormat` (`schemaforge/util/`) is the single definition of the canonical form and the only
+place the three accepted shapes are listed. It is applied at three points:
+
+| Point | Class | Effect |
+|---|---|---|
+| Read — `/defaults` response | `NeoDefaultsService.canonicalizeDateDefaults` | every date-valued default leaves as ISO |
+| Write — REST | `NeoTypeCoercionHelper.coerceField` | date branch, runs before the SmartClient wrap |
+| Write — MCP | `McpToolRouterSupport.coercePrimitiveFieldValue` | same branch, mirrored |
+
+Two deliberate constraints:
+
+- **An unrecognised shape is passed through verbatim** and logged at `WARN`, never blanked. Blanking
+  would turn a formatting problem into a missing mandatory field, and a guessed date is worse than
+  the lenient parser this replaces.
+- **The callout boundary is unchanged.** Normalization on the read path runs *after* the callout
+  cascade, and `CalloutRequestBuilder.reformatDateParams` converts ISO back to the UI pattern
+  before a legacy callout runs — so callouts receive exactly the same `dd-MM-yyyy` they did before.
+
+Full investigation, including the corrupt rows this found in a live database:
+`docs/mcp-evaluation/imps/IMP-16.md` in the `schema_forge` repo.
+
 ### 4.4 Selectors (FK Dropdowns)
 
 The selector service resolves foreign key references and provides searchable dropdown values.
