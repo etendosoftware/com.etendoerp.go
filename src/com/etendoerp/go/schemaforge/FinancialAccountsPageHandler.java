@@ -99,13 +99,31 @@ public class FinancialAccountsPageHandler implements NeoHandler {
           + "       fa.c_currency_id, cur.iso_code, fa.iban, fa.isdefault, fa.isactive, "
           + "       fa.em_psd2_masked_pan, fa.em_psd2_connection_status, "
           + "       COALESCE(fa.em_etgo_date_tolerance, 3), "
-          + "       COALESCE(fa.em_etgo_amount_tolerance, 0) "
+          + "       COALESCE(fa.em_etgo_amount_tolerance, 0), "
+          + "       COALESCE(fa.em_aprm_glitem_diff, ''), "
+          + "       COALESCE(gli.name, '') "
           + "  FROM fin_financial_account fa "
           + "  JOIN c_currency cur ON cur.c_currency_id = fa.c_currency_id "
+          + "  LEFT JOIN c_glitem gli ON gli.c_glitem_id = fa.em_aprm_glitem_diff "
           + " WHERE fa.ad_client_id = ? "
           + "   AND fa.ad_org_id = ANY (?) "
           + " ORDER BY fa.isdefault DESC, fa.name ASC";
 
+  /**
+   * "Pending to reconcile" per account, in two branches because the two account types measure it
+   * against different things (ETP-4795):
+   *
+   * <ul>
+   *   <li><b>Bank / card</b> — unmatched bank-statement lines, the rows the split panel lists.</li>
+   *   <li><b>Cash</b> — movements not yet part of a reconciliation, the rows the cash close lists.
+   *       A cash drawer has no bank statements, so before this branch existed its counter was
+   *       structurally always 0: the tab badge, the list's "Por conciliar" column and the sidebar's
+   *       "Cuentas con pendientes" were all blind to cash accounts.</li>
+   * </ul>
+   *
+   * An account is either cash or not, so the branches can never both match one — {@code UNION ALL}
+   * is safe and still yields exactly one row per account. Bind order: clientId, orgs, clientId, orgs.
+   */
   private static final String PENDING_BY_ACCOUNT_SQL =
       "SELECT bs.fin_financial_account_id, COUNT(bsl.*) AS pending_lines "
           + "  FROM fin_bankstatementline bsl "
@@ -115,7 +133,20 @@ public class FinancialAccountsPageHandler implements NeoHandler {
           + "   AND bs.isactive = 'Y' "
           + "   AND bs.ad_client_id = ? "
           + "   AND bs.ad_org_id = ANY (?) "
-          + " GROUP BY bs.fin_financial_account_id";
+          + " GROUP BY bs.fin_financial_account_id "
+          + " UNION ALL "
+          + "SELECT ft.fin_financial_account_id, COUNT(*) AS pending_lines "
+          + "  FROM fin_finacc_transaction ft "
+          + "  JOIN fin_financial_account fa "
+          + "    ON fa.fin_financial_account_id = ft.fin_financial_account_id "
+          + " WHERE fa.type = 'C' "
+          + "   AND ft.isactive = 'Y' "
+          + "   AND ft.processed = 'Y' "
+          + "   AND ft.fin_reconciliation_id IS NULL "
+          + "   AND ft.status <> 'RPPC' "
+          + "   AND ft.ad_client_id = ? "
+          + "   AND ft.ad_org_id = ANY (?) "
+          + " GROUP BY ft.fin_financial_account_id";
 
   /**
    * Accounts with at least one active transaction (ETP-4530). Used by the frontend to lock the
@@ -213,6 +244,8 @@ public class FinancialAccountsPageHandler implements NeoHandler {
           row.dateTolerance = rs.getInt(12);
           BigDecimal amtTol = rs.getBigDecimal(13);
           row.amountTolerance = amtTol != null ? amtTol : BigDecimal.ZERO;
+          row.glItemDifferenceId = StringUtils.trimToEmpty(rs.getString(14));
+          row.glItemDifferenceName = StringUtils.trimToEmpty(rs.getString(15));
           rows.add(row);
         }
       }
@@ -224,11 +257,18 @@ public class FinancialAccountsPageHandler implements NeoHandler {
     Map<String, Integer> result = new LinkedHashMap<>();
     Connection conn = OBDal.getInstance().getConnection();
     try (PreparedStatement ps = conn.prepareStatement(PENDING_BY_ACCOUNT_SQL)) {
+      // Two branches (bank-statement lines / cash movements), each scoped by client + org.
+      java.sql.Array orgArray = conn.createArrayOf(SQL_TYPE_VARCHAR, orgs.toArray(new String[0]));
       ps.setString(1, clientId);
-      ps.setArray(2, conn.createArrayOf(SQL_TYPE_VARCHAR, orgs.toArray(new String[0])));
+      ps.setArray(2, orgArray);
+      ps.setString(3, clientId);
+      ps.setArray(4, orgArray);
       try (ResultSet rs = ps.executeQuery()) {
         while (rs.next()) {
-          result.put(rs.getString(1), rs.getInt(2));
+          // merge, not put: the two UNION ALL branches are grouped independently, so an account
+          // that is cash-type AND has imported bank statements yields one row per branch. Summing
+          // keeps both; put would silently drop the first.
+          result.merge(rs.getString(1), rs.getInt(2), Integer::sum);
         }
       }
     }
@@ -275,6 +315,8 @@ public class FinancialAccountsPageHandler implements NeoHandler {
       json.put("pendingCount", pendingByAccount.getOrDefault(account.id, 0));
       json.put("dateTolerance", account.dateTolerance);
       json.put("amountTolerance", account.amountTolerance);
+      json.put("glItemDifferenceId", account.glItemDifferenceId);
+      json.put("glItemDifferenceName", account.glItemDifferenceName);
       json.put("hasTransactions", accountsWithTransactions.contains(account.id));
       arr.put(json);
     }
@@ -362,6 +404,10 @@ public class FinancialAccountsPageHandler implements NeoHandler {
     int dateTolerance = 3;
     /** Maximum % difference allowed when matching amounts. Default 0 (exact match). */
     BigDecimal amountTolerance = BigDecimal.ZERO;
+    /** GL item the cash-close/reconciliation difference is posted to (ETP-4795). Blank if unset. */
+    String glItemDifferenceId = "";
+    /** Display name of {@link #glItemDifferenceId}, resolved server-side. Blank if unset. */
+    String glItemDifferenceName = "";
 
     AccountRow(String id, String name, String type, BigDecimal currentBalance,
         Currency currency, String iban, boolean isDefault) {

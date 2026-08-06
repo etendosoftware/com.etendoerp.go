@@ -33,6 +33,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -482,6 +483,71 @@ public class FinancialAccountsPageHandlerTest {
   }
 
   /**
+   * Verifies that {@code loadAccounts()} maps columns 14 ({@code em_aprm_glitem_diff}) and 15
+   * (the joined {@code c_glitem.name}) into {@link AccountRow#glItemDifferenceId} and {@link
+   * AccountRow#glItemDifferenceName} (ETP-4795), and that an account with no GL item configured
+   * (both columns blank) degrades to the empty-string defaults rather than {@code null}.
+   *
+   * @throws Exception
+   *     if the mocked JDBC chain fails
+   */
+  @Test
+  public void testLoadAccountsReadsGlItemDifferenceColumns() throws Exception {
+    Connection conn = mock(Connection.class);
+    PreparedStatement ps = mock(PreparedStatement.class);
+    ResultSet rs = mock(ResultSet.class);
+
+    when(conn.prepareStatement(anyString())).thenReturn(ps);
+    when(conn.createArrayOf(eq("varchar"), any())).thenReturn(mock(java.sql.Array.class));
+    when(ps.executeQuery()).thenReturn(rs);
+    when(rs.next()).thenReturn(true, true, false);
+    when(rs.getString(1)).thenReturn("acc-caja", "acc-banco");
+    when(rs.getString(8)).thenReturn("N", "N");
+    when(rs.getString(9)).thenReturn("Y", "Y");
+    when(rs.getString(11)).thenReturn("IN", "CO");
+    // acc-caja has a GL Item Difference configured; acc-banco has none.
+    when(rs.getString(14)).thenReturn("gli-diff-1", "");
+    when(rs.getString(15)).thenReturn("Diferencias de caja", "");
+
+    try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.getConnection()).thenReturn(conn);
+
+      List<AccountRow> rows = handler.loadAccounts(CLIENT_ID, ORGS);
+
+      assertEquals(2, rows.size());
+      assertEquals("gli-diff-1", rows.get(0).glItemDifferenceId);
+      assertEquals("Diferencias de caja", rows.get(0).glItemDifferenceName);
+      assertEquals("", rows.get(1).glItemDifferenceId);
+      assertEquals("", rows.get(1).glItemDifferenceName);
+    }
+  }
+
+  /**
+   * Verifies that {@code buildAccountsArray()} always emits {@code glItemDifferenceId} and
+   * {@code glItemDifferenceName} (ETP-4795), even when the {@link AccountRow} default (blank) is
+   * never overwritten by the loader — the Edit Account modal reads both unconditionally.
+   *
+   * @throws Exception
+   *     if the JSON traversal fails
+   */
+  @Test
+  public void testBuildAccountsArrayEmitsGlItemDifference() throws Exception {
+    AccountRow row = account("acc-1", "Caja", "C", new BigDecimal("100.00"), "EUR");
+    row.glItemDifferenceId = "gli-diff-1";
+    row.glItemDifferenceName = "Diferencias de caja";
+
+    JSONArray arr = handler.buildAccountsArray(Collections.singletonList(row),
+        Collections.emptyMap(), Collections.emptySet());
+
+    assertEquals(1, arr.length());
+    JSONObject json = arr.getJSONObject(0);
+    assertEquals("gli-diff-1", json.getString("glItemDifferenceId"));
+    assertEquals("Diferencias de caja", json.getString("glItemDifferenceName"));
+  }
+
+  /**
    * Verifies that {@code buildAccountsArray()} emits the {@code active} flag for
    * each row: active accounts serialise {@code true}, archived ones serialise
    * {@code false}, so the UI can split them into the normal and "inactive"
@@ -793,6 +859,80 @@ public class FinancialAccountsPageHandlerTest {
       Map<String, Integer> result = handler.loadPendingByAccount(CLIENT_ID, ORGS);
 
       assertTrue("expected empty pending map", result.isEmpty());
+    }
+  }
+
+  /**
+   * Verifies that {@code loadPendingByAccount} binds all four parameters of the two-branch
+   * {@code UNION ALL} query — client + orgs for the bank-statement branch, then client + orgs again
+   * for the cash-movement branch (ETP-4795) — reusing a single {@code java.sql.Array} instance.
+   *
+   * <p>Before the cash branch existed the query took two parameters; binding only those two now
+   * leaves placeholders 3 and 4 unset and the driver throws at execution time.</p>
+   *
+   * @throws Exception
+   *     if the mocked JDBC chain fails
+   */
+  @Test
+  public void testLoadPendingByAccountBindsBothUnionBranches() throws Exception {
+    Connection conn = mock(Connection.class);
+    PreparedStatement ps = mock(PreparedStatement.class);
+    ResultSet rs = mock(ResultSet.class);
+    Array orgArray = mock(Array.class);
+
+    when(conn.prepareStatement(anyString())).thenReturn(ps);
+    when(conn.createArrayOf(eq("varchar"), any())).thenReturn(orgArray);
+    when(ps.executeQuery()).thenReturn(rs);
+    when(rs.next()).thenReturn(false);
+
+    try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.getConnection()).thenReturn(conn);
+
+      handler.loadPendingByAccount(CLIENT_ID, ORGS);
+
+      verify(ps).setString(1, CLIENT_ID);
+      verify(ps).setArray(2, orgArray);
+      verify(ps).setString(3, CLIENT_ID);
+      verify(ps).setArray(4, orgArray);
+      // One array built and bound twice, not two equivalent arrays.
+      verify(conn, times(1)).createArrayOf(eq("varchar"), any());
+    }
+  }
+
+  /**
+   * Verifies that {@code loadPendingByAccount} SUMS the counts when the same account id comes back
+   * from both {@code UNION ALL} branches, instead of letting the second row overwrite the first.
+   *
+   * <p>The branches group independently, so a cash-type account that also has imported bank
+   * statements produces two rows for one account. Its pending badge must show the total.</p>
+   *
+   * @throws Exception
+   *     if the mocked JDBC chain fails
+   */
+  @Test
+  public void testLoadPendingByAccountSumsRowsFromBothBranches() throws Exception {
+    Connection conn = mock(Connection.class);
+    PreparedStatement ps = mock(PreparedStatement.class);
+    ResultSet rs = mock(ResultSet.class);
+
+    when(conn.prepareStatement(anyString())).thenReturn(ps);
+    when(conn.createArrayOf(eq("varchar"), any())).thenReturn(mock(Array.class));
+    when(ps.executeQuery()).thenReturn(rs);
+    when(rs.next()).thenReturn(true, true, false);
+    when(rs.getString(1)).thenReturn("acc-cash", "acc-cash");
+    when(rs.getInt(2)).thenReturn(4, 7);
+
+    try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.getConnection()).thenReturn(conn);
+
+      Map<String, Integer> result = handler.loadPendingByAccount(CLIENT_ID, ORGS);
+
+      assertEquals(1, result.size());
+      assertEquals(Integer.valueOf(11), result.get("acc-cash"));
     }
   }
 
