@@ -508,7 +508,8 @@ class McpToolRouterRouteTest {
       JSONObject discoverSpec = new JSONObject();
       discoverSpec.put("name", SPEC_NAME);
       discoverSpec.put("type", "window");
-      supportMock.when(() -> McpToolRouterSupport.buildDiscoverSpec(eq(spec), eq("W"), any()))
+      supportMock.when(
+              () -> McpToolRouterSupport.buildDiscoverSpec(eq(spec), eq("W"), any(), any()))
           .thenReturn(discoverSpec);
 
       JSONObject result = router.route("neo_discover", null, READ_SCOPES);

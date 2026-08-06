@@ -49,6 +49,7 @@ import org.openbravo.service.json.JsonConstants;
 import com.etendoerp.go.schemaforge.AmortizationPlanService;
 import com.etendoerp.go.schemaforge.BatchService;
 import com.etendoerp.go.schemaforge.util.NeoButtonActionHelper;
+import com.etendoerp.go.schemaforge.util.NeoLanguage;
 import com.etendoerp.go.schemaforge.NeoContext;
 import com.etendoerp.go.schemaforge.NeoDefaultsService;
 import com.etendoerp.go.schemaforge.NeoFieldFilter;
@@ -258,13 +259,20 @@ public class McpToolRouter {
       String specType = spec.getSpecType();
       if (McpToolRouterSupport.hasSpecAccess(spec, specType)) {
         JSONArray entities = "W".equals(specType) ? buildEntitySummaryArray(spec.getId()) : null;
-        specsArray.put(McpToolRouterSupport.buildDiscoverSpec(spec, specType, entities));
+        // IMP-9: derived here (not inside buildDiscoverSpec) so that method stays DAL-free —
+        // handleDiscover already runs in the live/admin OBContext buildEntitySummaryArray needs.
+        String primaryEntity = "W".equals(specType)
+            ? McpToolRouterSupport.resolvePrimaryEntityName(spec.getId())
+            : null;
+        specsArray.put(
+            McpToolRouterSupport.buildDiscoverSpec(spec, specType, entities, primaryEntity));
       }
     }
 
     JSONObject result = new JSONObject();
     result.put("specs", specsArray);
     result.put("count", specsArray.length());
+    result.put("guidance", McpToolRouterSupport.buildDocsGuidance());
     return wrapAsTextContent(result.toString(2));
   }
 
@@ -300,7 +308,7 @@ public class McpToolRouter {
 
     // Apply filters as where clause
     if (filters != null && filters.length() > 0) {
-      String whereClause = McpToolRouterSupport.buildWhereFromFilters(filters, adTab, log);
+      String whereClause = McpToolRouterSupport.buildWhereFromFilters(filters, adTab, sfEntity, log);
       if (StringUtils.isNotBlank(whereClause)) {
         params.put(JsonConstants.WHERE_AND_FILTER_CLAUSE, whereClause);
         params.put(JsonConstants.USE_ALIAS, "true");
@@ -331,6 +339,10 @@ public class McpToolRouter {
 
     // Apply field filtering
     fieldFilter.filterGetResponse(responseJson);
+
+    // IMP-2: optional projection — explicit `fields:[...]` or view:"summary". No-op when neither
+    // is present, so the default returns every column.
+    McpToolRouterSupport.applyProjection(responseJson, args, sfEntity, adTab);
 
     return wrapAsTextContent(responseJson.toString(2));
   }
@@ -365,7 +377,18 @@ public class McpToolRouter {
       return wrapAsErrorContent(error);
     }
 
+    // IMP-5: a get-by-id that matched nothing comes back as {data:[], status:0} — a
+    // success-looking empty result. Translate it into an explicit, machine-detectable
+    // not-found so the agent can tell "not found" from "empty match" and self-correct.
+    if (McpToolRouterSupport.isEmptySuccessResult(responseJson)) {
+      return wrapAsErrorContent(
+          McpToolRouterSupport.buildNotFoundError(specName, entityName, recordId).toString(2));
+    }
+
     fieldFilter.filterGetResponse(responseJson);
+
+    // IMP-2: optional projection — explicit `fields:[...]` or view:"summary".
+    McpToolRouterSupport.applyProjection(responseJson, args, sfEntity, adTab);
 
     return wrapAsTextContent(responseJson.toString(2));
   }
@@ -395,6 +418,20 @@ public class McpToolRouter {
     // filterWriteRequest strips fields not in ETGO_SF_FIELD writableFields, which is
     // too restrictive for MCP where AI agents need to set any valid column.
     JSONObject filteredBody = mapFieldsToDalProperties(fields, adTab);
+
+    // Hoisted so both FK-by-name resolution (IMP-4, below) and the sentinel/coercion passes
+    // further down share one DAL entity lookup.
+    Entity dalEntity = ModelProvider.getInstance()
+        .getEntityByTableId(adTab.getTable().getId());
+
+    // IMP-4: resolve FK-by-name search strings (e.g. businessPartner:"Acme Corp") into real
+    // record ids before anything downstream touches them. A value that already looks like an id
+    // is left untouched. See McpFkResolver's class javadoc for the selector-context limitation.
+    JSONObject fkError = McpFkResolver.resolveFkNames(filteredBody, dalEntity, adTab,
+        McpSelectorContextHelper.buildSelectorContextParams(null, adTab), log);
+    if (fkError != null) {
+      return wrapAsErrorContent(fkError.toString(2));
+    }
 
     // Snapshot user-provided fields BEFORE callout cascade can overwrite them.
     // Callouts derive dependent fields (e.g. product → tax, UOM) and may reset them
@@ -434,8 +471,6 @@ public class McpToolRouter {
     // Fix FK sentinel values: "0" is a UI-level sentinel (means "not yet set") that can't
     // go through the DAL as an entity reference. Replace with a real value from the body
     // when possible (e.g. documentType="0" -> copy from transactionDocument), or remove.
-    Entity dalEntity = ModelProvider.getInstance()
-        .getEntityByTableId(adTab.getTable().getId());
     resolveFkSentinels(filteredBody, dalEntity);
 
     // Coerce string values to proper JSON types expected by the DAL (Long, BigDecimal, Boolean).
@@ -446,10 +481,16 @@ public class McpToolRouter {
     // Validate mandatory fields before insert — return structured error matching neo_schema contract
     JSONArray missingFields = validateMandatoryFields(filteredBody, adTab, dalEntity);
     if (missingFields.length() > 0) {
+      // IMP-5: stable machine-detectable code + status so the agent can distinguish an
+      // "invalid write" from a "server error"; the human text moves to `detail`, and the
+      // existing `missingFields`/`hint` guidance is preserved.
       JSONObject errorObj = new JSONObject();
-      errorObj.put(McpConstants.KEY_ERROR, "Missing required fields that could not be auto-resolved");
+      errorObj.put(McpConstants.KEY_STATUS, McpConstants.STATUS_UNPROCESSABLE);
+      errorObj.put(McpConstants.KEY_ERROR, McpConstants.ERROR_VALIDATION);
+      errorObj.put(McpConstants.KEY_DETAIL, "Missing required fields that could not be auto-resolved");
       errorObj.put("missingFields", missingFields);
       errorObj.put("hint", "Provide these fields in the request, or use neo_selectors to find valid values for foreignKey fields");
+      errorObj.put(McpConstants.KEY_SEE_ALSO, McpConstants.SEE_ALSO_WRITING);
       return wrapAsErrorContent(errorObj.toString(2));
     }
 
@@ -506,6 +547,16 @@ public class McpToolRouter {
 
     // MCP: accept all valid table columns from AI agents
     JSONObject filteredBody = mapFieldsToDalProperties(fields, adTab);
+
+    // IMP-4: resolve FK-by-name search strings before persist (mirrors handleCreate). handleUpdate
+    // has no other coercion pass, so this is the only place the shared resolver is invoked here.
+    Entity dalEntity = ModelProvider.getInstance()
+        .getEntityByTableId(adTab.getTable().getId());
+    JSONObject fkError = McpFkResolver.resolveFkNames(filteredBody, dalEntity, adTab,
+        McpSelectorContextHelper.buildSelectorContextParams(null, adTab), log);
+    if (fkError != null) {
+      return wrapAsErrorContent(fkError.toString(2));
+    }
 
     // Run the entity's NeoHandler pre-hook (parity with the REST CRUD path).
     NeoHandler handler = McpHookExecutor.resolveEntityHandler(sfEntity);
@@ -593,7 +644,16 @@ public class McpToolRouter {
    * Also supports parentContext for child selectors that depend on header values.
    */
   private JSONObject handleSelectors(String specName, JSONObject args) throws Exception {
-    McpToolRouterSupport.validateArgs(args, McpConstants.PARAM_ENTITY, McpConstants.PARAM_COLUMN);
+    // IMP-8: accept `field` as an alias for the canonical `column` argument so the natural
+    // first-try call shape succeeds instead of failing on a missing-argument error.
+    McpToolRouterSupport.aliasArg(args, McpConstants.PARAM_FIELD, McpConstants.PARAM_COLUMN);
+    McpToolRouterSupport.validateArgs(args, McpConstants.PARAM_ENTITY);
+    if (args == null || !args.has(McpConstants.PARAM_COLUMN)
+        || args.isNull(McpConstants.PARAM_COLUMN)) {
+      // Self-correcting error (IMP-8): name the expected key and the accepted alias.
+      throw new IllegalArgumentException("Missing required argument: 'column' (the FK field "
+          + "name, e.g. \"businessPartner\"). You may also pass it as 'field'.");
+    }
 
     String entityName = args.getString(McpConstants.PARAM_ENTITY);
     String columnName = args.getString(McpConstants.PARAM_COLUMN);
@@ -678,6 +738,18 @@ public class McpToolRouter {
       }
     }
 
+    // IMP-7: optional lean/grouped view. Without `view` (or view=full) the flat response is
+    // returned unchanged; grouped/minimal split writable defaults (confirm) from server-managed
+    // compliance flags so the agent isn't buried under ~65 columns it should never touch.
+    String view = args.optString(McpDefaultsView.PARAM_VIEW, null);
+    if (McpDefaultsView.isGroupingView(view) && neoResponse.getHttpStatus() < 400
+        && neoResponse.getBody() != null) {
+      java.util.Set<String> editable =
+          McpToolRouterSupport.editablePropertyNames(sfEntity, adTab);
+      neoResponse = NeoResponse.ok(
+          McpDefaultsView.apply(neoResponse.getBody(), editable, view));
+    }
+
     return McpHookExecutor.neoResponseToMcpResult(neoResponse);
   }
 
@@ -721,6 +793,18 @@ public class McpToolRouter {
         fieldMetadata.visibilityByColumnId, fieldMetadata.businessCriticalByColumnId,
         promptByColumnId, SYSTEM_COLUMNS, SELECTOR_REFS);
     McpSchemaFieldBuilder.applyPreconditionRequirements(fieldsArray, requiredWhenByField);
+    // IMP-1: overlay clean, localized labels + one-line descriptions from AD_Field so the agent
+    // sees "SII Description" instead of the raw AD_Column name "EM_Aeatsii_Descripcion_Sii".
+    McpSchemaFieldBuilder.applyCuratedLabels(fieldsArray,
+        McpSchemaFieldBuilder.loadFieldLabels(adTab, NeoLanguage.currentCode()));
+
+    // IMP-6: an explicit view:"actions" collapses the full field dump down to the callable
+    // buttons/processes only — a no-op for any other (or omitted) view.
+    String view = args.optString(McpActionsView.PARAM_VIEW, null);
+    if (McpActionsView.isActionsView(view)) {
+      return wrapAsTextContent(
+          McpActionsView.buildResponse(specName, entityName, fieldsArray).toString(2));
+    }
 
     // Build entity schema
     JSONObject entitySchema = new JSONObject();
@@ -743,6 +827,15 @@ public class McpToolRouter {
       methods.put(HTTP_METHOD_DELETE);
     }
     entitySchema.put("methods", methods);
+
+    // Named business filters (ETP-4601): advertise the spec's hand-authored status filters,
+    // each keyed by name, so the agent can discover them instead of guessing. Only the
+    // name/label/description are exposed — the HQL where fragment stays server-side.
+    JSONArray namedFilters = McpNamedFilters.describe(sfEntity.getNamedFilters());
+    if (namedFilters.length() > 0) {
+      entitySchema.put("namedFilters", namedFilters);
+    }
+
     entitySchema.put("fields", fieldsArray);
     entitySchema.put("fieldCount", fieldsArray.length());
 

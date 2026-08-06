@@ -259,7 +259,9 @@ public class ToolRegistry {
   // ── Discovery tool ─────────────────────────────────────────────────────
 
   private McpToolDefinition buildDiscoverTool() {
-    Map<String, Object> schema = buildSchema(McpConstants.TYPE_OBJECT,
+    Map<String, Object> schema = new LinkedHashMap<>();
+    schema.put("type", McpConstants.TYPE_OBJECT);
+    schema.put(McpConstants.KEY_DESCRIPTION,
         "Discover all available NEO Headless API specs and their entities");
     schema.put(McpConstants.KEY_PROPERTIES, new HashMap<>());
     return new McpToolDefinition(
@@ -367,15 +369,30 @@ public class ToolRegistry {
     props.put("spec", enumProp("Spec name (use neo_discover to find available specs)", specNames));
     props.put(McpConstants.PARAM_ENTITY,
       stringProp(McpConstants.LABEL_ENTITY_NAME_WITH_EXAMPLE));
-    props.put("filters", objectProp("Filter criteria as key-value pairs (column=value)"));
+    props.put("filters", objectProp(
+        "Filter criteria. Three shapes, combinable: (1) exact match {\"column\": value}; "
+            + "(2) range operators {\"column\": {\"gt\"|\"gte\"|\"lt\"|\"lte\": value}} or "
+            + "{\"column\": {\"between\": [from, to]}} (dates as \"YYYY-MM-DD\"); "
+            + "(3) named business filter {\"status\": \"<name>\"} — the spec's own hand-authored "
+            + "statuses (e.g. \"pending\", \"partial\", \"completed\"). Call neo_schema to see the "
+            + "named filters available for a given spec; an unknown name returns the valid list."));
     props.put("limit", intProp("Maximum number of records to return (default 100)"));
     props.put("offset", intProp("Number of records to skip for pagination"));
     props.put("orderBy", stringProp("Column name to sort by, prefix with '-' for descending"));
+    props.put(McpFieldProjection.PARAM_FIELDS, stringArrayProp(
+        "Optional projection: return only these field names per row (e.g. "
+            + "[\"documentNo\",\"businessPartner\",\"grandTotalAmount\"]). A FK's $_identifier "
+            + "label is included automatically. Omit to return every column."));
+    props.put(McpFieldProjection.PARAM_VIEW, enumProp(
+        "Optional curated view. \"summary\" returns only the spec's business-critical fields — a "
+            + "compact row for compliance-heavy specs. Ignored when `fields` is given; omit for the "
+            + "full row.", List.of(McpFieldProjection.VIEW_SUMMARY)));
 
     return new McpToolDefinition(
         "neo_list",
         "List records from a NEO Headless API spec. "
-            + "Supports filtering, pagination, and sorting.",
+            + "Supports filtering (exact match, range operators, named document status), "
+            + "pagination, sorting, and field projection (`fields` / view:\"summary\").",
           buildObjectSchema(props, List.of("spec", McpConstants.PARAM_ENTITY)));
   }
 
@@ -384,10 +401,19 @@ public class ToolRegistry {
     props.put("spec", enumProp(McpConstants.LABEL_SPEC_NAME, specNames));
     props.put(McpConstants.PARAM_ENTITY, stringProp(McpConstants.LABEL_ENTITY_NAME));
     props.put("id", stringProp("Record ID to retrieve"));
+    props.put(McpFieldProjection.PARAM_FIELDS, stringArrayProp(
+        "Optional projection: return only these field names (e.g. "
+            + "[\"documentNo\",\"grandTotalAmount\"]). A FK's $_identifier label is included "
+            + "automatically. Omit to return every column."));
+    props.put(McpFieldProjection.PARAM_VIEW, enumProp(
+        "Optional curated view. \"summary\" returns only the spec's business-critical fields. "
+            + "Ignored when `fields` is given; omit for the full record.",
+        List.of(McpFieldProjection.VIEW_SUMMARY)));
 
     return new McpToolDefinition(
         "neo_get",
-        "Get a single record by ID from a NEO Headless API spec.",
+        "Get a single record by ID from a NEO Headless API spec. Supports field projection "
+            + "(`fields` / view:\"summary\").",
           buildObjectSchema(props, List.of("spec", McpConstants.PARAM_ENTITY, "id")));
   }
 
@@ -474,6 +500,15 @@ public class ToolRegistry {
     props.put(McpConstants.PARAM_ASSET_ID, stringProp(
         "Optional asset ID for computing dynamic defaults that depend on a specific asset "
             + "(e.g. the amortization header name derived from the asset name and start date)"));
+    props.put(McpDefaultsView.PARAM_VIEW, enumProp(
+        "Optional response shape. Omit (or \"full\") for the historical flat map of every default. "
+            + "\"grouped\" splits the result into `confirm` (writable fields you should review or "
+            + "override before neo_create) and `systemManaged` (compliance/audit flags the server "
+            + "owns — leave them alone). \"minimal\" returns only the `confirm` block. Use "
+            + "grouped/minimal on compliance-heavy specs (invoices, payments) to avoid wading "
+            + "through ~65 fields when only ~5 matter.",
+        List.of(McpDefaultsView.VIEW_FULL, McpDefaultsView.VIEW_GROUPED,
+            McpDefaultsView.VIEW_MINIMAL)));
 
     return new McpToolDefinition(
         "neo_defaults",
@@ -483,7 +518,8 @@ public class ToolRegistry {
             + "the starting point and only override the fields the user actually wants to set — "
             + "instead of asking the user for every value from scratch. neo_create will still "
             + "auto-fill any field you omit, but calling this first lets you see the full base "
-            + "dataset up front.",
+            + "dataset up front. Pass view:\"minimal\" (or \"grouped\") to collapse server-managed "
+            + "compliance flags and focus on the fields you actually confirm.",
         buildObjectSchema(props, List.of("spec", McpConstants.PARAM_ENTITY)));
   }
 
@@ -567,6 +603,13 @@ public class ToolRegistry {
     props.put("spec", enumProp("Spec name (use neo_discover to find available specs)", specNames));
     props.put(McpConstants.PARAM_ENTITY,
       stringProp("Entity name within the spec (e.g. 'Header', 'Lines')"));
+    props.put(McpActionsView.PARAM_VIEW, enumProp(
+        "Optional response shape. Omit for the full field dump (default, unchanged). "
+            + "\"actions\" returns only the callable buttons/processes ({name, label, "
+            + "invokeVia:\"neo_action\", action, processName, processId, ...}) instead of the "
+            + "full ~97-field schema — use it when you only need to know what can be triggered "
+            + "on this entity, not every column.",
+        List.of(McpActionsView.VIEW_ACTIONS)));
 
     return new McpToolDefinition(
         "neo_schema",
@@ -574,7 +617,8 @@ public class ToolRegistry {
             + "read-only flag, default values, visibility (editable/readOnly/system/discarded), "
             + "and which fields have FK selectors. Call this BEFORE neo_create to know which "
             + "fields exist and which are required. Only fields with userRequired=true need to "
-            + "be provided — system fields are auto-derived by Etendo callouts.",
+            + "be provided — system fields are auto-derived by Etendo callouts. Pass "
+            + "view:\"actions\" to get only the callable buttons/processes instead.",
         buildObjectSchema(props, List.of("spec", "entity")));
   }
 
@@ -684,15 +728,6 @@ public class ToolRegistry {
 
   // ── JSON Schema builder helpers ────────────────────────────────────────
 
-  private Map<String, Object> buildSchema(String type, String description) {
-    Map<String, Object> schema = new LinkedHashMap<>();
-    schema.put("type", type);
-    if (description != null) {
-      schema.put(McpConstants.KEY_DESCRIPTION, description);
-    }
-    return schema;
-  }
-
   private Map<String, Object> buildObjectSchema(Map<String, Object> properties,
       List<String> required) {
     Map<String, Object> schema = new LinkedHashMap<>();
@@ -740,6 +775,17 @@ public class ToolRegistry {
     Map<String, Object> prop = new LinkedHashMap<>();
     prop.put("type", McpConstants.TYPE_OBJECT);
     prop.put(McpConstants.KEY_DESCRIPTION, description);
+    return prop;
+  }
+
+  /** A JSON-schema array of strings, used for the IMP-2 {@code fields} projection whitelist. */
+  private Map<String, Object> stringArrayProp(String description) {
+    Map<String, Object> items = new LinkedHashMap<>();
+    items.put("type", McpConstants.TYPE_STRING);
+    Map<String, Object> prop = new LinkedHashMap<>();
+    prop.put("type", "array");
+    prop.put(McpConstants.KEY_DESCRIPTION, description);
+    prop.put("items", items);
     return prop;
   }
 
