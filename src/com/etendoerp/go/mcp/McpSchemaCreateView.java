@@ -18,6 +18,7 @@
 package com.etendoerp.go.mcp;
 
 import java.util.HashSet;
+import java.util.Iterator;
 import java.util.Set;
 
 import org.codehaus.jettison.json.JSONArray;
@@ -69,6 +70,26 @@ final class McpSchemaCreateView {
   private static final String KEY_REQUIRED = "required";
   private static final String KEY_OPTIONAL = "optional";
 
+  /**
+   * Keys dropped from every emitted descriptor, because none of them tells the agent anything the
+   * view has not already told it.
+   *
+   * <p>{@code visibility} is always {@code editable}, {@code readOnly} always {@code false} and
+   * {@code userRequired} is exactly the group the field is in — repeating them 24 times is the
+   * verbosity this item exists to remove. {@code required} is the raw AD mandatory flag, which
+   * {@link McpSchemaFieldBuilder#addVisibility} already corrected into {@code userRequired}; leaving
+   * it in would contradict the grouping (an AD-mandatory field with a default sits under
+   * {@code optional} while carrying {@code required: true}).
+   *
+   * <p>{@code defaultExpression} / {@code defaultSource} go too, and that one is a size decision as
+   * much as a clarity one: on {@code sales-invoice/header} two AEAT compliance columns carry 806 and
+   * 604 characters of raw {@code @SQL=…} between them. An agent cannot evaluate an AD default
+   * expression — {@code neo_defaults} resolves it server-side, and the hint says so.
+   */
+  private static final Set<String> REDUNDANT_KEYS = Set.of(
+      "visibility", "readOnly", McpSchemaFieldBuilder.KEY_USER_REQUIRED, "required",
+      McpSchemaFieldBuilder.KEY_DEFAULT_EXPRESSION, McpSchemaFieldBuilder.KEY_DEFAULT_SOURCE);
+
   static final String CREATE_HINT =
       "Every field listed here is one you may send to neo_create. Fields under 'required' MUST be "
       + "provided — they are mandatory and nothing else supplies them. Fields under 'optional' are "
@@ -76,8 +97,11 @@ final class McpSchemaCreateView {
       + "or excluded — do not send it, and do not call neo_schema again to look for it. Fields with "
       + "hasSelector=true take a record id: resolve it with neo_selectors, or pass the display name "
       + "and let the server resolve it. Fields with businessCritical=true carry core business data — "
-      + "you MUST confirm those values with the user before creating the record. Call neo_defaults "
-      + "for the values the server will fill in.";
+      + "you MUST confirm those values with the user before creating the record. Every field here is "
+      + "editable and writable, so visibility/readOnly/userRequired are omitted — the group already "
+      + "says it. Default values are omitted too: call neo_defaults to get the values the server "
+      + "will fill in, already resolved. For the full descriptor of any field listed here, call "
+      + "neo_schema again with fields:[\"<name>\"].";
 
   /** @return {@code true} when {@code view} requests the create-shaped projection. */
   static boolean isCreateView(String view) {
@@ -107,9 +131,9 @@ final class McpSchemaCreateView {
           continue;
         }
         if (field.optBoolean(McpSchemaFieldBuilder.KEY_USER_REQUIRED, false)) {
-          required.put(field);
+          required.put(slim(field));
         } else {
-          optional.put(field);
+          optional.put(slim(field));
         }
       }
     }
@@ -122,6 +146,22 @@ final class McpSchemaCreateView {
     response.put("optionalCount", optional.length());
     response.put("hint", CREATE_HINT);
     return response;
+  }
+
+  /**
+   * Copies a descriptor without the {@link #REDUNDANT_KEYS}. The original is left untouched — the
+   * default (no-view) response is built from the same array and must stay byte-for-byte unchanged.
+   */
+  private static JSONObject slim(JSONObject field) throws JSONException {
+    JSONObject copy = new JSONObject();
+    Iterator<?> keys = field.keys();
+    while (keys.hasNext()) {
+      String key = String.valueOf(keys.next());
+      if (!REDUNDANT_KEYS.contains(key)) {
+        copy.put(key, field.get(key));
+      }
+    }
+    return copy;
   }
 
   /**

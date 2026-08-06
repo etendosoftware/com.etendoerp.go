@@ -143,6 +143,45 @@ class McpSchemaCreateViewTest {
       assertFalse(response.getJSONArray("optional").toString().contains("completeAction"));
     }
 
+    // Every emitted field is editable, writable, and in the group its userRequired flag names, so
+    // repeating those keys 24 times is the verbosity IMP-12 exists to remove. defaultExpression goes
+    // too: two AEAT columns on sales-invoice/header carry 1,410 chars of raw @SQL= that no agent can
+    // evaluate — neo_defaults resolves it server-side.
+    @Test
+    @DisplayName("drops the keys the grouping already encodes, plus the AD default expression")
+    void dropsRedundantKeys() throws JSONException {
+      JSONArray fields = new JSONArray();
+      JSONObject invoiceDate = field("invoiceDate", "editable", false, false);
+      invoiceDate.put(McpSchemaFieldBuilder.KEY_DEFAULT_EXPRESSION, "@#Date@");
+      invoiceDate.put("businessCritical", true);
+      fields.put(invoiceDate);
+
+      JSONObject emitted =
+          McpSchemaCreateView.buildResponse("sales-invoice", "header", fields)
+              .getJSONArray("optional").getJSONObject(0);
+
+      assertFalse(emitted.has("visibility"));
+      assertFalse(emitted.has("readOnly"));
+      assertFalse(emitted.has(McpSchemaFieldBuilder.KEY_USER_REQUIRED));
+      assertFalse(emitted.has(McpSchemaFieldBuilder.KEY_DEFAULT_EXPRESSION));
+      // Everything semantically useful survives.
+      assertEquals("invoiceDate", emitted.getString("name"));
+      assertEquals("string", emitted.getString("type"));
+      assertTrue(emitted.getBoolean("businessCritical"));
+    }
+
+    // The default (no-view) response is built from the same array, so slimming must copy rather than
+    // mutate — otherwise view:"create" would silently degrade the full dump for later callers.
+    @Test
+    @DisplayName("leaves the input descriptors untouched")
+    void doesNotMutateInput() throws JSONException {
+      JSONArray fields = sampleFields();
+      McpSchemaCreateView.buildResponse("sales-invoice", "header", fields);
+
+      assertEquals("editable", fields.getJSONObject(0).getString("visibility"));
+      assertTrue(fields.getJSONObject(0).getBoolean(McpSchemaFieldBuilder.KEY_USER_REQUIRED));
+    }
+
     @Test
     @DisplayName("a null fields array yields empty (never null) groups")
     void nullFields() throws JSONException {
