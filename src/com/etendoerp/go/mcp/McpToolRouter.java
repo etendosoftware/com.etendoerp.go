@@ -258,14 +258,20 @@ public class McpToolRouter {
     for (SFSpec spec : allSpecs) {
       String specType = spec.getSpecType();
       if (McpToolRouterSupport.hasSpecAccess(spec, specType)) {
-        JSONArray entities = "W".equals(specType) ? buildEntitySummaryArray(spec.getId()) : null;
+        // ETP-4254: load the included entities ONCE per W spec — the entity summary, the
+        // caller-derived primaryEntity (IMP-9/ETP-4601) and the spec-level readOnly marker are
+        // all derived from this same list, so none of them costs an extra query.
+        List<SFEntity> includedEntities = "W".equals(specType)
+            ? McpToolRouterSupport.listIncludedEntities(spec.getId()) : null;
+        JSONArray entities = "W".equals(specType)
+            ? McpToolRouterSupport.buildEntitySummaryArray(includedEntities) : null;
         // IMP-9: derived here (not inside buildDiscoverSpec) so that method stays DAL-free —
-        // handleDiscover already runs in the live/admin OBContext buildEntitySummaryArray needs.
+        // handleDiscover already runs in the live/admin OBContext resolving tab levels needs.
         String primaryEntity = "W".equals(specType)
-            ? McpToolRouterSupport.resolvePrimaryEntityName(spec.getId())
+            ? McpToolRouterSupport.resolvePrimaryEntityName(includedEntities)
             : null;
-        specsArray.put(
-            McpToolRouterSupport.buildDiscoverSpec(spec, specType, entities, primaryEntity));
+        specsArray.put(McpToolRouterSupport.buildDiscoverSpec(
+            spec, specType, entities, primaryEntity, includedEntities));
       }
     }
 
@@ -406,6 +412,10 @@ public class McpToolRouter {
 
     SFSpec spec = McpToolRouterSupport.findActiveSpecByName(specName);
     SFEntity sfEntity = McpToolRouterSupport.resolveIncludedEntityOrExplain(spec, entityName);
+    // ETP-4254: entity-level method gate, the same ETGO_SF_ENTITY flags the REST CRUD path
+    // enforces. hasSpecAccess above is role-level only, so without this an agent could write
+    // to an entity configured read-only (which neo_discover already reports as readOnly).
+    McpToolRouterSupport.requireMethodEnabled(spec, sfEntity, HTTP_METHOD_POST);
     Tab adTab = getAdTabOrThrow(sfEntity, entityName);
 
     String dalEntityName = adTab.getTable().getName();
@@ -537,6 +547,9 @@ public class McpToolRouter {
 
     SFSpec spec = McpToolRouterSupport.findActiveSpecByName(specName);
     SFEntity sfEntity = McpToolRouterSupport.resolveIncludedEntityOrExplain(spec, entityName);
+    // ETP-4254: neo_update maps to PUT, exactly as resolveAccessMethod does for the
+    // role-level check — so the entity-level flag consulted here is ISPUT.
+    McpToolRouterSupport.requireMethodEnabled(spec, sfEntity, HTTP_METHOD_PUT);
     Tab adTab = getAdTabOrThrow(sfEntity, entityName);
 
     String dalEntityName = adTab.getTable().getName();
@@ -599,6 +612,8 @@ public class McpToolRouter {
 
     SFSpec spec = McpToolRouterSupport.findActiveSpecByName(specName);
     SFEntity sfEntity = McpToolRouterSupport.resolveIncludedEntityOrExplain(spec, entityName);
+    // ETP-4254: entity-level DELETE flag, refused before any DAL work happens.
+    McpToolRouterSupport.requireMethodEnabled(spec, sfEntity, HTTP_METHOD_DELETE);
     Tab adTab = getAdTabOrThrow(sfEntity, entityName);
 
     String dalEntityName = adTab.getTable().getName();
@@ -1349,15 +1364,6 @@ public class McpToolRouter {
       return "Validation error: " + innerResponse.toString();
     }
     return null;
-  }
-
-  // ── Entity summary for discovery ──────────────────────────────────────
-
-  /**
-   * Build entity summary array for a spec (used by neo_discover).
-   */
-  private JSONArray buildEntitySummaryArray(String specId) throws Exception {
-    return McpToolRouterSupport.buildEntitySummaryArray(specId);
   }
 
   // ── MCP content formatting ────────────────────────────────────────────

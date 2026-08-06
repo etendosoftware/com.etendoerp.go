@@ -21,6 +21,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.when;
@@ -28,11 +29,13 @@ import static org.mockito.Mockito.when;
 import java.lang.reflect.Modifier;
 import java.lang.reflect.Constructor;
 import java.math.BigDecimal;
+import java.util.Collections;
 import java.util.List;
 
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
+import org.hibernate.criterion.Criterion;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -48,7 +51,9 @@ import org.openbravo.base.model.Property;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.ui.Process;
+import org.openbravo.model.ad.ui.Tab;
 
+import com.etendoerp.go.schemaforge.NeoActionSurface;
 import com.etendoerp.go.schemaforge.NeoSelectorService;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFSpec;
@@ -224,15 +229,25 @@ class McpToolRouterSupportTest {
   class HasSpecAccess {
 
     private MockedStatic<NeoAccessUtils> accessMock;
+    private MockedStatic<OBDal> obDalMock;
 
     @BeforeEach
     void setUp() {
       accessMock = mockStatic(NeoAccessUtils.class);
+      // ETP-4254: the "W" branch now also consults isCatalogExcludedSpec, which queries
+      // ETGO_SF_ENTITY. Default every spec to "no included entities", meaning no evidence of a
+      // handler-only spec, so the pre-existing access-tiering assertions below stay unchanged.
+      // The catalog-exclusion tests override this stub with real entities.
+      obDalMock = mockStatic(OBDal.class);
+      OBDal obDal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(obDal);
+      stubEntityCriteria(obDal, Collections.emptyList());
     }
 
     @AfterEach
     void tearDown() {
       accessMock.close();
+      obDalMock.close();
     }
 
     /**
@@ -372,43 +387,306 @@ class McpToolRouterSupportTest {
     }
 
     /**
-     * ETP-4284 / G4: the dashboard (widget) spec is handler-backed (no AD_Tab) and is
-     * surfaced via neo_widget, so it must be excluded from the type-W CRUD discovery
-     * catalog regardless of window access.
+     * ETP-4284 / G4 + ETP-4254: a handler-only window spec (the dashboard's widgets, whose
+     * entities have no AD_Tab) is surfaced via neo_widget, so it must be excluded from the
+     * type-W CRUD discovery catalog regardless of window access. ETP-4254 replaced the
+     * hardcoded {@code "dashboard"} name match with this data-driven test, so the spec is
+     * built here with handler-only entities rather than with the magic name.
      */
     @Test
-    void dashboardWidgetSpecIsExcludedFromDiscovery() {
+    void handlerOnlyWindowSpecIsExcludedFromDiscovery() {
       SFSpec spec = mock(SFSpec.class);
       when(spec.getName()).thenReturn(McpConstants.SPEC_DASHBOARD);
+      when(spec.getId()).thenReturn("spec-dashboard");
+      // Window access deliberately GRANTED, so the exclusion can only come from the
+      // handler-only rule and not from a missing access stub.
+      accessMock.when(() -> NeoAccessUtils.hasWindowAccessForSpec(spec, "GET")).thenReturn(true);
+      stubEntityCriteria(OBDal.getInstance(), List.of(handlerOnlyEntity()));
 
       assertFalse(McpToolRouterSupport.hasSpecAccess(spec, "W"),
-          "dashboard/widget spec must never surface through the W discovery catalog");
+          "handler-only (widget) spec must never surface through the W discovery catalog");
+    }
+
+    /**
+     * ETP-4254 regression guard: "handler-only" alone must NOT hide a spec. A tab-less spec
+     * whose handler serves ACTION requests ({@code not-posted-documents}' {@code post} /
+     * {@code bulk-post}) has a genuine agentic surface, and this very gate also guards
+     * {@code neo_action} ({@code McpToolRouter#route}) — excluding it would take a
+     * transactional business action away from agents, the opposite of ETP-4254's goal.
+     */
+    @Test
+    void handlerOnlySpecWithAnActionRouteStaysDiscoverable() {
+      SFSpec spec = mock(SFSpec.class);
+      when(spec.getName()).thenReturn("not-posted-documents");
+      when(spec.getId()).thenReturn("spec-not-posted");
+      accessMock.when(() -> NeoAccessUtils.hasWindowAccessForSpec(spec, "GET")).thenReturn(true);
+      stubEntityCriteria(OBDal.getInstance(), List.of(handlerOnlyEntity()));
+
+      try (MockedStatic<NeoActionSurface> actionMock = mockStatic(NeoActionSurface.class)) {
+        actionMock.when(() -> NeoActionSurface.hasActionSurface(anyList())).thenReturn(true);
+
+        assertTrue(McpToolRouterSupport.hasSpecAccess(spec, "W"),
+            "a tab-less spec that still serves /action must stay in the agentic catalog");
+      }
+    }
+
+    /**
+     * ETP-4254 regression guard: a read-only monitor spec (AD_Tab-backed entities, every
+     * mutation flag off) must STILL be readable and discoverable. Only its write catalog
+     * entry is removed — collapsing the two rules into one would have hidden the SII /
+     * VeriFactu monitors from the agent entirely.
+     */
+    @Test
+    void readOnlyWindowSpecStaysDiscoverable() {
+      SFSpec spec = mock(SFSpec.class);
+      when(spec.getName()).thenReturn("monitor-verifactu");
+      when(spec.getId()).thenReturn("spec-monitor");
+      accessMock.when(() -> NeoAccessUtils.hasWindowAccessForSpec(spec, "GET")).thenReturn(true);
+      stubEntityCriteria(OBDal.getInstance(), List.of(tabBackedEntity(false)));
+
+      assertTrue(McpToolRouterSupport.hasSpecAccess(spec, "W"));
+    }
+
+    /**
+     * ETP-4254: report specs are handler-only by design (NeoReportCallability resolves them
+     * through a Java_Qualifier, they have no AD_Tab), so the handler-only exclusion must be
+     * scoped to type W. Applying it to type R would delete every report from discovery.
+     */
+    @Test
+    void reportSpecIsNotSubjectToTheHandlerOnlyExclusion() {
+      SFSpec spec = mock(SFSpec.class);
+      Process process = mock(Process.class);
+      when(spec.getProcess()).thenReturn(process);
+      when(process.getId()).thenReturn("proc-report");
+      accessMock.when(() -> NeoAccessUtils.hasProcessAccess("proc-report")).thenReturn(true);
+
+      assertTrue(McpToolRouterSupport.hasSpecAccess(spec, "R"));
     }
   }
 
-  // ─── isWidgetSpec ───────────────────────────────────────────────────
+  // ─── isHandlerOnlySpec / isReadOnlySpec (ETP-4254) ──────────────────
 
+  /**
+   * The two data-driven catalog predicates that replaced the hardcoded
+   * {@code McpConstants.SPEC_DASHBOARD} literal in {@code isWidgetSpec}.
+   *
+   * <p>Both are deliberately conservative: they fire only on positive evidence (the spec HAS
+   * included entities and none of them qualifies). An empty list or a failed lookup keeps the
+   * spec in the catalog, because the authoritative refusal is
+   * {@code requireMethodEnabled}, not the catalog shape.</p>
+   */
   @Nested
-  @DisplayName("isWidgetSpec (ETP-4284 / G4)")
-  class IsWidgetSpec {
+  @DisplayName("isHandlerOnlySpec / isReadOnlySpec (ETP-4254)")
+  class SpecLevelPredicates {
 
-    @Test
-    void dashboardSpecIsWidgetSpec() {
+    @Mock private OBDal mockOBDal;
+    private MockedStatic<OBDal> obDalMock;
+
+    @BeforeEach
+    void setUp() {
+      obDalMock = mockStatic(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(mockOBDal);
+    }
+
+    @AfterEach
+    void tearDown() {
+      obDalMock.close();
+    }
+
+    private SFSpec spec(String name) {
       SFSpec spec = mock(SFSpec.class);
-      when(spec.getName()).thenReturn(McpConstants.SPEC_DASHBOARD);
-      assertTrue(McpToolRouterSupport.isWidgetSpec(spec));
+      when(spec.getName()).thenReturn(name);
+      when(spec.getId()).thenReturn(name + "-id");
+      return spec;
     }
 
     @Test
-    void otherSpecIsNotWidgetSpec() {
+    @DisplayName("a spec whose every entity lacks an AD_Tab is handler-only")
+    void allHandlerEntitiesMakeTheSpecHandlerOnly() {
+      stubEntityCriteria(mockOBDal, List.of(handlerOnlyEntity(), handlerOnlyEntity()));
+
+      assertTrue(McpToolRouterSupport.isHandlerOnlySpec(spec("dashboard")));
+    }
+
+    @Test
+    @DisplayName("one AD_Tab-backed entity is enough to make the spec CRUD-servable")
+    void oneTabBackedEntityDisqualifiesHandlerOnly() {
+      stubEntityCriteria(mockOBDal, List.of(handlerOnlyEntity(), tabBackedEntity(true)));
+
+      assertFalse(McpToolRouterSupport.isHandlerOnlySpec(spec("sales-order")));
+    }
+
+    @Test
+    @DisplayName("no entities is not evidence of a handler-only spec")
+    void emptyEntityListIsNotHandlerOnly() {
+      stubEntityCriteria(mockOBDal, Collections.emptyList());
+
+      assertFalse(McpToolRouterSupport.isHandlerOnlySpec(spec("empty")));
+    }
+
+    /**
+     * The catalog exclusion needs BOTH conditions. Being handler-only is the cheap shape test;
+     * the action probe is what separates {@code dashboard} (no agentic surface at all) from
+     * {@code not-posted-documents} (tab-less, but serves {@code post} / {@code bulk-post}).
+     */
+    @Test
+    @DisplayName("handler-only AND actionless is excluded from the catalog")
+    void handlerOnlyAndActionlessSpecIsCatalogExcluded() {
+      stubEntityCriteria(mockOBDal, List.of(handlerOnlyEntity(), handlerOnlyEntity()));
+
+      try (MockedStatic<NeoActionSurface> actionMock = mockStatic(NeoActionSurface.class)) {
+        actionMock.when(() -> NeoActionSurface.hasActionSurface(anyList())).thenReturn(false);
+
+        assertTrue(McpToolRouterSupport.isCatalogExcludedSpec(spec("dashboard")));
+      }
+    }
+
+    @Test
+    @DisplayName("handler-only but with an /action route stays in the catalog")
+    void handlerOnlySpecWithActionRouteIsNotCatalogExcluded() {
+      stubEntityCriteria(mockOBDal, List.of(handlerOnlyEntity()));
+
+      try (MockedStatic<NeoActionSurface> actionMock = mockStatic(NeoActionSurface.class)) {
+        actionMock.when(() -> NeoActionSurface.hasActionSurface(anyList())).thenReturn(true);
+
+        assertFalse(McpToolRouterSupport.isCatalogExcludedSpec(spec("not-posted-documents")));
+      }
+    }
+
+    /** The cheap shape test short-circuits, so an ordinary window never pays the CDI probe. */
+    @Test
+    @DisplayName("an AD_Tab-backed spec is never catalog-excluded and skips the action probe")
+    void tabBackedSpecSkipsTheActionProbe() {
+      stubEntityCriteria(mockOBDal, List.of(tabBackedEntity(true)));
+
+      try (MockedStatic<NeoActionSurface> actionMock = mockStatic(NeoActionSurface.class)) {
+        assertFalse(McpToolRouterSupport.isCatalogExcludedSpec(spec("sales-order")));
+
+        actionMock.verifyNoInteractions();
+      }
+    }
+
+    @Test
+    void nullSpecIsNotCatalogExcluded() {
+      assertFalse(McpToolRouterSupport.isCatalogExcludedSpec(null));
+    }
+
+    @Test
+    @DisplayName("a spec with no mutable entity is read-only (ETP-4254 AC#1)")
+    void allImmutableEntitiesMakeTheSpecReadOnly() {
+      stubEntityCriteria(mockOBDal, List.of(tabBackedEntity(false), tabBackedEntity(false)));
+
+      assertTrue(McpToolRouterSupport.isReadOnlySpec(spec("sii-monitor")));
+    }
+
+    @Test
+    @DisplayName("one mutable entity keeps the whole spec writable")
+    void oneMutableEntityKeepsTheSpecWritable() {
+      stubEntityCriteria(mockOBDal, List.of(tabBackedEntity(false), tabBackedEntity(true)));
+
+      assertFalse(McpToolRouterSupport.isReadOnlySpec(spec("sales-order")));
+    }
+
+    @Test
+    @DisplayName("per-method capability reports only the verbs enabled by an entity")
+    void perMethodCapabilityUsesTheExactEntityFlag() {
+      SFEntity putOnly = tabBackedEntity(false);
+      when(putOnly.isPut()).thenReturn(true);
+      when(putOnly.isPatch()).thenReturn(true);
+      stubEntityCriteria(mockOBDal, List.of(tabBackedEntity(false), putOnly));
+      SFSpec spec = spec("monitor-verifactu");
+
+      assertFalse(McpToolRouterSupport.hasEntityWithMethod(spec, "POST"));
+      assertTrue(McpToolRouterSupport.hasEntityWithMethod(spec, "PUT"));
+      assertFalse(McpToolRouterSupport.hasEntityWithMethod(spec, "DELETE"));
+    }
+
+    @Test
+    @DisplayName("no entities is not evidence of a read-only spec")
+    void emptyEntityListIsNotReadOnly() {
+      stubEntityCriteria(mockOBDal, Collections.emptyList());
+
+      assertFalse(McpToolRouterSupport.isReadOnlySpec(spec("empty")));
+    }
+
+    @Test
+    @DisplayName("a failed entity lookup degrades to 'no evidence' for both predicates")
+    void lookupFailureDegradesToNoEvidence() {
+      when(mockOBDal.createCriteria(SFEntity.class))
+          .thenThrow(new IllegalStateException("no session"));
+
+      assertFalse(McpToolRouterSupport.isHandlerOnlySpec(spec("boom")));
+      assertFalse(McpToolRouterSupport.isReadOnlySpec(spec("boom")));
+    }
+
+    @Test
+    void nullSpecIsNeitherHandlerOnlyNorReadOnly() {
+      assertFalse(McpToolRouterSupport.isHandlerOnlySpec((SFSpec) null));
+      assertFalse(McpToolRouterSupport.isReadOnlySpec((SFSpec) null));
+    }
+
+    /** The list overloads are the single implementation; null/empty means "no evidence". */
+    @Test
+    void handlerOnlyListOverloadTreatsNullAndEmptyAsNoEvidence() {
+      assertFalse(McpToolRouterSupport.isHandlerOnlySpec((List<SFEntity>) null));
+      assertFalse(McpToolRouterSupport.isHandlerOnlySpec(Collections.emptyList()));
+    }
+
+    /** The list overload is the single implementation; null/empty means "no evidence". */
+    @Test
+    void listOverloadTreatsNullAndEmptyAsNoEvidence() {
+      assertFalse(McpToolRouterSupport.isReadOnlySpec((List<SFEntity>) null));
+      assertFalse(McpToolRouterSupport.isReadOnlySpec(Collections.emptyList()));
+      assertTrue(McpToolRouterSupport.isReadOnlySpec(List.of(tabBackedEntity(false))));
+      assertFalse(McpToolRouterSupport.isReadOnlySpec(List.of(tabBackedEntity(true))));
+    }
+  }
+
+  // ─── requireMethodEnabled (ETP-4254) ────────────────────────────────
+
+  /**
+   * The MCP-side entity method gate. Mirrors the REST {@code 405} in
+   * {@code NeoCrudHandler#handleWindowEntityCrud}, but reports the refusal as an explained
+   * MCP tool error so the agent knows the entity is read-only and must not retry.
+   */
+  @Nested
+  @DisplayName("requireMethodEnabled (ETP-4254)")
+  class RequireMethodEnabled {
+
+    @Test
+    @DisplayName("an enabled method passes silently")
+    void enabledMethodPasses() {
       SFSpec spec = mock(SFSpec.class);
       when(spec.getName()).thenReturn("sales-order");
-      assertFalse(McpToolRouterSupport.isWidgetSpec(spec));
+
+      McpToolRouterSupport.requireMethodEnabled(spec, tabBackedEntity(true), "POST");
     }
 
     @Test
-    void nullSpecIsNotWidgetSpec() {
-      assertFalse(McpToolRouterSupport.isWidgetSpec(null));
+    @DisplayName("a read-only entity refuses POST, PUT and DELETE with an explained error")
+    void readOnlyEntityRefusesEveryWrite() {
+      SFSpec spec = mock(SFSpec.class);
+      when(spec.getName()).thenReturn("monitor-verifactu");
+      SFEntity entity = tabBackedEntity(false);
+
+      for (String method : List.of("POST", "PUT", "DELETE")) {
+        org.openbravo.base.exception.OBException ex = assertThrows(
+            org.openbravo.base.exception.OBException.class,
+            () -> McpToolRouterSupport.requireMethodEnabled(spec, entity, method));
+
+        assertTrue(ex.getMessage().contains("monitor-verifactu"), ex.getMessage());
+        assertTrue(ex.getMessage().contains("does not enable " + method), ex.getMessage());
+        assertTrue(ex.getMessage().contains("read-only"), ex.getMessage());
+      }
+    }
+
+    @Test
+    @DisplayName("GET is still allowed on a read-only entity")
+    void readOnlyEntityStillAllowsGet() {
+      SFSpec spec = mock(SFSpec.class);
+      when(spec.getName()).thenReturn("monitor-verifactu");
+
+      McpToolRouterSupport.requireMethodEnabled(spec, tabBackedEntity(false), "GET");
     }
   }
 
@@ -424,7 +702,7 @@ class McpToolRouterSupportTest {
       when(spec.getName()).thenReturn("sales-order");
       when(spec.getDescription()).thenReturn("Sales Order");
 
-      JSONObject result = McpToolRouterSupport.buildDiscoverSpec(spec, "W", null, null);
+      JSONObject result = McpToolRouterSupport.buildDiscoverSpec(spec, "W", null, null, null);
       assertEquals("sales-order", result.getString("name"));
       assertEquals("W", result.getString("type"));
       assertEquals("Sales Order", result.getString("description"));
@@ -436,7 +714,7 @@ class McpToolRouterSupportTest {
       when(spec.getName()).thenReturn("test");
       when(spec.getDescription()).thenReturn(null);
 
-      JSONObject result = McpToolRouterSupport.buildDiscoverSpec(spec, "W", null, null);
+      JSONObject result = McpToolRouterSupport.buildDiscoverSpec(spec, "W", null, null, null);
       assertFalse(result.has("description"));
     }
 
@@ -448,7 +726,7 @@ class McpToolRouterSupportTest {
       JSONArray entities = new JSONArray();
       entities.put(new JSONObject().put("name", "header"));
 
-      JSONObject result = McpToolRouterSupport.buildDiscoverSpec(spec, "W", entities, "header");
+      JSONObject result = McpToolRouterSupport.buildDiscoverSpec(spec, "W", entities, null, null);
       assertTrue(result.has("entities"));
       assertEquals(1, result.getJSONArray("entities").length());
     }
@@ -459,7 +737,7 @@ class McpToolRouterSupportTest {
       when(spec.getName()).thenReturn("test");
       when(spec.getDescription()).thenReturn(null);
 
-      JSONObject result = McpToolRouterSupport.buildDiscoverSpec(spec, "W", null, null);
+      JSONObject result = McpToolRouterSupport.buildDiscoverSpec(spec, "W", null, null, null);
       assertFalse(result.has("entities"));
     }
 
@@ -476,7 +754,7 @@ class McpToolRouterSupportTest {
       JSONArray entities = new JSONArray();
       entities.put(new JSONObject().put("name", "header"));
 
-      JSONObject result = McpToolRouterSupport.buildDiscoverSpec(spec, "W", entities, "header");
+      JSONObject result = McpToolRouterSupport.buildDiscoverSpec(spec, "W", entities, "header", null);
       assertEquals("header", result.getString("primaryEntity"));
     }
 
@@ -489,7 +767,7 @@ class McpToolRouterSupportTest {
       JSONArray entities = new JSONArray();
       entities.put(new JSONObject().put("name", "header"));
 
-      JSONObject result = McpToolRouterSupport.buildDiscoverSpec(spec, "W", entities, null);
+      JSONObject result = McpToolRouterSupport.buildDiscoverSpec(spec, "W", entities, null, null);
       assertFalse(result.has("primaryEntity"));
     }
 
@@ -500,8 +778,95 @@ class McpToolRouterSupportTest {
       when(spec.getName()).thenReturn("test");
       when(spec.getDescription()).thenReturn(null);
 
-      JSONObject result = McpToolRouterSupport.buildDiscoverSpec(spec, "W", null, "header");
+      JSONObject result = McpToolRouterSupport.buildDiscoverSpec(spec, "W", null, "header", null);
       assertFalse(result.has("primaryEntity"));
+    }
+
+    // ── ETP-4254 AC#4: spec-level readOnly marker ──────────────────────
+
+    /**
+     * AC#4: an agent scanning {@code neo_discover} must be able to tell writable W specs from
+     * read-only ones without inspecting every entity of every spec.
+     */
+    @Test
+    @DisplayName("a W spec with no mutable entity carries readOnly:true")
+    void readOnlyWindowSpecCarriesTheMarker() throws Exception {
+      SFSpec spec = mock(SFSpec.class);
+      when(spec.getName()).thenReturn("monitor-verifactu");
+
+      JSONObject result = McpToolRouterSupport.buildDiscoverSpec(spec, "W",
+          new JSONArray(), null, List.of(tabBackedEntity(false), tabBackedEntity(false)));
+
+      assertTrue(result.getBoolean("readOnly"));
+    }
+
+    /**
+     * The key must be emitted ONLY when true — the ~44 writable W specs stay byte-identical,
+     * and the negative case is already carried per entity inside {@code entities}.
+     */
+    @Test
+    @DisplayName("a writable W spec omits the readOnly key entirely")
+    void writableWindowSpecOmitsTheMarker() throws Exception {
+      SFSpec spec = mock(SFSpec.class);
+      when(spec.getName()).thenReturn("sales-order");
+
+      JSONObject result = McpToolRouterSupport.buildDiscoverSpec(spec, "W",
+          new JSONArray(), null, List.of(tabBackedEntity(false), tabBackedEntity(true)));
+
+      assertFalse(result.has("readOnly"),
+          "readOnly:false must not be added as noise to writable specs");
+    }
+
+    @Test
+    @DisplayName("a W spec with no included entities omits the readOnly key")
+    void emptyEntityListOmitsTheMarker() throws Exception {
+      SFSpec spec = mock(SFSpec.class);
+      when(spec.getName()).thenReturn("empty");
+
+      JSONObject result = McpToolRouterSupport.buildDiscoverSpec(spec, "W",
+          new JSONArray(), null, Collections.emptyList());
+
+      assertFalse(result.has("readOnly"));
+    }
+
+    /**
+     * The marker is scoped to type W: a report spec already advertises its nature through
+     * {@code isReport}/{@code callable} and must not gain a readOnly key.
+     */
+    @Test
+    @DisplayName("a report spec never gets the readOnly marker")
+    void reportSpecNeverGetsTheMarker() throws Exception {
+      SFSpec spec = mock(SFSpec.class);
+      when(spec.getName()).thenReturn("aging-report");
+
+      try (MockedStatic<NeoReportCallability> callabilityMock =
+          mockStatic(NeoReportCallability.class)) {
+        callabilityMock.when(() -> NeoReportCallability.isReportCallable(spec)).thenReturn(false);
+        callabilityMock.when(() -> NeoReportCallability.buildNotConfiguredMessage("aging-report"))
+            .thenReturn("not configured");
+
+        JSONObject result = McpToolRouterSupport.buildDiscoverSpec(spec, "R", null, null,
+            List.of(tabBackedEntity(false)));
+
+        assertFalse(result.has("readOnly"));
+      }
+    }
+
+    /**
+     * The marker must cost no extra query: it is derived from the very list the entity summary
+     * was built from. This test proves the code path never touches OBDal — OBDal is NOT mocked
+     * here, so any query would blow up instead of quietly returning a mock.
+     */
+    @Test
+    @DisplayName("the marker is derived from the passed list, not from a fresh query")
+    void markerIsDerivedWithoutQuerying() throws Exception {
+      SFSpec spec = mock(SFSpec.class);
+      when(spec.getName()).thenReturn("sii-monitor");
+
+      JSONObject result = McpToolRouterSupport.buildDiscoverSpec(spec, "W",
+          new JSONArray(), null, List.of(tabBackedEntity(false)));
+
+      assertTrue(result.getBoolean("readOnly"));
     }
 
     @Test
@@ -514,7 +879,7 @@ class McpToolRouterSupportTest {
           mockStatic(NeoReportCallability.class)) {
         callabilityMock.when(() -> NeoReportCallability.isReportCallable(spec)).thenReturn(true);
 
-        JSONObject result = McpToolRouterSupport.buildDiscoverSpec(spec, "R", null, null);
+        JSONObject result = McpToolRouterSupport.buildDiscoverSpec(spec, "R", null, null, null);
         assertTrue(result.getBoolean("isReport"));
       }
     }
@@ -533,7 +898,7 @@ class McpToolRouterSupportTest {
           mockStatic(NeoReportCallability.class)) {
         callabilityMock.when(() -> NeoReportCallability.isReportCallable(spec)).thenReturn(true);
 
-        JSONObject result = McpToolRouterSupport.buildDiscoverSpec(spec, "R", null, null);
+        JSONObject result = McpToolRouterSupport.buildDiscoverSpec(spec, "R", null, null, null);
 
         assertTrue(result.getBoolean("isReport"));
         assertTrue(result.getBoolean("callable"));
@@ -558,7 +923,7 @@ class McpToolRouterSupportTest {
         callabilityMock.when(() -> NeoReportCallability.buildNotConfiguredMessage("invoice-report"))
             .thenCallRealMethod();
 
-        JSONObject result = McpToolRouterSupport.buildDiscoverSpec(spec, "R", null, null);
+        JSONObject result = McpToolRouterSupport.buildDiscoverSpec(spec, "R", null, null, null);
 
         assertTrue(result.getBoolean("isReport"));
         assertFalse(result.getBoolean("callable"));
@@ -582,7 +947,7 @@ class McpToolRouterSupportTest {
           mockStatic(NeoReportCallability.class)) {
         callabilityMock.when(() -> NeoReportCallability.isReportCallable(spec)).thenReturn(true);
 
-        JSONObject result = McpToolRouterSupport.buildDiscoverSpec(spec, "R", null, null);
+        JSONObject result = McpToolRouterSupport.buildDiscoverSpec(spec, "R", null, null, null);
 
         assertTrue(result.getBoolean("callable"));
         assertEquals("generate_financial_accounts_page", result.getString("reportTool"));
@@ -605,7 +970,7 @@ class McpToolRouterSupportTest {
         callabilityMock.when(() -> NeoReportCallability.buildNotConfiguredMessage("invoice-report"))
             .thenCallRealMethod();
 
-        JSONObject result = McpToolRouterSupport.buildDiscoverSpec(spec, "R", null, null);
+        JSONObject result = McpToolRouterSupport.buildDiscoverSpec(spec, "R", null, null, null);
 
         assertFalse(result.getBoolean("callable"));
         assertFalse(result.has("reportTool"));
@@ -618,7 +983,7 @@ class McpToolRouterSupportTest {
       when(spec.getName()).thenReturn("order");
       when(spec.getDescription()).thenReturn(null);
 
-      JSONObject result = McpToolRouterSupport.buildDiscoverSpec(spec, "W", null, null);
+      JSONObject result = McpToolRouterSupport.buildDiscoverSpec(spec, "W", null, null, null);
       assertFalse(result.has("isReport"));
     }
 
@@ -629,7 +994,7 @@ class McpToolRouterSupportTest {
       when(spec.getDescription()).thenReturn(null);
       when(spec.getAgentPrompt()).thenReturn("Always confirm before completing the order.");
 
-      JSONObject result = McpToolRouterSupport.buildDiscoverSpec(spec, "W", null, null);
+      JSONObject result = McpToolRouterSupport.buildDiscoverSpec(spec, "W", null, null, null);
       assertEquals("Always confirm before completing the order.", result.getString("agentPrompt"));
     }
 
@@ -640,7 +1005,7 @@ class McpToolRouterSupportTest {
       when(spec.getDescription()).thenReturn(null);
       when(spec.getAgentPrompt()).thenReturn("   ");
 
-      JSONObject result = McpToolRouterSupport.buildDiscoverSpec(spec, "W", null, null);
+      JSONObject result = McpToolRouterSupport.buildDiscoverSpec(spec, "W", null, null, null);
       assertFalse(result.has("agentPrompt"));
     }
 
@@ -651,7 +1016,7 @@ class McpToolRouterSupportTest {
       when(spec.getDescription()).thenReturn(null);
       when(spec.getAgentPrompt()).thenReturn(null);
 
-      JSONObject result = McpToolRouterSupport.buildDiscoverSpec(spec, "W", null, null);
+      JSONObject result = McpToolRouterSupport.buildDiscoverSpec(spec, "W", null, null, null);
       assertFalse(result.has("agentPrompt"));
     }
   }
@@ -1169,6 +1534,49 @@ class McpToolRouterSupportTest {
   }
 
   // ─── Helper ─────────────────────────────────────────────────────────
+
+  /**
+   * Stub {@code OBDal.createCriteria(SFEntity.class)} so
+   * {@code McpToolRouterSupport#listIncludedEntities} returns {@code entities}.
+   * {@code addOrder} is intentionally left unstubbed — the criteria's return value is
+   * discarded by the production code.
+   */
+  @SuppressWarnings("unchecked")
+  private static OBCriteria<SFEntity> stubEntityCriteria(OBDal obDal, List<SFEntity> entities) {
+    OBCriteria<SFEntity> criteria = mock(OBCriteria.class);
+    when(obDal.createCriteria(SFEntity.class)).thenReturn(criteria);
+    when(criteria.add(org.mockito.ArgumentMatchers.any(Criterion.class))).thenReturn(criteria);
+    when(criteria.list()).thenReturn(entities);
+    return criteria;
+  }
+
+  /** An entity served by a NeoHandler: no AD_Tab, readable, never mutable (dashboard shape). */
+  private static SFEntity handlerOnlyEntity() {
+    SFEntity entity = mock(SFEntity.class);
+    when(entity.getName()).thenReturn("kpis");
+    when(entity.getADTab()).thenReturn(null);
+    when(entity.isGet()).thenReturn(true);
+    return entity;
+  }
+
+  /**
+   * An AD_Tab-backed CRUD entity.
+   *
+   * @param mutable when {@code true} every mutation flag is on; when {@code false} the entity
+   *                is GET-only — the monitor/log shape ETP-4254 targets
+   */
+  private static SFEntity tabBackedEntity(boolean mutable) {
+    SFEntity entity = mock(SFEntity.class);
+    when(entity.getName()).thenReturn("header");
+    when(entity.getADTab()).thenReturn(mock(Tab.class));
+    when(entity.isGet()).thenReturn(true);
+    when(entity.isGetByID()).thenReturn(true);
+    when(entity.isPost()).thenReturn(mutable);
+    when(entity.isPut()).thenReturn(mutable);
+    when(entity.isPatch()).thenReturn(mutable);
+    when(entity.isDelete()).thenReturn(mutable);
+    return entity;
+  }
 
   private static boolean arrayContains(JSONArray array, String value) {
     for (int i = 0; i < array.length(); i++) {

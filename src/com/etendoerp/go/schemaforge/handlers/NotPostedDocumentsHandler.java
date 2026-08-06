@@ -277,6 +277,20 @@ public class NotPostedDocumentsHandler implements NeoHandler {
   @Inject
   private DocumentPostingService postingService;
 
+  /**
+   * This spec is tab-less, so ETP-4254's catalog rule would hide it as "handler-only" were it
+   * not for the {@code post} / {@code bulk-post} ACTION routes below — which are exactly the
+   * transactional business actions the agentic catalog must keep. Declaring the action surface
+   * is what keeps {@code not-posted-documents} in {@code neo_discover} and reachable through
+   * {@code neo_action}.
+   *
+   * @return always {@code true}
+   */
+  @Override
+  public boolean servesActions() {
+    return true;
+  }
+
   @Override
   public NeoResponse handle(NeoContext context) {
     if (!NeoAccessHelper.hasObuiappProcessAccess(NOT_POSTED_DOCUMENTS_PROCESS_ID)) {
