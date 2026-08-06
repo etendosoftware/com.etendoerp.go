@@ -209,8 +209,11 @@ final class McpToolRouterSupport {
    * {@code AD_Window_Access} role would be able to write through MCP even though the
    * equivalent REST NEO Headless call correctly returns 403.
    * <p>
-   * Process specs (type {@code "P"}/{@code "R"}) remain binary — process access has no
-   * read/write tiering — so {@code httpMethod} is ignored for them.
+   * Process specs (type {@code "P"}) remain binary — process access has no read/write
+   * tiering — so {@code httpMethod} is ignored for them. Report specs (type {@code "R"})
+   * are binary too when backed by a real {@code AD_Process}, but otherwise (ETP-4596) gate
+   * on their constituent windows via {@link NeoAccessUtils#hasReportSpecAccess(SFSpec,
+   * String)} — {@code httpMethod} DOES matter for that path.
    *
    * @param spec       the spec to check (may be {@code null})
    * @param specType   the spec's type ({@code "W"}, {@code "P"}, or {@code "R"})
@@ -231,9 +234,15 @@ final class McpToolRouterSupport {
       // a windowless spec unchecked.
       return NeoAccessUtils.hasWindowAccessForSpec(spec, httpMethod);
     }
-    if ("P".equals(specType) || "R".equals(specType)) {
+    if ("P".equals(specType)) {
       Process adProcess = spec.getProcess();
       return adProcess == null || NeoAccessUtils.hasProcessAccess(adProcess.getId());
+    }
+    if ("R".equals(specType)) {
+      // ETP-4596: process-less report specs no longer pass unconditionally — they gate on
+      // their constituent windows (AD_TAB_ID) exactly like a windowless "W" spec, or fall
+      // back to the previous permissive behavior when they have neither.
+      return NeoAccessUtils.hasReportSpecAccess(spec, httpMethod);
     }
     return true;
   }

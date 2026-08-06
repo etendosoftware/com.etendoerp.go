@@ -117,9 +117,21 @@ class NeoRequestRouter {
    * and POST then return HTTP 200 with the canonical
    * {@code not_configured_for_report_generation} status body, identical to MCP discover
    * and the MCP report tool.</p>
+   *
+   * <p>ETP-4596: before this fix, report specs had NO access check here at all — every
+   * authenticated role could reach any report endpoint regardless of
+   * {@code AD_Window_Access}/{@code AD_Process_Access}. {@code hasReportSpecAccess} closes
+   * that gap: it gates on a real linked {@code AD_Process} when one exists, or on the
+   * spec's constituent windows (via each entity's {@code AD_TAB_ID}) otherwise, falling
+   * back to the pre-existing permissive behavior for specs with neither.</p>
    */
   void handleReportSpecRequest(SFSpec spec, NeoPathInfo pathInfo, String method,
       HttpServletRequest request, HttpServletResponse response) throws Exception {
+    if (!servlet.authenticator.hasReportSpecAccess(spec, method)) {
+      servlet.sendError(response, HttpServletResponse.SC_FORBIDDEN,
+          "Access denied to spec for current role");
+      return;
+    }
     // NEO-native handler dispatch (single-segment handlers such as aging-receivable).
     String reportHandlerQualifier = NeoReportCallability.resolveReportHandlerQualifier(spec);
     if (reportHandlerQualifier != null
