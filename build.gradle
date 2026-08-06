@@ -111,6 +111,15 @@ dependencies {
  * surfaced when this merge block added enough test classes to change how Gradle distributes them
  * across workers, which is also why it reproduces identically instead of coming and going.</p>
  *
+ * <p>ETP-4722 added a second symptom of the same contamination: a test whose assertions all
+ * PASSED still fails because {@code OBBaseTest}'s {@code TestWatcher.finished()} finds the
+ * admin-mode stack dirty and throws {@code IllegalStateException: Test case should take care of
+ * reseting admin mode correctly...}. {@code OBContext.adminModeStack} is a static
+ * {@code ThreadLocal} that {@code OBContext.setOBContext()} does not reset, and Gradle reuses one
+ * "Test worker" thread across classes, so an unbalanced {@code setAdminMode()} left by any earlier
+ * test in the worker is charged to whichever {@code OBBaseTest} subclass runs next. See
+ * {@code docs/test-jvm-isolation.md} for both symptoms.</p>
+ *
  * <p>The fix isolates the affected class into its own {@code Test} task with {@code forkEvery = 1},
  * so it always gets a pristine JVM. It is wired as {@code finalizedBy} the root {@code test} task
  * rather than as a separate CI step, so it keeps running in Jenkins without touching the pipeline
@@ -126,6 +135,9 @@ dependencies {
 // property resolution against a delegate that is the root project / the task, not this module.
 def isolatedDalTests = [
         '**/ReactivatePaymentHandlerRemoveIntegrationTest.class',
+        '**/CreateDraftInvoiceHandlerNegativeQuantityIntegrationTest.class',
+        '**/CreateGoodsReceiptHandlerNegativeQuantityIntegrationTest.class',
+        '**/CreatePurchaseInvoiceHandlerNegativeQuantityIntegrationTest.class',
 ]
 
 rootProject.afterEvaluate { rootProj ->
