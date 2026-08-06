@@ -926,14 +926,23 @@ class NeoCrudHandler {
       predicates.add(searchPredicate);
     }
 
+    // For to-one associations (FK properties), project through the identifier
+    // column (".id") instead of the bare association path, and reuse the exact
+    // same expression in ORDER BY. Projecting the raw association makes
+    // Hibernate expand ORDER BY into the target entity's own columns (a join)
+    // while SELECT DISTINCT only ever projects the local FK column — Postgres
+    // rejects that mismatch. See NeoDistinctFetchSupport#buildDistinctProjection.
+    String projection = NeoDistinctFetchSupport.buildDistinctProjection(prop, resolvedProperty);
+    boolean isRelation = !prop.isPrimitive();
+
     StringBuilder where = new StringBuilder(" as e where ")
         .append(String.join(HQL_AND_OPERATOR, predicates))
-        .append(" order by e.").append(resolvedProperty).append(" asc");
+        .append(" order by ").append(projection).append(" asc");
 
     try {
       OBQuery<BaseOBObject> obQuery = OBDal.getInstance()
           .createQuery(dalEntityName, where.toString());
-      obQuery.setSelectClause("DISTINCT e." + resolvedProperty);
+      obQuery.setSelectClause("DISTINCT " + projection);
       if (searchPredicate != null) {
         obQuery.setNamedParameter("search", "%" + search.toLowerCase() + "%");
       }
@@ -945,8 +954,15 @@ class NeoCrudHandler {
       List<Object> page = hasMore ? new ArrayList<>(results.subList(0, pageSize)) : results;
 
       JSONArray data = new JSONArray();
-      for (Object value : page) {
-        data.put(NeoDistinctFetchSupport.toDistinctEntry(value));
+      if (isRelation) {
+        Map<String, String> identifierById = NeoDistinctFetchSupport.loadIdentifiers(prop.getTargetEntity(), page);
+        for (Object value : page) {
+          data.put(NeoDistinctFetchSupport.toRelationDistinctEntry(value, identifierById));
+        }
+      } else {
+        for (Object value : page) {
+          data.put(NeoDistinctFetchSupport.toDistinctEntry(value));
+        }
       }
 
       JSONObject payload = new JSONObject();
