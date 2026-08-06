@@ -604,21 +604,31 @@ public class ToolRegistry {
     props.put(McpConstants.PARAM_ENTITY,
       stringProp("Entity name within the spec (e.g. 'Header', 'Lines')"));
     props.put(McpActionsView.PARAM_VIEW, enumProp(
-        "Optional response shape. Omit for the full field dump (default, unchanged). "
+        "Optional response shape. Omit for the full field dump (default, unchanged) — but note it "
+            + "can exceed 60 kB on compliance-heavy windows and may not fit your context. "
+            + "\"create\" returns ONLY the fields you may send to neo_create, split into "
+            + "required/optional — this is what you want before a create. "
             + "\"actions\" returns only the callable buttons/processes ({name, label, "
-            + "invokeVia:\"neo_action\", action, processName, processId, ...}) instead of the "
-            + "full ~97-field schema — use it when you only need to know what can be triggered "
-            + "on this entity, not every column.",
-        List.of(McpActionsView.VIEW_ACTIONS)));
+            + "invokeVia:\"neo_action\", action, processName, processId, ...}) — use it when you "
+            + "only need to know what can be triggered on this entity, not every column.",
+        List.of(McpSchemaCreateView.VIEW_CREATE, McpActionsView.VIEW_ACTIONS)));
+    props.put(McpSchemaCreateView.PARAM_FIELDS, stringArrayProp(
+        "Optional whitelist of field names to describe (e.g. [\"businessPartner\",\"invoiceDate\"]). "
+            + "Returns only those descriptors instead of all of them. Names that match nothing come "
+            + "back in \"unknownFields\" — check it if a field you expected is missing. Ignored when "
+            + "\"view\" is set."));
 
     return new McpToolDefinition(
         "neo_schema",
         "Get the field schema for an entity: field names, types, required flag, "
             + "read-only flag, default values, visibility (editable/readOnly/system/discarded), "
             + "and which fields have FK selectors. Call this BEFORE neo_create to know which "
-            + "fields exist and which are required. Only fields with userRequired=true need to "
-            + "be provided — system fields are auto-derived by Etendo callouts. Pass "
-            + "view:\"actions\" to get only the callable buttons/processes instead.",
+            + "fields exist and which are required — and prefer view:\"create\", which returns "
+            + "only the fields you may send, already split into required/optional. Only fields "
+            + "with userRequired=true need to be provided: a field that is mandatory but carries "
+            + "a default is filled by the server, so it is NOT userRequired. System fields are "
+            + "auto-derived by Etendo callouts. Pass view:\"actions\" for the callable "
+            + "buttons/processes instead.",
         buildObjectSchema(props, List.of("spec", "entity")));
   }
 

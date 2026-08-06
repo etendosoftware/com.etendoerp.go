@@ -22,6 +22,7 @@ import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
@@ -798,13 +799,28 @@ public class McpToolRouter {
     McpSchemaFieldBuilder.applyCuratedLabels(fieldsArray,
         McpSchemaFieldBuilder.loadFieldLabels(adTab, NeoLanguage.currentCode()));
 
-    // IMP-6: an explicit view:"actions" collapses the full field dump down to the callable
-    // buttons/processes only — a no-op for any other (or omitted) view.
+    // One dispatch point for every projection, so the views cannot drift apart. All of them are
+    // pure post-filters on the fully-decorated fieldsArray above — no extra DAL access. Omitting
+    // both `view` and `fields` returns the full response, byte-for-byte as before.
     String view = args.optString(McpActionsView.PARAM_VIEW, null);
+    // IMP-6: view:"actions" collapses the dump down to the callable buttons/processes.
     if (McpActionsView.isActionsView(view)) {
       return wrapAsTextContent(
           McpActionsView.buildResponse(specName, entityName, fieldsArray).toString(2));
     }
+    // IMP-12: view:"create" keeps only what the agent may actually send, split into
+    // required/optional. 157 fields / 62 kB on sales-invoice/header collapses to the handful that
+    // are the agent's to decide — the full response exceeds the client's token limit outright.
+    if (McpSchemaCreateView.isCreateView(view)) {
+      return wrapAsTextContent(
+          McpSchemaCreateView.buildResponse(specName, entityName, fieldsArray).toString(2));
+    }
+    // IMP-12: fields:[…] — an explicit whitelist, for an agent that already knows what it wants.
+    // Unmatched names are echoed back rather than dropped in silence (cf. IMP-18).
+    Set<String> requestedFields = McpFieldProjection.parseFields(
+        args.optJSONArray(McpSchemaCreateView.PARAM_FIELDS));
+    JSONArray unknownFields = McpSchemaCreateView.unknownFields(fieldsArray, requestedFields);
+    fieldsArray = McpSchemaCreateView.applyFieldWhitelist(fieldsArray, requestedFields);
 
     // Build entity schema
     JSONObject entitySchema = new JSONObject();
@@ -838,10 +854,15 @@ public class McpToolRouter {
 
     entitySchema.put("fields", fieldsArray);
     entitySchema.put("fieldCount", fieldsArray.length());
+    if (unknownFields.length() > 0) {
+      entitySchema.put("unknownFields", unknownFields);
+    }
 
     // Usage hints
     entitySchema.put("hint",
-        "Fields with userRequired=true: MUST be provided in neo_create. "
+        "Call neo_schema with view:\"create\" to get only the fields you may send, already split "
+        + "into required/optional — this full response is far larger than you need. "
+        + "Fields with userRequired=true: MUST be provided in neo_create. "
         + "Fields with visibility=system are auto-derived by Etendo callouts — omit them. "
         + "Fields with visibility=discarded are excluded — do not send them. "
         + "Fields with readOnly=true are auto-generated (DocumentNo, IDs). "

@@ -57,6 +57,11 @@ final class McpSchemaFieldBuilder {
   private McpSchemaFieldBuilder() {
   }
 
+  static final String KEY_DEFAULT_EXPRESSION = "defaultExpression";
+  static final String KEY_DEFAULT_SOURCE = "defaultSource";
+  static final String KEY_USER_REQUIRED = "userRequired";
+  static final String VISIBILITY_EDITABLE = "editable";
+
   static String mapColumnType(String refId) {
     if (refId == null) {
       return McpConstants.TYPE_STRING;
@@ -553,20 +558,57 @@ final class McpSchemaFieldBuilder {
       // "0" is a legacy AD placeholder meaning "resolve via callout/session logic" — it is not a
       // usable FK value. The resolved value is tenant-scoped (per client/org), so it must never be
       // baked into this structural schema; report shape/format only and point to neo_defaults.
-      fieldObj.put("defaultSource", "server");
+      fieldObj.put(KEY_DEFAULT_SOURCE, "server");
       fieldObj.put("defaultFormat", "32-char hex ID (FK)");
       fieldObj.put("defaultHint", "Resolved per-tenant at request time — call neo_defaults to get the value");
       return;
     }
-    fieldObj.put("defaultExpression", defaultExpr);
+    fieldObj.put(KEY_DEFAULT_EXPRESSION, defaultExpr);
   }
 
+  /**
+   * @return {@code true} when this already-built descriptor is one the agent may legitimately send on
+   *     a create: {@code editable} visibility and not read-only. Used by {@link McpSchemaCreateView}
+   *     so the create projection can never admit a sequence-generated or computed field.
+   */
+  static boolean isAgentSuppliable(JSONObject fieldObj) {
+    return fieldObj != null
+        && VISIBILITY_EDITABLE.equals(fieldObj.optString("visibility", null))
+        && !fieldObj.optBoolean("readOnly", false);
+  }
+
+  /**
+   * Flags {@code userRequired} — "the agent MUST supply this in neo_create", exactly as the
+   * {@code neo_schema} hint promises.
+   *
+   * <p>Being mandatory in AD is necessary but <b>not</b> sufficient: a mandatory column that carries
+   * a default is filled by the session, the server or the declaring module, so demanding it from the
+   * agent asks for a value we already have. On {@code sales-invoice/header} that was 5 of 11 flagged
+   * fields — the invoice date ({@code @#Date@}), the currency ({@code @C_Currency_ID@}) and three
+   * SII/VeriFactu compliance booleans defaulting to {@code N} — leaving 6 that genuinely are the
+   * agent's to decide (IMP-12 §5).
+   *
+   * <p>Order matters: {@link #addDefaultExpression} runs immediately before this method
+   * ({@code buildFieldObject}), so the default keys are already on {@code fieldObj} when we read
+   * them. A precondition can still force the flag back on afterwards, via
+   * {@link #applyPreconditionRequirement} — an explicit business rule outranks a column default.
+   */
   private static void addVisibility(JSONObject fieldObj, String visibility, boolean mandatory)
       throws JSONException {
     if (visibility != null) {
       fieldObj.put("visibility", visibility);
-      fieldObj.put("userRequired", "editable".equals(visibility) && mandatory);
+      fieldObj.put(KEY_USER_REQUIRED, VISIBILITY_EDITABLE.equals(visibility) && mandatory
+          && !hasSuppliedDefault(fieldObj));
     }
+  }
+
+  /**
+   * @return {@code true} when something other than the agent already provides this field's value:
+   *     either a literal/session AD default ({@code defaultExpression}) or the legacy {@code "0"} FK
+   *     sentinel that {@link #addDefaultExpression} reports as {@code defaultSource:"server"}.
+   */
+  private static boolean hasSuppliedDefault(JSONObject fieldObj) {
+    return fieldObj.has(KEY_DEFAULT_EXPRESSION) || fieldObj.has(KEY_DEFAULT_SOURCE);
   }
 
   private static void addSelectorInfo(JSONObject fieldObj, String refId,

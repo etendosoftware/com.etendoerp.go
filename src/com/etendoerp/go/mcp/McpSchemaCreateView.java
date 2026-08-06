@@ -1,0 +1,181 @@
+/*
+ * *************************************************************************
+ * The contents of this file are subject to the Etendo License
+ * (the "License"), you may not use this file except in compliance with
+ * the License.
+ * You may obtain a copy of the License at
+ * https://github.com/etendosoftware/etendo_core/blob/main/legal/Etendo_license.txt
+ * Software distributed under the License is distributed on an
+ * "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, either express or
+ * implied. See the License for the specific language governing rights
+ * and limitations under the License.
+ * All portions are Copyright (C) 2021-2026 FUTIT SERVICES, S.L
+ * All Rights Reserved.
+ * Contributor(s): Futit Services S.L.
+ * *************************************************************************
+ */
+
+package com.etendoerp.go.mcp;
+
+import java.util.HashSet;
+import java.util.Set;
+
+import org.codehaus.jettison.json.JSONArray;
+import org.codehaus.jettison.json.JSONException;
+import org.codehaus.jettison.json.JSONObject;
+
+/**
+ * Pure (DAL-free) create-shaped projection for {@code neo_schema} (IMP-12).
+ *
+ * <p>A compliance-heavy window returns ~157 fields / 62 kB, which on 2026-08-06 did not merely waste
+ * the agent's budget — the call <b>failed outright</b> against the client token limit, making
+ * {@code neo_schema} unusable for exactly the widest windows. Yet to create a record the agent must
+ * decide values for a handful of fields; the rest are audit columns, computed totals, compliance
+ * flags and buttons.
+ *
+ * <p>Two independent projections, both additive — omitting them leaves the response untouched:
+ * <ul>
+ *   <li><b>{@code view:"create"}</b> — only fields the agent may actually supply, in two groups:
+ *       {@code required} ({@code userRequired}) and {@code optional} (the rest, so an agent can still
+ *       enrich the record). Both are filtered through
+ *       {@link McpSchemaFieldBuilder#isAgentSuppliable} first.</li>
+ *   <li><b>{@code fields:[…]}</b> — an explicit whitelist of descriptor names, for an agent that
+ *       already knows what it wants and needs the shape of those fields only.</li>
+ * </ul>
+ *
+ * <p><b>Why {@code businessCritical} is intersected, not unioned.</b> IMP-12's original
+ * specification defined the view as {@code userRequired ∪ businessCritical ∪ FK-with-selector}. On
+ * {@code sales-invoice/header} that admits 18 of 157 fields — but three of them
+ * ({@code DocumentNo}, {@code GrandTotal}, {@code OutstandingAmt}) are {@code readOnly} and
+ * {@code businessCritical}, so the rule contradicted its own "every field in it is one the agent must
+ * provide". {@code businessCritical} answers a different question — "must I confirm this value with
+ * the user before writing?" — and is orthogonal to "may I send it". It is kept as a flag on the
+ * emitted fields, and gates nothing.
+ *
+ * <p>This class only reshapes an already-built field array (the one
+ * {@link McpSchemaFieldBuilder#buildSchemaFieldsArray} produced, after labels and preconditions are
+ * overlaid). No extra DAL access, no new query.
+ */
+final class McpSchemaCreateView {
+
+  private McpSchemaCreateView() {
+  }
+
+  /** The {@code view} parameter itself is declared by {@link McpActionsView#PARAM_VIEW}. */
+  static final String PARAM_FIELDS = "fields";
+  static final String VIEW_CREATE = "create";
+
+  private static final String KEY_NAME = "name";
+  private static final String KEY_REQUIRED = "required";
+  private static final String KEY_OPTIONAL = "optional";
+
+  static final String CREATE_HINT =
+      "Every field listed here is one you may send to neo_create. Fields under 'required' MUST be "
+      + "provided — they are mandatory and nothing else supplies them. Fields under 'optional' are "
+      + "accepted but not needed. Anything omitted from this view is either auto-derived, read-only "
+      + "or excluded — do not send it, and do not call neo_schema again to look for it. Fields with "
+      + "hasSelector=true take a record id: resolve it with neo_selectors, or pass the display name "
+      + "and let the server resolve it. Fields with businessCritical=true carry core business data — "
+      + "you MUST confirm those values with the user before creating the record. Call neo_defaults "
+      + "for the values the server will fill in.";
+
+  /** @return {@code true} when {@code view} requests the create-shaped projection. */
+  static boolean isCreateView(String view) {
+    return VIEW_CREATE.equalsIgnoreCase(view);
+  }
+
+  /**
+   * Builds the {@code neo_schema({view:"create"})} response:
+   * {@code {spec, entity, required[], optional[], requiredCount, optionalCount, hint}}.
+   *
+   * <p>{@code table}, {@code methods} and {@code namedFilters} are deliberately dropped — none of
+   * them is needed to build a create payload, and every key omitted is budget the agent keeps.
+   *
+   * @param fields the array built by {@link McpSchemaFieldBuilder#buildSchemaFieldsArray}, with the
+   *     IMP-1 labels and the precondition requirements already applied
+   */
+  static JSONObject buildResponse(String specName, String entityName, JSONArray fields)
+      throws JSONException {
+    JSONArray required = new JSONArray();
+    JSONArray optional = new JSONArray();
+    if (fields != null) {
+      for (int i = 0; i < fields.length(); i++) {
+        JSONObject field = fields.optJSONObject(i);
+        // Buttons are actions, not payload — they belong to view:"actions" (IMP-6).
+        if (field == null || McpActionsView.TYPE_BUTTON.equals(field.optString("type", null))
+            || !McpSchemaFieldBuilder.isAgentSuppliable(field)) {
+          continue;
+        }
+        if (field.optBoolean(McpSchemaFieldBuilder.KEY_USER_REQUIRED, false)) {
+          required.put(field);
+        } else {
+          optional.put(field);
+        }
+      }
+    }
+    JSONObject response = new JSONObject();
+    response.put("spec", specName);
+    response.put("entity", entityName);
+    response.put(KEY_REQUIRED, required);
+    response.put(KEY_OPTIONAL, optional);
+    response.put("requiredCount", required.length());
+    response.put("optionalCount", optional.length());
+    response.put("hint", CREATE_HINT);
+    return response;
+  }
+
+  /**
+   * Filters a schema field array down to the descriptors whose {@code name} is in {@code requested}.
+   *
+   * <p>Distinct from {@link McpFieldProjection#apply}, which trims <i>record rows</i> inside a
+   * {@code response.data[]} envelope. A schema payload has no such envelope, so that method would
+   * silently no-op here.
+   *
+   * @return a new array in the original order; a {@code null}/empty {@code requested} set returns
+   *     {@code fields} unchanged, so the caller stays backward compatible
+   */
+  static JSONArray applyFieldWhitelist(JSONArray fields, Set<String> requested)
+      throws JSONException {
+    if (fields == null || requested == null || requested.isEmpty()) {
+      return fields;
+    }
+    JSONArray filtered = new JSONArray();
+    for (int i = 0; i < fields.length(); i++) {
+      JSONObject field = fields.optJSONObject(i);
+      if (field != null && requested.contains(field.optString(KEY_NAME, null))) {
+        filtered.put(field);
+      }
+    }
+    return filtered;
+  }
+
+  /**
+   * Names in {@code requested} that matched no descriptor. Reported back as {@code unknownFields} so
+   * a typo surfaces instead of a field silently vanishing — the same defect IMP-18 tracks for
+   * {@code neo_list}'s projection, avoided here at birth rather than fixed later.
+   */
+  static JSONArray unknownFields(JSONArray fields, Set<String> requested) {
+    JSONArray unknown = new JSONArray();
+    if (requested == null || requested.isEmpty()) {
+      return unknown;
+    }
+    Set<String> known = new HashSet<>();
+    if (fields != null) {
+      for (int i = 0; i < fields.length(); i++) {
+        JSONObject field = fields.optJSONObject(i);
+        if (field != null) {
+          String name = field.optString(KEY_NAME, null);
+          if (name != null) {
+            known.add(name);
+          }
+        }
+      }
+    }
+    for (String name : requested) {
+      if (!known.contains(name)) {
+        unknown.put(name);
+      }
+    }
+    return unknown;
+  }
+}

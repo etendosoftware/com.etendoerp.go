@@ -515,6 +515,77 @@ class McpSchemaFieldBuilderTest {
       assertEquals("hidden", fieldObj.getString("visibility"));
       assertFalse(fieldObj.getBoolean("userRequired"));
     }
+
+    // IMP-12: a mandatory column that carries an AD default is filled by the server, so it is NOT
+    // the user's to supply. On sales-invoice/header this is 5 of the 11 mandatory editable fields
+    // (invoiceDate, accountingDate, paymentTerms, currency, priceList) — reporting them as
+    // userRequired is what made the agent ask the user for values the server already knows.
+    @Test
+    void mandatoryWithDefaultExpressionIsNotUserRequired() throws Exception {
+      JSONObject fieldObj = new JSONObject();
+      fieldObj.put(McpSchemaFieldBuilder.KEY_DEFAULT_EXPRESSION, "@#Date@");
+      invokeStatic("addVisibility",
+          new Class<?>[]{ JSONObject.class, String.class, boolean.class },
+          fieldObj, "editable", true);
+      assertEquals("editable", fieldObj.getString("visibility"));
+      assertFalse(fieldObj.getBoolean(McpSchemaFieldBuilder.KEY_USER_REQUIRED));
+    }
+
+    @Test
+    void mandatoryWithDefaultSourceIsNotUserRequired() throws Exception {
+      JSONObject fieldObj = new JSONObject();
+      fieldObj.put(McpSchemaFieldBuilder.KEY_DEFAULT_SOURCE, "server");
+      invokeStatic("addVisibility",
+          new Class<?>[]{ JSONObject.class, String.class, boolean.class },
+          fieldObj, "editable", true);
+      assertFalse(fieldObj.getBoolean(McpSchemaFieldBuilder.KEY_USER_REQUIRED));
+    }
+  }
+
+  // ─── isAgentSuppliable ──────────────────────────────────────────────
+
+  @Nested
+  @DisplayName("isAgentSuppliable")
+  class IsAgentSuppliable {
+
+    private JSONObject field(String visibility, boolean readOnly) throws Exception {
+      JSONObject fieldObj = new JSONObject();
+      if (visibility != null) {
+        fieldObj.put("visibility", visibility);
+      }
+      fieldObj.put("readOnly", readOnly);
+      return fieldObj;
+    }
+
+    @Test
+    @DisplayName("an editable, writable field is the agent's to send")
+    void editableWritable() throws Exception {
+      assertTrue(McpSchemaFieldBuilder.isAgentSuppliable(field("editable", false)));
+    }
+
+    @Test
+    @DisplayName("readOnly overrides editable — the server owns the value")
+    void editableButReadOnly() throws Exception {
+      assertFalse(McpSchemaFieldBuilder.isAgentSuppliable(field("editable", true)));
+    }
+
+    @Test
+    @DisplayName("system, readOnly and discarded visibilities are never suppliable")
+    void nonEditableVisibilities() throws Exception {
+      assertFalse(McpSchemaFieldBuilder.isAgentSuppliable(field("system", false)));
+      assertFalse(McpSchemaFieldBuilder.isAgentSuppliable(field("readOnly", false)));
+      assertFalse(McpSchemaFieldBuilder.isAgentSuppliable(field("discarded", false)));
+    }
+
+    // An uncurated entity (105 of them, per IMP-11 §4.2) emits no visibility at all. Excluding
+    // those from view:"create" is deliberate: absent curation, we cannot claim a field is safe to
+    // send, and a wrong "required" list is worse than a missing one.
+    @Test
+    @DisplayName("a field with no visibility, and null, are excluded")
+    void missingVisibility() throws Exception {
+      assertFalse(McpSchemaFieldBuilder.isAgentSuppliable(field(null, false)));
+      assertFalse(McpSchemaFieldBuilder.isAgentSuppliable(null));
+    }
   }
 
   // ─── addSelectorInfo ────────────────────────────────────────────────
