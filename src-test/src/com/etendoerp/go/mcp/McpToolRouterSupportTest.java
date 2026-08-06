@@ -809,7 +809,7 @@ class McpToolRouterSupportTest {
     void coercesUiPatternDateToIso() throws Exception {
       Property prop = mock(Property.class);
       when(prop.getPrimitiveObjectType()).thenReturn((Class) java.util.Date.class);
-      when(prop.isDatetime()).thenReturn(false);
+      when(prop.isDate()).thenReturn(true);
       JSONObject body = new JSONObject();
       body.put("orderDate", "06-08-2026");
 
@@ -822,7 +822,7 @@ class McpToolRouterSupportTest {
     void isoDateUnchanged() throws Exception {
       Property prop = mock(Property.class);
       when(prop.getPrimitiveObjectType()).thenReturn((Class) java.util.Date.class);
-      when(prop.isDatetime()).thenReturn(false);
+      when(prop.isDate()).thenReturn(true);
       JSONObject body = new JSONObject();
       body.put("orderDate", "2026-08-06");
 
@@ -848,12 +848,61 @@ class McpToolRouterSupportTest {
     void unrecognizedDateIsLeftAlone() throws Exception {
       Property prop = mock(Property.class);
       when(prop.getPrimitiveObjectType()).thenReturn((Class) java.util.Date.class);
-      when(prop.isDatetime()).thenReturn(false);
+      when(prop.isDate()).thenReturn(true);
       JSONObject body = new JSONObject();
       body.put("orderDate", "06/08/2026");
 
       McpToolRouterSupport.coercePrimitiveFieldValue(body, "orderDate", prop, log);
       assertEquals("06/08/2026", body.getString("orderDate"));
+    }
+
+    /**
+     * The eligibility gate is the DAL domain type, not the Java type. Time-of-day and
+     * timezone-free properties are {@code java.util.Date} as well, and
+     * {@code JsonToDataConverter} reads only the time half of the first kind — rewriting such a
+     * value to {@code yyyy-MM-dd} would delete exactly the part it uses.
+     */
+    @Test
+    @DisplayName("a time-of-day property is left untouched — the gate is the domain type")
+    void timePropertyIsNotTouched() throws Exception {
+      Property prop = mock(Property.class);
+      when(prop.getPrimitiveObjectType()).thenReturn((Class) java.util.Date.class);
+      when(prop.isTimestamp()).thenReturn(true);
+      JSONObject body = new JSONObject();
+      body.put("startTime", "2026-08-06T14:30:00");
+
+      McpToolRouterSupport.coercePrimitiveFieldValue(body, "startTime", prop, log);
+      assertEquals("2026-08-06T14:30:00", body.getString("startTime"));
+    }
+
+    @Test
+    @DisplayName("an absolute-datetime property is left untouched, time included")
+    void absoluteDateTimePropertyIsNotTouched() throws Exception {
+      Property prop = mock(Property.class);
+      when(prop.getPrimitiveObjectType()).thenReturn((Class) java.util.Date.class);
+      when(prop.isAbsoluteDateTime()).thenReturn(true);
+      JSONObject body = new JSONObject();
+      body.put("created", "06-08-2026 14:30:00");
+
+      McpToolRouterSupport.coercePrimitiveFieldValue(body, "created", prop, log);
+      assertEquals("06-08-2026 14:30:00", body.getString("created"));
+    }
+
+    /**
+     * A non-zero offset already reaches the DAL correctly, so normalizing it away would shift
+     * the instant — the fix turning into the corruption. It must be refused, not converted.
+     */
+    @Test
+    @DisplayName("a datetime with a non-zero offset is refused, never shifted to UTC")
+    void nonZeroOffsetIsRefused() throws Exception {
+      Property prop = mock(Property.class);
+      when(prop.getPrimitiveObjectType()).thenReturn((Class) java.util.Date.class);
+      when(prop.isDatetime()).thenReturn(true);
+      JSONObject body = new JSONObject();
+      body.put("movementDate", "2026-08-06T14:30:00+02:00");
+
+      McpToolRouterSupport.coercePrimitiveFieldValue(body, "movementDate", prop, log);
+      assertEquals("2026-08-06T14:30:00+02:00", body.getString("movementDate"));
     }
   }
 

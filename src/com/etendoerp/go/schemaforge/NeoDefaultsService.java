@@ -290,6 +290,10 @@ public class NeoDefaultsService {
    * and an unrecognised shape is a signal that this method needs a new case — not that the
    * value is worthless.
    *
+   * <p>Which properties qualify is decided by {@link NeoDateFormat#canonicalShapeFor(Property)},
+   * not by "is the Java type a {@code Date}" — Etendo's time-of-day and timezone-free domain
+   * types are also backed by {@code java.util.Date} and must be left alone.
+   *
    * @param defaults  the resolved defaults object, mutated in place
    * @param dalEntity the DAL entity used to tell date properties from everything else; a
    *                  {@code null} entity makes this a no-op
@@ -311,12 +315,12 @@ public class NeoDefaultsService {
         if (prop == null || !prop.isPrimitive()) {
           continue;
         }
-        Class<?> type = prop.getPrimitiveObjectType();
-        if (type == null || !java.util.Date.class.isAssignableFrom(type)) {
+        Boolean shape = NeoDateFormat.canonicalShapeFor(prop);
+        if (shape == null) {
           continue;
         }
         String raw = (String) value;
-        boolean datetime = prop.isDatetime();
+        boolean datetime = shape.booleanValue();
         if (NeoDateFormat.isCanonical(raw, datetime)) {
           continue;
         }

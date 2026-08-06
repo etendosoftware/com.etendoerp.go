@@ -272,11 +272,36 @@ place the three accepted shapes are listed. It is applied at three points:
 | Write — REST | `NeoTypeCoercionHelper.coerceField` | date branch, runs before the SmartClient wrap |
 | Write — MCP | `McpToolRouterSupport.coercePrimitiveFieldValue` | same branch, mirrored |
 
-Two deliberate constraints:
+**Which properties are eligible** is decided in one place —
+`NeoDateFormat.canonicalShapeFor(Property)` — and it is deliberately narrower than "the Java type is
+a `Date`". Etendo has **five** date-ish domain types and `JsonToDataConverter` branches on all of
+them (`Property.java:1107-1124`):
+
+| Domain type | Predicate | NEO normalizes? |
+|---|---|---|
+| `DateDomainType` | `isDate()` | ✅ → `yyyy-MM-dd` |
+| `DatetimeDomainType` | `isDatetime()` | ✅ → `yyyy-MM-dd'T'HH:mm:ss` |
+| `TimestampDomainType` | `isTimestamp()` | ❌ left as-is |
+| `AbsoluteTimeDomainType` | `isAbsoluteTime()` | ❌ left as-is |
+| `AbsoluteDateTimeDomainType` | `isAbsoluteDateTime()` | ❌ left as-is |
+
+The last three are excluded for a concrete reason, not as margin. The two `Time` kinds are
+**time-of-day** values: the converter discards everything before the `T`, appends `+0000` and
+supplies the calendar day itself — so rewriting such a value to `yyyy-MM-dd` would delete the only
+half it reads. `AbsoluteDateTime` is explicitly timezone-free and would need an offset policy no
+caller has asked for. All three keep today's behaviour exactly.
+
+Three deliberate constraints:
 
 - **An unrecognised shape is passed through verbatim** and logged at `WARN`, never blanked. Blanking
   would turn a formatting problem into a missing mandatory field, and a guessed date is worse than
   the lenient parser this replaces.
+- **A non-zero zone offset is refused, not converted.** `2026-08-06T14:30:00+02:00` already reaches
+  the DAL correctly (`JsonUtils.convertFromXSDToJavaFormat` rewrites `+02:00` to `+0200`, which the
+  datetime parser honours), and the canonical form has nowhere to put an offset — dropping it would
+  shift the instant by two hours, making the fix the corruption. A **zero** offset (`Z`, `+00`,
+  `+00:00`) *is* dropped: an offset-less canonical value is read as UTC by that same method, so the
+  two are identical.
 - **The callout boundary is unchanged.** Normalization on the read path runs *after* the callout
   cascade, and `CalloutRequestBuilder.reformatDateParams` converts ISO back to the UI pattern
   before a legacy callout runs — so callouts receive exactly the same `dd-MM-yyyy` they did before.

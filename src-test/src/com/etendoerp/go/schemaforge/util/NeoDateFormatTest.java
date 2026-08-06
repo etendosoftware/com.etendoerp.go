@@ -28,6 +28,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
+import org.openbravo.base.model.Property;
 
 /**
  * Unit tests for {@link NeoDateFormat} — the canonical NEO date format (ETP-4793 / IMP-16).
@@ -191,6 +192,120 @@ class NeoDateFormatTest {
     @DisplayName("an offset with no time half is refused rather than guessed")
     void offsetWithoutTime() {
       assertNull(NeoDateFormat.toCanonical("2026-08-06+02:00", false));
+    }
+
+    @Test
+    @DisplayName("a time half this class cannot account for is refused, not silently midnight")
+    void unparseableTimeHalf() {
+      assertNull(NeoDateFormat.toCanonical("2026-08-06T banana", true));
+      assertNull(NeoDateFormat.toCanonical("2026-08-06T14:30:00 (CEST)", true));
+    }
+  }
+
+  /**
+   * The offset rule, which is a correctness boundary rather than a formatting choice.
+   *
+   * <p>A value carrying a <b>non-zero</b> offset already reaches the DAL correctly:
+   * {@code JsonUtils.convertFromXSDToJavaFormat} rewrites {@code +02:00} into {@code +0200} and
+   * the datetime parser honours it. The canonical form has nowhere to put an offset, so
+   * normalizing such a value would shift the instant by two hours — the canonicalizer would
+   * become the source of the same silent reinterpretation it was written to remove. A zero
+   * offset is a different case: an offset-less canonical value is read as UTC by that same
+   * method (it appends {@code +0000}), so dropping {@code Z} / {@code +00:00} is an identity.
+   */
+  @Nested
+  @DisplayName("zone offsets")
+  class ZoneOffsets {
+
+    @Test
+    @DisplayName("a zero offset is dropped — Z, +00 and +00:00 all mean UTC")
+    void zeroOffsetDropped() {
+      assertEquals("2026-08-06T14:30:00", NeoDateFormat.toCanonical("2026-08-06T14:30:00Z", true));
+      assertEquals("2026-08-06T14:30:00",
+          NeoDateFormat.toCanonical("2026-08-06T14:30:00.000Z", true));
+      assertEquals("2026-08-06T14:30:00",
+          NeoDateFormat.toCanonical("2026-08-06T14:30:00+00:00", true));
+      assertEquals("2026-08-06T18:55:31",
+          NeoDateFormat.toCanonical("2026-08-06 18:55:31.567837+00", true));
+    }
+
+    @Test
+    @DisplayName("a non-zero offset is refused so the caller keeps the correct instant")
+    void nonZeroOffsetRefused() {
+      assertNull(NeoDateFormat.toCanonical("2026-08-06T14:30:00+02:00", true));
+      assertNull(NeoDateFormat.toCanonical("2026-08-06T14:30:00-03:00", true));
+      assertNull(NeoDateFormat.toCanonical("2026-08-06T14:30:00-0300", true));
+    }
+
+    @Test
+    @DisplayName("for a date-only property an offset cannot move the day, so it is ignored")
+    void offsetIrrelevantForDateOnly() {
+      // The DAL's date parser reads only the yyyy-MM-dd prefix here, so there is no instant to
+      // shift and nothing to protect: the calendar day is the whole value.
+      assertEquals("2026-08-06", NeoDateFormat.toCanonical("2026-08-06T14:30:00+02:00", false));
+    }
+  }
+
+  /**
+   * Eligibility. Etendo has five date-ish domain types and only two of them denote a calendar
+   * date this class can speak about; all five are backed by {@code java.util.Date}, so a gate
+   * written on the Java type would silently include the other three. That is not a hypothetical:
+   * for a time-of-day property {@code JsonToDataConverter} keeps only the part after the
+   * {@code T}, so a value rewritten to {@code yyyy-MM-dd} would lose the only half it reads.
+   */
+  @Nested
+  @DisplayName("canonicalShapeFor — which properties are eligible at all")
+  class Eligibility {
+
+    private Property propertyWith(String predicate) {
+      Property prop = org.mockito.Mockito.mock(Property.class);
+      switch (predicate) {
+        case "date":
+          org.mockito.Mockito.when(prop.isDate()).thenReturn(true);
+          break;
+        case "datetime":
+          org.mockito.Mockito.when(prop.isDatetime()).thenReturn(true);
+          break;
+        case "timestamp":
+          org.mockito.Mockito.when(prop.isTimestamp()).thenReturn(true);
+          break;
+        case "absoluteTime":
+          org.mockito.Mockito.when(prop.isAbsoluteTime()).thenReturn(true);
+          break;
+        case "absoluteDateTime":
+          org.mockito.Mockito.when(prop.isAbsoluteDateTime()).thenReturn(true);
+          break;
+        default:
+          break;
+      }
+      return prop;
+    }
+
+    @Test
+    @DisplayName("a date property asks for the date-only shape")
+    void dateProperty() {
+      assertEquals(Boolean.FALSE, NeoDateFormat.canonicalShapeFor(propertyWith("date")));
+    }
+
+    @Test
+    @DisplayName("a datetime property asks for the datetime shape")
+    void datetimeProperty() {
+      assertEquals(Boolean.TRUE, NeoDateFormat.canonicalShapeFor(propertyWith("datetime")));
+    }
+
+    @Test
+    @DisplayName("the three remaining date-ish domain types are excluded")
+    void otherDomainTypesExcluded() {
+      assertNull(NeoDateFormat.canonicalShapeFor(propertyWith("timestamp")));
+      assertNull(NeoDateFormat.canonicalShapeFor(propertyWith("absoluteTime")));
+      assertNull(NeoDateFormat.canonicalShapeFor(propertyWith("absoluteDateTime")));
+    }
+
+    @Test
+    @DisplayName("a non-date property and null are excluded")
+    void nonDateExcluded() {
+      assertNull(NeoDateFormat.canonicalShapeFor(propertyWith("none")));
+      assertNull(NeoDateFormat.canonicalShapeFor(null));
     }
   }
 

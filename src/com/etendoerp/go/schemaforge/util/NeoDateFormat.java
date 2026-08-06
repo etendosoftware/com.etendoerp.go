@@ -26,6 +26,7 @@ import java.util.regex.Pattern;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.openbravo.base.model.Property;
 import org.openbravo.base.session.OBPropertiesProvider;
 
 /**
@@ -53,11 +54,13 @@ import org.openbravo.base.session.OBPropertiesProvider;
  * produced this way are already in the database — see
  * {@code docs/mcp-evaluation/imps/IMP-16.md} §3.6 in the schema_forge repo.
  *
- * <p>This class therefore does two things and nothing else: it tells callers what the
- * canonical form is, and it converts the three known shapes into it. It is deliberately
- * <b>total but conservative</b> — an input it does not recognise yields {@code null}, and
- * every caller must then pass the original value through verbatim rather than blank it. A
- * value we cannot interpret is the caller's problem to report, never this class's to guess.
+ * <p>This class therefore does three things and nothing else: it tells callers what the
+ * canonical form is, it says which properties the canonical form even applies to
+ * ({@link #canonicalShapeFor}), and it converts the three known shapes into it. It is
+ * deliberately <b>total but conservative</b> — an input it does not recognise yields
+ * {@code null}, and every caller must then pass the original value through verbatim rather
+ * than blank it. A value we cannot interpret is the caller's problem to report, never this
+ * class's to guess.
  */
 public final class NeoDateFormat {
 
@@ -74,6 +77,10 @@ public final class NeoDateFormat {
 
   /** Leading {@code HH:mm[:ss]} of the time half, ignoring fractional seconds and offset. */
   private static final Pattern TIME_PREFIX = Pattern.compile("^(\\d{2}):(\\d{2})(?::(\\d{2}))?");
+
+  /** Fractional seconds plus an optional zone offset, i.e. everything after {@code HH:mm:ss}. */
+  private static final Pattern TIME_TAIL = Pattern
+      .compile("^(?:\\.\\d+)?(?:(Z)|([+-])(\\d{2}):?(\\d{2})?)?$");
 
   private static final String MIDNIGHT = "00:00:00";
 
@@ -168,7 +175,11 @@ public final class NeoDateFormat {
     if (!datetime) {
       return isoDate;
     }
-    return isoDate + "T" + normalizeTimePart(halves[1]);
+    String time = normalizeTimePart(halves[1]);
+    if (time == null) {
+      return null;
+    }
+    return isoDate + "T" + time;
   }
 
   /**
@@ -234,20 +245,95 @@ public final class NeoDateFormat {
   }
 
   /**
-   * Normalize the time half to {@code HH:mm:ss}, dropping fractional seconds and any zone
-   * offset. An absent, blank or unrecognised time half yields midnight — for a datetime
-   * column whose value carried no usable time, midnight is the only defensible reading, and
-   * it is what the DAL would have produced from a bare date anyway.
+   * Normalize the time half to {@code HH:mm:ss}, dropping fractional seconds and a
+   * <b>zero</b> zone offset ({@code Z}, {@code +00}, {@code +00:00}).
+   *
+   * <p>An absent or blank time half yields midnight — for a datetime column whose value
+   * carried no usable time, midnight is the only defensible reading, and it is what the DAL
+   * would have produced from a bare date anyway.
+   *
+   * <p>A <b>non-zero</b> offset, or any tail this method cannot account for, yields
+   * {@code null} so the whole conversion is refused and the caller passes the original value
+   * through. This is not caution for its own sake: the canonical form has no place to put an
+   * offset, and {@code JsonUtils.createDateTimeFormat} already parses
+   * {@code 2026-08-06T14:30:00+02:00} correctly (via
+   * {@code JsonUtils.convertFromXSDToJavaFormat}, which rewrites {@code +02:00} to
+   * {@code +0200}). Dropping that offset would shift the instant by two hours — turning this
+   * class into the source of exactly the silent reinterpretation it exists to remove.
+   *
+   * @return {@code HH:mm:ss}, or {@code null} when the time half must not be rewritten
    */
   private static String normalizeTimePart(String timePart) {
-    if (timePart == null) {
+    if (timePart == null || timePart.trim().isEmpty()) {
       return MIDNIGHT;
     }
-    Matcher m = TIME_PREFIX.matcher(timePart.trim());
+    String value = timePart.trim();
+    Matcher m = TIME_PREFIX.matcher(value);
     if (!m.find()) {
-      return MIDNIGHT;
+      return null;
+    }
+    Matcher tail = TIME_TAIL.matcher(value.substring(m.end()));
+    if (!tail.matches() || !isZeroOffset(tail)) {
+      return null;
     }
     String seconds = m.group(3) != null ? m.group(3) : "00";
     return m.group(1) + ":" + m.group(2) + ":" + seconds;
+  }
+
+  /**
+   * Whether a matched {@link #TIME_TAIL} carries no offset, {@code Z}, or an all-zero one.
+   *
+   * <p>{@code Z} and {@code +00:00} both mean UTC, and a canonical value with no offset is
+   * read as UTC by {@code JsonUtils.convertFromXSDToJavaFormat} (it appends {@code +0000}),
+   * so dropping a zero offset is an identity — not an approximation.
+   */
+  private static boolean isZeroOffset(Matcher tail) {
+    if (tail.group(2) == null) {
+      return true;
+    }
+    String hours = tail.group(3);
+    String minutes = tail.group(4);
+    return "00".equals(hours) && (minutes == null || "00".equals(minutes));
+  }
+
+  /**
+   * Whether the canonical form applies to {@code prop}, and in which of the two shapes.
+   *
+   * <p>Etendo has <b>five</b> date-ish domain types, not two, and
+   * {@code JsonToDataConverter} branches on all of them. Only two of the five carry a
+   * calendar date this class can speak about:
+   * <ul>
+   *   <li>{@code DateDomainType} ({@link Property#isDate()}) → {@link #ISO_DATE};</li>
+   *   <li>{@code DatetimeDomainType} ({@link Property#isDatetime()}) → {@link #ISO_DATETIME}.</li>
+   * </ul>
+   *
+   * <p>The other three are deliberately excluded. {@code TimestampDomainType}
+   * ({@link Property#isTimestamp()}) and {@code AbsoluteTimeDomainType}
+   * ({@link Property#isAbsoluteTime()}) are <b>time-of-day</b> values: the converter keeps
+   * only the part after the {@code T} and supplies today's date itself, so rewriting such a
+   * value into {@code yyyy-MM-dd} would destroy the only half it reads.
+   * {@code AbsoluteDateTimeDomainType} ({@link Property#isAbsoluteDateTime()}) is excluded
+   * because it is explicitly timezone-free, and normalizing it here would need a policy on
+   * offsets that no caller has asked for yet.
+   *
+   * <p>The exclusion is not theoretical safety margin: those properties simply keep today's
+   * behaviour, which is what a change of this blast radius should do for every case it has no
+   * evidence about.
+   *
+   * @param prop the DAL property the value is destined for; may be {@code null}
+   * @return {@link Boolean#FALSE} for date-only, {@link Boolean#TRUE} for datetime, or
+   *         {@code null} when this property must not be touched at all
+   */
+  public static Boolean canonicalShapeFor(Property prop) {
+    if (prop == null) {
+      return null;
+    }
+    if (prop.isDate()) {
+      return Boolean.FALSE;
+    }
+    if (prop.isDatetime()) {
+      return Boolean.TRUE;
+    }
+    return null;
   }
 }

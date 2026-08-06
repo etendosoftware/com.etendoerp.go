@@ -387,11 +387,18 @@ final class McpToolRouterSupport {
    *
    * <p>An unrecognised shape is left untouched on purpose: it then reaches the lenient parser
    * or fails there loudly, which is the pre-existing behaviour. Silently substituting a date
-   * we had to guess would be worse than either.
+   * we had to guess would be worse than either. The same reasoning narrows <i>which</i>
+   * properties are eligible at all — see
+   * {@link NeoDateFormat#canonicalShapeFor(Property)}: a time-of-day or timezone-free property
+   * is a {@code java.util.Date} as well, and is deliberately left as it arrives.
    */
   private static void coerceDateFieldValue(JSONObject body, String key, Property prop,
       String strVal, org.apache.logging.log4j.Logger log) throws JSONException {
-    String canonical = NeoDateFormat.toCanonical(strVal, prop.isDatetime());
+    Boolean shape = NeoDateFormat.canonicalShapeFor(prop);
+    if (shape == null) {
+      return;
+    }
+    String canonical = NeoDateFormat.toCanonical(strVal, shape.booleanValue());
     if (canonical == null) {
       log.warn("[MCP] Unrecognized date format for '{}': '{}' passed through unchanged",
           key, strVal);

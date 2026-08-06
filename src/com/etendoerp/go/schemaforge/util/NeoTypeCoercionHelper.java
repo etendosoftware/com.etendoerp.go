@@ -177,7 +177,16 @@ public final class NeoTypeCoercionHelper {
         // no date, because injectMandatoryDefaults re-resolves the server default first.
         // An unrecognised shape is passed through verbatim: guessing a date is worse than
         // letting the existing (loud or lenient) parser handle it.
-        String canonical = NeoDateFormat.toCanonical(strVal, prop.isDatetime());
+        //
+        // The gate is canonicalShapeFor(prop), not the Java type: time-of-day (Timestamp,
+        // AbsoluteTime) and timezone-free (AbsoluteDateTime) properties are java.util.Date
+        // too, and rewriting one of those into yyyy-MM-dd would destroy the half the
+        // converter actually reads.
+        Boolean shape = NeoDateFormat.canonicalShapeFor(prop);
+        if (shape == null) {
+          return;
+        }
+        String canonical = NeoDateFormat.toCanonical(strVal, shape.booleanValue());
         if (canonical == null) {
           log.warn("[NEO] Unrecognized date format for '{}': '{}' passed through unchanged",
               key, strVal);
