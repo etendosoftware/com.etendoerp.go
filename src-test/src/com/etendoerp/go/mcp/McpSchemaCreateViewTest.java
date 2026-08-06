@@ -237,8 +237,28 @@ class McpSchemaCreateViewTest {
   @DisplayName("resolvedDefaultNames")
   class ResolvedDefaultNames {
 
+    // The real shape. NeoDefaultsService returns {defaults:{…}, metadata:{…}} — the flat map an agent
+    // sees over MCP is produced downstream by neoResponseToMcpResult/McpDefaultsView. Reading the top
+    // level is what shipped on 2026-08-06: it collected the literal key "defaults", matched no field,
+    // and the cross-check silently did nothing. No test used the nested body, which is why the
+    // 7 green tests said nothing about it.
     @Test
-    @DisplayName("collects the keys carrying a usable value")
+    @DisplayName("reads the nested \"defaults\" object, not the response envelope")
+    void readsNestedDefaults() throws JSONException {
+      JSONObject values = new JSONObject();
+      values.put("transactionDocument", "0FF9A0B4A0A94E1AB0A4E9E8C1C1F1F1");
+      values.put("paymentTerms", "B62EDD9166D146D69E9AAE7CA5B58371");
+      JSONObject body = new JSONObject();
+      body.put("defaults", values);
+      body.put("metadata", new JSONObject().put("sequenceFields", "documentNo"));
+
+      assertEquals(Set.of("transactionDocument", "paymentTerms"),
+          McpSchemaCreateView.resolvedDefaultNames(body));
+    }
+
+    // Tolerated because an afterHandle hook may replace the body with a flat map.
+    @Test
+    @DisplayName("a body with no \"defaults\" wrapper is read directly")
     void collectsResolved() throws JSONException {
       JSONObject body = new JSONObject();
       body.put("transactionDocument", "0FF9A0B4A0A94E1AB0A4E9E8C1C1F1F1");

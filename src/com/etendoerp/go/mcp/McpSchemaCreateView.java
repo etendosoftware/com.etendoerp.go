@@ -113,6 +113,7 @@ final class McpSchemaCreateView {
   }
 
   private static final String KEY_SERVER_DEFAULTED = "serverDefaulted";
+  private static final String KEY_DEFAULTS = "defaults";
   private static final String KEY_METADATA = "metadata";
   private static final String IDENTIFIER_SUFFIX = "$_identifier";
 
@@ -132,6 +133,13 @@ final class McpSchemaCreateView {
    * server knows the field exists and could not resolve it, which is precisely the case where the
    * agent must still supply a value.
    *
+   * <p><b>The body is nested.</b> {@code resolveDefaults} returns
+   * {@code {defaults:{…}, metadata:{…}}}; the flat map an agent sees over MCP is what
+   * {@code neoResponseToMcpResult} and {@link McpDefaultsView} produce downstream. Reading the top
+   * level directly is the bug this method shipped with on 2026-08-06 — it collected the single literal
+   * key {@code "defaults"}, which matches no field, so the cross-check silently did nothing. The
+   * fallback to the body itself keeps it working if an {@code afterHandle} hook returns a flat map.
+   *
    * @param defaultsBody the body of {@code NeoDefaultsService.resolveDefaults}, or {@code null} when
    *     defaults could not be resolved — in which case the static rule stands unchanged
    */
@@ -140,13 +148,17 @@ final class McpSchemaCreateView {
     if (defaultsBody == null) {
       return resolved;
     }
-    Iterator<?> keys = defaultsBody.keys();
+    JSONObject values = defaultsBody.optJSONObject(KEY_DEFAULTS);
+    if (values == null) {
+      values = defaultsBody;
+    }
+    Iterator<?> keys = values.keys();
     while (keys.hasNext()) {
       String key = String.valueOf(keys.next());
       if (KEY_METADATA.equals(key) || key.endsWith(IDENTIFIER_SUFFIX)) {
         continue;
       }
-      Object value = defaultsBody.opt(key);
+      Object value = values.opt(key);
       if (value == null || JSONObject.NULL.equals(value)
           || (value instanceof String && ((String) value).trim().isEmpty())) {
         continue;
