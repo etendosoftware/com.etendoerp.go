@@ -158,9 +158,7 @@ final class McpSchemaCreateView {
       if (KEY_METADATA.equals(key) || key.endsWith(IDENTIFIER_SUFFIX)) {
         continue;
       }
-      Object value = values.opt(key);
-      if (value == null || JSONObject.NULL.equals(value)
-          || (value instanceof String && ((String) value).trim().isEmpty())) {
+      if (McpDefaultsView.isUnresolvedValue(values.opt(key))) {
         continue;
       }
       resolved.add(key);

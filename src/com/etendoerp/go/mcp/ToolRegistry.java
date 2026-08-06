@@ -506,7 +506,10 @@ public class ToolRegistry {
             + "override before neo_create) and `systemManaged` (compliance/audit flags the server "
             + "owns — leave them alone). \"minimal\" returns only the `confirm` block. Use "
             + "grouped/minimal on compliance-heavy specs (invoices, payments) to avoid wading "
-            + "through ~65 fields when only ~5 matter.",
+            + "through ~65 fields when only ~5 matter. In both grouped views a field the server "
+            + "knows but could not resolve a value for is listed in `metadata.unresolvedFields` "
+            + "instead of appearing in `confirm` with an empty value — those are the fields you "
+            + "must supply yourself.",
         List.of(McpDefaultsView.VIEW_FULL, McpDefaultsView.VIEW_GROUPED,
             McpDefaultsView.VIEW_MINIMAL)));
 
@@ -629,7 +632,10 @@ public class ToolRegistry {
             + "server can already resolve a value for — from an AD default, a session preference, "
             + "the business partner's configuration, or a callout — is filled by the server, so it "
             + "is NOT userRequired. In view:\"create\" those appear under optional with "
-            + "serverDefaulted=true. System fields are "
+            + "serverDefaulted=true. In the full dump userRequired is a static approximation — it "
+            + "reads the column's own default only, so it over-reports fields the server resolves "
+            + "from elsewhere; view:\"create\" cross-checks against the real defaults and is the "
+            + "authoritative answer to \"must I ask the user for this?\". System fields are "
             + "auto-derived by Etendo callouts. Pass view:\"actions\" for the callable "
             + "buttons/processes instead.",
         buildObjectSchema(props, List.of("spec", "entity")));
