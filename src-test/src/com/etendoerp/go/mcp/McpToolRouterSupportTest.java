@@ -354,15 +354,41 @@ class McpToolRouterSupportTest {
       assertTrue(McpToolRouterSupport.hasSpecAccess(spec, "P"));
     }
 
+    /**
+     * ETP-4596: the "R" branch now delegates to {@link NeoAccessUtils#hasReportSpecAccess}
+     * rather than calling {@code hasProcessAccess} directly — this proves the delegation and
+     * method threading; the tiering rules themselves are unit-tested on
+     * {@code NeoAccessHelperTest#hasReportSpecAccess}.
+     */
     @Test
-    void reportSpecDelegatesToProcessAccess() {
+    void reportSpecDelegatesToHasReportSpecAccess_allow() {
       SFSpec spec = mock(SFSpec.class);
-      Process process = mock(Process.class);
-      when(spec.getProcess()).thenReturn(process);
-      when(process.getId()).thenReturn("proc-2");
-      accessMock.when(() -> NeoAccessUtils.hasProcessAccess("proc-2")).thenReturn(false);
+      accessMock.when(() -> NeoAccessUtils.hasReportSpecAccess(spec, "GET")).thenReturn(true);
+
+      assertTrue(McpToolRouterSupport.hasSpecAccess(spec, "R"));
+    }
+
+    @Test
+    void reportSpecDelegatesToHasReportSpecAccess_deny() {
+      SFSpec spec = mock(SFSpec.class);
+      accessMock.when(() -> NeoAccessUtils.hasReportSpecAccess(spec, "GET")).thenReturn(false);
 
       assertFalse(McpToolRouterSupport.hasSpecAccess(spec, "R"));
+    }
+
+    /**
+     * ETP-4596: the write-tier method must thread through to
+     * {@code hasReportSpecAccess} for a process-less report spec exactly like it does for a
+     * "W" spec — the constituent-window check honors read-only vs. full-access tiering too.
+     */
+    @Test
+    void reportSpecThreadsHttpMethodToHasReportSpecAccess() {
+      SFSpec spec = mock(SFSpec.class);
+      accessMock.when(() -> NeoAccessUtils.hasReportSpecAccess(spec, "GET")).thenReturn(true);
+      accessMock.when(() -> NeoAccessUtils.hasReportSpecAccess(spec, "POST")).thenReturn(false);
+
+      assertTrue(McpToolRouterSupport.hasSpecAccess(spec, "R", "GET"));
+      assertFalse(McpToolRouterSupport.hasSpecAccess(spec, "R", "POST"));
     }
 
     @Test

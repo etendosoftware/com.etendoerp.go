@@ -233,6 +233,9 @@ class NeoRequestRouterTest {
     when(spec.getSpecType()).thenReturn("R");
     when(spec.getId()).thenReturn("spec-id");
     when(spec.getName()).thenReturn("myReport");
+    // ETP-4596: the report dispatch now gates on hasReportSpecAccess before anything else;
+    // this test is about the not-configured path, not access, so allow it through.
+    when(servlet.authenticator.hasReportSpecAccess(spec, "GET")).thenReturn(true);
 
     supportMock.when(() -> NeoServletSupport.findSpec("myReport")).thenReturn(spec);
 
@@ -273,6 +276,9 @@ class NeoRequestRouterTest {
     when(spec.getSpecType()).thenReturn("R");
     when(spec.getId()).thenReturn("spec-id");
     when(spec.getName()).thenReturn("aging-receivable");
+    // ETP-4596: aging-receivable has no AD_Process and no entity AD_TAB_ID, so it keeps
+    // today's permissive behavior — but the gate still runs, so stub it explicitly.
+    when(servlet.authenticator.hasReportSpecAccess(spec, "GET")).thenReturn(true);
 
     supportMock.when(() -> NeoServletSupport.findSpec("aging-receivable")).thenReturn(spec);
 
@@ -431,6 +437,58 @@ class NeoRequestRouterTest {
 
     verify(servlet).sendError(eq(response), eq(HttpServletResponse.SC_METHOD_NOT_ALLOWED),
         anyString());
+  }
+
+  // ── handleReportSpecRequest (ETP-4596) ───────────────────────────────────
+
+  /**
+   * ETP-4596: before this fix, {@code handleReportSpecRequest} had NO access check at all —
+   * every authenticated role could reach any report endpoint. Verifies the router now asks
+   * {@code hasReportSpecAccess} first and honors a denial with a 403, never reaching the
+   * handler dispatch at all.
+   */
+  @SuppressWarnings("unchecked")
+  @Test
+  void testHandleReportSpecAccessDenied() throws Exception {
+    NeoPathInfo pathInfo = new NeoPathInfo("bank-statements", null, null);
+    SFSpec spec = mock(SFSpec.class);
+    when(spec.getName()).thenReturn("bank-statements");
+    when(servlet.authenticator.hasReportSpecAccess(spec, "GET")).thenReturn(false);
+
+    router.handleReportSpecRequest(spec, pathInfo, "GET", request, response);
+
+    ArgumentCaptor<String> messageCaptor = ArgumentCaptor.forClass(String.class);
+    verify(servlet).sendError(eq(response), eq(HttpServletResponse.SC_FORBIDDEN),
+        messageCaptor.capture());
+    assertEquals("Access denied to spec for current role", messageCaptor.getValue());
+    // The handler dispatch must never run once access is denied.
+    verify(servlet, never()).handleWithHooks(anyString(), any(), any(), any());
+  }
+
+  /**
+   * Companion: a report spec for which {@code hasReportSpecAccess} grants access proceeds
+   * past the gate into the normal NEO-native handler dispatch / not-configured path.
+   */
+  @SuppressWarnings("unchecked")
+  @Test
+  void testHandleReportSpecAccessAllowedProceedsNormally() throws Exception {
+    NeoPathInfo pathInfo = new NeoPathInfo("financial-accounts-page", null, null);
+    SFSpec spec = mock(SFSpec.class);
+    when(spec.getId()).thenReturn("spec-id-far");
+    when(spec.getName()).thenReturn("financial-accounts-page");
+    when(servlet.authenticator.hasReportSpecAccess(spec, "GET")).thenReturn(true);
+
+    // No SFEntity carries a Java_Qualifier -> non-callable, but that's irrelevant here: the
+    // point is that the access gate did not short-circuit with a 403.
+    OBCriteria<SFEntity> entityCriteria = mock(OBCriteria.class);
+    when(obDal.createCriteria(SFEntity.class)).thenReturn(entityCriteria);
+    when(entityCriteria.add(any(Criterion.class))).thenReturn(entityCriteria);
+    when(entityCriteria.list()).thenReturn(Collections.emptyList());
+
+    router.handleReportSpecRequest(spec, pathInfo, "GET", request, response);
+
+    verify(servlet, never()).sendError(eq(response), eq(HttpServletResponse.SC_FORBIDDEN), anyString());
+    verify(servlet).writeResponse(eq(response), any(NeoResponse.class));
   }
 
   // ── handleWindowSpecRequest ──────────────────────────────────────────────
