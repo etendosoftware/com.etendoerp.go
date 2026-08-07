@@ -85,6 +85,10 @@
         <default/>
         <onCreateDefault/>
       </column>
+      <column name="STATUS" primaryKey="false" required="true" type="VARCHAR" size="20" autoIncrement="false">
+        <default><![CDATA[active]]></default>
+        <onCreateDefault><![CDATA[active]]></onCreateDefault>
+      </column>
       <foreign-key foreignTable="AD_CLIENT" name="ETGO_ACCOUNT_CLI_FK">
         <reference local="AD_CLIENT_ID" foreign="AD_CLIENT_ID"/>
       </foreign-key>
@@ -105,5 +109,6 @@
         <unique-column name="EXTERNAL_SUBJECT"/>
       </unique>
       <check name="ETGO_ACCOUNT_ISACTIVE"><![CDATA[ISACTIVE IN ('Y', 'N')]]></check>
+      <check name="ETGO_ACCOUNT_STATUS"><![CDATA[STATUS IN ('active', 'pending')]]></check>
     </table>
   </database>

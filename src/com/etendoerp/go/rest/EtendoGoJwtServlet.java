@@ -2025,23 +2025,15 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   /**
    * Hash a plaintext password using SHA-256 with a random salt.
    * Returns "base64(salt):base64(hash)" so the salt can be recovered for verification.
+   *
+   * @deprecated logic moved to {@link PasswordHasher#hash} (ETP-4829, so
+   *     {@link EtendoGoAccountProvisioning} can hash admin-set passwords the same way without
+   *     depending on this servlet); kept as a thin delegate so every existing call site here is
+   *     unchanged.
    */
+  @Deprecated
   private String hashPassword(String password) {
-    try {
-      SecureRandom random = new SecureRandom();
-      byte[] salt = new byte[SALT_BYTES];
-      random.nextBytes(salt);
-
-      MessageDigest md = MessageDigest.getInstance(HASH_ALGORITHM);
-      md.update(salt);
-      byte[] hash = md.digest(password.getBytes(StandardCharsets.UTF_8));
-
-      String saltB64 = Base64.getEncoder().encodeToString(salt);
-      String hashB64 = Base64.getEncoder().encodeToString(hash);
-      return saltB64 + ":" + hashB64;
-    } catch (NoSuchAlgorithmException e) {
-      throw new IllegalStateException("SHA-256 not available", e);
-    }
+    return PasswordHasher.hash(password);
   }
 
   /**
