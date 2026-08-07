@@ -20,9 +20,16 @@ package com.etendoerp.go.schemaforge;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.when;
 
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.Test;
+import org.mockito.MockedStatic;
+import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.common.plm.Product;
+import org.openbravo.model.common.uom.UOM;
 
 /**
  * Unit tests for {@link NeoCommercialLinePolicy}.
@@ -363,5 +370,185 @@ public class NeoCommercialLinePolicyTest {
     NeoCommercialLinePolicy.injectLineGrossAmountIfMissing(body);
 
     assertFalse(body.has("lineGrossAmount"));
+  }
+
+  // ── injectProductDerivedUomIfMissing (IMP-15, four-attempt bug) ───────────
+  //
+  // Incident recap: C_UOM_ID is mandatory on C_OrderLine, so
+  // NeoDefaultsService#tryInjectFirstFromLookup preselects the first combo option
+  // for it — alphabetically "Centimeter" (ADF850C3E6E9413B9F9EEA5C87456073) — before the
+  // product callout ever runs. On the REST path that mandatory, already-populated field
+  // then lands in protectedCalloutFields, which is exactly what blocked the callout's
+  // correct answer ("100" = Unit) from overwriting the wrong guess. The bad id reached the
+  // DAL and the c_orderline_trg trigger raised AD message 20111 ("Unit of Measure mismatch
+  // (product/transaction)").
+  //
+  // Three fix attempts before this one all widened the guard's notion of "absent" — first
+  // "", then "0", then "null" — against a value ("ADF850C3...") that was a legitimate,
+  // real UOM id and would never match any of those sentinels. The actual fix replaced
+  // "is body.uOM non-empty?" (never a safe proxy, since the defaults pass guarantees it is
+  // always non-empty) with an explicit userProvidedUom flag supplied by the caller.
+
+  private static final String PRODUCT_ID = "4028E6C227BB4E9C0127BB6A46810004";
+  private static final String CENTIMETER_GUESS_UOM_ID = "ADF850C3E6E9413B9F9EEA5C87456073";
+  private static final String PRODUCT_UOM_ID = "100";
+
+  private static Product mockProductWithUom(String uomId) {
+    Product product = mock(Product.class);
+    UOM uom = mock(UOM.class);
+    when(uom.getId()).thenReturn(uomId);
+    when(product.getUOM()).thenReturn(uom);
+    return product;
+  }
+
+  /**
+   * THE regression case. A body already carries the defaults-pass "Centimeter" guess — a
+   * real, valid, non-sentinel UOM id, not an empty/"0"/"null" placeholder — in the {@code uOM}
+   * field. With {@code userProvidedUom=false} the caller never actually chose it, so it MUST
+   * still be overridden by the product's own UOM. A test that only exercised empty/"0"/"null"
+   * would have passed against all three broken attempts and proves nothing about this bug:
+   * the whole point of the fix was that "non-empty" is not a usable stand-in for "user chose
+   * it". Do not simplify this assertion away.
+   */
+  @Test
+  public void testInjectProductDerivedUom_defaultsGuessPresent_userDidNotProvideIt_isOverridden()
+      throws Exception {
+    JSONObject body = new JSONObject()
+        .put("product", PRODUCT_ID)
+        .put("uOM", CENTIMETER_GUESS_UOM_ID);
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(Product.class, PRODUCT_ID)).thenReturn(mockProductWithUom(PRODUCT_UOM_ID));
+
+      NeoCommercialLinePolicy.injectProductDerivedUomIfMissing(body, false);
+
+      assertEquals(PRODUCT_UOM_ID, body.getString("uOM"));
+    }
+  }
+
+  /**
+   * When the caller explicitly provided uOM, their choice is preserved exactly as sent and
+   * OBDal is never touched — the whole reason the flag exists is to short-circuit before any
+   * lookup runs.
+   */
+  @Test
+  public void testInjectProductDerivedUom_userProvidedUom_leftUntouchedNoDalInteraction()
+      throws Exception {
+    JSONObject body = new JSONObject()
+        .put("product", PRODUCT_ID)
+        .put("uOM", CENTIMETER_GUESS_UOM_ID);
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      NeoCommercialLinePolicy.injectProductDerivedUomIfMissing(body, true);
+
+      assertEquals(CENTIMETER_GUESS_UOM_ID, body.getString("uOM"));
+      obDal.verifyNoInteractions();
+    }
+  }
+
+  /** No uOM key at all in the body → injected from the product. */
+  @Test
+  public void testInjectProductDerivedUom_uomKeyAbsent_injectedFromProduct() throws Exception {
+    JSONObject body = new JSONObject().put("product", PRODUCT_ID);
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(Product.class, PRODUCT_ID)).thenReturn(mockProductWithUom(PRODUCT_UOM_ID));
+
+      NeoCommercialLinePolicy.injectProductDerivedUomIfMissing(body, false);
+
+      assertEquals(PRODUCT_UOM_ID, body.getString("uOM"));
+    }
+  }
+
+  /** uOM key present but empty string → injected from the product. */
+  @Test
+  public void testInjectProductDerivedUom_uomKeyEmptyString_injectedFromProduct() throws Exception {
+    JSONObject body = new JSONObject().put("product", PRODUCT_ID).put("uOM", "");
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(Product.class, PRODUCT_ID)).thenReturn(mockProductWithUom(PRODUCT_UOM_ID));
+
+      NeoCommercialLinePolicy.injectProductDerivedUomIfMissing(body, false);
+
+      assertEquals(PRODUCT_UOM_ID, body.getString("uOM"));
+    }
+  }
+
+  /** No {@code product} in the body → no-op, no uOM written, no DAL interaction. */
+  @Test
+  public void testInjectProductDerivedUom_noProduct_noopNoDalInteraction() throws Exception {
+    JSONObject body = new JSONObject().put("uOM", CENTIMETER_GUESS_UOM_ID);
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      NeoCommercialLinePolicy.injectProductDerivedUomIfMissing(body, false);
+
+      assertEquals(CENTIMETER_GUESS_UOM_ID, body.getString("uOM"));
+      obDal.verifyNoInteractions();
+    }
+  }
+
+  /** {@code body == null} must not throw. */
+  @Test
+  public void testInjectProductDerivedUom_nullBody_doesNotThrow() {
+    NeoCommercialLinePolicy.injectProductDerivedUomIfMissing(null, false);
+  }
+
+  /**
+   * Product resolves but has no UOM configured → the 20111-warning branch: no uOM written,
+   * no exception propagated.
+   */
+  @Test
+  public void testInjectProductDerivedUom_productHasNoUom_nothingInjected() throws Exception {
+    JSONObject body = new JSONObject().put("product", PRODUCT_ID);
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      Product productWithoutUom = mock(Product.class);
+      when(productWithoutUom.getUOM()).thenReturn(null);
+      when(dal.get(Product.class, PRODUCT_ID)).thenReturn(productWithoutUom);
+
+      NeoCommercialLinePolicy.injectProductDerivedUomIfMissing(body, false);
+
+      assertFalse(body.has("uOM"));
+    }
+  }
+
+  /** Product id does not resolve to any record (get returns null) → nothing injected, no exception. */
+  @Test
+  public void testInjectProductDerivedUom_productNotFound_nothingInjected() throws Exception {
+    JSONObject body = new JSONObject().put("product", PRODUCT_ID);
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(Product.class, PRODUCT_ID)).thenReturn(null);
+
+      NeoCommercialLinePolicy.injectProductDerivedUomIfMissing(body, false);
+
+      assertFalse(body.has("uOM"));
+    }
+  }
+
+  /** OBDal.get throws → the exception is swallowed, body is left unchanged, nothing propagates. */
+  @Test
+  public void testInjectProductDerivedUom_dalThrows_exceptionSwallowedBodyUnchanged() throws Exception {
+    JSONObject body = new JSONObject().put("product", PRODUCT_ID);
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(Product.class, PRODUCT_ID)).thenThrow(new RuntimeException("DAL boom"));
+
+      NeoCommercialLinePolicy.injectProductDerivedUomIfMissing(body, false);
+
+      assertFalse(body.has("uOM"));
+    }
   }
 }
