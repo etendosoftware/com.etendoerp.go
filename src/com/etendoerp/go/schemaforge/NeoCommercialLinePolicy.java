@@ -25,6 +25,7 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.common.plm.Product;
 import org.openbravo.model.financialmgmt.tax.TaxRate;
 
 /**
@@ -180,21 +181,20 @@ public final class NeoCommercialLinePolicy {
       return;
     }
     try {
-      String sql = "SELECT C_UOM_ID FROM M_PRODUCT WHERE M_PRODUCT_ID = ?";
-      try (PreparedStatement ps = OBDal.getInstance().getConnection(false).prepareStatement(sql)) {
-        ps.setString(1, productId);
-        try (ResultSet rs = ps.executeQuery()) {
-          if (rs.next()) {
-            String uomId = rs.getString(1);
-            if (uomId != null && !uomId.isEmpty()) {
-              body.put("uOM", uomId);
-              log.debug("[NEO-LINE-POLICY] Injected product-derived uOM={} for product={}", uomId, productId);
-            }
-          }
-        }
+      Product product = OBDal.getInstance().get(Product.class, productId);
+      if (product == null || product.getUOM() == null) {
+        log.warn("[NEO-LINE-POLICY] No UOM resolvable for product {}; the C_OrderLine trigger will "
+            + "reject the line with message 20111", productId);
+        return;
       }
+      body.put("uOM", product.getUOM().getId());
+      log.debug("[NEO-LINE-POLICY] Injected product-derived uOM={} for product={}",
+          product.getUOM().getId(), productId);
     } catch (Exception e) {
-      log.debug("Could not inject product-derived UOM for product {}: {}", productId, e.getMessage());
+      // Deliberately warn, not debug: a swallowed failure here surfaces much later as an opaque
+      // "Unit of Measure mismatch (product/transaction)" from the DB trigger, with nothing in the
+      // log tying it back to this injection. That is exactly how ETP-4793 lost an afternoon.
+      log.warn("Could not inject product-derived UOM for product {}: {}", productId, e.getMessage());
     }
   }
 

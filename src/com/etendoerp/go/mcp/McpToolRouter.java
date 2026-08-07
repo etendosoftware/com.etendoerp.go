@@ -96,6 +96,9 @@ public class McpToolRouter {
   private static final String HTTP_METHOD_POST = "POST";
   private static final String HTTP_METHOD_PUT = "PUT";
   private static final String HTTP_METHOD_DELETE = "DELETE";
+  /** DAL property names the line-policy injection keys off (IMP-15). */
+  private static final String FIELD_PRODUCT = "product";
+  private static final String FIELD_UOM = "uOM";
 
 
   /**
@@ -481,12 +484,7 @@ public class McpToolRouter {
       filteredBody.put(key, userProvided.get(key));
     }
 
-    // IMP-15: derive the line's unit of measure from its product when the caller omitted it, the
-    // same injection the REST create path runs (NeoCrudHandler#executePostCreate). Without it a
-    // sales-order line whose body neo_schema had reported as complete died inside the DAL with a
-    // bare 500 "Unit of Measure mismatch (product/transaction)" — and the value was only
-    // recoverable from an undocumented key in the product selector's response.
-    NeoCommercialLinePolicy.injectProductDerivedUomIfMissing(filteredBody);
+    injectLineUomIfApplicable(filteredBody, dalEntity);
 
     // Fix FK sentinel values: "0" is a UI-level sentinel (means "not yet set") that can't
     // go through the DAL as an entity reference. Replace with a real value from the body
@@ -1017,7 +1015,33 @@ public class McpToolRouter {
   }
 
   /**
-   * Run the shared FK resolver over every operation body of a batch (IMP-15).
+   * Derive a commercial line's unit of measure from its product when the body omits it (IMP-15).
+   * <p>
+   * The MCP write verbs are the second and third create path in this module, and neither reaches
+   * {@code NeoCrudHandler#executePostCreate} — where the REST path runs this same injection. Without
+   * it, a line body that {@code neo_schema} reports as complete is rejected by the {@code C_OrderLine}
+   * trigger with AD message 20111, {@code "Unit of Measure mismatch (product/transaction)"}: the
+   * trigger compares {@code M_PRODUCT.C_UOM_ID} against the row's {@code C_UOM_ID}, and {@code uOM}
+   * is a {@code system}-visibility field, so no agent-visible contract ever mentions it.
+   * <p>
+   * Guarded on the entity actually declaring {@code uOM}, so an unrelated entity that happens to
+   * carry a {@code product} field is never handed a property its table does not have.
+   *
+   * @param body      the DAL-shaped body, mutated in place
+   * @param dalEntity the target entity, used to confirm the property exists
+   */
+  private void injectLineUomIfApplicable(JSONObject body, Entity dalEntity) {
+    if (body == null || dalEntity == null || !body.has(FIELD_PRODUCT)
+        || !dalEntity.hasProperty(FIELD_UOM)
+        || body.optString(FIELD_PRODUCT, "").startsWith(BatchService.REF_PREFIX)) {
+      return;
+    }
+    NeoCommercialLinePolicy.injectProductDerivedUomIfMissing(body);
+  }
+
+  /**
+   * Run the shared FK resolver — and the shared line-policy injection — over every operation body of
+   * a batch (IMP-15).
    * <p>
    * Mirrors what {@code handleCreate} does for a single record, with two batch-specific rules:
    * <ul>
@@ -1057,6 +1081,7 @@ public class McpToolRouter {
             e.getMessage());
         continue;
       }
+      injectLineUomIfApplicable(body, dalEntity);
       JSONObject fkError = McpFkResolver.resolveFkNames(body, dalEntity, adTab,
           McpSelectorContextHelper.buildSelectorContextParams(null, adTab), log,
           value -> value.startsWith(BatchService.REF_PREFIX));
