@@ -175,6 +175,54 @@ class EtendoGoJwtDalHelperTest {
   }
 
   @Nested
+  @DisplayName("createPendingAccount")
+  class CreatePendingAccount {
+
+    @Mock private Account account;
+    @Mock private Client client;
+    @Mock private Organization organization;
+    @Mock private OBQuery<Account> query;
+
+    @Test
+    @DisplayName("creates a pending account with no password when none exists yet")
+    void createsPendingAccountWhenNoneExists() {
+      when(obDal.createQuery(eq(Account.class), anyString())).thenReturn(query);
+      when(query.uniqueResult()).thenReturn(null);
+      when(obProvider.get(Account.class)).thenReturn(account);
+      when(obDal.get(Client.class, "0")).thenReturn(client);
+      when(obDal.get(Organization.class, "0")).thenReturn(organization);
+
+      Account result = EtendoGoJwtDalHelper.createPendingAccount("new.user@test.com", "New User");
+
+      assertEquals(account, result);
+      verify(account).setClient(client);
+      verify(account).setOrganization(organization);
+      verify(account).setEmail("new.user@test.com");
+      verify(account).setPasswordHash(null);
+      verify(account).setName("New User");
+      verify(account).setSessionToken(null);
+      verify(account).set("status", "pending");
+      verify(obDal).save(account);
+      verify(obDal).flush();
+      verify(obDal).commitAndClose();
+    }
+
+    @Test
+    @DisplayName("returns the existing account and creates nothing when email is already registered")
+    void returnsExistingAccountWithoutCreatingANewOne() {
+      Account existing = mock(Account.class);
+      when(obDal.createQuery(eq(Account.class), anyString())).thenReturn(query);
+      when(query.uniqueResult()).thenReturn(existing);
+
+      Account result = EtendoGoJwtDalHelper.createPendingAccount("already@test.com", "Someone");
+
+      assertEquals(existing, result);
+      verify(obProvider, org.mockito.Mockito.never()).get(Account.class);
+      verify(obDal, org.mockito.Mockito.never()).save(any());
+    }
+  }
+
+  @Nested
   @DisplayName("updateSessionToken")
   class UpdateSessionToken {
 
