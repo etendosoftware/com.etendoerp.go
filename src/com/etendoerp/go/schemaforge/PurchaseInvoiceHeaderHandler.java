@@ -158,16 +158,18 @@ public class PurchaseInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler i
       }
       JSONObject body = context.getPreviousResult().getBody();
       for (int i = 0; i < dataArr.length(); i++) {
-        applyTotalDiscountToRecord(dataArr.getJSONObject(i));
+        JSONObject rec = dataArr.getJSONObject(i);
+        applyTotalDiscountToRecord(rec);
+        enrichInvoiceSubtype(rec, getInvoiceSubtypeKey());
       }
       if (context.getRecordId() != null) {
         JSONObject rec = dataArr.getJSONObject(0);
         enrichLinkedReceipts(rec, context.getRecordId());
         enrichOriginInvoice(rec, context.getRecordId());
-        enrichInvoiceSubtype(rec, getInvoiceSubtypeKey());
         enrichDocTypeLocked(rec);
         enrichIsRectificative(rec);
         enrichHasRectifications(rec, context.getRecordId());
+        InvoiceExemptTaxes.enrich(rec, context.getRecordId());
       }
       return NeoResponse.ok(body);
     } catch (Exception e) {

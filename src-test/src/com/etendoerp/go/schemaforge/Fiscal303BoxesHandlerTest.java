@@ -1131,13 +1131,32 @@ public class Fiscal303BoxesHandlerTest {
 
   // ── resolveDeclType — AEAT letter code contract ────────────────────────────
 
-  /** Each accepted AEAT code must be returned unchanged. */
+  /**
+   * Each accepted AEAT code must be returned unchanged — all 7 letters the frontend's
+   * {@code TIPO_DECLARACION_FIELD} exposes. {@code D} (Devolución) and {@code X} (Devolución
+   * transferencia extranjero) were the BLOCKER fix (ETP-4456): before it, both silently fell back
+   * to {@code "N"}, corrupting the generated file's declaration type and, downstream, discarding
+   * the IBAN {@code AEAT303Report2014} requires for those two types.
+   */
   @Test
   public void testResolveDeclType_acceptedCodes() {
-    for (String code : new String[]{"I", "C", "V", "U", "G"}) {
+    for (String code : new String[]{"I", "C", "V", "U", "G", "D", "X"}) {
       assertEquals("Expected " + code + " to pass through unchanged",
           code, Fiscal303BoxesHandler.resolveDeclType(code));
     }
+  }
+
+  /**
+   * Dedicated regression test for the ETP-4456 BLOCKER fix: {@code D} and {@code X} must each
+   * resolve to themselves, not {@code "N"}. Kept separate from {@link
+   * #testResolveDeclType_acceptedCodes} (which already covers them as part of the full 7-code
+   * loop) so a future accidental removal of just these two codes fails with an unambiguous test
+   * name rather than a generic loop failure.
+   */
+  @Test
+  public void testResolveDeclType_dAndXAcceptedAfterBlockerFix() {
+    assertEquals("D", Fiscal303BoxesHandler.resolveDeclType("D"));
+    assertEquals("X", Fiscal303BoxesHandler.resolveDeclType("X"));
   }
 
   /** Null tipo must fall back to "N". */
@@ -1158,6 +1177,17 @@ public class Fiscal303BoxesHandlerTest {
     assertEquals("N", Fiscal303BoxesHandler.resolveDeclType("ingresar"));
     assertEquals("N", Fiscal303BoxesHandler.resolveDeclType("compensar"));
     assertEquals("N", Fiscal303BoxesHandler.resolveDeclType("devolver"));
+  }
+
+  /**
+   * A genuinely invented single-letter code (not among the 7 accepted AEAT letters) must still
+   * fall back to "N" — confirms the BLOCKER fix's widened whitelist ({@code D}/{@code X} added)
+   * did not accidentally loosen the fallback into a catch-all.
+   */
+  @Test
+  public void testResolveDeclType_inventedLetterFallsBackToN() {
+    assertEquals("N", Fiscal303BoxesHandler.resolveDeclType("Z"));
+    assertEquals("N", Fiscal303BoxesHandler.resolveDeclType("Q"));
   }
 
   /** "N" itself must be treated as an unknown code and return "N" via the fallback path. */

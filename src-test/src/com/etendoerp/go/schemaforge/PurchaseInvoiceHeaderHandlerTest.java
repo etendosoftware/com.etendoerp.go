@@ -18,6 +18,7 @@
 package com.etendoerp.go.schemaforge;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
@@ -65,8 +66,10 @@ import org.openbravo.model.common.invoice.Invoice;
  * <ul>
  *   <li>{@code afterHandle()} early-exit paths (non-GET, null/empty data).</li>
  *   <li>{@code afterHandle()} single-record enrichment — linked receipts query.</li>
- *   <li>{@code afterHandle()} list mode — total-discount adjustment applies to every record, but
- *       the detail-only enrichments (linked receipts, origin invoice, subtype, etc.) do not
+ *   <li>{@code afterHandle()} list mode — total-discount adjustment AND subtype enrichment
+ *       (ETP-4738 follow-up: {@code apInvoiceSubtype} is now injected on every row, not just
+ *       detail) apply to every record; the strictly detail-only enrichments (linked receipts,
+ *       origin invoice, docTypeLocked, isRectificative, hasRectifications) do not
  *       (recordId is null).</li>
  *   <li>{@code afterHandle()} total-discount adjustment for draft invoices (grandTotalAmount /
  *       outstandingAmount), inherited from {@link AbstractInvoiceHeaderHandler}.</li>
@@ -147,6 +150,11 @@ public class PurchaseInvoiceHeaderHandlerTest {
     NeoResponse result = handler.afterHandle(ctx);
     assertNotNull(result);
     assertEquals(200, result.getHttpStatus());
+    JSONObject resultRec = result.getBody().getJSONObject("response").getJSONArray("data").getJSONObject(0);
+    // ETP-4738 follow-up: subtype IS now enriched on list rows (no transactionDocument on this
+    // fixture → resolves to FAC without touching OBDal).
+    assertEquals("FAC", resultRec.getString("apInvoiceSubtype"));
+    assertFalse(resultRec.has("docTypeLocked"));
   }
 
   // ── afterHandle — total discount adjustment (ETP-4029 follow-up) ─────────
