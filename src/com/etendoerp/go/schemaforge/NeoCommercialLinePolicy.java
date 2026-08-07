@@ -176,8 +176,14 @@ public final class NeoCommercialLinePolicy {
     if (productId.isEmpty()) {
       return;
     }
+    // "0" and "null" are UI-level sentinels meaning "not set yet", and the callout cascade that
+    // runs immediately before this injection leaves exactly that in uOM. Treating them as a real
+    // value made the injection a no-op on EVERY create path — REST, MCP and batch alike — and the
+    // sentinel then reached the DAL, where the C_OrderLine trigger compared COALESCE(C_UOM_ID,'0')
+    // against the product's own UOM and raised message 20111. An explicit uOM in the request body
+    // still wins, which is the only case this early return is meant to protect.
     String existingUom = body.optString("uOM", "");
-    if (!existingUom.isEmpty()) {
+    if (!existingUom.isEmpty() && !"0".equals(existingUom) && !"null".equals(existingUom)) {
       return;
     }
     try {
