@@ -634,6 +634,206 @@ specs — not a replacement for this one).
 
 ---
 
+### 4.12 MCP Tool Ergonomics (Wave 3 — ETP-4601)
+
+The MCP tool layer (`/sws/neo/mcp`, routed by `McpToolRouter`) exposes the same specs described
+above to AI agents as JSON-RPC tools (`neo_discover`, `neo_schema`, `neo_create`, `neo_update`, …).
+Wave 3 of the MCP improvements adds three agent-ergonomics features on top of that surface. Each is
+additive and backwards-compatible: an existing caller that ignores the new parameter/field sees the
+exact same responses as before.
+
+#### 4.12.1 `neo_schema({view:"actions"})` — actions-only projection (IMP-6)
+
+`neo_schema` normally returns the full field dump for an entity — for a compliance-heavy window this
+can be ~97 fields, most of which an agent does not need when its only goal is to find out *which
+buttons/processes it can trigger* on that entity. The optional `view` parameter collapses the
+response down to the callable actions.
+
+`view` is an enum whose only accepted value is `"actions"` (matched case-insensitively). Omitting it
+— or passing anything else — is a no-op: the caller keeps receiving the full, unchanged schema.
+
+**Request:**
+
+```json
+{
+  "tool": "neo_schema",
+  "arguments": {
+    "spec": "sales-order",
+    "entity": "header",
+    "view": "actions"
+  }
+}
+```
+
+**Response** (`{spec, entity, actions, actionCount}` — the full `fields` array is dropped):
+
+```json
+{
+  "spec": "sales-order",
+  "entity": "header",
+  "actions": [
+    {
+      "name": "completeAction",
+      "label": "Complete",
+      "type": "button",
+      "invokeVia": "neo_action",
+      "action": "completeAction",
+      "processType": "OBUIAPP",
+      "processName": "Complete",
+      "processId": "ABC123..."
+    },
+    {
+      "name": "cancelAction",
+      "label": "Cancel Document",
+      "type": "button",
+      "invokeVia": "neo_action",
+      "action": "cancelAction",
+      "processType": "OBUIAPP",
+      "processName": "Cancel Document",
+      "processId": "..."
+    }
+  ],
+  "actionCount": 2
+}
+```
+
+Behavior details (`McpActionsView`):
+
+- The view is a **pure re-shape** of the field array `neo_schema` already builds
+  (`McpSchemaFieldBuilder.buildSchemaFieldsArray`) — it simply filters down to the `type:"button"`
+  entries, in their original order. No additional DAL/model access is performed.
+- Each returned action is already fully self-describing: `invokeVia:"neo_action"` plus `action`,
+  `processType`, `processName`, and `processId` tell the agent exactly how to invoke it via
+  `neo_action` — no follow-up `neo_schema` call on the full entity is required.
+- An entity with no button fields returns `"actions": []` and `"actionCount": 0` (never `null`).
+
+**When to use it:** the agent knows the entity and only wants the menu of things it can *do* to a
+record (complete, cancel, post, …), not the full editable/read-only column list.
+
+#### 4.12.2 `neo_discover` → `primaryEntity` — the root entity of a window spec (IMP-9)
+
+A window spec (`SPEC_TYPE = 'W'`) can include several entities (Header, Lines, …). To create a
+document an agent must create the **root/header** record first, then attach child rows. Previously it
+had to infer which included entity was the header by calling `neo_schema` on each. `neo_discover` now
+surfaces that directly: each window spec that has entities carries a `primaryEntity` field naming the
+root entity.
+
+**Response fragment** (`handleDiscover` → `McpToolRouterSupport.buildDiscoverSpec`):
+
+```json
+{
+  "name": "sales-order",
+  "type": "W",
+  "description": "Sales Order",
+  "primaryEntity": "header",
+  "entities": [
+    { "name": "header", "methods": ["GET", "POST", "PUT", "DELETE"], "readOnly": false },
+    { "name": "lines",  "methods": ["GET", "POST", "PUT", "DELETE"], "readOnly": false }
+  ]
+}
+```
+
+Resolution rules (`McpToolRouterSupport.resolvePrimaryEntityName`):
+
+- **Authoritative signal:** the included entity whose linked `AD_Tab` has `tabLevel == 0` is the
+  header (the same convention `McpToolRouter.resolveParentFK` relies on). `SFEntity` carries no
+  parent column, so hierarchy is read off the linked `AD_Tab`.
+- **Fallback:** when no included entity has a level-0 tab — or an entity has no linked tab at all
+  (handler-backed entities) — the first included entity by ascending `seqNo` is used.
+- `primaryEntity` is only ever emitted **alongside `entities`**, i.e. for `W` specs. Process (`P`)
+  and report (`R`) specs never carry it.
+- A spec with no included entities yields `null`, and the key is omitted from the response entirely.
+
+#### 4.12.3 FK-by-name resolution on `neo_create` / `neo_update` (IMP-4)
+
+Historically every foreign-key field in a write body required the exact 32-character record id,
+forcing an agent to call `neo_selectors` first even for an obvious single-match lookup. Wave 3 lets a
+write body pass a **human search string** for an FK field; the router resolves it to the real record
+id server-side before persisting, via the same selector path `neo_selectors` uses
+(`NeoSelectorService.querySelectorByColumn`, limit 10). This runs for both `neo_create` and
+`neo_update` (`McpFkResolver.resolveFkNames`, invoked from `handleCreate` and `handleUpdate`).
+
+**Request** — `businessPartner` given by name instead of id:
+
+```json
+{
+  "tool": "neo_create",
+  "arguments": {
+    "spec": "sales-order",
+    "entity": "header",
+    "businessPartner": "Acme Corp",
+    "orderDate": "2026-08-03"
+  }
+}
+```
+
+If exactly one business partner matches `"Acme Corp"`, the resolver replaces the value in place with
+that record's id and the create proceeds normally.
+
+**Which values are resolved, and which are passed through untouched:**
+
+- A value is treated as an already-valid id — and left untouched — when it is exactly **32 hex
+  characters** (`[0-9A-Fa-f]{32}`, upper/lower/mixed case). `looksLikeId` matches `95E2A8B5…`; it
+  rejects a 31-char string, a string with a non-hex char, an empty string, and `null`.
+- Only FK fields are considered: a key is resolved only if it maps to a DAL property that is a
+  non-primitive association with a target entity. Non-FK fields, non-string values, and empty strings
+  are never touched.
+
+**Outcomes by selector match count** (`decideOutcome`):
+
+| Matches | Outcome | Effect |
+|---------|---------|--------|
+| 0 | `NOT_FOUND` | Returns a structured `not_found` error; the write is rejected. |
+| 1 | `RESOLVED` | Value replaced in place with the matched record id; write proceeds. |
+| >1 | `AMBIGUOUS` | Returns a structured `ambiguous_fk` error carrying the candidate list; the write is rejected. |
+
+Both error shapes are returned as an MCP error content payload with HTTP-style
+`status: 422` (`STATUS_UNPROCESSABLE`) and a `field` naming the offending key:
+
+**Not found:**
+
+```json
+{
+  "status": 422,
+  "error": "not_found",
+  "detail": "No match for 'businessPartner'='Acme Corp'. Use neo_selectors to search, or pass the exact record id instead.",
+  "field": "businessPartner"
+}
+```
+
+**Ambiguous** (`candidates` is the raw selector `items` array, capped at the selector limit of 10):
+
+```json
+{
+  "status": 422,
+  "error": "ambiguous_fk",
+  "detail": "'businessPartner'='Acme' matched 3 records. Pick one of the candidates' ids, or narrow the search text.",
+  "field": "businessPartner",
+  "candidates": [
+    { "id": "…", "name": "Acme Corp" },
+    { "id": "…", "name": "Acme Industries" },
+    { "id": "…", "name": "Acme Logistics" }
+  ]
+}
+```
+
+> **Known limitation — selector context.** The selector context passed to the resolver is built from
+> the `AD_Tab` alone (`McpSelectorContextHelper.buildSelectorContextParams(null, adTab)` — window
+> sales/purchase context, business-partner role). It does **not** synthesize `recordContext` /
+> `parentContext` from the in-flight body, because that would require resolving fields in dependency
+> order (e.g. `priceList` needs `businessPartner` resolved first). A **dependent** FK — such as
+> `partnerAddress` depending on `businessPartner` — may therefore match more records than a
+> context-aware `neo_selectors` call would, and can return a false `ambiguous_fk`. When that happens,
+> resolve the dependent field explicitly via `neo_selectors` with an explicit `recordContext` and
+> pass its resulting id.
+
+If the selector lookup itself fails (HTTP status ≥ 400 or a null body) or no `AD_Column` can be
+resolved for the key, the resolver logs a warning/debug line and leaves the value as-is rather than
+failing the write — the downstream DAL then surfaces its own validation error for the unresolved
+reference.
+
+---
+
 ## 5. Configuration
 
 ### 5.1 Creating a Spec
@@ -854,6 +1054,74 @@ NEO Headless enforces security at multiple levels:
    `readOnly` flag. `readOnly: true` means at least one read method is enabled and no POST, PUT,
    PATCH, or DELETE method is enabled, so agents must not attempt a write even when the parent
    window spec is otherwise available.
+
+   **Spec-level `readOnly` marker (ETP-4254 AC#4):** a type-`W` spec whose every included entity
+   is read-only also carries `"readOnly": true` at the spec level, so an agent can pick the
+   writable specs out of the catalog without inspecting every entity of every spec. The key is
+   emitted **only when true** — writable specs have no `readOnly` key at all, and the negative
+   case is already carried per entity. It is never emitted for type-`P`/`R` specs. Derived from
+   the same entity list the `entities` array is built from, so it costs no extra query.
+
+   ```json
+   { "name": "monitor-verifactu", "type": "W", "readOnly": true,
+     "entities": [ { "name": "header", "methods": ["GET"], "readOnly": true } ] }
+   { "name": "sales-order", "type": "W",
+     "entities": [ { "name": "header", "methods": ["GET","POST","PUT","PATCH","DELETE"],
+                     "readOnly": false } ] }
+   ```
+
+   **The flags are enforced identically on every write entry point (ETP-4254).** The single
+   source of truth is `NeoMethodPolicy` (`schemaforge/util/NeoMethodPolicy.java`); `GET` is
+   enabled by either `ISGET` or `ISGETBYID`. It is consulted by:
+
+   | Entry point | Where | Refusal |
+   |---|---|---|
+   | REST CRUD | `NeoCrudHandler#handleWindowEntityCrud` | `405` `"<METHOD> not enabled for <entity>"` |
+   | `/batch` + MCP `neo_batch` | `BatchService#createRecord` (the batch enters at `handleDefault`, i.e. after the CRUD gate) | per-op `405`, whole batch rolled back |
+   | MCP `neo_create` / `neo_update` / `neo_delete` | `McpToolRouterSupport#requireMethodEnabled` | MCP tool error naming the enabled methods and stating the entity is read-only |
+
+   Before ETP-4254 only the REST path checked them, so turning the mutation flags off on a
+   monitor/log window blocked the React UI with a `405` while an MCP agent could still write —
+   and `neo_discover` reported `readOnly: true` while the write succeeded. Note that
+   `hasSpecAccess` (ETP-4510 `AD_Window_Access` tiering) is *role*-level and does not substitute
+   for this *entity*-level gate.
+
+   **Not gated by the flags, by design:** the sub-endpoints — `/action/*`, `/process`,
+   `/callout`, `/selector`, `/defaults`. `NeoRequestRouter` dispatches them before the CRUD
+   gate is reached, so a read-only-CRUD monitor window can still legitimately expose a button
+   action (e.g. `fiscal-monitor`'s `Correct_Invoice`). Do not extend the gate to them.
+
+   **MCP tool catalog consequence:** `ToolRegistry` builds one readable enum plus one enum per
+   write verb. Read tools (`neo_list`/`neo_get`/`neo_selectors`/`neo_defaults`/`neo_schema`) get
+   every accessible window spec. `neo_create`, `neo_update` and `neo_delete` each get only specs
+   with at least one entity enabling POST, PUT or DELETE respectively
+   (`McpToolRouterSupport#hasEntityWithMethod`). This per-verb split matters for mixed specs:
+   `monitor-verifactu` is offered by `neo_update` because one entity keeps PUT/PATCH, but not by
+   `neo_create` or `neo_delete`. Fully read-only monitors remain readable and absent from all
+   CRUD-write enums. `neo_action` keeps the read enum because actions are not gated by the method
+   flags.
+
+   **Catalog exclusion — needs BOTH conditions (`isCatalogExcludedSpec`).** A type-`W` spec is
+   dropped from the CRUD catalog *and* from discovery *and* from `McpResourceProvider` only when
+   it has neither surface:
+
+   1. every included entity is handler-backed (no `AD_Tab`), so the generic CRUD path cannot
+      serve it (`isHandlerOnlySpec`), **and**
+   2. no entity's handler declares `NeoHandler#servesActions()`, so there is no `/action` route
+      either (`NeoActionSurface`).
+
+   This replaced a hardcoded `"dashboard"` spec-name literal, and is scoped to type-`W` specs
+   because type-`R` report specs are handler-only by design. Condition 2 is not optional:
+   `hasSpecAccess` also gates `neo_action`, so testing condition 1 alone hid
+   `not-posted-documents` — a tab-less spec whose handler serves the `post` / `bulk-post`
+   actions — and took a real transactional action away from agents. `dashboard` satisfies both
+   conditions and is reached through `neo_widget` instead.
+
+   Because `ETGO_SF_ENTITY` carries no action metadata, condition 2 is a CDI probe of the
+   entity's `Java_Qualifier` handler and is **fail-open**: a missing qualifier aside, an
+   unregistered handler or a CDI failure keeps the spec visible. **Any handler serving ACTION
+   requests should override `servesActions()`** — it is only consulted for tab-less specs today,
+   but the declaration keeps the catalog honest if the spec ever loses its tabs.
 
 9. **Field-level control:** Only fields with `ISINCLUDED = 'Y'` participate in selector listings and button action discovery.
 

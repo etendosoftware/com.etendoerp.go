@@ -269,6 +269,10 @@ public class BatchServiceRobustnessTest {
     support.when(() -> NeoServletSupport.findSpec(SPEC)).thenReturn(spec);
 
     SFEntity entity = mock(SFEntity.class);
+    // These robustness scenarios model writable Contacts entities. ETP-4254 enforces
+    // ISPOST on batch creates, so the fixture must declare the method explicitly instead
+    // of relying on Mockito's false default and being rejected before the behavior under test.
+    when(entity.isPost()).thenReturn(true);
     when(entity.getADTab()).thenReturn(mock(Tab.class));
     when(entity.getJavaQualifier()).thenReturn(QUALIFIER);
 

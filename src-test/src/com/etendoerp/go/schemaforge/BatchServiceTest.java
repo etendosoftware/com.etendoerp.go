@@ -192,6 +192,63 @@ public class BatchServiceTest {
     }
   }
 
+  /**
+   * ETP-4254: {@code /batch} (and MCP {@code neo_batch}, which shares
+   * {@code BatchService#createRecord}) enters the CRUD pipeline at
+   * {@code NeoCrudHandler#handleDefault} — i.e. AFTER the method-flag gate in
+   * {@code handleWindowEntityCrud}. Before the fix a read-only entity (every mutation flag
+   * off, e.g. the SII/VeriFactu monitor logs) rejected a direct POST with {@code 405} while
+   * still accepting the very same create when smuggled inside a batch operation.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  public void executeBatchRefusesCreateOnReadOnlyEntity() throws Exception {
+    BatchService service = BatchService.forBatchOnly();
+    JSONArray ops = new JSONArray();
+
+    JSONObject op = new JSONObject();
+    op.put("id", "op1");
+    op.put("spec", "monitor-verifactu");
+    op.put("entity", "header");
+    op.put("body", new JSONObject());
+    ops.put(op);
+
+    OBDal obDal = mock(OBDal.class);
+    SFSpec spec = mock(SFSpec.class);
+    when(spec.getId()).thenReturn("spec-monitor");
+
+    // GET-only entity: this is what ETP-4254 configures on a monitor/log window.
+    SFEntity entity = mock(SFEntity.class);
+    when(entity.getName()).thenReturn("header");
+    when(entity.getADTab()).thenReturn(mock(Tab.class));
+    when(entity.isGet()).thenReturn(true);
+    when(entity.isGetByID()).thenReturn(true);
+    when(entity.isPost()).thenReturn(false);
+    when(entity.isPut()).thenReturn(false);
+    when(entity.isPatch()).thenReturn(false);
+    when(entity.isDelete()).thenReturn(false);
+
+    org.openbravo.dal.service.OBCriteria<SFEntity> criteria =
+        mock(org.openbravo.dal.service.OBCriteria.class);
+    when(obDal.createCriteria(SFEntity.class)).thenReturn(criteria);
+    when(criteria.list()).thenReturn(java.util.List.of(entity));
+
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+         MockedStatic<NeoServletSupport> supportMock = mockStatic(NeoServletSupport.class)) {
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      supportMock.when(() -> NeoServletSupport.findSpec("monitor-verifactu")).thenReturn(spec);
+
+      JSONObject result = service.executeBatch(ops);
+
+      assertFalse(result.getBoolean("committed"));
+      JSONObject error = result.optJSONObject("error");
+      assertNotNull(error);
+      assertEquals(405, error.getInt("status"));
+      // The detail carries the canonical REST wording produced by NeoMethodPolicy.
+      assertTrue(error.toString().contains("POST not enabled for header"));
+    }
+  }
+
   @Test
   public void handleRequiresServletBoundConstructor() throws Exception {
     BatchService service = BatchService.forBatchOnly();

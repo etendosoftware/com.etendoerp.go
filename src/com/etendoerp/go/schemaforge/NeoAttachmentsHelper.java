@@ -384,7 +384,7 @@ public final class NeoAttachmentsHelper {
    * @throws OBException when no active table with that physical name exists
    */
   @SuppressWarnings("unchecked")
-  private static String resolveTableId(String tableName) {
+  static String resolveTableId(String tableName) {
     String key = tableName.toLowerCase(Locale.ROOT);
     String cached = TABLE_ID_CACHE.get(key);
     if (cached != null) {
@@ -413,7 +413,7 @@ public final class NeoAttachmentsHelper {
    * @param tabIdHint optional client-provided tab id
    * @return the AD_Tab.id, or {@code null} if no suitable tab exists
    */
-  private static String resolveTabId(String tableId, String tabIdHint) {
+  static String resolveTabId(String tableId, String tabIdHint) {
     if (StringUtils.isNotBlank(tabIdHint)) {
       return tabIdHint;
     }
