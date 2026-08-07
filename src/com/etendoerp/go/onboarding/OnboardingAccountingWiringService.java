@@ -193,6 +193,72 @@ public class OnboardingAccountingWiringService extends OnboardingContextSupport 
   }
 
   /**
+   * Patches any {@code C_BP_Group_Acct} row still missing one of the 5 columns that NEITHER the
+   * core {@code c_bp_group_trg()} trigger NOR {@link #BP_GROUP_ACCT_SQL} populate (ETP-4720):
+   * {@code WriteOff_Rev_Acct}, {@code DoubtfulDebt_Acct}, {@code BadDebtExpense_Acct},
+   * {@code BadDebtRevenue_Acct}, {@code AllowanceForDoubtful_Acct}. This is the preventive twin of
+   * the corrective {@code R21-bp-group-acct-remaining-columns.sql} data-fix -- same 5-column set,
+   * same {@code COALESCE}-guarded UPDATE shape, kept in lockstep with it.
+   *
+   * <p>Root cause (verified via {@code pg_get_functiondef} on the trigger and by reading
+   * {@link #BP_GROUP_ACCT_SQL}'s own column list — see the ETP-4720 finding in
+   * {@code docs/etendo-ad/tenant-remediation-knowledge.md}): {@code C_BP_GROUP} is always inserted
+   * (firing the trigger) before this class ever runs, so the trigger wins the INSERT race every
+   * time and {@link #BP_GROUP_ACCT_SQL}'s own {@code NOT EXISTS} guard never gets a chance to
+   * contribute these 5 columns either — whichever path "wins," the row is missing the same
+   * columns. A genuine {@code UPDATE}-style patch is required, not another guarded {@code INSERT}.
+   *
+   * <p>Wired as the LAST provisioning step of the onboarding chain (right before the data-fix
+   * baseline is stamped), so it runs after every {@code C_BP_Group} row for the tenant has already
+   * been created and after {@code C_AcctSchema_Default} has its own values (both dataset-provisioned
+   * in step 1). A THIRD entry point on this class, after {@link #wire} (right after the dataset
+   * import) and {@link #wireBusinessPartnerAccounts} (after the default customer exists) — unlike
+   * those two, this one needs neither a fresh business partner nor a specific schema id: it patches
+   * every schema the tenant has via one client-scoped statement, exactly like its corrective twin.
+   *
+   * <p>Idempotent: {@code COALESCE} only ever fills a NULL, never overwrites an existing value, and
+   * the {@code WHERE} clause skips a row that has nothing left to fix.
+   *
+   * @param clientId    target client identifier
+   * @param orgId       target organization identifier
+   * @param adminUserId administrator user for DAL context
+   * @param adminRoleId administrator role for DAL context
+   */
+  public void patchBpGroupAcctMissingColumns(String clientId, String orgId, String adminUserId,
+      String adminRoleId) {
+    validateContext(clientId, orgId, adminUserId, adminRoleId);
+    OBContext previousContext = captureCurrentContext();
+    applyExecutionContext(adminUserId, adminRoleId, clientId, orgId);
+    try {
+      enterAdminMode();
+      try {
+        int rows = runBpGroupAcctMissingColumnsPatch(clientId);
+        if (rows > 0 && log.isDebugEnabled()) {
+          log.debug("Patched {} C_BP_Group_Acct row(s) missing bad-debt/write-off columns for"
+              + " client {}", rows, clientId);
+        }
+        flushChanges();
+      } finally {
+        exitAdminMode();
+      }
+    } finally {
+      restoreExecutionContext(previousContext);
+    }
+  }
+
+  /**
+   * Runs {@link #BP_GROUP_ACCT_MISSING_COLUMNS_PATCH_SQL} for {@code clientId}; returns the number
+   * of rows patched. Extracted as its own protected seam (mirroring {@link #runEntityAcctInsert})
+   * so unit tests can verify the call without a live Hibernate session.
+   */
+  protected int runBpGroupAcctMissingColumnsPatch(String clientId) {
+    return OBDal.getInstance().getSession()
+        .createNativeQuery(BP_GROUP_ACCT_MISSING_COLUMNS_PATCH_SQL)
+        .setParameter(PARAM_CLIENT_ID, clientId)
+        .executeUpdate();
+  }
+
+  /**
    * Resolves the accounting schema imported for the client. GOClient ships exactly one schema; if
    * more than one is present the first by id is used and a warning is logged.
    */
@@ -1009,6 +1075,36 @@ public class OnboardingAccountingWiringService extends OnboardingContextSupport 
       + "WHERE w.ad_client_id = :clientId AND d.c_acctschema_id = :schemaId "
       + "  AND NOT EXISTS (SELECT 1 FROM m_warehouse_acct a"
       + "    WHERE a.m_warehouse_id = w.m_warehouse_id AND a.c_acctschema_id = :schemaId)";
+
+  // ETP-4720: patches the 5 C_BP_Group_Acct columns neither c_bp_group_trg() (core trigger) nor
+  // BP_GROUP_ACCT_SQL above ever populate — WriteOff_Rev_Acct, DoubtfulDebt_Acct,
+  // BadDebtExpense_Acct, BadDebtRevenue_Acct, AllowanceForDoubtful_Acct. See
+  // #patchBpGroupAcctMissingColumns for the full root-cause explanation. Preventive twin of the
+  // corrective R21-bp-group-acct-remaining-columns.sql data-fix — keep both in lockstep. Not scoped
+  // to a single schema (unlike the other *_ACCT_SQL statements above): joins
+  // C_BP_GROUP -> C_BP_GROUP_ACCT -> C_ACCTSCHEMA_DEFAULT directly by :clientId, covering every
+  // schema the tenant has, exactly like its corrective twin. COALESCE makes each column write
+  // idempotent on its own (never overwrites a populated value); the WHERE clause mirrors R21's
+  // corrective @check so a row with nothing left to fix is never touched.
+  private static final String BP_GROUP_ACCT_MISSING_COLUMNS_PATCH_SQL =
+      "UPDATE c_bp_group_acct a"
+      + " SET writeoff_rev_acct = COALESCE(a.writeoff_rev_acct, d.writeoff_rev_acct),"
+      + "     doubtfuldebt_acct = COALESCE(a.doubtfuldebt_acct, d.doubtfuldebt_acct),"
+      + "     baddebtexpense_acct = COALESCE(a.baddebtexpense_acct, d.baddebtexpense_acct),"
+      + "     baddebtrevenue_acct = COALESCE(a.baddebtrevenue_acct, d.baddebtrevenue_acct),"
+      + "     allowancefordoubtful_acct = COALESCE(a.allowancefordoubtful_acct, d.allowancefordoubtful_acct),"
+      + "     updated = now(), updatedby = '0'"
+      + " FROM c_bp_group g, c_acctschema_default d"
+      + " WHERE a.c_bp_group_id = g.c_bp_group_id"
+      + "   AND a.c_acctschema_id = d.c_acctschema_id"
+      + "   AND g.ad_client_id = :clientId"
+      + "   AND ("
+      + "     (a.writeoff_rev_acct IS NULL AND d.writeoff_rev_acct IS NOT NULL) OR"
+      + "     (a.doubtfuldebt_acct IS NULL AND d.doubtfuldebt_acct IS NOT NULL) OR"
+      + "     (a.baddebtexpense_acct IS NULL AND d.baddebtexpense_acct IS NOT NULL) OR"
+      + "     (a.baddebtrevenue_acct IS NULL AND d.baddebtrevenue_acct IS NOT NULL) OR"
+      + "     (a.allowancefordoubtful_acct IS NULL AND d.allowancefordoubtful_acct IS NOT NULL)"
+      + "   )";
 
   protected Tree resolveTenantElementValueTree(Client client) {
     OBCriteria<Tree> criteria = OBDal.getInstance().createCriteria(Tree.class);
