@@ -124,10 +124,12 @@ public class SurveyConfigServlet extends HttpBaseServlet {
   private static final String FIELD_TAGS = "tags";
   private static final String FIELD_STATUS = "status";
   private static final String RESPONSE_PATH = "/response";
+  private static final String ALLOWED_METHODS = "GET, POST, OPTIONS";
+  private static final String ALLOWED_HEADERS = "Authorization, Content-Type";
 
   @Override
   public void doGet(HttpServletRequest request, HttpServletResponse response) throws IOException {
-    CorsUtils.apply(request, response, "GET, POST, OPTIONS", "Authorization, Content-Type", null, false);
+    CorsUtils.apply(request, response, ALLOWED_METHODS, ALLOWED_HEADERS, null, false);
 
     try {
       NeoServletSupport.authenticateJwt(request);
@@ -159,7 +161,7 @@ public class SurveyConfigServlet extends HttpBaseServlet {
 
   @Override
   public void doPost(HttpServletRequest request, HttpServletResponse response) throws IOException {
-    CorsUtils.apply(request, response, "GET, POST, OPTIONS", "Authorization, Content-Type", null, false);
+    CorsUtils.apply(request, response, ALLOWED_METHODS, ALLOWED_HEADERS, null, false);
 
     String pathInfo = request.getPathInfo();
     if (pathInfo == null || !(RESPONSE_PATH.equals(pathInfo) || (RESPONSE_PATH + "/").equals(pathInfo))) {
@@ -185,7 +187,7 @@ public class SurveyConfigServlet extends HttpBaseServlet {
 
   @Override
   public void doOptions(HttpServletRequest request, HttpServletResponse response) throws IOException {
-    CorsUtils.apply(request, response, "GET, POST, OPTIONS", "Authorization, Content-Type", null, false);
+    CorsUtils.apply(request, response, ALLOWED_METHODS, ALLOWED_HEADERS, null, false);
     response.setStatus(HttpServletResponse.SC_NO_CONTENT);
   }
 
