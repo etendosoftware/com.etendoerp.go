@@ -86,7 +86,22 @@ public class OnboardingBaselineService {
    * Use the exact UTC timestamp prefix of the last incorporated .sql file, e.g.:
    * {@code "20260617T120000Z"} matches {@code 20260617T120000Z__R7-tax-accounts.sql}.</p>
    *
-   * Current watermark: R21 bp-group-acct-remaining-columns (2026-08-05).
+   * Current watermark: R22 fin-account-warehouse-acct (2026-08-05).
+   *
+   * <p><b>Note (2026-08-05, ETP-4743):</b> bumped from R21's {@code 2026-08-05T12:00:00Z} (see
+   * the ETP-4720 note below) to R22's {@code 2026-08-05T14:00:00Z}, per this merge block's
+   * resolution of the conflict the ETP-4743 branch itself anticipated on this line. Gap A2c —
+   * {@code FIN_FINANCIAL_ACCOUNT} and {@code M_WAREHOUSE} are bulk-imported by the dataset
+   * importer with triggers disabled, so neither ever got its {@code *_Acct} row via the standard
+   * core AFTER-INSERT triggers. ETP-4565 already shipped the preventive fix for this
+   * ({@code FIN_FINANCIAL_ACCOUNT_ACCT_SQL} / {@code WAREHOUSE_ACCT_SQL} in
+   * {@code OnboardingAccountingWiringService}, called from {@code provisionEntityPostingAccounts})
+   * but deliberately did NOT bump this constant at the time, since the corrective {@code .sql}
+   * twin did not exist yet (bumping the CUT without its matching fix already in the repo would
+   * silently skip the gap for new tenants). ETP-4743 adds that corrective fix
+   * ({@code R22-fin-account-warehouse-acct}) for already-onboarded tenants, so this bump now
+   * closes the loop: new tenants are already provisioned correctly by the live ETP-4565 code, and
+   * the runner correctly skips R22 for them via this watermark.</p>
    *
    * <p><b>Note (2026-07-06):</b> the sibling in-flight branch {@code feat/bp-category-preventive}
    * (ETP-4402) independently bumps this same constant to {@code 2026-07-01T12:00:00Z} for its
@@ -144,7 +159,7 @@ public class OnboardingBaselineService {
    * ticket's scope); R21's own {@code @check} already no-ops on them today and will self-heal once
    * that separate gap closes, with no onboarding change needed here.</p>
    */
-  private static final Instant ONBOARDING_PROVISIONED_THROUGH = Instant.parse("2026-08-05T12:00:00Z");
+  private static final Instant ONBOARDING_PROVISIONED_THROUGH = Instant.parse("2026-08-05T14:00:00Z");
 
   private static final String SQL_INSERT_BASELINE = ""
       + "INSERT INTO etgo_data_fix_history ("
