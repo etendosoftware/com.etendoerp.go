@@ -1133,6 +1133,19 @@ class McpToolRouterSupportTest {
     }
 
     @Test
+    void coercesLowercaseYStringToTrue() throws Exception {
+      // ETP-4793: pins the shared NeoBooleanFormat behaviour on both write surfaces — the REST
+      // coercer used to reject a lowercase "y" that this one accepted.
+      Property prop = mock(Property.class);
+      when(prop.getPrimitiveObjectType()).thenReturn((Class) Boolean.class);
+      JSONObject body = new JSONObject();
+      body.put("active", "y");
+
+      McpToolRouterSupport.coercePrimitiveFieldValue(body, "active", prop, log);
+      assertTrue(body.getBoolean("active"));
+    }
+
+    @Test
     void coercesNStringToFalse() throws Exception {
       Property prop = mock(Property.class);
       when(prop.getPrimitiveObjectType()).thenReturn((Class) Boolean.class);

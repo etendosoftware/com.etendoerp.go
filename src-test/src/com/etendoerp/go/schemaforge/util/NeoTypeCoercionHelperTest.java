@@ -155,6 +155,22 @@ class NeoTypeCoercionHelperTest {
     }
 
     @Test
+    void coercesBooleanCaseInsensitively() {
+      // ETP-4793: this path used to require an uppercase "Y" while the MCP coercer accepted "y",
+      // so the same payload coerced differently depending on which surface it arrived through.
+      // Both now share NeoBooleanFormat.
+      Property prop = mock(Property.class);
+      when(prop.isPrimitive()).thenReturn(true);
+      when(prop.getPrimitiveObjectType()).thenReturn((Class) Boolean.class);
+      when(entity.getProperty("active")).thenReturn(prop);
+
+      Map<String, Object> coerced = new HashMap<>();
+      NeoTypeCoercionHelper.coerceField(entity, "active", "y", coerced);
+
+      assertEquals(true, coerced.get("active"));
+    }
+
+    @Test
     void skipsNonPrimitiveProperty() {
       Property prop = mock(Property.class);
       when(prop.isPrimitive()).thenReturn(false);

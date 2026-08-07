@@ -309,6 +309,66 @@ Three deliberate constraints:
 Full investigation, including the corrupt rows this found in a live database:
 `docs/mcp-evaluation/imps/IMP-16.md` in the `schema_forge` repo.
 
+#### 4.3.2 Boolean format contract (ETP-4793)
+
+**NEO speaks real JSON booleans in both directions.** Etendo stores booleans as `char(1) 'Y'/'N'`,
+and the legacy machinery that feeds `/defaults` — AD_Column default expressions, callout responses,
+combo option values — hands those raw strings straight through. A response that mixes both shapes
+breaks any consumer that trusts the declared type: in JavaScript the string `"N"` is **truthy**, so
+an agent reading `{"printDiscount": "N"}` concludes that discount printing is on.
+
+This was observed as a **per-producer** inconsistency, not a per-spec one — which is why it looked
+so arbitrary. On the same `c_invoice` columns:
+
+| Field | `sales-invoice/header` | `purchase-invoice/header` |
+|---|---|---|
+| `printDiscount` | `true` | `"Y"` |
+| `etvfacSentToVerifac` | `"N"` | `false` |
+| `etvfacSimpinvart7273` | `false` | `"N"` |
+| `etvfacInvNoIDArt61d` | `false` | `"N"` |
+
+The direction **inverts** between the two specs. The cause is that `/defaults` is built by five
+producers and only one of them coerced: `NeoDefaultsService.coerceBooleanDefault` was reachable
+from pass 1 alone, while the callout writeback and combo preselection in
+`NeoDefaultsCascadeHelper`, `NeoHiddenMandatoryDefaultsResolver`, and anything a handler injects
+all wrote their value directly. Which fields a callout touches differs per window, so which shape a
+field ends up with differs per window too.
+
+`NeoBooleanFormat` (`schemaforge/util/`) is the single definition, applied at three points — the
+same shape as the date fix above:
+
+| Point | Class | Effect |
+|---|---|---|
+| Read — `/defaults` response | `NeoDefaultsService.canonicalizeBooleanDefaults` | post-pass: every boolean-valued default leaves as a JSON boolean |
+| Write — REST | `NeoTypeCoercionHelper.coerceField` | Boolean branch |
+| Write — MCP | `McpToolRouterSupport.coercePrimitiveFieldValue` | same branch, mirrored |
+
+**Eligibility** is `NeoBooleanFormat.isBooleanProperty(Property)` — a primitive property whose Java
+type is `Boolean`.
+
+Three deliberate constraints:
+
+- **Read and write parse differently, on purpose.** `toCanonical` is strict: it accepts `Y`/`N`/
+  `true`/`false` (case-insensitive, trimmed) and returns `null` for anything else, so an
+  unrecognised value is left **verbatim** and logged at `WARN`. Turning an unknown string into
+  `false` would state something the ERP never stated. `toLenientBoolean`, used on the write path,
+  keeps the pre-existing behaviour where anything not recognised as true becomes `false` —
+  tightening that would reject payloads agents send today.
+- **Case sensitivity is no longer surface-dependent.** The two write coercers disagreed: MCP
+  accepted a lowercase `"y"`, REST did not, so the same payload coerced differently depending on how
+  it arrived. Both now share one parse.
+- **The callout boundary is unchanged.** The read-path normalization is a post-pass that runs
+  *after* the cascade, so legacy callouts receive exactly what they received before. The pass-1
+  `coerceBooleanDefault` is kept for the same reason — it runs before the cascade and its timing is
+  part of today's callout input.
+
+The React front end is **not** affected and needs no change: every boolean it reads from the server
+already goes through an explicit `=== true || === 'Y' || === 'true'` guard (`EntityForm.jsx`,
+`InlineLinesPanel.jsx`, `DataTable.jsx`, `listModalCells.jsx`, and ~26 more sites), so `"N"` was
+never misread as checked. Those guards exist *because* the backend did not guarantee the type;
+consolidating them behind a single helper is a follow-up, not part of this change — React still
+talks to endpoints that do not run this post-pass.
+
 ### 4.4 Selectors (FK Dropdowns)
 
 The selector service resolves foreign key references and provides searchable dropdown values.

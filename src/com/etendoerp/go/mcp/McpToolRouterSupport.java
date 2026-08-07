@@ -42,6 +42,7 @@ import com.etendoerp.go.schemaforge.NeoActionSurface;
 import com.etendoerp.go.schemaforge.NeoResponse;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFSpec;
+import com.etendoerp.go.schemaforge.util.NeoBooleanFormat;
 import com.etendoerp.go.schemaforge.util.NeoDateFormat;
 import com.etendoerp.go.schemaforge.util.NeoMethodPolicy;
 import com.etendoerp.go.schemaforge.util.NeoReportCallability;
@@ -591,8 +592,10 @@ final class McpToolRouterSupport {
             Long.parseLong(strVal.contains(".") ? strVal.substring(0, strVal.indexOf('.')) : strVal));
       } else if (type == java.math.BigDecimal.class) {
         body.put(key, new java.math.BigDecimal(strVal));
-      } else if (type == Boolean.class) {
-        body.put(key, "Y".equalsIgnoreCase(strVal) || "true".equalsIgnoreCase(strVal));
+      } else if (type != null && Boolean.class.isAssignableFrom(type)) {
+        // ETP-4793: shared with the REST coercer via NeoBooleanFormat. The two used to differ
+        // on case sensitivity ("y" was accepted here and rejected there).
+        body.put(key, NeoBooleanFormat.toLenientBoolean(strVal));
       } else if (type != null && java.util.Date.class.isAssignableFrom(type)) {
         coerceDateFieldValue(body, key, prop, strVal, log);
       }

@@ -36,6 +36,7 @@ import org.openbravo.service.db.DalConnectionProvider;
 
 import com.etendoerp.go.schemaforge.data.SFField;
 import com.etendoerp.go.schemaforge.data.SFSpec;
+import com.etendoerp.go.schemaforge.util.NeoBooleanFormat;
 import com.etendoerp.go.schemaforge.util.NeoDateFormat;
 import com.etendoerp.sequences.SequenceUtils;
 
@@ -233,6 +234,15 @@ public class NeoDefaultsService {
         // back to the UI pattern, and is a no-op on values already in it).
         canonicalizeDateDefaults(defaults, dalEntity);
 
+        // ETP-4793: same treatment for boolean-valued defaults. Etendo stores booleans as
+        // char(1) 'Y'/'N' and several producers below write that raw string into `defaults`
+        // (the callout writeback and combo preselection in NeoDefaultsCascadeHelper, the
+        // hidden-mandatory resolver), bypassing coerceBooleanDefault — which is only reached
+        // from pass 1. The result was a response that mixed JSON booleans and "Y"/"N" strings
+        // for the same column depending on the window. Normalizing here, after the cascade,
+        // for the same reason as the dates: the callouts must keep seeing what they see today.
+        canonicalizeBooleanDefaults(defaults, dalEntity);
+
         // Build response
         JSONObject response = new JSONObject();
         response.put("defaults", defaults);
@@ -350,26 +360,93 @@ public class NeoDefaultsService {
   }
 
   /**
+   * Rewrites every boolean-valued default that is still a string into a real JSON boolean
+   * (ETP-4793).
+   *
+   * <p>Runs as a post-pass over the finished {@code defaults} object for the same reason
+   * {@link #canonicalizeDateDefaults(JSONObject, Entity)} does: the per-field coercion at
+   * {@link #coerceBooleanDefault(Entity, String, Object)} is only reachable from pass 1, so
+   * every other producer — the callout writeback and combo preselection inside
+   * {@code NeoDefaultsCascadeHelper}, {@code NeoHiddenMandatoryDefaultsResolver}, anything a
+   * handler injects — bypassed it and left {@code "Y"}/{@code "N"} in the response. Which
+   * fields a callout touches differs per window, which is why the same column came back as a
+   * boolean on one spec and as a string on another.
+   *
+   * <p>Placement is deliberate: after the cascade, so the values the legacy callouts receive as
+   * input stay byte-for-byte what they are today.
+   *
+   * <p>A value whose shape {@link NeoBooleanFormat#toCanonical(String)} does not recognise is
+   * left untouched and logged at WARN. Defaulting it to {@code false} would state something the
+   * ERP never said; an unrecognised shape is a signal that this needs a new case.
+   *
+   * @param defaults  the resolved defaults object, mutated in place
+   * @param dalEntity the DAL entity used to tell boolean properties from everything else; a
+   *                  {@code null} entity makes this a no-op
+   */
+  private static void canonicalizeBooleanDefaults(JSONObject defaults, Entity dalEntity) {
+    if (defaults == null || dalEntity == null) {
+      return;
+    }
+    Iterator<?> keys = defaults.keys();
+    Map<String, Boolean> rewritten = new HashMap<>();
+    while (keys.hasNext()) {
+      String key = String.valueOf(keys.next());
+      Object value = defaults.opt(key);
+      if (!(value instanceof String) || ((String) value).isEmpty()) {
+        continue;
+      }
+      try {
+        if (!NeoBooleanFormat.isBooleanProperty(dalEntity.getProperty(key))) {
+          continue;
+        }
+        String raw = (String) value;
+        Boolean canonical = NeoBooleanFormat.toCanonical(raw);
+        if (canonical == null) {
+          log.warn("[NEO] Unrecognized boolean format for default '{}' on {}: '{}' left as-is",
+              key, dalEntity.getName(), raw);
+          continue;
+        }
+        rewritten.put(key, canonical);
+      } catch (Exception e) {
+        // getProperty throws for keys that are not properties at all ($_identifier companions).
+        log.debug("Skipping boolean canonicalization for key {}: {}", key, e.getMessage());
+      }
+    }
+    for (Map.Entry<String, Boolean> entry : rewritten.entrySet()) {
+      try {
+        defaults.put(entry.getKey(), entry.getValue().booleanValue());
+      } catch (JSONException e) {
+        log.debug("Could not store canonical boolean for {}: {}", entry.getKey(), e.getMessage());
+      }
+    }
+    if (!rewritten.isEmpty()) {
+      log.info("[NEO] canonicalizeBooleanDefaults: normalized {} boolean fields on {}: {}",
+          rewritten.size(), dalEntity.getName(), rewritten.keySet());
+    }
+  }
+
+  /**
    * If {@code value} is the string {@code "Y"} or {@code "N"} and the DAL property for
    * {@code propertyName} is a {@link Boolean} primitive type, returns the corresponding
    * {@code Boolean} ({@code true} for "Y", {@code false} for "N"/"anything else").
    * In all other cases the original value is returned unchanged.
    *
    * <p>This mirrors the coercion applied on the create path by
-   * {@code NeoTypeCoercionHelper.coerceField} (Boolean branch, line ~157).
+   * {@code NeoTypeCoercionHelper.coerceField} (Boolean branch) — both now share the one
+   * definition in {@link NeoBooleanFormat}.
+   *
+   * <p>Kept as a pass-1 step even though
+   * {@link #canonicalizeBooleanDefaults(JSONObject, Entity)} would catch the same values later:
+   * coercing before the cascade means the callouts receive the value in the shape they have
+   * always received it. The post-pass is what covers the producers this never reaches.
    */
   private static Object coerceBooleanDefault(Entity dalEntity, String propertyName, Object value) {
     if (dalEntity == null || !(value instanceof String)) {
       return value;
     }
     try {
-      Property prop = dalEntity.getProperty(propertyName);
-      if (prop != null && prop.isPrimitive()) {
-        Class<?> type = prop.getPrimitiveObjectType();
-        if (type != null && Boolean.class.isAssignableFrom(type)) {
-          String strVal = (String) value;
-          return "Y".equals(strVal) || "true".equalsIgnoreCase(strVal);
-        }
+      if (NeoBooleanFormat.isBooleanProperty(dalEntity.getProperty(propertyName))) {
+        return NeoBooleanFormat.toLenientBoolean((String) value);
       }
     } catch (Exception e) {
       log.debug("Could not coerce boolean default for property '{}': {}", propertyName, e.getMessage());

@@ -168,7 +168,9 @@ public final class NeoTypeCoercionHelper {
       } else if (Integer.class.isAssignableFrom(type)) {
         coerced.put(key, Integer.parseInt(strVal));
       } else if (Boolean.class.isAssignableFrom(type)) {
-        coerced.put(key, "Y".equals(strVal) || "true".equalsIgnoreCase(strVal));
+        // ETP-4793: shared with the MCP coercer via NeoBooleanFormat. The two used to differ
+        // on case sensitivity ("y" was rejected here and accepted there).
+        coerced.put(key, NeoBooleanFormat.toLenientBoolean(strVal));
       } else if (java.util.Date.class.isAssignableFrom(type)) {
         // ETP-4793 / IMP-16: the DAL parses dates with a lenient SimpleDateFormat
         // (JsonUtils.createDateFormat), so a dd-MM-yyyy value is silently reinterpreted

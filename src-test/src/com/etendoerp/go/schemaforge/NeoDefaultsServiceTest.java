@@ -1998,6 +1998,159 @@ public class NeoDefaultsServiceTest {
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
+  // canonicalizeBooleanDefaults — the post-pass (ETP-4793)
+  //
+  // coerceBooleanDefault above is only reachable from pass 1, so every other producer that
+  // writes into `defaults` (the callout writeback and combo preselection in
+  // NeoDefaultsCascadeHelper, NeoHiddenMandatoryDefaultsResolver, handler-injected values) left
+  // raw "Y"/"N" strings in the response. That is why the same c_invoice column came back as a
+  // boolean on sales-invoice and as a string on purchase-invoice, with the direction inverted
+  // per field. These tests pin the post-pass that closes that hole.
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  /** Wires {@code entity.getProperty(name)} to a primitive property of the given Java type. */
+  private static Entity entityWithPrimitiveProperty(String name, Class<?> type) {
+    Entity entity = mock(Entity.class);
+    when(entity.getName()).thenReturn("Invoice");
+    Property prop = mock(Property.class);
+    when(prop.isPrimitive()).thenReturn(true);
+    doReturn(type).when(prop).getPrimitiveObjectType();
+    when(entity.getProperty(name)).thenReturn(prop);
+    return entity;
+  }
+
+  private static void invokeCanonicalizeBooleanDefaults(JSONObject defaults, Entity entity)
+      throws Exception {
+    invokePrivate("canonicalizeBooleanDefaults",
+        new Class<?>[]{ JSONObject.class, Entity.class }, defaults, entity);
+  }
+
+  @Test
+  public void testCanonicalizeBooleanDefaultsRewritesStorageEncoding() throws Exception {
+    JSONObject defaults = new JSONObject();
+    defaults.put("etvfacSentToVerifac", "N");
+    Entity entity = entityWithPrimitiveProperty("etvfacSentToVerifac", Boolean.class);
+
+    invokeCanonicalizeBooleanDefaults(defaults, entity);
+
+    // Not just "falsy": the value must be a JSON boolean, because "N" is truthy in JavaScript.
+    assertEquals(Boolean.FALSE, defaults.get("etvfacSentToVerifac"));
+  }
+
+  @Test
+  public void testCanonicalizeBooleanDefaultsRewritesYToTrue() throws Exception {
+    JSONObject defaults = new JSONObject();
+    defaults.put("printDiscount", "Y");
+    Entity entity = entityWithPrimitiveProperty("printDiscount", Boolean.class);
+
+    invokeCanonicalizeBooleanDefaults(defaults, entity);
+
+    assertEquals(Boolean.TRUE, defaults.get("printDiscount"));
+  }
+
+  @Test
+  public void testCanonicalizeBooleanDefaultsLeavesAlreadyBooleanValueUntouched() throws Exception {
+    JSONObject defaults = new JSONObject();
+    defaults.put("printDiscount", true);
+    Entity entity = entityWithPrimitiveProperty("printDiscount", Boolean.class);
+
+    invokeCanonicalizeBooleanDefaults(defaults, entity);
+
+    assertEquals(Boolean.TRUE, defaults.get("printDiscount"));
+  }
+
+  @Test
+  public void testCanonicalizeBooleanDefaultsLeavesNonBooleanPropertyUntouched() throws Exception {
+    JSONObject defaults = new JSONObject();
+    defaults.put("documentNo", "Y");
+    Entity entity = entityWithPrimitiveProperty("documentNo", String.class);
+
+    invokeCanonicalizeBooleanDefaults(defaults, entity);
+
+    assertEquals("Y", defaults.get("documentNo"));
+  }
+
+  @Test
+  public void testCanonicalizeBooleanDefaultsLeavesUnrecognizedShapeVerbatim() throws Exception {
+    JSONObject defaults = new JSONObject();
+    defaults.put("printDiscount", "banana");
+    Entity entity = entityWithPrimitiveProperty("printDiscount", Boolean.class);
+
+    invokeCanonicalizeBooleanDefaults(defaults, entity);
+
+    // Guessing false would state something the ERP never stated — the value passes through.
+    assertEquals("banana", defaults.get("printDiscount"));
+  }
+
+  @Test
+  public void testCanonicalizeBooleanDefaultsSkipsEmptyString() throws Exception {
+    JSONObject defaults = new JSONObject();
+    defaults.put("printDiscount", "");
+    Entity entity = entityWithPrimitiveProperty("printDiscount", Boolean.class);
+
+    invokeCanonicalizeBooleanDefaults(defaults, entity);
+
+    assertEquals("", defaults.get("printDiscount"));
+  }
+
+  @Test
+  public void testCanonicalizeBooleanDefaultsSurvivesGetPropertyThrowing() throws Exception {
+    // $_identifier companion keys are not properties at all; getProperty throws for them.
+    JSONObject defaults = new JSONObject();
+    defaults.put("businessPartner$_identifier", "Y");
+    Entity entity = mock(Entity.class);
+    when(entity.getName()).thenReturn("Invoice");
+    when(entity.getProperty("businessPartner$_identifier"))
+        .thenThrow(new RuntimeException("not a property"));
+
+    invokeCanonicalizeBooleanDefaults(defaults, entity);
+
+    assertEquals("Y", defaults.get("businessPartner$_identifier"));
+  }
+
+  @Test
+  public void testCanonicalizeBooleanDefaultsNullArgumentsAreNoOp() throws Exception {
+    // Neither call may throw; a null entity means "we cannot tell booleans apart", so do nothing.
+    invokeCanonicalizeBooleanDefaults(null, mock(Entity.class));
+    JSONObject defaults = new JSONObject();
+    defaults.put("printDiscount", "Y");
+    invokeCanonicalizeBooleanDefaults(defaults, null);
+    assertEquals("Y", defaults.get("printDiscount"));
+  }
+
+  @Test
+  public void testCanonicalizeBooleanDefaultsNormalizesMultipleFieldsIndependently()
+      throws Exception {
+    // The real defect: two boolean columns on the same entity, one already coerced by pass 1 and
+    // one left as a string by the cascade. Both must end up as JSON booleans.
+    JSONObject defaults = new JSONObject();
+    defaults.put("printDiscount", "Y");
+    defaults.put("etvfacSimpinvart7273", false);
+    defaults.put("etvfacInvNoIDArt61d", "N");
+    defaults.put("documentNo", "1000042");
+
+    Entity entity = mock(Entity.class);
+    when(entity.getName()).thenReturn("Invoice");
+    Property boolProp = mock(Property.class);
+    when(boolProp.isPrimitive()).thenReturn(true);
+    doReturn(Boolean.class).when(boolProp).getPrimitiveObjectType();
+    Property strProp = mock(Property.class);
+    when(strProp.isPrimitive()).thenReturn(true);
+    doReturn(String.class).when(strProp).getPrimitiveObjectType();
+    when(entity.getProperty("printDiscount")).thenReturn(boolProp);
+    when(entity.getProperty("etvfacSimpinvart7273")).thenReturn(boolProp);
+    when(entity.getProperty("etvfacInvNoIDArt61d")).thenReturn(boolProp);
+    when(entity.getProperty("documentNo")).thenReturn(strProp);
+
+    invokeCanonicalizeBooleanDefaults(defaults, entity);
+
+    assertEquals(Boolean.TRUE, defaults.get("printDiscount"));
+    assertEquals(Boolean.FALSE, defaults.get("etvfacSimpinvart7273"));
+    assertEquals(Boolean.FALSE, defaults.get("etvfacInvNoIDArt61d"));
+    assertEquals("1000042", defaults.get("documentNo"));
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
   // parseSQLExpression — via reflection
   // ═══════════════════════════════════════════════════════════════════════════
 
