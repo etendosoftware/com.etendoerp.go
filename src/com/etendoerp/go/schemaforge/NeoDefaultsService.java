@@ -179,6 +179,11 @@ public class NeoDefaultsService {
         String docTypeId = docTypeIds[1];
 
         for (SFField sfField : sequenceSFFields) {
+          // No null check on purpose: pass 1 only adds to sequenceSFFields AFTER its own
+          // `adColumn == null` guard, so every element here is known to have a column.
+          // The tenant does hold ETGO_SF_FIELD rows with a null AD_Column (105 legacy rows from
+          // 2026-06-17 — see IMP-11), so if the two passes are ever reordered or merged this
+          // dereference becomes a live NPE. Keep the guard in pass 1, or add one here.
           Column adColumn = sfField.getADColumn();
           String dbColumnName = adColumn.getDBColumnName();
           String propertyName = NeoDefaultsCascadeHelper.resolvePropertyName(dalEntity, dbColumnName);

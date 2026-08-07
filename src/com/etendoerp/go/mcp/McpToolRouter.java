@@ -1317,6 +1317,13 @@ public class McpToolRouter {
    * Callout cascade and session defaults return everything as strings, but
    * DefaultJsonDataService expects JSON numbers for Long/BigDecimal properties
    * and JSON booleans for Boolean properties.
+   *
+   * <p>Date-typed properties are not merely re-typed but <b>re-shaped</b> to the canonical
+   * ISO wire format (ETP-4793 / IMP-16). That branch is not cosmetic: the DAL parses dates
+   * leniently, so a {@code dd-MM-yyyy} value is silently reinterpreted rather than rejected
+   * and {@code "06-08-2026"} persists as year 0012. See
+   * {@code McpToolRouterSupport.coerceDateFieldValue} for why an unrecognised shape is passed
+   * through untouched instead of guessed at.
    */
   private void coerceFieldTypes(JSONObject body, Entity dalEntity) {
     if (body == null || dalEntity == null) {

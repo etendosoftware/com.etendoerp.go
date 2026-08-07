@@ -160,7 +160,7 @@ final class McpSchemaFieldBuilder {
         continue;
       }
       String colId = (String) adCol.getId();
-      String visibility = (String) sfField.get("visibility");
+      String visibility = sfField.getVisibility();
       if (visibility != null && !visibility.trim().isEmpty()) {
         visibilityByColumnId.put(colId, visibility.trim());
       }
