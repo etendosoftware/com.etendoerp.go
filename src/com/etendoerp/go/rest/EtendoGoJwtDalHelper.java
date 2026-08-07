@@ -35,6 +35,8 @@ import org.openbravo.model.common.enterprise.Organization;
 
 import com.etendoerp.go.payment.TenantPlanService;
 import com.etendoerp.go.schemaforge.data.Account;
+import com.auth0.jwt.interfaces.DecodedJWT;
+import com.smf.securewebservices.utils.SecureWebServicesUtils;
 
 final class EtendoGoJwtDalHelper {
 
@@ -90,6 +92,30 @@ final class EtendoGoJwtDalHelper {
     query.setFilterOnReadableClients(false);
     query.setFilterOnReadableOrganization(false);
     return query.uniqueResult();
+  }
+
+  /** Resolves either an account session token or the active environment JWT to its account. */
+  static Account findActiveAccountByBearerToken(String token) {
+    Account account = findActiveAccountByToken(token);
+    if (account != null || StringUtils.isBlank(token)) return account;
+    try {
+      DecodedJWT jwt = SecureWebServicesUtils.decodeToken(token);
+      String userId = jwt == null ? null : jwt.getClaim("user").asString();
+      User user = StringUtils.isBlank(userId) ? null : OBDal.getInstance().get(User.class, userId);
+      if (user == null || !Boolean.TRUE.equals(user.isActive())) {
+        return null;
+      }
+      String accountEmail = StringUtils.trimToNull(user.getEmail());
+      if (accountEmail == null) accountEmail = StringUtils.trimToNull(user.getUsername());
+      account = accountEmail == null ? null : findActiveAccountByEmail(accountEmail);
+      if (account == null && StringUtils.isNotBlank(user.getUsername())) {
+        account = findActiveAccountByEmail(user.getUsername());
+      }
+      return account != null && clientBelongsToAccountEmail(user.getClient().getId(), account.getEmail())
+          ? account : null;
+    } catch (Exception e) {
+      return null;
+    }
   }
 
   static Account findActiveAccountBySsoIdentity(String provider, String subject) {
@@ -263,7 +289,8 @@ final class EtendoGoJwtDalHelper {
   static boolean clientBelongsToAccountEmail(String clientId, String accountEmail) {
     OBQuery<User> query = OBDal.getInstance().createQuery(User.class,
         "as user where user.client.id = :" + PARAM_CLIENT_ID
-            + " and (user.username = :" + PARAM_ACCOUNT_EMAIL
+            + " and (user.email = :" + PARAM_ACCOUNT_EMAIL
+            + " or user.username = :" + PARAM_ACCOUNT_EMAIL
             + " or user.username like :" + PARAM_ACCOUNT_PREFIX + " escape '\\') "
             + "and user.active = true");
     query.setNamedParameter(PARAM_CLIENT_ID, clientId);
@@ -277,7 +304,8 @@ final class EtendoGoJwtDalHelper {
 
   static List<User> findEnvironmentUsersByAccountEmail(String accountEmail) {
     OBQuery<User> query = OBDal.getInstance().createQuery(User.class,
-        "as user where (user.username = :" + PARAM_ACCOUNT_EMAIL
+        "as user where (user.email = :" + PARAM_ACCOUNT_EMAIL
+            + " or user.username = :" + PARAM_ACCOUNT_EMAIL
             + " or user.username like :" + PARAM_ACCOUNT_PREFIX + " escape '\\') "
             + "and user.active = true and user.client.active = true and user.client.id <> '0' "
             + "order by user.client.creationDate, user.creationDate");

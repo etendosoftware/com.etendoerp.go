@@ -25,6 +25,7 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.security.SecureRandom;
 import java.util.Base64;
+import java.util.Comparator;
 import java.util.Date;
 import java.util.List;
 import java.util.Locale;
@@ -60,6 +61,10 @@ import com.etendoerp.go.featureflags.FeatureFlagContext;
 import com.etendoerp.go.featureflags.GoFeatureFlags;
 import com.etendoerp.go.payment.TenantPaywallService;
 import com.etendoerp.go.payment.TenantPlanService;
+import com.etendoerp.go.payment.HostedCheckoutService;
+import com.etendoerp.go.payment.CheckoutConfiguration;
+import com.etendoerp.go.payment.CheckoutPaymentRegistry;
+import com.etendoerp.go.payment.CheckoutWebhookVerifier;
 import com.etendoerp.go.onboarding.OnboardingBaselineService;
 import com.etendoerp.go.onboarding.OnboardingAccountingWiringService;
 import com.etendoerp.go.onboarding.OnboardingDatasetImportService;
@@ -205,6 +210,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       new OnboardingBankConnectionSyncService();
   TenantPaywallService tenantPaywallService = new TenantPaywallService();
   TenantPlanService tenantPlanService = new TenantPlanService();
+  HostedCheckoutService hostedCheckoutService = new HostedCheckoutService();
   private final TransactionalAuthEmailSender authEmailSender;
   private final EtendoGoSsoProviderRegistry ssoProviderRegistry;
 
@@ -251,6 +257,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       handleEnvironments(request, response);
     } else if (isPath(path, "/login")) {
       handleEnvironmentLogin(request, response);
+    } else if (path != null && path.startsWith("/checkout/sessions/")) {
+      handleCheckoutStatus(request, response);
     } else {
       writeError(response, HttpServletResponse.SC_NOT_FOUND, "Unknown endpoint: " + path);
     }
@@ -259,6 +267,10 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   @Override
   public void doPost(HttpServletRequest request, HttpServletResponse response) throws IOException {
     String path = request.getPathInfo();
+    if (isPath(path, "/checkout/webhook")) {
+      handleCheckoutWebhook(request, response);
+      return;
+    }
     String ssoProvider = extractSsoProvider(path);
     if (isPath(path, "/register")) {
       handleRegister(request, response);
@@ -276,8 +288,91 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       handleSaveOnboardingDraft(request, response);
     } else if (isPath(path, "/onboarding")) {
       handleOnboarding(request, response);
+    } else if (isPath(path, "/checkout/sessions")) {
+      handleCheckoutSession(request, response);
     } else {
       writeError(response, HttpServletResponse.SC_NOT_FOUND, "Unknown endpoint: " + path);
+    }
+  }
+
+  private void handleCheckoutSession(HttpServletRequest request, HttpServletResponse response)
+      throws IOException {
+    runWithAuthenticatedAccount(request, response, "checkout-session", account -> {
+      JSONObject body = readJsonBodyOrBadRequest(request, response);
+      if (body == null) return;
+      String clientName = body.optString(FIELD_CLIENT_NAME, "").trim();
+      if (clientName.isEmpty()) {
+        writeError(response, HttpServletResponse.SC_BAD_REQUEST, CODE_INVALID_REQUEST,
+            "clientName is required", "clientName is required");
+        return;
+      }
+      String requestOrigin = request.getHeader("Origin");
+      final String origin = StringUtils.isBlank(requestOrigin)
+          ? PublicUrlResolver.resolveAppBaseUrl(request) : requestOrigin;
+      try {
+        JSONObject result = hostedCheckoutService.createSession(account.getEmail(), clientName,
+            body.optString(FIELD_LANGUAGE, ""), body.optString("countryCode", ""), origin);
+        writeResponse(response, HttpServletResponse.SC_CREATED, result);
+      } catch (IllegalStateException e) {
+        writeError(response, HttpServletResponse.SC_SERVICE_UNAVAILABLE, "CHECKOUT_NOT_CONFIGURED",
+            "Checkout is not configured", "Checkout is not configured");
+      } catch (Exception e) {
+        log.error("Could not create hosted checkout session", e);
+        writeError(response, HttpServletResponse.SC_BAD_GATEWAY, "CHECKOUT_PROVIDER_ERROR",
+            "Unable to create checkout session", "Unable to create checkout session");
+      }
+    });
+  }
+
+  private void handleCheckoutStatus(HttpServletRequest request, HttpServletResponse response)
+      throws IOException {
+    String prefix = "/checkout/sessions/";
+    String path = request.getPathInfo();
+    String requestId = path != null && path.startsWith(prefix) ? path.substring(prefix.length()) : "";
+    runWithAuthenticatedAccount(request, response, "checkout-status", account -> {
+      CheckoutPaymentRegistry.Payment payment = CheckoutPaymentRegistry.find(requestId,
+          account.getEmail());
+      JSONObject result = new JSONObject();
+      result.put("requestId", requestId);
+      result.put("status", payment == null ? "pending" : "paid");
+      if (payment != null) result.put(FIELD_CLIENT_NAME, payment.clientName);
+      writeResponse(response, HttpServletResponse.SC_OK, result);
+    });
+  }
+
+  private void handleCheckoutWebhook(HttpServletRequest request, HttpServletResponse response)
+      throws IOException {
+    String payload = readRawBody(request);
+    String signature = request.getHeader("Stripe-Signature");
+    if (!CheckoutWebhookVerifier.verify(payload, signature, CheckoutConfiguration.webhookSecret(),
+        Instant.now().getEpochSecond(), 300)) {
+      writeError(response, HttpServletResponse.SC_BAD_REQUEST, "INVALID_CHECKOUT_SIGNATURE",
+          "Invalid checkout webhook signature", "Invalid checkout webhook signature");
+      return;
+    }
+    try {
+      JSONObject event = new JSONObject(payload);
+      String eventId = event.optString("id", "");
+      if (!CheckoutPaymentRegistry.claimEvent(eventId)) {
+        writeResponse(response, HttpServletResponse.SC_OK, new JSONObject().put("received", true));
+        return;
+      }
+      String type = event.optString("type", "");
+      if ("checkout.session.completed".equals(type)
+          || "checkout.session.async_payment_succeeded".equals(type)) {
+        JSONObject object = event.getJSONObject("data").getJSONObject("object");
+        JSONObject metadata = object.optJSONObject("metadata");
+        String requestId = metadata == null ? "" : metadata.optString("request_id", "");
+        String email = metadata == null ? "" : metadata.optString("account_email", "");
+        String clientName = metadata == null ? "" : metadata.optString("client_name", "");
+        if (!StringUtils.isBlank(requestId) && !StringUtils.isBlank(email)) {
+          CheckoutPaymentRegistry.recordPaid(requestId, email, clientName);
+        }
+      }
+      writeResponse(response, HttpServletResponse.SC_OK, new JSONObject().put("received", true));
+    } catch (JSONException e) {
+      writeError(response, HttpServletResponse.SC_BAD_REQUEST, "INVALID_CHECKOUT_PAYLOAD",
+          "Invalid checkout webhook payload", "Invalid checkout webhook payload");
     }
   }
 
@@ -742,7 +837,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       OBContext.setOBContext("0", "0", "0", "0");
       OBContext.setAdminMode(true);
 
-      Account account = EtendoGoJwtDalHelper.findActiveAccountByToken(token);
+      Account account = EtendoGoJwtDalHelper.findActiveAccountByBearerToken(token);
       if (account == null) {
         writeError(response, HttpServletResponse.SC_UNAUTHORIZED, INVALID_OR_EXPIRED_TOKEN);
         return;
@@ -783,7 +878,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       writeError(response, HttpServletResponse.SC_UNAUTHORIZED, INVALID_AUTHORIZATION_HEADER);
       return null;
     }
-    Account account = EtendoGoJwtDalHelper.findActiveAccountByToken(token);
+    Account account = EtendoGoJwtDalHelper.findActiveAccountByBearerToken(token);
     if (account == null) {
       writeError(response, HttpServletResponse.SC_UNAUTHORIZED, INVALID_OR_EXPIRED_TOKEN);
     }
@@ -954,7 +1049,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       OBContext.setOBContext("0", "0", "0", "0");
       OBContext.setAdminMode(true);
 
-      Account account = EtendoGoJwtDalHelper.findActiveAccountByToken(token);
+      Account account = EtendoGoJwtDalHelper.findActiveAccountByBearerToken(token);
       if (account == null) {
         writeError(response, HttpServletResponse.SC_UNAUTHORIZED, INVALID_OR_EXPIRED_TOKEN);
         return;
@@ -962,6 +1057,14 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
 
       org.codehaus.jettison.json.JSONArray envArray = new org.codehaus.jettison.json.JSONArray();
       List<User> environmentUsers = EtendoGoJwtDalHelper.findEnvironmentUsersByAccountEmail(account.getEmail());
+      // The first environment is entered automatically after account login. Prefer the paid
+      // productive tenant so a demo tenant never unexpectedly becomes the active workspace when
+      // an account owns both plans. The client repeats this ordering for older backends.
+      environmentUsers.sort(Comparator
+          .comparing((User user) -> TenantPlanService.PLAN_PRODUCTIVE
+              .equals(tenantPlanService.resolvePlan(user.getClient().getId())))
+          .reversed()
+          .thenComparing(user -> user.getClient().getName(), String.CASE_INSENSITIVE_ORDER));
       for (User environmentUser : environmentUsers) {
         Client client = environmentUser.getClient();
         List<Organization> organizations = EtendoGoJwtDalHelper.findNonStarOrganizations(client.getId());
@@ -1018,7 +1121,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     try {
       OBContext.setOBContext("0", "0", "0", "0");
       OBContext.setAdminMode(true);
-      String accountEmail = EtendoGoJwtSupport.requireAccountEmail(token);
+      Account account = EtendoGoJwtDalHelper.findActiveAccountByBearerToken(token);
+      String accountEmail = account == null ? null : account.getEmail();
       if (accountEmail == null) {
         writeError(response, HttpServletResponse.SC_UNAUTHORIZED, INVALID_OR_EXPIRED_TOKEN);
         return;
@@ -1275,11 +1379,14 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     try {
       boolean ownsTenant = EtendoGoJwtDalHelper.countTenantsOwnedByAccountEmail(accountEmail) > 0;
       boolean resuming = isResumingOwnedTenant(onboardingRequest.clientName, accountEmail);
+      boolean convertingDemo = "convert-demo".equalsIgnoreCase(onboardingRequest.upgradeAction);
+      // Conversion is a paid state transition, not a free retry of interrupted onboarding.
+      boolean paywallResuming = resuming && !convertingDemo;
       TenantPaywallService.Decision decision = tenantPaywallService.decide(true, ownsTenant,
-          resuming, onboardingRequest.paymentToken);
+          paywallResuming, onboardingRequest.paymentToken, accountEmail, onboardingRequest.clientName);
       // Only a request that actually had to clear the paywall counts as a paid upgrade. A first
       // tenant, or a resume, stays on the free plan even if the payload carried a token.
-      boolean paid = !decision.isBlocked() && ownsTenant && !resuming;
+      boolean paid = !decision.isBlocked() && ownsTenant && (convertingDemo || !resuming);
       return new PaywallOutcome(decision, paid);
     } finally {
       OBContext.restorePreviousMode();
@@ -1340,7 +1447,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     try {
       OBContext.setOBContext("0", "0", "0", "0");
       OBContext.setAdminMode(true);
-      String resolvedEmail = EtendoGoJwtSupport.requireAccountEmail(token);
+      Account account = EtendoGoJwtDalHelper.findActiveAccountByBearerToken(token);
+      String resolvedEmail = account == null ? null : account.getEmail();
       if (resolvedEmail == null) {
         writeError(response, HttpServletResponse.SC_UNAUTHORIZED, INVALID_OR_EXPIRED_TOKEN);
       } else {
@@ -1401,6 +1509,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       // InitialClientSetup leaves it as the username/email).
       data.fullName = body.optString("fullName", "").trim();
       data.paymentToken = body.optString(FIELD_PAYMENT_TOKEN, "").trim();
+      data.upgradeAction = body.optString("upgradeAction", "create-productive").trim();
       return data;
     } catch (JSONException e) {
         String message = e.getMessage() != null && e.getMessage().contains(FIELD_CLIENT_NAME)
@@ -1952,7 +2061,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     }
   }
   private Account findAccountForCommittedOnboarding(String token, String accountEmail) {
-    Account account = EtendoGoJwtDalHelper.findActiveAccountByToken(token);
+    Account account = EtendoGoJwtDalHelper.findActiveAccountByBearerToken(token);
     return account != null ? account : EtendoGoJwtDalHelper.findActiveAccountByEmail(accountEmail);
   }
 
@@ -2143,6 +2252,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     // Present only when the paid second-tenant flow issued one (ETP-4686). Ignored while the
     // tenant-upgrade flag is off and for an account's first tenant.
     private String paymentToken;
+    private String upgradeAction;
   }
 
   private static class AdminContextData {

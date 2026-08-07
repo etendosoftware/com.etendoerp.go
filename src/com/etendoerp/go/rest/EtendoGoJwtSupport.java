@@ -66,7 +66,8 @@ final class EtendoGoJwtSupport {
       return false;
     }
     String username = user.getUsername();
-    return accountEmail.equals(username)
+    return accountEmail.equalsIgnoreCase(user.getEmail())
+        || accountEmail.equalsIgnoreCase(username)
         || (username != null && username.startsWith(accountEmail + "+"));
   }
 

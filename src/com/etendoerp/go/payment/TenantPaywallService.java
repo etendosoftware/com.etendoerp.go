@@ -77,7 +77,17 @@ public class TenantPaywallService {
    */
   public Decision decide(boolean upgradeFlagEnabled, boolean accountOwnsTenant,
       boolean resumingOwnedTenant, String paymentToken) {
+    return decide(upgradeFlagEnabled, accountOwnsTenant, resumingOwnedTenant, paymentToken, null,
+        null);
+  }
+
+  /** Validates a Stripe webhook-correlated payment for the authenticated account and tenant. */
+  public Decision decide(boolean upgradeFlagEnabled, boolean accountOwnsTenant,
+      boolean resumingOwnedTenant, String paymentToken, String accountEmail, String clientName) {
     if (!upgradeFlagEnabled || !accountOwnsTenant || resumingOwnedTenant) {
+      return Decision.ALLOWED;
+    }
+    if (CheckoutPaymentRegistry.isPaidFor(paymentToken, accountEmail, clientName)) {
       return Decision.ALLOWED;
     }
     PaymentOutcome outcome = paymentService.validate(paymentToken);
