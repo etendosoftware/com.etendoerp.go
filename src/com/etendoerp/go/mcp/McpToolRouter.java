@@ -484,7 +484,9 @@ public class McpToolRouter {
       filteredBody.put(key, userProvided.get(key));
     }
 
-    injectLineUomIfApplicable(filteredBody, dalEntity);
+    // userProvided is the pre-defaults snapshot, so it is the only reliable witness of whether the
+    // agent actually chose a uOM.
+    injectLineUomIfApplicable(filteredBody, dalEntity, userProvided.has(FIELD_UOM));
 
     // Fix FK sentinel values: "0" is a UI-level sentinel (means "not yet set") that can't
     // go through the DAL as an entity reference. Replace with a real value from the body
@@ -1027,16 +1029,21 @@ public class McpToolRouter {
    * Guarded on the entity actually declaring {@code uOM}, so an unrelated entity that happens to
    * carry a {@code product} field is never handed a property its table does not have.
    *
-   * @param body      the DAL-shaped body, mutated in place
-   * @param dalEntity the target entity, used to confirm the property exists
+   * @param body            the DAL-shaped body, mutated in place
+   * @param dalEntity       the target entity, used to confirm the property exists
+   * @param userProvidedUom whether the caller itself sent a {@code uOM}. A {@code uOM} already
+   *                        sitting in {@code body} does not imply this: the mandatory-defaults
+   *                        pass preselects one from the combo, and that guess must lose to the
+   *                        product — see {@code NeoCommercialLinePolicy}.
    */
-  private void injectLineUomIfApplicable(JSONObject body, Entity dalEntity) {
+  private void injectLineUomIfApplicable(JSONObject body, Entity dalEntity,
+      boolean userProvidedUom) {
     if (body == null || dalEntity == null || !body.has(FIELD_PRODUCT)
         || !dalEntity.hasProperty(FIELD_UOM)
         || body.optString(FIELD_PRODUCT, "").startsWith(BatchService.REF_PREFIX)) {
       return;
     }
-    NeoCommercialLinePolicy.injectProductDerivedUomIfMissing(body);
+    NeoCommercialLinePolicy.injectProductDerivedUomIfMissing(body, userProvidedUom);
   }
 
   /**
@@ -1081,7 +1088,9 @@ public class McpToolRouter {
             e.getMessage());
         continue;
       }
-      injectLineUomIfApplicable(body, dalEntity);
+      // This pre-pass runs on the raw operation body, before any defaults pass has touched it, so
+      // here a present uOM really is the caller's own.
+      injectLineUomIfApplicable(body, dalEntity, body.has(FIELD_UOM));
       JSONObject fkError = McpFkResolver.resolveFkNames(body, dalEntity, adTab,
           McpSelectorContextHelper.buildSelectorContextParams(null, adTab), log,
           value -> value.startsWith(BatchService.REF_PREFIX));

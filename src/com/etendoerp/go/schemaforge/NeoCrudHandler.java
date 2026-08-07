@@ -506,7 +506,8 @@ class NeoCrudHandler {
     protectedCalloutFields.addAll(userSubmittedFields);
     executePostCalloutCascade(filteredBody, adTab, context, parentIdValue, protectedCalloutFields);
     long perfCalloutCascade = System.nanoTime();
-    NeoCommercialLinePolicy.injectProductDerivedUomIfMissing(filteredBody);
+    NeoCommercialLinePolicy.injectProductDerivedUomIfMissing(filteredBody,
+        userSubmittedFields.contains("uOM"));
     NeoCommercialLinePolicy.injectGrossAmountIfMissing(filteredBody);
     NeoCommercialLinePolicy.injectLineGrossAmountIfMissing(filteredBody);
     NeoCommercialLinePolicy.injectLineNetAmountIfMissing(filteredBody);

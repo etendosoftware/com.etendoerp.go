@@ -161,31 +161,33 @@ public final class NeoCommercialLinePolicy {
 
 
   /**
-   * Fill {@code uOM} from the line's product when the body omits it.
+   * Set {@code uOM} from the line's product unless the caller explicitly chose one.
    * <p>
    * Public because {@code neo_create} (MCP) runs its own create pipeline rather than
    * {@code NeoCrudHandler#executePostCreate}, and omitting this injection there made an otherwise
-   * complete line body fail with a bare DAL 500 (IMP-15). No-op when the body already carries a
-   * {@code uOM} or has no {@code product}.
+   * complete line body fail with a bare DAL 500 (IMP-15).
+   *
+   * @param body            the create body, mutated in place
+   * @param userProvidedUom whether {@code uOM} came from the request itself. Only then is the
+   *                        existing value preserved — see the note below on why "the body already
+   *                        has a uOM" is <em>not</em> a safe proxy for that.
    */
-  public static void injectProductDerivedUomIfMissing(JSONObject body) {
-    if (body == null) {
+  public static void injectProductDerivedUomIfMissing(JSONObject body, boolean userProvidedUom) {
+    if (body == null || userProvidedUom) {
       return;
     }
     String productId = body.optString("product", "");
     if (productId.isEmpty()) {
       return;
     }
-    // "0" and "null" are UI-level sentinels meaning "not set yet", and the callout cascade that
-    // runs immediately before this injection leaves exactly that in uOM. Treating them as a real
-    // value made the injection a no-op on EVERY create path — REST, MCP and batch alike — and the
-    // sentinel then reached the DAL, where the C_OrderLine trigger compared COALESCE(C_UOM_ID,'0')
-    // against the product's own UOM and raised message 20111. An explicit uOM in the request body
-    // still wins, which is the only case this early return is meant to protect.
-    String existingUom = body.optString("uOM", "");
-    if (!existingUom.isEmpty() && !"0".equals(existingUom) && !"null".equals(existingUom)) {
-      return;
-    }
+    // Do NOT skip merely because the body already carries a uOM. C_UOM_ID is mandatory on
+    // C_OrderLine, so NeoDefaultsService#tryInjectFirstFromLookup preselects the first combo
+    // option for it — alphabetically "Centimeter" — before the product callout ever runs. That
+    // value is a real id, not a "0"/"null" sentinel, and on the REST path it then lands in
+    // protectedCalloutFields, which is precisely what stops the callout's correct answer from
+    // overwriting it. The line reaches the DAL with Centimeter, the C_OrderLine trigger compares
+    // it against M_PRODUCT.C_UOM_ID and raises message 20111. The product is the authority here:
+    // anything the defaults pass guessed must lose to it, and only an explicit caller value wins.
     try {
       Product product = OBDal.getInstance().get(Product.class, productId);
       if (product == null || product.getUOM() == null) {
