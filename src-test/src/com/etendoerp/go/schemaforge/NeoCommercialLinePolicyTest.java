@@ -27,6 +27,7 @@ import static org.mockito.Mockito.when;
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.Test;
 import org.mockito.MockedStatic;
+import org.openbravo.base.model.Entity;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.plm.Product;
 import org.openbravo.model.common.uom.UOM;
@@ -393,12 +394,43 @@ public class NeoCommercialLinePolicyTest {
   private static final String CENTIMETER_GUESS_UOM_ID = "ADF850C3E6E9413B9F9EEA5C87456073";
   private static final String PRODUCT_UOM_ID = "100";
 
+  /** DAL properties accepted as proof that the target entity is a transactional document line. */
+  private static final String[] TRANSACTIONAL_QUANTITY_PROPERTIES = {
+      "orderedQuantity", "invoicedQuantity", "movementQuantity", "quantityCount" };
+
   private static Product mockProductWithUom(String uomId) {
     Product product = mock(Product.class);
     UOM uom = mock(UOM.class);
     when(uom.getId()).thenReturn(uomId);
     when(product.getUOM()).thenReturn(uom);
     return product;
+  }
+
+  /**
+   * A C_OrderLine-like entity: declares {@code orderedQuantity}, so it passes the transactional
+   * line guard and the product's UOM is authoritative for it.
+   */
+  private static Entity mockTransactionalLineEntity() {
+    return mockEntityWithQuantityProperty("orderedQuantity");
+  }
+
+  /** An entity that declares exactly one of the accepted transactional quantity properties. */
+  private static Entity mockEntityWithQuantityProperty(String presentProperty) {
+    Entity entity = mock(Entity.class);
+    when(entity.hasProperty(presentProperty)).thenReturn(true);
+    return entity;
+  }
+
+  /**
+   * An {@code M_Product_AUM}-like entity: it does declare {@code product} and {@code uOM}, but no
+   * transactional quantity property — its UOM is deliberately NOT the product's base one.
+   */
+  private static Entity mockNonTransactionalEntity() {
+    Entity entity = mock(Entity.class);
+    for (String property : TRANSACTIONAL_QUANTITY_PROPERTIES) {
+      when(entity.hasProperty(property)).thenReturn(false);
+    }
+    return entity;
   }
 
   /**
@@ -422,7 +454,7 @@ public class NeoCommercialLinePolicyTest {
       obDal.when(OBDal::getInstance).thenReturn(dal);
       when(dal.get(Product.class, PRODUCT_ID)).thenReturn(mockProductWithUom(PRODUCT_UOM_ID));
 
-      NeoCommercialLinePolicy.injectProductDerivedUomIfMissing(body, false);
+      NeoCommercialLinePolicy.injectProductDerivedUomIfMissing(body, mockTransactionalLineEntity(), false);
 
       assertEquals(PRODUCT_UOM_ID, body.getString("uOM"));
     }
@@ -441,7 +473,7 @@ public class NeoCommercialLinePolicyTest {
         .put("uOM", CENTIMETER_GUESS_UOM_ID);
 
     try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
-      NeoCommercialLinePolicy.injectProductDerivedUomIfMissing(body, true);
+      NeoCommercialLinePolicy.injectProductDerivedUomIfMissing(body, mockTransactionalLineEntity(), true);
 
       assertEquals(CENTIMETER_GUESS_UOM_ID, body.getString("uOM"));
       obDal.verifyNoInteractions();
@@ -458,7 +490,7 @@ public class NeoCommercialLinePolicyTest {
       obDal.when(OBDal::getInstance).thenReturn(dal);
       when(dal.get(Product.class, PRODUCT_ID)).thenReturn(mockProductWithUom(PRODUCT_UOM_ID));
 
-      NeoCommercialLinePolicy.injectProductDerivedUomIfMissing(body, false);
+      NeoCommercialLinePolicy.injectProductDerivedUomIfMissing(body, mockTransactionalLineEntity(), false);
 
       assertEquals(PRODUCT_UOM_ID, body.getString("uOM"));
     }
@@ -474,7 +506,7 @@ public class NeoCommercialLinePolicyTest {
       obDal.when(OBDal::getInstance).thenReturn(dal);
       when(dal.get(Product.class, PRODUCT_ID)).thenReturn(mockProductWithUom(PRODUCT_UOM_ID));
 
-      NeoCommercialLinePolicy.injectProductDerivedUomIfMissing(body, false);
+      NeoCommercialLinePolicy.injectProductDerivedUomIfMissing(body, mockTransactionalLineEntity(), false);
 
       assertEquals(PRODUCT_UOM_ID, body.getString("uOM"));
     }
@@ -486,7 +518,7 @@ public class NeoCommercialLinePolicyTest {
     JSONObject body = new JSONObject().put("uOM", CENTIMETER_GUESS_UOM_ID);
 
     try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
-      NeoCommercialLinePolicy.injectProductDerivedUomIfMissing(body, false);
+      NeoCommercialLinePolicy.injectProductDerivedUomIfMissing(body, mockTransactionalLineEntity(), false);
 
       assertEquals(CENTIMETER_GUESS_UOM_ID, body.getString("uOM"));
       obDal.verifyNoInteractions();
@@ -496,7 +528,7 @@ public class NeoCommercialLinePolicyTest {
   /** {@code body == null} must not throw. */
   @Test
   public void testInjectProductDerivedUom_nullBody_doesNotThrow() {
-    NeoCommercialLinePolicy.injectProductDerivedUomIfMissing(null, false);
+    NeoCommercialLinePolicy.injectProductDerivedUomIfMissing(null, mockTransactionalLineEntity(), false);
   }
 
   /**
@@ -514,7 +546,7 @@ public class NeoCommercialLinePolicyTest {
       when(productWithoutUom.getUOM()).thenReturn(null);
       when(dal.get(Product.class, PRODUCT_ID)).thenReturn(productWithoutUom);
 
-      NeoCommercialLinePolicy.injectProductDerivedUomIfMissing(body, false);
+      NeoCommercialLinePolicy.injectProductDerivedUomIfMissing(body, mockTransactionalLineEntity(), false);
 
       assertFalse(body.has("uOM"));
     }
@@ -530,7 +562,7 @@ public class NeoCommercialLinePolicyTest {
       obDal.when(OBDal::getInstance).thenReturn(dal);
       when(dal.get(Product.class, PRODUCT_ID)).thenReturn(null);
 
-      NeoCommercialLinePolicy.injectProductDerivedUomIfMissing(body, false);
+      NeoCommercialLinePolicy.injectProductDerivedUomIfMissing(body, mockTransactionalLineEntity(), false);
 
       assertFalse(body.has("uOM"));
     }
@@ -546,9 +578,117 @@ public class NeoCommercialLinePolicyTest {
       obDal.when(OBDal::getInstance).thenReturn(dal);
       when(dal.get(Product.class, PRODUCT_ID)).thenThrow(new RuntimeException("DAL boom"));
 
-      NeoCommercialLinePolicy.injectProductDerivedUomIfMissing(body, false);
+      NeoCommercialLinePolicy.injectProductDerivedUomIfMissing(body, mockTransactionalLineEntity(), false);
 
       assertFalse(body.has("uOM"));
+    }
+  }
+
+  // ── injectProductDerivedUomIfMissing: transactional-line guard ────────────
+  //
+  // Declaring `product` + `uOM` is NOT enough to justify the injection. M_Product_AUM
+  // (alternate units of measure) declares both, yet its entire purpose is to hold a UOM that
+  // DIFFERS from the product's base one — (product, uOM) is its natural key, so injecting the
+  // product's own UOM there is semantically wrong (and would collapse every AUM row onto the
+  // base unit). The same applies to M_Product, M_Product_PO, M_Storage_Detail, Fact_Acct and
+  // GL_JournalLine, where the UOM is descriptive rather than transacted. The guard therefore
+  // requires a transactional quantity property — "this is a document line" — instead of
+  // enumerating tables.
+
+  /**
+   * An M_Product_AUM-like entity (product + uOM declared, no transactional quantity) must be
+   * left completely untouched, and must never even reach the product lookup.
+   */
+  @Test
+  public void testInjectProductDerivedUom_nonTransactionalEntity_bodyUntouchedNoDalInteraction()
+      throws Exception {
+    JSONObject body = new JSONObject().put("product", PRODUCT_ID);
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      NeoCommercialLinePolicy.injectProductDerivedUomIfMissing(body, mockNonTransactionalEntity(),
+          false);
+
+      assertFalse(body.has("uOM"));
+      assertEquals(PRODUCT_ID, body.getString("product"));
+      obDal.verifyNoInteractions();
+    }
+  }
+
+  /**
+   * A non-transactional entity that already carries a UOM keeps it verbatim: the AUM's whole
+   * point is a unit that differs from the product's base one.
+   */
+  @Test
+  public void testInjectProductDerivedUom_nonTransactionalEntityWithUom_uomPreserved()
+      throws Exception {
+    JSONObject body = new JSONObject()
+        .put("product", PRODUCT_ID)
+        .put("uOM", CENTIMETER_GUESS_UOM_ID);
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      NeoCommercialLinePolicy.injectProductDerivedUomIfMissing(body, mockNonTransactionalEntity(),
+          false);
+
+      assertEquals(CENTIMETER_GUESS_UOM_ID, body.getString("uOM"));
+      obDal.verifyNoInteractions();
+    }
+  }
+
+  /**
+   * A {@code null} entity means the target is unknown — abstaining is the safe default, so the
+   * body is left untouched and no lookup runs.
+   */
+  @Test
+  public void testInjectProductDerivedUom_nullEntity_bodyUntouchedNoDalInteraction()
+      throws Exception {
+    JSONObject body = new JSONObject().put("product", PRODUCT_ID);
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      NeoCommercialLinePolicy.injectProductDerivedUomIfMissing(body, null, false);
+
+      assertFalse(body.has("uOM"));
+      obDal.verifyNoInteractions();
+    }
+  }
+
+  /** C_InvoiceLine-like: {@code invoicedQuantity} alone is enough to enable the injection. */
+  @Test
+  public void testInjectProductDerivedUom_invoicedQuantityEntity_injectionEnabled()
+      throws Exception {
+    assertUomInjectedForEntityWithProperty("invoicedQuantity");
+  }
+
+  /** M_InOutLine / M_MovementLine-like: {@code movementQuantity} alone is enough. */
+  @Test
+  public void testInjectProductDerivedUom_movementQuantityEntity_injectionEnabled()
+      throws Exception {
+    assertUomInjectedForEntityWithProperty("movementQuantity");
+  }
+
+  /** M_InventoryLine-like: {@code quantityCount} alone is enough. */
+  @Test
+  public void testInjectProductDerivedUom_quantityCountEntity_injectionEnabled() throws Exception {
+    assertUomInjectedForEntityWithProperty("quantityCount");
+  }
+
+  /**
+   * Asserts that an entity declaring only {@code property} — and none of the other accepted
+   * quantity properties — is by itself sufficient to enable the product-derived UOM injection.
+   */
+  private static void assertUomInjectedForEntityWithProperty(String property) throws Exception {
+    JSONObject body = new JSONObject()
+        .put("product", PRODUCT_ID)
+        .put("uOM", CENTIMETER_GUESS_UOM_ID);
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(Product.class, PRODUCT_ID)).thenReturn(mockProductWithUom(PRODUCT_UOM_ID));
+
+      NeoCommercialLinePolicy.injectProductDerivedUomIfMissing(body,
+          mockEntityWithQuantityProperty(property), false);
+
+      assertEquals(PRODUCT_UOM_ID, body.getString("uOM"));
     }
   }
 }

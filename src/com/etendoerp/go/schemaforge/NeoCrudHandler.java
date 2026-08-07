@@ -506,7 +506,10 @@ class NeoCrudHandler {
     protectedCalloutFields.addAll(userSubmittedFields);
     executePostCalloutCascade(filteredBody, adTab, context, parentIdValue, protectedCalloutFields);
     long perfCalloutCascade = System.nanoTime();
+    // checkIfNotExists=false: a name the runtime model does not know must not blow up the create —
+    // the policy simply abstains on a null entity.
     NeoCommercialLinePolicy.injectProductDerivedUomIfMissing(filteredBody,
+        ModelProvider.getInstance().getEntity(dalEntityName, false),
         userSubmittedFields.contains("uOM"));
     NeoCommercialLinePolicy.injectGrossAmountIfMissing(filteredBody);
     NeoCommercialLinePolicy.injectLineGrossAmountIfMissing(filteredBody);

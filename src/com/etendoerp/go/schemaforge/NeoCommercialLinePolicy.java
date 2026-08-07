@@ -19,11 +19,14 @@ package com.etendoerp.go.schemaforge;
 import java.math.BigDecimal;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
+import java.util.Arrays;
+import java.util.List;
 
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONObject;
+import org.openbravo.base.model.Entity;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.plm.Product;
 import org.openbravo.model.financialmgmt.tax.TaxRate;
@@ -40,6 +43,24 @@ public final class NeoCommercialLinePolicy {
   private static final Logger log = LogManager.getLogger(NeoCommercialLinePolicy.class);
   private static final String VALUE_KEY = "value";
   private static final String FIELD_GROSS_UNIT_PRICE = "grossUnitPrice";
+
+  /**
+   * DAL properties that identify a transactional document line — the only entities where the
+   * product's own unit of measure is the authoritative value for {@code uOM}.
+   * <p>
+   * Declaring {@code product} + {@code uOM} is <em>not</em> enough on its own: {@code M_Product_AUM}
+   * (alternate units of measure) declares both, yet its whole purpose is to hold a UOM that
+   * <em>differs</em> from the product's base one — {@code (product, uOM)} is its natural key. The
+   * same goes for {@code M_Product}, {@code M_Product_PO}, {@code M_Storage_Detail},
+   * {@code Fact_Acct} and {@code GL_JournalLine}, where the UOM is descriptive rather than
+   * transactional. Requiring a movement/order/invoice quantity property expresses "this is a
+   * document line" without enumerating tables, and excludes all six.
+   */
+  private static final List<String> TRANSACTIONAL_QUANTITY_PROPERTIES = Arrays.asList(
+      "orderedQuantity",   // C_OrderLine
+      "invoicedQuantity",  // C_InvoiceLine, C_OrderLine
+      "movementQuantity",  // M_InOutLine, M_MovementLine, M_Internal_ConsumptionLine, M_Transaction
+      "quantityCount");    // M_InventoryLine
 
   private NeoCommercialLinePolicy() {
   }
@@ -168,12 +189,17 @@ public final class NeoCommercialLinePolicy {
    * complete line body fail with a bare DAL 500 (IMP-15).
    *
    * @param body            the create body, mutated in place
+   * @param dalEntity       the target DAL entity, used to confirm this is a transactional document
+   *                        line (see {@link #TRANSACTIONAL_QUANTITY_PROPERTIES}). A {@code null}
+   *                        entity skips the injection: without knowing the target, abstaining is
+   *                        the safe default.
    * @param userProvidedUom whether {@code uOM} came from the request itself. Only then is the
    *                        existing value preserved — see the note below on why "the body already
    *                        has a uOM" is <em>not</em> a safe proxy for that.
    */
-  public static void injectProductDerivedUomIfMissing(JSONObject body, boolean userProvidedUom) {
-    if (body == null || userProvidedUom) {
+  public static void injectProductDerivedUomIfMissing(JSONObject body, Entity dalEntity,
+      boolean userProvidedUom) {
+    if (body == null || userProvidedUom || !isTransactionalLine(dalEntity)) {
       return;
     }
     String productId = body.optString("product", "");
@@ -204,6 +230,17 @@ public final class NeoCommercialLinePolicy {
       // log tying it back to this injection. That is exactly how ETP-4793 lost an afternoon.
       log.warn("Could not inject product-derived UOM for product {}: {}", productId, e.getMessage());
     }
+  }
+
+  /**
+   * @return {@code true} when the entity is a document line whose quantity is transacted, i.e. one
+   *     where the product dictates the unit of measure.
+   */
+  private static boolean isTransactionalLine(Entity dalEntity) {
+    if (dalEntity == null) {
+      return false;
+    }
+    return TRANSACTIONAL_QUANTITY_PROPERTIES.stream().anyMatch(dalEntity::hasProperty);
   }
 
   static void injectTaxRateIfPresent(JSONObject updates) {

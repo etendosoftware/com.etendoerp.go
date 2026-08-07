@@ -1027,7 +1027,9 @@ public class McpToolRouter {
    * is a {@code system}-visibility field, so no agent-visible contract ever mentions it.
    * <p>
    * Guarded on the entity actually declaring {@code uOM}, so an unrelated entity that happens to
-   * carry a {@code product} field is never handed a property its table does not have.
+   * carry a {@code product} field is never handed a property its table does not have. The policy
+   * narrows it further to transactional document lines — declaring {@code uOM} is necessary but not
+   * sufficient (see {@code NeoCommercialLinePolicy}).
    *
    * @param body            the DAL-shaped body, mutated in place
    * @param dalEntity       the target entity, used to confirm the property exists
@@ -1043,7 +1045,7 @@ public class McpToolRouter {
         || body.optString(FIELD_PRODUCT, "").startsWith(BatchService.REF_PREFIX)) {
       return;
     }
-    NeoCommercialLinePolicy.injectProductDerivedUomIfMissing(body, userProvidedUom);
+    NeoCommercialLinePolicy.injectProductDerivedUomIfMissing(body, dalEntity, userProvidedUom);
   }
 
   /**
