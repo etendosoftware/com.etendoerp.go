@@ -317,6 +317,107 @@ public class NeoExchangeRateServiceTest {
   }
 
   // ---------------------------------------------------------------
+  // hasRate (ETP-4838) — the shared availability check used by the callout handlers
+  // ---------------------------------------------------------------
+
+  @Test
+  public void testHasRateQueriesSystemAndTenantRates() throws Exception {
+    // ETP-4838 regression: the callout handlers used to run their own query filtered by
+    // `ad_client_id = ?` alone, so they stopped seeing the shared system ('0') rates that
+    // ETP-4474 centralised there and warned "noExchangeRateAvailable" in false. Routing them
+    // through hasRate must emit the client-or-system scoped SQL.
+    Connection conn = mock(Connection.class);
+    ResultSet rs = mock(ResultSet.class);
+    wirePreparedStatement(conn, rs);
+    when(rs.next()).thenReturn(true);
+    when(rs.getDouble("multiplyrate")).thenReturn(0.87);
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+         MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      stubContext(ctxMock);
+      OBDal obDal = mock(OBDal.class);
+      when(obDal.getConnection()).thenReturn(conn);
+      obDalMock.when(OBDal::getInstance).thenReturn(obDal);
+
+      assertTrue(NeoExchangeRateService.hasRate("eur-id", "gbp-id", "2026-08-07"));
+
+      ArgumentCaptor<String> sqlCaptor = ArgumentCaptor.forClass(String.class);
+      verify(conn).prepareStatement(sqlCaptor.capture());
+      assertTrue(sqlCaptor.getValue().contains("ad_client_id IN ('0', ?)"));
+    }
+  }
+
+  @Test
+  public void testHasRateFallsBackToInverseDirection() throws Exception {
+    // Only TO→FROM is configured: standard Etendo treats that as covering FROM→TO at 1/rate,
+    // so no warning must be raised.
+    Connection conn = mock(Connection.class);
+    PreparedStatement ps = mock(PreparedStatement.class);
+    when(conn.prepareStatement(anyString())).thenReturn(ps);
+
+    ResultSet rsDirect = mock(ResultSet.class);
+    when(rsDirect.next()).thenReturn(false);
+    ResultSet rsInverse = mock(ResultSet.class);
+    when(rsInverse.next()).thenReturn(true);
+    when(rsInverse.getDouble("multiplyrate")).thenReturn(1.15);
+    when(ps.executeQuery()).thenReturn(rsDirect, rsInverse);
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+         MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      stubContext(ctxMock);
+      OBDal obDal = mock(OBDal.class);
+      when(obDal.getConnection()).thenReturn(conn);
+      obDalMock.when(OBDal::getInstance).thenReturn(obDal);
+
+      assertTrue(NeoExchangeRateService.hasRate("eur-id", "usd-id", "2026-08-07"));
+    }
+  }
+
+  @Test
+  public void testHasRateFalseWhenNeitherDirectionIsDefined() throws Exception {
+    Connection conn = mock(Connection.class);
+    ResultSet rs = mock(ResultSet.class);
+    wirePreparedStatement(conn, rs);
+    when(rs.next()).thenReturn(false);
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+         MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      stubContext(ctxMock);
+      OBDal obDal = mock(OBDal.class);
+      when(obDal.getConnection()).thenReturn(conn);
+      obDalMock.when(OBDal::getInstance).thenReturn(obDal);
+
+      assertFalse(NeoExchangeRateService.hasRate("eur-id", "xxx-id", "2026-08-07"));
+    }
+  }
+
+  @Test
+  public void testHasRateSameCurrencyShortCircuitsWithoutQuerying() throws Exception {
+    // No OBContext/OBDal statics are mocked here on purpose: touching either would blow up,
+    // proving the same-currency case never reaches the database.
+    assertTrue(NeoExchangeRateService.hasRate("eur-id", "eur-id", "2026-08-07"));
+  }
+
+  @Test
+  public void testHasRateFailsOpenWhenTheQueryBlowsUp() throws Exception {
+    // A DB hiccup must not turn into a false "no rate" warning on the document.
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+         MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      stubContext(ctxMock);
+      OBDal obDal = mock(OBDal.class);
+      when(obDal.getConnection()).thenThrow(new RuntimeException("connection lost"));
+      obDalMock.when(OBDal::getInstance).thenReturn(obDal);
+
+      assertTrue(NeoExchangeRateService.hasRate("eur-id", "usd-id", "2026-08-07"));
+    }
+  }
+
+  @Test
+  public void testHasRateFailsOpenOnUnparseableDate() {
+    assertTrue(NeoExchangeRateService.hasRate("eur-id", "usd-id", "not-a-date"));
+  }
+
+  // ---------------------------------------------------------------
   // helpers
   // ---------------------------------------------------------------
 

@@ -120,6 +120,43 @@ class NeoExchangeRateService {
   }
 
   /**
+   * Returns whether an exchange rate is usable for {@code from → to} on {@code dateStr},
+   * applying exactly the same lookup as {@link #handleValidateExchangeRate} — client-or-system
+   * scoped, with the inverse-direction fallback.
+   *
+   * <p>This is the single source of truth for "is there a rate?" on the server side. The callout
+   * handlers ({@code AbstractOrderHeaderHandler} / {@code AbstractInvoiceHeaderHandler}) MUST call
+   * this instead of rolling their own query: ETP-4838 was caused by two private copies that
+   * filtered {@code ad_client_id = ?} only, so they stopped seeing the shared system ('0') rates
+   * once ETP-4474 centralised the currencyLayer sync there. The frontend then got a
+   * {@code hasRate: true} from this service while the callout warned "noExchangeRateAvailable"
+   * for the very same pair and date.
+   *
+   * @param fromCurrencyId source currency record id ({@code C_Currency_ID})
+   * @param toCurrencyId   target currency record id ({@code C_Currency_ID})
+   * @param dateStr        document date; only the leading {@code YYYY-MM-DD} is read
+   * @return {@code true} when a direct or inverse rate exists — and also on any error, so a DB
+   *         hiccup never produces a false "no rate" warning (fail-open, as the callers relied on)
+   */
+  static boolean hasRate(String fromCurrencyId, String toCurrencyId, String dateStr) {
+    try {
+      if (fromCurrencyId == null || toCurrencyId == null || fromCurrencyId.equals(toCurrencyId)) {
+        return true;
+      }
+      java.time.LocalDate localDate = java.time.LocalDate.parse(dateStr.substring(0, 10));
+      String clientId = OBContext.getOBContext().getCurrentClient().getId();
+      String orgId = OBContext.getOBContext().getCurrentOrganization().getId();
+      Connection conn = OBDal.getInstance().getConnection();
+
+      return queryRate(conn, fromCurrencyId, toCurrencyId, clientId, orgId, localDate) != null
+          || queryRate(conn, toCurrencyId, fromCurrencyId, clientId, orgId, localDate) != null;
+    } catch (Exception e) {
+      log.warn("[ETP-4838] hasRate check failed (assuming a rate exists): {}", e.getMessage());
+      return true;
+    }
+  }
+
+  /**
    * Returns the {@code multiplyrate} for the given currency pair on {@code date},
    * or {@code null} when no active rate row is found.
    */
