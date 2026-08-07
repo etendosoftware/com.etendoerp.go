@@ -419,7 +419,7 @@ public class EtendoGoJwtServletOnboardingDatasetTest {
   private static final class NoOpOrgInfoService extends OnboardingOrgInfoService {
     @Override
     public void ensureOrgInfo(String clientId, String orgId, String adminUserId, String adminRoleId,
-        String countryIso, String address) {
+        String countryIso, String address, String taxId) {
       // no-op: DAL wiring is covered by OnboardingOrgInfoServiceTest
     }
   }
