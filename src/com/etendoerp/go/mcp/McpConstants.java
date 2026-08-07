@@ -55,6 +55,14 @@ final class McpConstants {
   static final String ERROR_VALIDATION = "validation_error";
   /** Machine-detectable error code for an FK-by-name resolution matching more than one record (IMP-4). */
   static final String ERROR_AMBIGUOUS_FK = "ambiguous_fk";
+  /**
+   * Machine-detectable error code for a failure the caller cannot fix by changing the request
+   * (IMP-15). Distinct from {@link #ERROR_VALIDATION} on purpose: an agent must not retry-with-
+   * corrections on this one.
+   */
+  static final String ERROR_SERVER = "server_error";
+  /** Machine-detectable error code for a write on an entity whose method flag is off (IMP-15). */
+  static final String ERROR_METHOD_NOT_ALLOWED = "method_not_allowed";
   /** HTTP-style status for a not-found result (IMP-5). */
   static final int STATUS_NOT_FOUND = 404;
   /** HTTP-style status for a validation failure on a write (IMP-5). */

@@ -50,6 +50,7 @@ import org.openbravo.service.json.JsonConstants;
 
 import com.etendoerp.go.schemaforge.AmortizationPlanService;
 import com.etendoerp.go.schemaforge.BatchService;
+import com.etendoerp.go.schemaforge.NeoCommercialLinePolicy;
 import com.etendoerp.go.schemaforge.util.NeoButtonActionHelper;
 import com.etendoerp.go.schemaforge.util.NeoLanguage;
 import com.etendoerp.go.schemaforge.NeoContext;
@@ -479,6 +480,13 @@ public class McpToolRouter {
       }
       filteredBody.put(key, userProvided.get(key));
     }
+
+    // IMP-15: derive the line's unit of measure from its product when the caller omitted it, the
+    // same injection the REST create path runs (NeoCrudHandler#executePostCreate). Without it a
+    // sales-order line whose body neo_schema had reported as complete died inside the DAL with a
+    // bare 500 "Unit of Measure mismatch (product/transaction)" — and the value was only
+    // recoverable from an undocumented key in the product selector's response.
+    NeoCommercialLinePolicy.injectProductDerivedUomIfMissing(filteredBody);
 
     // Fix FK sentinel values: "0" is a UI-level sentinel (means "not yet set") that can't
     // go through the DAL as an entity reference. Replace with a real value from the body
@@ -984,7 +992,20 @@ public class McpToolRouter {
           authorizeSpecAccess(specName, HTTP_METHOD_POST);
         }
       }
+      // IMP-15: resolve FK-by-name / legacy-numeric-id values in every op body before the
+      // transaction opens, so neo_batch accepts exactly the formats neo_create does. Without this
+      // the batch path handed the raw value to the DAL, which failed with an import-set error
+      // naming the value it could not resolve — a different contract for the same field.
+      JSONObject fkError = resolveBatchFkNames(operations);
+      if (fkError != null) {
+        return wrapAsErrorContent(fkError.toString(2));
+      }
       JSONObject result = BatchService.forBatchOnly().executeBatch(operations);
+      if (!result.optBoolean("committed", false)) {
+        // IMP-15: rewrite the failure in place into the IMP-5 envelope, so an agent gets a stable
+        // error code instead of the raw DAL sub-response BatchService forwards to REST callers.
+        McpToolRouterSupport.toMcpBatchFailure(result);
+      }
       return wrapAsTextContent(result.toString(2));
     } catch (SecurityException e) {
       log.warn("neo_batch access denied", e);
@@ -993,6 +1014,64 @@ public class McpToolRouter {
       log.error("Error executing neo_batch", e);
       return wrapAsErrorContent("Error executing neo_batch: " + e.getMessage());
     }
+  }
+
+  /**
+   * Run the shared FK resolver over every operation body of a batch (IMP-15).
+   * <p>
+   * Mirrors what {@code handleCreate} does for a single record, with two batch-specific rules:
+   * <ul>
+   *   <li>{@code "$ref:<opId>"} placeholders are skipped — the op they point at has not run yet, so
+   *       the value is resolvable as neither an id nor a name (see {@code BatchService#REF_PREFIX}).</li>
+   *   <li>An op whose spec/entity cannot be resolved is left untouched instead of erroring here, so
+   *       {@code BatchService} still reports it with its own {@code failedAt} pointer rather than
+   *       this pass changing the error shape for malformed input.</li>
+   * </ul>
+   * Bodies are mutated in place, so the resolved ids are what {@code executeBatch} persists.
+   *
+   * @param operations the {@code operations} array from the tool call
+   * @return {@code null} when every body resolved, or the structured FK error of the first op that
+   *         failed, carrying a {@code failedAt} pointer so the agent knows which op to fix
+   */
+  private JSONObject resolveBatchFkNames(JSONArray operations) throws JSONException {
+    for (int i = 0; i < operations.length(); i++) {
+      JSONObject op = operations.optJSONObject(i);
+      if (op == null) {
+        continue;
+      }
+      JSONObject body = op.optJSONObject("body");
+      String specName = op.optString("spec", null);
+      String entityName = op.optString(McpConstants.PARAM_ENTITY, null);
+      if (body == null || StringUtils.isBlank(specName) || StringUtils.isBlank(entityName)) {
+        continue;
+      }
+      Tab adTab;
+      Entity dalEntity;
+      try {
+        SFSpec spec = McpToolRouterSupport.findActiveSpecByName(specName);
+        SFEntity sfEntity = McpToolRouterSupport.findIncludedEntity(spec.getId(), entityName);
+        adTab = getAdTabOrThrow(sfEntity, entityName);
+        dalEntity = ModelProvider.getInstance().getEntityByTableId(adTab.getTable().getId());
+      } catch (Exception e) {
+        log.debug("neo_batch FK pre-pass skipped op {} ({}/{}): {}", i, specName, entityName,
+            e.getMessage());
+        continue;
+      }
+      JSONObject fkError = McpFkResolver.resolveFkNames(body, dalEntity, adTab,
+          McpSelectorContextHelper.buildSelectorContextParams(null, adTab), log,
+          value -> value.startsWith(BatchService.REF_PREFIX));
+      if (fkError != null) {
+        JSONObject failedAt = new JSONObject();
+        failedAt.put("index", i);
+        String opId = op.optString("id", null);
+        if (StringUtils.isNotBlank(opId)) {
+          failedAt.put("id", opId);
+        }
+        fkError.put("failedAt", failedAt);
+        return fkError;
+      }
+    }
+    return null;
   }
 
   // ── neo_action ────────────────────────────────────────────────────────

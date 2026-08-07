@@ -879,14 +879,16 @@ Resolution rules (`McpToolRouterSupport.resolvePrimaryEntityName`):
   and report (`R`) specs never carry it.
 - A spec with no included entities yields `null`, and the key is omitted from the response entirely.
 
-#### 4.12.3 FK-by-name resolution on `neo_create` / `neo_update` (IMP-4)
+#### 4.12.3 FK resolution on the write verbs (IMP-4, extended to every verb by IMP-15)
 
 Historically every foreign-key field in a write body required the exact 32-character record id,
 forcing an agent to call `neo_selectors` first even for an obvious single-match lookup. Wave 3 lets a
 write body pass a **human search string** for an FK field; the router resolves it to the real record
 id server-side before persisting, via the same selector path `neo_selectors` uses
 (`NeoSelectorService.querySelectorByColumn`, limit 10). This runs for both `neo_create` and
-`neo_update` (`McpFkResolver.resolveFkNames`, invoked from `handleCreate` and `handleUpdate`).
+`neo_update` (`McpFkResolver.resolveFkNames`, invoked from `handleCreate` and `handleUpdate`) and,
+since IMP-15, on every `neo_batch` operation body (`McpToolRouter.resolveBatchFkNames`, run before
+the batch transaction opens).
 
 **Request** — `businessPartner` given by name instead of id:
 
@@ -910,9 +912,20 @@ that record's id and the create proceeds normally.
 - A value is treated as an already-valid id — and left untouched — when it is exactly **32 hex
   characters** (`[0-9A-Fa-f]{32}`, upper/lower/mixed case). `looksLikeId` matches `95E2A8B5…`; it
   rejects a 31-char string, a string with a non-hex char, an empty string, and `null`.
+- **Id-first (ETP-4793 / IMP-15).** The shape check above is not the only id test: every Etendo
+  `_ID` column is a `VARCHAR`, and legacy master data (currency, UOM, document type, tax rate) still
+  carries short numeric ids such as `"102"` for EUR. Any value that fails the shape check is
+  therefore **probed as a record id of the target entity** before the selector runs, and only falls
+  through to the name lookup when no readable record carries it. This is what makes
+  `neo_defaults → currency:"102" → neo_create` work: before IMP-15 that value went down the name
+  path, matched no currency literally *named* `"102"`, and came back as a 422 advising the agent to
+  "pass the exact record id instead" — which is what it had done.
 - Only FK fields are considered: a key is resolved only if it maps to a DAL property that is a
   non-primitive association with a target entity. Non-FK fields, non-string values, and empty strings
   are never touched.
+- The same resolver runs on **`neo_create`, `neo_update` and `neo_batch`** (each op's `body`), so one
+  field body is accepted verbatim by every write verb. In a batch, `"$ref:<opId>"` placeholders are
+  skipped — the op they point at has not run yet, so the value is neither an id nor a name.
 
 **Outcomes by selector match count** (`decideOutcome`):
 
@@ -931,7 +944,7 @@ Both error shapes are returned as an MCP error content payload with HTTP-style
 {
   "status": 422,
   "error": "not_found",
-  "detail": "No match for 'businessPartner'='Acme Corp'. Use neo_selectors to search, or pass the exact record id instead.",
+  "detail": "No match for 'businessPartner'='Acme Corp': it is neither the id of an existing record nor a value any selector matched. Use neo_selectors to find a valid one.",
   "field": "businessPartner"
 }
 ```
@@ -966,6 +979,33 @@ If the selector lookup itself fails (HTTP status ≥ 400 or a null body) or no `
 resolved for the key, the resolver logs a warning/debug line and leaves the value as-is rather than
 failing the write — the downstream DAL then surfaces its own validation error for the unresolved
 reference.
+
+#### 4.12.4 `neo_batch` failure envelope (IMP-15)
+
+`BatchService` serves both the REST `/batch` endpoint and `neo_batch`, and its failure body forwards
+the offending sub-response verbatim under `error.detail`. For a REST caller that is useful; for an
+agent it meant a raw DAL payload — `{"response":{"status":-4,"errors":{…}}}` — with no stable code to
+branch on. The MCP layer therefore rewrites the failure in place
+(`McpToolRouterSupport.toMcpBatchFailure`) into the same envelope every other MCP error uses, while
+the REST contract stays untouched:
+
+```json
+{
+  "committed": false,
+  "failedAt": { "index": 0, "id": "h1" },
+  "error": {
+    "status": 400,
+    "error": "validation_error",
+    "detail": "Operation 'h1' rejected by server: id: New object Currency(null) …",
+    "seeAlso": "docs(topic:\"creating records\")"
+  }
+}
+```
+
+`error` is one of `validation_error` (any other 4xx), `not_found` (404), `method_not_allowed` (405)
+or `server_error` (5xx, and the batch-wide failure reported at index `-1`) — only the first three are
+worth retrying with a corrected request. The DAL's own text is preserved inside `detail`; its numeric
+`status: -4` is dropped, since it names nothing an agent can act on.
 
 ---
 

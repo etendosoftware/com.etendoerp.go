@@ -101,7 +101,13 @@ public class BatchService {
 
   private static final Logger log = LogManager.getLogger(BatchService.class);
 
-  private static final String REF_PREFIX = "$ref:";
+  /**
+   * Prefix marking a forward reference to an earlier op's recordId, substituted by
+   * {@link #substituteRefs}. Public because the MCP layer must recognise these placeholders to
+   * leave them alone during its FK-by-name pre-pass (IMP-15) — at that point the referenced op has
+   * not run yet, so the value is not resolvable as either an id or a name.
+   */
+  public static final String REF_PREFIX = "$ref:";
   private static final String FIELD_COMMITTED = "committed";
   private static final String FIELD_PARENT_ID = "parentId";
   private static final String FIELD_ID = "id";

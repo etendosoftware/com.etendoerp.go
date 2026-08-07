@@ -18,6 +18,7 @@
 package com.etendoerp.go.mcp;
 
 import java.util.Collections;
+import java.util.Iterator;
 import java.util.List;
 
 import org.apache.logging.log4j.LogManager;
@@ -835,5 +836,101 @@ final class McpToolRouterSupport {
     guidance.put(McpConstants.KEY_TOOL, McpConstants.TOOL_DOCS);
     guidance.put(McpConstants.KEY_HINT, McpConstants.GUIDANCE_DOCS_HINT);
     return guidance;
+  }
+
+  /**
+   * Rewrite a {@code BatchService} failure body into the IMP-5 error envelope (IMP-15).
+   * <p>
+   * {@code BatchService} serves both the REST {@code /batch} endpoint and {@code neo_batch}, and it
+   * forwards the failing operation's sub-response verbatim as {@code error.detail}. For an MCP agent
+   * that meant a raw DAL payload — {@code {"response":{"status":-4,"errors":{"id":"New object
+   * Currency(null) (key: EUR_Currency) refered to but not present in the import set"}}}} — with no
+   * error code, no field and no next step, while the single-record verbs had carried a structured
+   * envelope since IMP-5. The translation happens here rather than in {@code BatchService} so the
+   * REST contract, and any non-MCP caller reading {@code detail}, stay untouched.
+   * <p>
+   * Success bodies ({@code committed:true}) and bodies with no {@code error} object pass through
+   * unchanged. The {@code failedAt} pointer is always preserved — it is what tells the agent which
+   * operation to fix.
+   *
+   * @param result the body returned by {@code BatchService#executeBatch}, mutated in place
+   * @return the same object, for call chaining
+   * @throws JSONException never in practice (all values are plain strings/ints)
+   */
+  static JSONObject toMcpBatchFailure(JSONObject result) throws JSONException {
+    if (result == null || result.optBoolean("committed", false)) {
+      return result;
+    }
+    JSONObject rawError = result.optJSONObject(McpConstants.KEY_ERROR);
+    if (rawError == null) {
+      return result;
+    }
+    int status = rawError.optInt(McpConstants.KEY_STATUS, 500);
+    String message = rawError.optString(McpConstants.KEY_MESSAGE, "Batch operation failed");
+    String dalMessage = extractDalMessage(rawError.optJSONObject(McpConstants.KEY_DETAIL));
+
+    JSONObject clean = new JSONObject();
+    clean.put(McpConstants.KEY_STATUS, status);
+    clean.put(McpConstants.KEY_ERROR, batchErrorCode(status));
+    clean.put(McpConstants.KEY_DETAIL, dalMessage == null ? message : message + ": " + dalMessage);
+    clean.put(McpConstants.KEY_SEE_ALSO, McpConstants.SEE_ALSO_WRITING);
+    result.put(McpConstants.KEY_ERROR, clean);
+    return result;
+  }
+
+  /** Map a batch failure's HTTP status onto a stable machine-detectable code (IMP-15). */
+  static String batchErrorCode(int status) {
+    if (status == McpConstants.STATUS_NOT_FOUND) {
+      return McpConstants.ERROR_NOT_FOUND;
+    }
+    if (status == 405) {
+      return McpConstants.ERROR_METHOD_NOT_ALLOWED;
+    }
+    // Everything else in the 4xx range is something the agent can fix by changing the request;
+    // 5xx (and the -1 index used for an unexpected batch-wide failure) is not.
+    return status >= 400 && status < 500 ? McpConstants.ERROR_VALIDATION : McpConstants.ERROR_SERVER;
+  }
+
+  /**
+   * Pull the one human-readable sentence out of a DAL sub-response, discarding its transport
+   * internals (notably the SmartClient {@code status:-4} an agent cannot act on).
+   *
+   * @param detail the forwarded sub-response, or {@code null}
+   * @return the message, or {@code null} when the payload carries none
+   */
+  static String extractDalMessage(JSONObject detail) {
+    if (detail == null) {
+      return null;
+    }
+    JSONObject response = detail.optJSONObject(JsonConstants.RESPONSE_RESPONSE);
+    if (response == null) {
+      response = detail;
+    }
+    JSONObject error = response.optJSONObject(JsonConstants.RESPONSE_ERROR);
+    if (error != null) {
+      String message = error.optString(McpConstants.KEY_MESSAGE, null);
+      if (message != null && !message.isBlank()) {
+        return message;
+      }
+    }
+    // Per-field violations: {"errors":{"id":"…","documentNo":"…"}} — keep the field names, they are
+    // the most actionable part of the payload.
+    JSONObject errors = response.optJSONObject("errors");
+    if (errors != null) {
+      StringBuilder joined = new StringBuilder();
+      Iterator<String> keys = errors.keys();
+      while (keys.hasNext()) {
+        String key = keys.next();
+        if (joined.length() > 0) {
+          joined.append("; ");
+        }
+        joined.append(key).append(": ").append(errors.optString(key, ""));
+      }
+      if (joined.length() > 0) {
+        return joined.toString();
+      }
+    }
+    String message = response.optString(McpConstants.KEY_MESSAGE, null);
+    return message == null || message.isBlank() ? null : message;
   }
 }

@@ -29,8 +29,12 @@ import org.openbravo.model.financialmgmt.tax.TaxRate;
 
 /**
  * Commercial document line defaults and synthetic callout fields.
+ * <p>
+ * The class is {@code public} only so the MCP layer can reach the one injection it shares with the
+ * REST create path ({@link #injectProductDerivedUomIfMissing}, IMP-15). Every other member stays
+ * package-private on purpose — this is a policy helper for {@code NeoCrudHandler}, not an API.
  */
-final class NeoCommercialLinePolicy {
+public final class NeoCommercialLinePolicy {
 
   private static final Logger log = LogManager.getLogger(NeoCommercialLinePolicy.class);
   private static final String VALUE_KEY = "value";
@@ -155,7 +159,15 @@ final class NeoCommercialLinePolicy {
   }
 
 
-  static void injectProductDerivedUomIfMissing(JSONObject body) {
+  /**
+   * Fill {@code uOM} from the line's product when the body omits it.
+   * <p>
+   * Public because {@code neo_create} (MCP) runs its own create pipeline rather than
+   * {@code NeoCrudHandler#executePostCreate}, and omitting this injection there made an otherwise
+   * complete line body fail with a bare DAL 500 (IMP-15). No-op when the body already carries a
+   * {@code uOM} or has no {@code product}.
+   */
+  public static void injectProductDerivedUomIfMissing(JSONObject body) {
     if (body == null) {
       return;
     }

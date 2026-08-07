@@ -623,8 +623,10 @@ public class ToolRegistry {
     Map<String, Object> bodyProp = new LinkedHashMap<>();
     bodyProp.put("type", McpConstants.TYPE_OBJECT);
     bodyProp.put(McpConstants.KEY_DESCRIPTION,
-        "Field values for the new record. String values of the form '$ref:<opId>' are "
-            + "replaced with the resolved recordId of an earlier op.");
+        "Field values for the new record, in the same format neo_create accepts: a foreign key "
+            + "may be a record id (32-char hex or a legacy numeric one such as '102') or a display "
+            + "name resolved server-side (e.g. currency:'EUR'). String values of the form "
+            + "'$ref:<opId>' are replaced with the resolved recordId of an earlier op.");
     opProps.put("body", bodyProp);
 
     Map<String, Object> opItem = new LinkedHashMap<>();
@@ -654,8 +656,9 @@ public class ToolRegistry {
             + "neo_list / neo_selectors first to look up existing records and only "
             + "include create ops for what is genuinely new. "
             + "Returns {committed:true, operations:[{id,ok:true,recordId}]} on success "
-            + "or {committed:false, failedAt:{id,index}, error:{status,message,detail?}} "
-            + "on failure.",
+            + "or {committed:false, failedAt:{id,index}, error:{status,error,detail,seeAlso}} "
+            + "on failure, where 'error' is a stable code (validation_error, not_found, "
+            + "method_not_allowed, server_error) naming what to fix.",
         buildObjectSchema(props, List.of("operations")));
   }
 

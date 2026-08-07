@@ -1653,6 +1653,98 @@ class McpToolRouterSupportTest {
     }
   }
 
+  @Nested
+  @DisplayName("toMcpBatchFailure (IMP-15)")
+  class ToMcpBatchFailure {
+
+    /** The verbatim shape BatchService forwarded to agents before IMP-15. */
+    private JSONObject rawDalFailure() throws Exception {
+      JSONObject errors = new JSONObject();
+      errors.put("id", "New object Currency(null)  (key: EUR_Currency) refered to but not present "
+          + "in the import set");
+      JSONObject response = new JSONObject();
+      response.put("status", -4);
+      response.put("errors", errors);
+      JSONObject detail = new JSONObject();
+      detail.put("response", response);
+
+      JSONObject error = new JSONObject();
+      error.put("status", 400);
+      error.put("message", "Operation 'h1' rejected by server");
+      error.put("detail", detail);
+      JSONObject failedAt = new JSONObject();
+      failedAt.put("index", 0);
+      failedAt.put("id", "h1");
+      JSONObject body = new JSONObject();
+      body.put("committed", false);
+      body.put("failedAt", failedAt);
+      body.put("error", error);
+      return body;
+    }
+
+    @Test
+    @DisplayName("replaces the raw DAL detail with the IMP-5 envelope, keeping the failedAt pointer")
+    void rewritesTheFailure() throws Exception {
+      JSONObject result = McpToolRouterSupport.toMcpBatchFailure(rawDalFailure());
+
+      JSONObject error = result.getJSONObject("error");
+      assertEquals(400, error.getInt("status"));
+      assertEquals("validation_error", error.getString("error"));
+      assertEquals("docs(topic:\"creating records\")", error.getString("seeAlso"));
+      // The DAL's own sentence survives — it names the value that could not be resolved.
+      assertTrue(error.getString("detail").contains("EUR_Currency"));
+      // …but its transport internals do not: status:-4 is not actionable by an agent.
+      assertFalse(error.toString().contains("-4"));
+      assertNull(error.optJSONObject("detail"));
+      assertEquals("h1", result.getJSONObject("failedAt").getString("id"));
+    }
+
+    @Test
+    @DisplayName("a committed batch and a body with no error object pass through untouched")
+    void passesThroughNonFailures() throws Exception {
+      JSONObject committed = new JSONObject();
+      committed.put("committed", true);
+      assertTrue(McpToolRouterSupport.toMcpBatchFailure(committed).getBoolean("committed"));
+
+      JSONObject noError = new JSONObject();
+      noError.put("committed", false);
+      assertNull(McpToolRouterSupport.toMcpBatchFailure(noError).optJSONObject("error"));
+      assertNull(McpToolRouterSupport.toMcpBatchFailure(null));
+    }
+
+    @Test
+    @DisplayName("maps each status onto a stable code an agent can branch on")
+    void mapsStatusesToCodes() {
+      assertEquals("not_found", McpToolRouterSupport.batchErrorCode(404));
+      assertEquals("method_not_allowed", McpToolRouterSupport.batchErrorCode(405));
+      assertEquals("validation_error", McpToolRouterSupport.batchErrorCode(400));
+      assertEquals("validation_error", McpToolRouterSupport.batchErrorCode(422));
+      assertEquals("server_error", McpToolRouterSupport.batchErrorCode(500));
+    }
+
+    @Test
+    @DisplayName("extracts a message from either DAL error shape, and none when there is none")
+    void extractsDalMessages() throws Exception {
+      JSONObject nested = new JSONObject();
+      JSONObject inner = new JSONObject();
+      inner.put("message", "Unit of Measure mismatch (product/transaction)");
+      JSONObject response = new JSONObject();
+      response.put("error", inner);
+      nested.put("response", response);
+      assertEquals("Unit of Measure mismatch (product/transaction)",
+          McpToolRouterSupport.extractDalMessage(nested));
+
+      JSONObject perField = new JSONObject();
+      JSONObject errors = new JSONObject();
+      errors.put("documentNo", "required");
+      perField.put("errors", errors);
+      assertEquals("documentNo: required", McpToolRouterSupport.extractDalMessage(perField));
+
+      assertNull(McpToolRouterSupport.extractDalMessage(null));
+      assertNull(McpToolRouterSupport.extractDalMessage(new JSONObject()));
+    }
+  }
+
   // ─── Helper ─────────────────────────────────────────────────────────
 
   /**

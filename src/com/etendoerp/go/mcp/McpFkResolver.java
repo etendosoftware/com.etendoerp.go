@@ -21,6 +21,7 @@ import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.function.Predicate;
 import java.util.regex.Pattern;
 
 import org.apache.logging.log4j.Logger;
@@ -29,6 +30,7 @@ import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.base.model.Entity;
 import org.openbravo.base.model.Property;
+import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.datamodel.Column;
 import org.openbravo.model.ad.ui.Tab;
 
@@ -43,6 +45,15 @@ import com.etendoerp.go.schemaforge.NeoSelectorService;
  * {@code businessPartner: "Acme Corp"}). This resolves such human search strings server-side via
  * the same {@link NeoSelectorService#querySelectorByColumn} path {@code neo_selectors} uses,
  * leaving an already-valid id untouched.
+ * <p>
+ * <b>Id-first (ETP-4793 / IMP-15).</b> "Already-valid id" cannot be decided by shape alone: every
+ * Etendo {@code _ID} column is a {@code VARCHAR}, and legacy master data (currency, UOM, document
+ * type, tax rate) still carries short numeric ids such as {@code "102"} for EUR. Matching only the
+ * 32-char hex form sent those values down the name path, where no record is literally *named*
+ * {@code "102"}, so the very id {@code neo_defaults} had just returned came back as a 422. Each
+ * candidate value is therefore probed as a record id of the target entity first, and only falls
+ * through to the selector lookup when no record carries it. The residual ambiguity — a display name
+ * that happens to equal some record's id — resolves to that record, which is what the caller meant.
  * <p>
  * <b>Known limitation:</b> the selector context passed here is built from {@code adTab} alone
  * (window sales/purchase context, business-partner role) — {@link McpSelectorContextHelper}'s
@@ -100,6 +111,23 @@ final class McpFkResolver {
    */
   static JSONObject resolveFkNames(JSONObject body, Entity dalEntity, Tab adTab,
       Map<String, String> contextParams, Logger log) throws JSONException {
+    return resolveFkNames(body, dalEntity, adTab, contextParams, log, value -> false);
+  }
+
+  /**
+   * Same as {@link #resolveFkNames(JSONObject, Entity, Tab, Map, Logger)}, but skips values the
+   * caller knows are not resolvable yet.
+   * <p>
+   * Added for {@code neo_batch} (IMP-15): a batch body may carry {@code "$ref:<opId>"} placeholders
+   * that {@code BatchService} substitutes with a real recordId only once the referenced op has run.
+   * Sending those to the selector would report a spurious {@code not_found} for a value that is
+   * about to become a valid id.
+   *
+   * @param skipValue predicate over the raw string value; {@code true} leaves it untouched
+   */
+  static JSONObject resolveFkNames(JSONObject body, Entity dalEntity, Tab adTab,
+      Map<String, String> contextParams, Logger log, Predicate<String> skipValue)
+      throws JSONException {
     if (body == null || dalEntity == null) {
       return null;
     }
@@ -110,7 +138,7 @@ final class McpFkResolver {
     }
 
     for (String key : keys) {
-      JSONObject error = resolveOneField(body, dalEntity, adTab, contextParams, log, key);
+      JSONObject error = resolveOneField(body, dalEntity, adTab, contextParams, log, key, skipValue);
       if (error != null) {
         return error;
       }
@@ -119,7 +147,8 @@ final class McpFkResolver {
   }
 
   private static JSONObject resolveOneField(JSONObject body, Entity dalEntity, Tab adTab,
-      Map<String, String> contextParams, Logger log, String key) throws JSONException {
+      Map<String, String> contextParams, Logger log, String key, Predicate<String> skipValue)
+      throws JSONException {
     Property prop = dalEntity.getProperty(key, false);
     if (prop == null || prop.isPrimitive() || prop.getTargetEntity() == null) {
       return null;
@@ -129,7 +158,10 @@ final class McpFkResolver {
       return null;
     }
     String search = (String) rawValue;
-    if (search.isEmpty() || looksLikeId(search)) {
+    // Order matters: the two cheap shape checks first (no DAL hit), then the id probe, and only
+    // then the selector lookup. See the class javadoc for why the shape check alone is not enough.
+    if (search.isEmpty() || skipValue.test(search) || looksLikeId(search)
+        || existsAsRecordId(prop, search, log)) {
       return null;
     }
 
@@ -161,13 +193,37 @@ final class McpFkResolver {
     }
   }
 
+  /**
+   * Probe {@code value} as a record id of the FK's target entity (IMP-15).
+   * <p>
+   * Uses {@code OBDal#get(String, Object)} rather than {@code exists}, so the tenant's read-access
+   * rules still apply: an id in a table this role cannot read reports {@code false} and falls
+   * through to the name path, exactly as before this probe existed. Any exception (unreadable
+   * entity, id type the target's PK cannot hold) is deliberately swallowed to the same effect —
+   * the worst case of this method is the pre-IMP-15 behaviour, never a new failure mode.
+   *
+   * @return {@code true} when a record with that id exists and is readable
+   */
+  private static boolean existsAsRecordId(Property prop, String value, Logger log) {
+    String targetEntity = prop.getTargetEntity().getName();
+    try {
+      return OBDal.getInstance().get(targetEntity, value) != null;
+    } catch (Exception e) {
+      log.debug("FK id probe for '{}' on {} failed, falling back to the name path: {}", value,
+          targetEntity, e.getMessage());
+      return false;
+    }
+  }
+
   private static JSONObject buildNotFoundError(String field, String search) throws JSONException {
     JSONObject error = new JSONObject();
     error.put(McpConstants.KEY_STATUS, McpConstants.STATUS_UNPROCESSABLE);
     error.put(McpConstants.KEY_ERROR, McpConstants.ERROR_NOT_FOUND);
+    // IMP-15: never say "pass the exact record id instead" — the id path already ran and found
+    // nothing, so that advice was emitted to agents that had passed a real (legacy numeric) id.
     error.put(McpConstants.KEY_DETAIL,
-        "No match for '" + field + "'='" + search + "'. Use neo_selectors to search, or pass "
-            + "the exact record id instead.");
+        "No match for '" + field + "'='" + search + "': it is neither the id of an existing record "
+            + "nor a value any selector matched. Use neo_selectors to find a valid one.");
     error.put(KEY_FIELD, field);
     return error;
   }
