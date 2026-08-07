@@ -37,6 +37,9 @@ public final class EtendoGoAccountProvisioning {
    * if an account for this email is already registered. Never throws for a duplicate — callers
    * driving this from a best-effort post-hook (e.g. after saving an {@code AD_User}) must not
    * have their parent operation fail because of this side effect.
+   *
+   * @param email the account's email (login identifier)
+   * @param name  the account holder's display name
    */
   public static void ensurePendingAccount(String email, String name) {
     EtendoGoJwtDalHelper.createPendingAccount(email, name);
@@ -53,6 +56,11 @@ public final class EtendoGoAccountProvisioning {
    * rejected with 400 instead of leaving behind a created user with no usable account; this
    * method does not re-validate it. A blank/null {@code plainPassword} falls back to {@link
    * #ensurePendingAccount}.
+   *
+   * @param email         the account's email (login identifier)
+   * @param name          the account holder's display name
+   * @param plainPassword the admin-typed password, already validated by the caller's
+   *                      pre-hook, or blank/null to fall back to a pending account
    */
   public static void ensureAccountForCreatedUser(String email, String name,
       String plainPassword) {

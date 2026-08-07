@@ -41,6 +41,9 @@ public final class PasswordHasher {
   /**
    * Hash a plaintext password using SHA-256 with a random salt.
    * Returns "base64(salt):base64(hash)" so the salt can be recovered for verification.
+   *
+   * @param password the plaintext password to hash
+   * @return "base64(salt):base64(hash)"
    */
   public static String hash(String password) {
     try {
