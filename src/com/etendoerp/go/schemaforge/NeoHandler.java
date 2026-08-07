@@ -71,4 +71,30 @@ public interface NeoHandler {
   default NeoResponse afterCallout(NeoContext context) {
     return null;
   }
+
+  /**
+   * Declares whether this handler serves ACTION sub-endpoint requests
+   * ({@code POST /{spec}/{entity}/{id}/action/{name}}), i.e. whether the entity it backs has
+   * an {@code /action} route at all.
+   *
+   * <p><b>Why this exists (ETP-4254).</b> The MCP catalog hides a spec whose every included
+   * entity is handler-backed (no {@code AD_Tab}), because the generic CRUD path cannot serve
+   * it — that is how the dashboard's business widgets stay out of {@code neo_discover} and
+   * out of the CRUD tool enums (gap G4, ETP-4284). But "no AD_Tab" alone is too broad: a
+   * tab-less spec can still expose a genuine transactional action route — {@code
+   * not-posted-documents} serves {@code post} / {@code bulk-post} — and hiding it would take
+   * that action away from agents, which is the opposite of what ETP-4254 wants. There is no
+   * action metadata on {@code ETGO_SF_ENTITY} (see {@code NeoActionSurface}), so the handler
+   * is the only authority on whether it answers ACTION requests.</p>
+   *
+   * <p>Returns {@code false} by default: a handler that only serves or augments CRUD has no
+   * action surface. <b>Override it and return {@code true} whenever your handler answers
+   * {@code NeoEndpointType.ACTION}</b> — it is only consulted for tab-less specs today, but
+   * declaring it keeps the catalog honest if the spec ever becomes tab-less.</p>
+   *
+   * @return {@code true} when this handler answers ACTION sub-endpoint requests
+   */
+  default boolean servesActions() {
+    return false;
+  }
 }

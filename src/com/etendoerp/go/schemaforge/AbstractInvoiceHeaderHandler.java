@@ -98,7 +98,7 @@ public abstract class AbstractInvoiceHeaderHandler {
   // ---------------------------------------------------------------------------
 
   /**
-   * Returns the invoice subtype ("FAC", "NC", or "DEV") for the given document-type ID.
+   * Returns the invoice subtype ("FAC" or "RECTIFICATIVA") for the given document-type ID.
    * Handles null/blank IDs and DB lookup errors; delegates category-to-subtype mapping
    * to {@link #classifyDocType(DocumentType)}.
    *
@@ -377,6 +377,17 @@ public abstract class AbstractInvoiceHeaderHandler {
    * Injects the invoice subtype virtual field ({@link #getInvoiceSubtypeKey()}) into the record
    * by resolving the current {@code transactionDocument} value via {@link #resolveSubtype(String)}.
    *
+   * <p>ETP-4738: a plain-invoice-category Factura Rectificativa (flagged via
+   * {@code EM_Etsg_Isrectificative}, so not already resolved to {@code SUBTYPE_RECTIFICATIVA} by
+   * document category) with a negative total is reclassified here for DISPLAY purposes only (grid
+   * "Pendiente de pago" badge, detail topbar credit pill), so it renders the same "Saldo a favor"
+   * treatment. That reclassification is deliberately NOT folded into {@link #classifyDocType} /
+   * {@link #resolveSubtype}: those are also used by {@link #validateOriginInvoiceRequired} to
+   * require the {@code originInvoice} field on save, but a rectificativa links its corrected
+   * invoice via {@code C_Invoice_Reverse} (the "Reversed Invoices" tab), not {@code
+   * originInvoice} — reusing the same subtype there would incorrectly block saving every Factura
+   * Rectificativa.
+   *
    * @param rec
    *     the invoice record JSON object; modified in-place
    * @param key
@@ -386,7 +397,16 @@ public abstract class AbstractInvoiceHeaderHandler {
    */
   protected void enrichInvoiceSubtype(JSONObject rec, String key) throws Exception {
     String docTypeId = rec.optString(FIELD_TRANSACTION_DOCUMENT, null);
-    rec.put(key, resolveSubtype(docTypeId));
+    String subtype = resolveSubtype(docTypeId);
+    // Short-circuit order matters: isRectificativeDocType() hits the DB, so it must stay behind
+    // both the cheap subtype check and the in-memory negative-total check — otherwise every row
+    // of a list response pays for an extra doc-type fetch.
+    if (SUBTYPE_FAC.equals(subtype)
+        && rec.optDouble(FIELD_GRAND_TOTAL_AMOUNT, 0.0) < 0
+        && RectificativeSupport.isRectificativeDocType(docTypeId)) {
+      subtype = SUBTYPE_RECTIFICATIVA;
+    }
+    rec.put(key, subtype);
   }
 
   /**
@@ -404,7 +424,8 @@ public abstract class AbstractInvoiceHeaderHandler {
 
   /**
    * Test hook: force or reset (null) the cached {@code em_etsg_isrectificative} column-presence
-   * check shared via {@link RectificativeSupport}.
+   * check shared via {@link RectificativeSupport} (the single source of truth for this flag,
+   * also used by the ETP-4738 "saldo a favor" filter).
    */
   static void setRectificativeColumnPresentForTests(Boolean value) {
     RectificativeSupport.setColumnPresentForTests(value);
@@ -416,7 +437,6 @@ public abstract class AbstractInvoiceHeaderHandler {
    * Returns false when the invoice is a draft with no doctype selected, or when the
    * SIF General module (owner of the column) is not installed.
    */
-  @SuppressWarnings("java:S2077")
   protected void enrichIsRectificative(JSONObject rec) throws Exception {
     String docTypeId = rec.optString(FIELD_TRANSACTION_DOCUMENT, null);
     if (StringUtils.isBlank(docTypeId) || !RectificativeSupport.isColumnPresent()) {
@@ -467,6 +487,7 @@ public abstract class AbstractInvoiceHeaderHandler {
     }
     rec.put("hasRectifications", result);
   }
+
 
   /**
    * Adjusts {@code grandTotalAmount} and {@code outstandingAmount} for a draft invoice carrying

@@ -79,6 +79,7 @@ import org.openbravo.service.json.JsonConstants;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFSpec;
 import com.etendoerp.go.schemaforge.util.NeoDistinctFetchSupport;
+import com.etendoerp.go.schemaforge.util.NeoMethodPolicy;
 import com.etendoerp.go.schemaforge.util.NeoTypeCoercionHelper;
 
 /**
@@ -158,16 +159,19 @@ class NeoCrudHandlerTest {
   }
 
   // -------------------------------------------------------------------------
-  // isMethodEnabled tests (via reflection on private method)
+  // Method-flag gate. ETP-4254 extracted the private NeoCrudHandler#isMethodEnabled into
+  // the shared NeoMethodPolicy (the MCP write path needed the same check), so these cases
+  // now exercise the shared helper directly instead of through reflection. They are kept
+  // here because this is the gate NeoCrudHandler#handleWindowEntityCrud applies to produce
+  // the REST 405 — see also NeoMethodPolicyTest for the helper's own edge cases.
   // -------------------------------------------------------------------------
 
   @Nested
   @DisplayName("isMethodEnabled")
   class IsMethodEnabled {
 
-    private boolean invokeIsMethodEnabled(String method, SFEntity entity) throws Exception {
-      return (boolean) invokePrivate(handler, "isMethodEnabled",
-          new Class<?>[] { String.class, SFEntity.class }, method, entity);
+    private boolean invokeIsMethodEnabled(String method, SFEntity entity) {
+      return NeoMethodPolicy.isMethodEnabled(entity, method);
     }
 
     @Test
