@@ -1130,6 +1130,74 @@ NEO Headless enforces security at multiple levels:
    PATCH, or DELETE method is enabled, so agents must not attempt a write even when the parent
    window spec is otherwise available.
 
+   **Spec-level `readOnly` marker (ETP-4254 AC#4):** a type-`W` spec whose every included entity
+   is read-only also carries `"readOnly": true` at the spec level, so an agent can pick the
+   writable specs out of the catalog without inspecting every entity of every spec. The key is
+   emitted **only when true** — writable specs have no `readOnly` key at all, and the negative
+   case is already carried per entity. It is never emitted for type-`P`/`R` specs. Derived from
+   the same entity list the `entities` array is built from, so it costs no extra query.
+
+   ```json
+   { "name": "monitor-verifactu", "type": "W", "readOnly": true,
+     "entities": [ { "name": "header", "methods": ["GET"], "readOnly": true } ] }
+   { "name": "sales-order", "type": "W",
+     "entities": [ { "name": "header", "methods": ["GET","POST","PUT","PATCH","DELETE"],
+                     "readOnly": false } ] }
+   ```
+
+   **The flags are enforced identically on every write entry point (ETP-4254).** The single
+   source of truth is `NeoMethodPolicy` (`schemaforge/util/NeoMethodPolicy.java`); `GET` is
+   enabled by either `ISGET` or `ISGETBYID`. It is consulted by:
+
+   | Entry point | Where | Refusal |
+   |---|---|---|
+   | REST CRUD | `NeoCrudHandler#handleWindowEntityCrud` | `405` `"<METHOD> not enabled for <entity>"` |
+   | `/batch` + MCP `neo_batch` | `BatchService#createRecord` (the batch enters at `handleDefault`, i.e. after the CRUD gate) | per-op `405`, whole batch rolled back |
+   | MCP `neo_create` / `neo_update` / `neo_delete` | `McpToolRouterSupport#requireMethodEnabled` | MCP tool error naming the enabled methods and stating the entity is read-only |
+
+   Before ETP-4254 only the REST path checked them, so turning the mutation flags off on a
+   monitor/log window blocked the React UI with a `405` while an MCP agent could still write —
+   and `neo_discover` reported `readOnly: true` while the write succeeded. Note that
+   `hasSpecAccess` (ETP-4510 `AD_Window_Access` tiering) is *role*-level and does not substitute
+   for this *entity*-level gate.
+
+   **Not gated by the flags, by design:** the sub-endpoints — `/action/*`, `/process`,
+   `/callout`, `/selector`, `/defaults`. `NeoRequestRouter` dispatches them before the CRUD
+   gate is reached, so a read-only-CRUD monitor window can still legitimately expose a button
+   action (e.g. `fiscal-monitor`'s `Correct_Invoice`). Do not extend the gate to them.
+
+   **MCP tool catalog consequence:** `ToolRegistry` builds one readable enum plus one enum per
+   write verb. Read tools (`neo_list`/`neo_get`/`neo_selectors`/`neo_defaults`/`neo_schema`) get
+   every accessible window spec. `neo_create`, `neo_update` and `neo_delete` each get only specs
+   with at least one entity enabling POST, PUT or DELETE respectively
+   (`McpToolRouterSupport#hasEntityWithMethod`). This per-verb split matters for mixed specs:
+   `monitor-verifactu` is offered by `neo_update` because one entity keeps PUT/PATCH, but not by
+   `neo_create` or `neo_delete`. Fully read-only monitors remain readable and absent from all
+   CRUD-write enums. `neo_action` keeps the read enum because actions are not gated by the method
+   flags.
+
+   **Catalog exclusion — needs BOTH conditions (`isCatalogExcludedSpec`).** A type-`W` spec is
+   dropped from the CRUD catalog *and* from discovery *and* from `McpResourceProvider` only when
+   it has neither surface:
+
+   1. every included entity is handler-backed (no `AD_Tab`), so the generic CRUD path cannot
+      serve it (`isHandlerOnlySpec`), **and**
+   2. no entity's handler declares `NeoHandler#servesActions()`, so there is no `/action` route
+      either (`NeoActionSurface`).
+
+   This replaced a hardcoded `"dashboard"` spec-name literal, and is scoped to type-`W` specs
+   because type-`R` report specs are handler-only by design. Condition 2 is not optional:
+   `hasSpecAccess` also gates `neo_action`, so testing condition 1 alone hid
+   `not-posted-documents` — a tab-less spec whose handler serves the `post` / `bulk-post`
+   actions — and took a real transactional action away from agents. `dashboard` satisfies both
+   conditions and is reached through `neo_widget` instead.
+
+   Because `ETGO_SF_ENTITY` carries no action metadata, condition 2 is a CDI probe of the
+   entity's `Java_Qualifier` handler and is **fail-open**: a missing qualifier aside, an
+   unregistered handler or a CDI failure keeps the spec visible. **Any handler serving ACTION
+   requests should override `servesActions()`** — it is only consulted for tab-less specs today,
+   but the declaration keeps the catalog honest if the spec ever loses its tabs.
+
 9. **Field-level control:** Only fields with `ISINCLUDED = 'Y'` participate in selector listings and button action discovery.
 
 **Known limitations (ETP-4596):** 7 of the 8 `SPEC_TYPE = 'R'` report specs have no classic-process mapping and still have no handler-level access control. Separately, the MCP tool catalog/discovery layer (`ToolRegistry`, `NeoDiscoveryHelper`, `McpToolRouterSupport`) still exposes the *existence* of process-null specs to any authenticated caller regardless of role — metadata-only exposure; actual data access is blocked wherever a handler-level gate exists. Both gaps are tracked in ETP-4596, not fixed by ETP-4510/ETP-4511.
