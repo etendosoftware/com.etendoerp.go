@@ -485,6 +485,10 @@ class McpToolRouterSupportTest {
       when(spec.getProcess()).thenReturn(process);
       when(process.getId()).thenReturn("proc-report");
       accessMock.when(() -> NeoAccessUtils.hasProcessAccess("proc-report")).thenReturn(true);
+      // ETP-4596: hasSpecAccess's "R" branch now delegates to hasReportSpecAccess (which
+      // internally resolves to hasProcessAccess for a process-backed spec), not directly to
+      // hasProcessAccess — stub the entry point the code actually calls.
+      accessMock.when(() -> NeoAccessUtils.hasReportSpecAccess(spec, "GET")).thenReturn(true);
 
       assertTrue(McpToolRouterSupport.hasSpecAccess(spec, "R"));
     }
