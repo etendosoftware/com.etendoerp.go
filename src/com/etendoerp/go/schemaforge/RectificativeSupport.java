@@ -20,7 +20,11 @@ package com.etendoerp.go.schemaforge;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
 
+import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.openbravo.dal.service.OBDal;
@@ -97,5 +101,66 @@ final class RectificativeSupport {
       return false;
     }
     return Boolean.TRUE.equals(dt.isEtsgIsRectificative());
+  }
+
+  /**
+   * Id-based counterpart of {@link #isRectificative(DocumentType)}, for call sites (e.g. {@code
+   * PaymentCreditConsumer}, {@link AbstractInvoiceHeaderHandler#enrichInvoiceSubtype}) that only
+   * have the document type id at hand.
+   *
+   * <p>Deliberately NOT an overload named {@code isRectificative}: {@link DocumentType} and
+   * {@link String} are unrelated reference types, so a plain {@code isRectificative(null)} call
+   * would be ambiguous and fail to compile.
+   *
+   * @param docTypeId the document type id to inspect, may be {@code null}/blank
+   * @return {@code true} only when the column exists and the flag is set
+   */
+  static boolean isRectificativeDocType(String docTypeId) {
+    if (StringUtils.isBlank(docTypeId) || !isColumnPresent()) {
+      return false;
+    }
+    return isRectificative(OBDal.getInstance().get(DocumentType.class, docTypeId));
+  }
+
+  /**
+   * Resolves the active "Factura Rectificativa" document type ids for {@code clientId} on the
+   * given transaction side (sales vs. purchase), scoped to that client and {@code "0"} (System).
+   * Used by the ETP-4738 "saldo a favor" filter ({@code PaymentCreditSourcesService}) to restrict
+   * eligible credit sources to the current unified document type.
+   *
+   * <p>Returns an empty, unmodifiable list when the column is absent, {@code clientId} is blank,
+   * no doc type is flagged, or the lookup fails — callers must treat an empty result as "no
+   * rectificative doc type is configured" (i.e. nothing can qualify), not as "unrestricted".
+   *
+   * @param clientId the invoice's client id
+   * @param isSalesTransaction {@code true} for the AR/sales side, {@code false} for AP/purchase
+   * @return an unmodifiable list of {@code C_DocType_ID}s, possibly empty
+   */
+  @SuppressWarnings("java:S2077")
+  static List<String> resolveRectificativeDocTypes(String clientId, boolean isSalesTransaction) {
+    if (StringUtils.isBlank(clientId) || !isColumnPresent()) {
+      return Collections.emptyList();
+    }
+    List<String> ids = new ArrayList<>();
+    try {
+      String sql = "SELECT dt.c_doctype_id FROM c_doctype dt"
+          + " WHERE dt.em_etsg_isrectificative = 'Y' AND dt.isactive = 'Y'"
+          + " AND dt.ad_client_id IN ('0', ?) AND dt.issotrx = ?";
+      Connection conn = OBDal.getReadOnlyInstance().getConnection();
+      try (PreparedStatement ps = conn.prepareStatement(sql)) {
+        ps.setString(1, clientId);
+        ps.setString(2, isSalesTransaction ? "Y" : "N");
+        try (ResultSet rs = ps.executeQuery()) {
+          while (rs.next()) {
+            ids.add(rs.getString(1));
+          }
+        }
+      }
+    } catch (Exception e) {
+      log.warn("Could not resolve rectificative doc types for client {}: {}", clientId,
+          e.getMessage());
+      return Collections.emptyList();
+    }
+    return Collections.unmodifiableList(ids);
   }
 }
