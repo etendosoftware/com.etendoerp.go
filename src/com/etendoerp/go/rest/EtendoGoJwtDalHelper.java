@@ -139,6 +139,35 @@ final class EtendoGoJwtDalHelper {
    * (e.g. the admin is linking a newly-created {@code AD_User} to a pre-existing platform
    * account) — this must never fail the parent {@code AD_User} save.
    */
+  /**
+   * ETP-4829: creates an {@code etgo_account} for a user an admin created directly, with a real,
+   * immediately-usable password the admin typed on the create form — a temporary workaround for
+   * environments where ETP-4830's invite-email flow isn't available yet. {@code passwordHash}
+   * must already be produced by {@link PasswordHasher#hash} (this method does not hash or
+   * validate strength — see {@link EtendoGoAccountProvisioning#ensureAccountForCreatedUser},
+   * which does both before calling this). Unlike {@link #createPendingAccount}, the account is
+   * {@code active} immediately: it already has everything a normal local-password account needs
+   * to log in. Same duplicate-email handling as {@link #createPendingAccount} — returns the
+   * existing account untouched rather than failing the parent {@code AD_User} save.
+   */
+  static Account createActiveAccount(String email, String passwordHash, String name) {
+    Account existing = findActiveAccountByEmail(email);
+    if (existing != null) {
+      return existing;
+    }
+    Account account = OBProvider.getInstance().get(Account.class);
+    account.setClient(OBDal.getInstance().get(Client.class, ZERO_ID));
+    account.setOrganization(OBDal.getInstance().get(Organization.class, ZERO_ID));
+    account.setEmail(email);
+    account.setPasswordHash(passwordHash);
+    account.setName(name);
+    account.setSessionToken(null);
+    account.set(PROPERTY_STATUS, STATUS_ACTIVE);
+    OBDal.getInstance().save(account);
+    flushAndCommitDalChanges();
+    return account;
+  }
+
   static Account createPendingAccount(String email, String name) {
     Account existing = findActiveAccountByEmail(email);
     if (existing != null) {

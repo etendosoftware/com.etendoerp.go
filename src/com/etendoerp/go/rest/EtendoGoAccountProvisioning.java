@@ -16,13 +16,15 @@
  */
 package com.etendoerp.go.rest;
 
+import org.apache.commons.lang3.StringUtils;
+
 /**
  * Public entry point (ETP-4829) letting other packages provision an {@code etgo_account} row
  * without depending on the package-private {@link EtendoGoJwtDalHelper}, which stays scoped to
  * this package on purpose (it owns account creation/auth invariants for {@link
  * EtendoGoJwtServlet}). Currently the only caller is {@code
  * com.etendoerp.go.schemaforge.handlers.UserRoleAssignmentHandler}, linking an admin-created
- * {@code AD_User} to a new pending platform account (see {@code docs/neo-headless.md}).
+ * {@code AD_User} to a new platform account (see {@code docs/neo-headless.md}).
  */
 public final class EtendoGoAccountProvisioning {
 
@@ -38,5 +40,27 @@ public final class EtendoGoAccountProvisioning {
    */
   public static void ensurePendingAccount(String email, String name) {
     EtendoGoJwtDalHelper.createPendingAccount(email, name);
+  }
+
+  /**
+   * ETP-4829: provisions the {@code etgo_account} for a freshly admin-created {@code AD_User},
+   * with an optional temporary workaround for environments without ETP-4830's invite-email flow
+   * yet — if the admin typed a password on the create form, the account is created {@code
+   * active} with that password (hashed via {@link PasswordHasher#hash}, the same algorithm
+   * self-service register/login use) instead of {@code pending}. {@code plainPassword} must
+   * already have passed {@link PasswordPolicy#isStrong} — that check has to happen in the
+   * caller's pre-hook, before the {@code AD_User} is even created, so a weak password is
+   * rejected with 400 instead of leaving behind a created user with no usable account; this
+   * method does not re-validate it. A blank/null {@code plainPassword} falls back to {@link
+   * #ensurePendingAccount}.
+   */
+  public static void ensureAccountForCreatedUser(String email, String name,
+      String plainPassword) {
+    if (StringUtils.isBlank(plainPassword)) {
+      ensurePendingAccount(email, name);
+      return;
+    }
+    String passwordHash = PasswordHasher.hash(plainPassword);
+    EtendoGoJwtDalHelper.createActiveAccount(email, passwordHash, name);
   }
 }

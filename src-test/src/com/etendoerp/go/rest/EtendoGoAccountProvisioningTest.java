@@ -17,6 +17,7 @@
 package com.etendoerp.go.rest;
 
 import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 
 import org.junit.jupiter.api.Test;
@@ -37,6 +38,42 @@ class EtendoGoAccountProvisioningTest {
 
       dalHelperMock.verify(
           () -> EtendoGoJwtDalHelper.createPendingAccount("new.user@test.com", "New User"));
+    }
+  }
+
+  @Test
+  void ensureAccountForCreatedUserCreatesPendingAccountWhenPasswordIsBlank() {
+    try (MockedStatic<EtendoGoJwtDalHelper> dalHelperMock =
+        mockStatic(EtendoGoJwtDalHelper.class)) {
+      EtendoGoAccountProvisioning.ensureAccountForCreatedUser("new.user@test.com", "New User",
+          "   ");
+
+      dalHelperMock.verify(
+          () -> EtendoGoJwtDalHelper.createPendingAccount("new.user@test.com", "New User"));
+      dalHelperMock.verify(
+          () -> EtendoGoJwtDalHelper.createActiveAccount(
+              org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any(),
+              org.mockito.ArgumentMatchers.any()),
+          never());
+    }
+  }
+
+  @Test
+  void ensureAccountForCreatedUserCreatesActiveAccountWithHashedPasswordWhenPresent() {
+    try (MockedStatic<EtendoGoJwtDalHelper> dalHelperMock =
+        mockStatic(EtendoGoJwtDalHelper.class);
+        MockedStatic<PasswordHasher> hasherMock = mockStatic(PasswordHasher.class)) {
+      hasherMock.when(() -> PasswordHasher.hash("Str0ng!Pass")).thenReturn("salt:hash");
+
+      EtendoGoAccountProvisioning.ensureAccountForCreatedUser("new.user@test.com", "New User",
+          "Str0ng!Pass");
+
+      dalHelperMock.verify(() -> EtendoGoJwtDalHelper.createActiveAccount("new.user@test.com",
+          "salt:hash", "New User"));
+      dalHelperMock.verify(
+          () -> EtendoGoJwtDalHelper.createPendingAccount(
+              org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any()),
+          never());
     }
   }
 }
