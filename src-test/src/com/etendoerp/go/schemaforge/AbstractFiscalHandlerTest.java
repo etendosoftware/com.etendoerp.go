@@ -134,6 +134,34 @@ public class AbstractFiscalHandlerTest {
         anyString());
   }
 
+  // ── incidents entity (ETP-4456) ───────────────────────────────────
+
+  /**
+   * Requests to the "incidents" entity must be delegated to
+   * {@link FiscalDeclCrudHandler#handleIncidents}, bypassing {@code isKnownEntity} and the
+   * year/period requirement entirely — same routing shape as "declarations". Deliberately no
+   * "year"/"period" stubbed on the request, proving this entity never hits that gate (if it did,
+   * {@code handleIncidents} would never even run and this would surface as a 400 instead). The
+   * {@code id} param IS supplied so {@code handleIncidents} gets past its own param check and
+   * reaches {@code OBContext}, which is forced to throw so the base class's
+   * {@code catch (Exception e)} → 500 path is exercised deterministically.
+   */
+  @Test
+  public void testIncidentsPathCatchesException() throws IOException {
+    HttpServletRequest  req  = mock(HttpServletRequest.class);
+    HttpServletResponse resp = mock(HttpServletResponse.class);
+    when(req.getParameter("id")).thenReturn("decl1");
+
+    StubHandler handler = new StubHandler(servlet, false);
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class)) {
+      ctxMock.when(OBContext::getOBContext).thenThrow(new OBException("no context"));
+      handler.handle("incidents", "GET", req, resp);
+    }
+
+    verify(servlet).sendError(eq(resp), eq(HttpServletResponse.SC_INTERNAL_SERVER_ERROR),
+        anyString());
+  }
+
   // ── allowsPost default ────────────────────────────────────────────
 
   /**
