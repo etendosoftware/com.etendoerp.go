@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+ *************************************************************************
+ * The contents of this file are subject to the Etendo License
+ * (the "License"), you may not use this file except in compliance with
+ * the License.
+ * You may obtain a copy of the License at
+ * https://github.com/etendosoftware/etendo_core/blob/main/legal/Etendo_license.txt
+ * Software distributed under the License is distributed on an
+ * "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, either express or
+ * implied. See the License for the specific language governing rights
+ * and limitations under the License.
+ * All portions are Copyright (C) 2021-2026 FUTIT SERVICES, S.L
+ * All Rights Reserved.
+ * Contributor(s): Futit Services S.L.
+ * *************************************************************************
+-->
+<!--
+  Logger configuration for this module's Gradle :test task.
+
+  Without this file, log4j2's classpath scan for a log4j2-test.xml/log4j2.xml resource
+  falls through to the one bundled INSIDE dbsm-*.jar (a transitive dependency, needed for
+  schema-comparison utilities) — that file is meant only for build-time/rebuild-from-GUI
+  logging and unconditionally wires OBRebuildAppender to the root logger. OBRebuildAppender
+  opens its own JDBC connection on every INFO+ log line to write into ad_error_log; doing so
+  on the very first log statement of DalLayerInitializer.initialize() races with (and
+  corrupts) JdbcExternalConnectionPool's own lazy pool bootstrap, so the real
+  ModelProvider.initializeReferenceClasses() call that follows gets a null DataSource and
+  every OBBaseTest-derived test class fails with "Failed to load reference classes" on
+  classSetUp. Reproduces 100% deterministically (not a flaky race) — see ETP-4738 dev notes.
+
+  Deliberately does NOT reference <TestLogAppender/> (used by the root project's own
+  src-test/src/log4j2-test.xml): that class lives in the root project's OWN src-test
+  sourceSet, not in openbravo-core.jar, so it is not guaranteed to be on this module's
+  isolated :test classpath.
+-->
+<Configuration>
+  <Loggers>
+    <Root level="info">
+      <AppenderRef ref="Console"/>
+    </Root>
+
+    <Logger name="org.hibernate" level="error"/>
+  </Loggers>
+
+  <Appenders>
+    <Console name="Console" target="SYSTEM_OUT">
+      <PatternLayout pattern="%d{HH:mm:ss.SSS} %-5p %c - %m%n"/>
+    </Console>
+  </Appenders>
+</Configuration>

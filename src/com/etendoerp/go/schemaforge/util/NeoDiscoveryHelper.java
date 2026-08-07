@@ -217,20 +217,10 @@ public final class NeoDiscoveryHelper {
    */
   public static JSONArray buildMethodsArray(SFEntity entity) {
     JSONArray methods = new JSONArray();
-    if (Boolean.TRUE.equals(entity.isGet()) || Boolean.TRUE.equals(entity.isGetByID())) {
-      methods.put("GET");
-    }
-    if (Boolean.TRUE.equals(entity.isPost())) {
-      methods.put("POST");
-    }
-    if (Boolean.TRUE.equals(entity.isPut())) {
-      methods.put("PUT");
-    }
-    if (Boolean.TRUE.equals(entity.isPatch())) {
-      methods.put("PATCH");
-    }
-    if (Boolean.TRUE.equals(entity.isDelete())) {
-      methods.put("DELETE");
+    // ETP-4254: read through NeoMethodPolicy so the advertised methods cannot drift from the
+    // methods actually enforced by the CRUD gate.
+    for (String method : NeoMethodPolicy.enabledMethods(entity)) {
+      methods.put(method);
     }
     return methods;
   }
