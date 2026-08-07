@@ -17,19 +17,25 @@
 
 package com.etendoerp.go.mcp;
 
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.TreeSet;
 
+import org.apache.commons.lang3.StringUtils;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.criterion.Restrictions;
 import org.openbravo.base.model.Entity;
 import org.openbravo.base.model.Property;
+import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.datamodel.Column;
+import org.openbravo.model.ad.ui.Field;
+import org.openbravo.model.ad.ui.FieldTrl;
 import org.openbravo.model.ad.ui.Process;
 import org.openbravo.model.ad.ui.Tab;
 
@@ -280,6 +286,123 @@ final class McpSchemaFieldBuilder {
     }
   }
 
+  /**
+   * Loads clean, localized {@code {label, description}} pairs for the tab's fields, keyed by
+   * upper-cased DB column name. The label comes from {@code AD_Field.name} and the one-line
+   * description from {@code AD_Field.description} — both translated into {@code langCode} via
+   * {@code ADFieldTrl} when a translation exists — so {@code neo_schema} surfaces the same
+   * functional label the Etendo UI shows instead of the raw {@code AD_Column} name
+   * (e.g. "SII Description" rather than "EM_Aeatsii_Descripcion_Sii"). (IMP-1, ref §7.1)
+   *
+   * <p>A column may back more than one field in the tab; the first active field wins (the tab's
+   * field list is sequence-ordered). Never throws — on any failure the base-language label is used,
+   * and columns with no field fall back to the {@code AD_Column} name kept by the array builder.</p>
+   */
+  static Map<String, String[]> loadFieldLabels(Tab adTab, String langCode) {
+    Map<String, String[]> byColumn = new HashMap<>();
+    if (adTab == null) {
+      return byColumn;
+    }
+    Map<String, Field> fieldByColumnName = new HashMap<>();
+    List<String> fieldIds = new ArrayList<>();
+    for (Field field : adTab.getADFieldList()) {
+      if (!Boolean.TRUE.equals(field.isActive()) || field.getColumn() == null) {
+        continue;
+      }
+      String colName = field.getColumn().getDBColumnName().toUpperCase();
+      if (fieldByColumnName.putIfAbsent(colName, field) == null) {
+        fieldIds.add((String) field.getId());
+      }
+    }
+    Map<String, String[]> trlById = loadFieldTranslations(fieldIds, langCode);
+    for (Map.Entry<String, Field> entry : fieldByColumnName.entrySet()) {
+      Field field = entry.getValue();
+      String[] trl = trlById.get((String) field.getId());
+      String label = trl != null && StringUtils.isNotBlank(trl[0]) ? trl[0] : field.getName();
+      String description = trl != null && StringUtils.isNotBlank(trl[1])
+          ? trl[1] : field.getDescription();
+      byColumn.put(entry.getKey(), new String[] { label, description });
+    }
+    return byColumn;
+  }
+
+  /**
+   * Resolves the {@code {name, description}} translation of the given AD_Field ids into
+   * {@code langCode} from {@code ADFieldTrl}. Runs in admin mode ({@code ADFieldTrl} is not
+   * readable under a restricted NEO role) and never throws — an empty map means callers use the
+   * base-language field text. Mirrors the {@code *_Trl} lookup convention in {@code NeoTrl}.
+   */
+  private static Map<String, String[]> loadFieldTranslations(List<String> fieldIds,
+      String langCode) {
+    Map<String, String[]> byId = new HashMap<>();
+    if (fieldIds.isEmpty() || StringUtils.isBlank(langCode)) {
+      return byId;
+    }
+    boolean adminMode = false;
+    try {
+      OBContext.setAdminMode(true);
+      adminMode = true;
+      OBCriteria<FieldTrl> crit = OBDal.getInstance().createCriteria(FieldTrl.class);
+      crit.add(Restrictions.in(FieldTrl.PROPERTY_FIELD + ".id", fieldIds));
+      crit.add(Restrictions.eq(FieldTrl.PROPERTY_LANGUAGE + ".language", langCode));
+      for (FieldTrl trl : crit.list()) {
+        byId.put((String) trl.getField().getId(),
+            new String[] { trl.getName(), trl.getDescription() });
+      }
+    } catch (Exception e) {
+      // Translation table not readable / language missing → fall back to base-language labels.
+      return new HashMap<>();
+    } finally {
+      if (adminMode) {
+        OBContext.restorePreviousMode();
+      }
+    }
+    return byId;
+  }
+
+  /**
+   * Overlays clean, localized labels and one-line descriptions (see {@link #loadFieldLabels}) onto
+   * an already-built schema array, keyed by each field's {@code column}. Applied as a
+   * post-processing pass so the array/field builders keep their parameter budget (Sonar S107) and
+   * this overlay stays independently unit-testable. A blank label/description leaves the existing
+   * value untouched. (IMP-1)
+   */
+  static void applyCuratedLabels(JSONArray fieldsArray, Map<String, String[]> labelsByColumn)
+      throws JSONException {
+    if (fieldsArray == null || labelsByColumn == null || labelsByColumn.isEmpty()) {
+      return;
+    }
+    for (int i = 0; i < fieldsArray.length(); i++) {
+      overlayCuratedLabel(fieldsArray.optJSONObject(i), labelsByColumn);
+    }
+  }
+
+  /**
+   * Overlay a single field's curated label/description (helper for {@link #applyCuratedLabels}).
+   * Returns early — leaving the field untouched — when the field, its {@code column}, or a matching
+   * curated entry is absent, or when the curated value is blank.
+   */
+  private static void overlayCuratedLabel(JSONObject field, Map<String, String[]> labelsByColumn)
+      throws JSONException {
+    if (field == null) {
+      return;
+    }
+    String column = field.optString("column", null);
+    if (column == null) {
+      return;
+    }
+    String[] labelDesc = labelsByColumn.get(column.toUpperCase());
+    if (labelDesc == null) {
+      return;
+    }
+    if (StringUtils.isNotBlank(labelDesc[0])) {
+      field.put(McpConstants.KEY_LABEL, labelDesc[0]);
+    }
+    if (StringUtils.isNotBlank(labelDesc[1])) {
+      field.put(McpConstants.KEY_DESCRIPTION, labelDesc[1]);
+    }
+  }
+
   static JSONArray buildSchemaFieldsArray(Tab adTab, Entity dalEntity,
       Map<String, String> visibilityByColumnId, Map<String, Boolean> businessCriticalByColumnId,
       Map<String, String> promptByColumnId,
@@ -308,7 +431,7 @@ final class McpSchemaFieldBuilder {
     JSONObject fieldObj = new JSONObject();
     fieldObj.put("name", resolvePropertyName(dalEntity, dbColName));
     fieldObj.put("column", dbColName);
-    fieldObj.put("label", col.getName());
+    fieldObj.put(McpConstants.KEY_LABEL, col.getName());
     fieldObj.put("type", type);
     fieldObj.put("required", col.isMandatory());
     fieldObj.put("readOnly", isReadOnlyColumn(adTab, col));

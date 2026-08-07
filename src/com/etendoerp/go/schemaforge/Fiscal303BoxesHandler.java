@@ -20,17 +20,18 @@ import java.math.BigDecimal;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Base64;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.function.Function;
-import java.util.stream.Collectors;
 
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 
+import org.apache.commons.lang3.StringUtils;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.ScrollableResults;
@@ -47,21 +48,37 @@ import org.openbravo.model.financialmgmt.calendar.Period;
 import org.openbravo.model.financialmgmt.tax.TaxRate;
 import org.openbravo.module.aeat303.es.api.CashVATOperationType;
 import org.openbravo.module.aeat303.es.api.InvoiceType;
+import org.openbravo.module.aeat303.es.presentation.AEAT303DeclarationData;
+import org.openbravo.module.aeat303.es.presentation.AEAT303SubmissionResult;
 import org.openbravo.module.aeat303.es.report.v2014.AEAT303Report2014Dao;
 import org.openbravo.module.aeat303.es.util.AEAT303CalculationsHelper;
 import org.openbravo.module.taxreportlauncher.TaxReport;
 import org.openbravo.module.taxreportlauncher.TaxReportParameter;
-import org.openbravo.module.taxreportlauncher.erpCommon.ad_reports.OBTL_TaxReport_I;
+
+import com.etendoerp.go.schemaforge.data.FiscalDecl;
 
 class Fiscal303BoxesHandler extends AbstractFiscalHandler {
 
   private static final String BOXES        = "boxes";
   private static final String GENERATE     = "generate";
+  private static final String SUBMIT       = "submit";
   private static final String VAT_SALES    = "VAT_SALES";
   private static final String VAT_PURCHASE    = "VAT_PURCHASE";
   private static final String PURCHASE        = "Purchase";
   private static final String TAX_BASE_AMOUNT = "TaxBaseAmount";
   private static final String TAX_AMOUNT      = "TaxAmount";
+
+  // ── AEAT 303 telematic submission (POST /neo/fiscal303/submit) ──────────
+  // Package-private (not private): also read by Fiscal303SubmissionSupport, which owns the
+  // /generate and /submit entities (moved out of this class in ETP-4456 to keep this class's
+  // method count under the SonarQube java:S1448 threshold — see that class's header javadoc).
+  static final String ID_KEY = "id";
+  /** Shared by {@code handleSubmit}'s body parsing (Fiscal303SubmissionSupport) and this class's
+   *  {@link #buildSubmissionResultJson}/{@link #buildFailureJson} JSON-shape helpers — extracted
+   *  (ETP-4456, SonarQube java:S1192) so the literal isn't duplicated across the two classes. */
+  static final String PARAM_TEST_MODE = "testMode";
+  /** AEAT declaration type character for "a ingresar" (type I): the only type that uses NRC. */
+  private static final String DECLARATION_TYPE_INGRESO = "I";
 
   private static final BigDecimal PCT_21   = new BigDecimal("21");
   private static final BigDecimal PCT_10   = new BigDecimal("10");
@@ -78,13 +95,22 @@ class Fiscal303BoxesHandler extends AbstractFiscalHandler {
   private static final BigDecimal PCT_1_00 = new BigDecimal("1.00");
   private static final BigDecimal PCT_1_75 = new BigDecimal("1.75");
 
+  private final Fiscal303SubmissionSupport submissionSupport;
+
   Fiscal303BoxesHandler(NeoServlet servlet) {
     super(servlet);
+    this.submissionSupport = new Fiscal303SubmissionSupport(this);
   }
 
   @Override
   protected boolean isKnownEntity(String entityName) {
-    return BOXES.equals(entityName) || GENERATE.equals(entityName) || MODIFIED.equals(entityName);
+    return BOXES.equals(entityName) || GENERATE.equals(entityName) || SUBMIT.equals(entityName)
+        || MODIFIED.equals(entityName);
+  }
+
+  @Override
+  protected boolean allowsPost(String entityName) {
+    return SUBMIT.equals(entityName);
   }
 
   @Override
@@ -98,7 +124,11 @@ class Fiscal303BoxesHandler extends AbstractFiscalHandler {
         response.getWriter().write(result.toString());
       } else if (GENERATE.equals(entityName)) {
         String tipo = request.getParameter("tipo");
-        handleGenerate(orgId, year, period, tipo, response);
+        submissionSupport.handleGenerate(orgId, year, period, tipo, request, response);
+      } else if (SUBMIT.equals(entityName)) {
+        String tipo = request.getParameter("tipo");
+        String declId = request.getParameter(ID_KEY);
+        submissionSupport.handleSubmit(orgId, year, period, tipo, declId, request, response);
       } else {
         long sinceMs = Long.parseLong(request.getParameter(SINCE_KEY));
         handleModified(orgId, year, period, new java.util.Date(sinceMs), response);
@@ -115,53 +145,97 @@ class Fiscal303BoxesHandler extends AbstractFiscalHandler {
     return "fiscal303";
   }
 
-  private void handleGenerate(String orgId, int year, String period, String tipo,
-      HttpServletResponse response) throws Exception {
-    boolean quarterly = period.startsWith("T");
-    String valueKey = quarterly ? "AEAT303_Q_" + year : "AEAT303_M_" + year;
+  /** True when the declaration exists and belongs to the current client/organization. */
+  boolean belongsTo(FiscalDecl decl, String clientId, String orgId) {
+    return decl != null
+        && decl.getClient() != null && clientId.equals(decl.getClient().getId())
+        && decl.getOrganization() != null && orgId.equals(decl.getOrganization().getId());
+  }
 
-    TaxReport taxReport   = resolveTaxReport(orgId, valueKey);
-    AcctSchema acctSchema = resolveAcctSchema();
-    List<Period> periods  = resolvePeriods(orgId, year, period);
+  /**
+   * NRC only applies to type I (ingreso) declarations — mirrors
+   * {@code AEAT303PresentationServlet#resolveNrcForSubmission} exactly, so a value entered for a
+   * non-I declaration is never forwarded to the AEAT.
+   */
+  static String resolveNrcForSubmission(String declarationType, String nrc) {
+    return DECLARATION_TYPE_INGRESO.equals(declarationType) ? StringUtils.defaultString(nrc) : "";
+  }
 
-    if (periods.isEmpty()) {
-      throw new OBException(
-          "No fiscal periods found for org=" + orgId + " year=" + year + " period=" + period);
+  static String safeFileToken(String value) {
+    String token = StringUtils.defaultIfBlank(value, "NA");
+    return token.replaceAll("[^A-Za-z0-9]", "_");
+  }
+
+  JSONObject declarationDataJson(AEAT303DeclarationData data) throws Exception {
+    JSONObject o = new JSONObject();
+    o.put("nif", StringUtils.defaultString(data.getNif()));
+    o.put("businessName", StringUtils.defaultString(data.getBusinessName()));
+    o.put("fiscalYear", StringUtils.defaultString(data.getFiscalYear()));
+    o.put(PERIOD_KEY, StringUtils.defaultString(data.getPeriod()));
+    o.put("declarationType", StringUtils.defaultString(data.getDeclarationType()));
+    o.put("resultAmount",
+        data.getResultAmount() != null ? data.getResultAmount().toString() : JSONObject.NULL);
+    o.put("iban", data.getIban() != null ? data.getIban() : JSONObject.NULL);
+    return o;
+  }
+
+  /** Builds the response for a submission that reached the AEAT (successfully or not). */
+  JSONObject buildSubmissionResultJson(AEAT303SubmissionResult result,
+      AEAT303DeclarationData data) throws Exception {
+    boolean testMode = result.isTestMode();
+    boolean successful = result.isSuccessful();
+    String status;
+    if (!successful) {
+      status = "ERROR";
+    } else if (testMode) {
+      status = "TEST_SUCCESS";
+    } else {
+      status = "SUCCESS";
     }
 
-    String yearId    = periods.get(0).getYear().getId();
-    String periodIds = periods.stream().map(Period::getId).collect(Collectors.joining(","));
-    String reportId  = taxReport.getId();
-    String acctId    = acctSchema.getId();
-    String className = taxReport.getJavaClassName();
+    JSONObject o = new JSONObject();
+    o.put("status", status);
+    o.put(PARAM_TEST_MODE, testMode);
+    o.put("csv", StringUtils.defaultString(result.getCsv()));
+    o.put("presentationDate", StringUtils.defaultString(result.getPresentationDate()));
+    o.put("registryNumber", StringUtils.defaultString(result.getRegistryNumber()));
+    o.put("justificanteNumber", StringUtils.defaultString(result.getJustificanteNumber()));
+    byte[] pdf = result.getPdfContent();
+    o.put("pdfBase64", pdf != null ? Base64.getEncoder().encodeToString(pdf) : JSONObject.NULL);
+    o.put("pdfDownloadFailed", result.isPdfDownloadFailed());
+    o.put("errors", new JSONArray(result.getErrors()));
+    o.put("warnings", new JSONArray(result.getWarnings()));
+    o.put("declarationData", declarationDataJson(data));
+    return o;
+  }
 
-    Map<String, String> inputParams = new HashMap<>();
-    String filename = "303_" + period + "_" + year;
-    inputParams.put("FileName", filename);
-    // Declaration type required by AEAT303_Utility.getCheckedInputParameter.
-    // Frontend sends AEAT letter codes directly: C, I, V, U, G. Default N (zero result).
-    inputParams.put("Declaration_" + resolveDeclType(tipo), "Y");
-    // Box 65: percentage attributable to the State (always 100 for Modelo 303).
-    inputParams.put("ToPublicTreasury", "100");
-
-    OBTL_TaxReport_I report = (OBTL_TaxReport_I)
-        Class.forName(className).getDeclaredConstructor().newInstance();
-
-    HashMap<String, Object> result =
-        report.generateElectronicFile(orgId, reportId, acctId, yearId, periodIds, inputParams);
-    writeGeneratedFile(result, filename + ".txt", response);
+  /** Builds the response for a submission that failed before (or without) reaching the AEAT. */
+  JSONObject buildFailureJson(boolean testMode, String errorCode, String message)
+      throws Exception {
+    JSONObject o = new JSONObject();
+    o.put("status", "ERROR");
+    o.put(PARAM_TEST_MODE, testMode);
+    o.put("errorCode", errorCode);
+    JSONArray errors = new JSONArray();
+    errors.put(StringUtils.defaultString(message));
+    o.put("errors", errors);
+    o.put("warnings", new JSONArray());
+    return o;
   }
 
   // ── Package-private helpers (tested directly) ─────────────────────────────
 
   /**
    * Maps a frontend AEAT letter code to the declaration type used by
-   * {@code AEAT303_Utility.getCheckedInputParameter}. Accepted codes: C, I, V, U, G.
+   * {@code AEAT303_Utility.getCheckedInputParameter}. Accepted codes: C, D, I, U, V, X, G —
+   * all 7 options the frontend's {@code TIPO_DECLARACION_FIELD} exposes, each backed by its own
+   * {@code Declaration_<letter>} search key in
+   * {@code 303_Report_Tax_Parameters.xml} (org.openbravo.module.aeat303.es).
    * Anything else (null, empty, unknown alias) falls back to "N" (zero result).
    */
   static String resolveDeclType(String tipo) {
-    if ("C".equals(tipo) || "I".equals(tipo) || "V".equals(tipo)
-        || "U".equals(tipo) || "G".equals(tipo)) {
+    if ("C".equals(tipo) || "D".equals(tipo) || "I".equals(tipo) || "U".equals(tipo)
+        || "V".equals(tipo) || "X".equals(tipo) || "G".equals(tipo)) {
       return tipo;
     }
     return "N";

@@ -474,7 +474,11 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
       }
       if (ol != null) {
         BigDecimal qty = resolveReceiptLineQty(rl, qtyOverrides);
-        if (qty != null && qty.compareTo(BigDecimal.ZERO) > 0) {
+        // ETP-4722: quantities can be NEGATIVE since ETP-4567 removed the old
+        // min: 0 constraint (e.g. a return-style receipt line). Only an exact
+        // zero means "nothing left to invoice" — a strictly-positive check
+        // silently dropped every negative-quantity receipt line here.
+        if (qty != null && qty.compareTo(BigDecimal.ZERO) != 0) {
           accumulated.merge(ol.getId(), qty, BigDecimal::add);
         }
       }
@@ -595,7 +599,9 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
     BigDecimal qty = qtyOverrides.containsKey(rl.getId())
         ? qtyOverrides.get(rl.getId())
         : rl.getMovementQuantity();
-    if (qty == null || qty.compareTo(BigDecimal.ZERO) <= 0) {
+    // ETP-4722: same sign-unaware bug as buildSelectedLinesFromReceipt above —
+    // only an exact zero means "nothing to invoice", negative qty is valid.
+    if (qty == null || qty.compareTo(BigDecimal.ZERO) == 0) {
       return null;
     }
     try {
@@ -634,7 +640,9 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
         String qtyStr = entry.optString("quantity", null);
         if (StringUtils.isNotBlank(lineId) && StringUtils.isNotBlank(qtyStr)) {
           BigDecimal qty = new BigDecimal(qtyStr);
-          if (qty.compareTo(BigDecimal.ZERO) > 0) {
+          // ETP-4722: an explicit override can legitimately be negative
+          // (partial invoicing of a negative-quantity receipt/shipment line).
+          if (qty.compareTo(BigDecimal.ZERO) != 0) {
             overrides.put(lineId, qty);
           }
         }
