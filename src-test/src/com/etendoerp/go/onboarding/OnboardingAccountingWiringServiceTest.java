@@ -233,6 +233,62 @@ public class OnboardingAccountingWiringServiceTest {
   }
 
   // ---------------------------------------------------------------------------------------------
+  // patchBpGroupAcctMissingColumns() — ETP-4720, preventive twin of R21-bp-group-acct-remaining-columns.sql
+  // ---------------------------------------------------------------------------------------------
+
+  @Test
+  public void testPatchBpGroupAcctMissingColumnsFailsWhenClientIdMissing() {
+    try {
+      new TestableService().patchBpGroupAcctMissingColumns(null, "ORG-1", "USER-1", "ROLE-1");
+      fail("Expected OBException for missing client");
+    } catch (OBException e) {
+      assertTrue(e.getMessage().contains("Missing client"));
+    }
+  }
+
+  @Test
+  public void testPatchBpGroupAcctMissingColumnsFailsWhenOrgIdMissing() {
+    try {
+      new TestableService().patchBpGroupAcctMissingColumns("CLIENT-1", null, "USER-1", "ROLE-1");
+      fail("Expected OBException for missing organization");
+    } catch (OBException e) {
+      assertTrue(e.getMessage().contains("Missing organization"));
+    }
+  }
+
+  @Test
+  public void testPatchBpGroupAcctMissingColumnsRunsPatchFlushesAndRestoresContext() {
+    OBContext previous = mock(OBContext.class);
+    OBContext.setOBContext(previous);
+
+    TestableService service = new TestableService();
+    service.bpGroupAcctPatchRowsToReturn = 3;
+
+    service.patchBpGroupAcctMissingColumns("CLIENT-1", "ORG-1", "USER-1", "ROLE-1");
+
+    assertEquals("the patch must run exactly once", 1, service.bpGroupAcctPatchCount);
+    assertEquals("the patch must be scoped to the target client", "CLIENT-1",
+        service.bpGroupAcctPatchClientId);
+    assertTrue("patchBpGroupAcctMissingColumns() must flush", service.flushed);
+    assertSame("must restore the previous context", previous, OBContext.getOBContext());
+  }
+
+  @Test
+  public void testPatchBpGroupAcctMissingColumnsDoesNotResolveClientOrLedger() {
+    // Unlike wire()/wireBusinessPartnerAccounts(), this method needs neither a Client entity nor a
+    // resolved AcctSchema — it patches every schema the tenant has via one client-scoped statement
+    // (see the corrective R21 fix it mirrors). Prove that by leaving clientMissing/ledgerMissing
+    // set and confirming no exception is thrown (those seams are never consulted).
+    TestableService service = new TestableService();
+    service.clientMissing = true;
+    service.ledgerMissing = true;
+
+    service.patchBpGroupAcctMissingColumns("CLIENT-1", "ORG-1", "USER-1", "ROLE-1");
+
+    assertEquals(1, service.bpGroupAcctPatchCount);
+  }
+
+  // ---------------------------------------------------------------------------------------------
   // provisionEntityPostingAccounts() — direct invocation
   // ---------------------------------------------------------------------------------------------
 
@@ -950,6 +1006,9 @@ public class OnboardingAccountingWiringServiceTest {
     int wireTreeCount;
     int rebrandCount;
     int provisionEntityCount;
+    int bpGroupAcctPatchCount;
+    String bpGroupAcctPatchClientId;
+    int bpGroupAcctPatchRowsToReturn;
 
     final List<AcctInsert> acctInserts = new ArrayList<>();
 
@@ -1036,6 +1095,13 @@ public class OnboardingAccountingWiringServiceTest {
     @Override
     protected void runEntityAcctInsert(String sql, String clientId, String schemaId) {
       acctInserts.add(new AcctInsert(sql, clientId, schemaId));
+    }
+
+    @Override
+    protected int runBpGroupAcctMissingColumnsPatch(String clientId) {
+      bpGroupAcctPatchCount++;
+      bpGroupAcctPatchClientId = clientId;
+      return bpGroupAcctPatchRowsToReturn;
     }
   }
 
