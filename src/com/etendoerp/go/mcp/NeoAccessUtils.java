@@ -81,6 +81,23 @@ public final class NeoAccessUtils {
   }
 
   /**
+   * Check if the current role has access to a report-type ({@code spec_type = "R"}) spec
+   * for the given HTTP-method equivalent (ETP-4596): delegates to
+   * {@link #hasProcessAccess(String)} when the spec has a real linked {@code AD_Process},
+   * or to the same constituent-window "combination" check
+   * {@link #hasWindowAccessForSpec(SFSpec, String)} uses for windowless {@code "W"} specs
+   * otherwise. See {@link NeoAccessHelper#hasReportSpecAccess(SFSpec, String)} for the full
+   * tiering rules.
+   *
+   * @param spec       the spec to check (may be {@code null}, in which case access is denied)
+   * @param httpMethod the HTTP-method equivalent of the MCP operation
+   * @return true if the current role may perform {@code httpMethod} against {@code spec}
+   */
+  public static boolean hasReportSpecAccess(SFSpec spec, String httpMethod) {
+    return NeoAccessHelper.hasReportSpecAccess(spec, httpMethod);
+  }
+
+  /**
    * Check if the current role has access to the given AD_Process.
    *
    * @param processId AD_Process_ID to check
