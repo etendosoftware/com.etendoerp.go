@@ -22,9 +22,12 @@ import static com.etendoerp.go.schemaforge.BankConnectionHandlerTestSupport.API_
 import static com.etendoerp.go.schemaforge.BankConnectionHandlerTestSupport.CONNECTION_ID;
 import static com.etendoerp.go.schemaforge.BankConnectionHandlerTestSupport.ORIGIN;
 import static com.etendoerp.go.schemaforge.BankConnectionHandlerTestSupport.PARAM_ACCOUNT_ID;
+import static com.etendoerp.go.schemaforge.BankConnectionHandlerTestSupport.PARAM_CONNECTION_ID;
+import static com.etendoerp.go.schemaforge.BankConnectionHandlerTestSupport.PARAM_PERMANENT_DELETION;
 import static com.etendoerp.go.schemaforge.BankConnectionHandlerTestSupport.postContext;
 import static com.etendoerp.go.schemaforge.BankConnectionHandlerTestSupport.stubObContext;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
@@ -37,6 +40,7 @@ import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.when;
 
 import java.util.Collections;
+import java.util.Date;
 import java.util.List;
 
 import javax.servlet.http.HttpServletRequest;
@@ -215,6 +219,78 @@ public class FinancialAccountBankConnectionHandlerConnectTest {
     }
   }
 
+  /**
+   * The reconnect callback is what actually revives the connection (ETP-4764). Salt Edge redirects
+   * to an SPA route that only relays the connection id, so unlike Classic nothing else marks the
+   * connection active again — without this the account stays deactivated forever. The whole group
+   * sharing the Salt Edge id is reactivated, and the consent expiry is refreshed from Salt Edge.
+   */
+  @Test
+  public void testReconnectCallbackReactivatesTheConnection() throws Exception {
+    JSONObject body = new JSONObject()
+        .put(PARAM_ACCOUNT_ID, ACCOUNT_ID)
+        .put(PARAM_CONNECTION_ID, CONNECTION_ID);
+
+    FIN_FinancialAccount finAcc = mock(FIN_FinancialAccount.class);
+    doReturn(finAcc).when(handler).loadAccount(ACCOUNT_ID);
+    FinaccConnection connection = mock(FinaccConnection.class);
+    JSONObject details = new JSONObject().put("id", CONNECTION_ID);
+    Date expiry = new Date();
+
+    try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
+        MockedStatic<BankIntegrationUtils> utils = mockStatic(BankIntegrationUtils.class);
+        MockedStatic<SaltEdgeAccountLinkHelper> linkHelper =
+            mockStatic(SaltEdgeAccountLinkHelper.class)) {
+      stubObContext(obContext);
+      linkHelper.when(() -> SaltEdgeAccountLinkHelper.getConnectionForFinAccAndSaltEdgeId(
+          finAcc, CONNECTION_ID)).thenReturn(connection);
+      linkHelper.when(() -> SaltEdgeAccountLinkHelper.getApiKeyForFinAcc(finAcc)).thenReturn(API_KEY);
+      utils.when(() -> BankIntegrationUtils.getSaltEdgeConnectionDetails(CONNECTION_ID, API_KEY))
+          .thenReturn(details);
+      linkHelper.when(() -> SaltEdgeAccountLinkHelper.resolveConsentExpiresAt(details, API_KEY))
+          .thenReturn(expiry);
+
+      NeoResponse response = handler.handle(postContext("reconnect-callback", body));
+
+      assertEquals(200, response.getHttpStatus());
+      assertTrue(dataOf(response).getBoolean("connected"));
+      linkHelper.verify(() -> SaltEdgeAccountLinkHelper.syncAllConnectionsForSaltEdgeId(
+          CONNECTION_ID, "AC", expiry));
+    }
+  }
+
+  /** The reconnect callback needs the connection id the popup relayed back. */
+  @Test
+  public void testReconnectCallbackWithoutConnectionIdReturns400() throws Exception {
+    JSONObject body = new JSONObject().put(PARAM_ACCOUNT_ID, ACCOUNT_ID);
+
+    try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class)) {
+      stubObContext(obContext);
+      assertEquals(400, handler.handle(postContext("reconnect-callback", body)).getHttpStatus());
+    }
+  }
+
+  /** A callback naming a connection this account is not linked to resolves to a 404. */
+  @Test
+  public void testReconnectCallbackUnknownConnectionReturns404() throws Exception {
+    JSONObject body = new JSONObject()
+        .put(PARAM_ACCOUNT_ID, ACCOUNT_ID)
+        .put(PARAM_CONNECTION_ID, CONNECTION_ID);
+
+    FIN_FinancialAccount finAcc = mock(FIN_FinancialAccount.class);
+    doReturn(finAcc).when(handler).loadAccount(ACCOUNT_ID);
+
+    try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
+        MockedStatic<SaltEdgeAccountLinkHelper> linkHelper =
+            mockStatic(SaltEdgeAccountLinkHelper.class)) {
+      stubObContext(obContext);
+      linkHelper.when(() -> SaltEdgeAccountLinkHelper.getConnectionForFinAccAndSaltEdgeId(
+          finAcc, CONNECTION_ID)).thenReturn(null);
+
+      assertEquals(404, handler.handle(postContext("reconnect-callback", body)).getHttpStatus());
+    }
+  }
+
   /** reconnect on an account with no connection is rejected with a 400. */
   @Test
   public void testReconnectWithoutConnectionReturns400() throws Exception {
@@ -245,17 +321,23 @@ public class FinancialAccountBankConnectionHandlerConnectTest {
   }
 
   /**
-   * disconnect delegates to the helper and reports the boolean result. On a successful disconnect
-   * (ETP-4406) the handler also restores {@code Automatic Withdrawn} on the account's transfer
-   * payment method(s); this account has none, so that restore is a no-op — the empty
+   * disconnect delegates to the helper and reports the boolean result. On a successful permanent
+   * disconnect (ETP-4406) the handler also restores {@code Automatic Withdrawn} on the account's
+   * transfer payment method(s); this account has none, so that restore is a no-op — the empty
    * {@code FinAccPaymentMethod} criteria is stubbed so it does not hit a real Hibernate session.
    * The transfer-restore behavior itself is covered in {@code FinancialAccountBankConnectionHandlerLinkTest}.
+   *
+   * <p>The account reports a blank Salt Edge id after the call, which is how the handler
+   * recognizes a permanent deletion (ETP-4764).
    */
   @Test
   public void testDisconnectReturnsHelperResult() throws Exception {
-    JSONObject body = new JSONObject().put(PARAM_ACCOUNT_ID, ACCOUNT_ID);
+    JSONObject body = new JSONObject()
+        .put(PARAM_ACCOUNT_ID, ACCOUNT_ID)
+        .put(PARAM_PERMANENT_DELETION, true);
 
     FIN_FinancialAccount finAcc = mock(FIN_FinancialAccount.class);
+    when(finAcc.getPSD2SaltEdgeAccountID()).thenReturn(null);
     doReturn(finAcc).when(handler).loadAccount(ACCOUNT_ID);
 
     try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
@@ -263,7 +345,7 @@ public class FinancialAccountBankConnectionHandlerConnectTest {
             mockStatic(SaltEdgeAccountLinkHelper.class);
         MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
       stubObContext(obContext);
-      linkHelper.when(() -> SaltEdgeAccountLinkHelper.disconnectFinancialAccount(finAcc))
+      linkHelper.when(() -> SaltEdgeAccountLinkHelper.disconnectFinancialAccount(finAcc, true))
           .thenReturn(true);
       OBDal dal = mock(OBDal.class);
       obDal.when(OBDal::getInstance).thenReturn(dal);
@@ -273,6 +355,76 @@ public class FinancialAccountBankConnectionHandlerConnectTest {
 
       assertEquals(200, response.getHttpStatus());
       assertTrue(dataOf(response).getBoolean("disconnected"));
+      assertTrue(dataOf(response).getBoolean("permanent"));
+      assertFalse(dataOf(response).getBoolean("reconnectable"));
+    }
+  }
+
+  /**
+   * With no {@code permanentDeletion} field in the body the handler must default to the soft
+   * disconnect — the recoverable behavior, matching Classic's unchecked checkbox. The account
+   * keeps its Salt Edge id, so the response reports it as reconnectable and the
+   * {@code Automatic Withdrawn} restore is skipped (the link is still alive).
+   */
+  @Test
+  public void testDisconnectDefaultsToSoftWhenFlagAbsent() throws Exception {
+    JSONObject body = new JSONObject().put(PARAM_ACCOUNT_ID, ACCOUNT_ID);
+
+    FIN_FinancialAccount finAcc = mock(FIN_FinancialAccount.class);
+    when(finAcc.getPSD2SaltEdgeAccountID()).thenReturn("SE-ACC-1");
+    doReturn(finAcc).when(handler).loadAccount(ACCOUNT_ID);
+
+    try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
+        MockedStatic<SaltEdgeAccountLinkHelper> linkHelper =
+            mockStatic(SaltEdgeAccountLinkHelper.class)) {
+      stubObContext(obContext);
+      linkHelper.when(() -> SaltEdgeAccountLinkHelper.disconnectFinancialAccount(finAcc, false))
+          .thenReturn(true);
+
+      NeoResponse response = handler.handle(postContext(ACTION_DISCONNECT, body));
+
+      assertEquals(200, response.getHttpStatus());
+      assertTrue(dataOf(response).getBoolean("disconnected"));
+      assertFalse(dataOf(response).getBoolean("permanent"));
+      assertTrue(dataOf(response).getBoolean("reconnectable"));
+      linkHelper.verify(() -> SaltEdgeAccountLinkHelper.disconnectFinancialAccount(finAcc, false));
+    }
+  }
+
+  /**
+   * A Salt Edge connection shared by several Financial Accounts always takes the unlink path,
+   * even when a soft disconnect was requested — marking it inactive would break the siblings.
+   * The handler must therefore report what actually happened ({@code permanent: true}) rather
+   * than echoing the requested flag, which is why it re-derives the outcome from the account's
+   * own Salt Edge id instead of trusting the request.
+   */
+  @Test
+  public void testDisconnectSoftOnSharedConnectionReportsPermanent() throws Exception {
+    JSONObject body = new JSONObject()
+        .put(PARAM_ACCOUNT_ID, ACCOUNT_ID)
+        .put(PARAM_PERMANENT_DELETION, false);
+
+    FIN_FinancialAccount finAcc = mock(FIN_FinancialAccount.class);
+    // The shared-connection path unlinked the account despite the soft request.
+    when(finAcc.getPSD2SaltEdgeAccountID()).thenReturn(null);
+    doReturn(finAcc).when(handler).loadAccount(ACCOUNT_ID);
+
+    try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
+        MockedStatic<SaltEdgeAccountLinkHelper> linkHelper =
+            mockStatic(SaltEdgeAccountLinkHelper.class);
+        MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      stubObContext(obContext);
+      linkHelper.when(() -> SaltEdgeAccountLinkHelper.disconnectFinancialAccount(finAcc, false))
+          .thenReturn(true);
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      stubFinAccPaymentMethods(dal, Collections.emptyList());
+
+      NeoResponse response = handler.handle(postContext(ACTION_DISCONNECT, body));
+
+      assertEquals(200, response.getHttpStatus());
+      assertTrue(dataOf(response).getBoolean("permanent"));
+      assertFalse(dataOf(response).getBoolean("reconnectable"));
     }
   }
 
