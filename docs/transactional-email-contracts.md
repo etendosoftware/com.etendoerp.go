@@ -52,8 +52,48 @@ Rejected provider passthrough shape:
 | `EmailProviderAdapter` | Backend-only boundary to the external provider |
 | `ApiGatewayEmailProviderAdapter` | HTTP adapter for API Gateway-style providers |
 | `EmailProviderConfig` | Reads provider configuration from server-side properties or environment variables |
+| `GoProviderEmailSender` | Core `EmailSender` SPI implementation routing core ERP emails over the provider when no SMTP applies |
 
 The default executor loads injected contract providers. A missing contract still returns `VALIDATION_FAILED` with HTTP 404.
+
+## Core ERP Emails Through the Provider (`GoProviderEmailSender`)
+
+Everything above describes emails originated by this module's own contracts. Core ERP emails —
+alerts, password resets, portal access grants, legacy Print/Email — travel a different path:
+`EmailManager` routes them through `EmailSenderDispatcher` (`com.etendoerp.email.spi`, added by
+ETP-4216), which picks the highest-priority sender reporting itself configured.
+`GoProviderEmailSender` is this module's contribution to that SPI, so those emails can also go
+out over the provider gateway.
+
+It is a **fallback, not an override**. It reports itself configured only when all of the
+following hold:
+
+1. the provider is configured (`etendo.go.email.provider.enabled`, `.baseUrl`, `.apiKey`);
+2. the send context carries no SMTP configuration, resolved or otherwise;
+3. the message has no attachments and no BCC — the provider payload has no slot for either, so
+   it declines rather than dropping them, and the dispatcher falls back to SMTP.
+
+A `null` email means the dispatcher is probing for capability
+(`hasAlternativeSenderConfigured()`), and the sender answers `true` so callers get past their
+pre-send guard.
+
+Priority is `50`: below `TbaiEmailSender`'s `100`, so TicketBAI keeps delivering its own
+rejection alert through its own mailbox, and above `DefaultSmtpEmailSender`'s
+`Integer.MIN_VALUE`.
+
+Delivery uses the `custom` template with `data.subject` and `data.body` — the
+bring-your-own-content template documented under *Provider template allowlist*. The provider
+sends from its own verified identity, so core's `from`/`fromName` are ignored, as are
+`sentDate` and `headerExtras`.
+
+**Practical consequence:** the `com.smf.currency.conversionrate` failure alert now reaches its
+recipient on a System-scheduled downloader, where the SMTP cascade resolves nothing because it
+filters by client `0`. That module required no changes — the dispatcher selects the transport
+for it.
+
+Environments with SMTP configured, or without the provider configured, are unaffected.
+
+Design and rollout notes: `docs/plans/2026-08-10-go-provider-email-sender-design.md`.
 
 ## Authorization and Recipient Resolution
 
