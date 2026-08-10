@@ -354,7 +354,8 @@ public class McpToolRouter {
 
     // IMP-2: optional projection — explicit `fields:[...]` or view:"summary". No-op when neither
     // is present, so the default returns every column.
-    McpQuerySupport.applyProjection(responseJson, args, sfEntity, adTab);
+    // IMP-18: the filter is passed in so an unknown requested name is reported, not dropped.
+    McpQuerySupport.applyProjection(responseJson, args, sfEntity, adTab, fieldFilter);
 
     return wrapAsTextContent(responseJson.toString(2));
   }
@@ -400,7 +401,8 @@ public class McpToolRouter {
     fieldFilter.filterGetResponse(responseJson);
 
     // IMP-2: optional projection — explicit `fields:[...]` or view:"summary".
-    McpQuerySupport.applyProjection(responseJson, args, sfEntity, adTab);
+    // IMP-18: unknown requested names come back as response.unknownFields.
+    McpQuerySupport.applyProjection(responseJson, args, sfEntity, adTab, fieldFilter);
 
     return wrapAsTextContent(responseJson.toString(2));
   }

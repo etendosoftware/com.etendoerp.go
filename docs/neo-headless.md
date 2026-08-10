@@ -1028,6 +1028,43 @@ or `server_error` (5xx, and the batch-wide failure reported at index `-1`) — o
 worth retrying with a corrected request. The DAL's own text is preserved inside `detail`; its numeric
 `status: -4` is dropped, since it names nothing an agent can act on.
 
+#### 4.12.5 `neo_list` / `neo_get` — unknown projection fields (IMP-18)
+
+The `fields:[…]` projection is a whitelist, so a misspelt name used to be indistinguishable from a
+field that simply held no value: the key was absent from the row either way. `neo_schema` already
+reported its rejects (§ its own `fields` argument, `unknownFields`), and the two tools now behave the
+same way — one argument name, one contract.
+
+Any requested name the entity cannot return comes back under `response`, next to `data`, sorted:
+
+```json
+{
+  "response": {
+    "data": [ { "id": "…", "documentNo": "INV-1" } ],
+    "unknownFields": ["totalGross"]
+  }
+}
+```
+
+Three decisions worth knowing, because each one is a case where the obvious implementation lies:
+
+- **Validated against what the entity can emit, not against the rows returned.** On an empty result
+  set no row can answer the question — and that is exactly when a typo is most expensive, since the
+  agent reads "no matches" and concludes the data is missing rather than that it asked wrong.
+- **The emittable set is the spec's exposure, post-rename** (`NeoFieldFilter.emittableResponseKeys()`):
+  API keys, not DAL property names. A property the spec does not include, or that is served under a
+  `javaQualifier` alias, is just as unreachable for the caller as one that does not exist — so
+  requesting `dateAcct` when the spec exposes `accountingDate` is reported. When no `ETGO_SF_FIELD`
+  config exists the filter is inactive and the response is unfiltered, so the DAL entity's property
+  list is the fallback; if neither source resolves, nothing is reported (silence beats accusing a
+  valid field).
+- **Only an explicit `fields:[…]` whitelist is judged.** A `view:"summary"` set is derived server-side
+  from properties that already resolved, so an unknown name there would be our bug, not the caller's.
+
+A requested `$_identifier` companion is normalised to its base property, for both the projection and
+the validation — `fields:["businessPartner$_identifier"]` returns the FK *and* its label (it used to
+return only `id`) and is never mislabelled as unknown.
+
 ---
 
 ## 5. Configuration

@@ -436,7 +436,9 @@ public class ToolRegistry {
     props.put(McpFieldProjection.PARAM_FIELDS, stringArrayProp(
         "Optional projection: return only these field names per row (e.g. "
             + "[\"documentNo\",\"businessPartner\",\"grandTotalAmount\"]). A FK's $_identifier "
-            + "label is included automatically. Omit to return every column."));
+            + "label is included automatically. Names this entity cannot return come back in "
+            + "\"unknownFields\" alongside \"data\" — check it if a field you expected is missing, "
+            + "including when \"data\" is empty. Omit to return every column."));
     props.put(McpFieldProjection.PARAM_VIEW, enumProp(
         "Optional curated view. \"summary\" returns only the spec's business-critical fields — a "
             + "compact row for compliance-heavy specs. Ignored when `fields` is given; omit for the "
@@ -458,7 +460,9 @@ public class ToolRegistry {
     props.put(McpFieldProjection.PARAM_FIELDS, stringArrayProp(
         "Optional projection: return only these field names (e.g. "
             + "[\"documentNo\",\"grandTotalAmount\"]). A FK's $_identifier label is included "
-            + "automatically. Omit to return every column."));
+            + "automatically. Names this entity cannot return come back in \"unknownFields\" "
+            + "alongside \"data\" — check it if a field you expected is missing. Omit to return "
+            + "every column."));
     props.put(McpFieldProjection.PARAM_VIEW, enumProp(
         "Optional curated view. \"summary\" returns only the spec's business-critical fields. "
             + "Ignored when `fields` is given; omit for the full record.",

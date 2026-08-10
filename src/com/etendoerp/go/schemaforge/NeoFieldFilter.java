@@ -327,6 +327,32 @@ public class NeoFieldFilter {
   }
 
   /**
+   * The field keys a GET response can actually contain, expressed as the API keys the caller sees —
+   * i.e. every included DAL property already passed through the {@code propNameToApiKey} rename that
+   * {@link #filterGetResponse} applies. Companion keys such as {@code $_identifier} are included as
+   * they appear.
+   *
+   * <p>Exists so a caller can tell "this name is not available here" from "this name happens to be
+   * absent from the rows I got back" **without inspecting the rows** — the row-inspection answer is
+   * undefined on an empty result set, which is exactly when a typo is most expensive to miss
+   * (IMP-18). Read-only: the returned set is a copy.
+   *
+   * @return the emittable response keys, or {@code null} when this filter is inactive (no
+   *     {@code ETGO_SF_FIELD} config), in which case the response is unfiltered and the caller must
+   *     fall back to the DAL entity's own property list rather than assume nothing is valid
+   */
+  public Set<String> emittableResponseKeys() {
+    if (!active || includedFields == null) {
+      return null;
+    }
+    Set<String> keys = new HashSet<>();
+    for (String propName : includedFields) {
+      keys.add(propNameToApiKey.getOrDefault(propName, propName));
+    }
+    return keys;
+  }
+
+  /**
    * Filter a POST (create) request body.
    * Allows read-only fields through because they may carry values from callouts
    * or defaults that are required for record creation (e.g., transactionDocument).

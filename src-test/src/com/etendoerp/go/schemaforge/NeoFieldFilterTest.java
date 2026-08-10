@@ -368,6 +368,31 @@ class NeoFieldFilterTest {
   }
 
   @Nested
+  @DisplayName("emittableResponseKeys (IMP-18)")
+  class EmittableResponseKeys {
+    @Test
+    @DisplayName("Returns the included properties renamed to their API keys")
+    void returnsApiKeys() throws Exception {
+      Map<String, String> propToApiKey = new HashMap<>();
+      propToApiKey.put("dateAcct", "accountingDate");
+      NeoFieldFilter filter = activeFilterWithMappings(
+          new HashSet<>(Set.of("id", "documentNo", "dateAcct")), Collections.emptySet(),
+          Collections.emptyMap(), propToApiKey);
+
+      // The DAL name "dateAcct" must NOT appear: the caller never sees it, so asking for it is
+      // as wrong as asking for a field that does not exist.
+      assertEquals(Set.of("id", "documentNo", "accountingDate"), filter.emittableResponseKeys());
+    }
+
+    @Test
+    @DisplayName("Returns null for an inactive filter — the response is unfiltered, so the spec "
+        + "cannot answer what is emittable")
+    void inactiveReturnsNull() {
+      assertNull(NeoFieldFilter.forEntity(null, "Order").emittableResponseKeys());
+    }
+  }
+
+  @Nested
   @DisplayName("filterCreateRequest")
   class FilterCreateRequest {
     @Test

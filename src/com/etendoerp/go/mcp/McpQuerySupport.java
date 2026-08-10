@@ -28,6 +28,7 @@ import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.datamodel.Column;
 import org.openbravo.model.ad.ui.Tab;
 
+import com.etendoerp.go.schemaforge.NeoFieldFilter;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFField;
 
@@ -258,22 +259,68 @@ final class McpQuerySupport {
    * Precedence: an explicit {@code fields:[...]} whitelist wins; otherwise {@code view:"summary"}
    * uses the entity's business-critical fields; anything else leaves the response full. A no-op
    * when neither is present, so the default behavior is unchanged.
+   *
+   * <p>IMP-18: an explicit whitelist is also validated, and any name the entity cannot emit comes
+   * back as {@code response.unknownFields} instead of vanishing. {@code fieldFilter} is the same
+   * filter the caller already applied to the rows, and is what makes the answer honest — the
+   * emittable set has to be the spec's exposure post-rename, not the DAL model.
    */
-  static void applyProjection(JSONObject responseJson, JSONObject args, SFEntity sfEntity, Tab adTab)
-      throws JSONException {
+  static void applyProjection(JSONObject responseJson, JSONObject args, SFEntity sfEntity, Tab adTab,
+      NeoFieldFilter fieldFilter) throws JSONException {
     if (args == null) {
       return;
     }
     java.util.Set<String> requested;
     JSONArray fields = args.optJSONArray(McpFieldProjection.PARAM_FIELDS);
-    if (fields != null) {
-      requested = McpFieldProjection.parseFields(fields);
+    boolean explicitWhitelist = fields != null;
+    if (explicitWhitelist) {
+      requested = McpFieldProjection.baseNames(McpFieldProjection.parseFields(fields));
     } else if (McpFieldProjection.isSummaryView(
         args.optString(McpFieldProjection.PARAM_VIEW, null))) {
       requested = summaryFields(sfEntity, adTab);
     } else {
       return;
     }
+    if (explicitWhitelist) {
+      // IMP-18: only an explicit caller whitelist can contain a typo. A view:"summary" set is
+      // derived server-side from properties that already resolved, so an unknown name there would
+      // be a server bug, not caller input, and reporting it would blame the wrong party.
+      McpFieldProjection.reportUnknownFields(responseJson, requested,
+          emittableBaseNames(fieldFilter, adTab));
+    }
     McpFieldProjection.apply(responseJson, requested);
+  }
+
+  /**
+   * The base field names a response for this entity can contain, for validating a caller's
+   * {@code fields:[…]} whitelist (IMP-18).
+   *
+   * <p>The authoritative source is {@link NeoFieldFilter#emittableResponseKeys()} — the spec's own
+   * exposure, already renamed to API keys — because a DAL property the spec does not include is just
+   * as unavailable to the caller as one that does not exist. When no {@code ETGO_SF_FIELD} config
+   * exists the filter is inactive and the response is unfiltered, so the DAL entity's property list
+   * is the correct fallback.
+   *
+   * @return the emittable base names, or {@code null} when neither source is available, which means
+   *     "cannot validate" and must leave the caller's names unjudged rather than reported as unknown
+   */
+  private static java.util.Set<String> emittableBaseNames(NeoFieldFilter fieldFilter, Tab adTab) {
+    java.util.Set<String> keys = fieldFilter == null ? null : fieldFilter.emittableResponseKeys();
+    if (keys == null) {
+      Entity dalEntity = org.openbravo.base.model.ModelProvider.getInstance()
+          .getEntityByTableName(adTab.getTable().getDBTableName());
+      if (dalEntity == null) {
+        return null;
+      }
+      keys = new java.util.HashSet<>();
+      for (Property prop : dalEntity.getProperties()) {
+        keys.add(prop.getName());
+      }
+    }
+    java.util.Set<String> base = new java.util.HashSet<>();
+    for (String key : keys) {
+      base.add(McpDefaultsView.baseProperty(key));
+    }
+    return base;
   }
 }

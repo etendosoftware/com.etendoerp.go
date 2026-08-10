@@ -141,4 +141,101 @@ class McpFieldProjectionTest {
       assertTrue(root.getJSONObject("response").length() == 0);
     }
   }
+
+  @Nested
+  @DisplayName("baseNames (IMP-18)")
+  class BaseNames {
+
+    @Test
+    @DisplayName("a requested $_identifier companion resolves to its base property")
+    void companionResolvesToBase() {
+      Set<String> base = McpFieldProjection.baseNames(req("businessPartner$_identifier"));
+      assertEquals(req("businessPartner"), base);
+    }
+
+    @Test
+    @DisplayName("asking only for the companion still projects the FK and its label, not just id")
+    void companionOnlyRequestStillProjects() throws JSONException {
+      JSONObject root = envelope();
+      McpFieldProjection.apply(root, McpFieldProjection.baseNames(
+          req("businessPartner$_identifier")));
+
+      JSONObject r0 = root.getJSONObject("response").getJSONArray("data").getJSONObject(0);
+      assertTrue(r0.has("businessPartner"));
+      assertTrue(r0.has("businessPartner$_identifier"));
+      assertEquals("Juan Perez", r0.getString("businessPartner$_identifier"));
+      assertFalse(r0.has("documentNo"));
+    }
+
+    @Test
+    @DisplayName("null in means an empty set out, never a null")
+    void nullIsEmpty() {
+      assertTrue(McpFieldProjection.baseNames(null).isEmpty());
+    }
+  }
+
+  @Nested
+  @DisplayName("reportUnknownFields (IMP-18)")
+  class UnknownFields {
+
+    private static final String KEY_UNKNOWN = "unknownFields";
+
+    @Test
+    @DisplayName("a name the entity cannot emit is reported, sorted, alongside data")
+    void reportsUnknown() throws JSONException {
+      JSONObject root = envelope();
+      McpFieldProjection.reportUnknownFields(root, req("documentNo", "totalGross", "bpartner"),
+          req("id", "documentNo", "businessPartner", "grandTotalAmount"));
+
+      JSONArray unknown = root.getJSONObject("response").getJSONArray(KEY_UNKNOWN);
+      assertEquals(2, unknown.length());
+      assertEquals("bpartner", unknown.getString(0));
+      assertEquals("totalGross", unknown.getString(1));
+      // the rows themselves are untouched by the reporting step
+      assertTrue(root.getJSONObject("response").getJSONArray("data").length() == 2);
+    }
+
+    @Test
+    @DisplayName("an empty result set still reports the typo — the case that used to be silent")
+    void reportsOnEmptyResultSet() throws JSONException {
+      JSONObject response = new JSONObject();
+      response.put("data", new JSONArray());
+      JSONObject root = new JSONObject();
+      root.put("response", response);
+
+      McpFieldProjection.reportUnknownFields(root, req("totalGross"),
+          req("id", "grandTotalAmount"));
+
+      assertEquals("totalGross",
+          root.getJSONObject("response").getJSONArray(KEY_UNKNOWN).getString(0));
+    }
+
+    @Test
+    @DisplayName("all names known adds no key, so a clean call stays clean")
+    void silentWhenAllKnown() throws JSONException {
+      JSONObject root = envelope();
+      McpFieldProjection.reportUnknownFields(root, req("documentNo"),
+          req("id", "documentNo"));
+      assertFalse(root.getJSONObject("response").has(KEY_UNKNOWN));
+    }
+
+    @Test
+    @DisplayName("an unknown emittable set leaves the names unjudged rather than accusing them")
+    void nullEmittableIsNoOp() throws JSONException {
+      JSONObject root = envelope();
+      McpFieldProjection.reportUnknownFields(root, req("whatever"), null);
+      assertFalse(root.getJSONObject("response").has(KEY_UNKNOWN));
+    }
+
+    @Test
+    @DisplayName("no requested names and no response envelope are both no-ops")
+    void degenerateInputs() throws JSONException {
+      JSONObject root = envelope();
+      McpFieldProjection.reportUnknownFields(root, req(), req("id"));
+      assertFalse(root.getJSONObject("response").has(KEY_UNKNOWN));
+
+      // must not throw when there is no envelope to attach to
+      McpFieldProjection.reportUnknownFields(new JSONObject(), req("x"), req("id"));
+    }
+  }
 }
