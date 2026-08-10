@@ -153,23 +153,14 @@ public final class NeoAccessHelper {
    *       regardless of whether the spec has a window or not.</li>
    *   <li><b>Spec has a directly linked {@code AD_Window}</b> → delegates straight to
    *       {@link #hasWindowAccess(String, String)} for that window.</li>
-   *   <li><b>Windowless spec ({@code spec.getADWindow() == null}):</b>
-   *     <ul>
-   *       <li>If one or more active, included {@code SFEntity} rows of this spec have a
-   *           populated {@code AD_TAB_ID} — the "combination of windows" mechanism — every
-   *           distinct constituent {@link Tab#getWindow()} (deduped) must be accessible for
-   *           {@code httpMethod}: the role needs read access to all of them for a read, or
-   *           full/write access to all of them for a write. Deny if any one is
-   *           inaccessible.</li>
-   *       <li>If NO entity has a populated {@code AD_TAB_ID} (no combination data exists at
-   *           all — the current shape of the {@code not-posted-documents} and
-   *           {@code dashboard} specs) — fall back to the pre-existing behavior and allow
-   *           any authenticated role. There is no per-window data to check against for
-   *           these specs today, and {@code AD_Window_Access} provisioning was never
-   *           modeled for them either; skipping the check here (rather than denying
-   *           everyone) avoids a hard regression for the 2 windowless specs that exist.</li>
-   *     </ul>
-   *   </li>
+   *   <li><b>Windowless spec ({@code spec.getADWindow() == null}):</b> delegates to
+   *       {@link #hasAccessToConstituentWindows(SFSpec, String)} — see that method for the
+   *       "combination of windows" mechanism and its permissive fallback. As of ETP-4596
+   *       the only specs still relying on that fallback here (no {@code AD_Process}, no
+   *       constituent {@code AD_TAB_ID} data) are the windowless {@code "W"}-type specs
+   *       {@code not-posted-documents} and {@code dashboard} — every windowless "R" (report)
+   *       spec goes through {@link #hasReportSpecAccess(SFSpec, String)} instead, which
+   *       shares this same constituent-window helper.</li>
    * </ol>
    *
    * @param spec the spec to check (may be {@code null}, in which case access is denied)
@@ -185,11 +176,81 @@ public final class NeoAccessHelper {
     if (window != null) {
       return hasWindowAccess(window.getId(), httpMethod);
     }
+    return hasAccessToConstituentWindows(spec, httpMethod);
+  }
+
+  /**
+   * Checks whether the current role has access to a report-type ({@code spec_type = "R"})
+   * spec for the given HTTP method (ETP-4596).
+   *
+   * <p>Before this fix, report specs were never routed through any window/process access
+   * check at all: {@code NeoRequestRouter}'s report dispatch, MCP tool discovery/execution
+   * ({@code ToolRegistry}, {@code McpToolRouterSupport}), and spec-discovery listing
+   * ({@code NeoDiscoveryHelper}) all either skipped the check entirely or fell through a
+   * {@code spec.getProcess() == null} guard that is always true for NEO-native report
+   * handlers (they have no linked classic {@code AD_Process}) — so every "R" spec was
+   * reachable by any authenticated role regardless of {@code AD_Window_Access}. This method
+   * is the single gate those 4 call sites now delegate to for "R" specs, in tiers:</p>
+   * <ol>
+   *   <li><b>No role assigned → always deny.</b></li>
+   *   <li><b>Spec has a real, linked {@code AD_Process}</b>
+   *       ({@code spec.getProcess() != null}) → delegates straight to
+   *       {@link #hasProcessAccess(String)}. This is the correct equivalent when a report
+   *       genuinely wraps a classic process/report definition — e.g. once
+   *       {@code tax-report}/{@code inventory-stock-report} get a confirmed, FK-verified
+   *       {@code AD_Process} linked, they gate here with zero further code changes.</li>
+   *   <li><b>No linked {@code AD_Process}</b> — delegates to the same
+   *       {@link #hasAccessToConstituentWindows(SFSpec, String)} "combination of windows"
+   *       check used by {@link #hasWindowAccessForSpec(SFSpec, String)} for windowless
+   *       {@code "W"} specs, keyed off each active/included {@code SFEntity}'s
+   *       {@code AD_TAB_ID}: {@code financial-accounts-page},
+   *       {@code financial-account-transactions}, {@code bank-statements},
+   *       {@code bank-reconciliation} and {@code financial-account-bank-connection} gate on
+   *       their constituent window (the classic "Financial Account" window) this way; specs
+   *       this ticket does not touch ({@code aging-receivable}, {@code tax-report},
+   *       {@code inventory-stock-report}) have no {@code AD_TAB_ID} data yet and keep
+   *       today's permissive behavior unchanged.</li>
+   * </ol>
+   *
+   * @param spec the spec to check (may be {@code null}, in which case access is denied)
+   * @param httpMethod the HTTP method of the current request (e.g. {@code GET}, {@code POST})
+   * @return {@code true} if the current role is allowed to perform {@code httpMethod}
+   *         against {@code spec}
+   */
+  public static boolean hasReportSpecAccess(SFSpec spec, String httpMethod) {
+    if (spec == null || resolveCurrentRole() == null) {
+      return false;
+    }
+    Process process = spec.getProcess();
+    if (process != null) {
+      return hasProcessAccess(process.getId());
+    }
+    return hasAccessToConstituentWindows(spec, httpMethod);
+  }
+
+  /**
+   * Shared "combination of windows" check used by both
+   * {@link #hasWindowAccessForSpec(SFSpec, String)} (windowless {@code "W"} specs) and
+   * {@link #hasReportSpecAccess(SFSpec, String)} (process-less {@code "R"} specs): every
+   * distinct {@link Tab#getWindow()} reachable through the spec's active/included
+   * {@code SFEntity} rows (via {@link #resolveConstituentWindowIds(SFSpec)}) must be
+   * accessible for {@code httpMethod} — the role needs read access to all of them for a
+   * read, or full/write access to all of them for a write. Deny if any one is inaccessible.
+   *
+   * <p>When NO entity has a populated {@code AD_TAB_ID} (no combination data exists at all)
+   * this falls back to a permissive allow: there is no per-window data to check against for
+   * such a spec, and {@code AD_Window_Access} provisioning was never modeled for it either;
+   * skipping the check (rather than denying everyone) avoids a hard regression for the
+   * specs that still have no combination data today.</p>
+   *
+   * @param spec the spec whose constituent windows are checked
+   * @param httpMethod the HTTP method of the current request
+   * @return {@code true} when every constituent window is accessible for {@code httpMethod},
+   *         or when the spec has no combination data at all
+   */
+  private static boolean hasAccessToConstituentWindows(SFSpec spec, String httpMethod) {
     List<String> constituentWindowIds = resolveConstituentWindowIds(spec);
     if (constituentWindowIds.isEmpty()) {
-      // No combination data at all (e.g. not-posted-documents, dashboard): no per-window
-      // provisioning exists for these specs, so any authenticated role passes — matches
-      // the pre-existing (pre-ETP-4510-BUG-3) behavior for them.
       return true;
     }
     for (String windowId : constituentWindowIds) {
@@ -203,7 +264,10 @@ public final class NeoAccessHelper {
   /**
    * Resolves the distinct {@code AD_Window} IDs reachable through {@code spec}'s
    * "combination of windows" — every active, included {@link SFEntity} of the spec whose
-   * {@code AD_TAB_ID} is populated, mapped to its {@link Tab#getWindow()}.
+   * {@code AD_TAB_ID} is populated, mapped to its {@link Tab#getWindow()}. Shared by
+   * {@link #hasWindowAccessForSpec(SFSpec, String)} and
+   * {@link #hasReportSpecAccess(SFSpec, String)} via
+   * {@link #hasAccessToConstituentWindows(SFSpec, String)}.
    *
    * @param spec the spec whose constituent windows are needed
    * @return the distinct window IDs (insertion order), or an empty list when no entity of

@@ -22,6 +22,7 @@ import java.util.Set;
 
 import javax.inject.Named;
 
+import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
@@ -36,14 +37,16 @@ import org.openbravo.model.ad.access.User;
 import org.openbravo.model.ad.access.UserRoles;
 import org.openbravo.service.json.JsonConstants;
 
+import com.etendoerp.go.rest.EtendoGoAccountProvisioning;
+import com.etendoerp.go.rest.PasswordPolicy;
 import com.etendoerp.go.schemaforge.NeoContext;
 import com.etendoerp.go.schemaforge.NeoEndpointType;
 import com.etendoerp.go.schemaforge.NeoHandler;
 import com.etendoerp.go.schemaforge.NeoResponse;
 
 /**
- * NeoHandler for the {@code user} spec. Two independent post-hook concerns share this one class
- * because only one {@code JAVA_QUALIFIER} can be registered per {@code ETGO_SF_ENTITY} row (see
+ * NeoHandler for the {@code user} spec. Three independent concerns share this one class because
+ * only one {@code JAVA_QUALIFIER} can be registered per {@code ETGO_SF_ENTITY} row (see
  * {@code docs/neo-headless-extensibility.md} §2.2), and this entity's qualifier was already
  * claimed by the role-sync concern below (ETP-4512):
  *
@@ -60,9 +63,7 @@ import com.etendoerp.go.schemaforge.NeoResponse;
  *   active row per user: every save deletes any existing row(s) for that user and inserts
  *   exactly one new row for the role currently set in {@code Default_Ad_Role_ID} (or leaves the
  *   user role-less if that field is cleared). Scoped to {@code PUT}/{@code PATCH} only —
- *   editing an existing user. Admin-initiated user <em>creation</em> is a separate concern
- *   (ETP-4602, not yet implemented), and {@link NeoContext#getRecordId()} is not reliably
- *   populated on {@code POST}. Best-effort, secondary side effect: the {@link User} has already
+ *   editing an existing user. Best-effort, secondary side effect: the {@link User} has already
  *   been saved by the time {@link #afterHandle(NeoContext)} runs, so a failure here must never
  *   fail the parent request — any exception is logged and swallowed, and {@code null} is
  *   returned so the original CRUD response is kept untouched.</li>
@@ -75,6 +76,34 @@ import com.etendoerp.go.schemaforge.NeoResponse;
  *   GET-list response for this entity, unconditionally (no tenant needs to see or manage them
  *   through the Go SPA — the native classic backend remains the place for that kind of
  *   maintenance).</li>
+ *
+ *   <li><b>Admin-initiated user creation (ETP-4829):</b> the admin-facing "create user" form
+ *   never shows a username field (see {@code artifacts/user/decisions.json}'s create-only
+ *   {@code username} override in {@code etendo_schema_forge}) — it is always a direct copy of
+ *   the email address, matching the convention {@code EtendoGoJwtDalHelper}/
+ *   {@code EtendoGoJwtSupport} already rely on to link an {@code AD_User} row to its {@code
+ *   etgo_account} row by matching value. The frontend never sends a {@code username}, but this
+ *   is enforced server-side too (defense in depth): {@link #handle(NeoContext)} rewrites the
+ *   {@code POST} request body's {@code username} to the (trimmed, lower-cased) {@code email}
+ *   before the default CRUD create runs — reachable because {@link NeoContext#getRequestBody()}
+ *   is the same mutable {@code JSONObject} the default service reads afterward (see {@code
+ *   NeoServletSupport#handleWithHooks}). A blank/missing email is rejected with 400 before it
+ *   ever reaches the DB's NOT NULL constraint, for a clearer error message. Once the {@code
+ *   AD_User} is created, {@link #afterHandle(NeoContext)} reads the created record back out of
+ *   the response body (POST's {@code recordId} is never populated on {@link NeoContext} — this
+ *   is the one path that doesn't need it) and provisions a matching {@code etgo_account} row via
+ *   {@link EtendoGoAccountProvisioning#ensureAccountForCreatedUser}. By default that account is
+ *   {@code pending} (no password — see that method's javadoc), waiting on ETP-4830's
+ *   invite-email flow. As a temporary workaround for environments without ETP-4830 yet, the
+ *   admin can optionally type a password on the create form's existing {@code password} field
+ *   (already mapped to {@code AD_User.Password}, Openbravo's own classic-backend login,
+ *   unrelated to {@code etgo_account}) — when present, {@link #handle(NeoContext)} rejects it
+ *   with 400 up front unless it satisfies {@link PasswordPolicy#isStrong}, and {@link
+ *   #afterHandle(NeoContext)} then creates the {@code etgo_account} {@code active} with that
+ *   same password (read back from {@link NeoContext#getRequestBody()}, which is still the
+ *   caller's original object at this point — never from the response, which never echoes
+ *   plaintext passwords). Same best-effort contract as role sync: never fails the parent
+ *   {@code AD_User} creation.</li>
  * </ol>
  *
  * <p>{@code @Named} only — never a normal CDI scope. See CLAUDE.md §NeoHandler Pattern and
@@ -86,6 +115,7 @@ public class UserRoleAssignmentHandler implements NeoHandler {
   private static final Logger log = LogManager.getLogger(UserRoleAssignmentHandler.class);
 
   private static final String METHOD_GET = "GET";
+  private static final String METHOD_POST = "POST";
   private static final String METHOD_PUT = "PUT";
   private static final String METHOD_PATCH = "PATCH";
 
@@ -94,27 +124,64 @@ public class UserRoleAssignmentHandler implements NeoHandler {
 
   private static final String FIELD_TOTAL_ROWS = "totalRows";
   private static final String FIELD_ID = "id";
+  private static final String FIELD_USERNAME = "username";
+  private static final String FIELD_EMAIL = "email";
+  private static final String FIELD_NAME = "name";
+  private static final String FIELD_PASSWORD = "password";
 
-  /** No pre-hook behavior: this handler only reacts after the default service ran. */
+  /**
+   * Pre-hook: on a {@code user} {@code POST} (create), forces {@code username} to mirror
+   * {@code email}, rejects a blank/missing email with 400, and — if a {@code password} was
+   * typed on the create form (the temporary admin-set-password workaround, see concern (3) in
+   * the class javadoc) — rejects it with 400 unless it satisfies {@link PasswordPolicy#isStrong}.
+   * No-op for every other method/endpoint.
+   */
   @Override
   public NeoResponse handle(NeoContext context) {
+    if (context.getEndpointType() != NeoEndpointType.CRUD
+        || !METHOD_POST.equalsIgnoreCase(context.getHttpMethod())) {
+      return null;
+    }
+    JSONObject requestBody = context.getRequestBody();
+    if (requestBody == null) {
+      return null;
+    }
+    String email = StringUtils.trimToNull(requestBody.optString(FIELD_EMAIL, null));
+    if (email == null) {
+      return NeoResponse.error(400, "Field 'email' is required to create a user");
+    }
+    String password = StringUtils.trimToNull(requestBody.optString(FIELD_PASSWORD, null));
+    if (password != null && !PasswordPolicy.isStrong(password)) {
+      return NeoResponse.error(400, PasswordPolicy.USER_MESSAGE);
+    }
+    try {
+      requestBody.put(FIELD_USERNAME, email.toLowerCase());
+    } catch (Exception e) {
+      log.warn("UserRoleAssignmentHandler.handle: failed to force username=email: {}",
+          e.getMessage(), e);
+    }
     return null;
   }
 
   /**
-   * Post-hook dispatch: filters bootstrap users out of a {@code user} list GET, or syncs
-   * {@code AD_User_Roles} after a {@code user} update. See the class javadoc for why both
-   * concerns live in one handler.
+   * Post-hook dispatch: provisions a platform account after a {@code user} create,
+   * filters bootstrap users out of a {@code user} list GET, or syncs {@code AD_User_Roles} after
+   * a {@code user} update. See the class javadoc for why all three concerns live in one handler.
    *
-   * @return always {@code null} — both concerns mutate {@code context.getPreviousResult()}'s
-   *     body in place (or leave it untouched) rather than replacing the response.
+   * @return always {@code null} — every concern mutates {@code context.getPreviousResult()}'s
+   *     body in place (or leaves it untouched) rather than replacing the response.
    */
   @Override
   public NeoResponse afterHandle(NeoContext context) {
     if (context.getEndpointType() != NeoEndpointType.CRUD) {
       return null;
     }
-    if (METHOD_GET.equalsIgnoreCase(context.getHttpMethod()) && context.getRecordId() == null) {
+    String method = context.getHttpMethod();
+    if (METHOD_POST.equalsIgnoreCase(method)) {
+      provisionAccountAfterCreate(context);
+      return null;
+    }
+    if (METHOD_GET.equalsIgnoreCase(method) && context.getRecordId() == null) {
       hideBootstrapUsers(context);
       return null;
     }
@@ -157,6 +224,50 @@ public class UserRoleAssignmentHandler implements NeoHandler {
       }
     } catch (Exception e) {
       log.warn("UserRoleAssignmentHandler.hideBootstrapUsers error: {}", e.getMessage(), e);
+    }
+  }
+
+  /**
+   * On a successful {@code user} create, reads the newly-created record's {@code email}/{@code
+   * name} back out of the response body and provisions a matching {@code etgo_account} row (see
+   * concern (3) in the class javadoc). {@link NeoContext#getRecordId()} is never populated for
+   * {@code POST}, so the created record's fields are read from {@code
+   * previousResult.body.response.data} instead — a lone {@code JSONObject}, same shape as a
+   * single-record GET (see {@link #hideBootstrapUsers}'s javadoc for that same shape). The
+   * plaintext {@code password} (temporary admin-set-password workaround), if any, is read back
+   * from {@link NeoContext#getRequestBody()} instead — the original request, still the same
+   * object {@link #handle(NeoContext)} validated, never the response (which never echoes
+   * plaintext passwords). Best-effort: any failure is logged and swallowed, never failing the
+   * parent {@code AD_User} creation.
+   */
+  private void provisionAccountAfterCreate(NeoContext context) {
+    try {
+      NeoResponse previousResult = context.getPreviousResult();
+      JSONObject body = previousResult != null ? previousResult.getBody() : null;
+      JSONObject inner = body != null ? body.optJSONObject(JsonConstants.RESPONSE_RESPONSE) : null;
+      JSONObject data = inner != null ? inner.optJSONObject(JsonConstants.RESPONSE_DATA) : null;
+      if (data == null) {
+        return;
+      }
+      String email = StringUtils.trimToNull(data.optString(FIELD_EMAIL, null));
+      if (email == null) {
+        return;
+      }
+      String name = StringUtils.trimToNull(data.optString(FIELD_NAME, null));
+      JSONObject requestBody = context.getRequestBody();
+      String password = requestBody != null
+          ? StringUtils.trimToNull(requestBody.optString(FIELD_PASSWORD, null))
+          : null;
+      OBContext.setAdminMode(true);
+      try {
+        EtendoGoAccountProvisioning.ensureAccountForCreatedUser(email.toLowerCase(),
+            name != null ? name : email, password);
+      } finally {
+        OBContext.restorePreviousMode();
+      }
+    } catch (Exception e) {
+      log.warn("UserRoleAssignmentHandler.provisionAccountAfterCreate error: {}",
+          e.getMessage(), e);
     }
   }
 

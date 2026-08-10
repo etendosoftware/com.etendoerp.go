@@ -487,6 +487,222 @@ public class NeoAccessHelperTest {
     return entity;
   }
 
+  // ── hasReportSpecAccess (ETP-4596) ────────────────────────────────────────
+
+  @Test
+  public void hasReportSpecAccess_nullSpec_returnsFalse() {
+    when(role.getId()).thenReturn("0");
+    assertFalse(NeoAccessHelper.hasReportSpecAccess(null, "GET"));
+  }
+
+  @Test
+  public void hasReportSpecAccess_noRoleAssigned_returnsFalseRegardlessOfProcess() {
+    when(context.getRole()).thenReturn(null);
+
+    SFSpec specWithProcess = mock(SFSpec.class);
+    Process proc = mock(Process.class);
+    when(specWithProcess.getProcess()).thenReturn(proc);
+
+    SFSpec specWithoutProcess = mock(SFSpec.class);
+    when(specWithoutProcess.getProcess()).thenReturn(null);
+
+    assertFalse(NeoAccessHelper.hasReportSpecAccess(specWithProcess, "GET"));
+    assertFalse(NeoAccessHelper.hasReportSpecAccess(specWithoutProcess, "GET"));
+  }
+
+  /**
+   * When the report spec has a real, linked {@code AD_Process} (the resolution path that
+   * will "just work" for tax-report/inventory-stock-report once Valeria confirms one),
+   * {@code hasReportSpecAccess} delegates straight to {@code hasProcessAccess} — the
+   * constituent-window machinery must not even be consulted.
+   */
+  @SuppressWarnings("unchecked")
+  @Test
+  public void hasReportSpecAccess_realProcess_delegatesToHasProcessAccess_allow() {
+    when(role.getId()).thenReturn("role-id-report-process-allow");
+    SFSpec spec = mock(SFSpec.class);
+    Process proc = mock(Process.class);
+    when(proc.getId()).thenReturn("real-ad-process-id");
+    when(spec.getProcess()).thenReturn(proc);
+
+    OBCriteria<ProcessAccess> criteria = mock(OBCriteria.class);
+    when(dal.createCriteria(ProcessAccess.class)).thenReturn(criteria);
+    when(criteria.add(any())).thenReturn(criteria);
+    when(criteria.setMaxResults(1)).thenReturn(criteria);
+    ProcessAccess access = mock(ProcessAccess.class);
+    when(criteria.list()).thenReturn(Collections.singletonList(access));
+
+    assertTrue(NeoAccessHelper.hasReportSpecAccess(spec, "GET"));
+    // The process branch must short-circuit — no SFEntity/AD_TAB_ID lookup at all.
+    verify(dal, times(0)).createCriteria(SFEntity.class);
+  }
+
+  @SuppressWarnings("unchecked")
+  @Test
+  public void hasReportSpecAccess_realProcess_delegatesToHasProcessAccess_deny() {
+    when(role.getId()).thenReturn("role-id-report-process-deny");
+    SFSpec spec = mock(SFSpec.class);
+    Process proc = mock(Process.class);
+    when(proc.getId()).thenReturn("real-ad-process-id-denied");
+    when(spec.getProcess()).thenReturn(proc);
+
+    OBCriteria<ProcessAccess> criteria = mock(OBCriteria.class);
+    when(dal.createCriteria(ProcessAccess.class)).thenReturn(criteria);
+    when(criteria.add(any())).thenReturn(criteria);
+    when(criteria.setMaxResults(1)).thenReturn(criteria);
+    when(criteria.list()).thenReturn(Collections.emptyList());
+
+    assertFalse(NeoAccessHelper.hasReportSpecAccess(spec, "GET"));
+  }
+
+  /**
+   * No linked {@code AD_Process} and no entity carries a populated {@code AD_TAB_ID} — the
+   * shape of every "R" spec this ticket does NOT touch (aging-receivable, tax-report,
+   * inventory-stock-report today). Must keep the pre-existing permissive behavior.
+   */
+  @SuppressWarnings("unchecked")
+  @Test
+  public void hasReportSpecAccess_noProcessNoTabData_permissiveAllow() {
+    when(role.getId()).thenReturn("role-id-report-no-process-no-tab");
+    SFSpec spec = mock(SFSpec.class);
+    when(spec.getProcess()).thenReturn(null);
+    when(spec.getId()).thenReturn("spec-untouched-report");
+
+    OBCriteria<SFEntity> criteria = mock(OBCriteria.class);
+    when(dal.createCriteria(SFEntity.class)).thenReturn(criteria);
+    when(criteria.add(any())).thenReturn(criteria);
+    when(criteria.list()).thenReturn(Collections.emptyList());
+
+    assertTrue(NeoAccessHelper.hasReportSpecAccess(spec, "GET"));
+  }
+
+  /**
+   * No linked {@code AD_Process}, but the entity carries a populated {@code AD_TAB_ID} — the
+   * shape of the 5 specs fixed by ETP-4596 (financial-accounts-page and siblings) once their
+   * entity is wired to the "Financial Account" window's tab. A role WITH window access is
+   * allowed.
+   */
+  @SuppressWarnings("unchecked")
+  @Test
+  public void hasReportSpecAccess_noProcessConstituentWindowAccessible_returnsTrue() {
+    when(role.getId()).thenReturn("role-id-report-tab-allowed");
+    SFSpec spec = mock(SFSpec.class);
+    when(spec.getProcess()).thenReturn(null);
+    when(spec.getId()).thenReturn("spec-report-tab-allowed");
+
+    SFEntity entity = entityForWindow("financial-account-window");
+
+    OBCriteria<SFEntity> entityCriteria = mock(OBCriteria.class);
+    when(dal.createCriteria(SFEntity.class)).thenReturn(entityCriteria);
+    when(entityCriteria.add(any())).thenReturn(entityCriteria);
+    when(entityCriteria.list()).thenReturn(Collections.singletonList(entity));
+
+    OBCriteria<WindowAccess> windowAccessCriteria = mock(OBCriteria.class);
+    when(dal.createCriteria(WindowAccess.class)).thenReturn(windowAccessCriteria);
+    when(windowAccessCriteria.add(any())).thenReturn(windowAccessCriteria);
+    when(windowAccessCriteria.setMaxResults(1)).thenReturn(windowAccessCriteria);
+    WindowAccess access = mock(WindowAccess.class);
+    when(windowAccessCriteria.list()).thenReturn(Collections.singletonList(access));
+
+    assertTrue(NeoAccessHelper.hasReportSpecAccess(spec, "GET"));
+  }
+
+  /**
+   * Same shape as above, but the role has NO active {@code WindowAccess} row for the
+   * constituent window — must be denied. This is the live-bug scenario ETP-4596 closes: a
+   * role without access to the classic "Financial Account" window must not reach
+   * bank-statements/financial-account-transactions/etc.
+   */
+  @SuppressWarnings("unchecked")
+  @Test
+  public void hasReportSpecAccess_noProcessConstituentWindowInaccessible_returnsFalse() {
+    when(role.getId()).thenReturn("role-id-report-tab-denied");
+    SFSpec spec = mock(SFSpec.class);
+    when(spec.getProcess()).thenReturn(null);
+    when(spec.getId()).thenReturn("spec-report-tab-denied");
+
+    SFEntity entity = entityForWindow("financial-account-window");
+
+    OBCriteria<SFEntity> entityCriteria = mock(OBCriteria.class);
+    when(dal.createCriteria(SFEntity.class)).thenReturn(entityCriteria);
+    when(entityCriteria.add(any())).thenReturn(entityCriteria);
+    when(entityCriteria.list()).thenReturn(Collections.singletonList(entity));
+
+    OBCriteria<WindowAccess> windowAccessCriteria = mock(OBCriteria.class);
+    when(dal.createCriteria(WindowAccess.class)).thenReturn(windowAccessCriteria);
+    when(windowAccessCriteria.add(any())).thenReturn(windowAccessCriteria);
+    when(windowAccessCriteria.setMaxResults(1)).thenReturn(windowAccessCriteria);
+    when(windowAccessCriteria.list()).thenReturn(Collections.emptyList());
+
+    assertFalse(NeoAccessHelper.hasReportSpecAccess(spec, "GET"));
+  }
+
+  /**
+   * ETP-4596 QA gap: the constituent-window path advertises read/write tiering ("the role
+   * needs read access ... or full/write access ... for a write") but every existing
+   * {@code hasReportSpecAccess} test only ever calls it with {@code "GET"}. A role with a
+   * read-only ({@code IsReadWrite = N}) {@code WindowAccess} row for the constituent window
+   * must be allowed for GET but denied for a write method — even though today's report
+   * handlers are GET-only, the access-check API itself must not silently allow POST/PUT for
+   * a read-only role should a write-capable report ever reach this branch.
+   */
+  @SuppressWarnings("unchecked")
+  @Test
+  public void hasReportSpecAccess_noProcessConstituentWindowReadOnly_allowsGetDeniesWrite() {
+    when(role.getId()).thenReturn("role-id-report-tab-readonly");
+    SFSpec spec = mock(SFSpec.class);
+    when(spec.getProcess()).thenReturn(null);
+    when(spec.getId()).thenReturn("spec-report-tab-readonly");
+
+    SFEntity entity = entityForWindow("financial-account-window-readonly");
+
+    OBCriteria<SFEntity> entityCriteria = mock(OBCriteria.class);
+    when(dal.createCriteria(SFEntity.class)).thenReturn(entityCriteria);
+    when(entityCriteria.add(any())).thenReturn(entityCriteria);
+    when(entityCriteria.list()).thenReturn(Collections.singletonList(entity));
+
+    OBCriteria<WindowAccess> windowAccessCriteria = mock(OBCriteria.class);
+    when(dal.createCriteria(WindowAccess.class)).thenReturn(windowAccessCriteria);
+    when(windowAccessCriteria.add(any())).thenReturn(windowAccessCriteria);
+    when(windowAccessCriteria.setMaxResults(1)).thenReturn(windowAccessCriteria);
+    WindowAccess access = mock(WindowAccess.class);
+    when(access.isEditableField()).thenReturn(false);
+    when(windowAccessCriteria.list()).thenReturn(Collections.singletonList(access));
+
+    assertTrue(NeoAccessHelper.hasReportSpecAccess(spec, "GET"));
+    assertFalse(NeoAccessHelper.hasReportSpecAccess(spec, "POST"));
+    assertFalse(NeoAccessHelper.hasReportSpecAccess(spec, "PUT"));
+    assertFalse(NeoAccessHelper.hasReportSpecAccess(spec, "DELETE"));
+  }
+
+  /**
+   * ETP-4596 QA gap: {@code resolveConstituentWindowIds} filters {@code SFEntity} rows by
+   * {@code isActive = true, isIncluded = true} — a spec whose entity was deactivated or
+   * un-included (e.g. removed from the module) must resolve to an empty window list, not
+   * throw. The DAL criteria mock returning an empty list here reproduces exactly that shape
+   * (the query itself excludes the inactive row), asserting the permissive fallback holds
+   * and no NPE surfaces when the spec has zero eligible entities rather than merely zero
+   * entities with a populated {@code AD_TAB_ID}.
+   */
+  @SuppressWarnings("unchecked")
+  @Test
+  public void hasReportSpecAccess_noActiveIncludedEntityAtAll_permissiveAllowNoNpe() {
+    when(role.getId()).thenReturn("role-id-report-no-active-entity");
+    SFSpec spec = mock(SFSpec.class);
+    when(spec.getProcess()).thenReturn(null);
+    when(spec.getId()).thenReturn("spec-report-deactivated-entity");
+
+    OBCriteria<SFEntity> entityCriteria = mock(OBCriteria.class);
+    when(dal.createCriteria(SFEntity.class)).thenReturn(entityCriteria);
+    when(entityCriteria.add(any())).thenReturn(entityCriteria);
+    // Simulates the entity existing in the table but excluded by the isActive/isIncluded
+    // restrictions on the criteria — not a null/exception from the DAL.
+    when(entityCriteria.list()).thenReturn(Collections.emptyList());
+
+    assertTrue(NeoAccessHelper.hasReportSpecAccess(spec, "GET"));
+    assertTrue(NeoAccessHelper.hasReportSpecAccess(spec, "POST"));
+  }
+
   // ── hasProcessAccess ──────────────────────────────────────────────────────
 
   @Test

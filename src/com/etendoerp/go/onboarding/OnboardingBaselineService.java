@@ -86,7 +86,22 @@ public class OnboardingBaselineService {
    * Use the exact UTC timestamp prefix of the last incorporated .sql file, e.g.:
    * {@code "20260617T120000Z"} matches {@code 20260617T120000Z__R7-tax-accounts.sql}.</p>
    *
-   * Current watermark: R20 default-standard-costing-rule (2026-08-03).
+   * Current watermark: R22 fin-account-warehouse-acct (2026-08-05).
+   *
+   * <p><b>Note (2026-08-05, ETP-4743):</b> bumped from R21's {@code 2026-08-05T12:00:00Z} (see
+   * the ETP-4720 note below) to R22's {@code 2026-08-05T14:00:00Z}, per this merge block's
+   * resolution of the conflict the ETP-4743 branch itself anticipated on this line. Gap A2c —
+   * {@code FIN_FINANCIAL_ACCOUNT} and {@code M_WAREHOUSE} are bulk-imported by the dataset
+   * importer with triggers disabled, so neither ever got its {@code *_Acct} row via the standard
+   * core AFTER-INSERT triggers. ETP-4565 already shipped the preventive fix for this
+   * ({@code FIN_FINANCIAL_ACCOUNT_ACCT_SQL} / {@code WAREHOUSE_ACCT_SQL} in
+   * {@code OnboardingAccountingWiringService}, called from {@code provisionEntityPostingAccounts})
+   * but deliberately did NOT bump this constant at the time, since the corrective {@code .sql}
+   * twin did not exist yet (bumping the CUT without its matching fix already in the repo would
+   * silently skip the gap for new tenants). ETP-4743 adds that corrective fix
+   * ({@code R22-fin-account-warehouse-acct}) for already-onboarded tenants, so this bump now
+   * closes the loop: new tenants are already provisioned correctly by the live ETP-4565 code, and
+   * the runner correctly skips R22 for them via this watermark.</p>
    *
    * <p><b>Note (2026-07-06):</b> the sibling in-flight branch {@code feat/bp-category-preventive}
    * (ETP-4402) independently bumps this same constant to {@code 2026-07-01T12:00:00Z} for its
@@ -128,8 +143,23 @@ public class OnboardingBaselineService {
    * here and likewise falls below the cutoff — correctly so: it DOES ship a preventive front, so a
    * newborn tenant is already provisioned with the two "Factura Rectificativa" doc types and their
    * {@code REC-} sequences and must skip the corrective fix.</p>
+   *
+   * <p><b>Note (2026-08-05, ETP-4720):</b> gap A2b generalized — 5 {@code C_BP_Group_Acct} columns
+   * ({@code WriteOff_Rev_Acct}/{@code DoubtfulDebt_Acct}/{@code BadDebtExpense_Acct}/
+   * {@code BadDebtRevenue_Acct}/{@code AllowanceForDoubtful_Acct}) that neither the core
+   * {@code c_bp_group_trg()} trigger nor {@code OnboardingAccountingWiringService.BP_GROUP_ACCT_SQL}
+   * ever populated — confirmed live on a tenant onboarded just 6 days before diagnosis, so this was
+   * an ONGOING preventive gap, not only legacy drift. Closed by
+   * {@code OnboardingAccountingWiringService#patchBpGroupAcctMissingColumns}, wired as the new last
+   * provisioning step before this baseline stamp. Bumped to R21's own timestamp,
+   * {@code 2026-08-05T12:00:00Z}. The other 6 columns R21's corrective fix also covers
+   * (NotInvoicedRevenue/NotInvoicedReceivables/UnEarnedRevenue/PayDiscount_Exp/PayDiscount_Rev/
+   * V_Liability_Services) are NOT part of this preventive fix — their source,
+   * {@code C_AcctSchema_Default}, is itself NULL fleet-wide (an R11-adjacent gap, out of this
+   * ticket's scope); R21's own {@code @check} already no-ops on them today and will self-heal once
+   * that separate gap closes, with no onboarding change needed here.</p>
    */
-  private static final Instant ONBOARDING_PROVISIONED_THROUGH = Instant.parse("2026-08-03T18:00:00Z");
+  private static final Instant ONBOARDING_PROVISIONED_THROUGH = Instant.parse("2026-08-05T14:00:00Z");
 
   private static final String SQL_INSERT_BASELINE = ""
       + "INSERT INTO etgo_data_fix_history ("
