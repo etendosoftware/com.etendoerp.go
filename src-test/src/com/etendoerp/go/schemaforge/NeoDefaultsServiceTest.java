@@ -31,6 +31,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 import java.lang.reflect.Method;
@@ -343,7 +344,9 @@ public class NeoDefaultsServiceTest {
           1,
           0,
           Collections.emptyMap()), never());
-      verify(vars).setSessionValue(eq("#Date"), any(String.class));
+      // The "#Date" session seeding this used to also assert here was removed by
+      // ETP-4793 / IMP-16 and is now owned by
+      // testBuildVariablesSecureAppDoesNotSeedDateSessionValue.
       verify(dal, never()).get(eq(Organization.class), any(String.class));
     }
   }
@@ -1641,11 +1644,19 @@ public class NeoDefaultsServiceTest {
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
-  // buildVariablesSecureApp — delegates to NeoCalloutService and sets #Date
+  // buildVariablesSecureApp — pure delegation to NeoCalloutService, no #Date seeding
   // ═══════════════════════════════════════════════════════════════════════════
 
+  /**
+   * ETP-4793 / IMP-16 removed the ISO {@code "#Date"} session seeding from this method: core
+   * never reads the session for that name ({@code Utility.getContext} special-cases it and
+   * returns {@code DateTimeData.today}, formatted with a hardcoded {@code dd-MM-yyyy}), so the
+   * seeding was dead code that made {@code @#Date@} defaults look canonicalized when they were
+   * not. These two tests pin the removal: re-adding the seeding would revive the illusion and
+   * push canonicalization back off the resolved value, where it actually has to happen.
+   */
   @Test
-  public void testBuildVariablesSecureAppSetsDate() {
+  public void testBuildVariablesSecureAppDoesNotSeedDateSessionValue() {
     OBContext obContext = mock(OBContext.class);
     VariablesSecureApp vars = mock(VariablesSecureApp.class);
 
@@ -1655,12 +1666,13 @@ public class NeoDefaultsServiceTest {
       VariablesSecureApp result = NeoDefaultsService.buildVariablesSecureApp(obContext);
 
       assertEquals(vars, result);
-      verify(vars).setSessionValue(eq("#Date"), any(String.class));
+      verify(vars, never()).setSessionValue(eq("#Date"), any(String.class));
+      verifyNoInteractions(vars);
     }
   }
 
   @Test
-  public void testBuildVariablesSecureAppWithTabSetsDate() {
+  public void testBuildVariablesSecureAppWithTabDoesNotSeedDateSessionValue() {
     OBContext obContext = mock(OBContext.class);
     Tab adTab = mock(Tab.class);
     VariablesSecureApp vars = mock(VariablesSecureApp.class);
@@ -1671,7 +1683,8 @@ public class NeoDefaultsServiceTest {
       VariablesSecureApp result = NeoDefaultsService.buildVariablesSecureApp(obContext, adTab);
 
       assertEquals(vars, result);
-      verify(vars).setSessionValue(eq("#Date"), any(String.class));
+      verify(vars, never()).setSessionValue(eq("#Date"), any(String.class));
+      verifyNoInteractions(vars);
     }
   }
 

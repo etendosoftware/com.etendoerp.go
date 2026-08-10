@@ -848,7 +848,8 @@ public class NeoDefaultsService {
 
   /**
    * Build a VariablesSecureApp from OBContext, fully populated with ALL session variables.
-   * Delegates to {@link NeoCalloutService#buildVars} and adds caching + #Date.
+   * Delegates to {@link NeoCalloutService#buildVars}. It does NOT seed a #Date session value —
+   * see the two-arg overload for why that was removed by ETP-4793 / IMP-16.
    *
    * @param obContext the current OBContext containing user, role, org, and warehouse info
    * @return a cached or newly built VariablesSecureApp instance with session variables populated
