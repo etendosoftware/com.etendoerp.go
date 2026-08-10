@@ -1245,7 +1245,7 @@ class McpToolRouterSupportTest {
     void timePropertyIsNotTouched() throws Exception {
       Property prop = mock(Property.class);
       when(prop.getPrimitiveObjectType()).thenReturn((Class) java.util.Date.class);
-      when(prop.isTimestamp()).thenReturn(true);
+      when(prop.isTime()).thenReturn(true);
       JSONObject body = new JSONObject();
       body.put("startTime", "2026-08-06T14:30:00");
 

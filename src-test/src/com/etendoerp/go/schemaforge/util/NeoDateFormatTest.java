@@ -267,7 +267,7 @@ class NeoDateFormatTest {
           org.mockito.Mockito.when(prop.isDatetime()).thenReturn(true);
           break;
         case "timestamp":
-          org.mockito.Mockito.when(prop.isTimestamp()).thenReturn(true);
+          org.mockito.Mockito.when(prop.isTime()).thenReturn(true);
           break;
         case "absoluteTime":
           org.mockito.Mockito.when(prop.isAbsoluteTime()).thenReturn(true);

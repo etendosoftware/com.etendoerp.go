@@ -302,7 +302,7 @@ them (`Property.java:1107-1124`):
 |---|---|---|
 | `DateDomainType` | `isDate()` | ✅ → `yyyy-MM-dd` |
 | `DatetimeDomainType` | `isDatetime()` | ✅ → `yyyy-MM-dd'T'HH:mm:ss` |
-| `TimestampDomainType` | `isTimestamp()` | ❌ left as-is |
+| `TimestampDomainType` | `isTime()` | ❌ left as-is |
 | `AbsoluteTimeDomainType` | `isAbsoluteTime()` | ❌ left as-is |
 | `AbsoluteDateTimeDomainType` | `isAbsoluteDateTime()` | ❌ left as-is |
 

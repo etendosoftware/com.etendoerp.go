@@ -289,7 +289,7 @@ class NeoTypeCoercionHelperTest {
       Property prop = mock(Property.class);
       when(prop.isPrimitive()).thenReturn(true);
       when(prop.getPrimitiveObjectType()).thenReturn((Class) java.util.Date.class);
-      when(prop.isTimestamp()).thenReturn(true);
+      when(prop.isTime()).thenReturn(true);
       when(entity.getProperty("startTime")).thenReturn(prop);
 
       Map<String, Object> coerced = new HashMap<>();

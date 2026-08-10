@@ -308,7 +308,7 @@ public final class NeoDateFormat {
    * </ul>
    *
    * <p>The other three are deliberately excluded. {@code TimestampDomainType}
-   * ({@link Property#isTimestamp()}) and {@code AbsoluteTimeDomainType}
+   * ({@link Property#isTime()}) and {@code AbsoluteTimeDomainType}
    * ({@link Property#isAbsoluteTime()}) are <b>time-of-day</b> values: the converter keeps
    * only the part after the {@code T} and supplies today's date itself, so rewriting such a
    * value into {@code yyyy-MM-dd} would destroy the only half it reads.
