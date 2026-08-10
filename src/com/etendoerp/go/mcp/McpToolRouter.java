@@ -498,7 +498,13 @@ public class McpToolRouter {
     // Coerce string values to proper JSON types expected by the DAL (Long, BigDecimal, Boolean).
     // Callout cascade returns all values as strings, but DefaultJsonDataService/JsonToDataConverter
     // expects JSON numbers and booleans for numeric/boolean DAL properties.
-    coerceFieldTypes(filteredBody, dalEntity);
+    // IMP-24: userProvided is the pre-defaults snapshot, so it is also the only witness of which
+    // date the agent actually sent. A server-injected default in a bad shape must not become a 422
+    // the agent cannot act on.
+    JSONArray invalidDates = coerceFieldTypes(filteredBody, dalEntity, userProvided);
+    if (invalidDates.length() > 0) {
+      return wrapAsErrorContent(buildInvalidDatesError(invalidDates).toString(2));
+    }
 
     // Validate mandatory fields before insert — return structured error matching neo_schema contract
     JSONArray missingFields = validateMandatoryFields(filteredBody, adTab, dalEntity);
@@ -588,8 +594,13 @@ public class McpToolRouter {
     // status 0 and stored as 0015-02-16. The defect was never in the coercer — it was in the caller,
     // which is why IMP-16 read as fixed on emit and still corrupted on write. Unlike handleCreate
     // this path does not re-run injectMandatoryDefaults, so the caller's own value is the only
-    // source of a non-canonical date here; that also makes it the only thing left to repair.
-    coerceFieldTypes(filteredBody, dalEntity);
+    // source of a non-canonical date here; that also makes it the only thing left to repair — and,
+    // for IMP-24, the reason this path needs no separate witness: every key is the caller's, so
+    // `null` says so directly rather than passing a copy of the body to be compared against itself.
+    JSONArray invalidDates = coerceFieldTypes(filteredBody, dalEntity, null);
+    if (invalidDates.length() > 0) {
+      return wrapAsErrorContent(buildInvalidDatesError(invalidDates).toString(2));
+    }
 
     // Run the entity's NeoHandler pre-hook (parity with the REST CRUD path).
     NeoHandler handler = McpHookExecutor.resolveEntityHandler(sfEntity);
@@ -1446,13 +1457,18 @@ public class McpToolRouter {
    * <p>Date-typed properties are not merely re-typed but <b>re-shaped</b> to the canonical
    * ISO wire format (ETP-4793 / IMP-16). That branch is not cosmetic: the DAL parses dates
    * leniently, so a {@code dd-MM-yyyy} value is silently reinterpreted rather than rejected
-   * and {@code "06-08-2026"} persists as year 0012. See
-   * {@code McpToolRouterSupport.coerceDateFieldValue} for why an unrecognised shape is passed
-   * through untouched instead of guessed at.
+   * and {@code "06-08-2026"} persists as year 0012.
+   *
+   * @param callerKeys the keys the agent itself sent, as a snapshot taken before any server default
+   *     was injected; {@code null} means every key in {@code body} is the caller's. Only those keys
+   *     can produce a rejection — see
+   *     {@code McpToolRouterSupport.coerceDateFieldValue} (ETP-4793 / IMP-24)
+   * @return one descriptor per unusable date value, empty when the body is clean
    */
-  private void coerceFieldTypes(JSONObject body, Entity dalEntity) {
+  private JSONArray coerceFieldTypes(JSONObject body, Entity dalEntity, JSONObject callerKeys) {
+    JSONArray invalid = new JSONArray();
     if (body == null || dalEntity == null) {
-      return;
+      return invalid;
     }
     List<String> keys = new ArrayList<>();
     Iterator<String> it = body.keys();
@@ -1461,10 +1477,41 @@ public class McpToolRouter {
     }
     for (String key : keys) {
       Property prop = dalEntity.getProperty(key, false);
-      if (prop != null && prop.isPrimitive()) {
-        McpToolRouterSupport.coercePrimitiveFieldValue(body, key, prop, log);
+      if (prop == null || !prop.isPrimitive()) {
+        continue;
+      }
+      boolean callerSupplied = callerKeys == null || callerKeys.has(key);
+      JSONObject rejection = McpToolRouterSupport.coercePrimitiveFieldValue(body, key, prop,
+          callerSupplied, log);
+      if (rejection != null) {
+        invalid.put(rejection);
       }
     }
+    return invalid;
+  }
+
+  /**
+   * The 422 for date values the agent must re-send (ETP-4793 / IMP-24).
+   *
+   * <p>Mirrors the shape of the {@code missingFields} error a few lines above rather than inventing
+   * a second one: same envelope keys, same bare-object delivery, one list keyed by what is wrong
+   * with it. Before this existed the same input produced the DAL's raw
+   * {@code {"status":-4}} plus a {@code java.text.ParseException} that named no field at all, so the
+   * agent could not tell which of the dates it sent was the problem — or that a date was the
+   * problem.
+   */
+  private JSONObject buildInvalidDatesError(JSONArray invalidDates) throws JSONException {
+    JSONObject errorObj = new JSONObject();
+    errorObj.put(McpConstants.KEY_STATUS, McpConstants.STATUS_UNPROCESSABLE);
+    errorObj.put(McpConstants.KEY_ERROR, McpConstants.ERROR_VALIDATION);
+    errorObj.put(McpConstants.KEY_DETAIL,
+        "One or more date values are not in a format this API can read");
+    errorObj.put("invalidDates", invalidDates);
+    errorObj.put("hint", "Send dates as ISO: yyyy-MM-dd for dates, yyyy-MM-dd'T'HH:mm:ss for "
+        + "datetimes. Check the value is a real calendar date too — 2026-02-30 is ISO-shaped and "
+        + "still invalid.");
+    errorObj.put(McpConstants.KEY_SEE_ALSO, McpConstants.SEE_ALSO_WRITING);
+    return errorObj;
   }
 
   private void resolveFkSentinels(JSONObject body, Entity dalEntity) throws JSONException {

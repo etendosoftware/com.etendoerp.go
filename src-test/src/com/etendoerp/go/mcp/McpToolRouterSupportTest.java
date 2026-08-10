@@ -18,6 +18,7 @@ package com.etendoerp.go.mcp;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -1084,7 +1085,7 @@ class McpToolRouterSupportTest {
       JSONObject body = new JSONObject();
       body.put("lineNo", "42");
 
-      McpToolRouterSupport.coercePrimitiveFieldValue(body, "lineNo", prop, log);
+      McpToolRouterSupport.coercePrimitiveFieldValue(body, "lineNo", prop, true, log);
       assertEquals(42L, body.getLong("lineNo"));
     }
 
@@ -1095,7 +1096,7 @@ class McpToolRouterSupportTest {
       JSONObject body = new JSONObject();
       body.put("seqNo", "10.0");
 
-      McpToolRouterSupport.coercePrimitiveFieldValue(body, "seqNo", prop, log);
+      McpToolRouterSupport.coercePrimitiveFieldValue(body, "seqNo", prop, true, log);
       assertEquals(10L, body.getLong("seqNo"));
     }
 
@@ -1106,7 +1107,7 @@ class McpToolRouterSupportTest {
       JSONObject body = new JSONObject();
       body.put("amount", "123.45");
 
-      McpToolRouterSupport.coercePrimitiveFieldValue(body, "amount", prop, log);
+      McpToolRouterSupport.coercePrimitiveFieldValue(body, "amount", prop, true, log);
       assertEquals(new BigDecimal("123.45"), body.get("amount"));
     }
 
@@ -1117,7 +1118,7 @@ class McpToolRouterSupportTest {
       JSONObject body = new JSONObject();
       body.put("active", "Y");
 
-      McpToolRouterSupport.coercePrimitiveFieldValue(body, "active", prop, log);
+      McpToolRouterSupport.coercePrimitiveFieldValue(body, "active", prop, true, log);
       assertTrue(body.getBoolean("active"));
     }
 
@@ -1128,7 +1129,7 @@ class McpToolRouterSupportTest {
       JSONObject body = new JSONObject();
       body.put("active", "true");
 
-      McpToolRouterSupport.coercePrimitiveFieldValue(body, "active", prop, log);
+      McpToolRouterSupport.coercePrimitiveFieldValue(body, "active", prop, true, log);
       assertTrue(body.getBoolean("active"));
     }
 
@@ -1141,7 +1142,7 @@ class McpToolRouterSupportTest {
       JSONObject body = new JSONObject();
       body.put("active", "y");
 
-      McpToolRouterSupport.coercePrimitiveFieldValue(body, "active", prop, log);
+      McpToolRouterSupport.coercePrimitiveFieldValue(body, "active", prop, true, log);
       assertTrue(body.getBoolean("active"));
     }
 
@@ -1152,7 +1153,7 @@ class McpToolRouterSupportTest {
       JSONObject body = new JSONObject();
       body.put("active", "N");
 
-      McpToolRouterSupport.coercePrimitiveFieldValue(body, "active", prop, log);
+      McpToolRouterSupport.coercePrimitiveFieldValue(body, "active", prop, true, log);
       assertFalse(body.getBoolean("active"));
     }
 
@@ -1162,7 +1163,7 @@ class McpToolRouterSupportTest {
       JSONObject body = new JSONObject();
       body.put("count", 5);
 
-      McpToolRouterSupport.coercePrimitiveFieldValue(body, "count", prop, log);
+      McpToolRouterSupport.coercePrimitiveFieldValue(body, "count", prop, true, log);
       assertEquals(5, body.getInt("count"));
     }
 
@@ -1172,7 +1173,7 @@ class McpToolRouterSupportTest {
       JSONObject body = new JSONObject();
       body.put("name", "");
 
-      McpToolRouterSupport.coercePrimitiveFieldValue(body, "name", prop, log);
+      McpToolRouterSupport.coercePrimitiveFieldValue(body, "name", prop, true, log);
       assertEquals("", body.getString("name"));
     }
 
@@ -1191,7 +1192,7 @@ class McpToolRouterSupportTest {
       JSONObject body = new JSONObject();
       body.put("orderDate", "06-08-2026");
 
-      McpToolRouterSupport.coercePrimitiveFieldValue(body, "orderDate", prop, log);
+      McpToolRouterSupport.coercePrimitiveFieldValue(body, "orderDate", prop, true, log);
       assertEquals("2026-08-06", body.getString("orderDate"));
     }
 
@@ -1204,7 +1205,7 @@ class McpToolRouterSupportTest {
       JSONObject body = new JSONObject();
       body.put("orderDate", "2026-08-06");
 
-      McpToolRouterSupport.coercePrimitiveFieldValue(body, "orderDate", prop, log);
+      McpToolRouterSupport.coercePrimitiveFieldValue(body, "orderDate", prop, true, log);
       assertEquals("2026-08-06", body.getString("orderDate"));
     }
 
@@ -1217,21 +1218,109 @@ class McpToolRouterSupportTest {
       JSONObject body = new JSONObject();
       body.put("movementDate", "2026-08-06 18:55:31.567837+00");
 
-      McpToolRouterSupport.coercePrimitiveFieldValue(body, "movementDate", prop, log);
+      McpToolRouterSupport.coercePrimitiveFieldValue(body, "movementDate", prop, true, log);
       assertEquals("2026-08-06T18:55:31", body.getString("movementDate"));
     }
 
+    /**
+     * ETP-4793 / IMP-24 phase 2 changed the answer here, and the assertion is deliberately in two
+     * halves. Phase 1 passed an unusable value through with a WARN; it is now reported so the caller
+     * gets a 422 naming the field instead of the DAL's raw {@code status:-4} plus a
+     * {@code ParseException} that names nothing. What did <b>not</b> change is that the value in the
+     * body is still verbatim — the coercer never guesses a substitute, it only refuses.
+     */
     @Test
-    @DisplayName("an unrecognized date shape is passed through verbatim, not blanked")
-    void unrecognizedDateIsLeftAlone() throws Exception {
+    @DisplayName("an unrecognized date shape is reported, and left verbatim in the body")
+    void unrecognizedDateIsReported() throws Exception {
       Property prop = mock(Property.class);
       when(prop.getPrimitiveObjectType()).thenReturn((Class) java.util.Date.class);
       when(prop.isDate()).thenReturn(true);
       JSONObject body = new JSONObject();
       body.put("orderDate", "06/08/2026");
 
-      McpToolRouterSupport.coercePrimitiveFieldValue(body, "orderDate", prop, log);
+      JSONObject rejection =
+          McpToolRouterSupport.coercePrimitiveFieldValue(body, "orderDate", prop, true, log);
+
+      assertNotNull(rejection);
+      assertEquals("orderDate", rejection.getString("name"));
+      assertEquals("06/08/2026", rejection.getString("received"));
+      assertEquals("yyyy-MM-dd", rejection.getString("expectedFormat"));
       assertEquals("06/08/2026", body.getString("orderDate"));
+    }
+
+    /**
+     * An ISO-shaped value that is not a real calendar day. The strict resolver is what makes this a
+     * rejection rather than a silent slide to February 28th, and it is the case that proves the
+     * message has to echo the value back: the field name alone would suggest a format problem when
+     * the format is fine.
+     */
+    @Test
+    @DisplayName("an impossible calendar date is reported, not resolved to the 28th")
+    void impossibleDateIsReported() throws Exception {
+      Property prop = mock(Property.class);
+      when(prop.getPrimitiveObjectType()).thenReturn((Class) java.util.Date.class);
+      when(prop.isDate()).thenReturn(true);
+      JSONObject body = new JSONObject();
+      body.put("orderDate", "2026-02-30");
+
+      JSONObject rejection =
+          McpToolRouterSupport.coercePrimitiveFieldValue(body, "orderDate", prop, true, log);
+
+      assertNotNull(rejection);
+      assertEquals("2026-02-30", rejection.getString("received"));
+    }
+
+    /**
+     * The other half of the IMP-24 gate. A value the agent never sent cannot be fixed by the agent,
+     * so rejecting a server-injected default would hand it an unactionable error. Those keep the
+     * phase-1 pass-through, whose WARN is the signal that the default itself needs fixing.
+     */
+    @Test
+    @DisplayName("a server-injected default in a bad shape is passed through, never rejected")
+    void serverDefaultIsNotRejected() throws Exception {
+      Property prop = mock(Property.class);
+      when(prop.getPrimitiveObjectType()).thenReturn((Class) java.util.Date.class);
+      when(prop.isDate()).thenReturn(true);
+      JSONObject body = new JSONObject();
+      body.put("orderDate", "06/08/2026");
+
+      assertNull(McpToolRouterSupport.coercePrimitiveFieldValue(body, "orderDate", prop, false, log));
+      assertEquals("06/08/2026", body.getString("orderDate"));
+    }
+
+    @Test
+    @DisplayName("a datetime rejection reports the datetime pattern, not the date one")
+    void datetimeRejectionReportsDatetimePattern() throws Exception {
+      Property prop = mock(Property.class);
+      when(prop.getPrimitiveObjectType()).thenReturn((Class) java.util.Date.class);
+      when(prop.isDatetime()).thenReturn(true);
+      JSONObject body = new JSONObject();
+      body.put("movementDate", "2026-08-06T banana");
+
+      JSONObject rejection =
+          McpToolRouterSupport.coercePrimitiveFieldValue(body, "movementDate", prop, true, log);
+
+      assertNotNull(rejection);
+      assertEquals("yyyy-MM-dd'T'HH:mm:ss", rejection.getString("expectedFormat"));
+      assertEquals("2026-08-10T14:30:00", rejection.getString("example"));
+    }
+
+    /**
+     * A property outside the two eligible domain types is never judged, so an unusable-looking value
+     * on one cannot produce a 422 either. The eligibility gate has to come first, or the rejection
+     * would fire on values this class has no standing to read.
+     */
+    @Test
+    @DisplayName("an ineligible domain type is never rejected, however odd the value")
+    void ineligibleDomainTypeIsNeverRejected() throws Exception {
+      Property prop = mock(Property.class);
+      when(prop.getPrimitiveObjectType()).thenReturn((Class) java.util.Date.class);
+      when(prop.isTime()).thenReturn(true);
+      JSONObject body = new JSONObject();
+      body.put("startTime", "06/08/2026");
+
+      assertNull(McpToolRouterSupport.coercePrimitiveFieldValue(body, "startTime", prop, true, log));
+      assertEquals("06/08/2026", body.getString("startTime"));
     }
 
     /**
@@ -1249,7 +1338,7 @@ class McpToolRouterSupportTest {
       JSONObject body = new JSONObject();
       body.put("startTime", "2026-08-06T14:30:00");
 
-      McpToolRouterSupport.coercePrimitiveFieldValue(body, "startTime", prop, log);
+      McpToolRouterSupport.coercePrimitiveFieldValue(body, "startTime", prop, true, log);
       assertEquals("2026-08-06T14:30:00", body.getString("startTime"));
     }
 
@@ -1262,24 +1351,30 @@ class McpToolRouterSupportTest {
       JSONObject body = new JSONObject();
       body.put("created", "06-08-2026 14:30:00");
 
-      McpToolRouterSupport.coercePrimitiveFieldValue(body, "created", prop, log);
+      McpToolRouterSupport.coercePrimitiveFieldValue(body, "created", prop, true, log);
       assertEquals("06-08-2026 14:30:00", body.getString("created"));
     }
 
     /**
      * A non-zero offset already reaches the DAL correctly, so normalizing it away would shift
      * the instant — the fix turning into the corruption. It must be refused, not converted.
+     *
+     * <p>ETP-4793 / IMP-24 phase 2 makes this the one case that has to be refused <b>without</b>
+     * being rejected. It is the only value {@code toCanonical} turns down for being right rather than
+     * wrong, so a 422 here would break a working call — which is why the null-return from
+     * {@code toCanonical} needed classifying before the rejection could ship at all.
      */
     @Test
-    @DisplayName("a datetime with a non-zero offset is refused, never shifted to UTC")
-    void nonZeroOffsetIsRefused() throws Exception {
+    @DisplayName("a non-zero offset is left alone and NOT reported — refused, not rejected")
+    void nonZeroOffsetIsRefusedButNotRejected() throws Exception {
       Property prop = mock(Property.class);
       when(prop.getPrimitiveObjectType()).thenReturn((Class) java.util.Date.class);
       when(prop.isDatetime()).thenReturn(true);
       JSONObject body = new JSONObject();
       body.put("movementDate", "2026-08-06T14:30:00+02:00");
 
-      McpToolRouterSupport.coercePrimitiveFieldValue(body, "movementDate", prop, log);
+      assertNull(
+          McpToolRouterSupport.coercePrimitiveFieldValue(body, "movementDate", prop, true, log));
       assertEquals("2026-08-06T14:30:00+02:00", body.getString("movementDate"));
     }
   }

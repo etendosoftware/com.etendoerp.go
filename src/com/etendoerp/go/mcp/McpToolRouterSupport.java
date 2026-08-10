@@ -576,15 +576,24 @@ final class McpToolRouterSupport {
     return fieldInfo;
   }
 
-  static void coercePrimitiveFieldValue(JSONObject body, String key, Property prop,
-      org.apache.logging.log4j.Logger log) {
+  /**
+   * Coerce one primitive write value in place, and report it back when it is unusable.
+   *
+   * @param callerSupplied whether this key came from the agent rather than from a server-injected
+   *     default. Only a caller's own value may be rejected — see
+   *     {@link #coerceDateFieldValue} and {@code McpToolRouter.coerceFieldTypes}
+   * @return a rejection descriptor (see {@link #buildInvalidDateInfo}) when the value cannot be
+   *     used, or {@code null} when it was coerced, left alone, or is not the caller's to fix
+   */
+  static JSONObject coercePrimitiveFieldValue(JSONObject body, String key, Property prop,
+      boolean callerSupplied, org.apache.logging.log4j.Logger log) {
     Object value = body.opt(key);
     if (!(value instanceof String)) {
-      return;
+      return null;
     }
     String strVal = (String) value;
     if (strVal.isEmpty()) {
-      return;
+      return null;
     }
     try {
       Class<?> type = prop.getPrimitiveObjectType();
@@ -598,11 +607,15 @@ final class McpToolRouterSupport {
         // on case sensitivity ("y" was accepted here and rejected there).
         body.put(key, NeoBooleanFormat.toLenientBoolean(strVal));
       } else if (type != null && java.util.Date.class.isAssignableFrom(type)) {
-        coerceDateFieldValue(body, key, prop, strVal, log);
+        return coerceDateFieldValue(body, key, prop, strVal, callerSupplied, log);
       }
     } catch (Exception e) {
+      // Numeric and boolean shapes stay lenient here: a malformed one already surfaces as a DAL
+      // error whose text names the column, so the agent is not left guessing. Dates were the
+      // exception worth fixing (IMP-24) because the lenient parser *succeeds* on them.
       log.debug("Could not coerce field {} value '{}': {}", key, strVal, e.getMessage());
     }
+    return null;
   }
 
   /**
@@ -615,29 +628,71 @@ final class McpToolRouterSupport {
    * {@code injectMandatoryDefaults} before the save and the server's own default arrives in
    * that format. This branch is the last point where the value can still be repaired.
    *
-   * <p>An unrecognised shape is left untouched on purpose: it then reaches the lenient parser
-   * or fails there loudly, which is the pre-existing behaviour. Silently substituting a date
-   * we had to guess would be worse than either. The same reasoning narrows <i>which</i>
-   * properties are eligible at all — see
+   * <p>Which properties are eligible at all is narrow — see
    * {@link NeoDateFormat#canonicalShapeFor(Property)}: a time-of-day or timezone-free property
    * is a {@code java.util.Date} as well, and is deliberately left as it arrives.
+   *
+   * <p><b>Phase 2 (IMP-24).</b> An unrecognised shape used to be passed through with a WARN, which
+   * left the agent with the DAL's own leak — {@code status:-4} plus a bare
+   * {@code java.text.ParseException} naming no field. It is now rejected as a structured 422
+   * instead, but only under two conditions, because either one alone would make the rejection
+   * wrong:
+   * <ul>
+   *   <li>{@link NeoDateFormat#isOffsetDateTime} must not claim it. That family is refused by
+   *       {@code toCanonical} <i>because the DAL already parses it correctly</i>; a 422 there would
+   *       break a working call rather than fix a broken one;</li>
+   *   <li>the value must be the caller's own. A server-injected default in an unrecognised shape is
+   *       our bug, and answering it with a 422 would hand the agent an error it cannot act on —
+   *       it never sent the field. Those still pass through with the phase-1 WARN, which is the
+   *       signal that the default needs fixing at its source.</li>
+   * </ul>
+   *
+   * @return the rejection descriptor, or {@code null} when nothing is wrong with the value
    */
-  private static void coerceDateFieldValue(JSONObject body, String key, Property prop,
-      String strVal, org.apache.logging.log4j.Logger log) throws JSONException {
+  private static JSONObject coerceDateFieldValue(JSONObject body, String key, Property prop,
+      String strVal, boolean callerSupplied, org.apache.logging.log4j.Logger log)
+      throws JSONException {
     Boolean shape = NeoDateFormat.canonicalShapeFor(prop);
     if (shape == null) {
-      return;
+      return null;
     }
     String canonical = NeoDateFormat.toCanonical(strVal, shape.booleanValue());
     if (canonical == null) {
-      log.warn("[MCP] Unrecognized date format for '{}': '{}' passed through unchanged",
-          key, strVal);
-      return;
+      if (NeoDateFormat.isOffsetDateTime(strVal)) {
+        log.debug("[MCP] Offset datetime for '{}': '{}' passed through, the DAL parses it", key,
+            strVal);
+        return null;
+      }
+      if (!callerSupplied) {
+        log.warn("[MCP] Unrecognized date format for server default '{}': '{}' passed through",
+            key, strVal);
+        return null;
+      }
+      return buildInvalidDateInfo(key, strVal, shape.booleanValue());
     }
     if (!canonical.equals(strVal)) {
       log.info("[MCP] Normalized date '{}': '{}' -> '{}'", key, strVal, canonical);
       body.put(key, canonical);
     }
+    return null;
+  }
+
+  /**
+   * Describe one unusable date value for the 422 body (ETP-4793 / IMP-24).
+   *
+   * <p>{@code received} is echoed back verbatim. An agent that batched several writes cannot tell
+   * which of them it is being told about otherwise, and the field name alone does not distinguish a
+   * wrong <i>format</i> from a wrong <i>date</i> — {@code "2026-02-30"} is ISO-shaped and still
+   * impossible, so the value has to be visible for the message to be actionable.
+   */
+  static JSONObject buildInvalidDateInfo(String key, String received, boolean datetime)
+      throws JSONException {
+    JSONObject info = new JSONObject();
+    info.put("name", key);
+    info.put("received", received);
+    info.put("expectedFormat", NeoDateFormat.canonicalPattern(datetime));
+    info.put("example", datetime ? "2026-08-10T14:30:00" : "2026-08-10");
+    return info;
   }
 
   // ── Action result mapping (kept here to stay within McpToolRouter method-count limit) ─

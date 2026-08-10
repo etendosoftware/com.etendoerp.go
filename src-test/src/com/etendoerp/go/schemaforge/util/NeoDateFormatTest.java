@@ -309,6 +309,95 @@ class NeoDateFormatTest {
     }
   }
 
+  /**
+   * ETP-4793 / IMP-24 phase 2. {@code toCanonical} returns {@code null} for two unrelated reasons,
+   * and phase 1 could treat them alike because both ended in the same harmless pass-through. Phase 2
+   * cannot: it turns a refusal into a 422. The offset-datetime family is refused <b>because it is
+   * already correct</b> — the DAL parses it, the canonical form merely has nowhere to put the offset
+   * — so rejecting it would break a working call rather than fix a broken one. Every test below is
+   * therefore about one question: can this classifier be trusted to tell "wrong" from "not our
+   * business", given that a false positive is a new error on valid input?
+   */
+  @Nested
+  @DisplayName("isOffsetDateTime — refused-but-valid vs genuinely unusable")
+  class OffsetClassifier {
+
+    @Test
+    @DisplayName("the ISO datetime with a non-zero offset — the one that must not be rejected")
+    void nonZeroOffsetIsRecognized() {
+      assertTrue(NeoDateFormat.isOffsetDateTime("2026-08-06T14:30:00+02:00"));
+      assertTrue(NeoDateFormat.isOffsetDateTime("2026-08-06T14:30:00-05:00"));
+      assertTrue(NeoDateFormat.isOffsetDateTime("2026-08-06T14:30-05:00"));
+    }
+
+    /**
+     * The space separator is accepted on purpose. Only the {@code T} form is documented as reaching
+     * the DAL intact, but the two mistakes are not symmetric: a wrongly passed-through value keeps
+     * the behaviour that has been running all along, while a wrongly rejected one is a brand-new 422
+     * on a call that used to work.
+     */
+    @Test
+    @DisplayName("the space separator counts too — the safe direction when unsure")
+    void spaceSeparatorIsRecognized() {
+      assertTrue(NeoDateFormat.isOffsetDateTime("2026-08-06 14:30:00+02:00"));
+    }
+
+    /**
+     * A zero offset never reaches this question, because {@code toCanonical} converts it. Answering
+     * {@code true} anyway would be harmless in the current call path and wrong as a contract, so it
+     * is pinned: the classifier speaks only for values that were actually refused.
+     */
+    @Test
+    @DisplayName("a zero offset is not in the family — toCanonical converts those")
+    void zeroOffsetIsNotRecognized() {
+      assertFalse(NeoDateFormat.isOffsetDateTime("2026-08-06T14:30:00Z"));
+      assertFalse(NeoDateFormat.isOffsetDateTime("2026-08-06T14:30:00+00:00"));
+    }
+
+    @Test
+    @DisplayName("the genuinely unusable shapes are not shielded")
+    void unusableShapesAreNotRecognized() {
+      assertFalse(NeoDateFormat.isOffsetDateTime("06/08/2026"));
+      assertFalse(NeoDateFormat.isOffsetDateTime("2026-13-40"));
+      assertFalse(NeoDateFormat.isOffsetDateTime("2026-08"));
+      assertFalse(NeoDateFormat.isOffsetDateTime("2026-08-06T banana"));
+      assertFalse(NeoDateFormat.isOffsetDateTime("banana"));
+      assertFalse(NeoDateFormat.isOffsetDateTime(""));
+      assertFalse(NeoDateFormat.isOffsetDateTime(null));
+    }
+
+    /**
+     * A UI-pattern date half is excluded even when the offset half is well formed. The DAL's XSD
+     * parser reads the date half as ISO, so {@code 06-08-2026T14:30:00+02:00} is not a value it
+     * handles correctly — shielding it from rejection would leave the year-0012 class of corruption
+     * reachable through the one branch that skips the repair.
+     */
+    @Test
+    @DisplayName("a dd-MM-yyyy date half is not shielded by a valid offset")
+    void uiPatternDateHalfIsNotRecognized() {
+      assertFalse(NeoDateFormat.isOffsetDateTime("06-08-2026T14:30:00+02:00"));
+    }
+
+    @Test
+    @DisplayName("a date with no time half is never in the family")
+    void dateOnlyIsNotRecognized() {
+      assertFalse(NeoDateFormat.isOffsetDateTime("2026-08-06"));
+      assertFalse(NeoDateFormat.isOffsetDateTime("2026-08-06+02:00"));
+    }
+  }
+
+  @Nested
+  @DisplayName("canonicalPattern — the pattern quoted back in an error")
+  class CanonicalPattern {
+
+    @Test
+    @DisplayName("it quotes the same constants the conversion produces")
+    void matchesTheConstants() {
+      assertEquals(NeoDateFormat.ISO_DATE, NeoDateFormat.canonicalPattern(false));
+      assertEquals(NeoDateFormat.ISO_DATETIME, NeoDateFormat.canonicalPattern(true));
+    }
+  }
+
   @Test
   @DisplayName("the UI pattern falls back to dd-MM-yyyy when dateFormat.java is unreadable")
   void uiPatternFallback() {

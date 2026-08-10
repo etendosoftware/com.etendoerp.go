@@ -314,9 +314,10 @@ caller has asked for. All three keep today's behaviour exactly.
 
 Three deliberate constraints:
 
-- **An unrecognised shape is passed through verbatim** and logged at `WARN`, never blanked. Blanking
-  would turn a formatting problem into a missing mandatory field, and a guessed date is worse than
-  the lenient parser this replaces.
+- **An unrecognised shape is never blanked or guessed at.** Blanking would turn a formatting problem
+  into a missing mandatory field, and a guessed date is worse than the lenient parser this replaces.
+  What happens *instead* differs per stack: REST passes it through with a `WARN`, MCP answers a
+  structured 422 — see §4.3.1.1.
 - **A non-zero zone offset is refused, not converted.** `2026-08-06T14:30:00+02:00` already reaches
   the DAL correctly (`JsonUtils.convertFromXSDToJavaFormat` rewrites `+02:00` to `+0200`, which the
   datetime parser honours), and the canonical form has nowhere to put an offset — dropping it would
@@ -329,6 +330,47 @@ Three deliberate constraints:
 
 Full investigation, including the corrupt rows this found in a live database:
 `docs/mcp-evaluation/imps/IMP-16.md` in the `schema_forge` repo.
+
+##### 4.3.1.1 Unusable dates on the MCP write verbs — 422 (ETP-4793 / IMP-24)
+
+`neo_create` and `neo_update` **reject** a date value they cannot read, rather than letting it reach
+the DAL. What the agent used to get back was the DAL's own leak — `{"status":-4}` plus a bare
+`java.text.ParseException` naming no field, so it could not tell *which* date was wrong, or that a
+date was the problem at all. It now gets:
+
+```json
+{
+  "status": 422,
+  "error": "validation_error",
+  "detail": "One or more date values are not in a format this API can read",
+  "invalidDates": [
+    { "name": "orderDate", "received": "06/08/2026",
+      "expectedFormat": "yyyy-MM-dd", "example": "2026-08-10" }
+  ],
+  "hint": "Send dates as ISO: yyyy-MM-dd for dates, yyyy-MM-dd'T'HH:mm:ss for datetimes. …",
+  "seeAlso": "docs(topic:\"creating records\")"
+}
+```
+
+`received` is echoed back on purpose: the field name alone cannot distinguish a wrong *format* from a
+wrong *date*, and `2026-02-30` is ISO-shaped and still impossible (the strict resolver is what makes
+it an error instead of a silent slide to the 28th).
+
+Two conditions gate the rejection, and dropping either one would make it wrong:
+
+| Gate | Why |
+|---|---|
+| `NeoDateFormat.isOffsetDateTime(value)` must be false | `toCanonical` returns `null` for **two** reasons. A non-zero-offset datetime is refused *because it is already correct* (see the constraint above) — a 422 there would break a working call, not fix a broken one. The classifier exists solely to keep these two `null`s apart |
+| The value must be **caller-supplied** | A server-injected `dd-MM-yyyy` default is our bug. Answering it with a 422 hands the agent an error about a field it never sent. Those keep the pass-through `WARN`, which is the signal that the default needs fixing at source |
+
+The witness for the second gate is per-verb: `handleCreate` uses `userProvided`, the snapshot taken
+before `injectMandatoryDefaults` runs; `handleUpdate` needs none, because it never injects defaults,
+so every key in the body is the caller's.
+
+**REST stays lenient.** `NeoTypeCoercionHelper` keeps the pass-through `WARN`, following the same
+line IMP-15 drew: the React form is not an agent, it has a date picker, and changing the REST
+contract to fix an MCP ergonomics defect would be a breaking change bought for nothing. This is the
+one documented place where the two write stacks answer the same input differently.
 
 #### 4.3.2 Boolean format contract (ETP-4793)
 

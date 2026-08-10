@@ -297,6 +297,67 @@ public final class NeoDateFormat {
   }
 
   /**
+   * Whether a value {@link #toCanonical} refused is nevertheless one the DAL parses <b>correctly</b>
+   * (ETP-4793 / IMP-24 phase 2).
+   *
+   * <p>{@code toCanonical} returns {@code null} for two situations that phase 1 could treat alike
+   * and phase 2 must not, because it turns the refusal into a hard 422:
+   * <ul>
+   *   <li>the value is unusable — {@code "06/08/2026"}, {@code "2026-13-40"}, {@code "2026-08"} —
+   *       and the lenient DAL parser either reinterprets it or throws. Rejecting is the point;</li>
+   *   <li>the value is an ISO datetime carrying a <b>non-zero</b> zone offset. That one is refused
+   *       precisely <i>because it is already right</i>: the canonical form has nowhere to put an
+   *       offset, and {@code JsonUtils.convertFromXSDToJavaFormat} already rewrites {@code +02:00}
+   *       to {@code +0200} and parses it. Turning this into a 422 would break a working call —
+   *       which is why the two cases need telling apart before the rejection can ship.</li>
+   * </ul>
+   *
+   * <p>Only the second family returns {@code true}. A zero offset is not in it, because
+   * {@link #toCanonical} converts those successfully and never reaches this question.
+   *
+   * <p>The space separator is accepted alongside {@code T}, even though only the {@code T} form is
+   * documented as reaching the DAL intact. The two errors here are not symmetric: a value wrongly
+   * passed through keeps the phase-1 behaviour that has been running all along, while a value
+   * wrongly rejected is a new 422 on a call that used to work. Where the answer is uncertain this
+   * method therefore leans towards pass-through.
+   *
+   * @param raw the value as it arrived; may be {@code null}
+   * @return {@code true} when the value must be passed through rather than rejected
+   */
+  public static boolean isOffsetDateTime(String raw) {
+    if (raw == null) {
+      return false;
+    }
+    String[] halves = splitDateAndTime(raw.trim());
+    if (halves[1] == null) {
+      return false;
+    }
+    try {
+      LocalDate.parse(halves[0], DateTimeFormatter.ISO_LOCAL_DATE);
+    } catch (DateTimeParseException e) {
+      log.trace("Not an ISO date half: {}", halves[0]);
+      return false;
+    }
+    String timePart = halves[1].trim();
+    Matcher m = TIME_PREFIX.matcher(timePart);
+    if (!m.find()) {
+      return false;
+    }
+    Matcher tail = TIME_TAIL.matcher(timePart.substring(m.end()));
+    return tail.matches() && !isZeroOffset(tail);
+  }
+
+  /**
+   * The canonical pattern for a property kind, for use in an error message.
+   *
+   * @param datetime {@code true} for a datetime property, {@code false} for date-only
+   * @return {@link #ISO_DATETIME} or {@link #ISO_DATE}
+   */
+  public static String canonicalPattern(boolean datetime) {
+    return datetime ? ISO_DATETIME : ISO_DATE;
+  }
+
+  /**
    * Whether the canonical form applies to {@code prop}, and in which of the two shapes.
    *
    * <p>Etendo has <b>five</b> date-ish domain types, not two, and
