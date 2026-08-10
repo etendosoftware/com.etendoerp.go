@@ -1055,11 +1055,14 @@ the REST contract stays untouched:
 ```json
 {
   "committed": false,
-  "failedAt": { "index": 0, "id": "h1" },
+  "atomic": false,
+  "failedAt": { "index": 1, "id": "l0" },
+  "persisted": [ { "id": "h1", "ok": true, "recordId": "8A2…" } ],
+  "hint": "1 operation(s) that ran before the failure were already committed and were NOT rolled back …",
   "error": {
     "status": 400,
     "error": "validation_error",
-    "detail": "Operation 'h1' rejected by server: id: New object Currency(null) …",
+    "detail": "Operation 'l0' rejected by server: id: New object Currency(null) …",
     "seeAlso": "docs(topic:\"creating records\")"
   }
 }
@@ -1069,6 +1072,34 @@ the REST contract stays untouched:
 or `server_error` (5xx, and the batch-wide failure reported at index `-1`) — only the first three are
 worth retrying with a corrected request. The DAL's own text is preserved inside `detail`; its numeric
 `status: -4` is dropped, since it names nothing an agent can act on.
+
+##### 4.12.4.1 `persisted` — the batch is not atomic (IMP-23)
+
+**`neo_batch` and `POST /batch` do not roll back the operations that already succeeded.** The
+`persisted` array lists the ones that survived the failure, and it is present on every failure body,
+empty included — "nothing landed" and "we are not saying" must not look alike to a caller.
+
+Why: `BatchService` does hold a single transaction — one `commitAndClose()` after the loop,
+`rollbackAndClose()` on failure — but each op reaches core's `DefaultJsonDataService#update`, which
+ends its success branch with an unconditional `OBDal.getInstance().commitAndClose()`. So every op
+commits itself and the batch's rollback finds an empty session. The commit cannot be suppressed: it
+takes no parameter, `SessionHandler#setDoRollback` is read only by `DalThreadHandler` at thread end,
+and disabling triggers makes `commitAndClose` throw. Real atomicity means not routing through that
+core method at all, which is tracked separately.
+
+The failure mode is asymmetric, which is why it read as intermittent across four benchmark runs:
+
+| Failure happens at | Outcome |
+|---|---|
+| **validation / FK resolution** — caught by `McpToolRouter#resolveBatchFkNames` before `executeBatch` runs | nothing persisted; `persisted: []`. Looks atomic, and is |
+| **persist time** — a value the DAL accepts and Postgres rejects (e.g. 281 chars into `varchar(255)`) | earlier ops are committed and stay committed; `persisted` names them |
+
+So a caller must **read `persisted` rather than infer from `committed:false`**. Retrying the whole
+batch unchanged duplicates whatever it lists; the correct recovery is to delete those records, or
+reuse them and resubmit only the remaining ops. This is not academic — a benchmark run left a
+`sales-order` header orphaned for five days precisely because the response gave it no reason to look.
+
+Unchanged on success: a fully successful batch still returns `committed:true` with every `recordId`.
 
 #### 4.12.5 `neo_list` / `neo_get` — unknown projection fields (IMP-18)
 
@@ -1352,7 +1383,7 @@ NEO Headless enforces security at multiple levels:
    | Entry point | Where | Refusal |
    |---|---|---|
    | REST CRUD | `NeoCrudHandler#handleWindowEntityCrud` | `405` `"<METHOD> not enabled for <entity>"` |
-   | `/batch` + MCP `neo_batch` | `BatchService#createRecord` (the batch enters at `handleDefault`, i.e. after the CRUD gate) | per-op `405`, whole batch rolled back |
+   | `/batch` + MCP `neo_batch` | `BatchService#createRecord` (the batch enters at `handleDefault`, i.e. after the CRUD gate) | per-op `405`; the batch stops there, but earlier ops are already committed — see §4.12.4.1 |
    | MCP `neo_create` / `neo_update` / `neo_delete` | `McpToolRouterSupport#requireMethodEnabled` | MCP tool error naming the enabled methods and stating the entity is read-only |
 
    Before ETP-4254 only the REST path checked them, so turning the mutation flags off on a

@@ -46,14 +46,29 @@ import com.etendoerp.go.schemaforge.data.SFSpec;
 import com.etendoerp.go.schemaforge.util.NeoMethodPolicy;
 
 /**
- * Generic transactional batch endpoint.
+ * Generic sequential batch endpoint.
  *
- * <p>Accepts an ordered list of CRUD operations, runs them all in one OBDal
- * transaction, supports back-references between operations, and either
- * commits everything or rolls back everything. Used by the React UI to ingest
- * a multi-record document atomically and exposed as a generic primitive that
- * an MCP agent can compose alongside {@code neo_selectors} / {@code neo_create}.
- * </p>
+ * <p>Accepts an ordered list of CRUD operations, runs them in order, and supports
+ * back-references between operations. Used by the React UI to ingest a multi-record
+ * document and exposed as a generic primitive that an MCP agent can compose alongside
+ * {@code neo_selectors} / {@code neo_create}.</p>
+ *
+ * <p><b>Not atomic. This is a defect of the write path below, not a design choice
+ * (IMP-23).</b> The code here does own a single transaction — one {@code commitAndClose()}
+ * after the loop, {@code rollbackAndClose()} on failure — but each operation reaches core's
+ * {@code DefaultJsonDataService#update}, which ends its success branch with an unconditional
+ * {@code OBDal.getInstance().commitAndClose()}. So every op commits itself, and the rollback
+ * here finds an empty session. There is no supported way to suppress that commit: it takes no
+ * parameter, {@code SessionHandler#setDoRollback} is only read by {@code DalThreadHandler} at
+ * thread end, and disabling triggers makes {@code commitAndClose} throw. Making this genuinely
+ * atomic means not routing through that core method at all.</p>
+ *
+ * <p>Until then the failure response tells the truth instead of implying a rollback: see
+ * {@code persisted} / {@code atomic} / {@code hint} in
+ * {@link #failureBody(int, String, int, String, JSONObject, JSONArray)}. The failure mode is
+ * asymmetric and that is why three benchmark runs read it as intermittent — a validation or
+ * FK failure is caught before any op runs and really does look atomic, while a persist-time
+ * failure (a value the DAL accepts and Postgres rejects) leaves the earlier ops committed.</p>
  *
  * <p>Request shape (a single window's "ingest invoice" looks like this — but
  * the same endpoint serves any spec):</p>
@@ -86,8 +101,10 @@ import com.etendoerp.go.schemaforge.util.NeoMethodPolicy;
  * <p>Response:</p>
  * <ul>
  *   <li>Success: {@code { committed:true, operations: [{ id, ok:true, recordId },…] }}.</li>
- *   <li>Failure: {@code { committed:false, failedAt: { id, index }, error: {…} }} —
- *       the OBDal session is rolled back; no operation persists.</li>
+ *   <li>Failure: {@code { committed:false, atomic:false, failedAt: { id, index },
+ *       persisted: [{ id, ok:true, recordId },…], hint, error: {…} }} — a rollback is attempted,
+ *       but {@code persisted} lists the operations that had already committed and therefore
+ *       survived it. An empty {@code persisted} means nothing landed.</li>
  * </ul>
  *
  * <p>Find-or-create logic is intentionally NOT in the server. Callers (the UI
@@ -109,6 +126,9 @@ public class BatchService {
    */
   public static final String REF_PREFIX = "$ref:";
   private static final String FIELD_COMMITTED = "committed";
+  private static final String FIELD_ATOMIC = "atomic";
+  private static final String FIELD_PERSISTED = "persisted";
+  private static final String FIELD_HINT = "hint";
   private static final String FIELD_PARENT_ID = "parentId";
   private static final String FIELD_ID = "id";
   private static final String FIELD_ENTITY = "entity";
@@ -200,15 +220,20 @@ public class BatchService {
   }
 
   /**
-   * Run a batch of CRUD operations atomically. Owns the OBDal transaction
-   * lifecycle: commits on success, rolls back on any failure. Performs no
-   * HTTP I/O — both success and failure are returned as a JSONObject for
-   * the caller to translate (HTTP wrapper, MCP content, etc.).
+   * Run a batch of CRUD operations in order. Owns the OBDal transaction lifecycle it can own:
+   * commits after the loop, rolls back on any failure. Performs no HTTP I/O — both success and
+   * failure are returned as a JSONObject for the caller to translate (HTTP wrapper, MCP content,
+   * etc.).
+   *
+   * <p><b>The rollback does not undo earlier operations</b> — each one has already committed
+   * itself inside core's write path. See the class javadoc (IMP-23); the failure body reports the
+   * survivors rather than pretending they do not exist.</p>
    *
    * <p>Response shapes:</p>
    * <ul>
    *   <li>Success: {@code {committed:true, operations:[{id, ok:true, recordId},…]}}.</li>
-   *   <li>Failure: {@code {committed:false, failedAt:{id,index}, error:{status,message,detail?}}}.</li>
+   *   <li>Failure: {@code {committed:false, atomic:false, failedAt:{id,index},
+   *       persisted:[…], hint, error:{status,message,detail?}}}.</li>
    * </ul>
    *
    * @param operations the ordered list of operation objects (must be non-null)
@@ -218,7 +243,7 @@ public class BatchService {
   public JSONObject executeBatch(JSONArray operations) throws JSONException {
     if (operations == null) {
       return failureBody(-1, null, HttpServletResponse.SC_BAD_REQUEST,
-          "Missing 'operations' array", null);
+          "Missing 'operations' array", null, null);
     }
     log.info("[BATCH] received {} operation(s)", operations.length());
 
@@ -248,7 +273,7 @@ public class BatchService {
         rollbackQuietly();
       }
       return failureBody(-1, null, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
-          "Batch failed: " + e.getMessage(), null);
+          "Batch failed: " + e.getMessage(), null, opResults);
     }
   }
 
@@ -261,30 +286,30 @@ public class BatchService {
       JSONArray opResults) throws JSONException {
     if (op == null) {
       return failureBody(i, null, HttpServletResponse.SC_BAD_REQUEST,
-          OPS_PREFIX + i + "] must be an object", null);
+          OPS_PREFIX + i + "] must be an object", null, opResults);
     }
     String opId = op.optString(FIELD_ID, null);
     String specName = op.optString(FIELD_SPEC, null);
     String entityName = op.optString(FIELD_ENTITY, null);
     if (StringUtils.isBlank(opId) || StringUtils.isBlank(specName) || StringUtils.isBlank(entityName)) {
       return failureBody(i, opId, HttpServletResponse.SC_BAD_REQUEST,
-          OPS_PREFIX + i + "] requires 'id', 'spec', 'entity'", null);
+          OPS_PREFIX + i + "] requires 'id', 'spec', 'entity'", null, opResults);
     }
     if (resolvedIds.containsKey(opId)) {
       return failureBody(i, opId, HttpServletResponse.SC_BAD_REQUEST,
-          OPS_PREFIX + i + "].id duplicates an earlier op", null);
+          OPS_PREFIX + i + "].id duplicates an earlier op", null, opResults);
     }
     SFSpec spec = NeoServletSupport.findSpec(specName);
     if (spec == null) {
       return failureBody(i, opId, HttpServletResponse.SC_NOT_FOUND,
-          "Spec not found: " + specName, null);
+          "Spec not found: " + specName, null, opResults);
     }
 
     JSONObject opBody = op.optJSONObject(FIELD_BODY);
     if (opBody == null) {
       opBody = new JSONObject();
     }
-    JSONObject substitutionFailure = trySubstituteRefs(i, opId, opBody, resolvedIds);
+    JSONObject substitutionFailure = trySubstituteRefs(i, opId, opBody, resolvedIds, opResults);
     if (substitutionFailure != null) {
       return substitutionFailure;
     }
@@ -293,7 +318,7 @@ public class BatchService {
     if (StringUtils.isNotBlank(parentRef) && !resolvedIds.containsKey(parentRef)) {
       return failureBody(i, opId, HttpServletResponse.SC_BAD_REQUEST,
           OPS_PREFIX + i + "].parentRef '" + parentRef + "' does not match any earlier op id",
-          null);
+          null, opResults);
     }
     String parentId = resolveParentId(op, resolvedIds, opBody);
 
@@ -301,12 +326,12 @@ public class BatchService {
     if (!isSuccess(rowResp)) {
       log.warn("[BATCH] op '{}' (index {}) failed with status {}", opId, i, rowResp.getHttpStatus());
       return failureBody(i, opId, rowResp.getHttpStatus(),
-          "Operation '" + opId + "' rejected by server", rowResp.getBody());
+          "Operation '" + opId + "' rejected by server", rowResp.getBody(), opResults);
     }
     String recordId = extractRecordId(rowResp.getBody());
     if (StringUtils.isBlank(recordId)) {
       return failureBody(i, opId, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
-          "Operation '" + opId + "' created but id missing in response", null);
+          "Operation '" + opId + "' created but id missing in response", null, opResults);
     }
     resolvedIds.put(opId, recordId);
     JSONObject perOp = new JSONObject();
@@ -322,13 +347,13 @@ public class BatchService {
    * batch failure body. Keeps the per-op flow free of nested try/catch.
    */
   private JSONObject trySubstituteRefs(int i, String opId, JSONObject opBody,
-      Map<String, String> resolvedIds) throws JSONException {
+      Map<String, String> resolvedIds, JSONArray opResults) throws JSONException {
     try {
       substituteRefs(opBody, resolvedIds);
       return null;
     } catch (JSONException e) {
       return failureBody(i, opId, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
-          "Failed to substitute refs: " + e.getMessage(), null);
+          "Failed to substitute refs: " + e.getMessage(), null, opResults);
     }
   }
 
@@ -344,11 +369,33 @@ public class BatchService {
    * Build the failure JSON payload. {@code detail} is optional — pass the
    * sub-response body when one is available so callers can correlate the
    * underlying NEO error.
+   *
+   * <p><b>{@code persisted} is not decoration (IMP-23).</b> Because every op commits itself
+   * (see {@link #executeBatch}), the ops that ran before the failing one are already durable, and
+   * this array is the caller's only record of them. It used to be discarded here while sitting in
+   * memory one frame up, which is how a benchmark run left an orphan {@code sales-order} header
+   * undeleted for five days: the response said {@code committed:false} and gave the caller no reason
+   * to look for a record that existed. An empty array is reported explicitly rather than omitted —
+   * "nothing survived" and "we are not telling you" must not look alike.</p>
+   *
+   * @param persisted the successful-op results accumulated so far, or {@code null} when the batch
+   *                  failed before any op ran
    */
   private JSONObject failureBody(int index, String opId, int status, String message,
-      JSONObject detail) throws JSONException {
+      JSONObject detail, JSONArray persisted) throws JSONException {
     JSONObject body = new JSONObject();
     body.put(FIELD_COMMITTED, false);
+    JSONArray survivors = persisted != null ? persisted : new JSONArray();
+    body.put(FIELD_ATOMIC, false);
+    body.put(FIELD_PERSISTED, survivors);
+    body.put(FIELD_HINT, survivors.length() > 0
+        ? survivors.length() + " operation(s) that ran before the failure were already committed and "
+            + "were NOT rolled back — see 'persisted' for their recordIds. Those records exist: "
+            + "delete them, or reuse them and retry only the remaining operations. Retrying the "
+            + "whole batch as-is will create duplicates."
+        : "No operation persisted this time, but this endpoint is not atomic: a failure at persist "
+            + "time (rather than validation time) leaves earlier operations committed. Always read "
+            + "'persisted' rather than assuming a failed batch wrote nothing.");
     JSONObject failedAt = new JSONObject();
     failedAt.put("index", index);
     if (opId != null) {

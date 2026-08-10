@@ -124,8 +124,17 @@ public class ToolRegistryTest {
 
     assertEquals("neo_batch", tool.getName());
     assertNotNull(tool.getDescription());
-    assertTrue("Description must mention atomic transaction",
-        tool.getDescription().toLowerCase().contains("atomic"));
+    // This used to assert the description "must mention atomic transaction". It did — and the
+    // claim was false (IMP-23): every operation is committed by the core write path underneath,
+    // so a failure leaves the earlier ones durable. The assertion would still pass against the
+    // corrected text (which contains "NOT atomic"), which is exactly why it has to be inverted
+    // rather than left alone: what the agent must be told is the non-atomicity and where to find
+    // the records that survived.
+    String description = tool.getDescription().toLowerCase();
+    assertTrue("Description must warn the batch is not atomic",
+        description.contains("not atomic"));
+    assertTrue("Description must point the caller at 'persisted' to recover the surviving records",
+        description.contains("persisted"));
 
     Map<String, Object> schema = tool.getInputSchema();
     assertEquals("object", schema.get("type"));

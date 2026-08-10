@@ -63,8 +63,10 @@ import com.etendoerp.go.schemaforge.data.SFSpec;
  * constructed operations array), these tests instead assert the contract the batch
  * endpoint itself owns and that only it can break:
  * <ul>
- *   <li>the whole batch is atomic — one failed operation rolls everything back
- *       ({@code commitAndClose} is never reached), so no partial document is left behind;</li>
+ *   <li>{@link BatchService}'s own transaction lifecycle — one {@code commitAndClose} on success,
+ *       {@code rollbackAndClose} and no commit on failure;</li>
+ *   <li>the failure body names the operations that survived the failure, under {@code persisted},
+ *       with {@code atomic:false} and a {@code hint} (IMP-23);</li>
  *   <li>a sub-operation failure is surfaced as a structured
  *       {@code {committed:false, failedAt, error:{status,message,detail}}} body carrying the
  *       sub-operation's own HTTP status — never masked into an opaque 500 or a raw stack trace;</li>
@@ -79,6 +81,17 @@ import com.etendoerp.go.schemaforge.data.SFSpec;
  * genuinely maps each specific input to that specific status (e.g. an over-length name to a 400
  * rather than a 500) is a core-Etendo / DB-constraint concern verified at the CRUD layer and in
  * CI, orthogonal to the batch-orchestration contract asserted here.
+ *
+ * <p><b>What that stub necessarily hides, and why these tests once asserted an atomicity that does
+ * not exist (IMP-23).</b> The real per-op commit happens inside the stubbed seam — core's
+ * {@code DefaultJsonDataService#update} ends its success branch with its own
+ * {@code OBDal.getInstance().commitAndClose()}. With that seam mocked, {@code verify(obDal,
+ * never()).commitAndClose()} passes for a reason unrelated to atomicity: nothing downstream ever
+ * ran. So these assertions pin {@code BatchService}'s own lifecycle, which was never the broken
+ * part, and they are kept for that — but they must not be read as evidence of all-or-nothing
+ * behaviour. Only a DB-backed {@code OBBaseTest} could see the leak, and this sandbox cannot boot
+ * one. What is asserted instead is the observable contract that IMP-23 actually changed: the
+ * failure body reports the survivors rather than implying there are none.
  */
 public class BatchServiceRobustnessTest {
 
@@ -90,7 +103,7 @@ public class BatchServiceRobustnessTest {
 
   // ---------------------------------------------------------------------------
   // 1. Happy path — businessPartner + locationAddress + contact, mirroring the
-  //    real Contacts CSV import shape, commits atomically and wires parent refs.
+  //    real Contacts CSV import shape, commits and wires parent refs.
   // ---------------------------------------------------------------------------
   @Test
   public void happyPathContactsBatchCommitsAndWiresParentRefs() throws Exception {
@@ -120,7 +133,8 @@ public class BatchServiceRobustnessTest {
       assertEquals("loc-1", opResults.getJSONObject(1).getString("recordId"));
       assertEquals("ct-1", opResults.getJSONObject(2).getString("recordId"));
 
-      // Atomic-commit contract: exactly one commit, no rollback on the happy path.
+      // Exactly one commit and no rollback on the happy path. Unchanged by IMP-23: the
+      // success path was never the problem and was deliberately left byte-identical.
       verify(obDal).commitAndClose();
       verify(obDal, never()).rollbackAndClose();
 
@@ -170,8 +184,13 @@ public class BatchServiceRobustnessTest {
 
     assertEquals("an over-length field must be a 400 validation failure, not a 500",
         400, error.getInt("status"));
-    assertTrue("failure must be rejected before persistence, not committed",
-        error.getInt("status") >= 400 && error.getInt("status") < 500);
+    // The second assertion here used to read "failure must be rejected before persistence, not
+    // committed" while only re-checking that 400 is in the 4xx range — a tautology standing in for
+    // a claim the code could not make. What matters is that the status is one the caller can act
+    // on, i.e. fix-and-retry rather than server_error; whether anything persisted is asserted
+    // through 'persisted' in test 6, not inferred from a status code.
+    assertEquals("an over-length value is the caller's to fix, so it must not be a 5xx",
+        4, error.getInt("status") / 100);
   }
 
   // ---------------------------------------------------------------------------
@@ -189,12 +208,13 @@ public class BatchServiceRobustnessTest {
   }
 
   // ---------------------------------------------------------------------------
-  // 5. Duplicate unique key — the whole batch must roll back atomically. The
-  //    first op "succeeds" in-session, the second violates a uniqueness
-  //    constraint; nothing may be committed (no partial document).
+  // 5. Duplicate unique key on the SECOND op — the batch stops, and the first
+  //    op's record must be reported under 'persisted' (IMP-23). This test used to
+  //    assert the opposite ("nothing may be committed"); it was asserting the mock,
+  //    not the product — see the class javadoc.
   // ---------------------------------------------------------------------------
   @Test
-  public void duplicateKeyRollsBackWholeBatchAtomically() throws Exception {
+  public void duplicateKeyStopsBatchAndReportsTheSurvivingRecord() throws Exception {
     BatchService service = BatchService.forBatchOnly();
 
     JSONArray ops = new JSONArray();
@@ -218,10 +238,41 @@ public class BatchServiceRobustnessTest {
           result.getJSONObject("failedAt").getInt("index"));
       assertEquals("bp2", result.getJSONObject("failedAt").getString("id"));
 
-      // Atomicity: the first (successful) op must NOT be partially committed.
+      // IMP-23: the first op already committed inside the CRUD layer, so its record survives the
+      // rollback. The response must name it — this array is the caller's only way to find it.
+      assertFalse("a failed batch must declare it is not atomic",
+          result.getBoolean("atomic"));
+      JSONArray persisted = result.getJSONArray("persisted");
+      assertEquals("the one op that ran before the failure must be reported as persisted",
+          1, persisted.length());
+      assertEquals("bp1", persisted.getJSONObject(0).getString("id"));
+      assertEquals("bp-1", persisted.getJSONObject(0).getString("recordId"));
+      assertTrue("the hint must warn that retrying the whole batch duplicates the survivor",
+          result.getString("hint").contains("duplicates"));
+
+      // BatchService's own lifecycle, which was never the broken part: it commits once at the end
+      // and not at all on failure. This says nothing about the per-op commit below the stub.
       verify(obDal, never()).commitAndClose();
       verify(obDal).rollbackAndClose();
     }
+  }
+
+  // ---------------------------------------------------------------------------
+  // 6. Failure on the FIRST op — nothing ran before it, so 'persisted' must be
+  //    present and empty. "Nothing landed" and "we are not saying" must not look
+  //    alike to a caller, which is why the key is never omitted.
+  // ---------------------------------------------------------------------------
+  @Test
+  public void failureOnFirstOpReportsAnEmptyPersistedArray() throws Exception {
+    JSONObject result = runSingleOpBatch(
+        NeoResponse.error(400, "Value too long for column NAME (max 60)"));
+
+    assertEquals("no op ran before the failure, so nothing can have persisted",
+        0, result.getJSONArray("persisted").length());
+    assertFalse("the non-atomic warning is not conditional on something having survived",
+        result.getBoolean("atomic"));
+    assertTrue("the hint must still tell the caller to read 'persisted' rather than infer",
+        result.getString("hint").contains("persisted"));
   }
 
   // ---------------------------------------------------------------------------
@@ -234,6 +285,18 @@ public class BatchServiceRobustnessTest {
    * the {@code error} object for scenario-specific assertions.
    */
   private JSONObject runSingleOpAndExpectFailure(NeoResponse subFailure) throws Exception {
+    JSONObject result = runSingleOpBatch(subFailure);
+    JSONObject error = result.getJSONObject("error");
+    assertNotNull("failure body must carry a structured error", error);
+    return error;
+  }
+
+  /**
+   * Same as {@link #runSingleOpAndExpectFailure} but returns the whole failure body, for the
+   * assertions that are about the envelope itself ({@code persisted}, {@code atomic}, {@code hint})
+   * rather than about the {@code error} inside it.
+   */
+  private JSONObject runSingleOpBatch(NeoResponse subFailure) throws Exception {
     BatchService service = BatchService.forBatchOnly();
     JSONArray ops = new JSONArray();
     ops.put(op("bp", "businessPartner").put("body", new JSONObject().put("name", "x")));
@@ -251,9 +314,9 @@ public class BatchServiceRobustnessTest {
       assertFalse("sub-operation failure must fail the batch", result.getBoolean(COMMITTED));
       verify(obDal, never()).commitAndClose();
       verify(obDal).rollbackAndClose();
-      JSONObject error = result.getJSONObject("error");
-      assertNotNull("failure body must carry a structured error", error);
-      return error;
+      assertNotNull("every failure body must carry 'persisted', empty included (IMP-23)",
+          result.optJSONArray("persisted"));
+      return result;
     }
   }
 

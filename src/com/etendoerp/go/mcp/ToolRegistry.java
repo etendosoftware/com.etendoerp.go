@@ -590,12 +590,17 @@ public class ToolRegistry {
         buildObjectSchema(props, List.of("spec", McpConstants.PARAM_ENTITY)));
   }
 
-  // ── Batch tool (cross-spec, atomic) ───────────────────────────────────
+  // ── Batch tool (cross-spec, sequential — not atomic, see IMP-23) ──────
 
   /**
    * Build the {@code neo_batch} tool definition. Unlike the per-spec CRUD tools,
    * each operation in the batch carries its own {@code spec}, so this tool is
    * registered once with no top-level enum.
+   *
+   * <p>The description states plainly that the tool is not atomic (IMP-23). It used to promise
+   * all-or-nothing, which is worse than saying nothing: an agent that believes a failed batch
+   * wrote nothing has no reason to look for the records it left behind, and one such orphan
+   * survived five days in this project's own benchmark evidence.</p>
    */
   McpToolDefinition buildBatchTool() {
     Map<String, Object> opProps = new LinkedHashMap<>();
@@ -641,7 +646,7 @@ public class ToolRegistry {
     Map<String, Object> operationsProp = new LinkedHashMap<>();
     operationsProp.put("type", "array");
     operationsProp.put(McpConstants.KEY_DESCRIPTION,
-        "Ordered list of create operations to run as a single transaction.");
+        "Ordered list of create operations, run in the given order.");
     operationsProp.put("items", opItem);
 
     Map<String, Object> props = new LinkedHashMap<>();
@@ -649,9 +654,11 @@ public class ToolRegistry {
 
     return new McpToolDefinition(
         "neo_batch",
-        "Run a sequence of cross-spec create operations atomically. All operations "
-            + "share one OBDal transaction: success commits everything, any failure "
-            + "rolls back everything (no partial writes). Each op carries its own "
+        "Run a sequence of cross-spec create operations in order. NOT atomic: a failure "
+            + "does NOT reliably undo the operations that already succeeded, so never assume a "
+            + "failed batch wrote nothing — read 'persisted' in the failure response, which lists "
+            + "the recordIds that survived, and delete or reuse them before retrying (a plain "
+            + "retry duplicates them). Each op carries its own "
             + "'spec' and 'entity', so a single batch can mix windows (e.g. create a "
             + "Business Partner, a Location, then a Purchase Invoice referencing both). "
             + "Use 'parentRef':<earlierOpId> to set the parent FK on a child-tab op, "
@@ -660,9 +667,11 @@ public class ToolRegistry {
             + "neo_list / neo_selectors first to look up existing records and only "
             + "include create ops for what is genuinely new. "
             + "Returns {committed:true, operations:[{id,ok:true,recordId}]} on success "
-            + "or {committed:false, failedAt:{id,index}, error:{status,error,detail,seeAlso}} "
-            + "on failure, where 'error' is a stable code (validation_error, not_found, "
-            + "method_not_allowed, server_error) naming what to fix.",
+            + "or {committed:false, atomic:false, failedAt:{id,index}, "
+            + "persisted:[{id,ok:true,recordId}], hint, "
+            + "error:{status,error,detail,seeAlso}} on failure, where 'error' is a stable code "
+            + "(validation_error, not_found, method_not_allowed, server_error) naming what to fix "
+            + "and 'persisted' is empty only when nothing landed.",
         buildObjectSchema(props, List.of("operations")));
   }
 
