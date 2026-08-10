@@ -99,7 +99,8 @@ public class FinancialAccountsPageHandler implements NeoHandler {
           + "       fa.c_currency_id, cur.iso_code, fa.iban, fa.isdefault, fa.isactive, "
           + "       fa.em_psd2_masked_pan, fa.em_psd2_connection_status, "
           + "       COALESCE(fa.em_etgo_date_tolerance, 3), "
-          + "       COALESCE(fa.em_etgo_amount_tolerance, 0) "
+          + "       COALESCE(fa.em_etgo_amount_tolerance, 0), "
+          + "       fa.writeofflimit "
           + "  FROM fin_financial_account fa "
           + "  JOIN c_currency cur ON cur.c_currency_id = fa.c_currency_id "
           + " WHERE fa.ad_client_id = ? "
@@ -213,6 +214,9 @@ public class FinancialAccountsPageHandler implements NeoHandler {
           row.dateTolerance = rs.getInt(12);
           BigDecimal amtTol = rs.getBigDecimal(13);
           row.amountTolerance = amtTol != null ? amtTol : BigDecimal.ZERO;
+          // Left NULL on purpose when unset: null means "no limit", which is not the same as a
+          // configured 0. See the serialiser and ReconciliationHandler.assertWithinWriteoffLimit.
+          row.writeoffLimit = rs.getBigDecimal(14);
           rows.add(row);
         }
       }
@@ -275,6 +279,9 @@ public class FinancialAccountsPageHandler implements NeoHandler {
       json.put("pendingCount", pendingByAccount.getOrDefault(account.id, 0));
       json.put("dateTolerance", account.dateTolerance);
       json.put("amountTolerance", account.amountTolerance);
+      // JSONObject.put(String, Object) with null REMOVES the key, which is exactly what we want:
+      // the UI distinguishes "no limit configured" (absent) from a configured value.
+      json.put("writeoffLimit", account.writeoffLimit);
       json.put("hasTransactions", accountsWithTransactions.contains(account.id));
       arr.put(json);
     }
@@ -362,6 +369,13 @@ public class FinancialAccountsPageHandler implements NeoHandler {
     int dateTolerance = 3;
     /** Maximum % difference allowed when matching amounts. Default 0 (exact match). */
     BigDecimal amountTolerance = BigDecimal.ZERO;
+    /**
+     * Largest difference the user may write off when settling an invoice (ETP-4797), from
+     * {@code FIN_Financial_Account.Writeofflimit}. {@code null} when unset, which this feature
+     * reads as "no limit" — see {@code ReconciliationHandler.assertWithinWriteoffLimit} for why
+     * that diverges from Classic.
+     */
+    BigDecimal writeoffLimit = null;
 
     AccountRow(String id, String name, String type, BigDecimal currentBalance,
         Currency currency, String iban, boolean isDefault) {
