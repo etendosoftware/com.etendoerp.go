@@ -200,6 +200,40 @@ public class FinancialAccountBankConnectionHandlerRoutingTest {
       JSONObject data = dataOf(response);
       assertFalse(data.getBoolean("connected"));
       assertFalse("connection-only field omitted when no connection", data.has("providerName"));
+      assertFalse("never linked → not reconnectable", data.getBoolean("reconnectable"));
+    }
+  }
+
+  /**
+   * GET status on a soft-disconnected account (ETP-4764): the connection was deactivated rather
+   * than deleted, so the account is no longer {@code connected} but keeps its Salt Edge link and
+   * must be reported as {@code reconnectable}, which is what lets the SPA offer "Reconectar"
+   * instead of a from-scratch connect flow.
+   */
+  @Test
+  public void testStatusSoftDisconnectedAccountReturnsReconnectableTrue() throws Exception {
+    Map<String, String> params = new HashMap<>();
+    params.put(PARAM_ACTION, ACTION_STATUS);
+    params.put(PARAM_ACCOUNT_ID, ACCOUNT_ID);
+
+    FIN_FinancialAccount finAcc = mock(FIN_FinancialAccount.class);
+    when(finAcc.getPSD2ConnectionStatus()).thenReturn("CD");
+    when(finAcc.getPSD2SaltEdgeAccountID()).thenReturn("SE-1");
+    doReturn(finAcc).when(handler).loadAccount(ACCOUNT_ID);
+
+    try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
+        MockedStatic<SaltEdgeAccountLinkHelper> linkHelper =
+            mockStatic(SaltEdgeAccountLinkHelper.class)) {
+      // The soft path leaves the connection inactive, so the "active connection" lookup misses it.
+      linkHelper.when(() -> SaltEdgeAccountLinkHelper.getActiveConnectionForFinAcc(finAcc))
+          .thenReturn(null);
+
+      NeoResponse response = handler.handle(getContext(params));
+
+      assertEquals(200, response.getHttpStatus());
+      JSONObject data = dataOf(response);
+      assertFalse(data.getBoolean("connected"));
+      assertTrue(data.getBoolean("reconnectable"));
     }
   }
 
