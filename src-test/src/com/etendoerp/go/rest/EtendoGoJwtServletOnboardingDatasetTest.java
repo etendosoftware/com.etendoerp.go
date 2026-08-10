@@ -295,6 +295,57 @@ public class EtendoGoJwtServletOnboardingDatasetTest {
   }
 
   @Test
+  public void testEnsureOnboardingDatasetPatchesBpGroupAcctBeforeBaseline() {
+    CountingBaselineService baselineService = new CountingBaselineService();
+    CountingAccountingWiringService accountingService = new CountingAccountingWiringService();
+    TestServlet servlet = new TestServlet(new SuccessfulImportService(),
+        new CountingSequenceGeneratorService(), new CountingMarkOrgReadyService(),
+        new CountingFiscalDataSetupService(), new CountingDefaultCustomerService(),
+        baselineService);
+    servlet.onboardingAccountingWiringService = accountingService;
+    StringWriter output = new StringWriter();
+
+    boolean ready = servlet.ensureOnboardingDataset(new PrintWriter(output), "CLIENT-1", "ORG-1",
+        "USER-1", "ROLE-1", null);
+
+    String ndjson = output.toString();
+    assertTrue(ready);
+    assertEquals(1, accountingService.patchCount);
+    assertEquals("CLIENT-1", accountingService.clientId);
+    assertEquals("ORG-1", accountingService.orgId);
+    assertEquals("USER-1", accountingService.userId);
+    assertEquals("ROLE-1", accountingService.roleId);
+    assertEquals(1, baselineService.registerCount);
+    assertTrue(ndjson.contains("\"step\":\"bpGroupAcctPatch\""));
+    assertTrue(ndjson.contains("Business-partner group posting accounts patched"));
+    assertTrue(ndjson.indexOf("Business-partner group posting accounts patched")
+        < ndjson.indexOf("Data-fix baseline registered"));
+  }
+
+  @Test
+  public void testEnsureOnboardingDatasetSkipsBaselineWhenBpGroupAcctPatchFails() {
+    CountingBaselineService baselineService = new CountingBaselineService();
+    TestServlet servlet = new TestServlet(new SuccessfulImportService(),
+        new CountingSequenceGeneratorService(), new CountingMarkOrgReadyService(),
+        new CountingFiscalDataSetupService(), new CountingDefaultCustomerService(),
+        baselineService);
+    servlet.onboardingAccountingWiringService =
+        new FailingAccountingWiringService("broken bp-group-acct patch");
+    StringWriter output = new StringWriter();
+
+    boolean ready = servlet.ensureOnboardingDataset(new PrintWriter(output), "CLIENT-1", "ORG-1",
+        "USER-1", "ROLE-1", null);
+
+    String ndjson = output.toString();
+    assertFalse(ready);
+    assertEquals(0, baselineService.registerCount);
+    assertTrue(ndjson.contains("\"step\":\"bpGroupAcctPatch\""));
+    assertTrue(ndjson.contains("\"status\":\"error\""));
+    assertTrue(ndjson.contains("broken bp-group-acct patch"));
+    assertTrue(ndjson.contains("\"success\":false"));
+  }
+
+  @Test
   public void testEnsureOnboardingDatasetSkipsBaselineWhenFiscalDataFails() {
     CountingBaselineService baselineService = new CountingBaselineService();
     TestServlet servlet = new TestServlet(new SuccessfulImportService(),
@@ -396,7 +447,7 @@ public class EtendoGoJwtServletOnboardingDatasetTest {
     }
   }
 
-  private static final class NoOpAccountingWiringService extends OnboardingAccountingWiringService {
+  private static class NoOpAccountingWiringService extends OnboardingAccountingWiringService {
     @Override
     public void wire(String clientId, String orgId, String adminUserId, String adminRoleId) {
       // no-op: DAL wiring is covered by OnboardingAccountingWiringServiceTest
@@ -406,6 +457,50 @@ public class EtendoGoJwtServletOnboardingDatasetTest {
     public void wireBusinessPartnerAccounts(String clientId, String orgId, String adminUserId,
         String adminRoleId) {
       // no-op: DAL wiring is covered by OnboardingAccountingWiringServiceTest
+    }
+
+    @Override
+    public void patchBpGroupAcctMissingColumns(String clientId, String orgId, String adminUserId,
+        String adminRoleId) {
+      // no-op: DAL wiring is covered by OnboardingAccountingWiringServiceTest
+    }
+  }
+
+  /**
+   * ETP-4720 — counts {@code patchBpGroupAcctMissingColumns} invocations and captures its arguments,
+   * so the servlet-level wiring (order relative to the other steps, argument pass-through) can be
+   * asserted without touching the DAL. {@code wire}/{@code wireBusinessPartnerAccounts} stay no-ops.
+   */
+  private static class CountingAccountingWiringService extends NoOpAccountingWiringService {
+    private int patchCount;
+    private String clientId;
+    private String orgId;
+    private String userId;
+    private String roleId;
+
+    @Override
+    public void patchBpGroupAcctMissingColumns(String clientId, String orgId, String adminUserId,
+        String adminRoleId) {
+      patchCount++;
+      this.clientId = clientId;
+      this.orgId = orgId;
+      this.userId = adminUserId;
+      this.roleId = adminRoleId;
+    }
+  }
+
+  /** ETP-4720 — makes {@code patchBpGroupAcctMissingColumns} fail, to test the chain's short-circuit. */
+  private static final class FailingAccountingWiringService extends NoOpAccountingWiringService {
+    private final String message;
+
+    private FailingAccountingWiringService(String message) {
+      this.message = message;
+    }
+
+    @Override
+    public void patchBpGroupAcctMissingColumns(String clientId, String orgId, String adminUserId,
+        String adminRoleId) {
+      throw new OBException(message);
     }
   }
 
@@ -419,7 +514,7 @@ public class EtendoGoJwtServletOnboardingDatasetTest {
   private static final class NoOpOrgInfoService extends OnboardingOrgInfoService {
     @Override
     public void ensureOrgInfo(String clientId, String orgId, String adminUserId, String adminRoleId,
-        String countryIso, String address) {
+        String countryIso, String address, String taxId) {
       // no-op: DAL wiring is covered by OnboardingOrgInfoServiceTest
     }
   }
