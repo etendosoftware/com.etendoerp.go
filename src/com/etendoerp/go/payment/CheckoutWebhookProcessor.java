@@ -5,21 +5,40 @@ import org.codehaus.jettison.json.JSONObject;
 
 /** Validates and deduplicates checkout events before a durable provisioning handler is invoked. */
 public class CheckoutWebhookProcessor {
+  /** Atomic persistence boundary used to deduplicate webhook event ids. */
   public interface EventStore {
-    /** Atomically records an event id. Returns false when it was already processed. */
+    /**
+     * Claims an event id for processing, returning false when it was already processed.
+     * @param eventId provider event identifier
+     * @return true when the event was newly claimed
+     */
     boolean claim(String eventId);
   }
 
+  /** Outcome returned after signature, payload, and idempotency validation. */
   public enum Result { ACCEPTED, DUPLICATE, INVALID_SIGNATURE, INVALID_PAYLOAD }
 
   private final EventStore eventStore;
   private final long toleranceSeconds;
 
+  /**
+   * Creates a processor with an event store and accepted signature age.
+   * @param eventStore atomic event-claiming store
+   * @param toleranceSeconds maximum accepted signature age
+   */
   public CheckoutWebhookProcessor(EventStore eventStore, long toleranceSeconds) {
     this.eventStore = eventStore;
     this.toleranceSeconds = toleranceSeconds;
   }
 
+  /**
+   * Validates and claims one webhook event.
+   * @param payload raw provider webhook payload
+   * @param signature provider signature header
+   * @param secret webhook signing secret
+   * @param nowSeconds current epoch time in seconds
+   * @return validation and idempotency outcome
+   */
   public Result accept(String payload, String signature, String secret, long nowSeconds) {
     if (!CheckoutWebhookVerifier.verify(payload, signature, secret, nowSeconds, toleranceSeconds)) {
       return Result.INVALID_SIGNATURE;

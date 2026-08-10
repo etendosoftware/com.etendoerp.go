@@ -81,7 +81,17 @@ public class TenantPaywallService {
         null);
   }
 
-  /** Validates a Stripe webhook-correlated payment for the authenticated account and tenant. */
+  /**
+   * Validates a Stripe webhook-correlated payment for the authenticated account and tenant.
+   *
+   * @param upgradeFlagEnabled whether the tenant-upgrade flag is enabled
+   * @param accountOwnsTenant whether the account already owns a tenant
+   * @param resumingOwnedTenant whether this request resumes an owned tenant
+   * @param paymentToken payment token or server-generated checkout request id
+   * @param accountEmail authenticated account email used for payment correlation
+   * @param clientName requested client name used for payment correlation
+   * @return the paywall decision
+   */
   public Decision decide(boolean upgradeFlagEnabled, boolean accountOwnsTenant,
       boolean resumingOwnedTenant, String paymentToken, String accountEmail, String clientName) {
     if (!upgradeFlagEnabled || !accountOwnsTenant || resumingOwnedTenant) {

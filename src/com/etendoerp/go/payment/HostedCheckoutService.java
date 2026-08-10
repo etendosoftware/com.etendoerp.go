@@ -5,18 +5,28 @@ import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
+import java.io.UnsupportedEncodingException;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
-import java.util.Base64;
 import java.util.UUID;
+import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 
 /** Small provider adapter for Stripe Checkout Sessions. Pricing is always selected server-side. */
 public class HostedCheckoutService {
-  public JSONObject createSession(String accountEmail, String clientName, String language,
-      String countryCode, String origin) throws Exception {
+  /**
+   * Creates a provider-hosted Checkout Session bound to the authenticated account.
+   * @param accountEmail authenticated account email
+   * @param clientName requested client name
+   * @param origin public application origin for return URLs
+   * @return checkout request id, URL, and mode
+   * @throws IOException when the provider cannot be reached or rejects the request
+   * @throws JSONException when the provider response is not valid JSON
+   */
+  public JSONObject createSession(String accountEmail, String clientName, String origin)
+      throws IOException, JSONException {
     if (!CheckoutConfiguration.isConfigured()) throw new IllegalStateException("Checkout is not configured");
     String requestId = UUID.randomUUID().toString();
     String success = origin + "/upgrade?checkout=success&requestId=" + requestId;
@@ -40,7 +50,7 @@ public class HostedCheckoutService {
     HttpURLConnection connection = (HttpURLConnection) new URL(CheckoutConfiguration.apiBaseUrl() + "/v1/checkout/sessions").openConnection();
     connection.setRequestMethod("POST");
     connection.setDoOutput(true);
-    connection.setRequestProperty("Authorization", "Basic " + Base64.getEncoder().encodeToString((CheckoutConfiguration.secretKey() + ":").getBytes(StandardCharsets.UTF_8)));
+    connection.setRequestProperty("Authorization", "Bearer " + CheckoutConfiguration.secretKey());
     connection.setRequestProperty("Content-Type", "application/x-www-form-urlencoded");
     try (OutputStream output = connection.getOutputStream()) { output.write(form.toString().getBytes(StandardCharsets.UTF_8)); }
     String response = read(connection);
@@ -53,7 +63,8 @@ public class HostedCheckoutService {
     return result;
   }
 
-  private static void add(StringBuilder form, String key, String value) throws Exception {
+  private static void add(StringBuilder form, String key, String value)
+      throws UnsupportedEncodingException {
     if (form.length() > 0) form.append('&');
     form.append(URLEncoder.encode(key, StandardCharsets.UTF_8.name())).append('=').append(URLEncoder.encode(value == null ? "" : value, StandardCharsets.UTF_8.name()));
   }

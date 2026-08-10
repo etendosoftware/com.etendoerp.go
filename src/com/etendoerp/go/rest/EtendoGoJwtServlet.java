@@ -188,11 +188,12 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private static final String FIELD_DRAFT = "draft";
   private static final String FIELD_DRAFT_STEP = "step";
   private static final String FIELD_DRAFT_FORM = "form";
+  private static final String FIELD_COUNTRY_CODE = "countryCode";
   private static final int ONBOARDING_DRAFT_MAX_LENGTH = 4000;
   private static final String FIELD_FULL_NAME = "fullName";
   private static final String FIELD_ADDRESS = "address";
   private static final String[] ONBOARDING_DRAFT_FORM_FIELDS = { FIELD_FULL_NAME, "businessType",
-      FIELD_CLIENT_NAME, "currency", FIELD_LANGUAGE, "countryCode", "fiscalIdType",
+      FIELD_CLIENT_NAME, "currency", FIELD_LANGUAGE, FIELD_COUNTRY_CODE, "fiscalIdType",
       "fiscalIdValue", FIELD_ADDRESS, "sector" };
 
   OnboardingDatasetImportService onboardingDatasetImportService = new OnboardingDatasetImportService();
@@ -318,8 +319,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       final String origin = StringUtils.isBlank(requestOrigin)
           ? PublicUrlResolver.resolveAppBaseUrl(request) : requestOrigin;
       try {
-        JSONObject result = hostedCheckoutService.createSession(account.getEmail(), clientName,
-            body.optString(FIELD_LANGUAGE, ""), body.optString("countryCode", ""), origin);
+        JSONObject result = hostedCheckoutService.createSession(account.getEmail(), clientName, origin);
         writeResponse(response, HttpServletResponse.SC_CREATED, result);
       } catch (IllegalStateException e) {
         writeError(response, HttpServletResponse.SC_SERVICE_UNAVAILABLE, "CHECKOUT_NOT_CONFIGURED",
@@ -342,7 +342,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
           account.getEmail());
       JSONObject result = new JSONObject();
       result.put("requestId", requestId);
-      result.put("status", payment == null ? "pending" : "paid");
+      result.put(FIELD_STATUS, payment == null ? "pending" : "paid");
       if (payment != null) result.put(FIELD_CLIENT_NAME, payment.clientName);
       writeResponse(response, HttpServletResponse.SC_OK, result);
     });
@@ -1522,7 +1522,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       data.currencyIso = body.optString("currency", "EUR").trim();
       data.language = body.optString(FIELD_LANGUAGE, "en_US").trim();
       // Country drives the org's tax resolution; default to Spain (ES) when the form omits it.
-      data.countryCode = body.optString("countryCode", "ES").trim();
+      data.countryCode = body.optString(FIELD_COUNTRY_CODE, "ES").trim();
       data.address = body.optString(FIELD_ADDRESS, "").trim();
       // Full name of the person onboarding. Optional in the payload; when present
       // it becomes the display name of the client admin user (otherwise Etendo's

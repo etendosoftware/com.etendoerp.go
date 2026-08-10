@@ -11,6 +11,15 @@ public final class CheckoutWebhookVerifier {
   private CheckoutWebhookVerifier() {
   }
 
+  /**
+   * Verifies a timestamped webhook signature within the configured tolerance.
+   * @param payload raw provider webhook payload
+   * @param signatureHeader provider signature header
+   * @param secret webhook signing secret
+   * @param nowSeconds current epoch time in seconds
+   * @param toleranceSeconds maximum accepted signature age
+   * @return true when the signature is valid and fresh
+   */
   public static boolean verify(String payload, String signatureHeader, String secret, long nowSeconds,
       long toleranceSeconds) {
     if (payload == null || signatureHeader == null || secret == null || secret.isEmpty()) return false;
