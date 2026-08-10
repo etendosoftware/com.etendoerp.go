@@ -756,7 +756,15 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
     BigDecimal ordered = ol.getOrderedQuantity() != null ? ol.getOrderedQuantity() : BigDecimal.ZERO;
     BigDecimal invoiced = ol.getInvoicedQuantity() != null ? ol.getInvoicedQuantity() : BigDecimal.ZERO;
     BigDecimal pending = ordered.subtract(invoiced);
-    if (pending.compareTo(BigDecimal.ZERO) <= 0) return null;
+    // ETP-4722: quantities can be NEGATIVE since ETP-4567 removed the old
+    // min: 0 constraint (e.g. a return-style order line). Only an exact zero
+    // means "nothing left to invoice" — a strictly-positive check silently
+    // dropped every negative-quantity line here. This is the routine that
+    // actually runs for "Crear factura" on a Goods Shipment linked to this
+    // order: createFromShipments delegates straight to createFromOrder for
+    // the single-shipment-with-linked-order case, bypassing the shipment
+    // lines entirely.
+    if (pending.compareTo(BigDecimal.ZERO) == 0) return null;
     if (hasOverrides) {
       BigDecimal override = lineOverrides.get(ol.getId());
       return override != null ? override.min(pending) : pending;
@@ -932,7 +940,11 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
     for (Map.Entry<String, BigDecimal> entry : lineOverrides.entrySet()) {
       BigDecimal pendingQty = pending.getOrDefault(entry.getKey(), BigDecimal.ZERO);
       BigDecimal cappedQty = entry.getValue().min(pendingQty);
-      if (cappedQty.compareTo(BigDecimal.ZERO) > 0) {
+      // ETP-4722: same sign-unaware bug as resolvePendingForLine above — only an
+      // exact zero means "nothing to invoice". pendingQty here is an ABS-based
+      // magnitude (see computePendingQtyPerLine), so a negative override is always
+      // <= it and min() already returns the override unchanged with its sign intact.
+      if (cappedQty.compareTo(BigDecimal.ZERO) != 0) {
         capped.put(entry.getKey(), cappedQty);
       }
     }

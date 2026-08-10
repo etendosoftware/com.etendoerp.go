@@ -21,6 +21,8 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNull;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
@@ -45,6 +47,7 @@ import org.openbravo.model.ad.access.UserRoles;
 import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.enterprise.Organization;
 
+import com.etendoerp.go.rest.EtendoGoAccountProvisioning;
 import com.etendoerp.go.schemaforge.NeoContext;
 import com.etendoerp.go.schemaforge.NeoEndpointType;
 import com.etendoerp.go.schemaforge.NeoResponse;
@@ -67,19 +70,122 @@ import com.etendoerp.go.schemaforge.NeoResponse;
  * {@code data} is a lone object, not an array) is never altered, and that a missing/malformed
  * previous result degrades to a no-op rather than throwing.
  *
- * <p>{@link UserRoleAssignmentHandler#handle} is always a pre-hook no-op and is asserted
- * separately.
+ * <p>Admin-initiated user creation (ETP-4829): covers {@link UserRoleAssignmentHandler#handle}
+ * forcing {@code username=email} on a {@code user} {@code POST}, rejecting a blank/missing email
+ * or a weak admin-set {@code password}, and {@link UserRoleAssignmentHandler#afterHandle}
+ * provisioning an {@code etgo_account} (pending, or active with that password) from the created
+ * record's response body plus the original request body.
  */
 public class UserRoleAssignmentHandlerTest {
 
   private static final String USER_ID = "user-001";
 
-  // ─── handle(): always a pre-hook no-op ───────────────────────────────────────
+  // ─── handle(): pre-hook no-op for everything except a `user` POST ────────────
 
   @Test
-  public void handleAlwaysReturnsNull() {
+  public void handleReturnsNullForNonCrudEndpoint() {
     UserRoleAssignmentHandler handler = new UserRoleAssignmentHandler();
-    NeoContext ctx = NeoContext.builder().httpMethod("PUT").build();
+    NeoContext ctx = NeoContext.builder()
+        .endpointType(NeoEndpointType.SELECTOR)
+        .httpMethod("POST")
+        .build();
+    assertNull(handler.handle(ctx));
+  }
+
+  @Test
+  public void handleReturnsNullForNonPostMethod() {
+    UserRoleAssignmentHandler handler = new UserRoleAssignmentHandler();
+    NeoContext ctx = NeoContext.builder()
+        .endpointType(NeoEndpointType.CRUD)
+        .httpMethod("PUT")
+        .build();
+    assertNull(handler.handle(ctx));
+  }
+
+  @Test
+  public void handleForcesUsernameToMirrorEmailOnPost() throws Exception {
+    UserRoleAssignmentHandler handler = new UserRoleAssignmentHandler();
+    JSONObject requestBody = new JSONObject();
+    requestBody.put("email", "  New.User@Example.com  ");
+    requestBody.put("username", "should-be-overwritten");
+    NeoContext ctx = NeoContext.builder()
+        .endpointType(NeoEndpointType.CRUD)
+        .httpMethod("POST")
+        .requestBody(requestBody)
+        .build();
+
+    assertNull(handler.handle(ctx));
+
+    assertEquals("new.user@example.com", requestBody.getString("username"));
+  }
+
+  @Test
+  public void handleRejectsPostWithBlankEmail() throws Exception {
+    UserRoleAssignmentHandler handler = new UserRoleAssignmentHandler();
+    JSONObject requestBody = new JSONObject();
+    requestBody.put("email", "   ");
+    NeoContext ctx = NeoContext.builder()
+        .endpointType(NeoEndpointType.CRUD)
+        .httpMethod("POST")
+        .requestBody(requestBody)
+        .build();
+
+    NeoResponse response = handler.handle(ctx);
+    assertEquals(400, response.getHttpStatus());
+  }
+
+  @Test
+  public void handleRejectsPostWithWeakPassword() throws Exception {
+    UserRoleAssignmentHandler handler = new UserRoleAssignmentHandler();
+    JSONObject requestBody = new JSONObject();
+    requestBody.put("email", "new.user@example.com");
+    requestBody.put("password", "weak");
+    NeoContext ctx = NeoContext.builder()
+        .endpointType(NeoEndpointType.CRUD)
+        .httpMethod("POST")
+        .requestBody(requestBody)
+        .build();
+
+    NeoResponse response = handler.handle(ctx);
+    assertEquals(400, response.getHttpStatus());
+  }
+
+  @Test
+  public void handleAcceptsPostWithStrongPassword() throws Exception {
+    UserRoleAssignmentHandler handler = new UserRoleAssignmentHandler();
+    JSONObject requestBody = new JSONObject();
+    requestBody.put("email", "new.user@example.com");
+    requestBody.put("password", "Str0ng!Pass");
+    NeoContext ctx = NeoContext.builder()
+        .endpointType(NeoEndpointType.CRUD)
+        .httpMethod("POST")
+        .requestBody(requestBody)
+        .build();
+
+    assertNull(handler.handle(ctx));
+  }
+
+  @Test
+  public void handleAcceptsPostWithNoPassword() throws Exception {
+    UserRoleAssignmentHandler handler = new UserRoleAssignmentHandler();
+    JSONObject requestBody = new JSONObject();
+    requestBody.put("email", "new.user@example.com");
+    NeoContext ctx = NeoContext.builder()
+        .endpointType(NeoEndpointType.CRUD)
+        .httpMethod("POST")
+        .requestBody(requestBody)
+        .build();
+
+    assertNull(handler.handle(ctx));
+  }
+
+  @Test
+  public void handleReturnsNullWhenPostRequestBodyIsMissing() {
+    UserRoleAssignmentHandler handler = new UserRoleAssignmentHandler();
+    NeoContext ctx = NeoContext.builder()
+        .endpointType(NeoEndpointType.CRUD)
+        .httpMethod("POST")
+        .build();
     assertNull(handler.handle(ctx));
   }
 
@@ -204,19 +310,144 @@ public class UserRoleAssignmentHandlerTest {
     assertNull(handler.afterHandle(ctx));
   }
 
+  // ─── afterHandle: pending-account provisioning after a `user` POST create ────
+
+  private static JSONObject buildCreatedRecordResponseBody(String id, String email, String name)
+      throws Exception {
+    JSONObject data = new JSONObject();
+    data.put("id", id);
+    if (email != null) {
+      data.put("email", email);
+    }
+    if (name != null) {
+      data.put("name", name);
+    }
+    JSONObject inner = new JSONObject();
+    inner.put("data", data);
+    JSONObject body = new JSONObject();
+    body.put("response", inner);
+    return body;
+  }
+
   @Test
-  public void afterHandleReturnsNullForCrudPostMethod() {
-    // POST (create) is explicitly out of scope — getRecordId() isn't reliable there, and
-    // admin-initiated user creation is a separate concern (ETP-4602).
+  public void afterHandleProvisionsPendingAccountAfterCreateWithNoPassword() throws Exception {
     UserRoleAssignmentHandler handler = new UserRoleAssignmentHandler();
+    JSONObject body = buildCreatedRecordResponseBody(USER_ID, "New.User@Example.com",
+        "New User");
     NeoContext ctx = NeoContext.builder()
         .endpointType(NeoEndpointType.CRUD)
         .httpMethod("POST")
+        .requestBody(new JSONObject())
+        .previousResult(NeoResponse.ok(body))
         .build();
 
-    try (MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class)) {
+    try (MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
+        MockedStatic<EtendoGoAccountProvisioning> provisioningMock =
+            mockStatic(EtendoGoAccountProvisioning.class)) {
+      obCtxMock.when(() -> OBContext.setAdminMode(true)).then(inv -> null);
+      obCtxMock.when(OBContext::restorePreviousMode).then(inv -> null);
+
       assertNull(handler.afterHandle(ctx));
+
+      provisioningMock.verify(() -> EtendoGoAccountProvisioning.ensureAccountForCreatedUser(
+          eq("new.user@example.com"), eq("New User"), isNull()));
+      obCtxMock.verify(OBContext::restorePreviousMode, times(1));
+    }
+  }
+
+  @Test
+  public void afterHandlePassesThroughAdminSetPasswordFromRequestBody() throws Exception {
+    UserRoleAssignmentHandler handler = new UserRoleAssignmentHandler();
+    JSONObject body = buildCreatedRecordResponseBody(USER_ID, "New.User@Example.com",
+        "New User");
+    JSONObject requestBody = new JSONObject();
+    requestBody.put("password", "  Str0ng!Pass  ");
+    NeoContext ctx = NeoContext.builder()
+        .endpointType(NeoEndpointType.CRUD)
+        .httpMethod("POST")
+        .requestBody(requestBody)
+        .previousResult(NeoResponse.ok(body))
+        .build();
+
+    try (MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
+        MockedStatic<EtendoGoAccountProvisioning> provisioningMock =
+            mockStatic(EtendoGoAccountProvisioning.class)) {
+      obCtxMock.when(() -> OBContext.setAdminMode(true)).then(inv -> null);
+      obCtxMock.when(OBContext::restorePreviousMode).then(inv -> null);
+
+      assertNull(handler.afterHandle(ctx));
+
+      provisioningMock.verify(() -> EtendoGoAccountProvisioning.ensureAccountForCreatedUser(
+          eq("new.user@example.com"), eq("New User"), eq("Str0ng!Pass")));
+    }
+  }
+
+  @Test
+  public void afterHandleFallsBackToEmailAsNameWhenNameIsMissing() throws Exception {
+    UserRoleAssignmentHandler handler = new UserRoleAssignmentHandler();
+    JSONObject body = buildCreatedRecordResponseBody(USER_ID, "noname@example.com", null);
+    NeoContext ctx = NeoContext.builder()
+        .endpointType(NeoEndpointType.CRUD)
+        .httpMethod("POST")
+        .requestBody(new JSONObject())
+        .previousResult(NeoResponse.ok(body))
+        .build();
+
+    try (MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
+        MockedStatic<EtendoGoAccountProvisioning> provisioningMock =
+            mockStatic(EtendoGoAccountProvisioning.class)) {
+      obCtxMock.when(() -> OBContext.setAdminMode(true)).then(inv -> null);
+      obCtxMock.when(OBContext::restorePreviousMode).then(inv -> null);
+
+      assertNull(handler.afterHandle(ctx));
+
+      provisioningMock.verify(() -> EtendoGoAccountProvisioning.ensureAccountForCreatedUser(
+          eq("noname@example.com"), eq("noname@example.com"), isNull()));
+    }
+  }
+
+  @Test
+  public void afterHandleSkipsProvisioningWhenCreateResponseHasNoEmail() throws Exception {
+    UserRoleAssignmentHandler handler = new UserRoleAssignmentHandler();
+    JSONObject body = buildCreatedRecordResponseBody(USER_ID, null, "New User");
+    NeoContext ctx = NeoContext.builder()
+        .endpointType(NeoEndpointType.CRUD)
+        .httpMethod("POST")
+        .previousResult(NeoResponse.ok(body))
+        .build();
+
+    try (MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
+        MockedStatic<EtendoGoAccountProvisioning> provisioningMock =
+            mockStatic(EtendoGoAccountProvisioning.class)) {
+
+      assertNull(handler.afterHandle(ctx));
+
+      provisioningMock.verifyNoInteractions();
       obCtxMock.verify(() -> OBContext.setAdminMode(anyBoolean()), never());
+    }
+  }
+
+  @Test
+  public void afterHandleSwallowsExceptionFromProvisioningOnCreate() throws Exception {
+    UserRoleAssignmentHandler handler = new UserRoleAssignmentHandler();
+    JSONObject body = buildCreatedRecordResponseBody(USER_ID, "boom@example.com", "Boom");
+    NeoContext ctx = NeoContext.builder()
+        .endpointType(NeoEndpointType.CRUD)
+        .httpMethod("POST")
+        .previousResult(NeoResponse.ok(body))
+        .build();
+
+    try (MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
+        MockedStatic<EtendoGoAccountProvisioning> provisioningMock =
+            mockStatic(EtendoGoAccountProvisioning.class)) {
+      obCtxMock.when(() -> OBContext.setAdminMode(true)).then(inv -> null);
+      obCtxMock.when(OBContext::restorePreviousMode).then(inv -> null);
+      provisioningMock.when(() -> EtendoGoAccountProvisioning.ensureAccountForCreatedUser(
+          any(), any(), any())).thenThrow(new RuntimeException("DB unavailable"));
+
+      assertNull(handler.afterHandle(ctx));
+
+      obCtxMock.verify(OBContext::restorePreviousMode, times(1));
     }
   }
 

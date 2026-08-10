@@ -338,6 +338,29 @@ public class FinancialAccountsPageHandlerTest {
   }
 
   /**
+   * Verifies that {@code buildAccountsArray()} serialises {@code providerLogoUrl} per row, and
+   * that an account with no bank provider (the default, e.g. cash accounts) serialises it as an
+   * empty string rather than omitting the key or emitting {@code null} — the SPA's avatar
+   * component reads it unconditionally.
+   *
+   * @throws Exception
+   *     if the JSON traversal fails
+   */
+  @Test
+  public void testBuildAccountsArraySerialisesProviderLogoUrl() throws Exception {
+    AccountRow withLogo = account("acc-1", "BBVA", "B", new BigDecimal("100.00"), "EUR");
+    withLogo.providerLogoUrl = "https://cdn.saltedge.com/bank_icons/bbva.png";
+    AccountRow withoutProvider = account("acc-2", "Caja", "C", new BigDecimal("0.00"), "EUR");
+
+    JSONArray arr = handler.buildAccountsArray(Arrays.asList(withLogo, withoutProvider),
+        Collections.emptyMap(), Collections.emptySet());
+
+    assertEquals("https://cdn.saltedge.com/bank_icons/bbva.png",
+        arr.getJSONObject(0).getString("providerLogoUrl"));
+    assertEquals("", arr.getJSONObject(1).getString("providerLogoUrl"));
+  }
+
+  /**
    * Verifies that when the pending map carries a positive count for an
    * account, that count is serialised faithfully into the row's
    * {@code pendingCount} field so the UI can render the "Conciliar (N)" pill
@@ -435,6 +458,44 @@ public class FinancialAccountsPageHandlerTest {
       assertEquals(2, rows.size());
       assertTrue("'CO' maps to bankConnected=true", rows.get(0).bankConnected);
       assertFalse("non-'CO' maps to bankConnected=false", rows.get(1).bankConnected);
+    }
+  }
+
+  /**
+   * Verifies that {@code loadAccounts()} maps column 15 ({@code prov.logo_url}, from the
+   * {@code psd2_provider} LEFT JOIN) into {@link AccountRow#providerLogoUrl}: present for an
+   * account whose provider has a logo, blank for one whose provider row has none (LEFT JOIN
+   * returns SQL NULL, not a missing row — most accounts have no provider at all).
+   *
+   * @throws Exception
+   *     if the mocked JDBC chain fails
+   */
+  @Test
+  public void testLoadAccountsMapsProviderLogoUrl() throws Exception {
+    Connection conn = mock(Connection.class);
+    PreparedStatement ps = mock(PreparedStatement.class);
+    ResultSet rs = mock(ResultSet.class);
+
+    when(conn.prepareStatement(anyString())).thenReturn(ps);
+    when(conn.createArrayOf(eq("varchar"), any())).thenReturn(mock(Array.class));
+    when(ps.executeQuery()).thenReturn(rs);
+    when(rs.next()).thenReturn(true, true, false);
+    when(rs.getString(1)).thenReturn("acc-1", "acc-2");
+    when(rs.getString(8)).thenReturn("N", "N");
+    when(rs.getString(9)).thenReturn("Y", "Y");
+    // Column 15 (prov.logo_url): first has a logo, second's provider row has none (SQL NULL).
+    when(rs.getString(15)).thenReturn("https://cdn.saltedge.com/bank_icons/bbva.png", null);
+
+    try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.getConnection()).thenReturn(conn);
+
+      List<AccountRow> rows = handler.loadAccounts(CLIENT_ID, ORGS);
+
+      assertEquals(2, rows.size());
+      assertEquals("https://cdn.saltedge.com/bank_icons/bbva.png", rows.get(0).providerLogoUrl);
+      assertEquals("", rows.get(1).providerLogoUrl);
     }
   }
 

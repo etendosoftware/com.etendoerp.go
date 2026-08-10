@@ -49,6 +49,8 @@ final class BankConnectionHandlerTestSupport {
   static final String PARAM_ACCOUNT_ID = "financialAccountId";
   static final String PARAM_CONNECTION_ID = "connectionId";
   static final String PARAM_TYPE = "type";
+  /** Disconnect mode flag: {@code true} deletes the connection, {@code false} only deactivates it. */
+  static final String PARAM_PERMANENT_DELETION = "permanentDeletion";
 
   private BankConnectionHandlerTestSupport() {
   }
