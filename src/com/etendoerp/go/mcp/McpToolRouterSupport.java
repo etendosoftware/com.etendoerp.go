@@ -702,7 +702,17 @@ final class McpToolRouterSupport {
 
   /**
    * Wraps a flat JSON body into the structure expected by DefaultJsonDataService.
-   * Identical to NeoServlet.wrapForSmartclient().
+   *
+   * <p><b>This wrapper does not coerce.</b> It is no longer identical to
+   * {@link com.etendoerp.go.schemaforge.util.NeoTypeCoercionHelper#wrapForSmartclient}, which calls
+   * {@code coerceTypes} on its way through — so on the REST side the wrap is a second safety net,
+   * and here it is not. Type and date coercion is the caller's responsibility on this path:
+   * {@code McpToolRouter#coerceFieldTypes} must run before the body reaches this method.
+   *
+   * <p>That asymmetry is what let ETP-4793 / IMP-16 ship a working date coercer and still corrupt
+   * dates on {@code neo_update}: the verb wrapped without coercing, and nothing in either signature
+   * said it had to. Do not add coercion here to fix a future gap of that kind — it would give
+   * {@code neo_create} two passes and hide the missing call site again instead of naming it.
    */
   static String wrapForSmartclient(JSONObject filteredBody, String dalEntityName,
       String recordId, org.apache.logging.log4j.Logger log) {

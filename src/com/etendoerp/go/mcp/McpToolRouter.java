@@ -571,8 +571,7 @@ public class McpToolRouter {
     // MCP: accept all valid table columns from AI agents
     JSONObject filteredBody = mapFieldsToDalProperties(fields, adTab);
 
-    // IMP-4: resolve FK-by-name search strings before persist (mirrors handleCreate). handleUpdate
-    // has no other coercion pass, so this is the only place the shared resolver is invoked here.
+    // IMP-4: resolve FK-by-name search strings before persist (mirrors handleCreate).
     Entity dalEntity = ModelProvider.getInstance()
         .getEntityByTableId(adTab.getTable().getId());
     JSONObject fkError = McpFkResolver.resolveFkNames(filteredBody, dalEntity, adTab,
@@ -580,6 +579,15 @@ public class McpToolRouter {
     if (fkError != null) {
       return wrapAsErrorContent(fkError.toString(2));
     }
+
+    // ETP-4793 / IMP-16: the same coercion pass handleCreate runs, and for the same reason. Until
+    // this call site existed the date branch was unreachable from neo_update, so the agent's raw
+    // string went straight to the DAL's lenient parser: orderDate "09-08-2026" was accepted under
+    // status 0 and stored as 0015-02-16. The defect was never in the coercer — it was in the caller,
+    // which is why IMP-16 read as fixed on emit and still corrupted on write. Unlike handleCreate
+    // this path does not re-run injectMandatoryDefaults, so the caller's own value is the only
+    // source of a non-canonical date here; that also makes it the only thing left to repair.
+    coerceFieldTypes(filteredBody, dalEntity);
 
     // Run the entity's NeoHandler pre-hook (parity with the REST CRUD path).
     NeoHandler handler = McpHookExecutor.resolveEntityHandler(sfEntity);

@@ -264,13 +264,34 @@ no date at all, because both write paths (`McpToolRouter`, `NeoCrudHandler`) re-
 `injectMandatoryDefaults` immediately before saving, so the bad value is server-produced.
 
 `NeoDateFormat` (`schemaforge/util/`) is the single definition of the canonical form and the only
-place the three accepted shapes are listed. It is applied at three points:
+place the three accepted shapes are listed. Two coercers apply it — one per write stack:
 
 | Point | Class | Effect |
 |---|---|---|
 | Read — `/defaults` response | `NeoDefaultsService.canonicalizeDateDefaults` | every date-valued default leaves as ISO |
-| Write — REST | `NeoTypeCoercionHelper.coerceField` | date branch, runs before the SmartClient wrap |
+| Write — REST | `NeoTypeCoercionHelper.coerceField` | date branch, reached via `coerceTypes` |
 | Write — MCP | `McpToolRouterSupport.coercePrimitiveFieldValue` | same branch, mirrored |
+
+**A coercer only protects the call sites that invoke it**, and that — not the coercer — is what made
+IMP-16 read as fixed while `neo_update` still corrupted. Every path that persists must run its
+stack's pass:
+
+| Path | Invocation | Note |
+|---|---|---|
+| `POST /crud` (React form, and every `neo_batch` op via `BatchService`) | `NeoCrudHandler.executePostCreate` → `coerceTypes` | also re-run by `NeoTypeCoercionHelper.wrapForSmartclient` |
+| `PUT`/`PATCH /crud` | `NeoCrudHandler.executeUpdate` → `wrapForSmartclient` → `coerceTypes` | the REST wrapper coerces; the MCP one does not |
+| `neo_create` | `McpToolRouter.handleCreate` → `coerceFieldTypes` | mandatory: `injectMandatoryDefaults` injects `dd-MM-yyyy` server-side |
+| `neo_update` | `McpToolRouter.handleUpdate` → `coerceFieldTypes` | **added 2026-08-10**; before that this verb had no coercion pass at all |
+
+The MCP pass runs **before** the entity's `NeoHandler` pre-hook, so a hook that mirrors one date
+field into another (e.g. `AbstractInvoiceHeaderHandler#mirrorAccountingDate`) copies an
+already-canonical value. The corollary is the one known gap: a value a pre-hook *introduces* in a
+non-ISO shape is not re-canonicalized. Hooks must emit ISO.
+
+A source-reading guard (`McpWriteVerbCoercionCallSiteTest`) fails the build if a method of
+`McpToolRouter` reaches `jsonService.add`/`update` without calling `coerceFieldTypes` — a missing
+call site is invisible to the coercers' own unit tests, which passed the whole time `neo_update` was
+writing year 0015.
 
 **Which properties are eligible** is decided in one place —
 `NeoDateFormat.canonicalShapeFor(Property)` — and it is deliberately narrower than "the Java type is
