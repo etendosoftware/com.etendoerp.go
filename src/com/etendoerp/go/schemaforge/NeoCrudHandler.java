@@ -64,6 +64,7 @@ import com.etendoerp.go.schemaforge.util.NeoDistinctFetchSupport;
 import com.etendoerp.go.schemaforge.util.NeoErrorSanitizer;
 import com.etendoerp.go.schemaforge.util.NeoListIdentifierHelper;
 import com.etendoerp.go.schemaforge.util.NeoLocatorIdentifierHelper;
+import com.etendoerp.go.schemaforge.util.NeoMethodPolicy;
 import com.etendoerp.go.schemaforge.util.NeoTypeCoercionHelper;
 
 /**
@@ -121,10 +122,9 @@ class NeoCrudHandler {
           "Entity not found in spec: " + pathInfo.entityName);
       return;
     }
-    boolean methodEnabled = isMethodEnabled(method, entity);
-    if (!methodEnabled) {
+    if (!NeoMethodPolicy.isMethodEnabled(entity, method)) {
       servlet.sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
-          method + " not enabled for " + pathInfo.entityName);
+          NeoMethodPolicy.buildNotEnabledMessage(method, pathInfo.entityName));
       return;
     }
     Tab adTab = entity.getADTab();
@@ -220,24 +220,6 @@ class NeoCrudHandler {
       return servlet.handleWithHooks(javaQualifier, neoContext, request, response);
     }
     return handleDefault(neoContext);
-  }
-
-  /**
-   * Returns true if the given HTTP method is enabled on the entity's configuration.
-   */
-  private boolean isMethodEnabled(String method, SFEntity entity) {
-    if ("GET".equals(method)) {
-      return Boolean.TRUE.equals(entity.isGet()) || Boolean.TRUE.equals(entity.isGetByID());
-    } else if ("POST".equals(method)) {
-      return Boolean.TRUE.equals(entity.isPost());
-    } else if ("PUT".equals(method)) {
-      return Boolean.TRUE.equals(entity.isPut());
-    } else if (METHOD_PATCH.equals(method)) {
-      return Boolean.TRUE.equals(entity.isPatch());
-    } else if (METHOD_DELETE.equals(method)) {
-      return Boolean.TRUE.equals(entity.isDelete());
-    }
-    return false;
   }
 
   /**

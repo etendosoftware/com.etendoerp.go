@@ -20,6 +20,7 @@ package com.etendoerp.go.schemaforge.handlers;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
@@ -102,6 +103,19 @@ public class NotPostedDocumentsHandlerTest {
       assertEquals(403, resp.getHttpStatus());
       verifyNoInteractions(service);
     }
+  }
+
+  /**
+   * ETP-4254: this spec is tab-less, so the MCP catalog rule would hide it as "handler-only"
+   * unless the handler declares its {@code post} / {@code bulk-post} action surface. Losing the
+   * declaration removes the spec from neo_discover AND from neo_action — a silent regression
+   * with no other failing test, which is why it is asserted here.
+   */
+  @Test
+  public void declaresItsActionSurface() {
+    assertTrue("NotPostedDocumentsHandler serves post/bulk-post, so it must declare "
+        + "servesActions() — otherwise ETP-4254's catalog rule hides the spec from agents",
+        new NotPostedDocumentsHandler().servesActions());
   }
 
   @Test

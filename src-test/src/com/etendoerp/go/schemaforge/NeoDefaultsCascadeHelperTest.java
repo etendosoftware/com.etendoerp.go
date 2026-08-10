@@ -94,7 +94,7 @@ public class NeoDefaultsCascadeHelperTest {
   private static Method mergeCalloutCombosMethod() throws Exception {
     return getPrivateMethod("mergeCalloutCombos",
         JSONObject.class, JSONObject.class, JSONObject.class,
-        NeoDefaultsService.CalloutCascadeResult.class);
+        NeoDefaultsService.CalloutCascadeResult.class, Set.class);
   }
 
   private static Method propagateIdentifierMethod() throws Exception {
@@ -375,7 +375,8 @@ public class NeoDefaultsCascadeHelperTest {
     JSONObject defaults = new JSONObject();
     NeoDefaultsService.CalloutCascadeResult result = new NeoDefaultsService.CalloutCascadeResult();
 
-    mergeCalloutCombosMethod().invoke(null, calloutBody, formState, defaults, result);
+    mergeCalloutCombosMethod().invoke(null, calloutBody, formState, defaults, result,
+        Collections.emptySet());
 
     assertEquals("VAL1", defaults.get("paymentMethod"));
     assertEquals("VAL1", formState.get("paymentMethod"));
@@ -394,7 +395,8 @@ public class NeoDefaultsCascadeHelperTest {
     JSONObject defaults = new JSONObject();
     NeoDefaultsService.CalloutCascadeResult result = new NeoDefaultsService.CalloutCascadeResult();
 
-    mergeCalloutCombosMethod().invoke(null, calloutBody, formState, defaults, result);
+    mergeCalloutCombosMethod().invoke(null, calloutBody, formState, defaults, result,
+        Collections.emptySet());
 
     assertFalse("Null selected should not be applied",
         defaults.has("paymentMethod"));
@@ -413,7 +415,8 @@ public class NeoDefaultsCascadeHelperTest {
     JSONObject defaults = new JSONObject();
     NeoDefaultsService.CalloutCascadeResult result = new NeoDefaultsService.CalloutCascadeResult();
 
-    mergeCalloutCombosMethod().invoke(null, calloutBody, formState, defaults, result);
+    mergeCalloutCombosMethod().invoke(null, calloutBody, formState, defaults, result,
+        Collections.emptySet());
 
     assertFalse(defaults.has("paymentMethod"));
   }
@@ -425,9 +428,64 @@ public class NeoDefaultsCascadeHelperTest {
     JSONObject defaults = new JSONObject();
     NeoDefaultsService.CalloutCascadeResult result = new NeoDefaultsService.CalloutCascadeResult();
 
-    mergeCalloutCombosMethod().invoke(null, calloutBody, formState, defaults, result);
+    mergeCalloutCombosMethod().invoke(null, calloutBody, formState, defaults, result,
+        Collections.emptySet());
 
     assertEquals(0, defaults.length());
+  }
+
+  @Test
+  public void testMergeCalloutCombosSkipsProtectedField() throws Exception {
+    // ETP-4772 regression: a re-triggered callout (e.g. businessPartner on create)
+    // must not overwrite a combo field the user already explicitly submitted
+    // (e.g. warehouse), even though the callout returns a "selected" default for it.
+    JSONObject comboEntry = new JSONObject();
+    comboEntry.put("selected", "DEFAULT_WAREHOUSE");
+    JSONObject combos = new JSONObject();
+    combos.put("warehouse", comboEntry);
+    JSONObject calloutBody = new JSONObject();
+    calloutBody.put("combos", combos);
+
+    JSONObject formState = new JSONObject();
+    formState.put("warehouse", "USER_CHOSEN_WAREHOUSE");
+    JSONObject defaults = new JSONObject();
+    defaults.put("warehouse", "USER_CHOSEN_WAREHOUSE");
+    NeoDefaultsService.CalloutCascadeResult result = new NeoDefaultsService.CalloutCascadeResult();
+
+    Set<String> protectedFields = new HashSet<>();
+    protectedFields.add("warehouse");
+
+    mergeCalloutCombosMethod().invoke(null, calloutBody, formState, defaults, result,
+        protectedFields);
+
+    assertEquals("Protected combo field must keep the user-submitted value",
+        "USER_CHOSEN_WAREHOUSE", defaults.get("warehouse"));
+    assertEquals("Protected combo field must keep the user-submitted value in formState",
+        "USER_CHOSEN_WAREHOUSE", formState.get("warehouse"));
+  }
+
+  @Test
+  public void testMergeCalloutCombosAppliesUnprotectedFieldNormally() throws Exception {
+    // Sanity check for the fix: fields NOT explicitly submitted by the user must still
+    // be updated normally by combo defaults recalculated during the cascade.
+    JSONObject comboEntry = new JSONObject();
+    comboEntry.put("selected", "RECALCULATED_DEFAULT");
+    JSONObject combos = new JSONObject();
+    combos.put("warehouse", comboEntry);
+    JSONObject calloutBody = new JSONObject();
+    calloutBody.put("combos", combos);
+
+    JSONObject formState = new JSONObject();
+    formState.put("warehouse", "OLD_DEFAULT");
+    JSONObject defaults = new JSONObject();
+    defaults.put("warehouse", "OLD_DEFAULT");
+    NeoDefaultsService.CalloutCascadeResult result = new NeoDefaultsService.CalloutCascadeResult();
+
+    mergeCalloutCombosMethod().invoke(null, calloutBody, formState, defaults, result,
+        Collections.emptySet());
+
+    assertEquals("Unprotected combo field must be updated with the recalculated default",
+        "RECALCULATED_DEFAULT", defaults.get("warehouse"));
   }
 
   // ===================================================================
@@ -1143,6 +1201,78 @@ public class NeoDefaultsCascadeHelperTest {
 
       assertNotNull(result);
       assertTrue("Should have cascade results", result.hasResults());
+    }
+  }
+
+  @Test
+  public void testCascadeInteractiveCalloutProtectsTriggerFieldFromReCascade() throws Exception {
+    // ETP-4772 W2 regression: the interactive callout endpoint (POST {entity}/callout) must
+    // protect the original trigger field of THIS invocation (e.g. businessPartner, just
+    // changed by hand in the browser) from being silently overwritten by a callout
+    // re-cascaded from a DIFFERENT field it updated (e.g. warehouse). Before the fix,
+    // executeCascadeIteration always built its CalloutFieldContext with an empty
+    // protectedFields set, so this "OVERWRITE" would both mutate the internal formState
+    // AND leak into the CalloutCascadeResult merged back into the HTTP response sent to
+    // the browser, silently reverting the field the user just edited.
+    try (MockedStatic<NeoCalloutService> calloutMock = mockStatic(NeoCalloutService.class);
+         MockedStatic<ModelProvider> providerMock = mockStatic(ModelProvider.class)) {
+
+      NeoCalloutService.CalloutInfo warehouseInfo = new NeoCalloutService.CalloutInfo(
+          "com.example.WarehouseCallout", "inpwarehouse", "Warehouse");
+      calloutMock.when(() -> NeoCalloutService.resolveCallout(any(), eq("warehouse")))
+          .thenReturn(warehouseInfo);
+      calloutMock.when(() -> NeoCalloutService.resolveCallout(any(), eq("businessPartner")))
+          .thenReturn(null);
+      calloutMock.when(() -> NeoCalloutService.resolveCallout(any(), eq("taxCategory")))
+          .thenReturn(null);
+
+      // Initial callout response (from the direct callout the endpoint already ran for the
+      // trigger field) updates warehouse, queuing it for the interactive cascade.
+      JSONObject initialResponse = new JSONObject();
+      JSONObject initialUpdates = new JSONObject();
+      JSONObject warehouseUpdate = new JSONObject();
+      warehouseUpdate.put("value", "WH001");
+      initialUpdates.put("warehouse", warehouseUpdate);
+      initialResponse.put("updates", initialUpdates);
+
+      // The re-cascaded callout for warehouse tries to overwrite businessPartner — the
+      // original trigger field the user just changed by hand — and also legitimately
+      // updates an unrelated field (taxCategory), which must still go through normally.
+      JSONObject cascadeResponseBody = new JSONObject();
+      JSONObject cascadeUpdates = new JSONObject();
+      JSONObject bpUpdate = new JSONObject();
+      bpUpdate.put("value", "BP_OVERWRITE");
+      cascadeUpdates.put("businessPartner", bpUpdate);
+      JSONObject taxCategoryUpdate = new JSONObject();
+      taxCategoryUpdate.put("value", "TAX001");
+      cascadeUpdates.put("taxCategory", taxCategoryUpdate);
+      cascadeResponseBody.put("updates", cascadeUpdates);
+      NeoResponse cascadeCalloutResponse = NeoResponse.ok(cascadeResponseBody);
+      calloutMock.when(() -> NeoCalloutService.executeCallout(any(), any()))
+          .thenReturn(cascadeCalloutResponse);
+
+      ModelProvider mockProvider = mock(ModelProvider.class);
+      providerMock.when(ModelProvider::getInstance).thenReturn(mockProvider);
+      when(mockProvider.getEntityByTableId(anyString())).thenReturn(null);
+
+      Tab adTab = mockTabWithTable("300");
+      NeoContext ctx = mock(NeoContext.class);
+
+      JSONObject originalFormState = new JSONObject();
+      originalFormState.put("businessPartner", "BP001");
+
+      NeoDefaultsService.CalloutCascadeResult result =
+          NeoDefaultsCascadeHelper.cascadeInteractiveCallout(
+              ctx, adTab, "businessPartner", originalFormState, initialResponse);
+
+      assertNotNull(result);
+      JSONObject mergedUpdates = result.toJSON().optJSONObject("updates");
+      assertNotNull(mergedUpdates);
+      assertTrue("Unrelated field (taxCategory) must still be merged normally",
+          mergedUpdates.has("taxCategory"));
+      assertFalse("businessPartner (the trigger field of this interactive callout) must not "
+              + "be overwritten by a callout re-cascaded from a field it updated",
+          mergedUpdates.has("businessPartner"));
     }
   }
 

@@ -6,14 +6,19 @@ set -e
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 . "$SCRIPT_DIR/lib/hooks-proof.sh"
+# Same relevance rules the pre-push uses to pick steps — so the Checks: trailer
+# below always matches what the push will run.
+. "$SCRIPT_DIR/lib/relevance.sh"
 
 MSG_FILE="$1"
 
-# Always drop any pre-existing trailer first: on `--amend` the old one refers to
-# the previous tree, and a copy-pasted one from another commit must not survive.
-if grep -qE "^${HOOKS_TRAILER_KEY}:" "$MSG_FILE" 2>/dev/null; then
-  grep -vE "^${HOOKS_TRAILER_KEY}:" "$MSG_FILE" > "$MSG_FILE.tmp" && mv "$MSG_FILE.tmp" "$MSG_FILE"
-fi
+# Always drop any pre-existing trailers first: on `--amend` the old ones refer to
+# the previous tree/diff, and copy-pasted ones from another commit must not survive.
+for _key in "$HOOKS_TRAILER_KEY" "Checks"; do
+  if grep -qE "^${_key}:" "$MSG_FILE" 2>/dev/null; then
+    grep -vE "^${_key}:" "$MSG_FILE" > "$MSG_FILE.tmp" && mv "$MSG_FILE.tmp" "$MSG_FILE"
+  fi
+done
 
 PROOF="$(hooks_read_proof || true)"
 if [ -z "$PROOF" ]; then
@@ -34,12 +39,40 @@ if [ "$PROOF_TREE" != "$TREE" ]; then
   exit 0
 fi
 
-FP="$(hooks_fingerprint "$TREE" "$PROOF_VER")"
+# Two fingerprints (format v2): the TREE one (byte-identical content — survives an
+# amend via write-tree) and the PATCH-ID one (the diff — survives a rebase/cherry-pick
+# onto another base). A commit verifies if EITHER matches. See lib/hooks-proof.sh.
+TREE_FP="$(hooks_fingerprint "$TREE" "$PROOF_VER")"
+PATCH_FP="$(hooks_fingerprint "$(hooks_patchid_staged)" "$PROOF_VER")"
 
-# Append as a trailer: blank line separator only if the message does not already
-# end with one, so `git interpret-trailers` semantics are preserved.
+# Which checks does this commit require? Computed with the SAME rules and base as
+# the pre-push: the changed files are the branch's incremental delta (index vs the
+# merge-base with the epic). This is AMEND-SAFE — the merge-base does not depend on
+# HEAD/HEAD^, so `git commit --amend` recomputes the correct set (plain
+# `git diff --cached` would see only the amend delta). Informational only: the
+# Hooks-Verified fingerprint above is the integrity proof; Checks is for visibility.
+CHECKS_BASE=""
+for _b in origin/epic/ETP-3504 origin/develop origin/main; do
+  if git rev-parse --verify --quiet "$_b" >/dev/null; then
+    CHECKS_BASE="$(git merge-base "$_b" HEAD 2>/dev/null || true)"
+    break
+  fi
+done
+if [ -n "$CHECKS_BASE" ]; then
+  CHK_FILES="$(git diff --cached --name-only "$CHECKS_BASE" 2>/dev/null || true)"
+else
+  CHK_FILES="$(git diff --cached --name-only 2>/dev/null || true)"   # fallback: this commit's staged changes
+fi
+CHECKS="$(printf '%s\n' "$CHK_FILES" | relevance_checks)"
+[ -n "$CHECKS" ] || CHECKS="none"
+CHECKS_PRETTY="$(printf '%s' "$CHECKS" | sed 's/ /, /g')"
+
+# Append Checks + Hooks-Verified as ONE contiguous trailer block (git-trailer
+# semantics keep them adjacent), with a blank line before the block only if the
+# message does not already end with one.
 [ -n "$(tail -c1 "$MSG_FILE")" ] && printf '\n' >> "$MSG_FILE"
-printf '\n%s: %s %s %s\n' "$HOOKS_TRAILER_KEY" "$HOOKS_PROOF_FORMAT" "$PROOF_VER" "$FP" >> "$MSG_FILE"
+printf '\nChecks: %s\n' "$CHECKS_PRETTY" >> "$MSG_FILE"
+printf '%s: %s %s %s %s\n' "$HOOKS_TRAILER_KEY" "$HOOKS_PROOF_FORMAT" "$PROOF_VER" "$TREE_FP" "$PATCH_FP" >> "$MSG_FILE"
 
 hooks_clear_proof
 exit 0

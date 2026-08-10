@@ -946,9 +946,9 @@ public class FinancialAccountHandlerTest {
 
   /**
    * Every derived field the accounts list needs is injected per row: the transaction flag,
-   * the pending counter, the bank-connection flags, the currency pair, the default/archived
-   * flags, the masked card number and the lowercase {@code iban} alias of the contract's
-   * {@code iBAN}.
+   * the pending counter, the bank-connection flags, the provider's logo URL, the currency pair,
+   * the default/archived flags, the masked card number and the lowercase {@code iban} alias of
+   * the contract's {@code iBAN}.
    */
   @Test
   public void testAfterHandleGetCrudInjectsDerivedListFieldsPerRow() throws Exception {
@@ -958,6 +958,7 @@ public class FinancialAccountHandlerTest {
 
     FinancialAccountsPageHandler.AccountRow loaded1 = accountRow(ACC_ID, "1500.00", EUR_ID, "EUR", true);
     loaded1.bankConnected = true;
+    loaded1.providerLogoUrl = "https://cdn.saltedge.com/bank_icons/bbva.png";
     FinancialAccountsPageHandler.AccountRow loaded2 = accountRow("acc-2", "0.00", "100", "USD", false);
     loaded2.active = false;
     loaded2.maskedPan = "**** 4321";
@@ -984,6 +985,7 @@ public class FinancialAccountHandlerTest {
       assertTrue(first.getBoolean("isDefault"));
       assertTrue(first.getBoolean("active"));
       assertEquals("lowercase alias of the contract's iBAN", ES_IBAN, first.getString("iban"));
+      assertEquals("https://cdn.saltedge.com/bank_icons/bbva.png", first.getString("providerLogoUrl"));
 
       JSONObject second = outArr.getJSONObject(1);
       assertFalse("account without transactions leaves the Currency field editable",
@@ -994,6 +996,8 @@ public class FinancialAccountHandlerTest {
       assertFalse("archived accounts are flagged so the Inactivas filter can find them",
           second.getBoolean("active"));
       assertEquals("**** 4321", second.getString("maskedPan"));
+      assertEquals("no bank provider serialises providerLogoUrl as an empty string, not null",
+          "", second.getString("providerLogoUrl"));
     }
   }
 
@@ -1113,6 +1117,7 @@ public class FinancialAccountHandlerTest {
       assertEquals(ES_IBAN, out0.getString("iban"));
       assertFalse("loader-only column", out0.has("bankConnected"));
       assertFalse("loader-only column", out0.has("active"));
+      assertFalse("loader-only column", out0.has("providerLogoUrl"));
     }
   }
 
