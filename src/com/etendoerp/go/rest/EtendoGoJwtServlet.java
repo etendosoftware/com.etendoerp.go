@@ -24,6 +24,7 @@ import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.security.SecureRandom;
+import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Comparator;
 import java.util.Date;
@@ -1073,7 +1074,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       }
 
       org.codehaus.jettison.json.JSONArray envArray = new org.codehaus.jettison.json.JSONArray();
-      List<User> environmentUsers = EtendoGoJwtDalHelper.findEnvironmentUsersByAccountEmail(account.getEmail());
+      List<User> environmentUsers = new ArrayList<>(
+          EtendoGoJwtDalHelper.findEnvironmentUsersByAccountEmail(account.getEmail()));
       // The first environment is entered automatically after account login. Prefer the paid
       // productive tenant so a demo tenant never unexpectedly becomes the active workspace when
       // an account owns both plans. The client repeats this ordering for older backends.
@@ -1081,7 +1083,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
           .comparing((User user) -> TenantPlanService.PLAN_PRODUCTIVE
               .equals(tenantPlanService.resolvePlan(user.getClient().getId())))
           .reversed()
-          .thenComparing(user -> user.getClient().getName(), String.CASE_INSENSITIVE_ORDER));
+          .thenComparing(user -> StringUtils.defaultString(user.getClient().getName()),
+              String.CASE_INSENSITIVE_ORDER));
       for (User environmentUser : environmentUsers) {
         Client client = environmentUser.getClient();
         List<Organization> organizations = EtendoGoJwtDalHelper.findNonStarOrganizations(client.getId());
