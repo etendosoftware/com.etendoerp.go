@@ -452,7 +452,11 @@ public class NeoCommercialLinePolicyTest {
     try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
       OBDal dal = mock(OBDal.class);
       obDal.when(OBDal::getInstance).thenReturn(dal);
-      when(dal.get(Product.class, PRODUCT_ID)).thenReturn(mockProductWithUom(PRODUCT_UOM_ID));
+      // Build the product mock BEFORE opening the outer when(): mockProductWithUom stubs two
+      // other mocks, and Mockito rejects that inside a pending thenReturn argument
+      // (UnfinishedStubbingException).
+      Product productWithUom = mockProductWithUom(PRODUCT_UOM_ID);
+      when(dal.get(Product.class, PRODUCT_ID)).thenReturn(productWithUom);
 
       NeoCommercialLinePolicy.injectProductDerivedUomIfMissing(body, mockTransactionalLineEntity(), false);
 
@@ -488,7 +492,11 @@ public class NeoCommercialLinePolicyTest {
     try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
       OBDal dal = mock(OBDal.class);
       obDal.when(OBDal::getInstance).thenReturn(dal);
-      when(dal.get(Product.class, PRODUCT_ID)).thenReturn(mockProductWithUom(PRODUCT_UOM_ID));
+      // Build the product mock BEFORE opening the outer when(): mockProductWithUom stubs two
+      // other mocks, and Mockito rejects that inside a pending thenReturn argument
+      // (UnfinishedStubbingException).
+      Product productWithUom = mockProductWithUom(PRODUCT_UOM_ID);
+      when(dal.get(Product.class, PRODUCT_ID)).thenReturn(productWithUom);
 
       NeoCommercialLinePolicy.injectProductDerivedUomIfMissing(body, mockTransactionalLineEntity(), false);
 
@@ -504,7 +512,11 @@ public class NeoCommercialLinePolicyTest {
     try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
       OBDal dal = mock(OBDal.class);
       obDal.when(OBDal::getInstance).thenReturn(dal);
-      when(dal.get(Product.class, PRODUCT_ID)).thenReturn(mockProductWithUom(PRODUCT_UOM_ID));
+      // Build the product mock BEFORE opening the outer when(): mockProductWithUom stubs two
+      // other mocks, and Mockito rejects that inside a pending thenReturn argument
+      // (UnfinishedStubbingException).
+      Product productWithUom = mockProductWithUom(PRODUCT_UOM_ID);
+      when(dal.get(Product.class, PRODUCT_ID)).thenReturn(productWithUom);
 
       NeoCommercialLinePolicy.injectProductDerivedUomIfMissing(body, mockTransactionalLineEntity(), false);
 
@@ -683,7 +695,11 @@ public class NeoCommercialLinePolicyTest {
     try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
       OBDal dal = mock(OBDal.class);
       obDal.when(OBDal::getInstance).thenReturn(dal);
-      when(dal.get(Product.class, PRODUCT_ID)).thenReturn(mockProductWithUom(PRODUCT_UOM_ID));
+      // Build the product mock BEFORE opening the outer when(): mockProductWithUom stubs two
+      // other mocks, and Mockito rejects that inside a pending thenReturn argument
+      // (UnfinishedStubbingException).
+      Product productWithUom = mockProductWithUom(PRODUCT_UOM_ID);
+      when(dal.get(Product.class, PRODUCT_ID)).thenReturn(productWithUom);
 
       NeoCommercialLinePolicy.injectProductDerivedUomIfMissing(body,
           mockEntityWithQuantityProperty(property), false);
