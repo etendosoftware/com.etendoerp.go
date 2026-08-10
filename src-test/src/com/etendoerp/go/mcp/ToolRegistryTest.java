@@ -124,16 +124,18 @@ public class ToolRegistryTest {
 
     assertEquals("neo_batch", tool.getName());
     assertNotNull(tool.getDescription());
-    // This used to assert the description "must mention atomic transaction". It did — and the
-    // claim was false (IMP-23): every operation is committed by the core write path underneath,
-    // so a failure leaves the earlier ones durable. The assertion would still pass against the
-    // corrected text (which contains "NOT atomic"), which is exactly why it has to be inverted
-    // rather than left alone: what the agent must be told is the non-atomicity and where to find
-    // the records that survived.
+    // This assertion has now been wrong twice, in opposite directions, which is why it checks the
+    // caller-visible consequence rather than a keyword. It first required the description to
+    // "mention atomic transaction" while the endpoint was not atomic at all (IMP-23): every op was
+    // committed by core's write path, so a failure left the earlier ones durable. It was then
+    // inverted to require "not atomic" — correct only until option B made the batch genuinely
+    // atomic. What must hold in every version is that the description tells the agent what to do
+    // after a failure: retry the whole batch, unless 'atomic' says records survived.
     String description = tool.getDescription().toLowerCase();
-    assertTrue("Description must warn the batch is not atomic",
-        description.contains("not atomic"));
-    assertTrue("Description must point the caller at 'persisted' to recover the surviving records",
+    assertTrue("Description must state the batch is atomic", description.contains("atomically"));
+    assertTrue("Description must flag the process-commit exception, or agents will trust 'atomic' "
+        + "blindly in the one case where it is false", description.contains("'atomic':false"));
+    assertTrue("Description must point the caller at 'persisted' to recover surviving records",
         description.contains("persisted"));
 
     Map<String, Object> schema = tool.getInputSchema();

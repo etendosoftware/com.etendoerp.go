@@ -654,11 +654,13 @@ public class ToolRegistry {
 
     return new McpToolDefinition(
         "neo_batch",
-        "Run a sequence of cross-spec create operations in order. NOT atomic: a failure "
-            + "does NOT reliably undo the operations that already succeeded, so never assume a "
-            + "failed batch wrote nothing — read 'persisted' in the failure response, which lists "
-            + "the recordIds that survived, and delete or reuse them before retrying (a plain "
-            + "retry duplicates them). Each op carries its own "
+        "Run a sequence of cross-spec create operations in order, atomically: a failure rolls "
+            + "the whole batch back, so retry the whole batch after fixing the reported operation. "
+            + "One exception, and the response states it explicitly: if an operation triggers an "
+            + "Etendo process, that process commits internally and cannot be rolled back — the "
+            + "failure response then carries 'atomic':false plus 'persisted', listing the "
+            + "recordIds that survived, which you must delete or reuse before retrying (a plain "
+            + "retry duplicates them). Always check 'atomic' before retrying. Each op carries its own "
             + "'spec' and 'entity', so a single batch can mix windows (e.g. create a "
             + "Business Partner, a Location, then a Purchase Invoice referencing both). "
             + "Use 'parentRef':<earlierOpId> to set the parent FK on a child-tab op, "
@@ -667,11 +669,10 @@ public class ToolRegistry {
             + "neo_list / neo_selectors first to look up existing records and only "
             + "include create ops for what is genuinely new. "
             + "Returns {committed:true, operations:[{id,ok:true,recordId}]} on success "
-            + "or {committed:false, atomic:false, failedAt:{id,index}, "
-            + "persisted:[{id,ok:true,recordId}], hint, "
+            + "or {committed:false, atomic:true, failedAt:{id,index}, persisted:[], hint, "
             + "error:{status,error,detail,seeAlso}} on failure, where 'error' is a stable code "
             + "(validation_error, not_found, method_not_allowed, server_error) naming what to fix "
-            + "and 'persisted' is empty only when nothing landed.",
+            + "and 'persisted' is non-empty only in the process-commit case above.",
         buildObjectSchema(props, List.of("operations")));
   }
 

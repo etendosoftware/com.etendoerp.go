@@ -1055,10 +1055,10 @@ the REST contract stays untouched:
 ```json
 {
   "committed": false,
-  "atomic": false,
+  "atomic": true,
   "failedAt": { "index": 1, "id": "l0" },
-  "persisted": [ { "id": "h1", "ok": true, "recordId": "8A2…" } ],
-  "hint": "1 operation(s) that ran before the failure were already committed and were NOT rolled back …",
+  "persisted": [],
+  "hint": "Nothing was persisted: the batch was rolled back as a unit …",
   "error": {
     "status": 400,
     "error": "validation_error",
@@ -1073,31 +1073,38 @@ or `server_error` (5xx, and the batch-wide failure reported at index `-1`) — o
 worth retrying with a corrected request. The DAL's own text is preserved inside `detail`; its numeric
 `status: -4` is dropped, since it names nothing an agent can act on.
 
-##### 4.12.4.1 `persisted` — the batch is not atomic (IMP-23)
+##### 4.12.4.1 `atomic` / `persisted` — the batch rolls back as a unit (IMP-23)
 
-**`neo_batch` and `POST /batch` do not roll back the operations that already succeeded.** The
-`persisted` array lists the ones that survived the failure, and it is present on every failure body,
-empty included — "nothing landed" and "we are not saying" must not look alike to a caller.
+**`neo_batch` and `POST /batch` are atomic**: a failure rolls back every operation, so the recovery
+is to fix the operation named in `failedAt` and retry the whole batch. `atomic: true` with
+`persisted: []` is the normal failure shape. Both keys are present on every failure body, empty
+array included — "nothing landed" and "we are not saying" must not look alike to a caller.
 
-Why: `BatchService` does hold a single transaction — one `commitAndClose()` after the loop,
-`rollbackAndClose()` on failure — but each op reaches core's `DefaultJsonDataService#update`, which
-ends its success branch with an unconditional `OBDal.getInstance().commitAndClose()`. So every op
-commits itself and the batch's rollback finds an empty session. The commit cannot be suppressed: it
-takes no parameter, `SessionHandler#setDoRollback` is read only by `DalThreadHandler` at thread end,
-and disabling triggers makes `commitAndClose` throw. Real atomicity means not routing through that
-core method at all, which is tracked separately.
+**They were not atomic until IMP-23 option B**, and the history explains the two keys. `BatchService`
+always held a single transaction — one `commitAndClose()` after the loop, `rollbackAndClose()` on
+failure — but each op reached core's `DefaultJsonDataService#update`, whose success branch ends with
+an unconditional `OBDal.getInstance().commitAndClose()`. Every op committed itself and the batch's
+rollback found an empty session, so a failure at op *n* left ops `0..n-1` durable. That commit cannot
+be suppressed from outside — it takes no parameter, `SessionHandler#setDoRollback` is read only by
+`DalThreadHandler` at thread end, and disabling triggers makes `commitAndClose` throw — so the batch
+now routes through `NeoBatchJsonDataService`, core's write path subclassed with the commit deferred
+to `BatchService`. The failure mode was asymmetric (a validation or FK failure is caught before any op
+runs and looked atomic; a persist-time failure left records behind), which is why it read as
+intermittent across four benchmark runs, and why a `sales-order` header sat orphaned for five days.
 
-The failure mode is asymmetric, which is why it read as intermittent across four benchmark runs:
+**The one case that is still not atomic**, reported rather than hidden: an operation whose handler
+runs an Etendo process commits inside that process by design (`ProcessInvoiceUtil#process`). No
+caller-side transaction ownership can undo that. `BatchService` detects it generically — a
+`commitAndClose()` underneath closes the Hibernate session, so the `Session` identity changes
+mid-batch — and then reports `atomic: false` with `persisted` naming the records that outlived the
+rollback.
 
-| Failure happens at | Outcome |
-|---|---|
-| **validation / FK resolution** — caught by `McpToolRouter#resolveBatchFkNames` before `executeBatch` runs | nothing persisted; `persisted: []`. Looks atomic, and is |
-| **persist time** — a value the DAL accepts and Postgres rejects (e.g. 281 chars into `varchar(255)`) | earlier ops are committed and stay committed; `persisted` names them |
+| `atomic` | `persisted` | What the caller does |
+|---|---|---|
+| `true` | `[]` | Fix the op in `failedAt`, retry the whole batch |
+| `false` | the surviving ops | Delete those records, or reuse them and resubmit only the remaining ops — a plain retry duplicates them |
 
-So a caller must **read `persisted` rather than infer from `committed:false`**. Retrying the whole
-batch unchanged duplicates whatever it lists; the correct recovery is to delete those records, or
-reuse them and resubmit only the remaining ops. This is not academic — a benchmark run left a
-`sales-order` header orphaned for five days precisely because the response gave it no reason to look.
+So a caller must **check `atomic` before retrying** rather than assuming either outcome.
 
 Unchanged on success: a fully successful batch still returns `committed:true` with every `recordId`.
 
@@ -1383,7 +1390,7 @@ NEO Headless enforces security at multiple levels:
    | Entry point | Where | Refusal |
    |---|---|---|
    | REST CRUD | `NeoCrudHandler#handleWindowEntityCrud` | `405` `"<METHOD> not enabled for <entity>"` |
-   | `/batch` + MCP `neo_batch` | `BatchService#createRecord` (the batch enters at `handleDefault`, i.e. after the CRUD gate) | per-op `405`; the batch stops there, but earlier ops are already committed — see §4.12.4.1 |
+   | `/batch` + MCP `neo_batch` | `BatchService#createRecord` (the batch enters at `handleDefault`, i.e. after the CRUD gate) | per-op `405`; the batch stops there and rolls back the earlier ops — see §4.12.4.1 |
    | MCP `neo_create` / `neo_update` / `neo_delete` | `McpToolRouterSupport#requireMethodEnabled` | MCP tool error naming the enabled methods and stating the entity is read-only |
 
    Before ETP-4254 only the REST path checked them, so turning the mutation flags off on a

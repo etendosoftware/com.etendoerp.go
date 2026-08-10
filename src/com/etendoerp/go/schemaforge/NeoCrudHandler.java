@@ -234,7 +234,10 @@ class NeoCrudHandler {
       }
 
       String dalEntityName = adTab.getTable().getName();
-      DefaultJsonDataService jsonService = DefaultJsonDataService.getInstance();
+      // Not DefaultJsonDataService.getInstance(): when a caller owns the transaction (a batch),
+      // core's write path would commit this record on its own and defeat the caller's rollback
+      // (IMP-23). NeoBatchJsonDataService decides which of the two applies to this thread.
+      DefaultJsonDataService jsonService = BatchService.currentJsonService();
       NeoFieldFilter fieldFilter = NeoFieldFilter.forEntity(
           context.getSfEntity(), dalEntityName);
       Map<String, String> params = buildDalParams(context, adTab, dalEntityName);
