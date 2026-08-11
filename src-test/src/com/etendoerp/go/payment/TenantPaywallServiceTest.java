@@ -29,7 +29,10 @@ import com.etendoerp.go.payment.TenantPaywallService.Decision;
 
 class TenantPaywallServiceTest {
 
-  private static final String APPROVED_TOKEN = "mock-paid-abc123";
+  // Same shape the retired MockPaymentService used to accept. Kept as a constant specifically to
+  // prove it is no longer special-cased: with no matching CheckoutPaymentRegistry entry, a
+  // mock-shaped token must be declined exactly like any other unverified string.
+  private static final String MOCK_SHAPED_TOKEN = "mock-paid-abc123";
   private static final String DECLINED_TOKEN = "mock-declined";
 
   private final TenantPaywallService service = new TenantPaywallService();
@@ -45,6 +48,11 @@ class TenantPaywallServiceTest {
   @Test
   void flagOffIgnoresAnUnusableToken() {
     assertEquals(Decision.ALLOWED, service.decide(false, true, false, DECLINED_TOKEN));
+  }
+
+  @Test
+  void flagOffIgnoresEvenAMockShapedToken() {
+    assertEquals(Decision.ALLOWED, service.decide(false, true, false, MOCK_SHAPED_TOKEN));
   }
 
   // --- First tenant is always free ---
@@ -78,8 +86,11 @@ class TenantPaywallServiceTest {
   }
 
   @Test
-  void additionalTenantWithApprovedTokenIsAllowed() {
-    assertEquals(Decision.ALLOWED, service.decide(true, true, false, APPROVED_TOKEN));
+  void additionalTenantWithMockShapedButUnconfirmedTokenIsDeclined() {
+    // Regression test: a hand-crafted token that merely LOOKS like the retired mock-payment
+    // format must not bypass the paywall. Only a CheckoutPaymentRegistry-confirmed Stripe payment
+    // (see the overload tests below) may return ALLOWED for an additional tenant.
+    assertEquals(Decision.PAYMENT_DECLINED, service.decide(true, true, false, MOCK_SHAPED_TOKEN));
   }
 
   // --- Resuming a tenant the account already owns is not a new tenant ---
@@ -103,36 +114,31 @@ class TenantPaywallServiceTest {
     assertTrue(Decision.PAYMENT_DECLINED.isBlocked());
   }
 
-  // --- The paywall must not consult the payment provider when it does not have to ---
+  // --- Only a webhook-confirmed Stripe payment may pass the paywall for an additional tenant ---
 
   @Test
-  void paymentProviderIsNotConsultedWhenFlagIsOff() {
-    CountingPaymentService counting = new CountingPaymentService();
-    new TenantPaywallService(counting).decide(false, true, false, APPROVED_TOKEN);
-    assertEquals(0, counting.calls);
+  void additionalTenantIsAllowedWhenCheckoutPaymentRegistryConfirmsIt() {
+    String requestId = "req-" + System.identityHashCode(new Object());
+    String accountEmail = "buyer@example.test";
+    String clientName = "Acme Additional Tenant";
+    CheckoutPaymentRegistry.recordPaid(requestId, accountEmail, clientName);
+
+    assertEquals(Decision.ALLOWED,
+        service.decide(true, true, false, requestId, accountEmail, clientName));
   }
 
   @Test
-  void paymentProviderIsNotConsultedForAFirstTenant() {
-    CountingPaymentService counting = new CountingPaymentService();
-    new TenantPaywallService(counting).decide(true, false, false, APPROVED_TOKEN);
-    assertEquals(0, counting.calls);
+  void additionalTenantIsDeclinedWhenRequestIdIsConfirmedForADifferentAccount() {
+    String requestId = "req-" + System.identityHashCode(new Object());
+    CheckoutPaymentRegistry.recordPaid(requestId, "owner@example.test", "Acme");
+
+    assertEquals(Decision.PAYMENT_DECLINED,
+        service.decide(true, true, false, requestId, "attacker@example.test", "Acme"));
   }
 
   @Test
-  void paymentProviderIsConsultedForAnAdditionalTenant() {
-    CountingPaymentService counting = new CountingPaymentService();
-    new TenantPaywallService(counting).decide(true, true, false, APPROVED_TOKEN);
-    assertEquals(1, counting.calls);
-  }
-
-  private static class CountingPaymentService extends MockPaymentService {
-    private int calls;
-
-    @Override
-    public PaymentOutcome validate(String paymentToken) {
-      calls++;
-      return super.validate(paymentToken);
-    }
+  void additionalTenantIsDeclinedWhenRequestIdWasNeverRecordedAsPaid() {
+    assertEquals(Decision.PAYMENT_DECLINED,
+        service.decide(true, true, false, "req-never-paid", "buyer@example.test", "Acme"));
   }
 }

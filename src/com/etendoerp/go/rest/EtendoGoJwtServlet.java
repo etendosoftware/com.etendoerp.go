@@ -1177,7 +1177,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    * POST /sws/go/onboarding
    * Header: Authorization: Bearer <session_token>
    * Body: { "clientName": "...", "currency": "EUR", "language": "es_ES", "countryCode": "ES",
-   *         "paymentToken": "mock-paid-..." }
+   *         "paymentToken": "<checkout requestId returned by POST /sws/go/checkout/sessions>" }
    *
    * Creates a new Etendo environment (AD_Client + AD_Org) using the existing
    * InitialClientSetup and InitialOrgSetup business utilities.
