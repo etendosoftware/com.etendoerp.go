@@ -17,6 +17,7 @@
 
 package com.etendoerp.go.schemaforge.handlers;
 
+import java.math.BigDecimal;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
@@ -28,6 +29,7 @@ import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.criterion.Restrictions;
+import org.openbravo.advpaymentmngt.process.FIN_AddPayment;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.financialmgmt.payment.FIN_FinaccTransaction;
@@ -77,7 +79,9 @@ import com.etendoerp.payment.removal.util.PaymentRemovalUtil;
  * the payment, deletes those join rows itself and recalculates the affected invoices —
  * mirroring exactly what {@code PaymentRemovalUtil.remove()} does, just completed correctly.
  * Unapplied payments (no {@code FIN_PaymentDetail} rows) are unaffected — the cleanup is a
- * no-op.
+ * no-op. For a payment that was already a DRAFT, {@link #releaseInstallmentsToPending} first
+ * hands each installment back to Core so the invoice keeps a payable (pending) schedule
+ * fragment; without it the invoice became permanently unpayable (ETP-4841).
  *
  * <p>Three rounds of live testing (see the reject-cycle notes on {@link #handleRemove} and
  * {@link #removeApplicationDetails}) shaped the current design: (1) deleted children must also
@@ -280,16 +284,32 @@ public class ReactivatePaymentHandler implements NeoHandler {
             + "be removed from here; reverse the Payment Proposal instead.");
       }
 
-      if (Boolean.TRUE.equals(payment.isProcessed())) {
+      boolean wasProcessed = Boolean.TRUE.equals(payment.isProcessed());
+      if (wasProcessed) {
         PaymentRemovalUtil.reactivate(payment.getId(), REACTIVATE_BEFORE_REMOVE_VALUE);
         payment = OBDal.getInstance().get(FIN_Payment.class, context.getRecordId());
       }
 
       Set<String> affectedInvoiceIds = PaymentRemovalUtil.collectAffectedInvoiceIds(payment);
+      if (!wasProcessed) {
+        releaseInstallmentsToPending(payment);
+      }
       removeApplicationDetails(payment);
       OBDal.getInstance().flush();
-      PaymentRemovalUtil.updateInvoicesAfterPaymentRemoval(affectedInvoiceIds);
-      OBDal.getInstance().flush();
+      // Only a payment that WAS processed moved the invoice's paid/outstanding amounts, so only
+      // that case needs them recomputed. Running the recompute for a draft is not merely
+      // redundant, it corrupts the invoice: PaymentRemovalUtil.sumDetails() sums EVERY schedule
+      // detail of the installment without checking whether it is linked to a payment detail, so
+      // the pending fragment that releaseInstallmentsToPending() just restored gets counted as
+      // "paid" — leaving paidAmount = full, outstandingAmount = 0 and the invoice flagged
+      // paymentComplete, i.e. unpayable and wrongly shown as paid in both Etendo Go and Classic
+      // (ETP-4841, observed live on a 39.93 invoice). Verified against real data: an installment
+      // whose only linked detail belongs to an unprocessed payment reports paidAmount 0, which is
+      // why the draft path has nothing to recompute in the first place.
+      if (wasProcessed) {
+        PaymentRemovalUtil.updateInvoicesAfterPaymentRemoval(affectedInvoiceIds);
+        OBDal.getInstance().flush();
+      }
 
       PaymentRemovalUtil.remove(payment);
 
@@ -357,6 +377,48 @@ public class ReactivatePaymentHandler implements NeoHandler {
    *
    * @param payment the payment whose application join rows are being removed
    */
+  /**
+   * Releases each of {@code payment}'s document-linked {@link FIN_PaymentScheduleDetail} rows back
+   * to PENDING before {@link #removeApplicationDetails} deletes them, by handing each one to Core's
+   * own reconciliation with a zero amount. Core's "editing an existing link" branch then leaves an
+   * unlinked ({@code FIN_Payment_Detail_ID IS NULL}) fragment carrying the released amount — which
+   * is exactly what {@code PaymentRegistrationService.findPendingPSDs} requires in order to register
+   * any later payment against the same installment.
+   *
+   * <p><b>Only when the payment was ALREADY a draft (ETP-4841).</b> {@link
+   * #removeApplicationDetails} deletes every schedule detail outright and never restores a pending
+   * fragment. For a PROCESSED payment that is harmless, because {@code
+   * PaymentRemovalUtil.reactivate()} has by then already reversed the invoice's payment plan through
+   * Core. A DRAFT skips reactivation entirely (there is nothing to reactivate), so nothing restored
+   * the fragment and the installment was left with NO schedule-detail rows at all — every later
+   * attempt to pay that invoice then failed with "No pending payment schedule details found for this
+   * installment" (HTTP 400).
+   *
+   * <p>Diagnosed with a controlled experiment rather than by reading alone (an earlier fix premised
+   * on Core's internal branching was wrong and got reverted): the same draft-then-delete cycle was
+   * run twice on two equivalent invoices, once per delete route, and the DB inspected directly.
+   * Deleting through this handler left 0 schedule-detail rows; deleting through the invoice modal
+   * ({@code PaymentDraftEditService.deleteDraftPayment}, which already performs this release) left
+   * exactly 1 correct pending row. This method makes both routes converge on that verified end
+   * state. Note it deliberately does NOT depend on which internal branch Core takes — whether it
+   * unlinks the existing row in place or copies it — only on the end state the experiment proved.
+   *
+   * <p>Package-visible for the same reason {@link #removeApplicationDetails} is: {@code
+   * ReactivatePaymentHandlerDraftRemoveIntegrationTest} drives it directly against a real Hibernate
+   * session, and a compile-time call keeps a future rename from silently turning that test into a
+   * no-op the way a reflective lookup would.
+   */
+  static void releaseInstallmentsToPending(FIN_Payment payment) {
+    for (FIN_PaymentDetail detail : payment.getFINPaymentDetailList()) {
+      for (FIN_PaymentScheduleDetail psd : detail.getFINPaymentScheduleDetailList()) {
+        if (psd.getInvoicePaymentSchedule() != null || psd.getOrderPaymentSchedule() != null) {
+          FIN_AddPayment.updatePaymentDetail(psd, payment, BigDecimal.ZERO, false);
+        }
+      }
+    }
+    OBDal.getInstance().flush();
+  }
+
   static void removeApplicationDetails(FIN_Payment payment) {
     List<FIN_PaymentDetail> details = new ArrayList<>(payment.getFINPaymentDetailList());
     for (FIN_PaymentDetail detail : details) {
