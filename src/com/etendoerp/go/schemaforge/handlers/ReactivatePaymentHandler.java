@@ -27,12 +27,15 @@ import javax.inject.Named;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
+import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.criterion.Restrictions;
 import org.openbravo.advpaymentmngt.process.FIN_AddPayment;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.common.currency.Currency;
 import org.openbravo.model.financialmgmt.payment.FIN_FinaccTransaction;
+import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
 import org.openbravo.model.financialmgmt.payment.FIN_Payment;
 import org.openbravo.model.financialmgmt.payment.FIN_PaymentDetail;
 import org.openbravo.model.financialmgmt.payment.FIN_PaymentProposal;
@@ -106,7 +109,9 @@ import com.etendoerp.payment.removal.util.PaymentRemovalUtil;
  * field so the UI can navigate from the payment detail to the reconciled bank transaction
  * (there is no forward FK from {@code FIN_Payment} to {@code FIN_Finacc_Transaction}, only
  * the reverse {@code FIN_Finacc_Transaction.Fin_Payment_ID}). The field is {@code null} when
- * the payment has not been reconciled yet (e.g. status is not {@code RPPC}).
+ * the payment has not been reconciled yet (e.g. status is not {@code RPPC}). It also injects the
+ * three multi-currency extras {@code accountCurrency} / {@code conversionRate} /
+ * {@code financialTransactionAmount} — see {@link #injectMultiCurrencyExtras}.
  *
  * <p>{@code @Named} only — never a normal CDI scope. {@code lookupHandler()} reads the
  * {@code @Named} annotation off the concrete handler class; a normal-scoped bean would be a
@@ -139,6 +144,20 @@ public class ReactivatePaymentHandler implements NeoHandler {
   private static final String FIN_PAYMENT_ID_KEY = "Fin_Payment_ID";
   /** Nullable field injected into the single-record GET response (see class javadoc). */
   private static final String FIELD_FINANCIAL_TRANSACTION_ID = "financialTransactionId";
+  /**
+   * Read-only multi-currency extras injected into the single-record GET response so the payment
+   * detail panel can show the amount in the financial account's currency alongside the payment's
+   * own, plus the rate between them. None is reachable through the frontend contract:
+   * {@code Finacc_Txn_Convert_Rate} / {@code Finacc_Txn_Amount} are {@code ISINCLUDED = N} on
+   * payment-in, and the ACCOUNT's currency ISO is one hop past {@code Fin_Financial_Account_ID} in
+   * both windows. Injecting them here keeps this a pure read enrichment — no AD change, hence no
+   * {@code push-to-neo} / {@code export.database}. Field names deliberately match what
+   * {@code PaymentRegistrationService.paymentListItem} already emits for the invoice payment modal,
+   * so both surfaces speak one shape.
+   */
+  private static final String FIELD_ACCOUNT_CURRENCY = "accountCurrency";
+  private static final String FIELD_CONVERSION_RATE = "conversionRate";
+  private static final String FIELD_FINANCIAL_TRANSACTION_AMOUNT = "financialTransactionAmount";
   private static final String HTTP_GET = "GET";
   private static final String KEY_RESPONSE = "response";
   private static final String KEY_DATA = "data";
@@ -463,11 +482,56 @@ public class ReactivatePaymentHandler implements NeoHandler {
       String transactionId = resolveFinancialTransactionId(context.getRecordId());
       paymentRecord.put(FIELD_FINANCIAL_TRANSACTION_ID,
           transactionId != null ? transactionId : JSONObject.NULL);
+      // Isolated on purpose: these three are a display nicety, so a failure resolving them must
+      // never discard the whole enriched response — the outer catch returns null (i.e. "leave the
+      // previous result untouched"), which would also drop the financialTransactionId injection
+      // above and silently break the "go to transaction" link.
+      try {
+        injectMultiCurrencyExtras(paymentRecord, context.getRecordId());
+      } catch (Exception e) {
+        log.warn("Could not resolve multi-currency fields for payment {}", context.getRecordId(), e);
+      }
       return NeoResponse.ok(body);
     } catch (Exception e) {
       log.error("Error resolving financial transaction for payment {}", context.getRecordId(), e);
       return null;
     }
+  }
+
+  /**
+   * Adds {@link #FIELD_ACCOUNT_CURRENCY}, {@link #FIELD_CONVERSION_RATE} and
+   * {@link #FIELD_FINANCIAL_TRANSACTION_AMOUNT} to a single-record GET payload.
+   *
+   * <p>Every key is always present (explicitly {@code JSONObject.NULL} when unavailable) so the UI
+   * can tell "this backend does not send it" apart from "this payment has no value", rather than
+   * inferring intent from a missing key. The rate is emitted VERBATIM as stored — the payment's own
+   * booked rate, in its stored payment-currency → account-currency direction — which for a payment
+   * plays the same role the invoice's own document rate plays in the preview panel: the record's own
+   * rate wins over any system spot rate. Keeping it unconverted is what makes the detail panel show
+   * back exactly the rate the user typed in the Cobros/Pagos modal (ETP-4841).
+   *
+   * <p>Package-private so unit tests can drive it without the full {@code afterHandle} flow.
+   *
+   * @param record the payment JSON object to enrich, mutated in place
+   * @param paymentId the {@code FIN_Payment} id being returned
+   * @throws JSONException if the payload rejects a put
+   */
+  void injectMultiCurrencyExtras(JSONObject record, String paymentId) throws JSONException {
+    FIN_Payment payment = OBDal.getInstance().get(FIN_Payment.class, paymentId);
+    FIN_FinancialAccount account = payment != null ? payment.getAccount() : null;
+    Currency accountCurrency = account != null ? account.getCurrency() : null;
+    record.put(FIELD_ACCOUNT_CURRENCY,
+        accountCurrency != null && accountCurrency.getISOCode() != null
+            ? accountCurrency.getISOCode() : JSONObject.NULL);
+    record.put(FIELD_CONVERSION_RATE, nullSafe(
+        payment != null ? payment.getFinancialTransactionConvertRate() : null));
+    record.put(FIELD_FINANCIAL_TRANSACTION_AMOUNT, nullSafe(
+        payment != null ? payment.getFinancialTransactionAmount() : null));
+  }
+
+  /** {@code JSONObject.NULL} for a missing amount, so the key is emitted rather than dropped. */
+  private static Object nullSafe(BigDecimal value) {
+    return value != null ? value : JSONObject.NULL;
   }
 
   private static boolean isSingleRecordGet(NeoContext context) {
