@@ -209,7 +209,7 @@ final class PaymentRegistrationService {
         new DraftPaymentRequest(new AdvPaymentMngtDao(), isReceipt, invoice, paymentMethod, account,
             paymentDate),
         BigDecimal.ONE, amount);
-    linkPSDsToPayment(pendingPSDs, payment, amount);
+    linkPSDsToPayment(pendingPSDs, payment, amount, false);
     processOrThrow(payment);
     return payment;
   }
@@ -1006,19 +1006,10 @@ final class PaymentRegistrationService {
   }
 
   /**
-   * Links {@code amount} to the given pending PSDs without writing off any shortfall — the
-   * behaviour every caller had before ETP-4797.
+   * Links {@code amount} to the given pending PSDs, optionally writing off whatever the amount does
+   * not cover (ETP-4797). Pass {@code false} for the pre-ETP-4797 behaviour every caller had.
    *
    * <p>Package-visible: also used by {@link ReconciliationPaymentService}.
-   */
-  static void linkPSDsToPayment(List<FIN_PaymentScheduleDetail> psds,
-      FIN_Payment payment, BigDecimal amount) {
-    linkPSDsToPayment(psds, payment, amount, false);
-  }
-
-  /**
-   * Links {@code amount} to the given pending PSDs, optionally writing off whatever the amount does
-   * not cover (ETP-4797).
    *
    * <p>The flag is handed straight to Core. On the create path
    * ({@code FIN_AddPayment.updatePaymentDetail}, PSD not yet linked to a payment detail) Core

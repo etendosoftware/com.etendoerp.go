@@ -1664,9 +1664,9 @@ class PaymentRegistrationServiceTest {
   // ── linkPSDsToPayment() write-off flag (ETP-4797) ────────────────────────
 
   /**
-   * Verifies that the 3-argument overload keeps every pre-ETP-4797 caller on the old behaviour:
-   * the write-off flag reaching Core must be {@code false}, so a shortfall duplicates the schedule
-   * detail (invoice stays partially paid) rather than being written off.
+   * Verifies every pre-ETP-4797 caller's behaviour with the flag off: the write-off flag reaching
+   * Core must be {@code false}, so a shortfall duplicates the schedule detail (invoice stays
+   * partially paid) rather than being written off.
    */
   @Test
   void testLinkPSDsToPaymentDefaultsToNoWriteoff() {
@@ -1676,7 +1676,7 @@ class PaymentRegistrationServiceTest {
 
     try (MockedStatic<FIN_AddPayment> addPayment = mockStatic(FIN_AddPayment.class)) {
       PaymentRegistrationService.linkPSDsToPayment(
-          Collections.singletonList(psd), payment, new BigDecimal("12.00"));
+          Collections.singletonList(psd), payment, new BigDecimal("12.00"), false);
 
       addPayment.verify(() -> FIN_AddPayment.updatePaymentDetail(
           eq(psd), eq(payment), eq(new BigDecimal("12.00")), eq(false)));

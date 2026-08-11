@@ -74,7 +74,6 @@ import org.openbravo.model.financialmgmt.payment.FIN_BankStatementLine;
 import org.openbravo.model.financialmgmt.payment.FIN_FinaccTransaction;
 import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
 import org.openbravo.model.financialmgmt.payment.FIN_Payment;
-import org.openbravo.model.financialmgmt.payment.FIN_PaymentSchedule;
 import org.openbravo.model.financialmgmt.payment.FIN_Reconciliation;
 
 /**
@@ -845,16 +844,11 @@ public class ReconciliationHandler implements NeoHandler {
       // invoice for less than its outstanding amount, so the invoice is fully paid instead of
       // keeping a residual balance. The UI only offers it for a single selected invoice.
       boolean writeoffDifference = body.optBoolean("writeoffDifference", false);
-      NeoResponse limitError = assertWithinWriteoffLimit(account, writeoffDifference, line,
-          invoiceSpecs);
-      if (limitError != null) {
-        return limitError;
-      }
-      NeoResponse invError = ReconciliationFlowSupport.createInvoicePayments(
+      NeoResponse payError = ReconciliationWriteoffSupport.payInvoices(
           account, line, invoiceSpecs, operationIds, TOLERANCE, paymentMethodId,
           writeoffDifference);
-      if (invError != null) {
-        return invError;
+      if (payError != null) {
+        return payError;
       }
     }
 
@@ -865,64 +859,6 @@ public class ReconciliationHandler implements NeoHandler {
     }
 
     return compose(account, line, operationIds);
-  }
-
-  /**
-   * Rejects a write-off larger than the account's configured limit (ETP-4797). Returns {@code null}
-   * when the request is acceptable.
-   *
-   * <p>Enforced server-side as well as in the UI: the toggle being disabled is a convenience, not a
-   * boundary.
-   *
-   * <p><b>Deliberate divergence from Classic.</b> Classic applies this check only when the
-   * {@code WriteOffLimitPreference} preference is set to {@code 'Y'}, and its JS compares
-   * {@code totalWriteOffAmount > data.writeofflimit} — so an unset or zero limit blocks EVERY
-   * write-off. {@code Writeofflimit} has no default and is not mandatory, and the preference does
-   * not exist in this instance, so copying that literally would disable the feature everywhere it
-   * is not explicitly configured. Here an unset or zero limit means "no limit", and only a
-   * configured positive limit can reject.
-   */
-  private NeoResponse assertWithinWriteoffLimit(FIN_FinancialAccount account,
-      boolean writeoffDifference, FIN_BankStatementLine line, JSONArray invoiceSpecs) {
-    if (!writeoffDifference) {
-      return null;
-    }
-    BigDecimal limit = account.getWriteofflimit();
-    if (limit == null || limit.signum() <= 0) {
-      return null;
-    }
-    BigDecimal lineAmount = nullSafeAmount(line.getCramount())
-        .subtract(nullSafeAmount(line.getDramount())).abs();
-    BigDecimal selectedOutstanding = sumSelectedOutstanding(invoiceSpecs);
-    BigDecimal difference = selectedOutstanding.subtract(lineAmount);
-    if (difference.compareTo(limit) > 0) {
-      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
-          "The difference to write off (" + difference.toPlainString() + ") exceeds the write-off "
-              + "limit configured for this financial account (" + limit.toPlainString() + ").");
-    }
-    return null;
-  }
-
-  /** Total outstanding of the selected invoice installments, in their own currency. */
-  private BigDecimal sumSelectedOutstanding(JSONArray invoiceSpecs) {
-    BigDecimal total = BigDecimal.ZERO;
-    for (int i = 0; i < invoiceSpecs.length(); i++) {
-      String scheduleId = invoiceSpecs.optJSONObject(i) == null
-          ? null
-          : invoiceSpecs.optJSONObject(i).optString("scheduleId", null);
-      if (StringUtils.isBlank(scheduleId)) {
-        continue;
-      }
-      FIN_PaymentSchedule schedule = OBDal.getInstance().get(FIN_PaymentSchedule.class, scheduleId);
-      if (schedule != null) {
-        total = total.add(nullSafeAmount(schedule.getOutstandingAmount()).abs());
-      }
-    }
-    return total;
-  }
-
-  private static BigDecimal nullSafeAmount(BigDecimal value) {
-    return value == null ? BigDecimal.ZERO : value;
   }
 
   /**
