@@ -36,6 +36,7 @@ public final class EmailContractCommandSupport {
   public static final String FIELD_LANGUAGE = "language";
   public static final String FIELD_LINK = "link";
   public static final String FIELD_LOGIN_EVENT_ID = "loginEventId";
+  public static final String FIELD_MESSAGE_EDITS = "messageEdits";
   public static final String FIELD_RECORD_ID = "recordId";
   public static final String FIELD_RECIPIENT = "recipient";
   public static final String FIELD_RECIPIENT_EDITS = "recipientEdits";
@@ -136,6 +137,24 @@ public final class EmailContractCommandSupport {
     if (body != null && body.has(FIELD_RECIPIENT_EDITS)) {
       return EmailAuthorizationResult.rejected(400,
           "recipientEdits is not accepted by this contract");
+    }
+    return EmailAuthorizationResult.allowed();
+  }
+
+  /**
+   * Rejects a command carrying {@code messageEdits} for contracts outside the document-send family.
+   * Auth and notice contracts own their copy entirely; a caller must never be able to author their
+   * subject or body (ETP-4717).
+   *
+   * @param command contract command received by the service
+   * @return rejection when {@code messageEdits} is present, otherwise an allowed result
+   */
+  public static EmailAuthorizationResult rejectMessageEditsIfPresent(
+      EmailContractCommand command) {
+    JSONObject body = command == null ? null : command.getBody();
+    if (body != null && body.has(FIELD_MESSAGE_EDITS)) {
+      return EmailAuthorizationResult.rejected(400,
+          "messageEdits is not accepted by this contract");
     }
     return EmailAuthorizationResult.allowed();
   }
