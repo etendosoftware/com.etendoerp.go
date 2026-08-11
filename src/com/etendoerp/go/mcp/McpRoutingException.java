@@ -137,6 +137,28 @@ class McpRoutingException extends OBException {
   }
 
   /**
+   * The {@code status} filter names a business state the entity does not declare (ETP-4793 / IMP-17,
+   * evidence C14).
+   *
+   * <p>IMP-3 already made this failure self-correcting by naming the valid states in its message, and
+   * that is the reason it must not fall through to the catch-all: a {@code server_error} would tell
+   * an agent to stop retrying a call that one corrected word would fix. The names move from prose into
+   * {@code available}, the same key an unknown entity name uses.</p>
+   *
+   * @param status      the state name that matched nothing
+   * @param entityName  the entity whose filters were searched
+   * @param available   the named filters the entity declares
+   * @return the exception to throw
+   */
+  static McpRoutingException unknownNamedFilter(String status, String entityName,
+      List<String> available) {
+    return new McpRoutingException(
+        "Unknown status '" + status + "' for entity '" + entityName + "'",
+        McpConstants.STATUS_UNPROCESSABLE, McpConstants.ERROR_VALIDATION, "status", available,
+        "Retry with one of the names in 'available'.", McpConstants.SEE_ALSO_READING);
+  }
+
+  /**
    * A required tool argument is absent (ETP-4793 / IMP-17).
    *
    * @param detail the message naming the missing argument

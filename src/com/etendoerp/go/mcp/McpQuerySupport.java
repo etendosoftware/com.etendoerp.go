@@ -54,9 +54,9 @@ final class McpQuerySupport {
    *   <li><b>Range</b> {@code {column: {gt|gte|lt|lte: value}}} or {@code {column: {between: [a,b]}}}
    *       — comparison operators via {@link McpBusinessFilters}.</li>
    *   <li><b>Named status</b> {@code {status: "<name>"}} — resolved against the entity's hand-authored
-   *       {@code NAMED_FILTERS} (see {@link McpNamedFilters}); an unknown name raises a clear
-   *       "available filters" error, while an entity that declares no named filters falls back to
-   *       treating {@code status} as a plain column.</li>
+   *       {@code NAMED_FILTERS} (see {@link McpNamedFilters}); an unknown name raises a 422 envelope
+   *       listing the valid ones in {@code available}, while an entity that declares no named filters
+   *       falls back to treating {@code status} as a plain column.</li>
    * </ul>
    */
   static String buildWhereFromFilters(JSONObject filters, Tab adTab, SFEntity sfEntity,
@@ -158,8 +158,15 @@ final class McpQuerySupport {
    * Append the HQL condition for a named business status, resolved against the entity's
    * hand-authored {@code NAMED_FILTERS}. Returns {@code false} when the entity declares no named
    * filters, so the caller can fall back to treating {@code status} as a plain column (backward
-   * compatible). Throws {@link IllegalArgumentException} — surfaced to the agent as a clean handled
-   * error, never an HQL-500 — when the entity has named filters but none matches the requested name.
+   * compatible). Throws {@link McpRoutingException} — surfaced to the agent as a 422 envelope naming
+   * the valid states in {@code available}, never an HQL-500 — when the entity has named filters but
+   * none matches the requested name.
+   *
+   * <p>ETP-4793 / IMP-17: this used to be an {@code IllegalArgumentException}, which the router's
+   * catch-all could only render as prose (evidence C14: the list of valid states was there, but the
+   * response carried no status and no machine-detectable code). Since IMP-17 that catch-all classifies
+   * an unrecognised exception as {@code server_error}, so leaving it untyped would actively mislead —
+   * this is the caller's mistake and one corrected word fixes it.</p>
    */
   private static boolean appendStatusCondition(StringBuilder where, SFEntity sfEntity,
       String status, org.apache.logging.log4j.Logger log) {
@@ -170,8 +177,8 @@ final class McpQuerySupport {
     }
     String fragment = namedFilters.get(status);
     if (fragment == null) {
-      throw new IllegalArgumentException("Unknown status '" + status + "' for entity '"
-          + sfEntity.getName() + "'. Available: " + String.join(", ", namedFilters.keySet()));
+      throw McpRoutingException.unknownNamedFilter(status, sfEntity.getName(),
+          new java.util.ArrayList<>(namedFilters.keySet()));
     }
     log.debug("Applying named filter '{}' for entity '{}'", status, sfEntity.getName());
     appendAnd(where);
