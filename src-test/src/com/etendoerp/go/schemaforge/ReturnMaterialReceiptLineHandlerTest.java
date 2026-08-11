@@ -23,7 +23,9 @@ import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -38,7 +40,11 @@ import org.codehaus.jettison.json.JSONObject;
 import org.junit.Test;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
+import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.common.enterprise.Locator;
+import org.openbravo.model.common.enterprise.Warehouse;
+import org.openbravo.model.materialmgmt.transaction.ShipmentInOut;
 
 /**
  * Unit tests for {@link ReturnMaterialReceiptLineHandler}.
@@ -101,6 +107,64 @@ public class ReturnMaterialReceiptLineHandlerTest {
     NeoContext ctx = NeoContext.builder()
         .httpMethod("POST").endpointType(NeoEndpointType.ACTION).build();
     assertNull(HANDLER.handle(ctx));
+  }
+
+  // ── handle() — storageBin default injection (ETP-4863) ───────────────────
+
+  /**
+   * Reproduces ETP-4863: confirming a Return Material Receipt (Devolución de Venta / RMA of a
+   * sale) with the header on the PRINCIPAL warehouse must never leave the created line's
+   * {@code storageBin} pointing at a different (e.g. stale session-cached "secondary")
+   * warehouse. Unlike {@link GoodsShipmentLineHandler} (extends {@code
+   * AbstractInOutLineHandler}), this handler implements {@link NeoHandler} directly — same
+   * shape as {@link ReturnToVendorShipmentLineHandler} — and its {@code handle()} was a plain
+   * {@code return null;} with no locator-defaulting logic at all. handle() must default {@code
+   * storageBin} to the header warehouse's own default locator on POST when missing, exactly
+   * like the other three M_InOutLine-based line handlers.
+   */
+  @SuppressWarnings("unchecked")
+  @Test
+  public void testHandlePostInjectsWarehouseDefaultLocatorWhenStorageBinMissing() throws Exception {
+    JSONObject body = new JSONObject().put("parentId", "rma-1").put("product", "prod-1");
+    NeoContext ctx = NeoContext.builder().httpMethod("POST").endpointType(NeoEndpointType.CRUD)
+        .requestBody(body).build();
+
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      ShipmentInOut header = mock(ShipmentInOut.class);
+      Warehouse warehouse = mock(Warehouse.class);
+      Locator locator = mock(Locator.class);
+      when(dal.get(eq(ShipmentInOut.class), eq("rma-1"))).thenReturn(header);
+      when(header.getWarehouse()).thenReturn(warehouse);
+      when(warehouse.getId()).thenReturn("wh-principal");
+      when(locator.getId()).thenReturn("loc-default-wh-principal");
+      OBCriteria criteria = mock(OBCriteria.class);
+      when(dal.createCriteria(Locator.class)).thenReturn(criteria);
+      when(criteria.add(any())).thenReturn(criteria);
+      when(criteria.addOrder(any())).thenReturn(criteria);
+      when(criteria.setMaxResults(1)).thenReturn(criteria);
+      when(criteria.uniqueResult()).thenReturn(locator);
+
+      assertNull(HANDLER.handle(ctx));
+      assertEquals("A return-material-receipt line's storageBin must always resolve to the "
+          + "header warehouse's own default locator, never to a stale session-cached warehouse",
+          "loc-default-wh-principal", body.getString("storageBin"));
+    }
+  }
+
+  /**
+   * handle() POST must not override an explicit storageBin already supplied on the request.
+   */
+  @Test
+  public void testHandlePostDoesNotOverrideExplicitStorageBin() throws Exception {
+    JSONObject body = new JSONObject().put("parentId", "rma-1")
+        .put("storageBin", "loc-explicit");
+    NeoContext ctx = NeoContext.builder().httpMethod("POST").endpointType(NeoEndpointType.CRUD)
+        .requestBody(body).build();
+
+    assertNull(HANDLER.handle(ctx));
+    assertEquals("loc-explicit", body.getString("storageBin"));
   }
 
   // ── afterHandle() guard conditions ────────────────────────────────────────
