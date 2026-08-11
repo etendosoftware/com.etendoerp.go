@@ -19,24 +19,34 @@ package com.etendoerp.go.schemaforge;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.regex.Pattern;
 
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
+import org.hibernate.criterion.Order;
 import org.hibernate.criterion.Restrictions;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.utility.CSResponse;
 import org.openbravo.erpCommon.utility.DocumentNoData;
 import org.openbravo.model.common.enterprise.DocumentType;
+import org.openbravo.model.common.enterprise.Locator;
+import org.openbravo.model.materialmgmt.transaction.ShipmentInOut;
 import org.openbravo.service.db.DalConnectionProvider;
 
 /**
  * Shared helpers for {@link NeoHandler} implementations.
  */
 final class NeoHandlerUtils {
+
+  private static final String FIELD_STORAGE_BIN = "storageBin";
+  private static final String PARAM_PARENT_ID = "parentId";
+  // Matches an unresolved raw AD default literal such as "@OnHandLocatorDefault@". See
+  // injectDefaultLocatorIfMissing's javadoc for why this must be treated as absent.
+  private static final Pattern UNRESOLVED_TOKEN = Pattern.compile("^@[^@]+@$");
 
   private NeoHandlerUtils() {}
 
@@ -294,6 +304,84 @@ final class NeoHandlerUtils {
   static void mirrorAccountingDate(NeoContext context, String sourceField, String targetField) {
     if (NeoEndpointType.CRUD.equals(context.getEndpointType()) && isWriteMethod(context.getHttpMethod())) {
       mirrorFieldValue(context.getRequestBody(), sourceField, targetField);
+    }
+  }
+
+  /**
+   * Sets {@code storageBin} to the header {@code M_InOut}'s own warehouse default locator when
+   * a line-create request did not already supply a REAL one. Shared by every
+   * {@code M_InOutLine}-based create flow — Goods Receipt, Goods Shipment, and Return to Vendor
+   * Shipment — so all three anchor a new line's locator to the DOCUMENT'S warehouse
+   * ({@code M_InOut.M_Warehouse_ID}), never to the "first locator" found or to the product's
+   * on-hand locator (ETP-4863).
+   *
+   * <p>Originally added receipt-only (ETP-4671): the raw AD default
+   * ({@code @OnHandLocatorDefault@}) resolves to "the locator where this product already has
+   * stock", which is the right idea for a shipment (pick from what's in stock) but leaves
+   * {@code M_Locator_ID} {@code NULL} for a receipt of a brand-new, unstocked product — and
+   * {@code M_INOUT_POST} then rejects the document with {@code InoutLineWithoutLocator}. Goods
+   * Shipment and Return to Vendor Shipment never got this safeguard, so they hit the mirror-image
+   * bug: that same raw default correctly filters by header warehouse ONLY when the tab declares
+   * the matching {@code AD_AuxiliaryInput}; when it doesn't (or the re-resolution fails), it falls
+   * back to a value cached in the HTTP session from the last window/document touched in that
+   * session — a stale, unrelated warehouse. Confirming a shipment/return on the PRINCIPAL
+   * warehouse could silently create stock transactions in whatever warehouse happened to be
+   * cached, e.g. a "secondary" one.
+   *
+   * <p>Treats both a genuinely absent/blank value and an unresolved {@code @Token@}-shaped
+   * literal as "missing" — confirmed live for receipts (ETP-4671): the frontend's generated
+   * {@code addLineFields.hidden} merge can send the literal string {@code
+   * "@OnHandLocatorDefault@"} for a manually-added line whose default never resolved client-side,
+   * and that string is never a real Locator id. Never overrides a genuine explicit value coming
+   * from the user or from an "Import from..." flow.
+   *
+   * @param body the create request body to mutate in place; no-op if {@code null}
+   * @param log  the caller's logger, used for debug/warn messages
+   */
+  static void injectDefaultLocatorIfMissing(JSONObject body, Logger log) throws Exception {
+    if (body == null) {
+      return;
+    }
+    String existing = body.optString(FIELD_STORAGE_BIN, null);
+    if (StringUtils.isNotBlank(existing) && !UNRESOLVED_TOKEN.matcher(existing).matches()) {
+      return;
+    }
+    String parentId = body.optString(PARAM_PARENT_ID, "");
+    if (parentId.isEmpty()) {
+      return;
+    }
+    ShipmentInOut header = OBDal.getInstance().get(ShipmentInOut.class, parentId);
+    if (header == null || header.getWarehouse() == null) {
+      return;
+    }
+    String locatorId = resolveDefaultLocatorForWarehouse(header.getWarehouse().getId(), log);
+    if (locatorId != null) {
+      body.put(FIELD_STORAGE_BIN, locatorId);
+      log.debug("Defaulted storageBin={} to header warehouse={}", locatorId,
+          header.getWarehouse().getId());
+    }
+  }
+
+  /**
+   * Returns the default active {@code M_Locator} for a warehouse, or {@code null} when none is
+   * configured. Mirrors {@code InventoryLineHandler}'s locator lookup, scoped down to just the id
+   * since callers only need {@code storageBin}.
+   */
+  @SuppressWarnings("unchecked")
+  static String resolveDefaultLocatorForWarehouse(String warehouseId, Logger log) {
+    try {
+      Locator locator = (Locator) OBDal.getInstance().createCriteria(Locator.class)
+          .add(Restrictions.eq(Locator.PROPERTY_WAREHOUSE + ".id", warehouseId))
+          .add(Restrictions.eq(Locator.PROPERTY_DEFAULT, true))
+          .add(Restrictions.eq(Locator.PROPERTY_ACTIVE, true))
+          .addOrder(Order.asc(Locator.PROPERTY_SEARCHKEY))
+          .setMaxResults(1)
+          .uniqueResult();
+      return locator != null ? locator.getId() : null;
+    } catch (Exception e) {
+      log.debug("Could not resolve default locator for warehouse {}: {}", warehouseId,
+          e.getMessage());
+      return null;
     }
   }
 }
