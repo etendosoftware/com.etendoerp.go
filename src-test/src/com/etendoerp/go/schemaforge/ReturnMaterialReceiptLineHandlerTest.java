@@ -154,8 +154,11 @@ public class ReturnMaterialReceiptLineHandlerTest {
   }
 
   /**
-   * handle() POST must not override an explicit storageBin already supplied on the request.
+   * handle() POST must not override an explicit storageBin already supplied on the request
+   * when it ALREADY belongs to the header's warehouse (ETP-4863 BUG-1: the guarantee is about
+   * the warehouse, not about forcing every line onto the warehouse's single "default" locator).
    */
+  @SuppressWarnings("unchecked")
   @Test
   public void testHandlePostDoesNotOverrideExplicitStorageBin() throws Exception {
     JSONObject body = new JSONObject().put("parentId", "rma-1")
@@ -163,8 +166,22 @@ public class ReturnMaterialReceiptLineHandlerTest {
     NeoContext ctx = NeoContext.builder().httpMethod("POST").endpointType(NeoEndpointType.CRUD)
         .requestBody(body).build();
 
-    assertNull(HANDLER.handle(ctx));
-    assertEquals("loc-explicit", body.getString("storageBin"));
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      ShipmentInOut header = mock(ShipmentInOut.class);
+      Warehouse warehouse = mock(Warehouse.class);
+      when(dal.get(eq(ShipmentInOut.class), eq("rma-1"))).thenReturn(header);
+      when(header.getWarehouse()).thenReturn(warehouse);
+      when(warehouse.getId()).thenReturn("wh-1");
+      Locator existingLocator = mock(Locator.class);
+      when(dal.get(eq(Locator.class), eq("loc-explicit"))).thenReturn(existingLocator);
+      when(existingLocator.getWarehouse()).thenReturn(warehouse);
+
+      assertNull(HANDLER.handle(ctx));
+      assertEquals("loc-explicit", body.getString("storageBin"));
+      Mockito.verify(dal, Mockito.never()).createCriteria(Locator.class);
+    }
   }
 
   // ── afterHandle() guard conditions ────────────────────────────────────────

@@ -328,22 +328,24 @@ final class NeoHandlerUtils {
    * warehouse could silently create stock transactions in whatever warehouse happened to be
    * cached, e.g. a "secondary" one.
    *
-   * <p>Treats both a genuinely absent/blank value and an unresolved {@code @Token@}-shaped
-   * literal as "missing" — confirmed live for receipts (ETP-4671): the frontend's generated
-   * {@code addLineFields.hidden} merge can send the literal string {@code
-   * "@OnHandLocatorDefault@"} for a manually-added line whose default never resolved client-side,
-   * and that string is never a real Locator id. Never overrides a genuine explicit value coming
-   * from the user or from an "Import from..." flow.
+   * <p>Treats a genuinely absent value, an unresolved {@code @Token@}-shaped literal, AND an
+   * explicit-but-wrong-warehouse (or non-existent) locator all as cases requiring correction.
+   * This is an UNCONDITIONAL guarantee, confirmed in scope by the product owner (ETP-4863
+   * BUG-1) — every line's locator must belong to the header's own warehouse, full stop; it is
+   * not a fill-if-absent default that stops validating once any non-blank value shows up. An
+   * explicit {@code storageBin} that already belongs to the header's warehouse IS left alone,
+   * though — the guarantee is about the warehouse, not about collapsing every line onto the
+   * warehouse's single "default" locator. That is also why {@link InventoryLineHandler}'s
+   * "always overwrite {@code storageBin} on every POST" pattern (Physical Inventory, a sibling
+   * window) was deliberately NOT copied verbatim here: doing so would silently discard a
+   * deliberate, valid picking-bin choice — from the user or an "Import from..." flow — whenever
+   * that bin is already inside the correct warehouse.
    *
    * @param body the create request body to mutate in place; no-op if {@code null}
    * @param log  the caller's logger, used for debug/warn messages
    */
   static void injectDefaultLocatorIfMissing(JSONObject body, Logger log) throws Exception {
     if (body == null) {
-      return;
-    }
-    String existing = body.optString(FIELD_STORAGE_BIN, null);
-    if (StringUtils.isNotBlank(existing) && !UNRESOLVED_TOKEN.matcher(existing).matches()) {
       return;
     }
     String parentId = body.optString(PARAM_PARENT_ID, "");
@@ -354,11 +356,44 @@ final class NeoHandlerUtils {
     if (header == null || header.getWarehouse() == null) {
       return;
     }
-    String locatorId = resolveDefaultLocatorForWarehouse(header.getWarehouse().getId(), log);
-    if (locatorId != null) {
-      body.put(FIELD_STORAGE_BIN, locatorId);
-      log.debug("Defaulted storageBin={} to header warehouse={}", locatorId,
-          header.getWarehouse().getId());
+    String headerWarehouseId = header.getWarehouse().getId();
+
+    String existing = body.optString(FIELD_STORAGE_BIN, null);
+    boolean hasRealValue = StringUtils.isNotBlank(existing)
+        && !UNRESOLVED_TOKEN.matcher(existing).matches();
+    if (hasRealValue && belongsToWarehouse(existing, headerWarehouseId, log)) {
+      // Already anchored to the header's own warehouse — a deliberate bin choice, not a gap.
+      return;
+    }
+
+    String locatorId = resolveDefaultLocatorForWarehouse(headerWarehouseId, log);
+    if (locatorId == null) {
+      return;
+    }
+    if (hasRealValue) {
+      log.debug("Correcting storageBin={} (wrong/invalid warehouse) to {} for header "
+          + "warehouse={}", existing, locatorId, headerWarehouseId);
+    } else {
+      log.debug("Defaulted storageBin={} to header warehouse={}", locatorId, headerWarehouseId);
+    }
+    body.put(FIELD_STORAGE_BIN, locatorId);
+  }
+
+  /**
+   * True when {@code locatorId} resolves to a real, active {@code M_Locator} whose own
+   * warehouse matches {@code warehouseId}. Used by {@link #injectDefaultLocatorIfMissing} to
+   * decide whether an explicit {@code storageBin} already satisfies the header-warehouse
+   * guarantee (ETP-4863 BUG-1) — a locator that doesn't exist, or belongs to a different
+   * warehouse, is treated the same as a missing value and gets corrected.
+   */
+  static boolean belongsToWarehouse(String locatorId, String warehouseId, Logger log) {
+    try {
+      Locator locator = OBDal.getInstance().get(Locator.class, locatorId);
+      return locator != null && locator.getWarehouse() != null
+          && warehouseId.equals(locator.getWarehouse().getId());
+    } catch (Exception e) {
+      log.debug("Could not resolve warehouse for locator {}: {}", locatorId, e.getMessage());
+      return false;
     }
   }
 
