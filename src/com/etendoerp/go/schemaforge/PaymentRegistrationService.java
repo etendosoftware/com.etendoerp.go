@@ -406,6 +406,11 @@ final class PaymentRegistrationService {
       item.put("accountCurrency", p.getAccount().getCurrency() != null
           ? p.getAccount().getCurrency().getISOCode() : null);
     }
+    // Invoice-currency → account-currency rate stored on this payment. The edit modal reseeds its
+    // (editable) rate field from this instead of the system spot rate, so a rate the user typed on
+    // a draft survives reopening it (ETP-4841). Always ONE on a single-currency payment, where the
+    // modal hides the field.
+    item.put("conversionRate", p.getFinancialTransactionConvertRate());
     if (p.getPaymentMethod() != null) {
       item.put("paymentMethod", p.getPaymentMethod().getName());
     }
@@ -843,7 +848,10 @@ final class PaymentRegistrationService {
         docType, docNo, req.invoice().getBusinessPartner(), req.paymentMethod(), req.account(), "0",
         req.paymentDate(), "", req.invoice().getCurrency(), rate, txnAmount);
     payment.setAmount(amount);
-    FIN_AddPayment.setFinancialTransactionAmountAndRate(null, payment, rate, txnAmount);
+    // Verbatim rate: the core helper would recompute it from the rounded txnAmount and lose what
+    // the user typed in the modal — see
+    // PaymentCurrencyConverter#applyTransactionAmountAndRate (ETP-4841).
+    PaymentCurrencyConverter.applyTransactionAmountAndRate(payment, rate, txnAmount);
     OBDal.getInstance().save(payment);
     OBDal.getInstance().flush();
     return payment;
