@@ -19,6 +19,7 @@ package com.etendoerp.go.schemaforge;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
@@ -37,7 +38,9 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.ad.access.User;
 import org.openbravo.model.common.enterprise.DocumentType;
 import org.openbravo.model.common.invoice.Invoice;
 import org.openbravo.model.common.invoice.InvoiceLine;
@@ -333,6 +336,85 @@ class InvoiceLineHandlerTest {
             .requestBody(body).build();
 
         assertNull(handler.handle(ctx));
+      }
+    }
+
+    // ── ETP-4737: sourceInvoiceLineId capture + strip (Import from Source Invoice) ──
+    //
+    // sourceInvoiceLineId is a virtual signal field (not in decisions.json/contract) for the
+    // "Import from Source Invoice" popup. It must be captured + stripped from the raw POST body
+    // BEFORE the generic field filter runs, or afterHandle()'s persistSourceInvoiceLine would
+    // silently find nothing left to persist (same bypass-the-filter pattern as
+    // AbstractInvoiceHeaderHandler#captureOriginInvoice).
+
+    @Test
+    @DisplayName("POST body with sourceInvoiceLineId only (no invoicedQuantity) is stripped, handle returns null")
+    void postSourceInvoiceLineIdCapturedAndStripped() throws Exception {
+      JSONObject body = new JSONObject().put("sourceInvoiceLineId", "source-line-1");
+
+      NeoContext ctx = NeoContext.builder()
+          .specName("sales-invoice").entityName("lines")
+          .httpMethod("POST").endpointType(NeoEndpointType.CRUD)
+          .requestBody(body).build();
+
+      assertNull(handler.handle(ctx));
+      assertEquals(false, body.has("sourceInvoiceLineId"));
+    }
+
+    @Test
+    @DisplayName("PATCH body with sourceInvoiceLineId is NOT stripped (capture is POST-only)")
+    void patchSourceInvoiceLineIdNotStripped() throws Exception {
+      JSONObject body = new JSONObject().put("sourceInvoiceLineId", "source-line-2");
+
+      NeoContext ctx = NeoContext.builder()
+          .specName("sales-invoice").entityName("lines")
+          .httpMethod("PATCH").endpointType(NeoEndpointType.CRUD)
+          .requestBody(body).build();
+
+      assertNull(handler.handle(ctx));
+      assertEquals("source-line-2", body.getString("sourceInvoiceLineId"));
+    }
+
+    @Test
+    @DisplayName("POST body without sourceInvoiceLineId: nothing breaks, returns null")
+    void postBodyWithoutSourceInvoiceLineIdDoesNotCrash() throws Exception {
+      JSONObject body = new JSONObject().put("someOtherField", "value");
+
+      NeoContext ctx = NeoContext.builder()
+          .specName("sales-invoice").entityName("lines")
+          .httpMethod("POST").endpointType(NeoEndpointType.CRUD)
+          .requestBody(body).build();
+
+      assertNull(handler.handle(ctx));
+      assertEquals(true, body.has("someOtherField"));
+    }
+
+    @Test
+    @DisplayName("POST body with both sourceInvoiceLineId and invoicedQuantity: field is stripped, invoicedQuantity logic still runs")
+    void postBothFieldsPresent_sourceLineIdStrippedInvoicedQtyLogicStillRuns() throws Exception {
+      JSONObject body = new JSONObject()
+          .put("sourceInvoiceLineId", "source-line-3")
+          .put("parentId", "invoice-ret-src")
+          .put("invoicedQuantity", 5.0);
+
+      try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+        OBDal dal = mock(OBDal.class);
+        dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+        Invoice invoice = mock(Invoice.class);
+        DocumentType docType = mock(DocumentType.class);
+        when(dal.get(Invoice.class, "invoice-ret-src")).thenReturn(invoice);
+        when(invoice.getTransactionDocument()).thenReturn(docType);
+        when(docType.isReturn()).thenReturn(true);
+
+        NeoContext ctx = NeoContext.builder()
+            .specName("sales-invoice").entityName("lines")
+            .httpMethod("POST").endpointType(NeoEndpointType.CRUD)
+            .requestBody(body).build();
+
+        assertNull(handler.handle(ctx));
+        assertEquals(false, body.has("sourceInvoiceLineId"));
+        assertEquals(-5.0, body.getDouble("invoicedQuantity"), 0.001);
       }
     }
 
@@ -632,6 +714,108 @@ class InvoiceLineHandlerTest {
         assertNull(handler.afterHandle(ctx));
       }
     }
+
+    // ── ETP-4737: persistSourceInvoiceLine — consumes the value captured in handle() ──
+
+    /**
+     * End-to-end roundtrip on the SAME handler instance: handle() captures + strips
+     * sourceInvoiceLineId from the raw POST body, afterHandle() then persists it onto the newly
+     * created line via the self-referencing FK ({@code EM_Etgo_Source_Invoiceline_ID}). This is
+     * the exact regression the fix addresses — before it, the generic field filter stripped the
+     * value before afterHandle() ever got a chance to read it, making the persist a permanent
+     * silent no-op (confirmed via an empty column in production before the fix).
+     */
+    @Test
+    @DisplayName("POST: sourceInvoiceLineId captured in handle() is persisted in afterHandle() (ETP-4737)")
+    void postPersistsCapturedSourceInvoiceLineId() throws Exception {
+      JSONObject createBody = new JSONObject().put("sourceInvoiceLineId", "src-line-1");
+      NeoContext createCtx = NeoContext.builder()
+          .specName("sales-invoice").entityName("lines")
+          .httpMethod("POST").endpointType(NeoEndpointType.CRUD)
+          .requestBody(createBody).build();
+
+      assertNull(handler.handle(createCtx));
+      assertEquals(false, createBody.has("sourceInvoiceLineId"));
+
+      JSONObject createdLine = new JSONObject().put("id", "new-line-1");
+      JSONArray dataArray = new JSONArray().put(createdLine);
+      JSONObject response = new JSONObject().put("data", dataArray);
+      JSONObject respBody = new JSONObject().put("response", response);
+      NeoResponse prevResult = new NeoResponse(201, respBody);
+
+      NeoContext afterCtx = NeoContext.builder()
+          .specName("sales-invoice").entityName("lines")
+          .httpMethod("POST").endpointType(NeoEndpointType.CRUD)
+          .recordId(null).previousResult(prevResult).build();
+
+      try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+           MockedStatic<AbstractInvoiceHeaderHandler> headerMock =
+               mockStatic(AbstractInvoiceHeaderHandler.class)) {
+        OBDal dal = mock(OBDal.class);
+        dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+        InvoiceLine newLine = mock(InvoiceLine.class);
+        Invoice parentInvoice = mock(Invoice.class);
+        when(dal.get(InvoiceLine.class, "new-line-1")).thenReturn(newLine);
+        when(newLine.getInvoice()).thenReturn(parentInvoice);
+        when(parentInvoice.getId()).thenReturn("invoice-parent-src");
+        headerMock.when(() ->
+            AbstractInvoiceHeaderHandler.autoCreateOrUpdateConversionRateDocument(anyString()))
+            .thenAnswer(inv -> null);
+
+        InvoiceLine sourceLine = mock(InvoiceLine.class);
+        when(dal.get(InvoiceLine.class, "src-line-1")).thenReturn(sourceLine);
+
+        assertNull(handler.afterHandle(afterCtx));
+
+        Mockito.verify(newLine).setETGOSourceInvoiceLine(sourceLine);
+        Mockito.verify(dal).save(newLine);
+        Mockito.verify(dal).flush();
+      }
+    }
+
+    /**
+     * When the body never carried sourceInvoiceLineId, {@code pendingSourceInvoiceLineId} stays
+     * null and {@code persistSourceInvoiceLine} must no-op without touching OBDal for the source
+     * line lookup — no exception, nothing persisted.
+     */
+    @Test
+    @DisplayName("POST: no sourceInvoiceLineId captured — afterHandle persist step is a no-op")
+    void postWithoutCapturedSourceInvoiceLineIdSkipsPersist() throws Exception {
+      JSONObject createdLine = new JSONObject().put("id", "new-line-2");
+      JSONArray dataArray = new JSONArray().put(createdLine);
+      JSONObject response = new JSONObject().put("data", dataArray);
+      JSONObject respBody = new JSONObject().put("response", response);
+      NeoResponse prevResult = new NeoResponse(201, respBody);
+
+      NeoContext afterCtx = NeoContext.builder()
+          .specName("sales-invoice").entityName("lines")
+          .httpMethod("POST").endpointType(NeoEndpointType.CRUD)
+          .recordId(null).previousResult(prevResult).build();
+
+      try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+           MockedStatic<AbstractInvoiceHeaderHandler> headerMock =
+               mockStatic(AbstractInvoiceHeaderHandler.class)) {
+        OBDal dal = mock(OBDal.class);
+        dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+        InvoiceLine newLine = mock(InvoiceLine.class);
+        Invoice parentInvoice = mock(Invoice.class);
+        when(dal.get(InvoiceLine.class, "new-line-2")).thenReturn(newLine);
+        when(newLine.getInvoice()).thenReturn(parentInvoice);
+        when(parentInvoice.getId()).thenReturn("invoice-parent-nosrc");
+        headerMock.when(() ->
+            AbstractInvoiceHeaderHandler.autoCreateOrUpdateConversionRateDocument(anyString()))
+            .thenAnswer(inv -> null);
+
+        // NOTE: handle() was never called on this fresh handler instance — pendingSourceInvoiceLineId
+        // is at its default (null) value, exactly like a real line save that never carried the field.
+        assertNull(handler.afterHandle(afterCtx));
+
+        Mockito.verify(newLine, never()).setETGOSourceInvoiceLine(any());
+        Mockito.verify(dal, never()).save(newLine);
+      }
+    }
   }
 
   @Nested
@@ -649,6 +833,313 @@ class InvoiceLineHandlerTest {
       handler.afterCallout(ctx);
 
       taxRateHelperMock.verify(() -> LineCalloutTaxRateHelper.augmentTaxRate(ctx));
+    }
+  }
+
+  @Nested
+  @DisplayName("shouldAutoFillExemptionCause — exempt detection (ETP-4751)")
+  class ShouldAutoFillExemptionCause {
+
+    private boolean invokeShouldAutoFill(String invoiceId) throws Exception {
+      java.lang.reflect.Method m = InvoiceLineHandler.class
+          .getDeclaredMethod("shouldAutoFillExemptionCause", String.class);
+      m.setAccessible(true);
+      return (boolean) m.invoke(handler, invoiceId);
+    }
+
+    /**
+     * Sales invoice, no cause set, an exempt active line present → auto-fill qualifies (true).
+     * Also asserts the SQL detects exempt taxes via c_invoiceline and NEVER via the lingering
+     * c_invoicetax branch (ETP-4751 — Go drafts don't recompute c_invoicetax, so it would report
+     * a stale exempt=true after the exempt line was removed).
+     */
+    @Test
+    @DisplayName("exempt active line → true, and SQL is line-only (no c_invoicetax)")
+    void exemptLine_true_lineOnlySql() throws Exception {
+      try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+        OBDal dal = mock(OBDal.class);
+        dalMock.when(OBDal::getReadOnlyInstance).thenReturn(dal);
+        java.sql.Connection conn = mock(java.sql.Connection.class);
+        when(dal.getConnection()).thenReturn(conn);
+        java.sql.PreparedStatement ps = mock(java.sql.PreparedStatement.class);
+        org.mockito.ArgumentCaptor<String> sqlCaptor =
+            org.mockito.ArgumentCaptor.forClass(String.class);
+        when(conn.prepareStatement(sqlCaptor.capture())).thenReturn(ps);
+        java.sql.ResultSet rs = mock(java.sql.ResultSet.class);
+        when(ps.executeQuery()).thenReturn(rs);
+        when(rs.next()).thenReturn(true);
+        when(rs.getString("issotrx")).thenReturn("Y");
+        when(rs.getString("em_aeatsii_cause_exemption_id")).thenReturn(null);
+        when(rs.getBoolean("has_exempt")).thenReturn(true);
+
+        assertEquals(true, invokeShouldAutoFill("inv-1"));
+
+        String sql = sqlCaptor.getValue().toLowerCase();
+        org.junit.jupiter.api.Assertions.assertTrue(sql.contains("c_invoiceline"),
+            "must detect exempt taxes via c_invoiceline");
+        org.junit.jupiter.api.Assertions.assertFalse(sql.contains("c_invoicetax"),
+            "must NOT use the lingering c_invoicetax branch (ETP-4751)");
+      }
+    }
+
+    /**
+     * Sales invoice with no exempt active line → does not qualify (false). This is the
+     * "exempt line removed" case: with the c_invoicetax branch gone, has_exempt is driven purely
+     * by the current active lines, so removing the last exempt line correctly returns false.
+     */
+    @Test
+    @DisplayName("no exempt active line → false")
+    void noExemptLine_false() throws Exception {
+      try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+        OBDal dal = mock(OBDal.class);
+        dalMock.when(OBDal::getReadOnlyInstance).thenReturn(dal);
+        java.sql.Connection conn = mock(java.sql.Connection.class);
+        when(dal.getConnection()).thenReturn(conn);
+        java.sql.PreparedStatement ps = mock(java.sql.PreparedStatement.class);
+        when(conn.prepareStatement(anyString())).thenReturn(ps);
+        java.sql.ResultSet rs = mock(java.sql.ResultSet.class);
+        when(ps.executeQuery()).thenReturn(rs);
+        when(rs.next()).thenReturn(true);
+        when(rs.getString("issotrx")).thenReturn("Y");
+        when(rs.getString("em_aeatsii_cause_exemption_id")).thenReturn(null);
+        when(rs.getBoolean("has_exempt")).thenReturn(false);
+
+        assertEquals(false, invokeShouldAutoFill("inv-1"));
+      }
+    }
+  }
+
+  /**
+   * ETP-4751 — the {@code autoFillExemptionCauseAfterLineSave} ORCHESTRATION driven end-to-end
+   * through {@link InvoiceLineHandler#afterHandle} on a line save. The leaf detection
+   * ({@code shouldAutoFillExemptionCause}) is covered above; this suite covers the three
+   * mutually-exclusive outcomes of the orchestration and the {@code augmentResponseWithSignal}
+   * body mutation, which had no direct coverage:
+   * <ul>
+   *   <li>exempt tax present + no header cause + <b>no</b> default cause → response augmented with
+   *       {@code exemptionCauseWarning=true} (the Etendo-GO-dormant-autofill / warning path);</li>
+   *   <li>exempt tax present + no header cause + a default cause exists → the default is written and
+   *       the response is augmented with {@code exemptionCauseAutoFilled=true} (autofill path);</li>
+   *   <li>invoice does not qualify (e.g. purchase invoice / cause already set) → {@code null},
+   *       the original response is left untouched (no-op path).</li>
+   * </ul>
+   * Driven via a PATCH so {@code resolveParentInvoiceIdAfterSave} resolves the parent invoice
+   * directly from the line record ({@code context.getRecordId()}), keeping the test independent
+   * of the POST previousResult-parsing path (already covered elsewhere).
+   */
+  @Nested
+  @DisplayName("autoFillExemptionCauseAfterLineSave — signal orchestration (ETP-4751)")
+  class AutoFillExemptionCauseAfterLineSave {
+
+    /**
+     * Builds a PATCH line-save context whose previousResult carries a minimal CRUD body, so
+     * augmentResponseWithSignal has a body to mutate. The header sync hook is stubbed to a no-op.
+     */
+    private NeoContext patchCtxWithBody() throws Exception {
+      JSONObject savedLine = new JSONObject().put("id", "line-1");
+      JSONArray data = new JSONArray().put(savedLine);
+      JSONObject body = new JSONObject().put("response", new JSONObject().put("data", data));
+      return NeoContext.builder()
+          .specName("sales-invoice").entityName("lines")
+          .httpMethod("PATCH").endpointType(NeoEndpointType.CRUD)
+          .recordId("line-1")
+          .previousResult(NeoResponse.ok(body))
+          .build();
+    }
+
+    /** Wires the OBDal read-only connection that shouldAutoFillExemptionCause + findDefault query. */
+    private void wireQueries(OBDal dal, java.sql.Connection conn, boolean qualifies,
+        String defaultCauseId) throws Exception {
+      when(dal.getConnection()).thenReturn(conn);
+
+      // shouldAutoFillExemptionCause SELECT
+      java.sql.PreparedStatement qualifyPs = mock(java.sql.PreparedStatement.class);
+      java.sql.ResultSet qualifyRs = mock(java.sql.ResultSet.class);
+      when(qualifyPs.executeQuery()).thenReturn(qualifyRs);
+      when(qualifyRs.next()).thenReturn(true);
+      when(qualifyRs.getString("issotrx")).thenReturn("Y");
+      when(qualifyRs.getString("em_aeatsii_cause_exemption_id")).thenReturn(null);
+      when(qualifyRs.getBoolean("has_exempt")).thenReturn(qualifies);
+
+      // findDefaultCauseExemptionId SELECT
+      java.sql.PreparedStatement defaultPs = mock(java.sql.PreparedStatement.class);
+      java.sql.ResultSet defaultRs = mock(java.sql.ResultSet.class);
+      when(defaultPs.executeQuery()).thenReturn(defaultRs);
+      when(defaultRs.next()).thenReturn(defaultCauseId != null);
+      if (defaultCauseId != null) {
+        when(defaultRs.getString(1)).thenReturn(defaultCauseId);
+      }
+
+      // Route each SQL to the matching statement by content.
+      when(conn.prepareStatement(anyString())).thenAnswer(inv -> {
+        String sql = ((String) inv.getArgument(0)).toLowerCase();
+        return sql.contains("aeatsii_cause_exemption") && sql.contains("isdefault")
+            ? defaultPs
+            : qualifyPs;
+      });
+    }
+
+    /** WARNING path: exempt, no header cause, NO default cause → exemptionCauseWarning=true. */
+    @Test
+    @DisplayName("exempt + no default cause → response augmented with exemptionCauseWarning=true")
+    void warningWhenNoDefaultCause() throws Exception {
+      NeoContext ctx = patchCtxWithBody();
+
+      try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+           MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+           MockedStatic<AbstractInvoiceHeaderHandler> headerMock =
+               mockStatic(AbstractInvoiceHeaderHandler.class)) {
+        ctxMock.when(() -> OBContext.setAdminMode(anyBoolean())).thenAnswer(i -> null);
+        ctxMock.when(OBContext::restorePreviousMode).thenAnswer(i -> null);
+        headerMock.when(() ->
+            AbstractInvoiceHeaderHandler.autoCreateOrUpdateConversionRateDocument(anyString()))
+            .thenAnswer(i -> null);
+
+        OBDal dal = mock(OBDal.class);
+        dalMock.when(OBDal::getInstance).thenReturn(dal);
+        dalMock.when(OBDal::getReadOnlyInstance).thenReturn(dal);
+
+        // resolveParentInvoiceIdAfterSave: line-1 → invoice inv-1
+        InvoiceLine line = mock(InvoiceLine.class);
+        Invoice invoice = mock(Invoice.class);
+        when(dal.get(InvoiceLine.class, "line-1")).thenReturn(line);
+        when(line.getInvoice()).thenReturn(invoice);
+        when(invoice.getId()).thenReturn("inv-1");
+
+        java.sql.Connection conn = mock(java.sql.Connection.class);
+        wireQueries(dal, conn, true, null);
+
+        NeoResponse result = handler.afterHandle(ctx);
+
+        org.junit.jupiter.api.Assertions.assertNotNull(result);
+        org.junit.jupiter.api.Assertions.assertTrue(
+            result.getBody().getBoolean(InvoiceLineHandler.FIELD_EXEMPTION_CAUSE_WARNING));
+        org.junit.jupiter.api.Assertions.assertFalse(
+            result.getBody().has(InvoiceLineHandler.FIELD_EXEMPTION_CAUSE_AUTOFILLED));
+        // No UPDATE statement is prepared when there is no default cause (nothing written).
+        Mockito.verify(conn, never()).prepareStatement(
+            org.mockito.ArgumentMatchers.matches("(?is)^update c_invoice.*"));
+      }
+    }
+
+    /** AUTOFILL path: exempt, no header cause, default cause exists → autoFilled=true + UPDATE run. */
+    @Test
+    @DisplayName("exempt + default cause exists → cause written + exemptionCauseAutoFilled=true")
+    void autoFillsWhenDefaultCauseExists() throws Exception {
+      NeoContext ctx = patchCtxWithBody();
+
+      try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+           MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+           MockedStatic<AbstractInvoiceHeaderHandler> headerMock =
+               mockStatic(AbstractInvoiceHeaderHandler.class)) {
+        ctxMock.when(() -> OBContext.setAdminMode(anyBoolean())).thenAnswer(i -> null);
+        ctxMock.when(OBContext::restorePreviousMode).thenAnswer(i -> null);
+        OBContext obContext = mock(OBContext.class);
+        User user = mock(User.class);
+        when(user.getId()).thenReturn("user-1");
+        when(obContext.getUser()).thenReturn(user);
+        ctxMock.when(OBContext::getOBContext).thenReturn(obContext);
+        headerMock.when(() ->
+            AbstractInvoiceHeaderHandler.autoCreateOrUpdateConversionRateDocument(anyString()))
+            .thenAnswer(i -> null);
+
+        OBDal dal = mock(OBDal.class);
+        dalMock.when(OBDal::getInstance).thenReturn(dal);
+        dalMock.when(OBDal::getReadOnlyInstance).thenReturn(dal);
+
+        InvoiceLine line = mock(InvoiceLine.class);
+        Invoice invoice = mock(Invoice.class);
+        when(dal.get(InvoiceLine.class, "line-1")).thenReturn(line);
+        when(line.getInvoice()).thenReturn(invoice);
+        when(invoice.getId()).thenReturn("inv-1");
+
+        java.sql.Connection conn = mock(java.sql.Connection.class);
+        // The UPDATE statement also goes through conn.prepareStatement; capture it.
+        java.sql.PreparedStatement updatePs = mock(java.sql.PreparedStatement.class);
+        when(dal.getConnection()).thenReturn(conn);
+
+        // shouldAutoFill SELECT
+        java.sql.PreparedStatement qualifyPs = mock(java.sql.PreparedStatement.class);
+        java.sql.ResultSet qualifyRs = mock(java.sql.ResultSet.class);
+        when(qualifyPs.executeQuery()).thenReturn(qualifyRs);
+        when(qualifyRs.next()).thenReturn(true);
+        when(qualifyRs.getString("issotrx")).thenReturn("Y");
+        when(qualifyRs.getString("em_aeatsii_cause_exemption_id")).thenReturn(null);
+        when(qualifyRs.getBoolean("has_exempt")).thenReturn(true);
+        // findDefault SELECT
+        java.sql.PreparedStatement defaultPs = mock(java.sql.PreparedStatement.class);
+        java.sql.ResultSet defaultRs = mock(java.sql.ResultSet.class);
+        when(defaultPs.executeQuery()).thenReturn(defaultRs);
+        when(defaultRs.next()).thenReturn(true);
+        when(defaultRs.getString(1)).thenReturn("cause-default-1");
+
+        when(conn.prepareStatement(anyString())).thenAnswer(inv -> {
+          String sql = ((String) inv.getArgument(0)).toLowerCase();
+          if (sql.startsWith("update c_invoice")) {
+            return updatePs;
+          }
+          if (sql.contains("isdefault")) {
+            return defaultPs;
+          }
+          return qualifyPs;
+        });
+
+        NeoResponse result = handler.afterHandle(ctx);
+
+        org.junit.jupiter.api.Assertions.assertNotNull(result);
+        org.junit.jupiter.api.Assertions.assertTrue(
+            result.getBody().getBoolean(InvoiceLineHandler.FIELD_EXEMPTION_CAUSE_AUTOFILLED));
+        org.junit.jupiter.api.Assertions.assertFalse(
+            result.getBody().has(InvoiceLineHandler.FIELD_EXEMPTION_CAUSE_WARNING));
+        // The default cause was written to the invoice.
+        Mockito.verify(updatePs).setString(1, "cause-default-1");
+        Mockito.verify(updatePs).setString(3, "inv-1");
+        Mockito.verify(updatePs).executeUpdate();
+      }
+    }
+
+    /** NO-OP path: invoice does not qualify (e.g. cause already set) → null, no signal added. */
+    @Test
+    @DisplayName("does not qualify → null (original response untouched, no signal)")
+    void noOpWhenInvoiceDoesNotQualify() throws Exception {
+      NeoContext ctx = patchCtxWithBody();
+
+      try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+           MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+           MockedStatic<AbstractInvoiceHeaderHandler> headerMock =
+               mockStatic(AbstractInvoiceHeaderHandler.class)) {
+        ctxMock.when(() -> OBContext.setAdminMode(anyBoolean())).thenAnswer(i -> null);
+        ctxMock.when(OBContext::restorePreviousMode).thenAnswer(i -> null);
+        headerMock.when(() ->
+            AbstractInvoiceHeaderHandler.autoCreateOrUpdateConversionRateDocument(anyString()))
+            .thenAnswer(i -> null);
+
+        OBDal dal = mock(OBDal.class);
+        dalMock.when(OBDal::getInstance).thenReturn(dal);
+        dalMock.when(OBDal::getReadOnlyInstance).thenReturn(dal);
+
+        InvoiceLine line = mock(InvoiceLine.class);
+        Invoice invoice = mock(Invoice.class);
+        when(dal.get(InvoiceLine.class, "line-1")).thenReturn(line);
+        when(line.getInvoice()).thenReturn(invoice);
+        when(invoice.getId()).thenReturn("inv-1");
+
+        java.sql.Connection conn = mock(java.sql.Connection.class);
+        when(dal.getConnection()).thenReturn(conn);
+        java.sql.PreparedStatement qualifyPs = mock(java.sql.PreparedStatement.class);
+        java.sql.ResultSet qualifyRs = mock(java.sql.ResultSet.class);
+        when(conn.prepareStatement(anyString())).thenReturn(qualifyPs);
+        when(qualifyPs.executeQuery()).thenReturn(qualifyRs);
+        when(qualifyRs.next()).thenReturn(true);
+        // cause already selected → does not qualify
+        when(qualifyRs.getString("issotrx")).thenReturn("Y");
+        when(qualifyRs.getString("em_aeatsii_cause_exemption_id")).thenReturn("existing-cause");
+        when(qualifyRs.getBoolean("has_exempt")).thenReturn(true);
+
+        NeoResponse result = handler.afterHandle(ctx);
+
+        assertNull(result);
+      }
     }
   }
 }

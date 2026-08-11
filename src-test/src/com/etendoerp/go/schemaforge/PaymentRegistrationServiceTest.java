@@ -28,6 +28,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.math.BigDecimal;
@@ -446,6 +447,113 @@ class PaymentRegistrationServiceTest {
     assertEquals(400, response.getHttpStatus());
     assertTrue(response.getBody().getJSONObject("error").getString("message")
         .contains("No pending payment schedule details"));
+  }
+
+  // ========================================================================
+  // resolvePaymentMethod tests (direct calls - package-visible static method)
+  //
+  // These exercise PaymentRegistrationService#resolvePaymentMethod directly instead of going
+  // through doRegisterPayment, since the method is package-visible and this test class lives in
+  // the same package. This keeps the tests focused on the priority logic itself without having
+  // to also stub the rest of the doRegisterPayment flow (period check, draft payment creation).
+  // ========================================================================
+
+  /**
+   * Verifies that the account-fallback branch orders {@code FinAccPaymentMethod} by
+   * {@link FinAccPaymentMethod#PROPERTY_DEFAULT} descending before taking the first result, so
+   * the account's own default-for-direction method wins over an arbitrary one (mirrors Classic's
+   * account-level fallback in {@code TransactionAddPaymentDefaultValues}).
+   *
+   * <p><b>Limitation:</b> this only proves the ORDER BY clause is requested with the correct
+   * property and direction (via {@code verify(...)}). It cannot prove that a real database
+   * actually returns the default-flagged row first - that behavioral guarantee requires a live-DB
+   * integration test (e.g. OBBaseTest), which is out of scope for this Mockito-based unit test.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  void testResolvePaymentMethodFallbackOrdersByAccountDefaultFlag() {
+    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    Invoice invoice = mock(Invoice.class);
+
+    // No invoice/BP payment method at all, so resolveInvoiceMethod returns null and the
+    // fallback branch is reached directly (no isMethodAllowed call in between).
+    when(invoice.getPaymentMethod()).thenReturn(null);
+    when(invoice.getBusinessPartner()).thenReturn(null);
+
+    FIN_PaymentMethod defaultMethod = mock(FIN_PaymentMethod.class);
+    FinAccPaymentMethod defaultFapm = mock(FinAccPaymentMethod.class);
+    when(defaultFapm.getPaymentMethod()).thenReturn(defaultMethod);
+
+    OBCriteria<FinAccPaymentMethod> fallbackCriteria = mock(OBCriteria.class);
+    when(obDal.createCriteria(FinAccPaymentMethod.class)).thenReturn(fallbackCriteria);
+    when(fallbackCriteria.add(any(Criterion.class))).thenReturn(fallbackCriteria);
+    when(fallbackCriteria.addOrderBy(anyString(), anyBoolean())).thenReturn(fallbackCriteria);
+    when(fallbackCriteria.setMaxResults(1)).thenReturn(fallbackCriteria);
+    when(fallbackCriteria.list()).thenReturn(Collections.singletonList(defaultFapm));
+
+    FIN_PaymentMethod result =
+        PaymentRegistrationService.resolvePaymentMethod(account, invoice, true);
+
+    assertEquals(defaultMethod, result);
+    verify(fallbackCriteria).addOrderBy(FinAccPaymentMethod.PROPERTY_DEFAULT, false);
+  }
+
+  /**
+   * Regression test for the bug reproduced live in Etendo Classic: the business partner (or
+   * invoice) has its own payment method configured (e.g. "Efectivo"/Cash), but that method is NOT
+   * configured on the reconciliation account (which only allows Cheque/Transferencia/Tarjeta).
+   *
+   * <p>Classic's {@code TransactionAddPaymentDefaultValues.getDefaultPaymentMethod} validates the
+   * BP's method against the BP's OWN linked financial account instead of the account actually
+   * being reconciled, so it still defaults the popup to the BP's method - and creating the payment
+   * then fails with "Selected payment method doesn't exist". This test proves the fix: the
+   * invoice/BP method is validated against THIS account via {@link
+   * PaymentRegistrationService#isMethodAllowed}, and when it is not allowed, resolution falls
+   * through to the account-fallback branch instead of returning the disallowed method.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  void testResolvePaymentMethodInvoiceMethodNotAllowedFallsBackToAccountDefault() {
+    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    Invoice invoice = mock(Invoice.class);
+
+    FIN_PaymentMethod cashMethod = mock(FIN_PaymentMethod.class);
+    when(invoice.getPaymentMethod()).thenReturn(cashMethod);
+
+    // isMethodAllowed(account, cashMethod, ...) criteria: Cash is NOT configured for this
+    // account, so the criteria returns no rows.
+    OBCriteria<FinAccPaymentMethod> allowedCheckCriteria = mock(OBCriteria.class);
+    // Fallback criteria: the account's own default-for-direction method (Transferencia).
+    OBCriteria<FinAccPaymentMethod> fallbackCriteria = mock(OBCriteria.class);
+
+    when(obDal.createCriteria(FinAccPaymentMethod.class))
+        .thenReturn(allowedCheckCriteria)
+        .thenReturn(fallbackCriteria);
+
+    when(allowedCheckCriteria.add(any(Criterion.class))).thenReturn(allowedCheckCriteria);
+    when(allowedCheckCriteria.setMaxResults(1)).thenReturn(allowedCheckCriteria);
+    when(allowedCheckCriteria.list()).thenReturn(Collections.emptyList());
+
+    FIN_PaymentMethod transferMethod = mock(FIN_PaymentMethod.class);
+    FinAccPaymentMethod transferFapm = mock(FinAccPaymentMethod.class);
+    when(transferFapm.getPaymentMethod()).thenReturn(transferMethod);
+
+    when(fallbackCriteria.add(any(Criterion.class))).thenReturn(fallbackCriteria);
+    when(fallbackCriteria.addOrderBy(anyString(), anyBoolean())).thenReturn(fallbackCriteria);
+    when(fallbackCriteria.setMaxResults(1)).thenReturn(fallbackCriteria);
+    when(fallbackCriteria.list()).thenReturn(Collections.singletonList(transferFapm));
+
+    FIN_PaymentMethod result =
+        PaymentRegistrationService.resolvePaymentMethod(account, invoice, true);
+
+    assertEquals(transferMethod, result,
+        "the disallowed invoice/BP method must NOT be returned; resolution must fall through "
+            + "to the account-fallback branch instead");
+    assertTrue(result != cashMethod,
+        "the resolved method must not be the invoice's own method, since it isn't allowed "
+            + "for this account");
+    verify(allowedCheckCriteria).list();
+    verify(fallbackCriteria).addOrderBy(FinAccPaymentMethod.PROPERTY_DEFAULT, false);
   }
 
   // ========================================================================
@@ -905,12 +1013,14 @@ class PaymentRegistrationServiceTest {
   }
 
   /**
-   * Verifies that an account whose currency differs from the invoice's currency is
-   * excluded entirely from {@code items} — not merely missing currency fields.
+   * Verifies that an account whose currency differs from the invoice's currency is now LISTED
+   * (multi-currency support): the two-step modal supplies a conversion rate, so foreign-currency
+   * accounts must remain selectable. The account still carries its {@code currency}/{@code
+   * currencyId} fields so the UI can decide when to show the conversion fields.
    */
   @Test
   @SuppressWarnings("unchecked")
-  void testHandleListAccountsExcludesAccountWithMismatchedCurrency() throws Exception {
+  void testHandleListAccountsIncludesAccountWithDifferentCurrency() throws Exception {
     NeoContext context = NeoContext.builder()
         .recordId("inv-1")
         .httpMethod("GET")
@@ -934,14 +1044,16 @@ class PaymentRegistrationServiceTest {
     when(obContext.getOrganizationStructureProvider("client-1")).thenReturn(osp);
     when(osp.getNaturalTree("org-1")).thenReturn(new HashSet<>(Collections.singleton("org-1")));
 
-    // Account with a different currency (EUR) than the invoice (USD) — must be excluded.
-    FIN_FinancialAccount mismatchedAccount = mock(FIN_FinancialAccount.class);
-    when(mismatchedAccount.getId()).thenReturn("acc-eur");
+    // Account with a different currency (EUR) than the invoice (USD) — must now be included.
+    FIN_FinancialAccount foreignAccount = mock(FIN_FinancialAccount.class);
+    when(foreignAccount.getId()).thenReturn("acc-eur");
+    when(foreignAccount.getName()).thenReturn("EUR Account");
     Currency accCurrency = mock(Currency.class);
     when(accCurrency.getId()).thenReturn("EUR-ID");
-    when(mismatchedAccount.getCurrency()).thenReturn(accCurrency);
+    when(accCurrency.getISOCode()).thenReturn("EUR");
+    when(foreignAccount.getCurrency()).thenReturn(accCurrency);
 
-    // Account with a null currency — must still be included regardless of invoice currency.
+    // Account with a null currency — also included.
     FIN_FinancialAccount nullCurrencyAccount = mock(FIN_FinancialAccount.class);
     when(nullCurrencyAccount.getId()).thenReturn("acc-null-currency");
     when(nullCurrencyAccount.getName()).thenReturn("No Currency Account");
@@ -953,10 +1065,9 @@ class PaymentRegistrationServiceTest {
     when(accountCriteria.add(any(Criterion.class))).thenReturn(accountCriteria);
     when(accountCriteria.addOrderBy(anyString(), anyBoolean())).thenReturn(accountCriteria);
     when(accountCriteria.list())
-        .thenReturn(Arrays.asList(mismatchedAccount, nullCurrencyAccount));
+        .thenReturn(Arrays.asList(foreignAccount, nullCurrencyAccount));
 
-    // Only the null-currency account should reach the method lookup (the mismatched
-    // account returns early in appendAccountItem before querying FinAccPaymentMethod).
+    // Both accounts reach the method lookup now (no early currency return).
     FinAccPaymentMethod finAccMethod = mock(FinAccPaymentMethod.class);
     FIN_PaymentMethod paymentMethod = mock(FIN_PaymentMethod.class);
     when(paymentMethod.getId()).thenReturn("pm-cash");
@@ -972,11 +1083,15 @@ class PaymentRegistrationServiceTest {
 
     assertEquals(200, response.getHttpStatus());
     JSONObject body = response.getBody();
-    assertEquals(1, body.getInt("totalCount"),
-        "mismatched-currency account must be excluded entirely, only the null-currency one remains");
+    assertEquals(2, body.getInt("totalCount"),
+        "foreign-currency account must now be listed alongside the null-currency one");
     JSONArray items = body.getJSONArray("items");
-    assertEquals(1, items.length());
-    assertEquals("acc-null-currency", items.getJSONObject(0).getString("id"));
+    assertEquals(2, items.length());
+    JSONObject foreignItem = items.getJSONObject(0);
+    assertEquals("acc-eur", foreignItem.getString("id"));
+    assertEquals("EUR", foreignItem.getString("currency"),
+        "the foreign account must still expose its ISO currency for the UI conversion fields");
+    assertEquals("EUR-ID", foreignItem.getString("currencyId"));
   }
 
   /**

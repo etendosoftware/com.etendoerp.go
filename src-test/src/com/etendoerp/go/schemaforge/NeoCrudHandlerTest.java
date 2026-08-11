@@ -59,6 +59,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
+import org.mockito.ArgumentCaptor;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
 import org.openbravo.base.model.Entity;
@@ -77,6 +78,8 @@ import org.openbravo.service.json.JsonConstants;
 
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFSpec;
+import com.etendoerp.go.schemaforge.util.NeoDistinctFetchSupport;
+import com.etendoerp.go.schemaforge.util.NeoMethodPolicy;
 import com.etendoerp.go.schemaforge.util.NeoTypeCoercionHelper;
 
 /**
@@ -156,16 +159,19 @@ class NeoCrudHandlerTest {
   }
 
   // -------------------------------------------------------------------------
-  // isMethodEnabled tests (via reflection on private method)
+  // Method-flag gate. ETP-4254 extracted the private NeoCrudHandler#isMethodEnabled into
+  // the shared NeoMethodPolicy (the MCP write path needed the same check), so these cases
+  // now exercise the shared helper directly instead of through reflection. They are kept
+  // here because this is the gate NeoCrudHandler#handleWindowEntityCrud applies to produce
+  // the REST 405 — see also NeoMethodPolicyTest for the helper's own edge cases.
   // -------------------------------------------------------------------------
 
   @Nested
   @DisplayName("isMethodEnabled")
   class IsMethodEnabled {
 
-    private boolean invokeIsMethodEnabled(String method, SFEntity entity) throws Exception {
-      return (boolean) invokePrivate(handler, "isMethodEnabled",
-          new Class<?>[] { String.class, SFEntity.class }, method, entity);
+    private boolean invokeIsMethodEnabled(String method, SFEntity entity) {
+      return NeoMethodPolicy.isMethodEnabled(entity, method);
     }
 
     @Test
@@ -1468,7 +1474,7 @@ class NeoCrudHandlerTest {
   class ToDistinctEntry {
 
     private JSONObject invokeToDistinctEntry(Object value) throws Exception {
-      Method method = NeoCrudHandler.class.getDeclaredMethod("toDistinctEntry", Object.class);
+      Method method = NeoDistinctFetchSupport.class.getDeclaredMethod("toDistinctEntry", Object.class);
       method.setAccessible(true);
       return (JSONObject) method.invoke(null, value);
     }
@@ -1567,7 +1573,7 @@ class NeoCrudHandlerTest {
 
     private Property invokeResolveDistinctProperty(Entity entityDef, String fieldName)
         throws Exception {
-      Method method = NeoCrudHandler.class.getDeclaredMethod(
+      Method method = NeoDistinctFetchSupport.class.getDeclaredMethod(
           "resolveDistinctProperty", Entity.class, String.class);
       method.setAccessible(true);
       return (Property) method.invoke(null, entityDef, fieldName);
@@ -1975,6 +1981,70 @@ class NeoCrudHandlerTest {
         assertEquals(3, data.length());
         assertEquals("CO", data.getJSONObject(0).getString("id"));
         assertFalse(response.getBoolean("hasMore"));
+      }
+    }
+
+    @Test
+    @DisplayName("Search on a relation property targets the related entity's identifier, "
+        + "not a CAST of the relation itself (ETP-4609)")
+    void searchOnRelationPropertyTargetsIdentifier() throws Exception {
+      Tab adTab = mock(Tab.class);
+      Table table = mock(Table.class);
+      when(table.getName()).thenReturn("M_Product");
+      when(adTab.getTable()).thenReturn(table);
+      when(adTab.getHqlwhereclause()).thenReturn(null);
+      when(adTab.getTabLevel()).thenReturn(0L);
+
+      Map<String, String> params = new HashMap<>();
+      params.put("_distinct", "productCategory");
+      params.put("_distinctSearch", "beverages");
+
+      try (MockedStatic<ModelProvider> mpMock = Mockito.mockStatic(ModelProvider.class);
+           MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+
+        ModelProvider mp = mock(ModelProvider.class);
+        mpMock.when(ModelProvider::getInstance).thenReturn(mp);
+        Entity entity = mock(Entity.class);
+        when(mp.getEntity("M_Product")).thenReturn(entity);
+
+        // productCategory is a to-one relation (foreign key), not a scalar column.
+        Property categoryProp = mock(Property.class);
+        when(categoryProp.getName()).thenReturn("productCategory");
+        when(categoryProp.isPrimitive()).thenReturn(false);
+        when(entity.getProperty("productCategory", false)).thenReturn(categoryProp);
+
+        Entity categoryEntity = mock(Entity.class);
+        when(categoryProp.getTargetEntity()).thenReturn(categoryEntity);
+
+        Property nameProp = mock(Property.class);
+        when(nameProp.getName()).thenReturn("name");
+        when(nameProp.isPrimitive()).thenReturn(true);
+        when(categoryEntity.getIdentifierProperties())
+            .thenReturn(Collections.singletonList(nameProp));
+
+        OBDal dal = mock(OBDal.class);
+        obDalMock.when(OBDal::getInstance).thenReturn(dal);
+
+        @SuppressWarnings("unchecked")
+        OBQuery<BaseOBObject> obQuery = mock(OBQuery.class);
+        ArgumentCaptor<String> whereCaptor = ArgumentCaptor.forClass(String.class);
+        when(dal.createQuery(eq("M_Product"), whereCaptor.capture())).thenReturn(obQuery);
+
+        @SuppressWarnings("unchecked")
+        org.hibernate.query.Query<Object> hQuery = mock(org.hibernate.query.Query.class);
+        when(obQuery.createQuery(Object.class)).thenReturn(hQuery);
+        when(hQuery.list()).thenReturn(Collections.emptyList());
+
+        NeoResponse result = invokeDistinctFetch(adTab, params);
+
+        assertEquals(200, result.getHttpStatus());
+        String where = whereCaptor.getValue();
+        assertTrue(where.contains("e.productCategory.name"),
+            "Expected the search to target the related entity's identifier property ('name'), "
+                + "was: " + where);
+        assertFalse(where.contains("CAST(e.productCategory AS string)"),
+            "Search must not CAST the relation property itself to string, was: " + where);
+        verify(obQuery).setNamedParameter(eq("search"), eq("%beverages%"));
       }
     }
 

@@ -17,7 +17,9 @@
 package com.etendoerp.go.rest;
 
 import java.util.Date;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 
 import org.apache.commons.lang3.StringUtils;
 import org.codehaus.jettison.json.JSONException;
@@ -31,6 +33,7 @@ import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.currency.Currency;
 import org.openbravo.model.common.enterprise.Organization;
 
+import com.etendoerp.go.payment.TenantPlanService;
 import com.etendoerp.go.schemaforge.data.Account;
 
 final class EtendoGoJwtDalHelper {
@@ -57,6 +60,7 @@ final class EtendoGoJwtDalHelper {
   private static final String FIELD_ADMIN_USER_ID = "adminUserId";
   private static final String FIELD_ADMIN_USER = "adminUser";
   private static final String FIELD_ADMIN_USER_NAME = "adminUserName";
+  private static final String FIELD_PLAN = "plan";
   private static final String PROPERTY_PASSWORD_CHANGED = Account.PROPERTY_PASSWORDCHANGED;
   private static final String PROPERTY_RESET_TOKEN_CONSUMED = Account.PROPERTY_RESETTOKENCONSUMED;
   private static final String PROPERTY_RESET_TOKEN_EXPIRES = Account.PROPERTY_RESETTOKENEXPIRES;
@@ -65,6 +69,16 @@ final class EtendoGoJwtDalHelper {
   private static final String PROPERTY_EXTERNAL_SUBJECT = Account.PROPERTY_EXTERNALSUBJECT;
   private static final String PROPERTY_EXTERNAL_EMAIL = Account.PROPERTY_EXTERNALEMAIL;
   private static final String PROPERTY_LAST_SSO_LOGIN = Account.PROPERTY_LASTSSOLOGIN;
+  private static final TenantPlanService TENANT_PLAN_SERVICE = new TenantPlanService();
+  // ETP-4829: STATUS distinguishes an account that already owns a usable local password
+  // ("active", the default for self-registration/SSO) from one an admin created on a user's
+  // behalf, awaiting the ETP-4830 invite-email flow to set a password ("pending"). No login is
+  // possible on a pending account — hasLocalPassword() already returns false (passwordHash is
+  // null), STATUS exists purely to distinguish this from a not-yet-implemented "SSO account with
+  // no local password by design" case in UI-facing account listings.
+  private static final String STATUS_ACTIVE = "active";
+  private static final String STATUS_PENDING = "pending";
+  private static final String PROPERTY_STATUS = Account.PROPERTY_STATUS;
 
   private EtendoGoJwtDalHelper() {
   }
@@ -107,6 +121,66 @@ final class EtendoGoJwtDalHelper {
     account.setPasswordHash(passwordHash);
     account.setName(name);
     account.setSessionToken(sessionToken);
+    account.set(PROPERTY_STATUS, STATUS_ACTIVE);
+    OBDal.getInstance().save(account);
+    flushAndCommitDalChanges();
+    return account;
+  }
+
+  /**
+   * ETP-4829: creates the {@code etgo_account} row for a user an admin created directly (not via
+   * self-service {@code /sws/go/register}). No password is set here — the account is left in the
+   * {@code pending} status with a {@code null} password hash, exactly like an SSO-only account
+   * (see {@link #hasLocalPassword(Account)}), so it cannot log in until ETP-4830's invite-email
+   * flow sets one (e.g. by driving the same {@code password-reset/confirm} path used for a
+   * normal reset) and flips the status to {@code active} — that transition is ETP-4830's
+   * responsibility, not implemented here. Returns silently with the existing account if one is
+   * already registered for this email
+   * (e.g. the admin is linking a newly-created {@code AD_User} to a pre-existing platform
+   * account) — this must never fail the parent {@code AD_User} save.
+   */
+  /**
+   * ETP-4829: creates an {@code etgo_account} for a user an admin created directly, with a real,
+   * immediately-usable password the admin typed on the create form — a temporary workaround for
+   * environments where ETP-4830's invite-email flow isn't available yet. {@code passwordHash}
+   * must already be produced by {@link PasswordHasher#hash} (this method does not hash or
+   * validate strength — see {@link EtendoGoAccountProvisioning#ensureAccountForCreatedUser},
+   * which does both before calling this). Unlike {@link #createPendingAccount}, the account is
+   * {@code active} immediately: it already has everything a normal local-password account needs
+   * to log in. Same duplicate-email handling as {@link #createPendingAccount} — returns the
+   * existing account untouched rather than failing the parent {@code AD_User} save.
+   */
+  static Account createActiveAccount(String email, String passwordHash, String name) {
+    Account existing = findActiveAccountByEmail(email);
+    if (existing != null) {
+      return existing;
+    }
+    Account account = OBProvider.getInstance().get(Account.class);
+    account.setClient(OBDal.getInstance().get(Client.class, ZERO_ID));
+    account.setOrganization(OBDal.getInstance().get(Organization.class, ZERO_ID));
+    account.setEmail(email);
+    account.setPasswordHash(passwordHash);
+    account.setName(name);
+    account.setSessionToken(null);
+    account.set(PROPERTY_STATUS, STATUS_ACTIVE);
+    OBDal.getInstance().save(account);
+    flushAndCommitDalChanges();
+    return account;
+  }
+
+  static Account createPendingAccount(String email, String name) {
+    Account existing = findActiveAccountByEmail(email);
+    if (existing != null) {
+      return existing;
+    }
+    Account account = OBProvider.getInstance().get(Account.class);
+    account.setClient(OBDal.getInstance().get(Client.class, ZERO_ID));
+    account.setOrganization(OBDal.getInstance().get(Organization.class, ZERO_ID));
+    account.setEmail(email);
+    account.setPasswordHash(null);
+    account.setName(name);
+    account.setSessionToken(null);
+    account.set(PROPERTY_STATUS, STATUS_PENDING);
     OBDal.getInstance().save(account);
     flushAndCommitDalChanges();
     return account;
@@ -125,6 +199,7 @@ final class EtendoGoJwtDalHelper {
     account.set(PROPERTY_EXTERNAL_SUBJECT, subject);
     account.set(PROPERTY_EXTERNAL_EMAIL, externalEmail);
     account.set(PROPERTY_LAST_SSO_LOGIN, loginAt);
+    account.set(PROPERTY_STATUS, STATUS_ACTIVE);
     OBDal.getInstance().save(account);
     flushAndCommitDalChanges();
     return account;
@@ -241,17 +316,61 @@ final class EtendoGoJwtDalHelper {
     flushAndCommitDalChanges();
   }
 
+  /**
+   * Returns {@code true} when the given client is owned by the account identified by
+   * {@code accountEmail}, i.e. it has an active user whose username is the account email or an
+   * {@code email+suffix} variant of it — the same ownership criterion used by
+   * {@link #findEnvironmentUsersByAccountEmail}. Used by onboarding to decide whether an existing
+   * same-named client may be resumed (ETP-4428): a name collision with another account's client
+   * must never be resumable.
+   *
+   * <p>The {@code email+suffix} match is a bounded prefix LIKE: the account email is treated as a
+   * literal (its {@code %}, {@code _} and {@code \} are escaped and the LIKE declares
+   * {@code escape '\'}), so an attacker cannot register a wildcard-bearing email (e.g. {@code "%"})
+   * to make the prefix branch match users owned by another account. This is what preserves tenant
+   * isolation for the resume decision.</p>
+   */
+  static boolean clientBelongsToAccountEmail(String clientId, String accountEmail) {
+    OBQuery<User> query = OBDal.getInstance().createQuery(User.class,
+        "as user where user.client.id = :" + PARAM_CLIENT_ID
+            + " and (user.username = :" + PARAM_ACCOUNT_EMAIL
+            + " or user.username like :" + PARAM_ACCOUNT_PREFIX + " escape '\\') "
+            + "and user.active = true");
+    query.setNamedParameter(PARAM_CLIENT_ID, clientId);
+    query.setNamedParameter(PARAM_ACCOUNT_EMAIL, accountEmail);
+    query.setNamedParameter(PARAM_ACCOUNT_PREFIX, escapeLikeWildcards(accountEmail) + "+%");
+    query.setFilterOnReadableClients(false);
+    query.setFilterOnReadableOrganization(false);
+    query.setMaxResult(1);
+    return query.uniqueResult() != null;
+  }
+
   static List<User> findEnvironmentUsersByAccountEmail(String accountEmail) {
     OBQuery<User> query = OBDal.getInstance().createQuery(User.class,
         "as user where (user.username = :" + PARAM_ACCOUNT_EMAIL
-            + " or user.username like :" + PARAM_ACCOUNT_PREFIX + ") "
+            + " or user.username like :" + PARAM_ACCOUNT_PREFIX + " escape '\\') "
             + "and user.active = true and user.client.active = true and user.client.id <> '0' "
             + "order by user.client.creationDate, user.creationDate");
     query.setNamedParameter(PARAM_ACCOUNT_EMAIL, accountEmail);
-    query.setNamedParameter(PARAM_ACCOUNT_PREFIX, accountEmail + "+%");
+    query.setNamedParameter(PARAM_ACCOUNT_PREFIX, escapeLikeWildcards(accountEmail) + "+%");
     query.setFilterOnReadableClients(false);
     query.setFilterOnReadableOrganization(false);
     return query.list();
+  }
+
+  /**
+   * Escapes the SQL/HQL LIKE wildcards ({@code %} and {@code _}) and the escape character itself
+   * ({@code \}) in {@code value} so it can be embedded as a literal fragment in a LIKE pattern.
+   * The backslash must be escaped first to avoid double-escaping the wildcard replacements.
+   * Callers must pair the escaped value with an {@code escape '\'} clause in the LIKE, otherwise
+   * the backslashes are treated as literals and the wildcards are NOT neutralized.
+   *
+   * @param value
+   *     the raw value to embed inside a LIKE pattern
+   * @return the value with LIKE wildcards escaped for use with {@code escape '\'}
+   */
+  private static String escapeLikeWildcards(String value) {
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_");
   }
 
   static List<Organization> findNonStarOrganizations(String clientId) {
@@ -266,6 +385,22 @@ final class EtendoGoJwtDalHelper {
     return query.list();
   }
 
+  /**
+   * Counts the distinct tenants (AD_Clients) the account owns, using the same username-match rule
+   * as {@link #findEnvironmentUsersByAccountEmail}. This is what the onboarding paywall reads to
+   * tell a first (free) tenant from an additional (paid) one.
+   *
+   * @param accountEmail the authenticated account email
+   * @return the number of distinct clients linked to the account
+   */
+  static int countTenantsOwnedByAccountEmail(String accountEmail) {
+    Set<String> clientIds = new HashSet<>();
+    for (User environmentUser : findEnvironmentUsersByAccountEmail(accountEmail)) {
+      clientIds.add(environmentUser.getClient().getId());
+    }
+    return clientIds.size();
+  }
+
   static JSONObject buildEnvironmentJson(Client client, Organization organization, User environmentUser)
       throws JSONException {
     JSONObject env = new JSONObject();
@@ -276,6 +411,9 @@ final class EtendoGoJwtDalHelper {
     env.put(FIELD_ADMIN_USER_ID, environmentUser.getId());
     env.put(FIELD_ADMIN_USER, environmentUser.getUsername());
     env.put(FIELD_ADMIN_USER_NAME, environmentUser.getName());
+    // Additive since ETP-4686 so the environment picker can badge the plan. Older clients that
+    // ignore the field keep working, and a tenant with no plan marker reads back as free.
+    env.put(FIELD_PLAN, TENANT_PLAN_SERVICE.resolvePlan(client.getId()));
     return env;
   }
 

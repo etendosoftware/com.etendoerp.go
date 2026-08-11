@@ -17,6 +17,7 @@
 
 package com.etendoerp.go.mcp;
 
+import com.etendoerp.go.schemaforge.data.SFSpec;
 import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
 
 /**
@@ -35,13 +36,65 @@ public final class NeoAccessUtils {
   }
 
   /**
-   * Check if the current role has access to the given AD_Window.
+   * Check if the current role has (read) access to the given AD_Window.
+   * <p>
+   * Equivalent to {@link #hasWindowAccess(String, String)} with a {@code GET} method —
+   * use this only for visibility/discovery checks (e.g. "is this window in the tool
+   * catalog at all"), never to gate an actual write operation.
    *
    * @param windowId AD_Window_ID to check
    * @return true if the role has an active WindowAccess record, or is System Admin
    */
   public static boolean hasWindowAccess(String windowId) {
     return NeoAccessHelper.hasWindowAccess(windowId);
+  }
+
+  /**
+   * Check if the current role has access to the given AD_Window for the given HTTP-method
+   * equivalent, enforcing the read-only vs. full-access tiering (ETP-4510). MCP tools that
+   * mutate data (create/update/delete/batch) must call this with the write-intent method
+   * ({@code POST}/{@code PUT}/{@code PATCH}/{@code DELETE}) instead of the bare 1-arg
+   * overload, so a read-only {@code AD_Window_Access} row is correctly denied.
+   *
+   * @param windowId   AD_Window_ID to check
+   * @param httpMethod the HTTP-method equivalent of the MCP operation (e.g. {@code "POST"}
+   *                   for {@code neo_create}, {@code "GET"} for read-only tools)
+   * @return true if the role is allowed to perform {@code httpMethod} on {@code windowId}
+   */
+  public static boolean hasWindowAccess(String windowId, String httpMethod) {
+    return NeoAccessHelper.hasWindowAccess(windowId, httpMethod);
+  }
+
+  /**
+   * Check if the current role has access to {@code spec} for the given HTTP-method
+   * equivalent, covering both ordinary window specs and windowless/custom "combination"
+   * specs (ETP-4510 BUG-3). See
+   * {@link NeoAccessHelper#hasWindowAccessForSpec(SFSpec, String)} for the full tiering
+   * rules (no-role-denies-everywhere, direct window, or constituent-window combination).
+   *
+   * @param spec       the spec to check (may be {@code null}, in which case access is denied)
+   * @param httpMethod the HTTP-method equivalent of the MCP operation
+   * @return true if the current role may perform {@code httpMethod} against {@code spec}
+   */
+  public static boolean hasWindowAccessForSpec(SFSpec spec, String httpMethod) {
+    return NeoAccessHelper.hasWindowAccessForSpec(spec, httpMethod);
+  }
+
+  /**
+   * Check if the current role has access to a report-type ({@code spec_type = "R"}) spec
+   * for the given HTTP-method equivalent (ETP-4596): delegates to
+   * {@link #hasProcessAccess(String)} when the spec has a real linked {@code AD_Process},
+   * or to the same constituent-window "combination" check
+   * {@link #hasWindowAccessForSpec(SFSpec, String)} uses for windowless {@code "W"} specs
+   * otherwise. See {@link NeoAccessHelper#hasReportSpecAccess(SFSpec, String)} for the full
+   * tiering rules.
+   *
+   * @param spec       the spec to check (may be {@code null}, in which case access is denied)
+   * @param httpMethod the HTTP-method equivalent of the MCP operation
+   * @return true if the current role may perform {@code httpMethod} against {@code spec}
+   */
+  public static boolean hasReportSpecAccess(SFSpec spec, String httpMethod) {
+    return NeoAccessHelper.hasReportSpecAccess(spec, httpMethod);
   }
 
   /**

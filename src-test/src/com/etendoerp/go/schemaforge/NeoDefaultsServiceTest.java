@@ -3611,4 +3611,103 @@ public class NeoDefaultsServiceTest {
           body.getString("currency"));
     }
   }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // applyResolvedDefault — type-aware String-default coercion (ETP-4668)
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  private static final Class<?>[] APPLY_RESOLVED_DEFAULT_PARAMS = new Class<?>[] {
+      JSONObject.class, Column.class, String.class, Object.class, NeoContext.class,
+      Property.class };
+
+  /**
+   * ETP-4668 regression: {@code BusinessPartner.invoiceGrouping} ({@code C_BPartner.Invoicegrouping})
+   * is a genuine {@link String} DAL property whose AD_Column default is the 15-digit
+   * List-reference code {@code "000000000000000"}. The column name does not end in {@code _ID}
+   * and the string parses cleanly as a number, so the old name-based heuristic silently coerced
+   * it to {@code 0L}, corrupting the value and failing the List-reference validator downstream.
+   * The DAL property type is {@code String}, so the value MUST be stored verbatim.
+   */
+  @Test
+  public void testApplyResolvedDefaultKeepsAllDigitStringForStringProperty() throws Exception {
+    JSONObject body = new JSONObject();
+    Column col = mock(Column.class);
+    when(col.getDBColumnName()).thenReturn("Invoicegrouping");
+    Property prop = mock(Property.class);
+    when(prop.isPrimitive()).thenReturn(true);
+    doReturn(String.class).when(prop).getPrimitiveObjectType();
+
+    invokePrivate("applyResolvedDefault", APPLY_RESOLVED_DEFAULT_PARAMS,
+        body, col, "invoiceGrouping", "000000000000000", null, prop);
+
+    Object stored = body.get("invoiceGrouping");
+    assertTrue("String-typed List-reference default must stay a String, got "
+        + stored.getClass().getSimpleName(), stored instanceof String);
+    assertEquals("List-reference code must be preserved verbatim, not coerced to 0",
+        "000000000000000", stored);
+  }
+
+  /**
+   * Guards the legitimate path the coercion block exists for: a genuinely numeric ({@link Long})
+   * DAL property whose resolved default arrives as a String (e.g. a line number from an SQL
+   * {@code COALESCE(MAX(Line),0)+10} default) must still be coerced to {@link Long}.
+   */
+  @Test
+  public void testApplyResolvedDefaultCoercesNumericStringForLongProperty() throws Exception {
+    JSONObject body = new JSONObject();
+    Column col = mock(Column.class);
+    when(col.getDBColumnName()).thenReturn("Line");
+    Property prop = mock(Property.class);
+    when(prop.isPrimitive()).thenReturn(true);
+    doReturn(Long.class).when(prop).getPrimitiveObjectType();
+
+    invokePrivate("applyResolvedDefault", APPLY_RESOLVED_DEFAULT_PARAMS,
+        body, col, "lineNo", "10", null, prop);
+
+    Object stored = body.get("lineNo");
+    assertTrue("Numeric Long property default must coerce to Long, got "
+        + stored.getClass().getSimpleName(), stored instanceof Long);
+    assertEquals(10L, stored);
+  }
+
+  /**
+   * Guards the fractional numeric path: a {@link java.math.BigDecimal} DAL property whose
+   * resolved default arrives as a decimal String must be coerced to {@link java.math.BigDecimal}.
+   */
+  @Test
+  public void testApplyResolvedDefaultCoercesDecimalStringForBigDecimalProperty() throws Exception {
+    JSONObject body = new JSONObject();
+    Column col = mock(Column.class);
+    when(col.getDBColumnName()).thenReturn("PriceStd");
+    Property prop = mock(Property.class);
+    when(prop.isPrimitive()).thenReturn(true);
+    doReturn(java.math.BigDecimal.class).when(prop).getPrimitiveObjectType();
+
+    invokePrivate("applyResolvedDefault", APPLY_RESOLVED_DEFAULT_PARAMS,
+        body, col, "priceStd", "10.50", null, prop);
+
+    Object stored = body.get("priceStd");
+    assertTrue("Decimal property default must coerce to BigDecimal, got "
+        + stored.getClass().getSimpleName(), stored instanceof java.math.BigDecimal);
+    assertEquals(0, new java.math.BigDecimal("10.50").compareTo((java.math.BigDecimal) stored));
+  }
+
+  /**
+   * A non-numeric String default (status flag / doc number) on a String property must be left
+   * untouched — no coercion attempted.
+   */
+  @Test
+  public void testApplyResolvedDefaultKeepsNonNumericStringForStringProperty() throws Exception {
+    JSONObject body = new JSONObject();
+    Column col = mock(Column.class);
+    when(col.getDBColumnName()).thenReturn("DocStatus");
+    Property prop = mock(Property.class);
+    when(prop.isPrimitive()).thenReturn(true);
+    doReturn(String.class).when(prop).getPrimitiveObjectType();
+
+    invokePrivate("applyResolvedDefault", APPLY_RESOLVED_DEFAULT_PARAMS,
+        body, col, "documentStatus", "DR", null, prop);
+
+    assertEquals("DR", body.get("documentStatus"));
+  }
 }

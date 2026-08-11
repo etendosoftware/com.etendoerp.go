@@ -247,8 +247,12 @@ public class NeoDefaultsCascadeHelper {
       NeoContext ctx, Tab adTab, JSONObject formState, JSONObject defaults,
       Set<String> skipFields, NeoDefaultsService.CalloutCascadeResult result) {
     Set<String> nextPending = new LinkedHashSet<>();
+    // skipFields carries the original triggerField of this interactive callout invocation.
+    // Reuse it as protectedFields so a re-cascaded callout from a different field cannot
+    // overwrite the value the user is actively editing (mirrors the create-path fix where
+    // protectedFields comes from the submitted body's keys).
     CalloutFieldContext cCtx = new CalloutFieldContext(formState, defaults,
-        java.util.Collections.emptySet(), result, nextPending, java.util.Collections.emptySet());
+        java.util.Collections.emptySet(), result, nextPending, skipFields);
 
     for (String fieldName : pendingFields) {
       boolean shouldSkip = skipFields != null && skipFields.contains(fieldName);
@@ -295,7 +299,7 @@ public class NeoDefaultsCascadeHelper {
 
       mergeCalloutUpdates(calloutBody, cCtx.formState, cCtx.defaults, cCtx.seqFields,
           adTab, cCtx.result, cCtx.nextPending, cCtx.protectedFields);
-      mergeCalloutCombos(calloutBody, cCtx.formState, cCtx.defaults, cCtx.result);
+      mergeCalloutCombos(calloutBody, cCtx.formState, cCtx.defaults, cCtx.result, cCtx.protectedFields);
 
       JSONArray messages = calloutBody.optJSONArray("messages");
       if (messages != null) {
@@ -330,7 +334,11 @@ public class NeoDefaultsCascadeHelper {
     if (updates == null) {
       return;
     }
-    result.mergeUpdates(updates);
+    // Only merge unprotected fields into `result` — for the interactive callout path,
+    // `result` is serialized back to the browser (NeoCalloutEndpoint#applyCascade) and
+    // applied to the form as-is, so a protected field's stale/overwritten value must never
+    // reach it, even though the create path never surfaces `result` to a client.
+    result.mergeUpdates(filterProtectedFields(updates, defaults, protectedFields));
     Iterator<String> updateKeys = updates.keys();
     while (updateKeys.hasNext()) {
       String updatedField = updateKeys.next();
@@ -393,17 +401,23 @@ public class NeoDefaultsCascadeHelper {
   }
 
   private static void mergeCalloutCombos(JSONObject calloutBody, JSONObject formState,
-      JSONObject defaults, NeoDefaultsService.CalloutCascadeResult result) throws Exception {
+      JSONObject defaults, NeoDefaultsService.CalloutCascadeResult result,
+      Set<String> protectedFields) throws Exception {
     JSONObject combos = calloutBody.optJSONObject(KEY_COMBOS);
     if (combos == null) {
       return;
     }
-    result.mergeCombos(combos);
+    result.mergeCombos(filterProtectedFields(combos, defaults, protectedFields));
     Iterator<String> comboKeys = combos.keys();
     while (comboKeys.hasNext()) {
       String comboField = comboKeys.next();
       JSONObject comboObj = combos.optJSONObject(comboField);
-      if (comboObj == null || !comboObj.has(KEY_SELECTED)) {
+      boolean hasSelected = comboObj != null && comboObj.has(KEY_SELECTED);
+      boolean isProtected = hasSelected && shouldKeepExistingValue(defaults, comboField, protectedFields);
+      if (isProtected) {
+        log.debug("[NEO-DEFAULTS] Skipping combo update for protected field '{}'", comboField);
+      }
+      if (!hasSelected || isProtected) {
         continue;
       }
       Object selectedValue = comboObj.get(KEY_SELECTED);
@@ -444,6 +458,32 @@ public class NeoDefaultsCascadeHelper {
       this.protectedFields = protectedFields != null ? protectedFields
           : java.util.Collections.emptySet();
     }
+  }
+
+  /**
+   * Returns a copy of {@code source} (an "updates" or "combos" callout section) with any
+   * entry for a protected field removed, based on the SAME snapshot of {@code defaults}
+   * that {@link #shouldKeepExistingValue} will use for the per-field state-mutation check
+   * right after this call. Keeps the raw cascade result handed back to the caller
+   * (frontend, in the interactive callout path) consistent with what actually gets applied
+   * to {@code formState}/{@code defaults}.
+   */
+  private static JSONObject filterProtectedFields(JSONObject source, JSONObject defaults,
+      Set<String> protectedFields) throws JSONException {
+    if (protectedFields == null || protectedFields.isEmpty()) {
+      return source;
+    }
+    JSONObject filtered = new JSONObject();
+    Iterator<String> keys = source.keys();
+    while (keys.hasNext()) {
+      String key = keys.next();
+      if (shouldKeepExistingValue(defaults, key, protectedFields)) {
+        log.debug("[NEO-DEFAULTS] Excluding protected field '{}' from cascade result", key);
+        continue;
+      }
+      filtered.put(key, source.get(key));
+    }
+    return filtered;
   }
 
   private static boolean shouldKeepExistingValue(JSONObject defaults, String fieldName,

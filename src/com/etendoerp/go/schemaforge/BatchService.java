@@ -43,6 +43,7 @@ import org.openbravo.model.ad.ui.Tab;
 
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFSpec;
+import com.etendoerp.go.schemaforge.util.NeoMethodPolicy;
 
 /**
  * Generic transactional batch endpoint.
@@ -448,6 +449,16 @@ public class BatchService {
       return NeoResponse.error(HttpServletResponse.SC_NOT_FOUND,
           "Entity not found in spec '" + spec.getId() + "': " + entityName);
     }
+    // ETP-4254: /batch (and MCP neo_batch, which shares this method) enters the CRUD
+    // pipeline at NeoCrudHandler#handleDefault — i.e. AFTER the method-flag gate in
+    // handleWindowEntityCrud. Without this check a read-only entity (all mutation flags
+    // 'N', e.g. the SII/VeriFactu monitor logs) rejected a direct POST with 405 while
+    // still accepting the very same create when smuggled inside a batch operation.
+    if (!NeoMethodPolicy.isMethodEnabled(sfEntity, NeoMethodPolicy.METHOD_POST)) {
+      return NeoResponse.error(HttpServletResponse.SC_METHOD_NOT_ALLOWED,
+          NeoMethodPolicy.buildNotEnabledMessage(NeoMethodPolicy.METHOD_POST, entityName));
+    }
+
     Tab adTab = sfEntity.getADTab();
     if (adTab == null) {
       return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,

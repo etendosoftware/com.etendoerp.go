@@ -44,6 +44,7 @@ import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.utility.Utility;
 import org.openbravo.model.common.businesspartner.BusinessPartner;
+import org.openbravo.model.common.currency.Currency;
 import org.openbravo.model.common.enterprise.DocumentType;
 import org.openbravo.model.common.invoice.Invoice;
 import org.openbravo.model.common.order.Order;
@@ -243,6 +244,32 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
     return invoiceFromOrderSupport != null ? invoiceFromOrderSupport : new InvoiceFromOrderSupport();
   }
 
+  /**
+   * Overrides the invoice's price list with the one explicitly chosen by the user in the
+   * "invoice from goods receipt" confirmation popup (ETP-4028) — reads {@code priceListId}
+   * from the request body. A no-op when absent or blank.
+   *
+   * <p>Must be called BEFORE {@code CreateInvoiceLinesFromProcess} runs: the native
+   * {@code UpdatePricesAndAmounts} hook prices every line off {@code getInvoice().getPriceList()}
+   * read from this already-saved invoice, so overriding it here is sufficient. Currency is
+   * intentionally left untouched: it is always inherited from the receipt (read-only in the
+   * popup), never user-selected here.
+   */
+  private void applyPriceListOverride(Invoice invoice, JSONObject body) {
+    PriceList priceList = resolvePriceListOverride(body);
+    if (priceList != null) {
+      invoice.setPriceList(priceList);
+    }
+  }
+
+  private PriceList resolvePriceListOverride(JSONObject body) {
+    String priceListId = body != null ? body.optString("priceListId", null) : null;
+    if (StringUtils.isBlank(priceListId)) {
+      return null;
+    }
+    return OBDal.getInstance().get(PriceList.class, priceListId);
+  }
+
   protected Invoice createFromOrder(String orderId) {
     Order order = OBDal.getInstance().get(Order.class, orderId);
     if (order == null) {
@@ -367,7 +394,7 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
       linkedOrder = deriveOrderFromLines(receipt);
     }
     if (linkedOrder == null) {
-      return createFromReceiptNoPo(receipt, qtyOverrides);
+      return createFromReceiptNoPo(receipt, qtyOverrides, body);
     }
     JSONArray selectedLines = buildSelectedLinesFromReceipt(receipt, qtyOverrides, linkedOrder);
     if (selectedLines.length() == 0) {
@@ -375,6 +402,9 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
     }
 
     DocumentType invoiceDocType = resolveAPInvoiceDocType(linkedOrder);
+    // Read before evicting receipt below — a lazy FK access on a detached entity
+    // would throw LazyInitializationException.
+    Currency receiptCurrency = receipt.getEtgoCurrency();
 
     // Evict receipt and its lines from the Hibernate session before the first flush.
     // CreateInvoiceLinesFromProcess internally does saveOrUpdate on M_InOutLine objects
@@ -386,6 +416,11 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
 
     Invoice invoice = NeoCommercialDocumentFactory.createInvoiceFromOrderHeader(
         linkedOrder, invoiceDocType, false);
+    // ETP-4028: the invoice's currency is always inherited from the receipt's own
+    // (editable-until-confirmed) currency, never from the linked order — that can
+    // diverge from the receipt once the user changes it in draft.
+    invoice.setCurrency(receiptCurrency);
+    applyPriceListOverride(invoice, body);
 
     OBDal.getInstance().save(invoice);
     OBDal.getInstance().flush();
@@ -439,7 +474,11 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
       }
       if (ol != null) {
         BigDecimal qty = resolveReceiptLineQty(rl, qtyOverrides);
-        if (qty != null && qty.compareTo(BigDecimal.ZERO) > 0) {
+        // ETP-4722: quantities can be NEGATIVE since ETP-4567 removed the old
+        // min: 0 constraint (e.g. a return-style receipt line). Only an exact
+        // zero means "nothing left to invoice" — a strictly-positive check
+        // silently dropped every negative-quantity receipt line here.
+        if (qty != null && qty.compareTo(BigDecimal.ZERO) != 0) {
           accumulated.merge(ol.getId(), qty, BigDecimal::add);
         }
       }
@@ -493,11 +532,19 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
    */
   protected Invoice createFromReceiptNoPo(ShipmentInOut receipt,
       Map<String, BigDecimal> qtyOverrides) {
+    return createFromReceiptNoPo(receipt, qtyOverrides, null);
+  }
+
+  protected Invoice createFromReceiptNoPo(ShipmentInOut receipt,
+      Map<String, BigDecimal> qtyOverrides, JSONObject body) {
     BusinessPartner bp = receipt.getBusinessPartner();
     if (bp == null) {
       throw new OBException("Goods receipt has no business partner");
     }
-    PriceList priceList = bp.getPurchasePricelist();
+    PriceList priceList = resolvePriceListOverride(body);
+    if (priceList == null) {
+      priceList = bp.getPurchasePricelist();
+    }
     if (priceList == null) {
       throw new OBException(
           "Business partner '" + bp.getName() + "' has no purchase price list configured");
@@ -509,6 +556,9 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
     if (docType == null) {
       throw new OBException("No AP Invoice document type found");
     }
+    // Read before evicting receipt below — a lazy FK access on a detached entity
+    // would throw LazyInitializationException.
+    Currency receiptCurrency = receipt.getEtgoCurrency();
 
     JSONArray selectedLines = new JSONArray();
     for (ShipmentInOutLine rl : receipt.getMaterialMgmtShipmentInOutLineList()) {
@@ -527,7 +577,7 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
     OBDal.getInstance().getSession().evict(receipt);
 
     Invoice invoice = NeoCommercialDocumentFactory.createInvoiceFromReceiptHeader(
-        receipt, docType, priceList, paymentTerms, paymentMethod);
+        receipt, docType, priceList, paymentTerms, paymentMethod, receiptCurrency);
     OBDal.getInstance().save(invoice);
     OBDal.getInstance().flush();
 
@@ -549,7 +599,9 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
     BigDecimal qty = qtyOverrides.containsKey(rl.getId())
         ? qtyOverrides.get(rl.getId())
         : rl.getMovementQuantity();
-    if (qty == null || qty.compareTo(BigDecimal.ZERO) <= 0) {
+    // ETP-4722: same sign-unaware bug as buildSelectedLinesFromReceipt above —
+    // only an exact zero means "nothing to invoice", negative qty is valid.
+    if (qty == null || qty.compareTo(BigDecimal.ZERO) == 0) {
       return null;
     }
     try {
@@ -588,7 +640,9 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
         String qtyStr = entry.optString("quantity", null);
         if (StringUtils.isNotBlank(lineId) && StringUtils.isNotBlank(qtyStr)) {
           BigDecimal qty = new BigDecimal(qtyStr);
-          if (qty.compareTo(BigDecimal.ZERO) > 0) {
+          // ETP-4722: an explicit override can legitimately be negative
+          // (partial invoicing of a negative-quantity receipt/shipment line).
+          if (qty.compareTo(BigDecimal.ZERO) != 0) {
             overrides.put(lineId, qty);
           }
         }

@@ -50,12 +50,15 @@ import com.etendoerp.go.schemaforge.handlers.DocumentPostingService;
  *
  * <p>Before the Complete action (documentAction=CO), creates the total discount line.
  * Delegates to {@link TotalDiscountService} via the shared helper in
- * {@link AbstractOrderHeaderHandler}.
+ * {@link AbstractOrderHeaderHandler}. While still in draft, every GET response (list and
+ * detail) has {@code grandTotalAmount} / {@code outstandingAmount} adjusted for a pending total
+ * discount not yet materialized as a real line — see
+ * {@link AbstractInvoiceHeaderHandler#applyTotalDiscountToRecord}.
  *
- * <p>Subtype resolution for AP invoices:
+ * <p>Subtype resolution for AP invoices (ETP-4737 — unified "Factura Rectificativa"):
  * <ul>
- *   <li>{@code APC} → NC (Credit Note)</li>
- *   <li>{@code API} + isReturn → DEV (Return Invoice)</li>
+ *   <li>{@code EM_Etsg_Isrectificative = 'Y'} → RECTIFICATIVA (new unified type)</li>
+ *   <li>legacy fallback — {@code APC} (Credit Note) or {@code API} + isReturn (Return Invoice) → RECTIFICATIVA</li>
  *   <li>otherwise → FAC (Standard Invoice)</li>
  * </ul>
  */
@@ -92,6 +95,8 @@ public class PurchaseInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler i
 
   @Override
   public NeoResponse handle(NeoContext context) {
+    NeoHandlerUtils.mirrorAccountingDate(context, "invoiceDate", "accountingDate");
+    captureOriginInvoice(context);
     NeoResponse posting = postingService != null ? postingService.handleAction(context) : null;
     if (posting != null) {
       return posting;
@@ -137,9 +142,12 @@ public class PurchaseInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler i
   public NeoResponse afterHandle(NeoContext context) {
     autoCreateOrUpdateConversionRateDocument(context);
     try {
-      // POST/PUT: persist origin invoice relationship after the record is saved
+      // POST/PUT/PATCH: persist origin invoice relationship after the record is saved.
+      // ETP-4737 fix: the ImportFromSourceInvoiceModal.afterImport hook links via a PATCH
+      // (not POST/PUT), which this condition previously excluded — the origin-invoice link
+      // was silently never persisted for that flow (confirmed empty C_Invoice_Reverse table).
       if (NeoEndpointType.CRUD.equals(context.getEndpointType())
-          && ("POST".equals(context.getHttpMethod()) || "PUT".equals(context.getHttpMethod()))) {
+          && NeoHandlerUtils.isWriteMethod(context.getHttpMethod())) {
         persistOriginInvoice(context);
       }
 
@@ -149,14 +157,19 @@ public class PurchaseInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler i
         return null;
       }
       JSONObject body = context.getPreviousResult().getBody();
+      for (int i = 0; i < dataArr.length(); i++) {
+        JSONObject rec = dataArr.getJSONObject(i);
+        applyTotalDiscountToRecord(rec);
+        enrichInvoiceSubtype(rec, getInvoiceSubtypeKey());
+      }
       if (context.getRecordId() != null) {
         JSONObject rec = dataArr.getJSONObject(0);
         enrichLinkedReceipts(rec, context.getRecordId());
         enrichOriginInvoice(rec, context.getRecordId());
-        enrichInvoiceSubtype(rec, getInvoiceSubtypeKey());
         enrichDocTypeLocked(rec);
         enrichIsRectificative(rec);
         enrichHasRectifications(rec, context.getRecordId());
+        InvoiceExemptTaxes.enrich(rec, context.getRecordId());
       }
       return NeoResponse.ok(body);
     } catch (Exception e) {
@@ -165,16 +178,28 @@ public class PurchaseInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler i
     }
   }
 
+  @Override
+  protected TotalDiscountService getTotalDiscountService() {
+    return totalDiscountService;
+  }
+
   // ---------------------------------------------------------------------------
   // AP-specific subtype resolution
   // ---------------------------------------------------------------------------
 
-  /** {@inheritDoc} AP: APC → NC, API+isReturn → DEV, otherwise FAC. */
+  /**
+   * {@inheritDoc} AP: {@code EM_Etsg_Isrectificative = 'Y'} (ETP-4737 unified "Factura
+   * Rectificativa") → RECTIFICATIVA; legacy fallback for pre-existing invoices — APC (Credit
+   * Note) or API+isReturn (Return Invoice) → RECTIFICATIVA; otherwise FAC.
+   */
   @Override
   protected String classifyDocType(DocumentType dt) {
+    if (RectificativeSupport.isRectificative(dt)) {
+      return SUBTYPE_RECTIFICATIVA;
+    }
     String category = dt.getDocumentCategory();
-    if ("APC".equals(category)) return SUBTYPE_NC;
-    if ("API".equals(category) && Boolean.TRUE.equals(dt.isReturn())) return SUBTYPE_DEV;
+    if ("APC".equals(category)) return SUBTYPE_RECTIFICATIVA;
+    if ("API".equals(category) && Boolean.TRUE.equals(dt.isReturn())) return SUBTYPE_RECTIFICATIVA;
     return SUBTYPE_FAC;
   }
 

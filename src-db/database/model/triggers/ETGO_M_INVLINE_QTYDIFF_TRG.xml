@@ -1,0 +1,34 @@
+<?xml version="1.0"?>
+  <database name="TRIGGER ETGO_M_INVLINE_QTYDIFF_TRG">
+    <trigger name="ETGO_M_INVLINE_QTYDIFF_TRG" table="M_INVENTORYLINE" fires="before" insert="true" update="true" delete="false" foreach="row">
+      <body><![CDATA[
+
+/*************************************************************************
+* Maintains EM_ETGO_QTYDIFF as a DB-backed difference between the
+* counted quantity and the system (book) quantity on every insert/update
+* of the physical inventory line. Used by the simplified UI to render the
+* "Difference" column without frontend math.
+*
+* diff = QTYCOUNT - QTYBOOK
+* A positive value means the counted stock is higher than the system
+* stock; a negative value means it is lower. Both source columns are
+* NOT NULL DEFAULT 0, but COALESCE is kept for robustness.
+* BEFORE row trigger => sets :new directly, no recursion.
+************************************************************************/
+
+BEGIN
+
+    IF AD_isTriggerEnabled()='N' THEN
+      IF (DELETING) THEN RETURN OLD; ELSE RETURN NEW; END IF;
+    END IF;
+
+    IF (INSERTING OR UPDATING) THEN
+      :new.EM_ETGO_QTYDIFF := COALESCE(:new.QTYCOUNT, 0) - COALESCE(:new.QTYBOOK, 0);
+    END IF;
+
+    IF (DELETING) THEN RETURN OLD; ELSE RETURN NEW; END IF;
+
+END ETGO_M_INVLINE_QTYDIFF_TRG
+]]></body>
+    </trigger>
+  </database>

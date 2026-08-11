@@ -21,11 +21,18 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.mockConstruction;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.when;
 
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Method;
 import java.math.BigDecimal;
 import java.text.SimpleDateFormat;
+import java.util.Collections;
 import java.util.Date;
 
 import org.codehaus.jettison.json.JSONArray;
@@ -38,7 +45,19 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.NullAndEmptySource;
 import org.junit.jupiter.params.provider.ValueSource;
+import org.mockito.MockedConstruction;
+import org.mockito.MockedStatic;
+import org.openbravo.advpaymentmngt.utility.FIN_Utility;
+import org.openbravo.dal.security.OrganizationStructureProvider;
+import org.openbravo.dal.core.OBContext;
+import org.openbravo.dal.service.OBQuery;
+import org.openbravo.dal.service.OBDal;
 import org.openbravo.data.FieldProvider;
+import org.openbravo.erpCommon.ad_reports.AgingDao;
+import org.openbravo.model.common.enterprise.Organization;
+import org.openbravo.model.financialmgmt.accounting.coa.AcctSchema;
+
+import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
 
 /**
  * Unit tests for {@link AgingReportHandler}.
@@ -106,6 +125,13 @@ class AgingReportHandlerTest {
   // handle() entry point
   // -------------------------------------------------------------------------
 
+  /** Stubs {@code NeoAccessHelper.hasObuiappProcessAccess} to grant access for the aging-receivable process. */
+  private MockedStatic<NeoAccessHelper> mockAccessGranted() {
+    MockedStatic<NeoAccessHelper> accessMock = mockStatic(NeoAccessHelper.class);
+    accessMock.when(() -> NeoAccessHelper.hasObuiappProcessAccess(anyString())).thenReturn(true);
+    return accessMock;
+  }
+
   @Nested
   @DisplayName("handle")
   class Handle {
@@ -113,41 +139,218 @@ class AgingReportHandlerTest {
     @Test
     @DisplayName("GET returns describe response with parameters")
     void getReturnsDescribe() {
-      NeoContext ctx = NeoContext.builder().httpMethod("GET").build();
-      NeoResponse result = handler.handle(ctx);
+      try (MockedStatic<NeoAccessHelper> accessMock = mockAccessGranted()) {
+        NeoContext ctx = NeoContext.builder().httpMethod("GET").build();
+        NeoResponse result = handler.handle(ctx);
 
-      assertEquals(200, result.getHttpStatus());
-      JSONObject body = result.getBody();
-      assertNotNull(body);
-      assertTrue(body.has("name"));
-      assertTrue(body.has("parameters"));
+        assertEquals(200, result.getHttpStatus());
+        JSONObject body = result.getBody();
+        assertNotNull(body);
+        assertTrue(body.has("name"));
+        assertTrue(body.has("parameters"));
+      }
     }
 
     @Test
     @DisplayName("POST without body returns 400")
     void postWithoutBodyReturns400() {
-      NeoContext ctx = NeoContext.builder().httpMethod("POST").build();
-      NeoResponse result = handler.handle(ctx);
+      try (MockedStatic<NeoAccessHelper> accessMock = mockAccessGranted()) {
+        NeoContext ctx = NeoContext.builder().httpMethod("POST").build();
+        NeoResponse result = handler.handle(ctx);
 
-      assertEquals(400, result.getHttpStatus());
+        assertEquals(400, result.getHttpStatus());
+      }
     }
 
     @Test
     @DisplayName("DELETE returns 405")
     void deleteReturns405() {
-      NeoContext ctx = NeoContext.builder().httpMethod("DELETE").build();
-      NeoResponse result = handler.handle(ctx);
+      try (MockedStatic<NeoAccessHelper> accessMock = mockAccessGranted()) {
+        NeoContext ctx = NeoContext.builder().httpMethod("DELETE").build();
+        NeoResponse result = handler.handle(ctx);
 
-      assertEquals(405, result.getHttpStatus());
+        assertEquals(405, result.getHttpStatus());
+      }
     }
 
     @Test
     @DisplayName("PUT returns 405")
     void putReturns405() {
-      NeoContext ctx = NeoContext.builder().httpMethod("PUT").build();
-      NeoResponse result = handler.handle(ctx);
+      try (MockedStatic<NeoAccessHelper> accessMock = mockAccessGranted()) {
+        NeoContext ctx = NeoContext.builder().httpMethod("PUT").build();
+        NeoResponse result = handler.handle(ctx);
 
-      assertEquals(405, result.getHttpStatus());
+        assertEquals(405, result.getHttpStatus());
+      }
+    }
+
+    /**
+     * When the current role does not have {@code hasObuiappProcessAccess} for the "Aging
+     * Balance Process Definition for Receivables" OBUIAPP process, {@code handle} must deny
+     * with a 403 before doing anything else — even for a well-formed POST body that would
+     * otherwise reach {@link AgingDao}. Verified via {@link MockedConstruction}: if the guard
+     * did not short-circuit, {@code executeReport} would construct an {@code AgingDao}
+     * instance, so an empty construction list proves the business logic was never reached.
+     */
+    @Test
+    @DisplayName("Access denied short-circuits before any AgingDao work (POST)")
+    void handleReturns403WhenAccessDenied() {
+      try (MockedStatic<NeoAccessHelper> accessMock = mockStatic(NeoAccessHelper.class);
+           MockedConstruction<AgingDao> daoConstruction = mockConstruction(AgingDao.class)) {
+        accessMock.when(() -> NeoAccessHelper.hasObuiappProcessAccess(anyString()))
+            .thenReturn(false);
+
+        JSONObject body = new JSONObject();
+        try {
+          body.put("recOrPay", "RECEIVABLES");
+        } catch (Exception e) {
+          throw new IllegalStateException(e);
+        }
+        NeoContext ctx = NeoContext.builder().httpMethod("POST").requestBody(body).build();
+
+        NeoResponse result = handler.handle(ctx);
+
+        assertEquals(403, result.getHttpStatus());
+        assertTrue(daoConstruction.constructed().isEmpty());
+      }
+    }
+
+    /**
+     * Same denial for a GET (describe) request — the guard must gate every HTTP method, not
+     * just POST.
+     */
+    @Test
+    @DisplayName("Access denied short-circuits before describeReport (GET)")
+    void handleGetReturns403WhenAccessDenied() {
+      try (MockedStatic<NeoAccessHelper> accessMock = mockStatic(NeoAccessHelper.class)) {
+        accessMock.when(() -> NeoAccessHelper.hasObuiappProcessAccess(anyString()))
+            .thenReturn(false);
+
+        NeoContext ctx = NeoContext.builder().httpMethod("GET").build();
+        NeoResponse result = handler.handle(ctx);
+
+        assertEquals(403, result.getHttpStatus());
+        JSONObject body = result.getBody();
+        assertNotNull(body);
+        assertFalse(body.has("parameters"));
+      }
+    }
+
+    /**
+     * AgingDao creates a HashSet from the payment statuses returned by FIN_Utility. A null
+     * status collection is a missing server prerequisite, not an invalid MCP parameter, and
+     * must therefore be reported before the DAO is constructed.
+     */
+    @Test
+    @DisplayName("Missing confirmed payment statuses returns an actionable 422")
+    void missingConfirmedPaymentStatusesReturns422() throws Exception {
+      try (MockedStatic<NeoAccessHelper> accessMock = mockAccessGranted();
+           MockedStatic<FIN_Utility> paymentStatusMock = mockStatic(FIN_Utility.class);
+           MockedConstruction<AgingDao> daoConstruction = mockConstruction(AgingDao.class)) {
+        paymentStatusMock.when(FIN_Utility::getListPaymentConfirmed).thenReturn(null);
+
+        JSONObject body = new JSONObject();
+        body.put("recOrPay", "RECEIVABLES");
+        NeoResponse result = handler.handle(
+            NeoContext.builder().httpMethod("POST").requestBody(body).build());
+
+        assertEquals(422, result.getHttpStatus());
+        assertTrue(result.getBody().getJSONObject("error").getString("message")
+            .contains("confirmed payment statuses"));
+        assertTrue(daoConstruction.constructed().isEmpty());
+      }
+    }
+
+    @Test
+    @DisplayName("Unresolvable organization returns an actionable 400")
+    void unresolvableOrganizationReturns400() throws Exception {
+      OBDal dal = mock(OBDal.class);
+      try (MockedStatic<NeoAccessHelper> accessMock = mockAccessGranted();
+           MockedStatic<FIN_Utility> paymentStatusMock = mockStatic(FIN_Utility.class);
+           MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class);
+           MockedConstruction<AgingDao> daoConstruction = mockConstruction(AgingDao.class)) {
+        paymentStatusMock.when(FIN_Utility::getListPaymentConfirmed)
+            .thenReturn(Collections.singletonList("RPR"));
+        obDalMock.when(OBDal::getInstance).thenReturn(dal);
+        when(dal.get(Organization.class, "org-id")).thenReturn(null);
+
+        JSONObject body = new JSONObject();
+        body.put("recOrPay", "RECEIVABLES");
+        body.put("orgId", "org-id");
+        NeoResponse result = handler.handle(
+            NeoContext.builder().httpMethod("POST").requestBody(body).build());
+
+        assertEquals(400, result.getHttpStatus());
+        assertTrue(result.getBody().getJSONObject("error").getString("message")
+            .contains("organization context"));
+        assertTrue(daoConstruction.constructed().isEmpty());
+      }
+    }
+
+    @Test
+    @DisplayName("Missing organization tree returns an actionable 422")
+    void missingOrganizationTreeReturns422() throws Exception {
+      OBDal dal = mock(OBDal.class);
+      try (MockedStatic<NeoAccessHelper> accessMock = mockAccessGranted();
+           MockedStatic<FIN_Utility> paymentStatusMock = mockStatic(FIN_Utility.class);
+           MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class);
+           MockedConstruction<OrganizationStructureProvider> orgProviderConstruction =
+               mockConstruction(OrganizationStructureProvider.class, (provider, ignored) ->
+                   when(provider.getChildTree("org-id", true)).thenReturn(null));
+           MockedConstruction<AgingDao> daoConstruction = mockConstruction(AgingDao.class)) {
+        paymentStatusMock.when(FIN_Utility::getListPaymentConfirmed)
+            .thenReturn(Collections.singletonList("RPR"));
+        obDalMock.when(OBDal::getInstance).thenReturn(dal);
+        when(dal.get(Organization.class, "org-id")).thenReturn(mock(Organization.class));
+
+        JSONObject body = new JSONObject();
+        body.put("recOrPay", "RECEIVABLES");
+        body.put("orgId", "org-id");
+        NeoResponse result = handler.handle(
+            NeoContext.builder().httpMethod("POST").requestBody(body).build());
+
+        assertEquals(422, result.getHttpStatus());
+        assertTrue(result.getBody().getJSONObject("error").getString("message")
+            .contains("organization tree"));
+        assertTrue(daoConstruction.constructed().isEmpty());
+      }
+    }
+
+    @Test
+    @DisplayName("Missing accounting schema returns an actionable 422")
+    void missingAccountingSchemaReturns422() throws Exception {
+      OBDal dal = mock(OBDal.class);
+      @SuppressWarnings("unchecked")
+      OBQuery<AcctSchema> schemaQuery = mock(OBQuery.class);
+      try (MockedStatic<NeoAccessHelper> accessMock = mockAccessGranted();
+           MockedStatic<FIN_Utility> paymentStatusMock = mockStatic(FIN_Utility.class);
+           MockedStatic<OBContext> contextMock = mockStatic(OBContext.class);
+           MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class);
+           MockedConstruction<OrganizationStructureProvider> orgProviderConstruction =
+               mockConstruction(OrganizationStructureProvider.class, (provider, ignored) ->
+                   when(provider.getChildTree("org-id", true))
+                       .thenReturn(Collections.singleton("org-id")));
+           MockedConstruction<AgingDao> daoConstruction = mockConstruction(AgingDao.class)) {
+        paymentStatusMock.when(FIN_Utility::getListPaymentConfirmed)
+            .thenReturn(Collections.singletonList("RPR"));
+        obDalMock.when(OBDal::getInstance).thenReturn(dal);
+        when(dal.get(Organization.class, "org-id")).thenReturn(mock(Organization.class));
+        when(dal.createQuery(eq(AcctSchema.class), anyString())).thenReturn(schemaQuery);
+        when(schemaQuery.setNamedParameter(anyString(), anyString())).thenReturn(schemaQuery);
+        when(schemaQuery.setMaxResult(1)).thenReturn(schemaQuery);
+        when(schemaQuery.uniqueResult()).thenReturn(null);
+
+        JSONObject body = new JSONObject();
+        body.put("recOrPay", "RECEIVABLES");
+        body.put("orgId", "org-id");
+        NeoResponse result = handler.handle(
+            NeoContext.builder().httpMethod("POST").requestBody(body).build());
+
+        assertEquals(422, result.getHttpStatus());
+        assertTrue(result.getBody().getJSONObject("error").getString("message")
+            .contains("No accounting schema"));
+        assertTrue(daoConstruction.constructed().isEmpty());
+      }
     }
   }
 

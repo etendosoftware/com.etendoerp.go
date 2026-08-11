@@ -60,6 +60,8 @@ public class ReturnMaterialReceiptHeaderHandler implements NeoHandler {
 
   private static final String FIELD_SOURCE_SHIPMENT_DOC_NO = "sourceShipmentDocNo";
   private static final String FIELD_SOURCE_SHIPMENTS = "sourceShipments";
+  private static final String FIELD_MOVEMENT_DATE = "movementDate";
+  private static final String FIELD_ACCOUNTING_DATE = "accountingDate";
   private static final String ACTION_IMPORT_LINES = "importShipmentLines";
   private static final String ACTION_AVAILABLE_SHIPMENTS = "availableShipments";
   private static final String ACTION_AVAILABLE_LINES = "availableShipmentLines";
@@ -68,6 +70,8 @@ public class ReturnMaterialReceiptHeaderHandler implements NeoHandler {
 
   @Override
   public NeoResponse handle(NeoContext context) {
+    mirrorAccountingDate(context);
+
     if (NeoEndpointType.CRUD.equals(context.getEndpointType())
         && "POST".equals(context.getHttpMethod())
         && context.getRecordId() == null) {
@@ -99,6 +103,24 @@ public class ReturnMaterialReceiptHeaderHandler implements NeoHandler {
       return null; // let NEO native process handle completion
     }
     return null;
+  }
+
+  /**
+   * Mirrors the single visible {@code movementDate} field into the hidden
+   * {@code accountingDate} field on the request body, unconditionally, before the default CRUD
+   * path persists it (ETP-4531 pattern, applied here for ETP-4737). The user never sees or
+   * edits accountingDate directly — this window's {@code decisions.json} marks it
+   * {@code discarded} — so without this mirror a bare POST-create (e.g. "+ Nuevo" directly on
+   * this window, not via the goods-shipment "Crear Devolución" wizard, which sets both dates
+   * explicitly in {@link NeoCommercialDocumentFactory}) leaves accountingDate unset, and it
+   * falls back to whatever default the persistence layer applies instead of the document's own
+   * movement date.
+   */
+  static void mirrorAccountingDate(NeoContext context) {
+    if (NeoEndpointType.CRUD.equals(context.getEndpointType())
+        && NeoHandlerUtils.isWriteMethod(context.getHttpMethod())) {
+      NeoHandlerUtils.mirrorFieldValue(context.getRequestBody(), FIELD_MOVEMENT_DATE, FIELD_ACCOUNTING_DATE);
+    }
   }
 
   private void fillMissingStorageBins(String receiptId) {
@@ -281,11 +303,13 @@ public class ReturnMaterialReceiptHeaderHandler implements NeoHandler {
           return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "No product lines in this receipt");
         }
 
+        // ETP-4737: resolves the unified "Factura Rectificativa" (ARI + isRectificative) doc
+        // type, replacing the legacy ARI_RM ("Return Material Sales Invoice") lookup.
         DocumentType docType = ReturnShipmentUtils.findReturnDocTypeForOrg(
-            receipt.getOrganization().getId(), "ARI_RM", true, true);
+            receipt.getOrganization().getId(), "ARI", true, false, true);
         if (docType == null) {
           return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
-              "No return invoice document type (ARI_RM) found for this organization");
+              "No rectificative invoice document type found for this organization");
         }
 
         Invoice sourceInvoice = ReturnShipmentUtils.findSourceInvoice(lines);

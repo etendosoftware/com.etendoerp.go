@@ -17,6 +17,7 @@
 package com.etendoerp.go.rest;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -24,6 +25,7 @@ import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
@@ -57,6 +59,7 @@ import org.openbravo.model.common.currency.Currency;
 import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.dal.service.OBDal;
 
+import com.etendoerp.go.onboarding.OnboardingRoleProvisioningService;
 import com.etendoerp.go.schemaforge.data.Account;
 import com.smf.securewebservices.utils.SecureWebServicesUtils;
 
@@ -549,7 +552,11 @@ public class EtendoGoJwtServletCoverageTest {
     }
 
     assertEquals(200, resp.status);
-    assertEquals(2, new JSONObject(resp.body()).getJSONArray("environments").length());
+    JSONObject body = new JSONObject(resp.body());
+    assertEquals(2, body.getJSONArray("environments").length());
+    // The account email is the backend's flag-targeting key, returned so the web client can target
+    // on the same identity without a second call to /me (ETP-4686).
+    assertEquals("user@test.com", body.getString("accountEmail"));
   }
 
   @Test
@@ -761,7 +768,7 @@ public class EtendoGoJwtServletCoverageTest {
   }
 
   @Test
-  public void onboardingExistingIncompleteClientStreamsFailure() throws Exception {
+  public void onboardingExistingClientOwnedByAnotherAccountStreamsFailure() throws Exception {
     ResponseCapture resp = mockResponse();
     HttpServletRequest req = jsonRequest("/onboarding",
         "{\"clientName\":\"Acme\",\"currency\":\"EUR\",\"language\":\"en_US\"}");
@@ -777,10 +784,10 @@ public class EtendoGoJwtServletCoverageTest {
           .thenReturn("user@test.com");
       dalMock.when(() -> EtendoGoJwtDalHelper.findCurrencyByIsoCode("EUR"))
           .thenReturn(currency);
-      // Existing client that is missing its star organization -> incomplete branch.
+      // Existing client owned by ANOTHER account -> resume refused (tenant isolation, ETP-4428).
       supportMock.when(() -> EtendoGoJwtSupport.findClientIdByName("Acme"))
           .thenReturn("client-1");
-      supportMock.when(() -> EtendoGoJwtSupport.hasStarOrganization("client-1"))
+      dalMock.when(() -> EtendoGoJwtDalHelper.clientBelongsToAccountEmail("client-1", "user@test.com"))
           .thenReturn(false);
 
       servlet.doPost(req, resp.response);
@@ -789,7 +796,7 @@ public class EtendoGoJwtServletCoverageTest {
     // NDJSON stream: the servlet sets 200 before streaming, then emits a failure result line.
     String ndjson = resp.body();
     assertTrue(ndjson.contains("\"success\":false"));
-    assertTrue(ndjson.contains("incomplete"));
+    assertTrue(ndjson.contains("already in use"));
   }
 
   @Test
@@ -811,7 +818,7 @@ public class EtendoGoJwtServletCoverageTest {
           .thenReturn(currency);
       supportMock.when(() -> EtendoGoJwtSupport.findClientIdByName("Acme"))
           .thenReturn("client-1");
-      supportMock.when(() -> EtendoGoJwtSupport.hasStarOrganization("client-1"))
+      dalMock.when(() -> EtendoGoJwtDalHelper.clientBelongsToAccountEmail("client-1", "user@test.com"))
           .thenReturn(true);
       // No admin user-role for the resolved client -> resolveAdminContextData fails.
       dalMock.when(() -> EtendoGoJwtDalHelper.findClientAdminUserRole("client-1"))
@@ -842,6 +849,9 @@ public class EtendoGoJwtServletCoverageTest {
     when(contact.getId()).thenReturn("user-1");
     when(adminUserRole.getRole()).thenReturn(role);
     when(adminUserRole.getUserContact()).thenReturn(contact);
+    // Real admin-role resolution reaches ensureRoles() before the organization step this test
+    // targets; stub it out so the (unmocked-here) OBDal calls inside the real service never run.
+    servlet.onboardingRoleProvisioningService = mock(OnboardingRoleProvisioningService.class);
 
     try (var ctxMock = mockStatic(OBContext.class);
          var supportMock = mockStatic(EtendoGoJwtSupport.class);
@@ -852,7 +862,7 @@ public class EtendoGoJwtServletCoverageTest {
           .thenReturn(currency);
       supportMock.when(() -> EtendoGoJwtSupport.findClientIdByName("Acme"))
           .thenReturn("client-1");
-      supportMock.when(() -> EtendoGoJwtSupport.hasStarOrganization("client-1"))
+      dalMock.when(() -> EtendoGoJwtDalHelper.clientBelongsToAccountEmail("client-1", "user@test.com"))
           .thenReturn(true);
       dalMock.when(() -> EtendoGoJwtDalHelper.findClientAdminUserRole("client-1"))
           .thenReturn(adminUserRole);
@@ -871,6 +881,160 @@ public class EtendoGoJwtServletCoverageTest {
     assertTrue(ndjson.contains("\"step\":\"organization\""));
     assertTrue(ndjson.contains("\"success\":false"));
     assertTrue(ndjson.contains("Organization not found"));
+  }
+
+  @Test
+  public void onboardingRolesFailureRollsBackAndStreamsFailure() throws Exception {
+    ResponseCapture resp = mockResponse();
+    HttpServletRequest req = jsonRequest("/onboarding",
+        "{\"clientName\":\"Acme\",\"currency\":\"EUR\",\"language\":\"en_US\"}");
+    when(req.getHeader("Authorization")).thenReturn("Bearer valid-token");
+
+    Currency currency = mock(Currency.class);
+    when(currency.getId()).thenReturn("currency-1");
+
+    UserRoles adminUserRole = mock(UserRoles.class);
+    Role role = mock(Role.class);
+    when(role.getId()).thenReturn("role-1");
+    User contact = mock(User.class);
+    when(contact.getId()).thenReturn("user-1");
+    when(adminUserRole.getRole()).thenReturn(role);
+    when(adminUserRole.getUserContact()).thenReturn(contact);
+
+    OnboardingRoleProvisioningService roleProvisioningService =
+        mock(OnboardingRoleProvisioningService.class);
+    // A null-message exception exercises the "no message" default-text branch.
+    doThrow(new RuntimeException()).when(roleProvisioningService)
+        .wire(anyString(), anyString(), anyString());
+    servlet.onboardingRoleProvisioningService = roleProvisioningService;
+
+    try (var ctxMock = mockStatic(OBContext.class);
+         var supportMock = mockStatic(EtendoGoJwtSupport.class);
+         var dalMock = mockStatic(EtendoGoJwtDalHelper.class);
+         var rollbackMock = mockStatic(EtendoGoDalHelper.class)) {
+      supportMock.when(() -> EtendoGoJwtSupport.requireAccountEmail("valid-token"))
+          .thenReturn("user@test.com");
+      dalMock.when(() -> EtendoGoJwtDalHelper.findCurrencyByIsoCode("EUR"))
+          .thenReturn(currency);
+      supportMock.when(() -> EtendoGoJwtSupport.findClientIdByName("Acme"))
+          .thenReturn("client-1");
+      dalMock.when(() -> EtendoGoJwtDalHelper.clientBelongsToAccountEmail("client-1", "user@test.com"))
+          .thenReturn(true);
+      dalMock.when(() -> EtendoGoJwtDalHelper.findClientAdminUserRole("client-1"))
+          .thenReturn(adminUserRole);
+
+      servlet.doPost(req, resp.response);
+
+      rollbackMock.verify(() -> EtendoGoDalHelper.rollbackDalChanges(
+          eq("onboarding role provisioning"), any(), any()));
+      // The chain must stop here — ensureOrganization (the actual org-creation step, which
+      // runs after roles) never fires. findStarOrgId is NOT part of that later step: it runs
+      // earlier, inside resolveAdminContextData, to resolve the OBContext org needed before
+      // role provisioning can run at all — so it always runs regardless of this failure.
+      supportMock.verify(() -> EtendoGoJwtSupport.organizationExists(any()), never());
+    }
+
+    String ndjson = resp.body();
+    assertTrue(ndjson.contains("\"step\":\"roles\""));
+    assertTrue(ndjson.contains("\"success\":false"));
+    assertTrue(ndjson.contains("Role provisioning failed"));
+  }
+
+  // ===================== applySocialName() — ETP-4749 =====================
+  //
+  // AD_Org.SocialName ("Nombre comercial" in the Organization settings window) was never
+  // set anywhere in the onboarding flow — InitialOrgSetup/InitialSetupUtility (Etendo core)
+  // only set Name/SearchKey. applySocialName() reuses the same clientName already used for
+  // Name (which the wizard's CompanyStep.jsx already resolves to the user's Full Name for
+  // Freelancers, since that business type has no separate Company Name field) and persists
+  // it once, right after organization creation succeeds — never as part of
+  // OnboardingOrgInfoService's idempotent reconcile chain, so a resumed/retried onboarding
+  // call never overwrites a "Nombre comercial" the user already edited by hand.
+
+  @Test
+  public void applySocialNameSetsSocialNameAndSavesWhenOrganizationFound() {
+    Organization org = mock(Organization.class);
+    OBDal dal = mock(OBDal.class);
+
+    try (var dalHelperMock = mockStatic(EtendoGoJwtDalHelper.class);
+         var obDalMock = mockStatic(OBDal.class)) {
+      dalHelperMock.when(() -> EtendoGoJwtDalHelper.findFirstOrganization("client-1"))
+          .thenReturn(org);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      boolean result = servlet.applySocialName("client-1", "Acme Corp");
+
+      assertTrue(result);
+      verify(org).setSocialName("Acme Corp");
+      verify(dal).save(org);
+      verify(dal).flush();
+    }
+  }
+
+  @Test
+  public void applySocialNameUsesTheFreelancerFullNameFallbackAlreadyResolvedByTheWizard() {
+    // CompanyStep.jsx (schema_forge_core/packages/etendo-go-core) already resolves clientName
+    // to the Freelancer's Full Name before this ever reaches Java — applySocialName has no
+    // businessType branching of its own, it just persists whatever clientName it is given.
+    Organization org = mock(Organization.class);
+    OBDal dal = mock(OBDal.class);
+
+    try (var dalHelperMock = mockStatic(EtendoGoJwtDalHelper.class);
+         var obDalMock = mockStatic(OBDal.class)) {
+      dalHelperMock.when(() -> EtendoGoJwtDalHelper.findFirstOrganization("client-1"))
+          .thenReturn(org);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      boolean result = servlet.applySocialName("client-1", "Jane Freelancer");
+
+      assertTrue(result);
+      verify(org).setSocialName("Jane Freelancer");
+    }
+  }
+
+  @Test
+  public void applySocialNameReturnsFalseAndDoesNotSaveWhenOrganizationNotFound() {
+    OBDal dal = mock(OBDal.class);
+
+    try (var dalHelperMock = mockStatic(EtendoGoJwtDalHelper.class);
+         var obDalMock = mockStatic(OBDal.class)) {
+      dalHelperMock.when(() -> EtendoGoJwtDalHelper.findFirstOrganization("client-1"))
+          .thenReturn(null);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      boolean result = servlet.applySocialName("client-1", "Acme Corp");
+
+      assertFalse(result);
+      verify(dal, never()).save(any());
+      verify(dal, never()).flush();
+    }
+  }
+
+  @Test
+  public void applySocialNameHasNoBlankGuardUnlikeApplyTaxId() {
+    // Unlike OnboardingOrgInfoService.applyTaxId() (a deliberate no-op on blank, because
+    // Tax ID is genuinely optional), the clientName reaching this method is guaranteed
+    // non-blank by parseOnboardingRequest()'s upstream validation (FIELD_CLIENT_NAME must
+    // not be empty — see parseOnboardingRequest's own validation branch). This method
+    // intentionally carries no blank guard of its own: a blank value would still be
+    // persisted as-is. Locking this in so a future "harmonize with applyTaxId" refactor
+    // doesn't silently mask an upstream validation bug behind a no-op here.
+    Organization org = mock(Organization.class);
+    OBDal dal = mock(OBDal.class);
+
+    try (var dalHelperMock = mockStatic(EtendoGoJwtDalHelper.class);
+         var obDalMock = mockStatic(OBDal.class)) {
+      dalHelperMock.when(() -> EtendoGoJwtDalHelper.findFirstOrganization("client-1"))
+          .thenReturn(org);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      boolean result = servlet.applySocialName("client-1", "");
+
+      assertTrue(result);
+      verify(org).setSocialName("");
+      verify(dal).save(org);
+      verify(dal).flush();
+    }
   }
 
   // ===================== Helpers =====================

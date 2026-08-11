@@ -18,16 +18,14 @@
 package com.etendoerp.go.schemaforge.email;
 
 import org.apache.commons.lang3.StringUtils;
-import org.apache.logging.log4j.LogManager;
-import org.apache.logging.log4j.Logger;
+
+import com.etendoerp.go.common.ConfigPropertyReader;
 
 /**
  * Server-side provider configuration. No provider endpoint or API key is
  * hardcoded in the module.
  */
 public final class EmailProviderConfig {
-
-  private static final Logger log = LogManager.getLogger(EmailProviderConfig.class);
 
   static final String PROP_BASE_URL = "etendo.go.email.provider.baseUrl";
   static final String PROP_API_KEY = "etendo.go.email.provider.apiKey";
@@ -65,10 +63,10 @@ public final class EmailProviderConfig {
    * @return runtime provider configuration
    */
   public static EmailProviderConfig fromRuntime() {
-    String baseUrl = readConfigValue(PROP_BASE_URL, ENV_BASE_URL, null);
-    String apiKey = readConfigValue(PROP_API_KEY, ENV_API_KEY, null);
-    boolean enabled = isTruthy(readConfigValue(PROP_ENABLED, ENV_ENABLED, "true"));
-    int timeoutMs = parseTimeout(readConfigValue(PROP_TIMEOUT_MS, ENV_TIMEOUT_MS,
+    String baseUrl = ConfigPropertyReader.readConfigValue(PROP_BASE_URL, ENV_BASE_URL, null);
+    String apiKey = ConfigPropertyReader.readConfigValue(PROP_API_KEY, ENV_API_KEY, null);
+    boolean enabled = isTruthy(ConfigPropertyReader.readConfigValue(PROP_ENABLED, ENV_ENABLED, "true"));
+    int timeoutMs = parseTimeout(ConfigPropertyReader.readConfigValue(PROP_TIMEOUT_MS, ENV_TIMEOUT_MS,
         String.valueOf(DEFAULT_TIMEOUT_MS)));
     return new EmailProviderConfig(baseUrl, apiKey, enabled, timeoutMs);
   }
@@ -91,29 +89,6 @@ public final class EmailProviderConfig {
 
   public int getTimeoutMs() {
     return timeoutMs;
-  }
-
-  private static String readConfigValue(String propertyName, String envName, String defaultValue) {
-    String systemValue = StringUtils.trimToNull(System.getProperty(propertyName));
-    if (systemValue != null) {
-      return systemValue;
-    }
-    String openbravoValue = readOpenbravoProperty(propertyName);
-    if (openbravoValue != null) {
-      return openbravoValue;
-    }
-    String envValue = StringUtils.trimToNull(System.getenv(envName));
-    return envValue != null ? envValue : defaultValue;
-  }
-
-  private static String readOpenbravoProperty(String propertyName) {
-    try {
-      return StringUtils.trimToNull(org.openbravo.base.session.OBPropertiesProvider.getInstance()
-          .getOpenbravoProperties().getProperty(propertyName));
-    } catch (Exception e) {
-      log.debug("Could not read Openbravo property {}: {}", propertyName, e.getMessage(), e);
-      return null;
-    }
   }
 
   private static boolean isTruthy(String value) {

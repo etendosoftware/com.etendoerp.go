@@ -21,6 +21,8 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.any;
+import static org.mockito.Mockito.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.when;
@@ -86,6 +88,20 @@ class ToolRegistryGenerateToolsTest {
     obDalMock = mockStatic(OBDal.class);
     accessMock = mockStatic(NeoAccessUtils.class);
     obDalMock.when(OBDal::getInstance).thenReturn(mockOBDal);
+    // ETP-4510 BUG-3: addWindowSpec now routes every spec (windowed or windowless)
+    // through hasWindowAccessForSpec instead of short-circuiting on a null AD_Window.
+    // Default all specs to accessible here so the many pre-existing tests that build a
+    // windowless spec (spec.getADWindow() == null) without caring about access keep
+    // passing; tests that specifically exercise the access-denied path override this
+    // default with a spec-specific stub.
+    accessMock.when(() -> NeoAccessUtils.hasWindowAccessForSpec(any(), anyString()))
+        .thenReturn(true);
+    // ETP-4596: processSpec's "R" branch now additionally gates on hasReportSpecAccess.
+    // Default every report spec to accessible here for the same reason as the
+    // hasWindowAccessForSpec default above — tests that specifically exercise report-spec
+    // access denial override this with a spec-specific stub.
+    accessMock.when(() -> NeoAccessUtils.hasReportSpecAccess(any(), anyString()))
+        .thenReturn(true);
     registry = new ToolRegistry();
   }
 
@@ -240,10 +256,11 @@ class ToolRegistryGenerateToolsTest {
   class WindowSpecTests {
 
     @Test
-    @DisplayName("window spec with null AD_Window is always accessible")
-    void windowSpecNullWindowAlwaysAccessible() {
+    @DisplayName("window spec with null AD_Window is accessible when hasWindowAccessForSpec grants it")
+    void windowSpecNullWindowAllowedProceedsNormally() {
       SFSpec spec = createWindowSpec(SPEC_SALES_ORDER);
       when(spec.getADWindow()).thenReturn(null);
+      accessMock.when(() -> NeoAccessUtils.hasWindowAccessForSpec(spec, "GET")).thenReturn(true);
       mockSpecCriteria(List.of(spec));
 
       List<McpToolDefinition> tools = registry.generateTools(scopesOf("neo:read"));
@@ -256,11 +273,40 @@ class ToolRegistryGenerateToolsTest {
       assertTrue(names.contains("neo_schema"));
     }
 
+    /**
+     * ETP-4510 BUG-3 (cycle 3): before this fix, {@code addWindowSpec} short-circuited on
+     * {@code spec.getADWindow() == null}, granting access to every windowless/combination
+     * spec unconditionally — including a caller with no role assigned. Verifies that a
+     * windowless spec denied by {@code hasWindowAccessForSpec} is now correctly excluded
+     * from the CRUD spec catalog instead of silently allowed.
+     */
+    @Test
+    @DisplayName("window spec with null AD_Window is excluded when hasWindowAccessForSpec denies it")
+    void windowSpecNullWindowDeniedIsExcluded() {
+      SFSpec spec = createWindowSpec(SPEC_SALES_ORDER);
+      when(spec.getADWindow()).thenReturn(null);
+      accessMock.when(() -> NeoAccessUtils.hasWindowAccessForSpec(spec, "GET")).thenReturn(false);
+      mockSpecCriteria(List.of(spec));
+
+      List<McpToolDefinition> tools = registry.generateTools(scopesOf("neo:read"));
+      List<String> names = toolNames(tools);
+
+      // No CRUD tools since there are no accessible window specs; only the
+      // read-scope baseline tools (neo_discover + docs + neo_widget) are present.
+      assertFalse(names.contains("neo_list"));
+      assertFalse(names.contains("neo_get"));
+      assertFalse(names.contains("neo_create"));
+      assertTrue(names.contains("neo_discover"));
+      assertTrue(names.contains("docs"));
+      assertTrue(names.contains(McpConstants.TOOL_NEO_WIDGET));
+      assertEquals(3, tools.size());
+    }
+
     @Test
     @DisplayName("window spec with accessible AD_Window is included")
     void windowSpecWithAccessibleWindow() {
       SFSpec spec = createWindowSpecWithWindow(SPEC_SALES_ORDER, WINDOW_ID);
-      accessMock.when(() -> NeoAccessUtils.hasWindowAccess(WINDOW_ID)).thenReturn(true);
+      accessMock.when(() -> NeoAccessUtils.hasWindowAccessForSpec(spec, "GET")).thenReturn(true);
       mockSpecCriteria(List.of(spec));
 
       List<McpToolDefinition> tools = registry.generateTools(scopesOf("neo:read"));
@@ -272,7 +318,7 @@ class ToolRegistryGenerateToolsTest {
     @DisplayName("window spec with denied AD_Window is excluded")
     void windowSpecWithDeniedWindow() {
       SFSpec spec = createWindowSpecWithWindow(SPEC_SALES_ORDER, WINDOW_ID);
-      accessMock.when(() -> NeoAccessUtils.hasWindowAccess(WINDOW_ID)).thenReturn(false);
+      accessMock.when(() -> NeoAccessUtils.hasWindowAccessForSpec(spec, "GET")).thenReturn(false);
       mockSpecCriteria(List.of(spec));
 
       List<McpToolDefinition> tools = registry.generateTools(scopesOf("neo:read"));
@@ -547,6 +593,28 @@ class ToolRegistryGenerateToolsTest {
 
       assertFalse(toolNames(tools).contains("generate_print_invoice"),
           "Non-callable report specs must not produce a generate_* tool");
+    }
+
+    /**
+     * ETP-4596: a callable report spec whose constituent window is inaccessible to the
+     * current role (e.g. bank-statements once its entity carries a populated
+     * {@code AD_TAB_ID}) must not surface a generate_* tool, even though it is callable and
+     * the caller holds the {@code neo:report} scope. Before this fix, RBAC was never
+     * consulted here at all.
+     */
+    @Test
+    @DisplayName("callable report spec denied by hasReportSpecAccess emits no tool")
+    void callableReportSpecDeniedByRbacEmitsNoTool() {
+      SFSpec spec = createReportSpec(SPEC_PRINT_INVOICE);
+      when(spec.getProcess()).thenReturn(null);
+      callabilityMock.when(() -> NeoReportCallability.isReportCallable(spec)).thenReturn(true);
+      accessMock.when(() -> NeoAccessUtils.hasReportSpecAccess(spec, "GET")).thenReturn(false);
+      mockSpecCriteria(List.of(spec));
+
+      List<McpToolDefinition> tools = registry.generateTools(scopesOf("neo:report"));
+
+      assertFalse(toolNames(tools).contains("generate_print_invoice"),
+          "A report spec denied by hasReportSpecAccess must not produce a generate_* tool");
     }
 
     @Test
@@ -1293,6 +1361,175 @@ class ToolRegistryGenerateToolsTest {
     }
   }
 
+  // ── write-tool spec enum split (ETP-4254) ─────────────────────────────────
+
+  /**
+   * ETP-4254 AC#1: the write tools (neo_create/neo_update/neo_delete) get their own, narrower
+   * spec enum. A monitor/log spec — every included entity configured read-only — stays fully
+   * readable but must not be offered as a write target.
+   *
+   * <p>{@code isReadOnlySpec} itself is unit-tested in {@code McpToolRouterSupportTest}; it is
+   * stubbed per spec here so these tests cover only the {@code ToolRegistry} enum wiring.</p>
+   */
+  @Nested
+  @DisplayName("generateTools — write-tool spec enum (ETP-4254)")
+  class WriteCatalogTests {
+
+    private static final String SPEC_MONITOR = "monitor-verifactu";
+
+    @SuppressWarnings("unchecked")
+    private List<String> specEnumOf(List<McpToolDefinition> tools, String toolName) {
+      McpToolDefinition tool = tools.stream()
+          .filter(t -> toolName.equals(t.getName()))
+          .findFirst()
+          .orElse(null);
+      assertNotNull(tool, toolName + " must be registered");
+      Map<String, Object> props = (Map<String, Object>) tool.getInputSchema().get("properties");
+      Map<String, Object> specProp = (Map<String, Object>) props.get("spec");
+      assertNotNull(specProp);
+      return (List<String>) specProp.get("enum");
+    }
+
+    /** One all-method spec + one read-only spec, with capability predicates stubbed per spec. */
+    private MockedStatic<McpToolRouterSupport> setupMixedCatalog(SFSpec writable,
+        SFSpec readOnly) {
+      MockedStatic<McpToolRouterSupport> supportMock = mockStatic(McpToolRouterSupport.class);
+      supportMock.when(() -> McpToolRouterSupport.isCatalogExcludedSpec(any())).thenReturn(false);
+      supportMock.when(() -> McpToolRouterSupport.hasEntityWithMethod(writable, "POST"))
+          .thenReturn(true);
+      supportMock.when(() -> McpToolRouterSupport.hasEntityWithMethod(writable, "PUT"))
+          .thenReturn(true);
+      supportMock.when(() -> McpToolRouterSupport.hasEntityWithMethod(writable, "DELETE"))
+          .thenReturn(true);
+      supportMock.when(() -> McpToolRouterSupport.hasEntityWithMethod(readOnly, "POST"))
+          .thenReturn(false);
+      supportMock.when(() -> McpToolRouterSupport.hasEntityWithMethod(readOnly, "PUT"))
+          .thenReturn(false);
+      supportMock.when(() -> McpToolRouterSupport.hasEntityWithMethod(readOnly, "DELETE"))
+          .thenReturn(false);
+      return supportMock;
+    }
+
+    @Test
+    @DisplayName("a read-only spec is in the read enum but not in the write enum")
+    void readOnlySpecIsReadableButNotWritable() {
+      SFSpec writable = createWindowSpec(SPEC_SALES_ORDER);
+      when(writable.getADWindow()).thenReturn(null);
+      SFSpec readOnly = createWindowSpec(SPEC_MONITOR);
+      when(readOnly.getADWindow()).thenReturn(null);
+      mockSpecCriteria(List.of(writable, readOnly));
+
+      try (MockedStatic<McpToolRouterSupport> supportMock =
+          setupMixedCatalog(writable, readOnly)) {
+        List<McpToolDefinition> tools =
+            registry.generateTools(scopesOf("neo:read", "neo:write"));
+
+        List<String> readEnum = specEnumOf(tools, "neo_list");
+        assertTrue(readEnum.contains(SPEC_SALES_ORDER));
+        assertTrue(readEnum.contains(SPEC_MONITOR),
+            "a read-only monitor spec must stay readable");
+
+        for (String writeTool : List.of("neo_create", "neo_update", "neo_delete")) {
+          List<String> writeEnum = specEnumOf(tools, writeTool);
+          assertTrue(writeEnum.contains(SPEC_SALES_ORDER), writeTool + " must keep sales-order");
+          assertFalse(writeEnum.contains(SPEC_MONITOR),
+              writeTool + " must not offer a read-only spec as a target");
+        }
+      }
+    }
+
+    /**
+     * The {@code buildActionTool} judgement call (ETP-4254): button actions are served by the
+     * {@code /action/*} sub-endpoint, which is deliberately NOT gated by the
+     * {@code ETGO_SF_ENTITY} method flags, so a read-only-CRUD monitor may still legitimately
+     * expose an action. neo_action therefore keeps the READ enum.
+     */
+    @Test
+    @DisplayName("neo_action keeps the read enum — actions are not gated by the method flags")
+    void actionToolKeepsTheReadEnum() {
+      SFSpec writable = createWindowSpec(SPEC_SALES_ORDER);
+      when(writable.getADWindow()).thenReturn(null);
+      SFSpec readOnly = createWindowSpec(SPEC_MONITOR);
+      when(readOnly.getADWindow()).thenReturn(null);
+      mockSpecCriteria(List.of(writable, readOnly));
+
+      try (MockedStatic<McpToolRouterSupport> supportMock =
+          setupMixedCatalog(writable, readOnly)) {
+        List<McpToolDefinition> tools =
+            registry.generateTools(scopesOf("neo:read", "neo:write"));
+
+        List<String> actionEnum = specEnumOf(tools, "neo_action");
+        assertTrue(actionEnum.contains(SPEC_SALES_ORDER));
+        assertTrue(actionEnum.contains(SPEC_MONITOR),
+            "a read-only-CRUD spec may still expose button actions");
+      }
+    }
+
+    @Test
+    @DisplayName("a mixed spec is offered only by the write tool matching its enabled method")
+    void mixedSpecUsesPerMethodWriteEnums() {
+      SFSpec allMethods = createWindowSpec(SPEC_SALES_ORDER);
+      when(allMethods.getADWindow()).thenReturn(null);
+      SFSpec putOnly = createWindowSpec(SPEC_MONITOR);
+      when(putOnly.getADWindow()).thenReturn(null);
+      mockSpecCriteria(List.of(allMethods, putOnly));
+
+      try (MockedStatic<McpToolRouterSupport> supportMock =
+          mockStatic(McpToolRouterSupport.class)) {
+        supportMock.when(() -> McpToolRouterSupport.isCatalogExcludedSpec(any())).thenReturn(false);
+        for (String method : List.of("POST", "PUT", "DELETE")) {
+          supportMock.when(() -> McpToolRouterSupport.hasEntityWithMethod(allMethods, method))
+              .thenReturn(true);
+        }
+        supportMock.when(() -> McpToolRouterSupport.hasEntityWithMethod(putOnly, "POST"))
+            .thenReturn(false);
+        supportMock.when(() -> McpToolRouterSupport.hasEntityWithMethod(putOnly, "PUT"))
+            .thenReturn(true);
+        supportMock.when(() -> McpToolRouterSupport.hasEntityWithMethod(putOnly, "DELETE"))
+            .thenReturn(false);
+
+        List<McpToolDefinition> tools =
+            registry.generateTools(scopesOf("neo:read", "neo:write"));
+
+        assertFalse(specEnumOf(tools, "neo_create").contains(SPEC_MONITOR));
+        assertTrue(specEnumOf(tools, "neo_update").contains(SPEC_MONITOR));
+        assertFalse(specEnumOf(tools, "neo_delete").contains(SPEC_MONITOR));
+      }
+    }
+
+    @Test
+    @DisplayName("a catalog of only read-only specs registers no write CRUD tools")
+    void readOnlyOnlyCatalogRegistersNoWriteTools() {
+      SFSpec readOnly = createWindowSpec(SPEC_MONITOR);
+      when(readOnly.getADWindow()).thenReturn(null);
+      mockSpecCriteria(List.of(readOnly));
+
+      try (MockedStatic<McpToolRouterSupport> supportMock =
+          mockStatic(McpToolRouterSupport.class)) {
+        supportMock.when(() -> McpToolRouterSupport.isCatalogExcludedSpec(any())).thenReturn(false);
+        supportMock.when(() -> McpToolRouterSupport.hasEntityWithMethod(readOnly, "POST"))
+            .thenReturn(false);
+        supportMock.when(() -> McpToolRouterSupport.hasEntityWithMethod(readOnly, "PUT"))
+            .thenReturn(false);
+        supportMock.when(() -> McpToolRouterSupport.hasEntityWithMethod(readOnly, "DELETE"))
+            .thenReturn(false);
+
+        List<McpToolDefinition> tools =
+            registry.generateTools(scopesOf("neo:read", "neo:write"));
+        List<String> names = toolNames(tools);
+
+        assertTrue(names.contains("neo_list"), "reads must still be available");
+        assertFalse(names.contains("neo_create"));
+        assertFalse(names.contains("neo_update"));
+        assertFalse(names.contains("neo_delete"));
+        // neo_batch has no spec enum to narrow (its ops name their spec inline) and
+        // neo_action is not gated by the method flags, so both stay registered.
+        assertTrue(names.contains("neo_batch"));
+        assertTrue(names.contains("neo_action"));
+      }
+    }
+  }
+
   // ── neo_widget tool (business widgets, gap G4 / ETP-4284) ─────────────────
 
   @Nested
@@ -1390,12 +1627,18 @@ class ToolRegistryGenerateToolsTest {
           "neo_widget must declare an optional 'params' property");
     }
 
+    /**
+     * ETP-4284 / G4 — still enforced after ETP-4254 replaced the hardcoded
+     * {@code "dashboard"} literal with the data-driven {@code isCatalogExcludedSpec} rule
+     * (handler-only AND no {@code /action} route). The predicate itself is unit-tested in
+     * {@code McpToolRouterSupportTest}; here it is stubbed per spec so this test verifies only
+     * the {@code ToolRegistry} wiring (which spec lands in which enum), independently of the
+     * entity-query mocking.
+     */
     @Test
-    @DisplayName("dashboard/widget spec is NOT added to the CRUD spec enum")
+    @DisplayName("handler-only (dashboard/widget) spec is NOT added to the CRUD spec enum")
     @SuppressWarnings("unchecked")
-    void dashboardSpecExcludedFromCrudSpecEnum() {
-      // A normal window spec plus the dashboard (widget) spec — only the window spec
-      // may surface in the CRUD spec enum; dashboard is exposed via neo_widget.
+    void handlerOnlySpecExcludedFromCrudSpecEnum() {
       SFSpec windowSpec = createWindowSpec(SPEC_SALES_ORDER);
       when(windowSpec.getADWindow()).thenReturn(null);
 
@@ -1404,40 +1647,92 @@ class ToolRegistryGenerateToolsTest {
 
       mockSpecCriteria(List.of(windowSpec, dashboardSpec));
 
-      List<McpToolDefinition> tools = registry.generateTools(scopesOf("neo:read"));
+      try (MockedStatic<McpToolRouterSupport> supportMock =
+          mockStatic(McpToolRouterSupport.class)) {
+        supportMock.when(() -> McpToolRouterSupport.isCatalogExcludedSpec(windowSpec))
+            .thenReturn(false);
+        supportMock.when(() -> McpToolRouterSupport.isCatalogExcludedSpec(dashboardSpec))
+            .thenReturn(true);
+        List<McpToolDefinition> tools = registry.generateTools(scopesOf("neo:read"));
 
-      McpToolDefinition listTool = tools.stream()
-          .filter(t -> "neo_list".equals(t.getName()))
-          .findFirst()
-          .orElse(null);
-      assertNotNull(listTool, "neo_list must still be produced for the window spec");
+        McpToolDefinition listTool = tools.stream()
+            .filter(t -> "neo_list".equals(t.getName()))
+            .findFirst()
+            .orElse(null);
+        assertNotNull(listTool, "neo_list must still be produced for the window spec");
 
-      Map<String, Object> props = (Map<String, Object>) listTool.getInputSchema().get("properties");
-      Map<String, Object> specProp = (Map<String, Object>) props.get("spec");
-      List<String> enumValues = (List<String>) specProp.get("enum");
-      assertNotNull(enumValues);
-      assertTrue(enumValues.contains(SPEC_SALES_ORDER));
-      assertFalse(enumValues.contains(McpConstants.SPEC_DASHBOARD),
-          "dashboard spec must NOT appear in the CRUD spec enum (ETP-4284 / G4)");
+        Map<String, Object> props =
+            (Map<String, Object>) listTool.getInputSchema().get("properties");
+        Map<String, Object> specProp = (Map<String, Object>) props.get("spec");
+        List<String> enumValues = (List<String>) specProp.get("enum");
+        assertNotNull(enumValues);
+        assertTrue(enumValues.contains(SPEC_SALES_ORDER));
+        assertFalse(enumValues.contains(McpConstants.SPEC_DASHBOARD),
+            "handler-only spec must NOT appear in the CRUD spec enum (ETP-4284 / G4)");
+      }
+    }
+
+    /**
+     * ETP-4254 regression guard: a tab-less spec that still serves an {@code /action} route
+     * ({@code not-posted-documents}' {@code post} / {@code bulk-post}) is NOT catalog-excluded,
+     * so it must reach {@code accessibleWindowSpecs} — the enum {@code neo_action} is built
+     * from. Collapsing "handler-only" and "catalog-excluded" into one rule silently removed
+     * that action from the agent.
+     */
+    @Test
+    @DisplayName("handler-only spec with an /action route DOES reach the neo_action enum")
+    @SuppressWarnings("unchecked")
+    void actionServingHandlerOnlySpecReachesActionEnum() {
+      SFSpec actionSpec = createWindowSpec("not-posted-documents");
+      when(actionSpec.getADWindow()).thenReturn(null);
+      mockSpecCriteria(List.of(actionSpec));
+
+      try (MockedStatic<McpToolRouterSupport> supportMock =
+          mockStatic(McpToolRouterSupport.class)) {
+        supportMock.when(() -> McpToolRouterSupport.isCatalogExcludedSpec(actionSpec))
+            .thenReturn(false);
+
+        List<McpToolDefinition> tools = registry.generateTools(scopesOf("neo:write"));
+
+        McpToolDefinition actionTool = tools.stream()
+            .filter(t -> "neo_action".equals(t.getName()))
+            .findFirst()
+            .orElse(null);
+        assertNotNull(actionTool, "neo_action must be produced for an action-serving spec");
+
+        Map<String, Object> props =
+            (Map<String, Object>) actionTool.getInputSchema().get("properties");
+        Map<String, Object> specProp = (Map<String, Object>) props.get("spec");
+        List<String> enumValues = (List<String>) specProp.get("enum");
+        assertNotNull(enumValues);
+        assertTrue(enumValues.contains("not-posted-documents"),
+            "a tab-less spec that serves /action must remain callable through neo_action");
+      }
     }
 
     @Test
-    @DisplayName("a dashboard-only catalog produces no CRUD tools")
-    void dashboardOnlyCatalogProducesNoCrudTools() {
+    @DisplayName("a handler-only-spec catalog produces no CRUD tools")
+    void handlerOnlyCatalogProducesNoCrudTools() {
       SFSpec dashboardSpec = createWindowSpec(McpConstants.SPEC_DASHBOARD);
       when(dashboardSpec.getADWindow()).thenReturn(null);
       mockSpecCriteria(List.of(dashboardSpec));
 
-      List<McpToolDefinition> tools = registry.generateTools(scopesOf("neo:read"));
-      List<String> names = toolNames(tools);
+      try (MockedStatic<McpToolRouterSupport> supportMock =
+          mockStatic(McpToolRouterSupport.class)) {
+        supportMock.when(() -> McpToolRouterSupport.isCatalogExcludedSpec(dashboardSpec))
+            .thenReturn(true);
 
-      // No CRUD tools — the only specs is the dashboard, which is skipped. Only the
-      // read-scope baseline tools (neo_discover + docs + neo_widget) are present.
-      assertFalse(names.contains("neo_list"));
-      assertFalse(names.contains("neo_get"));
-      assertTrue(names.contains("neo_discover"));
-      assertTrue(names.contains("docs"));
-      assertTrue(names.contains(McpConstants.TOOL_NEO_WIDGET));
+        List<McpToolDefinition> tools = registry.generateTools(scopesOf("neo:read"));
+        List<String> names = toolNames(tools);
+
+        // No CRUD tools — the only spec is handler-only, so it is skipped. Only the
+        // read-scope baseline tools (neo_discover + docs + neo_widget) are present.
+        assertFalse(names.contains("neo_list"));
+        assertFalse(names.contains("neo_get"));
+        assertTrue(names.contains("neo_discover"));
+        assertTrue(names.contains("docs"));
+        assertTrue(names.contains(McpConstants.TOOL_NEO_WIDGET));
+      }
     }
 
     @Test

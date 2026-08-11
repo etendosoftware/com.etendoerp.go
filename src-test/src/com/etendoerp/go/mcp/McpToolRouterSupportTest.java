@@ -18,34 +18,30 @@ package com.etendoerp.go.mcp;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.when;
 
 import java.lang.reflect.Modifier;
 import java.lang.reflect.Constructor;
-import java.lang.reflect.Method;
 import java.math.BigDecimal;
-import java.util.HashMap;
+import java.util.Collections;
 import java.util.List;
-import java.util.Map;
 
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
+import org.hibernate.criterion.Criterion;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
-import org.junit.jupiter.params.ParameterizedTest;
-import org.junit.jupiter.params.provider.CsvSource;
-import org.junit.jupiter.params.provider.NullSource;
-import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.Mock;
 import org.mockito.MockedStatic;
 import org.mockito.junit.jupiter.MockitoExtension;
@@ -54,15 +50,13 @@ import org.mockito.quality.Strictness;
 import org.openbravo.base.model.Property;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
-import org.openbravo.model.ad.datamodel.Column;
 import org.openbravo.model.ad.ui.Process;
-import org.openbravo.model.ad.ui.Window;
+import org.openbravo.model.ad.ui.Tab;
 
+import com.etendoerp.go.schemaforge.NeoActionSurface;
 import com.etendoerp.go.schemaforge.NeoSelectorService;
 import com.etendoerp.go.schemaforge.data.SFEntity;
-import com.etendoerp.go.schemaforge.data.SFField;
 import com.etendoerp.go.schemaforge.data.SFSpec;
-import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
 import com.etendoerp.go.schemaforge.util.NeoReportCallability;
 
 /**
@@ -80,14 +74,6 @@ class McpToolRouterSupportTest {
     assertEquals(Modifier.PRIVATE, constructor.getModifiers() & Modifier.PRIVATE);
     constructor.setAccessible(true);
     constructor.newInstance();
-  }
-
-
-  private static Object invokeStatic(String methodName, Class<?>[] paramTypes, Object... args)
-      throws Exception {
-    Method method = McpToolRouterSupport.class.getDeclaredMethod(methodName, paramTypes);
-    method.setAccessible(true);
-    return method.invoke(null, args);
   }
 
   // ─── buildMethodsArray ──────────────────────────────────────────────
@@ -159,86 +145,81 @@ class McpToolRouterSupportTest {
     }
   }
 
-  // ─── mapColumnType ──────────────────────────────────────────────────
+  // ─── buildDiscoverEntity ────────────────────────────────────────────
 
-  @Nested
-  @DisplayName("mapColumnType")
-  class MapColumnType {
-
-    @Test
-    void nullRefIdReturnsString() {
-      assertEquals("string", McpToolRouterSupport.mapColumnType(null));
-    }
-
-    @ParameterizedTest
-    @CsvSource({
-        "'10', string",
-        "'14', string",
-        "'34', string",
-        "'11', number",
-        "'22', number",
-        "'29', number",
-        "'12', number",
-        "'800008', number",
-        "'800019', number",
-        "'20', boolean",
-        "'15', date",
-        "'16', datetime",
-        "'24', time",
-        "'28', button",
-        "'17', list",
-        "'13', id",
-        "'19', foreignKey",
-        "'18', foreignKey",
-        "'30', foreignKey"
-    })
-    void knownRefIdsMappedCorrectly(String refId, String expectedType) {
-      assertEquals(expectedType, McpToolRouterSupport.mapColumnType(refId));
-    }
-
-    @Test
-    void obuiselRefIdMapToForeignKey() {
-      assertEquals("foreignKey",
-          McpToolRouterSupport.mapColumnType(NeoSelectorService.REF_OBUISEL));
-    }
-
-    @Test
-    void unknownRefIdDefaultsToString() {
-      assertEquals("string", McpToolRouterSupport.mapColumnType("999999"));
-    }
+  @Test
+  @DisplayName("neo_discover marks bp-stats and bp-trend as read-only")
+  void getOnlyBusinessPartnerEntitiesAreExplicitlyReadOnly() throws Exception {
+    assertReadOnlyDiscoverEntity(getOnlyEntity("bp-stats"));
+    assertReadOnlyDiscoverEntity(getOnlyEntity("bp-trend"));
   }
 
-  // ─── mapSelectorType ────────────────────────────────────────────────
+  @Test
+  @DisplayName("neo_discover keeps writable tax data mutable")
+  void writableSystemDataEntityIsNotMarkedReadOnly() throws Exception {
+    SFEntity tax = writableEntity("tax");
 
-  @Nested
-  @DisplayName("mapSelectorType")
-  class MapSelectorType {
+    JSONObject discovered = McpToolRouterSupport.buildDiscoverEntity(tax);
 
-    @Test
-    void nullRefIdReturnsNull() {
-      assertNull(McpToolRouterSupport.mapSelectorType(null));
-    }
+    assertFalse(discovered.getBoolean("readOnly"));
+    assertTrue(arrayContains(discovered.getJSONArray("methods"), "POST"));
+  }
 
-    @ParameterizedTest
-    @CsvSource({
-        "'19', TableDir",
-        "'18', Table",
-        "'30', Search"
-    })
-    void knownRefIdsMappedCorrectly(String refId, String expectedType) {
-      assertEquals(expectedType, McpToolRouterSupport.mapSelectorType(refId));
-    }
+  @Test
+  @DisplayName("neo_discover marks every individually writable entity as mutable")
+  void eachMutationMethodPreventsReadOnly() throws Exception {
+    assertMutableDiscoverEntity(entityWithMethods("post-only", true, false, true, false, false, false));
+    assertMutableDiscoverEntity(entityWithMethods("put-only", true, false, false, true, false, false));
+    assertMutableDiscoverEntity(entityWithMethods("patch-only", true, false, false, false, true, false));
+    assertMutableDiscoverEntity(entityWithMethods("delete-only", true, false, false, false, false, true));
+  }
 
-    @Test
-    void obuiselRefIdMapsToOBUISEL() {
-      assertEquals("OBUISEL",
-          McpToolRouterSupport.mapSelectorType(NeoSelectorService.REF_OBUISEL));
-    }
+  @Test
+  @DisplayName("neo_discover does not label a fully disabled entity read-only")
+  void entityWithoutReadOrWriteMethodsIsNotMarkedReadOnly() throws Exception {
+    SFEntity disabled = entityWithMethods("disabled", false, false, false, false, false, false);
 
-    @Test
-    void unknownRefIdReturnsNull() {
-      assertNull(McpToolRouterSupport.mapSelectorType("99"));
-    }
+    JSONObject discovered = McpToolRouterSupport.buildDiscoverEntity(disabled);
+
+    assertFalse(discovered.getBoolean("readOnly"));
+  }
+
+  private SFEntity getOnlyEntity(String name) {
+    return entityWithMethods(name, true, false, false, false, false, false);
+  }
+
+  private SFEntity writableEntity(String name) {
+    return entityWithMethods(name, true, true, true, true, true, true);
+  }
+
+  private SFEntity entityWithMethods(String name, boolean get, boolean getById, boolean post,
+      boolean put, boolean patch, boolean delete) {
+    SFEntity entity = mock(SFEntity.class);
+    when(entity.getName()).thenReturn(name);
+    when(entity.isGet()).thenReturn(get);
+    when(entity.isGetByID()).thenReturn(getById);
+    when(entity.isPost()).thenReturn(post);
+    when(entity.isPut()).thenReturn(put);
+    when(entity.isPatch()).thenReturn(patch);
+    when(entity.isDelete()).thenReturn(delete);
+    return entity;
+  }
+
+  private void assertReadOnlyDiscoverEntity(SFEntity entity) throws Exception {
+    JSONObject discovered = McpToolRouterSupport.buildDiscoverEntity(entity);
+
+    assertTrue(discovered.getBoolean("readOnly"));
+    JSONArray methods = discovered.getJSONArray("methods");
+    assertEquals(1, methods.length());
+    assertTrue(arrayContains(methods, "GET"));
+    assertFalse(arrayContains(methods, "POST"));
+    assertFalse(arrayContains(methods, "PUT"));
+    assertFalse(arrayContains(methods, "PATCH"));
+    assertFalse(arrayContains(methods, "DELETE"));
+  }
+
+  private void assertMutableDiscoverEntity(SFEntity entity) throws Exception {
+    assertFalse(McpToolRouterSupport.buildDiscoverEntity(entity).getBoolean("readOnly"));
   }
 
   // ─── hasSpecAccess ──────────────────────────────────────────────────
@@ -248,24 +229,40 @@ class McpToolRouterSupportTest {
   class HasSpecAccess {
 
     private MockedStatic<NeoAccessUtils> accessMock;
+    private MockedStatic<OBDal> obDalMock;
 
     @BeforeEach
     void setUp() {
       accessMock = mockStatic(NeoAccessUtils.class);
+      // ETP-4254: the "W" branch now also consults isCatalogExcludedSpec, which queries
+      // ETGO_SF_ENTITY. Default every spec to "no included entities", meaning no evidence of a
+      // handler-only spec, so the pre-existing access-tiering assertions below stay unchanged.
+      // The catalog-exclusion tests override this stub with real entities.
+      obDalMock = mockStatic(OBDal.class);
+      OBDal obDal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(obDal);
+      stubEntityCriteria(obDal, Collections.emptyList());
     }
 
     @AfterEach
     void tearDown() {
       accessMock.close();
+      obDalMock.close();
     }
 
+    /**
+     * ETP-4510 BUG-3: {@code hasSpecAccess}'s "W" branch now delegates entirely to
+     * {@link NeoAccessUtils#hasWindowAccessForSpec(SFSpec, String)}, which covers both
+     * ordinary window specs and windowless/custom "combination" specs in one call —
+     * it must run unconditionally (never skipped just because {@code spec.getADWindow()}
+     * is null). The windowless tiering rules themselves are unit-tested directly on
+     * {@code NeoAccessHelperTest#hasWindowAccessForSpec}; here we only verify the
+     * delegation and method threading.
+     */
     @Test
     void windowSpecWithAccessReturnsTrue() {
       SFSpec spec = mock(SFSpec.class);
-      Window window = mock(Window.class);
-      when(spec.getADWindow()).thenReturn(window);
-      when(window.getId()).thenReturn("win-1");
-      accessMock.when(() -> NeoAccessUtils.hasWindowAccess("win-1")).thenReturn(true);
+      accessMock.when(() -> NeoAccessUtils.hasWindowAccessForSpec(spec, "GET")).thenReturn(true);
 
       assertTrue(McpToolRouterSupport.hasSpecAccess(spec, "W"));
     }
@@ -273,20 +270,92 @@ class McpToolRouterSupportTest {
     @Test
     void windowSpecWithoutAccessReturnsFalse() {
       SFSpec spec = mock(SFSpec.class);
-      Window window = mock(Window.class);
-      when(spec.getADWindow()).thenReturn(window);
-      when(window.getId()).thenReturn("win-2");
-      accessMock.when(() -> NeoAccessUtils.hasWindowAccess("win-2")).thenReturn(false);
+      accessMock.when(() -> NeoAccessUtils.hasWindowAccessForSpec(spec, "GET")).thenReturn(false);
 
       assertFalse(McpToolRouterSupport.hasSpecAccess(spec, "W"));
     }
 
+    /**
+     * ETP-4510 BUG-3: a windowless spec (spec.getADWindow() == null) no longer skips the
+     * check unconditionally — it is now routed through hasWindowAccessForSpec, which
+     * itself decides (based on combination data / no-role) whether to allow. This test
+     * only proves the delegation happens; the windowless decision logic lives in
+     * NeoAccessHelperTest.
+     */
     @Test
-    void windowSpecWithNullWindowReturnsTrue() {
+    void windowlessSpecDelegatesToHasWindowAccessForSpec() {
       SFSpec spec = mock(SFSpec.class);
       when(spec.getADWindow()).thenReturn(null);
+      accessMock.when(() -> NeoAccessUtils.hasWindowAccessForSpec(spec, "GET")).thenReturn(true);
 
       assertTrue(McpToolRouterSupport.hasSpecAccess(spec, "W"));
+    }
+
+    /**
+     * ETP-4510: the 2-arg overload defaults to a GET/read-tier check — a read-only
+     * {@code AD_Window_Access} role must still see the spec in discovery/listing.
+     */
+    @Test
+    void twoArgOverloadDefaultsToGetMethod() {
+      SFSpec spec = mock(SFSpec.class);
+      accessMock.when(() -> NeoAccessUtils.hasWindowAccessForSpec(spec, "GET")).thenReturn(true);
+      accessMock.when(() -> NeoAccessUtils.hasWindowAccessForSpec(spec, "POST")).thenReturn(false);
+
+      assertTrue(McpToolRouterSupport.hasSpecAccess(spec, "W"));
+    }
+
+    /**
+     * ETP-4510 (BLOCKER fix): a write-tier check (POST/PUT/DELETE) for a window spec
+     * must thread the HTTP-method-equivalent through to
+     * {@link NeoAccessUtils#hasWindowAccessForSpec(SFSpec, String)} so a read-only
+     * {@code AD_Window_Access} role is denied — this is the exact gap that let MCP
+     * neo_create/neo_update/neo_delete/neo_batch bypass the REST tiering.
+     */
+    @Test
+    void windowSpecWriteMethodDeniedForReadOnlyAccess() {
+      SFSpec spec = mock(SFSpec.class);
+      accessMock.when(() -> NeoAccessUtils.hasWindowAccessForSpec(spec, "GET")).thenReturn(true);
+      accessMock.when(() -> NeoAccessUtils.hasWindowAccessForSpec(spec, "POST")).thenReturn(false);
+      accessMock.when(() -> NeoAccessUtils.hasWindowAccessForSpec(spec, "PUT")).thenReturn(false);
+      accessMock.when(() -> NeoAccessUtils.hasWindowAccessForSpec(spec, "DELETE")).thenReturn(false);
+
+      assertTrue(McpToolRouterSupport.hasSpecAccess(spec, "W", "GET"));
+      assertFalse(McpToolRouterSupport.hasSpecAccess(spec, "W", "POST"));
+      assertFalse(McpToolRouterSupport.hasSpecAccess(spec, "W", "PUT"));
+      assertFalse(McpToolRouterSupport.hasSpecAccess(spec, "W", "DELETE"));
+    }
+
+    /**
+     * ETP-4510: a full-access (read/write) role passes every method tier.
+     */
+    @Test
+    void windowSpecWriteMethodAllowedForFullAccess() {
+      SFSpec spec = mock(SFSpec.class);
+      accessMock.when(() -> NeoAccessUtils.hasWindowAccessForSpec(spec, "GET")).thenReturn(true);
+      accessMock.when(() -> NeoAccessUtils.hasWindowAccessForSpec(spec, "POST")).thenReturn(true);
+      accessMock.when(() -> NeoAccessUtils.hasWindowAccessForSpec(spec, "PUT")).thenReturn(true);
+      accessMock.when(() -> NeoAccessUtils.hasWindowAccessForSpec(spec, "DELETE")).thenReturn(true);
+
+      assertTrue(McpToolRouterSupport.hasSpecAccess(spec, "W", "GET"));
+      assertTrue(McpToolRouterSupport.hasSpecAccess(spec, "W", "POST"));
+      assertTrue(McpToolRouterSupport.hasSpecAccess(spec, "W", "PUT"));
+      assertTrue(McpToolRouterSupport.hasSpecAccess(spec, "W", "DELETE"));
+    }
+
+    /**
+     * ETP-4510: process/report specs remain binary regardless of the method passed —
+     * the write-tier method string must not accidentally change process authorization.
+     */
+    @Test
+    void processSpecIgnoresHttpMethod() {
+      SFSpec spec = mock(SFSpec.class);
+      Process process = mock(Process.class);
+      when(spec.getProcess()).thenReturn(process);
+      when(process.getId()).thenReturn("proc-3");
+      accessMock.when(() -> NeoAccessUtils.hasProcessAccess("proc-3")).thenReturn(true);
+
+      assertTrue(McpToolRouterSupport.hasSpecAccess(spec, "P", "POST"));
+      assertTrue(McpToolRouterSupport.hasSpecAccess(spec, "P", "DELETE"));
     }
 
     @Test
@@ -300,15 +369,41 @@ class McpToolRouterSupportTest {
       assertTrue(McpToolRouterSupport.hasSpecAccess(spec, "P"));
     }
 
+    /**
+     * ETP-4596: the "R" branch now delegates to {@link NeoAccessUtils#hasReportSpecAccess}
+     * rather than calling {@code hasProcessAccess} directly — this proves the delegation and
+     * method threading; the tiering rules themselves are unit-tested on
+     * {@code NeoAccessHelperTest#hasReportSpecAccess}.
+     */
     @Test
-    void reportSpecDelegatesToProcessAccess() {
+    void reportSpecDelegatesToHasReportSpecAccess_allow() {
       SFSpec spec = mock(SFSpec.class);
-      Process process = mock(Process.class);
-      when(spec.getProcess()).thenReturn(process);
-      when(process.getId()).thenReturn("proc-2");
-      accessMock.when(() -> NeoAccessUtils.hasProcessAccess("proc-2")).thenReturn(false);
+      accessMock.when(() -> NeoAccessUtils.hasReportSpecAccess(spec, "GET")).thenReturn(true);
+
+      assertTrue(McpToolRouterSupport.hasSpecAccess(spec, "R"));
+    }
+
+    @Test
+    void reportSpecDelegatesToHasReportSpecAccess_deny() {
+      SFSpec spec = mock(SFSpec.class);
+      accessMock.when(() -> NeoAccessUtils.hasReportSpecAccess(spec, "GET")).thenReturn(false);
 
       assertFalse(McpToolRouterSupport.hasSpecAccess(spec, "R"));
+    }
+
+    /**
+     * ETP-4596: the write-tier method must thread through to
+     * {@code hasReportSpecAccess} for a process-less report spec exactly like it does for a
+     * "W" spec — the constituent-window check honors read-only vs. full-access tiering too.
+     */
+    @Test
+    void reportSpecThreadsHttpMethodToHasReportSpecAccess() {
+      SFSpec spec = mock(SFSpec.class);
+      accessMock.when(() -> NeoAccessUtils.hasReportSpecAccess(spec, "GET")).thenReturn(true);
+      accessMock.when(() -> NeoAccessUtils.hasReportSpecAccess(spec, "POST")).thenReturn(false);
+
+      assertTrue(McpToolRouterSupport.hasSpecAccess(spec, "R", "GET"));
+      assertFalse(McpToolRouterSupport.hasSpecAccess(spec, "R", "POST"));
     }
 
     @Test
@@ -318,43 +413,310 @@ class McpToolRouterSupportTest {
     }
 
     /**
-     * ETP-4284 / G4: the dashboard (widget) spec is handler-backed (no AD_Tab) and is
-     * surfaced via neo_widget, so it must be excluded from the type-W CRUD discovery
-     * catalog regardless of window access.
+     * ETP-4284 / G4 + ETP-4254: a handler-only window spec (the dashboard's widgets, whose
+     * entities have no AD_Tab) is surfaced via neo_widget, so it must be excluded from the
+     * type-W CRUD discovery catalog regardless of window access. ETP-4254 replaced the
+     * hardcoded {@code "dashboard"} name match with this data-driven test, so the spec is
+     * built here with handler-only entities rather than with the magic name.
      */
     @Test
-    void dashboardWidgetSpecIsExcludedFromDiscovery() {
+    void handlerOnlyWindowSpecIsExcludedFromDiscovery() {
       SFSpec spec = mock(SFSpec.class);
       when(spec.getName()).thenReturn(McpConstants.SPEC_DASHBOARD);
+      when(spec.getId()).thenReturn("spec-dashboard");
+      // Window access deliberately GRANTED, so the exclusion can only come from the
+      // handler-only rule and not from a missing access stub.
+      accessMock.when(() -> NeoAccessUtils.hasWindowAccessForSpec(spec, "GET")).thenReturn(true);
+      stubEntityCriteria(OBDal.getInstance(), List.of(handlerOnlyEntity()));
 
       assertFalse(McpToolRouterSupport.hasSpecAccess(spec, "W"),
-          "dashboard/widget spec must never surface through the W discovery catalog");
+          "handler-only (widget) spec must never surface through the W discovery catalog");
+    }
+
+    /**
+     * ETP-4254 regression guard: "handler-only" alone must NOT hide a spec. A tab-less spec
+     * whose handler serves ACTION requests ({@code not-posted-documents}' {@code post} /
+     * {@code bulk-post}) has a genuine agentic surface, and this very gate also guards
+     * {@code neo_action} ({@code McpToolRouter#route}) — excluding it would take a
+     * transactional business action away from agents, the opposite of ETP-4254's goal.
+     */
+    @Test
+    void handlerOnlySpecWithAnActionRouteStaysDiscoverable() {
+      SFSpec spec = mock(SFSpec.class);
+      when(spec.getName()).thenReturn("not-posted-documents");
+      when(spec.getId()).thenReturn("spec-not-posted");
+      accessMock.when(() -> NeoAccessUtils.hasWindowAccessForSpec(spec, "GET")).thenReturn(true);
+      stubEntityCriteria(OBDal.getInstance(), List.of(handlerOnlyEntity()));
+
+      try (MockedStatic<NeoActionSurface> actionMock = mockStatic(NeoActionSurface.class)) {
+        actionMock.when(() -> NeoActionSurface.hasActionSurface(anyList())).thenReturn(true);
+
+        assertTrue(McpToolRouterSupport.hasSpecAccess(spec, "W"),
+            "a tab-less spec that still serves /action must stay in the agentic catalog");
+      }
+    }
+
+    /**
+     * ETP-4254 regression guard: a read-only monitor spec (AD_Tab-backed entities, every
+     * mutation flag off) must STILL be readable and discoverable. Only its write catalog
+     * entry is removed — collapsing the two rules into one would have hidden the SII /
+     * VeriFactu monitors from the agent entirely.
+     */
+    @Test
+    void readOnlyWindowSpecStaysDiscoverable() {
+      SFSpec spec = mock(SFSpec.class);
+      when(spec.getName()).thenReturn("monitor-verifactu");
+      when(spec.getId()).thenReturn("spec-monitor");
+      accessMock.when(() -> NeoAccessUtils.hasWindowAccessForSpec(spec, "GET")).thenReturn(true);
+      stubEntityCriteria(OBDal.getInstance(), List.of(tabBackedEntity(false)));
+
+      assertTrue(McpToolRouterSupport.hasSpecAccess(spec, "W"));
+    }
+
+    /**
+     * ETP-4254: report specs are handler-only by design (NeoReportCallability resolves them
+     * through a Java_Qualifier, they have no AD_Tab), so the handler-only exclusion must be
+     * scoped to type W. Applying it to type R would delete every report from discovery.
+     */
+    @Test
+    void reportSpecIsNotSubjectToTheHandlerOnlyExclusion() {
+      SFSpec spec = mock(SFSpec.class);
+      Process process = mock(Process.class);
+      when(spec.getProcess()).thenReturn(process);
+      when(process.getId()).thenReturn("proc-report");
+      accessMock.when(() -> NeoAccessUtils.hasProcessAccess("proc-report")).thenReturn(true);
+      // ETP-4596: hasSpecAccess's "R" branch now delegates to hasReportSpecAccess (which
+      // internally resolves to hasProcessAccess for a process-backed spec), not directly to
+      // hasProcessAccess — stub the entry point the code actually calls.
+      accessMock.when(() -> NeoAccessUtils.hasReportSpecAccess(spec, "GET")).thenReturn(true);
+
+      assertTrue(McpToolRouterSupport.hasSpecAccess(spec, "R"));
     }
   }
 
-  // ─── isWidgetSpec ───────────────────────────────────────────────────
+  // ─── isHandlerOnlySpec / isReadOnlySpec (ETP-4254) ──────────────────
 
+  /**
+   * The two data-driven catalog predicates that replaced the hardcoded
+   * {@code McpConstants.SPEC_DASHBOARD} literal in {@code isWidgetSpec}.
+   *
+   * <p>Both are deliberately conservative: they fire only on positive evidence (the spec HAS
+   * included entities and none of them qualifies). An empty list or a failed lookup keeps the
+   * spec in the catalog, because the authoritative refusal is
+   * {@code requireMethodEnabled}, not the catalog shape.</p>
+   */
   @Nested
-  @DisplayName("isWidgetSpec (ETP-4284 / G4)")
-  class IsWidgetSpec {
+  @DisplayName("isHandlerOnlySpec / isReadOnlySpec (ETP-4254)")
+  class SpecLevelPredicates {
 
-    @Test
-    void dashboardSpecIsWidgetSpec() {
+    @Mock private OBDal mockOBDal;
+    private MockedStatic<OBDal> obDalMock;
+
+    @BeforeEach
+    void setUp() {
+      obDalMock = mockStatic(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(mockOBDal);
+    }
+
+    @AfterEach
+    void tearDown() {
+      obDalMock.close();
+    }
+
+    private SFSpec spec(String name) {
       SFSpec spec = mock(SFSpec.class);
-      when(spec.getName()).thenReturn(McpConstants.SPEC_DASHBOARD);
-      assertTrue(McpToolRouterSupport.isWidgetSpec(spec));
+      when(spec.getName()).thenReturn(name);
+      when(spec.getId()).thenReturn(name + "-id");
+      return spec;
     }
 
     @Test
-    void otherSpecIsNotWidgetSpec() {
+    @DisplayName("a spec whose every entity lacks an AD_Tab is handler-only")
+    void allHandlerEntitiesMakeTheSpecHandlerOnly() {
+      stubEntityCriteria(mockOBDal, List.of(handlerOnlyEntity(), handlerOnlyEntity()));
+
+      assertTrue(McpToolRouterSupport.isHandlerOnlySpec(spec("dashboard")));
+    }
+
+    @Test
+    @DisplayName("one AD_Tab-backed entity is enough to make the spec CRUD-servable")
+    void oneTabBackedEntityDisqualifiesHandlerOnly() {
+      stubEntityCriteria(mockOBDal, List.of(handlerOnlyEntity(), tabBackedEntity(true)));
+
+      assertFalse(McpToolRouterSupport.isHandlerOnlySpec(spec("sales-order")));
+    }
+
+    @Test
+    @DisplayName("no entities is not evidence of a handler-only spec")
+    void emptyEntityListIsNotHandlerOnly() {
+      stubEntityCriteria(mockOBDal, Collections.emptyList());
+
+      assertFalse(McpToolRouterSupport.isHandlerOnlySpec(spec("empty")));
+    }
+
+    /**
+     * The catalog exclusion needs BOTH conditions. Being handler-only is the cheap shape test;
+     * the action probe is what separates {@code dashboard} (no agentic surface at all) from
+     * {@code not-posted-documents} (tab-less, but serves {@code post} / {@code bulk-post}).
+     */
+    @Test
+    @DisplayName("handler-only AND actionless is excluded from the catalog")
+    void handlerOnlyAndActionlessSpecIsCatalogExcluded() {
+      stubEntityCriteria(mockOBDal, List.of(handlerOnlyEntity(), handlerOnlyEntity()));
+
+      try (MockedStatic<NeoActionSurface> actionMock = mockStatic(NeoActionSurface.class)) {
+        actionMock.when(() -> NeoActionSurface.hasActionSurface(anyList())).thenReturn(false);
+
+        assertTrue(McpToolRouterSupport.isCatalogExcludedSpec(spec("dashboard")));
+      }
+    }
+
+    @Test
+    @DisplayName("handler-only but with an /action route stays in the catalog")
+    void handlerOnlySpecWithActionRouteIsNotCatalogExcluded() {
+      stubEntityCriteria(mockOBDal, List.of(handlerOnlyEntity()));
+
+      try (MockedStatic<NeoActionSurface> actionMock = mockStatic(NeoActionSurface.class)) {
+        actionMock.when(() -> NeoActionSurface.hasActionSurface(anyList())).thenReturn(true);
+
+        assertFalse(McpToolRouterSupport.isCatalogExcludedSpec(spec("not-posted-documents")));
+      }
+    }
+
+    /** The cheap shape test short-circuits, so an ordinary window never pays the CDI probe. */
+    @Test
+    @DisplayName("an AD_Tab-backed spec is never catalog-excluded and skips the action probe")
+    void tabBackedSpecSkipsTheActionProbe() {
+      stubEntityCriteria(mockOBDal, List.of(tabBackedEntity(true)));
+
+      try (MockedStatic<NeoActionSurface> actionMock = mockStatic(NeoActionSurface.class)) {
+        assertFalse(McpToolRouterSupport.isCatalogExcludedSpec(spec("sales-order")));
+
+        actionMock.verifyNoInteractions();
+      }
+    }
+
+    @Test
+    void nullSpecIsNotCatalogExcluded() {
+      assertFalse(McpToolRouterSupport.isCatalogExcludedSpec(null));
+    }
+
+    @Test
+    @DisplayName("a spec with no mutable entity is read-only (ETP-4254 AC#1)")
+    void allImmutableEntitiesMakeTheSpecReadOnly() {
+      stubEntityCriteria(mockOBDal, List.of(tabBackedEntity(false), tabBackedEntity(false)));
+
+      assertTrue(McpToolRouterSupport.isReadOnlySpec(spec("sii-monitor")));
+    }
+
+    @Test
+    @DisplayName("one mutable entity keeps the whole spec writable")
+    void oneMutableEntityKeepsTheSpecWritable() {
+      stubEntityCriteria(mockOBDal, List.of(tabBackedEntity(false), tabBackedEntity(true)));
+
+      assertFalse(McpToolRouterSupport.isReadOnlySpec(spec("sales-order")));
+    }
+
+    @Test
+    @DisplayName("per-method capability reports only the verbs enabled by an entity")
+    void perMethodCapabilityUsesTheExactEntityFlag() {
+      SFEntity putOnly = tabBackedEntity(false);
+      when(putOnly.isPut()).thenReturn(true);
+      when(putOnly.isPatch()).thenReturn(true);
+      stubEntityCriteria(mockOBDal, List.of(tabBackedEntity(false), putOnly));
+      SFSpec spec = spec("monitor-verifactu");
+
+      assertFalse(McpToolRouterSupport.hasEntityWithMethod(spec, "POST"));
+      assertTrue(McpToolRouterSupport.hasEntityWithMethod(spec, "PUT"));
+      assertFalse(McpToolRouterSupport.hasEntityWithMethod(spec, "DELETE"));
+    }
+
+    @Test
+    @DisplayName("no entities is not evidence of a read-only spec")
+    void emptyEntityListIsNotReadOnly() {
+      stubEntityCriteria(mockOBDal, Collections.emptyList());
+
+      assertFalse(McpToolRouterSupport.isReadOnlySpec(spec("empty")));
+    }
+
+    @Test
+    @DisplayName("a failed entity lookup degrades to 'no evidence' for both predicates")
+    void lookupFailureDegradesToNoEvidence() {
+      when(mockOBDal.createCriteria(SFEntity.class))
+          .thenThrow(new IllegalStateException("no session"));
+
+      assertFalse(McpToolRouterSupport.isHandlerOnlySpec(spec("boom")));
+      assertFalse(McpToolRouterSupport.isReadOnlySpec(spec("boom")));
+    }
+
+    @Test
+    void nullSpecIsNeitherHandlerOnlyNorReadOnly() {
+      assertFalse(McpToolRouterSupport.isHandlerOnlySpec((SFSpec) null));
+      assertFalse(McpToolRouterSupport.isReadOnlySpec((SFSpec) null));
+    }
+
+    /** The list overloads are the single implementation; null/empty means "no evidence". */
+    @Test
+    void handlerOnlyListOverloadTreatsNullAndEmptyAsNoEvidence() {
+      assertFalse(McpToolRouterSupport.isHandlerOnlySpec((List<SFEntity>) null));
+      assertFalse(McpToolRouterSupport.isHandlerOnlySpec(Collections.emptyList()));
+    }
+
+    /** The list overload is the single implementation; null/empty means "no evidence". */
+    @Test
+    void listOverloadTreatsNullAndEmptyAsNoEvidence() {
+      assertFalse(McpToolRouterSupport.isReadOnlySpec((List<SFEntity>) null));
+      assertFalse(McpToolRouterSupport.isReadOnlySpec(Collections.emptyList()));
+      assertTrue(McpToolRouterSupport.isReadOnlySpec(List.of(tabBackedEntity(false))));
+      assertFalse(McpToolRouterSupport.isReadOnlySpec(List.of(tabBackedEntity(true))));
+    }
+  }
+
+  // ─── requireMethodEnabled (ETP-4254) ────────────────────────────────
+
+  /**
+   * The MCP-side entity method gate. Mirrors the REST {@code 405} in
+   * {@code NeoCrudHandler#handleWindowEntityCrud}, but reports the refusal as an explained
+   * MCP tool error so the agent knows the entity is read-only and must not retry.
+   */
+  @Nested
+  @DisplayName("requireMethodEnabled (ETP-4254)")
+  class RequireMethodEnabled {
+
+    @Test
+    @DisplayName("an enabled method passes silently")
+    void enabledMethodPasses() {
       SFSpec spec = mock(SFSpec.class);
       when(spec.getName()).thenReturn("sales-order");
-      assertFalse(McpToolRouterSupport.isWidgetSpec(spec));
+
+      McpToolRouterSupport.requireMethodEnabled(spec, tabBackedEntity(true), "POST");
     }
 
     @Test
-    void nullSpecIsNotWidgetSpec() {
-      assertFalse(McpToolRouterSupport.isWidgetSpec(null));
+    @DisplayName("a read-only entity refuses POST, PUT and DELETE with an explained error")
+    void readOnlyEntityRefusesEveryWrite() {
+      SFSpec spec = mock(SFSpec.class);
+      when(spec.getName()).thenReturn("monitor-verifactu");
+      SFEntity entity = tabBackedEntity(false);
+
+      for (String method : List.of("POST", "PUT", "DELETE")) {
+        org.openbravo.base.exception.OBException ex = assertThrows(
+            org.openbravo.base.exception.OBException.class,
+            () -> McpToolRouterSupport.requireMethodEnabled(spec, entity, method));
+
+        assertTrue(ex.getMessage().contains("monitor-verifactu"), ex.getMessage());
+        assertTrue(ex.getMessage().contains("does not enable " + method), ex.getMessage());
+        assertTrue(ex.getMessage().contains("read-only"), ex.getMessage());
+      }
+    }
+
+    @Test
+    @DisplayName("GET is still allowed on a read-only entity")
+    void readOnlyEntityStillAllowsGet() {
+      SFSpec spec = mock(SFSpec.class);
+      when(spec.getName()).thenReturn("monitor-verifactu");
+
+      McpToolRouterSupport.requireMethodEnabled(spec, tabBackedEntity(false), "GET");
     }
   }
 
@@ -370,7 +732,7 @@ class McpToolRouterSupportTest {
       when(spec.getName()).thenReturn("sales-order");
       when(spec.getDescription()).thenReturn("Sales Order");
 
-      JSONObject result = McpToolRouterSupport.buildDiscoverSpec(spec, "W", null);
+      JSONObject result = McpToolRouterSupport.buildDiscoverSpec(spec, "W", null, null, null);
       assertEquals("sales-order", result.getString("name"));
       assertEquals("W", result.getString("type"));
       assertEquals("Sales Order", result.getString("description"));
@@ -382,7 +744,7 @@ class McpToolRouterSupportTest {
       when(spec.getName()).thenReturn("test");
       when(spec.getDescription()).thenReturn(null);
 
-      JSONObject result = McpToolRouterSupport.buildDiscoverSpec(spec, "W", null);
+      JSONObject result = McpToolRouterSupport.buildDiscoverSpec(spec, "W", null, null, null);
       assertFalse(result.has("description"));
     }
 
@@ -394,7 +756,7 @@ class McpToolRouterSupportTest {
       JSONArray entities = new JSONArray();
       entities.put(new JSONObject().put("name", "header"));
 
-      JSONObject result = McpToolRouterSupport.buildDiscoverSpec(spec, "W", entities);
+      JSONObject result = McpToolRouterSupport.buildDiscoverSpec(spec, "W", entities, null, null);
       assertTrue(result.has("entities"));
       assertEquals(1, result.getJSONArray("entities").length());
     }
@@ -405,8 +767,136 @@ class McpToolRouterSupportTest {
       when(spec.getName()).thenReturn("test");
       when(spec.getDescription()).thenReturn(null);
 
-      JSONObject result = McpToolRouterSupport.buildDiscoverSpec(spec, "W", null);
+      JSONObject result = McpToolRouterSupport.buildDiscoverSpec(spec, "W", null, null, null);
       assertFalse(result.has("entities"));
+    }
+
+    /**
+     * IMP-9: {@code primaryEntity} is derived and passed in by the caller (handleDiscover), not
+     * computed inside buildDiscoverSpec — this method stays DAL-free (ETP-4601 regression fix).
+     * When entities are provided and a primaryEntity is given, it is surfaced.
+     */
+    @Test
+    void primaryEntityIsIncludedWhenProvidedAlongsideEntities() throws Exception {
+      SFSpec spec = mock(SFSpec.class);
+      when(spec.getName()).thenReturn("test");
+      when(spec.getDescription()).thenReturn(null);
+      JSONArray entities = new JSONArray();
+      entities.put(new JSONObject().put("name", "header"));
+
+      JSONObject result = McpToolRouterSupport.buildDiscoverSpec(spec, "W", entities, "header", null);
+      assertEquals("header", result.getString("primaryEntity"));
+    }
+
+    /** A null primaryEntity (e.g. a spec with no included entities) omits the key entirely. */
+    @Test
+    void nullPrimaryEntityOmitsKey() throws Exception {
+      SFSpec spec = mock(SFSpec.class);
+      when(spec.getName()).thenReturn("test");
+      when(spec.getDescription()).thenReturn(null);
+      JSONArray entities = new JSONArray();
+      entities.put(new JSONObject().put("name", "header"));
+
+      JSONObject result = McpToolRouterSupport.buildDiscoverSpec(spec, "W", entities, null, null);
+      assertFalse(result.has("primaryEntity"));
+    }
+
+    /** A primaryEntity is only ever surfaced alongside entities — never for a non-W spec. */
+    @Test
+    void primaryEntityIgnoredWhenEntitiesNull() throws Exception {
+      SFSpec spec = mock(SFSpec.class);
+      when(spec.getName()).thenReturn("test");
+      when(spec.getDescription()).thenReturn(null);
+
+      JSONObject result = McpToolRouterSupport.buildDiscoverSpec(spec, "W", null, "header", null);
+      assertFalse(result.has("primaryEntity"));
+    }
+
+    // ── ETP-4254 AC#4: spec-level readOnly marker ──────────────────────
+
+    /**
+     * AC#4: an agent scanning {@code neo_discover} must be able to tell writable W specs from
+     * read-only ones without inspecting every entity of every spec.
+     */
+    @Test
+    @DisplayName("a W spec with no mutable entity carries readOnly:true")
+    void readOnlyWindowSpecCarriesTheMarker() throws Exception {
+      SFSpec spec = mock(SFSpec.class);
+      when(spec.getName()).thenReturn("monitor-verifactu");
+
+      JSONObject result = McpToolRouterSupport.buildDiscoverSpec(spec, "W",
+          new JSONArray(), null, List.of(tabBackedEntity(false), tabBackedEntity(false)));
+
+      assertTrue(result.getBoolean("readOnly"));
+    }
+
+    /**
+     * The key must be emitted ONLY when true — the ~44 writable W specs stay byte-identical,
+     * and the negative case is already carried per entity inside {@code entities}.
+     */
+    @Test
+    @DisplayName("a writable W spec omits the readOnly key entirely")
+    void writableWindowSpecOmitsTheMarker() throws Exception {
+      SFSpec spec = mock(SFSpec.class);
+      when(spec.getName()).thenReturn("sales-order");
+
+      JSONObject result = McpToolRouterSupport.buildDiscoverSpec(spec, "W",
+          new JSONArray(), null, List.of(tabBackedEntity(false), tabBackedEntity(true)));
+
+      assertFalse(result.has("readOnly"),
+          "readOnly:false must not be added as noise to writable specs");
+    }
+
+    @Test
+    @DisplayName("a W spec with no included entities omits the readOnly key")
+    void emptyEntityListOmitsTheMarker() throws Exception {
+      SFSpec spec = mock(SFSpec.class);
+      when(spec.getName()).thenReturn("empty");
+
+      JSONObject result = McpToolRouterSupport.buildDiscoverSpec(spec, "W",
+          new JSONArray(), null, Collections.emptyList());
+
+      assertFalse(result.has("readOnly"));
+    }
+
+    /**
+     * The marker is scoped to type W: a report spec already advertises its nature through
+     * {@code isReport}/{@code callable} and must not gain a readOnly key.
+     */
+    @Test
+    @DisplayName("a report spec never gets the readOnly marker")
+    void reportSpecNeverGetsTheMarker() throws Exception {
+      SFSpec spec = mock(SFSpec.class);
+      when(spec.getName()).thenReturn("aging-report");
+
+      try (MockedStatic<NeoReportCallability> callabilityMock =
+          mockStatic(NeoReportCallability.class)) {
+        callabilityMock.when(() -> NeoReportCallability.isReportCallable(spec)).thenReturn(false);
+        callabilityMock.when(() -> NeoReportCallability.buildNotConfiguredMessage("aging-report"))
+            .thenReturn("not configured");
+
+        JSONObject result = McpToolRouterSupport.buildDiscoverSpec(spec, "R", null, null,
+            List.of(tabBackedEntity(false)));
+
+        assertFalse(result.has("readOnly"));
+      }
+    }
+
+    /**
+     * The marker must cost no extra query: it is derived from the very list the entity summary
+     * was built from. This test proves the code path never touches OBDal — OBDal is NOT mocked
+     * here, so any query would blow up instead of quietly returning a mock.
+     */
+    @Test
+    @DisplayName("the marker is derived from the passed list, not from a fresh query")
+    void markerIsDerivedWithoutQuerying() throws Exception {
+      SFSpec spec = mock(SFSpec.class);
+      when(spec.getName()).thenReturn("sii-monitor");
+
+      JSONObject result = McpToolRouterSupport.buildDiscoverSpec(spec, "W",
+          new JSONArray(), null, List.of(tabBackedEntity(false)));
+
+      assertTrue(result.getBoolean("readOnly"));
     }
 
     @Test
@@ -419,7 +909,7 @@ class McpToolRouterSupportTest {
           mockStatic(NeoReportCallability.class)) {
         callabilityMock.when(() -> NeoReportCallability.isReportCallable(spec)).thenReturn(true);
 
-        JSONObject result = McpToolRouterSupport.buildDiscoverSpec(spec, "R", null);
+        JSONObject result = McpToolRouterSupport.buildDiscoverSpec(spec, "R", null, null, null);
         assertTrue(result.getBoolean("isReport"));
       }
     }
@@ -438,7 +928,7 @@ class McpToolRouterSupportTest {
           mockStatic(NeoReportCallability.class)) {
         callabilityMock.when(() -> NeoReportCallability.isReportCallable(spec)).thenReturn(true);
 
-        JSONObject result = McpToolRouterSupport.buildDiscoverSpec(spec, "R", null);
+        JSONObject result = McpToolRouterSupport.buildDiscoverSpec(spec, "R", null, null, null);
 
         assertTrue(result.getBoolean("isReport"));
         assertTrue(result.getBoolean("callable"));
@@ -463,12 +953,57 @@ class McpToolRouterSupportTest {
         callabilityMock.when(() -> NeoReportCallability.buildNotConfiguredMessage("invoice-report"))
             .thenCallRealMethod();
 
-        JSONObject result = McpToolRouterSupport.buildDiscoverSpec(spec, "R", null);
+        JSONObject result = McpToolRouterSupport.buildDiscoverSpec(spec, "R", null, null, null);
 
         assertTrue(result.getBoolean("isReport"));
         assertFalse(result.getBoolean("callable"));
         assertEquals(NeoReportCallability.STATUS_NOT_CONFIGURED, result.getString("status"));
         assertTrue(result.getString("message").contains("not configured"));
+      }
+    }
+
+    /**
+     * ETP-4257: discover output for a CALLABLE report spec advertises the concrete report
+     * tool ({@code reportTool = generate_<snake>}) so the agent calls it directly instead of
+     * guessing an entity for neo_list.
+     */
+    @Test
+    void callableReportSpecEmitsReportTool() throws Exception {
+      SFSpec spec = mock(SFSpec.class);
+      when(spec.getName()).thenReturn("financial-accounts-page");
+      when(spec.getDescription()).thenReturn(null);
+
+      try (MockedStatic<NeoReportCallability> callabilityMock =
+          mockStatic(NeoReportCallability.class)) {
+        callabilityMock.when(() -> NeoReportCallability.isReportCallable(spec)).thenReturn(true);
+
+        JSONObject result = McpToolRouterSupport.buildDiscoverSpec(spec, "R", null, null, null);
+
+        assertTrue(result.getBoolean("callable"));
+        assertEquals("generate_financial_accounts_page", result.getString("reportTool"));
+      }
+    }
+
+    /**
+     * ETP-4257: a NON-callable report spec never advertises a report tool (there is none) —
+     * it keeps only the not_configured status/message.
+     */
+    @Test
+    void nonCallableReportSpecOmitsReportTool() throws Exception {
+      SFSpec spec = mock(SFSpec.class);
+      when(spec.getName()).thenReturn("invoice-report");
+      when(spec.getDescription()).thenReturn(null);
+
+      try (MockedStatic<NeoReportCallability> callabilityMock =
+          mockStatic(NeoReportCallability.class)) {
+        callabilityMock.when(() -> NeoReportCallability.isReportCallable(spec)).thenReturn(false);
+        callabilityMock.when(() -> NeoReportCallability.buildNotConfiguredMessage("invoice-report"))
+            .thenCallRealMethod();
+
+        JSONObject result = McpToolRouterSupport.buildDiscoverSpec(spec, "R", null, null, null);
+
+        assertFalse(result.getBoolean("callable"));
+        assertFalse(result.has("reportTool"));
       }
     }
 
@@ -478,7 +1013,7 @@ class McpToolRouterSupportTest {
       when(spec.getName()).thenReturn("order");
       when(spec.getDescription()).thenReturn(null);
 
-      JSONObject result = McpToolRouterSupport.buildDiscoverSpec(spec, "W", null);
+      JSONObject result = McpToolRouterSupport.buildDiscoverSpec(spec, "W", null, null, null);
       assertFalse(result.has("isReport"));
     }
 
@@ -489,7 +1024,7 @@ class McpToolRouterSupportTest {
       when(spec.getDescription()).thenReturn(null);
       when(spec.getAgentPrompt()).thenReturn("Always confirm before completing the order.");
 
-      JSONObject result = McpToolRouterSupport.buildDiscoverSpec(spec, "W", null);
+      JSONObject result = McpToolRouterSupport.buildDiscoverSpec(spec, "W", null, null, null);
       assertEquals("Always confirm before completing the order.", result.getString("agentPrompt"));
     }
 
@@ -500,7 +1035,7 @@ class McpToolRouterSupportTest {
       when(spec.getDescription()).thenReturn(null);
       when(spec.getAgentPrompt()).thenReturn("   ");
 
-      JSONObject result = McpToolRouterSupport.buildDiscoverSpec(spec, "W", null);
+      JSONObject result = McpToolRouterSupport.buildDiscoverSpec(spec, "W", null, null, null);
       assertFalse(result.has("agentPrompt"));
     }
 
@@ -511,40 +1046,9 @@ class McpToolRouterSupportTest {
       when(spec.getDescription()).thenReturn(null);
       when(spec.getAgentPrompt()).thenReturn(null);
 
-      JSONObject result = McpToolRouterSupport.buildDiscoverSpec(spec, "W", null);
+      JSONObject result = McpToolRouterSupport.buildDiscoverSpec(spec, "W", null, null, null);
       assertFalse(result.has("agentPrompt"));
     }
-  }
-
-  @Test
-  void schemaFieldsIncludeAgentPromptWhenProvided() throws Exception {
-    org.openbravo.model.ad.ui.Tab tab = mock(org.openbravo.model.ad.ui.Tab.class);
-    org.openbravo.model.ad.datamodel.Table table = mock(org.openbravo.model.ad.datamodel.Table.class);
-    org.openbravo.model.ad.datamodel.Column col =
-        mock(org.openbravo.model.ad.datamodel.Column.class);
-
-    when(tab.getTable()).thenReturn(table);
-    when(table.getDBTableName()).thenReturn("C_Order");
-    when(table.getADColumnList()).thenReturn(java.util.List.of(col));
-    when(col.getId()).thenReturn("COL1");
-    when(col.isActive()).thenReturn(true);
-    when(col.getDBColumnName()).thenReturn("C_BPartner_ID");
-    when(col.getName()).thenReturn("Business Partner");
-    when(col.isMandatory()).thenReturn(false);
-    when(col.isUseAutomaticSequence()).thenReturn(false);
-    when(col.getDefaultValue()).thenReturn(null);
-
-    JSONArray fields = McpToolRouterSupport.buildSchemaFieldsArray(
-        tab,
-        null,
-        java.util.Map.of(),
-        java.util.Map.of(),
-        java.util.Map.of("COL1", "  Pick the correct customer.  "),
-        java.util.Set.of(),
-        java.util.Set.of());
-
-    JSONObject field = fields.getJSONObject(0);
-    assertEquals("Pick the correct customer.", field.getString("agentPrompt"));
   }
 
   // ─── isMandatoryValueMissing ────────────────────────────────────────
@@ -736,414 +1240,6 @@ class McpToolRouterSupportTest {
     }
   }
 
-  // ─── isReadOnlyColumn (private, tested via buildSchemaField indirectly) ──
-
-  @Nested
-  @DisplayName("isReadOnlyColumn")
-  class IsReadOnlyColumn {
-
-    @Test
-    void pkColumnIsReadOnly() throws Exception {
-      org.openbravo.model.ad.ui.Tab tab = mock(org.openbravo.model.ad.ui.Tab.class);
-      org.openbravo.model.ad.datamodel.Table table = mock(org.openbravo.model.ad.datamodel.Table.class);
-      when(tab.getTable()).thenReturn(table);
-      when(table.getDBTableName()).thenReturn("C_Order");
-
-      org.openbravo.model.ad.datamodel.Column col = mock(org.openbravo.model.ad.datamodel.Column.class);
-      when(col.getDBColumnName()).thenReturn("C_Order_ID");
-      when(col.isUseAutomaticSequence()).thenReturn(false);
-
-      boolean result = (boolean) invokeStatic("isReadOnlyColumn",
-          new Class<?>[]{ org.openbravo.model.ad.ui.Tab.class,
-              org.openbravo.model.ad.datamodel.Column.class },
-          tab, col);
-      assertTrue(result);
-    }
-
-    @Test
-    void documentNoIsReadOnly() throws Exception {
-      org.openbravo.model.ad.ui.Tab tab = mock(org.openbravo.model.ad.ui.Tab.class);
-      org.openbravo.model.ad.datamodel.Table table = mock(org.openbravo.model.ad.datamodel.Table.class);
-      when(tab.getTable()).thenReturn(table);
-      when(table.getDBTableName()).thenReturn("C_Invoice");
-
-      org.openbravo.model.ad.datamodel.Column col = mock(org.openbravo.model.ad.datamodel.Column.class);
-      when(col.getDBColumnName()).thenReturn("DocumentNo");
-      when(col.isUseAutomaticSequence()).thenReturn(false);
-
-      boolean result = (boolean) invokeStatic("isReadOnlyColumn",
-          new Class<?>[]{ org.openbravo.model.ad.ui.Tab.class,
-              org.openbravo.model.ad.datamodel.Column.class },
-          tab, col);
-      assertTrue(result);
-    }
-
-    @Test
-    void autoSequenceColumnIsReadOnly() throws Exception {
-      org.openbravo.model.ad.ui.Tab tab = mock(org.openbravo.model.ad.ui.Tab.class);
-      org.openbravo.model.ad.datamodel.Table table = mock(org.openbravo.model.ad.datamodel.Table.class);
-      when(tab.getTable()).thenReturn(table);
-      when(table.getDBTableName()).thenReturn("C_Order");
-
-      org.openbravo.model.ad.datamodel.Column col = mock(org.openbravo.model.ad.datamodel.Column.class);
-      when(col.getDBColumnName()).thenReturn("RegularCol");
-      when(col.isUseAutomaticSequence()).thenReturn(true);
-
-      boolean result = (boolean) invokeStatic("isReadOnlyColumn",
-          new Class<?>[]{ org.openbravo.model.ad.ui.Tab.class,
-              org.openbravo.model.ad.datamodel.Column.class },
-          tab, col);
-      assertTrue(result);
-    }
-
-    @Test
-    void regularColumnIsNotReadOnly() throws Exception {
-      org.openbravo.model.ad.ui.Tab tab = mock(org.openbravo.model.ad.ui.Tab.class);
-      org.openbravo.model.ad.datamodel.Table table = mock(org.openbravo.model.ad.datamodel.Table.class);
-      when(tab.getTable()).thenReturn(table);
-      when(table.getDBTableName()).thenReturn("C_Order");
-
-      org.openbravo.model.ad.datamodel.Column col = mock(org.openbravo.model.ad.datamodel.Column.class);
-      when(col.getDBColumnName()).thenReturn("Description");
-      when(col.isUseAutomaticSequence()).thenReturn(false);
-
-      boolean result = (boolean) invokeStatic("isReadOnlyColumn",
-          new Class<?>[]{ org.openbravo.model.ad.ui.Tab.class,
-              org.openbravo.model.ad.datamodel.Column.class },
-          tab, col);
-      assertFalse(result);
-    }
-  }
-
-  // ─── resolvePropertyName ─────────────────────────────────────────────
-
-  @Nested
-  @DisplayName("resolvePropertyName")
-  class ResolvePropertyName {
-
-    @Test
-    void nullEntityReturnsDatabaseColumnName() throws Exception {
-      String result = (String) invokeStatic("resolvePropertyName",
-          new Class<?>[]{ org.openbravo.base.model.Entity.class, String.class },
-          null, "C_BPartner_ID");
-      assertEquals("C_BPartner_ID", result);
-    }
-
-    @Test
-    void resolvedPropertyReturnsPropertyName() throws Exception {
-      org.openbravo.base.model.Entity entity = mock(org.openbravo.base.model.Entity.class);
-      Property prop = mock(Property.class);
-      when(entity.getPropertyByColumnName("C_BPartner_ID")).thenReturn(prop);
-      when(prop.getName()).thenReturn("businessPartner");
-
-      String result = (String) invokeStatic("resolvePropertyName",
-          new Class<?>[]{ org.openbravo.base.model.Entity.class, String.class },
-          entity, "C_BPartner_ID");
-      assertEquals("businessPartner", result);
-    }
-
-    @Test
-    void nullPropertyReturnsDatabaseColumnName() throws Exception {
-      org.openbravo.base.model.Entity entity = mock(org.openbravo.base.model.Entity.class);
-      when(entity.getPropertyByColumnName("Unknown_Col")).thenReturn(null);
-
-      String result = (String) invokeStatic("resolvePropertyName",
-          new Class<?>[]{ org.openbravo.base.model.Entity.class, String.class },
-          entity, "Unknown_Col");
-      assertEquals("Unknown_Col", result);
-    }
-
-    @Test
-    void exceptionReturnsDatabaseColumnName() throws Exception {
-      org.openbravo.base.model.Entity entity = mock(org.openbravo.base.model.Entity.class);
-      when(entity.getPropertyByColumnName("Bad_Col")).thenThrow(new RuntimeException("fail"));
-
-      String result = (String) invokeStatic("resolvePropertyName",
-          new Class<?>[]{ org.openbravo.base.model.Entity.class, String.class },
-          entity, "Bad_Col");
-      assertEquals("Bad_Col", result);
-    }
-  }
-
-  // ─── addDefaultExpression ───────────────────────────────────────────
-
-  @Nested
-  @DisplayName("addDefaultExpression")
-  class AddDefaultExpression {
-
-    @Test
-    void addsNonBlankDefault() throws Exception {
-      org.openbravo.model.ad.datamodel.Column col = mock(org.openbravo.model.ad.datamodel.Column.class);
-      when(col.getDefaultValue()).thenReturn("@SQL=SELECT 1");
-
-      JSONObject fieldObj = new JSONObject();
-      invokeStatic("addDefaultExpression",
-          new Class<?>[]{ JSONObject.class, org.openbravo.model.ad.datamodel.Column.class },
-          fieldObj, col);
-      assertEquals("@SQL=SELECT 1", fieldObj.getString("defaultExpression"));
-    }
-
-    @Test
-    void nullDefaultOmitsKey() throws Exception {
-      org.openbravo.model.ad.datamodel.Column col = mock(org.openbravo.model.ad.datamodel.Column.class);
-      when(col.getDefaultValue()).thenReturn(null);
-
-      JSONObject fieldObj = new JSONObject();
-      invokeStatic("addDefaultExpression",
-          new Class<?>[]{ JSONObject.class, org.openbravo.model.ad.datamodel.Column.class },
-          fieldObj, col);
-      assertFalse(fieldObj.has("defaultExpression"));
-    }
-
-    @Test
-    void blankDefaultOmitsKey() throws Exception {
-      org.openbravo.model.ad.datamodel.Column col = mock(org.openbravo.model.ad.datamodel.Column.class);
-      when(col.getDefaultValue()).thenReturn("   ");
-
-      JSONObject fieldObj = new JSONObject();
-      invokeStatic("addDefaultExpression",
-          new Class<?>[]{ JSONObject.class, org.openbravo.model.ad.datamodel.Column.class },
-          fieldObj, col);
-      assertFalse(fieldObj.has("defaultExpression"));
-    }
-
-    /**
-     * ETP-4288: "0" is a legacy AD placeholder on FK (`_ID`) columns meaning "resolve via
-     * callout/session logic" — it is not a usable FK value (see DocTypeResolver on the write
-     * path). neo_schema must never surface it as a literal defaultExpression, since an agent
-     * reading only the schema would treat "0" as a valid id and fail on neo_create/neo_update.
-     */
-    @Test
-    void legacyZeroFkSentinelReplacedWithDynamicHint() throws Exception {
-      org.openbravo.model.ad.datamodel.Column col = mock(org.openbravo.model.ad.datamodel.Column.class);
-      when(col.getDefaultValue()).thenReturn("0");
-      when(col.getDBColumnName()).thenReturn("C_DocType_ID");
-
-      JSONObject fieldObj = new JSONObject();
-      invokeStatic("addDefaultExpression",
-          new Class<?>[]{ JSONObject.class, org.openbravo.model.ad.datamodel.Column.class },
-          fieldObj, col);
-
-      assertFalse(fieldObj.has("defaultExpression"));
-      assertEquals("server", fieldObj.getString("defaultSource"));
-      assertEquals("32-char hex ID (FK)", fieldObj.getString("defaultFormat"));
-      assertEquals("Resolved per-tenant at request time — call neo_defaults to get the value",
-          fieldObj.getString("defaultHint"));
-    }
-
-    /**
-     * ETP-4288: non-FK columns with a legitimate literal "0" default (e.g. ChargeAmt,
-     * EM_Etgo_Total_Discount) must keep reporting it as-is — the sentinel handling only
-     * targets `_ID`-suffixed FK columns.
-     */
-    @Test
-    void nonFkZeroDefaultIsUnaffected() throws Exception {
-      org.openbravo.model.ad.datamodel.Column col = mock(org.openbravo.model.ad.datamodel.Column.class);
-      when(col.getDefaultValue()).thenReturn("0");
-      when(col.getDBColumnName()).thenReturn("ChargeAmt");
-
-      JSONObject fieldObj = new JSONObject();
-      invokeStatic("addDefaultExpression",
-          new Class<?>[]{ JSONObject.class, org.openbravo.model.ad.datamodel.Column.class },
-          fieldObj, col);
-
-      assertEquals("0", fieldObj.getString("defaultExpression"));
-      assertFalse(fieldObj.has("defaultSource"));
-      assertFalse(fieldObj.has("defaultFormat"));
-      assertFalse(fieldObj.has("defaultHint"));
-    }
-
-    /**
-     * ETP-4288: a real (non-"0") FK default expression, e.g. a session-variable reference
-     * like the currency default, must still be emitted verbatim — the sentinel handling
-     * only intercepts the literal "0" placeholder, not legitimate expressions.
-     */
-    @Test
-    void realFkDefaultExpressionIsPreserved() throws Exception {
-      org.openbravo.model.ad.datamodel.Column col = mock(org.openbravo.model.ad.datamodel.Column.class);
-      when(col.getDefaultValue()).thenReturn("@C_Currency_ID@");
-      when(col.getDBColumnName()).thenReturn("C_Currency_ID");
-
-      JSONObject fieldObj = new JSONObject();
-      invokeStatic("addDefaultExpression",
-          new Class<?>[]{ JSONObject.class, org.openbravo.model.ad.datamodel.Column.class },
-          fieldObj, col);
-
-      assertEquals("@C_Currency_ID@", fieldObj.getString("defaultExpression"));
-      assertFalse(fieldObj.has("defaultSource"));
-      assertFalse(fieldObj.has("defaultFormat"));
-      assertFalse(fieldObj.has("defaultHint"));
-    }
-
-    /**
-     * ETP-4288: the sentinel handling is generic across any `_ID` FK column, not
-     * special-cased to C_DocType_ID/C_DocTypeTarget_ID — confirmed here with an unrelated
-     * business partner FK column carrying the same "0" placeholder.
-     */
-    @Test
-    void legacyZeroFkSentinelIsGenericAcrossTables() throws Exception {
-      org.openbravo.model.ad.datamodel.Column col = mock(org.openbravo.model.ad.datamodel.Column.class);
-      when(col.getDefaultValue()).thenReturn("0");
-      when(col.getDBColumnName()).thenReturn("C_BPartner_ID");
-
-      JSONObject fieldObj = new JSONObject();
-      invokeStatic("addDefaultExpression",
-          new Class<?>[]{ JSONObject.class, org.openbravo.model.ad.datamodel.Column.class },
-          fieldObj, col);
-
-      assertFalse(fieldObj.has("defaultExpression"));
-      assertEquals("server", fieldObj.getString("defaultSource"));
-      assertEquals("32-char hex ID (FK)", fieldObj.getString("defaultFormat"));
-
-      // Regression guard (rejected design): never bake a resolved instance id into the schema.
-      // No field in this object may carry a 32-char hex value anywhere.
-      java.util.Iterator<String> keys = fieldObj.keys();
-      while (keys.hasNext()) {
-        String key = keys.next();
-        Object value = fieldObj.get(key);
-        if (value instanceof String) {
-          assertFalse(((String) value).matches(".*[0-9A-Fa-f]{32}.*"),
-              "field '" + key + "' must never carry a resolved 32-char hex instance id");
-        }
-      }
-    }
-  }
-
-  // ─── addVisibility ──────────────────────────────────────────────────
-
-  @Nested
-  @DisplayName("addVisibility")
-  class AddVisibility {
-
-    @Test
-    void nullVisibilityOmitsKeys() throws Exception {
-      JSONObject fieldObj = new JSONObject();
-      invokeStatic("addVisibility",
-          new Class<?>[]{ JSONObject.class, String.class, boolean.class },
-          fieldObj, null, true);
-      assertFalse(fieldObj.has("visibility"));
-      assertFalse(fieldObj.has("userRequired"));
-    }
-
-    @Test
-    void editableVisibilityWithMandatorySetsUserRequired() throws Exception {
-      JSONObject fieldObj = new JSONObject();
-      invokeStatic("addVisibility",
-          new Class<?>[]{ JSONObject.class, String.class, boolean.class },
-          fieldObj, "editable", true);
-      assertEquals("editable", fieldObj.getString("visibility"));
-      assertTrue(fieldObj.getBoolean("userRequired"));
-    }
-
-    @Test
-    void editableVisibilityWithNonMandatorySetsFalse() throws Exception {
-      JSONObject fieldObj = new JSONObject();
-      invokeStatic("addVisibility",
-          new Class<?>[]{ JSONObject.class, String.class, boolean.class },
-          fieldObj, "editable", false);
-      assertFalse(fieldObj.getBoolean("userRequired"));
-    }
-
-    @Test
-    void hiddenVisibilitySetsUserRequiredFalse() throws Exception {
-      JSONObject fieldObj = new JSONObject();
-      invokeStatic("addVisibility",
-          new Class<?>[]{ JSONObject.class, String.class, boolean.class },
-          fieldObj, "hidden", true);
-      assertEquals("hidden", fieldObj.getString("visibility"));
-      assertFalse(fieldObj.getBoolean("userRequired"));
-    }
-  }
-
-  // ─── addSelectorInfo ────────────────────────────────────────────────
-
-  @Nested
-  @DisplayName("addSelectorInfo")
-  class AddSelectorInfo {
-
-    @Test
-    void selectorRefAddsHasSelectorAndType() throws Exception {
-      JSONObject fieldObj = new JSONObject();
-      java.util.Set<String> selectorRefs = java.util.Set.of("19", "18", "30");
-
-      invokeStatic("addSelectorInfo",
-          new Class<?>[]{ JSONObject.class, String.class, java.util.Set.class },
-          fieldObj, "19", selectorRefs);
-
-      assertTrue(fieldObj.getBoolean("hasSelector"));
-      assertEquals("TableDir", fieldObj.getString("selectorType"));
-    }
-
-    @Test
-    void nonSelectorRefOmitsKeys() throws Exception {
-      JSONObject fieldObj = new JSONObject();
-      java.util.Set<String> selectorRefs = java.util.Set.of("19", "18");
-
-      invokeStatic("addSelectorInfo",
-          new Class<?>[]{ JSONObject.class, String.class, java.util.Set.class },
-          fieldObj, "10", selectorRefs);
-
-      assertFalse(fieldObj.has("hasSelector"));
-    }
-
-    @Test
-    void nullRefIdOmitsKeys() throws Exception {
-      JSONObject fieldObj = new JSONObject();
-      java.util.Set<String> selectorRefs = java.util.Set.of("19");
-
-      invokeStatic("addSelectorInfo",
-          new Class<?>[]{ JSONObject.class, String.class, java.util.Set.class },
-          fieldObj, null, selectorRefs);
-
-      assertFalse(fieldObj.has("hasSelector"));
-    }
-  }
-
-  // ─── shouldIncludeSchemaColumn ──────────────────────────────────────
-
-  @Nested
-  @DisplayName("shouldIncludeSchemaColumn")
-  class ShouldIncludeSchemaColumn {
-
-    @Test
-    void activeNonSystemColumnIsIncluded() throws Exception {
-      org.openbravo.model.ad.datamodel.Column col = mock(org.openbravo.model.ad.datamodel.Column.class);
-      when(col.isActive()).thenReturn(true);
-      when(col.getDBColumnName()).thenReturn("Name");
-
-      java.util.Set<String> systemCols = java.util.Set.of("AD_CLIENT_ID", "AD_ORG_ID");
-      boolean result = (boolean) invokeStatic("shouldIncludeSchemaColumn",
-          new Class<?>[]{ org.openbravo.model.ad.datamodel.Column.class, java.util.Set.class },
-          col, systemCols);
-      assertTrue(result);
-    }
-
-    @Test
-    void inactiveColumnIsExcluded() throws Exception {
-      org.openbravo.model.ad.datamodel.Column col = mock(org.openbravo.model.ad.datamodel.Column.class);
-      when(col.isActive()).thenReturn(false);
-      when(col.getDBColumnName()).thenReturn("Name");
-
-      boolean result = (boolean) invokeStatic("shouldIncludeSchemaColumn",
-          new Class<?>[]{ org.openbravo.model.ad.datamodel.Column.class, java.util.Set.class },
-          col, java.util.Set.of());
-      assertFalse(result);
-    }
-
-    @Test
-    void systemColumnIsExcluded() throws Exception {
-      org.openbravo.model.ad.datamodel.Column col = mock(org.openbravo.model.ad.datamodel.Column.class);
-      when(col.isActive()).thenReturn(true);
-      when(col.getDBColumnName()).thenReturn("ad_client_id");
-
-      java.util.Set<String> systemCols = java.util.Set.of("AD_CLIENT_ID", "AD_ORG_ID");
-      boolean result = (boolean) invokeStatic("shouldIncludeSchemaColumn",
-          new Class<?>[]{ org.openbravo.model.ad.datamodel.Column.class, java.util.Set.class },
-          col, systemCols);
-      assertFalse(result);
-    }
-  }
-
   // ─── resolveMandatoryProperty ───────────────────────────────────────
 
   @Nested
@@ -1243,343 +1339,16 @@ class McpToolRouterSupportTest {
     }
   }
 
-  // ─── findColumn ─────────────────────────────────────────────────────
+  // ─── resolveIncludedEntityOrExplain (ETP-4257) ──────────────────────
 
+  /**
+   * Guard that turns the opaque {@code "Entity not found: <name>"} error into a descriptive
+   * message when an entity-CRUD tool (neo_list/get/create/...) is called on a report-type
+   * spec, while leaving type-W entity resolution unchanged.
+   */
   @Nested
-  @DisplayName("findColumn")
-  class FindColumn {
-
-    @Test
-    void findsByDbColumnNameCaseInsensitive() {
-      org.openbravo.model.ad.ui.Tab tab = mock(org.openbravo.model.ad.ui.Tab.class);
-      org.openbravo.model.ad.datamodel.Table table = mock(org.openbravo.model.ad.datamodel.Table.class);
-      when(tab.getTable()).thenReturn(table);
-
-      org.openbravo.model.ad.datamodel.Column col = mock(org.openbravo.model.ad.datamodel.Column.class);
-      when(col.getDBColumnName()).thenReturn("C_BPartner_ID");
-      when(table.getADColumnList()).thenReturn(java.util.List.of(col));
-
-      org.openbravo.model.ad.datamodel.Column result =
-          McpToolRouterSupport.findColumn(tab, "c_bpartner_id", null);
-      assertEquals(col, result);
-    }
-
-    @Test
-    void findsByPropertyNameFallback() {
-      org.openbravo.model.ad.ui.Tab tab = mock(org.openbravo.model.ad.ui.Tab.class);
-      org.openbravo.model.ad.datamodel.Table table = mock(org.openbravo.model.ad.datamodel.Table.class);
-      when(tab.getTable()).thenReturn(table);
-
-      org.openbravo.model.ad.datamodel.Column col = mock(org.openbravo.model.ad.datamodel.Column.class);
-      when(col.getDBColumnName()).thenReturn("C_BPartner_ID");
-      when(table.getADColumnList()).thenReturn(java.util.List.of(col));
-
-      org.openbravo.base.model.Entity entity = mock(org.openbravo.base.model.Entity.class);
-      Property prop = mock(Property.class);
-      when(entity.getPropertyByColumnName("C_BPartner_ID")).thenReturn(prop);
-      when(prop.getName()).thenReturn("businessPartner");
-
-      org.openbravo.model.ad.datamodel.Column result =
-          McpToolRouterSupport.findColumn(tab, "businessPartner", entity);
-      assertEquals(col, result);
-    }
-
-    @Test
-    void returnsNullWhenNotFound() {
-      org.openbravo.model.ad.ui.Tab tab = mock(org.openbravo.model.ad.ui.Tab.class);
-      org.openbravo.model.ad.datamodel.Table table = mock(org.openbravo.model.ad.datamodel.Table.class);
-      when(tab.getTable()).thenReturn(table);
-
-      org.openbravo.model.ad.datamodel.Column col = mock(org.openbravo.model.ad.datamodel.Column.class);
-      when(col.getDBColumnName()).thenReturn("Other_Col");
-      when(table.getADColumnList()).thenReturn(java.util.List.of(col));
-
-      assertNull(McpToolRouterSupport.findColumn(tab, "notExists", null));
-    }
-
-    @Test
-    void nullEntitySkipsPropertyFallback() {
-      org.openbravo.model.ad.ui.Tab tab = mock(org.openbravo.model.ad.ui.Tab.class);
-      org.openbravo.model.ad.datamodel.Table table = mock(org.openbravo.model.ad.datamodel.Table.class);
-      when(tab.getTable()).thenReturn(table);
-
-      org.openbravo.model.ad.datamodel.Column col = mock(org.openbravo.model.ad.datamodel.Column.class);
-      when(col.getDBColumnName()).thenReturn("SomeCol");
-      when(table.getADColumnList()).thenReturn(java.util.List.of(col));
-
-      assertNull(McpToolRouterSupport.findColumn(tab, "notMatching", null));
-    }
-  }
-
-  // ─── addButtonInfo ──────────────────────────────────────────────────
-
-  @Nested
-  @DisplayName("addButtonInfo")
-  class AddButtonInfo {
-
-    private MockedStatic<NeoAccessHelper> accessHelperMock;
-
-    @BeforeEach
-    void setUp() {
-      accessHelperMock = mockStatic(NeoAccessHelper.class);
-    }
-
-    @AfterEach
-    void tearDown() {
-      accessHelperMock.close();
-    }
-
-    @Test
-    @DisplayName("buttonColumnWithObuiappProcessEmitsAllFields")
-    void buttonColumnWithObuiappProcessEmitsAllFields() throws Exception {
-      org.openbravo.model.ad.datamodel.Column col = mock(
-          org.openbravo.model.ad.datamodel.Column.class);
-      org.openbravo.client.application.Process obuiappProcess = mock(
-          org.openbravo.client.application.Process.class);
-
-      when(col.getDBColumnName()).thenReturn("Processed");
-      when(col.getProcess()).thenReturn(null);
-      when(col.getOBUIAPPProcess()).thenReturn(obuiappProcess);
-      when(obuiappProcess.getName()).thenReturn("Complete Order");
-      when(obuiappProcess.getId()).thenReturn("OBUIAPP-PROC-001");
-
-      JSONObject fieldObj = new JSONObject();
-      invokeStatic("addButtonInfo",
-          new Class<?>[]{ JSONObject.class, org.openbravo.model.ad.datamodel.Column.class },
-          fieldObj, col);
-
-      assertEquals("Y", fieldObj.getString("triggerValue"));
-      assertEquals("Processed", fieldObj.getString("action"));
-      assertEquals("neo_action", fieldObj.getString("invokeVia"));
-      assertEquals("OBUIAPP", fieldObj.getString("processType"));
-      assertEquals("Complete Order", fieldObj.getString("processName"));
-      assertEquals("OBUIAPP-PROC-001", fieldObj.getString("processId"));
-    }
-
-    @Test
-    @DisplayName("buttonColumnWithClassicProcessEmitsAllFields")
-    void buttonColumnWithClassicProcessEmitsAllFields() throws Exception {
-      org.openbravo.model.ad.datamodel.Column col = mock(
-          org.openbravo.model.ad.datamodel.Column.class);
-      Process classicProcess = mock(Process.class);
-
-      when(col.getDBColumnName()).thenReturn("DocAction");
-      when(col.getProcess()).thenReturn(classicProcess);
-      when(col.getOBUIAPPProcess()).thenReturn(null);
-      when(classicProcess.getName()).thenReturn("Post Document");
-      when(classicProcess.getId()).thenReturn("CLASSIC-PROC-001");
-
-      JSONObject fieldObj = new JSONObject();
-      invokeStatic("addButtonInfo",
-          new Class<?>[]{ JSONObject.class, org.openbravo.model.ad.datamodel.Column.class },
-          fieldObj, col);
-
-      assertEquals("Y", fieldObj.getString("triggerValue"));
-      assertEquals("DocAction", fieldObj.getString("action"));
-      assertEquals("neo_action", fieldObj.getString("invokeVia"));
-      assertEquals("Classic", fieldObj.getString("processType"));
-      assertEquals("Post Document", fieldObj.getString("processName"));
-      assertEquals("CLASSIC-PROC-001", fieldObj.getString("processId"));
-    }
-
-    @Test
-    @DisplayName("buttonColumnWithNoProcessEmitsOnlyTrigger")
-    void buttonColumnWithNoProcessEmitsOnlyTrigger() throws Exception {
-      org.openbravo.model.ad.datamodel.Column col = mock(
-          org.openbravo.model.ad.datamodel.Column.class);
-
-      when(col.getDBColumnName()).thenReturn("Posted");
-      when(col.getProcess()).thenReturn(null);
-      when(col.getOBUIAPPProcess()).thenReturn(null);
-      accessHelperMock.when(
-          () -> NeoAccessHelper.resolveFallbackObuiappProcess(col)).thenReturn(null);
-
-      JSONObject fieldObj = new JSONObject();
-      invokeStatic("addButtonInfo",
-          new Class<?>[]{ JSONObject.class, org.openbravo.model.ad.datamodel.Column.class },
-          fieldObj, col);
-
-      assertEquals("Y", fieldObj.getString("triggerValue"));
-      assertEquals("Posted", fieldObj.getString("action"));
-      assertEquals("neo_action", fieldObj.getString("invokeVia"));
-      assertFalse(fieldObj.has("processType"));
-      assertFalse(fieldObj.has("processName"));
-      assertFalse(fieldObj.has("processId"));
-    }
-
-    @Test
-    @DisplayName("buildSchemaFieldButtonIncludesTriggerValue")
-    void buildSchemaFieldButtonIncludesTriggerValue() throws Exception {
-      // Set up column with ref "28" (button)
-      org.openbravo.model.ad.datamodel.Column col = mock(
-          org.openbravo.model.ad.datamodel.Column.class);
-      org.openbravo.model.ad.domain.Reference ref = mock(
-          org.openbravo.model.ad.domain.Reference.class);
-      org.openbravo.model.ad.ui.Tab tab = mock(org.openbravo.model.ad.ui.Tab.class);
-      org.openbravo.model.ad.datamodel.Table table = mock(
-          org.openbravo.model.ad.datamodel.Table.class);
-
-      when(ref.getId()).thenReturn("28");
-      when(col.getReference()).thenReturn(ref);
-      when(col.getDBColumnName()).thenReturn("Processed");
-      when(col.getName()).thenReturn("Processed");
-      when(col.isMandatory()).thenReturn(false);
-      when(col.isUseAutomaticSequence()).thenReturn(false);
-      when(col.getDefaultValue()).thenReturn(null);
-      when(col.getProcess()).thenReturn(null);
-      when(col.getOBUIAPPProcess()).thenReturn(null);
-      when(col.getId()).thenReturn("col-processed-id");
-      when(tab.getTable()).thenReturn(table);
-      when(table.getDBTableName()).thenReturn("C_Order");
-
-      accessHelperMock.when(
-          () -> NeoAccessHelper.resolveFallbackObuiappProcess(col)).thenReturn(null);
-
-      JSONObject result = (JSONObject) invokeStatic("buildSchemaField",
-          new Class<?>[]{ org.openbravo.model.ad.datamodel.Column.class,
-              org.openbravo.model.ad.ui.Tab.class,
-              org.openbravo.base.model.Entity.class,
-              java.util.Map.class,
-              java.util.Map.class,
-              java.util.Map.class,
-              java.util.Set.class },
-          col, tab, null,
-          new java.util.HashMap<>(),
-          new java.util.HashMap<>(),
-          new java.util.HashMap<>(),
-          new java.util.HashSet<>());
-
-      assertEquals("button", result.getString("type"));
-      assertEquals("Y", result.getString("triggerValue"));
-      assertEquals("Processed", result.getString("action"));
-      assertEquals("neo_action", result.getString("invokeVia"));
-    }
-  }
-
-  // ─── buildSchemaField — businessCritical flag ───────────────────────
-
-  @Nested
-  @DisplayName("buildSchemaField — businessCritical flag")
-  class BuildSchemaFieldBusinessCritical {
-
-    private MockedStatic<NeoAccessHelper> accessHelperMock;
-
-    @BeforeEach
-    void setUp() {
-      accessHelperMock = mockStatic(NeoAccessHelper.class);
-    }
-
-    @AfterEach
-    void tearDown() {
-      accessHelperMock.close();
-    }
-
-    private org.openbravo.model.ad.datamodel.Column buildStringColumn(String colId) {
-      org.openbravo.model.ad.datamodel.Column col = mock(
-          org.openbravo.model.ad.datamodel.Column.class);
-      org.openbravo.model.ad.domain.Reference ref = mock(
-          org.openbravo.model.ad.domain.Reference.class);
-      when(ref.getId()).thenReturn("10"); // string
-      when(col.getReference()).thenReturn(ref);
-      when(col.getDBColumnName()).thenReturn("Description");
-      when(col.getName()).thenReturn("Description");
-      when(col.isMandatory()).thenReturn(false);
-      when(col.isUseAutomaticSequence()).thenReturn(false);
-      when(col.getDefaultValue()).thenReturn(null);
-      when(col.getId()).thenReturn(colId);
-      return col;
-    }
-
-    private org.openbravo.model.ad.ui.Tab buildTab() {
-      org.openbravo.model.ad.ui.Tab tab = mock(org.openbravo.model.ad.ui.Tab.class);
-      org.openbravo.model.ad.datamodel.Table table = mock(
-          org.openbravo.model.ad.datamodel.Table.class);
-      when(tab.getTable()).thenReturn(table);
-      when(table.getDBTableName()).thenReturn("C_Order");
-      return tab;
-    }
-
-    @Test
-    @DisplayName("businessCritical true when flag set in map")
-    void businessCriticalTrueWhenFlagSet() throws Exception {
-      org.openbravo.model.ad.datamodel.Column col = buildStringColumn("col-desc-1");
-      org.openbravo.model.ad.ui.Tab tab = buildTab();
-
-      Map<String, Boolean> businessCriticalMap = new HashMap<>();
-      businessCriticalMap.put("col-desc-1", true);
-
-      JSONObject result = (JSONObject) invokeStatic("buildSchemaField",
-          new Class<?>[]{ org.openbravo.model.ad.datamodel.Column.class,
-              org.openbravo.model.ad.ui.Tab.class,
-              org.openbravo.base.model.Entity.class,
-              java.util.Map.class,
-              java.util.Map.class,
-              java.util.Map.class,
-              java.util.Set.class },
-          col, tab, null,
-          new java.util.HashMap<>(),
-          businessCriticalMap,
-          new java.util.HashMap<>(),
-          new java.util.HashSet<>());
-
-      assertTrue(result.getBoolean("businessCritical"));
-    }
-
-    @Test
-    @DisplayName("businessCritical false when flag absent from map — no NPE")
-    void businessCriticalFalseWhenFlagAbsent() throws Exception {
-      org.openbravo.model.ad.datamodel.Column col = buildStringColumn("col-desc-2");
-      org.openbravo.model.ad.ui.Tab tab = buildTab();
-
-      JSONObject result = (JSONObject) invokeStatic("buildSchemaField",
-          new Class<?>[]{ org.openbravo.model.ad.datamodel.Column.class,
-              org.openbravo.model.ad.ui.Tab.class,
-              org.openbravo.base.model.Entity.class,
-              java.util.Map.class,
-              java.util.Map.class,
-              java.util.Map.class,
-              java.util.Set.class },
-          col, tab, null,
-          new java.util.HashMap<>(),
-          new java.util.HashMap<>(),
-          new java.util.HashMap<>(),
-          new java.util.HashSet<>());
-
-      assertFalse(result.getBoolean("businessCritical"));
-    }
-
-    @Test
-    @DisplayName("businessCritical false when map contains explicit false")
-    void businessCriticalFalseWhenExplicitFalse() throws Exception {
-      org.openbravo.model.ad.datamodel.Column col = buildStringColumn("col-desc-3");
-      org.openbravo.model.ad.ui.Tab tab = buildTab();
-
-      Map<String, Boolean> businessCriticalMap = new HashMap<>();
-      businessCriticalMap.put("col-desc-3", false);
-
-      JSONObject result = (JSONObject) invokeStatic("buildSchemaField",
-          new Class<?>[]{ org.openbravo.model.ad.datamodel.Column.class,
-              org.openbravo.model.ad.ui.Tab.class,
-              org.openbravo.base.model.Entity.class,
-              java.util.Map.class,
-              java.util.Map.class,
-              java.util.Map.class,
-              java.util.Set.class },
-          col, tab, null,
-          new java.util.HashMap<>(),
-          businessCriticalMap,
-          new java.util.HashMap<>(),
-          new java.util.HashSet<>());
-
-      assertFalse(result.getBoolean("businessCritical"));
-    }
-  }
-
-  // ─── loadFieldMetadata — businessCritical mapping ───────────────────
-
-  @Nested
-  @DisplayName("loadFieldMetadata — businessCritical mapping")
-  class LoadFieldMetadata {
+  @DisplayName("resolveIncludedEntityOrExplain (ETP-4257)")
+  class ResolveIncludedEntityOrExplain {
 
     @Mock private OBDal mockOBDal;
     private MockedStatic<OBDal> obDalMock;
@@ -1595,61 +1364,249 @@ class McpToolRouterSupportTest {
       obDalMock.close();
     }
 
+    /**
+     * neo_list on a CALLABLE report spec: the error names the report type and points the
+     * agent at the concrete {@code etendo_generate_<snake>} tool instead of an entity.
+     */
+    @Test
+    void callableReportSpecExplainsGenerateTool() {
+      SFSpec spec = mock(SFSpec.class);
+      when(spec.getSpecType()).thenReturn("R");
+      when(spec.getName()).thenReturn("financial-accounts-page");
+
+      try (MockedStatic<NeoReportCallability> callabilityMock =
+          mockStatic(NeoReportCallability.class)) {
+        callabilityMock.when(() -> NeoReportCallability.isReportCallable(spec)).thenReturn(true);
+
+        org.openbravo.base.exception.OBException ex = assertThrows(
+            org.openbravo.base.exception.OBException.class,
+            () -> McpToolRouterSupport.resolveIncludedEntityOrExplain(spec, "header"));
+
+        assertTrue(ex.getMessage().contains("report type (R)"),
+            "message must state the spec is a report type: " + ex.getMessage());
+        assertTrue(ex.getMessage().contains("etendo_generate_financial_accounts_page"),
+            "message must name the concrete report tool: " + ex.getMessage());
+      }
+    }
+
+    /**
+     * neo_list on a NON-callable report spec: the error is the stable ETP-4255
+     * not_configured_for_report_generation message.
+     */
+    @Test
+    void nonCallableReportSpecExplainsNotConfigured() {
+      SFSpec spec = mock(SFSpec.class);
+      when(spec.getSpecType()).thenReturn("R");
+      when(spec.getName()).thenReturn("aging-report");
+
+      try (MockedStatic<NeoReportCallability> callabilityMock =
+          mockStatic(NeoReportCallability.class)) {
+        callabilityMock.when(() -> NeoReportCallability.isReportCallable(spec)).thenReturn(false);
+        callabilityMock.when(() -> NeoReportCallability.buildNotConfiguredMessage("aging-report"))
+            .thenCallRealMethod();
+
+        org.openbravo.base.exception.OBException ex = assertThrows(
+            org.openbravo.base.exception.OBException.class,
+            () -> McpToolRouterSupport.resolveIncludedEntityOrExplain(spec, "header"));
+
+        assertTrue(ex.getMessage().contains("not configured for Etendo Go/MCP report"),
+            "message must be the ETP-4255 not-configured text: " + ex.getMessage());
+      }
+    }
+
+    /**
+     * Regression (AC-3): a type-W spec resolves its included entity exactly as before —
+     * the guard only fires for report specs, never for windows.
+     */
+    @Test
     @SuppressWarnings("unchecked")
-    private OBCriteria<SFField> mockFieldCriteria(List<SFField> fields) {
-      OBCriteria<SFField> crit = mock(OBCriteria.class);
-      when(mockOBDal.createCriteria(SFField.class)).thenReturn(crit);
-      when(crit.list()).thenReturn(fields);
-      return crit;
-    }
+    void windowSpecResolvesEntityUnchanged() {
+      SFSpec spec = mock(SFSpec.class);
+      when(spec.getSpecType()).thenReturn("W");
+      when(spec.getId()).thenReturn("spec-w-1");
 
-    private SFField buildSFField(String columnId, Boolean businessCritical) {
-      SFField field = mock(SFField.class);
-      Column col = mock(Column.class);
-      when(col.getId()).thenReturn(columnId);
-      when(field.getADColumn()).thenReturn(col);
-      when(field.isBusinessCritical()).thenReturn(businessCritical);
-      return field;
+      SFEntity entity = mock(SFEntity.class);
+      OBCriteria<SFEntity> crit = mock(OBCriteria.class);
+      when(mockOBDal.createCriteria(SFEntity.class)).thenReturn(crit);
+      when(crit.add(org.mockito.ArgumentMatchers.any())).thenReturn(crit);
+      when(crit.setMaxResults(1)).thenReturn(crit);
+      when(crit.list()).thenReturn(List.of(entity));
+
+      SFEntity result = McpToolRouterSupport.resolveIncludedEntityOrExplain(spec, "header");
+
+      assertEquals(entity, result);
+    }
+  }
+
+  // ─── aliasArg (IMP-8) ───────────────────────────────────────────────
+
+  @Nested
+  @DisplayName("aliasArg")
+  class AliasArg {
+
+    @Test
+    @DisplayName("copies alias onto canonical when canonical is absent")
+    void copiesAliasWhenCanonicalAbsent() throws Exception {
+      JSONObject args = new JSONObject().put("field", "businessPartner");
+      McpToolRouterSupport.aliasArg(args, "field", "column");
+      assertEquals("businessPartner", args.getString("column"));
     }
 
     @Test
-    @DisplayName("field with isBusinessCritical=true maps to true in result map")
-    void fieldWithTrueMapsToTrue() {
-      SFEntity sfEntity = mock(SFEntity.class);
-      when(sfEntity.getId()).thenReturn("entity-1");
-      mockFieldCriteria(List.of(buildSFField("col-1", true)));
-
-      McpToolRouterSupport.FieldMetadata meta = McpToolRouterSupport.loadFieldMetadata(sfEntity);
-
-      assertTrue(meta.businessCriticalByColumnId.get("col-1"));
+    @DisplayName("canonical wins when both keys are present")
+    void canonicalWinsWhenBothPresent() throws Exception {
+      JSONObject args = new JSONObject().put("field", "aaa").put("column", "bbb");
+      McpToolRouterSupport.aliasArg(args, "field", "column");
+      assertEquals("bbb", args.getString("column"));
     }
 
     @Test
-    @DisplayName("field with isBusinessCritical=false maps to false in result map")
-    void fieldWithFalseMapsToFalse() {
-      SFEntity sfEntity = mock(SFEntity.class);
-      when(sfEntity.getId()).thenReturn("entity-2");
-      mockFieldCriteria(List.of(buildSFField("col-2", false)));
-
-      McpToolRouterSupport.FieldMetadata meta = McpToolRouterSupport.loadFieldMetadata(sfEntity);
-
-      assertFalse(meta.businessCriticalByColumnId.get("col-2"));
+    @DisplayName("no-op when alias is absent")
+    void noopWhenAliasAbsent() {
+      JSONObject args = new JSONObject();
+      McpToolRouterSupport.aliasArg(args, "field", "column");
+      assertFalse(args.has("column"));
     }
 
     @Test
-    @DisplayName("field with isBusinessCritical=null maps to false — no NPE")
-    void fieldWithNullMapsToFalse() {
-      SFEntity sfEntity = mock(SFEntity.class);
-      when(sfEntity.getId()).thenReturn("entity-3");
-      mockFieldCriteria(List.of(buildSFField("col-3", null)));
+    @DisplayName("null args is a no-op (does not throw)")
+    void nullArgsIsNoop() {
+      McpToolRouterSupport.aliasArg(null, "field", "column");
+    }
+  }
 
-      McpToolRouterSupport.FieldMetadata meta = McpToolRouterSupport.loadFieldMetadata(sfEntity);
+  // ─── isEmptySuccessResult (IMP-5) ───────────────────────────────────
 
-      assertFalse(meta.businessCriticalByColumnId.get("col-3"));
+  @Nested
+  @DisplayName("isEmptySuccessResult")
+  class IsEmptySuccessResult {
+
+    private JSONObject wrap(JSONObject inner) throws Exception {
+      return new JSONObject().put("response", inner);
+    }
+
+    @Test
+    @DisplayName("true for a success with an empty data array")
+    void trueForSuccessEmptyData() throws Exception {
+      JSONObject inner = new JSONObject().put("status", 0).put("data", new JSONArray());
+      assertTrue(McpToolRouterSupport.isEmptySuccessResult(wrap(inner)));
+    }
+
+    @Test
+    @DisplayName("false when data has rows")
+    void falseWhenDataHasRows() throws Exception {
+      JSONObject inner = new JSONObject().put("status", 0)
+          .put("data", new JSONArray().put(new JSONObject().put("id", "X")));
+      assertFalse(McpToolRouterSupport.isEmptySuccessResult(wrap(inner)));
+    }
+
+    @Test
+    @DisplayName("false on a failure status even with empty data")
+    void falseOnFailureStatus() throws Exception {
+      JSONObject inner = new JSONObject().put("status", -1).put("data", new JSONArray());
+      assertFalse(McpToolRouterSupport.isEmptySuccessResult(wrap(inner)));
+    }
+
+    @Test
+    @DisplayName("false when there is no response wrapper")
+    void falseWhenNoResponseWrapper() {
+      assertFalse(McpToolRouterSupport.isEmptySuccessResult(new JSONObject()));
+    }
+
+    @Test
+    @DisplayName("false for null input")
+    void falseForNull() {
+      assertFalse(McpToolRouterSupport.isEmptySuccessResult(null));
+    }
+  }
+
+  // ─── buildNotFoundError (IMP-5) ─────────────────────────────────────
+
+  @Nested
+  @DisplayName("buildNotFoundError")
+  class BuildNotFoundError {
+
+    @Test
+    @DisplayName("wraps a 404 not_found body with a descriptive detail")
+    void wrapsNotFoundBody() throws Exception {
+      JSONObject inner = McpToolRouterSupport
+          .buildNotFoundError("sales-invoice", "header", "NONEXISTENT123")
+          .getJSONObject("response");
+      assertEquals(404, inner.getInt("status"));
+      assertEquals("not_found", inner.getString("error"));
+      assertTrue(inner.getString("detail").contains("sales-invoice/header"));
+      assertTrue(inner.getString("detail").contains("NONEXISTENT123"));
+    }
+
+    @Test
+    @DisplayName("points the agent to a docs recipe via seeAlso (IMP-10)")
+    void includesSeeAlsoPointer() throws Exception {
+      JSONObject inner = McpToolRouterSupport
+          .buildNotFoundError("sales-invoice", "header", "NONEXISTENT123")
+          .getJSONObject("response");
+      assertEquals("docs(topic:\"reading records\")", inner.getString("seeAlso"));
+    }
+  }
+
+  // ─── buildDocsGuidance (IMP-10) ─────────────────────────────────────
+
+  @Nested
+  @DisplayName("buildDocsGuidance")
+  class BuildDocsGuidance {
+
+    @Test
+    @DisplayName("advertises the docs tool with a recipe hint")
+    void advertisesDocsTool() throws Exception {
+      JSONObject guidance = McpToolRouterSupport.buildDocsGuidance();
+      assertEquals("docs", guidance.getString("tool"));
+      assertTrue(guidance.getString("hint").toLowerCase().contains("docs(topic"));
     }
   }
 
   // ─── Helper ─────────────────────────────────────────────────────────
+
+  /**
+   * Stub {@code OBDal.createCriteria(SFEntity.class)} so
+   * {@code McpToolRouterSupport#listIncludedEntities} returns {@code entities}.
+   * {@code addOrder} is intentionally left unstubbed — the criteria's return value is
+   * discarded by the production code.
+   */
+  @SuppressWarnings("unchecked")
+  private static OBCriteria<SFEntity> stubEntityCriteria(OBDal obDal, List<SFEntity> entities) {
+    OBCriteria<SFEntity> criteria = mock(OBCriteria.class);
+    when(obDal.createCriteria(SFEntity.class)).thenReturn(criteria);
+    when(criteria.add(org.mockito.ArgumentMatchers.any(Criterion.class))).thenReturn(criteria);
+    when(criteria.list()).thenReturn(entities);
+    return criteria;
+  }
+
+  /** An entity served by a NeoHandler: no AD_Tab, readable, never mutable (dashboard shape). */
+  private static SFEntity handlerOnlyEntity() {
+    SFEntity entity = mock(SFEntity.class);
+    when(entity.getName()).thenReturn("kpis");
+    when(entity.getADTab()).thenReturn(null);
+    when(entity.isGet()).thenReturn(true);
+    return entity;
+  }
+
+  /**
+   * An AD_Tab-backed CRUD entity.
+   *
+   * @param mutable when {@code true} every mutation flag is on; when {@code false} the entity
+   *                is GET-only — the monitor/log shape ETP-4254 targets
+   */
+  private static SFEntity tabBackedEntity(boolean mutable) {
+    SFEntity entity = mock(SFEntity.class);
+    when(entity.getName()).thenReturn("header");
+    when(entity.getADTab()).thenReturn(mock(Tab.class));
+    when(entity.isGet()).thenReturn(true);
+    when(entity.isGetByID()).thenReturn(true);
+    when(entity.isPost()).thenReturn(mutable);
+    when(entity.isPut()).thenReturn(mutable);
+    when(entity.isPatch()).thenReturn(mutable);
+    when(entity.isDelete()).thenReturn(mutable);
+    return entity;
+  }
 
   private static boolean arrayContains(JSONArray array, String value) {
     for (int i = 0; i < array.length(); i++) {

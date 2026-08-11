@@ -27,7 +27,6 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.hibernate.criterion.Restrictions;
 import org.openbravo.base.provider.OBProvider;
-import org.openbravo.client.kernel.ApplicationInitializer;
 import org.openbravo.client.kernel.ComponentProvider;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
@@ -57,65 +56,34 @@ import com.etendoerp.go.schemaforge.data.SFSpec;
  * {@code AD_WINDOW} nor any {@code AD_ROLE} row, so it cannot trigger {@code AD_ROLE_TRG}'s
  * destructive access rebuild.</p>
  *
- * <p>The grant logic mirrors {@code CreateRoleStep} (the onboarding step) exactly, so freshly
+ * <p>The grant logic mirrors the onboarding role-access provisioning exactly, so freshly
  * onboarded tenants and self-healed existing tenants converge on the same access set.</p>
  */
 @ApplicationScoped
 @ComponentProvider.Qualifier(NeoAccessStartup.QUALIFIER)
-public class NeoAccessStartup implements ApplicationInitializer {
+public class NeoAccessStartup extends SessionAwareStartup {
 
   static final String QUALIFIER = "com.etendoerp.go.startup.NeoAccessStartup";
 
   private static final Logger log = LogManager.getLogger(NeoAccessStartup.class);
 
-  /** Organization assigned to granted access rows, matching {@code CreateRoleStep} (org '0'). */
+  /** Organization assigned to granted access rows, matching onboarding role-access grants (org '0'). */
   private static final String ORG_ZERO = "0";
   private static final String SYSTEM_CLIENT = "0";
 
-  /** Poll interval while waiting for the DB session info to be initialized. */
-  private static final long SESSION_POLL_MS = 100L;
-  /** Hard cap before proceeding regardless of session-info state. */
-  private static final long SESSION_WAIT_TIMEOUT_MS = 60_000L;
+  @Override
+  protected Logger log() {
+    return log;
+  }
 
   @Override
-  public void initialize() {
-    // Run asynchronously so we never block (nor fail) the application startup sequence, and so we
-    // can wait for SessionInfo to be initialized before borrowing a DAL connection (borrowing one
-    // too early hits the ad_context_info temp-table problem).
-    Thread worker = new Thread(this::runSafely, "NeoAccessStartup-grant");
-    worker.setDaemon(true);
-    worker.start();
+  protected String name() {
+    return "NeoAccessStartup";
   }
 
-  private void runSafely() {
-    try {
-      waitForSessionInfoInitialized();
-      grantMissingAccess();
-    } catch (Exception e) {
-      // Startup self-healing must never break the application: log and continue.
-      log.error("NeoAccessStartup: failed to grant missing NEO access; skipping.", e);
-      try {
-        OBDal.getInstance().rollbackAndClose();
-      } catch (Exception rollbackError) {
-        log.debug("NeoAccessStartup: rollback after failure also failed.", rollbackError);
-      }
-    }
-  }
-
-  private void waitForSessionInfoInitialized() {
-    long deadline = System.currentTimeMillis() + SESSION_WAIT_TIMEOUT_MS;
-    while (!SessionInfo.isInitialized() && System.currentTimeMillis() < deadline) {
-      try {
-        Thread.sleep(SESSION_POLL_MS);
-      } catch (InterruptedException e) {
-        Thread.currentThread().interrupt();
-        return;
-      }
-    }
-    if (!SessionInfo.isInitialized()) {
-      log.warn("NeoAccessStartup: SessionInfo not initialized after {} ms; proceeding anyway.",
-          SESSION_WAIT_TIMEOUT_MS);
-    }
+  @Override
+  protected void runPass() {
+    grantMissingAccess();
   }
 
   /**

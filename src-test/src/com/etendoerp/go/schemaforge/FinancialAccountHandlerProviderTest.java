@@ -42,16 +42,16 @@ import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.currency.Currency;
 
 import com.etendoerp.psd2.bank.integration.data.Provider;
-import com.etendoerp.psd2.bank.integration.utils.BankIntegrationUtils;
+import com.etendoerp.psd2.bank.integration.utils.ProviderCatalogUtils;
 
 /**
  * Mockito-driven unit tests for {@link FinancialAccountHandler#validateAndEnrichCreate} focused on
- * the {@code enrichProvider} step added by the PSD2 bridge (offline "with bank selected" flow).
+ * the {@code enrichProvider} step added by the bank connection bridge (offline "with bank selected" flow).
  *
  * <p>Split out of {@link FinancialAccountHandlerTest} so that file (already at the Sonar
  * 35-method-per-class ceiling) is not pushed over it. Strategy mirrors the sibling file: spy the
  * handler, stub the DAL-bound seams ({@code loadCurrency}, {@code nameExists},
- * {@code listMatchingAlgorithms}) and statically mock {@link BankIntegrationUtils} /
+ * {@code listMatchingAlgorithms}) and statically mock {@link ProviderCatalogUtils} /
  * {@link OBDal} so no database or live OBContext is needed.
  *
  * <p>Scenarios:
@@ -107,10 +107,10 @@ public class FinancialAccountHandlerProviderTest {
     when(provider.getId()).thenReturn(PROVIDER_FK_ID);
 
     try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
-        MockedStatic<BankIntegrationUtils> utils = mockStatic(BankIntegrationUtils.class)) {
+        MockedStatic<ProviderCatalogUtils> utils = mockStatic(ProviderCatalogUtils.class)) {
       OBDal dal = mock(OBDal.class);
       obDal.when(OBDal::getInstance).thenReturn(dal);
-      utils.when(() -> BankIntegrationUtils.upsertProvider(SANTANDER_CODE, SANTANDER_NAME, null))
+      utils.when(() -> ProviderCatalogUtils.upsertProvider(SANTANDER_CODE, SANTANDER_NAME, null))
           .thenReturn(provider);
 
       assertNull(handler.validateAndEnrichCreate(body));
@@ -118,7 +118,7 @@ public class FinancialAccountHandlerProviderTest {
       assertEquals(PROVIDER_FK_ID, body.getString(PSD2_PROVIDER));
       assertFalse("transient providerCode stripped", body.has(PROVIDER_CODE));
       assertFalse("transient providerName stripped", body.has(PROVIDER_NAME));
-      utils.verify(() -> BankIntegrationUtils.upsertProvider(SANTANDER_CODE, SANTANDER_NAME, null));
+      utils.verify(() -> ProviderCatalogUtils.upsertProvider(SANTANDER_CODE, SANTANDER_NAME, null));
       verify(dal).flush();
     }
   }
@@ -135,16 +135,16 @@ public class FinancialAccountHandlerProviderTest {
     when(provider.getId()).thenReturn(PROVIDER_FK_ID);
 
     try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
-        MockedStatic<BankIntegrationUtils> utils = mockStatic(BankIntegrationUtils.class)) {
+        MockedStatic<ProviderCatalogUtils> utils = mockStatic(ProviderCatalogUtils.class)) {
       OBDal dal = mock(OBDal.class);
       obDal.when(OBDal::getInstance).thenReturn(dal);
-      utils.when(() -> BankIntegrationUtils.upsertProvider(SANTANDER_CODE, SANTANDER_CODE, null))
+      utils.when(() -> ProviderCatalogUtils.upsertProvider(SANTANDER_CODE, SANTANDER_CODE, null))
           .thenReturn(provider);
 
       assertNull(handler.validateAndEnrichCreate(body));
 
       assertEquals(PROVIDER_FK_ID, body.getString(PSD2_PROVIDER));
-      utils.verify(() -> BankIntegrationUtils.upsertProvider(SANTANDER_CODE, SANTANDER_CODE, null));
+      utils.verify(() -> ProviderCatalogUtils.upsertProvider(SANTANDER_CODE, SANTANDER_CODE, null));
     }
   }
 
@@ -157,7 +157,7 @@ public class FinancialAccountHandlerProviderTest {
     JSONObject body = validCreateBody().put(FIELD_TYPE, "C").put(PROVIDER_CODE, SANTANDER_CODE);
     stubValidCreate();
 
-    try (MockedStatic<BankIntegrationUtils> utils = mockStatic(BankIntegrationUtils.class)) {
+    try (MockedStatic<ProviderCatalogUtils> utils = mockStatic(ProviderCatalogUtils.class)) {
       assertNull(handler.validateAndEnrichCreate(body));
 
       assertFalse("no provider FK injected for a non-bank account", body.has(PSD2_PROVIDER));
@@ -172,7 +172,7 @@ public class FinancialAccountHandlerProviderTest {
     JSONObject body = validCreateBody();
     stubValidCreate();
 
-    try (MockedStatic<BankIntegrationUtils> utils = mockStatic(BankIntegrationUtils.class)) {
+    try (MockedStatic<ProviderCatalogUtils> utils = mockStatic(ProviderCatalogUtils.class)) {
       assertNull(handler.validateAndEnrichCreate(body));
 
       assertFalse("no provider FK injected without a provider code", body.has(PSD2_PROVIDER));

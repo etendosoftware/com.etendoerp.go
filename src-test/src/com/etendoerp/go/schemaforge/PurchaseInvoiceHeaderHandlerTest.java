@@ -18,6 +18,7 @@
 package com.etendoerp.go.schemaforge;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
@@ -65,7 +66,13 @@ import org.openbravo.model.common.invoice.Invoice;
  * <ul>
  *   <li>{@code afterHandle()} early-exit paths (non-GET, null/empty data).</li>
  *   <li>{@code afterHandle()} single-record enrichment — linked receipts query.</li>
- *   <li>{@code afterHandle()} list mode — no enrichment (recordId is null).</li>
+ *   <li>{@code afterHandle()} list mode — total-discount adjustment AND subtype enrichment
+ *       (ETP-4738 follow-up: {@code apInvoiceSubtype} is now injected on every row, not just
+ *       detail) apply to every record; the strictly detail-only enrichments (linked receipts,
+ *       origin invoice, docTypeLocked, isRectificative, hasRectifications) do not
+ *       (recordId is null).</li>
+ *   <li>{@code afterHandle()} total-discount adjustment for draft invoices (grandTotalAmount /
+ *       outstandingAmount), inherited from {@link AbstractInvoiceHeaderHandler}.</li>
  *   <li>DB error resilience in enrichLinkedReceipts.</li>
  * </ul>
  */
@@ -143,6 +150,99 @@ public class PurchaseInvoiceHeaderHandlerTest {
     NeoResponse result = handler.afterHandle(ctx);
     assertNotNull(result);
     assertEquals(200, result.getHttpStatus());
+    JSONObject resultRec = result.getBody().getJSONObject("response").getJSONArray("data").getJSONObject(0);
+    // ETP-4738 follow-up: subtype IS now enriched on list rows (no transactionDocument on this
+    // fixture → resolves to FAC without touching OBDal).
+    assertEquals("FAC", resultRec.getString("apInvoiceSubtype"));
+    assertFalse(resultRec.has("docTypeLocked"));
+  }
+
+  // ── afterHandle — total discount adjustment (ETP-4029 follow-up) ─────────
+
+  private static JSONObject invoiceRecord(boolean processed, double discount, double grandTotal,
+      double outstanding) throws Exception {
+    return new JSONObject().put("id", "pinv-1").put("processed", processed).put(
+        "etgoTotalDiscount", discount).put("grandTotalAmount", grandTotal).put(
+        "outstandingAmount", outstanding);
+  }
+
+  private static NeoContext getCtx() {
+    return NeoContext.builder().httpMethod("GET").endpointType(NeoEndpointType.CRUD).build();
+  }
+
+  @Test
+  public void afterHandle_processedInvoice_notAdjusted() throws Exception {
+    JSONObject body = new JSONObject().put("response",
+        new JSONObject().put("data", new JSONArray().put(invoiceRecord(true, 10.0, 470.63, 470.63))));
+    NeoContext ctx = getCtx();
+    ctx.setPreviousResult(NeoResponse.ok(body));
+
+    NeoResponse result = handler.afterHandle(ctx);
+
+    double grand = result.getBody().getJSONObject("response").getJSONArray("data").getJSONObject(0)
+        .getDouble("grandTotalAmount");
+    assertEquals(470.63, grand, 0.001);
+  }
+
+  @Test
+  public void afterHandle_draftWithNoDiscount_notAdjusted() throws Exception {
+    JSONObject body = new JSONObject().put("response",
+        new JSONObject().put("data", new JSONArray().put(invoiceRecord(false, 0.0, 470.63, 470.63))));
+    NeoContext ctx = getCtx();
+    ctx.setPreviousResult(NeoResponse.ok(body));
+
+    NeoResponse result = handler.afterHandle(ctx);
+
+    double grand = result.getBody().getJSONObject("response").getJSONArray("data").getJSONObject(0)
+        .getDouble("grandTotalAmount");
+    assertEquals(470.63, grand, 0.001);
+  }
+
+  @Test
+  public void afterHandle_draftWithMaterializedDiscountLine_notAdjustedTwice() throws Exception {
+    when(totalDiscountService.hasDiscountLine("pinv-1", true)).thenReturn(true);
+    JSONObject body = new JSONObject().put("response",
+        new JSONObject().put("data", new JSONArray().put(invoiceRecord(false, 10.0, 108.90, 108.90))));
+    NeoContext ctx = getCtx();
+    ctx.setPreviousResult(NeoResponse.ok(body));
+
+    NeoResponse result = handler.afterHandle(ctx);
+
+    double grand = result.getBody().getJSONObject("response").getJSONArray("data").getJSONObject(0)
+        .getDouble("grandTotalAmount");
+    assertEquals(108.90, grand, 0.001);
+  }
+
+  @Test
+  public void afterHandle_draftWithDiscount_adjustsGrandTotalAndOutstanding() throws Exception {
+    JSONObject body = new JSONObject().put("response",
+        new JSONObject().put("data", new JSONArray().put(invoiceRecord(false, 10.0, 121.00, 121.00))));
+    NeoContext ctx = getCtx();
+    ctx.setPreviousResult(NeoResponse.ok(body));
+
+    NeoResponse result = handler.afterHandle(ctx);
+
+    JSONObject rec = result.getBody().getJSONObject("response").getJSONArray("data").getJSONObject(0);
+    assertEquals(108.90, rec.getDouble("grandTotalAmount"), 0.005);
+    assertEquals(108.90, rec.getDouble("outstandingAmount"), 0.005);
+  }
+
+  @Test
+  public void afterHandle_listMode_adjustsDiscountForEveryRecord() throws Exception {
+    JSONArray data = new JSONArray()
+        .put(new JSONObject().put("id", "pinv-1").put("processed", false).put("etgoTotalDiscount", 10.0)
+            .put("grandTotalAmount", 100.0).put("outstandingAmount", 100.0))
+        .put(new JSONObject().put("id", "pinv-2").put("processed", false).put("etgoTotalDiscount", 20.0)
+            .put("grandTotalAmount", 200.0).put("outstandingAmount", 200.0));
+    JSONObject body = new JSONObject().put("response", new JSONObject().put("data", data));
+    NeoContext ctx = getCtx();
+    ctx.setPreviousResult(NeoResponse.ok(body));
+
+    NeoResponse result = handler.afterHandle(ctx);
+
+    JSONArray resultData = result.getBody().getJSONObject("response").getJSONArray("data");
+    assertEquals(90.0, resultData.getJSONObject(0).getDouble("grandTotalAmount"), 0.001);
+    assertEquals(160.0, resultData.getJSONObject(1).getDouble("grandTotalAmount"), 0.001);
   }
 
   // ── afterHandle — single record, enrichLinkedReceipts ────────────────────
@@ -217,7 +317,7 @@ public class PurchaseInvoiceHeaderHandlerTest {
   }
 
   @Test
-  public void resolveSubtype_apcCategory_returnsNc() {
+  public void resolveSubtype_apcCategory_returnsRectificativa() {
     try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
       OBDal dal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(dal);
@@ -227,12 +327,12 @@ public class PurchaseInvoiceHeaderHandlerTest {
       when(dal.get(DocumentType.class, "dt-apc")).thenReturn(dt);
 
       TestablePurchaseHandler h = new TestablePurchaseHandler();
-      assertEquals("NC", h.callResolveSubtype("dt-apc"));
+      assertEquals("RECTIFICATIVA", h.callResolveSubtype("dt-apc"));
     }
   }
 
   @Test
-  public void resolveSubtype_apiWithIsReturn_returnsDev() {
+  public void resolveSubtype_apiWithIsReturn_returnsRectificativa() {
     try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
       OBDal dal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(dal);
@@ -243,7 +343,57 @@ public class PurchaseInvoiceHeaderHandlerTest {
       when(dal.get(DocumentType.class, "dt-api-return")).thenReturn(dt);
 
       TestablePurchaseHandler h = new TestablePurchaseHandler();
-      assertEquals("DEV", h.callResolveSubtype("dt-api-return"));
+      assertEquals("RECTIFICATIVA", h.callResolveSubtype("dt-api-return"));
+    }
+  }
+
+  /**
+   * ETP-4737: the new unified rectificative doc type is driven primarily by the
+   * {@code EM_Etsg_Isrectificative} flag, independent of {@code documentCategory} — proven here
+   * with an otherwise-FAC category ("API", no isReturn) that only classifies as RECTIFICATIVA
+   * because the flag is set.
+   */
+  @Test
+  public void resolveSubtype_rectificativeFlagSet_returnsRectificativaRegardlessOfCategory() {
+    AbstractInvoiceHeaderHandler.setRectificativeColumnPresentForTests(true);
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      DocumentType dt = mock(DocumentType.class);
+      when(dt.getDocumentCategory()).thenReturn("API");
+      when(dt.isReturn()).thenReturn(false);
+      when(dt.isEtsgIsRectificative()).thenReturn(true);
+      when(dal.get(DocumentType.class, "dt-new-rectificativa")).thenReturn(dt);
+
+      TestablePurchaseHandler h = new TestablePurchaseHandler();
+      assertEquals("RECTIFICATIVA", h.callResolveSubtype("dt-new-rectificativa"));
+    } finally {
+      AbstractInvoiceHeaderHandler.setRectificativeColumnPresentForTests(null);
+    }
+  }
+
+  /**
+   * When the rectificative column is not present (SIF General not installed), classification
+   * falls back to the legacy category-based rule even though the mock would otherwise report the
+   * flag as set.
+   */
+  @Test
+  public void resolveSubtype_rectificativeColumnAbsent_fallsBackToCategory() {
+    AbstractInvoiceHeaderHandler.setRectificativeColumnPresentForTests(false);
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      DocumentType dt = mock(DocumentType.class);
+      when(dt.getDocumentCategory()).thenReturn("API");
+      when(dt.isReturn()).thenReturn(false);
+      when(dal.get(DocumentType.class, "dt-api-no-column")).thenReturn(dt);
+
+      TestablePurchaseHandler h = new TestablePurchaseHandler();
+      assertEquals("FAC", h.callResolveSubtype("dt-api-no-column"));
+    } finally {
+      AbstractInvoiceHeaderHandler.setRectificativeColumnPresentForTests(null);
     }
   }
 
@@ -511,6 +661,10 @@ public class PurchaseInvoiceHeaderHandlerTest {
         .recordId("inv-put-ah")
         .requestBody(body)
         .build();
+    // ETP-4737: persistOriginInvoice now only acts on the value captureOriginInvoice() captured
+    // in handle() (the pre-hook) — call it here too so this test actually exercises the persist
+    // path instead of vacuously hitting the "not captured" early-return.
+    handler.captureOriginInvoice(ctx);
 
     try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
          MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class)) {
@@ -533,6 +687,64 @@ public class PurchaseInvoiceHeaderHandlerTest {
 
       NeoResponse result = handler.afterHandle(ctx);
       assertNull(result);
+
+      // persistOriginInvoice actually ran for PUT: it looked up the invoice and its existing
+      // reverse links (an empty originInvoice value only deletes, never creates, a link).
+      // atLeastOnce(): autoCreateOrUpdateConversionRateDocument (called unconditionally earlier
+      // in afterHandle()) also does its own dal.get(Invoice.class, recordId) lookup.
+      Mockito.verify(dal, Mockito.atLeastOnce()).get(Invoice.class, "inv-put-ah");
+      Mockito.verify(dal).createCriteria(org.openbravo.model.common.invoice.ReversedInvoice.class);
+    }
+  }
+
+  /**
+   * ETP-4737 regression: the write-method guard around {@code persistOriginInvoice} used to be
+   * {@code "POST".equals(method) || "PUT".equals(method)}, which silently excluded PATCH — but
+   * {@code ImportFromSourceInvoiceModal.afterImport} (schema_forge frontend) always links the
+   * origin invoice via a PATCH, not POST/PUT. Fixed to {@code NeoHandlerUtils.isWriteMethod},
+   * which includes PATCH. This test proves PATCH now reaches {@code persistOriginInvoice} (it
+   * would previously have skipped straight past it, leaving {@code C_Invoice_Reverse} empty).
+   */
+  @Test
+  public void afterHandle_patchCrud_callsPersistAndReturnsNull() throws Exception {
+    JSONObject body = new JSONObject().put("originInvoice", "");
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("PATCH")
+        .endpointType(NeoEndpointType.CRUD)
+        .recordId("inv-patch-ah")
+        .requestBody(body)
+        .build();
+    // Mirrors the real handle() pre-hook so persistOriginInvoice has a captured value to act on.
+    handler.captureOriginInvoice(ctx);
+
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class)) {
+      ctxMock.when(() -> OBContext.setAdminMode(anyBoolean())).thenAnswer(i -> null);
+      ctxMock.when(OBContext::restorePreviousMode).thenAnswer(i -> null);
+
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      Invoice invoice = mock(Invoice.class);
+      when(dal.get(Invoice.class, "inv-patch-ah")).thenReturn(invoice);
+
+      @SuppressWarnings("unchecked")
+      org.openbravo.dal.service.OBCriteria<org.openbravo.model.common.invoice.ReversedInvoice>
+          criteria = mock(org.openbravo.dal.service.OBCriteria.class);
+      when(dal.createCriteria(org.openbravo.model.common.invoice.ReversedInvoice.class))
+          .thenReturn(criteria);
+      when(criteria.add(any())).thenReturn(criteria);
+      when(criteria.list()).thenReturn(java.util.Collections.emptyList());
+
+      NeoResponse result = handler.afterHandle(ctx);
+      assertNull(result);
+
+      // persistOriginInvoice actually ran for PATCH: it looked up the invoice and its existing
+      // reverse links (an empty originInvoice value only deletes, never creates, a link).
+      // atLeastOnce(): autoCreateOrUpdateConversionRateDocument (called unconditionally earlier
+      // in afterHandle()) also does its own dal.get(Invoice.class, recordId) lookup.
+      Mockito.verify(dal, Mockito.atLeastOnce()).get(Invoice.class, "inv-patch-ah");
+      Mockito.verify(dal).createCriteria(org.openbravo.model.common.invoice.ReversedInvoice.class);
     }
   }
 

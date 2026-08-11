@@ -51,6 +51,7 @@ import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.utility.Utility;
 import org.openbravo.model.common.businesspartner.BusinessPartner;
+import org.openbravo.model.common.currency.Currency;
 import org.openbravo.service.db.DalConnectionProvider;
 import org.openbravo.model.common.enterprise.DocumentType;
 import org.openbravo.model.common.invoice.Invoice;
@@ -61,6 +62,7 @@ import org.openbravo.model.common.order.Order;
 import org.openbravo.model.common.order.OrderLine;
 import org.openbravo.model.materialmgmt.transaction.ShipmentInOut;
 import org.openbravo.model.materialmgmt.transaction.ShipmentInOutLine;
+import org.openbravo.model.pricing.pricelist.PriceList;
 import org.openbravo.common.actionhandler.createlinesfromprocess.CreateInvoiceLinesFromProcess;
 import org.openbravo.base.weld.WeldUtils;
 
@@ -102,6 +104,7 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
   private static final String FIELD_DOCUMENT_NO = "documentNo";
   private static final String FIELD_ORDERED_QUANTITY = "orderedQuantity";
   private static final String PARAM_SHIPMENT_IDS = "shipmentIds";
+  private static final String PARAM_PRICE_LIST_ID = "priceListId";
   private static final String ERR_RECORD_ID_REQUIRED = "Record ID is required";
   private static final String KEY_RESPONSE = "response";
 
@@ -181,13 +184,14 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
 
         Invoice invoice;
         if (SPEC_SALES_ORDER.equals(specName)) {
-          invoice = createFromOrder(recordId, lineOverrides);
+          invoice = createFromOrder(recordId, lineOverrides, null);
         } else if (SPEC_SALES_QUOTATION.equals(specName)) {
-          invoice = createFromOrder(recordId, lineOverrides);
+          invoice = createFromOrder(recordId, lineOverrides, null);
           markQuotationAsInvoiceCreated(recordId);
         } else if (SPEC_GOODS_SHIPMENT.equals(specName)) {
           List<String> shipmentIds = parseShipmentIds(body, recordId);
-          invoice = createFromShipments(shipmentIds, lineOverrides);
+          String priceListId = body != null ? body.optString(PARAM_PRICE_LIST_ID, null) : null;
+          invoice = createFromShipments(shipmentIds, lineOverrides, priceListId);
         } else {
           return null;
         }
@@ -583,7 +587,20 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
     return invoiceFromOrderSupport != null ? invoiceFromOrderSupport : new InvoiceFromOrderSupport();
   }
 
-  protected Invoice createFromOrder(String orderId, Map<String, BigDecimal> lineOverrides) {
+  protected Invoice createFromOrder(String orderId, Map<String, BigDecimal> lineOverrides,
+      String priceListId) {
+    return createFromOrder(orderId, lineOverrides, priceListId, null);
+  }
+
+  /**
+   * @param currencyId
+   *     when invoicing from a shipment (ETP-4028), the shipment's own currency —
+   *     overrides the order's currency, which can diverge once the user edits the
+   *     shipment's currency in draft. {@code null} for direct order/quotation invoicing,
+   *     where the order's own currency is correct as-is.
+   */
+  protected Invoice createFromOrder(String orderId, Map<String, BigDecimal> lineOverrides,
+      String priceListId, String currencyId) {
     Order order = OBDal.getInstance().get(Order.class, orderId);
     if (order == null) {
       throw new OBException("Order not found: " + orderId);
@@ -600,10 +617,15 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
         order,
         invoiceDocType,
         true);
+    applyPriceListOverride(invoice, priceListId);
+    applyCurrencyOverride(invoice, currencyId);
     OBDal.getInstance().save(invoice);
     OBDal.getInstance().flush();
 
     // Delegate line creation to native Etendo process — handles taxes, gross prices, IVA-included, etc.
+    // UpdatePricesAndAmounts (a CreateLinesFromProcessHook) reads getInvoice().getPriceList() and
+    // getInvoice().getCurrency() off this already-saved invoice, so the override above is picked
+    // up automatically — no changes needed to the native process itself.
     CreateInvoiceLinesFromProcess proc = WeldUtils.getInstanceFromStaticBeanManager(
         CreateInvoiceLinesFromProcess.class);
     proc.createInvoiceLinesFromDocumentLines(selectedLines, invoice, OrderLine.class);
@@ -734,7 +756,15 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
     BigDecimal ordered = ol.getOrderedQuantity() != null ? ol.getOrderedQuantity() : BigDecimal.ZERO;
     BigDecimal invoiced = ol.getInvoicedQuantity() != null ? ol.getInvoicedQuantity() : BigDecimal.ZERO;
     BigDecimal pending = ordered.subtract(invoiced);
-    if (pending.compareTo(BigDecimal.ZERO) <= 0) return null;
+    // ETP-4722: quantities can be NEGATIVE since ETP-4567 removed the old
+    // min: 0 constraint (e.g. a return-style order line). Only an exact zero
+    // means "nothing left to invoice" — a strictly-positive check silently
+    // dropped every negative-quantity line here. This is the routine that
+    // actually runs for "Crear factura" on a Goods Shipment linked to this
+    // order: createFromShipments delegates straight to createFromOrder for
+    // the single-shipment-with-linked-order case, bypassing the shipment
+    // lines entirely.
+    if (pending.compareTo(BigDecimal.ZERO) == 0) return null;
     if (hasOverrides) {
       BigDecimal override = lineOverrides.get(ol.getId());
       return override != null ? override.min(pending) : pending;
@@ -828,7 +858,8 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
    *     if a shipment is not found, shipments span multiple
    *     business partners, or no AR Invoice document type exists
    */
-  protected Invoice createFromShipments(List<String> shipmentIds, Map<String, BigDecimal> lineOverrides) {
+  protected Invoice createFromShipments(List<String> shipmentIds, Map<String, BigDecimal> lineOverrides,
+      String priceListId) {
     List<ShipmentInOut> shipments = loadAndValidateShipments(shipmentIds);
     ShipmentInOut first = shipments.get(0);
 
@@ -840,14 +871,56 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
     if (shipments.size() == 1 && first.getSalesOrder() != null) {
       Map<String, BigDecimal> draftCapped = capShipmentLineOverrides(first, lineOverrides);
       Map<String, BigDecimal> orderLineOverrides = translateToOrderLineOverrides(first, draftCapped);
-      return createFromOrder(first.getSalesOrder().getId(), orderLineOverrides);
+      String currencyId = first.getEtgoCurrency() != null ? first.getEtgoCurrency().getId() : null;
+      return createFromOrder(first.getSalesOrder().getId(), orderLineOverrides, priceListId, currencyId);
     }
 
     Invoice invoice = createInvoiceHeaderFromShipment(first, shipments);
+    applyPriceListOverride(invoice, priceListId);
     OBDal.getInstance().save(invoice);
     OBDal.getInstance().flush();
     addShipmentLinesToInvoice(invoice, shipments, lineOverrides);
     return invoice;
+  }
+
+  /**
+   * Overrides the invoice's price list — used by the "invoice from shipment" flow (ETP-4028),
+   * where the tariff is chosen explicitly by the user in a confirmation popup rather than
+   * inherited from the source order/business partner. A no-op when {@code priceListId} is
+   * blank or does not resolve to an active {@link PriceList}.
+   *
+   * <p>Must be called BEFORE {@code CreateInvoiceLinesFromProcess} runs: the native
+   * {@code UpdatePricesAndAmounts} hook prices every line off {@code getInvoice().getPriceList()}
+   * read from this already-saved invoice, so overriding it here is sufficient — no changes
+   * needed to the native pricing process.
+   */
+  private void applyPriceListOverride(Invoice invoice, String priceListId) {
+    if (StringUtils.isBlank(priceListId)) {
+      return;
+    }
+    PriceList priceList = OBDal.getInstance().get(PriceList.class, priceListId);
+    if (priceList != null) {
+      invoice.setPriceList(priceList);
+    }
+  }
+
+  /**
+   * Overrides the invoice's currency with the shipment's own (editable-until-confirmed)
+   * currency — used by the "invoice from shipment" flow (ETP-4028), where
+   * {@code createInvoiceFromOrderHeader} otherwise defaults it to the linked order's
+   * currency, which can diverge once the user edits the shipment's currency in draft.
+   * A no-op when {@code currencyId} is blank or does not resolve to an active
+   * {@link Currency}. Must be called before {@code OBDal.save} for the same reason as
+   * {@link #applyPriceListOverride}.
+   */
+  private void applyCurrencyOverride(Invoice invoice, String currencyId) {
+    if (StringUtils.isBlank(currencyId)) {
+      return;
+    }
+    Currency currency = OBDal.getInstance().get(Currency.class, currencyId);
+    if (currency != null) {
+      invoice.setCurrency(currency);
+    }
   }
 
   /**
@@ -867,7 +940,11 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
     for (Map.Entry<String, BigDecimal> entry : lineOverrides.entrySet()) {
       BigDecimal pendingQty = pending.getOrDefault(entry.getKey(), BigDecimal.ZERO);
       BigDecimal cappedQty = entry.getValue().min(pendingQty);
-      if (cappedQty.compareTo(BigDecimal.ZERO) > 0) {
+      // ETP-4722: same sign-unaware bug as resolvePendingForLine above — only an
+      // exact zero means "nothing to invoice". pendingQty here is an ABS-based
+      // magnitude (see computePendingQtyPerLine), so a negative override is always
+      // <= it and min() already returns the override unchanged with its sign intact.
+      if (cappedQty.compareTo(BigDecimal.ZERO) != 0) {
         capped.put(entry.getKey(), cappedQty);
       }
     }
@@ -993,6 +1070,10 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
       invoice.setPaymentTerms(bp.getPaymentTerms());
       invoice.setPaymentMethod(bp.getPaymentMethod());
     }
+    // ETP-4028: the invoice's currency is always inherited from the shipment's own
+    // (editable-until-confirmed) currency, never from the linked order or BP default —
+    // those can diverge from the shipment once the user changes it in draft.
+    invoice.setCurrency(first.getEtgoCurrency());
     invoice.setSummedLineAmount(BigDecimal.ZERO);
     invoice.setGrandTotalAmount(BigDecimal.ZERO);
     invoice.setWithholdingamount(BigDecimal.ZERO);

@@ -132,15 +132,29 @@ final class EtendoGoJwtSupport {
     return client == null ? null : client.getId();
   }
 
-  static boolean hasStarOrganization(String clientId) {
-    return findStarOrganization(clientId) != null;
-  }
-
+  /**
+   * Builds the {@code AD_USER.USERNAME} for a tenant admin: the account email, disambiguated with
+   * a {@code +company} suffix when that email already owns another environment.
+   *
+   * <p>The result must fit {@code AD_USER.USERNAME} / {@code AD_USER.NAME} (both NVARCHAR(60)).
+   * The email itself is capped at signup, but the suffix can still push the total past 60, so it
+   * is trimmed here — the email is kept intact and the company part gives way, since the email is
+   * what identifies the account (ETP-4665).
+   */
   static String buildClientUsername(String accountEmail, String clientName) {
     if (findActiveUserByUsername(accountEmail) == null) {
       return accountEmail;
     }
     String safeClientName = (clientName != null) ? clientName.toLowerCase().replaceAll("[^a-z0-9]", "") : "";
+    int suffixRoom = OnboardingFieldLimits.EMAIL - (accountEmail.length() + 1);
+    if (suffixRoom <= 0) {
+      // No room for a suffix at all: the email alone fills the column. Returning it unchanged
+      // keeps the value storable; the duplicate-username check upstream still guards uniqueness.
+      return accountEmail;
+    }
+    if (safeClientName.length() > suffixRoom) {
+      safeClientName = safeClientName.substring(0, suffixRoom);
+    }
     return accountEmail + "+" + safeClientName;
   }
 

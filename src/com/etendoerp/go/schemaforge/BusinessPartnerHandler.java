@@ -32,7 +32,9 @@ import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.base.exception.OBException;
+import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.erpCommon.utility.OBCurrencyUtils;
 import org.openbravo.erpCommon.utility.OBMessageUtils;
 
 /**
@@ -68,13 +70,14 @@ import org.openbravo.erpCommon.utility.OBMessageUtils;
  * ETGO_SF_ENTITY record for the contacts spec's businessPartner entity.
  */
 @Named("businessPartnerHandler")
-public class BusinessPartnerHandler implements NeoHandler {
+public class BusinessPartnerHandler extends AbstractPersonNameHandler {
 
   private static final Logger log = LogManager.getLogger(BusinessPartnerHandler.class);
   private static final String RESPONSE_KEY = "response";
   private static final String FIELD_SEARCH_KEY = "searchKey";
-  private static final String FIELD_NAME = "name";
   private static final String SQLSTATE_UNIQUE_VIOLATION = "23505";
+  /** {@code C_BPartner.Value} is {@code VARCHAR(40)}. */
+  private static final int SEARCH_KEY_MAX_LENGTH = 40;
 
   private static final Set<String> PRECREATE_BILLING_FIELDS = Set.of("priceList", "paymentMethod", "paymentTerms",
       "account", "customerBlocking", "purchasePricelist", "pOPaymentMethod", "pOPaymentTerms", "pOFinancialAccount",
@@ -82,31 +85,74 @@ public class BusinessPartnerHandler implements NeoHandler {
   private static final String FIELD_FIRSTNAME = "etgoFirstname";
   private static final String FIELD_LASTNAME = "etgoLastname";
   private static final String FIELD_EMAIL = "etgoEmail";
+  private static final String FIELD_CURRENCY = "bPCurrencyID";
+  private static final String FIELD_CUSTOMER = "customer";
+  private static final String FIELD_VENDOR = "vendor";
 
-  /**
-   * Concatenates non-blank parts separated by a single space.
-   */
-  private static String buildFullName(String firstname, String lastname) {
-    String combined = (firstname + " " + lastname).trim();
-    return combined.replaceAll("\\s{2,}", " ");
+  // ETP-4565 posting-account backfill (see provisionMissingBpAcctRows()): scoped to a single
+  // already-persisted business partner (bound by ? = c_bpartner_id) instead of a client-wide
+  // sweep, and driven by AD_Org_AcctSchema/ad_isorgincluded off the BP's OWN org (mirroring
+  // c_bpartner_trg's own org-tree resolution).
+  //
+  // Account source: c_bpartner_trg (src-db/database/model/triggers/C_BPARTNER_TRG.xml, lines
+  // 59-75) resolves C_BP_Customer_Acct/C_BP_Vendor_Acct EXCLUSIVELY from the BP's own
+  // C_BP_Group_Acct row (joined on d1.C_BP_Group_ID = :new.C_BP_Group_ID) — never from
+  // C_AcctSchema_Default. That generic table is only used by the trigger's separate Employee
+  // branch (C_BP_Employee_Acct), which is group-independent. C_BP_Group_Acct itself is always
+  // seeded per-group from C_AcctSchema_Default at onboarding time
+  // (OnboardingAccountingWiringService.BP_GROUP_ACCT_SQL) and can subsequently be overridden per
+  // group (see e.g. overrideAcreedorGroupAccounts() there) — so joining on the group is the ONLY
+  // way to pick up those overrides; joining on the schema default silently ignores them. There is
+  // no legitimate fallback to C_AcctSchema_Default in the trigger for these two tables, so this
+  // backfill does not fall back to it either. Note this SQL is NOT a mirror of an existing
+  // idiom that's already proven safe at runtime: OnboardingAccountingWiringService's own
+  // BP_CUSTOMER_ACCT_SQL/BP_VENDOR_ACCT_SQL (which DO read C_AcctSchema_Default) are a documented
+  // no-op at onboarding time (no C_BPartner rows exist yet) — this is the first place this
+  // resolution logic actually executes against live, already-accounted data, so it must match the
+  // trigger's real semantics rather than that onboarding-time simplification.
+  private static final String BP_CUSTOMER_ACCT_FOR_BP_SQL =
+      "INSERT INTO c_bp_customer_acct ("
+      + "  c_bp_customer_acct_id, ad_client_id, ad_org_id, isactive, created, createdby, updated, updatedby,"
+      + "  c_bpartner_id, c_acctschema_id, c_receivable_acct, c_prepayment_acct) "
+      + "SELECT get_uuid(), bp.ad_client_id, bp.ad_org_id, 'Y', now(), '0', now(), '0',"
+      + "  bp.c_bpartner_id, d.c_acctschema_id, d.c_receivable_acct, d.c_prepayment_acct "
+      + "FROM c_bpartner bp"
+      + "  JOIN ad_org_acctschema oa ON oa.ad_client_id = bp.ad_client_id AND oa.isactive = 'Y'"
+      + "  JOIN c_bp_group_acct d ON d.c_acctschema_id = oa.c_acctschema_id AND d.c_bp_group_id = bp.c_bp_group_id "
+      + "WHERE bp.c_bpartner_id = ? AND bp.iscustomer = 'Y'"
+      + "  AND (ad_isorgincluded(oa.ad_org_id, bp.ad_org_id, bp.ad_client_id) <> -1"
+      + "    OR ad_isorgincluded(bp.ad_org_id, oa.ad_org_id, bp.ad_client_id) <> -1)"
+      + "  AND NOT EXISTS (SELECT 1 FROM c_bp_customer_acct a"
+      + "    WHERE a.c_bpartner_id = bp.c_bpartner_id AND a.c_acctschema_id = d.c_acctschema_id)";
+
+  private static final String BP_VENDOR_ACCT_FOR_BP_SQL =
+      "INSERT INTO c_bp_vendor_acct ("
+      + "  c_bp_vendor_acct_id, ad_client_id, ad_org_id, isactive, created, createdby, updated, updatedby,"
+      + "  c_bpartner_id, c_acctschema_id, v_liability_acct, v_prepayment_acct) "
+      + "SELECT get_uuid(), bp.ad_client_id, bp.ad_org_id, 'Y', now(), '0', now(), '0',"
+      + "  bp.c_bpartner_id, d.c_acctschema_id, d.v_liability_acct, d.v_prepayment_acct "
+      + "FROM c_bpartner bp"
+      + "  JOIN ad_org_acctschema oa ON oa.ad_client_id = bp.ad_client_id AND oa.isactive = 'Y'"
+      + "  JOIN c_bp_group_acct d ON d.c_acctschema_id = oa.c_acctschema_id AND d.c_bp_group_id = bp.c_bp_group_id "
+      + "WHERE bp.c_bpartner_id = ? AND bp.isvendor = 'Y'"
+      + "  AND (ad_isorgincluded(oa.ad_org_id, bp.ad_org_id, bp.ad_client_id) <> -1"
+      + "    OR ad_isorgincluded(bp.ad_org_id, oa.ad_org_id, bp.ad_client_id) <> -1)"
+      + "  AND NOT EXISTS (SELECT 1 FROM c_bp_vendor_acct a"
+      + "    WHERE a.c_bpartner_id = bp.c_bpartner_id AND a.c_acctschema_id = d.c_acctschema_id)";
+
+  @Override
+  protected String firstnameField() {
+    return FIELD_FIRSTNAME;
   }
 
-  /**
-   * Returns [name, em_etgo_firstname, em_etgo_lastname] for the given record.
-   */
-  private static String[] queryPersistedNameParts(String recordId) throws Exception {
-    Connection conn = OBDal.getInstance().getConnection();
-    try (PreparedStatement ps = conn.prepareStatement(
-        "SELECT name, em_etgo_firstname, em_etgo_lastname" + "  FROM c_bpartner WHERE c_bpartner_id = ?")) {
-      ps.setString(1, recordId);
-      try (ResultSet rs = ps.executeQuery()) {
-        if (rs.next()) {
-          return new String[]{ StringUtils.trimToEmpty(rs.getString(1)), StringUtils.trimToEmpty(
-              rs.getString(2)), StringUtils.trimToEmpty(rs.getString(3)) };
-        }
-      }
-    }
-    return new String[]{ "", "", "" };
+  @Override
+  protected String lastnameField() {
+    return FIELD_LASTNAME;
+  }
+
+  @Override
+  protected String persistedNamePartsSql() {
+    return "SELECT name, em_etgo_firstname, em_etgo_lastname FROM c_bpartner WHERE c_bpartner_id = ?";
   }
 
   /**
@@ -236,14 +282,20 @@ public class BusinessPartnerHandler implements NeoHandler {
       return null;
     }
     try {
-      deriveNameFromPerson(ctx, body);
+      deriveName(ctx, body);
 
       if ("POST".equals(method)) {
         stripPreCreateBillingDefaults(body);
         String name = body.optString(FIELD_NAME, null);
         if (StringUtils.isNotBlank(name) && !body.has(FIELD_SEARCH_KEY)) {
-          body.put(FIELD_SEARCH_KEY, name);
+          // C_BPartner.Value is VARCHAR(40) while Name has 60, so a long commercial name
+          // cannot be used verbatim as the placeholder ("Value too long. Length 48,
+          // maximum allowed 40"). afterHandle() replaces it with em_etgo_identifier
+          // anyway, so truncating here is lossless. ETP-4156: the app-shell used to
+          // pre-truncate this client-side, which masked the missing guard.
+          body.put(FIELD_SEARCH_KEY, StringUtils.substring(name, 0, SEARCH_KEY_MAX_LENGTH));
         }
+        injectOrgCurrency(ctx, body);
       }
     } catch (Exception e) {
       log.error("BusinessPartnerHandler: error in handle()", e);
@@ -252,59 +304,42 @@ public class BusinessPartnerHandler implements NeoHandler {
     return null;
   }
 
+  /**
+   * A new Business Partner (contact) with no currency breaks purchase invoice confirmation
+   * later on ({@code ProcessInvoiceUtil} in the core validates {@code businessPartner
+   * .getCurrency() == null} with no fallback). When a create request omits the currency
+   * field, resolve and inject the organization's currency so {@code BP_Currency_ID} is
+   * populated deterministically instead of relying on a session default that may be null.
+   * Never overwrites a currency the caller explicitly set.
+   */
+  private void injectOrgCurrency(NeoContext ctx, JSONObject body) {
+    if (body.has(FIELD_CURRENCY) && StringUtils.isNotBlank(body.optString(FIELD_CURRENCY, null))) {
+      return;
+    }
+    OBContext obContext = ctx.getObContext();
+    if (obContext == null || obContext.getCurrentOrganization() == null) {
+      return;
+    }
+    try {
+      OBContext.setAdminMode();
+      try {
+        String orgId = obContext.getCurrentOrganization().getId();
+        String currencyId = OBCurrencyUtils.getOrgCurrency(orgId);
+        if (StringUtils.isNotBlank(currencyId)) {
+          body.put(FIELD_CURRENCY, currencyId);
+        }
+      } finally {
+        OBContext.restorePreviousMode();
+      }
+    } catch (Exception e) {
+      log.warn("BusinessPartnerHandler: could not inject organization currency", e);
+    }
+  }
+
   private void stripPreCreateBillingDefaults(JSONObject body) {
     for (String key : PRECREATE_BILLING_FIELDS) {
       body.remove(key);
       body.remove(key + "$_identifier");
-    }
-  }
-
-  /**
-   * Derives {@code name} from {@code etgoFirstname} + {@code etgoLastname} when:
-   * <ul>
-   *   <li>At least one of the name parts is present in the request body.</li>
-   *   <li>The effective {@code name} is blank (body value for POST; DB value for PATCH/PUT).</li>
-   * </ul>
-   * If {@code name} already has a value it is left untouched.
-   */
-  private void deriveNameFromPerson(NeoContext ctx, JSONObject body) throws Exception {
-    boolean hasFirstname = body.has(FIELD_FIRSTNAME);
-    boolean hasLastname = body.has(FIELD_LASTNAME);
-    if (!hasFirstname && !hasLastname) {
-      return;
-    }
-
-    String firstname;
-    String lastname;
-
-    if ("POST".equals(ctx.getHttpMethod())) {
-      // New record: name must be absent or blank to auto-fill.
-      if (StringUtils.isNotBlank(body.optString(FIELD_NAME, null))) {
-        return;
-      }
-      firstname = StringUtils.trimToEmpty(body.optString(FIELD_FIRSTNAME, ""));
-      lastname = StringUtils.trimToEmpty(body.optString(FIELD_LASTNAME, ""));
-    } else {
-      // PATCH / PUT: check the persisted name; if already set, respect it.
-      String recordId = ctx.getRecordId();
-      if (StringUtils.isBlank(recordId)) {
-        return;
-      }
-      String[] persisted = queryPersistedNameParts(recordId);
-      // persisted[0] = name, persisted[1] = firstname, persisted[2] = lastname
-      if (StringUtils.isNotBlank(persisted[0])) {
-        return;
-      }
-      // Merge: body value takes precedence over persisted value for each part.
-      firstname = hasFirstname ? StringUtils.trimToEmpty(body.optString(FIELD_FIRSTNAME, "")) : StringUtils.trimToEmpty(
-          persisted[1]);
-      lastname = hasLastname ? StringUtils.trimToEmpty(body.optString(FIELD_LASTNAME, "")) : StringUtils.trimToEmpty(
-          persisted[2]);
-    }
-
-    String derived = buildFullName(firstname, lastname);
-    if (StringUtils.isNotBlank(derived)) {
-      body.put(FIELD_NAME, derived);
     }
   }
 
@@ -335,6 +370,11 @@ public class BusinessPartnerHandler implements NeoHandler {
             modified = true;
           }
         }
+      } else {
+        // PUT/PATCH: flipping vendor/customer to Y on an already-persisted BP never runs through
+        // c_bpartner_trg (it only fires on TG_OP='INSERT'), so backfill whichever posting-account
+        // row is now missing. See provisionMissingBpAcctRows() for the full rationale (ETP-4565).
+        provisionMissingBpAcctRows(ctx);
       }
 
       modified |= injectViesMessage(body);
@@ -342,6 +382,50 @@ public class BusinessPartnerHandler implements NeoHandler {
     } catch (Exception e) {
       log.error("BusinessPartnerHandler: error in afterHandle()", e);
       return null;
+    }
+  }
+
+  /**
+   * ETP-4565 — closes the "vendor/customer flag flipped after creation" accounting gap.
+   *
+   * <p>Classic's native {@code c_bpartner_trg} trigger auto-creates {@code C_BP_Customer_Acct}/
+   * {@code C_BP_Vendor_Acct} rows unconditionally for every new {@code C_BPartner}, but ONLY on
+   * {@code TG_OP='INSERT'} — flipping {@code IsCustomer}/{@code IsVendor} from N to Y on an
+   * already-persisted BP via {@code UPDATE} never creates the newly-relevant row (confirmed live:
+   * a BP created as customer-only, later updated to also be a vendor, is left with a permanently
+   * empty Vendor accounting tab). This backfills whichever row is missing, right after a
+   * successful PUT/PATCH, only when the request actually flips the {@code vendor}/{@code
+   * customer} flag to {@code true} — so the common case (updating unrelated fields, or explicitly
+   * unsetting the flag) never pays for the extra lookup. Posting accounts are sourced from the
+   * BP's own {@code C_BP_Group_Acct} row (via {@code C_BPartner.C_BP_Group_ID}), one row per
+   * {@code AcctSchema} wired to the BP's own org (via {@code AD_Org_AcctSchema} / {@code
+   * ad_isorgincluded}), guarded by {@code NOT EXISTS} so it is idempotent and a no-op once the row
+   * exists — see the account-source rationale on {@link #BP_CUSTOMER_ACCT_FOR_BP_SQL}.
+   */
+  private void provisionMissingBpAcctRows(NeoContext ctx) {
+    JSONObject requestBody = ctx.getRequestBody();
+    String recordId = ctx.getRecordId();
+    if (requestBody == null || StringUtils.isBlank(recordId)) {
+      return;
+    }
+    try {
+      if (requestBody.has(FIELD_CUSTOMER) && requestBody.optBoolean(FIELD_CUSTOMER, false)) {
+        runBpAcctBackfill(BP_CUSTOMER_ACCT_FOR_BP_SQL, recordId);
+      }
+      if (requestBody.has(FIELD_VENDOR) && requestBody.optBoolean(FIELD_VENDOR, false)) {
+        runBpAcctBackfill(BP_VENDOR_ACCT_FOR_BP_SQL, recordId);
+      }
+    } catch (Exception e) {
+      log.warn("BusinessPartnerHandler: could not backfill customer/vendor posting accounts for bp={}",
+          recordId, e);
+    }
+  }
+
+  private static void runBpAcctBackfill(String sql, String recordId) throws SQLException {
+    Connection conn = OBDal.getInstance().getConnection();
+    try (PreparedStatement ps = conn.prepareStatement(sql)) {
+      ps.setString(1, recordId);
+      ps.executeUpdate();
     }
   }
 

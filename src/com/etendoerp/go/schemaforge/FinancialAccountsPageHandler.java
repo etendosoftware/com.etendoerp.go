@@ -92,15 +92,21 @@ public class FinancialAccountsPageHandler implements NeoHandler {
   private static final Logger log = LogManager.getLogger(FinancialAccountsPageHandler.class);
 
   private static final String METHOD_GET = "GET";
+  private static final String SQL_TYPE_VARCHAR = "varchar";
 
   private static final String ACCOUNTS_SQL =
       "SELECT fa.fin_financial_account_id, fa.name, fa.type, fa.currentbalance, "
           + "       fa.c_currency_id, cur.iso_code, fa.iban, fa.isdefault, fa.isactive, "
           + "       fa.em_psd2_masked_pan, fa.em_psd2_connection_status, "
           + "       COALESCE(fa.em_etgo_date_tolerance, 3), "
-          + "       COALESCE(fa.em_etgo_amount_tolerance, 0) "
+          + "       COALESCE(fa.em_etgo_amount_tolerance, 0), "
+          + "       fa.em_psd2_salt_edge_account_id, prov.logo_url "
           + "  FROM fin_financial_account fa "
           + "  JOIN c_currency cur ON cur.c_currency_id = fa.c_currency_id "
+          // LEFT JOIN: most accounts have no bank provider at all (cash, or never connected).
+          // Reads the logo straight from the already-synced provider catalog — no live Salt Edge
+          // call per row, unlike the connect-flow bank picker / account selector.
+          + "  LEFT JOIN psd2_provider prov ON prov.psd2_provider_id = fa.em_psd2_provider_id "
           + " WHERE fa.ad_client_id = ? "
           + "   AND fa.ad_org_id = ANY (?) "
           + " ORDER BY fa.isdefault DESC, fa.name ASC";
@@ -115,6 +121,18 @@ public class FinancialAccountsPageHandler implements NeoHandler {
           + "   AND bs.ad_client_id = ? "
           + "   AND bs.ad_org_id = ANY (?) "
           + " GROUP BY bs.fin_financial_account_id";
+
+  /**
+   * Accounts with at least one active transaction (ETP-4530). Used by the frontend to lock the
+   * Currency field on the edit form once real movement history exists — a stricter, different
+   * condition than {@code bankConnected} (bank-linkage only, no bearing on transaction history).
+   */
+  private static final String TRANSACTIONS_BY_ACCOUNT_SQL =
+      "SELECT DISTINCT ft.fin_financial_account_id "
+          + "  FROM fin_finacc_transaction ft "
+          + " WHERE ft.isactive = 'Y' "
+          + "   AND ft.ad_client_id = ? "
+          + "   AND ft.ad_org_id = ANY (?)";
 
   @Override
   public NeoResponse handle(NeoContext context) {
@@ -161,9 +179,10 @@ public class FinancialAccountsPageHandler implements NeoHandler {
   NeoResponse buildPayload(String clientId, Set<String> orgs) throws Exception {
     List<AccountRow> accounts = loadAccounts(clientId, orgs);
     Map<String, Integer> pendingByAccount = loadPendingByAccount(clientId, orgs);
+    Set<String> accountsWithTransactions = loadAccountsWithTransactions(clientId, orgs);
 
     JSONObject data = new JSONObject();
-    data.put("accounts", buildAccountsArray(accounts, pendingByAccount));
+    data.put("accounts", buildAccountsArray(accounts, pendingByAccount, accountsWithTransactions));
     data.put("summary", buildSummary(accounts, pendingByAccount));
 
     JSONObject responseData = new JSONObject();
@@ -182,7 +201,7 @@ public class FinancialAccountsPageHandler implements NeoHandler {
     Connection conn = OBDal.getInstance().getConnection();
     try (PreparedStatement ps = conn.prepareStatement(ACCOUNTS_SQL)) {
       ps.setString(1, clientId);
-      ps.setArray(2, conn.createArrayOf("varchar", orgs.toArray(new String[0])));
+      ps.setArray(2, conn.createArrayOf(SQL_TYPE_VARCHAR, orgs.toArray(new String[0])));
       try (ResultSet rs = ps.executeQuery()) {
         while (rs.next()) {
           AccountRow row = new AccountRow(
@@ -195,10 +214,13 @@ public class FinancialAccountsPageHandler implements NeoHandler {
               "Y".equals(rs.getString(8)));
           row.active = "Y".equals(rs.getString(9));
           row.maskedPan = StringUtils.trimToEmpty(rs.getString(10));
-          row.psd2Connected = "CO".equals(rs.getString(11));
+          row.bankConnected = "CO".equals(rs.getString(11));
           row.dateTolerance = rs.getInt(12);
           BigDecimal amtTol = rs.getBigDecimal(13);
           row.amountTolerance = amtTol != null ? amtTol : BigDecimal.ZERO;
+          row.bankReconnectable = !row.bankConnected
+              && StringUtils.isNotBlank(rs.getString(14));
+          row.providerLogoUrl = StringUtils.trimToEmpty(rs.getString(15));
           rows.add(row);
         }
       }
@@ -211,10 +233,26 @@ public class FinancialAccountsPageHandler implements NeoHandler {
     Connection conn = OBDal.getInstance().getConnection();
     try (PreparedStatement ps = conn.prepareStatement(PENDING_BY_ACCOUNT_SQL)) {
       ps.setString(1, clientId);
-      ps.setArray(2, conn.createArrayOf("varchar", orgs.toArray(new String[0])));
+      ps.setArray(2, conn.createArrayOf(SQL_TYPE_VARCHAR, orgs.toArray(new String[0])));
       try (ResultSet rs = ps.executeQuery()) {
         while (rs.next()) {
           result.put(rs.getString(1), rs.getInt(2));
+        }
+      }
+    }
+    return result;
+  }
+
+  /** Ids of accounts (within scope) that have at least one active transaction (ETP-4530). */
+  Set<String> loadAccountsWithTransactions(String clientId, Set<String> orgs) throws Exception {
+    Set<String> result = new java.util.LinkedHashSet<>();
+    Connection conn = OBDal.getInstance().getConnection();
+    try (PreparedStatement ps = conn.prepareStatement(TRANSACTIONS_BY_ACCOUNT_SQL)) {
+      ps.setString(1, clientId);
+      ps.setArray(2, conn.createArrayOf(SQL_TYPE_VARCHAR, orgs.toArray(new String[0])));
+      try (ResultSet rs = ps.executeQuery()) {
+        while (rs.next()) {
+          result.add(rs.getString(1));
         }
       }
     }
@@ -225,8 +263,8 @@ public class FinancialAccountsPageHandler implements NeoHandler {
   // Response builders (package-private to allow unit tests to drive directly)
   // ---------------------------------------------------------------------------
 
-  JSONArray buildAccountsArray(List<AccountRow> accounts, Map<String, Integer> pendingByAccount)
-      throws JSONException {
+  JSONArray buildAccountsArray(List<AccountRow> accounts, Map<String, Integer> pendingByAccount,
+      Set<String> accountsWithTransactions) throws JSONException {
     JSONArray arr = new JSONArray();
     for (AccountRow account : accounts) {
       JSONObject json = new JSONObject();
@@ -238,13 +276,16 @@ public class FinancialAccountsPageHandler implements NeoHandler {
       json.put("currencyIso", account.currency.iso);
       json.put("iban", account.iban);
       json.put("maskedPan", account.maskedPan);
-      json.put("psd2Connected", account.psd2Connected);
-      json.put("psd2Pending", account.psd2Pending);
+      json.put("bankConnected", account.bankConnected);
+      json.put("bankReconnectable", account.bankReconnectable);
+      json.put("providerLogoUrl", account.providerLogoUrl);
+      json.put("bankConnectionPending", account.bankConnectionPending);
       json.put("isDefault", account.isDefault);
       json.put("active", account.active);
       json.put("pendingCount", pendingByAccount.getOrDefault(account.id, 0));
       json.put("dateTolerance", account.dateTolerance);
       json.put("amountTolerance", account.amountTolerance);
+      json.put("hasTransactions", accountsWithTransactions.contains(account.id));
       arr.put(json);
     }
     return arr;
@@ -323,10 +364,26 @@ public class FinancialAccountsPageHandler implements NeoHandler {
     boolean active = true;
     /** PSD2 masked card number (column {@code EM_PSD2_Masked_Pan}); blank for non-card accounts. Set by the loader. */
     String maskedPan = "";
-    /** Whether the account has an active PSD2 connection ({@code EM_PSD2_Connection_Status = 'CO'}). Set by the loader. */
-    boolean psd2Connected = false;
-    /** Whether a PSD2 sync is pending. Not tracked server-side yet; reserved for the list sync badge. */
-    boolean psd2Pending = false;
+    /** Whether the account has an active bank connection ({@code EM_PSD2_Connection_Status = 'CO'}). Set by the loader. */
+    boolean bankConnected = false;
+    /**
+     * Whether the account was soft-disconnected and can be revived through the reconnect flow:
+     * not currently connected, yet still holding its Salt Edge link
+     * ({@code EM_PSD2_Salt_Edge_Account_ID} is set). A permanent deletion clears that column, so
+     * this stays {@code false} there. Kept as its own flag rather than turning
+     * {@code bankConnected} into a tri-state, because the SPA checks
+     * {@code bankConnected === true} in several places. Set by the loader.
+     */
+    boolean bankReconnectable = false;
+    /**
+     * The connected provider's logo image URL ({@code PSD2_Provider.Logo_Url}), or blank when the
+     * account has no bank provider or the provider has none on record yet. Read from the provider
+     * catalog via a join, not from a live Salt Edge call — that is the whole point of persisting
+     * it instead of fetching it per row like the connect-flow bank picker does. Set by the loader.
+     */
+    String providerLogoUrl = "";
+    /** Whether a bank sync is pending. Not tracked server-side yet; reserved for the list sync badge. */
+    boolean bankConnectionPending = false;
     /** Days of margin allowed between bank line and transaction dates. Default 3. */
     int dateTolerance = 3;
     /** Maximum % difference allowed when matching amounts. Default 0 (exact match). */

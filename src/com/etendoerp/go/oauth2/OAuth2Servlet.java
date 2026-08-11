@@ -25,6 +25,7 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Timestamp;
+import java.sql.Types;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashSet;
@@ -56,7 +57,7 @@ import com.smf.securewebservices.utils.SecureWebServicesUtils;
 /**
  * OAuth2 servlet handling token issuance, client CRUD, revocation, and introspection.
  *
- * Mapped to /sws/oauth2/* — endpoints:
+ * Mapped to /oauth2/* — endpoints:
  *   POST /token          — Client Credentials grant (RFC 6749 Section 4.4)
  *   GET  /clients        — List all OAuth2 clients (admin only)
  *   POST /clients        — Create a new OAuth2 client (admin only)
@@ -75,6 +76,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
 
   private static final int TOKEN_EXPIRY_SECONDS = 3600;
   private static final int AUTH_CODE_EXPIRY_MS = 300_000; // 5 minutes
+
     private static final String APPLICATION_JSON = "application/json";
     private static final String UTF_8 = "UTF-8";
     private static final String TOKEN_TYPE_BEARER = "bearer";
@@ -143,11 +145,12 @@ public class OAuth2Servlet extends HttpBaseServlet {
       "INSERT INTO etgo_oauth2_token "
       + "(etgo_oauth2_token_id, ad_client_id, ad_org_id, isactive, "
       + "created, createdby, updated, updatedby, "
-      + "etgo_oauth2_client_id, access_token_hash, refresh_token_hash, scopes, expires_at, is_revoked) "
-      + "VALUES (get_uuid(), ?, '0', 'Y', now(), ?, now(), ?, ?, ?, ?, ?, ?, 'N')";
+      + "etgo_oauth2_client_id, access_token_hash, refresh_token_hash, scopes, expires_at, "
+      + "validity_seconds, is_revoked) "
+      + "VALUES (get_uuid(), ?, '0', 'Y', now(), ?, now(), ?, ?, ?, ?, ?, ?, ?, 'N')";
 
   private static final String SQL_FIND_BY_REFRESH_TOKEN =
-      "SELECT t.etgo_oauth2_token_id, t.etgo_oauth2_client_id, t.scopes, t.is_revoked, "
+      "SELECT t.etgo_oauth2_token_id, t.etgo_oauth2_client_id, t.scopes, t.is_revoked, t.validity_seconds, "
       + "c.ad_user_id, c.ad_role_id, c.ad_client_id AS etendo_client_id, c.isactive AS client_active "
       + "FROM etgo_oauth2_token t "
       + "JOIN etgo_oauth2_client c ON t.etgo_oauth2_client_id = c.etgo_oauth2_client_id "
@@ -302,7 +305,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
   // --- Token endpoint (B2 — existing) ---
 
   /**
-   * Handle the POST /sws/oauth2/token request.
+   * Handle the POST /oauth2/token request.
    * Supports both application/x-www-form-urlencoded and application/json request bodies.
    */
   private void handleTokenRequest(HttpServletRequest request, HttpServletResponse response)
@@ -315,8 +318,9 @@ public class OAuth2Servlet extends HttpBaseServlet {
       String scopeParam;
 
       String contentType = request.getContentType();
+      JSONObject body = null;
       if (contentType != null && contentType.contains(APPLICATION_JSON)) {
-        JSONObject body = parseJsonBody(request);
+        body = parseJsonBody(request);
         grantType = body.optString("grant_type", null);
         clientId = body.optString(FIELD_CLIENT_ID_REQUEST, null);
         clientSecret = body.optString("client_secret", null);
@@ -331,12 +335,12 @@ public class OAuth2Servlet extends HttpBaseServlet {
 
       // Route by grant_type
       if (GRANT_TYPE_AUTHORIZATION_CODE.equals(grantType)) {
-        handleAuthorizationCodeGrant(request, response, contentType);
+        handleAuthorizationCodeGrant(request, response, body);
         return;
       }
 
       if (GRANT_TYPE_REFRESH_TOKEN.equals(grantType)) {
-        handleRefreshTokenGrant(request, response, contentType);
+        handleRefreshTokenGrant(request, response, body);
         return;
       }
 
@@ -401,7 +405,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
     String refreshToken = OAuth2Utils.generateSecureToken();
     Timestamp expiresAt = new Timestamp(System.currentTimeMillis() + (TOKEN_EXPIRY_SECONDS * 1000L));
     storeToken(client, OAuth2Utils.hashToken(accessToken), OAuth2Utils.hashToken(refreshToken),
-        String.join(" ", grantedScopes), expiresAt);
+        String.join(" ", grantedScopes), expiresAt, TOKEN_EXPIRY_SECONDS);
 
     JSONObject result = new JSONObject();
     result.put(FIELD_ACCESS_TOKEN, accessToken);
@@ -418,7 +422,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
   // --- Client CRUD (B3) ---
 
   /**
-   * GET /sws/oauth2/clients — List all OAuth2 clients.
+   * GET /oauth2/clients — List all OAuth2 clients.
    * Requires JWT auth with System Administrator role.
    */
   private void handleListClients(HttpServletRequest request, HttpServletResponse response)
@@ -460,7 +464,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
   }
 
   /**
-   * POST /sws/oauth2/clients — Create a new OAuth2 client.
+   * POST /oauth2/clients — Create a new OAuth2 client.
    * Requires JWT auth with System Administrator role.
    * Returns the plaintext client secret ONCE in the response.
    */
@@ -540,7 +544,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
   }
 
   /**
-   * PUT /sws/oauth2/clients/{id} — Update an existing OAuth2 client.
+   * PUT /oauth2/clients/{id} — Update an existing OAuth2 client.
    * Requires JWT auth with System Administrator role.
    * Updates name, scopes, adUserId, adRoleId, isActive. Does NOT touch the secret.
    */
@@ -611,7 +615,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
   }
 
   /**
-   * DELETE /sws/oauth2/clients/{id} — Delete an OAuth2 client and all its tokens.
+   * DELETE /oauth2/clients/{id} — Delete an OAuth2 client and all its tokens.
    * Requires JWT auth with System Administrator role.
    */
   private void handleDeleteClient(HttpServletRequest request, HttpServletResponse response,
@@ -658,7 +662,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
   // --- B5: Regenerate Secret ---
 
   /**
-   * PUT /sws/oauth2/clients/{id}/regenerate-secret — Generate a new secret for an OAuth2 client.
+   * PUT /oauth2/clients/{id}/regenerate-secret — Generate a new secret for an OAuth2 client.
    * Requires JWT auth with System Administrator role.
    * Optionally revokes existing tokens. Returns plaintext secret ONCE.
    */
@@ -727,7 +731,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
   // --- B4: Revoke and Introspect ---
 
   /**
-   * POST /sws/oauth2/revoke — Revoke all tokens for a client.
+   * POST /oauth2/revoke — Revoke all tokens for a client.
    * Requires JWT auth with System Administrator role.
    */
   private void handleRevoke(HttpServletRequest request, HttpServletResponse response)
@@ -769,7 +773,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
   }
 
   /**
-   * POST /sws/oauth2/introspect — Token introspection (RFC 7662).
+   * POST /oauth2/introspect — Token introspection (RFC 7662).
    * Requires JWT auth with System Administrator role.
    * Returns active status, scopes, expiry, and client_id for a given access token.
    */
@@ -830,7 +834,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
   // --- Authorization Code + PKCE flow ---
 
   /**
-   * GET /sws/oauth2/authorize — Serve the login page for the Authorization Code flow.
+   * GET /oauth2/authorize — Serve the login page for the Authorization Code flow.
    * Query params: client_id, redirect_uri, response_type, code_challenge, code_challenge_method, state, scope
    */
   private void handleAuthorizeGet(HttpServletRequest request, HttpServletResponse response)
@@ -894,7 +898,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
 
 
   /**
-   * POST /sws/oauth2/authorize — Process the login form submission.
+   * POST /oauth2/authorize — Process the login form submission.
    * Validates credentials via /sws/login, generates an authorization code, and redirects.
    */
   private void handleAuthorizePost(HttpServletRequest request, HttpServletResponse response)
@@ -951,14 +955,13 @@ public class OAuth2Servlet extends HttpBaseServlet {
    * Validates the code, verifies PKCE, and issues an access token.
    */
   private void handleAuthorizationCodeGrant(HttpServletRequest request,
-      HttpServletResponse response, String contentType) throws IOException {
+      HttpServletResponse response, JSONObject body) throws IOException {
     try {
       String code;
       String codeVerifier;
       String redirectUri;
 
-      if (contentType != null && contentType.contains(APPLICATION_JSON)) {
-        JSONObject body = parseJsonBody(request);
+      if (body != null) {
         code = body.optString("code", null);
         codeVerifier = body.optString("code_verifier", null);
         redirectUri = body.optString(FIELD_REDIRECT_URI, null);
@@ -1039,15 +1042,21 @@ public class OAuth2Servlet extends HttpBaseServlet {
       String tokenHash = OAuth2Utils.hashToken(accessToken);
       String refreshToken = OAuth2Utils.generateSecureToken();
       String refreshTokenHash = OAuth2Utils.hashToken(refreshToken);
-      Timestamp expiresAt = new Timestamp(System.currentTimeMillis() + (TOKEN_EXPIRY_SECONDS * 1000L));
+      long validitySeconds = codeData.validitySeconds;
+      Timestamp expiresAt = validitySeconds == OAuth2ValidityPolicy.VALIDITY_NO_EXPIRATION
+          ? null
+          : new Timestamp(System.currentTimeMillis() + (validitySeconds * 1000L));
 
-      storeToken(tokenClient, tokenHash, refreshTokenHash, codeData.scopes, expiresAt);
+      storeToken(tokenClient, tokenHash, refreshTokenHash, codeData.scopes, expiresAt,
+          validitySeconds);
 
       // Build response
       JSONObject result = new JSONObject();
       result.put(FIELD_ACCESS_TOKEN, accessToken);
       result.put(FIELD_TOKEN_TYPE, TOKEN_TYPE_BEARER);
-      result.put(FIELD_EXPIRES_IN, TOKEN_EXPIRY_SECONDS);
+      if (validitySeconds != OAuth2ValidityPolicy.VALIDITY_NO_EXPIRATION) {
+        result.put(FIELD_EXPIRES_IN, validitySeconds);
+      }
       result.put(FIELD_REFRESH_TOKEN, refreshToken);
       result.put(FIELD_SCOPE, codeData.scopes);
 
@@ -1073,12 +1082,11 @@ public class OAuth2Servlet extends HttpBaseServlet {
    * Validates the refresh token, revokes the old token pair, and issues new access + refresh tokens.
    */
   private void handleRefreshTokenGrant(HttpServletRequest request,
-      HttpServletResponse response, String contentType) throws IOException {
+      HttpServletResponse response, JSONObject body) throws IOException {
     try {
       String refreshTokenParam;
 
-      if (contentType != null && contentType.contains(APPLICATION_JSON)) {
-        JSONObject body = parseJsonBody(request);
+      if (body != null) {
         refreshTokenParam = body.optString(GRANT_TYPE_REFRESH_TOKEN, null);
       } else {
         refreshTokenParam = request.getParameter(GRANT_TYPE_REFRESH_TOKEN);
@@ -1103,6 +1111,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
       String adClientId = null;
       boolean revoked = false;
       boolean clientActive = false;
+      long validitySeconds = OAuth2ValidityPolicy.DEFAULT_AUTHORIZE_VALIDITY_SECONDS;
 
       try (PreparedStatement ps = conn.prepareStatement(SQL_FIND_BY_REFRESH_TOKEN)) {
         ps.setString(1, refreshHash);
@@ -1120,6 +1129,10 @@ public class OAuth2Servlet extends HttpBaseServlet {
           adRoleId = rs.getString(FIELD_DB_AD_ROLE_ID);
           adClientId = rs.getString("etendo_client_id");
           clientActive = "Y".equals(rs.getString("client_active"));
+          long storedValiditySeconds = rs.getLong("validity_seconds");
+          // Legacy rows predating this feature store NULL; getLong() returns 0 for NULL,
+          // which is indistinguishable from the "no expiration" sentinel, so check wasNull().
+          validitySeconds = rs.wasNull() ? OAuth2ValidityPolicy.DEFAULT_AUTHORIZE_VALIDITY_SECONDS : storedValiditySeconds;
         }
       }
 
@@ -1152,15 +1165,19 @@ public class OAuth2Servlet extends HttpBaseServlet {
       String newTokenHash = OAuth2Utils.hashToken(newAccessToken);
       String newRefreshToken = OAuth2Utils.generateSecureToken();
       String newRefreshHash = OAuth2Utils.hashToken(newRefreshToken);
-      Timestamp expiresAt = new Timestamp(System.currentTimeMillis() + (TOKEN_EXPIRY_SECONDS * 1000L));
+      Timestamp expiresAt = validitySeconds == OAuth2ValidityPolicy.VALIDITY_NO_EXPIRATION
+          ? null
+          : new Timestamp(System.currentTimeMillis() + (validitySeconds * 1000L));
 
-      storeToken(client, newTokenHash, newRefreshHash, scopes, expiresAt);
+      storeToken(client, newTokenHash, newRefreshHash, scopes, expiresAt, validitySeconds);
 
       // Build response
       JSONObject result = new JSONObject();
       result.put(FIELD_ACCESS_TOKEN, newAccessToken);
       result.put(FIELD_TOKEN_TYPE, TOKEN_TYPE_BEARER);
-      result.put(FIELD_EXPIRES_IN, TOKEN_EXPIRY_SECONDS);
+      if (validitySeconds != OAuth2ValidityPolicy.VALIDITY_NO_EXPIRATION) {
+        result.put(FIELD_EXPIRES_IN, validitySeconds);
+      }
       result.put(FIELD_REFRESH_TOKEN, newRefreshToken);
       result.put(FIELD_SCOPE, scopes);
 
@@ -1181,7 +1198,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
   // --- Dynamic Client Registration (RFC 7591) ---
 
   /**
-   * POST /sws/oauth2/register — Register a new OAuth2 client dynamically.
+   * POST /oauth2/register — Register a new OAuth2 client dynamically.
    * Public endpoint (no auth required). Creates a public client (no secret).
    */
   private void handleRegister(HttpServletRequest request, HttpServletResponse response)
@@ -1503,9 +1520,13 @@ public class OAuth2Servlet extends HttpBaseServlet {
 
   /**
    * Store the hashed access token in ETGO_OAUTH2_TOKEN.
+   *
+   * @param expiresAt       expiration timestamp, or {@code null} for a non-expiring token
+   *                        ({@code validitySeconds == OAuth2ValidityPolicy.VALIDITY_NO_EXPIRATION})
+   * @param validitySeconds the granted token validity in seconds ({@code 0} = no expiration)
    */
   private void storeToken(ClientRecord client, String tokenHash, String refreshTokenHash,
-      String scopes, Timestamp expiresAt) throws SQLException {
+      String scopes, Timestamp expiresAt, long validitySeconds) throws SQLException {
     Connection conn = OBDal.getInstance().getConnection();
     try (PreparedStatement ps = conn.prepareStatement(SQL_INSERT_TOKEN)) {
       ps.setString(1, client.adClientId);    // ad_client_id
@@ -1515,7 +1536,12 @@ public class OAuth2Servlet extends HttpBaseServlet {
       ps.setString(5, tokenHash);            // access_token_hash
       ps.setString(6, refreshTokenHash);     // refresh_token_hash
       ps.setString(7, scopes);               // scopes
-      ps.setTimestamp(8, expiresAt);          // expires_at
+      if (expiresAt == null) {
+        ps.setNull(8, Types.TIMESTAMP);       // expires_at (no expiration)
+      } else {
+        ps.setTimestamp(8, expiresAt);        // expires_at
+      }
+      ps.setLong(9, validitySeconds);         // validity_seconds
       ps.executeUpdate();
     }
   }
@@ -1610,6 +1636,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
     String codeChallenge;
     String scopes;
     long expiresAt;
+    long validitySeconds;
     boolean used;
   }
 

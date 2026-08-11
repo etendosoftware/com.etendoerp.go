@@ -39,6 +39,7 @@ import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
+import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.base.model.Entity;
 import org.openbravo.base.model.ModelProvider;
@@ -59,9 +60,11 @@ import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFSpec;
 import com.etendoerp.go.schemaforge.telemetry.NeoTelemetryService;
 import com.etendoerp.go.schemaforge.util.NeoCrudHelper;
+import com.etendoerp.go.schemaforge.util.NeoDistinctFetchSupport;
 import com.etendoerp.go.schemaforge.util.NeoErrorSanitizer;
 import com.etendoerp.go.schemaforge.util.NeoListIdentifierHelper;
 import com.etendoerp.go.schemaforge.util.NeoLocatorIdentifierHelper;
+import com.etendoerp.go.schemaforge.util.NeoMethodPolicy;
 import com.etendoerp.go.schemaforge.util.NeoTypeCoercionHelper;
 
 /**
@@ -78,8 +81,9 @@ class NeoCrudHandler {
   private static final String METHOD_DELETE = "DELETE";
   private static final String METHOD_PATCH = "PATCH";
   private static final String PARAM_PARENT_ID = "parentId";
+  private static final String CRITERIA_PARAM = "criteria";
   private static final String HQL_AND_OPERATOR = " and ";
-  private static final String JSON_IDENTIFIER = "_identifier";
+  private static final String FIELD_ACCOUNTING_DATE = "accountingDate";
   private static final Set<String> CONTACTS_PRECREATE_BILLING_FIELDS = new HashSet<>(
       Arrays.asList(
           "priceList",
@@ -118,10 +122,9 @@ class NeoCrudHandler {
           "Entity not found in spec: " + pathInfo.entityName);
       return;
     }
-    boolean methodEnabled = isMethodEnabled(method, entity);
-    if (!methodEnabled) {
+    if (!NeoMethodPolicy.isMethodEnabled(entity, method)) {
       servlet.sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
-          method + " not enabled for " + pathInfo.entityName);
+          NeoMethodPolicy.buildNotEnabledMessage(method, pathInfo.entityName));
       return;
     }
     Tab adTab = entity.getADTab();
@@ -220,24 +223,6 @@ class NeoCrudHandler {
   }
 
   /**
-   * Returns true if the given HTTP method is enabled on the entity's configuration.
-   */
-  private boolean isMethodEnabled(String method, SFEntity entity) {
-    if ("GET".equals(method)) {
-      return Boolean.TRUE.equals(entity.isGet()) || Boolean.TRUE.equals(entity.isGetByID());
-    } else if ("POST".equals(method)) {
-      return Boolean.TRUE.equals(entity.isPost());
-    } else if ("PUT".equals(method)) {
-      return Boolean.TRUE.equals(entity.isPut());
-    } else if (METHOD_PATCH.equals(method)) {
-      return Boolean.TRUE.equals(entity.isPatch());
-    } else if (METHOD_DELETE.equals(method)) {
-      return Boolean.TRUE.equals(entity.isDelete());
-    }
-    return false;
-  }
-
-  /**
    * Executes the default DAL-based handler for a CRUD request.
    */
   NeoResponse handleDefault(NeoContext context) {
@@ -322,6 +307,8 @@ class NeoCrudHandler {
     if (context.getQueryParams() != null) {
       params.putAll(context.getQueryParams());
     }
+
+    normalizeBooleanCriteria(params, dalEntityName);
 
     String parentId = context.getQueryParams() != null
         ? context.getQueryParams().get(PARAM_PARENT_ID)
@@ -476,7 +463,10 @@ class NeoCrudHandler {
       int httpStatus = NeoErrorSanitizer.isDuplicateKeyMessage(translated)
           ? HttpServletResponse.SC_CONFLICT
           : HttpServletResponse.SC_INTERNAL_SERVER_ERROR;
-      return NeoResponse.error(httpStatus, translated);
+      // Defence-in-depth: a DAL/validator failure message can carry a raw object toString
+      // (e.g. a List-reference "one of the following values: pkg.Class@hex ..."). Strip it
+      // before it reaches the client — the leak itself is built upstream in core (ETP-4668).
+      return NeoResponse.error(httpStatus, NeoErrorSanitizer.redactObjectReferences(translated));
     }
     if (status == JsonConstants.RPCREQUEST_STATUS_VALIDATION_ERROR) {
       return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, responseJson);
@@ -505,20 +495,16 @@ class NeoCrudHandler {
     // defaults. The callout cascade is allowed to refine missing/derived fields, but it must
     // not overwrite values the user explicitly chose (e.g. paymentTerms manually changed in
     // the form after a businessPartner callout already ran).
-    Set<String> userSubmittedFields = new HashSet<>();
-    if (filteredBody != null) {
-      Iterator<String> userKeyIter = filteredBody.keys();
-      while (userKeyIter.hasNext()) {
-        userSubmittedFields.add(userKeyIter.next());
-      }
-    }
+    Set<String> userSubmittedFields = NeoCrudHelper.snapshotBodyFields(filteredBody);
     long perfTotalStart = System.nanoTime();
     long perfStart = perfTotalStart;
     // runCascade=false: the cascade is run explicitly right after by executePostCalloutCascade,
     // so we skip the duplicated pass embedded in injectMandatoryDefaults.
     NeoDefaultsService.injectMandatoryDefaults(filteredBody, adTab, context, parentIdValue, false);
     long perfInjectDefaults = System.nanoTime();
-    executePostCalloutCascade(filteredBody, adTab, context, parentIdValue, userSubmittedFields);
+    Set<String> protectedCalloutFields = NeoCrudHelper.snapshotMandatoryBodyFields(filteredBody, adTab);
+    protectedCalloutFields.addAll(userSubmittedFields);
+    executePostCalloutCascade(filteredBody, adTab, context, parentIdValue, protectedCalloutFields);
     long perfCalloutCascade = System.nanoTime();
     NeoCommercialLinePolicy.injectProductDerivedUomIfMissing(filteredBody);
     NeoCommercialLinePolicy.injectGrossAmountIfMissing(filteredBody);
@@ -652,7 +638,18 @@ class NeoCrudHandler {
   private String executeUpdate(NeoContext context, String dalEntityName,
       NeoFieldFilter fieldFilter, DefaultJsonDataService jsonService,
       Map<String, String> params) throws Exception {
-    JSONObject filteredBody = fieldFilter.filterWriteRequest(context.getRequestBody());
+    JSONObject rawBody = context.getRequestBody();
+    // ETP-4531: capture accountingDate BEFORE filtering — filterWriteRequest/filterBody
+    // does NOT return an independent copy, it mutates `rawBody` in place (filterRecord strips
+    // non-writable keys directly from the same JSONObject reference it's given, when there's
+    // no "data" wrapper to unwrap into a different object first). So `rawBody` and
+    // `filteredBody` below end up being the SAME object once filtering runs — reading
+    // `rawBody.has("accountingDate")` AFTER calling filterWriteRequest is always false,
+    // because the filter already stripped it from that very same instance. Save the
+    // pre-filter value first, while it still exists.
+    Object accountingDateBeforeFilter = rawBody != null ? rawBody.opt(FIELD_ACCOUNTING_DATE) : null;
+    boolean hadAccountingDate = rawBody != null && rawBody.has(FIELD_ACCOUNTING_DATE);
+    JSONObject filteredBody = fieldFilter.filterWriteRequest(rawBody);
     // Inject lineNetAmount when absent from filteredBody (stripped by readOnly filter).
     // The frontend sends invoicedQuantity and unitPrice as editable fields, so both are
     // available here to compute the correct net amount even for products where SL_Invoice_Amt
@@ -660,6 +657,19 @@ class NeoCrudHandler {
     NeoCommercialLinePolicy.injectLineNetAmountIfMissing(filteredBody);
     NeoCommercialLinePolicy.injectGrossAmountIfMissing(filteredBody);
     NeoCommercialLinePolicy.injectLineGrossAmountIfMissing(filteredBody);
+    // ETP-4531: re-apply accountingDate now that filtering (which stripped it, correctly, as a
+    // read-only field the CLIENT should never write directly) has run. Each header handler's
+    // handle() pre-hook (e.g. AbstractInvoiceHeaderHandler#mirrorAccountingDate) mirrors the
+    // document date into this field before this method runs; filterCreateRequest (used on
+    // POST) already allows read-only fields through for exactly this reason ("they may carry
+    // values from callouts or defaults") — PATCH/PUT's stricter writableFields filter needs
+    // the same carve-out here. Uses the resolved DAL property name (e.g. "dateAcct"), not the
+    // API key ("accountingDate") — filterWriteRequest already remapped every other field to
+    // its DAL name via NeoFieldFilter#remapApiKeys, and DefaultJsonDataService only recognizes
+    // DAL property names; injecting under the API key would silently no-op.
+    if (hadAccountingDate) {
+      filteredBody.put(fieldFilter.resolveWritablePropName(FIELD_ACCOUNTING_DATE), accountingDateBeforeFilter);
+    }
     String wrappedBody = wrapForSmartclient(filteredBody, dalEntityName, context.getRecordId());
     return jsonService.update(params, wrappedBody);
   }
@@ -862,7 +872,7 @@ class NeoCrudHandler {
       return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
           "Unknown DAL entity: " + dalEntityName);
     }
-    Property prop = resolveDistinctProperty(entityDef, fieldName);
+    Property prop = NeoDistinctFetchSupport.resolveDistinctProperty(entityDef, fieldName);
     if (prop == null) {
       return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
           "Unknown field '" + fieldName + "' on entity " + dalEntityName);
@@ -893,8 +903,9 @@ class NeoCrudHandler {
         predicates.add("(" + parentFilter + ")");
       }
     }
-    if (StringUtils.isNotBlank(search)) {
-      predicates.add("LOWER(CAST(e." + resolvedProperty + " AS string)) LIKE :search");
+    String searchPredicate = NeoDistinctFetchSupport.buildDistinctSearchPredicate(prop, resolvedProperty, search);
+    if (searchPredicate != null) {
+      predicates.add(searchPredicate);
     }
 
     StringBuilder where = new StringBuilder(" as e where ")
@@ -905,7 +916,7 @@ class NeoCrudHandler {
       OBQuery<BaseOBObject> obQuery = OBDal.getInstance()
           .createQuery(dalEntityName, where.toString());
       obQuery.setSelectClause("DISTINCT e." + resolvedProperty);
-      if (StringUtils.isNotBlank(search)) {
+      if (searchPredicate != null) {
         obQuery.setNamedParameter("search", "%" + search.toLowerCase() + "%");
       }
       obQuery.setFirstResult(startRow);
@@ -917,7 +928,7 @@ class NeoCrudHandler {
 
       JSONArray data = new JSONArray();
       for (Object value : page) {
-        data.put(toDistinctEntry(value));
+        data.put(NeoDistinctFetchSupport.toDistinctEntry(value));
       }
 
       JSONObject payload = new JSONObject();
@@ -950,61 +961,85 @@ class NeoCrudHandler {
   }
 
   /**
-   * Resolves a distinct field name against the DAL entity, trying the raw name
-   * first and falling back to case-insensitive matches against property names
-   * and AD column names.
+   * Rewrites the char {@code "Y"}/{@code "N"} filter value to a real boolean for any criterion
+   * whose target property is a genuine {@link Boolean} DAL type.
+   *
+   * <p>The frontend serializes every boolean list column to {@code "Y"}/{@code "N"} (see
+   * gridQuery.js booleanLabel mode). That is correct for AD button/list columns the DAL exposes
+   * as {@code String} (e.g. {@code Posted}), which core matches verbatim. But for columns exposed
+   * as an actual {@code Boolean} property (Yes/No reference, e.g. {@code IsDefault}), core
+   * {@code AdvancedQueryBuilder} coerces the value with {@code Boolean.valueOf("Y") == false},
+   * silently inverting the filter. Here we translate {@code "Y"/"N"} to {@code true/false} for
+   * Boolean-typed properties only; String columns and non-{@code Y/N} values are left untouched,
+   * so raw {@code true}/{@code false} keeps working. ETP-4705.
    */
-  private static Property resolveDistinctProperty(Entity entityDef, String fieldName) {
+  private void normalizeBooleanCriteria(Map<String, String> params, String dalEntityName) {
+    String criteria = params.get(CRITERIA_PARAM);
+    if (StringUtils.isBlank(criteria)) {
+      return;
+    }
+    Entity entityDef = ModelProvider.getInstance().getEntity(dalEntityName);
     if (entityDef == null) {
-      return null;
+      return;
     }
-    Property direct = entityDef.getProperty(fieldName, false);
-    if (direct != null) {
-      return direct;
-    }
-    for (Property p : entityDef.getProperties()) {
-      if (p.getName().equalsIgnoreCase(fieldName)) {
-        return p;
+    try {
+      JSONArray arr = new JSONArray(criteria);
+      if (normalizeBooleanCriteriaArray(arr, entityDef)) {
+        params.put(CRITERIA_PARAM, arr.toString());
       }
-      if (p.getColumnName() != null && p.getColumnName().equalsIgnoreCase(fieldName)) {
-        return p;
-      }
+    } catch (JSONException e) {
+      // Not a JSON array (e.g. a single object or an unexpected shape) — leave it untouched
+      // rather than risk corrupting a criteria format we do not recognize.
+      log.debug("Skipping boolean-criteria normalization; criteria is not a JSON array: {}",
+          e.getMessage());
     }
-    return null;
   }
 
   /**
-   * Builds a {@code {"id": ..., "_identifier": ...}} entry for a single distinct
-   * value. Scalar values (String enum codes, numbers, dates) use the stringified
-   * value for both fields so the frontend can render a label without a second
-   * lookup. FK references expose the target entity's id and its DAL identifier.
+   * Walks a criteria array, normalizing flat clauses and recursing into nested {@code and}/{@code
+   * or} composites. Returns true if any clause was rewritten.
    */
-  private static JSONObject toDistinctEntry(Object value) {
-    JSONObject entry = new JSONObject();
-    try {
-      if (value == null) {
-        entry.put("id", "");
-        entry.put(JSON_IDENTIFIER, "");
-      } else if (value instanceof BaseOBObject) {
-        BaseOBObject bob = (BaseOBObject) value;
-        Object id = bob.getId();
-        String idStr = id == null ? "" : id.toString();
-        String identifier;
-        try {
-          identifier = bob.getIdentifier();
-        } catch (Exception e) {
-          identifier = idStr;
-        }
-        entry.put("id", idStr);
-        entry.put(JSON_IDENTIFIER, StringUtils.isBlank(identifier) ? idStr : identifier);
-      } else {
-        String str = value.toString();
-        entry.put("id", str);
-        entry.put(JSON_IDENTIFIER, str);
+  boolean normalizeBooleanCriteriaArray(JSONArray arr, Entity entityDef)
+      throws JSONException {
+    boolean changed = false;
+    for (int i = 0; i < arr.length(); i++) {
+      JSONObject clause = arr.optJSONObject(i);
+      if (clause == null) {
+        continue;
       }
-    } catch (Exception e) {
-      log.error("Failed to serialize distinct entry: {}", e.getMessage(), e);
+      JSONArray nested = clause.optJSONArray(CRITERIA_PARAM);
+      if (nested != null) {
+        changed |= normalizeBooleanCriteriaArray(nested, entityDef);
+      } else {
+        changed |= normalizeBooleanClause(clause, entityDef);
+      }
     }
-    return entry;
+    return changed;
+  }
+
+  /**
+   * Rewrites a single flat criterion's {@code "Y"}/{@code "N"} value to {@code true}/{@code false}
+   * when its target property is a Boolean DAL type. Returns true if the clause was rewritten.
+   */
+  boolean normalizeBooleanClause(JSONObject clause, Entity entityDef)
+      throws JSONException {
+    String fieldName = clause.optString("fieldName", null);
+    if (StringUtils.isBlank(fieldName)) {
+      return false;
+    }
+    Object value = clause.opt("value");
+    if (!(value instanceof String)) {
+      return false;
+    }
+    String str = ((String) value).trim();
+    if (!("Y".equalsIgnoreCase(str) || "N".equalsIgnoreCase(str))) {
+      return false;
+    }
+    Property prop = NeoDistinctFetchSupport.resolveDistinctProperty(entityDef, fieldName);
+    if (prop == null || Boolean.class != prop.getPrimitiveObjectType()) {
+      return false;
+    }
+    clause.put("value", "Y".equalsIgnoreCase(str));
+    return true;
   }
 }

@@ -33,8 +33,7 @@ import org.openbravo.dal.service.OBDal;
  *
  * <p>It is invoked as the final action of {@code EtendoGoJwtServlet.ensureOnboardingDataset}, before
  * {@code commitDalChanges("onboarding")}, so the baseline row is part of the same atomic onboarding
- * commit. This service is the single source of truth for baseline registration (the live wiring goes
- * through the service chain, not the inert {@code OnboardingStep} classes).</p>
+ * commit. This service is the single source of truth for baseline registration.</p>
  *
  * <h3>Row shape (non-negotiable, System-owned)</h3>
  * {@code ad_client_id='0'}, {@code ad_org_id='0'} (the ledger is System-owned so only the System
@@ -87,7 +86,22 @@ public class OnboardingBaselineService {
    * Use the exact UTC timestamp prefix of the last incorporated .sql file, e.g.:
    * {@code "20260617T120000Z"} matches {@code 20260617T120000Z__R7-tax-accounts.sql}.</p>
    *
-   * Current watermark: R13 amortization-table-active (2026-07-08).
+   * Current watermark: R22 fin-account-warehouse-acct (2026-08-05).
+   *
+   * <p><b>Note (2026-08-05, ETP-4743):</b> bumped from R21's {@code 2026-08-05T12:00:00Z} (see
+   * the ETP-4720 note below) to R22's {@code 2026-08-05T14:00:00Z}, per this merge block's
+   * resolution of the conflict the ETP-4743 branch itself anticipated on this line. Gap A2c —
+   * {@code FIN_FINANCIAL_ACCOUNT} and {@code M_WAREHOUSE} are bulk-imported by the dataset
+   * importer with triggers disabled, so neither ever got its {@code *_Acct} row via the standard
+   * core AFTER-INSERT triggers. ETP-4565 already shipped the preventive fix for this
+   * ({@code FIN_FINANCIAL_ACCOUNT_ACCT_SQL} / {@code WAREHOUSE_ACCT_SQL} in
+   * {@code OnboardingAccountingWiringService}, called from {@code provisionEntityPostingAccounts})
+   * but deliberately did NOT bump this constant at the time, since the corrective {@code .sql}
+   * twin did not exist yet (bumping the CUT without its matching fix already in the repo would
+   * silently skip the gap for new tenants). ETP-4743 adds that corrective fix
+   * ({@code R22-fin-account-warehouse-acct}) for already-onboarded tenants, so this bump now
+   * closes the loop: new tenants are already provisioned correctly by the live ETP-4565 code, and
+   * the runner correctly skips R22 for them via this watermark.</p>
    *
    * <p><b>Note (2026-07-06):</b> the sibling in-flight branch {@code feat/bp-category-preventive}
    * (ETP-4402) independently bumps this same constant to {@code 2026-07-01T12:00:00Z} for its
@@ -95,8 +109,57 @@ public class OnboardingBaselineService {
    * {@code 2026-07-06T12:00:00Z} for {@code R10-accounting-schema-dimensions}. Multiple in-flight
    * branches touch this single line — expect merge conflicts when they converge; always resolve to
    * the LATEST timestamp so no fix's cutoff is lost.</p>
+   *
+   * <p><b>Note (2026-07-30, ETP-4737):</b> bumped from R13's {@code 2026-07-08T10:00:00Z} to
+   * R17's {@code 2026-07-30T18:00:00Z}. Fixes R14/R15/R16 in between are dataset-only or
+   * non-provisioning (no CUT bump needed per their own doc — see
+   * {@code onboarding-and-datafixes-map.md} §4); R17 is the first fix since R13 whose preventive
+   * counterpart is a new onboarding action (the two "Factura Rectificativa" doc types/sequences),
+   * so this is the first bump since R13.</p>
+   *
+   * <p><b>Note (2026-08-03, ETP-4761):</b> gap I1 — the bundled locators in
+   * {@code M_LOCATOR.xml} now ship {@code M_INVENTORYSTATUS_ID='2'} ("Available") instead of
+   * {@code '0'} ("Undefined-OverIssue"), so a new tenant is no longer born with storage bins that
+   * allow negative stock. That preventive front alone put the watermark at
+   * {@code 2026-08-03T16:00:00Z} (R19).</p>
+   *
+   * <p><b>Note (2026-08-03, ETP-4760):</b> gap J1 — {@code M_COSTING_RULE} added to
+   * {@link OnboardingDatasetDefinition}'s {@code INCLUDED_TABLES} and its bundled sample row fixed
+   * to the Standard algorithm (was Average), so a new tenant is born with one active, validated
+   * Standard costing rule instead of zero rules. This is the later of the two, hence the value
+   * below.</p>
+   *
+   * <p><b>Note (2026-08-03, merge block ETP-4766):</b> the two notes above landed on separate
+   * branches, each bumping this constant (R19 → {@code 16:00:00Z}, R20 → {@code 18:00:00Z}).
+   * Resolved to the LATEST per the rule above; the watermark now covers BOTH preventive fronts.
+   * R18 (stuck-average-cost-anchor / ETP-4736, {@code 2026-08-03T14:00:00Z}) also falls below the
+   * cutoff even though it deliberately shipped NO preventive front — this is intentional and
+   * harmless: a newborn tenant has no products or transactions, so R18's {@code @check} would
+   * resolve to {@code SKIPPED_NOT_NEEDED} anyway, the same terminal state as being skipped. Should
+   * gap H3 ever surface later in that tenant's life, R18 must be forced with
+   * {@code --fix R18-stuck-average-cost-anchor --client <id>} — which is equally true for any
+   * tenant, since the runner never revisits an already-PROCESSED fix.
+   * R17 (rectificativa-doctype-sequence / ETP-4737, {@code 2026-07-30T18:00:00Z}) also merged in
+   * here and likewise falls below the cutoff — correctly so: it DOES ship a preventive front, so a
+   * newborn tenant is already provisioned with the two "Factura Rectificativa" doc types and their
+   * {@code REC-} sequences and must skip the corrective fix.</p>
+   *
+   * <p><b>Note (2026-08-05, ETP-4720):</b> gap A2b generalized — 5 {@code C_BP_Group_Acct} columns
+   * ({@code WriteOff_Rev_Acct}/{@code DoubtfulDebt_Acct}/{@code BadDebtExpense_Acct}/
+   * {@code BadDebtRevenue_Acct}/{@code AllowanceForDoubtful_Acct}) that neither the core
+   * {@code c_bp_group_trg()} trigger nor {@code OnboardingAccountingWiringService.BP_GROUP_ACCT_SQL}
+   * ever populated — confirmed live on a tenant onboarded just 6 days before diagnosis, so this was
+   * an ONGOING preventive gap, not only legacy drift. Closed by
+   * {@code OnboardingAccountingWiringService#patchBpGroupAcctMissingColumns}, wired as the new last
+   * provisioning step before this baseline stamp. Bumped to R21's own timestamp,
+   * {@code 2026-08-05T12:00:00Z}. The other 6 columns R21's corrective fix also covers
+   * (NotInvoicedRevenue/NotInvoicedReceivables/UnEarnedRevenue/PayDiscount_Exp/PayDiscount_Rev/
+   * V_Liability_Services) are NOT part of this preventive fix — their source,
+   * {@code C_AcctSchema_Default}, is itself NULL fleet-wide (an R11-adjacent gap, out of this
+   * ticket's scope); R21's own {@code @check} already no-ops on them today and will self-heal once
+   * that separate gap closes, with no onboarding change needed here.</p>
    */
-  private static final Instant ONBOARDING_PROVISIONED_THROUGH = Instant.parse("2026-07-08T10:00:00Z");
+  private static final Instant ONBOARDING_PROVISIONED_THROUGH = Instant.parse("2026-08-05T14:00:00Z");
 
   private static final String SQL_INSERT_BASELINE = ""
       + "INSERT INTO etgo_data_fix_history ("

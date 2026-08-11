@@ -23,6 +23,7 @@ import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.lang.reflect.Method;
@@ -35,6 +36,7 @@ import java.time.LocalDate;
 import javax.servlet.http.HttpServletRequest;
 
 import org.junit.Test;
+import org.mockito.ArgumentCaptor;
 import org.mockito.MockedStatic;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
@@ -101,6 +103,24 @@ public class NeoExchangeRateServiceTest {
     when(rs.next()).thenReturn(false);
 
     assertNull(invokeQueryRate(conn, "from", "to", "client", "org", LocalDate.of(2026, 1, 15)));
+  }
+
+  @Test
+  public void testQueryRateSqlIncludesSystemClientRatesWithTenantPriority() throws Exception {
+    // ETP-4474 regression: queryRate must include both the tenant's rates and the shared system
+    // ('0') rates, ordering ad_client_id DESC so the tenant row wins under LIMIT 1.
+    Connection conn = mock(Connection.class);
+    ResultSet rs = mock(ResultSet.class);
+    wirePreparedStatement(conn, rs);
+    when(rs.next()).thenReturn(false);
+
+    invokeQueryRate(conn, "from", "to", "client", "org", LocalDate.of(2026, 1, 15));
+
+    ArgumentCaptor<String> sqlCaptor = ArgumentCaptor.forClass(String.class);
+    verify(conn).prepareStatement(sqlCaptor.capture());
+    String sql = sqlCaptor.getValue();
+    assertTrue(sql.contains("ad_client_id IN ('0', ?)"));
+    assertTrue(sql.contains("ORDER BY ad_client_id DESC"));
   }
 
   // ---------------------------------------------------------------

@@ -63,6 +63,8 @@ public class ReturnToVendorShipmentHeaderHandler implements NeoHandler {
   private static final String FIELD_SOURCE_RECEIPT_DOC_NO = "sourceReceiptDocNo";
   private static final String FIELD_SOURCE_RECEIPTS = "sourceReceipts";
   private static final String FIELD_BUSINESS_PARTNER = "businessPartner";
+  private static final String FIELD_MOVEMENT_DATE = "movementDate";
+  private static final String FIELD_ACCOUNTING_DATE = "accountingDate";
   private static final String ACTION_IMPORT_LINES = "importReceiptLines";
   private static final String ACTION_AVAILABLE_RECEIPTS = "availableReceipts";
   private static final String ACTION_AVAILABLE_LINES = "availableReceiptLines";
@@ -71,6 +73,8 @@ public class ReturnToVendorShipmentHeaderHandler implements NeoHandler {
 
   @Override
   public NeoResponse handle(NeoContext context) {
+    mirrorAccountingDate(context);
+
     if (NeoEndpointType.CRUD.equals(context.getEndpointType())
         && "POST".equals(context.getHttpMethod())
         && context.getRecordId() == null) {
@@ -293,11 +297,13 @@ public class ReturnToVendorShipmentHeaderHandler implements NeoHandler {
               "No product lines in this return shipment");
         }
 
+        // ETP-4737: resolves the unified "Factura Rectificativa" (API + isRectificative) doc
+        // type, replacing the legacy plain-APC ("AP CreditMemo") lookup.
         DocumentType docType = ReturnShipmentUtils.findReturnDocTypeForOrg(
-            returnDoc.getOrganization().getId(), "APC", false, false);
+            returnDoc.getOrganization().getId(), "API", false, false, true);
         if (docType == null) {
           return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
-              "No AP CreditMemo document type (APC) found for this organization");
+              "No rectificative invoice document type found for this organization");
         }
 
         Invoice sourceInvoice = ReturnShipmentUtils.findSourceInvoice(lines);
@@ -322,6 +328,24 @@ public class ReturnToVendorShipmentHeaderHandler implements NeoHandler {
   // ---------------------------------------------------------------------------
   // Storage bin fill (pre-completion safety net)
   // ---------------------------------------------------------------------------
+
+  /**
+   * Mirrors the single visible {@code movementDate} field into the hidden
+   * {@code accountingDate} field on the request body, unconditionally, before the default CRUD
+   * path persists it (ETP-4531 pattern, applied here for ETP-4737). The user never sees or
+   * edits accountingDate directly — this window's {@code decisions.json} marks it
+   * {@code discarded} — so without this mirror a bare POST-create (e.g. "+ Nuevo" directly on
+   * this window, not via the goods-receipt "Crear Devolución" wizard, which sets both dates
+   * explicitly in {@link NeoCommercialDocumentFactory}) leaves accountingDate unset, and it
+   * falls back to whatever default the persistence layer applies instead of the document's own
+   * movement date.
+   */
+  static void mirrorAccountingDate(NeoContext context) {
+    if (NeoEndpointType.CRUD.equals(context.getEndpointType())
+        && NeoHandlerUtils.isWriteMethod(context.getHttpMethod())) {
+      NeoHandlerUtils.mirrorFieldValue(context.getRequestBody(), FIELD_MOVEMENT_DATE, FIELD_ACCOUNTING_DATE);
+    }
+  }
 
   private void fillMissingStorageBins(String returnId) {
     if (returnId == null) return;

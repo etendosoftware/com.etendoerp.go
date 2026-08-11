@@ -53,6 +53,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
 import org.mockito.MockedConstruction;
 import org.mockito.MockedStatic;
 import org.mockito.junit.jupiter.MockitoExtension;
@@ -142,6 +143,7 @@ class PaymentRegistrationServiceAdvancedTest {
   private MockedStatic<NeoDefaultsService> neoDefaultsMock;
   private MockedStatic<RequestContext> requestContextMock;
   private MockedStatic<PaymentRemovalUtil> paymentRemovalUtilMock;
+  private MockedStatic<RectificativeSupport> rectSupportMock;
   private MockedConstruction<AdvPaymentMngtDao> daoConstruction;
   private MockedConstruction<DalConnectionProvider> connConstruction;
 
@@ -215,6 +217,16 @@ class PaymentRegistrationServiceAdvancedTest {
 
     paymentRemovalUtilMock = mockStatic(PaymentRemovalUtil.class);
 
+    // ETP-4738: the "saldo a favor" doc-type whitelist defaults to a non-empty, permissive
+    // result so every pre-existing abono-listing/consumption test (written before this doc-type
+    // restriction existed) keeps exercising the same HQL/consume path unchanged. Tests that
+    // specifically exercise the whitelist restriction re-stub this per-test.
+    rectSupportMock = mockStatic(RectificativeSupport.class);
+    rectSupportMock.when(() -> RectificativeSupport.resolveRectificativeDocTypes(anyString(), anyBoolean()))
+        .thenReturn(Collections.singletonList("rect-dt-default"));
+    rectSupportMock.when(() -> RectificativeSupport.isRectificativeDocType(anyString()))
+        .thenReturn(true);
+
     // ── common entity stubs ──────────────────────────────────────────────────
     when(okResult.getType()).thenReturn("Success");
     when(docType.getDocumentCategory()).thenReturn("ARR");
@@ -251,6 +263,7 @@ class PaymentRegistrationServiceAdvancedTest {
   void tearDown() {
     closeQuietly(daoConstruction);
     closeQuietly(connConstruction);
+    closeQuietly(rectSupportMock);
     closeQuietly(paymentRemovalUtilMock);
     closeQuietly(requestContextMock);
     closeQuietly(neoDefaultsMock);
@@ -316,6 +329,20 @@ class PaymentRegistrationServiceAdvancedTest {
   }
 
   @Test
+  @DisplayName("Pagos (AP): accumulated credit is never queried — no supplier credit accrual in it1")
+  void testListCreditSourcesPaymentSideNeverQueriesAccumulatedCredit() throws Exception {
+    NeoContext context = creditSourcesContext();
+    stubInvoiceWithBp();
+    stubAbonoQuery(Collections.emptyList());
+
+    NeoResponse response = PaymentCreditSourcesService.handleListCreditSources(context, false);
+
+    assertEquals(200, response.getHttpStatus());
+    assertEquals(0, response.getBody().getInt("totalCount"));
+    verify(session, never()).createQuery(anyString(), eq(FIN_Payment.class));
+  }
+
+  @Test
   @DisplayName("Abono listing returns unpaid negative credit-memo PSDs with absolute avail")
   void testListCreditSourcesReturnsAbonos() throws Exception {
     NeoContext context = creditSourcesContext();
@@ -348,6 +375,38 @@ class PaymentRegistrationServiceAdvancedTest {
     assertEquals("NC/001", item.getString("doc"));
     // amount -25.00 → avail 25.00 (absolute value)
     assertEquals(0, new BigDecimal("25.00").compareTo(new BigDecimal(item.getString("avail"))));
+  }
+
+  @Test
+  @DisplayName("Credit sources are filtered by the invoice currency: both the abono and the "
+      + "accumulated-credit queries bind :cur to the invoice's currency id")
+  @SuppressWarnings("unchecked")
+  void testListCreditSourcesFilteredByInvoiceCurrency() throws Exception {
+    NeoContext context = creditSourcesContext();
+    stubInvoiceWithBp();
+    // invoice.getCurrency() → currency (CURRENCY_ID) is wired by the global setUp stubs.
+
+    Query<FIN_PaymentScheduleDetail> abonoQuery = mock(Query.class);
+    when(session.createQuery(anyString(), eq(FIN_PaymentScheduleDetail.class)))
+        .thenReturn(abonoQuery);
+    when(abonoQuery.setParameter(anyString(), any())).thenReturn(abonoQuery);
+    when(abonoQuery.setMaxResults(anyInt())).thenReturn(abonoQuery);
+    when(abonoQuery.list()).thenReturn(Collections.emptyList());
+
+    Query<FIN_Payment> creditQuery = mock(Query.class);
+    when(session.createQuery(anyString(), eq(FIN_Payment.class))).thenReturn(creditQuery);
+    when(creditQuery.setParameter(anyString(), any())).thenReturn(creditQuery);
+    when(creditQuery.setMaxResults(anyInt())).thenReturn(creditQuery);
+    when(creditQuery.list()).thenReturn(Collections.emptyList());
+
+    NeoResponse response = PaymentCreditSourcesService.handleListCreditSources(context, true);
+
+    assertEquals(200, response.getHttpStatus());
+    // Both source kinds must be restricted to the invoice currency — cross-currency credit
+    // cannot be applied. The row filtering is enforced by the HQL predicate on :cur; here we
+    // assert the predicate is bound to the invoice's own currency id.
+    verify(abonoQuery).setParameter("cur", CURRENCY_ID);
+    verify(creditQuery).setParameter("cur", CURRENCY_ID);
   }
 
   @Test
@@ -479,6 +538,94 @@ class PaymentRegistrationServiceAdvancedTest {
   }
 
   // ════════════════════════════════════════════════════════════════════════
+  // handleListCreditSources — ETP-4738 rectificative doc-type + negative-total filter
+  // ════════════════════════════════════════════════════════════════════════
+
+  @Test
+  @DisplayName("ETP-4738: the abono HQL restricts to a negative invoice total and the "
+      + "rectificative doc-type whitelist, bound as an in(:rectDocTypes) parameter")
+  @SuppressWarnings("unchecked")
+  void testListCreditSourcesAbonoRestrictedToRectificativeDocTypes() throws Exception {
+    NeoContext context = creditSourcesContext();
+    stubInvoiceWithBp();
+    rectSupportMock.when(() -> RectificativeSupport.resolveRectificativeDocTypes(
+        CLIENT_ID, true)).thenReturn(Arrays.asList("dt-1", "dt-2"));
+
+    Query<FIN_PaymentScheduleDetail> abonoQuery = mock(Query.class);
+    ArgumentCaptor<String> hqlCaptor = ArgumentCaptor.forClass(String.class);
+    when(session.createQuery(hqlCaptor.capture(), eq(FIN_PaymentScheduleDetail.class)))
+        .thenReturn(abonoQuery);
+    when(abonoQuery.setParameter(anyString(), any())).thenReturn(abonoQuery);
+    when(abonoQuery.setMaxResults(anyInt())).thenReturn(abonoQuery);
+    when(abonoQuery.list()).thenReturn(Collections.emptyList());
+    stubCreditQuery(Collections.emptyList());
+
+    NeoResponse response = PaymentCreditSourcesService.handleListCreditSources(context, true);
+
+    assertEquals(200, response.getHttpStatus());
+    String hql = hqlCaptor.getValue();
+    assertTrue(hql.contains("grandTotalAmount < 0"));
+    assertTrue(hql.contains("transactionDocument.id in (:rectDocTypes)"));
+    verify(abonoQuery).setParameterList("rectDocTypes", Arrays.asList("dt-1", "dt-2"));
+  }
+
+  @Test
+  @DisplayName("ETP-4738: no rectificative doc type configured for this client/side -> the "
+      + "selector is empty, and the abono query is never built (an HQL in() would be invalid)")
+  void testListCreditSourcesNoRectificativeDocTypeConfiguredSkipsAbonoQuery() throws Exception {
+    NeoContext context = creditSourcesContext();
+    stubInvoiceWithBp();
+    rectSupportMock.when(() -> RectificativeSupport.resolveRectificativeDocTypes(
+        anyString(), anyBoolean())).thenReturn(Collections.emptyList());
+    stubCreditQuery(Collections.emptyList());
+
+    NeoResponse response = PaymentCreditSourcesService.handleListCreditSources(context, true);
+
+    assertEquals(200, response.getHttpStatus());
+    assertEquals(0, response.getBody().getInt("totalCount"));
+    verify(session, never()).createQuery(anyString(), eq(FIN_PaymentScheduleDetail.class));
+  }
+
+  @Test
+  @DisplayName("ETP-4738: the payment side (isReceipt=false) resolves purchase-side "
+      + "rectificative doc types")
+  void testListCreditSourcesForPaymentSideResolvesPurchaseSideDocTypes() throws Exception {
+    NeoContext context = creditSourcesContext();
+    stubInvoiceWithBp();
+    stubAbonoQuery(Collections.emptyList());
+
+    NeoResponse response = PaymentCreditSourcesService.handleListCreditSources(context, false);
+
+    assertEquals(200, response.getHttpStatus());
+    rectSupportMock.verify(() -> RectificativeSupport.resolveRectificativeDocTypes(
+        CLIENT_ID, false));
+  }
+
+  @Test
+  @DisplayName("ETP-4738: a draft's already-linked abono re-lists even when no rectificative doc "
+      + "type is configured — abonosUsedByDraft is deliberately NOT restricted by the whitelist")
+  void testListCreditSourcesEditModeRelistsLinkedAbonoRegardlessOfDocTypeWhitelist()
+      throws Exception {
+    String editPaymentId = "draft-being-edited";
+    NeoContext context = creditSourcesContextWithEditPaymentId(editPaymentId);
+    stubInvoiceWithBp();
+    rectSupportMock.when(() -> RectificativeSupport.resolveRectificativeDocTypes(
+        anyString(), anyBoolean())).thenReturn(Collections.emptyList());
+    stubCreditQuery(Collections.emptyList());
+
+    FIN_PaymentScheduleDetail linkedAbono = abonoPsd("abono-linked", new BigDecimal("-20.00"),
+        "NC/020", date("2026-05-10"), "Credit Memo");
+    stubEditAbonoQueries(Collections.emptyList(), Collections.singletonList(linkedAbono));
+
+    NeoResponse response = PaymentCreditSourcesService.handleListCreditSources(context, true);
+
+    assertEquals(200, response.getHttpStatus());
+    JSONArray items = response.getBody().getJSONArray(ITEMS);
+    assertEquals(1, items.length());
+    assertEquals("abono-linked", items.getJSONObject(0).getString("psdId"));
+  }
+
+  // ════════════════════════════════════════════════════════════════════════
   // handleListPaymentMethods
   // ════════════════════════════════════════════════════════════════════════
 
@@ -572,6 +719,126 @@ class PaymentRegistrationServiceAdvancedTest {
   }
 
   // ════════════════════════════════════════════════════════════════════════
+  // doRegisterPaymentAdvanced - multi-currency (conversion rate)
+  // ════════════════════════════════════════════════════════════════════════
+
+  @Test
+  @DisplayName("A foreign-currency account applies the supplied rate to the financial transaction "
+      + "amount (100 USD x 0.92 = 92.00 EUR) and no longer throws")
+  void testAdvancedForeignCurrencyAppliesConversionRate() throws Exception {
+    stubAdvancedBasics();
+    stubPendingPSDs(new BigDecimal("100.00"));
+
+    // Account is EUR (precision 2), invoice is USD → foreign: the modal sends conversionRate=0.92.
+    Currency accountCurrency = mock(Currency.class);
+    when(accountCurrency.getId()).thenReturn("EUR-ID");
+    when(accountCurrency.getStandardPrecision()).thenReturn(2L);
+    when(account.getCurrency()).thenReturn(accountCurrency);
+
+    JSONObject body = advancedBody("100.00", CONFIRM).put("conversionRate", "0.92");
+
+    NeoResponse response = PaymentRegistrationService.doRegisterPaymentAdvanced(
+        INVOICE_ID, body, true);
+
+    assertEquals(201, response.getHttpStatus());
+    // Payment amount stays in invoice currency (100.00); the financial-transaction amount is the
+    // account-currency conversion 100.00 x 0.92 = 92.00, rounded to the account precision (2).
+    finAddPaymentMock.verify(() -> FIN_AddPayment.setFinancialTransactionAmountAndRate(
+        any(), eq(newPayment), eq(new BigDecimal("0.92")), eq(new BigDecimal("92.00"))));
+    // The payment is created in the invoice currency with the supplied rate + converted amount.
+    AdvPaymentMngtDao dao = daoConstruction.constructed().get(0);
+    verify(dao).getNewPayment(anyBoolean(), any(), any(), any(), any(), any(), any(), any(),
+        any(), any(), eq(currency), eq(new BigDecimal("0.92")), eq(new BigDecimal("92.00")));
+  }
+
+  @Test
+  @DisplayName("A same-currency account defaults the conversion rate to ONE (transaction amount "
+      + "equals the payment amount)")
+  void testAdvancedSameCurrencyDefaultsRateToOne() throws Exception {
+    stubAdvancedBasics();
+    stubPendingPSDs(new BigDecimal("100.00"));
+    // Account currency == invoice currency, no conversionRate in the body → rate ONE.
+
+    JSONObject body = advancedBody("100.00", CONFIRM);
+
+    NeoResponse response = PaymentRegistrationService.doRegisterPaymentAdvanced(
+        INVOICE_ID, body, true);
+
+    assertEquals(201, response.getHttpStatus());
+    finAddPaymentMock.verify(() -> FIN_AddPayment.setFinancialTransactionAmountAndRate(
+        any(), eq(newPayment), eq(BigDecimal.ONE), eq(new BigDecimal("100"))));
+  }
+
+  @Test
+  @DisplayName("A non-positive conversion rate is rejected with 400 before any payment is created")
+  void testAdvancedRejectsNonPositiveConversionRate() throws Exception {
+    stubAdvancedBasics();
+
+    JSONObject body = advancedBody("100.00", CONFIRM).put("conversionRate", "0");
+
+    NeoResponse response = PaymentRegistrationService.doRegisterPaymentAdvanced(
+        INVOICE_ID, body, true);
+
+    assertEquals(400, response.getHttpStatus());
+    finAddPaymentMock.verify(() -> FIN_AddPayment.processPayment(
+        any(), any(), anyString(), any(), anyString()), never());
+  }
+
+  @Test
+  @DisplayName("A malformed conversion rate is rejected with 400")
+  void testAdvancedRejectsMalformedConversionRate() throws Exception {
+    stubAdvancedBasics();
+
+    JSONObject body = advancedBody("100.00", CONFIRM).put("conversionRate", "abc");
+
+    NeoResponse response = PaymentRegistrationService.doRegisterPaymentAdvanced(
+        INVOICE_ID, body, true);
+
+    assertEquals(400, response.getHttpStatus());
+    finAddPaymentMock.verify(() -> FIN_AddPayment.processPayment(
+        any(), any(), anyString(), any(), anyString()), never());
+  }
+
+  @Test
+  @DisplayName("Defense-in-depth (B1): a foreign-currency payment with NO conversion rate is "
+      + "rejected with 400 instead of silently booking amount x 1")
+  void testAdvancedForeignCurrencyMissingRateRejected() throws Exception {
+    stubAdvancedBasics();
+    // Account is EUR, invoice is the global USD currency → foreign, but no conversionRate sent.
+    Currency accountCurrency = mock(Currency.class);
+    when(accountCurrency.getId()).thenReturn("EUR-ID");
+    when(account.getCurrency()).thenReturn(accountCurrency);
+
+    JSONObject body = advancedBody("100.00", CONFIRM); // conversionRate absent
+
+    NeoResponse response = PaymentRegistrationService.doRegisterPaymentAdvanced(
+        INVOICE_ID, body, true);
+
+    assertEquals(400, response.getHttpStatus());
+    finAddPaymentMock.verify(() -> FIN_AddPayment.processPayment(
+        any(), any(), anyString(), any(), anyString()), never());
+  }
+
+  @Test
+  @DisplayName("Defense-in-depth (B1): a foreign-currency payment with an explicit rate of ONE is "
+      + "rejected with 400 (placeholder value, not a real cross-currency rate)")
+  void testAdvancedForeignCurrencyRateOfOneRejected() throws Exception {
+    stubAdvancedBasics();
+    Currency accountCurrency = mock(Currency.class);
+    when(accountCurrency.getId()).thenReturn("EUR-ID");
+    when(account.getCurrency()).thenReturn(accountCurrency);
+
+    JSONObject body = advancedBody("100.00", CONFIRM).put("conversionRate", "1");
+
+    NeoResponse response = PaymentRegistrationService.doRegisterPaymentAdvanced(
+        INVOICE_ID, body, true);
+
+    assertEquals(400, response.getHttpStatus());
+    finAddPaymentMock.verify(() -> FIN_AddPayment.processPayment(
+        any(), any(), anyString(), any(), anyString()), never());
+  }
+
+  // ════════════════════════════════════════════════════════════════════════
   // doRegisterPaymentAdvanced - credit consumption
   // ════════════════════════════════════════════════════════════════════════
 
@@ -606,13 +873,24 @@ class PaymentRegistrationServiceAdvancedTest {
   }
 
   @Test
-  @DisplayName("Consuming an abono (credit memo) links it as a negative payment detail")
+  @DisplayName("Consuming an abono (Factura Rectificativa, ETP-4738) links it as a negative "
+      + "payment detail")
   void testAdvancedConsumesAbonoAsNegativeDetail() throws Exception {
     stubAdvancedBasics();
     stubPendingPSDs(new BigDecimal("100.00"));
 
     FIN_PaymentScheduleDetail abonoPsd = mock(FIN_PaymentScheduleDetail.class);
     when(dal.get(FIN_PaymentScheduleDetail.class, ABONO_PSD_ID)).thenReturn(abonoPsd);
+    // ETP-4738 eligibility guard: the abono's invoice must be an eligible Factura Rectificativa
+    // (negative total; isRectificativeDocType defaults to true in setUp()).
+    FIN_PaymentSchedule abonoSchedule = mock(FIN_PaymentSchedule.class);
+    Invoice abonoInvoice = mock(Invoice.class);
+    DocumentType abonoDocType = mock(DocumentType.class);
+    when(abonoDocType.getId()).thenReturn("rect-dt-default");
+    when(abonoInvoice.getTransactionDocument()).thenReturn(abonoDocType);
+    when(abonoInvoice.getGrandTotalAmount()).thenReturn(new BigDecimal("-30.00"));
+    when(abonoSchedule.getInvoice()).thenReturn(abonoInvoice);
+    when(abonoPsd.getInvoicePaymentSchedule()).thenReturn(abonoSchedule);
 
     JSONArray sources = new JSONArray(Collections.singletonList(
         new JSONObject().put("kind", KIND_ABONO).put("psdId", ABONO_PSD_ID).put("use", "30")));
@@ -690,7 +968,7 @@ class PaymentRegistrationServiceAdvancedTest {
     stubAdvancedBasics();
     stubPendingPSDs(new BigDecimal("100.00"));
 
-    // PIS eligibility: connected PSD2 account, transfer method, EUR invoice.
+    // PIS eligibility: bank-connected account, transfer method, EUR invoice.
     when(account.getPSD2ConnectionStatus())
         .thenReturn(BankIntegrationConstants.FA_CONNECTION_STATUS_CONNECTED);
     when(method.getName()).thenReturn("Bank Transfer");
@@ -736,11 +1014,11 @@ class PaymentRegistrationServiceAdvancedTest {
   }
 
   /**
-   * A {@code pis=true} confirm against a NON-PSD2-connected account fails eligibility before any
+   * A {@code pis=true} confirm against an account with no bank connection fails eligibility before any
    * payment is processed: {@code validatePisEligibility} throws {@link OBException}.
    */
   @Test
-  @DisplayName("PIS confirm rejects a non-PSD2-connected account before processing")
+  @DisplayName("PIS confirm rejects an account with no bank connection before processing")
   void testAdvancedPisRejectsUnconnectedAccount() throws Exception {
     stubAdvancedBasics();
     when(account.getPSD2ConnectionStatus()).thenReturn("NC");
@@ -1162,6 +1440,11 @@ class PaymentRegistrationServiceAdvancedTest {
     when(dal.get(Invoice.class, INVOICE_ID)).thenReturn(invoice);
     when(invoice.getBusinessPartner()).thenReturn(bp);
     when(bp.getId()).thenReturn("bp-1");
+    // ETP-4738: pendingAbonos resolves the rectificative doc-type whitelist scoped to the
+    // invoice's own client.
+    Client client = mock(Client.class);
+    when(client.getId()).thenReturn(CLIENT_ID);
+    when(invoice.getClient()).thenReturn(client);
   }
 
   private void stubInvoiceOrgTree() {
@@ -1239,7 +1522,7 @@ class PaymentRegistrationServiceAdvancedTest {
 
   /**
    * Stubs {@code PisPaymentService.hasLinkedPisPayment} (called by every {@code paymentListItem})
-   * to report no linked PSD2 payment, so {@code handleListPayments} tests don't NPE on the
+   * to report no linked PIS payment, so {@code handleListPayments} tests don't NPE on the
    * unrelated {@code PisPayment} criteria.
    */
   @SuppressWarnings("unchecked")

@@ -38,6 +38,7 @@ import java.io.StringReader;
 import java.io.StringWriter;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
+import java.security.SecureRandom;
 import java.util.Base64;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -112,6 +113,9 @@ public class EtendoGoJwtServletTest {
     servlet.doPost(req, resp.response);
 
     assertEquals(400, resp.status);
+    // ETP-4664: a stable code lets the frontend translate this instead of showing raw English.
+    JSONObject respBody = new JSONObject(resp.body());
+    assertEquals("REGISTER_MISSING_FIELDS", respBody.getJSONObject("error").getString("code"));
   }
 
   @Test
@@ -130,6 +134,30 @@ public class EtendoGoJwtServletTest {
     }
 
     assertEquals(400, resp.status);
+    JSONObject respBody = new JSONObject(resp.body());
+    assertEquals("REGISTER_EMPTY_FIELDS", respBody.getJSONObject("error").getString("code"));
+  }
+
+  @Test
+  public void registerInvalidEmailFormatReturnsBadRequest() throws Exception {
+    // ETP-4428: /register now rejects malformed emails (e.g. a bare LIKE wildcard "%") before the
+    // account is created — closes the tenant-isolation vector at the source.
+    ResponseCapture resp = mockResponse();
+    HttpServletRequest req = mockRequest("/register");
+    when(req.getContentType()).thenReturn("application/json");
+    JSONObject body = new JSONObject();
+    body.put("email", "%");
+    body.put("password", "Str0ng!Pass1");
+    body.put("name", "Test");
+    when(req.getReader()).thenReturn(new BufferedReader(new StringReader(body.toString())));
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class)) {
+      servlet.doPost(req, resp.response);
+    }
+
+    assertEquals(400, resp.status);
+    JSONObject respBody = new JSONObject(resp.body());
+    assertEquals("INVALID_EMAIL_FORMAT", respBody.getJSONObject("error").getString("code"));
   }
 
   @Test
@@ -176,6 +204,36 @@ public class EtendoGoJwtServletTest {
     assertEquals(400, resp.status);
     JSONObject respBody = new JSONObject(resp.body());
     assertTrue(respBody.toString().contains("already registered"));
+    assertEquals("EMAIL_ALREADY_REGISTERED", respBody.getJSONObject("error").getString("code"));
+  }
+
+  @Test
+  public void registerDatabaseErrorReturnsServerErrorWithCode() throws Exception {
+    // ETP-4664: a RuntimeException while persisting the new account must surface as
+    // REGISTER_SERVER_ERROR (translatable by the frontend), not a raw/untagged 500.
+    ResponseCapture resp = mockResponse();
+    HttpServletRequest req = mockRequest("/register");
+    when(req.getContentType()).thenReturn("application/json");
+    JSONObject body = new JSONObject();
+    body.put("email", "dberror@test.com");
+    body.put("password", "Str0ng!Pass1");
+    body.put("name", "DB Error User");
+    when(req.getReader()).thenReturn(new BufferedReader(new StringReader(body.toString())));
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+         MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
+      dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByEmail("dberror@test.com"))
+          .thenReturn(null);
+      dalMock.when(() -> EtendoGoJwtDalHelper.createAccount(
+          anyString(), anyString(), anyString(), anyString()))
+          .thenThrow(new RuntimeException("db connection lost"));
+
+      servlet.doPost(req, resp.response);
+    }
+
+    assertEquals(500, resp.status);
+    JSONObject respBody = new JSONObject(resp.body());
+    assertEquals("REGISTER_SERVER_ERROR", respBody.getJSONObject("error").getString("code"));
   }
 
   @Test
@@ -294,6 +352,8 @@ public class EtendoGoJwtServletTest {
     servlet.doPost(req, resp.response);
 
     assertEquals(400, resp.status);
+    JSONObject respBody = new JSONObject(resp.body());
+    assertEquals("INVALID_REQUEST", respBody.getJSONObject("error").getString("code"));
   }
 
   // ===================== POST /login =====================
@@ -308,6 +368,8 @@ public class EtendoGoJwtServletTest {
     servlet.doPost(req, resp.response);
 
     assertEquals(400, resp.status);
+    JSONObject respBody = new JSONObject(resp.body());
+    assertEquals("LOGIN_MISSING_FIELDS", respBody.getJSONObject("error").getString("code"));
   }
 
   @Test
@@ -329,6 +391,49 @@ public class EtendoGoJwtServletTest {
     }
 
     assertEquals(401, resp.status);
+    JSONObject respBody = new JSONObject(resp.body());
+    assertEquals("INVALID_CREDENTIALS", respBody.getJSONObject("error").getString("code"));
+  }
+
+  @Test
+  public void loginDatabaseErrorReturnsServerErrorWithCode() throws Exception {
+    // ETP-4664: a RuntimeException while persisting the new session token must surface
+    // as LOGIN_SERVER_ERROR (translatable by the frontend), not a raw/untagged 500.
+    // Credentials must verify successfully first, so build a real "salt:hash" pair using
+    // the servlet's own hashing scheme (private verifyPassword() cannot be stubbed).
+    ResponseCapture resp = mockResponse();
+    HttpServletRequest req = mockRequest("/login");
+    when(req.getContentType()).thenReturn("application/json");
+    JSONObject body = new JSONObject();
+    body.put("email", "dberror@test.com");
+    body.put("password", "Str0ng!Pass1");
+    when(req.getReader()).thenReturn(new BufferedReader(new StringReader(body.toString())));
+
+    byte[] salt = new byte[16];
+    new SecureRandom().nextBytes(salt);
+    MessageDigest md = MessageDigest.getInstance("SHA-256");
+    md.update(salt);
+    byte[] hash = md.digest("Str0ng!Pass1".getBytes(StandardCharsets.UTF_8));
+    String storedHash = Base64.getEncoder().encodeToString(salt) + ":"
+        + Base64.getEncoder().encodeToString(hash);
+
+    Account account = mock(Account.class);
+    when(account.getPasswordHash()).thenReturn(storedHash);
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+         MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
+      dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByEmail("dberror@test.com"))
+          .thenReturn(account);
+      dalMock.when(() -> EtendoGoJwtDalHelper.hasLocalPassword(account)).thenReturn(true);
+      dalMock.when(() -> EtendoGoJwtDalHelper.updateSessionToken(eq(account), anyString()))
+          .thenThrow(new RuntimeException("db connection lost"));
+
+      servlet.doPost(req, resp.response);
+    }
+
+    assertEquals(500, resp.status);
+    JSONObject respBody = new JSONObject(resp.body());
+    assertEquals("LOGIN_SERVER_ERROR", respBody.getJSONObject("error").getString("code"));
   }
 
   @Test
@@ -341,6 +446,8 @@ public class EtendoGoJwtServletTest {
     servlet.doPost(req, resp.response);
 
     assertEquals(400, resp.status);
+    JSONObject respBody = new JSONObject(resp.body());
+    assertEquals("INVALID_REQUEST", respBody.getJSONObject("error").getString("code"));
   }
 
   // ===================== POST /sso/google =====================

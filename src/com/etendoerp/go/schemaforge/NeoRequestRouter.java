@@ -25,7 +25,6 @@ import javax.servlet.http.HttpServletResponse;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.model.ad.ui.Process;
-import org.openbravo.model.ad.ui.Window;
 
 import com.etendoerp.go.schemaforge.NeoServlet.NeoPathInfo;
 import com.etendoerp.go.schemaforge.data.SFSpec;
@@ -118,9 +117,21 @@ class NeoRequestRouter {
    * and POST then return HTTP 200 with the canonical
    * {@code not_configured_for_report_generation} status body, identical to MCP discover
    * and the MCP report tool.</p>
+   *
+   * <p>ETP-4596: before this fix, report specs had NO access check here at all — every
+   * authenticated role could reach any report endpoint regardless of
+   * {@code AD_Window_Access}/{@code AD_Process_Access}. {@code hasReportSpecAccess} closes
+   * that gap: it gates on a real linked {@code AD_Process} when one exists, or on the
+   * spec's constituent windows (via each entity's {@code AD_TAB_ID}) otherwise, falling
+   * back to the pre-existing permissive behavior for specs with neither.</p>
    */
   void handleReportSpecRequest(SFSpec spec, NeoPathInfo pathInfo, String method,
       HttpServletRequest request, HttpServletResponse response) throws Exception {
+    if (!servlet.authenticator.hasReportSpecAccess(spec, method)) {
+      servlet.sendError(response, HttpServletResponse.SC_FORBIDDEN,
+          "Access denied to spec for current role");
+      return;
+    }
     // NEO-native handler dispatch (single-segment handlers such as aging-receivable).
     String reportHandlerQualifier = NeoReportCallability.resolveReportHandlerQualifier(spec);
     if (reportHandlerQualifier != null
@@ -168,10 +179,16 @@ class NeoRequestRouter {
    */
   void handleWindowSpecRequest(SFSpec spec, NeoPathInfo pathInfo, String method,
       HttpServletRequest request, HttpServletResponse response) throws Exception {
-    Window window = spec.getADWindow();
-    if (window != null && !servlet.authenticator.hasWindowAccess(window.getId())) {
+    // ETP-4510 BUG-3: hasWindowAccessForSpec covers both ordinary window specs AND
+    // windowless/custom "combination" specs (spec.getADWindow() == null) — it must run
+    // unconditionally rather than being skipped when there is no directly linked window,
+    // otherwise a role with no access at all (or no role assigned) could reach a
+    // windowless spec unchecked. The denial message is phrased at the spec level (not
+    // "window") because it must be accurate for both cases: a windowless/combination spec
+    // has no single window being checked.
+    if (!servlet.authenticator.hasWindowAccessForSpec(spec, method)) {
       servlet.sendError(response, HttpServletResponse.SC_FORBIDDEN,
-          "Access denied to window for current role");
+          "Access denied to spec for current role");
       return;
     }
     if (pathInfo.entityName == null) {

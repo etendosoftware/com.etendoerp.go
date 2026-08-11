@@ -22,6 +22,7 @@ import java.text.ParseException;
 import java.text.SimpleDateFormat;
 import java.util.Date;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
@@ -31,6 +32,7 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
+import org.openbravo.advpaymentmngt.utility.FIN_Utility;
 import org.openbravo.base.secureApp.VariablesSecureApp;
 import org.openbravo.client.kernel.RequestContext;
 import org.openbravo.dal.core.OBContext;
@@ -39,8 +41,11 @@ import org.openbravo.dal.service.OBDal;
 import org.openbravo.data.FieldProvider;
 import org.openbravo.erpCommon.ad_reports.AgingDao;
 import org.openbravo.model.common.currency.Currency;
+import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.financialmgmt.accounting.coa.AcctSchema;
 import org.openbravo.service.db.DalConnectionProvider;
+
+import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
 
 /**
  * NeoHandler that wraps the existing AgingDao to return aging schedule data as JSON.
@@ -79,6 +84,16 @@ public class AgingReportHandler implements NeoHandler {
   private static final String PARAM_BP_ID        = "bPartnerId";
   private static final String PARAM_ORG_ID       = "orgId";
   private static final String PARAM_SHOW_DETAILS = "showDetails";
+
+  /**
+   * OBUIAPP process id for the classic "Aging Balance Process Definition for Receivables"
+   * process. This is the process this spec must gate access on — confirmed via the real
+   * {@code AD_Menu.em_obuiapp_process_id} foreign key on {@code AD_Menu} row
+   * {@code CC226771DE354AEEAA5D69F696F1A676} ("Aging Balance Process Definition for
+   * Receivables"), not by name-matching. Do not repoint this constant at a different-looking
+   * process without re-confirming that same FK chain (ETP-4510, follow-up to BUG-3).
+   */
+  private static final String AGING_RECEIVABLE_PROCESS_ID = "0D37A9F6109549DEB058373EF2DAEB6A";
 
   // -------------------------------------------------------------------------
   // Inner value types
@@ -138,6 +153,9 @@ public class AgingReportHandler implements NeoHandler {
 
   @Override
   public NeoResponse handle(NeoContext context) {
+    if (!NeoAccessHelper.hasObuiappProcessAccess(AGING_RECEIVABLE_PROCESS_ID)) {
+      return NeoResponse.error(403, "Access denied");
+    }
     String method = context.getHttpMethod();
     if ("GET".equals(method)) {
       return describeReport();
@@ -191,11 +209,29 @@ public class AgingReportHandler implements NeoHandler {
       String dateStr     = body.optString(PARAM_CURRENT_DATE, "");
       boolean showDetails = body.optBoolean(PARAM_SHOW_DETAILS, false);
 
+      List<String> paidStatus = FIN_Utility.getListPaymentConfirmed();
+      if (paidStatus == null) {
+        return NeoResponse.error(422,
+            "Could not resolve confirmed payment statuses required for the aging report");
+      }
+
       BucketConfig buckets  = resolveBuckets(body);
       String bPartnerId     = buildBpInClause(body.optString(PARAM_BP_ID, ""));
       String orgId          = resolveOrgId(body);
+      if (orgId == null || orgId.isEmpty()
+          || OBDal.getInstance().get(Organization.class, orgId) == null) {
+        return NeoResponse.error(400, "Could not resolve organization context for the aging report");
+      }
       Set<String> orgs      = new OrganizationStructureProvider().getChildTree(orgId, true);
+      if (orgs == null || orgs.isEmpty()) {
+        return NeoResponse.error(422,
+            "Could not resolve the organization tree required for the aging report");
+      }
       AcctSchemaResult acct = resolveAcctSchema(body.optString("glId", ""), orgId);
+      if (acct.accSchemaId == null || acct.accSchemaId.isEmpty() || acct.currency == null) {
+        return NeoResponse.error(422,
+            "No accounting schema with currency is configured for organization " + orgId);
+      }
 
       initSessionReportsLimit();
 

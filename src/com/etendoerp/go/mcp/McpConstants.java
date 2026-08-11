@@ -39,6 +39,7 @@ final class McpConstants {
   static final String TYPE_OBJECT = "object";
   static final String KEY_PROPERTIES = "properties";
   static final String KEY_DESCRIPTION = "description";
+  static final String KEY_LABEL = "label";
   static final String GENERATE_PREFIX = "generate_";
   // Action result JSON keys
   static final String KEY_ERROR = "error";
@@ -46,6 +47,48 @@ final class McpConstants {
   static final String KEY_MESSAGE = "message";
   static final String KEY_PROCESS_RESULT = "processResult";
   static final String KEY_PROCESS_MESSAGE = "processMessage";
+  /** Human-readable detail of a structured error object (IMP-5). */
+  static final String KEY_DETAIL = "detail";
+  /** Machine-detectable error code for a get-by-id that matched no record (IMP-5). */
+  static final String ERROR_NOT_FOUND = "not_found";
+  /** Machine-detectable error code for a write rejected on missing required fields (IMP-5). */
+  static final String ERROR_VALIDATION = "validation_error";
+  /** Machine-detectable error code for an FK-by-name resolution matching more than one record (IMP-4). */
+  static final String ERROR_AMBIGUOUS_FK = "ambiguous_fk";
+  /** HTTP-style status for a not-found result (IMP-5). */
+  static final int STATUS_NOT_FOUND = 404;
+  /** HTTP-style status for a validation failure on a write (IMP-5). */
+  static final int STATUS_UNPROCESSABLE = 422;
+
+  /** The {@code docs} tool name — surfaced by neo_discover guidance and error pointers (IMP-10). */
+  static final String TOOL_DOCS = "docs";
+  /** Key for the neo_discover guidance object that routes the agent to {@code docs} (IMP-10). */
+  static final String KEY_GUIDANCE = "guidance";
+  /** Key for the {@code tool} pointer inside the guidance object (IMP-10). */
+  static final String KEY_TOOL = "tool";
+  /** Key for the free-text hint inside the guidance object (IMP-10). */
+  static final String KEY_HINT = "hint";
+  /** Key that points a structured error at a relevant {@code docs} recipe (IMP-10). */
+  static final String KEY_SEE_ALSO = "seeAlso";
+  /** Hint advertised by neo_discover to route a cold agent to ready-to-run recipes (IMP-10). */
+  static final String GUIDANCE_DOCS_HINT =
+      "Call docs(topic:…) for ready-to-run recipes per task.";
+  /** {@code docs} recipe an agent should read after a not-found on a get-by-id (IMP-10). */
+  static final String SEE_ALSO_READING = "docs(topic:\"reading records\")";
+  /** {@code docs} recipe an agent should read after a create/update validation failure (IMP-10). */
+  static final String SEE_ALSO_WRITING = "docs(topic:\"creating records\")";
+
+  // Button-action metadata surfaced by neo_schema (ETP-4285)
+  /**
+   * Key under which a list-backed button's chosen value travels in {@code neo_action}'s
+   * {@code parameters}. Consumed by {@code NeoProcessService.setDocAction}, which writes it
+   * onto the record before the process runs.
+   */
+  static final String PARAM_DOC_ACTION = "docAction";
+  /** {@code neo_schema} key listing the discrete values a button accepts. */
+  static final String KEY_ACTION_VALUES = "actionValues";
+  /** {@code neo_schema} key naming the parameter the chosen value must go under. */
+  static final String KEY_ACTION_PARAMETER = "actionParameter";
 
   static final String LABEL_SPEC_NAME = "Spec name";
   static final String LABEL_ENTITY_NAME = "Entity name within the spec";

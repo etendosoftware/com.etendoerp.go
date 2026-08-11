@@ -31,7 +31,7 @@ import org.openbravo.model.common.geography.Location;
 
 /**
  * Ensures the onboarding organization has an {@code AD_ORGINFO} record pointing to a
- * {@code C_LOCATION} with a country.
+ * {@code C_LOCATION} with a country, and carries over the Tax ID entered in the wizard.
  *
  * <p>The location's country is what Etendo's tax engine uses to resolve applicable taxes for the
  * organization. The onboarding dataset import creates an {@code AD_ORGINFO} row (it is in the
@@ -39,6 +39,12 @@ import org.openbravo.model.common.geography.Location;
  * located address exists. This service is idempotent: it only creates/links a location when the
  * org-info has none, defaulting the country to Spain (ISO {@code ES}) when the request carries no
  * explicit country.</p>
+ *
+ * <p>Tax ID (ETP-4749): {@code AD_ORGINFO.TAXID} is {@code NOT NULL} with no meaningful default,
+ * so a freshly-imported org-info row keeps Etendo core's generated placeholder for an unset
+ * required String field until something sets it explicitly. The wizard's Tax ID field is
+ * optional, so a blank/missing value here is left as-is — this service never invents or clears a
+ * Tax ID, it only persists one when the onboarding request actually carries one.</p>
  */
 public class OnboardingOrgInfoService extends OnboardingContextSupport {
 
@@ -46,7 +52,8 @@ public class OnboardingOrgInfoService extends OnboardingContextSupport {
   static final String DEFAULT_COUNTRY_ISO = "ES";
 
   /**
-   * Ensures the organization's {@code AD_ORGINFO} points to a located {@code C_LOCATION}.
+   * Ensures the organization's {@code AD_ORGINFO} points to a located {@code C_LOCATION} and
+   * carries over the onboarding request's Tax ID, if any.
    *
    * @param clientId    target client identifier
    * @param orgId       target organization identifier
@@ -54,9 +61,10 @@ public class OnboardingOrgInfoService extends OnboardingContextSupport {
    * @param adminRoleId administrator role for DAL context
    * @param countryIso  ISO country code from the onboarding request (defaults to {@code ES})
    * @param address     optional street address line from the onboarding request
+   * @param taxId       optional Tax ID from the onboarding request; left untouched when blank
    */
   public void ensureOrgInfo(String clientId, String orgId, String adminUserId, String adminRoleId,
-      String countryIso, String address) {
+      String countryIso, String address, String taxId) {
     validateContext(clientId, orgId, adminUserId, adminRoleId);
     OBContext previousContext = captureCurrentContext();
     applyExecutionContext(adminUserId, adminRoleId, clientId, orgId);
@@ -71,7 +79,7 @@ public class OnboardingOrgInfoService extends OnboardingContextSupport {
         if (org == null) {
           throw new OBException("Organization not found for org-info setup: " + orgId);
         }
-        ensureOrgInfoLocation(client, org, countryIso, address);
+        ensureOrgInfoLocation(client, org, countryIso, address, taxId);
         flushChanges();
       } finally {
         exitAdminMode();
@@ -82,11 +90,12 @@ public class OnboardingOrgInfoService extends OnboardingContextSupport {
   }
 
   protected void ensureOrgInfoLocation(Client client, Organization org, String countryIso,
-      String address) {
+      String address, String taxId) {
     OrganizationInformation orgInfo = resolveOrgInfo(org);
     if (orgInfo == null) {
       orgInfo = createOrgInfo(client, org);
     }
+    applyTaxId(orgInfo, taxId);
     if (orgInfo.getLocationAddress() != null) {
       // Already located (e.g. set manually in the UI); leave it untouched.
       return;
@@ -97,6 +106,19 @@ public class OnboardingOrgInfoService extends OnboardingContextSupport {
     }
     Location location = createLocation(client, org, country, address);
     orgInfo.setLocationAddress(location);
+    OBDal.getInstance().save(orgInfo);
+  }
+
+  /**
+   * Persists the onboarding request's Tax ID onto {@code orgInfo} when one was actually
+   * provided. The wizard's Tax ID field is optional (ETP-4749): a blank/null value here means the
+   * user did not fill it in, not that it should be cleared, so this is a no-op in that case.
+   */
+  protected void applyTaxId(OrganizationInformation orgInfo, String taxId) {
+    if (StringUtils.isBlank(taxId)) {
+      return;
+    }
+    orgInfo.setTaxID(taxId.trim());
     OBDal.getInstance().save(orgInfo);
   }
 
