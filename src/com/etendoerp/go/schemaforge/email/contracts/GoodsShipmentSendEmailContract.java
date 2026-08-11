@@ -37,4 +37,9 @@ public final class GoodsShipmentSendEmailContract extends DefaultDocumentSendEma
   public GoodsShipmentSendEmailContract(EmailDocumentRecordResolver documentResolver) {
     super(NAME, "Goods Shipment", Objects.requireNonNull(documentResolver, "documentResolver"));
   }
+
+  @Override
+  protected String documentTypeLabel() {
+    return "Albarán de Venta";
+  }
 }

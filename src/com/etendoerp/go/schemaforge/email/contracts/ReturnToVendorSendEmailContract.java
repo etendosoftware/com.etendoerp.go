@@ -37,4 +37,9 @@ public final class ReturnToVendorSendEmailContract extends DefaultDocumentSendEm
   public ReturnToVendorSendEmailContract(EmailDocumentRecordResolver documentResolver) {
     super(NAME, "Return to Vendor", Objects.requireNonNull(documentResolver, "documentResolver"));
   }
+
+  @Override
+  protected String documentTypeLabel() {
+    return "Devolución a Proveedor";
+  }
 }
