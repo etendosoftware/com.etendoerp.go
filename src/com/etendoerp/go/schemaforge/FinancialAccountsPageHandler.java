@@ -101,10 +101,15 @@ public class FinancialAccountsPageHandler implements NeoHandler {
           + "       COALESCE(fa.em_etgo_date_tolerance, 3), "
           + "       COALESCE(fa.em_etgo_amount_tolerance, 0), "
           + "       COALESCE(fa.em_aprm_glitem_diff, ''), "
-          + "       COALESCE(gli.name, '') "
+          + "       COALESCE(gli.name, ''), "
+          + "       fa.em_psd2_salt_edge_account_id, prov.logo_url "
           + "  FROM fin_financial_account fa "
           + "  JOIN c_currency cur ON cur.c_currency_id = fa.c_currency_id "
           + "  LEFT JOIN c_glitem gli ON gli.c_glitem_id = fa.em_aprm_glitem_diff "
+          // LEFT JOIN: most accounts have no bank provider at all (cash, or never connected).
+          // Reads the logo straight from the already-synced provider catalog — no live Salt Edge
+          // call per row, unlike the connect-flow bank picker / account selector.
+          + "  LEFT JOIN psd2_provider prov ON prov.psd2_provider_id = fa.em_psd2_provider_id "
           + " WHERE fa.ad_client_id = ? "
           + "   AND fa.ad_org_id = ANY (?) "
           + " ORDER BY fa.isdefault DESC, fa.name ASC";
@@ -246,6 +251,9 @@ public class FinancialAccountsPageHandler implements NeoHandler {
           row.amountTolerance = amtTol != null ? amtTol : BigDecimal.ZERO;
           row.glItemDifferenceId = StringUtils.trimToEmpty(rs.getString(14));
           row.glItemDifferenceName = StringUtils.trimToEmpty(rs.getString(15));
+          row.bankReconnectable = !row.bankConnected
+              && StringUtils.isNotBlank(rs.getString(16));
+          row.providerLogoUrl = StringUtils.trimToEmpty(rs.getString(17));
           rows.add(row);
         }
       }
@@ -309,6 +317,8 @@ public class FinancialAccountsPageHandler implements NeoHandler {
       json.put("iban", account.iban);
       json.put("maskedPan", account.maskedPan);
       json.put("bankConnected", account.bankConnected);
+      json.put("bankReconnectable", account.bankReconnectable);
+      json.put("providerLogoUrl", account.providerLogoUrl);
       json.put("bankConnectionPending", account.bankConnectionPending);
       json.put("isDefault", account.isDefault);
       json.put("active", account.active);
@@ -398,6 +408,22 @@ public class FinancialAccountsPageHandler implements NeoHandler {
     String maskedPan = "";
     /** Whether the account has an active bank connection ({@code EM_PSD2_Connection_Status = 'CO'}). Set by the loader. */
     boolean bankConnected = false;
+    /**
+     * Whether the account was soft-disconnected and can be revived through the reconnect flow:
+     * not currently connected, yet still holding its Salt Edge link
+     * ({@code EM_PSD2_Salt_Edge_Account_ID} is set). A permanent deletion clears that column, so
+     * this stays {@code false} there. Kept as its own flag rather than turning
+     * {@code bankConnected} into a tri-state, because the SPA checks
+     * {@code bankConnected === true} in several places. Set by the loader.
+     */
+    boolean bankReconnectable = false;
+    /**
+     * The connected provider's logo image URL ({@code PSD2_Provider.Logo_Url}), or blank when the
+     * account has no bank provider or the provider has none on record yet. Read from the provider
+     * catalog via a join, not from a live Salt Edge call — that is the whole point of persisting
+     * it instead of fetching it per row like the connect-flow bank picker does. Set by the loader.
+     */
+    String providerLogoUrl = "";
     /** Whether a bank sync is pending. Not tracked server-side yet; reserved for the list sync badge. */
     boolean bankConnectionPending = false;
     /** Days of margin allowed between bank line and transaction dates. Default 3. */

@@ -133,9 +133,12 @@ public class ToolRegistry {
       }
       // A generate_ tool is emitted only for NEO-native callable report specs backed by a
       // Java qualifier handler. Non-callable report specs get no tool and surface as
-      // not configured via neo discover.
+      // not configured via neo discover. ETP-4596: also require RBAC access — a process-less
+      // report spec now gates on its constituent windows (AD_TAB_ID) via
+      // hasReportSpecAccess, instead of always being offered as a tool.
       if ("R".equals(specType) && permissions.canReport
-          && NeoReportCallability.isReportCallable(spec)) {
+          && NeoReportCallability.isReportCallable(spec)
+          && NeoAccessUtils.hasReportSpecAccess(spec, "GET")) {
         tools.add(buildReportTool(spec.getName(), spec));
       }
     } catch (Exception e) {
