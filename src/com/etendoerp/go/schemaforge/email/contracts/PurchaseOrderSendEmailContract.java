@@ -37,4 +37,9 @@ public final class PurchaseOrderSendEmailContract extends DefaultDocumentSendEma
   public PurchaseOrderSendEmailContract(EmailDocumentRecordResolver documentResolver) {
     super(NAME, "Purchase Order", Objects.requireNonNull(documentResolver, "documentResolver"));
   }
+
+  @Override
+  protected String documentTypeLabel() {
+    return "Pedido de Compra";
+  }
 }

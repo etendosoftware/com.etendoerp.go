@@ -281,7 +281,15 @@ public abstract class AbstractOrderHeaderHandler implements NeoHandler {
     }
   }
 
-  private void checkExchangeRateWarning(JSONObject body, JSONObject requestBody,
+  /**
+   * Appends a {@code WARNING} to the callout body when the user directly changes the order's
+   * currency and no rate is available for (orgCurrency → docCurrency, orderDate).
+   *
+   * <p>ETP-4838: rate availability is resolved by {@link NeoExchangeRateService#hasRate} — the same
+   * lookup {@code GET /sws/neo/validate-exchange-rate} serves the frontend — so the callout warning
+   * and the frontend's own pre-check can never disagree.
+   */
+  private static void checkExchangeRateWarning(JSONObject body, JSONObject requestBody,
       JSONObject formState, String triggerField) {
     if (formState == null) {
       return;
@@ -300,50 +308,9 @@ public abstract class AbstractOrderHeaderHandler implements NeoHandler {
     String orgCurrencyId = OBCurrencyUtils.getOrgCurrency(orgId);
     if (!docCurrencyId.isEmpty() && orgCurrencyId != null
         && !docCurrencyId.equals(orgCurrencyId) && !orderDate.isEmpty()
-        && !hasConversionRate(orgCurrencyId, docCurrencyId, orderDate)) {
+        && !NeoExchangeRateService.hasRate(orgCurrencyId, docCurrencyId, orderDate)) {
       appendMessage(body, "WARNING", "noExchangeRateAvailable");
       log.debug("[ETP-4027] No conversion rate warning added (currency={})", docCurrencyId);
-    }
-  }
-
-  /**
-   * Checks whether a {@code C_Conversion_Rate} row exists for the given currency pair
-   * and date, scoped to the current client and org (including global org '0').
-   *
-   * @return {@code true} if a rate exists (safe default on error)
-   */
-  private boolean hasConversionRate(String fromCurrencyId, String toCurrencyId,
-      String dateStr) {
-    try {
-      java.time.LocalDate localDate = java.time.LocalDate.parse(dateStr.substring(0, 10));
-      String clientId = OBContext.getOBContext().getCurrentClient().getId();
-      String orgId = OBContext.getOBContext().getCurrentOrganization().getId();
-
-      String sql =
-          "SELECT 1 FROM c_conversion_rate"
-        + " WHERE c_currency_id = ?"
-        + " AND c_currency_id_to = ?"
-        + " AND isactive = 'Y'"
-        + " AND ad_client_id = ?"
-        + " AND (ad_org_id = '0' OR ad_org_id = ?)"
-        + " AND validfrom <= ?"
-        + " AND (validto IS NULL OR validto >= ?)"
-        + " LIMIT 1";
-      Connection conn = OBDal.getInstance().getConnection();
-      try (PreparedStatement ps = conn.prepareStatement(sql)) {
-        ps.setString(1, fromCurrencyId);
-        ps.setString(2, toCurrencyId);
-        ps.setString(3, clientId);
-        ps.setString(4, orgId);
-        ps.setDate(5, java.sql.Date.valueOf(localDate));
-        ps.setDate(6, java.sql.Date.valueOf(localDate));
-        try (ResultSet rs = ps.executeQuery()) {
-          return rs.next();
-        }
-      }
-    } catch (Exception e) {
-      log.warn("[ETP-4027] hasConversionRate check failed (assuming rate exists): {}", e.getMessage());
-      return true; // fail-open: avoid blocking when DB check fails
     }
   }
 
