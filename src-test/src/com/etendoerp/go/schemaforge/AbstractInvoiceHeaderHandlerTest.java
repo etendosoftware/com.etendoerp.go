@@ -2249,8 +2249,8 @@ public class AbstractInvoiceHeaderHandlerTest {
   }
 
   @Test
-  public void checkExchangeRateWarning_hasConversionRateThrows_failsOpenNoWarning() throws Exception {
-    // hasConversionRate's own catch block returns true (fail-open) on any exception —
+  public void checkExchangeRateWarning_rateLookupThrows_failsOpenNoWarning() throws Exception {
+    // NeoExchangeRateService.hasRate returns true (fail-open) on any exception —
     // so an unexpected DB failure must NOT produce a false warning.
     JSONObject body = new JSONObject();
     JSONObject requestBody = new JSONObject().put("value", "usd-id");
@@ -2278,6 +2278,53 @@ public class AbstractInvoiceHeaderHandlerTest {
 
       AbstractInvoiceHeaderHandler.checkExchangeRateWarning(body, requestBody, formState, "currency");
 
+      assertTrue(!body.has("messages"));
+    }
+  }
+
+  @Test
+  public void checkExchangeRateWarning_ratesLookupIsClientOrSystemScoped() throws Exception {
+    // ETP-4838 regression: this path used to run a private query filtered by `ad_client_id = ?`
+    // alone, so it stopped finding the shared system ('0') rates once ETP-4474 centralised the
+    // currencyLayer sync there — warning "noExchangeRateAvailable" while the frontend's own
+    // /validate-exchange-rate call, on the very same pair and date, answered hasRate: true.
+    // The delegation to NeoExchangeRateService is what keeps the two answers in sync.
+    JSONObject body = new JSONObject();
+    JSONObject requestBody = new JSONObject().put("value", "gbp-id");
+    JSONObject formState = new JSONObject()
+        .put("currencyid", "gbp-id").put("invoiceDate", "2026-08-07");
+
+    try (MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
+         MockedStatic<OBCurrencyUtils> curMock = Mockito.mockStatic(OBCurrencyUtils.class);
+         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+
+      OBContext obContext = mock(OBContext.class);
+      Organization org = mock(Organization.class);
+      Client client = mock(Client.class);
+      ctxMock.when(OBContext::getOBContext).thenReturn(obContext);
+      when(obContext.getCurrentOrganization()).thenReturn(org);
+      when(obContext.getCurrentClient()).thenReturn(client);
+      when(org.getId()).thenReturn("org-1");
+      when(client.getId()).thenReturn("client-1");
+
+      curMock.when(() -> OBCurrencyUtils.getOrgCurrency("org-1")).thenReturn("eur-id");
+
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      Connection conn = mock(Connection.class);
+      PreparedStatement ps = mock(PreparedStatement.class);
+      ResultSet rs = mock(ResultSet.class);
+      when(dal.getConnection()).thenReturn(conn);
+      when(conn.prepareStatement(anyString())).thenReturn(ps);
+      when(ps.executeQuery()).thenReturn(rs);
+      when(rs.next()).thenReturn(true); // a system-level rate exists for the pair
+      when(rs.getDouble("multiplyrate")).thenReturn(0.87);
+
+      AbstractInvoiceHeaderHandler.checkExchangeRateWarning(body, requestBody, formState, "currency");
+
+      ArgumentCaptor<String> sqlCaptor = ArgumentCaptor.forClass(String.class);
+      Mockito.verify(conn).prepareStatement(sqlCaptor.capture());
+      assertTrue(sqlCaptor.getValue().contains("ad_client_id IN ('0', ?)"));
       assertTrue(!body.has("messages"));
     }
   }
