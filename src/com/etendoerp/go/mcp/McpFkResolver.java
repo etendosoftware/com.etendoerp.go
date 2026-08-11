@@ -19,8 +19,10 @@ package com.etendoerp.go.mcp;
 
 import java.util.ArrayList;
 import java.util.Iterator;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.function.Predicate;
 import java.util.regex.Pattern;
 
@@ -55,15 +57,25 @@ import com.etendoerp.go.schemaforge.NeoSelectorService;
  * through to the selector lookup when no record carries it. The residual ambiguity — a display name
  * that happens to equal some record's id — resolves to that record, which is what the caller meant.
  * <p>
- * <b>Known limitation:</b> the selector context passed here is built from {@code adTab} alone
- * (window sales/purchase context, business-partner role) — {@link McpSelectorContextHelper}'s
- * {@code recordContext}/{@code parentContext} synthesis from the in-flight body is NOT attempted,
- * because that would require resolving fields in dependency order (e.g. {@code priceList} needs
- * {@code businessPartner} already resolved) — a second, more invasive pass. A dependent FK (e.g.
- * {@code partnerAddress} depending on {@code businessPartner}) may therefore return more matches
- * than a context-aware {@code neo_selectors} call would, including a false ambiguous_fk. Callers
- * that hit this should fall back to resolving the dependent field explicitly via
- * {@code neo_selectors} with {@code recordContext}.
+ * <b>Context-dependent selectors (ETP-4793 / IMP-22).</b> Some selectors only have a candidate set
+ * relative to a sibling field: {@code partnerAddress} lists the locations <i>of a given</i>
+ * {@code businessPartner}, a tax rate depends on {@code orderDate} and {@code priceList}. This class
+ * used to run with context built from {@code adTab} alone, so those selectors saw the unfiltered set
+ * or none at all — {@code neo_create} rejected the byte-identical {@code $_identifier} that
+ * {@code neo_selectors} with a {@code recordContext} had just returned. The body's own sibling fields
+ * are now fed in as that context via {@code McpSelectorContextHelper#withBodyContext}.
+ * <p>
+ * That requires <b>dependency order</b>, which was the reason the earlier note gave for not doing it:
+ * {@code partnerAddress} is only resolvable once {@code businessPartner} holds an id, and a body may
+ * present them in any order — or both as display names. Rather than model the dependency graph, this
+ * resolves in <b>repeated passes, deferring failures</b>: each pass rebuilds the context from the
+ * fields settled so far and retries the rest, and a field's error is only returned once a whole pass
+ * makes no progress. A graph is unnecessary because dependency order is discovered by trying — the
+ * fields resolvable without sibling context settle first and become the context for the rest.
+ * <p>
+ * <b>Cost.</b> Worst case is O(n²) selector calls for {@code n} FK-by-name values in one body, and
+ * only when the order is adversarial; typical bodies carry one to three and settle in one or two
+ * passes. Values that are already ids never reach a selector at all.
  */
 final class McpFkResolver {
 
@@ -137,37 +149,104 @@ final class McpFkResolver {
       keys.add(it.next());
     }
 
+    // Pass 0 — the cheap checks only, so that every field already holding an id is available as
+    // context before the first selector call, and never costs one.
+    Set<String> pending = new LinkedHashSet<>();
+    Set<String> unusableAsContext = new LinkedHashSet<>();
     for (String key : keys) {
-      JSONObject error = resolveOneField(body, dalEntity, adTab, contextParams, log, key, skipValue);
-      if (error != null) {
-        return error;
+      classify(body, dalEntity, log, key, skipValue, pending, unusableAsContext);
+    }
+    return resolveByDependencyOrder(body, dalEntity, adTab, contextParams, log, pending,
+        unusableAsContext);
+  }
+
+  /**
+   * Sorts one body key into "needs a selector lookup" or "cannot be used as selector context",
+   * using only checks that cost no selector call.
+   * <p>
+   * A key lands in neither set when its value is already a usable record id — that is the case the
+   * IMP-22 context synthesis depends on, and it is the common one: an agent that resolved
+   * {@code businessPartner} via {@code neo_selectors} sends the id, and {@code partnerAddress} in the
+   * same body then resolves against it on the very first pass.
+   */
+  private static void classify(JSONObject body, Entity dalEntity, Logger log, String key,
+      Predicate<String> skipValue, Set<String> pending, Set<String> unusableAsContext) {
+    Property prop = dalEntity.getProperty(key, false);
+    if (prop == null || prop.isPrimitive() || prop.getTargetEntity() == null) {
+      return;
+    }
+    Object rawValue = body.opt(key);
+    if (!(rawValue instanceof String)) {
+      return;
+    }
+    String search = (String) rawValue;
+    // An empty value carries no context, and a "$ref:" placeholder is a batch id that does not exist
+    // yet — copying either into a selector param would narrow the candidate set to nothing.
+    if (search.isEmpty() || skipValue.test(search)) {
+      unusableAsContext.add(key);
+      return;
+    }
+    // Order matters: the cheap shape check first (no DAL hit), then the id probe. See the class
+    // javadoc for why the shape check alone is not enough.
+    if (looksLikeId(search) || existsAsRecordId(prop, search, log)) {
+      return;
+    }
+    pending.add(key);
+  }
+
+  /**
+   * Resolves the pending FK names in repeated passes, rebuilding the selector context from the
+   * fields settled so far and returning a field's error only once a whole pass makes no progress.
+   * <p>
+   * "No progress" is the termination condition rather than a pass counter because it is the same
+   * condition that makes an error trustworthy: if nothing else in the body moved, no additional
+   * context is coming, so the {@code not_found} this field reports is final rather than an artefact
+   * of resolution order. Reporting it on the first pass — the pre-IMP-22 behaviour — is what turned a
+   * resolvable {@code partnerAddress} into a 422.
+   */
+  private static JSONObject resolveByDependencyOrder(JSONObject body, Entity dalEntity, Tab adTab,
+      Map<String, String> contextParams, Logger log, Set<String> pending,
+      Set<String> unusableAsContext) throws JSONException {
+    while (!pending.isEmpty()) {
+      Set<String> excluded = new LinkedHashSet<>(pending);
+      excluded.addAll(unusableAsContext);
+      Map<String, String> passContext =
+          McpSelectorContextHelper.withBodyContext(contextParams, body, excluded);
+
+      boolean progressed = false;
+      JSONObject firstError = null;
+      for (String key : new ArrayList<>(pending)) {
+        JSONObject error = lookupOneField(body, dalEntity, adTab, passContext, log, key,
+            unusableAsContext);
+        if (error == null) {
+          pending.remove(key);
+          progressed = true;
+        } else if (firstError == null) {
+          firstError = error;
+        }
+      }
+      if (!progressed) {
+        return firstError;
       }
     }
     return null;
   }
 
-  private static JSONObject resolveOneField(JSONObject body, Entity dalEntity, Tab adTab,
-      Map<String, String> contextParams, Logger log, String key, Predicate<String> skipValue)
+  /**
+   * One selector lookup for one field, against the context of the current pass.
+   *
+   * @return {@code null} when the field is settled — either resolved to an id, or abandoned because
+   *         nothing can be done with it (no {@code AD_Column}, selector unavailable), in which case
+   *         it is recorded as unusable context since its value is still a search string
+   */
+  private static JSONObject lookupOneField(JSONObject body, Entity dalEntity, Tab adTab,
+      Map<String, String> contextParams, Logger log, String key, Set<String> unusableAsContext)
       throws JSONException {
-    Property prop = dalEntity.getProperty(key, false);
-    if (prop == null || prop.isPrimitive() || prop.getTargetEntity() == null) {
-      return null;
-    }
-    Object rawValue = body.opt(key);
-    if (!(rawValue instanceof String)) {
-      return null;
-    }
-    String search = (String) rawValue;
-    // Order matters: the two cheap shape checks first (no DAL hit), then the id probe, and only
-    // then the selector lookup. See the class javadoc for why the shape check alone is not enough.
-    if (search.isEmpty() || skipValue.test(search) || looksLikeId(search)
-        || existsAsRecordId(prop, search, log)) {
-      return null;
-    }
-
+    String search = body.optString(key);
     Column column = McpSchemaFieldBuilder.findColumn(adTab, key, dalEntity);
     if (column == null) {
       log.debug("FK-by-name: no AD_Column resolved for '{}', leaving value as-is", key);
+      unusableAsContext.add(key);
       return null;
     }
 
@@ -176,6 +255,7 @@ final class McpFkResolver {
     if (selectorResponse.getHttpStatus() >= 400 || selectorResponse.getBody() == null) {
       log.warn("FK-by-name: selector lookup failed for '{}'='{}' (status {}), leaving value as-is",
           key, search, selectorResponse.getHttpStatus());
+      unusableAsContext.add(key);
       return null;
     }
 
