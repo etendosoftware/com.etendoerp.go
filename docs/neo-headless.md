@@ -995,6 +995,21 @@ Responses support custom headers via `withHeader(name, value)`.
   - `ReturnShipmentUtils.findReturnDocTypeForOrg(orgId, docCategory, isSales, requireReturn, requireRectificative)` — the `requireRectificative` parameter, when `true`, adds `Restrictions.eq(DocumentType.PROPERTY_ETSGISRECTIFICATIVE, true)` to the doc-type lookup criteria (silently ignored when the column is absent). Called with `requireRectificative=true` by both `ReturnMaterialReceiptHeaderHandler`'s and `ReturnToVendorShipmentHeaderHandler`'s `createReturnInvoice` action, so a confirmed Goods Return (either direction) auto-generates its invoice against the new unified rectificative doc type rather than a hardcoded legacy category.
   This is the pattern to follow for any future optional-module column: a single lazily-cached presence guard in a small dedicated class, consumed by every handler that needs it, rather than each handler probing `information_schema` independently.
 
+**Real-world example — `NeoHandlerUtils.injectDefaultLocatorIfMissing` (locator/warehouse safeguard shared across InOut-line handlers, ETP-4671 + ETP-4863):** `schemaforge/NeoHandlerUtils.java` bundles three static helpers — `injectDefaultLocatorIfMissing(JSONObject body, Logger log)`, `resolveDefaultLocatorForWarehouse(String warehouseId, Logger log)`, and `belongsToWarehouse(String locatorId, String warehouseId, Logger log)` — called as a `handle()` pre-hook by every `M_InOutLine`-based create flow: `GoodsReceiptLineHandler`, `GoodsShipmentLineHandler`, `ReturnToVendorShipmentLineHandler`, and `ReturnMaterialReceiptLineHandler`. On a line `POST` it guarantees `storageBin` (`M_InOutLine.M_Locator_ID`) always resolves to a `Locator` that belongs to the header `M_InOut`'s own warehouse (`M_InOut.M_Warehouse_ID`):
+  - A blank `storageBin`, or an unresolved raw-AD-default token shaped like `@OnHandLocatorDefault@` (see the `@OnHandLocatorDefault@` caveat in `docs/neo-headless-guide.md` §11), is filled with the header warehouse's default active `Locator`.
+  - An explicit value that already belongs to the header warehouse is left untouched — the guarantee is about the warehouse, not about collapsing every line onto the warehouse's single "default" bin, so a deliberate picking-bin choice (from the user or an import flow) survives.
+  - An explicit value that belongs to a *different* warehouse, or that doesn't resolve to a real, active `Locator` at all, is corrected to the header warehouse's default — this is an unconditional guarantee (ETP-4863 BUG-1), not a fill-if-absent default.
+  - When the header warehouse has no default locator configured, the field is left as-is (same graceful-degradation contract as the original ETP-4671 fix) instead of failing the request.
+
+  Typical call site (`GoodsShipmentLineHandler#handle`):
+  ```java
+  if (NeoEndpointType.CRUD.equals(context.getEndpointType())
+      && "POST".equalsIgnoreCase(context.getHttpMethod())) {
+    NeoHandlerUtils.injectDefaultLocatorIfMissing(context.getRequestBody(), log);
+  }
+  ```
+  `InventoryLineHandler` (Physical Inventory, a sibling window) deliberately does **not** use this helper — it always overwrites `storageBin` on every `POST`, a different and stronger guarantee that would silently discard a valid in-warehouse bin choice for this InOut family.
+
 ---
 
 ## 6. Parent-Child Tab Filtering
