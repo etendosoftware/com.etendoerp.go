@@ -18,15 +18,30 @@
 package com.etendoerp.go.schemaforge;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.when;
 
 import java.util.List;
 
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.Test;
+import org.mockito.MockedStatic;
+import org.mockito.Mockito;
+import org.openbravo.dal.service.OBCriteria;
+import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.common.enterprise.Locator;
+import org.openbravo.model.common.enterprise.Warehouse;
+import org.openbravo.model.materialmgmt.transaction.ShipmentInOut;
 
 /**
  * Unit tests for {@link NeoHandlerUtils}.
@@ -35,9 +50,17 @@ import org.junit.Test;
  * <ul>
  *   <li>{@code extractGetDataArray} — all early-exit paths and the happy path.</li>
  *   <li>{@code collectIds} — normal, empty-id filtering, and empty-array cases.</li>
+ *   <li>{@code injectDefaultLocatorIfMissing} / {@code resolveDefaultLocatorForWarehouse}
+ *       (ETP-4863) — direct coverage of the shared locator-defaulting helper. Until this QA
+ *       pass, this logic was only exercised indirectly through 4 near-duplicate assertions in
+ *       {@code GoodsReceiptLineHandlerTest}, {@code GoodsShipmentLineHandlerTest}, {@code
+ *       ReturnToVendorShipmentLineHandlerTest}, and {@code ReturnMaterialReceiptLineHandlerTest}
+ *       — this class now tests the actual implementation once, at the right level.</li>
  * </ul>
  */
 public class NeoHandlerUtilsTest {
+
+  private static final Logger LOG = LogManager.getLogger(NeoHandlerUtilsTest.class);
 
   // ── extractGetDataArray ──────────────────────────────────────────────────
 
@@ -312,5 +335,244 @@ public class NeoHandlerUtilsTest {
   @Test
   public void testIsWriteMethodFalseForNull() {
     assertTrue(!NeoHandlerUtils.isWriteMethod(null));
+  }
+
+  // ── ETP-4863: injectDefaultLocatorIfMissing / resolveDefaultLocatorForWarehouse ──────────
+  // Direct unit coverage of the shared locator-defaulting helper (QA edge cases). The 4 line
+  // handlers each assert the happy path and the "explicit value present" guard through their
+  // own handle() wrapper; the cases below target the helper itself, including branches none
+  // of those 4 wrapper tests exercise.
+
+  @Test
+  public void testInjectDefaultLocatorIfMissingNullBodyIsNoOp() throws Exception {
+    // Must not throw for a null body — same defensive contract as mirrorFieldValue.
+    NeoHandlerUtils.injectDefaultLocatorIfMissing(null, LOG);
+  }
+
+  @Test
+  public void testInjectDefaultLocatorIfMissingBlankParentIdDoesNotInjectLocator()
+      throws Exception {
+    JSONObject body = new JSONObject().put("parentId", "").put("product", "prod-1");
+
+    NeoHandlerUtils.injectDefaultLocatorIfMissing(body, LOG);
+
+    assertFalse(body.has("storageBin"));
+  }
+
+  @Test
+  public void testInjectDefaultLocatorIfMissingHeaderNotFoundDoesNotInjectLocator()
+      throws Exception {
+    JSONObject body = new JSONObject().put("parentId", "shipment-missing");
+
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(eq(ShipmentInOut.class), eq("shipment-missing"))).thenReturn(null);
+
+      NeoHandlerUtils.injectDefaultLocatorIfMissing(body, LOG);
+
+      assertFalse(body.has("storageBin"));
+    }
+  }
+
+  @Test
+  public void testInjectDefaultLocatorIfMissingHeaderWithNullWarehouseDoesNotInjectLocator()
+      throws Exception {
+    JSONObject body = new JSONObject().put("parentId", "shipment-1");
+
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      ShipmentInOut header = mock(ShipmentInOut.class);
+      when(dal.get(eq(ShipmentInOut.class), eq("shipment-1"))).thenReturn(header);
+      when(header.getWarehouse()).thenReturn(null);
+
+      NeoHandlerUtils.injectDefaultLocatorIfMissing(body, LOG);
+
+      assertFalse(body.has("storageBin"));
+    }
+  }
+
+  /**
+   * Edge case (QA): the header warehouse has NO active default {@code M_Locator} configured at
+   * all (e.g. a brand-new warehouse whose locators were never flagged as default/active). The
+   * helper must resolve to {@code null} and leave {@code storageBin} unset rather than throwing
+   * — completion will still fail downstream with {@code InoutLineWithoutLocator}, but this
+   * method itself must degrade gracefully, not blow up the request.
+   */
+  @SuppressWarnings("unchecked")
+  @Test
+  public void testInjectDefaultLocatorIfMissingNoLocatorConfiguredForWarehouseDoesNotThrow()
+      throws Exception {
+    JSONObject body = new JSONObject().put("parentId", "shipment-1");
+
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      ShipmentInOut header = mock(ShipmentInOut.class);
+      Warehouse warehouse = mock(Warehouse.class);
+      when(dal.get(eq(ShipmentInOut.class), eq("shipment-1"))).thenReturn(header);
+      when(header.getWarehouse()).thenReturn(warehouse);
+      when(warehouse.getId()).thenReturn("wh-empty");
+      OBCriteria criteria = mock(OBCriteria.class);
+      when(dal.createCriteria(Locator.class)).thenReturn(criteria);
+      when(criteria.add(any())).thenReturn(criteria);
+      when(criteria.addOrder(any())).thenReturn(criteria);
+      when(criteria.setMaxResults(1)).thenReturn(criteria);
+      when(criteria.uniqueResult()).thenReturn(null);
+
+      NeoHandlerUtils.injectDefaultLocatorIfMissing(body, LOG);
+
+      assertFalse(body.has("storageBin"));
+    }
+  }
+
+  @Test
+  public void testInjectDefaultLocatorIfMissingOverridesUnresolvedToken() throws Exception {
+    JSONObject body = new JSONObject().put("parentId", "shipment-1")
+        .put("storageBin", "@OnHandLocatorDefault@");
+
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      ShipmentInOut header = mock(ShipmentInOut.class);
+      Warehouse warehouse = mock(Warehouse.class);
+      Locator locator = mock(Locator.class);
+      when(dal.get(eq(ShipmentInOut.class), eq("shipment-1"))).thenReturn(header);
+      when(header.getWarehouse()).thenReturn(warehouse);
+      when(warehouse.getId()).thenReturn("wh-principal");
+      when(locator.getId()).thenReturn("loc-default-wh-principal");
+      OBCriteria criteria = mock(OBCriteria.class);
+      when(dal.createCriteria(Locator.class)).thenReturn(criteria);
+      when(criteria.add(any())).thenReturn(criteria);
+      when(criteria.addOrder(any())).thenReturn(criteria);
+      when(criteria.setMaxResults(1)).thenReturn(criteria);
+      when(criteria.uniqueResult()).thenReturn(locator);
+
+      NeoHandlerUtils.injectDefaultLocatorIfMissing(body, LOG);
+
+      assertEquals("loc-default-wh-principal", body.getString("storageBin"));
+    }
+  }
+
+  @Test
+  public void testInjectDefaultLocatorIfMissingHappyPathInjectsHeaderWarehouseLocator()
+      throws Exception {
+    JSONObject body = new JSONObject().put("parentId", "shipment-1").put("product", "prod-1");
+
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      ShipmentInOut header = mock(ShipmentInOut.class);
+      Warehouse warehouse = mock(Warehouse.class);
+      Locator locator = mock(Locator.class);
+      when(dal.get(eq(ShipmentInOut.class), eq("shipment-1"))).thenReturn(header);
+      when(header.getWarehouse()).thenReturn(warehouse);
+      when(warehouse.getId()).thenReturn("wh-principal");
+      when(locator.getId()).thenReturn("loc-default-wh-principal");
+      OBCriteria criteria = mock(OBCriteria.class);
+      when(dal.createCriteria(Locator.class)).thenReturn(criteria);
+      when(criteria.add(any())).thenReturn(criteria);
+      when(criteria.addOrder(any())).thenReturn(criteria);
+      when(criteria.setMaxResults(1)).thenReturn(criteria);
+      when(criteria.uniqueResult()).thenReturn(locator);
+
+      NeoHandlerUtils.injectDefaultLocatorIfMissing(body, LOG);
+
+      assertEquals("loc-default-wh-principal", body.getString("storageBin"));
+    }
+  }
+
+  /**
+   * BUG-1 [HIGH] (ETP-4863 QA report — confirmed IN SCOPE by the product owner, not a
+   * best-effort fallback): the ticket's "Comportamiento esperado" is an UNCONDITIONAL guarantee
+   * — "todas las transacciones deben quedar en el almacén [de cabecera]", with no exception for
+   * an already-populated field. The guard here only treats a BLANK or unresolved-{@code
+   * @Token@} storageBin as "missing"; an explicit, REAL locator id is passed through completely
+   * unchecked — {@code resolveDefaultLocatorForWarehouse}/the header lookup is never even
+   * reached (see {@code verifyNoInteractions(dal)} below), so nothing here verifies the supplied
+   * locator actually belongs to the header's own warehouse. {@link InventoryLineHandler}
+   * (Physical Inventory, a sibling window) already establishes the correct pattern in this same
+   * codebase: it unconditionally overwrites {@code storageBin} with the header-warehouse locator
+   * every POST, regardless of what was already in the body — this method should do the same
+   * instead of only filling gaps. Reachable in practice via any create payload that carries a
+   * real (non-blank, non-token) storageBin from a different warehouse than the header — e.g. an
+   * "Import from..." flow that copies a locator from the source document, or an external Etendo
+   * GO API client. This test PINS the current (deficient) behavior as a marker; it must be
+   * rewritten to assert the CORRECTED behavior once the guard is fixed, not just deleted.
+   */
+  @Test
+  public void testInjectDefaultLocatorIfMissingDoesNotValidateExplicitStorageBinWarehouse()
+      throws Exception {
+    JSONObject body = new JSONObject().put("parentId", "shipment-1")
+        .put("storageBin", "loc-from-secondary-warehouse");
+
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      NeoHandlerUtils.injectDefaultLocatorIfMissing(body, LOG);
+
+      assertEquals("An explicit, REAL storageBin is passed through unchecked even when it "
+          + "belongs to a warehouse other than the header's — see BUG-1 in the QA report",
+          "loc-from-secondary-warehouse", body.getString("storageBin"));
+      // The guard returns before ever touching OBDal — the header/warehouse is never even
+      // looked up, confirming no warehouse-match validation happens for an explicit value.
+      verifyNoInteractions(dal);
+    }
+  }
+
+  // ── ETP-4863: resolveDefaultLocatorForWarehouse ──────────────────────────────────────────
+
+  @SuppressWarnings("unchecked")
+  @Test
+  public void testResolveDefaultLocatorForWarehouseReturnsIdWhenFound() throws Exception {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      Locator locator = mock(Locator.class);
+      when(locator.getId()).thenReturn("loc-1");
+      OBCriteria criteria = mock(OBCriteria.class);
+      when(dal.createCriteria(Locator.class)).thenReturn(criteria);
+      when(criteria.add(any())).thenReturn(criteria);
+      when(criteria.addOrder(any())).thenReturn(criteria);
+      when(criteria.setMaxResults(1)).thenReturn(criteria);
+      when(criteria.uniqueResult()).thenReturn(locator);
+
+      assertEquals("loc-1", NeoHandlerUtils.resolveDefaultLocatorForWarehouse("wh-1", LOG));
+    }
+  }
+
+  @SuppressWarnings("unchecked")
+  @Test
+  public void testResolveDefaultLocatorForWarehouseReturnsNullWhenNoneFound() throws Exception {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      OBCriteria criteria = mock(OBCriteria.class);
+      when(dal.createCriteria(Locator.class)).thenReturn(criteria);
+      when(criteria.add(any())).thenReturn(criteria);
+      when(criteria.addOrder(any())).thenReturn(criteria);
+      when(criteria.setMaxResults(1)).thenReturn(criteria);
+      when(criteria.uniqueResult()).thenReturn(null);
+
+      assertNull(NeoHandlerUtils.resolveDefaultLocatorForWarehouse("wh-1", LOG));
+    }
+  }
+
+  /**
+   * Edge case (QA): if the criteria query itself blows up (e.g. transient DB issue), the method
+   * must fail closed — return {@code null} — instead of propagating the exception up into the
+   * POST create flow and turning a defaulting nicety into a hard 500.
+   */
+  @Test
+  public void testResolveDefaultLocatorForWarehouseReturnsNullOnException() throws Exception {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.createCriteria(Locator.class)).thenThrow(new RuntimeException("DB unavailable"));
+
+      assertNull(NeoHandlerUtils.resolveDefaultLocatorForWarehouse("wh-1", LOG));
+    }
   }
 }
