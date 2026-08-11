@@ -1226,41 +1226,56 @@ class McpToolRouterRouteTest {
   class ResolutionErrorTests {
 
     @Test
-    @DisplayName("unknown spec returns error")
+    @DisplayName("unknown spec returns a 404 not_found envelope pointing at neo_discover")
     void unknownSpecReturnsError() throws Exception {
-      // The router delegates spec resolution to the support class, which throws
-      // OBException("Spec not found: <name>") when no active spec matches.
+      // ETP-4793 / IMP-17: spec resolution throws McpRoutingException, which route renders as the
+      // IMP-5 envelope instead of the old bare prose line. No `available` list on purpose — the
+      // catalog can hold dozens of specs, so the hint routes to neo_discover instead (ACE).
       supportMock.when(() -> McpToolRouterSupport.findActiveSpecByName(anyString()))
-          .thenThrow(new OBException("Spec not found: " + SPEC_NAME));
+          .thenThrow(McpRoutingException.specNotFound(SPEC_NAME));
 
       JSONObject args = buildCrudArgs();
       JSONObject result = router.route("neo_list", args, READ_SCOPES);
 
       assertTrue(result.getBoolean("isError"));
-      String text = result.getJSONArray("content").getJSONObject(0).getString("text");
-      assertTrue(text.contains("Spec not found"));
+      JSONObject envelope = new JSONObject(
+          result.getJSONArray("content").getJSONObject(0).getString("text"));
+      assertEquals(404, envelope.getInt("status"));
+      assertEquals("not_found", envelope.getString("error"));
+      assertEquals("spec", envelope.getString("field"));
+      assertTrue(envelope.getString("detail").contains(SPEC_NAME));
+      assertTrue(envelope.getString("hint").contains("neo_discover"));
+      assertFalse(envelope.has("available"));
     }
 
     @Test
-    @DisplayName("unknown entity returns error")
+    @DisplayName("unknown entity returns a 404 not_found envelope carrying the valid entity names")
     void unknownEntityReturnsError() throws Exception {
       SFSpec spec = mockSpec(); // type "W"
       setupSpecLookup(spec);
 
-      // AC-3: for a type-W spec the shared guard delegates to findIncludedEntity, preserving
-      // the "Entity not found: <name>" message for a genuinely wrong entity name. Run the real
-      // helper and let the delegate throw, exercising the W branch end-to-end.
+      // AC-3: for a type-W spec the shared guard delegates to findIncludedEntity for a genuinely
+      // wrong entity name. Run the real helper and let the delegate throw, exercising the W branch
+      // end-to-end. ETP-4793 / IMP-17: the miss now travels as an envelope whose `available` list is
+      // the whole answer to the agent's next question (evidence B20 was exactly this call).
       supportMock.when(() -> McpToolRouterSupport.resolveIncludedEntityOrExplain(
           any(SFSpec.class), anyString())).thenCallRealMethod();
       supportMock.when(() -> McpToolRouterSupport.findIncludedEntity(anyString(), anyString()))
-          .thenThrow(new OBException("Entity not found: " + ENTITY_NAME));
+          .thenThrow(McpRoutingException.entityNotFound(ENTITY_NAME, SPEC_NAME,
+              List.of("orderHeader", "orderLines")));
 
       JSONObject args = buildCrudArgs();
       JSONObject result = router.route("neo_list", args, READ_SCOPES);
 
       assertTrue(result.getBoolean("isError"));
-      String text = contentText(result);
-      assertTrue(text.contains("Entity not found"));
+      JSONObject envelope = new JSONObject(contentText(result));
+      assertEquals(404, envelope.getInt("status"));
+      assertEquals("not_found", envelope.getString("error"));
+      assertEquals("entity", envelope.getString("field"));
+      assertEquals("neo_list", envelope.getString("tool"));
+      JSONArray available = envelope.getJSONArray("available");
+      assertEquals(2, available.length());
+      assertEquals("orderHeader", available.getString(0));
     }
 
     @Test

@@ -17,6 +17,7 @@
 
 package com.etendoerp.go.mcp;
 
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Iterator;
 import java.util.List;
@@ -39,6 +40,7 @@ import org.openbravo.model.ad.ui.Tab;
 
 import org.openbravo.service.json.JsonConstants;
 
+import com.etendoerp.go.schemaforge.MissingRequiredFieldsException;
 import com.etendoerp.go.schemaforge.NeoActionSurface;
 import com.etendoerp.go.schemaforge.NeoResponse;
 import com.etendoerp.go.schemaforge.data.SFEntity;
@@ -63,7 +65,7 @@ final class McpToolRouterSupport {
     criteria.setMaxResults(1);
     List<SFSpec> results = criteria.list();
     if (results.isEmpty()) {
-      throw new OBException("Spec not found: " + specName);
+      throw McpRoutingException.specNotFound(specName);
     }
     return results.get(0);
   }
@@ -77,9 +79,50 @@ final class McpToolRouterSupport {
     criteria.setMaxResults(1);
     List<SFEntity> results = criteria.list();
     if (results.isEmpty()) {
-      throw new OBException("Entity not found: " + entityName);
+      // ETP-4793 / IMP-17: the miss is only worth reporting alongside the names that would have
+      // worked. The extra query runs on the failure path only, and it is the one the agent would
+      // otherwise have to make itself (evidence B20).
+      throw McpRoutingException.entityNotFound(entityName, resolveSpecNameForError(specId),
+          includedEntityNames(specId));
     }
     return results.get(0);
+  }
+
+  /**
+   * The spec's caller-facing name, for an error message built on the failure path.
+   *
+   * <p>{@code SFSpec}'s primary key is a UUID, and the agent addressed the spec by its kebab-case
+   * name — echoing the UUID back would name something it never sent. Falls back to the id only if
+   * the spec somehow cannot be loaded, which cannot happen on this path (it was just resolved).</p>
+   *
+   * @param specId the spec's primary key
+   * @return the spec name, or the id when it cannot be resolved
+   */
+  private static String resolveSpecNameForError(String specId) {
+    try {
+      SFSpec spec = OBDal.getInstance().get(SFSpec.class, specId);
+      if (spec != null && spec.getName() != null) {
+        return spec.getName();
+      }
+    } catch (Exception e) {
+      log.debug("Could not resolve spec name for {}", specId, e);
+    }
+    return specId;
+  }
+
+  /**
+   * The names of a spec's active, included entities — the {@code available} list an unknown entity
+   * name is answered with (ETP-4793 / IMP-17).
+   *
+   * @param specId the spec whose entities to name
+   * @return the entity names in {@code seqNo} order, empty when the spec includes none
+   */
+  static List<String> includedEntityNames(String specId) {
+    List<String> names = new ArrayList<>();
+    for (SFEntity entity : listIncludedEntities(specId)) {
+      names.add(entity.getName());
+    }
+    return names;
   }
 
   /**
@@ -112,11 +155,12 @@ final class McpToolRouterSupport {
     if ("R".equals(spec.getSpecType())) {
       if (NeoReportCallability.isReportCallable(spec)) {
         String snakeTool = McpConstants.GENERATE_PREFIX + ToolRegistry.kebabToSnake(spec.getName());
-        throw new OBException("Spec '" + spec.getName() + "' is a report type (R) and does not "
-            + "expose listable entities. Use the etendo_" + snakeTool
-            + " tool to produce this report.");
+        throw McpRoutingException.notCrudCapable("Spec '" + spec.getName()
+            + "' is a report type (R) and does not expose listable entities. Use the etendo_"
+            + snakeTool + " tool to produce this report.");
       }
-      throw new OBException(NeoReportCallability.buildNotConfiguredMessage(spec.getName()));
+      throw McpRoutingException.notCrudCapable(
+          NeoReportCallability.buildNotConfiguredMessage(spec.getName()));
     }
     return findIncludedEntity(spec.getId(), entityName);
   }
@@ -247,7 +291,7 @@ final class McpToolRouterSupport {
     }
     String specName = spec != null ? spec.getName() : null;
     String entityName = entity != null ? entity.getName() : null;
-    throw new OBException(
+    throw McpRoutingException.methodNotAllowed(
         NeoMethodPolicy.buildMcpNotEnabledMessage(specName, entityName, method, entity));
   }
 
@@ -799,12 +843,15 @@ final class McpToolRouterSupport {
    * @throws IllegalArgumentException when {@code args} is {@code null} or a key is missing
    */
   static void validateArgs(JSONObject args, String... required) {
+    // ETP-4793 / IMP-17: an absent argument is the caller's mistake, so it must not travel as an
+    // IllegalArgumentException the router can only classify as a 500. The exception carries its own
+    // 422 envelope and names the argument in `field`.
     if (args == null) {
-      throw new IllegalArgumentException("Missing arguments");
+      throw McpRoutingException.missingArgument("Missing arguments", null);
     }
     for (String key : required) {
       if (!args.has(key) || args.isNull(key)) {
-        throw new IllegalArgumentException("Missing required argument: " + key);
+        throw McpRoutingException.missingArgument("Missing required argument: " + key, key);
       }
     }
   }
@@ -932,7 +979,15 @@ final class McpToolRouterSupport {
     }
     int status = rawError.optInt(McpConstants.KEY_STATUS, 500);
     String message = rawError.optString(McpConstants.KEY_MESSAGE, "Batch operation failed");
-    String dalMessage = extractDalMessage(rawError.optJSONObject(McpConstants.KEY_DETAIL));
+    JSONObject detail = rawError.optJSONObject(McpConstants.KEY_DETAIL);
+
+    JSONArray missingFields = extractMissingFields(detail);
+    if (missingFields != null) {
+      result.put(McpConstants.KEY_ERROR, buildBatchMissingFieldsError(missingFields));
+      return result;
+    }
+
+    String dalMessage = extractDalMessage(detail);
 
     JSONObject clean = new JSONObject();
     clean.put(McpConstants.KEY_STATUS, status);
@@ -941,6 +996,49 @@ final class McpToolRouterSupport {
     clean.put(McpConstants.KEY_SEE_ALSO, McpConstants.SEE_ALSO_WRITING);
     result.put(McpConstants.KEY_ERROR, clean);
     return result;
+  }
+
+  /**
+   * Lift {@code NeoCrudHandler}'s {@code MISSING_REQUIRED_FIELDS} body into the {@code missingFields}
+   * list an MCP agent already knows (ETP-4793 / IMP-17, from IMP-23 §9.4).
+   *
+   * <p>The condition was reported three different ways for the same mistake: {@code neo_create}
+   * answered IMP-5's {@code missingFields} 422, the REST CRUD path answered ETP-3894's
+   * {@code MISSING_REQUIRED_FIELDS} 400, and {@code neo_batch} — which reaches that REST path —
+   * forwarded whatever came back. Omitting {@code partnerAddress} inside a batch used to surface a
+   * <b>500</b> carrying a raw Postgres not-null violation with the whole failing row in it. The REST
+   * shape stays as it is, because the React UI highlights fields from it; the translation to the
+   * agent's shape belongs here, for the same reason the rest of this method does.</p>
+   *
+   * @param detail the failing operation's forwarded sub-response, or {@code null}
+   * @return the missing field names, or {@code null} when this is not that failure
+   */
+  private static JSONArray extractMissingFields(JSONObject detail) {
+    if (detail == null) {
+      return null;
+    }
+    JSONObject body = detail.optJSONObject(JsonConstants.RESPONSE_RESPONSE);
+    JSONObject error = (body == null ? detail : body).optJSONObject(McpConstants.KEY_ERROR);
+    if (error == null
+        || !MissingRequiredFieldsException.ERROR_CODE.equals(error.optString("code", null))) {
+      return null;
+    }
+    JSONArray fields = error.optJSONArray(McpConstants.PARAM_FIELDS);
+    return fields == null || fields.length() == 0 ? null : fields;
+  }
+
+  /** The {@code missingFields} 422 a batch reports for an omitted required value (IMP-17). */
+  private static JSONObject buildBatchMissingFieldsError(JSONArray missingFields)
+      throws JSONException {
+    JSONObject clean = new JSONObject();
+    clean.put(McpConstants.KEY_STATUS, McpConstants.STATUS_UNPROCESSABLE);
+    clean.put(McpConstants.KEY_ERROR, McpConstants.ERROR_VALIDATION);
+    clean.put(McpConstants.KEY_DETAIL, "Missing required fields on the operation named in 'failedAt'");
+    clean.put(McpConstants.KEY_MISSING_FIELDS, missingFields);
+    clean.put(McpConstants.KEY_HINT, "Add these fields to that operation's body, or use "
+        + "neo_selectors to find valid values for foreignKey fields, then retry the whole batch.");
+    clean.put(McpConstants.KEY_SEE_ALSO, McpConstants.SEE_ALSO_WRITING);
+    return clean;
   }
 
   /** Map a batch failure's HTTP status onto a stable machine-detectable code (IMP-15). */

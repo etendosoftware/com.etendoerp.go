@@ -20,6 +20,8 @@ package com.etendoerp.go.mcp;
 final class McpConstants {
 
   static final String PARAM_ENTITY = "entity";
+  /** The spec-name argument every CRUD tool carries (ETP-4793 / IMP-17). */
+  static final String PARAM_SPEC = "spec";
   static final String PARAM_FIELDS = "fields";
   static final String PARAM_COLUMN = "column";
   static final String PARAM_FIELD = "field";
@@ -69,6 +71,29 @@ final class McpConstants {
   static final int STATUS_NOT_FOUND = 404;
   /** HTTP-style status for a validation failure on a write (IMP-5). */
   static final int STATUS_UNPROCESSABLE = 422;
+  /**
+   * Machine-detectable error code for a write the current data refuses — a duplicate business key
+   * (ETP-4793 / IMP-17). Distinct from {@link #ERROR_VALIDATION}: the request is well-formed, so
+   * re-sending corrected values is not necessarily the remedy; the agent may need a different record.
+   */
+  static final String ERROR_CONFLICT = "conflict";
+  /** HTTP-style status for a duplicate-key conflict (ETP-4793 / IMP-17). */
+  static final int STATUS_CONFLICT = 409;
+  /** HTTP-style status for a failure the caller cannot fix (ETP-4793 / IMP-17). */
+  static final int STATUS_SERVER_ERROR = 500;
+  /** HTTP-style status for a verb the entity does not enable (ETP-4793 / IMP-17). */
+  static final int STATUS_METHOD_NOT_ALLOWED = 405;
+  /**
+   * Key listing the fields a write is missing. Established by IMP-5 for {@code neo_create} and
+   * reused verbatim by every later path that reports the same condition, so an agent parses one
+   * key (ETP-4793 / IMP-17, IMP-24 §2).
+   */
+  static final String KEY_MISSING_FIELDS = "missingFields";
+  /**
+   * Key listing the valid values for a name the caller got wrong — the self-correcting shape IMP-3
+   * established for unknown named filters, reused for an unknown entity name (ETP-4793 / IMP-17).
+   */
+  static final String KEY_AVAILABLE = "available";
 
   /** The {@code docs} tool name — surfaced by neo_discover guidance and error pointers (IMP-10). */
   static final String TOOL_DOCS = "docs";

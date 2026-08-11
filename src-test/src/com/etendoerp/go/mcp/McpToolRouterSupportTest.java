@@ -643,6 +643,58 @@ class McpToolRouterSupportTest {
     }
   }
 
+  // ─── validateArgs (ETP-4793 / IMP-17) ───────────────────────────────
+
+  /**
+   * An absent argument is the caller's mistake. It used to travel as an {@code
+   * IllegalArgumentException}, which {@code route}'s catch-all could only flatten into a prose 500 —
+   * telling an agent to give up on something one added key would have fixed.
+   */
+  @Nested
+  @DisplayName("validateArgs (ETP-4793 / IMP-17)")
+  class ValidateArgs {
+
+    @Test
+    @DisplayName("every required argument present passes silently")
+    void allPresentPasses() throws Exception {
+      JSONObject args = new JSONObject();
+      args.put("spec", "sales-order");
+      args.put("entity", "header");
+
+      McpToolRouterSupport.validateArgs(args, "spec", "entity");
+    }
+
+    @Test
+    @DisplayName("a missing argument raises a 422 naming it in 'field'")
+    void missingArgumentNamesTheField() throws Exception {
+      JSONObject args = new JSONObject();
+      args.put("spec", "sales-order");
+
+      McpRoutingException ex = assertThrows(McpRoutingException.class,
+          () -> McpToolRouterSupport.validateArgs(args, "spec", "entity"));
+
+      JSONObject envelope = ex.toEnvelope();
+      assertEquals(422, envelope.getInt("status"));
+      assertEquals("validation_error", envelope.getString("error"));
+      assertEquals("entity", envelope.getString("field"));
+      assertTrue(envelope.getString("hint").contains("neo_schema"));
+    }
+
+    @Test
+    @DisplayName("a JSON null counts as absent, and a null argument object is reported too")
+    void nullsAreTreatedAsAbsent() throws Exception {
+      JSONObject args = new JSONObject();
+      args.put("entity", JSONObject.NULL);
+      assertEquals("entity", assertThrows(McpRoutingException.class,
+          () -> McpToolRouterSupport.validateArgs(args, "entity")).toEnvelope().getString("field"));
+
+      McpRoutingException noArgs = assertThrows(McpRoutingException.class,
+          () -> McpToolRouterSupport.validateArgs(null, "entity"));
+      assertEquals(422, noArgs.toEnvelope().getInt("status"));
+      assertFalse(noArgs.toEnvelope().has("field"), "no single argument is at fault");
+    }
+  }
+
   // ─── requireMethodEnabled (ETP-4254) ────────────────────────────────
 
   /**
@@ -671,14 +723,34 @@ class McpToolRouterSupportTest {
       SFEntity entity = tabBackedEntity(false);
 
       for (String method : List.of("POST", "PUT", "DELETE")) {
-        org.openbravo.base.exception.OBException ex = assertThrows(
-            org.openbravo.base.exception.OBException.class,
+        McpRoutingException ex = assertThrows(McpRoutingException.class,
             () -> McpToolRouterSupport.requireMethodEnabled(spec, entity, method));
 
         assertTrue(ex.getMessage().contains("monitor-verifactu"), ex.getMessage());
         assertTrue(ex.getMessage().contains("does not enable " + method), ex.getMessage());
         assertTrue(ex.getMessage().contains("read-only"), ex.getMessage());
       }
+    }
+
+    /**
+     * ETP-4793 / IMP-17: the refusal is a 405, kept out of the {@code validation_error} bucket for the
+     * reason that code exists — the request is correct and the configuration forbids it, so no amount
+     * of correcting values will make the call work.
+     */
+    @Test
+    @DisplayName("the refusal carries a 405 method_not_allowed envelope, not a validation error")
+    void readOnlyRefusalIsA405Envelope() throws Exception {
+      SFSpec spec = mock(SFSpec.class);
+      when(spec.getName()).thenReturn("monitor-verifactu");
+      SFEntity entity = tabBackedEntity(false);
+
+      McpRoutingException ex = assertThrows(McpRoutingException.class,
+          () -> McpToolRouterSupport.requireMethodEnabled(spec, entity, "POST"));
+
+      JSONObject envelope = ex.toEnvelope();
+      assertEquals(405, envelope.getInt("status"));
+      assertEquals("method_not_allowed", envelope.getString("error"));
+      assertFalse(envelope.has("hint"), "there is no corrective action to hint at");
     }
 
     @Test
@@ -1527,9 +1599,15 @@ class McpToolRouterSupportTest {
   // ─── resolveIncludedEntityOrExplain (ETP-4257) ──────────────────────
 
   /**
-   * Guard that turns the opaque {@code "Entity not found: <name>"} error into a descriptive
-   * message when an entity-CRUD tool (neo_list/get/create/...) is called on a report-type
-   * spec, while leaving type-W entity resolution unchanged.
+   * Guard that turns an opaque entity-not-found error into a descriptive message when an entity-CRUD
+   * tool (neo_list/get/create/...) is called on a report-type spec, while leaving type-W entity
+   * resolution unchanged.
+   *
+   * <p>ETP-4793 / IMP-17: both report branches now raise an {@link McpRoutingException} — an
+   * {@code OBException} subtype, so the messages and every existing catch stay as they were, while
+   * {@code route} can render the IMP-5 envelope. The classification is {@code validation_error}, not
+   * {@code not_found}: nothing the agent named is missing, the call is aimed at the wrong surface and
+   * the message says which one to use, so a retry can succeed.</p>
    */
   @Nested
   @DisplayName("resolveIncludedEntityOrExplain (ETP-4257)")
@@ -1554,7 +1632,7 @@ class McpToolRouterSupportTest {
      * agent at the concrete {@code etendo_generate_<snake>} tool instead of an entity.
      */
     @Test
-    void callableReportSpecExplainsGenerateTool() {
+    void callableReportSpecExplainsGenerateTool() throws Exception {
       SFSpec spec = mock(SFSpec.class);
       when(spec.getSpecType()).thenReturn("R");
       when(spec.getName()).thenReturn("financial-accounts-page");
@@ -1563,14 +1641,18 @@ class McpToolRouterSupportTest {
           mockStatic(NeoReportCallability.class)) {
         callabilityMock.when(() -> NeoReportCallability.isReportCallable(spec)).thenReturn(true);
 
-        org.openbravo.base.exception.OBException ex = assertThrows(
-            org.openbravo.base.exception.OBException.class,
+        McpRoutingException ex = assertThrows(McpRoutingException.class,
             () -> McpToolRouterSupport.resolveIncludedEntityOrExplain(spec, "header"));
 
         assertTrue(ex.getMessage().contains("report type (R)"),
             "message must state the spec is a report type: " + ex.getMessage());
         assertTrue(ex.getMessage().contains("etendo_generate_financial_accounts_page"),
             "message must name the concrete report tool: " + ex.getMessage());
+        // ETP-4793 / IMP-17: carried as a 422, so an agent knows a corrected retry is worth making.
+        JSONObject envelope = ex.toEnvelope();
+        assertEquals(422, envelope.getInt("status"));
+        assertEquals("validation_error", envelope.getString("error"));
+        assertEquals("spec", envelope.getString("field"));
       }
     }
 
@@ -1792,6 +1874,44 @@ class McpToolRouterSupportTest {
       assertFalse(error.toString().contains("-4"));
       assertNull(error.optJSONObject("detail"));
       assertEquals("h1", result.getJSONObject("failedAt").getString("id"));
+    }
+
+    /**
+     * ETP-4793 / IMP-17 (absorbing IMP-23 §9.4): a batch operation rejected for missing required
+     * fields used to forward the REST layer's ETP-3894 {@code MISSING_REQUIRED_FIELDS} 400 verbatim,
+     * so the same mistake reached agents in three different shapes depending on the tool. The REST
+     * shape stays put — the React UI highlights fields from it — and the translation to IMP-24's
+     * {@code missingFields} 422 happens here, which is exactly what this method exists for.
+     */
+    @Test
+    @DisplayName("lifts a MISSING_REQUIRED_FIELDS rejection into the missingFields 422 shape")
+    void liftsMissingRequiredFields() throws Exception {
+      JSONArray fields = new JSONArray();
+      fields.put("partnerAddress");
+      JSONObject innerError = new JSONObject();
+      innerError.put("code", "MISSING_REQUIRED_FIELDS");
+      innerError.put("message", "Missing required fields");
+      innerError.put("fields", fields);
+      JSONObject detail = new JSONObject();
+      detail.put("error", innerError);
+
+      JSONObject error = new JSONObject();
+      error.put("status", 400);
+      error.put("message", "Operation 'h1' rejected by server");
+      error.put("detail", detail);
+      JSONObject body = new JSONObject();
+      body.put("committed", false);
+      body.put("error", error);
+
+      JSONObject result = McpToolRouterSupport.toMcpBatchFailure(body);
+
+      JSONObject mapped = result.getJSONObject("error");
+      assertEquals(422, mapped.getInt("status"));
+      assertEquals("validation_error", mapped.getString("error"));
+      assertEquals("partnerAddress", mapped.getJSONArray("missingFields").getString(0));
+      // The REST envelope's own nesting is gone: an agent parses one key, not three shapes.
+      assertNull(mapped.optJSONObject("detail"));
+      assertFalse(mapped.toString().contains("MISSING_REQUIRED_FIELDS"));
     }
 
     @Test

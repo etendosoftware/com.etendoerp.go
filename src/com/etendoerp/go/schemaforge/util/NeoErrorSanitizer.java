@@ -50,6 +50,41 @@ public final class NeoErrorSanitizer {
 
   private static final String SQLSTATE_UNIQUE_VIOLATION = "23505";
 
+  /** Postgres SQLState for a not-null constraint violation. */
+  private static final String SQLSTATE_NOT_NULL_VIOLATION = "23502";
+
+  /**
+   * Names the column of a Postgres not-null violation, e.g.
+   * {@code null value in column "c_bpartner_location_id" of relation "c_invoice" violates
+   * not-null constraint}.
+   *
+   * <p>Matches the English server wording only, which is why {@link #isNotNullViolationMessage}
+   * also accepts a bare {@code 23502} anywhere in the string: the SQLState is the
+   * locale-independent signal, and the column name is a best-effort refinement on top of it. An
+   * install running Postgres under a non-English {@code lc_messages} therefore still gets the
+   * right status and a stripped message — it just loses the field name.</p>
+   */
+  private static final java.util.regex.Pattern NOT_NULL_COLUMN_PATTERN =
+      java.util.regex.Pattern.compile(
+          "null value in column\\s+[\"«']?([A-Za-z0-9_]+)[\"»']?", java.util.regex.Pattern.CASE_INSENSITIVE);
+
+  /**
+   * A parenthesised run long enough that it can only be a data dump, not prose.
+   *
+   * <p>The concrete leak this exists for: a not-null violation on {@code c_invoice} came back with
+   * Postgres' {@code Failing row contains (…)} detail carrying **~90 columns** of the failing row —
+   * an internals leak, and a sizeable context cost for an MCP agent that has to read it (ETP-4793 /
+   * IMP-17, from IMP-23 §9.4). Cutting on the tuple rather than on the {@code Failing row contains}
+   * lead-in is deliberate: that lead-in is localised by Postgres, the oversized tuple is not.</p>
+   */
+  private static final int MAX_PARENTHESISED_RUN = 200;
+
+  private static final java.util.regex.Pattern LONG_TUPLE_PATTERN =
+      java.util.regex.Pattern.compile("\\([^()]{" + MAX_PARENTHESISED_RUN + ",}\\)");
+
+  /** Replaces a stripped row dump, so the response says a value was removed rather than hiding it. */
+  static final String REDACTED_ROW = "(…)";
+
   /**
    * Matches a default Java {@code Object.toString()} rendering
    * ({@code fully.qualified.ClassName@hexHash}, inner classes included via {@code $}), e.g.
@@ -96,7 +131,7 @@ public final class NeoErrorSanitizer {
       }
       current = current.getCause();
     }
-    return t == null ? GENERIC_DB_ERROR : redactObjectReferences(t.getMessage());
+    return t == null ? GENERIC_DB_ERROR : stripRowDump(redactObjectReferences(t.getMessage()));
   }
 
   /**
@@ -162,6 +197,101 @@ public final class NeoErrorSanitizer {
    */
   public static boolean isDuplicateKeyMessage(String message) {
     return message != null && message.toLowerCase().contains("must be unique");
+  }
+
+  /**
+   * Returns {@code true} if {@code t} or any exception in its cause chain is a not-null constraint
+   * violation (Postgres SQLState 23502). Mirrors {@link #isDuplicateKeyViolation(Throwable)} and
+   * exists for the same reason: a caller who omitted a required value sent a bad request, so the
+   * response must be a 4xx the agent can act on, never a 500 (ETP-4793 / IMP-17).
+   *
+   * @param t the throwable to inspect; may be {@code null}
+   * @return whether the chain contains a not-null constraint violation
+   */
+  public static boolean isNotNullViolation(Throwable t) {
+    Throwable current = t;
+    while (current != null) {
+      if (current instanceof java.sql.SQLException
+          && SQLSTATE_NOT_NULL_VIOLATION.equals(((java.sql.SQLException) current).getSQLState())) {
+        return true;
+      }
+      current = current.getCause();
+    }
+    return false;
+  }
+
+  /**
+   * Returns {@code true} if {@code message} describes a not-null constraint violation.
+   *
+   * <p>The message-based counterpart to {@link #isNotNullViolation(Throwable)}, needed for the same
+   * reason {@link #isDuplicateKeyMessage} is: {@code DefaultJsonDataService} catches the constraint
+   * violation internally and returns it as an ordinary JSON RPC failure body, so there is no
+   * {@link Throwable} left to inspect by the time {@code NeoCrudHandler} classifies the status.</p>
+   *
+   * @param message the (possibly already-translated) error message; may be {@code null}
+   * @return whether the message describes a not-null constraint violation
+   */
+  public static boolean isNotNullViolationMessage(String message) {
+    if (message == null) {
+      return false;
+    }
+    return message.contains(SQLSTATE_NOT_NULL_VIOLATION)
+        || NOT_NULL_COLUMN_PATTERN.matcher(message).find();
+  }
+
+  /**
+   * Extracts the DB column named by a not-null violation message, e.g. {@code c_bpartner_location_id}.
+   *
+   * @param message the error message; may be {@code null}
+   * @return the lower-cased column name, or {@code null} when the message names none
+   */
+  public static String notNullViolationColumn(String message) {
+    if (message == null) {
+      return null;
+    }
+    java.util.regex.Matcher matcher = NOT_NULL_COLUMN_PATTERN.matcher(message);
+    return matcher.find() ? matcher.group(1).toLowerCase() : null;
+  }
+
+  /**
+   * Extracts the not-null violation's column from anywhere in a throwable's cause chain.
+   *
+   * <p>Needed separately from {@link #notNullViolationColumn(String)} because {@link #sanitize} maps
+   * any DB exception to a generic message: by the time the caller has a safe string to return, the
+   * column name is gone. The raw chain is the only place it survives.</p>
+   *
+   * @param t the throwable to inspect; may be {@code null}
+   * @return the lower-cased column name, or {@code null} when no message in the chain names one
+   */
+  public static String notNullViolationColumn(Throwable t) {
+    Throwable current = t;
+    while (current != null) {
+      String column = notNullViolationColumn(current.getMessage());
+      if (column != null) {
+        return column;
+      }
+      current = current.getCause();
+    }
+    return null;
+  }
+
+  /**
+   * Replaces every parenthesised run of at least {@value #MAX_PARENTHESISED_RUN} characters with
+   * {@link #REDACTED_ROW}, so a Postgres {@code Failing row contains (…)} detail cannot carry the
+   * whole failing row into an HTTP response (ETP-4793 / IMP-17).
+   *
+   * <p>Keyed on the shape of the leak rather than on the sentence that introduces it: the lead-in is
+   * localised by the server's {@code lc_messages}, an oversized tuple is not. No human-readable
+   * message has a 200-character parenthetical, so ordinary text passes through untouched.</p>
+   *
+   * @param message the error message to strip; may be {@code null}
+   * @return the message with any row dump replaced, or {@code null} if input was null
+   */
+  public static String stripRowDump(String message) {
+    if (message == null) {
+      return null;
+    }
+    return LONG_TUPLE_PATTERN.matcher(message).replaceAll(REDACTED_ROW);
   }
 
   private static boolean isDbException(Throwable t) {

@@ -53,6 +53,7 @@ import com.etendoerp.go.schemaforge.AmortizationPlanService;
 import com.etendoerp.go.schemaforge.BatchService;
 import com.etendoerp.go.schemaforge.NeoCommercialLinePolicy;
 import com.etendoerp.go.schemaforge.util.NeoButtonActionHelper;
+import com.etendoerp.go.schemaforge.util.NeoErrorSanitizer;
 import com.etendoerp.go.schemaforge.util.NeoLanguage;
 import com.etendoerp.go.schemaforge.util.NeoReportContract;
 import com.etendoerp.go.schemaforge.NeoContext;
@@ -164,9 +165,57 @@ public class McpToolRouter {
       } finally {
         OBContext.restorePreviousMode();
       }
+    } catch (McpRoutingException e) {
+      // ETP-4793 / IMP-17: a spec/entity that does not exist already knows its own envelope,
+      // including the self-correcting `available` list (evidence B20).
+      log.warn("MCP tool '{}' addressed something that does not exist: {}", toolName, e.getMessage());
+      return wrapAsErrorContent(buildRoutingErrorBody(e, toolName));
     } catch (Exception e) {
       log.error("Error routing MCP tool '{}'", toolName, e);
-      return wrapAsErrorContent("Error executing " + toolName + ": " + e.getMessage());
+      return wrapAsErrorContent(buildUnexpectedErrorBody(toolName, e));
+    }
+  }
+
+  /**
+   * Render a routing failure, falling back to the old prose line only if the envelope cannot be
+   * serialised (ETP-4793 / IMP-17).
+   */
+  private String buildRoutingErrorBody(McpRoutingException e, String toolName) {
+    try {
+      JSONObject envelope = e.toEnvelope();
+      envelope.put(McpConstants.KEY_TOOL, toolName);
+      return envelope.toString(2);
+    } catch (JSONException jsonEx) {
+      log.error("Could not build routing error envelope for '{}'", toolName, jsonEx);
+      return "Error executing " + toolName + ": " + e.getMessage();
+    }
+  }
+
+  /**
+   * Render anything else thrown out of a tool call as the IMP-5 envelope (ETP-4793 / IMP-17).
+   *
+   * <p>This is the last leak IMP-5 left open: every unanticipated failure came back as the bare line
+   * {@code "Error executing neo_list: …"} (evidence C14), so an agent could not tell a mistake it
+   * could fix from a server fault it could not, and had to parse prose to find out. The code is
+   * deliberately {@code server_error} rather than {@code validation_error}: if the router could have
+   * told the caller what to change, one of the typed paths above would already have done it, and
+   * inviting a retry-with-corrections here would send the agent round a loop that cannot terminate.
+   * The message is sanitised on the way out — an unexpected failure is exactly where a DB internal
+   * or a row dump would otherwise reach the client.</p>
+   */
+  private String buildUnexpectedErrorBody(String toolName, Exception e) {
+    try {
+      JSONObject envelope = new JSONObject();
+      envelope.put(McpConstants.KEY_STATUS, McpConstants.STATUS_SERVER_ERROR);
+      envelope.put(McpConstants.KEY_ERROR, McpConstants.ERROR_SERVER);
+      envelope.put(McpConstants.KEY_DETAIL, NeoErrorSanitizer.sanitize(e));
+      envelope.put(McpConstants.KEY_TOOL, toolName);
+      envelope.put(McpConstants.KEY_HINT, "This is a server-side failure, not a bad request — "
+          + "re-sending the same call with corrected values will not help.");
+      return envelope.toString(2);
+    } catch (JSONException jsonEx) {
+      log.error("Could not build error envelope for '{}'", toolName, jsonEx);
+      return "Error executing " + toolName + ": " + e.getMessage();
     }
   }
 
@@ -346,9 +395,9 @@ public class McpToolRouter {
     JSONObject responseJson = new JSONObject(result);
 
     // Check for errors
-    String error = checkJsonServiceError(responseJson);
+    JSONObject error = checkJsonServiceError(responseJson, McpConstants.SEE_ALSO_READING);
     if (error != null) {
-      return wrapAsErrorContent(error);
+      return wrapAsErrorContent(error.toString(2));
     }
 
     // Apply field filtering
@@ -387,9 +436,9 @@ public class McpToolRouter {
     String result = jsonService.fetch(params);
     JSONObject responseJson = new JSONObject(result);
 
-    String error = checkJsonServiceError(responseJson);
+    JSONObject error = checkJsonServiceError(responseJson, McpConstants.SEE_ALSO_READING);
     if (error != null) {
-      return wrapAsErrorContent(error);
+      return wrapAsErrorContent(error.toString(2));
     }
 
     // IMP-5: a get-by-id that matched nothing comes back as {data:[], status:0} — a
@@ -538,9 +587,9 @@ public class McpToolRouter {
     String result = jsonService.add(params, wrappedBody);
     JSONObject responseJson = new JSONObject(result);
 
-    String error = checkJsonServiceError(responseJson);
+    JSONObject error = checkJsonServiceError(responseJson, McpConstants.SEE_ALSO_WRITING);
     if (error != null) {
-      return wrapAsErrorContent(error);
+      return wrapAsErrorContent(error.toString(2));
     }
 
     fieldFilter.filterGetResponse(responseJson);
@@ -617,9 +666,9 @@ public class McpToolRouter {
     String result = jsonService.update(params, wrappedBody);
     JSONObject responseJson = new JSONObject(result);
 
-    String error = checkJsonServiceError(responseJson);
+    JSONObject error = checkJsonServiceError(responseJson, McpConstants.SEE_ALSO_WRITING);
     if (error != null) {
-      return wrapAsErrorContent(error);
+      return wrapAsErrorContent(error.toString(2));
     }
 
     fieldFilter.filterGetResponse(responseJson);
@@ -667,9 +716,9 @@ public class McpToolRouter {
     String result = jsonService.remove(params);
     JSONObject responseJson = new JSONObject(result);
 
-    String error = checkJsonServiceError(responseJson);
+    JSONObject error = checkJsonServiceError(responseJson, McpConstants.SEE_ALSO_WRITING);
     if (error != null) {
-      return wrapAsErrorContent(error);
+      return wrapAsErrorContent(error.toString(2));
     }
 
     JSONObject deleteResult = new JSONObject();
@@ -1662,9 +1711,19 @@ public class McpToolRouter {
 
   /**
    * Check if a DefaultJsonDataService response contains an error.
-   * Returns error message if found, null otherwise.
+   *
+   * <p>Returns the IMP-5 envelope describing it, or {@code null} when the response is not a failure.
+   * Before ETP-4793 / IMP-17 this returned a bare {@code String} — core's own prose — which is how a
+   * callout rejection reached agents with no status and no code (evidence B13).</p>
+   *
+   * @param responseJson the raw DAL response
+   * @param seeAlso      the {@code docs} recipe for the calling verb; also tells the failure builder
+   *                     whether the caller submitted values, which decides 422 vs 500
+   * @return the error envelope, or {@code null} if the response reports no failure
+   * @throws JSONException if the envelope cannot be built
    */
-  private String checkJsonServiceError(JSONObject responseJson) throws JSONException {
+  private JSONObject checkJsonServiceError(JSONObject responseJson, String seeAlso)
+      throws JSONException {
     JSONObject innerResponse = responseJson.optJSONObject(JsonConstants.RESPONSE_RESPONSE);
     if (innerResponse == null) {
       return null;
@@ -1672,16 +1731,103 @@ public class McpToolRouter {
 
     int status = innerResponse.optInt(JsonConstants.RESPONSE_STATUS, 0);
     if (status == JsonConstants.RPCREQUEST_STATUS_FAILURE) {
-      if (innerResponse.has(JsonConstants.RESPONSE_ERROR)) {
-        return innerResponse.getJSONObject(JsonConstants.RESPONSE_ERROR)
-            .optString(McpConstants.KEY_MESSAGE, "Operation failed");
-      }
-      return "Operation failed";
+      String message = innerResponse.has(JsonConstants.RESPONSE_ERROR)
+          ? innerResponse.getJSONObject(JsonConstants.RESPONSE_ERROR)
+              .optString(McpConstants.KEY_MESSAGE, "Operation failed")
+          : "Operation failed";
+      return buildDalFailureEnvelope(message, seeAlso);
     }
     if (status == JsonConstants.RPCREQUEST_STATUS_VALIDATION_ERROR) {
-      return "Validation error: " + innerResponse.toString();
+      return buildDalValidationEnvelope(innerResponse, seeAlso);
     }
     return null;
+  }
+
+  /**
+   * The IMP-5 envelope for a DAL/callout rejection (ETP-4793 / IMP-17).
+   *
+   * <p>This is where evidence B13 escaped. A callout refusing a create returned its message as the
+   * whole response body — <i>"La fecha de operación no puede ser posterior a la fecha de la
+   * factura."</i> — with no {@code status}, no error code and no {@code field}, while the write verbs
+   * around it had carried a structured envelope since IMP-5. An agent could not tell that failure
+   * apart from a server fault except by reading Spanish prose.</p>
+   *
+   * <p>Two things this deliberately does not do. It does not translate: the message comes from
+   * {@code AD_Message} in the session user's language, so producing English would mean pinning the
+   * MCP session's locale — a separate change with its own blast radius (it would move process
+   * messages too), and not what IMP-17 registered. And it does not invent a {@code field}: a callout
+   * rejects a <em>combination</em> of values far more often than a single one, and a guessed field
+   * would point the agent at the wrong input, which is worse than no pointer at all.</p>
+   *
+   * <p>The status follows the failure, not the verb, with one exception: {@code seeAlso} tells us
+   * whether the caller submitted values at all. On a write, {@code status:-1} from core is a
+   * rejection of what was sent, so it is a 422 the agent can act on. On a read there is nothing to
+   * correct — the one actionable read failure, an unknown named filter, is answered upstream by
+   * IMP-3 — so inviting a retry-with-corrections would be a loop with no exit.</p>
+   */
+  private JSONObject buildDalFailureEnvelope(String rawMessage, String seeAlso)
+      throws JSONException {
+    String detail = NeoErrorSanitizer.stripRowDump(
+        NeoErrorSanitizer.redactObjectReferences(rawMessage));
+    boolean write = McpConstants.SEE_ALSO_WRITING.equals(seeAlso);
+    JSONObject envelope = new JSONObject();
+    if (NeoErrorSanitizer.isDuplicateKeyMessage(detail)) {
+      envelope.put(McpConstants.KEY_STATUS, McpConstants.STATUS_CONFLICT);
+      envelope.put(McpConstants.KEY_ERROR, McpConstants.ERROR_CONFLICT);
+      envelope.put(McpConstants.KEY_HINT, "A record with this business key already exists. Find it "
+          + "with neo_list and update it, or send a different key.");
+    } else if (write) {
+      envelope.put(McpConstants.KEY_STATUS, McpConstants.STATUS_UNPROCESSABLE);
+      envelope.put(McpConstants.KEY_ERROR, McpConstants.ERROR_VALIDATION);
+      envelope.put(McpConstants.KEY_HINT, "A business rule rejected the values sent. Read 'detail', "
+          + "correct the values it names and retry — the record was not written.");
+    } else {
+      envelope.put(McpConstants.KEY_STATUS, McpConstants.STATUS_SERVER_ERROR);
+      envelope.put(McpConstants.KEY_ERROR, McpConstants.ERROR_SERVER);
+      envelope.put(McpConstants.KEY_HINT, "The query itself failed; re-sending it unchanged will "
+          + "fail the same way.");
+    }
+    envelope.put(McpConstants.KEY_DETAIL, detail);
+    envelope.put(McpConstants.KEY_SEE_ALSO, seeAlso);
+    return envelope;
+  }
+
+  /**
+   * The IMP-5 envelope for core's per-field validation failure (ETP-4793 / IMP-17).
+   *
+   * <p>Replaces {@code "Validation error: " + innerResponse.toString()}, which shipped the raw DAL
+   * transport object — {@code status:-4} and all — into the agent's context. The per-field map is the
+   * only part that was ever actionable, so it is lifted into {@code fieldErrors} and the transport is
+   * dropped.</p>
+   */
+  private JSONObject buildDalValidationEnvelope(JSONObject innerResponse, String seeAlso)
+      throws JSONException {
+    JSONObject envelope = new JSONObject();
+    envelope.put(McpConstants.KEY_STATUS, McpConstants.STATUS_UNPROCESSABLE);
+    envelope.put(McpConstants.KEY_ERROR, McpConstants.ERROR_VALIDATION);
+    JSONObject rawErrors = innerResponse.optJSONObject("errors");
+    JSONObject fieldErrors = new JSONObject();
+    if (rawErrors != null) {
+      Iterator<String> keys = rawErrors.keys();
+      while (keys.hasNext()) {
+        String key = keys.next();
+        fieldErrors.put(key, NeoErrorSanitizer.stripRowDump(
+            NeoErrorSanitizer.redactObjectReferences(rawErrors.optString(key, ""))));
+      }
+    }
+    if (fieldErrors.length() > 0) {
+      envelope.put(McpConstants.KEY_DETAIL, "One or more values were rejected by field validation");
+      envelope.put("fieldErrors", fieldErrors);
+      envelope.put(McpConstants.KEY_HINT, "Each key in 'fieldErrors' is a field you sent; correct "
+          + "the value it describes and retry.");
+    } else {
+      envelope.put(McpConstants.KEY_DETAIL, "Field validation rejected the request, and named no "
+          + "field");
+      envelope.put(McpConstants.KEY_HINT, "Call neo_schema for this entity to check the type and "
+          + "allowed values of every field sent.");
+    }
+    envelope.put(McpConstants.KEY_SEE_ALSO, seeAlso);
+    return envelope;
   }
 
   // ── MCP content formatting ────────────────────────────────────────────

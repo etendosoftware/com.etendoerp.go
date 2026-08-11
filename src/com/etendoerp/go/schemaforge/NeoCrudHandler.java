@@ -249,6 +249,18 @@ class NeoCrudHandler {
       return buildMissingRequiredFieldsResponse(e);
     } catch (Exception e) {
       log.error("Error in default handler for {} {}", context.getHttpMethod(), context.getEntityName(), e);
+      // ETP-4793 / IMP-17: same reclassification as the RPC-failure branch in
+      // checkJsonServiceResponse, for the case where the violation is thrown rather than swallowed.
+      // The column is read off the raw chain because sanitize() maps any DB exception to a generic
+      // message, which is where the name would otherwise be lost.
+      if (NeoErrorSanitizer.isNotNullViolation(e)) {
+        String column = NeoErrorSanitizer.notNullViolationColumn(e);
+        String fieldName = resolvePropertyNameForColumn(column, context.getAdTab());
+        if (fieldName != null) {
+          return buildMissingRequiredFieldsResponse(
+              new MissingRequiredFieldsException(List.of(fieldName)));
+        }
+      }
       // A unique-constraint violation is a data conflict, not a server failure — the
       // client sent a value that already exists, which is a 409, never a 500. Reusing
       // this same classification is also what keeps the message worded consistently
@@ -291,6 +303,65 @@ class NeoCrudHandler {
       return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
           MissingRequiredFieldsException.ERROR_CODE);
     }
+  }
+
+  /**
+   * ETP-4793 / IMP-17: turn a Postgres not-null violation into the same structured
+   * {@code MISSING_REQUIRED_FIELDS} 400 a pre-flight validation failure produces.
+   *
+   * <p>What this replaces: omitting {@code partnerAddress} on a {@code sales-invoice} create used to
+   * answer <b>500</b> with the raw violation, whose {@code detail} dumped the entire failing row —
+   * ~90 columns of internals (IMP-23 §9.4). The status was wrong (the caller can fix this), the
+   * payload leaked, and it named no field.</p>
+   *
+   * <p>The field name is best-effort: the violation names a DB column
+   * ({@code c_bpartner_location_id}), so it is mapped back to the DAL property the caller actually
+   * sends ({@code partnerAddress}) through the tab's entity model. When the column cannot be mapped
+   * — or the server's locale hid it — the response still carries the corrected status and the
+   * stripped message, with an empty {@code fields} array rather than a guess.</p>
+   *
+   * @param translated the already-translated violation message
+   * @param adTab      the tab whose table the write targeted; may be {@code null}
+   * @return the structured 400 response
+   */
+  private NeoResponse buildNotNullViolationResponse(String translated, Tab adTab) {
+    String column = NeoErrorSanitizer.notNullViolationColumn(translated);
+    String fieldName = resolvePropertyNameForColumn(column, adTab);
+    List<String> fields = fieldName == null ? List.of() : List.of(fieldName);
+    log.warn("Not-null violation on column '{}' mapped to field '{}'", column, fieldName);
+    NeoResponse structured = buildMissingRequiredFieldsResponse(
+        new MissingRequiredFieldsException(fields));
+    if (fieldName != null) {
+      return structured;
+    }
+    // Nothing to highlight, so the stripped message is the only actionable content left. Returned
+    // instead of an empty `fields` list on its own, which would tell the caller nothing at all.
+    return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
+        NeoErrorSanitizer.stripRowDump(NeoErrorSanitizer.redactObjectReferences(translated)));
+  }
+
+  /**
+   * Maps a DB column name onto the DAL property name a NEO caller uses for it.
+   *
+   * @param column the DB column name; may be {@code null}
+   * @param adTab  the tab whose table owns the column; may be {@code null}
+   * @return the property name, or {@code null} when it cannot be resolved
+   */
+  private String resolvePropertyNameForColumn(String column, Tab adTab) {
+    if (StringUtils.isBlank(column) || adTab == null || adTab.getTable() == null) {
+      return null;
+    }
+    try {
+      Entity entity = ModelProvider.getInstance().getEntityByTableId(adTab.getTable().getId());
+      for (Property prop : entity.getProperties()) {
+        if (column.equalsIgnoreCase(prop.getColumnName())) {
+          return prop.getName();
+        }
+      }
+    } catch (Exception e) {
+      log.debug("Could not map column {} to a property", column, e);
+    }
+    return null;
   }
 
   /**
@@ -406,7 +477,7 @@ class NeoCrudHandler {
     }
 
     JSONObject responseJson = new JSONObject(result);
-    NeoResponse errorResponse = checkJsonServiceResponse(responseJson);
+    NeoResponse errorResponse = checkJsonServiceResponse(responseJson, adTab);
     if (errorResponse != null) {
       return errorResponse;
     }
@@ -444,7 +515,7 @@ class NeoCrudHandler {
    * Validates the response for error/validation-error status codes.
    * Returns an error NeoResponse if a failure is detected, or null if the response is OK.
    */
-  private NeoResponse checkJsonServiceResponse(JSONObject responseJson) throws Exception {
+  private NeoResponse checkJsonServiceResponse(JSONObject responseJson, Tab adTab) throws Exception {
     JSONObject innerResponse = responseJson.optJSONObject(JsonConstants.RESPONSE_RESPONSE);
     if (innerResponse == null) {
       return null;
@@ -456,6 +527,16 @@ class NeoCrudHandler {
               .optString("message", "Write operation failed")
           : "Write operation failed";
       String translated = OBMessageUtils.messageBD(errMsg);
+      // ETP-4793 / IMP-17: a not-null violation means the caller omitted a value the table
+      // requires — their request to fix, so it is a 400 naming the field, never a 500. It reaches
+      // here rather than the catch-all below because DefaultJsonDataService swallows the constraint
+      // violation and returns it as an ordinary RPC failure body. Reusing ETP-3894's
+      // MISSING_REQUIRED_FIELDS shape rather than inventing a second one keeps the React UI's
+      // field-highlighting working on this path too, and gives neo_batch a 4xx it can map onto
+      // IMP-24's `missingFields` envelope (IMP-23 §9.4).
+      if (NeoErrorSanitizer.isNotNullViolationMessage(translated)) {
+        return buildNotNullViolationResponse(translated, adTab);
+      }
       // DefaultJsonDataService catches a unique-constraint violation internally and
       // returns it as a normal RPC failure response (this branch), never as a thrown
       // exception — so NeoErrorSanitizer.isDuplicateKeyViolation(Throwable), which only
@@ -469,7 +550,11 @@ class NeoCrudHandler {
       // Defence-in-depth: a DAL/validator failure message can carry a raw object toString
       // (e.g. a List-reference "one of the following values: pkg.Class@hex ..."). Strip it
       // before it reaches the client — the leak itself is built upstream in core (ETP-4668).
-      return NeoResponse.error(httpStatus, NeoErrorSanitizer.redactObjectReferences(translated));
+      // stripRowDump for the same defence-in-depth reason: any DAL failure message may carry a
+      // Postgres `Failing row contains (…)` detail, which is both an internals leak and, for an MCP
+      // agent that has to read it, a real context cost (ETP-4793 / IMP-17).
+      return NeoResponse.error(httpStatus,
+          NeoErrorSanitizer.stripRowDump(NeoErrorSanitizer.redactObjectReferences(translated)));
     }
     if (status == JsonConstants.RPCREQUEST_STATUS_VALIDATION_ERROR) {
       return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, responseJson);

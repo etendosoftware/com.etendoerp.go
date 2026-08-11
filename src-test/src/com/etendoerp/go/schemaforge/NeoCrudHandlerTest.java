@@ -1134,8 +1134,28 @@ class NeoCrudHandlerTest {
   class CheckJsonServiceResponse {
 
     private NeoResponse invokeCheckResponse(JSONObject responseJson) throws Exception {
+      return invokeCheckResponse(responseJson, null);
+    }
+
+    /**
+     * ETP-4793 / IMP-17: the method now also receives the tab, because a not-null violation has to be
+     * mapped from a DB column back to the property name the caller sends. Passing {@code null} keeps
+     * the pre-existing cases exactly as they were — none of them reach the mapping.
+     */
+    private NeoResponse invokeCheckResponse(JSONObject responseJson, Tab adTab) throws Exception {
       return (NeoResponse) invokePrivate(handler, "checkJsonServiceResponse",
-          new Class<?>[] { JSONObject.class }, responseJson);
+          new Class<?>[] { JSONObject.class, Tab.class }, responseJson, adTab);
+    }
+
+    private JSONObject failureWithMessage(String rawMessage) throws Exception {
+      JSONObject error = new JSONObject();
+      error.put("message", rawMessage);
+      JSONObject inner = new JSONObject();
+      inner.put("status", -1);
+      inner.put("error", error);
+      JSONObject json = new JSONObject();
+      json.put("response", inner);
+      return json;
     }
 
     @Test
@@ -1275,6 +1295,98 @@ class NeoCrudHandlerTest {
       json.put("response", inner);
 
       assertNull(invokeCheckResponse(json));
+    }
+
+    /**
+     * ETP-4793 / IMP-17 (absorbing IMP-23 §9.4): the not-null violation is the caller's mistake, so it
+     * must arrive as the same {@code MISSING_REQUIRED_FIELDS} 400 a pre-flight failure produces —
+     * naming the property the caller sends, not the DB column the constraint names.
+     */
+    @Test
+    @DisplayName("Reclassifies a not-null violation as MISSING_REQUIRED_FIELDS 400 naming the property")
+    void reclassifiesNotNullViolationAsMissingRequiredFields() throws Exception {
+      JSONObject json = failureWithMessage("@GenericDatabaseError@");
+      String violation = "ERROR: null value in column \"c_bpartner_location_id\" of relation "
+          + "\"c_invoice\" violates not-null constraint";
+
+      Table table = mock(Table.class);
+      when(table.getId()).thenReturn("318");
+      Tab adTab = mock(Tab.class);
+      when(adTab.getTable()).thenReturn(table);
+
+      try (MockedStatic<org.openbravo.erpCommon.utility.OBMessageUtils> msgMock =
+               Mockito.mockStatic(org.openbravo.erpCommon.utility.OBMessageUtils.class);
+           MockedStatic<ModelProvider> mpMock = Mockito.mockStatic(ModelProvider.class)) {
+        msgMock.when(() -> org.openbravo.erpCommon.utility.OBMessageUtils.messageBD(
+            org.mockito.ArgumentMatchers.anyString())).thenReturn(violation);
+        ModelProvider mp = mock(ModelProvider.class);
+        mpMock.when(ModelProvider::getInstance).thenReturn(mp);
+        Entity entity = mock(Entity.class);
+        when(mp.getEntityByTableId("318")).thenReturn(entity);
+        Property prop = mock(Property.class);
+        when(prop.getColumnName()).thenReturn("C_BPartner_Location_ID");
+        when(prop.getName()).thenReturn("partnerAddress");
+        when(entity.getProperties()).thenReturn(List.of(prop));
+
+        NeoResponse result = invokeCheckResponse(json, adTab);
+
+        assertNotNull(result);
+        assertEquals(HttpServletResponse.SC_BAD_REQUEST, result.getHttpStatus());
+        JSONObject error = result.getBody().getJSONObject("error");
+        assertEquals(MissingRequiredFieldsException.ERROR_CODE, error.getString("code"));
+        assertEquals("partnerAddress", error.getJSONArray("fields").getString(0));
+      }
+    }
+
+    /**
+     * ETP-4793 / IMP-17: when the column cannot be mapped to a property the status is still corrected
+     * to 400, but the response must not fall back to an empty {@code fields} array alone — and the
+     * Postgres row dump (~90 columns of internals, both a leak and an ACE cost) must be stripped.
+     */
+    @Test
+    @DisplayName("Corrects the status and strips the row dump when the column maps to no property")
+    void stripsRowDumpWhenColumnUnmappable() throws Exception {
+      JSONObject json = failureWithMessage("@GenericDatabaseError@");
+      String violation = "ERROR: null value in column \"c_bpartner_location_id\" violates "
+          + "not-null constraint  Detail: Failing row contains ("
+          + "A".repeat(300) + ").";
+
+      try (MockedStatic<org.openbravo.erpCommon.utility.OBMessageUtils> msgMock =
+          Mockito.mockStatic(org.openbravo.erpCommon.utility.OBMessageUtils.class)) {
+        msgMock.when(() -> org.openbravo.erpCommon.utility.OBMessageUtils.messageBD(
+            org.mockito.ArgumentMatchers.anyString())).thenReturn(violation);
+
+        NeoResponse result = invokeCheckResponse(json, null);
+
+        assertNotNull(result);
+        assertEquals(HttpServletResponse.SC_BAD_REQUEST, result.getHttpStatus());
+        String body = result.getBody().toString();
+        assertFalse(body.contains("AAAA"), "the failing-row dump must not reach the caller");
+      }
+    }
+
+    /**
+     * ETP-4793 / IMP-17: a failure that stays a 500 must still lose the row dump. The status is
+     * unchanged from the pre-existing behaviour; only the payload shrinks.
+     */
+    @Test
+    @DisplayName("Strips the row dump from a failure that remains a 500")
+    void stripsRowDumpOnServerError() throws Exception {
+      JSONObject json = failureWithMessage("@GenericDatabaseError@");
+      String dump = "Database error  Detail: Failing row contains (" + "B".repeat(300) + ").";
+
+      try (MockedStatic<org.openbravo.erpCommon.utility.OBMessageUtils> msgMock =
+          Mockito.mockStatic(org.openbravo.erpCommon.utility.OBMessageUtils.class)) {
+        msgMock.when(() -> org.openbravo.erpCommon.utility.OBMessageUtils.messageBD(
+            org.mockito.ArgumentMatchers.anyString())).thenReturn(dump);
+
+        NeoResponse result = invokeCheckResponse(json, null);
+
+        assertNotNull(result);
+        assertEquals(HttpServletResponse.SC_INTERNAL_SERVER_ERROR, result.getHttpStatus());
+        assertFalse(result.getBody().toString().contains("BBBB"),
+            "the failing-row dump must not reach the caller");
+      }
     }
   }
 
