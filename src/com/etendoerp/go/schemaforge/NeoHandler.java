@@ -17,6 +17,11 @@
 
 package com.etendoerp.go.schemaforge;
 
+import java.util.List;
+import java.util.Optional;
+
+import com.etendoerp.go.schemaforge.util.NeoReportParam;
+
 /**
  * Interface for NEO Headless hook handlers.
  * Implementations are discovered via CDI using the Java_Qualifier
@@ -96,5 +101,53 @@ public interface NeoHandler {
    */
   default boolean servesActions() {
     return false;
+  }
+
+  /**
+   * Declares the input parameters this handler accepts when generating a report, i.e. the body
+   * keys it actually reads.
+   *
+   * <p><b>Why this exists (ETP-4793 / IMP-19).</b> Report parameters are not AD columns —
+   * {@code dateFrom}, {@code recOrPay} and {@code column1} exist only inside the handler's own
+   * SQL — and every active report spec carries zero {@code ETGO_SF_FIELD} rows, so the tool
+   * schema built from configuration degenerated to an untyped {@code parameters:{type:"object"}}
+   * for all eight {@code generate_*} tools. An agent could see that a report took "parameters"
+   * and nothing about which, of what type, or which were mandatory; the only feedback was the
+   * handler's own 400. As with {@link #servesActions()}, the configuration cannot carry this, so
+   * the handler is the only authority.</p>
+   *
+   * <p><b>It is also the callability signal.</b> {@code Optional.empty()} — the default — means
+   * "I am not a report generator", and
+   * {@code NeoReportCallability#isReportCallable(SFSpec)} then hides the spec's
+   * {@code generate_*} tool. This closes a second half of the same defect: a spec was treated as
+   * callable merely because <i>some</i> entity carried a {@code Java_Qualifier}, so five of the
+   * eight published report tools were UI handlers that dispatch on an {@code action} query
+   * param and could only ever answer 405 or 400 to the report route. Returning an <b>empty
+   * list</b> is different and meaningful: it declares a real report that takes no inputs.</p>
+   *
+   * <p>Declare only parameters the handler demonstrably reads. A declared-but-ignored parameter
+   * is the same silent lie as an undeclared-but-required one, with the failure moved to the
+   * caller's side.</p>
+   *
+   * @return the declared parameters, or {@code Optional.empty()} when this handler does not
+   *         generate reports
+   */
+  default Optional<List<NeoReportParam>> reportParameters() {
+    return Optional.empty();
+  }
+
+  /**
+   * Declares the output formats this handler actually serves, lowercase.
+   *
+   * <p>Defaults to JSON alone, which is what every NEO-native report handler returns today. The
+   * tool schema previously advertised {@code "pdf, xlsx, csv (default: pdf)"} while the router
+   * never read the {@code format} argument at all — so a request for a PDF was answered with
+   * JSON and no indication that the format had been ignored. Override this only when the
+   * handler genuinely branches on the format.</p>
+   *
+   * @return the supported format names; never empty
+   */
+  default List<String> reportFormats() {
+    return List.of(NeoReportParam.FORMAT_JSON);
   }
 }

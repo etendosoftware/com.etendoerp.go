@@ -36,6 +36,8 @@ import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFField;
 import com.etendoerp.go.schemaforge.data.SFSpec;
 import com.etendoerp.go.schemaforge.util.NeoReportCallability;
+import com.etendoerp.go.schemaforge.util.NeoReportContract;
+import com.etendoerp.go.schemaforge.util.NeoReportParam;
 
 /**
  * Generates MCP tool definitions dynamically based on ETGO_SF_SPEC configuration
@@ -131,12 +133,14 @@ public class ToolRegistry {
         tools.add(buildProcessTool(spec.getName(), spec));
         return;
       }
-      // A generate_ tool is emitted only for NEO-native callable report specs backed by a
-      // Java qualifier handler. Non-callable report specs get no tool and surface as
-      // not configured via neo discover.
-      if ("R".equals(specType) && permissions.canReport
-          && NeoReportCallability.isReportCallable(spec)) {
-        tools.add(buildReportTool(spec.getName(), spec));
+      // A generate_ tool is emitted only for a report spec whose NEO-native handler declares a
+      // report contract. Anything else — no handler, or a handler that serves the entity for
+      // some other purpose — gets no tool and surfaces as not configured via neo discover.
+      // The contract is resolved once here and carried into the schema so the tool an agent
+      // reads and the parameters the router enforces cannot diverge (ETP-4793 / IMP-19).
+      if ("R".equals(specType) && permissions.canReport) {
+        NeoReportCallability.resolveReportContract(spec)
+            .ifPresent(contract -> tools.add(buildReportTool(spec.getName(), spec, contract)));
       }
     } catch (Exception e) {
       log.warn("Error generating tools for spec '{}': {}", spec.getName(), e.getMessage());
@@ -768,20 +772,82 @@ public class ToolRegistry {
 
   // ── Report tool ────────────────────────────────────────────────────────
 
-  private McpToolDefinition buildReportTool(String specName, SFSpec spec) {
+  /**
+   * Build the {@code generate_*} tool schema from the handler's declared contract
+   * (ETP-4793 / IMP-19).
+   *
+   * <p>The parameters used to come from {@code buildProcessParamSchema}, which emits a property
+   * only for a field backed by an {@code AD_Column}. Every active report spec has zero
+   * {@code ETGO_SF_FIELD} rows — report inputs are not AD columns — so that produced an empty map
+   * and, because {@code objectPropWithProperties} omits the key when the map is empty, a bare
+   * {@code parameters:{type:"object"}} with no properties and no {@code required} list. An agent
+   * had to guess {@code dateFrom} and its date shape, then learn from a 400 that it had guessed
+   * wrong. The handler declares the truth, so the schema is built from that instead.</p>
+   */
+  private McpToolDefinition buildReportTool(String specName, SFSpec spec,
+      NeoReportContract contract) {
     String toolName = McpConstants.GENERATE_PREFIX + kebabToSnake(specName);
     String desc = String.format("Generate the '%s' report", specName);
     if (spec.getDescription() != null) {
       desc += ". " + spec.getDescription();
     }
 
-    Map<String, Object> paramProps = buildProcessParamSchema(spec);
+    Map<String, Object> paramProps = new LinkedHashMap<>();
+    for (NeoReportParam param : contract.getParameters()) {
+      paramProps.put(param.getName(), reportParamProp(param));
+    }
+
+    Map<String, Object> parametersProp = objectPropWithProperties("Report input parameters",
+        paramProps);
+    // An empty `properties` map is itself a statement — "this report takes no inputs" — where an
+    // absent one reads as "any object", which is the very ambiguity IMP-19 removes. The shared
+    // helper omits it when empty (right for process specs, whose parameters come from the
+    // AD_Process definition), so pin it explicitly here.
+    parametersProp.putIfAbsent(McpConstants.KEY_PROPERTIES, paramProps);
+    List<String> requiredParams = contract.getRequiredParameterNames();
+    if (!requiredParams.isEmpty()) {
+      parametersProp.put("required", requiredParams);
+    }
 
     Map<String, Object> props = new LinkedHashMap<>();
-    props.put(McpConstants.PARAM_PARAMETERS, objectPropWithProperties("Report input parameters", paramProps));
-    props.put("format", stringProp("Output format: pdf, xlsx, csv (default: pdf)", false));
+    props.put(McpConstants.PARAM_PARAMETERS, parametersProp);
+    // Only the formats the handler actually serves. The previous schema advertised
+    // "pdf, xlsx, csv (default: pdf)" while the router never read the argument, so a request
+    // for a PDF was answered with JSON and nothing said the format had been ignored.
+    props.put(McpConstants.PARAM_FORMAT, enumProp(
+        "Output format (default: " + contract.getDefaultFormat() + ")", contract.getFormats()));
 
     return new McpToolDefinition(toolName, desc, buildObjectSchema(props, List.of()));
+  }
+
+  /**
+   * Render one declared report parameter as a JSON-schema property.
+   *
+   * <p>{@code date} is carried as a string with the expected shape stated in the description:
+   * JSON Schema's own {@code format:"date"} is an annotation most MCP clients do not enforce, and
+   * IMP-16 traced silent corruption to date values whose shape was never written down where an
+   * agent could read it.</p>
+   */
+  private Map<String, Object> reportParamProp(NeoReportParam param) {
+    String description = param.getDescription();
+    if (!param.getAllowedValues().isEmpty()) {
+      return enumProp(description, param.getAllowedValues());
+    }
+    if (NeoReportParam.TYPE_DATE.equals(param.getType())) {
+      Map<String, Object> prop = stringProp(description + " Format: yyyy-MM-dd.");
+      prop.put("format", "date");
+      return prop;
+    }
+    if (NeoReportParam.TYPE_INTEGER.equals(param.getType())) {
+      return intProp(description);
+    }
+    if (NeoReportParam.TYPE_BOOLEAN.equals(param.getType())) {
+      Map<String, Object> prop = new LinkedHashMap<>();
+      prop.put("type", "boolean");
+      prop.put(McpConstants.KEY_DESCRIPTION, description);
+      return prop;
+    }
+    return stringProp(description);
   }
 
   // ── Process/report parameter introspection ─────────────────────────────
@@ -839,16 +905,6 @@ public class ToolRegistry {
     Map<String, Object> prop = new LinkedHashMap<>();
     prop.put("type", McpConstants.TYPE_STRING);
     prop.put(McpConstants.KEY_DESCRIPTION, description);
-    return prop;
-  }
-
-  private Map<String, Object> stringProp(String description, boolean required) {
-    Map<String, Object> prop = new LinkedHashMap<>();
-    prop.put("type", McpConstants.TYPE_STRING);
-    prop.put(McpConstants.KEY_DESCRIPTION, description);
-    if (!required) {
-      prop.put("optional", true);
-    }
     return prop;
   }
 

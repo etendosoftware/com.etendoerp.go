@@ -31,6 +31,7 @@ import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.stream.Collectors;
 
@@ -55,7 +56,12 @@ import org.openbravo.model.ad.ui.Window;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFField;
 import com.etendoerp.go.schemaforge.data.SFSpec;
+import com.etendoerp.go.schemaforge.NeoContext;
+import com.etendoerp.go.schemaforge.NeoHandler;
+import com.etendoerp.go.schemaforge.NeoResponse;
 import com.etendoerp.go.schemaforge.util.NeoReportCallability;
+import com.etendoerp.go.schemaforge.util.NeoReportContract;
+import com.etendoerp.go.schemaforge.util.NeoReportParam;
 
 /**
  * Unit tests for {@link ToolRegistry} — covers generateTools, processSpec,
@@ -167,6 +173,39 @@ class ToolRegistryGenerateToolsTest {
 
   // ── generateTools: scope resolution ─────────────────────────────────────
 
+  // ── report contract fixtures (ETP-4793 / IMP-19) ──────────────────────
+  //
+  // A report tool is now emitted only for a handler that DECLARES a report contract, and its
+  // `parameters` schema is built from that declaration. These are resolved through the real
+  // NeoReportCallability.contractOf at class-init time, i.e. before any test installs a static
+  // mock over that class.
+
+  /** A real report that takes no inputs (the inventory-stock case). */
+  private static final Optional<NeoReportContract> NO_INPUT_CONTRACT = declaredContract(List.of());
+
+  /** A report with two mandatory dates, a closed set, and optional filters (the aging case). */
+  private static final Optional<NeoReportContract> RICH_CONTRACT = declaredContract(List.of(
+      NeoReportParam.required("dateFrom", NeoReportParam.TYPE_DATE, "Start date."),
+      NeoReportParam.required("dateTo", NeoReportParam.TYPE_DATE, "End date."),
+      NeoReportParam.options("recOrPay", "Which side.", List.of("RECEIVABLES", "PAYABLES")),
+      NeoReportParam.optional("daysStep", NeoReportParam.TYPE_INTEGER, "Bucket width."),
+      NeoReportParam.optional("showDetails", NeoReportParam.TYPE_BOOLEAN, "Per-document rows.")));
+
+  private static Optional<NeoReportContract> declaredContract(List<NeoReportParam> params) {
+    NeoHandler handler = new NeoHandler() {
+      @Override
+      public NeoResponse handle(NeoContext context) {
+        return null;
+      }
+
+      @Override
+      public Optional<List<NeoReportParam>> reportParameters() {
+        return Optional.of(params);
+      }
+    };
+    return NeoReportCallability.contractOf(handler, "testReportHandler");
+  }
+
   @Nested
   @DisplayName("generateTools — scope permission resolution")
   class ScopePermissionTests {
@@ -218,8 +257,8 @@ class ToolRegistryGenerateToolsTest {
       // report spec.
       try (MockedStatic<NeoReportCallability> callabilityMock =
           mockStatic(NeoReportCallability.class)) {
-        callabilityMock.when(() -> NeoReportCallability.isReportCallable(reportSpec))
-            .thenReturn(true);
+        callabilityMock.when(() -> NeoReportCallability.resolveReportContract(reportSpec))
+            .thenReturn(NO_INPUT_CONTRACT);
 
         List<McpToolDefinition> tools = registry.generateTools(scopesOf("neo:*"));
         List<String> names = toolNames(tools);
@@ -561,7 +600,8 @@ class ToolRegistryGenerateToolsTest {
     void callableReportSpecGeneratesTool() {
       SFSpec spec = createReportSpec(SPEC_PRINT_INVOICE);
       when(spec.getProcess()).thenReturn(null);
-      callabilityMock.when(() -> NeoReportCallability.isReportCallable(spec)).thenReturn(true);
+      callabilityMock.when(() -> NeoReportCallability.resolveReportContract(spec))
+          .thenReturn(NO_INPUT_CONTRACT);
       mockEmptyEntities();
       mockSpecCriteria(List.of(spec));
 
@@ -580,7 +620,8 @@ class ToolRegistryGenerateToolsTest {
     void nonCallableReportSpecEmitsNoTool() {
       SFSpec spec = createReportSpec(SPEC_PRINT_INVOICE);
       when(spec.getProcess()).thenReturn(null);
-      callabilityMock.when(() -> NeoReportCallability.isReportCallable(spec)).thenReturn(false);
+      callabilityMock.when(() -> NeoReportCallability.resolveReportContract(spec))
+          .thenReturn(Optional.empty());
       mockSpecCriteria(List.of(spec));
 
       List<McpToolDefinition> tools = registry.generateTools(scopesOf("neo:report"));
@@ -593,7 +634,8 @@ class ToolRegistryGenerateToolsTest {
     @DisplayName("callable report spec without neo:report scope is excluded")
     void reportSpecWithoutReportScope() {
       SFSpec spec = createReportSpec(SPEC_PRINT_INVOICE);
-      callabilityMock.when(() -> NeoReportCallability.isReportCallable(spec)).thenReturn(true);
+      callabilityMock.when(() -> NeoReportCallability.resolveReportContract(spec))
+          .thenReturn(NO_INPUT_CONTRACT);
       mockSpecCriteria(List.of(spec));
 
       List<McpToolDefinition> tools = registry.generateTools(scopesOf("neo:read"));
@@ -607,7 +649,8 @@ class ToolRegistryGenerateToolsTest {
     void reportToolIncludesFormatParam() {
       SFSpec spec = createReportSpec(SPEC_PRINT_INVOICE);
       when(spec.getProcess()).thenReturn(null);
-      callabilityMock.when(() -> NeoReportCallability.isReportCallable(spec)).thenReturn(true);
+      callabilityMock.when(() -> NeoReportCallability.resolveReportContract(spec))
+          .thenReturn(NO_INPUT_CONTRACT);
       mockEmptyEntities();
       mockSpecCriteria(List.of(spec));
 
@@ -622,13 +665,115 @@ class ToolRegistryGenerateToolsTest {
       assertTrue(props.containsKey("format"));
     }
 
+    /**
+     * The defect IMP-19 records: `parameters` was published as a bare
+     * {@code {"type":"object"}} for all eight report tools, because the schema was built from
+     * {@code ETGO_SF_FIELD} rows and every report spec has none — report inputs like
+     * {@code dateFrom} are not AD columns of any table, so no amount of configuration could
+     * have filled them in. The handler's declaration is the only place they exist.
+     */
+    @Test
+    @DisplayName("report tool publishes the declared parameters, typed and named")
+    @SuppressWarnings("unchecked")
+    void reportToolPublishesDeclaredParameters() {
+      SFSpec spec = createReportSpec(SPEC_PRINT_INVOICE);
+      when(spec.getProcess()).thenReturn(null);
+      callabilityMock.when(() -> NeoReportCallability.resolveReportContract(spec))
+          .thenReturn(RICH_CONTRACT);
+      mockEmptyEntities();
+      mockSpecCriteria(List.of(spec));
+
+      Map<String, Object> parameters = reportParametersSchema(
+          registry.generateTools(scopesOf("neo:report")));
+      Map<String, Object> props = (Map<String, Object>) parameters.get("properties");
+
+      assertEquals(Set.of("dateFrom", "dateTo", "recOrPay", "daysStep", "showDetails"),
+          props.keySet());
+      // Only the two the handler cannot run without.
+      assertEquals(List.of("dateFrom", "dateTo"), parameters.get("required"));
+
+      // A date is not a string: IMP-16 recorded silent date corruption from that conflation,
+      // so the expected pattern is spelled out in the description too.
+      Map<String, Object> dateFrom = (Map<String, Object>) props.get("dateFrom");
+      assertEquals("string", dateFrom.get("type"));
+      assertEquals("date", dateFrom.get("format"));
+      assertTrue(((String) dateFrom.get("description")).contains("yyyy-MM-dd"));
+
+      // A closed set is published as an enum, so an agent cannot guess "receivable".
+      Map<String, Object> recOrPay = (Map<String, Object>) props.get("recOrPay");
+      assertEquals(List.of("RECEIVABLES", "PAYABLES"), recOrPay.get("enum"));
+
+      assertEquals("integer", ((Map<String, Object>) props.get("daysStep")).get("type"));
+      assertEquals("boolean", ((Map<String, Object>) props.get("showDetails")).get("type"));
+    }
+
+    @Test
+    @DisplayName("a report with no inputs publishes no properties and no required list")
+    @SuppressWarnings("unchecked")
+    void reportToolWithoutParametersPublishesEmptySchema() {
+      SFSpec spec = createReportSpec(SPEC_PRINT_INVOICE);
+      when(spec.getProcess()).thenReturn(null);
+      callabilityMock.when(() -> NeoReportCallability.resolveReportContract(spec))
+          .thenReturn(NO_INPUT_CONTRACT);
+      mockEmptyEntities();
+      mockSpecCriteria(List.of(spec));
+
+      Map<String, Object> parameters = reportParametersSchema(
+          registry.generateTools(scopesOf("neo:report")));
+
+      assertTrue(((Map<String, Object>) parameters.get("properties")).isEmpty());
+      assertFalse(parameters.containsKey("required"),
+          "nothing is required, so nothing should be listed");
+    }
+
+    /**
+     * {@code format} used to be advertised as "pdf, xlsx, csv (default: pdf)" and never read —
+     * a request for a PDF was answered with JSON. It is now an enum of what is actually served.
+     */
+    @Test
+    @DisplayName("format is an enum of the formats the handler actually serves")
+    @SuppressWarnings("unchecked")
+    void formatEnumMatchesWhatIsServed() {
+      SFSpec spec = createReportSpec(SPEC_PRINT_INVOICE);
+      when(spec.getProcess()).thenReturn(null);
+      callabilityMock.when(() -> NeoReportCallability.resolveReportContract(spec))
+          .thenReturn(NO_INPUT_CONTRACT);
+      mockEmptyEntities();
+      mockSpecCriteria(List.of(spec));
+
+      List<McpToolDefinition> tools = registry.generateTools(scopesOf("neo:report"));
+      Map<String, Object> props = (Map<String, Object>) reportTool(tools)
+          .getInputSchema().get("properties");
+      Map<String, Object> format = (Map<String, Object>) props.get("format");
+
+      assertEquals(List.of("json"), format.get("enum"));
+      assertTrue(((String) format.get("description")).contains("json"));
+    }
+
+    private McpToolDefinition reportTool(List<McpToolDefinition> tools) {
+      McpToolDefinition tool = tools.stream()
+          .filter(t -> t.getName().startsWith("generate_"))
+          .findFirst()
+          .orElse(null);
+      assertNotNull(tool);
+      return tool;
+    }
+
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> reportParametersSchema(List<McpToolDefinition> tools) {
+      Map<String, Object> props = (Map<String, Object>) reportTool(tools)
+          .getInputSchema().get("properties");
+      return (Map<String, Object>) props.get("parameters");
+    }
+
     @Test
     @DisplayName("report tool description includes spec description when available")
     void reportToolIncludesDescription() {
       SFSpec spec = createReportSpec(SPEC_PRINT_INVOICE);
       when(spec.getProcess()).thenReturn(null);
       when(spec.getDescription()).thenReturn("Generates a PDF invoice");
-      callabilityMock.when(() -> NeoReportCallability.isReportCallable(spec)).thenReturn(true);
+      callabilityMock.when(() -> NeoReportCallability.resolveReportContract(spec))
+          .thenReturn(NO_INPUT_CONTRACT);
       mockEmptyEntities();
       mockSpecCriteria(List.of(spec));
 
@@ -669,8 +814,8 @@ class ToolRegistryGenerateToolsTest {
       // report spec.
       try (MockedStatic<NeoReportCallability> callabilityMock =
           mockStatic(NeoReportCallability.class)) {
-        callabilityMock.when(() -> NeoReportCallability.isReportCallable(reportSpec))
-            .thenReturn(true);
+        callabilityMock.when(() -> NeoReportCallability.resolveReportContract(reportSpec))
+            .thenReturn(NO_INPUT_CONTRACT);
 
         List<McpToolDefinition> tools = registry.generateTools(
             scopesOf("neo:read", "neo:write", "neo:process", "neo:report"));

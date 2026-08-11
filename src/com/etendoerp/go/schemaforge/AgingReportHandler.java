@@ -24,6 +24,7 @@ import java.util.Date;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 
 import javax.inject.Named;
@@ -46,6 +47,7 @@ import org.openbravo.model.financialmgmt.accounting.coa.AcctSchema;
 import org.openbravo.service.db.DalConnectionProvider;
 
 import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
+import com.etendoerp.go.schemaforge.util.NeoReportParam;
 
 /**
  * NeoHandler that wraps the existing AgingDao to return aging schedule data as JSON.
@@ -55,12 +57,9 @@ import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
  *   GET  /sws/neo/aging-report           → describe parameters
  *   POST /sws/neo/aging-report           → execute and return JSON rows
  *
- * POST body parameters:
- *   recOrPay:    "RECEIVABLES" or "PAYABLES" (required)
- *   currentDate: "yyyy-MM-dd" (optional, defaults to today)
- *   column1-4:   aging bucket boundaries in days (optional, defaults: 30,60,90,120)
- *   bPartnerId:  filter by business partner UUID (optional)
- *   orgId:       filter by organization UUID (optional, defaults to session org)
+ * The POST body parameters are declared once in {@link #reportParameters()} and rendered from
+ * there by the GET descriptor and by the MCP {@code generate_*} tool schema. This comment used to
+ * list them a third time and had drifted from all of them.
  */
 @Named("agingReportHandler")
 public class AgingReportHandler implements NeoHandler {
@@ -73,8 +72,6 @@ public class AgingReportHandler implements NeoHandler {
   private static final String DEFAULT_COL4       = "120";
   private static final String BUCKET_SENTINEL    = "99999";
   private static final String DATE_FORMAT        = "yyyy-MM-dd";
-  private static final String TYPE_STRING        = "string";
-  private static final String TYPE_INTEGER       = "integer";
   private static final String PARAM_REC_OR_PAY   = "recOrPay";
   private static final String PARAM_CURRENT_DATE = "currentDate";
   private static final String PARAM_COLUMN1      = "column1";
@@ -84,6 +81,7 @@ public class AgingReportHandler implements NeoHandler {
   private static final String PARAM_BP_ID        = "bPartnerId";
   private static final String PARAM_ORG_ID       = "orgId";
   private static final String PARAM_SHOW_DETAILS = "showDetails";
+  private static final String PARAM_GL_ID        = "glId";
 
   /**
    * OBUIAPP process id for the classic "Aging Balance Process Definition for Receivables"
@@ -151,6 +149,48 @@ public class AgingReportHandler implements NeoHandler {
   // NeoHandler entry point
   // -------------------------------------------------------------------------
 
+  /**
+   * The report's input contract (ETP-4793 / IMP-19).
+   *
+   * <p>This handler already published a parameter list over GET, and that list had drifted from
+   * the code: it omitted {@code glId} and {@code showDetails}, both of which
+   * {@link #executeReport} reads, and it marked {@code recOrPay} required when the code defaults
+   * it to {@code RECEIVABLES}. Two hand-maintained descriptions of one contract is how that
+   * happens, so {@link #describeReport} now renders this list instead of repeating it.</p>
+   *
+   * <p>{@code recOrPay} is declared optional-with-a-default because that is what the code does.
+   * It is worth noting that the default is not neutral — omitting it yields the receivables
+   * report, not an error — which is exactly why it is declared as a closed set: a near-miss like
+   * {@code "receivable"} would otherwise fall through to the same silent default.</p>
+   */
+  @Override
+  public Optional<List<NeoReportParam>> reportParameters() {
+    return Optional.of(List.of(
+        NeoReportParam.options(PARAM_REC_OR_PAY,
+            "Which side to age: RECEIVABLES or PAYABLES (default: RECEIVABLES).",
+            List.of("RECEIVABLES", "PAYABLES")),
+        NeoReportParam.optional(PARAM_CURRENT_DATE, NeoReportParam.TYPE_DATE,
+            "As-of date the buckets are measured from. Default: today."),
+        NeoReportParam.optional(PARAM_COLUMN1, NeoReportParam.TYPE_INTEGER,
+            "First aging bucket boundary, in days. Default: 30."),
+        NeoReportParam.optional(PARAM_COLUMN2, NeoReportParam.TYPE_INTEGER,
+            "Second aging bucket boundary, in days. Default: 60."),
+        NeoReportParam.optional(PARAM_COLUMN3, NeoReportParam.TYPE_INTEGER,
+            "Third aging bucket boundary, in days. Default: 90."),
+        NeoReportParam.optional(PARAM_COLUMN4, NeoReportParam.TYPE_INTEGER,
+            "Fourth aging bucket boundary, in days. Default: 120."),
+        NeoReportParam.optional(PARAM_BP_ID, NeoReportParam.TYPE_STRING,
+            "Restrict to these business partners: one C_BPartner id, or several separated by "
+                + "commas. Default: every partner."),
+        NeoReportParam.optional(PARAM_ORG_ID, NeoReportParam.TYPE_STRING,
+            "Organization id whose tree is reported. Default: the session's organization."),
+        NeoReportParam.optional(PARAM_GL_ID, NeoReportParam.TYPE_STRING,
+            "Accounting schema (C_AcctSchema) id whose currency the amounts are shown in. "
+                + "Default: the organization's first accounting schema."),
+        NeoReportParam.optional(PARAM_SHOW_DETAILS, NeoReportParam.TYPE_BOOLEAN,
+            "Include the per-document detail rows under each partner (default: false).")));
+  }
+
   @Override
   public NeoResponse handle(NeoContext context) {
     if (!NeoAccessHelper.hasObuiappProcessAccess(AGING_RECEIVABLE_PROCESS_ID)) {
@@ -176,15 +216,12 @@ public class AgingReportHandler implements NeoHandler {
       desc.put("name", "Aging Report");
       desc.put("description", "Aging schedule for receivables or payables, grouped by business partner");
 
+      // Rendered from reportParameters(), the single declaration of this report's contract.
+      // Hand-maintaining a second copy here is what let glId and showDetails go undocumented.
       JSONArray params = new JSONArray();
-      params.put(param(PARAM_REC_OR_PAY,   TYPE_STRING,  true,  "RECEIVABLES or PAYABLES"));
-      params.put(param(PARAM_CURRENT_DATE, "date",       false, "As-of date (yyyy-MM-dd). Defaults to today."));
-      params.put(param(PARAM_COLUMN1,      TYPE_INTEGER, false, "First aging bucket boundary in days. Default: 30"));
-      params.put(param(PARAM_COLUMN2,      TYPE_INTEGER, false, "Second aging bucket boundary. Default: 60"));
-      params.put(param(PARAM_COLUMN3,      TYPE_INTEGER, false, "Third aging bucket boundary. Default: 90"));
-      params.put(param(PARAM_COLUMN4,      TYPE_INTEGER, false, "Fourth aging bucket boundary. Default: 120"));
-      params.put(param(PARAM_BP_ID,        TYPE_STRING,  false, "Filter by business partner UUID"));
-      params.put(param(PARAM_ORG_ID,       TYPE_STRING,  false, "Filter by organization UUID"));
+      for (NeoReportParam declared : reportParameters().orElse(List.of())) {
+        params.put(param(declared));
+      }
       desc.put("parameters", params);
 
       return NeoResponse.ok(desc);
@@ -227,7 +264,7 @@ public class AgingReportHandler implements NeoHandler {
         return NeoResponse.error(422,
             "Could not resolve the organization tree required for the aging report");
       }
-      AcctSchemaResult acct = resolveAcctSchema(body.optString("glId", ""), orgId);
+      AcctSchemaResult acct = resolveAcctSchema(body.optString(PARAM_GL_ID, ""), orgId);
       if (acct.accSchemaId == null || acct.accSchemaId.isEmpty() || acct.currency == null) {
         return NeoResponse.error(422,
             "No accounting schema with currency is configured for organization " + orgId);
@@ -488,13 +525,15 @@ public class AgingReportHandler implements NeoHandler {
   // Utilities
   // -------------------------------------------------------------------------
 
-  private static JSONObject param(String name, String type, boolean required, String description)
-      throws Exception {
+  private static JSONObject param(NeoReportParam declared) throws Exception {
     JSONObject p = new JSONObject();
-    p.put("name", name);
-    p.put("type", type);
-    p.put("required", required);
-    p.put("description", description);
+    p.put("name", declared.getName());
+    p.put("type", declared.getType());
+    p.put("required", declared.isRequired());
+    p.put("description", declared.getDescription());
+    if (!declared.getAllowedValues().isEmpty()) {
+      p.put("allowedValues", new JSONArray(declared.getAllowedValues()));
+    }
     return p;
   }
 

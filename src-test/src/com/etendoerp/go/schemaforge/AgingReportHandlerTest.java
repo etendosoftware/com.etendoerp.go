@@ -32,8 +32,10 @@ import java.lang.reflect.Constructor;
 import java.lang.reflect.Method;
 import java.math.BigDecimal;
 import java.text.SimpleDateFormat;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Date;
+import java.util.List;
 
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
@@ -58,6 +60,7 @@ import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.financialmgmt.accounting.coa.AcctSchema;
 
 import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
+import com.etendoerp.go.schemaforge.util.NeoReportParam;
 
 /**
  * Unit tests for {@link AgingReportHandler}.
@@ -362,8 +365,16 @@ class AgingReportHandlerTest {
   @DisplayName("describeReport")
   class DescribeReport {
 
+    /**
+     * The descriptor is now rendered from {@link AgingReportHandler#reportParameters()} instead of
+     * a hand-written second copy (ETP-4793 / IMP-19). That copy had drifted: it listed 8 of the 10
+     * parameters the handler actually reads — {@code glId} and {@code showDetails} were absent —
+     * and it claimed {@code recOrPay} was required when the code defaults it to RECEIVABLES.
+     * Rendering from the declaration is what makes that class of drift impossible, so the test
+     * asserts against the declaration rather than a second hardcoded count.
+     */
     @Test
-    @DisplayName("Returns all expected parameter definitions")
+    @DisplayName("Renders every declared parameter, and only those")
     void returnsAllParams() throws Exception {
       NeoResponse result = (NeoResponse) invokePrivate(handler, "describeReport",
           new Class<?>[] {});
@@ -372,13 +383,27 @@ class AgingReportHandlerTest {
       JSONObject body = result.getBody();
       assertEquals("Aging Report", body.getString("name"));
 
+      List<NeoReportParam> declared = handler.reportParameters().orElseThrow();
       JSONArray params = body.getJSONArray("parameters");
-      assertEquals(8, params.length());
+      assertEquals(declared.size(), params.length());
+      for (int i = 0; i < declared.size(); i++) {
+        assertEquals(declared.get(i).getName(), params.getJSONObject(i).getString("name"));
+      }
 
-      // Verify recOrPay is required
-      JSONObject firstParam = params.getJSONObject(0);
-      assertEquals("recOrPay", firstParam.getString("name"));
-      assertTrue(firstParam.getBoolean("required"));
+      // The two the old hand-written descriptor omitted entirely.
+      List<String> names = new ArrayList<>();
+      for (int i = 0; i < params.length(); i++) {
+        names.add(params.getJSONObject(i).getString("name"));
+      }
+      assertTrue(names.contains("glId"));
+      assertTrue(names.contains("showDetails"));
+
+      // recOrPay is a closed set with a non-neutral default, not a requirement: declaring it
+      // required would reject calls that work today.
+      JSONObject recOrPay = params.getJSONObject(0);
+      assertEquals("recOrPay", recOrPay.getString("name"));
+      assertFalse(recOrPay.getBoolean("required"));
+      assertEquals("RECEIVABLES", recOrPay.getJSONArray("allowedValues").getString(0));
     }
   }
 
@@ -1058,17 +1083,35 @@ class AgingReportHandlerTest {
   @DisplayName("param helper")
   class ParamHelper {
 
+    /**
+     * The helper takes the declared parameter itself now, so name/type/required/description can
+     * no longer be retyped differently from what the handler reads.
+     */
     @Test
-    @DisplayName("Builds JSON parameter definition")
+    @DisplayName("Builds JSON parameter definition from the declaration")
     void buildsParam() throws Exception {
       JSONObject p = (JSONObject) invokeStatic("param",
-          new Class<?>[] { String.class, String.class, boolean.class, String.class },
-          "recOrPay", "string", true, "RECEIVABLES or PAYABLES");
+          new Class<?>[] { NeoReportParam.class },
+          NeoReportParam.required("dateFrom", NeoReportParam.TYPE_DATE, "Start date."));
 
-      assertEquals("recOrPay", p.getString("name"));
-      assertEquals("string", p.getString("type"));
+      assertEquals("dateFrom", p.getString("name"));
+      assertEquals(NeoReportParam.TYPE_DATE, p.getString("type"));
       assertTrue(p.getBoolean("required"));
-      assertEquals("RECEIVABLES or PAYABLES", p.getString("description"));
+      assertEquals("Start date.", p.getString("description"));
+      assertFalse(p.has("allowedValues"), "an open-ended parameter has no closed set");
+    }
+
+    @Test
+    @DisplayName("A closed set is rendered as allowedValues")
+    void buildsParamWithAllowedValues() throws Exception {
+      JSONObject p = (JSONObject) invokeStatic("param",
+          new Class<?>[] { NeoReportParam.class },
+          NeoReportParam.options("recOrPay", "Which side.",
+              List.of("RECEIVABLES", "PAYABLES")));
+
+      assertFalse(p.getBoolean("required"));
+      assertEquals(2, p.getJSONArray("allowedValues").length());
+      assertEquals("PAYABLES", p.getJSONArray("allowedValues").getString(1));
     }
   }
 }

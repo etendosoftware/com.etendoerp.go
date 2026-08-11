@@ -25,6 +25,8 @@ final class McpConstants {
   static final String PARAM_FIELD = "field";
   static final String PARAM_QUERY = "query";
   static final String PARAM_PARAMETERS = "parameters";
+  /** Requested output format of a {@code generate_*} report tool (ETP-4793 / IMP-19). */
+  static final String PARAM_FORMAT = "format";
   static final String PARAM_PARENT_ID = "parentId";
   static final String PARAM_ASSET_ID = "assetId";
   /** Widget enum key for the {@code neo_widget} tool. */

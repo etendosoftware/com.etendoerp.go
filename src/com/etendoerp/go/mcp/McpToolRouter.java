@@ -23,6 +23,7 @@ import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 
 import org.apache.commons.lang3.StringUtils;
@@ -53,6 +54,7 @@ import com.etendoerp.go.schemaforge.BatchService;
 import com.etendoerp.go.schemaforge.NeoCommercialLinePolicy;
 import com.etendoerp.go.schemaforge.util.NeoButtonActionHelper;
 import com.etendoerp.go.schemaforge.util.NeoLanguage;
+import com.etendoerp.go.schemaforge.util.NeoReportContract;
 import com.etendoerp.go.schemaforge.NeoContext;
 import com.etendoerp.go.schemaforge.NeoDefaultsService;
 import com.etendoerp.go.schemaforge.NeoFieldFilter;
@@ -1278,10 +1280,29 @@ public class McpToolRouter {
           NeoReportCallability.buildNotConfiguredResponse(specName).toString(2));
     }
 
+    // The handler's own declaration is the authority on what it accepts, and it is the same
+    // object ToolRegistry built the tool schema from — so what the agent was shown and what it
+    // is judged against cannot drift (ETP-4793 / IMP-19). A handler that declares no report
+    // contract is not a report generator: it gets the not-configured answer rather than a POST
+    // it can only reject.
+    Optional<NeoReportContract> contract = NeoReportCallability.contractOf(handler,
+        reportEntity.getJavaQualifier());
+    if (contract.isEmpty()) {
+      return wrapAsTextContent(
+          NeoReportCallability.buildNotConfiguredResponse(specName).toString(2));
+    }
+
     JSONObject parameters = args != null ? args.optJSONObject(McpConstants.PARAM_PARAMETERS) : null;
     if (parameters == null) {
       parameters = new JSONObject();
     }
+
+    JSONObject contractError = validateReportRequest(contract.get(), parameters,
+        args != null ? args.optString(McpConstants.PARAM_FORMAT, null) : null);
+    if (contractError != null) {
+      return wrapAsErrorContent(contractError.toString(2));
+    }
+
     NeoContext ctx = NeoContext.builder()
         .specName(specName)
         .entityName(reportEntity.getName())
@@ -1296,6 +1317,60 @@ public class McpToolRouter {
           NeoReportCallability.buildNotConfiguredResponse(specName).toString(2));
     }
     return McpHookExecutor.neoResponseToMcpResult(neoResponse);
+  }
+
+  /**
+   * Check a {@code generate_*} call against the handler's declared contract (ETP-4793 / IMP-19).
+   *
+   * <p>Two things used to fail silently or opaquely. A missing mandatory parameter reached the
+   * handler and came back as its own ad-hoc 400 ({@code "dateFrom and dateTo are required"}) —
+   * true, but in a shape no agent can branch on, and only for the handlers that bothered to
+   * check. An unsupported {@code format} was not checked at all: the argument was declared in the
+   * schema and never read, so a request for a PDF was answered with JSON and nothing said so.
+   * Both now fail here, in the flat envelope the rest of the MCP surface uses
+   * ({@code status}/{@code error}/{@code detail}), before the handler runs.</p>
+   *
+   * @param contract the handler's declared contract
+   * @param params   the {@code parameters} object as submitted
+   * @param format   the requested format, may be {@code null}
+   * @return the error body to return, or {@code null} when the request satisfies the contract
+   */
+  private JSONObject validateReportRequest(NeoReportContract contract, JSONObject params,
+      String format) throws JSONException {
+    if (!contract.supportsFormat(format)) {
+      JSONObject error = new JSONObject();
+      error.put(McpConstants.KEY_STATUS, McpConstants.STATUS_UNPROCESSABLE);
+      error.put(McpConstants.KEY_ERROR, McpConstants.ERROR_VALIDATION);
+      error.put(McpConstants.KEY_DETAIL,
+          "Output format '" + format + "' is not served by this report");
+      error.put(McpConstants.PARAM_FIELD, McpConstants.PARAM_FORMAT);
+      error.put("supportedFormats", new JSONArray(contract.getFormats()));
+      error.put(McpConstants.KEY_HINT, "Etendo Go returns report data as JSON; it does not render documents. "
+          + "Omit 'format' or pass '" + contract.getDefaultFormat() + "'.");
+      return error;
+    }
+
+    JSONArray missing = new JSONArray();
+    for (String name : contract.getRequiredParameterNames()) {
+      // An empty string is as absent as a missing key here: every handler reads these with
+      // optString(name, "") and treats "" as unset, so accepting it would only move the failure
+      // back into the handler's own error path.
+      if (StringUtils.isBlank(params.optString(name, ""))) {
+        missing.put(name);
+      }
+    }
+    if (missing.length() == 0) {
+      return null;
+    }
+
+    JSONObject error = new JSONObject();
+    error.put(McpConstants.KEY_STATUS, McpConstants.STATUS_UNPROCESSABLE);
+    error.put(McpConstants.KEY_ERROR, McpConstants.ERROR_VALIDATION);
+    error.put(McpConstants.KEY_DETAIL, "Missing required report parameters");
+    error.put("missingParameters", missing);
+    error.put(McpConstants.KEY_HINT, "These are declared in this tool's parameters schema, with their expected "
+        + "types and accepted values.");
+    return error;
   }
 
   /**

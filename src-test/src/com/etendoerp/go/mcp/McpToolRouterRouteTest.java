@@ -27,11 +27,13 @@ import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.Optional;
 import java.util.Set;
 
 import org.codehaus.jettison.json.JSONArray;
@@ -68,6 +70,7 @@ import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFSpec;
 import com.etendoerp.go.schemaforge.util.NeoButtonActionHelper;
 import com.etendoerp.go.schemaforge.util.NeoReportCallability;
+import com.etendoerp.go.schemaforge.util.NeoReportParam;
 
 /**
  * Unit tests for {@link McpToolRouter#route} and its internal handler dispatch,
@@ -1024,7 +1027,11 @@ class McpToolRouterRouteTest {
       reportData.put("rows", 3);
       NeoResponse handlerResponse = NeoResponse.ok(reportData);
 
+      // IMP-19: the handler must also declare a report contract. An empty declaration is a
+      // valid one — "this report takes no inputs" — and is what keeps this vector callable.
       NeoHandler handler = mock(NeoHandler.class);
+      when(handler.reportParameters()).thenReturn(Optional.of(List.of()));
+      when(handler.reportFormats()).thenReturn(List.of("json"));
       when(handler.handle(any(NeoContext.class))).thenReturn(handlerResponse);
 
       try (MockedStatic<McpHookExecutor> hookMock = mockStatic(McpHookExecutor.class)) {
@@ -1038,6 +1045,176 @@ class McpToolRouterRouteTest {
         assertFalse(result.has("isError") && result.getBoolean("isError"));
         String text = result.getJSONArray("content").getJSONObject(0).getString("text");
         assertTrue(text.contains("\"rows\""));
+      }
+    }
+
+    // ── The declared contract gates and validates the call (IMP-19) ──────
+
+    /**
+     * The defect that hid five unusable tools: a {@code Java_Qualifier} means the handler serves
+     * the entity, not that it generates reports. Five of the eight published {@code generate_*}
+     * tools were UI handlers dispatching on an {@code action} query param, so the report route —
+     * a POST with no query params — could only ever get 405 or 400 out of them. A handler that
+     * declares no report contract must therefore read as non-callable, exactly like no handler
+     * at all.
+     */
+    @Test
+    @DisplayName("handler that declares no report contract is non-callable")
+    void handlerWithoutContractIsNotCallable() throws Exception {
+      SFSpec spec = mockReportSpec();
+      setupSpecLookup(spec);
+
+      SFEntity reportEntity = mock(SFEntity.class);
+      when(reportEntity.getJavaQualifier()).thenReturn("financialAccountsPageHandler");
+      supportMock.when(() -> McpToolRouterSupport.listIncludedEntities(SPEC_ID))
+          .thenReturn(List.of(reportEntity));
+
+      // Default reportParameters() — Optional.empty(): "I am not a report generator".
+      NeoHandler handler = mock(NeoHandler.class);
+      when(handler.reportParameters()).thenReturn(Optional.empty());
+
+      try (MockedStatic<McpHookExecutor> hookMock = mockStatic(McpHookExecutor.class)) {
+        hookMock.when(() -> McpHookExecutor.resolveEntityHandler(reportEntity))
+            .thenReturn(handler);
+
+        JSONObject result = router.route("generate_invoice_report", null, REPORT_SCOPES);
+
+        JSONObject body = new JSONObject(
+            result.getJSONArray("content").getJSONObject(0).getString("text"));
+        assertFalse(body.getBoolean("callable"));
+        assertEquals(NeoReportCallability.STATUS_NOT_CONFIGURED, body.getString("status"));
+      }
+      // The point of the gate: the handler is never asked to serve a request it cannot answer.
+      verify(handler, never()).handle(any(NeoContext.class));
+    }
+
+    @Test
+    @DisplayName("missing required parameter is rejected before the handler runs")
+    void missingRequiredParameterIsRejected() throws Exception {
+      NeoHandler handler = contractHandler(List.of(
+          NeoReportParam.required("dateFrom", NeoReportParam.TYPE_DATE, "Start."),
+          NeoReportParam.required("dateTo", NeoReportParam.TYPE_DATE, "End.")));
+      SFEntity reportEntity = setupContractSpec();
+
+      JSONObject args = new JSONObject();
+      JSONObject params = new JSONObject();
+      params.put("dateFrom", "2026-01-01");
+      args.put("parameters", params);
+
+      JSONObject error = routeReportWith(handler, reportEntity, args);
+
+      assertTrue(error.getBoolean("isError"));
+      JSONObject body = new JSONObject(
+          error.getJSONArray("content").getJSONObject(0).getString("text"));
+      assertEquals(422, body.getInt("status"));
+      assertEquals("validation_error", body.getString("error"));
+      // Names the one that is missing, and only that one.
+      JSONArray missing = body.getJSONArray("missingParameters");
+      assertEquals(1, missing.length());
+      assertEquals("dateTo", missing.getString(0));
+      verify(handler, never()).handle(any(NeoContext.class));
+    }
+
+    /**
+     * An empty string is as absent as a missing key: every handler reads these with
+     * {@code optString(name, "")} and treats {@code ""} as unset, so accepting it would only
+     * move the failure back into the handler's own ad-hoc error path.
+     */
+    @Test
+    @DisplayName("blank required parameter counts as missing")
+    void blankRequiredParameterCountsAsMissing() throws Exception {
+      NeoHandler handler = contractHandler(List.of(
+          NeoReportParam.required("dateFrom", NeoReportParam.TYPE_DATE, "Start.")));
+      SFEntity reportEntity = setupContractSpec();
+
+      JSONObject args = new JSONObject();
+      JSONObject params = new JSONObject();
+      params.put("dateFrom", "   ");
+      args.put("parameters", params);
+
+      JSONObject error = routeReportWith(handler, reportEntity, args);
+
+      assertTrue(error.getBoolean("isError"));
+      JSONObject body = new JSONObject(
+          error.getJSONArray("content").getJSONObject(0).getString("text"));
+      assertEquals("dateFrom", body.getJSONArray("missingParameters").getString(0));
+    }
+
+    /**
+     * The format argument used to be declared ("pdf, xlsx, csv") and never read, so a request
+     * for a PDF was answered with JSON and nothing said the format had been ignored. It is now
+     * checked against what the handler serves.
+     */
+    @Test
+    @DisplayName("unsupported format is rejected and names what is served")
+    void unsupportedFormatIsRejected() throws Exception {
+      NeoHandler handler = contractHandler(List.of());
+      SFEntity reportEntity = setupContractSpec();
+
+      JSONObject args = new JSONObject();
+      args.put("format", "pdf");
+
+      JSONObject error = routeReportWith(handler, reportEntity, args);
+
+      assertTrue(error.getBoolean("isError"));
+      JSONObject body = new JSONObject(
+          error.getJSONArray("content").getJSONObject(0).getString("text"));
+      assertEquals(422, body.getInt("status"));
+      assertEquals("format", body.getString("field"));
+      assertEquals("json", body.getJSONArray("supportedFormats").getString(0));
+      verify(handler, never()).handle(any(NeoContext.class));
+    }
+
+    @Test
+    @DisplayName("declared format and satisfied requirements reach the handler")
+    void satisfiedContractReachesHandler() throws Exception {
+      NeoHandler handler = contractHandler(List.of(
+          NeoReportParam.required("dateFrom", NeoReportParam.TYPE_DATE, "Start.")));
+      SFEntity reportEntity = setupContractSpec();
+
+      JSONObject args = new JSONObject();
+      JSONObject params = new JSONObject();
+      params.put("dateFrom", "2026-01-01");
+      args.put("parameters", params);
+      args.put("format", "JSON"); // case-insensitive: the same format, spelled loudly
+
+      JSONObject result = routeReportWith(handler, reportEntity, args);
+
+      assertFalse(result.has("isError") && result.getBoolean("isError"));
+      assertTrue(result.getJSONArray("content").getJSONObject(0).getString("text")
+          .contains("\"rows\""));
+    }
+
+    /** A handler declaring the given parameters, JSON output, and a trivial successful run. */
+    private NeoHandler contractHandler(List<NeoReportParam> params) throws Exception {
+      JSONObject reportData = new JSONObject();
+      reportData.put("rows", 3);
+      NeoHandler handler = mock(NeoHandler.class);
+      when(handler.reportParameters()).thenReturn(Optional.of(params));
+      when(handler.reportFormats()).thenReturn(List.of("json"));
+      when(handler.handle(any(NeoContext.class))).thenReturn(NeoResponse.ok(reportData));
+      return handler;
+    }
+
+    private SFEntity setupContractSpec() {
+      SFSpec spec = mockReportSpec();
+      setupSpecLookup(spec);
+      SFEntity reportEntity = mock(SFEntity.class);
+      when(reportEntity.getName()).thenReturn("tax");
+      when(reportEntity.getJavaQualifier()).thenReturn("taxReportHandler");
+      supportMock.when(() -> McpToolRouterSupport.listIncludedEntities(SPEC_ID))
+          .thenReturn(List.of(reportEntity));
+      return reportEntity;
+    }
+
+    private JSONObject routeReportWith(NeoHandler handler, SFEntity reportEntity, JSONObject args)
+        throws Exception {
+      try (MockedStatic<McpHookExecutor> hookMock = mockStatic(McpHookExecutor.class)) {
+        hookMock.when(() -> McpHookExecutor.resolveEntityHandler(reportEntity))
+            .thenReturn(handler);
+        hookMock.when(() -> McpHookExecutor.neoResponseToMcpResult(any()))
+            .thenCallRealMethod();
+        return router.route("generate_invoice_report", args, REPORT_SCOPES);
       }
     }
   }
