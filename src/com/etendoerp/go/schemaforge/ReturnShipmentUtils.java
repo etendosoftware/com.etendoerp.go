@@ -163,11 +163,7 @@ final class ReturnShipmentUtils {
 
     for (ShipmentInOutLine line : doc.getMaterialMgmtShipmentInOutLineList()) {
       Locator current = line.getStorageBin();
-      Locator candidate = current;
-      if (candidate == null) {
-        ShipmentInOutLine origLine = line.getCanceledInoutLine();
-        candidate = (origLine != null) ? origLine.getStorageBin() : null;
-      }
+      Locator candidate = resolveCandidateBin(line);
 
       Locator target;
       if (headerWarehouse == null || headerWarehouse.getId() == null
@@ -181,15 +177,36 @@ final class ReturnShipmentUtils {
         target = warehouseAnchorBin;
       }
 
-      boolean changed = (target == null)
-          ? current != null
-          : (current == null || !target.getId().equals(current.getId()));
-      if (changed) {
-        line.setStorageBin(target);
-        OBDal.getInstance().save(line);
-      }
+      applyStorageBinIfChanged(line, current, target);
     }
     OBDal.getInstance().flush();
+  }
+
+  /**
+   * Returns the line's own bin, or — when the line has none — the bin carried by the source
+   * ({@code canceledInoutLine}) line. Same evaluation order as before the extraction.
+   */
+  private static Locator resolveCandidateBin(ShipmentInOutLine line) {
+    Locator current = line.getStorageBin();
+    if (current != null) {
+      return current;
+    }
+    ShipmentInOutLine origLine = line.getCanceledInoutLine();
+    return (origLine != null) ? origLine.getStorageBin() : null;
+  }
+
+  /**
+   * Writes {@code target} onto {@code line} only when it differs from {@code current}, saving the
+   * line in that case. Same "changed" ternary as before the extraction.
+   */
+  private static void applyStorageBinIfChanged(ShipmentInOutLine line, Locator current, Locator target) {
+    boolean changed = (target == null)
+        ? current != null
+        : (current == null || !target.getId().equals(current.getId()));
+    if (changed) {
+      line.setStorageBin(target);
+      OBDal.getInstance().save(line);
+    }
   }
 
   // ---------------------------------------------------------------------------
