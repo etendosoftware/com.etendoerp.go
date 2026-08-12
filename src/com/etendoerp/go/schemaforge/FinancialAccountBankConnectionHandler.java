@@ -106,6 +106,9 @@ public class FinancialAccountBankConnectionHandler implements NeoHandler {
   private static final String PARAM_TYPE = "type";
   private static final String PARAM_COUNTRY = "country";
   private static final String PARAM_Q = "q";
+  /** Same literal as {@code BankIntegrationConstants.PERMANENT_DELETION}, so Classic's
+   *  "Permanent deletion" checkbox and this bridge speak the same wire format. */
+  private static final String PARAM_PERMANENT_DELETION = "permanentDeletion";
 
   private static final String ACTION_STATUS = "status";
   private static final String ACTION_ACCOUNTS = "accounts";
@@ -114,6 +117,7 @@ public class FinancialAccountBankConnectionHandler implements NeoHandler {
   private static final String ACTION_LINK = "link";
   private static final String ACTION_CREATE_AND_LINK = "createAndLink";
   private static final String ACTION_RECONNECT = "reconnect";
+  private static final String ACTION_RECONNECT_CALLBACK = "reconnect-callback";
   private static final String ACTION_DISCONNECT = "disconnect";
   private static final String ACTION_SYNC = "sync";
   private static final String ACTION_IMPORT_SETTINGS = "import-settings";
@@ -140,6 +144,7 @@ public class FinancialAccountBankConnectionHandler implements NeoHandler {
   private static final String KEY_DATA = "data";
   private static final String KEY_CODE = "code";
   private static final String KEY_PROVIDERS = "providers";
+  private static final String KEY_RECONNECTABLE = "reconnectable";
   private static final String DEFAULT_PROVIDER_COUNTRY = "ES";
   private static final String MSG_ACCOUNT_NOT_FOUND = "Financial account not found";
   private static final String MSG_MISSING = "Missing required parameter: ";
@@ -194,6 +199,9 @@ public class FinancialAccountBankConnectionHandler implements NeoHandler {
     if (ACTION_RECONNECT.equals(action)) {
       return handleReconnect(context);
     }
+    if (ACTION_RECONNECT_CALLBACK.equals(action)) {
+      return handleReconnectCallback(context);
+    }
     if (ACTION_DISCONNECT.equals(action)) {
       return handleDisconnect(context);
     }
@@ -221,6 +229,10 @@ public class FinancialAccountBankConnectionHandler implements NeoHandler {
     boolean connected = BankIntegrationConstants.FA_CONNECTION_STATUS_CONNECTED
         .equals(finAcc.getPSD2ConnectionStatus());
     data.put("connected", connected);
+    // Soft-disconnected: no longer connected, but the Salt Edge link survives, so the existing
+    // connection can be revived through the reconnect flow instead of starting a new one.
+    data.put(KEY_RECONNECTABLE,
+        !connected && StringUtils.isNotBlank(finAcc.getPSD2SaltEdgeAccountID()));
     data.put(KEY_SALT_EDGE_ACCOUNT_ID, finAcc.getPSD2SaltEdgeAccountID());
     data.put("maskedPan", finAcc.getPSD2CardNumber());
     data.put(KEY_IMPORT_FROM_DATE,
@@ -505,10 +517,73 @@ public class FinancialAccountBankConnectionHandler implements NeoHandler {
     return FinancialAccountBankConnectionSupport.okData(data);
   }
 
+  /**
+   * Finalizes a reconnect once the Salt Edge popup comes back (ETP-4764).
+   *
+   * <p>Classic reaches the equivalent code through {@code AisConnectionCallback}, because Salt Edge
+   * redirects straight into that servlet. The SPA cannot: its {@code return_to} points at an app
+   * route that only relays the connection id back to the opener, so without this action nothing
+   * ever flipped the connection back to active — the account stayed deactivated no matter how many
+   * times the user reconnected. It mirrors Classic's {@code handleReconnectCallback}: refresh the
+   * consent expiry from Salt Edge and mark every connection sharing this Salt Edge id active again.
+   *
+   * <p>Applies to the whole group rather than this account alone because one Salt Edge connection
+   * can back several Financial Accounts, and re-authorizing it revives all of them.
+   */
+  private NeoResponse handleReconnectCallback(NeoContext context) throws JSONException {
+    JSONObject body = FinancialAccountBankConnectionSupport.requireBody(context);
+    String accountId = FinancialAccountBankConnectionSupport.bodyString(body, PARAM_ACCOUNT_ID);
+    String connectionId = FinancialAccountBankConnectionSupport.bodyString(body, PARAM_CONNECTION_ID);
+    if (StringUtils.isBlank(connectionId)) {
+      return NeoResponse.error(400, MSG_MISSING + PARAM_CONNECTION_ID);
+    }
+    FIN_FinancialAccount finAcc = loadAccount(accountId);
+    if (finAcc == null) {
+      return NeoResponse.error(404, MSG_ACCOUNT_NOT_FOUND);
+    }
+    FinaccConnection connection = SaltEdgeAccountLinkHelper.getConnectionForFinAccAndSaltEdgeId(
+        finAcc, connectionId);
+    if (connection == null) {
+      return NeoResponse.error(404, "No connection to reconnect for this account");
+    }
+    String apiKey = SaltEdgeAccountLinkHelper.getApiKeyForFinAcc(finAcc);
+    JSONObject details = BankIntegrationUtils.getSaltEdgeConnectionDetails(connectionId, apiKey);
+    Date consentExpiresAt = details != null
+        ? SaltEdgeAccountLinkHelper.resolveConsentExpiresAt(details, apiKey)
+        : null;
+    SaltEdgeAccountLinkHelper.syncAllConnectionsForSaltEdgeId(connectionId, "AC", consentExpiresAt);
+    JSONObject data = new JSONObject();
+    data.put("connected", true);
+    data.put("consentExpiresAt", FinancialAccountBankConnectionSupport.formatInstant(consentExpiresAt));
+    return FinancialAccountBankConnectionSupport.okData(data);
+  }
+
   // ---------------------------------------------------------------------------
   // POST disconnect
   // ---------------------------------------------------------------------------
 
+  /**
+   * Disconnects the bank connection of a Financial Account, in one of two modes selected by the
+   * optional {@code permanentDeletion} body flag:
+   *
+   * <ul>
+   *   <li>{@code false} (the default, mirroring Classic's unchecked checkbox) — <b>soft
+   *       disconnect</b>: the connection is marked inactive on Salt Edge and locally, but the
+   *       account keeps its Salt Edge link so it can be reconnected later without losing
+   *       history.</li>
+   *   <li>{@code true} — <b>permanent deletion</b>: the connection is deleted on the Salt Edge
+   *       side and unlinked locally. Irreversible.</li>
+   * </ul>
+   *
+   * <p>Defaulting to soft is deliberate: a caller that omits the flag degrades to the
+   * recoverable behavior instead of silently destroying the connection.
+   *
+   * <p>The response reports what actually happened rather than what was requested, because a Salt
+   * Edge connection shared by several Financial Accounts always takes the unlink path regardless
+   * of the flag (marking it inactive would break the sibling accounts). The distinction is
+   * re-derived from the account's own state — the helper's return value only says whether an
+   * active connection existed.
+   */
   private NeoResponse handleDisconnect(NeoContext context) throws JSONException {
     JSONObject body = FinancialAccountBankConnectionSupport.requireBody(context);
     String accountId = FinancialAccountBankConnectionSupport.bodyString(body, PARAM_ACCOUNT_ID);
@@ -516,15 +591,23 @@ public class FinancialAccountBankConnectionHandler implements NeoHandler {
     if (finAcc == null) {
       return NeoResponse.error(404, MSG_ACCOUNT_NOT_FOUND);
     }
-    boolean disconnected = SaltEdgeAccountLinkHelper.disconnectFinancialAccount(finAcc);
-    if (disconnected) {
+    boolean permanentDeletion = body.optBoolean(PARAM_PERMANENT_DELETION, false);
+    boolean disconnected = SaltEdgeAccountLinkHelper.disconnectFinancialAccount(finAcc,
+        permanentDeletion);
+    // Soft disconnect keeps the Salt Edge account id; the permanent path clears it. That is the
+    // only reliable discriminator once shared connections are taken into account.
+    boolean stillLinked = StringUtils.isNotBlank(finAcc.getPSD2SaltEdgeAccountID());
+    if (disconnected && !stillLinked) {
       // Mirror of the connect-time clear: with the bank connection (and its PIS callback) gone,
       // the transfer method must auto-create the FIN_Finacc_Transaction on processing again, like
       // any unconnected account. Scoped to this Etendo Go bridge only — never Classic's flow.
+      // Skipped on a soft disconnect: the link survives and reconnecting would just undo it.
       restoreAutomaticWithdrawnForTransferMethod(finAcc);
     }
     JSONObject data = new JSONObject();
     data.put("disconnected", disconnected);
+    data.put("permanent", !stillLinked);
+    data.put(KEY_RECONNECTABLE, stillLinked);
     return FinancialAccountBankConnectionSupport.okData(data);
   }
 

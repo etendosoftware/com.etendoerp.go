@@ -57,7 +57,7 @@ final class ReconciliationFlowSupport {
    */
   private record InvoiceSettlementContext(FIN_FinancialAccount account, FIN_BankStatementLine line,
       boolean isReceipt, FIN_PaymentMethod chosenMethod, List<String> operationIds,
-      BigDecimal tolerance) {
+      BigDecimal tolerance, boolean writeoffDifference) {
   }
 
   /**
@@ -88,7 +88,7 @@ final class ReconciliationFlowSupport {
    */
   static NeoResponse createInvoicePayments(FIN_FinancialAccount account,
       FIN_BankStatementLine line, JSONArray invoiceSpecs, List<String> operationIds,
-      BigDecimal tolerance, String paymentMethodId) throws Exception {
+      BigDecimal tolerance, String paymentMethodId, boolean writeoffDifference) throws Exception {
     FIN_PaymentMethod chosenMethod = resolveChosenMethod(paymentMethodId);
 
     BigDecimal lineAmount = nullSafe(line.getCramount()).subtract(nullSafe(line.getDramount()));
@@ -97,7 +97,7 @@ final class ReconciliationFlowSupport {
     BigDecimal remaining = startingRemaining;
 
     InvoiceSettlementContext ctx = new InvoiceSettlementContext(account, line, isReceipt,
-        chosenMethod, operationIds, tolerance);
+        chosenMethod, operationIds, tolerance, writeoffDifference);
     for (int i = 0; i < invoiceSpecs.length() && remaining.compareTo(tolerance) > 0; i++) {
       SettlementOutcome outcome = settleInvoice(ctx, invoiceSpecs.getJSONObject(i), remaining);
       if (outcome.error() != null) {
@@ -185,7 +185,7 @@ final class ReconciliationFlowSupport {
     FIN_Payment payment = ReconciliationPaymentService.registerReconciliationPayment(
         new ReconciliationPaymentService.ReconciliationPaymentRequest(invoice, schedule,
             paymentAmount, txnAmount, rate, line.getTransactionDate(), account, isReceipt,
-            chosenMethod));
+            chosenMethod, ctx.writeoffDifference() && !fullSettlement));
     List<FIN_FinaccTransaction> txns = payment.getFINFinaccTransactionList();
     if (txns.isEmpty()) {
       return new SettlementOutcome(remaining,

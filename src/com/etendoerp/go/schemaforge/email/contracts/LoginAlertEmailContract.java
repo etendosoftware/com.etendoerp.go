@@ -64,6 +64,11 @@ final class LoginAlertEmailContract implements EmailContract {
     if (!editsRejection.isAllowed()) {
       return editsRejection;
     }
+    EmailAuthorizationResult messageRejection =
+        EmailContractCommandSupport.rejectMessageEditsIfPresent(command);
+    if (!messageRejection.isAllowed()) {
+      return messageRejection;
+    }
     EmailAuthorizationResult validation = EmailContractCommandSupport.validateCommand(command,
         EmailContractCommandSupport.FIELD_USER_ID);
     if (!validation.isAllowed()) {

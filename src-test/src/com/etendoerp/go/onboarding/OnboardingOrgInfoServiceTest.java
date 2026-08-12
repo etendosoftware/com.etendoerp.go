@@ -52,7 +52,7 @@ public class OnboardingOrgInfoServiceTest {
   public void testEnsureOrgInfoFailsWhenClientIdIsMissing() {
     TestableService service = new TestableService();
     try {
-      service.ensureOrgInfo(null, "ORG-1", "USER-1", "ROLE-1", "ES", null);
+      service.ensureOrgInfo(null, "ORG-1", "USER-1", "ROLE-1", "ES", null, null);
       fail("Expected missing clientId to fail");
     } catch (OBException e) {
       assertTrue(e.getMessage().contains("Missing client"));
@@ -63,7 +63,7 @@ public class OnboardingOrgInfoServiceTest {
   public void testEnsureOrgInfoFailsWhenOrgIdIsMissing() {
     TestableService service = new TestableService();
     try {
-      service.ensureOrgInfo("CLIENT-1", null, "USER-1", "ROLE-1", "ES", null);
+      service.ensureOrgInfo("CLIENT-1", null, "USER-1", "ROLE-1", "ES", null, null);
       fail("Expected missing orgId to fail");
     } catch (OBException e) {
       assertTrue(e.getMessage().contains("Missing organization"));
@@ -74,7 +74,7 @@ public class OnboardingOrgInfoServiceTest {
   public void testEnsureOrgInfoFailsWhenAdminUserIsMissing() {
     TestableService service = new TestableService();
     try {
-      service.ensureOrgInfo("CLIENT-1", "ORG-1", null, "ROLE-1", "ES", null);
+      service.ensureOrgInfo("CLIENT-1", "ORG-1", null, "ROLE-1", "ES", null, null);
       fail("Expected missing admin user to fail");
     } catch (OBException e) {
       assertTrue(e.getMessage().contains("Missing admin user"));
@@ -85,7 +85,7 @@ public class OnboardingOrgInfoServiceTest {
   public void testEnsureOrgInfoFailsWhenAdminRoleIsMissing() {
     TestableService service = new TestableService();
     try {
-      service.ensureOrgInfo("CLIENT-1", "ORG-1", "USER-1", null, "ES", null);
+      service.ensureOrgInfo("CLIENT-1", "ORG-1", "USER-1", null, "ES", null, null);
       fail("Expected missing admin role to fail");
     } catch (OBException e) {
       assertTrue(e.getMessage().contains("Missing admin role"));
@@ -101,7 +101,7 @@ public class OnboardingOrgInfoServiceTest {
     TestableService service = new TestableService();
     service.client = null;
     try {
-      service.ensureOrgInfo("CLIENT-1", "ORG-1", "USER-1", "ROLE-1", "ES", null);
+      service.ensureOrgInfo("CLIENT-1", "ORG-1", "USER-1", "ROLE-1", "ES", null, null);
       fail("Expected client-not-found failure");
     } catch (OBException e) {
       assertTrue(e.getMessage().contains("Client not found for org-info setup"));
@@ -113,7 +113,7 @@ public class OnboardingOrgInfoServiceTest {
     TestableService service = new TestableService();
     service.organization = null;
     try {
-      service.ensureOrgInfo("CLIENT-1", "ORG-1", "USER-1", "ROLE-1", "ES", null);
+      service.ensureOrgInfo("CLIENT-1", "ORG-1", "USER-1", "ROLE-1", "ES", null, null);
       fail("Expected organization-not-found failure");
     } catch (OBException e) {
       assertTrue(e.getMessage().contains("Organization not found for org-info setup"));
@@ -127,7 +127,7 @@ public class OnboardingOrgInfoServiceTest {
     OBContext previous = mock(OBContext.class);
     OBContext.setOBContext(previous);
 
-    service.ensureOrgInfo("CLIENT-1", "ORG-1", "USER-1", "ROLE-1", "ES", "Main St 1");
+    service.ensureOrgInfo("CLIENT-1", "ORG-1", "USER-1", "ROLE-1", "ES", "Main St 1", null);
 
     assertTrue(service.ensureLocationCalled);
     assertTrue(service.flushed);
@@ -143,7 +143,7 @@ public class OnboardingOrgInfoServiceTest {
     OBContext.setOBContext(previous);
 
     try {
-      service.ensureOrgInfo("CLIENT-1", "ORG-1", "USER-1", "ROLE-1", "ES", null);
+      service.ensureOrgInfo("CLIENT-1", "ORG-1", "USER-1", "ROLE-1", "ES", null, null);
       fail("Expected delegated failure");
     } catch (OBException e) {
       assertTrue(e.getMessage().contains("location-boom"));
@@ -210,7 +210,7 @@ public class OnboardingOrgInfoServiceTest {
       when(orgInfo.getLocationAddress()).thenReturn(mock(Location.class));
       service.orgInfo = orgInfo;
 
-      service.ensureOrgInfoLocation(service.client, service.organization, "ES", null);
+      service.ensureOrgInfoLocation(service.client, service.organization, "ES", null, null);
 
       // Already located: no location created, no link, no save.
       assertNull(service.createdLocation);
@@ -231,7 +231,7 @@ public class OnboardingOrgInfoServiceTest {
       service.resolvedCountry = null; // resolveCountry yields nothing
 
       try {
-        service.ensureOrgInfoLocation(service.client, service.organization, "ES", null);
+        service.ensureOrgInfoLocation(service.client, service.organization, "ES", null, null);
         fail("Expected no-country failure");
       } catch (OBException e) {
         assertTrue(e.getMessage().contains("No country available"));
@@ -256,12 +256,71 @@ public class OnboardingOrgInfoServiceTest {
       service.resolvedCountry = country;
       service.locationToCreate = location;
 
-      service.ensureOrgInfoLocation(service.client, service.organization, "ES", "Main St 1");
+      service.ensureOrgInfoLocation(service.client, service.organization, "ES", "Main St 1", null);
 
       assertTrue(service.createOrgInfoCalled);
       assertSame(location, service.createdLocation);
       verify(createdOrgInfo).setLocationAddress(location);
       verify(dal).save(createdOrgInfo);
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // applyTaxId() — ETP-4749: the wizard's Tax ID is optional and must never be
+  // forced/cleared, only persisted when the onboarding request actually carries one.
+  // ---------------------------------------------------------------------------
+
+  @Test
+  public void testApplyTaxIdSetsTrimmedValueAndSavesWhenNonBlank() {
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+
+      OnboardingOrgInfoService service = new OnboardingOrgInfoService();
+      OrganizationInformation orgInfo = mock(OrganizationInformation.class);
+
+      service.applyTaxId(orgInfo, "  1234  ");
+
+      verify(orgInfo).setTaxID("1234");
+      verify(dal).save(orgInfo);
+    }
+  }
+
+  @Test
+  public void testApplyTaxIdIsNoOpWhenBlank() {
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+
+      OnboardingOrgInfoService service = new OnboardingOrgInfoService();
+      OrganizationInformation orgInfo = mock(OrganizationInformation.class);
+
+      service.applyTaxId(orgInfo, "   ");
+      service.applyTaxId(orgInfo, null);
+
+      verify(orgInfo, never()).setTaxID(anyString());
+      verify(dal, never()).save(any());
+    }
+  }
+
+  @Test
+  public void testEnsureOrgInfoLocationAppliesTaxIdBeforeTheAlreadyLocatedEarlyReturn() {
+    // Regression guard: applyTaxId() must run even when the org already has a location
+    // (the pre-existing early return in ensureOrgInfoLocation must not skip it).
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+
+      TestableService service = new TestableService();
+      OrganizationInformation orgInfo = mock(OrganizationInformation.class);
+      when(orgInfo.getLocationAddress()).thenReturn(mock(Location.class));
+      service.orgInfo = orgInfo;
+
+      service.ensureOrgInfoLocation(service.client, service.organization, "ES", null, "5678");
+
+      verify(orgInfo).setTaxID("5678");
+      // Still no location work — that early return is unrelated to the Tax ID.
+      verify(orgInfo, never()).setLocationAddress(any());
     }
   }
 
@@ -506,7 +565,7 @@ public class OnboardingOrgInfoServiceTest {
 
     @Override
     protected void ensureOrgInfoLocation(Client client, Organization org, String countryIso,
-        String address) {
+        String address, String taxId) {
       if (overrideLocation) {
         ensureLocationCalled = true;
         if (failOnLocation) {
@@ -514,7 +573,7 @@ public class OnboardingOrgInfoServiceTest {
         }
         return;
       }
-      super.ensureOrgInfoLocation(client, org, countryIso, address);
+      super.ensureOrgInfoLocation(client, org, countryIso, address, taxId);
     }
 
     @Override

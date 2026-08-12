@@ -102,6 +102,12 @@ class ToolRegistryGenerateToolsTest {
     // default with a spec-specific stub.
     accessMock.when(() -> NeoAccessUtils.hasWindowAccessForSpec(any(), anyString()))
         .thenReturn(true);
+    // ETP-4596: processSpec's "R" branch now additionally gates on hasReportSpecAccess.
+    // Default every report spec to accessible here for the same reason as the
+    // hasWindowAccessForSpec default above — tests that specifically exercise report-spec
+    // access denial override this with a spec-specific stub.
+    accessMock.when(() -> NeoAccessUtils.hasReportSpecAccess(any(), anyString()))
+        .thenReturn(true);
     registry = new ToolRegistry();
   }
 
@@ -628,6 +634,36 @@ class ToolRegistryGenerateToolsTest {
 
       assertFalse(toolNames(tools).contains("generate_print_invoice"),
           "Non-callable report specs must not produce a generate_* tool");
+    }
+
+    /**
+     * ETP-4596: a callable report spec whose constituent window is inaccessible to the
+     * current role (e.g. bank-statements once its entity carries a populated
+     * {@code AD_TAB_ID}) must not surface a generate_* tool, even though it is callable and
+     * the caller holds the {@code neo:report} scope. Before this fix, RBAC was never
+     * consulted here at all.
+     *
+     * <p>The callable half is stubbed as a resolved <em>contract</em> rather than as
+     * {@code isReportCallable}, which is what ETP-4793 replaced it with (IMP-19): the point of
+     * this test is that access is denied to a spec that would otherwise have produced a tool, so
+     * it has to stub whatever the emitting branch actually asks. Stubbing the retired predicate
+     * would leave the test green for the wrong reason — the access gate short-circuits before the
+     * contract lookup, so an unused stub is indistinguishable from a correct one.</p>
+     */
+    @Test
+    @DisplayName("callable report spec denied by hasReportSpecAccess emits no tool")
+    void callableReportSpecDeniedByRbacEmitsNoTool() {
+      SFSpec spec = createReportSpec(SPEC_PRINT_INVOICE);
+      when(spec.getProcess()).thenReturn(null);
+      callabilityMock.when(() -> NeoReportCallability.resolveReportContract(spec))
+          .thenReturn(NO_INPUT_CONTRACT);
+      accessMock.when(() -> NeoAccessUtils.hasReportSpecAccess(spec, "GET")).thenReturn(false);
+      mockSpecCriteria(List.of(spec));
+
+      List<McpToolDefinition> tools = registry.generateTools(scopesOf("neo:report"));
+
+      assertFalse(toolNames(tools).contains("generate_print_invoice"),
+          "A report spec denied by hasReportSpecAccess must not produce a generate_* tool");
     }
 
     @Test

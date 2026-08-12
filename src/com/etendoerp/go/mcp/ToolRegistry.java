@@ -133,12 +133,18 @@ public class ToolRegistry {
         tools.add(buildProcessTool(spec.getName(), spec));
         return;
       }
-      // A generate_ tool is emitted only for a report spec whose NEO-native handler declares a
-      // report contract. Anything else — no handler, or a handler that serves the entity for
-      // some other purpose — gets no tool and surfaces as not configured via neo discover.
-      // The contract is resolved once here and carried into the schema so the tool an agent
-      // reads and the parameters the router enforces cannot diverge (ETP-4793 / IMP-19).
-      if ("R".equals(specType) && permissions.canReport) {
+      // A generate_ tool is emitted only for a report spec that clears two independent gates.
+      // ETP-4596: the role must be able to reach it — a process-less report spec gates on its
+      // constituent windows (AD_TAB_ID) via hasReportSpecAccess instead of always being offered.
+      // ETP-4793 / IMP-19: the spec's NEO-native handler must declare a report contract.
+      // Anything else — no handler, or a handler that serves the entity for some other purpose —
+      // gets no tool and surfaces as not configured via neo discover. The contract is resolved
+      // once here and carried into the schema so the tool an agent reads and the parameters the
+      // router enforces cannot diverge. The access gate runs first because it is the security
+      // one: both predicates are pure, so the order changes only which cost is paid on a spec
+      // that fails both, and a spec the role cannot see should not have its handlers looked up.
+      if ("R".equals(specType) && permissions.canReport
+          && NeoAccessUtils.hasReportSpecAccess(spec, "GET")) {
         NeoReportCallability.resolveReportContract(spec)
             .ifPresent(contract -> tools.add(buildReportTool(spec.getName(), spec, contract)));
       }

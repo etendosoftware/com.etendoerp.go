@@ -840,10 +840,15 @@ public class ReconciliationHandler implements NeoHandler {
     // invoice payment created here — an already-existing transaction (operationIds) keeps its own.
     if (hasInvoices) {
       String paymentMethodId = body.optString("paymentMethodId", null);
-      NeoResponse invError = ReconciliationFlowSupport.createInvoicePayments(
-          account, line, invoiceSpecs, operationIds, TOLERANCE, paymentMethodId);
-      if (invError != null) {
-        return invError;
+      // ETP-4797: opt-in, off by default. Writes off the shortfall when the line settles the
+      // invoice for less than its outstanding amount, so the invoice is fully paid instead of
+      // keeping a residual balance. The UI only offers it for a single selected invoice.
+      boolean writeoffDifference = body.optBoolean("writeoffDifference", false);
+      NeoResponse payError = ReconciliationWriteoffSupport.payInvoices(
+          account, line, invoiceSpecs, operationIds, TOLERANCE, paymentMethodId,
+          writeoffDifference);
+      if (payError != null) {
+        return payError;
       }
     }
 

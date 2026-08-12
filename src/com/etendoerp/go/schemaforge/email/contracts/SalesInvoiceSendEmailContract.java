@@ -39,4 +39,13 @@ public final class SalesInvoiceSendEmailContract extends DefaultDocumentSendEmai
     super(NAME, TEMPLATE, "Sales Invoice", "invoice_number", true,
         Objects.requireNonNull(documentResolver, "documentResolver"));
   }
+
+  /**
+   * Only used when an operator edits the copy: this contract then leaves the branded
+   * {@code invoice} template for the content template, which needs a subject.
+   */
+  @Override
+  protected String documentTypeLabel() {
+    return "Factura de Venta";
+  }
 }

@@ -984,30 +984,26 @@ class NeoCrudHandler {
     // Build the same where clause used by the list GET (tab HQL where with
     // @token@ substitution + parent filter for child tabs). Prefixed with
     // "as e" so OBQuery picks up the alias for its own client/org filters.
-    List<String> predicates = new ArrayList<>();
-    predicates.add("e." + resolvedProperty + " IS NOT NULL");
-
-    String tabWhere = adTab.getHqlwhereclause();
-    addTabWherePredicate(adTab, tabWhere, parentId, predicates);
-    if (parentId != null && adTab.getTabLevel() != null && adTab.getTabLevel() > 0) {
-      String parentFilter = resolveParentFilter(adTab, parentId);
-      if (StringUtils.isNotBlank(parentFilter)) {
-        predicates.add("(" + parentFilter + ")");
-      }
-    }
     String searchPredicate = NeoDistinctFetchSupport.buildDistinctSearchPredicate(prop, resolvedProperty, search);
-    if (searchPredicate != null) {
-      predicates.add(searchPredicate);
-    }
+    List<String> predicates = buildDistinctPredicates(adTab, resolvedProperty, parentId, searchPredicate);
+
+    // For to-one associations (FK properties), project through the identifier
+    // column (".id") instead of the bare association path, and reuse the exact
+    // same expression in ORDER BY. Projecting the raw association makes
+    // Hibernate expand ORDER BY into the target entity's own columns (a join)
+    // while SELECT DISTINCT only ever projects the local FK column — Postgres
+    // rejects that mismatch. See NeoDistinctFetchSupport#buildDistinctProjection.
+    String projection = NeoDistinctFetchSupport.buildDistinctProjection(prop, resolvedProperty);
+    boolean isRelation = !prop.isPrimitive();
 
     StringBuilder where = new StringBuilder(" as e where ")
         .append(String.join(HQL_AND_OPERATOR, predicates))
-        .append(" order by e.").append(resolvedProperty).append(" asc");
+        .append(" order by ").append(projection).append(" asc");
 
     try {
       OBQuery<BaseOBObject> obQuery = OBDal.getInstance()
           .createQuery(dalEntityName, where.toString());
-      obQuery.setSelectClause("DISTINCT e." + resolvedProperty);
+      obQuery.setSelectClause("DISTINCT " + projection);
       if (searchPredicate != null) {
         obQuery.setNamedParameter("search", "%" + search.toLowerCase() + "%");
       }
@@ -1018,10 +1014,7 @@ class NeoCrudHandler {
       boolean hasMore = results.size() > pageSize;
       List<Object> page = hasMore ? new ArrayList<>(results.subList(0, pageSize)) : results;
 
-      JSONArray data = new JSONArray();
-      for (Object value : page) {
-        data.put(NeoDistinctFetchSupport.toDistinctEntry(value));
-      }
+      JSONArray data = buildDistinctData(prop, isRelation, page);
 
       JSONObject payload = new JSONObject();
       payload.put("data", data);
@@ -1037,6 +1030,55 @@ class NeoCrudHandler {
       return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
           "Failed to compute distinct values");
     }
+  }
+
+  /**
+   * Builds the HQL predicate list for {@link #handleDistinctFetch(Tab, Map)}: the
+   * not-null guard on the projected property, the tab's own HQL where clause
+   * (token-resolved), the parent-record filter for child tabs, and the
+   * caller-resolved search predicate. Extracted purely to keep
+   * {@code handleDistinctFetch}'s cognitive complexity within the Sonar limit
+   * (S3776) — same logic, same order, unconditionally invoked once.
+   */
+  private List<String> buildDistinctPredicates(Tab adTab, String resolvedProperty, String parentId,
+      String searchPredicate) {
+    List<String> predicates = new ArrayList<>();
+    predicates.add("e." + resolvedProperty + " IS NOT NULL");
+
+    String tabWhere = adTab.getHqlwhereclause();
+    addTabWherePredicate(adTab, tabWhere, parentId, predicates);
+    if (parentId != null && adTab.getTabLevel() != null && adTab.getTabLevel() > 0) {
+      String parentFilter = resolveParentFilter(adTab, parentId);
+      if (StringUtils.isNotBlank(parentFilter)) {
+        predicates.add("(" + parentFilter + ")");
+      }
+    }
+    if (searchPredicate != null) {
+      predicates.add(searchPredicate);
+    }
+    return predicates;
+  }
+
+  /**
+   * Builds the {@code data} array for {@link #handleDistinctFetch(Tab, Map)}: for a
+   * to-one association property, resolves display identifiers in batch; for a
+   * primitive property, emits the raw distinct values as-is. Extracted purely to
+   * keep {@code handleDistinctFetch}'s cognitive complexity within the Sonar
+   * limit (S3776) — same logic, same order, unconditionally invoked once.
+   */
+  private JSONArray buildDistinctData(Property prop, boolean isRelation, List<Object> page) {
+    JSONArray data = new JSONArray();
+    if (isRelation) {
+      Map<String, String> identifierById = NeoDistinctFetchSupport.loadIdentifiers(prop.getTargetEntity(), page);
+      for (Object value : page) {
+        data.put(NeoDistinctFetchSupport.toRelationDistinctEntry(value, identifierById));
+      }
+    } else {
+      for (Object value : page) {
+        data.put(NeoDistinctFetchSupport.toDistinctEntry(value));
+      }
+    }
+    return data;
   }
 
   private void addTabWherePredicate(Tab adTab, String tabWhere, String parentId, List<String> predicates) {
