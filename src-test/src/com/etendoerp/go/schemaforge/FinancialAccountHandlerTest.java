@@ -416,6 +416,175 @@ public class FinancialAccountHandlerTest {
     assertEquals(400, handler.validateAndEnrichUpdate(ACC_ID, body).getHttpStatus());
   }
 
+  // ── amount tolerance: 0…100 percentage bound ─────────────────────────────
+  //
+  // Server-side counterpart of the modal's clamp. The value is read as a PERCENTAGE of the
+  // statement line by both the automatch engine and the difference posting, so at 100 % or more the
+  // latter's gate would authorise posting an entire statement line of any size to a G/L item. The
+  // UI clamp is a convenience; this is the boundary.
+
+  private static final String FIELD_AMOUNT_TOLERANCE = "eTGOAmountTolerance";
+
+  /** The human-readable message of an error response. */
+  private static String errorMessage(NeoResponse response) throws Exception {
+    return response.getBody().getJSONObject("error").getString("message");
+  }
+
+  /** A tolerance above 100 % is rejected on update, naming the accepted range. */
+  @Test
+  public void testUpdateAmountToleranceAboveMaxReturns400() throws Exception {
+    JSONObject body = new JSONObject().put(FIELD_AMOUNT_TOLERANCE, "500");
+
+    NeoResponse response = handler.validateAndEnrichUpdate(ACC_ID, body);
+
+    assertEquals(400, response.getHttpStatus());
+    String message = errorMessage(response);
+    assertTrue(message.contains("between 0 and 100"));
+    assertTrue("the message should echo the offending value", message.contains("500"));
+  }
+
+  /** A negative tolerance is rejected on update. */
+  @Test
+  public void testUpdateAmountToleranceNegativeReturns400() throws Exception {
+    JSONObject body = new JSONObject().put(FIELD_AMOUNT_TOLERANCE, "-5");
+
+    NeoResponse response = handler.validateAndEnrichUpdate(ACC_ID, body);
+
+    assertEquals(400, response.getHttpStatus());
+    assertTrue(errorMessage(response).contains("between 0 and 100"));
+  }
+
+  /** Both bounds are INCLUSIVE: 0 and 100 are legitimate configurations. */
+  @Test
+  public void testUpdateAmountToleranceBoundsAreInclusive() throws Exception {
+    assertNull(handler.validateAndEnrichUpdate(ACC_ID,
+        new JSONObject().put(FIELD_AMOUNT_TOLERANCE, "0")));
+    assertNull(handler.validateAndEnrichUpdate(ACC_ID,
+        new JSONObject().put(FIELD_AMOUNT_TOLERANCE, "100")));
+  }
+
+  /** A fractional percentage inside the range is accepted (the field is a decimal). */
+  @Test
+  public void testUpdateAmountToleranceAcceptsDecimal() throws Exception {
+    assertNull(handler.validateAndEnrichUpdate(ACC_ID,
+        new JSONObject().put(FIELD_AMOUNT_TOLERANCE, "2.5")));
+    assertNull(handler.validateAndEnrichUpdate(ACC_ID,
+        new JSONObject().put(FIELD_AMOUNT_TOLERANCE, "99.99")));
+  }
+
+  /** Non-numeric text is rejected with its own message rather than escaping as a 500. */
+  @Test
+  public void testUpdateAmountToleranceNonNumericReturns400() throws Exception {
+    JSONObject body = new JSONObject().put(FIELD_AMOUNT_TOLERANCE, "abc");
+
+    NeoResponse response = handler.validateAndEnrichUpdate(ACC_ID, body);
+
+    assertEquals(400, response.getHttpStatus());
+    assertTrue(errorMessage(response).contains("must be a number"));
+  }
+
+  /**
+   * The guard is inert on a partial update. The Edit-account modal sends ONLY the fields it
+   * considers dirty, so a body without the key — or with an explicit null / empty string — must
+   * validate exactly as before, and the rest of the enrichment must still run.
+   */
+  @Test
+  public void testUpdateWithoutAmountToleranceKeyIsUnaffected() throws Exception {
+    Country spain = mock(Country.class);
+    when(spain.getId()).thenReturn("106");
+    doReturn(spain).when(handler).resolveCountryFromIban(ES_IBAN);
+    JSONObject body = new JSONObject().put("iBAN", ES_IBAN);
+
+    assertNull(handler.validateAndEnrichUpdate(ACC_ID, body));
+    // The IBAN→country sync still happened: the guard did not swallow the enrichment.
+    assertEquals("106", body.getString("country"));
+  }
+
+  /** An explicit JSON null on the field is treated as "not sent", not as invalid. */
+  @Test
+  public void testUpdateAmountToleranceNullOrBlankIsSkipped() throws Exception {
+    JSONObject withNull = new JSONObject();
+    withNull.put(FIELD_AMOUNT_TOLERANCE, JSONObject.NULL);
+    assertNull(handler.validateAndEnrichUpdate(ACC_ID, withNull));
+
+    assertNull(handler.validateAndEnrichUpdate(ACC_ID,
+        new JSONObject().put(FIELD_AMOUNT_TOLERANCE, "")));
+    assertNull(handler.validateAndEnrichUpdate(ACC_ID,
+        new JSONObject().put(FIELD_AMOUNT_TOLERANCE, "   ")));
+  }
+
+  /**
+   * An out-of-range value SHORT-CIRCUITS the update: the enrichment that follows never runs, so
+   * nothing derived from the rejected body can reach the record.
+   */
+  @Test
+  public void testUpdateOutOfRangeToleranceStopsBeforeEnrichment() throws Exception {
+    JSONObject body = new JSONObject()
+        .put(FIELD_AMOUNT_TOLERANCE, "500")
+        .put("iBAN", ES_IBAN);
+
+    NeoResponse response = handler.validateAndEnrichUpdate(ACC_ID, body);
+
+    assertEquals(400, response.getHttpStatus());
+    // The IBAN→country sync is downstream of the guard and must not have run.
+    verify(handler, never()).resolveCountryFromIban(any());
+    assertFalse(body.has("country"));
+  }
+
+  /** The same bound applies on create — an account must not be born out of range. */
+  @Test
+  public void testCreateAmountToleranceAboveMaxReturns400() throws Exception {
+    stubValidCreate();
+    JSONObject body = validCreateBody().put(FIELD_AMOUNT_TOLERANCE, "500");
+
+    NeoResponse response = handler.validateAndEnrichCreate(body);
+
+    assertEquals(400, response.getHttpStatus());
+    assertTrue(errorMessage(response).contains("between 0 and 100"));
+  }
+
+  /** A negative tolerance is rejected on create too. */
+  @Test
+  public void testCreateAmountToleranceNegativeReturns400() throws Exception {
+    stubValidCreate();
+    JSONObject body = validCreateBody().put(FIELD_AMOUNT_TOLERANCE, "-1");
+
+    assertEquals(400, handler.validateAndEnrichCreate(body).getHttpStatus());
+  }
+
+  /**
+   * The create guard runs BEFORE the currency and duplicate-name lookups, so a rejected body never
+   * reaches the DB-bound seams.
+   */
+  @Test
+  public void testCreateOutOfRangeToleranceStopsBeforeLookups() throws Exception {
+    stubValidCreate();
+    JSONObject body = validCreateBody().put(FIELD_AMOUNT_TOLERANCE, "101");
+
+    assertEquals(400, handler.validateAndEnrichCreate(body).getHttpStatus());
+    verify(handler, never()).loadCurrency(any());
+    verify(handler, never()).nameExists(any(), any());
+  }
+
+  /** A valid tolerance leaves the create path untouched. */
+  @Test
+  public void testCreateAmountToleranceInRangeIsAccepted() throws Exception {
+    stubValidCreate();
+
+    assertNull(handler.validateAndEnrichCreate(
+        validCreateBody().put(FIELD_AMOUNT_TOLERANCE, "2.5")));
+    assertNull(handler.validateAndEnrichCreate(
+        validCreateBody().put(FIELD_AMOUNT_TOLERANCE, "100")));
+  }
+
+  /** Create without the field behaves exactly as before the guard existed. */
+  @Test
+  public void testCreateWithoutAmountToleranceKeyIsUnaffected() throws Exception {
+    stubValidCreate();
+
+    assertNull(handler.validateAndEnrichCreate(validCreateBody()));
+  }
+
   // ── delete: soft-archive ─────────────────────────────────────────────────
 
   /** A blank id is rejected with a 400 before any account lookup. */
