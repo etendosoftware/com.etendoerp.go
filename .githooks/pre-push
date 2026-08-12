@@ -175,7 +175,23 @@ exec_with_progress() {
   return $st
 }
 
-# Pipeline runner helper
+# Every failed check lands here instead of aborting the script — the rest of
+# the relevant steps still get their turn, so a push with e.g. a failing test
+# AND a Sonar issue shows both in one attempt, not one per push. Only the
+# final summary (after everything relevant has run) blocks the push.
+FAILED_STEPS=()
+
+record_failure() {
+  local label="$1" existing
+  for existing in "${FAILED_STEPS[@]}"; do
+    [ "$existing" = "$label" ] && return 0
+  done
+  FAILED_STEPS+=("$label")
+}
+
+# Pipeline runner helper. Always returns 0 — never trips `set -e` at the call
+# site — regardless of whether the step passed; failures are tracked in
+# FAILED_STEPS instead.
 run_step() {
   local step_num="$1"
   local step_name="$2"
@@ -210,8 +226,11 @@ run_step() {
     echo ""
     # If the step produced a ready-to-use handoff prompt (e.g. the Sonar gate),
     # print it IN FULL to the console so the developer sees exactly what to fix.
+    # Remove it afterward — otherwise a LATER, unrelated step failing in this
+    # same run would show this stale handoff instead of its own detail.
     if [ -f "$HANDOFF_FILE" ]; then
       cat "$HANDOFF_FILE"
+      rm -f "$HANDOFF_FILE"
     else
       echo "========================================================================="
       echo "❌ ERROR: Step '$step_name' failed with exit code $exit_status."
@@ -223,8 +242,9 @@ run_step() {
       echo "-------------------------------------------------------------------------"
       echo ""
     fi
-    exit 1
+    record_failure "$step_name"
   fi
+  return 0
 }
 
 # Report a step that relevance detection decided not to run. Non-blocking: the
@@ -364,6 +384,22 @@ if [ "$RUN_STEP3" = "1" ]; then
   run_step "3" "Generating JaCoCo coverage + SonarQube analysis" "$MODULE_DIR" "tmp/pre-push/sonar-analysis.log" "$SONAR_CMD"
 else
   skip_step "3" "Generating JaCoCo coverage + SonarQube analysis"
+fi
+
+if [ "${#FAILED_STEPS[@]}" -gt 0 ]; then
+  echo ""
+  echo "=========================================="
+  echo "❌ Pre-push checks failed — ${#FAILED_STEPS[@]} problem(s) found (see details above):"
+  i=1
+  for f in "${FAILED_STEPS[@]}"; do
+    echo "   $i. $f"
+    i=$((i + 1))
+  done
+  echo ""
+  echo "   Fix everything listed, then re-push (each is re-checked together —"
+  echo "   no need to push once per problem). Bypass with 'git push --no-verify'."
+  echo "=========================================="
+  exit 1
 fi
 
 echo ""
