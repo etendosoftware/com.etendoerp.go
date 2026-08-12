@@ -27,9 +27,12 @@ import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.criterion.Projections;
 import org.hibernate.criterion.Restrictions;
+import javax.servlet.http.HttpServletResponse;
+
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.erpCommon.utility.OBMessageUtils;
 import org.openbravo.model.common.invoice.Invoice;
 
 /**
@@ -80,6 +83,22 @@ public class VerifactuConfigReadyHandler implements NeoHandler {
 
   private static final String DELETE_CONFIG_SQL =
       "DELETE FROM etvfac_verifactu_config WHERE etvfac_verifactu_config_id = :id";
+
+  // Mirrors the condition in ETVFAC_VFACTU_CONFIG_BLOCK_TRG so the Java layer gives a clear
+  // error before the trigger fires (which would surface as an opaque DB exception).
+  private static final String COUNT_PENDING_INVOICES_SQL =
+      "SELECT COUNT(1) FROM c_invoice ci"
+          + " WHERE ci.docstatus = 'CO'"
+          + "   AND ci.issotrx = 'Y'"
+          + "   AND ci.em_etvfac_invoice_status IN ('PE','IN')"
+          + "   AND ci.em_etvfac_senttoverifac = 'N'"
+          + "   AND NOT EXISTS ("
+          + "         SELECT 1 FROM c_invoice_reverse ri"
+          + "         WHERE ri.reversed_c_invoice_id = ci.c_invoice_id)"
+          + "   AND :orgId = ad_get_org_le_bu(ci.ad_org_id, 'LE')"
+          + "   AND ci.created >= :adoptionDate";
+
+  private static final String ETVFAC_CFG_BLOCK_MSG = "ETVFAC_cfg_verifactu_block";
 
   /**
    * Pre-hook: implements smart deactivation (ETP-4785). When a PUT explicitly sets
@@ -143,6 +162,12 @@ public class VerifactuConfigReadyHandler implements NeoHandler {
       return deletedResponse();
     }
 
+    // Block deactivation when pending invoices exist (mirrors the DB trigger's check).
+    if (hasPendingVerifactuInvoices(orgId, adoptionDate)) {
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
+          OBMessageUtils.messageBD(ETVFAC_CFG_BLOCK_MSG));
+    }
+
     // Check whether any invoice was sent through Verifactu during this config's active period.
     if (hasVerifactuInvoicesSince(orgId, adoptionDate)) {
       // Invoices exist — let the default CRUD deactivate (preserve audit trail).
@@ -151,6 +176,21 @@ public class VerifactuConfigReadyHandler implements NeoHandler {
 
     deleteConfig(recordId);
     return deletedResponse();
+  }
+
+  /**
+   * Returns {@code true} if at least one completed sales invoice is pending Verifactu
+   * submission for this config's org and period (matches the ETVFAC_VFACTU_CONFIG_BLOCK_TRG
+   * trigger condition exactly). When pending invoices exist, deactivation or deletion must
+   * be blocked so those invoices can still be transmitted.
+   */
+  private boolean hasPendingVerifactuInvoices(String orgId, java.util.Date adoptionDate) {
+    Number count = (Number) OBDal.getInstance().getSession()
+        .createNativeQuery(COUNT_PENDING_INVOICES_SQL)
+        .setParameter("orgId", orgId)
+        .setParameter("adoptionDate", adoptionDate)
+        .uniqueResult();
+    return count != null && count.longValue() > 0;
   }
 
   /**
