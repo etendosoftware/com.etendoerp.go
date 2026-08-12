@@ -189,34 +189,71 @@ public class UserRoleCompositionServiceIntegrationTest extends OBBaseTest {
     }
   }
 
+  /**
+   * Creates a throwaway system-level ({@code AD_Client_ID = '0'}) template role, purely as test
+   * fixture setup — the real production seeding path ({@code EnsureSystemRoleTemplatesScript})
+   * uses raw SQL via {@code ConnectionProvider}, which never goes through {@code OBDal}/{@code
+   * SecurityChecker} at all, so it never hits what this method has to work around.
+   *
+   * <p><b>Why the extra admin-mode wrapping:</b> {@code SecurityChecker.checkWriteAccess}
+   * requires the row's OWN client to literally equal {@code obContext.getCurrentClient()} UNLESS
+   * {@code doOrgClientAccessCheck()} is {@code false} — and {@code OBContext.setAdminMode(true)}
+   * (used by the surrounding test methods, and by {@code UserRoleCompositionService} itself)
+   * passes {@code true} for exactly that flag, so it does NOT bypass this specific check
+   * ({@code OBContext.setAdminMode(boolean)}'s javadoc: the {@code boolean} parameter IS {@code
+   * doOrgClientAccessCheck}). Only the no-arg {@link OBContext#setAdminMode()} (which calls
+   * {@code setAdminMode(false)}) disables it. {@link UserRoleCompositionService} itself never
+   * needs this: every row IT writes is scoped to the tenant's own client (the personal role, its
+   * {@code AD_Role_Inheritance} rows, the {@code AD_User_Roles} sync) — it only ever READS the
+   * client {@code '0'} template via {@code OBDal.get(Role.class, id)}, which {@code
+   * SecurityChecker} never gates. So this bypass is fixture-only, not a production gap.</p>
+   */
   private Role createSystemTemplateRole() {
-    Client systemClient = OBDal.getInstance().get(Client.class, SYSTEM_CLIENT_ID);
-    Organization starOrg = OBDal.getInstance().get(Organization.class, STAR_ORG_ID);
-    Role role = OBProvider.getInstance().get(Role.class);
-    role.setNewOBObject(true);
-    role.setClient(systemClient);
-    role.setOrganization(starOrg);
-    role.setActive(true);
-    role.setName("ETP-4852 IT template " + System.nanoTime());
-    role.setUserLevel(SystemRoleTemplates.FIXED_ROLE_USER_LEVEL);
-    role.setManual(true);
-    role.setTemplate(true);
-    role.setClientAdmin(false);
-    OBDal.getInstance().save(role);
-    OBDal.getInstance().flush();
-    return role;
+    OBContext.setAdminMode();
+    try {
+      Client systemClient = OBDal.getInstance().get(Client.class, SYSTEM_CLIENT_ID);
+      Organization starOrg = OBDal.getInstance().get(Organization.class, STAR_ORG_ID);
+      Role role = OBProvider.getInstance().get(Role.class);
+      role.setNewOBObject(true);
+      role.setClient(systemClient);
+      role.setOrganization(starOrg);
+      role.setActive(true);
+      role.setName("ETP-4852 IT template " + System.nanoTime());
+      role.setUserLevel(SystemRoleTemplates.FIXED_ROLE_USER_LEVEL);
+      role.setManual(true);
+      role.setTemplate(true);
+      role.setClientAdmin(false);
+      OBDal.getInstance().save(role);
+      OBDal.getInstance().flush();
+      return role;
+    } finally {
+      OBContext.restorePreviousMode();
+    }
   }
 
+  /**
+   * Grants a smoke-test {@code AD_Window_Access} row on the (system-level) throwaway template —
+   * same fixture-only admin-mode bypass rationale as {@link #createSystemTemplateRole()}, since
+   * the new {@code WindowAccess} row is also client {@code '0'} (it mirrors {@code role}'s own
+   * client). Production code never creates a {@code WindowAccess} row itself — those are core's
+   * {@code RoleInheritanceManager} propagating the TEMPLATE's existing rows, an entity copy, not
+   * a fresh row at a client the service picked — so this has no production equivalent either.
+   */
   private void grantWindowAccess(Role role, Window window) {
-    WindowAccess access = OBProvider.getInstance().get(WindowAccess.class);
-    access.setNewOBObject(true);
-    access.setClient(role.getClient());
-    access.setOrganization(role.getOrganization());
-    access.setActive(true);
-    access.setRole(role);
-    access.setWindow(window);
-    access.setEditableField(true);
-    OBDal.getInstance().save(access);
+    OBContext.setAdminMode();
+    try {
+      WindowAccess access = OBProvider.getInstance().get(WindowAccess.class);
+      access.setNewOBObject(true);
+      access.setClient(role.getClient());
+      access.setOrganization(role.getOrganization());
+      access.setActive(true);
+      access.setRole(role);
+      access.setWindow(window);
+      access.setEditableField(true);
+      OBDal.getInstance().save(access);
+    } finally {
+      OBContext.restorePreviousMode();
+    }
   }
 
   @SuppressWarnings("unchecked")
