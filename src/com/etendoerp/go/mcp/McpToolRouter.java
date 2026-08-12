@@ -1070,7 +1070,10 @@ public class McpToolRouter {
       // naming the value it could not resolve — a different contract for the same field.
       JSONObject fkError = resolveBatchFkNames(operations);
       if (fkError != null) {
-        return wrapAsErrorContent(fkError.toString(2));
+        // IMP-5 clause (i): reported through the same outcome envelope as a failure inside
+        // executeBatch, and as text rather than error content for the same reason — one condition
+        // must not have two shapes depending on which funnel caught it.
+        return wrapAsTextContent(fkError.toString(2));
       }
       JSONObject result = BatchService.forBatchOnly().executeBatch(operations);
       if (!result.optBoolean("committed", false)) {
@@ -1135,8 +1138,11 @@ public class McpToolRouter {
    * Bodies are mutated in place, so the resolved ids are what {@code executeBatch} persists.
    *
    * @param operations the {@code operations} array from the tool call
-   * @return {@code null} when every body resolved, or the structured FK error of the first op that
-   *         failed, carrying a {@code failedAt} pointer so the agent knows which op to fix
+   * @return {@code null} when every body resolved, or — for the first op that failed — the full batch
+   *         outcome envelope built by
+   *         {@link McpToolRouterSupport#toMcpBatchPreflightFailure(JSONObject, int, String)}, which
+   *         carries {@code committed:false} and the {@code failedAt} pointer so the agent reads this
+   *         rejection exactly as it reads a failure from inside the batch (IMP-5 clause (i))
    */
   private JSONObject resolveBatchFkNames(JSONArray operations) throws JSONException {
     for (int i = 0; i < operations.length(); i++) {
@@ -1169,14 +1175,8 @@ public class McpToolRouter {
           McpSelectorContextHelper.buildSelectorContextParams(null, adTab), log,
           value -> value.startsWith(BatchService.REF_PREFIX));
       if (fkError != null) {
-        JSONObject failedAt = new JSONObject();
-        failedAt.put("index", i);
-        String opId = op.optString("id", null);
-        if (StringUtils.isNotBlank(opId)) {
-          failedAt.put("id", opId);
-        }
-        fkError.put("failedAt", failedAt);
-        return fkError;
+        return McpToolRouterSupport.toMcpBatchPreflightFailure(fkError, i,
+            op.optString("id", null));
       }
     }
     return null;

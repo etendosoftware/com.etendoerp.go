@@ -1930,11 +1930,11 @@ class McpToolRouterSupportTest {
     @Test
     @DisplayName("maps each status onto a stable code an agent can branch on")
     void mapsStatusesToCodes() {
-      assertEquals("not_found", McpToolRouterSupport.batchErrorCode(404));
-      assertEquals("method_not_allowed", McpToolRouterSupport.batchErrorCode(405));
-      assertEquals("validation_error", McpToolRouterSupport.batchErrorCode(400));
-      assertEquals("validation_error", McpToolRouterSupport.batchErrorCode(422));
-      assertEquals("server_error", McpToolRouterSupport.batchErrorCode(500));
+      assertEquals("not_found", McpToolRouterSupport.errorCodeForStatus(404));
+      assertEquals("method_not_allowed", McpToolRouterSupport.errorCodeForStatus(405));
+      assertEquals("validation_error", McpToolRouterSupport.errorCodeForStatus(400));
+      assertEquals("validation_error", McpToolRouterSupport.errorCodeForStatus(422));
+      assertEquals("server_error", McpToolRouterSupport.errorCodeForStatus(500));
     }
 
     @Test
@@ -1957,6 +1957,179 @@ class McpToolRouterSupportTest {
 
       assertNull(McpToolRouterSupport.extractDalMessage(null));
       assertNull(McpToolRouterSupport.extractDalMessage(new JSONObject()));
+    }
+  }
+
+  @Nested
+  @DisplayName("toMcpHandlerError — the fourth error funnel (IMP-5 clause (iv))")
+  class ToMcpHandlerError {
+
+    @Test
+    @DisplayName("flattens the nested NeoResponse.error shape into the canonical envelope")
+    void flattensNestedError() throws Exception {
+      // Verbatim from the live probe that found this funnel: generate_aging_receivable({}) after
+      // passing contract validation, failing inside the handler (IMP-19 §6.3).
+      JSONObject inner = new JSONObject();
+      inner.put("message", "No accounting schema with currency is configured for organization "
+          + "61849243BE89460EB70866880A545D50");
+      inner.put("status", 422);
+      JSONObject body = new JSONObject();
+      body.put("error", inner);
+
+      JSONObject envelope = McpToolRouterSupport.toMcpHandlerError(body, 422);
+
+      assertEquals(422, envelope.getInt("status"));
+      assertEquals("validation_error", envelope.getString("error"));
+      assertTrue(envelope.getString("detail").startsWith("No accounting schema with currency"));
+      // The nesting is gone: 'error' is a code an agent can branch on, not an object.
+      assertNull(envelope.optJSONObject("error"));
+    }
+
+    @Test
+    @DisplayName("adds no seeAlso — neither docs topic helps an instance-configuration failure")
+    void addsNoSeeAlso() throws Exception {
+      JSONObject inner = new JSONObject();
+      inner.put("message", "No accounting schema with currency is configured");
+      inner.put("status", 422);
+      JSONObject body = new JSONObject();
+      body.put("error", inner);
+
+      // Pinned rather than left to a comment, on IMP-17 §4.3's precedent: a deliberate omission and
+      // a forgotten key look identical in a response, so the test has to state which this is.
+      assertFalse(McpToolRouterSupport.toMcpHandlerError(body, 422).has("seeAlso"));
+    }
+
+    @Test
+    @DisplayName("leaves an already-canonical envelope untouched, so normalizing twice is safe")
+    void isIdempotent() throws Exception {
+      // The shape IMP-17 and IMP-24 build upstream. Re-flattening it would strip the very keys
+      // that make it actionable, so the early return is what protects them.
+      JSONObject canonical = new JSONObject();
+      canonical.put("status", 422);
+      canonical.put("error", "validation_error");
+      canonical.put("detail", "Missing required fields");
+      canonical.put("missingFields", new JSONArray().put("partnerAddress"));
+      canonical.put("seeAlso", "docs(topic:\"creating records\")");
+
+      JSONObject once = McpToolRouterSupport.toMcpHandlerError(canonical, 422);
+      JSONObject twice = McpToolRouterSupport.toMcpHandlerError(once, 422);
+
+      assertEquals("validation_error", twice.getString("error"));
+      assertEquals("partnerAddress", twice.getJSONArray("missingFields").getString(0));
+      assertEquals("docs(topic:\"creating records\")", twice.getString("seeAlso"));
+      assertEquals("Missing required fields", twice.getString("detail"));
+    }
+
+    @Test
+    @DisplayName("lifts the nested object's other keys instead of discarding them")
+    void preservesHandlerDetail() throws Exception {
+      JSONObject inner = new JSONObject();
+      inner.put("message", "Period is not open");
+      inner.put("status", 422);
+      inner.put("field", "accountingDate");
+      inner.put("available", new JSONArray().put("2026-08"));
+      JSONObject body = new JSONObject();
+      body.put("error", inner);
+
+      JSONObject envelope = McpToolRouterSupport.toMcpHandlerError(body, 422);
+
+      // A handler that named a field and its candidates meant the agent to see them; a
+      // normalization that dropped them would trade one unusable error for another.
+      assertEquals("accountingDate", envelope.getString("field"));
+      assertEquals("2026-08", envelope.getJSONArray("available").getString(0));
+      assertEquals("Period is not open", envelope.getString("detail"));
+    }
+
+    @Test
+    @DisplayName("gives a body-less failure a status, a code and a detail")
+    void handlesNullBody() throws Exception {
+      JSONObject envelope = McpToolRouterSupport.toMcpHandlerError(null, 500);
+
+      assertEquals(500, envelope.getInt("status"));
+      assertEquals("server_error", envelope.getString("error"));
+      assertEquals("Request failed with status 500", envelope.getString("detail"));
+    }
+
+    @Test
+    @DisplayName("annotates an unrecognised body without removing anything from it")
+    void annotatesUnknownShape() throws Exception {
+      JSONObject body = new JSONObject();
+      body.put("reportRows", new JSONArray().put("partial"));
+      body.put("warning", "truncated");
+
+      JSONObject envelope = McpToolRouterSupport.toMcpHandlerError(body, 500);
+
+      assertEquals(500, envelope.getInt("status"));
+      assertEquals("server_error", envelope.getString("error"));
+      // Additive: a handler's own payload survives, because we cannot know it was not the point.
+      assertEquals("truncated", envelope.getString("warning"));
+      assertEquals("partial", envelope.getJSONArray("reportRows").getString(0));
+    }
+  }
+
+  @Nested
+  @DisplayName("toMcpBatchPreflightFailure — one shape per condition (IMP-5 clause (i))")
+  class ToMcpBatchPreflightFailure {
+
+    /** The resolver's structured error for an FK name that matched nothing (evidence C9). */
+    private JSONObject fkError() throws Exception {
+      JSONObject error = new JSONObject();
+      error.put("status", 422);
+      error.put("error", "not_found");
+      error.put("detail", "No Currency matches 'EUR_Currency'");
+      error.put("field", "currency");
+      return error;
+    }
+
+    @Test
+    @DisplayName("carries committed:false, the key an agent is told to branch on")
+    void carriesCommitted() throws Exception {
+      JSONObject body = McpToolRouterSupport.toMcpBatchPreflightFailure(fkError(), 1, "l1");
+
+      // The whole of clause (i): this key was absent, so an agent following neo_batch's own
+      // documented contract read false from a missing key by luck rather than by promise.
+      assertTrue(body.has("committed"));
+      assertFalse(body.getBoolean("committed"));
+      assertEquals(1, body.getJSONObject("failedAt").getInt("index"));
+      assertEquals("l1", body.getJSONObject("failedAt").getString("id"));
+      assertEquals("not_found", body.getJSONObject("error").getString("error"));
+      assertEquals("currency", body.getJSONObject("error").getString("field"));
+    }
+
+    @Test
+    @DisplayName("claims atomic:true with an empty persisted list — true by construction here")
+    void claimsAtomicity() throws Exception {
+      JSONObject body = McpToolRouterSupport.toMcpBatchPreflightFailure(fkError(), 0, "h0");
+
+      // Stronger than executeBatch can promise: the pre-pass runs before the transaction opens,
+      // so nothing can have persisted. IMP-23 §1 found that this is exactly why FK failures
+      // always looked atomic while persist-time failures were not.
+      assertTrue(body.getBoolean("atomic"));
+      assertEquals(0, body.getJSONArray("persisted").length());
+      // And the hint must say why, not reuse the rollback wording: no rollback happened.
+      assertTrue(body.getString("hint").contains("before the transaction opened"));
+    }
+
+    @Test
+    @DisplayName("omits the failedAt id when the operation declared none")
+    void omitsBlankOpId() throws Exception {
+      assertFalse(McpToolRouterSupport.toMcpBatchPreflightFailure(fkError(), 2, null)
+          .getJSONObject("failedAt").has("id"));
+      assertFalse(McpToolRouterSupport.toMcpBatchPreflightFailure(fkError(), 2, "  ")
+          .getJSONObject("failedAt").has("id"));
+    }
+
+    @Test
+    @DisplayName("matches the outcome keys BatchService itself defines")
+    void usesBatchServiceKeys() throws Exception {
+      JSONObject body = McpToolRouterSupport.toMcpBatchPreflightFailure(fkError(), 0, "h0");
+
+      // Pins the shared-constant decision rather than the literals: if BatchService renames an
+      // outcome key, this fails here instead of drifting silently in a response body.
+      assertTrue(body.has(com.etendoerp.go.schemaforge.BatchService.FIELD_COMMITTED));
+      assertTrue(body.has(com.etendoerp.go.schemaforge.BatchService.FIELD_ATOMIC));
+      assertTrue(body.has(com.etendoerp.go.schemaforge.BatchService.FIELD_PERSISTED));
+      assertTrue(body.has(com.etendoerp.go.schemaforge.BatchService.FIELD_HINT));
     }
   }
 

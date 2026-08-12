@@ -167,12 +167,21 @@ final class McpHookExecutor {
   /**
    * Convert a {@link NeoResponse} to MCP result format.
    * Responses with status &ge; 400 set {@code isError: true}.
+   *
+   * <p>This is the <b>fourth error funnel</b> (ETP-4793 / IMP-5 clause (iv)). It used to forward the
+   * handler's body verbatim, which is how {@code generate_aging_receivable({})} answered the nested
+   * pre-IMP-5 {@code {"error":{"message":…,"status":422}}} with nothing an agent could branch on —
+   * found while verifying IMP-19, after IMP-17 had closed the three funnels it enumerated and this
+   * was in none of them. Every MCP path that returns a handler's or a process's {@code NeoResponse}
+   * comes through here — report generation, {@code neo_process}, the widget/amortization paths and
+   * all four entity pre/post hooks — so normalizing once covers all of them. The normalization is
+   * additive and idempotent; see {@link McpToolRouterSupport#toMcpHandlerError} for why it does not
+   * live in {@code NeoResponse.error} itself.</p>
    */
   static JSONObject neoResponseToMcpResult(NeoResponse neoResponse) throws JSONException {
     if (neoResponse.getHttpStatus() >= 400) {
-      String errorText = neoResponse.getBody() != null
-          ? neoResponse.getBody().toString(2)
-          : "Request failed with status " + neoResponse.getHttpStatus();
+      String errorText = McpToolRouterSupport
+          .toMcpHandlerError(neoResponse.getBody(), neoResponse.getHttpStatus()).toString(2);
       return McpToolRouter.wrapAsErrorContent(errorText);
     }
     String text = neoResponse.getBody() != null

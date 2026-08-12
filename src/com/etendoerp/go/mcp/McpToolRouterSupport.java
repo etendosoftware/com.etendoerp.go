@@ -22,6 +22,7 @@ import java.util.Collections;
 import java.util.Iterator;
 import java.util.List;
 
+import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
@@ -40,6 +41,7 @@ import org.openbravo.model.ad.ui.Tab;
 
 import org.openbravo.service.json.JsonConstants;
 
+import com.etendoerp.go.schemaforge.BatchService;
 import com.etendoerp.go.schemaforge.MissingRequiredFieldsException;
 import com.etendoerp.go.schemaforge.NeoActionSurface;
 import com.etendoerp.go.schemaforge.NeoResponse;
@@ -951,6 +953,138 @@ final class McpToolRouterSupport {
   }
 
   /**
+   * Normalize a {@link com.etendoerp.go.schemaforge.NeoResponse} error body into the flat IMP-5
+   * envelope (ETP-4793 / IMP-5 clause (iv)).
+   *
+   * <p><b>The fourth error funnel.</b> IMP-17 enumerated three places a raw error escaped the
+   * envelope and closed all three. Verifying IMP-19 found a fourth that none of them covered:
+   * a report handler's <em>own</em> errors. {@code McpToolRouter#handleReport} validates the call
+   * against the handler's declared contract — that half is enveloped — and then invokes the handler,
+   * whose {@code NeoResponse} body is forwarded verbatim. So
+   * {@code generate_aging_receivable({})} answered
+   * {@code {"error":{"message":"No accounting schema with currency is configured for organization
+   * 6184…","status":422}}}: the nested pre-IMP-5 shape, with no machine-detectable code to branch on.
+   * The same funnel serves {@code neo_process}, the {@code neo_widget}/amortization paths and every
+   * entity pre/post hook, because all of them return through
+   * {@code McpHookExecutor#neoResponseToMcpResult} — which is why one normalization here covers five
+   * surfaces, the same leverage IMP-17 got from closing three funnels with one change.</p>
+   *
+   * <p><b>The shape is not rewritten in {@code NeoResponse.error} itself</b>, deliberately. That
+   * factory serves the REST endpoints the React UI consumes, and its nested {@code error.message} is
+   * what the UI reads. This is the same split IMP-17 §4.4 made for {@code MISSING_REQUIRED_FIELDS}:
+   * the REST shape stays, the translation to the agent's shape happens in the MCP layer.</p>
+   *
+   * <p><b>Additive, never destructive.</b> A handler may have built a rich body on purpose, so no
+   * key is ever removed: the nested {@code error} object is flattened (its {@code message} becomes
+   * {@code detail}, its remaining keys are lifted alongside), and {@code status} / {@code error} are
+   * filled in only when absent. A body that is already a canonical envelope — {@code error} carrying
+   * a code {@code String} — is returned untouched, which is what keeps this idempotent and keeps the
+   * richer IMP-17 / IMP-24 bodies ({@code missingFields}, {@code invalidDates}, {@code fieldErrors})
+   * passing through this method intact.</p>
+   *
+   * <p><b>No {@code seeAlso} is added</b>, on IMP-17 §4.3's precedent that a deliberate omission
+   * beats an unhelpful value. The two topics that exist are {@code "reading records"} and
+   * {@code "creating records"}; pointing an agent at either for *"no accounting schema with currency
+   * is configured"* sends it to read a recipe that cannot help. When a handler knows a better
+   * pointer it can put one in its own body, and this method will preserve it.</p>
+   *
+   * @param body       the handler's error body, or {@code null}
+   * @param httpStatus the response status, used when the body names none
+   * @return the normalized envelope; a fresh object when {@code body} is {@code null}, otherwise
+   *         {@code body} itself, mutated in place
+   * @throws JSONException never in practice (all values are plain strings/ints)
+   */
+  static JSONObject toMcpHandlerError(JSONObject body, int httpStatus) throws JSONException {
+    if (body == null) {
+      JSONObject envelope = new JSONObject();
+      envelope.put(McpConstants.KEY_STATUS, httpStatus);
+      envelope.put(McpConstants.KEY_ERROR, errorCodeForStatus(httpStatus));
+      envelope.put(McpConstants.KEY_DETAIL, "Request failed with status " + httpStatus);
+      return envelope;
+    }
+    // Already canonical: 'error' holds the code itself. Returning early is what makes repeated
+    // normalization safe, and it is why the envelopes IMP-17 and IMP-24 build upstream survive.
+    if (body.optString(McpConstants.KEY_ERROR, null) != null
+        && body.optJSONObject(McpConstants.KEY_ERROR) == null) {
+      return body;
+    }
+    JSONObject nested = body.optJSONObject(McpConstants.KEY_ERROR);
+    int status = httpStatus;
+    if (nested != null) {
+      status = nested.optInt(McpConstants.KEY_STATUS, httpStatus);
+      String message = nested.optString(McpConstants.KEY_MESSAGE, null);
+      if (message != null && !message.isBlank() && !body.has(McpConstants.KEY_DETAIL)) {
+        body.put(McpConstants.KEY_DETAIL, message);
+      }
+      // Lift whatever else the handler put inside the nested object rather than discarding it —
+      // a handler that reported a field or a candidate list meant the agent to see it.
+      for (Iterator<?> keys = nested.keys(); keys.hasNext();) {
+        String key = String.valueOf(keys.next());
+        if (!McpConstants.KEY_MESSAGE.equals(key) && !McpConstants.KEY_STATUS.equals(key)
+            && !body.has(key)) {
+          body.put(key, nested.get(key));
+        }
+      }
+      body.remove(McpConstants.KEY_ERROR);
+    }
+    body.put(McpConstants.KEY_ERROR, errorCodeForStatus(status));
+    if (!body.has(McpConstants.KEY_STATUS)) {
+      body.put(McpConstants.KEY_STATUS, status);
+    }
+    if (!body.has(McpConstants.KEY_DETAIL)) {
+      body.put(McpConstants.KEY_DETAIL, "Request failed with status " + status);
+    }
+    return body;
+  }
+
+  /**
+   * Report a batch rejected by the MCP FK pre-pass in the same outcome envelope a batch failure
+   * always uses (ETP-4793 / IMP-5 clause (i)).
+   *
+   * <p><b>The envelope used to differ by failure class.</b> A batch that failed inside
+   * {@code executeBatch} came back as {@code {committed:false, atomic, persisted, hint, failedAt,
+   * error:{…}}}. A batch rejected by the FK-by-name pre-pass — which runs <em>before</em>
+   * {@code executeBatch} — came back as the resolver's flat error with a {@code failedAt} bolted on
+   * and <b>no {@code committed} key at all</b> (evidence C9), so an agent branching on
+   * {@code committed}, exactly as the tool description tells it to, read {@code false} from a missing
+   * key by luck or crashed on it. One condition, two shapes, and the difference was invisible from
+   * the call site.</p>
+   *
+   * <p><b>{@code atomic:true} / {@code persisted:[]} are true here by construction</b>, not by
+   * observation — a stronger guarantee than {@code executeBatch} can give. IMP-23 §1 found that the
+   * discriminator three benchmark runs had missed was exactly this: a pre-pass failure happens before
+   * the transaction opens, so nothing can have persisted, which is why these failures always
+   * <em>looked</em> atomic while persist-time failures were not. What used to be an accident of
+   * timing is now a claim the response makes. The hint says so specifically rather than reusing
+   * {@code BatchService}'s "rolled back as a unit" wording: no rollback happened, because no
+   * transaction was opened.</p>
+   *
+   * @param fkError the resolver's structured error for the first op that failed to resolve
+   * @param index   the index of that operation in the {@code operations} array
+   * @param opId    that operation's caller-supplied {@code id}, or {@code null} when it declared none
+   * @return the batch outcome envelope
+   * @throws JSONException never in practice (all values are plain strings/ints)
+   */
+  static JSONObject toMcpBatchPreflightFailure(JSONObject fkError, int index, String opId)
+      throws JSONException {
+    JSONObject body = new JSONObject();
+    body.put(BatchService.FIELD_COMMITTED, false);
+    body.put(BatchService.FIELD_ATOMIC, true);
+    body.put(BatchService.FIELD_PERSISTED, new JSONArray());
+    body.put(BatchService.FIELD_HINT, "Nothing was persisted: the batch was rejected before the "
+        + "transaction opened, so no records were created and none need cleaning up. Fix the "
+        + "operation reported in 'failedAt' and retry the whole batch.");
+    JSONObject failedAt = new JSONObject();
+    failedAt.put("index", index);
+    if (StringUtils.isNotBlank(opId)) {
+      failedAt.put("id", opId);
+    }
+    body.put("failedAt", failedAt);
+    body.put(McpConstants.KEY_ERROR, fkError);
+    return body;
+  }
+
+  /**
    * Rewrite a {@code BatchService} failure body into the IMP-5 error envelope (IMP-15).
    * <p>
    * {@code BatchService} serves both the REST {@code /batch} endpoint and {@code neo_batch}, and it
@@ -991,7 +1125,7 @@ final class McpToolRouterSupport {
 
     JSONObject clean = new JSONObject();
     clean.put(McpConstants.KEY_STATUS, status);
-    clean.put(McpConstants.KEY_ERROR, batchErrorCode(status));
+    clean.put(McpConstants.KEY_ERROR, errorCodeForStatus(status));
     clean.put(McpConstants.KEY_DETAIL, dalMessage == null ? message : message + ": " + dalMessage);
     clean.put(McpConstants.KEY_SEE_ALSO, McpConstants.SEE_ALSO_WRITING);
     result.put(McpConstants.KEY_ERROR, clean);
@@ -1042,7 +1176,7 @@ final class McpToolRouterSupport {
   }
 
   /** Map a batch failure's HTTP status onto a stable machine-detectable code (IMP-15). */
-  static String batchErrorCode(int status) {
+  static String errorCodeForStatus(int status) {
     if (status == McpConstants.STATUS_NOT_FOUND) {
       return McpConstants.ERROR_NOT_FOUND;
     }

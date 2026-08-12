@@ -163,10 +163,21 @@ public class BatchService {
    * not run yet, so the value is not resolvable as either an id or a name.
    */
   public static final String REF_PREFIX = "$ref:";
-  private static final String FIELD_COMMITTED = "committed";
-  private static final String FIELD_ATOMIC = "atomic";
-  private static final String FIELD_PERSISTED = "persisted";
-  private static final String FIELD_HINT = "hint";
+  /**
+   * The four outcome keys of a batch response. Public for the same reason {@link #REF_PREFIX} is
+   * (IMP-15): the MCP layer builds one batch failure of its own — the FK-by-name pre-pass rejects a
+   * body before {@code executeBatch} is ever called (IMP-5 clause (i)) — and it must report that
+   * outcome with the keys defined here rather than with string literals of its own. Two spellings of
+   * {@code committed} drifting apart is precisely the failure IMP-5 clause (i) describes: an agent
+   * branching on the key it was promised, against a body that does not carry it.
+   */
+  public static final String FIELD_COMMITTED = "committed";
+  /** @see #FIELD_COMMITTED */
+  public static final String FIELD_ATOMIC = "atomic";
+  /** @see #FIELD_COMMITTED */
+  public static final String FIELD_PERSISTED = "persisted";
+  /** @see #FIELD_COMMITTED */
+  public static final String FIELD_HINT = "hint";
   private static final String FIELD_PARENT_ID = "parentId";
   private static final String FIELD_ID = "id";
   private static final String FIELD_ENTITY = "entity";
