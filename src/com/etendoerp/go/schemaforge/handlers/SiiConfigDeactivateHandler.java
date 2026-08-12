@@ -21,22 +21,19 @@ import java.util.Date;
 
 import javax.inject.Named;
 
-import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONException;
-import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.criterion.Projections;
 import org.hibernate.criterion.Restrictions;
-import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.module.sii.data.AEATSIIConfig;
 import org.openbravo.module.sii.data.AEATSIIFacturas;
 import org.openbravo.model.common.invoice.Invoice;
 
+import com.etendoerp.go.schemaforge.AbstractSmartDeactivationHandler;
 import com.etendoerp.go.schemaforge.NeoContext;
-import com.etendoerp.go.schemaforge.NeoHandler;
 import com.etendoerp.go.schemaforge.NeoResponse;
 
 /**
@@ -56,53 +53,9 @@ import com.etendoerp.go.schemaforge.NeoResponse;
  * discovered if a scope annotation such as {@code @ApplicationScoped} is added).
  */
 @Named("sii-config-deactivate-handler")
-public class SiiConfigDeactivateHandler implements NeoHandler {
+public class SiiConfigDeactivateHandler extends AbstractSmartDeactivationHandler {
 
   private static final Logger log = LogManager.getLogger(SiiConfigDeactivateHandler.class);
-
-  private static final String METHOD_PUT = "PUT";
-  private static final String FIELD_ACTIVE = "active";
-
-  /**
-   * Pre-hook: implements smart deactivation for SII config records. When a PUT explicitly
-   * sets {@code active=false}, decides between deleting the record (no invoices sent) or
-   * falling through to the default CRUD deactivation (invoices sent — audit trail required).
-   *
-   * @return 200 {@code {"deleted":true}} when the record was deleted; {@code null} to let
-   *     default CRUD deactivate it normally.
-   */
-  @Override
-  public NeoResponse handle(NeoContext context) {
-    if (!METHOD_PUT.equalsIgnoreCase(context.getHttpMethod())) {
-      return null;
-    }
-    if (!isExplicitlyDeactivating(context.getRequestBody())) {
-      return null;
-    }
-    String recordId = context.getRecordId();
-    if (StringUtils.isBlank(recordId)) {
-      return null;
-    }
-    try {
-      OBContext.setAdminMode(true);
-      try {
-        return smartDeactivate(recordId);
-      } finally {
-        OBContext.restorePreviousMode();
-      }
-    } catch (Exception e) {
-      log.error("SiiConfigDeactivateHandler.handle: error during smart deactivation for {}: {}",
-          recordId, e.getMessage(), e);
-      // Fail safe: let default CRUD deactivate normally rather than blocking the request.
-      return null;
-    }
-  }
-
-  /** Post-hook: no behavior — smart deactivation is entirely a pre-hook concern. */
-  @Override
-  public NeoResponse afterHandle(NeoContext context) {
-    return null;
-  }
 
   /**
    * Decides between deleting the config record (no invoices sent through it) and letting the
@@ -112,7 +65,8 @@ public class SiiConfigDeactivateHandler implements NeoHandler {
    * @return a 200 {@code {"deleted":true}} response when the record was deleted, or
    *     {@code null} to let default CRUD deactivate it.
    */
-  NeoResponse smartDeactivate(String recordId) throws JSONException {
+  @Override
+  protected NeoResponse smartDeactivate(String recordId) throws JSONException {
     AEATSIIConfig config = OBDal.getInstance().get(AEATSIIConfig.class, recordId);
     if (config == null) {
       return null;
@@ -161,23 +115,4 @@ public class SiiConfigDeactivateHandler implements NeoHandler {
     return count != null && count.longValue() > 0;
   }
 
-  private static NeoResponse deletedResponse() throws JSONException {
-    JSONObject body = new JSONObject();
-    body.put("deleted", true);
-    return NeoResponse.ok(body);
-  }
-
-  private static boolean isExplicitlyDeactivating(JSONObject body) {
-    if (body == null || !body.has(FIELD_ACTIVE)) {
-      return false;
-    }
-    Object value = body.opt(FIELD_ACTIVE);
-    if (value instanceof Boolean) {
-      return !(Boolean) value;
-    }
-    if (value instanceof String) {
-      return "false".equalsIgnoreCase((String) value) || "N".equalsIgnoreCase((String) value);
-    }
-    return false;
-  }
 }

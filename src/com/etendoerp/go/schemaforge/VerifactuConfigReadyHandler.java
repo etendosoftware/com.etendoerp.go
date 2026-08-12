@@ -60,15 +60,12 @@ import org.openbravo.model.common.invoice.Invoice;
  * {@link MarkSubsanationHandler}.
  */
 @Named("verifactu-config-ready-handler")
-public class VerifactuConfigReadyHandler implements NeoHandler {
+public class VerifactuConfigReadyHandler extends AbstractSmartDeactivationHandler {
 
   private static final Logger log = LogManager.getLogger(VerifactuConfigReadyHandler.class);
 
   private static final String METHOD_POST = "POST";
-  private static final String METHOD_PUT = "PUT";
   private static final String METHOD_PATCH = "PATCH";
-
-  private static final String FIELD_ACTIVE = "active";
 
   private static final String SELECT_IS_READY_SQL =
       "SELECT is_ready, in_vfactu_system, ad_org_id FROM etvfac_verifactu_config "
@@ -101,40 +98,6 @@ public class VerifactuConfigReadyHandler implements NeoHandler {
   private static final String ETVFAC_CFG_BLOCK_MSG = "ETVFAC_cfg_verifactu_block";
 
   /**
-   * Pre-hook: implements smart deactivation (ETP-4785). When a PUT explicitly sets
-   * {@code active=false}, checks whether invoices were sent through this config during its
-   * active period. If none were sent, deletes the record and returns 200
-   * {@code {"deleted":true}}. If invoices exist, returns {@code null} so the default CRUD
-   * proceeds and deactivates the record normally (audit-trail preserved).
-   */
-  @Override
-  public NeoResponse handle(NeoContext context) {
-    if (!METHOD_PUT.equalsIgnoreCase(context.getHttpMethod())) {
-      return null;
-    }
-    if (!isExplicitlyDeactivating(context.getRequestBody())) {
-      return null;
-    }
-    String recordId = context.getRecordId();
-    if (StringUtils.isBlank(recordId)) {
-      return null;
-    }
-    try {
-      OBContext.setAdminMode(true);
-      try {
-        return smartDeactivate(recordId);
-      } finally {
-        OBContext.restorePreviousMode();
-      }
-    } catch (Exception e) {
-      log.error("VerifactuConfigReadyHandler.handle: error during smart deactivation for {}: {}",
-          recordId, e.getMessage(), e);
-      // Fail safe: let default CRUD deactivate normally rather than blocking the request.
-      return null;
-    }
-  }
-
-  /**
    * Decides between deleting the config record (no invoices sent through it) and letting the
    * default CRUD deactivate it (invoices exist — audit trail must be preserved).
    *
@@ -142,7 +105,8 @@ public class VerifactuConfigReadyHandler implements NeoHandler {
    * @return a 200 {@code {"deleted":true}} response when the record was deleted, or
    *     {@code null} to let default CRUD deactivate it.
    */
-  NeoResponse smartDeactivate(String recordId) throws JSONException {
+  @Override
+  protected NeoResponse smartDeactivate(String recordId) throws JSONException {
     Object[] row = (Object[]) OBDal.getInstance().getSession()
         .createNativeQuery(SELECT_IS_READY_SQL)
         .setParameter("id", recordId)
@@ -216,26 +180,6 @@ public class VerifactuConfigReadyHandler implements NeoHandler {
         .executeUpdate();
     OBDal.getInstance().flush();
     log.info("VerifactuConfigReadyHandler: deleted unused config record {}", recordId);
-  }
-
-  private static NeoResponse deletedResponse() throws JSONException {
-    JSONObject body = new JSONObject();
-    body.put("deleted", true);
-    return NeoResponse.ok(body);
-  }
-
-  private static boolean isExplicitlyDeactivating(JSONObject body) {
-    if (body == null || !body.has(FIELD_ACTIVE)) {
-      return false;
-    }
-    Object value = body.opt(FIELD_ACTIVE);
-    if (value instanceof Boolean) {
-      return !(Boolean) value;
-    }
-    if (value instanceof String) {
-      return "false".equalsIgnoreCase((String) value) || "N".equalsIgnoreCase((String) value);
-    }
-    return false;
   }
 
   @Override

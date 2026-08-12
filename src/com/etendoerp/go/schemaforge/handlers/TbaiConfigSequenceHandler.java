@@ -43,9 +43,9 @@ import org.openbravo.model.common.enterprise.DocumentType;
 import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.common.invoice.Invoice;
 
+import com.etendoerp.go.schemaforge.AbstractSmartDeactivationHandler;
 import com.etendoerp.go.schemaforge.NeoContext;
 import com.etendoerp.go.schemaforge.NeoEndpointType;
-import com.etendoerp.go.schemaforge.NeoHandler;
 import com.etendoerp.go.schemaforge.NeoResponse;
 import com.smf.ticketbai.data.TbaiConfig;
 
@@ -92,14 +92,11 @@ import com.smf.ticketbai.data.TbaiConfig;
  * before in ETP-4244).
  */
 @Named("tbai-config-sequence-handler")
-public class TbaiConfigSequenceHandler implements NeoHandler {
+public class TbaiConfigSequenceHandler extends AbstractSmartDeactivationHandler {
 
   private static final Logger log = LogManager.getLogger(TbaiConfigSequenceHandler.class);
 
   private static final String METHOD_POST = "POST";
-  private static final String METHOD_PUT = "PUT";
-
-  private static final String FIELD_ACTIVE = "active";
 
   /**
    * DB table name that identifies invoice {@link DocumentType}s. All invoice-category doc types
@@ -117,45 +114,11 @@ public class TbaiConfigSequenceHandler implements NeoHandler {
   private static final long SEQUENCE_INCREMENT_BY = 1L;
 
   /**
-   * Pre-hook: implements smart deactivation (ETP-4785). When a PUT explicitly sets
-   * {@code active=false}, checks whether any invoice was sent through TicketBAI during this
-   * config's active period (i.e. with {@code dateinvoiced >= tbaisystemdate} and matching org).
-   * If the config has no adoption date ({@code tbaisystemdate IS NULL}) or no invoice was sent,
-   * deletes the record and returns 200 {@code {"deleted":true}}. If invoices were sent, returns
-   * {@code null} so the default CRUD deactivates the record normally (audit trail preserved).
-   */
-  @Override
-  public NeoResponse handle(NeoContext context) {
-    if (!METHOD_PUT.equalsIgnoreCase(context.getHttpMethod())) {
-      return null;
-    }
-    if (!isExplicitlyDeactivating(context.getRequestBody())) {
-      return null;
-    }
-    String recordId = context.getRecordId();
-    if (StringUtils.isBlank(recordId)) {
-      return null;
-    }
-    try {
-      OBContext.setAdminMode(true);
-      try {
-        return smartDeactivate(recordId);
-      } finally {
-        OBContext.restorePreviousMode();
-      }
-    } catch (Exception e) {
-      log.warn("TbaiConfigSequenceHandler.handle: error during smart deactivation for {}: {}",
-          recordId, e.getMessage(), e);
-      // Fail safe: let default CRUD deactivate normally.
-      return null;
-    }
-  }
-
-  /**
    * Decides between deleting the config record (no invoices sent through it) and letting the
    * default CRUD deactivate it (invoices exist — audit trail must be preserved).
    */
-  NeoResponse smartDeactivate(String recordId) throws JSONException {
+  @Override
+  protected NeoResponse smartDeactivate(String recordId) throws JSONException {
     TbaiConfig config = OBDal.getInstance().get(TbaiConfig.class, recordId);
     if (config == null) {
       return null;
@@ -197,26 +160,6 @@ public class TbaiConfigSequenceHandler implements NeoHandler {
     crit.setProjection(Projections.rowCount());
     Number count = (Number) crit.uniqueResult();
     return count != null && count.longValue() > 0;
-  }
-
-  private static NeoResponse deletedResponse() throws JSONException {
-    JSONObject body = new JSONObject();
-    body.put("deleted", true);
-    return NeoResponse.ok(body);
-  }
-
-  private static boolean isExplicitlyDeactivating(JSONObject body) {
-    if (body == null || !body.has(FIELD_ACTIVE)) {
-      return false;
-    }
-    Object value = body.opt(FIELD_ACTIVE);
-    if (value instanceof Boolean) {
-      return !(Boolean) value;
-    }
-    if (value instanceof String) {
-      return "false".equalsIgnoreCase((String) value) || "N".equalsIgnoreCase((String) value);
-    }
-    return false;
   }
 
   /**
