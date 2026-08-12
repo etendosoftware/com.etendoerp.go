@@ -780,8 +780,8 @@ class McpSchemaFieldBuilderTest {
       JSONObject fieldObj = new JSONObject();
       invokeStatic("addButtonInfo",
           new Class<?>[]{ JSONObject.class, org.openbravo.model.ad.datamodel.Column.class,
-              String.class },
-          fieldObj, col, null);
+              String.class, boolean.class },
+          fieldObj, col, null, false);
 
       assertEquals("Y", fieldObj.getString("triggerValue"));
       assertEquals("Processed", fieldObj.getString("action"));
@@ -807,8 +807,8 @@ class McpSchemaFieldBuilderTest {
       JSONObject fieldObj = new JSONObject();
       invokeStatic("addButtonInfo",
           new Class<?>[]{ JSONObject.class, org.openbravo.model.ad.datamodel.Column.class,
-              String.class },
-          fieldObj, col, null);
+              String.class, boolean.class },
+          fieldObj, col, null, false);
 
       assertEquals("Y", fieldObj.getString("triggerValue"));
       assertEquals("DocAction", fieldObj.getString("action"));
@@ -838,8 +838,8 @@ class McpSchemaFieldBuilderTest {
       JSONObject fieldObj = new JSONObject();
       invokeStatic("addButtonInfo",
           new Class<?>[]{ JSONObject.class, org.openbravo.model.ad.datamodel.Column.class,
-              String.class },
-          fieldObj, col, null);
+              String.class, boolean.class },
+          fieldObj, col, null, false);
 
       assertEquals("Y", fieldObj.getString("triggerValue"));
       assertEquals("CreateFrom", fieldObj.getString("action"));
@@ -872,8 +872,8 @@ class McpSchemaFieldBuilderTest {
       JSONObject fieldObj = new JSONObject();
       invokeStatic("addButtonInfo",
           new Class<?>[]{ JSONObject.class, org.openbravo.model.ad.datamodel.Column.class,
-              String.class },
-          fieldObj, col, "discarded");
+              String.class, boolean.class },
+          fieldObj, col, "discarded", false);
 
       assertFalse(fieldObj.has("invokeVia"));
       assertFalse(fieldObj.getBoolean("invokable"));
@@ -903,12 +903,72 @@ class McpSchemaFieldBuilderTest {
       JSONObject fieldObj = new JSONObject();
       invokeStatic("addButtonInfo",
           new Class<?>[]{ JSONObject.class, org.openbravo.model.ad.datamodel.Column.class,
-              String.class },
-          fieldObj, col, "system");
+              String.class, boolean.class },
+          fieldObj, col, "system", false);
 
       assertEquals("neo_action", fieldObj.getString("invokeVia"));
       assertFalse(fieldObj.has("invokable"));
       assertFalse(fieldObj.has("notInvokableReason"));
+    }
+
+    /**
+     * IMP-21 defect (viii), found by the live verification: {@code Processing} shares
+     * {@code AD_Process} 111 with {@code DocAction} but is the classic procedure's internal flag,
+     * hidden in every window that has a field for it. It was the one action still presented as
+     * callable while carrying no {@code actionValues}, {@code actionParameter} or
+     * {@code agentPrompt}. Curation could not withdraw it — it is curated {@code system}, which is
+     * a statement about a payload value and says nothing about a button.
+     */
+    @Test
+    @DisplayName("buttonHiddenInTheTabIsNotInvokableEvenWithAProcess")
+    void buttonHiddenInTheTabIsNotInvokableEvenWithAProcess() throws Exception {
+      org.openbravo.model.ad.datamodel.Column col = mock(
+          org.openbravo.model.ad.datamodel.Column.class);
+      Process classicProcess = mock(Process.class);
+
+      when(col.getDBColumnName()).thenReturn("Processing");
+      when(col.getProcess()).thenReturn(classicProcess);
+      when(col.getOBUIAPPProcess()).thenReturn(null);
+      when(classicProcess.getName()).thenReturn("Process Invoice");
+      when(classicProcess.getId()).thenReturn("111");
+
+      JSONObject fieldObj = new JSONObject();
+      invokeStatic("addButtonInfo",
+          new Class<?>[]{ JSONObject.class, org.openbravo.model.ad.datamodel.Column.class,
+              String.class, boolean.class },
+          fieldObj, col, "system", true);
+
+      assertFalse(fieldObj.has("invokeVia"));
+      assertFalse(fieldObj.getBoolean("invokable"));
+      assertTrue(fieldObj.getString("notInvokableReason").startsWith("hidden"));
+      // Still described: an agent should be able to see it exists and shares process 111.
+      assertEquals("111", fieldObj.getString("processId"));
+    }
+
+    /**
+     * Both blockers at once must report the curated one — it tells the agent a human decided this,
+     * which is more actionable than AD's display flag.
+     */
+    @Test
+    @DisplayName("discardedTakesPrecedenceOverHiddenInTheReason")
+    void discardedTakesPrecedenceOverHiddenInTheReason() throws Exception {
+      org.openbravo.model.ad.datamodel.Column col = mock(
+          org.openbravo.model.ad.datamodel.Column.class);
+      Process classicProcess = mock(Process.class);
+
+      when(col.getDBColumnName()).thenReturn("Processing");
+      when(col.getProcess()).thenReturn(classicProcess);
+      when(col.getOBUIAPPProcess()).thenReturn(null);
+      when(classicProcess.getName()).thenReturn("Process Invoice");
+      when(classicProcess.getId()).thenReturn("111");
+
+      JSONObject fieldObj = new JSONObject();
+      invokeStatic("addButtonInfo",
+          new Class<?>[]{ JSONObject.class, org.openbravo.model.ad.datamodel.Column.class,
+              String.class, boolean.class },
+          fieldObj, col, "discarded", true);
+
+      assertTrue(fieldObj.getString("notInvokableReason").startsWith("discarded"));
     }
 
     /**
@@ -934,8 +994,8 @@ class McpSchemaFieldBuilderTest {
       fieldObj.put("label", "EM_Psd2_Generate Bank Payment");
       invokeStatic("addButtonInfo",
           new Class<?>[]{ JSONObject.class, org.openbravo.model.ad.datamodel.Column.class,
-              String.class },
-          fieldObj, col, null);
+              String.class, boolean.class },
+          fieldObj, col, null, false);
 
       assertEquals("Generate SEPA payment file", fieldObj.getString("label"));
     }
@@ -958,8 +1018,8 @@ class McpSchemaFieldBuilderTest {
       fieldObj.put("label", "EM_Aeatsii_Unsubscribe");
       invokeStatic("addButtonInfo",
           new Class<?>[]{ JSONObject.class, org.openbravo.model.ad.datamodel.Column.class,
-              String.class },
-          fieldObj, col, null);
+              String.class, boolean.class },
+          fieldObj, col, null, false);
 
       assertEquals("Unsubscribe", fieldObj.getString("label"));
     }
@@ -983,8 +1043,8 @@ class McpSchemaFieldBuilderTest {
       fieldObj.put("label", "Copy from");
       invokeStatic("addButtonInfo",
           new Class<?>[]{ JSONObject.class, org.openbravo.model.ad.datamodel.Column.class,
-              String.class },
-          fieldObj, col, null);
+              String.class, boolean.class },
+          fieldObj, col, null, false);
 
       assertEquals("Copy from", fieldObj.getString("label"));
     }
@@ -1070,8 +1130,8 @@ class McpSchemaFieldBuilderTest {
         JSONObject fieldObj = new JSONObject();
         invokeStatic("addButtonInfo",
             new Class<?>[]{ JSONObject.class, org.openbravo.model.ad.datamodel.Column.class,
-                String.class },
-            fieldObj, col, null);
+                String.class, boolean.class },
+            fieldObj, col, null, false);
 
         assertEquals("docAction", fieldObj.getString("actionParameter"));
         JSONArray values = fieldObj.getJSONArray("actionValues");
@@ -1100,8 +1160,8 @@ class McpSchemaFieldBuilderTest {
       JSONObject fieldObj = new JSONObject();
       invokeStatic("addButtonInfo",
           new Class<?>[]{ JSONObject.class, org.openbravo.model.ad.datamodel.Column.class,
-              String.class },
-          fieldObj, col, null);
+              String.class, boolean.class },
+          fieldObj, col, null, false);
 
       assertFalse(fieldObj.has("actionValues"));
       assertFalse(fieldObj.has("actionParameter"));
@@ -1131,8 +1191,8 @@ class McpSchemaFieldBuilderTest {
         JSONObject fieldObj = new JSONObject();
         invokeStatic("addButtonInfo",
             new Class<?>[]{ JSONObject.class, org.openbravo.model.ad.datamodel.Column.class,
-                String.class },
-            fieldObj, col, null);
+                String.class, boolean.class },
+            fieldObj, col, null, false);
 
         assertFalse(fieldObj.has("actionValues"));
         assertFalse(fieldObj.has("actionParameter"));
@@ -1165,8 +1225,8 @@ class McpSchemaFieldBuilderTest {
         JSONObject fieldObj = new JSONObject();
         invokeStatic("addButtonInfo",
             new Class<?>[]{ JSONObject.class, org.openbravo.model.ad.datamodel.Column.class,
-                String.class },
-            fieldObj, col, null);
+                String.class, boolean.class },
+            fieldObj, col, null, false);
 
         assertFalse(fieldObj.has("actionValues"));
         assertFalse(fieldObj.has("actionParameter"));
@@ -1387,6 +1447,96 @@ class McpSchemaFieldBuilderTest {
       JSONObject result = buildField(buildButtonColumn("col-copyfrom-2", "CopyFrom"), curated);
 
       assertTrue(result.getBoolean("businessCritical"));
+    }
+  }
+
+  // ─── isHiddenButtonField ────────────────────────────────────────────
+
+  @Nested
+  @DisplayName("isHiddenButtonField")
+  class IsHiddenButtonField {
+
+    private org.openbravo.model.ad.ui.Field fieldFor(String colName, boolean displayed,
+        boolean active) {
+      org.openbravo.model.ad.ui.Field field = mock(org.openbravo.model.ad.ui.Field.class);
+      org.openbravo.model.ad.datamodel.Column col = mock(
+          org.openbravo.model.ad.datamodel.Column.class);
+      when(col.getDBColumnName()).thenReturn(colName);
+      when(field.getColumn()).thenReturn(col);
+      when(field.isDisplayed()).thenReturn(displayed);
+      when(field.isActive()).thenReturn(active);
+      return field;
+    }
+
+    private boolean isHidden(org.openbravo.model.ad.ui.Tab tab, String colName) throws Exception {
+      org.openbravo.model.ad.datamodel.Column col = mock(
+          org.openbravo.model.ad.datamodel.Column.class);
+      when(col.getDBColumnName()).thenReturn(colName);
+      return (boolean) invokeStatic("isHiddenButtonField",
+          new Class<?>[]{ org.openbravo.model.ad.ui.Tab.class,
+              org.openbravo.model.ad.datamodel.Column.class },
+          tab, col);
+    }
+
+    private org.openbravo.model.ad.ui.Tab tabWith(org.openbravo.model.ad.ui.Field... fields) {
+      org.openbravo.model.ad.ui.Tab tab = mock(org.openbravo.model.ad.ui.Tab.class);
+      when(tab.getADFieldList()).thenReturn(java.util.Arrays.asList(fields));
+      return tab;
+    }
+
+    /** The Processing case: AD has a field for it and hides it. */
+    @Test
+    @DisplayName("reportsHiddenWhenTheTabFieldIsNotDisplayed")
+    void reportsHiddenWhenTheTabFieldIsNotDisplayed() throws Exception {
+      assertTrue(isHidden(tabWith(fieldFor("Processing", false, true)), "Processing"));
+    }
+
+    /** The DocAction case: displayed, so it stays a real action. */
+    @Test
+    @DisplayName("reportsVisibleWhenTheTabFieldIsDisplayed")
+    void reportsVisibleWhenTheTabFieldIsDisplayed() throws Exception {
+      assertFalse(isHidden(tabWith(fieldFor("DocAction", true, true)), "DocAction"));
+    }
+
+    /**
+     * The load-bearing case. Module-contributed buttons frequently have no AD_Field in the tab —
+     * that is why {@code applyActionLabelFallback} exists — and treating a missing field as hidden
+     * would silently retire those actions across the instance.
+     */
+    @Test
+    @DisplayName("columnWithNoTabFieldIsNotHidden")
+    void columnWithNoTabFieldIsNotHidden() throws Exception {
+      assertFalse(isHidden(tabWith(fieldFor("DocAction", true, true)), "EM_Aeatsii_Send"));
+    }
+
+    /** An inactive field does not describe the tab, so it must not decide the answer. */
+    @Test
+    @DisplayName("inactiveFieldIsIgnored")
+    void inactiveFieldIsIgnored() throws Exception {
+      assertFalse(isHidden(tabWith(fieldFor("Processing", false, false)), "Processing"));
+    }
+
+    /** Column names are compared case-insensitively, as everywhere else in the builder. */
+    @Test
+    @DisplayName("matchesTheColumnNameCaseInsensitively")
+    void matchesTheColumnNameCaseInsensitively() throws Exception {
+      assertTrue(isHidden(tabWith(fieldFor("em_tbai_qrcode", false, true)), "EM_Tbai_QRcode"));
+    }
+
+    /** A field with no column must be skipped rather than NPE the schema build. */
+    @Test
+    @DisplayName("skipsFieldsWithNoColumn")
+    void skipsFieldsWithNoColumn() throws Exception {
+      org.openbravo.model.ad.ui.Field orphan = mock(org.openbravo.model.ad.ui.Field.class);
+      when(orphan.isActive()).thenReturn(true);
+      when(orphan.getColumn()).thenReturn(null);
+      assertTrue(isHidden(tabWith(orphan, fieldFor("Processing", false, true)), "Processing"));
+    }
+
+    @Test
+    @DisplayName("nullTabIsNotHidden")
+    void nullTabIsNotHidden() throws Exception {
+      assertFalse(isHidden(null, "Processing"));
     }
   }
 

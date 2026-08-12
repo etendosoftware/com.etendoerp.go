@@ -918,10 +918,20 @@ Behavior details (`McpActionsView`):
   call on the full entity is required.
 - **`invokeVia` is a claim, not a decoration (IMP-21).** Fire only the actions that carry
   `invokeVia:"neo_action"`. An action the agent cannot run instead reports `invokable: false` plus a
-  `notInvokableReason`, for one of two causes: it is curated `visibility:"discarded"` (deliberately
-  out of this window's agent surface), or the AD button column has no process wired behind it so
-  there is nothing to run. Uncurated buttons with a process stay invokable — absence of curation is
-  not a decision to exclude.
+  `notInvokableReason`, for one of three causes, reported in that order: it is curated
+  `visibility:"discarded"` (deliberately out of this window's agent surface); AD itself does not
+  display the button in the tab (`AD_Field.isDisplayed = 'N'`), which makes it an internal flag
+  rather than a user-facing action; or the AD button column has no process wired behind it so there
+  is nothing to run. Uncurated buttons that AD displays and that have a process stay invokable —
+  absence of curation is not a decision to exclude. A button with **no** `AD_Field` in the tab is not
+  hidden: module-contributed buttons routinely have none, and treating that as hidden would retire
+  them.
+- The **hidden** check exists because `Processing` and `DocAction` on `C_Invoice` point at the *same*
+  `AD_Process` (`111`, `C_Invoice_Post0`). `Processing` is the classic procedure's internal
+  "in progress" flag, hidden in all three windows that have a field for it, and it was the one action
+  the catalog still offered as callable while carrying no `actionValues`, no `actionParameter` and no
+  `agentPrompt`. Curation cannot express this: `Processing` is curated `system`, which states that
+  the server fills a payload value and says nothing about a button.
 - **`invokableCount`** sits next to `actionCount` so the split is visible before reading the array.
   On `sales-invoice/header` the catalog has 22 actions and only a handful are callable.
 - A button carries **no `required` flag** (IMP-21). A button has no payload value, so AD's NOT NULL

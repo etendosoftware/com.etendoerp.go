@@ -462,7 +462,7 @@ final class McpSchemaFieldBuilder {
     addAgentPrompt(fieldObj, promptByColumnId.get((String) col.getId()));
     addSelectorInfo(fieldObj, refId, selectorRefs);
     if (isButton) {
-      addButtonInfo(fieldObj, col, visibility);
+      addButtonInfo(fieldObj, col, visibility, isHiddenButtonField(adTab, col));
       isBusinessCritical = isBusinessCritical || isCriticalAction(fieldObj, dbColName);
     }
     fieldObj.put("businessCritical", isBusinessCritical);
@@ -489,12 +489,14 @@ final class McpSchemaFieldBuilder {
    * still appears in the catalog — knowing an action exists but is out of scope is useful; being
    * told it is callable when it is not is not.</p>
    *
-   * @param fieldObj   the field object being built, mutated in place
-   * @param col        the button AD column
-   * @param visibility the curated visibility for this column, or {@code null} when uncurated
+   * @param fieldObj    the field object being built, mutated in place
+   * @param col         the button AD column
+   * @param visibility  the curated visibility for this column, or {@code null} when uncurated
+   * @param hiddenInTab whether AD itself hides this button in the tab — see
+   *                    {@link #isHiddenButtonField}
    */
-  private static void addButtonInfo(JSONObject fieldObj, Column col, String visibility)
-      throws JSONException {
+  private static void addButtonInfo(JSONObject fieldObj, Column col, String visibility,
+      boolean hiddenInTab) throws JSONException {
     fieldObj.put("triggerValue", "Y");
     fieldObj.put("action", col.getDBColumnName());
     addActionValues(fieldObj, col);
@@ -517,24 +519,28 @@ final class McpSchemaFieldBuilder {
       fieldObj.put("processId", classicProcess.getId());
     }
     applyActionLabelFallback(fieldObj, col, processName);
-    addInvokability(fieldObj, visibility, processName != null);
+    addInvokability(fieldObj, visibility, processName != null, hiddenInTab);
   }
 
   /**
    * Declares whether {@code neo_action} can actually run this button (IMP-21).
    *
-   * <p>Two independent blockers, reported in the order an agent would care about: a curated
-   * {@code discarded} means the action was deliberately kept out of this window's agent surface,
-   * and a missing process means AD has nothing wired behind the column. An uncurated button (no
-   * {@code visibility} row at all) with a process is treated as invokable — that is the
-   * pre-IMP-21 behaviour and the only safe default, since absence of curation is not a decision.
-   * </p>
+   * <p>Three independent blockers, reported in the order an agent would care about. A curated
+   * {@code discarded} means the action was deliberately kept out of this window's agent surface.
+   * {@code hidden} means AD itself never shows the button in this tab, so it is not a user-facing
+   * action at all — see {@link #isHiddenButtonField}. A missing process means AD has nothing wired
+   * behind the column. An uncurated button (no {@code visibility} row at all) that AD does display
+   * and that has a process is treated as invokable — that is the pre-IMP-21 behaviour and the only
+   * safe default, since absence of curation is not a decision.</p>
    */
-  private static void addInvokability(JSONObject fieldObj, String visibility, boolean hasProcess)
-      throws JSONException {
+  private static void addInvokability(JSONObject fieldObj, String visibility, boolean hasProcess,
+      boolean hiddenInTab) throws JSONException {
     String blocker = null;
     if (VISIBILITY_DISCARDED.equals(visibility)) {
       blocker = "discarded: this action is not part of the curated agent surface for this window";
+    } else if (hiddenInTab) {
+      blocker = "hidden: AD does not display this button in the tab, so it is an internal flag "
+          + "rather than a user-facing action";
     } else if (!hasProcess) {
       blocker = "no process: the AD button column has no process wired behind it";
     }
@@ -544,6 +550,47 @@ final class McpSchemaFieldBuilder {
     }
     fieldObj.put(KEY_INVOKABLE, false);
     fieldObj.put(KEY_NOT_INVOKABLE_REASON, blocker);
+  }
+
+  /**
+   * Whether AD itself hides this button in the given tab, i.e. its {@code AD_Field} is
+   * {@code isDisplayed = 'N'} (IMP-21, defect viii).
+   *
+   * <p>Found by the live verification of IMP-21: {@code Processing} and {@code DocAction} on
+   * {@code C_Invoice} point at the <i>same</i> {@code AD_Process} (id {@code 111},
+   * {@code C_Invoice_Post0}), but {@code Processing} is the classic procedure's internal
+   * "in progress" flag — its {@code AD_Field} is hidden in every window that has one (Sales
+   * Invoice, Purchase Invoice, Business Partner Info), while {@code DocAction} and {@code Posted}
+   * are displayed. So the catalog was offering an undescribed second door to the invoice-processing
+   * process: no {@code actionValues}, no {@code actionParameter}, no {@code agentPrompt}.</p>
+   *
+   * <p>This is read off AD rather than curated, which is why it belongs in this generic layer: that
+   * a button the UI never renders is not a user action is structural, not per-window judgement.
+   * Curation could not carry it anyway — the visibility vocabulary is designed for form fields, and
+   * {@code system} (which is what {@code Processing} is curated as) means "the server fills this,
+   * do not ask the user" — a statement about a payload value that says nothing at all about a
+   * button.</p>
+   *
+   * <p><b>A column with no {@code AD_Field} in the tab is NOT hidden.</b> Module-contributed
+   * buttons frequently have no tab field — that is the very case
+   * {@link #applyActionLabelFallback} exists for — and treating a missing field as hidden would
+   * silently retire those actions. Only an explicit {@code isDisplayed = 'N'} blocks. Mirrors
+   * {@link #loadFieldLabels}: first active field for the column wins.</p>
+   */
+  private static boolean isHiddenButtonField(Tab adTab, Column col) {
+    if (adTab == null) {
+      return false;
+    }
+    String dbColName = col.getDBColumnName();
+    for (Field field : adTab.getADFieldList()) {
+      if (!Boolean.TRUE.equals(field.isActive()) || field.getColumn() == null) {
+        continue;
+      }
+      if (dbColName.equalsIgnoreCase(field.getColumn().getDBColumnName())) {
+        return !Boolean.TRUE.equals(field.isDisplayed());
+      }
+    }
+    return false;
   }
 
   /**
