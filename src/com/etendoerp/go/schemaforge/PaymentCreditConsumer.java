@@ -37,8 +37,8 @@ import org.openbravo.model.financialmgmt.payment.FIN_PaymentScheduleDetail;
  *   - 'credit' (accumulated credit): Classic's used-credit mechanism
  *     ({@code setUsedCredit} + {@link FIN_PaymentProcess#linkCreditPayment}) on the
  *     source payment — it must NOT be re-linked as a detail (it is already paid).
- *   - 'abono' (Factura Rectificativa with a negative total, ETP-4738): linked as a
- *     negative invoice payment detail.
+ *   - 'abono' (any invoice with a negative total, ETP-4841 — the document type is
+ *     irrelevant): linked as a negative invoice payment detail.
  */
 final class PaymentCreditConsumer {
 
@@ -92,7 +92,7 @@ final class PaymentCreditConsumer {
     return use;
   }
 
-  /** Consumes a Factura Rectificativa "saldo a favor" by linking its PSD as a negative detail. */
+  /** Consumes a negative-total invoice's "saldo a favor" by linking its PSD as a negative detail. */
   private static BigDecimal consumeAbono(FIN_Payment payment, String psdId, BigDecimal use) {
     if (StringUtils.isBlank(psdId)) {
       return BigDecimal.ZERO;
@@ -107,13 +107,17 @@ final class PaymentCreditConsumer {
   }
 
   /**
-   * Rejects a "saldo a favor" PSD that is not (ETP-4738) a Factura Rectificativa with a negative
-   * total — the selector only ever offers such PSDs, but nothing stops a crafted request from
-   * sending an arbitrary {@code psdId}.
+   * Rejects a "saldo a favor" PSD whose invoice total is not negative — the selector only ever
+   * offers negative-total invoices, but nothing stops a crafted request from sending an
+   * arbitrary {@code psdId}.
+   *
+   * <p>ETP-4841: the document type is deliberately NOT checked. Any invoice with a negative
+   * total is a usable credit whatever its type, and a POSITIVE Factura Rectificativa is a
+   * payable correction that this sign check already rejects on its own.
    *
    * <p>Skipped when {@code psd} is already linked to the payment being registered/edited: it was
-   * validated when originally consumed, and the edit modal must be able to re-save a draft that
-   * consumed a legacy (pre-ETP-4738) source without being locked out by a rule introduced later.
+   * validated when originally consumed, and the edit modal must be able to re-save an older
+   * draft without being locked out by a rule introduced later.
    */
   private static void validateAbonoEligible(FIN_Payment payment, FIN_PaymentScheduleDetail psd) {
     FIN_PaymentDetail existingLink = psd.getPaymentDetails();
@@ -126,13 +130,11 @@ final class PaymentCreditConsumer {
     if (invoice == null) {
       throw new OBException("Credit source not found: " + psd.getId());
     }
-    String docTypeId = invoice.getTransactionDocument() != null
-        ? invoice.getTransactionDocument().getId() : null;
     boolean negativeTotal = invoice.getGrandTotalAmount() != null
         && invoice.getGrandTotalAmount().signum() < 0;
-    if (!negativeTotal || !RectificativeSupport.isRectificativeDocType(docTypeId)) {
+    if (!negativeTotal) {
       throw new OBException(
-          "Credit source is not an eligible Factura Rectificativa: " + psd.getId());
+          "Credit source is not an eligible negative-total invoice: " + psd.getId());
     }
   }
 

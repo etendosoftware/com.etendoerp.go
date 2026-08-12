@@ -302,6 +302,82 @@ class ProductTransactionsHandlerTest {
   }
 
   // ---------------------------------------------------------------------------
+  // afterHandle() — return-material-receipt and return-to-vendor-shipment
+  // (discriminated by C_DocType.IsReturn, NOT M_InOut.MovementType — the same
+  // MovementType is shared by a normal document and its return)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * A sales return (M_InOut with IsSOTrx {@code Y} and its {@code C_DocType.IsReturn}
+   * flag set to {@code Y}) must resolve to the {@code return-material-receipt}
+   * window key, not {@code goods-shipment}.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  void afterHandle_salesReturn_resolvesToReturnMaterialReceipt() throws Exception {
+    JSONArray data = new JSONArray().put(txRow("TX-RET-SALES"));
+    JSONObject body = wrapData(data);
+
+    Object[] sqlRow = new Object[]{ "TX-RET-SALES", "HDR-RMR-1", "return-material-receipt", "RM-0001" };
+
+    try (MockedStatic<OBDal> obDal = Mockito.mockStatic(
+        OBDal.class); MockedStatic<OBContext> obCtx = Mockito.mockStatic(OBContext.class)) {
+
+      OBDal mockDal = mock(OBDal.class);
+      Session session = mock(Session.class);
+      when(mockDal.getSession()).thenReturn(session);
+      obDal.when(OBDal::getInstance).thenReturn(mockDal);
+      mockNativeQuery(session, Collections.singletonList(sqlRow));
+
+      NeoContext ctx = getCtx();
+      ctx.setPreviousResult(NeoResponse.ok(body));
+
+      NeoResponse result = HANDLER.afterHandle(ctx);
+
+      assertNotNull(result);
+      JSONObject row = result.getBody().getJSONObject("response").getJSONArray("data").getJSONObject(0);
+      assertEquals("HDR-RMR-1", row.getString("etgoDocHeaderId"));
+      assertEquals("return-material-receipt", row.getString("etgoDocWindow"));
+      assertEquals("RM-0001", row.getString("etgoDocLabel"));
+    }
+  }
+
+  /**
+   * A purchase return (M_InOut with IsSOTrx {@code N} and its {@code C_DocType.IsReturn}
+   * flag set to {@code Y}) must resolve to the {@code return-to-vendor-shipment}
+   * window key, not {@code goods-receipt}.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  void afterHandle_purchaseReturn_resolvesToReturnToVendorShipment() throws Exception {
+    JSONArray data = new JSONArray().put(txRow("TX-RET-PURCH"));
+    JSONObject body = wrapData(data);
+
+    Object[] sqlRow = new Object[]{ "TX-RET-PURCH", "HDR-RVS-1", "return-to-vendor-shipment", "RV-0001" };
+
+    try (MockedStatic<OBDal> obDal = Mockito.mockStatic(
+        OBDal.class); MockedStatic<OBContext> obCtx = Mockito.mockStatic(OBContext.class)) {
+
+      OBDal mockDal = mock(OBDal.class);
+      Session session = mock(Session.class);
+      when(mockDal.getSession()).thenReturn(session);
+      obDal.when(OBDal::getInstance).thenReturn(mockDal);
+      mockNativeQuery(session, Collections.singletonList(sqlRow));
+
+      NeoContext ctx = getCtx();
+      ctx.setPreviousResult(NeoResponse.ok(body));
+
+      NeoResponse result = HANDLER.afterHandle(ctx);
+
+      assertNotNull(result);
+      JSONObject row = result.getBody().getJSONObject("response").getJSONArray("data").getJSONObject(0);
+      assertEquals("HDR-RVS-1", row.getString("etgoDocHeaderId"));
+      assertEquals("return-to-vendor-shipment", row.getString("etgoDocWindow"));
+      assertEquals("RV-0001", row.getString("etgoDocLabel"));
+    }
+  }
+
+  // ---------------------------------------------------------------------------
   // afterHandle() — SQL row with null headerId or null windowKey: row is skipped
   // ---------------------------------------------------------------------------
 
@@ -337,6 +413,46 @@ class ProductTransactionsHandlerTest {
       JSONObject row = result.getBody().getJSONObject("response").getJSONArray("data").getJSONObject(0);
       assertFalse(row.has("etgoDocHeaderId"), "Row with null headerId must not be enriched");
       assertFalse(row.has("etgoDocWindow"));
+    }
+  }
+
+  /**
+   * When the SQL result has a non-null headerId but a null windowKey (column 2) — the
+   * scenario produced by the {@code LEFT JOIN c_doctype} when a document's doctype row
+   * is missing or its {@code isreturn} flag can't be evaluated by the CASE — the handler
+   * must not inject any enrichment fields either. {@code resolveDocumentTargets} only adds
+   * an entry when both headerId AND windowKey are non-null (ETP-4864 gap: this branch was
+   * not previously exercised even though {@code afterHandle_nullHeaderId_rowIsNotEnriched}
+   * covered the mirror case).
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  void afterHandle_nullWindowKey_rowIsNotEnriched() throws Exception {
+    JSONArray data = new JSONArray().put(txRow("TX-005"));
+    JSONObject body = wrapData(data);
+
+    // SQL returns: headerId present, windowKey null → target is invalid, must be skipped
+    Object[] sqlRow = new Object[]{ "TX-005", "HDR-777", null, "1000031" };
+
+    try (MockedStatic<OBDal> obDal = Mockito.mockStatic(
+        OBDal.class); MockedStatic<OBContext> obCtx = Mockito.mockStatic(OBContext.class)) {
+
+      OBDal mockDal = mock(OBDal.class);
+      Session session = mock(Session.class);
+      when(mockDal.getSession()).thenReturn(session);
+      obDal.when(OBDal::getInstance).thenReturn(mockDal);
+      mockNativeQuery(session, Collections.singletonList(sqlRow));
+
+      NeoContext ctx = getCtx();
+      ctx.setPreviousResult(NeoResponse.ok(body));
+
+      NeoResponse result = HANDLER.afterHandle(ctx);
+
+      assertNotNull(result);
+      JSONObject row = result.getBody().getJSONObject("response").getJSONArray("data").getJSONObject(0);
+      assertFalse(row.has("etgoDocHeaderId"), "Row with null windowKey must not be enriched");
+      assertFalse(row.has("etgoDocWindow"));
+      assertFalse(row.has("etgoDocLabel"));
     }
   }
 
