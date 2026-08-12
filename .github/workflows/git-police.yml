@@ -16,17 +16,17 @@ jobs:
       DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
       DOCKERHUB_PASSWORD: ${{ secrets.DOCKERHUB_PASSWORD }}
     steps:
-      - name: Bypass Git Police (merge-block label)
-        if: ${{ contains(github.event.pull_request.labels.*.name, 'merge-block') }}
-        run: echo "Git Police bypassed via 'merge-block' label - marking check as approved."
+      - name: Bypass Git Police (merge-block label or mergeblock/* branch)
+        if: ${{ contains(github.event.pull_request.labels.*.name, 'merge-block') || startsWith(github.head_ref, 'mergeblock/') }}
+        run: echo "Git Police bypassed via 'merge-block' label or mergeblock/* branch name - marking check as approved."
 
       - name: Checkout code
-        if: ${{ !contains(github.event.pull_request.labels.*.name, 'merge-block') }}
+        if: ${{ !contains(github.event.pull_request.labels.*.name, 'merge-block') && !startsWith(github.head_ref, 'mergeblock/') }}
         uses: actions/checkout@v3
 
       - name: Run Docker container
         id: run-docker
-        if: ${{ !contains(github.event.pull_request.labels.*.name, 'merge-block') }}
+        if: ${{ !contains(github.event.pull_request.labels.*.name, 'merge-block') && !startsWith(github.head_ref, 'mergeblock/') }}
         run: |
           printenv
           echo "-------------------------------------------------------------------------"
@@ -34,7 +34,7 @@ jobs:
           docker run -d -p 5000:5000 -e REPO_TOKEN="${{ env.ETENDOBOT_TOKEN }}" -e PR_ID=${{ env.PR_ID }} -e REPO_NAME=${{ env.REPO_NAME }} etendo/gitpolice:latest
       - name: Git Police API call
         id: call-api
-        if: ${{ !contains(github.event.pull_request.labels.*.name, 'merge-block') }}
+        if: ${{ !contains(github.event.pull_request.labels.*.name, 'merge-block') && !startsWith(github.head_ref, 'mergeblock/') }}
         run: |
           sleep 10s
           response=$(curl -s -o response.txt -w "%{http_code}" -X GET http://localhost:5000/api/github)
