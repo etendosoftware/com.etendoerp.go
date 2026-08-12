@@ -132,8 +132,9 @@ class Fiscal303SubmissionSupport {
       String tipo, String filename, HttpServletRequest request) throws Exception {
     boolean quarterly = period.startsWith("T");
     String valueKey = quarterly ? "AEAT303_Q_" + year : "AEAT303_M_" + year;
+    boolean lastPeriod = Fiscal303BoxesHandler.isLastPeriodOfYear(quarterly, period);
 
-    TaxReport taxReport   = owner.resolveTaxReport(orgId, valueKey);
+    TaxReport taxReport   = owner.resolveTaxReport(orgId, valueKey, lastPeriod);
     AcctSchema acctSchema = owner.resolveAcctSchema();
     List<Period> periods  = owner.resolvePeriods(orgId, year, period);
 

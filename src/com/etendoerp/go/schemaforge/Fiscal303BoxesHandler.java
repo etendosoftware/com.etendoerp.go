@@ -280,7 +280,7 @@ class Fiscal303BoxesHandler extends AbstractFiscalHandler {
     String valueKey = quarterly
         ? "AEAT303_Q_" + year
         : "AEAT303_M_" + year;
-    TaxReport taxReport = resolveTaxReport(orgId, valueKey);
+    TaxReport taxReport = resolveTaxReport(orgId, valueKey, isLastPeriodOfYear(quarterly, period));
 
     AcctSchema acctSchema = resolveAcctSchema();
 
@@ -321,6 +321,21 @@ class Fiscal303BoxesHandler extends AbstractFiscalHandler {
       return Integer.parseInt(period.substring(1)) >= 4;
     }
     return Integer.parseInt(period) >= 10;
+  }
+
+  /**
+   * True when {@code period} is the LAST declaration period of the fiscal year for its
+   * periodicity — {@code "T4"} for quarterly, {@code "12"} for monthly. Classic's own
+   * {@code AEAT303Report2021#generatePage3} (and its 2022/2023/2024/2026 subclass overrides)
+   * computes this exact "annual closing" condition independently via {@code
+   * AEAT303_Utility.isLastPeriod}, then reads the closing-only casillas (e.g. box 125) from
+   * whichever {@code TaxReport} happens to be loaded. {@link #resolveTaxReport(String, String,
+   * boolean)} uses this flag to prefer the {@code "_UltimoPeriodo"} TaxReport variant — the one
+   * seeded with those extra closing casillas — so that lookup never NPEs on the last period of
+   * the year (ETP-4755).
+   */
+  static boolean isLastPeriodOfYear(boolean quarterly, String period) {
+    return quarterly ? "T4".equals(period) : "12".equals(period);
   }
 
   /**
@@ -614,18 +629,52 @@ class Fiscal303BoxesHandler extends AbstractFiscalHandler {
 
   // ── Resolution helpers ───────────────────────────────────────────
 
+  /** Kept for callers that don't care about the last-period-of-year variant (e.g. existing
+   *  tests) — always resolves the base {@code valueKey}, exactly as before ETP-4755. */
   TaxReport resolveTaxReport(String orgId, String valueKey) {
-    OBCriteria<TaxReport> crit = OBDal.getInstance().createCriteria(TaxReport.class);
-    crit.add(Restrictions.in(TaxReport.PROPERTY_ORGANIZATION + ".id", Arrays.asList(orgId, "0")));
-    crit.add(Restrictions.eq(TaxReport.PROPERTY_SEARCHKEY, valueKey));
-    crit.addOrder(Order.desc(TaxReport.PROPERTY_ORGANIZATION + ".id"));
-    crit.setMaxResults(1);
-    List<TaxReport> list = crit.list();
-    if (list.isEmpty()) {
+    return resolveTaxReport(orgId, valueKey, false);
+  }
+
+  /**
+   * Resolves the AEAT303 {@code TaxReport} for {@code valueKey}. When {@code lastPeriod} is
+   * {@code true} (the declaration being generated is the LAST period of its fiscal year for its
+   * periodicity — see {@link #isLastPeriodOfYear}), first tries the {@code
+   * valueKey + "_UltimoPeriodo"} variant seeded by {@code
+   * org.openbravo.module.aeat303.es}'s {@code 303_Report_Tax_Parameters.xml} with the extra
+   * annual-closing casillas (e.g. box 125) that Classic's own report-generation code reads
+   * unconditionally once it detects the last period — regardless of which TaxReport variant was
+   * loaded. Not every org/year necessarily has that variant seeded, so an empty result there
+   * falls through silently to the base {@code valueKey} lookup; only when BOTH lookups come back
+   * empty does this throw (ETP-4755 — fixes the NPE thrown by Classic's {@code
+   * AEAT303_Utility.createINClauseForBaseOBObject} when box 125's TaxReportParameter is missing
+   * from the wrong TaxReport variant).
+   */
+  TaxReport resolveTaxReport(String orgId, String valueKey, boolean lastPeriod) {
+    if (lastPeriod) {
+      TaxReport ultimoPeriodo = findTaxReport(orgId, valueKey + "_UltimoPeriodo");
+      if (ultimoPeriodo != null) {
+        return ultimoPeriodo;
+      }
+    }
+    TaxReport base = findTaxReport(orgId, valueKey);
+    if (base == null) {
       throw new OBException(
           "No TaxReport found for org=" + orgId + " searchKey=" + valueKey);
     }
-    return list.get(0);
+    return base;
+  }
+
+  /** Same org-scoped (falls back to org "0") searchKey lookup {@link #resolveTaxReport} always
+   *  used — extracted so it can be tried without throwing, letting callers fall through to a
+   *  different searchKey on an empty result instead of failing outright. */
+  private TaxReport findTaxReport(String orgId, String searchKey) {
+    OBCriteria<TaxReport> crit = OBDal.getInstance().createCriteria(TaxReport.class);
+    crit.add(Restrictions.in(TaxReport.PROPERTY_ORGANIZATION + ".id", Arrays.asList(orgId, "0")));
+    crit.add(Restrictions.eq(TaxReport.PROPERTY_SEARCHKEY, searchKey));
+    crit.addOrder(Order.desc(TaxReport.PROPERTY_ORGANIZATION + ".id"));
+    crit.setMaxResults(1);
+    List<TaxReport> list = crit.list();
+    return list.isEmpty() ? null : list.get(0);
   }
 
   // ── Utility ──────────────────────────────────────────────────────
