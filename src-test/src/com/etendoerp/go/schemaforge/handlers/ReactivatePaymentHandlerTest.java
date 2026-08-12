@@ -186,10 +186,11 @@ public class ReactivatePaymentHandlerTest {
   //
   // ETP-4841 note — what mocks CAN pin here, and why: unlike the reject-cycle-1 Hibernate-cascade
   // bug above, the draft-delete regression lives entirely in two CONDITIONALS inside handleRemove
-  // (`if (!wasProcessed) releaseInstallmentsToPending(payment)` and `if (wasProcessed)
-  // updateInvoicesAfterPaymentRemoval(...)`), keyed off a `wasProcessed` flag captured BEFORE
-  // reactivation. Branch selection is exactly what a static mock observes reliably, so the tests
-  // below are genuine regression guards for both halves of that fix, not smoke tests. What they
+  // — one calling releaseInstallmentsToPending when the payment was NOT processed, the other
+  // calling updateInvoicesAfterPaymentRemoval when it was — both keyed off a wasProcessed flag
+  // captured BEFORE reactivation. Branch selection is exactly what a static mock observes
+  // reliably, so the tests below are genuine regression guards for both halves of that fix,
+  // not smoke tests. What they
   // still cannot prove is the resulting DB state (that an unlinked, payable FIN_PaymentScheduleDetail
   // fragment actually survives, and that the invoice's paid/outstanding amounts are untouched) —
   // that is what ReactivatePaymentHandlerDraftRemoveIntegrationTest in this package asserts against

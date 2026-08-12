@@ -482,19 +482,30 @@ public class ReactivatePaymentHandler implements NeoHandler {
       String transactionId = resolveFinancialTransactionId(context.getRecordId());
       paymentRecord.put(FIELD_FINANCIAL_TRANSACTION_ID,
           transactionId != null ? transactionId : JSONObject.NULL);
-      // Isolated on purpose: these three are a display nicety, so a failure resolving them must
-      // never discard the whole enriched response — the outer catch returns null (i.e. "leave the
-      // previous result untouched"), which would also drop the financialTransactionId injection
-      // above and silently break the "go to transaction" link.
-      try {
-        injectMultiCurrencyExtras(paymentRecord, context.getRecordId());
-      } catch (Exception e) {
-        log.warn("Could not resolve multi-currency fields for payment {}", context.getRecordId(), e);
-      }
+      injectMultiCurrencyExtrasQuietly(paymentRecord, context.getRecordId());
       return NeoResponse.ok(body);
     } catch (Exception e) {
       log.error("Error resolving financial transaction for payment {}", context.getRecordId(), e);
       return null;
+    }
+  }
+
+  /**
+   * Calls {@link #injectMultiCurrencyExtras} and swallows any failure.
+   *
+   * <p>Isolated on purpose: those three fields are a display nicety, so a failure resolving them
+   * must never discard the whole enriched response. {@link #afterHandle}'s catch returns
+   * {@code null} (i.e. "leave the previous result untouched"), which would also drop the
+   * {@code financialTransactionId} injection and silently break the "go to transaction" link.
+   *
+   * @param paymentRecord the payment JSON object to enrich, mutated in place
+   * @param paymentId the {@code FIN_Payment} id being returned
+   */
+  private void injectMultiCurrencyExtrasQuietly(JSONObject paymentRecord, String paymentId) {
+    try {
+      injectMultiCurrencyExtras(paymentRecord, paymentId);
+    } catch (Exception e) {
+      log.warn("Could not resolve multi-currency fields for payment {}", paymentId, e);
     }
   }
 
@@ -512,20 +523,20 @@ public class ReactivatePaymentHandler implements NeoHandler {
    *
    * <p>Package-private so unit tests can drive it without the full {@code afterHandle} flow.
    *
-   * @param record the payment JSON object to enrich, mutated in place
+   * @param paymentRecord the payment JSON object to enrich, mutated in place
    * @param paymentId the {@code FIN_Payment} id being returned
    * @throws JSONException if the payload rejects a put
    */
-  void injectMultiCurrencyExtras(JSONObject record, String paymentId) throws JSONException {
+  void injectMultiCurrencyExtras(JSONObject paymentRecord, String paymentId) throws JSONException {
     FIN_Payment payment = OBDal.getInstance().get(FIN_Payment.class, paymentId);
     FIN_FinancialAccount account = payment != null ? payment.getAccount() : null;
     Currency accountCurrency = account != null ? account.getCurrency() : null;
-    record.put(FIELD_ACCOUNT_CURRENCY,
+    paymentRecord.put(FIELD_ACCOUNT_CURRENCY,
         accountCurrency != null && accountCurrency.getISOCode() != null
             ? accountCurrency.getISOCode() : JSONObject.NULL);
-    record.put(FIELD_CONVERSION_RATE, nullSafe(
+    paymentRecord.put(FIELD_CONVERSION_RATE, nullSafe(
         payment != null ? payment.getFinancialTransactionConvertRate() : null));
-    record.put(FIELD_FINANCIAL_TRANSACTION_AMOUNT, nullSafe(
+    paymentRecord.put(FIELD_FINANCIAL_TRANSACTION_AMOUNT, nullSafe(
         payment != null ? payment.getFinancialTransactionAmount() : null));
   }
 
