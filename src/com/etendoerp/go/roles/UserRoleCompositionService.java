@@ -311,6 +311,19 @@ public class UserRoleCompositionService {
    * so core's {@code RoleInheritanceEventHandler} fires and propagates/retracts the template's
    * accesses — see the class javadoc.
    *
+   * <p><b>Deliberately queries fresh via {@code OBCriteria} instead of {@code
+   * personalRole.getADRoleInheritanceList()}.</b> The entity's own collection property is NOT
+   * reliably refreshed by a sibling {@code OBDal.save(newInheritance)} within the same session —
+   * a brand-new {@link Role} starts with the plain default {@code ArrayList} its constructor set
+   * ({@code setDefaultValue(PROPERTY_ADROLEINHERITANCELIST, new ArrayList&lt;&gt;())}), and
+   * nothing re-fetches or appends to it after an insert, so a second call against the SAME
+   * in-session {@code Role} instance would see a stale, empty list and try to re-insert a row
+   * that already exists — hitting {@code ad_role_inheritance_role_un}'s
+   * {@code UNIQUE(ad_role_id, inherit_from)} constraint. A fresh criteria query has no such
+   * staleness. This mirrors core's own {@code RoleInheritanceManager#getRoleInheritancesList},
+   * which also always queries fresh rather than trusting {@code role.getADRoleInheritanceList()}.
+   * </p>
+   *
    * @return {@code {addedCount, removedCount}}
    */
   private int[] reconcileInheritances(Role personalRole, List<Role> templates) {
@@ -319,7 +332,7 @@ public class UserRoleCompositionService {
       desiredIds.add(template.getId());
     }
 
-    List<RoleInheritance> existing = new ArrayList<>(personalRole.getADRoleInheritanceList());
+    List<RoleInheritance> existing = findExistingInheritances(personalRole);
     Set<String> existingIds = new LinkedHashSet<>();
     long maxSeqno = 0L;
     for (RoleInheritance inheritance : existing) {
@@ -358,5 +371,20 @@ public class UserRoleCompositionService {
       added++;
     }
     return new int[] { added, removed };
+  }
+
+  /**
+   * Queries {@code AD_Role_Inheritance} fresh for {@code personalRole}, ordered by {@code
+   * Seqno} ascending — deliberately NOT {@code personalRole.getADRoleInheritanceList()}; see
+   * the javadoc on {@link #reconcileInheritances(Role, List)} for why. Mirrors core's own
+   * {@code RoleInheritanceManager#getRoleInheritancesList(Role, Role, boolean)}.
+   */
+  @SuppressWarnings("unchecked")
+  private List<RoleInheritance> findExistingInheritances(Role personalRole) {
+    OBCriteria<RoleInheritance> criteria = OBDal.getInstance()
+        .createCriteria(RoleInheritance.class);
+    criteria.add(Restrictions.eq(RoleInheritance.PROPERTY_ROLE, personalRole));
+    criteria.addOrderBy(RoleInheritance.PROPERTY_SEQUENCENUMBER, true);
+    return criteria.list();
   }
 }
