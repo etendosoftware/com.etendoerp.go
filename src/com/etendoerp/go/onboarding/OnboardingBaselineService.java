@@ -86,7 +86,17 @@ public class OnboardingBaselineService {
    * Use the exact UTC timestamp prefix of the last incorporated .sql file, e.g.:
    * {@code "20260617T120000Z"} matches {@code 20260617T120000Z__R7-tax-accounts.sql}.</p>
    *
-   * Current watermark: R22 fin-account-warehouse-acct (2026-08-05).
+   * Current watermark: R23 acctdim-centrally-maintained (2026-08-11).
+   *
+   * <p><b>Note (2026-08-11, ETP-4854):</b> gap K1 — {@code AD_Client.Acctdim_Centrally_Maintained}
+   * was hardcoded to {@code true} for every new client by classic {@code InitialSetupUtility},
+   * locking every tenant out of the flat, per-dimension accounting-dimension visibility mechanism
+   * that Etendo GO's own "Dimensiones contables" screen ({@code
+   * GeneralLedgerConfigurationHandler#applyDimensionChanges}) actually writes to — the fine-grained
+   * {@code AD_Client.<Dim>_Acctdim_*} matrix the {@code true} default routes to has no Etendo GO
+   * screen at all. Closed by {@code OnboardingAcctdimCentrallyMaintainedService}, wired as the new
+   * step right before this baseline stamp. Bumped to R23's own timestamp, {@code
+   * 2026-08-11T12:00:00Z}.</p>
    *
    * <p><b>Note (2026-08-05, ETP-4743):</b> bumped from R21's {@code 2026-08-05T12:00:00Z} (see
    * the ETP-4720 note below) to R22's {@code 2026-08-05T14:00:00Z}, per this merge block's
@@ -159,7 +169,7 @@ public class OnboardingBaselineService {
    * ticket's scope); R21's own {@code @check} already no-ops on them today and will self-heal once
    * that separate gap closes, with no onboarding change needed here.</p>
    */
-  private static final Instant ONBOARDING_PROVISIONED_THROUGH = Instant.parse("2026-08-05T14:00:00Z");
+  private static final Instant ONBOARDING_PROVISIONED_THROUGH = Instant.parse("2026-08-11T12:00:00Z");
 
   private static final String SQL_INSERT_BASELINE = ""
       + "INSERT INTO etgo_data_fix_history ("
