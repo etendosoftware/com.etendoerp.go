@@ -924,26 +924,95 @@ final class McpToolRouterSupport {
    * Build an explicit, machine-detectable not-found error body for a get-by-id (IMP-5).
    * <p>
    * Replaces the ambiguous {@code {data:[], status:0}} success shape with a clear
-   * {@code {response:{status:404, error:"not_found", detail:"…"}}} so an agent can tell
+   * {@code {status:404, error:"not_found", detail:"…", seeAlso:"…"}} so an agent can tell
    * "not found" from "empty match" purely from the response.
+   *
+   * <p><b>Flat, as of IMP-5 clause (iii).</b> This envelope used to be returned wrapped in
+   * {@code {"response":{…}}}, which made it the one read-verb error that did not match the shape of
+   * its siblings on the same tool: an unknown filter or a DAL failure on the very same
+   * {@code neo_get} call came back flat from {@code buildDalFailureEnvelope}. IMP-17 §8.6 measured
+   * "read errors are flat" on that vector and the not-found vector was never re-checked, so the
+   * asymmetry survived inside the item that introduced the envelope.</p>
    *
    * @param specName   the spec name from the tool call
    * @param entityName the entity name from the tool call
    * @param recordId   the id that matched no record
-   * @return the wrapped not-found error object
+   * @return the flat not-found envelope
    * @throws JSONException never in practice (all values are plain strings/ints)
    */
   static JSONObject buildNotFoundError(String specName, String entityName, String recordId)
       throws JSONException {
-    JSONObject inner = new JSONObject();
-    inner.put(McpConstants.KEY_STATUS, McpConstants.STATUS_NOT_FOUND);
-    inner.put(McpConstants.KEY_ERROR, McpConstants.ERROR_NOT_FOUND);
-    inner.put(McpConstants.KEY_DETAIL,
+    JSONObject envelope = new JSONObject();
+    envelope.put(McpConstants.KEY_STATUS, McpConstants.STATUS_NOT_FOUND);
+    envelope.put(McpConstants.KEY_ERROR, McpConstants.ERROR_NOT_FOUND);
+    envelope.put(McpConstants.KEY_DETAIL,
         "No " + specName + "/" + entityName + " with id " + recordId);
-    inner.put(McpConstants.KEY_SEE_ALSO, McpConstants.SEE_ALSO_READING);
-    JSONObject wrapper = new JSONObject();
-    wrapper.put(JsonConstants.RESPONSE_RESPONSE, inner);
-    return wrapper;
+    envelope.put(McpConstants.KEY_SEE_ALSO, McpConstants.SEE_ALSO_READING);
+    return envelope;
+  }
+
+  /**
+   * Lift a success body out of core's {@code {"response":{…}}} wrapper (ETP-4793 / IMP-5
+   * clause (iii)).
+   *
+   * <p><b>The asymmetry this closes.</b> Every MCP failure body is flat — {@code {status, error,
+   * detail, …}} — and so is every {@code neo_delete} success, which builds its own
+   * {@code {deleted,id}}. The four DAL-backed successes were the exception: {@code neo_list},
+   * {@code neo_get}, {@code neo_create} and {@code neo_update} forwarded
+   * {@code {"response":{data,status:0,startRow,endRow,totalRows}}} straight from
+   * {@code DefaultJsonDataService}, so an agent had to unwrap <em>conditionally</em>, on a key it
+   * could only predict by first knowing whether the call had succeeded. Same defect class as clauses
+   * (i) and (iv): one surface, two shapes, chosen by which code path produced the body.</p>
+   *
+   * <p><b>Wider than the clause as registered</b>, which reads "read-verb wrapped, write-verb bare".
+   * That was measured on the <em>error</em> bodies (IMP-17 §8.6); on the success bodies the write
+   * verbs are wrapped too, and only {@code neo_delete} — which never returns
+   * {@code DefaultJsonDataService}'s response — is bare. Flattening the reads alone would have made
+   * {@code neo_create} and {@code neo_update} the new outliers, i.e. moved the inconsistency rather
+   * than removed it.</p>
+   *
+   * <p><b>Where the wrapper comes from, and why it is not removed there.</b> {@code response} is
+   * Etendo core's RPC convention and ~20 {@code schemaforge} handlers speak it over NEO REST, where
+   * the React UI reads it. Flattening in core would break that consumer, so the translation lives in
+   * the MCP layer — the same layering call as clause (iv) §4.4 for {@code NeoResponse.error} and as
+   * IMP-17 §4.4 before it.</p>
+   *
+   * <p><b>{@code status:0} is dropped, and nothing replaces it.</b> By the time a body reaches here
+   * the failure branches have already returned, so the DAL success code carries no information — and
+   * it actively misleads, because {@code status} on every other MCP body is an HTTP code, so an agent
+   * branching on it read {@code 0} where it expected {@code 200}. No {@code status:200} is
+   * substituted either: the absence of {@code error} is already the success discriminator every other
+   * verb uses, and a second redundant one is a second thing to drift.</p>
+   *
+   * <p><b>Everything else is lifted, not filtered.</b> The pagination keys survive, and so does any
+   * key a later stage added inside the wrapper — IMP-18's {@code unknownFields} is lifted to the top
+   * level by this rule rather than by being named here, which is why a future annotation needs no
+   * edit to this method. A body with no {@code response} object is returned untouched, so calling
+   * this twice is safe; a body carrying keys <em>beside</em> {@code response} is left alone rather
+   * than merged, because that shape is not one this layer produces and guessing at a collision is
+   * worse than passing it through.</p>
+   *
+   * @param responseJson the parsed DAL response, or {@code null}
+   * @return the flattened body; {@code responseJson} itself when it is not a lone wrapper
+   * @throws JSONException never in practice (keys are copied, not parsed)
+   */
+  static JSONObject flattenCoreResponse(JSONObject responseJson) throws JSONException {
+    if (responseJson == null) {
+      return null;
+    }
+    JSONObject inner = responseJson.optJSONObject(JsonConstants.RESPONSE_RESPONSE);
+    if (inner == null || responseJson.length() != 1) {
+      return responseJson;
+    }
+    JSONObject flat = new JSONObject();
+    for (Iterator<?> keys = inner.keys(); keys.hasNext();) {
+      String key = String.valueOf(keys.next());
+      if (JsonConstants.RESPONSE_STATUS.equals(key)) {
+        continue;
+      }
+      flat.put(key, inner.get(key));
+    }
+    return flat;
   }
 
   /**

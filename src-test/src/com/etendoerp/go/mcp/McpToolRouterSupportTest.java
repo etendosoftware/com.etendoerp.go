@@ -20,6 +20,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.anyList;
@@ -1824,24 +1825,118 @@ class McpToolRouterSupportTest {
   class BuildNotFoundError {
 
     @Test
-    @DisplayName("wraps a 404 not_found body with a descriptive detail")
-    void wrapsNotFoundBody() throws Exception {
-      JSONObject inner = McpToolRouterSupport
-          .buildNotFoundError("sales-invoice", "header", "NONEXISTENT123")
-          .getJSONObject("response");
-      assertEquals(404, inner.getInt("status"));
-      assertEquals("not_found", inner.getString("error"));
-      assertTrue(inner.getString("detail").contains("sales-invoice/header"));
-      assertTrue(inner.getString("detail").contains("NONEXISTENT123"));
+    @DisplayName("builds a 404 not_found body with a descriptive detail")
+    void buildsNotFoundBody() throws Exception {
+      JSONObject envelope = McpToolRouterSupport
+          .buildNotFoundError("sales-invoice", "header", "NONEXISTENT123");
+      assertEquals(404, envelope.getInt("status"));
+      assertEquals("not_found", envelope.getString("error"));
+      assertTrue(envelope.getString("detail").contains("sales-invoice/header"));
+      assertTrue(envelope.getString("detail").contains("NONEXISTENT123"));
     }
 
     @Test
     @DisplayName("points the agent to a docs recipe via seeAlso (IMP-10)")
     void includesSeeAlsoPointer() throws Exception {
-      JSONObject inner = McpToolRouterSupport
+      assertEquals("docs(topic:\"reading records\")", McpToolRouterSupport
           .buildNotFoundError("sales-invoice", "header", "NONEXISTENT123")
-          .getJSONObject("response");
-      assertEquals("docs(topic:\"reading records\")", inner.getString("seeAlso"));
+          .getString("seeAlso"));
+    }
+
+    /**
+     * IMP-5 clause (iii): this envelope used to be returned inside {@code {"response":{…}}}, which
+     * made it the one read-verb error whose shape differed from its siblings on the same tool. The
+     * two tests above were rewritten from asserting on {@code .getJSONObject("response")}; this one
+     * pins the absence directly, so a future edit that re-wraps it fails here rather than silently
+     * restoring the asymmetry.
+     */
+    @Test
+    @DisplayName("is flat — no 'response' wrapper (IMP-5 clause (iii))")
+    void isFlat() throws Exception {
+      assertFalse(McpToolRouterSupport
+          .buildNotFoundError("sales-invoice", "header", "NONEXISTENT123").has("response"));
+    }
+  }
+
+  // ─── flattenCoreResponse (IMP-5 clause (iii)) ───────────────────────
+
+  @Nested
+  @DisplayName("flattenCoreResponse")
+  class FlattenCoreResponse {
+
+    private JSONObject wrap(JSONObject inner) throws Exception {
+      return new JSONObject().put("response", inner);
+    }
+
+    @Test
+    @DisplayName("lifts data and the pagination keys to the top level")
+    void liftsDataAndPagination() throws Exception {
+      JSONObject inner = new JSONObject()
+          .put("status", 0)
+          .put("data", new JSONArray().put(new JSONObject().put("id", "X")))
+          .put("startRow", 0)
+          .put("endRow", 0)
+          .put("totalRows", 1);
+      JSONObject flat = McpToolRouterSupport.flattenCoreResponse(wrap(inner));
+      assertFalse(flat.has("response"));
+      assertEquals(1, flat.getJSONArray("data").length());
+      assertEquals(0, flat.getInt("startRow"));
+      assertEquals(0, flat.getInt("endRow"));
+      assertEquals(1, flat.getInt("totalRows"));
+    }
+
+    /**
+     * The DAL success code is dropped rather than translated: by this point the failure branches
+     * have already returned, so it carries no information, and {@code status} on every other MCP
+     * body is an HTTP code — an agent branching on it read {@code 0} where it expected {@code 200}.
+     * Nothing is substituted, because the absence of {@code error} is already the success
+     * discriminator the other verbs use.
+     */
+    @Test
+    @DisplayName("drops the DAL status:0 and substitutes nothing")
+    void dropsDalStatus() throws Exception {
+      JSONObject flat = McpToolRouterSupport.flattenCoreResponse(
+          wrap(new JSONObject().put("status", 0).put("data", new JSONArray())));
+      assertFalse(flat.has("status"));
+      assertFalse(flat.has("error"));
+    }
+
+    /**
+     * Lifting by rule rather than by an allow-list is what keeps IMP-18's annotation working: it is
+     * added inside the wrapper by {@code applyProjection} and reaches the agent at the top level
+     * without this method naming it.
+     */
+    @Test
+    @DisplayName("lifts a key it does not know about, such as IMP-18's unknownFields")
+    void liftsUnknownKeys() throws Exception {
+      JSONObject flat = McpToolRouterSupport.flattenCoreResponse(
+          wrap(new JSONObject().put("status", 0).put("data", new JSONArray())
+              .put("unknownFields", new JSONArray().put("nosuchfield"))));
+      assertEquals("nosuchfield", flat.getJSONArray("unknownFields").getString(0));
+    }
+
+    @Test
+    @DisplayName("returns an already-flat body untouched, so it is idempotent")
+    void idempotentOnFlatBody() throws Exception {
+      JSONObject flat = new JSONObject().put("data", new JSONArray()).put("totalRows", 0);
+      assertSame(flat, McpToolRouterSupport.flattenCoreResponse(flat));
+    }
+
+    /**
+     * A body carrying keys beside {@code response} is not a shape this layer produces, and merging
+     * would have to guess at a collision. Passing it through is the conservative answer.
+     */
+    @Test
+    @DisplayName("leaves a body that has keys beside 'response' alone")
+    void leavesMixedBodyAlone() throws Exception {
+      JSONObject mixed = wrap(new JSONObject().put("status", 0)).put("extra", "keep me");
+      assertSame(mixed, McpToolRouterSupport.flattenCoreResponse(mixed));
+    }
+
+    @Test
+    @DisplayName("null in, null out")
+    void nullIsNull() throws Exception {
+      assertNull(McpToolRouterSupport.flattenCoreResponse(null));
     }
   }
 

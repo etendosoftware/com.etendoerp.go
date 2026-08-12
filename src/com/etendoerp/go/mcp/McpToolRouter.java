@@ -408,7 +408,10 @@ public class McpToolRouter {
     // IMP-18: the filter is passed in so an unknown requested name is reported, not dropped.
     McpQuerySupport.applyProjection(responseJson, args, sfEntity, adTab, fieldFilter);
 
-    return wrapAsTextContent(responseJson.toString(2));
+    // IMP-5 clause (iii): flatten last, so projection and field filtering keep operating on the
+    // wrapped shape core produced and only the body handed to the agent changes.
+    return wrapAsTextContent(
+        McpToolRouterSupport.flattenCoreResponse(responseJson).toString(2));
   }
 
   // ── neo_get ───────────────────────────────────────────────────────────
@@ -452,10 +455,13 @@ public class McpToolRouter {
     fieldFilter.filterGetResponse(responseJson);
 
     // IMP-2: optional projection — explicit `fields:[...]` or view:"summary".
-    // IMP-18: unknown requested names come back as response.unknownFields.
+    // IMP-18: unknown requested names are reported as unknownFields — lifted to the top level by
+    // the flatten below, along with the rest of the wrapper's contents.
     McpQuerySupport.applyProjection(responseJson, args, sfEntity, adTab, fieldFilter);
 
-    return wrapAsTextContent(responseJson.toString(2));
+    // IMP-5 clause (iii): see handleList — flatten last, after every stage that reads the wrapper.
+    return wrapAsTextContent(
+        McpToolRouterSupport.flattenCoreResponse(responseJson).toString(2));
   }
 
   // ── neo_create ────────────────────────────────────────────────────────
@@ -599,7 +605,10 @@ public class McpToolRouter {
       return postHookResult;
     }
 
-    return wrapAsTextContent(responseJson.toString(2));
+    // IMP-5 clause (iii): the post-hook still sees core's wrapped body, for parity with the REST
+    // CRUD path a handler was written against; only the body handed to the agent is flattened.
+    return wrapAsTextContent(
+        McpToolRouterSupport.flattenCoreResponse(responseJson).toString(2));
   }
 
   // ── neo_update ────────────────────────────────────────────────────────
@@ -678,7 +687,10 @@ public class McpToolRouter {
       return postHookResult;
     }
 
-    return wrapAsTextContent(responseJson.toString(2));
+    // IMP-5 clause (iii): the post-hook still sees core's wrapped body, for parity with the REST
+    // CRUD path a handler was written against; only the body handed to the agent is flattened.
+    return wrapAsTextContent(
+        McpToolRouterSupport.flattenCoreResponse(responseJson).toString(2));
   }
 
   // ── neo_delete ────────────────────────────────────────────────────────
