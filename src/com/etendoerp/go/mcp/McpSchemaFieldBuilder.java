@@ -61,6 +61,14 @@ final class McpSchemaFieldBuilder {
   static final String KEY_DEFAULT_SOURCE = "defaultSource";
   static final String KEY_USER_REQUIRED = "userRequired";
   static final String VISIBILITY_EDITABLE = "editable";
+  static final String VISIBILITY_DISCARDED = "discarded";
+  static final String TYPE_BUTTON = McpActionsView.TYPE_BUTTON;
+  static final String KEY_INVOKE_VIA = "invokeVia";
+  static final String KEY_INVOKABLE = "invokable";
+  static final String KEY_NOT_INVOKABLE_REASON = "notInvokableReason";
+  /** AD column of the accounting trigger, present on every accountable document. */
+  private static final String COLUMN_POSTED = "Posted";
+  private static final String EM_PREFIX = "EM_";
 
   static String mapColumnType(String refId) {
     if (refId == null) {
@@ -433,23 +441,31 @@ final class McpSchemaFieldBuilder {
     String dbColName = col.getDBColumnName();
     String refId = col.getReference() != null ? (String) col.getReference().getId() : null;
     String type = mapColumnType(refId);
+    boolean isButton = TYPE_BUTTON.equals(type);
     JSONObject fieldObj = new JSONObject();
     fieldObj.put("name", resolvePropertyName(dalEntity, dbColName));
     fieldObj.put("column", dbColName);
     fieldObj.put(McpConstants.KEY_LABEL, col.getName());
     fieldObj.put("type", type);
-    fieldObj.put("required", col.isMandatory());
+    if (!isButton) {
+      // IMP-21: a button carries no payload value, so AD's NOT NULL flag says nothing about what
+      // the agent must send. Emitting it made 10 of the 22 sales-invoice actions claim
+      // required:true right next to an honest userRequired:false. See addButtonInfo.
+      fieldObj.put("required", col.isMandatory());
+    }
     fieldObj.put("readOnly", isReadOnlyColumn(adTab, col));
     addDefaultExpression(fieldObj, col);
-    addVisibility(fieldObj, visibilityByColumnId.get((String) col.getId()), col.isMandatory());
+    String visibility = visibilityByColumnId.get((String) col.getId());
+    addVisibility(fieldObj, visibility, !isButton && col.isMandatory());
     boolean isBusinessCritical = Boolean.TRUE.equals(
         businessCriticalByColumnId.get((String) col.getId()));
-    fieldObj.put("businessCritical", isBusinessCritical);
     addAgentPrompt(fieldObj, promptByColumnId.get((String) col.getId()));
     addSelectorInfo(fieldObj, refId, selectorRefs);
-    if ("button".equals(type)) {
-      addButtonInfo(fieldObj, col);
+    if (isButton) {
+      addButtonInfo(fieldObj, col, visibility);
+      isBusinessCritical = isBusinessCritical || isCriticalAction(fieldObj, dbColName);
     }
+    fieldObj.put("businessCritical", isBusinessCritical);
     return fieldObj;
   }
 
@@ -459,10 +475,28 @@ final class McpSchemaFieldBuilder {
     }
   }
 
-  private static void addButtonInfo(JSONObject fieldObj, Column col) throws JSONException {
+  /**
+   * Describes a {@code type:"button"} column as an invokable action (IMP-6's {@code
+   * view:"actions"} catalog is a filter over these).
+   *
+   * <p><b>IMP-21 — {@code invokeVia} is now a claim, not a decoration.</b> It used to be written
+   * unconditionally, so the sales-invoice catalog advertised all 22 buttons as callable via
+   * {@code neo_action} even though 17 were curated {@code visibility:"discarded"} and one
+   * ({@code CreateFrom}) resolves no process at all — there is nothing for {@code neo_action} to
+   * run. An agent had no way to tell the 22 apart. Now a button carries {@code
+   * invokeVia:"neo_action"} only when it really is invokable, and otherwise says so explicitly
+   * with {@code invokable:false} plus a machine-readable {@code notInvokableReason}. The button
+   * still appears in the catalog — knowing an action exists but is out of scope is useful; being
+   * told it is callable when it is not is not.</p>
+   *
+   * @param fieldObj   the field object being built, mutated in place
+   * @param col        the button AD column
+   * @param visibility the curated visibility for this column, or {@code null} when uncurated
+   */
+  private static void addButtonInfo(JSONObject fieldObj, Column col, String visibility)
+      throws JSONException {
     fieldObj.put("triggerValue", "Y");
     fieldObj.put("action", col.getDBColumnName());
-    fieldObj.put("invokeVia", "neo_action");
     addActionValues(fieldObj, col);
     // Resolve process info — mirror NeoButtonActionHelper / NeoProcessService logic
     Process classicProcess = col.getProcess();
@@ -470,18 +504,115 @@ final class McpSchemaFieldBuilder {
     if (classicProcess == null && obuiappProcess == null) {
       obuiappProcess = NeoAccessHelper.resolveFallbackObuiappProcess(col);
     }
+    String processName = null;
     if (obuiappProcess != null) {
       fieldObj.put("processType", "OBUIAPP");
-      String name = obuiappProcess.getName();
-      fieldObj.put("processName", name != null ? name : "");
+      processName = obuiappProcess.getName();
+      fieldObj.put("processName", processName != null ? processName : "");
       fieldObj.put("processId", obuiappProcess.getId());
     } else if (classicProcess != null) {
       fieldObj.put("processType", "Classic");
-      String name = classicProcess.getName();
-      fieldObj.put("processName", name != null ? name : "");
+      processName = classicProcess.getName();
+      fieldObj.put("processName", processName != null ? processName : "");
       fieldObj.put("processId", classicProcess.getId());
     }
-    // If no process resolved: triggerValue/action/invokeVia already set, omit process fields
+    applyActionLabelFallback(fieldObj, col, processName);
+    addInvokability(fieldObj, visibility, processName != null);
+  }
+
+  /**
+   * Declares whether {@code neo_action} can actually run this button (IMP-21).
+   *
+   * <p>Two independent blockers, reported in the order an agent would care about: a curated
+   * {@code discarded} means the action was deliberately kept out of this window's agent surface,
+   * and a missing process means AD has nothing wired behind the column. An uncurated button (no
+   * {@code visibility} row at all) with a process is treated as invokable — that is the
+   * pre-IMP-21 behaviour and the only safe default, since absence of curation is not a decision.
+   * </p>
+   */
+  private static void addInvokability(JSONObject fieldObj, String visibility, boolean hasProcess)
+      throws JSONException {
+    String blocker = null;
+    if (VISIBILITY_DISCARDED.equals(visibility)) {
+      blocker = "discarded: this action is not part of the curated agent surface for this window";
+    } else if (!hasProcess) {
+      blocker = "no process: the AD button column has no process wired behind it";
+    }
+    if (blocker == null) {
+      fieldObj.put(KEY_INVOKE_VIA, "neo_action");
+      return;
+    }
+    fieldObj.put(KEY_INVOKABLE, false);
+    fieldObj.put(KEY_NOT_INVOKABLE_REASON, blocker);
+  }
+
+  /**
+   * Replaces a raw module-extension column name with something an agent can read (IMP-21).
+   *
+   * <p>A button's label defaults to {@code AD_Column.name}, which for a column contributed by a
+   * module is the machine name the module author typed — {@code EM_Aeatsii_Dup},
+   * {@code EM_Psd2_Generate Bank Payment}. Core buttons are unaffected because their column names
+   * are already functional ({@code "Copy from"}, {@code "Document Action"}), and any button that
+   * has an {@code AD_Field} in the tab is overwritten later by {@link #applyCuratedLabels} — so
+   * this only ever fires for the module buttons that no tab field describes, which is exactly
+   * where the raw names were surfacing.</p>
+   *
+   * <p>The process name is preferred over a mechanically de-prefixed column name because it is a
+   * label a human wrote for this very action; the de-prefixed name is the last resort.</p>
+   */
+  private static void applyActionLabelFallback(JSONObject fieldObj, Column col, String processName)
+      throws JSONException {
+    String dbColName = col.getDBColumnName();
+    if (!StringUtils.startsWithIgnoreCase(dbColName, EM_PREFIX)) {
+      return;
+    }
+    if (StringUtils.isNotBlank(processName)) {
+      fieldObj.put(McpConstants.KEY_LABEL, processName.trim());
+      return;
+    }
+    String humanized = humanizeExtensionColumn(col.getName());
+    if (StringUtils.isNotBlank(humanized)) {
+      fieldObj.put(McpConstants.KEY_LABEL, humanized);
+    }
+  }
+
+  /**
+   * {@code "EM_Psd2_Generate Bank Payment"} → {@code "Generate Bank Payment"}: drops the
+   * {@code EM_<module>_} extension prefix and turns the remaining underscores into spaces.
+   */
+  static String humanizeExtensionColumn(String rawName) {
+    if (StringUtils.isBlank(rawName)) {
+      return null;
+    }
+    String name = rawName.trim();
+    if (!StringUtils.startsWithIgnoreCase(name, EM_PREFIX)) {
+      return name;
+    }
+    // EM_<module>_<rest> — drop both the marker and the module prefix that follows it.
+    int moduleEnd = name.indexOf('_', EM_PREFIX.length());
+    String rest = moduleEnd < 0 ? name.substring(EM_PREFIX.length()) : name.substring(moduleEnd + 1);
+    rest = rest.replace('_', ' ').trim();
+    return rest.isEmpty() ? null : rest;
+  }
+
+  /**
+   * Derives {@code businessCritical} for an action that curation left unflagged (IMP-21).
+   *
+   * <p>{@code ETGO_SF_FIELD.isBusinessCritical} has no producer for buttons: it is {@code N} on
+   * every button column in the instance, so the flag was emitted {@code false} on all 22
+   * sales-invoice actions and never discriminated anywhere. {@code false} is not a neutral
+   * default — it reads as "nobody needs to think before firing this", which is the opposite of
+   * true for the two actions that change a document's legal and accounting state.</p>
+   *
+   * <p>Both signals below are structural properties of core AD, not per-window judgement (which
+   * belongs in {@code decisions.json} — see {@link #addActionValues}): a button bound to the
+   * shared {@code docAction} list drives the document state machine, and {@code Posted} is the
+   * accounting trigger present on every accountable document. Curation still wins — this only
+   * fills the gap, it never clears a flag someone set.</p>
+   */
+  private static boolean isCriticalAction(JSONObject fieldObj, String dbColName) {
+    return fieldObj.has(McpConstants.KEY_ACTION_PARAMETER)
+        || COLUMN_POSTED.equalsIgnoreCase(dbColName);
   }
 
   /**

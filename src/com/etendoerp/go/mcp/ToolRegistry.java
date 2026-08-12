@@ -698,9 +698,11 @@ public class ToolRegistry {
             + "can exceed 60 kB on compliance-heavy windows and may not fit your context. "
             + "\"create\" returns ONLY the fields you may send to neo_create, split into "
             + "required/optional — this is what you want before a create. "
-            + "\"actions\" returns only the callable buttons/processes ({name, label, "
-            + "invokeVia:\"neo_action\", action, processName, processId, ...}) — use it when you "
-            + "only need to know what can be triggered on this entity, not every column.",
+            + "\"actions\" returns only the buttons/processes ({name, label, action, processName, "
+            + "processId, ...}) — use it when you only need to know what can be triggered on this "
+            + "entity, not every column. Fire only the ones carrying invokeVia:\"neo_action\"; the "
+            + "rest report invokable:false plus a notInvokableReason, and \"invokableCount\" next "
+            + "to \"actionCount\" tells you the split up front.",
         List.of(McpSchemaCreateView.VIEW_CREATE, McpActionsView.VIEW_ACTIONS)));
     props.put(McpSchemaCreateView.PARAM_FIELDS, stringArrayProp(
         "Optional whitelist of field names to describe (e.g. [\"businessPartner\",\"invoiceDate\"]). "

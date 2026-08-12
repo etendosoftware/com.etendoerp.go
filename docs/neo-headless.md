@@ -863,7 +863,8 @@ response down to the callable actions.
 }
 ```
 
-**Response** (`{spec, entity, actions, actionCount}` — the full `fields` array is dropped):
+**Response** (`{spec, entity, actions, actionCount, invokableCount}` — the full `fields` array is
+dropped):
 
 ```json
 {
@@ -889,9 +890,21 @@ response down to the callable actions.
       "processType": "OBUIAPP",
       "processName": "Cancel Document",
       "processId": "..."
+    },
+    {
+      "name": "calculatePromotions",
+      "label": "Calculate Promotions",
+      "type": "button",
+      "invokable": false,
+      "notInvokableReason": "discarded: this action is not part of the curated agent surface for this window",
+      "action": "Calculate_Promotions",
+      "processType": "Classic",
+      "processName": "Calculate Promotions",
+      "processId": "..."
     }
   ],
-  "actionCount": 2
+  "actionCount": 3,
+  "invokableCount": 2
 }
 ```
 
@@ -900,9 +913,27 @@ Behavior details (`McpActionsView`):
 - The view is a **pure re-shape** of the field array `neo_schema` already builds
   (`McpSchemaFieldBuilder.buildSchemaFieldsArray`) — it simply filters down to the `type:"button"`
   entries, in their original order. No additional DAL/model access is performed.
-- Each returned action is already fully self-describing: `invokeVia:"neo_action"` plus `action`,
-  `processType`, `processName`, and `processId` tell the agent exactly how to invoke it via
-  `neo_action` — no follow-up `neo_schema` call on the full entity is required.
+- Each returned action is already fully self-describing: `action`, `processType`, `processName` and
+  `processId` tell the agent exactly how to invoke it via `neo_action` — no follow-up `neo_schema`
+  call on the full entity is required.
+- **`invokeVia` is a claim, not a decoration (IMP-21).** Fire only the actions that carry
+  `invokeVia:"neo_action"`. An action the agent cannot run instead reports `invokable: false` plus a
+  `notInvokableReason`, for one of two causes: it is curated `visibility:"discarded"` (deliberately
+  out of this window's agent surface), or the AD button column has no process wired behind it so
+  there is nothing to run. Uncurated buttons with a process stay invokable — absence of curation is
+  not a decision to exclude.
+- **`invokableCount`** sits next to `actionCount` so the split is visible before reading the array.
+  On `sales-invoice/header` the catalog has 22 actions and only a handful are callable.
+- A button carries **no `required` flag** (IMP-21). A button has no payload value, so AD's NOT NULL
+  flag on the trigger column says nothing about what the agent must send; it used to be reported as
+  `required: true` right next to an honest `userRequired: false`.
+- **`businessCritical`** is derived for actions that curation left unflagged: a button bound to the
+  shared `docAction` list (it drives the document state machine, and that binding is what
+  `actionParameter` records) and the `Posted` accounting trigger are business-critical by
+  construction. Curated flags always win — the derivation only fills gaps, never clears a flag.
+- Module-contributed buttons have no `AD_Field` in the tab, so their label fell back to the raw
+  column name (`EM_Psd2_Generate Bank Payment`). The fallback chain is now curated `AD_Field` label
+  → process name → the column name with its `EM_<module>_` prefix stripped.
 - An entity with no button fields returns `"actions": []` and `"actionCount": 0` (never `null`).
 
 **When to use it:** the agent knows the entity and only wants the menu of things it can *do* to a

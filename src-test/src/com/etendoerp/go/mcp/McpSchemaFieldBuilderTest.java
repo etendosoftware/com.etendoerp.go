@@ -779,8 +779,9 @@ class McpSchemaFieldBuilderTest {
 
       JSONObject fieldObj = new JSONObject();
       invokeStatic("addButtonInfo",
-          new Class<?>[]{ JSONObject.class, org.openbravo.model.ad.datamodel.Column.class },
-          fieldObj, col);
+          new Class<?>[]{ JSONObject.class, org.openbravo.model.ad.datamodel.Column.class,
+              String.class },
+          fieldObj, col, null);
 
       assertEquals("Y", fieldObj.getString("triggerValue"));
       assertEquals("Processed", fieldObj.getString("action"));
@@ -805,8 +806,9 @@ class McpSchemaFieldBuilderTest {
 
       JSONObject fieldObj = new JSONObject();
       invokeStatic("addButtonInfo",
-          new Class<?>[]{ JSONObject.class, org.openbravo.model.ad.datamodel.Column.class },
-          fieldObj, col);
+          new Class<?>[]{ JSONObject.class, org.openbravo.model.ad.datamodel.Column.class,
+              String.class },
+          fieldObj, col, null);
 
       assertEquals("Y", fieldObj.getString("triggerValue"));
       assertEquals("DocAction", fieldObj.getString("action"));
@@ -816,13 +818,18 @@ class McpSchemaFieldBuilderTest {
       assertEquals("CLASSIC-PROC-001", fieldObj.getString("processId"));
     }
 
+    /**
+     * IMP-21: a button with no process behind it has nothing for {@code neo_action} to run, so it
+     * must not claim {@code invokeVia} — it used to, which is how {@code CreateFrom} was advertised
+     * as callable while carrying neither {@code processName} nor {@code processId}.
+     */
     @Test
-    @DisplayName("buttonColumnWithNoProcessEmitsOnlyTrigger")
-    void buttonColumnWithNoProcessEmitsOnlyTrigger() throws Exception {
+    @DisplayName("buttonColumnWithNoProcessIsNotInvokable")
+    void buttonColumnWithNoProcessIsNotInvokable() throws Exception {
       org.openbravo.model.ad.datamodel.Column col = mock(
           org.openbravo.model.ad.datamodel.Column.class);
 
-      when(col.getDBColumnName()).thenReturn("Posted");
+      when(col.getDBColumnName()).thenReturn("CreateFrom");
       when(col.getProcess()).thenReturn(null);
       when(col.getOBUIAPPProcess()).thenReturn(null);
       accessHelperMock.when(
@@ -830,15 +837,156 @@ class McpSchemaFieldBuilderTest {
 
       JSONObject fieldObj = new JSONObject();
       invokeStatic("addButtonInfo",
-          new Class<?>[]{ JSONObject.class, org.openbravo.model.ad.datamodel.Column.class },
-          fieldObj, col);
+          new Class<?>[]{ JSONObject.class, org.openbravo.model.ad.datamodel.Column.class,
+              String.class },
+          fieldObj, col, null);
 
       assertEquals("Y", fieldObj.getString("triggerValue"));
-      assertEquals("Posted", fieldObj.getString("action"));
-      assertEquals("neo_action", fieldObj.getString("invokeVia"));
+      assertEquals("CreateFrom", fieldObj.getString("action"));
+      assertFalse(fieldObj.has("invokeVia"));
+      assertFalse(fieldObj.getBoolean("invokable"));
+      assertTrue(fieldObj.getString("notInvokableReason").startsWith("no process"));
       assertFalse(fieldObj.has("processType"));
       assertFalse(fieldObj.has("processName"));
       assertFalse(fieldObj.has("processId"));
+    }
+
+    /**
+     * IMP-21: 17 of the 22 sales-invoice actions were curated {@code discarded} and still
+     * advertised {@code invokeVia:"neo_action"}. A discarded action stays in the catalog — the
+     * agent should know it exists — but is reported as out of scope, not as callable.
+     */
+    @Test
+    @DisplayName("discardedButtonIsNotInvokableEvenWithAProcess")
+    void discardedButtonIsNotInvokableEvenWithAProcess() throws Exception {
+      org.openbravo.model.ad.datamodel.Column col = mock(
+          org.openbravo.model.ad.datamodel.Column.class);
+      Process classicProcess = mock(Process.class);
+
+      when(col.getDBColumnName()).thenReturn("Calculate_Promotions");
+      when(col.getProcess()).thenReturn(classicProcess);
+      when(col.getOBUIAPPProcess()).thenReturn(null);
+      when(classicProcess.getName()).thenReturn("Calculate Promotions");
+      when(classicProcess.getId()).thenReturn("CLASSIC-PROC-002");
+
+      JSONObject fieldObj = new JSONObject();
+      invokeStatic("addButtonInfo",
+          new Class<?>[]{ JSONObject.class, org.openbravo.model.ad.datamodel.Column.class,
+              String.class },
+          fieldObj, col, "discarded");
+
+      assertFalse(fieldObj.has("invokeVia"));
+      assertFalse(fieldObj.getBoolean("invokable"));
+      assertTrue(fieldObj.getString("notInvokableReason").startsWith("discarded"));
+      // The action is still fully described — only the callable claim is withdrawn.
+      assertEquals("Calculate Promotions", fieldObj.getString("processName"));
+      assertEquals("CLASSIC-PROC-002", fieldObj.getString("processId"));
+    }
+
+    /**
+     * A curated-but-not-discarded button with a process is invokable; so is an uncurated one
+     * ({@code visibility == null}), because absence of curation is not a decision to exclude.
+     */
+    @Test
+    @DisplayName("curatedNonDiscardedButtonWithProcessIsInvokable")
+    void curatedNonDiscardedButtonWithProcessIsInvokable() throws Exception {
+      org.openbravo.model.ad.datamodel.Column col = mock(
+          org.openbravo.model.ad.datamodel.Column.class);
+      Process classicProcess = mock(Process.class);
+
+      when(col.getDBColumnName()).thenReturn("DocAction");
+      when(col.getProcess()).thenReturn(classicProcess);
+      when(col.getOBUIAPPProcess()).thenReturn(null);
+      when(classicProcess.getName()).thenReturn("Process Invoice");
+      when(classicProcess.getId()).thenReturn("CLASSIC-PROC-003");
+
+      JSONObject fieldObj = new JSONObject();
+      invokeStatic("addButtonInfo",
+          new Class<?>[]{ JSONObject.class, org.openbravo.model.ad.datamodel.Column.class,
+              String.class },
+          fieldObj, col, "system");
+
+      assertEquals("neo_action", fieldObj.getString("invokeVia"));
+      assertFalse(fieldObj.has("invokable"));
+      assertFalse(fieldObj.has("notInvokableReason"));
+    }
+
+    /**
+     * IMP-21: a module-contributed button has no {@code AD_Field} in the tab, so its label fell
+     * back to the raw column name the module author typed ({@code EM_Psd2_Generate Bank Payment}).
+     * The process name is a label a human wrote for this action, so it wins.
+     */
+    @Test
+    @DisplayName("extensionButtonLabelFallsBackToProcessName")
+    void extensionButtonLabelFallsBackToProcessName() throws Exception {
+      org.openbravo.model.ad.datamodel.Column col = mock(
+          org.openbravo.model.ad.datamodel.Column.class);
+      Process classicProcess = mock(Process.class);
+
+      when(col.getDBColumnName()).thenReturn("EM_Psd2_Generate_Bank_Payment");
+      when(col.getName()).thenReturn("EM_Psd2_Generate Bank Payment");
+      when(col.getProcess()).thenReturn(classicProcess);
+      when(col.getOBUIAPPProcess()).thenReturn(null);
+      when(classicProcess.getName()).thenReturn("Generate SEPA payment file");
+      when(classicProcess.getId()).thenReturn("CLASSIC-PROC-004");
+
+      JSONObject fieldObj = new JSONObject();
+      fieldObj.put("label", "EM_Psd2_Generate Bank Payment");
+      invokeStatic("addButtonInfo",
+          new Class<?>[]{ JSONObject.class, org.openbravo.model.ad.datamodel.Column.class,
+              String.class },
+          fieldObj, col, null);
+
+      assertEquals("Generate SEPA payment file", fieldObj.getString("label"));
+    }
+
+    /** With no process name to borrow, the raw name is de-prefixed rather than left as-is. */
+    @Test
+    @DisplayName("extensionButtonLabelFallsBackToHumanizedColumnName")
+    void extensionButtonLabelFallsBackToHumanizedColumnName() throws Exception {
+      org.openbravo.model.ad.datamodel.Column col = mock(
+          org.openbravo.model.ad.datamodel.Column.class);
+
+      when(col.getDBColumnName()).thenReturn("EM_Aeatsii_Unsubscribe");
+      when(col.getName()).thenReturn("EM_Aeatsii_Unsubscribe");
+      when(col.getProcess()).thenReturn(null);
+      when(col.getOBUIAPPProcess()).thenReturn(null);
+      accessHelperMock.when(
+          () -> NeoAccessHelper.resolveFallbackObuiappProcess(col)).thenReturn(null);
+
+      JSONObject fieldObj = new JSONObject();
+      fieldObj.put("label", "EM_Aeatsii_Unsubscribe");
+      invokeStatic("addButtonInfo",
+          new Class<?>[]{ JSONObject.class, org.openbravo.model.ad.datamodel.Column.class,
+              String.class },
+          fieldObj, col, null);
+
+      assertEquals("Unsubscribe", fieldObj.getString("label"));
+    }
+
+    /** A core button's column name is already functional — the fallback must not touch it. */
+    @Test
+    @DisplayName("coreButtonLabelIsLeftAlone")
+    void coreButtonLabelIsLeftAlone() throws Exception {
+      org.openbravo.model.ad.datamodel.Column col = mock(
+          org.openbravo.model.ad.datamodel.Column.class);
+      Process classicProcess = mock(Process.class);
+
+      when(col.getDBColumnName()).thenReturn("CopyFrom");
+      when(col.getName()).thenReturn("Copy from");
+      when(col.getProcess()).thenReturn(classicProcess);
+      when(col.getOBUIAPPProcess()).thenReturn(null);
+      when(classicProcess.getName()).thenReturn("Copy Lines");
+      when(classicProcess.getId()).thenReturn("CLASSIC-PROC-005");
+
+      JSONObject fieldObj = new JSONObject();
+      fieldObj.put("label", "Copy from");
+      invokeStatic("addButtonInfo",
+          new Class<?>[]{ JSONObject.class, org.openbravo.model.ad.datamodel.Column.class,
+              String.class },
+          fieldObj, col, null);
+
+      assertEquals("Copy from", fieldObj.getString("label"));
     }
 
     @Test
@@ -886,7 +1034,10 @@ class McpSchemaFieldBuilderTest {
       assertEquals("button", result.getString("type"));
       assertEquals("Y", result.getString("triggerValue"));
       assertEquals("Processed", result.getString("action"));
-      assertEquals("neo_action", result.getString("invokeVia"));
+      // No process resolved → not invokable (IMP-21).
+      assertFalse(result.getBoolean("invokable"));
+      // IMP-21: a button carries no payload, so AD's NOT NULL flag is not reported as `required`.
+      assertFalse(result.has("required"));
     }
 
     @Test
@@ -918,8 +1069,9 @@ class McpSchemaFieldBuilderTest {
 
         JSONObject fieldObj = new JSONObject();
         invokeStatic("addButtonInfo",
-            new Class<?>[]{ JSONObject.class, org.openbravo.model.ad.datamodel.Column.class },
-            fieldObj, col);
+            new Class<?>[]{ JSONObject.class, org.openbravo.model.ad.datamodel.Column.class,
+                String.class },
+            fieldObj, col, null);
 
         assertEquals("docAction", fieldObj.getString("actionParameter"));
         JSONArray values = fieldObj.getJSONArray("actionValues");
@@ -947,8 +1099,9 @@ class McpSchemaFieldBuilderTest {
 
       JSONObject fieldObj = new JSONObject();
       invokeStatic("addButtonInfo",
-          new Class<?>[]{ JSONObject.class, org.openbravo.model.ad.datamodel.Column.class },
-          fieldObj, col);
+          new Class<?>[]{ JSONObject.class, org.openbravo.model.ad.datamodel.Column.class,
+              String.class },
+          fieldObj, col, null);
 
       assertFalse(fieldObj.has("actionValues"));
       assertFalse(fieldObj.has("actionParameter"));
@@ -977,13 +1130,15 @@ class McpSchemaFieldBuilderTest {
 
         JSONObject fieldObj = new JSONObject();
         invokeStatic("addButtonInfo",
-            new Class<?>[]{ JSONObject.class, org.openbravo.model.ad.datamodel.Column.class },
-            fieldObj, col);
+            new Class<?>[]{ JSONObject.class, org.openbravo.model.ad.datamodel.Column.class,
+                String.class },
+            fieldObj, col, null);
 
         assertFalse(fieldObj.has("actionValues"));
         assertFalse(fieldObj.has("actionParameter"));
         // The rest of the button metadata is still emitted.
-        assertEquals("neo_action", fieldObj.getString("invokeVia"));
+        assertEquals("Y", fieldObj.getString("triggerValue"));
+        assertEquals("DocAction", fieldObj.getString("action"));
       }
     }
 
@@ -1009,8 +1164,9 @@ class McpSchemaFieldBuilderTest {
 
         JSONObject fieldObj = new JSONObject();
         invokeStatic("addButtonInfo",
-            new Class<?>[]{ JSONObject.class, org.openbravo.model.ad.datamodel.Column.class },
-            fieldObj, col);
+            new Class<?>[]{ JSONObject.class, org.openbravo.model.ad.datamodel.Column.class,
+                String.class },
+            fieldObj, col, null);
 
         assertFalse(fieldObj.has("actionValues"));
         assertFalse(fieldObj.has("actionParameter"));
@@ -1134,6 +1290,146 @@ class McpSchemaFieldBuilderTest {
           new java.util.HashSet<>());
 
       assertFalse(result.getBoolean("businessCritical"));
+    }
+
+    private org.openbravo.model.ad.datamodel.Column buildButtonColumn(String colId,
+        String dbColName) {
+      org.openbravo.model.ad.datamodel.Column col = mock(
+          org.openbravo.model.ad.datamodel.Column.class);
+      org.openbravo.model.ad.domain.Reference ref = mock(
+          org.openbravo.model.ad.domain.Reference.class);
+      when(ref.getId()).thenReturn("28"); // button
+      when(col.getReference()).thenReturn(ref);
+      when(col.getDBColumnName()).thenReturn(dbColName);
+      when(col.getName()).thenReturn(dbColName);
+      when(col.isMandatory()).thenReturn(true);
+      when(col.isUseAutomaticSequence()).thenReturn(false);
+      when(col.getDefaultValue()).thenReturn(null);
+      when(col.getProcess()).thenReturn(null);
+      when(col.getOBUIAPPProcess()).thenReturn(null);
+      when(col.getReferenceSearchKey()).thenReturn(null);
+      when(col.getId()).thenReturn(colId);
+      accessHelperMock.when(
+          () -> NeoAccessHelper.resolveFallbackObuiappProcess(col)).thenReturn(null);
+      return col;
+    }
+
+    private JSONObject buildField(org.openbravo.model.ad.datamodel.Column col,
+        Map<String, Boolean> businessCriticalMap) throws Exception {
+      return (JSONObject) invokeStatic("buildSchemaField",
+          new Class<?>[]{ org.openbravo.model.ad.datamodel.Column.class,
+              org.openbravo.model.ad.ui.Tab.class,
+              org.openbravo.base.model.Entity.class,
+              java.util.Map.class,
+              java.util.Map.class,
+              java.util.Map.class,
+              java.util.Set.class },
+          col, buildTab(), null,
+          new java.util.HashMap<>(),
+          businessCriticalMap,
+          new java.util.HashMap<>(),
+          new java.util.HashSet<>());
+    }
+
+    /**
+     * IMP-21: {@code ETGO_SF_FIELD.isBusinessCritical} is {@code N} on every button column in the
+     * instance, so before this the accounting trigger was reported as not business-critical —
+     * an assertion of safety nobody made. It is now derived from the column itself.
+     */
+    @Test
+    @DisplayName("postedButtonIsBusinessCriticalWithoutCuration")
+    void postedButtonIsBusinessCriticalWithoutCuration() throws Exception {
+      JSONObject result = buildField(buildButtonColumn("col-posted", "Posted"), new HashMap<>());
+
+      assertTrue(result.getBoolean("businessCritical"));
+    }
+
+    /**
+     * A button bound to the shared {@code docAction} list drives the document state machine, so it
+     * is business-critical by construction — that binding is what {@code actionParameter} records.
+     */
+    @Test
+    @DisplayName("docActionButtonIsBusinessCriticalWithoutCuration")
+    void docActionButtonIsBusinessCriticalWithoutCuration() throws Exception {
+      org.openbravo.model.ad.datamodel.Column col = buildButtonColumn("col-docaction", "DocAction");
+      org.openbravo.model.ad.domain.Reference listRef = mock(
+          org.openbravo.model.ad.domain.Reference.class);
+      when(col.getReferenceSearchKey()).thenReturn(listRef);
+      when(listRef.getId()).thenReturn("INVOICE-DOCACTION-REF");
+
+      try (MockedStatic<NeoSelectorService> selectorMock = mockStatic(NeoSelectorService.class)) {
+        selectorMock.when(() -> NeoSelectorService.getListLabels("INVOICE-DOCACTION-REF"))
+            .thenReturn(Map.of("CO", "Book", "VO", "Void"));
+
+        JSONObject result = buildField(col, new HashMap<>());
+
+        assertTrue(result.getBoolean("businessCritical"));
+      }
+    }
+
+    /** An ordinary process button is not promoted — the derivation must still discriminate. */
+    @Test
+    @DisplayName("plainProcessButtonIsNotBusinessCritical")
+    void plainProcessButtonIsNotBusinessCritical() throws Exception {
+      JSONObject result = buildField(
+          buildButtonColumn("col-copyfrom", "CopyFrom"), new HashMap<>());
+
+      assertFalse(result.getBoolean("businessCritical"));
+    }
+
+    /** Curation still wins: an explicitly flagged button stays critical. */
+    @Test
+    @DisplayName("curatedFlagStillWinsOnAPlainButton")
+    void curatedFlagStillWinsOnAPlainButton() throws Exception {
+      Map<String, Boolean> curated = new HashMap<>();
+      curated.put("col-copyfrom-2", true);
+
+      JSONObject result = buildField(buildButtonColumn("col-copyfrom-2", "CopyFrom"), curated);
+
+      assertTrue(result.getBoolean("businessCritical"));
+    }
+  }
+
+  // ─── humanizeExtensionColumn ────────────────────────────────────────
+
+  @Nested
+  @DisplayName("humanizeExtensionColumn")
+  class HumanizeExtensionColumn {
+
+    @Test
+    @DisplayName("dropsExtensionAndModulePrefix")
+    void dropsExtensionAndModulePrefix() {
+      assertEquals("Generate Bank Payment",
+          McpSchemaFieldBuilder.humanizeExtensionColumn("EM_Psd2_Generate Bank Payment"));
+      assertEquals("Dup", McpSchemaFieldBuilder.humanizeExtensionColumn("EM_Aeatsii_Dup"));
+      assertEquals("Rect Create",
+          McpSchemaFieldBuilder.humanizeExtensionColumn("EM_Etvfac_Rect_Create"));
+    }
+
+    /** The prefix marker is matched case-insensitively — some modules use {@code em_}. */
+    @Test
+    @DisplayName("matchesLowercaseMarker")
+    void matchesLowercaseMarker() {
+      assertEquals("qrcode", McpSchemaFieldBuilder.humanizeExtensionColumn("em_tbai_qrcode"));
+    }
+
+    /** A core column name is already functional and is returned untouched. */
+    @Test
+    @DisplayName("leavesNonExtensionNameAlone")
+    void leavesNonExtensionNameAlone() {
+      assertEquals("Copy from", McpSchemaFieldBuilder.humanizeExtensionColumn("Copy from"));
+    }
+
+    /**
+     * Degenerate inputs must not produce an empty label — the caller keeps the raw name instead of
+     * showing the agent a blank action.
+     */
+    @Test
+    @DisplayName("returnsNullWhenNothingIsLeft")
+    void returnsNullWhenNothingIsLeft() {
+      assertNull(McpSchemaFieldBuilder.humanizeExtensionColumn(null));
+      assertNull(McpSchemaFieldBuilder.humanizeExtensionColumn("   "));
+      assertNull(McpSchemaFieldBuilder.humanizeExtensionColumn("EM_Aeatsii_"));
     }
   }
 
