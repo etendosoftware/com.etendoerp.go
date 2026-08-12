@@ -63,10 +63,23 @@ public final class NeoErrorSanitizer {
    * locale-independent signal, and the column name is a best-effort refinement on top of it. An
    * install running Postgres under a non-English {@code lc_messages} therefore still gets the
    * right status and a stripped message — it just loses the field name.</p>
+   *
+   * <p>The quote delimiter is optional <em>and</em> may arrive HTML-escaped as {@code &quot;}:
+   * core escapes error messages for display before they reach us, so the live message reads
+   * {@code null value in column &quot;c_bpartner_location_id&quot;}. A pattern expecting a bare
+   * {@code "} silently matched nothing there, which cost the whole reclassification — the column
+   * came back null, the field could not be resolved, and the violation fell through to the 500 it
+   * was supposed to replace (ETP-4793 / IMP-17, measured live 2026-08-11). The escaping is core's
+   * and is left in the message: the only messages that still carry it are the ones we could not
+   * reclassify, and rewriting them would touch the wording the import UI depends on
+   * ({@link #DUPLICATE_KEY_ERROR}).</p>
    */
+  private static final String QUOTE_OR_ESCAPED = "(?:&quot;|&#34;|[\"«»'])?";
+
   private static final java.util.regex.Pattern NOT_NULL_COLUMN_PATTERN =
       java.util.regex.Pattern.compile(
-          "null value in column\\s+[\"«']?([A-Za-z0-9_]+)[\"»']?", java.util.regex.Pattern.CASE_INSENSITIVE);
+          "null value in column\\s+" + QUOTE_OR_ESCAPED + "([A-Za-z0-9_]+)" + QUOTE_OR_ESCAPED,
+          java.util.regex.Pattern.CASE_INSENSITIVE);
 
   /**
    * A parenthesised run long enough that it can only be a data dump, not prose.

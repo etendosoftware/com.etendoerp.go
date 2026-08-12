@@ -262,6 +262,21 @@ public class NeoErrorSanitizerTest {
         "null value in column \"C_BPartner_Location_ID\" violates not-null constraint"));
   }
 
+  /**
+   * The message core actually hands us is HTML-escaped, so the quote around the column name arrives
+   * as {@code &quot;}. This is not a hypothetical: the first live probe of the IMP-23 §9.4 vector
+   * returned the 500 it was meant to replace, because the pattern required a bare {@code "}, found
+   * no column, could not resolve a field, and fell through. §9.4 had even recorded the escaping —
+   * it just was not read as load-bearing. Verbatim from that response.
+   */
+  @Test
+  public void notNullViolationColumn_htmlEscapedQuotes_isFound() {
+    String live = "ERROR: null value in column &quot;c_bpartner_location_id&quot; of relation "
+        + "&quot;c_invoice&quot; violates not-null constraint\n  Detail: Failing row contains (…).";
+    assertEquals("c_bpartner_location_id", NeoErrorSanitizer.notNullViolationColumn(live));
+    assertTrue(NeoErrorSanitizer.isNotNullViolationMessage(live));
+  }
+
   @Test
   public void notNullViolationColumn_messageNamingNoColumn_isNull() {
     assertNull(NeoErrorSanitizer.notNullViolationColumn("something else failed"));
