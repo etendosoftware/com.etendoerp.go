@@ -178,6 +178,20 @@ final class NeoReturnReceiptService {
     return qtyByLineId;
   }
 
+  /**
+   * Builds (without saving) the return line that mirrors {@code sourceLine} into
+   * {@code returnDoc}. Shared by every "import the lines of a source document into a return"
+   * flow: this service's own {@code createReturn}, {@code CreatePurchaseReturnHandler} and
+   * {@code ReturnShipmentUtils.buildAndSaveReturnLine}.
+   *
+   * <p>ETP-4863: this path persists straight through DAL and never reaches the line
+   * {@code NeoHandler}, so {@code NeoHandlerUtils.injectDefaultLocatorIfMissing} never runs on it.
+   * The source line's bin therefore used to be copied verbatim, and a return whose header sits in
+   * another warehouse than the source document ended up moving stock in the SOURCE's warehouse.
+   * {@code anchorLocatorToWarehouse} enforces the same header-warehouse guarantee the CRUD path
+   * already has: a source bin that already belongs to the return's warehouse is kept as-is, any
+   * other value is replaced by that warehouse's default bin.
+   */
   static ShipmentInOutLine createReturnLineShell(ShipmentInOut returnDoc,
       ShipmentInOutLine sourceLine, long lineNo) {
     ShipmentInOutLine line = OBProvider.getInstance().get(ShipmentInOutLine.class);
@@ -187,8 +201,10 @@ final class NeoReturnReceiptService {
     line.setLineNo(lineNo);
     line.setProduct(sourceLine.getProduct());
     line.setUOM(sourceLine.getUOM());
-    if (sourceLine.getStorageBin() != null) {
-      line.setStorageBin(sourceLine.getStorageBin());
+    Locator anchoredBin = NeoHandlerUtils.anchorLocatorToWarehouse(
+        sourceLine.getStorageBin(), returnDoc.getWarehouse(), log);
+    if (anchoredBin != null) {
+      line.setStorageBin(anchoredBin);
     }
     line.setCanceledInoutLine(sourceLine);
     return line;

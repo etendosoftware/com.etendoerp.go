@@ -34,6 +34,7 @@ import org.openbravo.erpCommon.utility.CSResponse;
 import org.openbravo.erpCommon.utility.DocumentNoData;
 import org.openbravo.model.common.enterprise.DocumentType;
 import org.openbravo.model.common.enterprise.Locator;
+import org.openbravo.model.common.enterprise.Warehouse;
 import org.openbravo.model.materialmgmt.transaction.ShipmentInOut;
 import org.openbravo.service.db.DalConnectionProvider;
 
@@ -398,25 +399,84 @@ final class NeoHandlerUtils {
   }
 
   /**
-   * Returns the default active {@code M_Locator} for a warehouse, or {@code null} when none is
-   * configured. Mirrors {@code InventoryLineHandler}'s locator lookup, scoped down to just the id
-   * since callers only need {@code storageBin}.
+   * Returns the id of the default active {@code M_Locator} for a warehouse, or {@code null} when
+   * none is configured. Thin id-only wrapper over {@link #findDefaultLocatorForWarehouse}, kept
+   * because the CRUD path ({@link #injectDefaultLocatorIfMissing}) writes the id straight into a
+   * JSON request body and never needs the entity.
+   */
+  static String resolveDefaultLocatorForWarehouse(String warehouseId, Logger log) {
+    Locator locator = findDefaultLocatorForWarehouse(warehouseId, log);
+    return locator != null ? locator.getId() : null;
+  }
+
+  /**
+   * Returns the default active {@code M_Locator} entity for a warehouse, or {@code null} when
+   * none is configured. Mirrors {@code InventoryLineHandler}'s locator lookup.
    */
   @SuppressWarnings("unchecked")
-  static String resolveDefaultLocatorForWarehouse(String warehouseId, Logger log) {
+  static Locator findDefaultLocatorForWarehouse(String warehouseId, Logger log) {
     try {
-      Locator locator = (Locator) OBDal.getInstance().createCriteria(Locator.class)
+      return (Locator) OBDal.getInstance().createCriteria(Locator.class)
           .add(Restrictions.eq(Locator.PROPERTY_WAREHOUSE + ".id", warehouseId))
           .add(Restrictions.eq(Locator.PROPERTY_DEFAULT, true))
           .add(Restrictions.eq(Locator.PROPERTY_ACTIVE, true))
           .addOrder(Order.asc(Locator.PROPERTY_SEARCHKEY))
           .setMaxResults(1)
           .uniqueResult();
-      return locator != null ? locator.getId() : null;
     } catch (Exception e) {
       log.debug("Could not resolve default locator for warehouse {}: {}", warehouseId,
           e.getMessage());
       return null;
     }
+  }
+
+  /**
+   * Entity-level counterpart of {@link #injectDefaultLocatorIfMissing}, for the DAL write paths
+   * that never reach a {@code NeoHandler} (ETP-4863).
+   *
+   * <p>{@link #injectDefaultLocatorIfMissing} can only guard requests that arrive as a JSON body
+   * on {@code POST /neo/.../lines}. Several flows build {@code M_InOutLine} records directly with
+   * {@code OBProvider} + {@code OBDal} — importing the lines of a source document into a return,
+   * or projecting an order's lines into a shipment/receipt — and those bypass the hook entirely.
+   * They used to copy the SOURCE document's bin verbatim, so a return whose header sits in
+   * warehouse A, built from a document whose lines sit in warehouse B, produced stock
+   * transactions in B. The bin, not the header, is what {@code M_INOUT_POST} follows.
+   *
+   * <p>The rule is the same UNCONDITIONAL guarantee the CRUD path applies, confirmed in scope by
+   * the product owner: a line's locator must ALWAYS belong to the header document's warehouse.
+   * A candidate that already belongs there is a deliberate, valid bin choice and is returned
+   * untouched — the guarantee is about the warehouse, not about collapsing every line onto the
+   * warehouse's single default locator.
+   *
+   * @param candidate       the bin the caller would otherwise have used (source line's bin, the
+   *                        order's warehouse default, …); may be {@code null}
+   * @param headerWarehouse the warehouse of the {@code M_InOut} the line belongs to; when
+   *                        {@code null} there is nothing to anchor to and {@code candidate} is
+   *                        returned unchanged
+   * @param log             the caller's logger
+   * @return {@code candidate} when it already belongs to {@code headerWarehouse}; otherwise that
+   *         warehouse's default locator, or {@code null} when the warehouse has none configured
+   *         (a data-setup error the caller must surface rather than paper over with a bin from
+   *         the wrong warehouse)
+   */
+  static Locator anchorLocatorToWarehouse(Locator candidate, Warehouse headerWarehouse,
+      Logger log) {
+    if (headerWarehouse == null || headerWarehouse.getId() == null) {
+      return candidate;
+    }
+    String headerWarehouseId = headerWarehouse.getId();
+    if (candidate != null && candidate.getWarehouse() != null
+        && headerWarehouseId.equals(candidate.getWarehouse().getId())) {
+      return candidate;
+    }
+    Locator anchored = findDefaultLocatorForWarehouse(headerWarehouseId, log);
+    if (anchored == null) {
+      log.warn("No default locator configured for warehouse {}; storage bin left unanchored",
+          headerWarehouseId);
+    } else if (candidate != null) {
+      log.debug("Re-anchored storage bin {} to {} (header warehouse {})", candidate.getId(),
+          anchored.getId(), headerWarehouseId);
+    }
+    return anchored;
   }
 }

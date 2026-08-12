@@ -1010,6 +1010,20 @@ Responses support custom headers via `withHeader(name, value)`.
   ```
   `InventoryLineHandler` (Physical Inventory, a sibling window) deliberately does **not** use this helper — it always overwrites `storageBin` on every `POST`, a different and stronger guarantee that would silently discard a valid in-warehouse bin choice for this InOut family.
 
+**The DAL counterpart — `NeoHandlerUtils.anchorLocatorToWarehouse` (ETP-4863):** `injectDefaultLocatorIfMissing` can only guard what arrives as a JSON body on a line `POST`. Several flows build `M_InOutLine` records **directly through `OBProvider` + `OBDal`** and therefore never reach a `NeoHandler` at all:
+
+  | Call site | What it imports |
+  |---|---|
+  | `NeoReturnReceiptService.createReturnLineShell` | source document's lines → a return (also used by `CreatePurchaseReturnHandler` and `ReturnShipmentUtils.buildAndSaveReturnLine`) |
+  | `ReturnShipmentUtils.assignBinsToLines` | header-level backfill run by `ReturnMaterialReceiptHeaderHandler` / `ReturnToVendorShipmentHeaderHandler` on `documentAction` |
+  | `InOutLineFromOrderFactory.createAndLinkLine` | an order's lines → a Goods Shipment / Goods Receipt |
+
+  All of them route their candidate bin through `anchorLocatorToWarehouse(Locator candidate, Warehouse headerWarehouse, Logger log)`, the entity-level twin of the CRUD rule: the candidate is returned untouched when it already belongs to `headerWarehouse`, otherwise it is replaced by that warehouse's default `Locator` (or `null` when the warehouse has none configured — a data-setup error worth surfacing rather than papering over with a bin from the wrong warehouse). `resolveDefaultLocatorForWarehouse` and `anchorLocatorToWarehouse` share one lookup (`findDefaultLocatorForWarehouse`), so "the warehouse's default bin" has exactly one definition across both paths.
+
+  Two failure modes this closed, both observed live:
+  - **Imported return lines** copied the SOURCE document's bin verbatim, so a return whose header sat in warehouse A but was built from a document whose lines sat in warehouse B booked its stock transactions in B. `M_INOUT_POST` follows the line's bin, not the header.
+  - **`assignBinsToLines` had its precedence inverted** — it preferred `line.getCanceledInoutLine().getStorageBin()` OVER the line's own value. A return line references its source line even when the user typed it by hand in the window, so this header-level pass silently overwrote the correct bin the line handler had just set. Confirmed on RFC Receipts 1000057/1000059/1000061/1000063: header in "Almacen GO", lines rewritten to `AS-0-0-0` of "Almacén Secundario". The line's own bin now wins; the source document's bin is only a fallback for a line that has none.
+
 ---
 
 ## 6. Parent-Child Tab Filtering

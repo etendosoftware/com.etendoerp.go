@@ -122,44 +122,46 @@ final class ReturnShipmentUtils {
   }
 
   // ---------------------------------------------------------------------------
-  // Default locator – shared between both return header handlers
+  // Default locator lookup lives in NeoHandlerUtils (ETP-4863)
+  //
+  // This class used to own a second, raw-JDBC copy of the "default locator of a warehouse"
+  // query, used only by assignBinsToLines. It is gone: both the CRUD path and every DAL path
+  // now go through NeoHandlerUtils.anchorLocatorToWarehouse / findDefaultLocatorForWarehouse,
+  // so there is a single definition of what "the warehouse's default bin" means.
   // ---------------------------------------------------------------------------
-
-  @SuppressWarnings("java:S2077")
-  static Locator findDefaultLocator(String warehouseId, Logger callerLog) {
-    String sql = "SELECT m_locator_id FROM m_locator " +
-        "WHERE m_warehouse_id = ? AND isdefault = 'Y' AND isactive = 'Y' LIMIT 1";
-    Connection conn = OBDal.getInstance().getConnection();
-    try (PreparedStatement ps = conn.prepareStatement(sql)) {
-      ps.setString(1, warehouseId);
-      try (ResultSet rs = ps.executeQuery()) {
-        if (rs.next()) {
-          return OBDal.getInstance().get(Locator.class, rs.getString(1));
-        }
-      }
-    } catch (Exception e) {
-      callerLog.warn("Could not find default locator for warehouse {}: {}", warehouseId, e.getMessage());
-    }
-    return null;
-  }
 
   // ---------------------------------------------------------------------------
   // Storage bin fill – shared between both return header handlers
   // ---------------------------------------------------------------------------
 
+  /**
+   * Header-level safety net that guarantees every line of {@code doc} carries a storage bin
+   * belonging to {@code doc}'s OWN warehouse. Called from
+   * {@code ReturnMaterialReceiptHeaderHandler.fillMissingStorageBins} and its
+   * {@code ReturnToVendorShipmentHeaderHandler} twin, after the lines exist.
+   *
+   * <p><b>ETP-4863 — this method WAS the live bug.</b> It used to give the SOURCE document's bin
+   * ({@code line.getCanceledInoutLine().getStorageBin()}) precedence over the line's own value.
+   * A return line references its source line even when the user typed it by hand in the window,
+   * so this ran on every line and silently overwrote the correct bin that the line
+   * {@code NeoHandler} had just set from the header's warehouse with a bin from the SOURCE
+   * document's warehouse. Confirmed in production on RFC Receipts 1000057/1000059/1000061/1000063:
+   * header in "Almacen GO", lines rewritten to {@code AS-0-0-0} of "Almacén Secundario", and the
+   * whole stock movement followed the bin into the wrong warehouse.
+   *
+   * <p>Corrected precedence: the LINE'S OWN bin wins; the source document's bin is only a
+   * fallback for a line that has none; and whatever comes out of that is then passed through
+   * {@link NeoHandlerUtils#anchorLocatorToWarehouse} so the final value always belongs to the
+   * header's warehouse. A line already holding a valid bin is left untouched — no write, no save.
+   */
   static void assignBinsToLines(ShipmentInOut doc) {
-    Locator defaultLocator = null;
     for (ShipmentInOutLine line : doc.getMaterialMgmtShipmentInOutLineList()) {
-      ShipmentInOutLine origLine = line.getCanceledInoutLine();
-      Locator target = (origLine != null && origLine.getStorageBin() != null)
-          ? origLine.getStorageBin()
-          : line.getStorageBin();
-      if (target == null) {
-        if (defaultLocator == null) {
-          defaultLocator = findDefaultLocator(doc.getWarehouse().getId(), log);
-        }
-        target = defaultLocator;
+      Locator candidate = line.getStorageBin();
+      if (candidate == null) {
+        ShipmentInOutLine origLine = line.getCanceledInoutLine();
+        candidate = (origLine != null) ? origLine.getStorageBin() : null;
       }
+      Locator target = NeoHandlerUtils.anchorLocatorToWarehouse(candidate, doc.getWarehouse(), log);
       if (target != null && (line.getStorageBin() == null
           || !target.getId().equals(line.getStorageBin().getId()))) {
         line.setStorageBin(target);
@@ -272,20 +274,21 @@ final class ReturnShipmentUtils {
   // Return shipment line builder – shared between both return header handlers
   // ---------------------------------------------------------------------------
 
+  /**
+   * Imports {@code sourceLine} into {@code doc} as a return line and persists it.
+   *
+   * <p>ETP-4863: the line shell (including the header-warehouse anchoring of the storage bin) is
+   * built by {@link NeoReturnReceiptService#createReturnLineShell} — the two implementations were
+   * byte-for-byte identical, so the shell now lives in exactly one place and there is a single
+   * spot where the locator rule can drift. Only the quantity handling stays here: this flow takes
+   * a caller-computed {@code qty} and deliberately does NOT apply the proportional
+   * order-UOM/order-quantity projection that {@code NeoReturnReceiptService}'s own wrapper does.
+   */
   static void buildAndSaveReturnLine(ShipmentInOut doc, ShipmentInOutLine sourceLine,
       long lineNo, BigDecimal qty) {
-    ShipmentInOutLine retLine = OBProvider.getInstance().get(ShipmentInOutLine.class);
-    retLine.setClient(doc.getClient());
-    retLine.setOrganization(doc.getOrganization());
-    retLine.setShipmentReceipt(doc);
-    retLine.setLineNo(lineNo);
-    retLine.setProduct(sourceLine.getProduct());
-    retLine.setUOM(sourceLine.getUOM());
+    ShipmentInOutLine retLine =
+        NeoReturnReceiptService.createReturnLineShell(doc, sourceLine, lineNo);
     retLine.setMovementQuantity(qty);
-    retLine.setCanceledInoutLine(sourceLine);
-    if (sourceLine.getStorageBin() != null) {
-      retLine.setStorageBin(sourceLine.getStorageBin());
-    }
     OBDal.getInstance().save(retLine);
   }
 
