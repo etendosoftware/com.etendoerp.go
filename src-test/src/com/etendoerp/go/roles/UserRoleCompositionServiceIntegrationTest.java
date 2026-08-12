@@ -27,6 +27,7 @@ import org.hibernate.criterion.Restrictions;
 import org.junit.After;
 import org.junit.Test;
 import org.openbravo.base.provider.OBProvider;
+import org.openbravo.base.weld.test.WeldBaseTest;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
@@ -37,13 +38,29 @@ import org.openbravo.model.ad.access.WindowAccess;
 import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.ad.ui.Window;
 import org.openbravo.model.common.enterprise.Organization;
-import org.openbravo.test.base.OBBaseTest;
 
 /**
  * ETP-4852 — real-DB, end-to-end proof that a system-level ({@code AD_Client_ID = '0'}) template
  * role's {@code AD_Window_Access} propagates onto a per-tenant personal role purely via core's
  * own {@code RoleInheritanceEventHandler}/{@code RoleInheritanceManager} — the exact claim the
  * ticket asked to be VERIFIED live, not assumed from reading the source.
+ *
+ * <p><b>Extends {@code WeldBaseTest}, NOT plain {@code OBBaseTest}.</b> Propagation is driven by
+ * a Hibernate {@code Interceptor} ({@code PersistenceEventOBInterceptor}) firing a CDI {@code
+ * EntityNewEvent}, observed by core's {@code RoleInheritanceEventHandler} (an {@code
+ * EntityPersistenceEventObserver}), which in turn invokes the {@code @ApplicationScoped
+ * RoleInheritanceManager}. None of that wiring exists under plain {@code OBBaseTest} — only
+ * {@code WeldBaseTest} (via its Arquillian {@code @RunWith} and {@code
+ * kernelInitializer.setInterceptor()} in {@code setUp()}) actually installs the interceptor into
+ * {@code SessionFactoryController}'s Hibernate {@code Configuration} and boots the CDI container
+ * that hosts the observer. Confirmed by precedent: {@code
+ * GoodsReceiptNoStockCompletionIntegrationTest} in this same module already uses {@code
+ * WeldBaseTest} for the same reason, and core's own {@code AccessPropagation} role-inheritance
+ * test (@code org.openbravo.test.role.inheritance}) does too. Under plain {@code OBBaseTest} the
+ * {@code @Inject Event<EntityNewEvent>} producer in the interceptor is never wired to any
+ * observer, so {@code RoleInheritanceEventHandler#onSave} silently never runs — this is a test
+ * harness gap, not a bug in {@link UserRoleCompositionService}: production code always runs
+ * inside the webapp's real CDI container, where the interceptor is installed once at startup.</p>
  *
  * <p>Deliberately does NOT depend on {@code EnsureSystemRoleTemplatesScript} having run against
  * this test database (that {@code ModuleScript} only fires during {@code update.database}, not
@@ -56,7 +73,7 @@ import org.openbravo.test.base.OBBaseTest;
  * {@link #TEST_USER_ID} default role) is rolled back in {@link #rollbackChanges()}, mirroring
  * {@code TbaiSyncStatusInjectorIntegrationTest}'s convention.</p>
  */
-public class UserRoleCompositionServiceIntegrationTest extends OBBaseTest {
+public class UserRoleCompositionServiceIntegrationTest extends WeldBaseTest {
 
   private static final String SYSTEM_CLIENT_ID = "0";
   private static final String STAR_ORG_ID = "0";
