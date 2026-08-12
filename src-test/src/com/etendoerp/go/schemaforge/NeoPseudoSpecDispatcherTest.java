@@ -33,6 +33,7 @@ import org.junit.Before;
 import org.junit.Test;
 import org.mockito.ArgumentCaptor;
 
+import com.etendoerp.go.schemaforge.webhooks.SFAssignUserRoles;
 import com.etendoerp.go.schemaforge.webhooks.SFListMenu;
 import com.etendoerp.go.schemaforge.webhooks.SFRolesOverview;
 import com.etendoerp.go.schemaforge.webhooks.SFWindowAccessMap;
@@ -200,6 +201,30 @@ public class NeoPseudoSpecDispatcherTest {
     assertTrue(handled);
     verify(servlet).sendError(eq(response), eq(HttpServletResponse.SC_METHOD_NOT_ALLOWED),
         eq("Rolesoverview endpoint only supports GET"));
+    verify(goWebhookBridge, never()).handle(any(), any());
+  }
+
+  @Test
+  public void assignUserRolesGetDispatchesThroughBridgeWithSFAssignUserRoles() throws Exception {
+    NeoResponse payload = NeoResponse.ok(new JSONObject());
+    when(goWebhookBridge.handle(eq(request), any(BaseWebhookService.class))).thenReturn(payload);
+
+    boolean handled = dispatcher.handle(pathInfo("assignuserroles"), "GET", request, response);
+
+    assertTrue(handled);
+    ArgumentCaptor<BaseWebhookService> webhookCaptor = ArgumentCaptor.forClass(BaseWebhookService.class);
+    verify(goWebhookBridge).handle(eq(request), webhookCaptor.capture());
+    assertTrue(webhookCaptor.getValue() instanceof SFAssignUserRoles);
+    verify(servlet).writeResponse(response, payload);
+  }
+
+  @Test
+  public void assignUserRolesRejectsNonGetMethod() throws Exception {
+    boolean handled = dispatcher.handle(pathInfo("assignuserroles"), "POST", request, response);
+
+    assertTrue(handled);
+    verify(servlet).sendError(eq(response), eq(HttpServletResponse.SC_METHOD_NOT_ALLOWED),
+        eq("Assignuserroles endpoint only supports GET"));
     verify(goWebhookBridge, never()).handle(any(), any());
   }
 }

@@ -16,8 +16,6 @@
  */
 package com.etendoerp.go.schemaforge.handlers;
 
-import java.util.ArrayList;
-import java.util.List;
 import java.util.Set;
 
 import javax.inject.Named;
@@ -27,14 +25,10 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
-import org.hibernate.criterion.Restrictions;
-import org.openbravo.base.provider.OBProvider;
 import org.openbravo.dal.core.OBContext;
-import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.access.Role;
 import org.openbravo.model.ad.access.User;
-import org.openbravo.model.ad.access.UserRoles;
 import org.openbravo.service.json.JsonConstants;
 
 import com.etendoerp.go.rest.EtendoGoAccountProvisioning;
@@ -43,6 +37,7 @@ import com.etendoerp.go.schemaforge.NeoContext;
 import com.etendoerp.go.schemaforge.NeoEndpointType;
 import com.etendoerp.go.schemaforge.NeoHandler;
 import com.etendoerp.go.schemaforge.NeoResponse;
+import com.etendoerp.go.schemaforge.util.UserRoleSyncSupport;
 
 /**
  * NeoHandler for the {@code user} spec. Three independent concerns share this one class because
@@ -307,36 +302,6 @@ public class UserRoleAssignmentHandler implements NeoHandler {
       return;
     }
     Role targetRole = user.getDefaultRole();
-
-    OBCriteria<UserRoles> criteria = OBDal.getInstance().createCriteria(UserRoles.class);
-    criteria.add(Restrictions.eq(UserRoles.PROPERTY_USERCONTACT, user));
-    List<UserRoles> existing = criteria.list();
-
-    boolean alreadyInSync = existing.size() == 1 && targetRole != null
-        && targetRole.getId().equals(existing.get(0).getRole().getId());
-    if (alreadyInSync) {
-      return;
-    }
-
-    for (UserRoles row : new ArrayList<>(existing)) {
-      OBDal.getInstance().remove(row);
-    }
-    OBDal.getInstance().flush();
-
-    if (targetRole == null) {
-      log.info("User {} has no default role set; cleared all AD_User_Roles rows.", userId);
-      return;
-    }
-
-    UserRoles newRow = OBProvider.getInstance().get(UserRoles.class);
-    newRow.setNewOBObject(true);
-    newRow.setClient(targetRole.getClient());
-    newRow.setOrganization(targetRole.getOrganization());
-    newRow.setUserContact(user);
-    newRow.setRole(targetRole);
-    newRow.setRoleAdmin(false);
-    OBDal.getInstance().save(newRow);
-    OBDal.getInstance().flush();
-    log.info("Assigned role {} to user {} via AD_User_Roles.", targetRole.getId(), userId);
+    UserRoleSyncSupport.syncSingleActiveUserRole(user, targetRole);
   }
 }

@@ -36,6 +36,20 @@ import org.openbravo.model.ad.system.Client;
  * ETP-4515 (Phase 7, folded into ETP-4520) — clones GOClient's Finance/Sales/Purchasing/Inventory
  * roles onto a freshly onboarded tenant when missing.
  *
+ * <p><b>SUPERSEDED by ETP-4852 (2026-08-12) — no longer invoked from the live onboarding chain.</b>
+ * The four roles this service used to duplicate per client are now single, canonical,
+ * system-level ({@code AD_Client_ID = '0'}) template roles (seeded once by {@code
+ * EnsureSystemRoleTemplatesScript}, see {@code com.etendoerp.go.roles.SystemRoleTemplates}) —
+ * naturally visible to every tenant via the same {@code AD_Client_ID = '0'} cross-client
+ * visibility mechanism reference/tax tables already use, so nothing needs to be cloned per
+ * client anymore. {@code EtendoGoJwtServlet.handleOnboarding} no longer calls {@link #wire}.
+ * This class (and its test) is kept, unused by the live path, only because {@code ETP-4877}
+ * (migrating the ~21 EXISTING tenants that still hold duplicated copies of these roles onto the
+ * new template-inheritance model) may find its clone logic a useful reference — it is NOT a
+ * dependency of that migration, just a candidate source to read. Per-user role composition for
+ * the new model lives in {@code com.etendoerp.go.roles.UserRoleCompositionService}, reached via
+ * the {@code SFAssignUserRoles} webhook.
+ *
  * <p>This is the preventive (onboarding-time) counterpart of the corrective data-fix {@code
  * cli/src/data-fixes/sql/20260727T114306Z__R16-tenant-roles-and-webhook-access.sql} in
  * {@code etendo_schema_forge} (role clone + {@code AD_Window_Access} backfill; that data-fix's
@@ -43,11 +57,12 @@ import org.openbravo.model.ad.system.Client;
  * {@code SFListMenu}/{@code SFWindowAccessMap}/{@code SFRolesOverview} are reached through the NEO
  * pseudo-spec bridge instead of the Webhooks module — see {@code neo-headless.md} §4.10–4.11). See
  * {@code santo_roles_handoff_phase7.md} and {@code docs/etendo-ad/onboarding-gaps.md} §H2 in the
- * functional repo for the full gap writeup.
+ * functional repo for the full gap writeup (both now historical — describe the pre-ETP-4852 model).
  *
- * <p>Without this, a real onboarded tenant has exactly one role (its auto-created admin role) —
- * the ETP-4512 "assign one of 5 predefined roles" UI has nothing else to offer, and role-based
- * access segmentation is impossible for that tenant.
+ * <p>Without this, a real onboarded tenant used to have exactly one role (its auto-created admin
+ * role) — the ETP-4512 "assign one of 5 predefined roles" UI had nothing else to offer. ETP-4852
+ * closes that same gap a different way (system-level templates + composition), so this class's
+ * own rationale no longer applies to new tenants.
  *
  * <p>Window ids are copied as-is from GOClient's {@code AD_Window_Access} rows: {@code AD_Window}
  * is a system-level entity ({@code ad_client_id = '0'} for every row), so a window id means the

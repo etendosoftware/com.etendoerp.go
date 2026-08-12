@@ -580,24 +580,29 @@ does not resolve to a readable entity, `405` for any method other than `GET`.
 GET /sws/neo/listmenu[?q=<term>]
 GET /sws/neo/windowaccessmap
 GET /sws/neo/rolesoverview
+GET /sws/neo/assignuserroles?UserId=<id>&TemplateRoleIds=<id1,id2,...>
 Authorization: Bearer {token}
 ```
 
-`NeoGoWebhookBridge` runs `SFListMenu`/`SFWindowAccessMap`/`SFRolesOverview` (§8, §8b, §8c) through
-NEO's own JWT authentication instead of the Webhooks module's HTTP dispatch — the same pattern
-`NeoSimSearchEndpoint` (§4.9) already used for `SimSearch`. Each of these three pseudo-specs
-constructs the corresponding `BaseWebhookService` and calls its unchanged `get(Map, Map)` method
-directly; the response body is the exact `{"result": "<value>"}` / `{"error": "<message>"}` shape
-the Webhooks module itself produces (verified by disassembling `WebhookServiceHandler.buildResponse`
-in `webhookevents-3.1.0.jar`), so callers only need their request URL updated, never their
-response-parsing logic. All three still work at their original `/webhooks/SFListMenu` /
-`/webhooks/SFWindowAccessMap` / `/webhooks/SFRolesOverview` paths too — the Webhooks module dispatch
-was not removed — but `/sws/neo/*` is the path the Go SPA (`tools/app-shell` in
-`etendo_schema_forge`) actually calls, and no `SMFWHE_DEFINEDWEBHOOK_ROLE` grant is required for it.
+`NeoGoWebhookBridge` runs `SFListMenu`/`SFWindowAccessMap`/`SFRolesOverview`/`SFAssignUserRoles`
+(§8, §8b, §8c, §8d) through NEO's own JWT authentication instead of the Webhooks module's HTTP
+dispatch — the same pattern `NeoSimSearchEndpoint` (§4.9) already used for `SimSearch`. Each of
+these pseudo-specs constructs the corresponding `BaseWebhookService` and calls its unchanged
+`get(Map, Map)` method directly; the response body is the exact `{"result": "<value>"}` /
+`{"error": "<message>"}` shape the Webhooks module itself produces (verified by disassembling
+`WebhookServiceHandler.buildResponse` in `webhookevents-3.1.0.jar`), so callers only need their
+request URL updated, never their response-parsing logic. `SFListMenu`/`SFWindowAccessMap`/
+`SFRolesOverview` still work at their original `/webhooks/*` paths too — the Webhooks module
+dispatch was not removed for them — but `/sws/neo/*` is the path the Go SPA (`tools/app-shell` in
+`etendo_schema_forge`) actually calls, and no `SMFWHE_DEFINEDWEBHOOK_ROLE` grant is required for
+it. `SFAssignUserRoles` (ETP-4852) is `/sws/neo/*`-only — it was authored after this pattern was
+already established, so it never had a legacy `/webhooks/*` path to keep.
 
-Each webhook's own access rule is unaffected and still enforced inside its `get()` — see §8/§8b/§8c
-for what each one checks (`NeoAccessHelper.isAdminOrClientAdmin`, window/process access checks,
-etc.). Non-`GET` requests get `405`; a webhook that throws gets `500` with the exception message.
+Each webhook's own access rule is unaffected and still enforced inside its `get()` — see
+§8/§8b/§8c/§8d for what each one checks (`NeoAccessHelper.isAdminOrClientAdmin`, window/process
+access checks, etc.). Non-`GET` requests get `405`; a webhook that throws gets `500` with the
+exception message (except `SFAssignUserRoles`'s own expected domain-validation rejections — see
+§8d for why those are a `200`/`success:false` result instead).
 
 ### 4.11 NEO Pseudo-Spec Bridge Pattern (preferred for new Etendo-GO-authored webhooks)
 
@@ -1303,6 +1308,82 @@ Unlike `SFWindowAccessMap`, which answers "what can the CURRENT caller's own rol
 A role id that fails to resolve (missing/renamed) is skipped defensively — the other 4 roles are still returned rather than failing the whole request.
 
 **`windows` intersection:** a role's native `AD_Window_Access` rows are filtered down to windows Etendo GO actually exposes today — every distinct `AD_Window` backing an active, `SPEC_TYPE = 'W'` `ETGO_SF_SPEC` — so inherited/legacy grants to native-only Etendo windows don't leak into this "assigned windows" view. Each entry's `tier` resolves the same way as `SFWindowAccessMap`: `IsReadWrite = true` → `"full"`, `IsReadWrite = false` → `"read-only"`. The array is sorted by window name.
+
+> **⚠️ Known follow-up gap (ETP-4852, not fixed here):** `SFRolesOverview.GOCLIENT_ROLE_IDS` is
+> still hardcoded to GOClient's own 5 per-client role ids (the table above). Since ETP-4852
+> moved the 4 fixed roles to system-level templates and introduced per-user personal
+> composition roles (§8d), this webhook's "Configuración > Roles" aggregate no longer reflects
+> the real per-tenant picture for any client OTHER than GOClient (whose old per-client role
+> copies still exist, untouched, pending ETP-4877's migration) — a tenant onboarded after
+> ETP-4852 has no roles at all under these 5 hardcoded ids to aggregate. Reworking this webhook
+> to aggregate the system templates + each tenant's own personal roles is a natural follow-up,
+> out of scope for ETP-4852 itself (which only builds the mechanism, per the ticket).
+
+---
+
+## 8d. Compose User Roles From Templates (SFAssignUserRoles Webhook, ETP-4852)
+
+`SFAssignUserRoles` (`GET /sws/neo/assignuserroles?UserId=<id>&TemplateRoleIds=<id1,id2,...>`
+— reached ONLY through the NEO pseudo-spec bridge, §4.10/§4.11; there is no legacy
+`/webhooks/SFAssignUserRoles` path since this webhook was authored after the bridge pattern was
+already established) backs the reworked "assign roles to user" UI: instead of picking ONE shared
+role (the old `AD_User.Default_Ad_Role_ID` single-dropdown flow, still handled by
+`UserRoleAssignmentHandler`'s `user`-entity `PUT`/`PATCH` sync for any caller who has not been
+migrated to the new flow yet), an admin picks **1+** system-level template roles to **compose**.
+
+**The model this replaces:** four fixed roles (Finance/Sales/Purchasing/Inventory) used to be
+duplicated per client (`OnboardingRoleProvisioningService`, now retired from the live onboarding
+chain — see its class javadoc). ETP-4852 moves them to a single canonical, system-owned
+(`AD_Client_ID = '0'`) `AD_Role` row per role, `IsTemplate = 'Y'` / `IsManual = 'Y'`, seeded once
+by the `EnsureSystemRoleTemplatesScript` `ModuleScript` (`com.etendoerp.go.roles`). The "Admin"
+(`is_client_admin = 'Y'`) role stays client-level, per tenant, untouched.
+
+**The mechanism (`com.etendoerp.go.roles.UserRoleCompositionService`):** each user gets exactly
+ONE personal, non-template, non-admin `AD_Role` (found by reuse or created on first use), which
+inherits — via a real `AD_Role_Inheritance` row per requested template, added through `OBDal`
+(never native SQL) — from every template the caller asked for. Core's own
+`RoleInheritanceEventHandler`/`RoleInheritanceManager` (unmodified, `org.openbravo.role.
+inheritance`) does the actual propagation of `AD_Window_Access` (and every other inheritable
+access type) onto the personal role — this module never hand-copies an access row. Requesting a
+DIFFERENT set on a later call reconciles (adds what's missing, removes what's no longer
+requested) rather than only ever growing.
+
+**Verified live (not just from reading the source):** a template role and a personal role
+naturally end up on DIFFERENT `AD_Client_ID`s (`'0'` vs. the tenant's own) — confirmed this does
+NOT block enforcement anywhere in either NEO (`NeoAccessHelper.findActiveWindowAccess`) or
+classic core (`EntityAccessChecker`, `Seguridad_data.xsql`), since neither filters
+`AD_Window_Access` by client, and a tenant role's own readable-clients set always includes `'0'`
+by design (the exact mechanism reference/tax tables already rely on). See
+`UserRoleCompositionServiceIntegrationTest` for the real-DB proof (create template → add
+inheritance → confirm `AD_Window_Access` appears on the personal role with the right
+`InheritedFrom`, across clients).
+
+**Response shape:**
+
+```json
+// Success:
+{"success": true, "userId": "...", "personalRoleId": "...",
+ "templateRoleIds": ["...", "..."], "added": 1, "removed": 0}
+// Validation failure or access denial (still HTTP 200 — see below):
+{"success": false, "message": "Role is not a template, cannot be composed: ..."}
+```
+
+**Access gate:** admin/client-admin only (`NeoAccessHelper.isAdminOrClientAdmin`), captured
+before entering admin mode — same convention as `SFRolesOverview`. No role, or a restricted
+role, gets `{"success": false, "message": "Not authorized"}` without touching the database.
+
+**⚠️ Deliberately does NOT use the bridge's `error`/HTTP 500 path for expected rejections.**
+`NeoGoWebhookBridge` always maps `responseVars["error"]` to `500` — correct for a genuine crash,
+misleading for "that id isn't a valid template". `SFAssignUserRoles` catches `OBException`
+itself and folds it into a `result` (HTTP 200) body with `success: false`; only an unexpected
+`RuntimeException` reaches the bridge's `error`/`500` path. Callers must branch on the body's
+`success` flag, not the HTTP status.
+
+**Not yet built (ETP-4878/ETP-4877, explicitly out of scope for ETP-4852):** the four templates
+ship with only a 2-window smoke-test `AD_Window_Access` grant each — enough to prove propagation
+end-to-end, not the real 48-window Admin/Ventas/Compras/Financiero/Almacén matrix from the
+ticket (ETP-4878's job). The ~21 existing tenants still holding per-client duplicated role
+copies are untouched by this mechanism (ETP-4877's job — a migration, not a runtime fallback).
 
 ---
 

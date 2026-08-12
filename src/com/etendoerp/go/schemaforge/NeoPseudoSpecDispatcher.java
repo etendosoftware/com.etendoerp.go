@@ -21,6 +21,7 @@ import java.io.IOException;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 
+import com.etendoerp.go.schemaforge.webhooks.SFAssignUserRoles;
 import com.etendoerp.go.schemaforge.webhooks.SFListMenu;
 import com.etendoerp.go.schemaforge.webhooks.SFRolesOverview;
 import com.etendoerp.go.schemaforge.webhooks.SFWindowAccessMap;
@@ -88,6 +89,12 @@ class NeoPseudoSpecDispatcher {
     }
     if ("rolesoverview".equals(pathInfo.specName)) {
       return dispatchGoWebhook("Rolesoverview", method, request, response, new SFRolesOverview());
+    }
+    // ETP-4852: compose a user's access from 1+ system-level template roles. See
+    // SFAssignUserRoles's class javadoc for the full mechanism and response shape.
+    if ("assignuserroles".equals(pathInfo.specName)) {
+      return dispatchGoWebhook("Assignuserroles", method, request, response,
+          new SFAssignUserRoles());
     }
     return false;
   }
