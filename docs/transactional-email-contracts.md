@@ -52,8 +52,48 @@ Rejected provider passthrough shape:
 | `EmailProviderAdapter` | Backend-only boundary to the external provider |
 | `ApiGatewayEmailProviderAdapter` | HTTP adapter for API Gateway-style providers |
 | `EmailProviderConfig` | Reads provider configuration from server-side properties or environment variables |
+| `GoProviderEmailSender` | Core `EmailSender` SPI implementation routing core ERP emails over the provider when no SMTP applies |
 
 The default executor loads injected contract providers. A missing contract still returns `VALIDATION_FAILED` with HTTP 404.
+
+## Core ERP Emails Through the Provider (`GoProviderEmailSender`)
+
+Everything above describes emails originated by this module's own contracts. Core ERP emails —
+alerts, password resets, portal access grants, legacy Print/Email — travel a different path:
+`EmailManager` routes them through `EmailSenderDispatcher` (`com.etendoerp.email.spi`, added by
+ETP-4216), which picks the highest-priority sender reporting itself configured.
+`GoProviderEmailSender` is this module's contribution to that SPI, so those emails can also go
+out over the provider gateway.
+
+It is a **fallback, not an override**. It reports itself configured only when all of the
+following hold:
+
+1. the provider is configured (`etendo.go.email.provider.enabled`, `.baseUrl`, `.apiKey`);
+2. the send context carries no SMTP configuration, resolved or otherwise;
+3. the message has no attachments and no BCC — the provider payload has no slot for either, so
+   it declines rather than dropping them, and the dispatcher falls back to SMTP.
+
+A `null` email means the dispatcher is probing for capability
+(`hasAlternativeSenderConfigured()`), and the sender answers `true` so callers get past their
+pre-send guard.
+
+Priority is `50`: below `TbaiEmailSender`'s `100`, so TicketBAI keeps delivering its own
+rejection alert through its own mailbox, and above `DefaultSmtpEmailSender`'s
+`Integer.MIN_VALUE`.
+
+Delivery uses the `custom` template with `data.subject` and `data.body` — the
+bring-your-own-content template documented under *Provider template allowlist*. The provider
+sends from its own verified identity, so core's `from`/`fromName` are ignored, as are
+`sentDate` and `headerExtras`.
+
+**Practical consequence:** the `com.smf.currency.conversionrate` failure alert now reaches its
+recipient on a System-scheduled downloader, where the SMTP cascade resolves nothing because it
+filters by client `0`. That module required no changes — the dispatcher selects the transport
+for it.
+
+Environments with SMTP configured, or without the provider configured, are unaffected.
+
+Design and rollout notes: `docs/plans/2026-08-10-go-provider-email-sender-design.md`.
 
 ## Authorization and Recipient Resolution
 
@@ -150,11 +190,58 @@ Email delivery failure is audited and must not roll back registration, onboardin
 | `environment-ready` | `custom` | `ETGO_Account.email` resolved by `accountId` | `version`, `accountId`, `recordId` |
 | `password-changed` | `custom` | `ETGO_Account.email` resolved by `accountId` | `version`, `accountId`, `recordId`; optional `date` |
 | `login-alert` | `login-alert` | `AD_User.email` resolved by `userId` | `version`, `userId`; optional `loginEventId`, `ip`, `date` |
-| `sales-invoice-send` | `invoice` | `C_BPartner.EM_Etgo_Email`, falling back to active contact email, resolved from the invoice business partner | `version`, `recordId` |
-| `sales-order-send` | `document` | `C_BPartner.EM_Etgo_Email`, falling back to active contact email, resolved from the sales order business partner | `version`, `recordId` |
-| `sales-quotation-send` | `document` | `C_BPartner.EM_Etgo_Email`, falling back to active contact email, resolved from the sales quotation business partner | `version`, `recordId` |
+| `sales-invoice-send` | `invoice`, or `custom` on an edited send | `C_BPartner.EM_Etgo_Email`, falling back to active contact email, resolved from the invoice business partner | `version`, `recordId` |
+| `sales-order-send` | `custom` | `C_BPartner.EM_Etgo_Email`, falling back to active contact email, resolved from the sales order business partner | `version`, `recordId` |
+| `sales-quotation-send` | `custom` | `C_BPartner.EM_Etgo_Email`, falling back to active contact email, resolved from the sales quotation business partner | `version`, `recordId` |
+| `purchase-order-send` | `custom` | `C_BPartner.EM_Etgo_Email`, falling back to active contact email, resolved from the purchase order business partner | `version`, `recordId` |
+| `goods-shipment-send` | `custom` | `C_BPartner.EM_Etgo_Email`, falling back to active contact email, resolved from the shipment business partner | `version`, `recordId` |
+| `return-to-vendor-send` | `custom` | `C_BPartner.EM_Etgo_Email`, falling back to active contact email, resolved from the vendor-return business partner | `version`, `recordId` |
 
 `custom` and `support-custom-email` are not registered as public contracts by default. Some closed auth contracts use the provider's `custom` template because the current provider allowlist exposes `custom`, `reset-password`, `login-alert`, and `invoice`. Those contracts still generate fixed `subject` and `body` values server-side and never accept arbitrary provider payloads from the browser. A generic custom HTML email can only be added later as an explicit support/admin contract with role checks, reason capture, sanitizer, throttle, and audit.
+
+### Provider template allowlist (ETP-4786)
+
+The gateway exposes exactly four templates and rejects anything else with
+`400 {"error": "Unknown template '<name>'. Available: ['reset-password', 'login-alert', 'invoice', 'custom']"}`.
+The document-send family originally emitted `document`, which is **not** in that set, so every
+document send failed with `PROVIDER_FAILED`; `sales-invoice-send` was unaffected only because it
+pins `invoice`. The family now defaults to `custom` and therefore owns its `subject` and `body`,
+built from the trusted document record in `DefaultDocumentSendEmailContract`. Never introduce a
+template name that is not in the allowlist above — `InitialEmailContractsTest` fails if you do.
+
+Set `etendo.go.email.provider.documentTemplate` (or `ETGO_EMAIL_PROVIDER_DOCUMENT_TEMPLATE`) to
+switch the family onto a branded document template once the gateway publishes one; no code change
+is required. Contracts that pin their own template (`sales-invoice-send`) ignore the property.
+
+### Per-send template selection (ETP-4717)
+
+The template is resolved per send, not per contract, because only `custom` can render copy the
+operator authored:
+
+| | `messageEdits` absent | `messageEdits` present |
+|---|---|---|
+| `sales-invoice-send` | `invoice` — branded, `subject`/`body` not emitted | `custom` + operator copy |
+| every other document contract | `custom` + contract-composed default copy | `custom` + operator copy |
+
+`messageEdits` is the allowlisted `{ subject, message }` command field posted by `SendDocumentModal`
+only when the operator changed either value; an untouched send carries no such key and keeps the
+byte-identical legacy payload. `EmailMessageEdits` validates it: unknown keys are rejected, both
+values are length-capped, CR/LF are stripped from the subject (header-injection vector), and the
+message is HTML-escaped with newlines converted to `<br>` because the content template renders
+`body` as HTML. The browser still cannot choose the template, the recipient, or any provider
+metadata.
+
+The send idempotency key gains a `:{contentHash}` suffix **only** on an edited send. Without it,
+correcting the text and re-sending to the same recipients reuses the previous key and is answered
+`DUPLICATE`, so the corrected email would never leave. Untouched sends keep their pre-ETP-4717 key.
+
+Contracts outside the document-send family reject `messageEdits` outright via
+`EmailContractCommandSupport.rejectMessageEditsIfPresent`, mirroring the existing `recipientEdits`
+rejection.
+
+When the gateway publishes a `document` template that accepts optional `subject`/`body` overrides,
+both branches of the table collapse onto it: set the property, delete the contract-composed
+defaults (`buildSubject`/`buildBody`), and pass the operator copy straight through.
 
 `login-alert` is registered but not triggered by login. It remains deferred until the SSO and risk-policy model is defined.
 

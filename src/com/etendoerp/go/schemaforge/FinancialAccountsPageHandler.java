@@ -99,13 +99,37 @@ public class FinancialAccountsPageHandler implements NeoHandler {
           + "       fa.c_currency_id, cur.iso_code, fa.iban, fa.isdefault, fa.isactive, "
           + "       fa.em_psd2_masked_pan, fa.em_psd2_connection_status, "
           + "       COALESCE(fa.em_etgo_date_tolerance, 3), "
-          + "       COALESCE(fa.em_etgo_amount_tolerance, 0) "
+          + "       COALESCE(fa.em_etgo_amount_tolerance, 0), "
+          + "       COALESCE(fa.em_aprm_glitem_diff, ''), "
+          + "       COALESCE(gli.name, ''), "
+          + "       fa.em_psd2_salt_edge_account_id, prov.logo_url, "
+          + "       fa.writeofflimit "
           + "  FROM fin_financial_account fa "
           + "  JOIN c_currency cur ON cur.c_currency_id = fa.c_currency_id "
+          + "  LEFT JOIN c_glitem gli ON gli.c_glitem_id = fa.em_aprm_glitem_diff "
+          // LEFT JOIN: most accounts have no bank provider at all (cash, or never connected).
+          // Reads the logo straight from the already-synced provider catalog — no live Salt Edge
+          // call per row, unlike the connect-flow bank picker / account selector.
+          + "  LEFT JOIN psd2_provider prov ON prov.psd2_provider_id = fa.em_psd2_provider_id "
           + " WHERE fa.ad_client_id = ? "
           + "   AND fa.ad_org_id = ANY (?) "
           + " ORDER BY fa.isdefault DESC, fa.name ASC";
 
+  /**
+   * "Pending to reconcile" per account, in two branches because the two account types measure it
+   * against different things (ETP-4795):
+   *
+   * <ul>
+   *   <li><b>Bank / card</b> — unmatched bank-statement lines, the rows the split panel lists.</li>
+   *   <li><b>Cash</b> — movements not yet part of a reconciliation, the rows the cash close lists.
+   *       A cash drawer has no bank statements, so before this branch existed its counter was
+   *       structurally always 0: the tab badge, the list's "Por conciliar" column and the sidebar's
+   *       "Cuentas con pendientes" were all blind to cash accounts.</li>
+   * </ul>
+   *
+   * An account is either cash or not, so the branches can never both match one — {@code UNION ALL}
+   * is safe and still yields exactly one row per account. Bind order: clientId, orgs, clientId, orgs.
+   */
   private static final String PENDING_BY_ACCOUNT_SQL =
       "SELECT bs.fin_financial_account_id, COUNT(bsl.*) AS pending_lines "
           + "  FROM fin_bankstatementline bsl "
@@ -115,7 +139,20 @@ public class FinancialAccountsPageHandler implements NeoHandler {
           + "   AND bs.isactive = 'Y' "
           + "   AND bs.ad_client_id = ? "
           + "   AND bs.ad_org_id = ANY (?) "
-          + " GROUP BY bs.fin_financial_account_id";
+          + " GROUP BY bs.fin_financial_account_id "
+          + " UNION ALL "
+          + "SELECT ft.fin_financial_account_id, COUNT(*) AS pending_lines "
+          + "  FROM fin_finacc_transaction ft "
+          + "  JOIN fin_financial_account fa "
+          + "    ON fa.fin_financial_account_id = ft.fin_financial_account_id "
+          + " WHERE fa.type = 'C' "
+          + "   AND ft.isactive = 'Y' "
+          + "   AND ft.processed = 'Y' "
+          + "   AND ft.fin_reconciliation_id IS NULL "
+          + "   AND ft.status <> 'RPPC' "
+          + "   AND ft.ad_client_id = ? "
+          + "   AND ft.ad_org_id = ANY (?) "
+          + " GROUP BY ft.fin_financial_account_id";
 
   /**
    * Accounts with at least one active transaction (ETP-4530). Used by the frontend to lock the
@@ -213,6 +250,14 @@ public class FinancialAccountsPageHandler implements NeoHandler {
           row.dateTolerance = rs.getInt(12);
           BigDecimal amtTol = rs.getBigDecimal(13);
           row.amountTolerance = amtTol != null ? amtTol : BigDecimal.ZERO;
+          row.glItemDifferenceId = StringUtils.trimToEmpty(rs.getString(14));
+          row.glItemDifferenceName = StringUtils.trimToEmpty(rs.getString(15));
+          row.bankReconnectable = !row.bankConnected
+              && StringUtils.isNotBlank(rs.getString(16));
+          row.providerLogoUrl = StringUtils.trimToEmpty(rs.getString(17));
+          // Left NULL on purpose when unset: null means "no limit", which is not the same as a
+          // configured 0. See the serialiser and ReconciliationHandler.assertWithinWriteoffLimit.
+          row.writeoffLimit = rs.getBigDecimal(18);
           rows.add(row);
         }
       }
@@ -224,11 +269,18 @@ public class FinancialAccountsPageHandler implements NeoHandler {
     Map<String, Integer> result = new LinkedHashMap<>();
     Connection conn = OBDal.getInstance().getConnection();
     try (PreparedStatement ps = conn.prepareStatement(PENDING_BY_ACCOUNT_SQL)) {
+      // Two branches (bank-statement lines / cash movements), each scoped by client + org.
+      java.sql.Array orgArray = conn.createArrayOf(SQL_TYPE_VARCHAR, orgs.toArray(new String[0]));
       ps.setString(1, clientId);
-      ps.setArray(2, conn.createArrayOf(SQL_TYPE_VARCHAR, orgs.toArray(new String[0])));
+      ps.setArray(2, orgArray);
+      ps.setString(3, clientId);
+      ps.setArray(4, orgArray);
       try (ResultSet rs = ps.executeQuery()) {
         while (rs.next()) {
-          result.put(rs.getString(1), rs.getInt(2));
+          // merge, not put: the two UNION ALL branches are grouped independently, so an account
+          // that is cash-type AND has imported bank statements yields one row per branch. Summing
+          // keeps both; put would silently drop the first.
+          result.merge(rs.getString(1), rs.getInt(2), Integer::sum);
         }
       }
     }
@@ -269,12 +321,19 @@ public class FinancialAccountsPageHandler implements NeoHandler {
       json.put("iban", account.iban);
       json.put("maskedPan", account.maskedPan);
       json.put("bankConnected", account.bankConnected);
+      json.put("bankReconnectable", account.bankReconnectable);
+      json.put("providerLogoUrl", account.providerLogoUrl);
       json.put("bankConnectionPending", account.bankConnectionPending);
       json.put("isDefault", account.isDefault);
       json.put("active", account.active);
       json.put("pendingCount", pendingByAccount.getOrDefault(account.id, 0));
       json.put("dateTolerance", account.dateTolerance);
       json.put("amountTolerance", account.amountTolerance);
+      // JSONObject.put(String, Object) with null REMOVES the key, which is exactly what we want:
+      // the UI distinguishes "no limit configured" (absent) from a configured value.
+      json.put("writeoffLimit", account.writeoffLimit);
+      json.put("glItemDifferenceId", account.glItemDifferenceId);
+      json.put("glItemDifferenceName", account.glItemDifferenceName);
       json.put("hasTransactions", accountsWithTransactions.contains(account.id));
       arr.put(json);
     }
@@ -356,12 +415,39 @@ public class FinancialAccountsPageHandler implements NeoHandler {
     String maskedPan = "";
     /** Whether the account has an active bank connection ({@code EM_PSD2_Connection_Status = 'CO'}). Set by the loader. */
     boolean bankConnected = false;
+    /**
+     * Whether the account was soft-disconnected and can be revived through the reconnect flow:
+     * not currently connected, yet still holding its Salt Edge link
+     * ({@code EM_PSD2_Salt_Edge_Account_ID} is set). A permanent deletion clears that column, so
+     * this stays {@code false} there. Kept as its own flag rather than turning
+     * {@code bankConnected} into a tri-state, because the SPA checks
+     * {@code bankConnected === true} in several places. Set by the loader.
+     */
+    boolean bankReconnectable = false;
+    /**
+     * The connected provider's logo image URL ({@code PSD2_Provider.Logo_Url}), or blank when the
+     * account has no bank provider or the provider has none on record yet. Read from the provider
+     * catalog via a join, not from a live Salt Edge call — that is the whole point of persisting
+     * it instead of fetching it per row like the connect-flow bank picker does. Set by the loader.
+     */
+    String providerLogoUrl = "";
     /** Whether a bank sync is pending. Not tracked server-side yet; reserved for the list sync badge. */
     boolean bankConnectionPending = false;
     /** Days of margin allowed between bank line and transaction dates. Default 3. */
     int dateTolerance = 3;
     /** Maximum % difference allowed when matching amounts. Default 0 (exact match). */
     BigDecimal amountTolerance = BigDecimal.ZERO;
+    /**
+     * Largest difference the user may write off when settling an invoice (ETP-4797), from
+     * {@code FIN_Financial_Account.Writeofflimit}. {@code null} when unset, which this feature
+     * reads as "no limit" — see {@code ReconciliationHandler.assertWithinWriteoffLimit} for why
+     * that diverges from Classic.
+     */
+    BigDecimal writeoffLimit = null;
+    /** GL item the cash-close/reconciliation difference is posted to (ETP-4795). Blank if unset. */
+    String glItemDifferenceId = "";
+    /** Display name of {@link #glItemDifferenceId}, resolved server-side. Blank if unset. */
+    String glItemDifferenceName = "";
 
     AccountRow(String id, String name, String type, BigDecimal currentBalance,
         Currency currency, String iban, boolean isDefault) {
