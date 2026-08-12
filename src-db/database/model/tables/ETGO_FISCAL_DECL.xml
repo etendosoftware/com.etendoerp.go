@@ -45,7 +45,7 @@
         <default/>
         <onCreateDefault/>
       </column>
-      <column name="DECL_TYPE" primaryKey="false" required="true" type="CHAR" size="1" autoIncrement="false">
+      <column name="DECL_TYPE" primaryKey="false" required="true" type="VARCHAR" size="1" autoIncrement="false">
         <default><![CDATA[O]]></default>
         <onCreateDefault/>
       </column>
@@ -59,6 +59,10 @@
       </column>
       <column name="FILE_EXTERNAL" primaryKey="false" required="true" type="CHAR" size="1" autoIncrement="false">
         <default><![CDATA[N]]></default>
+        <onCreateDefault/>
+      </column>
+      <column name="MANUAL_DATA" primaryKey="false" required="false" type="CLOB" size="4000" autoIncrement="false">
+        <default/>
         <onCreateDefault/>
       </column>
       <foreign-key foreignTable="AD_CLIENT" name="ETGO_FISCAL_DECL_CLI_FK">
