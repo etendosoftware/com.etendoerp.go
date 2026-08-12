@@ -69,8 +69,8 @@ import com.etendoerp.webhookevents.services.BaseWebhookService;
  * a live, reproducible bug (RolesPresa tenant, 2026-07-27). Now resolves the 4 fixed-name roles
  * (Finance/Sales/Purchasing/Inventory) plus whichever role has {@code is_client_admin='Y'} WITHIN
  * {@code currentRole.getClient()} — the same "resolve by name + is_client_admin, scoped to
- * :client_id" approach already used by {@code OnboardingRoleProvisioningService} and
- * {@code R16-tenant-roles-and-webhook-access.sql} in {@code etendo_schema_forge}. Every
+ * :client_id" approach used by the now-retired-and-deleted {@code OnboardingRoleProvisioningService}
+ * (ETP-4852) and {@code R16-tenant-roles-and-webhook-access.sql} in {@code etendo_schema_forge}. Every
  * OBCriteria below explicitly disables readable-client/org filtering (matching every sibling
  * webhook in this package) so cross-tenant filtering can never silently empty a same-tenant
  * result again.</p>
@@ -137,7 +137,7 @@ public class SFRolesOverview extends BaseWebhookService {
   /**
    * The 4 fixed non-admin role names every tenant gets (ETP-4515/4516), in the display order
    * this endpoint returns them (after the client-admin role, which always sorts first). Mirrors
-   * {@code OnboardingRoleProvisioningService.ROLE_NAMES} / R16's role list in
+   * the now-deleted {@code OnboardingRoleProvisioningService.ROLE_NAMES} / R16's role list in
    * {@code etendo_schema_forge} — keep in lockstep.
    */
   private static final String[] FIXED_ROLE_NAMES = { "Finance", "Sales", "Purchasing", "Inventory" };
@@ -204,8 +204,8 @@ public class SFRolesOverview extends BaseWebhookService {
    * Resolves {@code clientId}'s own client-admin role plus its 4 {@link #FIXED_ROLE_NAMES}
    * roles, ordered admin-first then {@link #FIXED_ROLE_NAMES} order. Scoped strictly to
    * {@code clientId} — a tenant's own role NAMES (not GOClient's specific ids) are what's
-   * universal across tenants (see {@code OnboardingRoleProvisioningService}), so this is the
-   * same resolution strategy as the rest of the role-provisioning feature.
+   * universal across tenants (see the now-deleted {@code OnboardingRoleProvisioningService}),
+   * so this is the same resolution strategy as the rest of the role-provisioning feature.
    */
   @SuppressWarnings("unchecked")
   private List<Role> resolveTenantRoles(String clientId) {

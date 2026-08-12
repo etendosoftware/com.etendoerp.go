@@ -73,12 +73,25 @@ import com.etendoerp.go.schemaforge.util.UserRoleSyncSupport;
  *
  * <p>Callers MUST already be running inside an authenticated, admin/client-admin-checked
  * {@code OBContext} (the webhook layer's job — this class never itself decides WHO may call
- * it). {@link #assignTemplateRoles(String, List)} enters {@link OBContext#setAdminMode(boolean)}
- * for its own duration purely to bypass row-level security while writing across clients (the
- * personal role's client vs. the template's, which may be {@code '0'}), never to decide access —
- * mirroring every other write in this module (e.g. {@code UserRoleAssignmentHandler}). Openbravo's
- * admin-mode flag is stack-based, so an already-admin-mode caller nesting into this method is
- * safe (push/pop), not a double-entry bug.</p>
+ * it AT ALL). {@link #assignTemplateRoles(String, List)} enters {@link
+ * OBContext#setAdminMode(boolean)} for its own duration purely to bypass row-level security
+ * while writing across clients (the personal role's client vs. the template's, which may be
+ * {@code '0'}), never to decide access — mirroring every other write in this module (e.g.
+ * {@code UserRoleAssignmentHandler}). Openbravo's admin-mode flag is stack-based, so an
+ * already-admin-mode caller nesting into this method is safe (push/pop), not a double-entry
+ * bug.</p>
+ *
+ * <p><b>The tenant BOUNDARY of the target user, however, IS this class's own job</b> (REVIEW
+ * cycle 1 finding, ETP-4852) — {@code NeoAccessHelper#isAdminOrClientAdmin}, the webhook's only
+ * gate, treats a per-tenant client-admin the same as the literal System Administrator, so
+ * without an explicit check here a client-admin for Tenant A could target any {@code userId} in
+ * Tenant B. {@link #assignTemplateRoles(String, List, Role)} takes the caller's already-resolved
+ * {@link Role} and calls {@link #enforceCallerClientBoundary(User, Role)} right after resolving
+ * {@code user}, before any template validation or write. The 2-arg {@link
+ * #assignTemplateRoles(String, List)} overload passes a {@code null} caller (no boundary to
+ * enforce) — for plain unit tests and any other caller with no per-request identity to check
+ * against; real webhook callers MUST use the 3-arg overload with their own resolved role, as
+ * {@code SFAssignUserRoles} does.</p>
  */
 public class UserRoleCompositionService {
 
@@ -92,6 +105,15 @@ public class UserRoleCompositionService {
 
   /** Increment used when minting a fresh {@code AD_Role_Inheritance.Seqno}. */
   private static final long SEQNO_STEP = 10L;
+
+  /**
+   * The literal System Administrator {@code AD_Role_ID} — the ONLY role id that bypasses
+   * {@link #enforceCallerClientBoundary(User, Role)}. Mirrors the same literal id
+   * {@code NeoAccessHelper#isAdminOrClientAdmin} checks at the webhook-gating layer, but
+   * deliberately NOT that method itself: {@code isAdminOrClientAdmin} also returns {@code true}
+   * for a mere {@code isClientAdmin()} role, which must NOT bypass a tenant-boundary check.
+   */
+  private static final String SYSTEM_ADMINISTRATOR_ROLE_ID = "0";
 
   /**
    * Result of {@link #assignTemplateRoles(String, List)} — everything the webhook needs to
@@ -127,8 +149,34 @@ public class UserRoleCompositionService {
    * @return a summary of what changed
    * @throws OBException if {@code userId} is missing/unresolvable, {@code templateRoleIds} is
    *     {@code null}, or any requested id is not an active, non-admin template role
+   * @see #assignTemplateRoles(String, List, Role) the overload that also enforces the caller's
+   *     tenant boundary against {@code userId} — use that one for any real webhook/request path
    */
   public AssignmentResult assignTemplateRoles(String userId, List<String> templateRoleIds) {
+    return assignTemplateRoles(userId, templateRoleIds, null);
+  }
+
+  /**
+   * Same as {@link #assignTemplateRoles(String, List)}, but also enforces that {@code
+   * callerRole} may target {@code userId} at all — see {@link
+   * #enforceCallerClientBoundary(User, Role)} and the class javadoc for why this matters
+   * (REVIEW cycle 1, ETP-4852: a client-admin must never be able to reassign or strip another
+   * tenant's user). Real webhook callers (e.g. {@code SFAssignUserRoles}) MUST use this
+   * overload, passing the role they already resolved for the current request.
+   *
+   * @param userId the {@code AD_User_ID} to compose roles for
+   * @param templateRoleIds the desired FULL set of template role ids — see {@link
+   *     #assignTemplateRoles(String, List)}
+   * @param callerRole the role making this request, already resolved by the caller BEFORE
+   *     entering admin mode — {@code null} means "no per-request identity to check" (skips the
+   *     boundary check entirely; see {@link #enforceCallerClientBoundary(User, Role)})
+   * @return a summary of what changed
+   * @throws OBException if {@code userId} is missing/unresolvable, {@code templateRoleIds} is
+   *     {@code null}, any requested id is not an active, non-admin template role, or {@code
+   *     callerRole} is a non-system role whose client differs from {@code userId}'s
+   */
+  public AssignmentResult assignTemplateRoles(String userId, List<String> templateRoleIds,
+      Role callerRole) {
     if (StringUtils.isBlank(userId)) {
       throw new OBException("Missing user id for role composition");
     }
@@ -139,6 +187,7 @@ public class UserRoleCompositionService {
     if (user == null) {
       throw new OBException("User not found: " + userId);
     }
+    enforceCallerClientBoundary(user, callerRole);
 
     List<Role> templates = resolveAndValidateTemplates(templateRoleIds);
 
@@ -168,8 +217,49 @@ public class UserRoleCompositionService {
   }
 
   /**
+   * Rejects targeting {@code user} across a tenant boundary — closes a real cross-tenant
+   * privilege-escalation gap found in REVIEW cycle 1 (ETP-4852): {@code SFAssignUserRoles}'s
+   * only access gate, {@code NeoAccessHelper#isAdminOrClientAdmin}, treats a per-tenant
+   * client-admin the same as the literal System Administrator, so without this check a
+   * client-admin for Tenant A could call this service against any {@code userId} in Tenant B
+   * and reassign or completely strip (empty {@code templateRoleIds}) that user's access.
+   *
+   * <p>Bypassed ONLY for the literal System Administrator role ({@link
+   * #SYSTEM_ADMINISTRATOR_ROLE_ID}) — never for a mere {@code isClientAdmin()} role, however
+   * privileged within its own tenant. Also a no-op when {@code callerRole} is {@code null}: per
+   * this class's own javadoc, it never itself decides WHO may call it AT ALL — with no caller
+   * identity supplied (the 2-arg {@link #assignTemplateRoles(String, List)} overload, used by
+   * plain unit tests and any other caller with no per-request identity to check), there is
+   * nothing to enforce a boundary against; that remains the caller's own responsibility.</p>
+   *
+   * @param user the already-resolved target user
+   * @param callerRole the role making this request, or {@code null} to skip this check
+   * @throws OBException if {@code callerRole} is a non-system role whose client differs from
+   *     {@code user}'s (or either has no client at all)
+   */
+  private void enforceCallerClientBoundary(User user, Role callerRole) {
+    if (callerRole == null || SYSTEM_ADMINISTRATOR_ROLE_ID.equals(callerRole.getId())) {
+      return;
+    }
+    String callerClientId = callerRole.getClient() != null ? callerRole.getClient().getId() : null;
+    String userClientId = user.getClient() != null ? user.getClient().getId() : null;
+    if (callerClientId == null || !callerClientId.equals(userClientId)) {
+      throw new OBException(
+          "User belongs to a different client, cannot be targeted: " + user.getId());
+    }
+  }
+
+  /**
    * Resolves every requested id to an active template role, deduplicating while preserving
    * first-seen order, and rejecting anything that is not a genuine composable template.
+   *
+   * <p><b>By design, this accepts ANY active {@code IsTemplate = 'Y'} role</b> — not only the 4
+   * system-level ones {@code SystemRoleTemplates}/{@code EnsureSystemRoleTemplatesScript} seed
+   * (Finance/Sales/Purchasing/Inventory). Confirmed intentional, not an oversight (W3, REVIEW
+   * cycle 1, ETP-4852): a future, tenant-authored template role is meant to be composable the
+   * same way, and {@link #enforceCallerClientBoundary(User, Role)} plus core's own
+   * {@code RoleInheritanceEventHandler} same-{@code UserLevel} check already bound what this
+   * can actually reach.</p>
    */
   private List<Role> resolveAndValidateTemplates(List<String> templateRoleIds) {
     Set<String> seen = new LinkedHashSet<>();
@@ -203,7 +293,12 @@ public class UserRoleCompositionService {
    * ONE user and no other (checked directly, not inferred from the name prefix alone, since an
    * admin could rename a role in the classic UI). Any mismatch is treated as "this user has no
    * personal role yet" and a brand-new one is minted, rather than risk repurposing a role
-   * something else still depends on.</p>
+   * something else still depends on — including a role something else INHERITS FROM (see
+   * {@link #isInheritFromTargetOfAnyInheritance(Role)}; W1, REVIEW cycle 1, ETP-4852): a role
+   * can be "exclusively assigned to user U" via {@code AD_User_Roles} AND STILL be a parent
+   * some OTHER role's {@code AD_Role_Inheritance} points at — repurposing it as U's personal
+   * role would then let {@link #reconcileInheritances} mutate an inheritance set that isn't
+   * only U's, silently changing access for whatever inherits from it.</p>
    */
   private Role resolveOrCreatePersonalRole(User user) {
     Role candidate = user.getDefaultRole();
@@ -268,6 +363,9 @@ public class UserRoleCompositionService {
         || !user.getClient().getId().equals(candidate.getClient().getId())) {
       return false;
     }
+    if (isInheritFromTargetOfAnyInheritance(candidate)) {
+      return false;
+    }
     return isExclusivelyAssignedTo(candidate, user);
   }
 
@@ -287,6 +385,23 @@ public class UserRoleCompositionService {
       return true;
     }
     return rows.size() == 1 && user.getId().equals(rows.get(0).getUserContact().getId());
+  }
+
+  /**
+   * True when some OTHER role's {@code AD_Role_Inheritance} row has {@code candidate} as its
+   * {@code InheritFrom} target — i.e. {@code candidate} is itself a parent/template that
+   * something else's access derives from, so it must never be repurposed as anyone's personal
+   * role (W1, REVIEW cycle 1, ETP-4852). {@link #isExclusivelyAssignedTo} alone only checks
+   * {@code AD_User_Roles} (who the role is DIRECTLY assigned to) — this is the complementary
+   * check on the other side of the {@code AD_Role_Inheritance} relationship.
+   */
+  @SuppressWarnings("unchecked")
+  private boolean isInheritFromTargetOfAnyInheritance(Role candidate) {
+    OBCriteria<RoleInheritance> criteria = OBDal.getInstance()
+        .createCriteria(RoleInheritance.class);
+    criteria.add(Restrictions.eq(RoleInheritance.PROPERTY_INHERITFROM, candidate));
+    criteria.setMaxResults(1);
+    return !criteria.list().isEmpty();
   }
 
   private Role createPersonalRole(User user) {

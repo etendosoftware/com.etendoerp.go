@@ -54,6 +54,15 @@ import com.etendoerp.webhookevents.services.BaseWebhookService;
  * database, never a raw {@code 403} (this webhook family's own "deny silently, don't 403"
  * convention — see {@code docs/neo-headless.md} §8c).</p>
  *
+ * <p><b>Tenant boundary of the TARGET user (fixed in REVIEW cycle 1, ETP-4852):</b> {@code
+ * isAdminOrClientAdmin} answers "may this caller use this webhook at all" — it does NOT limit
+ * WHICH {@code userId} a client-admin may target, and a per-tenant client-admin is treated the
+ * same as the literal System Administrator by that check alone. So {@code currentRole} (already
+ * resolved above) is passed straight through to {@link
+ * UserRoleCompositionService#assignTemplateRoles(String, List, Role)}, which enforces that a
+ * non-system {@code currentRole} may only target a {@code userId} in its OWN client — see that
+ * method's javadoc.</p>
+ *
  * <p><b>Response shape — deliberately NEVER surfaces a domain validation failure (bad user id,
  * bad/non-template role id, Admin role requested, …) as the bridge's generic {@code error}/{@code
  * 500}.</b> {@code NeoGoWebhookBridge} (package-private, {@code com.etendoerp.go.schemaforge})
@@ -111,9 +120,16 @@ public class SFAssignUserRoles extends BaseWebhookService {
 
     // No admin-mode wrapping here: UserRoleCompositionService enters it itself, for its own
     // duration only — see that class's javadoc for why the innermost unit of work owns it.
+    //
+    // currentRole is passed through explicitly (not re-resolved ambiently inside the service)
+    // so UserRoleCompositionService can enforce the caller's tenant boundary against userId —
+    // isAdminOrClientAdmin above treats a per-tenant client-admin the same as the literal
+    // System Administrator, so without this a client-admin for Tenant A could target any user
+    // in Tenant B (REVIEW cycle 1 finding, ETP-4852). See
+    // UserRoleCompositionService#enforceCallerClientBoundary.
     try {
-      UserRoleCompositionService.AssignmentResult result =
-          new UserRoleCompositionService().assignTemplateRoles(userId, templateRoleIds);
+      UserRoleCompositionService.AssignmentResult result = new UserRoleCompositionService()
+          .assignTemplateRoles(userId, templateRoleIds, currentRole);
       responseVars.put("result", success(result).toString());
     } catch (OBException e) {
       // Expected domain-validation rejection — see class javadoc for why this is a 200

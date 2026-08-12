@@ -35,6 +35,7 @@ import org.openbravo.base.exception.OBException;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.access.Role;
 import org.openbravo.model.ad.access.User;
+import org.openbravo.model.ad.system.Client;
 
 /**
  * Unit tests for {@link UserRoleCompositionService}'s input-validation guard clauses — the slice
@@ -163,5 +164,58 @@ class UserRoleCompositionServiceTest {
         () -> service.assignTemplateRoles("user-1", List.of("tpl-1", " tpl-1", "tpl-1 ")));
 
     org.mockito.Mockito.verify(mockDal, org.mockito.Mockito.times(1)).get(Role.class, "tpl-1");
+  }
+
+  /**
+   * REVIEW cycle 1 blocker (B1, ETP-4852): {@code SFAssignUserRoles}'s only access gate,
+   * {@code NeoAccessHelper#isAdminOrClientAdmin}, treats a per-tenant client-admin the same as
+   * the literal System Administrator — so without {@link
+   * UserRoleCompositionService#enforceCallerClientBoundary}, a client-admin for one client could
+   * target ANY user in a different client. This proves the 3-arg {@link
+   * UserRoleCompositionService#assignTemplateRoles(String, List, Role)} overload rejects that,
+   * before any template validation, admin-mode entry, or write.
+   */
+  @Test
+  void rejectsCrossClientTarget() {
+    User user = mock(User.class);
+    Client targetClient = mock(Client.class);
+    when(targetClient.getId()).thenReturn("client-B");
+    when(user.getClient()).thenReturn(targetClient);
+    when(user.getId()).thenReturn("user-1");
+    when(mockDal.get(User.class, "user-1")).thenReturn(user);
+
+    Role callerClientAdmin = mock(Role.class);
+    when(callerClientAdmin.getId()).thenReturn("caller-role-id");
+    Client callerClient = mock(Client.class);
+    when(callerClient.getId()).thenReturn("client-A");
+    when(callerClientAdmin.getClient()).thenReturn(callerClient);
+
+    OBException e = assertThrows(OBException.class, () -> service
+        .assignTemplateRoles("user-1", Collections.emptyList(), callerClientAdmin));
+    assertTrue(e.getMessage().contains("different client"));
+  }
+
+  /**
+   * The bypass is the LITERAL System Administrator role id ({@code "0"}), never a mere
+   * {@code isClientAdmin()} role (see {@link #rejectsCrossClientTarget}). Deliberately never
+   * stubs {@code systemAdmin.getClient()} — reaching the TEMPLATE validation error (not the
+   * boundary one, and not an NPE) proves {@code enforceCallerClientBoundary} short-circuits on
+   * the id check before ever comparing clients.
+   */
+  @Test
+  void systemAdministratorCallerBypassesClientBoundaryCheck() {
+    User user = mock(User.class);
+    Client targetClient = mock(Client.class);
+    when(targetClient.getId()).thenReturn("client-B");
+    when(user.getClient()).thenReturn(targetClient);
+    when(mockDal.get(User.class, "user-1")).thenReturn(user);
+    when(mockDal.get(Role.class, "missing-role")).thenReturn(null);
+
+    Role systemAdmin = mock(Role.class);
+    when(systemAdmin.getId()).thenReturn("0");
+
+    OBException e = assertThrows(OBException.class, () -> service
+        .assignTemplateRoles("user-1", List.of("missing-role"), systemAdmin));
+    assertTrue(e.getMessage().contains("Template role not found or inactive"));
   }
 }

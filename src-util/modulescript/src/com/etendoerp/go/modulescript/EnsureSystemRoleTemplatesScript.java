@@ -24,9 +24,9 @@ import org.openbravo.modulescript.ModuleScript;
 
 /**
  * ETP-4852 — seeds the four system-level ({@code AD_Client_ID = '0'}) fixed-role templates
- * (Finance, Sales, Purchasing, Inventory), replacing the old per-client clone
- * ({@code OnboardingRoleProvisioningService}, now retired from the live onboarding chain — see
- * its class javadoc). Runs automatically on every {@code update.database} (the standard
+ * (Finance, Sales, Purchasing, Inventory), replacing the old per-client clone (the retired
+ * {@code OnboardingRoleProvisioningService}, deleted as dead code once this template-inheritance
+ * model landed — REVIEW cycle 1 cleanup). Runs automatically on every {@code update.database} (the standard
  * {@code ModuleScript} contract — see {@code org.openbravo.modulescript.ModuleScript}); fully
  * idempotent, so re-running it on an environment that already has the rows is a no-op.
  *
@@ -49,6 +49,15 @@ import org.openbravo.modulescript.ModuleScript;
  * see {@code UserRoleCompositionServiceIntegrationTest}). Populating the full 48-window
  * Admin/Ventas/Compras/Financiero/Almacén matrix from the ticket is explicitly ETP-4878's job,
  * not this script's.</p>
+ *
+ * <p><b>All 6 legacy window ids re-verified against the live DB (REVIEW cycle 1, ETP-4852) —
+ * not just Finance's.</b> Alex's review could only corroborate Finance's two UUIDs from the
+ * worktree (no DB access there); an FK failure on any of the other four would only surface at
+ * {@code update.database} time, uncaught until then. Confirmed live: {@code 143} = "Sales
+ * Order", {@code 123} = "Business Partner" (Sales); {@code 181} = "Purchase Order", {@code 140}
+ * = "Product" (Purchasing); {@code 184} = "Goods Receipt", {@code 139} = "Warehouse and Storage
+ * Bins" (Inventory) — all six {@code IsActive = 'Y'} and {@code AD_Client_ID = '0'} (system-owned,
+ * consistent with a system-level template's grant).</p>
  */
 public class EnsureSystemRoleTemplatesScript extends ModuleScript {
 

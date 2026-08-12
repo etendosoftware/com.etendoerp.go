@@ -130,7 +130,7 @@ class SFAssignUserRolesTest {
 
   @Test
   void adminRoleComposesAndReturnsAssignmentSummary() {
-    givenClientAdminRole();
+    Role currentRole = givenClientAdminRole();
     parameters.put("UserId", "user-1");
     parameters.put("TemplateRoleIds", " tpl-finance , tpl-sales ,, ");
 
@@ -141,7 +141,8 @@ class SFAssignUserRolesTest {
     try (MockedConstruction<UserRoleCompositionService> construction =
         mockConstruction(UserRoleCompositionService.class, (mockService, ctx) ->
             when(mockService.assignTemplateRoles("user-1",
-                Arrays.asList("tpl-finance", "tpl-sales"))).thenReturn(delegateResult))) {
+                Arrays.asList("tpl-finance", "tpl-sales"), currentRole))
+                    .thenReturn(delegateResult))) {
 
       webhook.get(parameters, responseVars);
 
@@ -155,6 +156,39 @@ class SFAssignUserRolesTest {
     assertEquals(2, result.optInt("added"));
     assertEquals(0, result.optInt("removed"));
     assertEquals(2, result.optJSONArray("templateRoleIds").length());
+  }
+
+  /**
+   * REVIEW cycle 1 blocker (B1, ETP-4852): {@code isAdminOrClientAdmin} alone does not stop a
+   * client-admin from targeting another tenant's user — the tenant-boundary enforcement lives
+   * in {@code UserRoleCompositionService#enforceCallerClientBoundary}, which needs the caller's
+   * OWN role. This proves the webhook actually forwards the {@code currentRole} it already
+   * resolved for the access gate through to the service, rather than silently dropping it (the
+   * exact wiring gap that would have made the boundary check inert for every real request).
+   */
+  @Test
+  void forwardsCallerRoleToTheServiceForTheTenantBoundaryCheck() {
+    Role currentRole = givenClientAdminRole();
+    parameters.put("UserId", "user-1");
+    parameters.put("TemplateRoleIds", "tpl-finance");
+
+    UserRoleCompositionService.AssignmentResult delegateResult =
+        new UserRoleCompositionService.AssignmentResult("user-1", "personal-1",
+            List.of("tpl-finance"), 1, 0);
+
+    try (MockedConstruction<UserRoleCompositionService> construction =
+        mockConstruction(UserRoleCompositionService.class, (mockService, ctx) ->
+            when(mockService.assignTemplateRoles("user-1", List.of("tpl-finance"), currentRole))
+                .thenReturn(delegateResult))) {
+      webhook.get(parameters, responseVars);
+
+      UserRoleCompositionService constructedService = construction.constructed().get(0);
+      org.mockito.Mockito.verify(constructedService)
+          .assignTemplateRoles("user-1", List.of("tpl-finance"), currentRole);
+    }
+
+    JSONObject result = resultOf(responseVars);
+    assertTrue(result.optBoolean("success"));
   }
 
   @Test
@@ -174,7 +208,7 @@ class SFAssignUserRolesTest {
 
   @Test
   void emptyTemplateRoleIdsParameterMeansRevokeAll() {
-    givenClientAdminRole();
+    Role currentRole = givenClientAdminRole();
     parameters.put("UserId", "user-1");
     // TemplateRoleIds intentionally absent — must resolve to an empty (not null) list.
 
@@ -184,7 +218,7 @@ class SFAssignUserRolesTest {
 
     try (MockedConstruction<UserRoleCompositionService> construction =
         mockConstruction(UserRoleCompositionService.class, (mockService, ctx) ->
-            when(mockService.assignTemplateRoles("user-1", Collections.emptyList()))
+            when(mockService.assignTemplateRoles("user-1", Collections.emptyList(), currentRole))
                 .thenReturn(delegateResult))) {
       webhook.get(parameters, responseVars);
     }
@@ -198,15 +232,16 @@ class SFAssignUserRolesTest {
 
   @Test
   void domainValidationFailureBecomesSuccessFalseResultNotBridgeError() {
-    givenClientAdminRole();
+    Role currentRole = givenClientAdminRole();
     parameters.put("UserId", "user-1");
     parameters.put("TemplateRoleIds", "not-a-template");
 
     try (MockedConstruction<UserRoleCompositionService> construction =
         mockConstruction(UserRoleCompositionService.class, (mockService, ctx) ->
-            when(mockService.assignTemplateRoles("user-1", List.of("not-a-template")))
-                .thenThrow(new OBException("Role is not a template, cannot be composed: "
-                    + "not-a-template")))) {
+            when(mockService.assignTemplateRoles("user-1", List.of("not-a-template"),
+                currentRole))
+                    .thenThrow(new OBException("Role is not a template, cannot be composed: "
+                        + "not-a-template")))) {
       webhook.get(parameters, responseVars);
     }
 
@@ -218,13 +253,13 @@ class SFAssignUserRolesTest {
 
   @Test
   void unexpectedExceptionSurfacesAsBridgeError() {
-    givenClientAdminRole();
+    Role currentRole = givenClientAdminRole();
     parameters.put("UserId", "user-1");
     parameters.put("TemplateRoleIds", "tpl-finance");
 
     try (MockedConstruction<UserRoleCompositionService> construction =
         mockConstruction(UserRoleCompositionService.class, (mockService, ctx) ->
-            when(mockService.assignTemplateRoles("user-1", List.of("tpl-finance")))
+            when(mockService.assignTemplateRoles("user-1", List.of("tpl-finance"), currentRole))
                 .thenThrow(new RuntimeException("boom")))) {
       webhook.get(parameters, responseVars);
     }
