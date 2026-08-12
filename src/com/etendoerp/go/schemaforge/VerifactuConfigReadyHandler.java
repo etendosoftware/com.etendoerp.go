@@ -23,34 +23,38 @@ import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
+import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
+import org.hibernate.criterion.Projections;
+import org.hibernate.criterion.Restrictions;
 import org.openbravo.dal.core.OBContext;
+import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.common.invoice.Invoice;
 
 /**
- * NeoHandler that auto-fills the Verifactu adoption fields on {@code etvfac_verifactu_config}
- * (ETP-4389).
+ * NeoHandler for {@code etvfac_verifactu_config} that owns two behaviors:
  *
- * <p>In classic Etendo, the "Marcar como listo" process
- * ({@code com.etendoerp.verifactu.process.SetAsReady}) sets {@code IS_Ready = true} and
- * {@code IN_Vfactu_System = <now>} ("Fecha de Acogida") when a fiscal configuration is marked
- * ready for Verifactu submission. In Etendo Go, neither the {@code /fiscal-config} onboarding
- * wizard (POST) nor {@code VerifactuSection.jsx} (PUT) triggers that side effect, so
- * {@code in_vfactu_system} stays {@code null} and invoices are never flagged for Verifactu
- * submission. This handler closes that gap by running the same field-fill after every
- * create/update of the entity.
+ * <ol>
+ *   <li><b>Smart deactivation (pre-hook, ETP-4785):</b> when a PUT request explicitly sets
+ *       {@code active=false}, checks whether any invoice was sent through Verifactu during
+ *       this config's active period (i.e. with {@code dateinvoiced >= in_vfactu_system} and
+ *       matching org). If the config has no adoption date ({@code in_vfactu_system IS NULL})
+ *       or no invoice was sent through it, the record is <em>deleted</em> rather than merely
+ *       deactivated, preventing orphan inactive configs from accumulating. If invoices were
+ *       sent, the request falls through so the default CRUD deactivates the record normally.
+ *   </li>
+ *   <li><b>Adoption-date auto-fill (post-hook, ETP-4389):</b> after every POST/PUT/PATCH,
+ *       sets {@code is_ready='Y'} and {@code in_vfactu_system=now()} on the saved record
+ *       when those fields are not already both set — closing the gap left by Etendo Go not
+ *       calling the classic "Marcar como listo" process.
+ *   </li>
+ * </ol>
  *
- * <p>It uses native SQL against {@code etvfac_verifactu_config} (columns
- * {@code is_ready} and {@code in_vfactu_system}) instead of the generated DAL class
- * ({@code com.etendoerp.verifactu.data.VerifactuConfig}) to avoid introducing a compile-time
- * dependency from {@code com.etendoerp.go} on the {@code com.etendoerp.verifactu} module,
- * mirroring the approach used by {@link MarkSubsanationHandler}.
- *
- * <p>This is a best-effort, secondary side-effect (unlike a primary-purpose handler such as
- * {@link MarkSubsanationHandler}): the fiscal config record has already been created/updated
- * by the generic CRUD service by the time {@link #afterHandle(NeoContext)} runs, so a failure
- * here must never fail the parent request. Any exception is logged and swallowed, and
- * {@code null} is returned so the original CRUD response is kept untouched.
+ * <p>Uses native SQL against {@code etvfac_verifactu_config} (rather than the generated DAL
+ * class {@code com.etendoerp.verifactu.data.VerifactuConfig}) to avoid a compile-time
+ * dependency from {@code com.etendoerp.go} on {@code com.etendoerp.verifactu}, mirroring
+ * {@link MarkSubsanationHandler}.
  */
 @Named("verifactu-config-ready-handler")
 public class VerifactuConfigReadyHandler implements NeoHandler {
@@ -61,8 +65,10 @@ public class VerifactuConfigReadyHandler implements NeoHandler {
   private static final String METHOD_PUT = "PUT";
   private static final String METHOD_PATCH = "PATCH";
 
+  private static final String FIELD_ACTIVE = "active";
+
   private static final String SELECT_IS_READY_SQL =
-      "SELECT is_ready, in_vfactu_system FROM etvfac_verifactu_config "
+      "SELECT is_ready, in_vfactu_system, ad_org_id FROM etvfac_verifactu_config "
           + "WHERE etvfac_verifactu_config_id = :id";
 
   // Timestamp is computed in SQL (now()) rather than passed as a Java Date, matching the
@@ -72,10 +78,124 @@ public class VerifactuConfigReadyHandler implements NeoHandler {
       "UPDATE etvfac_verifactu_config SET is_ready = 'Y', in_vfactu_system = now() "
           + "WHERE etvfac_verifactu_config_id = :id";
 
+  private static final String DELETE_CONFIG_SQL =
+      "DELETE FROM etvfac_verifactu_config WHERE etvfac_verifactu_config_id = :id";
+
+  /**
+   * Pre-hook: implements smart deactivation (ETP-4785). When a PUT explicitly sets
+   * {@code active=false}, checks whether invoices were sent through this config during its
+   * active period. If none were sent, deletes the record and returns 200
+   * {@code {"deleted":true}}. If invoices exist, returns {@code null} so the default CRUD
+   * proceeds and deactivates the record normally (audit-trail preserved).
+   */
   @Override
   public NeoResponse handle(NeoContext context) {
-    // No pre-hook behavior: this handler only reacts after the record is persisted.
-    return null;
+    if (!METHOD_PUT.equalsIgnoreCase(context.getHttpMethod())) {
+      return null;
+    }
+    if (!isExplicitlyDeactivating(context.getRequestBody())) {
+      return null;
+    }
+    String recordId = context.getRecordId();
+    if (StringUtils.isBlank(recordId)) {
+      return null;
+    }
+    try {
+      OBContext.setAdminMode(true);
+      try {
+        return smartDeactivate(recordId);
+      } finally {
+        OBContext.restorePreviousMode();
+      }
+    } catch (Exception e) {
+      log.error("VerifactuConfigReadyHandler.handle: error during smart deactivation for {}: {}",
+          recordId, e.getMessage(), e);
+      // Fail safe: let default CRUD deactivate normally rather than blocking the request.
+      return null;
+    }
+  }
+
+  /**
+   * Decides between deleting the config record (no invoices sent through it) and letting the
+   * default CRUD deactivate it (invoices exist — audit trail must be preserved).
+   *
+   * @param recordId the primary key of the {@code etvfac_verifactu_config} record
+   * @return a 200 {@code {"deleted":true}} response when the record was deleted, or
+   *     {@code null} to let default CRUD deactivate it.
+   */
+  NeoResponse smartDeactivate(String recordId) throws JSONException {
+    Object[] row = (Object[]) OBDal.getInstance().getSession()
+        .createNativeQuery(SELECT_IS_READY_SQL)
+        .setParameter("id", recordId)
+        .uniqueResult();
+
+    if (row == null) {
+      // Record already gone — nothing to do.
+      return null;
+    }
+
+    java.util.Date adoptionDate = (java.util.Date) row[1];
+    String orgId = (String) row[2];
+
+    // If the config never entered the fiscal system (adoption date not set), delete directly.
+    if (adoptionDate == null) {
+      deleteConfig(recordId);
+      return deletedResponse();
+    }
+
+    // Check whether any invoice was sent through Verifactu during this config's active period.
+    if (hasVerifactuInvoicesSince(orgId, adoptionDate)) {
+      // Invoices exist — let the default CRUD deactivate (preserve audit trail).
+      return null;
+    }
+
+    deleteConfig(recordId);
+    return deletedResponse();
+  }
+
+  /**
+   * Returns {@code true} if at least one invoice was sent through Verifactu for the given
+   * org with an invoice date on or after {@code since}. The date filter scopes the check to
+   * this config's active period so that invoices from a prior config of the same org do not
+   * incorrectly prevent deletion.
+   */
+  private boolean hasVerifactuInvoicesSince(String orgId, java.util.Date since) {
+    OBCriteria<Invoice> crit = OBDal.getInstance().createCriteria(Invoice.class);
+    crit.add(Restrictions.eq(Invoice.PROPERTY_ORGANIZATION + ".id", orgId));
+    crit.add(Restrictions.eq(Invoice.PROPERTY_ETVFACSENTTOVERIFAC, Boolean.TRUE));
+    crit.add(Restrictions.ge(Invoice.PROPERTY_INVOICEDATE, since));
+    crit.setProjection(Projections.rowCount());
+    Number count = (Number) crit.uniqueResult();
+    return count != null && count.longValue() > 0;
+  }
+
+  private void deleteConfig(String recordId) {
+    OBDal.getInstance().getSession()
+        .createNativeQuery(DELETE_CONFIG_SQL)
+        .setParameter("id", recordId)
+        .executeUpdate();
+    OBDal.getInstance().flush();
+    log.info("VerifactuConfigReadyHandler: deleted unused config record {}", recordId);
+  }
+
+  private static NeoResponse deletedResponse() throws JSONException {
+    JSONObject body = new JSONObject();
+    body.put("deleted", true);
+    return NeoResponse.ok(body);
+  }
+
+  private static boolean isExplicitlyDeactivating(JSONObject body) {
+    if (body == null || !body.has(FIELD_ACTIVE)) {
+      return false;
+    }
+    Object value = body.opt(FIELD_ACTIVE);
+    if (value instanceof Boolean) {
+      return !(Boolean) value;
+    }
+    if (value instanceof String) {
+      return "false".equalsIgnoreCase((String) value) || "N".equalsIgnoreCase((String) value);
+    }
+    return false;
   }
 
   @Override
@@ -84,6 +204,12 @@ public class VerifactuConfigReadyHandler implements NeoHandler {
     if (!METHOD_POST.equalsIgnoreCase(method)
         && !METHOD_PUT.equalsIgnoreCase(method)
         && !METHOD_PATCH.equalsIgnoreCase(method)) {
+      return null;
+    }
+    // If handle() already deleted the record (smart deactivation), skip the adoption-date fill.
+    NeoResponse preResult = context.getPreviousResult();
+    if (preResult != null && preResult.getBody() != null
+        && preResult.getBody().optBoolean("deleted", false)) {
       return null;
     }
 
