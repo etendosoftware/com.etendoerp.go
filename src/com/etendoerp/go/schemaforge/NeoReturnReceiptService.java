@@ -192,15 +192,16 @@ final class NeoReturnReceiptService {
    * already has: a source bin that already belongs to the return's warehouse is kept as-is, any
    * other value is replaced by that warehouse's default (or, failing that, any active) bin.
    *
-   * <p><b>Behaviour widened by ETP-4863:</b> a source line with NO bin used to produce a return
-   * line with no bin either — the old code only copied when {@code sourceLine.getStorageBin()}
-   * was non-null. It now receives the return header's warehouse anchor bin, because
-   * {@code anchorLocatorToWarehouse} treats "absent" and "belongs elsewhere" identically. That is
-   * the intended reading of the unconditional rule (the line must end up in the header's
-   * warehouse) and it also removes a source of {@code InoutLineWithoutLocator} rejections. The
-   * anchor is written through even when it resolves to {@code null} (warehouse with no active
-   * locator at all), so this path fails loudly rather than keeping a foreign bin — the same
-   * contract every other anchored write path follows.
+   * <p><b>Behaviour widened by ETP-4863:</b> the actual change from the intermediate
+   * {@code anchorLocatorToWarehouse}-based version (which guarded the write with
+   * {@code if (anchoredBin != null)}) is at the failure edge only — when the return header's
+   * warehouse has no active locator at all, the anchor now resolves to {@code null} and this
+   * method still calls {@code setStorageBin} with it, so the shell ends up with an explicit
+   * {@code null} bin and the document fails loudly at posting instead of silently keeping
+   * whatever the entity provider defaulted to. A source line with NO bin whose header warehouse
+   * DOES have an active locator was already anchored to that locator by the intermediate version
+   * too — {@code anchorLocatorToWarehouse} treats "absent" and "belongs elsewhere" identically, so
+   * that scenario is not new behaviour, it just happens to also be correct.
    */
   static ShipmentInOutLine createReturnLineShell(ShipmentInOut returnDoc,
       ShipmentInOutLine sourceLine, long lineNo) {

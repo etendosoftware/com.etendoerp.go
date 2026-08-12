@@ -726,10 +726,14 @@ public class NeoReturnReceiptServiceTest {
   }
 
   /**
-   * W4 — behaviour widened by ETP-4863: a source line with NO bin used to produce a return line
-   * with no bin either. It now receives the header warehouse's anchor bin, because the rule
-   * treats "absent" and "belongs elsewhere" identically. Also removes a source of
-   * {@code InoutLineWithoutLocator} rejections at posting time.
+   * Regression guard, not a bug demonstrator: a source line with NO bin, whose header warehouse
+   * DOES have an active locator, already got that locator as its default before ETP-4863 too —
+   * {@code anchorLocatorToWarehouse} treats "absent" and "belongs elsewhere" identically, so the
+   * intermediate {@code if (anchoredBin != null)}-guarded version already resolved and wrote this
+   * same anchor bin. This test passes unchanged on the pre-widening code; it guards that this
+   * preexisting-and-correct default-fill keeps working, it does not exercise what ETP-4863
+   * changed (see {@code testCreateReturnLineShell_headerWarehouseHasNoLocator_doesNotKeepForeignBin}
+   * for the test that actually demonstrates the widening).
    */
   @Test
   public void testCreateReturnLineShell_sourceLineWithoutBin_getsHeaderWarehouseDefault() {
