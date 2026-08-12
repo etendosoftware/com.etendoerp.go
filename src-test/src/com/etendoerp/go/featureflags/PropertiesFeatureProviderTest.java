@@ -21,12 +21,20 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.when;
+
+import java.util.Properties;
 
 import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
+import org.mockito.MockedStatic;
+import org.openbravo.base.session.OBPropertiesProvider;
 
 import dev.openfeature.sdk.ErrorCode;
 import dev.openfeature.sdk.ProviderEvaluation;
@@ -40,8 +48,31 @@ class PropertiesFeatureProviderTest {
 
   private final PropertiesFeatureProvider provider = new PropertiesFeatureProvider();
 
+  private MockedStatic<OBPropertiesProvider> propertiesMock;
+
+  /**
+   * Isolate every test from the ambient {@code Openbravo.properties}/{@code gradle.properties} on
+   * whatever machine runs this suite: {@code ConfigPropertyReader} falls back to
+   * {@code OBPropertiesProvider} whenever the JVM system property is unset, so a developer's local
+   * override (e.g. {@code etendo.go.flags.tenant-upgrade=true}, kept locally to exercise the paid
+   * upgrade flow by hand) would otherwise leak into "unconfigured" assertions here and fail them
+   * on that machine only, never in CI. Returning empty properties forces every test to exercise
+   * only what it explicitly sets via {@code System.setProperty}. Same pattern as
+   * {@code PublicUrlResolverTest}.
+   */
+  @BeforeEach
+  void mockOpenbravoProperties() {
+    OBPropertiesProvider mockProvider = mock(OBPropertiesProvider.class);
+    when(mockProvider.getOpenbravoProperties()).thenReturn(new Properties());
+    propertiesMock = mockStatic(OBPropertiesProvider.class);
+    propertiesMock.when(OBPropertiesProvider::getInstance).thenReturn(mockProvider);
+  }
+
   @AfterEach
   void clearOverrides() {
+    if (propertiesMock != null) {
+      propertiesMock.close();
+    }
     System.clearProperty(FLAG_PROPERTY);
     GoFeatureFlags.reset();
   }
