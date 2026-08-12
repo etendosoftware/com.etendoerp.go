@@ -19,9 +19,9 @@ package com.etendoerp.go.schemaforge;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
-import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
@@ -52,23 +52,30 @@ import org.openbravo.model.financialmgmt.payment.FIN_PaymentSchedule;
 import org.openbravo.model.financialmgmt.payment.FIN_PaymentScheduleDetail;
 
 /**
- * Unit tests for {@link PaymentCreditConsumer#consumeAbono} — the ETP-4738 server-side
- * eligibility guard on "saldo a favor" consumption. The selector only ever offers negative-total
- * Facturas Rectificativas, but nothing stops a crafted request from sending an arbitrary
- * {@code psdId}, so {@code consume} must reject anything the selector would not have listed.
+ * Unit tests for {@link PaymentCreditConsumer#consumeAbono} — the server-side eligibility guard on
+ * "saldo a favor" consumption. The selector only ever offers negative-total invoices, but nothing
+ * stops a crafted request from sending an arbitrary {@code psdId}, so {@code consume} must reject
+ * anything the selector would not have listed.
+ *
+ * <p>ETP-4841: eligibility is decided purely by the SIGN of the invoice total. The document type is
+ * deliberately irrelevant — an ordinary "Factura" issued with a negative total is a usable credit,
+ * and a POSITIVE Factura Rectificativa (an under-invoiced correction) is payable, not spendable.
+ * The tests below walk that full 2x2 matrix (sign x document type), because the doc-type whitelist
+ * this replaced got both off-diagonal cases wrong.
  */
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)
 class PaymentCreditConsumerTest {
 
   private static final String PSD_ID = "psd-1";
-  private static final String DOC_TYPE_ID = "dt-rect-1";
+  private static final String ORDINARY_DOC_TYPE_ID = "dt-fac-1";
+  private static final String RECTIFICATIVE_DOC_TYPE_ID = "dt-rect-1";
   private static final String PAYMENT_ID = "pay-new-1";
   private static final String OTHER_PAYMENT_ID = "pay-other-1";
+  private static final String MSG_NOT_ELIGIBLE = "not an eligible negative-total invoice";
 
   private MockedStatic<OBDal> obDalMock;
   private MockedStatic<FIN_AddPayment> finAddPaymentMock;
-  private MockedStatic<RectificativeSupport> rectSupportMock;
 
   private OBDal dal;
   private FIN_Payment payment;
@@ -94,21 +101,38 @@ class PaymentCreditConsumerTest {
     finAddPaymentMock.when(() -> FIN_AddPayment.updatePaymentDetail(any(), any(), any(), anyBoolean()))
         .thenReturn(BigDecimal.ZERO);
 
-    rectSupportMock = mockStatic(RectificativeSupport.class);
+    // The rectificative flag lives on a column owned by an optional module; force it "installed"
+    // so a doc type CAN be flagged. If the guard ever went back to consulting the document type,
+    // the ordinary-doc-type tests below would start failing instead of silently passing.
+    RectificativeSupport.setColumnPresentForTests(true);
 
     when(payment.getId()).thenReturn(PAYMENT_ID);
     when(psd.getId()).thenReturn(PSD_ID);
     when(psd.getInvoicePaymentSchedule()).thenReturn(schedule);
     when(schedule.getInvoice()).thenReturn(invoice);
     when(invoice.getTransactionDocument()).thenReturn(docType);
-    when(docType.getId()).thenReturn(DOC_TYPE_ID);
+    useOrdinaryDocType();
   }
 
   @AfterEach
   void tearDown() {
-    closeQuietly(rectSupportMock);
+    RectificativeSupport.setColumnPresentForTests(null);
     closeQuietly(finAddPaymentMock);
     closeQuietly(obDalMock);
+  }
+
+  /** Makes the abono's invoice carry an ordinary "Factura" document type. */
+  private void useOrdinaryDocType() {
+    when(docType.getId()).thenReturn(ORDINARY_DOC_TYPE_ID);
+    when(docType.isEtsgIsRectificative()).thenReturn(false);
+    when(dal.get(DocumentType.class, ORDINARY_DOC_TYPE_ID)).thenReturn(docType);
+  }
+
+  /** Makes the abono's invoice carry a "Factura Rectificativa" document type. */
+  private void useRectificativeDocType() {
+    when(docType.getId()).thenReturn(RECTIFICATIVE_DOC_TYPE_ID);
+    when(docType.isEtsgIsRectificative()).thenReturn(true);
+    when(dal.get(DocumentType.class, RECTIFICATIVE_DOC_TYPE_ID)).thenReturn(docType);
   }
 
   private static void closeQuietly(AutoCloseable closeable) {
@@ -127,12 +151,11 @@ class PaymentCreditConsumerTest {
   }
 
   @Test
-  @DisplayName("An eligible abono (rectificative doc type, negative invoice total) is consumed "
+  @DisplayName("An eligible abono (negative invoice total, rectificative doc type) is consumed "
       + "as a negative payment detail")
-  void consumeAbono_eligibleRectificativeNegativeTotal_linksNegativeDetail() throws Exception {
+  void consumeAbono_negativeTotalRectificativeDocType_linksNegativeDetail() throws Exception {
+    useRectificativeDocType();
     when(invoice.getGrandTotalAmount()).thenReturn(new BigDecimal("-30.00"));
-    rectSupportMock.when(() -> RectificativeSupport.isRectificativeDocType(DOC_TYPE_ID))
-        .thenReturn(true);
 
     BigDecimal funded = PaymentCreditConsumer.consume(payment, abonoSource(new BigDecimal("30")));
 
@@ -141,12 +164,61 @@ class PaymentCreditConsumerTest {
         eq(psd), eq(payment), eq(new BigDecimal("-30")), eq(false)));
   }
 
+  /**
+   * ETP-4841 (inverted rule): an ORDINARY "Factura" issued with a negative total is a genuine
+   * credit the business partner can spend, so it must now be accepted. Before this ticket the
+   * doc-type whitelist rejected it outright — this is the new capability, not just a relaxation.
+   */
   @Test
-  @DisplayName("An abono whose invoice total is NOT negative is rejected (ETP-4738)")
-  void consumeAbono_positiveTotal_throwsOBException() throws Exception {
+  @DisplayName("ETP-4841: an abono on an ORDINARY document type with a negative total is ACCEPTED "
+      + "and linked as a negative payment detail")
+  void consumeAbono_negativeTotalOrdinaryDocType_isAcceptedAndLinked() throws Exception {
+    when(invoice.getGrandTotalAmount()).thenReturn(new BigDecimal("-30.00"));
+
+    BigDecimal funded = PaymentCreditConsumer.consume(payment, abonoSource(new BigDecimal("30")));
+
+    assertEquals(new BigDecimal("30"), funded);
+    finAddPaymentMock.verify(() -> FIN_AddPayment.updatePaymentDetail(
+        eq(psd), eq(payment), eq(new BigDecimal("-30")), eq(false)));
+  }
+
+  /**
+   * The surviving rule: a POSITIVE Factura Rectificativa is an under-invoiced correction — money
+   * the partner OWES — so it can never fund a payment, however it is typed.
+   */
+  @Test
+  @DisplayName("An abono whose invoice total is NOT negative is rejected, even on a rectificative "
+      + "document type (ETP-4841)")
+  void consumeAbono_positiveTotalRectificativeDocType_throwsOBException() throws Exception {
+    useRectificativeDocType();
     when(invoice.getGrandTotalAmount()).thenReturn(new BigDecimal("30.00"));
-    rectSupportMock.when(() -> RectificativeSupport.isRectificativeDocType(DOC_TYPE_ID))
-        .thenReturn(true);
+
+    JSONArray sources = abonoSource(new BigDecimal("30"));
+    OBException ex = assertThrows(OBException.class,
+        () -> PaymentCreditConsumer.consume(payment, sources));
+    assertTrue(ex.getMessage().contains(MSG_NOT_ELIGIBLE), ex.getMessage());
+    finAddPaymentMock.verify(
+        () -> FIN_AddPayment.updatePaymentDetail(any(), any(), any(), anyBoolean()), never());
+  }
+
+  @Test
+  @DisplayName("An abono whose invoice total is NOT negative is rejected on an ordinary document "
+      + "type too — the sign alone decides")
+  void consumeAbono_positiveTotalOrdinaryDocType_throwsOBException() throws Exception {
+    when(invoice.getGrandTotalAmount()).thenReturn(new BigDecimal("30.00"));
+
+    JSONArray sources = abonoSource(new BigDecimal("30"));
+    OBException ex = assertThrows(OBException.class,
+        () -> PaymentCreditConsumer.consume(payment, sources));
+    assertTrue(ex.getMessage().contains(MSG_NOT_ELIGIBLE), ex.getMessage());
+    finAddPaymentMock.verify(
+        () -> FIN_AddPayment.updatePaymentDetail(any(), any(), any(), anyBoolean()), never());
+  }
+
+  @Test
+  @DisplayName("An abono whose invoice total is exactly zero is rejected (strictly negative only)")
+  void consumeAbono_zeroTotal_throwsOBException() throws Exception {
+    when(invoice.getGrandTotalAmount()).thenReturn(BigDecimal.ZERO);
 
     JSONArray sources = abonoSource(new BigDecimal("30"));
     assertThrows(OBException.class, () -> PaymentCreditConsumer.consume(payment, sources));
@@ -155,12 +227,9 @@ class PaymentCreditConsumerTest {
   }
 
   @Test
-  @DisplayName("An abono whose document type is not a Factura Rectificativa is rejected "
-      + "(ETP-4738), even with a negative total")
-  void consumeAbono_nonRectificativeDocType_throwsOBException() throws Exception {
-    when(invoice.getGrandTotalAmount()).thenReturn(new BigDecimal("-30.00"));
-    rectSupportMock.when(() -> RectificativeSupport.isRectificativeDocType(DOC_TYPE_ID))
-        .thenReturn(false);
+  @DisplayName("An abono whose invoice carries no total at all is rejected")
+  void consumeAbono_nullTotal_throwsOBException() throws Exception {
+    when(invoice.getGrandTotalAmount()).thenReturn(null);
 
     JSONArray sources = abonoSource(new BigDecimal("30"));
     assertThrows(OBException.class, () -> PaymentCreditConsumer.consume(payment, sources));
@@ -179,12 +248,10 @@ class PaymentCreditConsumerTest {
 
   @Test
   @DisplayName("A PSD already linked to the SAME payment being registered/edited bypasses "
-      + "eligibility re-validation (a draft may re-save a legacy pre-ETP-4738 source)")
+      + "eligibility re-validation (a draft may re-save a source a later rule would reject)")
   void consumeAbono_alreadyLinkedToSamePayment_bypassesValidation() throws Exception {
-    // Deliberately ineligible: positive total AND non-rectificative doc type.
+    // Deliberately ineligible under the current rule: a positive invoice total.
     when(invoice.getGrandTotalAmount()).thenReturn(new BigDecimal("30.00"));
-    rectSupportMock.when(() -> RectificativeSupport.isRectificativeDocType(DOC_TYPE_ID))
-        .thenReturn(false);
 
     FIN_PaymentDetail existingLink = mock(FIN_PaymentDetail.class);
     when(existingLink.getFinPayment()).thenReturn(payment);
@@ -202,8 +269,6 @@ class PaymentCreditConsumerTest {
       + "to the payment currently consuming it)")
   void consumeAbono_linkedToDifferentPayment_stillValidates() throws Exception {
     when(invoice.getGrandTotalAmount()).thenReturn(new BigDecimal("30.00"));
-    rectSupportMock.when(() -> RectificativeSupport.isRectificativeDocType(DOC_TYPE_ID))
-        .thenReturn(false);
 
     FIN_Payment otherPayment = mock(FIN_Payment.class);
     when(otherPayment.getId()).thenReturn(OTHER_PAYMENT_ID);

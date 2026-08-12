@@ -28,6 +28,7 @@ import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import java.math.BigDecimal;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashSet;
@@ -42,6 +43,7 @@ import org.codehaus.jettison.json.JSONObject;
 import org.junit.Test;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
+import org.openbravo.advpaymentmngt.process.FIN_AddPayment;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.financialmgmt.payment.FIN_FinaccTransaction;
@@ -110,10 +112,44 @@ public class ReactivatePaymentHandlerTest {
     return scheduleDetail;
   }
 
+  /**
+   * A schedule detail linked to an INVOICE installment — i.e. a "document-linked" row, the only
+   * kind {@code releaseInstallmentsToPending} hands back to Core (ETP-4841).
+   */
+  private static FIN_PaymentScheduleDetail mockInvoiceLinkedScheduleDetail() {
+    FIN_PaymentScheduleDetail scheduleDetail = mockScheduleDetail();
+    when(scheduleDetail.getInvoicePaymentSchedule()).thenReturn(mock(FIN_PaymentSchedule.class));
+    return scheduleDetail;
+  }
+
   private static FIN_PaymentDetail mockDetailWith(List<FIN_PaymentScheduleDetail> scheduleDetails) {
     FIN_PaymentDetail detail = mock(FIN_PaymentDetail.class);
     when(detail.getFINPaymentScheduleDetailList()).thenReturn(scheduleDetails);
     return detail;
+  }
+
+  /**
+   * Convenience wrapper for the exact {@code FIN_AddPayment.updatePaymentDetail} overload and
+   * argument tuple {@code releaseInstallmentsToPending} uses: zero amount, no write-off. Verifying
+   * this precise tuple (rather than {@code any()}) is deliberate — releasing with any amount other
+   * than {@code ZERO}, or with {@code writeoffDifference = true}, would NOT leave the unlinked
+   * pending fragment the later payment registration depends on.
+   */
+  private static void verifyReleasedToPending(MockedStatic<FIN_AddPayment> addPaymentMock,
+      FIN_PaymentScheduleDetail scheduleDetail, FIN_Payment payment) {
+    addPaymentMock.verify(
+        () -> FIN_AddPayment.updatePaymentDetail(scheduleDetail, payment, BigDecimal.ZERO, false));
+  }
+
+  private static void verifyNothingReleasedToPending(MockedStatic<FIN_AddPayment> addPaymentMock) {
+    addPaymentMock.verify(() -> FIN_AddPayment.updatePaymentDetail(
+        Mockito.any(FIN_PaymentScheduleDetail.class), Mockito.any(FIN_Payment.class),
+        Mockito.any(BigDecimal.class), Mockito.anyBoolean()), never());
+  }
+
+  private static void verifyNoInvoiceRecompute(MockedStatic<PaymentRemovalUtil> removalUtilMock) {
+    removalUtilMock.verify(
+        () -> PaymentRemovalUtil.updateInvoicesAfterPaymentRemoval(Mockito.anySet()), never());
   }
 
   // ── @Named qualifier ──────────────────────────────────────────────────────
@@ -148,6 +184,18 @@ public class ReactivatePaymentHandlerTest {
   // reject cycles, fix) this regression. QA: re-test the live scenario again after this fix,
   // don't rely on this unit suite passing as sufficient evidence.
   //
+  // ETP-4841 note — what mocks CAN pin here, and why: unlike the reject-cycle-1 Hibernate-cascade
+  // bug above, the draft-delete regression lives entirely in two CONDITIONALS inside handleRemove
+  // — one calling releaseInstallmentsToPending when the payment was NOT processed, the other
+  // calling updateInvoicesAfterPaymentRemoval when it was — both keyed off a wasProcessed flag
+  // captured BEFORE reactivation. Branch selection is exactly what a static mock observes
+  // reliably, so the tests below are genuine regression guards for both halves of that fix,
+  // not smoke tests. What they
+  // still cannot prove is the resulting DB state (that an unlinked, payable FIN_PaymentScheduleDetail
+  // fragment actually survives, and that the invoice's paid/outstanding amounts are untouched) —
+  // that is what ReactivatePaymentHandlerDraftRemoveIntegrationTest in this package asserts against
+  // a real session, and what was confirmed live on invoice 10000074.
+  //
   // Reject-cycle 3 note: an earlier design delegated the final removal step to
   // NeoButtonActionHelper.executeButtonActionCore(context.getSfEntity(), ...), which broke
   // because reactivating a reconciled payment clears the whole Hibernate session, stranding
@@ -160,16 +208,25 @@ public class ReactivatePaymentHandlerTest {
    * Payment applied to an invoice (the reported bug scenario): {@code handle} must delete the
    * {@code FIN_PaymentScheduleDetail} and {@code FIN_PaymentDetail} join rows itself (via
    * {@code OBDal.remove}), call {@code collectAffectedInvoiceIds} BEFORE that cleanup (it
-   * reads the same list being deleted), recalculate the invoice via {@code
-   * updateInvoicesAfterPaymentRemoval}, then remove the payment itself via {@code
+   * reads the same list being deleted), then remove the payment itself via {@code
    * PaymentRemovalUtil.remove(payment)}.
+   *
+   * <p><b>Updated for ETP-4841.</b> This test previously asserted that {@code
+   * updateInvoicesAfterPaymentRemoval} IS called here. That assertion was wrong (it merely
+   * mirrored the then-unconditional call): the payment in this fixture is NOT processed
+   * ({@code isProcessed()} is unstubbed, i.e. {@code null}), and recomputing the invoice
+   * aggregates on the draft path actively corrupts the invoice — {@code
+   * PaymentRemovalUtil.sumDetails()} sums every schedule detail of the installment without
+   * checking {@code paymentDetails}, so the pending fragment just restored by {@code
+   * releaseInstallmentsToPending} is counted as "paid", leaving {@code paidAmount} = full,
+   * {@code outstandingAmount} = 0 and the invoice flagged {@code paymentComplete} (observed live
+   * on a 39.93 EUR invoice). A draft never moved those aggregates in the first place, so there is
+   * nothing to recompute. The expectation is therefore now {@code never()}.
    */
   @Test
   public void handleRemoveCleansUpInvoiceAppliedDetailsBeforeRemovingPayment() throws Exception {
     FIN_Payment payment = mock(FIN_Payment.class);
-    FIN_PaymentScheduleDetail scheduleDetail = mockScheduleDetail();
-    FIN_PaymentSchedule invoiceSchedule = mock(FIN_PaymentSchedule.class);
-    when(scheduleDetail.getInvoicePaymentSchedule()).thenReturn(invoiceSchedule);
+    FIN_PaymentScheduleDetail scheduleDetail = mockInvoiceLinkedScheduleDetail();
     // Real mutable ArrayLists (not Arrays.asList/List.of), matching how a real Hibernate-backed
     // getter returns the actual persistent collection instance: production code calls
     // .remove(...) on these directly to detach the child, so an immutable list here would throw
@@ -183,6 +240,7 @@ public class ReactivatePaymentHandlerTest {
     Set<String> affectedInvoiceIds = new HashSet<>(Collections.singletonList("inv-1"));
 
     try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<FIN_AddPayment> addPaymentMock = Mockito.mockStatic(FIN_AddPayment.class);
          MockedStatic<PaymentRemovalUtil> removalUtilMock =
              Mockito.mockStatic(PaymentRemovalUtil.class)) {
 
@@ -199,10 +257,10 @@ public class ReactivatePaymentHandlerTest {
       // Cleanup happened: both the schedule-detail and the detail itself were removed.
       verify(dal).remove(scheduleDetail);
       verify(dal).remove(detail);
-      // Invoice ids were collected BEFORE cleanup, and used to recalculate after.
+      // Invoice ids are still collected BEFORE cleanup (they are what the processed path uses).
       removalUtilMock.verify(() -> PaymentRemovalUtil.collectAffectedInvoiceIds(payment));
-      removalUtilMock.verify(
-          () -> PaymentRemovalUtil.updateInvoicesAfterPaymentRemoval(affectedInvoiceIds));
+      // ETP-4841: draft path — no aggregate recompute (see javadoc).
+      verifyNoInvoiceRecompute(removalUtilMock);
       // The payment itself is removed directly — no more button-action delegation.
       removalUtilMock.verify(() -> PaymentRemovalUtil.remove(payment));
       assertFalse("detail must be removed from payment.getFINPaymentDetailList()",
@@ -310,6 +368,12 @@ public class ReactivatePaymentHandlerTest {
    * own cleanup does not distinguish invoice vs. order — it removes the join rows
    * unconditionally — so this must succeed identically; only the affected-invoice-ids
    * collection differs (empty, since order applications do not recalculate an invoice).
+   *
+   * <p><b>Updated for ETP-4841</b> (same reason as {@link
+   * #handleRemoveCleansUpInvoiceAppliedDetailsBeforeRemovingPayment}): the fixture payment is not
+   * processed, so the aggregate recompute must NOT run. An order-linked schedule detail IS still
+   * released back to pending — {@code releaseInstallmentsToPending} treats {@code
+   * getOrderPaymentSchedule() != null} exactly like the invoice case.
    */
   @Test
   public void handleRemoveCleansUpOrderAppliedDetailsBeforeRemovingPayment() throws Exception {
@@ -325,6 +389,7 @@ public class ReactivatePaymentHandlerTest {
     Set<String> noAffectedInvoices = Collections.emptySet();
 
     try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<FIN_AddPayment> addPaymentMock = Mockito.mockStatic(FIN_AddPayment.class);
          MockedStatic<PaymentRemovalUtil> removalUtilMock =
              Mockito.mockStatic(PaymentRemovalUtil.class)) {
 
@@ -340,8 +405,8 @@ public class ReactivatePaymentHandlerTest {
       assertEquals(200, result.getHttpStatus());
       verify(dal).remove(scheduleDetail);
       verify(dal).remove(detail);
-      removalUtilMock.verify(
-          () -> PaymentRemovalUtil.updateInvoicesAfterPaymentRemoval(noAffectedInvoices));
+      verifyReleasedToPending(addPaymentMock, scheduleDetail, payment);
+      verifyNoInvoiceRecompute(removalUtilMock);
       removalUtilMock.verify(() -> PaymentRemovalUtil.remove(payment));
       assertFalse("detail must be removed from payment.getFINPaymentDetailList()",
           detailList.contains(detail));
@@ -356,20 +421,22 @@ public class ReactivatePaymentHandlerTest {
    * have every detail/scheduleDetail pair cleaned up, not just the first one the loop visits.
    * Guards against a regression where only {@code details.get(0)} (or an early-exit loop) gets
    * detached/removed while the second application silently keeps its stale join row.
+   *
+   * <p><b>Updated for ETP-4841</b> (same reason as {@link
+   * #handleRemoveCleansUpInvoiceAppliedDetailsBeforeRemovingPayment}): the fixture payment is not
+   * processed, so no aggregate recompute. Additionally asserts the ETP-4841 multi-application
+   * analogue: EVERY installment is released back to pending, not just the first — otherwise the
+   * second invoice would be left permanently unpayable.
    */
   @Test
   public void handleRemoveCleansUpAllDetailsWhenPaymentHasMultipleApplications() throws Exception {
     FIN_Payment payment = mock(FIN_Payment.class);
 
-    FIN_PaymentScheduleDetail scheduleDetail1 = mockScheduleDetail();
-    FIN_PaymentSchedule invoiceSchedule1 = mock(FIN_PaymentSchedule.class);
-    when(scheduleDetail1.getInvoicePaymentSchedule()).thenReturn(invoiceSchedule1);
+    FIN_PaymentScheduleDetail scheduleDetail1 = mockInvoiceLinkedScheduleDetail();
     List<FIN_PaymentScheduleDetail> scheduleDetailList1 = new ArrayList<>(List.of(scheduleDetail1));
     FIN_PaymentDetail detail1 = mockDetailWith(scheduleDetailList1);
 
-    FIN_PaymentScheduleDetail scheduleDetail2 = mockScheduleDetail();
-    FIN_PaymentSchedule invoiceSchedule2 = mock(FIN_PaymentSchedule.class);
-    when(scheduleDetail2.getInvoicePaymentSchedule()).thenReturn(invoiceSchedule2);
+    FIN_PaymentScheduleDetail scheduleDetail2 = mockInvoiceLinkedScheduleDetail();
     List<FIN_PaymentScheduleDetail> scheduleDetailList2 = new ArrayList<>(List.of(scheduleDetail2));
     FIN_PaymentDetail detail2 = mockDetailWith(scheduleDetailList2);
 
@@ -379,6 +446,7 @@ public class ReactivatePaymentHandlerTest {
     Set<String> affectedInvoiceIds = new HashSet<>(List.of("inv-1", "inv-2"));
 
     try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<FIN_AddPayment> addPaymentMock = Mockito.mockStatic(FIN_AddPayment.class);
          MockedStatic<PaymentRemovalUtil> removalUtilMock =
              Mockito.mockStatic(PaymentRemovalUtil.class)) {
 
@@ -403,8 +471,10 @@ public class ReactivatePaymentHandlerTest {
           scheduleDetailList2.isEmpty());
       assertTrue("both details must be detached from payment.getFINPaymentDetailList()",
           detailList.isEmpty());
-      removalUtilMock.verify(
-          () -> PaymentRemovalUtil.updateInvoicesAfterPaymentRemoval(affectedInvoiceIds));
+      // ETP-4841: both installments released, no aggregate recompute on the draft path.
+      verifyReleasedToPending(addPaymentMock, scheduleDetail1, payment);
+      verifyReleasedToPending(addPaymentMock, scheduleDetail2, payment);
+      verifyNoInvoiceRecompute(removalUtilMock);
       removalUtilMock.verify(() -> PaymentRemovalUtil.remove(payment));
     }
   }
@@ -641,6 +711,309 @@ public class ReactivatePaymentHandlerTest {
 
       assertEquals(404, result.getHttpStatus());
       removalUtilMock.verifyNoInteractions();
+    }
+  }
+
+  // ── handle — Remove action, ETP-4841 draft-vs-processed branching ──────────
+  //
+  // Regression suite for the "deleting a DRAFT payment leaves its invoice permanently unpayable"
+  // bug. Symptom: delete a Borrador payment from the Pago window's trash icon, then try to
+  // register a new payment on the same invoice -> HTTP 400 "No pending payment schedule details
+  // found for this installment" (PaymentRegistrationService.MSG_NO_PENDING_PSD, thrown when
+  // findPendingPSDs(scheduleId) returns zero rows, i.e. no FIN_PaymentScheduleDetail with
+  // paymentDetails IS NULL for that installment).
+  //
+  // Root cause: removeApplicationDetails deletes every schedule detail outright and never restores
+  // a pending fragment. Harmless for a PROCESSED payment, because PaymentRemovalUtil.reactivate()
+  // has by then already reversed the invoice's plan through Core — but a DRAFT skips reactivation
+  // entirely, so nothing restored the fragment and the installment was left with NO schedule-detail
+  // rows at all (confirmed by direct DB inspection of 11 broken invoices, and by an A/B experiment
+  // against the invoice-modal delete route, which left exactly 1 correct pending row).
+  //
+  // The fix is two interdependent conditionals keyed off a `wasProcessed` flag captured BEFORE
+  // reactivation; each of the tests below pins one specific way that branching can regress.
+
+  /**
+   * ETP-4841 half 1 — the 400 guard: for a payment that is NOT processed (a draft), each
+   * document-linked schedule detail must be handed back to Core with a ZERO amount via {@code
+   * FIN_AddPayment.updatePaymentDetail(psd, payment, ZERO, false)} BEFORE {@code
+   * removeApplicationDetails} deletes it. Core's "editing an existing link" branch then leaves an
+   * unlinked ({@code paymentDetails IS NULL}) fragment carrying the released amount — exactly what
+   * {@code PaymentRegistrationService.findPendingPSDs} needs to find for any later payment on the
+   * same installment to be registrable.
+   *
+   * <p>The ordering half of that sentence is asserted structurally, not by comment: the stubbed
+   * {@code updatePaymentDetail} answer checks that the schedule detail is still attached to its
+   * parent collection at the moment it is called. Releasing AFTER the delete would restore nothing.
+   */
+  @Test
+  public void handleRemoveReleasesDocumentLinkedInstallmentsForDraftPayment() throws Exception {
+    FIN_Payment draftPayment = mock(FIN_Payment.class);
+    when(draftPayment.isProcessed()).thenReturn(false);
+    FIN_PaymentScheduleDetail scheduleDetail = mockInvoiceLinkedScheduleDetail();
+    List<FIN_PaymentScheduleDetail> scheduleDetailList = new ArrayList<>(List.of(scheduleDetail));
+    FIN_PaymentDetail detail = mockDetailWith(scheduleDetailList);
+    when(draftPayment.getFINPaymentDetailList())
+        .thenReturn(new ArrayList<>(List.of(detail)));
+
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<FIN_AddPayment> addPaymentMock = Mockito.mockStatic(FIN_AddPayment.class);
+         MockedStatic<PaymentRemovalUtil> removalUtilMock =
+             Mockito.mockStatic(PaymentRemovalUtil.class)) {
+
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(FIN_Payment.class, "pay-draft")).thenReturn(draftPayment);
+      removalUtilMock.when(() -> PaymentRemovalUtil.collectAffectedInvoiceIds(draftPayment))
+          .thenReturn(Collections.emptySet());
+
+      // The release must happen while the schedule detail is still attached — i.e. BEFORE
+      // removeApplicationDetails runs. Releasing a row that is already deleted restores nothing.
+      addPaymentMock.when(() -> FIN_AddPayment.updatePaymentDetail(
+              scheduleDetail, draftPayment, BigDecimal.ZERO, false))
+          .thenAnswer(invocation -> {
+            assertTrue("the installment must be released BEFORE its schedule detail is deleted",
+                scheduleDetailList.contains(scheduleDetail));
+            return BigDecimal.ZERO;
+          });
+
+      NeoResponse result = new ReactivatePaymentHandler().handle(removeActionCtx("pay-draft"));
+
+      assertEquals(200, result.getHttpStatus());
+      verifyReleasedToPending(addPaymentMock, scheduleDetail, draftPayment);
+      // The join rows are still deleted afterwards, exactly as before this fix.
+      verify(dal).remove(scheduleDetail);
+      verify(dal).remove(detail);
+      removalUtilMock.verify(() -> PaymentRemovalUtil.remove(draftPayment));
+    }
+  }
+
+  /**
+   * ETP-4841 half 2 — the silent-corruption guard, and the more valuable of the two: on the draft
+   * path the invoice aggregates must NOT be recomputed.
+   *
+   * <p>With only half 1 in place, live testing showed the invoice becoming flagged PAID and STILL
+   * unpayable: {@code PaymentRemovalUtil.sumDetails()} sums EVERY schedule detail of the installment
+   * without checking whether it is linked to a payment detail, so the pending fragment that {@code
+   * releaseInstallmentsToPending} had just restored was counted as "paid" — {@code paidAmount} =
+   * full, {@code outstandingAmount} = 0, {@code Invoice.paymentComplete = true} (observed live on a
+   * 39.93 EUR invoice). A draft never contributed to those aggregates in the first place — verified
+   * against real data: installments whose only linked detail belongs to an unprocessed payment
+   * report {@code paidAmount} 0 — so the draft path has nothing to recompute.
+   *
+   * <p>This failure mode is silent (wrong data, no error), which is why it gets its own named test
+   * rather than only riding along on the cleanup tests above.
+   */
+  @Test
+  public void handleRemoveSkipsInvoiceAggregateRecomputeForDraftPayment() throws Exception {
+    FIN_Payment draftPayment = mock(FIN_Payment.class);
+    when(draftPayment.isProcessed()).thenReturn(false);
+    FIN_PaymentScheduleDetail scheduleDetail = mockInvoiceLinkedScheduleDetail();
+    FIN_PaymentDetail detail = mockDetailWith(new ArrayList<>(List.of(scheduleDetail)));
+    when(draftPayment.getFINPaymentDetailList()).thenReturn(new ArrayList<>(List.of(detail)));
+
+    Set<String> affectedInvoiceIds = new HashSet<>(Collections.singletonList("inv-draft"));
+
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<FIN_AddPayment> addPaymentMock = Mockito.mockStatic(FIN_AddPayment.class);
+         MockedStatic<PaymentRemovalUtil> removalUtilMock =
+             Mockito.mockStatic(PaymentRemovalUtil.class)) {
+
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(FIN_Payment.class, "pay-draft-2")).thenReturn(draftPayment);
+      // Deliberately non-empty: the recompute must be skipped because the payment was a draft, NOT
+      // merely because there happened to be no affected invoice to recompute.
+      removalUtilMock.when(() -> PaymentRemovalUtil.collectAffectedInvoiceIds(draftPayment))
+          .thenReturn(affectedInvoiceIds);
+
+      NeoResponse result = new ReactivatePaymentHandler().handle(removeActionCtx("pay-draft-2"));
+
+      assertEquals(200, result.getHttpStatus());
+      verifyReleasedToPending(addPaymentMock, scheduleDetail, draftPayment);
+      verifyNoInvoiceRecompute(removalUtilMock);
+      // Reactivation is also skipped — a draft has nothing to reactivate.
+      removalUtilMock.verify(
+          () -> PaymentRemovalUtil.reactivate(Mockito.anyString(), Mockito.anyString()), never());
+    }
+  }
+
+  /**
+   * ETP-4841 — the mirror image, so the fix cannot be "corrected" into always taking the draft
+   * branch: for a PROCESSED payment the handler must reactivate through Core, must NOT release the
+   * installments itself (Core's reversal inside {@code PaymentRemovalUtil.reactivate()} has already
+   * done it — doing it a second time would double-release), and MUST recompute the invoice
+   * aggregates (a processed payment genuinely did move {@code paidAmount}/{@code
+   * outstandingAmount}, so skipping the recompute there would leave the invoice looking paid).
+   */
+  @Test
+  public void handleRemoveRecomputesInvoicesAndSkipsReleaseForProcessedPayment() throws Exception {
+    FIN_Payment processedPayment = mock(FIN_Payment.class);
+    when(processedPayment.isProcessed()).thenReturn(true);
+    when(processedPayment.getId()).thenReturn("pay-processed-applied");
+    when(processedPayment.getFINPaymentDetailList()).thenReturn(new ArrayList<>());
+
+    FIN_Payment reactivatedPayment = mock(FIN_Payment.class);
+    when(reactivatedPayment.isProcessed()).thenReturn(false);
+    FIN_PaymentScheduleDetail scheduleDetail = mockInvoiceLinkedScheduleDetail();
+    FIN_PaymentDetail detail = mockDetailWith(new ArrayList<>(List.of(scheduleDetail)));
+    when(reactivatedPayment.getFINPaymentDetailList()).thenReturn(new ArrayList<>(List.of(detail)));
+
+    Set<String> affectedInvoiceIds = new HashSet<>(Collections.singletonList("inv-processed"));
+
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<FIN_AddPayment> addPaymentMock = Mockito.mockStatic(FIN_AddPayment.class);
+         MockedStatic<PaymentRemovalUtil> removalUtilMock =
+             Mockito.mockStatic(PaymentRemovalUtil.class)) {
+
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(FIN_Payment.class, "pay-processed-applied"))
+          .thenReturn(processedPayment, reactivatedPayment);
+      removalUtilMock.when(() -> PaymentRemovalUtil.collectAffectedInvoiceIds(reactivatedPayment))
+          .thenReturn(affectedInvoiceIds);
+
+      NeoResponse result =
+          new ReactivatePaymentHandler().handle(removeActionCtx("pay-processed-applied"));
+
+      assertEquals(200, result.getHttpStatus());
+      removalUtilMock.verify(() -> PaymentRemovalUtil.reactivate("pay-processed-applied", "R"));
+      verifyNothingReleasedToPending(addPaymentMock);
+      removalUtilMock.verify(
+          () -> PaymentRemovalUtil.updateInvoicesAfterPaymentRemoval(affectedInvoiceIds));
+      removalUtilMock.verify(() -> PaymentRemovalUtil.remove(reactivatedPayment));
+    }
+  }
+
+  /**
+   * ETP-4841 — {@code wasProcessed} must be captured BEFORE {@code PaymentRemovalUtil.reactivate()}
+   * runs, and reused thereafter. This is subtle enough to deserve its own test: reactivation clears
+   * the payment's {@code Processed} flag, so any later re-read of {@code payment.isProcessed()}
+   * (whether on the stale reference or on the re-fetched instance) returns {@code false} and would
+   * wrongly route a PROCESSED payment down the draft branch — releasing installments Core has
+   * already reversed, and skipping a recompute that is genuinely needed.
+   *
+   * <p>Simulated by stubbing {@code isProcessed()} to answer {@code true} once and {@code false}
+   * afterwards — the state transition a real reactivation performs — and by returning the SAME
+   * instance from both {@code OBDal.get(...)} calls so a re-read cannot accidentally hit a
+   * still-processed object. The processed behaviour must survive unchanged.
+   */
+  @Test
+  public void handleRemoveCapturesProcessedFlagBeforeReactivation() throws Exception {
+    FIN_Payment payment = mock(FIN_Payment.class);
+    // true on the first read (before reactivation), false on every read after it.
+    when(payment.isProcessed()).thenReturn(true, false);
+    when(payment.getId()).thenReturn("pay-flag-order");
+    FIN_PaymentScheduleDetail scheduleDetail = mockInvoiceLinkedScheduleDetail();
+    FIN_PaymentDetail detail = mockDetailWith(new ArrayList<>(List.of(scheduleDetail)));
+    when(payment.getFINPaymentDetailList()).thenReturn(new ArrayList<>(List.of(detail)));
+
+    Set<String> affectedInvoiceIds = new HashSet<>(Collections.singletonList("inv-flag-order"));
+
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<FIN_AddPayment> addPaymentMock = Mockito.mockStatic(FIN_AddPayment.class);
+         MockedStatic<PaymentRemovalUtil> removalUtilMock =
+             Mockito.mockStatic(PaymentRemovalUtil.class)) {
+
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(FIN_Payment.class, "pay-flag-order")).thenReturn(payment);
+      removalUtilMock.when(() -> PaymentRemovalUtil.collectAffectedInvoiceIds(payment))
+          .thenReturn(affectedInvoiceIds);
+
+      NeoResponse result = new ReactivatePaymentHandler().handle(removeActionCtx("pay-flag-order"));
+
+      assertEquals(200, result.getHttpStatus());
+      removalUtilMock.verify(() -> PaymentRemovalUtil.reactivate("pay-flag-order", "R"));
+      // PROCESSED behaviour must hold even though isProcessed() now reports false.
+      verifyNothingReleasedToPending(addPaymentMock);
+      removalUtilMock.verify(
+          () -> PaymentRemovalUtil.updateInvoicesAfterPaymentRemoval(affectedInvoiceIds));
+    }
+  }
+
+  /**
+   * ETP-4841 — scope guard: {@code releaseInstallmentsToPending} must only touch DOCUMENT-linked
+   * schedule details. A row with neither {@code getInvoicePaymentSchedule()} nor {@code
+   * getOrderPaymentSchedule()} (a credit/refund/GL-only fragment) has no installment to release
+   * back to, and handing it to {@code FIN_AddPayment.updatePaymentDetail} would mutate an unrelated
+   * credit row. It must still be deleted by the normal cleanup.
+   */
+  @Test
+  public void handleRemoveDoesNotReleaseNonDocumentScheduleDetail() throws Exception {
+    FIN_Payment draftPayment = mock(FIN_Payment.class);
+    when(draftPayment.isProcessed()).thenReturn(false);
+    // Neither getInvoicePaymentSchedule() nor getOrderPaymentSchedule() stubbed -> both null.
+    FIN_PaymentScheduleDetail creditScheduleDetail = mockScheduleDetail();
+    FIN_PaymentDetail detail = mockDetailWith(new ArrayList<>(List.of(creditScheduleDetail)));
+    when(draftPayment.getFINPaymentDetailList()).thenReturn(new ArrayList<>(List.of(detail)));
+
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<FIN_AddPayment> addPaymentMock = Mockito.mockStatic(FIN_AddPayment.class);
+         MockedStatic<PaymentRemovalUtil> removalUtilMock =
+             Mockito.mockStatic(PaymentRemovalUtil.class)) {
+
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(FIN_Payment.class, "pay-credit")).thenReturn(draftPayment);
+      removalUtilMock.when(() -> PaymentRemovalUtil.collectAffectedInvoiceIds(draftPayment))
+          .thenReturn(Collections.emptySet());
+
+      NeoResponse result = new ReactivatePaymentHandler().handle(removeActionCtx("pay-credit"));
+
+      assertEquals(200, result.getHttpStatus());
+      verifyNothingReleasedToPending(addPaymentMock);
+      verify(dal).remove(creditScheduleDetail);
+      removalUtilMock.verify(() -> PaymentRemovalUtil.remove(draftPayment));
+    }
+  }
+
+  /**
+   * ETP-4841 — ordering guard for a dependency-internal recompute the handler cannot skip:
+   * {@code PaymentRemovalUtil.remove(payment)} itself ends with {@code
+   * updateInvoicesAfterPaymentRemoval(collectAffectedInvoiceIds(payment))}, unconditionally, inside
+   * the payment.removal module. Skipping the handler's own recompute on the draft path is therefore
+   * only effective because {@code removeApplicationDetails} has ALREADY detached every {@code
+   * FIN_PaymentDetail} by then, so that internal collect yields an empty set and the recompute is a
+   * no-op.
+   *
+   * <p>Reordering the two calls — removing the payment before cleaning up its join rows — would
+   * silently reintroduce the false-"paid" corruption through the dependency, with nothing in the
+   * handler's own source looking wrong. This test pins the invariant by asserting the detail list is
+   * already empty at the moment {@code remove(payment)} is invoked.
+   */
+  @Test
+  public void handleRemoveDetachesAllDetailsBeforeFinalRemoveSoDependencyRecomputeIsNoOp()
+      throws Exception {
+    FIN_Payment draftPayment = mock(FIN_Payment.class);
+    when(draftPayment.isProcessed()).thenReturn(false);
+    FIN_PaymentScheduleDetail scheduleDetail = mockInvoiceLinkedScheduleDetail();
+    FIN_PaymentDetail detail = mockDetailWith(new ArrayList<>(List.of(scheduleDetail)));
+    List<FIN_PaymentDetail> detailList = new ArrayList<>(List.of(detail));
+    when(draftPayment.getFINPaymentDetailList()).thenReturn(detailList);
+
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<FIN_AddPayment> addPaymentMock = Mockito.mockStatic(FIN_AddPayment.class);
+         MockedStatic<PaymentRemovalUtil> removalUtilMock =
+             Mockito.mockStatic(PaymentRemovalUtil.class)) {
+
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(FIN_Payment.class, "pay-order-invariant")).thenReturn(draftPayment);
+      removalUtilMock.when(() -> PaymentRemovalUtil.collectAffectedInvoiceIds(draftPayment))
+          .thenReturn(Collections.emptySet());
+      removalUtilMock.when(() -> PaymentRemovalUtil.remove(draftPayment)).thenAnswer(invocation -> {
+        assertTrue("every FIN_PaymentDetail must already be detached when "
+            + "PaymentRemovalUtil.remove() runs its own internal invoice recompute",
+            detailList.isEmpty());
+        return true;
+      });
+
+      NeoResponse result =
+          new ReactivatePaymentHandler().handle(removeActionCtx("pay-order-invariant"));
+
+      assertEquals(200, result.getHttpStatus());
+      removalUtilMock.verify(() -> PaymentRemovalUtil.remove(draftPayment));
     }
   }
 
