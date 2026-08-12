@@ -71,6 +71,11 @@ final class AccountNoticeEmailContract implements EmailContract {
     if (!editsRejection.isAllowed()) {
       return editsRejection;
     }
+    EmailAuthorizationResult messageRejection =
+        EmailContractCommandSupport.rejectMessageEditsIfPresent(command);
+    if (!messageRejection.isAllowed()) {
+      return messageRejection;
+    }
     EmailAuthorizationResult validation = EmailContractCommandSupport.validateCommand(command,
         EmailContractCommandSupport.FIELD_ACCOUNT_ID);
     if (!validation.isAllowed()) {

@@ -17,6 +17,7 @@
 
 package com.etendoerp.go.schemaforge.handlers;
 
+import java.math.BigDecimal;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
@@ -26,11 +27,15 @@ import javax.inject.Named;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
+import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.criterion.Restrictions;
+import org.openbravo.advpaymentmngt.process.FIN_AddPayment;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.common.currency.Currency;
 import org.openbravo.model.financialmgmt.payment.FIN_FinaccTransaction;
+import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
 import org.openbravo.model.financialmgmt.payment.FIN_Payment;
 import org.openbravo.model.financialmgmt.payment.FIN_PaymentDetail;
 import org.openbravo.model.financialmgmt.payment.FIN_PaymentProposal;
@@ -77,7 +82,9 @@ import com.etendoerp.payment.removal.util.PaymentRemovalUtil;
  * the payment, deletes those join rows itself and recalculates the affected invoices —
  * mirroring exactly what {@code PaymentRemovalUtil.remove()} does, just completed correctly.
  * Unapplied payments (no {@code FIN_PaymentDetail} rows) are unaffected — the cleanup is a
- * no-op.
+ * no-op. For a payment that was already a DRAFT, {@link #releaseInstallmentsToPending} first
+ * hands each installment back to Core so the invoice keeps a payable (pending) schedule
+ * fragment; without it the invoice became permanently unpayable (ETP-4841).
  *
  * <p>Three rounds of live testing (see the reject-cycle notes on {@link #handleRemove} and
  * {@link #removeApplicationDetails}) shaped the current design: (1) deleted children must also
@@ -102,7 +109,9 @@ import com.etendoerp.payment.removal.util.PaymentRemovalUtil;
  * field so the UI can navigate from the payment detail to the reconciled bank transaction
  * (there is no forward FK from {@code FIN_Payment} to {@code FIN_Finacc_Transaction}, only
  * the reverse {@code FIN_Finacc_Transaction.Fin_Payment_ID}). The field is {@code null} when
- * the payment has not been reconciled yet (e.g. status is not {@code RPPC}).
+ * the payment has not been reconciled yet (e.g. status is not {@code RPPC}). It also injects the
+ * three multi-currency extras {@code accountCurrency} / {@code conversionRate} /
+ * {@code financialTransactionAmount} — see {@link #injectMultiCurrencyExtras}.
  *
  * <p>{@code @Named} only — never a normal CDI scope. {@code lookupHandler()} reads the
  * {@code @Named} annotation off the concrete handler class; a normal-scoped bean would be a
@@ -135,6 +144,20 @@ public class ReactivatePaymentHandler implements NeoHandler {
   private static final String FIN_PAYMENT_ID_KEY = "Fin_Payment_ID";
   /** Nullable field injected into the single-record GET response (see class javadoc). */
   private static final String FIELD_FINANCIAL_TRANSACTION_ID = "financialTransactionId";
+  /**
+   * Read-only multi-currency extras injected into the single-record GET response so the payment
+   * detail panel can show the amount in the financial account's currency alongside the payment's
+   * own, plus the rate between them. None is reachable through the frontend contract:
+   * {@code Finacc_Txn_Convert_Rate} / {@code Finacc_Txn_Amount} are {@code ISINCLUDED = N} on
+   * payment-in, and the ACCOUNT's currency ISO is one hop past {@code Fin_Financial_Account_ID} in
+   * both windows. Injecting them here keeps this a pure read enrichment — no AD change, hence no
+   * {@code push-to-neo} / {@code export.database}. Field names deliberately match what
+   * {@code PaymentRegistrationService.paymentListItem} already emits for the invoice payment modal,
+   * so both surfaces speak one shape.
+   */
+  private static final String FIELD_ACCOUNT_CURRENCY = "accountCurrency";
+  private static final String FIELD_CONVERSION_RATE = "conversionRate";
+  private static final String FIELD_FINANCIAL_TRANSACTION_AMOUNT = "financialTransactionAmount";
   private static final String HTTP_GET = "GET";
   private static final String KEY_RESPONSE = "response";
   private static final String KEY_DATA = "data";
@@ -280,16 +303,32 @@ public class ReactivatePaymentHandler implements NeoHandler {
             + "be removed from here; reverse the Payment Proposal instead.");
       }
 
-      if (Boolean.TRUE.equals(payment.isProcessed())) {
+      boolean wasProcessed = Boolean.TRUE.equals(payment.isProcessed());
+      if (wasProcessed) {
         PaymentRemovalUtil.reactivate(payment.getId(), REACTIVATE_BEFORE_REMOVE_VALUE);
         payment = OBDal.getInstance().get(FIN_Payment.class, context.getRecordId());
       }
 
       Set<String> affectedInvoiceIds = PaymentRemovalUtil.collectAffectedInvoiceIds(payment);
+      if (!wasProcessed) {
+        releaseInstallmentsToPending(payment);
+      }
       removeApplicationDetails(payment);
       OBDal.getInstance().flush();
-      PaymentRemovalUtil.updateInvoicesAfterPaymentRemoval(affectedInvoiceIds);
-      OBDal.getInstance().flush();
+      // Only a payment that WAS processed moved the invoice's paid/outstanding amounts, so only
+      // that case needs them recomputed. Running the recompute for a draft is not merely
+      // redundant, it corrupts the invoice: PaymentRemovalUtil.sumDetails() sums EVERY schedule
+      // detail of the installment without checking whether it is linked to a payment detail, so
+      // the pending fragment that releaseInstallmentsToPending() just restored gets counted as
+      // "paid" — leaving paidAmount = full, outstandingAmount = 0 and the invoice flagged
+      // paymentComplete, i.e. unpayable and wrongly shown as paid in both Etendo Go and Classic
+      // (ETP-4841, observed live on a 39.93 invoice). Verified against real data: an installment
+      // whose only linked detail belongs to an unprocessed payment reports paidAmount 0, which is
+      // why the draft path has nothing to recompute in the first place.
+      if (wasProcessed) {
+        PaymentRemovalUtil.updateInvoicesAfterPaymentRemoval(affectedInvoiceIds);
+        OBDal.getInstance().flush();
+      }
 
       PaymentRemovalUtil.remove(payment);
 
@@ -357,6 +396,48 @@ public class ReactivatePaymentHandler implements NeoHandler {
    *
    * @param payment the payment whose application join rows are being removed
    */
+  /**
+   * Releases each of {@code payment}'s document-linked {@link FIN_PaymentScheduleDetail} rows back
+   * to PENDING before {@link #removeApplicationDetails} deletes them, by handing each one to Core's
+   * own reconciliation with a zero amount. Core's "editing an existing link" branch then leaves an
+   * unlinked ({@code FIN_Payment_Detail_ID IS NULL}) fragment carrying the released amount — which
+   * is exactly what {@code PaymentRegistrationService.findPendingPSDs} requires in order to register
+   * any later payment against the same installment.
+   *
+   * <p><b>Only when the payment was ALREADY a draft (ETP-4841).</b> {@link
+   * #removeApplicationDetails} deletes every schedule detail outright and never restores a pending
+   * fragment. For a PROCESSED payment that is harmless, because {@code
+   * PaymentRemovalUtil.reactivate()} has by then already reversed the invoice's payment plan through
+   * Core. A DRAFT skips reactivation entirely (there is nothing to reactivate), so nothing restored
+   * the fragment and the installment was left with NO schedule-detail rows at all — every later
+   * attempt to pay that invoice then failed with "No pending payment schedule details found for this
+   * installment" (HTTP 400).
+   *
+   * <p>Diagnosed with a controlled experiment rather than by reading alone (an earlier fix premised
+   * on Core's internal branching was wrong and got reverted): the same draft-then-delete cycle was
+   * run twice on two equivalent invoices, once per delete route, and the DB inspected directly.
+   * Deleting through this handler left 0 schedule-detail rows; deleting through the invoice modal
+   * ({@code PaymentDraftEditService.deleteDraftPayment}, which already performs this release) left
+   * exactly 1 correct pending row. This method makes both routes converge on that verified end
+   * state. Note it deliberately does NOT depend on which internal branch Core takes — whether it
+   * unlinks the existing row in place or copies it — only on the end state the experiment proved.
+   *
+   * <p>Package-visible for the same reason {@link #removeApplicationDetails} is: {@code
+   * ReactivatePaymentHandlerDraftRemoveIntegrationTest} drives it directly against a real Hibernate
+   * session, and a compile-time call keeps a future rename from silently turning that test into a
+   * no-op the way a reflective lookup would.
+   */
+  static void releaseInstallmentsToPending(FIN_Payment payment) {
+    for (FIN_PaymentDetail detail : payment.getFINPaymentDetailList()) {
+      for (FIN_PaymentScheduleDetail psd : detail.getFINPaymentScheduleDetailList()) {
+        if (psd.getInvoicePaymentSchedule() != null || psd.getOrderPaymentSchedule() != null) {
+          FIN_AddPayment.updatePaymentDetail(psd, payment, BigDecimal.ZERO, false);
+        }
+      }
+    }
+    OBDal.getInstance().flush();
+  }
+
   static void removeApplicationDetails(FIN_Payment payment) {
     List<FIN_PaymentDetail> details = new ArrayList<>(payment.getFINPaymentDetailList());
     for (FIN_PaymentDetail detail : details) {
@@ -401,11 +482,67 @@ public class ReactivatePaymentHandler implements NeoHandler {
       String transactionId = resolveFinancialTransactionId(context.getRecordId());
       paymentRecord.put(FIELD_FINANCIAL_TRANSACTION_ID,
           transactionId != null ? transactionId : JSONObject.NULL);
+      injectMultiCurrencyExtrasQuietly(paymentRecord, context.getRecordId());
       return NeoResponse.ok(body);
     } catch (Exception e) {
       log.error("Error resolving financial transaction for payment {}", context.getRecordId(), e);
       return null;
     }
+  }
+
+  /**
+   * Calls {@link #injectMultiCurrencyExtras} and swallows any failure.
+   *
+   * <p>Isolated on purpose: those three fields are a display nicety, so a failure resolving them
+   * must never discard the whole enriched response. {@link #afterHandle}'s catch returns
+   * {@code null} (i.e. "leave the previous result untouched"), which would also drop the
+   * {@code financialTransactionId} injection and silently break the "go to transaction" link.
+   *
+   * @param paymentRecord the payment JSON object to enrich, mutated in place
+   * @param paymentId the {@code FIN_Payment} id being returned
+   */
+  private void injectMultiCurrencyExtrasQuietly(JSONObject paymentRecord, String paymentId) {
+    try {
+      injectMultiCurrencyExtras(paymentRecord, paymentId);
+    } catch (Exception e) {
+      log.warn("Could not resolve multi-currency fields for payment {}", paymentId, e);
+    }
+  }
+
+  /**
+   * Adds {@link #FIELD_ACCOUNT_CURRENCY}, {@link #FIELD_CONVERSION_RATE} and
+   * {@link #FIELD_FINANCIAL_TRANSACTION_AMOUNT} to a single-record GET payload.
+   *
+   * <p>Every key is always present (explicitly {@code JSONObject.NULL} when unavailable) so the UI
+   * can tell "this backend does not send it" apart from "this payment has no value", rather than
+   * inferring intent from a missing key. The rate is emitted VERBATIM as stored — the payment's own
+   * booked rate, in its stored payment-currency → account-currency direction — which for a payment
+   * plays the same role the invoice's own document rate plays in the preview panel: the record's own
+   * rate wins over any system spot rate. Keeping it unconverted is what makes the detail panel show
+   * back exactly the rate the user typed in the Cobros/Pagos modal (ETP-4841).
+   *
+   * <p>Package-private so unit tests can drive it without the full {@code afterHandle} flow.
+   *
+   * @param paymentRecord the payment JSON object to enrich, mutated in place
+   * @param paymentId the {@code FIN_Payment} id being returned
+   * @throws JSONException if the payload rejects a put
+   */
+  void injectMultiCurrencyExtras(JSONObject paymentRecord, String paymentId) throws JSONException {
+    FIN_Payment payment = OBDal.getInstance().get(FIN_Payment.class, paymentId);
+    FIN_FinancialAccount account = payment != null ? payment.getAccount() : null;
+    Currency accountCurrency = account != null ? account.getCurrency() : null;
+    paymentRecord.put(FIELD_ACCOUNT_CURRENCY,
+        accountCurrency != null && accountCurrency.getISOCode() != null
+            ? accountCurrency.getISOCode() : JSONObject.NULL);
+    paymentRecord.put(FIELD_CONVERSION_RATE, nullSafe(
+        payment != null ? payment.getFinancialTransactionConvertRate() : null));
+    paymentRecord.put(FIELD_FINANCIAL_TRANSACTION_AMOUNT, nullSafe(
+        payment != null ? payment.getFinancialTransactionAmount() : null));
+  }
+
+  /** {@code JSONObject.NULL} for a missing amount, so the key is emitted rather than dropped. */
+  private static Object nullSafe(BigDecimal value) {
+    return value != null ? value : JSONObject.NULL;
   }
 
   private static boolean isSingleRecordGet(NeoContext context) {

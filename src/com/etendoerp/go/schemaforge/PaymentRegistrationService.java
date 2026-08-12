@@ -209,7 +209,7 @@ final class PaymentRegistrationService {
         new DraftPaymentRequest(new AdvPaymentMngtDao(), isReceipt, invoice, paymentMethod, account,
             paymentDate),
         BigDecimal.ONE, amount);
-    linkPSDsToPayment(pendingPSDs, payment, amount);
+    linkPSDsToPayment(pendingPSDs, payment, amount, false);
     processOrThrow(payment);
     return payment;
   }
@@ -304,6 +304,9 @@ final class PaymentRegistrationService {
     }
     item.put("bankConnected", BankIntegrationConstants.FA_CONNECTION_STATUS_CONNECTED
         .equals(acc.getPSD2ConnectionStatus()));
+    // ETP-4797: caps the write-off the payment modal will offer. put(String, null) removes the key,
+    // so an unconfigured limit simply does not travel — which the UI reads as "no limit".
+    item.put("writeoffLimit", acc.getWriteofflimit());
     if (acc.getPSD2CardNumber() != null) {
       item.put("maskedPan", acc.getPSD2CardNumber());
     }
@@ -406,6 +409,11 @@ final class PaymentRegistrationService {
       item.put("accountCurrency", p.getAccount().getCurrency() != null
           ? p.getAccount().getCurrency().getISOCode() : null);
     }
+    // Invoice-currency → account-currency rate stored on this payment. The edit modal reseeds its
+    // (editable) rate field from this instead of the system spot rate, so a rate the user typed on
+    // a draft survives reopening it (ETP-4841). Always ONE on a single-currency payment, where the
+    // modal hides the field.
+    item.put("conversionRate", p.getFinancialTransactionConvertRate());
     if (p.getPaymentMethod() != null) {
       item.put("paymentMethod", p.getPaymentMethod().getName());
     }
@@ -635,7 +643,13 @@ final class PaymentRegistrationService {
 
     BigDecimal totalFunded = PaymentCreditConsumer.consume(payment, body.optJSONArray("creditSources"));
     BigDecimal funds = cash.add(totalFunded);
-    BigDecimal invoiceApplied = applyInvoiceInstallment(isEdit, payment, scheduleId, funds);
+    // ETP-4797: opt-in write-off of the shortfall so the installment is fully settled instead of
+    // dragging a residual balance. Only honoured on create — an edited draft reconciles its already
+    // linked PSD through a different Core call that has no write-off input (see
+    // applyInvoiceInstallment), which is why the UI hides the toggle in edit mode.
+    boolean writeoffDifference = body.optBoolean("writeoffDifference", false);
+    BigDecimal invoiceApplied =
+        applyInvoiceInstallment(isEdit, payment, scheduleId, funds, writeoffDifference);
     OBDal.getInstance().save(payment);
     OBDal.getInstance().flush();
 
@@ -685,8 +699,10 @@ final class PaymentRegistrationService {
    * re-searching for "pending" PSDs. On create, links the funded amount to the pending PSDs found.
    */
   private static BigDecimal applyInvoiceInstallment(boolean isEdit, FIN_Payment payment,
-      String scheduleId, BigDecimal funds) {
+      String scheduleId, BigDecimal funds, boolean writeoffDifference) {
     if (isEdit) {
+      // No write-off on the edit path: the installment PSD is still linked to this payment, so Core
+      // adjusts it in place through reapplyLinkedInstallmentPSD, which takes no write-off flag.
       return PaymentDraftEditService.reapplyLinkedInstallmentPSD(payment, scheduleId, funds);
     }
     List<FIN_PaymentScheduleDetail> pendingPSDs = findPendingPSDs(scheduleId);
@@ -694,7 +710,7 @@ final class PaymentRegistrationService {
       throw new OBException(MSG_NO_PENDING_PSD);
     }
     BigDecimal invoiceApplied = sumAmounts(pendingPSDs).min(funds).max(BigDecimal.ZERO);
-    linkPSDsToPayment(pendingPSDs, payment, invoiceApplied);
+    linkPSDsToPayment(pendingPSDs, payment, invoiceApplied, writeoffDifference);
     return invoiceApplied;
   }
 
@@ -843,7 +859,10 @@ final class PaymentRegistrationService {
         docType, docNo, req.invoice().getBusinessPartner(), req.paymentMethod(), req.account(), "0",
         req.paymentDate(), "", req.invoice().getCurrency(), rate, txnAmount);
     payment.setAmount(amount);
-    FIN_AddPayment.setFinancialTransactionAmountAndRate(null, payment, rate, txnAmount);
+    // Verbatim rate: the core helper would recompute it from the rounded txnAmount and lose what
+    // the user typed in the modal — see
+    // PaymentCurrencyConverter#applyTransactionAmountAndRate (ETP-4841).
+    PaymentCurrencyConverter.applyTransactionAmountAndRate(payment, rate, txnAmount);
     OBDal.getInstance().save(payment);
     OBDal.getInstance().flush();
     return payment;
@@ -994,16 +1013,38 @@ final class PaymentRegistrationService {
     return !crit.list().isEmpty();
   }
 
-  /** Package-visible: also used by {@link ReconciliationPaymentService}. */
+  /**
+   * Links {@code amount} to the given pending PSDs, optionally writing off whatever the amount does
+   * not cover (ETP-4797). Pass {@code false} for the pre-ETP-4797 behaviour every caller had.
+   *
+   * <p>Package-visible: also used by {@link ReconciliationPaymentService}.
+   *
+   * <p>The flag is handed straight to Core. On the create path
+   * ({@code FIN_AddPayment.updatePaymentDetail}, PSD not yet linked to a payment detail) Core
+   * computes {@code difference = psd.amount − assigned} and then either duplicates the PSD for the
+   * difference — leaving the invoice partially paid, the default — or, with the flag on, stores the
+   * difference as {@code writeoffAmount} on both the PSD and its payment detail, so the installment
+   * is fully settled and the payment stays at the funded amount. The accounting side is Core's too:
+   * the write-off posts against the business partner group's write-off account, NOT a G/L item.
+   *
+   * <p>Only a PSD that receives a PARTIAL assignment can produce a write-off: a fully covered one
+   * has no difference, and Core skips the branch. So passing {@code true} is safe for the whole
+   * list — at most one PSD (the one where {@code remaining} runs out) is ever written off.
+   *
+   * <p>Known limit: if {@code amount} runs out before the last PSD, the untouched PSDs stay pending
+   * and the installment is NOT fully settled despite the flag. Reaching that needs an installment
+   * split into three or more PSDs; the callers guard against it upstream by only offering the
+   * write-off when a single invoice is being settled.
+   */
   static void linkPSDsToPayment(List<FIN_PaymentScheduleDetail> psds,
-      FIN_Payment payment, BigDecimal amount) {
+      FIN_Payment payment, BigDecimal amount, boolean writeoffDifference) {
     BigDecimal remaining = amount;
     for (FIN_PaymentScheduleDetail psd : psds) {
       if (remaining.compareTo(BigDecimal.ZERO) <= 0) {
         break;
       }
       BigDecimal assignAmount = remaining.min(psd.getAmount());
-      FIN_AddPayment.updatePaymentDetail(psd, payment, assignAmount, false);
+      FIN_AddPayment.updatePaymentDetail(psd, payment, assignAmount, writeoffDifference);
       remaining = remaining.subtract(assignAmount);
     }
   }
