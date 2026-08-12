@@ -145,6 +145,7 @@ public class UserRoleCompositionService {
     OBContext.setAdminMode(true);
     try {
       Role personalRole = resolveOrCreatePersonalRole(user);
+      personalRole = discardStaleSessionState(personalRole);
       int[] counters = reconcileInheritances(personalRole, templates);
 
       user.setDefaultRole(personalRole);
@@ -210,6 +211,47 @@ public class UserRoleCompositionService {
       return candidate;
     }
     return createPersonalRole(user);
+  }
+
+  /**
+   * Evicts {@code personalRole} from the DAL session and re-fetches it by id, so it starts this
+   * call with every mapped collection back to a genuinely UNINITIALIZED state — matching what a
+   * fresh per-HTTP-request session gets for free.
+   *
+   * <p><b>Why this is needed:</b> core's {@code WindowAccessInjector#setParent} (invoked while
+   * propagating a template's {@code AD_Window_Access} during {@link #reconcileInheritances}'s
+   * ADD step) explicitly does {@code role.getADWindowAccessList().add(newAccess)} — it maintains
+   * BOTH sides of the association by hand. Its sibling {@code TabAccessInjector} does the same
+   * for {@code WindowAccess.getADTabAccessList()} AND correctly overrides {@code
+   * AccessTypeInjector#removeReferenceInParentList} to strip the reference back out on removal.
+   * {@code WindowAccessInjector} does NOT override it (confirmed by reading every {@code
+   * AccessTypeInjector} subclass in core — only {@code FieldAccessInjector} and {@code
+   * TabAccessInjector} do). So once {@code personalRole.getADWindowAccessList()} has been
+   * initialized by an ADD (this call or an earlier one against the SAME {@code Role} instance),
+   * it keeps holding a reference to a propagated {@code WindowAccess} row even after a LATER
+   * {@code AD_Role_Inheritance} removal deletes that row — Hibernate's flush then throws {@code
+   * EntityNotFoundException("deleted object would be re-saved by cascade")}, because a
+   * cascade-eligible collection still references an object pending delete.</p>
+   *
+   * <p>Production NEO webhook calls never hit this: {@code HttpBaseServlet} gives every HTTP
+   * request its own fresh DAL session, so {@code personalRole}'s collections start uninitialized
+   * regardless of what an earlier, separate request did. This defends the service itself against
+   * being invoked twice for the same {@code Role} within one long-lived session — e.g. a future
+   * bulk-retrofit/batch caller (ETP-4877) reusing a single session across many users — where the
+   * staleness would otherwise be real.</p>
+   *
+   * <p><b>Why not just {@code OBDal.refresh(personalRole)}:</b> {@code OBDal#refresh} explicitly
+   * reloads already-initialized collections from CURRENT database state (see its javadoc) — but
+   * at the point this runs, the stale {@code WindowAccess} row hasn't been deleted yet, so a
+   * refresh would simply reload the exact same soon-to-be-conflicting reference. Only a full
+   * evict, forcing a brand-new proxy on the next {@code get}, actually resets the collection to
+   * an uninitialized state that core's flush-time cascade processing skips until something
+   * touches it again.</p>
+   */
+  private Role discardStaleSessionState(Role personalRole) {
+    String personalRoleId = personalRole.getId();
+    OBDal.getInstance().getSession().evict(personalRole);
+    return OBDal.getInstance().get(Role.class, personalRoleId);
   }
 
   private boolean isReusablePersonalRole(User user, Role candidate) {
