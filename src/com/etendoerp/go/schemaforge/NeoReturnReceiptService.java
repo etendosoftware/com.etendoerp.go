@@ -190,7 +190,17 @@ final class NeoReturnReceiptService {
    * another warehouse than the source document ended up moving stock in the SOURCE's warehouse.
    * {@code anchorLocatorToWarehouse} enforces the same header-warehouse guarantee the CRUD path
    * already has: a source bin that already belongs to the return's warehouse is kept as-is, any
-   * other value is replaced by that warehouse's default bin.
+   * other value is replaced by that warehouse's default (or, failing that, any active) bin.
+   *
+   * <p><b>Behaviour widened by ETP-4863:</b> a source line with NO bin used to produce a return
+   * line with no bin either — the old code only copied when {@code sourceLine.getStorageBin()}
+   * was non-null. It now receives the return header's warehouse anchor bin, because
+   * {@code anchorLocatorToWarehouse} treats "absent" and "belongs elsewhere" identically. That is
+   * the intended reading of the unconditional rule (the line must end up in the header's
+   * warehouse) and it also removes a source of {@code InoutLineWithoutLocator} rejections. The
+   * anchor is written through even when it resolves to {@code null} (warehouse with no active
+   * locator at all), so this path fails loudly rather than keeping a foreign bin — the same
+   * contract every other anchored write path follows.
    */
   static ShipmentInOutLine createReturnLineShell(ShipmentInOut returnDoc,
       ShipmentInOutLine sourceLine, long lineNo) {
@@ -201,11 +211,8 @@ final class NeoReturnReceiptService {
     line.setLineNo(lineNo);
     line.setProduct(sourceLine.getProduct());
     line.setUOM(sourceLine.getUOM());
-    Locator anchoredBin = NeoHandlerUtils.anchorLocatorToWarehouse(
-        sourceLine.getStorageBin(), returnDoc.getWarehouse(), log);
-    if (anchoredBin != null) {
-      line.setStorageBin(anchoredBin);
-    }
+    line.setStorageBin(NeoHandlerUtils.anchorLocatorToWarehouse(
+        sourceLine.getStorageBin(), returnDoc.getWarehouse(), log));
     line.setCanceledInoutLine(sourceLine);
     return line;
   }

@@ -478,32 +478,20 @@ public class ReturnShipmentUtilsTest {
   // SECONDARY → every stock transaction landed in SECONDARY.
   // ───────────────────────────────────────────────────────────────────────────────────────
 
-  private static final String WH_PRINCIPAL = "wh-principal";
-  private static final String WH_SECONDARY = "wh-secondary";
-  private static final String LOC_PRINCIPAL_DEFAULT = "loc-principal-default";
+  private static final String WH_PRINCIPAL = LocatorTestSupport.WH_PRINCIPAL;
+  private static final String WH_SECONDARY = LocatorTestSupport.WH_SECONDARY;
+  private static final String LOC_PRINCIPAL_DEFAULT = LocatorTestSupport.LOC_PRINCIPAL_DEFAULT;
 
-  /** Stubs the {@code M_Locator} default-lookup criteria used to anchor a bin to a warehouse. */
-  @SuppressWarnings("unchecked")
   private static void stubDefaultLocatorLookup(OBDal dal, Locator result) {
-    OBCriteria criteria = mock(OBCriteria.class);
-    when(dal.createCriteria(Locator.class)).thenReturn(criteria);
-    when(criteria.add(any())).thenReturn(criteria);
-    when(criteria.addOrder(any())).thenReturn(criteria);
-    when(criteria.setMaxResults(1)).thenReturn(criteria);
-    when(criteria.uniqueResult()).thenReturn(result);
+    LocatorTestSupport.stubDefaultLocatorLookup(dal, result);
   }
 
   private static Warehouse mockWarehouse(String id) {
-    Warehouse warehouse = mock(Warehouse.class);
-    when(warehouse.getId()).thenReturn(id);
-    return warehouse;
+    return LocatorTestSupport.mockWarehouse(id);
   }
 
   private static Locator mockLocator(String id, Warehouse warehouse) {
-    Locator locator = mock(Locator.class);
-    when(locator.getId()).thenReturn(id);
-    when(locator.getWarehouse()).thenReturn(warehouse);
-    return locator;
+    return LocatorTestSupport.mockLocator(id, warehouse);
   }
 
   /**
@@ -669,6 +657,115 @@ public class ReturnShipmentUtilsTest {
       verify(dal, never()).save(line);
       // Nothing to correct → no default-locator lookup should be issued either.
       verify(dal, never()).createCriteria(Locator.class);
+    }
+  }
+
+  /**
+   * Cascade step 4 at this call site: the header warehouse has NO active locator, so the foreign
+   * bin cannot be anchored. It must be written as {@code null} rather than left in place —
+   * skipping the write would keep the line pointing at the wrong warehouse, which is the exact
+   * silent corruption this method exists to prevent. Uniform with
+   * {@code createReturnLineShell} and {@code createAndLinkLine}.
+   */
+  @Test
+  public void assignBinsToLines_headerWarehouseHasNoLocator_clearsForeignBinInsteadOfKeepingIt() {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      Warehouse headerWarehouse = mockWarehouse(WH_PRINCIPAL);
+      Locator binInSecondary = mockLocator("loc-secondary-A", mockWarehouse(WH_SECONDARY));
+
+      ShipmentInOutLine line = mock(ShipmentInOutLine.class);
+      when(line.getStorageBin()).thenReturn(binInSecondary);
+      when(line.getCanceledInoutLine()).thenReturn(null);
+
+      ShipmentInOut doc = mock(ShipmentInOut.class);
+      when(doc.getWarehouse()).thenReturn(headerWarehouse);
+      when(doc.getMaterialMgmtShipmentInOutLineList())
+          .thenReturn(Collections.singletonList(line));
+
+      // No default-flagged bin AND no active bin at all → cascade bottoms out at null.
+      LocatorTestSupport.stubLocatorCascade(dal, null);
+
+      ReturnShipmentUtils.assignBinsToLines(doc);
+
+      verify(line).setStorageBin(null);
+      verify(dal).save(line);
+    }
+  }
+
+  /**
+   * Cascade step 3 at this call site: the header warehouse has bins but none flagged default.
+   * The foreign bin must still be replaced, by the lowest-searchKey active bin.
+   */
+  @Test
+  public void assignBinsToLines_headerWarehouseHasNoDefaultBin_usesAnyActiveBin() {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      Warehouse headerWarehouse = mockWarehouse(WH_PRINCIPAL);
+      Locator binInSecondary = mockLocator("loc-secondary-A", mockWarehouse(WH_SECONDARY));
+      Locator anyActiveBin = mockLocator("loc-principal-any", headerWarehouse);
+
+      ShipmentInOutLine line = mock(ShipmentInOutLine.class);
+      when(line.getStorageBin()).thenReturn(binInSecondary);
+      when(line.getCanceledInoutLine()).thenReturn(null);
+
+      ShipmentInOut doc = mock(ShipmentInOut.class);
+      when(doc.getWarehouse()).thenReturn(headerWarehouse);
+      when(doc.getMaterialMgmtShipmentInOutLineList())
+          .thenReturn(Collections.singletonList(line));
+
+      LocatorTestSupport.stubLocatorCascade(dal, anyActiveBin);
+
+      ReturnShipmentUtils.assignBinsToLines(doc);
+
+      verify(line).setStorageBin(anyActiveBin);
+      verify(line, never()).setStorageBin(binInSecondary);
+    }
+  }
+
+  /**
+   * W1 — the warehouse's fallback bin depends only on the header, so it must be resolved ONCE per
+   * document no matter how many lines need correcting. Hibernate's L1 cache does not deduplicate
+   * criteria queries, so a per-line lookup would issue N queries on a document with N bad lines.
+   */
+  @Test
+  public void assignBinsToLines_resolvesWarehouseFallbackBinOncePerDocument() {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      Warehouse headerWarehouse = mockWarehouse(WH_PRINCIPAL);
+      Locator binInSecondary = mockLocator("loc-secondary-A", mockWarehouse(WH_SECONDARY));
+      Locator headerDefaultBin = mockLocator(LOC_PRINCIPAL_DEFAULT, headerWarehouse);
+
+      ShipmentInOutLine lineA = mock(ShipmentInOutLine.class);
+      when(lineA.getStorageBin()).thenReturn(binInSecondary);
+      when(lineA.getCanceledInoutLine()).thenReturn(null);
+      ShipmentInOutLine lineB = mock(ShipmentInOutLine.class);
+      when(lineB.getStorageBin()).thenReturn(binInSecondary);
+      when(lineB.getCanceledInoutLine()).thenReturn(null);
+      ShipmentInOutLine lineC = mock(ShipmentInOutLine.class);
+      when(lineC.getStorageBin()).thenReturn(null);
+      when(lineC.getCanceledInoutLine()).thenReturn(null);
+
+      ShipmentInOut doc = mock(ShipmentInOut.class);
+      when(doc.getWarehouse()).thenReturn(headerWarehouse);
+      when(doc.getMaterialMgmtShipmentInOutLineList())
+          .thenReturn(Arrays.asList(lineA, lineB, lineC));
+
+      stubDefaultLocatorLookup(dal, headerDefaultBin);
+
+      ReturnShipmentUtils.assignBinsToLines(doc);
+
+      verify(lineA).setStorageBin(headerDefaultBin);
+      verify(lineB).setStorageBin(headerDefaultBin);
+      verify(lineC).setStorageBin(headerDefaultBin);
+      // Three lines corrected, but the warehouse lookup runs exactly once.
+      verify(dal, Mockito.times(1)).createCriteria(Locator.class);
     }
   }
 

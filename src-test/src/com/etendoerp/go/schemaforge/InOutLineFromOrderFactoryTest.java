@@ -49,32 +49,8 @@ import org.openbravo.model.materialmgmt.transaction.ShipmentInOutLine;
  */
 public class InOutLineFromOrderFactoryTest {
 
-  private static final String WH_PRINCIPAL = "wh-principal";
-  private static final String WH_SECONDARY = "wh-secondary";
-
-  private static Warehouse mockWarehouse(String id) {
-    Warehouse warehouse = mock(Warehouse.class);
-    when(warehouse.getId()).thenReturn(id);
-    return warehouse;
-  }
-
-  private static Locator mockLocator(String id, Warehouse warehouse) {
-    Locator locator = mock(Locator.class);
-    when(locator.getId()).thenReturn(id);
-    when(locator.getWarehouse()).thenReturn(warehouse);
-    return locator;
-  }
-
-  /** Stubs the {@code M_Locator} default-lookup criteria used to anchor a bin to a warehouse. */
-  @SuppressWarnings("unchecked")
-  private static void stubDefaultLocatorLookup(OBDal dal, Locator result) {
-    OBCriteria criteria = mock(OBCriteria.class);
-    when(dal.createCriteria(Locator.class)).thenReturn(criteria);
-    when(criteria.add(any())).thenReturn(criteria);
-    when(criteria.addOrder(any())).thenReturn(criteria);
-    when(criteria.setMaxResults(1)).thenReturn(criteria);
-    when(criteria.uniqueResult()).thenReturn(result);
-  }
+  private static final String WH_PRINCIPAL = LocatorTestSupport.WH_PRINCIPAL;
+  private static final String WH_SECONDARY = LocatorTestSupport.WH_SECONDARY;
 
   /**
    * Stubs the native-query chain {@code InvoiceLineLinker.linkPendingInvoiceLinesToInout} runs at
@@ -109,10 +85,10 @@ public class InOutLineFromOrderFactoryTest {
       dalMock.when(OBDal::getInstance).thenReturn(dal);
       stubInvoiceLineLinker(dal);
 
-      Warehouse headerWarehouse = mockWarehouse(WH_PRINCIPAL);
-      Locator orderLocator = mockLocator("loc-secondary-A", mockWarehouse(WH_SECONDARY));
-      Locator headerDefaultBin = mockLocator("loc-principal-default", headerWarehouse);
-      stubDefaultLocatorLookup(dal, headerDefaultBin);
+      Warehouse headerWarehouse = LocatorTestSupport.mockWarehouse(WH_PRINCIPAL);
+      Locator orderLocator = LocatorTestSupport.mockLocator("loc-secondary-A", LocatorTestSupport.mockWarehouse(WH_SECONDARY));
+      Locator headerDefaultBin = LocatorTestSupport.mockLocator("loc-principal-default", headerWarehouse);
+      LocatorTestSupport.stubDefaultLocatorLookup(dal, headerDefaultBin);
 
       ShipmentInOut parentInOut = mock(ShipmentInOut.class);
       when(parentInOut.getWarehouse()).thenReturn(headerWarehouse);
@@ -143,8 +119,8 @@ public class InOutLineFromOrderFactoryTest {
       dalMock.when(OBDal::getInstance).thenReturn(dal);
       stubInvoiceLineLinker(dal);
 
-      Warehouse headerWarehouse = mockWarehouse(WH_PRINCIPAL);
-      Locator orderLocator = mockLocator("loc-principal-A", headerWarehouse);
+      Warehouse headerWarehouse = LocatorTestSupport.mockWarehouse(WH_PRINCIPAL);
+      Locator orderLocator = LocatorTestSupport.mockLocator("loc-principal-A", headerWarehouse);
 
       ShipmentInOut parentInOut = mock(ShipmentInOut.class);
       when(parentInOut.getWarehouse()).thenReturn(headerWarehouse);
@@ -159,6 +135,41 @@ public class InOutLineFromOrderFactoryTest {
 
       verify(line).setStorageBin(orderLocator);
       verify(dal, never()).createCriteria(Locator.class);
+    }
+  }
+
+  /**
+   * Cascade step 4 at this call site: the header's warehouse has no active locator, so the
+   * order's foreign locator must NOT be persisted — the line gets a null bin and the document
+   * fails loudly at posting. Uniform with {@code assignBinsToLines} and
+   * {@code createReturnLineShell}.
+   */
+  @Test
+  public void createAndLinkLine_headerWarehouseHasNoLocator_doesNotKeepForeignLocator() {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+        MockedStatic<OBProvider> providerMock = Mockito.mockStatic(OBProvider.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      stubInvoiceLineLinker(dal);
+
+      Warehouse headerWarehouse = LocatorTestSupport.mockWarehouse(WH_PRINCIPAL);
+      Locator orderLocator = LocatorTestSupport.mockLocator("loc-secondary-A",
+          LocatorTestSupport.mockWarehouse(WH_SECONDARY));
+      LocatorTestSupport.stubLocatorCascade(dal, null);
+
+      ShipmentInOut parentInOut = mock(ShipmentInOut.class);
+      when(parentInOut.getWarehouse()).thenReturn(headerWarehouse);
+
+      ShipmentInOutLine line = mock(ShipmentInOutLine.class);
+      OBProvider provider = mock(OBProvider.class);
+      providerMock.when(OBProvider::getInstance).thenReturn(provider);
+      when(provider.get(ShipmentInOutLine.class)).thenReturn(line);
+
+      InOutLineFromOrderFactory.createAndLinkLine(
+          parentInOut, mockOrderLine(), orderLocator, 10L, BigDecimal.ONE);
+
+      verify(line, never()).setStorageBin(orderLocator);
+      verify(line).setStorageBin(null);
     }
   }
 }

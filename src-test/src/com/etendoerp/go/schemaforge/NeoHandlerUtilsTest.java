@@ -20,7 +20,9 @@ package com.etendoerp.go.schemaforge;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNotSame;
 import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
@@ -661,6 +663,202 @@ public class NeoHandlerUtilsTest {
       when(dal.createCriteria(Locator.class)).thenThrow(new RuntimeException("DB unavailable"));
 
       assertNull(NeoHandlerUtils.resolveDefaultLocatorForWarehouse("wh-1", LOG));
+    }
+  }
+
+  // ── ETP-4863: anchorLocatorToWarehouse — the 4-step cascade ─────────────────────────────────
+  //
+  // The business rule is unconditional: a line's bin must ALWAYS belong to the header document's
+  // warehouse. This method is the single definition of that rule for every DAL write path, so
+  // each step of the cascade and each null-guard is asserted directly here rather than only
+  // through a call site.
+
+  /** Step 1 — a candidate already in the header warehouse is returned as-is, with NO query. */
+  @Test
+  public void testAnchorLocatorKeepsCandidateAlreadyInHeaderWarehouse() {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      Warehouse headerWarehouse = LocatorTestSupport.mockWarehouse(LocatorTestSupport.WH_PRINCIPAL);
+      Locator candidate = LocatorTestSupport.mockLocator("loc-principal-A", headerWarehouse);
+
+      assertSame(candidate,
+          NeoHandlerUtils.anchorLocatorToWarehouse(candidate, headerWarehouse, LOG));
+      Mockito.verify(dal, Mockito.never()).createCriteria(Locator.class);
+    }
+  }
+
+  /** Step 2 — a candidate from another warehouse is replaced by the default-flagged bin. */
+  @Test
+  public void testAnchorLocatorReplacesForeignCandidateWithDefaultBin() {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      Warehouse headerWarehouse = LocatorTestSupport.mockWarehouse(LocatorTestSupport.WH_PRINCIPAL);
+      Locator foreign = LocatorTestSupport.mockLocator("loc-secondary-A",
+          LocatorTestSupport.mockWarehouse(LocatorTestSupport.WH_SECONDARY));
+      Locator defaultBin = LocatorTestSupport.mockLocator(
+          LocatorTestSupport.LOC_PRINCIPAL_DEFAULT, headerWarehouse);
+      LocatorTestSupport.stubDefaultLocatorLookup(dal, defaultBin);
+
+      assertSame(defaultBin,
+          NeoHandlerUtils.anchorLocatorToWarehouse(foreign, headerWarehouse, LOG));
+    }
+  }
+
+  /** Step 2 — an absent candidate is filled with the default-flagged bin just the same. */
+  @Test
+  public void testAnchorLocatorFillsNullCandidateWithDefaultBin() {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      Warehouse headerWarehouse = LocatorTestSupport.mockWarehouse(LocatorTestSupport.WH_PRINCIPAL);
+      Locator defaultBin = LocatorTestSupport.mockLocator(
+          LocatorTestSupport.LOC_PRINCIPAL_DEFAULT, headerWarehouse);
+      LocatorTestSupport.stubDefaultLocatorLookup(dal, defaultBin);
+
+      assertSame(defaultBin, NeoHandlerUtils.anchorLocatorToWarehouse(null, headerWarehouse, LOG));
+    }
+  }
+
+  /**
+   * Step 3 — the header warehouse has bins but NONE flagged default. The foreign candidate must
+   * still be replaced, now by the lowest-searchKey active bin. This is the branch that closes the
+   * "configuration gap silently keeps a wrong-warehouse bin" hole.
+   */
+  @Test
+  public void testAnchorLocatorFallsBackToAnyActiveBinWhenNoDefaultFlagged() {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      Warehouse headerWarehouse = LocatorTestSupport.mockWarehouse(LocatorTestSupport.WH_PRINCIPAL);
+      Locator foreign = LocatorTestSupport.mockLocator("loc-secondary-A",
+          LocatorTestSupport.mockWarehouse(LocatorTestSupport.WH_SECONDARY));
+      Locator anyActive = LocatorTestSupport.mockLocator("loc-principal-any", headerWarehouse);
+      LocatorTestSupport.stubLocatorCascade(dal, anyActive);
+
+      Locator result = NeoHandlerUtils.anchorLocatorToWarehouse(foreign, headerWarehouse, LOG);
+
+      assertSame(anyActive, result);
+      assertNotSame("a bin from another warehouse must never survive", foreign, result);
+    }
+  }
+
+  /**
+   * Step 4 — the header warehouse has no active bin at all. The result is {@code null}: the
+   * foreign candidate is NOT handed back, so no caller can persist a wrong-warehouse bin.
+   */
+  @Test
+  public void testAnchorLocatorReturnsNullRatherThanForeignBinWhenWarehouseHasNoLocator() {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      Warehouse headerWarehouse = LocatorTestSupport.mockWarehouse(LocatorTestSupport.WH_PRINCIPAL);
+      Locator foreign = LocatorTestSupport.mockLocator("loc-secondary-A",
+          LocatorTestSupport.mockWarehouse(LocatorTestSupport.WH_SECONDARY));
+      LocatorTestSupport.stubLocatorCascade(dal, null);
+
+      assertNull(NeoHandlerUtils.anchorLocatorToWarehouse(foreign, headerWarehouse, LOG));
+    }
+  }
+
+  /** Null guard — no header warehouse means nothing to anchor to; the candidate passes through. */
+  @Test
+  public void testAnchorLocatorReturnsCandidateWhenHeaderWarehouseIsNull() {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      Locator candidate = LocatorTestSupport.mockLocator("loc-x",
+          LocatorTestSupport.mockWarehouse(LocatorTestSupport.WH_SECONDARY));
+
+      assertSame(candidate, NeoHandlerUtils.anchorLocatorToWarehouse(candidate, null, LOG));
+      assertNull(NeoHandlerUtils.anchorLocatorToWarehouse(null, null, LOG));
+      Mockito.verify(dal, Mockito.never()).createCriteria(Locator.class);
+    }
+  }
+
+  /** Null guard — a header warehouse whose id is null is as unusable as a null warehouse. */
+  @Test
+  public void testAnchorLocatorReturnsCandidateWhenHeaderWarehouseIdIsNull() {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      Warehouse headerWarehouse = mock(Warehouse.class);
+      when(headerWarehouse.getId()).thenReturn(null);
+      Locator candidate = LocatorTestSupport.mockLocator("loc-x",
+          LocatorTestSupport.mockWarehouse(LocatorTestSupport.WH_SECONDARY));
+
+      assertSame(candidate,
+          NeoHandlerUtils.anchorLocatorToWarehouse(candidate, headerWarehouse, LOG));
+      Mockito.verify(dal, Mockito.never()).createCriteria(Locator.class);
+    }
+  }
+
+  /**
+   * Null guard — a candidate with no warehouse of its own cannot satisfy step 1, so it is treated
+   * as unanchored and corrected instead of blowing up on a null dereference.
+   */
+  @Test
+  public void testAnchorLocatorCorrectsCandidateWithNullWarehouse() {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      Warehouse headerWarehouse = LocatorTestSupport.mockWarehouse(LocatorTestSupport.WH_PRINCIPAL);
+      Locator orphan = mock(Locator.class);
+      when(orphan.getId()).thenReturn("loc-orphan");
+      when(orphan.getWarehouse()).thenReturn(null);
+      Locator defaultBin = LocatorTestSupport.mockLocator(
+          LocatorTestSupport.LOC_PRINCIPAL_DEFAULT, headerWarehouse);
+      LocatorTestSupport.stubDefaultLocatorLookup(dal, defaultBin);
+
+      assertSame(defaultBin,
+          NeoHandlerUtils.anchorLocatorToWarehouse(orphan, headerWarehouse, LOG));
+    }
+  }
+
+  /**
+   * {@code locatorBelongsToWarehouse} is the step-1 predicate batch callers reuse to skip the
+   * per-line lookup; it must agree with the cascade on every null combination.
+   */
+  @Test
+  public void testLocatorBelongsToWarehouseIsNullSafe() {
+    Warehouse warehouse = LocatorTestSupport.mockWarehouse(LocatorTestSupport.WH_PRINCIPAL);
+    Locator inWarehouse = LocatorTestSupport.mockLocator("loc-a", warehouse);
+    Locator elsewhere = LocatorTestSupport.mockLocator("loc-b",
+        LocatorTestSupport.mockWarehouse(LocatorTestSupport.WH_SECONDARY));
+    Locator orphan = mock(Locator.class);
+    when(orphan.getWarehouse()).thenReturn(null);
+
+    assertTrue(NeoHandlerUtils.locatorBelongsToWarehouse(inWarehouse, warehouse));
+    assertFalse(NeoHandlerUtils.locatorBelongsToWarehouse(elsewhere, warehouse));
+    assertFalse(NeoHandlerUtils.locatorBelongsToWarehouse(orphan, warehouse));
+    assertFalse(NeoHandlerUtils.locatorBelongsToWarehouse(null, warehouse));
+    assertFalse(NeoHandlerUtils.locatorBelongsToWarehouse(inWarehouse, null));
+  }
+
+  /**
+   * {@code resolveWarehouseAnchorBin} (steps 2–4, hoisted by batch callers) must return exactly
+   * what the full cascade would, so memoizing it stays equivalent to calling
+   * {@code anchorLocatorToWarehouse} per line.
+   */
+  @Test
+  public void testResolveWarehouseAnchorBinMatchesCascadeAndIsNullSafe() {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      Warehouse warehouse = LocatorTestSupport.mockWarehouse(LocatorTestSupport.WH_PRINCIPAL);
+      Locator anyActive = LocatorTestSupport.mockLocator("loc-principal-any", warehouse);
+      LocatorTestSupport.stubLocatorCascade(dal, anyActive);
+
+      assertSame(anyActive, NeoHandlerUtils.resolveWarehouseAnchorBin(warehouse, LOG));
+      assertNull(NeoHandlerUtils.resolveWarehouseAnchorBin(null, LOG));
     }
   }
 }

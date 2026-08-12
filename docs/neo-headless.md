@@ -1018,11 +1018,26 @@ Responses support custom headers via `withHeader(name, value)`.
   | `ReturnShipmentUtils.assignBinsToLines` | header-level backfill run by `ReturnMaterialReceiptHeaderHandler` / `ReturnToVendorShipmentHeaderHandler` on `documentAction` |
   | `InOutLineFromOrderFactory.createAndLinkLine` | an order's lines → a Goods Shipment / Goods Receipt |
 
-  All of them route their candidate bin through `anchorLocatorToWarehouse(Locator candidate, Warehouse headerWarehouse, Logger log)`, the entity-level twin of the CRUD rule: the candidate is returned untouched when it already belongs to `headerWarehouse`, otherwise it is replaced by that warehouse's default `Locator` (or `null` when the warehouse has none configured — a data-setup error worth surfacing rather than papering over with a bin from the wrong warehouse). `resolveDefaultLocatorForWarehouse` and `anchorLocatorToWarehouse` share one lookup (`findDefaultLocatorForWarehouse`), so "the warehouse's default bin" has exactly one definition across both paths.
+  All of them route their candidate bin through `anchorLocatorToWarehouse(Locator candidate, Warehouse headerWarehouse, Logger log)`, the entity-level twin of the CRUD rule. The rule is unconditional — **the method never returns a locator belonging to another warehouse, and no call site may keep one** — resolved as a 4-step cascade:
+
+  1. `candidate` already belongs to `headerWarehouse` → returned as-is, no query. The guarantee is about the *warehouse*, not about collapsing every line onto one bin, so a deliberate picking-bin choice survives.
+  2. otherwise the warehouse's `isDefault` active bin (`findDefaultLocatorForWarehouse`).
+  3. otherwise **any** active bin of that warehouse, lowest `searchKey` (`findAnyActiveLocatorForWarehouse`). A warehouse with bins but none flagged default is a configuration gap, and a gap is not a licence to keep pointing at another warehouse.
+  4. only when the warehouse has **no active bin at all** → `null`. Every call site writes that `null` through, so the document fails loudly at `M_INOUT_POST` (`InoutLineWithoutLocator`) instead of silently booking stock in the wrong warehouse. In particular `assignBinsToLines` *clears* an unanchorable bin rather than skipping the write — skipping would leave the line pointing at the wrong warehouse, the exact failure this exists to prevent.
+
+  Steps 2 and 3 are **two separate lookups on purpose**. Step 2 (`findDefaultLocatorForWarehouse`) is also the entirety of what the CRUD path resolves via `resolveDefaultLocatorForWarehouse`, and that behaviour is verified in runtime; folding the step-3 relaxation into it would silently change what a line `POST` defaults to. The widening therefore lives in `resolveWarehouseAnchorBin`, composed on top, and only the DAL paths get it.
+
+  Batch callers that anchor many lines of the same header (`assignBinsToLines`) hoist steps 2–4 out of their loop via `resolveWarehouseAnchorBin` and apply `locatorBelongsToWarehouse` per line — Hibernate's L1 cache does not deduplicate criteria queries, so the naive per-line form issues one query per line needing correction.
+
+  **Scope of "one definition":** these helpers unify the CRUD path and the four DAL paths above. `NeoCommercialDocumentFactory.findDefaultLocator(Warehouse)` is still a *separate* implementation of "the warehouse's default bin" (default-flagged, else any active — the same cascade, expressed independently) used by the order→shipment/receipt and invoice→shipment handlers to pick the locator they pass IN. It was deliberately left alone: it feeds `createAndLinkLine`, whose result is re-anchored anyway, so its output can no longer reach the database unchecked.
+
+  **Exempt by design — `CreateInvoiceShipmentHandler`:** it is a fifth DAL writer of `setStorageBin` (invoice → shipment) and is deliberately NOT in the table above. It already resolves its locator from the shipment header's own warehouse and throws an `OBException` when none resolves, so it is structurally incapable of persisting a foreign bin — the same reasoning that keeps `InventoryLineHandler` out of the CRUD helper. Any *new* `M_InOutLine` write path, though, belongs on the list.
 
   Two failure modes this closed, both observed live:
   - **Imported return lines** copied the SOURCE document's bin verbatim, so a return whose header sat in warehouse A but was built from a document whose lines sat in warehouse B booked its stock transactions in B. `M_INOUT_POST` follows the line's bin, not the header.
   - **`assignBinsToLines` had its precedence inverted** — it preferred `line.getCanceledInoutLine().getStorageBin()` OVER the line's own value. A return line references its source line even when the user typed it by hand in the window, so this header-level pass silently overwrote the correct bin the line handler had just set. Confirmed on RFC Receipts 1000057/1000059/1000061/1000063: header in "Almacen GO", lines rewritten to `AS-0-0-0` of "Almacén Secundario". The line's own bin now wins; the source document's bin is only a fallback for a line that has none.
+
+  One behaviour was also **widened**: a source line with no bin used to produce a return line with no bin either (`createReturnLineShell` only copied a non-null value). It now receives the header warehouse's anchor bin, because the cascade treats "absent" and "belongs elsewhere" identically. That is the intended reading of the unconditional rule and it removes a source of `InoutLineWithoutLocator` rejections.
 
 ---
 

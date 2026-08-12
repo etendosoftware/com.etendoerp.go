@@ -43,6 +43,7 @@ import org.openbravo.erpCommon.businessUtility.Tax;
 import org.openbravo.model.common.businesspartner.BusinessPartner;
 import org.openbravo.model.common.enterprise.DocumentType;
 import org.openbravo.model.common.enterprise.Locator;
+import org.openbravo.model.common.enterprise.Warehouse;
 import org.openbravo.model.common.invoice.Invoice;
 import org.openbravo.model.common.invoice.InvoiceLine;
 import org.openbravo.model.financialmgmt.tax.TaxRate;
@@ -122,15 +123,6 @@ final class ReturnShipmentUtils {
   }
 
   // ---------------------------------------------------------------------------
-  // Default locator lookup lives in NeoHandlerUtils (ETP-4863)
-  //
-  // This class used to own a second, raw-JDBC copy of the "default locator of a warehouse"
-  // query, used only by assignBinsToLines. It is gone: both the CRUD path and every DAL path
-  // now go through NeoHandlerUtils.anchorLocatorToWarehouse / findDefaultLocatorForWarehouse,
-  // so there is a single definition of what "the warehouse's default bin" means.
-  // ---------------------------------------------------------------------------
-
-  // ---------------------------------------------------------------------------
   // Storage bin fill – shared between both return header handlers
   // ---------------------------------------------------------------------------
 
@@ -150,20 +142,49 @@ final class ReturnShipmentUtils {
    * whole stock movement followed the bin into the wrong warehouse.
    *
    * <p>Corrected precedence: the LINE'S OWN bin wins; the source document's bin is only a
-   * fallback for a line that has none; and whatever comes out of that is then passed through
-   * {@link NeoHandlerUtils#anchorLocatorToWarehouse} so the final value always belongs to the
-   * header's warehouse. A line already holding a valid bin is left untouched — no write, no save.
+   * fallback for a line that has none; and whatever comes out of that must belong to the header's
+   * warehouse or be replaced. A line already holding a valid bin is left untouched — no write, no
+   * save.
+   *
+   * <p>A bin that cannot be anchored (the header warehouse has no active locator at all) is
+   * written as {@code null}, NOT skipped. Skipping would leave the line pointing at the wrong
+   * warehouse's bin — the exact silent-corruption failure mode this method exists to prevent —
+   * so it fails loudly at {@code M_INOUT_POST} instead, matching what every other anchored write
+   * path does.
+   *
+   * <p>The warehouse's fallback bin is resolved at most once per document rather than once per
+   * line: it depends only on {@code doc}'s warehouse, and Hibernate's L1 cache does not
+   * deduplicate criteria queries.
    */
   static void assignBinsToLines(ShipmentInOut doc) {
+    Warehouse headerWarehouse = doc.getWarehouse();
+    Locator warehouseAnchorBin = null;
+    boolean anchorBinResolved = false;
+
     for (ShipmentInOutLine line : doc.getMaterialMgmtShipmentInOutLineList()) {
-      Locator candidate = line.getStorageBin();
+      Locator current = line.getStorageBin();
+      Locator candidate = current;
       if (candidate == null) {
         ShipmentInOutLine origLine = line.getCanceledInoutLine();
         candidate = (origLine != null) ? origLine.getStorageBin() : null;
       }
-      Locator target = NeoHandlerUtils.anchorLocatorToWarehouse(candidate, doc.getWarehouse(), log);
-      if (target != null && (line.getStorageBin() == null
-          || !target.getId().equals(line.getStorageBin().getId()))) {
+
+      Locator target;
+      if (headerWarehouse == null || headerWarehouse.getId() == null
+          || NeoHandlerUtils.locatorBelongsToWarehouse(candidate, headerWarehouse)) {
+        target = candidate;
+      } else {
+        if (!anchorBinResolved) {
+          warehouseAnchorBin = NeoHandlerUtils.resolveWarehouseAnchorBin(headerWarehouse, log);
+          anchorBinResolved = true;
+        }
+        target = warehouseAnchorBin;
+      }
+
+      boolean changed = (target == null)
+          ? current != null
+          : (current == null || !target.getId().equals(current.getId()));
+      if (changed) {
         line.setStorageBin(target);
         OBDal.getInstance().save(line);
       }

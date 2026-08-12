@@ -410,8 +410,17 @@ final class NeoHandlerUtils {
   }
 
   /**
-   * Returns the default active {@code M_Locator} entity for a warehouse, or {@code null} when
-   * none is configured. Mirrors {@code InventoryLineHandler}'s locator lookup.
+   * Returns the {@code isDefault} active {@code M_Locator} entity for a warehouse, or
+   * {@code null} when the warehouse has no default-flagged bin. Mirrors
+   * {@code InventoryLineHandler}'s locator lookup.
+   *
+   * <p><b>Deliberately strict, and deliberately NOT widened.</b> This is step 2 of the anchoring
+   * cascade AND the whole of what the CRUD path ({@link #injectDefaultLocatorIfMissing} →
+   * {@link #resolveDefaultLocatorForWarehouse}) resolves. That CRUD behaviour is verified in
+   * runtime and must not shift, so the "any active bin" relaxation that the DAL paths need lives
+   * in a SEPARATE lookup ({@link #findAnyActiveLocatorForWarehouse}) composed on top by
+   * {@link #resolveWarehouseAnchorBin}, rather than being folded in here. Two methods, on
+   * purpose: widening this one would silently change what a line {@code POST} defaults to.
    */
   @SuppressWarnings("unchecked")
   static Locator findDefaultLocatorForWarehouse(String warehouseId, Logger log) {
@@ -431,6 +440,32 @@ final class NeoHandlerUtils {
   }
 
   /**
+   * Returns the lowest-{@code searchKey} ACTIVE {@code M_Locator} of a warehouse regardless of
+   * its {@code isDefault} flag, or {@code null} when the warehouse has no active bin at all.
+   *
+   * <p>Step 3 of the anchoring cascade (ETP-4863), used only by
+   * {@link #resolveWarehouseAnchorBin}. A warehouse with bins but none flagged as default is a
+   * configuration gap, not a reason to leave a line pointing at ANOTHER warehouse's bin — the
+   * business rule is unconditional. Separate from {@link #findDefaultLocatorForWarehouse} so the
+   * CRUD path's defaulting behaviour is untouched; see that method's note.
+   */
+  @SuppressWarnings("unchecked")
+  static Locator findAnyActiveLocatorForWarehouse(String warehouseId, Logger log) {
+    try {
+      return (Locator) OBDal.getInstance().createCriteria(Locator.class)
+          .add(Restrictions.eq(Locator.PROPERTY_WAREHOUSE + ".id", warehouseId))
+          .add(Restrictions.eq(Locator.PROPERTY_ACTIVE, true))
+          .addOrder(Order.asc(Locator.PROPERTY_SEARCHKEY))
+          .setMaxResults(1)
+          .uniqueResult();
+    } catch (Exception e) {
+      log.debug("Could not resolve any active locator for warehouse {}: {}", warehouseId,
+          e.getMessage());
+      return null;
+    }
+  }
+
+  /**
    * Entity-level counterpart of {@link #injectDefaultLocatorIfMissing}, for the DAL write paths
    * that never reach a {@code NeoHandler} (ETP-4863).
    *
@@ -442,11 +477,31 @@ final class NeoHandlerUtils {
    * warehouse A, built from a document whose lines sit in warehouse B, produced stock
    * transactions in B. The bin, not the header, is what {@code M_INOUT_POST} follows.
    *
-   * <p>The rule is the same UNCONDITIONAL guarantee the CRUD path applies, confirmed in scope by
-   * the product owner: a line's locator must ALWAYS belong to the header document's warehouse.
-   * A candidate that already belongs there is a deliberate, valid bin choice and is returned
-   * untouched — the guarantee is about the warehouse, not about collapsing every line onto the
-   * warehouse's single default locator.
+   * <p>The rule is UNCONDITIONAL, confirmed in scope by the product owner: a line's locator must
+   * ALWAYS belong to the header document's warehouse. This method therefore NEVER returns a
+   * locator belonging to any other warehouse, and no call site may keep one — a {@code null}
+   * result means "write null", not "leave the wrong bin in place". Resolution cascade:
+   *
+   * <ol>
+   *   <li>{@code candidate} already belongs to {@code headerWarehouse} → returned as-is, with no
+   *       query. The guarantee is about the WAREHOUSE, not about collapsing every line onto the
+   *       warehouse's single default bin, so a deliberate picking-bin choice survives.</li>
+   *   <li>otherwise the warehouse's {@code isDefault} active bin
+   *       ({@link #findDefaultLocatorForWarehouse});</li>
+   *   <li>otherwise ANY active bin of that warehouse, lowest {@code searchKey}
+   *       ({@link #findAnyActiveLocatorForWarehouse}) — a warehouse with bins but none flagged
+   *       default is a configuration gap, and a gap is not a licence to keep pointing at another
+   *       warehouse;</li>
+   *   <li>only when the warehouse has NO active bin at all → {@code null}, which every caller
+   *       writes through so the document fails loudly at {@code M_INOUT_POST}
+   *       ({@code InoutLineWithoutLocator}) instead of silently booking stock in the wrong
+   *       warehouse.</li>
+   * </ol>
+   *
+   * <p>Batch callers that anchor many lines of the SAME header may hoist steps 2–4 out of their
+   * loop by calling {@link #resolveWarehouseAnchorBin} once and using
+   * {@link #locatorBelongsToWarehouse} as the per-line step-1 test — that composition is exactly
+   * what this method does, and the two must stay equivalent.
    *
    * @param candidate       the bin the caller would otherwise have used (source line's bin, the
    *                        order's warehouse default, …); may be {@code null}
@@ -454,29 +509,67 @@ final class NeoHandlerUtils {
    *                        {@code null} there is nothing to anchor to and {@code candidate} is
    *                        returned unchanged
    * @param log             the caller's logger
-   * @return {@code candidate} when it already belongs to {@code headerWarehouse}; otherwise that
-   *         warehouse's default locator, or {@code null} when the warehouse has none configured
-   *         (a data-setup error the caller must surface rather than paper over with a bin from
-   *         the wrong warehouse)
+   * @return a locator guaranteed to belong to {@code headerWarehouse}, or {@code null} when that
+   *         warehouse has no active locator at all
    */
   static Locator anchorLocatorToWarehouse(Locator candidate, Warehouse headerWarehouse,
       Logger log) {
     if (headerWarehouse == null || headerWarehouse.getId() == null) {
       return candidate;
     }
-    String headerWarehouseId = headerWarehouse.getId();
-    if (candidate != null && candidate.getWarehouse() != null
-        && headerWarehouseId.equals(candidate.getWarehouse().getId())) {
+    if (locatorBelongsToWarehouse(candidate, headerWarehouse)) {
       return candidate;
     }
-    Locator anchored = findDefaultLocatorForWarehouse(headerWarehouseId, log);
-    if (anchored == null) {
-      log.warn("No default locator configured for warehouse {}; storage bin left unanchored",
-          headerWarehouseId);
-    } else if (candidate != null) {
+    Locator anchored = resolveWarehouseAnchorBin(headerWarehouse, log);
+    if (anchored != null && candidate != null) {
       log.debug("Re-anchored storage bin {} to {} (header warehouse {})", candidate.getId(),
-          anchored.getId(), headerWarehouseId);
+          anchored.getId(), headerWarehouse.getId());
     }
     return anchored;
+  }
+
+  /**
+   * Step 1 of the anchoring cascade: true when {@code locator} is a real bin whose own warehouse
+   * is {@code warehouse}. Pure, no query — both operands are already-hydrated entities.
+   *
+   * <p>Entity-level sibling of {@link #belongsToWarehouse(String, String, Logger)}, which the
+   * CRUD path uses because it only ever holds ids from a JSON body and must hit the DB to resolve
+   * them. Exposed separately from {@link #anchorLocatorToWarehouse} so batch callers can apply
+   * the per-line test without re-resolving the warehouse's anchor bin on every iteration.
+   */
+  static boolean locatorBelongsToWarehouse(Locator locator, Warehouse warehouse) {
+    return locator != null && warehouse != null && warehouse.getId() != null
+        && locator.getWarehouse() != null
+        && warehouse.getId().equals(locator.getWarehouse().getId());
+  }
+
+  /**
+   * Steps 2–4 of the anchoring cascade: the bin a line of {@code warehouse} must fall back to
+   * when its candidate belongs elsewhere — the {@code isDefault} active bin, else any active bin
+   * (lowest {@code searchKey}), else {@code null} when the warehouse has no active bin at all.
+   *
+   * <p>Costs up to two queries and depends only on the warehouse, so a caller anchoring every
+   * line of one document should call this ONCE and reuse the result rather than going through
+   * {@link #anchorLocatorToWarehouse} per line — Hibernate's L1 cache does not deduplicate
+   * criteria queries, so the naive form issues one query per line needing correction.
+   */
+  static Locator resolveWarehouseAnchorBin(Warehouse warehouse, Logger log) {
+    if (warehouse == null || warehouse.getId() == null) {
+      return null;
+    }
+    String warehouseId = warehouse.getId();
+    Locator anchor = findDefaultLocatorForWarehouse(warehouseId, log);
+    if (anchor != null) {
+      return anchor;
+    }
+    anchor = findAnyActiveLocatorForWarehouse(warehouseId, log);
+    if (anchor == null) {
+      log.warn("Warehouse {} has no active locator; storage bin will be left empty and the "
+          + "document will not complete until one is configured", warehouseId);
+    } else {
+      log.warn("Warehouse {} has no default locator; falling back to active locator {}",
+          warehouseId, anchor.getId());
+    }
+    return anchor;
   }
 }
