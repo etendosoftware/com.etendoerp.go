@@ -98,8 +98,8 @@ import com.etendoerp.psd2.bank.integration.utils.PISPaymentDao;
  * {@link PaymentRegistrationService}:
  * <ul>
  *   <li>{@code handleListCreditSources} - nets generatedCredit - usedCredit for accumulated
- *       credit, and lists unpaid negative credit-memo PSDs (abonos) excluding the current
- *       invoice.</li>
+ *       credit, and lists unpaid negative PSDs (abonos) of any negative-total invoice, whatever
+ *       its document type (ETP-4841), excluding the current invoice.</li>
  *   <li>{@code handleListPaymentMethods} - distinct payin/payout methods for accounts in
  *       the invoice's natural org tree.</li>
  *   <li>{@code doRegisterPaymentAdvanced} - draft (not processed), confirm (processed),
@@ -145,7 +145,6 @@ class PaymentRegistrationServiceAdvancedTest {
   private MockedStatic<NeoDefaultsService> neoDefaultsMock;
   private MockedStatic<RequestContext> requestContextMock;
   private MockedStatic<PaymentRemovalUtil> paymentRemovalUtilMock;
-  private MockedStatic<RectificativeSupport> rectSupportMock;
   private MockedConstruction<AdvPaymentMngtDao> daoConstruction;
   private MockedConstruction<DalConnectionProvider> connConstruction;
 
@@ -222,16 +221,6 @@ class PaymentRegistrationServiceAdvancedTest {
 
     paymentRemovalUtilMock = mockStatic(PaymentRemovalUtil.class);
 
-    // ETP-4738: the "saldo a favor" doc-type whitelist defaults to a non-empty, permissive
-    // result so every pre-existing abono-listing/consumption test (written before this doc-type
-    // restriction existed) keeps exercising the same HQL/consume path unchanged. Tests that
-    // specifically exercise the whitelist restriction re-stub this per-test.
-    rectSupportMock = mockStatic(RectificativeSupport.class);
-    rectSupportMock.when(() -> RectificativeSupport.resolveRectificativeDocTypes(anyString(), anyBoolean()))
-        .thenReturn(Collections.singletonList("rect-dt-default"));
-    rectSupportMock.when(() -> RectificativeSupport.isRectificativeDocType(anyString()))
-        .thenReturn(true);
-
     // ── common entity stubs ──────────────────────────────────────────────────
     when(okResult.getType()).thenReturn("Success");
     when(docType.getDocumentCategory()).thenReturn("ARR");
@@ -268,7 +257,6 @@ class PaymentRegistrationServiceAdvancedTest {
   void tearDown() {
     closeQuietly(daoConstruction);
     closeQuietly(connConstruction);
-    closeQuietly(rectSupportMock);
     closeQuietly(paymentRemovalUtilMock);
     closeQuietly(requestContextMock);
     closeQuietly(neoDefaultsMock);
@@ -543,18 +531,23 @@ class PaymentRegistrationServiceAdvancedTest {
   }
 
   // ════════════════════════════════════════════════════════════════════════
-  // handleListCreditSources — ETP-4738 rectificative doc-type + negative-total filter
+  // handleListCreditSources — ETP-4841 negative-total-only filter (no doc-type whitelist)
   // ════════════════════════════════════════════════════════════════════════
 
+  /**
+   * ETP-4841: eligibility is decided purely by the SIGN of the invoice total. The abono HQL keeps
+   * the {@code grandTotalAmount < 0} predicate (it must stay INSIDE the query — with
+   * {@code setMaxResults(50)}, filtering in Java afterwards would truncate before the restriction
+   * applied and silently drop eligible sources) and no longer carries any rectificative doc-type
+   * whitelist.
+   */
   @Test
-  @DisplayName("ETP-4738: the abono HQL restricts to a negative invoice total and the "
-      + "rectificative doc-type whitelist, bound as an in(:rectDocTypes) parameter")
+  @DisplayName("ETP-4841: the abono HQL restricts to a negative invoice total ONLY — the "
+      + "rectificative doc-type whitelist is gone")
   @SuppressWarnings("unchecked")
-  void testListCreditSourcesAbonoRestrictedToRectificativeDocTypes() throws Exception {
+  void testListCreditSourcesAbonoRestrictedToNegativeTotalOnly() throws Exception {
     NeoContext context = creditSourcesContext();
     stubInvoiceWithBp();
-    rectSupportMock.when(() -> RectificativeSupport.resolveRectificativeDocTypes(
-        CLIENT_ID, true)).thenReturn(Arrays.asList("dt-1", "dt-2"));
 
     Query<FIN_PaymentScheduleDetail> abonoQuery = mock(Query.class);
     ArgumentCaptor<String> hqlCaptor = ArgumentCaptor.forClass(String.class);
@@ -569,57 +562,83 @@ class PaymentRegistrationServiceAdvancedTest {
 
     assertEquals(200, response.getHttpStatus());
     String hql = hqlCaptor.getValue();
-    assertTrue(hql.contains("grandTotalAmount < 0"));
-    assertTrue(hql.contains("transactionDocument.id in (:rectDocTypes)"));
-    verify(abonoQuery).setParameterList("rectDocTypes", Arrays.asList("dt-1", "dt-2"));
+    // A POSITIVE-total invoice is excluded by this predicate even when it IS a rectificativa.
+    assertTrue(hql.contains("grandTotalAmount < 0"),
+        "the negative-total restriction must stay inside the HQL");
+    assertFalse(hql.contains("rectDocTypes"),
+        "the rectificative doc-type whitelist must be gone from the HQL");
+    assertFalse(hql.contains("transactionDocument"),
+        "the abono query must not filter by document type at all");
   }
 
+  /**
+   * The new capability: a negative-total invoice of an ORDINARY document type ("Factura", not a
+   * Factura Rectificativa) is listed as a funding source. The doc-type whitelist used to drop it.
+   * Nothing may re-introduce a Java-side doc-type filter after the query either.
+   */
   @Test
-  @DisplayName("ETP-4738: no rectificative doc type configured for this client/side -> the "
-      + "selector is empty, and the abono query is never built (an HQL in() would be invalid)")
-  void testListCreditSourcesNoRectificativeDocTypeConfiguredSkipsAbonoQuery() throws Exception {
+  @DisplayName("ETP-4841: a negative-total invoice of an ORDINARY document type is listed as an "
+      + "abono source")
+  void testListCreditSourcesListsNegativeTotalInvoiceOfOrdinaryDocType() throws Exception {
     NeoContext context = creditSourcesContext();
     stubInvoiceWithBp();
-    rectSupportMock.when(() -> RectificativeSupport.resolveRectificativeDocTypes(
-        anyString(), anyBoolean())).thenReturn(Collections.emptyList());
+
+    FIN_PaymentScheduleDetail ordinaryAbono = abonoPsd("abono-ordinary", new BigDecimal("-45.00"),
+        "FAC/077", date("2026-06-11"), "Factura");
+    stubAbonoQuery(Collections.singletonList(ordinaryAbono));
     stubCreditQuery(Collections.emptyList());
 
     NeoResponse response = PaymentCreditSourcesService.handleListCreditSources(context, true);
 
     assertEquals(200, response.getHttpStatus());
-    assertEquals(0, response.getBody().getInt("totalCount"));
-    verify(session, never()).createQuery(anyString(), eq(FIN_PaymentScheduleDetail.class));
+    JSONArray items = response.getBody().getJSONArray(ITEMS);
+    assertEquals(1, items.length(), "an ordinary-doc-type credit must not be filtered out");
+    JSONObject item = items.getJSONObject(0);
+    assertEquals(KIND_ABONO, item.getString("kind"));
+    assertEquals("abono-ordinary", item.getString("psdId"));
+    assertEquals("Factura", item.getString("note"));
+    assertEquals(0, new BigDecimal("45.00").compareTo(new BigDecimal(item.getString("avail"))));
   }
 
   @Test
-  @DisplayName("ETP-4738: the payment side (isReceipt=false) resolves purchase-side "
-      + "rectificative doc types")
-  void testListCreditSourcesForPaymentSideResolvesPurchaseSideDocTypes() throws Exception {
+  @DisplayName("The payment side (isReceipt=false) binds receipt=false on the abono query, so AP "
+      + "only ever sees purchase-side sources")
+  @SuppressWarnings("unchecked")
+  void testListCreditSourcesForPaymentSideBindsReceiptFalse() throws Exception {
     NeoContext context = creditSourcesContext();
     stubInvoiceWithBp();
-    stubAbonoQuery(Collections.emptyList());
+
+    Query<FIN_PaymentScheduleDetail> abonoQuery = mock(Query.class);
+    when(session.createQuery(anyString(), eq(FIN_PaymentScheduleDetail.class)))
+        .thenReturn(abonoQuery);
+    when(abonoQuery.setParameter(anyString(), any())).thenReturn(abonoQuery);
+    when(abonoQuery.setMaxResults(anyInt())).thenReturn(abonoQuery);
+    when(abonoQuery.list()).thenReturn(Collections.emptyList());
 
     NeoResponse response = PaymentCreditSourcesService.handleListCreditSources(context, false);
 
     assertEquals(200, response.getHttpStatus());
-    rectSupportMock.verify(() -> RectificativeSupport.resolveRectificativeDocTypes(
-        CLIENT_ID, false));
+    verify(abonoQuery).setParameter("receipt", Boolean.FALSE);
   }
 
+  /**
+   * {@code abonosUsedByDraft} is deliberately unrestricted: it answers "what is already physically
+   * linked to this draft", not "what may be linked". A source the current rule would reject — here
+   * an invoice whose total is POSITIVE — must still re-list, or the frontend
+   * ({@code usePaymentBalance.seedLines}) would silently drop funding the draft already relies on,
+   * leaving the user unable to see or un-check it.
+   */
   @Test
-  @DisplayName("ETP-4738: a draft's already-linked abono re-lists even when no rectificative doc "
-      + "type is configured — abonosUsedByDraft is deliberately NOT restricted by the whitelist")
-  void testListCreditSourcesEditModeRelistsLinkedAbonoRegardlessOfDocTypeWhitelist()
-      throws Exception {
+  @DisplayName("ETP-4841: a draft's already-linked abono re-lists even when its invoice total is "
+      + "no longer eligible — abonosUsedByDraft is deliberately unfiltered")
+  void testListCreditSourcesEditModeRelistsLinkedAbonoRegardlessOfEligibility() throws Exception {
     String editPaymentId = "draft-being-edited";
     NeoContext context = creditSourcesContextWithEditPaymentId(editPaymentId);
     stubInvoiceWithBp();
-    rectSupportMock.when(() -> RectificativeSupport.resolveRectificativeDocTypes(
-        anyString(), anyBoolean())).thenReturn(Collections.emptyList());
     stubCreditQuery(Collections.emptyList());
 
-    FIN_PaymentScheduleDetail linkedAbono = abonoPsd("abono-linked", new BigDecimal("-20.00"),
-        "NC/020", date("2026-05-10"), "Credit Memo");
+    FIN_PaymentScheduleDetail linkedAbono = abonoPsdWithInvoiceTotal("abono-linked",
+        new BigDecimal("-20.00"), "NC/020", date("2026-05-10"), new BigDecimal("120.00"));
     stubEditAbonoQueries(Collections.emptyList(), Collections.singletonList(linkedAbono));
 
     NeoResponse response = PaymentCreditSourcesService.handleListCreditSources(context, true);
@@ -1001,7 +1020,7 @@ class PaymentRegistrationServiceAdvancedTest {
   }
 
   @Test
-  @DisplayName("Consuming an abono (Factura Rectificativa, ETP-4738) links it as a negative "
+  @DisplayName("Consuming an abono (any negative-total invoice, ETP-4841) links it as a negative "
       + "payment detail")
   void testAdvancedConsumesAbonoAsNegativeDetail() throws Exception {
     stubAdvancedBasics();
@@ -1009,13 +1028,10 @@ class PaymentRegistrationServiceAdvancedTest {
 
     FIN_PaymentScheduleDetail abonoPsd = mock(FIN_PaymentScheduleDetail.class);
     when(dal.get(FIN_PaymentScheduleDetail.class, ABONO_PSD_ID)).thenReturn(abonoPsd);
-    // ETP-4738 eligibility guard: the abono's invoice must be an eligible Factura Rectificativa
-    // (negative total; isRectificativeDocType defaults to true in setUp()).
+    // ETP-4841 eligibility guard: the abono's invoice only has to carry a NEGATIVE total — its
+    // document type is deliberately never consulted, so none is stubbed here.
     FIN_PaymentSchedule abonoSchedule = mock(FIN_PaymentSchedule.class);
     Invoice abonoInvoice = mock(Invoice.class);
-    DocumentType abonoDocType = mock(DocumentType.class);
-    when(abonoDocType.getId()).thenReturn("rect-dt-default");
-    when(abonoInvoice.getTransactionDocument()).thenReturn(abonoDocType);
     when(abonoInvoice.getGrandTotalAmount()).thenReturn(new BigDecimal("-30.00"));
     when(abonoSchedule.getInvoice()).thenReturn(abonoInvoice);
     when(abonoPsd.getInvoicePaymentSchedule()).thenReturn(abonoSchedule);
@@ -1574,11 +1590,6 @@ class PaymentRegistrationServiceAdvancedTest {
     when(dal.get(Invoice.class, INVOICE_ID)).thenReturn(invoice);
     when(invoice.getBusinessPartner()).thenReturn(bp);
     when(bp.getId()).thenReturn("bp-1");
-    // ETP-4738: pendingAbonos resolves the rectificative doc-type whitelist scoped to the
-    // invoice's own client.
-    Client client = mock(Client.class);
-    when(client.getId()).thenReturn(CLIENT_ID);
-    when(invoice.getClient()).thenReturn(client);
   }
 
   private void stubInvoiceOrgTree() {
@@ -1690,6 +1701,29 @@ class PaymentRegistrationServiceAdvancedTest {
     when(ncInvoice.getDocumentNo()).thenReturn(docNo);
     when(ncInvoice.getInvoiceDate()).thenReturn(invoiceDate);
     when(ncInvoice.getDocumentType()).thenReturn(ncType);
+    when(ps.getInvoice()).thenReturn(ncInvoice);
+    when(psd.getInvoicePaymentSchedule()).thenReturn(ps);
+    return psd;
+  }
+
+  /**
+   * Same as {@link #abonoPsd}, but the originating invoice also reports a {@code grandTotalAmount}
+   * — used to prove that the listing code never consults the total sign in Java (ETP-4841 keeps
+   * that restriction inside the HQL, and {@code abonosUsedByDraft} has no restriction at all).
+   */
+  private FIN_PaymentScheduleDetail abonoPsdWithInvoiceTotal(String id, BigDecimal amount,
+      String docNo, Date invoiceDate, BigDecimal invoiceTotal) {
+    FIN_PaymentScheduleDetail psd = mock(FIN_PaymentScheduleDetail.class);
+    when(psd.getId()).thenReturn(id);
+    when(psd.getAmount()).thenReturn(amount);
+    FIN_PaymentSchedule ps = mock(FIN_PaymentSchedule.class);
+    Invoice ncInvoice = mock(Invoice.class);
+    DocumentType ncType = mock(DocumentType.class);
+    when(ncType.getName()).thenReturn("Credit Memo");
+    when(ncInvoice.getDocumentNo()).thenReturn(docNo);
+    when(ncInvoice.getInvoiceDate()).thenReturn(invoiceDate);
+    when(ncInvoice.getDocumentType()).thenReturn(ncType);
+    when(ncInvoice.getGrandTotalAmount()).thenReturn(invoiceTotal);
     when(ps.getInvoice()).thenReturn(ncInvoice);
     when(psd.getInvoicePaymentSchedule()).thenReturn(ps);
     return psd;
