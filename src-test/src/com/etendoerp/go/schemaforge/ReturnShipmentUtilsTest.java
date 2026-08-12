@@ -800,4 +800,183 @@ public class ReturnShipmentUtilsTest {
       verify(line).setStorageBin(headerDefaultBin);
     }
   }
+
+  // ───────────────────────────────────────────────────────────────────────────────────────
+  // ETP-4863 QA round — additional edge cases not exercised by DEV/REVIEW
+  // ───────────────────────────────────────────────────────────────────────────────────────
+
+  /**
+   * QA edge case: a line's own bin is wrong (another warehouse), but its {@code
+   * canceledInoutLine} happens to carry a bin that IS in the header warehouse — just not the
+   * warehouse's flagged-default one. {@code resolveCandidateBin} only falls back to the source
+   * line when the line's OWN bin is {@code null}; when it is non-null (even if wrong), the
+   * source line's bin is never even read. The line is therefore corrected to the warehouse's
+   * anchor bin, NOT to the source line's (coincidentally valid) bin — the source's
+   * {@code getStorageBin()} must not be consulted at all in this branch.
+   *
+   * <p>This is a real behavior fork from the pre-fix code, which prioritized {@code
+   * canceledInoutLine}'s bin unconditionally: the old code would have read the source's bin
+   * first, found it valid for the header warehouse, and kept that SPECIFIC locator — passing
+   * this same assertion by coincidence. This test pins the NEW precedence at the query level
+   * (own bin wins outright when present, correct or not) rather than only at the value level.
+   */
+  @Test
+  public void assignBinsToLines_ownBinWrongButSourceBinAlreadyCorrect_neverConsultsSourceBin() {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      Warehouse headerWarehouse = mockWarehouse(WH_PRINCIPAL);
+      Locator ownWrongBin = mockLocator("loc-secondary-A", mockWarehouse(WH_SECONDARY));
+      // Source's bin IS in the header warehouse, but is a specific bin, not the flagged default.
+      Locator sourceCorrectButNonDefaultBin = mockLocator("loc-principal-specific", headerWarehouse);
+      Locator headerDefaultBin = mockLocator(LOC_PRINCIPAL_DEFAULT, headerWarehouse);
+
+      ShipmentInOutLine sourceLine = mock(ShipmentInOutLine.class);
+      when(sourceLine.getStorageBin()).thenReturn(sourceCorrectButNonDefaultBin);
+
+      ShipmentInOutLine line = mock(ShipmentInOutLine.class);
+      when(line.getStorageBin()).thenReturn(ownWrongBin);
+      when(line.getCanceledInoutLine()).thenReturn(sourceLine);
+
+      ShipmentInOut doc = mock(ShipmentInOut.class);
+      when(doc.getWarehouse()).thenReturn(headerWarehouse);
+      when(doc.getMaterialMgmtShipmentInOutLineList()).thenReturn(Collections.singletonList(line));
+
+      stubDefaultLocatorLookup(dal, headerDefaultBin);
+
+      ReturnShipmentUtils.assignBinsToLines(doc);
+
+      // Own bin is present (even though wrong) → candidate resolution never reads the source.
+      verify(sourceLine, never()).getStorageBin();
+      verify(line).setStorageBin(headerDefaultBin);
+      verify(line, never()).setStorageBin(sourceCorrectButNonDefaultBin);
+    }
+  }
+
+  /**
+   * QA edge case: reentrancy/idempotency. Calling {@code assignBinsToLines} a second time on a
+   * document whose line was ALREADY corrected on the first pass (simulating a retry of the
+   * document-completion flow) must be a no-op — no second {@code setStorageBin} / {@code save}
+   * call — because the line's own bin now already belongs to the header warehouse.
+   */
+  @Test
+  public void assignBinsToLines_calledTwice_secondPassIsNoOp() {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      Warehouse headerWarehouse = mockWarehouse(WH_PRINCIPAL);
+      Locator binInSecondary = mockLocator("loc-secondary-A", mockWarehouse(WH_SECONDARY));
+      Locator headerDefaultBin = mockLocator(LOC_PRINCIPAL_DEFAULT, headerWarehouse);
+
+      ShipmentInOutLine line = mock(ShipmentInOutLine.class);
+      when(line.getStorageBin()).thenReturn(binInSecondary);
+      when(line.getCanceledInoutLine()).thenReturn(null);
+
+      ShipmentInOut doc = mock(ShipmentInOut.class);
+      when(doc.getWarehouse()).thenReturn(headerWarehouse);
+      when(doc.getMaterialMgmtShipmentInOutLineList()).thenReturn(Collections.singletonList(line));
+
+      stubDefaultLocatorLookup(dal, headerDefaultBin);
+
+      // First pass: line gets corrected.
+      ReturnShipmentUtils.assignBinsToLines(doc);
+      verify(line).setStorageBin(headerDefaultBin);
+      verify(dal, Mockito.times(1)).save(line);
+
+      // Simulate the persisted state: the line now reports the corrected bin.
+      when(line.getStorageBin()).thenReturn(headerDefaultBin);
+
+      // Second pass (e.g. a retried "complete document" action) must not touch the line again.
+      ReturnShipmentUtils.assignBinsToLines(doc);
+      verify(line, Mockito.times(1)).setStorageBin(headerDefaultBin);
+      verify(dal, Mockito.times(1)).save(line);
+    }
+  }
+
+  /**
+   * QA edge case: a document with lines imported from MULTIPLE different source documents,
+   * each in a DIFFERENT (and different-from-each-other) foreign warehouse, all sharing the same
+   * return header. The per-document warehouse-fallback memoization must still resolve to the
+   * SAME header-warehouse anchor bin for every line and must still issue the lookup exactly
+   * once, regardless of how many distinct source warehouses are involved.
+   */
+  @Test
+  public void assignBinsToLines_linesFromDifferentSourceWarehouses_allAnchorToSameHeaderBinWithOneLookup() {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      Warehouse headerWarehouse = mockWarehouse(WH_PRINCIPAL);
+      Warehouse thirdWarehouse = mockWarehouse("wh-tertiary");
+      Locator binInSecondary = mockLocator("loc-secondary-A", mockWarehouse(WH_SECONDARY));
+      Locator binInTertiary = mockLocator("loc-tertiary-A", thirdWarehouse);
+      Locator headerDefaultBin = mockLocator(LOC_PRINCIPAL_DEFAULT, headerWarehouse);
+
+      // lineA imported from a source document in the SECONDARY warehouse.
+      ShipmentInOutLine origLineA = mock(ShipmentInOutLine.class);
+      when(origLineA.getStorageBin()).thenReturn(binInSecondary);
+      ShipmentInOutLine lineA = mock(ShipmentInOutLine.class);
+      when(lineA.getStorageBin()).thenReturn(null);
+      when(lineA.getCanceledInoutLine()).thenReturn(origLineA);
+
+      // lineB imported from a DIFFERENT source document, in the TERTIARY warehouse.
+      ShipmentInOutLine origLineB = mock(ShipmentInOutLine.class);
+      when(origLineB.getStorageBin()).thenReturn(binInTertiary);
+      ShipmentInOutLine lineB = mock(ShipmentInOutLine.class);
+      when(lineB.getStorageBin()).thenReturn(null);
+      when(lineB.getCanceledInoutLine()).thenReturn(origLineB);
+
+      ShipmentInOut doc = mock(ShipmentInOut.class);
+      when(doc.getWarehouse()).thenReturn(headerWarehouse);
+      when(doc.getMaterialMgmtShipmentInOutLineList())
+          .thenReturn(Arrays.asList(lineA, lineB));
+
+      stubDefaultLocatorLookup(dal, headerDefaultBin);
+
+      ReturnShipmentUtils.assignBinsToLines(doc);
+
+      verify(lineA).setStorageBin(headerDefaultBin);
+      verify(lineB).setStorageBin(headerDefaultBin);
+      verify(lineA, never()).setStorageBin(binInSecondary);
+      verify(lineB, never()).setStorageBin(binInTertiary);
+      // Two different foreign warehouses among the source lines, still exactly one lookup.
+      verify(dal, Mockito.times(1)).createCriteria(Locator.class);
+    }
+  }
+
+  /**
+   * QA edge case: the return header itself has NO warehouse at all (e.g. a legacy/malformed
+   * document). {@code assignBinsToLines}' own guard ({@code headerWarehouse == null}) takes the
+   * "keep candidate" branch directly — a line with no own bin falls back to whatever the source
+   * document's bin was, completely unanchored, because there is nothing to anchor against. This
+   * pins the deliberate pass-through (matches {@code NeoHandlerUtils.anchorLocatorToWarehouse}'s
+   * own null-warehouse guard) rather than an accidental null-pointer-safe default.
+   */
+  @Test
+  public void assignBinsToLines_headerHasNoWarehouseAtAll_fallsBackToSourceBinUnanchored() {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      Locator sourceBin = mockLocator("loc-secondary-A", mockWarehouse(WH_SECONDARY));
+      ShipmentInOutLine origLine = mock(ShipmentInOutLine.class);
+      when(origLine.getStorageBin()).thenReturn(sourceBin);
+
+      ShipmentInOutLine line = mock(ShipmentInOutLine.class);
+      when(line.getStorageBin()).thenReturn(null);
+      when(line.getCanceledInoutLine()).thenReturn(origLine);
+
+      ShipmentInOut doc = mock(ShipmentInOut.class);
+      when(doc.getWarehouse()).thenReturn(null);
+      when(doc.getMaterialMgmtShipmentInOutLineList()).thenReturn(Collections.singletonList(line));
+
+      ReturnShipmentUtils.assignBinsToLines(doc);
+
+      verify(line).setStorageBin(sourceBin);
+      // No warehouse to resolve an anchor bin for → no M_Locator lookup at all.
+      verify(dal, never()).createCriteria(Locator.class);
+    }
+  }
 }

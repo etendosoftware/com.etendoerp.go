@@ -172,4 +172,37 @@ public class InOutLineFromOrderFactoryTest {
       verify(line).setStorageBin(null);
     }
   }
+
+  /**
+   * QA edge case: the parent shipment/receipt has NO warehouse set at all (e.g. malformed
+   * document). There is nothing to anchor to, so the order-resolved locator must be kept
+   * unmodified and no {@code M_Locator} lookup issued — same null-warehouse guard verified at
+   * {@code NeoHandlerUtils.anchorLocatorToWarehouse} level, pinned here at the call site too.
+   */
+  @Test
+  public void createAndLinkLine_parentWarehouseIsNull_keepsOrderLocatorUnanchored() {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+        MockedStatic<OBProvider> providerMock = Mockito.mockStatic(OBProvider.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      stubInvoiceLineLinker(dal);
+
+      Locator orderLocator = LocatorTestSupport.mockLocator("loc-secondary-A",
+          LocatorTestSupport.mockWarehouse(WH_SECONDARY));
+
+      ShipmentInOut parentInOut = mock(ShipmentInOut.class);
+      when(parentInOut.getWarehouse()).thenReturn(null);
+
+      ShipmentInOutLine line = mock(ShipmentInOutLine.class);
+      OBProvider provider = mock(OBProvider.class);
+      providerMock.when(OBProvider::getInstance).thenReturn(provider);
+      when(provider.get(ShipmentInOutLine.class)).thenReturn(line);
+
+      InOutLineFromOrderFactory.createAndLinkLine(
+          parentInOut, mockOrderLine(), orderLocator, 10L, BigDecimal.ONE);
+
+      verify(line).setStorageBin(orderLocator);
+      verify(dal, never()).createCriteria(Locator.class);
+    }
+  }
 }
