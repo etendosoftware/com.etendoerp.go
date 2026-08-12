@@ -18,6 +18,7 @@
 package com.etendoerp.go.schemaforge;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -1521,6 +1522,8 @@ class PaymentRegistrationServiceTest {
     when(account.getCurrency()).thenReturn(currency);
     when(currency.getISOCode()).thenReturn("EUR");
     when(method.getName()).thenReturn("Wire Transfer");
+    // ETP-4841: a foreign payment carries the rate that was typed when it was registered.
+    when(payment.getFinancialTransactionConvertRate()).thenReturn(new BigDecimal("0.89"));
 
     Query<FIN_Payment> hqlQuery = mock(Query.class);
     when(session.createQuery(anyString(), eq(FIN_Payment.class))).thenReturn(hqlQuery);
@@ -1537,6 +1540,87 @@ class PaymentRegistrationServiceTest {
     assertEquals("Bank EUR", payItem.getString("accountName"));
     assertEquals("EUR", payItem.getString("accountCurrency"));
     assertEquals("Wire Transfer", payItem.getString("paymentMethod"));
+    assertEquals(0, new BigDecimal("0.89")
+            .compareTo(new BigDecimal(payItem.getString("conversionRate"))),
+        "the row must expose the payment's stored conversion rate (ETP-4841)");
+  }
+
+  /**
+   * ETP-4841: every payment row exposes {@code conversionRate}, so the edit modal reseeds its
+   * (editable) rate field from the payment itself instead of the system spot rate — which is what
+   * made a rate typed on a draft disappear when the draft was reopened. A single-currency payment
+   * carries ONE, where the modal hides the field.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  void testHandleListPaymentsExposesConversionRateOneForSingleCurrencyPayment() throws Exception {
+    NeoContext context = NeoContext.builder()
+        .recordId("inv-1")
+        .httpMethod("GET")
+        .endpointType(NeoEndpointType.CRUD)
+        .build();
+
+    FIN_Payment payment = mock(FIN_Payment.class);
+    when(payment.getId()).thenReturn("pay-5");
+    when(payment.getDocumentNo()).thenReturn("PAY/005");
+    when(payment.getAmount()).thenReturn(new BigDecimal("100.00"));
+    when(payment.getPaymentDate()).thenReturn(null);
+    when(payment.getStatus()).thenReturn("RPR");
+    when(payment.isReceipt()).thenReturn(true);
+    when(payment.getAccount()).thenReturn(null);
+    when(payment.getPaymentMethod()).thenReturn(null);
+    when(payment.getFinancialTransactionConvertRate()).thenReturn(BigDecimal.ONE);
+
+    Query<FIN_Payment> hqlQuery = mock(Query.class);
+    when(session.createQuery(anyString(), eq(FIN_Payment.class))).thenReturn(hqlQuery);
+    when(hqlQuery.setParameter(anyString(), any())).thenReturn(hqlQuery);
+    when(hqlQuery.setMaxResults(50)).thenReturn(hqlQuery);
+    when(hqlQuery.list()).thenReturn(Collections.singletonList(payment));
+
+    NeoResponse response = PaymentRegistrationService.handleListPayments(context);
+
+    assertEquals(200, response.getHttpStatus());
+    JSONObject payItem = response.getBody().getJSONObject("response")
+        .getJSONArray("data").getJSONObject(0);
+    assertEquals(0, BigDecimal.ONE.compareTo(new BigDecimal(payItem.getString("conversionRate"))));
+  }
+
+  /**
+   * A legacy payment with no stored financial-transaction rate must not break the listing: the
+   * {@code conversionRate} key is simply absent (JSON nulls are dropped), never a 500.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  void testHandleListPaymentsNullConversionRateOmitsTheKey() throws Exception {
+    NeoContext context = NeoContext.builder()
+        .recordId("inv-1")
+        .httpMethod("GET")
+        .endpointType(NeoEndpointType.CRUD)
+        .build();
+
+    FIN_Payment payment = mock(FIN_Payment.class);
+    when(payment.getId()).thenReturn("pay-6");
+    when(payment.getDocumentNo()).thenReturn("PAY/006");
+    when(payment.getAmount()).thenReturn(new BigDecimal("10.00"));
+    when(payment.getPaymentDate()).thenReturn(null);
+    when(payment.getStatus()).thenReturn("PPM");
+    when(payment.isReceipt()).thenReturn(true);
+    when(payment.getAccount()).thenReturn(null);
+    when(payment.getPaymentMethod()).thenReturn(null);
+    when(payment.getFinancialTransactionConvertRate()).thenReturn(null);
+
+    Query<FIN_Payment> hqlQuery = mock(Query.class);
+    when(session.createQuery(anyString(), eq(FIN_Payment.class))).thenReturn(hqlQuery);
+    when(hqlQuery.setParameter(anyString(), any())).thenReturn(hqlQuery);
+    when(hqlQuery.setMaxResults(50)).thenReturn(hqlQuery);
+    when(hqlQuery.list()).thenReturn(Collections.singletonList(payment));
+
+    NeoResponse response = PaymentRegistrationService.handleListPayments(context);
+
+    assertEquals(200, response.getHttpStatus());
+    JSONObject payItem = response.getBody().getJSONObject("response")
+        .getJSONArray("data").getJSONObject(0);
+    assertFalse(payItem.has("conversionRate"));
   }
 
   /**
