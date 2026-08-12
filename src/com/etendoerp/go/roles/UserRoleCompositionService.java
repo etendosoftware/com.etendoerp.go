@@ -104,8 +104,8 @@ public class UserRoleCompositionService {
     public final int addedCount;
     public final int removedCount;
 
-    AssignmentResult(String userId, String personalRoleId, List<String> appliedTemplateRoleIds,
-        int addedCount, int removedCount) {
+    public AssignmentResult(String userId, String personalRoleId,
+        List<String> appliedTemplateRoleIds, int addedCount, int removedCount) {
       this.userId = userId;
       this.personalRoleId = personalRoleId;
       this.appliedTemplateRoleIds = appliedTemplateRoleIds;
