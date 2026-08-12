@@ -293,19 +293,34 @@ public class UserRoleCompositionServiceIntegrationTest extends WeldBaseTest {
   }
 
   /**
-   * QA (Sentinel, ETP-4852): what happens when a template a user already inherits from is
-   * deactivated LATER, and a subsequent composition call still asks for that same (now
-   * inactive) id — e.g. a UI that re-submits the "currently applied" set without the admin
-   * having touched that particular entry. {@code resolveAndValidateTemplates} rejects it (same
-   * as any other inactive template — {@code UserRoleCompositionServiceTest#
-   * rejectsInactiveTemplateRole}), but the real-DB question this answers is whether that
-   * rejection is genuinely fail-fast: validation runs for ALL requested ids BEFORE {@code
-   * OBContext.setAdminMode}/any write, so a still-valid PRE-EXISTING inheritance (and the
-   * AD_Window_Access core already propagated from it) must be left completely untouched by the
-   * failed call, not partially retracted.
+   * QA (Sentinel, ETP-4852) — <b>note on a scenario deliberately NOT simulated here:</b> "a
+   * template a user already inherits from gets deactivated later, then a recompose call still
+   * requests that now-inactive id" is UNREACHABLE through any normal write path, application or
+   * SQL. Confirmed live: attempting to set {@code AD_Role.IsActive='N'} (or {@code
+   * IsTemplate='N'}) on a role that any {@code AD_Role_Inheritance.InheritFrom} still points at
+   * is rejected at the DATABASE level by core's own {@code AD_ROLE_CHECK_TRG} trigger
+   * ({@code src-db/database/model/triggers/AD_ROLE_CHECK_TRG.xml}, {@code @CannotUncheckTemplateRole@}) —
+   * a {@code BEFORE UPDATE} trigger on {@code AD_ROLE} itself, so it fires regardless of whether
+   * the write goes through {@code OBDal} or raw SQL; the only way around it is the explicit
+   * {@code AD_isTriggerEnabled()}/trigger-disable session bypass core's own data-import tooling
+   * uses. An earlier version of this test tried to construct that state via {@code
+   * role.setActive(false)} through {@code OBDal} and got exactly this exception instead of
+   * reaching the intended assertions:
+   * {@code PSQLException: ERROR: @CannotUncheckTemplateRole@ … ad_role_check_trg() line 38}.
+   *
+   * <p><b>Why not simulate it via a trigger-disable bypass instead:</b> the only realistic way
+   * this state could ever exist in production is a future data-fix or admin correction
+   * deliberately reaching for that same bypass — not a path this service itself needs to defend
+   * against today. The property this test WAS trying to prove — a rejected recompose call must
+   * not touch state left by an earlier, unrelated successful call — is instead proven below
+   * (RE the {@code AD_Role_Inheritance} rows) with a genuinely reachable trigger: rejecting one
+   * bad id among an otherwise-valid request. <b>Relevant for ETP-4877's bulk retrofit:</b> this
+   * means template-role lifecycle code does NOT need its own defense against "deactivate a
+   * still-depended-on template" — the DB already refuses that write outright, for every caller.
+   * </p>
    */
   @Test
-  public void testRecomposingWithAStillRequestedButNowInactiveTemplateIsRejectedWithoutMutatingExistingAccess()
+  public void testRecomposingWithOneInvalidTemplateIdRejectsWithoutMutatingTheValidExistingInheritance()
       throws Exception {
     setTestUserContext();
     OBContext.setAdminMode(true);
@@ -323,36 +338,22 @@ public class UserRoleCompositionServiceIntegrationTest extends WeldBaseTest {
       UserRoleCompositionService.AssignmentResult first = service.assignTemplateRoles(
           TEST_USER_ID, Collections.singletonList(template.getId()));
       Role personalRole = OBDal.getInstance().get(Role.class, first.personalRoleId);
-      assertNotNull("Sanity check: the template's access must have propagated before "
-          + "deactivation", findWindowAccess(personalRole, anyWindow));
+      assertNotNull("Sanity check: the first, valid-only call must have propagated access",
+          findWindowAccess(personalRole, anyWindow));
 
-      deactivateTemplate(template);
-
+      // A later call keeps the SAME valid template but also asks for a bogus second one — e.g.
+      // an admin adding one more template and mistyping its id. The whole request must be
+      // rejected (resolveAndValidateTemplates validates the FULL list before any write), and the
+      // still-valid, already-applied template's inheritance/access must be left exactly as-is.
       OBException e = assertThrows(OBException.class, () -> service.assignTemplateRoles(
-          TEST_USER_ID, Collections.singletonList(template.getId())));
+          TEST_USER_ID, Arrays.asList(template.getId(), "does-not-exist-role-id")));
       assertTrue(e.getMessage().contains("Template role not found or inactive"));
 
       OBDal.getInstance().refresh(personalRole);
-      assertEquals("A rejected recompose call must not retract the AD_Role_Inheritance row "
-          + "that predates the template's deactivation", 1, findInheritances(personalRole).size());
-      assertNotNull("A rejected recompose call must not retract access propagated BEFORE the "
-          + "template was deactivated", findWindowAccess(personalRole, anyWindow));
-    } finally {
-      OBContext.restorePreviousMode();
-    }
-  }
-
-  /**
-   * Deactivates an already-persisted system-level ({@code AD_Client_ID = '0'}) template role —
-   * same fixture-only admin-mode-without-client-check rationale as {@link
-   * #createSystemTemplateRole()}, since this mutates a client {@code '0'} row.
-   */
-  private void deactivateTemplate(Role role) {
-    OBContext.setAdminMode();
-    try {
-      role.setActive(false);
-      OBDal.getInstance().save(role);
-      OBDal.getInstance().flush();
+      assertEquals("A rejected recompose call must not retract the AD_Role_Inheritance row from "
+          + "an earlier, unrelated successful call", 1, findInheritances(personalRole).size());
+      assertNotNull("A rejected recompose call must not retract access propagated by an earlier, "
+          + "unrelated successful call", findWindowAccess(personalRole, anyWindow));
     } finally {
       OBContext.restorePreviousMode();
     }

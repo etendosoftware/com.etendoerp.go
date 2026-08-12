@@ -92,6 +92,20 @@ import com.etendoerp.go.schemaforge.util.UserRoleSyncSupport;
  * enforce) — for plain unit tests and any other caller with no per-request identity to check
  * against; real webhook callers MUST use the 3-arg overload with their own resolved role, as
  * {@code SFAssignUserRoles} does.</p>
+ *
+ * <p><b>Template-role lifecycle — deactivation while depended-upon is a DB-level non-issue, not
+ * an application-level one</b> (QA finding, ETP-4852, confirmed live against Postgres): core's own
+ * {@code AD_ROLE_CHECK_TRG} trigger (a {@code BEFORE UPDATE} on {@code AD_ROLE} — see {@code
+ * src-db/database/model/triggers/AD_ROLE_CHECK_TRG.xml}) already refuses to set {@code
+ * IsActive='N'} (or unset {@code IsTemplate}) on any role that an {@code AD_Role_Inheritance} row
+ * still points {@code InheritFrom} — for EVERY writer, {@code OBDal} or raw SQL alike, unless
+ * triggers are explicitly disabled via core's own {@code AD_isTriggerEnabled()} bypass (the
+ * mechanism data-import/migration tooling uses). So "a personal role keeps inheriting from a
+ * template that went inactive behind its back" cannot occur through any normal write path — this
+ * class deliberately has no defensive code for it, and {@code UserRoleCompositionServiceIntegrationTest}
+ * documents (rather than simulates) this instead of faking the state past the trigger. <b>Relevant
+ * for ETP-4877's bulk retrofit:</b> template deactivation-while-depended-upon is not something that
+ * retrofit's own code needs to guard against either — the DB already refuses it outright.</p>
  */
 public class UserRoleCompositionService {
 
