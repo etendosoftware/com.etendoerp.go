@@ -18,20 +18,24 @@ package com.etendoerp.go.roles;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 
 import org.hibernate.criterion.Restrictions;
 import org.junit.After;
 import org.junit.Test;
+import org.openbravo.base.exception.OBException;
 import org.openbravo.base.provider.OBProvider;
 import org.openbravo.base.weld.test.WeldBaseTest;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.access.Role;
+import org.openbravo.model.ad.access.RoleInheritance;
 import org.openbravo.model.ad.access.User;
 import org.openbravo.model.ad.access.UserRoles;
 import org.openbravo.model.ad.access.WindowAccess;
@@ -204,6 +208,162 @@ public class UserRoleCompositionServiceIntegrationTest extends WeldBaseTest {
     } finally {
       OBContext.restorePreviousMode();
     }
+  }
+
+  /**
+   * QA (Sentinel, ETP-4852): an empty {@code templateRoleIds} list on a user's FIRST-EVER
+   * composition call (no personal role exists yet) is a distinct edge case from "revoke
+   * everything on a SECOND call" (already covered by {@link
+   * #testRemovingATemplateRetractsItsPropagatedWindowAccess()}) — there is nothing yet to
+   * reconcile away, only a personal role to mint. Confirms the service still creates the
+   * personal role and syncs {@code AD_User_Roles}/{@code Default_Ad_Role_ID} to it, rather than
+   * short-circuiting on "no templates requested" and leaving the user role-less.
+   */
+  @Test
+  public void testEmptyTemplateListOnFirstCompositionStillCreatesPersonalRole() throws Exception {
+    setTestUserContext();
+    OBContext.setAdminMode(true);
+    try {
+      User user = OBDal.getInstance().get(User.class, TEST_USER_ID);
+      assertNotNull(user);
+
+      UserRoleCompositionService.AssignmentResult result = new UserRoleCompositionService()
+          .assignTemplateRoles(TEST_USER_ID, Collections.emptyList());
+
+      assertEquals("Nothing to reconcile on a first-ever call with no templates requested", 0,
+          result.addedCount);
+      assertEquals(0, result.removedCount);
+      assertNotNull("A personal role must still be created even with zero templates requested",
+          result.personalRoleId);
+
+      Role personalRole = OBDal.getInstance().get(Role.class, result.personalRoleId);
+      assertNotNull(personalRole);
+      assertTrue("A freshly created personal role must start with zero AD_Role_Inheritance rows",
+          findInheritances(personalRole).isEmpty());
+
+      OBDal.getInstance().refresh(user);
+      assertEquals("Default_Ad_Role_ID must be synced to the new personal role even though it "
+          + "inherits from nothing", personalRole.getId(), user.getDefaultRole().getId());
+
+      OBCriteria<UserRoles> userRolesCriteria = OBDal.getInstance().createCriteria(UserRoles.class);
+      userRolesCriteria.add(Restrictions.eq(UserRoles.PROPERTY_USERCONTACT, user));
+      List<UserRoles> userRoles = userRolesCriteria.list();
+      assertEquals("AD_User_Roles must have exactly one active row even for a template-less "
+          + "personal role", 1, userRoles.size());
+      assertEquals(personalRole.getId(), userRoles.get(0).getRole().getId());
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  /**
+   * QA (Sentinel, ETP-4852): {@code resolveAndValidateTemplates} dedupes requested ids
+   * BEFORE persistence (proved without a DB by {@code
+   * UserRoleCompositionServiceTest#deduplicatesRequestedTemplateIdsBeforeValidating}, which
+   * stops at the first validation failure) — this is the real-DB counterpart proving the
+   * dedup actually holds all the way through a SUCCESSFUL write: repeating the SAME valid
+   * template id must not attempt N inserts of the same {@code AD_Role_Inheritance} row (which
+   * would otherwise hit {@code ad_role_inheritance_role_un}'s unique constraint) and must not
+   * report an inflated {@code addedCount}.
+   */
+  @Test
+  public void testDuplicateValidTemplateIdsInOneRequestProduceOnlyOneInheritance()
+      throws Exception {
+    setTestUserContext();
+    OBContext.setAdminMode(true);
+    try {
+      Role template = createSystemTemplateRole();
+      OBDal.getInstance().flush();
+
+      UserRoleCompositionService.AssignmentResult result = new UserRoleCompositionService()
+          .assignTemplateRoles(TEST_USER_ID,
+              Arrays.asList(template.getId(), template.getId(), template.getId()));
+
+      assertEquals("Three occurrences of the SAME valid template id must collapse into exactly "
+          + "one AD_Role_Inheritance row, not one per occurrence", 1, result.addedCount);
+      assertEquals(0, result.removedCount);
+      assertEquals("appliedTemplateRoleIds must also reflect the deduplicated set, not echo "
+          + "back three raw entries", 1, result.appliedTemplateRoleIds.size());
+
+      Role personalRole = OBDal.getInstance().get(Role.class, result.personalRoleId);
+      assertEquals(1, findInheritances(personalRole).size());
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  /**
+   * QA (Sentinel, ETP-4852): what happens when a template a user already inherits from is
+   * deactivated LATER, and a subsequent composition call still asks for that same (now
+   * inactive) id — e.g. a UI that re-submits the "currently applied" set without the admin
+   * having touched that particular entry. {@code resolveAndValidateTemplates} rejects it (same
+   * as any other inactive template — {@code UserRoleCompositionServiceTest#
+   * rejectsInactiveTemplateRole}), but the real-DB question this answers is whether that
+   * rejection is genuinely fail-fast: validation runs for ALL requested ids BEFORE {@code
+   * OBContext.setAdminMode}/any write, so a still-valid PRE-EXISTING inheritance (and the
+   * AD_Window_Access core already propagated from it) must be left completely untouched by the
+   * failed call, not partially retracted.
+   */
+  @Test
+  public void testRecomposingWithAStillRequestedButNowInactiveTemplateIsRejectedWithoutMutatingExistingAccess()
+      throws Exception {
+    setTestUserContext();
+    OBContext.setAdminMode(true);
+    try {
+      Window anyWindow = (Window) OBDal.getInstance().createCriteria(Window.class)
+          .setMaxResults(1)
+          .uniqueResult();
+      assertNotNull(anyWindow);
+
+      Role template = createSystemTemplateRole();
+      grantWindowAccess(template, anyWindow);
+      OBDal.getInstance().flush();
+
+      UserRoleCompositionService service = new UserRoleCompositionService();
+      UserRoleCompositionService.AssignmentResult first = service.assignTemplateRoles(
+          TEST_USER_ID, Collections.singletonList(template.getId()));
+      Role personalRole = OBDal.getInstance().get(Role.class, first.personalRoleId);
+      assertNotNull("Sanity check: the template's access must have propagated before "
+          + "deactivation", findWindowAccess(personalRole, anyWindow));
+
+      deactivateTemplate(template);
+
+      OBException e = assertThrows(OBException.class, () -> service.assignTemplateRoles(
+          TEST_USER_ID, Collections.singletonList(template.getId())));
+      assertTrue(e.getMessage().contains("Template role not found or inactive"));
+
+      OBDal.getInstance().refresh(personalRole);
+      assertEquals("A rejected recompose call must not retract the AD_Role_Inheritance row "
+          + "that predates the template's deactivation", 1, findInheritances(personalRole).size());
+      assertNotNull("A rejected recompose call must not retract access propagated BEFORE the "
+          + "template was deactivated", findWindowAccess(personalRole, anyWindow));
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  /**
+   * Deactivates an already-persisted system-level ({@code AD_Client_ID = '0'}) template role —
+   * same fixture-only admin-mode-without-client-check rationale as {@link
+   * #createSystemTemplateRole()}, since this mutates a client {@code '0'} row.
+   */
+  private void deactivateTemplate(Role role) {
+    OBContext.setAdminMode();
+    try {
+      role.setActive(false);
+      OBDal.getInstance().save(role);
+      OBDal.getInstance().flush();
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  @SuppressWarnings("unchecked")
+  private List<RoleInheritance> findInheritances(Role personalRole) {
+    OBCriteria<RoleInheritance> criteria = OBDal.getInstance()
+        .createCriteria(RoleInheritance.class);
+    criteria.add(Restrictions.eq(RoleInheritance.PROPERTY_ROLE, personalRole));
+    return criteria.list();
   }
 
   /**
