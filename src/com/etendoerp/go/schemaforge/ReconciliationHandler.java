@@ -152,6 +152,7 @@ public class ReconciliationHandler implements NeoHandler {
   private static final String ACTION_REACTIVATE = "reactivate";
   private static final String ACTION_REMOVE_OPERATION = "removeOperation";
   private static final String ACTION_REACTIVATE_SELECTED = "reactivateSelected";
+  private static final String ACTION_RECONCILE_DIFFERENCE = "reconcileDifference";
 
   /** One route of the {@code ?action=} dispatcher. */
   @FunctionalInterface
@@ -164,20 +165,28 @@ public class ReconciliationHandler implements NeoHandler {
    * however many actions this handler grows (Sonar java:S3776). Unknown keys fall through to the
    * generic spec handling, exactly as the previous if-chain's final {@code return null} did.
    */
-  private static final Map<String, ActionRoute> ROUTES = Map.of(
-      METHOD_GET + " " + ACTION_PENDING_LINES,
-      ReconciliationHandlerSupport::handlePendingLines,
-      METHOD_GET + " " + ACTION_CANDIDATES, ReconciliationHandlerSupport::handleCandidates,
-      METHOD_GET + " " + ACTION_AUTO_MATCH, ReconciliationHandlerSupport::handleAutoMatch,
-      METHOD_POST + " " + ACTION_RECONCILE_GROUP,
-      ReconciliationHandlerSupport::handleReconcileGroup,
-      METHOD_POST + " " + ACTION_APPLY_SUGGESTIONS,
-      ReconciliationHandlerSupport::handleApplySuggestions,
-      METHOD_POST + " " + ACTION_REACTIVATE, ReconciliationHandlerSupport::handleReactivate,
-      METHOD_POST + " " + ACTION_REMOVE_OPERATION,
-      ReconciliationHandlerSupport::handleRemoveOperation,
-      METHOD_POST + " " + ACTION_REACTIVATE_SELECTED,
-      ReconciliationHandlerSupport::handleReactivateSelected);
+  // Map.ofEntries, not Map.of: the latter caps at 10 key/value pairs and this map is at 9, so the
+  // next action added would fail to compile with a message ("no suitable method found for of") that
+  // does not mention the real cause.
+  private static final Map<String, ActionRoute> ROUTES = Map.ofEntries(
+      Map.entry(METHOD_GET + " " + ACTION_PENDING_LINES,
+          ReconciliationHandlerSupport::handlePendingLines),
+      Map.entry(METHOD_GET + " " + ACTION_CANDIDATES,
+          ReconciliationHandlerSupport::handleCandidates),
+      Map.entry(METHOD_GET + " " + ACTION_AUTO_MATCH,
+          ReconciliationHandlerSupport::handleAutoMatch),
+      Map.entry(METHOD_POST + " " + ACTION_RECONCILE_GROUP,
+          ReconciliationHandlerSupport::handleReconcileGroup),
+      Map.entry(METHOD_POST + " " + ACTION_APPLY_SUGGESTIONS,
+          ReconciliationHandlerSupport::handleApplySuggestions),
+      Map.entry(METHOD_POST + " " + ACTION_REACTIVATE,
+          ReconciliationHandlerSupport::handleReactivate),
+      Map.entry(METHOD_POST + " " + ACTION_REMOVE_OPERATION,
+          ReconciliationHandlerSupport::handleRemoveOperation),
+      Map.entry(METHOD_POST + " " + ACTION_REACTIVATE_SELECTED,
+          ReconciliationHandlerSupport::handleReactivateSelected),
+      Map.entry(METHOD_POST + " " + ACTION_RECONCILE_DIFFERENCE,
+          ReconciliationHandlerSupport::handleReconcileDifference));
 
   /** Match level recorded on the reconciliation lines produced by this handler. */
   private static final String MATCH_LEVEL_MANUAL = "MANUALMATCH";
@@ -195,11 +204,11 @@ public class ReconciliationHandler implements NeoHandler {
    * helpers extracted from this handler can reuse the exact same keys/messages.
    */
   static final String MSG_MISSING_PARAM = "Missing required parameter: ";
-  private static final String MSG_ACCOUNT_NOT_FOUND = "Financial account not found: ";
+  static final String MSG_ACCOUNT_NOT_FOUND = "Financial account not found: ";
   static final String MSG_BODY_REQUIRED = "Request body is required";
-  private static final String MSG_STATEMENT_LINE_NOT_FOUND = "Statement line not found: ";
-  private static final String KEY_FINANCIAL_ACCOUNT_ID = "financialAccountId";
-  private static final String KEY_STATEMENT_LINE_ID = "statementLineId";
+  static final String MSG_STATEMENT_LINE_NOT_FOUND = "Statement line not found: ";
+  static final String KEY_FINANCIAL_ACCOUNT_ID = "financialAccountId";
+  static final String KEY_STATEMENT_LINE_ID = "statementLineId";
   static final String KEY_TRANSACTION_ID = "transactionId";
   static final String KEY_ID = "id";
   private static final String KEY_DATE = "date";
@@ -218,8 +227,10 @@ public class ReconciliationHandler implements NeoHandler {
   static final String STATUS_PENDING = "pending";
   static final String MSG_INTERNAL_SERVER_ERROR = "Internal Server Error";
   /** Reused error message + JSON key — extracted to satisfy Sonar S1192 (each appears 3×). */
-  private static final String MSG_LINE_NOT_IN_ACCOUNT =
+  static final String MSG_LINE_NOT_IN_ACCOUNT =
       "Statement line does not belong to the financial account";
+  /** Shared with {@link ReconciliationDifferenceSupport}, which hoists this very guard. */
+  static final String MSG_LINE_ALREADY_RECONCILED = "Statement line is already reconciled";
   private static final String KEY_UPDATED_BALANCE = "updatedBalance";
 
   /**
@@ -830,8 +841,7 @@ public class ReconciliationHandler implements NeoHandler {
     // Re-confirming such a line is the whole point of that action (compose then re-processes the same
     // draft via reprocessDraftIfAlreadyMatched), so it must not be rejected here.
     if (line.getFinancialAccountTransaction() != null && draftReconciliationOf(line) == null) {
-      return NeoResponse.error(HttpServletResponse.SC_CONFLICT,
-          "Statement line is already reconciled");
+      return NeoResponse.error(HttpServletResponse.SC_CONFLICT, MSG_LINE_ALREADY_RECONCILED);
     }
 
     // Pay each selected unpaid invoice (creates payment + auto-creates its transaction); the new
@@ -1443,7 +1453,11 @@ public class ReconciliationHandler implements NeoHandler {
     trx.setTransactionType(isDeposit ? TRX_TYPE_DEPOSIT : TRX_TYPE_WITHDRAWAL);
     trx.setTransactionDate(line.getTransactionDate());
     trx.setDateAcct(line.getTransactionDate());
-    trx.setDescription(StringUtils.trimToEmpty(line.getDescription()));
+    // An explicit spec description wins, so a difference posting can say WHY the row exists (the
+    // way the cash close does) instead of only echoing the statement line's own text.
+    String specDescription = StringUtils.trimToNull(spec.optString(KEY_DESCRIPTION, null));
+    trx.setDescription(specDescription != null ? specDescription
+        : StringUtils.trimToEmpty(line.getDescription()));
     trx.setLineNo(AutoMatchSupport.nextTransactionLineNo(account.getId()));
     trx.setDepositAmount(isDeposit ? absAmount : BigDecimal.ZERO);
     trx.setPaymentAmount(isDeposit ? BigDecimal.ZERO : absAmount);
