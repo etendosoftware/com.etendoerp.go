@@ -22,10 +22,12 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.TreeSet;
 
 import org.junit.jupiter.api.Test;
 
@@ -171,5 +173,130 @@ class TemplateRoleWindowAccessTest {
     assertEquals(4, second.size(),
         "Mutating a caller's copy must never affect the next caller — byRoleId() must return a "
             + "fresh map each time, mirroring SystemRoleTemplates#byName()'s own contract");
+  }
+
+  /**
+   * QA (Sentinel, ETP-4878) — the class javadoc and {@code EnsureSystemRoleTemplatesScript}'s own
+   * javadoc both claim "33 distinct AD_Window_IDs" across the 64 grants, but nothing in the
+   * existing suite actually counted the DISTINCT windows (only the raw 64-grant total, which
+   * would stay 64 even if every role duplicated the same handful of windows). This locks in the
+   * documented number so a future matrix edit that silently drifts from it is caught here instead
+   * of only being caught by someone re-reading the javadoc by hand.
+   */
+  @Test
+  void thirtyThreeDistinctWindowIdsAreCoveredAcrossAllFourRoles() {
+    Set<String> distinctWindowIds = new TreeSet<>();
+    for (List<WindowGrant> grants : TemplateRoleWindowAccess.byRoleId().values()) {
+      for (WindowGrant grant : grants) {
+        distinctWindowIds.add(grant.getWindowId());
+      }
+    }
+    assertEquals(33, distinctWindowIds.size(),
+        "The matrix's 64 grants must resolve to exactly 33 distinct AD_Window_IDs once shared "
+            + "windows (e.g. Contactos, Producto, Tarifa) are counted once, per the class javadoc "
+            + "and EnsureSystemRoleTemplatesScript's own javadoc");
+  }
+
+  /**
+   * QA (Sentinel, ETP-4878) — locks in the exact two {@code AD_Window_ID}s each role carried
+   * under the old ETP-4852 2-window smoke test (see the pre-ETP-4878 revision of {@code
+   * EnsureSystemRoleTemplatesScript}), confirming they all survive UNCHANGED (same access level)
+   * in the new real matrix.
+   *
+   * <p><b>Why this matters beyond "nothing regressed":</b> it means {@code
+   * EnsureSystemRoleTemplatesScript#removeStaleWindowAccess} is NEVER actually exercised by the
+   * real old-smoke-test → new-matrix transition on any of the 4 roles — every one of these 8
+   * windows is a subset of, not disjoint from, its role's new column. The delete-stale-grant code
+   * path is correctly implemented (verified by reading {@code removeStaleWindowAccess} — it is a
+   * plain "active row not in desiredWindowIds → DELETE"), but this specific migration exercises
+   * only the upsert half, never the delete half, against real production data. If this test ever
+   * starts failing because one of these 8 windows or its access level DID change, that is exactly
+   * the scenario that would finally exercise (or require re-verifying) the delete path — treat a
+   * failure here as a signal to re-run the live-DB check documented in the QA report, not just a
+   * data typo.</p>
+   */
+  @Test
+  void allEightOldEtp4852SmokeTestWindowsSurviveUnchangedInTheNewMatrix() {
+    Map<String, List<WindowGrant>> byRoleId = TemplateRoleWindowAccess.byRoleId();
+
+    // roleId -> {oldSmokeWindowId -> wasFullAccess}
+    Map<String, Map<String, Boolean>> oldSmokeGrantsByRole = new HashMap<>();
+    Map<String, Boolean> financeOld = new HashMap<>();
+    financeOld.put("94EAA455D2644E04AB25D93BE5157B6D", true); // Financial Account
+    financeOld.put("E547CE89D4C04429B6340FFA44E70716", true); // Payment In
+    oldSmokeGrantsByRole.put(SystemRoleTemplates.FINANCE_ROLE_ID, financeOld);
+
+    Map<String, Boolean> salesOld = new HashMap<>();
+    salesOld.put("143", true); // Sales Order
+    salesOld.put("123", true); // Business Partner
+    oldSmokeGrantsByRole.put(SystemRoleTemplates.SALES_ROLE_ID, salesOld);
+
+    Map<String, Boolean> purchasingOld = new HashMap<>();
+    purchasingOld.put("181", true); // Purchase Order
+    purchasingOld.put("140", true); // Product
+    oldSmokeGrantsByRole.put(SystemRoleTemplates.PURCHASING_ROLE_ID, purchasingOld);
+
+    Map<String, Boolean> inventoryOld = new HashMap<>();
+    inventoryOld.put("184", true); // Goods Receipt
+    inventoryOld.put("139", true); // Warehouse and Storage Bins
+    oldSmokeGrantsByRole.put(SystemRoleTemplates.INVENTORY_ROLE_ID, inventoryOld);
+
+    for (Map.Entry<String, Map<String, Boolean>> roleEntry : oldSmokeGrantsByRole.entrySet()) {
+      String roleId = roleEntry.getKey();
+      List<WindowGrant> newGrants = byRoleId.get(roleId);
+      for (Map.Entry<String, Boolean> windowEntry : roleEntry.getValue().entrySet()) {
+        WindowGrant newGrant = grantFor(newGrants, windowEntry.getKey());
+        assertNotNull(newGrant, "Old smoke-test window " + windowEntry.getKey()
+            + " for role " + roleId + " must still be present in the new ETP-4878 matrix");
+        assertEquals(windowEntry.getValue(), !newGrant.isReadOnly(),
+            "Old smoke-test window " + windowEntry.getKey() + " for role " + roleId
+                + " must keep its old (full) access level in the new matrix, or "
+                + "removeStaleWindowAccess's delete path would newly apply to it");
+      }
+    }
+  }
+
+  /**
+   * QA (Sentinel, ETP-4878) — cross-ticket integration seam finding. Computes, straight from the
+   * matrix data (no DB needed), every {@code AD_Window_ID} that is granted by two or more of the
+   * four roles at DIFFERING access levels. This set is non-empty, which is the root cause behind
+   * {@link TemplateRoleWindowAccessConflictIntegrationTest}: any personal role composed (per
+   * ETP-4852's {@code UserRoleCompositionService}) from two templates that both appear as a key
+   * for the same window here will end up with two simultaneously-active, conflicting {@code
+   * AD_Window_Access} rows for that window, resolved by {@code
+   * NeoAccessHelper#findActiveWindowAccess} with an un-ordered {@code setMaxResults(1)} query —
+   * i.e. arbitrarily, not by any explicit "most permissive/most restrictive wins" policy.
+   *
+   * <p>This did not exist before ETP-4878: the old 2-window-per-role smoke test used disjoint
+   * window sets across all 4 roles, so this set would have been empty under the pre-ETP-4878
+   * matrix. Locking in the current, non-empty set here so a future matrix edit that resolves (or
+   * widens) the conflict is a visible, deliberate diff to this test, not a silent side effect.</p>
+   */
+  @Test
+  void multipleWindowsAreGrantedByTwoOrMoreRolesAtConflictingAccessLevels() {
+    Map<String, List<WindowGrant>> byRoleId = TemplateRoleWindowAccess.byRoleId();
+    Map<String, Boolean> firstAccessLevelSeenByWindowId = new HashMap<>();
+    Set<String> conflictingWindowIds = new TreeSet<>();
+
+    for (List<WindowGrant> grants : byRoleId.values()) {
+      for (WindowGrant grant : grants) {
+        Boolean previouslySeen = firstAccessLevelSeenByWindowId.putIfAbsent(grant.getWindowId(),
+            grant.isReadOnly());
+        if (previouslySeen != null && !previouslySeen.equals(grant.isReadOnly())) {
+          conflictingWindowIds.add(grant.getWindowId());
+        }
+      }
+    }
+
+    assertTrue(conflictingWindowIds.contains("123"),
+        "Contactos (123) is full for Sales/Purchasing/Finance but read-only for Inventory — a "
+            + "known conflicting window per the matrix");
+    assertTrue(conflictingWindowIds.contains("143"),
+        "Pedido de venta (143) is full for Sales but read-only for Finance/Inventory — a known "
+            + "conflicting window per the matrix");
+    assertFalse(conflictingWindowIds.isEmpty(),
+        "At least one window must be granted at conflicting access levels across roles — this "
+            + "is the data-level root cause of the ETP-4852/ETP-4878 multi-template composition "
+            + "conflict documented in TemplateRoleWindowAccessConflictIntegrationTest");
   }
 }
