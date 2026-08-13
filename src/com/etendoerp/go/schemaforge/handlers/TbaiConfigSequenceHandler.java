@@ -17,6 +17,7 @@
 
 package com.etendoerp.go.schemaforge.handlers;
 
+import java.util.Date;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
@@ -27,7 +28,9 @@ import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
+import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
+import org.hibernate.criterion.Projections;
 import org.hibernate.criterion.Restrictions;
 import org.openbravo.base.provider.OBProvider;
 import org.openbravo.dal.core.OBContext;
@@ -38,10 +41,11 @@ import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.ad.utility.Sequence;
 import org.openbravo.model.common.enterprise.DocumentType;
 import org.openbravo.model.common.enterprise.Organization;
+import org.openbravo.model.common.invoice.Invoice;
 
+import com.etendoerp.go.schemaforge.AbstractSmartDeactivationHandler;
 import com.etendoerp.go.schemaforge.NeoContext;
 import com.etendoerp.go.schemaforge.NeoEndpointType;
-import com.etendoerp.go.schemaforge.NeoHandler;
 import com.etendoerp.go.schemaforge.NeoResponse;
 import com.smf.ticketbai.data.TbaiConfig;
 
@@ -88,12 +92,11 @@ import com.smf.ticketbai.data.TbaiConfig;
  * before in ETP-4244).
  */
 @Named("tbai-config-sequence-handler")
-public class TbaiConfigSequenceHandler implements NeoHandler {
+public class TbaiConfigSequenceHandler extends AbstractSmartDeactivationHandler {
 
   private static final Logger log = LogManager.getLogger(TbaiConfigSequenceHandler.class);
 
   private static final String METHOD_POST = "POST";
-  private static final String METHOD_PUT = "PUT";
 
   /**
    * DB table name that identifies invoice {@link DocumentType}s. All invoice-category doc types
@@ -110,10 +113,53 @@ public class TbaiConfigSequenceHandler implements NeoHandler {
   private static final long SEQUENCE_START_NO = 1L;
   private static final long SEQUENCE_INCREMENT_BY = 1L;
 
-  /** No pre-hook behavior: this handler only reacts after the config record is persisted. */
+  /**
+   * Decides between deleting the config record (no invoices sent through it) and letting the
+   * default CRUD deactivate it (invoices exist — audit trail must be preserved).
+   */
   @Override
-  public NeoResponse handle(NeoContext context) {
-    return null;
+  protected NeoResponse smartDeactivate(String recordId) throws JSONException {
+    TbaiConfig config = OBDal.getInstance().get(TbaiConfig.class, recordId);
+    if (config == null) {
+      return null;
+    }
+
+    Date adoptionDate = config.getTbaisystemdate();
+    String orgId = config.getOrganization().getId();
+
+    // If the config never entered the fiscal system (adoption date not set), delete directly.
+    if (adoptionDate == null) {
+      OBDal.getInstance().remove(config);
+      OBDal.getInstance().flush();
+      log.info("TbaiConfigSequenceHandler: deleted unused config record {} (no adoption date)",
+          recordId);
+      return deletedResponse();
+    }
+
+    if (hasTbaiInvoicesSince(orgId, adoptionDate)) {
+      // Invoices exist — let default CRUD deactivate (preserve audit trail).
+      return null;
+    }
+
+    OBDal.getInstance().remove(config);
+    OBDal.getInstance().flush();
+    log.info("TbaiConfigSequenceHandler: deleted unused config record {} (no invoices sent)",
+        recordId);
+    return deletedResponse();
+  }
+
+  /**
+   * Returns {@code true} if at least one invoice was sent through TicketBAI for the given
+   * org with an invoice date on or after {@code since}.
+   */
+  private boolean hasTbaiInvoicesSince(String orgId, Date since) {
+    OBCriteria<Invoice> crit = OBDal.getInstance().createCriteria(Invoice.class);
+    crit.add(Restrictions.eq(Invoice.PROPERTY_ORGANIZATION + ".id", orgId));
+    crit.add(Restrictions.eq(Invoice.PROPERTY_TBAIISSENT, Boolean.TRUE));
+    crit.add(Restrictions.ge(Invoice.PROPERTY_INVOICEDATE, since));
+    crit.setProjection(Projections.rowCount());
+    Number count = (Number) crit.uniqueResult();
+    return count != null && count.longValue() > 0;
   }
 
   /**
@@ -129,6 +175,12 @@ public class TbaiConfigSequenceHandler implements NeoHandler {
     }
     String method = context.getHttpMethod();
     if (!METHOD_POST.equalsIgnoreCase(method) && !METHOD_PUT.equalsIgnoreCase(method)) {
+      return null;
+    }
+    // If handle() already deleted the record (smart deactivation), skip sequence assignment.
+    NeoResponse preResult = context.getPreviousResult();
+    if (preResult != null && preResult.getBody() != null
+        && preResult.getBody().optBoolean("deleted", false)) {
       return null;
     }
     try {
