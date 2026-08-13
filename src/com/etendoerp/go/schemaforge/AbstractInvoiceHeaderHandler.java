@@ -377,16 +377,11 @@ public abstract class AbstractInvoiceHeaderHandler {
    * Injects the invoice subtype virtual field ({@link #getInvoiceSubtypeKey()}) into the record
    * by resolving the current {@code transactionDocument} value via {@link #resolveSubtype(String)}.
    *
-   * <p>ETP-4738: a plain-invoice-category Factura Rectificativa (flagged via
-   * {@code EM_Etsg_Isrectificative}, so not already resolved to {@code SUBTYPE_RECTIFICATIVA} by
-   * document category) with a negative total is reclassified here for DISPLAY purposes only (grid
-   * "Pendiente de pago" badge, detail topbar credit pill), so it renders the same "Saldo a favor"
-   * treatment. That reclassification is deliberately NOT folded into {@link #classifyDocType} /
-   * {@link #resolveSubtype}: those are also used by {@link #validateOriginInvoiceRequired} to
-   * require the {@code originInvoice} field on save, but a rectificativa links its corrected
-   * invoice via {@code C_Invoice_Reverse} (the "Reversed Invoices" tab), not {@code
-   * originInvoice} — reusing the same subtype there would incorrectly block saving every Factura
-   * Rectificativa.
+   * <p>This reflects the DOCUMENT TYPE only (FAC vs RECTIFICATIVA) and drives the doc-type badge
+   * column and the list tab filters. It must NOT be used to decide payment state: whether an
+   * invoice is a "saldo a favor" or a payable is decided by the SIGN of its total (ETP-4841),
+   * because a Factura Rectificativa can legitimately be positive (an under-invoiced correction,
+   * which is payable) and an ordinary Factura can be negative (a credit).
    *
    * @param rec
    *     the invoice record JSON object; modified in-place
@@ -396,17 +391,7 @@ public abstract class AbstractInvoiceHeaderHandler {
    *     if a JSON operation fails
    */
   protected void enrichInvoiceSubtype(JSONObject rec, String key) throws Exception {
-    String docTypeId = rec.optString(FIELD_TRANSACTION_DOCUMENT, null);
-    String subtype = resolveSubtype(docTypeId);
-    // Short-circuit order matters: isRectificativeDocType() hits the DB, so it must stay behind
-    // both the cheap subtype check and the in-memory negative-total check — otherwise every row
-    // of a list response pays for an extra doc-type fetch.
-    if (SUBTYPE_FAC.equals(subtype)
-        && rec.optDouble(FIELD_GRAND_TOTAL_AMOUNT, 0.0) < 0
-        && RectificativeSupport.isRectificativeDocType(docTypeId)) {
-      subtype = SUBTYPE_RECTIFICATIVA;
-    }
-    rec.put(key, subtype);
+    rec.put(key, resolveSubtype(rec.optString(FIELD_TRANSACTION_DOCUMENT, null)));
   }
 
   /**
@@ -802,6 +787,10 @@ public abstract class AbstractInvoiceHeaderHandler {
    * (docCurrency → orgCurrency, invoiceDate). Mirrors
    * {@code AbstractOrderHeaderHandler#checkExchangeRateWarning}.
    *
+   * <p>ETP-4838: rate availability is resolved by {@link NeoExchangeRateService#hasRate} — the same
+   * lookup {@code GET /sws/neo/validate-exchange-rate} serves the frontend — so the callout warning
+   * and the frontend's own pre-check can never disagree.
+   *
    * <p>Call from each subclass's {@code afterCallout()} override.
    *
    * @param body         the callout response body; messages are appended in-place
@@ -826,7 +815,7 @@ public abstract class AbstractInvoiceHeaderHandler {
     String orgCurrencyId = OBCurrencyUtils.getOrgCurrency(orgId);
     if (!docCurrencyId.isEmpty() && orgCurrencyId != null
         && !docCurrencyId.equals(orgCurrencyId) && !invoiceDate.isEmpty()
-        && !hasConversionRate(orgCurrencyId, docCurrencyId, invoiceDate)) {
+        && !NeoExchangeRateService.hasRate(orgCurrencyId, docCurrencyId, invoiceDate)) {
       appendMessage(body, "WARNING", "noExchangeRateAvailable");
       log.debug("[ETP-4029] No conversion rate warning added (currency={})", docCurrencyId);
     }
@@ -900,48 +889,6 @@ public abstract class AbstractInvoiceHeaderHandler {
       return null;
     }
     return StringUtils.trimToNull(formState.optString("id", null));
-  }
-
-  /**
-   * Checks whether a {@code C_Conversion_Rate} row exists for the given currency pair
-   * and date, scoped to the current client and org (including global org '0').
-   *
-   * @return {@code true} if a rate exists (safe default on error)
-   */
-  @SuppressWarnings("java:S2077")
-  private static boolean hasConversionRate(String fromCurrencyId, String toCurrencyId,
-      String dateStr) {
-    try {
-      java.time.LocalDate localDate = java.time.LocalDate.parse(dateStr.substring(0, 10));
-      String clientId = OBContext.getOBContext().getCurrentClient().getId();
-      String orgId = OBContext.getOBContext().getCurrentOrganization().getId();
-
-      String sql =
-          "SELECT 1 FROM c_conversion_rate"
-        + " WHERE c_currency_id = ?"
-        + " AND c_currency_id_to = ?"
-        + " AND isactive = 'Y'"
-        + " AND ad_client_id = ?"
-        + " AND (ad_org_id = '0' OR ad_org_id = ?)"
-        + " AND validfrom <= ?"
-        + " AND (validto IS NULL OR validto >= ?)"
-        + " LIMIT 1";
-      Connection conn = OBDal.getInstance().getConnection();
-      try (PreparedStatement ps = conn.prepareStatement(sql)) {
-        ps.setString(1, fromCurrencyId);
-        ps.setString(2, toCurrencyId);
-        ps.setString(3, clientId);
-        ps.setString(4, orgId);
-        ps.setDate(5, java.sql.Date.valueOf(localDate));
-        ps.setDate(6, java.sql.Date.valueOf(localDate));
-        try (ResultSet rs = ps.executeQuery()) {
-          return rs.next();
-        }
-      }
-    } catch (Exception e) {
-      log.warn("[ETP-4029] hasConversionRate check failed (assuming rate exists): {}", e.getMessage());
-      return true; // fail-open: avoid blocking when DB check fails
-    }
   }
 
   private static void appendMessage(JSONObject body, String type, String text) {

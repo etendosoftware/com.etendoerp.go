@@ -28,7 +28,6 @@ import static com.etendoerp.go.schemaforge.PaymentRegistrationService.MSG_INVOIC
 
 import java.math.BigDecimal;
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.Comparator;
 import java.util.Date;
 import java.util.List;
@@ -53,8 +52,9 @@ import org.openbravo.model.financialmgmt.payment.FIN_Payment_Credit;
 import org.openbravo.service.json.JsonUtils;
 
 /**
- * Consumable funding sources for an invoice's business partner: pending Factura Rectificativa
- * payment-schedule details with a negative invoice total ("abono", ETP-4738), plus — AR
+ * Consumable funding sources for an invoice's business partner: pending payment-schedule
+ * details of any invoice with a negative total ("abono", ETP-4841 — the document type is
+ * irrelevant, only the sign), plus — AR
  * (Cobros) only — accumulated credit (generatedCredit minus usedCredit). Per the Cobros y
  * Pagos functional spec, AP (Pagos) has no supplier credit accrual in it1, so {@code
  * collectAccumulatedCredit} is only ever invoked when {@code isReceipt} is true. Split out of
@@ -74,8 +74,8 @@ final class PaymentCreditSourcesService {
 
   /**
    * Lists the consumable funding sources for the invoice's business partner:
-   *   - 'abono'  : pending Factura Rectificativa payment-schedule details (amount &lt; 0, on an
-   *                invoice with a negative total — ETP-4738)
+   *   - 'abono'  : pending payment-schedule details (amount &lt; 0) of any invoice with a
+   *                negative total, whatever its document type (ETP-4841)
    *   - 'credit' : available accumulated credit lines (generatedCredit minus usedCredit) —
    *                Cobros (AR) only; never listed for Pagos (AP), which has no supplier
    *                credit accrual in it1.
@@ -144,8 +144,8 @@ final class PaymentCreditSourcesService {
   }
 
   /**
-   * Collects pending "saldo a favor" PSDs (negative amount, on a Factura Rectificativa with a
-   * negative total — ETP-4738) of the BP, plus — when editing a draft ({@code editPaymentId}
+   * Collects pending "saldo a favor" PSDs (negative amount, on an invoice with a negative
+   * total — ETP-4841) of the BP, plus — when editing a draft ({@code editPaymentId}
    * present) — any such PSD that draft ALREADY consumed (its {@code paymentDetails} is no
    * longer null, so it would otherwise vanish from this list once used), so the edit modal can
    * keep showing and re-checking it.
@@ -164,30 +164,20 @@ final class PaymentCreditSourcesService {
 
   /**
    * Pending "saldo a favor" PSDs: negative, unpaid, same BP/currency/side, on an invoice whose
-   * total is negative AND (ETP-4738) whose document type is a Factura Rectificativa
-   * ({@code c_doctype.em_etsg_isrectificative = 'Y'}).
+   * total is negative.
    *
-   * <p>The rectificative doc types are resolved once per call via {@link
-   * RectificativeSupport#resolveRectificativeDocTypes}, scoped to the invoice's own
-   * client and transaction side, and bound as an {@code in (:rectDocTypes)} HQL parameter —
-   * never fetched unrestricted and filtered afterwards, since {@code setMaxResults(50)} would
-   * then truncate before the restriction is applied. When no rectificative doc type is
-   * configured for this client/side, the whitelist is empty and the query is skipped entirely
-   * (an HQL {@code in ()} is invalid), returning no abonos.
+   * <p>ETP-4841: eligibility is decided purely by the SIGN of the invoice total, never by its
+   * document type. An ordinary "Factura" issued with a negative total is just as much a credit
+   * the customer can spend as a Factura Rectificativa is; conversely a POSITIVE rectificativa
+   * (an under-invoiced correction) is payable and must NOT be offered as a funding source.
+   * The previous doc-type whitelist ({@code em_etsg_isrectificative}) got both cases wrong.
    *
-   * <p>Deliberately restricted to {@code transactionDocument.id} (never
-   * {@code .transactionDocument.etsgIsRectificative}) — that DAL property only exists when the
-   * optional SIF General module is installed, and referencing it would fail to PARSE the HQL,
-   * breaking this endpoint on any deployment without the module.
+   * <p>The {@code grandTotalAmount < 0} predicate lives inside the query on purpose: with
+   * {@code setMaxResults(50)}, filtering in Java afterwards would truncate before the
+   * restriction is applied and silently drop eligible sources.
    */
   private static List<FIN_PaymentScheduleDetail> pendingAbonos(Invoice invoice,
       boolean isReceipt) {
-    String clientId = invoice.getClient() != null ? invoice.getClient().getId() : null;
-    List<String> rectDocTypes = RectificativeSupport.resolveRectificativeDocTypes(
-        clientId, isReceipt);
-    if (rectDocTypes.isEmpty()) {
-      return Collections.emptyList();
-    }
     String hql = "select psd from FIN_Payment_ScheduleDetail psd "
         + "where psd.invoicePaymentSchedule.invoice.businessPartner.id = :bp "
         + "and psd.invoicePaymentSchedule.invoice.salesTransaction = :receipt "
@@ -195,7 +185,6 @@ final class PaymentCreditSourcesService {
         + "and psd.invoicePaymentSchedule.invoice.id <> :inv "
         + "and psd.invoicePaymentSchedule.invoice.currency.id = :cur "
         + "and psd.invoicePaymentSchedule.invoice.grandTotalAmount < 0 "
-        + "and psd.invoicePaymentSchedule.invoice.transactionDocument.id in (:rectDocTypes) "
         + "order by psd.invoicePaymentSchedule.invoice.invoiceDate desc";
     Query<FIN_PaymentScheduleDetail> query = OBDal.getInstance().getSession()
         .createQuery(hql, FIN_PaymentScheduleDetail.class)
@@ -203,7 +192,6 @@ final class PaymentCreditSourcesService {
         .setParameter(KEY_RECEIPT, isReceipt)
         .setParameter("inv", invoice.getId())
         .setParameter("cur", invoice.getCurrency() != null ? invoice.getCurrency().getId() : null);
-    query.setParameterList("rectDocTypes", rectDocTypes);
     return query.setMaxResults(50).list();
   }
 
