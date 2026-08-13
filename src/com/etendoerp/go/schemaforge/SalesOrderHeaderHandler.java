@@ -50,15 +50,25 @@ public class SalesOrderHeaderHandler extends AbstractOrderHeaderHandler {
   private CreateDraftInvoiceHandler createDraftInvoiceHandler;
 
   @Inject
+  private CurrencyOptionsHandler currencyOptionsHandler;
+
+  @Inject
   private TotalDiscountService totalDiscountService;
 
   @Override
   public NeoResponse handle(NeoContext context) {
+    AbstractOrderHeaderHandler.mirrorAccountingDate(context);
     AbstractOrderHeaderHandler.applyTotalDiscountBeforeComplete(context, totalDiscountService, false);
     return NeoHeaderActionRouter.dispatch(
         context,
         cloneRecordHandler,
         createShipmentHandler,
-        createDraftInvoiceHandler);
+        createDraftInvoiceHandler,
+        currencyOptionsHandler);
+  }
+
+  @Override
+  protected TotalDiscountService getTotalDiscountService() {
+    return totalDiscountService;
   }
 }

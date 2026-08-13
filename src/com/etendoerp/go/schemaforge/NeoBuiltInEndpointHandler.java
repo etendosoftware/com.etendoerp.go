@@ -7,10 +7,13 @@ import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 
 import org.apache.commons.lang3.StringUtils;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.dal.service.OBDal;
 
+import com.etendoerp.go.schemaforge.email.TransactionalEmailService;
 import com.etendoerp.go.schemaforge.util.NeoImageHelper;
 
 /**
@@ -18,6 +21,8 @@ import com.etendoerp.go.schemaforge.util.NeoImageHelper;
  * an SF spec.
  */
 class NeoBuiltInEndpointHandler {
+
+  private static final Logger log = LogManager.getLogger(NeoBuiltInEndpointHandler.class);
 
   private static final String METHOD_GET    = "GET";
   private static final String METHOD_POST   = "POST";
@@ -30,11 +35,20 @@ class NeoBuiltInEndpointHandler {
   private final NeoServlet servlet;
   private final NeoDiscoveryHandler discoveryHandler;
   private final Fiscal303BoxesHandler fiscal303Handler;
+  private final Fiscal349BoxesHandler fiscal349Handler;
+  private final TransactionalEmailService transactionalEmailService;
 
   NeoBuiltInEndpointHandler(NeoServlet servlet, NeoDiscoveryHandler discoveryHandler) {
+    this(servlet, discoveryHandler, new TransactionalEmailService());
+  }
+
+  NeoBuiltInEndpointHandler(NeoServlet servlet, NeoDiscoveryHandler discoveryHandler,
+      TransactionalEmailService transactionalEmailService) {
     this.servlet = servlet;
     this.discoveryHandler = discoveryHandler;
     this.fiscal303Handler = new Fiscal303BoxesHandler(servlet);
+    this.fiscal349Handler = new Fiscal349BoxesHandler(servlet);
+    this.transactionalEmailService = transactionalEmailService;
   }
 
   boolean handle(NeoServlet.NeoPathInfo pathInfo, String method,
@@ -67,6 +81,26 @@ class NeoBuiltInEndpointHandler {
     }
     if ("fiscal303".equals(pathInfo.specName)) {
       fiscal303Handler.handle(pathInfo.entityName, method, request, response);
+      return true;
+    }
+    if ("fiscal349".equals(pathInfo.specName)) {
+      fiscal349Handler.handle(pathInfo.entityName, method, request, response);
+      return true;
+    }
+    if ("email-contracts".equals(pathInfo.specName)) {
+      handleEmailContractsEndpoint(pathInfo, method, request, response);
+      return true;
+    }
+    // Only intercept amortization built-in endpoints (e.g. generate-plan).
+    // Regular amortization spec CRUD (entityName = header/lines/accounting) falls through to
+    // the standard window-spec router which resolves the DB spec.
+    if ("amortization".equals(pathInfo.specName)
+        && "generate-plan".equals(pathInfo.entityName)) {
+      handleAmortizationEndpoint(method, request, response);
+      return true;
+    }
+    if ("validate-exchange-rate".equals(pathInfo.specName)) {
+      handleValidateExchangeRateEndpoint(method, request, response);
       return true;
     }
     return false;
@@ -164,6 +198,52 @@ class NeoBuiltInEndpointHandler {
     }
     servlet.sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
         "Preview file endpoint supports GET, POST and DELETE");
+  }
+
+  private void handleEmailContractsEndpoint(NeoServlet.NeoPathInfo pathInfo, String method,
+      HttpServletRequest request, HttpServletResponse response) throws IOException {
+    if (!METHOD_POST.equals(method)) {
+      servlet.sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
+          "Email contract endpoint only supports POST");
+      return;
+    }
+    if (!isStrictEmailContractSendPath(request.getPathInfo())
+        || StringUtils.isBlank(pathInfo.entityName) || !"send".equals(pathInfo.recordId)) {
+      servlet.sendError(response, HttpServletResponse.SC_NOT_FOUND,
+          "Unknown email contract endpoint");
+      return;
+    }
+    try {
+      JSONObject body = NeoRequestBodyParser.parseJsonObject(
+          NeoRequestBodyParser.readRequestBody(request));
+      servlet.writeResponse(response, transactionalEmailService.send(pathInfo.entityName, body));
+    } catch (JSONException e) {
+      servlet.sendError(response, HttpServletResponse.SC_BAD_REQUEST, "Invalid JSON body");
+    } catch (IOException e) {
+      log.error("Error reading email contract request body: {}", e.getMessage(), e);
+      throw e;
+    } catch (Exception e) {
+      log.error("Unexpected error handling email contract [{}]: {}", pathInfo.entityName,
+          e.getMessage(), e);
+      OBDal.getInstance().rollbackAndClose();
+      servlet.sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
+          "Email contract request failed");
+    }
+  }
+
+  private boolean isStrictEmailContractSendPath(String pathInfo) {
+    if (pathInfo == null) {
+      return false;
+    }
+    String trimmed = pathInfo;
+    while (trimmed.startsWith("/")) {
+      trimmed = trimmed.substring(1);
+    }
+    String[] parts = trimmed.split("/");
+    return parts.length == 3
+        && "email-contracts".equals(parts[0])
+        && StringUtils.isNotBlank(parts[1])
+        && "send".equals(parts[2]);
   }
 
   private void handleCertificateEndpoint(String method, HttpServletRequest request,
@@ -340,5 +420,53 @@ class NeoBuiltInEndpointHandler {
       }
     }
     return sb.toString();
+  }
+
+  /**
+   * Handles {@code POST /sws/neo/amortization/generate-plan} — generates an asset
+   * amortization plan in a single call by firing the native A_Asset_Post process.
+   *
+   * <p>Body: {@code { "assetId": "<id>" }}
+   * <p>Responses: 200 OK with plan summary, 400/404/409 on validation failures,
+   * 500 on unexpected errors.
+   *
+   * <p>This method is only invoked when the path is exactly
+   * {@code amortization/generate-plan}, so there is no collision with the
+   * regular amortization window spec CRUD endpoints.
+   */
+  private void handleAmortizationEndpoint(String method,
+      HttpServletRequest request, HttpServletResponse response) throws IOException {
+    if (!METHOD_POST.equals(method)) {
+      servlet.sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
+          "Amortization generate-plan endpoint only supports POST");
+      return;
+    }
+    String assetId;
+    try {
+      String body = readBody(request);
+      JSONObject json = new JSONObject(body);
+      assetId = json.optString("assetId", null);
+    } catch (Exception e) {
+      servlet.sendError(response, HttpServletResponse.SC_BAD_REQUEST,
+          "Invalid JSON body: " + e.getMessage());
+      return;
+    }
+    if (assetId == null || assetId.trim().isEmpty()) {
+      servlet.sendError(response, HttpServletResponse.SC_BAD_REQUEST,
+          "The 'assetId' parameter is mandatory.");
+      return;
+    }
+    servlet.writeResponse(response, AmortizationPlanService.generatePlan(assetId));
+  }
+
+  private void handleValidateExchangeRateEndpoint(String method,
+      HttpServletRequest request, HttpServletResponse response) throws IOException {
+    if (!METHOD_GET.equals(method)) {
+      servlet.sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
+          "validate-exchange-rate only supports GET");
+      return;
+    }
+    servlet.writeResponse(response,
+        NeoExchangeRateService.handleValidateExchangeRate(request));
   }
 }

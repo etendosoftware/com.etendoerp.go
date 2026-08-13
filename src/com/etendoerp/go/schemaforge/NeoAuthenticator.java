@@ -29,6 +29,8 @@ import org.openbravo.base.exception.OBException;
 import org.openbravo.dal.core.OBContext;
 
 import com.auth0.jwt.interfaces.DecodedJWT;
+import com.etendoerp.go.schemaforge.data.SFSpec;
+import com.etendoerp.go.schemaforge.util.NeoLanguage;
 import com.smf.securewebservices.utils.SecureWebServicesUtils;
 
 /**
@@ -106,10 +108,41 @@ class NeoAuthenticator {
     }
     OBContext.setOBContext(context);
     OBContext.setOBContextInSession(request, context);
+    applyRequestLanguage(request);
+  }
+
+  /**
+   * Apply the UI language requested via the {@code Accept-Language} header to the
+   * current {@link OBContext}, so server-side message translation (AD_Message)
+   * matches the language the user selected in the frontend. Falls back silently
+   * to the context default when the header is absent or not a valid active language.
+   *
+   * <p>Only Etendo language codes ({@code xx_YY}, e.g. {@code es_ES}) are honored;
+   * browser-style values ({@code es-ES,es;q=0.9}) are ignored on purpose so the
+   * explicit app locale wins and nothing else does.
+   */
+  private void applyRequestLanguage(HttpServletRequest request) {
+    // Validation + AD_Language lookup live in the shared NeoLanguage helper so the
+    // same "GO locale of the request" is used by selectors (ETP-4304) and messages
+    // (ETP-4306). Only well-formed, active xx_YY codes are honored; otherwise the
+    // context default stands.
+    NeoLanguage.applyToContext(request.getHeader("Accept-Language"));
   }
 
   boolean hasWindowAccess(String windowId) {
     return NeoServletSupport.hasWindowAccess(windowId);
+  }
+
+  boolean hasWindowAccess(String windowId, String httpMethod) {
+    return NeoServletSupport.hasWindowAccess(windowId, httpMethod);
+  }
+
+  boolean hasWindowAccessForSpec(SFSpec spec, String httpMethod) {
+    return NeoServletSupport.hasWindowAccessForSpec(spec, httpMethod);
+  }
+
+  boolean hasReportSpecAccess(SFSpec spec, String httpMethod) {
+    return NeoServletSupport.hasReportSpecAccess(spec, httpMethod);
   }
 
   boolean hasProcessAccess(String processId) {

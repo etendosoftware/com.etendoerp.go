@@ -38,6 +38,7 @@ import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.utility.OBError;
+import org.openbravo.erpCommon.utility.OBMessageUtils;
 import org.openbravo.model.ad.datamodel.Column;
 import org.openbravo.base.secureApp.VariablesSecureApp;
 import org.openbravo.base.structure.BaseOBObject;
@@ -81,6 +82,7 @@ public class NeoProcessService {
   public static final String MESSAGE = "message";
   public static final String PROCESS_TYPE = "processType";
   public static final String INP_RECORD_ID = "inpRecordId";
+  public static final String RECORD_ID = "recordId";
   public static final String INP_TAB_ID = "inpTabId";
   public static final String STATUS = "status";
   public static final String ERROR = "error";
@@ -113,6 +115,10 @@ public class NeoProcessService {
         NeoResponse validationError = validateMandatoryParams(process, params);
         if (validationError != null) {
           return validationError;
+        }
+        NeoResponse preconditionError = NeoProcessPreconditionService.validate(process, params);
+        if (preconditionError != null) {
+          return preconditionError;
         }
         return executeResolvedProcess(process, params);
       } finally {
@@ -608,17 +614,7 @@ public class NeoProcessService {
     if (params.has(INP_TAB_ID)) {
       String tabId = params.getString(INP_TAB_ID);
       content.put(INP_TAB_ID, tabId);
-
-      // Resolve DAL entity name from tab for SMF Jobs framework
-      try {
-        Tab tab = OBDal.getInstance().get(Tab.class, tabId);
-        if (tab != null && tab.getTable() != null) {
-          String dalEntityName = tab.getTable().getName();
-          content.put("_entityName", dalEntityName);
-        }
-      } catch (Exception e) {
-        log.debug("Could not resolve entity name from tab {}", tabId, e);
-      }
+      addTabContextToContent(content, params, tabId);
     }
 
     try (RequestContextScope ignored = pushRequestContextVars()) {
@@ -636,6 +632,50 @@ public class NeoProcessService {
           handlerInstance, handlerParams, content.toString());
 
       return translateObuiappResult(handlerResult);
+    }
+  }
+
+  /**
+   * Resolve the tab's DAL entity name and key-column record id into the content
+   * JSON. Best-effort: failures are logged and swallowed so process execution
+   * proceeds even when the tab metadata cannot be read.
+   */
+  static void addTabContextToContent(JSONObject content, JSONObject params,
+      String tabId) {
+    try {
+      Tab tab = OBDal.getInstance().get(Tab.class, tabId);
+      if (tab == null || tab.getTable() == null) {
+        return;
+      }
+      // DAL entity name for the SMF Jobs framework.
+      content.put("_entityName", tab.getTable().getName());
+
+      // Classic OBUIAPP process handlers read the record id from the table's
+      // key column (e.g. "A_Asset_ID"), not from inpRecordId. Resolve the key
+      // column DB name and expose the record id under it so those handlers work.
+      if (params.has(INP_RECORD_ID)) {
+        addKeyColumnToContent(content, tab, params.getString(INP_RECORD_ID));
+      }
+    } catch (Exception e) {
+      log.debug("Could not resolve tab context from tab {}", tabId, e);
+    }
+  }
+
+  /**
+   * Finds the table's key column and adds the recordId to the content JSON under
+   * the column's DB name (e.g. "A_Asset_ID"). Classic OBUIAPP handlers read the
+   * record id this way instead of from inpRecordId.
+   */
+  static void addKeyColumnToContent(JSONObject content, Tab tab,
+      String recordId) throws org.codehaus.jettison.json.JSONException {
+    if (tab == null || tab.getTable() == null || recordId == null) {
+      return;
+    }
+    for (Column col : tab.getTable().getADColumnList()) {
+      if (Boolean.TRUE.equals(col.isKeyColumn())) {
+        content.put(col.getDBColumnName(), recordId);
+        break;
+      }
     }
   }
 
@@ -736,7 +776,7 @@ public class NeoProcessService {
       JSONObject params) throws Exception {
 
     try (RequestContextScope ignored = pushRequestContextVars()) {
-      String recordId = params.optString("recordId",
+      String recordId = params.optString(RECORD_ID,
           params.optString(INP_RECORD_ID, null));
 
       if (recordId == null || recordId.isBlank()) {
@@ -759,7 +799,7 @@ public class NeoProcessService {
       Iterator<String> keys = params.keys();
       while (keys.hasNext()) {
         String key = keys.next();
-        if ("recordId".equals(key) || INP_RECORD_ID.equals(key)
+        if (RECORD_ID.equals(key) || INP_RECORD_ID.equals(key)
             || INP_TAB_ID.equals(key) || "docAction".equals(key)) {
           continue;
         }
@@ -809,7 +849,8 @@ public class NeoProcessService {
     if (resultCode == 0L) {
       // Error
       String cleanMsg = errorMsg != null
-          ? errorMsg.replaceFirst("@ERROR=", "") : "Process failed";
+          ? safeParseTranslation(errorMsg.replaceFirst("@ERROR=", ""))
+          : "Process failed";
       result.put(STATUS, ERROR);
       result.put(MESSAGE, cleanMsg);
       return new NeoResponse(400, result);
@@ -891,7 +932,7 @@ public class NeoProcessService {
       String text = message.optString("text", "");
 
       result.put(STATUS, severity);
-      result.put(MESSAGE, text);
+      result.put(MESSAGE, safeParseTranslation(text));
 
       if (ERROR.equals(severity)) {
         return new NeoResponse(400, result);
@@ -903,7 +944,8 @@ public class NeoProcessService {
     JSONObject actionError = extractProcessViewError(handlerResult);
     if (actionError != null) {
       result.put(STATUS, ERROR);
-      result.put(MESSAGE, actionError.optString("msgText", "Process failed"));
+      result.put(MESSAGE,
+          safeParseTranslation(actionError.optString("msgText", "Process failed")));
       return new NeoResponse(400, result);
     }
 
@@ -945,7 +987,7 @@ public class NeoProcessService {
    * Returns the classname of the default implementation with action = 'P' (Process),
    * or null if none found.
    */
-  private static String resolveModelImplementationClass(
+  protected static String resolveModelImplementationClass(
       org.openbravo.model.ad.ui.Process process) {
     try {
       List<ModelImplementation> impls = process.getADModelImplementationList();
@@ -973,7 +1015,7 @@ public class NeoProcessService {
   /**
    * Translate a classic process result (typically OBError) to a NeoResponse.
    */
-  private static NeoResponse translateClassicResult(Object bundleResult,
+  protected static NeoResponse translateClassicResult(Object bundleResult,
       Process process) throws JSONException {
 
     JSONObject result = new JSONObject();
@@ -982,7 +1024,8 @@ public class NeoProcessService {
       OBError error = (OBError) bundleResult;
       result.put(STATUS, error.getType().toLowerCase());
       result.put("title", StringUtils.defaultString(error.getTitle()));
-      result.put(MESSAGE, StringUtils.defaultString(error.getMessage()));
+      result.put(MESSAGE,
+          safeParseTranslation(StringUtils.defaultString(error.getMessage())));
 
       if (ERROR.equalsIgnoreCase(error.getType())) {
         return new NeoResponse(400, result);
@@ -1000,5 +1043,19 @@ public class NeoProcessService {
     }
 
     return NeoResponse.ok(result);
+  }
+
+  /**
+   * Resolves {@code @Key@} AD_Message tokens in {@code text} using the current
+   * {@link org.openbravo.dal.core.OBContext} language. Falls back to returning
+   * the original {@code text} unchanged when no OBContext is available (e.g. in
+   * unit tests that call these methods without a live Etendo application context).
+   */
+  private static String safeParseTranslation(String text) {
+    try {
+      return OBMessageUtils.parseTranslation(text);
+    } catch (Exception e) {
+      return text;
+    }
   }
 }

@@ -95,7 +95,7 @@ final class ComboReferenceSelectorExecutor {
     log.info("[ComboSelector] resolvedParams={}", resolvedParams);
 
     if (StringUtils.isNotBlank(search)) {
-      resolvedParams.put("FILTER_VALUE", search);
+      resolvedParams.put("FILTER_VALUE", "%" + search.toLowerCase() + "%");
     }
 
     FieldProvider[] rawRows = comboTableData.select(new DalConnectionProvider(false), resolvedParams,

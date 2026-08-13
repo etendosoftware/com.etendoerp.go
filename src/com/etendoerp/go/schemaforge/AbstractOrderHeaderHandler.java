@@ -30,15 +30,28 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
+import org.hibernate.criterion.Restrictions;
+import org.openbravo.dal.core.OBContext;
+import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.erpCommon.utility.OBCurrencyUtils;
+import org.openbravo.model.common.currency.Currency;
+import org.openbravo.model.common.order.Order;
+import org.openbravo.model.common.order.OrderLine;
+import org.openbravo.model.pricing.pricelist.PriceList;
 
 /**
- * Shared base for order-type header handlers (Sales Order, Purchase Order).
+ * Shared base for order-type header handlers (Sales Order, Purchase Order, Sales Quotation).
  *
  * <p>The {@code afterHandle} post-hook appends {@code hasLinkedDocuments} to every
  * record in GET responses. Single-record GETs use a LIMIT 1 query; list GETs
  * use a single batch IN query to avoid N+1. Subclasses only need to implement
  * {@code handle()} with their window-specific action dispatching.
+ *
+ * <p>The same post-hook also adjusts {@code grandTotalAmount} via {@link #applyTotalDiscountToRecord}
+ * for draft documents carrying a pending total discount — see that method's Javadoc for details.
+ * Subclasses must implement {@link #getTotalDiscountService()} to expose their injected
+ * {@link TotalDiscountService} for this purpose.
  *
  * <p>The static helper {@link #applyTotalDiscountBeforeComplete(NeoContext, TotalDiscountService, boolean)}
  * is called from the pre-hook ({@code handle()}) of each header subclass. It creates the discount
@@ -49,8 +62,50 @@ public abstract class AbstractOrderHeaderHandler implements NeoHandler {
 
   private static final Logger log = LogManager.getLogger(AbstractOrderHeaderHandler.class);
   private static final String FIELD_DOCUMENT_ACTION = "documentAction";
+  private static final String FIELD_CURRENCY = "currency";
+  private static final String FIELD_PRICE_LIST = "priceList";
+  private static final String FIELD_VALUE = "value";
   private static final String DOC_TYPE_ORDER = "order";
   private static final String DOC_TYPE_INVOICE = "invoice";
+  private static final String FIELD_PROCESSED = "processed";
+  private static final String FIELD_TOTAL_DISCOUNT_PCT = "etgoTotalDiscount";
+  private static final String FIELD_GRAND_TOTAL_AMOUNT = "grandTotalAmount";
+  private static final String FIELD_ID = "id";
+  private static final String FIELD_ORDER_DATE = "orderDate";
+  private static final String FIELD_ACCOUNTING_DATE = "accountingDate";
+
+  /**
+   * Supplies the concrete handler's own {@code @Inject}-ed {@link TotalDiscountService} so the
+   * shared GET-enrichment loop in {@link #afterHandle} can adjust {@code grandTotalAmount}
+   * without this abstract class holding a CDI-injected field itself — consistent with the rest
+   * of this class, where collaborators are always passed in rather than injected here (see
+   * {@link #applyTotalDiscountBeforeComplete}).
+   */
+  protected abstract TotalDiscountService getTotalDiscountService();
+
+  /**
+   * Mirrors the single visible {@code orderDate} field into the hidden {@code accountingDate}
+   * field on the request body, unconditionally, before the default CRUD path persists it
+   * (ETP-4531 — unified date). The user never sees or edits accountingDate directly; whatever
+   * value is saved for orderDate (create or update) must also become the order's accounting
+   * date.
+   *
+   * <p>Call at the very top of each subclass's {@code handle()} override, before any other
+   * logic.
+   *
+   * <p><b>ETP-4531 fix:</b> must fire on {@code PATCH} as well as {@code POST}/{@code PUT} — the
+   * live React UI ({@code useEntity.js#getMethod}) always sends {@code PATCH} (a sparse,
+   * changed-fields-only body) when saving an edit to an EXISTING order; it never sends a full
+   * {@code PUT}. See {@link NeoHandlerUtils#isWriteMethod}.
+   *
+   * @param context the current NeoContext
+   */
+  static void mirrorAccountingDate(NeoContext context) {
+    if (NeoEndpointType.CRUD.equals(context.getEndpointType())
+        && NeoHandlerUtils.isWriteMethod(context.getHttpMethod())) {
+      NeoHandlerUtils.mirrorFieldValue(context.getRequestBody(), FIELD_ORDER_DATE, FIELD_ACCOUNTING_DATE);
+    }
+  }
 
   /**
    * Creates (or re-creates) the total discount line immediately before the Complete action
@@ -169,8 +224,222 @@ public abstract class AbstractOrderHeaderHandler implements NeoHandler {
     }
   }
 
+  // -----------------------------------------------------------------------
+  // Currency / price-list / exchange-rate hooks (ETP-4027)
+  // -----------------------------------------------------------------------
+
+  /**
+   * Post-callout hook shared by all order-header handlers.
+   *
+   * <p>Three behaviors, evaluated in order:
+   * <ol>
+   *   <li><b>Block callout-driven currency updates.</b> When a callout (e.g.
+   *       {@code SL_Order_PriceList} or {@code SE_Order_BPartner}) pushes a
+   *       {@code currency} key in its {@code updates} map, we remove it. Currency
+   *       is only changed by the user directly.</li>
+   *   <li><b>Price list fallback.</b> When {@code SE_Order_BPartner} returns a
+   *       {@code priceList} whose {@code M_PriceList.IsActive = 'N'}, replace it
+   *       with the client's first active price list of the correct type and append
+   *       a WARNING message.</li>
+   *   <li><b>Exchange rate warning.</b> When the user directly changes
+   *       {@code currency}, check whether a {@code C_Conversion_Rate} row exists
+   *       for (docCurrency → orgCurrency, orderDate). If none exists, append a
+   *       WARNING message so the user can create the rate before confirming.</li>
+   * </ol>
+   *
+   * <p>All mutations are applied directly to the callout response body so they
+   * survive even if the handler returns {@code null}. The dispatcher merges only
+   * {@code updates}/{@code combos} from the returned response; messages and
+   * removals must be applied in-place.
+   *
+   * @param context callout context; {@code previousResult} carries the callout response
+   * @return {@code null} — mutations are applied in-place on the body
+   */
+  @Override
+  public NeoResponse afterCallout(NeoContext context) {
+    try {
+      NeoHandlerUtils.CalloutFields fields = NeoHandlerUtils.extractCalloutFields(context);
+      if (fields == null) {
+        return null;
+      }
+      blockCalloutCurrencyUpdate(fields.updates(), fields.triggerField());
+      if ("businessPartner".equals(fields.triggerField()) && fields.updates() != null
+          && fields.updates().has(FIELD_PRICE_LIST)) {
+        applyPriceListFallbackIfNeeded(fields.body(), fields.updates());
+      }
+      checkExchangeRateWarning(fields.body(), fields.requestBody(), fields.formState(), fields.triggerField());
+    } catch (Exception e) {
+      log.warn("[ETP-4027] afterCallout failed (non-fatal): {}", e.getMessage());
+    }
+    return null; // mutations applied in-place; dispatcher merges nothing extra
+  }
+
+  private static void blockCalloutCurrencyUpdate(JSONObject updates, String triggerField) {
+    if (updates != null && updates.has(FIELD_CURRENCY) && !FIELD_CURRENCY.equals(triggerField)) {
+      updates.remove(FIELD_CURRENCY);
+      log.debug("[ETP-4027] Removed callout-driven currency update (trigger={})", triggerField);
+    }
+  }
+
+  private void checkExchangeRateWarning(JSONObject body, JSONObject requestBody,
+      JSONObject formState, String triggerField) {
+    if (formState == null) {
+      return;
+    }
+    if (!FIELD_CURRENCY.equals(triggerField) && !"currencyid".equals(triggerField)) {
+      return;
+    }
+    // Use requestBody.value (the newly selected currency) instead of formState.currency,
+    // which may still carry the previous value when the callout fires.
+    String docCurrencyId = requestBody != null ? requestBody.optString(FIELD_VALUE, "") : "";
+    if (docCurrencyId.isEmpty()) {
+      docCurrencyId = formState.optString("currencyid", "");
+    }
+    String orderDate = formState.optString("orderDate", "");
+    String orgId = OBContext.getOBContext().getCurrentOrganization().getId();
+    String orgCurrencyId = OBCurrencyUtils.getOrgCurrency(orgId);
+    if (!docCurrencyId.isEmpty() && orgCurrencyId != null
+        && !docCurrencyId.equals(orgCurrencyId) && !orderDate.isEmpty()
+        && !hasConversionRate(orgCurrencyId, docCurrencyId, orderDate)) {
+      appendMessage(body, "WARNING", "noExchangeRateAvailable");
+      log.debug("[ETP-4027] No conversion rate warning added (currency={})", docCurrencyId);
+    }
+  }
+
+  /**
+   * Checks whether a {@code C_Conversion_Rate} row exists for the given currency pair
+   * and date, scoped to the current client and org (including global org '0').
+   *
+   * @return {@code true} if a rate exists (safe default on error)
+   */
+  private boolean hasConversionRate(String fromCurrencyId, String toCurrencyId,
+      String dateStr) {
+    try {
+      java.time.LocalDate localDate = java.time.LocalDate.parse(dateStr.substring(0, 10));
+      String clientId = OBContext.getOBContext().getCurrentClient().getId();
+      String orgId = OBContext.getOBContext().getCurrentOrganization().getId();
+
+      String sql =
+          "SELECT 1 FROM c_conversion_rate"
+        + " WHERE c_currency_id = ?"
+        + " AND c_currency_id_to = ?"
+        + " AND isactive = 'Y'"
+        + " AND ad_client_id = ?"
+        + " AND (ad_org_id = '0' OR ad_org_id = ?)"
+        + " AND validfrom <= ?"
+        + " AND (validto IS NULL OR validto >= ?)"
+        + " LIMIT 1";
+      Connection conn = OBDal.getInstance().getConnection();
+      try (PreparedStatement ps = conn.prepareStatement(sql)) {
+        ps.setString(1, fromCurrencyId);
+        ps.setString(2, toCurrencyId);
+        ps.setString(3, clientId);
+        ps.setString(4, orgId);
+        ps.setDate(5, java.sql.Date.valueOf(localDate));
+        ps.setDate(6, java.sql.Date.valueOf(localDate));
+        try (ResultSet rs = ps.executeQuery()) {
+          return rs.next();
+        }
+      }
+    } catch (Exception e) {
+      log.warn("[ETP-4027] hasConversionRate check failed (assuming rate exists): {}", e.getMessage());
+      return true; // fail-open: avoid blocking when DB check fails
+    }
+  }
+
+  /**
+   * Replaces an inactive price list in the callout {@code updates} with the
+   * client's first active price list of the matching type (sales or purchase).
+   * Appends a WARNING message if a fallback is applied.
+   */
+  private void applyPriceListFallbackIfNeeded(JSONObject body, JSONObject updates) {
+    try {
+      // Extract the priceList id from updates (may be a nested object or a plain string)
+      String priceListId = extractPriceListId(updates);
+      if (priceListId == null || priceListId.isEmpty()) {
+        return;
+      }
+      PriceList pl = OBDal.getInstance().get(PriceList.class, priceListId);
+      if (pl == null || pl.isActive()) {
+        return; // active (or unknown) — nothing to do
+      }
+
+      String defaultId = findDefaultActivePriceList();
+      if (defaultId == null) {
+        return;
+      }
+
+      // Replace in updates (preserve object wrapper format if present)
+      Object existing = updates.get(FIELD_PRICE_LIST);
+      if (existing instanceof JSONObject existingObj) {
+        existingObj.put(FIELD_VALUE, defaultId);
+        existingObj.remove("identifier");
+      } else {
+        updates.put(FIELD_PRICE_LIST, defaultId);
+      }
+      appendMessage(body, "WARNING", "priceListFallbackAlert");
+      log.debug("[ETP-4027] Replaced inactive priceList {} with default {}", priceListId, defaultId);
+    } catch (Exception e) {
+      log.warn("[ETP-4027] applyPriceListFallbackIfNeeded failed (non-fatal): {}", e.getMessage());
+    }
+  }
+
+  private String extractPriceListId(JSONObject updates) {
+    try {
+      Object raw = updates.get(FIELD_PRICE_LIST);
+      if (raw instanceof JSONObject rawObj) {
+        return rawObj.optString(FIELD_VALUE, null);
+      }
+      return updates.optString(FIELD_PRICE_LIST, null);
+    } catch (Exception e) {
+      return null;
+    }
+  }
+
+  private String findDefaultActivePriceList() {
+    try {
+      // OBCriteria automatically scopes to the current client via DAL security
+      OBCriteria<PriceList> crit = OBDal.getInstance().createCriteria(PriceList.class);
+      crit.add(Restrictions.eq(PriceList.PROPERTY_ACTIVE, true));
+      crit.add(Restrictions.eq(PriceList.PROPERTY_SALESPRICELIST, isSalesTransaction()));
+      crit.setMaxResults(1);
+      List<PriceList> results = crit.list();
+      return results.isEmpty() ? null : results.get(0).getId();
+    } catch (Exception e) {
+      log.warn("[ETP-4027] findDefaultActivePriceList failed: {}", e.getMessage());
+      return null;
+    }
+  }
+
+  private static void appendMessage(JSONObject body, String type, String text) {
+    try {
+      JSONArray messages = body.optJSONArray("messages");
+      if (messages == null) {
+        messages = new JSONArray();
+        body.put("messages", messages);
+      }
+      JSONObject msg = new JSONObject();
+      msg.put("type", type);
+      msg.put("text", text);
+      messages.put(msg);
+    } catch (Exception e) {
+      log.warn("[ETP-4027] appendMessage failed: {}", e.getMessage());
+    }
+  }
+
+  /**
+   * Returns {@code true} if this handler is for a sales transaction
+   * (used to select the matching price list type on fallback).
+   *
+   * <p>Defaults to {@code true}. Override in purchase-order handlers.
+   */
+  protected boolean isSalesTransaction() {
+    return true;
+  }
+
   @Override
   public NeoResponse afterHandle(NeoContext context) {
+    syncLineCurrenciesOnCurrencyPatch(context);
     if (!"GET".equals(context.getHttpMethod())) {
       return null;
     }
@@ -188,6 +457,9 @@ public abstract class AbstractOrderHeaderHandler implements NeoHandler {
       if (dataArr == null || dataArr.length() == 0) {
         return null;
       }
+      for (int i = 0; i < dataArr.length(); i++) {
+        applyTotalDiscountToRecord(dataArr.getJSONObject(i));
+      }
       if (context.getRecordId() != null) {
         dataArr.getJSONObject(0).put("hasLinkedDocuments", checkLinkedDocuments(context.getRecordId()));
       } else {
@@ -198,6 +470,41 @@ public abstract class AbstractOrderHeaderHandler implements NeoHandler {
       log.error("Error computing hasLinkedDocuments (id={})", context.getRecordId(), e);
       return null;
     }
+  }
+
+  /**
+   * Adjusts {@code grandTotalAmount} for a draft order/quotation carrying a positive
+   * {@code etgoTotalDiscount} percentage that has not yet been materialized as a real line —
+   * the same GET-time compensation {@code SalesInvoiceHeaderHandler} already applies for
+   * invoices (list view and preview cards otherwise showed the raw undiscounted total while
+   * the document was still in draft, since the discount is only materialized into a real line
+   * at Complete time via {@link TotalDiscountService}).
+   *
+   * <p>No-op when the document is processed (the DB total already reflects the discount),
+   * when no discount percentage is set, or when the discount is already a real line
+   * ({@code hasDiscountLine} — avoids double-counting when e.g. an order was created carrying
+   * an already-materialized discount). Mirrors {@code AbstractInvoiceHeaderHandler}'s exact
+   * guard order: {@link #getTotalDiscountService()} is only dereferenced when {@code id} is
+   * present.
+   *
+   * <p>Unlike the invoice version, there is no {@code outstandingAmount} to adjust here —
+   * orders/quotations do not expose that field.
+   */
+  private void applyTotalDiscountToRecord(JSONObject order) throws Exception {
+    if (order.optBoolean(FIELD_PROCESSED, false)) {
+      return;
+    }
+    double discountPct = order.optDouble(FIELD_TOTAL_DISCOUNT_PCT, 0.0);
+    if (discountPct <= 0.0) {
+      return;
+    }
+    String orderId = order.optString(FIELD_ID, null);
+    if (orderId != null && getTotalDiscountService().hasDiscountLine(orderId, false)) {
+      return;
+    }
+    double factor = 1.0 - discountPct / 100.0;
+    double grand = order.optDouble(FIELD_GRAND_TOTAL_AMOUNT, 0.0);
+    order.put(FIELD_GRAND_TOTAL_AMOUNT, NeoHandlerUtils.roundHalfUp(grand * factor));
   }
 
   private void annotateListWithLinkedDocuments(JSONArray dataArr) throws Exception {
@@ -260,6 +567,62 @@ public abstract class AbstractOrderHeaderHandler implements NeoHandler {
     } catch (Exception e) {
       log.error("DB error querying linked documents for order {}", orderId, e);
       return false;
+    }
+  }
+
+  /**
+   * After a successful header PATCH, aligns all order-line currencies to the saved
+   * header currency. This runs whenever the PATCH body contains a {@code currency} field.
+   *
+   * <p>Rationale (ETP-4027): when the user changes the header currency and saves, every
+   * existing line must reflect that choice — the user consciously accepts that the whole
+   * order moves to the new currency. Line amounts are left unchanged; only
+   * {@code C_CURRENCY_ID} is updated on mismatched lines.
+   *
+   * <p>No-op when no lines are mismatched (ordinary saves without a currency change).
+   */
+  private void syncLineCurrenciesOnCurrencyPatch(NeoContext context) {
+    String method = context.getHttpMethod();
+    if (!"PATCH".equals(method) && !"PUT".equals(method)) {
+      return;
+    }
+    JSONObject reqBody = context.getRequestBody();
+    if (reqBody == null || !reqBody.has(FIELD_CURRENCY)) {
+      return;
+    }
+    String recordId = context.getRecordId();
+    if (recordId == null || recordId.isEmpty()) {
+      return;
+    }
+    try {
+      OBContext.setAdminMode(true);
+      try {
+        Order order = OBDal.getInstance().get(Order.class, recordId);
+        if (order == null || order.getCurrency() == null) {
+          return;
+        }
+        Currency headerCurrency = order.getCurrency();
+        String headerCurrencyId = headerCurrency.getId();
+        int updated = 0;
+        for (OrderLine line : order.getOrderLineList()) {
+          if (line.getCurrency() == null
+              || !headerCurrencyId.equals(line.getCurrency().getId())) {
+            line.setCurrency(headerCurrency);
+            OBDal.getInstance().save(line);
+            updated++;
+          }
+        }
+        if (updated > 0) {
+          OBDal.getInstance().flush();
+          log.info("[ETP-4027] Synced {} order-line currencies → {} on order {}",
+              updated, headerCurrencyId, recordId);
+        }
+      } finally {
+        OBContext.restorePreviousMode();
+      }
+    } catch (Exception e) {
+      log.warn("[ETP-4027] syncLineCurrenciesOnCurrencyPatch failed for {}: {}",
+          recordId, e.getMessage());
     }
   }
 }

@@ -32,6 +32,10 @@ public final class PublicUrlResolver {
   public static final String MCP_PUBLIC_URL_ENV = "ETGO_MCP_PUBLIC_URL";
   public static final String OAUTH2_PUBLIC_URL_PROPERTY = "etgo.oauth2.public.url";
   public static final String OAUTH2_PUBLIC_URL_ENV = "ETGO_OAUTH2_PUBLIC_URL";
+  public static final String APP_BASE_URL_PROPERTY = "etendo.go.app.baseUrl";
+  public static final String APP_BASE_URL_ENV = "ETGO_APP_BASE_URL";
+  private static final String LEGACY_APP_URL_PROPERTY = "etgo.app.url";
+  private static final String LEGACY_APP_URL_ENV = "ETGO_APP_URL";
 
   private static final Logger log = LogManager.getLogger(PublicUrlResolver.class);
 
@@ -67,6 +71,33 @@ public final class PublicUrlResolver {
       return configured;
     }
     return appendPath(buildBaseUrl(request), "oauth2");
+  }
+
+  /**
+   * Returns the public Etendo Go app base URL used in transactional account emails.
+   *
+   * @param request current HTTP request used to build the fallback app URL
+   * @return configured public app URL, request-derived app URL, or null when neither can be resolved
+   */
+  public static String resolveAppBaseUrl(HttpServletRequest request) {
+    String configured = resolveConfiguredAppBaseUrl();
+    if (configured != null) {
+      return configured;
+    }
+    return buildBaseUrl(request);
+  }
+
+  /**
+   * Returns only the configured public Etendo Go app base URL.
+   *
+   * @return configured public app URL, or null when no configured app URL exists
+   */
+  public static String resolveConfiguredAppBaseUrl() {
+    String configured = resolveConfiguredUrl(APP_BASE_URL_PROPERTY, APP_BASE_URL_ENV);
+    if (configured != null) {
+      return configured;
+    }
+    return resolveConfiguredUrl(LEGACY_APP_URL_PROPERTY, LEGACY_APP_URL_ENV);
   }
 
   /**

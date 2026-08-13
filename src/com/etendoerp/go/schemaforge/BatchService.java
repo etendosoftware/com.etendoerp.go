@@ -43,6 +43,7 @@ import org.openbravo.model.ad.ui.Tab;
 
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFSpec;
+import com.etendoerp.go.schemaforge.util.NeoMethodPolicy;
 
 /**
  * Generic transactional batch endpoint.
@@ -448,6 +449,16 @@ public class BatchService {
       return NeoResponse.error(HttpServletResponse.SC_NOT_FOUND,
           "Entity not found in spec '" + spec.getId() + "': " + entityName);
     }
+    // ETP-4254: /batch (and MCP neo_batch, which shares this method) enters the CRUD
+    // pipeline at NeoCrudHandler#handleDefault — i.e. AFTER the method-flag gate in
+    // handleWindowEntityCrud. Without this check a read-only entity (all mutation flags
+    // 'N', e.g. the SII/VeriFactu monitor logs) rejected a direct POST with 405 while
+    // still accepting the very same create when smuggled inside a batch operation.
+    if (!NeoMethodPolicy.isMethodEnabled(sfEntity, NeoMethodPolicy.METHOD_POST)) {
+      return NeoResponse.error(HttpServletResponse.SC_METHOD_NOT_ALLOWED,
+          NeoMethodPolicy.buildNotEnabledMessage(NeoMethodPolicy.METHOD_POST, entityName));
+    }
+
     Tab adTab = sfEntity.getADTab();
     if (adTab == null) {
       return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
@@ -466,18 +477,37 @@ public class BatchService {
       }
     }
 
+    // A custom NeoHandler (e.g. Contacts' locationAddress -> ContactsLocationAddressHandler)
+    // reads its parent id from queryParams, exactly like the real HTTP endpoint it also
+    // serves (POST .../locationAddress?parentId={bpId}) - body-only wouldn't reach it.
+    Map<String, String> queryParams = parentId != null
+        ? Collections.singletonMap(FIELD_PARENT_ID, parentId)
+        : Collections.emptyMap();
+
     NeoContext ctx = NeoContext.builder()
         .specName(spec.getId())
         .entityName(entityName)
         .httpMethod("POST")
         .requestBody(body)
-        .queryParams(Collections.emptyMap())
+        .queryParams(queryParams)
         .adTab(adTab)
         .sfEntity(sfEntity)
         .obContext(OBContext.getOBContext())
         .endpointType(NeoEndpointType.CRUD)
         .build();
 
+    // Entities with a configured Java_Qualifier own logic the generic CRUD path knows
+    // nothing about (e.g. locationAddress creates a nested C_Location from fields the
+    // C_BPartner_Location join entity itself never exposes) - dispatching straight to
+    // handleDefault silently skipped that logic for every /batch op, unlike the direct
+    // HTTP endpoint for the same entity, which always routes through handleWithHooks.
+    // Confirmed via a real import run: a location op created a bare C_BPartner_Location
+    // row with none of its required fields populated, hitting a raw Postgres NOT NULL
+    // violation instead of ever running ContactsLocationAddressHandler.
+    String javaQualifier = sfEntity.getJavaQualifier();
+    if (StringUtils.isNotBlank(javaQualifier)) {
+      return NeoServletSupport.handleWithHooks(javaQualifier, ctx, crudHandler);
+    }
     return crudHandler.handleDefault(ctx);
   }
 

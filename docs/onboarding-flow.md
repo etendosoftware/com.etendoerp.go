@@ -6,6 +6,10 @@ The `POST /sws/go/onboarding` endpoint streams NDJSON progress events while
 setting up a newly registered client. The core method is
 `EtendoGoJwtServlet.ensureOnboardingDataset`, which runs five steps in order.
 Each step either completes or emits an `{"status":"error"}` event and aborts.
+After all steps complete, the endpoint commits the DAL transaction and then sends
+the `environment-ready` transactional email best-effort. Email delivery failure
+is audited by the transactional email safety store and does not roll back the
+already committed environment.
 
 ## Step Sequence
 
@@ -69,6 +73,7 @@ names that the import step processes. Key entries and their rationale:
 | `C_DOCTYPE` | Document types (invoice, order, etc.) |
 | `C_PAYMENTTERM` | Payment terms required for invoicing |
 | `AD_SEQUENCE` / `GL_CATEGORY` | Document-number sequences and GL categories |
+| `M_COSTING_RULE` | Without a costing rule a new tenant computes cost for zero transactions (`M_Transaction.iscostcalculated` stuck `'N'`); the bundled row seeds a validated Standard rule (ETP-4760) |
 
 ## NDJSON Progress Events
 
@@ -86,3 +91,125 @@ On error:
 ```
 
 The final event always carries `"success": true|false`.
+
+## Transactional Email Behavior
+
+The onboarding flow participates in the local-account transactional auth email
+model:
+
+- `/sws/go/register` sends `new-account` after the account commit.
+- `/sws/go/onboarding` sends `environment-ready` only after onboarding commits.
+- Both emails use server-generated links based on `etendo.go.app.baseUrl` or
+  `ETGO_APP_BASE_URL`.
+- Email verification is intentionally out of scope for local accounts; onboarding
+  and login are not blocked by an email verification state because SSO is the
+  next authentication step.
+- `login-alert` remains a registered contract but is not triggered until the SSO
+  and risk-policy model is defined.
+
+## Provider-Agnostic SSO Behavior
+
+SSO account login is provider-agnostic at the account boundary. The public
+endpoint shape is `POST /sws/go/sso/{provider}` and the backend resolves the
+provider-specific verifier from a server-side registry. All providers return the
+same internal assertion shape: provider id, stable external subject, resolved
+email, display name, and whether the provider is authoritative for that email.
+
+Google is the first implementation at `POST /sws/go/sso/google`. It uses Google
+Identity Services, not the deprecated Google Sign-In `gapi.auth2` platform
+library. The web client must render the Google button with `google.accounts.id`
+and should enable FedCM for the button flow.
+
+The Google JavaScript callback flow sends only the Google ID token in
+`credential`; provider payload fields such as `subject`, `email`, or `name` are
+ignored as client authority. If a Google form/login-uri flow later sends a
+`g_csrf_token`, the server validates it against the matching GIS cookie, but the
+callback flow is not gated on that cookie. The server validates the ID token with
+Google, checks the configured audience, and stores the Google `sub` claim as the
+stable external subject.
+
+Configuration:
+
+| Property | Environment variable | Description |
+| --- | --- | --- |
+| `etendo.go.sso.google.clientId` | `ETGO_GOOGLE_CLIENT_ID` | Required Google Web OAuth client ID. Multiple IDs can be comma-separated. |
+
+SSO-only accounts are created without a local password hash. Existing local
+accounts are auto-linked by email only when the provider-specific verifier marks
+that email as authoritative. The Google implementation does this for any email
+verified by Google (where the `email_verified` claim is `true`). No email
+verification fields or login gates are added.
+
+## Onboarding Draft (resume support)
+
+The create-environment wizard can be resumed after a re-login. The in-progress
+wizard state is persisted server-side in `ETGO_ACCOUNT.ONBOARDING_DRAFT`
+(nullable `VARCHAR(4000)` JSON blob: `{ "step": 1|2, "form": { ... } }`).
+
+Endpoints (session-token auth, same Bearer model as `/me`):
+
+- `GET  /sws/go/onboarding/draft` — returns `{ status, draft }`; `draft` is the
+  stored object or `null`. Invalid stored JSON is ignored and reported as `null`.
+- `POST /sws/go/onboarding/draft` — body `{ "draft": { "step", "form" } }` saves;
+  `{ "draft": null }` clears. Only whitelisted wizard form fields are persisted
+  (`fullName`, `businessType`, `clientName`, `currency`, `language`,
+  `countryCode`, `fiscalIdType`, `fiscalIdValue`, `address`, `sector`) and the
+  serialized draft is capped at 4000 chars (400 otherwise).
+
+The draft is cleared automatically (best-effort, non-blocking) by
+`POST /sws/go/onboarding` right after the environment commit succeeds, so a
+completed onboarding never resurrects a stale wizard.
+
+The frontend (`OnboardingPage.jsx`) fetches the draft when an authenticated
+account has zero environments, restores step + form, shows a one-time
+"progress restored" banner, and autosaves changes debounced (1.5 s) while the
+wizard is visible and not running.
+
+## Startup Access Self-Healer (`NeoAccessStartup`)
+
+`com.etendoerp.go.startup.NeoAccessStartup` is an `ApplicationInitializer`
+(`@ApplicationScoped` + `@ComponentProvider.Qualifier`) that grants — idempotently,
+on every application startup — the `WindowAccess` / `ProcessAccess` that automatic
+roles are missing for module-shipped NEO windows/processes.
+
+### Why it exists
+
+Window access for automatic roles (`ad_role.ismanual='N'`) is normally created by
+two DB triggers, both gated by `IF AD_isTriggerEnabled()='N' THEN RETURN;`:
+
+- `AD_WINDOW_TRG` (AFTER INSERT on `AD_WINDOW`) — inserts `ad_window_access` for all
+  existing non-manual roles.
+- `AD_ROLE_TRG` (INSERT/UPDATE on `AD_ROLE`) — rebuilds window/process/form access
+  for non-manual roles by UserLevel (destructive: it DELETEs then re-inserts).
+
+Module windows install via `update.database`, which runs with **triggers disabled**,
+so `AD_WINDOW_TRG` never fires for them. The base GOClient sampledata ships no
+`AD_WINDOW_ACCESS.xml` and its roles do not go through onboarding (`CreateRoleStep`).
+Net result: on a clean install nothing grants those roles access to module windows
+(e.g. "Match Rule" `24963D64E83B4543A7F6BD248CF944EE`, Verifactu/SII/TBAI windows).
+
+### Behavior
+
+1. `initialize()` spawns a daemon thread so it never blocks (nor fails) startup.
+2. The worker first waits for `SessionInfo.isInitialized()` (poll ~100 ms, ~60 s
+   timeout, then proceed) — borrowing a DAL connection too early hits the
+   `ad_context_info` temp-table problem.
+3. Under `OBContext.setAdminMode()`, it selects all roles with `active = true` and
+   `manual = false`, skips the system client (`'0'`), and for each remaining role
+   grants any missing access:
+   - active `SFSpec` of `specType='W'` with a non-null window → `WindowAccess`
+     (client = role's client, org `'0'`, `editableField = true`),
+   - active `SFSpec` of `specType='P'` with a non-null process → `ProcessAccess`,
+   - only when the role does not already have it (existing ids queried per role).
+4. One `flush()` + `commitAndClose()`. On any error it logs and
+   `rollbackAndClose()`s — startup is never allowed to fail.
+
+The grant logic mirrors `CreateRoleStep` exactly, so freshly onboarded tenants and
+self-healed existing tenants converge on the same access set.
+
+### Invariants
+
+- **INSERT-only into the access tables.** It never touches `AD_WINDOW` nor any
+  `AD_ROLE` row, so it can never trigger `AD_ROLE_TRG`'s destructive rebuild.
+- **Idempotent.** Re-running on the next restart grants nothing new.
+- **No SQL migration.** Existing databases self-heal on the next Tomcat restart.

@@ -17,6 +17,9 @@
 
 package com.etendoerp.go.schemaforge;
 
+import java.time.LocalDate;
+import java.time.format.DateTimeFormatter;
+import java.time.format.DateTimeParseException;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
@@ -34,6 +37,7 @@ import org.openbravo.base.model.Entity;
 import org.openbravo.base.model.ModelProvider;
 import org.openbravo.base.model.Property;
 import org.openbravo.base.secureApp.VariablesSecureApp;
+import org.openbravo.base.session.OBPropertiesProvider;
 import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
@@ -131,7 +135,85 @@ class CalloutRequestBuilder {
     // Process auxiliary values (e.g., businessPartner_LOC -> inpcBpartnerId_LOC)
     mapAuxValuesToParams(auxValues, maps, params);
 
+    // Legacy AD callouts re-parse date params through Postgres to_date(), which uses
+    // dateFormat() (DD-MM-YYYY). The frontend/NEO sends ISO 'yyyy-MM-dd', so reformat
+    // Date-typed params to the Etendo UI date format before the callout runs (ETP-4244).
+    reformatDateParams(maps.columns, params);
+
     return params;
+  }
+
+  // ── Date param normalization ───────────────────────────────────────
+
+  /** AD_Reference id for the Date data type. */
+  private static final String DATE_REFERENCE_ID = "15";
+
+  /**
+   * Reformat Date-typed callout params from ISO ('yyyy-MM-dd') to the Etendo UI date
+   * format expected by legacy callouts that wrap inputs in SQL {@code to_date()}.
+   * Values that are not ISO dates (e.g. already DD-MM-YYYY) are left untouched.
+   */
+  private static void reformatDateParams(List<Column> columns, Map<String, String[]> params) {
+    if (columns == null || columns.isEmpty() || params.isEmpty()) {
+      return;
+    }
+    String targetPattern = getCalloutDatePattern();
+    for (Column col : columns) {
+      String refId = col.getReference() != null ? col.getReference().getId() : null;
+      if (!DATE_REFERENCE_ID.equals(refId)) {
+        continue;
+      }
+      String inpName = NeoCalloutService.toInpName(col.getDBColumnName());
+      String[] holder = params.get(inpName);
+      String originalValue = (holder != null && holder.length > 0) ? holder[0] : null;
+      String reformatted = (originalValue != null && !originalValue.isEmpty())
+          ? isoToEtendoDate(originalValue, targetPattern) : null;
+      if (reformatted != null) {
+        params.put(inpName, new String[]{ reformatted });
+      }
+    }
+  }
+
+  /**
+   * Resolve the Etendo UI date pattern from {@code dateFormat.java} (e.g. "dd-MM-yyyy").
+   * Falls back to dd-MM-yyyy, which matches the Postgres {@code dateFormat()} default.
+   */
+  private static volatile String cachedDatePattern = null;
+
+  static String getCalloutDatePattern() {
+    if (cachedDatePattern != null) {
+      return cachedDatePattern;
+    }
+    try {
+      String p = OBPropertiesProvider.getInstance().getOpenbravoProperties()
+          .getProperty("dateFormat.java");
+      if (p != null && !p.trim().isEmpty()) {
+        cachedDatePattern = p.trim();
+        return cachedDatePattern;
+      }
+    } catch (Exception e) {
+      log.debug("Could not read dateFormat.java, defaulting to dd-MM-yyyy: {}", e.getMessage());
+    }
+    cachedDatePattern = "dd-MM-yyyy";
+    return cachedDatePattern;
+  }
+
+  /**
+   * Convert an ISO date string ('yyyy-MM-dd', optionally with a trailing time component)
+   * to {@code targetPattern}. Returns {@code null} when the value is not an ISO date so
+   * the caller can leave it untouched (idempotent if already in the target format).
+   */
+  static String isoToEtendoDate(String value, String targetPattern) {
+    if (value == null || value.length() < 10) {
+      return null;
+    }
+    String datePart = value.substring(0, 10);
+    try {
+      LocalDate parsed = LocalDate.parse(datePart); // strict ISO yyyy-MM-dd
+      return parsed.format(DateTimeFormatter.ofPattern(targetPattern));
+    } catch (DateTimeParseException e) {
+      return null; // not an ISO date — leave the original value as-is
+    }
   }
 
   /**
@@ -149,7 +231,7 @@ class CalloutRequestBuilder {
     }
     String clientId = obCtx.getCurrentClient() != null ? obCtx.getCurrentClient().getId() : null;
     if (clientId != null && !clientId.isEmpty()) {
-      String realOrgId = NeoDefaultsService.resolveFirstOrgForClient(clientId);
+      String realOrgId = NeoDefaultsSqlHelper.resolveFirstOrgForClient(clientId);
       if (realOrgId != null && !realOrgId.isEmpty()) {
         return realOrgId;
       }

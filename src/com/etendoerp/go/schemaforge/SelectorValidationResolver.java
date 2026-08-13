@@ -40,7 +40,16 @@ import org.openbravo.model.ad.domain.Validation;
  */
 public final class SelectorValidationResolver {
   private static final Logger log = LogManager.getLogger(SelectorValidationResolver.class);
+  private static final String UNRESOLVED_MARKER = "__NEO_UNRESOLVED__";
 
+  /**
+   * Detects a nested {@code (SELECT ...)} subquery inside a validation clause. Such clauses
+   * (e.g. {@code X IN (SELECT ... FROM Fin_Finacc_Paymentmethod WHERE ...)}) reference raw SQL
+   * table names that the generic SQL→HQL translator cannot resolve reliably, so they are dropped
+   * here and handled by a dedicated {@code SelectorContextPolicy} instead.
+   */
+  private static final Pattern NESTED_SUBQUERY = Pattern.compile("\\(\\s*SELECT\\b",
+      Pattern.CASE_INSENSITIVE);
 
   private SelectorValidationResolver() {
   }
@@ -48,8 +57,8 @@ public final class SelectorValidationResolver {
   /**
    * Replace @param@ placeholders in OBUISEL where/HQL clauses with values from OBContext.
    * Known context params (AD_Org_ID, AD_Client_ID, AD_User_ID, AD_Role_ID) are resolved
-   * case-insensitively. Unknown params (e.g. @inpmWarehouseId@) that depend on form context
-   * are replaced with NULL since NEO selectors don't have that context yet.
+   * case-insensitively. Clauses containing unknown params (e.g. @inpcAcctschemaId@) are
+   * dropped entirely so they do not evaluate to a permanently-false NULL comparison.
    */
   static SelectorQueryBuilder.HqlWithParams resolveObuiselParams(String whereClause) {
     if (StringUtils.isBlank(whereClause)) {
@@ -78,10 +87,10 @@ public final class SelectorValidationResolver {
         m.appendReplacement(sb,
             java.util.regex.Matcher.quoteReplacement(":" + hqlParamName));
       } else {
-        // Unknown context param — replace with NULL so the condition
-        // evaluates safely rather than crashing with '@' parse error
-        log.debug("Unresolved OBUISEL param @{}@ replaced with NULL", paramName);
-        m.appendReplacement(sb, "NULL");
+        // Unknown context param (e.g. @inpcAcctschemaId@): mark the clause for removal
+        // so it does not produce a permanently-false "= NULL" comparison.
+        log.debug("Unresolved OBUISEL param @{}@, clause will be dropped", paramName);
+        m.appendReplacement(sb, UNRESOLVED_MARKER);
       }
     }
     m.appendTail(sb);
@@ -89,11 +98,13 @@ public final class SelectorValidationResolver {
     String afterDual = SqlToHqlTranslator.unwrapSelectFromDual(sb.toString());
 
     // Strip top-level AND clauses that contain SQL-only functions (AD_ISORGINCLUDED, etc.)
-    // which have no HQL equivalent and would cause a Hibernate parse error.
+    // or an unresolved-param marker — both would break the HQL query.
     List<String> clauses = SqlToHqlTranslator.splitTopLevelAnd(afterDual);
     List<String> safeClauses = new ArrayList<>();
     for (String clause : clauses) {
-      if (SelectorQueryBuilder.SQL_ONLY_FUNCTIONS.matcher(clause).find()) {
+      if (clause.contains(UNRESOLVED_MARKER)) {
+        log.debug("Dropping OBUISEL clause with unresolved context param: {}", clause);
+      } else if (SelectorQueryBuilder.SQL_ONLY_FUNCTIONS.matcher(clause).find()) {
         log.debug("Dropping OBUISEL clause with SQL-only function: {}", clause);
       } else {
         safeClauses.add(clause);
@@ -226,6 +237,13 @@ public final class SelectorValidationResolver {
     // Skip clauses containing SQL-only functions (no HQL equivalent)
     if (SelectorQueryBuilder.SQL_ONLY_FUNCTIONS.matcher(trimmed).find()) {
       log.debug("Skipping validation clause with SQL-only function: {}", trimmed);
+      return null;
+    }
+
+    // Skip clauses with a nested subquery: the generic translator cannot map raw SQL table names
+    // to HQL entities, so these are handled by a dedicated SelectorContextPolicy instead.
+    if (NESTED_SUBQUERY.matcher(trimmed).find()) {
+      log.debug("Skipping validation clause with nested subquery: {}", trimmed);
       return null;
     }
 

@@ -17,9 +17,11 @@
 
 package com.etendoerp.go.schemaforge;
 
+import java.math.BigDecimal;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
+import java.sql.SQLException;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -31,10 +33,13 @@ import javax.inject.Named;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
+import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.materialmgmt.transaction.ShipmentInOut;
+
+import com.etendoerp.go.schemaforge.handlers.DocumentPostingService;
 
 /**
  * Post-hook for the Goods Shipment header entity.
@@ -48,6 +53,21 @@ public class GoodsShipmentHeaderHandler implements NeoHandler {
 
   private static final Logger log = LogManager.getLogger(GoodsShipmentHeaderHandler.class);
   private static final String FIELD_INVOICE_STATUS = "invoiceStatus";
+  private static final String CAN_RETURN_SQL =
+      "SELECT 1 FROM m_inoutline sil" +
+      " WHERE sil.m_inout_id = ? AND sil.isactive = 'Y'" +
+      "   AND ABS(sil.movementqty) > (" +
+      "     SELECT COALESCE(SUM(ABS(rl.movementqty)), 0)" +
+      "     FROM m_inoutline rl" +
+      "     JOIN m_inout r ON r.m_inout_id = rl.m_inout_id" +
+      "     WHERE rl.canceled_inoutline_id = sil.m_inoutline_id" +
+      "       AND rl.isactive = 'Y' AND r.isactive = 'Y'" +
+      "       AND r.docstatus <> 'VO'" +
+      "   )";
+  private static final String FIELD_DOCUMENT_NO = "documentNo";
+  private static final String FIELD_DOCUMENT_STATUS = "documentStatus";
+  private static final String FIELD_MOVEMENT_DATE = "movementDate";
+  private static final String FIELD_ACCOUNTING_DATE = "accountingDate";
 
   @Inject
   private CreateDraftInvoiceHandler createDraftInvoiceHandler;
@@ -55,9 +75,44 @@ public class GoodsShipmentHeaderHandler implements NeoHandler {
   @Inject
   private NeoCloneRecordHandler neoCloneRecordHandler;
 
+  @Inject
+  private CreateReturnReceiptHandler createReturnReceiptHandler;
+
+  @Inject
+  private DocumentPostingService postingService;
+
+  /** Package-private seam so unit tests can inject a mocked {@link DocumentPostingService}. */
+  void setPostingService(DocumentPostingService postingService) {
+    this.postingService = postingService;
+  }
+
   @Override
   public NeoResponse handle(NeoContext context) {
-    return NeoHeaderActionRouter.dispatch(context, createDraftInvoiceHandler, neoCloneRecordHandler);
+    mirrorAccountingDate(context);
+    NeoResponse posting = postingService != null ? postingService.handleAction(context) : null;
+    if (posting != null) {
+      return posting;
+    }
+    return NeoHeaderActionRouter.dispatch(context,
+        createDraftInvoiceHandler, neoCloneRecordHandler, createReturnReceiptHandler);
+  }
+
+  /**
+   * Mirrors the single visible {@code movementDate} field into the hidden
+   * {@code accountingDate} field on the request body, unconditionally, before the default CRUD
+   * path persists it (ETP-4531 — unified date). The user never sees or edits accountingDate
+   * directly; whatever value is saved for movementDate (create or update) must also become the
+   * shipment's accounting date.
+   *
+   * <p><b>ETP-4531 fix:</b> must fire on {@code PATCH} as well as {@code POST}/{@code PUT} — the
+   * live React UI ({@code useEntity.js#getMethod}) always sends {@code PATCH} for edits to an
+   * EXISTING shipment; it never sends a full {@code PUT}. See {@link NeoHandlerUtils#isWriteMethod}.
+   */
+  static void mirrorAccountingDate(NeoContext context) {
+    if (NeoEndpointType.CRUD.equals(context.getEndpointType())
+        && NeoHandlerUtils.isWriteMethod(context.getHttpMethod())) {
+      NeoHandlerUtils.mirrorFieldValue(context.getRequestBody(), FIELD_MOVEMENT_DATE, FIELD_ACCOUNTING_DATE);
+    }
   }
 
   @Override
@@ -72,6 +127,10 @@ public class GoodsShipmentHeaderHandler implements NeoHandler {
         JSONObject shipmentRec = dataArr.getJSONObject(0);
         shipmentRec.put(FIELD_INVOICE_STATUS, computeSingle(context.getRecordId()));
         enrichIssuerOrg(shipmentRec, context.getRecordId());
+        enrichLinkedOrder(shipmentRec, context.getRecordId());
+        enrichLinkedInvoices(shipmentRec, context.getRecordId());
+        enrichReturnReceipts(shipmentRec, context.getRecordId());
+        enrichCanCreateReturn(shipmentRec, context.getRecordId());
       } else {
         annotateBatch(dataArr);
       }
@@ -154,6 +213,128 @@ public class GoodsShipmentHeaderHandler implements NeoHandler {
     }
   }
 
+  @SuppressWarnings("java:S2077")
+  private void enrichLinkedOrder(JSONObject shipmentRec, String shipmentId) {
+    // Union: orders linked via header C_Order_ID + orders linked via imported lines
+    String sql =
+        "SELECT DISTINCT co.c_order_id, co.documentno, co.grandtotal, co.docstatus, cur.iso_code " +
+        "FROM c_order co " +
+        "LEFT JOIN c_currency cur ON cur.c_currency_id = co.c_currency_id " +
+        "WHERE co.isactive = 'Y' AND co.c_order_id IN (" +
+        "  SELECT io.c_order_id FROM m_inout io WHERE io.m_inout_id = ? AND io.c_order_id IS NOT NULL" +
+        "  UNION" +
+        "  SELECT ol.c_order_id FROM m_inoutline il JOIN c_orderline ol ON ol.c_orderline_id = il.c_orderline_id" +
+        "  WHERE il.m_inout_id = ? AND il.isactive = 'Y'" +
+        ")";
+    Connection conn = OBDal.getReadOnlyInstance().getConnection();
+    try (PreparedStatement ps = conn.prepareStatement(sql)) {
+      ps.setString(1, shipmentId);
+      ps.setString(2, shipmentId);
+      JSONArray orders = new JSONArray();
+      try (ResultSet rs = ps.executeQuery()) {
+        while (rs.next()) {
+          JSONObject order = new JSONObject();
+          order.put("id", rs.getString(1));
+          order.put(FIELD_DOCUMENT_NO, rs.getString(2));
+          BigDecimal orderTotal = rs.getBigDecimal(3);
+          order.put("grandTotalAmount", orderTotal != null ? orderTotal : JSONObject.NULL);
+          order.put(FIELD_DOCUMENT_STATUS, rs.getString(4));
+          order.put("currency$_identifier", rs.getString(5));
+          orders.put(order);
+        }
+      }
+      shipmentRec.put("linkedOrders", orders);
+    } catch (Exception e) {
+      log.warn("Could not enrich linked orders for shipment {}: {}", shipmentId, e.getMessage());
+    }
+  }
+
+  @SuppressWarnings("java:S2077")
+  private void enrichLinkedInvoices(JSONObject shipmentRec, String shipmentId) {
+    // Covers both flows with a single scan:
+    // - invoice created FROM this shipment: c_invoiceline.m_inoutline_id = shipment line
+    // - shipment created FROM invoice (via order): shared c_orderline_id
+    String sql =
+        "SELECT DISTINCT i.c_invoice_id, i.documentno, i.grandtotal, i.docstatus, cur.iso_code " +
+        "FROM m_inoutline sil " +
+        "JOIN c_invoiceline il ON (" +
+        "  il.m_inoutline_id = sil.m_inoutline_id " +
+        "  OR (sil.c_orderline_id IS NOT NULL AND il.c_orderline_id = sil.c_orderline_id)" +
+        ") " +
+        "JOIN c_invoice i ON i.c_invoice_id = il.c_invoice_id " +
+        "LEFT JOIN c_currency cur ON cur.c_currency_id = i.c_currency_id " +
+        "WHERE sil.m_inout_id = ? AND sil.isactive = 'Y' " +
+        "  AND i.isactive = 'Y' AND i.docstatus NOT IN ('VO', 'CL')";
+    Connection conn = OBDal.getReadOnlyInstance().getConnection();
+    try (PreparedStatement ps = conn.prepareStatement(sql)) {
+      ps.setString(1, shipmentId);
+      JSONArray invoices = new JSONArray();
+      try (ResultSet rs = ps.executeQuery()) {
+        while (rs.next()) {
+          JSONObject inv = new JSONObject();
+          inv.put("id", rs.getString(1));
+          inv.put(FIELD_DOCUMENT_NO, rs.getString(2));
+          BigDecimal invTotal = rs.getBigDecimal(3);
+          inv.put("grandTotalAmount", invTotal != null ? invTotal : JSONObject.NULL);
+          inv.put(FIELD_DOCUMENT_STATUS, rs.getString(4));
+          inv.put("currency$_identifier", rs.getString(5));
+          invoices.put(inv);
+        }
+      }
+      shipmentRec.put("linkedInvoices", invoices);
+    } catch (Exception e) {
+      log.warn("Could not enrich linked invoices for shipment {}: {}", shipmentId, e.getMessage());
+    }
+  }
+
+  @SuppressWarnings("java:S2077")
+  private void enrichReturnReceipts(JSONObject shipmentRec, String shipmentId) {
+    String sql =
+        "SELECT DISTINCT rio.m_inout_id, rio.documentno, rio.docstatus " +
+        "FROM m_inoutline ril " +
+        "JOIN m_inout rio ON rio.m_inout_id = ril.m_inout_id " +
+        "WHERE ril.canceled_inoutline_id IN (" +
+        "  SELECT sil.m_inoutline_id FROM m_inoutline sil " +
+        "  WHERE sil.m_inout_id = ? AND sil.isactive = 'Y'" +
+        ") AND ril.isactive = 'Y' AND rio.isactive = 'Y'";
+    Connection conn = OBDal.getReadOnlyInstance().getConnection();
+    try (PreparedStatement ps = conn.prepareStatement(sql)) {
+      ps.setString(1, shipmentId);
+      JSONArray returns = new JSONArray();
+      try (ResultSet rs = ps.executeQuery()) {
+        while (rs.next()) {
+          JSONObject ret = new JSONObject();
+          ret.put("id", rs.getString(1));
+          ret.put(FIELD_DOCUMENT_NO, rs.getString(2));
+          ret.put(FIELD_DOCUMENT_STATUS, rs.getString(3));
+          returns.put(ret);
+        }
+      }
+      shipmentRec.put("returnReceipts", returns);
+    } catch (Exception e) {
+      log.warn("Could not enrich return receipts for shipment {}: {}", shipmentId, e.getMessage());
+    }
+  }
+
+  /**
+   * Sets {@code canCreateReturn=true} when at least one shipment line still has
+   * returnable quantity (original qty > sum of non-voided return receipt qty).
+   * Voided returns (docstatus='VO') are excluded so they don't block new returns.
+   */
+  @SuppressWarnings("java:S2077")
+  private void enrichCanCreateReturn(JSONObject shipmentRec, String shipmentId) {
+    Connection conn = OBDal.getReadOnlyInstance().getConnection();
+    try (PreparedStatement ps = conn.prepareStatement(CAN_RETURN_SQL)) {
+      ps.setString(1, shipmentId);
+      try (ResultSet rs = ps.executeQuery()) {
+        boolean canReturn = rs.next();
+        shipmentRec.put("canCreateReturn", canReturn);
+      }
+    } catch (SQLException | JSONException e) {
+      log.warn("Could not compute canCreateReturn for shipment {}: {}", shipmentId, e.getMessage());
+    }
+  }
+
   private static String buildInvoiceStatusSql(String whereClause) {
     return
       "SELECT iol.m_inout_id, " +
@@ -161,7 +342,8 @@ public class GoodsShipmentHeaderHandler implements NeoHandler {
       "       ELSE LEAST(100, ROUND( " +
       "         COALESCE(SUM(GREATEST( " +
       "           COALESCE(msi_qty.qtymatched, 0), " +
-      "           COALESCE(direct_qty.qtyinvoiced, 0) " +
+      "           COALESCE(direct_qty.qtyinvoiced, 0), " +
+      "           COALESCE(ol_qty.qtyinvoiced, 0) " +
       "         )), 0) / SUM(ABS(iol.movementqty)) * 100 " +
       "       )) " +
       "  END " +
@@ -181,7 +363,21 @@ public class GoodsShipmentHeaderHandler implements NeoHandler {
       "  WHERE i2.docstatus NOT IN ('VO','CL','DR') AND i2.isactive = 'Y' " +
       "  GROUP BY il2.m_inoutline_id " +
       ") direct_qty ON direct_qty.m_inoutline_id = iol.m_inoutline_id " +
+      // Invoice created from the order (m_inoutline_id is NULL on the invoice line):
+      // join via c_orderline_id to find the shipment line.
+      "LEFT JOIN ( " +
+      "  SELECT iol2.m_inoutline_id, SUM(ABS(il3.qtyinvoiced)) AS qtyinvoiced " +
+      "  FROM c_invoiceline il3 " +
+      "  JOIN c_invoice i3 ON i3.c_invoice_id = il3.c_invoice_id " +
+      "  JOIN m_inoutline iol2 ON iol2.c_orderline_id = il3.c_orderline_id " +
+      "                        AND iol2.isactive = 'Y' " +
+      "  WHERE i3.docstatus NOT IN ('VO','CL','DR') AND i3.isactive = 'Y' " +
+      "    AND il3.c_orderline_id IS NOT NULL " +
+      "    AND il3.m_inoutline_id IS NULL " +
+      "  GROUP BY iol2.m_inoutline_id " +
+      ") ol_qty ON ol_qty.m_inoutline_id = iol.m_inoutline_id " +
       "WHERE iol.isactive = 'Y' AND " + whereClause + " " +
       "GROUP BY iol.m_inout_id";
   }
+
 }

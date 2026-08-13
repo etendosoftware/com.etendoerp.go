@@ -18,8 +18,13 @@
 package com.etendoerp.go.schemaforge;
 
 import java.math.BigDecimal;
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Date;
+import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 import javax.inject.Inject;
 import javax.inject.Named;
@@ -38,16 +43,24 @@ import org.openbravo.common.actionhandler.createlinesfromprocess.CreateInvoiceLi
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.utility.Utility;
+import org.openbravo.model.common.businesspartner.BusinessPartner;
+import org.openbravo.model.common.currency.Currency;
 import org.openbravo.model.common.enterprise.DocumentType;
 import org.openbravo.model.common.invoice.Invoice;
 import org.openbravo.model.common.order.Order;
 import org.openbravo.model.common.order.OrderLine;
+import org.openbravo.model.financialmgmt.payment.FIN_PaymentMethod;
+import org.openbravo.model.financialmgmt.payment.PaymentTerm;
+import org.openbravo.model.materialmgmt.transaction.ShipmentInOut;
+import org.openbravo.model.materialmgmt.transaction.ShipmentInOutLine;
+import org.openbravo.model.pricing.pricelist.PriceList;
 import org.openbravo.service.db.DalConnectionProvider;
 
 /**
- * NeoHandler that creates a draft Purchase Invoice from a Purchase Order.
+ * NeoHandler that creates a draft Purchase Invoice from a Purchase Order or Goods Receipt.
  * Invoked as an ACTION endpoint via:
  *   POST /sws/neo/purchase-order/header/{recordId}/action/createPurchaseInvoice
+ *   POST /sws/neo/goods-receipt/{entity}/{recordId}/action/createPurchaseInvoice
  */
 @Named("createPurchaseInvoiceHandler")
 public class CreatePurchaseInvoiceHandler implements NeoHandler {
@@ -55,6 +68,8 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
   private static final Logger log = LogManager.getLogger(CreatePurchaseInvoiceHandler.class);
   private static final String ACTION_NAME = "createPurchaseInvoice";
   private static final String SPEC_PURCHASE_ORDER = "purchase-order";
+  private static final String SPEC_GOODS_RECEIPT = "goods-receipt";
+  private static final String FIELD_ORDERED_QUANTITY = "orderedQuantity";
 
   @Inject
   InvoiceFromOrderSupport invoiceFromOrderSupport;
@@ -67,10 +82,12 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
     if (!NeoEndpointType.ACTION.equals(context.getEndpointType())) {
       return null;
     }
-    if (!ACTION_NAME.equals(context.getFieldName()) || !"POST".equals(context.getHttpMethod())) {
+    String specName = context.getSpecName();
+    if (!SPEC_PURCHASE_ORDER.equals(specName) && !SPEC_GOODS_RECEIPT.equals(specName)) {
       return null;
     }
-    if (!SPEC_PURCHASE_ORDER.equals(context.getSpecName())) {
+
+    if (!ACTION_NAME.equals(context.getFieldName()) || !"POST".equals(context.getHttpMethod())) {
       return null;
     }
 
@@ -82,7 +99,9 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
     try {
       OBContext.setAdminMode(true);
       try {
-        Invoice invoice = createFromOrder(recordId);
+        Invoice invoice = SPEC_GOODS_RECEIPT.equals(specName)
+            ? createFromReceipt(recordId, context.getRequestBody())
+            : createFromOrder(recordId);
         OBDal.getInstance().flush();
         // Refresh to pick up trigger-generated documentNo and totals set by CreateInvoiceLinesFromProcess.
         OBDal.getInstance().getSession().refresh(invoice);
@@ -104,7 +123,14 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
       }
     } catch (OBException e) {
       log.warn("Error creating purchase invoice from order {}: {}", recordId, e.getMessage());
-      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, e.getMessage());
+      try {
+        JSONObject body = new JSONObject();
+        body.put("status", "error");
+        body.put("message", e.getMessage());
+        return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, body);
+      } catch (Exception jsonEx) {
+        return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, e.getMessage());
+      }
     } catch (Exception e) {
       log.error("Error creating purchase invoice from order {}: {}", recordId, e.getMessage(), e);
       return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
@@ -149,8 +175,99 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
     OBDal.getInstance().flush();
   }
 
+  /**
+   * Returns the draft-invoice state for a goods receipt:
+   * <ul>
+   *   <li>{@code draftExists} — at least one draft AP invoice exists for this receipt's lines</li>
+   *   <li>{@code pendingExists} — there are still lines not yet covered by any draft/completed invoice</li>
+   *   <li>{@code draftId} / {@code draftDocNo} — first draft's ID and document number (when {@code draftExists})</li>
+   * </ul>
+   * The frontend uses this to decide whether to show "create invoice" (pendingExists) or
+   * navigate to the existing draft ({@code !pendingExists && draftExists}).
+   */
+  protected NeoResponse handleCheck(NeoContext context) {
+    String recordId = context.getRecordId();
+    if (StringUtils.isBlank(recordId)) {
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "Record ID is required");
+    }
+    try {
+      OBContext.setAdminMode(true);
+      try {
+        ShipmentInOut receipt = OBDal.getInstance().get(ShipmentInOut.class, recordId);
+        if (receipt == null) {
+          return NeoResponse.error(HttpServletResponse.SC_NOT_FOUND, "Receipt not found: " + recordId);
+        }
+        // Collect order line IDs from this receipt's lines — used to find linked draft invoices.
+        List<String> orderLineIds = new ArrayList<>();
+        for (ShipmentInOutLine rl : receipt.getMaterialMgmtShipmentInOutLineList()) {
+          if (rl.isActive() && rl.getSalesOrderLine() != null) {
+            orderLineIds.add(rl.getSalesOrderLine().getId());
+          }
+        }
+        List<Invoice> drafts = Collections.emptyList();
+        if (!orderLineIds.isEmpty()) {
+          drafts = OBDal.getInstance().getSession()
+              .createQuery(
+                  "SELECT DISTINCT i FROM Invoice i JOIN i.invoiceLineList il "
+                  + "WHERE il.salesOrderLine.id IN :olIds "
+                  + "AND i.documentStatus = 'DR' AND i.salesTransaction = false "
+                  + "ORDER BY i.creationDate DESC",
+                  Invoice.class)
+              .setParameterList("olIds", orderLineIds)
+              .setMaxResults(5)
+              .list();
+        }
+        boolean pendingExists = !NeoInvoiceSupport.computePendingQtyPerLine(recordId, true).isEmpty();
+        JSONObject data = new JSONObject();
+        data.put("draftExists", !drafts.isEmpty());
+        data.put("pendingExists", pendingExists);
+        if (!drafts.isEmpty()) {
+          Invoice first = drafts.get(0);
+          data.put("draftId", first.getId());
+          data.put("draftDocNo", first.getDocumentNo());
+        }
+        JSONObject responseData = new JSONObject();
+        responseData.put("data", data);
+        JSONObject wrapper = new JSONObject();
+        wrapper.put("response", responseData);
+        return new NeoResponse(200, wrapper);
+      } finally {
+        OBContext.restorePreviousMode();
+      }
+    } catch (Exception e) {
+      log.error("Error checking purchase invoice for receipt {}: {}", recordId, e.getMessage(), e);
+      return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR, e.getMessage());
+    }
+  }
+
   InvoiceFromOrderSupport getSupport() {
     return invoiceFromOrderSupport != null ? invoiceFromOrderSupport : new InvoiceFromOrderSupport();
+  }
+
+  /**
+   * Overrides the invoice's price list with the one explicitly chosen by the user in the
+   * "invoice from goods receipt" confirmation popup (ETP-4028) — reads {@code priceListId}
+   * from the request body. A no-op when absent or blank.
+   *
+   * <p>Must be called BEFORE {@code CreateInvoiceLinesFromProcess} runs: the native
+   * {@code UpdatePricesAndAmounts} hook prices every line off {@code getInvoice().getPriceList()}
+   * read from this already-saved invoice, so overriding it here is sufficient. Currency is
+   * intentionally left untouched: it is always inherited from the receipt (read-only in the
+   * popup), never user-selected here.
+   */
+  private void applyPriceListOverride(Invoice invoice, JSONObject body) {
+    PriceList priceList = resolvePriceListOverride(body);
+    if (priceList != null) {
+      invoice.setPriceList(priceList);
+    }
+  }
+
+  private PriceList resolvePriceListOverride(JSONObject body) {
+    String priceListId = body != null ? body.optString("priceListId", null) : null;
+    if (StringUtils.isBlank(priceListId)) {
+      return null;
+    }
+    return OBDal.getInstance().get(PriceList.class, priceListId);
   }
 
   protected Invoice createFromOrder(String orderId) {
@@ -187,6 +304,7 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
     OBDal.getInstance().getSession().refresh(invoice);
     invoice = getSupport().applyOrderDiscountToInvoice(invoice, orderId, totalDiscountService);
     getSupport().ensureLineGrossAmounts(invoice);
+    getSupport().propagateOrderRateToInvoice(order, invoice);
 
     return invoice;
   }
@@ -199,7 +317,7 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
       try {
         JSONObject entry = new JSONObject();
         entry.put("id", ol.getId());
-        entry.put("orderedQuantity", pending.toPlainString());
+        entry.put(FIELD_ORDERED_QUANTITY, pending.toPlainString());
         selectedLines.put(entry);
       } catch (Exception e) {
         log.warn("Failed to add line {}: {}", ol.getId(), e.getMessage());
@@ -247,5 +365,291 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
         .setMaxResults(1)
         .list();
     return results.isEmpty() ? null : results.get(0);
+  }
+
+  /**
+   * Creates a draft AP Invoice from a Goods Receipt. Quantities come from the
+   * receipt's movement quantities, or from per-line overrides supplied in the
+   * request body ({@code { "lines": [{ "receiptLineId": "...", "quantity": "2" }] }}).
+   * Prices and taxes are resolved via the linked purchase order lines.
+   * Only lines that have a linked {@code C_OrderLine} are included.
+   *
+   * @param receiptId primary key of the source {@code M_InOut} record (issotrx=false)
+   * @param body      optional request JSON; may be null
+   * @return the newly persisted draft {@link Invoice}
+   * @throws OBException if the receipt is not found, has no linked PO, or no invoiceable lines
+   */
+  protected Invoice createFromReceipt(String receiptId, JSONObject body) {
+    ShipmentInOut receipt = OBDal.getInstance().get(ShipmentInOut.class, receiptId);
+    if (receipt == null) {
+      throw new OBException("Goods receipt not found: " + receiptId);
+    }
+
+    Map<String, BigDecimal> qtyOverrides = parseLineOverrides(body);
+
+    Order linkedOrder = receipt.getSalesOrder();
+    if (linkedOrder == null) {
+      // When the receipt was created via NEO import-from-PO, C_Order_ID may not be
+      // set at the header level — fall back to deriving the order from the line links.
+      linkedOrder = deriveOrderFromLines(receipt);
+    }
+    if (linkedOrder == null) {
+      return createFromReceiptNoPo(receipt, qtyOverrides, body);
+    }
+    JSONArray selectedLines = buildSelectedLinesFromReceipt(receipt, qtyOverrides, linkedOrder);
+    if (selectedLines.length() == 0) {
+      throw new OBException("No lines with a linked purchase order to invoice in this goods receipt");
+    }
+
+    DocumentType invoiceDocType = resolveAPInvoiceDocType(linkedOrder);
+    // Read before evicting receipt below — a lazy FK access on a detached entity
+    // would throw LazyInitializationException.
+    Currency receiptCurrency = receipt.getEtgoCurrency();
+
+    // Evict receipt and its lines from the Hibernate session before the first flush.
+    // CreateInvoiceLinesFromProcess internally does saveOrUpdate on M_InOutLine objects
+    // and throws EntityExistsException when those objects are already in the session.
+    for (ShipmentInOutLine rl : receipt.getMaterialMgmtShipmentInOutLineList()) {
+      OBDal.getInstance().getSession().evict(rl);
+    }
+    OBDal.getInstance().getSession().evict(receipt);
+
+    Invoice invoice = NeoCommercialDocumentFactory.createInvoiceFromOrderHeader(
+        linkedOrder, invoiceDocType, false);
+    // ETP-4028: the invoice's currency is always inherited from the receipt's own
+    // (editable-until-confirmed) currency, never from the linked order — that can
+    // diverge from the receipt once the user changes it in draft.
+    invoice.setCurrency(receiptCurrency);
+    applyPriceListOverride(invoice, body);
+
+    OBDal.getInstance().save(invoice);
+    OBDal.getInstance().flush();
+
+    CreateInvoiceLinesFromProcess proc =
+        WeldUtils.getInstanceFromStaticBeanManager(CreateInvoiceLinesFromProcess.class);
+    proc.createInvoiceLinesFromDocumentLines(selectedLines, invoice, OrderLine.class);
+
+    OBDal.getInstance().flush();
+
+    InvoiceLineLinker.linkInvoiceLinesToExistingInouts(invoice.getId());
+
+    OBDal.getInstance().getSession().refresh(invoice);
+    ensureDocumentNo(invoice);
+
+    return invoice;
+  }
+
+  /**
+   * Builds the selectedLines JSON array for a goods receipt.
+   *
+   * <p>For each active receipt line the order line is resolved as follows:
+   * <ol>
+   *   <li>Direct link via {@code C_OrderLine_ID} on the receipt line (normal receipts).</li>
+   *   <li>Product-based match against {@code linkedOrder} (cloned receipts, where
+   *       {@code m_inoutline_trg} forces {@code C_OrderLine_ID} to be null on INSERT
+   *       but the header still carries {@code C_Order_ID}).</li>
+   * </ol>
+   *
+   * <p>Quantities are accumulated per order line ID so that multiple receipt lines
+   * mapping to the same order line produce a single entry instead of duplicates.
+   * Receipt lines absent from {@code qtyOverrides} are skipped when the map is
+   * non-empty: a missing entry means the line has zero pending qty.
+   *
+   * @param linkedOrder the purchase order linked to the receipt header; may be null
+   */
+  protected JSONArray buildSelectedLinesFromReceipt(ShipmentInOut receipt,
+      Map<String, BigDecimal> qtyOverrides, Order linkedOrder) {
+    Map<String, OrderLine> orderLineByProduct = buildOrderLineByProduct(linkedOrder);
+    // Accumulate by order line ID: multiple receipt lines for the same product / order line
+    // must not produce duplicate selectedLines entries — CreateInvoiceLinesFromProcess
+    // creates one invoice line per entry and does not deduplicate.
+    Map<String, BigDecimal> accumulated = new LinkedHashMap<>();
+    for (ShipmentInOutLine rl : receipt.getMaterialMgmtShipmentInOutLineList()) {
+      if (!rl.isActive() || rl.getProduct() == null) {
+        continue;
+      }
+      OrderLine ol = rl.getSalesOrderLine();
+      if (ol == null) {
+        ol = orderLineByProduct.get(rl.getProduct().getId());
+      }
+      if (ol != null) {
+        BigDecimal qty = resolveReceiptLineQty(rl, qtyOverrides);
+        // ETP-4722: quantities can be NEGATIVE since ETP-4567 removed the old
+        // min: 0 constraint (e.g. a return-style receipt line). Only an exact
+        // zero means "nothing left to invoice" — a strictly-positive check
+        // silently dropped every negative-quantity receipt line here.
+        if (qty != null && qty.compareTo(BigDecimal.ZERO) != 0) {
+          accumulated.merge(ol.getId(), qty, BigDecimal::add);
+        }
+      }
+    }
+    JSONArray selectedLines = new JSONArray();
+    for (Map.Entry<String, BigDecimal> e : accumulated.entrySet()) {
+      try {
+        JSONObject entry = new JSONObject();
+        entry.put("id", e.getKey());
+        entry.put(FIELD_ORDERED_QUANTITY, e.getValue().toPlainString());
+        selectedLines.put(entry);
+      } catch (Exception ex) {
+        log.warn("Failed to build selectedLine entry for order line {}: {}", e.getKey(), ex.getMessage());
+      }
+    }
+    return selectedLines;
+  }
+
+  /**
+   * Resolves the quantity to invoice for a single receipt line.
+   * When {@code qtyOverrides} is non-empty (populated from {@code computePendingQtyPerLine}
+   * or from explicit request overrides) only lines present in the map are invoiced —
+   * an absent entry means pending qty is zero and the line must be skipped.
+   * When {@code qtyOverrides} is empty the full movement quantity is used.
+   */
+  private BigDecimal resolveReceiptLineQty(ShipmentInOutLine rl, Map<String, BigDecimal> qtyOverrides) {
+    if (!qtyOverrides.isEmpty()) {
+      return qtyOverrides.get(rl.getId()); // null → skip (pending = 0)
+    }
+    return rl.getMovementQuantity();
+  }
+
+  private Map<String, OrderLine> buildOrderLineByProduct(Order linkedOrder) {
+    Map<String, OrderLine> result = new HashMap<>();
+    if (linkedOrder != null) {
+      for (OrderLine ol : linkedOrder.getOrderLineList()) {
+        if (ol.isActive() && ol.getProduct() != null) {
+          result.putIfAbsent(ol.getProduct().getId(), ol);
+        }
+      }
+    }
+    return result;
+  }
+
+  /**
+   * Creates a draft AP Invoice from a goods receipt with no linked purchase order.
+   * Follows the same pattern as {@code InvoiceGeneratorFromGoodsShipment} but for AP:
+   * doc type API, salesTransaction=false, and purchase defaults from the business partner.
+   * Prices are resolved by {@link CreateInvoiceLinesFromProcess} from the product's
+   * entry in the invoice price list.
+   */
+  protected Invoice createFromReceiptNoPo(ShipmentInOut receipt,
+      Map<String, BigDecimal> qtyOverrides) {
+    return createFromReceiptNoPo(receipt, qtyOverrides, null);
+  }
+
+  protected Invoice createFromReceiptNoPo(ShipmentInOut receipt,
+      Map<String, BigDecimal> qtyOverrides, JSONObject body) {
+    BusinessPartner bp = receipt.getBusinessPartner();
+    if (bp == null) {
+      throw new OBException("Goods receipt has no business partner");
+    }
+    PriceList priceList = resolvePriceListOverride(body);
+    if (priceList == null) {
+      priceList = bp.getPurchasePricelist();
+    }
+    if (priceList == null) {
+      throw new OBException(
+          "Business partner '" + bp.getName() + "' has no purchase price list configured");
+    }
+    PaymentTerm paymentTerms = bp.getPOPaymentTerms();
+    FIN_PaymentMethod paymentMethod = bp.getPOPaymentMethod();
+
+    DocumentType docType = findAPInvoiceDocType(receipt.getClient().getId());
+    if (docType == null) {
+      throw new OBException("No AP Invoice document type found");
+    }
+    // Read before evicting receipt below — a lazy FK access on a detached entity
+    // would throw LazyInitializationException.
+    Currency receiptCurrency = receipt.getEtgoCurrency();
+
+    JSONArray selectedLines = new JSONArray();
+    for (ShipmentInOutLine rl : receipt.getMaterialMgmtShipmentInOutLineList()) {
+      JSONObject entry = buildNoPoLineEntry(rl, qtyOverrides);
+      if (entry != null) {
+        selectedLines.put(entry);
+      }
+    }
+    if (selectedLines.length() == 0) {
+      throw new OBException("No invoiceable lines found in this goods receipt");
+    }
+
+    for (ShipmentInOutLine rl : receipt.getMaterialMgmtShipmentInOutLineList()) {
+      OBDal.getInstance().getSession().evict(rl);
+    }
+    OBDal.getInstance().getSession().evict(receipt);
+
+    Invoice invoice = NeoCommercialDocumentFactory.createInvoiceFromReceiptHeader(
+        receipt, docType, priceList, paymentTerms, paymentMethod, receiptCurrency);
+    OBDal.getInstance().save(invoice);
+    OBDal.getInstance().flush();
+
+    CreateInvoiceLinesFromProcess proc =
+        WeldUtils.getInstanceFromStaticBeanManager(CreateInvoiceLinesFromProcess.class);
+    proc.createInvoiceLinesFromDocumentLines(selectedLines, invoice, ShipmentInOutLine.class);
+
+    OBDal.getInstance().flush();
+    OBDal.getInstance().getSession().refresh(invoice);
+    ensureDocumentNo(invoice);
+
+    return invoice;
+  }
+
+  private JSONObject buildNoPoLineEntry(ShipmentInOutLine rl, Map<String, BigDecimal> qtyOverrides) {
+    if (!rl.isActive() || rl.getProduct() == null || rl.getUOM() == null) {
+      return null;
+    }
+    BigDecimal qty = qtyOverrides.containsKey(rl.getId())
+        ? qtyOverrides.get(rl.getId())
+        : rl.getMovementQuantity();
+    // ETP-4722: same sign-unaware bug as buildSelectedLinesFromReceipt above —
+    // only an exact zero means "nothing to invoice", negative qty is valid.
+    if (qty == null || qty.compareTo(BigDecimal.ZERO) == 0) {
+      return null;
+    }
+    try {
+      JSONObject entry = new JSONObject();
+      entry.put("id", rl.getId());
+      entry.put(FIELD_ORDERED_QUANTITY, qty.toPlainString());
+      return entry;
+    } catch (Exception e) {
+      log.warn("Failed to add receipt line {} to invoice lines: {}", rl.getId(), e.getMessage());
+      return null;
+    }
+  }
+
+  private Order deriveOrderFromLines(ShipmentInOut receipt) {
+    for (ShipmentInOutLine rl : receipt.getMaterialMgmtShipmentInOutLineList()) {
+      if (rl.getSalesOrderLine() != null && rl.getSalesOrderLine().getSalesOrder() != null) {
+        return rl.getSalesOrderLine().getSalesOrder();
+      }
+    }
+    return null;
+  }
+
+  private Map<String, BigDecimal> parseLineOverrides(JSONObject body) {
+    Map<String, BigDecimal> overrides = new HashMap<>();
+    if (body == null) {
+      return overrides;
+    }
+    JSONArray linesArr = body.optJSONArray("lines");
+    if (linesArr == null) {
+      return overrides;
+    }
+    for (int i = 0; i < linesArr.length(); i++) {
+      try {
+        JSONObject entry = linesArr.getJSONObject(i);
+        String lineId = entry.optString("receiptLineId", null);
+        String qtyStr = entry.optString("quantity", null);
+        if (StringUtils.isNotBlank(lineId) && StringUtils.isNotBlank(qtyStr)) {
+          BigDecimal qty = new BigDecimal(qtyStr);
+          // ETP-4722: an explicit override can legitimately be negative
+          // (partial invoicing of a negative-quantity receipt/shipment line).
+          if (qty.compareTo(BigDecimal.ZERO) != 0) {
+            overrides.put(lineId, qty);
+          }
+        }
+      } catch (Exception e) {
+        log.warn("Failed to parse line override at index {}: {}", i, e.getMessage());
+      }
+    }
+    return overrides;
   }
 }

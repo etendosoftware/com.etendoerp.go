@@ -19,7 +19,6 @@ import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.criterion.MatchMode;
 import org.hibernate.criterion.Restrictions;
 import org.openbravo.base.HttpBaseServlet;
-import org.openbravo.base.weld.WeldUtils;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
@@ -51,6 +50,7 @@ public class NeoServlet extends HttpBaseServlet {
 
   private static final String METHOD_DELETE = "DELETE";
   private static final String METHOD_PATCH = "PATCH";
+  private static final String DOCUMENT_DOWNLOAD_PREFIX = "/document-download/";
   static final String ERR_ENTITY_NOT_FOUND = "Entity not found: ";
   static final String ERR_NO_LINKED_TAB = "Entity has no linked AD_Tab: ";
   public static final String ACTION_REQUEST_BODY_ATTR = "neo.action.requestBody";
@@ -59,7 +59,12 @@ public class NeoServlet extends HttpBaseServlet {
   private final NeoBuiltInEndpointHandler builtInEndpointHandler =
       new NeoBuiltInEndpointHandler(this, discoveryHandler);
   final NeoButtonHandler buttonHandler = new NeoButtonHandler();
-  final NeoDisplayLogicHandler displayLogicHandler = new NeoDisplayLogicHandler();
+  // NOTE: evaluate-display is routed through NeoDisplayLogicHelper (a static utility, see
+  // NeoSubEndpointDispatcher.handleEvaluateDisplaySubEndpoint), not through NeoDisplayLogicHandler.
+  // The latter's buildEvalContext()/resolveAccountingDimensions() never set $IsAcctDimCentrally,
+  // so @ACCT_DIMENSION_DISPLAY@ macros always evaluated false for centrally-maintained clients.
+  // See ETP-4529. NeoDisplayLogicHandler is left in place (with its own tests) as a known-dead
+  // class pending a follow-up cleanup decision -- not deleted as part of this fix.
   // Package-private so sibling collaborators (BatchService) can dispatch through
   // the same default CRUD pipeline without going via HTTP.
   final NeoCrudHandler crudHandler = new NeoCrudHandler(this);
@@ -72,6 +77,10 @@ public class NeoServlet extends HttpBaseServlet {
   final NeoDefaultsEndpoint defaultsEndpoint = new NeoDefaultsEndpoint(this);
   final NeoProcessReportEndpoint processReportEndpoint = new NeoProcessReportEndpoint(this);
   private final BatchService batchService = new BatchService(this);
+  private final NeoSimSearchEndpoint simSearchEndpoint = new NeoSimSearchEndpoint();
+  private final NeoGoWebhookBridge goWebhookBridge = new NeoGoWebhookBridge(this);
+  private final NeoPseudoSpecDispatcher pseudoSpecDispatcher =
+      new NeoPseudoSpecDispatcher(this, batchService, simSearchEndpoint, goWebhookBridge);
 
   @Override
   public void doGet(HttpServletRequest request, HttpServletResponse response) throws IOException {
@@ -115,6 +124,13 @@ public class NeoServlet extends HttpBaseServlet {
       return;
     }
 
+    // Download links are intentionally unauthenticated: the signed, expiring token carries the
+    // record/client scope and NeoDocumentDownloadService validates it before serving any file.
+    if ("GET".equals(method) && isDocumentDownloadPath(request.getPathInfo())) {
+      handleDocumentDownload(request, response);
+      return;
+    }
+
     if (!authenticator.authenticateRequest(request, response)) {
       return;
     }
@@ -130,24 +146,41 @@ public class NeoServlet extends HttpBaseServlet {
         return;
       }
 
-      // Generic transactional batch endpoint: POST /sws/neo/batch
-      //   Runs an ordered list of CRUD ops in one OBDal transaction with
-      //   $ref:<opId> substitution between ops. Same primitive is consumed by
-      //   the React UI (composite-document ingest) and external agents (MCP).
-      //   Find-or-create logic stays with the caller — no per-window server code.
-      if ("batch".equals(pathInfo.specName)) {
-        if (!"POST".equals(method)) {
-          sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
-              "Batch endpoint only supports POST");
-          return;
-        }
-        batchService.handle(request, response);
+      if (pseudoSpecDispatcher.handle(pathInfo, method, request, response)) {
         return;
       }
       requestRouter.handleSpecRequest(pathInfo, method, request, response);
     } catch (Exception e) {
       log.error("Error processing NEO request: {}", e.getMessage(), e);
       sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, NeoErrorSanitizer.sanitize(e));
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  private boolean isDocumentDownloadPath(String pathInfo) {
+    return pathInfo != null && pathInfo.startsWith(DOCUMENT_DOWNLOAD_PREFIX);
+  }
+
+  private void handleDocumentDownload(HttpServletRequest request, HttpServletResponse response)
+      throws IOException {
+    String token = StringUtils.substringAfter(request.getPathInfo(), DOCUMENT_DOWNLOAD_PREFIX);
+    if (StringUtils.isBlank(token)) {
+      sendError(response, HttpServletResponse.SC_BAD_REQUEST, "Missing download token");
+      return;
+    }
+    try {
+      OBContext.setAdminMode(true);
+      NeoDocumentDownloadService.handle(token, response);
+    } catch (Exception e) {
+      log.error("Error processing document download request", e);
+      if (!response.isCommitted()) {
+        response.reset();
+        response.setStatus(HttpServletResponse.SC_INTERNAL_SERVER_ERROR);
+        response.setContentType("text/plain");
+        response.setCharacterEncoding(StandardCharsets.UTF_8.name());
+        response.getWriter().write("Document download failed");
+      }
     } finally {
       OBContext.restorePreviousMode();
     }
@@ -167,27 +200,6 @@ public class NeoServlet extends HttpBaseServlet {
     return results.isEmpty() ? null : results.get(0);
   }
 
-  /**
-   * Check if the given HTTP method is enabled on the entity.
-   */
-  private boolean isMethodEnabled(SFEntity entity, String method) {
-    switch (method) {
-      case "GET":
-        return Boolean.TRUE.equals(entity.isGet())
-            || Boolean.TRUE.equals(entity.isGetByID());
-      case "POST":
-        return Boolean.TRUE.equals(entity.isPost());
-      case "PUT":
-        return Boolean.TRUE.equals(entity.isPut());
-      case METHOD_PATCH:
-        return Boolean.TRUE.equals(entity.isPatch());
-      case METHOD_DELETE:
-        return Boolean.TRUE.equals(entity.isDelete());
-      default:
-        return false;
-    }
-  }
-
   Map<String, String> extractQueryParams(HttpServletRequest request) {
     Map<String, String> params = new HashMap<>();
     Enumeration<String> names = request.getParameterNames();
@@ -201,51 +213,20 @@ public class NeoServlet extends HttpBaseServlet {
   /**
    * Handle request with CDI hooks discovered via Java_Qualifier.
    * The handler acts as a pre+post hook (the handler decides via convention).
+   *
+   * <p>{@code request}/{@code response} are kept in the signature for the HTTP call sites
+   * that already pass them, but the dispatch logic itself needs neither — it lives in
+   * {@link NeoServletSupport#handleWithHooks(String, NeoContext, NeoCrudHandler)} so that
+   * {@link BatchService}'s non-HTTP per-op create path can reach the exact same hook
+   * dispatch without needing servlet request/response objects it does not have.
    */
   NeoResponse handleWithHooks(String javaQualifier, NeoContext context,
       HttpServletRequest request, HttpServletResponse response) {
-    try {
-      NeoHandler handler = lookupHandler(javaQualifier);
-      if (handler == null) {
-        log.warn("No handler found for qualifier '{}', falling back to default", javaQualifier);
-        return crudHandler.handleDefault(context);
-      }
-
-      // Pre-hook
-      NeoResponse preResult = handler.handle(context);
-      if (preResult != null) {
-        context.setPreviousResult(preResult);
-        NeoResponse afterResult = handler.afterHandle(context);
-        return afterResult != null ? afterResult : preResult;
-      }
-
-      // Default service
-      NeoResponse defaultResult = crudHandler.handleDefault(context);
-
-      // Post-hook
-      context.setPreviousResult(defaultResult);
-      NeoResponse afterResult = handler.afterHandle(context);
-      return afterResult != null ? afterResult : defaultResult;
-    } catch (Exception e) {
-      log.error("Error executing hook handler: {}", javaQualifier, e);
-      return NeoResponse.error(500, "Hook handler error: " + e.getMessage());
-    }
+    return NeoServletSupport.handleWithHooks(javaQualifier, context, crudHandler);
   }
 
   NeoHandler lookupHandler(String qualifier) {
-    try {
-      for (NeoHandler handler : WeldUtils.getInstances(NeoHandler.class)) {
-        javax.inject.Named named = handler.getClass().getAnnotation(javax.inject.Named.class);
-        if (named != null && qualifier.equals(named.value())) {
-          return handler;
-        }
-      }
-      log.warn("No NeoHandler found with @Named(\"{}\")", qualifier);
-      return null;
-    } catch (Exception e) {
-      log.error("Failed to lookup handler with qualifier: {}", qualifier, e);
-      return null;
-    }
+    return NeoServletSupport.lookupHandler(qualifier);
   }
 
   void writeResponse(HttpServletResponse response, NeoResponse neoResponse)

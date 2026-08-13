@@ -1,0 +1,124 @@
+/*
+ * *************************************************************************
+ * The contents of this file are subject to the Etendo License
+ * (the "License"), you may not use this file except in compliance with
+ * the License.
+ * You may obtain a copy of the License at
+ * https://github.com/etendosoftware/etendo_core/blob/main/legal/Etendo_license.txt
+ * Software distributed under the License is distributed on an
+ * "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, either express or
+ * implied. See the License for the specific language governing rights
+ * and limitations under the License.
+ * All portions are Copyright (C) 2021-2026 FUTIT SERVICES, S.L
+ * All Rights Reserved.
+ * Contributor(s): Futit Services S.L.
+ * *************************************************************************
+ */
+
+package com.etendoerp.go.schemaforge;
+
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
+import org.codehaus.jettison.json.JSONArray;
+import org.codehaus.jettison.json.JSONObject;
+import org.hibernate.query.NativeQuery;
+import org.openbravo.dal.service.OBDal;
+
+/**
+ * Injects the latest TBAI sync status ({@code tbaiSyncEstado}) into a NEO list response.
+ *
+ * <p>Reads from {@code tbai_syncinvoice} using a single portable SQL query (ROW_NUMBER window
+ * function, compatible with both PostgreSQL and Oracle) so only one round-trip is needed for the
+ * whole page. If the TBAI module is not installed the table will not exist; the resulting
+ * {@link org.hibernate.exception.SQLGrammarException} is caught and logged at DEBUG level so the
+ * main response is returned unmodified. Unexpected exceptions are logged at ERROR level.
+ */
+class TbaiSyncStatusInjector {
+
+  private static final Logger log = LogManager.getLogger(TbaiSyncStatusInjector.class);
+
+  private TbaiSyncStatusInjector() {
+  }
+
+  /**
+   * Injects {@code tbaiSyncEstado} into each record in {@code data} that has a matching row in
+   * {@code tbai_syncinvoice}. Records with no TBAI sync row are left unchanged.
+   *
+   * @param data
+   *     the {@code response.data} array from a NEO GET response; modified in-place
+   */
+  static void inject(JSONArray data) {
+    if (data == null) {
+      return;
+    }
+    try {
+      List<String> ids = new ArrayList<>(data.length());
+      for (int i = 0; i < data.length(); i++) {
+        String id = data.getJSONObject(i).optString("id", null);
+        if (id != null && !id.isEmpty()) {
+          ids.add(id);
+        }
+      }
+      if (ids.isEmpty()) {
+        return;
+      }
+      applyTbaiMap(data, fetchLatestByInvoice(ids));
+    } catch (org.hibernate.exception.SQLGrammarException e) {
+      log.debug("Could not inject tbaiSyncEstado (TBAI module may not be installed): {}", e.getMessage());
+    } catch (Exception e) {
+      log.error("Unexpected error injecting tbaiSyncEstado: ", e);
+    }
+  }
+
+  /**
+   * Writes {@code tbaiSyncEstado} from {@code tbaiMap} into each matching record in {@code data}.
+   * Package-private to allow direct unit testing without a database.
+   */
+  static void applyTbaiMap(JSONArray data, Map<String, String> tbaiMap) throws org.codehaus.jettison.json.JSONException {
+    for (int i = 0; i < data.length(); i++) {
+      JSONObject rec = data.getJSONObject(i);
+      String id = rec.optString("id", null);
+      if (id != null) {
+        String estado = tbaiMap.get(id);
+        if (estado != null) {
+          rec.put("tbaiSyncEstado", estado);
+        }
+      }
+    }
+  }
+
+  @SuppressWarnings("unchecked")
+  private static Map<String, String> fetchLatestByInvoice(List<String> invoiceIds) {
+    String sql = "SELECT c_invoice_id, estado FROM ("
+        + "  SELECT c_invoice_id, estado,"
+        + "    ROW_NUMBER() OVER (PARTITION BY c_invoice_id ORDER BY created DESC) AS rn"
+        + "  FROM tbai_syncinvoice"
+        + "  WHERE c_invoice_id IN (:invoiceIds)"
+        + ") t WHERE rn = 1";
+    // NOTE: must NOT pass Object[].class as a second argument to createNativeQuery(String, Class).
+    // That JPA-style overload treats the Class argument as an *entity* to map results onto
+    // (Session#createNativeQuery(String, Class) -> addEntity(alias, resultClass.getName(), ...)
+    // under the hood in Hibernate 5.6), and Object[] is not a mapped entity — every call threw a
+    // MappingException that was swallowed by the generic catch in inject() below, silently
+    // producing an empty map on every GET (list and detail) regardless of real data. The correct
+    // idiom for a multi-column scalar native query, used everywhere else in this package, is the
+    // single-argument createNativeQuery(String), whose untyped NativeQuery already yields Object[]
+    // rows for multi-column selects.
+    NativeQuery<Object[]> nq = OBDal.getInstance().getSession()
+        .createNativeQuery(sql);
+    nq.setParameterList("invoiceIds", invoiceIds);
+    List<Object[]> rows = nq.list();
+    Map<String, String> result = new HashMap<>(rows.size());
+    for (Object[] row : rows) {
+      if (row[0] != null) {
+        result.put((String) row[0], (String) row[1]);
+      }
+    }
+    return result;
+  }
+}

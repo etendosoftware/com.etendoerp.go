@@ -16,36 +16,30 @@
  */
 package com.etendoerp.go.onboarding;
 
-import java.io.BufferedReader;
-import java.io.IOException;
 import java.io.InputStream;
-import java.io.InputStreamReader;
-import java.io.StringWriter;
-import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.ArrayList;
-import java.util.Comparator;
+import java.util.Date;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
-import javax.xml.XMLConstants;
 import javax.xml.parsers.DocumentBuilder;
-import javax.xml.parsers.DocumentBuilderFactory;
-import javax.xml.transform.OutputKeys;
-import javax.xml.transform.Transformer;
-import javax.xml.transform.TransformerFactory;
-import javax.xml.transform.dom.DOMSource;
-import javax.xml.transform.stream.StreamResult;
 
 import org.openbravo.base.exception.OBException;
 import org.openbravo.base.model.Entity;
-import org.openbravo.base.model.ModelProvider;
 import org.openbravo.base.model.Property;
 import org.w3c.dom.Document;
 import org.w3c.dom.Element;
 import org.w3c.dom.Node;
 import org.w3c.dom.NodeList;
+
+import com.etendoerp.go.onboarding.OnboardingSourceFiles.SourceFile;
+import com.etendoerp.go.onboarding.OnboardingSourceFiles.SourceFileProvider;
 
 /**
  * Converts GOClient sourcedata into Openbravo entity XML so it can be consumed by
@@ -53,26 +47,39 @@ import org.w3c.dom.NodeList;
  */
 public class OnboardingDatasetNormalizer {
 
-  private static final String SAMPLE_DATA_RESOURCE_ROOT =
-      "com/etendoerp/go/onboarding/sampledata";
-  private static final String SAMPLE_DATA_RESOURCE_DIRECTORY =
-      SAMPLE_DATA_RESOURCE_ROOT + "/GOClient";
-  private static final String SAMPLE_DATA_INDEX_RESOURCE =
-      SAMPLE_DATA_RESOURCE_ROOT + "/index.txt";
-  private static final String RESOURCE_PATH_SEPARATOR = "/";
+  private static final String CLASS_LOADER_REQUIRED = "classLoader is required";
+  private static final String AD_ORG_ID_COLUMN = "AD_ORG_ID";
+
+  /**
+   * Matches a plain, ddlutils-shaped timestamp literal ("yyyy-MM-dd HH:mm:ss[.f...]") as bundled
+   * sample-data XML files carry them (required by {@code org.apache.ddlutils.io.converters
+   * .TimestampConverter}'s {@code java.sql.Timestamp.valueOf()} at install time via {@code
+   * org.openbravo.ddlutils.task.ImportSampledata}). Group 1 is the date part, group 2 the
+   * time-of-day part (with optional fractional seconds).
+   */
+  private static final Pattern DDLUTILS_TIMESTAMP_SHAPE =
+      Pattern.compile("^(\\d{4}-\\d{2}-\\d{2}) (\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?)$");
 
   private final SourceFileProvider sourceFileProvider;
   private final EntityResolver entityResolver;
+  private final ReferenceIdResolver referenceIdResolver;
   /**
    * Creates a normalizer that reads the packaged GOClient sourcedata from the runtime classpath.
    */
   public OnboardingDatasetNormalizer() {
-    this(classpathSourceFileProvider(defaultClassLoader()), modelProviderEntityResolver());
+    this(OnboardingSourceFiles.classpathSourceFileProvider(OnboardingSourceFiles.defaultClassLoader()),
+        OnboardingDefaultResolvers.modelProviderEntityResolver());
   }
 
   OnboardingDatasetNormalizer(ClassLoader classLoader, EntityResolver entityResolver) {
-    this(classpathSourceFileProvider(Objects.requireNonNull(classLoader, "classLoader is required")),
-        entityResolver);
+    this(OnboardingSourceFiles.classpathSourceFileProvider(
+        Objects.requireNonNull(classLoader, CLASS_LOADER_REQUIRED)), entityResolver);
+  }
+
+  OnboardingDatasetNormalizer(ClassLoader classLoader, EntityResolver entityResolver,
+      ReferenceIdResolver referenceIdResolver) {
+    this(OnboardingSourceFiles.classpathSourceFileProvider(
+        Objects.requireNonNull(classLoader, CLASS_LOADER_REQUIRED)), entityResolver, referenceIdResolver);
   }
 
   /**
@@ -81,19 +88,32 @@ public class OnboardingDatasetNormalizer {
    * @param sampleDataDirectory the directory that contains the GOClient sourcedata XML files
    */
   public OnboardingDatasetNormalizer(Path sampleDataDirectory) {
-    this(sampleDataDirectory, modelProviderEntityResolver());
+    this(sampleDataDirectory, OnboardingDefaultResolvers.modelProviderEntityResolver());
   }
 
   OnboardingDatasetNormalizer(Path sampleDataDirectory, EntityResolver entityResolver) {
-    this(directorySourceFileProvider(Objects.requireNonNull(sampleDataDirectory,
+    this(OnboardingSourceFiles.directorySourceFileProvider(Objects.requireNonNull(sampleDataDirectory,
         "sampleDataDirectory is required")), entityResolver);
+  }
+
+  OnboardingDatasetNormalizer(Path sampleDataDirectory, EntityResolver entityResolver,
+      ReferenceIdResolver referenceIdResolver) {
+    this(OnboardingSourceFiles.directorySourceFileProvider(Objects.requireNonNull(sampleDataDirectory,
+        "sampleDataDirectory is required")), entityResolver, referenceIdResolver);
   }
 
   private OnboardingDatasetNormalizer(SourceFileProvider sourceFileProvider,
       EntityResolver entityResolver) {
+    this(sourceFileProvider, entityResolver, OnboardingDefaultResolvers.dalReferenceIdResolver());
+  }
+
+  private OnboardingDatasetNormalizer(SourceFileProvider sourceFileProvider,
+      EntityResolver entityResolver, ReferenceIdResolver referenceIdResolver) {
     this.sourceFileProvider = Objects.requireNonNull(sourceFileProvider,
         "sourceFileProvider is required");
     this.entityResolver = Objects.requireNonNull(entityResolver, "entityResolver is required");
+    this.referenceIdResolver = Objects.requireNonNull(referenceIdResolver,
+        "referenceIdResolver is required");
   }
 
   /**
@@ -112,29 +132,35 @@ public class OnboardingDatasetNormalizer {
    * @return the normalized Openbravo XML ready to be imported
    */
   public String buildDatasetXml(String targetOrganizationId) {
-    DocumentBuilder builder = newDocumentBuilder();
+    DocumentBuilder builder = OnboardingDatasetXmlSupport.newDocumentBuilder();
     Document output = builder.newDocument();
     Element root = output.createElement("Openbravo");
     root.setAttribute("xmlns:xsi", "http://www.w3.org/2001/XMLSchema-instance");
     output.appendChild(root);
 
-    for (SourceFile sourceFile : listIncludedSourceFiles()) {
-      appendEntities(sourceFile, builder, output, root, targetOrganizationId);
+    // Per-build state so repeated calls never leak excluded ids into one another.
+    RowExclusionFilter rowExclusionFilter = new RowExclusionFilter();
+    for (SourceFile sourceFile : sourceFileProvider.listIncludedSourceFiles()) {
+      appendEntities(sourceFile, builder, output, root, targetOrganizationId, rowExclusionFilter);
     }
 
-    return toXml(output);
+    return OnboardingDatasetXmlSupport.toXml(output);
   }
 
   private void appendEntities(SourceFile sourceFile, DocumentBuilder builder, Document output, Element root,
-      String targetOrganizationId) {
-    Entity entity = resolveEntity(tableName(sourceFile.fileName));
+      String targetOrganizationId, RowExclusionFilter rowExclusionFilter) {
+    Entity entity = resolveEntity(OnboardingSourceFiles.tableName(sourceFile.fileName));
     try (InputStream inputStream = sourceFile.openStream()) {
       Document source = builder.parse(inputStream);
       NodeList childNodes = source.getDocumentElement().getChildNodes();
       for (int i = 0; i < childNodes.getLength(); i++) {
         Node child = childNodes.item(i);
         if (child instanceof Element) {
-          root.appendChild(convertRow((Element) child, entity, targetOrganizationId, output));
+          Element converted = convertRow((Element) child, entity, targetOrganizationId, output,
+              rowExclusionFilter);
+          if (converted != null) {
+            root.appendChild(converted);
+          }
         }
       }
     } catch (Exception e) {
@@ -144,7 +170,12 @@ public class OnboardingDatasetNormalizer {
   }
 
   private Element convertRow(Element sourceRow, Entity entity, String targetOrganizationId,
-      Document output) {
+      Document output, RowExclusionFilter rowExclusionFilter) {
+    Map<String, String> rawColumns = readRawColumns(sourceRow);
+    if (rowExclusionFilter.isExcludedRow(entity.getTableName(), rawColumns)) {
+      return null;
+    }
+
     Element entityElement = output.createElement(entity.getName());
     RowConversionState rowState = new RowConversionState();
 
@@ -171,11 +202,11 @@ public class OnboardingDatasetNormalizer {
     String columnName = sourceField.getTagName();
     String rawValue = normalizeFieldValue(sourceField.getTextContent());
 
-    if (shouldSkipColumn(columnName, rawValue)) {
+    if (shouldSkipColumn(entity, columnName, rawValue)) {
       return;
     }
 
-    if ("AD_ORG_ID".equals(columnName)) {
+    if (AD_ORG_ID_COLUMN.equals(columnName)) {
       rowState.sourceOrganizationId = rawValue;
       return;
     }
@@ -193,26 +224,78 @@ public class OnboardingDatasetNormalizer {
     }
   }
 
+  /**
+   * Reads the raw sourcedata columns of a row into a case-insensitive map (keys upper-cased),
+   * so row-level filters can inspect ownership and parent references before conversion.
+   */
+  private Map<String, String> readRawColumns(Element sourceRow) {
+    Map<String, String> columns = new HashMap<>();
+    NodeList children = sourceRow.getChildNodes();
+    for (int i = 0; i < children.getLength(); i++) {
+      Node child = children.item(i);
+      if (child instanceof Element) {
+        Element field = (Element) child;
+        columns.put(field.getTagName().toUpperCase(), normalizeFieldValue(field.getTextContent()));
+      }
+    }
+    return columns;
+  }
+
   private String normalizeFieldValue(String rawValue) {
     return rawValue == null ? null : rawValue.trim();
   }
 
-  private boolean shouldSkipColumn(String columnName, String rawValue) {
+  private boolean shouldSkipColumn(Entity entity, String columnName, String rawValue) {
     return rawValue == null
         || rawValue.isEmpty()
         || "AD_CLIENT_ID".equals(columnName)
-        || OnboardingDatasetDefinition.getStrippedFields().contains(columnName);
+        || OnboardingDatasetDefinition.isStrippedColumn(entity.getTableName(), columnName);
   }
 
   private void appendPropertyElement(Document output, Element entityElement, Property property,
       String rawValue) {
     Element propertyElement = output.createElement(property.getName());
     if (property.isPrimitive()) {
-      propertyElement.setTextContent(rawValue);
+      propertyElement.setTextContent(normalizeDateTimeValueIfNeeded(property, rawValue));
     } else {
-      propertyElement.setAttribute("id", mapReferenceId(rawValue));
+      propertyElement.setAttribute("id", resolveReferenceId(property, rawValue));
     }
     entityElement.appendChild(propertyElement);
+  }
+
+  /**
+   * Reformats a ddlutils-shaped ("yyyy-MM-dd HH:mm:ss[.f...]") date/timestamp value into the
+   * strict ISO "yyyy-MM-dd'T'HH:mm:ss.S'Z'" shape required by the RUNTIME onboarding importer's
+   * {@code org.openbravo.base.model.domaintype.DateDomainType}/{@code DatetimeDomainType} (ETP-4760).
+   *
+   * <p>Bundled sample-data XML files have TWO independent consumers with OPPOSITE format
+   * requirements for the exact same literal: {@code org.openbravo.ddlutils.task.ImportSampledata}
+   * (the install-time seeder) requires the plain space-separated shape ({@code
+   * java.sql.Timestamp.valueOf()}, which rejects a "T"/"Z" ISO shape), while this runtime importer
+   * requires the opposite (no space-separated fallback for {@code DatetimeDomainType}, the
+   * "DateTime" AD_Reference_ID=16 type). No single literal in the SOURCE file satisfies both, so
+   * this reformatting is applied ONLY to this in-memory, runtime-only copy of the value — the
+   * bundled XML file itself is never rewritten and keeps the ddlutils-compatible shape.
+   *
+   * <p>A value that is not a plain date/timestamp property (checked via {@link
+   * Property#getPrimitiveType()}, which is {@code null} for non-date properties and for any
+   * property whose domain type a caller has not fully stubbed) or does not match the ddlutils
+   * shape (e.g. already ISO, blank, non-date text) is returned unchanged.
+   *
+   * @param property the property the raw value belongs to
+   * @param rawValue the raw value read from the bundled XML, already trimmed
+   * @return the reformatted value when applicable, otherwise {@code rawValue} unchanged
+   */
+  private String normalizeDateTimeValueIfNeeded(Property property, String rawValue) {
+    Class<?> primitiveType = property.getPrimitiveType();
+    if (primitiveType == null || !Date.class.isAssignableFrom(primitiveType)) {
+      return rawValue;
+    }
+    Matcher matcher = DDLUTILS_TIMESTAMP_SHAPE.matcher(rawValue);
+    if (!matcher.matches()) {
+      return rawValue;
+    }
+    return matcher.group(1) + "T" + matcher.group(2) + "Z";
   }
 
   private void appendOrganizationReferenceIfNeeded(Document output, Element entityElement, Entity entity,
@@ -233,8 +316,20 @@ public class OnboardingDatasetNormalizer {
     entityElement.appendChild(organizationElement);
   }
 
-  private String mapReferenceId(String rawValue) {
-    return rawValue;
+  /**
+   * Resolves the value emitted as the {@code id} attribute of a reference property.
+   *
+   * <p>Most sourcedata reference columns already carry the referenced row's DAL id, so the raw value
+   * is passed through unchanged. The exception is the {@code AD_LANGUAGE} column on translation
+   * (_TRL) tables: GOClient stores the language <em>code</em> there (e.g. {@code es_ES}), but the
+   * importer resolves references by DAL id ({@code AD_Language.AD_Language_ID}). For
+   * {@code ADLanguage} references the code is therefore resolved to its installed id; the resolution
+   * targets the always-present {@code AD_Language} master table, never GOAdmin.
+   */
+  private String resolveReferenceId(Property property, String rawValue) {
+    Entity targetEntity = property.getTargetEntity();
+    String targetEntityName = targetEntity == null ? null : targetEntity.getName();
+    return referenceIdResolver.resolve(targetEntityName, rawValue);
   }
 
   private Entity resolveEntity(String tableName) {
@@ -243,169 +338,6 @@ public class OnboardingDatasetNormalizer {
       throw new OBException("Table " + tableName + " is not mapped in the runtime model");
     }
     return entity;
-  }
-
-  private static ClassLoader defaultClassLoader() {
-    ClassLoader contextClassLoader = Thread.currentThread().getContextClassLoader();
-    return contextClassLoader != null
-        ? contextClassLoader
-        : OnboardingDatasetNormalizer.class.getClassLoader();
-  }
-
-
-  private static EntityResolver modelProviderEntityResolver() {
-    return tableName -> ModelProvider.getInstance().getEntityByTableName(tableName);
-  }
-
-  private List<SourceFile> listIncludedSourceFiles() {
-    return sourceFileProvider.listIncludedSourceFiles();
-  }
-
-  private static SourceFileProvider directorySourceFileProvider(Path sampleDataDirectory) {
-    return () -> {
-      List<SourceFile> files = new ArrayList<>();
-      try (var stream = Files.list(sampleDataDirectory)) {
-        stream.filter(Files::isRegularFile)
-            .filter(path -> path.getFileName().toString().endsWith(".xml"))
-            .filter(path -> OnboardingDatasetDefinition.shouldIncludeTable(
-                tableName(path.getFileName().toString())))
-            .sorted(Comparator.comparing(path -> path.getFileName().toString()))
-            .forEach(path -> files.add(new SourceFile(path.getFileName().toString(),
-                () -> openFileSystemSourceFile(path))));
-      } catch (Exception e) {
-        throw new OnboardingDatasetNormalizationException(
-            "Failed to list onboarding sourcedata in " + sampleDataDirectory, e);
-      }
-      return files;
-    };
-  }
-
-  private static SourceFileProvider classpathSourceFileProvider(ClassLoader classLoader) {
-    Objects.requireNonNull(classLoader, "classLoader is required");
-    return () -> {
-      List<SourceFile> files = new ArrayList<>();
-      for (String fileName : readBundledSourceFileNames(classLoader)) {
-        if (fileName.endsWith(".xml")
-            && OnboardingDatasetDefinition.shouldIncludeTable(tableName(fileName))) {
-          files.add(new SourceFile(fileName, () -> openBundledSourceFile(classLoader, fileName)));
-        }
-      }
-      files.sort(Comparator.comparing(sourceFile -> sourceFile.fileName));
-      return files;
-    };
-  }
-
-  private static List<String> readBundledSourceFileNames(ClassLoader classLoader) {
-    try (InputStream inputStream = classLoader.getResourceAsStream(SAMPLE_DATA_INDEX_RESOURCE)) {
-      if (inputStream == null) {
-        throw new OnboardingDatasetNormalizationException(
-            "Bundled GOClient sampledata index not found on the classpath: "
-                + SAMPLE_DATA_INDEX_RESOURCE);
-      }
-
-      List<String> fileNames = new ArrayList<>();
-      try (BufferedReader reader = new BufferedReader(
-          new InputStreamReader(inputStream, StandardCharsets.UTF_8))) {
-        String line;
-        while ((line = reader.readLine()) != null) {
-          String fileName = line.trim();
-          if (!fileName.isEmpty()) {
-            fileNames.add(fileName);
-          }
-        }
-      }
-
-      if (fileNames.isEmpty()) {
-        throw new OnboardingDatasetNormalizationException(
-            "Bundled GOClient sampledata index is empty: " + SAMPLE_DATA_INDEX_RESOURCE);
-      }
-      return fileNames;
-    } catch (IOException e) {
-      throw new OnboardingDatasetNormalizationException(
-          "Failed to read bundled GOClient sampledata index " + SAMPLE_DATA_INDEX_RESOURCE, e);
-    }
-  }
-
-  private static InputStream openFileSystemSourceFile(Path path) throws SourceFileAccessException {
-    try {
-      return Files.newInputStream(path);
-    } catch (IOException e) {
-      throw new SourceFileAccessException(
-          "Failed to open onboarding sourcedata file " + path.getFileName(), e);
-    }
-  }
-
-  private static InputStream openBundledSourceFile(ClassLoader classLoader, String fileName)
-      throws SourceFileAccessException {
-    String resourcePath = String.join(RESOURCE_PATH_SEPARATOR, SAMPLE_DATA_RESOURCE_DIRECTORY, fileName);
-    InputStream inputStream = classLoader.getResourceAsStream(resourcePath);
-    if (inputStream == null) {
-      throw new SourceFileAccessException(
-          "Bundled GOClient sampledata file not found on the classpath: " + resourcePath);
-    }
-    return inputStream;
-  }
-
-  private static String tableName(String sourceFileName) {
-    int suffix = sourceFileName.lastIndexOf('.');
-    return suffix == -1 ? sourceFileName : sourceFileName.substring(0, suffix);
-  }
-
-  private DocumentBuilder newDocumentBuilder() {
-    try {
-      DocumentBuilderFactory factory = DocumentBuilderFactory.newInstance();
-      factory.setNamespaceAware(false);
-      factory.setFeature(XMLConstants.FEATURE_SECURE_PROCESSING, true);
-      factory.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true);
-      factory.setFeature("http://xml.org/sax/features/external-general-entities", false);
-      factory.setFeature("http://xml.org/sax/features/external-parameter-entities", false);
-      factory.setFeature("http://apache.org/xml/features/nonvalidating/load-external-dtd", false);
-      setAttributeIfSupported(factory, XMLConstants.ACCESS_EXTERNAL_DTD, "");
-      setAttributeIfSupported(factory, XMLConstants.ACCESS_EXTERNAL_SCHEMA, "");
-      factory.setXIncludeAware(false);
-      factory.setExpandEntityReferences(false);
-      return factory.newDocumentBuilder();
-    } catch (Exception e) {
-      throw new OnboardingDatasetNormalizationException(
-          "Failed to create a secure XML parser for onboarding sourcedata", e);
-    }
-  }
-
-  private String toXml(Document document) {
-    try {
-      TransformerFactory transformerFactory = TransformerFactory.newInstance();
-      transformerFactory.setFeature(XMLConstants.FEATURE_SECURE_PROCESSING, true);
-      setAttributeIfSupported(transformerFactory, XMLConstants.ACCESS_EXTERNAL_DTD, "");
-      setAttributeIfSupported(transformerFactory, XMLConstants.ACCESS_EXTERNAL_STYLESHEET, "");
-      Transformer transformer = transformerFactory.newTransformer();
-      transformer.setOutputProperty(OutputKeys.ENCODING, StandardCharsets.UTF_8.name());
-      transformer.setOutputProperty(OutputKeys.INDENT, "yes");
-      transformer.setOutputProperty(OutputKeys.OMIT_XML_DECLARATION, "no");
-      StringWriter writer = new StringWriter();
-      transformer.transform(new DOMSource(document), new StreamResult(writer));
-      return writer.toString();
-    } catch (Exception e) {
-      throw new OnboardingDatasetNormalizationException(
-          "Failed to serialize onboarding dataset XML", e);
-    }
-  }
-
-  private void setAttributeIfSupported(DocumentBuilderFactory factory, String attribute,
-      String value) {
-    try {
-      factory.setAttribute(attribute, value);
-    } catch (IllegalArgumentException ignored) {
-      // Older XML implementations may not expose these JAXP attributes.
-    }
-  }
-
-  private void setAttributeIfSupported(TransformerFactory factory, String attribute,
-      String value) {
-    try {
-      factory.setAttribute(attribute, value);
-    } catch (IllegalArgumentException ignored) {
-      // Older XML implementations may not expose these JAXP attributes.
-    }
   }
 
   /**
@@ -422,44 +354,138 @@ public class OnboardingDatasetNormalizer {
     Entity resolve(String tableName);
   }
 
-
+  /**
+   * Resolves the {@code id} attribute value for a reference property, given the referenced entity's
+   * name and the raw sourcedata value. Lets tests stub away the {@code AD_Language} DAL lookup.
+   */
   @FunctionalInterface
-  private interface SourceFileProvider {
-    List<SourceFile> listIncludedSourceFiles();
+  interface ReferenceIdResolver {
+    /**
+     * Returns the id to emit for a reference property.
+     *
+     * @param targetEntityName the referenced entity name, or {@code null} when unknown
+     * @param rawValue         the raw sourcedata value of the reference column
+     * @return the id attribute value to emit in the normalized XML
+     */
+    String resolve(String targetEntityName, String rawValue);
   }
 
-  @FunctionalInterface
-  private interface SourceFileOpener {
-    InputStream open() throws SourceFileAccessException;
-  }
-
-  private static final class SourceFile {
-    private final String fileName;
-    private final SourceFileOpener opener;
-
-    private SourceFile(String fileName, SourceFileOpener opener) {
-      this.fileName = Objects.requireNonNull(fileName, "fileName is required");
-      this.opener = Objects.requireNonNull(opener, "opener is required");
-    }
-
-    private InputStream openStream() throws SourceFileAccessException {
-      return opener.open();
-    }
-  }
-  private static final class SourceFileAccessException extends IOException {
-    private static final long serialVersionUID = 1L;
-
-    private SourceFileAccessException(String message) {
-      super(message);
-    }
-
-    private SourceFileAccessException(String message, Throwable cause) {
-      super(message, cause);
-    }
-  }
 
   private static final class RowConversionState {
     private String rowId;
     private String sourceOrganizationId;
+  }
+
+  /**
+   * Skips org-specific account-element trees so only the client-level
+   * ({@code AD_ORG_ID = '0'}) chart of accounts reaches a new tenant.
+   *
+   * <p>GOClient ships a second, organization-owned {@code C_ELEMENT} tree that is not wired to any
+   * accounting schema and has no valid combinations — a dangling chart. Importing it would create
+   * an orphan chart of accounts in every onboarded tenant. This filter ignores it at import time
+   * <em>without modifying the source dataset</em>: it drops the org-specific element row, then
+   * cascades the exclusion to that element's {@code C_ELEMENTVALUE} rows and their
+   * {@code C_ELEMENTVALUE_TRL} translations. The cascade relies on the alphabetical source-file
+   * order ({@code C_ELEMENT} → {@code C_ELEMENTVALUE} → {@code C_ELEMENTVALUE_TRL}), which the
+   * source providers guarantee.
+   */
+  private static final class AccountElementTreeFilter {
+    private static final String ELEMENT_TABLE = "C_ELEMENT";
+    private static final String ELEMENT_VALUE_TABLE = "C_ELEMENTVALUE";
+    private static final String ELEMENT_VALUE_TRL_TABLE = "C_ELEMENTVALUE_TRL";
+    private static final String CLIENT_LEVEL_ORG = "0";
+
+    private final Set<String> excludedElementIds = new HashSet<>();
+    private final Set<String> excludedElementValueIds = new HashSet<>();
+
+    private boolean isExcludedRow(String tableName, Map<String, String> rawColumns) {
+      if (tableName == null) {
+        return false;
+      }
+      switch (tableName.toUpperCase()) {
+        case ELEMENT_TABLE:
+          return excludeOrgSpecificElement(rawColumns);
+        case ELEMENT_VALUE_TABLE:
+          return excludeValueOfExcludedElement(rawColumns);
+        case ELEMENT_VALUE_TRL_TABLE:
+          return excludedElementValueIds.contains(rawColumns.get("C_ELEMENTVALUE_ID"));
+        default:
+          return false;
+      }
+    }
+
+    private boolean excludeOrgSpecificElement(Map<String, String> rawColumns) {
+      String org = rawColumns.get(AD_ORG_ID_COLUMN);
+      if (org == null || CLIENT_LEVEL_ORG.equals(org)) {
+        return false;
+      }
+      String elementId = rawColumns.get("C_ELEMENT_ID");
+      if (elementId != null) {
+        excludedElementIds.add(elementId);
+      }
+      return true;
+    }
+
+    private boolean excludeValueOfExcludedElement(Map<String, String> rawColumns) {
+      String parentElementId = rawColumns.get("C_ELEMENT_ID");
+      if (parentElementId == null || !excludedElementIds.contains(parentElementId)) {
+        return false;
+      }
+      String valueId = rawColumns.get("C_ELEMENTVALUE_ID");
+      if (valueId != null) {
+        excludedElementValueIds.add(valueId);
+      }
+      return true;
+    }
+  }
+
+  /**
+   * Aggregates the per-build stateful row filters applied while normalizing the dataset. Each
+   * sub-filter owns mutable exclusion state, so a fresh instance is created per
+   * {@link #buildDatasetXml(String)} call and shared across all source files of that build.
+   */
+  private static final class RowExclusionFilter {
+    private final AccountElementTreeFilter accountElementTree = new AccountElementTreeFilter();
+    private final DanglingCalendarFilter danglingCalendar = new DanglingCalendarFilter();
+
+    private boolean isExcludedRow(String tableName, Map<String, String> rawColumns) {
+      // Sub-filters operate on disjoint table sets, so a row excluded by one is never relevant to
+      // the other; short-circuit evaluation keeps the unrelated filter's state untouched.
+      return accountElementTree.isExcludedRow(tableName, rawColumns)
+          || danglingCalendar.isExcludedRow(tableName, rawColumns);
+    }
+  }
+
+  /**
+   * Skips the dangling client-level fiscal calendar so only the operative calendar (remapped to the
+   * new tenant's organization) reaches the tenant.
+   *
+   * <p>GOClient ships two calendars: an organization-owned one with a full year of periods and
+   * period-control rows (the keeper, wired to the org by {@code OnboardingPeriodControlService}), and
+   * a second, client-level ({@code AD_ORG_ID = '0'}) calendar whose single year has no periods — a
+   * dangling empty calendar, the fiscal analogue of the orphan account-element tree. Importing it
+   * would create a useless second calendar in every onboarded tenant. This filter ignores it at
+   * import time <em>without modifying the source dataset</em>.
+   *
+   * <p>Unlike {@link AccountElementTreeFilter}, the cascade cannot rely on alphabetical source-file
+   * order, because it does not match the fiscal hierarchy ({@code C_CALENDAR} &lt; {@code C_PERIOD}
+   * &lt; {@code C_PERIODCONTROL} &lt; {@code C_YEAR} alphabetically, but the hierarchy is
+   * calendar → year → period → period-control). Instead the filter keys on ownership: every
+   * client-level ({@code AD_ORG_ID = '0'}) calendar, year, period and period-control row is dropped.
+   * GOClient's only client-level fiscal rows are the dangling calendar and its empty year; all real
+   * fiscal data lives at the operative organization level and is therefore kept. This rule is
+   * order-independent and remains correct even if the dangling calendar ever ships periods.
+   */
+  private static final class DanglingCalendarFilter {
+    private static final String CLIENT_LEVEL_ORG = "0";
+    private static final Set<String> FISCAL_TABLES =
+        Set.of("C_CALENDAR", "C_YEAR", "C_PERIOD", "C_PERIODCONTROL");
+
+    private boolean isExcludedRow(String tableName, Map<String, String> rawColumns) {
+      if (tableName == null || !FISCAL_TABLES.contains(tableName.toUpperCase())) {
+        return false;
+      }
+      return CLIENT_LEVEL_ORG.equals(rawColumns.get(AD_ORG_ID_COLUMN));
+    }
   }
 }

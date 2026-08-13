@@ -37,17 +37,22 @@ final class OAuth2AuthorizeSupport {
     final String codeChallenge;
     final String state;
     final String scope;
+    final long validitySeconds;
 
     AuthorizeRequestData(String jwtToken, String clientId, String redirectUri,
-        String codeChallenge, String state, String scope) {
+        String codeChallenge, String state, String scope, long validitySeconds) {
       this.jwtToken = jwtToken;
       this.clientId = clientId;
       this.redirectUri = redirectUri;
       this.codeChallenge = codeChallenge;
       this.state = state;
       this.scope = scope;
+      this.validitySeconds = validitySeconds;
     }
   }
+
+  /** Marker used when validity_seconds is absent, blank, or not a valid number. */
+  private static final long VALIDITY_SECONDS_ABSENT = -1L;
 
   interface JsonBodyParser {
     /**
@@ -76,7 +81,8 @@ final class OAuth2AuthorizeSupport {
           body.optString("redirect_uri", null),
           body.optString("code_challenge", null),
           body.optString("state", null),
-          body.optString("scope", null));
+          body.optString("scope", null),
+          body.optLong("validity_seconds", VALIDITY_SECONDS_ABSENT));
     }
     return new AuthorizeRequestData(
         request.getParameter("token"),
@@ -84,7 +90,25 @@ final class OAuth2AuthorizeSupport {
         request.getParameter("redirect_uri"),
         request.getParameter("code_challenge"),
         request.getParameter("state"),
-        request.getParameter("scope"));
+        request.getParameter("scope"),
+        parseValiditySecondsParam(request.getParameter("validity_seconds")));
+  }
+
+  /**
+   * Parse the {@code validity_seconds} form parameter.
+   *
+   * @param rawValue raw parameter value, possibly null or blank
+   * @return the parsed value, or {@link #VALIDITY_SECONDS_ABSENT} when missing/blank/non-numeric
+   */
+  private static long parseValiditySecondsParam(String rawValue) {
+    if (rawValue == null || rawValue.trim().isEmpty()) {
+      return VALIDITY_SECONDS_ABSENT;
+    }
+    try {
+      return Long.parseLong(rawValue.trim());
+    } catch (NumberFormatException e) {
+      return VALIDITY_SECONDS_ABSENT;
+    }
   }
 
   static void writeAuthorizeSuccess(HttpServletResponse response, String redirectUri,
@@ -128,6 +152,7 @@ final class OAuth2AuthorizeSupport {
     }
     codeData.scopes = String.join(" ", grantedScopes);
     codeData.expiresAt = System.currentTimeMillis() + authCodeExpiryMs;
+    codeData.validitySeconds = OAuth2ValidityPolicy.normalizeValiditySeconds(authorizeRequest.validitySeconds);
     codeData.used = false;
     return codeData;
   }

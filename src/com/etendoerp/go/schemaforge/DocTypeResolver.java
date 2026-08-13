@@ -2,6 +2,8 @@ package com.etendoerp.go.schemaforge;
 
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
+import java.util.Set;
+import java.util.regex.Pattern;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -25,6 +27,14 @@ import org.openbravo.service.db.DalConnectionProvider;
 public class DocTypeResolver {
 
   private static final Logger log = LogManager.getLogger(DocTypeResolver.class);
+  private static final String COL_DOC_TYPE_TARGET_ID = "C_DocTypeTarget_ID";
+
+  private static final Pattern PAT_SUBTYPE_NOT_LIKE =
+      Pattern.compile("sOSubType\\s+NOT\\s+LIKE\\s+'(\\w+)'", Pattern.CASE_INSENSITIVE);
+  private static final Pattern PAT_SUBTYPE_LIKE =
+      Pattern.compile("sOSubType\\s+LIKE\\s+'(\\w+)'", Pattern.CASE_INSENSITIVE);
+  private static final Pattern PAT_IS_RETURN =
+      Pattern.compile("documentType\\.return\\s*=\\s*(true|false)", Pattern.CASE_INSENSITIVE);
 
   private DocTypeResolver() {
   }
@@ -35,17 +45,28 @@ public class DocTypeResolver {
    * (e.g., a wrong default coming from session). This method queries the canonical
    * default doctype for the tab and forces it back into the body.
    *
-   * @param body  the JSON request body (modified in place)
-   * @param adTab the AD_Tab containing doctype column info
-   * @param ctx   the NeoContext with spec/entity info for doctype resolution
+   * <p>If {@code clientSubmittedFields} contains the DAL property name for
+   * {@code C_DocTypeTarget_ID}, the reapplication is skipped — the user explicitly chose a
+   * document type and their selection must be preserved (callouts are already blocked from
+   * overriding it via the same set).
+   *
+   * @param body                 the JSON request body (modified in place)
+   * @param adTab                the AD_Tab containing doctype column info
+   * @param ctx                  the NeoContext with spec/entity info for doctype resolution
+   * @param clientSubmittedFields DAL property names the client explicitly sent; null = no skip
    */
-  public static void reapplyDocTypeFromTabFilter(JSONObject body, Tab adTab, NeoContext ctx) {
+  public static void reapplyDocTypeFromTabFilter(JSONObject body, Tab adTab, NeoContext ctx,
+      Set<String> clientSubmittedFields) {
     if (body == null || adTab == null || ctx == null) {
       return;
     }
     try {
       Column docTypeTargetCol = findDocTypeTargetColumn(adTab);
       if (docTypeTargetCol == null) {
+        return;
+      }
+      if (shouldSkipDocTypeReapply(ctx, adTab, clientSubmittedFields)) {
+        log.debug("Skipping doctype reapply — client submitted explicit doc type choice");
         return;
       }
       String correctId = resolveDefaultDocTypeId(docTypeTargetCol, ctx);
@@ -58,11 +79,48 @@ public class DocTypeResolver {
   }
 
   /**
+   * Returns {@code true} when the caller submitted an explicit doc-type choice that must be
+   * preserved. Only relevant for tabs without a subtype constraint — tabs with a LIKE/NOT LIKE
+   * filter always enforce the canonical doctype regardless of what the client sent.
+   */
+  private static boolean shouldSkipDocTypeReapply(NeoContext ctx, Tab adTab,
+      Set<String> clientSubmittedFields) {
+    if (clientSubmittedFields == null || clientSubmittedFields.isEmpty()) {
+      return false;
+    }
+    String tabWhere = ctx.getSfEntity() != null && ctx.getSfEntity().getADTab() != null
+        ? ctx.getSfEntity().getADTab().getHqlwhereclause() : null;
+    boolean hasSubTypeConstraint = tabWhere != null && (
+        PAT_SUBTYPE_LIKE.matcher(tabWhere).find() ||
+        PAT_SUBTYPE_NOT_LIKE.matcher(tabWhere).find());
+    if (hasSubTypeConstraint) {
+      return false;
+    }
+    Entity dalEntity = ModelProvider.getInstance().getEntityByTableId(adTab.getTable().getId());
+    if (dalEntity == null) {
+      return false;
+    }
+    Property targetProp = dalEntity.getPropertyByColumnName(COL_DOC_TYPE_TARGET_ID);
+    return targetProp != null && clientSubmittedFields.contains(targetProp.getName());
+  }
+
+  /**
+   * Overload for callers without client-fields context — existing behavior preserved.
+   *
+   * @param body  the JSON request body to apply the resolved doc type to
+   * @param adTab the AD tab whose table contains the doc type target column
+   * @param ctx   the NEO context carrying session and request state
+   */
+  public static void reapplyDocTypeFromTabFilter(JSONObject body, Tab adTab, NeoContext ctx) {
+    reapplyDocTypeFromTabFilter(body, adTab, ctx, null);
+  }
+
+  /**
    * Find the C_DocTypeTarget_ID column in the tab's table.
    */
   private static Column findDocTypeTargetColumn(Tab adTab) {
     for (Column col : adTab.getTable().getADColumnList()) {
-      if ("C_DocTypeTarget_ID".equalsIgnoreCase(col.getDBColumnName())) {
+      if (COL_DOC_TYPE_TARGET_ID.equalsIgnoreCase(col.getDBColumnName())) {
         return col;
       }
     }
@@ -79,7 +137,7 @@ public class DocTypeResolver {
     if (dalEntity == null) {
       return;
     }
-    Property targetProp = dalEntity.getPropertyByColumnName("C_DocTypeTarget_ID");
+    Property targetProp = dalEntity.getPropertyByColumnName(COL_DOC_TYPE_TARGET_ID);
     Property typeProp = dalEntity.getPropertyByColumnName("C_DocType_ID");
     if (targetProp != null) {
       body.put(targetProp.getName(), docTypeId);
@@ -113,7 +171,7 @@ public class DocTypeResolver {
 
       String[] subTypeFilters = parseSubTypeFilters(ctx);
       return queryDefaultDocType(clientId, docBaseType, isSOTrx,
-          subTypeFilters[0], subTypeFilters[1], colName);
+          subTypeFilters[0], subTypeFilters[1], subTypeFilters[2], colName);
 
     } catch (Exception e) {
       log.debug("Could not resolve default doctype for {}: {}", colName, e.getMessage());
@@ -122,40 +180,44 @@ public class DocTypeResolver {
   }
 
   /**
-   * Parse DocSubTypeSO filter and exclude values from the tab's HQL where clause.
-   * Returns a two-element array: [subTypeFilter, subTypeExclude], either may be null.
+   * Parse DocSubTypeSO filter, exclude values, and isReturn flag from the tab's HQL where clause.
+   * Returns a three-element array: [subTypeFilter, subTypeExclude, isReturn], any may be null.
+   * isReturn is "Y" when the clause contains {@code documentType.return=true},
+   * "N" when it contains {@code documentType.return=false}.
    */
   private static String[] parseSubTypeFilters(NeoContext ctx) {
-    String subTypeFilter = null;
-    String subTypeExclude = null;
-    if (ctx != null && ctx.getSfEntity() != null && ctx.getSfEntity().getADTab() != null) {
-      String tabWhere = ctx.getSfEntity().getADTab().getHqlwhereclause();
-      if (tabWhere != null) {
-        java.util.regex.Matcher m = java.util.regex.Pattern
-            .compile("sOSubType\\s+NOT\\s+LIKE\\s+'(\\w+)'",
-                java.util.regex.Pattern.CASE_INSENSITIVE)
-            .matcher(tabWhere);
-        if (m.find()) {
-          subTypeExclude = m.group(1);
-        } else {
-          m = java.util.regex.Pattern
-              .compile("sOSubType\\s+LIKE\\s+'(\\w+)'",
-                  java.util.regex.Pattern.CASE_INSENSITIVE)
-              .matcher(tabWhere);
-          if (m.find()) {
-            subTypeFilter = m.group(1);
-          }
-        }
-      }
+    if (ctx == null || ctx.getSfEntity() == null || ctx.getSfEntity().getADTab() == null) {
+      return new String[]{null, null, null};
     }
-    return new String[] { subTypeFilter, subTypeExclude };
+    String tabWhere = ctx.getSfEntity().getADTab().getHqlwhereclause();
+    if (tabWhere == null) {
+      return new String[]{null, null, null};
+    }
+    String subTypeExclude = matchFirst(tabWhere, PAT_SUBTYPE_NOT_LIKE);
+    String subTypeFilter = subTypeExclude == null
+        ? matchFirst(tabWhere, PAT_SUBTYPE_LIKE)
+        : null;
+    String isReturn = parseIsReturnValue(matchFirst(tabWhere, PAT_IS_RETURN));
+    return new String[]{subTypeFilter, subTypeExclude, isReturn};
+  }
+
+  private static String matchFirst(String text, Pattern pattern) {
+    java.util.regex.Matcher m = pattern.matcher(text);
+    return m.find() ? m.group(1) : null;
+  }
+
+  private static String parseIsReturnValue(String match) {
+    if (match == null) {
+      return null;
+    }
+    return "true".equalsIgnoreCase(match) ? "Y" : "N";
   }
 
   /**
    * Query the C_DocType table for the default document type matching the given criteria.
    */
   private static String queryDefaultDocType(String clientId, String docBaseType,
-      String isSOTrx, String subTypeFilter, String subTypeExclude, String colName)
+      String isSOTrx, String subTypeFilter, String subTypeExclude, String isReturn, String colName)
       throws Exception {
     String orgId = OBContext.getOBContext().getCurrentOrganization().getId();
 
@@ -172,6 +234,9 @@ public class DocTypeResolver {
     } else if (subTypeExclude != null) {
       sql.append("AND (dt.DocSubTypeSO IS NULL OR dt.DocSubTypeSO != ?) ");
     }
+    if (isReturn != null) {
+      sql.append("AND dt.IsReturn = ? ");
+    }
     sql.append("ORDER BY dt.IsDefault DESC, dt.Name ASC");
 
     try (PreparedStatement ps = OBDal.getInstance().getConnection(false)
@@ -183,23 +248,26 @@ public class DocTypeResolver {
       ps.setString(paramIndex++, orgId);
       ps.setString(paramIndex++, clientId);
       if (subTypeFilter != null) {
-        ps.setString(paramIndex, subTypeFilter);
+        ps.setString(paramIndex++, subTypeFilter);
       } else if (subTypeExclude != null) {
-        ps.setString(paramIndex, subTypeExclude);
+        ps.setString(paramIndex++, subTypeExclude);
+      }
+      if (isReturn != null) {
+        ps.setString(paramIndex, isReturn);
       }
 
       try (ResultSet rs = ps.executeQuery()) {
         if (rs.next()) {
           String docTypeId = rs.getString(1);
-          log.debug("Resolved default doctype for {} (DocBaseType={}, IsSOTrx={}): {}",
-              colName, docBaseType, isSOTrx, docTypeId);
+          log.debug("Resolved default doctype for {} (DocBaseType={}, IsSOTrx={}, IsReturn={}): {}",
+              colName, docBaseType, isSOTrx, isReturn, docTypeId);
           return docTypeId;
         }
       }
     }
 
-    log.debug("No matching doctype found for {} (DocBaseType={}, IsSOTrx={})",
-        colName, docBaseType, isSOTrx);
+    log.debug("No matching doctype found for {} (DocBaseType={}, IsSOTrx={}, IsReturn={})",
+        colName, docBaseType, isSOTrx, isReturn);
     return null;
   }
 

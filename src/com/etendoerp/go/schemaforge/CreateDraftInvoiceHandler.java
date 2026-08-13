@@ -19,8 +19,12 @@ package com.etendoerp.go.schemaforge;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Date;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
@@ -47,16 +51,18 @@ import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.utility.Utility;
 import org.openbravo.model.common.businesspartner.BusinessPartner;
+import org.openbravo.model.common.currency.Currency;
 import org.openbravo.service.db.DalConnectionProvider;
 import org.openbravo.model.common.enterprise.DocumentType;
 import org.openbravo.model.common.invoice.Invoice;
 import org.openbravo.model.common.invoice.InvoiceLine;
 import org.openbravo.model.common.invoice.InvoiceTax;
-import org.openbravo.model.common.order.Order;
 import org.openbravo.model.financialmgmt.tax.TaxRate;
+import org.openbravo.model.common.order.Order;
 import org.openbravo.model.common.order.OrderLine;
 import org.openbravo.model.materialmgmt.transaction.ShipmentInOut;
 import org.openbravo.model.materialmgmt.transaction.ShipmentInOutLine;
+import org.openbravo.model.pricing.pricelist.PriceList;
 import org.openbravo.common.actionhandler.createlinesfromprocess.CreateInvoiceLinesFromProcess;
 import org.openbravo.base.weld.WeldUtils;
 
@@ -76,6 +82,7 @@ import org.openbravo.base.weld.WeldUtils;
  * For shipments: invoices the full movement quantity, pulling prices from linked order lines.
  */
 @Named("createDraftInvoiceHandler")
+@SuppressWarnings("java:S1448")
 public class CreateDraftInvoiceHandler implements NeoHandler {
 
   private static final Logger log = LogManager.getLogger(CreateDraftInvoiceHandler.class);
@@ -89,12 +96,15 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
 
   private static final String CHECK_ACTION = "checkDraftInvoice";
   private static final String LIST_ACTION = "listInvoices";
+  private static final String PENDING_LINES_ACTION = "pendingInvoiceLines";
 
   private static final String SPEC_GOODS_SHIPMENT = "goods-shipment";
   private static final String SPEC_SALES_QUOTATION = "sales-quotation";
   private static final String SPEC_SALES_ORDER = "sales-order";
   private static final String FIELD_DOCUMENT_NO = "documentNo";
+  private static final String FIELD_ORDERED_QUANTITY = "orderedQuantity";
   private static final String PARAM_SHIPMENT_IDS = "shipmentIds";
+  private static final String PARAM_PRICE_LIST_ID = "priceListId";
   private static final String ERR_RECORD_ID_REQUIRED = "Record ID is required";
   private static final String KEY_RESPONSE = "response";
 
@@ -135,6 +145,11 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
       return handleList(context);
     }
 
+    // GET pendingInvoiceLines — returns uninvoiced qty per shipment line (excludes drafts)
+    if (PENDING_LINES_ACTION.equals(fieldName) && "GET".equals(context.getHttpMethod())) {
+      return handlePendingLines(context);
+    }
+
     if (!ACTION_NAME.equals(fieldName) || !"POST".equals(context.getHttpMethod())) {
       return null;
     }
@@ -169,25 +184,23 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
 
         Invoice invoice;
         if (SPEC_SALES_ORDER.equals(specName)) {
-          invoice = createFromOrder(recordId, lineOverrides);
+          invoice = createFromOrder(recordId, lineOverrides, null);
         } else if (SPEC_SALES_QUOTATION.equals(specName)) {
-          invoice = createFromOrder(recordId, lineOverrides);
+          invoice = createFromOrder(recordId, lineOverrides, null);
           markQuotationAsInvoiceCreated(recordId);
         } else if (SPEC_GOODS_SHIPMENT.equals(specName)) {
           List<String> shipmentIds = parseShipmentIds(body, recordId);
-          invoice = createFromShipments(shipmentIds, lineOverrides);
+          String priceListId = body != null ? body.optString(PARAM_PRICE_LIST_ID, null) : null;
+          invoice = createFromShipments(shipmentIds, lineOverrides, priceListId);
         } else {
           return null;
         }
 
         OBDal.getInstance().flush();
-        // Refresh to pick up trigger-generated documentNo and the totals
-        // set by CreateInvoiceLinesFromProcess (order path) or recalculateTotals (shipment path).
         OBDal.getInstance().getSession().refresh(invoice);
         ensureDocumentNo(invoice);
         if (SPEC_GOODS_SHIPMENT.equals(specName)) {
-          ensureLineGrossAmounts(invoice);
-          recalculateTotals(invoice);
+          getSupport().ensureLineGrossAmounts(invoice);
           OBDal.getInstance().flush();
         }
 
@@ -208,7 +221,14 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
       }
     } catch (OBException e) {
       log.warn("Error creating draft invoice from {}: {}", specName, e.getMessage());
-      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, e.getMessage());
+      try {
+        JSONObject body = new JSONObject();
+        body.put("status", "error");
+        body.put("message", e.getMessage());
+        return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, body);
+      } catch (Exception jsonEx) {
+        return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, e.getMessage());
+      }
     } catch (Exception e) {
       log.error("Error creating draft invoice from {}: {}", specName, e.getMessage(), e);
       return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
@@ -332,6 +352,65 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
   }
 
   /**
+   * Returns the uninvoiced (pending) quantity per shipment line for the given shipment.
+   * Mirrors the GREATEST(msi, direct) logic from {@code buildInvoiceStatusSql} in
+   * {@link GoodsShipmentHeaderHandler} but operates at line granularity so the frontend
+   * preview can show — and cap at — the remaining quantity, and so that
+   * {@link #createFromShipments} never creates invoice lines for already-invoiced quantities.
+   * Draft invoices are deliberately excluded (same as the status badge), allowing users
+   * to invoice remaining units even when a draft exists for other lines.
+   */
+  protected NeoResponse handlePendingLines(NeoContext context) {
+    String recordId = context.getRecordId();
+    if (StringUtils.isBlank(recordId)) {
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, ERR_RECORD_ID_REQUIRED);
+    }
+    try {
+      OBContext.setAdminMode(true);
+      try {
+        Map<String, BigDecimal> pendingMap = computePendingQtyPerLine(recordId, true);
+        JSONArray arr = new JSONArray();
+        for (Map.Entry<String, BigDecimal> entry : pendingMap.entrySet()) {
+          JSONObject item = new JSONObject();
+          item.put("lineId", entry.getKey());
+          item.put("pendingQty", entry.getValue());
+          arr.put(item);
+        }
+        JSONObject responseData = new JSONObject();
+        responseData.put("data", arr);
+        JSONObject wrapper = new JSONObject();
+        wrapper.put(KEY_RESPONSE, responseData);
+        return new NeoResponse(200, wrapper);
+      } finally {
+        OBContext.restorePreviousMode();
+      }
+    } catch (Exception e) {
+      log.error("Error computing pending invoice lines for shipment {}", recordId, e);
+      return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR, e.getMessage());
+    }
+  }
+
+  /**
+   * Computes the uninvoiced quantity for every active line of the given shipment.
+   * Uses the same GREATEST(msi_qty, direct_qty) pattern as the header-level invoice
+   * status badge to avoid double-counting when both m_matchsi and c_invoiceline.m_inoutline_id
+   * are populated (e.g. after m_inout_post). Draft, voided and closed invoices are excluded
+   * so that lines in draft invoices can still be fully invoiced in a new document.
+   *
+   * @param shipmentId {@code M_InOut_ID} of the shipment to inspect
+   * @return map of {@code M_InOutLine_ID → pending qty} (clamped to ≥ 0); empty on DB error
+   */
+  @SuppressWarnings("java:S2077")
+  protected Map<String, BigDecimal> computePendingQtyPerLine(String shipmentId) {
+    return computePendingQtyPerLine(shipmentId, false);
+  }
+
+  @SuppressWarnings("java:S2077")
+  protected Map<String, BigDecimal> computePendingQtyPerLine(String shipmentId, boolean includeDrafts) {
+    return NeoInvoiceSupport.computePendingQtyPerLine(shipmentId, includeDrafts);
+  }
+
+  /**
    * Finds all draft invoices ({@code documentStatus = 'DR'}) linked to the given
    * source record IDs. For order/quotation specs the link is {@code C_Invoice.C_Order_ID};
    * for goods-shipment the lookup goes through the shipment's linked sales order.
@@ -348,7 +427,20 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
     if (SPEC_SALES_ORDER.equals(specName) || SPEC_SALES_QUOTATION.equals(specName)) {
       hql = "from Invoice i where i.salesOrder.id in :ids and i.documentStatus = 'DR' and i.salesTransaction = true order by i.creationDate desc";
     } else if (SPEC_GOODS_SHIPMENT.equals(specName)) {
-      hql = "from Invoice i where i.salesOrder.id in (select s.salesOrder.id from MaterialMgmtShipmentInOut s where s.id in :ids) and i.documentStatus = 'DR' and i.salesTransaction = true order by i.creationDate desc";
+      // Cover both flows:
+      // 1. Shipment linked to an order: find draft via salesOrder.id
+      // 2. Standalone shipment (no order): find draft via invoice line → shipment line → shipment
+      hql = "FROM Invoice i WHERE i.salesTransaction = true AND i.documentStatus = 'DR' AND ("
+          + "  i.salesOrder.id IN ("
+          + "    SELECT s.salesOrder.id FROM MaterialMgmtShipmentInOut s"
+          + "    WHERE s.id IN :ids AND s.salesOrder IS NOT NULL"
+          + "  ) OR EXISTS ("
+          + "    SELECT 1 FROM InvoiceLine il"
+          + "    WHERE il.invoice.id = i.id"
+          + "    AND il.goodsShipmentLine IS NOT NULL"
+          + "    AND il.goodsShipmentLine.shipmentReceipt.id IN :ids"
+          + "  )"
+          + ") ORDER BY i.creationDate DESC";
     } else {
       return java.util.Collections.emptyList();
     }
@@ -384,14 +476,29 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
    * sequence names are hard-coded anywhere in this class.
    */
   protected void ensureDocumentNo(Invoice invoice) {
-    if (StringUtils.isNotBlank(invoice.getDocumentNo())) {
+    String current = invoice.getDocumentNo();
+    if (StringUtils.isNotBlank(current) && !current.startsWith("<")) {
       return;
     }
     String docNo = generateInvoiceDocumentNo(invoice);
+    if (StringUtils.isBlank(docNo) && invoice.getClient() != null) {
+      // generateInvoiceDocumentNo relies on RequestContext which may be absent in
+      // backend action contexts (e.g. createReturnInvoice from NeoServlet). Fall back
+      // to the same table-level sequence approach that CreatePurchaseInvoiceHandler uses.
+      docNo = Utility.getDocumentNoConnection(
+          OBDal.getInstance().getConnection(false),
+          new DalConnectionProvider(false),
+          invoice.getClient().getId(),
+          "C_Invoice",
+          true);
+    }
     if (StringUtils.isBlank(docNo)) {
       log.warn(
-          "Could not generate documentNo for invoice {} (docType={}, client={}). " + "Verify the DocType's DocNoSequence_ID is set, or that the table-level " + "AD_Sequence for C_Invoice exists for the client.",
-          invoice.getId(), invoice.getDocumentType() != null ? invoice.getDocumentType().getId() : "null",
+          "Could not generate documentNo for invoice {} (docType={}, client={}). "
+              + "Configure DocNoSequence_ID on the document type or activate "
+              + "AD_Sequence 'DocumentNo_C_Invoice' for the client.",
+          invoice.getId(),
+          invoice.getDocumentType() != null ? invoice.getDocumentType().getId() : "null",
           invoice.getClient() != null ? invoice.getClient().getId() : "null");
       return;
     }
@@ -480,7 +587,20 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
     return invoiceFromOrderSupport != null ? invoiceFromOrderSupport : new InvoiceFromOrderSupport();
   }
 
-  protected Invoice createFromOrder(String orderId, Map<String, BigDecimal> lineOverrides) {
+  protected Invoice createFromOrder(String orderId, Map<String, BigDecimal> lineOverrides,
+      String priceListId) {
+    return createFromOrder(orderId, lineOverrides, priceListId, null);
+  }
+
+  /**
+   * @param currencyId
+   *     when invoicing from a shipment (ETP-4028), the shipment's own currency —
+   *     overrides the order's currency, which can diverge once the user edits the
+   *     shipment's currency in draft. {@code null} for direct order/quotation invoicing,
+   *     where the order's own currency is correct as-is.
+   */
+  protected Invoice createFromOrder(String orderId, Map<String, BigDecimal> lineOverrides,
+      String priceListId, String currencyId) {
     Order order = OBDal.getInstance().get(Order.class, orderId);
     if (order == null) {
       throw new OBException("Order not found: " + orderId);
@@ -497,10 +617,15 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
         order,
         invoiceDocType,
         true);
+    applyPriceListOverride(invoice, priceListId);
+    applyCurrencyOverride(invoice, currencyId);
     OBDal.getInstance().save(invoice);
     OBDal.getInstance().flush();
 
     // Delegate line creation to native Etendo process — handles taxes, gross prices, IVA-included, etc.
+    // UpdatePricesAndAmounts (a CreateLinesFromProcessHook) reads getInvoice().getPriceList() and
+    // getInvoice().getCurrency() off this already-saved invoice, so the override above is picked
+    // up automatically — no changes needed to the native process itself.
     CreateInvoiceLinesFromProcess proc = WeldUtils.getInstanceFromStaticBeanManager(
         CreateInvoiceLinesFromProcess.class);
     proc.createInvoiceLinesFromDocumentLines(selectedLines, invoice, OrderLine.class);
@@ -518,7 +643,9 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
 
     OBDal.getInstance().getSession().refresh(invoice);
     invoice = getSupport().applyOrderDiscountToInvoice(invoice, orderId, totalDiscountService);
-    ensureLineGrossAmounts(invoice);
+    getSupport().ensureLineGrossAmounts(invoice);
+
+    getSupport().propagateOrderRateToInvoice(order, invoice);
 
     return invoice;
   }
@@ -594,7 +721,7 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
       try {
         JSONObject entry = new JSONObject();
         entry.put("id", ol.getId());
-        entry.put("orderedQuantity", pending.toPlainString());
+        entry.put(FIELD_ORDERED_QUANTITY, pending.toPlainString());
         selectedLines.put(entry);
       } catch (Exception e) {
         log.warn("Failed to add line {}: {}", ol.getId(), e.getMessage());
@@ -629,7 +756,15 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
     BigDecimal ordered = ol.getOrderedQuantity() != null ? ol.getOrderedQuantity() : BigDecimal.ZERO;
     BigDecimal invoiced = ol.getInvoicedQuantity() != null ? ol.getInvoicedQuantity() : BigDecimal.ZERO;
     BigDecimal pending = ordered.subtract(invoiced);
-    if (pending.compareTo(BigDecimal.ZERO) <= 0) return null;
+    // ETP-4722: quantities can be NEGATIVE since ETP-4567 removed the old
+    // min: 0 constraint (e.g. a return-style order line). Only an exact zero
+    // means "nothing left to invoice" — a strictly-positive check silently
+    // dropped every negative-quantity line here. This is the routine that
+    // actually runs for "Crear factura" on a Goods Shipment linked to this
+    // order: createFromShipments delegates straight to createFromOrder for
+    // the single-shipment-with-linked-order case, bypassing the shipment
+    // lines entirely.
+    if (pending.compareTo(BigDecimal.ZERO) == 0) return null;
     if (hasOverrides) {
       BigDecimal override = lineOverrides.get(ol.getId());
       return override != null ? override.min(pending) : pending;
@@ -723,18 +858,121 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
    *     if a shipment is not found, shipments span multiple
    *     business partners, or no AR Invoice document type exists
    */
-  protected Invoice createFromShipments(List<String> shipmentIds, Map<String, BigDecimal> lineOverrides) {
+  protected Invoice createFromShipments(List<String> shipmentIds, Map<String, BigDecimal> lineOverrides,
+      String priceListId) {
     List<ShipmentInOut> shipments = loadAndValidateShipments(shipmentIds);
-
     ShipmentInOut first = shipments.get(0);
-    Invoice invoice = createInvoiceHeaderFromShipment(first, shipments);
 
+    // Single shipment with a linked order: delegate to createFromOrder so that
+    // CreateInvoiceLinesFromProcess handles price-list lookups, taxes, and pending
+    // quantity exactly as Etendo core does — avoiding the manual pricelist=0 issue.
+    // Cap overrides by draft-aware pending so a second draft cannot be created for
+    // quantities already committed in an existing draft invoice.
+    if (shipments.size() == 1 && first.getSalesOrder() != null) {
+      Map<String, BigDecimal> draftCapped = capShipmentLineOverrides(first, lineOverrides);
+      Map<String, BigDecimal> orderLineOverrides = translateToOrderLineOverrides(first, draftCapped);
+      String currencyId = first.getEtgoCurrency() != null ? first.getEtgoCurrency().getId() : null;
+      return createFromOrder(first.getSalesOrder().getId(), orderLineOverrides, priceListId, currencyId);
+    }
+
+    Invoice invoice = createInvoiceHeaderFromShipment(first, shipments);
+    applyPriceListOverride(invoice, priceListId);
     OBDal.getInstance().save(invoice);
     OBDal.getInstance().flush();
-
     addShipmentLinesToInvoice(invoice, shipments, lineOverrides);
-
     return invoice;
+  }
+
+  /**
+   * Overrides the invoice's price list — used by the "invoice from shipment" flow (ETP-4028),
+   * where the tariff is chosen explicitly by the user in a confirmation popup rather than
+   * inherited from the source order/business partner. A no-op when {@code priceListId} is
+   * blank or does not resolve to an active {@link PriceList}.
+   *
+   * <p>Must be called BEFORE {@code CreateInvoiceLinesFromProcess} runs: the native
+   * {@code UpdatePricesAndAmounts} hook prices every line off {@code getInvoice().getPriceList()}
+   * read from this already-saved invoice, so overriding it here is sufficient — no changes
+   * needed to the native pricing process.
+   */
+  private void applyPriceListOverride(Invoice invoice, String priceListId) {
+    if (StringUtils.isBlank(priceListId)) {
+      return;
+    }
+    PriceList priceList = OBDal.getInstance().get(PriceList.class, priceListId);
+    if (priceList != null) {
+      invoice.setPriceList(priceList);
+    }
+  }
+
+  /**
+   * Overrides the invoice's currency with the shipment's own (editable-until-confirmed)
+   * currency — used by the "invoice from shipment" flow (ETP-4028), where
+   * {@code createInvoiceFromOrderHeader} otherwise defaults it to the linked order's
+   * currency, which can diverge once the user edits the shipment's currency in draft.
+   * A no-op when {@code currencyId} is blank or does not resolve to an active
+   * {@link Currency}. Must be called before {@code OBDal.save} for the same reason as
+   * {@link #applyPriceListOverride}.
+   */
+  private void applyCurrencyOverride(Invoice invoice, String currencyId) {
+    if (StringUtils.isBlank(currencyId)) {
+      return;
+    }
+    Currency currency = OBDal.getInstance().get(Currency.class, currencyId);
+    if (currency != null) {
+      invoice.setCurrency(currency);
+    }
+  }
+
+  /**
+   * Reduces each shipment-line override by the draft-aware pending quantity so that
+   * quantities already committed in a draft invoice cannot be re-invoiced by a second
+   * draft. Lines whose remaining pending qty ≤ 0 are dropped from the result, causing
+   * {@link #createFromOrder} to skip them. When {@code lineOverrides} is empty (no
+   * per-line selection from the frontend) the method returns it unchanged.
+   */
+  private Map<String, BigDecimal> capShipmentLineOverrides(ShipmentInOut shipment,
+      Map<String, BigDecimal> lineOverrides) {
+    if (lineOverrides.isEmpty()) {
+      return lineOverrides;
+    }
+    Map<String, BigDecimal> pending = computePendingQtyPerLine(shipment.getId(), true);
+    Map<String, BigDecimal> capped = new HashMap<>();
+    for (Map.Entry<String, BigDecimal> entry : lineOverrides.entrySet()) {
+      BigDecimal pendingQty = pending.getOrDefault(entry.getKey(), BigDecimal.ZERO);
+      BigDecimal cappedQty = entry.getValue().min(pendingQty);
+      // ETP-4722: same sign-unaware bug as resolvePendingForLine above — only an
+      // exact zero means "nothing to invoice". pendingQty here is an ABS-based
+      // magnitude (see computePendingQtyPerLine), so a negative override is always
+      // <= it and min() already returns the override unchanged with its sign intact.
+      if (cappedQty.compareTo(BigDecimal.ZERO) != 0) {
+        capped.put(entry.getKey(), cappedQty);
+      }
+    }
+    if (capped.isEmpty()) {
+      throw new OBException("No hay líneas pendientes de facturar en este albarán");
+    }
+    return capped;
+  }
+
+  /**
+   * Converts a map of {@code M_InOutLine_ID → qty} overrides (sent by the frontend
+   * when the user selects specific quantities in the preview) into the equivalent
+   * {@code C_OrderLine_ID → qty} map expected by {@link #createFromOrder}.
+   * Lines without a linked order line are silently dropped.
+   */
+  private Map<String, BigDecimal> translateToOrderLineOverrides(ShipmentInOut shipment,
+      Map<String, BigDecimal> shipmentLineOverrides) {
+    if (shipmentLineOverrides.isEmpty()) {
+      return Collections.emptyMap();
+    }
+    Map<String, BigDecimal> result = new HashMap<>();
+    for (ShipmentInOutLine sl : shipment.getMaterialMgmtShipmentInOutLineList()) {
+      BigDecimal qty = shipmentLineOverrides.get(sl.getId());
+      if (qty != null && sl.getSalesOrderLine() != null) {
+        result.put(sl.getSalesOrderLine().getId(), qty);
+      }
+    }
+    return result;
   }
 
   /**
@@ -832,6 +1070,10 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
       invoice.setPaymentTerms(bp.getPaymentTerms());
       invoice.setPaymentMethod(bp.getPaymentMethod());
     }
+    // ETP-4028: the invoice's currency is always inherited from the shipment's own
+    // (editable-until-confirmed) currency, never from the linked order or BP default —
+    // those can diverge from the shipment once the user changes it in draft.
+    invoice.setCurrency(first.getEtgoCurrency());
     invoice.setSummedLineAmount(BigDecimal.ZERO);
     invoice.setGrandTotalAmount(BigDecimal.ZERO);
     invoice.setWithholdingamount(BigDecimal.ZERO);
@@ -854,26 +1096,57 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
    */
   protected void addShipmentLinesToInvoice(Invoice invoice, List<ShipmentInOut> shipments,
       Map<String, BigDecimal> lineOverrides) {
+    Map<String, BigDecimal> pendingQtyMap = new HashMap<>();
+    for (ShipmentInOut shipment : shipments) {
+      pendingQtyMap.putAll(computePendingQtyPerLine(shipment.getId(), true));
+    }
+
     boolean hasOverrides = !lineOverrides.isEmpty();
-    long lineNo = 10;
+    JSONArray selectedLines = new JSONArray();
     for (ShipmentInOut shipment : shipments) {
       for (ShipmentInOutLine sl : shipment.getMaterialMgmtShipmentInOutLineList()) {
-        BigDecimal qty = resolveShipmentLineQty(sl, hasOverrides, lineOverrides);
+        BigDecimal qty = resolveShipmentLineQty(sl, hasOverrides, lineOverrides, pendingQtyMap);
         if (qty == null) {
           continue;
         }
-        InvoiceLine il = createShipmentInvoiceLine(invoice, sl, qty, lineNo);
-        OBDal.getInstance().save(il);
-        lineNo += 10;
+        try {
+          JSONObject entry = new JSONObject();
+          entry.put("id", sl.getId());
+          entry.put(FIELD_ORDERED_QUANTITY, qty.toPlainString());
+          selectedLines.put(entry);
+        } catch (Exception e) {
+          log.warn("Failed to build invoice line entry for shipment line {}: {}", sl.getId(), e.getMessage());
+        }
       }
     }
+    if (selectedLines.length() == 0) {
+      throw new OBException("No hay líneas pendientes de facturar en este albarán");
+    }
+    createInvoiceLinesFromShipmentLines(selectedLines, invoice);
+  }
+
+  protected void createInvoiceLinesFromShipmentLines(JSONArray selectedLines, Invoice invoice) {
+    CreateInvoiceLinesFromProcess proc =
+        WeldUtils.getInstanceFromStaticBeanManager(CreateInvoiceLinesFromProcess.class);
+    proc.createInvoiceLinesFromDocumentLines(selectedLines, invoice, ShipmentInOutLine.class);
   }
 
   /**
-   * Determines the quantity to invoice for a single shipment line.
+   * Backward-compatible 3-arg overload. Delegates to the 4-arg variant with an
+   * empty pending-qty map, which falls back to movement quantity for every line
+   * (same behaviour as before pending-qty awareness was added).
+   */
+  protected BigDecimal resolveShipmentLineQty(ShipmentInOutLine sl, boolean hasOverrides,
+      Map<String, BigDecimal> lineOverrides) {
+    return resolveShipmentLineQty(sl, hasOverrides, lineOverrides, Collections.emptyMap());
+  }
+
+  /**
+   * Determines the quantity to invoice for a single shipment line, capped at
+   * the uninvoiced (pending) quantity so that already-invoiced lines are skipped.
    * Returns {@code null} when the line is inactive, excluded by overrides,
-   * or has zero/null movement quantity. When overrides are present the result
-   * is capped at the override value.
+   * has zero/null movement quantity, or is already fully invoiced.
+   * When overrides are present the result is capped at min(override, pendingQty).
    *
    * @param sl
    *     the shipment line to evaluate
@@ -881,145 +1154,29 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
    *     whether {@code lineOverrides} is non-empty
    * @param lineOverrides
    *     caller-supplied quantity caps per shipment line
+   * @param pendingQtyMap
+   *     pre-computed uninvoiced qty per {@code M_InOutLine_ID}; empty map
+   *     means treat all lines as fully pending (backward-compat behaviour)
    * @return quantity to invoice, or {@code null} to skip this line
    */
   protected BigDecimal resolveShipmentLineQty(ShipmentInOutLine sl, boolean hasOverrides,
-      Map<String, BigDecimal> lineOverrides) {
+      Map<String, BigDecimal> lineOverrides, Map<String, BigDecimal> pendingQtyMap) {
     if (!sl.isActive() || (hasOverrides && !lineOverrides.containsKey(sl.getId()))) {
       return null;
     }
-    BigDecimal maxQty = sl.getMovementQuantity();
-    if (maxQty == null || maxQty.compareTo(BigDecimal.ZERO) <= 0) {
+    BigDecimal movementQty = sl.getMovementQuantity();
+    if (movementQty == null || movementQty.compareTo(BigDecimal.ZERO) <= 0) {
       return null;
     }
-    BigDecimal qty = hasOverrides ? lineOverrides.get(sl.getId()).min(maxQty) : maxQty;
+    // Fall back to movement qty when map is absent (backward-compat / no-DB path).
+    BigDecimal pendingQty = pendingQtyMap.getOrDefault(sl.getId(), movementQty)
+        .min(movementQty)
+        .max(BigDecimal.ZERO);
+    if (pendingQty.compareTo(BigDecimal.ZERO) <= 0) {
+      return null; // already fully invoiced
+    }
+    BigDecimal qty = hasOverrides ? lineOverrides.get(sl.getId()).min(pendingQty) : pendingQty;
     return qty.compareTo(BigDecimal.ZERO) > 0 ? qty : null;
-  }
-
-  /**
-   * Builds an unsaved {@link InvoiceLine} for the given shipment line.
-   * When a linked {@link OrderLine} exists, unit price, list price, price limit, tax,
-   * and net amount are copied from it; otherwise all monetary fields default to zero
-   * and tax is left unset (caller must patch before completing the invoice).
-   *
-   * @param invoice
-   *     the parent invoice
-   * @param sl
-   *     the source shipment line
-   * @param qty
-   *     the quantity to invoice (already validated > 0)
-   * @param lineNo
-   *     sequential line number to assign (10, 20, …)
-   * @return a transient {@link InvoiceLine} ready to be saved
-   */
-  protected InvoiceLine createShipmentInvoiceLine(Invoice invoice, ShipmentInOutLine sl, BigDecimal qty, long lineNo) {
-    InvoiceLine il = OBProvider.getInstance().get(InvoiceLine.class);
-    il.setOrganization(sl.getOrganization());
-    il.setInvoice(invoice);
-    il.setLineNo(lineNo);
-    il.setProduct(sl.getProduct());
-    il.setInvoicedQuantity(qty);
-    il.setUOM(sl.getUOM());
-    il.setGoodsShipmentLine(sl);
-
-    OrderLine ol = sl.getSalesOrderLine();
-    if (ol != null) {
-      il.setUnitPrice(ol.getUnitPrice());
-      il.setListPrice(ol.getListPrice());
-      il.setPriceLimit(ol.getPriceLimit());
-      int precision = invoice.getCurrency().getStandardPrecision().intValue();
-      il.setLineNetAmount(qty.multiply(ol.getUnitPrice()).setScale(precision, RoundingMode.HALF_UP));
-      il.setTax(ol.getTax());
-      il.setSalesOrderLine(ol);
-    } else {
-      il.setUnitPrice(BigDecimal.ZERO);
-      il.setListPrice(BigDecimal.ZERO);
-      il.setLineNetAmount(BigDecimal.ZERO);
-    }
-    return il;
-  }
-
-  /** Delegates to {@link InvoiceFromOrderSupport} — logic shared with the purchase path. */
-  protected void ensureLineGrossAmounts(Invoice invoice) {
-    getSupport().ensureLineGrossAmounts(invoice);
-  }
-
-  /** Delegates to {@link InvoiceFromOrderSupport} — logic shared with the purchase path. */
-  protected BigDecimal calculateLineGross(InvoiceLine il, int precision) {
-    return getSupport().calculateLineGross(il, precision);
-  }
-
-  /**
-   * Recalculates and persists {@code summedLineAmount}, {@code grandTotalAmount},
-   * and {@link InvoiceTax} records for the given invoice.
-   * Needed for shipment-based invoices whose lines are created manually (not via
-   * {@code CreateInvoiceLinesFromProcess}), so the DB totals reflect the actual
-   * line data. Works in two passes:
-   * <ol>
-   *   <li>Iterates lines to ensure {@code lineNetAmount} is set, and accumulates
-   *       the taxable base per tax rate.</li>
-   *   <li>Creates one {@link InvoiceTax} row per non-summary tax and sums the
-   *       tax amounts into the invoice grand total.</li>
-   * </ol>
-   *
-   * @param invoice
-   *     the invoice whose totals should be recalculated
-   */
-  protected void recalculateTotals(Invoice invoice) {
-    int precision = invoice.getCurrency().getStandardPrecision().intValue();
-
-    // Pass 1: ensure lineNetAmount is set; accumulate taxable base per tax
-    Map<String, BigDecimal> taxBaseMap = new LinkedHashMap<>();
-    Map<String, TaxRate> taxRateMap = new LinkedHashMap<>();
-    BigDecimal totalLines = BigDecimal.ZERO;
-
-    for (InvoiceLine il : invoice.getInvoiceLineList()) {
-      BigDecimal qty = il.getInvoicedQuantity() != null ? il.getInvoicedQuantity() : BigDecimal.ZERO;
-      BigDecimal price = il.getUnitPrice() != null ? il.getUnitPrice() : BigDecimal.ZERO;
-      BigDecimal lineNet;
-      if (il.getLineNetAmount() == null || il.getLineNetAmount().compareTo(BigDecimal.ZERO) == 0) {
-        lineNet = qty.multiply(price).setScale(precision, RoundingMode.HALF_UP);
-        il.setLineNetAmount(lineNet);
-        OBDal.getInstance().save(il);
-      } else {
-        lineNet = il.getLineNetAmount();
-      }
-      totalLines = totalLines.add(lineNet);
-
-      TaxRate tax = il.getTax();
-      if (tax != null && Boolean.FALSE.equals(tax.isSummaryLevel())) {
-        taxBaseMap.merge(tax.getId(), lineNet, BigDecimal::add);
-        taxRateMap.putIfAbsent(tax.getId(), tax);
-      }
-    }
-
-    // Pass 2: create InvoiceTax records and accumulate total tax
-    BigDecimal totalTax = BigDecimal.ZERO;
-    long lineNo = 10;
-    for (Map.Entry<String, TaxRate> entry : taxRateMap.entrySet()) {
-      TaxRate tax = entry.getValue();
-      BigDecimal taxBase = taxBaseMap.get(entry.getKey());
-      BigDecimal rate = tax.getRate() != null ? tax.getRate() : BigDecimal.ZERO;
-      BigDecimal taxAmt = taxBase.multiply(rate).divide(new BigDecimal("100"), precision, RoundingMode.HALF_UP);
-
-      InvoiceTax it = OBProvider.getInstance().get(InvoiceTax.class);
-      it.setClient(invoice.getClient());
-      it.setOrganization(invoice.getOrganization());
-      it.setInvoice(invoice);
-      it.setTax(tax);
-      it.setLineNo(lineNo);
-      it.setTaxableAmount(taxBase.setScale(precision, RoundingMode.HALF_UP));
-      it.setTaxAmount(taxAmt);
-      it.setRecalculate(false);
-      OBDal.getInstance().save(it);
-
-      totalTax = totalTax.add(taxAmt);
-      lineNo += 10;
-    }
-
-    invoice.setSummedLineAmount(totalLines.setScale(precision, RoundingMode.HALF_UP));
-    invoice.setGrandTotalAmount(totalLines.add(totalTax).setScale(precision, RoundingMode.HALF_UP));
-    OBDal.getInstance().save(invoice);
   }
 
   /**
@@ -1111,5 +1268,169 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
       }
     }
     return candidates.isEmpty() ? null : candidates.get(0);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Legacy shipment-line invoice creation — used by ReturnShipmentUtils
+  // ---------------------------------------------------------------------------
+
+  protected InvoiceLine createShipmentInvoiceLine(Invoice invoice, ShipmentInOutLine sl, BigDecimal qty, long lineNo) {
+    InvoiceLine il = OBProvider.getInstance().get(InvoiceLine.class);
+    il.setOrganization(sl.getOrganization());
+    il.setInvoice(invoice);
+    il.setLineNo(lineNo);
+    il.setProduct(sl.getProduct());
+    il.setInvoicedQuantity(qty);
+    il.setUOM(sl.getUOM());
+    il.setGoodsShipmentLine(sl);
+
+    OrderLine ol = sl.getSalesOrderLine();
+    if (ol != null) {
+      applyPricesFromOrderLine(il, ol, qty, invoice);
+    } else {
+      InvoiceLine sourceIL = findLinkedInvoiceLine(sl.getId());
+      if (sourceIL != null) {
+        applyPricesFromInvoiceLine(il, sourceIL, qty, invoice);
+      } else {
+        il.setUnitPrice(BigDecimal.ZERO);
+        il.setListPrice(BigDecimal.ZERO);
+        il.setLineNetAmount(BigDecimal.ZERO);
+      }
+    }
+    return il;
+  }
+
+  private void applyPricesFromOrderLine(InvoiceLine il, OrderLine ol, BigDecimal qty, Invoice invoice) {
+    BigDecimal unitPrice = ol.getUnitPrice() != null ? ol.getUnitPrice() : BigDecimal.ZERO;
+    BigDecimal rawList  = ol.getListPrice();
+    String productId = ol.getProduct() != null ? ol.getProduct().getId() : null;
+    String priceListId = invoice.getPriceList() != null ? invoice.getPriceList().getId() : null;
+    BigDecimal listPrice = (rawList != null && rawList.compareTo(BigDecimal.ZERO) > 0)
+        ? rawList
+        : resolveListPriceFromPriceList(productId, priceListId, unitPrice);
+    il.setUnitPrice(unitPrice);
+    il.setListPrice(listPrice);
+    il.setPriceLimit(ol.getPriceLimit());
+    int precision = invoice.getCurrency().getStandardPrecision().intValue();
+    il.setLineNetAmount(qty.multiply(unitPrice).setScale(precision, RoundingMode.HALF_UP));
+    if (ol.getGrossUnitPrice() != null) il.setGrossUnitPrice(ol.getGrossUnitPrice());
+    if (ol.getGrossListPrice() != null) il.setGrossListPrice(ol.getGrossListPrice());
+    if (ol.getBaseGrossUnitPrice() != null) il.setBaseGrossUnitPrice(ol.getBaseGrossUnitPrice());
+    il.setTax(ol.getTax());
+    il.setSalesOrderLine(ol);
+  }
+
+  private void applyPricesFromInvoiceLine(InvoiceLine il, InvoiceLine sourceIL, BigDecimal qty, Invoice invoice) {
+    BigDecimal unitPrice = sourceIL.getUnitPrice() != null ? sourceIL.getUnitPrice() : BigDecimal.ZERO;
+    BigDecimal rawList  = sourceIL.getListPrice();
+    String productId = sourceIL.getProduct() != null ? sourceIL.getProduct().getId() : null;
+    String priceListId = invoice.getPriceList() != null ? invoice.getPriceList().getId() : null;
+    BigDecimal listPrice = (rawList != null && rawList.compareTo(BigDecimal.ZERO) > 0)
+        ? rawList
+        : resolveListPriceFromPriceList(productId, priceListId, unitPrice);
+    il.setUnitPrice(unitPrice);
+    il.setListPrice(listPrice);
+    if (sourceIL.getPriceLimit() != null) il.setPriceLimit(sourceIL.getPriceLimit());
+    int precision = invoice.getCurrency().getStandardPrecision().intValue();
+    il.setLineNetAmount(qty.multiply(unitPrice).setScale(precision, RoundingMode.HALF_UP));
+    if (sourceIL.getGrossUnitPrice() != null) il.setGrossUnitPrice(sourceIL.getGrossUnitPrice());
+    if (sourceIL.getGrossListPrice() != null) il.setGrossListPrice(sourceIL.getGrossListPrice());
+    if (sourceIL.getBaseGrossUnitPrice() != null) il.setBaseGrossUnitPrice(sourceIL.getBaseGrossUnitPrice());
+    if (sourceIL.getTax() != null) il.setTax(sourceIL.getTax());
+    if (sourceIL.getSalesOrderLine() != null) il.setSalesOrderLine(sourceIL.getSalesOrderLine());
+  }
+
+  @SuppressWarnings("java:S2077")
+  private BigDecimal resolveListPriceFromPriceList(String productId, String priceListId, BigDecimal fallback) {
+    if (productId == null || priceListId == null) return fallback;
+    String sql =
+        "SELECT pp.pricelist FROM m_productprice pp " +
+        "JOIN m_pricelist_version plv ON plv.m_pricelist_version_id = pp.m_pricelist_version_id " +
+        "WHERE pp.m_product_id = ? AND plv.m_pricelist_id = ? " +
+        "AND plv.isactive = 'Y' AND pp.isactive = 'Y' AND plv.validfrom <= CURRENT_DATE " +
+        "ORDER BY plv.validfrom DESC LIMIT 1";
+    Connection conn = OBDal.getInstance().getConnection();
+    try (PreparedStatement ps = conn.prepareStatement(sql)) {
+      ps.setString(1, productId);
+      ps.setString(2, priceListId);
+      try (ResultSet rs = ps.executeQuery()) {
+        if (rs.next()) {
+          BigDecimal listed = rs.getBigDecimal(1);
+          return (listed != null && listed.compareTo(BigDecimal.ZERO) > 0) ? listed : fallback;
+        }
+      }
+    } catch (Exception e) {
+      log.warn("Could not resolve list price for product {} from price list {}: {}", productId, priceListId, e.getMessage());
+    }
+    return fallback;
+  }
+
+  protected InvoiceLine findLinkedInvoiceLine(String shipmentLineId) {
+    try {
+      List<InvoiceLine> lines = OBDal.getInstance().getSession()
+          .createQuery(
+              "FROM InvoiceLine il WHERE il.goodsShipmentLine.id = :slId " +
+              "AND il.invoice.documentStatus NOT IN ('VO', 'CL') " +
+              "ORDER BY il.invoice.invoiceDate DESC",
+              InvoiceLine.class)
+          .setParameter("slId", shipmentLineId)
+          .setMaxResults(1)
+          .list();
+      return lines.isEmpty() ? null : lines.get(0);
+    } catch (Exception e) {
+      log.warn("Could not find linked invoice line for shipment line {}: {}", shipmentLineId, e.getMessage());
+      return null;
+    }
+  }
+
+  protected void recalculateTotals(Invoice invoice) {
+    int precision = invoice.getCurrency().getStandardPrecision().intValue();
+    Map<String, BigDecimal> taxBaseMap = new LinkedHashMap<>();
+    Map<String, TaxRate> taxRateMap = new LinkedHashMap<>();
+    BigDecimal totalLines = BigDecimal.ZERO;
+
+    for (InvoiceLine il : invoice.getInvoiceLineList()) {
+      BigDecimal qty = il.getInvoicedQuantity() != null ? il.getInvoicedQuantity() : BigDecimal.ZERO;
+      BigDecimal price = il.getUnitPrice() != null ? il.getUnitPrice() : BigDecimal.ZERO;
+      BigDecimal lineNet;
+      if (il.getLineNetAmount() == null || il.getLineNetAmount().compareTo(BigDecimal.ZERO) == 0) {
+        lineNet = qty.multiply(price).setScale(precision, RoundingMode.HALF_UP);
+        il.setLineNetAmount(lineNet);
+        OBDal.getInstance().save(il);
+      } else {
+        lineNet = il.getLineNetAmount();
+      }
+      totalLines = totalLines.add(lineNet);
+      TaxRate tax = il.getTax();
+      if (tax != null && Boolean.FALSE.equals(tax.isSummaryLevel())) {
+        taxBaseMap.merge(tax.getId(), lineNet, BigDecimal::add);
+        taxRateMap.putIfAbsent(tax.getId(), tax);
+      }
+    }
+
+    BigDecimal totalTax = BigDecimal.ZERO;
+    long lineNo = 10;
+    for (Map.Entry<String, TaxRate> entry : taxRateMap.entrySet()) {
+      TaxRate tax = entry.getValue();
+      BigDecimal taxBase = taxBaseMap.get(entry.getKey());
+      BigDecimal rate = tax.getRate() != null ? tax.getRate() : BigDecimal.ZERO;
+      BigDecimal taxAmt = taxBase.multiply(rate).divide(new BigDecimal("100"), precision, RoundingMode.HALF_UP);
+      InvoiceTax it = OBProvider.getInstance().get(InvoiceTax.class);
+      it.setClient(invoice.getClient());
+      it.setOrganization(invoice.getOrganization());
+      it.setInvoice(invoice);
+      it.setTax(tax);
+      it.setLineNo(lineNo);
+      it.setTaxableAmount(taxBase.setScale(precision, RoundingMode.HALF_UP));
+      it.setTaxAmount(taxAmt);
+      it.setRecalculate(false);
+      OBDal.getInstance().save(it);
+      totalTax = totalTax.add(taxAmt);
+      lineNo += 10;
+    }
+
+    invoice.setSummedLineAmount(totalLines.setScale(precision, RoundingMode.HALF_UP));
+    invoice.setGrandTotalAmount(totalLines.add(totalTax).setScale(precision, RoundingMode.HALF_UP));
+    OBDal.getInstance().save(invoice);
   }
 }

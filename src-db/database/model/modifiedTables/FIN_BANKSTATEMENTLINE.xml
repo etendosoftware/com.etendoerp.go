@@ -1,0 +1,13 @@
+<?xml version="1.0"?>
+  <database name="MODIFIED TABLE FIN_BANKSTATEMENTLINE">
+    <table name="FIN_BANKSTATEMENTLINE" primaryKey="FIN_BANKSTATEMENTLINE_KEY">
+      <column name="EM_ETGO_MATCH_GROUP_ID" primaryKey="false" required="false" type="VARCHAR" size="200" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="EM_ETGO_PENDING_AMOUNT" primaryKey="false" required="true" type="DECIMAL" autoIncrement="false">
+        <default><![CDATA[0]]></default>
+        <onCreateDefault/>
+      </column>
+    </table>
+  </database>

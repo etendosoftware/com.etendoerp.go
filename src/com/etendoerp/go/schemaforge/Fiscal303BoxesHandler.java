@@ -16,10 +16,11 @@
  */
 package com.etendoerp.go.schemaforge;
 
-import java.io.IOException;
 import java.math.BigDecimal;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Base64;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
@@ -30,13 +31,13 @@ import java.util.function.Function;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 
-import org.apache.log4j.Logger;
+import org.apache.commons.lang3.StringUtils;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.ScrollableResults;
+import org.hibernate.criterion.Order;
 import org.hibernate.criterion.Restrictions;
 import org.openbravo.base.exception.OBException;
-import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.enterprise.Organization;
@@ -47,21 +48,37 @@ import org.openbravo.model.financialmgmt.calendar.Period;
 import org.openbravo.model.financialmgmt.tax.TaxRate;
 import org.openbravo.module.aeat303.es.api.CashVATOperationType;
 import org.openbravo.module.aeat303.es.api.InvoiceType;
+import org.openbravo.module.aeat303.es.presentation.AEAT303DeclarationData;
+import org.openbravo.module.aeat303.es.presentation.AEAT303SubmissionResult;
 import org.openbravo.module.aeat303.es.report.v2014.AEAT303Report2014Dao;
 import org.openbravo.module.aeat303.es.util.AEAT303CalculationsHelper;
 import org.openbravo.module.taxreportlauncher.TaxReport;
 import org.openbravo.module.taxreportlauncher.TaxReportParameter;
 
-class Fiscal303BoxesHandler {
+import com.etendoerp.go.schemaforge.data.FiscalDecl;
 
-  private static final Logger log = Logger.getLogger(Fiscal303BoxesHandler.class);
+class Fiscal303BoxesHandler extends AbstractFiscalHandler {
 
-  private static final String BOXES           = "boxes";
-  private static final String VAT_SALES       = "VAT_SALES";
+  private static final String BOXES        = "boxes";
+  private static final String GENERATE     = "generate";
+  private static final String SUBMIT       = "submit";
+  private static final String VAT_SALES    = "VAT_SALES";
   private static final String VAT_PURCHASE    = "VAT_PURCHASE";
   private static final String PURCHASE        = "Purchase";
   private static final String TAX_BASE_AMOUNT = "TaxBaseAmount";
   private static final String TAX_AMOUNT      = "TaxAmount";
+
+  // ── AEAT 303 telematic submission (POST /neo/fiscal303/submit) ──────────
+  // Package-private (not private): also read by Fiscal303SubmissionSupport, which owns the
+  // /generate and /submit entities (moved out of this class in ETP-4456 to keep this class's
+  // method count under the SonarQube java:S1448 threshold — see that class's header javadoc).
+  static final String ID_KEY = "id";
+  /** Shared by {@code handleSubmit}'s body parsing (Fiscal303SubmissionSupport) and this class's
+   *  {@link #buildSubmissionResultJson}/{@link #buildFailureJson} JSON-shape helpers — extracted
+   *  (ETP-4456, SonarQube java:S1192) so the literal isn't duplicated across the two classes. */
+  static final String PARAM_TEST_MODE = "testMode";
+  /** AEAT declaration type character for "a ingresar" (type I): the only type that uses NRC. */
+  private static final String DECLARATION_TYPE_INGRESO = "I";
 
   private static final BigDecimal PCT_21   = new BigDecimal("21");
   private static final BigDecimal PCT_10   = new BigDecimal("10");
@@ -73,40 +90,155 @@ class Fiscal303BoxesHandler {
   private static final BigDecimal PCT_1_40 = new BigDecimal("1.40");
   private static final BigDecimal PCT_5_20 = new BigDecimal("5.20");
   private static final BigDecimal PCT_0_50 = new BigDecimal("0.50");
+  private static final BigDecimal PCT_0_26 = new BigDecimal("0.26");
+  private static final BigDecimal PCT_0_62 = new BigDecimal("0.62");
+  private static final BigDecimal PCT_1_00 = new BigDecimal("1.00");
   private static final BigDecimal PCT_1_75 = new BigDecimal("1.75");
 
-  private final NeoServlet servlet;
+  private final Fiscal303SubmissionSupport submissionSupport;
 
   Fiscal303BoxesHandler(NeoServlet servlet) {
-    this.servlet = servlet;
+    super(servlet);
+    this.submissionSupport = new Fiscal303SubmissionSupport(this);
   }
 
-  void handle(String entityName, String method, HttpServletRequest request,
-      HttpServletResponse response) throws IOException {
-    if (!"GET".equals(method) || !BOXES.equals(entityName)) {
-      servlet.sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
-          "Only GET /fiscal303/boxes is supported");
-      return;
-    }
-    try {
-      String yearStr = request.getParameter("year");
-      String period  = request.getParameter("period");
-      if (yearStr == null || period == null) {
-        servlet.sendError(response, HttpServletResponse.SC_BAD_REQUEST,
-            "Missing required params: year, period");
-        return;
-      }
-      int year = Integer.parseInt(yearStr);
-      String orgId = OBContext.getOBContext().getCurrentOrganization().getId();
+  @Override
+  protected boolean isKnownEntity(String entityName) {
+    return BOXES.equals(entityName) || GENERATE.equals(entityName) || SUBMIT.equals(entityName)
+        || MODIFIED.equals(entityName);
+  }
 
-      ComputeResult cr = computeBoxes(orgId, year, period);
-      JSONObject result = buildResponse(cr.boxes, cr.sources);
-      response.setContentType("application/json;charset=UTF-8");
-      response.getWriter().write(result.toString());
+  @Override
+  protected boolean allowsPost(String entityName) {
+    return SUBMIT.equals(entityName);
+  }
+
+  @Override
+  protected void dispatch(String entityName, String orgId, int year, String period,
+      HttpServletRequest request, HttpServletResponse response) throws FiscalHandlerException {
+    try {
+      if (BOXES.equals(entityName)) {
+        ComputeResult cr = computeBoxes(orgId, year, period);
+        JSONObject result = buildResponse(cr.boxes, cr.sources);
+        response.setContentType(JSON_CT);
+        response.getWriter().write(result.toString());
+      } else if (GENERATE.equals(entityName)) {
+        String tipo = request.getParameter("tipo");
+        submissionSupport.handleGenerate(orgId, year, period, tipo, request, response);
+      } else if (SUBMIT.equals(entityName)) {
+        String tipo = request.getParameter("tipo");
+        String declId = request.getParameter(ID_KEY);
+        submissionSupport.handleSubmit(orgId, year, period, tipo, declId, request, response);
+      } else {
+        long sinceMs = Long.parseLong(request.getParameter(SINCE_KEY));
+        handleModified(orgId, year, period, new java.util.Date(sinceMs), response);
+      }
+    } catch (FiscalHandlerException e) {
+      throw e;
     } catch (Exception e) {
-      log.error("Error computing 303 boxes", e);
-      servlet.sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, e.getMessage());
+      throw new FiscalHandlerException(e);
     }
+  }
+
+  @Override
+  protected String getModelKey() {
+    return "fiscal303";
+  }
+
+  /** True when the declaration exists and belongs to the current client/organization. */
+  boolean belongsTo(FiscalDecl decl, String clientId, String orgId) {
+    return decl != null
+        && decl.getClient() != null && clientId.equals(decl.getClient().getId())
+        && decl.getOrganization() != null && orgId.equals(decl.getOrganization().getId());
+  }
+
+  /**
+   * NRC only applies to type I (ingreso) declarations — mirrors
+   * {@code AEAT303PresentationServlet#resolveNrcForSubmission} exactly, so a value entered for a
+   * non-I declaration is never forwarded to the AEAT.
+   */
+  static String resolveNrcForSubmission(String declarationType, String nrc) {
+    return DECLARATION_TYPE_INGRESO.equals(declarationType) ? StringUtils.defaultString(nrc) : "";
+  }
+
+  static String safeFileToken(String value) {
+    String token = StringUtils.defaultIfBlank(value, "NA");
+    return token.replaceAll("[^A-Za-z0-9]", "_");
+  }
+
+  JSONObject declarationDataJson(AEAT303DeclarationData data) throws Exception {
+    JSONObject o = new JSONObject();
+    o.put("nif", StringUtils.defaultString(data.getNif()));
+    o.put("businessName", StringUtils.defaultString(data.getBusinessName()));
+    o.put("fiscalYear", StringUtils.defaultString(data.getFiscalYear()));
+    o.put(PERIOD_KEY, StringUtils.defaultString(data.getPeriod()));
+    o.put("declarationType", StringUtils.defaultString(data.getDeclarationType()));
+    o.put("resultAmount",
+        data.getResultAmount() != null ? data.getResultAmount().toString() : JSONObject.NULL);
+    o.put("iban", data.getIban() != null ? data.getIban() : JSONObject.NULL);
+    return o;
+  }
+
+  /** Builds the response for a submission that reached the AEAT (successfully or not). */
+  JSONObject buildSubmissionResultJson(AEAT303SubmissionResult result,
+      AEAT303DeclarationData data) throws Exception {
+    boolean testMode = result.isTestMode();
+    boolean successful = result.isSuccessful();
+    String status;
+    if (!successful) {
+      status = "ERROR";
+    } else if (testMode) {
+      status = "TEST_SUCCESS";
+    } else {
+      status = "SUCCESS";
+    }
+
+    JSONObject o = new JSONObject();
+    o.put("status", status);
+    o.put(PARAM_TEST_MODE, testMode);
+    o.put("csv", StringUtils.defaultString(result.getCsv()));
+    o.put("presentationDate", StringUtils.defaultString(result.getPresentationDate()));
+    o.put("registryNumber", StringUtils.defaultString(result.getRegistryNumber()));
+    o.put("justificanteNumber", StringUtils.defaultString(result.getJustificanteNumber()));
+    byte[] pdf = result.getPdfContent();
+    o.put("pdfBase64", pdf != null ? Base64.getEncoder().encodeToString(pdf) : JSONObject.NULL);
+    o.put("pdfDownloadFailed", result.isPdfDownloadFailed());
+    o.put("errors", new JSONArray(result.getErrors()));
+    o.put("warnings", new JSONArray(result.getWarnings()));
+    o.put("declarationData", declarationDataJson(data));
+    return o;
+  }
+
+  /** Builds the response for a submission that failed before (or without) reaching the AEAT. */
+  JSONObject buildFailureJson(boolean testMode, String errorCode, String message)
+      throws Exception {
+    JSONObject o = new JSONObject();
+    o.put("status", "ERROR");
+    o.put(PARAM_TEST_MODE, testMode);
+    o.put("errorCode", errorCode);
+    JSONArray errors = new JSONArray();
+    errors.put(StringUtils.defaultString(message));
+    o.put("errors", errors);
+    o.put("warnings", new JSONArray());
+    return o;
+  }
+
+  // ── Package-private helpers (tested directly) ─────────────────────────────
+
+  /**
+   * Maps a frontend AEAT letter code to the declaration type used by
+   * {@code AEAT303_Utility.getCheckedInputParameter}. Accepted codes: C, D, I, U, V, X, G —
+   * all 7 options the frontend's {@code TIPO_DECLARACION_FIELD} exposes, each backed by its own
+   * {@code Declaration_<letter>} search key in
+   * {@code 303_Report_Tax_Parameters.xml} (org.openbravo.module.aeat303.es).
+   * Anything else (null, empty, unknown alias) falls back to "N" (zero result).
+   */
+  static String resolveDeclType(String tipo) {
+    if ("C".equals(tipo) || "D".equals(tipo) || "I".equals(tipo) || "U".equals(tipo)
+        || "V".equals(tipo) || "X".equals(tipo) || "G".equals(tipo)) {
+      return tipo;
+    }
+    return "N";
   }
 
   // ── Internal ─────────────────────────────────────────────────────
@@ -150,7 +282,7 @@ class Fiscal303BoxesHandler {
         : "AEAT303_M_" + year;
     TaxReport taxReport = resolveTaxReport(orgId, valueKey);
 
-    AcctSchema acctSchema = resolveAcctSchema(org);
+    AcctSchema acctSchema = resolveAcctSchema();
 
     List<Period> periods = resolvePeriods(orgId, year, period);
     if (periods.isEmpty()) {
@@ -166,32 +298,29 @@ class Fiscal303BoxesHandler {
     // taxRateId → list of box numbers it contributes to
     Map<String, List<Integer>> rateToBoxes = new HashMap<>();
 
-    fillSalesBoxes(b, helper, dao303, taxReport, rateToBoxes);
+    boolean isNewForm = isOct2024OrLater(year, period);
+    fillSalesBoxes(b, helper, dao303, taxReport, rateToBoxes, isNewForm);
     fillPurchaseBoxes(b, helper, dao303, taxReport, rateToBoxes);
     fillAdditionalInfoBoxes(b, helper, dao303, taxReport, rateToBoxes);
 
-    int[] accruedBoxes   = { 3, 6, 9, 11, 13, 15, 18, 21, 24, 152, 158, 167 };
-    int[] deductibleBoxes = { 29, 31, 33, 35, 37, 39, 41, 42, 43, 44 };
-    BigDecimal accrued    = sumBoxes(b, accruedBoxes);
-    BigDecimal deductible = sumBoxes(b, deductibleBoxes);
-    b.put(27, round(accrued));
-    b.put(45, round(deductible));
-    b.put(46, round(accrued.subtract(deductible)));
-
-    // resultado_final — standard company (100 % Estado, no pending credits, no complementary)
-    BigDecimal r46 = b.getOrDefault(46, BigDecimal.ZERO);
-    b.put(66, r46);   // amount attributable to Estado (box 65 % × box 46)
-    b.put(69, r46);   // result before final adjustments (assumes boxes 64/76/77/78/68/108 = 0)
-    b.put(71, r46);   // final declaration result (assumes boxes 70/109 = 0)
-    // volume of operations — intracom and export mirrors
-    BigDecimal r59 = b.getOrDefault(59, BigDecimal.ZERO);
-    BigDecimal r60 = b.getOrDefault(60, BigDecimal.ZERO);
-    if (r59.compareTo(BigDecimal.ZERO) > 0) b.put(93, r59);
-    if (r60.compareTo(BigDecimal.ZERO) > 0) b.put(94, r60);
+    computeSummaryBoxes(b);
 
     List<Map<String, Object>> sources = collectSources(org, periods, dao303, rateToBoxes);
 
     return new ComputeResult(b, sources);
+  }
+
+  /**
+   * Returns true for form versions that introduced boxes 168-170 for 0.5%/0.26% RE
+   * and reassigned boxes 16-18 to 1% RE (Oct 2024 onwards).
+   */
+  static boolean isOct2024OrLater(int year, String period) {
+    if (year > 2024) return true;
+    if (year < 2024) return false;
+    if (period.startsWith("T")) {
+      return Integer.parseInt(period.substring(1)) >= 4;
+    }
+    return Integer.parseInt(period) >= 10;
   }
 
   /**
@@ -283,8 +412,26 @@ class Fiscal303BoxesHandler {
     row.put("total", round(base.add(vat)));
   }
 
+  // Package-private for unit testing — injects pre-built helper and dao,
+  // skips DB lookups and source collection.
+  @SuppressWarnings("java:S1172")
+  ComputeResult computeBoxes(Organization org, TaxReport taxReport,
+      List<Period> periods, AEAT303CalculationsHelper helper,
+      AEAT303Report2014Dao dao303) {
+    Map<Integer, BigDecimal> b = new HashMap<>();
+    Map<String, List<Integer>> rateToBoxes = new HashMap<>();
+
+    fillSalesBoxes(b, helper, dao303, taxReport, rateToBoxes, false);
+    fillPurchaseBoxes(b, helper, dao303, taxReport, rateToBoxes);
+    fillAdditionalInfoBoxes(b, helper, dao303, taxReport, rateToBoxes);
+    computeSummaryBoxes(b);
+
+    return new ComputeResult(b, Collections.emptyList());
+  }
+
   private void fillSalesBoxes(Map<Integer, BigDecimal> b, AEAT303CalculationsHelper helper,
-      AEAT303Report2014Dao dao303, TaxReport taxReport, Map<String, List<Integer>> rateToBoxes) {
+      AEAT303Report2014Dao dao303, TaxReport taxReport, Map<String, List<Integer>> rateToBoxes,
+      boolean isNewForm) {
 
     // VAT_SALES_GENERAL — split by rate % → boxes 7/9 (21%), 4/6 (10%/7%/8%), 1/3 (4%/5%),
     // 150/152 (0%), 165/167 (2%)
@@ -304,13 +451,20 @@ class Fiscal303BoxesHandler {
     fillGroupBoxes(b, helper, dao303, taxReport,
         new BoxGroupConfig(VAT_SALES, "VAT_SALES_ISP", PURCHASE, "No", "No", 12, 13), rateToBoxes);
 
-    // VAT_SALES_EC (recargo equivalencia) — split by %
+    // VAT_SALES_EC (recargo equivalencia) — split by %.
+    // Box assignment depends on form version: Oct 2024+ reassigned 0.5%/0.26% to 168/170
+    // and introduced 1% in boxes 16/18.
+    // Pre-2024: 0%, 0.50%, 0.62% all go to 16/18; box 17 = dominant rate by largest base.
     TaxReportParameter paramEC =
         dao303.getTaxReportParameter(taxReport, VAT_SALES, "VAT_SALES_EC");
     if (paramEC != null) {
       List<TaxRate> ecTaxes =
           dao303.get303Taxes(taxReport.getId(), "All", "All", "All", paramEC);
-      applyPercentageSplit(b, helper, ecTaxes, this::vatEcBoxes, rateToBoxes);
+      applyPercentageSplit(b, helper, ecTaxes, pct -> vatEcBoxes(pct, isNewForm), rateToBoxes);
+      if (!isNewForm && b.containsKey(16)) {
+        BigDecimal dominantRate = computePreOct2024EcDominantRate(helper, ecTaxes);
+        if (dominantRate != null) b.put(17, dominantRate);
+      }
     }
   }
 
@@ -327,13 +481,53 @@ class Fiscal303BoxesHandler {
     return Collections.emptyList();
   }
 
-  List<Integer> vatEcBoxes(BigDecimal pct) {
+  /**
+   * Maps a VAT_SALES_EC percentage to the correct box pair.
+   * From Oct 2024 (isNewForm=true), the AEAT 303 form redesigned the RE section:
+   *   0.26% / 0.50% → boxes 168/170 (new row introduced Oct 2024)
+   *   1.00%         → boxes 16/18  (previously held 0.50% in older forms)
+   * Pre-Oct 2024 (isNewForm=false):
+   *   0% / 0.50% / 0.62% → boxes 16/18 (box 17 = dominant rate, computed separately)
+   */
+  List<Integer> vatEcBoxes(BigDecimal pct, boolean isNewForm) {
     if (pct == null) return Collections.emptyList();
     if (pct.compareTo(PCT_1_40) == 0) return java.util.Arrays.asList(19, 21);
     if (pct.compareTo(PCT_5_20) == 0) return java.util.Arrays.asList(22, 24);
-    if (pct.compareTo(PCT_0_50) == 0) return java.util.Arrays.asList(16, 18);
     if (pct.compareTo(PCT_1_75) == 0) return java.util.Arrays.asList(156, 158);
+    if (isNewForm) {
+      if (pct.compareTo(PCT_0_50) == 0 || pct.compareTo(PCT_0_26) == 0)
+        return java.util.Arrays.asList(168, 170);
+      if (pct.compareTo(PCT_1_00) == 0) return java.util.Arrays.asList(16, 18);
+    } else {
+      if (pct.compareTo(PCT_0_50) == 0 || pct.compareTo(PCT_0_62) == 0
+          || pct.compareTo(BigDecimal.ZERO) == 0) return java.util.Arrays.asList(16, 18);
+    }
     return Collections.emptyList();
+  }
+
+  /**
+   * For pre-Oct 2024 forms: picks the dominant RE rate (0%, 0.50%, 0.62%) for box 17 display,
+   * defined as the rate with the largest base imponible — matching Classic AEAT303Report2023 logic.
+   * Returns null if no EC activity found.
+   */
+  BigDecimal computePreOct2024EcDominantRate(AEAT303CalculationsHelper helper,
+      List<TaxRate> ecTaxes) {
+    BigDecimal[] candidates = { BigDecimal.ZERO, PCT_0_50, PCT_0_62 };
+    Map<BigDecimal, List<TaxRate>> split = splitByPercentage(ecTaxes);
+    BigDecimal dominantRate = null;
+    BigDecimal maxBase = BigDecimal.ZERO;
+    for (BigDecimal rate : candidates) {
+      BigDecimal normRate = rate.setScale(2, java.math.RoundingMode.HALF_UP);
+      List<TaxRate> group = split.get(normRate);
+      if (group == null || group.isEmpty()) continue;
+      Map<String, BigDecimal> amounts = helper.calculateAmountsMap(group, InvoiceType.ALL);
+      BigDecimal base = amounts.getOrDefault(TAX_BASE_AMOUNT, BigDecimal.ZERO).abs();
+      if (base.compareTo(maxBase) > 0) {
+        maxBase = base;
+        dominantRate = normRate;
+      }
+    }
+    return dominantRate;
   }
 
   private void applyPercentageSplit(Map<Integer, BigDecimal> b, AEAT303CalculationsHelper helper,
@@ -397,12 +591,34 @@ class Fiscal303BoxesHandler {
         new BoxGroupConfig("Difference", "ExportsAndOperations", "All", "All", "All", 60, 0), rateToBoxes);
   }
 
+  // resultado_final — standard company (100 % Estado, no pending credits, no complementary)
+  private void computeSummaryBoxes(Map<Integer, BigDecimal> b) {
+    int[] accruedBoxes    = { 3, 6, 9, 11, 13, 15, 18, 21, 24, 152, 158, 167, 170 };
+    int[] deductibleBoxes = { 29, 31, 33, 35, 37, 39, 41, 42, 43, 44 };
+    BigDecimal accrued    = sumBoxes(b, accruedBoxes);
+    BigDecimal deductible = sumBoxes(b, deductibleBoxes);
+    b.put(27, round(accrued));
+    b.put(45, round(deductible));
+    b.put(46, round(accrued.subtract(deductible)));
+
+    BigDecimal r46 = b.getOrDefault(46, BigDecimal.ZERO);
+    b.put(66, r46);   // amount attributable to Estado (box 65 % × box 46)
+    b.put(69, r46);   // result before final adjustments (assumes boxes 64/76/77/78/68/108 = 0)
+    b.put(71, r46);   // final declaration result (assumes boxes 70/109 = 0)
+
+    BigDecimal r59 = b.getOrDefault(59, BigDecimal.ZERO);
+    BigDecimal r60 = b.getOrDefault(60, BigDecimal.ZERO);
+    if (r59.compareTo(BigDecimal.ZERO) > 0) b.put(93, r59);
+    if (r60.compareTo(BigDecimal.ZERO) > 0) b.put(94, r60);
+  }
+
   // ── Resolution helpers ───────────────────────────────────────────
 
-  private TaxReport resolveTaxReport(String orgId, String valueKey) {
+  TaxReport resolveTaxReport(String orgId, String valueKey) {
     OBCriteria<TaxReport> crit = OBDal.getInstance().createCriteria(TaxReport.class);
-    crit.add(Restrictions.eq(TaxReport.PROPERTY_ORGANIZATION + ".id", orgId));
+    crit.add(Restrictions.in(TaxReport.PROPERTY_ORGANIZATION + ".id", Arrays.asList(orgId, "0")));
     crit.add(Restrictions.eq(TaxReport.PROPERTY_SEARCHKEY, valueKey));
+    crit.addOrder(Order.desc(TaxReport.PROPERTY_ORGANIZATION + ".id"));
     crit.setMaxResults(1);
     List<TaxReport> list = crit.list();
     if (list.isEmpty()) {
@@ -410,44 +626,6 @@ class Fiscal303BoxesHandler {
           "No TaxReport found for org=" + orgId + " searchKey=" + valueKey);
     }
     return list.get(0);
-  }
-
-  private AcctSchema resolveAcctSchema(Organization org) {
-    OBCriteria<AcctSchema> crit = OBDal.getInstance().createCriteria(AcctSchema.class);
-    crit.add(Restrictions.eq(AcctSchema.PROPERTY_CLIENT + ".id", org.getClient().getId()));
-    crit.add(Restrictions.eq(AcctSchema.PROPERTY_ACTIVE, true));
-    crit.setMaxResults(1);
-    List<AcctSchema> list = crit.list();
-    if (list.isEmpty()) {
-      throw new OBException("No AcctSchema found for client=" + org.getClient().getId());
-    }
-    return list.get(0);
-  }
-
-  @SuppressWarnings("unchecked")
-  private List<Period> resolvePeriods(String orgId, int year, String periodCode) {
-    int monthFrom;
-    int monthTo;
-    if (periodCode.startsWith("T")) {
-      int q = Integer.parseInt(periodCode.substring(1));
-      monthFrom = (q - 1) * 3 + 1;
-      monthTo   = q * 3;
-    } else {
-      monthFrom = monthTo = Integer.parseInt(periodCode);
-    }
-    return OBDal.getInstance().getSession()
-        .createQuery(
-            "from FinancialMgmtPeriod p "
-            + "where p.organization.id = :orgId "
-            + "  and p.year.fiscalYear = :year "
-            + "  and p.periodNo between :from and :to "
-            + "order by p.periodNo",
-            Period.class)
-        .setParameter("orgId", orgId)
-        .setParameter("year", String.valueOf(year))
-        .setParameter("from", (long) monthFrom)
-        .setParameter("to",   (long) monthTo)
-        .list();
   }
 
   // ── Utility ──────────────────────────────────────────────────────

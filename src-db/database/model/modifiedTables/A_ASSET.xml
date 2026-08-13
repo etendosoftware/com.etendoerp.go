@@ -1,0 +1,9 @@
+<?xml version="1.0"?>
+  <database name="MODIFIED TABLE A_ASSET">
+    <table name="A_ASSET" primaryKey="A_ASSET_KEY">
+      <column name="EM_ETGO_AMORTIZATION_STATUS" primaryKey="false" required="false" type="DECIMAL" autoIncrement="false">
+        <default><![CDATA[0]]></default>
+        <onCreateDefault/>
+      </column>
+    </table>
+  </database>

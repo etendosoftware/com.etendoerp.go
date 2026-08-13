@@ -17,28 +17,41 @@
 package com.etendoerp.go.schemaforge;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.argThat;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
+
+import org.openbravo.erpCommon.utility.OBMessageUtils;
 
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.sql.Savepoint;
 
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
 import org.mockito.MockedStatic;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
+import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.erpCommon.utility.OBCurrencyUtils;
+import org.openbravo.model.common.enterprise.Organization;
 
 /**
  * Unit tests for {@link BusinessPartnerHandler}.
@@ -173,6 +186,28 @@ class BusinessPartnerHandlerTest {
     assertEquals("Empresa Test", body.getString("searchKey"));
   }
 
+  /**
+   * Regression (ETP-4156): {@code C_BPartner.Value} is {@code VARCHAR(40)} while
+   * {@code Name} has 60, so a long commercial name must be truncated before it is used as
+   * the placeholder searchKey — otherwise the save fails with
+   * "Value too long. Length 48, maximum allowed 40". The app-shell used to pre-truncate
+   * this client-side; the guard now lives here.
+   */
+  @Test
+  void testHandlePostTruncatesInjectedSearchKeyToColumnLength() throws Exception {
+    String longName = "Comercializadora Internacional de Suministros Generales";
+    JSONObject body = new JSONObject();
+    body.put("name", longName);
+    when(ctx.getHttpMethod()).thenReturn("POST");
+    when(ctx.getRequestBody()).thenReturn(body);
+
+    handler.handle(ctx);
+
+    assertEquals(40, body.getString("searchKey").length());
+    assertEquals(longName.substring(0, 40), body.getString("searchKey"));
+    assertEquals(longName, body.getString("name"), "name itself must not be truncated");
+  }
+
   // ── handle() — POST: billing field stripping ─────────────────────────────────
 
   /**
@@ -213,6 +248,103 @@ class BusinessPartnerHandlerTest {
     assertNull(body.optString("priceList", null));
     assertNull(body.optString("priceList$_identifier", null));
     assertNull(body.optString("paymentMethod", null));
+  }
+
+  // ── handle() — POST: org currency injection (ETP-4649) ───────────────────────
+
+  /**
+   * A new Business Partner with no currency breaks purchase invoice confirmation later on. When
+   * the POST body omits {@code bPCurrencyID}, the handler must resolve and inject the
+   * organization's currency.
+   */
+  @Test
+  void testHandlePostInjectsOrgCurrencyWhenMissing() throws Exception {
+    JSONObject body = new JSONObject();
+    body.put("name", "Empresa Test");
+    when(ctx.getHttpMethod()).thenReturn("POST");
+    when(ctx.getRequestBody()).thenReturn(body);
+
+    OBContext obContext = mock(OBContext.class);
+    Organization org = mock(Organization.class);
+    when(org.getId()).thenReturn("ORG1");
+    when(obContext.getCurrentOrganization()).thenReturn(org);
+    when(ctx.getObContext()).thenReturn(obContext);
+
+    try (MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
+        MockedStatic<OBCurrencyUtils> curMock = mockStatic(OBCurrencyUtils.class)) {
+      curMock.when(() -> OBCurrencyUtils.getOrgCurrency("ORG1")).thenReturn("CUR1");
+
+      handler.handle(ctx);
+
+      assertEquals("CUR1", body.getString("bPCurrencyID"));
+    }
+  }
+
+  /**
+   * A POST that already carries {@code bPCurrencyID} must be left untouched — the org-currency
+   * resolver is never invoked, so an explicit caller value is never overwritten.
+   */
+  @Test
+  void testHandlePostKeepsExplicitCurrency() throws Exception {
+    JSONObject body = new JSONObject();
+    body.put("name", "Empresa Test");
+    body.put("bPCurrencyID", "EXISTING");
+    when(ctx.getHttpMethod()).thenReturn("POST");
+    when(ctx.getRequestBody()).thenReturn(body);
+
+    try (MockedStatic<OBCurrencyUtils> curMock = mockStatic(OBCurrencyUtils.class)) {
+      handler.handle(ctx);
+
+      assertEquals("EXISTING", body.getString("bPCurrencyID"));
+      curMock.verifyNoInteractions();
+    }
+  }
+
+  /**
+   * When the org currency cannot be resolved (e.g. the organization has none configured), the
+   * body is left without {@code bPCurrencyID} and no exception propagates.
+   */
+  @Test
+  void testHandlePostLeavesCurrencyUnsetWhenUnresolved() throws Exception {
+    JSONObject body = new JSONObject();
+    body.put("name", "Empresa Test");
+    when(ctx.getHttpMethod()).thenReturn("POST");
+    when(ctx.getRequestBody()).thenReturn(body);
+
+    OBContext obContext = mock(OBContext.class);
+    Organization org = mock(Organization.class);
+    when(org.getId()).thenReturn("ORG1");
+    when(obContext.getCurrentOrganization()).thenReturn(org);
+    when(ctx.getObContext()).thenReturn(obContext);
+
+    try (MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
+        MockedStatic<OBCurrencyUtils> curMock = mockStatic(OBCurrencyUtils.class)) {
+      curMock.when(() -> OBCurrencyUtils.getOrgCurrency("ORG1")).thenReturn(null);
+
+      handler.handle(ctx);
+
+      assertFalse(body.has("bPCurrencyID"));
+    }
+  }
+
+  /**
+   * When the NEO context has no {@code OBContext} at all (defensive guard), currency injection
+   * is skipped without throwing.
+   */
+  @Test
+  void testHandlePostSkipsCurrencyInjectionWhenObContextIsNull() throws Exception {
+    JSONObject body = new JSONObject();
+    body.put("name", "Empresa Test");
+    when(ctx.getHttpMethod()).thenReturn("POST");
+    when(ctx.getRequestBody()).thenReturn(body);
+    when(ctx.getObContext()).thenReturn(null);
+
+    try (MockedStatic<OBCurrencyUtils> curMock = mockStatic(OBCurrencyUtils.class)) {
+      handler.handle(ctx);
+
+      assertFalse(body.has("bPCurrencyID"));
+      curMock.verifyNoInteractions();
+    }
   }
 
   /**
@@ -422,6 +554,733 @@ class BusinessPartnerHandlerTest {
       assertNotNull(result);
       String patchedKey = body.getJSONObject("response").getJSONArray("data").getJSONObject(0).getString("searchKey");
       assertEquals("1000067", patchedKey);
+    }
+  }
+
+  /**
+   * Reproduces ETP-4469: two concurrent POSTs race on {@code updateSearchKey()} and the
+   * second one hits the {@code c_bpartner_value} unique-constraint violation (both rows
+   * fetched the same not-yet-committed sequence value). The handler must protect the
+   * update with a savepoint and roll back to it on the duplicate-key error, so the
+   * shared {@code /batch} connection is recovered instead of left poisoned for whatever
+   * statement runs next in the same transaction.
+   */
+  @Test
+  void testAfterHandleRecoversFromDuplicateSearchKeyRaceWithSavepoint() throws Exception {
+    JSONObject body = buildResponseBody();
+    NeoResponse prevResult = mock(NeoResponse.class);
+    when(prevResult.getBody()).thenReturn(body);
+    when(ctx.getHttpMethod()).thenReturn("POST");
+    when(ctx.getPreviousResult()).thenReturn(prevResult);
+
+    Connection connMock = mock(Connection.class);
+    PreparedStatement psSelect = mock(PreparedStatement.class);
+    PreparedStatement psUpdate = mock(PreparedStatement.class);
+    ResultSet rsMock = mock(ResultSet.class);
+    Savepoint savepointMock = mock(Savepoint.class);
+
+    when(rsMock.next()).thenReturn(true);
+    when(rsMock.getString(1)).thenReturn("1000013");
+    when(psSelect.executeQuery()).thenReturn(rsMock);
+    when(connMock.prepareStatement(argThat(s -> s != null && s.contains("em_etgo_identifier")))).thenReturn(psSelect);
+    when(connMock.prepareStatement(argThat(s -> s != null && s.contains("UPDATE")))).thenReturn(psUpdate);
+    when(connMock.setSavepoint()).thenReturn(savepointMock);
+
+    SQLException duplicateKeyViolation = new SQLException(
+        "ERROR: duplicate key value violates unique constraint \"c_bpartner_value\"", "23505");
+    doThrow(duplicateKeyViolation).when(psUpdate).executeUpdate();
+
+    try (MockedStatic<OBDal> mDal = mockStatic(OBDal.class)) {
+      OBDal obDalMock = mock(OBDal.class);
+      when(obDalMock.getConnection()).thenReturn(connMock);
+      mDal.when(OBDal::getInstance).thenReturn(obDalMock);
+
+      // Must not throw / must not blow up the batch — this is what the outer swallowing
+      // try/catch already gives us today, so it alone is not enough to prove the fix.
+      handler.afterHandle(ctx);
+
+      // The real assertion: the handler must recover the connection via a savepoint
+      // rollback rather than leaving the failed UPDATE unrolled-back on a shared connection.
+      verify(connMock).setSavepoint();
+      verify(connMock).rollback(savepointMock);
+      verify(connMock, never()).rollback();
+    }
+  }
+
+  // ── afterHandle() — ETP-4565: vendor/customer posting-account backfill on PATCH/PUT ──
+
+  /**
+   * Reproduces ETP-4565: Classic's {@code c_bpartner_trg} only auto-creates
+   * {@code C_BP_Vendor_Acct} on {@code TG_OP='INSERT'}, so flipping {@code isVendor} to Y on an
+   * already-persisted BP via PATCH never gets its posting-account row (confirmed live on a real
+   * tenant). When the PATCH body touches the {@code vendor} field, {@code afterHandle()} must run
+   * the backfill INSERT bound to the record id, and must NOT touch the customer-side statement.
+   */
+  @Test
+  void testAfterHandlePatchWithVendorFieldBackfillsVendorAcctRow() throws Exception {
+    JSONObject body = buildResponseBody();
+    NeoResponse prevResult = mock(NeoResponse.class);
+    when(prevResult.getBody()).thenReturn(body);
+    when(ctx.getHttpMethod()).thenReturn("PATCH");
+    when(ctx.getPreviousResult()).thenReturn(prevResult);
+    when(ctx.getRecordId()).thenReturn("BP_ID_1");
+    JSONObject requestBody = new JSONObject();
+    requestBody.put("vendor", true);
+    when(ctx.getRequestBody()).thenReturn(requestBody);
+
+    Connection connMock = mock(Connection.class);
+    PreparedStatement psVendor = mock(PreparedStatement.class);
+    when(connMock.prepareStatement(argThat(s -> s != null && s.contains("c_bp_vendor_acct"))))
+        .thenReturn(psVendor);
+
+    try (MockedStatic<OBDal> mDal = mockStatic(OBDal.class)) {
+      OBDal obDalMock = mock(OBDal.class);
+      when(obDalMock.getConnection()).thenReturn(connMock);
+      mDal.when(OBDal::getInstance).thenReturn(obDalMock);
+
+      handler.afterHandle(ctx);
+
+      verify(psVendor).setString(1, "BP_ID_1");
+      verify(psVendor).executeUpdate();
+      verify(connMock, never())
+          .prepareStatement(argThat(s -> s != null && s.contains("c_bp_customer_acct")));
+    }
+  }
+
+  /**
+   * Symmetric case: PATCH body touches {@code customer} — {@code afterHandle()} must run the
+   * customer-side backfill INSERT and must NOT touch the vendor-side statement.
+   */
+  @Test
+  void testAfterHandlePatchWithCustomerFieldBackfillsCustomerAcctRow() throws Exception {
+    JSONObject body = buildResponseBody();
+    NeoResponse prevResult = mock(NeoResponse.class);
+    when(prevResult.getBody()).thenReturn(body);
+    when(ctx.getHttpMethod()).thenReturn("PUT");
+    when(ctx.getPreviousResult()).thenReturn(prevResult);
+    when(ctx.getRecordId()).thenReturn("BP_ID_2");
+    JSONObject requestBody = new JSONObject();
+    requestBody.put("customer", true);
+    when(ctx.getRequestBody()).thenReturn(requestBody);
+
+    Connection connMock = mock(Connection.class);
+    PreparedStatement psCustomer = mock(PreparedStatement.class);
+    when(connMock.prepareStatement(argThat(s -> s != null && s.contains("c_bp_customer_acct"))))
+        .thenReturn(psCustomer);
+
+    try (MockedStatic<OBDal> mDal = mockStatic(OBDal.class)) {
+      OBDal obDalMock = mock(OBDal.class);
+      when(obDalMock.getConnection()).thenReturn(connMock);
+      mDal.when(OBDal::getInstance).thenReturn(obDalMock);
+
+      handler.afterHandle(ctx);
+
+      verify(psCustomer).setString(1, "BP_ID_2");
+      verify(psCustomer).executeUpdate();
+      verify(connMock, never())
+          .prepareStatement(argThat(s -> s != null && s.contains("c_bp_vendor_acct")));
+    }
+  }
+
+  /**
+   * When the PATCH body touches neither {@code vendor} nor {@code customer}, the handler must
+   * skip the backfill entirely — no DB access at all — so ordinary field updates (e.g. address,
+   * email) never pay for the extra lookup. Deliberately does NOT mock {@link OBDal}: if the guard
+   * were broken, the real static call would blow up this unit test instead of silently no-op'ing.
+   */
+  @Test
+  void testAfterHandlePatchWithoutVendorOrCustomerFieldsSkipsBackfill() throws Exception {
+    JSONObject body = buildResponseBody();
+    NeoResponse prevResult = mock(NeoResponse.class);
+    when(prevResult.getBody()).thenReturn(body);
+    when(ctx.getHttpMethod()).thenReturn("PATCH");
+    when(ctx.getPreviousResult()).thenReturn(prevResult);
+    when(ctx.getRecordId()).thenReturn("BP_ID_3");
+    JSONObject requestBody = new JSONObject();
+    requestBody.put("etgoEmail", "a@b.com");
+    when(ctx.getRequestBody()).thenReturn(requestBody);
+
+    handler.afterHandle(ctx);
+    // No assertion beyond "did not throw" — reaching this line without an exception proves
+    // OBDal.getInstance() was never invoked in this unmocked-static context.
+  }
+
+  /**
+   * Reproduces the PR #804 review BLOCKER: {@code c_bpartner_trg} (the native Classic trigger,
+   * {@code src-db/database/model/triggers/C_BPARTNER_TRG.xml} lines 59-75) resolves
+   * {@code C_BP_Vendor_Acct}/{@code C_BP_Customer_Acct} posting accounts EXCLUSIVELY from the BP's
+   * own {@code C_BP_Group_Acct} row (joined on the BP's {@code C_BP_Group_ID}) — never from the
+   * generic, client-wide {@code C_AcctSchema_Default} table (that table only feeds the trigger's
+   * separate, group-independent Employee branch). A BP group can carry account overrides that
+   * diverge from the schema default (see {@code OnboardingAccountingWiringService
+   * .overrideAcreedorGroupAccounts()} — e.g. the "Acreedor" group overrides {@code v_liability_acct}
+   * to {@code 41000000}); sourcing from the schema default instead of the group silently wires the
+   * WRONG account for any BP in such a group. The backfill SQL must therefore join
+   * {@code c_bp_group_acct} keyed by {@code c_bp_group_id}, and must NOT reference
+   * {@code c_acctschema_default} at all.
+   */
+  @Test
+  void testAfterHandlePatchVendorBackfillSourcesAccountFromBpGroupAcctNotSchemaDefault() throws Exception {
+    JSONObject body = buildResponseBody();
+    NeoResponse prevResult = mock(NeoResponse.class);
+    when(prevResult.getBody()).thenReturn(body);
+    when(ctx.getHttpMethod()).thenReturn("PATCH");
+    when(ctx.getPreviousResult()).thenReturn(prevResult);
+    when(ctx.getRecordId()).thenReturn("BP_ID_5");
+    JSONObject requestBody = new JSONObject();
+    requestBody.put("vendor", true);
+    when(ctx.getRequestBody()).thenReturn(requestBody);
+
+    Connection connMock = mock(Connection.class);
+    PreparedStatement psVendor = mock(PreparedStatement.class);
+    ArgumentCaptor<String> sqlCaptor = ArgumentCaptor.forClass(String.class);
+    when(connMock.prepareStatement(sqlCaptor.capture())).thenReturn(psVendor);
+
+    try (MockedStatic<OBDal> mDal = mockStatic(OBDal.class)) {
+      OBDal obDalMock = mock(OBDal.class);
+      when(obDalMock.getConnection()).thenReturn(connMock);
+      mDal.when(OBDal::getInstance).thenReturn(obDalMock);
+
+      handler.afterHandle(ctx);
+    }
+
+    String sql = sqlCaptor.getValue().toLowerCase();
+    assertTrue(sql.contains("c_bp_group_acct"),
+        "vendor backfill SQL must source posting accounts from c_bp_group_acct (the BP's own"
+            + " group), matching c_bpartner_trg — was:\n" + sql);
+    assertTrue(sql.contains("c_bp_group_id"),
+        "vendor backfill SQL must key the c_bp_group_acct lookup by the BP's own c_bp_group_id"
+            + " — was:\n" + sql);
+    assertFalse(sql.contains("c_acctschema_default"),
+        "vendor backfill SQL must NOT source posting accounts from the generic client-wide"
+            + " c_acctschema_default — that silently ignores per-group account overrides"
+            + " (e.g. the Acreedor group's v_liability_acct override) — was:\n" + sql);
+  }
+
+  /**
+   * Symmetric case for the customer-side backfill statement.
+   */
+  @Test
+  void testAfterHandlePatchCustomerBackfillSourcesAccountFromBpGroupAcctNotSchemaDefault() throws Exception {
+    JSONObject body = buildResponseBody();
+    NeoResponse prevResult = mock(NeoResponse.class);
+    when(prevResult.getBody()).thenReturn(body);
+    when(ctx.getHttpMethod()).thenReturn("PUT");
+    when(ctx.getPreviousResult()).thenReturn(prevResult);
+    when(ctx.getRecordId()).thenReturn("BP_ID_6");
+    JSONObject requestBody = new JSONObject();
+    requestBody.put("customer", true);
+    when(ctx.getRequestBody()).thenReturn(requestBody);
+
+    Connection connMock = mock(Connection.class);
+    PreparedStatement psCustomer = mock(PreparedStatement.class);
+    ArgumentCaptor<String> sqlCaptor = ArgumentCaptor.forClass(String.class);
+    when(connMock.prepareStatement(sqlCaptor.capture())).thenReturn(psCustomer);
+
+    try (MockedStatic<OBDal> mDal = mockStatic(OBDal.class)) {
+      OBDal obDalMock = mock(OBDal.class);
+      when(obDalMock.getConnection()).thenReturn(connMock);
+      mDal.when(OBDal::getInstance).thenReturn(obDalMock);
+
+      handler.afterHandle(ctx);
+    }
+
+    String sql = sqlCaptor.getValue().toLowerCase();
+    assertTrue(sql.contains("c_bp_group_acct"),
+        "customer backfill SQL must source posting accounts from c_bp_group_acct (the BP's own"
+            + " group), matching c_bpartner_trg — was:\n" + sql);
+    assertTrue(sql.contains("c_bp_group_id"),
+        "customer backfill SQL must key the c_bp_group_acct lookup by the BP's own c_bp_group_id"
+            + " — was:\n" + sql);
+    assertFalse(sql.contains("c_acctschema_default"),
+        "customer backfill SQL must NOT source posting accounts from the generic client-wide"
+            + " c_acctschema_default — that silently ignores per-group account overrides"
+            + " — was:\n" + sql);
+  }
+
+  /**
+   * S1 follow-up: a PATCH that explicitly sets {@code vendor: false} (e.g. un-flagging a BP as a
+   * vendor) must NOT run the backfill lookup — only a flip TO {@code true} ever needs a new
+   * posting-account row. {@link OBDal} IS mocked here (unlike the sibling "no vendor/customer
+   * key at all" test) so the assertion can positively prove no statement was ever prepared,
+   * rather than relying on the surrounding try/catch to swallow an unmocked static call either
+   * way — that would pass identically whether or not the guard actually exists.
+   */
+  @Test
+  void testAfterHandlePatchWithVendorFieldExplicitlyFalseSkipsBackfill() throws Exception {
+    JSONObject body = buildResponseBody();
+    NeoResponse prevResult = mock(NeoResponse.class);
+    when(prevResult.getBody()).thenReturn(body);
+    when(ctx.getHttpMethod()).thenReturn("PATCH");
+    when(ctx.getPreviousResult()).thenReturn(prevResult);
+    when(ctx.getRecordId()).thenReturn("BP_ID_7");
+    JSONObject requestBody = new JSONObject();
+    requestBody.put("vendor", false);
+    when(ctx.getRequestBody()).thenReturn(requestBody);
+
+    Connection connMock = mock(Connection.class);
+    try (MockedStatic<OBDal> mDal = mockStatic(OBDal.class)) {
+      OBDal obDalMock = mock(OBDal.class);
+      when(obDalMock.getConnection()).thenReturn(connMock);
+      mDal.when(OBDal::getInstance).thenReturn(obDalMock);
+
+      handler.afterHandle(ctx);
+
+      verify(connMock, never()).prepareStatement(anyString());
+    }
+  }
+
+  /**
+   * A failure inside the backfill (e.g. a transient DB error) must be logged and swallowed, never
+   * propagated out of {@code afterHandle()} — the surrounding searchKey/VIES logic on the same
+   * request must not be sacrificed because of this best-effort backfill.
+   */
+  @Test
+  void testAfterHandlePatchVendorBackfillFailureIsSwallowed() throws Exception {
+    JSONObject body = buildResponseBody();
+    NeoResponse prevResult = mock(NeoResponse.class);
+    when(prevResult.getBody()).thenReturn(body);
+    when(ctx.getHttpMethod()).thenReturn("PATCH");
+    when(ctx.getPreviousResult()).thenReturn(prevResult);
+    when(ctx.getRecordId()).thenReturn("BP_ID_4");
+    JSONObject requestBody = new JSONObject();
+    requestBody.put("vendor", true);
+    when(ctx.getRequestBody()).thenReturn(requestBody);
+
+    try (MockedStatic<OBDal> mDal = mockStatic(OBDal.class)) {
+      OBDal obDalMock = mock(OBDal.class);
+      when(obDalMock.getConnection()).thenThrow(new RuntimeException("connection pool exhausted"));
+      mDal.when(OBDal::getInstance).thenReturn(obDalMock);
+
+      // Must not throw.
+      handler.afterHandle(ctx);
+    }
+  }
+
+  // ── afterHandle() — GET: contact email fallback ──────────────────────────────
+
+  /**
+   * Builds a NEO GET response body with a single record carrying {@code id = REC_ID}
+   * and the given {@code etgoEmail} (omitted when {@code email} is {@code null}).
+   */
+  private static JSONObject buildGetBody(String email) throws Exception {
+    JSONObject recordEntry = new JSONObject();
+    recordEntry.put("id", "REC_ID");
+    if (email != null) {
+      recordEntry.put("etgoEmail", email);
+    }
+    JSONArray data = new JSONArray();
+    data.put(recordEntry);
+    JSONObject response = new JSONObject();
+    response.put("data", data);
+    JSONObject body = new JSONObject();
+    body.put("response", response);
+    return body;
+  }
+
+  /**
+   * A GET with no recordId is a list fetch; the handler must skip the email fallback
+   * and return {@code null} without touching the database.
+   */
+  @Test
+  void testAfterHandleGetBlankRecordIdReturnsNull() {
+    when(ctx.getHttpMethod()).thenReturn("GET");
+    when(ctx.getRecordId()).thenReturn("");
+    assertNull(handler.afterHandle(ctx));
+  }
+
+  /**
+   * When the partner record already carries its own {@code etgoEmail}, the handler must
+   * leave the response untouched (return {@code null}) and never query contacts.
+   */
+  @Test
+  void testAfterHandleGetPartnerAlreadyHasEmailReturnsNull() throws Exception {
+    NeoResponse prevResult = mock(NeoResponse.class);
+    when(prevResult.getBody()).thenReturn(buildGetBody("partner@own.com"));
+    when(ctx.getHttpMethod()).thenReturn("GET");
+    when(ctx.getRecordId()).thenReturn("REC_ID");
+    when(ctx.getPreviousResult()).thenReturn(prevResult);
+
+    assertNull(handler.afterHandle(ctx));
+  }
+
+  /**
+   * When the partner email is blank and no contact has a valid email, the handler must
+   * return {@code null} and leave the record unchanged.
+   */
+  @Test
+  void testAfterHandleGetNoContactEmailReturnsNull() throws Exception {
+    JSONObject body = buildGetBody(null);
+    NeoResponse prevResult = mock(NeoResponse.class);
+    when(prevResult.getBody()).thenReturn(body);
+    when(ctx.getHttpMethod()).thenReturn("GET");
+    when(ctx.getRecordId()).thenReturn("REC_ID");
+    when(ctx.getPreviousResult()).thenReturn(prevResult);
+
+    Connection connMock = mock(Connection.class);
+    PreparedStatement psMock = mock(PreparedStatement.class);
+    ResultSet rsMock = mock(ResultSet.class);
+    when(rsMock.next()).thenReturn(false);
+    when(psMock.executeQuery()).thenReturn(rsMock);
+    when(connMock.prepareStatement(anyString())).thenReturn(psMock);
+
+    try (MockedStatic<OBDal> mDal = mockStatic(OBDal.class)) {
+      OBDal obDalMock = mock(OBDal.class);
+      when(obDalMock.getConnection()).thenReturn(connMock);
+      mDal.when(OBDal::getInstance).thenReturn(obDalMock);
+
+      assertNull(handler.afterHandle(ctx));
+    }
+  }
+
+  /**
+   * When the partner email is blank and a contact has a valid email, the handler must
+   * inject that email into {@code etgoEmail} and return a non-null response.
+   */
+  @Test
+  void testAfterHandleGetInjectsContactEmail() throws Exception {
+    JSONObject body = buildGetBody(null);
+    NeoResponse prevResult = mock(NeoResponse.class);
+    when(prevResult.getBody()).thenReturn(body);
+    when(ctx.getHttpMethod()).thenReturn("GET");
+    when(ctx.getRecordId()).thenReturn("REC_ID");
+    when(ctx.getPreviousResult()).thenReturn(prevResult);
+
+    Connection connMock = mock(Connection.class);
+    PreparedStatement psMock = mock(PreparedStatement.class);
+    ResultSet rsMock = mock(ResultSet.class);
+    when(rsMock.next()).thenReturn(true);
+    when(rsMock.getString(1)).thenReturn("contact@partner.com");
+    when(psMock.executeQuery()).thenReturn(rsMock);
+    when(connMock.prepareStatement(anyString())).thenReturn(psMock);
+
+    try (MockedStatic<OBDal> mDal = mockStatic(OBDal.class)) {
+      OBDal obDalMock = mock(OBDal.class);
+      when(obDalMock.getConnection()).thenReturn(connMock);
+      mDal.when(OBDal::getInstance).thenReturn(obDalMock);
+
+      NeoResponse result = handler.afterHandle(ctx);
+
+      assertNotNull(result);
+      String patchedEmail = body.getJSONObject("response").getJSONArray("data").getJSONObject(0).getString("etgoEmail");
+      assertEquals("contact@partner.com", patchedEmail);
+    }
+  }
+
+  /**
+   * A GET with a recordId but a {@code null} previous result must skip the fallback
+   * and return {@code null} without touching the database.
+   */
+  @Test
+  void testAfterHandleGetNullPreviousResultReturnsNull() {
+    when(ctx.getHttpMethod()).thenReturn("GET");
+    when(ctx.getRecordId()).thenReturn("REC_ID");
+    when(ctx.getPreviousResult()).thenReturn(null);
+
+    assertNull(handler.afterHandle(ctx));
+  }
+
+  /**
+   * A GET whose response body carries no record array must skip the fallback and
+   * return {@code null}.
+   */
+  @Test
+  void testAfterHandleGetNoRecordInBodyReturnsNull() {
+    NeoResponse prevResult = mock(NeoResponse.class);
+    when(prevResult.getBody()).thenReturn(new JSONObject());
+    when(ctx.getHttpMethod()).thenReturn("GET");
+    when(ctx.getRecordId()).thenReturn("REC_ID");
+    when(ctx.getPreviousResult()).thenReturn(prevResult);
+
+    assertNull(handler.afterHandle(ctx));
+  }
+
+  // ── afterHandle() — DELETE guard ─────────────────────────────────────────
+
+  /**
+   * DELETE is not a write method — afterHandle must return {@code null} immediately.
+   */
+  @Test
+  void testAfterHandleDeleteReturnsNull() {
+    when(ctx.getHttpMethod()).thenReturn("DELETE");
+    assertNull(handler.afterHandle(ctx));
+  }
+
+  // ── afterHandle() — injectViesMessage: guard paths ──────────────────────
+
+  /**
+   * When the response body has no "response" key, injectViesMessage returns false
+   * and afterHandle returns null (PUT path — no searchKey update).
+   */
+  @Test
+  void testAfterHandlePutNoViesMessageWhenBodyHasNoResponseKey() throws Exception {
+    JSONObject body = new JSONObject();
+    body.put("someOtherKey", "value");
+
+    NeoResponse prevResult = mock(NeoResponse.class);
+    when(prevResult.getBody()).thenReturn(body);
+    when(ctx.getHttpMethod()).thenReturn("PUT");
+    when(ctx.getPreviousResult()).thenReturn(prevResult);
+
+    assertNull(handler.afterHandle(ctx));
+  }
+
+  /**
+   * When the response data array is empty, injectViesMessage returns false
+   * and afterHandle returns null.
+   */
+  @Test
+  void testAfterHandlePutNoViesMessageWhenDataArrayIsEmpty() throws Exception {
+    JSONObject response = new JSONObject();
+    response.put("data", new JSONArray());
+    JSONObject body = new JSONObject();
+    body.put("response", response);
+
+    NeoResponse prevResult = mock(NeoResponse.class);
+    when(prevResult.getBody()).thenReturn(body);
+    when(ctx.getHttpMethod()).thenReturn("PUT");
+    when(ctx.getPreviousResult()).thenReturn(prevResult);
+
+    assertNull(handler.afterHandle(ctx));
+  }
+
+  /**
+   * When oBTIKTaxIDKey != "2", injectViesMessage must skip message injection
+   * and afterHandle returns null (no searchKey patch on PUT).
+   */
+  @Test
+  void testAfterHandlePutNoViesMessageWhenTaxKeyNotNOI() throws Exception {
+    JSONObject savedRecord = new JSONObject();
+    savedRecord.put("id", "REC_ID");
+    savedRecord.put("oBTIKTaxIDKey", "1");
+    savedRecord.put("oBTIKVIESStatus", "V");
+    JSONArray data = new JSONArray();
+    data.put(savedRecord);
+    JSONObject response = new JSONObject();
+    response.put("data", data);
+    JSONObject body = new JSONObject();
+    body.put("response", response);
+
+    NeoResponse prevResult = mock(NeoResponse.class);
+    when(prevResult.getBody()).thenReturn(body);
+    when(ctx.getHttpMethod()).thenReturn("PUT");
+    when(ctx.getPreviousResult()).thenReturn(prevResult);
+
+    assertNull(handler.afterHandle(ctx));
+    assertNull(body.optJSONArray("messages"));
+  }
+
+  /**
+   * When oBTIKVIESStatus = "P" (pending), injectViesMessage must not inject a message.
+   */
+  @Test
+  void testAfterHandlePutNoViesMessageWhenStatusIsPending() throws Exception {
+    JSONObject savedRecord = new JSONObject();
+    savedRecord.put("id", "REC_ID");
+    savedRecord.put("oBTIKTaxIDKey", "2");
+    savedRecord.put("oBTIKVIESStatus", "P");
+    JSONArray data = new JSONArray();
+    data.put(savedRecord);
+    JSONObject response = new JSONObject();
+    response.put("data", data);
+    JSONObject body = new JSONObject();
+    body.put("response", response);
+
+    NeoResponse prevResult = mock(NeoResponse.class);
+    when(prevResult.getBody()).thenReturn(body);
+    when(ctx.getHttpMethod()).thenReturn("PUT");
+    when(ctx.getPreviousResult()).thenReturn(prevResult);
+
+    assertNull(handler.afterHandle(ctx));
+    assertNull(body.optJSONArray("messages"));
+  }
+
+  /**
+   * When oBTIKVIESStatus is absent (null), injectViesMessage must not inject a message.
+   */
+  @Test
+  void testAfterHandlePutNoViesMessageWhenStatusIsNull() throws Exception {
+    JSONObject savedRecord = new JSONObject();
+    savedRecord.put("id", "REC_ID");
+    savedRecord.put("oBTIKTaxIDKey", "2");
+    JSONArray data = new JSONArray();
+    data.put(savedRecord);
+    JSONObject response = new JSONObject();
+    response.put("data", data);
+    JSONObject body = new JSONObject();
+    body.put("response", response);
+
+    NeoResponse prevResult = mock(NeoResponse.class);
+    when(prevResult.getBody()).thenReturn(body);
+    when(ctx.getHttpMethod()).thenReturn("PUT");
+    when(ctx.getPreviousResult()).thenReturn(prevResult);
+
+    assertNull(handler.afterHandle(ctx));
+    assertNull(body.optJSONArray("messages"));
+  }
+
+  // ── afterHandle() — injectViesMessage: message injection paths ───────────
+
+  /**
+   * Builds a POST response body containing a record with the given tax key and VIES status.
+   */
+  private static JSONObject buildViesBody(String taxIdKey, String viesStatus) throws Exception {
+    JSONObject savedRecord = new JSONObject();
+    savedRecord.put("id", "REC_ID");
+    if (taxIdKey != null) {
+      savedRecord.put("oBTIKTaxIDKey", taxIdKey);
+    }
+    if (viesStatus != null) {
+      savedRecord.put("oBTIKVIESStatus", viesStatus);
+    }
+    JSONArray data = new JSONArray();
+    data.put(savedRecord);
+    JSONObject response = new JSONObject();
+    response.put("data", data);
+    JSONObject body = new JSONObject();
+    body.put("response", response);
+    return body;
+  }
+
+  /**
+   * When PUT body has oBTIKTaxIDKey = "2" and oBTIKVIESStatus = "V",
+   * injectViesMessage must inject a "success" message.
+   */
+  @Test
+  void testAfterHandlePutInjectsViesSuccessMessageForValidStatus() throws Exception {
+    JSONObject body = buildViesBody("2", "V");
+
+    NeoResponse prevResult = mock(NeoResponse.class);
+    when(prevResult.getBody()).thenReturn(body);
+    when(ctx.getHttpMethod()).thenReturn("PUT");
+    when(ctx.getPreviousResult()).thenReturn(prevResult);
+
+    try (MockedStatic<OBMessageUtils> mMsg = mockStatic(OBMessageUtils.class)) {
+      mMsg.when(() -> OBMessageUtils.messageBD(anyString())).thenReturn("msg");
+
+      NeoResponse result = handler.afterHandle(ctx);
+
+      assertNotNull(result);
+      JSONArray messages = body.optJSONArray("messages");
+      assertNotNull(messages);
+      assertEquals(1, messages.length());
+      assertEquals("success", messages.getJSONObject(0).getString("type"));
+    }
+  }
+
+  /**
+   * When PUT body has oBTIKTaxIDKey = "2" and oBTIKVIESStatus = "I",
+   * injectViesMessage must inject a "warning" message.
+   */
+  @Test
+  void testAfterHandlePutInjectsViesWarningMessageForInvalidStatus() throws Exception {
+    JSONObject body = buildViesBody("2", "I");
+
+    NeoResponse prevResult = mock(NeoResponse.class);
+    when(prevResult.getBody()).thenReturn(body);
+    when(ctx.getHttpMethod()).thenReturn("PUT");
+    when(ctx.getPreviousResult()).thenReturn(prevResult);
+
+    try (MockedStatic<OBMessageUtils> mMsg = mockStatic(OBMessageUtils.class)) {
+      mMsg.when(() -> OBMessageUtils.messageBD(anyString())).thenReturn("msg");
+
+      NeoResponse result = handler.afterHandle(ctx);
+
+      assertNotNull(result);
+      JSONArray messages = body.optJSONArray("messages");
+      assertNotNull(messages);
+      assertEquals(1, messages.length());
+      assertEquals("warning", messages.getJSONObject(0).getString("type"));
+    }
+  }
+
+  /**
+   * On POST with oBTIKTaxIDKey = "2" and oBTIKVIESStatus = "V", afterHandle must
+   * run both the searchKey lookup (returning blank) and injectViesMessage,
+   * returning a non-null response with a "success" message.
+   */
+  @Test
+  void testAfterHandlePostInjectsViesSuccessMessageWhenIdentifierIsBlank() throws Exception {
+    JSONObject body = buildViesBody("2", "V");
+
+    NeoResponse prevResult = mock(NeoResponse.class);
+    when(prevResult.getBody()).thenReturn(body);
+    when(ctx.getHttpMethod()).thenReturn("POST");
+    when(ctx.getPreviousResult()).thenReturn(prevResult);
+
+    Connection connMock = mock(Connection.class);
+    PreparedStatement psMock = mock(PreparedStatement.class);
+    ResultSet rsMock = mock(ResultSet.class);
+    when(rsMock.next()).thenReturn(false);
+    when(psMock.executeQuery()).thenReturn(rsMock);
+    when(connMock.prepareStatement(anyString())).thenReturn(psMock);
+
+    try (MockedStatic<OBDal> mDal = mockStatic(OBDal.class);
+         MockedStatic<OBMessageUtils> mMsg = mockStatic(OBMessageUtils.class)) {
+      OBDal obDalMock = mock(OBDal.class);
+      when(obDalMock.getConnection()).thenReturn(connMock);
+      mDal.when(OBDal::getInstance).thenReturn(obDalMock);
+      mMsg.when(() -> OBMessageUtils.messageBD(anyString())).thenReturn("msg");
+
+      NeoResponse result = handler.afterHandle(ctx);
+
+      assertNotNull(result);
+      JSONArray messages = body.optJSONArray("messages");
+      assertNotNull(messages);
+      assertEquals("success", messages.getJSONObject(0).getString("type"));
+    }
+  }
+
+  /**
+   * On POST with oBTIKTaxIDKey != "2", no message is injected and afterHandle returns
+   * null when the identifier lookup is also blank.
+   */
+  @Test
+  void testAfterHandlePostNoViesMessageWhenTaxKeyNotNOI() throws Exception {
+    JSONObject body = buildViesBody("1", "V");
+
+    NeoResponse prevResult = mock(NeoResponse.class);
+    when(prevResult.getBody()).thenReturn(body);
+    when(ctx.getHttpMethod()).thenReturn("POST");
+    when(ctx.getPreviousResult()).thenReturn(prevResult);
+
+    Connection connMock = mock(Connection.class);
+    PreparedStatement psMock = mock(PreparedStatement.class);
+    ResultSet rsMock = mock(ResultSet.class);
+    when(rsMock.next()).thenReturn(false);
+    when(psMock.executeQuery()).thenReturn(rsMock);
+    when(connMock.prepareStatement(anyString())).thenReturn(psMock);
+
+    try (MockedStatic<OBDal> mDal = mockStatic(OBDal.class)) {
+      OBDal obDalMock = mock(OBDal.class);
+      when(obDalMock.getConnection()).thenReturn(connMock);
+      mDal.when(OBDal::getInstance).thenReturn(obDalMock);
+
+      assertNull(handler.afterHandle(ctx));
+      assertNull(body.optJSONArray("messages"));
+    }
+  }
+
+  /**
+   * On PATCH with oBTIKTaxIDKey = "2" and oBTIKVIESStatus = "I", afterHandle
+   * must inject a "warning" message (PATCH is now treated as a write method).
+   */
+  @Test
+  void testAfterHandlePatchInjectsViesWarningMessage() throws Exception {
+    JSONObject body = buildViesBody("2", "I");
+
+    NeoResponse prevResult = mock(NeoResponse.class);
+    when(prevResult.getBody()).thenReturn(body);
+    when(ctx.getHttpMethod()).thenReturn("PATCH");
+    when(ctx.getPreviousResult()).thenReturn(prevResult);
+
+    try (MockedStatic<OBMessageUtils> mMsg = mockStatic(OBMessageUtils.class)) {
+      mMsg.when(() -> OBMessageUtils.messageBD(anyString())).thenReturn("msg");
+
+      NeoResponse result = handler.afterHandle(ctx);
+
+      assertNotNull(result);
+      assertEquals("warning", body.getJSONArray("messages").getJSONObject(0).getString("type"));
     }
   }
 }

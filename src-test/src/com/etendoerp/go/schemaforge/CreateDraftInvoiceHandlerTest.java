@@ -42,6 +42,8 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
+import javax.enterprise.inject.Vetoed;
+
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
@@ -117,6 +119,7 @@ public class CreateDraftInvoiceHandlerTest {
    * {@code generateInvoiceDocumentNo} or {@code findARInvoiceDocType},
    * letting each test control those return values without static mocking.
    */
+  @Vetoed // not a CDI bean: a discoverable subclass makes @Inject of the real handler ambiguous
   private static class TestableHandler extends CreateDraftInvoiceHandler {
     String generatedDocNo = "DOC-TEST";
     DocumentType arDocTypeToReturn = null;
@@ -332,63 +335,6 @@ public class CreateDraftInvoiceHandlerTest {
     List<String> result = new CreateDraftInvoiceHandler().parseShipmentIds(body, "fb");
     assertEquals(1, result.size());
     assertEquals("fb", result.get(0));
-  }
-
-  // ── calculateLineGross ────────────────────────────────────────────────────
-
-  @Test
-  public void testCalculateLineGrossWithPositiveGrossPrice() {
-    InvoiceLine il = mock(InvoiceLine.class);
-    when(il.getInvoicedQuantity()).thenReturn(new BigDecimal("2"));
-    when(il.getGrossUnitPrice()).thenReturn(new BigDecimal("10"));
-    assertEquals(new BigDecimal("20.00"),
-        new CreateDraftInvoiceHandler().calculateLineGross(il, PRECISION));
-  }
-
-  @Test
-  public void testCalculateLineGrossWithZeroGrossPriceUsesNetPlusTax() {
-    InvoiceLine il = mock(InvoiceLine.class);
-    when(il.getGrossUnitPrice()).thenReturn(BigDecimal.ZERO);
-    when(il.getLineNetAmount()).thenReturn(new BigDecimal("100"));
-    TaxRate tax = mock(TaxRate.class);
-    when(tax.getRate()).thenReturn(new BigDecimal("21"));
-    when(il.getTax()).thenReturn(tax);
-    // 100 + 100*21/100 = 121.00
-    assertEquals(new BigDecimal("121.00"),
-        new CreateDraftInvoiceHandler().calculateLineGross(il, PRECISION));
-  }
-
-  @Test
-  public void testCalculateLineGrossNullGrossPriceAndNoTax() {
-    InvoiceLine il = mock(InvoiceLine.class);
-    when(il.getGrossUnitPrice()).thenReturn(null);
-    when(il.getLineNetAmount()).thenReturn(new BigDecimal("50"));
-    when(il.getTax()).thenReturn(null);
-    assertEquals(new BigDecimal("50.00"),
-        new CreateDraftInvoiceHandler().calculateLineGross(il, PRECISION));
-  }
-
-  @Test
-  public void testCalculateLineGrossNullTaxRateReturnsNet() {
-    InvoiceLine il = mock(InvoiceLine.class);
-    when(il.getGrossUnitPrice()).thenReturn(null);
-    when(il.getLineNetAmount()).thenReturn(new BigDecimal("80"));
-    TaxRate tax = mock(TaxRate.class);
-    when(tax.getRate()).thenReturn(null);
-    when(il.getTax()).thenReturn(tax);
-    assertEquals(new BigDecimal("80.00"),
-        new CreateDraftInvoiceHandler().calculateLineGross(il, PRECISION));
-  }
-
-  @Test
-  public void testCalculateLineGrossAllNullsReturnZero() {
-    InvoiceLine il = mock(InvoiceLine.class);
-    when(il.getInvoicedQuantity()).thenReturn(null);
-    when(il.getGrossUnitPrice()).thenReturn(null);
-    when(il.getLineNetAmount()).thenReturn(null);
-    when(il.getTax()).thenReturn(null);
-    assertEquals(new BigDecimal("0.00"),
-        new CreateDraftInvoiceHandler().calculateLineGross(il, PRECISION));
   }
 
   // ── resolvePendingForLine ─────────────────────────────────────────────────
@@ -721,6 +667,34 @@ public class CreateDraftInvoiceHandlerTest {
     }
   }
 
+  @Test
+  public void testEnsureDocNoFallbackToGetDocumentNoConnectionWhenClientPresent() {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+        MockedStatic<Utility> utilityMock = Mockito.mockStatic(Utility.class)) {
+      OBDal dal = mock(OBDal.class);
+      Connection connection = mock(Connection.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.getConnection(false)).thenReturn(connection);
+
+      Client client = mock(Client.class);
+      when(client.getId()).thenReturn("CLIENT-001");
+      Invoice invoice = mock(Invoice.class);
+      when(invoice.getDocumentNo()).thenReturn(null);
+      when(invoice.getClient()).thenReturn(client);
+
+      utilityMock.when(() -> Utility.getDocumentNoConnection(
+          eq(connection), any(), eq("CLIENT-001"), eq("C_Invoice"), eq(true)))
+          .thenReturn("FALLBACK-001");
+
+      TestableHandler h = new TestableHandler();
+      h.generatedDocNo = ""; // blank primary → triggers fallback
+      h.ensureDocumentNo(invoice);
+
+      verify(invoice).setDocumentNo("FALLBACK-001");
+      verify(dal).save(invoice);
+    }
+  }
+
   // ── loadAndValidateShipments ──────────────────────────────────────────────
 
   @Test(expected = OBException.class)
@@ -903,172 +877,6 @@ public class CreateDraftInvoiceHandlerTest {
     h.resolveARInvoiceDocType(order);
   }
 
-  // ── ensureLineGrossAmounts ────────────────────────────────────────────────
-
-  @Test
-  public void testEnsureGrossAlreadyPositiveSkipsLine() {
-    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
-      OBDal dal = mock(OBDal.class);
-      obDalMock.when(OBDal::getInstance).thenReturn(dal);
-      Currency currency = mock(Currency.class);
-      when(currency.getStandardPrecision()).thenReturn(2L);
-      Invoice invoice = mock(Invoice.class);
-      when(invoice.getCurrency()).thenReturn(currency);
-      InvoiceLine il = mock(InvoiceLine.class);
-      when(il.getGrossAmount()).thenReturn(new BigDecimal("50.00"));
-      when(invoice.getInvoiceLineList()).thenReturn(Collections.singletonList(il));
-
-      new CreateDraftInvoiceHandler().ensureLineGrossAmounts(invoice);
-      verify(il, never()).setGrossAmount(any());
-    }
-  }
-
-  @Test
-  public void testEnsureGrossNullComputesAndSaves() {
-    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
-      OBDal dal = mock(OBDal.class);
-      obDalMock.when(OBDal::getInstance).thenReturn(dal);
-      Currency currency = mock(Currency.class);
-      when(currency.getStandardPrecision()).thenReturn(2L);
-      Invoice invoice = mock(Invoice.class);
-      when(invoice.getCurrency()).thenReturn(currency);
-      InvoiceLine il = mock(InvoiceLine.class);
-      when(il.getGrossAmount()).thenReturn(null);
-      when(il.getGrossUnitPrice()).thenReturn(new BigDecimal("10"));
-      when(il.getInvoicedQuantity()).thenReturn(new BigDecimal("3"));
-      when(invoice.getInvoiceLineList()).thenReturn(Collections.singletonList(il));
-
-      new CreateDraftInvoiceHandler().ensureLineGrossAmounts(invoice);
-      verify(il).setGrossAmount(new BigDecimal("30.00"));
-      verify(dal).save(il);
-    }
-  }
-
-  @Test
-  public void testEnsureGrossZeroComputesAndSaves() {
-    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
-      OBDal dal = mock(OBDal.class);
-      obDalMock.when(OBDal::getInstance).thenReturn(dal);
-      Currency currency = mock(Currency.class);
-      when(currency.getStandardPrecision()).thenReturn(2L);
-      Invoice invoice = mock(Invoice.class);
-      when(invoice.getCurrency()).thenReturn(currency);
-      InvoiceLine il = mock(InvoiceLine.class);
-      when(il.getGrossAmount()).thenReturn(BigDecimal.ZERO);
-      when(il.getGrossUnitPrice()).thenReturn(null);
-      when(il.getLineNetAmount()).thenReturn(new BigDecimal("100"));
-      when(il.getTax()).thenReturn(null);
-      when(invoice.getInvoiceLineList()).thenReturn(Collections.singletonList(il));
-
-      new CreateDraftInvoiceHandler().ensureLineGrossAmounts(invoice);
-      verify(il).setGrossAmount(new BigDecimal("100.00"));
-    }
-  }
-
-  // ── recalculateTotals ─────────────────────────────────────────────────────
-
-  @Test
-  public void testRecalculateTotalsNoLinesSetsTotalsToZero() {
-    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
-      OBDal dal = mock(OBDal.class);
-      obDalMock.when(OBDal::getInstance).thenReturn(dal);
-      Currency currency = mock(Currency.class);
-      when(currency.getStandardPrecision()).thenReturn(2L);
-      Invoice invoice = mock(Invoice.class);
-      when(invoice.getCurrency()).thenReturn(currency);
-      when(invoice.getInvoiceLineList()).thenReturn(Collections.emptyList());
-
-      new CreateDraftInvoiceHandler().recalculateTotals(invoice);
-      verify(invoice).setSummedLineAmount(new BigDecimal("0.00"));
-      verify(invoice).setGrandTotalAmount(new BigDecimal("0.00"));
-      verify(dal).save(invoice);
-    }
-  }
-
-  @Test
-  public void testRecalculateTotalsLineWithoutTaxAccumulatesNet() {
-    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
-      OBDal dal = mock(OBDal.class);
-      obDalMock.when(OBDal::getInstance).thenReturn(dal);
-      Currency currency = mock(Currency.class);
-      when(currency.getStandardPrecision()).thenReturn(2L);
-      InvoiceLine il = mock(InvoiceLine.class);
-      when(il.getInvoicedQuantity()).thenReturn(new BigDecimal("2"));
-      when(il.getUnitPrice()).thenReturn(new BigDecimal("50"));
-      when(il.getLineNetAmount()).thenReturn(new BigDecimal("100"));
-      when(il.getTax()).thenReturn(null);
-      Invoice invoice = mock(Invoice.class);
-      when(invoice.getCurrency()).thenReturn(currency);
-      when(invoice.getInvoiceLineList()).thenReturn(Collections.singletonList(il));
-
-      new CreateDraftInvoiceHandler().recalculateTotals(invoice);
-      verify(invoice).setSummedLineAmount(new BigDecimal("100.00"));
-      verify(invoice).setGrandTotalAmount(new BigDecimal("100.00"));
-    }
-  }
-
-  // ── createShipmentInvoiceLine ─────────────────────────────────────────────
-
-  @Test
-  public void testCreateShipmentInvoiceLineNoOrderLineZeroPrices() {
-    try (MockedStatic<OBProvider> providerMock = Mockito.mockStatic(OBProvider.class)) {
-      OBProvider provider = mock(OBProvider.class);
-      providerMock.when(OBProvider::getInstance).thenReturn(provider);
-      InvoiceLine il = mock(InvoiceLine.class);
-      when(provider.get(InvoiceLine.class)).thenReturn(il);
-
-      ShipmentInOutLine sl = mock(ShipmentInOutLine.class);
-      when(sl.getOrganization()).thenReturn(mock(Organization.class));
-      when(sl.getProduct()).thenReturn(mock(Product.class));
-      when(sl.getUOM()).thenReturn(null);
-      when(sl.getSalesOrderLine()).thenReturn(null);
-
-      Invoice invoice = mock(Invoice.class);
-      InvoiceLine result = new CreateDraftInvoiceHandler()
-          .createShipmentInvoiceLine(invoice, sl, new BigDecimal("3"), 10L);
-
-      assertEquals(il, result);
-      verify(il).setUnitPrice(BigDecimal.ZERO);
-      verify(il).setListPrice(BigDecimal.ZERO);
-      verify(il).setLineNetAmount(BigDecimal.ZERO);
-    }
-  }
-
-  @Test
-  public void testCreateShipmentInvoiceLineWithOrderLineCopiesPrices() {
-    try (MockedStatic<OBProvider> providerMock = Mockito.mockStatic(OBProvider.class)) {
-      OBProvider provider = mock(OBProvider.class);
-      providerMock.when(OBProvider::getInstance).thenReturn(provider);
-      InvoiceLine il = mock(InvoiceLine.class);
-      when(provider.get(InvoiceLine.class)).thenReturn(il);
-
-      OrderLine ol = mock(OrderLine.class);
-      when(ol.getUnitPrice()).thenReturn(new BigDecimal("10"));
-      when(ol.getListPrice()).thenReturn(new BigDecimal("12"));
-      when(ol.getPriceLimit()).thenReturn(new BigDecimal("8"));
-      when(ol.getTax()).thenReturn(mock(TaxRate.class));
-
-      ShipmentInOutLine sl = mock(ShipmentInOutLine.class);
-      when(sl.getOrganization()).thenReturn(mock(Organization.class));
-      when(sl.getProduct()).thenReturn(mock(Product.class));
-      when(sl.getUOM()).thenReturn(null);
-      when(sl.getSalesOrderLine()).thenReturn(ol);
-
-      Currency currency = mock(Currency.class);
-      when(currency.getStandardPrecision()).thenReturn(2L);
-      Invoice invoice = mock(Invoice.class);
-      when(invoice.getCurrency()).thenReturn(currency);
-
-      new CreateDraftInvoiceHandler()
-          .createShipmentInvoiceLine(invoice, sl, new BigDecimal("2"), 10L);
-
-      verify(il).setUnitPrice(new BigDecimal("10"));
-      verify(il).setListPrice(new BigDecimal("12"));
-      // lineNetAmount = 2 * 10 = 20.00
-      verify(il).setLineNetAmount(new BigDecimal("20.00"));
-    }
-  }
-
   // ── handleCreate (mockStatic) ─────────────────────────────────────────────
 
   @Test
@@ -1198,6 +1006,7 @@ public class CreateDraftInvoiceHandlerTest {
    * Test double for dispatch-oriented scenarios where individual handler branches
    * need to be observed without executing the full persistence workflow.
    */
+  @Vetoed // not a CDI bean: a discoverable subclass makes @Inject of the real handler ambiguous
   private static class DispatchHandler extends CreateDraftInvoiceHandler {
     Invoice orderInvoice;
     Invoice shipmentInvoice;
@@ -1208,14 +1017,14 @@ public class CreateDraftInvoiceHandlerTest {
     String markedQuotationId;
     boolean ensuredDocumentNo;
     boolean ensuredGrossAmounts;
-    boolean recalculatedTotals;
     List<Invoice> draftsToReturn = Collections.emptyList();
     RuntimeException checkFailure;
     List<String> checkedIds;
     String checkedSpecName;
 
     @Override
-    protected Invoice createFromOrder(String orderId, Map<String, BigDecimal> lineOverrides) {
+    protected Invoice createFromOrder(String orderId, Map<String, BigDecimal> lineOverrides,
+        String priceListId) {
       if (createFailure != null) {
         throw createFailure;
       }
@@ -1224,7 +1033,8 @@ public class CreateDraftInvoiceHandlerTest {
     }
 
     @Override
-    protected Invoice createFromShipments(List<String> shipmentIds, Map<String, BigDecimal> lineOverrides) {
+    protected Invoice createFromShipments(List<String> shipmentIds, Map<String, BigDecimal> lineOverrides,
+        String priceListId) {
       if (createFailure != null) {
         throw createFailure;
       }
@@ -1249,13 +1059,13 @@ public class CreateDraftInvoiceHandlerTest {
     }
 
     @Override
-    protected void ensureLineGrossAmounts(Invoice invoice) {
-      ensuredGrossAmounts = true;
-    }
-
-    @Override
-    protected void recalculateTotals(Invoice invoice) {
-      recalculatedTotals = true;
+    InvoiceFromOrderSupport getSupport() {
+      return new InvoiceFromOrderSupport() {
+        @Override
+        public void ensureLineGrossAmounts(Invoice invoice) {
+          ensuredGrossAmounts = true;
+        }
+      };
     }
 
     @Override
@@ -1272,6 +1082,7 @@ public class CreateDraftInvoiceHandlerTest {
   /**
    * Test double for isolating {@code createFromOrder()} from downstream helpers.
    */
+  @Vetoed // not a CDI bean: a discoverable subclass makes @Inject of the real handler ambiguous
   private static class CreateFromOrderHandler extends CreateDraftInvoiceHandler {
     JSONArray selectedLines = new JSONArray();
     DocumentType resolvedDocType;
@@ -1291,8 +1102,13 @@ public class CreateDraftInvoiceHandlerTest {
     }
 
     @Override
-    protected void ensureLineGrossAmounts(Invoice invoice) {
-      ensuredGrossInvoice = invoice;
+    InvoiceFromOrderSupport getSupport() {
+      return new InvoiceFromOrderSupport() {
+        @Override
+        public void ensureLineGrossAmounts(Invoice invoice) {
+          ensuredGrossInvoice = invoice;
+        }
+      };
     }
 
     @Override
@@ -1304,6 +1120,7 @@ public class CreateDraftInvoiceHandlerTest {
   /**
    * Test double for shipment-based creation scenarios where collaborators are stubbed.
    */
+  @Vetoed // not a CDI bean: a discoverable subclass makes @Inject of the real handler ambiguous
   private static class CreateFromShipmentsHandler extends CreateDraftInvoiceHandler {
     List<ShipmentInOut> shipmentsToReturn = Collections.emptyList();
     Invoice invoiceHeader;
@@ -1334,6 +1151,7 @@ public class CreateDraftInvoiceHandlerTest {
   /**
    * Test double used to control AR invoice document type lookup for shipment headers.
    */
+  @Vetoed // not a CDI bean: a discoverable subclass makes @Inject of the real handler ambiguous
   private static class InvoiceHeaderHandler extends CreateDraftInvoiceHandler {
     DocumentType docTypeToReturn;
     String requestedOrgId;
@@ -1346,23 +1164,28 @@ public class CreateDraftInvoiceHandlerTest {
   }
 
   /**
-   * Test double that captures generated line numbers while bypassing invoice line creation.
+   * Test double that captures generated line numbers while bypassing invoice line creation
+   * and DB access (pending-qty computation is stubbed to return an empty map).
    */
+  @Vetoed // not a CDI bean: a discoverable subclass makes @Inject of the real handler ambiguous
   private static class AddShipmentLinesHandler extends CreateDraftInvoiceHandler {
     final Map<String, BigDecimal> qtyByShipmentLineId = new HashMap<>();
-    final Map<String, Long> lineNoByShipmentLineId = new HashMap<>();
+    JSONArray capturedLines;
+
+    @Override
+    protected Map<String, BigDecimal> computePendingQtyPerLine(String shipmentId, boolean includeDrafts) {
+      return Collections.emptyMap();
+    }
 
     @Override
     protected BigDecimal resolveShipmentLineQty(ShipmentInOutLine sl, boolean hasOverrides,
-        Map<String, BigDecimal> lineOverrides) {
+        Map<String, BigDecimal> lineOverrides, Map<String, BigDecimal> pendingQtyMap) {
       return qtyByShipmentLineId.get(sl.getId());
     }
 
     @Override
-    protected InvoiceLine createShipmentInvoiceLine(Invoice invoice, ShipmentInOutLine sl,
-        BigDecimal qty, long lineNo) {
-      lineNoByShipmentLineId.put(sl.getId(), lineNo);
-      return mock(InvoiceLine.class);
+    protected void createInvoiceLinesFromShipmentLines(JSONArray selectedLines, Invoice invoice) {
+      capturedLines = selectedLines;
     }
   }
 
@@ -1511,7 +1334,7 @@ public class CreateDraftInvoiceHandlerTest {
   }
 
   /**
-   * Verifies that shipment-based creation triggers gross repair and total recalculation.
+   * Verifies that shipment-based creation triggers gross amount repair.
    */
   @Test
   public void testHandleCreateGoodsShipmentRecalculatesShipmentInvoice() throws Exception {
@@ -1553,7 +1376,6 @@ public class CreateDraftInvoiceHandlerTest {
       assertEquals(Arrays.asList("ship-1", "ship-2"), handler.receivedShipmentIds);
       assertEquals(new BigDecimal("3"), handler.receivedLineOverrides.get("sl-1"));
       assertTrue(handler.ensuredGrossAmounts);
-      assertTrue(handler.recalculatedTotals);
       verify(dal, Mockito.times(2)).flush();
     }
   }
@@ -1914,7 +1736,7 @@ public class CreateDraftInvoiceHandlerTest {
           .put("orderedQuantity", "2"));
 
       Map<String, BigDecimal> overrides = Collections.singletonMap("ol-1", new BigDecimal("2"));
-      Invoice result = handler.createFromOrder("order-10", overrides);
+      Invoice result = handler.createFromOrder("order-10", overrides, null);
 
       assertSame(invoice, result);
       assertEquals(overrides, handler.receivedOverrides);
@@ -1930,6 +1752,338 @@ public class CreateDraftInvoiceHandlerTest {
       verify(process).createInvoiceLinesFromDocumentLines(eq(handler.selectedLines), eq(invoice), eq(OrderLine.class));
       verify(session).refresh(invoice);
       verify(dal, Mockito.atLeastOnce()).flush();
+    }
+  }
+
+  // ─── applyPriceListOverride (ETP-4028) — exercised via createFromOrder ─────
+  //
+  // applyPriceListOverride() itself is private, so it is exercised through the
+  // createFromOrder() entry point using the same CreateFromOrderHandler test
+  // double as testCreateFromOrderPersistsHeaderAndDelegatesLines.
+
+  /**
+   * Verifies that when {@code priceListId} is blank/null, {@code invoice.setPriceList(...)}
+   * is never called with anything other than the order's own price list — i.e. the popup
+   * override is a no-op and the invoice keeps whatever the order/header defaulted to.
+   */
+  @Test
+  public void testCreateFromOrderNullPriceListIdDoesNotOverridePriceList() throws JSONException {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+        MockedStatic<OBProvider> obProviderMock = Mockito.mockStatic(OBProvider.class);
+        MockedStatic<OBContext> obContextMock = Mockito.mockStatic(OBContext.class);
+        MockedStatic<WeldUtils> weldUtilsMock = Mockito.mockStatic(WeldUtils.class)) {
+      OBDal dal = mock(OBDal.class);
+      Session session = mock(Session.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      Order order = mockOrderWithHeaderData();
+      when(dal.get(eq(Order.class), eq("order-pl-null"))).thenReturn(order);
+      when(dal.getSession()).thenReturn(session);
+
+      OBProvider provider = mock(OBProvider.class);
+      Invoice invoice = mock(Invoice.class);
+      when(invoice.getId()).thenReturn("invoice-pl-null");
+      obProviderMock.when(OBProvider::getInstance).thenReturn(provider);
+      when(provider.get(Invoice.class)).thenReturn(invoice);
+
+      OBContext obCtx = mock(OBContext.class);
+      org.openbravo.model.ad.access.User user = mock(org.openbravo.model.ad.access.User.class);
+      when(user.getId()).thenReturn("user-pl-null");
+      when(obCtx.getUser()).thenReturn(user);
+      obContextMock.when(OBContext::getOBContext).thenReturn(obCtx);
+
+      NativeQuery linkQuery = mock(NativeQuery.class);
+      when(session.createNativeQuery(anyString())).thenReturn(linkQuery);
+      when(linkQuery.setParameter(anyString(), any())).thenReturn(linkQuery);
+      when(linkQuery.executeUpdate()).thenReturn(0);
+
+      CreateInvoiceLinesFromProcess process = mock(CreateInvoiceLinesFromProcess.class);
+      weldUtilsMock.when(() -> WeldUtils.getInstanceFromStaticBeanManager(CreateInvoiceLinesFromProcess.class))
+          .thenReturn(process);
+
+      CreateFromOrderHandler handler = new CreateFromOrderHandler();
+      handler.resolvedDocType = mock(DocumentType.class);
+      handler.selectedLines = new JSONArray().put(new JSONObject()
+          .put("id", "ol-1").put("orderedQuantity", "1"));
+
+      handler.createFromOrder("order-pl-null", Collections.emptyMap(), null);
+
+      // Header creation always sets the order's own price list; no override call is made.
+      verify(invoice, Mockito.times(1)).setPriceList(any(PriceList.class));
+      verify(invoice).setPriceList(order.getPriceList());
+      verify(dal, never()).get(eq(PriceList.class), anyString());
+    }
+  }
+
+  /**
+   * Verifies that when {@code priceListId} resolves to an active {@link PriceList},
+   * {@code invoice.setPriceList(...)} is called with that resolved price list — overriding
+   * whatever the header derivation set from the order.
+   */
+  @Test
+  public void testCreateFromOrderValidPriceListIdOverridesInvoicePriceList() throws JSONException {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+        MockedStatic<OBProvider> obProviderMock = Mockito.mockStatic(OBProvider.class);
+        MockedStatic<OBContext> obContextMock = Mockito.mockStatic(OBContext.class);
+        MockedStatic<WeldUtils> weldUtilsMock = Mockito.mockStatic(WeldUtils.class)) {
+      OBDal dal = mock(OBDal.class);
+      Session session = mock(Session.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      Order order = mockOrderWithHeaderData();
+      when(dal.get(eq(Order.class), eq("order-pl-valid"))).thenReturn(order);
+      when(dal.getSession()).thenReturn(session);
+
+      PriceList overridePriceList = mock(PriceList.class);
+      when(dal.get(eq(PriceList.class), eq("pl-tarifa-1"))).thenReturn(overridePriceList);
+
+      OBProvider provider = mock(OBProvider.class);
+      Invoice invoice = mock(Invoice.class);
+      when(invoice.getId()).thenReturn("invoice-pl-valid");
+      obProviderMock.when(OBProvider::getInstance).thenReturn(provider);
+      when(provider.get(Invoice.class)).thenReturn(invoice);
+
+      OBContext obCtx = mock(OBContext.class);
+      org.openbravo.model.ad.access.User user = mock(org.openbravo.model.ad.access.User.class);
+      when(user.getId()).thenReturn("user-pl-valid");
+      when(obCtx.getUser()).thenReturn(user);
+      obContextMock.when(OBContext::getOBContext).thenReturn(obCtx);
+
+      NativeQuery linkQuery = mock(NativeQuery.class);
+      when(session.createNativeQuery(anyString())).thenReturn(linkQuery);
+      when(linkQuery.setParameter(anyString(), any())).thenReturn(linkQuery);
+      when(linkQuery.executeUpdate()).thenReturn(0);
+
+      CreateInvoiceLinesFromProcess process = mock(CreateInvoiceLinesFromProcess.class);
+      weldUtilsMock.when(() -> WeldUtils.getInstanceFromStaticBeanManager(CreateInvoiceLinesFromProcess.class))
+          .thenReturn(process);
+
+      CreateFromOrderHandler handler = new CreateFromOrderHandler();
+      handler.resolvedDocType = mock(DocumentType.class);
+      handler.selectedLines = new JSONArray().put(new JSONObject()
+          .put("id", "ol-1").put("orderedQuantity", "1"));
+
+      handler.createFromOrder("order-pl-valid", Collections.emptyMap(), "pl-tarifa-1");
+
+      verify(invoice).setPriceList(overridePriceList);
+    }
+  }
+
+  /**
+   * Verifies that when {@code priceListId} does not resolve to any {@link PriceList} record
+   * (OBDal returns null), no exception is thrown and {@code invoice.setPriceList(...)} is
+   * never called with anything other than the order's own price list.
+   */
+  @Test
+  public void testCreateFromOrderUnresolvedPriceListIdDoesNotThrowOrOverride() throws JSONException {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+        MockedStatic<OBProvider> obProviderMock = Mockito.mockStatic(OBProvider.class);
+        MockedStatic<OBContext> obContextMock = Mockito.mockStatic(OBContext.class);
+        MockedStatic<WeldUtils> weldUtilsMock = Mockito.mockStatic(WeldUtils.class)) {
+      OBDal dal = mock(OBDal.class);
+      Session session = mock(Session.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      Order order = mockOrderWithHeaderData();
+      when(dal.get(eq(Order.class), eq("order-pl-missing"))).thenReturn(order);
+      when(dal.getSession()).thenReturn(session);
+      when(dal.get(eq(PriceList.class), eq("pl-does-not-exist"))).thenReturn(null);
+
+      OBProvider provider = mock(OBProvider.class);
+      Invoice invoice = mock(Invoice.class);
+      when(invoice.getId()).thenReturn("invoice-pl-missing");
+      obProviderMock.when(OBProvider::getInstance).thenReturn(provider);
+      when(provider.get(Invoice.class)).thenReturn(invoice);
+
+      OBContext obCtx = mock(OBContext.class);
+      org.openbravo.model.ad.access.User user = mock(org.openbravo.model.ad.access.User.class);
+      when(user.getId()).thenReturn("user-pl-missing");
+      when(obCtx.getUser()).thenReturn(user);
+      obContextMock.when(OBContext::getOBContext).thenReturn(obCtx);
+
+      NativeQuery linkQuery = mock(NativeQuery.class);
+      when(session.createNativeQuery(anyString())).thenReturn(linkQuery);
+      when(linkQuery.setParameter(anyString(), any())).thenReturn(linkQuery);
+      when(linkQuery.executeUpdate()).thenReturn(0);
+
+      CreateInvoiceLinesFromProcess process = mock(CreateInvoiceLinesFromProcess.class);
+      weldUtilsMock.when(() -> WeldUtils.getInstanceFromStaticBeanManager(CreateInvoiceLinesFromProcess.class))
+          .thenReturn(process);
+
+      CreateFromOrderHandler handler = new CreateFromOrderHandler();
+      handler.resolvedDocType = mock(DocumentType.class);
+      handler.selectedLines = new JSONArray().put(new JSONObject()
+          .put("id", "ol-1").put("orderedQuantity", "1"));
+
+      Invoice result = handler.createFromOrder("order-pl-missing", Collections.emptyMap(), "pl-does-not-exist");
+
+      assertSame(invoice, result);
+      verify(invoice, Mockito.times(1)).setPriceList(any(PriceList.class));
+      verify(invoice).setPriceList(order.getPriceList());
+    }
+  }
+
+  // ─── applyCurrencyOverride (ETP-4314) — exercised via createFromOrder(4-arg) ──
+  //
+  // applyCurrencyOverride() itself is private, so it is exercised through the
+  // 4-arg createFromOrder() entry point using the same CreateFromOrderHandler test
+  // double as the price-list override tests above.
+
+  /**
+   * Verifies that when {@code currencyId} is blank/null, {@code invoice.setCurrency(...)}
+   * is never called with anything other than the order's own currency — i.e. the
+   * shipment-currency override is a no-op and the invoice keeps whatever the order's
+   * header derivation set.
+   */
+  @Test
+  public void testCreateFromOrderNullCurrencyIdDoesNotOverrideCurrency() throws JSONException {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+        MockedStatic<OBProvider> obProviderMock = Mockito.mockStatic(OBProvider.class);
+        MockedStatic<OBContext> obContextMock = Mockito.mockStatic(OBContext.class);
+        MockedStatic<WeldUtils> weldUtilsMock = Mockito.mockStatic(WeldUtils.class)) {
+      OBDal dal = mock(OBDal.class);
+      Session session = mock(Session.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      Order order = mockOrderWithHeaderData();
+      when(dal.get(eq(Order.class), eq("order-cur-null"))).thenReturn(order);
+      when(dal.getSession()).thenReturn(session);
+
+      OBProvider provider = mock(OBProvider.class);
+      Invoice invoice = mock(Invoice.class);
+      when(invoice.getId()).thenReturn("invoice-cur-null");
+      obProviderMock.when(OBProvider::getInstance).thenReturn(provider);
+      when(provider.get(Invoice.class)).thenReturn(invoice);
+
+      OBContext obCtx = mock(OBContext.class);
+      org.openbravo.model.ad.access.User user = mock(org.openbravo.model.ad.access.User.class);
+      when(user.getId()).thenReturn("user-cur-null");
+      when(obCtx.getUser()).thenReturn(user);
+      obContextMock.when(OBContext::getOBContext).thenReturn(obCtx);
+
+      NativeQuery linkQuery = mock(NativeQuery.class);
+      when(session.createNativeQuery(anyString())).thenReturn(linkQuery);
+      when(linkQuery.setParameter(anyString(), any())).thenReturn(linkQuery);
+      when(linkQuery.executeUpdate()).thenReturn(0);
+
+      CreateInvoiceLinesFromProcess process = mock(CreateInvoiceLinesFromProcess.class);
+      weldUtilsMock.when(() -> WeldUtils.getInstanceFromStaticBeanManager(CreateInvoiceLinesFromProcess.class))
+          .thenReturn(process);
+
+      CreateFromOrderHandler handler = new CreateFromOrderHandler();
+      handler.resolvedDocType = mock(DocumentType.class);
+      handler.selectedLines = new JSONArray().put(new JSONObject()
+          .put("id", "ol-1").put("orderedQuantity", "1"));
+
+      handler.createFromOrder("order-cur-null", Collections.emptyMap(), null, null);
+
+      // Header creation always sets the order's own currency; no override call is made.
+      verify(invoice, Mockito.times(1)).setCurrency(any(Currency.class));
+      verify(invoice).setCurrency(order.getCurrency());
+      verify(dal, never()).get(eq(Currency.class), anyString());
+    }
+  }
+
+  /**
+   * Verifies that when {@code currencyId} resolves to an active {@link Currency},
+   * {@code invoice.setCurrency(...)} is called with that resolved currency —
+   * overriding whatever the header derivation set from the order.
+   */
+  @Test
+  public void testCreateFromOrderValidCurrencyIdOverridesInvoiceCurrency() throws JSONException {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+        MockedStatic<OBProvider> obProviderMock = Mockito.mockStatic(OBProvider.class);
+        MockedStatic<OBContext> obContextMock = Mockito.mockStatic(OBContext.class);
+        MockedStatic<WeldUtils> weldUtilsMock = Mockito.mockStatic(WeldUtils.class)) {
+      OBDal dal = mock(OBDal.class);
+      Session session = mock(Session.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      Order order = mockOrderWithHeaderData();
+      when(dal.get(eq(Order.class), eq("order-cur-valid"))).thenReturn(order);
+      when(dal.getSession()).thenReturn(session);
+
+      Currency overrideCurrency = mock(Currency.class);
+      when(dal.get(eq(Currency.class), eq("cur-eur"))).thenReturn(overrideCurrency);
+
+      OBProvider provider = mock(OBProvider.class);
+      Invoice invoice = mock(Invoice.class);
+      when(invoice.getId()).thenReturn("invoice-cur-valid");
+      obProviderMock.when(OBProvider::getInstance).thenReturn(provider);
+      when(provider.get(Invoice.class)).thenReturn(invoice);
+
+      OBContext obCtx = mock(OBContext.class);
+      org.openbravo.model.ad.access.User user = mock(org.openbravo.model.ad.access.User.class);
+      when(user.getId()).thenReturn("user-cur-valid");
+      when(obCtx.getUser()).thenReturn(user);
+      obContextMock.when(OBContext::getOBContext).thenReturn(obCtx);
+
+      NativeQuery linkQuery = mock(NativeQuery.class);
+      when(session.createNativeQuery(anyString())).thenReturn(linkQuery);
+      when(linkQuery.setParameter(anyString(), any())).thenReturn(linkQuery);
+      when(linkQuery.executeUpdate()).thenReturn(0);
+
+      CreateInvoiceLinesFromProcess process = mock(CreateInvoiceLinesFromProcess.class);
+      weldUtilsMock.when(() -> WeldUtils.getInstanceFromStaticBeanManager(CreateInvoiceLinesFromProcess.class))
+          .thenReturn(process);
+
+      CreateFromOrderHandler handler = new CreateFromOrderHandler();
+      handler.resolvedDocType = mock(DocumentType.class);
+      handler.selectedLines = new JSONArray().put(new JSONObject()
+          .put("id", "ol-1").put("orderedQuantity", "1"));
+
+      handler.createFromOrder("order-cur-valid", Collections.emptyMap(), null, "cur-eur");
+
+      verify(invoice).setCurrency(overrideCurrency);
+    }
+  }
+
+  /**
+   * Verifies that when {@code currencyId} does not resolve to any {@link Currency} record
+   * (OBDal returns null), no exception is thrown and {@code invoice.setCurrency(...)} is
+   * never called with anything other than the order's own currency.
+   */
+  @Test
+  public void testCreateFromOrderUnresolvedCurrencyIdDoesNotThrowOrOverride() throws JSONException {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+        MockedStatic<OBProvider> obProviderMock = Mockito.mockStatic(OBProvider.class);
+        MockedStatic<OBContext> obContextMock = Mockito.mockStatic(OBContext.class);
+        MockedStatic<WeldUtils> weldUtilsMock = Mockito.mockStatic(WeldUtils.class)) {
+      OBDal dal = mock(OBDal.class);
+      Session session = mock(Session.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      Order order = mockOrderWithHeaderData();
+      when(dal.get(eq(Order.class), eq("order-cur-missing"))).thenReturn(order);
+      when(dal.getSession()).thenReturn(session);
+      when(dal.get(eq(Currency.class), eq("cur-does-not-exist"))).thenReturn(null);
+
+      OBProvider provider = mock(OBProvider.class);
+      Invoice invoice = mock(Invoice.class);
+      when(invoice.getId()).thenReturn("invoice-cur-missing");
+      obProviderMock.when(OBProvider::getInstance).thenReturn(provider);
+      when(provider.get(Invoice.class)).thenReturn(invoice);
+
+      OBContext obCtx = mock(OBContext.class);
+      org.openbravo.model.ad.access.User user = mock(org.openbravo.model.ad.access.User.class);
+      when(user.getId()).thenReturn("user-cur-missing");
+      when(obCtx.getUser()).thenReturn(user);
+      obContextMock.when(OBContext::getOBContext).thenReturn(obCtx);
+
+      NativeQuery linkQuery = mock(NativeQuery.class);
+      when(session.createNativeQuery(anyString())).thenReturn(linkQuery);
+      when(linkQuery.setParameter(anyString(), any())).thenReturn(linkQuery);
+      when(linkQuery.executeUpdate()).thenReturn(0);
+
+      CreateInvoiceLinesFromProcess process = mock(CreateInvoiceLinesFromProcess.class);
+      weldUtilsMock.when(() -> WeldUtils.getInstanceFromStaticBeanManager(CreateInvoiceLinesFromProcess.class))
+          .thenReturn(process);
+
+      CreateFromOrderHandler handler = new CreateFromOrderHandler();
+      handler.resolvedDocType = mock(DocumentType.class);
+      handler.selectedLines = new JSONArray().put(new JSONObject()
+          .put("id", "ol-1").put("orderedQuantity", "1"));
+
+      Invoice result = handler.createFromOrder("order-cur-missing", Collections.emptyMap(), null,
+          "cur-does-not-exist");
+
+      assertSame(invoice, result);
+      verify(invoice, Mockito.times(1)).setCurrency(any(Currency.class));
+      verify(invoice).setCurrency(order.getCurrency());
     }
   }
 
@@ -2044,7 +2198,7 @@ public class CreateDraftInvoiceHandlerTest {
           .put("id", "ol-X")
           .put("orderedQuantity", "1"));
 
-      handler.createFromOrder("order-X", Collections.emptyMap());
+      handler.createFromOrder("order-X", Collections.emptyMap(), null);
 
       // Capture the SQL and assert it has the right shape.
       ArgumentCaptor<String> sqlCaptor = ArgumentCaptor.forClass(String.class);
@@ -2077,7 +2231,7 @@ public class CreateDraftInvoiceHandlerTest {
       CreateFromOrderHandler handler = new CreateFromOrderHandler();
       handler.selectedLines = new JSONArray();
 
-      handler.createFromOrder("order-11", Collections.emptyMap());
+      handler.createFromOrder("order-11", Collections.emptyMap(), null);
     }
   }
 
@@ -2099,7 +2253,7 @@ public class CreateDraftInvoiceHandlerTest {
       handler.invoiceHeader = invoice;
       Map<String, BigDecimal> overrides = Collections.singletonMap("sl-1", new BigDecimal("4"));
 
-      Invoice result = handler.createFromShipments(Arrays.asList("ship-10", "ship-20"), overrides);
+      Invoice result = handler.createFromShipments(Arrays.asList("ship-10", "ship-20"), overrides, null);
 
       assertSame(invoice, result);
       assertEquals(Arrays.asList(first, second), handler.receivedShipments);
@@ -2107,6 +2261,35 @@ public class CreateDraftInvoiceHandlerTest {
       assertSame(invoice, handler.receivedInvoice);
       verify(dal).save(invoice);
       verify(dal).flush();
+    }
+  }
+
+  /**
+   * Verifies that the multi-shipment path of {@code createFromShipments} also applies the
+   * price-list override (ETP-4028) — same {@code applyPriceListOverride} helper used by
+   * {@code createFromOrder}, called before {@code OBDal.save(invoice)}.
+   */
+  @Test
+  public void testCreateFromShipmentsMultiShipmentAppliesPriceListOverride() {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      PriceList overridePriceList = mock(PriceList.class);
+      when(dal.get(eq(PriceList.class), eq("pl-shipments-1"))).thenReturn(overridePriceList);
+
+      ShipmentInOut first = mock(ShipmentInOut.class);
+      ShipmentInOut second = mock(ShipmentInOut.class);
+      Invoice invoice = mock(Invoice.class);
+
+      CreateFromShipmentsHandler handler = new CreateFromShipmentsHandler();
+      handler.shipmentsToReturn = Arrays.asList(first, second);
+      handler.invoiceHeader = invoice;
+
+      handler.createFromShipments(Arrays.asList("ship-30", "ship-40"),
+          Collections.emptyMap(), "pl-shipments-1");
+
+      verify(invoice).setPriceList(overridePriceList);
     }
   }
 
@@ -2139,12 +2322,14 @@ public class CreateDraftInvoiceHandlerTest {
       when(linkedOrder.getPaymentTerms()).thenReturn(paymentTerm);
       when(linkedOrder.getPaymentMethod()).thenReturn(paymentMethod);
 
+      Currency shipmentCurrency = mock(Currency.class);
       ShipmentInOut shipment = mock(ShipmentInOut.class);
       when(shipment.getClient()).thenReturn(client);
       when(shipment.getOrganization()).thenReturn(organization);
       when(shipment.getBusinessPartner()).thenReturn(businessPartner);
       when(shipment.getPartnerAddress()).thenReturn(null);
       when(shipment.getSalesOrder()).thenReturn(linkedOrder);
+      when(shipment.getEtgoCurrency()).thenReturn(shipmentCurrency);
 
       InvoiceHeaderHandler handler = new InvoiceHeaderHandler();
       Invoice result = handler.createInvoiceHeaderFromShipment(shipment, Collections.singletonList(shipment));
@@ -2153,11 +2338,15 @@ public class CreateDraftInvoiceHandlerTest {
       verify(invoice).setDocumentType(invoiceDocType);
       verify(invoice).setTransactionDocument(invoiceDocType);
       verify(invoice).setPriceList(priceList);
-      verify(invoice).setCurrency(currency);
       verify(invoice).setPaymentTerms(paymentTerm);
       verify(invoice).setPaymentMethod(paymentMethod);
       verify(invoice).setSalesOrder(linkedOrder);
       verify(invoice).setBusinessPartner(businessPartner);
+      // ETP-4028/ETP-4314: the invoice's currency is unconditionally overwritten
+      // with the shipment's OWN currency at the end of the method — it may diverge
+      // from linkedOrder.getCurrency() (set earlier) once the user edits the
+      // shipment's currency in draft, so the shipment's currency must win.
+      verify(invoice).setCurrency(shipmentCurrency);
     }
   }
 
@@ -2184,12 +2373,14 @@ public class CreateDraftInvoiceHandlerTest {
       when(businessPartner.getPaymentTerms()).thenReturn(paymentTerm);
       when(businessPartner.getPaymentMethod()).thenReturn(paymentMethod);
 
+      Currency shipmentCurrency = mock(Currency.class);
       ShipmentInOut shipment = mock(ShipmentInOut.class);
       when(shipment.getClient()).thenReturn(mock(Client.class));
       when(shipment.getOrganization()).thenReturn(organization);
       when(shipment.getBusinessPartner()).thenReturn(businessPartner);
       when(shipment.getPartnerAddress()).thenReturn(null);
       when(shipment.getSalesOrder()).thenReturn(null);
+      when(shipment.getEtgoCurrency()).thenReturn(shipmentCurrency);
 
       InvoiceHeaderHandler handler = new InvoiceHeaderHandler();
       handler.docTypeToReturn = mock(DocumentType.class);
@@ -2199,10 +2390,13 @@ public class CreateDraftInvoiceHandlerTest {
       assertSame(invoice, result);
       assertEquals("org-20", handler.requestedOrgId);
       verify(invoice).setPriceList(priceList);
-      verify(invoice).setCurrency(currency);
       verify(invoice).setPaymentTerms(paymentTerm);
       verify(invoice).setPaymentMethod(paymentMethod);
       verify(invoice, never()).setSalesOrder(any(Order.class));
+      // ETP-4028/ETP-4314: even in the no-order (BP-default) branch, the invoice's
+      // currency must end up being the shipment's OWN currency, not the BP's
+      // price-list currency set earlier in this same branch.
+      verify(invoice).setCurrency(shipmentCurrency);
     }
   }
 
@@ -2257,44 +2451,711 @@ public class CreateDraftInvoiceHandlerTest {
   }
 
   /**
-   * Verifies that shipment line appending skips null quantities and preserves sequential line numbering.
+   * Verifies that addShipmentLinesToInvoice includes qualifying lines and skips null-qty lines
+   * when delegating to CreateInvoiceLinesFromProcess.
    */
   @Test
-  public void testAddShipmentLinesToInvoiceSkipsNullQtyAndIncrementsLineNo() {
+  public void testAddShipmentLinesToInvoiceDelegatesQualifyingLinesToProcess() throws Exception {
+    ShipmentInOutLine line1 = mock(ShipmentInOutLine.class);
+    when(line1.getId()).thenReturn("sl-1");
+    ShipmentInOutLine line2 = mock(ShipmentInOutLine.class);
+    when(line2.getId()).thenReturn("sl-2");
+    ShipmentInOutLine line3 = mock(ShipmentInOutLine.class);
+    when(line3.getId()).thenReturn("sl-3");
+
+    ShipmentInOut shipment1 = mock(ShipmentInOut.class);
+    when(shipment1.getMaterialMgmtShipmentInOutLineList()).thenReturn(Arrays.asList(line1, line2));
+    ShipmentInOut shipment2 = mock(ShipmentInOut.class);
+    when(shipment2.getMaterialMgmtShipmentInOutLineList()).thenReturn(Collections.singletonList(line3));
+
+    AddShipmentLinesHandler handler = new AddShipmentLinesHandler();
+    handler.qtyByShipmentLineId.put("sl-1", new BigDecimal("2"));
+    handler.qtyByShipmentLineId.put("sl-2", null);  // excluded
+    handler.qtyByShipmentLineId.put("sl-3", new BigDecimal("5"));
+
+    handler.addShipmentLinesToInvoice(mock(Invoice.class), Arrays.asList(shipment1, shipment2),
+        Collections.emptyMap());
+
+    assertNotNull(handler.capturedLines);
+    assertEquals(2, handler.capturedLines.length());
+    assertEquals("sl-1", handler.capturedLines.getJSONObject(0).getString("id"));
+    assertEquals("2", handler.capturedLines.getJSONObject(0).getString("orderedQuantity"));
+    assertEquals("sl-3", handler.capturedLines.getJSONObject(1).getString("id"));
+    assertEquals("5", handler.capturedLines.getJSONObject(1).getString("orderedQuantity"));
+  }
+
+
+  /**
+   * Verifies that AR invoice document type lookup prefers an exact organization match with sequence.
+   */
+  @Test
+  public void testFindArInvoiceDocTypePrefersExactOrgWithSequence() {
     try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
       OBDal dal = mock(OBDal.class);
       obDalMock.when(OBDal::getInstance).thenReturn(dal);
 
-      ShipmentInOutLine line1 = mock(ShipmentInOutLine.class);
-      when(line1.getId()).thenReturn("sl-1");
-      ShipmentInOutLine line2 = mock(ShipmentInOutLine.class);
-      when(line2.getId()).thenReturn("sl-2");
-      ShipmentInOutLine line3 = mock(ShipmentInOutLine.class);
-      when(line3.getId()).thenReturn("sl-3");
+      DocumentType other = mockCandidate("dt-other", "org-2", false, "SEQ-2");
+      DocumentType target = mockCandidate("dt-target", "org-1", true, "SEQ-1");
+      mockDocumentTypeCriteria(dal, Arrays.asList(other, target));
 
-      ShipmentInOut shipment1 = mock(ShipmentInOut.class);
-      when(shipment1.getMaterialMgmtShipmentInOutLineList()).thenReturn(Arrays.asList(line1, line2));
-      ShipmentInOut shipment2 = mock(ShipmentInOut.class);
-      when(shipment2.getMaterialMgmtShipmentInOutLineList()).thenReturn(Collections.singletonList(line3));
+      DocumentType result = new CreateDraftInvoiceHandler().findARInvoiceDocType("org-1");
 
-      AddShipmentLinesHandler handler = new AddShipmentLinesHandler();
-      handler.qtyByShipmentLineId.put("sl-1", new BigDecimal("2"));
-      handler.qtyByShipmentLineId.put("sl-2", null);
-      handler.qtyByShipmentLineId.put("sl-3", new BigDecimal("5"));
-
-      handler.addShipmentLinesToInvoice(mock(Invoice.class), Arrays.asList(shipment1, shipment2),
-          Collections.emptyMap());
-
-      assertEquals(Long.valueOf(10), handler.lineNoByShipmentLineId.get("sl-1"));
-      assertEquals(Long.valueOf(20), handler.lineNoByShipmentLineId.get("sl-3"));
-      assertFalse(handler.lineNoByShipmentLineId.containsKey("sl-2"));
-      verify(dal, Mockito.times(2)).save(any(InvoiceLine.class));
+      assertSame(target, result);
     }
   }
 
   /**
-   * Verifies that total recalculation backfills missing net amounts and creates invoice tax rows.
+   * Verifies that AR invoice document type lookup falls back to any active candidate when none has a sequence.
    */
+  @Test
+  @SuppressWarnings("unchecked")
+  public void testFindArInvoiceDocTypeFallsBackToAnyActiveCandidate() {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      OBCriteria<DocumentType> withSequenceCriteria = mock(OBCriteria.class);
+      OBCriteria<DocumentType> fallbackCriteria = mock(OBCriteria.class);
+      when(dal.createCriteria(DocumentType.class)).thenReturn(withSequenceCriteria, fallbackCriteria);
+
+      when(withSequenceCriteria.add(any())).thenReturn(withSequenceCriteria);
+      when(withSequenceCriteria.addOrderBy(anyString(), anyBoolean())).thenReturn(withSequenceCriteria);
+      when(withSequenceCriteria.list()).thenReturn(Collections.emptyList());
+
+      DocumentType systemCandidate = mockCandidate("dt-system", "0", false, null);
+      when(fallbackCriteria.add(any())).thenReturn(fallbackCriteria);
+      when(fallbackCriteria.addOrderBy(anyString(), anyBoolean())).thenReturn(fallbackCriteria);
+      when(fallbackCriteria.list()).thenReturn(Collections.singletonList(systemCandidate));
+
+      DocumentType result = new CreateDraftInvoiceHandler().findARInvoiceDocType("org-9");
+
+      assertSame(systemCandidate, result);
+    }
+  }
+
+  // ── handlePendingLines ────────────────────────────────────────────────────
+
+  /** Blank recordId returns 400. */
+  @Test
+  public void testHandlePendingLinesBlankRecordIdReturns400() {
+    NeoResponse r = new CreateDraftInvoiceHandler().handle(NeoContext.builder()
+        .specName(SPEC_GOODS_SHIPMENT).entityName(ENTITY_HEADER)
+        .httpMethod("GET").endpointType(NeoEndpointType.ACTION)
+        .fieldName("pendingInvoiceLines").build());
+    assertNotNull(r);
+    assertEquals(400, r.getHttpStatus());
+  }
+
+  /** Whitespace recordId returns 400. */
+  @Test
+  public void testHandlePendingLinesWhitespaceRecordIdReturns400() {
+    NeoResponse r = new CreateDraftInvoiceHandler().handle(NeoContext.builder()
+        .specName(SPEC_GOODS_SHIPMENT).entityName(ENTITY_HEADER)
+        .httpMethod("GET").endpointType(NeoEndpointType.ACTION)
+        .fieldName("pendingInvoiceLines").recordId("   ").build());
+    assertNotNull(r);
+    assertEquals(400, r.getHttpStatus());
+  }
+
+  /** POST method for pendingInvoiceLines is not routed (only GET is handled). */
+  @Test
+  public void testHandlePendingLinesPostMethodReturnsNull() {
+    NeoResponse r = new CreateDraftInvoiceHandler().handle(NeoContext.builder()
+        .specName(SPEC_GOODS_SHIPMENT).entityName(ENTITY_HEADER)
+        .httpMethod("POST").endpointType(NeoEndpointType.ACTION)
+        .fieldName("pendingInvoiceLines").recordId("ship-1").build());
+    assertNull(r);
+  }
+
+  /**
+   * Success path: subclass overrides computePendingQtyPerLine to return a known map;
+   * verifies JSON structure of the response.
+   */
+  @Test
+  public void testHandlePendingLinesSuccessReturns200WithLineArray() throws Exception {
+    try (MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class)) {
+      mockAdminMode(ctxMock);
+
+      CreateDraftInvoiceHandler handler = new CreateDraftInvoiceHandler() {
+        @Override
+        protected Map<String, BigDecimal> computePendingQtyPerLine(String shipmentId, boolean includeDrafts) {
+          Map<String, BigDecimal> m = new java.util.LinkedHashMap<>();
+          m.put("line-A", new BigDecimal("3"));
+          m.put("line-B", new BigDecimal("0"));
+          return m;
+        }
+      };
+
+      NeoResponse r = handler.handle(NeoContext.builder()
+          .specName(SPEC_GOODS_SHIPMENT).entityName(ENTITY_HEADER)
+          .httpMethod("GET").endpointType(NeoEndpointType.ACTION)
+          .fieldName("pendingInvoiceLines").recordId("ship-99").build());
+
+      assertNotNull(r);
+      assertEquals(200, r.getHttpStatus());
+      JSONArray data = r.getBody().getJSONObject("response").getJSONArray("data");
+      assertEquals(2, data.length());
+      assertEquals("line-A", data.getJSONObject(0).getString("lineId"));
+      assertEquals(3.0, data.getJSONObject(0).getDouble("pendingQty"), 0.0);
+      assertEquals("line-B", data.getJSONObject(1).getString("lineId"));
+    }
+  }
+
+  /** Exception inside computePendingQtyPerLine is caught and returns 500. */
+  @Test
+  public void testHandlePendingLinesExceptionReturns500() throws Exception {
+    try (MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class)) {
+      mockAdminMode(ctxMock);
+
+      CreateDraftInvoiceHandler handler = new CreateDraftInvoiceHandler() {
+        @Override
+        protected Map<String, BigDecimal> computePendingQtyPerLine(String shipmentId, boolean includeDrafts) {
+          throw new RuntimeException("db burst");
+        }
+      };
+
+      NeoResponse r = handler.handle(NeoContext.builder()
+          .specName(SPEC_GOODS_SHIPMENT).entityName(ENTITY_HEADER)
+          .httpMethod("GET").endpointType(NeoEndpointType.ACTION)
+          .fieldName("pendingInvoiceLines").recordId("ship-1").build());
+
+      assertNotNull(r);
+      assertEquals(500, r.getHttpStatus());
+    }
+  }
+
+  // ── computePendingQtyPerLine ──────────────────────────────────────────────
+
+  /** DB connection throws: method catches it and returns empty map. */
+  @Test
+  public void testComputePendingQtyPerLineDbErrorReturnsEmptyMap() {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      // getConnection() throws — simulates a lost connection
+      when(dal.getConnection()).thenThrow(new RuntimeException("connection lost"));
+
+      Map<String, BigDecimal> result = new CreateDraftInvoiceHandler()
+          .computePendingQtyPerLine("ship-X");
+      assertNotNull(result);
+      assertTrue(result.isEmpty());
+    }
+  }
+
+  /**
+   * PreparedStatement throws during executeQuery: method catches and returns empty map.
+   */
+  @Test
+  public void testComputePendingQtyPerLinePrepareStmtExceptionReturnsEmpty() throws Exception {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      java.sql.Connection conn = mock(java.sql.Connection.class);
+      when(dal.getConnection()).thenReturn(conn);
+      java.sql.PreparedStatement ps = mock(java.sql.PreparedStatement.class);
+      when(conn.prepareStatement(anyString())).thenReturn(ps);
+      when(ps.executeQuery()).thenThrow(new java.sql.SQLException("query failed"));
+
+      Map<String, BigDecimal> result = new CreateDraftInvoiceHandler()
+          .computePendingQtyPerLine("ship-Y");
+      assertNotNull(result);
+      assertTrue(result.isEmpty());
+    }
+  }
+
+  /**
+   * ResultSet returns one row: movQty=5, invQty=2 → pending=3.
+   * Also verifies clamping: a row with movQty=1, invQty=3 → pending=0 (not negative).
+   */
+  @Test
+  public void testComputePendingQtyPerLineSubtractsAndClampsAtZero() throws Exception {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      java.sql.Connection conn = mock(java.sql.Connection.class);
+      when(dal.getConnection()).thenReturn(conn);
+      java.sql.PreparedStatement ps = mock(java.sql.PreparedStatement.class);
+      when(conn.prepareStatement(anyString())).thenReturn(ps);
+
+      java.sql.ResultSet rs = mock(java.sql.ResultSet.class);
+      // First row: pending = 5 - 2 = 3
+      // Second row: pending = max(1 - 3, 0) = 0
+      when(rs.next()).thenReturn(true, true, false);
+      when(rs.getString(1)).thenReturn("line-1", "line-2");
+      when(rs.getBigDecimal(2)).thenReturn(new BigDecimal("5"), new BigDecimal("1"));
+      when(rs.getBigDecimal(3)).thenReturn(new BigDecimal("2"), new BigDecimal("3"));
+      when(ps.executeQuery()).thenReturn(rs);
+
+      Map<String, BigDecimal> result = new CreateDraftInvoiceHandler()
+          .computePendingQtyPerLine("ship-Z");
+      assertEquals(1, result.size());
+      assertEquals(0, new BigDecimal("3").compareTo(result.get("line-1")));
+      assertFalse("line-2 with zero pending (clamped from negative) must not be in map",
+          result.containsKey("line-2"));
+    }
+  }
+
+  /** Null movQty is treated as zero: 0 - invQty clamped at 0. */
+  @Test
+  public void testComputePendingQtyPerLineNullMovQtyTreatedAsZero() throws Exception {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      java.sql.Connection conn = mock(java.sql.Connection.class);
+      when(dal.getConnection()).thenReturn(conn);
+      java.sql.PreparedStatement ps = mock(java.sql.PreparedStatement.class);
+      when(conn.prepareStatement(anyString())).thenReturn(ps);
+      java.sql.ResultSet rs = mock(java.sql.ResultSet.class);
+      when(rs.next()).thenReturn(true, false);
+      when(rs.getString(1)).thenReturn("line-null");
+      when(rs.getBigDecimal(2)).thenReturn(null);
+      when(rs.getBigDecimal(3)).thenReturn(new BigDecimal("2"));
+      when(ps.executeQuery()).thenReturn(rs);
+
+      Map<String, BigDecimal> result = new CreateDraftInvoiceHandler()
+          .computePendingQtyPerLine("ship-null");
+      assertFalse("null movQty treated as zero: pending = max(0-2,0) = 0, line must not be in map",
+          result.containsKey("line-null"));
+    }
+  }
+
+  // ── resolveShipmentLineQty (4-arg with pendingQtyMap) ────────────────────
+
+  /** pendingQtyMap entry < movementQty → capped at pendingQty. */
+  @Test
+  public void testResolveShipmentLineQty4ArgPendingQtyCapsMovement() {
+    ShipmentInOutLine sl = mock(ShipmentInOutLine.class);
+    when(sl.isActive()).thenReturn(true);
+    when(sl.getId()).thenReturn("sl-pending-1");
+    when(sl.getMovementQuantity()).thenReturn(new BigDecimal("10"));
+
+    Map<String, BigDecimal> pendingMap = new HashMap<>();
+    pendingMap.put("sl-pending-1", new BigDecimal("4"));
+
+    BigDecimal result = new CreateDraftInvoiceHandler()
+        .resolveShipmentLineQty(sl, false, new HashMap<>(), pendingMap);
+    assertEquals(0, new BigDecimal("4").compareTo(result));
+  }
+
+  /** pendingQtyMap entry = 0 → line is already fully invoiced, returns null. */
+  @Test
+  public void testResolveShipmentLineQty4ArgZeroPendingReturnsNull() {
+    ShipmentInOutLine sl = mock(ShipmentInOutLine.class);
+    when(sl.isActive()).thenReturn(true);
+    when(sl.getId()).thenReturn("sl-zero");
+    when(sl.getMovementQuantity()).thenReturn(new BigDecimal("5"));
+
+    Map<String, BigDecimal> pendingMap = new HashMap<>();
+    pendingMap.put("sl-zero", BigDecimal.ZERO);
+
+    assertNull(new CreateDraftInvoiceHandler()
+        .resolveShipmentLineQty(sl, false, new HashMap<>(), pendingMap));
+  }
+
+  /** lineId not in pendingQtyMap → falls back to movementQty (backward-compat). */
+  @Test
+  public void testResolveShipmentLineQty4ArgMissingFromMapFallsBackToMovement() {
+    ShipmentInOutLine sl = mock(ShipmentInOutLine.class);
+    when(sl.isActive()).thenReturn(true);
+    when(sl.getId()).thenReturn("sl-not-in-map");
+    when(sl.getMovementQuantity()).thenReturn(new BigDecimal("7"));
+
+    BigDecimal result = new CreateDraftInvoiceHandler()
+        .resolveShipmentLineQty(sl, false, new HashMap<>(), new HashMap<>());
+    assertEquals(0, new BigDecimal("7").compareTo(result));
+  }
+
+  /** Override present + pendingQty: result = min(override, pendingQty). */
+  @Test
+  public void testResolveShipmentLineQty4ArgOverrideCappedByPendingQty() {
+    ShipmentInOutLine sl = mock(ShipmentInOutLine.class);
+    when(sl.isActive()).thenReturn(true);
+    when(sl.getId()).thenReturn("sl-cap");
+    when(sl.getMovementQuantity()).thenReturn(new BigDecimal("10"));
+
+    Map<String, BigDecimal> overrides = new HashMap<>();
+    overrides.put("sl-cap", new BigDecimal("8"));
+    Map<String, BigDecimal> pendingMap = new HashMap<>();
+    pendingMap.put("sl-cap", new BigDecimal("5"));
+
+    // min(override=8, pendingQty=5) = 5
+    BigDecimal result = new CreateDraftInvoiceHandler()
+        .resolveShipmentLineQty(sl, true, overrides, pendingMap);
+    assertEquals(0, new BigDecimal("5").compareTo(result));
+  }
+
+  // ── handleCreate — OBException produces structured JSON body ────────────────
+
+  /**
+   * When createFromOrder throws an OBException the catch block wraps the message
+   * in {"status":"error","message":"..."} and returns HTTP 400.
+   */
+  @Test
+  public void testHandleCreateOBExceptionReturns400WithStructuredBody() throws Exception {
+    try (MockedStatic<OBContext> obContextMock = Mockito.mockStatic(OBContext.class)) {
+      mockAdminMode(obContextMock);
+
+      DispatchHandler handler = new DispatchHandler();
+      handler.createFailure = new OBException("not enough stock");
+
+      NeoResponse response = handler.handle(NeoContext.builder()
+          .specName(SPEC_SALES_ORDER)
+          .entityName(ENTITY_HEADER)
+          .httpMethod("POST")
+          .endpointType(NeoEndpointType.ACTION)
+          .fieldName(ACTION_CREATE)
+          .recordId("order-err")
+          .build());
+
+      assertNotNull(response);
+      assertEquals(400, response.getHttpStatus());
+      String body = response.getBody().toString();
+      assertTrue("Response body must contain the OBException message",
+          body.contains("not enough stock"));
+    }
+  }
+
+  // ── handleCheck — single draft returns id + documentNo ──────────────────────
+
+  /**
+   * When exactly one draft exists the check response contains its id and documentNo,
+   * and the "drafts" array is absent (only added when count > 1).
+   */
+  @Test
+  public void testHandleCheckSingleDraftReturnsIdAndDocNo() throws Exception {
+    try (MockedStatic<OBContext> obContextMock = Mockito.mockStatic(OBContext.class)) {
+      mockAdminMode(obContextMock);
+
+      Invoice draft = mock(Invoice.class);
+      when(draft.getId()).thenReturn("inv-single");
+      when(draft.getDocumentNo()).thenReturn("INV-SINGLE-001");
+
+      DispatchHandler handler = new DispatchHandler();
+      handler.draftsToReturn = Collections.singletonList(draft);
+
+      NeoResponse response = handler.handle(NeoContext.builder()
+          .specName(SPEC_SALES_ORDER)
+          .entityName(ENTITY_HEADER)
+          .httpMethod("GET")
+          .endpointType(NeoEndpointType.ACTION)
+          .fieldName(ACTION_CHECK)
+          .recordId("order-single")
+          .build());
+
+      assertNotNull(response);
+      assertEquals(200, response.getHttpStatus());
+      JSONObject data = response.getBody().getJSONObject("response").getJSONObject("data");
+      assertTrue(data.getBoolean("exists"));
+      assertEquals(1, data.getInt("count"));
+      assertEquals("inv-single", data.getString("id"));
+      assertEquals("INV-SINGLE-001", data.getString("documentNo"));
+      assertFalse("drafts array must not be present when count == 1", data.has("drafts"));
+    }
+  }
+
+  // ── createFromShipments — single shipment with linked order delegates ────────
+
+  /**
+   * When there is exactly one shipment and it has a linked sales order,
+   * createFromShipments delegates to createFromOrder instead of the multi-shipment path.
+   */
+  @Test
+  public void testCreateFromShipmentsSingleShipmentWithOrderDelegatesToCreateFromOrder() {
+    Order linkedOrder = mock(Order.class);
+    when(linkedOrder.getId()).thenReturn("order-linked");
+
+    ShipmentInOut single = mock(ShipmentInOut.class);
+    when(single.getSalesOrder()).thenReturn(linkedOrder);
+    when(single.getMaterialMgmtShipmentInOutLineList()).thenReturn(Collections.emptyList());
+    when(single.getId()).thenReturn("ship-single");
+
+    Invoice expectedInvoice = mock(Invoice.class);
+    final boolean[] orderPathCalled = {false};
+    final boolean[] multiPathCalled = {false};
+
+    CreateDraftInvoiceHandler handler = new CreateDraftInvoiceHandler() {
+      @Override
+      protected List<ShipmentInOut> loadAndValidateShipments(List<String> ids) {
+        return Collections.singletonList(single);
+      }
+
+      @Override
+      protected Invoice createFromOrder(String orderId, Map<String, BigDecimal> lineOverrides,
+          String priceListId, String currencyId) {
+        orderPathCalled[0] = true;
+        assertEquals("order-linked", orderId);
+        return expectedInvoice;
+      }
+
+      @Override
+      protected Invoice createInvoiceHeaderFromShipment(ShipmentInOut first, List<ShipmentInOut> shipments) {
+        multiPathCalled[0] = true;
+        return null;
+      }
+
+      @Override
+      protected Map<String, BigDecimal> computePendingQtyPerLine(String shipmentId, boolean includeDrafts) {
+        return Collections.emptyMap();
+      }
+    };
+
+    Invoice result = handler.createFromShipments(
+        Collections.singletonList("ship-single"), Collections.emptyMap(), null);
+    assertSame(expectedInvoice, result);
+    assertTrue("Single-shipment-with-order path must delegate to createFromOrder",
+        orderPathCalled[0]);
+    assertFalse("Multi-shipment path must NOT be entered", multiPathCalled[0]);
+  }
+
+  // ── capShipmentLineOverrides — all lines capped to zero throws ──────────────
+
+  /**
+   * When every line override is fully consumed by an existing draft the cap method
+   * throws OBException instead of returning an empty map.
+   */
+  @Test(expected = OBException.class)
+  public void testCreateFromShipmentsAllLinesCappedToZeroThrows() {
+    ShipmentInOutLine sl = mock(ShipmentInOutLine.class);
+    when(sl.getId()).thenReturn("sl-used");
+
+    Order linkedOrder = mock(Order.class);
+    when(linkedOrder.getId()).thenReturn("order-cap");
+
+    ShipmentInOut shipment = mock(ShipmentInOut.class);
+    when(shipment.getSalesOrder()).thenReturn(linkedOrder); // single-shipment-with-order path → cap is applied
+    when(shipment.getMaterialMgmtShipmentInOutLineList())
+        .thenReturn(Collections.singletonList(sl));
+    when(shipment.getId()).thenReturn("ship-cap");
+
+    // pendingQty for all overridden lines is zero → cap leaves empty map → throw
+    Map<String, BigDecimal> overrides = new HashMap<>();
+    overrides.put("sl-used", new BigDecimal("3"));
+
+    CreateDraftInvoiceHandler handler = new CreateDraftInvoiceHandler() {
+      @Override
+      protected List<ShipmentInOut> loadAndValidateShipments(List<String> ids) {
+        return Collections.singletonList(shipment);
+      }
+
+      @Override
+      protected Map<String, BigDecimal> computePendingQtyPerLine(String shipmentId, boolean includeDrafts) {
+        // Returns zero for sl-used → override gets capped to 0 → dropped → OBException
+        Map<String, BigDecimal> m = new HashMap<>();
+        m.put("sl-used", BigDecimal.ZERO);
+        return m;
+      }
+    };
+
+    handler.createFromShipments(Collections.singletonList("ship-cap"), overrides, null);
+  }
+
+  // ── computePendingQtyPerLine (1-arg) delegates to 2-arg ─────────────────────
+
+  /**
+   * The 1-arg overload (no includeDrafts param) must call the 2-arg variant
+   * with includeDrafts=false. Verified via a subclass that captures the flag.
+   */
+  @Test
+  public void testComputePendingQtyPerLineOneArgDelegatesToTwoArgWithFalse() {
+    // Capture the includeDrafts flag passed by the 1-arg overload
+    boolean[] capturedFlag = {true}; // init to true so a false write is detectable
+    CreateDraftInvoiceHandler handler = new CreateDraftInvoiceHandler() {
+      @Override
+      protected Map<String, BigDecimal> computePendingQtyPerLine(String shipmentId, boolean includeDrafts) {
+        capturedFlag[0] = includeDrafts;
+        return Collections.emptyMap();
+      }
+    };
+    handler.computePendingQtyPerLine("ship-1arg");
+    assertFalse("1-arg overload must pass includeDrafts=false to the 2-arg variant",
+        capturedFlag[0]);
+  }
+
+  // ── computePendingQtyPerLine (2-arg, includeDrafts=true) — draft SQL branch ──
+
+  /**
+   * When includeDrafts=true the method uses a different SQL branch. The DB mock
+   * yields one line with movQty=5 and invoiced=2 → pending=3.
+   */
+  @Test
+  public void testComputePendingQtyPerLineIncludeDraftsReturnsPositivePending() throws Exception {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      java.sql.Connection conn = mock(java.sql.Connection.class);
+      when(dal.getConnection()).thenReturn(conn);
+      java.sql.PreparedStatement ps = mock(java.sql.PreparedStatement.class);
+      when(conn.prepareStatement(anyString())).thenReturn(ps);
+
+      java.sql.ResultSet rs = mock(java.sql.ResultSet.class);
+      when(rs.next()).thenReturn(true, false);
+      when(rs.getString(1)).thenReturn("line-draft");
+      when(rs.getBigDecimal(2)).thenReturn(new BigDecimal("5"));
+      when(rs.getBigDecimal(3)).thenReturn(new BigDecimal("2"));
+      when(ps.executeQuery()).thenReturn(rs);
+
+      Map<String, BigDecimal> result = new CreateDraftInvoiceHandler()
+          .computePendingQtyPerLine("ship-draft", true);
+
+      assertEquals(1, result.size());
+      assertEquals(0, new BigDecimal("3").compareTo(result.get("line-draft")));
+    }
+  }
+
+  /**
+   * includeDrafts=true with a line fully consumed by drafts → pending=0 → omitted.
+   */
+  @Test
+  public void testComputePendingQtyPerLineIncludeDraftsFullyConsumedLineOmitted() throws Exception {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      java.sql.Connection conn = mock(java.sql.Connection.class);
+      when(dal.getConnection()).thenReturn(conn);
+      java.sql.PreparedStatement ps = mock(java.sql.PreparedStatement.class);
+      when(conn.prepareStatement(anyString())).thenReturn(ps);
+
+      java.sql.ResultSet rs = mock(java.sql.ResultSet.class);
+      when(rs.next()).thenReturn(true, false);
+      when(rs.getString(1)).thenReturn("line-consumed");
+      when(rs.getBigDecimal(2)).thenReturn(new BigDecimal("5"));
+      when(rs.getBigDecimal(3)).thenReturn(new BigDecimal("5")); // fully invoiced
+      when(ps.executeQuery()).thenReturn(rs);
+
+      Map<String, BigDecimal> result = new CreateDraftInvoiceHandler()
+          .computePendingQtyPerLine("ship-full", true);
+
+      assertTrue("Fully consumed line must be omitted even with includeDrafts=true",
+          result.isEmpty());
+    }
+  }
+
+  /**
+   * includeDrafts=true, DB throws → empty map returned without propagation.
+   */
+  @Test
+  public void testComputePendingQtyPerLineIncludeDraftsDbErrorReturnsEmptyMap() {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.getConnection()).thenThrow(new RuntimeException("DB down includeDrafts=true"));
+
+      Map<String, BigDecimal> result = new CreateDraftInvoiceHandler()
+          .computePendingQtyPerLine("ship-err", true);
+
+      assertNotNull(result);
+      assertTrue(result.isEmpty());
+    }
+  }
+
+  // ── findLinkedInvoiceLine ─────────────────────────────────────────────────────
+
+  /**
+   * When the HQL query returns a matching invoice line, findLinkedInvoiceLine returns it.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  public void testFindLinkedInvoiceLineReturnsMatchingLine() {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      Session session = mock(Session.class);
+      when(dal.getSession()).thenReturn(session);
+
+      InvoiceLine il = mock(InvoiceLine.class);
+      Query<InvoiceLine> q = mock(Query.class);
+      when(session.createQuery(anyString(), eq(InvoiceLine.class))).thenReturn(q);
+      when(q.setParameter(anyString(), any())).thenReturn(q);
+      when(q.setMaxResults(anyInt())).thenReturn(q);
+      when(q.list()).thenReturn(Collections.singletonList(il));
+
+      InvoiceLine result = new CreateDraftInvoiceHandler().findLinkedInvoiceLine("sl-linked");
+      assertSame(il, result);
+    }
+  }
+
+  /**
+   * When no matching invoice line exists, findLinkedInvoiceLine returns null.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  public void testFindLinkedInvoiceLineReturnsNullWhenNotFound() {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      Session session = mock(Session.class);
+      when(dal.getSession()).thenReturn(session);
+
+      Query<InvoiceLine> q = mock(Query.class);
+      when(session.createQuery(anyString(), eq(InvoiceLine.class))).thenReturn(q);
+      when(q.setParameter(anyString(), any())).thenReturn(q);
+      when(q.setMaxResults(anyInt())).thenReturn(q);
+      when(q.list()).thenReturn(Collections.emptyList());
+
+      assertNull(new CreateDraftInvoiceHandler().findLinkedInvoiceLine("sl-missing"));
+    }
+  }
+
+  /**
+   * When the query throws, findLinkedInvoiceLine swallows the exception and returns null.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  public void testFindLinkedInvoiceLineReturnsNullOnException() {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      Session session = mock(Session.class);
+      when(dal.getSession()).thenReturn(session);
+      when(session.createQuery(anyString(), eq(InvoiceLine.class)))
+          .thenThrow(new RuntimeException("query error"));
+
+      assertNull(new CreateDraftInvoiceHandler().findLinkedInvoiceLine("sl-err"));
+    }
+  }
+
+  // ── recalculateTotals ─────────────────────────────────────────────────────
+
+  @Test
+  public void testRecalculateTotalsNoLinesSetsTotalsToZero() {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      Currency currency = mock(Currency.class);
+      when(currency.getStandardPrecision()).thenReturn(2L);
+      Invoice invoice = mock(Invoice.class);
+      when(invoice.getCurrency()).thenReturn(currency);
+      when(invoice.getInvoiceLineList()).thenReturn(Collections.emptyList());
+
+      new CreateDraftInvoiceHandler().recalculateTotals(invoice);
+      verify(invoice).setSummedLineAmount(new BigDecimal("0.00"));
+      verify(invoice).setGrandTotalAmount(new BigDecimal("0.00"));
+      verify(dal).save(invoice);
+    }
+  }
+
+  @Test
+  public void testRecalculateTotalsLineWithoutTaxAccumulatesNet() {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      Currency currency = mock(Currency.class);
+      when(currency.getStandardPrecision()).thenReturn(2L);
+      InvoiceLine il = mock(InvoiceLine.class);
+      when(il.getInvoicedQuantity()).thenReturn(new BigDecimal("2"));
+      when(il.getUnitPrice()).thenReturn(new BigDecimal("50"));
+      when(il.getLineNetAmount()).thenReturn(new BigDecimal("100"));
+      when(il.getTax()).thenReturn(null);
+      Invoice invoice = mock(Invoice.class);
+      when(invoice.getCurrency()).thenReturn(currency);
+      when(invoice.getInvoiceLineList()).thenReturn(Collections.singletonList(il));
+
+      new CreateDraftInvoiceHandler().recalculateTotals(invoice);
+      verify(invoice).setSummedLineAmount(new BigDecimal("100.00"));
+      verify(invoice).setGrandTotalAmount(new BigDecimal("100.00"));
+    }
+  }
+
   @Test
   public void testRecalculateTotalsCreatesInvoiceTaxAndBackfillsLineNetAmount() {
     try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
@@ -2348,51 +3209,509 @@ public class CreateDraftInvoiceHandlerTest {
     }
   }
 
-  /**
-   * Verifies that AR invoice document type lookup prefers an exact organization match with sequence.
-   */
+  // ── createShipmentInvoiceLine ─────────────────────────────────────────────
+
   @Test
-  public void testFindArInvoiceDocTypePrefersExactOrgWithSequence() {
-    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
-      OBDal dal = mock(OBDal.class);
-      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+  public void testCreateShipmentInvoiceLineNoOrderLineNoLinkedInvoiceZeroPrices() {
+    try (MockedStatic<OBProvider> providerMock = Mockito.mockStatic(OBProvider.class)) {
+      OBProvider provider = mock(OBProvider.class);
+      providerMock.when(OBProvider::getInstance).thenReturn(provider);
+      InvoiceLine il = mock(InvoiceLine.class);
+      when(provider.get(InvoiceLine.class)).thenReturn(il);
 
-      DocumentType other = mockCandidate("dt-other", "org-2", false, "SEQ-2");
-      DocumentType target = mockCandidate("dt-target", "org-1", true, "SEQ-1");
-      mockDocumentTypeCriteria(dal, Arrays.asList(other, target));
+      ShipmentInOutLine sl = mock(ShipmentInOutLine.class);
+      when(sl.getOrganization()).thenReturn(mock(Organization.class));
+      when(sl.getProduct()).thenReturn(mock(Product.class));
+      when(sl.getUOM()).thenReturn(null);
+      when(sl.getSalesOrderLine()).thenReturn(null);
 
-      DocumentType result = new CreateDraftInvoiceHandler().findARInvoiceDocType("org-1");
+      Invoice invoice = mock(Invoice.class);
+      CreateDraftInvoiceHandler handler = new CreateDraftInvoiceHandler() {
+        @Override
+        protected InvoiceLine findLinkedInvoiceLine(String id) { return null; }
+      };
+      InvoiceLine result = handler.createShipmentInvoiceLine(invoice, sl, new BigDecimal("3"), 10L);
 
-      assertSame(target, result);
+      assertEquals(il, result);
+      verify(il).setUnitPrice(BigDecimal.ZERO);
+      verify(il).setListPrice(BigDecimal.ZERO);
+      verify(il).setLineNetAmount(BigDecimal.ZERO);
     }
   }
 
-  /**
-   * Verifies that AR invoice document type lookup falls back to any active candidate when none has a sequence.
-   */
   @Test
-  @SuppressWarnings("unchecked")
-  public void testFindArInvoiceDocTypeFallsBackToAnyActiveCandidate() {
-    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
-      OBDal dal = mock(OBDal.class);
-      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+  public void testCreateShipmentInvoiceLineNoOrderLineFallsBackToLinkedInvoicePrices() {
+    try (MockedStatic<OBProvider> providerMock = Mockito.mockStatic(OBProvider.class)) {
+      OBProvider provider = mock(OBProvider.class);
+      providerMock.when(OBProvider::getInstance).thenReturn(provider);
+      InvoiceLine il = mock(InvoiceLine.class);
+      when(provider.get(InvoiceLine.class)).thenReturn(il);
 
-      OBCriteria<DocumentType> withSequenceCriteria = mock(OBCriteria.class);
-      OBCriteria<DocumentType> fallbackCriteria = mock(OBCriteria.class);
-      when(dal.createCriteria(DocumentType.class)).thenReturn(withSequenceCriteria, fallbackCriteria);
+      InvoiceLine sourceIL = mock(InvoiceLine.class);
+      when(sourceIL.getUnitPrice()).thenReturn(new BigDecimal("15"));
+      when(sourceIL.getListPrice()).thenReturn(new BigDecimal("18"));
+      when(sourceIL.getPriceLimit()).thenReturn(new BigDecimal("12"));
+      when(sourceIL.getTax()).thenReturn(mock(TaxRate.class));
+      when(sourceIL.getSalesOrderLine()).thenReturn(null);
 
-      when(withSequenceCriteria.add(any())).thenReturn(withSequenceCriteria);
-      when(withSequenceCriteria.addOrderBy(anyString(), anyBoolean())).thenReturn(withSequenceCriteria);
-      when(withSequenceCriteria.list()).thenReturn(Collections.emptyList());
+      ShipmentInOutLine sl = mock(ShipmentInOutLine.class);
+      when(sl.getOrganization()).thenReturn(mock(Organization.class));
+      when(sl.getProduct()).thenReturn(mock(Product.class));
+      when(sl.getUOM()).thenReturn(null);
+      when(sl.getSalesOrderLine()).thenReturn(null);
 
-      DocumentType systemCandidate = mockCandidate("dt-system", "0", false, null);
-      when(fallbackCriteria.add(any())).thenReturn(fallbackCriteria);
-      when(fallbackCriteria.addOrderBy(anyString(), anyBoolean())).thenReturn(fallbackCriteria);
-      when(fallbackCriteria.list()).thenReturn(Collections.singletonList(systemCandidate));
+      Currency currency = mock(Currency.class);
+      when(currency.getStandardPrecision()).thenReturn(2L);
+      Invoice invoice = mock(Invoice.class);
+      when(invoice.getCurrency()).thenReturn(currency);
 
-      DocumentType result = new CreateDraftInvoiceHandler().findARInvoiceDocType("org-9");
+      CreateDraftInvoiceHandler handler = new CreateDraftInvoiceHandler() {
+        @Override
+        protected InvoiceLine findLinkedInvoiceLine(String id) { return sourceIL; }
+      };
+      handler.createShipmentInvoiceLine(invoice, sl, new BigDecimal("4"), 10L);
 
-      assertSame(systemCandidate, result);
+      verify(il).setUnitPrice(new BigDecimal("15"));
+      verify(il).setListPrice(new BigDecimal("18"));
+      verify(il).setLineNetAmount(new BigDecimal("60.00"));
     }
   }
+
+  @Test
+  public void testCreateShipmentInvoiceLineWithOrderLineCopiesPrices() {
+    try (MockedStatic<OBProvider> providerMock = Mockito.mockStatic(OBProvider.class)) {
+      OBProvider provider = mock(OBProvider.class);
+      providerMock.when(OBProvider::getInstance).thenReturn(provider);
+      InvoiceLine il = mock(InvoiceLine.class);
+      when(provider.get(InvoiceLine.class)).thenReturn(il);
+
+      OrderLine ol = mock(OrderLine.class);
+      when(ol.getUnitPrice()).thenReturn(new BigDecimal("10"));
+      when(ol.getListPrice()).thenReturn(new BigDecimal("12"));
+      when(ol.getPriceLimit()).thenReturn(new BigDecimal("8"));
+      when(ol.getTax()).thenReturn(mock(TaxRate.class));
+
+      ShipmentInOutLine sl = mock(ShipmentInOutLine.class);
+      when(sl.getOrganization()).thenReturn(mock(Organization.class));
+      when(sl.getProduct()).thenReturn(mock(Product.class));
+      when(sl.getUOM()).thenReturn(null);
+      when(sl.getSalesOrderLine()).thenReturn(ol);
+
+      Currency currency = mock(Currency.class);
+      when(currency.getStandardPrecision()).thenReturn(2L);
+      Invoice invoice = mock(Invoice.class);
+      when(invoice.getCurrency()).thenReturn(currency);
+
+      new CreateDraftInvoiceHandler().createShipmentInvoiceLine(invoice, sl, new BigDecimal("2"), 10L);
+
+      verify(il).setUnitPrice(new BigDecimal("10"));
+      verify(il).setListPrice(new BigDecimal("12"));
+      verify(il).setLineNetAmount(new BigDecimal("20.00"));
+    }
+  }
+
+  // ── applyPricesFromOrderLine (via createShipmentInvoiceLine) ─────────────
+
+  @Test
+  public void testApplyPricesFromOrderLineUsesOrderListPriceWhenPositive() {
+    try (MockedStatic<OBProvider> providerMock = Mockito.mockStatic(OBProvider.class)) {
+      OBProvider provider = mock(OBProvider.class);
+      providerMock.when(OBProvider::getInstance).thenReturn(provider);
+      InvoiceLine il = mock(InvoiceLine.class);
+      when(provider.get(InvoiceLine.class)).thenReturn(il);
+
+      OrderLine ol = mock(OrderLine.class);
+      when(ol.getUnitPrice()).thenReturn(new BigDecimal("20"));
+      when(ol.getListPrice()).thenReturn(new BigDecimal("25"));
+      when(ol.getPriceLimit()).thenReturn(new BigDecimal("18"));
+      TaxRate tax = mock(TaxRate.class);
+      when(ol.getTax()).thenReturn(tax);
+
+      ShipmentInOutLine sl = mock(ShipmentInOutLine.class);
+      when(sl.getOrganization()).thenReturn(mock(Organization.class));
+      when(sl.getProduct()).thenReturn(mock(Product.class));
+      when(sl.getUOM()).thenReturn(null);
+      when(sl.getSalesOrderLine()).thenReturn(ol);
+
+      Currency currency = mock(Currency.class);
+      when(currency.getStandardPrecision()).thenReturn(2L);
+      Invoice invoice = mock(Invoice.class);
+      when(invoice.getCurrency()).thenReturn(currency);
+      when(invoice.getPriceList()).thenReturn(null);
+
+      new CreateDraftInvoiceHandler().createShipmentInvoiceLine(invoice, sl, new BigDecimal("2"), 10L);
+
+      verify(il).setUnitPrice(new BigDecimal("20"));
+      verify(il).setListPrice(new BigDecimal("25"));
+      verify(il).setLineNetAmount(new BigDecimal("40.00"));
+      verify(il).setTax(tax);
+      verify(il).setSalesOrderLine(ol);
+    }
+  }
+
+  @Test
+  public void testApplyPricesFromOrderLineNullListPriceFallsBackToUnitPrice() {
+    try (MockedStatic<OBProvider> providerMock = Mockito.mockStatic(OBProvider.class)) {
+      OBProvider provider = mock(OBProvider.class);
+      providerMock.when(OBProvider::getInstance).thenReturn(provider);
+      InvoiceLine il = mock(InvoiceLine.class);
+      when(provider.get(InvoiceLine.class)).thenReturn(il);
+
+      Product product = mock(Product.class);
+      when(product.getId()).thenReturn("prod-1");
+
+      OrderLine ol = mock(OrderLine.class);
+      when(ol.getUnitPrice()).thenReturn(new BigDecimal("15"));
+      when(ol.getListPrice()).thenReturn(null);
+      when(ol.getPriceLimit()).thenReturn(null);
+      when(ol.getTax()).thenReturn(null);
+      when(ol.getProduct()).thenReturn(product);
+
+      ShipmentInOutLine sl = mock(ShipmentInOutLine.class);
+      when(sl.getOrganization()).thenReturn(mock(Organization.class));
+      when(sl.getProduct()).thenReturn(product);
+      when(sl.getUOM()).thenReturn(null);
+      when(sl.getSalesOrderLine()).thenReturn(ol);
+
+      Currency currency = mock(Currency.class);
+      when(currency.getStandardPrecision()).thenReturn(2L);
+      Invoice invoice = mock(Invoice.class);
+      when(invoice.getCurrency()).thenReturn(currency);
+      when(invoice.getPriceList()).thenReturn(null);
+
+      new CreateDraftInvoiceHandler().createShipmentInvoiceLine(invoice, sl, new BigDecimal("3"), 10L);
+
+      verify(il).setListPrice(new BigDecimal("15"));
+    }
+  }
+
+  // ── applyPricesFromInvoiceLine (via createShipmentInvoiceLine) ────────────
+
+  @Test
+  public void testApplyPricesFromInvoiceLineCopiesTaxAndSalesOrderLine() {
+    try (MockedStatic<OBProvider> providerMock = Mockito.mockStatic(OBProvider.class)) {
+      OBProvider provider = mock(OBProvider.class);
+      providerMock.when(OBProvider::getInstance).thenReturn(provider);
+      InvoiceLine il = mock(InvoiceLine.class);
+      when(provider.get(InvoiceLine.class)).thenReturn(il);
+
+      TaxRate tax = mock(TaxRate.class);
+      OrderLine orderLine = mock(OrderLine.class);
+
+      InvoiceLine sourceIL = mock(InvoiceLine.class);
+      when(sourceIL.getUnitPrice()).thenReturn(new BigDecimal("8"));
+      when(sourceIL.getListPrice()).thenReturn(new BigDecimal("10"));
+      when(sourceIL.getPriceLimit()).thenReturn(new BigDecimal("6"));
+      when(sourceIL.getTax()).thenReturn(tax);
+      when(sourceIL.getSalesOrderLine()).thenReturn(orderLine);
+      when(sourceIL.getProduct()).thenReturn(null);
+
+      ShipmentInOutLine sl = mock(ShipmentInOutLine.class);
+      when(sl.getOrganization()).thenReturn(mock(Organization.class));
+      when(sl.getProduct()).thenReturn(mock(Product.class));
+      when(sl.getUOM()).thenReturn(null);
+      when(sl.getSalesOrderLine()).thenReturn(null);
+
+      Currency currency = mock(Currency.class);
+      when(currency.getStandardPrecision()).thenReturn(2L);
+      Invoice invoice = mock(Invoice.class);
+      when(invoice.getCurrency()).thenReturn(currency);
+      when(invoice.getPriceList()).thenReturn(null);
+
+      CreateDraftInvoiceHandler handler = new CreateDraftInvoiceHandler() {
+        @Override
+        protected InvoiceLine findLinkedInvoiceLine(String id) { return sourceIL; }
+      };
+      handler.createShipmentInvoiceLine(invoice, sl, new BigDecimal("2"), 10L);
+
+      verify(il).setUnitPrice(new BigDecimal("8"));
+      verify(il).setListPrice(new BigDecimal("10"));
+      verify(il).setLineNetAmount(new BigDecimal("16.00"));
+      verify(il).setTax(tax);
+      verify(il).setSalesOrderLine(orderLine);
+    }
+  }
+
+  @Test
+  public void testApplyPricesFromInvoiceLineNullTaxAndNullOrderLineSkipsBothSetters() {
+    try (MockedStatic<OBProvider> providerMock = Mockito.mockStatic(OBProvider.class)) {
+      OBProvider provider = mock(OBProvider.class);
+      providerMock.when(OBProvider::getInstance).thenReturn(provider);
+      InvoiceLine il = mock(InvoiceLine.class);
+      when(provider.get(InvoiceLine.class)).thenReturn(il);
+
+      InvoiceLine sourceIL = mock(InvoiceLine.class);
+      when(sourceIL.getUnitPrice()).thenReturn(new BigDecimal("5"));
+      when(sourceIL.getListPrice()).thenReturn(new BigDecimal("7"));
+      when(sourceIL.getPriceLimit()).thenReturn(null);
+      when(sourceIL.getTax()).thenReturn(null);
+      when(sourceIL.getSalesOrderLine()).thenReturn(null);
+      when(sourceIL.getProduct()).thenReturn(null);
+
+      ShipmentInOutLine sl = mock(ShipmentInOutLine.class);
+      when(sl.getOrganization()).thenReturn(mock(Organization.class));
+      when(sl.getProduct()).thenReturn(mock(Product.class));
+      when(sl.getUOM()).thenReturn(null);
+      when(sl.getSalesOrderLine()).thenReturn(null);
+
+      Currency currency = mock(Currency.class);
+      when(currency.getStandardPrecision()).thenReturn(2L);
+      Invoice invoice = mock(Invoice.class);
+      when(invoice.getCurrency()).thenReturn(currency);
+      when(invoice.getPriceList()).thenReturn(null);
+
+      CreateDraftInvoiceHandler handler = new CreateDraftInvoiceHandler() {
+        @Override
+        protected InvoiceLine findLinkedInvoiceLine(String id) { return sourceIL; }
+      };
+      handler.createShipmentInvoiceLine(invoice, sl, new BigDecimal("1"), 10L);
+
+      verify(il, never()).setTax(any());
+      verify(il, never()).setSalesOrderLine(any());
+    }
+  }
+
+  // ── resolveListPriceFromPriceList (via createShipmentInvoiceLine) ─────────
+
+  @Test
+  public void testResolveListPriceNullProductIdReturnsFallback() {
+    try (MockedStatic<OBProvider> providerMock = Mockito.mockStatic(OBProvider.class)) {
+      OBProvider provider = mock(OBProvider.class);
+      providerMock.when(OBProvider::getInstance).thenReturn(provider);
+      InvoiceLine il = mock(InvoiceLine.class);
+      when(provider.get(InvoiceLine.class)).thenReturn(il);
+
+      OrderLine ol = mock(OrderLine.class);
+      when(ol.getUnitPrice()).thenReturn(new BigDecimal("9"));
+      when(ol.getListPrice()).thenReturn(BigDecimal.ZERO);
+      when(ol.getPriceLimit()).thenReturn(null);
+      when(ol.getTax()).thenReturn(null);
+      when(ol.getProduct()).thenReturn(null);
+
+      PriceList priceList = mock(PriceList.class);
+      when(priceList.getId()).thenReturn("pl-1");
+      Currency currency = mock(Currency.class);
+      when(currency.getStandardPrecision()).thenReturn(2L);
+      Invoice invoice = mock(Invoice.class);
+      when(invoice.getCurrency()).thenReturn(currency);
+      when(invoice.getPriceList()).thenReturn(priceList);
+
+      ShipmentInOutLine sl = mock(ShipmentInOutLine.class);
+      when(sl.getOrganization()).thenReturn(mock(Organization.class));
+      when(sl.getProduct()).thenReturn(mock(Product.class));
+      when(sl.getUOM()).thenReturn(null);
+      when(sl.getSalesOrderLine()).thenReturn(ol);
+
+      new CreateDraftInvoiceHandler().createShipmentInvoiceLine(invoice, sl, new BigDecimal("1"), 10L);
+
+      verify(il).setListPrice(new BigDecimal("9"));
+    }
+  }
+
+  @Test
+  public void testResolveListPriceNullPriceListIdReturnsFallback() {
+    try (MockedStatic<OBProvider> providerMock = Mockito.mockStatic(OBProvider.class)) {
+      OBProvider provider = mock(OBProvider.class);
+      providerMock.when(OBProvider::getInstance).thenReturn(provider);
+      InvoiceLine il = mock(InvoiceLine.class);
+      when(provider.get(InvoiceLine.class)).thenReturn(il);
+
+      Product product = mock(Product.class);
+      when(product.getId()).thenReturn("prod-X");
+
+      OrderLine ol = mock(OrderLine.class);
+      when(ol.getUnitPrice()).thenReturn(new BigDecimal("12"));
+      when(ol.getListPrice()).thenReturn(BigDecimal.ZERO);
+      when(ol.getPriceLimit()).thenReturn(null);
+      when(ol.getTax()).thenReturn(null);
+      when(ol.getProduct()).thenReturn(product);
+
+      Currency currency = mock(Currency.class);
+      when(currency.getStandardPrecision()).thenReturn(2L);
+      Invoice invoice = mock(Invoice.class);
+      when(invoice.getCurrency()).thenReturn(currency);
+      when(invoice.getPriceList()).thenReturn(null);
+
+      ShipmentInOutLine sl = mock(ShipmentInOutLine.class);
+      when(sl.getOrganization()).thenReturn(mock(Organization.class));
+      when(sl.getProduct()).thenReturn(product);
+      when(sl.getUOM()).thenReturn(null);
+      when(sl.getSalesOrderLine()).thenReturn(ol);
+
+      new CreateDraftInvoiceHandler().createShipmentInvoiceLine(invoice, sl, new BigDecimal("1"), 10L);
+
+      verify(il).setListPrice(new BigDecimal("12"));
+    }
+  }
+
+  @Test
+  public void testResolveListPriceDbReturnsZeroPriceFallsBackToUnitPrice() throws Exception {
+    try (MockedStatic<OBProvider> providerMock = Mockito.mockStatic(OBProvider.class);
+        MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBProvider provider = mock(OBProvider.class);
+      providerMock.when(OBProvider::getInstance).thenReturn(provider);
+      InvoiceLine il = mock(InvoiceLine.class);
+      when(provider.get(InvoiceLine.class)).thenReturn(il);
+
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      java.sql.Connection conn = mock(java.sql.Connection.class);
+      when(dal.getConnection()).thenReturn(conn);
+      java.sql.PreparedStatement ps = mock(java.sql.PreparedStatement.class);
+      when(conn.prepareStatement(anyString())).thenReturn(ps);
+      java.sql.ResultSet rs = mock(java.sql.ResultSet.class);
+      when(rs.next()).thenReturn(true);
+      when(rs.getBigDecimal(1)).thenReturn(BigDecimal.ZERO);
+      when(ps.executeQuery()).thenReturn(rs);
+
+      Product product = mock(Product.class);
+      when(product.getId()).thenReturn("prod-2");
+      PriceList priceList = mock(PriceList.class);
+      when(priceList.getId()).thenReturn("pl-2");
+
+      OrderLine ol = mock(OrderLine.class);
+      when(ol.getUnitPrice()).thenReturn(new BigDecimal("11"));
+      when(ol.getListPrice()).thenReturn(BigDecimal.ZERO);
+      when(ol.getPriceLimit()).thenReturn(null);
+      when(ol.getTax()).thenReturn(null);
+      when(ol.getProduct()).thenReturn(product);
+
+      ShipmentInOutLine sl = mock(ShipmentInOutLine.class);
+      when(sl.getOrganization()).thenReturn(mock(Organization.class));
+      when(sl.getProduct()).thenReturn(product);
+      when(sl.getUOM()).thenReturn(null);
+      when(sl.getSalesOrderLine()).thenReturn(ol);
+
+      Currency currency = mock(Currency.class);
+      when(currency.getStandardPrecision()).thenReturn(2L);
+      Invoice invoice = mock(Invoice.class);
+      when(invoice.getCurrency()).thenReturn(currency);
+      when(invoice.getPriceList()).thenReturn(priceList);
+
+      new CreateDraftInvoiceHandler().createShipmentInvoiceLine(invoice, sl, new BigDecimal("1"), 10L);
+
+      verify(il).setListPrice(new BigDecimal("11"));
+    }
+  }
+
+  @Test
+  public void testResolveListPriceDbReturnsPositivePriceUsesIt() throws Exception {
+    try (MockedStatic<OBProvider> providerMock = Mockito.mockStatic(OBProvider.class);
+        MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBProvider provider = mock(OBProvider.class);
+      providerMock.when(OBProvider::getInstance).thenReturn(provider);
+      InvoiceLine il = mock(InvoiceLine.class);
+      when(provider.get(InvoiceLine.class)).thenReturn(il);
+
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      java.sql.Connection conn = mock(java.sql.Connection.class);
+      when(dal.getConnection()).thenReturn(conn);
+      java.sql.PreparedStatement ps = mock(java.sql.PreparedStatement.class);
+      when(conn.prepareStatement(anyString())).thenReturn(ps);
+      java.sql.ResultSet rs = mock(java.sql.ResultSet.class);
+      when(rs.next()).thenReturn(true);
+      when(rs.getBigDecimal(1)).thenReturn(new BigDecimal("30"));
+      when(ps.executeQuery()).thenReturn(rs);
+
+      Product product = mock(Product.class);
+      when(product.getId()).thenReturn("prod-3");
+      PriceList priceList = mock(PriceList.class);
+      when(priceList.getId()).thenReturn("pl-3");
+
+      OrderLine ol = mock(OrderLine.class);
+      when(ol.getUnitPrice()).thenReturn(new BigDecimal("20"));
+      when(ol.getListPrice()).thenReturn(BigDecimal.ZERO);
+      when(ol.getPriceLimit()).thenReturn(null);
+      when(ol.getTax()).thenReturn(null);
+      when(ol.getProduct()).thenReturn(product);
+
+      ShipmentInOutLine sl = mock(ShipmentInOutLine.class);
+      when(sl.getOrganization()).thenReturn(mock(Organization.class));
+      when(sl.getProduct()).thenReturn(product);
+      when(sl.getUOM()).thenReturn(null);
+      when(sl.getSalesOrderLine()).thenReturn(ol);
+
+      Currency currency = mock(Currency.class);
+      when(currency.getStandardPrecision()).thenReturn(2L);
+      Invoice invoice = mock(Invoice.class);
+      when(invoice.getCurrency()).thenReturn(currency);
+      when(invoice.getPriceList()).thenReturn(priceList);
+
+      new CreateDraftInvoiceHandler().createShipmentInvoiceLine(invoice, sl, new BigDecimal("1"), 10L);
+
+      verify(il).setListPrice(new BigDecimal("30"));
+    }
+  }
+
+  @Test
+  public void testResolveListPriceDbExceptionFallsBackToUnitPrice() throws Exception {
+    try (MockedStatic<OBProvider> providerMock = Mockito.mockStatic(OBProvider.class);
+        MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBProvider provider = mock(OBProvider.class);
+      providerMock.when(OBProvider::getInstance).thenReturn(provider);
+      InvoiceLine il = mock(InvoiceLine.class);
+      when(provider.get(InvoiceLine.class)).thenReturn(il);
+
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      java.sql.Connection conn = mock(java.sql.Connection.class);
+      when(dal.getConnection()).thenReturn(conn);
+      when(conn.prepareStatement(anyString())).thenThrow(new java.sql.SQLException("db down"));
+
+      Product product = mock(Product.class);
+      when(product.getId()).thenReturn("prod-4");
+      PriceList priceList = mock(PriceList.class);
+      when(priceList.getId()).thenReturn("pl-4");
+
+      OrderLine ol = mock(OrderLine.class);
+      when(ol.getUnitPrice()).thenReturn(new BigDecimal("18"));
+      when(ol.getListPrice()).thenReturn(BigDecimal.ZERO);
+      when(ol.getPriceLimit()).thenReturn(null);
+      when(ol.getTax()).thenReturn(null);
+      when(ol.getProduct()).thenReturn(product);
+
+      ShipmentInOutLine sl = mock(ShipmentInOutLine.class);
+      when(sl.getOrganization()).thenReturn(mock(Organization.class));
+      when(sl.getProduct()).thenReturn(product);
+      when(sl.getUOM()).thenReturn(null);
+      when(sl.getSalesOrderLine()).thenReturn(ol);
+
+      Currency currency = mock(Currency.class);
+      when(currency.getStandardPrecision()).thenReturn(2L);
+      Invoice invoice = mock(Invoice.class);
+      when(invoice.getCurrency()).thenReturn(currency);
+      when(invoice.getPriceList()).thenReturn(priceList);
+
+      new CreateDraftInvoiceHandler().createShipmentInvoiceLine(invoice, sl, new BigDecimal("1"), 10L);
+
+      verify(il).setListPrice(new BigDecimal("18"));
+    }
+  }
+
+  // ── addShipmentLinesToInvoice — throws when all lines produce null qty ────────
+
+  /**
+   * When no shipment line produces a qualifying quantity (all return null from
+   * resolveShipmentLineQty) addShipmentLinesToInvoice throws OBException.
+   */
+  @Test(expected = OBException.class)
+  public void testAddShipmentLinesToInvoiceThrowsWhenNoQualifyingLines() {
+    ShipmentInOutLine sl = mock(ShipmentInOutLine.class);
+    when(sl.getId()).thenReturn("sl-none");
+
+    ShipmentInOut shipment = mock(ShipmentInOut.class);
+    when(shipment.getMaterialMgmtShipmentInOutLineList())
+        .thenReturn(Collections.singletonList(sl));
+    when(shipment.getId()).thenReturn("ship-none");
+
+    AddShipmentLinesHandler handler = new AddShipmentLinesHandler();
+    // qtyByShipmentLineId intentionally empty → resolveShipmentLineQty returns null for sl-none
+
+    handler.addShipmentLinesToInvoice(
+        mock(Invoice.class),
+        Collections.singletonList(shipment),
+        Collections.emptyMap());
+  }
+
 }

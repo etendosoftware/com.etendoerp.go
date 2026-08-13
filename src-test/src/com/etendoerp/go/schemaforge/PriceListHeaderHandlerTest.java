@@ -18,6 +18,7 @@
 package com.etendoerp.go.schemaforge;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.mockito.ArgumentMatchers.any;
@@ -37,13 +38,17 @@ import org.junit.Test;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
 import org.openbravo.base.provider.OBProvider;
+import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.erpCommon.utility.OBCurrencyUtils;
+import org.openbravo.erpCommon.utility.OBMessageUtils;
 import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.pricing.pricelist.PriceList;
 import org.openbravo.model.pricing.pricelist.PriceListSchema;
 import org.openbravo.model.pricing.pricelist.PriceListVersion;
+import org.openbravo.model.pricing.pricelist.ProductPrice;
 
 /**
  * Unit tests for {@link PriceListHeaderHandler}.
@@ -135,6 +140,21 @@ public class PriceListHeaderHandlerTest {
     return crit;
   }
 
+  /**
+   * Stubs {@code dal.createCriteria(ProductPrice.class)} used by the product-count
+   * computation (ETP-4592). Defaults both call shapes to "no products" (single-record
+   * {@code uniqueResult()} and batch {@code list()}) so tests that don't care about the
+   * count still pass; callers that do care override the relevant stub afterwards.
+   */
+  @SuppressWarnings("unchecked")
+  private static OBCriteria<ProductPrice> stubProductPriceCriteria(OBDal dal) {
+    OBCriteria<ProductPrice> crit = mock(OBCriteria.class);
+    when(dal.createCriteria(ProductPrice.class)).thenReturn(crit);
+    when(crit.uniqueResult()).thenReturn(0L);
+    when(crit.list()).thenReturn(Collections.emptyList());
+    return crit;
+  }
+
   // ── handle() ──────────────────────────────────────────────────────────────
 
   /**
@@ -145,6 +165,271 @@ public class PriceListHeaderHandlerTest {
     NeoContext ctx = NeoContext.builder()
         .httpMethod("GET").endpointType(NeoEndpointType.CRUD).build();
     assertNull(new PriceListHeaderHandler().handle(ctx));
+  }
+
+  private static NeoContext postCreateCtx(JSONObject requestBody, OBContext obContext) {
+    return NeoContext.builder()
+        .specName("price-list").entityName("priceList")
+        .httpMethod("POST").endpointType(NeoEndpointType.CRUD)
+        .requestBody(requestBody).obContext(obContext).build();
+  }
+
+  /**
+   * Tariffs inherit the organization currency: a POST create without a {@code currency}
+   * field gets the org currency injected into the request body (so the mandatory
+   * C_Currency_ID column is satisfied), and handle() still returns null to continue
+   * to the default create.
+   */
+  @Test
+  public void testHandlePostInjectsOrgCurrencyWhenMissing() throws JSONException {
+    JSONObject body = new JSONObject().put("name", "My Tariff").put("salesPriceList", true);
+    OBContext obContext = mock(OBContext.class);
+    Organization org = mock(Organization.class);
+    when(org.getId()).thenReturn("ORG1");
+    when(obContext.getCurrentOrganization()).thenReturn(org);
+
+    try (MockedStatic<OBContext> obCtxMock = Mockito.mockStatic(OBContext.class);
+         MockedStatic<OBCurrencyUtils> curMock = Mockito.mockStatic(OBCurrencyUtils.class)) {
+      curMock.when(() -> OBCurrencyUtils.getOrgCurrency("ORG1")).thenReturn("CUR1");
+
+      assertNull(new PriceListHeaderHandler().handle(postCreateCtx(body, obContext)));
+      assertEquals("CUR1", body.getString("currency"));
+    }
+  }
+
+  /**
+   * A POST that already carries a currency is left untouched — the org-currency resolver
+   * is never invoked.
+   */
+  @Test
+  public void testHandlePostKeepsExplicitCurrency() throws JSONException {
+    JSONObject body = new JSONObject().put("name", "My Tariff").put("currency", "EXISTING");
+
+    try (MockedStatic<OBCurrencyUtils> curMock = Mockito.mockStatic(OBCurrencyUtils.class)) {
+      assertNull(new PriceListHeaderHandler().handle(postCreateCtx(body, mock(OBContext.class))));
+      assertEquals("EXISTING", body.getString("currency"));
+      curMock.verifyNoInteractions();
+    }
+  }
+
+  /**
+   * When the org currency cannot be resolved, the body is left without a currency (the
+   * downstream defaults/validation layer handles it) and no exception propagates.
+   */
+  @Test
+  public void testHandlePostLeavesCurrencyUnsetWhenUnresolved() throws JSONException {
+    JSONObject body = new JSONObject().put("name", "My Tariff");
+    OBContext obContext = mock(OBContext.class);
+    Organization org = mock(Organization.class);
+    when(org.getId()).thenReturn("ORG1");
+    when(obContext.getCurrentOrganization()).thenReturn(org);
+
+    try (MockedStatic<OBContext> obCtxMock = Mockito.mockStatic(OBContext.class);
+         MockedStatic<OBCurrencyUtils> curMock = Mockito.mockStatic(OBCurrencyUtils.class)) {
+      curMock.when(() -> OBCurrencyUtils.getOrgCurrency("ORG1")).thenReturn(null);
+
+      assertNull(new PriceListHeaderHandler().handle(postCreateCtx(body, obContext)));
+      assertFalse(body.has("currency"));
+    }
+  }
+
+  /**
+   * A GET never triggers currency injection (only POST creates need it).
+   */
+  @Test
+  public void testHandleGetDoesNotInjectCurrency() throws JSONException {
+    JSONObject body = new JSONObject().put("name", "My Tariff");
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("GET").endpointType(NeoEndpointType.CRUD)
+        .requestBody(body).build();
+
+    try (MockedStatic<OBCurrencyUtils> curMock = Mockito.mockStatic(OBCurrencyUtils.class)) {
+      assertNull(new PriceListHeaderHandler().handle(ctx));
+      assertFalse(body.has("currency"));
+      curMock.verifyNoInteractions();
+    }
+  }
+
+  // ── handle() — block deactivating a default price list (ETP-4592) ─────────
+
+  private static final String MSG_KEY_CANNOT_DEACTIVATE = "ETGO_PriceListCannotDeactivateDefault";
+
+  private static NeoContext patchCtx(String recordId, JSONObject requestBody) {
+    return methodCtx("PATCH", recordId, requestBody);
+  }
+
+  private static NeoContext methodCtx(String method, String recordId, JSONObject requestBody) {
+    return NeoContext.builder()
+        .specName("price-list").entityName("priceList")
+        .httpMethod(method).endpointType(NeoEndpointType.CRUD)
+        .recordId(recordId).requestBody(requestBody).build();
+  }
+
+  /**
+   * A PATCH that explicitly sets {@code active: false} on a price list currently marked as
+   * default is blocked with a 400, and the error text comes from the AD_Message catalog via
+   * {@code OBMessageUtils.messageBD} (which resolves the requesting user's language at runtime).
+   */
+  @Test
+  public void testHandleBlocksDeactivatingDefaultPriceList() throws JSONException {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<OBMessageUtils> msgMock = Mockito.mockStatic(OBMessageUtils.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      PriceList pl = mock(PriceList.class);
+      when(pl.isDefault()).thenReturn(true);
+      when(dal.get(PriceList.class, "pl-1")).thenReturn(pl);
+      msgMock.when(() -> OBMessageUtils.messageBD(MSG_KEY_CANNOT_DEACTIVATE))
+          .thenReturn("Localized message");
+
+      JSONObject body = new JSONObject().put("active", false);
+      NeoResponse result = new PriceListHeaderHandler().handle(patchCtx("pl-1", body));
+
+      assertNotNull(result);
+      assertEquals(400, result.getHttpStatus());
+      assertEquals("Localized message",
+          result.getBody().getJSONObject("error").getString("message"));
+      msgMock.verify(() -> OBMessageUtils.messageBD(MSG_KEY_CANNOT_DEACTIVATE));
+    }
+  }
+
+  /**
+   * Deactivating a price list that is NOT marked as default is allowed (handle() falls through)
+   * and the message catalog is never consulted.
+   */
+  @Test
+  public void testHandleAllowsDeactivatingNonDefaultPriceList() throws JSONException {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<OBMessageUtils> msgMock = Mockito.mockStatic(OBMessageUtils.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      PriceList pl = mock(PriceList.class);
+      when(pl.isDefault()).thenReturn(false);
+      when(dal.get(PriceList.class, "pl-2")).thenReturn(pl);
+
+      JSONObject body = new JSONObject().put("active", false);
+      assertNull(new PriceListHeaderHandler().handle(patchCtx("pl-2", body)));
+      msgMock.verifyNoInteractions();
+    }
+  }
+
+  /**
+   * A PATCH that doesn't touch {@code active} at all never triggers the guard — and never
+   * even reaches OBDal, since {@code isExplicitlyDeactivating} short-circuits first.
+   */
+  @Test
+  public void testHandleIgnoresPatchWithoutActiveField() throws JSONException {
+    JSONObject body = new JSONObject().put("name", "Renamed Tariff");
+
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      assertNull(new PriceListHeaderHandler().handle(patchCtx("pl-3", body)));
+      obDalMock.verifyNoInteractions();
+    }
+  }
+
+  /**
+   * A PATCH that sets {@code active: true} (reactivating) is never blocked, regardless of the
+   * default flag.
+   */
+  @Test
+  public void testHandleIgnoresPatchReactivating() throws JSONException {
+    JSONObject body = new JSONObject().put("active", true);
+
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      assertNull(new PriceListHeaderHandler().handle(patchCtx("pl-4", body)));
+      obDalMock.verifyNoInteractions();
+    }
+  }
+
+  /**
+   * The guard applies to PUT the same way it applies to PATCH — both are treated as updates.
+   */
+  @Test
+  public void testHandleBlocksDeactivatingDefaultPriceListViaPut() throws JSONException {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<OBMessageUtils> msgMock = Mockito.mockStatic(OBMessageUtils.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      PriceList pl = mock(PriceList.class);
+      when(pl.isDefault()).thenReturn(true);
+      when(dal.get(PriceList.class, "pl-5")).thenReturn(pl);
+      msgMock.when(() -> OBMessageUtils.messageBD(MSG_KEY_CANNOT_DEACTIVATE))
+          .thenReturn("Localized message");
+
+      JSONObject body = new JSONObject().put("active", false);
+      NeoResponse result = new PriceListHeaderHandler().handle(methodCtx("PUT", "pl-5", body));
+
+      assertNotNull(result);
+      assertEquals(400, result.getHttpStatus());
+    }
+  }
+
+  /**
+   * {@code isExplicitlyDeactivating} also recognizes the string-encoded booleans
+   * ({@code "false"}/{@code "N"}, case-insensitive) that some client payloads send instead of
+   * a JSON boolean.
+   */
+  @Test
+  public void testHandleBlocksDeactivatingWhenActiveIsStringEncoded() throws JSONException {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<OBMessageUtils> msgMock = Mockito.mockStatic(OBMessageUtils.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      PriceList pl = mock(PriceList.class);
+      when(pl.isDefault()).thenReturn(true);
+      when(dal.get(PriceList.class, "pl-6")).thenReturn(pl);
+      msgMock.when(() -> OBMessageUtils.messageBD(MSG_KEY_CANNOT_DEACTIVATE))
+          .thenReturn("Localized message");
+
+      JSONObject body = new JSONObject().put("active", "N");
+      assertNotNull(new PriceListHeaderHandler().handle(patchCtx("pl-6", body)));
+    }
+  }
+
+  /**
+   * A truthy string value for {@code active} (e.g. {@code "Y"}) is not a deactivation and never
+   * triggers the guard.
+   */
+  @Test
+  public void testHandleIgnoresStringEncodedActiveTrue() throws JSONException {
+    JSONObject body = new JSONObject().put("active", "Y");
+
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      assertNull(new PriceListHeaderHandler().handle(patchCtx("pl-7", body)));
+      obDalMock.verifyNoInteractions();
+    }
+  }
+
+  /**
+   * Defensive guard: a PATCH with no record id (should not normally occur for an update) never
+   * reaches the price list lookup — {@code blockDeactivatingDefault} returns null immediately.
+   */
+  @Test
+  public void testHandleAllowsDeactivatingWhenRecordIdMissing() throws JSONException {
+    JSONObject body = new JSONObject().put("active", false);
+
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      assertNull(new PriceListHeaderHandler().handle(patchCtx(null, body)));
+      obDalMock.verifyNoInteractions();
+    }
+  }
+
+  /**
+   * Defensive guard: if the price list id no longer resolves to a record (e.g., deleted between
+   * request and validation), the guard does not block — there's nothing to protect.
+   */
+  @Test
+  public void testHandleAllowsDeactivatingWhenPriceListNotFound() throws JSONException {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<OBMessageUtils> msgMock = Mockito.mockStatic(OBMessageUtils.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(PriceList.class, "pl-missing")).thenReturn(null);
+
+      JSONObject body = new JSONObject().put("active", false);
+      assertNull(new PriceListHeaderHandler().handle(patchCtx("pl-missing", body)));
+      msgMock.verifyNoInteractions();
+    }
   }
 
   // ── guard conditions ──────────────────────────────────────────────────────
@@ -216,6 +501,8 @@ public class PriceListHeaderHandlerTest {
       PriceListVersion mockVersion = mock(PriceListVersion.class);
       when(mockVersion.getId()).thenReturn("v-1");
       stubVersionCriteria(dal, Collections.singletonList(mockVersion));
+      OBCriteria<ProductPrice> productPriceCrit = stubProductPriceCriteria(dal);
+      when(productPriceCrit.uniqueResult()).thenReturn(7L);
 
       JSONObject body = singleRecordBody("pl-1");
       NeoContext ctx = ctxWithPreviousResult("pl-1", body);
@@ -224,10 +511,11 @@ public class PriceListHeaderHandlerTest {
 
       assertNotNull(result);
       assertEquals(200, result.getHttpStatus());
-      String injected = result.getBody()
+      JSONObject savedRecord = result.getBody()
           .getJSONObject("response").getJSONArray("data")
-          .getJSONObject(0).getString("priceListVersion");
-      assertEquals("v-1", injected);
+          .getJSONObject(0);
+      assertEquals("v-1", savedRecord.getString("priceListVersion"));
+      assertEquals(7L, savedRecord.getLong("etgoProductcount"));
     }
   }
 
@@ -303,6 +591,14 @@ public class PriceListHeaderHandlerTest {
       when(v2.getId()).thenReturn("v-2");
 
       stubVersionCriteria(dal, Arrays.asList(v1, v2));
+      OBCriteria<ProductPrice> productPriceCrit = stubProductPriceCriteria(dal);
+      // Raw type: the criteria projection turns list() into a List<Object[]> at runtime,
+      // but the mock's generic signature is fixed to List<ProductPrice> — erase it to stub freely.
+      @SuppressWarnings({ "unchecked", "rawtypes" })
+      OBCriteria rawProductPriceCrit = productPriceCrit;
+      when(rawProductPriceCrit.list()).thenReturn(Arrays.asList(
+          new Object[] { "v-1", 3L },
+          new Object[] { "v-2", 5L }));
 
       JSONObject body = listBody("pl-1", "pl-2");
       NeoContext ctx = listCtxWithPreviousResult(body);
@@ -314,6 +610,8 @@ public class PriceListHeaderHandlerTest {
       JSONArray data = result.getBody().getJSONObject("response").getJSONArray("data");
       assertEquals("v-1", data.getJSONObject(0).getString("priceListVersion"));
       assertEquals("v-2", data.getJSONObject(1).getString("priceListVersion"));
+      assertEquals(3L, data.getJSONObject(0).getLong("etgoProductcount"));
+      assertEquals(5L, data.getJSONObject(1).getLong("etgoProductcount"));
     }
   }
 
@@ -357,6 +655,7 @@ public class PriceListHeaderHandlerTest {
       PriceListVersion existing = mock(PriceListVersion.class);
       when(existing.getId()).thenReturn("v-existing");
       stubVersionCriteria(dal, Collections.singletonList(existing));
+      stubProductPriceCriteria(dal);
 
       JSONObject body = singleRecordBody("pl-new");
       NeoContext ctx = postCtxWithBody(body);
@@ -479,6 +778,7 @@ public class PriceListHeaderHandlerTest {
       when(version.getName()).thenReturn("Old Name");
       when(version.getId()).thenReturn("v-1");
       stubVersionCriteria(dal, Collections.singletonList(version));
+      stubProductPriceCriteria(dal);
 
       JSONObject body = singleRecordBody("pl-1");
       NeoContext ctx = patchCtxWithBody("pl-1", body);
@@ -508,6 +808,7 @@ public class PriceListHeaderHandlerTest {
       when(version.getName()).thenReturn("Same Name");
       when(version.getId()).thenReturn("v-1");
       stubVersionCriteria(dal, Collections.singletonList(version));
+      stubProductPriceCriteria(dal);
 
       JSONObject body = singleRecordBody("pl-1");
       NeoContext ctx = patchCtxWithBody("pl-1", body);

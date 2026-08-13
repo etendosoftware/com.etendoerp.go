@@ -17,7 +17,6 @@
 
 package com.etendoerp.go.mcp;
 
-import java.io.ByteArrayOutputStream;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.Iterator;
@@ -38,23 +37,29 @@ import org.openbravo.base.model.Property;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.erpCommon.businessUtility.Preferences;
+import org.openbravo.erpCommon.utility.PropertyException;
+import org.openbravo.erpCommon.utility.PropertyNotFoundException;
 import org.openbravo.model.ad.datamodel.Column;
 import org.openbravo.model.ad.ui.Process;
 import org.openbravo.model.ad.ui.Tab;
-import org.openbravo.model.ad.ui.Window;
 import org.openbravo.service.json.DefaultJsonDataService;
 import org.openbravo.service.json.JsonConstants;
 
+import com.etendoerp.go.schemaforge.AmortizationPlanService;
 import com.etendoerp.go.schemaforge.BatchService;
+import com.etendoerp.go.schemaforge.util.NeoButtonActionHelper;
+import com.etendoerp.go.schemaforge.util.NeoLanguage;
 import com.etendoerp.go.schemaforge.NeoContext;
 import com.etendoerp.go.schemaforge.NeoDefaultsService;
 import com.etendoerp.go.schemaforge.NeoFieldFilter;
+import com.etendoerp.go.schemaforge.NeoHandler;
 import com.etendoerp.go.schemaforge.NeoProcessService;
-import com.etendoerp.go.schemaforge.NeoReportService;
 import com.etendoerp.go.schemaforge.NeoResponse;
 import com.etendoerp.go.schemaforge.NeoSelectorService;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFSpec;
+import com.etendoerp.go.schemaforge.util.NeoReportCallability;
 
 /**
  * Routes MCP tool calls to appropriate NEO Headless handlers.
@@ -82,6 +87,13 @@ public class McpToolRouter {
 
   private static final Logger log = LogManager.getLogger(McpToolRouter.class);
   private static final String ACCESS_DENIED_FOR_CURRENT_ROLE_SUFFIX = "' for current role";
+  /** OBPreference property name holding the optional Context7 API token. */
+  static final String PREF_CONTEXT7_TOKEN = "ETGO_Context7Token";
+  private static final String HTTP_METHOD_GET = "GET";
+  private static final String HTTP_METHOD_POST = "POST";
+  private static final String HTTP_METHOD_PUT = "PUT";
+  private static final String HTTP_METHOD_DELETE = "DELETE";
+
 
   /**
    * Route a tool call to its handler.
@@ -102,7 +114,7 @@ public class McpToolRouter {
       try {
         // Resolve spec name from tool name or arguments
         String specName = ToolRegistry.resolveSpecName(toolName, arguments);
-        authorizeSpecAccess(specName);
+        authorizeSpecAccess(specName, resolveAccessMethod(toolName));
 
         switch (toolName) {
           case "neo_discover":
@@ -125,6 +137,14 @@ public class McpToolRouter {
             return handleSchema(specName, arguments);
           case "neo_batch":
             return handleBatch(arguments);
+          case "neo_action":
+            return handleAction(specName, arguments);
+          case McpConstants.TOOL_GENERATE_AMORTIZATION_PLAN:
+            return handleGenerateAmortizationPlan(arguments);
+          case McpConstants.TOOL_NEO_WIDGET:
+            return McpWidgetHandler.handle(arguments);
+          case "docs":
+            return handleDocs(arguments);
           default:
             // Check if it's a report tool (generate_*)
             if (toolName.startsWith(McpConstants.GENERATE_PREFIX)) {
@@ -142,6 +162,85 @@ public class McpToolRouter {
     }
   }
 
+  // ── docs (Context7 documentation lookup) ──────────────────────────────
+
+  /**
+   * Handle the {@code docs} tool: fetch documentation from Context7 for the
+   * {@code etendosoftware/etendo-go-docs} library, filtered by a topic.
+   * <p>
+   * Delegates to {@link #handleDocs(JSONObject, Context7DocsClient)} with a default
+   * client. Tests should call the package-private overload with a mocked client.
+   *
+   * @param arguments tool arguments ({@code topic} required, {@code tokens} and
+   *                  {@code type} optional)
+   * @return MCP text content with the docs body, or error content on failure
+   */
+  private JSONObject handleDocs(JSONObject arguments) {
+    return handleDocs(arguments, new Context7DocsClient());
+  }
+
+  /**
+   * Package-private seam for the {@code docs} tool so unit tests can inject a mocked
+   * {@link Context7DocsClient} and exercise the success path without the network.
+   *
+   * @param arguments tool arguments ({@code topic} required, {@code tokens} and
+   *                  {@code type} optional)
+   * @param client    the Context7 client to use for the lookup
+   * @return MCP text content with the docs body, a friendly message when no docs are
+   *         found, or error content on failure
+   */
+  JSONObject handleDocs(JSONObject arguments, Context7DocsClient client) {
+    String topic = arguments != null ? arguments.optString("topic", null) : null;
+    if (StringUtils.isBlank(topic)) {
+      return wrapAsErrorContent("The 'topic' argument is required for the docs tool.");
+    }
+    int tokens = arguments != null
+        ? arguments.optInt("tokens", Context7DocsClient.DEFAULT_TOKENS)
+        : Context7DocsClient.DEFAULT_TOKENS;
+    String type = arguments != null
+        ? arguments.optString("type", Context7DocsClient.DEFAULT_TYPE)
+        : Context7DocsClient.DEFAULT_TYPE;
+
+    String apiKey = resolveContext7Token();
+    try {
+      String body = client.fetchDocs(topic, tokens, type, apiKey);
+      if (StringUtils.isBlank(body)) {
+        return wrapAsTextContent("No documentation found for topic '" + topic + "'.");
+      }
+      return wrapAsTextContent(body);
+    } catch (Exception e) {
+      log.error("Error fetching docs for topic '{}'", topic, e);
+      return wrapAsErrorContent("Error fetching docs: " + e.getMessage());
+    }
+  }
+
+  /**
+   * Resolve the optional Context7 API token from the {@code ETGO_Context7Token} OBPreference.
+   * <p>
+   * Runs within the {@code OBContext.setAdminMode()} scope of {@link #route} and uses the
+   * current context (client, org, user, role; window = null). If no preference is defined
+   * or it is blank, returns {@code null} so the docs lookup proceeds unauthenticated.
+   * The token value is never logged.
+   *
+   * @return the configured token, or {@code null} when none is set
+   */
+  String resolveContext7Token() {
+    OBContext ctx = OBContext.getOBContext();
+    try {
+      String value = Preferences.getPreferenceValue(
+          PREF_CONTEXT7_TOKEN, true,
+          ctx.getCurrentClient(), ctx.getCurrentOrganization(),
+          ctx.getUser(), ctx.getRole(), null);
+      return StringUtils.trimToNull(value);
+    } catch (PropertyNotFoundException e) {
+      // No preference defined → unauthenticated call.
+      return null;
+    } catch (PropertyException e) {
+      log.warn("Could not read preference {}: {}", PREF_CONTEXT7_TOKEN, e.getMessage());
+      return null;
+    }
+  }
+
   // ── neo_discover ──────────────────────────────────────────────────────
 
   /**
@@ -151,6 +250,7 @@ public class McpToolRouter {
   private JSONObject handleDiscover() throws Exception {
     OBCriteria<SFSpec> specCriteria = OBDal.getInstance().createCriteria(SFSpec.class);
     specCriteria.add(Restrictions.eq(SFSpec.PROPERTY_ISACTIVE, true));
+    specCriteria.add(Restrictions.eq(SFSpec.PROPERTY_SHOWINMCP, true));
     specCriteria.addOrder(Order.asc(SFSpec.PROPERTY_NAME));
     List<SFSpec> allSpecs = specCriteria.list();
 
@@ -158,14 +258,27 @@ public class McpToolRouter {
     for (SFSpec spec : allSpecs) {
       String specType = spec.getSpecType();
       if (McpToolRouterSupport.hasSpecAccess(spec, specType)) {
-        JSONArray entities = "W".equals(specType) ? buildEntitySummaryArray(spec.getId()) : null;
-        specsArray.put(McpToolRouterSupport.buildDiscoverSpec(spec, specType, entities));
+        // ETP-4254: load the included entities ONCE per W spec — the entity summary, the
+        // caller-derived primaryEntity (IMP-9/ETP-4601) and the spec-level readOnly marker are
+        // all derived from this same list, so none of them costs an extra query.
+        List<SFEntity> includedEntities = "W".equals(specType)
+            ? McpToolRouterSupport.listIncludedEntities(spec.getId()) : null;
+        JSONArray entities = "W".equals(specType)
+            ? McpToolRouterSupport.buildEntitySummaryArray(includedEntities) : null;
+        // IMP-9: derived here (not inside buildDiscoverSpec) so that method stays DAL-free —
+        // handleDiscover already runs in the live/admin OBContext resolving tab levels needs.
+        String primaryEntity = "W".equals(specType)
+            ? McpToolRouterSupport.resolvePrimaryEntityName(includedEntities)
+            : null;
+        specsArray.put(McpToolRouterSupport.buildDiscoverSpec(
+            spec, specType, entities, primaryEntity, includedEntities));
       }
     }
 
     JSONObject result = new JSONObject();
     result.put("specs", specsArray);
     result.put("count", specsArray.length());
+    result.put("guidance", McpToolRouterSupport.buildDocsGuidance());
     return wrapAsTextContent(result.toString(2));
   }
 
@@ -175,7 +288,7 @@ public class McpToolRouter {
    * List records from a spec entity. Replicates NeoServlet.handleDefault() GET logic.
    */
   private JSONObject handleList(String specName, JSONObject args) throws Exception {
-    validateArgs(args, McpConstants.PARAM_ENTITY);
+    McpToolRouterSupport.validateArgs(args, McpConstants.PARAM_ENTITY);
 
     String entityName = args.getString(McpConstants.PARAM_ENTITY);
     int limit = args.optInt("limit", 100);
@@ -183,8 +296,8 @@ public class McpToolRouter {
     String orderBy = args.optString("orderBy", null);
     JSONObject filters = args.optJSONObject("filters");
 
-    SFSpec spec = findSpecOrThrow(specName);
-    SFEntity sfEntity = findEntityOrThrow(spec.getId(), entityName);
+    SFSpec spec = McpToolRouterSupport.findActiveSpecByName(specName);
+    SFEntity sfEntity = McpToolRouterSupport.resolveIncludedEntityOrExplain(spec, entityName);
     Tab adTab = getAdTabOrThrow(sfEntity, entityName);
 
     String dalEntityName = adTab.getTable().getName();
@@ -201,7 +314,7 @@ public class McpToolRouter {
 
     // Apply filters as where clause
     if (filters != null && filters.length() > 0) {
-      String whereClause = buildWhereFromFilters(filters, adTab);
+      String whereClause = McpQuerySupport.buildWhereFromFilters(filters, adTab, sfEntity, log);
       if (StringUtils.isNotBlank(whereClause)) {
         params.put(JsonConstants.WHERE_AND_FILTER_CLAUSE, whereClause);
         params.put(JsonConstants.USE_ALIAS, "true");
@@ -233,6 +346,10 @@ public class McpToolRouter {
     // Apply field filtering
     fieldFilter.filterGetResponse(responseJson);
 
+    // IMP-2: optional projection — explicit `fields:[...]` or view:"summary". No-op when neither
+    // is present, so the default returns every column.
+    McpQuerySupport.applyProjection(responseJson, args, sfEntity, adTab);
+
     return wrapAsTextContent(responseJson.toString(2));
   }
 
@@ -242,13 +359,13 @@ public class McpToolRouter {
    * Get a single record by ID.
    */
   private JSONObject handleGet(String specName, JSONObject args) throws Exception {
-    validateArgs(args, McpConstants.PARAM_ENTITY, "id");
+    McpToolRouterSupport.validateArgs(args, McpConstants.PARAM_ENTITY, "id");
 
     String entityName = args.getString(McpConstants.PARAM_ENTITY);
     String recordId = args.getString("id");
 
-    SFSpec spec = findSpecOrThrow(specName);
-    SFEntity sfEntity = findEntityOrThrow(spec.getId(), entityName);
+    SFSpec spec = McpToolRouterSupport.findActiveSpecByName(specName);
+    SFEntity sfEntity = McpToolRouterSupport.resolveIncludedEntityOrExplain(spec, entityName);
     Tab adTab = getAdTabOrThrow(sfEntity, entityName);
 
     String dalEntityName = adTab.getTable().getName();
@@ -266,7 +383,18 @@ public class McpToolRouter {
       return wrapAsErrorContent(error);
     }
 
+    // IMP-5: a get-by-id that matched nothing comes back as {data:[], status:0} — a
+    // success-looking empty result. Translate it into an explicit, machine-detectable
+    // not-found so the agent can tell "not found" from "empty match" and self-correct.
+    if (McpToolRouterSupport.isEmptySuccessResult(responseJson)) {
+      return wrapAsErrorContent(
+          McpToolRouterSupport.buildNotFoundError(specName, entityName, recordId).toString(2));
+    }
+
     fieldFilter.filterGetResponse(responseJson);
+
+    // IMP-2: optional projection — explicit `fields:[...]` or view:"summary".
+    McpQuerySupport.applyProjection(responseJson, args, sfEntity, adTab);
 
     return wrapAsTextContent(responseJson.toString(2));
   }
@@ -277,13 +405,17 @@ public class McpToolRouter {
    * Create a new record.
    */
   private JSONObject handleCreate(String specName, JSONObject args) throws Exception {
-    validateArgs(args, McpConstants.PARAM_ENTITY, McpConstants.PARAM_FIELDS);
+    McpToolRouterSupport.validateArgs(args, McpConstants.PARAM_ENTITY, McpConstants.PARAM_FIELDS);
 
     String entityName = args.getString(McpConstants.PARAM_ENTITY);
     JSONObject fields = args.getJSONObject(McpConstants.PARAM_FIELDS);
 
-    SFSpec spec = findSpecOrThrow(specName);
-    SFEntity sfEntity = findEntityOrThrow(spec.getId(), entityName);
+    SFSpec spec = McpToolRouterSupport.findActiveSpecByName(specName);
+    SFEntity sfEntity = McpToolRouterSupport.resolveIncludedEntityOrExplain(spec, entityName);
+    // ETP-4254: entity-level method gate, the same ETGO_SF_ENTITY flags the REST CRUD path
+    // enforces. hasSpecAccess above is role-level only, so without this an agent could write
+    // to an entity configured read-only (which neo_discover already reports as readOnly).
+    McpToolRouterSupport.requireMethodEnabled(spec, sfEntity, HTTP_METHOD_POST);
     Tab adTab = getAdTabOrThrow(sfEntity, entityName);
 
     String dalEntityName = adTab.getTable().getName();
@@ -296,6 +428,20 @@ public class McpToolRouter {
     // filterWriteRequest strips fields not in ETGO_SF_FIELD writableFields, which is
     // too restrictive for MCP where AI agents need to set any valid column.
     JSONObject filteredBody = mapFieldsToDalProperties(fields, adTab);
+
+    // Hoisted so both FK-by-name resolution (IMP-4, below) and the sentinel/coercion passes
+    // further down share one DAL entity lookup.
+    Entity dalEntity = ModelProvider.getInstance()
+        .getEntityByTableId(adTab.getTable().getId());
+
+    // IMP-4: resolve FK-by-name search strings (e.g. businessPartner:"Acme Corp") into real
+    // record ids before anything downstream touches them. A value that already looks like an id
+    // is left untouched. See McpFkResolver's class javadoc for the selector-context limitation.
+    JSONObject fkError = McpFkResolver.resolveFkNames(filteredBody, dalEntity, adTab,
+        McpSelectorContextHelper.buildSelectorContextParams(null, adTab), log);
+    if (fkError != null) {
+      return wrapAsErrorContent(fkError.toString(2));
+    }
 
     // Snapshot user-provided fields BEFORE callout cascade can overwrite them.
     // Callouts derive dependent fields (e.g. product → tax, UOM) and may reset them
@@ -314,7 +460,7 @@ public class McpToolRouter {
     NeoContext ctx = NeoContext.builder()
         .specName(specName)
         .entityName(entityName)
-        .httpMethod("POST")
+        .httpMethod(HTTP_METHOD_POST)
         .adTab(adTab)
         .sfEntity(sfEntity)
         .obContext(OBContext.getOBContext())
@@ -335,8 +481,6 @@ public class McpToolRouter {
     // Fix FK sentinel values: "0" is a UI-level sentinel (means "not yet set") that can't
     // go through the DAL as an entity reference. Replace with a real value from the body
     // when possible (e.g. documentType="0" -> copy from transactionDocument), or remove.
-    Entity dalEntity = ModelProvider.getInstance()
-        .getEntityByTableId(adTab.getTable().getId());
     resolveFkSentinels(filteredBody, dalEntity);
 
     // Coerce string values to proper JSON types expected by the DAL (Long, BigDecimal, Boolean).
@@ -347,15 +491,30 @@ public class McpToolRouter {
     // Validate mandatory fields before insert — return structured error matching neo_schema contract
     JSONArray missingFields = validateMandatoryFields(filteredBody, adTab, dalEntity);
     if (missingFields.length() > 0) {
+      // IMP-5: stable machine-detectable code + status so the agent can distinguish an
+      // "invalid write" from a "server error"; the human text moves to `detail`, and the
+      // existing `missingFields`/`hint` guidance is preserved.
       JSONObject errorObj = new JSONObject();
-      errorObj.put("error", "Missing required fields that could not be auto-resolved");
+      errorObj.put(McpConstants.KEY_STATUS, McpConstants.STATUS_UNPROCESSABLE);
+      errorObj.put(McpConstants.KEY_ERROR, McpConstants.ERROR_VALIDATION);
+      errorObj.put(McpConstants.KEY_DETAIL, "Missing required fields that could not be auto-resolved");
       errorObj.put("missingFields", missingFields);
       errorObj.put("hint", "Provide these fields in the request, or use neo_selectors to find valid values for foreignKey fields");
+      errorObj.put(McpConstants.KEY_SEE_ALSO, McpConstants.SEE_ALSO_WRITING);
       return wrapAsErrorContent(errorObj.toString(2));
     }
 
+    // Run the entity's NeoHandler pre-hook (parity with the REST CRUD path): it may
+    // validate and mutate filteredBody (e.g. inject derived FK values) before persist.
+    NeoHandler handler = McpHookExecutor.resolveEntityHandler(sfEntity);
+    NeoContext hookCtx = McpHookExecutor.buildHookContext(specName, entityName, HTTP_METHOD_POST, null, filteredBody, adTab, sfEntity);
+    JSONObject preHookResult = McpHookExecutor.runPreHook(handler, hookCtx);
+    if (preHookResult != null) {
+      return preHookResult;
+    }
+
     // Wrap for DefaultJsonDataService
-    String wrappedBody = wrapForSmartclient(filteredBody, dalEntityName, null);
+    String wrappedBody = McpToolRouterSupport.wrapForSmartclient(filteredBody, dalEntityName, null, log);
     String result = jsonService.add(params, wrappedBody);
     JSONObject responseJson = new JSONObject(result);
 
@@ -366,6 +525,11 @@ public class McpToolRouter {
 
     fieldFilter.filterGetResponse(responseJson);
 
+    JSONObject postHookResult = McpHookExecutor.runPostHook(handler, hookCtx, responseJson);
+    if (postHookResult != null) {
+      return postHookResult;
+    }
+
     return wrapAsTextContent(responseJson.toString(2));
   }
 
@@ -375,14 +539,17 @@ public class McpToolRouter {
    * Update an existing record.
    */
   private JSONObject handleUpdate(String specName, JSONObject args) throws Exception {
-    validateArgs(args, McpConstants.PARAM_ENTITY, "id", McpConstants.PARAM_FIELDS);
+    McpToolRouterSupport.validateArgs(args, McpConstants.PARAM_ENTITY, "id", McpConstants.PARAM_FIELDS);
 
     String entityName = args.getString(McpConstants.PARAM_ENTITY);
     String recordId = args.getString("id");
     JSONObject fields = args.getJSONObject(McpConstants.PARAM_FIELDS);
 
-    SFSpec spec = findSpecOrThrow(specName);
-    SFEntity sfEntity = findEntityOrThrow(spec.getId(), entityName);
+    SFSpec spec = McpToolRouterSupport.findActiveSpecByName(specName);
+    SFEntity sfEntity = McpToolRouterSupport.resolveIncludedEntityOrExplain(spec, entityName);
+    // ETP-4254: neo_update maps to PUT, exactly as resolveAccessMethod does for the
+    // role-level check — so the entity-level flag consulted here is ISPUT.
+    McpToolRouterSupport.requireMethodEnabled(spec, sfEntity, HTTP_METHOD_PUT);
     Tab adTab = getAdTabOrThrow(sfEntity, entityName);
 
     String dalEntityName = adTab.getTable().getName();
@@ -394,8 +561,26 @@ public class McpToolRouter {
     // MCP: accept all valid table columns from AI agents
     JSONObject filteredBody = mapFieldsToDalProperties(fields, adTab);
 
+    // IMP-4: resolve FK-by-name search strings before persist (mirrors handleCreate). handleUpdate
+    // has no other coercion pass, so this is the only place the shared resolver is invoked here.
+    Entity dalEntity = ModelProvider.getInstance()
+        .getEntityByTableId(adTab.getTable().getId());
+    JSONObject fkError = McpFkResolver.resolveFkNames(filteredBody, dalEntity, adTab,
+        McpSelectorContextHelper.buildSelectorContextParams(null, adTab), log);
+    if (fkError != null) {
+      return wrapAsErrorContent(fkError.toString(2));
+    }
+
+    // Run the entity's NeoHandler pre-hook (parity with the REST CRUD path).
+    NeoHandler handler = McpHookExecutor.resolveEntityHandler(sfEntity);
+    NeoContext hookCtx = McpHookExecutor.buildHookContext(specName, entityName, HTTP_METHOD_PUT, recordId, filteredBody, adTab, sfEntity);
+    JSONObject preHookResult = McpHookExecutor.runPreHook(handler, hookCtx);
+    if (preHookResult != null) {
+      return preHookResult;
+    }
+
     // Wrap for DefaultJsonDataService with record ID
-    String wrappedBody = wrapForSmartclient(filteredBody, dalEntityName, recordId);
+    String wrappedBody = McpToolRouterSupport.wrapForSmartclient(filteredBody, dalEntityName, recordId, log);
     String result = jsonService.update(params, wrappedBody);
     JSONObject responseJson = new JSONObject(result);
 
@@ -406,6 +591,11 @@ public class McpToolRouter {
 
     fieldFilter.filterGetResponse(responseJson);
 
+    JSONObject postHookResult = McpHookExecutor.runPostHook(handler, hookCtx, responseJson);
+    if (postHookResult != null) {
+      return postHookResult;
+    }
+
     return wrapAsTextContent(responseJson.toString(2));
   }
 
@@ -415,13 +605,15 @@ public class McpToolRouter {
    * Delete a record by ID.
    */
   private JSONObject handleDelete(String specName, JSONObject args) throws Exception {
-    validateArgs(args, McpConstants.PARAM_ENTITY, "id");
+    McpToolRouterSupport.validateArgs(args, McpConstants.PARAM_ENTITY, "id");
 
     String entityName = args.getString(McpConstants.PARAM_ENTITY);
     String recordId = args.getString("id");
 
-    SFSpec spec = findSpecOrThrow(specName);
-    SFEntity sfEntity = findEntityOrThrow(spec.getId(), entityName);
+    SFSpec spec = McpToolRouterSupport.findActiveSpecByName(specName);
+    SFEntity sfEntity = McpToolRouterSupport.resolveIncludedEntityOrExplain(spec, entityName);
+    // ETP-4254: entity-level DELETE flag, refused before any DAL work happens.
+    McpToolRouterSupport.requireMethodEnabled(spec, sfEntity, HTTP_METHOD_DELETE);
     Tab adTab = getAdTabOrThrow(sfEntity, entityName);
 
     String dalEntityName = adTab.getTable().getName();
@@ -429,6 +621,15 @@ public class McpToolRouter {
 
     Map<String, String> params = buildBaseParams(adTab, dalEntityName);
     params.put(JsonConstants.ID, recordId);
+
+    // Run the entity's NeoHandler pre-hook (parity with the REST CRUD path). A
+    // handler may fully handle the delete (e.g. a soft-archive) or reject it.
+    NeoHandler handler = McpHookExecutor.resolveEntityHandler(sfEntity);
+    NeoContext hookCtx = McpHookExecutor.buildHookContext(specName, entityName, HTTP_METHOD_DELETE, recordId, null, adTab, sfEntity);
+    JSONObject preHookResult = McpHookExecutor.runPreHook(handler, hookCtx);
+    if (preHookResult != null) {
+      return preHookResult;
+    }
 
     String result = jsonService.remove(params);
     JSONObject responseJson = new JSONObject(result);
@@ -450,58 +651,121 @@ public class McpToolRouter {
    * Query FK selector values for a column.
    * Resolves the AD_Column from the dictionary (AD_Tab → AD_Table → AD_Column),
    * bypassing ETGO_SF_FIELD so all FK columns are queryable — not just included ones.
+   *
+   * Supports optional recordContext for dependent selectors:
+   * - partnerAddress: { "businessPartner": "..." }
+   * - priceList: { "isSOTrx": "Y" } (auto-derived from window category if omitted)
+   * - tax: { "invoiceDate": "2026-05-12", "priceList": "..." }
+   * Also supports parentContext for child selectors that depend on header values.
    */
   private JSONObject handleSelectors(String specName, JSONObject args) throws Exception {
-    validateArgs(args, McpConstants.PARAM_ENTITY, McpConstants.PARAM_COLUMN);
+    // IMP-8: accept `field` as an alias for the canonical `column` argument so the natural
+    // first-try call shape succeeds instead of failing on a missing-argument error.
+    McpToolRouterSupport.aliasArg(args, McpConstants.PARAM_FIELD, McpConstants.PARAM_COLUMN);
+    McpToolRouterSupport.validateArgs(args, McpConstants.PARAM_ENTITY);
+    if (args == null || !args.has(McpConstants.PARAM_COLUMN)
+        || args.isNull(McpConstants.PARAM_COLUMN)) {
+      // Self-correcting error (IMP-8): name the expected key and the accepted alias.
+      throw new IllegalArgumentException("Missing required argument: 'column' (the FK field "
+          + "name, e.g. \"businessPartner\"). You may also pass it as 'field'.");
+    }
 
     String entityName = args.getString(McpConstants.PARAM_ENTITY);
     String columnName = args.getString(McpConstants.PARAM_COLUMN);
-    String query = args.optString("query", null);
+    String query = args.optString(McpConstants.PARAM_QUERY, null);
 
-    SFSpec spec = findSpecOrThrow(specName);
-    SFEntity sfEntity = findEntityOrThrow(spec.getId(), entityName);
+    SFSpec spec = McpToolRouterSupport.findActiveSpecByName(specName);
+    SFEntity sfEntity = McpToolRouterSupport.resolveIncludedEntityOrExplain(spec, entityName);
     Tab adTab = getAdTabOrThrow(sfEntity, entityName);
 
     // Find the AD_Column by DB column name or DAL property name (field name from schema)
     Entity dalEntity = ModelProvider.getInstance()
       .getEntityByTableName(adTab.getTable().getDBTableName());
-    Column adColumn = McpToolRouterSupport.findColumn(adTab, columnName, dalEntity);
+    Column adColumn = McpSchemaFieldBuilder.findColumn(adTab, columnName, dalEntity);
 
     if (adColumn == null) {
       throw new IllegalArgumentException("Column not found in table: " + columnName);
     }
 
-    NeoResponse neoResponse = NeoSelectorService.querySelectorByColumn(
-        adColumn, columnName, query, 50, 0, new HashMap<>());
+    // Build contextParams from recordContext and window category
+    Map<String, String> contextParams = McpSelectorContextHelper.buildSelectorContextParams(
+        args, adTab);
 
-    return neoResponseToMcpResult(neoResponse);
+    NeoResponse neoResponse = NeoSelectorService.querySelectorByColumn(
+        adColumn, columnName, query, 50, 0, contextParams);
+
+    NeoResponse response = McpSelectorContextHelper.withDiagnostics(
+        neoResponse, columnName, contextParams);
+    return McpHookExecutor.neoResponseToMcpResult(response);
   }
 
   // ── neo_defaults ──────────────────────────────────────────────────────
 
   /**
    * Get default field values for creating a new record.
+   * Supports optional parentId for child entity defaults.
    */
   private JSONObject handleDefaults(String specName, JSONObject args) throws Exception {
-    validateArgs(args, McpConstants.PARAM_ENTITY);
+    McpToolRouterSupport.validateArgs(args, McpConstants.PARAM_ENTITY);
 
     String entityName = args.getString(McpConstants.PARAM_ENTITY);
+    String parentId = args.optString(McpConstants.PARAM_PARENT_ID, null);
+    String assetId = args.optString(McpConstants.PARAM_ASSET_ID, null);
 
-    SFSpec spec = findSpecOrThrow(specName);
-    SFEntity sfEntity = findEntityOrThrow(spec.getId(), entityName);
+    // Build queryParams so NeoHandler implementations (e.g. AmortizationHeaderHandler)
+    // can read named request params via NeoContext.getQueryParams().
+    Map<String, String> queryParams = new HashMap<>();
+    if (parentId != null) {
+      queryParams.put(McpConstants.PARAM_PARENT_ID, parentId);
+    }
+    if (assetId != null) {
+      queryParams.put(McpConstants.PARAM_ASSET_ID, assetId);
+    }
+
+    SFSpec spec = McpToolRouterSupport.findActiveSpecByName(specName);
+    SFEntity sfEntity = McpToolRouterSupport.resolveIncludedEntityOrExplain(spec, entityName);
     Tab adTab = getAdTabOrThrow(sfEntity, entityName);
 
     NeoContext ctx = NeoContext.builder()
         .specName(specName)
         .entityName(entityName)
-        .httpMethod("GET")
+        .httpMethod(HTTP_METHOD_GET)
         .adTab(adTab)
         .sfEntity(sfEntity)
         .obContext(OBContext.getOBContext())
+        .queryParams(queryParams)
         .build();
 
-    NeoResponse neoResponse = NeoDefaultsService.resolveDefaults(ctx, null);
-    return neoResponseToMcpResult(neoResponse);
+    NeoResponse neoResponse = NeoDefaultsService.resolveDefaults(ctx, parentId);
+
+    // Fire the entity's afterHandle hook for the DEFAULTS endpoint, mirroring the
+    // REST path (NeoSubEndpointDispatcher → NeoHookDispatcher). This allows handlers
+    // like AmortizationHeaderHandler to compute dynamic defaults (e.g. the header name
+    // from assetId) over MCP, just as they do over REST.
+    NeoHandler handler = McpHookExecutor.resolveEntityHandler(sfEntity);
+    if (handler != null) {
+      NeoContext hookCtx = McpHookExecutor.buildDefaultsHookContext(
+          specName, entityName, adTab, sfEntity, queryParams);
+      hookCtx.setPreviousResult(neoResponse);
+      NeoResponse afterResult = handler.afterHandle(hookCtx);
+      if (afterResult != null) {
+        neoResponse = afterResult;
+      }
+    }
+
+    // IMP-7: optional lean/grouped view. Without `view` (or view=full) the flat response is
+    // returned unchanged; grouped/minimal split writable defaults (confirm) from server-managed
+    // compliance flags so the agent isn't buried under ~65 columns it should never touch.
+    String view = args.optString(McpDefaultsView.PARAM_VIEW, null);
+    if (McpDefaultsView.isGroupingView(view) && neoResponse.getHttpStatus() < 400
+        && neoResponse.getBody() != null) {
+      java.util.Set<String> editable =
+          McpQuerySupport.editablePropertyNames(sfEntity, adTab);
+      neoResponse = NeoResponse.ok(
+          McpDefaultsView.apply(neoResponse.getBody(), editable, view));
+    }
+
+    return McpHookExecutor.neoResponseToMcpResult(neoResponse);
   }
 
   // ── neo_schema ─────────────────────────────────────────────────────────
@@ -523,21 +787,39 @@ public class McpToolRouter {
    * so the agent sees exactly the same fields the UI would show.
    */
   private JSONObject handleSchema(String specName, JSONObject args) throws Exception {
-    validateArgs(args, McpConstants.PARAM_ENTITY);
+    McpToolRouterSupport.validateArgs(args, McpConstants.PARAM_ENTITY);
 
     String entityName = args.getString(McpConstants.PARAM_ENTITY);
 
-    SFSpec spec = findSpecOrThrow(specName);
-    SFEntity sfEntity = findEntityOrThrow(spec.getId(), entityName);
+    SFSpec spec = McpToolRouterSupport.findActiveSpecByName(specName);
+    SFEntity sfEntity = McpToolRouterSupport.resolveIncludedEntityOrExplain(spec, entityName);
     Tab adTab = getAdTabOrThrow(sfEntity, entityName);
 
     Entity dalEntity = ModelProvider.getInstance()
         .getEntityByTableName(adTab.getTable().getDBTableName());
 
-    Map<String, String> visibilityByColumnId =
-      McpToolRouterSupport.loadVisibilityByColumnId(sfEntity);
-    JSONArray fieldsArray = McpToolRouterSupport.buildSchemaFieldsArray(adTab, dalEntity,
-      visibilityByColumnId, SYSTEM_COLUMNS, SELECTOR_REFS);
+    McpSchemaFieldBuilder.FieldMetadata fieldMetadata =
+        McpSchemaFieldBuilder.loadFieldMetadata(sfEntity);
+    Map<String, String> promptByColumnId =
+        McpSchemaFieldBuilder.loadPromptByColumnId(sfEntity);
+    Map<String, String> requiredWhenByField =
+        McpSchemaFieldBuilder.loadPreconditionRequirements(sfEntity);
+    JSONArray fieldsArray = McpSchemaFieldBuilder.buildSchemaFieldsArray(adTab, dalEntity,
+        fieldMetadata.visibilityByColumnId, fieldMetadata.businessCriticalByColumnId,
+        promptByColumnId, SYSTEM_COLUMNS, SELECTOR_REFS);
+    McpSchemaFieldBuilder.applyPreconditionRequirements(fieldsArray, requiredWhenByField);
+    // IMP-1: overlay clean, localized labels + one-line descriptions from AD_Field so the agent
+    // sees "SII Description" instead of the raw AD_Column name "EM_Aeatsii_Descripcion_Sii".
+    McpSchemaFieldBuilder.applyCuratedLabels(fieldsArray,
+        McpSchemaFieldBuilder.loadFieldLabels(adTab, NeoLanguage.currentCode()));
+
+    // IMP-6: an explicit view:"actions" collapses the full field dump down to the callable
+    // buttons/processes only — a no-op for any other (or omitted) view.
+    String view = args.optString(McpActionsView.PARAM_VIEW, null);
+    if (McpActionsView.isActionsView(view)) {
+      return wrapAsTextContent(
+          McpActionsView.buildResponse(specName, entityName, fieldsArray).toString(2));
+    }
 
     // Build entity schema
     JSONObject entitySchema = new JSONObject();
@@ -548,18 +830,27 @@ public class McpToolRouter {
     // Methods from SFEntity config
     JSONArray methods = new JSONArray();
     if (Boolean.TRUE.equals(sfEntity.isGet()) || Boolean.TRUE.equals(sfEntity.isGetByID())) {
-      methods.put("GET");
+      methods.put(HTTP_METHOD_GET);
     }
     if (Boolean.TRUE.equals(sfEntity.isPost())) {
-      methods.put("POST");
+      methods.put(HTTP_METHOD_POST);
     }
     if (Boolean.TRUE.equals(sfEntity.isPut())) {
-      methods.put("PUT");
+      methods.put(HTTP_METHOD_PUT);
     }
     if (Boolean.TRUE.equals(sfEntity.isDelete())) {
-      methods.put("DELETE");
+      methods.put(HTTP_METHOD_DELETE);
     }
     entitySchema.put("methods", methods);
+
+    // Named business filters (ETP-4601): advertise the spec's hand-authored status filters,
+    // each keyed by name, so the agent can discover them instead of guessing. Only the
+    // name/label/description are exposed — the HQL where fragment stays server-side.
+    JSONArray namedFilters = McpNamedFilters.describe(sfEntity.getNamedFilters());
+    if (namedFilters.length() > 0) {
+      entitySchema.put("namedFilters", namedFilters);
+    }
+
     entitySchema.put("fields", fieldsArray);
     entitySchema.put("fieldCount", fieldsArray.length());
 
@@ -569,17 +860,20 @@ public class McpToolRouter {
         + "Fields with visibility=system are auto-derived by Etendo callouts — omit them. "
         + "Fields with visibility=discarded are excluded — do not send them. "
         + "Fields with readOnly=true are auto-generated (DocumentNo, IDs). "
-        + "Use neo_selectors for FK fields with hasSelector=true.");
+        + "Use neo_selectors for FK fields with hasSelector=true. "
+        + "Fields with businessCritical=true carry core business data (amounts, categories, "
+        + "key dates) — you MUST confirm these values with the user before creating or "
+        + "modifying records.");
 
     return wrapAsTextContent(entitySchema.toString(2));
   }
 
   static String mapColumnTypeStatic(String refId) {
-    return McpToolRouterSupport.mapColumnType(refId);
+    return McpSchemaFieldBuilder.mapColumnType(refId);
   }
 
   static String mapSelectorTypeStatic(String refId) {
-    return McpToolRouterSupport.mapSelectorType(refId);
+    return McpSchemaFieldBuilder.mapSelectorType(refId);
   }
 
   // ── neo_batch ─────────────────────────────────────────────────────────
@@ -611,6 +905,10 @@ public class McpToolRouter {
       // windows, and the top-level authorizeSpecAccess(null) on neo_batch is a
       // no-op. Authorise each distinct spec before any DAL work happens so an
       // LLM agent cannot smuggle writes into a spec it lacks CRUD access to.
+      // Every batch operation is a create (BatchService#processOperation only
+      // ever calls createRecord — there is no update/delete op type), so this
+      // is a write-tier ("POST") check: a read-only AD_Window_Access role must
+      // be denied here exactly as it would be for a direct neo_create call.
       java.util.Set<String> seen = new java.util.HashSet<>();
       for (int i = 0; i < operations.length(); i++) {
         JSONObject op = operations.optJSONObject(i);
@@ -619,7 +917,7 @@ public class McpToolRouter {
         }
         String specName = op.optString("spec", null);
         if (StringUtils.isNotBlank(specName) && seen.add(specName)) {
-          authorizeSpecAccess(specName);
+          authorizeSpecAccess(specName, HTTP_METHOD_POST);
         }
       }
       JSONObject result = BatchService.forBatchOnly().executeBatch(operations);
@@ -633,13 +931,106 @@ public class McpToolRouter {
     }
   }
 
+  // ── neo_action ────────────────────────────────────────────────────────
+
+  /**
+   * Fire a button action on a record and return the structured process result.
+   * <p>
+   * Resolves the SFEntity from spec+entity arguments, validates the action column
+   * exists (delegating to {@link NeoButtonActionHelper#executeButtonActionCore}),
+   * then maps the NeoResponse body to MCP result keys:
+   * <ul>
+   *   <li>{@code processResult} — status from the process response (success|error|warning)</li>
+   *   <li>{@code processMessage} — translated message from the process response</li>
+   * </ul>
+   * A validation or process error surfaces as {@code processResult: "error"} with
+   * a descriptive {@code processMessage} — it is never swallowed.
+   * <p>
+   * Runs the entity's {@link NeoHandler} pre/post hooks around the action, matching the REST
+   * action path ({@code NeoSubEndpointDispatcher.handleHookedSubEndpoint} with
+   * {@code NeoEndpointType.ACTION}). A pre-hook {@link NeoResponse} short-circuits before the
+   * process is fired; the post-hook may replace the result. Without this parity, completing a
+   * document over MCP would skip handler logic the UI executes (ETP-4285).
+   */
+  JSONObject handleAction(String specName, JSONObject args) throws Exception {
+    McpToolRouterSupport.validateArgs(args, McpConstants.PARAM_ENTITY, "id", "action");
+
+    String entityName = args.getString(McpConstants.PARAM_ENTITY);
+    String recordId = args.getString("id");
+    String actionName = args.getString("action");
+    JSONObject parameters = args.optJSONObject(McpConstants.PARAM_PARAMETERS);
+
+    SFSpec spec = McpToolRouterSupport.findActiveSpecByName(specName);
+    SFEntity sfEntity = McpToolRouterSupport.findIncludedEntity(spec.getId(), entityName);
+
+    // The body object is shared with executeButtonActionCore on purpose, so a handler that
+    // normalizes or injects the action value is honoured by the process call that follows —
+    // the same contract the REST path gives handlers.
+    JSONObject actionParams = parameters != null ? parameters : new JSONObject();
+    NeoHandler handler = McpHookExecutor.resolveEntityHandler(sfEntity);
+    NeoContext hookCtx = McpHookExecutor.buildActionHookContext(specName, entityName, recordId,
+        actionName, actionParams, sfEntity.getADTab(), sfEntity);
+    JSONObject preHookResult = McpHookExecutor.runPreHook(handler, hookCtx);
+    if (preHookResult != null) {
+      return preHookResult;
+    }
+
+    NeoResponse neoResponse = NeoButtonActionHelper.executeButtonActionCore(
+        sfEntity, recordId, actionName, actionParams);
+
+    JSONObject actionResult = McpToolRouterSupport.mapNeoResponseToActionResult(neoResponse);
+
+    if (neoResponse.getHttpStatus() >= 400) {
+      if (!actionResult.has(McpConstants.KEY_PROCESS_RESULT)) {
+        actionResult.put(McpConstants.KEY_PROCESS_RESULT, McpConstants.KEY_ERROR);
+      }
+      if (!actionResult.has(McpConstants.KEY_PROCESS_MESSAGE)) {
+        actionResult.put(McpConstants.KEY_PROCESS_MESSAGE,
+            "Request failed with HTTP status " + neoResponse.getHttpStatus());
+      }
+      return wrapAsErrorContent(actionResult.toString(2));
+    }
+
+    // Post-hook only on the success path, mirroring handleCreate/handleUpdate, which both
+    // return early on error before runPostHook.
+    JSONObject postHookResult = McpHookExecutor.runPostHook(handler, hookCtx, actionResult);
+    if (postHookResult != null) {
+      return postHookResult;
+    }
+
+    return wrapAsTextContent(actionResult.toString(2));
+  }
+
+  // ── neo_generate_amortization_plan ────────────────────────────────────
+
+  /**
+   * Handles the {@code neo_generate_amortization_plan} MCP tool call.
+   * Delegates to {@link AmortizationPlanService#generatePlan(String)}.
+   *
+   * @param arguments tool arguments containing {@code assetId}
+   * @return MCP result object
+   */
+  private JSONObject handleGenerateAmortizationPlan(JSONObject arguments) throws Exception {
+    String assetId = arguments != null ? arguments.optString("assetId", null) : null;
+    NeoResponse response = AmortizationPlanService.generatePlan(assetId);
+    if (response == null) {
+      return wrapAsErrorContent("Internal error: service returned a null response");
+    }
+    if (response.getHttpStatus() >= 400) {
+      return wrapAsErrorContent(
+          response.getBody() != null ? response.getBody().toString() : "Error generating amortization plan");
+    }
+    return wrapAsTextContent(
+        response.getBody() != null ? response.getBody().toString(2) : "{}");
+  }
+
   // ── Process execution ─────────────────────────────────────────────────
 
   /**
    * Execute a process-type spec.
    */
   private JSONObject handleProcess(String specName, JSONObject args) throws Exception {
-    SFSpec spec = findSpecOrThrow(specName);
+    SFSpec spec = McpToolRouterSupport.findActiveSpecByName(specName);
 
     Process adProcess = spec.getProcess();
     if (adProcess == null) {
@@ -652,111 +1043,116 @@ public class McpToolRouter {
           + ACCESS_DENIED_FOR_CURRENT_ROLE_SUFFIX);
     }
 
-    JSONObject parameters = args != null ? args.optJSONObject("parameters") : null;
+    JSONObject parameters = args != null ? args.optJSONObject(McpConstants.PARAM_PARAMETERS) : null;
     NeoResponse neoResponse = NeoProcessService.executeProcess(adProcess, parameters);
-    return neoResponseToMcpResult(neoResponse);
+    return McpHookExecutor.neoResponseToMcpResult(neoResponse);
   }
 
   // ── Report generation ─────────────────────────────────────────────────
 
   /**
-   * Generate a report. Returns the report description (binary output cannot be
-   * sent via MCP text content, so we describe what would be generated and provide
-   * the parameters needed to call the REST endpoint directly).
+   * Generate a report through its NEO-native report handler (ETP-4255).
+   *
+   * <p>Etendo Go/NEO/MCP no longer execute Jasper/AD_Process reports. A report spec is
+   * callable only when it is backed by a NEO report handler ({@code NeoHandler} bean
+   * matched by the entity's {@code Java_Qualifier}); the handler returns report data as
+   * JSON. When the spec has no NEO-native handler it is non-callable: this returns the
+   * exact same {@code not_configured_for_report_generation} message shown by discover.</p>
    */
   private JSONObject handleReport(String specName, JSONObject args) throws Exception {
-    SFSpec spec = findSpecOrThrow(specName);
+    SFSpec spec = McpToolRouterSupport.findActiveSpecByName(specName);
 
-    Process adProcess = spec.getProcess();
-    if (adProcess == null) {
-      return wrapAsErrorContent("Report spec '" + specName + "' has no linked AD_Process");
+    // First included entity declaring a NEO report handler qualifier, or null.
+    SFEntity reportEntity = null;
+    for (SFEntity entity : McpToolRouterSupport.listIncludedEntities(spec.getId())) {
+      if (StringUtils.isNotBlank(entity.getJavaQualifier())) {
+        reportEntity = entity;
+        break;
+      }
+    }
+    NeoHandler handler = reportEntity != null
+        ? McpHookExecutor.resolveEntityHandler(reportEntity) : null;
+    if (handler == null) {
+      // Non-callable report: identical message to neo_discover. Not an error path.
+      return wrapAsTextContent(
+          NeoReportCallability.buildNotConfiguredResponse(specName).toString(2));
     }
 
-    // Check RBAC
-    if (!NeoAccessUtils.hasProcessAccess(adProcess.getId())) {
-      return wrapAsErrorContent("Access denied to report '" + specName
-          + ACCESS_DENIED_FOR_CURRENT_ROLE_SUFFIX);
+    JSONObject parameters = args != null ? args.optJSONObject(McpConstants.PARAM_PARAMETERS) : null;
+    if (parameters == null) {
+      parameters = new JSONObject();
     }
-
-    String format = args != null ? args.optString("format", "pdf") : "pdf";
-    JSONObject parameters = args != null ? args.optJSONObject("parameters") : null;
-
-    // Generate report to byte array and return base64 or description
-    try {
-      ByteArrayOutputStream baos = new ByteArrayOutputStream();
-      NeoReportService.generateReport(adProcess, parameters,
-          format.toUpperCase(), baos);
-
-      // For MCP, encode as base64 so the client can save the file
-      byte[] reportBytes = baos.toByteArray();
-      String base64 = java.util.Base64.getEncoder().encodeToString(reportBytes);
-
-      JSONObject reportResult = new JSONObject();
-      reportResult.put("format", format);
-      reportResult.put("sizeBytes", reportBytes.length);
-      reportResult.put("base64", base64);
-      reportResult.put("filename", specName + "." + format.toLowerCase());
-
-      return wrapAsTextContent(reportResult.toString());
-    } catch (Exception e) {
-      log.error("Error generating report '{}'", specName, e);
-      // Fall back to describe
-      NeoResponse describeResponse = NeoReportService.describeReport(adProcess);
-      JSONObject fallback = new JSONObject();
-      fallback.put("error", "Report generation failed: " + e.getMessage());
-      fallback.put("description", describeResponse.getBody());
-      fallback.put("hint", "Use the REST endpoint POST /sws/neo/" + specName
-          + " with exportType and params to generate the report via HTTP");
-      return wrapAsErrorContent(fallback.toString(2));
+    NeoContext ctx = NeoContext.builder()
+        .specName(specName)
+        .entityName(reportEntity.getName())
+        .httpMethod(HTTP_METHOD_POST)
+        .requestBody(parameters)
+        .sfEntity(reportEntity)
+        .obContext(OBContext.getOBContext())
+        .build();
+    NeoResponse neoResponse = handler.handle(ctx);
+    if (neoResponse == null) {
+      return wrapAsTextContent(
+          NeoReportCallability.buildNotConfiguredResponse(specName).toString(2));
     }
+    return McpHookExecutor.neoResponseToMcpResult(neoResponse);
   }
 
+  /**
+   * Read-tier ({@code GET}) spec authorization. Prefer
+   * {@link #authorizeSpecAccess(String, String)} whenever the caller knows the
+   * MCP tool's write intent.
+   */
   private void authorizeSpecAccess(String specName) throws Exception {
+    authorizeSpecAccess(specName, HTTP_METHOD_GET);
+  }
+
+  /**
+   * Authorizes the current role against {@code specName} for the given HTTP-method
+   * equivalent, enforcing the read-only vs. full-access {@code AD_Window_Access}
+   * tiering (ETP-4510) via {@link McpToolRouterSupport#hasSpecAccess(SFSpec, String, String)}.
+   *
+   * @param specName   the spec name resolved from the tool call (blank/{@code null} is a no-op —
+   *                   some tools, e.g. {@code neo_discover}, have no single spec to authorize)
+   * @param httpMethod the HTTP-method equivalent of the MCP operation being authorized
+   *                   (e.g. {@code "POST"} for {@code neo_create})
+   */
+  private void authorizeSpecAccess(String specName, String httpMethod) throws Exception {
     if (StringUtils.isBlank(specName)) {
       return;
     }
-    SFSpec spec = findSpecOrThrow(specName);
-    if (!McpToolRouterSupport.hasSpecAccess(spec, spec.getSpecType())) {
+    SFSpec spec = McpToolRouterSupport.findActiveSpecByName(specName);
+    if (!McpToolRouterSupport.hasSpecAccess(spec, spec.getSpecType(), httpMethod)) {
       throw new SecurityException("Access denied to spec '" + specName
           + ACCESS_DENIED_FOR_CURRENT_ROLE_SUFFIX);
     }
   }
 
+  /**
+   * Maps an MCP tool name to the HTTP-method equivalent used for
+   * {@code AD_Window_Access} read/write tiering (ETP-4510). Mutating CRUD tools map to
+   * their REST NEO Headless counterpart; every other tool (reads, process/report
+   * execution, discovery) is treated as a read for window-access purposes — process and
+   * report access are authorized separately and are unaffected by this method string.
+   *
+   * @param toolName the MCP tool name (e.g. {@code "neo_create"})
+   * @return {@code "POST"}, {@code "PUT"}, or {@code "DELETE"} for the corresponding
+   *         mutating tool; {@code "GET"} for everything else
+   */
+  private static String resolveAccessMethod(String toolName) {
+    switch (toolName) {
+      case "neo_create":
+        return HTTP_METHOD_POST;
+      case "neo_update":
+        return HTTP_METHOD_PUT;
+      case "neo_delete":
+        return HTTP_METHOD_DELETE;
+      default:
+        return HTTP_METHOD_GET;
+    }
+  }
+
   // ── Spec/entity resolution helpers ────────────────────────────────────
-
-  /**
-   * Find an active spec by name or throw.
-   * Same query pattern as NeoServlet.findSpec().
-   */
-  private SFSpec findSpecOrThrow(String specName) throws Exception {
-    OBCriteria<SFSpec> criteria = OBDal.getInstance().createCriteria(SFSpec.class);
-    criteria.add(Restrictions.eq(SFSpec.PROPERTY_NAME, specName));
-    criteria.add(Restrictions.eq(SFSpec.PROPERTY_ISACTIVE, true));
-    criteria.setMaxResults(1);
-    List<SFSpec> results = criteria.list();
-    if (results.isEmpty()) {
-      throw new IllegalArgumentException("Spec not found: " + specName);
-    }
-    return results.get(0);
-  }
-
-  /**
-   * Find an active, included entity within a spec or throw.
-   * Same query pattern as NeoServlet.findEntity().
-   */
-  private SFEntity findEntityOrThrow(String specId, String entityName) throws Exception {
-    OBCriteria<SFEntity> criteria = OBDal.getInstance().createCriteria(SFEntity.class);
-    criteria.add(Restrictions.eq(SFEntity.PROPERTY_ETGOSFSPEC + ".id", specId));
-    criteria.add(Restrictions.eq(SFEntity.PROPERTY_NAME, entityName));
-    criteria.add(Restrictions.eq(SFSpec.PROPERTY_ISACTIVE, true));
-    criteria.add(Restrictions.eq(SFEntity.PROPERTY_ISINCLUDED, true));
-    criteria.setMaxResults(1);
-    List<SFEntity> results = criteria.list();
-    if (results.isEmpty()) {
-      throw new IllegalArgumentException("Entity not found: " + entityName);
-    }
-    return results.get(0);
-  }
 
   /**
    * Get the AD_Tab linked to an entity, or throw if not linked.
@@ -781,59 +1177,6 @@ public class McpToolRouter {
     params.put(JsonConstants.WINDOW_ID, adTab.getWindow().getId());
     params.put(JsonConstants.NO_ACTIVE_FILTER, "true");
     return params;
-  }
-
-  /**
-   * Build an HQL where clause fragment from MCP filter key-value pairs.
-   * Filters are applied as exact-match conditions using the DAL property name.
-   */
-  private String buildWhereFromFilters(JSONObject filters, Tab adTab) throws JSONException {
-    Entity dalEntity = ModelProvider.getInstance()
-        .getEntityByTableName(adTab.getTable().getDBTableName());
-    if (dalEntity == null) {
-      return null;
-    }
-
-    StringBuilder where = new StringBuilder();
-    Iterator<String> keys = filters.keys();
-    while (keys.hasNext()) {
-      String key = keys.next();
-      String value = filters.getString(key);
-      appendFilterCondition(where, dalEntity, key, value);
-    }
-    return where.length() > 0 ? where.toString() : null;
-  }
-
-  /**
-   * Resolve a single filter key to a DAL property and append an HQL condition.
-   */
-  private void appendFilterCondition(StringBuilder where, Entity dalEntity,
-      String key, String value) {
-    Property prop = null;
-    try {
-      prop = dalEntity.getPropertyByColumnName(key);
-    } catch (Exception ignored) {
-      try {
-        prop = dalEntity.getProperty(key);
-      } catch (Exception alsoIgnored) {
-        log.debug("Filter column '{}' not found in entity, skipping", key);
-      }
-    }
-
-    if (prop == null) {
-      log.warn("Filter key '{}' could not be resolved to a DAL property, ignoring", key);
-      return;
-    }
-
-    if (where.length() > 0) {
-      where.append(" and ");
-    }
-    String escaped = value.replace("'", "''");
-    if (!prop.isPrimitive()) {
-      where.append("e.").append(prop.getName()).append(".id='").append(escaped).append("'");
-    } else {
-      where.append("e.").append(prop.getName()).append("='").append(escaped).append("'");
-    }
   }
 
   /**
@@ -969,30 +1312,6 @@ public class McpToolRouter {
   }
 
   /**
-   * Wraps a flat JSON body into the structure expected by DefaultJsonDataService.
-   * Identical to NeoServlet.wrapForSmartclient().
-   */
-  private String wrapForSmartclient(JSONObject filteredBody, String dalEntityName,
-      String recordId) {
-    try {
-      JSONObject data = filteredBody != null ? filteredBody : new JSONObject();
-      data.put(JsonConstants.ENTITYNAME, dalEntityName);
-      if (recordId != null) {
-        data.put(JsonConstants.ID, recordId);
-      } else {
-        data.put(JsonConstants.NEW_INDICATOR, true);
-      }
-
-      JSONObject wrapper = new JSONObject();
-      wrapper.put(JsonConstants.DATA, data);
-      return wrapper.toString();
-    } catch (Exception e) {
-      log.error("Error wrapping body for Smartclient format: {}", e.getMessage(), e);
-      return "{}";
-    }
-  }
-
-  /**
    * Resolve parentId to the actual FK property name on child tabs.
    * Replicates the same logic from NeoServlet's POST handler.
    */
@@ -1037,7 +1356,7 @@ public class McpToolRouter {
     if (status == JsonConstants.RPCREQUEST_STATUS_FAILURE) {
       if (innerResponse.has(JsonConstants.RESPONSE_ERROR)) {
         return innerResponse.getJSONObject(JsonConstants.RESPONSE_ERROR)
-            .optString("message", "Operation failed");
+            .optString(McpConstants.KEY_MESSAGE, "Operation failed");
       }
       return "Operation failed";
     }
@@ -1045,15 +1364,6 @@ public class McpToolRouter {
       return "Validation error: " + innerResponse.toString();
     }
     return null;
-  }
-
-  // ── Entity summary for discovery ──────────────────────────────────────
-
-  /**
-   * Build entity summary array for a spec (used by neo_discover).
-   */
-  private JSONArray buildEntitySummaryArray(String specId) throws Exception {
-    return McpToolRouterSupport.buildEntitySummaryArray(specId);
   }
 
   // ── MCP content formatting ────────────────────────────────────────────
@@ -1095,40 +1405,6 @@ public class McpToolRouter {
       return result;
     } catch (JSONException e) {
       throw new McpToolException("Error building MCP error content", e);
-    }
-  }
-
-  /**
-   * Convert a NeoResponse to MCP result format.
-   * Successful responses become text content; error responses set isError.
-   */
-  private JSONObject neoResponseToMcpResult(NeoResponse neoResponse) throws JSONException {
-    if (neoResponse.getHttpStatus() >= 400) {
-      String errorText = neoResponse.getBody() != null
-          ? neoResponse.getBody().toString(2)
-          : "Request failed with status " + neoResponse.getHttpStatus();
-      return wrapAsErrorContent(errorText);
-    }
-
-    String text = neoResponse.getBody() != null
-        ? neoResponse.getBody().toString(2)
-        : "{}";
-    return wrapAsTextContent(text);
-  }
-
-  // ── Validation helpers ────────────────────────────────────────────────
-
-  /**
-   * Validate that required arguments are present.
-   */
-  private void validateArgs(JSONObject args, String... required) throws IllegalArgumentException {
-    if (args == null) {
-      throw new IllegalArgumentException("Missing arguments");
-    }
-    for (String key : required) {
-      if (!args.has(key) || args.isNull(key)) {
-        throw new IllegalArgumentException("Missing required argument: " + key);
-      }
     }
   }
 }

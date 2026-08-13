@@ -61,6 +61,14 @@
         <default/>
         <onCreateDefault/>
       </column>
+      <column name="AGENT_PROMPT" primaryKey="false" required="false" type="CLOB" size="4000" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="SHOWINMCP" primaryKey="false" required="true" type="CHAR" size="1" autoIncrement="false">
+        <default><![CDATA[Y]]></default>
+        <onCreateDefault><![CDATA['Y']]></onCreateDefault>
+      </column>
       <foreign-key foreignTable="AD_CLIENT" name="ETGO_SF_SPEC_CLI_FK">
         <reference local="AD_CLIENT_ID" foreign="AD_CLIENT_ID"/>
       </foreign-key>
@@ -77,5 +85,6 @@
         <reference local="AD_WINDOW_ID" foreign="AD_WINDOW_ID"/>
       </foreign-key>
       <check name="ETGO_SF_SPEC_ISACTIVE"><![CDATA[ISACTIVE IN ('Y', 'N')]]></check>
+      <check name="ETGO_SF_SPEC_SHOWINMCP"><![CDATA[SHOWINMCP IN ('Y', 'N')]]></check>
     </table>
   </database>

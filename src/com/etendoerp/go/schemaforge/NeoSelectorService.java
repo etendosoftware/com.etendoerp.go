@@ -15,6 +15,8 @@ import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.criterion.MatchMode;
 import org.hibernate.criterion.Restrictions;
 import org.openbravo.base.model.Entity;
+import org.openbravo.base.model.ModelProvider;
+import org.openbravo.base.model.Property;
 import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
@@ -27,6 +29,7 @@ import com.etendoerp.go.schemaforge.selector.meta.SelectorContextResolver;
 import com.etendoerp.go.schemaforge.selector.meta.SelectorDescriptorResolver;
 import com.etendoerp.go.schemaforge.selector.meta.SelectorMeta;
 import com.etendoerp.go.schemaforge.selector.policy.NeoSelectorPolicy;
+import com.etendoerp.go.schemaforge.util.NeoLocatorSelectorHelper;
 
 /**
  * Generic dynamic selector service for FK fields.
@@ -150,7 +153,7 @@ public class NeoSelectorService {
       }
       if (column == null) {
         return NeoResponse.error(404,
-            "Field not found or not included: " + columnName);
+            "Field not found or not included (checked column and property name): " + columnName);
       }
 
       return querySelectorByColumn(entity, column, columnName, search, limit, offset, contextParams);
@@ -181,6 +184,15 @@ public class NeoSelectorService {
 
   private static NeoResponse querySelectorByColumn(SFEntity sourceEntity, Column column, String columnName,
       String search, int limit, int offset, Map<String, String> contextParams) {
+    NeoResponse result = resolveSelectorResponse(
+        sourceEntity, column, columnName, search, limit, offset, contextParams);
+    // Generic post-processing: collapse M_Locator storage-bin labels into their parent
+    // warehouse name for every window. Fail-safe — leaves the response untouched on error.
+    return NeoLocatorSelectorHelper.rewriteLocatorLabels(result, column);
+  }
+
+  private static NeoResponse resolveSelectorResponse(SFEntity sourceEntity, Column column, String columnName,
+      String search, int limit, int offset, Map<String, String> contextParams) {
     try {
       int safeLimit = normalizeLimit(limit);
       int safeOffset = normalizeOffset(offset);
@@ -196,7 +208,8 @@ public class NeoSelectorService {
         return ListReferenceSelectorExecutor.resolveListSelector(column, search, safeLimit,
             safeOffset, contextParams);
       }
-      if (!isObuisel && ComboReferenceSelectorExecutor.shouldUseCoreComboSelector(sourceEntity, column, refId)) {
+      if (!isObuisel && !SystemClientSelectorRegistry.isRegisteredColumn(column)
+          && ComboReferenceSelectorExecutor.shouldUseCoreComboSelector(sourceEntity, column, refId)) {
         log.info("[ComboSelector] routing {} via core ComboTableData (SQL validation rule)",
             column.getDBColumnName());
         return ComboReferenceSelectorExecutor.resolveClassicSelectorWithCoreCombo(
@@ -211,18 +224,47 @@ public class NeoSelectorService {
 
       String validationFilter = SelectorValidationResolver.resolveValidationFilter(
           column, meta.entityName, contextParams);
+      if (SystemClientSelectorRegistry.isRegisteredColumn(column)) {
+        validationFilter = SystemClientSelectorRegistry.expandClientFilter(validationFilter);
+      }
       String contextOrganizationId = SelectorContextResolver.resolveContextOrganizationId(sourceEntity, contextParams);
       String filterAlias = resolveFilterAlias(meta);
       String combinedFilter = buildCombinedFilter(
           column, validationFilter, filterAlias);
+      Map<String, String> selectorContextParams = withSourceEntityName(contextParams, sourceEntity);
       NeoResponse selectorResult = executeSelectorQuery(
-          meta, search, safeLimit, safeOffset, contextOrganizationId, combinedFilter, contextParams);
-      return enrichProductSelectorIfNeeded(selectorResult, meta, contextParams);
+          meta, search, safeLimit, safeOffset, contextOrganizationId, combinedFilter, selectorContextParams);
+      return enrichProductSelectorIfNeeded(selectorResult, meta, selectorContextParams);
 
     } catch (Exception e) {
       log.error("Error querying selector by column {}", columnName, e);
       return NeoResponse.error(500, e.getMessage());
     }
+  }
+
+  /**
+   * Internal context param key carrying the requesting Schema Forge entity's name (e.g.
+   * {@code movementLine}). Not a real request parameter — injected here so {@code
+   * SelectorContextPolicy} implementations can scope a filter to a specific source window/tab
+   * without the generic target entity name (e.g. {@code Product}) being enough on its own.
+   * See {@link com.etendoerp.go.schemaforge.selector.policy.GoodsMovementProductSelectorPolicy}.
+   */
+  public static final String SOURCE_ENTITY_NAME_PARAM = "_sourceEntityName";
+
+  /**
+   * Returns a copy of {@code contextParams} augmented with the requesting entity's name, without
+   * mutating the caller's map. When {@code sourceEntity} is {@code null} (e.g. the MCP layer,
+   * which resolves selectors directly by column) the original params are reused unchanged.
+   */
+  private static Map<String, String> withSourceEntityName(Map<String, String> contextParams,
+      SFEntity sourceEntity) {
+    if (sourceEntity == null || StringUtils.isBlank(sourceEntity.getName())) {
+      return contextParams;
+    }
+    Map<String, String> augmented = new HashMap<>(
+        contextParams != null ? contextParams : Collections.emptyMap());
+    augmented.put(SOURCE_ENTITY_NAME_PARAM, sourceEntity.getName());
+    return augmented;
   }
 
   private static int normalizeLimit(int limit) {
@@ -275,6 +317,16 @@ public class NeoSelectorService {
         && ctxParamFilter.contains(":priceListId")) {
       ctxFilterParams.put("priceListId", priceListId);
     }
+    if (ctxParamFilter != null && ctxParamFilter.contains(":finAccPaymentMethodId")) {
+      // Financial-account-by-payment-method policy: customer sends Fin_Paymentmethod_ID,
+      // vendor sends PO_Paymentmethod_ID (only one per request).
+      String finAccPaymentMethodId = StringUtils.defaultIfBlank(
+          safeContextParams.get("Fin_Paymentmethod_ID"),
+          safeContextParams.get("PO_Paymentmethod_ID"));
+      if (StringUtils.isNotBlank(finAccPaymentMethodId)) {
+        ctxFilterParams.put("finAccPaymentMethodId", finAccPaymentMethodId);
+      }
+    }
     String language = safeContextParams.get("language");
     if (StringUtils.isNotBlank(language)) {
       ctxFilterParams.put("language", language);
@@ -306,6 +358,9 @@ public class NeoSelectorService {
 
   private static SFField findFieldByColumnName(String entityId,
       String columnName) {
+    // Fast path: exact DB column name match (for example "M_PriceList_ID").
+    // Kept as-is for backward compatibility with clients that use column-name
+    // selector URLs.
     OBCriteria<SFField> criteria = OBDal.getInstance().createCriteria(SFField.class);
     criteria.add(Restrictions.eq(SFField.PROPERTY_ETGOSFENTITY + ".id", entityId));
     criteria.add(Restrictions.eq(SFField.PROPERTY_ISACTIVE, true));
@@ -314,7 +369,63 @@ public class NeoSelectorService {
     criteria.add(Restrictions.eq("col." + Column.PROPERTY_DBCOLUMNNAME, columnName));
     criteria.setMaxResults(1);
     List<SFField> results = criteria.list();
-    return results.isEmpty() ? null : results.get(0);
+    if (!results.isEmpty()) {
+      return results.get(0);
+    }
+    // Fallback: the identifier may be the DAL property name (for example
+    // "priceList" instead of "M_PriceList_ID"). Records, defaults and callouts
+    // all key off property names; this brings the selector endpoint in line
+    // with them and with the MCP path (McpToolRouterSupport#findColumn). See
+    // ETP-4058.
+    return findFieldByPropertyName(entityId, columnName);
+  }
+
+  private static SFField findFieldByPropertyName(String entityId, String identifier) {
+    OBCriteria<SFField> criteria = OBDal.getInstance().createCriteria(SFField.class);
+    criteria.add(Restrictions.eq(SFField.PROPERTY_ETGOSFENTITY + ".id", entityId));
+    criteria.add(Restrictions.eq(SFField.PROPERTY_ISACTIVE, true));
+    criteria.add(Restrictions.eq(SFField.PROPERTY_ISINCLUDED, true));
+    // All SFFields of one SF entity map to columns of the same AD table, so the
+    // DAL entity is resolved once (on the first field with a column) and reused.
+    Entity dalEntity = null;
+    for (SFField field : criteria.list()) {
+      Column column = field.getADColumn();
+      if (column == null) {
+        continue;
+      }
+      if (dalEntity == null) {
+        dalEntity = ModelProvider.getInstance()
+            .getEntityByTableName(column.getTable().getDBTableName());
+      }
+      if (matchesPropertyName(dalEntity, column, identifier)) {
+        return field;
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Whether {@code identifier} matches the DAL property name of {@code column}
+   * within {@code dalEntity} (case-insensitive). Mirrors the property-name
+   * resolution used by the MCP path
+   * ({@code McpToolRouterSupport#findColumn}). Fail-safe: null arguments or a
+   * model lookup failure yield {@code false}.
+   *
+   * @param dalEntity the DAL entity that owns the column, or {@code null}
+   * @param column the AD column to resolve the property name for, or {@code null}
+   * @param identifier the selector identifier from the request URL
+   * @return {@code true} when the column's DAL property name equals the identifier
+   */
+  static boolean matchesPropertyName(Entity dalEntity, Column column, String identifier) {
+    if (dalEntity == null || column == null) {
+      return false;
+    }
+    try {
+      Property prop = dalEntity.getPropertyByColumnName(column.getDBColumnName());
+      return prop != null && prop.getName().equalsIgnoreCase(identifier);
+    } catch (Exception ignored) {
+      return false;
+    }
   }
 
 

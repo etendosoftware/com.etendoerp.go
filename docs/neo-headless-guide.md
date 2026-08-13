@@ -20,8 +20,10 @@
 16. [Customizacion con NeoHandler (Hooks CDI)](#16-customizacion-con-neohandler-hooks-cdi)
 17. [OpenAPI Auto-Generado](#17-openapi-auto-generado)
 18. [Seguridad](#18-seguridad)
-19. [Testing](#19-testing)
-20. [Troubleshooting](#20-troubleshooting)
+19. [Menu de Navegacion (SFListMenu)](#19-menu-de-navegacion-sflistmenu)
+    - [19b. Mapa Proactivo de Acceso a Ventanas (SFWindowAccessMap)](#19b-mapa-proactivo-de-acceso-a-ventanas-sfwindowaccessmap)
+20. [Testing](#20-testing)
+21. [Troubleshooting](#21-troubleshooting)
 
 ---
 
@@ -55,7 +57,7 @@ NeoServlet (/sws/neo/*)
     |
     +-- Route por tipo de spec:
     |     |
-    |     +-- Report spec (type R) --> NeoReportService
+    |     +-- Report spec (type R) --> NeoHandler NEO-native (Java_Qualifier) o no-invocable (ETP-4255; ya no usa Jasper)
     |     |
     |     +-- Process spec (type P) --> NeoProcessService.executeProcess()
     |     |
@@ -93,6 +95,7 @@ NeoServlet (/sws/neo/*)
 | `schemaforge.selector.policy` | SPI/registry para filtros por contexto, overrides, columnas virtuales y enriquecimiento post-query. |
 | `NeoCalloutService` | Ejecucion de AD_Callouts via REST. Construye request sintetico. |
 | `NeoDefaultsService` | Resolucion de valores por defecto (literals, context vars, SQL, sequences). |
+| `NeoAuxiliaryInputResolver` | Evalua los auxiliary inputs del tab e inyecta sus valores en sesion (`windowId\|nombre`) antes de resolver defaults, para que defaults tipo `@DESCRIPTION1@` resuelvan desde el padre. |
 | `NeoProcessService` | Ejecucion de procesos (OBUIAPP, Classic, scheduling, DB procedure). Validacion de parametros. |
 | `NeoReportService` | Generacion de reportes Jasper (PDF, XLS, XLSX, HTML, CSV). |
 | `NeoFieldFilter` | Filtra JSON basado en config ETGO_SF_FIELD (IsIncluded, IsReadOnly). |
@@ -129,8 +132,9 @@ Busca `ETGO_SF_Spec` activo por nombre. Si no existe: `404 Not Found`.
 Busca `ETGO_SF_Entity` activa dentro del spec. Verifica que el metodo HTTP este habilitado (ISGET, ISPOST, etc). Si no: `405 Method Not Allowed`.
 
 ### Etapa 6: Control de Acceso
-- Window specs: verifica `ADWindowAccess` para el role actual
-- Process specs: verifica `ADProcessAccess` para el role actual
+- Window specs: `NeoAccessHelper.hasWindowAccess(role, windowId, httpMethod)` verifica `AD_Window_Access` con tiering lectura/escritura (ver §18)
+- Windowless/custom specs (sin `AD_Window` directo): `hasWindowAccessForSpec(spec, httpMethod)` resuelve una "combinacion" de ventanas, o cae a permitir cualquier role autenticado (ver §18)
+- Process specs: verifica `AD_Process_Access` para el role actual (binario, sin tiering)
 - Si denegado: `403 Forbidden`
 
 ### Etapa 7: Hook Discovery (opcional)
@@ -193,6 +197,7 @@ Representa un tab (window specs) o el proceso mismo (process specs).
 | `ISDELETE` | CHAR(1) | Habilitar DELETE. |
 | `JAVA_QUALIFIER` | VARCHAR | CDI `@Named` qualifier para un `NeoHandler` custom. |
 | `SEQNO` | NUMERIC | Orden de procesamiento/display. |
+| `PRECONDITIONS` | CLOB (Text) | JSON de preconditions por proceso, validado antes de ejecutar un proceso. Ver [NEO Headless Extensibility Guide § 1.5 Process Precondition Validation](../../../schema_forge/docs/neo-headless-extensibility.md#15-process-precondition-validation) (repo `schema_forge`). Ref AD `Text` (14), igual que `AGENT_PROMPT` en `ETGO_SF_SPEC`. |
 
 **Constraint unico:** `(ETGO_SF_SPEC_ID, NAME)`
 
@@ -384,10 +389,13 @@ Base URL: `/sws/neo`
 
 ### Report Specs (SPEC_TYPE = 'R')
 
+> **ETP-4255:** sin ejecucion Jasper. Invocable solo via `NeoHandler` NEO-native; si no,
+> GET/POST devuelven HTTP 200 con estado `not_configured_for_report_generation`. Ver §13.
+
 | Pattern | Method | Descripcion |
 |---------|--------|-------------|
-| `/{specName}` | GET | Describir reporte + formatos soportados |
-| `/{specName}` | POST | Generar reporte (con parametro `format`) |
+| `/{specName}` | GET | Describe (handler NEO-native) o estado no-invocable |
+| `/{specName}` | POST | Ejecuta via handler NEO-native (datos JSON) o estado no-invocable |
 
 ---
 
@@ -564,6 +572,57 @@ Si un selector tiene un `AD_Validation` con codigo que referencia parametros (ej
 GET /sws/neo/sales-order/OrderLine/selectors/M_Product_ID?q=laptop&M_Product_Category_ID=CAT123
 ```
 
+### Context params en MCP `neo_selectors`
+
+El tool MCP `neo_selectors` acepta contexto estructurado para resolver selectors dependientes sin que el agente tenga que hardcodear ids ni conocer los nombres internos de todos los parametros de validacion.
+
+Campos soportados:
+
+- `recordContext`: valores del registro actual.
+- `parentContext`: valores del header/padre cuando se consulta un selector de lineas.
+- `parentId`: id del registro padre para entidades hijas.
+
+Ejemplo para direccion de tercero:
+
+```json
+{
+  "spec": "return-to-vendor",
+  "entity": "header",
+  "column": "partnerAddress",
+  "recordContext": {
+    "businessPartner": "A6750F0D15334FB890C254369AC750A8"
+  }
+}
+```
+
+Ejemplo para impuesto de linea:
+
+```json
+{
+  "spec": "return-to-vendor",
+  "entity": "lines",
+  "column": "tax",
+  "parentId": "D1B79F29FA384A098BA64A6CC75B1F6D",
+  "parentContext": {
+    "businessPartner": "A6750F0D15334FB890C254369AC750A8",
+    "partnerAddress": "7E9A9E23C6ED4EABAE4B2CE9A9767D4A",
+    "orderDate": "2026-05-12",
+    "priceList": "8E7D3B782AC84D19A0BA84C3B46E61E8"
+  }
+}
+```
+
+El router MCP normaliza estos valores a los parametros que espera Classic:
+`C_BPartner_ID`, `C_BPartner_Location_ID`, `priceList`/`PriceList`/`M_PriceList_ID`,
+`isSOTrx`/`IsSOTrx`, `DateInvoiced` y `DateOrdered`. Las fechas ISO
+`YYYY-MM-DD` se convierten a `DD-MM-YYYY` porque varias validaciones Classic las
+consumen con ese formato. Si no se envia `isSOTrx`, se deriva desde la ventana y
+tambien se inyecta `isCustomer=Y` o `isVendor=Y` para selectors de terceros.
+
+Cuando el selector devuelve cero resultados, la respuesta MCP puede incluir
+`diagnostics.missingContext` con los parametros recomendados para reintentar la
+consulta.
+
 ---
 ### Internal selector package split
 
@@ -682,6 +741,8 @@ GET /sws/neo/{specName}/{entityName}/defaults?parentId=PARENT-RECORD-ID
 
 ### Pipeline de resolucion
 
+**Paso previo — Auxiliary inputs:** antes de resolver los campos, `NeoAuxiliaryInputResolver` evalua los auxiliary inputs activos del tab y los inyecta en sesion como `windowId|<nombre>`, replicando `FormInitializationComponent.computeAuxiliaryInputs`. Esto permite que un default de columna que referencia un auxiliary input por nombre se resuelva correctamente. Ejemplo: la linea de GL Journal tiene `Description` con default `@DESCRIPTION1@`, donde `DESCRIPTION1` es un auxiliary input del tab Lines con codigo `@SQL=SELECT description FROM gl_journal WHERE gl_journal_id=@GL_Journal_ID@`. El resolver ejecuta ese SQL (tomando `@GL_Journal_ID@` de los valores del registro padre cargados via `NeoParentValuesLoader`) y guarda el resultado en sesion, de modo que `@DESCRIPTION1@` resuelve a la descripcion del journal padre — igual que en classic, sin configuracion por ventana. Los codigos `@SQL=...` se evaluan via `NeoDefaultsSqlHelper.resolveSQLDefault`; los `@token@` via `Utility.getContext`; el resto como literal.
+
 Para cada campo incluido (IsIncluded=Y) de la entity, resuelve en este orden:
 
 1. **IsActive**: Siempre `true` (comportamiento NEO-specific)
@@ -693,6 +754,8 @@ Para cada campo incluido (IsIncluded=Y) de la entity, resuelve en este orden:
    - Preferences via `Utility.getPreference`
    - Alternativas separadas por coma (`@#Var1@,@#Var2@,literal`)
    - Literales sin `@` (ej: `"DR"`, `"N"`, `"0"`)
+
+**Exception — List reference columns (AD_Reference_ID=17):** a literal without `@` on a List column is returned as-is, without going through `Utility.getDefault()`. AD_Ref_List values are opaque codes that are sometimes all-digit strings (e.g. `Invoicegrouping` on `C_BPartner`, a 15-digit binary code like `"000000000000000"`) — `Utility.getDefault()` treats them as numeric candidates and collapses leading zeros/length (`"000000000000000"` -> `"0"`), producing a value that matches no real `AD_Ref_List` entry. For the same reason, `applyResolvedDefault` (post-resolution BigDecimal/Long coercion) and `NeoTypeCoercionHelper.coerceField` (coercion on the create payload) also exclude List columns from their numeric coercion, even though `Property.getPrimitiveObjectType()` reports a numeric type for them (see ETP-4700).
 
 ### Bridge VariablesSecureApp
 
@@ -834,6 +897,40 @@ El `recordId` de la URL se inyecta automaticamente como `inpRecordId` en los par
 ---
 
 ## 13. Pipeline de Reportes
+
+> **DESCARTADO / OBSOLETO — ETP-4255.** El pipeline Jasper descrito abajo **ya no existe en
+> runtime**. Se conserva solo como registro historico. Razones:
+> - Etendo Go / NEO Headless / MCP **nunca** debe ejecutar Jasper, JRXML, reportes clasicos
+>   por `AD_Process`, ni `ReportingUtils.exportJR` (regla dura de producto/arquitectura).
+> - El camino de ejecucion Jasper en runtime (`NeoReportService.generateReport`/
+>   `describeReport`/`resolveReportMetadata`, y el fallback de `NeoRequestRouter`/
+>   `NeoProcessReportEndpoint`) fue **eliminado**.
+> - Los reportes Jasper/JRXML legacy solo existen como fuente de migracion offline para la
+>   tooling de Schema Forge (`source: "jasper-migration"`); eso **nunca** implica ejecucion
+>   en runtime por Etendo Go.
+>
+> **Comportamiento actual (NEO-native-handlers-only):** un spec `R` es invocable solo si
+> esta respaldado por un `NeoHandler` (bean CDI por `ETGO_SF_ENTITY.Java_Qualifier`) que
+> devuelve datos en JSON. Handlers disponibles: `agingReportHandler` (`aging-receivable`),
+> `inventoryStockReportHandler` (`inventory-stock-report`), `taxReportHandler`
+> (`tax-report`). Un `R` **sin** handler NEO-native no es invocable: GET y POST devuelven
+> **HTTP 200** con `{name, type:"report", callable:false, status:"not_configured_for_report_generation", message}`,
+> identico a `neo_discover` y a la herramienta de reporte de MCP. La integracion de jsreport
+> queda fuera del alcance de ETP-4255.
+>
+> **ETP-4257 — herramientas CRUD de MCP sobre specs `R`.** Un spec `R` no expone entidades
+> listables, por lo que `neo_list`/`neo_get`/`neo_create`/`neo_update`/`neo_delete`/
+> `neo_selectors`/`neo_defaults`/`neo_schema` **no** devuelven ya el opaco `Entity not found:
+> <entity>`. En su lugar el guard (`McpToolRouterSupport.resolveIncludedEntityOrExplain`)
+> explica que el spec es de tipo reporte:
+> - **callable** (respaldado por handler NEO-native): `Spec '<name>' is a report type (R) and
+>   does not expose listable entities. Use the etendo_generate_<snake> tool to produce this
+>   report.`
+> - **no callable**: el mismo mensaje `not_configured_for_report_generation` de arriba.
+>
+> Ademas, `neo_discover` añade en cada spec `R` **callable** el campo `reportTool =
+> generate_<snake>` (el cliente lo ve como `etendo_generate_<snake>`), para que el agente
+> invoque directamente la herramienta de reporte en vez de adivinar una entidad.
 
 El `NeoReportService` genera reportes Jasper desde specs tipo `R`.
 
@@ -1028,6 +1125,56 @@ Headers custom via `withHeader(name, value)`.
 - El `beans.xml` del modulo tiene `bean-discovery-mode="all"` para discovery automatico
 - El handler se ejecuta **antes** del field filtering
 
+### Patron avanzado: invocar un `ad_actionButton` legacy por reflection (sin `CallProcess`)
+
+La mayoria de los `NeoHandler` custom terminan invocando un AD Process via `CallProcess`
+(stored procedure) o simplemente ejecutan una query HQL propia (ej. `YearAccountingHandler`,
+seccion 5 arriba). Pero algunos AD Process **legacy** no son stored procedures ni son invocables
+por `CallProcess` en absoluto: son servlets `ad_actionButton` classname-based (`AD_Process.
+procedurename IS NULL`), cuya logica de negocio real vive en un metodo privado
+`processButton(...)`.
+
+`YearCloseHandler` (`com.etendoerp.go.schemaforge.YearCloseHandler`, `JAVA_QUALIFIER =
+'year-close'`, spec `calendar`) es el primer caso de este patron en el modulo: los AD Process
+800036/800038 ("Close Year"/"Undo Close Year", clases `CreateRegFactAcct`/`DropRegFactAcct`)
+no tienen `procedurename`, y `CallProcess.callProcess()` no tiene ninguna rama de codigo para
+processes basados en `classname` — confirmado por spike, no asumido. Ir por el propio
+`doPost()` del servlet (simular un request HTTP real) tampoco es viable sin un contenedor
+servlet real y sin replicar los nombres de parametro legacy (`inpcYearId`, `inpwindowId`, ...).
+
+La solucion — invocar `processButton(...)` directamente via reflection, evitando la capa de
+parseo HTTP por completo — se apoya en dos piezas del propio Etendo core, no en hacks:
+
+1. `VariablesSecureApp` tiene un constructor "manual instance" oficialmente documentado en su
+   propio javadoc (el mismo mecanismo que usa `ProcessContext#toVars()` para ejecutar processes
+   en background/scheduled, fuera de un request HTTP).
+2. `DalConnectionProvider` es un `ConnectionProvider` construido sobre la conexion DAL actual,
+   pensado precisamente para callers fuera de un contexto servlet — se setea directamente sobre
+   el campo protegido `myPool` (tambien via reflection), de modo que el `init()` del servlet
+   (que necesita un `ServletConfig`/`ServletContext` real) nunca se llama.
+
+```java
+CreateRegFactAcct servlet = servletClass.getDeclaredConstructor().newInstance();
+Field poolField = /* buscar myPool en la jerarquia de clases */;
+poolField.setAccessible(true);
+poolField.set(servlet, new DalConnectionProvider(true));
+
+VariablesSecureApp vars = new VariablesSecureApp(userId, clientId, orgId, roleId, language);
+Method processButton = CreateRegFactAcct.class.getDeclaredMethod("processButton",
+    VariablesSecureApp.class, String.class, String.class, String.class);
+processButton.setAccessible(true);
+OBError result = (OBError) processButton.invoke(servlet, vars, yearId, orgId, windowId);
+```
+
+**Fragilidad conocida (trade-off aceptado, no un bug):** reflection sobre un metodo privado es
+inherentemente fragil entre versiones del core — si `processButton(...)` cambia de firma, el
+handler rompe en runtime, no en compile time. Esto se acepta unicamente porque no existe un
+punto de entrada oficial menos fragil para estos dos processes legacy en particular. **No uses
+este patron por defecto** — resuelvelo con `CallProcess` (stored procedure) o una query HQL
+directa (ver `YearAccountingHandler`) salvo que confirmes, como aqui, que `AD_Process.
+procedurename IS NULL` y que no hay otra via. Ver el javadoc de la clase
+`YearCloseHandler.java` para el razonamiento completo.
+
 ---
 
 ## 17. OpenAPI Auto-Generado
@@ -1048,15 +1195,138 @@ Neo Headless aplica seguridad en multiples capas:
 |------|-----------|------------|
 | Autenticacion | JWT bearer token via SecureWebServices | 401 |
 | OBContext | Claims JWT -> OBContext completo. Todas las queries DAL respetan org/client access | -- |
-| Window access | Verifica `ADWindowAccess` para el role actual | 403 |
-| Process access | Verifica `ADProcessAccess` antes de ejecucion | 403 |
+| Window access (tiered) | `NeoAccessHelper.hasWindowAccess(role, windowId, httpMethod)` verifica `AD_Window_Access` con tiering lectura/escritura | 403 |
+| Windowless/custom spec access | `NeoAccessHelper.hasWindowAccessForSpec(spec, httpMethod)` -- ver detalle abajo | 403 |
+| Process access | Verifica `AD_Process_Access` antes de ejecucion (binario, sin tiering) | 403 |
+| OBUIAPP process access | `NeoAccessHelper.hasObuiappProcessAccess(processId)` -- usado por handlers de reportes sin `AD_Process` propio | 403 |
 | Method-level | Cada metodo HTTP debe estar habilitado en entity record | 405 |
 | Field-level | Solo campos con `ISINCLUDED = 'Y'` participan. Read-only fields no se escriben | -- |
 | Error sanitization | Mensajes de error de autenticacion se sanitizan para no exponer detalles internos | -- |
 
+### Window access: lectura vs escritura
+
+`hasWindowAccess` resuelve en este orden:
+
+1. Sin role asignado en el request -> deniega.
+2. Role System Administrator (`"0"`) o cualquier role con `AD_Role.is_client_admin = 'Y'` -> siempre permitido, cualquier metodo.
+3. Sin fila activa de `AD_Window_Access` para role+window -> deniega.
+4. Existe una fila activa: `GET` siempre permitido; `POST`/`PUT`/`PATCH`/`DELETE` solo si el flag `IsReadWrite` de esa fila es `true` -- una fila de solo-lectura otorga visibilidad pero deniega escritura.
+
+Este check se aplica identico en los dos puntos de entrada a datos de ventana: el servlet REST (`NeoRequestRouter.handleWindowSpecRequest`) y el router de tools MCP (`McpToolRouter`, que mapea `neo_create`->`POST`, `neo_update`->`PUT`, `neo_delete`->`DELETE`, el resto->`GET` antes de llamar al mismo helper).
+
+### Windowless/custom specs ("combinacion" de ventanas)
+
+Un spec sin un `AD_Window` unico (`spec.getADWindow() == null`, ej. specs 100% custom) no se puede chequear contra un solo window ID. `hasWindowAccessForSpec(spec, httpMethod)` resuelve en 3 niveles, en este orden de prioridad:
+
+1. Sin role asignado -> deniega, siempre e incondicionalmente.
+2. Las `SFEntity` del spec resuelven (via su `AD_Tab`) a una o mas `AD_Window` reales (una "combinacion") -> el role necesita `hasWindowAccess` (para el mismo `httpMethod`) sobre **todas** ellas; deniega si falta el acceso a alguna.
+3. Ninguna entity tiene `AD_Tab` poblado (no hay datos de combinacion -- la forma actual de los specs `dashboard` y `not-posted-documents`) -> cae a permitir cualquier role autenticado. No existe modelo de `AD_Window_Access` por-ventana para estos specs hoy, asi que denegar a todos seria una regresion, no un fix.
+
+Usado en `NeoRequestRouter`, `ToolRegistry#addWindowSpec`, `NeoDiscoveryHelper#isSpecAccessible` y la capa de soporte MCP (`McpToolRouterSupport`) -- cualquier lugar que necesite resolver si un spec es accesible sin asumir un unico `AD_Window`. Antes de este fix (ETP-4510 BUG-3), un spec sin ventana se saltaba el chequeo por completo, incluso para un request sin ningun role asignado.
+
+### Reportes sin `AD_Process` propio
+
+Dos specs de tipo reporte (`not-posted-documents`, `aging-receivable`) no tienen `AD_Process` ni `AD_Window` propio, y antes no tenian ningun control de acceso. Ahora su `NeoHandler.handle()` verifica `hasObuiappProcessAccess(processId)` contra el proceso OBUIAPP real, resuelto via el FK `AD_Menu.em_obuiapp_process_id` (nunca por name-matching).
+
+### Limitaciones conocidas (ETP-4596)
+
+7 de los 8 specs `SPEC_TYPE = 'R'` sin mapping a un proceso clasico todavia no tienen control de acceso a nivel handler. Por separado, el catalogo de tools MCP y el discovery (`ToolRegistry`, `NeoDiscoveryHelper`, `McpToolRouterSupport`) siguen exponiendo la *existencia* de specs sin proceso a cualquier caller autenticado sin importar el role -- exposicion de metadata unicamente; el acceso a datos real sigue bloqueado donde exista un gate a nivel handler. Ambos gaps estan trackeados en ETP-4596, no resueltos por ETP-4510/ETP-4511.
+
 ---
 
-## 19. Testing
+## 19. Menu de Navegacion (SFListMenu)
+
+`SFListMenu` (`GET /webhooks/SFListMenu`, o preferentemente `GET /sws/neo/listmenu` -- ver `neo-headless.md` §4.10) expone el arbol de `AD_Menu` -- o una busqueda plana filtrada con `?q=` -- como JSON, podado a lo que el role del request puede alcanzar. Es el webhook de menu filtrado por role, correctamente implementado y disponible para que cualquier cliente lo consuma. El webhook en si esta escrito junto a `SFUpsertSpec`/`SFPopulateSpec` (§5) en la infraestructura de Webhooks, pero el SPA de Go lo alcanza via el NEO pseudo-spec bridge (`neo-headless.md` §4.10), no directamente por `/webhooks/SFListMenu`.
+
+> **Nota:** el sidebar del SPA de Go (`tools/app-shell` en `etendo_schema_forge`) ahora consume este webhook (`useRoleMenu()` -> `lib/menuTree.js`) para calcular que entradas de menu puede ver el role actual -- pero solo para *filtrar*: la estructura, labels e iconos del arbol siguen viniendo de un `menu.json` estatico; `useRoleMenu()` solo extrae el set de ids permitidos del arbol devuelto para ocultar/mostrar las entradas estaticas correspondientes. Que el arbol renderizado refleje tambien la forma (orden, agrupamiento, anidado) de la respuesta de este webhook sigue pendiente -- trackeado como ETP-4598.
+
+### Endpoints
+
+```bash
+# Arbol completo, filtrado por el role actual (via NEO, preferido)
+curl -X GET https://tu-etendo/sws/neo/listmenu \
+  -H "Authorization: Bearer <jwt>"
+
+# Busqueda plana por nombre, mismo filtrado
+curl -X GET "https://tu-etendo/sws/neo/listmenu?q=sales" \
+  -H "Authorization: Bearer <jwt>"
+```
+
+Response (arbol):
+
+```json
+{
+  "tree": [
+    {
+      "id": "...", "name": "Sales", "type": "folder",
+      "children": [
+        { "id": "...", "name": "Sales Order", "type": "window", "windowId": "143" }
+      ]
+    }
+  ],
+  "count": 2
+}
+```
+
+`type` sale de `AD_Menu.issummary`/`action`: `folder` (nodo summary), `window` (`action='W'`), `process` (`action='P'`), `report` (`action='R'`), `form` (`action='X'`), u `other`. Cada nodo hoja lleva el/los ID que le correspondan (`windowId`, `processId`, `obuiappProcessId`, `formId`); las carpetas llevan `children` en su lugar.
+
+### Filtrado por acceso
+
+El role del request se captura una sola vez, al principio del metodo `get()`, **antes** de entrar a `OBContext.setAdminMode()` -- admin mode solo se usa para saltar row-level security en las queries nativas que arman el arbol, nunca para decidir acceso. Un request sin role asignado recibe `{"tree": [], "count": 0}` de inmediato, sin siquiera consultar la base.
+
+Con el role resuelto, cada nodo se valida (debe pasar todos los checks que le apliquen):
+
+| El nodo lleva | Se valida via | Notas |
+|---|---|---|
+| `windowId` | `NeoAccessHelper.hasWindowAccess(role, windowId)` | Cualquier tier (solo-lectura o full) alcanza para aparecer en el menu -- el menu responde "es esto alcanzable", no "puedo escribir esto". |
+| `processId` | `NeoAccessHelper.hasProcessAccess(role, processId)` | Binario, como en §18. |
+| `obuiappProcessId` | `NeoAccessHelper.hasObuiappProcessAccess(processId)` | Cubre entries con `action = 'OBUIAPP_Process'`, enlazados via `AD_Menu.em_obuiapp_process_id` (no `ad_window_id`/`ad_process_id`). Cierra el gap donde los dos report specs gateados por OBUIAPP (§18) seguian siendo visibles en el menu aunque su handler ya rechazara el request. |
+
+Un nodo que no lleva ninguno de esos IDs (tipicamente `report`/`form`/`other` sin link a OBUIAPP) queda sin filtrar -- filtrar esos casos queda fuera de alcance de este cambio.
+
+Las carpetas nunca se filtran directamente: primero se filtran sus hijos (post-order), y la carpeta se elimina del arbol solo si termina sin hijos accesibles. `count` se recalcula despues del pruning (no refleja el conteo crudo de filas de la DB).
+
+### Fuera de alcance
+
+Este endpoint controla que aparece **en el menu**. No bloquea la navegacion directa/deep-link a una ventana sin acceso -- ese gap reactivo se mantiene abierto. El contrapunto proactivo -- decirle al frontend de antemano que tier tiene para cada ventana, antes de renderizar nada -- es `SFWindowAccessMap`, descrito a continuacion (ETP-4520).
+
+---
+
+## 19b. Mapa Proactivo de Acceso a Ventanas (SFWindowAccessMap)
+
+`SFWindowAccessMap` (`GET /webhooks/SFWindowAccessMap`, o preferentemente `GET /sws/neo/windowaccessmap` -- ver `neo-headless.md` §4.10) informa, para el usuario/role autenticado actual, su tier de acceso para cada ventana con una concesion explicita, mas si puede ver datos sensibles de contabilidad -- asi el frontend se adapta *antes* de renderizar en vez de descubrir un `403` reactivamente por-request (§18). El webhook esta escrito en la misma infraestructura de Webhooks que `SFListMenu`, pero el SPA de Go lo alcanza via el NEO pseudo-spec bridge.
+
+### Endpoint
+
+```bash
+curl -X GET https://tu-etendo/sws/neo/windowaccessmap \
+  -H "Authorization: Bearer <jwt>"
+```
+
+Response:
+
+```json
+{
+  "windowAccess": { "111": "full", "268": "read-only" },
+  "capabilities": { "showAccountingFields": true }
+}
+```
+
+Las keys de `windowAccess` son `AD_Window_ID`s; una ventana sin fila activa de `AD_Window_Access` para el role simplemente no aparece -- el frontend trata una key ausente como `"none"`.
+
+### Orden de resolucion
+
+Igual que `NeoAccessHelper.hasWindowAccess(Role, String, String)` (§18):
+
+1. Sin role asignado -> `{"windowAccess": {}, "capabilities": {}}`, sin consultar la base -- misma convencion que `SFListMenu`: el role se captura una sola vez, al principio del request, antes de entrar a `OBContext.setAdminMode()`.
+2. Role System Administrator (`"0"`) o client-admin (`NeoAccessHelper.isAdminOrClientAdmin(Role)`, ahora `public` justamente para que este webhook lo reutilice) -> cada `AD_Window` distinto detras de un `ETGO_SF_SPEC` activo con `SPEC_TYPE = 'W'` resuelve a `"full"`, y `capabilities.showAccountingFields` es siempre `true` -- la columna ni siquiera se consulta en esta rama.
+3. Si no, para cada fila activa de `AD_Window_Access` del role: `IsReadWrite = true` -> `"full"`; `IsReadWrite = false` -> `"read-only"`. `capabilities.showAccountingFields` se lee directo de la nueva columna extension `AD_Role.EM_ETGO_Show_Acct_Fields` (boolean, ETP-4520) para el role resuelto, via SQL nativo (la columna se agrego directo a la tabla fisica y todavia no esta mapeada como property tipada del entity DAL).
+
+**`AD_Role.EM_ETGO_Show_Acct_Fields`:** columna extension Yes/No agregada por este modulo (`AD_Column_ID = A0F2D12B5B4A48C2855EE73E3E93E274`, default `N`) y expuesta como campo real (`AD_Field_ID = 98C71197D0744EED96856A497E49F159`) en la ventana/tab clasica de `AD_Role`, para que un consultor funcional la togglee como cualquier otro atributo del role. Gatea la visibilidad de campos/tabs sensibles a contabilidad en Etendo GO -- ej. el status pill `Posted` en ventanas de facturas y la tab "Cuentas contables" del formulario de edicion de financial-account -- independiente del `AD_Window_Access` por-ventana.
+
+---
+
+## 20. Testing
 
 Tests unitarios en `src-test/src/com/etendoerp/go/schemaforge/`:
 
@@ -1073,10 +1343,12 @@ Tests unitarios en `src-test/src/com/etendoerp/go/schemaforge/`:
 | `SFUpsertFieldTest` | Webhook de upsert field |
 | `SFListWindowsTest` | Webhook de listar ventanas |
 | `SFListProcessesTest` | Webhook de listar procesos |
+| `SFListMenuTest` | Webhook de menu de navegacion: build/pruning del arbol, busqueda plana, filtrado por role (nodos window/process/OBUIAPP-process), role sin acceso -> menu vacio, arbol multi-nivel |
+| `SFWindowAccessMapTest` | Resolucion de windowAccess por role (full/read-only/ausente), sin role -> ambos mapas vacios, bypass admin/client-admin -> full access a toda ventana activa de Etendo GO + toda capability true, `showAccountingFields` true/false/no-seteado/sin-role |
 
 ---
 
-## 20. Troubleshooting
+## 21. Troubleshooting
 
 ### 401 Unauthorized
 - Verificar que el token JWT es valido y no expirado
@@ -1084,7 +1356,15 @@ Tests unitarios en `src-test/src/com/etendoerp/go/schemaforge/`:
 
 ### 403 Forbidden
 - El role del usuario no tiene acceso a la ventana/proceso
-- Verificar `ADWindowAccess` / `ADProcessAccess` para el role
+- Verificar `AD_Window_Access` / `AD_Process_Access` para el role
+- Para ventanas: una fila de `AD_Window_Access` de solo-lectura permite `GET` pero deniega `POST`/`PUT`/`PATCH`/`DELETE` -- revisar el flag `IsReadWrite` (ver §18)
+- Para specs sin `AD_Window` directo (windowless/custom): revisar `hasWindowAccessForSpec` -- puede requerir acceso a varias ventanas "combinadas" a la vez (ver §18)
+
+### El menu no muestra una ventana/proceso esperado
+- El role no tiene una fila activa de `AD_Window_Access`/`AD_Process_Access` para ese item (ver §19) -- alcanza con acceso de solo-lectura, no hace falta `IsReadWrite`
+- Si es un entry con `action = 'OBUIAPP_Process'`, revisar `AD_Menu.em_obuiapp_process_id` y `hasObuiappProcessAccess`
+- Un request sin ningun role asignado recibe el menu vacio (`{"tree": [], "count": 0}`), no un error
+- Una carpeta desaparece del arbol si todos sus hijos quedaron filtrados -- revisar el acceso de los hijos, no de la carpeta misma
 
 ### 404 Not Found
 - Verificar que el spec existe y esta activo (`ISACTIVE = 'Y'`)

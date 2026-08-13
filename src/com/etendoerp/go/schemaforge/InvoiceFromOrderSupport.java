@@ -22,14 +22,18 @@ import java.math.RoundingMode;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
+import java.util.UUID;
 
 import javax.enterprise.context.ApplicationScoped;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.erpCommon.utility.OBCurrencyUtils;
 import org.openbravo.model.common.invoice.Invoice;
 import org.openbravo.model.common.invoice.InvoiceLine;
+import org.openbravo.model.common.order.Order;
 import org.openbravo.model.financialmgmt.tax.TaxRate;
 
 /**
@@ -144,6 +148,96 @@ public class InvoiceFromOrderSupport {
     BigDecimal rate = (tax != null && tax.getRate() != null) ? tax.getRate() : BigDecimal.ZERO;
     BigDecimal taxAmt = net.multiply(rate).divide(new BigDecimal("100"), precision, ROUNDING);
     return net.add(taxAmt).setScale(precision, ROUNDING);
+  }
+
+  /**
+   * When the source order has a per-order rate override ({@code EM_ETGO_Currency_Rate}),
+   * creates a {@code C_Conversion_Rate_Document} record for the new invoice so that
+   * {@code InvoiceExchangeRateValidator} finds a document-level rate and allows completion,
+   * and {@code DocInvoice} uses the same rate for accounting journal entries.
+   *
+   * <p>No-op when {@code EM_ETGO_Currency_Rate} is null, invoice and org currencies are
+   * the same, or a rate record already exists for this invoice + currency pair.
+   *
+   * @param order   the source order carrying the custom exchange rate
+   * @param invoice the newly created draft invoice
+   */
+  public void propagateOrderRateToInvoice(Order order, Invoice invoice) {
+    try {
+      BigDecimal rate = order.getETGOCurrencyRate();
+      if (rate == null) {
+        return;
+      }
+      if (invoice.getCurrency() == null) {
+        return;
+      }
+      String orgId = order.getOrganization().getId();
+      String orgCurrencyId = OBCurrencyUtils.getOrgCurrency(orgId);
+      if (orgCurrencyId == null || orgCurrencyId.equals(invoice.getCurrency().getId())) {
+        return;
+      }
+
+      Connection conn = OBDal.getInstance().getConnection();
+
+      String checkSql =
+          "SELECT 1 FROM c_conversion_rate_document"
+        + " WHERE c_invoice_id = ? AND c_currency_id = ? AND c_currency_id_to = ? LIMIT 1";
+      try (PreparedStatement ps = conn.prepareStatement(checkSql)) {
+        ps.setString(1, invoice.getId());
+        ps.setString(2, invoice.getCurrency().getId());
+        ps.setString(3, orgCurrencyId);
+        try (ResultSet rs = ps.executeQuery()) {
+          if (rs.next()) {
+            return;
+          }
+        }
+      }
+
+      String newId = UUID.randomUUID().toString().replace("-", "").toUpperCase();
+      String userId = OBContext.getOBContext().getUser().getId();
+      BigDecimal grandTotal = invoice.getGrandTotalAmount();
+
+      // EM_ETGO_Currency_Rate is the org→doc multiplyRate (e.g. EUR→USD = 1.16).
+      // C_Conversion_Rate_Document.rate is the doc→org multiplier: amount_USD × docRate = amount_EUR.
+      BigDecimal docRate = BigDecimal.ONE.divide(rate, 12, RoundingMode.HALF_UP);
+      BigDecimal foreignAmount = (grandTotal != null)
+          ? grandTotal.multiply(docRate).setScale(2, RoundingMode.HALF_UP)
+          : null;
+
+      String insertSql =
+          "INSERT INTO c_conversion_rate_document ("
+        + " c_conversion_rate_document_id, ad_client_id, ad_org_id, isactive,"
+        + " created, createdby, updated, updatedby,"
+        + " c_invoice_id, c_currency_id, c_currency_id_to, rate, foreign_amount"
+        + ") VALUES (?, ?, ?, 'Y', NOW(), ?, NOW(), ?, ?, ?, ?, ?, ?)";
+
+      try (PreparedStatement ps = conn.prepareStatement(insertSql)) {
+        ps.setString(1, newId);
+        ps.setString(2, invoice.getClient().getId());
+        ps.setString(3, invoice.getOrganization().getId());
+        ps.setString(4, userId);
+        ps.setString(5, userId);
+        ps.setString(6, invoice.getId());
+        ps.setString(7, invoice.getCurrency().getId());
+        ps.setString(8, orgCurrencyId);
+        ps.setBigDecimal(9, docRate);
+        if (foreignAmount != null) {
+          ps.setBigDecimal(10, foreignAmount);
+        } else {
+          ps.setNull(10, java.sql.Types.NUMERIC);
+        }
+        ps.executeUpdate();
+        log.info("[ETP-4027] Created C_Conversion_Rate_Document {} for invoice {} (docRate={}, eTGORate={})",
+            newId, invoice.getId(), docRate, rate);
+      }
+
+      // ETP-4029: also persist the rate on the invoice column so summaries/lists can display it.
+      invoice.setETGOCurrencyRate(rate);
+      OBDal.getInstance().save(invoice);
+    } catch (Exception e) {
+      log.warn("[ETP-4027] propagateOrderRateToInvoice failed for order {} → invoice {}: {}",
+          order.getId(), invoice.getId(), e.getMessage());
+    }
   }
 
   // ── JDBC helpers ────────────────────────────────────────────────────────────
