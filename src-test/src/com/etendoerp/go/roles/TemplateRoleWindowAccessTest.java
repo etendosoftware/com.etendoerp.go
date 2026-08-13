@@ -219,7 +219,7 @@ class TemplateRoleWindowAccessTest {
   void allEightOldEtp4852SmokeTestWindowsSurviveUnchangedInTheNewMatrix() {
     Map<String, List<WindowGrant>> byRoleId = TemplateRoleWindowAccess.byRoleId();
 
-    // roleId -> {oldSmokeWindowId -> wasFullAccess}
+    // Maps each role id to its old smoke-test window ids and whether that grant was full access.
     Map<String, Map<String, Boolean>> oldSmokeGrantsByRole = new HashMap<>();
     Map<String, Boolean> financeOld = new HashMap<>();
     financeOld.put("94EAA455D2644E04AB25D93BE5157B6D", true); // Financial Account
@@ -259,13 +259,13 @@ class TemplateRoleWindowAccessTest {
   /**
    * QA (Sentinel, ETP-4878) — cross-ticket integration seam finding. Computes, straight from the
    * matrix data (no DB needed), every {@code AD_Window_ID} that is granted by two or more of the
-   * four roles at DIFFERING access levels. This set is non-empty, which is the root cause behind
-   * {@link TemplateRoleWindowAccessConflictIntegrationTest}: any personal role composed (per
-   * ETP-4852's {@code UserRoleCompositionService}) from two templates that both appear as a key
-   * for the same window here will end up with two simultaneously-active, conflicting {@code
-   * AD_Window_Access} rows for that window, resolved by {@code
-   * NeoAccessHelper#findActiveWindowAccess} with an un-ordered {@code setMaxResults(1)} query —
-   * i.e. arbitrarily, not by any explicit "most permissive/most restrictive wins" policy.
+   * four roles at DIFFERING access levels. This set is non-empty, which is the data-level root
+   * cause behind the cross-template {@code AD_Window_Access} overlap bug found via this exact
+   * matrix (ETP-4852, fixed in {@code UserRoleCompositionService} — see that class's javadoc and
+   * {@code UserRoleCompositionServiceOverlapIntegrationTest}): any personal role composed from
+   * two templates that both appear as a key for the same window here is exactly the scenario that
+   * fix's most-permissive-wins reconciliation pass exists to resolve — the window must end up full
+   * access if EITHER template wanted full, never silently one-or-the-other.
    *
    * <p>This did not exist before ETP-4878: the old 2-window-per-role smoke test used disjoint
    * window sets across all 4 roles, so this set would have been empty under the pre-ETP-4878
@@ -296,7 +296,8 @@ class TemplateRoleWindowAccessTest {
             + "conflicting window per the matrix");
     assertFalse(conflictingWindowIds.isEmpty(),
         "At least one window must be granted at conflicting access levels across roles — this "
-            + "is the data-level root cause of the ETP-4852/ETP-4878 multi-template composition "
-            + "conflict documented in TemplateRoleWindowAccessConflictIntegrationTest");
+            + "is the data-level root cause of the ETP-4852 multi-template composition overlap "
+            + "resolved by UserRoleCompositionService's most-permissive-wins reconciliation "
+            + "pass (see UserRoleCompositionServiceOverlapIntegrationTest)");
   }
 }
