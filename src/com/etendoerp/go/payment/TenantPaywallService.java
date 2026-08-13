@@ -17,6 +17,8 @@
 
 package com.etendoerp.go.payment;
 
+import org.apache.commons.lang3.StringUtils;
+
 /**
  * Decides whether an onboarding request must be paid for before any tenant is created.
  *
@@ -30,7 +32,10 @@ package com.etendoerp.go.payment;
  *   <li>Account owns no tenant yet → allowed. A first tenant is always free.</li>
  *   <li>The request targets a tenant the account already owns → allowed. That is a resume of a
  *       partially provisioned environment, not a new one, so it must not be charged again.</li>
- *   <li>Otherwise the account is asking for an additional tenant → the payment token decides.</li>
+ *   <li>Otherwise the account is asking for an additional tenant → only a payment Stripe's webhook
+ *       actually confirmed (see {@link CheckoutPaymentRegistry}) is accepted. There is no other way
+ *       to pass this check: a well-shaped but unconfirmed {@code paymentToken} is declined, not
+ *       approved.</li>
  * </ol>
  */
 public class TenantPaywallService {
@@ -41,7 +46,7 @@ public class TenantPaywallService {
     ALLOWED,
     /** An additional tenant was requested without a payment token. */
     PAYMENT_REQUIRED,
-    /** A payment token was supplied but rejected by the payment provider. */
+    /** A payment token was supplied but no confirmed Stripe payment matches it. */
     PAYMENT_DECLINED;
 
     /**
@@ -50,19 +55,6 @@ public class TenantPaywallService {
     public boolean isBlocked() {
       return this != ALLOWED;
     }
-  }
-
-  private final MockPaymentService paymentService;
-
-  /**
-   * Creates the paywall backed by the mock payment provider.
-   */
-  public TenantPaywallService() {
-    this(new MockPaymentService());
-  }
-
-  TenantPaywallService(MockPaymentService paymentService) {
-    this.paymentService = paymentService;
   }
 
   /**
@@ -77,17 +69,30 @@ public class TenantPaywallService {
    */
   public Decision decide(boolean upgradeFlagEnabled, boolean accountOwnsTenant,
       boolean resumingOwnedTenant, String paymentToken) {
+    return decide(upgradeFlagEnabled, accountOwnsTenant, resumingOwnedTenant, paymentToken, null,
+        null);
+  }
+
+  /**
+   * Validates a Stripe webhook-correlated payment for the authenticated account and tenant.
+   *
+   * @param upgradeFlagEnabled whether the tenant-upgrade flag is enabled
+   * @param accountOwnsTenant whether the account already owns a tenant
+   * @param resumingOwnedTenant whether this request resumes an owned tenant
+   * @param paymentToken the server-generated Stripe checkout request id to correlate against
+   *     {@link CheckoutPaymentRegistry}
+   * @param accountEmail authenticated account email used for payment correlation
+   * @param clientName requested client name used for payment correlation
+   * @return the paywall decision
+   */
+  public Decision decide(boolean upgradeFlagEnabled, boolean accountOwnsTenant,
+      boolean resumingOwnedTenant, String paymentToken, String accountEmail, String clientName) {
     if (!upgradeFlagEnabled || !accountOwnsTenant || resumingOwnedTenant) {
       return Decision.ALLOWED;
     }
-    PaymentOutcome outcome = paymentService.validate(paymentToken);
-    switch (outcome) {
-      case APPROVED:
-        return Decision.ALLOWED;
-      case MISSING_TOKEN:
-        return Decision.PAYMENT_REQUIRED;
-      default:
-        return Decision.PAYMENT_DECLINED;
+    if (CheckoutPaymentRegistry.isPaidFor(paymentToken, accountEmail, clientName)) {
+      return Decision.ALLOWED;
     }
+    return StringUtils.isBlank(paymentToken) ? Decision.PAYMENT_REQUIRED : Decision.PAYMENT_DECLINED;
   }
 }
