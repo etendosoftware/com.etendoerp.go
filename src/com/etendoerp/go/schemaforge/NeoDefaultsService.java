@@ -8,6 +8,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.Set;
 
 import org.apache.logging.log4j.LogManager;
@@ -321,35 +322,7 @@ public class NeoDefaultsService {
     Map<String, String> rewritten = new HashMap<>();
     while (keys.hasNext()) {
       String key = String.valueOf(keys.next());
-      Object value = defaults.opt(key);
-      if (!(value instanceof String) || ((String) value).isEmpty()) {
-        continue;
-      }
-      try {
-        Property prop = dalEntity.getProperty(key);
-        if (prop == null || !prop.isPrimitive()) {
-          continue;
-        }
-        Boolean shape = NeoDateFormat.canonicalShapeFor(prop);
-        if (shape == null) {
-          continue;
-        }
-        String raw = (String) value;
-        boolean datetime = shape.booleanValue();
-        if (NeoDateFormat.isCanonical(raw, datetime)) {
-          continue;
-        }
-        String canonical = NeoDateFormat.toCanonical(raw, datetime);
-        if (canonical == null) {
-          log.warn("[NEO] Unrecognized date format for default '{}' on {}: '{}' left as-is",
-              key, dalEntity.getName(), raw);
-          continue;
-        }
-        rewritten.put(key, canonical);
-      } catch (Exception e) {
-        // getProperty throws for keys that are not properties at all ($_identifier companions).
-        log.debug("Skipping date canonicalization for key {}: {}", key, e.getMessage());
-      }
+      canonicalDateFor(key, defaults, dalEntity).ifPresent(canonical -> rewritten.put(key, canonical));
     }
     for (Map.Entry<String, String> entry : rewritten.entrySet()) {
       try {
@@ -361,6 +334,53 @@ public class NeoDefaultsService {
     if (!rewritten.isEmpty()) {
       log.info("[NEO] canonicalizeDateDefaults: normalized {} date fields on {}: {}",
           rewritten.size(), dalEntity.getName(), rewritten.keySet());
+    }
+  }
+
+  /**
+   * Compute the canonical ISO value for a single {@code defaults} entry, if it is a
+   * date-valued, non-canonical string. Extracted from {@link #canonicalizeDateDefaults}
+   * to keep that method's cognitive complexity and break/continue count within
+   * SonarQube's limits — pure extraction, no behavior change.
+   *
+   * @param key       the defaults key being examined
+   * @param defaults  the resolved defaults object (read-only here)
+   * @param dalEntity the DAL entity used to tell date properties from everything else
+   * @return the canonical value to rewrite the key to, or empty when the key should be
+   *         left untouched (not a string, not a date property, already canonical, or an
+   *         unrecognized date shape — the last case is logged at WARN here, same as before
+   *         the extraction)
+   */
+  private static Optional<String> canonicalDateFor(String key, JSONObject defaults, Entity dalEntity) {
+    Object value = defaults.opt(key);
+    if (!(value instanceof String) || ((String) value).isEmpty()) {
+      return Optional.empty();
+    }
+    try {
+      Property prop = dalEntity.getProperty(key);
+      if (prop == null || !prop.isPrimitive()) {
+        return Optional.empty();
+      }
+      Optional<Boolean> shape = NeoDateFormat.canonicalShapeFor(prop);
+      if (shape.isEmpty()) {
+        return Optional.empty();
+      }
+      String raw = (String) value;
+      boolean datetime = shape.get().booleanValue();
+      if (NeoDateFormat.isCanonical(raw, datetime)) {
+        return Optional.empty();
+      }
+      String canonical = NeoDateFormat.toCanonical(raw, datetime);
+      if (canonical == null) {
+        log.warn("[NEO] Unrecognized date format for default '{}' on {}: '{}' left as-is",
+            key, dalEntity.getName(), raw);
+        return Optional.empty();
+      }
+      return Optional.of(canonical);
+    } catch (Exception e) {
+      // getProperty throws for keys that are not properties at all ($_identifier companions).
+      log.debug("Skipping date canonicalization for key {}: {}", key, e.getMessage());
+      return Optional.empty();
     }
   }
 
@@ -396,26 +416,7 @@ public class NeoDefaultsService {
     Map<String, Boolean> rewritten = new HashMap<>();
     while (keys.hasNext()) {
       String key = String.valueOf(keys.next());
-      Object value = defaults.opt(key);
-      if (!(value instanceof String) || ((String) value).isEmpty()) {
-        continue;
-      }
-      try {
-        if (!NeoBooleanFormat.isBooleanProperty(dalEntity.getProperty(key))) {
-          continue;
-        }
-        String raw = (String) value;
-        Boolean canonical = NeoBooleanFormat.toCanonical(raw);
-        if (canonical == null) {
-          log.warn("[NEO] Unrecognized boolean format for default '{}' on {}: '{}' left as-is",
-              key, dalEntity.getName(), raw);
-          continue;
-        }
-        rewritten.put(key, canonical);
-      } catch (Exception e) {
-        // getProperty throws for keys that are not properties at all ($_identifier companions).
-        log.debug("Skipping boolean canonicalization for key {}: {}", key, e.getMessage());
-      }
+      canonicalBooleanFor(key, defaults, dalEntity).ifPresent(canonical -> rewritten.put(key, canonical));
     }
     for (Map.Entry<String, Boolean> entry : rewritten.entrySet()) {
       try {
@@ -427,6 +428,43 @@ public class NeoDefaultsService {
     if (!rewritten.isEmpty()) {
       log.info("[NEO] canonicalizeBooleanDefaults: normalized {} boolean fields on {}: {}",
           rewritten.size(), dalEntity.getName(), rewritten.keySet());
+    }
+  }
+
+  /**
+   * Compute the canonical boolean value for a single {@code defaults} entry, if it is a
+   * boolean-valued, string-shaped default. Extracted from {@link #canonicalizeBooleanDefaults}
+   * for the same reason {@link #canonicalDateFor} was extracted from
+   * {@link #canonicalizeDateDefaults} — pure extraction, no behavior change.
+   *
+   * @param key       the defaults key being examined
+   * @param defaults  the resolved defaults object (read-only here)
+   * @param dalEntity the DAL entity used to tell boolean properties from everything else
+   * @return the canonical boolean to rewrite the key to, or empty when the key should be left
+   *         untouched (not a string, not a boolean property, or an unrecognized shape — the
+   *         last case is logged at WARN here, same as before the extraction)
+   */
+  private static Optional<Boolean> canonicalBooleanFor(String key, JSONObject defaults, Entity dalEntity) {
+    Object value = defaults.opt(key);
+    if (!(value instanceof String) || ((String) value).isEmpty()) {
+      return Optional.empty();
+    }
+    try {
+      if (!NeoBooleanFormat.isBooleanProperty(dalEntity.getProperty(key))) {
+        return Optional.empty();
+      }
+      String raw = (String) value;
+      Optional<Boolean> canonical = NeoBooleanFormat.toCanonical(raw);
+      if (canonical.isEmpty()) {
+        log.warn("[NEO] Unrecognized boolean format for default '{}' on {}: '{}' left as-is",
+            key, dalEntity.getName(), raw);
+        return Optional.empty();
+      }
+      return canonical;
+    } catch (Exception e) {
+      // getProperty throws for keys that are not properties at all ($_identifier companions).
+      log.debug("Skipping boolean canonicalization for key {}: {}", key, e.getMessage());
+      return Optional.empty();
     }
   }
 

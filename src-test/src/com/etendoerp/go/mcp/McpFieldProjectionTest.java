@@ -21,6 +21,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.HashSet;
+import java.util.Optional;
 import java.util.Set;
 
 import org.codehaus.jettison.json.JSONArray;
@@ -185,7 +186,7 @@ class McpFieldProjectionTest {
     void reportsUnknown() throws JSONException {
       JSONObject root = envelope();
       McpFieldProjection.reportUnknownFields(root, req("documentNo", "totalGross", "bpartner"),
-          req("id", "documentNo", "businessPartner", "grandTotalAmount"));
+          Optional.of(req("id", "documentNo", "businessPartner", "grandTotalAmount")));
 
       JSONArray unknown = root.getJSONObject("response").getJSONArray(KEY_UNKNOWN);
       assertEquals(2, unknown.length());
@@ -204,7 +205,7 @@ class McpFieldProjectionTest {
       root.put("response", response);
 
       McpFieldProjection.reportUnknownFields(root, req("totalGross"),
-          req("id", "grandTotalAmount"));
+          Optional.of(req("id", "grandTotalAmount")));
 
       assertEquals("totalGross",
           root.getJSONObject("response").getJSONArray(KEY_UNKNOWN).getString(0));
@@ -215,13 +216,21 @@ class McpFieldProjectionTest {
     void silentWhenAllKnown() throws JSONException {
       JSONObject root = envelope();
       McpFieldProjection.reportUnknownFields(root, req("documentNo"),
-          req("id", "documentNo"));
+          Optional.of(req("id", "documentNo")));
       assertFalse(root.getJSONObject("response").has(KEY_UNKNOWN));
     }
 
     @Test
-    @DisplayName("an unknown emittable set leaves the names unjudged rather than accusing them")
-    void nullEmittableIsNoOp() throws JSONException {
+    @DisplayName("an absent emittable set leaves the names unjudged rather than accusing them")
+    void emptyEmittableIsNoOp() throws JSONException {
+      JSONObject root = envelope();
+      McpFieldProjection.reportUnknownFields(root, req("whatever"), Optional.empty());
+      assertFalse(root.getJSONObject("response").has(KEY_UNKNOWN));
+    }
+
+    @Test
+    @DisplayName("a null Optional is defensively treated the same as an absent one")
+    void nullOptionalIsNoOp() throws JSONException {
       JSONObject root = envelope();
       McpFieldProjection.reportUnknownFields(root, req("whatever"), null);
       assertFalse(root.getJSONObject("response").has(KEY_UNKNOWN));
@@ -231,11 +240,11 @@ class McpFieldProjectionTest {
     @DisplayName("no requested names and no response envelope are both no-ops")
     void degenerateInputs() throws JSONException {
       JSONObject root = envelope();
-      McpFieldProjection.reportUnknownFields(root, req(), req("id"));
+      McpFieldProjection.reportUnknownFields(root, req(), Optional.of(req("id")));
       assertFalse(root.getJSONObject("response").has(KEY_UNKNOWN));
 
       // must not throw when there is no envelope to attach to
-      McpFieldProjection.reportUnknownFields(new JSONObject(), req("x"), req("id"));
+      McpFieldProjection.reportUnknownFields(new JSONObject(), req("x"), Optional.of(req("id")));
     }
   }
 }

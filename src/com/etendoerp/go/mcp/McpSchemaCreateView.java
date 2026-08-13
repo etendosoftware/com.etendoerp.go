@@ -88,7 +88,7 @@ final class McpSchemaCreateView {
    * expression — {@code neo_defaults} resolves it server-side, and the hint says so.
    */
   private static final Set<String> REDUNDANT_KEYS = Set.of(
-      "visibility", "readOnly", McpSchemaFieldBuilder.KEY_USER_REQUIRED, "required",
+      "visibility", "readOnly", McpSchemaFieldBuilder.KEY_USER_REQUIRED, KEY_REQUIRED,
       McpSchemaFieldBuilder.KEY_DEFAULT_EXPRESSION, McpSchemaFieldBuilder.KEY_DEFAULT_SOURCE);
 
   static final String CREATE_HINT =
@@ -160,13 +160,11 @@ final class McpSchemaCreateView {
     Iterator<?> keys = values.keys();
     while (keys.hasNext()) {
       String key = String.valueOf(keys.next());
-      if (KEY_METADATA.equals(key) || key.endsWith(IDENTIFIER_SUFFIX)) {
-        continue;
+      boolean skip = KEY_METADATA.equals(key) || key.endsWith(IDENTIFIER_SUFFIX)
+          || McpDefaultsView.isUnresolvedValue(values.opt(key));
+      if (!skip) {
+        resolved.add(key);
       }
-      if (McpDefaultsView.isUnresolvedValue(values.opt(key))) {
-        continue;
-      }
-      resolved.add(key);
     }
     return resolved;
   }

@@ -73,12 +73,20 @@ public final class NeoErrorSanitizer {
    * and is left in the message: the only messages that still carry it are the ones we could not
    * reclassify, and rewriting them would touch the wording the import UI depends on
    * ({@link #DUPLICATE_KEY_ERROR}).</p>
+   *
+   * <p>The captured column-name group is written {@code \w+}, not {@code [A-Za-z0-9_]+}: under
+   * the {@code CASE_INSENSITIVE} flag this pattern is compiled with, {@code A-Z} and {@code a-z}
+   * already cover each other, making the two ranges a duplicate of one another (SonarQube
+   * java:S6397) — and the resulting set is exactly Java's predefined {@code \w} (SonarQube
+   * java:S5867), unaffected by {@code CASE_INSENSITIVE} since it is already case-symmetric. No
+   * {@code UNICODE_CHARACTER_CLASS} flag is set, so {@code \w} matches precisely
+   * {@code [a-zA-Z0-9_]} here — the same set as before, just without the redundant ranges.</p>
    */
   private static final String QUOTE_OR_ESCAPED = "(?:&quot;|&#34;|[\"«»'])?";
 
   private static final java.util.regex.Pattern NOT_NULL_COLUMN_PATTERN =
       java.util.regex.Pattern.compile(
-          "null value in column\\s+" + QUOTE_OR_ESCAPED + "([A-Za-z0-9_]+)" + QUOTE_OR_ESCAPED,
+          "null value in column\\s+" + QUOTE_OR_ESCAPED + "(\\w+)" + QUOTE_OR_ESCAPED,
           java.util.regex.Pattern.CASE_INSENSITIVE);
 
   /**

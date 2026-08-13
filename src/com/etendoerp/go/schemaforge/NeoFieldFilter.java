@@ -22,6 +22,7 @@ import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 
 import org.apache.logging.log4j.LogManager;
@@ -385,19 +386,20 @@ public class NeoFieldFilter {
    * undefined on an empty result set, which is exactly when a typo is most expensive to miss
    * (IMP-18). Read-only: the returned set is a copy.
    *
-   * @return the emittable response keys, or {@code null} when this filter is inactive (no
-   *     {@code ETGO_SF_FIELD} config), in which case the response is unfiltered and the caller must
-   *     fall back to the DAL entity's own property list rather than assume nothing is valid
+   * @return {@link Optional#of} the emittable response keys, or {@link Optional#empty()} when this
+   *     filter is inactive (no {@code ETGO_SF_FIELD} config), in which case the response is
+   *     unfiltered and the caller must fall back to the DAL entity's own property list rather than
+   *     assume nothing is valid
    */
-  public Set<String> emittableResponseKeys() {
+  public Optional<Set<String>> emittableResponseKeys() {
     if (!active || includedFields == null) {
-      return null;
+      return Optional.empty();
     }
     Set<String> keys = new HashSet<>();
     for (String propName : includedFields) {
       keys.add(propNameToApiKey.getOrDefault(propName, propName));
     }
-    return keys;
+    return Optional.of(keys);
   }
 
   /**

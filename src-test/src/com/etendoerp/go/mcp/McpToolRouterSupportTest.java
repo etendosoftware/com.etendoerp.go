@@ -161,7 +161,7 @@ class McpToolRouterSupportTest {
   void writableSystemDataEntityIsNotMarkedReadOnly() throws Exception {
     SFEntity tax = writableEntity("tax");
 
-    JSONObject discovered = McpToolRouterSupport.buildDiscoverEntity(tax);
+    JSONObject discovered = McpSupportInternals.buildDiscoverEntity(tax);
 
     assertFalse(discovered.getBoolean("readOnly"));
     assertTrue(arrayContains(discovered.getJSONArray("methods"), "POST"));
@@ -181,7 +181,7 @@ class McpToolRouterSupportTest {
   void entityWithoutReadOrWriteMethodsIsNotMarkedReadOnly() throws Exception {
     SFEntity disabled = entityWithMethods("disabled", false, false, false, false, false, false);
 
-    JSONObject discovered = McpToolRouterSupport.buildDiscoverEntity(disabled);
+    JSONObject discovered = McpSupportInternals.buildDiscoverEntity(disabled);
 
     assertFalse(discovered.getBoolean("readOnly"));
   }
@@ -208,7 +208,7 @@ class McpToolRouterSupportTest {
   }
 
   private void assertReadOnlyDiscoverEntity(SFEntity entity) throws Exception {
-    JSONObject discovered = McpToolRouterSupport.buildDiscoverEntity(entity);
+    JSONObject discovered = McpSupportInternals.buildDiscoverEntity(entity);
 
     assertTrue(discovered.getBoolean("readOnly"));
     JSONArray methods = discovered.getJSONArray("methods");
@@ -221,7 +221,7 @@ class McpToolRouterSupportTest {
   }
 
   private void assertMutableDiscoverEntity(SFEntity entity) throws Exception {
-    assertFalse(McpToolRouterSupport.buildDiscoverEntity(entity).getBoolean("readOnly"));
+    assertFalse(McpSupportInternals.buildDiscoverEntity(entity).getBoolean("readOnly"));
   }
 
   // ─── hasSpecAccess ──────────────────────────────────────────────────
@@ -537,7 +537,7 @@ class McpToolRouterSupportTest {
     void allHandlerEntitiesMakeTheSpecHandlerOnly() {
       stubEntityCriteria(mockOBDal, List.of(handlerOnlyEntity(), handlerOnlyEntity()));
 
-      assertTrue(McpToolRouterSupport.isHandlerOnlySpec(spec("dashboard")));
+      assertTrue(McpSupportInternals.isHandlerOnlySpec(spec("dashboard")));
     }
 
     @Test
@@ -545,7 +545,7 @@ class McpToolRouterSupportTest {
     void oneTabBackedEntityDisqualifiesHandlerOnly() {
       stubEntityCriteria(mockOBDal, List.of(handlerOnlyEntity(), tabBackedEntity(true)));
 
-      assertFalse(McpToolRouterSupport.isHandlerOnlySpec(spec("sales-order")));
+      assertFalse(McpSupportInternals.isHandlerOnlySpec(spec("sales-order")));
     }
 
     @Test
@@ -553,7 +553,7 @@ class McpToolRouterSupportTest {
     void emptyEntityListIsNotHandlerOnly() {
       stubEntityCriteria(mockOBDal, Collections.emptyList());
 
-      assertFalse(McpToolRouterSupport.isHandlerOnlySpec(spec("empty")));
+      assertFalse(McpSupportInternals.isHandlerOnlySpec(spec("empty")));
     }
 
     /**
@@ -647,21 +647,21 @@ class McpToolRouterSupportTest {
       when(mockOBDal.createCriteria(SFEntity.class))
           .thenThrow(new IllegalStateException("no session"));
 
-      assertFalse(McpToolRouterSupport.isHandlerOnlySpec(spec("boom")));
+      assertFalse(McpSupportInternals.isHandlerOnlySpec(spec("boom")));
       assertFalse(McpToolRouterSupport.isReadOnlySpec(spec("boom")));
     }
 
     @Test
     void nullSpecIsNeitherHandlerOnlyNorReadOnly() {
-      assertFalse(McpToolRouterSupport.isHandlerOnlySpec((SFSpec) null));
+      assertFalse(McpSupportInternals.isHandlerOnlySpec((SFSpec) null));
       assertFalse(McpToolRouterSupport.isReadOnlySpec((SFSpec) null));
     }
 
     /** The list overloads are the single implementation; null/empty means "no evidence". */
     @Test
     void handlerOnlyListOverloadTreatsNullAndEmptyAsNoEvidence() {
-      assertFalse(McpToolRouterSupport.isHandlerOnlySpec((List<SFEntity>) null));
-      assertFalse(McpToolRouterSupport.isHandlerOnlySpec(Collections.emptyList()));
+      assertFalse(McpSupportInternals.isHandlerOnlySpec((List<SFEntity>) null));
+      assertFalse(McpSupportInternals.isHandlerOnlySpec(Collections.emptyList()));
     }
 
     /** The list overload is the single implementation; null/empty means "no evidence". */
@@ -2177,11 +2177,11 @@ class McpToolRouterSupportTest {
     @Test
     @DisplayName("maps each status onto a stable code an agent can branch on")
     void mapsStatusesToCodes() {
-      assertEquals("not_found", McpToolRouterSupport.errorCodeForStatus(404));
-      assertEquals("method_not_allowed", McpToolRouterSupport.errorCodeForStatus(405));
-      assertEquals("validation_error", McpToolRouterSupport.errorCodeForStatus(400));
-      assertEquals("validation_error", McpToolRouterSupport.errorCodeForStatus(422));
-      assertEquals("server_error", McpToolRouterSupport.errorCodeForStatus(500));
+      assertEquals("not_found", McpSupportInternals.errorCodeForStatus(404));
+      assertEquals("method_not_allowed", McpSupportInternals.errorCodeForStatus(405));
+      assertEquals("validation_error", McpSupportInternals.errorCodeForStatus(400));
+      assertEquals("validation_error", McpSupportInternals.errorCodeForStatus(422));
+      assertEquals("server_error", McpSupportInternals.errorCodeForStatus(500));
     }
 
     @Test
@@ -2194,16 +2194,16 @@ class McpToolRouterSupportTest {
       response.put("error", inner);
       nested.put("response", response);
       assertEquals("Unit of Measure mismatch (product/transaction)",
-          McpToolRouterSupport.extractDalMessage(nested));
+          McpSupportInternals.extractDalMessage(nested));
 
       JSONObject perField = new JSONObject();
       JSONObject errors = new JSONObject();
       errors.put("documentNo", "required");
       perField.put("errors", errors);
-      assertEquals("documentNo: required", McpToolRouterSupport.extractDalMessage(perField));
+      assertEquals("documentNo: required", McpSupportInternals.extractDalMessage(perField));
 
-      assertNull(McpToolRouterSupport.extractDalMessage(null));
-      assertNull(McpToolRouterSupport.extractDalMessage(new JSONObject()));
+      assertNull(McpSupportInternals.extractDalMessage(null));
+      assertNull(McpSupportInternals.extractDalMessage(new JSONObject()));
     }
   }
 

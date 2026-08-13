@@ -25,15 +25,11 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
-
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
@@ -45,8 +41,6 @@ import org.openbravo.base.model.Entity;
 import org.openbravo.base.model.ModelProvider;
 import org.openbravo.base.model.Property;
 import org.openbravo.base.structure.BaseOBObject;
-import org.openbravo.client.kernel.KernelUtils;
-import org.openbravo.dal.core.DalUtil;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.dal.service.OBQuery;
@@ -446,12 +440,12 @@ class NeoCrudHandler {
     String tabWhere = adTab.getHqlwhereclause();
     if (StringUtils.isNotBlank(tabWhere)) {
       if (parentId != null && tabWhere.contains("@")) {
-        tabWhere = resolveTabWhereTokens(adTab, tabWhere, parentId);
+        tabWhere = NeoParentTabFilterResolver.resolveTabWhereTokens(adTab, tabWhere, parentId);
       }
       where.append("(").append(tabWhere).append(")");
     }
     if (parentId != null && adTab.getTabLevel() != null && adTab.getTabLevel() > 0) {
-      String parentFilter = resolveParentFilter(adTab, parentId);
+      String parentFilter = NeoParentTabFilterResolver.resolveParentFilter(adTab, parentId);
       if (StringUtils.isNotBlank(parentFilter)) {
         if (where.length() > 0) {
           where.append(HQL_AND_OPERATOR);
@@ -830,141 +824,6 @@ class NeoCrudHandler {
     return NeoTypeCoercionHelper.wrapForSmartclient(filteredBody, dalEntityName, recordId);
   }
 
-  private static final Pattern TAB_WHERE_TOKEN_PATTERN = Pattern.compile("@([A-Za-z_.]+)@");
-
-  /**
-   * Replaces {@code @token@} placeholders in a tab HQL where clause using the actual column
-   * values from the parent record rather than substituting all tokens with the same parentId.
-   *
-   * <p>Classic Etendo resolves each {@code @ColumnName@} against the corresponding column on the
-   * parent record. NEO previously replaced every token with the same parentId, which broke cases
-   * where a tab has two different tokens — e.g. {@code @AD_Org_ID@} (the parent's organization
-   * UUID) and {@code @aeatsii_config_id@} (the parent record's primary key).</p>
-   *
-   * <p>Resolution order for each token:</p>
-   * <ol>
-   *   <li>{@code @AD_Org_ID@} / {@code @Org_ID@} → parent record's {@code organization.id}</li>
-   *   <li>{@code @AD_Client_ID@} / {@code @Client_ID@} → parent record's {@code client.id}</li>
-   *   <li>{@code @<tableName>_id@} → {@code parentId} (the parent PK)</li>
-   *   <li>Any other token → matched against parent entity property column names</li>
-   *   <li>Fallback → {@code parentId}</li>
-   * </ol>
-   */
-  private String resolveTabWhereTokens(Tab adTab, String tabWhere, String parentId) {
-    Tab parentTab = null;
-    BaseOBObject parentRecord = null;
-    Entity parentEntity = null;
-    String parentTableName = null;
-
-    try {
-      parentTab = KernelUtils.getInstance().getParentTab(adTab);
-      if (parentTab != null && parentTab.getTable() != null) {
-        parentTableName = parentTab.getTable().getName().toLowerCase();
-        parentEntity = ModelProvider.getInstance()
-            .getEntityByTableId(parentTab.getTable().getId());
-        if (parentEntity != null) {
-          parentRecord = OBDal.getInstance().get(parentEntity.getName(), parentId);
-        }
-      }
-    } catch (Exception e) {
-      log.warn("Could not load parent record for tab '{}' parentId='{}': {}",
-          adTab.getName(), parentId, e.getMessage());
-    }
-
-    final BaseOBObject finalParentRecord = parentRecord;
-    final Entity finalParentEntity = parentEntity;
-    final String finalParentTableName = parentTableName;
-
-    Matcher matcher = TAB_WHERE_TOKEN_PATTERN.matcher(tabWhere);
-    StringBuilder result = new StringBuilder();
-    while (matcher.find()) {
-      String token = matcher.group(1);
-      String value = resolveTokenFromParent(
-          token, parentId, finalParentRecord, finalParentEntity, finalParentTableName);
-      matcher.appendReplacement(result, Matcher.quoteReplacement("'" + value.replace("'", "''") + "'"));
-    }
-    matcher.appendTail(result);
-    return result.toString();
-  }
-
-  /**
-   * Resolves a single {@code @token@} value from the parent record.
-   */
-  private String resolveTokenFromParent(String token, String parentId,
-      BaseOBObject parentRecord, Entity parentEntity, String parentTableName) {
-    if (parentRecord == null) {
-      return parentId;
-    }
-    String tokenLower = token.toLowerCase(Locale.ROOT);
-
-    if ("ad_org_id".equals(tokenLower) || "org_id".equals(tokenLower)) {
-      return resolveRelatedObjectId(parentRecord, "organization", parentId);
-    }
-
-    if ("ad_client_id".equals(tokenLower) || "client_id".equals(tokenLower)) {
-      return resolveRelatedObjectId(parentRecord, "client", parentId);
-    }
-
-    if (parentTableName != null && tokenLower.equals(parentTableName + "_id")) {
-      return parentId;
-    }
-
-    if (parentEntity != null) {
-      String entityValue = resolveTokenFromEntityProperty(token, parentRecord, parentEntity);
-      return entityValue != null ? entityValue : parentId;
-    }
-
-    return parentId;
-  }
-
-  private String resolveRelatedObjectId(BaseOBObject parentRecord, String propertyName,
-      String fallbackValue) {
-    try {
-      Object relatedObject = parentRecord.get(propertyName);
-      if (relatedObject instanceof BaseOBObject) {
-        return DalUtil.getId((BaseOBObject) relatedObject).toString();
-      }
-    } catch (Exception e) {
-      log.debug("Could not resolve parent {} token", propertyName, e);
-    }
-    return fallbackValue;
-  }
-
-  private String resolveTokenFromEntityProperty(String token, BaseOBObject parentRecord,
-      Entity parentEntity) {
-    try {
-      for (Property prop : parentEntity.getProperties()) {
-        if (prop.getColumnName() != null && prop.getColumnName().equalsIgnoreCase(token)) {
-          return stringifyParentValue(parentRecord.get(prop.getName()));
-        }
-      }
-    } catch (Exception e) {
-      log.debug("Could not resolve parent token {}", token, e);
-    }
-    return null;
-  }
-
-  private String stringifyParentValue(Object value) {
-    if (value instanceof BaseOBObject) {
-      return DalUtil.getId((BaseOBObject) value).toString();
-    }
-    return value != null ? value.toString() : "";
-  }
-
-  /**
-   * Resolves the HQL filter expression that constrains child tab records by parent record ID.
-   */
-  private String resolveParentFilter(Tab childTab, String parentId) {
-    try {
-      NeoTypeCoercionHelper.ParentFilter parentFilter =
-          NeoTypeCoercionHelper.buildParentWhereClause(childTab, parentId);
-      return parentFilter != null ? parentFilter.resolveForStringApi() : null;
-    } catch (Exception e) {
-      log.error("Error resolving parent filter for tab '{}': {}", childTab.getName(), e.getMessage(), e);
-      return null;
-    }
-  }
-
   /**
    * Parses an integer from a raw query-string value, falling back to
    * {@code fallback} when the value is blank or malformed.
@@ -1093,7 +952,7 @@ class NeoCrudHandler {
     String tabWhere = adTab.getHqlwhereclause();
     addTabWherePredicate(adTab, tabWhere, parentId, predicates);
     if (parentId != null && adTab.getTabLevel() != null && adTab.getTabLevel() > 0) {
-      String parentFilter = resolveParentFilter(adTab, parentId);
+      String parentFilter = NeoParentTabFilterResolver.resolveParentFilter(adTab, parentId);
       if (StringUtils.isNotBlank(parentFilter)) {
         predicates.add("(" + parentFilter + ")");
       }
@@ -1129,7 +988,7 @@ class NeoCrudHandler {
   private void addTabWherePredicate(Tab adTab, String tabWhere, String parentId, List<String> predicates) {
     if (StringUtils.isNotBlank(tabWhere)) {
       if (parentId != null && tabWhere.contains("@")) {
-        tabWhere = resolveTabWhereTokens(adTab, tabWhere, parentId);
+        tabWhere = NeoParentTabFilterResolver.resolveTabWhereTokens(adTab, tabWhere, parentId);
       }
       if (!tabWhere.contains("@")) {
         // Skip when unresolved @session_tokens@ remain — OBQuery can't bind

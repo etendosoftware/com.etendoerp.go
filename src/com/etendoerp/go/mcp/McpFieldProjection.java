@@ -19,6 +19,7 @@ package com.etendoerp.go.mcp;
 
 import java.util.HashSet;
 import java.util.Iterator;
+import java.util.Optional;
 import java.util.Set;
 
 import org.codehaus.jettison.json.JSONArray;
@@ -113,19 +114,20 @@ final class McpFieldProjection {
    *
    * <p>Validation is against what the entity can emit, not against the rows that came back: on an
    * empty result set no row can answer the question, and that is exactly when a typo costs the most
-   * (an agent reads "no matches" and concludes the data is missing). A {@code null} {@code emittable}
-   * means the emittable set could not be determined, and leaves the names unjudged — silence is
-   * better than accusing a valid field.
+   * (an agent reads "no matches" and concludes the data is missing). An empty (or {@code null})
+   * {@code emittable} means the emittable set could not be determined, and leaves the names
+   * unjudged — silence is better than accusing a valid field.
    */
   static void reportUnknownFields(JSONObject responseJson, Set<String> requestedBase,
-      Set<String> emittable) throws JSONException {
+      Optional<Set<String>> emittable) throws JSONException {
     if (responseJson == null || requestedBase == null || requestedBase.isEmpty()
-        || emittable == null) {
+        || emittable == null || emittable.isEmpty()) {
       return;
     }
+    Set<String> emittableNames = emittable.get();
     java.util.List<String> unknown = new java.util.ArrayList<>();
     for (String name : requestedBase) {
-      if (!emittable.contains(name)) {
+      if (!emittableNames.contains(name)) {
         unknown.add(name);
       }
     }

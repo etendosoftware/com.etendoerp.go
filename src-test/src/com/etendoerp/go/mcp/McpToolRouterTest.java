@@ -1253,15 +1253,16 @@ public class McpToolRouterTest {
   // ── checkJsonServiceError envelopes (ETP-4793 / IMP-17) ───────────────
 
   /**
-   * Invokes the private classifier, which before IMP-17 returned core's prose as a bare String —
-   * the leak evidence B13 recorded.
+   * Invokes the classifier, which before IMP-17 returned core's prose as a bare String — the leak
+   * evidence B13 recorded. Moved from {@link McpToolRouter} to {@link McpWriteRequestSupport}
+   * (ETP-4793, method-count split), where it is package-private static, so no instance is needed.
    */
   private JSONObject invokeCheckJsonServiceError(JSONObject responseJson, String seeAlso)
       throws Exception {
-    java.lang.reflect.Method m = McpToolRouter.class.getDeclaredMethod(
+    java.lang.reflect.Method m = McpWriteRequestSupport.class.getDeclaredMethod(
         "checkJsonServiceError", JSONObject.class, String.class);
     m.setAccessible(true);
-    return (JSONObject) m.invoke(new McpToolRouter(), responseJson, seeAlso);
+    return (JSONObject) m.invoke(null, responseJson, seeAlso);
   }
 
   private JSONObject dalFailure(String message) throws Exception {

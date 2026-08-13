@@ -31,6 +31,7 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 
 import org.codehaus.jettison.json.JSONArray;
@@ -390,14 +391,15 @@ class NeoFieldFilterTest {
 
       // The DAL name "dateAcct" must NOT appear: the caller never sees it, so asking for it is
       // as wrong as asking for a field that does not exist.
-      assertEquals(Set.of("id", "documentNo", "accountingDate"), filter.emittableResponseKeys());
+      assertEquals(Optional.of(Set.of("id", "documentNo", "accountingDate")),
+          filter.emittableResponseKeys());
     }
 
     @Test
-    @DisplayName("Returns null for an inactive filter — the response is unfiltered, so the spec "
-        + "cannot answer what is emittable")
-    void inactiveReturnsNull() {
-      assertNull(NeoFieldFilter.forEntity(null, "Order").emittableResponseKeys());
+    @DisplayName("Returns Optional.empty() for an inactive filter — the response is unfiltered, so "
+        + "the spec cannot answer what is emittable")
+    void inactiveReturnsEmpty() {
+      assertEquals(Optional.empty(), NeoFieldFilter.forEntity(null, "Order").emittableResponseKeys());
     }
   }
 

@@ -19,11 +19,12 @@ package com.etendoerp.go.schemaforge.util;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
+
+import java.util.Optional;
 
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
@@ -51,6 +52,17 @@ import org.openbravo.base.model.Property;
 class NeoBooleanFormatTest {
 
   /**
+   * A {@code null} property is not eligible — the base case every {@code isBooleanProperty}
+   * check builds on. Kept at the top level (rather than inside {@link Eligibility}) so this
+   * class carries at least one test of its own, not just nested ones (SonarQube java:S2187).
+   */
+  @Test
+  @DisplayName("a null property is not eligible")
+  void nullPropertyIsNotEligible() {
+    assertFalse(NeoBooleanFormat.isBooleanProperty(null));
+  }
+
+  /**
    * Builds a mock DAL property whose primitive Java type is {@code type}. A {@code null}
    * {@code type} models a property whose primitive object type is not resolvable.
    */
@@ -69,37 +81,37 @@ class NeoBooleanFormatTest {
     @Test
     @DisplayName("the storage encoding 'Y'/'N' becomes a real boolean")
     void storageEncoding() {
-      assertEquals(Boolean.TRUE, NeoBooleanFormat.toCanonical("Y"));
-      assertEquals(Boolean.FALSE, NeoBooleanFormat.toCanonical("N"));
+      assertEquals(Optional.of(Boolean.TRUE), NeoBooleanFormat.toCanonical("Y"));
+      assertEquals(Optional.of(Boolean.FALSE), NeoBooleanFormat.toCanonical("N"));
     }
 
     @Test
     @DisplayName("stringified booleans are accepted too")
     void stringifiedBooleans() {
-      assertEquals(Boolean.TRUE, NeoBooleanFormat.toCanonical("true"));
-      assertEquals(Boolean.FALSE, NeoBooleanFormat.toCanonical("false"));
+      assertEquals(Optional.of(Boolean.TRUE), NeoBooleanFormat.toCanonical("true"));
+      assertEquals(Optional.of(Boolean.FALSE), NeoBooleanFormat.toCanonical("false"));
     }
 
     @Test
     @DisplayName("case and surrounding whitespace are irrelevant")
     void caseAndWhitespaceInsensitive() {
-      assertEquals(Boolean.TRUE, NeoBooleanFormat.toCanonical("y"));
-      assertEquals(Boolean.FALSE, NeoBooleanFormat.toCanonical("n"));
-      assertEquals(Boolean.TRUE, NeoBooleanFormat.toCanonical("TRUE"));
-      assertEquals(Boolean.FALSE, NeoBooleanFormat.toCanonical("False"));
-      assertEquals(Boolean.TRUE, NeoBooleanFormat.toCanonical("  Y  "));
+      assertEquals(Optional.of(Boolean.TRUE), NeoBooleanFormat.toCanonical("y"));
+      assertEquals(Optional.of(Boolean.FALSE), NeoBooleanFormat.toCanonical("n"));
+      assertEquals(Optional.of(Boolean.TRUE), NeoBooleanFormat.toCanonical("TRUE"));
+      assertEquals(Optional.of(Boolean.FALSE), NeoBooleanFormat.toCanonical("False"));
+      assertEquals(Optional.of(Boolean.TRUE), NeoBooleanFormat.toCanonical("  Y  "));
     }
 
     @Test
     @DisplayName("an unrecognised value is refused, never guessed as false")
     void unrecognisedIsRefused() {
-      assertNull(NeoBooleanFormat.toCanonical("Yes"));
-      assertNull(NeoBooleanFormat.toCanonical("1"));
-      assertNull(NeoBooleanFormat.toCanonical("0"));
-      assertNull(NeoBooleanFormat.toCanonical("banana"));
-      assertNull(NeoBooleanFormat.toCanonical(""));
-      assertNull(NeoBooleanFormat.toCanonical("   "));
-      assertNull(NeoBooleanFormat.toCanonical(null));
+      assertEquals(Optional.empty(), NeoBooleanFormat.toCanonical("Yes"));
+      assertEquals(Optional.empty(), NeoBooleanFormat.toCanonical("1"));
+      assertEquals(Optional.empty(), NeoBooleanFormat.toCanonical("0"));
+      assertEquals(Optional.empty(), NeoBooleanFormat.toCanonical("banana"));
+      assertEquals(Optional.empty(), NeoBooleanFormat.toCanonical(""));
+      assertEquals(Optional.empty(), NeoBooleanFormat.toCanonical("   "));
+      assertEquals(Optional.empty(), NeoBooleanFormat.toCanonical(null));
     }
   }
 
@@ -162,12 +174,6 @@ class NeoBooleanFormatTest {
       Property prop = mock(Property.class);
       when(prop.isPrimitive()).thenReturn(false);
       assertFalse(NeoBooleanFormat.isBooleanProperty(prop));
-    }
-
-    @Test
-    @DisplayName("a null property is not eligible")
-    void nullProperty() {
-      assertFalse(NeoBooleanFormat.isBooleanProperty(null));
     }
   }
 }

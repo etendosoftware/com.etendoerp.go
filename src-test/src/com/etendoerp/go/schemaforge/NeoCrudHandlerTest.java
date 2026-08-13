@@ -133,6 +133,19 @@ class NeoCrudHandlerTest {
     return method.invoke(target, args);
   }
 
+  /**
+   * Like {@link #invokePrivate} but for a {@code static} method, invoked with no target
+   * instance. Used for {@link NeoParentTabFilterResolver}'s private static helpers, which moved
+   * out of {@code NeoCrudHandler} (Sonar method-count split) but are still exercised directly
+   * via reflection here, same as their previous instance-method form.
+   */
+  private static Object invokeStaticPrivate(Class<?> clazz, String methodName,
+      Class<?>[] paramTypes, Object... args) throws Exception {
+    Method method = clazz.getDeclaredMethod(methodName, paramTypes);
+    method.setAccessible(true);
+    return method.invoke(null, args);
+  }
+
   private static ServletInputStream toServletInputStream(String content) {
     ByteArrayInputStream bais = new ByteArrayInputStream(
         content.getBytes(StandardCharsets.UTF_8));
@@ -2018,7 +2031,9 @@ class NeoCrudHandlerTest {
 
     private String invokeResolveToken(String token, String parentId,
         Object parentRecord, Object parentEntity, String parentTableName) throws Exception {
-      return (String) invokePrivate(handler, "resolveTokenFromParent",
+      // Moved to NeoParentTabFilterResolver (Sonar method-count split of NeoCrudHandler) —
+      // invoked here with no target instance since it is now a static helper.
+      return (String) invokeStaticPrivate(NeoParentTabFilterResolver.class, "resolveTokenFromParent",
           new Class<?>[] { String.class, String.class,
               BaseOBObject.class, Entity.class, String.class },
           token, parentId, parentRecord, parentEntity, parentTableName);
@@ -3059,9 +3074,10 @@ class NeoCrudHandlerTest {
   @DisplayName("resolveParentFilter")
   class ResolveParentFilter {
 
-    private String invokeResolveParentFilter(Tab childTab, String parentId) throws Exception {
-      return (String) invokePrivate(handler, "resolveParentFilter",
-          new Class<?>[] { Tab.class, String.class }, childTab, parentId);
+    private String invokeResolveParentFilter(Tab childTab, String parentId) {
+      // Moved to NeoParentTabFilterResolver (Sonar method-count split of NeoCrudHandler) as a
+      // package-private static method — callable directly, no reflection needed.
+      return NeoParentTabFilterResolver.resolveParentFilter(childTab, parentId);
     }
 
     @Test

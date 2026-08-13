@@ -124,6 +124,26 @@ final class McpDefaultsView {
     JSONObject confirm = new JSONObject();
     JSONObject systemManaged = new JSONObject();
     Set<String> blanks = new LinkedHashSet<>();
+    groupDefaultsEntries(defaults, editableProps, confirm, systemManaged, blanks);
+
+    JSONObject out = new JSONObject();
+    out.put(GROUP_CONFIRM, confirm);
+    if (!VIEW_MINIMAL.equalsIgnoreCase(view)) {
+      out.put(GROUP_SYSTEM_MANAGED, systemManaged);
+    }
+    putMetadata(out, response, blanks);
+    return out;
+  }
+
+  /**
+   * Split {@code defaults}'s entries between {@code confirm} (agent-writable, resolved) and
+   * {@code systemManaged} (everything else), collecting the base property name of every
+   * agent-writable-but-blank entry into {@code blanks} instead of putting it in {@code confirm} —
+   * see {@link #apply} for why. Extracted so {@code apply} itself stays within the cognitive
+   * complexity Sonar allows per method (S3776).
+   */
+  private static void groupDefaultsEntries(JSONObject defaults, Set<String> editableProps,
+      JSONObject confirm, JSONObject systemManaged, Set<String> blanks) throws JSONException {
     Iterator<?> keys = defaults.keys();
     while (keys.hasNext()) {
       String key = String.valueOf(keys.next());
@@ -140,12 +160,16 @@ final class McpDefaultsView {
         systemManaged.put(key, value);
       }
     }
+  }
 
-    JSONObject out = new JSONObject();
-    out.put(GROUP_CONFIRM, confirm);
-    if (!VIEW_MINIMAL.equalsIgnoreCase(view)) {
-      out.put(GROUP_SYSTEM_MANAGED, systemManaged);
-    }
+  /**
+   * Attach the {@code metadata} key to {@code out}: {@code response}'s own metadata when there is
+   * no blank to report, or that metadata augmented with {@code blanks} (via
+   * {@link #withUnresolved}) otherwise. Omits the key entirely when neither applies, matching what
+   * {@code apply} did inline before this extraction.
+   */
+  private static void putMetadata(JSONObject out, JSONObject response, Set<String> blanks)
+      throws JSONException {
     if (blanks.isEmpty()) {
       if (response.has(KEY_METADATA)) {
         out.put(KEY_METADATA, response.get(KEY_METADATA));
@@ -153,7 +177,6 @@ final class McpDefaultsView {
     } else {
       out.put(KEY_METADATA, withUnresolved(response.optJSONObject(KEY_METADATA), blanks));
     }
-    return out;
   }
 
   /**

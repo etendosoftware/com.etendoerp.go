@@ -17,7 +17,6 @@
 
 package com.etendoerp.go.mcp;
 
-import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.Iterator;
@@ -36,7 +35,6 @@ import org.hibernate.criterion.Order;
 import org.hibernate.criterion.Restrictions;
 import org.openbravo.base.model.Entity;
 import org.openbravo.base.model.ModelProvider;
-import org.openbravo.base.model.Property;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
@@ -355,13 +353,13 @@ public class McpToolRouter {
 
     SFSpec spec = McpToolRouterSupport.findActiveSpecByName(specName);
     SFEntity sfEntity = McpToolRouterSupport.resolveIncludedEntityOrExplain(spec, entityName);
-    Tab adTab = getAdTabOrThrow(sfEntity, entityName);
+    Tab adTab = McpWriteRequestSupport.getAdTabOrThrow(sfEntity, entityName);
 
     String dalEntityName = adTab.getTable().getName();
     DefaultJsonDataService jsonService = DefaultJsonDataService.getInstance();
     NeoFieldFilter fieldFilter = NeoFieldFilter.forEntity(sfEntity, dalEntityName);
 
-    Map<String, String> params = buildBaseParams(adTab, dalEntityName);
+    Map<String, String> params = McpWriteRequestSupport.buildBaseParams(adTab, dalEntityName);
     params.put(JsonConstants.STARTROW_PARAMETER, String.valueOf(offset));
     params.put(JsonConstants.ENDROW_PARAMETER, String.valueOf(offset + limit - 1));
 
@@ -395,7 +393,7 @@ public class McpToolRouter {
     JSONObject responseJson = new JSONObject(result);
 
     // Check for errors
-    JSONObject error = checkJsonServiceError(responseJson, McpConstants.SEE_ALSO_READING);
+    JSONObject error = McpWriteRequestSupport.checkJsonServiceError(responseJson, McpConstants.SEE_ALSO_READING);
     if (error != null) {
       return wrapAsErrorContent(error.toString(2));
     }
@@ -427,19 +425,19 @@ public class McpToolRouter {
 
     SFSpec spec = McpToolRouterSupport.findActiveSpecByName(specName);
     SFEntity sfEntity = McpToolRouterSupport.resolveIncludedEntityOrExplain(spec, entityName);
-    Tab adTab = getAdTabOrThrow(sfEntity, entityName);
+    Tab adTab = McpWriteRequestSupport.getAdTabOrThrow(sfEntity, entityName);
 
     String dalEntityName = adTab.getTable().getName();
     DefaultJsonDataService jsonService = DefaultJsonDataService.getInstance();
     NeoFieldFilter fieldFilter = NeoFieldFilter.forEntity(sfEntity, dalEntityName);
 
-    Map<String, String> params = buildBaseParams(adTab, dalEntityName);
+    Map<String, String> params = McpWriteRequestSupport.buildBaseParams(adTab, dalEntityName);
     params.put(JsonConstants.ID, recordId);
 
     String result = jsonService.fetch(params);
     JSONObject responseJson = new JSONObject(result);
 
-    JSONObject error = checkJsonServiceError(responseJson, McpConstants.SEE_ALSO_READING);
+    JSONObject error = McpWriteRequestSupport.checkJsonServiceError(responseJson, McpConstants.SEE_ALSO_READING);
     if (error != null) {
       return wrapAsErrorContent(error.toString(2));
     }
@@ -481,18 +479,18 @@ public class McpToolRouter {
     // enforces. hasSpecAccess above is role-level only, so without this an agent could write
     // to an entity configured read-only (which neo_discover already reports as readOnly).
     McpToolRouterSupport.requireMethodEnabled(spec, sfEntity, HTTP_METHOD_POST);
-    Tab adTab = getAdTabOrThrow(sfEntity, entityName);
+    Tab adTab = McpWriteRequestSupport.getAdTabOrThrow(sfEntity, entityName);
 
     String dalEntityName = adTab.getTable().getName();
     DefaultJsonDataService jsonService = DefaultJsonDataService.getInstance();
     NeoFieldFilter fieldFilter = NeoFieldFilter.forEntity(sfEntity, dalEntityName);
 
-    Map<String, String> params = buildBaseParams(adTab, dalEntityName);
+    Map<String, String> params = McpWriteRequestSupport.buildBaseParams(adTab, dalEntityName);
 
     // MCP: accept all valid table columns from AI agents, not just SF-configured ones.
     // filterWriteRequest strips fields not in ETGO_SF_FIELD writableFields, which is
     // too restrictive for MCP where AI agents need to set any valid column.
-    JSONObject filteredBody = mapFieldsToDalProperties(fields, adTab);
+    JSONObject filteredBody = McpWriteRequestSupport.mapFieldsToDalProperties(fields, adTab);
 
     // Hoisted so both FK-by-name resolution (IMP-4, below) and the sentinel/coercion passes
     // further down share one DAL entity lookup.
@@ -518,7 +516,7 @@ public class McpToolRouter {
     if (filteredBody.has(McpConstants.PARAM_PARENT_ID)) {
       parentIdValue = filteredBody.getString(McpConstants.PARAM_PARENT_ID);
       filteredBody.remove(McpConstants.PARAM_PARENT_ID);
-      resolveParentFK(adTab, filteredBody, parentIdValue);
+      McpWriteRequestSupport.resolveParentFK(adTab, filteredBody, parentIdValue, log);
     }
 
     // Inject mandatory defaults
@@ -550,7 +548,7 @@ public class McpToolRouter {
     // Fix FK sentinel values: "0" is a UI-level sentinel (means "not yet set") that can't
     // go through the DAL as an entity reference. Replace with a real value from the body
     // when possible (e.g. documentType="0" -> copy from transactionDocument), or remove.
-    resolveFkSentinels(filteredBody, dalEntity);
+    McpWriteRequestSupport.resolveFkSentinels(filteredBody, dalEntity, log);
 
     // Coerce string values to proper JSON types expected by the DAL (Long, BigDecimal, Boolean).
     // Callout cascade returns all values as strings, but DefaultJsonDataService/JsonToDataConverter
@@ -558,13 +556,13 @@ public class McpToolRouter {
     // IMP-24: userProvided is the pre-defaults snapshot, so it is also the only witness of which
     // date the agent actually sent. A server-injected default in a bad shape must not become a 422
     // the agent cannot act on.
-    JSONArray invalidDates = coerceFieldTypes(filteredBody, dalEntity, userProvided);
+    JSONArray invalidDates = McpWriteRequestSupport.coerceFieldTypes(filteredBody, dalEntity, userProvided, log);
     if (invalidDates.length() > 0) {
-      return wrapAsErrorContent(buildInvalidDatesError(invalidDates).toString(2));
+      return wrapAsErrorContent(McpWriteRequestSupport.buildInvalidDatesError(invalidDates).toString(2));
     }
 
     // Validate mandatory fields before insert — return structured error matching neo_schema contract
-    JSONArray missingFields = validateMandatoryFields(filteredBody, adTab, dalEntity);
+    JSONArray missingFields = McpWriteRequestSupport.validateMandatoryFields(filteredBody, adTab, dalEntity, SYSTEM_COLUMNS, SELECTOR_REFS, log);
     if (missingFields.length() > 0) {
       // IMP-5: stable machine-detectable code + status so the agent can distinguish an
       // "invalid write" from a "server error"; the human text moves to `detail`, and the
@@ -593,7 +591,7 @@ public class McpToolRouter {
     String result = jsonService.add(params, wrappedBody);
     JSONObject responseJson = new JSONObject(result);
 
-    JSONObject error = checkJsonServiceError(responseJson, McpConstants.SEE_ALSO_WRITING);
+    JSONObject error = McpWriteRequestSupport.checkJsonServiceError(responseJson, McpConstants.SEE_ALSO_WRITING);
     if (error != null) {
       return wrapAsErrorContent(error.toString(2));
     }
@@ -628,16 +626,16 @@ public class McpToolRouter {
     // ETP-4254: neo_update maps to PUT, exactly as resolveAccessMethod does for the
     // role-level check — so the entity-level flag consulted here is ISPUT.
     McpToolRouterSupport.requireMethodEnabled(spec, sfEntity, HTTP_METHOD_PUT);
-    Tab adTab = getAdTabOrThrow(sfEntity, entityName);
+    Tab adTab = McpWriteRequestSupport.getAdTabOrThrow(sfEntity, entityName);
 
     String dalEntityName = adTab.getTable().getName();
     DefaultJsonDataService jsonService = DefaultJsonDataService.getInstance();
     NeoFieldFilter fieldFilter = NeoFieldFilter.forEntity(sfEntity, dalEntityName);
 
-    Map<String, String> params = buildBaseParams(adTab, dalEntityName);
+    Map<String, String> params = McpWriteRequestSupport.buildBaseParams(adTab, dalEntityName);
 
     // MCP: accept all valid table columns from AI agents
-    JSONObject filteredBody = mapFieldsToDalProperties(fields, adTab);
+    JSONObject filteredBody = McpWriteRequestSupport.mapFieldsToDalProperties(fields, adTab);
 
     // IMP-4: resolve FK-by-name search strings before persist (mirrors handleCreate).
     Entity dalEntity = ModelProvider.getInstance()
@@ -657,9 +655,9 @@ public class McpToolRouter {
     // source of a non-canonical date here; that also makes it the only thing left to repair — and,
     // for IMP-24, the reason this path needs no separate witness: every key is the caller's, so
     // `null` says so directly rather than passing a copy of the body to be compared against itself.
-    JSONArray invalidDates = coerceFieldTypes(filteredBody, dalEntity, null);
+    JSONArray invalidDates = McpWriteRequestSupport.coerceFieldTypes(filteredBody, dalEntity, null, log);
     if (invalidDates.length() > 0) {
-      return wrapAsErrorContent(buildInvalidDatesError(invalidDates).toString(2));
+      return wrapAsErrorContent(McpWriteRequestSupport.buildInvalidDatesError(invalidDates).toString(2));
     }
 
     // Run the entity's NeoHandler pre-hook (parity with the REST CRUD path).
@@ -675,7 +673,7 @@ public class McpToolRouter {
     String result = jsonService.update(params, wrappedBody);
     JSONObject responseJson = new JSONObject(result);
 
-    JSONObject error = checkJsonServiceError(responseJson, McpConstants.SEE_ALSO_WRITING);
+    JSONObject error = McpWriteRequestSupport.checkJsonServiceError(responseJson, McpConstants.SEE_ALSO_WRITING);
     if (error != null) {
       return wrapAsErrorContent(error.toString(2));
     }
@@ -708,12 +706,12 @@ public class McpToolRouter {
     SFEntity sfEntity = McpToolRouterSupport.resolveIncludedEntityOrExplain(spec, entityName);
     // ETP-4254: entity-level DELETE flag, refused before any DAL work happens.
     McpToolRouterSupport.requireMethodEnabled(spec, sfEntity, HTTP_METHOD_DELETE);
-    Tab adTab = getAdTabOrThrow(sfEntity, entityName);
+    Tab adTab = McpWriteRequestSupport.getAdTabOrThrow(sfEntity, entityName);
 
     String dalEntityName = adTab.getTable().getName();
     DefaultJsonDataService jsonService = DefaultJsonDataService.getInstance();
 
-    Map<String, String> params = buildBaseParams(adTab, dalEntityName);
+    Map<String, String> params = McpWriteRequestSupport.buildBaseParams(adTab, dalEntityName);
     params.put(JsonConstants.ID, recordId);
 
     // Run the entity's NeoHandler pre-hook (parity with the REST CRUD path). A
@@ -728,7 +726,7 @@ public class McpToolRouter {
     String result = jsonService.remove(params);
     JSONObject responseJson = new JSONObject(result);
 
-    JSONObject error = checkJsonServiceError(responseJson, McpConstants.SEE_ALSO_WRITING);
+    JSONObject error = McpWriteRequestSupport.checkJsonServiceError(responseJson, McpConstants.SEE_ALSO_WRITING);
     if (error != null) {
       return wrapAsErrorContent(error.toString(2));
     }
@@ -770,7 +768,7 @@ public class McpToolRouter {
 
     SFSpec spec = McpToolRouterSupport.findActiveSpecByName(specName);
     SFEntity sfEntity = McpToolRouterSupport.resolveIncludedEntityOrExplain(spec, entityName);
-    Tab adTab = getAdTabOrThrow(sfEntity, entityName);
+    Tab adTab = McpWriteRequestSupport.getAdTabOrThrow(sfEntity, entityName);
 
     // Find the AD_Column by DB column name or DAL property name (field name from schema)
     Entity dalEntity = ModelProvider.getInstance()
@@ -818,7 +816,7 @@ public class McpToolRouter {
 
     SFSpec spec = McpToolRouterSupport.findActiveSpecByName(specName);
     SFEntity sfEntity = McpToolRouterSupport.resolveIncludedEntityOrExplain(spec, entityName);
-    Tab adTab = getAdTabOrThrow(sfEntity, entityName);
+    Tab adTab = McpWriteRequestSupport.getAdTabOrThrow(sfEntity, entityName);
 
     NeoContext ctx = NeoContext.builder()
         .specName(specName)
@@ -887,7 +885,7 @@ public class McpToolRouter {
 
     SFSpec spec = McpToolRouterSupport.findActiveSpecByName(specName);
     SFEntity sfEntity = McpToolRouterSupport.resolveIncludedEntityOrExplain(spec, entityName);
-    Tab adTab = getAdTabOrThrow(sfEntity, entityName);
+    Tab adTab = McpWriteRequestSupport.getAdTabOrThrow(sfEntity, entityName);
 
     Entity dalEntity = ModelProvider.getInstance()
         .getEntityByTableName(adTab.getTable().getDBTableName());
@@ -1192,38 +1190,53 @@ public class McpToolRouter {
    */
   private JSONObject resolveBatchFkNames(JSONArray operations) throws JSONException {
     for (int i = 0; i < operations.length(); i++) {
-      JSONObject op = operations.optJSONObject(i);
-      if (op == null) {
-        continue;
-      }
-      JSONObject body = op.optJSONObject("body");
-      String specName = op.optString("spec", null);
-      String entityName = op.optString(McpConstants.PARAM_ENTITY, null);
-      if (body == null || StringUtils.isBlank(specName) || StringUtils.isBlank(entityName)) {
-        continue;
-      }
-      Tab adTab;
-      Entity dalEntity;
-      try {
-        SFSpec spec = McpToolRouterSupport.findActiveSpecByName(specName);
-        SFEntity sfEntity = McpToolRouterSupport.findIncludedEntity(spec.getId(), entityName);
-        adTab = getAdTabOrThrow(sfEntity, entityName);
-        dalEntity = ModelProvider.getInstance().getEntityByTableId(adTab.getTable().getId());
-      } catch (Exception e) {
-        log.debug("neo_batch FK pre-pass skipped op {} ({}/{}): {}", i, specName, entityName,
-            e.getMessage());
-        continue;
-      }
-      // This pre-pass runs on the raw operation body, before any defaults pass has touched it, so
-      // here a present uOM really is the caller's own.
-      injectLineUomIfApplicable(body, dalEntity, body.has(FIELD_UOM));
-      JSONObject fkError = McpFkResolver.resolveFkNames(body, dalEntity, adTab,
-          McpSelectorContextHelper.buildSelectorContextParams(null, adTab), log,
-          value -> value.startsWith(BatchService.REF_PREFIX));
+      JSONObject fkError = resolveBatchOpFkNames(operations, i);
       if (fkError != null) {
-        return McpToolRouterSupport.toMcpBatchPreflightFailure(fkError, i,
-            op.optString("id", null));
+        return fkError;
       }
+    }
+    return null;
+  }
+
+  /**
+   * Run the FK pre-pass for a single batch operation (extracted from {@link #resolveBatchFkNames}
+   * so the loop there carries a single exit point, not one {@code continue} per skip reason).
+   *
+   * @return the batch outcome envelope when this op's FK resolution failed, or {@code null} when
+   *         the op was skipped (malformed, unresolved spec/entity) or resolved cleanly
+   */
+  private JSONObject resolveBatchOpFkNames(JSONArray operations, int i) throws JSONException {
+    JSONObject op = operations.optJSONObject(i);
+    if (op == null) {
+      return null;
+    }
+    JSONObject body = op.optJSONObject("body");
+    String specName = op.optString("spec", null);
+    String entityName = op.optString(McpConstants.PARAM_ENTITY, null);
+    if (body == null || StringUtils.isBlank(specName) || StringUtils.isBlank(entityName)) {
+      return null;
+    }
+    Tab adTab;
+    Entity dalEntity;
+    try {
+      SFSpec spec = McpToolRouterSupport.findActiveSpecByName(specName);
+      SFEntity sfEntity = McpToolRouterSupport.findIncludedEntity(spec.getId(), entityName);
+      adTab = McpWriteRequestSupport.getAdTabOrThrow(sfEntity, entityName);
+      dalEntity = ModelProvider.getInstance().getEntityByTableId(adTab.getTable().getId());
+    } catch (Exception e) {
+      log.debug("neo_batch FK pre-pass skipped op {} ({}/{}): {}", i, specName, entityName,
+          e.getMessage());
+      return null;
+    }
+    // This pre-pass runs on the raw operation body, before any defaults pass has touched it, so
+    // here a present uOM really is the caller's own.
+    injectLineUomIfApplicable(body, dalEntity, body.has(FIELD_UOM));
+    JSONObject fkError = McpFkResolver.resolveFkNames(body, dalEntity, adTab,
+        McpSelectorContextHelper.buildSelectorContextParams(null, adTab), log,
+        value -> value.startsWith(BatchService.REF_PREFIX));
+    if (fkError != null) {
+      return McpToolRouterSupport.toMcpBatchPreflightFailure(fkError, i,
+          op.optString("id", null));
     }
     return null;
   }
@@ -1520,388 +1533,6 @@ public class McpToolRouter {
       default:
         return HTTP_METHOD_GET;
     }
-  }
-
-  // ── Spec/entity resolution helpers ────────────────────────────────────
-
-  /**
-   * Get the AD_Tab linked to an entity, or throw if not linked.
-   */
-  private Tab getAdTabOrThrow(SFEntity sfEntity, String entityName) throws Exception {
-    Tab tab = sfEntity.getADTab();
-    if (tab == null) {
-      throw new IllegalArgumentException("No AD_Tab linked to entity: " + entityName);
-    }
-    return tab;
-  }
-
-  // ── DefaultJsonDataService helpers ────────────────────────────────────
-
-  /**
-   * Build the base parameter map for DefaultJsonDataService calls.
-   */
-  private Map<String, String> buildBaseParams(Tab adTab, String dalEntityName) {
-    Map<String, String> params = new HashMap<>();
-    params.put(JsonConstants.ENTITYNAME, dalEntityName);
-    params.put(JsonConstants.TAB_PARAMETER, adTab.getId());
-    params.put(JsonConstants.WINDOW_ID, adTab.getWindow().getId());
-    params.put(JsonConstants.NO_ACTIVE_FILTER, "true");
-    return params;
-  }
-
-  /**
-   * Map user-provided fields to DAL property names without SF-field filtering.
-   * Accepts both DAL property names ("businessPartner") and DB column names
-   * ("C_BPartner_ID"), resolving all to their DAL property equivalents.
-   * This allows MCP AI agents to set any valid column on the table.
-   */
-  private JSONObject mapFieldsToDalProperties(JSONObject fields, Tab adTab)
-      throws JSONException {
-    Entity dalEntity = ModelProvider.getInstance()
-        .getEntityByTableId(adTab.getTable().getId());
-    JSONObject mapped = new JSONObject();
-
-    Iterator<String> keys = fields.keys();
-    while (keys.hasNext()) {
-      String key = keys.next();
-      Object value = fields.get(key);
-      String mappedKey = key;
-
-      // Try as DAL property name first
-      Property prop = dalEntity.getProperty(key, false);
-      if (prop != null) {
-        mappedKey = key;
-      } else {
-        // Try as DB column name
-        prop = dalEntity.getPropertyByColumnName(key, false);
-        if (prop != null) {
-          mappedKey = prop.getName();
-        }
-      }
-
-      // Pass through unknown keys (parentId, etc.)
-      mapped.put(mappedKey, value);
-    }
-    return mapped;
-  }
-
-  /**
-   * Replace FK sentinel values ("0") in the body with real values.
-   * The DAL's JsonToDataConverter tries to load entities by ID, and "0" is not a valid UUID.
-   * In Etendo, "0" means "not yet determined" — the real value comes from a related field
-   * (e.g. C_DocType_ID copies from C_DocTypeTarget_ID). For each sentinel, we find another
-   * property in the body that targets the same entity and has a real value.
-   */
-  /**
-   * Validate that all mandatory columns have a value in the body before insert.
-   * Returns a JSONArray of missing fields using the same structure as neo_schema
-   * (name, column, type, hasSelector) so the model knows exactly what to provide.
-   */
-  private JSONArray validateMandatoryFields(JSONObject body, Tab adTab, Entity dalEntity) {
-    JSONArray missing = new JSONArray();
-    if (dalEntity == null) {
-      return missing;
-    }
-
-    for (Column col : adTab.getTable().getADColumnList()) {
-      Property prop = McpToolRouterSupport.resolveMandatoryProperty(adTab, dalEntity, col,
-          SYSTEM_COLUMNS);
-      if (prop != null && McpToolRouterSupport.isMandatoryValueMissing(body, prop.getName())) {
-        try {
-          missing.put(McpToolRouterSupport.buildMissingFieldInfo(col, prop.getName(),
-              SELECTOR_REFS));
-        } catch (Exception e) {
-          log.warn("Error building missing field info for column {}: {}", col.getDBColumnName(), e.getMessage());
-        }
-      }
-    }
-    return missing;
-  }
-
-  /**
-   * Coerce string values in the body to the proper JSON types expected by the DAL.
-   * Callout cascade and session defaults return everything as strings, but
-   * DefaultJsonDataService expects JSON numbers for Long/BigDecimal properties
-   * and JSON booleans for Boolean properties.
-   *
-   * <p>Date-typed properties are not merely re-typed but <b>re-shaped</b> to the canonical
-   * ISO wire format (ETP-4793 / IMP-16). That branch is not cosmetic: the DAL parses dates
-   * leniently, so a {@code dd-MM-yyyy} value is silently reinterpreted rather than rejected
-   * and {@code "06-08-2026"} persists as year 0012.
-   *
-   * @param callerKeys the keys the agent itself sent, as a snapshot taken before any server default
-   *     was injected; {@code null} means every key in {@code body} is the caller's. Only those keys
-   *     can produce a rejection — see
-   *     {@code McpToolRouterSupport.coerceDateFieldValue} (ETP-4793 / IMP-24)
-   * @return one descriptor per unusable date value, empty when the body is clean
-   */
-  private JSONArray coerceFieldTypes(JSONObject body, Entity dalEntity, JSONObject callerKeys) {
-    JSONArray invalid = new JSONArray();
-    if (body == null || dalEntity == null) {
-      return invalid;
-    }
-    List<String> keys = new ArrayList<>();
-    Iterator<String> it = body.keys();
-    while (it.hasNext()) {
-      keys.add(it.next());
-    }
-    for (String key : keys) {
-      Property prop = dalEntity.getProperty(key, false);
-      if (prop == null || !prop.isPrimitive()) {
-        continue;
-      }
-      boolean callerSupplied = callerKeys == null || callerKeys.has(key);
-      JSONObject rejection = McpToolRouterSupport.coercePrimitiveFieldValue(body, key, prop,
-          callerSupplied, log);
-      if (rejection != null) {
-        invalid.put(rejection);
-      }
-    }
-    return invalid;
-  }
-
-  /**
-   * The 422 for date values the agent must re-send (ETP-4793 / IMP-24).
-   *
-   * <p>Mirrors the shape of the {@code missingFields} error a few lines above rather than inventing
-   * a second one: same envelope keys, same bare-object delivery, one list keyed by what is wrong
-   * with it. Before this existed the same input produced the DAL's raw
-   * {@code {"status":-4}} plus a {@code java.text.ParseException} that named no field at all, so the
-   * agent could not tell which of the dates it sent was the problem — or that a date was the
-   * problem.
-   *
-   * <p>{@code detail} branches on each item's {@code reason} (ETP-4793, the ambiguity gate):
-   * "unreadable" and "ambiguous" are different failures — one is a format the parser cannot make
-   * sense of at all, the other is a format the parser understands two different ways at once — and
-   * conflating them back into one generic sentence would cost the agent the distinction the
-   * per-item {@code reason}/{@code candidates} keys exist to give it.
-   */
-  private JSONObject buildInvalidDatesError(JSONArray invalidDates) throws JSONException {
-    boolean hasUnreadable = false;
-    boolean hasAmbiguous = false;
-    for (int i = 0; i < invalidDates.length(); i++) {
-      String reason = invalidDates.getJSONObject(i).optString("reason", "unreadable");
-      if ("ambiguous".equals(reason)) {
-        hasAmbiguous = true;
-      } else {
-        hasUnreadable = true;
-      }
-    }
-    String detail;
-    if (hasAmbiguous && hasUnreadable) {
-      detail = "One or more date values are not in a format this API can read, and one or more "
-          + "others are ambiguous — readable as two different calendar dates depending on which "
-          + "day-first/month-first convention is assumed";
-    } else if (hasAmbiguous) {
-      detail = "One or more date values are ambiguous: each is readable as two different calendar "
-          + "dates depending on which day-first/month-first convention is assumed, so this API "
-          + "refuses to guess. See each item's 'candidates' for the two readings";
-    } else {
-      detail = "One or more date values are not in a format this API can read";
-    }
-    JSONObject errorObj = new JSONObject();
-    errorObj.put(McpConstants.KEY_STATUS, McpConstants.STATUS_UNPROCESSABLE);
-    errorObj.put(McpConstants.KEY_ERROR, McpConstants.ERROR_VALIDATION);
-    errorObj.put(McpConstants.KEY_DETAIL, detail);
-    errorObj.put("invalidDates", invalidDates);
-    errorObj.put("hint", "Send dates as ISO: yyyy-MM-dd for dates, yyyy-MM-dd'T'HH:mm:ss for "
-        + "datetimes. Check the value is a real calendar date too — 2026-02-30 is ISO-shaped and "
-        + "still invalid. For an ambiguous value, resend the exact ISO date you meant from "
-        + "'candidates'.");
-    errorObj.put(McpConstants.KEY_SEE_ALSO, McpConstants.SEE_ALSO_WRITING);
-    return errorObj;
-  }
-
-  private void resolveFkSentinels(JSONObject body, Entity dalEntity) throws JSONException {
-    // First pass: collect all sentinels and all real FK values by target entity
-    Map<String, String> sentinelProps = new HashMap<>(); // propName -> targetEntityName
-    Map<String, String> realValues = new HashMap<>();    // targetEntityName -> value
-
-    Iterator<String> keys = body.keys();
-    while (keys.hasNext()) {
-      String key = keys.next();
-      Property prop = dalEntity.getProperty(key, false);
-      if (prop == null || prop.isPrimitive() || prop.getTargetEntity() == null) {
-        continue;
-      }
-      String targetEntity = prop.getTargetEntity().getName();
-      String value = body.optString(key, "");
-      if ("0".equals(value)) {
-        sentinelProps.put(key, targetEntity);
-      } else if (!value.isEmpty()) {
-        realValues.put(targetEntity, value);
-      }
-    }
-
-    // Second pass: replace sentinels with real values from same-target-entity fields
-    for (Map.Entry<String, String> entry : sentinelProps.entrySet()) {
-      String propName = entry.getKey();
-      String targetEntity = entry.getValue();
-      String realValue = realValues.get(targetEntity);
-      if (realValue != null) {
-        body.put(propName, realValue);
-        log.debug("Resolved FK sentinel: {} = {} (from sibling targeting {})",
-            propName, realValue, targetEntity);
-      } else {
-        // No sibling with real value — remove to avoid DAL error. The column must
-        // either have a DB default or be nullable; if not, the INSERT will fail.
-        body.remove(propName);
-        log.warn("Removed FK sentinel '0' for {} — no sibling value found for {}",
-            propName, targetEntity);
-      }
-    }
-  }
-
-  /**
-   * Resolve parentId to the actual FK property name on child tabs.
-   * Replicates the same logic from NeoServlet's POST handler.
-   */
-  private void resolveParentFK(Tab adTab, JSONObject body, String parentIdValue)
-      throws JSONException {
-    if (adTab.getTabLevel() == null || adTab.getTabLevel() <= 0) {
-      return;
-    }
-
-    Entity dalEntity = ModelProvider.getInstance()
-        .getEntityByTableName(adTab.getTable().getDBTableName());
-    if (dalEntity == null) {
-      return;
-    }
-
-    for (Column col : adTab.getTable().getADColumnList()) {
-      if (col.isLinkToParentColumn() && col.isActive()) {
-        try {
-          Property prop = dalEntity.getPropertyByColumnName(col.getDBColumnName());
-          if (prop != null) {
-            body.put(prop.getName(), parentIdValue);
-            break;
-          }
-        } catch (Exception e) {
-          log.warn("Column '{}' not mappable to property in entity '{}': {}", col.getDBColumnName(), dalEntity.getName(), e.getMessage());
-        }
-      }
-    }
-  }
-
-  /**
-   * Check if a DefaultJsonDataService response contains an error.
-   *
-   * <p>Returns the IMP-5 envelope describing it, or {@code null} when the response is not a failure.
-   * Before ETP-4793 / IMP-17 this returned a bare {@code String} — core's own prose — which is how a
-   * callout rejection reached agents with no status and no code (evidence B13).</p>
-   *
-   * @param responseJson the raw DAL response
-   * @param seeAlso      the {@code docs} recipe for the calling verb; also tells the failure builder
-   *                     whether the caller submitted values, which decides 422 vs 500
-   * @return the error envelope, or {@code null} if the response reports no failure
-   * @throws JSONException if the envelope cannot be built
-   */
-  private JSONObject checkJsonServiceError(JSONObject responseJson, String seeAlso)
-      throws JSONException {
-    JSONObject innerResponse = responseJson.optJSONObject(JsonConstants.RESPONSE_RESPONSE);
-    if (innerResponse == null) {
-      return null;
-    }
-
-    int status = innerResponse.optInt(JsonConstants.RESPONSE_STATUS, 0);
-    if (status == JsonConstants.RPCREQUEST_STATUS_FAILURE) {
-      String message = innerResponse.has(JsonConstants.RESPONSE_ERROR)
-          ? innerResponse.getJSONObject(JsonConstants.RESPONSE_ERROR)
-              .optString(McpConstants.KEY_MESSAGE, "Operation failed")
-          : "Operation failed";
-      return buildDalFailureEnvelope(message, seeAlso);
-    }
-    if (status == JsonConstants.RPCREQUEST_STATUS_VALIDATION_ERROR) {
-      return buildDalValidationEnvelope(innerResponse, seeAlso);
-    }
-    return null;
-  }
-
-  /**
-   * The IMP-5 envelope for a DAL/callout rejection (ETP-4793 / IMP-17).
-   *
-   * <p>This is where evidence B13 escaped. A callout refusing a create returned its message as the
-   * whole response body — <i>"La fecha de operación no puede ser posterior a la fecha de la
-   * factura."</i> — with no {@code status}, no error code and no {@code field}, while the write verbs
-   * around it had carried a structured envelope since IMP-5. An agent could not tell that failure
-   * apart from a server fault except by reading Spanish prose.</p>
-   *
-   * <p>Two things this deliberately does not do. It does not translate: the message comes from
-   * {@code AD_Message} in the session user's language, so producing English would mean pinning the
-   * MCP session's locale — a separate change with its own blast radius (it would move process
-   * messages too), and not what IMP-17 registered. And it does not invent a {@code field}: a callout
-   * rejects a <em>combination</em> of values far more often than a single one, and a guessed field
-   * would point the agent at the wrong input, which is worse than no pointer at all.</p>
-   *
-   * <p>The status follows the failure, not the verb, with one exception: {@code seeAlso} tells us
-   * whether the caller submitted values at all. On a write, {@code status:-1} from core is a
-   * rejection of what was sent, so it is a 422 the agent can act on. On a read there is nothing to
-   * correct — the one actionable read failure, an unknown named filter, is answered upstream by
-   * IMP-3 — so inviting a retry-with-corrections would be a loop with no exit.</p>
-   */
-  private JSONObject buildDalFailureEnvelope(String rawMessage, String seeAlso)
-      throws JSONException {
-    String detail = NeoErrorSanitizer.stripRowDump(
-        NeoErrorSanitizer.redactObjectReferences(rawMessage));
-    boolean write = McpConstants.SEE_ALSO_WRITING.equals(seeAlso);
-    JSONObject envelope = new JSONObject();
-    if (NeoErrorSanitizer.isDuplicateKeyMessage(detail)) {
-      envelope.put(McpConstants.KEY_STATUS, McpConstants.STATUS_CONFLICT);
-      envelope.put(McpConstants.KEY_ERROR, McpConstants.ERROR_CONFLICT);
-      envelope.put(McpConstants.KEY_HINT, "A record with this business key already exists. Find it "
-          + "with neo_list and update it, or send a different key.");
-    } else if (write) {
-      envelope.put(McpConstants.KEY_STATUS, McpConstants.STATUS_UNPROCESSABLE);
-      envelope.put(McpConstants.KEY_ERROR, McpConstants.ERROR_VALIDATION);
-      envelope.put(McpConstants.KEY_HINT, "A business rule rejected the values sent. Read 'detail', "
-          + "correct the values it names and retry — the record was not written.");
-    } else {
-      envelope.put(McpConstants.KEY_STATUS, McpConstants.STATUS_SERVER_ERROR);
-      envelope.put(McpConstants.KEY_ERROR, McpConstants.ERROR_SERVER);
-      envelope.put(McpConstants.KEY_HINT, "The query itself failed; re-sending it unchanged will "
-          + "fail the same way.");
-    }
-    envelope.put(McpConstants.KEY_DETAIL, detail);
-    envelope.put(McpConstants.KEY_SEE_ALSO, seeAlso);
-    return envelope;
-  }
-
-  /**
-   * The IMP-5 envelope for core's per-field validation failure (ETP-4793 / IMP-17).
-   *
-   * <p>Replaces {@code "Validation error: " + innerResponse.toString()}, which shipped the raw DAL
-   * transport object — {@code status:-4} and all — into the agent's context. The per-field map is the
-   * only part that was ever actionable, so it is lifted into {@code fieldErrors} and the transport is
-   * dropped.</p>
-   */
-  private JSONObject buildDalValidationEnvelope(JSONObject innerResponse, String seeAlso)
-      throws JSONException {
-    JSONObject envelope = new JSONObject();
-    envelope.put(McpConstants.KEY_STATUS, McpConstants.STATUS_UNPROCESSABLE);
-    envelope.put(McpConstants.KEY_ERROR, McpConstants.ERROR_VALIDATION);
-    JSONObject rawErrors = innerResponse.optJSONObject("errors");
-    JSONObject fieldErrors = new JSONObject();
-    if (rawErrors != null) {
-      Iterator<String> keys = rawErrors.keys();
-      while (keys.hasNext()) {
-        String key = keys.next();
-        fieldErrors.put(key, NeoErrorSanitizer.stripRowDump(
-            NeoErrorSanitizer.redactObjectReferences(rawErrors.optString(key, ""))));
-      }
-    }
-    if (fieldErrors.length() > 0) {
-      envelope.put(McpConstants.KEY_DETAIL, "One or more values were rejected by field validation");
-      envelope.put("fieldErrors", fieldErrors);
-      envelope.put(McpConstants.KEY_HINT, "Each key in 'fieldErrors' is a field you sent; correct "
-          + "the value it describes and retry.");
-    } else {
-      envelope.put(McpConstants.KEY_DETAIL, "Field validation rejected the request, and named no "
-          + "field");
-      envelope.put(McpConstants.KEY_HINT, "Call neo_schema for this entity to check the type and "
-          + "allowed values of every field sent.");
-    }
-    envelope.put(McpConstants.KEY_SEE_ALSO, seeAlso);
-    return envelope;
   }
 
   // ── MCP content formatting ────────────────────────────────────────────

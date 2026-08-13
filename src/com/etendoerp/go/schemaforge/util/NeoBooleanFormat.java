@@ -17,6 +17,8 @@
 
 package com.etendoerp.go.schemaforge.util;
 
+import java.util.Optional;
+
 import org.openbravo.base.model.Property;
 
 /**
@@ -87,22 +89,22 @@ public final class NeoBooleanFormat {
    * both case-insensitively and ignoring surrounding whitespace.
    *
    * @param value the raw string, may be {@code null}
-   * @return {@link Boolean#TRUE} or {@link Boolean#FALSE} for a recognised shape, or
-   *         {@code null} when the value is not a boolean this method knows how to read — the
-   *         caller must then leave it untouched rather than guess
+   * @return {@link Optional#of} {@link Boolean#TRUE} or {@link Boolean#FALSE} for a recognised
+   *         shape, or {@link Optional#empty()} when the value is not a boolean this method knows
+   *         how to read — the caller must then leave it untouched rather than guess
    */
-  public static Boolean toCanonical(String value) {
+  public static Optional<Boolean> toCanonical(String value) {
     if (value == null) {
-      return null;
+      return Optional.empty();
     }
     String v = value.trim();
     if ("Y".equalsIgnoreCase(v) || "true".equalsIgnoreCase(v)) {
-      return Boolean.TRUE;
+      return Optional.of(Boolean.TRUE);
     }
     if ("N".equalsIgnoreCase(v) || "false".equalsIgnoreCase(v)) {
-      return Boolean.FALSE;
+      return Optional.of(Boolean.FALSE);
     }
-    return null;
+    return Optional.empty();
   }
 
   /**
@@ -116,6 +118,6 @@ public final class NeoBooleanFormat {
    * @return {@code true} only for {@code "Y"} / {@code "true"} (case-insensitive)
    */
   public static boolean toLenientBoolean(String value) {
-    return Boolean.TRUE.equals(toCanonical(value));
+    return toCanonical(value).orElse(Boolean.FALSE);
   }
 }

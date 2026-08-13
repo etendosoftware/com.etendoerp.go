@@ -17,6 +17,8 @@
 
 package com.etendoerp.go.mcp;
 
+import java.util.Optional;
+
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
@@ -308,16 +310,21 @@ final class McpQuerySupport {
    * exists the filter is inactive and the response is unfiltered, so the DAL entity's property list
    * is the correct fallback.
    *
-   * @return the emittable base names, or {@code null} when neither source is available, which means
-   *     "cannot validate" and must leave the caller's names unjudged rather than reported as unknown
+   * @return {@link Optional#of} the emittable base names, or {@link Optional#empty()} when neither
+   *     source is available, which means "cannot validate" and must leave the caller's names
+   *     unjudged rather than reported as unknown
    */
-  private static java.util.Set<String> emittableBaseNames(NeoFieldFilter fieldFilter, Tab adTab) {
-    java.util.Set<String> keys = fieldFilter == null ? null : fieldFilter.emittableResponseKeys();
-    if (keys == null) {
+  private static Optional<java.util.Set<String>> emittableBaseNames(NeoFieldFilter fieldFilter, Tab adTab) {
+    Optional<java.util.Set<String>> filterKeys =
+        fieldFilter == null ? Optional.empty() : fieldFilter.emittableResponseKeys();
+    java.util.Set<String> keys;
+    if (filterKeys.isPresent()) {
+      keys = filterKeys.get();
+    } else {
       Entity dalEntity = org.openbravo.base.model.ModelProvider.getInstance()
           .getEntityByTableName(adTab.getTable().getDBTableName());
       if (dalEntity == null) {
-        return null;
+        return Optional.empty();
       }
       keys = new java.util.HashSet<>();
       for (Property prop : dalEntity.getProperties()) {
@@ -328,6 +335,6 @@ final class McpQuerySupport {
     for (String key : keys) {
       base.add(McpDefaultsView.baseProperty(key));
     }
-    return base;
+    return Optional.of(base);
   }
 }

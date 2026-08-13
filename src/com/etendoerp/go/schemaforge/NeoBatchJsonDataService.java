@@ -164,27 +164,9 @@ public class NeoBatchJsonDataService extends DefaultJsonDataService {
       }
 
       final Object jsonContent = getContentAsJSON(localContent);
-      final List<BaseOBObject> bobs;
       final List<JSONObject> originalData = new ArrayList<>();
-      if (jsonContent instanceof JSONArray) {
-        bobs = fromJsonConverter.toBaseOBObjects((JSONArray) jsonContent);
-        final JSONArray jsonArray = (JSONArray) jsonContent;
-        for (int i = 0; i < jsonArray.length(); i++) {
-          originalData.add(jsonArray.getJSONObject(i));
-        }
-      } else {
-        final JSONObject jsonObject = (JSONObject) jsonContent;
-        originalData.add(jsonObject);
-        // now set the id and entityname from the parameters if it was set
-        if (!jsonObject.has(JsonConstants.ID) && parameters.containsKey(JsonConstants.ID)) {
-          jsonObject.put(JsonConstants.ID, parameters.containsKey(JsonConstants.ID));
-        }
-        if (!jsonObject.has(JsonConstants.ENTITYNAME)
-            && parameters.containsKey(JsonConstants.ENTITYNAME)) {
-          jsonObject.put(JsonConstants.ENTITYNAME, parameters.get(JsonConstants.ENTITYNAME));
-        }
-        bobs = Collections.singletonList(fromJsonConverter.toBaseOBObject(jsonObject));
-      }
+      final List<BaseOBObject> bobs = buildBobsFromContent(parameters, fromJsonConverter,
+          jsonContent, originalData);
 
       if (fromJsonConverter.hasErrors()) {
         // Core rolls back and closes the session here. Deliberately not done: the caller owns the
@@ -195,17 +177,69 @@ public class NeoBatchJsonDataService extends DefaultJsonDataService {
       return persistWithoutCommitting(parameters, content, bobs, originalData, sendOriginalIdBack);
     } catch (Throwable t) { // NOSONAR — core catches Throwable here and the shape must match
       Throwable localThrowable = DbUtility.getUnderlyingSQLException(t);
-      if (!(localThrowable instanceof OBException
-          && !((OBException) localThrowable).isLogExceptionNeeded())) {
-        if (parameters.containsKey(ADD_FLAG)) {
-          log.error("Error adding new object (caller-owned transaction)", localThrowable);
-        } else {
-          log.error("Error updating object (caller-owned transaction)", localThrowable);
-        }
-      }
+      logUpdateFailure(parameters, localThrowable);
       return JsonUtils.convertExceptionToJson(localThrowable);
     } finally {
       OBContext.restorePreviousCrossOrgReferenceMode();
+    }
+  }
+
+  /**
+   * Converts the request content into the list of {@link BaseOBObject}s to persist, and populates
+   * {@code originalData} with each request's raw JSON object (needed later by
+   * {@code sendOriginalIdBack}). Extracted from {@link #update(Map, String)} purely to reduce its
+   * cognitive complexity (Sonar) — the branching/looping shape and behavior are unchanged from
+   * core's original inline version.
+   *
+   * @param parameters        the datasource parameters
+   * @param fromJsonConverter the converter used to build the {@link BaseOBObject}s
+   * @param jsonContent       the {@code data} element, as a {@link JSONObject} or {@link JSONArray}
+   * @param originalData      mutated in place with each request's raw JSON object
+   * @return the objects built from the request
+   */
+  private List<BaseOBObject> buildBobsFromContent(Map<String, String> parameters,
+      JsonToDataConverter fromJsonConverter, Object jsonContent, List<JSONObject> originalData)
+      throws Exception {
+    final List<BaseOBObject> bobs;
+    if (jsonContent instanceof JSONArray) {
+      bobs = fromJsonConverter.toBaseOBObjects((JSONArray) jsonContent);
+      final JSONArray jsonArray = (JSONArray) jsonContent;
+      for (int i = 0; i < jsonArray.length(); i++) {
+        originalData.add(jsonArray.getJSONObject(i));
+      }
+    } else {
+      final JSONObject jsonObject = (JSONObject) jsonContent;
+      originalData.add(jsonObject);
+      // now set the id and entityname from the parameters if it was set
+      if (!jsonObject.has(JsonConstants.ID) && parameters.containsKey(JsonConstants.ID)) {
+        jsonObject.put(JsonConstants.ID, parameters.containsKey(JsonConstants.ID));
+      }
+      if (!jsonObject.has(JsonConstants.ENTITYNAME)
+          && parameters.containsKey(JsonConstants.ENTITYNAME)) {
+        jsonObject.put(JsonConstants.ENTITYNAME, parameters.get(JsonConstants.ENTITYNAME));
+      }
+      bobs = Collections.singletonList(fromJsonConverter.toBaseOBObject(jsonObject));
+    }
+    return bobs;
+  }
+
+  /**
+   * Logs an {@code update}/{@code add} failure exactly like core, minus the rollback core performs
+   * before logging (the caller owns the transaction here). Extracted from {@link #update(Map,
+   * String)} purely to reduce its cognitive complexity (Sonar).
+   *
+   * @param parameters      the datasource parameters, used to tell add from update for the message
+   * @param localThrowable  the underlying throwable, already unwrapped via
+   *                        {@link DbUtility#getUnderlyingSQLException(Throwable)}
+   */
+  private void logUpdateFailure(Map<String, String> parameters, Throwable localThrowable) {
+    if (!(localThrowable instanceof OBException
+        && !((OBException) localThrowable).isLogExceptionNeeded())) {
+      if (parameters.containsKey(ADD_FLAG)) {
+        log.error("Error adding new object (caller-owned transaction)", localThrowable);
+      } else {
+        log.error("Error updating object (caller-owned transaction)", localThrowable);
+      }
     }
   }
 
@@ -250,18 +284,7 @@ public class NeoBatchJsonDataService extends DefaultJsonDataService {
     }
     OBDal.getInstance().flush();
 
-    // business event handlers can change the data
-    // flush again before refreshing, refreshing can
-    // potentially remove any in-memory changes
-    int countFlushes = 0;
-    while (OBDal.getInstance().isSessionDirty()) {
-      OBDal.getInstance().flush();
-      countFlushes++;
-      // arbitrary point to give up...
-      if (countFlushes > 100) {
-        throw new OBException("Infinite loop in flushing when persisting json: " + content);
-      }
-    }
+    flushSessionUntilClean(content);
 
     // Objects might have been modified in DB through triggers, let's force them to be fetched from
     // DB again, to do so session is cleared (any possible modification is already persisted by the
@@ -269,19 +292,7 @@ public class NeoBatchJsonDataService extends DefaultJsonDataService {
     // already been flushed to the database, so clearing only detaches the in-memory copies.
     OBDal.getInstance().getSession().clear();
 
-    final List<BaseOBObject> refreshedBobs = new ArrayList<>();
-    for (BaseOBObject bob : bobs) {
-      // forcing fetch from DB
-      BaseOBObject refreshedBob = OBDal.getInstance().get(bob.getEntityName(), bob.getId());
-
-      // if object has computed columns refresh from the database too
-      if (refreshedBob.getEntity().hasComputedColumns()) {
-        OBDal.getInstance()
-            .getSession()
-            .refresh(refreshedBob.get(Entity.COMPUTED_COLUMNS_PROXY_PROPERTY));
-      }
-      refreshedBobs.add(refreshedBob);
-    }
+    final List<BaseOBObject> refreshedBobs = refreshBobsFromDb(bobs);
 
     // almost successful, now create the response
     // needs to be done before the close of the session
@@ -291,19 +302,7 @@ public class NeoBatchJsonDataService extends DefaultJsonDataService {
     final List<JSONObject> jsonObjects = toJsonConverter.toJsonObjects(refreshedBobs);
 
     if (sendOriginalIdBack) {
-      // now it is assumed that the jsonObjects are the same size and the same location in the array
-      if (jsonObjects.size() != originalData.size()) {
-        throw new OBException("Unequal sizes in json data processed " + jsonObjects.size() + " "
-            + originalData.size());
-      }
-      // now add the old id back
-      for (int i = 0; i < originalData.size(); i++) {
-        final JSONObject original = originalData.get(i);
-        final JSONObject ret = jsonObjects.get(i);
-        if (original.has(JsonConstants.ID) && original.has(JsonConstants.NEW_INDICATOR)) {
-          ret.put(JsonConstants.ORIGINAL_ID, original.get(JsonConstants.ID));
-        }
-      }
+      attachOriginalIds(jsonObjects, originalData);
     }
 
     final JSONObject jsonResult = new JSONObject();
@@ -321,6 +320,76 @@ public class NeoBatchJsonDataService extends DefaultJsonDataService {
     // Core calls OBDal.getInstance().commitAndClose() here. That single omission is the whole
     // point of this class: the caller commits once, after every operation has succeeded.
     return result;
+  }
+
+  /**
+   * Core's dirty-session flush loop, verbatim. Extracted from {@link #persistWithoutCommitting}
+   * purely to reduce its cognitive complexity (Sonar).
+   *
+   * @param content the original request content, used only for the giving-up error message
+   */
+  private void flushSessionUntilClean(String content) {
+    // business event handlers can change the data
+    // flush again before refreshing, refreshing can
+    // potentially remove any in-memory changes
+    int countFlushes = 0;
+    while (OBDal.getInstance().isSessionDirty()) {
+      OBDal.getInstance().flush();
+      countFlushes++;
+      // arbitrary point to give up...
+      if (countFlushes > 100) {
+        throw new OBException("Infinite loop in flushing when persisting json: " + content);
+      }
+    }
+  }
+
+  /**
+   * Core's post-clear refresh loop, verbatim. Extracted from {@link #persistWithoutCommitting}
+   * purely to reduce its cognitive complexity (Sonar).
+   *
+   * @param bobs the objects to re-fetch from the database
+   * @return the refreshed objects, in the same order as {@code bobs}
+   */
+  private List<BaseOBObject> refreshBobsFromDb(List<BaseOBObject> bobs) {
+    final List<BaseOBObject> refreshedBobs = new ArrayList<>();
+    for (BaseOBObject bob : bobs) {
+      // forcing fetch from DB
+      BaseOBObject refreshedBob = OBDal.getInstance().get(bob.getEntityName(), bob.getId());
+
+      // if object has computed columns refresh from the database too
+      if (refreshedBob.getEntity().hasComputedColumns()) {
+        OBDal.getInstance()
+            .getSession()
+            .refresh(refreshedBob.get(Entity.COMPUTED_COLUMNS_PROXY_PROPERTY));
+      }
+      refreshedBobs.add(refreshedBob);
+    }
+    return refreshedBobs;
+  }
+
+  /**
+   * Core's {@code sendOriginalIdBack} logic, verbatim. Extracted from
+   * {@link #persistWithoutCommitting} purely to reduce its cognitive complexity (Sonar).
+   *
+   * @param jsonObjects  the response objects, mutated in place with each original id
+   * @param originalData the request's original JSON objects, in the same order as
+   *                     {@code jsonObjects}
+   */
+  private void attachOriginalIds(List<JSONObject> jsonObjects, List<JSONObject> originalData)
+      throws JSONException {
+    // now it is assumed that the jsonObjects are the same size and the same location in the array
+    if (jsonObjects.size() != originalData.size()) {
+      throw new OBException("Unequal sizes in json data processed " + jsonObjects.size() + " "
+          + originalData.size());
+    }
+    // now add the old id back
+    for (int i = 0; i < originalData.size(); i++) {
+      final JSONObject original = originalData.get(i);
+      final JSONObject ret = jsonObjects.get(i);
+      if (original.has(JsonConstants.ID) && original.has(JsonConstants.NEW_INDICATOR)) {
+        ret.put(JsonConstants.ORIGINAL_ID, original.get(JsonConstants.ID));
+      }
+    }
   }
 
   /**

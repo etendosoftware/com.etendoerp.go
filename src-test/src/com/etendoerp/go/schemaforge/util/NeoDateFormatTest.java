@@ -23,6 +23,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.lang.reflect.Field;
+import java.util.Optional;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -284,28 +285,28 @@ class NeoDateFormatTest {
     @Test
     @DisplayName("a date property asks for the date-only shape")
     void dateProperty() {
-      assertEquals(Boolean.FALSE, NeoDateFormat.canonicalShapeFor(propertyWith("date")));
+      assertEquals(Optional.of(Boolean.FALSE), NeoDateFormat.canonicalShapeFor(propertyWith("date")));
     }
 
     @Test
     @DisplayName("a datetime property asks for the datetime shape")
     void datetimeProperty() {
-      assertEquals(Boolean.TRUE, NeoDateFormat.canonicalShapeFor(propertyWith("datetime")));
+      assertEquals(Optional.of(Boolean.TRUE), NeoDateFormat.canonicalShapeFor(propertyWith("datetime")));
     }
 
     @Test
     @DisplayName("the three remaining date-ish domain types are excluded")
     void otherDomainTypesExcluded() {
-      assertNull(NeoDateFormat.canonicalShapeFor(propertyWith("timestamp")));
-      assertNull(NeoDateFormat.canonicalShapeFor(propertyWith("absoluteTime")));
-      assertNull(NeoDateFormat.canonicalShapeFor(propertyWith("absoluteDateTime")));
+      assertEquals(Optional.empty(), NeoDateFormat.canonicalShapeFor(propertyWith("timestamp")));
+      assertEquals(Optional.empty(), NeoDateFormat.canonicalShapeFor(propertyWith("absoluteTime")));
+      assertEquals(Optional.empty(), NeoDateFormat.canonicalShapeFor(propertyWith("absoluteDateTime")));
     }
 
     @Test
     @DisplayName("a non-date property and null are excluded")
     void nonDateExcluded() {
-      assertNull(NeoDateFormat.canonicalShapeFor(propertyWith("none")));
-      assertNull(NeoDateFormat.canonicalShapeFor(null));
+      assertEquals(Optional.empty(), NeoDateFormat.canonicalShapeFor(propertyWith("none")));
+      assertEquals(Optional.empty(), NeoDateFormat.canonicalShapeFor(null));
     }
   }
 
@@ -450,12 +451,12 @@ class NeoDateFormatTest {
     }
 
     @Test
-    @DisplayName("ambiguousReadings is null for anything that is not ambiguous")
-    void readingsIsNullWhenNotAmbiguous() {
-      assertNull(NeoDateFormat.ambiguousReadings("20-09-2026"));
-      assertNull(NeoDateFormat.ambiguousReadings("2026-03-04"));
-      assertNull(NeoDateFormat.ambiguousReadings("06/08/2026"));
-      assertNull(NeoDateFormat.ambiguousReadings(null));
+    @DisplayName("ambiguousReadings is an empty array for anything that is not ambiguous")
+    void readingsIsEmptyWhenNotAmbiguous() {
+      assertEquals(0, NeoDateFormat.ambiguousReadings("20-09-2026").length);
+      assertEquals(0, NeoDateFormat.ambiguousReadings("2026-03-04").length);
+      assertEquals(0, NeoDateFormat.ambiguousReadings("06/08/2026").length);
+      assertEquals(0, NeoDateFormat.ambiguousReadings(null).length);
     }
   }
 

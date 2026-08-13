@@ -43,6 +43,7 @@ public final class NeoCommercialLinePolicy {
   private static final Logger log = LogManager.getLogger(NeoCommercialLinePolicy.class);
   private static final String VALUE_KEY = "value";
   private static final String FIELD_GROSS_UNIT_PRICE = "grossUnitPrice";
+  private static final String FIELD_INVOICED_QUANTITY = "invoicedQuantity";
 
   /**
    * DAL properties that identify a transactional document line — the only entities where the
@@ -58,7 +59,7 @@ public final class NeoCommercialLinePolicy {
    */
   private static final List<String> TRANSACTIONAL_QUANTITY_PROPERTIES = Arrays.asList(
       "orderedQuantity",   // C_OrderLine
-      "invoicedQuantity",  // C_InvoiceLine, C_OrderLine
+      FIELD_INVOICED_QUANTITY,  // C_InvoiceLine, C_OrderLine
       "movementQuantity",  // M_InOutLine, M_MovementLine, M_Internal_ConsumptionLine, M_Transaction
       "quantityCount");    // M_InventoryLine
 
@@ -71,7 +72,7 @@ public final class NeoCommercialLinePolicy {
     }
     double qty;
     try {
-      qty = Double.parseDouble(body.optString("invoicedQuantity", "0"));
+      qty = Double.parseDouble(body.optString(FIELD_INVOICED_QUANTITY, "0"));
     } catch (NumberFormatException e) {
       return;
     }
@@ -144,7 +145,7 @@ public final class NeoCommercialLinePolicy {
     }
     double qty;
     try {
-      qty = Double.parseDouble(body.optString("invoicedQuantity", "0"));
+      qty = Double.parseDouble(body.optString(FIELD_INVOICED_QUANTITY, "0"));
     } catch (NumberFormatException e) {
       return;
     }

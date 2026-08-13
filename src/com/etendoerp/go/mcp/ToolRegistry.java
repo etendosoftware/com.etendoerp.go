@@ -63,6 +63,9 @@ public class ToolRegistry {
 
   private static final Logger log = LogManager.getLogger(ToolRegistry.class);
 
+  /** The JSON-schema {@code required} keyword, kept as one constant so it is not re-typed. */
+  private static final String KEY_REQUIRED = "required";
+
   /**
    * Generate all MCP tools the authenticated user can access.
    *
@@ -651,7 +654,7 @@ public class ToolRegistry {
     Map<String, Object> opItem = new LinkedHashMap<>();
     opItem.put("type", McpConstants.TYPE_OBJECT);
     opItem.put(McpConstants.KEY_PROPERTIES, opProps);
-    opItem.put("required", List.of("id", "spec", McpConstants.PARAM_ENTITY));
+    opItem.put(KEY_REQUIRED, List.of("id", "spec", McpConstants.PARAM_ENTITY));
 
     Map<String, Object> operationsProp = new LinkedHashMap<>();
     operationsProp.put("type", "array");
@@ -814,7 +817,7 @@ public class ToolRegistry {
     parametersProp.putIfAbsent(McpConstants.KEY_PROPERTIES, paramProps);
     List<String> requiredParams = contract.getRequiredParameterNames();
     if (!requiredParams.isEmpty()) {
-      parametersProp.put("required", requiredParams);
+      parametersProp.put(KEY_REQUIRED, requiredParams);
     }
 
     Map<String, Object> props = new LinkedHashMap<>();
@@ -904,7 +907,7 @@ public class ToolRegistry {
     schema.put("type", McpConstants.TYPE_OBJECT);
     schema.put(McpConstants.KEY_PROPERTIES, properties);
     if (required != null && !required.isEmpty()) {
-      schema.put("required", required);
+      schema.put(KEY_REQUIRED, required);
     }
     return schema;
   }

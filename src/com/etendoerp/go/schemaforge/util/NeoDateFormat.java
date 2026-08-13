@@ -21,6 +21,7 @@ import java.time.LocalDate;
 import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeParseException;
 import java.time.format.ResolverStyle;
+import java.util.Optional;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -421,12 +422,13 @@ public final class NeoDateFormat {
    * method is meant to be called for.
    *
    * @param raw the value as it arrived; may be {@code null}
-   * @return {@code {primaryReading, alternateReading}} in ISO {@code yyyy-MM-dd}, or
-   *     {@code null} when {@link #isAmbiguousUiDate} is {@code false} for this value
+   * @return {@code {primaryReading, alternateReading}} in ISO {@code yyyy-MM-dd}, or an empty
+   *     array — meaning "not ambiguous" — when {@link #isAmbiguousUiDate} is {@code false} for
+   *     this value
    */
   public static String[] ambiguousReadings(String raw) {
     if (!isAmbiguousUiDate(raw)) {
-      return null;
+      return new String[0];
     }
     String datePart = splitDateAndTime(raw.trim())[0];
     LocalDate primary = parseUiDatePart(datePart);
@@ -471,19 +473,20 @@ public final class NeoDateFormat {
    * evidence about.
    *
    * @param prop the DAL property the value is destined for; may be {@code null}
-   * @return {@link Boolean#FALSE} for date-only, {@link Boolean#TRUE} for datetime, or
-   *         {@code null} when this property must not be touched at all
+   * @return {@link Optional#of} {@link Boolean#FALSE} for date-only, {@link Optional#of}
+   *         {@link Boolean#TRUE} for datetime, or {@link Optional#empty()} when this property
+   *         must not be touched at all
    */
-  public static Boolean canonicalShapeFor(Property prop) {
+  public static Optional<Boolean> canonicalShapeFor(Property prop) {
     if (prop == null) {
-      return null;
+      return Optional.empty();
     }
     if (prop.isDate()) {
-      return Boolean.FALSE;
+      return Optional.of(Boolean.FALSE);
     }
     if (prop.isDatetime()) {
-      return Boolean.TRUE;
+      return Optional.of(Boolean.TRUE);
     }
-    return null;
+    return Optional.empty();
   }
 }
