@@ -146,6 +146,8 @@ public class UserRoleCompositionService {
     public final int removedCount;
 
     /**
+     * Creates an immutable summary of one {@link #assignTemplateRoles(String, List)} call.
+     *
      * @param userId the {@code AD_User_ID} the roles were composed for
      * @param personalRoleId the {@code AD_Role_ID} of the user's personal role
      * @param appliedTemplateRoleIds the FULL set of template role ids now applied
