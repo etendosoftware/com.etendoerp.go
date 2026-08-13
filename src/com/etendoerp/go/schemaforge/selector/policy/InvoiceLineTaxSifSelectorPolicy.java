@@ -114,8 +114,13 @@ public final class InvoiceLineTaxSifSelectorPolicy implements SelectorEnrichment
     }
     String sourceEntity = contextParams.get(NeoSelectorService.SOURCE_ENTITY_NAME_PARAM);
     String sourceWindowId = contextParams.get(NeoSelectorService.SOURCE_WINDOW_ID_PARAM);
+    // Set.of(...) forbids contains(null) — throws NPE instead of returning false — so the
+    // missing-key case (map.get returns null whenever the source spec's window link can't be
+    // resolved, e.g. most OTHER windows' "lines" entities too) must be checked before consulting
+    // the set. Mirrors the same guard GoodsMovementProductSelectorPolicy already applies to
+    // SOURCE_ENTITY_NAME_PARAM for the identical reason.
     return LINES_ENTITY_NAME.equals(sourceEntity)
-        && IN_SCOPE_WINDOW_IDS.contains(sourceWindowId)
+        && sourceWindowId != null && IN_SCOPE_WINDOW_IDS.contains(sourceWindowId)
         && TAX_TARGET_ENTITY.equals(meta.entityName);
   }
 
