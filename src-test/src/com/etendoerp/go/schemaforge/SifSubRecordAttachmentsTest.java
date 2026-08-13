@@ -19,6 +19,7 @@ package com.etendoerp.go.schemaforge;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.contains;
 import static org.mockito.Mockito.mock;
@@ -32,6 +33,7 @@ import java.sql.SQLException;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.Test;
+import org.mockito.ArgumentCaptor;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
 import org.openbravo.dal.service.OBDal;
@@ -105,6 +107,51 @@ public class SifSubRecordAttachmentsTest {
       assertEquals("sii-row-001", rec.getString("aeatsiiFacturaId"));
       assertEquals("tbai-row-001", rec.getString("tbaiSyncInvoiceId"));
       assertEquals("vf-row-001", rec.getString("invoiceVerifactuId"));
+    }
+  }
+
+  // ── most-recent-row resolution (retry history) ──────────────────────────
+
+  /**
+   * Guards the "most recent sub-record wins" resolution against a real, already-observed
+   * production scenario (ETP-4888 QA investigation): a single invoice can accumulate
+   * MULTIPLE {@code etvfac_c_invoice_verifactu} rows across retries — an earlier attempt
+   * that failed pre-send validation (no AEAT response, so no attachment), followed by a
+   * later successful attempt that actually reached AEAT and carries the response
+   * attachment. A plain Mockito {@link ResultSet} mock cannot exercise real SQL
+   * {@code ORDER BY}/{@code LIMIT} semantics, so this test instead captures the literal SQL
+   * text sent to {@link PreparedStatement} for every one of the 3 tables and asserts it
+   * still carries {@code ORDER BY created DESC} and {@code LIMIT 1} — the only thing
+   * standing between "most recent wins" and "whichever row the DB happens to return first"
+   * if a future refactor ever drops that clause.
+   */
+  @Test
+  public void testEnrichQueriesOrderByCreatedDescLimitOneForAllThreeTables() throws Exception {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getReadOnlyInstance).thenReturn(dal);
+      Connection conn = mock(Connection.class);
+      when(dal.getConnection()).thenReturn(conn);
+
+      PreparedStatement ps = mock(PreparedStatement.class);
+      ResultSet rs = mock(ResultSet.class);
+      when(rs.next()).thenReturn(true);
+      when(rs.getString(1)).thenReturn("some-id");
+      when(ps.executeQuery()).thenReturn(rs);
+      ArgumentCaptor<String> sqlCaptor = ArgumentCaptor.forClass(String.class);
+      when(conn.prepareStatement(sqlCaptor.capture())).thenReturn(ps);
+
+      JSONObject rec = new JSONObject().put("id", "inv-004");
+      SifSubRecordAttachments.enrich(rec, "inv-004");
+
+      java.util.List<String> queries = sqlCaptor.getAllValues();
+      assertEquals(3, queries.size());
+      for (String sql : queries) {
+        assertTrue("Query must order by created DESC to pick the most recent retry: " + sql,
+            sql.contains("ORDER BY created DESC"));
+        assertTrue("Query must be limited to 1 row: " + sql, sql.contains("LIMIT 1"));
+        assertTrue("Query must filter to active rows only: " + sql, sql.contains("isactive = 'Y'"));
+      }
     }
   }
 
