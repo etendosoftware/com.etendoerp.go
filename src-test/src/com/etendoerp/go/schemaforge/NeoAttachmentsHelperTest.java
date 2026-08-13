@@ -19,6 +19,7 @@ package com.etendoerp.go.schemaforge;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -49,6 +50,7 @@ import org.hibernate.query.NativeQuery;
 import org.junit.After;
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.Test;
+import org.mockito.InOrder;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
 import org.openbravo.base.session.OBPropertiesProvider;
@@ -668,8 +670,114 @@ public class NeoAttachmentsHelperTest {
 
       String tabId = NeoAttachmentsHelper.resolveTabId("TABLE1", null);
 
-      assertEquals(null, tabId);
+      assertNull(tabId);
       verify(dal, times(2)).createCriteria(Tab.class);
+    }
+  }
+
+  /**
+   * Edge case: a table with MULTIPLE active non-{@code STD} tabs at different
+   * {@code tabLevel}/{@code sequenceNumber} combinations (e.g. {@code aeatsii_facturas},
+   * which has 6 {@code RO} tabs at different levels). The fallback query must request
+   * the exact same deterministic ordering as the {@code STD}-only query (lowest
+   * {@code tabLevel}, then lowest {@code sequenceNumber}) and the same single-row cap,
+   * so the "first" tab picked is never left to whatever order Postgres/the mock
+   * happens to hand back.
+   */
+  @Test
+  @SuppressWarnings({"rawtypes", "unchecked"})
+  public void resolveTabIdFallbackOrdersByTabLevelThenSequenceNumber() throws Exception {
+    OBDal dal = mock(OBDal.class);
+    OBCriteria<Tab> stdCriteria = mock(OBCriteria.class);
+    OBCriteria<Tab> anyCriteria = mock(OBCriteria.class);
+    Tab winner = mock(Tab.class);
+    when(winner.getId()).thenReturn("RO_TAB_LEVEL0_SEQ10");
+    when(dal.createCriteria(Tab.class)).thenReturn(stdCriteria, anyCriteria);
+    when(stdCriteria.list()).thenReturn(Collections.emptyList());
+    // Represents the DB already applying the requested order (lowest tabLevel,
+    // then lowest sequenceNumber) with setMaxResults(1) trimming to one row —
+    // out of the 6 RO tabs a table like aeatsii_facturas would actually have.
+    when(anyCriteria.list()).thenReturn(Collections.singletonList(winner));
+
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      String tabId = NeoAttachmentsHelper.resolveTabId("TABLE1", null);
+
+      assertEquals("RO_TAB_LEVEL0_SEQ10", tabId);
+      InOrder inOrder = Mockito.inOrder(anyCriteria);
+      inOrder.verify(anyCriteria).addOrderBy(Tab.PROPERTY_TABLEVEL, true);
+      inOrder.verify(anyCriteria).addOrderBy(Tab.PROPERTY_SEQUENCENUMBER, true);
+      verify(anyCriteria).setMaxResults(1);
+    }
+  }
+
+  /**
+   * Sharpest edge case: proves the {@code STD} preference is ABSOLUTE, not merely
+   * incidental to level/sequence ordering. Models a table with a mix of active
+   * {@code STD} and {@code RO} tabs where the {@code STD} tab has a HIGHER
+   * {@code tabLevel} (3) than an RO tab would (0) — meaning a single merged query
+   * ordered by level/seqNo across both types would put the RO tab first. The
+   * two-separate-query design must still return the {@code STD} tab, and must
+   * never even issue the fallback ("any active tab") query, proving {@code STD}
+   * wins by construction rather than by a lucky ordering coincidence.
+   */
+  @Test
+  @SuppressWarnings({"rawtypes", "unchecked"})
+  public void resolveTabIdPrefersStdTabEvenWhenRoTabWouldSortFirstByLevel() throws Exception {
+    OBDal dal = mock(OBDal.class);
+    OBCriteria<Tab> stdCriteria = mock(OBCriteria.class);
+    Tab stdTab = mock(Tab.class);
+    when(stdTab.getId()).thenReturn("STD_TAB_LEVEL3");
+    when(stdTab.getTabLevel()).thenReturn(3L);
+    when(dal.createCriteria(Tab.class)).thenReturn(stdCriteria);
+    when(stdCriteria.list()).thenReturn(Collections.singletonList(stdTab));
+
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      String tabId = NeoAttachmentsHelper.resolveTabId("TABLE1", null);
+
+      assertEquals("STD_TAB_LEVEL3", tabId);
+      // The fallback ("any active tab") query is never issued: STD wins outright,
+      // regardless of what tabLevel/sequenceNumber a coexisting RO tab might have.
+      verify(dal, times(1)).createCriteria(Tab.class);
+    }
+  }
+
+  /**
+   * An INACTIVE {@code STD} tab coexisting with an ACTIVE {@code RO} tab: the
+   * {@code STD}-only query restricts on {@code active = true} so it correctly
+   * excludes the inactive {@code STD} tab (returns empty), and the fallback must
+   * then return the active {@code RO} tab — never {@code null}, never the
+   * inactive {@code STD} tab.
+   */
+  @Test
+  @SuppressWarnings({"rawtypes", "unchecked"})
+  public void resolveTabIdIgnoresInactiveStdTabAndFallsBackToActiveRoTab() throws Exception {
+    OBDal dal = mock(OBDal.class);
+    OBCriteria<Tab> stdCriteria = mock(OBCriteria.class);
+    OBCriteria<Tab> anyCriteria = mock(OBCriteria.class);
+    Tab roTab = mock(Tab.class);
+    when(roTab.getId()).thenReturn("RO_TAB_ACTIVE");
+    when(dal.createCriteria(Tab.class)).thenReturn(stdCriteria, anyCriteria);
+    // The inactive STD tab never reaches this list: the "active = true"
+    // restriction (added unconditionally by findFirstActiveTabId) excludes it
+    // at the DB level, regardless of the stdOnly flag.
+    when(stdCriteria.list()).thenReturn(Collections.emptyList());
+    when(anyCriteria.list()).thenReturn(Collections.singletonList(roTab));
+
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      String tabId = NeoAttachmentsHelper.resolveTabId("TABLE1", null);
+
+      assertEquals("RO_TAB_ACTIVE", tabId);
+      // Both queries unconditionally restrict on table + active; only the
+      // STD-only query additionally restricts on uipattern. Call-count check
+      // guards against a future refactor silently dropping the active filter.
+      verify(stdCriteria, times(3)).add(any());
+      verify(anyCriteria, times(2)).add(any());
     }
   }
 
