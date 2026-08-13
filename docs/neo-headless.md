@@ -1335,7 +1335,12 @@ migrated to the new flow yet), an admin picks **1+** system-level template roles
 duplicated per client (`OnboardingRoleProvisioningService`, now retired from the live onboarding
 chain — see its class javadoc). ETP-4852 moves them to a single canonical, system-owned
 (`AD_Client_ID = '0'`) `AD_Role` row per role, `IsTemplate = 'Y'` / `IsManual = 'Y'`, seeded once
-by the `EnsureSystemRoleTemplatesScript` `ModuleScript` (`com.etendoerp.go.roles`). The "Admin"
+by the `EnsureSystemRoleTemplatesScript` `ModuleScript` (`com.etendoerp.go.roles`) — a plain
+Etendo dataset (`referencedata/standard/`) was considered instead but rejected: dataset import
+only fires during `InitialClientSetup` for a brand-new client or via a manual
+admin-triggered `UpdateReferenceData` action, neither of which runs on every `update.database`
+execution against every environment (new or existing), which is the one guarantee this seeding
+actually needs. The "Admin"
 (`is_client_admin = 'Y'`) role stays client-level, per tenant, untouched.
 
 **The mechanism (`com.etendoerp.go.roles.UserRoleCompositionService`):** each user gets exactly
@@ -1372,6 +1377,36 @@ inheritance → confirm `AD_Window_Access` appears on the personal role with the
 before entering admin mode — same convention as `SFRolesOverview`. No role, or a restricted
 role, gets `{"success": false, "message": "Not authorized"}` without touching the database.
 
+**Tenant boundary of the TARGET user (REVIEW cycle 1 fix, ETP-4852).** The access gate above
+only answers "may this caller use this webhook at all" — it does not limit WHICH `userId` a
+client-admin may target, because `isAdminOrClientAdmin` treats a per-tenant client-admin the
+same as the literal System Administrator. The original implementation never verified that the
+target user's client matched the CALLER's own client, so a client-admin for Tenant A could
+reassign — or completely strip, with an empty `TemplateRoleIds` — any Tenant B user's roles: a
+real cross-tenant privilege-escalation bug, not a theoretical one. The fix,
+`UserRoleCompositionService.enforceCallerClientBoundary(User, Role)`, runs immediately after
+`user` is resolved and before any template validation or admin-mode entry, and rejects a
+non-system caller whose client differs from the target user's. The bypass is scoped to the
+LITERAL System Administrator role id (`"0"`) — never to a mere `isClientAdmin()` role, however
+privileged within its own tenant. `SFAssignUserRoles.get()` forwards its already-resolved
+`currentRole` into the 3-arg `assignTemplateRoles(String, List, Role)` overload for exactly this
+purpose — see that method's javadoc. A 2-arg `assignTemplateRoles(String, List)` overload also
+exists (delegates with `callerRole=null`, skipping the boundary check entirely); today it is only
+reached by plain unit tests and the integration test's fixture calls, but REVIEW flagged it as a
+non-blocking latent risk — a future caller reaching for the 2-arg overload instead of the 3-arg
+one would silently ship without this protection.
+
+> **Template-role lifecycle: deactivation while depended-upon is a DB-level non-issue (QA
+> finding, ETP-4852).** Reading `src-db/database/model/triggers/AD_ROLE_CHECK_TRG.xml` directly
+> confirms core's own `ad_role_check_trg()` — a `BEFORE UPDATE` trigger on `AD_Role` itself —
+> refuses to set `IsActive = 'N'`, or uncheck `IsTemplate`, on ANY role that an
+> `AD_Role_Inheritance` row still points `InheritFrom` at (`@CannotUncheckTemplateRole@`), for
+> EVERY writer (`OBDal` or raw SQL alike), gated only by core's own explicit trigger-disable
+> bypass. In practice: **a template role can never be deactivated while an active inheritance
+> still depends on it — the database physically prevents it.** Whoever eventually builds
+> ETP-4877's existing-tenant retrofit never needs application-level code to defend against
+> "template deactivated out from under an active inheritance", because it cannot happen.
+
 **⚠️ Deliberately does NOT use the bridge's `error`/HTTP 500 path for expected rejections.**
 `NeoGoWebhookBridge` always maps `responseVars["error"]` to `500` — correct for a genuine crash,
 misleading for "that id isn't a valid template". `SFAssignUserRoles` catches `OBException`
@@ -1401,8 +1436,13 @@ The module includes unit tests that run without a backend:
 | `SFListMenuTest` | -- | Tree building/pruning, flat search, role-based filtering (window/process/OBUIAPP-process nodes), no-role → empty menu, multi-level nesting. |
 | `SFWindowAccessMapTest` | -- | Role-based windowAccess resolution (full/read-only/absent), no-role → both maps empty, admin/client-admin bypass → full access to every active Etendo GO window + every capability true, `showAccountingFields` true/false/unset/missing-role, `isAdminOrClientAdmin` true on bypass / false for a restricted role. |
 | `SFRolesOverviewTest` | -- | Admin/client-admin access gate (no role, restricted role, System Administrator, client-admin), all 5 roles returned in `GOCLIENT_ROLE_IDS` order with id/name/rawDescription, missing/renamed role id skipped gracefully, distinct-user-count aggregation, GO-window intersection (native-only windows excluded), tier resolution (full/read-only), exception handling. Two defense-in-depth regression cases confirm the gate is genuinely `isAdminOrClientAdmin`, not "is this one of the 5 known `GOCLIENT_ROLE_IDS`": a caller authenticated AS one of those 5 roles (Finance) but not admin/client-admin is still denied (empty `roles`, zero `Role` lookups), and a role with zero active `AD_User_Roles` AND zero active `AD_Window_Access` rows degrades gracefully to `userCount: 0` + an empty `windows` array for all 5 roles rather than throwing or omitting the role. |
+| `UserRoleCompositionServiceTest` | 221 | Pure-Mockito unit test (10 tests) covering `assignTemplateRoles`'s input-validation guard clauses — the slice that fails before any persistence side effect: blank user id, `null` template id list, unknown user, unknown/inactive template id, a role that is not a template, the client-admin "Admin" role rejected even if somehow marked as a template, requested-id dedup happening before the per-id validation loop (verified via a single `Role` lookup despite 3 whitespace-noisy repeats of the same id), and the two `enforceCallerClientBoundary` regression cases from REVIEW cycle 1: a caller whose client differs from the target user's is rejected with a "different client" message, while the literal System Administrator role id (`"0"`) bypasses the check and reaches the (unrelated) template-validation error instead. |
+| `UserRoleCompositionServiceIntegrationTest` | 446 | Real-DB, end-to-end proof (6 tests) of the full add/reconcile/retract lifecycle: a system-level (`AD_Client_ID = '0'`) template's `AD_Window_Access` propagates onto a per-tenant personal role purely via core's own `RoleInheritanceEventHandler`/`RoleInheritanceManager` (no hand-rolled copy in this module); removing a template on a later call retracts what it had propagated; re-running with the identical template set is a no-op (0 added, 0 removed); an empty template list on a user's FIRST-EVER composition call still creates the personal role and syncs `AD_User_Roles`/`Default_Ad_Role_ID` rather than leaving the user role-less; three occurrences of the same valid template id in one request collapse into exactly one `AD_Role_Inheritance` row instead of one per occurrence; and a recompose call mixing one still-valid template with one bogus id is rejected wholesale without mutating the inheritance/access an earlier, unrelated successful call had already applied. Extends `WeldBaseTest`, NOT plain `OBBaseTest` — role-inheritance propagation is driven by a Hibernate interceptor firing a CDI event that only `WeldBaseTest`'s Arquillian-booted container wires to an observer; under plain `OBBaseTest` the propagation silently never fires, which is a test-harness gap, not a bug in the service. |
+| `SFAssignUserRolesTest` | 278 | Unit test (8 tests) proving the webhook wires parameters/results/errors correctly, with `UserRoleCompositionService` itself intercepted via `mockConstruction` (its real behavior is the integration test's job): access gate (no role / restricted role denied without constructing the service), the happy path (admin composes, parses a whitespace/empty-entry-noisy `TemplateRoleIds` CSV, returns the assignment summary), missing `UserId` rejected before construction, an absent `TemplateRoleIds` parameter resolving to an empty (not `null`) list meaning "revoke all", a domain `OBException` folding into a `success:false` HTTP-200 result rather than the bridge's `error`/500 path, an unexpected `RuntimeException` surfacing as the bridge's `error` field instead, and the REVIEW cycle 1 regression proving the webhook actually forwards its already-resolved `currentRole` through to `assignTemplateRoles`'s 3-arg overload — the exact wiring the tenant-boundary check depends on. |
 
-Tests are located in `src-test/src/com/etendoerp/go/schemaforge/`.
+Tests are located in `src-test/src/com/etendoerp/go/schemaforge/`. `UserRoleCompositionServiceTest`
+and `UserRoleCompositionServiceIntegrationTest` are the exception, living under
+`src-test/src/com/etendoerp/go/roles/` alongside the service they cover.
 
 ---
 
