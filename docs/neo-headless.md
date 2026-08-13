@@ -1453,11 +1453,41 @@ itself and folds it into a `result` (HTTP 200) body with `success: false`; only 
 `RuntimeException` reaches the bridge's `error`/`500` path. Callers must branch on the body's
 `success` flag, not the HTTP status.
 
-**Not yet built (ETP-4878/ETP-4877, explicitly out of scope for ETP-4852):** the four templates
-ship with only a 2-window smoke-test `AD_Window_Access` grant each — enough to prove propagation
-end-to-end, not the real 48-window Admin/Ventas/Compras/Financiero/Almacén matrix from the
-ticket (ETP-4878's job). The ~21 existing tenants still holding per-client duplicated role
-copies are untouched by this mechanism (ETP-4877's job — a migration, not a runtime fallback).
+**ETP-4878 — the four templates now carry the real permission matrix, not the ETP-4852 smoke
+test.** `EnsureSystemRoleTemplatesScript` (the `ModuleScript`) no longer inserts a fixed 2-window
+pair per role; it now iterates the full matrix from `TemplateRoleWindowAccess`
+(`src/com/etendoerp/go/roles/TemplateRoleWindowAccess.java`) — a plain data class holding the
+Ventas/Compras/Financiero/Almacén columns from the ticket ("Admin" stays client-level, out of
+scope). Final grant counts: **Sales 13, Purchasing 11, Finance 27, Inventory 13** (33 distinct
+`AD_Window_ID`s, 64 role×window rows total). "Asientos manuales" resolves to **Simple G/L
+Journal** (`B917E8A7B0864ACEA9D941E3B7494E53`), not the classic `G/L Journal` window (`132`,
+which literally carries the matching ES label but has no Schema Forge spec) — a human call made
+explicitly for this ticket on an otherwise genuinely ambiguous resolution. The script's
+reconciliation is now two-sided: it inserts/corrects every grant the matrix calls for AND removes
+(hard `DELETE`) any existing grant a role has for a window the matrix does NOT call for — so the
+old smoke-test pairs are cleaned up on the next `update.database`, not just added to.
+`TemplateRoleWindowAccess` is unit-tested directly (`TemplateRoleWindowAccessTest`, `src-test/`)
+since it has zero DB/SQL dependencies — no Gradle classpath workaround needed, unlike the
+`ModuleScript` itself which stays DB-only.
+
+**Twelve matrix rows are a documented, deliberate gap — not yet implementable.** Every one of
+them has NO `AD_Window_ID` at all backing it in this environment (either a pure custom/aggregate
+Schema Forge page with zero classic-AD entity, or a report-type spec whose access resolves via a
+different, non-window mechanism), so `AD_Window_Access` cannot express a grant for it at all:
+**Inicio (Dashboard)**, **Favoritos**, **Copilot (Asistente IA)**, **Informes de inventario**,
+**Documentos no contabilizados**, **Monitor fiscal**, **Modelos fiscales**, **Informes
+financieros**, **Informe Antigüedad de Cobros**, **Informe Antigüedad de Pagos**, **Escaneo
+inteligente**, **Configuración fiscal**. Full per-row resolution detail (which spec/artifact was
+checked, why it has no window) lives in `EnsureSystemRoleTemplatesScript`'s own class javadoc.
+Closing this gap needs either building the missing AD entity/spec first, or a different grant
+mechanism entirely — left for a follow-up ticket. Separately, "Roles", "Usuario", and "Conectar
+asistente de IA" DO resolve to real `AD_Window_ID`s but are deliberately granted to none of the
+four templates — the matrix shows "—" for all four non-Admin roles on all three, so they stay
+Admin-only.
+
+**Still open (ETP-4877, unchanged by ETP-4878):** the ~21 existing tenants still holding
+per-client duplicated role copies are untouched by this mechanism (a migration, not a runtime
+fallback).
 
 ---
 
@@ -1475,6 +1505,7 @@ The module includes unit tests that run without a backend:
 | `SFListMenuTest` | -- | Tree building/pruning, flat search, role-based filtering (window/process/OBUIAPP-process nodes), no-role → empty menu, multi-level nesting. |
 | `SFWindowAccessMapTest` | -- | Role-based windowAccess resolution (full/read-only/absent), no-role → both maps empty, admin/client-admin bypass → full access to every active Etendo GO window + every capability true, `showAccountingFields` true/false/unset/missing-role, `isAdminOrClientAdmin` true on bypass / false for a restricted role. |
 | `SFRolesOverviewTest` | -- | Admin/client-admin access gate (no role, restricted role, System Administrator, client-admin), all 5 roles returned in `GOCLIENT_ROLE_IDS` order with id/name/rawDescription, missing/renamed role id skipped gracefully, distinct-user-count aggregation, GO-window intersection (native-only windows excluded), tier resolution (full/read-only), exception handling. Two defense-in-depth regression cases confirm the gate is genuinely `isAdminOrClientAdmin`, not "is this one of the 5 known `GOCLIENT_ROLE_IDS`": a caller authenticated AS one of those 5 roles (Finance) but not admin/client-admin is still denied (empty `roles`, zero `Role` lookups), and a role with zero active `AD_User_Roles` AND zero active `AD_Window_Access` rows degrades gracefully to `userCount: 0` + an empty `windows` array for all 5 roles rather than throwing or omitting the role. |
+| `TemplateRoleWindowAccessTest` (ETP-4878) | -- | The real ETP-4878 permission matrix in `TemplateRoleWindowAccess` (`src/com/etendoerp/go/roles/`), DB-free: exactly the 4 non-Admin template roles present, exact grant counts per role (Sales 13 / Purchasing 11 / Finance 27 / Inventory 13, 64 total), Asientos manuales resolves to Simple G/L Journal and never to the classic G/L Journal window (`132`), Sales has no grant for Pago, "Categoría del producto" is read-only for Sales/Purchasing but full for Finance/Inventory, no role repeats the same `AD_Window_ID` twice, `byRoleId()` returns a fresh mutable map per call. |
 | `UserRoleCompositionServiceTest` | 221 | Pure-Mockito unit test (10 tests) covering `assignTemplateRoles`'s input-validation guard clauses — the slice that fails before any persistence side effect: blank user id, `null` template id list, unknown user, unknown/inactive template id, a role that is not a template, the client-admin "Admin" role rejected even if somehow marked as a template, requested-id dedup happening before the per-id validation loop (verified via a single `Role` lookup despite 3 whitespace-noisy repeats of the same id), and the two `enforceCallerClientBoundary` regression cases from REVIEW cycle 1: a caller whose client differs from the target user's is rejected with a "different client" message, while the literal System Administrator role id (`"0"`) bypasses the check and reaches the (unrelated) template-validation error instead. |
 | `UserRoleCompositionServiceIntegrationTest` | 446 | Real-DB, end-to-end proof (6 tests) of the full add/reconcile/retract lifecycle: a system-level (`AD_Client_ID = '0'`) template's `AD_Window_Access` propagates onto a per-tenant personal role purely via core's own `RoleInheritanceEventHandler`/`RoleInheritanceManager` (no hand-rolled copy in this module); removing a template on a later call retracts what it had propagated; re-running with the identical template set is a no-op (0 added, 0 removed); an empty template list on a user's FIRST-EVER composition call still creates the personal role and syncs `AD_User_Roles`/`Default_Ad_Role_ID` rather than leaving the user role-less; three occurrences of the same valid template id in one request collapse into exactly one `AD_Role_Inheritance` row instead of one per occurrence; and a recompose call mixing one still-valid template with one bogus id is rejected wholesale without mutating the inheritance/access an earlier, unrelated successful call had already applied. Extends `WeldBaseTest`, NOT plain `OBBaseTest` — role-inheritance propagation is driven by a Hibernate interceptor firing a CDI event that only `WeldBaseTest`'s Arquillian-booted container wires to an observer; under plain `OBBaseTest` the propagation silently never fires, which is a test-harness gap, not a bug in the service. |
 | `UserRoleCompositionServiceOverlapIntegrationTest` | -- | Real-DB proof (3 tests) of the cross-template `AD_Window_Access` overlap fix (see above): composing Finance (full) + Sales (read-only) on a shared window succeeds (no `OBSecurityException`) and resolves to full access, with `client`/`organization` on the shared row matching the personal role's own, and both templates' non-shared windows also present (a real union); the same conflicting grants requested in the OPPOSITE order still resolve to full — add order never changes the most-permissive-wins outcome; and re-running the identical overlapping template set is a no-op that leaves the shared window's access exactly as-is. Uses the real Finance/Sales system templates (not throwaway roles) plus one confirmed-unused window (`AD_Window_ID = 100`) for the shared grant, so it is independent of whatever the templates' own real grants happen to be. |
