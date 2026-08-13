@@ -18,9 +18,19 @@ package com.etendoerp.go.modulescript;
 
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
+import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
 
 import org.openbravo.database.ConnectionProvider;
 import org.openbravo.modulescript.ModuleScript;
+
+import com.etendoerp.go.roles.SystemRoleTemplates;
+import com.etendoerp.go.roles.TemplateRoleWindowAccess;
+import com.etendoerp.go.roles.TemplateRoleWindowAccess.WindowGrant;
 
 /**
  * ETP-4852 — seeds the four system-level ({@code AD_Client_ID = '0'}) fixed-role templates
@@ -33,31 +43,75 @@ import org.openbravo.modulescript.ModuleScript;
  * <p><b>Deliberately excludes "Admin".</b> The client-level {@code is_client_admin = 'Y'} role
  * stays exactly as core provisions it per tenant — this script never touches it.</p>
  *
- * <p><b>IDs are literal, not {@code get_uuid()}-generated at insert time</b> — mirrored in {@link
- * com.etendoerp.go.roles.SystemRoleTemplates}, which is what the rest of the module (the
- * composition webhook, its tests) reference. See that class's javadoc for why the same four
- * strings are intentionally duplicated here instead of importing it: every existing
- * {@code ModuleScript} in this codebase is self-contained raw SQL against a
- * {@link ConnectionProvider}, with no dependency on its own module's {@code src/} tree (these
- * scripts run as part of {@code update.database}, before the module's own classes are
- * necessarily on that build step's classpath) — this one follows the same convention.</p>
+ * <p><b>Role ids come from {@link SystemRoleTemplates}, and the ETP-4878 permission matrix comes
+ * from {@link TemplateRoleWindowAccess} — a deliberate, single EXCEPTION to the usual "{@code
+ * ModuleScript} is self-contained, no dependency on this module's own {@code src/} tree"
+ * convention (every OTHER script here still follows that convention; see the historical note this
+ * javadoc used to carry about literal-ID duplication, superseded 2026-08-13/ETP-4878).</b>
+ * Confirmed empirically that {@code compile.modulescript} resolves this import fine — it compiles
+ * against the module's already-built {@code main} classes, so the isolation convention is about
+ * self-containment/readability of an individual script, not a hard compile-time sandbox. The
+ * tradeoff was made specifically so the 64-row permission matrix is plain data reachable by a
+ * normal {@code src-test} unit test (no DB, no Gradle classpath workaround) — see {@code
+ * TemplateRoleWindowAccessTest}. This script stays a thin consumer: role creation + the
+ * check-then-insert/reconcile idempotency pattern below, nothing else.</p>
  *
- * <p><b>Smoke-test {@code AD_Window_Access} only — NOT the real permission matrix.</b> Each
- * template gets exactly two full-access window grants, enough to prove end-to-end that core's
- * {@code RoleInheritanceManager} propagates {@code AD_Window_Access} from a system-level
- * template down to a per-tenant personal role via {@code AD_Role_Inheritance} (verified live,
- * see {@code UserRoleCompositionServiceIntegrationTest}). Populating the full 48-window
- * Admin/Ventas/Compras/Financiero/Almacén matrix from the ticket is explicitly ETP-4878's job,
- * not this script's.</p>
+ * <p><b>ETP-4878 — real permission matrix (supersedes the old 2-window-per-role smoke test).</b>
+ * Each template now carries the full window-access matrix from the ticket (Ventas/Compras/
+ * Financiero/Almacén columns; "Admin" stays client-level and is out of scope). Grant counts:
+ * Sales 13, Purchasing 11, Finance 27, Inventory 13 (33 distinct windows, some shared across more
+ * than one role at different access levels — e.g. "Categoría del producto" is read-only for
+ * Sales/Purchasing but full for Finance/Inventory). "Asientos manuales" resolves to the
+ * <b>Simple G/L Journal</b> window ({@code B917E8A7B0864ACEA9D941E3B7494E53}), not the classic
+ * {@code G/L Journal} (window {@code 132}, which literally carries the ES label "Asientos
+ * manuales" but has no Schema Forge spec at all) — a human call on an otherwise genuinely
+ * ambiguous resolution, made explicitly for this ticket. Full per-window detail lives in {@link
+ * TemplateRoleWindowAccess}'s own javadoc, not duplicated here.</p>
  *
- * <p><b>All 6 legacy window ids re-verified against the live DB (REVIEW cycle 1, ETP-4852) —
- * not just Finance's.</b> Alex's review could only corroborate Finance's two UUIDs from the
- * worktree (no DB access there); an FK failure on any of the other four would only surface at
- * {@code update.database} time, uncaught until then. Confirmed live: {@code 143} = "Sales
- * Order", {@code 123} = "Business Partner" (Sales); {@code 181} = "Purchase Order", {@code 140}
- * = "Product" (Purchasing); {@code 184} = "Goods Receipt", {@code 139} = "Warehouse and Storage
- * Bins" (Inventory) — all six {@code IsActive = 'Y'} and {@code AD_Client_ID = '0'} (system-owned,
- * consistent with a system-level template's grant).</p>
+ * <p><b>Twelve matrix rows are deliberately NOT implemented — known gap, follow-up ticket
+ * pending.</b> Every one of these has NO {@code AD_Window_ID} at all backing it (either a pure
+ * custom/aggregate Schema Forge page with zero classic-AD entity, or a report-type spec whose
+ * access is resolved via a different, non-window mechanism) — {@code AD_Window_Access} cannot
+ * express a grant against something that has no window. Listed here so the gap is visible from
+ * the class that would otherwise silently look complete:
+ * <ul>
+ *   <li><b>Inicio (Dashboard)</b> — {@code dashboard} spec is pure widget-handler qualifiers, no
+ *       {@code ad_tab_id}/{@code ad_window_id} anywhere.</li>
+ *   <li><b>Favoritos</b> — no backing AD entity of any kind found (app-shell client feature).</li>
+ *   <li><b>Copilot (Asistente IA)</b> — {@code AD_Menu} "Copilot" exists but its
+ *       {@code ad_window_id} is null (points at an embedded chat feature, not a window).</li>
+ *   <li><b>Informes de inventario</b> — {@code inventory-stock-report} spec, type R, no window,
+ *       no tab; pure webhook handler.</li>
+ *   <li><b>Documentos no contabilizados</b> — {@code not-posted-documents} spec, type W but
+ *       {@code ad_window_id} null; fully custom, no classic window backing it.</li>
+ *   <li><b>Monitor fiscal</b> — {@code fiscal-monitor} artifact is {@code category: "custom"},
+ *       {@code entities: {}}; not even pushed to {@code ETGO_SF_SPEC}.</li>
+ *   <li><b>Modelos fiscales</b> — {@code fiscal-models} artifact has no {@code decisions.json} at
+ *       all yet (only mock data) — earliest possible pipeline stage.</li>
+ *   <li><b>Informes financieros</b> — no single window backs this label; multiple jsreport-print
+ *       candidates exist ({@code profit-loss}, {@code balance-sheet}, {@code tax-report}, the
+ *       {@code reports} index, …), none with an {@code AD_Window_ID} — likely a menu category,
+ *       not one window.</li>
+ *   <li><b>Informe Antigüedad de Cobros</b> — {@code aging-receivable} spec exists (type R) but
+ *       has neither {@code ad_window_id} nor {@code ad_tab_id}; same report-access-mechanism gap
+ *       as ETP-4596.</li>
+ *   <li><b>Informe Antigüedad de Pagos</b> — no {@code ETGO_SF_SPEC} row exists at all (only a
+ *       jsreport template artifact); more severe than its sibling above.</li>
+ *   <li><b>Escaneo inteligente</b> — {@code smart-scan} artifact is an aggregate/custom route
+ *       page ({@code /smart-scan}); no {@code ad_window}/{@code ad_menu} entry whatsoever.</li>
+ *   <li><b>Configuración fiscal</b> — {@code fiscal-config} artifact is {@code category:
+ *       "configuration"}, {@code entities: {}}; not in {@code ETGO_SF_SPEC}.</li>
+ * </ul>
+ * See {@code docs/neo-headless.md} (in this module) for the same list with the research
+ * dispatch's full resolution table. Populating these 12 requires either building the missing AD
+ * entity/spec first or a different, non-{@code AD_Window_Access} grant mechanism — out of scope
+ * for this script until that follow-up ticket lands.</p>
+ *
+ * <p><b>"Roles", "Usuario", and "Conectar asistente de IA" resolve to real {@code AD_Window_ID}s
+ * (111, 108, and {@code 6006F3B3DDF74D618CBEE21BEFD398DC} respectively) but are deliberately NOT
+ * granted to any of the four templates</b> — the ticket's matrix shows "—" (no access) for all
+ * four non-Admin roles on all three. They stay Admin-only, consistent with Admin being out of
+ * scope for this ticket.</p>
  *
  * <p><b>This class's compiled {@code .class} files are committed to git</b> — an intentional
  * exception to this module's {@code build/} gitignore, force-added, and unusual for
@@ -72,10 +126,12 @@ import org.openbravo.modulescript.ModuleScript;
  *
  * <p><b>Consequence for future edits — read before touching this file.</b> After ANY change to
  * this source, you MUST re-run {@code ./gradlew compile.modulescript -Dmodule=com.etendoerp.go}
- * and {@code git add -f} the two regenerated {@code .class} files (this class's and its nested
- * {@code TemplateRole}'s) again before committing. Skip that and the checked-in binary silently
- * diverges from this source — {@code update.database} keeps running the stale, pre-edit logic
- * with no compile error or warning to flag it.</p>
+ * and {@code git add -f} the regenerated {@code .class} file again before committing (this class
+ * no longer has its own nested data classes — {@code WindowGrant} now lives on {@link
+ * TemplateRoleWindowAccess}, compiled as part of the module's normal {@code main} sourceSet, not
+ * force-added). Skip the recompile and the checked-in binary silently diverges from this source —
+ * {@code update.database} keeps running the stale, pre-edit logic with no compile error or
+ * warning to flag it.</p>
  */
 public class EnsureSystemRoleTemplatesScript extends ModuleScript {
 
@@ -86,32 +142,27 @@ public class EnsureSystemRoleTemplatesScript extends ModuleScript {
   /** {@code AD_Role.UserLevel} shared by every fixed role in this fleet (client + org). */
   private static final String USER_LEVEL = "  O";
 
-  private static final String FINANCE_ROLE_ID = "B88A34B5D1874F8685FA6F3C3A609412";
-  private static final String SALES_ROLE_ID = "15ECC46CFBD74CF3A76D1F4DC8BA9F80";
-  private static final String PURCHASING_ROLE_ID = "5E279F5102F9410F9B8CCBA424741F46";
-  private static final String INVENTORY_ROLE_ID = "73581A7B4F414A2C9059C83CE7BE97BF";
+  /** English names for the role INSERT, keyed the same way {@link SystemRoleTemplates#byName()} is. */
+  private static final Map<String, String> ROLE_NAMES_BY_ID = namesByRoleId();
 
-  /** One template descriptor: role id, English name, and its 2-window smoke set. */
-  private static final TemplateRole[] TEMPLATES = {
-      new TemplateRole(FINANCE_ROLE_ID, "Finance",
-          new String[] { "94EAA455D2644E04AB25D93BE5157B6D", "E547CE89D4C04429B6340FFA44E70716" }),
-      new TemplateRole(SALES_ROLE_ID, "Sales",
-          new String[] { "143", "123" }),
-      new TemplateRole(PURCHASING_ROLE_ID, "Purchasing",
-          new String[] { "181", "140" }),
-      new TemplateRole(INVENTORY_ROLE_ID, "Inventory",
-          new String[] { "184", "139" }),
-  };
+  private static Map<String, String> namesByRoleId() {
+    Map<String, String> byName = SystemRoleTemplates.byName();
+    Map<String, String> byId = new LinkedHashMap<>();
+    for (Map.Entry<String, String> entry : byName.entrySet()) {
+      byId.put(entry.getValue(), entry.getKey());
+    }
+    return byId;
+  }
 
   @Override
   public void execute() {
     try {
       ConnectionProvider cp = getConnectionProvider();
-      for (TemplateRole template : TEMPLATES) {
-        ensureRole(cp, template);
-        for (String windowId : template.smokeWindowIds) {
-          ensureWindowAccess(cp, template.roleId, windowId);
-        }
+      Map<String, List<WindowGrant>> grantsByRoleId = TemplateRoleWindowAccess.byRoleId();
+      for (Map.Entry<String, List<WindowGrant>> entry : grantsByRoleId.entrySet()) {
+        String roleId = entry.getKey();
+        ensureRole(cp, roleId, ROLE_NAMES_BY_ID.get(roleId));
+        reconcileWindowAccess(cp, roleId, entry.getValue());
       }
     } catch (Exception e) {
       handleError(e);
@@ -119,13 +170,13 @@ public class EnsureSystemRoleTemplatesScript extends ModuleScript {
   }
 
   /**
-   * Inserts the system-level template role for {@code template} unless a role with that exact
-   * ID already exists (the ID is literal/fixed, so a re-run's own previous insert is what this
+   * Inserts the system-level template role for {@code roleId} unless a role with that exact ID
+   * already exists (the ID is literal/fixed, so a re-run's own previous insert is what this
    * guard normally matches — not a name lookup, which would be a weaker guard against a
    * same-named row created some other way).
    */
-  private void ensureRole(ConnectionProvider cp, TemplateRole template) throws Exception {
-    if (exists(cp, "SELECT 1 FROM AD_Role WHERE AD_Role_ID = ?", template.roleId)) {
+  private void ensureRole(ConnectionProvider cp, String roleId, String name) throws Exception {
+    if (exists(cp, "SELECT 1 FROM AD_Role WHERE AD_Role_ID = ?", roleId)) {
       return;
     }
     String sql = "INSERT INTO AD_Role (AD_Role_ID, AD_Client_ID, AD_Org_ID, IsActive, "
@@ -135,12 +186,12 @@ public class EnsureSystemRoleTemplatesScript extends ModuleScript {
         + "VALUES (?, ?, ?, 'Y', now(), ?, now(), ?, ?, ?, ?, 'Y', 'N', 'N', 'N', 'N', 'N', 'N', "
         + "'Y', 'N')";
     try (PreparedStatement ps = cp.getPreparedStatement(sql)) {
-      ps.setString(1, template.roleId);
+      ps.setString(1, roleId);
       ps.setString(2, SYSTEM_CLIENT_ID);
       ps.setString(3, STAR_ORG_ID);
       ps.setString(4, SYSTEM_ADMIN_USER_ID);
       ps.setString(5, SYSTEM_ADMIN_USER_ID);
-      ps.setString(6, template.name);
+      ps.setString(6, name);
       ps.setString(7, "System-level template role (ETP-4852) — compose per-user personal roles "
           + "by inheriting from this template, never edit directly.");
       ps.setString(8, USER_LEVEL);
@@ -149,22 +200,62 @@ public class EnsureSystemRoleTemplatesScript extends ModuleScript {
   }
 
   /**
-   * Inserts one smoke-test {@code AD_Window_Access} row for {@code roleId}/{@code windowId}
-   * unless an active row already exists — the guard a real re-run relies on, since the window
-   * ids are stable/shared (core-owned, {@code AD_Client_ID = '0'}) but not tied to this script's
-   * own literal role IDs the way the role insert above is.
+   * Reconciles {@code roleId}'s {@code AD_Window_Access} rows against {@code grants} (from {@link
+   * TemplateRoleWindowAccess}) — the ETP-4878 replacement for the old insert-only smoke test. For
+   * every desired grant: inserts it if missing, or corrects {@code IsReadWrite} in place if an
+   * active row already exists with the wrong access level (e.g. a window that moved from "R" to
+   * "✓" between revisions of the matrix). Then removes (hard {@code DELETE}, mirroring the
+   * "remove it, don't just leave it" spirit of {@code UserRoleCompositionService
+   * #reconcileInheritances}) any active grant this role has for a window that is NOT in the
+   * current matrix — e.g. the old 2-window smoke-test grants, for roles/windows the real matrix
+   * says "—" for.
+   *
+   * <p>Scoped strictly per {@code roleId}: only rows owned by THIS template role are ever
+   * touched, never another role's. Safe because these four template roles are entirely managed
+   * by this script — no other code path writes {@code AD_Window_Access} rows for them.</p>
+   *
+   * <p><b>Out of scope:</b> retroactively updating personal roles that already inherited from a
+   * template before this reconciliation ran. This script writes raw SQL against the TEMPLATE role
+   * only — the {@code RoleInheritanceManager} propagation covered by {@code
+   * UserRoleCompositionServiceIntegrationTest} fires off {@code AD_Role_Inheritance}/{@code
+   * AD_Window_Access} Hibernate events, which this JDBC-only {@code ModuleScript} does not
+   * generate. Retroactively re-syncing already-composed personal roles when a template's matrix
+   * changes later is ETP-4877's territory, not this script's.</p>
    */
-  private void ensureWindowAccess(ConnectionProvider cp, String roleId, String windowId)
+  private void reconcileWindowAccess(ConnectionProvider cp, String roleId, List<WindowGrant> grants)
       throws Exception {
-    if (exists(cp,
-        "SELECT 1 FROM AD_Window_Access WHERE AD_Role_ID = ? AND AD_Window_ID = ? "
-            + "AND IsActive = 'Y'",
-        roleId, windowId)) {
-      return;
+    Set<String> desiredWindowIds = new HashSet<>();
+    for (WindowGrant grant : grants) {
+      desiredWindowIds.add(grant.getWindowId());
+      upsertWindowAccess(cp, roleId, grant.getWindowId(), grant.isReadOnly());
     }
+    removeStaleWindowAccess(cp, roleId, desiredWindowIds);
+  }
+
+  /**
+   * Inserts one {@code AD_Window_Access} row for {@code roleId}/{@code windowId} unless an active
+   * row already exists; if one exists but its {@code IsReadWrite} disagrees with {@code
+   * readOnly}, updates it in place instead of leaving a stale access level.
+   */
+  private void upsertWindowAccess(ConnectionProvider cp, String roleId, String windowId,
+      boolean readOnly) throws Exception {
+    String desiredReadWrite = readOnly ? "N" : "Y";
+    String currentReadWrite = singleString(cp,
+        "SELECT IsReadWrite FROM AD_Window_Access WHERE AD_Role_ID = ? AND AD_Window_ID = ? "
+            + "AND IsActive = 'Y'",
+        roleId, windowId);
+    if (currentReadWrite == null) {
+      insertWindowAccess(cp, roleId, windowId, desiredReadWrite);
+    } else if (!currentReadWrite.equals(desiredReadWrite)) {
+      updateWindowAccessReadWrite(cp, roleId, windowId, desiredReadWrite);
+    }
+  }
+
+  private void insertWindowAccess(ConnectionProvider cp, String roleId, String windowId,
+      String readWrite) throws Exception {
     String sql = "INSERT INTO AD_Window_Access (AD_Window_Access_ID, AD_Client_ID, AD_Org_ID, "
         + "IsActive, Created, CreatedBy, Updated, UpdatedBy, AD_Role_ID, AD_Window_ID, "
-        + "IsReadWrite) VALUES (get_uuid(), ?, ?, 'Y', now(), ?, now(), ?, ?, ?, 'Y')";
+        + "IsReadWrite) VALUES (get_uuid(), ?, ?, 'Y', now(), ?, now(), ?, ?, ?, ?)";
     try (PreparedStatement ps = cp.getPreparedStatement(sql)) {
       ps.setString(1, SYSTEM_CLIENT_ID);
       ps.setString(2, STAR_ORG_ID);
@@ -172,7 +263,53 @@ public class EnsureSystemRoleTemplatesScript extends ModuleScript {
       ps.setString(4, SYSTEM_ADMIN_USER_ID);
       ps.setString(5, roleId);
       ps.setString(6, windowId);
+      ps.setString(7, readWrite);
       ps.executeUpdate();
+    }
+  }
+
+  private void updateWindowAccessReadWrite(ConnectionProvider cp, String roleId, String windowId,
+      String readWrite) throws Exception {
+    String sql = "UPDATE AD_Window_Access SET IsReadWrite = ?, Updated = now(), UpdatedBy = ? "
+        + "WHERE AD_Role_ID = ? AND AD_Window_ID = ? AND IsActive = 'Y'";
+    try (PreparedStatement ps = cp.getPreparedStatement(sql)) {
+      ps.setString(1, readWrite);
+      ps.setString(2, SYSTEM_ADMIN_USER_ID);
+      ps.setString(3, roleId);
+      ps.setString(4, windowId);
+      ps.executeUpdate();
+    }
+  }
+
+  /**
+   * Deletes every active {@code AD_Window_Access} row for {@code roleId} whose window is NOT in
+   * {@code desiredWindowIds} — the reconciliation half of ETP-4878's replacement for the old
+   * insert-only smoke test (e.g. the old smoke-test grants for a role/window pair the real matrix
+   * now says "—" for).
+   */
+  private void removeStaleWindowAccess(ConnectionProvider cp, String roleId,
+      Set<String> desiredWindowIds) throws Exception {
+    List<String> staleWindowIds = new ArrayList<>();
+    String selectSql = "SELECT AD_Window_ID FROM AD_Window_Access WHERE AD_Role_ID = ? "
+        + "AND IsActive = 'Y'";
+    try (PreparedStatement ps = cp.getPreparedStatement(selectSql)) {
+      ps.setString(1, roleId);
+      try (ResultSet rs = ps.executeQuery()) {
+        while (rs.next()) {
+          String windowId = rs.getString(1);
+          if (!desiredWindowIds.contains(windowId)) {
+            staleWindowIds.add(windowId);
+          }
+        }
+      }
+    }
+    String deleteSql = "DELETE FROM AD_Window_Access WHERE AD_Role_ID = ? AND AD_Window_ID = ?";
+    for (String windowId : staleWindowIds) {
+      try (PreparedStatement ps = cp.getPreparedStatement(deleteSql)) {
+        ps.setString(1, roleId);
+        ps.setString(2, windowId);
+        ps.executeUpdate();
+      }
     }
   }
 
@@ -187,16 +324,15 @@ public class EnsureSystemRoleTemplatesScript extends ModuleScript {
     }
   }
 
-  /** One template role's ID, English name, and 2-window smoke-test access set. */
-  private static final class TemplateRole {
-    final String roleId;
-    final String name;
-    final String[] smokeWindowIds;
-
-    TemplateRole(String roleId, String name, String[] smokeWindowIds) {
-      this.roleId = roleId;
-      this.name = name;
-      this.smokeWindowIds = smokeWindowIds;
+  private String singleString(ConnectionProvider cp, String sql, String... params)
+      throws Exception {
+    try (PreparedStatement ps = cp.getPreparedStatement(sql)) {
+      for (int i = 0; i < params.length; i++) {
+        ps.setString(i + 1, params[i]);
+      }
+      try (ResultSet rs = ps.executeQuery()) {
+        return rs.next() ? rs.getString(1) : null;
+      }
     }
   }
 }
