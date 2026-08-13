@@ -50,8 +50,9 @@ import com.etendoerp.go.common.CorsUtils;
  * Configuration" backoffice window: a single global-settings row
  * (ETGO_Survey_Config), one header row per survey (ETGO_Survey_Type — adding a
  * new survey is a new row, not a new column), and canned responses as a child
- * of that header (ETGO_Survey_Canned_Resp), each with a score range. Read-only,
- * not client-scoped.
+ * of that header (ETGO_Survey_Canned_Resp), each with a score range. Not client-scoped.
+ * Only the GET endpoint is read-only: POST /response writes survey feedback to
+ * ETGO_Survey_Response (see below).
  *
  * URL:
  *   GET  /sws/survey-config/
@@ -98,9 +99,12 @@ public class SurveyConfigServlet extends HttpBaseServlet {
 
   private static final Logger log = LogManager.getLogger(SurveyConfigServlet.class);
 
+  // Newest-first so the most recently maintained row wins. The table has no uniqueness constraint
+  // and the Config tab allows creating rows, so more than one active row is possible; picking the
+  // oldest (ORDER BY created) would silently serve stale tuning after an admin adds a corrected row.
   private static final String GLOBAL_QUERY =
       "SELECT global_cooldown_days, dismissed_cooldown_days, max_per_month"
-      + " FROM etgo_survey_config WHERE isactive='Y' ORDER BY created LIMIT 1";
+      + " FROM etgo_survey_config WHERE isactive='Y' ORDER BY updated DESC LIMIT 1";
 
   // Not filtered by isactive: a disabled (isactive='N') survey type row must still be reported
   // to the frontend (as enabled=false in groupSurveyTypes) so it can be treated as a hard
