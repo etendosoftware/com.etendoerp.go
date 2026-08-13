@@ -34,6 +34,7 @@ import org.openbravo.model.common.currency.ConversionRateDoc;
 import org.openbravo.model.common.currency.Currency;
 import org.openbravo.model.common.invoice.Invoice;
 import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
+import org.openbravo.model.financialmgmt.payment.FIN_Payment;
 
 /**
  * Currency-conversion concern for the payment registration flow: resolving the request's
@@ -129,6 +130,26 @@ final class PaymentCurrencyConverter {
           RoundingMode.HALF_UP);
     }
     return converted;
+  }
+
+  /**
+   * Writes the financial-transaction fields on {@code payment} VERBATIM: the rate exactly as the
+   * caller resolved it, and {@code txnAmount} exactly as {@link #convertedAmount} rounded it.
+   *
+   * <p>Deliberately NOT {@code FIN_AddPayment.setFinancialTransactionAmountAndRate}: that core
+   * helper recomputes {@code rate = txnAmount / paymentAmount} to "correct exchange rate for
+   * rounding that occurs in UI", because Classic's Add Payment treats the CONVERTED AMOUNT as the
+   * user's input. Our two-step modal is the other way round — the user types the RATE and the
+   * account-currency amount is derived — so that correction silently mangles the stored rate: a
+   * typed 0.89 on 58.70 USD becomes 52.24 EUR and then 52.24/58.70 = 0.889948892674617, and the
+   * reopened draft no longer shows what the user entered (ETP-4841). Note the same recompute is
+   * commented out in {@code AdvPaymentMngtDao.getNewPayment} (core bug 17829), so storing the rate
+   * verbatim is the behavior core itself settled on.
+   */
+  static void applyTransactionAmountAndRate(FIN_Payment payment, BigDecimal rate,
+      BigDecimal txnAmount) {
+    payment.setFinancialTransactionAmount(txnAmount);
+    payment.setFinancialTransactionConvertRate(rate);
   }
 
   /**

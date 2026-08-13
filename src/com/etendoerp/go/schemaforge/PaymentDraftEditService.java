@@ -248,7 +248,8 @@ final class PaymentDraftEditService {
    * ({@code amount * rate}, rounded to the account precision by
    * {@link PaymentCurrencyConverter#convertedAmount}), so editing/confirming a draft keeps its
    * conversion rate. A rate of {@link BigDecimal#ONE} (same currency) preserves the original
-   * single-currency behavior.
+   * single-currency behavior. The rate itself is stored verbatim (ETP-4841) — see
+   * {@link PaymentCurrencyConverter#applyTransactionAmountAndRate}.
    */
   private static void reapplyDraftBasics(FIN_Payment payment, FIN_PaymentMethod paymentMethod,
       FIN_FinancialAccount account, Date paymentDate, BigDecimal rate, BigDecimal amount) {
@@ -257,7 +258,7 @@ final class PaymentDraftEditService {
     payment.setPaymentMethod(paymentMethod);
     payment.setAmount(amount);
     BigDecimal txnAmount = PaymentCurrencyConverter.convertedAmount(amount, rate, account);
-    FIN_AddPayment.setFinancialTransactionAmountAndRate(null, payment, rate, txnAmount);
+    PaymentCurrencyConverter.applyTransactionAmountAndRate(payment, rate, txnAmount);
     OBDal.getInstance().save(payment);
     OBDal.getInstance().flush();
   }
