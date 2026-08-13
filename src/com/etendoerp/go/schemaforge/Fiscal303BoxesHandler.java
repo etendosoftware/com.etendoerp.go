@@ -17,13 +17,11 @@
 package com.etendoerp.go.schemaforge;
 
 import java.math.BigDecimal;
-import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Base64;
 import java.util.Collections;
 import java.util.HashMap;
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.function.Function;
@@ -34,19 +32,15 @@ import javax.servlet.http.HttpServletResponse;
 import org.apache.commons.lang3.StringUtils;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
-import org.hibernate.ScrollableResults;
 import org.hibernate.criterion.Order;
 import org.hibernate.criterion.Restrictions;
 import org.openbravo.base.exception.OBException;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.enterprise.Organization;
-import org.openbravo.model.common.invoice.Invoice;
-import org.openbravo.model.common.invoice.InvoiceTax;
 import org.openbravo.model.financialmgmt.accounting.coa.AcctSchema;
 import org.openbravo.model.financialmgmt.calendar.Period;
 import org.openbravo.model.financialmgmt.tax.TaxRate;
-import org.openbravo.module.aeat303.es.api.CashVATOperationType;
 import org.openbravo.module.aeat303.es.api.InvoiceType;
 import org.openbravo.module.aeat303.es.presentation.AEAT303DeclarationData;
 import org.openbravo.module.aeat303.es.presentation.AEAT303SubmissionResult;
@@ -59,7 +53,10 @@ import com.etendoerp.go.schemaforge.data.FiscalDecl;
 
 class Fiscal303BoxesHandler extends AbstractFiscalHandler {
 
-  private static final String BOXES        = "boxes";
+  // Package-private (not private): also read by Fiscal303SourcesSupport, which owns the
+  // invoice-sources-building concern (moved out of this class in ETP-4755 to keep this class's
+  // method count under the SonarQube java:S1448 threshold — see that class's header javadoc).
+  static final String BOXES        = "boxes";
   private static final String GENERATE     = "generate";
   private static final String SUBMIT       = "submit";
   private static final String VAT_SALES    = "VAT_SALES";
@@ -96,10 +93,14 @@ class Fiscal303BoxesHandler extends AbstractFiscalHandler {
   private static final BigDecimal PCT_1_75 = new BigDecimal("1.75");
 
   private final Fiscal303SubmissionSupport submissionSupport;
+  // Package-private (not private): Fiscal303BoxesHandlerTest calls finalizeInvoiceRow directly on
+  // this field to test it in isolation — see Fiscal303SourcesSupport's header javadoc.
+  final Fiscal303SourcesSupport sourcesSupport;
 
   Fiscal303BoxesHandler(NeoServlet servlet) {
     super(servlet);
     this.submissionSupport = new Fiscal303SubmissionSupport(this);
+    this.sourcesSupport = new Fiscal303SourcesSupport(this);
   }
 
   @Override
@@ -305,7 +306,7 @@ class Fiscal303BoxesHandler extends AbstractFiscalHandler {
 
     computeSummaryBoxes(b);
 
-    List<Map<String, Object>> sources = collectSources(org, periods, dao303, rateToBoxes);
+    List<Map<String, Object>> sources = sourcesSupport.collectSources(org, periods, dao303, rateToBoxes);
 
     return new ComputeResult(b, sources);
   }
@@ -336,95 +337,6 @@ class Fiscal303BoxesHandler extends AbstractFiscalHandler {
    */
   static boolean isLastPeriodOfYear(boolean quarterly, String period) {
     return quarterly ? "T4".equals(period) : "12".equals(period);
-  }
-
-  /**
-   * Iterates C_INVOICETAX for all tracked tax rates and builds a per-invoice source row.
-   * Groups multiple tax lines of the same invoice into one row.
-   */
-  private List<Map<String, Object>> collectSources(
-      Organization org, List<Period> periods,
-      AEAT303Report2014Dao dao303,
-      Map<String, List<Integer>> rateToBoxes) {
-
-    if (rateToBoxes.isEmpty()) return Collections.emptyList();
-
-    List<TaxRate> allRates = buildRatesList(rateToBoxes);
-    Map<String, Map<String, Object>> byInvoice = new LinkedHashMap<>();
-    SimpleDateFormat sdf = new SimpleDateFormat("yyyy-MM-dd");
-
-    ScrollableResults sr = dao303.getInvoiceTax(
-        org, allRates, periods, CashVATOperationType.ONLY_NONCASHVAT);
-    try {
-      while (sr.next()) {
-        InvoiceTax it = (InvoiceTax) sr.get(0);
-        Invoice inv   = it.getInvoice();
-        Map<String, Object> row = byInvoice.computeIfAbsent(inv.getId(), k -> buildNewInvoiceRow(inv, sdf));
-        accumulateInvoiceTax(row, it, rateToBoxes);
-        OBDal.getInstance().getSession().evict(it);
-        OBDal.getInstance().getSession().evict(inv);
-      }
-    } finally {
-      sr.close();
-    }
-
-    List<Map<String, Object>> result = new ArrayList<>(byInvoice.values());
-    result.forEach(this::finalizeInvoiceRow);
-    return result;
-  }
-
-  private List<TaxRate> buildRatesList(Map<String, List<Integer>> rateToBoxes) {
-    List<TaxRate> allRates = new ArrayList<>();
-    for (String id : rateToBoxes.keySet()) {
-      TaxRate tr = OBDal.getInstance().get(TaxRate.class, id);
-      if (tr != null) allRates.add(tr);
-    }
-    return allRates;
-  }
-
-  private Map<String, Object> buildNewInvoiceRow(Invoice inv, SimpleDateFormat sdf) {
-    Map<String, Object> r = new LinkedHashMap<>();
-    r.put("ref",   inv.getDocumentNo());
-    r.put("date",  sdf.format(inv.getInvoiceDate()));
-    String cat = inv.getDocumentType().getDocumentCategory();
-    r.put("type",  "ARI".equals(cat) || "ARI_RM".equals(cat) ? "Venta" : "Compra");
-    r.put("party", inv.getBusinessPartner() != null ? inv.getBusinessPartner().getName() : "");
-    r.put("base",  BigDecimal.ZERO);
-    r.put("vat",   BigDecimal.ZERO);
-    r.put(BOXES,   new java.util.LinkedHashSet<Integer>());
-    return r;
-  }
-
-  private void accumulateInvoiceTax(Map<String, Object> row, InvoiceTax it,
-      Map<String, List<Integer>> rateToBoxes) {
-    BigDecimal base = it.getTaxableAmount() != null ? it.getTaxableAmount().abs() : BigDecimal.ZERO;
-    BigDecimal tax  = it.getTaxAmount()     != null ? it.getTaxAmount().abs()     : BigDecimal.ZERO;
-    row.put("base", round(((BigDecimal) row.get("base")).add(base)));
-    row.put("vat",  round(((BigDecimal) row.get("vat")).add(tax)));
-    List<Integer> boxes = rateToBoxes.get(it.getTax().getId());
-    if (boxes != null) {
-      @SuppressWarnings("unchecked")
-      java.util.LinkedHashSet<Integer> bSet = (java.util.LinkedHashSet<Integer>) row.get(BOXES);
-      bSet.addAll(boxes);
-    }
-  }
-
-  void finalizeInvoiceRow(Map<String, Object> row) {
-    @SuppressWarnings("unchecked")
-    java.util.LinkedHashSet<Integer> bSet = (java.util.LinkedHashSet<Integer>) row.get(BOXES);
-    List<Integer> sorted = new ArrayList<>(bSet);
-    Collections.sort(sorted);
-    StringBuilder sb = new StringBuilder();
-    for (Integer bx : sorted) {
-      if (sb.length() > 0) {
-        sb.append(",");
-      }
-      sb.append(bx);
-    }
-    row.put(BOXES, sb.toString());
-    BigDecimal base = (BigDecimal) row.get("base");
-    BigDecimal vat  = (BigDecimal) row.get("vat");
-    row.put("total", round(base.add(vat)));
   }
 
   // Package-private for unit testing — injects pre-built helper and dao,
@@ -690,7 +602,9 @@ class Fiscal303BoxesHandler extends AbstractFiscalHandler {
     return sum;
   }
 
-  private BigDecimal round(BigDecimal v) {
+  // Package-private (not private): also called by Fiscal303SourcesSupport — see BOXES's comment
+  // above and that class's header javadoc.
+  BigDecimal round(BigDecimal v) {
     return v.setScale(2, java.math.RoundingMode.HALF_UP);
   }
 

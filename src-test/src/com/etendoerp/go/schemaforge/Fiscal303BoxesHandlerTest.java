@@ -76,7 +76,7 @@ import com.etendoerp.go.schemaforge.Fiscal303BoxesHandler.ComputeResult;
  *       for the general regime map to the correct box pairs.</li>
  *   <li>{@link Fiscal303BoxesHandler#vatEcBoxes} — all recargo-de-equivalencia
  *       percentages map to the correct box pairs.</li>
- *   <li>{@link Fiscal303BoxesHandler#finalizeInvoiceRow} — boxes set is sorted and
+ *   <li>{@link Fiscal303SourcesSupport#finalizeInvoiceRow} — boxes set is sorted and
  *       serialised as a comma-separated string, and the total is base+vat.</li>
  *   <li>{@code handle()} routing — wrong HTTP method and wrong entity name both
  *       respond 405; missing query parameters respond 400.</li>
@@ -301,7 +301,7 @@ public class Fiscal303BoxesHandlerTest {
   @Test
   public void testFinalizeRowSortsBoxesAscending() {
     Map<String, Object> row = buildRow(pct("100.00"), pct("21.00"), 9, 7);
-    handler.finalizeInvoiceRow(row);
+    handler.sourcesSupport.finalizeInvoiceRow(row);
     assertEquals("7,9", row.get("boxes"));
   }
 
@@ -311,7 +311,7 @@ public class Fiscal303BoxesHandlerTest {
   @Test
   public void testFinalizeRowComputesTotal() {
     Map<String, Object> row = buildRow(pct("100.00"), pct("21.00"), 7);
-    handler.finalizeInvoiceRow(row);
+    handler.sourcesSupport.finalizeInvoiceRow(row);
     assertTrue("total should be 121.00",
         new BigDecimal("121.00").compareTo((BigDecimal) row.get("total")) == 0);
   }
@@ -320,7 +320,7 @@ public class Fiscal303BoxesHandlerTest {
   @Test
   public void testFinalizeRowSingleBox() {
     Map<String, Object> row = buildRow(pct("500.00"), pct("50.00"), 29);
-    handler.finalizeInvoiceRow(row);
+    handler.sourcesSupport.finalizeInvoiceRow(row);
     assertEquals("29", row.get("boxes"));
   }
 
@@ -331,7 +331,7 @@ public class Fiscal303BoxesHandlerTest {
   @Test
   public void testFinalizeRowNoBoxesProducesEmptyString() {
     Map<String, Object> row = buildRow(BigDecimal.ZERO, BigDecimal.ZERO);
-    handler.finalizeInvoiceRow(row);
+    handler.sourcesSupport.finalizeInvoiceRow(row);
     assertEquals("", row.get("boxes"));
   }
 
