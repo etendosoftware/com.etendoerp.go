@@ -331,6 +331,30 @@ class NeoServletSupportTest {
     }
 
     @Test
+    @DisplayName("skips afterHandle when pre-hook returns an error response (4xx/5xx), preventing unintended side-effect writes")
+    void afterHandleSkippedWhenPreHookReturnsError() {
+      NeoCrudHandler crudHandler = mock(NeoCrudHandler.class);
+      NeoContext context = NeoContext.builder().build();
+      NamedFakeHandler handler = new NamedFakeHandler();
+      handler.preResult = NeoResponse.error(400, "pending invoices block deactivation");
+      handler.postResult = NeoResponse.ok(new JSONObject()); // would corrupt state if called
+
+      try (MockedStatic<WeldUtils> weld = mockStatic(WeldUtils.class)) {
+        weld.when(() -> WeldUtils.getInstances(NeoHandler.class))
+            .thenReturn(List.<NeoHandler>of(handler));
+
+        NeoResponse result = NeoServletSupport.handleWithHooks("test-handler-qualifier", context, crudHandler);
+
+        assertSame(handler.preResult, result);
+        // afterHandle must NOT be called — calling it when the pre-hook rejected the request
+        // runs post-CRUD side effects (e.g. OBDal.flush) that can corrupt the transaction.
+        assertNull(handler.lastAfterHandleContext,
+            "afterHandle must not be called when the pre-hook returned an error");
+        verify(crudHandler, never()).handleDefault(any());
+      }
+    }
+
+    @Test
     @DisplayName("runs handleDefault as the default service, then lets the post-hook see and optionally replace it")
     void runsDefaultServiceWhenPreHookDeclines() {
       NeoCrudHandler crudHandler = mock(NeoCrudHandler.class);
