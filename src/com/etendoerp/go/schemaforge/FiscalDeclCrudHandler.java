@@ -243,7 +243,7 @@ class FiscalDeclCrudHandler {
     // Unlike fileName above (hasFileName = body.has(...), no null-check — an explicit null there
     // DOES clear the stored value via decl.set(..., null)), an explicit "manualData": null is
     // treated as "not sent" rather than "clear the value": manualData is autosaved from ephemeral
-    // frontend state, so a caller wanting to reset it must send an empty object ({}), not null;
+    // frontend state, so a caller wanting to reset it must send an empty object rather than null —
     // treating null as "clear" would risk silently wiping real user data from a stray/racy
     // autosave call. This asymmetry with fileName is intentional, not an oversight.
     boolean hasManualData = body.has(MANUAL_DATA_KEY) && !body.isNull(MANUAL_DATA_KEY);
