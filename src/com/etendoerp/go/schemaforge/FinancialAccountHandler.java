@@ -20,6 +20,7 @@ package com.etendoerp.go.schemaforge;
 import java.math.BigDecimal;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -36,17 +37,29 @@ import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.criterion.Restrictions;
 import org.openbravo.base.exception.OBException;
+import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.common.businesspartner.BusinessPartner;
 import org.openbravo.model.common.currency.Currency;
 import org.openbravo.model.common.geography.Country;
+import org.openbravo.model.financialmgmt.accounting.FIN_FinancialAccountAccounting;
 import org.openbravo.model.financialmgmt.accounting.coa.AcctSchema;
+import org.openbravo.model.financialmgmt.gl.GLJournalLine;
+import org.openbravo.model.financialmgmt.payment.BankFileException;
+import org.openbravo.model.financialmgmt.payment.FIN_BankStatement;
 import org.openbravo.model.financialmgmt.payment.FIN_FinaccTransaction;
 import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
+import org.openbravo.model.financialmgmt.payment.FIN_Payment;
+import org.openbravo.model.financialmgmt.payment.FIN_PaymentProposal;
 import org.openbravo.model.financialmgmt.payment.FIN_Reconciliation;
+import org.openbravo.model.financialmgmt.payment.FinAccPaymentMethod;
 import org.openbravo.model.financialmgmt.payment.MatchingAlgorithm;
 
+import com.etendoerp.go.schemaforge.data.MatchRule;
+import com.etendoerp.psd2.bank.integration.data.FinaccConnection;
+import com.etendoerp.psd2.bank.integration.data.PSD2FinaccLog;
 import com.etendoerp.psd2.bank.integration.data.Provider;
 import com.etendoerp.psd2.bank.integration.utils.ProviderCatalogUtils;
 
@@ -72,9 +85,15 @@ import com.etendoerp.psd2.bank.integration.utils.ProviderCatalogUtils;
  * {@code null}, letting the generic CRUD service persist within its single
  * transaction. Injecting {@code country} before the insert is mandatory because
  * the row-level trigger {@code FIN_FINANCIAL_ACCOUNT_TRG2} ({@code @COUNTRY_IBAN@})
- * rejects a bank account that carries an IBAN without a country. On DELETE the
- * hook short-circuits with a soft-archive ({@code IsActive='N'}) to preserve the
- * former archive semantics and avoid FK violations from a hard delete.
+ * rejects a bank account that carries an IBAN without a country.
+ *
+ * <p>ETP-4871: DELETE now attempts a real hard delete (see {@link #deleteAccount}) —
+ * every FK from another table into {@code FIN_Financial_Account} is RESTRICT (no
+ * cascade), so the delete is only allowed once {@link #findDeleteBlockers} proves
+ * nothing depends on the account. The former soft-archive ({@code IsActive='N'})
+ * semantics still exist but moved onto the update path: a {@code PATCH
+ * {"active": false}} runs the same open-reconciliations guard the old DELETE-based
+ * archive used to run (see {@link #validateAndEnrichUpdate}).
  */
 @Named("financialAccountHeaderHandler")
 public class FinancialAccountHandler implements NeoHandler {
@@ -113,6 +132,13 @@ public class FinancialAccountHandler implements NeoHandler {
    *  on the generic CRUD response) rather than declared in decisions.json — the same technique
    *  {@code SalesInvoiceHeaderHandler} uses for {@code arInvoiceSubtype}. */
   private static final String FIELD_HAS_TRANSACTIONS = "hasTransactions";
+  /** {@code true} when {@link #findDeleteBlockers} finds nothing depending on the account
+   *  (ETP-4871). Injected the same way as {@link #FIELD_HAS_TRANSACTIONS} — post-hook, batched
+   *  per page via {@code FinancialAccountsPageHandler#loadDeleteBlockersByAccount}. */
+  private static final String FIELD_DELETABLE = "deletable";
+  /** Human-readable reason(s) blocking a hard delete; only present when
+   *  {@link #FIELD_DELETABLE} is {@code false}. */
+  private static final String FIELD_DELETE_BLOCKED_REASON = "deleteBlockedReason";
 
   /* ---------------------------------------------------------------------------
    * Derived list fields (ETP-4658 follow-up): the accounts list used to be served
@@ -160,6 +186,24 @@ public class FinancialAccountHandler implements NeoHandler {
   /** Reconciliation document statuses considered closed (not "open"). */
   private static final List<String> CLOSED_RECONCILIATION_STATUSES = Arrays.asList("CO", "CL");
 
+  /* ---------------------------------------------------------------------------
+   * Delete-blocker reason wording (ETP-4871). Package-private (not private) so
+   * FinancialAccountsPageHandler's batched loader can reuse the exact same strings for the
+   * `deleteBlockedReason` list field — the DELETE 409 message and the list-row tooltip must never
+   * drift apart.
+   * --------------------------------------------------------------------------- */
+  static final String REASON_TRANSACTIONS = "This account has registered transactions.";
+  static final String REASON_RECONCILIATIONS = "This account has reconciliations recorded.";
+  static final String REASON_BANK_STATEMENTS = "This account has bank statements recorded.";
+  static final String REASON_PAYMENTS = "This account has payments recorded.";
+  static final String REASON_PAYMENT_PROPOSALS = "This account has payment proposals recorded.";
+  static final String REASON_JOURNAL_LINES = "This account has GL journal entries recorded.";
+  static final String REASON_BANK_FILE_EXCEPTIONS = "This account has bank file exceptions recorded.";
+  static final String REASON_BPARTNER_DEFAULT =
+      "This account is set as a business partner's default financial account.";
+  static final String REASON_BANK_CONNECTION =
+      "This account is connected to a bank — disconnect the bank first.";
+
   @Override
   public NeoResponse handle(NeoContext context) {
     if (!SPEC.equals(context.getSpecName())) {
@@ -175,7 +219,7 @@ public class FinancialAccountHandler implements NeoHandler {
         return validateAndEnrichUpdate(context.getRecordId(), context.getRequestBody());
       }
       if (METHOD_DELETE.equals(method)) {
-        return archive(context.getRecordId());
+        return deleteAccount(context.getRecordId());
       }
       // GET (list / getById) flows straight through to the generic service.
       return null;
@@ -312,9 +356,11 @@ public class FinancialAccountHandler implements NeoHandler {
    * Enriches every GET row with the fields the accounts list needs but no AD column provides,
    * and attaches the collection-level {@code summary} used by the list sidebar.
    *
-   * <p>All three data loaders run <b>once</b> for the whole page (a Map/Set lookup per row),
+   * <p>All four data loaders run <b>once</b> for the whole page (a Map/Set lookup per row),
    * reusing {@link FinancialAccountsPageHandler}'s SQL verbatim. The previous implementation
-   * issued two queries <i>per row</i> just for {@code hasTransactions}.
+   * issued two queries <i>per row</i> just for {@code hasTransactions}; {@code deletable} /
+   * {@code deleteBlockedReason} (ETP-4871) follow the same rule — one batched query for the
+   * whole page, never {@link #findDeleteBlockers} called per row.
    *
    * <p>The summary deliberately aggregates only the rows present in <b>this</b> response rather
    * than the loader's own universe: the generic CRUD already applied the role's readable-org and
@@ -332,10 +378,12 @@ public class FinancialAccountHandler implements NeoHandler {
     }
     Map<String, Integer> pendingByAccount = loaders.loadPendingByAccount(clientId, orgs);
     Set<String> withTransactions = loaders.loadAccountsWithTransactions(clientId, orgs);
+    Map<String, List<String>> deleteBlockersByAccount = loaders.loadDeleteBlockersByAccount(clientId, orgs);
 
     Set<String> visibleIds = new java.util.LinkedHashSet<>();
     for (int i = 0; i < dataArr.length(); i++) {
-      String correlatedId = enrichRecord(dataArr.getJSONObject(i), byId, pendingByAccount, withTransactions);
+      String correlatedId = enrichRecord(dataArr.getJSONObject(i), byId, pendingByAccount, withTransactions,
+          deleteBlockersByAccount);
       if (correlatedId != null) {
         visibleIds.add(correlatedId);
       }
@@ -369,7 +417,8 @@ public class FinancialAccountHandler implements NeoHandler {
    *         towards {@code summary}, or {@code null} when it did not.
    */
   private String enrichRecord(JSONObject rec, Map<String, FinancialAccountsPageHandler.AccountRow> byId,
-      Map<String, Integer> pendingByAccount, Set<String> withTransactions) throws JSONException {
+      Map<String, Integer> pendingByAccount, Set<String> withTransactions,
+      Map<String, List<String>> deleteBlockersByAccount) throws JSONException {
     String id = StringUtils.trimToNull(rec.optString("id", null));
     // A row with no id cannot be correlated with the loaders; keep the historical
     // contract (the flag is always present, defaulting to false) instead of omitting it.
@@ -381,6 +430,12 @@ public class FinancialAccountHandler implements NeoHandler {
     // isNull() first: optString() on a JSON null yields the literal "null" string,
     // which the list would render as text under the account type.
     rec.put(FIELD_IBAN_ALIAS, rec.isNull(FIELD_IBAN) ? "" : rec.optString(FIELD_IBAN, ""));
+
+    List<String> blockers = deleteBlockersByAccount.getOrDefault(id, Collections.emptyList());
+    rec.put(FIELD_DELETABLE, blockers.isEmpty());
+    if (!blockers.isEmpty()) {
+      rec.put(FIELD_DELETE_BLOCKED_REASON, String.join(" ", blockers));
+    }
 
     FinancialAccountsPageHandler.AccountRow row = byId.get(id);
     if (row == null) {
@@ -400,7 +455,7 @@ public class FinancialAccountHandler implements NeoHandler {
 
   /**
    * Seam for the SQL loaders shared with the accounts-page handler. Package-private and
-   * overridable so unit tests can stub the three queries without a live connection —
+   * overridable so unit tests can stub the four queries without a live connection —
    * same convention as {@link #loadAccount(String)} and {@code hasOpenReconciliations}.
    */
   FinancialAccountsPageHandler pageLoaders() {
@@ -522,6 +577,16 @@ public class FinancialAccountHandler implements NeoHandler {
     if (body == null) {
       return null;
     }
+    // Archive guard moved here from the old DELETE-based archive() (ETP-4871): the frontend now
+    // archives via PATCH {"active": false} instead of DELETE, so the open-reconciliations check
+    // that used to gate the soft-archive must gate this instead, before the generic CRUD persists
+    // the flip. Reuses the same has()/isNull() body-inspection idiom as the IBAN check below.
+    if (isArchivingRequest(body)) {
+      NeoResponse archiveGuardError = guardArchive(id);
+      if (archiveGuardError != null) {
+        return archiveGuardError;
+      }
+    }
     String name = body.has(FIELD_NAME) ? body.optString(FIELD_NAME, "").trim() : null;
     String iban = body.optString(FIELD_IBAN, "").trim();
     String swift = body.optString(FIELD_SWIFT_CODE, "").trim();
@@ -548,13 +613,21 @@ public class FinancialAccountHandler implements NeoHandler {
   }
 
   // ---------------------------------------------------------------------------
-  // Delete (short-circuit with a soft-archive)
+  // Archive guard (moved here from the former DELETE-based archive(); ETP-4871)
   // ---------------------------------------------------------------------------
 
-  NeoResponse archive(String id) {
-    if (StringUtils.isBlank(id)) {
-      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "Missing account id");
-    }
+  /** {@code true} when the incoming body explicitly sets {@code active} to {@code false}. */
+  private boolean isArchivingRequest(JSONObject body) {
+    return body.has(FIELD_ACTIVE) && !body.isNull(FIELD_ACTIVE) && !body.optBoolean(FIELD_ACTIVE, true);
+  }
+
+  /**
+   * Blocks an archive (soft-delete via {@code active=false}) the same way the old DELETE-based
+   * {@code archive()} used to: an account with open reconciliations cannot be archived. Loads the
+   * account itself here (the rest of {@link #validateAndEnrichUpdate} does not need it) so a
+   * missing id/account still gets the same 400 the old DELETE path returned.
+   */
+  private NeoResponse guardArchive(String id) {
     FIN_FinancialAccount account = loadAccount(id);
     if (account == null) {
       return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "Account not found");
@@ -563,10 +636,160 @@ public class FinancialAccountHandler implements NeoHandler {
       return NeoResponse.error(HttpServletResponse.SC_CONFLICT,
           "Cannot archive an account with open reconciliations");
     }
-    account.setActive(false);
-    OBDal.getInstance().save(account);
+    return null;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Delete (hard delete, ETP-4871: every FK into FIN_Financial_Account is RESTRICT)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Hard-deletes the account once nothing depends on it via a foreign key. Every FK from another
+   * table into {@code FIN_Financial_Account} is {@code RESTRICT} (no cascade), so a bare delete
+   * would fail at the DB level regardless — {@link #findDeleteBlockers} proves in advance that it
+   * will not, and returns a 409 naming every blocker instead of surfacing a raw constraint
+   * violation. The account's own auto-created configuration rows (accounting setup, default
+   * payment methods, matching rules, PSD2 sync log) are swept first via {@link #sweepOwnConfig} —
+   * those are not blockers, every account has them from creation.
+   */
+  NeoResponse deleteAccount(String id) {
+    if (StringUtils.isBlank(id)) {
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "Missing account id");
+    }
+    FIN_FinancialAccount account = loadAccount(id);
+    if (account == null) {
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "Account not found");
+    }
+    List<String> blockers = findDeleteBlockers(account);
+    if (!blockers.isEmpty()) {
+      return NeoResponse.error(HttpServletResponse.SC_CONFLICT,
+          "Cannot delete this account. " + String.join(" ", blockers));
+    }
+    sweepOwnConfig(account);
+    OBDal.getInstance().remove(account);
     OBDal.getInstance().flush();
     return NeoResponse.noContent();
+  }
+
+  /**
+   * Collects every reason a hard delete would fail, instead of stopping at the first one, so the
+   * 409 message (and the batched list-view {@code deleteBlockedReason} built from the same
+   * reasons — see {@code FinancialAccountsPageHandler#loadDeleteBlockersByAccount}) can name
+   * everything blocking the account at once.
+   *
+   * <p>Unlike {@link #hasTransactions} (reused as-is here) and {@link #hasOpenReconciliations}
+   * (a narrower, "open only" check used solely by the archive guard above), every other check here
+   * deliberately does NOT filter on {@code active}: a {@code RESTRICT} FK blocks a hard delete
+   * regardless of whether the referencing row is soft-deleted, so a delete must be refused even
+   * when the only reference left is, say, an inactive bank connection or a closed reconciliation.
+   */
+  List<String> findDeleteBlockers(FIN_FinancialAccount account) {
+    List<String> reasons = new ArrayList<>();
+    if (hasTransactions(account)) {
+      reasons.add(REASON_TRANSACTIONS);
+    }
+    if (hasAnyReconciliation(account)) {
+      reasons.add(REASON_RECONCILIATIONS);
+    }
+    if (hasBankStatements(account)) {
+      reasons.add(REASON_BANK_STATEMENTS);
+    }
+    if (hasPayments(account)) {
+      reasons.add(REASON_PAYMENTS);
+    }
+    if (hasPaymentProposals(account)) {
+      reasons.add(REASON_PAYMENT_PROPOSALS);
+    }
+    if (hasJournalLines(account)) {
+      reasons.add(REASON_JOURNAL_LINES);
+    }
+    if (hasBankFileExceptions(account)) {
+      reasons.add(REASON_BANK_FILE_EXCEPTIONS);
+    }
+    if (isDefaultBpartnerAccount(account)) {
+      reasons.add(REASON_BPARTNER_DEFAULT);
+    }
+    if (hasBankConnection(account)) {
+      reasons.add(REASON_BANK_CONNECTION);
+    }
+    return reasons;
+  }
+
+  /**
+   * Removes the account's own auto-created configuration rows before the account itself is
+   * deleted. These are NOT delete blockers: {@code FIN_FINANCIAL_ACCOUNT_ACCT} is inserted by the
+   * {@code FIN_FINANCIAL_ACCOUNT_TRG} trigger on every account creation and
+   * {@code FIN_FINACC_PAYMENTMETHOD} by {@code afterHandle}'s own POST branch — every account has
+   * at least one row in both from the moment it is created, so treating either as a blocker would
+   * make no account ever deletable. Matching rules and the PSD2 sync log are account-owned history
+   * (not cross-entity references) and are swept the same way.
+   */
+  void sweepOwnConfig(FIN_FinancialAccount account) {
+    removeAll(FIN_FinancialAccountAccounting.class, FIN_FinancialAccountAccounting.PROPERTY_ACCOUNT, account);
+    removeAll(FinAccPaymentMethod.class, FinAccPaymentMethod.PROPERTY_ACCOUNT, account);
+    removeAll(MatchRule.class, MatchRule.PROPERTY_FINANCIALACCOUNT, account);
+    removeAll(PSD2FinaccLog.class, PSD2FinaccLog.PROPERTY_FINANCIALACCOUNT, account);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Individual delete-blocker checks (package-private, one per FK, so unit tests can stub each
+  // independently — same seam convention as hasTransactions/hasOpenReconciliations above).
+  // ---------------------------------------------------------------------------
+
+  boolean hasAnyReconciliation(FIN_FinancialAccount account) {
+    return hasAnyRow(FIN_Reconciliation.class, FIN_Reconciliation.PROPERTY_ACCOUNT, account);
+  }
+
+  boolean hasBankStatements(FIN_FinancialAccount account) {
+    return hasAnyRow(FIN_BankStatement.class, FIN_BankStatement.PROPERTY_ACCOUNT, account);
+  }
+
+  boolean hasPayments(FIN_FinancialAccount account) {
+    return hasAnyRow(FIN_Payment.class, FIN_Payment.PROPERTY_ACCOUNT, account);
+  }
+
+  boolean hasPaymentProposals(FIN_FinancialAccount account) {
+    return hasAnyRow(FIN_PaymentProposal.class, FIN_PaymentProposal.PROPERTY_ACCOUNT, account);
+  }
+
+  boolean hasJournalLines(FIN_FinancialAccount account) {
+    return hasAnyRow(GLJournalLine.class, GLJournalLine.PROPERTY_FINANCIALACCOUNT, account);
+  }
+
+  boolean hasBankFileExceptions(FIN_FinancialAccount account) {
+    return hasAnyRow(BankFileException.class, BankFileException.PROPERTY_FINANCIALACCOUNT, account);
+  }
+
+  /** A business partner can default to this account either as its regular or its PO account. */
+  boolean isDefaultBpartnerAccount(FIN_FinancialAccount account) {
+    return hasAnyRow(BusinessPartner.class, BusinessPartner.PROPERTY_ACCOUNT, account)
+        || hasAnyRow(BusinessPartner.class, BusinessPartner.PROPERTY_POFINANCIALACCOUNT, account);
+  }
+
+  boolean hasBankConnection(FIN_FinancialAccount account) {
+    return hasAnyRow(FinaccConnection.class, FinaccConnection.PROPERTY_FINANCIALACCOUNT, account);
+  }
+
+  /** Shared {@code OBCriteria} probe reused by every blocker check above: does at least one row
+   *  of {@code entityClass} reference {@code account} through {@code fkProperty}? */
+  private <T extends BaseOBObject> boolean hasAnyRow(Class<T> entityClass, String fkProperty,
+      FIN_FinancialAccount account) {
+    OBCriteria<T> criteria = OBDal.getInstance().createCriteria(entityClass);
+    criteria.add(Restrictions.eq(fkProperty, account));
+    criteria.setMaxResults(1);
+    return criteria.uniqueResult() != null;
+  }
+
+  /** Deletes every row of {@code entityClass} referencing {@code account} through
+   *  {@code fkProperty}. Same list-then-remove idiom as
+   *  {@code PopulateSpecHelper.deleteExistingChildren}. */
+  private <T extends BaseOBObject> void removeAll(Class<T> entityClass, String fkProperty,
+      FIN_FinancialAccount account) {
+    OBCriteria<T> criteria = OBDal.getInstance().createCriteria(entityClass);
+    criteria.add(Restrictions.eq(fkProperty, account));
+    for (T row : criteria.list()) {
+      OBDal.getInstance().remove(row);
+    }
   }
 
   // ---------------------------------------------------------------------------
