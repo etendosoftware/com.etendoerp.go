@@ -861,76 +861,72 @@ public class AbstractInvoiceHeaderHandlerTest {
   }
 
   /**
-   * ETP-4738 follow-up: a Factura Rectificativa (docbasetype ARI, not ARC/ARI_RM — so {@code
-   * classifyDocType} alone resolves it to FAC) with a negative total must still be DISPLAY-
-   * reclassified as RECTIFICATIVA so the grid "Pendiente de pago" badge and detail topbar show
-   * "Saldo a favor".
+   * ETP-4841: the subtype reflects the DOCUMENT TYPE only. An ordinary invoice document type with
+   * a NEGATIVE total stays FAC — its negative sign makes it a spendable credit for the payment
+   * flow, but it is still a "Factura" as far as the doc-type badge and the list tab filters are
+   * concerned. This replaces the ETP-4738 sign-driven display reclassification, which was deleted
+   * as unreachable: {@code classifyDocType} already resolves a flagged doc type to RECTIFICATIVA
+   * before any total is looked at.
    */
   @Test
-  public void enrichInvoiceSubtype_rectificativeDocTypeNegativeTotal_setsRectificativaSubtype() throws Exception {
+  public void enrichInvoiceSubtype_negativeTotalOrdinaryDocType_staysFacSubtype() throws Exception {
     JSONObject rec = new JSONObject()
-        .put("transactionDocument", "dt-rect")
+        .put("transactionDocument", "dt-plain")
         .put("grandTotalAmount", -27.83);
-    RectificativeSupport.setColumnPresentForTests(true);
     try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
       OBDal dal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(dal);
       DocumentType dt = mock(DocumentType.class);
       when(dt.getDocumentCategory()).thenReturn("ARI"); // plain invoice base type, not ARC/ARI_RM
-      when(dt.isEtsgIsRectificative()).thenReturn(true);
-      when(dal.get(DocumentType.class, "dt-rect")).thenReturn(dt);
-
-      handler.callEnrichInvoiceSubtype(rec, "arInvoiceSubtype");
-
-      assertEquals("RECTIFICATIVA", rec.getString("arInvoiceSubtype"));
-    } finally {
-      RectificativeSupport.setColumnPresentForTests(null);
-    }
-  }
-
-  /** A Factura Rectificativa with a POSITIVE total stays FAC — only a negative total is saldo a favor. */
-  @Test
-  public void enrichInvoiceSubtype_rectificativeDocTypePositiveTotal_staysFacSubtype() throws Exception {
-    JSONObject rec = new JSONObject()
-        .put("transactionDocument", "dt-rect")
-        .put("grandTotalAmount", 27.83);
-    RectificativeSupport.setColumnPresentForTests(true);
-    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
-      OBDal dal = mock(OBDal.class);
-      dalMock.when(OBDal::getInstance).thenReturn(dal);
-      DocumentType dt = mock(DocumentType.class);
-      when(dt.getDocumentCategory()).thenReturn("ARI");
-      when(dt.isEtsgIsRectificative()).thenReturn(true);
-      when(dal.get(DocumentType.class, "dt-rect")).thenReturn(dt);
-
-      handler.callEnrichInvoiceSubtype(rec, "arInvoiceSubtype");
-
-      assertEquals("FAC", rec.getString("arInvoiceSubtype"));
-    } finally {
-      RectificativeSupport.setColumnPresentForTests(null);
-    }
-  }
-
-  /** A plain (non-rectificative) invoice with a negative total is NOT reclassified — the flag decides. */
-  @Test
-  public void enrichInvoiceSubtype_nonRectificativeNegativeTotal_staysFacSubtype() throws Exception {
-    JSONObject rec = new JSONObject()
-        .put("transactionDocument", "dt-plain")
-        .put("grandTotalAmount", -27.83);
-    RectificativeSupport.setColumnPresentForTests(true);
-    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
-      OBDal dal = mock(OBDal.class);
-      dalMock.when(OBDal::getInstance).thenReturn(dal);
-      DocumentType dt = mock(DocumentType.class);
-      when(dt.getDocumentCategory()).thenReturn("ARI");
-      when(dt.isEtsgIsRectificative()).thenReturn(false);
       when(dal.get(DocumentType.class, "dt-plain")).thenReturn(dt);
 
       handler.callEnrichInvoiceSubtype(rec, "arInvoiceSubtype");
 
       assertEquals("FAC", rec.getString("arInvoiceSubtype"));
-    } finally {
-      RectificativeSupport.setColumnPresentForTests(null);
+    }
+  }
+
+  /**
+   * The mirror case: a rectificative document type with a POSITIVE total (an under-invoiced
+   * correction, which is payable) keeps its RECTIFICATIVA subtype. The sign never downgrades the
+   * document-type classification either.
+   */
+  @Test
+  public void enrichInvoiceSubtype_positiveTotalRectificativeDocType_staysRectificativaSubtype()
+      throws Exception {
+    JSONObject rec = new JSONObject()
+        .put("transactionDocument", "dt-arc")
+        .put("grandTotalAmount", 27.83);
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      DocumentType dt = mock(DocumentType.class);
+      when(dt.getDocumentCategory()).thenReturn("ARC");
+      when(dal.get(DocumentType.class, "dt-arc")).thenReturn(dt);
+
+      handler.callEnrichInvoiceSubtype(rec, "arInvoiceSubtype");
+
+      assertEquals("RECTIFICATIVA", rec.getString("arInvoiceSubtype"));
+    }
+  }
+
+  /**
+   * The total is not read at all: an invoice record that carries no {@code grandTotalAmount}
+   * resolves its subtype from the document type alone, without a JSON lookup failure.
+   */
+  @Test
+  public void enrichInvoiceSubtype_noGrandTotal_resolvesFromDocTypeAlone() throws Exception {
+    JSONObject rec = new JSONObject().put("transactionDocument", "dt-arc");
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      DocumentType dt = mock(DocumentType.class);
+      when(dt.getDocumentCategory()).thenReturn("ARC");
+      when(dal.get(DocumentType.class, "dt-arc")).thenReturn(dt);
+
+      handler.callEnrichInvoiceSubtype(rec, "arInvoiceSubtype");
+
+      assertEquals("RECTIFICATIVA", rec.getString("arInvoiceSubtype"));
     }
   }
 

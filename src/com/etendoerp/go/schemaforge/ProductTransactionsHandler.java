@@ -43,7 +43,8 @@ import org.openbravo.dal.service.OBDal;
  * <ul>
  *   <li>{@code etgoDocHeaderId} &mdash; the header record id to navigate to.</li>
  *   <li>{@code etgoDocWindow} &mdash; the GO window key for that header
- *       ({@code goods-shipment}, {@code goods-receipt}, {@code goods-movements}
+ *       ({@code goods-shipment}, {@code goods-receipt}, {@code return-material-receipt},
+ *       {@code return-to-vendor-shipment}, {@code goods-movements}
  *       or {@code physical-inventory}).</li>
  *   <li>{@code etgoDocLabel} &mdash; the header's existing document number, used as the
  *       link label (read straight from the header column; nothing is computed).</li>
@@ -63,8 +64,10 @@ public class ProductTransactionsHandler implements NeoHandler {
       "SELECT t.m_transaction_id AS tx_id, "
       + "  COALESCE(io.m_inout_id, mv.m_movement_id, inv.m_inventory_id) AS header_id, "
       + "  CASE "
-      + "    WHEN t.m_inoutline_id IS NOT NULL AND io.issotrx = 'Y' THEN 'goods-shipment' "
-      + "    WHEN t.m_inoutline_id IS NOT NULL AND io.issotrx = 'N' THEN 'goods-receipt' "
+      + "    WHEN t.m_inoutline_id IS NOT NULL AND io.issotrx = 'Y' AND dt.isreturn = 'N' THEN 'goods-shipment' "
+      + "    WHEN t.m_inoutline_id IS NOT NULL AND io.issotrx = 'Y' AND dt.isreturn = 'Y' THEN 'return-material-receipt' "
+      + "    WHEN t.m_inoutline_id IS NOT NULL AND io.issotrx = 'N' AND dt.isreturn = 'N' THEN 'goods-receipt' "
+      + "    WHEN t.m_inoutline_id IS NOT NULL AND io.issotrx = 'N' AND dt.isreturn = 'Y' THEN 'return-to-vendor-shipment' "
       + "    WHEN t.m_movementline_id IS NOT NULL THEN 'goods-movements' "
       + "    WHEN t.m_inventoryline_id IS NOT NULL THEN 'physical-inventory' "
       + "    ELSE NULL "
@@ -74,6 +77,7 @@ public class ProductTransactionsHandler implements NeoHandler {
       + "FROM m_transaction t "
       + "  LEFT JOIN m_inoutline iol ON iol.m_inoutline_id = t.m_inoutline_id "
       + "  LEFT JOIN m_inout io ON io.m_inout_id = iol.m_inout_id "
+      + "  LEFT JOIN c_doctype dt ON dt.c_doctype_id = io.c_doctype_id "
       + "  LEFT JOIN m_movementline ml ON ml.m_movementline_id = t.m_movementline_id "
       + "  LEFT JOIN m_movement mv ON mv.m_movement_id = ml.m_movement_id "
       + "  LEFT JOIN m_inventoryline invl ON invl.m_inventoryline_id = t.m_inventoryline_id "
