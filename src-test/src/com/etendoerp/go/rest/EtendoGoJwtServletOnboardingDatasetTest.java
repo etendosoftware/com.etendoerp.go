@@ -30,6 +30,7 @@ import org.openbravo.base.exception.OBException;
 import org.openbravo.service.db.ImportResult;
 
 import com.etendoerp.go.onboarding.OnboardingAccountingWiringService;
+import com.etendoerp.go.onboarding.OnboardingAcctdimCentrallyMaintainedService;
 import com.etendoerp.go.onboarding.OnboardingDatasetImportService;
 import com.etendoerp.go.onboarding.OnboardingBaselineService;
 import com.etendoerp.go.onboarding.OnboardingOrgInfoService;
@@ -346,6 +347,59 @@ public class EtendoGoJwtServletOnboardingDatasetTest {
   }
 
   @Test
+  public void testEnsureOnboardingDatasetForcesFlatAcctdimVisibilityBeforeBaseline() {
+    CountingBaselineService baselineService = new CountingBaselineService();
+    CountingAccountingWiringService accountingService = new CountingAccountingWiringService();
+    CountingAcctdimCentrallyMaintainedService acctdimService =
+        new CountingAcctdimCentrallyMaintainedService();
+    TestServlet servlet = new TestServlet(new SuccessfulImportService(),
+        new CountingSequenceGeneratorService(), new CountingMarkOrgReadyService(),
+        new CountingFiscalDataSetupService(), new CountingDefaultCustomerService(),
+        baselineService);
+    servlet.onboardingAccountingWiringService = accountingService;
+    servlet.onboardingAcctdimCentrallyMaintainedService = acctdimService;
+    StringWriter output = new StringWriter();
+
+    boolean ready = servlet.ensureOnboardingDataset(new PrintWriter(output), "CLIENT-1", "ORG-1",
+        "USER-1", "ROLE-1", null);
+
+    String ndjson = output.toString();
+    assertTrue(ready);
+    assertEquals(1, acctdimService.forceFlatCount);
+    assertEquals("CLIENT-1", acctdimService.clientId);
+    assertEquals(1, baselineService.registerCount);
+    assertTrue(ndjson.contains("\"step\":\"acctdimVisibility\""));
+    assertTrue(ndjson.contains("Accounting-dimension visibility configured"));
+    assertTrue(ndjson.indexOf("Business-partner group posting accounts patched")
+        < ndjson.indexOf("Accounting-dimension visibility configured"));
+    assertTrue(ndjson.indexOf("Accounting-dimension visibility configured")
+        < ndjson.indexOf("Data-fix baseline registered"));
+  }
+
+  @Test
+  public void testEnsureOnboardingDatasetSkipsBaselineWhenAcctdimVisibilityPatchFails() {
+    CountingBaselineService baselineService = new CountingBaselineService();
+    TestServlet servlet = new TestServlet(new SuccessfulImportService(),
+        new CountingSequenceGeneratorService(), new CountingMarkOrgReadyService(),
+        new CountingFiscalDataSetupService(), new CountingDefaultCustomerService(),
+        baselineService);
+    servlet.onboardingAcctdimCentrallyMaintainedService =
+        new FailingAcctdimCentrallyMaintainedService("broken acctdim visibility");
+    StringWriter output = new StringWriter();
+
+    boolean ready = servlet.ensureOnboardingDataset(new PrintWriter(output), "CLIENT-1", "ORG-1",
+        "USER-1", "ROLE-1", null);
+
+    String ndjson = output.toString();
+    assertFalse(ready);
+    assertEquals(0, baselineService.registerCount);
+    assertTrue(ndjson.contains("\"step\":\"acctdimVisibility\""));
+    assertTrue(ndjson.contains("\"status\":\"error\""));
+    assertTrue(ndjson.contains("broken acctdim visibility"));
+    assertTrue(ndjson.contains("\"success\":false"));
+  }
+
+  @Test
   public void testEnsureOnboardingDatasetSkipsBaselineWhenFiscalDataFails() {
     CountingBaselineService baselineService = new CountingBaselineService();
     TestServlet servlet = new TestServlet(new SuccessfulImportService(),
@@ -444,6 +498,11 @@ public class EtendoGoJwtServletOnboardingDatasetTest {
       this.onboardingAccountingWiringService = new NoOpAccountingWiringService();
       this.onboardingPeriodControlService = new NoOpPeriodControlService();
       this.onboardingOrgInfoService = new NoOpOrgInfoService();
+      // ETP-4854: forceFlatAccountingDimensionVisibility also touches the DAL directly (raw SQL on
+      // OBDal's shared connection) and is exercised by its own dedicated unit test
+      // (OnboardingAcctdimCentrallyMaintainedServiceTest); stub it to a no-op here for the same
+      // reason as the services above.
+      this.onboardingAcctdimCentrallyMaintainedService = new NoOpAcctdimCentrallyMaintainedService();
     }
   }
 
@@ -500,6 +559,49 @@ public class EtendoGoJwtServletOnboardingDatasetTest {
     @Override
     public void patchBpGroupAcctMissingColumns(String clientId, String orgId, String adminUserId,
         String adminRoleId) {
+      throw new OBException(message);
+    }
+  }
+
+  private static class NoOpAcctdimCentrallyMaintainedService
+      extends OnboardingAcctdimCentrallyMaintainedService {
+    @Override
+    public void forceFlatAccountingDimensionVisibility(String clientId) {
+      // no-op: DAL wiring is covered by OnboardingAcctdimCentrallyMaintainedServiceTest
+    }
+  }
+
+  /**
+   * ETP-4854 — counts {@code forceFlatAccountingDimensionVisibility} invocations and captures its
+   * argument, so the servlet-level wiring (order relative to the other steps, argument
+   * pass-through) can be asserted without touching the DAL.
+   */
+  private static final class CountingAcctdimCentrallyMaintainedService
+      extends NoOpAcctdimCentrallyMaintainedService {
+    private int forceFlatCount;
+    private String clientId;
+
+    @Override
+    public void forceFlatAccountingDimensionVisibility(String clientId) {
+      forceFlatCount++;
+      this.clientId = clientId;
+    }
+  }
+
+  /**
+   * ETP-4854 — makes {@code forceFlatAccountingDimensionVisibility} fail, to test the chain's
+   * short-circuit.
+   */
+  private static final class FailingAcctdimCentrallyMaintainedService
+      extends NoOpAcctdimCentrallyMaintainedService {
+    private final String message;
+
+    private FailingAcctdimCentrallyMaintainedService(String message) {
+      this.message = message;
+    }
+
+    @Override
+    public void forceFlatAccountingDimensionVisibility(String clientId) {
       throw new OBException(message);
     }
   }

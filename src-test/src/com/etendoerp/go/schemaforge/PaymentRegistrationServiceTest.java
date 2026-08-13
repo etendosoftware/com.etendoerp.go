@@ -18,6 +18,7 @@
 package com.etendoerp.go.schemaforge;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -52,6 +53,7 @@ import org.mockito.MockedStatic;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
+import org.openbravo.advpaymentmngt.process.FIN_AddPayment;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.security.OrganizationStructureProvider;
 import org.openbravo.dal.service.OBCriteria;
@@ -1520,6 +1522,8 @@ class PaymentRegistrationServiceTest {
     when(account.getCurrency()).thenReturn(currency);
     when(currency.getISOCode()).thenReturn("EUR");
     when(method.getName()).thenReturn("Wire Transfer");
+    // ETP-4841: a foreign payment carries the rate that was typed when it was registered.
+    when(payment.getFinancialTransactionConvertRate()).thenReturn(new BigDecimal("0.89"));
 
     Query<FIN_Payment> hqlQuery = mock(Query.class);
     when(session.createQuery(anyString(), eq(FIN_Payment.class))).thenReturn(hqlQuery);
@@ -1536,6 +1540,87 @@ class PaymentRegistrationServiceTest {
     assertEquals("Bank EUR", payItem.getString("accountName"));
     assertEquals("EUR", payItem.getString("accountCurrency"));
     assertEquals("Wire Transfer", payItem.getString("paymentMethod"));
+    assertEquals(0, new BigDecimal("0.89")
+            .compareTo(new BigDecimal(payItem.getString("conversionRate"))),
+        "the row must expose the payment's stored conversion rate (ETP-4841)");
+  }
+
+  /**
+   * ETP-4841: every payment row exposes {@code conversionRate}, so the edit modal reseeds its
+   * (editable) rate field from the payment itself instead of the system spot rate — which is what
+   * made a rate typed on a draft disappear when the draft was reopened. A single-currency payment
+   * carries ONE, where the modal hides the field.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  void testHandleListPaymentsExposesConversionRateOneForSingleCurrencyPayment() throws Exception {
+    NeoContext context = NeoContext.builder()
+        .recordId("inv-1")
+        .httpMethod("GET")
+        .endpointType(NeoEndpointType.CRUD)
+        .build();
+
+    FIN_Payment payment = mock(FIN_Payment.class);
+    when(payment.getId()).thenReturn("pay-5");
+    when(payment.getDocumentNo()).thenReturn("PAY/005");
+    when(payment.getAmount()).thenReturn(new BigDecimal("100.00"));
+    when(payment.getPaymentDate()).thenReturn(null);
+    when(payment.getStatus()).thenReturn("RPR");
+    when(payment.isReceipt()).thenReturn(true);
+    when(payment.getAccount()).thenReturn(null);
+    when(payment.getPaymentMethod()).thenReturn(null);
+    when(payment.getFinancialTransactionConvertRate()).thenReturn(BigDecimal.ONE);
+
+    Query<FIN_Payment> hqlQuery = mock(Query.class);
+    when(session.createQuery(anyString(), eq(FIN_Payment.class))).thenReturn(hqlQuery);
+    when(hqlQuery.setParameter(anyString(), any())).thenReturn(hqlQuery);
+    when(hqlQuery.setMaxResults(50)).thenReturn(hqlQuery);
+    when(hqlQuery.list()).thenReturn(Collections.singletonList(payment));
+
+    NeoResponse response = PaymentRegistrationService.handleListPayments(context);
+
+    assertEquals(200, response.getHttpStatus());
+    JSONObject payItem = response.getBody().getJSONObject("response")
+        .getJSONArray("data").getJSONObject(0);
+    assertEquals(0, BigDecimal.ONE.compareTo(new BigDecimal(payItem.getString("conversionRate"))));
+  }
+
+  /**
+   * A legacy payment with no stored financial-transaction rate must not break the listing: the
+   * {@code conversionRate} key is simply absent (JSON nulls are dropped), never a 500.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  void testHandleListPaymentsNullConversionRateOmitsTheKey() throws Exception {
+    NeoContext context = NeoContext.builder()
+        .recordId("inv-1")
+        .httpMethod("GET")
+        .endpointType(NeoEndpointType.CRUD)
+        .build();
+
+    FIN_Payment payment = mock(FIN_Payment.class);
+    when(payment.getId()).thenReturn("pay-6");
+    when(payment.getDocumentNo()).thenReturn("PAY/006");
+    when(payment.getAmount()).thenReturn(new BigDecimal("10.00"));
+    when(payment.getPaymentDate()).thenReturn(null);
+    when(payment.getStatus()).thenReturn("PPM");
+    when(payment.isReceipt()).thenReturn(true);
+    when(payment.getAccount()).thenReturn(null);
+    when(payment.getPaymentMethod()).thenReturn(null);
+    when(payment.getFinancialTransactionConvertRate()).thenReturn(null);
+
+    Query<FIN_Payment> hqlQuery = mock(Query.class);
+    when(session.createQuery(anyString(), eq(FIN_Payment.class))).thenReturn(hqlQuery);
+    when(hqlQuery.setParameter(anyString(), any())).thenReturn(hqlQuery);
+    when(hqlQuery.setMaxResults(50)).thenReturn(hqlQuery);
+    when(hqlQuery.list()).thenReturn(Collections.singletonList(payment));
+
+    NeoResponse response = PaymentRegistrationService.handleListPayments(context);
+
+    assertEquals(200, response.getHttpStatus());
+    JSONObject payItem = response.getBody().getJSONObject("response")
+        .getJSONArray("data").getJSONObject(0);
+    assertFalse(payItem.has("conversionRate"));
   }
 
   /**
@@ -1657,6 +1742,94 @@ class PaymentRegistrationServiceTest {
     JSONObject payItem = response.getBody().getJSONObject("response")
         .getJSONArray("data").getJSONObject(0);
     assertTrue(payItem.isNull("accountCurrency"));
+  }
+
+
+  // ── linkPSDsToPayment() write-off flag (ETP-4797) ────────────────────────
+
+  /**
+   * Verifies every pre-ETP-4797 caller's behaviour with the flag off: the write-off flag reaching
+   * Core must be {@code false}, so a shortfall duplicates the schedule detail (invoice stays
+   * partially paid) rather than being written off.
+   */
+  @Test
+  void testLinkPSDsToPaymentDefaultsToNoWriteoff() {
+    FIN_Payment payment = mock(FIN_Payment.class);
+    FIN_PaymentScheduleDetail psd = mock(FIN_PaymentScheduleDetail.class);
+    when(psd.getAmount()).thenReturn(new BigDecimal("12.50"));
+
+    try (MockedStatic<FIN_AddPayment> addPayment = mockStatic(FIN_AddPayment.class)) {
+      PaymentRegistrationService.linkPSDsToPayment(
+          Collections.singletonList(psd), payment, new BigDecimal("12.00"), false);
+
+      addPayment.verify(() -> FIN_AddPayment.updatePaymentDetail(
+          eq(psd), eq(payment), eq(new BigDecimal("12.00")), eq(false)));
+    }
+  }
+
+  /**
+   * Verifies the ETP-4797 path: the flag is handed to Core untouched, and the amount assigned is
+   * still only what the payment funds (12,00 of a 12,50 installment). Core turns the 0,50 remainder
+   * into {@code writeoffAmount}; asserting the arguments is what this layer is responsible for.
+   */
+  @Test
+  void testLinkPSDsToPaymentForwardsTheWriteoffFlag() {
+    FIN_Payment payment = mock(FIN_Payment.class);
+    FIN_PaymentScheduleDetail psd = mock(FIN_PaymentScheduleDetail.class);
+    when(psd.getAmount()).thenReturn(new BigDecimal("12.50"));
+
+    try (MockedStatic<FIN_AddPayment> addPayment = mockStatic(FIN_AddPayment.class)) {
+      PaymentRegistrationService.linkPSDsToPayment(
+          Collections.singletonList(psd), payment, new BigDecimal("12.00"), true);
+
+      addPayment.verify(() -> FIN_AddPayment.updatePaymentDetail(
+          eq(psd), eq(payment), eq(new BigDecimal("12.00")), eq(true)));
+    }
+  }
+
+  /**
+   * Verifies that a PSD fully covered by the amount is assigned its own full value, so Core sees no
+   * difference and cannot write anything off even with the flag on. Only the PSD where the funds
+   * run out can produce a write-off — which is why passing the flag for the whole list is safe.
+   */
+  @Test
+  void testLinkPSDsToPaymentAssignsFullAmountToCoveredPsds() {
+    FIN_Payment payment = mock(FIN_Payment.class);
+    FIN_PaymentScheduleDetail covered = mock(FIN_PaymentScheduleDetail.class);
+    when(covered.getAmount()).thenReturn(new BigDecimal("10.00"));
+    FIN_PaymentScheduleDetail partial = mock(FIN_PaymentScheduleDetail.class);
+    when(partial.getAmount()).thenReturn(new BigDecimal("5.00"));
+
+    try (MockedStatic<FIN_AddPayment> addPayment = mockStatic(FIN_AddPayment.class)) {
+      PaymentRegistrationService.linkPSDsToPayment(
+          Arrays.asList(covered, partial), payment, new BigDecimal("12.00"), true);
+
+      // Fully covered: assigned its whole 10.00, leaving no difference for Core to write off.
+      addPayment.verify(() -> FIN_AddPayment.updatePaymentDetail(
+          eq(covered), eq(payment), eq(new BigDecimal("10.00")), eq(true)));
+      // Boundary PSD: only the remaining 2.00 of its 5.00 — Core writes off the other 3.00.
+      addPayment.verify(() -> FIN_AddPayment.updatePaymentDetail(
+          eq(partial), eq(payment), eq(new BigDecimal("2.00")), eq(true)));
+    }
+  }
+
+  /** Verifies that PSDs beyond the funded amount are never touched (the loop breaks). */
+  @Test
+  void testLinkPSDsToPaymentStopsOnceTheAmountIsExhausted() {
+    FIN_Payment payment = mock(FIN_Payment.class);
+    FIN_PaymentScheduleDetail first = mock(FIN_PaymentScheduleDetail.class);
+    when(first.getAmount()).thenReturn(new BigDecimal("12.00"));
+    FIN_PaymentScheduleDetail beyond = mock(FIN_PaymentScheduleDetail.class);
+
+    try (MockedStatic<FIN_AddPayment> addPayment = mockStatic(FIN_AddPayment.class)) {
+      PaymentRegistrationService.linkPSDsToPayment(
+          Arrays.asList(first, beyond), payment, new BigDecimal("12.00"), true);
+
+      addPayment.verify(() -> FIN_AddPayment.updatePaymentDetail(
+          eq(first), eq(payment), eq(new BigDecimal("12.00")), eq(true)));
+      addPayment.verify(() -> FIN_AddPayment.updatePaymentDetail(
+          eq(beyond), any(), any(), anyBoolean()), never());
+    }
   }
 
 }

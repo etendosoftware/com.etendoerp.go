@@ -52,10 +52,15 @@ final class ReconciliationPaymentService {
    * + {@code schedule}), the two amounts ({@code paymentAmount} in invoice currency,
    * {@code accountAmount} in account currency) with their {@code rate}, and the booking context
    * ({@code paymentDate}, {@code account}, {@code isReceipt}, {@code chosenMethod}).
+   *
+   * <p>{@code writeoffDifference} (ETP-4797) writes off whatever {@code paymentAmount} leaves
+   * unpaid on the installment, so the invoice is fully settled instead of keeping a residual
+   * balance. The caller only sets it for a partial settlement of a single selected invoice.
    */
   record ReconciliationPaymentRequest(Invoice invoice, FIN_PaymentSchedule schedule,
       BigDecimal paymentAmount, BigDecimal accountAmount, BigDecimal rate, Date paymentDate,
-      FIN_FinancialAccount account, boolean isReceipt, FIN_PaymentMethod chosenMethod) {
+      FIN_FinancialAccount account, boolean isReceipt, FIN_PaymentMethod chosenMethod,
+      boolean writeoffDifference) {
   }
 
   /**
@@ -112,7 +117,8 @@ final class ReconciliationPaymentService {
         new PaymentRegistrationService.DraftPaymentRequest(new AdvPaymentMngtDao(), isReceipt,
             invoice, paymentMethod, account, paymentDate),
         rate, paymentAmount, accountAmount);
-    PaymentRegistrationService.linkPSDsToPayment(pendingPSDs, payment, paymentAmount);
+    PaymentRegistrationService.linkPSDsToPayment(pendingPSDs, payment, paymentAmount,
+        req.writeoffDifference());
     PaymentRegistrationService.processOrThrow(payment);
     return payment;
   }
