@@ -103,6 +103,9 @@ public class CreateDraftInvoiceHandlerNegativeQuantityIntegrationTest extends OB
     // belongs here: see docs/test-jvm-isolation.md.
     OBContext.setOBContext(TestConstants.Users.ADMIN, TestConstants.Roles.FB_GRP_ADMIN,
         TestConstants.Clients.FB_GRP, TestConstants.Orgs.ESP);
+    // createSalesOrder() stamps accountingDate=new Date() on the header; open today's fiscal
+    // period so the save doesn't fail on a clean env or once the seeded period prefix lapses.
+    PeriodTestUtils.ensureOpenPeriod(new Date());
   }
 
   @After
