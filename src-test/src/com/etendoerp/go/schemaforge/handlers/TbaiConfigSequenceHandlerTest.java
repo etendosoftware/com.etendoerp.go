@@ -276,10 +276,10 @@ public class TbaiConfigSequenceHandlerTest {
     }
   }
 
-  // ─── handle(): fail-safe on unexpected exception ─────────────────────────────
+  // ─── handle(): 500 on unexpected exception (must NOT fall through to default CRUD) ───
 
   @Test
-  public void handleReturnsNullOnUnexpectedException() throws Exception {
+  public void handleReturns500OnUnexpectedException() throws Exception {
     TbaiConfigSequenceHandler handler = new TbaiConfigSequenceHandler();
 
     try (MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
@@ -298,8 +298,10 @@ public class TbaiConfigSequenceHandlerTest {
           .requestBody(new JSONObject().put("active", false))
           .recordId(RECORD_ID)
           .build());
-      // Fail safe: returns null (let default CRUD handle it).
-      assertNull(result);
+      // Must return 500, NOT null — returning null would let the default CRUD deactivate
+      // the record without verifying pending invoices, bypassing the business rule.
+      assertNotNull(result);
+      assertEquals(500, result.getHttpStatus());
       obCtxMock.verify(OBContext::restorePreviousMode, times(1));
     }
   }
