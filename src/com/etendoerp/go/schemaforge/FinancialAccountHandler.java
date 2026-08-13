@@ -526,17 +526,9 @@ public class FinancialAccountHandler implements NeoHandler {
     String iban = body.optString(FIELD_IBAN, "").trim();
     String swift = body.optString(FIELD_SWIFT_CODE, "").trim();
 
-    if (name != null) {
-      if (StringUtils.isBlank(name)) {
-        return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "Name is required");
-      }
-      if (name.length() > NAME_MAX_LENGTH) {
-        return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "Name is too long");
-      }
-      if (nameExists(name, id)) {
-        return NeoResponse.error(HttpServletResponse.SC_CONFLICT,
-            "An account with this name already exists");
-      }
+    NeoResponse nameError = validateRenamedName(name, id);
+    if (nameError != null) {
+      return nameError;
     }
     if (iban.length() > IBAN_MAX_LENGTH || swift.length() > SWIFT_MAX_LENGTH) {
       return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "IBAN or BIC/SWIFT is too long");
@@ -614,6 +606,28 @@ public class FinancialAccountHandler implements NeoHandler {
       return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
           "Amount tolerance must be a percentage between 0 and " + AMOUNT_TOLERANCE_MAX_PCT
               + " (received " + pct.toPlainString() + ").");
+    }
+    return null;
+  }
+
+  /**
+   * Validates the name an update is trying to set. A {@code null} name means the caller never sent
+   * the field, so a partial update that does not rename the account skips these checks entirely —
+   * which is why this cannot reuse {@link #validateLengths}, whose blank check is unconditional.
+   */
+  private NeoResponse validateRenamedName(String name, String id) {
+    if (name == null) {
+      return null;
+    }
+    if (StringUtils.isBlank(name)) {
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "Name is required");
+    }
+    if (name.length() > NAME_MAX_LENGTH) {
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "Name is too long");
+    }
+    if (nameExists(name, id)) {
+      return NeoResponse.error(HttpServletResponse.SC_CONFLICT,
+          "An account with this name already exists");
     }
     return null;
   }
