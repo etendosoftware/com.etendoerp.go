@@ -76,6 +76,7 @@ final class ReconciliationHandlerSupport {
   private static final String ACTION_REACTIVATE = "reactivate";
   private static final String ACTION_REMOVE_OPERATION = "removeOperation";
   private static final String ACTION_REACTIVATE_SELECTED = "reactivateSelected";
+  private static final String ACTION_RECONCILE_DIFFERENCE = "reconcileDifference";
 
   // ---------------------------------------------------------------------------
   // POST action dispatch wrappers (OBContext admin mode + rollback boilerplate)
@@ -99,6 +100,10 @@ final class ReconciliationHandlerSupport {
 
   static NeoResponse handleReactivateSelected(ReconciliationHandler handler, NeoContext context) {
     return runPostAction(handler, context, ACTION_REACTIVATE_SELECTED);
+  }
+
+  static NeoResponse handleReconcileDifference(ReconciliationHandler handler, NeoContext context) {
+    return runPostAction(handler, context, ACTION_RECONCILE_DIFFERENCE);
   }
 
   // ---------------------------------------------------------------------------
@@ -263,6 +268,10 @@ final class ReconciliationHandlerSupport {
           return handler.removeOperation(body);
         case ACTION_REACTIVATE_SELECTED:
           return handler.reactivateSelected(body);
+        // Unlike its siblings this one lands on a support class, not on the handler: the handler
+        // sits at the Sonar S1448 method-count ceiling (see ReconciliationDifferenceSupport).
+        case ACTION_RECONCILE_DIFFERENCE:
+          return ReconciliationDifferenceSupport.reconcileDifference(handler, body);
         default:
           throw new ReconciliationActionException(
               new IllegalArgumentException("Unknown reconciliation action: " + action));
