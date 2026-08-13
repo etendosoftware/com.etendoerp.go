@@ -17,6 +17,8 @@
 
 package com.etendoerp.go.schemaforge;
 
+import javax.servlet.http.HttpServletResponse;
+
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.codehaus.jettison.json.JSONException;
@@ -27,7 +29,9 @@ import org.openbravo.dal.core.OBContext;
  * Base class for {@link NeoHandler} implementations that perform smart deactivation.
  *
  * <p>Provides the standard pre-hook skeleton: guard on PUT method, guard on explicit
- * {@code active=false}, run {@link #smartDeactivate} under admin mode with fail-safe catch.
+ * {@code active=false}, run {@link #smartDeactivate} under admin mode. Any unexpected exception
+ * surfaces as a 500 rather than silently falling through to the default CRUD — falling through
+ * would bypass the pending-invoices check and allow deactivation without verification.
  * Concrete handlers supply only {@link #smartDeactivate} and their {@code @Named} qualifier.
  *
  * <p>{@link #deletedResponse()} and {@link #isExplicitlyDeactivating} are {@code protected
@@ -58,9 +62,10 @@ public abstract class AbstractSmartDeactivationHandler implements NeoHandler {
         OBContext.restorePreviousMode();
       }
     } catch (Exception e) {
-      LogManager.getLogger(getClass()).warn(
-          "handle: error during smart deactivation for {}: {}", recordId, e.getMessage(), e);
-      return null;
+      LogManager.getLogger(getClass()).error(
+          "handle: unexpected error during smart deactivation for {}: {}", recordId, e.getMessage(), e);
+      return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
+          "Error checking deactivation conditions: " + e.getMessage());
     }
   }
 
