@@ -386,6 +386,79 @@ class NeoDateFormatTest {
     }
   }
 
+  /**
+   * ETP-4793 / IMP-24, the ambiguity gate. {@code toCanonical} treats {@code "03-04-2026"} and
+   * {@code "20-09-2026"} alike: both parse under the strict UI pattern, so both come back
+   * non-null. That is correct for {@code toCanonical}'s own contract — it only promises "this is
+   * <i>a</i> valid date" — but it is exactly the gap phase 2 left open: {@code "03-04-2026"} is
+   * also a valid date under {@code MM-dd-yyyy} (4 March), while {@code "20-09-2026"} is not (there
+   * is no month 20), so only the first is a genuine coin flip. {@link
+   * NeoDateFormat#isAmbiguousUiDate} is the predicate that tells them apart; {@link
+   * NeoDateFormat#ambiguousReadings} names the two candidate dates so the rejection can quote them.
+   */
+  @Nested
+  @DisplayName("isAmbiguousUiDate / ambiguousReadings — the coin-flip predicate")
+  class AmbiguityClassifier {
+
+    @Test
+    @DisplayName("day and month both <=12 and different — the genuine coin flip")
+    void ambiguousValueIsRecognized() {
+      assertTrue(NeoDateFormat.isAmbiguousUiDate("03-04-2026"));
+    }
+
+    @Test
+    @DisplayName("day > 12 — no month-first reading exists, so this is not ambiguous")
+    void dayOver12IsNotAmbiguous() {
+      // this is the case IMP-24's own report called out as most likely to be broken by a naive fix
+      assertFalse(NeoDateFormat.isAmbiguousUiDate("20-09-2026"));
+    }
+
+    @Test
+    @DisplayName("equal day and month denote the same date under either reading")
+    void equalDayAndMonthIsNotAmbiguous() {
+      assertFalse(NeoDateFormat.isAmbiguousUiDate("03-03-2026"));
+    }
+
+    @Test
+    @DisplayName("an ISO value is never ambiguous — the ISO branch is untouched by this gate")
+    void isoValueIsNotAmbiguous() {
+      assertFalse(NeoDateFormat.isAmbiguousUiDate("2026-03-04"));
+      assertFalse(NeoDateFormat.isAmbiguousUiDate("2026-08-06 18:55:31.567837+00"));
+    }
+
+    @Test
+    @DisplayName("a value neither parser can read is not ambiguous, just unreadable")
+    void unparseableValueIsNotAmbiguous() {
+      assertFalse(NeoDateFormat.isAmbiguousUiDate("06/08/2026"));
+      assertFalse(NeoDateFormat.isAmbiguousUiDate("not-a-date"));
+    }
+
+    @Test
+    @DisplayName("null and blank are not ambiguous")
+    void nullAndBlankAreNotAmbiguous() {
+      assertFalse(NeoDateFormat.isAmbiguousUiDate(null));
+      assertFalse(NeoDateFormat.isAmbiguousUiDate(""));
+      assertFalse(NeoDateFormat.isAmbiguousUiDate("   "));
+    }
+
+    @Test
+    @DisplayName("ambiguousReadings names both candidate dates for a genuine coin flip")
+    void readingsNameBothCandidates() {
+      String[] readings = NeoDateFormat.ambiguousReadings("03-04-2026");
+      assertEquals("2026-04-03", readings[0]);
+      assertEquals("2026-03-04", readings[1]);
+    }
+
+    @Test
+    @DisplayName("ambiguousReadings is null for anything that is not ambiguous")
+    void readingsIsNullWhenNotAmbiguous() {
+      assertNull(NeoDateFormat.ambiguousReadings("20-09-2026"));
+      assertNull(NeoDateFormat.ambiguousReadings("2026-03-04"));
+      assertNull(NeoDateFormat.ambiguousReadings("06/08/2026"));
+      assertNull(NeoDateFormat.ambiguousReadings(null));
+    }
+  }
+
   @Nested
   @DisplayName("canonicalPattern — the pattern quoted back in an error")
   class CanonicalPattern {

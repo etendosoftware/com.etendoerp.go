@@ -206,11 +206,25 @@ public final class NeoDateFormat {
     if (datePart == null || datePart.isEmpty()) {
       return null;
     }
+    LocalDate isoReading = parseIsoDatePart(datePart);
+    if (isoReading != null) {
+      return isoReading;
+    }
+    return parseUiDatePart(datePart);
+  }
+
+  /** Parse the date half as strict ISO ({@code yyyy-MM-dd}) only. {@code null} if it does not match. */
+  private static LocalDate parseIsoDatePart(String datePart) {
     try {
       return LocalDate.parse(datePart, DateTimeFormatter.ISO_LOCAL_DATE);
     } catch (DateTimeParseException ignored) {
       log.trace("Not an ISO date: {}", datePart);
+      return null;
     }
+  }
+
+  /** Parse the date half as the strict UI pattern only. {@code null} if it does not match. */
+  private static LocalDate parseUiDatePart(String datePart) {
     DateTimeFormatter uiFormatter = strictUiFormatter();
     if (uiFormatter == null) {
       return null;
@@ -345,6 +359,81 @@ public final class NeoDateFormat {
     }
     Matcher tail = TIME_TAIL.matcher(timePart.substring(m.end()));
     return tail.matches() && !isZeroOffset(tail);
+  }
+
+  /**
+   * Whether a UI-pattern-shaped date is genuinely ambiguous — undecidable between two different,
+   * equally valid calendar readings (ETP-4793 / IMP-24, the caller-supplied-ambiguity gate).
+   *
+   * <p>{@code toCanonical} repairs any value the UI pattern (e.g. {@code dd-MM-yyyy}) parses,
+   * unconditionally — it has no notion of "this could also mean something else". That is correct
+   * for {@code "20-09-2026"}: no month 20 exists under any day/month ordering, so
+   * {@code dd-MM-yyyy} is the only reading and repairing it is right. It is wrong for
+   * {@code "03-04-2026"}: read as {@code dd-MM-yyyy} it is 3 April, read as {@code MM-dd-yyyy} it
+   * is 4 March, and both are valid calendar dates. Silently picking one is exactly the class of
+   * silent reinterpretation this whole item exists to stop — the caller never said which
+   * convention it meant, and the wrong guess is indistinguishable from a right one until it is too
+   * late to matter.
+   *
+   * <p>The check is purely arithmetic once the UI-pattern reading is known: swapping the parsed
+   * day and month values gives the alternate reading, and that alternate reading is a valid date
+   * whenever the day value is itself {@code <= 12} (every month has at least 12 days, so the
+   * swapped month is always in range) and is not equal to the month value (a day equal to its own
+   * month, e.g. {@code "05-05-2026"}, denotes the same date under either reading, so there is
+   * nothing to disambiguate).
+   *
+   * <p>An ISO-shaped date part is never ambiguous, because only one reading order is ever
+   * attempted for it — this method returns {@code false} before the UI pattern is even tried.
+   *
+   * @param raw the value as it arrived; may be {@code null}. The time half, if any, is ignored:
+   *     ambiguity is a property of the date half alone
+   * @return {@code true} only when the UI-pattern reading has a distinct, equally valid
+   *     day/month-swapped alternative
+   */
+  public static boolean isAmbiguousUiDate(String raw) {
+    if (raw == null) {
+      return false;
+    }
+    String value = raw.trim();
+    if (value.isEmpty()) {
+      return false;
+    }
+    String datePart = splitDateAndTime(value)[0];
+    if (parseIsoDatePart(datePart) != null) {
+      return false;
+    }
+    LocalDate uiReading = parseUiDatePart(datePart);
+    if (uiReading == null) {
+      return false;
+    }
+    int day = uiReading.getDayOfMonth();
+    int month = uiReading.getMonthValue();
+    return day != month && day <= 12;
+  }
+
+  /**
+   * The two candidate ISO dates an ambiguous caller-supplied value could mean, for use in an
+   * error message (ETP-4793 / IMP-24).
+   *
+   * <p>{@code [0]} is the UI-pattern reading (e.g. {@code dd-MM-yyyy}) {@link #toCanonical} would
+   * otherwise have picked silently; {@code [1]} is the day/month-swapped alternative. Both are
+   * valid calendar dates whenever {@link #isAmbiguousUiDate} says so, which is the only case this
+   * method is meant to be called for.
+   *
+   * @param raw the value as it arrived; may be {@code null}
+   * @return {@code {primaryReading, alternateReading}} in ISO {@code yyyy-MM-dd}, or
+   *     {@code null} when {@link #isAmbiguousUiDate} is {@code false} for this value
+   */
+  public static String[] ambiguousReadings(String raw) {
+    if (!isAmbiguousUiDate(raw)) {
+      return null;
+    }
+    String datePart = splitDateAndTime(raw.trim())[0];
+    LocalDate primary = parseUiDatePart(datePart);
+    LocalDate alternate = LocalDate.of(primary.getYear(), primary.getDayOfMonth(),
+        primary.getMonthValue());
+    return new String[] { primary.format(DateTimeFormatter.ISO_LOCAL_DATE),
+        alternate.format(DateTimeFormatter.ISO_LOCAL_DATE) };
   }
 
   /**

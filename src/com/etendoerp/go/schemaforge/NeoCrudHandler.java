@@ -247,6 +247,10 @@ class NeoCrudHandler {
     } catch (MissingRequiredFieldsException e) {
       // ETP-3894: structured 400 lists the missing fields so the UI can highlight them.
       return buildMissingRequiredFieldsResponse(e);
+    } catch (ReadOnlyFieldRejectedException e) {
+      // IMP-28 clause 2: a value was sent for a field NeoFieldFilter.filterCreateRequest would
+      // otherwise have silently dropped. Reject instead, so the caller sees why nothing changed.
+      return buildReadOnlyFieldRejectedResponse(e);
     } catch (Exception e) {
       log.error("Error in default handler for {} {}", context.getHttpMethod(), context.getEntityName(), e);
       // ETP-4793 / IMP-17: same reclassification as the RPC-failure branch in
@@ -302,6 +306,47 @@ class NeoCrudHandler {
       log.warn("Could not build MISSING_REQUIRED_FIELDS body: {}", fallback.getMessage());
       return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
           MissingRequiredFieldsException.ERROR_CODE);
+    }
+  }
+
+  /** HTTP-style status for a rejected read-only field write (IMP-28 clause 2, mirrors IMP-5). */
+  private static final int STATUS_UNPROCESSABLE = 422;
+
+  /**
+   * IMP-28 clause 2: build the structured 422 response returned when a create is rejected
+   * because the client tried to write a field that is read-only with no configured default
+   * and no NeoHandler that could legitimately have supplied it. Body shape mirrors the flat
+   * IMP-5 convention used by the MCP tool layer ({@code McpToolRouter}'s 422s) — status/error/
+   * detail/field/hint/seeAlso — rather than the nested {@code {"error":{...}}} shape used by
+   * {@link #buildMissingRequiredFieldsResponse}, since the two conventions' literal string
+   * constants ({@code McpConstants}) live in a different, package-private class not
+   * accessible from here; the key names below are copied verbatim rather than imported.
+   * <pre>{
+   *   "status": 422,
+   *   "error": "read_only_field",
+   *   "detail": "...",
+   *   "field": "eTGOSalePrice",
+   *   "hint": "...",
+   *   "seeAlso": "docs(topic:\"creating records\")"
+   * }</pre>
+   */
+  private NeoResponse buildReadOnlyFieldRejectedResponse(ReadOnlyFieldRejectedException e) {
+    try {
+      JSONObject errorObj = new JSONObject();
+      errorObj.put("status", STATUS_UNPROCESSABLE);
+      errorObj.put("error", "read_only_field");
+      errorObj.put("detail", "Field '" + e.getFieldName()
+          + "' is read-only and cannot be set by the caller; its value was rejected, not silently"
+          + " dropped, so the write does not answer 200 with the field left unset.");
+      errorObj.put("field", e.getFieldName());
+      errorObj.put("hint", "Remove '" + e.getFieldName() + "' from the request. If this value must "
+          + "be set, it is derived automatically (e.g. by a callout or a dedicated write path) — "
+          + "check neo_schema's field descriptor for this entity before retrying.");
+      errorObj.put("seeAlso", "docs(topic:\"creating records\")");
+      return NeoResponse.error(STATUS_UNPROCESSABLE, errorObj);
+    } catch (Exception fallback) {
+      log.warn("Could not build READ_ONLY_FIELD_REJECTED body: {}", fallback.getMessage());
+      return NeoResponse.error(STATUS_UNPROCESSABLE, ReadOnlyFieldRejectedException.ERROR_CODE);
     }
   }
 

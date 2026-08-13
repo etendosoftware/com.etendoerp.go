@@ -158,6 +158,7 @@ final class McpSchemaFieldBuilder {
   static FieldMetadata loadFieldMetadata(SFEntity sfEntity) {
     Map<String, String> visibilityByColumnId = new HashMap<>();
     Map<String, Boolean> businessCriticalByColumnId = new HashMap<>();
+    Map<String, Boolean> readOnlyByColumnId = new HashMap<>();
     OBCriteria<SFField> fieldCrit = OBDal.getInstance().createCriteria(SFField.class);
     fieldCrit.add(Restrictions.eq(
         SFField.PROPERTY_ETGOSFENTITY + ".id", sfEntity.getId()));
@@ -174,18 +175,22 @@ final class McpSchemaFieldBuilder {
       }
       Boolean isBusinessCritical = sfField.isBusinessCritical();
       businessCriticalByColumnId.put(colId, Boolean.TRUE.equals(isBusinessCritical));
+      readOnlyByColumnId.put(colId, Boolean.TRUE.equals(sfField.isReadOnly()));
     }
-    return new FieldMetadata(visibilityByColumnId, businessCriticalByColumnId);
+    return new FieldMetadata(visibilityByColumnId, businessCriticalByColumnId, readOnlyByColumnId);
   }
 
   static final class FieldMetadata {
     final Map<String, String> visibilityByColumnId;
     final Map<String, Boolean> businessCriticalByColumnId;
+    final Map<String, Boolean> readOnlyByColumnId;
 
     FieldMetadata(Map<String, String> visibilityByColumnId,
-        Map<String, Boolean> businessCriticalByColumnId) {
+        Map<String, Boolean> businessCriticalByColumnId,
+        Map<String, Boolean> readOnlyByColumnId) {
       this.visibilityByColumnId = visibilityByColumnId;
       this.businessCriticalByColumnId = businessCriticalByColumnId;
+      this.readOnlyByColumnId = readOnlyByColumnId;
     }
   }
 
@@ -418,13 +423,13 @@ final class McpSchemaFieldBuilder {
 
   static JSONArray buildSchemaFieldsArray(Tab adTab, Entity dalEntity,
       Map<String, String> visibilityByColumnId, Map<String, Boolean> businessCriticalByColumnId,
-      Map<String, String> promptByColumnId,
+      Map<String, Boolean> readOnlyByColumnId, Map<String, String> promptByColumnId,
       java.util.Set<String> systemColumns, java.util.Set<String> selectorRefs) throws JSONException {
     JSONArray fieldsArray = new JSONArray();
     for (Column col : adTab.getTable().getADColumnList()) {
       if (shouldIncludeSchemaColumn(col, systemColumns)) {
         fieldsArray.put(buildSchemaField(col, adTab, dalEntity, visibilityByColumnId,
-            businessCriticalByColumnId, promptByColumnId, selectorRefs));
+            businessCriticalByColumnId, readOnlyByColumnId, promptByColumnId, selectorRefs));
       }
     }
     return fieldsArray;
@@ -436,7 +441,7 @@ final class McpSchemaFieldBuilder {
 
   private static JSONObject buildSchemaField(Column col, Tab adTab, Entity dalEntity,
       Map<String, String> visibilityByColumnId, Map<String, Boolean> businessCriticalByColumnId,
-      Map<String, String> promptByColumnId,
+      Map<String, Boolean> readOnlyByColumnId, Map<String, String> promptByColumnId,
       java.util.Set<String> selectorRefs) throws JSONException {
     String dbColName = col.getDBColumnName();
     String refId = col.getReference() != null ? (String) col.getReference().getId() : null;
@@ -453,7 +458,17 @@ final class McpSchemaFieldBuilder {
       // required:true right next to an honest userRequired:false. See addButtonInfo.
       fieldObj.put("required", col.isMandatory());
     }
-    fieldObj.put("readOnly", isReadOnlyColumn(adTab, col));
+    // IMP-28: isReadOnlyColumn only catches structural AD read-only columns (PK/DocumentNo/
+    // auto-sequence) — columns with no ETGO_SF_FIELD row at all still need that check, since a
+    // curated field row can be entirely absent. But when a curated SFField row DOES exist and its
+    // own SF isReadOnly=Y (source of truth for AD_Column.isUpdateable derivation, see
+    // NeoFieldFilter#processFieldMappings), the structural check alone missed it — e.g. a stored
+    // computed column like M_Product.EM_ETGO_Stock is neither a PK nor a sequence column, so it
+    // used to report readOnly:false while its own "visibility":"readOnly" said the opposite. OR
+    // the two signals together; never drop the structural check, it is the only one covering
+    // columns with no SFField row.
+    boolean curatedReadOnly = Boolean.TRUE.equals(readOnlyByColumnId.get((String) col.getId()));
+    fieldObj.put("readOnly", isReadOnlyColumn(adTab, col) || curatedReadOnly);
     addDefaultExpression(fieldObj, col);
     String visibility = visibilityByColumnId.get((String) col.getId());
     addVisibility(fieldObj, visibility, !isButton && col.isMandatory());

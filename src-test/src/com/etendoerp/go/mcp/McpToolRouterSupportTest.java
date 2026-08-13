@@ -1283,20 +1283,33 @@ class McpToolRouterSupportTest {
     /**
      * ETP-4793 / IMP-16. The MCP write path has its own coercer, independent of the REST one in
      * {@code NeoTypeCoercionHelper} — two implementations that must agree on dates, since a
-     * {@code dd-MM-yyyy} value reaching the lenient DAL parser persists as year 0012 rather than
-     * failing. These tests exist on both sides on purpose, so the pair cannot drift silently.
+     * {@code dd-MM-yyyy} value reaching the lenient DAL parser persists as a year taken from the
+     * day component (the "year 0012" regression) rather than failing. These tests exist on both
+     * sides on purpose, so the pair cannot drift silently.
+     *
+     * <p><b>IMP-24 narrowed that agreement deliberately, and this test's date had to move.</b> It
+     * originally used {@code 06-08-2026}, which is ambiguous — 6 August and 8 June are both valid
+     * readings — so as of IMP-24 the MCP coercer rejects it for a caller-supplied value instead of
+     * repairing it, and the assertion below could no longer hold. The rejection is the point of
+     * IMP-24, not a regression; {@code ambiguousCallerDateIsRejected} pins that behaviour.
+     *
+     * <p>The date is therefore {@code 25-08-2026}: day 25 cannot be a month, so it is unambiguous
+     * and still repaired, which keeps this test guarding what it was written to guard — that a
+     * {@code dd-MM-yyyy} value never reaches the DAL unconverted. The MCP and REST coercers still
+     * agree here; they diverge **only** on ambiguous caller-supplied values, where the REST side
+     * keeps repairing because the React UI always sends {@code dd-MM-yyyy} and an agent does not.
      */
     @Test
-    @DisplayName("normalizes a dd-MM-yyyy date to ISO — the year-0012 regression")
+    @DisplayName("normalizes an unambiguous dd-MM-yyyy date to ISO — the year-0012 regression")
     void coercesUiPatternDateToIso() throws Exception {
       Property prop = mock(Property.class);
       when(prop.getPrimitiveObjectType()).thenReturn((Class) java.util.Date.class);
       when(prop.isDate()).thenReturn(true);
       JSONObject body = new JSONObject();
-      body.put("orderDate", "06-08-2026");
+      body.put("orderDate", "25-08-2026");
 
       McpToolRouterSupport.coercePrimitiveFieldValue(body, "orderDate", prop, true, log);
-      assertEquals("2026-08-06", body.getString("orderDate"));
+      assertEquals("2026-08-25", body.getString("orderDate"));
     }
 
     @Test
@@ -1479,6 +1492,115 @@ class McpToolRouterSupportTest {
       assertNull(
           McpToolRouterSupport.coercePrimitiveFieldValue(body, "movementDate", prop, true, log));
       assertEquals("2026-08-06T14:30:00+02:00", body.getString("movementDate"));
+    }
+
+    /**
+     * ETP-4793 / IMP-24, the ambiguity gate. {@code "03-04-2026"} reads as either 3 April or
+     * 4 March under the two conventions an agent might have meant — {@code toCanonical} alone would
+     * silently pick the first, which is the exact silent-reinterpretation bug this item exists to
+     * stop. The value is left verbatim in the body, same contract as an unreadable date: this class
+     * refuses, it never guesses.
+     */
+    @Test
+    @DisplayName("a genuinely ambiguous caller-supplied date is rejected, not repaired")
+    void ambiguousCallerDateIsRejected() throws Exception {
+      Property prop = mock(Property.class);
+      when(prop.getPrimitiveObjectType()).thenReturn((Class) java.util.Date.class);
+      when(prop.isDate()).thenReturn(true);
+      JSONObject body = new JSONObject();
+      body.put("orderDate", "03-04-2026");
+
+      JSONObject rejection =
+          McpToolRouterSupport.coercePrimitiveFieldValue(body, "orderDate", prop, true, log);
+
+      assertNotNull(rejection);
+      assertEquals("orderDate", rejection.getString("name"));
+      assertEquals("03-04-2026", rejection.getString("received"));
+      assertEquals("ambiguous", rejection.getString("reason"));
+      org.codehaus.jettison.json.JSONArray candidates = rejection.getJSONArray("candidates");
+      assertEquals("2026-04-03", candidates.getString(0));
+      assertEquals("2026-03-04", candidates.getString(1));
+      assertEquals("03-04-2026", body.getString("orderDate"));
+    }
+
+    /**
+     * The case IMP-24's own report called out as most likely to be got wrong: day 20 cannot be a
+     * month under any reading, so there is only one valid calendar date here and the repair must
+     * still happen exactly as before this gate existed.
+     */
+    @Test
+    @DisplayName("an unambiguous UI-pattern date is still silently repaired")
+    void unambiguousCallerDateIsStillRepaired() throws Exception {
+      Property prop = mock(Property.class);
+      when(prop.getPrimitiveObjectType()).thenReturn((Class) java.util.Date.class);
+      when(prop.isDate()).thenReturn(true);
+      JSONObject body = new JSONObject();
+      body.put("orderDate", "20-09-2026");
+
+      JSONObject rejection =
+          McpToolRouterSupport.coercePrimitiveFieldValue(body, "orderDate", prop, true, log);
+
+      assertNull(rejection);
+      assertEquals("2026-09-20", body.getString("orderDate"));
+    }
+
+    /**
+     * The other half of the IMP-24 gate applies here too: a value the agent never sent cannot be
+     * blamed on it, so an ambiguous server-injected default is still repaired rather than rejected.
+     */
+    @Test
+    @DisplayName("an ambiguous server-injected default is still repaired, never rejected")
+    void ambiguousServerDefaultIsStillRepaired() throws Exception {
+      Property prop = mock(Property.class);
+      when(prop.getPrimitiveObjectType()).thenReturn((Class) java.util.Date.class);
+      when(prop.isDate()).thenReturn(true);
+      JSONObject body = new JSONObject();
+      body.put("orderDate", "03-04-2026");
+
+      JSONObject rejection =
+          McpToolRouterSupport.coercePrimitiveFieldValue(body, "orderDate", prop, false, log);
+
+      assertNull(rejection);
+      assertEquals("2026-04-03", body.getString("orderDate"));
+    }
+
+    /**
+     * The ISO branch must never reach the ambiguity check at all — an ISO-parsed value is never
+     * ambiguous by construction, so this pins that the new gate leaves it exactly as before.
+     */
+    @Test
+    @DisplayName("an ISO date is unaffected by the ambiguity gate")
+    void isoDateIsUnaffectedByAmbiguityGate() throws Exception {
+      Property prop = mock(Property.class);
+      when(prop.getPrimitiveObjectType()).thenReturn((Class) java.util.Date.class);
+      when(prop.isDate()).thenReturn(true);
+      JSONObject body = new JSONObject();
+      body.put("orderDate", "2026-03-04");
+
+      assertNull(McpToolRouterSupport.coercePrimitiveFieldValue(body, "orderDate", prop, true, log));
+      assertEquals("2026-03-04", body.getString("orderDate"));
+    }
+
+    /**
+     * The pre-existing phase-2 rejection for an unreadable shape is unchanged by this gate: it is
+     * a different {@code reason} ("unreadable", not "ambiguous"), reached only when neither parser
+     * accepts the value at all.
+     */
+    @Test
+    @DisplayName("a differently-separated date still hits the existing unreadable 422")
+    void differentSeparatorStillReportedAsUnreadable() throws Exception {
+      Property prop = mock(Property.class);
+      when(prop.getPrimitiveObjectType()).thenReturn((Class) java.util.Date.class);
+      when(prop.isDate()).thenReturn(true);
+      JSONObject body = new JSONObject();
+      body.put("orderDate", "06/08/2026");
+
+      JSONObject rejection =
+          McpToolRouterSupport.coercePrimitiveFieldValue(body, "orderDate", prop, true, log);
+
+      assertNotNull(rejection);
+      assertEquals("unreadable", rejection.getString("reason"));
+      assertEquals("06/08/2026", body.getString("orderDate"));
     }
   }
 

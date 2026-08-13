@@ -97,15 +97,20 @@ final class McpSchemaCreateView {
       + "for them, so nothing else supplies them. Fields under 'optional' are accepted but not "
       + "needed; those carrying serverDefaulted=true are mandatory in Etendo but the server already "
       + "has a value for them, so do not ask the user — send one only to override it. "
-      + "Anything omitted from this view is either auto-derived, read-only "
-      + "or excluded — do not send it, and do not call neo_schema again to look for it. Fields with "
-      + "hasSelector=true take a record id: resolve it with neo_selectors, or pass the display name "
-      + "and let the server resolve it. Fields with businessCritical=true carry core business data — "
-      + "you MUST confirm those values with the user before creating the record. Every field here is "
-      + "editable and writable, so visibility/readOnly/userRequired are omitted — the group already "
-      + "says it. Default values are omitted too: call neo_defaults to get the values the server "
-      + "will fill in, already resolved. For the full descriptor of any field listed here, call "
-      + "neo_schema again with fields:[\"<name>\"].";
+      + "Anything omitted from this view is either auto-derived, read-only, or excluded — 'visibility' "
+      + "is the authoritative field for why (editable/readOnly/system/discarded), 'readOnly' agrees "
+      + "with it and is a shorthand of the same signal, so trust either one alone. Do not send an "
+      + "omitted field to neo_create. If the value you need lives on a field that was omitted for "
+      + "this reason, that value may still be writable elsewhere: call neo_schema again without "
+      + "view:\"create\" (or on a sibling entity of this spec) to see the full field list and each "
+      + "field's visibility — do not assume the value is unreachable just because this view left it "
+      + "out. Fields with hasSelector=true take a record id: resolve it with neo_selectors, or pass "
+      + "the display name and let the server resolve it. Fields with businessCritical=true carry core "
+      + "business data — you MUST confirm those values with the user before creating the record. "
+      + "Every field here is editable and writable, so visibility/readOnly/userRequired are omitted — "
+      + "the group already says it. Default values are omitted too: call neo_defaults to get the "
+      + "values the server will fill in, already resolved. For the full descriptor of any field "
+      + "listed here, call neo_schema again with fields:[\"<name>\"].";
 
   /** @return {@code true} when {@code view} requests the create-shaped projection. */
   static boolean isCreateView(String view) {

@@ -900,12 +900,17 @@ public class McpToolRouter {
         McpSchemaFieldBuilder.loadPreconditionRequirements(sfEntity);
     JSONArray fieldsArray = McpSchemaFieldBuilder.buildSchemaFieldsArray(adTab, dalEntity,
         fieldMetadata.visibilityByColumnId, fieldMetadata.businessCriticalByColumnId,
-        promptByColumnId, SYSTEM_COLUMNS, SELECTOR_REFS);
+        fieldMetadata.readOnlyByColumnId, promptByColumnId, SYSTEM_COLUMNS, SELECTOR_REFS);
     McpSchemaFieldBuilder.applyPreconditionRequirements(fieldsArray, requiredWhenByField);
     // IMP-1: overlay clean, localized labels + one-line descriptions from AD_Field so the agent
     // sees "SII Description" instead of the raw AD_Column name "EM_Aeatsii_Descripcion_Sii".
     McpSchemaFieldBuilder.applyCuratedLabels(fieldsArray,
         McpSchemaFieldBuilder.loadFieldLabels(adTab, NeoLanguage.currentCode()));
+
+    // IMP-28 clause 4: computed off the full field array, before any view/fields narrowing
+    // below, so a caller passing fields:[...] does not skew what the entity as a whole
+    // supports. See the "methods" section for why this gates POST/PUT.
+    boolean entityHasWritableField = hasAnyAgentSuppliableField(fieldsArray);
 
     // One dispatch point for every projection, so the views cannot drift apart. All of them are
     // pure post-filters on the fully-decorated fieldsArray above — no extra DAL access. Omitting
@@ -943,10 +948,18 @@ public class McpToolRouter {
     if (Boolean.TRUE.equals(sfEntity.isGet()) || Boolean.TRUE.equals(sfEntity.isGetByID())) {
       methods.put(HTTP_METHOD_GET);
     }
-    if (Boolean.TRUE.equals(sfEntity.isPost())) {
+    // IMP-28 clause 4: ETGO_SF_ENTITY can enable POST/PUT while every individual field is
+    // configured read-only (live evidence: product/stock — M_Storage_Detail is a computed
+    // ledger, not a user-editable record — advertised methods:["GET","POST","PUT","DELETE"]
+    // alongside view:"create" returning zero required/optional fields). Advertising a write
+    // method an agent cannot actually use is worse than silence: it spends the write attempt
+    // (and, post clause 2, gets rejected) before the agent learns anything. Gate POST/PUT on
+    // "at least one field the agent may actually set", in addition to the raw entity flag.
+    // DELETE is untouched — deleting a record never requires any field to be writable.
+    if (Boolean.TRUE.equals(sfEntity.isPost()) && entityHasWritableField) {
       methods.put(HTTP_METHOD_POST);
     }
-    if (Boolean.TRUE.equals(sfEntity.isPut())) {
+    if (Boolean.TRUE.equals(sfEntity.isPut()) && entityHasWritableField) {
       methods.put(HTTP_METHOD_PUT);
     }
     if (Boolean.TRUE.equals(sfEntity.isDelete())) {
@@ -982,6 +995,27 @@ public class McpToolRouter {
         + "modifying records.");
 
     return wrapAsTextContent(entitySchema.toString(2));
+  }
+
+  /**
+   * Whether at least one descriptor in the array is one an agent may actually write —
+   * i.e. {@link McpSchemaFieldBuilder#isAgentSuppliable} — used by IMP-28 clause 4 to decide
+   * whether the entity's advertised {@code methods} may include POST/PUT.
+   *
+   * @param fieldsArray the full, undecorated field array (before any {@code view}/{@code fields}
+   *     narrowing) so a caller's whitelist request does not skew the entity-wide answer
+   */
+  private static boolean hasAnyAgentSuppliableField(JSONArray fieldsArray) {
+    if (fieldsArray == null) {
+      return false;
+    }
+    for (int i = 0; i < fieldsArray.length(); i++) {
+      JSONObject field = fieldsArray.optJSONObject(i);
+      if (field != null && McpSchemaFieldBuilder.isAgentSuppliable(field)) {
+        return true;
+      }
+    }
+    return false;
   }
 
   /**
@@ -1635,17 +1669,45 @@ public class McpToolRouter {
    * {@code {"status":-4}} plus a {@code java.text.ParseException} that named no field at all, so the
    * agent could not tell which of the dates it sent was the problem — or that a date was the
    * problem.
+   *
+   * <p>{@code detail} branches on each item's {@code reason} (ETP-4793, the ambiguity gate):
+   * "unreadable" and "ambiguous" are different failures — one is a format the parser cannot make
+   * sense of at all, the other is a format the parser understands two different ways at once — and
+   * conflating them back into one generic sentence would cost the agent the distinction the
+   * per-item {@code reason}/{@code candidates} keys exist to give it.
    */
   private JSONObject buildInvalidDatesError(JSONArray invalidDates) throws JSONException {
+    boolean hasUnreadable = false;
+    boolean hasAmbiguous = false;
+    for (int i = 0; i < invalidDates.length(); i++) {
+      String reason = invalidDates.getJSONObject(i).optString("reason", "unreadable");
+      if ("ambiguous".equals(reason)) {
+        hasAmbiguous = true;
+      } else {
+        hasUnreadable = true;
+      }
+    }
+    String detail;
+    if (hasAmbiguous && hasUnreadable) {
+      detail = "One or more date values are not in a format this API can read, and one or more "
+          + "others are ambiguous — readable as two different calendar dates depending on which "
+          + "day-first/month-first convention is assumed";
+    } else if (hasAmbiguous) {
+      detail = "One or more date values are ambiguous: each is readable as two different calendar "
+          + "dates depending on which day-first/month-first convention is assumed, so this API "
+          + "refuses to guess. See each item's 'candidates' for the two readings";
+    } else {
+      detail = "One or more date values are not in a format this API can read";
+    }
     JSONObject errorObj = new JSONObject();
     errorObj.put(McpConstants.KEY_STATUS, McpConstants.STATUS_UNPROCESSABLE);
     errorObj.put(McpConstants.KEY_ERROR, McpConstants.ERROR_VALIDATION);
-    errorObj.put(McpConstants.KEY_DETAIL,
-        "One or more date values are not in a format this API can read");
+    errorObj.put(McpConstants.KEY_DETAIL, detail);
     errorObj.put("invalidDates", invalidDates);
     errorObj.put("hint", "Send dates as ISO: yyyy-MM-dd for dates, yyyy-MM-dd'T'HH:mm:ss for "
         + "datetimes. Check the value is a real calendar date too — 2026-02-30 is ISO-shaped and "
-        + "still invalid.");
+        + "still invalid. For an ambiguous value, resend the exact ISO date you meant from "
+        + "'candidates'.");
     errorObj.put(McpConstants.KEY_SEE_ALSO, McpConstants.SEE_ALSO_WRITING);
     return errorObj;
   }

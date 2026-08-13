@@ -18,6 +18,7 @@
 package com.etendoerp.go.mcp;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.Iterator;
 import java.util.List;
@@ -702,6 +703,19 @@ final class McpToolRouterSupport {
    *       signal that the default needs fixing at its source.</li>
    * </ul>
    *
+   * <p><b>Phase 2.1 (IMP-24, the ambiguity gate).</b> A value {@code toCanonical} repairs is not
+   * automatically safe: the UI pattern reads {@code "03-04-2026"} as 3 April, but {@code
+   * "04-03-2026"} would read as 4 March under the same pattern, and 4 March is what an agent
+   * meaning {@code MM-dd-yyyy} would have written as {@code "03-04-2026"} instead. Repairing that
+   * value picks one of two equally valid calendar dates without ever asking, which is the same
+   * silent reinterpretation this item exists to stop — the value just happens to already be
+   * repairable, so phase 2 alone let it through. {@link NeoDateFormat#isAmbiguousUiDate} tells
+   * repairable-but-ambiguous apart from repairable-and-safe (e.g. {@code "20-09-2026"}, where no
+   * month 20 exists so {@code dd-MM-yyyy} is the only possible reading); this rejects the former
+   * and leaves the latter as a silent repair. As with the phase-2 gate above, only a
+   * caller-supplied value may be rejected here — a server-injected default that happens to be
+   * ambiguous (e.g. today's date on days 1–12) is still repaired, never blamed on the agent.
+   *
    * @return the rejection descriptor, or {@code null} when nothing is wrong with the value
    */
   private static JSONObject coerceDateFieldValue(JSONObject body, String key, Property prop,
@@ -725,6 +739,11 @@ final class McpToolRouterSupport {
       }
       return buildInvalidDateInfo(key, strVal, shape.booleanValue());
     }
+    if (callerSupplied && NeoDateFormat.isAmbiguousUiDate(strVal)) {
+      log.info("[MCP] Ambiguous date for '{}': '{}' rejected — both day-first and month-first "
+          + "readings are valid calendar dates", key, strVal);
+      return buildAmbiguousDateInfo(key, strVal);
+    }
     if (!canonical.equals(strVal)) {
       log.info("[MCP] Normalized date '{}': '{}' -> '{}'", key, strVal, canonical);
       body.put(key, canonical);
@@ -747,6 +766,31 @@ final class McpToolRouterSupport {
     info.put("received", received);
     info.put("expectedFormat", NeoDateFormat.canonicalPattern(datetime));
     info.put("example", datetime ? "2026-08-10T14:30:00" : "2026-08-10");
+    info.put("reason", "unreadable");
+    return info;
+  }
+
+  /**
+   * Describe one ambiguous date value for the 422 body (ETP-4793 / IMP-24, the ambiguity gate).
+   *
+   * <p>Reuses {@code invalidDates}' four base keys — {@code name}/{@code received}/
+   * {@code expectedFormat}/{@code example} — so an agent that already handles that envelope needs
+   * no new parsing logic for this case; {@code reason} and {@code candidates} are additive. Unlike
+   * {@link #buildInvalidDateInfo}, this value is not unreadable — it is undecidable between two
+   * readings, both listed in {@code candidates} so the agent can resend the one it actually meant
+   * instead of guessing at a third shape.
+   */
+  static JSONObject buildAmbiguousDateInfo(String key, String received) throws JSONException {
+    JSONObject info = new JSONObject();
+    info.put("name", key);
+    info.put("received", received);
+    info.put("expectedFormat", NeoDateFormat.ISO_DATE);
+    info.put("example", "2026-08-10");
+    info.put("reason", "ambiguous");
+    String[] readings = NeoDateFormat.ambiguousReadings(received);
+    if (readings != null) {
+      info.put("candidates", new JSONArray(Arrays.asList(readings)));
+    }
     return info;
   }
 

@@ -20,6 +20,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
@@ -62,23 +63,31 @@ class NeoFieldFilterTest {
    * Creates a NeoFieldFilter via the private constructor for testing.
    */
   private static NeoFieldFilter createFilter(Set<String> included, Set<String> writable,
-      Map<String, String> apiKeyToProp, Map<String, String> propToApiKey, boolean active)
-      throws Exception {
+      Set<String> rejectableOnCreate, Map<String, String> apiKeyToProp,
+      Map<String, String> propToApiKey, boolean active) throws Exception {
     Constructor<NeoFieldFilter> ctor = NeoFieldFilter.class.getDeclaredConstructor(
-        Set.class, Set.class, Map.class, Map.class, boolean.class);
+        Set.class, Set.class, Set.class, Map.class, Map.class, boolean.class);
     ctor.setAccessible(true);
-    return ctor.newInstance(included, writable, apiKeyToProp, propToApiKey, active);
+    return ctor.newInstance(included, writable, rejectableOnCreate, apiKeyToProp, propToApiKey,
+        active);
   }
 
   private static NeoFieldFilter activeFilter(Set<String> included, Set<String> writable)
       throws Exception {
-    return createFilter(included, writable,
+    return createFilter(included, writable, Collections.emptySet(),
         Collections.emptyMap(), Collections.emptyMap(), true);
   }
 
   private static NeoFieldFilter activeFilterWithMappings(Set<String> included, Set<String> writable,
       Map<String, String> apiKeyToProp, Map<String, String> propToApiKey) throws Exception {
-    return createFilter(included, writable, apiKeyToProp, propToApiKey, true);
+    return createFilter(included, writable, Collections.emptySet(), apiKeyToProp, propToApiKey,
+        true);
+  }
+
+  private static NeoFieldFilter activeFilterWithRejectable(Set<String> included,
+      Set<String> writable, Set<String> rejectableOnCreate) throws Exception {
+    return createFilter(included, writable, rejectableOnCreate,
+        Collections.emptyMap(), Collections.emptyMap(), true);
   }
 
   private static boolean invokeIsMetadataKey(NeoFieldFilter filter, String key) throws Exception {
@@ -118,7 +127,7 @@ class NeoFieldFilterTest {
   class FilterGetResponse {
     @Test
     void inactiveFilterReturnsUnchanged() throws Exception {
-      NeoFieldFilter filter = createFilter(null, null,
+      NeoFieldFilter filter = createFilter(null, null, null,
           Collections.emptyMap(), Collections.emptyMap(), false);
       JSONObject input = new JSONObject().put("someField", "value");
       JSONObject result = filter.filterGetResponse(input);
@@ -248,7 +257,7 @@ class NeoFieldFilterTest {
   class FilterWriteRequest {
     @Test
     void inactiveFilterReturnsUnchanged() throws Exception {
-      NeoFieldFilter filter = createFilter(null, null,
+      NeoFieldFilter filter = createFilter(null, null, null,
           Collections.emptyMap(), Collections.emptyMap(), false);
       JSONObject body = new JSONObject().put("any", "value");
       assertEquals(body, filter.filterWriteRequest(body));
@@ -410,6 +419,111 @@ class NeoFieldFilterTest {
       JSONObject result = filter.filterCreateRequest(body);
       assertTrue(result.has("readOnlyField"), "Read-only included fields allowed on create");
       assertFalse(result.has("unknownField"));
+    }
+
+    /**
+     * IMP-28 clause 2: an included, read-only field with no configured default and no owning
+     * NeoHandler must be REJECTED (thrown), not silently dropped — that silent drop is the root
+     * cause the ticket describes: the caller gets 200 with the value discarded and no signal.
+     */
+    @Test
+    @DisplayName("rejects a read-only field with no default/handler excuse instead of dropping it")
+    void rejectsUnexcusedReadOnlyField() throws Exception {
+      Set<String> included = new HashSet<>(Set.of("id", "name", "salePrice"));
+      Set<String> writable = new HashSet<>(Set.of("id", "name"));
+      Set<String> rejectableOnCreate = new HashSet<>(Set.of("salePrice"));
+      NeoFieldFilter filter = activeFilterWithRejectable(included, writable, rejectableOnCreate);
+
+      JSONObject body = new JSONObject();
+      body.put("id", "1");
+      body.put("name", "Test");
+      body.put("salePrice", 42.0);
+
+      ReadOnlyFieldRejectedException ex = assertThrows(
+          ReadOnlyFieldRejectedException.class, () -> filter.filterCreateRequest(body));
+      assertEquals("salePrice", ex.getFieldName());
+    }
+
+    @Test
+    @DisplayName("rejection names the API-facing key the caller actually sent, not the DAL name")
+    void rejectionReportsApiKeyNotDalName() throws Exception {
+      Set<String> included = new HashSet<>(Set.of("id", "priceActual"));
+      Set<String> writable = new HashSet<>(Set.of("id"));
+      Set<String> rejectableOnCreate = new HashSet<>(Set.of("priceActual"));
+      Map<String, String> apiKeyToProp = new HashMap<>();
+      apiKeyToProp.put("unitPrice", "priceActual");
+      NeoFieldFilter filter = createFilter(included, writable, rejectableOnCreate,
+          apiKeyToProp, Collections.emptyMap(), true);
+
+      JSONObject body = new JSONObject();
+      body.put("id", "1");
+      body.put("unitPrice", 42.0);
+
+      ReadOnlyFieldRejectedException ex = assertThrows(
+          ReadOnlyFieldRejectedException.class, () -> filter.filterCreateRequest(body));
+      assertEquals("unitPrice", ex.getFieldName(),
+          "the caller sent 'unitPrice' — that is the name they must see, not the DAL 'priceActual'");
+    }
+
+    @Test
+    @DisplayName("a request that omits the rejectable field entirely is not rejected")
+    void doesNotRejectWhenFieldAbsent() throws Exception {
+      Set<String> included = new HashSet<>(Set.of("id", "name", "salePrice"));
+      Set<String> writable = new HashSet<>(Set.of("id", "name"));
+      Set<String> rejectableOnCreate = new HashSet<>(Set.of("salePrice"));
+      NeoFieldFilter filter = activeFilterWithRejectable(included, writable, rejectableOnCreate);
+
+      JSONObject body = new JSONObject();
+      body.put("id", "1");
+      body.put("name", "Test");
+
+      JSONObject result = filter.filterCreateRequest(body);
+      assertFalse(result.has("salePrice"));
+    }
+
+    @Test
+    @DisplayName("rejection also fires when the body arrives wrapped in a data envelope")
+    void rejectsInsideDataEnvelope() throws Exception {
+      Set<String> included = new HashSet<>(Set.of("id", "salePrice"));
+      Set<String> writable = new HashSet<>(Set.of("id"));
+      Set<String> rejectableOnCreate = new HashSet<>(Set.of("salePrice"));
+      NeoFieldFilter filter = activeFilterWithRejectable(included, writable, rejectableOnCreate);
+
+      JSONObject inner = new JSONObject();
+      inner.put("id", "1");
+      inner.put("salePrice", 42.0);
+      JSONObject body = new JSONObject();
+      body.put("data", inner);
+
+      assertThrows(
+          ReadOnlyFieldRejectedException.class, () -> filter.filterCreateRequest(body));
+    }
+
+    /**
+     * IMP-28 clause 2 regression guard: fields whose value is legitimately supplied by their
+     * entity's own NeoHandler pre-hook (e.g. {@code InventoryLineHandler} injecting
+     * {@code bookQuantity}, {@code transactionDocument} on document headers) must keep passing
+     * through unfiltered — they are simply never added to rejectableOnCreateFields in the first
+     * place (see NeoFieldFilter#processFieldMappings), so an empty rejectable set behaves
+     * exactly like the pre-clause-2 passthrough.
+     */
+    @Test
+    @DisplayName("still passes through a handler-supplied read-only field (regression: bookQuantity/transactionDocument)")
+    void passesThroughHandlerSuppliedReadOnlyField() throws Exception {
+      Set<String> included = new HashSet<>(Set.of("id", "bookQuantity", "transactionDocument"));
+      Set<String> writable = new HashSet<>(Set.of("id"));
+      // Empty: these fields were excluded from rejectableOnCreateFields because their entity has
+      // a Java_Qualifier (a NeoHandler may have supplied them) or an AD default is configured.
+      NeoFieldFilter filter = activeFilterWithRejectable(included, writable, Collections.emptySet());
+
+      JSONObject body = new JSONObject();
+      body.put("id", "1");
+      body.put("bookQuantity", 5);
+      body.put("transactionDocument", "some-doc-type-id");
+
+      JSONObject result = filter.filterCreateRequest(body);
+      assertTrue(result.has("bookQuantity"));
+      assertTrue(result.has("transactionDocument"));
     }
   }
 

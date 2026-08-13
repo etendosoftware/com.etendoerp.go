@@ -190,6 +190,7 @@ class McpSchemaFieldBuilderTest {
         null,
         java.util.Map.of(),
         java.util.Map.of(),
+        java.util.Map.of(),
         java.util.Map.of("COL1", "  Pick the correct customer.  "),
         java.util.Set.of(),
         java.util.Set.of());
@@ -1084,8 +1085,10 @@ class McpSchemaFieldBuilderTest {
               java.util.Map.class,
               java.util.Map.class,
               java.util.Map.class,
+              java.util.Map.class,
               java.util.Set.class },
           col, tab, null,
+          new java.util.HashMap<>(),
           new java.util.HashMap<>(),
           new java.util.HashMap<>(),
           new java.util.HashMap<>(),
@@ -1293,10 +1296,12 @@ class McpSchemaFieldBuilderTest {
               java.util.Map.class,
               java.util.Map.class,
               java.util.Map.class,
+              java.util.Map.class,
               java.util.Set.class },
           col, tab, null,
           new java.util.HashMap<>(),
           businessCriticalMap,
+          new java.util.HashMap<>(),
           new java.util.HashMap<>(),
           new java.util.HashSet<>());
 
@@ -1316,8 +1321,10 @@ class McpSchemaFieldBuilderTest {
               java.util.Map.class,
               java.util.Map.class,
               java.util.Map.class,
+              java.util.Map.class,
               java.util.Set.class },
           col, tab, null,
+          new java.util.HashMap<>(),
           new java.util.HashMap<>(),
           new java.util.HashMap<>(),
           new java.util.HashMap<>(),
@@ -1342,10 +1349,12 @@ class McpSchemaFieldBuilderTest {
               java.util.Map.class,
               java.util.Map.class,
               java.util.Map.class,
+              java.util.Map.class,
               java.util.Set.class },
           col, tab, null,
           new java.util.HashMap<>(),
           businessCriticalMap,
+          new java.util.HashMap<>(),
           new java.util.HashMap<>(),
           new java.util.HashSet<>());
 
@@ -1383,10 +1392,12 @@ class McpSchemaFieldBuilderTest {
               java.util.Map.class,
               java.util.Map.class,
               java.util.Map.class,
+              java.util.Map.class,
               java.util.Set.class },
           col, buildTab(), null,
           new java.util.HashMap<>(),
           businessCriticalMap,
+          new java.util.HashMap<>(),
           new java.util.HashMap<>(),
           new java.util.HashSet<>());
     }

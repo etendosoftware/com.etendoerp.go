@@ -51,6 +51,7 @@ import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 
 import org.codehaus.jettison.json.JSONArray;
+import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -708,6 +709,82 @@ class NeoCrudHandlerTest {
 
       JSONObject error = result.getBody().getJSONObject("error");
       assertEquals("Missing required fields", error.getString("message"));
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // buildReadOnlyFieldRejectedResponse tests (via reflection, IMP-28 clause 2)
+  // -------------------------------------------------------------------------
+
+  @Nested
+  @DisplayName("buildReadOnlyFieldRejectedResponse")
+  class BuildReadOnlyFieldRejectedResponse {
+
+    private NeoResponse invokeBuildResponse(ReadOnlyFieldRejectedException e) throws Exception {
+      return (NeoResponse) invokePrivate(handler, "buildReadOnlyFieldRejectedResponse",
+          new Class<?>[] { ReadOnlyFieldRejectedException.class }, e);
+    }
+
+    @Test
+    @DisplayName("Returns the IMP-5-shaped 422: status/error/detail/field/hint/seeAlso")
+    void buildsFlatImp5Shape() throws Exception {
+      ReadOnlyFieldRejectedException ex = new ReadOnlyFieldRejectedException("eTGOSalePrice");
+
+      NeoResponse result = invokeBuildResponse(ex);
+
+      assertNotNull(result);
+      assertEquals(422, result.getHttpStatus());
+
+      JSONObject body = result.getBody();
+      assertNotNull(body);
+      assertEquals(422, body.getInt("status"));
+      assertEquals("read_only_field", body.getString("error"));
+      assertEquals("eTGOSalePrice", body.getString("field"));
+      assertTrue(body.has("detail"));
+      assertTrue(body.has("hint"));
+      assertEquals("docs(topic:\"creating records\")", body.getString("seeAlso"));
+    }
+
+    @Test
+    @DisplayName("detail and hint both name the rejected field")
+    void detailAndHintNameTheField() throws Exception {
+      ReadOnlyFieldRejectedException ex = new ReadOnlyFieldRejectedException("quantityOnHand");
+
+      NeoResponse result = invokeBuildResponse(ex);
+
+      JSONObject body = result.getBody();
+      assertTrue(body.getString("detail").contains("quantityOnHand"));
+      assertTrue(body.getString("hint").contains("quantityOnHand"));
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // handleDefault + ReadOnlyFieldRejectedException wiring (IMP-28 clause 2)
+  // -------------------------------------------------------------------------
+
+  @Nested
+  @DisplayName("handleDefault — ReadOnlyFieldRejectedException")
+  class HandleDefaultReadOnlyFieldRejected {
+
+    @Test
+    @DisplayName("A ReadOnlyFieldRejectedException thrown deep in the write path answers 422, "
+        + "not the generic 500 the catch-all(Exception) branch would otherwise produce")
+    void translatesToStructured422() throws JSONException {
+      Tab adTab = mock(Tab.class);
+      // Forces handleDefault's try-block to throw before reaching the DAL —
+      // getTable() is the first call handleDefault makes on adTab.
+      when(adTab.getTable()).thenThrow(new ReadOnlyFieldRejectedException("salePrice"));
+
+      NeoContext context = buildContext("POST", null, adTab,
+          mock(SFEntity.class), null, null);
+
+      NeoResponse result = handler.handleDefault(context);
+
+      assertNotNull(result);
+      assertEquals(422, result.getHttpStatus(),
+          "must be routed through buildReadOnlyFieldRejectedResponse, not the generic 500 path");
+      assertEquals("read_only_field", result.getBody().getString("error"));
+      assertEquals("salePrice", result.getBody().getString("field"));
     }
   }
 
