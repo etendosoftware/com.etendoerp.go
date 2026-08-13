@@ -256,8 +256,10 @@ check_base_conflicts() {
 
   # Tree-level merge check — no working-tree changes (git >= 2.38).
   local out rc
+  set +e
   out="$(git merge-tree --write-tree --name-only "$base_ref" HEAD 2>/dev/null)"
   rc=$?
+  set -e
 
   if [ "$rc" -eq 0 ]; then
     echo "    SUCCESS ✅ (merges cleanly into $base_ref)"
