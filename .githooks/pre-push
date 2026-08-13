@@ -255,15 +255,9 @@ check_base_conflicts() {
   local base_ref="origin/$base_branch"
 
   # Tree-level merge check — no working-tree changes (git >= 2.38).
-  # git < 2.38 rejects the --write-tree/--name-only flags and exits non-zero
-  # before printing anything usable; under `set -e` (top of this script) that
-  # exit would abort the hook right here instead of reaching the rc>1 SKIPPED
-  # path below, so errexit is suspended for just this one capture.
   local out rc
-  set +e
   out="$(git merge-tree --write-tree --name-only "$base_ref" HEAD 2>/dev/null)"
   rc=$?
-  set -e
 
   if [ "$rc" -eq 0 ]; then
     echo "    SUCCESS ✅ (merges cleanly into $base_ref)"
