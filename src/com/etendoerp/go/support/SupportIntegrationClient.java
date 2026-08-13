@@ -64,6 +64,12 @@ final class SupportIntegrationClient {
       System.getProperty("support.adk.url", "http://localhost:8000");
   private static final String ADK_APP_NAME = "agent";
 
+  /** Zero-width-prefixed marker appended to a reply's text when the ADK's response for that
+   * turn set {@code pending_escalation=confirm} — i.e. ValerIA just offered to escalate to a
+   * human. Persisted as part of the message text; the frontend strips it before rendering and
+   * shows a one-click "talk to a human" button on that message instead. */
+  static final String SUGGESTS_ESCALATION_MARKER = "​##SUGGESTS_ESCALATION##";
+
   private static final HttpClient HTTP_CLIENT = HttpClient.newBuilder()
       .connectTimeout(Duration.ofSeconds(10))
       .build();
@@ -154,7 +160,11 @@ final class SupportIntegrationClient {
         log.warn("ADK /run returned {}: {}", resp.statusCode(), resp.body());
         return null;
       }
-      return parseAdkResponse(resp.body());
+      String replyText = parseAdkResponse(resp.body());
+      if (replyText != null && responseSuggestsEscalation(resp.body())) {
+        replyText += SUGGESTS_ESCALATION_MARKER;
+      }
+      return replyText;
     } catch (InterruptedException e) {
       Thread.currentThread().interrupt();
       log.warn("ADK /run failed: {}", e.getMessage());
@@ -231,6 +241,27 @@ final class SupportIntegrationClient {
       log.warn("Failed to parse ADK response: {}", e.getMessage());
       return null;
     }
+  }
+
+  /** True if any event in the turn's raw ADK response set {@code pending_escalation=confirm}
+   * in its {@code actions.stateDelta} — the ADK's signal that this reply just offered to
+   * escalate to a human and is waiting on the user's confirmation. */
+  static boolean responseSuggestsEscalation(String json) {
+    try {
+      JSONArray events = new JSONArray(json);
+      for (int i = 0; i < events.length(); i++) {
+        JSONObject event = events.optJSONObject(i);
+        if (event == null) continue;
+        JSONObject actions = event.optJSONObject("actions");
+        JSONObject stateDelta = actions != null ? actions.optJSONObject("stateDelta") : null;
+        if (stateDelta != null && "confirm".equals(stateDelta.optString("pending_escalation", null))) {
+          return true;
+        }
+      }
+    } catch (Exception e) {
+      log.warn("Failed to scan ADK response for escalation signal: {}", e.getMessage());
+    }
+    return false;
   }
 
   static void appendEventText(StringBuilder sb, JSONObject event) {

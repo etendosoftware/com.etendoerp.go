@@ -78,6 +78,26 @@ class CorsUtilsTest {
     }
 
     @Test
+    void defaultAllowedOriginSetsCorsHeadersForSchemaForgeDevPort() {
+      when(request.getHeader("Origin")).thenReturn("http://localhost:3100");
+      when(request.getRequestURL()).thenReturn(new StringBuffer("http://server:8080/api"));
+
+      CorsUtils.apply(request, response, "GET,POST", "Content-Type,Authorization", null, false);
+
+      verify(response).setHeader("Access-Control-Allow-Origin", "http://localhost:3100");
+    }
+
+    @Test
+    void defaultAllowedOriginSetsCorsHeadersForSchemaForgeDevPortViaLoopbackIp() {
+      when(request.getHeader("Origin")).thenReturn("http://127.0.0.1:3100");
+      when(request.getRequestURL()).thenReturn(new StringBuffer("http://server:8080/api"));
+
+      CorsUtils.apply(request, response, "GET,POST", "Content-Type,Authorization", null, false);
+
+      verify(response).setHeader("Access-Control-Allow-Origin", "http://127.0.0.1:3100");
+    }
+
+    @Test
     void sameOriginAsRequestUrlSetsCorsHeaders() {
       when(request.getHeader("Origin")).thenReturn("http://myserver:8080");
       when(request.getRequestURL()).thenReturn(new StringBuffer("http://myserver:8080/etendo/api"));
