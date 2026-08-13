@@ -66,6 +66,7 @@ import com.etendoerp.go.payment.HostedCheckoutService;
 import com.etendoerp.go.payment.CheckoutConfiguration;
 import com.etendoerp.go.payment.CheckoutPaymentRegistry;
 import com.etendoerp.go.payment.CheckoutWebhookVerifier;
+import com.etendoerp.go.onboarding.OnboardingAcctdimCentrallyMaintainedService;
 import com.etendoerp.go.onboarding.OnboardingBaselineService;
 import com.etendoerp.go.onboarding.OnboardingAccountingWiringService;
 import com.etendoerp.go.onboarding.OnboardingDatasetImportService;
@@ -173,6 +174,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private static final String PROGRESS_BASELINE = "baseline";
   private static final String PROGRESS_BANK_CONNECTION_SYNC = "bankConnectionSync";
   private static final String PROGRESS_BP_GROUP_ACCT_PATCH = "bpGroupAcctPatch";
+  private static final String PROGRESS_ACCTDIM_VISIBILITY = "acctdimVisibility";
   private static final String LEGAL_WITH_ACCOUNTING_ORG_TYPE_ID = "1";
   // Stable codes for provisioning failures whose underlying message is an unresolved AD message
   // key. Mirrored by the frontend's onboarding/errorMessages.js (ETP-4665).
@@ -213,6 +215,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       new OnboardingOrgInfoService();
   OnboardingDefaultCustomerService onboardingDefaultCustomerService =
       new OnboardingDefaultCustomerService();
+  OnboardingAcctdimCentrallyMaintainedService onboardingAcctdimCentrallyMaintainedService =
+      new OnboardingAcctdimCentrallyMaintainedService();
   OnboardingBaselineService onboardingBaselineService =
       new OnboardingBaselineService();
   OnboardingBankConnectionSyncService onboardingBankConnectionSyncService =
@@ -1831,6 +1835,14 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     if (!patchBpGroupAcctMissingColumns(writer, clientId, orgId, adminUserId, adminRoleId)) {
       return false;
     }
+    // ETP-4854 (gap K1): force flat, per-dimension accounting-dimension visibility for the new
+    // tenant. Runs AFTER the accounting-wiring steps (which created this client's
+    // C_AcctSchema_Element rows, all defaulting isactive='Y') and BEFORE the baseline stamp — see
+    // OnboardingAcctdimCentrallyMaintainedService for the full root-cause explanation and its
+    // lockstep corrective twin (R23-acctdim-centrally-maintained.sql).
+    if (!forceFlatAccountingDimensionVisibility(writer, clientId)) {
+      return false;
+    }
     // Final action before commitDalChanges: stamp the tenant's data-fix baseline so it lands in the
     // same atomic onboarding commit. A genuine SQL error propagates (not caught here) so the outer
     // handleOnboarding catch rolls back cleanly; the expected ON CONFLICT->0-rows case is benign.
@@ -2021,6 +2033,30 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       String errorMessage = e.getMessage() != null ? e.getMessage()
           : "Business-partner group posting-account patch failed";
       sendProgress(writer, PROGRESS_BP_GROUP_ACCT_PATCH, PROGRESS_ERROR, errorMessage);
+      sendFinalResult(writer, false, errorMessage);
+      return false;
+    }
+  }
+
+  /**
+   * Forces flat, per-dimension accounting-dimension visibility ({@code Acctdim_Centrally_Maintained
+   * = 'N'}) for the new tenant, backfilling {@code C_AcctSchema_Element.isactive} first so the
+   * flip does not change what the tenant would otherwise see (ETP-4854, gap K1) — see
+   * {@link OnboardingAcctdimCentrallyMaintainedService} for the full explanation.
+   */
+  boolean forceFlatAccountingDimensionVisibility(PrintWriter writer, String clientId) {
+    sendProgress(writer, PROGRESS_ACCTDIM_VISIBILITY, PROGRESS_IN_PROGRESS,
+        "Configuring accounting-dimension visibility...");
+    try {
+      onboardingAcctdimCentrallyMaintainedService.forceFlatAccountingDimensionVisibility(clientId);
+      sendProgress(writer, PROGRESS_ACCTDIM_VISIBILITY, "done",
+          "Accounting-dimension visibility configured");
+      return true;
+    } catch (Exception e) {
+      EtendoGoDalHelper.rollbackDalChanges("onboarding acctdim-visibility", e, log);
+      String errorMessage = e.getMessage() != null ? e.getMessage()
+          : "Accounting-dimension visibility configuration failed";
+      sendProgress(writer, PROGRESS_ACCTDIM_VISIBILITY, PROGRESS_ERROR, errorMessage);
       sendFinalResult(writer, false, errorMessage);
       return false;
     }

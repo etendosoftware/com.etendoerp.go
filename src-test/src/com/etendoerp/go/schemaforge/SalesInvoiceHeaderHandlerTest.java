@@ -694,10 +694,10 @@ public class SalesInvoiceHeaderHandlerTest {
     }
   }
 
-  // ── afterHandle(): amount negation for NC / DEV subtypes ─────────────────
+  // ── afterHandle(): the stored amount sign is passed through untouched ─────
 
   /**
-   * Builds a body for NC/DEV subtype tests with a specific transactionDocument field.
+   * Builds a body for subtype/sign tests with a specific transactionDocument field.
    */
   private static JSONObject invoiceBodyWithDocType(String docTypeId, double grand, double outstanding)
       throws Exception {
@@ -711,13 +711,71 @@ public class SalesInvoiceHeaderHandlerTest {
   }
 
   /**
-   * Verifies that grandTotalAmount and outstandingAmount are negated for RECTIFICATIVA (via
-   * legacy ARC / Credit Memo category) subtype records when amounts are positive.
+   * ETP-4841 regression guard for the deleted {@code applyAmountNegationForCredit}: a POSITIVE
+   * Factura Rectificativa (via the legacy ARC / Credit Memo category) is an under-invoiced
+   * correction that the customer OWES, so its amounts must reach the grid exactly as stored.
+   * Forcing them negative made the list contradict the detail page and mislabelled a payable as a
+   * "saldo a favor".
    */
   @Test
-  public void afterHandle_rectificativaViaArc_negatesPositiveAmounts() throws Exception {
+  public void afterHandle_positiveRectificativaViaArc_keepsPositiveAmounts() throws Exception {
     JSONObject body = invoiceBodyWithDocType("dt-arc", 150.0, 100.0);
     NeoContext ctx = getCtx(); // list mode — no recordId, no enrichSourceInvoice call
+    ctx.setPreviousResult(NeoResponse.ok(body));
+
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      DocumentType dt = mock(DocumentType.class);
+      when(dt.getDocumentCategory()).thenReturn("ARC");
+      when(dal.get(DocumentType.class, "dt-arc")).thenReturn(dt);
+
+      NeoResponse result = new SalesInvoiceHeaderHandler().afterHandle(ctx);
+
+      assertNotNull(result);
+      JSONObject rec = result.getBody().getJSONObject("response").getJSONArray("data").getJSONObject(0);
+      // The doc-type badge still says RECTIFICATIVA — only the SIGN rewriting is gone.
+      assertEquals("RECTIFICATIVA", rec.getString("arInvoiceSubtype"));
+      assertEquals(150.0, rec.getDouble("grandTotalAmount"), 0.001);
+      assertEquals(100.0, rec.getDouble("outstandingAmount"), 0.001);
+    }
+  }
+
+  /**
+   * Same guard through the other legacy rectificative category (ARI_RM / Return Invoice): a
+   * positive total is passed through untouched.
+   */
+  @Test
+  public void afterHandle_positiveRectificativaViaAriRm_keepsPositiveAmounts() throws Exception {
+    JSONObject body = invoiceBodyWithDocType("dt-ari-rm", 200.0, 200.0);
+    NeoContext ctx = getCtx(); // list mode
+    ctx.setPreviousResult(NeoResponse.ok(body));
+
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      DocumentType dt = mock(DocumentType.class);
+      when(dt.getDocumentCategory()).thenReturn("ARI_RM");
+      when(dal.get(DocumentType.class, "dt-ari-rm")).thenReturn(dt);
+
+      NeoResponse result = new SalesInvoiceHeaderHandler().afterHandle(ctx);
+
+      assertNotNull(result);
+      JSONObject rec = result.getBody().getJSONObject("response").getJSONArray("data").getJSONObject(0);
+      assertEquals("RECTIFICATIVA", rec.getString("arInvoiceSubtype"));
+      assertEquals(200.0, rec.getDouble("grandTotalAmount"), 0.001);
+      assertEquals(200.0, rec.getDouble("outstandingAmount"), 0.001);
+    }
+  }
+
+  /**
+   * A genuinely NEGATIVE rectificativa (the ordinary "saldo a favor" case) also passes through
+   * unchanged — the handler neither negates nor re-negates, whatever the stored sign is.
+   */
+  @Test
+  public void afterHandle_negativeRectificativa_keepsNegativeAmounts() throws Exception {
+    JSONObject body = invoiceBodyWithDocType("dt-arc", -150.0, -100.0);
+    NeoContext ctx = getCtx();
     ctx.setPreviousResult(NeoResponse.ok(body));
 
     try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
@@ -738,38 +796,13 @@ public class SalesInvoiceHeaderHandlerTest {
   }
 
   /**
-   * Verifies that grandTotalAmount and outstandingAmount are negated for RECTIFICATIVA (via
-   * legacy ARI_RM / Return Invoice category) subtype records when amounts are positive.
+   * A NEGATIVE ordinary Factura (the case ETP-4841 made spendable in the payment modal) keeps both
+   * its FAC subtype and its negative amounts: the handler must not "fix" the sign of a plain
+   * invoice either.
    */
   @Test
-  public void afterHandle_rectificativaViaAriRm_negatesPositiveAmounts() throws Exception {
-    JSONObject body = invoiceBodyWithDocType("dt-ari-rm", 200.0, 200.0);
-    NeoContext ctx = getCtx(); // list mode
-    ctx.setPreviousResult(NeoResponse.ok(body));
-
-    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
-      OBDal dal = mock(OBDal.class);
-      dalMock.when(OBDal::getInstance).thenReturn(dal);
-      DocumentType dt = mock(DocumentType.class);
-      when(dt.getDocumentCategory()).thenReturn("ARI_RM");
-      when(dal.get(DocumentType.class, "dt-ari-rm")).thenReturn(dt);
-
-      NeoResponse result = new SalesInvoiceHeaderHandler().afterHandle(ctx);
-
-      assertNotNull(result);
-      JSONObject rec = result.getBody().getJSONObject("response").getJSONArray("data").getJSONObject(0);
-      assertEquals("RECTIFICATIVA", rec.getString("arInvoiceSubtype"));
-      assertEquals(-200.0, rec.getDouble("grandTotalAmount"), 0.001);
-      assertEquals(-200.0, rec.getDouble("outstandingAmount"), 0.001);
-    }
-  }
-
-  /**
-   * Verifies that non-positive amounts are NOT negated — the guard {@code grand > 0} must hold.
-   */
-  @Test
-  public void afterHandle_rectificativaSubtype_doesNotNegateZeroOrNegativeAmounts() throws Exception {
-    JSONObject body = invoiceBodyWithDocType("dt-arc", 0.0, -50.0);
+  public void afterHandle_negativeOrdinaryFactura_keepsFacSubtypeAndNegativeAmounts() throws Exception {
+    JSONObject body = invoiceBodyWithDocType("dt-ari", -80.0, -80.0);
     NeoContext ctx = getCtx();
     ctx.setPreviousResult(NeoResponse.ok(body));
 
@@ -777,15 +810,16 @@ public class SalesInvoiceHeaderHandlerTest {
       OBDal dal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(dal);
       DocumentType dt = mock(DocumentType.class);
-      when(dt.getDocumentCategory()).thenReturn("ARC");
-      when(dal.get(DocumentType.class, "dt-arc")).thenReturn(dt);
+      when(dt.getDocumentCategory()).thenReturn("ARI");
+      when(dal.get(DocumentType.class, "dt-ari")).thenReturn(dt);
 
       NeoResponse result = new SalesInvoiceHeaderHandler().afterHandle(ctx);
 
       assertNotNull(result);
       JSONObject rec = result.getBody().getJSONObject("response").getJSONArray("data").getJSONObject(0);
-      assertEquals(0.0, rec.getDouble("grandTotalAmount"), 0.001);   // unchanged
-      assertEquals(-50.0, rec.getDouble("outstandingAmount"), 0.001); // already negative, unchanged
+      assertEquals("FAC", rec.getString("arInvoiceSubtype"));
+      assertEquals(-80.0, rec.getDouble("grandTotalAmount"), 0.001);
+      assertEquals(-80.0, rec.getDouble("outstandingAmount"), 0.001);
     }
   }
 
