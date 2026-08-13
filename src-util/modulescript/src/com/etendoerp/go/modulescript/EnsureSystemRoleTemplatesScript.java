@@ -58,6 +58,24 @@ import org.openbravo.modulescript.ModuleScript;
  * = "Product" (Purchasing); {@code 184} = "Goods Receipt", {@code 139} = "Warehouse and Storage
  * Bins" (Inventory) — all six {@code IsActive = 'Y'} and {@code AD_Client_ID = '0'} (system-owned,
  * consistent with a system-level template's grant).</p>
+ *
+ * <p><b>This class's compiled {@code .class} files are committed to git</b> — an intentional
+ * exception to this module's {@code build/} gitignore, force-added, and unusual for
+ * {@code com.etendoerp.go}'s own module scripts (it mirrors Etendo core's long-standing precedent
+ * of committing compiled {@code ModuleScript} classes under
+ * {@code src-util/modulescript/build/classes/org/openbravo/modulescript/}). The reason is a build
+ * quirk, not a style choice: {@code update.database} executes whatever {@code ModuleScript}
+ * classes are already compiled — it does NOT compile them itself. Compilation is the separate,
+ * easy-to-forget {@code ./gradlew compile.modulescript -Dmodule=com.etendoerp.go} step. Shipping
+ * the compiled bytes means a fresh checkout of this branch runs this script correctly on
+ * {@code update.database} with no extra step.</p>
+ *
+ * <p><b>Consequence for future edits — read before touching this file.</b> After ANY change to
+ * this source, you MUST re-run {@code ./gradlew compile.modulescript -Dmodule=com.etendoerp.go}
+ * and {@code git add -f} the two regenerated {@code .class} files (this class's and its nested
+ * {@code TemplateRole}'s) again before committing. Skip that and the checked-in binary silently
+ * diverges from this source — {@code update.database} keeps running the stale, pre-edit logic
+ * with no compile error or warning to flag it.</p>
  */
 public class EnsureSystemRoleTemplatesScript extends ModuleScript {
 
