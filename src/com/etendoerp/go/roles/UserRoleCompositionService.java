@@ -17,8 +17,10 @@
 package com.etendoerp.go.roles;
 
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 import org.apache.commons.lang3.StringUtils;
@@ -27,6 +29,7 @@ import org.apache.logging.log4j.Logger;
 import org.hibernate.criterion.Restrictions;
 import org.openbravo.base.exception.OBException;
 import org.openbravo.base.provider.OBProvider;
+import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
@@ -34,6 +37,7 @@ import org.openbravo.model.ad.access.Role;
 import org.openbravo.model.ad.access.RoleInheritance;
 import org.openbravo.model.ad.access.User;
 import org.openbravo.model.ad.access.UserRoles;
+import org.openbravo.model.ad.access.WindowAccess;
 import org.openbravo.model.common.enterprise.Organization;
 
 import com.etendoerp.go.schemaforge.util.UserRoleSyncSupport;
@@ -106,6 +110,44 @@ import com.etendoerp.go.schemaforge.util.UserRoleSyncSupport;
  * documents (rather than simulates) this instead of faking the state past the trigger. <b>Relevant
  * for ETP-4877's bulk retrofit:</b> template deactivation-while-depended-upon is not something that
  * retrofit's own code needs to guard against either — the DB already refuses it outright.</p>
+ *
+ * <p><b>Cross-template {@code AD_Window_Access} overlap — self-contained fix for a latent core
+ * bug (found via ETP-4878's overlapping matrix, QA/Sentinel; fixed here, not in core, per an
+ * explicit human decision).</b> Composing a personal role from 2+ templates that grant the SAME
+ * window used to throw {@code OBSecurityException} and roll back the whole call. Root cause,
+ * traced into {@code org.openbravo.role.inheritance}: {@code WindowAccessInjector} never
+ * overrides {@code AccessTypeInjector#getSkippedProperties()} (the base default only skips
+ * {@code creationDate}/{@code createdBy}), so when a SECOND template's inheritance propagates to
+ * a window a FIRST template already covered, {@code RoleInheritanceManager#handleAccess} takes
+ * the UPDATE path ({@code updateRoleAccess} → {@code DalUtil.copyToTarget}), which overwrites the
+ * personal (tenant-client) role's existing {@code AD_Window_Access} row with the template's OWN
+ * {@code client}/{@code organization} (system client {@code "0"}) — the very next flush then
+ * fails {@code SecurityChecker.checkWriteAccess} under the tenant-scoped {@code OBContext}. The
+ * CREATE path ({@code copyRoleAccess}) does not hit this, because {@link
+ * org.openbravo.dal.core.OBContext#setAdminMode(boolean)}'s bypass around it is still active
+ * when {@code Session.save()}'s interceptor callback fires (new-entity saves are checked
+ * immediately, before the bypass is popped); the UPDATE path's dirty-check-driven callback fires
+ * later, at the CALLER's own flush, by which point that inner bypass has already been restored.
+ * </p>
+ *
+ * <p>{@link #reconcileInheritances(Role, List)} therefore does two things beyond core's own
+ * mechanism, both scoped to {@code WindowAccess} only (the reported access type — not a generic
+ * fix for every {@code AccessTypeInjector}): (1) {@link
+ * #preventWindowAccessOverlapCorruption(Role, Role)}, called right before a new template's
+ * {@code AD_Role_Inheritance} is saved, removes the personal role's existing active {@code
+ * WindowAccess} row for every window the about-to-be-added template also grants — so core's
+ * propagation finds no existing row and takes the safe CREATE path for every one of that
+ * template's windows, overlapping or not; (2) {@link #reconcileWindowAccessAfterComposition(Role,
+ * List)}, run once after the whole add/remove loop, pins {@code client}/{@code organization} on
+ * every inherited row back to the personal role's OWN values (belt-and-braces — defends the
+ * CREATE path too, even though it has not been observed to corrupt it) and resolves the
+ * ticket-required "most-permissive wins" union: a window ends up full ("✓") access if ANY
+ * currently-applied template grants it full, read-only ("R") only if ALL of them do. Both helpers
+ * use the SAME narrow, method-scoped {@code OBContext.setAdminMode(false)} bypass core's own
+ * {@code copyRoleAccess}/{@code updateRoleAccess}/{@code deleteRoleAccess} use for exactly this
+ * kind of cross-client write — never the outer, method-wide bypass, which stays at {@code
+ * setAdminMode(true)} to keep {@link #enforceCallerClientBoundary(User, Role)}'s tenant-boundary
+ * guarantee intact for the rest of this class.</p>
  */
 public class UserRoleCompositionService {
 
@@ -542,6 +584,7 @@ public class UserRoleCompositionService {
       if (existingIds.contains(template.getId())) {
         continue;
       }
+      preventWindowAccessOverlapCorruption(personalRole, template);
       maxSeqno += SEQNO_STEP;
       RoleInheritance inheritance = OBProvider.getInstance().get(RoleInheritance.class);
       inheritance.setNewOBObject(true);
@@ -555,7 +598,153 @@ public class UserRoleCompositionService {
       OBDal.getInstance().flush();
       added++;
     }
+
+    if (added > 0) {
+      reconcileWindowAccessAfterComposition(personalRole, templates);
+    }
     return new int[] { added, removed };
+  }
+
+  /**
+   * Removes {@code personalRole}'s existing active {@code AD_Window_Access} row for every window
+   * {@code template} also grants, BEFORE the caller saves the new {@code AD_Role_Inheritance} —
+   * see the class javadoc for why this avoids core's corrupting UPDATE path entirely (it forces
+   * every one of {@code template}'s windows through the safe CREATE path instead). A no-op when
+   * {@code template} grants no windows the personal role doesn't already have from elsewhere.
+   *
+   * <p>Uses the SAME {@code OBContext.setAdminMode(false)} bypass core's own {@code
+   * deleteRoleAccess} uses for removing a cross-client-owned inherited access row — scoped to
+   * just this removal, not the whole method.</p>
+   */
+  private void preventWindowAccessOverlapCorruption(Role personalRole, Role template) {
+    Set<String> templateWindowIds = activeWindowIdsFor(template);
+    if (templateWindowIds.isEmpty()) {
+      return;
+    }
+    List<WindowAccess> overlapping = new ArrayList<>();
+    for (WindowAccess access : findActiveWindowAccess(personalRole)) {
+      if (templateWindowIds.contains(access.getWindow().getId())) {
+        overlapping.add(access);
+      }
+    }
+    if (overlapping.isEmpty()) {
+      return;
+    }
+    OBContext.setAdminMode(false);
+    try {
+      for (WindowAccess access : overlapping) {
+        // Core's own InheritedAccessEnabledEventHandler#doAction rejects deleting a row whose
+        // inheritedFrom is still set ("NotDeleteInheritedAccess") — mirrors the exact sequence
+        // core's own deleteRoleAccess/propagateDeletedAccess use: null the field on the in-memory
+        // object FIRST, so the interceptor's delete-time check sees it already cleared.
+        access.setInheritedFrom(null);
+        OBDal.getInstance().remove(access);
+      }
+      OBDal.getInstance().flush();
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  /**
+   * Final pass over {@code personalRole}'s inherited {@code AD_Window_Access} rows, run once
+   * after the whole add/remove loop in {@link #reconcileInheritances(Role, List)} — see the class
+   * javadoc for the full rationale. For every row whose {@code inheritedFrom} is set (i.e.
+   * template-derived, never a manually-granted one): (1) pins {@code client}/{@code
+   * organization} back to {@code personalRole}'s own values if they differ; (2) widens it to full
+   * ("✓") access if {@code templates} contains ANY role that grants that window full access,
+   * even if the row core's propagation happens to have left behind reflects only a read-only
+   * ("R") template — the most-permissive-wins union the ticket requires. Never narrows a row from
+   * full to read-only (a full grant, once resolved, always wins).
+   */
+  private void reconcileWindowAccessAfterComposition(Role personalRole, List<Role> templates) {
+    Map<String, Boolean> mostPermissiveByWindowId = mostPermissiveWindowAccess(templates);
+    if (mostPermissiveByWindowId.isEmpty()) {
+      return;
+    }
+    List<WindowAccess> corrected = new ArrayList<>();
+    for (WindowAccess access : findActiveWindowAccess(personalRole)) {
+      if (access.getInheritedFrom() == null) {
+        continue;
+      }
+      boolean changed = false;
+      if (!sameId(access.getClient(), personalRole.getClient())) {
+        access.setClient(personalRole.getClient());
+        changed = true;
+      }
+      if (!sameId(access.getOrganization(), personalRole.getOrganization())) {
+        access.setOrganization(personalRole.getOrganization());
+        changed = true;
+      }
+      Boolean shouldBeFull = mostPermissiveByWindowId.get(access.getWindow().getId());
+      if (Boolean.TRUE.equals(shouldBeFull) && !Boolean.TRUE.equals(access.isEditableField())) {
+        access.setEditableField(true);
+        changed = true;
+      }
+      if (changed) {
+        corrected.add(access);
+      }
+    }
+    if (corrected.isEmpty()) {
+      return;
+    }
+    OBContext.setAdminMode(false);
+    try {
+      for (WindowAccess access : corrected) {
+        OBDal.getInstance().save(access);
+      }
+      OBDal.getInstance().flush();
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  /**
+   * Computes, per window id, whether ANY of {@code templates} grants that window full ("✓")
+   * access — the independent source of truth {@link #reconcileWindowAccessAfterComposition} uses
+   * to resolve the most-permissive-wins union, deliberately computed from the templates' OWN
+   * current {@code AD_Window_Access} rows rather than trusting whatever single row core's
+   * per-window propagation happened to leave on the personal role.
+   */
+  private Map<String, Boolean> mostPermissiveWindowAccess(List<Role> templates) {
+    Map<String, Boolean> result = new LinkedHashMap<>();
+    for (Role template : templates) {
+      for (WindowAccess access : findActiveWindowAccess(template)) {
+        String windowId = access.getWindow().getId();
+        boolean full = Boolean.TRUE.equals(access.isEditableField());
+        result.merge(windowId, full, (a, b) -> a || b);
+      }
+    }
+    return result;
+  }
+
+  private Set<String> activeWindowIdsFor(Role role) {
+    Set<String> windowIds = new LinkedHashSet<>();
+    for (WindowAccess access : findActiveWindowAccess(role)) {
+      windowIds.add(access.getWindow().getId());
+    }
+    return windowIds;
+  }
+
+  /**
+   * Queries {@code AD_Window_Access} fresh for {@code role} — deliberately NOT {@code
+   * role.getADWindowAccessList()}, for the same staleness reason {@link
+   * #findExistingInheritances(Role)} queries {@code AD_Role_Inheritance} fresh instead of
+   * trusting the entity's own collection property (see that method's javadoc, and {@link
+   * #discardStaleSessionState(Role)}).
+   */
+  @SuppressWarnings("unchecked")
+  private List<WindowAccess> findActiveWindowAccess(Role role) {
+    OBCriteria<WindowAccess> criteria = OBDal.getInstance().createCriteria(WindowAccess.class);
+    criteria.add(Restrictions.eq(WindowAccess.PROPERTY_ROLE, role));
+    criteria.add(Restrictions.eq(WindowAccess.PROPERTY_ACTIVE, true));
+    return criteria.list();
+  }
+
+  private static boolean sameId(BaseOBObject a, BaseOBObject b) {
+    String idA = a == null ? null : (String) a.getId();
+    String idB = b == null ? null : (String) b.getId();
+    return idA != null && idA.equals(idB);
   }
 
   /**
