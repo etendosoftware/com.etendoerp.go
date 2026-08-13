@@ -303,7 +303,8 @@ public class EnsureSystemRoleTemplatesScript extends ModuleScript {
         }
       }
     }
-    String deleteSql = "DELETE FROM AD_Window_Access WHERE AD_Role_ID = ? AND AD_Window_ID = ?";
+    String deleteSql = "DELETE FROM AD_Window_Access WHERE AD_Role_ID = ? AND AD_Window_ID = ? "
+        + "AND IsActive = 'Y'";
     for (String windowId : staleWindowIds) {
       try (PreparedStatement ps = cp.getPreparedStatement(deleteSql)) {
         ps.setString(1, roleId);

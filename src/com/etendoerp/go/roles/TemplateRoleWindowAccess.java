@@ -72,6 +72,12 @@ public final class TemplateRoleWindowAccess {
     private final String windowId;
     private final boolean readOnly;
 
+    /**
+     * Creates a grant for {@code windowId} with the given {@code readOnly} access level.
+     *
+     * @param windowId the {@code AD_Window_ID} being granted
+     * @param readOnly {@code true} for read-only ("R") access, {@code false} for full ("✓") access
+     */
     public WindowGrant(String windowId, boolean readOnly) {
       this.windowId = windowId;
       this.readOnly = readOnly;
