@@ -114,14 +114,14 @@ final class McpFieldProjection {
    *
    * <p>Validation is against what the entity can emit, not against the rows that came back: on an
    * empty result set no row can answer the question, and that is exactly when a typo costs the most
-   * (an agent reads "no matches" and concludes the data is missing). An empty (or {@code null})
-   * {@code emittable} means the emittable set could not be determined, and leaves the names
+   * (an agent reads "no matches" and concludes the data is missing). An empty {@code emittable}
+   * means the emittable set could not be determined, and leaves the names
    * unjudged — silence is better than accusing a valid field.
    */
   static void reportUnknownFields(JSONObject responseJson, Set<String> requestedBase,
       Optional<Set<String>> emittable) throws JSONException {
     if (responseJson == null || requestedBase == null || requestedBase.isEmpty()
-        || emittable == null || emittable.isEmpty()) {
+        || emittable.isEmpty()) {
       return;
     }
     Set<String> emittableNames = emittable.get();

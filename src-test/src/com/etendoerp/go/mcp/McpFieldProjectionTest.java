@@ -229,14 +229,6 @@ class McpFieldProjectionTest {
     }
 
     @Test
-    @DisplayName("a null Optional is defensively treated the same as an absent one")
-    void nullOptionalIsNoOp() throws JSONException {
-      JSONObject root = envelope();
-      McpFieldProjection.reportUnknownFields(root, req("whatever"), null);
-      assertFalse(root.getJSONObject("response").has(KEY_UNKNOWN));
-    }
-
-    @Test
     @DisplayName("no requested names and no response envelope are both no-ops")
     void degenerateInputs() throws JSONException {
       JSONObject root = envelope();

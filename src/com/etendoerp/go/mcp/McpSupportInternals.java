@@ -406,22 +406,35 @@ final class McpSupportInternals {
     }
     // Per-field violations: {"errors":{"id":"…","documentNo":"…"}} — keep the field names, they are
     // the most actionable part of the payload.
-    JSONObject errors = response.optJSONObject("errors");
-    if (errors != null) {
-      StringBuilder joined = new StringBuilder();
-      java.util.Iterator<String> keys = errors.keys();
-      while (keys.hasNext()) {
-        String key = keys.next();
-        if (joined.length() > 0) {
-          joined.append("; ");
-        }
-        joined.append(key).append(": ").append(errors.optString(key, ""));
-      }
-      if (joined.length() > 0) {
-        return joined.toString();
-      }
+    String fieldViolations = joinFieldViolations(response.optJSONObject("errors"));
+    if (fieldViolations != null) {
+      return fieldViolations;
     }
     String message = response.optString(McpConstants.KEY_MESSAGE, null);
     return message == null || message.isBlank() ? null : message;
+  }
+
+  /**
+   * Join a DAL per-field violations map into a single {@code "key: value"} sentence, {@code "; "}
+   * separated, in {@code errors.keys()} iteration order — the field names are the most actionable
+   * part of the payload.
+   *
+   * @param errors the {@code errors} map from a DAL sub-response, or {@code null}
+   * @return the joined sentence, or {@code null} when there is no map or it yields nothing
+   */
+  private static String joinFieldViolations(JSONObject errors) {
+    if (errors == null) {
+      return null;
+    }
+    StringBuilder joined = new StringBuilder();
+    java.util.Iterator<String> keys = errors.keys();
+    while (keys.hasNext()) {
+      String key = keys.next();
+      if (joined.length() > 0) {
+        joined.append("; ");
+      }
+      joined.append(key).append(": ").append(errors.optString(key, ""));
+    }
+    return joined.length() > 0 ? joined.toString() : null;
   }
 }
