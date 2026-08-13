@@ -62,6 +62,9 @@ public final class SystemRoleTemplates {
   /**
    * The four seeded template IDs, keyed by their (English) role name — insertion order matches
    * the ticket's own enumeration (Finance, Sales, Purchasing, Inventory).
+   *
+   * @return a fresh, mutable {@link LinkedHashMap} from role name to {@code AD_Role_ID}, in
+   *     Finance/Sales/Purchasing/Inventory order
    */
   public static Map<String, String> byName() {
     Map<String, String> map = new LinkedHashMap<>();

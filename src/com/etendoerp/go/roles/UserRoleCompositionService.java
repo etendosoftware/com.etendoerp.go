@@ -134,12 +134,24 @@ public class UserRoleCompositionService {
    * build its JSON response.
    */
   public static final class AssignmentResult {
+    /** The {@code AD_User_ID} the roles were composed for. */
     public final String userId;
+    /** The {@code AD_Role_ID} of the user's personal role (found or newly created). */
     public final String personalRoleId;
+    /** The FULL set of template role ids now applied to the personal role, in request order. */
     public final List<String> appliedTemplateRoleIds;
+    /** How many {@code AD_Role_Inheritance} rows were newly added by this call. */
     public final int addedCount;
+    /** How many {@code AD_Role_Inheritance} rows were removed by this call. */
     public final int removedCount;
 
+    /**
+     * @param userId the {@code AD_User_ID} the roles were composed for
+     * @param personalRoleId the {@code AD_Role_ID} of the user's personal role
+     * @param appliedTemplateRoleIds the FULL set of template role ids now applied
+     * @param addedCount how many {@code AD_Role_Inheritance} rows were newly added
+     * @param removedCount how many {@code AD_Role_Inheritance} rows were removed
+     */
     public AssignmentResult(String userId, String personalRoleId,
         List<String> appliedTemplateRoleIds, int addedCount, int removedCount) {
       this.userId = userId;

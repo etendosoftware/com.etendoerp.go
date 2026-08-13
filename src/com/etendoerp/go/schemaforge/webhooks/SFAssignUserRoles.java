@@ -92,6 +92,9 @@ public class SFAssignUserRoles extends BaseWebhookService {
   private static final String PARAM_USER_ID = "UserId";
   private static final String PARAM_TEMPLATE_ROLE_IDS = "TemplateRoleIds";
 
+  /** The {@code responseVars} map key the NEO pseudo-spec bridge reads the JSON body from. */
+  private static final String RESPONSE_VAR_RESULT = "result";
+
   private static final String FIELD_SUCCESS = "success";
   private static final String FIELD_MESSAGE = "message";
   private static final String FIELD_USER_ID = "userId";
@@ -107,14 +110,15 @@ public class SFAssignUserRoles extends BaseWebhookService {
     // against the role actually resolved for this request.
     Role currentRole = NeoAccessHelper.resolveCurrentRole();
     if (currentRole == null || !NeoAccessHelper.isAdminOrClientAdmin(currentRole)) {
-      responseVars.put("result", denied().toString());
+      responseVars.put(RESPONSE_VAR_RESULT, denied().toString());
       return;
     }
 
     String userId = StringUtils.trimToNull(parameter.get(PARAM_USER_ID));
     List<String> templateRoleIds = parseTemplateRoleIds(parameter.get(PARAM_TEMPLATE_ROLE_IDS));
     if (userId == null) {
-      responseVars.put("result", failure("Missing required parameter: " + PARAM_USER_ID).toString());
+      responseVars.put(RESPONSE_VAR_RESULT,
+          failure("Missing required parameter: " + PARAM_USER_ID).toString());
       return;
     }
 
@@ -130,11 +134,11 @@ public class SFAssignUserRoles extends BaseWebhookService {
     try {
       UserRoleCompositionService.AssignmentResult result = new UserRoleCompositionService()
           .assignTemplateRoles(userId, templateRoleIds, currentRole);
-      responseVars.put("result", success(result).toString());
+      responseVars.put(RESPONSE_VAR_RESULT, success(result).toString());
     } catch (OBException e) {
       // Expected domain-validation rejection — see class javadoc for why this is a 200
       // success:false result, not the bridge's 500 error path.
-      responseVars.put("result", failure(e.getMessage()).toString());
+      responseVars.put(RESPONSE_VAR_RESULT, failure(e.getMessage()).toString());
     } catch (Exception e) {
       log.error("Unexpected error in SFAssignUserRoles for user {}", userId, e);
       responseVars.put("error", e.getMessage());
