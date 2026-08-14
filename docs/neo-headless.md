@@ -582,30 +582,32 @@ GET /sws/neo/windowaccessmap
 GET /sws/neo/rolesoverview
 GET /sws/neo/assignuserroles?UserId=<id>&TemplateRoleIds=<id1,id2,...>
 GET /sws/neo/userroleassignments[?UserId=<id>]
+GET /sws/neo/systemroletemplates
 Authorization: Bearer {token}
 ```
 
 `NeoGoWebhookBridge` runs `SFListMenu`/`SFWindowAccessMap`/`SFRolesOverview`/`SFAssignUserRoles`/
-`SFUserRoleAssignments` (§8, §8b, §8c, §8d, §8e) through NEO's own JWT authentication instead of
-the Webhooks module's HTTP dispatch — the same pattern `NeoSimSearchEndpoint` (§4.9) already used
-for `SimSearch`. Each of these pseudo-specs constructs the corresponding `BaseWebhookService` and
-calls its unchanged `get(Map, Map)` method directly; the response body is the exact `{"result":
-"<value>"}` / `{"error": "<message>"}` shape the Webhooks module itself produces (verified by
-disassembling `WebhookServiceHandler.buildResponse` in `webhookevents-3.1.0.jar`), so callers only
-need their request URL updated, never their response-parsing logic. `SFListMenu`/
-`SFWindowAccessMap`/`SFRolesOverview` still work at their original `/webhooks/*` paths too — the
-Webhooks module dispatch was not removed for them — but `/sws/neo/*` is the path the Go SPA
-(`tools/app-shell` in `etendo_schema_forge`) actually calls, and no `SMFWHE_DEFINEDWEBHOOK_ROLE`
-grant is required for it. `SFAssignUserRoles` (ETP-4852) and `SFUserRoleAssignments` (ETP-4906)
-are `/sws/neo/*`-only — both were authored after this pattern was already established, so neither
-ever had a legacy `/webhooks/*` path to keep.
+`SFUserRoleAssignments`/`SFSystemRoleTemplates` (§8, §8b, §8c, §8d, §8e, §8f) through NEO's own
+JWT authentication instead of the Webhooks module's HTTP dispatch — the same pattern
+`NeoSimSearchEndpoint` (§4.9) already used for `SimSearch`. Each of these pseudo-specs constructs
+the corresponding `BaseWebhookService` and calls its unchanged `get(Map, Map)` method directly;
+the response body is the exact `{"result": "<value>"}` / `{"error": "<message>"}` shape the
+Webhooks module itself produces (verified by disassembling `WebhookServiceHandler.buildResponse`
+in `webhookevents-3.1.0.jar`), so callers only need their request URL updated, never their
+response-parsing logic. `SFListMenu`/`SFWindowAccessMap`/`SFRolesOverview` still work at their
+original `/webhooks/*` paths too — the Webhooks module dispatch was not removed for them — but
+`/sws/neo/*` is the path the Go SPA (`tools/app-shell` in `etendo_schema_forge`) actually calls,
+and no `SMFWHE_DEFINEDWEBHOOK_ROLE` grant is required for it. `SFAssignUserRoles` (ETP-4852),
+`SFUserRoleAssignments` (ETP-4906), and `SFSystemRoleTemplates` (ETP-4906) are `/sws/neo/*`-only
+— all three were authored after this pattern was already established, so none ever had a legacy
+`/webhooks/*` path to keep.
 
 Each webhook's own access rule is unaffected and still enforced inside its `get()` — see
-§8/§8b/§8c/§8d/§8e for what each one checks (`NeoAccessHelper.isAdminOrClientAdmin`, window/process
-access checks, etc.). Non-`GET` requests get `405`; a webhook that throws gets `500` with the
-exception message (except `SFAssignUserRoles`'s own expected domain-validation rejections, and
-`SFUserRoleAssignments`'s own expected domain rejections — see §8d/§8e for why those are a `200`
-result instead).
+§8/§8b/§8c/§8d/§8e/§8f for what each one checks (`NeoAccessHelper.isAdminOrClientAdmin`,
+window/process access checks, etc.). Non-`GET` requests get `405`; a webhook that throws gets
+`500` with the exception message (except `SFAssignUserRoles`'s own expected domain-validation
+rejections, and `SFUserRoleAssignments`'s own expected domain rejections — see §8d/§8e for why
+those are a `200` result instead).
 
 ### 4.11 NEO Pseudo-Spec Bridge Pattern (preferred for new Etendo-GO-authored webhooks)
 
@@ -1571,6 +1573,61 @@ catches `OBException` and folds it into its own empty-result shape; only an unex
 
 ---
 
+## 8f. System-Level Role Templates (SFSystemRoleTemplates Webhook, ETP-4906)
+
+`SFSystemRoleTemplates` (`GET /sws/neo/systemroletemplates` — reached ONLY through the NEO
+pseudo-spec bridge, §4.10/§4.11; no legacy `/webhooks/*` path, same as `SFAssignUserRoles`/
+`SFUserRoleAssignments`) returns the 4 fixed role templates (Finance/Sales/Purchasing/Inventory,
+`com.etendoerp.go.roles.SystemRoleTemplates`) — resolved at the SYSTEM client
+(`AD_Client_ID = '0'`), never the caller's own tenant. It backs the "which template roles can I
+compose from" question for the multi-role assignment UI (`AssignTemplateRolesControl.jsx`,
+`UserRolesTab.jsx`, `RoleChipsCell.jsx`, `RoleFilterControl.jsx` in `etendo_schema_forge`).
+
+**Why not `SFRolesOverview` (§8c)?** That webhook is hard-scoped to the CALLING tenant's own
+client by design — it resolves the 4 fixed role NAMES plus the client-admin role WITHIN
+`currentRole.getClient()`, for its own ETP-4513 "Configuración > Roles" page. This is correct for
+that page, but breaks down the moment a tenant has no per-client copies of these roles left to
+find — which is now the target end state ETP-4906 itself needs: "no template role should be at
+client level, only at system level" (Manual QA Feedback Round 2, finding 2, `docs/plans/2026-08-
+14-etp-4906-multi-role-user-assignment.md`). Repointing `SFRolesOverview` itself would have broken
+its own unrelated page instead of fixing this — hence a new, separate webhook rather than a change
+to an existing one.
+
+**Response shape** — deliberately a subset of `SFRolesOverview`'s per-role shape (§8c), omitting
+what only makes sense for a tenant-scoped aggregate:
+
+```json
+{"roles": [
+  {"id": "B88A34B5D1874F8685FA6F3C3A609412", "name": "Finance",
+   "windows": [{"id": "...", "name": "...", "tier": "full"}]},
+  {"id": "15ECC46CFBD74CF3A76D1F4DC8BA9F80", "name": "Sales", "windows": [...]},
+  {"id": "5E279F5102F9410F9B8CCBA424741F46", "name": "Purchasing", "windows": [...]},
+  {"id": "73581A7B4F414A2C9059C83CE7BE97BF", "name": "Inventory", "windows": [...]}
+]}
+```
+
+No `userCount` (there is no meaningful "assigned users" count for a system-level template — every
+tenant that composes from it gets its own personal role, per `UserRoleCompositionService`) and no
+client-admin row (`SystemRoleTemplates`'s own class javadoc explicitly excludes the client-level
+"Admin" role from the template set — there is nothing to represent at system level).
+
+**Access gate:** admin/client-admin only (`NeoAccessHelper.isAdminOrClientAdmin`), captured before
+any lookup — same convention as every sibling webhook in this family. No role, or a restricted
+role, gets `{"roles": []}`, never a raw `403` — this family's "deny silently" convention.
+
+**Resolution:** the 4 fixed ids from `SystemRoleTemplates.byName()` are looked up directly via
+`OBDal.get(Role.class, id)` — never a client-scoped `Role` criteria keyed off the caller's own
+client, the way `SFRolesOverview` resolves its roles. A template id that no longer resolves to an
+active `Role` (deleted or deactivated — not expected, but not this webhook's job to prevent) is
+skipped rather than surfaced as an error. Each role's `windows` array follows the exact same
+GO-window intersection + tier resolution as `SFRolesOverview` (`AD_Window_Access`, intersected
+with the windows Etendo GO actually exposes, tier `full`/`read-only` from `IsReadWrite`) — with
+client/organization filtering explicitly disabled on that query, since these roles live at the
+system client and a non-system caller's ambient readable-client set would otherwise filter their
+`AD_Window_Access` rows out entirely.
+
+---
+
 ## 9. Testing
 
 The module includes unit tests that run without a backend:
@@ -1592,11 +1649,13 @@ The module includes unit tests that run without a backend:
 | `UserRoleCompositionServiceOverlapReverificationTest` | 275 | QA (Sentinel) independent re-verification (3 tests) of the same overlap fix, deliberately NOT reusing the fix author's own integration test: 3 simultaneously-overlapping templates (Finance/Sales/Purchasing on a shared window) resolve to most-permissive-wins with the "winner" (Purchasing, full) in the middle of the composition order — ruling out a pairwise-only fix that only checks the newest template against the immediately-preceding state; and two cases seeded with the REAL ETP-4878 matrix's own access levels (not the synthetic window `100`) — Sales (full) + Inventory (read-only) on Contactos resolves to full, and Sales + Purchasing both read-only on Categoría del producto stays read-only (confirms the fix does not spuriously promote a window to full just because 2+ templates share it). Also closes a data point the original QA report got wrong: `ad_window_access_un_key` is a plain `CREATE UNIQUE INDEX` on `(ad_role_id, ad_window_id)`, invisible to a `pg_constraint`-only query — Sales already had a live pre-existing row for Contactos, so this suite seeds only the missing side instead of inserting a duplicate. |
 | `SFAssignUserRolesTest` | 278 | Unit test (8 tests) proving the webhook wires parameters/results/errors correctly, with `UserRoleCompositionService` itself intercepted via `mockConstruction` (its real behavior is the integration test's job): access gate (no role / restricted role denied without constructing the service), the happy path (admin composes, parses a whitespace/empty-entry-noisy `TemplateRoleIds` CSV, returns the assignment summary), missing `UserId` rejected before construction, an absent `TemplateRoleIds` parameter resolving to an empty (not `null`) list meaning "revoke all", a domain `OBException` folding into a `success:false` HTTP-200 result rather than the bridge's `error`/500 path, an unexpected `RuntimeException` surfacing as the bridge's `error` field instead, and the REVIEW cycle 1 regression proving the webhook actually forwards its already-resolved `currentRole` through to `assignTemplateRoles`'s 3-arg overload — the exact wiring the tenant-boundary check depends on. |
 | `SFUserRoleAssignmentsTest` (ETP-4906) | -- | Unit test mirroring `SFAssignUserRolesTest`'s `mockConstruction` convention for §8e's read endpoint: access gate denies with the mode-appropriate empty shape (bulk `{"assignments":{}}` with no `UserId`, single `{"userId":...,"templateRoleIds":[]}` with one) without constructing the service; bulk mode returns every user's assignments keyed by id, scoped to `currentRole.getClient().getId()`; single mode returns one user's ids and proves `currentRole` is forwarded into the boundary-checking overload (mirrors `SFAssignUserRolesTest`'s own forwarding regression); a cross-tenant read attempt and an unknown-user-id `OBException` both fold into the single-mode empty shape rather than the bridge's `error`/500 path; an unexpected `RuntimeException` still surfaces as `error`. |
+| `SFSystemRoleTemplatesTest` (ETP-4906) | -- | Unit test (12 tests) mirroring `SFRolesOverviewTest`'s structure for §8f's endpoint: admin/client-admin access gate (no role, restricted role, System Administrator, client-admin — all resolved without the caller's own client ever appearing in any stub); roles resolved via `OBDal.get(Role.class, id)` against the 4 fixed `SystemRoleTemplates` ids rather than a client-scoped `Role` criteria; response omits `userCount`/`isClientAdmin` entirely; Finance/Sales/Purchasing/Inventory ordering; a template id resolving to `null` or to an inactive `Role` is skipped gracefully rather than erroring; GO-window intersection (native-only windows excluded) and tier resolution (full/read-only), mirroring `SFRolesOverview`'s identical logic; exception handling. |
 
 Tests are located in `src-test/src/com/etendoerp/go/schemaforge/` (including its `webhooks/`
-subpackage, e.g. `SFAssignUserRolesTest`/`SFUserRoleAssignmentsTest`). The `NeoPseudoSpecDispatcher`
-routing for `userroleassignments` is covered by `NeoPseudoSpecDispatcherTest` (same package),
-mirroring its existing per-endpoint dispatch/method-not-allowed test pairs. The five `AD_Role`-templates/composition classes —
+subpackage, e.g. `SFAssignUserRolesTest`/`SFUserRoleAssignmentsTest`/`SFSystemRoleTemplatesTest`).
+The `NeoPseudoSpecDispatcher` routing for `userroleassignments` and `systemroletemplates` is
+covered by `NeoPseudoSpecDispatcherTest` (same package), mirroring its existing per-endpoint
+dispatch/method-not-allowed test pairs. The five `AD_Role`-templates/composition classes —
 `UserRoleCompositionServiceTest`, `UserRoleCompositionServiceIntegrationTest`,
 `UserRoleCompositionServiceOverlapIntegrationTest`,
 `UserRoleCompositionServiceOverlapReverificationTest`, and `TemplateRoleWindowAccessTest` — are the

@@ -24,6 +24,7 @@ import javax.servlet.http.HttpServletResponse;
 import com.etendoerp.go.schemaforge.webhooks.SFAssignUserRoles;
 import com.etendoerp.go.schemaforge.webhooks.SFListMenu;
 import com.etendoerp.go.schemaforge.webhooks.SFRolesOverview;
+import com.etendoerp.go.schemaforge.webhooks.SFSystemRoleTemplates;
 import com.etendoerp.go.schemaforge.webhooks.SFUserRoleAssignments;
 import com.etendoerp.go.schemaforge.webhooks.SFWindowAccessMap;
 import com.etendoerp.webhookevents.services.BaseWebhookService;
@@ -103,6 +104,13 @@ class NeoPseudoSpecDispatcher {
     if ("userroleassignments".equals(pathInfo.specName)) {
       return dispatchGoWebhook("Userroleassignments", method, request, response,
           new SFUserRoleAssignments());
+    }
+    // ETP-4906 (Manual QA Feedback Round 2, finding 2): the 4 fixed role templates resolved at
+    // the SYSTEM client (AD_Client_ID = '0'), not the caller's own tenant — see
+    // SFSystemRoleTemplates's class javadoc for why this can't just repoint SFRolesOverview.
+    if ("systemroletemplates".equals(pathInfo.specName)) {
+      return dispatchGoWebhook("Systemroletemplates", method, request, response,
+          new SFSystemRoleTemplates());
     }
     return false;
   }
