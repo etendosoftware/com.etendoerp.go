@@ -18,6 +18,8 @@ package com.etendoerp.go.rest;
 
 import org.apache.commons.lang3.StringUtils;
 
+import com.etendoerp.go.schemaforge.data.Account;
+
 /**
  * Public entry point (ETP-4829) letting other packages provision an {@code etgo_account} row
  * without depending on the package-private {@link EtendoGoJwtDalHelper}, which stays scoped to
@@ -42,7 +44,8 @@ public final class EtendoGoAccountProvisioning {
    * @param name  the account holder's display name
    */
   public static void ensurePendingAccount(String email, String name) {
-    EtendoGoJwtDalHelper.createPendingAccount(email, name);
+    Account account = EtendoGoJwtDalHelper.createPendingAccount(email, name);
+    PasswordResetInvitationService.sendIfNeeded(account);
   }
 
   /**

@@ -179,6 +179,21 @@ Auth transactional emails are created server-side by the `/sws/go/*` endpoints. 
 | `POST /sws/go/change-password` | Requires a valid platform bearer token and current password, changes the password, rotates the platform token, and sends `password-changed` best-effort |
 | `POST /sws/go/onboarding` | Commits onboarding first, then sends `environment-ready` best-effort |
 
+When an authorized company administrator creates an `AD_User` without a password, the
+`UserRoleAssignmentHandler` provisions a pending `ETGO_Account` and the system creates a
+one-time password-setup link through the existing `reset-password` contract. The recipient is
+resolved exclusively from that server-side account; the browser does not send a recipient,
+template, or provider payload. The account becomes active only after a successful password-reset
+confirmation.
+
+Invitation safeguards:
+
+- Existing pending accounts with a reset token do not receive a replacement invitation.
+- A missing public app URL, provider rejection, throttle, suppression, or kill switch restores
+  the prior token state and does not leave a usable new invitation token.
+- The setup link expires after 24 hours and can be consumed only once; an expired or consumed
+  token is rejected by the existing password-reset confirmation endpoint.
+
 Email delivery failure is audited and must not roll back registration, onboarding completion, or a successful password change. Password reset request responses stay neutral even when delivery fails.
 
 ## Built-In v1 Contracts
