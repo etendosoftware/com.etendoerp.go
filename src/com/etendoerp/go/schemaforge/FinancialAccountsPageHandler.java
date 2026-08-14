@@ -166,6 +166,83 @@ public class FinancialAccountsPageHandler implements NeoHandler {
           + "   AND ft.ad_client_id = ? "
           + "   AND ft.ad_org_id = ANY (?)";
 
+  /**
+   * One reason code per row that would block a hard delete of the account (ETP-4871), across
+   * every table {@code FinancialAccountDeleteSupport.findDeleteBlockers} checks — a single {@code UNION
+   * ALL} for the whole page, same performance rule as the other loaders in this class (never N
+   * calls to {@code findDeleteBlockers} per row). Deliberately does NOT filter on {@code isactive}
+   * for any branch except {@code TRANSACTIONS} (mirroring {@code hasTransactions}'s own filter):
+   * a {@code RESTRICT} FK blocks a hard delete regardless of whether the referencing row is itself
+   * soft-deleted. {@code BPARTNER_DEFAULT} appears twice because a business partner can default to
+   * this account either as its regular or its PO financial account (two separate FK columns on the
+   * same table). Bind order: (clientId, orgs) repeated once per branch, in source order.
+   */
+  private static final String DELETE_BLOCKERS_BY_ACCOUNT_SQL =
+      "SELECT ft.fin_financial_account_id, 'TRANSACTIONS' AS reason "
+          + "  FROM fin_finacc_transaction ft "
+          + " WHERE ft.isactive = 'Y' AND ft.ad_client_id = ? AND ft.ad_org_id = ANY (?) "
+          + " UNION ALL "
+          + "SELECT r.fin_financial_account_id, 'RECONCILIATIONS' "
+          + "  FROM fin_reconciliation r "
+          + " WHERE r.ad_client_id = ? AND r.ad_org_id = ANY (?) "
+          + " UNION ALL "
+          + "SELECT bs.fin_financial_account_id, 'BANK_STATEMENTS' "
+          + "  FROM fin_bankstatement bs "
+          + " WHERE bs.ad_client_id = ? AND bs.ad_org_id = ANY (?) "
+          + " UNION ALL "
+          + "SELECT p.fin_financial_account_id, 'PAYMENTS' "
+          + "  FROM fin_payment p "
+          + " WHERE p.ad_client_id = ? AND p.ad_org_id = ANY (?) "
+          + " UNION ALL "
+          + "SELECT pp.fin_financial_account_id, 'PAYMENT_PROPOSALS' "
+          + "  FROM fin_payment_proposal pp "
+          + " WHERE pp.ad_client_id = ? AND pp.ad_org_id = ANY (?) "
+          + " UNION ALL "
+          + "SELECT gl.fin_financial_account_id, 'JOURNAL_LINES' "
+          + "  FROM gl_journalline gl "
+          + " WHERE gl.ad_client_id = ? AND gl.ad_org_id = ANY (?) "
+          + " UNION ALL "
+          + "SELECT bfe.fin_financial_account_id, 'BANK_FILE_EXCEPTIONS' "
+          + "  FROM fin_bankfile_exception bfe "
+          + " WHERE bfe.ad_client_id = ? AND bfe.ad_org_id = ANY (?) "
+          + " UNION ALL "
+          + "SELECT bp.fin_financial_account_id, 'BPARTNER_DEFAULT' "
+          + "  FROM c_bpartner bp "
+          + " WHERE bp.fin_financial_account_id IS NOT NULL "
+          + "   AND bp.ad_client_id = ? AND bp.ad_org_id = ANY (?) "
+          + " UNION ALL "
+          + "SELECT bp.po_financial_account_id, 'BPARTNER_DEFAULT' "
+          + "  FROM c_bpartner bp "
+          + " WHERE bp.po_financial_account_id IS NOT NULL "
+          + "   AND bp.ad_client_id = ? AND bp.ad_org_id = ANY (?) "
+          + " UNION ALL "
+          + "SELECT c.fin_financial_account_id, 'BANK_CONNECTION' "
+          + "  FROM psd2_finacc_connection c "
+          + " WHERE c.ad_client_id = ? AND c.ad_org_id = ANY (?)";
+
+  /** Number of {@code UNION ALL} branches in {@link #DELETE_BLOCKERS_BY_ACCOUNT_SQL}, each bound
+   *  with (clientId, orgs) — kept in sync manually with the SQL above. */
+  private static final int DELETE_BLOCKERS_SQL_BRANCH_COUNT = 10;
+
+  /** Maps each {@code DELETE_BLOCKERS_BY_ACCOUNT_SQL} reason code to the exact wording
+   *  {@code FinancialAccountDeleteSupport.findDeleteBlockers} uses for the same check, so the
+   *  DELETE 409 message and this list-view field never drift apart. */
+  private static final Map<String, String> DELETE_BLOCKER_REASON_BY_CODE = new LinkedHashMap<>();
+
+  static {
+    DELETE_BLOCKER_REASON_BY_CODE.put("TRANSACTIONS", FinancialAccountDeleteSupport.REASON_TRANSACTIONS);
+    DELETE_BLOCKER_REASON_BY_CODE.put("RECONCILIATIONS", FinancialAccountDeleteSupport.REASON_RECONCILIATIONS);
+    DELETE_BLOCKER_REASON_BY_CODE.put("BANK_STATEMENTS", FinancialAccountDeleteSupport.REASON_BANK_STATEMENTS);
+    DELETE_BLOCKER_REASON_BY_CODE.put("PAYMENTS", FinancialAccountDeleteSupport.REASON_PAYMENTS);
+    DELETE_BLOCKER_REASON_BY_CODE.put("PAYMENT_PROPOSALS",
+        FinancialAccountDeleteSupport.REASON_PAYMENT_PROPOSALS);
+    DELETE_BLOCKER_REASON_BY_CODE.put("JOURNAL_LINES", FinancialAccountDeleteSupport.REASON_JOURNAL_LINES);
+    DELETE_BLOCKER_REASON_BY_CODE.put("BANK_FILE_EXCEPTIONS",
+        FinancialAccountDeleteSupport.REASON_BANK_FILE_EXCEPTIONS);
+    DELETE_BLOCKER_REASON_BY_CODE.put("BPARTNER_DEFAULT", FinancialAccountDeleteSupport.REASON_BPARTNER_DEFAULT);
+    DELETE_BLOCKER_REASON_BY_CODE.put("BANK_CONNECTION", FinancialAccountDeleteSupport.REASON_BANK_CONNECTION);
+  }
+
   @Override
   public NeoResponse handle(NeoContext context) {
     if (!METHOD_GET.equals(context.getHttpMethod())) {
@@ -299,6 +376,40 @@ public class FinancialAccountsPageHandler implements NeoHandler {
           result.add(rs.getString(1));
         }
       }
+    }
+    return result;
+  }
+
+  /**
+   * Reasons (already translated to their human-readable wording) a hard delete would fail on,
+   * per account id, for the whole page in one query (ETP-4871). Used to drive the accounts list's
+   * {@code deletable} / {@code deleteBlockedReason} fields — see
+   * {@code FinancialAccountHandler#injectDerivedFields}.
+   */
+  Map<String, List<String>> loadDeleteBlockersByAccount(String clientId, Set<String> orgs) throws Exception {
+    Map<String, java.util.LinkedHashSet<String>> reasonsByAccount = new LinkedHashMap<>();
+    Connection conn = OBDal.getInstance().getConnection();
+    try (PreparedStatement ps = conn.prepareStatement(DELETE_BLOCKERS_BY_ACCOUNT_SQL)) {
+      java.sql.Array orgArray = conn.createArrayOf(SQL_TYPE_VARCHAR, orgs.toArray(new String[0]));
+      int paramIndex = 1;
+      for (int branch = 0; branch < DELETE_BLOCKERS_SQL_BRANCH_COUNT; branch++) {
+        ps.setString(paramIndex++, clientId);
+        ps.setArray(paramIndex++, orgArray);
+      }
+      try (ResultSet rs = ps.executeQuery()) {
+        while (rs.next()) {
+          String accountId = rs.getString(1);
+          String reason = DELETE_BLOCKER_REASON_BY_CODE.get(rs.getString(2));
+          if (accountId == null || reason == null) {
+            continue;
+          }
+          reasonsByAccount.computeIfAbsent(accountId, k -> new java.util.LinkedHashSet<>()).add(reason);
+        }
+      }
+    }
+    Map<String, List<String>> result = new LinkedHashMap<>();
+    for (Map.Entry<String, java.util.LinkedHashSet<String>> entry : reasonsByAccount.entrySet()) {
+      result.put(entry.getKey(), new ArrayList<>(entry.getValue()));
     }
     return result;
   }
