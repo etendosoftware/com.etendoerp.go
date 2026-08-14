@@ -21,6 +21,7 @@ import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
 
 import java.util.Arrays;
+import java.util.List;
 
 import org.hibernate.criterion.Restrictions;
 import org.junit.After;
@@ -235,6 +236,67 @@ public class UserRoleCompositionServiceOverlapIntegrationTest extends WeldBaseTe
           shared);
       assertTrue("The shared window's access must still be full after the no-op re-run",
           Boolean.TRUE.equals(shared.isEditableField()));
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  /**
+   * QA (Sentinel, ETP-4906) — closes a real gap between two things that were each independently
+   * tested but never together: this suite's own most-permissive-wins WRITE-side fix above
+   * ({@code assignTemplateRoles} with 2 disagreeing templates), and ETP-4906's brand-new READ
+   * path, {@link UserRoleCompositionService#getAppliedTemplateRoleIds(String)} — the method
+   * {@code SFUserRoleAssignments} calls to seed the multi-role picker's initial chip state.
+   * {@code SFUserRoleAssignmentsTest} only exercises that read method against a fully mocked
+   * {@code UserRoleCompositionService} (never a real composition), so nothing before this test
+   * proved the read path actually reflects a REAL overlapping write against the real DB — exactly
+   * the "does the composed access after save match what the read endpoint reports" question this
+   * ticket's QA dispatch called out as the one thing the mocked Playwright suite cannot verify.
+   */
+  @Test
+  public void testGetAppliedTemplateRoleIdsReflectsARealOverlappingComposition() throws Exception {
+    setTestUserContext();
+    OBContext.setAdminMode(true);
+    try {
+      Window sharedWindow = OBDal.getInstance().get(Window.class, UNUSED_WINDOW_ID);
+      assertNotNull(sharedWindow);
+
+      Role financeTemplate = OBDal.getInstance().get(Role.class,
+          SystemRoleTemplates.FINANCE_ROLE_ID);
+      Role salesTemplate = OBDal.getInstance().get(Role.class, SystemRoleTemplates.SALES_ROLE_ID);
+      assertNotNull(financeTemplate);
+      assertNotNull(salesTemplate);
+
+      // Same conflicting shared-window grants as the tests above: Finance full, Sales read-only.
+      grantWindowAccess(financeTemplate, sharedWindow, false);
+      OBDal.getInstance().flush();
+      grantWindowAccess(salesTemplate, sharedWindow, true);
+      OBDal.getInstance().flush();
+
+      User user = OBDal.getInstance().get(User.class, TEST_USER_ID);
+      assertNotNull(user);
+
+      UserRoleCompositionService service = new UserRoleCompositionService();
+      UserRoleCompositionService.AssignmentResult result = service.assignTemplateRoles(
+          TEST_USER_ID, Arrays.asList(financeTemplate.getId(), salesTemplate.getId()));
+      assertEquals(2, result.addedCount);
+
+      // Read path: must report exactly the 2 applied templates, no more, no less — the same set
+      // SFUserRoleAssignments' single-user mode would hand back to the frontend on page load.
+      List<String> appliedIds = service.getAppliedTemplateRoleIds(TEST_USER_ID);
+      assertEquals("The read path must report exactly the 2 templates just composed", 2,
+          appliedIds.size());
+      assertTrue("Finance must be in the applied set", appliedIds.contains(financeTemplate.getId()));
+      assertTrue("Sales must be in the applied set", appliedIds.contains(salesTemplate.getId()));
+
+      // And the underlying window access the read path is describing must itself still be the
+      // most-permissive-wins result — the read isn't just echoing back requested ids, it is
+      // describing a personal role whose real AD_Window_Access already resolved the conflict.
+      Role personalRole = OBDal.getInstance().get(Role.class, result.personalRoleId);
+      WindowAccess shared = findWindowAccess(personalRole, sharedWindow);
+      assertNotNull(shared);
+      assertTrue("The composed access the read path describes must itself be full "
+          + "(most-permissive-wins), not read-only", Boolean.TRUE.equals(shared.isEditableField()));
     } finally {
       OBContext.restorePreviousMode();
     }
