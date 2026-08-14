@@ -49,18 +49,17 @@ public class FundsTransferDestinationHook implements FundsTransferPostProcessHoo
       return;
     }
     for (FIN_FinaccTransaction target : transactions) {
-      // The destination-side bank fee (BF) also carries an origin, so filtering by BPD is what
-      // keeps a fee line from overwriting the link with the wrong counterpart.
+      // Only a BPD with an origin is the deposit leg of a transfer: filtering by BPD keeps the
+      // destination-side bank fee (BF, which also carries an origin) from overwriting the link
+      // with the wrong counterpart; a null origin means a plain deposit, not part of a transfer.
       if (!BP_DEPOSIT.equals(target.getTransactionType())) {
         continue;
       }
       FIN_FinaccTransaction origin = target.getAprmFinaccTransOrigin();
-      if (origin == null) {
-        // A plain deposit, not part of a transfer.
-        continue;
+      if (origin != null) {
+        origin.setETGOFinaccTransDest(target);
+        OBDal.getInstance().save(origin);
       }
-      origin.setETGOFinaccTransDest(target);
-      OBDal.getInstance().save(origin);
     }
     OBDal.getInstance().flush();
   }
