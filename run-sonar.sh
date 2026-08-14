@@ -795,7 +795,10 @@ fi
 
 # ── Quality Gate enforcement (opt-in via --fail-on-gate) ────────────
 # Mirrors the server-side Quality Gate that CI enforces on the PR. When the
-# gate is in ERROR, exit non-zero so callers (e.g. the pre-push hook) can block.
+# gate is in ERROR, record it and keep going — --compare-coverage below still
+# needs to run, so a dev with both a new bug AND a coverage drop sees both in
+# this one push attempt instead of one now and the other on the next push.
+GATE_RC=0
 if [[ "$FAIL_ON_GATE" == "true" ]]; then
   QG_FILE="$REPORT_DIR/sonar-quality-gate.json"
   PR_ISSUES_FILE="$REPORT_DIR/sonar-issues-pr-only.json"
@@ -807,6 +810,7 @@ if [[ "$FAIL_ON_GATE" == "true" ]]; then
   GATE_BRANCH="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo 'this branch')"
   HANDOFF_FILE="$REPORT_DIR/sonar-handoff-prompt.md"
 
+  set +e
   REPORT_DIR="$REPORT_DIR" QG_FILE="$QG_FILE" PR_ISSUES_FILE="$PR_ISSUES_FILE" \
   CHANGED_ONLY="$CHANGED_ONLY" HANDOFF_FILE="$HANDOFF_FILE" \
   GATE_BRANCH="$GATE_BRANCH" CORE_DIR="$CLASSIC_ROOT" PROJECT_KEY="$PROJECT_KEY" \
@@ -1059,6 +1063,8 @@ print(handoff)
 print("\n  Bypass with 'git push --no-verify' (WIP only).")
 sys.exit(1)
 PYEOF
+  GATE_RC=$?
+  set -e
 fi
 
 # ── Coverage-decrease gate (opt-in via --compare-coverage) ──────────
@@ -1066,6 +1072,7 @@ fi
 # (pp, default 1) below the base branch's, or below the absolute COVERAGE_MINIMUM
 # (default 70). Mirrors the Jenkins sonarUtils.compareCoverage gate. Current and
 # base coverage are queried live from Sonar.
+CMP_RC=0
 if [[ "$COMPARE_COVERAGE" == "true" ]]; then
   CMP_BRANCH="${BASE_REF#origin/}"
   CMP_BRANCH="${CMP_BRANCH:-epic/ETP-3504}"
@@ -1172,8 +1179,19 @@ sys.exit(0)
 PYEOF
     CMP_RC=$?
     set -e
-    if [[ "$CMP_RC" -ne 0 ]]; then
-      exit "$CMP_RC"
-    fi
   fi
 fi
+
+# ── Combined result ──────────────────────────────────────────────
+# Both gates above ran to completion regardless of each other's outcome, so a
+# push with a new bug AND a coverage drop shows both here — not one now and
+# the other on the next push attempt.
+if [[ "$GATE_RC" -ne 0 || "$CMP_RC" -ne 0 ]]; then
+  if [[ "$GATE_RC" -ne 0 && "$CMP_RC" -ne 0 ]]; then
+    echo ""
+    echo "❌ Both the Quality Gate and the coverage comparison failed — see above for each."
+  fi
+  exit 1
+fi
+
+exit 0
