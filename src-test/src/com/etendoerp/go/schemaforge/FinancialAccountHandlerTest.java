@@ -743,6 +743,12 @@ public class FinancialAccountHandlerTest {
       stubNoBlockers(deleteSupport, account);
       deleteSupport.when(() -> FinancialAccountDeleteSupport.sweepOwnConfig(account))
           .thenAnswer(invocation -> null);
+      // The .when(...) registration above is itself recorded as an invocation on the static
+      // mock (unlike a regular instance mock, MockedStatic does not auto-exclude it), so clear
+      // that bookkeeping noise before exercising the real code path — otherwise the verify()
+      // below double-counts and fails with "Wanted 1 time... But was 2 times". This only
+      // discards recorded invocations; the stub set up above is preserved.
+      deleteSupport.clearInvocations();
 
       NeoResponse response = handler.deleteAccount(ACC_ID);
 
