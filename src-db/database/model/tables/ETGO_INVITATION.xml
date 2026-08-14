@@ -1,0 +1,98 @@
+<?xml version="1.0"?>
+  <database name="TABLE ETGO_INVITATION">
+    <table name="ETGO_INVITATION" primaryKey="ETGO_INVITATION_PK">
+      <column name="ETGO_INVITATION_ID" primaryKey="true" required="true" type="VARCHAR" size="32" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="AD_CLIENT_ID" primaryKey="false" required="true" type="VARCHAR" size="32" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="AD_ORG_ID" primaryKey="false" required="true" type="VARCHAR" size="32" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="ISACTIVE" primaryKey="false" required="true" type="CHAR" size="1" autoIncrement="false">
+        <default><![CDATA[Y]]></default>
+        <onCreateDefault/>
+      </column>
+      <column name="CREATED" primaryKey="false" required="true" type="TIMESTAMP" size="7" autoIncrement="false">
+        <default><![CDATA[SYSDATE]]></default>
+        <onCreateDefault/>
+      </column>
+      <column name="CREATEDBY" primaryKey="false" required="true" type="VARCHAR" size="32" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="UPDATED" primaryKey="false" required="true" type="TIMESTAMP" size="7" autoIncrement="false">
+        <default><![CDATA[SYSDATE]]></default>
+        <onCreateDefault/>
+      </column>
+      <column name="UPDATEDBY" primaryKey="false" required="true" type="VARCHAR" size="32" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="ETGO_ACCOUNT_ID" primaryKey="false" required="true" type="VARCHAR" size="32" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="AD_USER_ID" primaryKey="false" required="true" type="VARCHAR" size="32" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="EMAIL" primaryKey="false" required="true" type="VARCHAR" size="255" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="TOKEN_HASH" primaryKey="false" required="true" type="VARCHAR" size="128" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="STATUS" primaryKey="false" required="true" type="VARCHAR" size="20" autoIncrement="false">
+        <default><![CDATA[PENDING]]></default>
+        <onCreateDefault/>
+      </column>
+      <column name="EXPIRES_AT" primaryKey="false" required="true" type="TIMESTAMP" size="7" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <foreign-key foreignTable="ETGO_ACCOUNT" name="ETGO_INVITATION_ACCOUNT_FK">
+        <reference local="ETGO_ACCOUNT_ID" foreign="ETGO_ACCOUNT_ID"/>
+      </foreign-key>
+      <foreign-key foreignTable="AD_CLIENT" name="ETGO_INVITATION_CLIENT_FK">
+        <reference local="AD_CLIENT_ID" foreign="AD_CLIENT_ID"/>
+      </foreign-key>
+      <foreign-key foreignTable="AD_USER" name="ETGO_INVITATION_CREATEDBY_FK">
+        <reference local="CREATEDBY" foreign="AD_USER_ID"/>
+      </foreign-key>
+      <foreign-key foreignTable="AD_ORG" name="ETGO_INVITATION_ORG_FK">
+        <reference local="AD_ORG_ID" foreign="AD_ORG_ID"/>
+      </foreign-key>
+      <foreign-key foreignTable="AD_USER" name="ETGO_INVITATION_UPDATEDBY_FK">
+        <reference local="UPDATEDBY" foreign="AD_USER_ID"/>
+      </foreign-key>
+      <foreign-key foreignTable="AD_USER" name="ETGO_INVITATION_USER_FK">
+        <reference local="AD_USER_ID" foreign="AD_USER_ID"/>
+      </foreign-key>
+      <index name="ETGO_INV_ACCOUNT_IX" unique="false">
+        <index-column name="ETGO_ACCOUNT_ID"/>
+      </index>
+      <index name="ETGO_INV_ONE_OPEN_ACCOUNT_UQ" unique="true">
+        <index-column name="ETGO_ACCOUNT_ID"/>
+        <whereClause><![CDATA[ISACTIVE='Y' AND(STATUS=ANY(ARRAY['PENDING','SENT'][]))]]></whereClause>
+      </index>
+      <index name="ETGO_INV_STATUS_EXPIRY_IX" unique="false">
+        <index-column name="STATUS"/>
+        <index-column name="EXPIRES_AT"/>
+      </index>
+      <index name="ETGO_INV_USER_IX" unique="false">
+        <index-column name="AD_USER_ID"/>
+      </index>
+      <unique name="ETGO_INVITATION_TOKEN_UQ">
+        <unique-column name="TOKEN_HASH"/>
+      </unique>
+      <check name="ETGO_INVITATION_ACTIVE_CHK"><![CDATA[ISACTIVE IN ('Y', 'N')]]></check>
+      <check name="ETGO_INVITATION_STATUS_CHK"><![CDATA[STATUS IN ('PENDING', 'SENT', 'ACCEPTED', 'EXPIRED', 'REVOKED', 'DELIVERY_FAILED')]]></check>
+    </table>
+  </database>

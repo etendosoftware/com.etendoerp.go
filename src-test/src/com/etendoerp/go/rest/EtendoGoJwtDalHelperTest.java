@@ -368,6 +368,7 @@ class EtendoGoJwtDalHelperTest {
 
       verify(account).setPasswordHash("new-hash");
       verify(account).setSessionToken(null);
+      verify(account).set("status", "active");
       verify(account).set("resetTokenHash", null);
       verify(account).set("resetTokenExpires", null);
       verify(account).set("resetTokenConsumed", changedAt);
