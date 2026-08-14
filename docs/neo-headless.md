@@ -1332,8 +1332,10 @@ role (the old `AD_User.Default_Ad_Role_ID` single-dropdown flow, still handled b
 migrated to the new flow yet), an admin picks **1+** system-level template roles to **compose**.
 
 **The model this replaces:** four fixed roles (Finance/Sales/Purchasing/Inventory) used to be
-duplicated per client (`OnboardingRoleProvisioningService`, now retired from the live onboarding
-chain — see its class javadoc). ETP-4852 moves them to a single canonical, system-owned
+duplicated per client by `OnboardingRoleProvisioningService`, unwired from the live onboarding
+chain by this same ticket and then deleted outright (REVIEW cycle 1 finding S1, confirmed
+unreachable from any production path) — see the now-retired-and-deleted pointers left in
+`SFRolesOverview`'s javadoc for what it used to do. ETP-4852 moves them to a single canonical, system-owned
 (`AD_Client_ID = '0'`) `AD_Role` row per role, `IsTemplate = 'Y'` / `IsManual = 'Y'`, seeded once
 by the `EnsureSystemRoleTemplatesScript` `ModuleScript` (`com.etendoerp.go.roles`) — a plain
 Etendo dataset (`referencedata/standard/`) was considered instead but rejected: dataset import
