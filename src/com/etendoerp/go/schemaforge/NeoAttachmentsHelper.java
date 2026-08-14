@@ -30,10 +30,14 @@ import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.Date;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipOutputStream;
 
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
@@ -96,6 +100,7 @@ public final class NeoAttachmentsHelper {
   private static final String TABLENAME_RECORDID_REQUIRED = "tableName and recordId are required";
   private static final String ATTACHMENTID_REQUIRED = "attachmentId is required";
   private static final String CONTENT_DISPOSITION = "Content-Disposition";
+  private static final String MAIN_FLAG_COLUMN = "EM_ETGO_ISPREVIEWMAIN";
 
   private NeoAttachmentsHelper() {
   }
@@ -103,7 +108,9 @@ public final class NeoAttachmentsHelper {
   // ── List ────────────────────────────────────────────────────────────────────
 
   /**
-   * Lists attachments bound to the given record.
+   * Lists attachments bound to the given record, excluding whichever one is
+   * currently marked as the record's "main" document (see {@link #handleGetMain})
+   * — that one belongs to the sidebar/preview, not the generic attachments list.
    *
    * @param tableName the AD_Table.name (case-insensitive, e.g. {@code "C_Order"})
    * @param recordId  the record's primary key (string; all AD IDs are VARCHAR)
@@ -115,6 +122,7 @@ public final class NeoAttachmentsHelper {
     }
     try {
       String tableId = resolveTableId(tableName);
+      Set<String> mainIds = findMainAttachmentIds(tableId, recordId);
 
       OBCriteria<Attachment> criteria = OBDal.getInstance().createCriteria(Attachment.class);
       criteria.add(Restrictions.eq(Attachment.PROPERTY_TABLE + ".id", tableId));
@@ -125,6 +133,9 @@ public final class NeoAttachmentsHelper {
 
       JSONArray items = new JSONArray();
       for (Attachment attachment : criteria.list()) {
+        if (mainIds.contains(attachment.getId())) {
+          continue;
+        }
         items.put(toAttachmentJson(attachment));
       }
       JSONObject body = new JSONObject();
@@ -139,6 +150,129 @@ public final class NeoAttachmentsHelper {
     }
   }
 
+  // ── Main document (sidebar/preview) ──────────────────────────────────────────
+
+  /**
+   * Looks up the attachment currently marked as the record's "main" document —
+   * the single file the sidebar and preview must always agree on.
+   *
+   * @param tableName the AD_Table.name (case-insensitive)
+   * @param recordId  the record's primary key
+   * @return a NeoResponse wrapping the attachment's metadata, or {@code {}} if none is marked
+   */
+  public static NeoResponse handleGetMain(String tableName, String recordId) {
+    if (StringUtils.isBlank(tableName) || StringUtils.isBlank(recordId)) {
+      return NeoResponse.error(400, TABLENAME_RECORDID_REQUIRED);
+    }
+    try {
+      String tableId = resolveTableId(tableName);
+      Attachment main = findMainAttachment(tableId, recordId);
+      if (main == null) {
+        return NeoResponse.ok(new JSONObject());
+      }
+      return NeoResponse.ok(toAttachmentJson(main));
+    } catch (OBException e) {
+      log.warn("Attachments main lookup failed: {}", e.getMessage());
+      return NeoResponse.error(404, e.getMessage());
+    } catch (Exception e) {
+      log.error("Attachments main lookup failed for {}/{}", tableName, recordId, e);
+      return NeoResponse.error(500, "Internal error resolving main attachment");
+    }
+  }
+
+  /**
+   * Marks or unmarks an attachment as its record's "main" document.
+   *
+   * <p>Marking ({@code isMain=true}) deletes any attachment previously marked
+   * for the same (table, record) pair, in the same transaction — at most one
+   * attachment can be "main" per record at any time. Unmarking just clears the
+   * flag on the given attachment.</p>
+   *
+   * @param attachmentId the C_File_ID to mark/unmark
+   * @param isMain       {@code true} to mark as main, {@code false} to unmark
+   * @return a NeoResponse wrapping {@code { id, isMain }}, or 404 if not found
+   */
+  public static NeoResponse handleMarkMain(String attachmentId, boolean isMain) {
+    if (StringUtils.isBlank(attachmentId)) {
+      return NeoResponse.error(400, ATTACHMENTID_REQUIRED);
+    }
+    try {
+      Attachment attachment = OBDal.getInstance().get(Attachment.class, attachmentId);
+      if (attachment == null) {
+        return NeoResponse.error(404, ERR_ATTACHMENT_NOT_FOUND);
+      }
+      if (isMain) {
+        markAsMain(attachment);
+      } else {
+        setMainFlag(attachment.getId(), false);
+      }
+      JSONObject body = new JSONObject();
+      body.put("id", attachment.getId());
+      body.put("isMain", isMain);
+      return NeoResponse.ok(body);
+    } catch (OBException e) {
+      OBDal.getInstance().rollbackAndClose();
+      log.warn("Attachment mark-main failed for id {}: {}", attachmentId, e.getMessage());
+      return NeoResponse.error(500, e.getMessage());
+    } catch (Exception e) {
+      OBDal.getInstance().rollbackAndClose();
+      log.error("Attachment mark-main failed for id {}", attachmentId, e);
+      return NeoResponse.error(500, "Internal error marking attachment");
+    }
+  }
+
+  /**
+   * Marks the given attachment as its record's main document, deleting any
+   * previously-marked attachment for that same (table, record) first — always
+   * exactly one "main" attachment per record, sidebar and preview never diverge.
+   */
+  private static void markAsMain(Attachment attachment) {
+    String tableId = attachment.getTable().getId();
+    String recordId = attachment.getRecord();
+    Attachment previous = findMainAttachment(tableId, recordId);
+    if (previous != null && !previous.getId().equals(attachment.getId())) {
+      getAttachManager().delete(previous);
+    }
+    setMainFlag(attachment.getId(), true);
+  }
+
+  private static void setMainFlag(String attachmentId, boolean value) {
+    OBDal.getInstance().getSession().createNativeQuery(
+        "UPDATE C_File SET " + MAIN_FLAG_COLUMN + " = :flag WHERE C_File_ID = :id")
+        .setParameter("flag", value ? "Y" : "N")
+        .setParameter("id", attachmentId)
+        .executeUpdate();
+  }
+
+  /**
+   * Finds the attachment marked as main for the given (tableId, recordId), or
+   * {@code null} if none is marked.
+   */
+  private static Attachment findMainAttachment(String tableId, String recordId) {
+    Set<String> ids = findMainAttachmentIds(tableId, recordId);
+    if (ids.isEmpty()) {
+      return null;
+    }
+    return OBDal.getInstance().get(Attachment.class, ids.iterator().next());
+  }
+
+  /**
+   * Native-SQL lookup of main-marked attachment ids for a record. Native SQL is
+   * used (rather than an {@link OBCriteria} restriction) because the extension
+   * column {@value #MAIN_FLAG_COLUMN} has no generated DAL property.
+   */
+  @SuppressWarnings("unchecked")
+  private static Set<String> findMainAttachmentIds(String tableId, String recordId) {
+    List<String> ids = OBDal.getInstance().getSession()
+        .createNativeQuery(
+            "SELECT C_File_ID FROM C_File WHERE AD_Table_ID = :tableId "
+            + "AND AD_Record_ID = :recordId AND " + MAIN_FLAG_COLUMN + " = 'Y'")
+        .setParameter("tableId", tableId)
+        .setParameter("recordId", recordId)
+        .list();
+    return new HashSet<>(ids);
+  }
+
   // ── Upload ──────────────────────────────────────────────────────────────────
 
   /**
@@ -148,13 +282,16 @@ public final class NeoAttachmentsHelper {
    * {@code "file"}. Optional query parameter {@code tabId} overrides the
    * automatic tab resolution (useful when the same table has multiple tabs).</p>
    *
-   * @param tableName the AD_Table.name (case-insensitive)
-   * @param recordId  the record's primary key
-   * @param request   the HTTP request carrying the multipart payload
+   * @param tableName  the AD_Table.name (case-insensitive)
+   * @param recordId   the record's primary key
+   * @param request    the HTTP request carrying the multipart payload
+   * @param markAsMain when {@code true}, marks the newly-uploaded attachment as
+   *                   the record's main document (see {@link #handleMarkMain}),
+   *                   deleting any previously-marked one, in the same request
    * @return 201 Created on success, 400/404/500 on failure
    */
   public static NeoResponse handleUpload(String tableName, String recordId,
-      HttpServletRequest request) {
+      HttpServletRequest request, boolean markAsMain) {
     if (StringUtils.isBlank(tableName) || StringUtils.isBlank(recordId)) {
       return NeoResponse.error(400, TABLENAME_RECORDID_REQUIRED);
     }
@@ -187,6 +324,15 @@ public final class NeoAttachmentsHelper {
       JSONObject body = new JSONObject();
       body.put("name", tempFile.getName());
       body.put("message", "uploaded");
+
+      if (markAsMain) {
+        Attachment uploaded = findLatestUploadedAttachment(tableId, recordId, tempFile.getName());
+        if (uploaded != null) {
+          markAsMain(uploaded);
+          body.put("id", uploaded.getId());
+          body.put("isMain", true);
+        }
+      }
       return NeoResponse.created(body);
     } catch (OBException e) {
       OBDal.getInstance().rollbackAndClose();
@@ -255,7 +401,10 @@ public final class NeoAttachmentsHelper {
   // ── Download (zip of all attachments for a record) ──────────────────────────
 
   /**
-   * Streams all attachments for a record as a single zip file.
+   * Streams all of a record's attachments as a single zip file, excluding
+   * whichever one is marked as the record's main document — that one already
+   * has its own dedicated download button in the preview, no need to duplicate
+   * it here.
    *
    * @param tableName the AD_Table.name (case-insensitive)
    * @param recordId  the record's primary key
@@ -270,16 +419,27 @@ public final class NeoAttachmentsHelper {
     }
     try {
       String tableId = resolveTableId(tableName);
-      String tabId = resolveTabId(tableId, null);
-      if (tabId == null) {
-        writeError(response, 400,
-            "Could not resolve a standard tab for table '" + tableName + "'");
-        return;
-      }
+      Set<String> mainIds = findMainAttachmentIds(tableId, recordId);
+
+      OBCriteria<Attachment> criteria = OBDal.getInstance().createCriteria(Attachment.class);
+      criteria.add(Restrictions.eq(Attachment.PROPERTY_TABLE + ".id", tableId));
+      criteria.add(Restrictions.eq(Attachment.PROPERTY_RECORD, recordId));
+      criteria.setFilterOnReadableOrganization(false);
 
       AttachImplementationManager aim = getAttachManager();
       ByteArrayOutputStream buffer = new ByteArrayOutputStream();
-      aim.downloadAll(tabId, recordId, buffer);
+      try (ZipOutputStream zip = new ZipOutputStream(buffer)) {
+        for (Attachment attachment : criteria.list()) {
+          if (mainIds.contains(attachment.getId())) {
+            continue;
+          }
+          ByteArrayOutputStream fileBuffer = new ByteArrayOutputStream();
+          aim.download(attachment.getId(), fileBuffer);
+          zip.putNextEntry(new ZipEntry(attachment.getName()));
+          zip.write(fileBuffer.toByteArray());
+          zip.closeEntry();
+        }
+      }
 
       response.setStatus(HttpServletResponse.SC_OK);
       response.setContentType(ZIP_CONTENT_TYPE);
@@ -435,6 +595,23 @@ public final class NeoAttachmentsHelper {
    */
   static AttachImplementationManager getAttachManager() {
     return WeldUtils.getInstanceFromStaticBeanManager(AttachImplementationManager.class);
+  }
+
+  /**
+   * Finds the most-recently-created attachment matching (table, record, name) —
+   * used right after {@link AttachImplementationManager#upload} to identify the
+   * row that call just created, since it has no return value of its own.
+   */
+  private static Attachment findLatestUploadedAttachment(String tableId, String recordId,
+      String fileName) {
+    OBCriteria<Attachment> criteria = OBDal.getInstance().createCriteria(Attachment.class);
+    criteria.add(Restrictions.eq(Attachment.PROPERTY_TABLE + ".id", tableId));
+    criteria.add(Restrictions.eq(Attachment.PROPERTY_RECORD, recordId));
+    criteria.add(Restrictions.eq(Attachment.PROPERTY_NAME, fileName));
+    criteria.addOrderBy(Attachment.PROPERTY_CREATIONDATE, false);
+    criteria.setMaxResults(1);
+    criteria.setFilterOnReadableOrganization(false);
+    return (Attachment) criteria.uniqueResult();
   }
 
   /**

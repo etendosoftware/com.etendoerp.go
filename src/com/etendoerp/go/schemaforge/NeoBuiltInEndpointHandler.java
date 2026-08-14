@@ -30,7 +30,10 @@ class NeoBuiltInEndpointHandler {
   private static final String METHOD_PATCH = "PATCH";
   private static final String ATTACHMENTS_SEGMENT_FILE = "file";
   private static final String ATTACHMENTS_SEGMENT_ZIP = "zip";
+  private static final String ATTACHMENTS_SEGMENT_MAIN = "main";
   private static final String DESCRIPTION_FIELD = "description";
+  private static final String IS_MAIN_FIELD = "isMain";
+  private static final String MARK_AS_MAIN_PARAM = "markAsMain";
 
   private final NeoServlet servlet;
   private final NeoDiscoveryHandler discoveryHandler;
@@ -268,12 +271,19 @@ class NeoBuiltInEndpointHandler {
    * Dispatches {@code /sws/neo/attachments/*} requests to the cross-cutting
    * {@link NeoAttachmentsHelper}. Supported shapes:
    * <ul>
-   *   <li>{@code GET    /attachments/{tableName}/{recordId}}        — list attachments</li>
-   *   <li>{@code POST   /attachments/{tableName}/{recordId}}        — multipart upload</li>
-   *   <li>{@code GET    /attachments/{tableName}/{recordId}/zip}    — download all as zip</li>
+   *   <li>{@code GET    /attachments/{tableName}/{recordId}}        — list attachments
+   *       (excludes the one marked as "main")</li>
+   *   <li>{@code POST   /attachments/{tableName}/{recordId}}        — multipart upload;
+   *       {@code ?markAsMain=true} marks the uploaded file as main atomically</li>
+   *   <li>{@code GET    /attachments/{tableName}/{recordId}/zip}    — download all as zip
+   *       (excludes the one marked as "main")</li>
+   *   <li>{@code GET    /attachments/{tableName}/{recordId}/main}   — look up the attachment
+   *       marked as this record's main document, or {@code {}} if none</li>
    *   <li>{@code GET    /attachments/file/{attachmentId}}           — download single file</li>
    *   <li>{@code DELETE /attachments/file/{attachmentId}}           — delete attachment</li>
    *   <li>{@code PATCH  /attachments/file/{attachmentId}}           — update description</li>
+   *   <li>{@code PATCH  /attachments/file/{attachmentId}/main}      — {@code {isMain: bool}};
+   *       marking deletes any previously-marked attachment for the same record</li>
    * </ul>
    */
   private void handleAttachmentsEndpoint(String method,
@@ -295,13 +305,14 @@ class NeoBuiltInEndpointHandler {
   }
 
   /**
-   * Handles {@code /attachments/{tableName}/{recordId}[/zip]}.
+   * Handles {@code /attachments/{tableName}/{recordId}[/zip|/main]}.
    */
   private void handleAttachmentsRecordSubresource(String[] segments, String method,
       HttpServletRequest request, HttpServletResponse response) throws IOException {
     String tableName = segments[0];
     String recordId = segments[1];
     boolean isZip = segments.length >= 3 && ATTACHMENTS_SEGMENT_ZIP.equals(segments[2]);
+    boolean isMain = segments.length >= 3 && ATTACHMENTS_SEGMENT_MAIN.equals(segments[2]);
 
     if (isZip) {
       if (!"GET".equals(method)) {
@@ -313,13 +324,24 @@ class NeoBuiltInEndpointHandler {
       return;
     }
 
+    if (isMain) {
+      if (!"GET".equals(method)) {
+        servlet.sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
+            "Attachments main endpoint only supports GET");
+        return;
+      }
+      servlet.writeResponse(response, NeoAttachmentsHelper.handleGetMain(tableName, recordId));
+      return;
+    }
+
     if ("GET".equals(method)) {
       servlet.writeResponse(response, NeoAttachmentsHelper.handleList(tableName, recordId));
       return;
     }
     if ("POST".equals(method)) {
+      boolean markAsMain = "true".equalsIgnoreCase(request.getParameter(MARK_AS_MAIN_PARAM));
       servlet.writeResponse(response,
-          NeoAttachmentsHelper.handleUpload(tableName, recordId, request));
+          NeoAttachmentsHelper.handleUpload(tableName, recordId, request, markAsMain));
       return;
     }
     servlet.sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
@@ -327,7 +349,8 @@ class NeoBuiltInEndpointHandler {
   }
 
   /**
-   * Handles {@code /attachments/file/{attachmentId}} (download, delete, patch description).
+   * Handles {@code /attachments/file/{attachmentId}[/main]}
+   * (download, delete, patch description, mark/unmark as main).
    */
   private void handleAttachmentsFileSubresource(String[] segments, String method,
       HttpServletRequest request, HttpServletResponse response) throws IOException {
@@ -337,6 +360,22 @@ class NeoBuiltInEndpointHandler {
       return;
     }
     String attachmentId = segments[1];
+    boolean isMain = segments.length >= 3 && ATTACHMENTS_SEGMENT_MAIN.equals(segments[2]);
+
+    if (isMain) {
+      if (!METHOD_PATCH.equals(method)) {
+        servlet.sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
+            "Attachments main endpoint only supports PATCH");
+        return;
+      }
+      Boolean isMainValue = readIsMainFromBody(request, response);
+      if (isMainValue == null && response.isCommitted()) {
+        return;
+      }
+      servlet.writeResponse(response,
+          NeoAttachmentsHelper.handleMarkMain(attachmentId, Boolean.TRUE.equals(isMainValue)));
+      return;
+    }
 
     if ("GET".equals(method)) {
       NeoAttachmentsHelper.handleDownload(attachmentId, response);
@@ -361,6 +400,34 @@ class NeoBuiltInEndpointHandler {
     }
     servlet.sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
         "Attachments file endpoint supports GET, DELETE and PATCH");
+  }
+
+  /**
+   * Reads the {@code isMain} boolean out of a {@code PATCH .../main} JSON body.
+   * Signals an error via {@code response} and returns {@code null} with the
+   * response already committed if the body is missing or invalid.
+   */
+  private Boolean readIsMainFromBody(HttpServletRequest request, HttpServletResponse response)
+      throws IOException {
+    String body = readBody(request);
+    if (StringUtils.isBlank(body)) {
+      servlet.sendError(response, HttpServletResponse.SC_BAD_REQUEST,
+          "Required field: isMain");
+      return null;
+    }
+    try {
+      JSONObject json = new JSONObject(body);
+      if (!json.has(IS_MAIN_FIELD) || json.isNull(IS_MAIN_FIELD)) {
+        servlet.sendError(response, HttpServletResponse.SC_BAD_REQUEST,
+            "Required field: isMain");
+        return null;
+      }
+      return json.getBoolean(IS_MAIN_FIELD);
+    } catch (JSONException e) {
+      servlet.sendError(response, HttpServletResponse.SC_BAD_REQUEST,
+          "Invalid JSON body: " + e.getMessage());
+      return null;
+    }
   }
 
   /**
