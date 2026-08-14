@@ -1365,43 +1365,6 @@ by design (the exact mechanism reference/tax tables already rely on). See
 inheritance → confirm `AD_Window_Access` appears on the personal role with the right
 `InheritedFrom`, across clients).
 
-**Cross-template `AD_Window_Access` overlap — self-contained fix for a latent core bug (found via
-ETP-4878's overlapping matrix, QA/Sentinel; fixed here, not in core, per an explicit human
-decision).** Composing a personal role from 2+ templates that grant the SAME window used to throw
-`OBSecurityException` and roll back the whole call — reachable the moment any two requested
-templates share a window, regardless of whether they agree on access level. Root cause traced
-into `org.openbravo.role.inheritance`: `WindowAccessInjector` never overrides `AccessTypeInjector
-#getSkippedProperties()` (the base default only skips `creationDate`/`createdBy`), so when a
-SECOND template's inheritance propagates to a window a FIRST template already covered,
-`RoleInheritanceManager#handleAccess` takes the UPDATE path (`updateRoleAccess` → `DalUtil.
-copyToTarget`), which overwrites the personal (tenant-client) role's existing row with the
-template's OWN `client`/`organization` (system client `"0"`) — the very next flush then fails
-`SecurityChecker.checkWriteAccess` under the tenant-scoped `OBContext`. The CREATE path
-(`copyRoleAccess`) does not hit this: `OBContext.setAdminMode(boolean)`'s bypass around it is
-still active when `Session.save()`'s interceptor callback fires (new-entity saves are checked
-immediately), while the UPDATE path's dirty-check-driven callback fires later, at the caller's own
-flush, by which point that inner bypass has already been restored.
-
-`UserRoleCompositionService.reconcileInheritances` now does two things beyond core's own
-mechanism, both scoped to `WindowAccess` only: (1) right before a new template's `AD_Role_
-Inheritance` is saved, it removes the personal role's existing active `WindowAccess` row for
-every window that template also grants — forcing core's propagation through the safe CREATE path
-for every one of that template's windows, overlapping or not (this also has to null the row's
-`InheritedFrom` field before removing it, mirroring core's own `deleteRoleAccess`, since core's
-`InheritedAccessEnabledEventHandler` otherwise rejects deleting any row that still has one set);
-(2) once the whole add/remove loop finishes, a final pass pins `client`/`organization` on every
-inherited row back to the personal role's own values (belt-and-braces, defending the CREATE path
-too even though it has not been observed to corrupt it) and resolves the ticket-required
-most-permissive-wins union — a window ends up full (`✓`) access if ANY currently-applied template
-grants it full, read-only (`R`) only if ALL of them do. Both steps use the same narrow,
-method-scoped `OBContext.setAdminMode(false)` bypass core's own `copyRoleAccess`/`updateRoleAccess`/
-`deleteRoleAccess` use for exactly this kind of cross-client write — never the outer, method-wide
-bypass, which stays at `setAdminMode(true)` so `enforceCallerClientBoundary`'s tenant-boundary
-guarantee (above) stays intact for the rest of this class. See
-`UserRoleCompositionServiceOverlapIntegrationTest` for the real-DB proof (conflicting access
-levels resolve to full regardless of which template is added second, a real union of both
-templates' non-shared windows, and a no-op re-run stays correct).
-
 **Response shape:**
 
 ```json
@@ -1470,6 +1433,46 @@ old smoke-test pairs are cleaned up on the next `update.database`, not just adde
 since it has zero DB/SQL dependencies — no Gradle classpath workaround needed, unlike the
 `ModuleScript` itself which stays DB-only.
 
+**Cross-template `AD_Window_Access` overlap — self-contained fix for a latent core bug (found via
+ETP-4878's overlapping matrix, QA/Sentinel; fixed here, not in core, per an explicit human
+decision).** Composing a personal role from 2+ templates that grant the SAME window used to throw
+`OBSecurityException` and roll back the whole call — reachable the moment any two requested
+templates share a window, regardless of whether they agree on access level. Root cause traced
+into `org.openbravo.role.inheritance`: `WindowAccessInjector` never overrides `AccessTypeInjector
+#getSkippedProperties()` (the base default only skips `creationDate`/`createdBy`), so when a
+SECOND template's inheritance propagates to a window a FIRST template already covered,
+`RoleInheritanceManager#handleAccess` takes the UPDATE path (`updateRoleAccess` → `DalUtil.
+copyToTarget`), which overwrites the personal (tenant-client) role's existing row with the
+template's OWN `client`/`organization` (system client `"0"`) — the very next flush then fails
+`SecurityChecker.checkWriteAccess` under the tenant-scoped `OBContext`. The CREATE path
+(`copyRoleAccess`) does not hit this: `OBContext.setAdminMode(boolean)`'s bypass around it is
+still active when `Session.save()`'s interceptor callback fires (new-entity saves are checked
+immediately), while the UPDATE path's dirty-check-driven callback fires later, at the caller's own
+flush, by which point that inner bypass has already been restored.
+
+`UserRoleCompositionService.reconcileInheritances` now does two things beyond core's own
+mechanism, both scoped to `WindowAccess` only: (1) right before a new template's `AD_Role_
+Inheritance` is saved, it removes the personal role's existing active `WindowAccess` row for
+every window that template also grants — forcing core's propagation through the safe CREATE path
+for every one of that template's windows, overlapping or not (this also has to null the row's
+`InheritedFrom` field before removing it, mirroring core's own `deleteRoleAccess`, since core's
+`InheritedAccessEnabledEventHandler` otherwise rejects deleting any row that still has one set);
+(2) once the whole add/remove loop finishes, a final pass pins `client`/`organization` on every
+inherited row back to the personal role's own values (belt-and-braces, defending the CREATE path
+too even though it has not been observed to corrupt it) and resolves the ticket-required
+most-permissive-wins union — a window ends up full (`✓`) access if ANY currently-applied template
+grants it full, read-only (`R`) only if ALL of them do. Both steps use the same narrow,
+method-scoped `OBContext.setAdminMode(false)` bypass core's own `copyRoleAccess`/`updateRoleAccess`/
+`deleteRoleAccess` use for exactly this kind of cross-client write — never the outer, method-wide
+bypass, which stays at `setAdminMode(true)` so `enforceCallerClientBoundary`'s tenant-boundary
+guarantee (above) stays intact for the rest of this class. See
+`UserRoleCompositionServiceOverlapIntegrationTest` and
+`UserRoleCompositionServiceOverlapReverificationTest` (§9) for the real-DB proof (conflicting
+access levels resolve to full regardless of which template is added second, a real union of both
+templates' non-shared windows, a no-op re-run stays correct, and — independently re-verified
+against the real ETP-4878 matrix rather than a synthetic window — the fix holds for 3
+simultaneously-overlapping templates, not just 2).
+
 **Twelve matrix rows are a documented, deliberate gap — not yet implementable.** Every one of
 them has NO `AD_Window_ID` at all backing it in this environment (either a pure custom/aggregate
 Schema Forge page with zero classic-AD entity, or a report-type spec whose access resolves via a
@@ -1509,11 +1512,16 @@ The module includes unit tests that run without a backend:
 | `UserRoleCompositionServiceTest` | 221 | Pure-Mockito unit test (10 tests) covering `assignTemplateRoles`'s input-validation guard clauses — the slice that fails before any persistence side effect: blank user id, `null` template id list, unknown user, unknown/inactive template id, a role that is not a template, the client-admin "Admin" role rejected even if somehow marked as a template, requested-id dedup happening before the per-id validation loop (verified via a single `Role` lookup despite 3 whitespace-noisy repeats of the same id), and the two `enforceCallerClientBoundary` regression cases from REVIEW cycle 1: a caller whose client differs from the target user's is rejected with a "different client" message, while the literal System Administrator role id (`"0"`) bypasses the check and reaches the (unrelated) template-validation error instead. |
 | `UserRoleCompositionServiceIntegrationTest` | 446 | Real-DB, end-to-end proof (6 tests) of the full add/reconcile/retract lifecycle: a system-level (`AD_Client_ID = '0'`) template's `AD_Window_Access` propagates onto a per-tenant personal role purely via core's own `RoleInheritanceEventHandler`/`RoleInheritanceManager` (no hand-rolled copy in this module); removing a template on a later call retracts what it had propagated; re-running with the identical template set is a no-op (0 added, 0 removed); an empty template list on a user's FIRST-EVER composition call still creates the personal role and syncs `AD_User_Roles`/`Default_Ad_Role_ID` rather than leaving the user role-less; three occurrences of the same valid template id in one request collapse into exactly one `AD_Role_Inheritance` row instead of one per occurrence; and a recompose call mixing one still-valid template with one bogus id is rejected wholesale without mutating the inheritance/access an earlier, unrelated successful call had already applied. Extends `WeldBaseTest`, NOT plain `OBBaseTest` — role-inheritance propagation is driven by a Hibernate interceptor firing a CDI event that only `WeldBaseTest`'s Arquillian-booted container wires to an observer; under plain `OBBaseTest` the propagation silently never fires, which is a test-harness gap, not a bug in the service. |
 | `UserRoleCompositionServiceOverlapIntegrationTest` | -- | Real-DB proof (3 tests) of the cross-template `AD_Window_Access` overlap fix (see above): composing Finance (full) + Sales (read-only) on a shared window succeeds (no `OBSecurityException`) and resolves to full access, with `client`/`organization` on the shared row matching the personal role's own, and both templates' non-shared windows also present (a real union); the same conflicting grants requested in the OPPOSITE order still resolve to full — add order never changes the most-permissive-wins outcome; and re-running the identical overlapping template set is a no-op that leaves the shared window's access exactly as-is. Uses the real Finance/Sales system templates (not throwaway roles) plus one confirmed-unused window (`AD_Window_ID = 100`) for the shared grant, so it is independent of whatever the templates' own real grants happen to be. |
+| `UserRoleCompositionServiceOverlapReverificationTest` | 275 | QA (Sentinel) independent re-verification (3 tests) of the same overlap fix, deliberately NOT reusing the fix author's own integration test: 3 simultaneously-overlapping templates (Finance/Sales/Purchasing on a shared window) resolve to most-permissive-wins with the "winner" (Purchasing, full) in the middle of the composition order — ruling out a pairwise-only fix that only checks the newest template against the immediately-preceding state; and two cases seeded with the REAL ETP-4878 matrix's own access levels (not the synthetic window `100`) — Sales (full) + Inventory (read-only) on Contactos resolves to full, and Sales + Purchasing both read-only on Categoría del producto stays read-only (confirms the fix does not spuriously promote a window to full just because 2+ templates share it). Also closes a data point the original QA report got wrong: `ad_window_access_un_key` is a plain `CREATE UNIQUE INDEX` on `(ad_role_id, ad_window_id)`, invisible to a `pg_constraint`-only query — Sales already had a live pre-existing row for Contactos, so this suite seeds only the missing side instead of inserting a duplicate. |
 | `SFAssignUserRolesTest` | 278 | Unit test (8 tests) proving the webhook wires parameters/results/errors correctly, with `UserRoleCompositionService` itself intercepted via `mockConstruction` (its real behavior is the integration test's job): access gate (no role / restricted role denied without constructing the service), the happy path (admin composes, parses a whitespace/empty-entry-noisy `TemplateRoleIds` CSV, returns the assignment summary), missing `UserId` rejected before construction, an absent `TemplateRoleIds` parameter resolving to an empty (not `null`) list meaning "revoke all", a domain `OBException` folding into a `success:false` HTTP-200 result rather than the bridge's `error`/500 path, an unexpected `RuntimeException` surfacing as the bridge's `error` field instead, and the REVIEW cycle 1 regression proving the webhook actually forwards its already-resolved `currentRole` through to `assignTemplateRoles`'s 3-arg overload — the exact wiring the tenant-boundary check depends on. |
 
-Tests are located in `src-test/src/com/etendoerp/go/schemaforge/`. `UserRoleCompositionServiceTest`
-and `UserRoleCompositionServiceIntegrationTest` are the exception, living under
-`src-test/src/com/etendoerp/go/roles/` alongside the service they cover.
+Tests are located in `src-test/src/com/etendoerp/go/schemaforge/` (including its `webhooks/`
+subpackage, e.g. `SFAssignUserRolesTest`). The five `AD_Role`-templates/composition classes —
+`UserRoleCompositionServiceTest`, `UserRoleCompositionServiceIntegrationTest`,
+`UserRoleCompositionServiceOverlapIntegrationTest`,
+`UserRoleCompositionServiceOverlapReverificationTest`, and `TemplateRoleWindowAccessTest` — are the
+exception, living under `src-test/src/com/etendoerp/go/roles/` alongside the `com.etendoerp.go.roles`
+production classes they cover.
 
 ---
 
