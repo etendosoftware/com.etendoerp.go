@@ -17,6 +17,7 @@
 package com.etendoerp.go.roles;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -287,6 +288,163 @@ public class UserRoleCompositionService {
   }
 
   /**
+   * ETP-4906 — read-only counterpart to {@link #assignTemplateRoles(String, List)}: "which
+   * template roles does {@code userId} currently have applied", with NO caller-boundary check
+   * (see {@link #getAppliedTemplateRoleIds(String, Role)} for the overload real webhook callers
+   * MUST use instead). Delegates with {@code callerRole=null} — kept for plain unit tests and any
+   * other caller with no per-request identity to check against, mirroring
+   * {@link #assignTemplateRoles(String, List)}'s own 2-arg/3-arg split.
+   *
+   * @param userId the {@code AD_User_ID} to look up
+   * @return the FULL set of active-template role ids currently applied to {@code userId}'s
+   *     personal role, in {@code AD_Role_Inheritance.Seqno} order; an empty list if {@code
+   *     userId} has no personal role yet (never creates one as a side effect of a read)
+   * @throws OBException if {@code userId} is missing/unresolvable
+   */
+  public List<String> getAppliedTemplateRoleIds(String userId) {
+    return getAppliedTemplateRoleIds(userId, null);
+  }
+
+  /**
+   * Same as {@link #getAppliedTemplateRoleIds(String)}, but also enforces that {@code
+   * callerRole} may target {@code userId} at all — see {@link
+   * #enforceCallerClientBoundary(User, Role)}. Real webhook callers (e.g. {@code
+   * SFUserRoleAssignments}) MUST use this overload, passing the role they already resolved for
+   * the current request, for the exact same reason {@code SFAssignUserRoles} passes its own
+   * {@code currentRole} into {@link #assignTemplateRoles(String, List, Role)}: {@code
+   * NeoAccessHelper#isAdminOrClientAdmin} alone does not stop a client-admin from targeting
+   * another tenant's user.
+   *
+   * <p>Deliberately does NOT call {@link #resolveOrCreatePersonalRole(User)} — a user with no
+   * personal role yet simply has zero applied templates; minting one as a side effect of a READ
+   * would be a surprising, unnecessary write.</p>
+   *
+   * @param userId the {@code AD_User_ID} to look up
+   * @param callerRole the role making this request, already resolved by the caller BEFORE
+   *     entering admin mode — {@code null} means "no per-request identity to check" (skips the
+   *     boundary check entirely)
+   * @return the FULL set of active-template role ids currently applied to {@code userId}'s
+   *     personal role, in {@code AD_Role_Inheritance.Seqno} order; an empty list if {@code
+   *     userId} has no personal role yet
+   * @throws OBException if {@code userId} is missing/unresolvable, or {@code callerRole} is a
+   *     non-system role whose client differs from {@code userId}'s
+   */
+  public List<String> getAppliedTemplateRoleIds(String userId, Role callerRole) {
+    if (StringUtils.isBlank(userId)) {
+      throw new OBException("Missing user id for role assignment lookup");
+    }
+    User user = OBDal.getInstance().get(User.class, userId);
+    if (user == null) {
+      throw new OBException("User not found: " + userId);
+    }
+    enforceCallerClientBoundary(user, callerRole);
+
+    OBContext.setAdminMode(true);
+    try {
+      Role personalRole = findExistingPersonalRole(user);
+      if (personalRole == null) {
+        return new ArrayList<>();
+      }
+      return activeTemplateIds(findExistingInheritances(personalRole));
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  /**
+   * ETP-4906 — bulk grid counterpart to {@link #getAppliedTemplateRoleIds(String, Role)}: every
+   * user's applied template ids for the WHOLE client, in one query pass — deliberately NOT a loop
+   * calling the single-user method once per user (that would be 4-6 queries per row on a
+   * potentially large grid). Every user of {@code clientId} gets an entry (empty list if they
+   * have no qualifying personal role), so callers never need a separate "does this user have an
+   * entry at all" check.
+   *
+   * <p>Applies the exact same "is this actually a personal role" identity check {@link
+   * #isReusablePersonalRole(User, Role)} does for the write path — active, non-template,
+   * non-client-admin, same client, not itself the {@code InheritFrom} target of some OTHER role's
+   * inheritance, and exclusively assigned (via {@code AD_User_Roles}) to the ONE user whose {@code
+   * Default_Ad_Role_ID} points at it — but re-expressed as a handful of {@code
+   * Restrictions.in(...)} bulk queries instead of one query per candidate role, so the two
+   * definitions must be kept in lockstep (see {@link #isReusablePersonalRole(User, Role)}'s own
+   * javadoc for what each check defends against). This guarantees the grid's initial chip state
+   * exactly matches what a subsequent no-op save through {@link #assignTemplateRoles(String,
+   * List, Role)} would reconcile to (0 added, 0 removed).</p>
+   *
+   * <p>No caller-boundary check here — unlike the single-user overload, {@code clientId} itself
+   * IS the boundary: real callers (e.g. {@code SFUserRoleAssignments}) must pass their OWN
+   * resolved {@code currentRole.getClient().getId()}, never a caller-supplied client id (no such
+   * parameter is exposed), mirroring {@code SFRolesOverview}'s identical "always the caller's own
+   * client" convention.</p>
+   *
+   * @param clientId the {@code AD_Client_ID} whose users should be resolved
+   * @return every user of {@code clientId} mapped to their FULL set of active-template role ids
+   *     (insertion order, possibly empty per user); never {@code null}
+   * @throws OBException if {@code clientId} is missing
+   */
+  public Map<String, List<String>> getAppliedTemplateRoleIdsForClient(String clientId) {
+    if (StringUtils.isBlank(clientId)) {
+      throw new OBException("Missing client id for bulk role assignment lookup");
+    }
+    Map<String, List<String>> result = new LinkedHashMap<>();
+
+    OBContext.setAdminMode(true);
+    try {
+      List<User> users = findUsersForClient(clientId);
+      for (User user : users) {
+        result.put(user.getId(), new ArrayList<>());
+      }
+      if (users.isEmpty()) {
+        return result;
+      }
+
+      Map<String, Role> candidateRolesById = fetchCandidateDefaultRoles(users);
+      if (candidateRolesById.isEmpty()) {
+        return result;
+      }
+
+      Set<String> inheritFromTargetRoleIds =
+          findRoleIdsUsedAsInheritFromTarget(candidateRolesById.keySet());
+      Map<String, List<String>> assignedUserIdsByRoleId =
+          findActiveAssignedUserIdsByRoleId(candidateRolesById.keySet());
+
+      Set<String> confirmedPersonalRoleIds = new LinkedHashSet<>();
+      Map<String, String> personalRoleIdByUserId = new LinkedHashMap<>();
+      for (User user : users) {
+        Role candidate = user.getDefaultRole();
+        if (candidate == null) {
+          continue;
+        }
+        String roleId = candidate.getId();
+        if (!candidateRolesById.containsKey(roleId) || inheritFromTargetRoleIds.contains(roleId)) {
+          continue;
+        }
+        List<String> assignedUserIds =
+            assignedUserIdsByRoleId.getOrDefault(roleId, Collections.emptyList());
+        boolean exclusive = assignedUserIds.isEmpty()
+            || (assignedUserIds.size() == 1 && assignedUserIds.get(0).equals(user.getId()));
+        if (!exclusive) {
+          continue;
+        }
+        confirmedPersonalRoleIds.add(roleId);
+        personalRoleIdByUserId.put(user.getId(), roleId);
+      }
+
+      if (confirmedPersonalRoleIds.isEmpty()) {
+        return result;
+      }
+      Map<String, List<String>> templateIdsByPersonalRoleId =
+          findActiveTemplateIdsByPersonalRoleId(confirmedPersonalRoleIds);
+      for (Map.Entry<String, String> entry : personalRoleIdByUserId.entrySet()) {
+        result.put(entry.getKey(),
+            templateIdsByPersonalRoleId.getOrDefault(entry.getValue(), Collections.emptyList()));
+      }
+      return result;
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  /**
    * Rejects targeting {@code user} across a tenant boundary — closes a real cross-tenant
    * privilege-escalation gap found in REVIEW cycle 1 (ETP-4852): {@code SFAssignUserRoles}'s
    * only access gate, {@code NeoAccessHelper#isAdminOrClientAdmin}, treats a per-tenant
@@ -371,11 +529,19 @@ public class UserRoleCompositionService {
    * only U's, silently changing access for whatever inherits from it.</p>
    */
   private Role resolveOrCreatePersonalRole(User user) {
+    Role existing = findExistingPersonalRole(user);
+    return existing != null ? existing : createPersonalRole(user);
+  }
+
+  /**
+   * Read-only half of {@link #resolveOrCreatePersonalRole(User)} — used by {@link
+   * #getAppliedTemplateRoleIds(String, Role)} (ETP-4906), which must NEVER mint a personal role
+   * as a side effect of a read. Returns {@code null} instead of falling through to {@link
+   * #createPersonalRole(User)} when {@code user} has no reusable candidate yet.
+   */
+  private Role findExistingPersonalRole(User user) {
     Role candidate = user.getDefaultRole();
-    if (candidate != null && isReusablePersonalRole(user, candidate)) {
-      return candidate;
-    }
-    return createPersonalRole(user);
+    return (candidate != null && isReusablePersonalRole(user, candidate)) ? candidate : null;
   }
 
   /**
@@ -760,5 +926,152 @@ public class UserRoleCompositionService {
     criteria.add(Restrictions.eq(RoleInheritance.PROPERTY_ROLE, personalRole));
     criteria.addOrderBy(RoleInheritance.PROPERTY_SEQUENCENUMBER, true);
     return criteria.list();
+  }
+
+  /**
+   * ETP-4906 — filters {@code inheritances} down to the {@code InheritFrom} ids that are
+   * themselves still active templates, in {@code Seqno} order. Shared by {@link
+   * #getAppliedTemplateRoleIds(String, Role)} and (in its bulk form, {@link
+   * #findActiveTemplateIdsByPersonalRoleId(Set)}) {@link #getAppliedTemplateRoleIdsForClient
+   * (String)} — a personal role can retain a stale {@code AD_Role_Inheritance} row pointing at a
+   * template that was later deactivated or un-templated (the trigger documented in this class's
+   * own javadoc only blocks deactivation WHILE an inheritance depends on it, not un-linking the
+   * inheritance itself first), so this is not a redundant check.
+   */
+  private List<String> activeTemplateIds(List<RoleInheritance> inheritances) {
+    List<String> ids = new ArrayList<>();
+    for (RoleInheritance inheritance : inheritances) {
+      Role template = inheritance.getInheritFrom();
+      if (template != null && Boolean.TRUE.equals(template.isActive())
+          && Boolean.TRUE.equals(template.isTemplate())) {
+        ids.add(template.getId());
+      }
+    }
+    return ids;
+  }
+
+  /**
+   * Queries every {@code AD_User} of {@code clientId} — used only by {@link
+   * #getAppliedTemplateRoleIdsForClient(String)} (ETP-4906) to seed a "every user gets an entry"
+   * result map before any personal-role resolution.
+   */
+  @SuppressWarnings("unchecked")
+  private List<User> findUsersForClient(String clientId) {
+    OBCriteria<User> criteria = OBDal.getInstance().createCriteria(User.class);
+    criteria.setFilterOnReadableClients(false);
+    criteria.setFilterOnReadableOrganization(false);
+    criteria.add(Restrictions.eq(User.PROPERTY_CLIENT + ".id", clientId));
+    return criteria.list();
+  }
+
+  /**
+   * Bulk-fetches, in ONE query, the distinct {@code Default_Ad_Role_ID} roles referenced by
+   * {@code users} and keeps only the ones passing the same basic identity checks {@link
+   * #isReusablePersonalRole(User, Role)} applies first (active, non-template, non-client-admin)
+   * — deliberately NOT the two write-safety-only checks ({@code isInheritFromTargetOfAnyInheritance}
+   * / {@code isExclusivelyAssignedTo}), which {@link #getAppliedTemplateRoleIdsForClient(String)}
+   * applies separately, in bulk, over the ids this method returns.
+   *
+   * <p>Reading {@code user.getDefaultRole().getId()} does not itself trigger a query — a Hibernate
+   * proxy's identifier is already known from the owning row's FK column — so collecting the
+   * distinct ids to bulk-fetch is free; only this one {@code Restrictions.in} query actually hits
+   * the database.</p>
+   */
+  @SuppressWarnings("unchecked")
+  private Map<String, Role> fetchCandidateDefaultRoles(List<User> users) {
+    Set<String> roleIds = new LinkedHashSet<>();
+    for (User user : users) {
+      Role defaultRole = user.getDefaultRole();
+      if (defaultRole != null) {
+        roleIds.add(defaultRole.getId());
+      }
+    }
+    if (roleIds.isEmpty()) {
+      return Collections.emptyMap();
+    }
+    OBCriteria<Role> criteria = OBDal.getInstance().createCriteria(Role.class);
+    criteria.setFilterOnReadableClients(false);
+    criteria.setFilterOnReadableOrganization(false);
+    criteria.add(Restrictions.in(Role.PROPERTY_ID, roleIds));
+    Map<String, Role> byId = new LinkedHashMap<>();
+    for (Role role : (List<Role>) criteria.list()) {
+      if (Boolean.TRUE.equals(role.isActive()) && !Boolean.TRUE.equals(role.isTemplate())
+          && !Boolean.TRUE.equals(role.isClientAdmin())) {
+        byId.put(role.getId(), role);
+      }
+    }
+    return byId;
+  }
+
+  /**
+   * Bulk form of {@link #isInheritFromTargetOfAnyInheritance(Role)}: the subset of {@code
+   * roleIds} that some OTHER role's {@code AD_Role_Inheritance} row points at as its {@code
+   * InheritFrom} — i.e. roles that are themselves depended upon as a template/parent, and must
+   * never be treated as anyone's personal role.
+   */
+  @SuppressWarnings("unchecked")
+  private Set<String> findRoleIdsUsedAsInheritFromTarget(Set<String> roleIds) {
+    OBCriteria<RoleInheritance> criteria = OBDal.getInstance()
+        .createCriteria(RoleInheritance.class);
+    criteria.setFilterOnReadableClients(false);
+    criteria.setFilterOnReadableOrganization(false);
+    criteria.add(Restrictions.in(RoleInheritance.PROPERTY_INHERITFROM + ".id", roleIds));
+    Set<String> targets = new LinkedHashSet<>();
+    for (RoleInheritance inheritance : (List<RoleInheritance>) criteria.list()) {
+      targets.add(inheritance.getInheritFrom().getId());
+    }
+    return targets;
+  }
+
+  /**
+   * Bulk form of {@link #isExclusivelyAssignedTo(Role, User)}: for every role in {@code
+   * roleIds}, the {@code AD_User_ID}s of its active {@code AD_User_Roles} rows (NOT deduplicated
+   * — mirrors {@link #isExclusivelyAssignedTo(Role, User)}'s own {@code rows.size() == 1} check,
+   * which would also fail on two rows for the same user). A role id absent from the returned map
+   * has zero active rows — {@link #getAppliedTemplateRoleIdsForClient(String)} treats that the
+   * same way {@link #isExclusivelyAssignedTo(Role, User)} does: "never assigned yet, still safe".
+   */
+  @SuppressWarnings("unchecked")
+  private Map<String, List<String>> findActiveAssignedUserIdsByRoleId(Set<String> roleIds) {
+    OBCriteria<UserRoles> criteria = OBDal.getInstance().createCriteria(UserRoles.class);
+    criteria.setFilterOnReadableClients(false);
+    criteria.setFilterOnReadableOrganization(false);
+    criteria.add(Restrictions.in(UserRoles.PROPERTY_ROLE + ".id", roleIds));
+    criteria.add(Restrictions.eq(UserRoles.PROPERTY_ACTIVE, true));
+    Map<String, List<String>> byRoleId = new LinkedHashMap<>();
+    for (UserRoles row : (List<UserRoles>) criteria.list()) {
+      if (row.getUserContact() == null) {
+        continue;
+      }
+      byRoleId.computeIfAbsent(row.getRole().getId(), k -> new ArrayList<>())
+          .add(row.getUserContact().getId());
+    }
+    return byRoleId;
+  }
+
+  /**
+   * Bulk form of {@link #activeTemplateIds(List)}: for every confirmed personal role in {@code
+   * personalRoleIds}, its active-template {@code InheritFrom} ids, in {@code Seqno} order.
+   */
+  @SuppressWarnings("unchecked")
+  private Map<String, List<String>> findActiveTemplateIdsByPersonalRoleId(
+      Set<String> personalRoleIds) {
+    OBCriteria<RoleInheritance> criteria = OBDal.getInstance()
+        .createCriteria(RoleInheritance.class);
+    criteria.setFilterOnReadableClients(false);
+    criteria.setFilterOnReadableOrganization(false);
+    criteria.add(Restrictions.in(RoleInheritance.PROPERTY_ROLE + ".id", personalRoleIds));
+    criteria.addOrderBy(RoleInheritance.PROPERTY_SEQUENCENUMBER, true);
+    Map<String, List<String>> byPersonalRoleId = new LinkedHashMap<>();
+    for (RoleInheritance inheritance : (List<RoleInheritance>) criteria.list()) {
+      Role template = inheritance.getInheritFrom();
+      if (template == null || !Boolean.TRUE.equals(template.isActive())
+          || !Boolean.TRUE.equals(template.isTemplate())) {
+        continue;
+      }
+      byPersonalRoleId.computeIfAbsent(inheritance.getRole().getId(), k -> new ArrayList<>())
+          .add(template.getId());
+    }
+    return byPersonalRoleId;
   }
 }

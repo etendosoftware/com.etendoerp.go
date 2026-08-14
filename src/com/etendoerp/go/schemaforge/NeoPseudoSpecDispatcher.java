@@ -24,6 +24,7 @@ import javax.servlet.http.HttpServletResponse;
 import com.etendoerp.go.schemaforge.webhooks.SFAssignUserRoles;
 import com.etendoerp.go.schemaforge.webhooks.SFListMenu;
 import com.etendoerp.go.schemaforge.webhooks.SFRolesOverview;
+import com.etendoerp.go.schemaforge.webhooks.SFUserRoleAssignments;
 import com.etendoerp.go.schemaforge.webhooks.SFWindowAccessMap;
 import com.etendoerp.webhookevents.services.BaseWebhookService;
 
@@ -95,6 +96,13 @@ class NeoPseudoSpecDispatcher {
     if ("assignuserroles".equals(pathInfo.specName)) {
       return dispatchGoWebhook("Assignuserroles", method, request, response,
           new SFAssignUserRoles());
+    }
+    // ETP-4906: read-path companion to assignuserroles — "which template roles does user X (or
+    // every user of my client) currently have applied". See SFUserRoleAssignments's class
+    // javadoc for the full mechanism and both response shapes.
+    if ("userroleassignments".equals(pathInfo.specName)) {
+      return dispatchGoWebhook("Userroleassignments", method, request, response,
+          new SFUserRoleAssignments());
     }
     return false;
   }
