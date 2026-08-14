@@ -26,9 +26,13 @@ import java.util.Date;
 import org.junit.jupiter.api.Test;
 import org.mockito.MockedConstruction;
 import org.mockito.MockedStatic;
+import org.openbravo.base.provider.OBProvider;
+import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.ad.access.User;
 
 import com.etendoerp.go.common.PublicUrlResolver;
 import com.etendoerp.go.schemaforge.data.Account;
+import com.etendoerp.go.schemaforge.data.Invitation;
 /**
  * Unit tests for {@link EtendoGoAccountProvisioning} — the public cross-package entry point
  * (ETP-4829) that {@code com.etendoerp.go.schemaforge.handlers.UserRoleAssignmentHandler} calls
@@ -86,6 +90,10 @@ class EtendoGoAccountProvisioningTest {
   @Test
   void ensurePendingAccountSendsPasswordSetupInvitationForNewPendingAccount() {
     Account account = org.mockito.Mockito.mock(Account.class);
+    User user = org.mockito.Mockito.mock(User.class);
+    Invitation invitation = org.mockito.Mockito.mock(Invitation.class);
+    OBDal obDal = org.mockito.Mockito.mock(OBDal.class);
+    OBProvider obProvider = org.mockito.Mockito.mock(OBProvider.class);
     when(account.get("status")).thenReturn("pending");
     when(account.getEmail()).thenReturn("new.user@test.com");
 
@@ -93,6 +101,8 @@ class EtendoGoAccountProvisioningTest {
         MockedStatic<PublicUrlResolver> publicUrlMock = mockStatic(PublicUrlResolver.class);
         MockedStatic<EtendoGoAuthLinkBuilder> linkBuilderMock =
             mockStatic(EtendoGoAuthLinkBuilder.class);
+        MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class);
+        MockedStatic<OBProvider> obProviderMock = mockStatic(OBProvider.class);
         MockedConstruction<TransactionalAuthEmailSender> senderConstruction =
             org.mockito.Mockito.mockConstruction(TransactionalAuthEmailSender.class,
                 (sender, context) -> when(sender.sendPasswordReset(
@@ -107,8 +117,13 @@ class EtendoGoAccountProvisioningTest {
       linkBuilderMock.when(() -> EtendoGoAuthLinkBuilder.resetPasswordLink(
           org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.eq("https://app.test")))
           .thenReturn("https://app.test/onboarding?resetToken=token");
+      obDalMock.when(OBDal::getInstance).thenReturn(obDal);
+      obProviderMock.when(OBProvider::getInstance).thenReturn(obProvider);
+      when(obDal.get(User.class, "user-001")).thenReturn(user);
+      when(obProvider.get(Invitation.class)).thenReturn(invitation);
 
-      EtendoGoAccountProvisioning.ensurePendingAccount("new.user@test.com", "New User");
+      EtendoGoAccountProvisioning.ensurePendingAccount("new.user@test.com", "New User",
+          "user-001");
 
       verify(senderConstruction.constructed().get(0)).sendPasswordReset(
           org.mockito.ArgumentMatchers.eq(account), org.mockito.ArgumentMatchers.anyString(),
@@ -116,6 +131,7 @@ class EtendoGoAccountProvisioningTest {
       dalHelperMock.verify(() -> EtendoGoJwtDalHelper.storePasswordResetToken(
           org.mockito.ArgumentMatchers.eq(account), org.mockito.ArgumentMatchers.anyString(),
           org.mockito.ArgumentMatchers.any(Date.class)));
+      verify(invitation).setStatus("SENT");
     }
   }
 }
