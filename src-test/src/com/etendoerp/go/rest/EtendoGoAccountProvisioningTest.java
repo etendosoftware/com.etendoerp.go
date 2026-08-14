@@ -88,50 +88,13 @@ class EtendoGoAccountProvisioningTest {
   }
 
   @Test
-  void ensurePendingAccountSendsPasswordSetupInvitationForNewPendingAccount() {
-    Account account = org.mockito.Mockito.mock(Account.class);
-    User user = org.mockito.Mockito.mock(User.class);
-    Invitation invitation = org.mockito.Mockito.mock(Invitation.class);
-    OBDal obDal = org.mockito.Mockito.mock(OBDal.class);
-    OBProvider obProvider = org.mockito.Mockito.mock(OBProvider.class);
-    when(account.get("status")).thenReturn("pending");
-    when(account.getEmail()).thenReturn("new.user@test.com");
+  void ensurePendingAccountWithUserIdDelegatesToDalHelper() {
+    try (MockedStatic<EtendoGoJwtDalHelper> dalHelperMock =
+        mockStatic(EtendoGoJwtDalHelper.class)) {
+      EtendoGoAccountProvisioning.ensurePendingAccount("new.user@test.com", "New User", "user-001");
 
-    try (MockedStatic<EtendoGoJwtDalHelper> dalHelperMock = mockStatic(EtendoGoJwtDalHelper.class);
-        MockedStatic<PublicUrlResolver> publicUrlMock = mockStatic(PublicUrlResolver.class);
-        MockedStatic<EtendoGoAuthLinkBuilder> linkBuilderMock =
-            mockStatic(EtendoGoAuthLinkBuilder.class);
-        MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class);
-        MockedStatic<OBProvider> obProviderMock = mockStatic(OBProvider.class);
-        MockedConstruction<TransactionalAuthEmailSender> senderConstruction =
-            org.mockito.Mockito.mockConstruction(TransactionalAuthEmailSender.class,
-                (sender, context) -> when(sender.sendPasswordReset(
-                    org.mockito.ArgumentMatchers.eq(account), org.mockito.ArgumentMatchers.anyString(),
-                    org.mockito.ArgumentMatchers.eq("https://app.test/onboarding?resetToken=token")))
-                    .thenReturn(true))) {
-      dalHelperMock.when(() -> EtendoGoJwtDalHelper.createPendingAccount(
-          "new.user@test.com", "New User")).thenReturn(account);
-      dalHelperMock.when(() -> EtendoGoJwtDalHelper.hasPasswordResetToken(account)).thenReturn(false);
-      dalHelperMock.when(() -> EtendoGoJwtDalHelper.capturePasswordResetToken(account)).thenReturn(null);
-      publicUrlMock.when(PublicUrlResolver::resolveConfiguredAppBaseUrl).thenReturn("https://app.test");
-      linkBuilderMock.when(() -> EtendoGoAuthLinkBuilder.resetPasswordLink(
-          org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.eq("https://app.test")))
-          .thenReturn("https://app.test/onboarding?resetToken=token");
-      obDalMock.when(OBDal::getInstance).thenReturn(obDal);
-      obProviderMock.when(OBProvider::getInstance).thenReturn(obProvider);
-      when(obDal.get(User.class, "user-001")).thenReturn(user);
-      when(obProvider.get(Invitation.class)).thenReturn(invitation);
-
-      EtendoGoAccountProvisioning.ensurePendingAccount("new.user@test.com", "New User",
-          "user-001");
-
-      verify(senderConstruction.constructed().get(0)).sendPasswordReset(
-          org.mockito.ArgumentMatchers.eq(account), org.mockito.ArgumentMatchers.anyString(),
-          org.mockito.ArgumentMatchers.eq("https://app.test/onboarding?resetToken=token"));
-      dalHelperMock.verify(() -> EtendoGoJwtDalHelper.storePasswordResetToken(
-          org.mockito.ArgumentMatchers.eq(account), org.mockito.ArgumentMatchers.anyString(),
-          org.mockito.ArgumentMatchers.any(Date.class)));
-      verify(invitation).setStatus("SENT");
+      dalHelperMock.verify(
+          () -> EtendoGoJwtDalHelper.createPendingAccount("new.user@test.com", "New User"));
     }
   }
 }

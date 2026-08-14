@@ -35,7 +35,6 @@ import org.openbravo.model.common.enterprise.Organization;
 
 import com.etendoerp.go.payment.TenantPlanService;
 import com.etendoerp.go.schemaforge.data.Account;
-import com.etendoerp.go.schemaforge.data.Invitation;
 import com.auth0.jwt.interfaces.DecodedJWT;
 import com.smf.securewebservices.utils.SecureWebServicesUtils;
 
@@ -319,26 +318,8 @@ final class EtendoGoJwtDalHelper {
     account.set(PROPERTY_RESET_TOKEN_EXPIRES, null);
     account.set(PROPERTY_RESET_TOKEN_CONSUMED, changedAt);
     account.set(PROPERTY_PASSWORD_CHANGED, changedAt);
-    markInvitationAccepted(account);
     OBDal.getInstance().save(account);
     flushAndCommitDalChanges();
-  }
-
-  private static void markInvitationAccepted(Account account) {
-    if (account == null || StringUtils.isBlank(account.getId())) {
-      return;
-    }
-    OBQuery<Invitation> query = OBDal.getInstance().createQuery(Invitation.class,
-        "as invitation where invitation.etgoAccount.id = :accountId"
-            + " and invitation.status = 'SENT' and invitation.active = true");
-    query.setNamedParameter("accountId", account.getId());
-    query.setFilterOnReadableClients(false);
-    query.setFilterOnReadableOrganization(false);
-    Invitation invitation = query.uniqueResult();
-    if (invitation != null) {
-      invitation.setStatus("ACCEPTED");
-      OBDal.getInstance().save(invitation);
-    }
   }
 
   static void changePassword(Account account, String passwordHash, String sessionToken,
