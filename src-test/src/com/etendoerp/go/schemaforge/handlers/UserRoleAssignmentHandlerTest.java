@@ -350,7 +350,7 @@ public class UserRoleAssignmentHandlerTest {
       assertNull(handler.afterHandle(ctx));
 
       provisioningMock.verify(() -> EtendoGoAccountProvisioning.ensureAccountForCreatedUser(
-          eq("new.user@example.com"), eq("New User"), isNull()));
+          eq("new.user@example.com"), eq("New User"), isNull(), eq(USER_ID)));
       obCtxMock.verify(OBContext::restorePreviousMode, times(1));
     }
   }
@@ -378,7 +378,7 @@ public class UserRoleAssignmentHandlerTest {
       assertNull(handler.afterHandle(ctx));
 
       provisioningMock.verify(() -> EtendoGoAccountProvisioning.ensureAccountForCreatedUser(
-          eq("new.user@example.com"), eq("New User"), eq("Str0ng!Pass")));
+          eq("new.user@example.com"), eq("New User"), eq("Str0ng!Pass"), eq(USER_ID)));
     }
   }
 
@@ -402,7 +402,7 @@ public class UserRoleAssignmentHandlerTest {
       assertNull(handler.afterHandle(ctx));
 
       provisioningMock.verify(() -> EtendoGoAccountProvisioning.ensureAccountForCreatedUser(
-          eq("noname@example.com"), eq("noname@example.com"), isNull()));
+          eq("noname@example.com"), eq("noname@example.com"), isNull(), eq(USER_ID)));
     }
   }
 
@@ -443,7 +443,7 @@ public class UserRoleAssignmentHandlerTest {
       obCtxMock.when(() -> OBContext.setAdminMode(true)).then(inv -> null);
       obCtxMock.when(OBContext::restorePreviousMode).then(inv -> null);
       provisioningMock.when(() -> EtendoGoAccountProvisioning.ensureAccountForCreatedUser(
-          any(), any(), any())).thenThrow(new RuntimeException("DB unavailable"));
+          any(), any(), any(), any())).thenThrow(new RuntimeException("DB unavailable"));
 
       assertNull(handler.afterHandle(ctx));
 

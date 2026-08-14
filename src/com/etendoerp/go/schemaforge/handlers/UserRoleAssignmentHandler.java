@@ -254,6 +254,7 @@ public class UserRoleAssignmentHandler implements NeoHandler {
         return;
       }
       String name = StringUtils.trimToNull(data.optString(FIELD_NAME, null));
+      String userId = StringUtils.trimToNull(data.optString(FIELD_ID, null));
       JSONObject requestBody = context.getRequestBody();
       String password = requestBody != null
           ? StringUtils.trimToNull(requestBody.optString(FIELD_PASSWORD, null))
@@ -261,7 +262,7 @@ public class UserRoleAssignmentHandler implements NeoHandler {
       OBContext.setAdminMode(true);
       try {
         EtendoGoAccountProvisioning.ensureAccountForCreatedUser(email.toLowerCase(),
-            name != null ? name : email, password);
+            name != null ? name : email, password, userId);
       } finally {
         OBContext.restorePreviousMode();
       }

@@ -180,11 +180,13 @@ Auth transactional emails are created server-side by the `/sws/go/*` endpoints. 
 | `POST /sws/go/onboarding` | Commits onboarding first, then sends `environment-ready` best-effort |
 
 When an authorized company administrator creates an `AD_User` without a password, the
-`UserRoleAssignmentHandler` provisions a pending `ETGO_Account` and the system creates a
-one-time password-setup link through the existing `reset-password` contract. The recipient is
-resolved exclusively from that server-side account; the browser does not send a recipient,
-template, or provider payload. The account becomes active only after a successful password-reset
-confirmation.
+`UserRoleAssignmentHandler` provisions a pending `ETGO_Account` and persists an `ETGO_Invitation`
+row. The system creates a one-time password-setup link through the existing `reset-password`
+contract. The invitation records `PENDING`, `SENT`, `DELIVERY_FAILED`, and `ACCEPTED` lifecycle
+states without storing the raw token. The recipient is resolved exclusively from that
+server-side account; the browser does not send a recipient, template, or provider payload. The
+account becomes active only after a successful password-reset confirmation, which also marks the
+related invitation `ACCEPTED`.
 
 Invitation safeguards:
 

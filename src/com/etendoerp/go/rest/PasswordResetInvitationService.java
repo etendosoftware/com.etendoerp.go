@@ -27,9 +27,13 @@ import java.util.Date;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.openbravo.base.provider.OBProvider;
+import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.ad.access.User;
 
 import com.etendoerp.go.common.PublicUrlResolver;
 import com.etendoerp.go.schemaforge.data.Account;
+import com.etendoerp.go.schemaforge.data.Invitation;
 
 /** Issues the first password-setup link for an administrator-created pending account. */
 final class PasswordResetInvitationService {
@@ -43,7 +47,7 @@ final class PasswordResetInvitationService {
   private PasswordResetInvitationService() {
   }
 
-  static void sendIfNeeded(Account account) {
+  static void sendIfNeeded(Account account, String userId) {
     if (account == null || !StringUtils.equals(STATUS_PENDING, (String) account.get("status"))
         || EtendoGoJwtDalHelper.hasPasswordResetToken(account)) {
       return;
@@ -57,11 +61,29 @@ final class PasswordResetInvitationService {
       return;
     }
 
+    User user = StringUtils.isBlank(userId) ? null : OBDal.getInstance().get(User.class, userId);
+    if (user == null) {
+      log.warn("Invitation email skipped because the created ERP user could not be resolved");
+      return;
+    }
+
     EtendoGoJwtDalHelper.PasswordResetTokenState previousTokenState =
         EtendoGoJwtDalHelper.capturePasswordResetToken(account);
     String tokenHash = hashToken(token);
-    EtendoGoJwtDalHelper.storePasswordResetToken(account, tokenHash,
-        Date.from(Instant.now().plusSeconds(TOKEN_TTL_SECONDS)));
+    Date expiresAt = Date.from(Instant.now().plusSeconds(TOKEN_TTL_SECONDS));
+    Invitation invitation = OBProvider.getInstance().get(Invitation.class);
+    invitation.setClient(user.getClient());
+    invitation.setOrganization(user.getOrganization());
+    invitation.setEtgoAccount(account);
+    invitation.setUser(user);
+    invitation.setEmail(account.getEmail());
+    invitation.setTokenHash(tokenHash);
+    invitation.setStatus("PENDING");
+    invitation.setExpiresAt(expiresAt);
+    OBDal.getInstance().save(invitation);
+    OBDal.getInstance().flush();
+    OBDal.getInstance().commitAndClose();
+    EtendoGoJwtDalHelper.storePasswordResetToken(account, tokenHash, expiresAt);
 
     boolean sent = false;
     try {
@@ -71,7 +93,13 @@ final class PasswordResetInvitationService {
     }
     if (!sent) {
       EtendoGoJwtDalHelper.restorePasswordResetToken(account, previousTokenState);
+      invitation.setStatus("DELIVERY_FAILED");
+    } else {
+      invitation.setStatus("SENT");
     }
+    OBDal.getInstance().save(invitation);
+    OBDal.getInstance().flush();
+    OBDal.getInstance().commitAndClose();
   }
 
   private static String generateToken() {

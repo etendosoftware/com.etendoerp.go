@@ -44,8 +44,19 @@ public final class EtendoGoAccountProvisioning {
    * @param name  the account holder's display name
    */
   public static void ensurePendingAccount(String email, String name) {
+    ensurePendingAccount(email, name, null);
+  }
+
+  /**
+   * Ensures a pending account and records the password-setup invitation for the ERP user.
+   *
+   * @param email account login identifier
+   * @param name account holder display name
+   * @param userId created AD_User identifier used by the invitation audit record
+   */
+  public static void ensurePendingAccount(String email, String name, String userId) {
     Account account = EtendoGoJwtDalHelper.createPendingAccount(email, name);
-    PasswordResetInvitationService.sendIfNeeded(account);
+    PasswordResetInvitationService.sendIfNeeded(account, userId);
   }
 
   /**
@@ -67,8 +78,14 @@ public final class EtendoGoAccountProvisioning {
    */
   public static void ensureAccountForCreatedUser(String email, String name,
       String plainPassword) {
+    ensureAccountForCreatedUser(email, name, plainPassword, null);
+  }
+
+  /** Provisions a created ERP user and records its invitation when no password was supplied. */
+  public static void ensureAccountForCreatedUser(String email, String name,
+      String plainPassword, String userId) {
     if (StringUtils.isBlank(plainPassword)) {
-      ensurePendingAccount(email, name);
+      ensurePendingAccount(email, name, userId);
       return;
     }
     String passwordHash = PasswordHasher.hash(plainPassword);
