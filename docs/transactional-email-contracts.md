@@ -205,6 +205,7 @@ Email delivery failure is audited and must not roll back registration, onboardin
 | `reset-password` | `reset-password` | `ETGO_Account.email` resolved by `accountId` | `version`, `accountId`, `link` |
 | `new-account` | `custom` | `ETGO_Account.email` resolved by `accountId` | `version`, `accountId`, `link`; optional `language` |
 | `environment-ready` | `custom` | `ETGO_Account.email` resolved by `accountId` | `version`, `accountId`, `recordId` |
+| `company-invitation` | `custom` | `ETGO_Invitation.email` resolved by `recordId` | `version`, `recordId`, `link`; optional `language` |
 | `password-changed` | `custom` | `ETGO_Account.email` resolved by `accountId` | `version`, `accountId`, `recordId`; optional `date` |
 | `login-alert` | `login-alert` | `AD_User.email` resolved by `userId` | `version`, `userId`; optional `loginEventId`, `ip`, `date` |
 | `sales-invoice-send` | `invoice`, or `custom` on an edited send | `C_BPartner.EM_Etgo_Email`, falling back to active contact email, resolved from the invoice business partner | `version`, `recordId` |

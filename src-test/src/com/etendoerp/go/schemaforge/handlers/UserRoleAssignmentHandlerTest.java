@@ -48,6 +48,7 @@ import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.enterprise.Organization;
 
 import com.etendoerp.go.rest.EtendoGoAccountProvisioning;
+import com.etendoerp.go.rest.EtendoGoJwtSupport;
 import com.etendoerp.go.schemaforge.NeoContext;
 import com.etendoerp.go.schemaforge.NeoEndpointType;
 import com.etendoerp.go.schemaforge.NeoResponse;
@@ -71,7 +72,7 @@ import com.etendoerp.go.schemaforge.NeoResponse;
  * previous result degrades to a no-op rather than throwing.
  *
  * <p>Admin-initiated user creation (ETP-4829): covers {@link UserRoleAssignmentHandler#handle}
- * forcing {@code username=email} on a {@code user} {@code POST}, rejecting a blank/missing email
+ * deriving a unique username from the email and client on a {@code user} {@code POST}, rejecting a blank/missing email
  * or a weak admin-set {@code password}, and {@link UserRoleAssignmentHandler#afterHandle}
  * provisioning an {@code etgo_account} (pending, or active with that password) from the created
  * record's response body plus the original request body.
@@ -117,6 +118,32 @@ public class UserRoleAssignmentHandlerTest {
     assertNull(handler.handle(ctx));
 
     assertEquals("new.user@example.com", requestBody.getString("username"));
+  }
+
+  @Test
+  public void handleUsesSharedClientUsernameConventionWhenContextIsAvailable() throws Exception {
+    UserRoleAssignmentHandler handler = new UserRoleAssignmentHandler();
+    JSONObject requestBody = new JSONObject();
+    requestBody.put("email", "user@example.com");
+    NeoContext ctx = NeoContext.builder()
+        .endpointType(NeoEndpointType.CRUD)
+        .httpMethod("POST")
+        .requestBody(requestBody)
+        .build();
+    OBContext obContext = mock(OBContext.class);
+    Client client = mock(Client.class);
+    when(obContext.getCurrentClient()).thenReturn(client);
+    when(client.getName()).thenReturn("Second Client");
+
+    try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
+        MockedStatic<EtendoGoJwtSupport> usernameMock = mockStatic(EtendoGoJwtSupport.class)) {
+      obContextMock.when(OBContext::getOBContext).thenReturn(obContext);
+      usernameMock.when(() -> EtendoGoJwtSupport.buildClientUsername(
+          "user@example.com", "Second Client")).thenReturn("user@example.com+secondclient");
+
+      assertNull(handler.handle(ctx));
+      assertEquals("user@example.com+secondclient", requestBody.getString("username"));
+    }
   }
 
   @Test

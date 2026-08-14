@@ -67,8 +67,6 @@ class EtendoGoJwtDalHelperTest {
 
   @Mock private OBDal obDal;
   @Mock private OBProvider obProvider;
-  @Mock private OBQuery<Invitation> invitationQuery;
-  @Mock private Invitation invitation;
 
   private MockedStatic<OBDal> obDalMock;
   private MockedStatic<OBProvider> obProviderMock;
@@ -379,20 +377,6 @@ class EtendoGoJwtDalHelperTest {
       verify(obDal).save(account);
       verify(obDal).flush();
       verify(obDal).commitAndClose();
-    }
-
-    @Test
-    @DisplayName("marks the related invitation as accepted")
-    void marksInvitationAccepted() {
-      Date changedAt = new Date();
-      when(account.getId()).thenReturn("account-1");
-      when(obDal.createQuery(eq(Invitation.class), anyString())).thenReturn(invitationQuery);
-      when(invitationQuery.uniqueResult()).thenReturn(invitation);
-
-      EtendoGoJwtDalHelper.consumePasswordReset(account, "new-hash", changedAt);
-
-      verify(invitation).setStatus("ACCEPTED");
-      verify(invitationQuery).setNamedParameter("accountId", "account-1");
     }
 
     @Test

@@ -34,7 +34,7 @@ import org.openbravo.model.common.enterprise.Organization;
 
 import com.etendoerp.go.schemaforge.data.Account;
 
-final class EtendoGoJwtSupport {
+public final class EtendoGoJwtSupport {
 
   private static final String STAR_ORG_VALUE = "*";
   private static final String SYSTEM_ORG_ID = "0";
@@ -142,7 +142,11 @@ final class EtendoGoJwtSupport {
    * is trimmed here — the email is kept intact and the company part gives way, since the email is
    * what identifies the account (ETP-4665).
    */
-  static String buildClientUsername(String accountEmail, String clientName) {
+  /**
+   * Builds a unique ERP username while preserving the platform account email as the identity.
+   * This is public so admin-created users follow the same cross-client convention as onboarding.
+   */
+  public static String buildClientUsername(String accountEmail, String clientName) {
     if (findActiveUserByUsername(accountEmail) == null) {
       return accountEmail;
     }
