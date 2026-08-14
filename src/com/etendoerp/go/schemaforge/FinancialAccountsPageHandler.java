@@ -168,7 +168,7 @@ public class FinancialAccountsPageHandler implements NeoHandler {
 
   /**
    * One reason code per row that would block a hard delete of the account (ETP-4871), across
-   * every table {@code FinancialAccountHandler.findDeleteBlockers} checks — a single {@code UNION
+   * every table {@code FinancialAccountDeleteSupport.findDeleteBlockers} checks — a single {@code UNION
    * ALL} for the whole page, same performance rule as the other loaders in this class (never N
    * calls to {@code findDeleteBlockers} per row). Deliberately does NOT filter on {@code isactive}
    * for any branch except {@code TRANSACTIONS} (mirroring {@code hasTransactions}'s own filter):
@@ -225,21 +225,22 @@ public class FinancialAccountsPageHandler implements NeoHandler {
   private static final int DELETE_BLOCKERS_SQL_BRANCH_COUNT = 10;
 
   /** Maps each {@code DELETE_BLOCKERS_BY_ACCOUNT_SQL} reason code to the exact wording
-   *  {@code FinancialAccountHandler.findDeleteBlockers} uses for the same check, so the DELETE
-   *  409 message and this list-view field never drift apart. */
+   *  {@code FinancialAccountDeleteSupport.findDeleteBlockers} uses for the same check, so the
+   *  DELETE 409 message and this list-view field never drift apart. */
   private static final Map<String, String> DELETE_BLOCKER_REASON_BY_CODE = new LinkedHashMap<>();
 
   static {
-    DELETE_BLOCKER_REASON_BY_CODE.put("TRANSACTIONS", FinancialAccountHandler.REASON_TRANSACTIONS);
-    DELETE_BLOCKER_REASON_BY_CODE.put("RECONCILIATIONS", FinancialAccountHandler.REASON_RECONCILIATIONS);
-    DELETE_BLOCKER_REASON_BY_CODE.put("BANK_STATEMENTS", FinancialAccountHandler.REASON_BANK_STATEMENTS);
-    DELETE_BLOCKER_REASON_BY_CODE.put("PAYMENTS", FinancialAccountHandler.REASON_PAYMENTS);
-    DELETE_BLOCKER_REASON_BY_CODE.put("PAYMENT_PROPOSALS", FinancialAccountHandler.REASON_PAYMENT_PROPOSALS);
-    DELETE_BLOCKER_REASON_BY_CODE.put("JOURNAL_LINES", FinancialAccountHandler.REASON_JOURNAL_LINES);
+    DELETE_BLOCKER_REASON_BY_CODE.put("TRANSACTIONS", FinancialAccountDeleteSupport.REASON_TRANSACTIONS);
+    DELETE_BLOCKER_REASON_BY_CODE.put("RECONCILIATIONS", FinancialAccountDeleteSupport.REASON_RECONCILIATIONS);
+    DELETE_BLOCKER_REASON_BY_CODE.put("BANK_STATEMENTS", FinancialAccountDeleteSupport.REASON_BANK_STATEMENTS);
+    DELETE_BLOCKER_REASON_BY_CODE.put("PAYMENTS", FinancialAccountDeleteSupport.REASON_PAYMENTS);
+    DELETE_BLOCKER_REASON_BY_CODE.put("PAYMENT_PROPOSALS",
+        FinancialAccountDeleteSupport.REASON_PAYMENT_PROPOSALS);
+    DELETE_BLOCKER_REASON_BY_CODE.put("JOURNAL_LINES", FinancialAccountDeleteSupport.REASON_JOURNAL_LINES);
     DELETE_BLOCKER_REASON_BY_CODE.put("BANK_FILE_EXCEPTIONS",
-        FinancialAccountHandler.REASON_BANK_FILE_EXCEPTIONS);
-    DELETE_BLOCKER_REASON_BY_CODE.put("BPARTNER_DEFAULT", FinancialAccountHandler.REASON_BPARTNER_DEFAULT);
-    DELETE_BLOCKER_REASON_BY_CODE.put("BANK_CONNECTION", FinancialAccountHandler.REASON_BANK_CONNECTION);
+        FinancialAccountDeleteSupport.REASON_BANK_FILE_EXCEPTIONS);
+    DELETE_BLOCKER_REASON_BY_CODE.put("BPARTNER_DEFAULT", FinancialAccountDeleteSupport.REASON_BPARTNER_DEFAULT);
+    DELETE_BLOCKER_REASON_BY_CODE.put("BANK_CONNECTION", FinancialAccountDeleteSupport.REASON_BANK_CONNECTION);
   }
 
   @Override

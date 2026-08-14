@@ -24,9 +24,9 @@ import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.eq;
-import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
@@ -703,41 +703,51 @@ public class FinancialAccountHandlerTest {
   }
 
   /**
-   * Stubs every individual blocker check on the spy to {@code false} so a test can flip exactly
-   * one back to {@code true} and prove that one alone is enough to block the delete.
+   * Stubs every individual blocker check to {@code false} so a test can flip exactly one back to
+   * {@code true} and prove that one alone is enough to block the delete. {@code hasTransactions}
+   * stays an instance method on the {@code handler} spy; the other eight moved to static methods
+   * on {@link FinancialAccountDeleteSupport} (ETP-4871's Sonar method-count extraction), so they
+   * are stubbed on the {@code deleteSupport} static mock instead. {@code deleteSupport} must be
+   * created with {@code Mockito.CALLS_REAL_METHODS} as its default answer so
+   * {@code findDeleteBlockers}'s own real body still runs and calls back into these (stubbed)
+   * sibling static methods.
    */
-  private void stubNoBlockers(FIN_FinancialAccount account) {
+  private void stubNoBlockers(MockedStatic<FinancialAccountDeleteSupport> deleteSupport,
+      FIN_FinancialAccount account) {
     doReturn(false).when(handler).hasTransactions(account);
-    doReturn(false).when(handler).hasAnyReconciliation(account);
-    doReturn(false).when(handler).hasBankStatements(account);
-    doReturn(false).when(handler).hasPayments(account);
-    doReturn(false).when(handler).hasPaymentProposals(account);
-    doReturn(false).when(handler).hasJournalLines(account);
-    doReturn(false).when(handler).hasBankFileExceptions(account);
-    doReturn(false).when(handler).isDefaultBpartnerAccount(account);
-    doReturn(false).when(handler).hasBankConnection(account);
+    deleteSupport.when(() -> FinancialAccountDeleteSupport.hasAnyReconciliation(account)).thenReturn(false);
+    deleteSupport.when(() -> FinancialAccountDeleteSupport.hasBankStatements(account)).thenReturn(false);
+    deleteSupport.when(() -> FinancialAccountDeleteSupport.hasPayments(account)).thenReturn(false);
+    deleteSupport.when(() -> FinancialAccountDeleteSupport.hasPaymentProposals(account)).thenReturn(false);
+    deleteSupport.when(() -> FinancialAccountDeleteSupport.hasJournalLines(account)).thenReturn(false);
+    deleteSupport.when(() -> FinancialAccountDeleteSupport.hasBankFileExceptions(account)).thenReturn(false);
+    deleteSupport.when(() -> FinancialAccountDeleteSupport.isDefaultBpartnerAccount(account)).thenReturn(false);
+    deleteSupport.when(() -> FinancialAccountDeleteSupport.hasBankConnection(account)).thenReturn(false);
   }
 
   /**
    * The happy path: nothing blocks the delete, so the account's own auto-created configuration
-   * rows are swept first (via {@link FinancialAccountHandler#sweepOwnConfig}), then the account
-   * itself is removed, flushed, and a 204 returned.
+   * rows are swept first (via {@link FinancialAccountDeleteSupport#sweepOwnConfig}), then the
+   * account itself is removed, flushed, and a 204 returned.
    */
   @Test
   public void testDeleteAccountHappyPathSweepsConfigRemovesAccountAndReturns204() {
     FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
     doReturn(account).when(handler).loadAccount(ACC_ID);
-    stubNoBlockers(account);
-    doNothing().when(handler).sweepOwnConfig(account);
 
-    try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+    try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class);
+        MockedStatic<FinancialAccountDeleteSupport> deleteSupport =
+            mockStatic(FinancialAccountDeleteSupport.class, Mockito.CALLS_REAL_METHODS)) {
       OBDal dal = mock(OBDal.class);
       obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      stubNoBlockers(deleteSupport, account);
+      deleteSupport.when(() -> FinancialAccountDeleteSupport.sweepOwnConfig(account))
+          .thenAnswer(invocation -> null);
 
       NeoResponse response = handler.deleteAccount(ACC_ID);
 
       assertEquals(204, response.getHttpStatus());
-      verify(handler).sweepOwnConfig(account);
+      deleteSupport.verify(() -> FinancialAccountDeleteSupport.sweepOwnConfig(account));
       verify(dal).remove(account);
       verify(dal).flush();
     }
@@ -749,126 +759,162 @@ public class FinancialAccountHandlerTest {
   public void testDeleteAccountWithTransactionsReturns409NamingReason() throws Exception {
     FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
     doReturn(account).when(handler).loadAccount(ACC_ID);
-    stubNoBlockers(account);
-    doReturn(true).when(handler).hasTransactions(account);
 
-    NeoResponse response = handler.deleteAccount(ACC_ID);
+    try (MockedStatic<FinancialAccountDeleteSupport> deleteSupport =
+        mockStatic(FinancialAccountDeleteSupport.class, Mockito.CALLS_REAL_METHODS)) {
+      stubNoBlockers(deleteSupport, account);
+      doReturn(true).when(handler).hasTransactions(account);
 
-    assertEquals(409, response.getHttpStatus());
-    assertTrue(errorMessage(response).contains(FinancialAccountHandler.REASON_TRANSACTIONS));
-    verify(handler, never()).sweepOwnConfig(any());
+      NeoResponse response = handler.deleteAccount(ACC_ID);
+
+      assertEquals(409, response.getHttpStatus());
+      assertTrue(errorMessage(response).contains(FinancialAccountDeleteSupport.REASON_TRANSACTIONS));
+      deleteSupport.verify(() -> FinancialAccountDeleteSupport.sweepOwnConfig(any()), never());
+    }
   }
 
   @Test
   public void testDeleteAccountWithReconciliationReturns409NamingReason() throws Exception {
     FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
     doReturn(account).when(handler).loadAccount(ACC_ID);
-    stubNoBlockers(account);
-    doReturn(true).when(handler).hasAnyReconciliation(account);
 
-    NeoResponse response = handler.deleteAccount(ACC_ID);
+    try (MockedStatic<FinancialAccountDeleteSupport> deleteSupport =
+        mockStatic(FinancialAccountDeleteSupport.class, Mockito.CALLS_REAL_METHODS)) {
+      stubNoBlockers(deleteSupport, account);
+      deleteSupport.when(() -> FinancialAccountDeleteSupport.hasAnyReconciliation(account)).thenReturn(true);
 
-    assertEquals(409, response.getHttpStatus());
-    assertTrue(errorMessage(response).contains(FinancialAccountHandler.REASON_RECONCILIATIONS));
-    verify(handler, never()).sweepOwnConfig(any());
+      NeoResponse response = handler.deleteAccount(ACC_ID);
+
+      assertEquals(409, response.getHttpStatus());
+      assertTrue(errorMessage(response).contains(FinancialAccountDeleteSupport.REASON_RECONCILIATIONS));
+      deleteSupport.verify(() -> FinancialAccountDeleteSupport.sweepOwnConfig(any()), never());
+    }
   }
 
   @Test
   public void testDeleteAccountWithBankStatementsReturns409NamingReason() throws Exception {
     FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
     doReturn(account).when(handler).loadAccount(ACC_ID);
-    stubNoBlockers(account);
-    doReturn(true).when(handler).hasBankStatements(account);
 
-    NeoResponse response = handler.deleteAccount(ACC_ID);
+    try (MockedStatic<FinancialAccountDeleteSupport> deleteSupport =
+        mockStatic(FinancialAccountDeleteSupport.class, Mockito.CALLS_REAL_METHODS)) {
+      stubNoBlockers(deleteSupport, account);
+      deleteSupport.when(() -> FinancialAccountDeleteSupport.hasBankStatements(account)).thenReturn(true);
 
-    assertEquals(409, response.getHttpStatus());
-    assertTrue(errorMessage(response).contains(FinancialAccountHandler.REASON_BANK_STATEMENTS));
-    verify(handler, never()).sweepOwnConfig(any());
+      NeoResponse response = handler.deleteAccount(ACC_ID);
+
+      assertEquals(409, response.getHttpStatus());
+      assertTrue(errorMessage(response).contains(FinancialAccountDeleteSupport.REASON_BANK_STATEMENTS));
+      deleteSupport.verify(() -> FinancialAccountDeleteSupport.sweepOwnConfig(any()), never());
+    }
   }
 
   @Test
   public void testDeleteAccountWithPaymentsReturns409NamingReason() throws Exception {
     FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
     doReturn(account).when(handler).loadAccount(ACC_ID);
-    stubNoBlockers(account);
-    doReturn(true).when(handler).hasPayments(account);
 
-    NeoResponse response = handler.deleteAccount(ACC_ID);
+    try (MockedStatic<FinancialAccountDeleteSupport> deleteSupport =
+        mockStatic(FinancialAccountDeleteSupport.class, Mockito.CALLS_REAL_METHODS)) {
+      stubNoBlockers(deleteSupport, account);
+      deleteSupport.when(() -> FinancialAccountDeleteSupport.hasPayments(account)).thenReturn(true);
 
-    assertEquals(409, response.getHttpStatus());
-    assertTrue(errorMessage(response).contains(FinancialAccountHandler.REASON_PAYMENTS));
-    verify(handler, never()).sweepOwnConfig(any());
+      NeoResponse response = handler.deleteAccount(ACC_ID);
+
+      assertEquals(409, response.getHttpStatus());
+      assertTrue(errorMessage(response).contains(FinancialAccountDeleteSupport.REASON_PAYMENTS));
+      deleteSupport.verify(() -> FinancialAccountDeleteSupport.sweepOwnConfig(any()), never());
+    }
   }
 
   @Test
   public void testDeleteAccountWithPaymentProposalsReturns409NamingReason() throws Exception {
     FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
     doReturn(account).when(handler).loadAccount(ACC_ID);
-    stubNoBlockers(account);
-    doReturn(true).when(handler).hasPaymentProposals(account);
 
-    NeoResponse response = handler.deleteAccount(ACC_ID);
+    try (MockedStatic<FinancialAccountDeleteSupport> deleteSupport =
+        mockStatic(FinancialAccountDeleteSupport.class, Mockito.CALLS_REAL_METHODS)) {
+      stubNoBlockers(deleteSupport, account);
+      deleteSupport.when(() -> FinancialAccountDeleteSupport.hasPaymentProposals(account)).thenReturn(true);
 
-    assertEquals(409, response.getHttpStatus());
-    assertTrue(errorMessage(response).contains(FinancialAccountHandler.REASON_PAYMENT_PROPOSALS));
-    verify(handler, never()).sweepOwnConfig(any());
+      NeoResponse response = handler.deleteAccount(ACC_ID);
+
+      assertEquals(409, response.getHttpStatus());
+      assertTrue(errorMessage(response).contains(FinancialAccountDeleteSupport.REASON_PAYMENT_PROPOSALS));
+      deleteSupport.verify(() -> FinancialAccountDeleteSupport.sweepOwnConfig(any()), never());
+    }
   }
 
   @Test
   public void testDeleteAccountWithJournalLinesReturns409NamingReason() throws Exception {
     FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
     doReturn(account).when(handler).loadAccount(ACC_ID);
-    stubNoBlockers(account);
-    doReturn(true).when(handler).hasJournalLines(account);
 
-    NeoResponse response = handler.deleteAccount(ACC_ID);
+    try (MockedStatic<FinancialAccountDeleteSupport> deleteSupport =
+        mockStatic(FinancialAccountDeleteSupport.class, Mockito.CALLS_REAL_METHODS)) {
+      stubNoBlockers(deleteSupport, account);
+      deleteSupport.when(() -> FinancialAccountDeleteSupport.hasJournalLines(account)).thenReturn(true);
 
-    assertEquals(409, response.getHttpStatus());
-    assertTrue(errorMessage(response).contains(FinancialAccountHandler.REASON_JOURNAL_LINES));
-    verify(handler, never()).sweepOwnConfig(any());
+      NeoResponse response = handler.deleteAccount(ACC_ID);
+
+      assertEquals(409, response.getHttpStatus());
+      assertTrue(errorMessage(response).contains(FinancialAccountDeleteSupport.REASON_JOURNAL_LINES));
+      deleteSupport.verify(() -> FinancialAccountDeleteSupport.sweepOwnConfig(any()), never());
+    }
   }
 
   @Test
   public void testDeleteAccountWithBankFileExceptionsReturns409NamingReason() throws Exception {
     FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
     doReturn(account).when(handler).loadAccount(ACC_ID);
-    stubNoBlockers(account);
-    doReturn(true).when(handler).hasBankFileExceptions(account);
 
-    NeoResponse response = handler.deleteAccount(ACC_ID);
+    try (MockedStatic<FinancialAccountDeleteSupport> deleteSupport =
+        mockStatic(FinancialAccountDeleteSupport.class, Mockito.CALLS_REAL_METHODS)) {
+      stubNoBlockers(deleteSupport, account);
+      deleteSupport.when(() -> FinancialAccountDeleteSupport.hasBankFileExceptions(account)).thenReturn(true);
 
-    assertEquals(409, response.getHttpStatus());
-    assertTrue(errorMessage(response).contains(FinancialAccountHandler.REASON_BANK_FILE_EXCEPTIONS));
-    verify(handler, never()).sweepOwnConfig(any());
+      NeoResponse response = handler.deleteAccount(ACC_ID);
+
+      assertEquals(409, response.getHttpStatus());
+      assertTrue(errorMessage(response).contains(FinancialAccountDeleteSupport.REASON_BANK_FILE_EXCEPTIONS));
+      deleteSupport.verify(() -> FinancialAccountDeleteSupport.sweepOwnConfig(any()), never());
+    }
   }
 
   @Test
   public void testDeleteAccountAsBpartnerDefaultReturns409NamingReason() throws Exception {
     FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
     doReturn(account).when(handler).loadAccount(ACC_ID);
-    stubNoBlockers(account);
-    doReturn(true).when(handler).isDefaultBpartnerAccount(account);
 
-    NeoResponse response = handler.deleteAccount(ACC_ID);
+    try (MockedStatic<FinancialAccountDeleteSupport> deleteSupport =
+        mockStatic(FinancialAccountDeleteSupport.class, Mockito.CALLS_REAL_METHODS)) {
+      stubNoBlockers(deleteSupport, account);
+      deleteSupport.when(() -> FinancialAccountDeleteSupport.isDefaultBpartnerAccount(account)).thenReturn(true);
 
-    assertEquals(409, response.getHttpStatus());
-    assertTrue(errorMessage(response).contains(FinancialAccountHandler.REASON_BPARTNER_DEFAULT));
-    verify(handler, never()).sweepOwnConfig(any());
+      NeoResponse response = handler.deleteAccount(ACC_ID);
+
+      assertEquals(409, response.getHttpStatus());
+      assertTrue(errorMessage(response).contains(FinancialAccountDeleteSupport.REASON_BPARTNER_DEFAULT));
+      deleteSupport.verify(() -> FinancialAccountDeleteSupport.sweepOwnConfig(any()), never());
+    }
   }
 
   @Test
   public void testDeleteAccountWithBankConnectionReturns409NamingReason() throws Exception {
     FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
     doReturn(account).when(handler).loadAccount(ACC_ID);
-    stubNoBlockers(account);
-    doReturn(true).when(handler).hasBankConnection(account);
 
-    NeoResponse response = handler.deleteAccount(ACC_ID);
+    try (MockedStatic<FinancialAccountDeleteSupport> deleteSupport =
+        mockStatic(FinancialAccountDeleteSupport.class, Mockito.CALLS_REAL_METHODS)) {
+      stubNoBlockers(deleteSupport, account);
+      deleteSupport.when(() -> FinancialAccountDeleteSupport.hasBankConnection(account)).thenReturn(true);
 
-    assertEquals(409, response.getHttpStatus());
-    assertTrue(errorMessage(response).contains(FinancialAccountHandler.REASON_BANK_CONNECTION));
-    verify(handler, never()).sweepOwnConfig(any());
+      NeoResponse response = handler.deleteAccount(ACC_ID);
+
+      assertEquals(409, response.getHttpStatus());
+      assertTrue(errorMessage(response).contains(FinancialAccountDeleteSupport.REASON_BANK_CONNECTION));
+      deleteSupport.verify(() -> FinancialAccountDeleteSupport.sweepOwnConfig(any()), never());
+    }
   }
 
   /** Multiple simultaneous blockers are all named in the same 409 message. */
@@ -876,17 +922,21 @@ public class FinancialAccountHandlerTest {
   public void testDeleteAccountWithMultipleBlockersListsAllReasonsIn409() throws Exception {
     FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
     doReturn(account).when(handler).loadAccount(ACC_ID);
-    stubNoBlockers(account);
-    doReturn(true).when(handler).hasTransactions(account);
-    doReturn(true).when(handler).hasBankConnection(account);
 
-    NeoResponse response = handler.deleteAccount(ACC_ID);
+    try (MockedStatic<FinancialAccountDeleteSupport> deleteSupport =
+        mockStatic(FinancialAccountDeleteSupport.class, Mockito.CALLS_REAL_METHODS)) {
+      stubNoBlockers(deleteSupport, account);
+      doReturn(true).when(handler).hasTransactions(account);
+      deleteSupport.when(() -> FinancialAccountDeleteSupport.hasBankConnection(account)).thenReturn(true);
 
-    assertEquals(409, response.getHttpStatus());
-    String message = errorMessage(response);
-    assertTrue(message.contains(FinancialAccountHandler.REASON_TRANSACTIONS));
-    assertTrue(message.contains(FinancialAccountHandler.REASON_BANK_CONNECTION));
-    verify(handler, never()).sweepOwnConfig(any());
+      NeoResponse response = handler.deleteAccount(ACC_ID);
+
+      assertEquals(409, response.getHttpStatus());
+      String message = errorMessage(response);
+      assertTrue(message.contains(FinancialAccountDeleteSupport.REASON_TRANSACTIONS));
+      assertTrue(message.contains(FinancialAccountDeleteSupport.REASON_BANK_CONNECTION));
+      deleteSupport.verify(() -> FinancialAccountDeleteSupport.sweepOwnConfig(any()), never());
+    }
   }
 
   /**
@@ -896,7 +946,6 @@ public class FinancialAccountHandlerTest {
    */
   @Test
   public void testSweepOwnConfigRemovesAllFourConfigTables() {
-    FinancialAccountHandler h = new FinancialAccountHandler();
     FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
 
     try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
@@ -927,7 +976,7 @@ public class FinancialAccountHandlerTest {
       when(dal.createCriteria(PSD2FinaccLog.class)).thenReturn(logCriteria);
       when(logCriteria.list()).thenReturn(Arrays.asList(logRow));
 
-      h.sweepOwnConfig(account);
+      FinancialAccountDeleteSupport.sweepOwnConfig(account);
 
       verify(dal).remove(acctRow);
       verify(dal).remove(pmRow);
@@ -943,7 +992,6 @@ public class FinancialAccountHandlerTest {
    */
   @Test
   public void testIsDefaultBpartnerAccountChecksBothRegularAndPoFkColumns() {
-    FinancialAccountHandler h = new FinancialAccountHandler();
     FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
 
     try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
@@ -958,7 +1006,7 @@ public class FinancialAccountHandlerTest {
       when(poCriteria.uniqueResult()).thenReturn(mock(BusinessPartner.class));
 
       assertTrue("a BP defaulting to this account only as its PO account still blocks the delete",
-          h.isDefaultBpartnerAccount(account));
+          FinancialAccountDeleteSupport.isDefaultBpartnerAccount(account));
     }
   }
 
@@ -972,7 +1020,6 @@ public class FinancialAccountHandlerTest {
    */
   @Test
   public void testHasAnyReconciliationCountsInactiveOrClosedRowAsBlocker() {
-    FinancialAccountHandler h = new FinancialAccountHandler();
     FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
 
     try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
@@ -986,7 +1033,7 @@ public class FinancialAccountHandlerTest {
       when(criteria.uniqueResult()).thenReturn(mock(FIN_Reconciliation.class));
 
       assertTrue("an inactive/closed reconciliation still blocks the hard delete",
-          h.hasAnyReconciliation(account));
+          FinancialAccountDeleteSupport.hasAnyReconciliation(account));
       verify(criteria, times(1)).add(any());
       verify(criteria).setMaxResults(1);
     }
@@ -1000,7 +1047,6 @@ public class FinancialAccountHandlerTest {
    */
   @Test
   public void testHasBankConnectionCountsSoftDisconnectedRowAsBlocker() {
-    FinancialAccountHandler h = new FinancialAccountHandler();
     FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
 
     try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
@@ -1012,7 +1058,7 @@ public class FinancialAccountHandlerTest {
       when(criteria.uniqueResult()).thenReturn(mock(FinaccConnection.class));
 
       assertTrue("a soft-disconnected bank connection still blocks the hard delete",
-          h.hasBankConnection(account));
+          FinancialAccountDeleteSupport.hasBankConnection(account));
       verify(criteria, times(1)).add(any());
       verify(criteria).setMaxResults(1);
     }
@@ -1581,7 +1627,9 @@ public class FinancialAccountHandlerTest {
         .put(new JSONObject().put("id", "acc-3"));
     NeoContext ctx = getCrudContext(rows);
 
-    try (MockedStatic<OBContext> obContext = mockSessionContext()) {
+    try (MockedStatic<OBContext> obContext = mockSessionContext();
+        MockedStatic<FinancialAccountDeleteSupport> deleteSupport =
+            mockStatic(FinancialAccountDeleteSupport.class)) {
       FinancialAccountsPageHandler loaders = stubLoaders(
           Arrays.asList(
               accountRow(ACC_ID, "10.00", EUR_ID, "EUR", false),
@@ -1595,12 +1643,14 @@ public class FinancialAccountHandlerTest {
       verify(loaders, times(1)).loadPendingByAccount(CLIENT_ID, ORGS);
       verify(loaders, times(1)).loadAccountsWithTransactions(CLIENT_ID, ORGS);
       verify(loaders, times(1)).loadDeleteBlockersByAccount(CLIENT_ID, ORGS);
-      // The legacy per-row DAL seams must not be reached at all any more; findDeleteBlockers is
-      // never called per row either — the batched loader above is the only ETP-4871 entry point
-      // this injection path is allowed to reach.
+      // The legacy per-row DAL seams must not be reached at all any more; findDeleteBlockers
+      // (now static on FinancialAccountDeleteSupport, ETP-4871's Sonar method-count extraction)
+      // is never called per row either — the batched loader above is the only ETP-4871 entry
+      // point this injection path is allowed to reach.
       verify(handler, never()).loadAccount(any());
       verify(handler, never()).hasTransactions(any());
-      verify(handler, never()).findDeleteBlockers(any());
+      deleteSupport.verify(
+          () -> FinancialAccountDeleteSupport.findDeleteBlockers(any(), anyBoolean()), never());
     }
   }
 
@@ -1639,7 +1689,7 @@ public class FinancialAccountHandlerTest {
 
     Map<String, List<String>> blockers = new LinkedHashMap<>();
     blockers.put(ACC_ID, Arrays.asList(
-        FinancialAccountHandler.REASON_TRANSACTIONS, FinancialAccountHandler.REASON_BANK_CONNECTION));
+        FinancialAccountDeleteSupport.REASON_TRANSACTIONS, FinancialAccountDeleteSupport.REASON_BANK_CONNECTION));
 
     try (MockedStatic<OBContext> obContext = mockSessionContext()) {
       stubLoaders(Collections.singletonList(accountRow(ACC_ID, "10.00", EUR_ID, "EUR", false)),
@@ -1650,8 +1700,8 @@ public class FinancialAccountHandlerTest {
       JSONObject outRow = out.getBody().getJSONObject("response").getJSONArray("data").getJSONObject(0);
       assertFalse(outRow.getBoolean("deletable"));
       String reason = outRow.getString("deleteBlockedReason");
-      assertTrue(reason.contains(FinancialAccountHandler.REASON_TRANSACTIONS));
-      assertTrue(reason.contains(FinancialAccountHandler.REASON_BANK_CONNECTION));
+      assertTrue(reason.contains(FinancialAccountDeleteSupport.REASON_TRANSACTIONS));
+      assertTrue(reason.contains(FinancialAccountDeleteSupport.REASON_BANK_CONNECTION));
     }
   }
 

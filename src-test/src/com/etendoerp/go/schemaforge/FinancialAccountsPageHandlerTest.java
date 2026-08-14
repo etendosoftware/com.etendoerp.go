@@ -1168,8 +1168,8 @@ public class FinancialAccountsPageHandlerTest {
 
   /**
    * Verifies that {@code loadDeleteBlockersByAccount} maps each SQL reason code to the exact same
-   * {@code REASON_*} wording {@link FinancialAccountHandler} uses for the DELETE 409 message — the
-   * two must never drift apart, since {@code FinancialAccountHandler#deleteAccount} and this
+   * {@code REASON_*} wording {@link FinancialAccountDeleteSupport} uses for the DELETE 409
+   * message — the two must never drift apart, since {@code FinancialAccountHandler#deleteAccount} and this
    * batched, page-scoped loader independently name the same blockers to two different UI surfaces
    * (the 409 error and the list's {@code deleteBlockedReason} field).
    *
@@ -1196,7 +1196,7 @@ public class FinancialAccountsPageHandlerTest {
       Map<String, List<String>> result = handler.loadDeleteBlockersByAccount(CLIENT_ID, ORGS);
 
       // Same constant the DELETE 409 message uses for the "has transactions" blocker.
-      assertEquals(Collections.singletonList(FinancialAccountHandler.REASON_TRANSACTIONS),
+      assertEquals(Collections.singletonList(FinancialAccountDeleteSupport.REASON_TRANSACTIONS),
           result.get("acc-1"));
     }
   }
@@ -1236,9 +1236,9 @@ public class FinancialAccountsPageHandlerTest {
       // The duplicate TRANSACTIONS row is deduplicated, so acc-1 has exactly two distinct
       // reasons, not three.
       assertEquals(2, acc1Reasons.size());
-      assertTrue(acc1Reasons.contains(FinancialAccountHandler.REASON_TRANSACTIONS));
-      assertTrue(acc1Reasons.contains(FinancialAccountHandler.REASON_BANK_CONNECTION));
-      assertEquals(Collections.singletonList(FinancialAccountHandler.REASON_RECONCILIATIONS),
+      assertTrue(acc1Reasons.contains(FinancialAccountDeleteSupport.REASON_TRANSACTIONS));
+      assertTrue(acc1Reasons.contains(FinancialAccountDeleteSupport.REASON_BANK_CONNECTION));
+      assertEquals(Collections.singletonList(FinancialAccountDeleteSupport.REASON_RECONCILIATIONS),
           result.get("acc-2"));
     }
   }
