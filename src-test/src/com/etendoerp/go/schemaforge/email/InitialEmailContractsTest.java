@@ -52,6 +52,13 @@ import com.etendoerp.go.schemaforge.email.contracts.SalesQuotationSendEmailContr
  */
 public class InitialEmailContractsTest {
 
+  /**
+   * Templates the provider gateway exposes, taken verbatim from its own rejection message
+   * (ETP-4786). Anything outside this set is answered with HTTP 400.
+   */
+  private static final List<String> GATEWAY_TEMPLATE_ALLOWLIST =
+      Arrays.asList("reset-password", "login-alert", "invoice", "custom");
+
   @After
   public void clearProperties() {
     System.clearProperty(PublicUrlResolver.APP_BASE_URL_PROPERTY);
@@ -406,6 +413,194 @@ public class InitialEmailContractsTest {
     assertFalse(adapter.getLastRequest().getData().has("amount"));
     assertEquals("https://app.example.test/doc/sales-quotation/quotation-1",
         adapter.getLastRequest().getData().getString("download_link"));
+  }
+
+  /**
+   * ETP-4786 regression guard.
+   * <p>
+   * The document-send family used to emit the template {@code "document"}, which the provider
+   * gateway does not expose. Every send answered
+   * {@code 400 {"error": "Unknown template 'document'. Available: ['reset-password',
+   * 'login-alert', 'invoice', 'custom']"}} and surfaced as PROVIDER_FAILED in the UI. The
+   * pre-existing assertions compared the emitted template against
+   * {@link DefaultDocumentSendEmailContract#DEFAULT_TEMPLATE} itself, so they kept passing with
+   * an unroutable value. This pins the gateway's set instead, verified by direct probe on
+   * 2026-08-06.
+   */
+  @Test
+  public void documentSendDefaultTemplateIsExposedByTheProviderGateway() {
+    assertTrue("DEFAULT_TEMPLATE must be a template the provider gateway exposes "
+            + GATEWAY_TEMPLATE_ALLOWLIST + " but was '"
+            + DefaultDocumentSendEmailContract.DEFAULT_TEMPLATE + "'",
+        GATEWAY_TEMPLATE_ALLOWLIST.contains(DefaultDocumentSendEmailContract.DEFAULT_TEMPLATE));
+  }
+
+  @Test
+  public void documentSendEmitsAllowlistedTemplateWithContractOwnedSubjectAndBody()
+      throws Exception {
+    FakeProviderAdapter adapter = new FakeProviderAdapter();
+    TransactionalEmailService service = service(adapter);
+
+    JSONObject command = baseCommand();
+    command.put(EmailContractCommandSupport.FIELD_RECORD_ID, "order-1");
+
+    NeoResponse response = service.send("sales-order-send", command);
+
+    assertSent(response);
+    String template = adapter.getLastRequest().getTemplate();
+    assertTrue("Emitted template '" + template + "' is not exposed by the provider gateway "
+        + GATEWAY_TEMPLATE_ALLOWLIST, GATEWAY_TEMPLATE_ALLOWLIST.contains(template));
+
+    // The content template renders caller-supplied copy, so the contract must provide it.
+    JSONObject data = adapter.getLastRequest().getData();
+    assertEquals("Pedido de Venta #SO-0007 — Empresa SRL", data.getString("subject"));
+    assertTrue(data.getString("body").contains("SO-0007"));
+    assertTrue(data.getString("body").contains(
+        "https://app.example.test/doc/sales-order/order-1"));
+    // The provider variables the document payload already carried stay untouched.
+    assertEquals("Sales Order", data.getString("document_type"));
+  }
+
+  /**
+   * ETP-4717 + ETP-4786 — option B: an edited send swaps the contract's branded template for the
+   * content template, for that send only. Sales invoice is the case that matters, because it is the
+   * only contract with branded copy today.
+   */
+  @Test
+  public void editedSalesInvoiceSendSwapsBrandedTemplateForContentTemplate() throws Exception {
+    FakeProviderAdapter adapter = new FakeProviderAdapter();
+    TransactionalEmailService service = service(adapter);
+
+    JSONObject command = baseCommand();
+    command.put(EmailContractCommandSupport.FIELD_RECORD_ID, "invoice-1");
+    JSONObject edits = new JSONObject();
+    edits.put("subject", "Su factura corregida");
+    edits.put("message", "Adjuntamos la factura\ncon el importe corregido.");
+    command.put(EmailContractCommandSupport.FIELD_MESSAGE_EDITS, edits);
+
+    NeoResponse response = service.send("sales-invoice-send", command);
+
+    assertSent(response);
+    assertEquals("custom", adapter.getLastRequest().getTemplate());
+    JSONObject data = adapter.getLastRequest().getData();
+    assertEquals("Su factura corregida", data.getString("subject"));
+    // Newlines become <br>, and the invoice variables still travel untouched.
+    assertEquals("Adjuntamos la factura<br>con el importe corregido.", data.getString("body"));
+    assertEquals("0001-00042", data.getString("invoice_number"));
+  }
+
+  @Test
+  public void untouchedSalesInvoiceSendKeepsBrandedTemplateWithoutContentFields() throws Exception {
+    FakeProviderAdapter adapter = new FakeProviderAdapter();
+    TransactionalEmailService service = service(adapter);
+
+    JSONObject command = baseCommand();
+    command.put(EmailContractCommandSupport.FIELD_RECORD_ID, "invoice-1");
+
+    NeoResponse response = service.send("sales-invoice-send", command);
+
+    assertSent(response);
+    assertEquals("invoice", adapter.getLastRequest().getTemplate());
+    assertFalse(adapter.getLastRequest().getData().has("subject"));
+    assertFalse(adapter.getLastRequest().getData().has("body"));
+  }
+
+  @Test
+  public void editedDocumentSendEscapesOperatorMarkup() throws Exception {
+    FakeProviderAdapter adapter = new FakeProviderAdapter();
+    TransactionalEmailService service = service(adapter);
+
+    JSONObject command = baseCommand();
+    command.put(EmailContractCommandSupport.FIELD_RECORD_ID, "order-1");
+    JSONObject edits = new JSONObject();
+    edits.put("message", "<script>alert('x')</script> & listo");
+    command.put(EmailContractCommandSupport.FIELD_MESSAGE_EDITS, edits);
+
+    NeoResponse response = service.send("sales-order-send", command);
+
+    assertSent(response);
+    String body = adapter.getLastRequest().getData().getString("body");
+    assertEquals("&lt;script&gt;alert(&#39;x&#39;)&lt;/script&gt; &amp; listo", body);
+  }
+
+  @Test
+  public void malformedMessageEditsAreRejectedBeforeReachingTheProvider() throws Exception {
+    FakeProviderAdapter adapter = new FakeProviderAdapter();
+    TransactionalEmailService service = service(adapter);
+
+    JSONObject command = baseCommand();
+    command.put(EmailContractCommandSupport.FIELD_RECORD_ID, "order-1");
+    JSONObject edits = new JSONObject();
+    edits.put("bodyHtml", "<b>nope</b>");
+    command.put(EmailContractCommandSupport.FIELD_MESSAGE_EDITS, edits);
+
+    NeoResponse response = service.send("sales-order-send", command);
+
+    JSONObject data = responseData(response);
+    assertEquals(TransactionalEmailService.STATUS_VALIDATION_FAILED, data.getString("status"));
+    assertEquals(0, adapter.getSendCount());
+  }
+
+  /**
+   * Without the content hash in the send key, correcting the message and re-sending to the same
+   * recipients collides with the previous send and is answered DUPLICATE, so nothing is delivered.
+   */
+  @Test
+  public void editingTheMessageAndResendingIsNotTreatedAsADuplicate() throws Exception {
+    FakeProviderAdapter adapter = new FakeProviderAdapter();
+    InMemoryEmailSafetyStore safetyStore = new InMemoryEmailSafetyStore();
+    TransactionalEmailService service = service(adapter, safetyStore);
+
+    JSONObject first = baseCommand();
+    first.put(EmailContractCommandSupport.FIELD_RECORD_ID, "order-1");
+    JSONObject firstEdits = new JSONObject();
+    firstEdits.put("message", "Primer intento");
+    first.put(EmailContractCommandSupport.FIELD_MESSAGE_EDITS, firstEdits);
+    assertSent(service.send("sales-order-send", first));
+
+    JSONObject second = baseCommand();
+    second.put(EmailContractCommandSupport.FIELD_RECORD_ID, "order-1");
+    JSONObject secondEdits = new JSONObject();
+    secondEdits.put("message", "Texto corregido");
+    second.put(EmailContractCommandSupport.FIELD_MESSAGE_EDITS, secondEdits);
+
+    NeoResponse response = service.send("sales-order-send", second);
+
+    assertSent(response);
+    assertEquals(2, adapter.getSendCount());
+    assertEquals("Texto corregido", adapter.getLastRequest().getData().getString("body"));
+  }
+
+  @Test
+  public void authContractsRejectMessageEdits() throws Exception {
+    FakeProviderAdapter adapter = new FakeProviderAdapter();
+    TransactionalEmailService service = service(adapter);
+
+    JSONObject command = baseCommand();
+    command.put(EmailContractCommandSupport.FIELD_ACCOUNT_ID, "account-1");
+    command.put(EmailContractCommandSupport.FIELD_LINK, "https://app.example.test/reset?token=a");
+    JSONObject edits = new JSONObject();
+    edits.put("subject", "intento de override");
+    command.put(EmailContractCommandSupport.FIELD_MESSAGE_EDITS, edits);
+
+    NeoResponse response = service.send("reset-password", command);
+
+    JSONObject data = responseData(response);
+    assertEquals(400, response.getHttpStatus());
+    assertEquals("messageEdits is not accepted by this contract", data.getString("message"));
+    assertEquals(0, adapter.getSendCount());
+  }
+
+  @Test
+  public void documentTemplateCanBeOverriddenByConfiguration() {
+    assertEquals(DefaultDocumentSendEmailContract.DEFAULT_TEMPLATE,
+        DefaultDocumentSendEmailContract.resolveDefaultTemplate());
+    System.setProperty(DefaultDocumentSendEmailContract.PROP_DOCUMENT_TEMPLATE, "document");
+    try {
+      assertEquals("document", DefaultDocumentSendEmailContract.resolveDefaultTemplate());
+    } finally {
+      System.clearProperty(DefaultDocumentSendEmailContract.PROP_DOCUMENT_TEMPLATE);
+    }
   }
 
   @Test

@@ -27,14 +27,40 @@ import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.base.exception.OBException;
 
+import com.etendoerp.go.common.ConfigPropertyReader;
+
 /**
  * Base contract for document-send transactional emails resolved from trusted server records.
  */
 public class DefaultDocumentSendEmailContract implements EmailContract {
 
-  public static final String DEFAULT_TEMPLATE = "document";
+  /**
+   * Provider template that renders caller-supplied {@code subject}/{@code body} instead of
+   * carrying copy of its own.
+   */
+  public static final String CONTENT_TEMPLATE = "custom";
+
+  /**
+   * Provider template used by the document-send family when no contract overrides it.
+   * <p>
+   * ETP-4786: this was {@code "document"}, a template the provider gateway does not expose. The
+   * gateway answered every send with
+   * {@code 400 Unknown template 'document'. Available: ['reset-password', 'login-alert',
+   * 'invoice', 'custom']}, surfacing in the UI as "the email provider could not send the
+   * document". {@code custom} is the bring-your-own-content template, so this contract also
+   * supplies {@code subject} and {@code body} (see {@link #buildTemplateData}). Override with
+   * {@link #PROP_DOCUMENT_TEMPLATE} once the gateway publishes a branded document template.
+   */
+  public static final String DEFAULT_TEMPLATE = CONTENT_TEMPLATE;
+
+  public static final String PROP_DOCUMENT_TEMPLATE =
+      "etendo.go.email.provider.documentTemplate";
+  public static final String ENV_DOCUMENT_TEMPLATE =
+      "ETGO_EMAIL_PROVIDER_DOCUMENT_TEMPLATE";
 
   private static final String DOCUMENT_RECORD_NOT_FOUND = "Email document record was not found";
+  private static final String FIELD_SUBJECT = "subject";
+  private static final String FIELD_BODY = "body";
 
   private final String name;
   private final String template;
@@ -45,7 +71,7 @@ public class DefaultDocumentSendEmailContract implements EmailContract {
 
   protected DefaultDocumentSendEmailContract(String name, String documentType,
       EmailDocumentRecordResolver documentResolver) {
-    this(name, DEFAULT_TEMPLATE, documentType, null, false, documentResolver);
+    this(name, resolveDefaultTemplate(), documentType, null, false, documentResolver);
   }
 
   protected DefaultDocumentSendEmailContract(String name, String template, String documentType,
@@ -63,6 +89,16 @@ public class DefaultDocumentSendEmailContract implements EmailContract {
     this.documentNumberAlias = StringUtils.trimToNull(documentNumberAlias);
     this.includeAmount = includeAmount;
     this.documentResolver = Objects.requireNonNull(documentResolver, "documentResolver");
+  }
+
+  /**
+   * Resolves the provider template used by contracts that do not pin one of their own.
+   *
+   * @return configured document template, or {@link #DEFAULT_TEMPLATE} when unset
+   */
+  static String resolveDefaultTemplate() {
+    return StringUtils.defaultIfBlank(ConfigPropertyReader.readConfigValue(PROP_DOCUMENT_TEMPLATE,
+        ENV_DOCUMENT_TEMPLATE, null), DEFAULT_TEMPLATE);
   }
 
   @Override
@@ -153,12 +189,24 @@ public class DefaultDocumentSendEmailContract implements EmailContract {
           TransactionalEmailService.STATUS_VALIDATION_FAILED,
           "Document download link is not configured");
     }
+    Optional<EmailMessageEdits> messageEdits;
+    try {
+      messageEdits = EmailMessageEdits.fromBody(command.getBody());
+    } catch (EmailMessageEdits.InvalidMessageEditsException e) {
+      return EmailContractResolution.rejected(400,
+          TransactionalEmailService.STATUS_VALIDATION_FAILED, e.getMessage());
+    }
+    // ETP-4717 + ETP-4786 — the branded template carries its own copy and cannot render an
+    // operator-authored message, so an edited send switches to the content template for that send
+    // only. Untouched sends keep the contract's own template (and thus the branded email).
+    String effectiveTemplate = messageEdits.isPresent() ? CONTENT_TEMPLATE : template;
     try {
       EmailRecipientSet recipients = recipient.getRecipientSet() != null
           ? recipient.getRecipientSet()
           : EmailRecipientSet.singleTo(recipient.getRecipient());
-      return EmailContractResolution.ready(new EmailProviderRequest(recipients,
-          template, buildTemplateData(document.get(), downloadLink.get()), null));
+      return EmailContractResolution.ready(new EmailProviderRequest(recipients, effectiveTemplate,
+          buildTemplateData(document.get(), downloadLink.get(), effectiveTemplate, messageEdits),
+          null));
     } catch (JSONException e) {
       throw new OBException("Could not build document email payload for " + name, e);
     }
@@ -176,7 +224,8 @@ public class DefaultDocumentSendEmailContract implements EmailContract {
         ? recipient.getRecipientSet()
         : providerRequest.getRecipients();
     return EmailDeliveryPolicy.serverDerived(
-        resolveSendIdempotencyKey(tenantId, documentRecordId, finalRecipients),
+        resolveSendIdempotencyKey(tenantId, documentRecordId, finalRecipients,
+            messageEditsQuietly(command)),
         java.util.Arrays.asList(
             EmailThrottleRule.perTenant(100, 3600),
             EmailThrottleRule.perUser(50, 3600),
@@ -186,8 +235,8 @@ public class DefaultDocumentSendEmailContract implements EmailContract {
             EmailThrottleRule.global(2000, 60)));
   }
 
-  private JSONObject buildTemplateData(EmailDocumentRecord document, String downloadLink)
-      throws JSONException {
+  private JSONObject buildTemplateData(EmailDocumentRecord document, String downloadLink,
+      String effectiveTemplate, Optional<EmailMessageEdits> messageEdits) throws JSONException {
     JSONObject data = new JSONObject();
     data.put("name", StringUtils.defaultIfBlank(document.getRecipientName(), "Customer"));
     data.put("document_type", documentType);
@@ -199,7 +248,63 @@ public class DefaultDocumentSendEmailContract implements EmailContract {
       data.put("amount", document.getAmount());
     }
     data.put("download_link", downloadLink);
+    if (CONTENT_TEMPLATE.equals(effectiveTemplate)) {
+      // The content template has no copy of its own, so subject and body must be supplied. They
+      // default to contract-composed values built from the trusted document record; the operator's
+      // allowlisted messageEdits override them when present, escaped by EmailMessageEdits.
+      data.put(FIELD_SUBJECT, resolveSubject(document, messageEdits));
+      data.put(FIELD_BODY, resolveBody(document, downloadLink, messageEdits));
+    }
     return data;
+  }
+
+  private String resolveSubject(EmailDocumentRecord document,
+      Optional<EmailMessageEdits> messageEdits) {
+    String override = messageEdits.map(EmailMessageEdits::getSubject).orElse(null);
+    return override != null ? override : buildSubject(document);
+  }
+
+  private String resolveBody(EmailDocumentRecord document, String downloadLink,
+      Optional<EmailMessageEdits> messageEdits) {
+    String override = messageEdits.map(EmailMessageEdits::toHtmlBody).orElse(null);
+    return override != null ? override : buildBody(document, downloadLink);
+  }
+
+  /**
+   * Display name of the document type used in the subject and body of content-template emails.
+   * Contracts override this to localize; {@link #documentType} stays as the provider
+   * {@code document_type} variable and is not affected.
+   *
+   * @return human-facing document type label
+   */
+  protected String documentTypeLabel() {
+    return documentType;
+  }
+
+  /**
+   * Builds the default subject line, deliberately mirroring the shape the send modal displays
+   * ({@code {documentType} #{documentNo} — {businessPartner}}) so that an operator who edits only
+   * the message does not see the subject change meaning: the modal posts its own derived subject
+   * back as the override, and the two must agree.
+   * <p>
+   * Known limitation: the modal derives its label from the active UI locale while
+   * {@link #documentTypeLabel()} is a fixed Spanish string, so the two diverge under {@code en_US}.
+   */
+  private String buildSubject(EmailDocumentRecord document) {
+    String subject = documentTypeLabel() + " #" + document.getDocumentNumber();
+    String recipientName = StringUtils.trimToNull(document.getRecipientName());
+    return recipientName == null ? subject : subject + " — " + recipientName;
+  }
+
+  /**
+   * Builds the default body. The content template renders {@code body} as HTML, so this emits
+   * markup rather than plain text; operator-authored bodies are escaped by
+   * {@link EmailMessageEdits#toHtmlBody()} before they reach this slot.
+   */
+  private String buildBody(EmailDocumentRecord document, String downloadLink) {
+    return "<p>Le enviamos su " + documentTypeLabel() + " " + document.getDocumentNumber()
+        + ".</p><p>Puede descargarlo desde este enlace: <a href=\"" + downloadLink + "\">"
+        + downloadLink + "</a></p>";
   }
 
   /**
@@ -228,13 +333,33 @@ public class DefaultDocumentSendEmailContract implements EmailContract {
 
   /**
    * Server-derived send idempotency key: {@code {contract}:{tenant}:{record}:send:v1:
-   * {recipientSetHash}}. The caller-supplied idempotency key is ignored for document sends.
+   * {recipientSetHash}}, with {@code :{contentHash}} appended only when the operator authored the
+   * copy. The caller-supplied idempotency key is ignored for document sends.
+   * <p>
+   * The content hash matters: without it, correcting the message and re-sending to the same
+   * recipients produces the same key as the previous send and is answered {@code DUPLICATE}, so the
+   * corrected email is never delivered. It is appended conditionally so untouched sends keep
+   * exactly the key they had before ETP-4717.
    */
   private String resolveSendIdempotencyKey(String tenantId, String recordId,
-      EmailRecipientSet finalRecipients) {
+      EmailRecipientSet finalRecipients, Optional<EmailMessageEdits> messageEdits) {
     String normalizedTenant = StringUtils.defaultIfBlank(tenantId, "global");
-    return name + ":" + normalizedTenant + ":" + recordId + ":send:"
+    String key = name + ":" + normalizedTenant + ":" + recordId + ":send:"
         + EmailContractCommandSupport.VERSION + ":" + finalRecipients.recipientSetHash();
+    return messageEdits.isPresent() ? key + ":" + messageEdits.get().contentHash() : key;
+  }
+
+  /**
+   * Re-reads {@code messageEdits} for delivery-policy purposes. {@link #resolve} already rejected
+   * malformed payloads with a 400, so a parse failure here cannot reach a real send and degrades to
+   * "no edits".
+   */
+  private Optional<EmailMessageEdits> messageEditsQuietly(EmailContractCommand command) {
+    try {
+      return EmailMessageEdits.fromBody(command == null ? null : command.getBody());
+    } catch (EmailMessageEdits.InvalidMessageEditsException e) {
+      return Optional.empty();
+    }
   }
 
   private String resolveEffectiveRecordId(EmailDocumentRecord document, String fallbackRecordId) {
