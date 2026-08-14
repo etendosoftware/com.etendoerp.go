@@ -18,11 +18,13 @@
 package com.etendoerp.go.schemaforge.handlers;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
@@ -32,6 +34,7 @@ import static org.mockito.Mockito.when;
 
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.Date;
 import java.util.List;
 
 import org.codehaus.jettison.json.JSONArray;
@@ -40,6 +43,7 @@ import org.hibernate.criterion.Criterion;
 import org.junit.Test;
 import org.mockito.ArgumentCaptor;
 import org.mockito.MockedStatic;
+import org.mockito.Mockito;
 import org.openbravo.base.provider.OBProvider;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.security.OrganizationStructureProvider;
@@ -49,6 +53,7 @@ import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.ad.utility.Sequence;
 import org.openbravo.model.common.enterprise.DocumentType;
 import org.openbravo.model.common.enterprise.Organization;
+import org.openbravo.model.common.invoice.Invoice;
 
 import com.etendoerp.go.schemaforge.NeoContext;
 import com.etendoerp.go.schemaforge.NeoEndpointType;
@@ -80,13 +85,225 @@ public class TbaiConfigSequenceHandlerTest {
   private static final String ORG_ID = "org-001";
   private static final String ORG_NAME = "Acme Spain";
 
-  // ─── handle(): always a pre-hook no-op ───────────────────────────────────────
+  // ─── handle(): smart deactivation dispatch guards ────────────────────────────
 
   @Test
-  public void handleAlwaysReturnsNull() {
+  public void handleReturnsNullForNonPutMethod() {
     TbaiConfigSequenceHandler handler = new TbaiConfigSequenceHandler();
-    NeoContext ctx = NeoContext.builder().httpMethod("POST").build();
-    assertNull(handler.handle(ctx));
+    // POST, GET, PATCH, DELETE all fall through — only PUT triggers smart deactivation.
+    assertNull(handler.handle(NeoContext.builder().httpMethod("POST").build()));
+    assertNull(handler.handle(NeoContext.builder().httpMethod("GET").build()));
+    assertNull(handler.handle(NeoContext.builder().httpMethod("PATCH").build()));
+    assertNull(handler.handle(NeoContext.builder().httpMethod("DELETE").build()));
+  }
+
+  @Test
+  public void handleReturnsNullWhenBodyHasNoActiveField() throws Exception {
+    TbaiConfigSequenceHandler handler = new TbaiConfigSequenceHandler();
+    assertNull(handler.handle(NeoContext.builder()
+        .httpMethod("PUT")
+        .requestBody(new JSONObject().put("name", "foo"))
+        .recordId(RECORD_ID)
+        .build()));
+  }
+
+  @Test
+  public void handleReturnsNullWhenActiveIsTrue() throws Exception {
+    TbaiConfigSequenceHandler handler = new TbaiConfigSequenceHandler();
+    assertNull(handler.handle(NeoContext.builder()
+        .httpMethod("PUT")
+        .requestBody(new JSONObject().put("active", true))
+        .recordId(RECORD_ID)
+        .build()));
+  }
+
+  @Test
+  public void handleReturnsNullWhenRecordIdIsBlank() throws Exception {
+    TbaiConfigSequenceHandler handler = new TbaiConfigSequenceHandler();
+    assertNull(handler.handle(NeoContext.builder()
+        .httpMethod("PUT")
+        .requestBody(new JSONObject().put("active", false))
+        .recordId("   ")
+        .build()));
+  }
+
+  // ─── handle(): smartDeactivate scenarios ─────────────────────────────────────
+
+  @Test
+  public void smartDeactivateReturnsNullWhenConfigNotFound() throws Exception {
+    TbaiConfigSequenceHandler handler = new TbaiConfigSequenceHandler();
+
+    try (MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+
+      obCtxMock.when(() -> OBContext.setAdminMode(true)).then(inv -> null);
+      obCtxMock.when(OBContext::restorePreviousMode).then(inv -> null);
+
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(eq(TbaiConfig.class), eq(RECORD_ID))).thenReturn(null);
+
+      NeoResponse result = handler.handle(NeoContext.builder()
+          .httpMethod("PUT")
+          .requestBody(new JSONObject().put("active", false))
+          .recordId(RECORD_ID)
+          .build());
+
+      assertNull(result);
+      verify(dal, never()).remove(any());
+    }
+  }
+
+  @Test
+  public void smartDeactivateDeletesAndReturnsDeletedWhenTbaisystemdateIsNull() throws Exception {
+    TbaiConfigSequenceHandler handler = new TbaiConfigSequenceHandler();
+
+    try (MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+
+      obCtxMock.when(() -> OBContext.setAdminMode(true)).then(inv -> null);
+      obCtxMock.when(OBContext::restorePreviousMode).then(inv -> null);
+
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      TbaiConfig config = mock(TbaiConfig.class);
+      when(dal.get(eq(TbaiConfig.class), eq(RECORD_ID))).thenReturn(config);
+
+      Organization org = mock(Organization.class);
+      when(org.getId()).thenReturn(ORG_ID);
+      when(config.getOrganization()).thenReturn(org);
+      // tbaisystemdate is null — config never entered the fiscal system
+      when(config.getTbaisystemdate()).thenReturn(null);
+
+      NeoResponse result = handler.handle(NeoContext.builder()
+          .httpMethod("PUT")
+          .requestBody(new JSONObject().put("active", false))
+          .recordId(RECORD_ID)
+          .build());
+
+      verify(dal).remove(config);
+      verify(dal).flush();
+      assertNotNull(result);
+      assertEquals(200, result.getHttpStatus());
+      assertEquals(true, result.getBody().getBoolean("deleted"));
+    }
+  }
+
+  @Test
+  public void smartDeactivateDeletesWhenAdoptionDateSetButNoTbaiInvoices() throws Exception {
+    TbaiConfigSequenceHandler handler = new TbaiConfigSequenceHandler();
+    Date adoptionDate = new Date();
+
+    try (MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+
+      obCtxMock.when(() -> OBContext.setAdminMode(true)).then(inv -> null);
+      obCtxMock.when(OBContext::restorePreviousMode).then(inv -> null);
+
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      TbaiConfig config = mock(TbaiConfig.class);
+      when(dal.get(eq(TbaiConfig.class), eq(RECORD_ID))).thenReturn(config);
+
+      Organization org = mock(Organization.class);
+      when(org.getId()).thenReturn(ORG_ID);
+      when(config.getOrganization()).thenReturn(org);
+      when(config.getTbaisystemdate()).thenReturn(adoptionDate);
+
+      // hasTbaiInvoicesSince → OBCriteria returns count 0
+      @SuppressWarnings("unchecked")
+      OBCriteria<Invoice> crit = mock(OBCriteria.class);
+      when(dal.createCriteria(Invoice.class)).thenReturn(crit);
+      when(crit.add(any())).thenReturn(crit);
+      when(crit.setProjection(any())).thenReturn(crit);
+      when(crit.uniqueResult()).thenReturn(0L);
+
+      NeoResponse result = handler.handle(NeoContext.builder()
+          .httpMethod("PUT")
+          .requestBody(new JSONObject().put("active", false))
+          .recordId(RECORD_ID)
+          .build());
+
+      verify(dal).remove(config);
+      verify(dal).flush();
+      assertNotNull(result);
+      assertEquals(200, result.getHttpStatus());
+      assertEquals(true, result.getBody().getBoolean("deleted"));
+    }
+  }
+
+  @Test
+  public void smartDeactivateReturnsNullWhenTbaiInvoicesExist() throws Exception {
+    TbaiConfigSequenceHandler handler = new TbaiConfigSequenceHandler();
+    Date adoptionDate = new Date();
+
+    try (MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+
+      obCtxMock.when(() -> OBContext.setAdminMode(true)).then(inv -> null);
+      obCtxMock.when(OBContext::restorePreviousMode).then(inv -> null);
+
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      TbaiConfig config = mock(TbaiConfig.class);
+      when(dal.get(eq(TbaiConfig.class), eq(RECORD_ID))).thenReturn(config);
+
+      Organization org = mock(Organization.class);
+      when(org.getId()).thenReturn(ORG_ID);
+      when(config.getOrganization()).thenReturn(org);
+      when(config.getTbaisystemdate()).thenReturn(adoptionDate);
+
+      // hasTbaiInvoicesSince → OBCriteria returns count > 0
+      @SuppressWarnings("unchecked")
+      OBCriteria<Invoice> crit = mock(OBCriteria.class);
+      when(dal.createCriteria(Invoice.class)).thenReturn(crit);
+      when(crit.add(any())).thenReturn(crit);
+      when(crit.setProjection(any())).thenReturn(crit);
+      when(crit.uniqueResult()).thenReturn(4L);
+
+      NeoResponse result = handler.handle(NeoContext.builder()
+          .httpMethod("PUT")
+          .requestBody(new JSONObject().put("active", false))
+          .recordId(RECORD_ID)
+          .build());
+
+      // TBAI invoices found → fallthrough to default CRUD deactivation
+      assertNull(result);
+      verify(dal, never()).remove(any());
+    }
+  }
+
+  // ─── handle(): 500 on unexpected exception (must NOT fall through to default CRUD) ───
+
+  @Test
+  public void handleReturns500OnUnexpectedException() throws Exception {
+    TbaiConfigSequenceHandler handler = new TbaiConfigSequenceHandler();
+
+    try (MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+
+      obCtxMock.when(() -> OBContext.setAdminMode(true)).then(inv -> null);
+      obCtxMock.when(OBContext::restorePreviousMode).then(inv -> null);
+
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(eq(TbaiConfig.class), Mockito.anyString()))
+          .thenThrow(new RuntimeException("DB exploded"));
+
+      NeoResponse result = handler.handle(NeoContext.builder()
+          .httpMethod("PUT")
+          .requestBody(new JSONObject().put("active", false))
+          .recordId(RECORD_ID)
+          .build());
+      // Must return 500, NOT null — returning null would let the default CRUD deactivate
+      // the record without verifying pending invoices, bypassing the business rule.
+      assertNotNull(result);
+      assertEquals(500, result.getHttpStatus());
+      obCtxMock.verify(OBContext::restorePreviousMode, times(1));
+    }
   }
 
   // ─── afterHandle: endpoint/method guards ─────────────────────────────────────
@@ -652,6 +869,45 @@ public class TbaiConfigSequenceHandlerTest {
 
       assertNull(handler.afterHandle(ctx));
       obCtxMock.verify(OBContext::restorePreviousMode, times(1));
+    }
+  }
+
+  // ─── afterHandle: skips sequence assignment when handle() already deleted ─────
+
+  /**
+   * Regression guard for ETP-4785: when {@link TbaiConfigSequenceHandler#handle} already
+   * deleted the config record (smart deactivation), {@code afterHandle} must detect the
+   * {@code deleted:true} marker in the {@code preResult} and skip sequence assignment — trying
+   * to load a deleted config would either return null (and silently no-op) or fail with a DB
+   * error. This asserts the guard is active so the behaviour is explicit and stable.
+   */
+  @Test
+  public void afterHandleSkipsSequenceAssignmentWhenPreResultIndicatesDeleted() throws Exception {
+    TbaiConfigSequenceHandler handler = new TbaiConfigSequenceHandler();
+
+    JSONObject deletedBody = new JSONObject().put("deleted", true);
+    NeoContext ctx = NeoContext.builder()
+        .endpointType(NeoEndpointType.CRUD)
+        .httpMethod("PUT")
+        .recordId(RECORD_ID)
+        .previousResult(new com.etendoerp.go.schemaforge.NeoResponse(200, deletedBody))
+        .build();
+
+    try (MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+
+      obCtxMock.when(() -> OBContext.setAdminMode(anyBoolean())).then(inv -> null);
+      obCtxMock.when(OBContext::restorePreviousMode).then(inv -> null);
+
+      OBDal obDal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(obDal);
+
+      assertNull(handler.afterHandle(ctx));
+
+      // OBContext.setAdminMode should never be called — the guard fires before entering
+      // the try-block that wraps ensureTbaiSequences.
+      obCtxMock.verify(() -> OBContext.setAdminMode(anyBoolean()), never());
+      verify(obDal, never()).get(eq(TbaiConfig.class), Mockito.anyString());
     }
   }
 }
