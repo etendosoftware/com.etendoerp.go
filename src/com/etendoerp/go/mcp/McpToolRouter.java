@@ -980,13 +980,23 @@ public class McpToolRouter {
     }
 
     // Usage hints
+    // IMP-28: `visibility` is the authoritative key for what you may send — `readOnly` is ORed
+    // from a structural check plus curated data plus visibility itself, so a field can be
+    // readOnly:true for a reason visibility does not spell out; read visibility first. A
+    // read-only field is not necessarily a dead end: when its value is derived from another
+    // entity, `writableVia` names where to set it instead of silently giving up.
     entitySchema.put("hint",
         "Call neo_schema with view:\"create\" to get only the fields you may send, already split "
         + "into required/optional — this full response is far larger than you need. "
         + "Fields with userRequired=true: MUST be provided in neo_create. "
         + "Fields with visibility=system are auto-derived by Etendo callouts — omit them. "
         + "Fields with visibility=discarded are excluded — do not send them. "
-        + "Fields with readOnly=true are auto-generated (DocumentNo, IDs). "
+        + "visibility=readOnly means you cannot set this field here — trust visibility over "
+        + "readOnly, which only reports whether the value is locked, not why. "
+        + "Fields with readOnly=true cannot be set by you: this covers auto-generated "
+        + "identifiers (DocumentNo, IDs) as well as values derived/maintained elsewhere. "
+        + "When such a field carries a writableVia pointer, it names the spec/entity where "
+        + "the value is actually writable — call neo_schema there instead of giving up. "
         + "Use neo_selectors for FK fields with hasSelector=true. "
         + "Fields with businessCritical=true carry core business data (amounts, categories, "
         + "key dates) — you MUST confirm these values with the user before creating or "

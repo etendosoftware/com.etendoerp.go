@@ -467,15 +467,21 @@ final class McpSchemaFieldBuilder {
     // used to report readOnly:false while its own "visibility":"readOnly" said the opposite. OR
     // the two signals together; never drop the structural check, it is the only one covering
     // columns with no SFField row.
-    boolean curatedReadOnly = Boolean.TRUE.equals(readOnlyByColumnId.get((String) col.getId()));
-    fieldObj.put("readOnly", isReadOnlyColumn(adTab, col) || curatedReadOnly);
-    addDefaultExpression(fieldObj, col);
     String visibility = visibilityByColumnId.get((String) col.getId());
+    boolean curatedReadOnly = Boolean.TRUE.equals(readOnlyByColumnId.get((String) col.getId()));
+    // Belt-and-suspenders for the same invariant: visibility="readOnly" forces readOnly=true even
+    // if the SFField row's own ISREADONLY column were ever mis-curated to N — VISIBILITY and
+    // ISREADONLY should already agree via push-to-neo.js, but the emitted contract must not depend
+    // on that staying true forever.
+    boolean visibilityIsReadOnly = "readOnly".equals(visibility);
+    fieldObj.put("readOnly", isReadOnlyColumn(adTab, col) || curatedReadOnly || visibilityIsReadOnly);
+    addDefaultExpression(fieldObj, col);
     addVisibility(fieldObj, visibility, !isButton && col.isMandatory());
     boolean isBusinessCritical = Boolean.TRUE.equals(
         businessCriticalByColumnId.get((String) col.getId()));
     addAgentPrompt(fieldObj, promptByColumnId.get((String) col.getId()));
     addSelectorInfo(fieldObj, refId, selectorRefs);
+    addWritableVia(fieldObj, dalEntity, dbColName);
     if (isButton) {
       addButtonInfo(fieldObj, col, visibility, isHiddenButtonField(adTab, col));
       isBusinessCritical = isBusinessCritical || isCriticalAction(fieldObj, dbColName);
@@ -810,5 +816,86 @@ final class McpSchemaFieldBuilder {
       fieldObj.put("hasSelector", true);
       fieldObj.put("selectorType", mapSelectorType(refId));
     }
+  }
+
+  /**
+   * IMP-28 (§7.5a): maps a stored-computed column's {@code AD_Column.Computation_Function} name
+   * to the entity path that actually owns the value it mirrors.
+   *
+   * <p>Keyed by function name, not by column id/name/table — this is deliberate. AD's stored
+   * computed column framework ({@code Computation_Mode='S'/'Q'}, enforced by
+   * {@code ColumnStoredComputedHandler}, EPL-1807) records only that a column is derived and by
+   * which function; it carries no queryable pointer from the column to the source table/entity
+   * that maintains the underlying data — that link only exists inside the function body. So this
+   * map cannot be derived from AD metadata alone; it is a curated table, same as the
+   * {@code businessCritical}/{@code visibility} curation already sitting in {@code SFField}.
+   * What *is* data-driven is the trigger: {@link #addWritableVia} only consults this map for a
+   * property that actually reports a non-blank {@link Property#getComputationFunction()} — so a
+   * read-only field that is NOT a stored computed column (e.g. {@code product/stock}'s
+   * {@code quantityOnHand}, which is real data on {@code M_Storage_Detail} curated read-only for
+   * process-integrity reasons) correctly gets no {@code writableVia} rather than a guess.</p>
+   */
+  private static final Map<String, WritableVia> WRITABLE_VIA_BY_COMPUTATION_FUNCTION =
+      buildWritableViaMap();
+
+  private static Map<String, WritableVia> buildWritableViaMap() {
+    Map<String, WritableVia> map = new HashMap<>();
+    map.put("etgo_product_sale_price", new WritableVia("product", "price",
+        "Set on the sale price list (M_ProductPrice where issopricelist='Y')."));
+    map.put("etgo_product_purchase_price", new WritableVia("product", "price",
+        "Set on the purchase price list (M_ProductPrice where issopricelist='N')."));
+    map.put("etgo_product_stock", new WritableVia("physical-inventory", "inventoryLine",
+        "Create a physical-inventory/inventory header, add this line with the counted "
+            + "quantity, then process the document — stock is never written directly."));
+    return map;
+  }
+
+  private static final class WritableVia {
+    private final String spec;
+    private final String entity;
+    private final String note;
+
+    WritableVia(String spec, String entity, String note) {
+      this.spec = spec;
+      this.entity = entity;
+      this.note = note;
+    }
+  }
+
+  /**
+   * IMP-28 (§7.5a/§7.6): a field that is read-only because its value is a stored computed column
+   * must not just say so — it must name where the value can actually be set, or an agent that
+   * correctly declines to write it is left with nowhere to go (the "trap" the item was opened to
+   * close). Omits the key entirely when the column is not a stored computed column, or is one
+   * whose computation function has no known mapping — never emits a guess.
+   */
+  private static void addWritableVia(JSONObject fieldObj, Entity dalEntity, String dbColName)
+      throws JSONException {
+    if (dalEntity == null) {
+      return;
+    }
+    Property prop;
+    try {
+      prop = dalEntity.getPropertyByColumnName(dbColName);
+    } catch (Exception ignored) {
+      return;
+    }
+    if (prop == null) {
+      return;
+    }
+    String computationFunction = prop.getComputationFunction();
+    if (computationFunction == null || computationFunction.trim().isEmpty()) {
+      return;
+    }
+    WritableVia via = WRITABLE_VIA_BY_COMPUTATION_FUNCTION.get(
+        computationFunction.trim().toLowerCase(java.util.Locale.ROOT));
+    if (via == null) {
+      return;
+    }
+    JSONObject viaObj = new JSONObject();
+    viaObj.put("spec", via.spec);
+    viaObj.put("entity", via.entity);
+    viaObj.put("note", via.note);
+    fieldObj.put("writableVia", viaObj);
   }
 }

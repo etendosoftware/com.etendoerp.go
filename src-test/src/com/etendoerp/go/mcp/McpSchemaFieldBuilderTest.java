@@ -46,6 +46,7 @@ import org.mockito.MockedStatic;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
+import org.openbravo.base.model.Entity;
 import org.openbravo.base.model.Property;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
@@ -1665,6 +1666,331 @@ class McpSchemaFieldBuilderTest {
       McpSchemaFieldBuilder.FieldMetadata meta = McpSchemaFieldBuilder.loadFieldMetadata(sfEntity);
 
       assertFalse(meta.businessCriticalByColumnId.get("col-3"));
+    }
+  }
+
+  // ─── loadFieldMetadata — readOnly mapping (IMP-28) ──────────────────
+
+  @Nested
+  @DisplayName("loadFieldMetadata — readOnly mapping (IMP-28)")
+  class LoadFieldMetadataReadOnly {
+
+    @Mock private OBDal mockOBDal;
+    private MockedStatic<OBDal> obDalMock;
+
+    @BeforeEach
+    void setUp() {
+      obDalMock = mockStatic(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(mockOBDal);
+    }
+
+    @AfterEach
+    void tearDown() {
+      obDalMock.close();
+    }
+
+    @SuppressWarnings("unchecked")
+    private OBCriteria<SFField> mockFieldCriteria(List<SFField> fields) {
+      OBCriteria<SFField> crit = mock(OBCriteria.class);
+      when(mockOBDal.createCriteria(SFField.class)).thenReturn(crit);
+      when(crit.list()).thenReturn(fields);
+      return crit;
+    }
+
+    private SFField buildSFField(String columnId, Boolean isReadOnly) {
+      SFField field = mock(SFField.class);
+      Column col = mock(Column.class);
+      when(col.getId()).thenReturn(columnId);
+      when(field.getADColumn()).thenReturn(col);
+      when(field.isReadOnly()).thenReturn(isReadOnly);
+      return field;
+    }
+
+    @Test
+    @DisplayName("field with isReadOnly=true maps to true in result map")
+    void fieldWithTrueMapsToTrue() {
+      SFEntity sfEntity = mock(SFEntity.class);
+      when(sfEntity.getId()).thenReturn("entity-1");
+      mockFieldCriteria(List.of(buildSFField("col-1", true)));
+
+      McpSchemaFieldBuilder.FieldMetadata meta = McpSchemaFieldBuilder.loadFieldMetadata(sfEntity);
+
+      assertTrue(meta.readOnlyByColumnId.get("col-1"));
+    }
+
+    @Test
+    @DisplayName("field with isReadOnly=false maps to false in result map")
+    void fieldWithFalseMapsToFalse() {
+      SFEntity sfEntity = mock(SFEntity.class);
+      when(sfEntity.getId()).thenReturn("entity-2");
+      mockFieldCriteria(List.of(buildSFField("col-2", false)));
+
+      McpSchemaFieldBuilder.FieldMetadata meta = McpSchemaFieldBuilder.loadFieldMetadata(sfEntity);
+
+      assertFalse(meta.readOnlyByColumnId.get("col-2"));
+    }
+
+    @Test
+    @DisplayName("field with isReadOnly=null maps to false — no NPE")
+    void fieldWithNullMapsToFalse() {
+      SFEntity sfEntity = mock(SFEntity.class);
+      when(sfEntity.getId()).thenReturn("entity-3");
+      mockFieldCriteria(List.of(buildSFField("col-3", null)));
+
+      McpSchemaFieldBuilder.FieldMetadata meta = McpSchemaFieldBuilder.loadFieldMetadata(sfEntity);
+
+      assertFalse(meta.readOnlyByColumnId.get("col-3"));
+    }
+  }
+
+  // ─── buildSchemaField — readOnly never disagrees with visibility (IMP-28) ──
+
+  @Nested
+  @DisplayName("buildSchemaField — readOnly never disagrees with visibility (IMP-28)")
+  class ReadOnlyVisibilityInvariant {
+
+    private org.openbravo.model.ad.datamodel.Column buildColumn(String colId, String dbColName) {
+      org.openbravo.model.ad.datamodel.Column col = mock(
+          org.openbravo.model.ad.datamodel.Column.class);
+      org.openbravo.model.ad.domain.Reference ref = mock(
+          org.openbravo.model.ad.domain.Reference.class);
+      when(ref.getId()).thenReturn("10"); // string
+      when(col.getReference()).thenReturn(ref);
+      when(col.getDBColumnName()).thenReturn(dbColName);
+      when(col.getName()).thenReturn(dbColName);
+      when(col.isMandatory()).thenReturn(false);
+      when(col.isUseAutomaticSequence()).thenReturn(false);
+      when(col.getDefaultValue()).thenReturn(null);
+      when(col.getId()).thenReturn(colId);
+      return col;
+    }
+
+    private org.openbravo.model.ad.ui.Tab buildTab() {
+      org.openbravo.model.ad.ui.Tab tab = mock(org.openbravo.model.ad.ui.Tab.class);
+      org.openbravo.model.ad.datamodel.Table table = mock(
+          org.openbravo.model.ad.datamodel.Table.class);
+      when(tab.getTable()).thenReturn(table);
+      when(table.getDBTableName()).thenReturn("M_Product");
+      return tab;
+    }
+
+    private JSONObject build(String colId, String visibility, Boolean curatedReadOnly)
+        throws Exception {
+      org.openbravo.model.ad.datamodel.Column col = buildColumn(colId, "EM_ETGO_Sale_Price");
+      org.openbravo.model.ad.ui.Tab tab = buildTab();
+
+      Map<String, String> visibilityMap = new HashMap<>();
+      if (visibility != null) {
+        visibilityMap.put(colId, visibility);
+      }
+      Map<String, Boolean> readOnlyMap = new HashMap<>();
+      if (curatedReadOnly != null) {
+        readOnlyMap.put(colId, curatedReadOnly);
+      }
+
+      return (JSONObject) invokeStatic("buildSchemaField",
+          new Class<?>[]{ org.openbravo.model.ad.datamodel.Column.class,
+              org.openbravo.model.ad.ui.Tab.class,
+              org.openbravo.base.model.Entity.class,
+              java.util.Map.class,
+              java.util.Map.class,
+              java.util.Map.class,
+              java.util.Map.class,
+              java.util.Set.class },
+          col, tab, null, visibilityMap, new java.util.HashMap<>(), readOnlyMap,
+          new java.util.HashMap<>(), new java.util.HashSet<>());
+    }
+
+    /**
+     * The exact regression this item was opened for: {@code readOnly:false} next to
+     * {@code visibility:"readOnly"} in the same field object (IMP-28 §2).
+     */
+    @Test
+    @DisplayName("visibility=readOnly forces readOnly=true even when ISREADONLY was mis-curated to N")
+    void visibilityReadOnlyForcesReadOnlyTrueEvenIfCuratedFlagSaysNo() throws Exception {
+      JSONObject field = build("col-price", "readOnly", false);
+      assertEquals("readOnly", field.getString("visibility"));
+      assertTrue(field.getBoolean("readOnly"),
+          "readOnly must never be false when visibility is readOnly");
+    }
+
+    @Test
+    @DisplayName("curated ISREADONLY=true sets readOnly=true regardless of the structural check")
+    void curatedReadOnlyTrueSetsReadOnlyTrue() throws Exception {
+      JSONObject field = build("col-price", "readOnly", true);
+      assertTrue(field.getBoolean("readOnly"));
+    }
+
+    @Test
+    @DisplayName("no curation at all leaves a regular column writable")
+    void noCurationLeavesRegularColumnWritable() throws Exception {
+      JSONObject field = build("col-price", null, null);
+      assertFalse(field.has("visibility"));
+      assertFalse(field.getBoolean("readOnly"));
+    }
+
+    @Test
+    @DisplayName("editable visibility with no curated readOnly flag stays writable")
+    void editableVisibilityStaysWritable() throws Exception {
+      JSONObject field = build("col-price", "editable", false);
+      assertEquals("editable", field.getString("visibility"));
+      assertFalse(field.getBoolean("readOnly"));
+    }
+
+    /**
+     * Pins the invariant itself (not a spot check on one field): for every
+     * (visibility, curatedReadOnly) combination a curator could configure, whenever the built
+     * field reports {@code visibility:"readOnly"} it must also report {@code readOnly:true}.
+     */
+    @ParameterizedTest
+    @CsvSource({
+        "readOnly, true",
+        "readOnly, false",
+        "editable, true",
+        "editable, false",
+        "hidden, true",
+        "hidden, false",
+        "system, true",
+        "system, false",
+        "discarded, true",
+        "discarded, false"
+    })
+    @DisplayName("invariant: visibility=readOnly implies readOnly=true, for every curated combination")
+    void invariantHoldsAcrossEveryCombination(String visibility, boolean curatedReadOnly)
+        throws Exception {
+      JSONObject field = build("col-price", visibility, curatedReadOnly);
+      if ("readOnly".equals(field.optString("visibility", null))) {
+        assertTrue(field.getBoolean("readOnly"),
+            "visibility=readOnly must imply readOnly=true (curatedReadOnly was " + curatedReadOnly
+                + ")");
+      }
+    }
+  }
+
+  // ─── addWritableVia (IMP-28 §7.5a) ──────────────────────────────────
+
+  @Nested
+  @DisplayName("addWritableVia")
+  class AddWritableVia {
+
+    private Object invokeAddWritableVia(JSONObject fieldObj, Entity dalEntity, String dbColName)
+        throws Exception {
+      Method method = McpSchemaFieldBuilder.class.getDeclaredMethod("addWritableVia",
+          JSONObject.class, Entity.class, String.class);
+      method.setAccessible(true);
+      return method.invoke(null, fieldObj, dalEntity, dbColName);
+    }
+
+    @Test
+    @DisplayName("a stored-computed sale price column gets writableVia pointing at product/price")
+    void salePriceGetsWritableViaProductPrice() throws Exception {
+      Entity dalEntity = mock(Entity.class);
+      Property prop = mock(Property.class);
+      when(dalEntity.getPropertyByColumnName("EM_ETGO_Sale_Price")).thenReturn(prop);
+      when(prop.getComputationFunction()).thenReturn("etgo_product_sale_price");
+
+      JSONObject fieldObj = new JSONObject();
+      invokeAddWritableVia(fieldObj, dalEntity, "EM_ETGO_Sale_Price");
+
+      JSONObject via = fieldObj.getJSONObject("writableVia");
+      assertEquals("product", via.getString("spec"));
+      assertEquals("price", via.getString("entity"));
+      assertTrue(via.has("note"));
+    }
+
+    @Test
+    @DisplayName("a stored-computed stock column gets writableVia pointing at physical-inventory/inventoryLine")
+    void stockGetsWritableViaPhysicalInventory() throws Exception {
+      Entity dalEntity = mock(Entity.class);
+      Property prop = mock(Property.class);
+      when(dalEntity.getPropertyByColumnName("EM_ETGO_Stock")).thenReturn(prop);
+      when(prop.getComputationFunction()).thenReturn("etgo_product_stock");
+
+      JSONObject fieldObj = new JSONObject();
+      invokeAddWritableVia(fieldObj, dalEntity, "EM_ETGO_Stock");
+
+      JSONObject via = fieldObj.getJSONObject("writableVia");
+      assertEquals("physical-inventory", via.getString("spec"));
+      assertEquals("inventoryLine", via.getString("entity"));
+    }
+
+    @Test
+    @DisplayName("a regular (non-computed) column omits writableVia")
+    void regularColumnOmitsWritableVia() throws Exception {
+      Entity dalEntity = mock(Entity.class);
+      Property prop = mock(Property.class);
+      when(dalEntity.getPropertyByColumnName("Description")).thenReturn(prop);
+      when(prop.getComputationFunction()).thenReturn(null);
+
+      JSONObject fieldObj = new JSONObject();
+      invokeAddWritableVia(fieldObj, dalEntity, "Description");
+
+      assertFalse(fieldObj.has("writableVia"));
+    }
+
+    /**
+     * IMP-28 §7.5a's own example: {@code product/stock.quantityOnHand} is real data on
+     * {@code M_Storage_Detail}, curated read-only for process-integrity reasons, but it is NOT a
+     * stored computed column — it must not get a fabricated writableVia pointer.
+     */
+    @Test
+    @DisplayName("a read-only column with no computation function omits writableVia — never a guess")
+    void readOnlyColumnWithoutComputationFunctionOmitsWritableVia() throws Exception {
+      Entity dalEntity = mock(Entity.class);
+      Property prop = mock(Property.class);
+      when(dalEntity.getPropertyByColumnName("QtyOnHand")).thenReturn(prop);
+      when(prop.getComputationFunction()).thenReturn("   ");
+
+      JSONObject fieldObj = new JSONObject();
+      invokeAddWritableVia(fieldObj, dalEntity, "QtyOnHand");
+
+      assertFalse(fieldObj.has("writableVia"));
+    }
+
+    @Test
+    @DisplayName("an unmapped computation function omits writableVia rather than guessing")
+    void unmappedComputationFunctionOmitsWritableVia() throws Exception {
+      Entity dalEntity = mock(Entity.class);
+      Property prop = mock(Property.class);
+      when(dalEntity.getPropertyByColumnName("Some_Other_Computed_Col")).thenReturn(prop);
+      when(prop.getComputationFunction()).thenReturn("some_future_unmapped_function");
+
+      JSONObject fieldObj = new JSONObject();
+      invokeAddWritableVia(fieldObj, dalEntity, "Some_Other_Computed_Col");
+
+      assertFalse(fieldObj.has("writableVia"));
+    }
+
+    @Test
+    @DisplayName("null dalEntity omits writableVia without throwing")
+    void nullDalEntityOmitsWritableVia() throws Exception {
+      JSONObject fieldObj = new JSONObject();
+      invokeAddWritableVia(fieldObj, null, "EM_ETGO_Sale_Price");
+      assertFalse(fieldObj.has("writableVia"));
+    }
+
+    @Test
+    @DisplayName("null property (unmapped column) omits writableVia without throwing")
+    void nullPropertyOmitsWritableVia() throws Exception {
+      Entity dalEntity = mock(Entity.class);
+      when(dalEntity.getPropertyByColumnName("Unknown_Col")).thenReturn(null);
+
+      JSONObject fieldObj = new JSONObject();
+      invokeAddWritableVia(fieldObj, dalEntity, "Unknown_Col");
+
+      assertFalse(fieldObj.has("writableVia"));
+    }
+
+    @Test
+    @DisplayName("a property lookup exception is swallowed and omits writableVia")
+    void propertyLookupExceptionOmitsWritableVia() throws Exception {
+      Entity dalEntity = mock(Entity.class);
+      when(dalEntity.getPropertyByColumnName("Bad_Col")).thenThrow(new RuntimeException("fail"));
+
+      JSONObject fieldObj = new JSONObject();
+      invokeAddWritableVia(fieldObj, dalEntity, "Bad_Col");
+
+      assertFalse(fieldObj.has("writableVia"));
     }
   }
 
