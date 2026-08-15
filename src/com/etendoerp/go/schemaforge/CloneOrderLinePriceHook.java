@@ -23,8 +23,10 @@ import com.smf.jobs.hooks.CloneRecordHook;
 import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.client.kernel.ComponentProvider.Qualifier;
 import org.openbravo.model.common.order.Order;
+import org.openbravo.model.common.order.OrderLine;
 
 import javax.enterprise.context.ApplicationScoped;
+import java.util.List;
 
 /**
  * GO-specific override of {@link CloneOrderHook}. Delegates the actual clone to the
@@ -67,8 +69,22 @@ public class CloneOrderLinePriceHook extends CloneRecordHook {
 
   @Override
   public BaseOBObject postCopy(BaseOBObject originalRecord, BaseOBObject newRecord) throws Exception {
-    return delegate.postCopy(originalRecord, newRecord);
-    // TODO (GREEN phase, ETP-4801): restore listPrice on each cloned OrderLine to match
-    // the corresponding source line — the core CloneOrderHook resets it to the catalog price.
+    BaseOBObject copied = delegate.postCopy(originalRecord, newRecord);
+    restoreListPrices((Order) originalRecord, (Order) copied);
+    return copied;
+  }
+
+  /**
+   * Restores each cloned line's listPrice to match the corresponding source line's
+   * listPrice. Lines are matched one-to-one by their position in the list, the same
+   * order {@link CloneOrderHook} clones them in via {@code DalUtil.copy}.
+   */
+  private void restoreListPrices(Order original, Order clone) {
+    List<OrderLine> sourceLines = original.getOrderLineList();
+    List<OrderLine> clonedLines = clone.getOrderLineList();
+    int lineCount = Math.min(sourceLines.size(), clonedLines.size());
+    for (int i = 0; i < lineCount; i++) {
+      clonedLines.get(i).setListPrice(sourceLines.get(i).getListPrice());
+    }
   }
 }
