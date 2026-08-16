@@ -32,9 +32,11 @@ import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.access.Role;
+import org.openbravo.model.ad.access.RoleInheritance;
 import org.openbravo.model.ad.access.User;
 import org.openbravo.model.ad.access.WindowAccess;
 import org.openbravo.model.ad.ui.Window;
+import org.openbravo.model.common.enterprise.Organization;
 
 /**
  * QA (Sentinel, originally found via ETP-4878's overlapping permission matrix; the fix and this
@@ -300,6 +302,107 @@ public class UserRoleCompositionServiceOverlapIntegrationTest extends WeldBaseTe
     } finally {
       OBContext.restorePreviousMode();
     }
+  }
+
+  /**
+   * ETP-4906 (Task B6) — deterministic, self-contained proof that {@code
+   * WindowAccessOverlapCorruptionGuard} protects a role {@link UserRoleCompositionService} never
+   * even knows about, not just the one it is actively composing.
+   *
+   * <p>Before this fix, ONLY a role passed into {@code assignTemplateRoles} was protected from
+   * the corrupting UPDATE-path write core's own propagation performs when a second overlapping
+   * template's access propagates onto a role that already inherits from the first. This test
+   * builds a throwaway "bystander" role — never passed into {@code assignTemplateRoles} at all —
+   * that already inherits from BOTH templates before either {@link #grantWindowAccess} call below,
+   * exactly like the real, pre-existing multi-role personal account that first exposed this gap
+   * (see this suite's class javadoc history / ETP-4906 B5 Findings), but built fresh here so this
+   * test's pass/fail never depends on any incidental real DB state surviving between runs.</p>
+   */
+  @Test
+  public void testBystanderRoleNotPassedToAssignTemplateRolesIsAlsoProtected() throws Exception {
+    setTestUserContext();
+    OBContext.setAdminMode(true);
+    try {
+      Window sharedWindow = OBDal.getInstance().get(Window.class, UNUSED_WINDOW_ID);
+      assertNotNull(sharedWindow);
+
+      Role financeTemplate = OBDal.getInstance().get(Role.class,
+          SystemRoleTemplates.FINANCE_ROLE_ID);
+      Role salesTemplate = OBDal.getInstance().get(Role.class, SystemRoleTemplates.SALES_ROLE_ID);
+      assertNotNull(financeTemplate);
+      assertNotNull(salesTemplate);
+
+      User user = OBDal.getInstance().get(User.class, TEST_USER_ID);
+      assertNotNull(user);
+
+      // A bystander role that already inherits from BOTH templates — set up directly via
+      // AD_Role_Inheritance, never through assignTemplateRoles, so UserRoleCompositionService has
+      // no idea this role even exists. Flushed ONE AT A TIME (addInheritance flushes internally,
+      // see its own javadoc) — this environment's real Finance/Sales templates have themselves
+      // drifted to overlap on a real window since this test was written, so batching both
+      // inheritance-adds into a single flush would hit an UNRELATED, pre-existing core limitation
+      // (core's own propagation for the second inheritance cannot see the first inheritance's
+      // still-pending, not-yet-executed INSERT within the same flush cycle) — nothing to do with
+      // the guard under test here, exactly like a real admin adding roles one row at a time in
+      // Etendo Classic would naturally flush between them too.
+      Role bystanderRole = createBystanderRole(user);
+      addInheritance(bystanderRole, financeTemplate, 10L);
+      addInheritance(bystanderRole, salesTemplate, 20L);
+
+      // Same conflicting overlap as the tests above, but triggered directly on the TEMPLATES —
+      // zero UserRoleCompositionService code anywhere in this call stack. Must not throw.
+      grantWindowAccess(financeTemplate, sharedWindow, false);
+      OBDal.getInstance().flush();
+      grantWindowAccess(salesTemplate, sharedWindow, true);
+      OBDal.getInstance().flush();
+
+      WindowAccess bystanderAccess = findWindowAccess(bystanderRole, sharedWindow);
+      assertNotNull("The bystander role must have received the propagated access, not lost it",
+          bystanderAccess);
+      assertEquals("client must always match the BYSTANDER role's own, never a template's",
+          bystanderRole.getClient().getId(), bystanderAccess.getClient().getId());
+      assertEquals(
+          "organization must always match the BYSTANDER role's own, never a template's",
+          bystanderRole.getOrganization().getId(), bystanderAccess.getOrganization().getId());
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  private Role createBystanderRole(User user) {
+    Organization starOrg = OBDal.getInstance().get(Organization.class, "0");
+    Role role = OBProvider.getInstance().get(Role.class);
+    role.setNewOBObject(true);
+    role.setClient(user.getClient());
+    role.setOrganization(starOrg);
+    role.setActive(true);
+    role.setName("ETP-4906 B6 bystander " + System.nanoTime());
+    role.setUserLevel(SystemRoleTemplates.FIXED_ROLE_USER_LEVEL);
+    role.setManual(true);
+    role.setTemplate(false);
+    role.setClientAdmin(false);
+    OBDal.getInstance().save(role);
+    OBDal.getInstance().flush();
+    return role;
+  }
+
+  /**
+   * Flushes immediately after saving — mirrors {@code UserRoleCompositionService
+   * #reconcileInheritances}'s own established pattern (save one {@code AD_Role_Inheritance} row,
+   * flush, THEN move to the next), never batching 2+ inheritance-adds into one flush. See the call
+   * site's own comment for why this matters here specifically.
+   */
+  private void addInheritance(Role role, Role template, long seqno) {
+    RoleInheritance inheritance = OBProvider.getInstance().get(RoleInheritance.class);
+    inheritance.setNewOBObject(true);
+    inheritance.setClient(role.getClient());
+    inheritance.setOrganization(role.getOrganization());
+    inheritance.setActive(true);
+    inheritance.setRole(role);
+    inheritance.setInheritFrom(template);
+    inheritance.setSequenceNumber(seqno);
+    OBDal.getInstance().save(inheritance);
+    OBDal.getInstance().flush();
   }
 
   private void grantWindowAccess(Role role, Window window, boolean readOnly) {

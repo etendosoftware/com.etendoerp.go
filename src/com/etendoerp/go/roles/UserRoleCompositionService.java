@@ -149,6 +149,25 @@ import com.etendoerp.go.schemaforge.util.UserRoleSyncSupport;
  * kind of cross-client write — never the outer, method-wide bypass, which stays at {@code
  * setAdminMode(true)} to keep {@link #enforceCallerClientBoundary(User, Role)}'s tenant-boundary
  * guarantee intact for the rest of this class.</p>
+ *
+ * <p><b>The above two helpers only ever protect the ONE {@code personalRole} passed into a given
+ * {@link #assignTemplateRoles(String, List)} call — widened beyond that by {@link
+ * com.etendoerp.go.roles.WindowAccessOverlapCorruptionGuard} (ETP-4906, Task B6).</b> Core's own
+ * propagation is not scoped to one role either — it fires for EVERY role that inherits from
+ * whichever template's {@code AD_Window_Access} just changed, so any OTHER already-existing role
+ * inheriting from a touched template was getting swept into the same corrupting write with zero
+ * protection, whether the trigger was a DIFFERENT user's {@code assignTemplateRoles} call or (live-
+ * reproduced by {@code UserRoleCompositionServiceOverlapIntegrationTest}, AND by a live Etendo
+ * Classic UI reproduction — see the ETP-4906 plan doc's "B6 Findings — Root Cause") a completely
+ * unrelated direct edit to a template's own {@code AD_Window_Access}, with no {@code
+ * UserRoleCompositionService} code anywhere in the call stack. That system-wide case cannot be
+ * closed from inside this class at all — see {@code WindowAccessOverlapCorruptionGuard}'s own
+ * class javadoc for the full write-up, including why its FIRST design (a reactive, correction-
+ * based observer) was structurally impossible and had to be replaced with a prevention-based one
+ * before it actually worked. The two helpers here are left as-is (still valuable as an eager,
+ * pre-emptive defense for the role this class is actively composing) — {@code
+ * WindowAccessOverlapCorruptionGuard} is the belt-and-braces net for every role this class never
+ * even knows about.</p>
  */
 public class UserRoleCompositionService {
 
