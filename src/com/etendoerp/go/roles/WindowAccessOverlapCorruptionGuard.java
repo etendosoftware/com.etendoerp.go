@@ -31,6 +31,7 @@ import org.openbravo.base.model.Entity;
 import org.openbravo.base.model.ModelProvider;
 import org.openbravo.base.model.Property;
 import org.openbravo.base.structure.BaseOBObject;
+import org.openbravo.client.kernel.event.EntityDeleteEvent;
 import org.openbravo.client.kernel.event.EntityNewEvent;
 import org.openbravo.client.kernel.event.EntityPersistenceEventObserver;
 import org.openbravo.client.kernel.event.EntityUpdateEvent;
@@ -157,6 +158,28 @@ import org.openbravo.model.ad.ui.Window;
  * inheritance row) and applies the exact same delete-before-write logic, scoped to the ONE role
  * gaining the ONE new inheritance, before core's own (also unprioritized) handler propagates the
  * newly-inherited template's entire grant set onto it.
+ *
+ * <p><b>A third trigger, on the REMOVE side: a role LOSING an existing {@code
+ * AD_Role_Inheritance}.</b> Live-confirmed gap (ETP-4906, Task B6 follow-up, 2026-08-16): the two
+ * triggers above only defend a role GAINING access. Removing one of two overlapping templates
+ * from an already-composed role reproduces the identical {@code OBSecurityException}, from a
+ * THIRD, previously-unguarded door. Traced into core: {@code RoleInheritanceEventHandler#onDelete}
+ * (unprioritized, same {@code EntityDeleteEvent} this class now also observes) calls {@code
+ * RoleInheritanceManager#applyRemoveInheritance}, which recalculates the dependent role's access
+ * against EVERY remaining template it still inherits from via the SAME {@code
+ * calculateAccesses}/{@code handleAccess} path {@code applyNewInheritance} uses — for any window a
+ * REMAINING template grants, {@code isPrecedent} treats the dependent's existing row as needing
+ * override whenever its current {@code inheritedFrom} is no longer in the updated (post-removal)
+ * template list, which is exactly true for a row still sourced from the template being removed —
+ * driving the exact same corrupting {@code updateRoleAccess} blind copy this class already guards
+ * against on the ADD side. This class also observes {@code RoleInheritance} DELETE events: for
+ * every OTHER template the dependent still actively inherits from, for every window that template
+ * grants, if the dependent's own existing row for that window is not ALREADY sourced from that
+ * exact remaining template, it is deleted BEFORE core's own (unprioritized) {@code
+ * RoleInheritanceEventHandler#onDelete} propagates — forcing the same safe CREATE path. A row
+ * whose window is granted by NO remaining template is deliberately left untouched here: core's own
+ * {@code deleteRoleAccess} cleanup step removes it via a normal, non-corrupting entity delete
+ * (no cross-client field copy involved), so there is nothing to prevent for that case.
  */
 public class WindowAccessOverlapCorruptionGuard extends EntityPersistenceEventObserver {
 
@@ -227,6 +250,24 @@ public class WindowAccessOverlapCorruptionGuard extends EntityPersistenceEventOb
     Object target = event.getTargetInstance();
     if (target instanceof WindowAccess) {
       guardDependentsOf((WindowAccess) target);
+    }
+  }
+
+  /**
+   * Defends the THIRD, REMOVE-side corruption trigger — see the class javadoc's "A third trigger,
+   * on the REMOVE side" section. {@code RoleInheritance} has the only meaningful delete path to
+   * guard here; {@code WindowAccess} deletes are not a corruption vector this class needs to react
+   * to (a manually- or template-deleted {@code AD_Window_Access} row is a plain entity delete on
+   * the OWNING role's own row, never a cross-role blind-copy write).
+   */
+  public void onDelete(@Observes @Priority(RUNS_BEFORE_UNPRIORITIZED_CORE_OBSERVERS)
+      EntityDeleteEvent event) {
+    if (!isValidEvent(event)) {
+      return;
+    }
+    Object target = event.getTargetInstance();
+    if (target instanceof RoleInheritance) {
+      guardRemovedInheritance((RoleInheritance) target);
     }
   }
 
@@ -329,6 +370,75 @@ public class WindowAccessOverlapCorruptionGuard extends EntityPersistenceEventOb
       }
       deleteForcingCreatePath(existing, dependent, window, template, existingSource);
     }
+  }
+
+  /**
+   * If {@code inheritance} points a role away from a template it is about to stop inheriting from,
+   * proactively clears that role's OWN conflicting active access for every window ANY OTHER
+   * template it still actively inherits from also grants — the same mechanism as {@link
+   * #guardNewInheritance(RoleInheritance)}, just triggered by the OPPOSITE event and iterating
+   * every REMAINING template instead of the one NEW one, because {@code
+   * RoleInheritanceManager#applyRemoveInheritance} recalculates against ALL of them, not just one.
+   * See the class javadoc's "A third trigger, on the REMOVE side" section.
+   *
+   * <p>Deliberately does NOT special-case "only rows currently sourced from the template being
+   * removed" — the same "already correctly sourced from THIS remaining template, skip" check
+   * {@link #guardNewInheritance(RoleInheritance)} and {@link #guardDependentsOf(WindowAccess)} both
+   * use is sufficient and correct here too: for a remaining template's window, if the dependent's
+   * existing row is not already sourced from THAT remaining template, core's own {@code
+   * isPrecedent} will treat it as needing override regardless of what it is currently sourced from
+   * (manually granted, or inherited from a DIFFERENT still-active template) — exactly mirroring
+   * why {@link #guardDependentsOf(WindowAccess)} never restricts itself to "only rows sourced from
+   * THIS template" either.
+   */
+  private void guardRemovedInheritance(RoleInheritance inheritance) {
+    Role dependent = inheritance.getRole();
+    Role removedTemplate = inheritance.getInheritFrom();
+    if (dependent == null || removedTemplate == null) {
+      return;
+    }
+    for (Role remainingTemplate : findOtherActiveTemplates(dependent, inheritance)) {
+      for (WindowAccess templateGrant : findActiveWindowAccess(remainingTemplate)) {
+        Window window = templateGrant.getWindow();
+        if (window == null) {
+          continue;
+        }
+        WindowAccess existing = findActiveWindowAccess(dependent, window);
+        if (existing == null) {
+          continue;
+        }
+        Role existingSource = existing.getInheritedFrom();
+        if (existingSource != null && sameId(existingSource, remainingTemplate)) {
+          continue;
+        }
+        deleteForcingCreatePath(existing, dependent, window, remainingTemplate, existingSource);
+      }
+    }
+  }
+
+  /**
+   * Returns every OTHER template {@code dependent} still actively inherits from, excluding {@code
+   * excludedInheritance} (the {@code RoleInheritance} row about to be deleted) by id — mirrors
+   * core's own {@code RoleInheritanceManager#getUpdatedRoleInheritancesList(RoleInheritance,
+   * boolean)}, which excludes the same way rather than relying on the row's DB-visible state (the
+   * row may still be physically present at this point in the flush).
+   */
+  @SuppressWarnings("unchecked")
+  private List<Role> findOtherActiveTemplates(Role dependent, RoleInheritance excludedInheritance) {
+    OBCriteria<RoleInheritance> criteria = crossClientCriteria(RoleInheritance.class);
+    criteria.add(Restrictions.eq(RoleInheritance.PROPERTY_ROLE, dependent));
+    criteria.add(Restrictions.ne(RoleInheritance.PROPERTY_ID, excludedInheritance.getId()));
+    criteria.add(Restrictions.eq(RoleInheritance.PROPERTY_ACTIVE, true));
+    List<Role> templates = new ArrayList<>();
+    Set<String> seenTemplateIds = new LinkedHashSet<>();
+    for (RoleInheritance ri : (List<RoleInheritance>) criteria.list()) {
+      Role template = ri.getInheritFrom();
+      if (template != null && Boolean.TRUE.equals(template.isTemplate())
+          && seenTemplateIds.add(template.getId())) {
+        templates.add(template);
+      }
+    }
+    return templates;
   }
 
   /**

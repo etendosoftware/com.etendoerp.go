@@ -369,6 +369,100 @@ public class UserRoleCompositionServiceOverlapIntegrationTest extends WeldBaseTe
     }
   }
 
+  /**
+   * ETP-4906 (Task B6 follow-up, REMOVE-path gap) — deterministic, self-contained proof that
+   * {@code WindowAccessOverlapCorruptionGuard} also protects a role LOSING one of two overlapping
+   * template inheritances, not just gaining one. Live-confirmed gap: the ADD-path fix (see {@link
+   * #testBystanderRoleNotPassedToAssignTemplateRolesIsAlsoProtected()} above) alone was not
+   * enough — removing one of two overlapping templates from an already-composed role reproduced
+   * the identical {@code OBSecurityException} from a third, previously-unguarded entry point
+   * ({@code RoleInheritanceManager#applyRemoveInheritance}, triggered by deleting an {@code
+   * AD_Role_Inheritance} row).
+   *
+   * <p>Same "bystander" shape as the ADD-path test — zero {@code UserRoleCompositionService} code
+   * anywhere in this call stack, just a raw {@code RoleInheritance} delete, exactly like a raw
+   * Etendo Classic "remove role from composition" edit.
+   */
+  @Test
+  public void testRemovingOneOfTwoOverlappingTemplateInheritancesIsAlsoProtected()
+      throws Exception {
+    setTestUserContext();
+    OBContext.setAdminMode(true);
+    try {
+      Window sharedWindow = OBDal.getInstance().get(Window.class, UNUSED_WINDOW_ID);
+      assertNotNull(sharedWindow);
+
+      Role financeTemplate = OBDal.getInstance().get(Role.class,
+          SystemRoleTemplates.FINANCE_ROLE_ID);
+      Role salesTemplate = OBDal.getInstance().get(Role.class, SystemRoleTemplates.SALES_ROLE_ID);
+      assertNotNull(financeTemplate);
+      assertNotNull(salesTemplate);
+
+      User user = OBDal.getInstance().get(User.class, TEST_USER_ID);
+      assertNotNull(user);
+
+      // Same setup as the ADD-path bystander test: a role inheriting from BOTH templates before
+      // either grant exists, built directly via AD_Role_Inheritance/AD_Window_Access, never
+      // through assignTemplateRoles.
+      Role bystanderRole = createBystanderRole(user);
+      addInheritance(bystanderRole, financeTemplate, 10L);
+      addInheritance(bystanderRole, salesTemplate, 20L);
+
+      // Finance FULL, granted FIRST; Sales READ-ONLY, granted SECOND — per the ADD-path guard's
+      // own "last write wins" mechanism (see WindowAccessOverlapCorruptionGuard#guardDependentsOf),
+      // the bystander's shared-window row ends up sourced from SALES after this, not Finance.
+      grantWindowAccess(financeTemplate, sharedWindow, false);
+      OBDal.getInstance().flush();
+      grantWindowAccess(salesTemplate, sharedWindow, true);
+      OBDal.getInstance().flush();
+
+      WindowAccess beforeRemoval = findWindowAccess(bystanderRole, sharedWindow);
+      assertNotNull("Sanity: the ADD-path fix must have already propagated the shared window",
+          beforeRemoval);
+      assertEquals("Sanity: per the guard's own last-write-wins mechanism, Sales (granted "
+          + "second) must currently be the source, not Finance", salesTemplate.getId(),
+          beforeRemoval.getInheritedFrom() != null ? beforeRemoval.getInheritedFrom().getId()
+              : null);
+
+      // THE REMOVE-PATH TRIGGER: delete the RoleInheritance row that currently SOURCES the
+      // shared window's access (Sales) — zero UserRoleCompositionService code anywhere in this
+      // call stack. This forces RoleInheritanceManager#applyRemoveInheritance to re-derive the
+      // shared window's access from the one remaining template, Finance — exactly the corrupting
+      // handleAccess -> updateRoleAccess blind-copy path this fix guards against. Must not throw.
+      RoleInheritance salesInheritance = findInheritance(bystanderRole, salesTemplate);
+      assertNotNull(salesInheritance);
+      OBDal.getInstance().remove(salesInheritance);
+      OBDal.getInstance().flush();
+
+      WindowAccess afterRemoval = findWindowAccess(bystanderRole, sharedWindow);
+      assertNotNull("The shared window's access must survive the removal, re-derived from the "
+          + "one remaining template (Finance), not silently dropped", afterRemoval);
+      assertEquals("client must always match the BYSTANDER role's own, never a template's",
+          bystanderRole.getClient().getId(), afterRemoval.getClient().getId());
+      assertEquals("organization must always match the BYSTANDER role's own, never a template's",
+          bystanderRole.getOrganization().getId(), afterRemoval.getOrganization().getId());
+      assertEquals("The window must now be re-derived from Finance, the one remaining template",
+          financeTemplate.getId(),
+          afterRemoval.getInheritedFrom() != null ? afterRemoval.getInheritedFrom().getId()
+              : null);
+      assertTrue("Finance's own access level (full) must be what survives the re-derivation",
+          Boolean.TRUE.equals(afterRemoval.isEditableField()));
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  @SuppressWarnings("unchecked")
+  private RoleInheritance findInheritance(Role role, Role template) {
+    OBCriteria<RoleInheritance> criteria = OBDal.getInstance()
+        .createCriteria(RoleInheritance.class);
+    criteria.add(Restrictions.eq(RoleInheritance.PROPERTY_ROLE, role));
+    criteria.add(Restrictions.eq(RoleInheritance.PROPERTY_INHERITFROM, template));
+    criteria.add(Restrictions.eq(RoleInheritance.PROPERTY_ACTIVE, true));
+    criteria.setMaxResults(1);
+    return (RoleInheritance) criteria.uniqueResult();
+  }
+
   private Role createBystanderRole(User user) {
     Organization starOrg = OBDal.getInstance().get(Organization.class, "0");
     Role role = OBProvider.getInstance().get(Role.class);
