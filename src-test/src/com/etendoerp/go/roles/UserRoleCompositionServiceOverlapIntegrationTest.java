@@ -452,6 +452,80 @@ public class UserRoleCompositionServiceOverlapIntegrationTest extends WeldBaseTe
     }
   }
 
+  /**
+   * ETP-4906 (Task B6, 4th round, access-LEVEL gap) — deterministic, self-contained proof that
+   * {@code WindowAccessOverlapCorruptionGuard} enforces most-permissive-wins for a role {@link
+   * UserRoleCompositionService} never even knows about, not just crash-safety.
+   *
+   * <p>Before this fix, the ADD-path and REMOVE-path triggers above only ever decided WHETHER core
+   * takes the safe CREATE path instead of the corrupting UPDATE path (an ownership/ crash concern);
+   * NONE of them decided WHICH access level the CREATE path should use. Human-reproduced gap: a
+   * role with only a full-access template, then gaining an inheritance from a read-only template on
+   * the SAME window, ended up read-only — no exception, silently wrong data, since {@code
+   * UserRoleCompositionService#reconcileWindowAccessAfterComposition} (the only most-permissive-wins
+   * authority) runs EXCLUSIVELY inside {@code assignTemplateRoles}.
+   *
+   * <p>Same "bystander" shape as the other two tests in this class — zero {@code
+   * UserRoleCompositionService} code anywhere in this call stack — but mirrors the human's EXACT
+   * repro order: the FULL template is already composed and committed BEFORE the READ-ONLY template
+   * is added, via a raw {@code AD_Role_Inheritance} insert, exactly like a raw Etendo Classic
+   * "add role to composition" edit.
+   */
+  @Test
+  public void testGainingReadOnlyTemplateInheritanceNeverDowngradesExistingFullAccess()
+      throws Exception {
+    setTestUserContext();
+    OBContext.setAdminMode(true);
+    try {
+      Window sharedWindow = OBDal.getInstance().get(Window.class, UNUSED_WINDOW_ID);
+      assertNotNull(sharedWindow);
+
+      Role financeTemplate = OBDal.getInstance().get(Role.class,
+          SystemRoleTemplates.FINANCE_ROLE_ID);
+      Role salesTemplate = OBDal.getInstance().get(Role.class, SystemRoleTemplates.SALES_ROLE_ID);
+      assertNotNull(financeTemplate);
+      assertNotNull(salesTemplate);
+
+      User user = OBDal.getInstance().get(User.class, TEST_USER_ID);
+      assertNotNull(user);
+
+      // The two templates' own access levels on the shared window: Finance FULL, Sales READ-ONLY.
+      grantWindowAccess(financeTemplate, sharedWindow, false);
+      OBDal.getInstance().flush();
+      grantWindowAccess(salesTemplate, sharedWindow, true);
+      OBDal.getInstance().flush();
+
+      // The bystander gains ONLY the full-access template first — mirrors the human's real repro
+      // ("ClassicTemplateTest2Broad alone"), never through assignTemplateRoles.
+      Role bystanderRole = createBystanderRole(user);
+      addInheritance(bystanderRole, financeTemplate, 10L);
+
+      WindowAccess afterFinance = findWindowAccess(bystanderRole, sharedWindow);
+      assertNotNull("Sanity: Finance alone must have propagated the shared window",
+          afterFinance);
+      assertTrue("Sanity: Finance alone must grant full access",
+          Boolean.TRUE.equals(afterFinance.isEditableField()));
+
+      // THE GAP: gain a SECOND, READ-ONLY template on the SAME window — zero
+      // UserRoleCompositionService code anywhere in this call stack, exactly like the human's raw
+      // Classic UI "add role to composition" edit. Must not throw AND must not downgrade access.
+      addInheritance(bystanderRole, salesTemplate, 20L);
+
+      WindowAccess afterSales = findWindowAccess(bystanderRole, sharedWindow);
+      assertNotNull("The shared window's access must survive gaining the second template",
+          afterSales);
+      assertEquals("client must always match the BYSTANDER role's own, never a template's",
+          bystanderRole.getClient().getId(), afterSales.getClient().getId());
+      assertEquals("organization must always match the BYSTANDER role's own, never a template's",
+          bystanderRole.getOrganization().getId(), afterSales.getOrganization().getId());
+      assertTrue("Most-permissive-wins: gaining a READ-ONLY template must never downgrade "
+          + "already-existing FULL access (Finance), even outside UserRoleCompositionService",
+          Boolean.TRUE.equals(afterSales.isEditableField()));
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
   @SuppressWarnings("unchecked")
   private RoleInheritance findInheritance(Role role, Role template) {
     OBCriteria<RoleInheritance> criteria = OBDal.getInstance()

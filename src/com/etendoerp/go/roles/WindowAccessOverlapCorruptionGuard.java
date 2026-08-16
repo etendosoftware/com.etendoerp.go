@@ -136,11 +136,17 @@ import org.openbravo.model.ad.ui.Window;
  * template (the one signal core's own event handler uses to decide whether to propagate at all —
  * see {@code InheritedAccessEnabledEventHandler#doAction}), and only ever deletes an OTHER role's
  * row for the SAME window as the template row that triggered the event — never touches the
- * template's own row, never widens/narrows any grant level, never runs at all for a template-owned
- * row's grant LEVEL change alone. {@code UserRoleCompositionService#reconcileWindowAccessAfterComposition}
- * remains the most-permissive-wins union authority for the role it is actively composing; this
- * class's only job is making sure core never gets the chance to corrupt a BYSTANDER role's
- * ownership fields in the first place.
+ * template's own row. {@code guardDependentsOf}/{@code guardNewInheritance}/{@code
+ * guardRemovedInheritance} themselves never widen/narrow any grant level and never run at all for
+ * a template-owned row's grant LEVEL change alone — their only job is forcing core onto the safe
+ * CREATE path so it re-derives the level from the correct source. (As of the fourth trigger below,
+ * a SEPARATE method, {@code widenInheritedAccessLevelIfNeeded}, does decide levels for the row
+ * that CREATE path produces — see that section for why this is a distinct concern from ownership
+ * correction.) {@code UserRoleCompositionService#reconcileWindowAccessAfterComposition} remains
+ * the most-permissive-wins union authority for the role it is actively composing; this class's job
+ * is making sure core never gets the chance to corrupt a BYSTANDER role's ownership fields OR
+ * silently under-resolve its access level, for every entry point {@code
+ * UserRoleCompositionService} does not see.
  *
  * <p><b>A second, symmetric trigger: a role gaining a brand-new {@code AD_Role_Inheritance} from
  * an already-overlapping template.</b> Empirically found while re-verifying this redesign (not
@@ -180,6 +186,43 @@ import org.openbravo.model.ad.ui.Window;
  * whose window is granted by NO remaining template is deliberately left untouched here: core's own
  * {@code deleteRoleAccess} cleanup step removes it via a normal, non-corrupting entity delete
  * (no cross-client field copy involved), so there is nothing to prevent for that case.
+ *
+ * <p><b>A fourth trigger: most-permissive-wins is not enforced outside {@code
+ * UserRoleCompositionService}.</b> Live-confirmed gap (ETP-4906, Task B6 4th round, 2026-08-16),
+ * DIFFERENT in kind from the three triggers above — not a crash, a silently WRONG result. The
+ * three triggers above only ever decide whether core takes the safe CREATE path instead of the
+ * corrupting UPDATE path for ownership ({@code client}/{@code organization}); NONE of them decide
+ * which access LEVEL (full vs. read-only) the CREATE path should use when 2+ actively-inherited
+ * templates grant the same window — that decision is made ONLY by {@code
+ * UserRoleCompositionService#reconcileWindowAccessAfterComposition}, which runs EXCLUSIVELY inside
+ * {@code assignTemplateRoles}. Live-reproduced: a role with only a full-access template
+ * ({@code ClassicTemplateTest2Broad}) on a window, then gaining an inheritance from a read-only
+ * template ({@code ClassicTemplateTest1Read}) on the SAME window via Etendo Classic (not through
+ * this module's own webhook) ends up READ-ONLY, when most-permissive-wins requires it stay FULL —
+ * no exception, no log, just wrong data.
+ *
+ * <p>The fix reuses the exact extension point {@link #correctInheritedOwnership(EntityNewEvent,
+ * WindowAccess)} already proved: it fires on {@code EntityNewEvent} for EVERY freshly-created
+ * inherited {@code AD_Window_Access} row on a non-template role — precisely the row the CREATE
+ * path (forced by one of the three triggers above, or a plain first-time grant) produces — and
+ * {@code event.setCurrentState(Property, Object)} already reliably corrects such a row's fields
+ * before the security check runs. {@link #widenInheritedAccessLevelIfNeeded(EntityNewEvent,
+ * WindowAccess)} runs right alongside it (same {@code onSave} branch): before the row is
+ * persisted, it looks up {@code access.getRole()}'s OTHER currently-active template inheritances
+ * ({@link #findActiveTemplatesFor(Role, String)}, the same query pattern {@code
+ * findOtherActiveTemplates} already used for the REMOVE-path trigger — and the same source-of-
+ * truth choice {@code UserRoleCompositionService#mostPermissiveWindowAccess} makes: the templates'
+ * OWN current grants, not whatever level core's propagation happened to leave behind) and, if ANY
+ * of them grants the SAME window at a MORE permissive level ({@code isEditableField() == true})
+ * than the row about to be created, corrects it via {@code event.setCurrentState(
+ * editableFieldProperty, true)} — the same mechanism, applied to a different field. Deliberately
+ * a SEPARATE method from {@code correctInheritedOwnership}, not a merge into it: ownership
+ * correction is unconditional (a row is either wrong or not), while level widening requires an
+ * extra query across the role's OTHER template inheritances and a strictly one-directional rule
+ * (never narrows — matches the existing rule: a full grant, once resolved, always wins) that reads
+ * more clearly kept apart. This generalizes {@code reconcileWindowAccessAfterComposition}'s own
+ * most-permissive-wins union to ANY newly-created inherited row, not only ones created via {@code
+ * assignTemplateRoles}.
  */
 public class WindowAccessOverlapCorruptionGuard extends EntityPersistenceEventObserver {
 
@@ -228,6 +271,7 @@ public class WindowAccessOverlapCorruptionGuard extends EntityPersistenceEventOb
         guardDependentsOf(access);
       } else {
         correctInheritedOwnership(event, access);
+        widenInheritedAccessLevelIfNeeded(event, access);
       }
     } else if (target instanceof RoleInheritance) {
       guardNewInheritance((RoleInheritance) target);
@@ -343,6 +387,64 @@ public class WindowAccessOverlapCorruptionGuard extends EntityPersistenceEventOb
   }
 
   /**
+   * The FOURTH corruption trigger — see the class javadoc's "A fourth trigger: most-permissive-
+   * wins is not enforced outside {@code UserRoleCompositionService}" section. For the SAME
+   * freshly-created inherited row {@link #correctInheritedOwnership} just fixed ownership on,
+   * widens its access level to full whenever ANY OTHER template {@code access.getRole()} is
+   * currently, actively inheriting from ALSO grants the same window full ("&#x2713;") access —
+   * mirroring {@code UserRoleCompositionService#reconcileWindowAccessAfterComposition}'s own
+   * most-permissive-wins union, just applied to any newly-created inherited row instead of only
+   * ones created via {@code assignTemplateRoles}. Never narrows (matches the existing rule: a
+   * full grant, once resolved, always wins) — this method only ever flips {@code false} to
+   * {@code true}, never the other way.
+   */
+  private void widenInheritedAccessLevelIfNeeded(EntityNewEvent event, WindowAccess access) {
+    if (access.getInheritedFrom() == null) {
+      // Manually-granted row, never template-derived — not this class's business, same guard
+      // correctInheritedOwnership already applies.
+      return;
+    }
+    Role owner = access.getRole();
+    Window window = access.getWindow();
+    if (owner == null || window == null) {
+      return;
+    }
+    Property editableFieldProperty = windowAccessEntity().getProperty(
+        WindowAccess.PROPERTY_EDITABLEFIELD);
+    if (Boolean.TRUE.equals(event.getCurrentState(editableFieldProperty))) {
+      // Already the most permissive value possible — nothing to widen.
+      return;
+    }
+    if (!anyOtherActiveTemplateGrantsFullAccess(owner, window)) {
+      return;
+    }
+    event.setCurrentState(editableFieldProperty, true);
+    log.info(
+        "Widened AD_Window_Access on role {} window {} to full: another currently-inherited "
+            + "template already grants this window full access (most-permissive-wins, mirrors "
+            + "UserRoleCompositionService#reconcileWindowAccessAfterComposition, applied outside "
+            + "assignTemplateRoles)",
+        owner.getId(), window.getId());
+  }
+
+  /**
+   * Whether ANY template {@code dependent} is currently, actively inheriting from grants {@code
+   * window} full ("&#x2713;") access — read fresh from each template's own {@code
+   * AD_Window_Access} rows, mirroring {@code UserRoleCompositionService#mostPermissiveWindowAccess}
+   * (same source-of-truth choice: the templates' own current grants, not whatever single row
+   * core's per-window propagation happened to leave behind).
+   */
+  private boolean anyOtherActiveTemplateGrantsFullAccess(Role dependent, Window window) {
+    for (Role template : findActiveTemplatesFor(dependent, null)) {
+      WindowAccess templateAccess = findActiveWindowAccess(template, window);
+      if (templateAccess != null && Boolean.TRUE.equals(templateAccess.isEditableField())) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /**
    * If {@code inheritance} points a role at a template, proactively clears that role's OWN
    * conflicting active access for every window the NEW template also grants — the same mechanism
    * as {@link UserRoleCompositionService#preventWindowAccessOverlapCorruption(Role, Role)}, just
@@ -423,12 +525,30 @@ public class WindowAccessOverlapCorruptionGuard extends EntityPersistenceEventOb
    * boolean)}, which excludes the same way rather than relying on the row's DB-visible state (the
    * row may still be physically present at this point in the flush).
    */
-  @SuppressWarnings("unchecked")
   private List<Role> findOtherActiveTemplates(Role dependent, RoleInheritance excludedInheritance) {
+    return findActiveTemplatesFor(dependent, excludedInheritance.getId());
+  }
+
+  /**
+   * Every ACTIVE template {@code dependent} currently inherits from, optionally excluding one
+   * {@code AD_Role_Inheritance} row by id (pass {@code null} to include all of them). Shared by
+   * {@link #findOtherActiveTemplates(Role, RoleInheritance)} (REMOVE-path: exclude the
+   * about-to-be-deleted row) and {@link #anyOtherActiveTemplateGrantsFullAccess(Role, Window)}
+   * (level-widening: no exclusion, every currently-active template counts) — same query pattern
+   * {@code UserRoleCompositionService#reconcileWindowAccessAfterComposition} relies on for its own
+   * most-permissive-wins resolution, reused rather than re-derived. Excludes by id, not by
+   * DB-visible state, mirroring core's own {@code
+   * RoleInheritanceManager#getUpdatedRoleInheritancesList(RoleInheritance, boolean)} (the row may
+   * still be physically present at this point in the flush).
+   */
+  @SuppressWarnings("unchecked")
+  private List<Role> findActiveTemplatesFor(Role dependent, String excludedInheritanceId) {
     OBCriteria<RoleInheritance> criteria = crossClientCriteria(RoleInheritance.class);
     criteria.add(Restrictions.eq(RoleInheritance.PROPERTY_ROLE, dependent));
-    criteria.add(Restrictions.ne(RoleInheritance.PROPERTY_ID, excludedInheritance.getId()));
     criteria.add(Restrictions.eq(RoleInheritance.PROPERTY_ACTIVE, true));
+    if (excludedInheritanceId != null) {
+      criteria.add(Restrictions.ne(RoleInheritance.PROPERTY_ID, excludedInheritanceId));
+    }
     List<Role> templates = new ArrayList<>();
     Set<String> seenTemplateIds = new LinkedHashSet<>();
     for (RoleInheritance ri : (List<RoleInheritance>) criteria.list()) {
