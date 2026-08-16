@@ -35,6 +35,7 @@ import org.openbravo.client.kernel.event.EntityDeleteEvent;
 import org.openbravo.client.kernel.event.EntityNewEvent;
 import org.openbravo.client.kernel.event.EntityPersistenceEventObserver;
 import org.openbravo.client.kernel.event.EntityUpdateEvent;
+import org.openbravo.client.kernel.event.TransactionCompletedEvent;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
@@ -223,6 +224,42 @@ import org.openbravo.model.ad.ui.Window;
  * more clearly kept apart. This generalizes {@code reconcileWindowAccessAfterComposition}'s own
  * most-permissive-wins union to ANY newly-created inherited row, not only ones created via {@code
  * assignTemplateRoles}.
+ *
+ * <p><b>InheritedFrom bookkeeping — a fifth, immediately-following gap in the fourth trigger's own
+ * first fix.</b> Live-confirmed gap (ETP-4906, Task B6 5th round, 2026-08-16), found by the human
+ * continuing self-review with the REMOVE direction on the SAME scenario the fourth trigger's fix
+ * addressed. The fourth trigger's first implementation widened {@code editableField} correctly but
+ * never touched {@code inheritedFrom} on the same row — so a row widened to full because ANOTHER
+ * template justifies it kept pointing {@code InheritedFrom} at whichever template the CREATE path
+ * happened to source the row from originally (which, by construction, does NOT itself grant full
+ * access — that mismatch is exactly why widening was needed in the first place). Confirmed via a
+ * direct read-only {@code psql} query: {@code isreadwrite='Y'} (correct, widened) while {@code
+ * inherited_from} still pointed at the read-only template, not the full one. This breaks REMOVAL
+ * specifically: BOTH core's own {@code RoleInheritanceManager} re-derivation AND this class's own
+ * third-trigger {@link #guardRemovedInheritance(RoleInheritance)} decide whether a row needs
+ * re-evaluating when a {@code RoleInheritance} is removed by checking whether that row's {@code
+ * InheritedFrom} matches the template being removed — a row whose {@code InheritedFrom} lies about
+ * which template is actually responsible for its value is invisible to that check for the ONE
+ * removal that should affect it, and stays stuck at "full" forever.
+ *
+ * <p>The fix: {@link #widenInheritedAccessLevelIfNeeded(EntityNewEvent, WindowAccess)} now also
+ * repoints {@code inheritedFrom} to the SAME template it already resolved as justifying the
+ * widened value ({@link #findActiveTemplateGrantingFullAccess(Role, Window)} — the fourth
+ * trigger's own helper, changed from a boolean "does one exist" check into one that also returns
+ * WHICH template), via the identical {@code event.setCurrentState(Property, Object)} mechanism
+ * already used for {@code editableField} on this same row and for ownership on {@code
+ * correctInheritedOwnership}'s row. This keeps {@code InheritedFrom} an accurate "who is currently
+ * responsible for this row's effective value" pointer at all times, so a later removal of THAT
+ * exact template's inheritance correctly triggers re-derivation in both mechanisms above, cascading
+ * to whatever template remains. Only runs in the branch that already widens (i.e. only when {@code
+ * editableField} was actually {@code false} and gets flipped) — a row that is ALREADY full when
+ * CREATE-sourced never needs repointing, because the template CREATE sourced it from must itself
+ * grant full access for that to be true, so {@code InheritedFrom} is already correct in that case;
+ * see {@link #widenInheritedAccessLevelIfNeeded(EntityNewEvent, WindowAccess)}'s own early-return
+ * comment for the full reasoning. Tie-break when 2+ other active templates are equally responsible:
+ * see {@link #findActiveTemplateGrantingFullAccess(Role, Window)}'s own javadoc (highest {@code
+ * AD_Role_Inheritance.SeqNo}, mirroring core's own {@code
+ * RoleInheritanceManager#propagateDeletedAccess} heuristic).
  */
 public class WindowAccessOverlapCorruptionGuard extends EntityPersistenceEventObserver {
 
@@ -234,6 +271,43 @@ public class WindowAccessOverlapCorruptionGuard extends EntityPersistenceEventOb
    * "Why {@code @Priority} matters here" section. The literal value is otherwise arbitrary.
    */
   private static final int RUNS_BEFORE_UNPRIORITIZED_CORE_OBSERVERS = 1;
+
+  /**
+   * Template role ids currently being removed via an in-flight {@code RoleInheritance} deletion
+   * within THIS transaction (one set per thread — Openbravo/Tomcat threads process one request's
+   * transaction at a time, never concurrently). Exists to close a race confirmed EMPIRICALLY
+   * (ETP-4906, Task B6 5th round follow-up, 2026-08-16) while verifying the {@code InheritedFrom}
+   * repointing fix: {@link #guardRemovedInheritance(RoleInheritance)} deletes a dependent's stale
+   * row and forces core onto the safe CREATE path; the resulting fresh {@code AD_Window_Access}
+   * row's {@code EntityNewEvent} fires — and reaches {@link #widenInheritedAccessLevelIfNeeded}
+   * — NESTED inside the SAME still-in-progress flush that is ALSO in the middle of deleting the
+   * template's own {@code AD_Role_Inheritance} row. Hibernate's default action-queue execution
+   * order runs entity Deletions LAST (after Insertions/Updates), so the just-removed template's
+   * {@code RoleInheritance} row is STILL {@code active=true} as far as any fresh {@code OBCriteria}
+   * SELECT can see at that point — reproduced live as an infinite-seeming loop: removing the FULL
+   * template correctly deleted-and-recreated the dependent's row sourced from the REMAINING
+   * (read-only) template, but the immediately-following widen check found the just-removed FULL
+   * template "still active," and re-widened the fresh row right back to full, silently undoing the
+   * whole point of the removal within the same flush.
+   *
+   * <p>Populated by {@link #guardRemovedInheritance(RoleInheritance)} and consulted by {@link
+   * #findActiveTemplatesFor(Role, String)} (see that method's own javadoc for why the ALREADY-
+   * EXISTING {@code excludedInheritanceId} parameter is not sufficient on its own). Deliberately
+   * NOT cleared at the end of {@link #guardRemovedInheritance(RoleInheritance)}'s own method body —
+   * by the time the nested CREATE this field exists to protect actually fires, that method's own
+   * stack frame has already returned (core's unprioritized {@code RoleInheritanceEventHandler}
+   * observer, which triggers the nested CREATE, runs strictly AFTER this class's own prioritized
+   * observer returns — the entire point of {@code @Priority} in this class). Instead cleared once
+   * per transaction via {@link #onTransactionComplete(TransactionCompletedEvent)} — safe because a
+   * marker surviving until transaction end can only make this class MORE conservative (skip a
+   * template that is, by then, genuinely gone or about to be), never less correct.
+   */
+  private static final ThreadLocal<Set<String>> TEMPLATES_BEING_REMOVED =
+      ThreadLocal.withInitial(LinkedHashSet::new);
+
+  private static Set<String> templatesBeingRemoved() {
+    return TEMPLATES_BEING_REMOVED.get();
+  }
 
   private static Entity[] entities;
 
@@ -313,6 +387,18 @@ public class WindowAccessOverlapCorruptionGuard extends EntityPersistenceEventOb
     if (target instanceof RoleInheritance) {
       guardRemovedInheritance((RoleInheritance) target);
     }
+  }
+
+  /**
+   * Cleanup counterpart to {@link #TEMPLATES_BEING_REMOVED} — see that field's own javadoc for why
+   * it is deliberately NOT cleared inside {@link #guardRemovedInheritance(RoleInheritance)} itself.
+   * {@code TransactionCompletedEvent} fires once per transaction, on BOTH commit and rollback (see
+   * {@code OBInterceptor#afterTransactionCompletion(Transaction)}, this event's own {@code @see}
+   * reference) — always strictly after every flush the transaction could have triggered, so this is
+   * a safe, simple point to reset the marker for the next transaction on this thread.
+   */
+  public void onTransactionComplete(@Observes TransactionCompletedEvent event) {
+    TEMPLATES_BEING_REMOVED.remove();
   }
 
   /**
@@ -409,39 +495,67 @@ public class WindowAccessOverlapCorruptionGuard extends EntityPersistenceEventOb
     if (owner == null || window == null) {
       return;
     }
-    Property editableFieldProperty = windowAccessEntity().getProperty(
-        WindowAccess.PROPERTY_EDITABLEFIELD);
+    Entity waEntity = windowAccessEntity();
+    Property editableFieldProperty = waEntity.getProperty(WindowAccess.PROPERTY_EDITABLEFIELD);
     if (Boolean.TRUE.equals(event.getCurrentState(editableFieldProperty))) {
-      // Already the most permissive value possible — nothing to widen.
+      // Already the most permissive value possible — nothing to widen. Note this does NOT mean
+      // InheritedFrom needs checking here too: whichever template CREATE sourced this row from
+      // already grants full access itself (that is the only way editableField could already be
+      // true), so InheritedFrom already names a template that genuinely justifies the current
+      // value — no correction needed. See the class javadoc's "InheritedFrom bookkeeping" section
+      // for why that stops being true once this method actually widens the value below.
       return;
     }
-    if (!anyOtherActiveTemplateGrantsFullAccess(owner, window)) {
+    Role justifyingTemplate = findActiveTemplateGrantingFullAccess(owner, window);
+    if (justifyingTemplate == null) {
       return;
     }
     event.setCurrentState(editableFieldProperty, true);
+    // Repoint InheritedFrom to the template that actually justifies the now-widened value — see
+    // the class javadoc's "InheritedFrom bookkeeping" section for why leaving it pointed at the
+    // originally CREATE-sourced template (which does NOT grant full access — that is exactly why
+    // widening was needed) breaks a later removal of the justifying template.
+    Property inheritedFromProperty = waEntity.getProperty(WindowAccess.PROPERTY_INHERITEDFROM);
+    Role originalSource = access.getInheritedFrom();
+    event.setCurrentState(inheritedFromProperty, justifyingTemplate);
     log.info(
-        "Widened AD_Window_Access on role {} window {} to full: another currently-inherited "
-            + "template already grants this window full access (most-permissive-wins, mirrors "
+        "Widened AD_Window_Access on role {} window {} to full and repointed InheritedFrom from "
+            + "{} to {}: another currently-inherited template already grants this window full "
+            + "access (most-permissive-wins, mirrors "
             + "UserRoleCompositionService#reconcileWindowAccessAfterComposition, applied outside "
-            + "assignTemplateRoles)",
-        owner.getId(), window.getId());
+            + "assignTemplateRoles). Repointing keeps InheritedFrom an accurate 'who is currently "
+            + "responsible for this row's value' so a LATER removal of {}'s inheritance correctly "
+            + "re-triggers re-derivation instead of leaving the row stuck at full.",
+        owner.getId(), window.getId(), originalSource.getId(), justifyingTemplate.getId(),
+        justifyingTemplate.getId());
   }
 
   /**
-   * Whether ANY template {@code dependent} is currently, actively inheriting from grants {@code
-   * window} full ("&#x2713;") access — read fresh from each template's own {@code
+   * The single OTHER template {@code dependent} is currently, actively inheriting from that
+   * grants {@code window} full ("&#x2713;") access — read fresh from each template's own {@code
    * AD_Window_Access} rows, mirroring {@code UserRoleCompositionService#mostPermissiveWindowAccess}
    * (same source-of-truth choice: the templates' own current grants, not whatever single row
-   * core's per-window propagation happened to leave behind).
+   * core's per-window propagation happened to leave behind). Returns {@code null} if none does.
+   *
+   * <p><b>Tie-break when 2+ OTHER active templates both grant full access.</b> {@link
+   * #findActiveTemplatesFor(Role, String)} returns templates ordered by their {@code
+   * AD_Role_Inheritance.SeqNo} DESCENDING, so the first match this method finds is the
+   * highest-sequence-number one — deliberately mirroring the exact tie-break core's own {@code
+   * RoleInheritanceManager#propagateDeletedAccess} already uses when it has to pick ONE surviving
+   * template to re-source a row from after a removal ("retrieve the list of templates, ordered by
+   * sequence number descending, to update the access with the first one available"). Picking the
+   * SAME tie-break core itself uses means this method's choice of "the" justifying template stays
+   * consistent with whatever core would independently re-derive if the row were deleted and
+   * recreated from scratch — not a novel rule invented for this method.
    */
-  private boolean anyOtherActiveTemplateGrantsFullAccess(Role dependent, Window window) {
+  private Role findActiveTemplateGrantingFullAccess(Role dependent, Window window) {
     for (Role template : findActiveTemplatesFor(dependent, null)) {
       WindowAccess templateAccess = findActiveWindowAccess(template, window);
       if (templateAccess != null && Boolean.TRUE.equals(templateAccess.isEditableField())) {
-        return true;
+        return template;
       }
     }
-    return false;
+    return null;
   }
 
   /**
@@ -499,6 +613,10 @@ public class WindowAccessOverlapCorruptionGuard extends EntityPersistenceEventOb
     if (dependent == null || removedTemplate == null) {
       return;
     }
+    // Marks removedTemplate as "being removed" for the REST of this transaction, not just this
+    // method call — see TEMPLATES_BEING_REMOVED's own javadoc for why the marker must outlive
+    // this method's own stack frame (a race this class hit empirically, see that javadoc).
+    templatesBeingRemoved().add(removedTemplate.getId());
     for (Role remainingTemplate : findOtherActiveTemplates(dependent, inheritance)) {
       for (WindowAccess templateGrant : findActiveWindowAccess(remainingTemplate)) {
         Window window = templateGrant.getWindow();
@@ -533,13 +651,30 @@ public class WindowAccessOverlapCorruptionGuard extends EntityPersistenceEventOb
    * Every ACTIVE template {@code dependent} currently inherits from, optionally excluding one
    * {@code AD_Role_Inheritance} row by id (pass {@code null} to include all of them). Shared by
    * {@link #findOtherActiveTemplates(Role, RoleInheritance)} (REMOVE-path: exclude the
-   * about-to-be-deleted row) and {@link #anyOtherActiveTemplateGrantsFullAccess(Role, Window)}
-   * (level-widening: no exclusion, every currently-active template counts) — same query pattern
-   * {@code UserRoleCompositionService#reconcileWindowAccessAfterComposition} relies on for its own
+   * about-to-be-deleted row; order does not matter there — every remaining template is processed
+   * regardless of order) and {@link #findActiveTemplateGrantingFullAccess(Role, Window)}
+   * (level-widening: no exclusion; order DOES matter there — see that method's own javadoc for the
+   * tie-break this ordering exists to support) — same query pattern {@code
+   * UserRoleCompositionService#reconcileWindowAccessAfterComposition} relies on for its own
    * most-permissive-wins resolution, reused rather than re-derived. Excludes by id, not by
    * DB-visible state, mirroring core's own {@code
    * RoleInheritanceManager#getUpdatedRoleInheritancesList(RoleInheritance, boolean)} (the row may
-   * still be physically present at this point in the flush).
+   * still be physically present at this point in the flush). Ordered by {@code
+   * AD_Role_Inheritance.SeqNo} DESCENDING — mirrors core's own {@code
+   * RoleInheritanceManager#getRoleInheritancesList(Role, Role, boolean)} call from {@code
+   * propagateDeletedAccess} (also descending), which is itself the tie-break authority {@link
+   * #findActiveTemplateGrantingFullAccess(Role, Window)} deliberately reuses.
+   *
+   * <p><b>ALSO excludes every template in {@link #templatesBeingRemoved()}</b> — see that field's
+   * own javadoc for the exact race this closes (a template's {@code RoleInheritance} row is still
+   * DB-visible as {@code active=true} here, mid-flush, even though it is being deleted in the SAME
+   * flush this query runs in). {@code excludedInheritanceId} alone is not enough for THIS
+   * exclusion: that parameter excludes one specific {@code AD_Role_Inheritance} row by id, known
+   * only to {@link #findOtherActiveTemplates(Role, RoleInheritance)}'s own REMOVE-path caller;
+   * {@link #findActiveTemplateGrantingFullAccess(Role, Window)} has no such id available (it is
+   * reached from a completely different event — an unrelated {@code AD_Window_Access} CREATE —
+   * that carries no reference back to whichever {@code RoleInheritance} deletion, if any, is
+   * concurrently in-flight in the same transaction).
    */
   @SuppressWarnings("unchecked")
   private List<Role> findActiveTemplatesFor(Role dependent, String excludedInheritanceId) {
@@ -549,11 +684,14 @@ public class WindowAccessOverlapCorruptionGuard extends EntityPersistenceEventOb
     if (excludedInheritanceId != null) {
       criteria.add(Restrictions.ne(RoleInheritance.PROPERTY_ID, excludedInheritanceId));
     }
+    criteria.addOrderBy(RoleInheritance.PROPERTY_SEQUENCENUMBER, false);
+    Set<String> beingRemoved = templatesBeingRemoved();
     List<Role> templates = new ArrayList<>();
     Set<String> seenTemplateIds = new LinkedHashSet<>();
     for (RoleInheritance ri : (List<RoleInheritance>) criteria.list()) {
       Role template = ri.getInheritFrom();
       if (template != null && Boolean.TRUE.equals(template.isTemplate())
+          && !beingRemoved.contains(template.getId())
           && seenTemplateIds.add(template.getId())) {
         templates.add(template);
       }

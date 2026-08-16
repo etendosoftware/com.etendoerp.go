@@ -408,9 +408,12 @@ public class UserRoleCompositionServiceOverlapIntegrationTest extends WeldBaseTe
       addInheritance(bystanderRole, financeTemplate, 10L);
       addInheritance(bystanderRole, salesTemplate, 20L);
 
-      // Finance FULL, granted FIRST; Sales READ-ONLY, granted SECOND — per the ADD-path guard's
-      // own "last write wins" mechanism (see WindowAccessOverlapCorruptionGuard#guardDependentsOf),
-      // the bystander's shared-window row ends up sourced from SALES after this, not Finance.
+      // Finance FULL, granted FIRST; Sales READ-ONLY, granted SECOND. Sales's own grant briefly
+      // becomes the row's raw CREATE source ("last write wins", see
+      // WindowAccessOverlapCorruptionGuard#guardDependentsOf), but ETP-4906's round-5 fix then
+      // immediately widens AND repoints InheritedFrom to Finance in the SAME flush (Finance still
+      // grants full — see widenInheritedAccessLevelIfNeeded) — so by the time this test can
+      // observe the row, InheritedFrom already correctly names Finance, not Sales.
       grantWindowAccess(financeTemplate, sharedWindow, false);
       OBDal.getInstance().flush();
       grantWindowAccess(salesTemplate, sharedWindow, true);
@@ -419,16 +422,23 @@ public class UserRoleCompositionServiceOverlapIntegrationTest extends WeldBaseTe
       WindowAccess beforeRemoval = findWindowAccess(bystanderRole, sharedWindow);
       assertNotNull("Sanity: the ADD-path fix must have already propagated the shared window",
           beforeRemoval);
-      assertEquals("Sanity: per the guard's own last-write-wins mechanism, Sales (granted "
-          + "second) must currently be the source, not Finance", salesTemplate.getId(),
+      assertEquals("Sanity: most-permissive-wins (round 5) must have already repointed "
+          + "InheritedFrom to Finance, the template that actually justifies the full access, "
+          + "even though Sales was the raw CREATE source (\"last write wins\")",
+          financeTemplate.getId(),
           beforeRemoval.getInheritedFrom() != null ? beforeRemoval.getInheritedFrom().getId()
               : null);
 
-      // THE REMOVE-PATH TRIGGER: delete the RoleInheritance row that currently SOURCES the
-      // shared window's access (Sales) — zero UserRoleCompositionService code anywhere in this
-      // call stack. This forces RoleInheritanceManager#applyRemoveInheritance to re-derive the
-      // shared window's access from the one remaining template, Finance — exactly the corrupting
-      // handleAccess -> updateRoleAccess blind-copy path this fix guards against. Must not throw.
+      // THE REMOVE-PATH TRIGGER: delete Sales's RoleInheritance row — zero
+      // UserRoleCompositionService code anywhere in this call stack. Since round 5's fix, the
+      // row's InheritedFrom already correctly names Finance (see the sanity check above), so
+      // guardRemovedInheritance's own "already correctly sourced from the one remaining template,
+      // skip" check (see that method's own javadoc) means this particular removal is a no-op for
+      // the delete-forcing-create-path mechanism — nothing NEEDS re-deriving, because nothing was
+      // wrong to begin with. What this still verifies: removing the NON-justifying template must
+      // not throw and must leave the row's correct (Finance-sourced, full) state untouched. See
+      // testRemovingTheTemplateThatJustifiedAWidenedAccessLevelCorrectlyDowngrades for the
+      // complementary case — removing the template that DOES currently justify the row's value.
       RoleInheritance salesInheritance = findInheritance(bystanderRole, salesTemplate);
       assertNotNull(salesInheritance);
       OBDal.getInstance().remove(salesInheritance);
@@ -521,6 +531,112 @@ public class UserRoleCompositionServiceOverlapIntegrationTest extends WeldBaseTe
       assertTrue("Most-permissive-wins: gaining a READ-ONLY template must never downgrade "
           + "already-existing FULL access (Finance), even outside UserRoleCompositionService",
           Boolean.TRUE.equals(afterSales.isEditableField()));
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  /**
+   * ETP-4906 (Task B6, 5th round, {@code InheritedFrom} bookkeeping gap) — deterministic,
+   * self-contained proof that widening a row's access level ALSO repoints {@code InheritedFrom}
+   * to the template that actually justifies the widened value, and that a LATER removal of THAT
+   * template correctly downgrades the row instead of leaving it stuck.
+   *
+   * <p>Immediately continues the exact scenario {@link
+   * #testGainingReadOnlyTemplateInheritanceNeverDowngradesExistingFullAccess()} above already
+   * proves resolves to full: Finance (full) added FIRST, Sales (read-only) added SECOND —
+   * deliberately, NOT the reverse order. Only Finance-first/Sales-second actually reproduces the
+   * bookkeeping bug: adding Sales second forces {@code guardNewInheritance} to delete-and-recreate
+   * the dependent's row sourced from Sales (the newly-added template), which {@code
+   * widenInheritedAccessLevelIfNeeded} then widens back to full because Finance still justifies
+   * it — this is the live-reproduced order (the human's real {@code ClassicTemplateTest2Broad}
+   * added, THEN {@code ClassicTemplateTest1Read} added). Adding the full template SECOND instead
+   * would have core's own {@code applyNewInheritance} source the fresh row directly from the full
+   * template, already correct on both level AND {@code InheritedFrom} with nothing to widen —
+   * not a reproduction of this bug at all.
+   *
+   * <p>Before this round's fix, the widened row's {@code InheritedFrom} stayed pointed at Sales
+   * (the template CREATE originally sourced the row from, which does NOT itself grant full — that
+   * mismatch is exactly why widening was needed) instead of Finance (the template that actually
+   * justifies the value) — confirmed live via a direct {@code psql} query against the human's real
+   * repro. Removing Finance's inheritance afterward then had NO EFFECT: both core's own
+   * re-derivation and this class's own {@link #guardRemovedInheritance(RoleInheritance)} decide
+   * whether a row needs re-evaluating by checking whether {@code InheritedFrom} matches the
+   * template being removed/still-remaining, and a row that lies about its own source is invisible
+   * to that check for the one removal that should actually affect it — reproduced here as the
+   * assertion that would fail without this round's fix.
+   */
+  @Test
+  public void testRemovingTheTemplateThatJustifiedAWidenedAccessLevelCorrectlyDowngrades()
+      throws Exception {
+    setTestUserContext();
+    OBContext.setAdminMode(true);
+    try {
+      Window sharedWindow = OBDal.getInstance().get(Window.class, UNUSED_WINDOW_ID);
+      assertNotNull(sharedWindow);
+
+      Role financeTemplate = OBDal.getInstance().get(Role.class,
+          SystemRoleTemplates.FINANCE_ROLE_ID);
+      Role salesTemplate = OBDal.getInstance().get(Role.class, SystemRoleTemplates.SALES_ROLE_ID);
+      assertNotNull(financeTemplate);
+      assertNotNull(salesTemplate);
+
+      User user = OBDal.getInstance().get(User.class, TEST_USER_ID);
+      assertNotNull(user);
+
+      // The two templates' own access levels on the shared window: Finance FULL, Sales READ-ONLY.
+      grantWindowAccess(financeTemplate, sharedWindow, false);
+      OBDal.getInstance().flush();
+      grantWindowAccess(salesTemplate, sharedWindow, true);
+      OBDal.getInstance().flush();
+
+      // Finance (full) FIRST, Sales (read-only) SECOND — see this test's own javadoc for why this
+      // exact order, not the reverse, is required to reproduce the bug.
+      Role bystanderRole = createBystanderRole(user);
+      addInheritance(bystanderRole, financeTemplate, 10L);
+      addInheritance(bystanderRole, salesTemplate, 20L);
+
+      WindowAccess widened = findWindowAccess(bystanderRole, sharedWindow);
+      assertNotNull("Sanity: gaining Sales must not have dropped the shared window", widened);
+      assertTrue("Sanity: most-permissive-wins must still resolve to full (round 4's own fix, "
+          + "reused here as the setup for round 5's own gap)",
+          Boolean.TRUE.equals(widened.isEditableField()));
+      // THE ROUND-5 FIX, asserted directly: InheritedFrom must be repointed to the template that
+      // ACTUALLY justifies the widened value (Finance), not left pointing at Sales (the template
+      // CREATE originally sourced the row from) — the exact field a live psql query on the
+      // human's real repro found stale.
+      assertEquals("InheritedFrom must point at the template that actually justifies the "
+          + "widened value (Finance), not the template CREATE originally sourced the row from "
+          + "(Sales) — this is the exact bookkeeping bug this round fixes",
+          financeTemplate.getId(),
+          widened.getInheritedFrom() != null ? widened.getInheritedFrom().getId() : null);
+
+      // Now remove the FULL template's inheritance (Finance). With InheritedFrom now correctly
+      // pointing at Finance, this removal must be recognized by both guardRemovedInheritance and
+      // core's own re-derivation as "this row needs re-evaluating" and downgrade it to Sales's
+      // read-only grant. Before this round's fix, InheritedFrom wrongly said "Sales" so this
+      // removal was invisible to both mechanisms and the row stayed stuck at full forever — the
+      // human's own live-confirmed symptom.
+      RoleInheritance financeInheritance = findInheritance(bystanderRole, financeTemplate);
+      assertNotNull(financeInheritance);
+      OBDal.getInstance().remove(financeInheritance);
+      OBDal.getInstance().flush();
+
+      WindowAccess afterRemoval = findWindowAccess(bystanderRole, sharedWindow);
+      assertNotNull("The shared window's access must survive the removal, re-derived from the "
+          + "one remaining template (Sales), not silently dropped", afterRemoval);
+      assertEquals("client must always match the BYSTANDER role's own, never a template's",
+          bystanderRole.getClient().getId(), afterRemoval.getClient().getId());
+      assertEquals("organization must always match the BYSTANDER role's own, never a template's",
+          bystanderRole.getOrganization().getId(), afterRemoval.getOrganization().getId());
+      assertEquals("The window must now be re-derived from Sales, the one remaining template",
+          salesTemplate.getId(),
+          afterRemoval.getInheritedFrom() != null ? afterRemoval.getInheritedFrom().getId()
+              : null);
+      assertTrue("Removing the FULL template must downgrade to the remaining READ-ONLY "
+          + "template's level, not stay stuck at full (the exact live-confirmed regression this "
+          + "round fixes)",
+          !Boolean.TRUE.equals(afterRemoval.isEditableField()));
     } finally {
       OBContext.restorePreviousMode();
     }
