@@ -24,6 +24,7 @@ import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anySet;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
@@ -1160,6 +1161,177 @@ public class FinancialAccountsPageHandlerTest {
       Set<String> result = handler.loadAccountsWithTransactions(CLIENT_ID, ORGS);
 
       assertTrue("expected empty set", result.isEmpty());
+    }
+  }
+
+  // ── loadDeleteBlockersByAccount() (ETP-4871) ─────────────────────────────
+
+  /**
+   * Verifies that {@code loadDeleteBlockersByAccount} maps each SQL reason code to the exact same
+   * {@code REASON_*} wording {@link FinancialAccountDeleteSupport} uses for the DELETE 409
+   * message — the two must never drift apart, since {@code FinancialAccountHandler#deleteAccount} and this
+   * batched, page-scoped loader independently name the same blockers to two different UI surfaces
+   * (the 409 error and the list's {@code deleteBlockedReason} field).
+   *
+   * @throws Exception if the mocked JDBC chain fails
+   */
+  @Test
+  public void testLoadDeleteBlockersByAccountReasonWordingMatchesHandlerConstants() throws Exception {
+    Connection conn = mock(Connection.class);
+    PreparedStatement ps = mock(PreparedStatement.class);
+    ResultSet rs = mock(ResultSet.class);
+
+    when(conn.prepareStatement(anyString())).thenReturn(ps);
+    when(conn.createArrayOf(eq("varchar"), any())).thenReturn(mock(Array.class));
+    when(ps.executeQuery()).thenReturn(rs);
+    when(rs.next()).thenReturn(true, false);
+    when(rs.getString(1)).thenReturn("acc-1");
+    when(rs.getString(2)).thenReturn("TRANSACTIONS");
+
+    try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.getConnection()).thenReturn(conn);
+
+      Map<String, List<String>> result = handler.loadDeleteBlockersByAccount(CLIENT_ID, ORGS);
+
+      // Same constant the DELETE 409 message uses for the "has transactions" blocker.
+      assertEquals(Collections.singletonList(FinancialAccountDeleteSupport.REASON_TRANSACTIONS),
+          result.get("acc-1"));
+    }
+  }
+
+  /**
+   * Verifies that reasons are aggregated per account id, deduplicated (a duplicate row for the
+   * same account+reason — e.g. two active transactions — must not repeat the reason text), and
+   * that different accounts do not leak reasons into one another.
+   *
+   * @throws Exception if the mocked JDBC chain fails
+   */
+  @Test
+  public void testLoadDeleteBlockersByAccountAggregatesMultipleReasonsWithoutDuplicates()
+      throws Exception {
+    Connection conn = mock(Connection.class);
+    PreparedStatement ps = mock(PreparedStatement.class);
+    ResultSet rs = mock(ResultSet.class);
+
+    when(conn.prepareStatement(anyString())).thenReturn(ps);
+    when(conn.createArrayOf(eq("varchar"), any())).thenReturn(mock(Array.class));
+    when(ps.executeQuery()).thenReturn(rs);
+    // acc-1 appears twice for TRANSACTIONS (e.g. two active transaction rows) and once for
+    // BANK_CONNECTION; acc-2 appears once for RECONCILIATIONS.
+    when(rs.next()).thenReturn(true, true, true, true, false);
+    when(rs.getString(1)).thenReturn("acc-1", "acc-1", "acc-1", "acc-2");
+    when(rs.getString(2)).thenReturn("TRANSACTIONS", "TRANSACTIONS", "BANK_CONNECTION", "RECONCILIATIONS");
+
+    try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.getConnection()).thenReturn(conn);
+
+      Map<String, List<String>> result = handler.loadDeleteBlockersByAccount(CLIENT_ID, ORGS);
+
+      assertEquals(2, result.size());
+      List<String> acc1Reasons = result.get("acc-1");
+      // The duplicate TRANSACTIONS row is deduplicated, so acc-1 has exactly two distinct
+      // reasons, not three.
+      assertEquals(2, acc1Reasons.size());
+      assertTrue(acc1Reasons.contains(FinancialAccountDeleteSupport.REASON_TRANSACTIONS));
+      assertTrue(acc1Reasons.contains(FinancialAccountDeleteSupport.REASON_BANK_CONNECTION));
+      assertEquals(Collections.singletonList(FinancialAccountDeleteSupport.REASON_RECONCILIATIONS),
+          result.get("acc-2"));
+    }
+  }
+
+  /**
+   * Verifies that a reason code the reason-map does not recognise (e.g. a future branch added to
+   * the SQL without a matching entry in {@code DELETE_BLOCKER_REASON_BY_CODE}) is defensively
+   * skipped rather than producing a phantom blocker with a {@code null} reason string.
+   *
+   * @throws Exception if the mocked JDBC chain fails
+   */
+  @Test
+  public void testLoadDeleteBlockersByAccountIgnoresUnrecognizedReasonCode() throws Exception {
+    Connection conn = mock(Connection.class);
+    PreparedStatement ps = mock(PreparedStatement.class);
+    ResultSet rs = mock(ResultSet.class);
+
+    when(conn.prepareStatement(anyString())).thenReturn(ps);
+    when(conn.createArrayOf(eq("varchar"), any())).thenReturn(mock(Array.class));
+    when(ps.executeQuery()).thenReturn(rs);
+    when(rs.next()).thenReturn(true, false);
+    when(rs.getString(1)).thenReturn("acc-1");
+    when(rs.getString(2)).thenReturn("SOME_FUTURE_CODE_NOT_YET_MAPPED");
+
+    try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.getConnection()).thenReturn(conn);
+
+      Map<String, List<String>> result = handler.loadDeleteBlockersByAccount(CLIENT_ID, ORGS);
+
+      assertTrue("an unrecognized code must not produce a phantom blocker", result.isEmpty());
+    }
+  }
+
+  /**
+   * Verifies that {@code loadDeleteBlockersByAccount} returns an empty map when no row in scope
+   * would block a hard delete — the state of a freshly-created, untouched account.
+   *
+   * @throws Exception if the mocked JDBC chain fails
+   */
+  @Test
+  public void testLoadDeleteBlockersByAccountReturnsEmptyMapWhenNoRows() throws Exception {
+    Connection conn = mock(Connection.class);
+    PreparedStatement ps = mock(PreparedStatement.class);
+    ResultSet rs = mock(ResultSet.class);
+
+    when(conn.prepareStatement(anyString())).thenReturn(ps);
+    when(conn.createArrayOf(eq("varchar"), any())).thenReturn(mock(Array.class));
+    when(ps.executeQuery()).thenReturn(rs);
+    when(rs.next()).thenReturn(false);
+
+    try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.getConnection()).thenReturn(conn);
+
+      assertTrue(handler.loadDeleteBlockersByAccount(CLIENT_ID, ORGS).isEmpty());
+    }
+  }
+
+  /**
+   * Verifies that all ten {@code UNION ALL} branches of {@code DELETE_BLOCKERS_BY_ACCOUNT_SQL} are
+   * bound with (clientId, orgs) — ten {@code setString} + ten {@code setArray} calls reusing a
+   * single {@code java.sql.Array} instance, mirroring {@code loadPendingByAccount}'s own
+   * multi-branch binding test. A missed branch would leave a placeholder unset and the driver
+   * would throw at execution time.
+   *
+   * @throws Exception if the mocked JDBC chain fails
+   */
+  @Test
+  public void testLoadDeleteBlockersByAccountBindsAllTenUnionBranches() throws Exception {
+    Connection conn = mock(Connection.class);
+    PreparedStatement ps = mock(PreparedStatement.class);
+    ResultSet rs = mock(ResultSet.class);
+    Array orgArray = mock(Array.class);
+
+    when(conn.prepareStatement(anyString())).thenReturn(ps);
+    when(conn.createArrayOf(eq("varchar"), any())).thenReturn(orgArray);
+    when(ps.executeQuery()).thenReturn(rs);
+    when(rs.next()).thenReturn(false);
+
+    try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.getConnection()).thenReturn(conn);
+
+      handler.loadDeleteBlockersByAccount(CLIENT_ID, ORGS);
+
+      verify(ps, times(10)).setString(anyInt(), eq(CLIENT_ID));
+      verify(ps, times(10)).setArray(anyInt(), eq(orgArray));
+      // One array built and bound ten times, not ten equivalent arrays.
+      verify(conn, times(1)).createArrayOf(eq("varchar"), any());
     }
   }
 
