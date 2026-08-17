@@ -541,7 +541,7 @@ public class WindowAccessOverlapCorruptionGuard extends EntityPersistenceEventOb
    */
   private void correctInheritedOwnership(EntityNewEvent event, WindowAccess access) {
     if (access.getInheritedFrom() == null) {
-      // Manually-granted row, never template-derived — ownership is whatever the grantor set;
+      // Manually-granted row, never template-derived — ownership is whatever the grantor set,
       // not this class's business.
       return;
     }
@@ -681,15 +681,7 @@ public class WindowAccessOverlapCorruptionGuard extends EntityPersistenceEventOb
       if (window == null) {
         continue;
       }
-      WindowAccess existing = findActiveWindowAccess(dependent, window);
-      if (existing == null) {
-        continue;
-      }
-      Role existingSource = existing.getInheritedFrom();
-      if (existingSource != null && sameId(existingSource, template)) {
-        continue;
-      }
-      deleteForcingCreatePath(existing, dependent, window, template, existingSource);
+      clearConflictingAccessUnconditionally(dependent, window, template);
     }
   }
 
@@ -727,69 +719,15 @@ public class WindowAccessOverlapCorruptionGuard extends EntityPersistenceEventOb
     // javadoc's "A sixth trigger" section for why this replaces the old per-remaining-template
     // delete loop, and its "Why InheritedFrom must track core's own SeqNo precedence" paragraph
     // for why the winner (InheritedFrom target) and the level (most-permissive-wins) are computed
-    // SEPARATELY below, not both from the same "prefer full access" pick. remainingTemplates is
-    // already SeqNo DESCENDING (findActiveTemplatesFor), so the FIRST remaining template seen
-    // granting a given window is exactly the value core's OWN ascending-SeqNo precedence
-    // algorithm (RoleInheritanceManager#isPrecedent) would themselves converge on if left
-    // undisturbed — REGARDLESS of which template grants the window most permissively.
+    // SEPARATELY, not both from the same "prefer full access" pick — see {@link
+    // #collectWindowGrantors(List)} and {@link #repointWindowIfNeeded(Role, Window,
+    // WindowGrantors)} for the two halves of that computation.
     List<Role> remainingTemplates = findOtherActiveTemplates(dependent, inheritance);
-    Map<String, Window> windowsById = new LinkedHashMap<>();
-    Map<String, Role> anyGrantor = new LinkedHashMap<>();
-    Map<String, Role> fullGrantor = new LinkedHashMap<>();
-    for (Role remainingTemplate : remainingTemplates) {
-      for (WindowAccess templateGrant : findActiveWindowAccess(remainingTemplate)) {
-        Window window = templateGrant.getWindow();
-        if (window == null) {
-          continue;
-        }
-        windowsById.putIfAbsent(window.getId(), window);
-        anyGrantor.putIfAbsent(window.getId(), remainingTemplate);
-        if (Boolean.TRUE.equals(templateGrant.isEditableField())) {
-          fullGrantor.putIfAbsent(window.getId(), remainingTemplate);
-        }
-      }
-    }
+    WindowGrantors grantors = collectWindowGrantors(remainingTemplates);
 
     boolean anyCorrected = false;
-    for (Map.Entry<String, Window> entry : windowsById.entrySet()) {
-      String windowId = entry.getKey();
-      Window window = entry.getValue();
-      // winner (WHO becomes InheritedFrom) is ALWAYS the highest-SeqNo remaining template
-      // granting this window, regardless of level — see the class javadoc's "A sixth trigger"
-      // section, "InheritedFrom must track core's own precedence, not most-permissive-wins"
-      // paragraph, for why preferring a more-permissive-but-lower-SeqNo template here (as an
-      // earlier version of this fix did) is NOT safe: core's own calculateAccesses walks ALL
-      // remaining templates ascending by SeqNo in ONE call, and isPrecedent only ever compares
-      // list INDEX (== SeqNo order), never access level — so anything other than the highest-
-      // SeqNo grantor here is guaranteed to be overridden by core's own LATER pass over the
-      // actual highest-SeqNo grantor, hitting the exact blind-copy client corruption this class
-      // exists to prevent. winnerLevel (the ACCESS LEVEL) is a SEPARATE decision — most-
-      // permissive-wins across every remaining template granting this window, independent of
-      // which one ends up as the source, exactly mirroring widenInheritedAccessLevelIfNeeded's
-      // own "level and ownership are different concerns" split on the ADD side.
-      Role winner = anyGrantor.get(windowId);
-      boolean winnerLevel = fullGrantor.containsKey(windowId);
-
-      WindowAccess existing = findActiveWindowAccess(dependent, window);
-      if (existing == null) {
-        // No existing row to correct in place — nothing for THIS mechanism to do; falls back to
-        // core's own natural CREATE path. Residual, pre-existing, theoretical gap (not the
-        // failure mode reproduced by ETP-4906's 6th round): if 2+ remaining templates BOTH grant
-        // a window the dependent never had access to before this removal, core's own
-        // calculateAccesses could still independently attempt 2 competing CREATEs for it, same
-        // root cause as the fix below just for a row that never existed to repoint. Not closed
-        // here — see the class javadoc's "A sixth trigger" section for why this is considered
-        // acceptable residual risk for now.
-        continue;
-      }
-      Role existingSource = existing.getInheritedFrom();
-      boolean sourceCorrect = existingSource != null && sameId(existingSource, winner);
-      boolean levelCorrect = Boolean.valueOf(winnerLevel).equals(existing.isEditableField());
-      if (sourceCorrect && levelCorrect) {
-        continue;
-      }
-      repointInPlace(existing, dependent, window, winner, winnerLevel, existingSource);
-      anyCorrected = true;
+    for (Window window : grantors.windowsById.values()) {
+      anyCorrected |= repointWindowIfNeeded(dependent, window, grantors);
     }
 
     if (anyCorrected) {
@@ -805,6 +743,96 @@ public class WindowAccessOverlapCorruptionGuard extends EntityPersistenceEventOb
       // of once per corrected window.
       OBDal.getInstance().refresh(dependent);
     }
+  }
+
+  /**
+   * Per-window verdict {@link #collectWindowGrantors(List)} computes and {@link
+   * #repointWindowIfNeeded(Role, Window, WindowGrantors)} consumes — extracted purely to keep
+   * {@link #guardRemovedInheritance(RoleInheritance)}'s own cognitive complexity and per-loop
+   * break/continue count within the SonarQube gate; carries no behavior of its own.
+   */
+  private static final class WindowGrantors {
+    private final Map<String, Window> windowsById = new LinkedHashMap<>();
+    private final Map<String, Role> anyGrantor = new LinkedHashMap<>();
+    private final Map<String, Role> fullGrantor = new LinkedHashMap<>();
+  }
+
+  /**
+   * Builds the per-window verdict {@link #repointWindowIfNeeded(Role, Window, WindowGrantors)}
+   * needs, across ALL of {@code remainingTemplates} in one pass. {@code remainingTemplates} is
+   * already SeqNo DESCENDING ({@link #findActiveTemplatesFor(Role, String)}), so the FIRST
+   * remaining template seen granting a given window — {@code anyGrantor}'s {@code putIfAbsent} —
+   * is exactly the value core's OWN ascending-SeqNo precedence algorithm ({@code
+   * RoleInheritanceManager#isPrecedent}) would itself converge on if left undisturbed, REGARDLESS
+   * of which template grants the window most permissively; {@code fullGrantor} is a SEPARATE,
+   * independent tracking of whether ANY remaining template (not necessarily {@code anyGrantor}'s
+   * winner) grants the window full access — see {@link #repointWindowIfNeeded(Role, Window,
+   * WindowGrantors)}'s own javadoc for why the source (WHO) and the level (HOW MUCH) are two
+   * separate decisions.
+   */
+  private WindowGrantors collectWindowGrantors(List<Role> remainingTemplates) {
+    WindowGrantors grantors = new WindowGrantors();
+    for (Role remainingTemplate : remainingTemplates) {
+      for (WindowAccess templateGrant : findActiveWindowAccess(remainingTemplate)) {
+        Window window = templateGrant.getWindow();
+        if (window == null) {
+          continue;
+        }
+        grantors.windowsById.putIfAbsent(window.getId(), window);
+        grantors.anyGrantor.putIfAbsent(window.getId(), remainingTemplate);
+        if (Boolean.TRUE.equals(templateGrant.isEditableField())) {
+          grantors.fullGrantor.putIfAbsent(window.getId(), remainingTemplate);
+        }
+      }
+    }
+    return grantors;
+  }
+
+  /**
+   * Corrects {@code dependent}'s existing row for {@code window} in place when it does not
+   * already match {@code grantors}' verdict for that window; returns whether a correction was
+   * made (so the caller knows whether {@code dependent} needs refreshing afterward).
+   *
+   * <p><b>Winner (WHO becomes {@code InheritedFrom}) is ALWAYS the highest-SeqNo remaining
+   * template granting this window, regardless of level</b> — see the class javadoc's "A sixth
+   * trigger" section, "InheritedFrom must track core's own precedence, not most-permissive-wins"
+   * paragraph, for why preferring a more-permissive-but-lower-SeqNo template here (as an earlier
+   * version of this fix did) is NOT safe: core's own {@code calculateAccesses} walks ALL
+   * remaining templates ascending by SeqNo in ONE call, and {@code isPrecedent} only ever
+   * compares list INDEX (== SeqNo order), never access level — so anything other than the
+   * highest-SeqNo grantor here is guaranteed to be overridden by core's own LATER pass over the
+   * actual highest-SeqNo grantor, hitting the exact blind-copy client corruption this class
+   * exists to prevent. {@code winnerLevel} (the ACCESS LEVEL) is a SEPARATE decision —
+   * most-permissive-wins across every remaining template granting this window, independent of
+   * which one ends up as the source, exactly mirroring {@link
+   * #widenInheritedAccessLevelIfNeeded(EntityNewEvent, WindowAccess)}'s own "level and ownership
+   * are different concerns" split on the ADD side.
+   */
+  private boolean repointWindowIfNeeded(Role dependent, Window window, WindowGrantors grantors) {
+    String windowId = window.getId();
+    Role winner = grantors.anyGrantor.get(windowId);
+    boolean winnerLevel = grantors.fullGrantor.containsKey(windowId);
+
+    WindowAccess existing = findActiveWindowAccess(dependent, window);
+    if (existing == null) {
+      // No existing row to correct in place — nothing for THIS mechanism to do; falls back to
+      // core's own natural CREATE path. Residual, pre-existing, theoretical gap (not the
+      // failure mode reproduced by ETP-4906's 6th round): if 2+ remaining templates BOTH grant
+      // a window the dependent never had access to before this removal, core's own
+      // calculateAccesses could still independently attempt 2 competing CREATEs for it, same
+      // root cause as the fix below just for a row that never existed to repoint. Not closed
+      // here — see the class javadoc's "A sixth trigger" section for why this is considered
+      // acceptable residual risk for now.
+      return false;
+    }
+    Role existingSource = existing.getInheritedFrom();
+    boolean sourceCorrect = existingSource != null && sameId(existingSource, winner);
+    boolean levelCorrect = Boolean.valueOf(winnerLevel).equals(existing.isEditableField());
+    if (sourceCorrect && levelCorrect) {
+      return false;
+    }
+    repointInPlace(existing, dependent, window, winner, winnerLevel, existingSource);
+    return true;
   }
 
   /**
@@ -886,19 +914,75 @@ public class WindowAccessOverlapCorruptionGuard extends EntityPersistenceEventOb
       return;
     }
     for (Role dependent : findActiveDependentRoles(role)) {
-      WindowAccess existing = findActiveWindowAccess(dependent, window);
-      if (existing == null) {
-        // No conflicting row at all — core will safely CREATE one, nothing to prevent.
-        continue;
-      }
-      Role existingSource = existing.getInheritedFrom();
-      if (existingSource != null && sameId(existingSource, role)) {
-        // Already correctly sourced from THIS SAME template — a normal, non-corrupting
-        // re-propagation (core's own updateRoleAccess only ever touches same-source rows here).
-        continue;
-      }
-      deleteForcingCreatePath(existing, dependent, window, role, existingSource);
+      clearConflictingAccessUnconditionally(dependent, window, role);
     }
+  }
+
+  /**
+   * Shared by both ADD-side triggers ({@link #guardDependentsOf(WindowAccess)} and {@link
+   * #guardNewInheritance(RoleInheritance)}): if {@code dependent} has an active {@code
+   * AD_Window_Access} row for {@code window}, deletes it via {@link #deleteForcingCreatePath}
+   * UNCONDITIONALLY — even when the row is ALREADY correctly sourced from {@code
+   * grantingTemplate}. See the class javadoc's "A seventh trigger" section for the full
+   * root-cause write-up; summarized here.
+   *
+   * <p><b>Why "already correct" is no longer a reason to skip — found empirically (ETP-4906,
+   * Task B6, 7th round, 2026-08-17).</b> Both prior ADD-side implementations (rounds 1-2) treated
+   * "the existing row is already sourced from the SAME template that just gained the grant" as a
+   * safe no-op, reasoning that core's own {@code RoleInheritanceManager#handleAccess}/{@code
+   * isPrecedent} would independently reach the identical conclusion (its own {@code
+   * ACCESS_NOT_CHANGED} branch) and leave the row alone. That reasoning assumed core's own {@code
+   * getAccess()}/{@code AccessTypeInjector#findAccess} lookup can actually SEE the row — it
+   * cannot, whenever the dependent's client is not in the ambient {@code OBContext}'s own
+   * readable-clients list: {@code findAccess}'s generated query filters by {@code AD_Client_ID in
+   * (...)} using the CALLING context's readable clients (confirmed via SQL trace: a role
+   * belonging to a tenant client not in that list is invisible to this query, full stop — the
+   * row-level filter is not admin-mode-gated, exactly like {@link #crossClientCriteria(Class)}'s
+   * own javadoc already documents for OUR OWN queries). When blind, {@code handleAccess} ALWAYS
+   * evaluates {@code access == null} and takes the CREATE branch — REGARDLESS of whether a
+   * correctly-sourced row already exists — so ANY pre-existing row for that (role, window), no
+   * matter how correct, is a duplicate-INSERT collision waiting to happen the instant core's own
+   * propagation reaches it. Live-reproduced: {@code
+   * UserRoleCompositionServiceOverlapReverificationTest#testRealMatrixOverlapSalesAndPurchasingOnProductCategoryStaysReadOnly}
+   * — a bystander role ({@code F238CDA0}, "Personal – CompositionUser") already had a correctly-
+   * sourced, correctly-leveled row for the template's newly-granted window; the OLD "skip when
+   * already correct" branch left it in place; core's own blind {@code copyRoleAccess} then tried
+   * to INSERT a second row for the identical {@code (AD_Role_ID, AD_Window_ID)} key and crashed
+   * with the same {@code ad_window_access_un_key} violation this whole class exists to prevent.
+   *
+   * <p><b>Why deletion (not {@link #repointInPlace}) is the correct lever here — a DIFFERENT
+   * conclusion from {@link #guardRemovedInheritance(RoleInheritance)}'s own "never delete, always
+   * repoint in place" rule, for a DIFFERENTLY-SHAPED bug.</b> {@code guardRemovedInheritance}'s
+   * duplicate-INSERT race (the "sixth trigger") is about core's {@code calculateAccesses} walking
+   * 2+ REMAINING TEMPLATES in ONE call with no flush between passes — repointing in place removes
+   * the underlying trigger entirely, because core's OWN {@code isPrecedent} check, once it can
+   * see a row sourced from the highest-{@code SeqNo} template, correctly resolves to
+   * ACCESS_NOT_CHANGED and never attempts a competing write. That reasoning requires core to be
+   * ABLE to see the row. Here, core's blindness is the root cause itself — repointing a row's
+   * fields in place changes nothing about whether the row PHYSICALLY EXISTS, so core's blind
+   * {@code copyRoleAccess} would still attempt an INSERT against the identical key regardless of
+   * what values the surviving row holds. The ONLY way to guarantee core's own (blind) CREATE
+   * lands on an empty slot is to ensure no row exists at all before returning control to it —
+   * exactly what {@link #deleteForcingCreatePath} already does for the "needs correction" case.
+   * Applying it unconditionally simply closes the gap left by the old "already correct" shortcut.
+   *
+   * <p>Trades a small amount of churn (a correctly-sourced row is deleted and recreated with a
+   * fresh id/audit columns instead of being left untouched) for guaranteed safety — acceptable
+   * given the alternative is a 500 error on the real {@code SFAssignUserRoles} webhook. The
+   * recreated row is corrected right back to the exact same values by {@link
+   * #correctInheritedOwnership(EntityNewEvent, WindowAccess)}/{@link
+   * #widenInheritedAccessLevelIfNeeded(EntityNewEvent, WindowAccess)}, which already run on
+   * EVERY freshly-created inherited row regardless of how it was triggered.
+   */
+  private void clearConflictingAccessUnconditionally(Role dependent, Window window,
+      Role grantingTemplate) {
+    WindowAccess existing = findActiveWindowAccess(dependent, window);
+    if (existing == null) {
+      // No conflicting row at all — core will safely CREATE one, nothing to prevent.
+      return;
+    }
+    deleteForcingCreatePath(existing, dependent, window, grantingTemplate,
+        existing.getInheritedFrom());
   }
 
   /**

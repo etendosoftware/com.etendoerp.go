@@ -429,23 +429,8 @@ public class UserRoleCompositionService {
       Set<String> confirmedPersonalRoleIds = new LinkedHashSet<>();
       Map<String, String> personalRoleIdByUserId = new LinkedHashMap<>();
       for (User user : users) {
-        Role candidate = user.getDefaultRole();
-        if (candidate == null) {
-          continue;
-        }
-        String roleId = candidate.getId();
-        if (!candidateRolesById.containsKey(roleId) || inheritFromTargetRoleIds.contains(roleId)) {
-          continue;
-        }
-        List<String> assignedUserIds =
-            assignedUserIdsByRoleId.getOrDefault(roleId, Collections.emptyList());
-        boolean exclusive = assignedUserIds.isEmpty()
-            || (assignedUserIds.size() == 1 && assignedUserIds.get(0).equals(user.getId()));
-        if (!exclusive) {
-          continue;
-        }
-        confirmedPersonalRoleIds.add(roleId);
-        personalRoleIdByUserId.put(user.getId(), roleId);
+        confirmPersonalRoleForUser(user, candidateRolesById, inheritFromTargetRoleIds,
+            assignedUserIdsByRoleId, confirmedPersonalRoleIds, personalRoleIdByUserId);
       }
 
       if (confirmedPersonalRoleIds.isEmpty()) {
@@ -461,6 +446,41 @@ public class UserRoleCompositionService {
     } finally {
       OBContext.restorePreviousMode();
     }
+  }
+
+  /**
+   * Per-user classification step of {@link #getAppliedTemplateRoleIdsForClient(String)} —
+   * extracted purely to keep that method's own cognitive complexity and per-loop break/continue
+   * count within the SonarQube gate; carries no behavior of its own beyond what the inline loop
+   * body already did. Applies the exact same "is this actually a personal role" identity check
+   * {@link #isReusablePersonalRole(User, Role)} does for the write path (active, non-template,
+   * non-client-admin, same client, not itself the {@code InheritFrom} target of some OTHER
+   * role's inheritance, and exclusively assigned via {@code AD_User_Roles} to {@code user}) —
+   * see that method's own javadoc for what each check defends against; the two definitions must
+   * be kept in lockstep. On a match, records {@code candidate}'s id into both {@code
+   * confirmedPersonalRoleIds} and {@code personalRoleIdByUserId} (mutated in place); a no-match
+   * is a silent no-op, exactly like the {@code continue} it replaces.
+   */
+  private void confirmPersonalRoleForUser(User user, Map<String, Role> candidateRolesById,
+      Set<String> inheritFromTargetRoleIds, Map<String, List<String>> assignedUserIdsByRoleId,
+      Set<String> confirmedPersonalRoleIds, Map<String, String> personalRoleIdByUserId) {
+    Role candidate = user.getDefaultRole();
+    if (candidate == null) {
+      return;
+    }
+    String roleId = candidate.getId();
+    if (!candidateRolesById.containsKey(roleId) || inheritFromTargetRoleIds.contains(roleId)) {
+      return;
+    }
+    List<String> assignedUserIds =
+        assignedUserIdsByRoleId.getOrDefault(roleId, Collections.emptyList());
+    boolean exclusive = assignedUserIds.isEmpty()
+        || (assignedUserIds.size() == 1 && assignedUserIds.get(0).equals(user.getId()));
+    if (!exclusive) {
+      return;
+    }
+    confirmedPersonalRoleIds.add(roleId);
+    personalRoleIdByUserId.put(user.getId(), roleId);
   }
 
   /**

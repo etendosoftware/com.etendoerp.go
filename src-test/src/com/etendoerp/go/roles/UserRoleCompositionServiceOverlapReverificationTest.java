@@ -173,11 +173,14 @@ public class UserRoleCompositionServiceOverlapReverificationTest extends WeldBas
       assertTrue("Sales' existing Contactos grant must already be full access",
           Boolean.TRUE.equals(existingSalesGrant.isEditableField()));
 
-      // Only Inventory needs a NEW row — seeded directly here (mirrors what
-      // EnsureSystemRoleTemplatesScript will eventually write once it runs on update.database)
-      // using the real matrix's real access level: Inventory=read-only on Contactos.
-      grantWindowAccess(inventoryTemplate, contactos, true);
-      OBDal.getInstance().flush();
+      // Inventory's side, using the real matrix's real access level (read-only on Contactos) —
+      // seeded via ensureReadOnlyWindowAccess (see its own javadoc), which mirrors what
+      // EnsureSystemRoleTemplatesScript will eventually write once it runs on update.database,
+      // but skips the insert when this environment already carries the grant (by 2026-08-17
+      // Inventory's own Contactos grant is ALSO already committed here, from earlier manual
+      // verification of Task B6's 7th gap against the real SFAssignUserRoles webhook — the same
+      // kind of drift this test's own comment above already documents for Sales).
+      ensureReadOnlyWindowAccess(inventoryTemplate, contactos);
 
       User user = OBDal.getInstance().get(User.class, TEST_USER_ID);
       assertNotNull(user);
@@ -221,11 +224,15 @@ public class UserRoleCompositionServiceOverlapReverificationTest extends WeldBas
       assertNotNull(salesTemplate);
       assertNotNull(purchasingTemplate);
 
-      // Real matrix: BOTH Sales and Purchasing grant Categoría del producto read-only.
-      grantWindowAccess(salesTemplate, productCategory, true);
-      OBDal.getInstance().flush();
-      grantWindowAccess(purchasingTemplate, productCategory, true);
-      OBDal.getInstance().flush();
+      // Real matrix: BOTH Sales and Purchasing grant Categoría del producto read-only — seeded
+      // via ensureReadOnlyWindowAccess (see its own javadoc), which skips the insert for
+      // whichever template already carries this exact grant. By 2026-08-17 BOTH Sales' and
+      // Purchasing's own Categoría del producto grants are ALREADY committed in this
+      // environment (drift from earlier manual verification of Task B6's 7th gap against the
+      // real SFAssignUserRoles webhook), so blindly inserting a second row for either one
+      // collides with ad_window_access_un_key exactly like the Contactos case above.
+      ensureReadOnlyWindowAccess(salesTemplate, productCategory);
+      ensureReadOnlyWindowAccess(purchasingTemplate, productCategory);
 
       User user = OBDal.getInstance().get(User.class, TEST_USER_ID);
       assertNotNull(user);
@@ -244,6 +251,32 @@ public class UserRoleCompositionServiceOverlapReverificationTest extends WeldBas
     } finally {
       OBContext.restorePreviousMode();
     }
+  }
+
+  /**
+   * Grants {@code role} read-only access to {@code window} UNLESS it already has an active
+   * {@code AD_Window_Access} row for that window — in which case it asserts that existing row is
+   * ALSO read-only (sanity check: if this ever stops being true, this shortcut is no longer
+   * valid and the test needs revisiting, not just re-running) and leaves it alone instead of
+   * inserting a duplicate. Mirrors the "skip seeding a template that already has the exact
+   * grant" pattern {@link #testRealMatrixOverlapSalesAndInventoryOnContactosResolvesToFull()}
+   * already established for Sales — generalized here because, by 2026-08-17, this LIVE
+   * environment's real templates have drifted to already carry SEVERAL of the real ETP-4878
+   * matrix grants (from earlier manual verification against the real {@code SFAssignUserRoles}
+   * webhook while diagnosing Task B6's 7th gap) — which one(s) is no longer a fixed, hardcodable
+   * fact, so check-then-seed instead of assuming any particular role/window pair is still empty.
+   */
+  private void ensureReadOnlyWindowAccess(Role role, Window window) {
+    WindowAccess existing = findWindowAccess(role, window);
+    if (existing != null) {
+      assertFalse("If " + role.getName() + " already grants window " + window.getId()
+          + ", it must already be read-only per the real ETP-4878 matrix — otherwise this "
+          + "test's skip-seeding shortcut is no longer valid and needs revisiting",
+          Boolean.TRUE.equals(existing.isEditableField()));
+      return;
+    }
+    grantWindowAccess(role, window, true);
+    OBDal.getInstance().flush();
   }
 
   private void grantWindowAccess(Role role, Window window, boolean readOnly) {
