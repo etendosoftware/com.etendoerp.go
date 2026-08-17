@@ -36,6 +36,7 @@ import org.openbravo.model.ad.access.Role;
 import org.openbravo.model.ad.access.RoleInheritance;
 import org.openbravo.model.ad.access.User;
 import org.openbravo.model.ad.access.WindowAccess;
+import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.ad.ui.Window;
 import org.openbravo.model.common.enterprise.Organization;
 
@@ -743,6 +744,148 @@ public class UserRoleCompositionServiceOverlapIntegrationTest extends WeldBaseTe
       assertFalse("Neither remaining grantor (Sales, Purchasing) is full, so access must "
           + "downgrade to read-only, not stay stuck at Finance's old full value",
           Boolean.TRUE.equals(afterRemoval.isEditableField()));
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  /**
+   * ETP-4906 (Task B6, REVIEW round, finding "[B7]", 2026-08-17) — deterministic, self-contained
+   * proof that updating a TEMPLATE's OWN existing {@code AD_Window_Access} row (e.g. an admin
+   * toggling its read-only/full checkbox directly in Etendo Classic — core's own {@code onUpdate}/
+   * {@code propagateUpdatedAccess} trigger, NOT a new grant) never permanently deletes an
+   * already-correctly-inheriting dependent's row.
+   *
+   * <p>Round 7 (commit {@code dfb7b242}) made {@code
+   * WindowAccessOverlapCorruptionGuard#guardDependentsOf}'s underlying unconditional-delete fix
+   * apply uniformly to BOTH the {@code onSave} trigger (a template GAINS
+   * a NEW window grant) and the {@code onUpdate} trigger (a template's OWN EXISTING grant has its
+   * level changed) — but only the FIRST always has a core-side CREATE fallback ({@code
+   * RoleInheritanceManager#propagateNewAccess} to {@code handleAccess} to {@code copyRoleAccess}).
+   * The SECOND, {@code propagateUpdatedAccess}, has none at all: it only ever UPDATEs a dependent's
+   * row it can find, and does nothing otherwise. Deleting first on THAT trigger therefore
+   * permanently lost the dependent's access with nothing left to restore it — REVIEW's own "[B7]"
+   * finding, traced via static core-source analysis (see the plan doc for the full trace).
+   *
+   * <p>Uses a THROWAWAY, freshly-created system-client ({@code AD_Client_ID = '0'}) template role
+   * (mirrors {@code UserRoleCompositionServiceIntegrationTest#createSystemTemplateRole}), NOT one
+   * of the 4 real system templates — reusing a real template for a direct UPDATE on its own row
+   * cascades across every real pre-existing dependent in this shared dev DB (dozens of unrelated
+   * corrections, Hibernate collection-management noise), too noisy to isolate cleanly; this is
+   * exactly what tripped up REVIEW's own 2nd repro attempt (see the plan doc's "[B7]" section).
+   * The dependent is the SAME kind of throwaway tenant-client "bystander" role the rest of this
+   * class already uses successfully paired with the REAL templates ({@link #createBystanderRole}).
+   * This test pairs a throwaway TEMPLATE with a throwaway BYSTANDER — the union of two patterns
+   * each already independently proven to work elsewhere in this module's own test suite (system
+   * client {@code "0"} is universally readable, unlike an arbitrary tenant client), sidestepping
+   * REVIEW's own suspected client-visibility precondition on a fully-fresh fixture (its own 3rd
+   * repro attempt, where the ADD-path propagation never even fired).
+   */
+  @Test
+  public void testUpdatingTemplatesOwnAccessLevelNeverDeletesAnAlreadyCorrectlySourcedDependentRow()
+      throws Exception {
+    setTestUserContext();
+    OBContext.setAdminMode(true);
+    try {
+      Window sharedWindow = OBDal.getInstance().get(Window.class, UNUSED_WINDOW_ID);
+      assertNotNull(sharedWindow);
+
+      Role template = createThrowawaySystemTemplateRole();
+      grantWindowAccess(template, sharedWindow, true); // starts read-only
+      OBDal.getInstance().flush();
+
+      User user = OBDal.getInstance().get(User.class, TEST_USER_ID);
+      assertNotNull(user);
+
+      // The ADD path first — proven safe by every other test in this class — so the dependent's
+      // row genuinely, already correctly inherits from `template` before the UPDATE trigger below
+      // even runs.
+      Role bystanderRole = createBystanderRole(user);
+      addInheritance(bystanderRole, template, 10L);
+
+      WindowAccess beforeUpdate = findWindowAccess(bystanderRole, sharedWindow);
+      assertNotNull("Sanity: the dependent must have inherited the template's grant via the ADD "
+          + "path before this test's own UPDATE trigger runs", beforeUpdate);
+      assertEquals("Sanity: the dependent's row must already be sourced from this exact template",
+          template.getId(),
+          beforeUpdate.getInheritedFrom() != null ? beforeUpdate.getInheritedFrom().getId()
+              : null);
+      assertFalse("Sanity: the template's initial grant was read-only",
+          Boolean.TRUE.equals(beforeUpdate.isEditableField()));
+
+      // THE B7 TRIGGER: UPDATE (never create) the template's OWN existing AD_Window_Access row —
+      // core's onUpdate/propagateUpdatedAccess path, which has NO create fallback if it cannot
+      // find a dependent's row.
+      WindowAccess templateAccess = findWindowAccess(template, sharedWindow);
+      assertNotNull(templateAccess);
+      updateWindowAccessLevel(templateAccess, false); // widen the template's own grant to full
+
+      WindowAccess afterUpdate = findWindowAccess(bystanderRole, sharedWindow);
+      assertNotNull("THE B7 FIX: the dependent's row must survive a routine UPDATE to the "
+          + "template's own access level, not be silently deleted with nothing left to restore "
+          + "it", afterUpdate);
+      assertEquals("client must always match the DEPENDENT role's own, never a template's",
+          bystanderRole.getClient().getId(), afterUpdate.getClient().getId());
+      assertEquals("organization must always match the DEPENDENT role's own, never a template's",
+          bystanderRole.getOrganization().getId(), afterUpdate.getOrganization().getId());
+      assertEquals("InheritedFrom must still name the same template",
+          template.getId(),
+          afterUpdate.getInheritedFrom() != null ? afterUpdate.getInheritedFrom().getId() : null);
+      assertTrue("The dependent's access level must be corrected to match the template's new "
+          + "(widened) value, not left stale at the old read-only level",
+          Boolean.TRUE.equals(afterUpdate.isEditableField()));
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  /**
+   * Throwaway system-client ({@code AD_Client_ID = '0'}) template role — mirrors {@code
+   * UserRoleCompositionServiceIntegrationTest#createSystemTemplateRole} exactly (same fixture-only
+   * no-arg {@code OBContext.setAdminMode()} bypass rationale: system client {@code '0'} rows are
+   * never gated by {@code SecurityChecker} for a plain read, but creating one directly here does
+   * need the write-access bypass). Deliberately NOT one of the 4 real {@link SystemRoleTemplates}
+   * rows — see {@link
+   * #testUpdatingTemplatesOwnAccessLevelNeverDeletesAnAlreadyCorrectlySourcedDependentRow()}'s own
+   * javadoc for why.
+   */
+  private Role createThrowawaySystemTemplateRole() {
+    OBContext.setAdminMode();
+    try {
+      Client systemClient = OBDal.getInstance().get(Client.class, "0");
+      Organization starOrg = OBDal.getInstance().get(Organization.class, "0");
+      Role role = OBProvider.getInstance().get(Role.class);
+      role.setNewOBObject(true);
+      role.setClient(systemClient);
+      role.setOrganization(starOrg);
+      role.setActive(true);
+      role.setName("ETP-4906 B7 throwaway template " + System.nanoTime());
+      role.setUserLevel(SystemRoleTemplates.FIXED_ROLE_USER_LEVEL);
+      role.setManual(true);
+      role.setTemplate(true);
+      role.setClientAdmin(false);
+      OBDal.getInstance().save(role);
+      OBDal.getInstance().flush();
+      return role;
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  /**
+   * UPDATEs (never creates) an existing template's own {@code AD_Window_Access} row's level — the
+   * B7 trigger's own entry point (core's {@code onUpdate}/{@code propagateUpdatedAccess}). Same
+   * no-arg {@code OBContext.setAdminMode()} bypass rationale as {@link #grantWindowAccess}: only
+   * the no-arg overload disables {@code SecurityChecker.checkWriteAccess} — confirmed empirically
+   * by REVIEW's own "[B7]" finding (the boolean overload, {@code setAdminMode(true)}, does NOT),
+   * see the plan doc for the full trace into {@code OBContext.java:213-242}.
+   */
+  private void updateWindowAccessLevel(WindowAccess access, boolean readOnly) {
+    OBContext.setAdminMode();
+    try {
+      access.setEditableField(!readOnly);
+      OBDal.getInstance().save(access);
+      OBDal.getInstance().flush();
     } finally {
       OBContext.restorePreviousMode();
     }

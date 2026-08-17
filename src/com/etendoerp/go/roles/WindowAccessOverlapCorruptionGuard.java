@@ -347,8 +347,9 @@ import org.openbravo.model.ad.ui.Window;
  * #correctInheritedOwnership}/{@link #widenInheritedAccessLevelIfNeeded} to react to).
  *
  * <p><b>Scope: REMOVE-side only.</b> The three ADD-side triggers ({@link
- * #guardNewInheritance(RoleInheritance)}, {@link #guardDependentsOf(WindowAccess)}) are NOT
- * vulnerable to this race and were deliberately left unchanged: {@code applyNewInheritance}'s and
+ * #guardNewInheritance(RoleInheritance)}, {@link #guardDependentsOf(WindowAccess,
+ * PropagationTrigger)}) are NOT vulnerable to this race and were deliberately left unchanged:
+ * {@code applyNewInheritance}'s and
  * {@code propagateNewAccess}'s own {@code inheritanceList}/iteration are always scoped to exactly
  * ONE template (the one new inheritance, or the one template whose own access just changed) per
  * call, so at most ONE {@code copyRoleAccess} attempt is ever made for a given (dependent, window)
@@ -365,6 +366,66 @@ import org.openbravo.model.ad.ui.Window;
  * found on) will already have a materialized row for every window any of its active templates
  * grants, making this specific sub-case very unlikely in practice — see the class's own {@code
  * guardRemovedInheritance} method body for the exact guard.
+ *
+ * <p><b>A seventh trigger - the ADD-path fix (rounds 1-2) had its own blind spot: core cannot
+ * always SEE a pre-existing, already-correct row before it propagates.</b> Live-confirmed
+ * BLOCKER (ETP-4906, Task B6, 7th round, 2026-08-17), found via {@code
+ * UserRoleCompositionServiceOverlapReverificationTest}. Both ADD-side triggers ({@link
+ * #guardNewInheritance(RoleInheritance)}, {@link #guardDependentsOf(WindowAccess,
+ * PropagationTrigger)}) originally skipped deleting a dependent's row whenever it was ALREADY
+ * sourced from the SAME template that just propagated, reasoning that core's own {@code
+ * handleAccess}/{@code isPrecedent} would independently reach {@code ACCESS_NOT_CHANGED} and
+ * leave it alone. That reasoning silently assumed core's own {@code AccessTypeInjector#findAccess}
+ * lookup CAN see the row - it cannot whenever the dependent's client is outside the CALLING
+ * {@code OBContext}'s own readable-clients list (the row-level filter core's query builds is not
+ * admin-mode-gated, exactly like {@link #crossClientCriteria(Class)}'s own javadoc documents for
+ * OUR queries). When blind, {@code handleAccess} ALWAYS evaluates {@code access == null} and takes
+ * the CREATE branch regardless of whether a correct row already exists, so ANY pre-existing row -
+ * no matter how correct - risks a duplicate-INSERT the instant core's blind {@code copyRoleAccess}
+ * reaches it.
+ *
+ * <p>The fix: {@link #clearConflictingAccessUnconditionally(Role, Window, Role)} deletes a
+ * dependent's conflicting row UNCONDITIONALLY, even when already correctly sourced - forcing core
+ * onto its own safe CREATE path every time, never relying on core being able to see (and thus
+ * skip) an already-correct row. Safe for the {@code onSave}-triggered callers ({@link
+ * #guardNewInheritance(RoleInheritance)}, and {@link #guardDependentsOf(WindowAccess,
+ * PropagationTrigger)}'s {@code NEW_GRANT} case) because both feed a core propagation method with
+ * a guaranteed CREATE fallback when no row is found: {@code propagateNewAccess} to {@code
+ * handleAccess} to {@code copyRoleAccess}.
+ *
+ * <p><b>The seventh trigger's own gap, found in REVIEW - {@link #guardDependentsOf(WindowAccess,
+ * PropagationTrigger)} is ALSO invoked from {@code onUpdate}, where core has NO create
+ * fallback.</b> Live-confirmed BLOCKER (ETP-4906, REVIEW round, finding "[B7]", 2026-08-17 -
+ * traced via static core-source analysis; the plan doc's "[B7]" section has the full trace,
+ * including whether it was independently live-reproduced by the fix below). {@link
+ * #guardDependentsOf(WindowAccess, PropagationTrigger)} is called from BOTH {@link
+ * #onSave(EntityNewEvent)} (a template GAINS a brand-new window grant - core propagates via
+ * {@code propagateNewAccess}, which DOES have the CREATE fallback above) AND {@link
+ * #onUpdate(EntityUpdateEvent)} (an admin edits a template's OWN EXISTING access level - core
+ * propagates via a DIFFERENT method, {@code propagateUpdatedAccess}, which has NO create fallback
+ * at all: {@code findInheritedAccess} either finds a dependent's row already sourced from this
+ * exact template and updates it, or does nothing). The seventh trigger's own fix made {@code
+ * clearConflictingAccessUnconditionally} delete unconditionally for BOTH callers uniformly,
+ * without checking that both downstream core paths actually have a create fallback - on the
+ * {@code onUpdate} route, deleting a dependent's already-correctly-sourced row therefore
+ * permanently loses it: core's own propagation, the one path that is supposed to reconcile the
+ * level change, has no branch left that recreates a missing row. No exception, no useful log - a
+ * completely routine "admin edits a template's access level in Classic" action would silently
+ * delete every correctly-inheriting dependent's access to that window.
+ *
+ * <p>The fix: {@link #guardDependentsOf(WindowAccess, PropagationTrigger)} now takes a {@link
+ * PropagationTrigger} telling it which core path its caller feeds. {@code NEW_GRANT} ({@code
+ * onSave}) keeps the unconditional {@link #clearConflictingAccessUnconditionally(Role, Window,
+ * Role)} behavior above - safe, since {@code propagateNewAccess} always recreates. {@code
+ * UPDATED_GRANT} ({@code onUpdate}) instead calls {@link #repointIfAlreadySourcedFromTemplate(
+ * Role, Window, Role, WindowAccess)}: a dependent row NOT sourced from the template whose access
+ * just changed is left untouched - core's own {@code propagateUpdatedAccess} would not have
+ * touched it either, exactly matching core's own scope; a row ALREADY sourced from that exact
+ * template - the ONLY case {@code propagateUpdatedAccess} would act on - is corrected IN PLACE via
+ * the same bulk-HQL-UPDATE technique {@link #repointInPlace(WindowAccess, Role, Window, Role,
+ * boolean, Role)} already uses for the sixth trigger, rather than deleted, so the dependent's row
+ * is guaranteed to survive regardless of what core's own (possibly-blind) propagation does
+ * afterward.
  */
 public class WindowAccessOverlapCorruptionGuard extends EntityPersistenceEventObserver {
 
@@ -447,7 +508,7 @@ public class WindowAccessOverlapCorruptionGuard extends EntityPersistenceEventOb
       WindowAccess access = (WindowAccess) target;
       Role role = access.getRole();
       if (role != null && Boolean.TRUE.equals(role.isTemplate())) {
-        guardDependentsOf(access);
+        guardDependentsOf(access, PropagationTrigger.NEW_GRANT);
       } else {
         correctInheritedOwnership(event, access);
         widenInheritedAccessLevelIfNeeded(event, access);
@@ -458,11 +519,15 @@ public class WindowAccessOverlapCorruptionGuard extends EntityPersistenceEventOb
   }
 
   /**
-   * Defends the {@code propagateUpdatedAccess} trigger too — belt-and-braces. Core's own {@code
-   * findInheritedAccess} scopes updates to rows already sourced from the SAME template, so this
-   * path is not the corruption vector the live repro exercised, but guarding it costs nothing and
-   * keeps both persistence-event entry points for a template's own row uniformly covered. {@code
-   * RoleInheritance} has no meaningful update path to guard — core's own {@code
+   * Defends the {@code propagateUpdatedAccess} trigger too — belt-and-braces, but with a DIFFERENT
+   * safe strategy than {@link #onSave(EntityNewEvent)}'s own {@code NEW_GRANT} trigger (see the
+   * class javadoc's "The seventh trigger's own gap, found in REVIEW" section, finding "[B7]"):
+   * core's own {@code propagateUpdatedAccess} (triggered here) has NO create fallback — unlike
+   * {@code propagateNewAccess} ({@link #onSave(EntityNewEvent)}'s own trigger), it never recreates
+   * a dependent's row if none is found, it only updates one it CAN find. {@link
+   * #guardDependentsOf(WindowAccess, PropagationTrigger)} is passed {@code UPDATED_GRANT}
+   * specifically so it never unconditionally deletes here — see that method's own javadoc.
+   * {@code RoleInheritance} has no meaningful update path to guard — core's own {@code
    * RoleInheritanceEventHandler#onUpdate} unconditionally rejects it.
    */
   public void onUpdate(@Observes @Priority(RUNS_BEFORE_UNPRIORITIZED_CORE_OBSERVERS)
@@ -472,7 +537,7 @@ public class WindowAccessOverlapCorruptionGuard extends EntityPersistenceEventOb
     }
     Object target = event.getTargetInstance();
     if (target instanceof WindowAccess) {
-      guardDependentsOf((WindowAccess) target);
+      guardDependentsOf((WindowAccess) target, PropagationTrigger.UPDATED_GRANT);
     }
   }
 
@@ -695,14 +760,17 @@ public class WindowAccessOverlapCorruptionGuard extends EntityPersistenceEventOb
    * See the class javadoc's "A third trigger, on the REMOVE side" section.
    *
    * <p>Deliberately does NOT special-case "only rows currently sourced from the template being
-   * removed" — the same "already correctly sourced from THIS remaining template, skip" check
-   * {@link #guardNewInheritance(RoleInheritance)} and {@link #guardDependentsOf(WindowAccess)} both
-   * use is sufficient and correct here too: for a remaining template's window, if the dependent's
-   * existing row is not already sourced from THAT remaining template, core's own {@code
-   * isPrecedent} will treat it as needing override regardless of what it is currently sourced from
-   * (manually granted, or inherited from a DIFFERENT still-active template) — exactly mirroring
-   * why {@link #guardDependentsOf(WindowAccess)} never restricts itself to "only rows sourced from
-   * THIS template" either.
+   * removed": for a remaining template's window, if the dependent's existing row is not already
+   * sourced from THAT remaining template, core's own {@code isPrecedent} will treat it as needing
+   * override regardless of what it is currently sourced from (manually granted, or inherited from
+   * a DIFFERENT still-active template). (Historical note: as of round 7, neither {@link
+   * #guardNewInheritance(RoleInheritance)} nor {@link #guardDependentsOf(WindowAccess,
+   * PropagationTrigger)}'s {@code NEW_GRANT} case skip an already-correctly-sourced row either any
+   * more — see the class javadoc's "A seventh trigger" section — so this method's own choice not
+   * to special-case is now consistent with both of those, not merely "sufficient and correct on
+   * its own" as it was originally written; {@code UPDATED_GRANT}'s {@link
+   * #repointIfAlreadySourcedFromTemplate(Role, Window, Role, WindowAccess)} is the one exception,
+   * and deliberately so — see its own javadoc.)
    */
   private void guardRemovedInheritance(RoleInheritance inheritance) {
     Role dependent = inheritance.getRole();
@@ -899,11 +967,40 @@ public class WindowAccessOverlapCorruptionGuard extends EntityPersistenceEventOb
   }
 
   /**
-   * If {@code templateAccess} belongs to a template role, proactively clears every OTHER role's
-   * conflicting active access for the same window BEFORE returning control to core's own
-   * propagation (which fires next, via the SAME CDI event, per this class's {@code @Priority}).
+   * Which core propagation method will run AFTER {@link #guardDependentsOf(WindowAccess,
+   * PropagationTrigger)} returns, for the SAME {@code AD_Window_Access} event — determines whether
+   * it is safe to unconditionally delete a dependent's conflicting row. See the class javadoc's
+   * "The seventh trigger's own gap, found in REVIEW" section (finding "[B7]") for the full
+   * root-cause write-up.
    */
-  private void guardDependentsOf(WindowAccess templateAccess) {
+  private enum PropagationTrigger {
+    /**
+     * Fed by {@link #onSave(EntityNewEvent)} — a template GAINED a brand-new window grant. Core
+     * propagates via {@code RoleInheritanceManager#propagateNewAccess}, which ALWAYS falls back to
+     * {@code copyRoleAccess} (a CREATE) when it finds no existing row for a dependent — so
+     * unconditionally deleting a dependent's conflicting row first is always safe here.
+     */
+    NEW_GRANT,
+    /**
+     * Fed by {@link #onUpdate(EntityUpdateEvent)} — a template's OWN EXISTING window grant had its
+     * access level changed. Core propagates via {@code RoleInheritanceManager
+     * #propagateUpdatedAccess}, which has NO create fallback: it only ever UPDATEs a dependent's
+     * row it can find via {@code findInheritedAccess}, and silently does nothing otherwise.
+     * Unconditionally deleting here would permanently lose the dependent's access with nothing
+     * left to restore it.
+     */
+    UPDATED_GRANT
+  }
+
+  /**
+   * If {@code templateAccess} belongs to a template role, proactively reconciles every OTHER
+   * role's conflicting active access for the same window BEFORE returning control to core's own
+   * propagation (which fires next, via the SAME CDI event, per this class's {@code @Priority}) —
+   * using a DIFFERENT strategy depending on {@code trigger}, since the two core propagation
+   * methods this guards behave asymmetrically (see {@link PropagationTrigger}'s own javadoc and
+   * the class javadoc's "[B7]" section).
+   */
+  private void guardDependentsOf(WindowAccess templateAccess, PropagationTrigger trigger) {
     Role role = templateAccess.getRole();
     if (role == null || !Boolean.TRUE.equals(role.isTemplate())) {
       // Not a template's own row — nothing to propagate, core will not react to this one either.
@@ -914,17 +1011,66 @@ public class WindowAccessOverlapCorruptionGuard extends EntityPersistenceEventOb
       return;
     }
     for (Role dependent : findActiveDependentRoles(role)) {
-      clearConflictingAccessUnconditionally(dependent, window, role);
+      if (trigger == PropagationTrigger.NEW_GRANT) {
+        clearConflictingAccessUnconditionally(dependent, window, role);
+      } else {
+        repointIfAlreadySourcedFromTemplate(dependent, window, role, templateAccess);
+      }
     }
   }
 
   /**
-   * Shared by both ADD-side triggers ({@link #guardDependentsOf(WindowAccess)} and {@link
-   * #guardNewInheritance(RoleInheritance)}): if {@code dependent} has an active {@code
-   * AD_Window_Access} row for {@code window}, deletes it via {@link #deleteForcingCreatePath}
-   * UNCONDITIONALLY — even when the row is ALREADY correctly sourced from {@code
-   * grantingTemplate}. See the class javadoc's "A seventh trigger" section for the full
-   * root-cause write-up; summarized here.
+   * The {@code onUpdate}/{@code UPDATED_GRANT} counterpart to {@link
+   * #clearConflictingAccessUnconditionally(Role, Window, Role)} — see {@link PropagationTrigger}'s
+   * own javadoc and the class javadoc's "[B7]" section for why deleting is NOT safe on this
+   * trigger. Restricted to the only case core's own {@code propagateUpdatedAccess} actually acts
+   * on: {@code dependent}'s existing row for {@code window} is ALREADY sourced from {@code
+   * grantingTemplate}. For that case, corrects the row's {@code editableField} IN PLACE to match
+   * {@code templateAccess}'s own (already-updated, pre-flush) value directly — via the same
+   * bulk-HQL-UPDATE technique {@link #repointInPlace(WindowAccess, Role, Window, Role, boolean,
+   * Role)} already uses for the sixth trigger — rather than deleting it, so the dependent's row is
+   * guaranteed to survive regardless of whether core's own {@code propagateUpdatedAccess} manages
+   * to find and update it afterward.
+   *
+   * <p>A row NOT sourced from {@code grantingTemplate} (manually granted, or sourced from a
+   * DIFFERENT template) is left entirely untouched: core's own {@code findInheritedAccess} only
+   * ever matches a dependent's row already sourced from the SAME template whose grant just
+   * changed, so it would not have acted on this row either — nothing to prevent, nothing to
+   * correct.
+   */
+  private void repointIfAlreadySourcedFromTemplate(Role dependent, Window window,
+      Role grantingTemplate, WindowAccess templateAccess) {
+    WindowAccess existing = findActiveWindowAccess(dependent, window);
+    if (existing == null) {
+      // No existing row — core's own propagateUpdatedAccess would find nothing here either and
+      // do nothing; consistent, nothing for this mechanism to do.
+      return;
+    }
+    Role existingSource = existing.getInheritedFrom();
+    if (existingSource == null || !sameId(existingSource, grantingTemplate)) {
+      // Not sourced from THIS template — out of scope for core's own propagateUpdatedAccess too,
+      // see this method's own javadoc.
+      return;
+    }
+    boolean newLevel = Boolean.TRUE.equals(templateAccess.isEditableField());
+    if (Boolean.valueOf(newLevel).equals(existing.isEditableField())) {
+      // Already matches the template's new value — nothing to correct.
+      return;
+    }
+    repointInPlace(existing, dependent, window, grantingTemplate, newLevel, existingSource);
+  }
+
+  /**
+   * Shared by both {@code NEW_GRANT}-safe ADD-side triggers ({@link
+   * #guardDependentsOf(WindowAccess, PropagationTrigger)}'s {@code NEW_GRANT} case and {@link
+   * #guardNewInheritance(RoleInheritance)}) — NOT called for {@link
+   * #guardDependentsOf(WindowAccess, PropagationTrigger)}'s {@code UPDATED_GRANT} case, which uses
+   * {@link #repointIfAlreadySourcedFromTemplate(Role, Window, Role, WindowAccess)} instead (see
+   * that method's own javadoc and {@link PropagationTrigger}'s javadoc for why). If {@code
+   * dependent} has an active {@code AD_Window_Access} row for {@code window}, deletes it via
+   * {@link #deleteForcingCreatePath} UNCONDITIONALLY — even when the row is ALREADY correctly
+   * sourced from {@code grantingTemplate}. See the class javadoc's "A seventh trigger" section for
+   * the full root-cause write-up; summarized here.
    *
    * <p><b>Why "already correct" is no longer a reason to skip — found empirically (ETP-4906,
    * Task B6, 7th round, 2026-08-17).</b> Both prior ADD-side implementations (rounds 1-2) treated
@@ -1095,20 +1241,25 @@ public class WindowAccessOverlapCorruptionGuard extends EntityPersistenceEventOb
   }
 
   /**
-   * The SIXTH-trigger fix's own mechanism — see the class javadoc's "A sixth trigger" section for
-   * the full root-cause write-up. Corrects {@code existing}'s {@code inheritedFrom} and {@code
-   * editableField} to the pre-computed {@code winner}/{@code winnerLevel} DIRECTLY, IN PLACE — the
-   * SAME row, SAME primary key — instead of {@link #deleteForcingCreatePath} deleting it and
-   * relying on core's OWN {@code calculateAccesses} to recreate it. Deliberately does NOT reuse
-   * {@code deleteForcingCreatePath}: deleting here would reopen the exact duplicate-INSERT race
-   * this method exists to close (see the class javadoc) whenever 2+ remaining templates both grant
-   * {@code window} — core's {@code RoleInheritanceManager#applyRemoveInheritance} walks EVERY
-   * remaining template's own grants in ONE {@code calculateAccesses} call, and with {@code
-   * existing} deleted, each remaining template covering the same window independently finds no row
-   * and issues its OWN {@code copyRoleAccess} INSERT, none of them aware of the others' still-
-   * unflushed one ({@code FlushMode.COMMIT} never auto-flushes a query into visibility — see
-   * {@link #deleteForcingCreatePath}'s own javadoc for the proof of that same limitation on the
-   * delete side).
+   * Originally the SIXTH-trigger fix's own mechanism (see the class javadoc's "A sixth trigger"
+   * section for the full root-cause write-up) — now ALSO reused by the seventh trigger's own B7
+   * fix, {@link #repointIfAlreadySourcedFromTemplate(Role, Window, Role, WindowAccess)} (see the
+   * class javadoc's "The seventh trigger's own gap, found in REVIEW" section). Corrects {@code
+   * existing}'s {@code inheritedFrom} and {@code editableField} to the pre-computed {@code
+   * winner}/{@code winnerLevel} DIRECTLY, IN PLACE — the SAME row, SAME primary key — instead of
+   * {@link #deleteForcingCreatePath} deleting it and relying on core's OWN propagation to recreate
+   * it. Deliberately does NOT reuse {@code deleteForcingCreatePath}: for the sixth trigger,
+   * deleting would reopen the exact duplicate-INSERT race this method exists to close (see the
+   * class javadoc) whenever 2+ remaining templates both grant {@code window} — core's {@code
+   * RoleInheritanceManager#applyRemoveInheritance} walks EVERY remaining template's own grants in
+   * ONE {@code calculateAccesses} call, and with {@code existing} deleted, each remaining template
+   * covering the same window independently finds no row and issues its OWN {@code copyRoleAccess}
+   * INSERT, none of them aware of the others' still-unflushed one ({@code FlushMode.COMMIT} never
+   * auto-flushes a query into visibility — see {@link #deleteForcingCreatePath}'s own javadoc for
+   * the proof of that same limitation on the delete side); for the seventh trigger's B7 fix,
+   * deleting would reopen the ORIGINAL "[B7]" bug this method's caller exists to close — core's
+   * {@code propagateUpdatedAccess} has no create fallback at all, so a deleted row here is simply
+   * gone forever.
    *
    * <p>Same bulk-DML-bypasses-the-session technique as {@link #deleteForcingCreatePath} (an
    * {@code executeUpdate()} HQL bulk UPDATE, not an entity-level setter + flush), for the identical
@@ -1133,16 +1284,42 @@ public class WindowAccessOverlapCorruptionGuard extends EntityPersistenceEventOb
    * can never find {@code winner}'s index smaller than any OTHER remaining template's index (its
    * index is, by construction, the largest among templates granting this window), so every one of
    * core's own per-template passes over this window resolves to {@code ACCESS_NOT_CHANGED} —
-   * core touches this row ZERO times during its own recalculation. No {@code EntityNewEvent}/
-   * {@code EntityUpdateEvent} ever fires for it during this removal, so {@link
-   * #correctInheritedOwnership}/{@link #widenInheritedAccessLevelIfNeeded} never run for it either
-   * — this method does both jobs itself, up front, in one step, since there is no later CREATE
-   * event left for them to react to.
+   * core touches this row ZERO times during its own recalculation (sixth-trigger case) or, for the
+   * seventh-trigger's B7 case, core's {@code propagateUpdatedAccess}'s own {@code updateRoleAccess}
+   * call against this SAME row afterward is a same-value, idempotent no-op. Either way, no {@code
+   * EntityNewEvent}/{@code EntityUpdateEvent} is left for {@link #correctInheritedOwnership}/{@link
+   * #widenInheritedAccessLevelIfNeeded} to react to — this method does both jobs itself, up front,
+   * in one step.
    *
    * <p>{@code client}/{@code organization} are deliberately NOT touched here — {@code existing}
    * already belongs to {@code dependent} (it is an update to an ALREADY-correctly-owned row, never
    * a copy from a template's own row), so there is nothing to re-pin, unlike {@link
    * #correctInheritedOwnership}'s CREATE-path concern.
+   *
+   * <p><b>Refreshes {@code existing} afterward — {@code OBDal.refresh}, NOT {@code
+   * session.evict()} — found empirically (ETP-4906, REVIEW round, "[B7]" fix, 2026-08-17).</b> An
+   * earlier version of the seventh-trigger's B7 fix reused {@code session.evict(existing)} here
+   * unchanged (the same call the sixth trigger's own {@code onDelete}-triggered caller uses safely)
+   * — reproduced live as {@code HibernateException: Don't change the reference to a collection with
+   * delete-orphan enabled : ADWindowAccess.aDTabAccessList} at the OUTER flush, specifically on the
+   * B7 fix's own {@code onUpdate}-triggered path, never on the sixth trigger's {@code onDelete}
+   * path. Root cause (confirmed by bisection — the crash disappeared when the {@code evict} call
+   * was removed, and reappeared only once {@code repointInPlace} was called again from the {@code
+   * onUpdate} trigger): {@code Interceptor#onFlushDirty} (which is how {@code onUpdate}'s {@code
+   * EntityUpdateEvent} reaches this class) fires FROM WITHIN Hibernate's own {@code
+   * AbstractFlushingEventListener#flushEntities} loop — the SAME loop that walks every OTHER
+   * managed entity's collection-valued properties for reachability, {@code existing} included, in
+   * the SAME pass. Evicting {@code existing} mid-loop rips it out of the persistence context while
+   * Hibernate's own flush-time bookkeeping still expects to examine it, corrupting the collection
+   * tracking. {@code Interceptor#onSave} (how the sixth trigger's sibling ADD-side triggers and
+   * {@code deleteForcingCreatePath} reach this class) fires synchronously at {@code save()}/{@code
+   * delete()} call time, OUTSIDE that loop entirely — evicting there never collides with it, which
+   * is why the identical {@code evict()} call is safe on those paths but not here. {@code
+   * OBDal.refresh(existing)} avoids the collision entirely: it re-syncs {@code existing}'s scalar
+   * fields from the DB (reflecting the bulk UPDATE above, visible on the same connection/
+   * transaction) while keeping it ATTACHED and managed, so the flush's own collection-reachability
+   * bookkeeping for it stays consistent throughout — confirmed safe for BOTH callers by re-running
+   * the full existing regression suite in this class after the change.
    */
   private void repointInPlace(WindowAccess existing, Role dependent, Window window, Role winner,
       boolean winnerLevel, Role previousSource) {
@@ -1177,7 +1354,7 @@ public class WindowAccessOverlapCorruptionGuard extends EntityPersistenceEventOb
     } finally {
       OBContext.restorePreviousMode();
     }
-    OBDal.getInstance().getSession().evict(existing);
+    OBDal.getInstance().refresh(existing);
     log.info(
         "Prevented cross-template AD_Window_Access overlap corruption (multi-remaining-template "
             + "removal case): repointed role {} window {} in place from {} to {} (editableField={}) "
