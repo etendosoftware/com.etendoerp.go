@@ -126,9 +126,9 @@ public class InvoiceLineTaxSifSelectorPolicyTest {
     assertFalse(policy.supports(metaFor(TARGET_TAX_RATE), null));
   }
 
-  // KNOWN SOURCE BUG (ETP-4888, found by this test — reported, not fixed here per the
-  // test-writer mandate): `supports()` calls `IN_SCOPE_WINDOW_IDS.contains(sourceWindowId)`
-  // where IN_SCOPE_WINDOW_IDS is `Set.of("167", "183")`. `Set.of(...)`'s immutable-set
+  // FIXED SOURCE BUG (ETP-4888, found by this test, fixed in a follow-up commit):
+  // `supports()` used to call `IN_SCOPE_WINDOW_IDS.contains(sourceWindowId)` where
+  // IN_SCOPE_WINDOW_IDS is `Set.of("167", "183")`. `Set.of(...)`'s immutable-set
   // `.contains(null)` THROWS NullPointerException instead of returning false (verified:
   // java.util.ImmutableCollections$Set12.contains rejects null outright). `sourceWindowId`
   // is legitimately null whenever a spec's SFEntity -> SFSpec -> AD_Window chain can't be
@@ -136,14 +136,11 @@ public class InvoiceLineTaxSifSelectorPolicyTest {
   // contract) — which happens for every OTHER window's "lines"-named entity too, not just
   // this policy's two in-scope windows. Since NeoSelectorPolicy.enrichSelectorResult calls
   // supports() unconditionally for every registered enrichment policy on every selector
-  // request, this throws a real NPE on ordinary selector calls for unrelated windows
-  // whenever _sourceWindowId is absent — a production crash risk, not just a cosmetic gap.
-  // Fix (not applied here): swap IN_SCOPE_WINDOW_IDS for a HashSet, or guard with
-  // `sourceWindowId != null &&` before the .contains() call.
+  // request, this would have thrown a real NPE on ordinary selector calls for unrelated
+  // windows whenever _sourceWindowId is absent — a production crash risk, not just a
+  // cosmetic gap. Fixed by adding a `sourceWindowId != null &&` short-circuit before the
+  // .contains() call (IN_SCOPE_WINDOW_IDS deliberately kept as Set.of(...)).
   @Test
-  @org.junit.Ignore("ETP-4888 known bug: IN_SCOPE_WINDOW_IDS.contains(null) throws NPE "
-      + "(Set.of(...) rejects null) instead of returning false — see comment above. "
-      + "Un-ignore once InvoiceLineTaxSifSelectorPolicy.supports() null-guards sourceWindowId.")
   public void doesNotSupportWhenSourceWindowIdIsMissing() {
     // _sourceEntityName alone, with no _sourceWindowId at all (e.g. a spec whose
     // window link could not be resolved), must not match — and must NOT throw.
