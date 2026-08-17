@@ -97,6 +97,10 @@ public class PurchaseInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler i
   public NeoResponse handle(NeoContext context) {
     NeoHandlerUtils.mirrorAccountingDate(context, "invoiceDate", "accountingDate");
     captureOriginInvoice(context);
+    NeoResponse siiAuthError = captureAndValidateSiiAuthorization(context);
+    if (siiAuthError != null) {
+      return siiAuthError;
+    }
     NeoResponse posting = postingService != null ? postingService.handleAction(context) : null;
     if (posting != null) {
       return posting;
@@ -149,12 +153,16 @@ public class PurchaseInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler i
       if (NeoEndpointType.CRUD.equals(context.getEndpointType())
           && NeoHandlerUtils.isWriteMethod(context.getHttpMethod())) {
         persistOriginInvoice(context);
+        persistSiiAuthorizationno(context);
       }
 
       // GET: enrich response with virtual fields
       JSONArray dataArr = NeoHandlerUtils.extractGetDataArray(context);
       if (dataArr == null) {
-        return null;
+        // ETP-4783: for PATCH/POST, inject aeatsiiAuthorizationno written by
+        // persistSiiAuthorizationno() into the save response so the frontend sees the
+        // correct value (the CRUD write response was captured before afterHandle ran).
+        return injectAuthorizationnoIntoSaveResponse(context);
       }
       JSONObject body = context.getPreviousResult().getBody();
       for (int i = 0; i < dataArr.length(); i++) {

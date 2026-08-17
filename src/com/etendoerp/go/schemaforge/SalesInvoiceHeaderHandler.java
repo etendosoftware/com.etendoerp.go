@@ -99,6 +99,10 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
   public NeoResponse handle(NeoContext context) {
     NeoHandlerUtils.mirrorAccountingDate(context, "invoiceDate", "accountingDate");
     captureOriginInvoice(context);
+    NeoResponse siiAuthError = captureAndValidateSiiAuthorization(context);
+    if (siiAuthError != null) {
+      return siiAuthError;
+    }
     NeoResponse posting = postingService != null ? postingService.handleAction(context) : null;
     if (posting != null) {
       return posting;
@@ -153,9 +157,13 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
     if (NeoEndpointType.CRUD.equals(context.getEndpointType())
         && NeoHandlerUtils.isWriteMethod(context.getHttpMethod())) {
       persistOriginInvoice(context);
+      persistSiiAuthorizationno(context);
     }
     if (!"GET".equals(context.getHttpMethod()) || !NeoEndpointType.CRUD.equals(context.getEndpointType())) {
-      return null;
+      // ETP-4783: the main CRUD write captures its response before afterHandle() runs, so
+      // aeatsiiAuthorizationno (written by persistSiiAuthorizationno()) is absent from the
+      // PATCH response. Inject it so the frontend sees the correct value without a re-fetch.
+      return injectAuthorizationnoIntoSaveResponse(context);
     }
     NeoResponse prev = context.getPreviousResult();
     if (prev == null || prev.getBody() == null) {
