@@ -17,8 +17,11 @@
 package com.etendoerp.go.roles;
 
 import java.util.ArrayList;
+import java.util.Date;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 import javax.annotation.Priority;
@@ -260,6 +263,108 @@ import org.openbravo.model.ad.ui.Window;
  * see {@link #findActiveTemplateGrantingFullAccess(Role, Window)}'s own javadoc (highest {@code
  * AD_Role_Inheritance.SeqNo}, mirroring core's own {@code
  * RoleInheritanceManager#propagateDeletedAccess} heuristic).
+ *
+ * <p><b>A sixth trigger — the REMOVE-side fix itself corrupts a role composed from 3+ overlapping
+ * templates.</b> Live-confirmed BLOCKER (ETP-4906, Task B6, 6th round, 2026-08-17), found by the
+ * human on the REAL {@code SFAssignUserRoles} webhook (not a raw Classic edit — the first bug in
+ * this whole B6 sequence to break the actual production flow this ticket exists to deliver): a
+ * real multi-role account composed from ALL 4 system templates (Finance/Sales/Purchasing/
+ * Inventory) had Finance unchecked and saved, crashing with {@code ConstraintViolationException:
+ * duplicate key value violates unique constraint "ad_window_access_un_key"}. All five rounds
+ * above, and every JUnit test written for them, only ever exercised a role composed from EXACTLY
+ * 2 templates (so removing one always left exactly ONE remaining template) — this is the first
+ * real exercise of 3+ overlapping templates, where removing one leaves 2+ REMAINING templates
+ * that themselves ALSO overlap on the same window, and it breaks by a DIFFERENT, deeper mechanism
+ * than any of the five gaps above.
+ *
+ * <p><b>Root cause, traced into {@code RoleInheritanceManager#applyRemoveInheritance}/{@code
+ * calculateAccesses}.</b> Unlike {@code applyNewInheritance} (ADD-path — {@code inheritanceList}
+ * passed to {@code calculateAccesses} contains exactly ONE template: the one just added, so its
+ * outer loop runs exactly once per window, structurally incapable of this race), {@code
+ * applyRemoveInheritance} passes {@code calculateAccesses} the FULL list of every REMAINING
+ * template, and its outer loop walks ALL of them, ascending by {@code AD_Role_Inheritance.SeqNo},
+ * calling {@code handleAccess} once per (remaining template, window-that-template-grants) pair —
+ * with NO flush between passes ({@code calculateAccesses(..., doFlush=false)} on this call site).
+ * When {@link #guardRemovedInheritance(RoleInheritance)}'s OLD implementation deleted a dependent's
+ * existing row for a window (forcing core onto the "safe" CREATE path, exactly like the ADD-side
+ * triggers above), and that SAME window happens to be granted by 2+ of the REMAINING templates —
+ * only possible with 3+ templates total — core's outer loop processes EACH of those remaining
+ * templates' passes independently: the FIRST pass's {@code getAccess()} query finds nothing (the
+ * row was deleted) and calls {@code copyRoleAccess} → {@code OBDal.save()}, scheduling an INSERT;
+ * the SECOND pass's {@code getAccess()} query, run moments later in the SAME {@code
+ * calculateAccesses} call, does NOT see that still-pending, not-yet-flushed INSERT (Openbravo's DAL
+ * sets every session to {@code FlushMode.COMMIT} — see {@link #deleteForcingCreatePath}'s own
+ * javadoc for the proof of this same limitation on the delete side) — so it ALSO finds nothing and
+ * ALSO calls {@code copyRoleAccess}, scheduling a SECOND INSERT for the IDENTICAL {@code
+ * (AD_Role_ID, AD_Window_ID)} unique key. Both execute in the same JDBC batch at the eventual
+ * flush; the second one violates the unique constraint — exactly the human's stack trace. This is
+ * NOT a race in the "sometimes" sense — given 2+ remaining templates overlapping on a window whose
+ * existing row needed clearing, it is deterministic, every time.
+ *
+ * <p>Empirically, this ALSO explains why the old per-remaining-template delete loop's own log
+ * output (the human's server log) showed criss-crossing "widen and repoint InheritedFrom" lines
+ * across many windows and three different templates before the eventual crash: the OLD
+ * implementation iterated remaining templates one at a time and deleted a dependent's row
+ * whenever it was not ALREADY sourced from whichever remaining template was currently being
+ * examined — a blanket, per-template-pass heuristic that fires far more often than core's own
+ * precedence algorithm would ever actually need an update, generating unnecessary churn on top of
+ * the genuine duplicate-INSERT risk above.
+ *
+ * <p><b>The fix.</b> {@link #guardRemovedInheritance(RoleInheritance)} no longer deletes a
+ * dependent's row once per remaining template that does not already own it. It instead computes,
+ * ONCE per window across ALL remaining templates together, TWO independent things: (1) the single
+ * template that becomes {@code InheritedFrom} — ALWAYS the remaining template with the
+ * numerically highest {@code AD_Role_Inheritance.SeqNo} among every remaining template granting
+ * that window, regardless of its own access level; and (2) the access level — most-permissive-
+ * wins across EVERY remaining template granting that window, independent of which one was chosen
+ * for (1). When the existing row does not already match both, it is corrected IN PLACE via {@link
+ * #repointInPlace(WindowAccess, Role, Window, Role, boolean, Role)}: a bulk HQL UPDATE on the SAME
+ * row (same primary key), never a delete+recreate.
+ *
+ * <p><b>Why {@code InheritedFrom} must track core's own SeqNo precedence, not most-permissive-
+ * wins — confirmed empirically, the hard way.</b> An earlier version of this fix picked whichever
+ * remaining template grants FULL access as the winner (generalizing {@link
+ * #findActiveTemplateGrantingFullAccess(Role, Window)}'s own ADD-side tie-break) — reasonable-
+ * looking, but WRONG: reproduced live as the identical {@code OBSecurityException: Client (0) ...
+ * is not present in ClientList} this whole class exists to prevent, on a window granted by 3
+ * remaining templates where the most-permissive one did NOT have the highest {@code SeqNo}.
+ * Root cause: core's own {@code calculateAccesses} (unlike the ADD-side call sites) walks EVERY
+ * remaining template in ONE call, ascending by {@code SeqNo}, and {@code isPrecedent} compares
+ * ONLY list index (== {@code SeqNo} order) — it has no concept of access level at all. Repointing
+ * to anything other than the actual highest-{@code SeqNo} grantor leaves a LOWER-index template's
+ * name in {@code InheritedFrom}; core's own LATER pass over the genuinely highest-{@code SeqNo}
+ * template then finds {@code isPrecedent(current, new) == true} (current's index is lower) and
+ * blindly overrides the row via {@code updateRoleAccess} → {@code DalUtil.copyToTarget} — the
+ * exact corrupting copy this class exists to prevent, just reached one hop later than the
+ * duplicate-INSERT race above. Because the computed winner is now ALWAYS the actual highest-
+ * {@code SeqNo} grantor, core's own {@code isPrecedent} check can never find a reason to touch
+ * this row during its OWN recalculation — every one of core's per-template passes over it
+ * resolves to {@code ACCESS_NOT_CHANGED}, so core never attempts a competing write, and neither
+ * the duplicate-INSERT race above NOR this ownership-corruption variant can occur, no matter how
+ * many remaining templates overlap on the same window. See {@link #repointInPlace(WindowAccess,
+ * Role, Window, Role, boolean, Role)}'s own javadoc for why this method does both the ownership
+ * AND most-permissive-level correction itself (no later CREATE event is left for {@link
+ * #correctInheritedOwnership}/{@link #widenInheritedAccessLevelIfNeeded} to react to).
+ *
+ * <p><b>Scope: REMOVE-side only.</b> The three ADD-side triggers ({@link
+ * #guardNewInheritance(RoleInheritance)}, {@link #guardDependentsOf(WindowAccess)}) are NOT
+ * vulnerable to this race and were deliberately left unchanged: {@code applyNewInheritance}'s and
+ * {@code propagateNewAccess}'s own {@code inheritanceList}/iteration are always scoped to exactly
+ * ONE template (the one new inheritance, or the one template whose own access just changed) per
+ * call, so at most ONE {@code copyRoleAccess} attempt is ever made for a given (dependent, window)
+ * pair per event — structurally incapable of the "2+ competing passes in one calculateAccesses
+ * call" mechanism above, confirmed by re-reading both call sites, not merely assumed.
+ *
+ * <p><b>Known residual gap, NOT closed here (documented, not silently ignored).</b> If the
+ * dependent has NO existing row at all for a window 2+ remaining templates both grant (i.e. a
+ * brand-new window neither the dependent nor any of its OTHER already-composed templates ever
+ * granted before this specific removal), {@link #guardRemovedInheritance(RoleInheritance)} still
+ * has nothing to repoint and falls back to core's own natural CREATE, which could in principle hit
+ * the identical duplicate-INSERT race for that one window. Considered acceptable residual risk for
+ * now: a role that has been composed for any length of time (like every real account this bug was
+ * found on) will already have a materialized row for every window any of its active templates
+ * grants, making this specific sub-case very unlikely in practice — see the class's own {@code
+ * guardRemovedInheritance} method body for the exact guard.
  */
 public class WindowAccessOverlapCorruptionGuard extends EntityPersistenceEventObserver {
 
@@ -617,22 +722,88 @@ public class WindowAccessOverlapCorruptionGuard extends EntityPersistenceEventOb
     // method call — see TEMPLATES_BEING_REMOVED's own javadoc for why the marker must outlive
     // this method's own stack frame (a race this class hit empirically, see that javadoc).
     templatesBeingRemoved().add(removedTemplate.getId());
-    for (Role remainingTemplate : findOtherActiveTemplates(dependent, inheritance)) {
+
+    // ONE winner per window, computed ONCE across ALL remaining templates — see the class
+    // javadoc's "A sixth trigger" section for why this replaces the old per-remaining-template
+    // delete loop, and its "Why InheritedFrom must track core's own SeqNo precedence" paragraph
+    // for why the winner (InheritedFrom target) and the level (most-permissive-wins) are computed
+    // SEPARATELY below, not both from the same "prefer full access" pick. remainingTemplates is
+    // already SeqNo DESCENDING (findActiveTemplatesFor), so the FIRST remaining template seen
+    // granting a given window is exactly the value core's OWN ascending-SeqNo precedence
+    // algorithm (RoleInheritanceManager#isPrecedent) would themselves converge on if left
+    // undisturbed — REGARDLESS of which template grants the window most permissively.
+    List<Role> remainingTemplates = findOtherActiveTemplates(dependent, inheritance);
+    Map<String, Window> windowsById = new LinkedHashMap<>();
+    Map<String, Role> anyGrantor = new LinkedHashMap<>();
+    Map<String, Role> fullGrantor = new LinkedHashMap<>();
+    for (Role remainingTemplate : remainingTemplates) {
       for (WindowAccess templateGrant : findActiveWindowAccess(remainingTemplate)) {
         Window window = templateGrant.getWindow();
         if (window == null) {
           continue;
         }
-        WindowAccess existing = findActiveWindowAccess(dependent, window);
-        if (existing == null) {
-          continue;
+        windowsById.putIfAbsent(window.getId(), window);
+        anyGrantor.putIfAbsent(window.getId(), remainingTemplate);
+        if (Boolean.TRUE.equals(templateGrant.isEditableField())) {
+          fullGrantor.putIfAbsent(window.getId(), remainingTemplate);
         }
-        Role existingSource = existing.getInheritedFrom();
-        if (existingSource != null && sameId(existingSource, remainingTemplate)) {
-          continue;
-        }
-        deleteForcingCreatePath(existing, dependent, window, remainingTemplate, existingSource);
       }
+    }
+
+    boolean anyCorrected = false;
+    for (Map.Entry<String, Window> entry : windowsById.entrySet()) {
+      String windowId = entry.getKey();
+      Window window = entry.getValue();
+      // winner (WHO becomes InheritedFrom) is ALWAYS the highest-SeqNo remaining template
+      // granting this window, regardless of level — see the class javadoc's "A sixth trigger"
+      // section, "InheritedFrom must track core's own precedence, not most-permissive-wins"
+      // paragraph, for why preferring a more-permissive-but-lower-SeqNo template here (as an
+      // earlier version of this fix did) is NOT safe: core's own calculateAccesses walks ALL
+      // remaining templates ascending by SeqNo in ONE call, and isPrecedent only ever compares
+      // list INDEX (== SeqNo order), never access level — so anything other than the highest-
+      // SeqNo grantor here is guaranteed to be overridden by core's own LATER pass over the
+      // actual highest-SeqNo grantor, hitting the exact blind-copy client corruption this class
+      // exists to prevent. winnerLevel (the ACCESS LEVEL) is a SEPARATE decision — most-
+      // permissive-wins across every remaining template granting this window, independent of
+      // which one ends up as the source, exactly mirroring widenInheritedAccessLevelIfNeeded's
+      // own "level and ownership are different concerns" split on the ADD side.
+      Role winner = anyGrantor.get(windowId);
+      boolean winnerLevel = fullGrantor.containsKey(windowId);
+
+      WindowAccess existing = findActiveWindowAccess(dependent, window);
+      if (existing == null) {
+        // No existing row to correct in place — nothing for THIS mechanism to do; falls back to
+        // core's own natural CREATE path. Residual, pre-existing, theoretical gap (not the
+        // failure mode reproduced by ETP-4906's 6th round): if 2+ remaining templates BOTH grant
+        // a window the dependent never had access to before this removal, core's own
+        // calculateAccesses could still independently attempt 2 competing CREATEs for it, same
+        // root cause as the fix below just for a row that never existed to repoint. Not closed
+        // here — see the class javadoc's "A sixth trigger" section for why this is considered
+        // acceptable residual risk for now.
+        continue;
+      }
+      Role existingSource = existing.getInheritedFrom();
+      boolean sourceCorrect = existingSource != null && sameId(existingSource, winner);
+      boolean levelCorrect = Boolean.valueOf(winnerLevel).equals(existing.isEditableField());
+      if (sourceCorrect && levelCorrect) {
+        continue;
+      }
+      repointInPlace(existing, dependent, window, winner, winnerLevel, existingSource);
+      anyCorrected = true;
+    }
+
+    if (anyCorrected) {
+      // Mirrors deleteForcingCreatePath's own OBDal.refresh(dependent) call — see that method's
+      // own javadoc for why a plain collection-remove is not enough on its own. Empirically
+      // required here too (ETP-4906, Task B6, 6th round): without it, the CALLER's own pending
+      // deletion of `inheritance` (still in-flight in the SAME flush that invoked this observer)
+      // can hit Hibernate's "deleted object would be re-saved by cascade" check — `dependent`'s
+      // own AD_Role_Inheritance collection, if already loaded/cached in this session, still holds
+      // a stale in-memory reference to the about-to-be-deleted row until something forces it to
+      // reload; refreshing `dependent` here (a Role we already loaded and are actively mutating
+      // access for) is the same safe, already-proven lever, just applied once per removal instead
+      // of once per corrected window.
+      OBDal.getInstance().refresh(dependent);
     }
   }
 
@@ -837,6 +1008,100 @@ public class WindowAccessOverlapCorruptionGuard extends EntityPersistenceEventOb
         dependent.getId(), window.getId(),
         previousSource != null ? "inherited from " + previousSource.getId() : "manually granted",
         template.getId());
+  }
+
+  /**
+   * The SIXTH-trigger fix's own mechanism — see the class javadoc's "A sixth trigger" section for
+   * the full root-cause write-up. Corrects {@code existing}'s {@code inheritedFrom} and {@code
+   * editableField} to the pre-computed {@code winner}/{@code winnerLevel} DIRECTLY, IN PLACE — the
+   * SAME row, SAME primary key — instead of {@link #deleteForcingCreatePath} deleting it and
+   * relying on core's OWN {@code calculateAccesses} to recreate it. Deliberately does NOT reuse
+   * {@code deleteForcingCreatePath}: deleting here would reopen the exact duplicate-INSERT race
+   * this method exists to close (see the class javadoc) whenever 2+ remaining templates both grant
+   * {@code window} — core's {@code RoleInheritanceManager#applyRemoveInheritance} walks EVERY
+   * remaining template's own grants in ONE {@code calculateAccesses} call, and with {@code
+   * existing} deleted, each remaining template covering the same window independently finds no row
+   * and issues its OWN {@code copyRoleAccess} INSERT, none of them aware of the others' still-
+   * unflushed one ({@code FlushMode.COMMIT} never auto-flushes a query into visibility — see
+   * {@link #deleteForcingCreatePath}'s own javadoc for the proof of that same limitation on the
+   * delete side).
+   *
+   * <p>Same bulk-DML-bypasses-the-session technique as {@link #deleteForcingCreatePath} (an
+   * {@code executeUpdate()} HQL bulk UPDATE, not an entity-level setter + flush), for the identical
+   * reason: this runs nested inside an already-in-progress flush under {@code FlushMode.COMMIT},
+   * so an entity-level {@code existing.setInheritedFrom(winner)} would only mutate the in-memory
+   * Java object — never Hibernate's own dirty-check bookkeeping in a way guaranteed to survive
+   * being invoked mid-flush from an unrelated entity's delete-event callback — and a reentrant
+   * {@code OBDal.flush()} to force it through is independently unsafe (see {@link
+   * #deleteForcingCreatePath}'s javadoc, point 2). A bulk UPDATE writes the SQL immediately on the
+   * current connection, visible to every subsequent SELECT in this transaction (including core's
+   * own {@code getAccess()} lookups during {@code calculateAccesses}), with zero risk to the outer
+   * flush's action queue.
+   *
+   * <p>Because {@code existing}'s {@code inheritedFrom} is corrected to {@code winner} — by
+   * construction ALWAYS the remaining template with the numerically HIGHEST {@code
+   * AD_Role_Inheritance.SeqNo} among every remaining template granting {@code window}, regardless
+   * of that template's own access level (see the class javadoc's "Why InheritedFrom must track
+   * core's own SeqNo precedence" paragraph for why a most-permissive-based pick here is NOT safe
+   * — {@code winnerLevel} is where most-permissive-wins is actually applied, decoupled from this)
+   * — core's OWN {@code
+   * isPrecedent(inheritanceInheritFromIdList, currentInheritedFromId, newInheritedFromId)} check
+   * can never find {@code winner}'s index smaller than any OTHER remaining template's index (its
+   * index is, by construction, the largest among templates granting this window), so every one of
+   * core's own per-template passes over this window resolves to {@code ACCESS_NOT_CHANGED} —
+   * core touches this row ZERO times during its own recalculation. No {@code EntityNewEvent}/
+   * {@code EntityUpdateEvent} ever fires for it during this removal, so {@link
+   * #correctInheritedOwnership}/{@link #widenInheritedAccessLevelIfNeeded} never run for it either
+   * — this method does both jobs itself, up front, in one step, since there is no later CREATE
+   * event left for them to react to.
+   *
+   * <p>{@code client}/{@code organization} are deliberately NOT touched here — {@code existing}
+   * already belongs to {@code dependent} (it is an update to an ALREADY-correctly-owned row, never
+   * a copy from a template's own row), so there is nothing to re-pin, unlike {@link
+   * #correctInheritedOwnership}'s CREATE-path concern.
+   */
+  private void repointInPlace(WindowAccess existing, Role dependent, Window window, Role winner,
+      boolean winnerLevel, Role previousSource) {
+    // updatedBy is an entity reference (AD_User), not a plain id string — binding a String here
+    // throws ClassCastException from Hibernate's EntityType#nullSafeSet (confirmed empirically
+    // while verifying this fix: the first attempt bound the raw user id string and failed this
+    // way immediately). Falls back to leaving updatedBy/updated untouched (rather than guessing a
+    // system user) when no user is available on the context, mirroring how
+    // deleteForcingCreatePath's own bulk DELETE never touches audit columns on the row it removes
+    // either — this bulk UPDATE is the same kind of trusted, event-bypassing correction.
+    org.openbravo.model.ad.access.User currentUser = OBContext.getOBContext() != null
+        ? OBContext.getOBContext().getUser()
+        : null;
+    OBContext.setAdminMode(false);
+    try {
+      StringBuilder hql = new StringBuilder("update ").append(WindowAccess.ENTITY_NAME)
+          .append(" set inheritedFrom = :winner, editableField = :level");
+      if (currentUser != null) {
+        hql.append(", updated = :updated, updatedBy = :updatedBy");
+      }
+      hql.append(" where id = :id");
+      org.hibernate.query.Query<?> query = OBDal.getInstance().getSession()
+          .createQuery(hql.toString());
+      query.setParameter("winner", winner);
+      query.setParameter("level", winnerLevel);
+      if (currentUser != null) {
+        query.setParameter("updated", new Date());
+        query.setParameter("updatedBy", currentUser);
+      }
+      query.setParameter("id", existing.getId());
+      query.executeUpdate();
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+    OBDal.getInstance().getSession().evict(existing);
+    log.info(
+        "Prevented cross-template AD_Window_Access overlap corruption (multi-remaining-template "
+            + "removal case): repointed role {} window {} in place from {} to {} (editableField={}) "
+            + "without deleting the row — avoids core's own calculateAccesses independently "
+            + "re-creating this window from 2+ remaining templates within the same flush",
+        dependent.getId(), window.getId(),
+        previousSource != null ? previousSource.getId() : "manually granted", winner.getId(),
+        winnerLevel);
   }
 
   /**

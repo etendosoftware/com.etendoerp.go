@@ -17,6 +17,7 @@
 package com.etendoerp.go.roles;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
 
@@ -637,6 +638,111 @@ public class UserRoleCompositionServiceOverlapIntegrationTest extends WeldBaseTe
           + "template's level, not stay stuck at full (the exact live-confirmed regression this "
           + "round fixes)",
           !Boolean.TRUE.equals(afterRemoval.isEditableField()));
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  /**
+   * ETP-4906 (Task B6, 6th round, human-found on the REAL {@code SFAssignUserRoles} webhook,
+   * 2026-08-17) — deterministic, self-contained reproduction of the first B6 gap to break the
+   * ACTUAL production flow, not a raw Etendo Classic edit. All five rounds above (and every test
+   * in this class before this one) only ever compose a role from EXACTLY 2 templates, so removing
+   * one always leaves exactly ONE remaining template — structurally incapable of exercising the
+   * bug this test reproduces, which requires 2+ REMAINING templates to BOTH grant the SAME window
+   * after a third is removed (only possible starting at 3 templates total).
+   *
+   * <p>Mirrors the human's real repro shape (composed from all 4 real system templates, Finance
+   * unchecked via the real "Asignar roles" flow) using the SAME "bystander" construction as the
+   * rest of this class — built directly via {@code AD_Role_Inheritance}, not through {@code
+   * assignTemplateRoles} — because the crash is in {@code
+   * WindowAccessOverlapCorruptionGuard#guardRemovedInheritance} itself (triggered by ANY {@code
+   * RoleInheritance} delete, {@code assignTemplateRoles} included), not in anything {@code
+   * UserRoleCompositionService} does. Before this round's fix: {@code
+   * javax.persistence.PersistenceException: org.hibernate.exception.ConstraintViolationException:
+   * could not execute batch} — {@code ad_window_access_un_key} duplicate — reproduced live against
+   * the human's own real role via psql (see this ticket's plan doc, "B6 Findings — 6th gap") and,
+   * before the fix below, by this very test locally.
+   */
+  @Test
+  public void testRemovingOneOfFourTemplatesLeavesTwoRemainingOverlappingTemplatesUnbroken()
+      throws Exception {
+    setTestUserContext();
+    OBContext.setAdminMode(true);
+    try {
+      Window sharedWindow = OBDal.getInstance().get(Window.class, UNUSED_WINDOW_ID);
+      assertNotNull(sharedWindow);
+
+      Role financeTemplate = OBDal.getInstance().get(Role.class,
+          SystemRoleTemplates.FINANCE_ROLE_ID);
+      Role salesTemplate = OBDal.getInstance().get(Role.class, SystemRoleTemplates.SALES_ROLE_ID);
+      Role purchasingTemplate = OBDal.getInstance().get(Role.class,
+          SystemRoleTemplates.PURCHASING_ROLE_ID);
+      Role inventoryTemplate = OBDal.getInstance().get(Role.class,
+          SystemRoleTemplates.INVENTORY_ROLE_ID);
+      assertNotNull("The real Finance system template must already exist", financeTemplate);
+      assertNotNull("The real Sales system template must already exist", salesTemplate);
+      assertNotNull("The real Purchasing system template must already exist", purchasingTemplate);
+      assertNotNull("The real Inventory system template must already exist", inventoryTemplate);
+
+      User user = OBDal.getInstance().get(User.class, TEST_USER_ID);
+      assertNotNull(user);
+
+      // Finance grants the shared window FULL. Sales AND Purchasing BOTH ALSO grant it,
+      // READ-ONLY — the "2+ REMAINING templates overlap on the same window" shape that can only
+      // exist with 3+ templates composed. Inventory does not grant this window at all — present
+      // only to match the human's real 4-template composition shape (Finance/Sales/Purchasing/
+      // Inventory); it plays no other role in this reproduction.
+      grantWindowAccess(financeTemplate, sharedWindow, false);
+      OBDal.getInstance().flush();
+      grantWindowAccess(salesTemplate, sharedWindow, true);
+      OBDal.getInstance().flush();
+      grantWindowAccess(purchasingTemplate, sharedWindow, true);
+      OBDal.getInstance().flush();
+
+      // Compose the bystander from all 4 templates, ascending SeqNo, exactly mirroring the real
+      // template order (Finance/Sales/Purchasing/Inventory) and the human's real role's shape.
+      Role bystanderRole = createBystanderRole(user);
+      addInheritance(bystanderRole, financeTemplate, 10L);
+      addInheritance(bystanderRole, salesTemplate, 20L);
+      addInheritance(bystanderRole, purchasingTemplate, 30L);
+      addInheritance(bystanderRole, inventoryTemplate, 40L);
+
+      WindowAccess beforeRemoval = findWindowAccess(bystanderRole, sharedWindow);
+      assertNotNull("Sanity: composing all 4 templates must have propagated the shared window",
+          beforeRemoval);
+      assertEquals("Sanity: Finance is the only full grantor among all 4, so it must be the "
+          + "source before removal",
+          financeTemplate.getId(),
+          beforeRemoval.getInheritedFrom() != null ? beforeRemoval.getInheritedFrom().getId()
+              : null);
+      assertTrue("Sanity: most-permissive-wins must resolve to full before removal",
+          Boolean.TRUE.equals(beforeRemoval.isEditableField()));
+
+      // THE 6TH-ROUND TRIGGER: remove Finance's inheritance — zero UserRoleCompositionService
+      // code anywhere in this call stack, exactly like the guard's own scope. Sales AND
+      // Purchasing BOTH still grant the shared window afterward. Before this round's fix, this
+      // threw a duplicate-key ConstraintViolationException; must now succeed.
+      RoleInheritance financeInheritance = findInheritance(bystanderRole, financeTemplate);
+      assertNotNull(financeInheritance);
+      OBDal.getInstance().remove(financeInheritance);
+      OBDal.getInstance().flush();
+
+      WindowAccess afterRemoval = findWindowAccess(bystanderRole, sharedWindow);
+      assertNotNull("The shared window's access must survive the removal, re-derived from the "
+          + "2 remaining overlapping templates, not silently dropped or duplicated", afterRemoval);
+      assertEquals("client must always match the BYSTANDER role's own, never a template's",
+          bystanderRole.getClient().getId(), afterRemoval.getClient().getId());
+      assertEquals("organization must always match the BYSTANDER role's own, never a template's",
+          bystanderRole.getOrganization().getId(), afterRemoval.getOrganization().getId());
+      assertEquals("Purchasing (the highest-SeqNo template among the 2 remaining templates that "
+          + "grant this window) must become the new source",
+          purchasingTemplate.getId(),
+          afterRemoval.getInheritedFrom() != null ? afterRemoval.getInheritedFrom().getId()
+              : null);
+      assertFalse("Neither remaining grantor (Sales, Purchasing) is full, so access must "
+          + "downgrade to read-only, not stay stuck at Finance's old full value",
+          Boolean.TRUE.equals(afterRemoval.isEditableField()));
     } finally {
       OBContext.restorePreviousMode();
     }
