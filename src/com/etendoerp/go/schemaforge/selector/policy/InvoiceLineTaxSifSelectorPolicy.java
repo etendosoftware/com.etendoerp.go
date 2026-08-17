@@ -58,8 +58,8 @@ import com.etendoerp.go.schemaforge.selector.meta.SelectorMeta;
  * <p><b>Scoping:</b> {@code entityName == "lines"} alone is too broad — several unrelated
  * windows name their detail/lines entity "lines" too. This also requires
  * {@link NeoSelectorService#SOURCE_WINDOW_ID_PARAM} to be one of the two in-scope windows,
- * and the selector's resolved DAL target entity to be {@code TaxRate} (so this never
- * misfires against, e.g., the SAME lines entity's Product selector).
+ * and the selector's resolved DAL target entity to be {@code FinancialMgmtTaxRate} (so this
+ * never misfires against, e.g., the SAME lines entity's Product selector).
  *
  * <p><b>SII is intentionally NOT enriched here</b> — confirmed by investigation that SII has
  * nothing to configure at tax level; its equivalent ({@code aeatsiiCauseExemption}) already
@@ -79,7 +79,9 @@ public final class InvoiceLineTaxSifSelectorPolicy implements SelectorEnrichment
   private static final String LINES_ENTITY_NAME = "lines";
   // DAL entity name for C_Tax (org.openbravo.model.financialmgmt.tax.TaxRate), resolved by
   // SelectorDescriptorResolver via ModelProvider.getEntityByTableName("C_Tax").getName().
-  private static final String TAX_TARGET_ENTITY = "TaxRate";
+  // Confirmed via TaxRate.ENTITY_NAME and SelectorDescriptorResolver — NOT the Java simple
+  // class name "TaxRate" (see ETP-4888 fix commit for the full trace).
+  private static final String TAX_TARGET_ENTITY = "FinancialMgmtTaxRate";
 
   // c_tax DB column (key) -> JSON key emitted on each enriched selector item (value). Keys for
   // the TBAI/Verifactu columns are the EXACT raw AD column names `selectSifFields()`'s

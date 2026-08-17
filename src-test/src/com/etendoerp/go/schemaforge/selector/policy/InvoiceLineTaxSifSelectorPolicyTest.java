@@ -65,7 +65,7 @@ public class InvoiceLineTaxSifSelectorPolicyTest {
   private static final String WINDOW_SALES_INVOICE = "167";
   private static final String WINDOW_PURCHASE_INVOICE = "183";
   private static final String WINDOW_OTHER = "143";
-  private static final String TARGET_TAX_RATE = "TaxRate";
+  private static final String TARGET_TAX_RATE = "FinancialMgmtTaxRate";
   private static final String TARGET_PRODUCT = "Product";
 
   private final InvoiceLineTaxSifSelectorPolicy policy = new InvoiceLineTaxSifSelectorPolicy();
