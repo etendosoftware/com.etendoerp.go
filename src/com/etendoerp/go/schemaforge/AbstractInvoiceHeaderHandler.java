@@ -30,6 +30,7 @@ import java.util.UUID;
 import javax.servlet.http.HttpServletResponse;
 
 import org.apache.commons.lang3.StringUtils;
+import org.codehaus.jettison.json.JSONArray;
 import org.openbravo.advpaymentmngt.ProcessInvoiceUtil;
 import org.openbravo.erpCommon.utility.OBError;
 import org.openbravo.erpCommon.utility.OBMessageUtils;
@@ -46,8 +47,11 @@ import org.openbravo.database.ConnectionProvider;
 import org.openbravo.erpCommon.utility.OBCurrencyUtils;
 import org.openbravo.model.ad.ui.Process;
 import org.openbravo.model.common.enterprise.DocumentType;
+import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.common.invoice.Invoice;
 import org.openbravo.model.common.invoice.ReversedInvoice;
+import org.openbravo.module.sii.data.AEATSIIConfig;
+import org.openbravo.module.sii.utils.SIIUtils;
 import org.openbravo.service.db.DalConnectionProvider;
 
 /**
@@ -92,6 +96,16 @@ public abstract class AbstractInvoiceHeaderHandler {
   // field on this shared base class safely carries state between them.
   private String pendingOriginInvoiceId;
   private boolean originInvoiceCaptured;
+
+  // ETP-4783: SII authorization number — same capture/persist pattern as originInvoice.
+  // captureAndValidateSiiAuthorization() (called from handle()) validates the SII config and
+  // stores the resolved authorization number (or ""), then persistSiiAuthorizationno() (called
+  // from afterHandle()) writes it directly via DAL after the CRUD write completes.
+  // This is necessary because aeatsiiAuthorizationno has visibility=readOnly in the contract,
+  // so filterWriteRequest() strips it from the PATCH body before the DB write — it cannot be
+  // injected into the request body in handle() and survive to the DAL layer.
+  private String pendingSiiAuthorizationno;
+  private boolean siiAuthorizationCaptured;
 
   // ---------------------------------------------------------------------------
   // Abstract contract
@@ -336,6 +350,156 @@ public abstract class AbstractInvoiceHeaderHandler {
   }
 
   // ---------------------------------------------------------------------------
+  // SII authorization (ETP-4783)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Validates and captures the SII authorization number when {@code aeatsiiIsauthorization}
+   * is being set to {@code true} in a write request (ETP-4783).
+   *
+   * <p>Must be called from each subclass's {@code handle()} (the pre-hook). The classic
+   * {@code SiiAuthorizationCallout} does not fire in Go/NEO Headless because the SifTab custom
+   * component fires a direct {@code /header/callout} fetch instead (bypassing the
+   * {@code fireCallout} guard that filters 'Y'/'N' values). This method enforces the same
+   * save-time invariant for every PATCH/PUT/POST.
+   *
+   * <p>{@code aeatsiiAuthorizationno} has {@code visibility=readOnly} in the contract
+   * ({@code isreadonly='Y'} in the DB), so {@code filterWriteRequest} strips it from the PATCH
+   * body before the DAL write. The value resolved here (from {@code AEATSIIConfig}) is stored in
+   * {@link #pendingSiiAuthorizationno} and written by {@link #persistSiiAuthorizationno(NeoContext)}
+   * (called from {@code afterHandle()}) via a direct DAL update on the already-saved record.
+   *
+   * <p>When {@code aeatsiiIsauthorization} is being set to {@code false}, this method returns
+   * {@code null} immediately (no capture, no persist) — preserving the existing DB number for
+   * future re-enabling. Clearing the number on uncheck caused a "2nd cycle" bug where the number
+   * would vanish after uncheck→save→re-check→save.
+   *
+   * @param context the current request context
+   * @return an error {@link NeoResponse} to reject the save (400), or {@code null} to proceed
+   */
+  protected NeoResponse captureAndValidateSiiAuthorization(NeoContext context) {
+    if (!NeoHandlerUtils.isWriteMethod(context.getHttpMethod())) {
+      return null;
+    }
+    JSONObject body = context.getRequestBody();
+    if (body == null || !body.has("aeatsiiIsauthorization")) {
+      return null;
+    }
+    try {
+      Object rawValue = body.opt("aeatsiiIsauthorization");
+      // The field is a Boolean in the Invoice entity; the JSON body can carry true/false or "Y"/"N"
+      // depending on the frontend serialization.
+      boolean isAuthorization = Boolean.TRUE.equals(rawValue)
+          || "Y".equalsIgnoreCase(String.valueOf(rawValue))
+          || "true".equalsIgnoreCase(String.valueOf(rawValue));
+
+      if (isAuthorization) {
+        Organization org = OBContext.getOBContext().getCurrentOrganization();
+        if (org == null) {
+          return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
+              "La organización no tiene configuración de SII o la configuración no tiene número de autorización.");
+        }
+        AEATSIIConfig config = SIIUtils.getSiiConfigFromOrg(org);
+        if (config == null || StringUtils.isBlank(config.getAuthorizationno())) {
+          return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
+              "La organización no tiene configuración de SII o la configuración no tiene número de autorización.");
+        }
+        pendingSiiAuthorizationno = config.getAuthorizationno();
+      } else {
+        // ETP-4783: Authorization disabled — do NOT clear the stored number. Wiping it here
+        // (via persistSiiAuthorizationno) would erase the DB value when the user unchecks,
+        // causing the number to vanish on re-check + save. The CRUD write handles
+        // aeatsiiIsauthorization = false normally; the number is preserved for future use.
+        return null;
+      }
+      siiAuthorizationCaptured = true;
+    } catch (Exception e) {
+      log.warn("[ETP-4783] captureAndValidateSiiAuthorization failed (non-fatal): {}", e.getMessage());
+    }
+    return null;
+  }
+
+  /**
+   * Writes {@link #pendingSiiAuthorizationno} (captured in the pre-hook) to the invoice via a
+   * direct DAL update after the main CRUD write completes (ETP-4783).
+   *
+   * <p>Must be called from each subclass's {@code afterHandle()} alongside
+   * {@link #persistOriginInvoice(NeoContext)}.
+   *
+   * @param context the current request context
+   */
+  protected void persistSiiAuthorizationno(NeoContext context) {
+    if (!siiAuthorizationCaptured) {
+      return;
+    }
+    try {
+      String invoiceId = resolveInvoiceIdFromContext(context);
+      if (StringUtils.isBlank(invoiceId)) {
+        return;
+      }
+      OBContext.setAdminMode(true);
+      try {
+        Invoice invoice = OBDal.getInstance().get(Invoice.class, invoiceId);
+        if (invoice == null) {
+          return;
+        }
+        invoice.setAeatsiiAuthorizationno(pendingSiiAuthorizationno);
+        OBDal.getInstance().save(invoice);
+        OBDal.getInstance().flush();
+      } finally {
+        OBContext.restorePreviousMode();
+      }
+    } catch (Exception e) {
+      log.warn("[ETP-4783] persistSiiAuthorizationno failed: {}", e.getMessage());
+    }
+  }
+
+  /**
+   * Injects {@link #pendingSiiAuthorizationno} into the PATCH/POST response body so the
+   * frontend sees the value that {@link #persistSiiAuthorizationno(NeoContext)} wrote to DB
+   * after the main CRUD write captured its response (ETP-4783).
+   *
+   * <p>The main CRUD handler captures its JSON result in {@code context.getPreviousResult()}
+   * before {@code afterHandle()} runs. {@code persistSiiAuthorizationno()} writes to DB in
+   * {@code afterHandle()}, so the captured PATCH response body does not include the new value.
+   * Without this injection the frontend would display a stale (empty) auth number.
+   *
+   * <p>No-op (returns {@code null}) when {@link #siiAuthorizationCaptured} is {@code false} or
+   * the previous result cannot be parsed — callers fall back to the normal {@code null} return.
+   *
+   * @param context the current request context
+   * @return a {@link NeoResponse} with the patched body, or {@code null} to fall through
+   */
+  protected NeoResponse injectAuthorizationnoIntoSaveResponse(NeoContext context) {
+    if (!siiAuthorizationCaptured) {
+      return null;
+    }
+    try {
+      NeoResponse prev = context.getPreviousResult();
+      if (prev == null || prev.getBody() == null) {
+        return null;
+      }
+      // Defensive copy so we do not mutate the original captured result.
+      JSONObject body = new JSONObject(prev.getBody().toString());
+      // Try the standard JsonDataService wrapper: { "response": { "data": [{ ... }] } }
+      JSONObject responseWrapper = body.optJSONObject("response");
+      if (responseWrapper != null) {
+        JSONArray data = responseWrapper.optJSONArray("data");
+        if (data != null && data.length() > 0) {
+          data.getJSONObject(0).put("aeatsiiAuthorizationno", pendingSiiAuthorizationno);
+          return NeoResponse.ok(body);
+        }
+      }
+      // Flat format fallback: the body itself is the record.
+      body.put("aeatsiiAuthorizationno", pendingSiiAuthorizationno);
+      return NeoResponse.ok(body);
+    } catch (Exception e) {
+      log.warn("[ETP-4783] injectAuthorizationnoIntoSaveResponse failed (non-fatal): {}", e.getMessage());
+      return null;
+    }
+  }
+
+  // ---------------------------------------------------------------------------
   // GET enrichment (virtual fields)
   // ---------------------------------------------------------------------------
 
@@ -573,6 +737,11 @@ public abstract class AbstractInvoiceHeaderHandler {
       // neither the Verifactu nor the TBAI ProcessInvoiceHook reads RequestContext today, so this
       // is a non-issue in practice. Revisit if a future hook needs request-scoped context.
       ConnectionProvider conn = new DalConnectionProvider(false);
+      // ETP-4783: In Go, the Classic ETVFAC_C_INVOICE_SET_VERIFACTU callout is never triggered.
+      // Copy DocType Verifactu fields to the invoice before completing so GenerateRFAfterProcessingHook
+      // finds em_etvfac_inv_type / em_etvfac_verifac_desc populated (only for AR invoices; AP skipped
+      // by the hook anyway). Also ensures em_etsg_date_operation is set when null.
+      populateVerifactuFieldsFromDocType(invoiceId);
       ProcessInvoiceUtil processInvoiceUtil =
           WeldUtils.getInstanceFromStaticBeanManager(ProcessInvoiceUtil.class);
       // Void-date/supplier-reference params are only consulted for the void action (docAction RC).
@@ -591,6 +760,70 @@ public abstract class AbstractInvoiceHeaderHandler {
           invoiceId, e.getMessage(), e);
       return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
           "Invoice completion failed: " + e.getMessage());
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Pre-completion Verifactu field population
+  // ---------------------------------------------------------------------------
+
+  /**
+   * ETP-4783: Copies Verifactu fields from the invoice's DocType to the invoice record itself
+   * before the completion hook chain runs, replicating the behaviour of the Classic callout
+   * {@code ETVFAC_C_INVOICE_SET_VERIFACTU} which Go never fires.
+   *
+   * <p>Only touches AR sales invoices where {@code em_etvfac_inv_type} is currently null.
+   * Uses native SQL so the Go module compiles even when the Verifactu module is absent.
+   * After the UPDATE the invoice is evicted from the Hibernate first-level cache so that
+   * {@link ProcessInvoiceUtil} (called immediately after) reads the fresh DB values.
+   *
+   * <p>Fields populated (strictly from DocType — no fallback derivation):
+   * <ul>
+   *   <li>{@code em_etvfac_inv_type} — invoice type (e.g. F1, R1) — must be set on the DocType</li>
+   *   <li>{@code em_etvfac_verifac_desc} — operation description — must be set on the DocType</li>
+   *   <li>{@code em_etvfac_reverseinvtype} — rectification method I/S (DocType, for R-types)</li>
+   *   <li>{@code em_etsg_date_operation} — defaults to {@code dateinvoiced} when null</li>
+   * </ul>
+   *
+   * <p><b>Developer responsibility:</b> any DocType added to Go for AR invoices MUST have
+   * {@code em_etvfac_inv_type} and {@code em_etvfac_verifac_desc} configured in its sampledata
+   * (and {@code em_etvfac_reverseinvtype} for R-types). No automatic derivation is performed —
+   * if those fields are absent the Verifactu hook will reject the invoice at completion.
+   *
+   * @param invoiceId the ID of the invoice being completed
+   */
+  @SuppressWarnings("java:S2077")
+  private static void populateVerifactuFieldsFromDocType(String invoiceId) {
+    String sql =
+        "UPDATE c_invoice i"
+        + "   SET em_etvfac_inv_type       = COALESCE(i.em_etvfac_inv_type,       dt.em_etvfac_inv_type),"
+        + "       em_etvfac_verifac_desc   = COALESCE(i.em_etvfac_verifac_desc,   dt.em_etvfac_verifac_desc),"
+        + "       em_etvfac_reverseinvtype = COALESCE(i.em_etvfac_reverseinvtype, dt.em_etvfac_reverseinvtype),"
+        + "       em_etsg_date_operation   = COALESCE(i.em_etsg_date_operation,   i.dateinvoiced)"
+        + "  FROM c_doctype dt"
+        + " WHERE i.c_invoice_id   = ?"
+        + "   AND dt.c_doctype_id  = i.c_doctypetarget_id"
+        + "   AND i.issotrx        = 'Y'"
+        + "   AND (i.em_etvfac_inv_type IS NULL OR i.em_etsg_date_operation IS NULL)";
+    try {
+      Connection conn = OBDal.getInstance().getConnection();
+      try (PreparedStatement ps = conn.prepareStatement(sql)) {
+        ps.setString(1, invoiceId);
+        int rows = ps.executeUpdate();
+        if (rows > 0) {
+          // Evict from Hibernate first-level cache so ProcessInvoiceUtil sees the updated values
+          Invoice inv = OBDal.getInstance().getSession().get(Invoice.class, invoiceId);
+          if (inv != null) {
+            OBDal.getInstance().getSession().evict(inv);
+          }
+          log.debug("[INVOICE-COMPLETE] Populated Verifactu DocType fields for invoice {}", invoiceId);
+        }
+      }
+    } catch (Exception e) {
+      // Non-fatal: log and continue — if Verifactu is not installed the columns don't exist,
+      // and the hook itself will skip processing (shouldSkipSendingToVerifactu returns true).
+      log.debug("[INVOICE-COMPLETE] Could not populate Verifactu fields for invoice {}: {}",
+          invoiceId, e.getMessage());
     }
   }
 
@@ -853,10 +1086,73 @@ public abstract class AbstractInvoiceHeaderHandler {
       checkExchangeRateWarning(fields.body(), fields.requestBody(), fields.formState(), fields.triggerField());
       String recordId = resolveCalloutRecordId(context, fields.formState());
       blockCalloutDocTypeUpdateIfLocked(fields.updates(), fields.triggerField(), recordId);
+      applySiiAuthorizationCallout(fields.triggerField(), fields.requestBody(), fields.updates(), fields.body());
     } catch (Exception e) {
       log.warn("[ETP-4029/ETP-4535] afterCallout failed (non-fatal): {}", e.getMessage());
     }
     return null; // mutations applied in-place; dispatcher merges nothing extra
+  }
+
+  /**
+   * Replicates {@code SiiAuthorizationCallout} behavior for Go/NEO Headless (ETP-4783).
+   *
+   * <p>Classic Etendo fires the {@code SiiAuthorizationCallout} immediately when the user
+   * toggles the {@code aeatsiiIsauthorization} checkbox on the invoice. In Go/NEO, that
+   * Classic callout does not run; this hook restores the same field-update semantics:
+   *
+   * <ul>
+   *   <li>If set to {@code Y}: looks up {@link AEATSIIConfig} for the current legal-entity org
+   *       via {@link SIIUtils#getSiiConfigFromOrg(Organization)}. If no config or no
+   *       authorization number is set, an ERROR message is appended to the callout response.
+   *       Otherwise, {@code aeatsiiAuthorizationno} is injected into the {@code updates} map
+   *       so the form field is populated immediately without a round-trip save.
+   *   <li>If set to {@code N}: clears {@code aeatsiiAuthorizationno} by injecting an empty
+   *       string into the {@code updates} map.
+   * </ul>
+   *
+   * <p>No-op when the trigger field is not {@code aeatsiiIsauthorization}. All failures are
+   * caught and logged as warnings (non-fatal) to match the Classic callout's error-handling.
+   *
+   * @param triggerField the name of the field that fired the callout
+   * @param requestBody  the callout request body ({@code field}, {@code value}, {@code formState})
+   * @param updates      the callout response's {@code updates} map; may be {@code null}
+   * @param body         the full callout response body, used to append error messages
+   */
+  private static void applySiiAuthorizationCallout(String triggerField, JSONObject requestBody,
+      JSONObject updates, JSONObject body) {
+    if (!"aeatsiiIsauthorization".equals(triggerField)) {
+      return;
+    }
+    try {
+      Object rawValue = requestBody != null ? requestBody.opt("value") : null;
+      String value = rawValue != null ? rawValue.toString() : "";
+      boolean isAuthorization = "Y".equalsIgnoreCase(value) || "true".equalsIgnoreCase(value);
+
+      if (updates == null) {
+        // Cannot inject field updates without the updates section — skip silently.
+        log.debug("[ETP-4783] applySiiAuthorizationCallout: no updates map, skipping injection");
+        return;
+      }
+
+      if (isAuthorization) {
+        Organization org = OBContext.getOBContext().getCurrentOrganization();
+        if (org == null) {
+          log.warn("[ETP-4783] applySiiAuthorizationCallout: no current organization in OBContext");
+          return;
+        }
+        AEATSIIConfig config = SIIUtils.getSiiConfigFromOrg(org);
+        if (config == null || StringUtils.isBlank(config.getAuthorizationno())) {
+          appendMessage(body, "ERROR",
+              "La organización no tiene configuración de SII o la configuración no tiene número de autorización.");
+        } else {
+          updates.put("aeatsiiAuthorizationno", config.getAuthorizationno());
+        }
+      } else {
+        updates.put("aeatsiiAuthorizationno", "");
+      }
+    } catch (Exception e) {
+      log.warn("[ETP-4783] applySiiAuthorizationCallout failed (non-fatal): {}", e.getMessage());
+    }
   }
 
   /**
