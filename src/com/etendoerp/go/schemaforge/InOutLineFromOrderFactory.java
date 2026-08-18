@@ -39,11 +39,21 @@ final class InOutLineFromOrderFactory {
   /**
    * Returns the pending qty for an order line (ordered minus delivered), or
    * {@code null} when the line should be skipped from a new shipment/receipt
-   * (inactive, missing product/UOM, or fully shipped/received).
+   * (inactive, missing product/UOM, non-stockable/non-Item product, or fully
+   * shipped/received).
    *
    * <p>Returning {@code null} (instead of throwing or returning ZERO with a
    * separate flag) keeps the caller loop tight: "fetch qty, skip if null,
    * otherwise create line".
+   *
+   * <p><b>ETP-4853:</b> a product that is not stockable, or not of type Item
+   * (e.g. the synthetic global-discount line materialized by
+   * {@link TotalDiscountService}, or a Service/Expense product), never
+   * represents physical stock movement and must never become a shipment/
+   * receipt line. This mirrors the discriminator the classic {@code
+   * M_INOUT_CREATE} stored procedure uses ({@code IsStocked='Y' AND
+   * ProductType='I'}) to decide whether an order line belongs in the
+   * generated document.
    *
    * <p><b>ETP-4722:</b> ordered/delivered quantities can be NEGATIVE since
    * ETP-4567 removed the old {@code min: 0} constraint on order lines (e.g.
@@ -56,6 +66,10 @@ final class InOutLineFromOrderFactory {
    */
   static BigDecimal pendingQuantityFor(OrderLine orderLine) {
     if (!orderLine.isActive() || orderLine.getProduct() == null || orderLine.getUOM() == null) {
+      return null;
+    }
+    if (!Boolean.TRUE.equals(orderLine.getProduct().isStocked())
+        || !"I".equals(orderLine.getProduct().getProductType())) {
       return null;
     }
     BigDecimal orderedQty = orderLine.getOrderedQuantity();
