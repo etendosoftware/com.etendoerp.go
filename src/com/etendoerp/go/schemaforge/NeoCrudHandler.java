@@ -507,9 +507,10 @@ class NeoCrudHandler {
     executePostCalloutCascade(filteredBody, adTab, context, parentIdValue, protectedCalloutFields);
     long perfCalloutCascade = System.nanoTime();
     NeoCommercialLinePolicy.injectProductDerivedUomIfMissing(filteredBody);
-    NeoCommercialLinePolicy.injectGrossAmountIfMissing(filteredBody);
-    NeoCommercialLinePolicy.injectLineGrossAmountIfMissing(filteredBody);
-    NeoCommercialLinePolicy.injectLineNetAmountIfMissing(filteredBody);
+    // ETP-4855: net BEFORE gross — injectCommercialAmounts owns that order. This path used to
+    // call the injectors gross-first, which left LINE_GROSS_AMOUNT at 0 for any client that
+    // sent neither amount (OCR /batch, MCP, import modal).
+    NeoCommercialLinePolicy.injectCommercialAmounts(filteredBody);
     stripContactsPreCreateBillingDefaults(filteredBody, context, adTab);
     // Coerce String primitives injected by injectMandatoryDefaults to their correct Java types.
     // Utility.getDefault() always returns String; JsonToDataConverter has no String→BigDecimal/
@@ -654,9 +655,7 @@ class NeoCrudHandler {
     // The frontend sends invoicedQuantity and unitPrice as editable fields, so both are
     // available here to compute the correct net amount even for products where SL_Invoice_Amt
     // throws on the sales invoice context (e.g. tax-exclusive price lists).
-    NeoCommercialLinePolicy.injectLineNetAmountIfMissing(filteredBody);
-    NeoCommercialLinePolicy.injectGrossAmountIfMissing(filteredBody);
-    NeoCommercialLinePolicy.injectLineGrossAmountIfMissing(filteredBody);
+    NeoCommercialLinePolicy.injectCommercialAmounts(filteredBody);
     // ETP-4531: re-apply accountingDate now that filtering (which stripped it, correctly, as a
     // read-only field the CLIENT should never write directly) has run. Each header handler's
     // handle() pre-hook (e.g. AbstractInvoiceHeaderHandler#mirrorAccountingDate) mirrors the
