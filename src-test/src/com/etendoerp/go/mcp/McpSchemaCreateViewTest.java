@@ -231,6 +231,39 @@ class McpSchemaCreateViewTest {
       assertEquals("businessPartner",
           response.getJSONArray("required").getJSONObject(0).getString("name"));
     }
+
+    // Defaults to false (4-arg overload) so every pre-existing call site keeps CREATE_HINT
+    // byte-for-byte unchanged — only the router opts a caller into the child-entity clause.
+    @Test
+    @DisplayName("the 4-arg overload never appends the child-entity clause")
+    void fourArgOverloadOmitsChildClause() throws JSONException {
+      JSONObject response =
+          McpSchemaCreateView.buildResponse("sales-invoice", "header", sampleFields(), Set.of());
+
+      assertEquals(McpSchemaCreateView.CREATE_HINT, response.getString("hint"));
+    }
+
+    // ETP-4918: a cold agent hit neo_create's 422 on a child entity's parent FK because
+    // neo_defaults without parentId silently omits parent-dependent fields (a storage bin scoped
+    // to the parent's warehouse) rather than erroring — the hint must say so up front.
+    @Test
+    @DisplayName("a child entity gets the parentId clause appended to the hint")
+    void childEntityAppendsParentIdClause() throws JSONException {
+      JSONObject response = McpSchemaCreateView.buildResponse("physical-inventory",
+          "inventoryLine", sampleFields(), Set.of(), true);
+
+      assertEquals(McpSchemaCreateView.CREATE_HINT + McpSchemaCreateView.CHILD_ENTITY_HINT_SUFFIX,
+          response.getString("hint"));
+    }
+
+    @Test
+    @DisplayName("a non-child entity keeps the plain hint even through the 5-arg overload")
+    void nonChildEntityKeepsPlainHint() throws JSONException {
+      JSONObject response = McpSchemaCreateView.buildResponse("sales-invoice", "header",
+          sampleFields(), Set.of(), false);
+
+      assertEquals(McpSchemaCreateView.CREATE_HINT, response.getString("hint"));
+    }
   }
 
   @Nested

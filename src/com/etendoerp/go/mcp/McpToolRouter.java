@@ -923,9 +923,10 @@ public class McpToolRouter {
     // required/optional. 157 fields / 62 kB on sales-invoice/header collapses to the handful that
     // are the agent's to decide — the full response exceeds the client's token limit outright.
     if (McpSchemaCreateView.isCreateView(view)) {
+      boolean isChildEntity = adTab.getTabLevel() != null && adTab.getTabLevel() > 0;
       return wrapAsTextContent(McpSchemaCreateView
           .buildResponse(specName, entityName, fieldsArray,
-              serverDefaultedNames(specName, entityName, adTab, sfEntity))
+              serverDefaultedNames(specName, entityName, adTab, sfEntity), isChildEntity)
           .toString(2));
     }
     // IMP-12: fields:[…] — an explicit whitelist, for an agent that already knows what it wants.

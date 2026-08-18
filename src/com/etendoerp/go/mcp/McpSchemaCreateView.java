@@ -114,6 +114,27 @@ final class McpSchemaCreateView {
       + "values the server will fill in, already resolved. For the full descriptor of any field "
       + "listed here, call neo_schema again with fields:[\"<name>\"].";
 
+  /**
+   * Appended to {@link #CREATE_HINT} when the entity is a child/line tab ({@code tabLevel > 0}),
+   * so the agent is told the one call that differs for a child create: pass {@code parentId}.
+   *
+   * <p>Without it, {@code neo_defaults(spec, entity)} on a child entity silently omits every field
+   * whose default expression reads from the parent record (the parent's warehouse for a storage
+   * bin, its price-list version, its running line number) — it does not error, the field is simply
+   * absent from {@code confirm}. Passing {@code parentId} is what resolves them. This is additive
+   * text only; the {@code required}/{@code optional} split above is unaffected — the parent FK
+   * itself does not appear there because {@code view:"create"} lists only fields the schema
+   * describes as belonging to this entity, and the parent FK is always required regardless.</p>
+   */
+  static final String CHILD_ENTITY_HINT_SUFFIX =
+      " This is a child/line entity: before calling neo_create, call neo_defaults with "
+      + "parentId set to the parent record's id — parent-dependent defaults (e.g. a storage bin "
+      + "scoped to the parent's warehouse, a price-list version, a line number) are resolved only "
+      + "when parentId is given; omitting it does not error, it just leaves those fields absent. "
+      + "Also send the parent foreign key itself among your neo_create fields (e.g. physInventory "
+      + "on inventoryLine, salesOrder on sales-order/lines) — it is required even though it is not "
+      + "listed above.";
+
   /** @return {@code true} when {@code view} requests the create-shaped projection. */
   static boolean isCreateView(String view) {
     return VIEW_CREATE.equalsIgnoreCase(view);
@@ -188,6 +209,19 @@ final class McpSchemaCreateView {
    */
   static JSONObject buildResponse(String specName, String entityName, JSONArray fields,
       Set<String> serverResolved) throws JSONException {
+    return buildResponse(specName, entityName, fields, serverResolved, false);
+  }
+
+  /**
+   * Same as {@link #buildResponse(String, String, JSONArray, Set)}, plus {@code isChildEntity} —
+   * whether {@code entityName} is a child/line tab ({@code tabLevel > 0}) — which appends
+   * {@link #CHILD_ENTITY_HINT_SUFFIX} to the emitted {@code hint} so the agent is told to pass
+   * {@code parentId} to {@code neo_defaults} before creating. Cheap to compute at the call site
+   * from the already-loaded {@code Tab} (see {@code McpToolRouter#handleSchema}), so it costs
+   * nothing extra here.
+   */
+  static JSONObject buildResponse(String specName, String entityName, JSONArray fields,
+      Set<String> serverResolved, boolean isChildEntity) throws JSONException {
     JSONArray required = new JSONArray();
     JSONArray optional = new JSONArray();
     Set<String> resolved = serverResolved == null ? Set.of() : serverResolved;
@@ -221,7 +255,7 @@ final class McpSchemaCreateView {
     response.put(KEY_OPTIONAL, optional);
     response.put("requiredCount", required.length());
     response.put("optionalCount", optional.length());
-    response.put("hint", CREATE_HINT);
+    response.put("hint", isChildEntity ? CREATE_HINT + CHILD_ENTITY_HINT_SUFFIX : CREATE_HINT);
     return response;
   }
 

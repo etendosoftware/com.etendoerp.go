@@ -571,7 +571,13 @@ public class ToolRegistry {
     props.put("spec", enumProp(McpConstants.LABEL_SPEC_NAME, specNames));
     props.put(McpConstants.PARAM_ENTITY, stringProp(McpConstants.LABEL_ENTITY_NAME_WITH_EXAMPLE));
     props.put(McpConstants.PARAM_PARENT_ID, stringProp(
-        "Optional parent record ID for child entities (e.g. order ID when getting line defaults)"));
+        "Parent record ID — REQUIRED for a child/line entity (e.g. the order ID when getting "
+            + "line defaults, or the inventory header ID when getting inventory-line defaults). "
+            + "Without it, fields whose default depends on the parent record (a storage bin scoped "
+            + "to the parent's warehouse, a price-list version, a running line number) are silently "
+            + "left out of the result rather than erroring — they simply do not appear, so a missing "
+            + "value here is easy to miss unless you know to expect it. Pass the parent's id "
+            + "whenever entity is not the spec's top-level entity."));
     props.put(McpConstants.PARAM_ASSET_ID, stringProp(
         "Optional asset ID for computing dynamic defaults that depend on a specific asset "
             + "(e.g. the amortization header name derived from the asset name and start date)"));
@@ -596,7 +602,11 @@ public class ToolRegistry {
             + "the starting point and only override the fields the user actually wants to set — "
             + "instead of asking the user for every value from scratch. neo_create will still "
             + "auto-fill any field you omit, but calling this first lets you see the full base "
-            + "dataset up front. Pass view:\"minimal\" (or \"grouped\") to collapse server-managed "
+            + "dataset up front. When entity is a child/line tab (not the spec's top-level "
+            + "entity), pass parentId with the parent record's id — omitting it does not resolve "
+            + "parent-dependent fields (a storage bin scoped to the parent's warehouse, a "
+            + "price-list version, a running line number); they are silently absent rather than "
+            + "erroring. Pass view:\"minimal\" (or \"grouped\") to collapse server-managed "
             + "compliance flags and focus on the fields you actually confirm. "
             + "Date values come back ISO-8601 ('YYYY-MM-DD', or 'YYYY-MM-DDTHH:MM:SS' for "
             + "datetime fields) and can be passed straight back to neo_create unchanged.",
