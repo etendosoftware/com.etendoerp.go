@@ -29,6 +29,7 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import java.lang.reflect.Field;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
@@ -42,6 +43,7 @@ import org.junit.Test;
 import org.mockito.ArgumentCaptor;
 import org.mockito.MockedStatic;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.financialmgmt.tax.TaxRate;
 
 import com.etendoerp.go.schemaforge.NeoResponse;
 import com.etendoerp.go.schemaforge.NeoSelectorService;
@@ -65,7 +67,15 @@ public class InvoiceLineTaxSifSelectorPolicyTest {
   private static final String WINDOW_SALES_INVOICE = "167";
   private static final String WINDOW_PURCHASE_INVOICE = "183";
   private static final String WINDOW_OTHER = "143";
-  private static final String TARGET_TAX_RATE = "FinancialMgmtTaxRate";
+  // Bound to the GENERATED DAL model's own entity name, NEVER a hardcoded literal.
+  // A literal here would silently mirror whatever the production constant says, making
+  // production and test mutually confirming instead of one verifying the other: that is
+  // exactly how ETP-4888 shipped with TAX_TARGET_ENTITY = "TaxRate" (the Java SIMPLE CLASS
+  // name) while the real DAL entity name is "FinancialMgmtTaxRate", leaving supports()
+  // permanently false and the whole policy dead in production with a fully green suite.
+  // org.openbravo.model.financialmgmt.tax.TaxRate is on the unit-test classpath, so this
+  // stays a pure unit test — no DB, no OBBaseTest, no ModelProvider bootstrap needed.
+  private static final String TARGET_TAX_RATE = TaxRate.ENTITY_NAME;
   private static final String TARGET_PRODUCT = "Product";
 
   private final InvoiceLineTaxSifSelectorPolicy policy = new InvoiceLineTaxSifSelectorPolicy();
@@ -83,6 +93,42 @@ public class InvoiceLineTaxSifSelectorPolicyTest {
 
   private static SelectorMeta metaFor(String entityName) {
     return new SelectorMeta(entityName, "name", null);
+  }
+
+  // ── The production constant itself vs. the generated DAL model ──────────
+
+  /**
+   * Pins {@code InvoiceLineTaxSifSelectorPolicy.TAX_TARGET_ENTITY} to the DAL entity name
+   * that {@code SelectorDescriptorResolver} actually puts in {@link SelectorMeta#entityName}
+   * at runtime (i.e. {@code ModelProvider.getEntityByTableName("C_Tax").getName()}, which the
+   * generated model exposes as {@link TaxRate#ENTITY_NAME}).
+   *
+   * <p>Every other test in this class exercises {@code supports()} through {@code metaFor()},
+   * so a wrong constant shows up only INDIRECTLY, as "supports() returned false" — which reads
+   * like an ordinary assertion failure and says nothing about why. This test fails LOUDLY and
+   * specifically instead, naming both values and what the drift costs.
+   *
+   * <p>ETP-4888 shipped with {@code TAX_TARGET_ENTITY = "TaxRate"} — the Java SIMPLE CLASS
+   * name, not the DAL entity name — so {@code supports()} was permanently false and this
+   * policy never ran once in production, for its entire life, with a fully green test suite.
+   */
+  @Test
+  public void productionTargetEntityConstantMatchesTheGeneratedDalModelEntityName() throws Exception {
+    Field field = InvoiceLineTaxSifSelectorPolicy.class.getDeclaredField("TAX_TARGET_ENTITY");
+    field.setAccessible(true);
+    String productionValue = (String) field.get(null);
+
+    assertEquals(
+        "InvoiceLineTaxSifSelectorPolicy.TAX_TARGET_ENTITY is \"" + productionValue
+            + "\" but the DAL entity name for C_Tax is \"" + TaxRate.ENTITY_NAME
+            + "\" (org.openbravo.model.financialmgmt.tax.TaxRate.ENTITY_NAME). "
+            + "SelectorDescriptorResolver fills SelectorMeta.entityName from "
+            + "ModelProvider.getEntityByTableName(\"C_Tax\").getName(), so any other value "
+            + "makes supports() permanently false and silently kills the whole policy in "
+            + "production — the invoice-lines Tax selector stops being enriched and the "
+            + "frontend's TBAI/Verifactu SIF-missing badges never light up. Beware the Java "
+            + "SIMPLE CLASS name \"TaxRate\": that was the original ETP-4888 bug.",
+        TaxRate.ENTITY_NAME, productionValue);
   }
 
   // ── supports() — window/entity/target-entity scoping (pure, no DB) ────────
