@@ -1,0 +1,51 @@
+name: Branch Merge Policy
+
+# Restricts which source branch a PR may come from, based on its target:
+#   -> main            only from develop
+#   -> develop         only from epic/*
+#   -> epic/*          from anywhere
+#   -> anything else   from anywhere (unrestricted)
+#
+# Self-contained (no external service) — intended to eventually replace the
+# equivalent rule in Git Police, alongside the local pre-push checks and the
+# validation agent.
+
+on:
+  pull_request:
+    types: [opened, reopened, edited, synchronize]
+
+jobs:
+  check-branch-policy:
+    name: Validate source branch for target
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate source branch is allowed for this target
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+        run: |
+          echo "PR: $HEAD_REF -> $BASE_REF"
+          case "$BASE_REF" in
+            main)
+              if [ "$HEAD_REF" != "develop" ]; then
+                echo "::error::'main' only accepts PRs from 'develop' (got '$HEAD_REF')."
+                exit 1
+              fi
+              ;;
+            develop)
+              case "$HEAD_REF" in
+                epic/*) ;;
+                *)
+                  echo "::error::'develop' only accepts PRs from 'epic/*' branches (got '$HEAD_REF')."
+                  exit 1
+                  ;;
+              esac
+              ;;
+            epic/*)
+              echo "'epic/*' accepts PRs from any branch — no restriction."
+              ;;
+            *)
+              echo "No source-branch restriction defined for target '$BASE_REF'."
+              ;;
+          esac
+          echo "OK — '$HEAD_REF' -> '$BASE_REF' is allowed."
