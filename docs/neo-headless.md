@@ -452,7 +452,139 @@ Classic processes return OBError results, translated to:
 
 Errors from either type return HTTP 400 with `"status": "error"`.
 
-### 4.7 Preview File Endpoint
+### 4.6a Attachments Endpoint (ETP-4315)
+
+A built-in endpoint over Etendo's real `Attachment`/`C_File` table, backing both the generic
+"Adjuntos" tab and, via the "main document" marker below, the sidebar/preview panel of every
+document window. Implemented in `NeoAttachmentsHelper.java`, routed from
+`NeoBuiltInEndpointHandler.java`.
+
+**Base path:** `/sws/neo/attachments`
+
+#### GET — List attachments
+
+```
+GET /sws/neo/attachments/{tableName}/{recordId}
+Authorization: Bearer {token}
+```
+
+`{tableName}` is the AD_Table physical name (case-insensitive, e.g. `C_Invoice`, `C_Order`,
+`M_InOut`). Returns `200 { "items": [...] }`, one entry per attachment
+(`id`, `name`, `size`, `dataType`, `description`, `uploadedAt`, `updatedAt`, `uploadedBy`).
+Excludes whichever attachment is currently marked as the record's "main" document (see below) —
+that one belongs to the sidebar/preview, not the generic list. Returns `400` if `tableName` or
+`recordId` is missing, `404` if `tableName` does not resolve to a known active table.
+
+#### GET — Fetch the "main" (sidebar/preview) attachment
+
+```
+GET /sws/neo/attachments/{tableName}/{recordId}/main
+Authorization: Bearer {token}
+```
+
+Returns `200` with the marked attachment's metadata, or `200 {}` if none is marked. At most one
+attachment can be "main" per `(tableName, recordId)` at any time — this is what guarantees the
+sidebar/tab and the preview panel always show the same file (the bug ETP-4315 fixed: previously
+the sidebar picked "the first attachment" with no way to know which one the preview meant).
+
+#### PATCH — Mark or unmark an attachment as "main"
+
+```
+PATCH /sws/neo/attachments/file/{attachmentId}/main
+Authorization: Bearer {token}
+Content-Type: application/json
+
+{ "isMain": true }
+```
+
+Marking (`isMain: true`) **deletes** any attachment previously marked for the same
+`(table, record)` pair, in the same transaction — enforced at the application level (delete-old-
+then-mark-new), not via a DB constraint, since the marker column has no generated DAL property.
+Unmarking (`isMain: false`) just clears the flag on the given attachment. Returns
+`200 { "id", "isMain" }`, or `404` if the attachment does not exist.
+
+#### POST — Upload (optionally marking as "main" in the same request)
+
+```
+POST /sws/neo/attachments/{tableName}/{recordId}?markAsMain=true
+Authorization: Bearer {token}
+Content-Type: multipart/form-data; boundary=...
+
+--...
+Content-Disposition: form-data; name="file"; filename="invoice.pdf"
+Content-Type: application/pdf
+
+<binary>
+--...--
+```
+
+Expects a single multipart part named `file`. Optional query parameter `tabId` overrides automatic
+tab resolution (useful when a table has multiple tabs). With `markAsMain=true`, the newly-created
+attachment is marked as the record's main document immediately after upload — deleting any
+previously-marked attachment, same as the PATCH above. Returns `201` with
+`{ "name", "message", "id"?, "isMain"? }` (the last two only present when `markAsMain=true`).
+
+#### GET — Download a single attachment
+
+```
+GET /sws/neo/attachments/file/{attachmentId}
+Authorization: Bearer {token}
+```
+
+Streams the file body directly (not wrapped in JSON) with `Content-Type` from the attachment's
+`dataType` and an RFC 5987 `Content-Disposition: attachment` header. Returns `404` if the
+attachment does not exist.
+
+#### GET — Download all attachments as a zip
+
+```
+GET /sws/neo/attachments/{tableName}/{recordId}?zip=true
+Authorization: Bearer {token}
+```
+
+Streams a zip of every attachment for the record, **excluding** whichever one is marked as main
+(it already has its own dedicated download button in the preview panel).
+
+#### DELETE — Remove an attachment
+
+```
+DELETE /sws/neo/attachments/file/{attachmentId}
+Authorization: Bearer {token}
+```
+
+Returns `204` on success, `404` if the attachment does not exist.
+
+#### PATCH — Update description
+
+```
+PATCH /sws/neo/attachments/file/{attachmentId}
+Content-Type: application/json
+
+{ "description": "Signed by customer on receipt" }
+```
+
+Updates `C_File.text`. Returns `200 { "id", "description" }`.
+
+#### Frontend integration
+
+`useMainAttachment` (`tools/app-shell/src/windows/custom/shared/useMainAttachment.js`, backed by
+`@/components/copilot/ocr/listAttachments.js`) wraps the "main" GET/PATCH/POST-with-markAsMain
+calls above, exposing the same public shape as the legacy `usePreviewAttachment` (see 4.7) so it
+drops into `GenericPreviewModal`'s `attachmentConfig` unchanged except for the selector flag
+`useMainAttachment: true` and `tableName` (physical table) replacing `specName`. As of 2026-08-18
+every window with a preview panel (sales/purchase invoice, sales/purchase order, sales quotation,
+goods receipt/shipment, return-to-vendor shipment, return material receipt) uses this path; the
+legacy hook remains wired as the unselected branch in `GenericPreviewModal` only until Phase 9 of
+`docs/plans/2026-08-14-etp-4315-attachment-preview-unification-plan.md` retires it.
+
+### 4.7 Preview File Endpoint — retired for preview panels, pending removal (ETP-4315 Phase 9)
+
+**As of 2026-08-18, no window's preview panel uses this endpoint anymore** — every one of them was
+migrated to the Attachments endpoint's "main" marker (4.6a) above, which fixes the sidebar/preview
+desync this endpoint could never guarantee (nothing tied a `ETGO_PREVIEW_FILE` row to a *specific*
+real attachment). This section is kept only until
+`docs/plans/2026-08-14-etp-4315-attachment-preview-unification-plan.md` Phase 9 deletes
+`NeoPreviewFileService.java`, this routing block, and the `ETGO_PREVIEW_FILE` table.
 
 A built-in endpoint for persisting document preview files. Files are stored per `(clientId, specName, recordId)` tuple in `ETGO_PREVIEW_FILE`.
 
@@ -516,16 +648,30 @@ GET /sws/neo/document-download/{token}
 
 This endpoint is link-token based because email recipients do not have the browser session that
 created the original preview `blob:` URL. The token is signed server-side and includes the email
-contract, document spec, record id, client id, send idempotency key, and expiration. The endpoint
-serves the cached `ETGO_PREVIEW_FILE` file only after validating the token signature and expiration.
+contract, document spec, record id, client id, send idempotency key, and expiration.
+
+**Resolution (as of ETP-4315 Phase 8, 2026-08-18):** `NeoDocumentDownloadService.handle()` no
+longer looks up `ETGO_PREVIEW_FILE`. After validating the token, it maps the token's `specName` to
+a physical table (the same 8-window map as `documentEmailSend.js`'s `WINDOW_ATTACHMENT_TABLE`) and
+resolves the attachment currently marked "main" for `(tableId, recordId)` via
+`NeoAttachmentsHelper.findMainAttachment`, then streams it through the same
+`AttachImplementationManager.download()` path `GET /sws/neo/attachments/file/{id}` uses. An extra
+`attachment.getClient()` check enforces the token's client scope, since the attachment lookup
+itself runs without a client filter under the servlet's existing admin-mode wrapping
+(`NeoServlet.handleDocumentDownload`, already in place before this change — no new admin-mode
+wrapping was needed). **Accepted behavior change:** a link sent before the document's marked
+attachment was replaced now 404s, instead of the old cache's risk of silently serving stale or
+mismatched content — the replaced attachment was hard-deleted server-side (4.6a's mark-as-main
+delete-old-then-mark-new semantics), so there is nothing left to serve.
+
 The send event remains audited by the transactional email service, but download authorization does
 not rely on in-memory audit state.
 
 #### Frontend integration
 
-The React hook `usePreviewAttachment` (`tools/app-shell/src/windows/custom/shared/usePreviewAttachment.js`) wraps all three methods. It is activated only when `storeCondition=true`; when false the hook is a no-op and nothing is fetched or stored.
+The React hook `useMainAttachment` (`tools/app-shell/src/windows/custom/shared/useMainAttachment.js`, see 4.6a) is what actually gets uploaded here — `documentEmailSend.js`'s `cacheDocumentPreviewFile()` uploads-and-marks through the same Attachments endpoint before the email send request, for the 8 windows in `WINDOW_ATTACHMENT_TABLE`. The legacy hook `usePreviewAttachment` (`tools/app-shell/src/windows/custom/shared/usePreviewAttachment.js`) wraps the retired endpoint in 4.7 and is no longer reachable for any window's preview panel; it remains wired as `GenericPreviewModal`'s unselected fallback branch only until Phase 9 removes it.
 
-`GenericPreviewModal` consumes `usePreviewAttachment` internally via its `attachmentConfig` prop and manages the left-panel state machine:
+`GenericPreviewModal` consumes whichever hook is selected via `attachmentConfig.useMainAttachment` and manages the left-panel state machine identically either way:
 
 | State | Left panel shown |
 |-------|-----------------|

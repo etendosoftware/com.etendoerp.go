@@ -78,10 +78,6 @@ class NeoBuiltInEndpointHandler {
       handleAttachmentsEndpoint(method, request, response);
       return true;
     }
-    if ("preview-file".equals(pathInfo.specName)) {
-      handlePreviewFileEndpoint(method, request, response);
-      return true;
-    }
     if ("fiscal303".equals(pathInfo.specName)) {
       fiscal303Handler.handle(pathInfo.entityName, method, request, response);
       return true;
@@ -167,40 +163,6 @@ class NeoBuiltInEndpointHandler {
     }
     servlet.sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
         "Filters endpoint only supports GET, PUT and DELETE");
-  }
-
-  private void handlePreviewFileEndpoint(String method, HttpServletRequest request,
-      HttpServletResponse response) throws IOException {
-    if (METHOD_GET.equals(method)) {
-      String specName = request.getParameter("specName");
-      String recordId = request.getParameter("recordId");
-      if (specName == null || recordId == null) {
-        servlet.sendError(response, HttpServletResponse.SC_BAD_REQUEST,
-            "Required parameters: specName, recordId");
-        return;
-      }
-      servlet.writeResponse(response, NeoPreviewFileService.getPreviewFile(specName, recordId));
-      return;
-    }
-    if (METHOD_POST.equals(method)) {
-      servlet.writeResponse(response,
-          NeoPreviewFileService.savePreviewFile(NeoRequestBodyParser.readRequestBody(request)));
-      return;
-    }
-    if (METHOD_DELETE.equals(method)) {
-      String specName = request.getParameter("specName");
-      String recordId = request.getParameter("recordId");
-      if (specName == null || recordId == null) {
-        servlet.sendError(response, HttpServletResponse.SC_BAD_REQUEST,
-            "Required parameters: specName, recordId");
-        return;
-      }
-      servlet.writeResponse(response,
-          NeoPreviewFileService.deletePreviewFile(specName, recordId));
-      return;
-    }
-    servlet.sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
-        "Preview file endpoint supports GET, POST and DELETE");
   }
 
   private void handleEmailContractsEndpoint(NeoServlet.NeoPathInfo pathInfo, String method,

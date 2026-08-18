@@ -246,9 +246,10 @@ public final class NeoAttachmentsHelper {
 
   /**
    * Finds the attachment marked as main for the given (tableId, recordId), or
-   * {@code null} if none is marked.
+   * {@code null} if none is marked. Package-private so {@link NeoDocumentDownloadService}
+   * can resolve the same "main" document for signed email download links (ETP-4315).
    */
-  private static Attachment findMainAttachment(String tableId, String recordId) {
+  static Attachment findMainAttachment(String tableId, String recordId) {
     Set<String> ids = findMainAttachmentIds(tableId, recordId);
     if (ids.isEmpty()) {
       return null;
