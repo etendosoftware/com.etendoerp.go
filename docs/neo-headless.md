@@ -1267,15 +1267,17 @@ Folder nodes are never filtered directly: their children are filtered first (pos
 
 ## 8c. Roles Overview (SFRolesOverview Webhook)
 
-`SFRolesOverview` (`GET /webhooks/SFRolesOverview`, or preferably `GET /sws/neo/rolesoverview` — §4.10) returns, for an admin/client-admin caller only, a cross-role aggregate for GOClient's 5 fixed roles (ETP-4513 — "Configuración > Roles"): each role's display name, raw `AD_Role.description`, count of distinct assigned users (`AD_User_Roles`), and the list of Etendo GO windows it can reach (`AD_Window_Access`, intersected with the windows Etendo GO actually exposes today). The webhook is authored in the same Webhooks module infrastructure as `SFListMenu`/`SFWindowAccessMap`, but the Go SPA (`RolesOverviewPage.jsx`) reaches it through the NEO pseudo-spec bridge (§4.10).
+`SFRolesOverview` (`GET /webhooks/SFRolesOverview`, or preferably `GET /sws/neo/rolesoverview` — §4.10) returns, for an admin/client-admin caller only, a cross-role aggregate for the CALLING TENANT's 5 fixed roles (ETP-4513 — "Configuración > Roles"): each role's display name, raw `AD_Role.description`, count of distinct assigned users, an explicit window count, and the list of Etendo GO windows it can reach (`AD_Window_Access`, intersected with the windows Etendo GO actually exposes today) — plus (ETP-4907) a full window × role permission `matrix`, grouped by top-level menu category. The webhook is authored in the same Webhooks module infrastructure as `SFListMenu`/`SFWindowAccessMap`, but the Go SPA (`RolesOverviewPage.jsx`) reaches it through the NEO pseudo-spec bridge (§4.10).
 
-Unlike `SFWindowAccessMap`, which answers "what can the CURRENT caller's own role reach", this endpoint is a cross-role aggregate: it always returns data for all 5 GOClient roles regardless of which one the caller happens to be using. That is exactly why it is gated to admin/client-admin callers only.
+Unlike `SFWindowAccessMap`, which answers "what can the CURRENT caller's own role reach", this endpoint is a cross-role aggregate: it always returns data for all 5 of the caller's OWN tenant's roles regardless of which one the caller happens to be using. That is exactly why it is gated to admin/client-admin callers only.
+
+> **Doc correction (ETP-4907):** this section previously described a `SFRolesOverview.GOCLIENT_ROLE_IDS` hardcoded to GOClient's own 5 per-client role ids. That was already stale — the webhook was fixed on 2026-07-27 (live RolesPresa bug) to resolve roles by name (`Finance`/`Sales`/`Purchasing`/`Inventory`) plus `is_client_admin='Y'`, scoped to `currentRole.getClient()`, with no hardcoded id list at all. This section now documents the actual current behavior, including the ETP-4907 system-template fallback below.
 
 **Endpoint:**
 
 | Pattern | Method | Description |
 |---------|--------|-------------|
-| `/webhooks/SFRolesOverview` (legacy) / `/sws/neo/rolesoverview` (preferred) | GET | Per-role aggregate (user count + reachable windows) for all 5 GOClient roles |
+| `/webhooks/SFRolesOverview` (legacy) / `/sws/neo/rolesoverview` (preferred) | GET | Per-role aggregate (user count, window count, reachable windows) for the caller's own 5 fixed roles, plus the full permission matrix |
 
 **Response shape:**
 
@@ -1286,43 +1288,67 @@ Unlike `SFWindowAccessMap`, which answers "what can the CURRENT caller's own rol
       "id": "9B8D736190724807AB256DC95F20EC5E",
       "name": "GOClient Admin",
       "rawDescription": "*** Please, do not edit this role. Use Copy Record instead ***",
+      "isClientAdmin": true,
+      "roleSource": "tenant",
       "userCount": 2,
+      "windowCount": 48,
       "windows": [
         { "id": "143", "name": "Sales Order", "tier": "full" },
         { "id": "259", "name": "Business Partner", "tier": "read-only" }
       ]
+    },
+    {
+      "id": "B88A34B5D1874F8685FA6F3C3A609412",
+      "name": "Finance",
+      "rawDescription": null,
+      "isClientAdmin": false,
+      "roleSource": "systemTemplate",
+      "userCount": 9,
+      "windowCount": 27,
+      "windows": [ "..." ]
     }
-  ]
+  ],
+  "matrix": {
+    "categories": [
+      {
+        "name": "Sales Management",
+        "windows": [
+          {
+            "id": "143",
+            "name": "Sales Order",
+            "access": {
+              "9B8D736190724807AB256DC95F20EC5E": "full",
+              "B88A34B5D1874F8685FA6F3C3A609412": "none",
+              "...": "read-only"
+            }
+          }
+        ]
+      }
+    ]
+  }
 }
 ```
 
+Field types: `id`/`name`/`rawDescription` (`string`, `rawDescription` may be `null`), `isClientAdmin` (`boolean`), `roleSource` (`string`, `"tenant"` or `"systemTemplate"`), `userCount`/`windowCount` (`integer`), `windows` (`array` of `{id, name, tier}` — `tier` is `"full"` or `"read-only"`, never `"none"` — sorted by name), `matrix.categories` (`array` of `{name, windows}` — sorted by category name), each matrix window's `access` (`object` keyed by role `id` from the `roles` array above, value `"full"` / `"read-only"` / `"none"`).
+
 **Access gate:** the current role is captured once, at the very top of `get(Map, Map)`, before the servlet enters `OBContext.setAdminMode()` — same convention as `SFListMenu`/`SFWindowAccessMap`: admin mode is only used to bypass row-level security on the underlying queries, never to decide access. A request with no role assigned, or a role that is not admin/client-admin (`NeoAccessHelper.isAdminOrClientAdmin(Role)`), gets `{"roles": []}` immediately, without querying a single `Role` — mirroring `SFListMenu`'s "deny silently, don't 403" convention for this webhook family.
 
-**`rawDescription` is NOT display copy.** `AD_Role.description` is boilerplate for 4 of the 5 GOClient roles today (`"*** Please, do not edit this role. Use Copy Record instead ***"`) — this backend has no i18n awareness, so it cannot produce user-facing copy itself. The field is returned only as a raw/debug fallback; the frontend (`RolesOverviewPage.jsx` in `etendo_schema_forge`) maps each of the 5 known role ids to its own curated, i18n-keyed description (`roleDescGoClientAdmin`, `roleDescFinance`, etc. in `en_US.json`/`es_ES.json`) instead of rendering this field.
+**`rawDescription` is NOT display copy.** `AD_Role.description` is boilerplate for 4 of the 5 GOClient roles today (`"*** Please, do not edit this role. Use Copy Record instead ***"`) — this backend has no i18n awareness, so it cannot produce user-facing copy itself. The field is returned only as a raw/debug fallback; the frontend (`RolesOverviewPage.jsx` in `etendo_schema_forge`) maps the 4 fixed role NAMES (and the `isClientAdmin` flag for the 5th) to curated, i18n-keyed copy instead of rendering this field. The same applies to `matrix.categories[].name`, which is the raw (English) top-level `AD_Menu` folder name for each window — the frontend is expected to map/translate it, not render it verbatim.
 
-**The 5 role IDs** are GOClient's fixed, well-known roles (seeded in ETP-3504 phases 1/2 — see `artifacts/user/decisions.json` in `etendo_schema_forge`'s `defaultRole.enumValues` for the same 5 ids/names) and are intentionally hardcoded in `SFRolesOverview.GOCLIENT_ROLE_IDS` rather than derived from a client/role-name heuristic:
+**Tenant-relative role resolution:** the client-admin role plus the 4 named roles (`Finance`/`Sales`/`Purchasing`/`Inventory`) are resolved via an `OBCriteria<Role>` scoped to `currentRole.getClient()` — never a hardcoded id list, and never GOClient's ids for a different tenant's caller. A fixed name with no ACTIVE match at the tenant level simply falls through to the system-template fallback below (or is omitted entirely if that also fails to resolve) rather than erroring.
 
-| Role | `AD_Role_ID` |
-|------|--------------|
-| GOClient Admin | `9B8D736190724807AB256DC95F20EC5E` |
-| Finance | `127AE77FE2994067B7FE6495FC21D51E` |
-| Sales | `2A159DF4F4B944A6AA903202AD35B545` |
-| Purchasing | `A826430F723E4C1B9A53EBB0746A98C0` |
-| Inventory | `55E05A4B43514A029D6FB6B8D94B49D4` |
+**System-template fallback (ETP-4907).** ETP-4852 introduced 4 single, system-owned (`AD_Client_ID = '0'`) template roles (`SystemRoleTemplates`, §8f) that a tenant's users now *compose* their access from (`UserRoleCompositionService`, §8d), rather than every tenant keeping its OWN active copy of the 4 fixed-name roles. A tenant that has migrated to this model — confirmed live for GOClient, 2026-08-18: its own `Finance`/`Sales`/`Purchasing`/`Inventory` rows are `IsActive = 'N'` — would otherwise silently drop from 5 role cards to 1 (just its client-admin role). For each of the 4 fixed names with no active tenant-scoped match, this webhook now falls back to the matching `SystemRoleTemplates.byName()` system role:
 
-A role id that fails to resolve (missing/renamed) is skipped defensively — the other 4 roles are still returned rather than failing the whole request.
+- **`windows`/`windowCount`** are resolved via the exact same `AD_Window_Access` query used for a real tenant role (it already disables client/organization filtering, so it works unchanged for a system-client role — no separate "system template window resolution" exists).
+- **`userCount`** is the number of this client's users whose PERSONAL role currently composes that template — from `UserRoleCompositionService#getAppliedTemplateRoleIdsForClient(String)` (called once per request, lazily, only if at least one fallback is needed) — **never** a direct `AD_User_Roles` count against the template itself, which would always read zero (users are never assigned a template role directly).
+- **`id`** is the SYSTEM template's own `AD_Role_ID` (client `'0'`) — the SAME id `SFSystemRoleTemplates` (§8f) returns for that role. Callers must not assume every card's `id` belongs to the caller's own client.
+- **`roleSource`** is `"systemTemplate"` (vs. `"tenant"` for a real tenant-owned role, including the client-admin card, which is never subject to this fallback — see the class javadoc's "Never touches the Admin role" convention shared with `UserRoleCompositionService`).
 
-**`windows` intersection:** a role's native `AD_Window_Access` rows are filtered down to windows Etendo GO actually exposes today — every distinct `AD_Window` backing an active, `SPEC_TYPE = 'W'` `ETGO_SF_SPEC` — so inherited/legacy grants to native-only Etendo windows don't leak into this "assigned windows" view. Each entry's `tier` resolves the same way as `SFWindowAccessMap`: `IsReadWrite = true` → `"full"`, `IsReadWrite = false` → `"read-only"`. The array is sorted by window name.
+Both paths can appear side-by-side within one response (a tenant may have migrated some fixed roles but not others) — this is intentional graceful coexistence, not a bug. **Admin is never affected**: it is always sourced from the tenant's own client-level `AD_Role`/`AD_User_Roles`/`AD_Window_Access` — confirmed live against GOClient, 2026-08-18: 48 windows, 2 users, matching the pre-ETP-4907 behavior exactly.
 
-> **⚠️ Known follow-up gap (ETP-4852, not fixed here):** `SFRolesOverview.GOCLIENT_ROLE_IDS` is
-> still hardcoded to GOClient's own 5 per-client role ids (the table above). Since ETP-4852
-> moved the 4 fixed roles to system-level templates and introduced per-user personal
-> composition roles (§8d), this webhook's "Configuración > Roles" aggregate no longer reflects
-> the real per-tenant picture for any client OTHER than GOClient (whose old per-client role
-> copies still exist, untouched, pending ETP-4877's migration) — a tenant onboarded after
-> ETP-4852 has no roles at all under these 5 hardcoded ids to aggregate. Reworking this webhook
-> to aggregate the system templates + each tenant's own personal roles is a natural follow-up,
-> out of scope for ETP-4852 itself (which only builds the mechanism, per the ticket).
+**`windows`/`matrix` window universe:** every distinct `AD_Window` backing an active, `SPEC_TYPE = 'W'` `ETGO_SF_SPEC` — i.e. every window Etendo GO actually exposes today — so inherited/legacy grants to native-only Etendo windows don't leak into either structure. Each `windows[]` entry's `tier` resolves the same way as `SFWindowAccessMap`: `IsReadWrite = true` → `"full"`, `IsReadWrite = false` → `"read-only"`; a role's `windows` array only lists windows it can actually reach (sorted by name).
+
+**`matrix`** additionally covers **every** Etendo GO window — including ones no role in the response can reach at all (`"none"`) — grouped by the window's top-level `AD_Menu` folder (tree `'10'`, the same tree `SFListMenu` walks) via one recursive-CTE native query; a window linked from two different top-level folders deterministically picks the alphabetically-first one, and a window with no resolvable folder falls back to the `"Other"` bucket. Categories are sorted by name; each category's windows are sorted by name.
 
 ---
 
@@ -1733,10 +1759,13 @@ what only makes sense for a tenant-scoped aggregate:
 ]}
 ```
 
-No `userCount` (there is no meaningful "assigned users" count for a system-level template — every
-tenant that composes from it gets its own personal role, per `UserRoleCompositionService`) and no
-client-admin row (`SystemRoleTemplates`'s own class javadoc explicitly excludes the client-level
-"Admin" role from the template set — there is nothing to represent at system level).
+No `userCount` — not because none can be computed (ETP-4907's `SFRolesOverview` system-template
+fallback, §8c, does compute one, via `UserRoleCompositionService#getAppliedTemplateRoleIdsForClient`
+counting how many of a CLIENT's users currently compose from a given template), but because THIS
+endpoint's own consumer — "which templates can I compose from" — has no use for a per-tenant
+aggregate; that is `SFRolesOverview`'s job, not this one's. And no client-admin row
+(`SystemRoleTemplates`'s own class javadoc explicitly excludes the client-level "Admin" role from
+the template set — there is nothing to represent at system level).
 
 **Access gate:** admin/client-admin only (`NeoAccessHelper.isAdminOrClientAdmin`), captured before
 any lookup — same convention as every sibling webhook in this family. No role, or a restricted
@@ -1768,7 +1797,7 @@ The module includes unit tests that run without a backend:
 | `NeoPreviewFileServiceTest` | ~250 | Validation (invalid JSON, blank fields), GET miss/hit, POST INSERT/UPDATE paths, DELETE miss/hit. All without a live DB via `MockedStatic<OBDal>` + `MockedStatic<OBContext>`. |
 | `SFListMenuTest` | -- | Tree building/pruning, flat search, role-based filtering (window/process/OBUIAPP-process nodes), no-role → empty menu, multi-level nesting. |
 | `SFWindowAccessMapTest` | -- | Role-based windowAccess resolution (full/read-only/absent), no-role → both maps empty, admin/client-admin bypass → full access to every active Etendo GO window + every capability true, `showAccountingFields` true/false/unset/missing-role, `isAdminOrClientAdmin` true on bypass / false for a restricted role. |
-| `SFRolesOverviewTest` | -- | Admin/client-admin access gate (no role, restricted role, System Administrator, client-admin), all 5 roles returned in `GOCLIENT_ROLE_IDS` order with id/name/rawDescription, missing/renamed role id skipped gracefully, distinct-user-count aggregation, GO-window intersection (native-only windows excluded), tier resolution (full/read-only), exception handling. Two defense-in-depth regression cases confirm the gate is genuinely `isAdminOrClientAdmin`, not "is this one of the 5 known `GOCLIENT_ROLE_IDS`": a caller authenticated AS one of those 5 roles (Finance) but not admin/client-admin is still denied (empty `roles`, zero `Role` lookups), and a role with zero active `AD_User_Roles` AND zero active `AD_Window_Access` rows degrades gracefully to `userCount: 0` + an empty `windows` array for all 5 roles rather than throwing or omitting the role. |
+| `SFRolesOverviewTest` | -- | Admin/client-admin access gate (no role, restricted role, System Administrator, client-admin); tenant-relative role resolution via a client-scoped `Role` criteria (not hardcoded ids), admin-first-then-fixed-name sort order, a tenant with fewer than 5 matching roles; distinct-user-count aggregation; GO-window intersection (native-only windows excluded); tier resolution (full/read-only); exception handling. Two defense-in-depth regression cases confirm the gate is genuinely `isAdminOrClientAdmin`, not "is this one of the tenant's 5 fixed roles": a caller authenticated AS one of those roles (Finance) but not admin/client-admin is still denied (empty `roles`, zero `Role` lookups), and a role with zero active `AD_User_Roles` AND zero active `AD_Window_Access` rows degrades gracefully to `userCount: 0` + an empty `windows` array for all 5 roles rather than throwing or omitting the role. **ETP-4907 additions:** missing tenant roles fall back to the system-level templates with composition-based `userCount` (`UserRoleCompositionService` constructed lazily, once, via `mockConstruction`); an active tenant role is never overridden by its template counterpart, and the composition service is never even constructed when unneeded; the `matrix` covers every GO window (including one no role can reach, resolving to `"none"`) grouped by category, and a window with no resolvable category falls back to the `"Other"` bucket. |
 | `TemplateRoleWindowAccessTest` (ETP-4878) | -- | The real ETP-4878 permission matrix in `TemplateRoleWindowAccess` (`src/com/etendoerp/go/roles/`), DB-free (12 tests): exactly the 4 non-Admin template roles present, exact grant counts per role (Sales 13 / Purchasing 11 / Finance 27 / Inventory 13, 64 total), Asientos manuales resolves to Simple G/L Journal and never to the classic G/L Journal window (`132`), Sales has no grant for Pago, "Categoría del producto" is read-only for Sales/Purchasing but full for Finance/Inventory, no role repeats the same `AD_Window_ID` twice, `byRoleId()` returns a fresh mutable map per call. QA (Sentinel) added 3 more: the 64 grants resolve to exactly 33 DISTINCT `AD_Window_ID`s (not just a raw count that would stay 64 even under duplication); all 8 window/role pairs from the old ETP-4852 2-window smoke test survive unchanged (same full access) in the new matrix, confirming `EnsureSystemRoleTemplatesScript#removeStaleWindowAccess`'s delete path is never actually exercised by that specific migration; and at least one window (e.g. Contactos, Pedido de venta) is granted at genuinely conflicting access levels across 2+ roles — the data-level root cause behind the ETP-4852 cross-template overlap bug fixed in `UserRoleCompositionService` (see §8d and `UserRoleCompositionServiceOverlapIntegrationTest`). |
 | `UserRoleCompositionServiceTest` | -- | Pure-Mockito unit test covering `assignTemplateRoles`'s input-validation guard clauses — the slice that fails before any persistence side effect: blank user id, `null` template id list, unknown user, unknown/inactive template id, a role that is not a template, the client-admin "Admin" role rejected even if somehow marked as a template, requested-id dedup happening before the per-id validation loop (verified via a single `Role` lookup despite 3 whitespace-noisy repeats of the same id), and the two `enforceCallerClientBoundary` regression cases from REVIEW cycle 1: a caller whose client differs from the target user's is rejected with a "different client" message, while the literal System Administrator role id (`"0"`) bypasses the check and reaches the (unrelated) template-validation error instead. **ETP-4906 additions:** `getAppliedTemplateRoleIds`'s read path — blank/unknown user id rejected the same way, a user with no `Default_Ad_Role_ID` yet returns an empty list without ever calling `createPersonalRole`, a reusable personal role with 2 active `AD_Role_Inheritance` rows returns both `InheritFrom` ids in `Seqno` order, and the read path enforces the exact same `enforceCallerClientBoundary` regression pair (cross-client rejected, System Administrator bypasses) as the write path. |
 | `UserRoleCompositionServiceIntegrationTest` | 446 | Real-DB, end-to-end proof (6 tests) of the full add/reconcile/retract lifecycle: a system-level (`AD_Client_ID = '0'`) template's `AD_Window_Access` propagates onto a per-tenant personal role purely via core's own `RoleInheritanceEventHandler`/`RoleInheritanceManager` (no hand-rolled copy in this module); removing a template on a later call retracts what it had propagated; re-running with the identical template set is a no-op (0 added, 0 removed); an empty template list on a user's FIRST-EVER composition call still creates the personal role and syncs `AD_User_Roles`/`Default_Ad_Role_ID` rather than leaving the user role-less; three occurrences of the same valid template id in one request collapse into exactly one `AD_Role_Inheritance` row instead of one per occurrence; and a recompose call mixing one still-valid template with one bogus id is rejected wholesale without mutating the inheritance/access an earlier, unrelated successful call had already applied. Extends `WeldBaseTest`, NOT plain `OBBaseTest` — role-inheritance propagation is driven by a Hibernate interceptor firing a CDI event that only `WeldBaseTest`'s Arquillian-booted container wires to an observer; under plain `OBBaseTest` the propagation silently never fires, which is a test-harness gap, not a bug in the service. |
