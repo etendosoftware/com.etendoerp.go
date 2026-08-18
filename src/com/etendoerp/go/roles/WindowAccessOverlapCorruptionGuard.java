@@ -1125,8 +1125,10 @@ public class WindowAccessOverlapCorruptionGuard extends EntityPersistenceEventOb
             : findActiveTemplateGrantingFullAccess(dependent, window, grantingTemplate);
 
     boolean finalLevel = grantingTemplateNewLevel || otherJustifyingTemplate != null;
-    Role winner = grantingTemplateNewLevel ? grantingTemplate
-        : (otherJustifyingTemplate != null ? otherJustifyingTemplate : grantingTemplate);
+    // otherJustifyingTemplate is only ever non-null when grantingTemplateNewLevel is false (see
+    // above), so this already covers both cases: grantingTemplate's own new value still suffices,
+    // or some other active template is the one that now justifies the final value.
+    Role winner = otherJustifyingTemplate != null ? otherJustifyingTemplate : grantingTemplate;
 
     boolean sourceCorrect = sameId(existingSource, winner);
     boolean levelCorrect = Boolean.valueOf(finalLevel).equals(existing.isEditableField());
