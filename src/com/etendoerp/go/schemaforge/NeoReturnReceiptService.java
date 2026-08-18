@@ -178,6 +178,31 @@ final class NeoReturnReceiptService {
     return qtyByLineId;
   }
 
+  /**
+   * Builds (without saving) the return line that mirrors {@code sourceLine} into
+   * {@code returnDoc}. Shared by every "import the lines of a source document into a return"
+   * flow: this service's own {@code createReturn}, {@code CreatePurchaseReturnHandler} and
+   * {@code ReturnShipmentUtils.buildAndSaveReturnLine}.
+   *
+   * <p>ETP-4863: this path persists straight through DAL and never reaches the line
+   * {@code NeoHandler}, so {@code NeoHandlerUtils.injectDefaultLocatorIfMissing} never runs on it.
+   * The source line's bin therefore used to be copied verbatim, and a return whose header sits in
+   * another warehouse than the source document ended up moving stock in the SOURCE's warehouse.
+   * {@code anchorLocatorToWarehouse} enforces the same header-warehouse guarantee the CRUD path
+   * already has: a source bin that already belongs to the return's warehouse is kept as-is, any
+   * other value is replaced by that warehouse's default (or, failing that, any active) bin.
+   *
+   * <p><b>Behaviour widened by ETP-4863:</b> the actual change from the intermediate
+   * {@code anchorLocatorToWarehouse}-based version (which guarded the write with
+   * {@code if (anchoredBin != null)}) is at the failure edge only — when the return header's
+   * warehouse has no active locator at all, the anchor now resolves to {@code null} and this
+   * method still calls {@code setStorageBin} with it, so the shell ends up with an explicit
+   * {@code null} bin and the document fails loudly at posting instead of silently keeping
+   * whatever the entity provider defaulted to. A source line with NO bin whose header warehouse
+   * DOES have an active locator was already anchored to that locator by the intermediate version
+   * too — {@code anchorLocatorToWarehouse} treats "absent" and "belongs elsewhere" identically, so
+   * that scenario is not new behaviour, it just happens to also be correct.
+   */
   static ShipmentInOutLine createReturnLineShell(ShipmentInOut returnDoc,
       ShipmentInOutLine sourceLine, long lineNo) {
     ShipmentInOutLine line = OBProvider.getInstance().get(ShipmentInOutLine.class);
@@ -187,9 +212,8 @@ final class NeoReturnReceiptService {
     line.setLineNo(lineNo);
     line.setProduct(sourceLine.getProduct());
     line.setUOM(sourceLine.getUOM());
-    if (sourceLine.getStorageBin() != null) {
-      line.setStorageBin(sourceLine.getStorageBin());
-    }
+    line.setStorageBin(NeoHandlerUtils.anchorLocatorToWarehouse(
+        sourceLine.getStorageBin(), returnDoc.getWarehouse(), log));
     line.setCanceledInoutLine(sourceLine);
     return line;
   }
