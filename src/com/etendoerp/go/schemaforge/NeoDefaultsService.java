@@ -12,11 +12,13 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 
+import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
+import org.hibernate.criterion.MatchMode;
 import org.hibernate.criterion.Restrictions;
 import org.jspecify.annotations.NonNull;
 import org.jspecify.annotations.Nullable;
@@ -36,8 +38,10 @@ import org.openbravo.model.ad.utility.Sequence;
 import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.service.db.DalConnectionProvider;
 
+import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFField;
 import com.etendoerp.go.schemaforge.data.SFSpec;
+import com.etendoerp.go.schemaforge.util.NeoTypeCoercionHelper;
 import com.etendoerp.sequences.SequenceUtils;
 
 /**
@@ -1309,6 +1313,211 @@ public class NeoDefaultsService {
           col.getDBColumnName(), e.getMessage());
       return false;
     }
+  }
+
+  // ── Background entity defaults (non-HTTP callers) ───────────────────────
+  // ETP-4888: header-builder methods that construct a document (Invoice,
+  // ShipmentInOut, ...) directly via OBProvider/manual setters — instead of
+  // going through NeoCrudHandler's HTTP "new record" path — never triggered
+  // this class's declared-derivation resolution. Any field whose value comes
+  // purely from a contract.json derivation (callout/fromConfig/lookup) and is
+  // never set by hand in the builder was silently left null (e.g. SII/SIF
+  // fields like etsgDateOperation, aeatsiiFechaRegCont). This section gives
+  // those background callers a non-HTTP entry point into the same resolution
+  // pass that /defaults already exposes over HTTP.
+
+  /**
+   * Resolves declared field derivations (contract.json defaults/callouts/lookups configured via
+   * ETGO_SF_FIELD) for a NEO-registered spec/entity and applies them onto a header entity built
+   * directly by a background Java caller — i.e. one that constructs its bean via
+   * {@code OBProvider}/manual setters instead of going through the normal NEO CRUD "new record"
+   * HTTP path (which calls {@link #resolveDefaults} automatically via {@code GET .../defaults}
+   * during form bootstrap). Without this, any field whose value comes purely from a declared
+   * derivation — never set by hand in the builder — is silently left {@code null}.
+   *
+   * <p>Only fields the caller left blank are touched: a property already carrying a non-blank
+   * value on {@code entity} is never overwritten, mirroring the "skip if already present" rule
+   * {@link #injectMandatoryDefaults} applies to the request body on the HTTP create path — so
+   * fields the builder set explicitly (order, business partner, currency, accounting date, etc.)
+   * always win over a generic derivation. Only primitive (non-FK) properties are set; an
+   * FK-typed derivation is logged and skipped rather than risked, since resolving the referenced
+   * bean safely is out of scope for this generic entry point.
+   *
+   * <p>Failures anywhere in this method (missing spec/entity, resolution error, coercion
+   * failure) are swallowed and logged — a background document-creation flow must never fail
+   * because an optional declared default could not be resolved.
+   *
+   * @param specName   NEO spec name (kebab-case, e.g. {@code "sales-invoice"})
+   * @param entityName NEO entity name within the spec (e.g. {@code "header"})
+   * @param entity     the already-populated header entity to enrich; a no-op if {@code null}
+   * @param parentId   optional id of the source document (order/shipment/receipt) this entity is
+   *                   being created from, used for {@code fromParent}-style derivations
+   */
+  public static void applyDeclaredDefaultsToBackgroundEntity(String specName, String entityName,
+      BaseOBObject entity, String parentId) {
+    if (entity == null || StringUtils.isBlank(specName) || StringUtils.isBlank(entityName)) {
+      return;
+    }
+    try {
+      JSONObject defaults = resolveBackgroundDefaults(specName, entityName, parentId);
+      if (defaults == null || defaults.length() == 0) {
+        return;
+      }
+      Entity dalEntity = entity.getEntity();
+      Iterator<String> keys = defaults.keys();
+      while (keys.hasNext()) {
+        String propName = keys.next();
+        if (propName.endsWith("$_identifier")) {
+          continue;
+        }
+        applyDeclaredDefaultIfMissing(entity, dalEntity, propName, defaults.opt(propName));
+      }
+    } catch (Exception e) {
+      log.error("Could not apply declared defaults for {}/{}: {}", specName, entityName,
+          e.getMessage(), e);
+    }
+  }
+
+  /**
+   * Looks up the SFSpec/SFEntity/AD_Tab for {@code specName}/{@code entityName} and delegates to
+   * {@link #resolveDefaults}, returning just the {@code defaults} JSON object (or {@code null}
+   * if the spec/entity cannot be resolved or the underlying call fails).
+   */
+  private static JSONObject resolveBackgroundDefaults(String specName, String entityName,
+      String parentId) throws JSONException {
+    SFSpec spec = NeoServletSupport.findSpec(specName);
+    if (spec == null) {
+      log.debug("No SFSpec found for '{}' — skipping background declared-default resolution",
+          specName);
+      return null;
+    }
+    SFEntity sfEntity = findBackgroundEntity(spec.getId(), entityName);
+    if (sfEntity == null) {
+      log.debug("No SFEntity '{}' found for spec '{}' — skipping background declared-default "
+          + "resolution", entityName, specName);
+      return null;
+    }
+    Tab adTab = sfEntity.getADTab();
+    NeoContext ctx = NeoContext.builder()
+        .specName(specName)
+        .entityName(entityName)
+        .adTab(adTab)
+        .sfEntity(sfEntity)
+        .obContext(OBContext.getOBContext())
+        .endpointType(NeoEndpointType.CRUD)
+        .build();
+
+    NeoResponse response = resolveDefaults(ctx, parentId);
+    if (response == null || response.getHttpStatus() != 200 || response.getBody() == null) {
+      return null;
+    }
+    return response.getBody().optJSONObject("defaults");
+  }
+
+  /**
+   * Finds an active, included {@link SFEntity} by parent spec ID and entity name. The same
+   * five-line criteria query is already duplicated across {@code NeoServlet#findEntity},
+   * {@code BatchService#findEntity} and other siblings (pre-existing pattern, not introduced
+   * here) — kept as a local private copy since this is the only non-HTTP caller of
+   * {@link #resolveDefaults} and consolidating all of those copies is out of scope for this fix.
+   */
+  private static SFEntity findBackgroundEntity(String specId, String entityName) {
+    OBCriteria<SFEntity> criteria = OBDal.getInstance().createCriteria(SFEntity.class);
+    criteria.add(Restrictions.eq(SFEntity.PROPERTY_ETGOSFSPEC + ".id", specId));
+    criteria.add(Restrictions.ilike(SFEntity.PROPERTY_NAME, entityName, MatchMode.EXACT));
+    criteria.add(Restrictions.eq(SFEntity.PROPERTY_ISACTIVE, true));
+    criteria.add(Restrictions.eq(SFEntity.PROPERTY_ISINCLUDED, true));
+    criteria.setMaxResults(1);
+    List<SFEntity> results = criteria.list();
+    return results.isEmpty() ? null : results.get(0);
+  }
+
+  /**
+   * Applies a single resolved declared-default value onto {@code entity}, unless the property is
+   * non-primitive (FK) or already carries a non-blank value. All failures are swallowed and
+   * logged at debug level — an unresolvable single field must never abort the rest of the pass.
+   */
+  private static void applyDeclaredDefaultIfMissing(BaseOBObject entity, Entity dalEntity,
+      String propName, Object rawValue) {
+    if (rawValue == null || dalEntity == null) {
+      return;
+    }
+    try {
+      Property prop = dalEntity.getProperty(propName);
+      if (prop == null) {
+        return;
+      }
+      if (!prop.isPrimitive()) {
+        // FK-typed derivations are intentionally not applied by this generic path — resolving
+        // the referenced bean safely is out of scope here. Logged so it's discoverable if a
+        // future SII/SIF (or other) field turns out to need it.
+        log.debug("Skipping non-primitive declared default for '{}' on background entity {}",
+            propName, entity.getEntityName());
+        return;
+      }
+      if (!isBlankValue(entity.get(propName))) {
+        return; // caller already set this field explicitly — never clobber it
+      }
+      Object coerced = coercePrimitiveDefault(prop, rawValue);
+      if (coerced != null) {
+        entity.set(propName, coerced);
+        log.debug("Applied declared default on background entity {}: {} = {}",
+            entity.getEntityName(), propName, coerced);
+      }
+    } catch (Exception e) {
+      log.debug("Could not apply declared default for property '{}': {}", propName,
+          e.getMessage());
+    }
+  }
+
+  private static boolean isBlankValue(Object current) {
+    if (current == null) {
+      return true;
+    }
+    return current instanceof String && ((String) current).isEmpty();
+  }
+
+  /**
+   * Coerces a raw declared-default value (as returned by {@link #resolveDefaults}, typically a
+   * {@code String}) to the Java type the given primitive DAL property expects.
+   *
+   * <p>Date properties are parsed with the same {@code yyyy-MM-dd} format used for the
+   * {@code @#Date@} session variable ({@link #DATE_FORMAT}) — {@link NeoTypeCoercionHelper}
+   * does not cover dates, since on the HTTP path date coercion is handled downstream by
+   * {@code DefaultJsonDataService}. Other numeric/boolean types delegate to
+   * {@link NeoTypeCoercionHelper#coerceField}, the same coercion the HTTP create path uses via
+   * {@code NeoTypeCoercionHelper.coerceTypes}.
+   */
+  private static Object coercePrimitiveDefault(Property prop, Object rawValue) {
+    Class<?> type = prop.getPrimitiveObjectType();
+    if (type == null) {
+      return null;
+    }
+    if (Date.class.isAssignableFrom(type)) {
+      return coerceDateDefault(prop, rawValue);
+    }
+    if (rawValue instanceof String) {
+      Map<String, Object> coerced = new HashMap<>();
+      NeoTypeCoercionHelper.coerceField(prop.getEntity(), prop.getName(), (String) rawValue,
+          coerced);
+      return coerced.getOrDefault(prop.getName(), rawValue);
+    }
+    return rawValue; // already correctly typed (e.g. Boolean from coerceBooleanDefault)
+  }
+
+  private static Object coerceDateDefault(Property prop, Object rawValue) {
+    if (rawValue instanceof Date) {
+      return rawValue;
+    }
+    if (rawValue instanceof String && !((String) rawValue).isEmpty()) {
+      try {
+        return new SimpleDateFormat(DATE_FORMAT).parse((String) rawValue);
+      } catch (java.text.ParseException e) {
+        log.debug("Could not parse date default '{}' for property {}: {}",
+            rawValue, prop.getName(), e.getMessage());
+      }
+    }
+    return null;
   }
 
 }

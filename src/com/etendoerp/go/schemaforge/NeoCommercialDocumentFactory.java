@@ -94,6 +94,12 @@ final class NeoCommercialDocumentFactory {
     return any.isEmpty() ? null : any.get(0);
   }
 
+  // ETP-4888: shipment/receipt headers (M_InOut) intentionally do NOT call
+  // NeoDefaultsService.applyDeclaredDefaultsToBackgroundEntity here. The confirmed SII/SIF
+  // gaps (etsgDateOperation, aeatsiiFechaRegCont) live on the sales-invoice/purchase-invoice
+  // header entities, not on the shipment/goods-receipt spec — M_InOut carries no SII fields.
+  // Only the invoice header builders below need the declared-derivation resolution pass.
+
   static ShipmentInOut createShipmentReceiptHeader(Order order, DocumentType docType,
       boolean salesTransaction, String movementType) {
     ShipmentInOut shipment = OBProvider.getInstance().get(ShipmentInOut.class);
@@ -191,6 +197,12 @@ final class NeoCommercialDocumentFactory {
     invoice.setGrandTotalAmount(BigDecimal.ZERO);
     invoice.setWithholdingamount(BigDecimal.ZERO);
     invoice.setDocumentNo("<*>");
+    // ETP-4888: this header is built directly via OBProvider, bypassing the normal NEO CRUD
+    // "new record" HTTP path that would otherwise resolve every declared contract.json
+    // derivation (e.g. SII/SIF fields like aeatsiiFechaRegCont). Fields already set above are
+    // never overwritten — only properties still blank are filled in.
+    NeoDefaultsService.applyDeclaredDefaultsToBackgroundEntity("purchase-invoice", "header",
+        invoice, receipt.getId());
     return invoice;
   }
 
@@ -221,6 +233,14 @@ final class NeoCommercialDocumentFactory {
     // Carry over the header-level total discount percentage so TotalDiscountService
     // can materialize the matching ETGO_DTO discount line on the new invoice.
     invoice.setEtgoTotalDiscount(order.getEtgoTotalDiscount());
+    // ETP-4888: this header is built directly via OBProvider, bypassing the normal NEO CRUD
+    // "new record" HTTP path that would otherwise resolve every declared contract.json
+    // derivation (e.g. SII/SIF fields like etsgDateOperation/aeatsiiFechaRegCont). Fields
+    // already set above are never overwritten — only properties still blank are filled in.
+    // Used by both the AR (sales-invoice) and AP (purchase-invoice) order-to-invoice paths.
+    String invoiceSpecName = salesTransaction ? "sales-invoice" : "purchase-invoice";
+    NeoDefaultsService.applyDeclaredDefaultsToBackgroundEntity(invoiceSpecName, "header",
+        invoice, order.getId());
     return invoice;
   }
 }
