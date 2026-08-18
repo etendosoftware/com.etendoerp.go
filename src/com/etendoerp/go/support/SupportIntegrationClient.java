@@ -68,7 +68,7 @@ final class SupportIntegrationClient {
    * turn set {@code pending_escalation=confirm} — i.e. ValerIA just offered to escalate to a
    * human. Persisted as part of the message text; the frontend strips it before rendering and
    * shows a one-click "talk to a human" button on that message instead. */
-  static final String SUGGESTS_ESCALATION_MARKER = "​##SUGGESTS_ESCALATION##";
+  static final String SUGGESTS_ESCALATION_MARKER = "\u200B##SUGGESTS_ESCALATION##";
 
   private static final HttpClient HTTP_CLIENT = HttpClient.newBuilder()
       .connectTimeout(Duration.ofSeconds(10))
