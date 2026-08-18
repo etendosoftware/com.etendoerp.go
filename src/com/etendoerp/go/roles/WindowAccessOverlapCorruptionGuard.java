@@ -426,6 +426,25 @@ import org.openbravo.model.ad.ui.Window;
  * boolean, Role)} already uses for the sixth trigger, rather than deleted, so the dependent's row
  * is guaranteed to survive regardless of what core's own (possibly-blind) propagation does
  * afterward.
+ *
+ * <p><b>[BUG-2] The seventh trigger's OWN fix had a most-permissive-wins gap of its own, found
+ * by QA's final coverage pass (ETP-4906, 2026-08-18).</b> {@link #repointIfAlreadySourcedFromTemplate(
+ * Role, Window, Role, WindowAccess)} — the B7 fix above — only ever compared the dependent's
+ * existing row against the ONE template whose own row just changed, then copied that template's
+ * new value onto the row directly. It never surveyed whether some OTHER template {@code
+ * dependent} still actively inherits from also grants {@code window} full access, unlike the
+ * ADD-path ({@link #widenInheritedAccessLevelIfNeeded(EntityNewEvent, WindowAccess)}) and
+ * REMOVE-path ({@link #collectWindowGrantors(List)}) triggers, which both already re-derive a
+ * window's level from the FULL set of currently active grantors before writing anything.
+ * Empirically reproduced live (QA's throwaway JUnit probe, first attempt, no flakiness): a
+ * dependent inheriting FULL access to the same window from two templates A and B, both actively
+ * granting it — downgrading B's own access via a routine Etendo Classic admin edit dragged the
+ * dependent's row down to read-only too, even though A still actively granted it full. The fix:
+ * {@link #repointIfAlreadySourcedFromTemplate(Role, Window, Role, WindowAccess)} now surveys
+ * every OTHER actively-inherited template via {@link #findActiveTemplateGrantingFullAccess(Role,
+ * Window, Role)} before applying anything, and repoints {@code InheritedFrom} to whichever
+ * template actually justifies the final (most-permissive) value — see that method's own javadoc
+ * for the full before/after.
  */
 public class WindowAccessOverlapCorruptionGuard extends EntityPersistenceEventObserver {
 
@@ -717,9 +736,31 @@ public class WindowAccessOverlapCorruptionGuard extends EntityPersistenceEventOb
    * SAME tie-break core itself uses means this method's choice of "the" justifying template stays
    * consistent with whatever core would independently re-derive if the row were deleted and
    * recreated from scratch — not a novel rule invented for this method.
+   *
+   * <p>Also reused by {@link #repointIfAlreadySourcedFromTemplate(Role, Window, Role,
+   * WindowAccess)} (the BUG-2 fix, ETP-4906 QA final coverage pass, 2026-08-18) via the {@code
+   * excludedTemplate} overload below, so the {@code onUpdate}/{@code UPDATED_GRANT} trigger
+   * surveys every OTHER actively-inherited template before applying a downgrade — the same
+   * most-permissive-wins pattern this method already gives the ADD-path trigger.
    */
   private Role findActiveTemplateGrantingFullAccess(Role dependent, Window window) {
+    return findActiveTemplateGrantingFullAccess(dependent, window, null);
+  }
+
+  /**
+   * Overload of {@link #findActiveTemplateGrantingFullAccess(Role, Window)} that skips one
+   * specific template — used by {@link #repointIfAlreadySourcedFromTemplate(Role, Window, Role,
+   * WindowAccess)} to survey every OTHER actively-inherited template ({@code excludedTemplate} is
+   * the one whose own row just changed and is being handled separately, from the caller's
+   * already-updated in-memory value). Same SeqNo-descending tie-break as the no-exclusion
+   * overload — see that method's own javadoc.
+   */
+  private Role findActiveTemplateGrantingFullAccess(Role dependent, Window window,
+      Role excludedTemplate) {
     for (Role template : findActiveTemplatesFor(dependent, null)) {
+      if (excludedTemplate != null && sameId(template, excludedTemplate)) {
+        continue;
+      }
       WindowAccess templateAccess = findActiveWindowAccess(template, window);
       if (templateAccess != null && Boolean.TRUE.equals(templateAccess.isEditableField())) {
         return template;
@@ -1037,6 +1078,28 @@ public class WindowAccessOverlapCorruptionGuard extends EntityPersistenceEventOb
    * ever matches a dependent's row already sourced from the SAME template whose grant just
    * changed, so it would not have acted on this row either — nothing to prevent, nothing to
    * correct.
+   *
+   * <p><b>[BUG-2 fix, ETP-4906 QA final coverage pass, 2026-08-18] Never blindly trusts {@code
+   * grantingTemplate}'s new value in isolation.</b> The original version of this method copied
+   * {@code templateAccess}'s new {@code editableField} onto the dependent's row unconditionally
+   * whenever the row was sourced from {@code grantingTemplate} — silently violating
+   * most-permissive-wins whenever {@code dependent} ALSO actively inherits from a DIFFERENT
+   * template that still grants {@code window} full access: downgrading {@code grantingTemplate}'s
+   * own access (a routine Etendo Classic admin action) would drag the dependent's row down too,
+   * even though the other template still justified full access. Empirically reproduced live (QA's
+   * throwaway probe, see the plan doc's "QA Findings — Final Coverage Pass" section) — first
+   * attempt, no flakiness. Fixed by surveying every OTHER actively-inherited template via {@link
+   * #findActiveTemplateGrantingFullAccess(Role, Window, Role)} BEFORE applying anything — the
+   * exact same most-permissive-wins survey {@link #widenInheritedAccessLevelIfNeeded(EntityNewEvent,
+   * WindowAccess)} (ADD path) and {@link #collectWindowGrantors(List)} (REMOVE path) already run,
+   * just applied to the one trigger that skipped it. The final level is the MAX of {@code
+   * grantingTemplate}'s own new value and every other active grantor's current value; {@code
+   * InheritedFrom} is repointed to whichever template actually justifies that final value —
+   * {@code grantingTemplate} itself when its own new value already suffices, otherwise the
+   * OTHER still-active full grantor — mirroring {@code widenInheritedAccessLevelIfNeeded}'s own
+   * "repoint to whoever actually justifies the value" rule so a LATER removal of either template
+   * correctly re-triggers re-derivation instead of leaving the row pointed at a template that no
+   * longer backs its own value.
    */
   private void repointIfAlreadySourcedFromTemplate(Role dependent, Window window,
       Role grantingTemplate, WindowAccess templateAccess) {
@@ -1052,12 +1115,26 @@ public class WindowAccessOverlapCorruptionGuard extends EntityPersistenceEventOb
       // see this method's own javadoc.
       return;
     }
-    boolean newLevel = Boolean.TRUE.equals(templateAccess.isEditableField());
-    if (Boolean.valueOf(newLevel).equals(existing.isEditableField())) {
-      // Already matches the template's new value — nothing to correct.
+    // grantingTemplate's own NEW value is read directly from the caller's already-updated
+    // (pre-flush, in-memory) WindowAccess entity, not re-queried — see this method's own javadoc.
+    boolean grantingTemplateNewLevel = Boolean.TRUE.equals(templateAccess.isEditableField());
+    // Survey every OTHER actively-inherited template before trusting grantingTemplate alone —
+    // the BUG-2 fix. excludedTemplate=grantingTemplate: its own value is already known above.
+    Role otherJustifyingTemplate =
+        grantingTemplateNewLevel ? null
+            : findActiveTemplateGrantingFullAccess(dependent, window, grantingTemplate);
+
+    boolean finalLevel = grantingTemplateNewLevel || otherJustifyingTemplate != null;
+    Role winner = grantingTemplateNewLevel ? grantingTemplate
+        : (otherJustifyingTemplate != null ? otherJustifyingTemplate : grantingTemplate);
+
+    boolean sourceCorrect = sameId(existingSource, winner);
+    boolean levelCorrect = Boolean.valueOf(finalLevel).equals(existing.isEditableField());
+    if (sourceCorrect && levelCorrect) {
+      // Already matches the correctly-surveyed value/source — nothing to correct.
       return;
     }
-    repointInPlace(existing, dependent, window, grantingTemplate, newLevel, existingSource);
+    repointInPlace(existing, dependent, window, winner, finalLevel, existingSource);
   }
 
   /**

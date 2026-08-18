@@ -840,6 +840,220 @@ public class UserRoleCompositionServiceOverlapIntegrationTest extends WeldBaseTe
   }
 
   /**
+   * [BUG-2 regression, ETP-4906 QA final coverage pass, 2026-08-18] The permanent, committed
+   * version of QA's own throwaway reproduction probe. Before the fix, {@code
+   * repointIfAlreadySourcedFromTemplate} (the B7 trigger above) copied the just-edited template's
+   * new value onto the dependent's row WITHOUT checking whether some OTHER actively-inherited
+   * template still justified the OLD (more permissive) value — silently violating
+   * most-permissive-wins. Mirrors {@link
+   * #testUpdatingTemplatesOwnAccessLevelNeverDeletesAnAlreadyCorrectlySourcedDependentRow()}'s own
+   * structure exactly, just with a SECOND overlapping template in play throughout (that test used
+   * exactly one, which is precisely the coverage gap QA's pass found).
+   */
+  @Test
+  public void testDowngradingOneOfTwoOverlappingTemplatesNeverDowngradesDependentWhenTheOtherStillGrantsFullAccess()
+      throws Exception {
+    setTestUserContext();
+    OBContext.setAdminMode(true);
+    try {
+      Window sharedWindow = OBDal.getInstance().get(Window.class, UNUSED_WINDOW_ID);
+      assertNotNull(sharedWindow);
+
+      Role templateA = createThrowawaySystemTemplateRole();
+      Role templateB = createThrowawaySystemTemplateRole();
+      grantWindowAccess(templateA, sharedWindow, false); // full
+      grantWindowAccess(templateB, sharedWindow, false); // full
+      OBDal.getInstance().flush();
+
+      User user = OBDal.getInstance().get(User.class, TEST_USER_ID);
+      assertNotNull(user);
+
+      // Both templates active, both granting full — templateB added SECOND (higher SeqNo), so
+      // core's own tie-break sources the bystander's row from templateB (mirrors the class
+      // javadoc's own documented SeqNo-descending tie-break).
+      Role bystanderRole = createBystanderRole(user);
+      addInheritance(bystanderRole, templateA, 10L);
+      addInheritance(bystanderRole, templateB, 20L);
+
+      WindowAccess beforeUpdate = findWindowAccess(bystanderRole, sharedWindow);
+      assertNotNull("Sanity: the dependent must have inherited full access from the overlapping "
+          + "templates before this test's own UPDATE trigger runs", beforeUpdate);
+      assertTrue("Sanity: the dependent starts at full access",
+          Boolean.TRUE.equals(beforeUpdate.isEditableField()));
+      assertEquals("Sanity: the row is sourced from templateB (the higher-SeqNo grantor) — the "
+          + "exact precondition for repointIfAlreadySourcedFromTemplate to fire below",
+          templateB.getId(),
+          beforeUpdate.getInheritedFrom() != null ? beforeUpdate.getInheritedFrom().getId()
+              : null);
+
+      // THE BUG-2 TRIGGER: downgrade templateB's OWN access level — a routine Etendo Classic
+      // admin edit — while templateA is STILL actively inherited and STILL grants this exact
+      // window full access.
+      WindowAccess templateBAccess = findWindowAccess(templateB, sharedWindow);
+      assertNotNull(templateBAccess);
+      updateWindowAccessLevel(templateBAccess, true); // downgrade B to read-only
+
+      Role stillActiveTemplateA = OBDal.getInstance().get(Role.class, templateA.getId());
+      WindowAccess templateAAccessAfter = findWindowAccess(stillActiveTemplateA, sharedWindow);
+      assertNotNull("Direct confirmation templateA is still active and still grants full access "
+          + "at the moment of the assertion below", templateAAccessAfter);
+      assertTrue(Boolean.TRUE.equals(templateAAccessAfter.isEditableField()));
+
+      WindowAccess afterUpdate = findWindowAccess(bystanderRole, sharedWindow);
+      assertNotNull("The dependent's row must survive the downgrade", afterUpdate);
+      assertTrue("MOST-PERMISSIVE-WINS (BUG-2 fix): the dependent must STAY at full access — "
+          + "templateA still actively grants this window full access, even though templateB "
+          + "(the one just downgraded) no longer does",
+          Boolean.TRUE.equals(afterUpdate.isEditableField()));
+      assertEquals("InheritedFrom must repoint to the template that actually still justifies "
+          + "full access (templateA), not stay pointed at templateB whose own new value no "
+          + "longer backs it",
+          templateA.getId(),
+          afterUpdate.getInheritedFrom() != null ? afterUpdate.getInheritedFrom().getId() : null);
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  /**
+   * [GAP-1, ETP-4906 QA final coverage pass, 2026-08-18] Every test in this file before this one
+   * used exactly ONE shared window per scenario — real system templates grant 27/13 windows each,
+   * and a single {@code RoleInheritance} add fans out into one {@code guardNewInheritance} call
+   * covering EVERY window the template grants, in the SAME method invocation. This test proves
+   * that fan-out resolves each window's most-permissive-wins verdict independently and correctly,
+   * not just the first one encountered.
+   */
+  @Test
+  public void testSingleInheritanceEventAffectingMultipleWindowsResolvesEachWindowIndependently()
+      throws Exception {
+    setTestUserContext();
+    OBContext.setAdminMode(true);
+    try {
+      Window windowOne = OBDal.getInstance().get(Window.class, UNUSED_WINDOW_ID);
+      Window windowTwo = OBDal.getInstance().get(Window.class, FINANCE_ONLY_WINDOW_ID);
+      Window windowThree = OBDal.getInstance().get(Window.class, SALES_ONLY_WINDOW_ID);
+      assertNotNull(windowOne);
+      assertNotNull(windowTwo);
+      assertNotNull(windowThree);
+      List<Window> windows = Arrays.asList(windowOne, windowTwo, windowThree);
+
+      Role templateA = createThrowawaySystemTemplateRole();
+      Role templateB = createThrowawaySystemTemplateRole();
+
+      // templateA grants all 3 windows FULL; templateB grants all 3 windows READ-ONLY.
+      for (Window window : windows) {
+        grantWindowAccess(templateA, window, false);
+      }
+      OBDal.getInstance().flush();
+      for (Window window : windows) {
+        grantWindowAccess(templateB, window, true);
+      }
+      OBDal.getInstance().flush();
+
+      User user = OBDal.getInstance().get(User.class, TEST_USER_ID);
+      assertNotNull(user);
+
+      Role bystanderRole = createBystanderRole(user);
+      addInheritance(bystanderRole, templateA, 10L);
+
+      for (Window window : windows) {
+        WindowAccess afterA = findWindowAccess(bystanderRole, window);
+        assertNotNull("Sanity: templateA alone must propagate window " + window.getId(), afterA);
+        assertTrue("Sanity: templateA alone grants full access on window " + window.getId(),
+            Boolean.TRUE.equals(afterA.isEditableField()));
+      }
+
+      // THE GAP-1 TRIGGER: a SINGLE RoleInheritance ADD event for templateB, which itself grants
+      // ALL 3 windows read-only — guardNewInheritance fans out over every one of templateB's
+      // grants within the SAME method call/flush.
+      addInheritance(bystanderRole, templateB, 20L);
+
+      for (Window window : windows) {
+        WindowAccess afterB = findWindowAccess(bystanderRole, window);
+        assertNotNull("Window " + window.getId() + " must survive gaining the second template",
+            afterB);
+        assertTrue("MOST-PERMISSIVE-WINS must hold independently for EVERY window affected by "
+            + "this single inheritance event, not just the first one — window " + window.getId()
+            + " must stay full (templateA still grants it) even though templateB (just added) "
+            + "only grants read-only",
+            Boolean.TRUE.equals(afterB.isEditableField()));
+      }
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  /**
+   * [GAP-2, ETP-4906 QA final coverage pass, 2026-08-18] Every {@code flush()} call in this file
+   * before this one immediately follows exactly ONE guard-relevant mutation. This test batches
+   * TWO guard-triggering template updates into the SAME flush — the same failure class
+   * (Hibernate flush-loop reentrancy, {@code Interceptor#onFlushDirty} firing from inside
+   * {@code AbstractFlushingEventListener#flushEntities}'s own entity-walking loop) that produced
+   * B7's own {@code session.evict()} bug, fixed via {@code OBDal.refresh()} — see {@link
+   * #repointInPlace(WindowAccess, Role, Window, Role, boolean, Role)}'s own javadoc. Asserts both
+   * corrections land correctly with no Hibernate collection-tracking exception.
+   */
+  @Test
+  public void testTwoGuardTriggeringTemplateUpdatesInsideASingleFlushDoNotCauseHibernateReentrancy()
+      throws Exception {
+    setTestUserContext();
+    OBContext.setAdminMode(true);
+    try {
+      Window sharedWindow = OBDal.getInstance().get(Window.class, UNUSED_WINDOW_ID);
+      assertNotNull(sharedWindow);
+
+      Role templateA = createThrowawaySystemTemplateRole();
+      Role templateB = createThrowawaySystemTemplateRole();
+      grantWindowAccess(templateA, sharedWindow, false); // full
+      grantWindowAccess(templateB, sharedWindow, false); // full
+      OBDal.getInstance().flush();
+
+      User user = OBDal.getInstance().get(User.class, TEST_USER_ID);
+      assertNotNull(user);
+
+      Role bystanderRole = createBystanderRole(user);
+      addInheritance(bystanderRole, templateA, 10L);
+      addInheritance(bystanderRole, templateB, 20L);
+
+      WindowAccess beforeUpdate = findWindowAccess(bystanderRole, sharedWindow);
+      assertNotNull(beforeUpdate);
+      assertTrue("Sanity: both templates start full",
+          Boolean.TRUE.equals(beforeUpdate.isEditableField()));
+
+      // THE GAP-2 TRIGGER: downgrade BOTH templates' own access rows in the SAME transaction
+      // BEFORE a single shared flush() — 2 onUpdate/guard-triggering mutations reaching this
+      // class from WITHIN the SAME Hibernate flushEntities loop.
+      OBContext.setAdminMode();
+      try {
+        WindowAccess templateAAccess = findWindowAccess(templateA, sharedWindow);
+        WindowAccess templateBAccess = findWindowAccess(templateB, sharedWindow);
+        assertNotNull(templateAAccess);
+        assertNotNull(templateBAccess);
+        templateAAccess.setEditableField(false);
+        templateBAccess.setEditableField(false);
+        OBDal.getInstance().save(templateAAccess);
+        OBDal.getInstance().save(templateBAccess);
+        OBDal.getInstance().flush(); // single shared flush for BOTH mutations
+      } finally {
+        OBContext.restorePreviousMode();
+      }
+
+      WindowAccess afterUpdate = findWindowAccess(bystanderRole, sharedWindow);
+      assertNotNull("The dependent's row must survive 2 simultaneous guard-triggering template "
+          + "updates within the same flush with no Hibernate reentrancy exception", afterUpdate);
+      assertEquals("client must always match the DEPENDENT role's own",
+          bystanderRole.getClient().getId(), afterUpdate.getClient().getId());
+      assertEquals("organization must always match the DEPENDENT role's own",
+          bystanderRole.getOrganization().getId(), afterUpdate.getOrganization().getId());
+      assertFalse("Both overlapping templates were downgraded to read-only in the same flush — "
+          + "the dependent's row must end up read-only too, with no leftover full access",
+          Boolean.TRUE.equals(afterUpdate.isEditableField()));
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  /**
    * Throwaway system-client ({@code AD_Client_ID = '0'}) template role — mirrors {@code
    * UserRoleCompositionServiceIntegrationTest#createSystemTemplateRole} exactly (same fixture-only
    * no-arg {@code OBContext.setAdminMode()} bypass rationale: system client {@code '0'} rows are
