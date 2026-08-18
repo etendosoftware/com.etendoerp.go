@@ -1108,12 +1108,12 @@ public class CreateDraftInvoiceHandlerTest {
         public void ensureLineGrossAmounts(Invoice invoice) {
           ensuredGrossInvoice = invoice;
         }
-      };
-    }
 
-    @Override
-    protected void copyLineDiscountsFromOrder(Invoice invoice) {
-      copiedDiscountsInvoice = invoice;
+        @Override
+        public void copyLineDiscountsFromOrder(Invoice invoice) {
+          copiedDiscountsInvoice = invoice;
+        }
+      };
     }
   }
 
@@ -2087,48 +2087,10 @@ public class CreateDraftInvoiceHandlerTest {
     }
   }
 
-  @Test
-  public void testCopyLineDiscountsFromOrderCopiesOnlyMissingInvoiceDiscounts() {
-    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
-      OBDal dal = mock(OBDal.class);
-      obDalMock.when(OBDal::getInstance).thenReturn(dal);
-
-      OrderLine discountedOrderLine = mock(OrderLine.class);
-      when(discountedOrderLine.getDiscount()).thenReturn(new BigDecimal("10"));
-
-      InvoiceLine emptyInvoiceLine = mock(InvoiceLine.class);
-      when(emptyInvoiceLine.getSalesOrderLine()).thenReturn(discountedOrderLine);
-      when(emptyInvoiceLine.getEtgoDiscount()).thenReturn(null);
-
-      OrderLine zeroDiscountOrderLine = mock(OrderLine.class);
-      when(zeroDiscountOrderLine.getDiscount()).thenReturn(BigDecimal.ZERO);
-
-      InvoiceLine zeroDiscountInvoiceLine = mock(InvoiceLine.class);
-      when(zeroDiscountInvoiceLine.getSalesOrderLine()).thenReturn(zeroDiscountOrderLine);
-      when(zeroDiscountInvoiceLine.getEtgoDiscount()).thenReturn(null);
-
-      OrderLine alreadyCopiedOrderLine = mock(OrderLine.class);
-      when(alreadyCopiedOrderLine.getDiscount()).thenReturn(new BigDecimal("7"));
-
-      InvoiceLine existingDiscountInvoiceLine = mock(InvoiceLine.class);
-      when(existingDiscountInvoiceLine.getSalesOrderLine()).thenReturn(alreadyCopiedOrderLine);
-      when(existingDiscountInvoiceLine.getEtgoDiscount()).thenReturn(new BigDecimal("3"));
-
-      Invoice invoice = mock(Invoice.class);
-      when(invoice.getInvoiceLineList()).thenReturn(Arrays.asList(
-          emptyInvoiceLine,
-          zeroDiscountInvoiceLine,
-          existingDiscountInvoiceLine));
-
-      new CreateDraftInvoiceHandler().copyLineDiscountsFromOrder(invoice);
-
-      verify(emptyInvoiceLine).setEtgoDiscount(new BigDecimal("10"));
-      verify(dal).save(emptyInvoiceLine);
-      verify(zeroDiscountInvoiceLine, never()).setEtgoDiscount(any(BigDecimal.class));
-      verify(existingDiscountInvoiceLine, never()).setEtgoDiscount(any(BigDecimal.class));
-      verify(dal).flush();
-    }
-  }
+  // ETP-4780: copyLineDiscountsFromOrder() moved to InvoiceFromOrderSupport so
+  // CreatePurchaseInvoiceHandler can reuse it — the logic-level regression test now
+  // lives in InvoiceFromOrderSupportTest. CreateFromOrderHandler above still verifies
+  // that createFromOrder() delegates to getSupport().copyLineDiscountsFromOrder(...).
 
   @Test
   public void testCreateInvoiceFromOrderHeaderCarriesTotalDiscountToInvoiceHeader() {
