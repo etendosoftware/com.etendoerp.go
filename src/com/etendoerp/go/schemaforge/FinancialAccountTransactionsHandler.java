@@ -204,6 +204,15 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
           + "       COALESCE(dimsr.name, '')   AS dim_salesregion,"
           + "       COALESCE(dimu1.name, '')   AS dim_user1,"
           + "       COALESCE(dimu2.name, '')   AS dim_user2,"
+          // Funds-transfer counterpart. Classic only links destination -> source
+          // (em_aprm_finacc_trans_origin); em_etgo_finacc_trans_dest adds the mirror half, so
+          // COALESCE resolves BOTH directions with a single join: the BPW source row resolves
+          // through _dest, the BPD destination row through _origin.
+          + "       COALESCE(ft.em_etgo_finacc_trans_dest, ft.em_aprm_finacc_trans_origin) AS transfer_txn_id,"
+          + "       CASE WHEN ft.em_etgo_finacc_trans_dest IS NOT NULL THEN 'out' "
+          + "            WHEN ft.em_aprm_finacc_trans_origin IS NOT NULL THEN 'in' END AS transfer_direction,"
+          + "       COALESCE(tfa.fin_financial_account_id, '') AS transfer_account_id,"
+          + "       COALESCE(tfa.name, '') AS transfer_account_name,"
           + "       cur.iso_code AS currency_iso,"
           + "       (fa.currentbalance"
           + "         - SUM(CASE WHEN ft.trxtype = 'BPD' THEN ft.depositamt ELSE -ft.paymentamt END)"
@@ -228,6 +237,11 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
           + "  LEFT JOIN c_salesregion dimsr ON dimsr.c_salesregion_id = ft.c_salesregion_id"
           + "  LEFT JOIN c_elementvalue dimu1 ON dimu1.c_elementvalue_id = ft.user1_id"
           + "  LEFT JOIN c_elementvalue dimu2 ON dimu2.c_elementvalue_id = ft.user2_id"
+          + "  LEFT JOIN fin_finacc_transaction tft"
+          + "         ON tft.fin_finacc_transaction_id"
+          + "            = COALESCE(ft.em_etgo_finacc_trans_dest, ft.em_aprm_finacc_trans_origin)"
+          + "  LEFT JOIN fin_financial_account tfa"
+          + "         ON tfa.fin_financial_account_id = tft.fin_financial_account_id"
           + " WHERE ft.fin_financial_account_id = ?"
           + "   AND ft.isactive = 'Y'"
           + " ORDER BY ft.statementdate DESC, ft.line DESC";
@@ -372,6 +386,13 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
           row.put(FIELD_COSTCENTER_ID, StringUtils.trimToEmpty(rs.getString("costcenter_id")));
           row.put(FIELD_PRODUCT_ID, StringUtils.trimToEmpty(rs.getString("product_id")));
           row.put("currencyIso", StringUtils.trimToEmpty(rs.getString("currency_iso")));
+          // Funds-transfer counterpart link: id + account, so the UI can navigate to the paired
+          // transaction in the other financial account. `transferDirection` is 'out' on the
+          // source (BPW) leg and 'in' on the destination (BPD) leg, which is what picks the label.
+          row.put("transferTxnId", StringUtils.trimToEmpty(rs.getString("transfer_txn_id")));
+          row.put("transferDirection", StringUtils.trimToEmpty(rs.getString("transfer_direction")));
+          row.put("transferAccountId", StringUtils.trimToEmpty(rs.getString("transfer_account_id")));
+          row.put("transferAccountName", StringUtils.trimToEmpty(rs.getString("transfer_account_name")));
           // Pre-derived fields consumed by the generic CSV export (export=csv) so it
           // stays a dumb serializer: Classic-style type/status labels, the deposit
           // /withdrawal split (raw depositamt/paymentamt columns), the synthetic
