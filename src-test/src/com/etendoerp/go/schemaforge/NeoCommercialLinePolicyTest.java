@@ -20,9 +20,19 @@ package com.etendoerp.go.schemaforge;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
+
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
 
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.Test;
+import org.mockito.MockedStatic;
+import org.mockito.Mockito;
+import org.openbravo.dal.service.OBDal;
 
 /**
  * Unit tests for {@link NeoCommercialLinePolicy}.
@@ -32,8 +42,13 @@ import org.junit.Test;
  * all paths that require {@code fetchTaxRate} are avoided by providing
  * a non-zero {@code grossUnitPrice} or an empty tax ID (rate = 0).
  *
- * Key regression guarded: the client-value guard and the no-double-discount
- * formula ({@code baseNetAmt = unitPrice × qty}, never applying discount twice).
+ * The {@code injectCommercialAmounts} ordering tests are the one exception — deriving a gross
+ * from a net inherently needs a tax rate, so they stub the JDBC chain via {@link #withTaxRate}
+ * instead of touching a real DB.
+ *
+ * Key regressions guarded: the client-value guard, the no-double-discount formula
+ * ({@code baseNetAmt = unitPrice × qty}, never applying discount twice), and the
+ * net-before-gross injector order (ETP-4855).
  */
 public class NeoCommercialLinePolicyTest {
 
@@ -363,5 +378,81 @@ public class NeoCommercialLinePolicyTest {
     NeoCommercialLinePolicy.injectLineGrossAmountIfMissing(body);
 
     assertFalse(body.has("lineGrossAmount"));
+  }
+
+  // ── ETP-4855: injectCommercialAmounts ordering ────────────────────────────
+
+  @Test
+  public void testInjectCommercialAmounts_nullBody_doesNotThrow() {
+    NeoCommercialLinePolicy.injectCommercialAmounts(null);
+  }
+
+  /**
+   * ETP-4855 regression guard — THE ordering test.
+   *
+   * <p>An invoice line carrying only quantity, unit price and tax (no amounts at all) is
+   * exactly what the OCR {@code /batch} ingest, the MCP write path and the line import modal
+   * send. {@code injectGrossAmountIfMissing} derives the gross from {@code lineNetAmount}, so
+   * if it runs before {@code injectLineNetAmountIfMissing} the base is 0, the NaN guard fires
+   * and {@code grossAmount} is never written — persisting {@code LINE_GROSS_AMOUNT = 0} and a
+   * line "Total" column rendered as 0.
+   *
+   * <p>Asserting on the sequence (not on each injector in isolation, which is what the tests
+   * above do and why the bug shipped) is the whole point of this test.
+   */
+  @Test
+  public void testInjectCommercialAmounts_amountsAbsent_derivesNetThenGross() throws Exception {
+    JSONObject body = new JSONObject()
+        .put("invoicedQuantity", "20")
+        .put("unitPrice", 15.5)
+        .put("tax", "TAX21");
+
+    withTaxRate(21.0, () -> NeoCommercialLinePolicy.injectCommercialAmounts(body));
+
+    // Net first: 20 × 15.5. Then gross off that net: 310 × 1.21.
+    assertEquals(310.0, body.getDouble("lineNetAmount"), DELTA);
+    assertEquals(375.1, body.getDouble("grossAmount"), DELTA);
+  }
+
+  /**
+   * Centralising the sequence must not leak invoice-side fields onto order lines: an order line
+   * uses {@code orderedQuantity}, so only {@code lineGrossAmount} may be produced.
+   */
+  @Test
+  public void testInjectCommercialAmounts_orderLine_onlyLineGrossInjected() throws Exception {
+    JSONObject body = new JSONObject()
+        .put("orderedQuantity", "3")
+        .put("unitPrice", 20.0)
+        .put("tax", "");
+
+    NeoCommercialLinePolicy.injectCommercialAmounts(body);
+
+    assertEquals(60.0, body.getDouble("lineGrossAmount"), DELTA);
+    assertFalse(body.has("lineNetAmount"));
+    assertFalse(body.has("grossAmount"));
+  }
+
+  /**
+   * Run {@code action} with {@code NeoCommercialLinePolicy#fetchTaxRate} resolving to
+   * {@code rate}. The rate lookup goes straight to JDBC through
+   * {@code OBDal.getInstance().getConnection(false)}, so the whole chain down to the
+   * ResultSet is stubbed — no DB, no DAL initialisation.
+   */
+  private void withTaxRate(double rate, Runnable action) throws Exception {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      Connection conn = mock(Connection.class);
+      PreparedStatement ps = mock(PreparedStatement.class);
+      ResultSet rs = mock(ResultSet.class);
+
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.getConnection(false)).thenReturn(conn);
+      when(conn.prepareStatement(anyString())).thenReturn(ps);
+      when(ps.executeQuery()).thenReturn(rs);
+      when(rs.next()).thenReturn(true);
+      when(rs.getDouble(1)).thenReturn(rate);
+
+      action.run();
+    }
   }
 }
