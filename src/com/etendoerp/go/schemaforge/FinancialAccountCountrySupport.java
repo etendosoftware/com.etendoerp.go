@@ -35,6 +35,7 @@ import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.enterprise.OrganizationInformation;
 import org.openbravo.model.common.geography.Country;
 import org.openbravo.model.common.geography.Location;
+import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
 
 import com.google.common.cache.Cache;
 import com.google.common.cache.CacheBuilder;
@@ -353,5 +354,46 @@ final class FinancialAccountCountrySupport {
       return true;
     }
     return StringUtils.isBlank(body.optString(key, ""));
+  }
+
+  // ---------------------------------------------------------------------------
+  // "What will actually be persisted" resolvers (body value, else stored value)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * The account type the write will end up with: the body's when it carries one, otherwise the
+   * stored account's, otherwise {@code null}.
+   *
+   * <p>Returns the RAW value on purpose — the caller passes it through its own
+   * {@code normalizeType}, which already maps {@code null} (and anything unrecognized) to Bank. So
+   * this resolver never needs to know the type codes, and the fallback lives in exactly one place
+   * instead of being duplicated here as a literal.
+   *
+   * <p>Extracted out of {@code FinancialAccountHandler#validateCountryAndIban} together with
+   * {@link #effectiveIban}: inline they were nested ternaries (java:S3358) and together carried
+   * about six of that method's cognitive-complexity points (java:S3776).
+   */
+  static String rawEffectiveType(JSONObject body, FIN_FinancialAccount stored) {
+    if (body != null && body.has(FinancialAccountHandler.FIELD_TYPE)) {
+      return StringUtils.trimToEmpty(bodyString(body, FinancialAccountHandler.FIELD_TYPE));
+    }
+    return stored != null ? stored.getType() : null;
+  }
+
+  /**
+   * The normalized IBAN the write will end up with: the body's when it carries the key (including
+   * an explicit clear, which normalizes to {@code ""}), otherwise the stored account's.
+   *
+   * <p>Always normalized, so the length this is later compared against {@code IBANNODIGITS} is the
+   * same one the trigger will see after its own {@code REPLACE}.
+   *
+   * @param bodyHasIban passed in rather than re-derived: the caller already computed it, and it is
+   *                    what distinguishes "clearing the IBAN" from "not touching it".
+   */
+  static String effectiveIban(JSONObject body, boolean bodyHasIban, FIN_FinancialAccount stored) {
+    if (bodyHasIban) {
+      return normalizeIban(bodyString(body, FinancialAccountHandler.FIELD_IBAN));
+    }
+    return stored != null ? normalizeIban(stored.getIBAN()) : "";
   }
 }

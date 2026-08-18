@@ -299,9 +299,10 @@ public class FinancialAccountsPageHandler implements NeoHandler {
     JSONObject data = new JSONObject();
     data.put("accounts", buildAccountsArray(accounts, pendingByAccount, accountsWithTransactions));
     data.put("summary", buildSummary(accounts, pendingByAccount));
-    // Sibling of accounts/summary, not a per-account field (ETP-4896) — this is the same catalog
-    // FinancialAccountHandler#injectAccountDefaults attaches to the W-spec defaults response;
-    // this R spec is what the accounts list and EditAccountModal actually load today.
+    // Sibling of accounts/summary, not a per-account field (ETP-4896). It is the same catalog that
+    // the W-spec defaults response carries (see the injectAccountDefaults method over in
+    // FinancialAccountHandler), and this R spec is what the accounts list and the edit modal
+    // actually load today.
     data.put("countryIbanRules", FinancialAccountCountrySupport.buildIbanRules());
 
     JSONObject responseData = new JSONObject();

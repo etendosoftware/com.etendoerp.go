@@ -97,8 +97,11 @@ public class FinancialAccountHandler implements NeoHandler {
 
   private static final String FIELD_NAME = "name";
   private static final String FIELD_CURRENCY = "currency";
-  private static final String FIELD_TYPE = "type";
-  private static final String FIELD_IBAN = "iBAN";
+  /** Package-private (not private) so {@link FinancialAccountCountrySupport}'s
+   *  {@code rawEffectiveType}/{@code effectiveIban} resolvers read the same body keys this class
+   *  writes, instead of re-declaring the literals on their side. */
+  static final String FIELD_TYPE = "type";
+  static final String FIELD_IBAN = "iBAN";
   private static final String FIELD_SWIFT_CODE = "swiftCode";
   private static final String FIELD_COUNTRY = "country";
   private static final String FIELD_MATCHING_ALGORITHM = "matchingAlgorithm";
@@ -667,20 +670,18 @@ public class FinancialAccountHandler implements NeoHandler {
 
     FIN_FinancialAccount stored = StringUtils.isNotBlank(accountId) ? loadAccount(accountId) : null;
     // On create, validateAndEnrichCreate already normalized and wrote FIELD_TYPE into the body
-    // before calling here, so body.has(FIELD_TYPE) is always true there; the stored-type fallback
-    // only ever applies on update.
-    String effectiveType = body.has(FIELD_TYPE)
-        ? normalizeType(StringUtils.trimToEmpty(FinancialAccountCountrySupport.bodyString(body, FIELD_TYPE)))
-        : (stored != null ? stored.getType() : TYPE_BANK);
+    // before calling here, so the body branch always wins there; the stored-type fallback only
+    // ever applies on update. normalizeType maps a null (neither source had one) to Bank, and is
+    // the identity for every value the AD "Financial account type" reference allows — the stored
+    // type now goes through it too, which only matters for a DB value outside {B, C, CA}.
+    String effectiveType = normalizeType(FinancialAccountCountrySupport.rawEffectiveType(body, stored));
     if (!TYPE_BANK.equals(effectiveType)) {
       // The trigger's IBAN branch only runs for TYPE='B'; mirroring that avoids rejecting a
       // Cash/Card account that happens to carry a stale IBAN.
       return null;
     }
 
-    String effectiveIban = bodyHasIban
-        ? FinancialAccountCountrySupport.normalizeIban(FinancialAccountCountrySupport.bodyString(body, FIELD_IBAN))
-        : (stored != null ? FinancialAccountCountrySupport.normalizeIban(stored.getIBAN()) : "");
+    String effectiveIban = FinancialAccountCountrySupport.effectiveIban(body, bodyHasIban, stored);
     if (StringUtils.isBlank(effectiveIban)) {
       // The trigger's own guard is IF (:NEW.IBAN IS NOT NULL) — a bank account with a country and
       // no IBAN is legal, so there is nothing to validate.
@@ -694,17 +695,12 @@ public class FinancialAccountHandler implements NeoHandler {
           "A bank account with an IBAN must have a country.");
     }
 
-    Country effectiveCountry;
-    if (bodyHasCountry) {
-      String bodyCountryId = FinancialAccountCountrySupport.bodyString(body, FIELD_COUNTRY);
-      effectiveCountry = loadCountry(bodyCountryId);
-      if (effectiveCountry == null) {
-        return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "Invalid country");
-      }
-    } else if (stored != null && stored.getCountry() != null) {
-      effectiveCountry = stored.getCountry();
-    } else {
-      effectiveCountry = resolveCountryFromIban(effectiveIban);
+    Country effectiveCountry = resolveEffectiveCountry(body, bodyHasCountry, stored, effectiveIban);
+    // Only meaningful when the body supplied one: there, null means the id does not resolve to a
+    // country at all. When it did not, null just means "nothing to derive from the IBAN either",
+    // which validateIbanCountryPair reports with its own, more specific message.
+    if (bodyHasCountry && effectiveCountry == null) {
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "Invalid country");
     }
 
     String pairError = FinancialAccountCountrySupport.validateIbanCountryPair(effectiveIban, effectiveCountry);
@@ -719,6 +715,35 @@ public class FinancialAccountHandler implements NeoHandler {
       body.put(FIELD_COUNTRY, effectiveCountry.getId());
     }
     return null;
+  }
+
+  /**
+   * The country the write will end up with, in strict precedence order (ETP-4896):
+   *
+   * <ol>
+   *   <li>the one the body carries — the SPA's picker is authoritative, so it wins outright and
+   *       {@link #resolveCountryFromIban} is not even consulted;</li>
+   *   <li>the stored account's, when the body is silent on the field;</li>
+   *   <li>derived from the IBAN prefix — the pre-ETP-4896 behavior, kept only as a fallback for
+   *       API/MCP callers that send an IBAN and no country at all.</li>
+   * </ol>
+   *
+   * <p>Returns {@code null} when nothing resolves; the caller decides what that means, since it
+   * reads differently per branch (an invalid id the caller sent vs. an unrecognized IBAN prefix).
+   *
+   * <p>Kept in this class rather than {@link FinancialAccountCountrySupport} — unlike the two
+   * resolvers there, this one goes through the {@link #loadCountry} / {@link #resolveCountryFromIban}
+   * seams, which the unit tests spy on to run without a database.</p>
+   */
+  private Country resolveEffectiveCountry(JSONObject body, boolean bodyHasCountry,
+      FIN_FinancialAccount stored, String effectiveIban) {
+    if (bodyHasCountry) {
+      return loadCountry(FinancialAccountCountrySupport.bodyString(body, FIELD_COUNTRY));
+    }
+    if (stored != null && stored.getCountry() != null) {
+      return stored.getCountry();
+    }
+    return resolveCountryFromIban(effectiveIban);
   }
 
   // ---------------------------------------------------------------------------
