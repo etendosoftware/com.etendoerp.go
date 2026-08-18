@@ -611,6 +611,113 @@ class SFRolesOverviewTest extends BaseWebhookTest {
         assertEquals(FINANCE_ROLE_ID, roles.getJSONObject(1).getString("id"));
     }
 
+    /**
+     * When the system-template role itself does not resolve at all (missing {@code AD_Role} row
+     * — e.g. deleted or never seeded) for a fixed name with no active tenant-scoped match, that
+     * name is simply absent from the response — degrading gracefully like the existing
+     * "fewer than 5 roles" case — rather than throwing. Targets the specific early-return branch
+     * in {@link SFRolesOverview#addSystemTemplateRoleCardIfResolvable} triggered by
+     * {@code OBDal.get(Role.class, templateId) == null}.
+     */
+    @Test
+    @DisplayName("Missing system-template role (OBDal.get returns null) is silently omitted, not thrown")
+    void testSystemTemplateFallbackSkippedWhenTemplateRoleMissing() throws Exception {
+        givenSystemAdminCallerRole();
+        stubBaselineQueries(
+                Collections.singletonList(mockRole(ADMIN_ROLE_ID, "GOClient Admin", true)),
+                Collections.emptyList());
+
+        stubAllFourTemplatesResolve();
+        // Purchasing's template row does not exist at all (deleted / never seeded).
+        when(obDal.get(Role.class, SystemRoleTemplates.PURCHASING_ROLE_ID)).thenReturn(null);
+
+        Map<String, List<String>> composed = new LinkedHashMap<>();
+        try (MockedConstruction<UserRoleCompositionService> construction = mockConstruction(
+                UserRoleCompositionService.class, (mockService, ctx) ->
+                        when(mockService.getAppliedTemplateRoleIdsForClient(CLIENT_ID)).thenReturn(composed))) {
+            webhook.get(parameters, responseVars);
+        }
+
+        assertNull(responseVars.get(ERROR));
+        JSONObject result = new JSONObject(responseVars.get(RESULT));
+        JSONArray roles = result.getJSONArray("roles");
+        // Admin + Finance + Sales + Inventory = 4; Purchasing is absent, not a 5th entry with
+        // null/empty fields.
+        assertEquals(4, roles.length());
+        for (int i = 0; i < roles.length(); i++) {
+            assertNotEquals(SystemRoleTemplates.PURCHASING_ROLE_ID, roles.getJSONObject(i).getString("id"));
+        }
+    }
+
+    /**
+     * When the system-template role resolves but is {@code IsActive = 'N'}, it must be treated
+     * exactly like a missing row — omitted, not returned with stale/inactive data. Targets the
+     * {@code !Boolean.TRUE.equals(templateRole.isActive())} half of the same early-return branch.
+     */
+    @Test
+    @DisplayName("Inactive system-template role is silently omitted, not thrown")
+    void testSystemTemplateFallbackSkippedWhenTemplateRoleInactive() throws Exception {
+        givenSystemAdminCallerRole();
+        stubBaselineQueries(
+                Collections.singletonList(mockRole(ADMIN_ROLE_ID, "GOClient Admin", true)),
+                Collections.emptyList());
+
+        stubAllFourTemplatesResolve();
+        // Inventory's template row exists but has since been deactivated.
+        Role inactiveInventoryTemplate = mockTemplateRole(SystemRoleTemplates.INVENTORY_ROLE_ID, "Inventory");
+        when(inactiveInventoryTemplate.isActive()).thenReturn(false);
+        when(obDal.get(Role.class, SystemRoleTemplates.INVENTORY_ROLE_ID)).thenReturn(inactiveInventoryTemplate);
+
+        Map<String, List<String>> composed = new LinkedHashMap<>();
+        try (MockedConstruction<UserRoleCompositionService> construction = mockConstruction(
+                UserRoleCompositionService.class, (mockService, ctx) ->
+                        when(mockService.getAppliedTemplateRoleIdsForClient(CLIENT_ID)).thenReturn(composed))) {
+            webhook.get(parameters, responseVars);
+        }
+
+        assertNull(responseVars.get(ERROR));
+        JSONObject result = new JSONObject(responseVars.get(RESULT));
+        JSONArray roles = result.getJSONArray("roles");
+        assertEquals(4, roles.length());
+        for (int i = 0; i < roles.length(); i++) {
+            assertNotEquals(SystemRoleTemplates.INVENTORY_ROLE_ID, roles.getJSONObject(i).getString("id"));
+        }
+    }
+
+    /**
+     * The full degradation case: a tenant with only its client-admin role active, AND every one
+     * of the 4 system templates missing/inactive, must still return a valid (if minimal)
+     * response — just the admin card — never an exception. Also confirms
+     * {@code UserRoleCompositionService} is never constructed when no fallback template ever
+     * resolves far enough to need a composed user count (laziness holds under total
+     * degradation, not only in the "every fixed name already has a tenant role" case covered by
+     * {@link #testActiveTenantRoleIsNotOverriddenByTemplate}).
+     */
+    @Test
+    @DisplayName("All four system templates missing/inactive degrades to just the admin role, without constructing the composition service")
+    void testAllSystemTemplatesUnresolvableDegradesToAdminOnly() throws Exception {
+        givenSystemAdminCallerRole();
+        stubBaselineQueries(
+                Collections.singletonList(mockRole(ADMIN_ROLE_ID, "GOClient Admin", true)),
+                Collections.emptyList());
+        // obDal.get(Role.class, <any template id>) is left unstubbed → returns null for all 4.
+
+        try (MockedConstruction<UserRoleCompositionService> construction =
+                mockConstruction(UserRoleCompositionService.class)) {
+            webhook.get(parameters, responseVars);
+
+            assertTrue(construction.constructed().isEmpty(),
+                    "The composition service must never be constructed when every fallback template "
+                            + "is unresolvable");
+        }
+
+        assertNull(responseVars.get(ERROR));
+        JSONObject result = new JSONObject(responseVars.get(RESULT));
+        JSONArray roles = result.getJSONArray("roles");
+        assertEquals(1, roles.length());
+        assertEquals(ADMIN_ROLE_ID, roles.getJSONObject(0).getString("id"));
+    }
+
     // ── ETP-4907: matrix ──────────────────────────────────────────────────
 
     /**
