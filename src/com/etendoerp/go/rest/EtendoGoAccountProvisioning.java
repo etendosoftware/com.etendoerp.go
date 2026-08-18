@@ -54,6 +54,14 @@ public final class EtendoGoAccountProvisioning {
    * @param name account holder display name
    * @param userId created AD_User identifier
    */
+  /**
+   * Compatibility overload retained for callers that still provide the created user id.
+   *
+   * @param email account login identifier
+   * @param name account holder display name
+   * @param userId legacy user identifier, intentionally unused by account provisioning
+   */
+  @SuppressWarnings("java:S1172")
   public static void ensurePendingAccount(String email, String name, String userId) {
     ensurePendingAccount(email, name);
   }
@@ -80,7 +88,14 @@ public final class EtendoGoAccountProvisioning {
     ensureAccountForCreatedUser(email, name, plainPassword, null);
   }
 
-  /** Provisions a created ERP user when no password was supplied. */
+  /**
+   * Provisions a created ERP user when no password was supplied.
+   *
+   * @param email account login identifier
+   * @param name account holder display name
+   * @param plainPassword validated password, or blank for a pending account
+   * @param userId ERP user identifier retained for compatibility with the provisioning hook
+   */
   public static void ensureAccountForCreatedUser(String email, String name,
       String plainPassword, String userId) {
     if (StringUtils.isBlank(plainPassword)) {
