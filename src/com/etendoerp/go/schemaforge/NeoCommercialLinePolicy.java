@@ -39,6 +39,30 @@ final class NeoCommercialLinePolicy {
   private NeoCommercialLinePolicy() {
   }
 
+  /**
+   * Applies the three commercial-amount injectors in dependency order. Every write path
+   * (POST create, PATCH/PUT update, and the {@code /batch} channel that funnels through
+   * create) must go through here rather than calling the injectors individually.
+   *
+   * <p><b>The order is load-bearing:</b> {@link #injectGrossAmountIfMissing} derives the gross
+   * from {@code lineNetAmount} in the body, so {@link #injectLineNetAmountIfMissing} has to
+   * populate it FIRST. {@link #injectLineGrossAmountIfMissing} is independent (it recomputes
+   * its own base from {@code orderedQuantity} × {@code unitPrice}) and its position is free.
+   *
+   * <p>ETP-4855: the create path used to run gross-first while the update path ran net-first.
+   * With gross-first, any client that omitted both amounts — the OCR {@code /batch} ingest, the
+   * MCP write path, the line import modal — hit the NaN guard in
+   * {@link #resolveGrossAmount(double, double, double, String)} and persisted
+   * {@code LINE_GROSS_AMOUNT = 0}, so the line "Total" column rendered as 0 even though
+   * {@code LINENETAMT} and the header totals were correct. Keeping the sequence in one place
+   * is what stops the two call sites from drifting apart again.
+   */
+  static void injectCommercialAmounts(JSONObject body) {
+    injectLineNetAmountIfMissing(body);
+    injectGrossAmountIfMissing(body);
+    injectLineGrossAmountIfMissing(body);
+  }
+
   static void injectGrossAmountIfMissing(JSONObject body) {
     if (body == null) {
       return;
