@@ -22,6 +22,7 @@ import java.math.RoundingMode;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -35,6 +36,7 @@ import org.openbravo.erpCommon.utility.OBError;
 import org.openbravo.erpCommon.utility.OBMessageUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.criterion.Restrictions;
 import org.openbravo.base.provider.OBProvider;
@@ -75,6 +77,13 @@ public abstract class AbstractInvoiceHeaderHandler {
   protected static final String SUBTYPE_RECTIFICATIVA = "RECTIFICATIVA";
 
   protected static final String FIELD_ORIGIN_INVOICE       = "originInvoice";
+  // ETP-4919: plural counterpart of FIELD_ORIGIN_INVOICE — a Factura Rectificativa can be
+  // linked back to MORE THAN ONE source invoice (importing from source invoice A, then later
+  // from source invoice B, must keep BOTH links). FIELD_ORIGIN_INVOICE is kept as a
+  // backward-compatible single-id alias (accepted on input, folded into the id set; emitted on
+  // output as the first linked origin) — see captureOriginInvoice/persistOriginInvoice/
+  // enrichOriginInvoice below.
+  protected static final String FIELD_ORIGIN_INVOICES      = "originInvoices";
   protected static final String FIELD_TRANSACTION_DOCUMENT = "transactionDocument";
   private static final String FIELD_CURRENCY = "currency";
   private static final String FIELD_VALUE = "value";
@@ -90,7 +99,7 @@ public abstract class AbstractInvoiceHeaderHandler {
   // beans, defaulting to @Dependent scope, and NeoServletSupport#handleWithHooks calls handle()
   // then afterHandle() on the SAME handler instance for a given request, so a plain instance
   // field on this shared base class safely carries state between them.
-  private String pendingOriginInvoiceId;
+  private List<String> pendingOriginInvoiceIds;
   private boolean originInvoiceCaptured;
 
   // ---------------------------------------------------------------------------
@@ -234,18 +243,25 @@ public abstract class AbstractInvoiceHeaderHandler {
   // ---------------------------------------------------------------------------
 
   /**
-   * Captures and strips {@code originInvoice} from the raw request body BEFORE the generic
-   * field filter runs, so {@link #persistOriginInvoice} can still use it later in
-   * {@code afterHandle()}. Must be called from each subclass's {@code handle()} (the pre-hook),
-   * e.g. alongside the existing {@code NeoHandlerUtils.mirrorAccountingDate(...)} call.
+   * Captures and strips {@code originInvoice}/{@code originInvoices} from the raw request body
+   * BEFORE the generic field filter runs, so {@link #persistOriginInvoice} can still use them
+   * later in {@code afterHandle()}. Must be called from each subclass's {@code handle()} (the
+   * pre-hook), e.g. alongside the existing {@code NeoHandlerUtils.mirrorAccountingDate(...)}
+   * call.
    *
-   * <p>{@code originInvoice} is not a decisions.json/contract field, so
+   * <p>Neither field is a decisions.json/contract field, so
    * {@code NeoFieldFilter#filterCreateRequest}/{@code filterWriteRequest} would otherwise
-   * silently drop it before {@code afterHandle()} got a chance to read it back from
+   * silently drop them before {@code afterHandle()} got a chance to read them back from
    * {@code context.getRequestBody()} — the link was never actually persisted (confirmed via an
    * empty {@code C_Invoice_Reverse} table) despite {@code persistOriginInvoice} looking correct
    * in isolation. Same reasoning as the {@code parentId} carve-out at the top of
    * {@code NeoCrudHandler#executePostCreate}.
+   *
+   * <p>ETP-4919: {@code originInvoices} (a JSON array of invoice ids) is the current shape sent
+   * by the "Import from Source Invoice" popup — a rectificativa can be linked to more than one
+   * source invoice across separate import runs. {@code originInvoice} (a single id) is kept as a
+   * backward-compatible alias: if present, its id is folded into the same captured set. Both
+   * keys may be present at once; ids are de-duplicated.
    *
    * @param context
    *     the current request context
@@ -255,18 +271,55 @@ public abstract class AbstractInvoiceHeaderHandler {
       return;
     }
     JSONObject body = context.getRequestBody();
-    if (body != null && body.has(FIELD_ORIGIN_INVOICE)) {
-      pendingOriginInvoiceId = body.optString(FIELD_ORIGIN_INVOICE, null);
-      originInvoiceCaptured = true;
+    if (body == null) {
+      return;
+    }
+    List<String> ids = new ArrayList<>();
+    boolean captured = false;
+
+    if (body.has(FIELD_ORIGIN_INVOICES)) {
+      captured = true;
+      try {
+        JSONArray arr = body.getJSONArray(FIELD_ORIGIN_INVOICES);
+        for (int i = 0; i < arr.length(); i++) {
+          String id = arr.optString(i, null);
+          if (StringUtils.isNotBlank(id) && !ids.contains(id)) {
+            ids.add(id);
+          }
+        }
+      } catch (Exception e) {
+        log.warn("Could not parse {} array: {}", FIELD_ORIGIN_INVOICES, e.getMessage());
+      }
+      body.remove(FIELD_ORIGIN_INVOICES);
+    }
+
+    if (body.has(FIELD_ORIGIN_INVOICE)) {
+      captured = true;
+      String legacyId = body.optString(FIELD_ORIGIN_INVOICE, null);
+      if (StringUtils.isNotBlank(legacyId) && !ids.contains(legacyId)) {
+        ids.add(legacyId);
+      }
       body.remove(FIELD_ORIGIN_INVOICE);
+    }
+
+    if (captured) {
+      pendingOriginInvoiceIds = ids;
+      originInvoiceCaptured = true;
     }
   }
 
   /**
-   * Persists the origin-invoice relationship to {@code C_Invoice_Reverse} after a POST or PUT,
-   * using the value {@link #captureOriginInvoice} captured from the raw request body before the
-   * generic field filter stripped it. Deletes any existing link for this invoice before creating
-   * the new one (or leaves it deleted if {@code originInvoice} was absent/blank).
+   * Persists the origin-invoice relationship(s) to {@code C_Invoice_Reverse} after a POST or
+   * PUT/PATCH, using the ids {@link #captureOriginInvoice} captured from the raw request body
+   * before the generic field filter stripped them.
+   *
+   * <p>ETP-4919 fix: this NEVER deletes existing links to OTHER origin invoices from prior
+   * import runs — the old delete-then-single-create behavior is exactly why importing from a
+   * second source invoice silently dropped the first link. It only creates a link per captured
+   * id, and only if that exact (invoice, origin) pair doesn't already exist — so re-importing
+   * from the same source invoice twice never produces duplicate rows. When the captured id set
+   * is empty (field absent, or present but blank), this is a no-op: there is no supported way to
+   * unlink an origin invoice through this endpoint.
    *
    * @param context
    *     the current request context
@@ -276,7 +329,10 @@ public abstract class AbstractInvoiceHeaderHandler {
       if (!originInvoiceCaptured) {
         return;
       }
-      String originInvoiceId = pendingOriginInvoiceId;
+      List<String> originInvoiceIds = pendingOriginInvoiceIds;
+      if (originInvoiceIds == null || originInvoiceIds.isEmpty()) {
+        return;
+      }
 
       String invoiceId = resolveInvoiceIdFromContext(context);
       if (StringUtils.isBlank(invoiceId)) {
@@ -285,9 +341,8 @@ public abstract class AbstractInvoiceHeaderHandler {
 
       OBContext.setAdminMode(true);
       try {
-        deleteExistingReverseLinks(invoiceId);
-        if (StringUtils.isNotBlank(originInvoiceId)) {
-          createReverseLink(invoiceId, originInvoiceId);
+        for (String originInvoiceId : originInvoiceIds) {
+          createReverseLinkIfMissing(invoiceId, originInvoiceId);
         }
         OBDal.getInstance().flush();
       } finally {
@@ -306,25 +361,26 @@ public abstract class AbstractInvoiceHeaderHandler {
     return NeoHandlerUtils.extractCreatedIdFromPreviousResult(context);
   }
 
-  private void deleteExistingReverseLinks(String invoiceId) {
+  /**
+   * Creates a {@code C_Invoice_Reverse} link from {@code invoiceId} to {@code originInvoiceId}
+   * unless one already exists — the dedupe check that replaces the old unconditional
+   * delete-then-create (ETP-4919), so importing from the same source invoice twice never
+   * produces duplicate rows, and importing from a NEW source invoice never removes the link to a
+   * previously-imported one.
+   */
+  private void createReverseLinkIfMissing(String invoiceId, String originInvoiceId) {
     Invoice invoice = OBDal.getInstance().get(Invoice.class, invoiceId);
-    if (invoice == null) {
+    Invoice origin = OBDal.getInstance().get(Invoice.class, originInvoiceId);
+    if (invoice == null || origin == null) {
+      log.warn("Cannot create reverse link: invoice={} origin={}", invoiceId, originInvoiceId);
       return;
     }
     List<ReversedInvoice> existing = OBDal.getInstance()
         .createCriteria(ReversedInvoice.class)
         .add(Restrictions.eq(ReversedInvoice.PROPERTY_INVOICE, invoice))
+        .add(Restrictions.eq(ReversedInvoice.PROPERTY_REVERSEDINVOICE, origin))
         .list();
-    for (ReversedInvoice ri : existing) {
-      OBDal.getInstance().remove(ri);
-    }
-  }
-
-  private void createReverseLink(String invoiceId, String originInvoiceId) {
-    Invoice invoice = OBDal.getInstance().get(Invoice.class, invoiceId);
-    Invoice origin = OBDal.getInstance().get(Invoice.class, originInvoiceId);
-    if (invoice == null || origin == null) {
-      log.warn("Cannot create reverse link: invoice={} origin={}", invoiceId, originInvoiceId);
+    if (!existing.isEmpty()) {
       return;
     }
     ReversedInvoice link = OBProvider.getInstance().get(ReversedInvoice.class);
@@ -340,8 +396,18 @@ public abstract class AbstractInvoiceHeaderHandler {
   // ---------------------------------------------------------------------------
 
   /**
-   * Injects {@code originInvoice} and {@code originInvoice$_identifier} into the record by
-   * querying the {@code C_Invoice_Reverse} table for a link where this invoice is the reversed one.
+   * Injects {@code originInvoices} (a JSON array of {@code {id, documentNo}}, one entry per
+   * linked origin invoice) plus the backward-compatible singular {@code originInvoice}/
+   * {@code originInvoice$_identifier} pair (the FIRST linked origin, or {@code null} when none)
+   * into the record, by querying the {@code C_Invoice_Reverse} table for ALL active links where
+   * this invoice is the reversed one.
+   *
+   * <p>ETP-4919 fix: previously this read only the first matching row ({@code rs.next()} called
+   * once) — a rectificativa linked to more than one source invoice (e.g. two separate "Import
+   * from Source Invoice" runs) silently lost every origin but one on the frontend, even on the
+   * rare occasion the backend link itself did survive. Callers that only need "is there at least
+   * one" can keep reading {@code originInvoice}; {@code RelatedDocuments} now reads
+   * {@code originInvoices} to render one chip per linked origin.
    *
    * @param rec
    *     the invoice record JSON object; modified in-place
@@ -355,18 +421,30 @@ public abstract class AbstractInvoiceHeaderHandler {
         "SELECT inv.c_invoice_id, inv.documentno "
         + "FROM c_invoice_reverse r "
         + "JOIN c_invoice inv ON inv.c_invoice_id = r.reversed_c_invoice_id "
-        + "WHERE r.c_invoice_id = ? AND r.isactive = 'Y'";
+        + "WHERE r.c_invoice_id = ? AND r.isactive = 'Y' "
+        + "ORDER BY inv.documentno";
     Connection conn = OBDal.getReadOnlyInstance().getConnection();
     try (PreparedStatement ps = conn.prepareStatement(sql)) {
       ps.setString(1, invoiceId);
       try (ResultSet rs = ps.executeQuery()) {
-        if (rs.next()) {
-          rec.put(FIELD_ORIGIN_INVOICE, rs.getString(1));
-          rec.put("originInvoice$_identifier", rs.getString(2));
-        } else {
+        JSONArray origins = new JSONArray();
+        boolean first = true;
+        while (rs.next()) {
+          String originId = rs.getString(1);
+          String originDocNo = rs.getString(2);
+          origins.put(new JSONObject().put("id", originId).put("documentNo", originDocNo));
+          if (first) {
+            rec.put(FIELD_ORIGIN_INVOICE, originId);
+            rec.put("originInvoice$_identifier", originDocNo);
+            first = false;
+          }
+        }
+        if (first) {
+          // no rows at all
           rec.put(FIELD_ORIGIN_INVOICE, JSONObject.NULL);
           rec.put("originInvoice$_identifier", JSONObject.NULL);
         }
+        rec.put(FIELD_ORIGIN_INVOICES, origins);
       }
     } catch (Exception e) {
       log.warn("Could not enrich origin invoice for {}: {}", invoiceId, e.getMessage());

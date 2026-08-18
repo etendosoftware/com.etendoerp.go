@@ -607,7 +607,7 @@ public class AbstractInvoiceHeaderHandlerTest {
 
   @Test
   @SuppressWarnings("unchecked")
-  public void persistOriginInvoice_putWithRecordId_deletesExistingAndCreatesLink() throws Exception {
+  public void persistOriginInvoice_putWithRecordId_createsLinkWhenNotAlreadyLinked() throws Exception {
     JSONObject body = new JSONObject().put("originInvoice", "origin-inv-1");
     NeoContext ctx = NeoContext.builder()
         .httpMethod("PUT").recordId("inv-put").requestBody(body).build();
@@ -645,13 +645,50 @@ public class AbstractInvoiceHeaderHandlerTest {
 
       verify(dal).save(link);
       verify(dal).flush();
+      // ETP-4919: no longer deletes anything — createReverseLinkIfMissing only checks/creates.
+      Mockito.verify(dal, Mockito.never()).remove(any(ReversedInvoice.class));
+    }
+  }
+
+  @Test
+  @SuppressWarnings("unchecked")
+  public void persistOriginInvoice_putWithRecordId_skipsCreateWhenAlreadyLinked() throws Exception {
+    // ETP-4919: re-importing from the SAME source invoice must not create a duplicate row.
+    JSONObject body = new JSONObject().put("originInvoice", "origin-inv-1");
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("PUT").recordId("inv-put").requestBody(body).build();
+
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
+         MockedStatic<OBProvider> providerMock = Mockito.mockStatic(OBProvider.class)) {
+
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      Invoice invoice = mock(Invoice.class);
+      Invoice origin = mock(Invoice.class);
+      when(dal.get(Invoice.class, "inv-put")).thenReturn(invoice);
+      when(dal.get(Invoice.class, "origin-inv-1")).thenReturn(origin);
+
+      ReversedInvoice existingLink = mock(ReversedInvoice.class);
+      OBCriteria<ReversedInvoice> criteria = mock(OBCriteria.class);
+      when(dal.createCriteria(ReversedInvoice.class)).thenReturn(criteria);
+      when(criteria.add(any())).thenReturn(criteria);
+      when(criteria.list()).thenReturn(Collections.singletonList(existingLink));
+
+      handler.callCaptureOriginInvoice(ctx);
+      handler.callPersistOriginInvoice(ctx);
+
+      Mockito.verify(dal, Mockito.never()).save(any(ReversedInvoice.class));
+      Mockito.verify(dal, Mockito.never()).remove(any(ReversedInvoice.class));
+      verify(dal).flush();
     }
   }
 
   @Test
   public void persistOriginInvoice_fieldAbsent_doesNotTouchExistingLinks() throws Exception {
-    // PATCH-like semantics: a PUT whose body omits "originInvoice" entirely must not
-    // delete existing reverse links (partial header updates would otherwise wipe them).
+    // PATCH-like semantics: a PUT whose body omits "originInvoice"/"originInvoices" entirely
+    // must not touch existing reverse links (partial header updates would otherwise wipe them).
     JSONObject body = new JSONObject();
     NeoContext ctx = NeoContext.builder()
         .httpMethod("PUT").recordId("inv-del").requestBody(body).build();
@@ -672,12 +709,38 @@ public class AbstractInvoiceHeaderHandlerTest {
   }
 
   @Test
-  @SuppressWarnings("unchecked")
-  public void persistOriginInvoice_blankOriginId_onlyDeletesExistingLinks() throws Exception {
-    // Explicitly clearing the field (present but blank) deletes the link without creating one.
+  public void persistOriginInvoice_blankOriginId_isNoOpAndDoesNotDeleteExistingLinks()
+      throws Exception {
+    // ETP-4919: presence-but-blank is captured (originInvoiceCaptured flips true, same as
+    // before) but yields an empty id set, so persistOriginInvoice returns early WITHOUT ever
+    // touching OBDal — there is no supported "unlink" via this endpoint any more; the old
+    // behavior of deleting the existing link on a blank value is exactly the kind of unconditional
+    // delete this fix removes.
     JSONObject body = new JSONObject().put("originInvoice", "");
     NeoContext ctx = NeoContext.builder()
         .httpMethod("PUT").recordId("inv-del").requestBody(body).build();
+
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      handler.callCaptureOriginInvoice(ctx);
+      handler.callPersistOriginInvoice(ctx);
+
+      Mockito.verifyNoInteractions(dal);
+    }
+  }
+
+  @Test
+  @SuppressWarnings("unchecked")
+  public void persistOriginInvoice_pluralOriginInvoices_createsOneLinkPerId() throws Exception {
+    // ETP-4919: the actual multi-origin request shape sent by the "Import from Source Invoice"
+    // popups — originInvoices is a JSON array, and each id gets its own dedupe-checked link.
+    JSONObject body = new JSONObject()
+        .put("originInvoices", new JSONArray().put("origin-a").put("origin-b"));
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("PATCH").recordId("inv-multi").requestBody(body).build();
 
     try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
          MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
@@ -687,22 +750,29 @@ public class AbstractInvoiceHeaderHandlerTest {
       dalMock.when(OBDal::getInstance).thenReturn(dal);
 
       Invoice invoice = mock(Invoice.class);
-      ReversedInvoice existing = mock(ReversedInvoice.class);
-      when(dal.get(Invoice.class, "inv-del")).thenReturn(invoice);
+      Invoice originA = mock(Invoice.class);
+      Invoice originB = mock(Invoice.class);
+      when(dal.get(Invoice.class, "inv-multi")).thenReturn(invoice);
+      when(dal.get(Invoice.class, "origin-a")).thenReturn(originA);
+      when(dal.get(Invoice.class, "origin-b")).thenReturn(originB);
+      when(invoice.getClient()).thenReturn(mock(Client.class));
+      when(invoice.getOrganization()).thenReturn(mock(Organization.class));
 
       OBCriteria<ReversedInvoice> criteria = mock(OBCriteria.class);
       when(dal.createCriteria(ReversedInvoice.class)).thenReturn(criteria);
       when(criteria.add(any())).thenReturn(criteria);
-      when(criteria.list()).thenReturn(Collections.singletonList(existing));
+      when(criteria.list()).thenReturn(Collections.emptyList());
 
-      // Present-but-blank still counts as "captured" (body.has(...) is true for "") — the field
-      // is stripped and originInvoiceCaptured flips true, exactly like a real blank-clear PUT.
+      OBProvider provider = mock(OBProvider.class);
+      providerMock.when(OBProvider::getInstance).thenReturn(provider);
+      when(provider.get(ReversedInvoice.class))
+          .thenReturn(mock(ReversedInvoice.class), mock(ReversedInvoice.class));
+
       handler.callCaptureOriginInvoice(ctx);
       handler.callPersistOriginInvoice(ctx);
 
-      verify(dal).remove(existing);
+      verify(dal, times(2)).save(any(ReversedInvoice.class));
       verify(dal).flush();
-      Mockito.verify(dal, Mockito.never()).save(any(ReversedInvoice.class));
     }
   }
 
@@ -761,7 +831,7 @@ public class AbstractInvoiceHeaderHandlerTest {
   // ── enrichOriginInvoice ──────────────────────────────────────────────────────
 
   @Test
-  public void enrichOriginInvoice_rowFound_setsBothFields() throws Exception {
+  public void enrichOriginInvoice_rowFound_setsBothFieldsAndOriginInvoicesArray() throws Exception {
     JSONObject rec = new JSONObject();
 
     try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
@@ -774,7 +844,7 @@ public class AbstractInvoiceHeaderHandlerTest {
       when(roInst.getConnection()).thenReturn(conn);
       when(conn.prepareStatement(any())).thenReturn(ps);
       when(ps.executeQuery()).thenReturn(rs);
-      when(rs.next()).thenReturn(true);
+      when(rs.next()).thenReturn(true, false);
       when(rs.getString(1)).thenReturn("origin-inv-id");
       when(rs.getString(2)).thenReturn("ORIG-001");
 
@@ -782,11 +852,51 @@ public class AbstractInvoiceHeaderHandlerTest {
 
       assertEquals("origin-inv-id", rec.getString("originInvoice"));
       assertEquals("ORIG-001", rec.getString("originInvoice$_identifier"));
+      assertEquals(1, rec.getJSONArray("originInvoices").length());
+      assertEquals("origin-inv-id", rec.getJSONArray("originInvoices").getJSONObject(0).getString("id"));
+      assertEquals("ORIG-001",
+          rec.getJSONArray("originInvoices").getJSONObject(0).getString("documentNo"));
+    }
+  }
+
+  /**
+   * ETP-4919 regression: a rectificativa linked to more than one source invoice (two separate
+   * "Import from Source Invoice" runs) must surface ALL of them in {@code originInvoices} —
+   * previously only the first row ({@code rs.next()} called once) was ever read.
+   */
+  @Test
+  public void enrichOriginInvoice_twoRowsFound_originInvoicesContainsBoth() throws Exception {
+    JSONObject rec = new JSONObject();
+
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal roInst = mock(OBDal.class);
+      dalMock.when(OBDal::getReadOnlyInstance).thenReturn(roInst);
+
+      Connection conn = mock(Connection.class);
+      PreparedStatement ps = mock(PreparedStatement.class);
+      ResultSet rs = mock(ResultSet.class);
+      when(roInst.getConnection()).thenReturn(conn);
+      when(conn.prepareStatement(any())).thenReturn(ps);
+      when(ps.executeQuery()).thenReturn(rs);
+      when(rs.next()).thenReturn(true, true, false);
+      when(rs.getString(1)).thenReturn("origin-a", "origin-b");
+      when(rs.getString(2)).thenReturn("ORIG-A", "ORIG-B");
+
+      handler.callEnrichOriginInvoice(rec, "inv-multi");
+
+      // Backward-compat singular fields reflect the FIRST row.
+      assertEquals("origin-a", rec.getString("originInvoice"));
+      assertEquals("ORIG-A", rec.getString("originInvoice$_identifier"));
+
+      JSONArray origins = rec.getJSONArray("originInvoices");
+      assertEquals(2, origins.length());
+      assertEquals("origin-a", origins.getJSONObject(0).getString("id"));
+      assertEquals("origin-b", origins.getJSONObject(1).getString("id"));
     }
   }
 
   @Test
-  public void enrichOriginInvoice_noRowFound_setsBothFieldsToNull() throws Exception {
+  public void enrichOriginInvoice_noRowFound_setsBothFieldsToNullAndEmptyArray() throws Exception {
     JSONObject rec = new JSONObject();
 
     try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
@@ -805,6 +915,7 @@ public class AbstractInvoiceHeaderHandlerTest {
 
       assertTrue(rec.isNull("originInvoice"));
       assertTrue(rec.isNull("originInvoice$_identifier"));
+      assertEquals(0, rec.getJSONArray("originInvoices").length());
     }
   }
 
