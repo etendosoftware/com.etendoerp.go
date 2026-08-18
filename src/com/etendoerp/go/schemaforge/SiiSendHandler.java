@@ -20,6 +20,7 @@ package com.etendoerp.go.schemaforge;
 import javax.inject.Named;
 
 import org.codehaus.jettison.json.JSONArray;
+import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.dal.service.OBDal;
 
@@ -51,7 +52,50 @@ public class SiiSendHandler extends AbstractLegacyInvoiceActionHandler {
     ids.put(recordId);
     params.put("ids", ids);
 
-    return NeoProcessService.executeObuiappClass(PROCESS_CLASS, PROCESS_ID, params);
+    NeoResponse response = NeoProcessService.executeObuiappClass(PROCESS_CLASS, PROCESS_ID, params);
+    return normalizeErrorShape(response);
+  }
+
+  /**
+   * Ensures every error response carries a top-level {@code message} field.
+   *
+   * <p>{@code MultiEnvioFactura} (the classic SII sending process) reports a failed
+   * single-invoice send (e.g. a missing required field caught by
+   * {@code SIIUtils.invoicePreviousValidations}) through
+   * {@link NeoProcessService#translateObuiappResult}, which already produces a body with a
+   * top-level {@code message}. But any exception the classic process throws instead (a bug in
+   * its own validation/classification code, a SOAP/network failure, etc.) is caught generically
+   * by {@link NeoProcessService#executeObuiappClass} and returned via
+   * {@link NeoResponse#error(int, String)}, whose body nests the text under {@code error.message}.
+   *
+   * <p>The frontend ({@code SifSendingModal.jsx}) only reads {@code response.message} /
+   * {@code message} off the on-demand send response — it does not know about the
+   * {@code error.message} shape used by generic CRUD/process error handling elsewhere. Without
+   * this normalization, any such exception would silently degrade to a generic "HTTP 500" in the
+   * UI instead of showing the real cause, which is exactly the "sent but nothing reached AEAT"
+   * symptom this handler exists to prevent.
+   *
+   * <p>Package-private and static so it can be unit tested directly against a synthetic
+   * {@link NeoResponse}, without needing a live AEAT connection or DB access.
+   */
+  static NeoResponse normalizeErrorShape(NeoResponse response) {
+    if (response == null || response.getHttpStatus() < 400 || response.getBody() == null) {
+      return response;
+    }
+    JSONObject body = response.getBody();
+    if (body.has("message")) {
+      return response;
+    }
+    JSONObject error = body.optJSONObject("error");
+    if (error == null) {
+      return response;
+    }
+    try {
+      body.put("message", error.optString("message", "SII send failed"));
+    } catch (JSONException ignored) {
+      // Best-effort normalization: fall back to the original (unnormalized) body.
+    }
+    return response;
   }
 
   @Override
