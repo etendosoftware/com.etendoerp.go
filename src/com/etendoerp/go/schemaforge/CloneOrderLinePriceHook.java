@@ -29,59 +29,30 @@ import javax.enterprise.context.ApplicationScoped;
 import java.util.List;
 
 /**
- * GO-specific override of {@link CloneOrderHook}. Delegates the actual clone to the
- * core hook, then restores each cloned line's listPrice to match the source line —
- * the core hook resets listPrice to the current catalog price, which Schema Forge's
- * UI displays as the line's editable "Precio" field (ETP-4801).
- *
- * <p>Registered with a lower priority than the core hook's default (100) so this
- * one is selected by {@code NeoCloneRecordHandler} instead.
+ * GO-specific override of {@link CloneOrderHook} (ETP-4801). See {@link CloneLinePriceHook}
+ * for the shared clone-price-fix behavior; this class only supplies the Order-specific
+ * delegate and line matching.
  */
 @ApplicationScoped
 @Qualifier(Order.ENTITY_NAME)
-public class CloneOrderLinePriceHook extends CloneRecordHook {
+public class CloneOrderLinePriceHook extends CloneLinePriceHook {
 
-  private final CloneRecordHook delegate;
-
+  /**
+   * Creates the hook using the core {@link CloneOrderHook} as the clone delegate.
+   */
   public CloneOrderLinePriceHook() {
     this(new CloneOrderHook());
   }
 
   // package-private constructor for testing with a mocked delegate
   CloneOrderLinePriceHook(CloneRecordHook delegate) {
-    this.delegate = delegate;
+    super(delegate);
   }
 
   @Override
-  public int getPriority() {
-    return 10; // lower than the core hook's default (100) so this one is selected
-  }
-
-  @Override
-  public boolean shouldCopyChildren(boolean uiCopyChildren) {
-    return delegate.shouldCopyChildren(uiCopyChildren);
-  }
-
-  @Override
-  public BaseOBObject preCopy(BaseOBObject originalRecord) throws Exception {
-    return delegate.preCopy(originalRecord);
-  }
-
-  @Override
-  public BaseOBObject postCopy(BaseOBObject originalRecord, BaseOBObject newRecord) throws Exception {
-    BaseOBObject copied = delegate.postCopy(originalRecord, newRecord);
-    restoreListPrices((Order) originalRecord, (Order) copied);
-    return copied;
-  }
-
-  /**
-   * Restores each cloned line's listPrice to match the corresponding source line's
-   * listPrice. Lines are matched one-to-one by their position in the list, the same
-   * order {@link CloneOrderHook} clones them in via {@code DalUtil.copy}.
-   */
-  private void restoreListPrices(Order original, Order clone) {
-    List<OrderLine> sourceLines = original.getOrderLineList();
-    List<OrderLine> clonedLines = clone.getOrderLineList();
+  protected void restoreListPrices(BaseOBObject originalRecord, BaseOBObject copied) {
+    List<OrderLine> sourceLines = ((Order) originalRecord).getOrderLineList();
+    List<OrderLine> clonedLines = ((Order) copied).getOrderLineList();
     int lineCount = Math.min(sourceLines.size(), clonedLines.size());
     for (int i = 0; i < lineCount; i++) {
       clonedLines.get(i).setListPrice(sourceLines.get(i).getListPrice());
