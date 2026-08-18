@@ -122,12 +122,14 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private static final String FIELD_EMAIL = "email";
   private static final String FIELD_CLIENT_NAME = "clientName";
   private static final String FIELD_STATUS = "status";
+  private static final String FIELD_HTTP_STATUS = "httpStatus";
   private static final String FIELD_TOKEN = "token";
   private static final String FIELD_MESSAGE = "message";
   private static final String FIELD_CODE = "code";
   private static final String FIELD_USER_MESSAGE = "userMessage";
   private static final String FIELD_PASSWORD = "password";
   private static final String FIELD_SUCCESS = "success";
+  private static final String CODE_INVITATION_ERROR = "INVITATION_ERROR";
   private static final String FIELD_TIMESTAMP = "timestamp";
   private static final String FIELD_ACCOUNT = "account";
   private static final String FIELD_AUTH_METHOD = "authMethod";
@@ -424,11 +426,11 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
         ? PublicUrlResolver.resolveAppBaseUrl(request) : requestOrigin;
     runWithAuthenticatedAccount(request, response, "create company invitation", account -> {
       JSONObject result = companyInvitationService.createInvitation(account, email, origin, language);
-      if (result.optBoolean("error", false)) {
-        int httpStatus = result.optInt("httpStatus", HttpServletResponse.SC_BAD_REQUEST);
-        writeError(response, httpStatus, result.optString("code", "INVITATION_ERROR"),
-            result.optString("message", "Could not create invitation"),
-            result.optString("message", "Could not create invitation"));
+      if (result.optBoolean(FIELD_ERROR, false)) {
+        int httpStatus = result.optInt(FIELD_HTTP_STATUS, HttpServletResponse.SC_BAD_REQUEST);
+        writeError(response, httpStatus, result.optString(FIELD_CODE, CODE_INVITATION_ERROR),
+            result.optString(FIELD_MESSAGE, "Could not create invitation"),
+            result.optString(FIELD_MESSAGE, "Could not create invitation"));
         return;
       }
       writeResponse(response, HttpServletResponse.SC_CREATED, result);
@@ -443,11 +445,11 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       HttpServletResponse response) throws IOException {
     runWithAuthenticatedAccount(request, response, "list company invitations", account -> {
       JSONObject result = companyInvitationService.listInvitationsForAccount(account);
-      if (result.optBoolean("error", false)) {
-        int httpStatus = result.optInt("httpStatus", HttpServletResponse.SC_UNAUTHORIZED);
+      if (result.optBoolean(FIELD_ERROR, false)) {
+        int httpStatus = result.optInt(FIELD_HTTP_STATUS, HttpServletResponse.SC_UNAUTHORIZED);
         writeError(response, httpStatus, result.optString("code", "AUTHENTICATION_REQUIRED"),
-            result.optString("message", "Authentication required"),
-            result.optString("message", "Authentication required"));
+            result.optString(FIELD_MESSAGE, "Authentication required"),
+            result.optString(FIELD_MESSAGE, "Authentication required"));
         return;
       }
       writeResponse(response, HttpServletResponse.SC_OK, result);
@@ -462,11 +464,11 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     String token = request.getParameter(FIELD_TOKEN);
     try {
       JSONObject result = companyInvitationService.resolveInvitation(token);
-      if (result.optBoolean("error", false)) {
-        int httpStatus = result.optInt("httpStatus", HttpServletResponse.SC_BAD_REQUEST);
-        writeError(response, httpStatus, result.optString("code", "INVITATION_ERROR"),
-            result.optString("message", "Could not resolve invitation"),
-            result.optString("message", "Could not resolve invitation"));
+      if (result.optBoolean(FIELD_ERROR, false)) {
+        int httpStatus = result.optInt(FIELD_HTTP_STATUS, HttpServletResponse.SC_BAD_REQUEST);
+        writeError(response, httpStatus, result.optString(FIELD_CODE, CODE_INVITATION_ERROR),
+            result.optString(FIELD_MESSAGE, "Could not resolve invitation"),
+            result.optString(FIELD_MESSAGE, "Could not resolve invitation"));
         return;
       }
       writeResponse(response, HttpServletResponse.SC_OK, result);
@@ -495,11 +497,11 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     String accountBearerToken = extractBearerToken(request);
     try {
       JSONObject result = companyInvitationService.acceptExistingAccount(token, accountBearerToken);
-      if (result.optBoolean("error", false)) {
-        int httpStatus = result.optInt("httpStatus", HttpServletResponse.SC_BAD_REQUEST);
-        writeError(response, httpStatus, result.optString("code", "INVITATION_ERROR"),
-            result.optString("message", "Could not accept invitation"),
-            result.optString("message", "Could not accept invitation"));
+      if (result.optBoolean(FIELD_ERROR, false)) {
+        int httpStatus = result.optInt(FIELD_HTTP_STATUS, HttpServletResponse.SC_BAD_REQUEST);
+        writeError(response, httpStatus, result.optString(FIELD_CODE, CODE_INVITATION_ERROR),
+            result.optString(FIELD_MESSAGE, "Could not accept invitation"),
+            result.optString(FIELD_MESSAGE, "Could not accept invitation"));
         return;
       }
       writeResponse(response, HttpServletResponse.SC_OK, result);
@@ -529,11 +531,11 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     String password = body.optString(FIELD_PASSWORD, "");
     try {
       JSONObject result = companyInvitationService.registerAndAccept(token, name, password);
-      if (result.optBoolean("error", false)) {
-        int httpStatus = result.optInt("httpStatus", HttpServletResponse.SC_BAD_REQUEST);
-        writeError(response, httpStatus, result.optString("code", "INVITATION_ERROR"),
-            result.optString("message", "Could not register and accept invitation"),
-            result.optString("message", "Could not register and accept invitation"));
+      if (result.optBoolean(FIELD_ERROR, false)) {
+        int httpStatus = result.optInt(FIELD_HTTP_STATUS, HttpServletResponse.SC_BAD_REQUEST);
+        writeError(response, httpStatus, result.optString(FIELD_CODE, CODE_INVITATION_ERROR),
+            result.optString(FIELD_MESSAGE, "Could not register and accept invitation"),
+            result.optString(FIELD_MESSAGE, "Could not register and accept invitation"));
         return;
       }
       writeResponse(response, HttpServletResponse.SC_OK, result);

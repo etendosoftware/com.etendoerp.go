@@ -34,6 +34,7 @@ import org.openbravo.model.common.enterprise.Organization;
 
 import com.etendoerp.go.schemaforge.data.Account;
 
+/** Shared JWT and environment-role helpers used by the Etendo Go servlet. */
 public final class EtendoGoJwtSupport {
 
   private static final String STAR_ORG_VALUE = "*";
@@ -134,17 +135,15 @@ public final class EtendoGoJwtSupport {
   }
 
   /**
-   * Builds the {@code AD_USER.USERNAME} for a tenant admin: the account email, disambiguated with
-   * a {@code +company} suffix when that email already owns another environment.
-   *
-   * <p>The result must fit {@code AD_USER.USERNAME} / {@code AD_USER.NAME} (both NVARCHAR(60)).
-   * The email itself is capped at signup, but the suffix can still push the total past 60, so it
-   * is trimmed here — the email is kept intact and the company part gives way, since the email is
-   * what identifies the account (ETP-4665).
-   */
-  /**
    * Builds a unique ERP username while preserving the platform account email as the identity.
    * This is public so admin-created users follow the same cross-client convention as onboarding.
+   *
+   * <p>The result fits the AD user username limit by trimming only the disambiguating company
+   * suffix when necessary.
+   *
+   * @param accountEmail platform account email used as the identity
+   * @param clientName company name used to disambiguate the username
+   * @return a unique ERP username candidate
    */
   public static String buildClientUsername(String accountEmail, String clientName) {
     if (findActiveUserByUsername(accountEmail) == null) {

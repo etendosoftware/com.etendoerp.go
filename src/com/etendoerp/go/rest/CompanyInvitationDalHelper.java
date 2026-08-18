@@ -21,6 +21,8 @@ import com.etendoerp.go.schemaforge.data.Invitation;
 /** DAO boundary for company invitation persistence and tenant filtering. */
 final class CompanyInvitationDalHelper {
 
+  private static final String EMAIL_PARAMETER = "email";
+
   private CompanyInvitationDalHelper() {
   }
 
@@ -35,7 +37,7 @@ final class CompanyInvitationDalHelper {
   static List<Invitation> findInvitationsForEmail(String email) {
     OBQuery<Invitation> query = OBDal.getInstance().createQuery(Invitation.class,
         "as i where lower(i.email) = :email and i.active = true order by i.creationDate desc");
-    query.setNamedParameter("email", email.toLowerCase(Locale.ROOT));
+    query.setNamedParameter(EMAIL_PARAMETER, email.toLowerCase(Locale.ROOT));
     disableTenantFilters(query);
     return query.list();
   }
@@ -45,7 +47,7 @@ final class CompanyInvitationDalHelper {
         "as i where i.client.id = :clientId and lower(i.email) = :email "
             + "and i.active = true and i.status in ('PENDING', 'SENT')");
     query.setNamedParameter("clientId", clientId);
-    query.setNamedParameter("email", email.toLowerCase(Locale.ROOT));
+    query.setNamedParameter(EMAIL_PARAMETER, email.toLowerCase(Locale.ROOT));
     disableTenantFilters(query);
     query.setMaxResult(1);
     List<Invitation> list = query.list();
@@ -57,7 +59,7 @@ final class CompanyInvitationDalHelper {
         "as u where u.client = :client and (lower(u.email) = :email "
             + "or lower(u.username) = :email) and u.active = true");
     query.setNamedParameter("client", client);
-    query.setNamedParameter("email", email.toLowerCase(Locale.ROOT));
+    query.setNamedParameter(EMAIL_PARAMETER, email.toLowerCase(Locale.ROOT));
     disableTenantFilters(query);
     query.setMaxResult(1);
     return query.uniqueResult();
