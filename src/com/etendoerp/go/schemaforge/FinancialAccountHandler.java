@@ -17,8 +17,10 @@
 
 package com.etendoerp.go.schemaforge;
 
+import java.math.BigDecimal;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -47,7 +49,7 @@ import org.openbravo.model.financialmgmt.payment.FIN_Reconciliation;
 import org.openbravo.model.financialmgmt.payment.MatchingAlgorithm;
 
 import com.etendoerp.psd2.bank.integration.data.Provider;
-import com.etendoerp.psd2.bank.integration.utils.BankIntegrationUtils;
+import com.etendoerp.psd2.bank.integration.utils.ProviderCatalogUtils;
 
 /**
  * NeoHandler that powers the financial-account window as a generic W (CRUD) spec
@@ -71,9 +73,15 @@ import com.etendoerp.psd2.bank.integration.utils.BankIntegrationUtils;
  * {@code null}, letting the generic CRUD service persist within its single
  * transaction. Injecting {@code country} before the insert is mandatory because
  * the row-level trigger {@code FIN_FINANCIAL_ACCOUNT_TRG2} ({@code @COUNTRY_IBAN@})
- * rejects a bank account that carries an IBAN without a country. On DELETE the
- * hook short-circuits with a soft-archive ({@code IsActive='N'}) to preserve the
- * former archive semantics and avoid FK violations from a hard delete.
+ * rejects a bank account that carries an IBAN without a country.
+ *
+ * <p>ETP-4871: DELETE now attempts a real hard delete (see {@link #deleteAccount}) —
+ * every FK from another table into {@code FIN_Financial_Account} is RESTRICT (no
+ * cascade), so the delete is only allowed once {@link FinancialAccountDeleteSupport#findDeleteBlockers} proves
+ * nothing depends on the account. The former soft-archive ({@code IsActive='N'})
+ * semantics still exist but moved onto the update path: a {@code PATCH
+ * {"active": false}} runs the same open-reconciliations guard the old DELETE-based
+ * archive used to run (see {@link #validateAndEnrichUpdate}).
  */
 @Named("financialAccountHeaderHandler")
 public class FinancialAccountHandler implements NeoHandler {
@@ -94,6 +102,10 @@ public class FinancialAccountHandler implements NeoHandler {
   private static final String FIELD_SWIFT_CODE = "swiftCode";
   private static final String FIELD_COUNTRY = "country";
   private static final String FIELD_MATCHING_ALGORITHM = "matchingAlgorithm";
+  /** DAL property of {@code EM_ETGO_Amount_Tolerance} — Etendo drops the "EM_" module prefix. */
+  private static final String FIELD_AMOUNT_TOLERANCE = "eTGOAmountTolerance";
+  /** A tolerance is a percentage OF the statement line, so beyond 100 % it stops meaning anything. */
+  private static final int AMOUNT_TOLERANCE_MAX_PCT = 100;
   /** Salt Edge provider chosen at offline creation (optional); persisted so a later bank connect
    *  can preselect that bank. {@link #FIELD_PSD2_PROVIDER} is the DAL FK property the generic CRUD
    *  resolves by id (mirrors how {@link #FIELD_COUNTRY} is injected). */
@@ -108,6 +120,13 @@ public class FinancialAccountHandler implements NeoHandler {
    *  on the generic CRUD response) rather than declared in decisions.json — the same technique
    *  {@code SalesInvoiceHeaderHandler} uses for {@code arInvoiceSubtype}. */
   private static final String FIELD_HAS_TRANSACTIONS = "hasTransactions";
+  /** {@code true} when {@link FinancialAccountDeleteSupport#findDeleteBlockers} finds nothing depending on the account
+   *  (ETP-4871). Injected the same way as {@link #FIELD_HAS_TRANSACTIONS} — post-hook, batched
+   *  per page via {@code FinancialAccountsPageHandler#loadDeleteBlockersByAccount}. */
+  private static final String FIELD_DELETABLE = "deletable";
+  /** Human-readable reason(s) blocking a hard delete; only present when
+   *  {@link #FIELD_DELETABLE} is {@code false}. */
+  private static final String FIELD_DELETE_BLOCKED_REASON = "deleteBlockedReason";
 
   /* ---------------------------------------------------------------------------
    * Derived list fields (ETP-4658 follow-up): the accounts list used to be served
@@ -124,6 +143,10 @@ public class FinancialAccountHandler implements NeoHandler {
   private static final String FIELD_PENDING_COUNT = "pendingCount";
   /** {@code EM_PSD2_Connection_Status = 'CO'} — drives the "Sincronizado / Sin conexión" badge. */
   private static final String FIELD_BANK_CONNECTED = "bankConnected";
+  /** Soft-disconnected but still linked to Salt Edge — drives the "Reconectar" action. */
+  private static final String FIELD_BANK_RECONNECTABLE = "bankReconnectable";
+  /** {@code PSD2_Provider.Logo_Url} of the connected provider; blank when there is none. */
+  private static final String FIELD_PROVIDER_LOGO_URL = "providerLogoUrl";
   /** Reserved for the sync badge; never computed server-side (mirrors the R spec's constant false). */
   private static final String FIELD_BANK_CONNECTION_PENDING = "bankConnectionPending";
   /** Currency ISO code, from the {@code c_currency} join. The contract only carries the FK. */
@@ -166,7 +189,7 @@ public class FinancialAccountHandler implements NeoHandler {
         return validateAndEnrichUpdate(context.getRecordId(), context.getRequestBody());
       }
       if (METHOD_DELETE.equals(method)) {
-        return archive(context.getRecordId());
+        return deleteAccount(context.getRecordId());
       }
       // GET (list / getById) flows straight through to the generic service.
       return null;
@@ -303,9 +326,11 @@ public class FinancialAccountHandler implements NeoHandler {
    * Enriches every GET row with the fields the accounts list needs but no AD column provides,
    * and attaches the collection-level {@code summary} used by the list sidebar.
    *
-   * <p>All three data loaders run <b>once</b> for the whole page (a Map/Set lookup per row),
+   * <p>All four data loaders run <b>once</b> for the whole page (a Map/Set lookup per row),
    * reusing {@link FinancialAccountsPageHandler}'s SQL verbatim. The previous implementation
-   * issued two queries <i>per row</i> just for {@code hasTransactions}.
+   * issued two queries <i>per row</i> just for {@code hasTransactions}; {@code deletable} /
+   * {@code deleteBlockedReason} (ETP-4871) follow the same rule — one batched query for the
+   * whole page, never {@link FinancialAccountDeleteSupport#findDeleteBlockers} called per row.
    *
    * <p>The summary deliberately aggregates only the rows present in <b>this</b> response rather
    * than the loader's own universe: the generic CRUD already applied the role's readable-org and
@@ -323,10 +348,12 @@ public class FinancialAccountHandler implements NeoHandler {
     }
     Map<String, Integer> pendingByAccount = loaders.loadPendingByAccount(clientId, orgs);
     Set<String> withTransactions = loaders.loadAccountsWithTransactions(clientId, orgs);
+    Map<String, List<String>> deleteBlockersByAccount = loaders.loadDeleteBlockersByAccount(clientId, orgs);
 
     Set<String> visibleIds = new java.util.LinkedHashSet<>();
     for (int i = 0; i < dataArr.length(); i++) {
-      String correlatedId = enrichRecord(dataArr.getJSONObject(i), byId, pendingByAccount, withTransactions);
+      String correlatedId = enrichRecord(dataArr.getJSONObject(i), byId, pendingByAccount, withTransactions,
+          deleteBlockersByAccount);
       if (correlatedId != null) {
         visibleIds.add(correlatedId);
       }
@@ -360,7 +387,8 @@ public class FinancialAccountHandler implements NeoHandler {
    *         towards {@code summary}, or {@code null} when it did not.
    */
   private String enrichRecord(JSONObject rec, Map<String, FinancialAccountsPageHandler.AccountRow> byId,
-      Map<String, Integer> pendingByAccount, Set<String> withTransactions) throws JSONException {
+      Map<String, Integer> pendingByAccount, Set<String> withTransactions,
+      Map<String, List<String>> deleteBlockersByAccount) throws JSONException {
     String id = StringUtils.trimToNull(rec.optString("id", null));
     // A row with no id cannot be correlated with the loaders; keep the historical
     // contract (the flag is always present, defaulting to false) instead of omitting it.
@@ -373,11 +401,19 @@ public class FinancialAccountHandler implements NeoHandler {
     // which the list would render as text under the account type.
     rec.put(FIELD_IBAN_ALIAS, rec.isNull(FIELD_IBAN) ? "" : rec.optString(FIELD_IBAN, ""));
 
+    List<String> blockers = deleteBlockersByAccount.getOrDefault(id, Collections.emptyList());
+    rec.put(FIELD_DELETABLE, blockers.isEmpty());
+    if (!blockers.isEmpty()) {
+      rec.put(FIELD_DELETE_BLOCKED_REASON, String.join(" ", blockers));
+    }
+
     FinancialAccountsPageHandler.AccountRow row = byId.get(id);
     if (row == null) {
       return null;
     }
     rec.put(FIELD_BANK_CONNECTED, row.bankConnected);
+    rec.put(FIELD_BANK_RECONNECTABLE, row.bankReconnectable);
+    rec.put(FIELD_PROVIDER_LOGO_URL, row.providerLogoUrl);
     rec.put(FIELD_BANK_CONNECTION_PENDING, row.bankConnectionPending);
     rec.put(FIELD_CURRENCY_ISO, row.currency.iso);
     rec.put(FIELD_CURRENCY_ID, row.currency.id);
@@ -389,7 +425,7 @@ public class FinancialAccountHandler implements NeoHandler {
 
   /**
    * Seam for the SQL loaders shared with the accounts-page handler. Package-private and
-   * overridable so unit tests can stub the three queries without a live connection —
+   * overridable so unit tests can stub the four queries without a live connection —
    * same convention as {@link #loadAccount(String)} and {@code hasOpenReconciliations}.
    */
   FinancialAccountsPageHandler pageLoaders() {
@@ -445,6 +481,10 @@ public class FinancialAccountHandler implements NeoHandler {
     if (lengthError != null) {
       return lengthError;
     }
+    NeoResponse toleranceError = validateAmountTolerance(body);
+    if (toleranceError != null) {
+      return toleranceError;
+    }
     if (StringUtils.isBlank(currencyId)) {
       return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "Currency is required");
     }
@@ -491,7 +531,7 @@ public class FinancialAccountHandler implements NeoHandler {
     String providerCode = body.optString(FIELD_PROVIDER_CODE, "").trim();
     if (TYPE_BANK.equals(type) && StringUtils.isNotBlank(providerCode)) {
       String providerName = body.optString(FIELD_PROVIDER_NAME, providerCode).trim();
-      Provider provider = BankIntegrationUtils.upsertProvider(providerCode, providerName, null);
+      Provider provider = ProviderCatalogUtils.upsertProvider(providerCode, providerName, null);
       OBDal.getInstance().flush();
       body.put(FIELD_PSD2_PROVIDER, provider.getId());
     }
@@ -507,24 +547,30 @@ public class FinancialAccountHandler implements NeoHandler {
     if (body == null) {
       return null;
     }
+    // Archive guard moved here from the old DELETE-based archive() (ETP-4871): the frontend now
+    // archives via PATCH {"active": false} instead of DELETE, so the open-reconciliations check
+    // that used to gate the soft-archive must gate this instead, before the generic CRUD persists
+    // the flip. Reuses the same has()/isNull() body-inspection idiom as the IBAN check below.
+    if (isArchivingRequest(body)) {
+      NeoResponse archiveGuardError = guardArchive(id);
+      if (archiveGuardError != null) {
+        return archiveGuardError;
+      }
+    }
     String name = body.has(FIELD_NAME) ? body.optString(FIELD_NAME, "").trim() : null;
     String iban = body.optString(FIELD_IBAN, "").trim();
     String swift = body.optString(FIELD_SWIFT_CODE, "").trim();
 
-    if (name != null) {
-      if (StringUtils.isBlank(name)) {
-        return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "Name is required");
-      }
-      if (name.length() > NAME_MAX_LENGTH) {
-        return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "Name is too long");
-      }
-      if (nameExists(name, id)) {
-        return NeoResponse.error(HttpServletResponse.SC_CONFLICT,
-            "An account with this name already exists");
-      }
+    NeoResponse nameError = validateRenamedName(name, id);
+    if (nameError != null) {
+      return nameError;
     }
     if (iban.length() > IBAN_MAX_LENGTH || swift.length() > SWIFT_MAX_LENGTH) {
       return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "IBAN or BIC/SWIFT is too long");
+    }
+    NeoResponse toleranceError = validateAmountTolerance(body);
+    if (toleranceError != null) {
+      return toleranceError;
     }
     // Keep the country in sync with the IBAN whenever the caller sends an IBAN.
     if (body.has(FIELD_IBAN) && StringUtils.isNotBlank(iban)) {
@@ -537,13 +583,21 @@ public class FinancialAccountHandler implements NeoHandler {
   }
 
   // ---------------------------------------------------------------------------
-  // Delete (short-circuit with a soft-archive)
+  // Archive guard (moved here from the former DELETE-based archive(); ETP-4871)
   // ---------------------------------------------------------------------------
 
-  NeoResponse archive(String id) {
-    if (StringUtils.isBlank(id)) {
-      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "Missing account id");
-    }
+  /** {@code true} when the incoming body explicitly sets {@code active} to {@code false}. */
+  private boolean isArchivingRequest(JSONObject body) {
+    return body.has(FIELD_ACTIVE) && !body.isNull(FIELD_ACTIVE) && !body.optBoolean(FIELD_ACTIVE, true);
+  }
+
+  /**
+   * Blocks an archive (soft-delete via {@code active=false}) the same way the old DELETE-based
+   * {@code archive()} used to: an account with open reconciliations cannot be archived. Loads the
+   * account itself here (the rest of {@link #validateAndEnrichUpdate} does not need it) so a
+   * missing id/account still gets the same 400 the old DELETE path returned.
+   */
+  private NeoResponse guardArchive(String id) {
     FIN_FinancialAccount account = loadAccount(id);
     if (account == null) {
       return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "Account not found");
@@ -552,8 +606,42 @@ public class FinancialAccountHandler implements NeoHandler {
       return NeoResponse.error(HttpServletResponse.SC_CONFLICT,
           "Cannot archive an account with open reconciliations");
     }
-    account.setActive(false);
-    OBDal.getInstance().save(account);
+    return null;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Delete (hard delete, ETP-4871: every FK into FIN_Financial_Account is RESTRICT)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Hard-deletes the account once nothing depends on it via a foreign key. Every FK from another
+   * table into {@code FIN_Financial_Account} is {@code RESTRICT} (no cascade), so a bare delete
+   * would fail at the DB level regardless — {@link FinancialAccountDeleteSupport#findDeleteBlockers}
+   * proves in advance that it will not, and returns a 409 naming every blocker instead of surfacing
+   * a raw constraint violation. The account's own auto-created configuration rows (accounting
+   * setup, default payment methods, matching rules, PSD2 sync log) are swept first via
+   * {@link FinancialAccountDeleteSupport#sweepOwnConfig} — those are not blockers, every account
+   * has them from creation.
+   *
+   * <p>The blocker checks and the config sweep live in {@link FinancialAccountDeleteSupport}
+   * (extracted purely to keep this class under the Sonar method-count threshold, java:S1448) —
+   * this method is the only remaining caller in this class.
+   */
+  NeoResponse deleteAccount(String id) {
+    if (StringUtils.isBlank(id)) {
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "Missing account id");
+    }
+    FIN_FinancialAccount account = loadAccount(id);
+    if (account == null) {
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "Account not found");
+    }
+    List<String> blockers = FinancialAccountDeleteSupport.findDeleteBlockers(account, hasTransactions(account));
+    if (!blockers.isEmpty()) {
+      return NeoResponse.error(HttpServletResponse.SC_CONFLICT,
+          "Cannot delete this account. " + String.join(" ", blockers));
+    }
+    FinancialAccountDeleteSupport.sweepOwnConfig(account);
+    OBDal.getInstance().remove(account);
     OBDal.getInstance().flush();
     return NeoResponse.noContent();
   }
@@ -561,6 +649,65 @@ public class FinancialAccountHandler implements NeoHandler {
   // ---------------------------------------------------------------------------
   // Helpers
   // ---------------------------------------------------------------------------
+
+  /**
+   * Rejects an amount tolerance outside 0…100. Returns {@code null} when the body does not carry the
+   * field at all, so a partial update that never mentions it is untouched.
+   *
+   * <p>Enforced here and not only in the edit modal because this is a generic W spec: anything
+   * holding a token can PUT {@code eTGOAmountTolerance} straight at the entity. The value is read as
+   * a PERCENTAGE of the statement line by both the automatch engine
+   * ({@code AutoMatchSupport.computeAmountTolerance}) and the difference posting
+   * ({@code ReconciliationDifferenceSupport.differenceLimit}); at 100 % or more the latter's gate
+   * would authorise posting an entire statement line of any size to a G/L item, so this is a
+   * boundary, not a nicety.
+   */
+  private NeoResponse validateAmountTolerance(JSONObject body) {
+    if (body == null || !body.has(FIELD_AMOUNT_TOLERANCE)
+        || body.isNull(FIELD_AMOUNT_TOLERANCE)) {
+      return null;
+    }
+    String raw = StringUtils.trimToEmpty(body.optString(FIELD_AMOUNT_TOLERANCE, ""));
+    if (raw.isEmpty()) {
+      return null;
+    }
+    BigDecimal pct;
+    try {
+      pct = new BigDecimal(raw);
+    } catch (NumberFormatException e) {
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
+          "Amount tolerance must be a number: " + raw);
+    }
+    if (pct.signum() < 0
+        || pct.compareTo(BigDecimal.valueOf(AMOUNT_TOLERANCE_MAX_PCT)) > 0) {
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
+          "Amount tolerance must be a percentage between 0 and " + AMOUNT_TOLERANCE_MAX_PCT
+              + " (received " + pct.toPlainString() + ").");
+    }
+    return null;
+  }
+
+  /**
+   * Validates the name an update is trying to set. A {@code null} name means the caller never sent
+   * the field, so a partial update that does not rename the account skips these checks entirely —
+   * which is why this cannot reuse {@link #validateLengths}, whose blank check is unconditional.
+   */
+  private NeoResponse validateRenamedName(String name, String id) {
+    if (name == null) {
+      return null;
+    }
+    if (StringUtils.isBlank(name)) {
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "Name is required");
+    }
+    if (name.length() > NAME_MAX_LENGTH) {
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "Name is too long");
+    }
+    if (nameExists(name, id)) {
+      return NeoResponse.error(HttpServletResponse.SC_CONFLICT,
+          "An account with this name already exists");
+    }
+    return null;
+  }
 
   private NeoResponse validateLengths(String name, String iban, String swift) {
     if (StringUtils.isBlank(name)) {

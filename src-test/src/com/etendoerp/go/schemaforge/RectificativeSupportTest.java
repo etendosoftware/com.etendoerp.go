@@ -19,6 +19,8 @@ package com.etendoerp.go.schemaforge;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import org.junit.After;
@@ -31,6 +33,12 @@ import org.openbravo.model.common.enterprise.DocumentType;
  * <p>Covers {@link RectificativeSupport#isRectificative(DocumentType)}, using the
  * {@link RectificativeSupport#setColumnPresentForTests(Boolean)} hook to avoid depending on a
  * real database connection for the column-presence check.
+ *
+ * <p>ETP-4841 removed the id-based lookup ({@code isRectificativeDocType}) and the client-wide
+ * doc-type resolution ({@code resolveRectificativeDocTypes}) together with their only callers:
+ * whether an invoice is a consumable credit is now decided by the SIGN of its total, never by its
+ * document type. What remains here is the document-type FLAG itself, which still drives display
+ * classification (FAC vs RECTIFICATIVA badge) and the return-shipment doc-type lookup.
  */
 public class RectificativeSupportTest {
 
@@ -45,12 +53,18 @@ public class RectificativeSupportTest {
     assertFalse(RectificativeSupport.isRectificative(null));
   }
 
+  /**
+   * When the column is absent (SIF General not installed) the flag getter is never consulted —
+   * that short-circuit is what keeps a SELECT against a missing column from poisoning the shared
+   * PostgreSQL transaction for the rest of the request.
+   */
   @Test
   public void isRectificative_columnAbsent_returnsFalseWithoutTouchingDocType() {
     RectificativeSupport.setColumnPresentForTests(false);
     DocumentType dt = mock(DocumentType.class);
 
     assertFalse(RectificativeSupport.isRectificative(dt));
+    verify(dt, never()).isEtsgIsRectificative();
   }
 
   @Test
@@ -78,5 +92,18 @@ public class RectificativeSupportTest {
     when(dt.isEtsgIsRectificative()).thenReturn(null);
 
     assertFalse(RectificativeSupport.isRectificative(dt));
+  }
+
+  /** The forced column-presence value survives repeated calls (it is a cache, not a one-shot). */
+  @Test
+  public void isColumnPresent_forcedValue_isStableAcrossCalls() {
+    RectificativeSupport.setColumnPresentForTests(true);
+
+    assertTrue(RectificativeSupport.isColumnPresent());
+    assertTrue(RectificativeSupport.isColumnPresent());
+
+    RectificativeSupport.setColumnPresentForTests(false);
+
+    assertFalse(RectificativeSupport.isColumnPresent());
   }
 }

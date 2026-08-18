@@ -24,7 +24,9 @@ import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.security.SecureRandom;
+import java.util.ArrayList;
 import java.util.Base64;
+import java.util.Comparator;
 import java.util.Date;
 import java.util.List;
 import java.util.Locale;
@@ -66,6 +68,11 @@ import com.etendoerp.go.featureflags.FeatureFlagContext;
 import com.etendoerp.go.featureflags.GoFeatureFlags;
 import com.etendoerp.go.payment.TenantPaywallService;
 import com.etendoerp.go.payment.TenantPlanService;
+import com.etendoerp.go.payment.HostedCheckoutService;
+import com.etendoerp.go.payment.CheckoutConfiguration;
+import com.etendoerp.go.payment.CheckoutPaymentRegistry;
+import com.etendoerp.go.payment.CheckoutWebhookVerifier;
+import com.etendoerp.go.onboarding.OnboardingAcctdimCentrallyMaintainedService;
 import com.etendoerp.go.onboarding.OnboardingBaselineService;
 import com.etendoerp.go.onboarding.OnboardingAccountingWiringService;
 import com.etendoerp.go.onboarding.OnboardingDatasetImportService;
@@ -197,7 +204,13 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private static final String PROGRESS_ORG_INFO = "orgInfo";
   private static final String PROGRESS_BASELINE = "baseline";
   private static final String PROGRESS_BANK_CONNECTION_SYNC = "bankConnectionSync";
+  private static final String PROGRESS_BP_GROUP_ACCT_PATCH = "bpGroupAcctPatch";
+  private static final String PROGRESS_ACCTDIM_VISIBILITY = "acctdimVisibility";
   private static final String LEGAL_WITH_ACCOUNTING_ORG_TYPE_ID = "1";
+  // Stable codes for provisioning failures whose underlying message is an unresolved AD message
+  // key. Mirrored by the frontend's onboarding/errorMessages.js (ETP-4665).
+  private static final String ERROR_CODE_CLIENT_CREATION_FAILED = "CLIENT_CREATION_FAILED";
+  private static final String ERROR_CODE_ORG_CREATION_FAILED = "ORG_CREATION_FAILED";
   private static final long PASSWORD_RESET_TTL_SECONDS = 30 * 60L;
   private static final String PASSWORD_RESET_NEUTRAL_MESSAGE =
       "If an account exists for that email, password reset instructions will be sent.";
@@ -208,10 +221,13 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private static final String FIELD_DRAFT = "draft";
   private static final String FIELD_DRAFT_STEP = "step";
   private static final String FIELD_DRAFT_FORM = "form";
+  private static final String FIELD_COUNTRY_CODE = "countryCode";
   private static final int ONBOARDING_DRAFT_MAX_LENGTH = 4000;
-  private static final String[] ONBOARDING_DRAFT_FORM_FIELDS = { "fullName", "businessType",
-      FIELD_CLIENT_NAME, "currency", FIELD_LANGUAGE, "countryCode", "fiscalIdType",
-      "fiscalIdValue", "address", "sector" };
+  private static final String FIELD_FULL_NAME = "fullName";
+  private static final String FIELD_ADDRESS = "address";
+  private static final String[] ONBOARDING_DRAFT_FORM_FIELDS = { FIELD_FULL_NAME, "businessType",
+      FIELD_CLIENT_NAME, "currency", FIELD_LANGUAGE, FIELD_COUNTRY_CODE, "fiscalIdType",
+      "fiscalIdValue", FIELD_ADDRESS, "sector" };
 
   OnboardingDatasetImportService onboardingDatasetImportService = new OnboardingDatasetImportService();
   OnboardingRoleProvisioningService onboardingRoleProvisioningService =
@@ -230,12 +246,15 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       new OnboardingOrgInfoService();
   OnboardingDefaultCustomerService onboardingDefaultCustomerService =
       new OnboardingDefaultCustomerService();
+  OnboardingAcctdimCentrallyMaintainedService onboardingAcctdimCentrallyMaintainedService =
+      new OnboardingAcctdimCentrallyMaintainedService();
   OnboardingBaselineService onboardingBaselineService =
       new OnboardingBaselineService();
   OnboardingBankConnectionSyncService onboardingBankConnectionSyncService =
       new OnboardingBankConnectionSyncService();
   TenantPaywallService tenantPaywallService = new TenantPaywallService();
   TenantPlanService tenantPlanService = new TenantPlanService();
+  HostedCheckoutService hostedCheckoutService = new HostedCheckoutService();
   private final TransactionalAuthEmailSender authEmailSender;
   private final EtendoGoSsoProviderRegistry ssoProviderRegistry;
   private final GoSessionService goSessionService;
@@ -291,6 +310,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       handleEnvironmentLogin(request, response);
     } else if (isPath(path, PATH_SESSION)) {
       handleSessionRestore(request, response);
+    } else if (path != null && path.startsWith("/checkout/sessions/")) {
+      handleCheckoutStatus(request, response);
     } else {
       writeError(response, HttpServletResponse.SC_NOT_FOUND, ERROR_UNKNOWN_ENDPOINT + path);
     }
@@ -299,6 +320,10 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   @Override
   public void doPost(HttpServletRequest request, HttpServletResponse response) throws IOException {
     String path = request.getPathInfo();
+    if (isPath(path, "/checkout/webhook")) {
+      handleCheckoutWebhook(request, response);
+      return;
+    }
     String ssoProvider = extractSsoProvider(path);
     if (isPath(path, "/register")) {
       handleRegister(request, response);
@@ -326,6 +351,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       handleSaveOnboardingDraft(request, response);
     } else if (isPath(path, "/onboarding")) {
       handleOnboarding(request, response);
+    } else if (isPath(path, "/checkout/sessions")) {
+      handleCheckoutSession(request, response);
     } else {
       writeError(response, HttpServletResponse.SC_NOT_FOUND, ERROR_UNKNOWN_ENDPOINT + path);
     }
@@ -338,6 +365,86 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       handleSessionDelete(request, response);
     } else {
       writeError(response, HttpServletResponse.SC_NOT_FOUND, ERROR_UNKNOWN_ENDPOINT + path);
+    }
+  }
+
+  private void handleCheckoutSession(HttpServletRequest request, HttpServletResponse response)
+      throws IOException {
+    runWithAuthenticatedAccount(request, response, "checkout-session", account -> {
+      JSONObject body = readJsonBodyOrBadRequest(request, response);
+      if (body == null) return;
+      String clientName = body.optString(FIELD_CLIENT_NAME, "").trim();
+      if (clientName.isEmpty()) {
+        writeError(response, HttpServletResponse.SC_BAD_REQUEST, CODE_INVALID_REQUEST,
+            "clientName is required", "clientName is required");
+        return;
+      }
+      String requestOrigin = request.getHeader("Origin");
+      final String origin = StringUtils.isBlank(requestOrigin)
+          ? PublicUrlResolver.resolveAppBaseUrl(request) : requestOrigin;
+      try {
+        JSONObject result = hostedCheckoutService.createSession(account.getEmail(), clientName, origin);
+        writeResponse(response, HttpServletResponse.SC_CREATED, result);
+      } catch (IllegalStateException e) {
+        writeError(response, HttpServletResponse.SC_SERVICE_UNAVAILABLE, "CHECKOUT_NOT_CONFIGURED",
+            "Checkout is not configured", "Checkout is not configured");
+      } catch (Exception e) {
+        log.error("Could not create hosted checkout session", e);
+        writeError(response, HttpServletResponse.SC_BAD_GATEWAY, "CHECKOUT_PROVIDER_ERROR",
+            "Unable to create checkout session", "Unable to create checkout session");
+      }
+    });
+  }
+
+  private void handleCheckoutStatus(HttpServletRequest request, HttpServletResponse response)
+      throws IOException {
+    String prefix = "/checkout/sessions/";
+    String path = request.getPathInfo();
+    String requestId = path != null && path.startsWith(prefix) ? path.substring(prefix.length()) : "";
+    runWithAuthenticatedAccount(request, response, "checkout-status", account -> {
+      CheckoutPaymentRegistry.Payment payment = CheckoutPaymentRegistry.find(requestId,
+          account.getEmail());
+      JSONObject result = new JSONObject();
+      result.put("requestId", requestId);
+      result.put(FIELD_STATUS, payment == null ? "pending" : "paid");
+      if (payment != null) result.put(FIELD_CLIENT_NAME, payment.clientName);
+      writeResponse(response, HttpServletResponse.SC_OK, result);
+    });
+  }
+
+  private void handleCheckoutWebhook(HttpServletRequest request, HttpServletResponse response)
+      throws IOException {
+    String payload = readRawBody(request);
+    String signature = request.getHeader("Stripe-Signature");
+    if (!CheckoutWebhookVerifier.verify(payload, signature, CheckoutConfiguration.webhookSecret(),
+        Instant.now().getEpochSecond(), 300)) {
+      writeError(response, HttpServletResponse.SC_BAD_REQUEST, "INVALID_CHECKOUT_SIGNATURE",
+          "Invalid checkout webhook signature", "Invalid checkout webhook signature");
+      return;
+    }
+    try {
+      JSONObject event = new JSONObject(payload);
+      String eventId = event.optString("id", "");
+      if (!CheckoutPaymentRegistry.claimEvent(eventId)) {
+        writeResponse(response, HttpServletResponse.SC_OK, new JSONObject().put("received", true));
+        return;
+      }
+      String type = event.optString("type", "");
+      if ("checkout.session.completed".equals(type)
+          || "checkout.session.async_payment_succeeded".equals(type)) {
+        JSONObject object = event.getJSONObject("data").getJSONObject("object");
+        JSONObject metadata = object.optJSONObject("metadata");
+        String requestId = metadata == null ? "" : metadata.optString("request_id", "");
+        String email = metadata == null ? "" : metadata.optString("account_email", "");
+        String clientName = metadata == null ? "" : metadata.optString("client_name", "");
+        if (!StringUtils.isBlank(requestId) && !StringUtils.isBlank(email)) {
+          CheckoutPaymentRegistry.recordPaid(requestId, email, clientName);
+        }
+      }
+      writeResponse(response, HttpServletResponse.SC_OK, new JSONObject().put("received", true));
+    } catch (JSONException e) {
+      writeError(response, HttpServletResponse.SC_BAD_REQUEST, "INVALID_CHECKOUT_PAYLOAD",
+          "Invalid checkout webhook payload", "Invalid checkout webhook payload");
     }
   }
 
@@ -397,6 +504,16 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     if (!EmailContractCommandSupport.isValidEmail(email)) {
       writeError(response, HttpServletResponse.SC_BAD_REQUEST, CODE_INVALID_EMAIL_FORMAT,
           "Invalid email format", "Invalid email format");
+      return;
+    }
+    // ETP-4665: the email later becomes AD_USER.USERNAME/NAME (60) during provisioning, so an
+    // over-long address is only detected halfway through tenant creation. Reject it at signup.
+    OnboardingFieldLimits.LengthViolation violation = OnboardingFieldLimits.firstViolation(
+        FIELD_EMAIL, email, OnboardingFieldLimits.EMAIL,
+        "name", name, OnboardingFieldLimits.ACCOUNT_NAME,
+        FIELD_PASSWORD, password, OnboardingFieldLimits.PASSWORD);
+    if (violation != null) {
+      writeFieldTooLongError(response, violation);
       return;
     }
     if (!PasswordPolicy.isStrong(password)) {
@@ -1128,7 +1245,17 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       Account account = authenticated.account;
 
       org.codehaus.jettison.json.JSONArray envArray = new org.codehaus.jettison.json.JSONArray();
-      List<User> environmentUsers = EtendoGoJwtDalHelper.findEnvironmentUsersByAccountEmail(account.getEmail());
+      List<User> environmentUsers = new ArrayList<>(
+          EtendoGoJwtDalHelper.findEnvironmentUsersByAccountEmail(account.getEmail()));
+      // The first environment is entered automatically after account login. Prefer the paid
+      // productive tenant so a demo tenant never unexpectedly becomes the active workspace when
+      // an account owns both plans. The client repeats this ordering for older backends.
+      environmentUsers.sort(Comparator
+          .comparing((User user) -> TenantPlanService.PLAN_PRODUCTIVE
+              .equals(tenantPlanService.resolvePlan(user.getClient().getId())))
+          .reversed()
+          .thenComparing(user -> StringUtils.defaultString(user.getClient().getName()),
+              String.CASE_INSENSITIVE_ORDER));
       for (User environmentUser : environmentUsers) {
         Client client = environmentUser.getClient();
         List<Organization> organizations = EtendoGoJwtDalHelper.findNonStarOrganizations(client.getId());
@@ -1186,7 +1313,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     try {
       OBContext.setOBContext("0", "0", "0", "0");
       OBContext.setAdminMode(true);
-      String accountEmail = EtendoGoJwtSupport.requireAccountEmail(token);
+      Account account = EtendoGoJwtDalHelper.findActiveAccountByBearerToken(token);
+      String accountEmail = account == null ? null : account.getEmail();
       if (accountEmail == null) {
         writeError(response, HttpServletResponse.SC_UNAUTHORIZED, INVALID_OR_EXPIRED_TOKEN);
         return;
@@ -1221,7 +1349,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    * POST /sws/go/onboarding
    * Header: Authorization: Bearer <session_token>
    * Body: { "clientName": "...", "currency": "EUR", "language": "es_ES", "countryCode": "ES",
-   *         "paymentToken": "mock-paid-..." }
+   *         "paymentToken": "<checkout requestId returned by POST /sws/go/checkout/sessions>" }
    *
    * Creates a new Etendo environment (AD_Client + AD_Org) using the existing
    * InitialClientSetup and InitialOrgSetup business utilities.
@@ -1480,11 +1608,14 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     try {
       boolean ownsTenant = EtendoGoJwtDalHelper.countTenantsOwnedByAccountEmail(accountEmail) > 0;
       boolean resuming = isResumingOwnedTenant(onboardingRequest.clientName, accountEmail);
+      boolean convertingDemo = "convert-demo".equalsIgnoreCase(onboardingRequest.upgradeAction);
+      // Conversion is a paid state transition, not a free retry of interrupted onboarding.
+      boolean paywallResuming = resuming && !convertingDemo;
       TenantPaywallService.Decision decision = tenantPaywallService.decide(true, ownsTenant,
-          resuming, onboardingRequest.paymentToken);
+          paywallResuming, onboardingRequest.paymentToken, accountEmail, onboardingRequest.clientName);
       // Only a request that actually had to clear the paywall counts as a paid upgrade. A first
       // tenant, or a resume, stays on the free plan even if the payload carried a token.
-      boolean paid = !decision.isBlocked() && ownsTenant && !resuming;
+      boolean paid = !decision.isBlocked() && ownsTenant && (convertingDemo || !resuming);
       return new PaywallOutcome(decision, paid);
     } finally {
       OBContext.restorePreviousMode();
@@ -1545,7 +1676,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     try {
       OBContext.setOBContext("0", "0", "0", "0");
       OBContext.setAdminMode(true);
-      String resolvedEmail = EtendoGoJwtSupport.requireAccountEmail(token);
+      Account account = EtendoGoJwtDalHelper.findActiveAccountByBearerToken(token);
+      String resolvedEmail = account == null ? null : account.getEmail();
       if (resolvedEmail == null) {
         writeError(response, HttpServletResponse.SC_UNAUTHORIZED, INVALID_OR_EXPIRED_TOKEN);
       } else {
@@ -1599,13 +1731,28 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       data.currencyIso = body.optString("currency", "EUR").trim();
       data.language = body.optString(FIELD_LANGUAGE, "en_US").trim();
       // Country drives the org's tax resolution; default to Spain (ES) when the form omits it.
-      data.countryCode = body.optString("countryCode", "ES").trim();
-      data.address = body.optString("address", "").trim();
+      data.countryCode = body.optString(FIELD_COUNTRY_CODE, "ES").trim();
+      data.address = body.optString(FIELD_ADDRESS, "").trim();
       // Full name of the person onboarding. Optional in the payload; when present
       // it becomes the display name of the client admin user (otherwise Etendo's
       // InitialClientSetup leaves it as the username/email).
-      data.fullName = body.optString("fullName", "").trim();
+      data.fullName = body.optString(FIELD_FULL_NAME, "").trim();
+      // Tax ID (ETP-4749): optional in the wizard, so a blank value here is expected and
+      // must not fail the request — wireOrgInfo() only persists it when non-blank.
+      data.taxId = body.optString("fiscalIdValue", "").trim();
       data.paymentToken = body.optString(FIELD_PAYMENT_TOKEN, "").trim();
+      data.upgradeAction = body.optString("upgradeAction", "create-productive").trim();
+      // ETP-4665: validate before the NDJSON stream opens. Past this point a length overflow
+      // surfaces as a DAL ValidationException halfway through tenant creation, which rolls the
+      // transaction back and reports the opaque "@CreateClientFailed@".
+      OnboardingFieldLimits.LengthViolation violation = OnboardingFieldLimits.firstViolation(
+          FIELD_CLIENT_NAME, data.clientName, OnboardingFieldLimits.CLIENT_NAME,
+          FIELD_FULL_NAME, data.fullName, OnboardingFieldLimits.FULL_NAME,
+          FIELD_ADDRESS, data.address, OnboardingFieldLimits.ADDRESS);
+      if (violation != null) {
+        writeFieldTooLongError(response, violation);
+        return null;
+      }
       return data;
     } catch (JSONException e) {
         String message = e.getMessage() != null && e.getMessage().contains(FIELD_CLIENT_NAME)
@@ -1704,11 +1851,16 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
         adminPassword, "", "Account", "Calendar", false, null, false, false, false,
         false, false);
     if (!"Success".equals(clientResult.getType())) {
+      // InitialClientSetup reports failures as UNRESOLVED AD message keys ("@CreateClientFailed@")
+      // whose text says nothing about the actual cause — the real exception only reaches the
+      // server log. Keep the raw value here for diagnostics and hand the client a stable code it
+      // can localize (ETP-4665).
       String errorMsg = clientResult.getMessage() != null
           ? clientResult.getMessage()
           : "Client creation failed";
+      log.error("Client creation failed for '{}': {}", clientName, errorMsg);
       sendProgress(writer, PROGRESS_CLIENT, PROGRESS_ERROR, errorMsg);
-      sendFinalResult(writer, false, errorMsg);
+      sendFinalResult(writer, false, errorMsg, ERROR_CODE_CLIENT_CREATION_FAILED);
       return false;
     }
     sendProgress(writer, PROGRESS_CLIENT, "done", "Client created successfully");
@@ -1789,14 +1941,50 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
         LEGAL_WITH_ACCOUNTING_ORG_TYPE_ID, starOrgId, null, "", "", false, null, currencyId,
         false, false, false, false, false);
     if (!"Success".equals(orgResult.getType())) {
+      // Same as createClient: InitialOrgSetup yields raw AD keys such as "@CreateOrgFailed@".
       String errorMsg = orgResult.getMessage() != null
           ? orgResult.getMessage()
           : "Organization creation failed";
+      log.error("Organization creation failed for '{}': {}", clientName, errorMsg);
       sendProgress(writer, PROGRESS_ORGANIZATION, PROGRESS_ERROR, errorMsg);
-      sendFinalResult(writer, false, errorMsg);
+      sendFinalResult(writer, false, errorMsg, ERROR_CODE_ORG_CREATION_FAILED);
       return false;
     }
+    // ETP-4749: AD_Org.SocialName ("Nombre comercial" in the Organization settings window)
+    // was never set anywhere in the onboarding flow — InitialOrgSetup/InitialSetupUtility
+    // (Etendo core) only set Name/SearchKey. The wizard has no separate "trade name" field,
+    // so reuse the same clientName already used for Name — it already resolves to the
+    // user's Full Name for Freelancers (CompanyStep.jsx has no Company Name field for
+    // that business type). A missing SocialName write here must not fail an otherwise
+    // successful organization creation; log and move on.
+    applySocialName(clientId, clientName);
     sendProgress(writer, PROGRESS_ORGANIZATION, "done", "Organization created successfully");
+    return true;
+  }
+
+  /**
+   * Sets {@code AD_Org.SocialName} from the onboarding {@code clientName}, once, right after
+   * organization creation succeeds. Deliberately NOT part of {@link OnboardingOrgInfoService}'s
+   * idempotent reconcile chain (which re-runs on every resumed/retried onboarding call): a
+   * resumed tenant may already have had its "Nombre comercial" edited by hand in the
+   * Organization settings window, and re-running this on every retry would silently overwrite
+   * that edit. Organization creation itself only happens once (guarded by
+   * {@code organizationExists()} in {@link #ensureOrganization}), so this call site shares the
+   * same one-time guarantee.
+   *
+   * @return {@code true} when the organization was found and updated; {@code false} otherwise
+   *     (logged, non-fatal — the organization itself was already created successfully).
+   */
+  boolean applySocialName(String clientId, String clientName) {
+    Organization org = EtendoGoJwtDalHelper.findFirstOrganization(clientId);
+    if (org == null) {
+      log.warn("applySocialName: no organization found for client {} right after creation",
+          clientId);
+      return false;
+    }
+    org.setSocialName(clientName);
+    OBDal.getInstance().save(org);
+    OBDal.getInstance().flush();
     return true;
   }
 
@@ -1841,6 +2029,23 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       return false;
     }
     if (!scheduleBankConnectionSync(writer, clientId, orgId, adminUserId, adminRoleId)) {
+      return false;
+    }
+    // ETP-4720: patch the 5 C_BP_Group_Acct columns neither the core c_bp_group_trg() trigger nor
+    // OnboardingAccountingWiringService's own BP_GROUP_ACCT_SQL populate. Runs LAST among the
+    // provisioning steps (right before the data-fix baseline) since it only needs C_BP_Group and
+    // C_AcctSchema_Default, both already provisioned by step 1 -- see
+    // OnboardingAccountingWiringService#patchBpGroupAcctMissingColumns for the full root-cause
+    // explanation and its lockstep corrective twin (R21-bp-group-acct-remaining-columns.sql).
+    if (!patchBpGroupAcctMissingColumns(writer, clientId, orgId, adminUserId, adminRoleId)) {
+      return false;
+    }
+    // ETP-4854 (gap K1): force flat, per-dimension accounting-dimension visibility for the new
+    // tenant. Runs AFTER the accounting-wiring steps (which created this client's
+    // C_AcctSchema_Element rows, all defaulting isactive='Y') and BEFORE the baseline stamp — see
+    // OnboardingAcctdimCentrallyMaintainedService for the full root-cause explanation and its
+    // lockstep corrective twin (R23-acctdim-centrally-maintained.sql).
+    if (!forceFlatAccountingDimensionVisibility(writer, clientId)) {
       return false;
     }
     // Final action before commitDalChanges: stamp the tenant's data-fix baseline so it lands in the
@@ -1971,8 +2176,9 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     try {
       String countryCode = requestData != null ? requestData.countryCode : null;
       String address = requestData != null ? requestData.address : null;
+      String taxId = requestData != null ? requestData.taxId : null;
       onboardingOrgInfoService.ensureOrgInfo(clientId, orgId, adminUserId, adminRoleId,
-          countryCode, address);
+          countryCode, address, taxId);
       sendProgress(writer, PROGRESS_ORG_INFO, "done", "Organization address ready");
       return true;
     } catch (Exception e) {
@@ -2005,6 +2211,57 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       String errorMessage = e.getMessage() != null ? e.getMessage()
           : "Default customer creation failed";
       sendProgress(writer, PROGRESS_CUSTOMER, PROGRESS_ERROR, errorMessage);
+      sendFinalResult(writer, false, errorMessage);
+      return false;
+    }
+  }
+
+  /**
+   * Patches any {@code C_BP_Group_Acct} row still missing one of the 5 columns that neither the
+   * core {@code c_bp_group_trg()} trigger nor {@code OnboardingAccountingWiringService}'s own
+   * {@code BP_GROUP_ACCT_SQL} populate (ETP-4720) — see
+   * {@code OnboardingAccountingWiringService#patchBpGroupAcctMissingColumns} for the full
+   * explanation and its corrective twin ({@code R21-bp-group-acct-remaining-columns.sql}).
+   */
+  boolean patchBpGroupAcctMissingColumns(PrintWriter writer, String clientId, String orgId,
+      String adminUserId, String adminRoleId) {
+    sendProgress(writer, PROGRESS_BP_GROUP_ACCT_PATCH, PROGRESS_IN_PROGRESS,
+        "Patching business-partner group posting accounts...");
+    try {
+      onboardingAccountingWiringService.patchBpGroupAcctMissingColumns(clientId, orgId,
+          adminUserId, adminRoleId);
+      sendProgress(writer, PROGRESS_BP_GROUP_ACCT_PATCH, "done",
+          "Business-partner group posting accounts patched");
+      return true;
+    } catch (Exception e) {
+      EtendoGoDalHelper.rollbackDalChanges("onboarding bp-group-acct patch", e, log);
+      String errorMessage = e.getMessage() != null ? e.getMessage()
+          : "Business-partner group posting-account patch failed";
+      sendProgress(writer, PROGRESS_BP_GROUP_ACCT_PATCH, PROGRESS_ERROR, errorMessage);
+      sendFinalResult(writer, false, errorMessage);
+      return false;
+    }
+  }
+
+  /**
+   * Forces flat, per-dimension accounting-dimension visibility ({@code Acctdim_Centrally_Maintained
+   * = 'N'}) for the new tenant, backfilling {@code C_AcctSchema_Element.isactive} first so the
+   * flip does not change what the tenant would otherwise see (ETP-4854, gap K1) — see
+   * {@link OnboardingAcctdimCentrallyMaintainedService} for the full explanation.
+   */
+  boolean forceFlatAccountingDimensionVisibility(PrintWriter writer, String clientId) {
+    sendProgress(writer, PROGRESS_ACCTDIM_VISIBILITY, PROGRESS_IN_PROGRESS,
+        "Configuring accounting-dimension visibility...");
+    try {
+      onboardingAcctdimCentrallyMaintainedService.forceFlatAccountingDimensionVisibility(clientId);
+      sendProgress(writer, PROGRESS_ACCTDIM_VISIBILITY, "done",
+          "Accounting-dimension visibility configured");
+      return true;
+    } catch (Exception e) {
+      EtendoGoDalHelper.rollbackDalChanges("onboarding acctdim-visibility", e, log);
+      String errorMessage = e.getMessage() != null ? e.getMessage()
+          : "Accounting-dimension visibility configuration failed";
+      sendProgress(writer, PROGRESS_ACCTDIM_VISIBILITY, PROGRESS_ERROR, errorMessage);
       sendFinalResult(writer, false, errorMessage);
       return false;
     }
@@ -2079,11 +2336,26 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    * Write the final NDJSON result line.
    */
   void sendFinalResult(PrintWriter writer, boolean success, String message) {
+    sendFinalResult(writer, success, message, null);
+  }
+
+  /**
+   * Write the final NDJSON result line, tagged with a stable error code.
+   *
+   * <p>Provisioning failures carry unresolved Etendo AD message keys (e.g.
+   * {@code @CreateClientFailed@}) that the UI cannot translate and must never display. The code
+   * gives the client something stable to localize, while {@code message} stays in the payload for
+   * non-UI callers and logs (ETP-4665).
+   */
+  void sendFinalResult(PrintWriter writer, boolean success, String message, String code) {
     try {
       JSONObject result = new JSONObject();
       result.put("type", "result");
       result.put(FIELD_SUCCESS, success);
       result.put(FIELD_MESSAGE, message);
+      if (code != null) {
+        result.put(FIELD_CODE, code);
+      }
       result.put(FIELD_TIMESTAMP, Instant.now().toString());
       writer.println(result.toString());
       writer.flush();
@@ -2106,23 +2378,15 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   /**
    * Hash a plaintext password using SHA-256 with a random salt.
    * Returns "base64(salt):base64(hash)" so the salt can be recovered for verification.
+   *
+   * @deprecated logic moved to {@link PasswordHasher#hash} (ETP-4829, so
+   *     {@link EtendoGoAccountProvisioning} can hash admin-set passwords the same way without
+   *     depending on this servlet); kept as a thin delegate so every existing call site here is
+   *     unchanged.
    */
+  @Deprecated
   private String hashPassword(String password) {
-    try {
-      SecureRandom random = new SecureRandom();
-      byte[] salt = new byte[SALT_BYTES];
-      random.nextBytes(salt);
-
-      MessageDigest md = MessageDigest.getInstance(HASH_ALGORITHM);
-      md.update(salt);
-      byte[] hash = md.digest(password.getBytes(StandardCharsets.UTF_8));
-
-      String saltB64 = Base64.getEncoder().encodeToString(salt);
-      String hashB64 = Base64.getEncoder().encodeToString(hash);
-      return saltB64 + ":" + hashB64;
-    } catch (NoSuchAlgorithmException e) {
-      throw new IllegalStateException("SHA-256 not available", e);
-    }
+    return PasswordHasher.hash(password);
   }
 
   /**
@@ -2788,6 +3052,31 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     }
   }
 
+  /**
+   * Write a length rejection as HTTP 400 with the same machine-readable envelope used by
+   * {@link #writeWeakPasswordError}: {@code { "error": { "code": "FIELD_TOO_LONG", "field": "...",
+   * "max": 60, "message": "..." } } }. The client localizes it from the code and {@code max}; the
+   * English {@code message} is only a fallback for non-UI callers (ETP-4665).
+   */
+  private void writeFieldTooLongError(HttpServletResponse response,
+      OnboardingFieldLimits.LengthViolation violation) throws IOException {
+    try {
+      JSONObject error = new JSONObject();
+      error.put(FIELD_CODE, OnboardingFieldLimits.ERROR_CODE);
+      error.put("field", violation.field());
+      error.put("max", violation.max());
+      error.put(FIELD_MESSAGE,
+          String.format("Field %s must not exceed %d characters", violation.field(),
+              violation.max()));
+      JSONObject envelope = new JSONObject();
+      envelope.put(PROGRESS_ERROR, error);
+      writeResponse(response, HttpServletResponse.SC_BAD_REQUEST, envelope);
+    } catch (JSONException e) {
+      log.error("JSON error building field-too-long response", e);
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, INTERNAL_ERROR);
+    }
+  }
+
   private static class OnboardingRequestData {
     private String clientName;
     private String currencyIso;
@@ -2795,9 +3084,13 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     private String countryCode;
     private String address;
     private String fullName;
+    // Optional Tax ID from the wizard's "Details to start invoicing" step (ETP-4749).
+    // Same JSON key as ONBOARDING_DRAFT_FORM_FIELDS ("fiscalIdValue") for consistency.
+    private String taxId;
     // Present only when the paid second-tenant flow issued one (ETP-4686). Ignored while the
     // tenant-upgrade flag is off and for an account's first tenant.
     private String paymentToken;
+    private String upgradeAction;
   }
 
   private static class AdminContextData {

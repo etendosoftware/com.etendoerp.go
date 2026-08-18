@@ -36,6 +36,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.math.BigDecimal;
+import java.math.MathContext;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -53,6 +54,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
 import org.mockito.MockedConstruction;
 import org.mockito.MockedStatic;
 import org.mockito.junit.jupiter.MockitoExtension;
@@ -96,8 +98,8 @@ import com.etendoerp.psd2.bank.integration.utils.PISPaymentDao;
  * {@link PaymentRegistrationService}:
  * <ul>
  *   <li>{@code handleListCreditSources} - nets generatedCredit - usedCredit for accumulated
- *       credit, and lists unpaid negative credit-memo PSDs (abonos) excluding the current
- *       invoice.</li>
+ *       credit, and lists unpaid negative PSDs (abonos) of any negative-total invoice, whatever
+ *       its document type (ETP-4841), excluding the current invoice.</li>
  *   <li>{@code handleListPaymentMethods} - distinct payin/payout methods for accounts in
  *       the invoice's natural org tree.</li>
  *   <li>{@code doRegisterPaymentAdvanced} - draft (not processed), confirm (processed),
@@ -131,6 +133,7 @@ class PaymentRegistrationServiceAdvancedTest {
   private static final String CREDIT_PAY_ID = "credit-pay-1";
   private static final String ABONO_PSD_ID = "abono-psd-1";
   private static final String NEW_PAY_ID = "new-pay-1";
+  private static final String DRAFT_PAY_ID = "draft-pay-1";
   private static final String ERROR_TYPE = "Error";
   private static final String ITEMS = "items";
 
@@ -193,8 +196,11 @@ class PaymentRegistrationServiceAdvancedTest {
         .thenReturn("PAY-1");
 
     finAddPaymentMock = mockStatic(FIN_AddPayment.class);
-    finAddPaymentMock.when(() -> FIN_AddPayment.setFinancialTransactionAmountAndRate(
-        any(), any(), any(), any())).thenReturn(newPayment);
+    // ETP-4841: deliberately NO stub for FIN_AddPayment.setFinancialTransactionAmountAndRate — the
+    // payment flow no longer calls that core helper (it recomputed rate = txnAmount / amount and so
+    // lost the rate typed in the modal). Both fields are now written verbatim on the entity by
+    // PaymentCurrencyConverter.applyTransactionAmountAndRate, which the tests below assert through
+    // the entity setters plus a never() guard on the core helper.
     finAddPaymentMock.when(() -> FIN_AddPayment.updatePaymentDetail(any(), any(), any(), anyBoolean()))
         .thenReturn(BigDecimal.ZERO);
     finAddPaymentMock.when(() -> FIN_AddPayment.processPayment(any(), any(), anyString(), any(), anyString()))
@@ -313,6 +319,20 @@ class PaymentRegistrationServiceAdvancedTest {
     assertEquals(KIND_CREDIT, item.getString("kind"));
     assertEquals("p-partial", item.getString("paymentId"));
     assertEquals(new BigDecimal("40"), new BigDecimal(item.getString("avail")));
+  }
+
+  @Test
+  @DisplayName("Pagos (AP): accumulated credit is never queried — no supplier credit accrual in it1")
+  void testListCreditSourcesPaymentSideNeverQueriesAccumulatedCredit() throws Exception {
+    NeoContext context = creditSourcesContext();
+    stubInvoiceWithBp();
+    stubAbonoQuery(Collections.emptyList());
+
+    NeoResponse response = PaymentCreditSourcesService.handleListCreditSources(context, false);
+
+    assertEquals(200, response.getHttpStatus());
+    assertEquals(0, response.getBody().getInt("totalCount"));
+    verify(session, never()).createQuery(anyString(), eq(FIN_Payment.class));
   }
 
   @Test
@@ -511,6 +531,125 @@ class PaymentRegistrationServiceAdvancedTest {
   }
 
   // ════════════════════════════════════════════════════════════════════════
+  // handleListCreditSources — ETP-4841 negative-total-only filter (no doc-type whitelist)
+  // ════════════════════════════════════════════════════════════════════════
+
+  /**
+   * ETP-4841: eligibility is decided purely by the SIGN of the invoice total. The abono HQL keeps
+   * the {@code grandTotalAmount < 0} predicate (it must stay INSIDE the query — with
+   * {@code setMaxResults(50)}, filtering in Java afterwards would truncate before the restriction
+   * applied and silently drop eligible sources) and no longer carries any rectificative doc-type
+   * whitelist.
+   */
+  @Test
+  @DisplayName("ETP-4841: the abono HQL restricts to a negative invoice total ONLY — the "
+      + "rectificative doc-type whitelist is gone")
+  @SuppressWarnings("unchecked")
+  void testListCreditSourcesAbonoRestrictedToNegativeTotalOnly() throws Exception {
+    NeoContext context = creditSourcesContext();
+    stubInvoiceWithBp();
+
+    Query<FIN_PaymentScheduleDetail> abonoQuery = mock(Query.class);
+    ArgumentCaptor<String> hqlCaptor = ArgumentCaptor.forClass(String.class);
+    when(session.createQuery(hqlCaptor.capture(), eq(FIN_PaymentScheduleDetail.class)))
+        .thenReturn(abonoQuery);
+    when(abonoQuery.setParameter(anyString(), any())).thenReturn(abonoQuery);
+    when(abonoQuery.setMaxResults(anyInt())).thenReturn(abonoQuery);
+    when(abonoQuery.list()).thenReturn(Collections.emptyList());
+    stubCreditQuery(Collections.emptyList());
+
+    NeoResponse response = PaymentCreditSourcesService.handleListCreditSources(context, true);
+
+    assertEquals(200, response.getHttpStatus());
+    String hql = hqlCaptor.getValue();
+    // A POSITIVE-total invoice is excluded by this predicate even when it IS a rectificativa.
+    assertTrue(hql.contains("grandTotalAmount < 0"),
+        "the negative-total restriction must stay inside the HQL");
+    assertFalse(hql.contains("rectDocTypes"),
+        "the rectificative doc-type whitelist must be gone from the HQL");
+    assertFalse(hql.contains("transactionDocument"),
+        "the abono query must not filter by document type at all");
+  }
+
+  /**
+   * The new capability: a negative-total invoice of an ORDINARY document type ("Factura", not a
+   * Factura Rectificativa) is listed as a funding source. The doc-type whitelist used to drop it.
+   * Nothing may re-introduce a Java-side doc-type filter after the query either.
+   */
+  @Test
+  @DisplayName("ETP-4841: a negative-total invoice of an ORDINARY document type is listed as an "
+      + "abono source")
+  void testListCreditSourcesListsNegativeTotalInvoiceOfOrdinaryDocType() throws Exception {
+    NeoContext context = creditSourcesContext();
+    stubInvoiceWithBp();
+
+    FIN_PaymentScheduleDetail ordinaryAbono = abonoPsd("abono-ordinary", new BigDecimal("-45.00"),
+        "FAC/077", date("2026-06-11"), "Factura");
+    stubAbonoQuery(Collections.singletonList(ordinaryAbono));
+    stubCreditQuery(Collections.emptyList());
+
+    NeoResponse response = PaymentCreditSourcesService.handleListCreditSources(context, true);
+
+    assertEquals(200, response.getHttpStatus());
+    JSONArray items = response.getBody().getJSONArray(ITEMS);
+    assertEquals(1, items.length(), "an ordinary-doc-type credit must not be filtered out");
+    JSONObject item = items.getJSONObject(0);
+    assertEquals(KIND_ABONO, item.getString("kind"));
+    assertEquals("abono-ordinary", item.getString("psdId"));
+    assertEquals("Factura", item.getString("note"));
+    assertEquals(0, new BigDecimal("45.00").compareTo(new BigDecimal(item.getString("avail"))));
+  }
+
+  @Test
+  @DisplayName("The payment side (isReceipt=false) binds receipt=false on the abono query, so AP "
+      + "only ever sees purchase-side sources")
+  @SuppressWarnings("unchecked")
+  void testListCreditSourcesForPaymentSideBindsReceiptFalse() throws Exception {
+    NeoContext context = creditSourcesContext();
+    stubInvoiceWithBp();
+
+    Query<FIN_PaymentScheduleDetail> abonoQuery = mock(Query.class);
+    when(session.createQuery(anyString(), eq(FIN_PaymentScheduleDetail.class)))
+        .thenReturn(abonoQuery);
+    when(abonoQuery.setParameter(anyString(), any())).thenReturn(abonoQuery);
+    when(abonoQuery.setMaxResults(anyInt())).thenReturn(abonoQuery);
+    when(abonoQuery.list()).thenReturn(Collections.emptyList());
+
+    NeoResponse response = PaymentCreditSourcesService.handleListCreditSources(context, false);
+
+    assertEquals(200, response.getHttpStatus());
+    verify(abonoQuery).setParameter("receipt", Boolean.FALSE);
+  }
+
+  /**
+   * {@code abonosUsedByDraft} is deliberately unrestricted: it answers "what is already physically
+   * linked to this draft", not "what may be linked". A source the current rule would reject — here
+   * an invoice whose total is POSITIVE — must still re-list, or the frontend
+   * ({@code usePaymentBalance.seedLines}) would silently drop funding the draft already relies on,
+   * leaving the user unable to see or un-check it.
+   */
+  @Test
+  @DisplayName("ETP-4841: a draft's already-linked abono re-lists even when its invoice total is "
+      + "no longer eligible — abonosUsedByDraft is deliberately unfiltered")
+  void testListCreditSourcesEditModeRelistsLinkedAbonoRegardlessOfEligibility() throws Exception {
+    String editPaymentId = "draft-being-edited";
+    NeoContext context = creditSourcesContextWithEditPaymentId(editPaymentId);
+    stubInvoiceWithBp();
+    stubCreditQuery(Collections.emptyList());
+
+    FIN_PaymentScheduleDetail linkedAbono = abonoPsdWithInvoiceTotal("abono-linked",
+        new BigDecimal("-20.00"), "NC/020", date("2026-05-10"), new BigDecimal("120.00"));
+    stubEditAbonoQueries(Collections.emptyList(), Collections.singletonList(linkedAbono));
+
+    NeoResponse response = PaymentCreditSourcesService.handleListCreditSources(context, true);
+
+    assertEquals(200, response.getHttpStatus());
+    JSONArray items = response.getBody().getJSONArray(ITEMS);
+    assertEquals(1, items.length());
+    assertEquals("abono-linked", items.getJSONObject(0).getString("psdId"));
+  }
+
+  // ════════════════════════════════════════════════════════════════════════
   // handleListPaymentMethods
   // ════════════════════════════════════════════════════════════════════════
 
@@ -628,21 +767,55 @@ class PaymentRegistrationServiceAdvancedTest {
     assertEquals(201, response.getHttpStatus());
     // Payment amount stays in invoice currency (100.00); the financial-transaction amount is the
     // account-currency conversion 100.00 x 0.92 = 92.00, rounded to the account precision (2).
-    finAddPaymentMock.verify(() -> FIN_AddPayment.setFinancialTransactionAmountAndRate(
-        any(), eq(newPayment), eq(new BigDecimal("0.92")), eq(new BigDecimal("92.00"))));
+    assertVerbatimTransactionFields(newPayment, "0.92", "92.00");
     // The payment is created in the invoice currency with the supplied rate + converted amount.
     AdvPaymentMngtDao dao = daoConstruction.constructed().get(0);
     verify(dao).getNewPayment(anyBoolean(), any(), any(), any(), any(), any(), any(), any(),
         any(), any(), eq(currency), eq(new BigDecimal("0.92")), eq(new BigDecimal("92.00")));
   }
 
+  /**
+   * ETP-4841 regression: the ticket's own numbers. A 58.70 (invoice currency) payment at a typed
+   * rate of 0.89 converts to 52.24 in a 2-decimal account currency, and that rounding is exactly
+   * what {@code FIN_AddPayment.setFinancialTransactionAmountAndRate} used to "correct" by
+   * recomputing 52.24 / 58.70 = 0.889948892674617 — so reopening the draft no longer showed the
+   * 0.89 the user typed. The rate must now be stored byte-for-byte as typed.
+   */
   @Test
-  @DisplayName("A same-currency account defaults the conversion rate to ONE (transaction amount "
-      + "equals the payment amount)")
+  @DisplayName("ETP-4841: a typed rate whose converted amount needs rounding is stored VERBATIM "
+      + "(58.70 x 0.89 -> 52.24, rate stays 0.89 and is never recomputed to 0.8899...)")
+  void testAdvancedForeignCurrencyStoresTypedRateVerbatimDespiteRounding() throws Exception {
+    stubAdvancedBasics();
+    stubPendingPSDs(new BigDecimal("58.70"));
+    stubForeignEurAccount();
+
+    JSONObject body = advancedBody("58.70", DRAFT).put("conversionRate", "0.89");
+
+    NeoResponse response = PaymentRegistrationService.doRegisterPaymentAdvanced(
+        INVOICE_ID, body, true);
+
+    assertEquals(201, response.getHttpStatus());
+    assertVerbatimTransactionFields(newPayment, "0.89", "52.24");
+
+    // Explicit anti-regression assertion: the stored rate is the typed one, NOT the value the core
+    // helper would have derived from the rounded transaction amount.
+    ArgumentCaptor<BigDecimal> rateCaptor = ArgumentCaptor.forClass(BigDecimal.class);
+    verify(newPayment).setFinancialTransactionConvertRate(rateCaptor.capture());
+    assertEquals(0, new BigDecimal("0.89").compareTo(rateCaptor.getValue()));
+    assertTrue(new BigDecimal("52.24").divide(new BigDecimal("58.70"), MathContext.DECIMAL64)
+            .compareTo(rateCaptor.getValue()) != 0,
+        "the stored rate must not be the core helper's txnAmount/amount recomputation");
+  }
+
+  @Test
+  @DisplayName("A same-currency account defaults the conversion rate to ONE and keeps the "
+      + "transaction amount equal to the payment amount (verbatim write, ETP-4841)")
   void testAdvancedSameCurrencyDefaultsRateToOne() throws Exception {
     stubAdvancedBasics();
     stubPendingPSDs(new BigDecimal("100.00"));
-    // Account currency == invoice currency, no conversionRate in the body → rate ONE.
+    // Account currency == invoice currency, no conversionRate in the body → rate ONE. The shared
+    // currency declares 2 decimals, like a real EUR/USD account, so the conversion is a no-op.
+    when(currency.getStandardPrecision()).thenReturn(2L);
 
     JSONObject body = advancedBody("100.00", CONFIRM);
 
@@ -650,8 +823,97 @@ class PaymentRegistrationServiceAdvancedTest {
         INVOICE_ID, body, true);
 
     assertEquals(201, response.getHttpStatus());
-    finAddPaymentMock.verify(() -> FIN_AddPayment.setFinancialTransactionAmountAndRate(
-        any(), eq(newPayment), eq(BigDecimal.ONE), eq(new BigDecimal("100"))));
+    // Single-currency behavior is unchanged by the verbatim write: rate ONE and a transaction
+    // amount equal to the payment amount (100.00 x 1, rescaled to the account's own 2 decimals).
+    assertVerbatimTransactionFields(newPayment, "1", "100.00");
+  }
+
+  // ════════════════════════════════════════════════════════════════════════
+  // doRegisterPaymentAdvanced - edit-in-place (paymentId) rate handling
+  // ════════════════════════════════════════════════════════════════════════
+
+  /**
+   * ETP-4841, edit path: reopening a draft and re-sending the same rate must rewrite it verbatim on
+   * the SAME {@link FIN_Payment} row, so a second save does not drift the value the user typed.
+   */
+  @Test
+  @DisplayName("Editing a draft with the same rate rewrites rate + transaction amount VERBATIM on "
+      + "the same payment row (no new payment is created)")
+  void testAdvancedEditDraftReappliesSameRateVerbatim() throws Exception {
+    stubAdvancedBasics();
+    stubForeignEurAccount();
+    FIN_Payment draft = stubExistingDraft(new BigDecimal("58.70"));
+
+    JSONObject body = advancedBody("58.70", DRAFT)
+        .put("conversionRate", "0.89")
+        .put("paymentId", DRAFT_PAY_ID);
+
+    NeoResponse response = PaymentRegistrationService.doRegisterPaymentAdvanced(
+        INVOICE_ID, body, true);
+
+    assertEquals(201, response.getHttpStatus());
+    assertEquals(DRAFT_PAY_ID, response.getBody().getJSONObject("response")
+        .getJSONObject("data").getString("id"), "the edit must reuse the same payment row");
+    assertVerbatimTransactionFields(draft, "0.89", "52.24");
+    // The draft is reused, never re-created.
+    AdvPaymentMngtDao dao = daoConstruction.constructed().get(0);
+    verify(dao, never()).getNewPayment(anyBoolean(), any(), any(), any(), any(), any(), any(),
+        any(), any(), any(), any(), any(), any());
+  }
+
+  /**
+   * ETP-4841, edit path: changing the rate on a draft must persist the NEW typed rate (and its own
+   * converted amount) verbatim — 58.70 x 0.95 = 55.7650 → 55.77 at the account's 2 decimals, whose
+   * recomputation (55.77 / 58.70) would again have drifted the rate.
+   */
+  @Test
+  @DisplayName("Editing a draft with a CHANGED rate stores the new rate verbatim (0.95 -> 55.77)")
+  void testAdvancedEditDraftAppliesChangedRateVerbatim() throws Exception {
+    stubAdvancedBasics();
+    stubForeignEurAccount();
+    FIN_Payment draft = stubExistingDraft(new BigDecimal("58.70"));
+
+    JSONObject body = advancedBody("58.70", DRAFT)
+        .put("conversionRate", "0.95")
+        .put("paymentId", DRAFT_PAY_ID);
+
+    NeoResponse response = PaymentRegistrationService.doRegisterPaymentAdvanced(
+        INVOICE_ID, body, true);
+
+    assertEquals(201, response.getHttpStatus());
+    assertVerbatimTransactionFields(draft, "0.95", "55.77");
+  }
+
+  @Test
+  @DisplayName("Editing a draft returns 404 when its paymentId does not resolve to a payment")
+  void testAdvancedEditDraftUnknownPaymentIdReturns404() throws Exception {
+    stubAdvancedBasics();
+    when(dal.get(FIN_Payment.class, DRAFT_PAY_ID)).thenReturn(null);
+
+    JSONObject body = advancedBody("58.70", DRAFT).put("paymentId", DRAFT_PAY_ID);
+
+    NeoResponse response = PaymentRegistrationService.doRegisterPaymentAdvanced(
+        INVOICE_ID, body, true);
+
+    assertEquals(404, response.getHttpStatus());
+    finAddPaymentMock.verify(() -> FIN_AddPayment.processPayment(
+        any(), any(), anyString(), any(), anyString()), never());
+  }
+
+  @Test
+  @DisplayName("Editing an already-processed payment is rejected before any field is rewritten")
+  void testAdvancedEditProcessedPaymentThrows() throws Exception {
+    stubAdvancedBasics();
+    FIN_Payment processed = mock(FIN_Payment.class);
+    when(processed.isProcessed()).thenReturn(true);
+    when(dal.get(FIN_Payment.class, DRAFT_PAY_ID)).thenReturn(processed);
+
+    JSONObject body = advancedBody("58.70", DRAFT).put("paymentId", DRAFT_PAY_ID);
+
+    OBException ex = assertThrows(OBException.class,
+        () -> PaymentRegistrationService.doRegisterPaymentAdvanced(INVOICE_ID, body, true));
+    assertEquals("Cannot edit a processed payment", ex.getMessage());
+    verify(processed, never()).setFinancialTransactionConvertRate(any());
   }
 
   @Test
@@ -758,13 +1020,21 @@ class PaymentRegistrationServiceAdvancedTest {
   }
 
   @Test
-  @DisplayName("Consuming an abono (credit memo) links it as a negative payment detail")
+  @DisplayName("Consuming an abono (any negative-total invoice, ETP-4841) links it as a negative "
+      + "payment detail")
   void testAdvancedConsumesAbonoAsNegativeDetail() throws Exception {
     stubAdvancedBasics();
     stubPendingPSDs(new BigDecimal("100.00"));
 
     FIN_PaymentScheduleDetail abonoPsd = mock(FIN_PaymentScheduleDetail.class);
     when(dal.get(FIN_PaymentScheduleDetail.class, ABONO_PSD_ID)).thenReturn(abonoPsd);
+    // ETP-4841 eligibility guard: the abono's invoice only has to carry a NEGATIVE total — its
+    // document type is deliberately never consulted, so none is stubbed here.
+    FIN_PaymentSchedule abonoSchedule = mock(FIN_PaymentSchedule.class);
+    Invoice abonoInvoice = mock(Invoice.class);
+    when(abonoInvoice.getGrandTotalAmount()).thenReturn(new BigDecimal("-30.00"));
+    when(abonoSchedule.getInvoice()).thenReturn(abonoInvoice);
+    when(abonoPsd.getInvoicePaymentSchedule()).thenReturn(abonoSchedule);
 
     JSONArray sources = new JSONArray(Collections.singletonList(
         new JSONObject().put("kind", KIND_ABONO).put("psdId", ABONO_PSD_ID).put("use", "30")));
@@ -1138,6 +1408,9 @@ class PaymentRegistrationServiceAdvancedTest {
     when(draft.getStatus()).thenReturn("RPR");
     when(draft.isProcessed()).thenReturn(false);
     when(draft.isReceipt()).thenReturn(true);
+    // ETP-4841: the draft carries the rate the user typed in the modal; the row must expose it so
+    // the edit modal reseeds its rate field from the draft instead of the system spot rate.
+    when(draft.getFinancialTransactionConvertRate()).thenReturn(new BigDecimal("0.89"));
 
     FIN_Payment creditSourcePayment = mock(FIN_Payment.class);
     when(creditSourcePayment.getId()).thenReturn(CREDIT_PAY_ID);
@@ -1167,6 +1440,9 @@ class PaymentRegistrationServiceAdvancedTest {
     assertEquals(1, data.length());
     JSONObject draftItem = data.getJSONObject(0);
     assertFalse(draftItem.getBoolean("processed"));
+    assertEquals(0, new BigDecimal("0.89")
+            .compareTo(new BigDecimal(draftItem.getString("conversionRate"))),
+        "the row must expose the draft's own stored conversion rate (ETP-4841)");
     JSONArray used = draftItem.getJSONArray("creditSourcesUsed");
     assertEquals(2, used.length());
 
@@ -1430,6 +1706,29 @@ class PaymentRegistrationServiceAdvancedTest {
     return psd;
   }
 
+  /**
+   * Same as {@link #abonoPsd}, but the originating invoice also reports a {@code grandTotalAmount}
+   * — used to prove that the listing code never consults the total sign in Java (ETP-4841 keeps
+   * that restriction inside the HQL, and {@code abonosUsedByDraft} has no restriction at all).
+   */
+  private FIN_PaymentScheduleDetail abonoPsdWithInvoiceTotal(String id, BigDecimal amount,
+      String docNo, Date invoiceDate, BigDecimal invoiceTotal) {
+    FIN_PaymentScheduleDetail psd = mock(FIN_PaymentScheduleDetail.class);
+    when(psd.getId()).thenReturn(id);
+    when(psd.getAmount()).thenReturn(amount);
+    FIN_PaymentSchedule ps = mock(FIN_PaymentSchedule.class);
+    Invoice ncInvoice = mock(Invoice.class);
+    DocumentType ncType = mock(DocumentType.class);
+    when(ncType.getName()).thenReturn("Credit Memo");
+    when(ncInvoice.getDocumentNo()).thenReturn(docNo);
+    when(ncInvoice.getInvoiceDate()).thenReturn(invoiceDate);
+    when(ncInvoice.getDocumentType()).thenReturn(ncType);
+    when(ncInvoice.getGrandTotalAmount()).thenReturn(invoiceTotal);
+    when(ps.getInvoice()).thenReturn(ncInvoice);
+    when(psd.getInvoicePaymentSchedule()).thenReturn(ps);
+    return psd;
+  }
+
   /** Builds a mock accumulated-credit payment, sortable by payment date. */
   private FIN_Payment creditPayment(String id, String docNo, BigDecimal generatedCredit,
       BigDecimal usedCredit, Date paymentDate) {
@@ -1473,6 +1772,59 @@ class PaymentRegistrationServiceAdvancedTest {
     when(methodCrit.add(any(Criterion.class))).thenReturn(methodCrit);
     when(methodCrit.setMaxResults(anyInt())).thenReturn(methodCrit);
     when(methodCrit.list()).thenReturn(Collections.singletonList(mock(FinAccPaymentMethod.class)));
+  }
+
+  /**
+   * Asserts the financial-transaction fields were written on {@code payment} VERBATIM (ETP-4841):
+   * the conversion rate exactly as the modal typed it and the transaction amount exactly as
+   * {@code PaymentCurrencyConverter.convertedAmount} rounded it — and that the core helper
+   * {@code FIN_AddPayment.setFinancialTransactionAmountAndRate}, which would recompute the rate
+   * from that rounded amount, is never called.
+   */
+  private void assertVerbatimTransactionFields(FIN_Payment payment, String rate, String txnAmount) {
+    verify(payment).setFinancialTransactionConvertRate(new BigDecimal(rate));
+    verify(payment).setFinancialTransactionAmount(new BigDecimal(txnAmount));
+    finAddPaymentMock.verify(() -> FIN_AddPayment.setFinancialTransactionAmountAndRate(
+        any(), any(), any(), any()), never());
+  }
+
+  /**
+   * Makes the selected financial account foreign to the invoice: EUR with a standard precision of
+   * 2 decimals, while the invoice keeps the global (USD-like) test currency.
+   */
+  private void stubForeignEurAccount() {
+    Currency accountCurrency = mock(Currency.class);
+    when(accountCurrency.getId()).thenReturn("EUR-ID");
+    when(accountCurrency.getStandardPrecision()).thenReturn(2L);
+    when(account.getCurrency()).thenReturn(accountCurrency);
+  }
+
+  /**
+   * Stubs the existing DRAFT the edit-in-place path reuses: {@code DRAFT_PAY_ID} resolves to it, it
+   * is not processed, it consumed no accumulated credit, and the document's own installment PSD for
+   * {@link #SCHEDULE_ID} is still linked to it — the state
+   * {@code PaymentDraftEditService.prepareEditableDraft} / {@code reapplyLinkedInstallmentPSD}
+   * expect.
+   */
+  private FIN_Payment stubExistingDraft(BigDecimal scheduleTotal) {
+    FIN_Payment draft = mock(FIN_Payment.class);
+    when(draft.getId()).thenReturn(DRAFT_PAY_ID);
+    when(draft.getDocumentNo()).thenReturn("PAY-DRAFT");
+    when(draft.getStatus()).thenReturn("RPR");
+    when(draft.isProcessed()).thenReturn(false);
+    when(dal.get(FIN_Payment.class, DRAFT_PAY_ID)).thenReturn(draft);
+
+    when(schedule.getId()).thenReturn(SCHEDULE_ID);
+    when(schedule.getAmount()).thenReturn(scheduleTotal);
+    FIN_PaymentScheduleDetail linkedPsd = mock(FIN_PaymentScheduleDetail.class);
+    when(linkedPsd.getInvoicePaymentSchedule()).thenReturn(schedule);
+    FIN_PaymentDetail detail = mock(FIN_PaymentDetail.class);
+    when(detail.getFINPaymentScheduleDetailList())
+        .thenReturn(new ArrayList<>(Collections.singletonList(linkedPsd)));
+    when(draft.getFINPaymentDetailList())
+        .thenReturn(new ArrayList<>(Collections.singletonList(detail)));
+    stubNoConsumedCredit();
+    return draft;
   }
 
   /**

@@ -41,6 +41,7 @@ import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.criterion.Restrictions;
+import org.hibernate.query.Query;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
@@ -51,10 +52,14 @@ import org.openbravo.model.financialmgmt.payment.FIN_Payment_Credit;
 import org.openbravo.service.json.JsonUtils;
 
 /**
- * Consumable funding sources for an invoice's business partner: accumulated credit
- * (generatedCredit minus usedCredit) and pending credit-memo / return payment-schedule
- * details ("abono"). Split out of {@link PaymentRegistrationService} to keep that class
- * under the method-count limit (Sonar S1200).
+ * Consumable funding sources for an invoice's business partner: pending payment-schedule
+ * details of any invoice with a negative total ("abono", ETP-4841 — the document type is
+ * irrelevant, only the sign), plus — AR
+ * (Cobros) only — accumulated credit (generatedCredit minus usedCredit). Per the Cobros y
+ * Pagos functional spec, AP (Pagos) has no supplier credit accrual in it1, so {@code
+ * collectAccumulatedCredit} is only ever invoked when {@code isReceipt} is true. Split out of
+ * {@link PaymentRegistrationService} to keep that class under the method-count limit (Sonar
+ * S1200).
  */
 final class PaymentCreditSourcesService {
 
@@ -69,8 +74,11 @@ final class PaymentCreditSourcesService {
 
   /**
    * Lists the consumable funding sources for the invoice's business partner:
-   *   - 'abono'  : pending credit-memo / return payment-schedule details (amount &lt; 0)
-   *   - 'credit' : available accumulated credit lines (generatedCredit minus usedCredit)
+   *   - 'abono'  : pending payment-schedule details (amount &lt; 0) of any invoice with a
+   *                negative total, whatever its document type (ETP-4841)
+   *   - 'credit' : available accumulated credit lines (generatedCredit minus usedCredit) —
+   *                Cobros (AR) only; never listed for Pagos (AP), which has no supplier
+   *                credit accrual in it1.
    */
   static NeoResponse handleListCreditSources(NeoContext context, boolean isReceipt) {
     String invoiceId = context.getRecordId();
@@ -97,8 +105,10 @@ final class PaymentCreditSourcesService {
         String editPaymentId = context.getRequestBody() != null
             ? context.getRequestBody().optString(FIELD_EDIT_PAYMENT_ID, null) : null;
         List<DatedSource> sources = new ArrayList<>();
-        collectAbonoSources(sources, bpId, invoiceId, curId, isReceipt, editPaymentId);
-        collectAccumulatedCredit(sources, bpId, curId, isReceipt, editPaymentId);
+        collectAbonoSources(sources, invoice, isReceipt, editPaymentId);
+        if (isReceipt) {
+          collectAccumulatedCredit(sources, bpId, curId, editPaymentId);
+        }
         // Merge both kinds into a single list ordered by each row's own date — invoice
         // date for saldo a favor (abono), payment date for credit — most recent first.
         // The two kinds are NOT grouped separately; they interleave by date. Reversing
@@ -122,7 +132,7 @@ final class PaymentCreditSourcesService {
     }
   }
 
-  /** Pairs a credit-source JSON item with the raw date used to sort it against the other kind. */
+  /** Pairs a credit-source JSON item with the raw date used to sort the list. */
   private static final class DatedSource {
     private final Date date;
     private final JSONObject item;
@@ -134,29 +144,15 @@ final class PaymentCreditSourcesService {
   }
 
   /**
-   * Collects pending credit-memo / return PSDs (negative amount) of the BP, plus — when editing a
-   * draft ({@code editPaymentId} present) — any such PSD that draft ALREADY consumed (its
-   * {@code paymentDetails} is no longer null, so it would otherwise vanish from this list once
-   * used), so the edit modal can keep showing and re-checking it.
+   * Collects pending "saldo a favor" PSDs (negative amount, on an invoice with a negative
+   * total — ETP-4841) of the BP, plus — when editing a draft ({@code editPaymentId}
+   * present) — any such PSD that draft ALREADY consumed (its {@code paymentDetails} is no
+   * longer null, so it would otherwise vanish from this list once used), so the edit modal can
+   * keep showing and re-checking it.
    */
-  private static void collectAbonoSources(List<DatedSource> sources, String bpId, String invoiceId,
-      String curId, boolean isReceipt, String editPaymentId) throws Exception {
-    String hql = "select psd from FIN_Payment_ScheduleDetail psd "
-        + "where psd.invoicePaymentSchedule.invoice.businessPartner.id = :bp "
-        + "and psd.invoicePaymentSchedule.invoice.salesTransaction = :receipt "
-        + "and psd.paymentDetails is null and psd.amount < 0 "
-        + "and psd.invoicePaymentSchedule.invoice.id <> :inv "
-        + "and psd.invoicePaymentSchedule.invoice.currency.id = :cur "
-        + "order by psd.invoicePaymentSchedule.invoice.invoiceDate desc";
-    List<FIN_PaymentScheduleDetail> abonos = OBDal.getInstance().getSession()
-        .createQuery(hql, FIN_PaymentScheduleDetail.class)
-        .setParameter("bp", bpId)
-        .setParameter(KEY_RECEIPT, isReceipt)
-        .setParameter("inv", invoiceId)
-        .setParameter("cur", curId)
-        .setMaxResults(50)
-        .list();
-    for (FIN_PaymentScheduleDetail psd : abonos) {
+  private static void collectAbonoSources(List<DatedSource> sources, Invoice invoice,
+      boolean isReceipt, String editPaymentId) throws Exception {
+    for (FIN_PaymentScheduleDetail psd : pendingAbonos(invoice, isReceipt)) {
       addAbonoSource(sources, psd);
     }
     if (StringUtils.isNotBlank(editPaymentId)) {
@@ -166,7 +162,51 @@ final class PaymentCreditSourcesService {
     }
   }
 
-  /** Credit-memo / return PSDs (negative amount) already linked to the draft being edited. */
+  /**
+   * Pending "saldo a favor" PSDs: negative, unpaid, same BP/currency/side, on an invoice whose
+   * total is negative.
+   *
+   * <p>ETP-4841: eligibility is decided purely by the SIGN of the invoice total, never by its
+   * document type. An ordinary "Factura" issued with a negative total is just as much a credit
+   * the customer can spend as a Factura Rectificativa is; conversely a POSITIVE rectificativa
+   * (an under-invoiced correction) is payable and must NOT be offered as a funding source.
+   * The previous doc-type whitelist ({@code em_etsg_isrectificative}) got both cases wrong.
+   *
+   * <p>The {@code grandTotalAmount < 0} predicate lives inside the query on purpose: with
+   * {@code setMaxResults(50)}, filtering in Java afterwards would truncate before the
+   * restriction is applied and silently drop eligible sources.
+   */
+  private static List<FIN_PaymentScheduleDetail> pendingAbonos(Invoice invoice,
+      boolean isReceipt) {
+    String hql = "select psd from FIN_Payment_ScheduleDetail psd "
+        + "where psd.invoicePaymentSchedule.invoice.businessPartner.id = :bp "
+        + "and psd.invoicePaymentSchedule.invoice.salesTransaction = :receipt "
+        + "and psd.paymentDetails is null and psd.amount < 0 "
+        + "and psd.invoicePaymentSchedule.invoice.id <> :inv "
+        + "and psd.invoicePaymentSchedule.invoice.currency.id = :cur "
+        + "and psd.invoicePaymentSchedule.invoice.grandTotalAmount < 0 "
+        + "order by psd.invoicePaymentSchedule.invoice.invoiceDate desc";
+    Query<FIN_PaymentScheduleDetail> query = OBDal.getInstance().getSession()
+        .createQuery(hql, FIN_PaymentScheduleDetail.class)
+        .setParameter("bp", invoice.getBusinessPartner().getId())
+        .setParameter(KEY_RECEIPT, isReceipt)
+        .setParameter("inv", invoice.getId())
+        .setParameter("cur", invoice.getCurrency() != null ? invoice.getCurrency().getId() : null);
+    return query.setMaxResults(50).list();
+  }
+
+  /**
+   * "Saldo a favor" PSDs (negative amount) already linked to the draft being edited.
+   *
+   * <p>Deliberately NOT restricted by rectificative doc type, total sign, or currency: it
+   * answers "what is already physically linked to this draft", not "what may be linked". A
+   * PSD consumed by a prior draft stays linked across edits ({@code
+   * PaymentDraftEditService.removeCreditOwnedDetails} skips any PSD whose {@code
+   * invoicePaymentSchedule} is non-null, which is exactly what an abono PSD is), and the
+   * frontend ({@code usePaymentBalance.seedLines}) silently drops a used source that is absent
+   * from the response — so filtering here would hide funding the draft already relies on,
+   * leaving the user unable to see or un-check it.
+   */
   private static List<FIN_PaymentScheduleDetail> abonosUsedByDraft(String editPaymentId) {
     String hql = "select psd from FIN_Payment_ScheduleDetail psd "
         + "where psd.paymentDetails.finPayment.id = :pay and psd.amount < 0 "
@@ -196,9 +236,14 @@ final class PaymentCreditSourcesService {
    * plus — when editing a draft ({@code editPaymentId} present) — that draft's own consumption
    * added back into each source's {@code avail} (so it shows "as if this draft didn't exist" and
    * stays listed even if fully consumed by it, letting the modal re-check it).
+   *
+   * <p>Cobros (AR) only — the caller only invokes this when {@code isReceipt} is true, per the
+   * Cobros y Pagos functional spec ("Sin crédito acumulado a proveedor en it1"). The HQL binds
+   * {@code receipt = true} directly rather than taking a parameter, since a false value is
+   * never a valid call here.
    */
   private static void collectAccumulatedCredit(List<DatedSource> sources, String bpId,
-      String curId, boolean isReceipt, String editPaymentId) throws Exception {
+      String curId, String editPaymentId) throws Exception {
     boolean editing = StringUtils.isNotBlank(editPaymentId);
     // While editing, the strict ">0" filter would hide a source THIS draft fully consumed —
     // fetch unfiltered and apply the (draft-adjusted) avail>0 check in Java instead.
@@ -210,7 +255,7 @@ final class PaymentCreditSourcesService {
     List<FIN_Payment> credits = OBDal.getInstance().getSession()
         .createQuery(hql, FIN_Payment.class)
         .setParameter("bp", bpId)
-        .setParameter(KEY_RECEIPT, isReceipt)
+        .setParameter(KEY_RECEIPT, true)
         .setParameter("cur", curId)
         .setMaxResults(50)
         .list();

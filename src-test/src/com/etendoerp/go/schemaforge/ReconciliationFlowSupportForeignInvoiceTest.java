@@ -218,7 +218,7 @@ class ReconciliationFlowSupportForeignInvoiceTest {
     List<String> operationIds = new ArrayList<>();
 
     NeoResponse resp = ReconciliationFlowSupport.createInvoicePayments(
-        acc, bsl, invoiceSpecs, operationIds, TOLERANCE, null);
+        acc, bsl, invoiceSpecs, operationIds, TOLERANCE, null, false);
 
     assertEquals(400, resp.getHttpStatus());
     assertTrue(message(resp).contains("scheduleId"), message(resp));
@@ -238,7 +238,7 @@ class ReconciliationFlowSupportForeignInvoiceTest {
     List<String> operationIds = new ArrayList<>();
 
     NeoResponse resp = ReconciliationFlowSupport.createInvoicePayments(
-        acc, bsl, invoiceSpecs, operationIds, TOLERANCE, null);
+        acc, bsl, invoiceSpecs, operationIds, TOLERANCE, null, false);
 
     assertEquals(404, resp.getHttpStatus());
   }
@@ -259,7 +259,7 @@ class ReconciliationFlowSupportForeignInvoiceTest {
     List<String> operationIds = new ArrayList<>();
 
     NeoResponse resp = ReconciliationFlowSupport.createInvoicePayments(
-        acc, bsl, invoiceSpecs, operationIds, TOLERANCE, null);
+        acc, bsl, invoiceSpecs, operationIds, TOLERANCE, null, false);
 
     assertEquals(400, resp.getHttpStatus());
     assertTrue(message(resp).toLowerCase().contains("do not cover"), message(resp));
@@ -284,7 +284,7 @@ class ReconciliationFlowSupportForeignInvoiceTest {
     List<String> operationIds = new ArrayList<>();
 
     NeoResponse resp = ReconciliationFlowSupport.createInvoicePayments(
-        acc, bsl, invoiceSpecs, operationIds, TOLERANCE, null);
+        acc, bsl, invoiceSpecs, operationIds, TOLERANCE, null, false);
 
     assertNull(resp, "a zero-amount line should short-circuit before any invoice lookup");
     assertTrue(operationIds.isEmpty());
@@ -309,7 +309,7 @@ class ReconciliationFlowSupportForeignInvoiceTest {
     List<String> operationIds = new ArrayList<>();
 
     NeoResponse resp = ReconciliationFlowSupport.createInvoicePayments(
-        acc, bsl, invoiceSpecs, operationIds, TOLERANCE, null);
+        acc, bsl, invoiceSpecs, operationIds, TOLERANCE, null, false);
 
     assertEquals(400, resp.getHttpStatus());
     assertTrue(message(resp).toLowerCase().contains("do not cover"), message(resp));
@@ -330,7 +330,7 @@ class ReconciliationFlowSupportForeignInvoiceTest {
     List<String> operationIds = new ArrayList<>();
 
     NeoResponse resp = ReconciliationFlowSupport.createInvoicePayments(
-        acc, bsl, invoiceSpecs, operationIds, TOLERANCE, null);
+        acc, bsl, invoiceSpecs, operationIds, TOLERANCE, null, false);
 
     assertNull(resp, "same-currency zero line should not hit any rejection path");
     assertTrue(operationIds.isEmpty());
@@ -348,7 +348,7 @@ class ReconciliationFlowSupportForeignInvoiceTest {
     List<String> operationIds = new ArrayList<>();
 
     NeoResponse resp = ReconciliationFlowSupport.createInvoicePayments(
-        acc, bsl, invoiceSpecs, operationIds, TOLERANCE, null);
+        acc, bsl, invoiceSpecs, operationIds, TOLERANCE, null, false);
 
     assertNull(resp);
   }
@@ -369,7 +369,7 @@ class ReconciliationFlowSupportForeignInvoiceTest {
     // obDal.get(FIN_PaymentMethod.class, "pm-missing") is unstubbed -> returns null by default.
 
     assertThrows(OBException.class, () -> ReconciliationFlowSupport.createInvoicePayments(
-        acc, bsl, invoiceSpecs, operationIds, TOLERANCE, "pm-missing"));
+        acc, bsl, invoiceSpecs, operationIds, TOLERANCE, "pm-missing", false));
   }
 
   /**
@@ -384,7 +384,7 @@ class ReconciliationFlowSupportForeignInvoiceTest {
     List<String> operationIds = new ArrayList<>();
 
     NeoResponse resp = ReconciliationFlowSupport.createInvoicePayments(
-        acc, bsl, invoiceSpecs, operationIds, TOLERANCE, "");
+        acc, bsl, invoiceSpecs, operationIds, TOLERANCE, "", false);
 
     assertNull(resp);
   }
@@ -404,7 +404,7 @@ class ReconciliationFlowSupportForeignInvoiceTest {
     List<String> operationIds = new ArrayList<>();
 
     NeoResponse resp = ReconciliationFlowSupport.createInvoicePayments(
-        acc, bsl, invoiceSpecs, operationIds, TOLERANCE, "pm-1");
+        acc, bsl, invoiceSpecs, operationIds, TOLERANCE, "pm-1", false);
 
     assertNull(resp);
   }
@@ -445,7 +445,7 @@ class ReconciliationFlowSupportForeignInvoiceTest {
         .thenReturn(payment);
 
     NeoResponse resp = ReconciliationFlowSupport.createInvoicePayments(
-        acc, bsl, invoiceSpecs, operationIds, TOLERANCE, null);
+        acc, bsl, invoiceSpecs, operationIds, TOLERANCE, null, false);
 
     assertNull(resp, "an invoice settling less than the line should now succeed, not 400");
     assertEquals(1, operationIds.size());

@@ -4,26 +4,54 @@
 
 The `POST /sws/go/onboarding` endpoint streams NDJSON progress events while
 setting up a newly registered client. The core method is
-`EtendoGoJwtServlet.ensureOnboardingDataset`, which runs five steps in order.
-Each step either completes or emits an `{"status":"error"}` event and aborts.
-After all steps complete, the endpoint commits the DAL transaction and then sends
-the `environment-ready` transactional email best-effort. Email delivery failure
-is audited by the transactional email safety store and does not roll back the
-already committed environment.
+`EtendoGoJwtServlet.ensureOnboardingDataset`, which runs the steps below in
+order (reconcile model, ETP-4428: every step is idempotent/self-guarding, so
+the full chain runs unconditionally on every call, repairing whatever a prior
+partial failure left missing). Each step either completes or emits an
+`{"status":"error"}` event and aborts. After all steps complete, the endpoint
+commits the DAL transaction and then sends the `environment-ready`
+transactional email best-effort. Email delivery failure is audited by the
+transactional email safety store and does not roll back the already committed
+environment.
+
+**Do not hardcode the step count in prose** — the list below is the source of
+truth; keep it (and this list ONLY) in sync with
+`EtendoGoJwtServlet.ensureOnboardingDataset` whenever a step is added,
+removed, or reordered.
 
 ## Step Sequence
 
 ```
-1. dataset    — import sampledata XML into the new client/org
-2. sequences  — generate document-number sequences (AD_SEQUENCE)
-3. orgReady   — mark the org as ready (AD_ORG.isready = Y)
-4. fiscal     — seed SII descriptions (AEATSII_DESCRIPTION)
-5. customer   — ensure a default customer business partner exists
+ 1. dataset             — import sampledata XML into the new client/org
+ 2. accounting          — wire the accounting schema (OnboardingAccountingWiringService#wire)
+ 3. periodControl       — open the initial fiscal calendar / period control
+ 4. sequences           — generate document-number sequences (AD_SEQUENCE)
+ 5. orgReady            — mark the org as ready (AD_ORG.isready = Y)
+ 6. fiscal              — seed SII descriptions (AEATSII_DESCRIPTION)
+ 7. orgInfo             — wire org fiscal/address info from the signup form
+ 8. customer            — ensure a default customer business partner exists
+ 9. bankConnectionSync  — schedule the PSD2 daily bank-statement sync (non-fatal; wired live 2026-06-28)
+10. bpGroupAcctPatch    — patch C_BP_Group_Acct columns the core trigger never populates (ETP-4720)
+11. acctdimVisibility   — force flat accounting-dimension visibility (gap K1, ETP-4854)
+12. baseline            — stamp the tenant's data-fix baseline (registerBaseline; always LAST)
 ```
 
-Steps 3–5 were added to fix the "environment not ready for invoicing" error that
-occurred when the org-accessibility filter hid all org-scoped records because
-`isready=N`.
+The `orgReady`, `fiscal`, and `customer` steps were added to fix the
+"environment not ready for invoicing" error that occurred when the
+org-accessibility filter hid all org-scoped records because `isready=N`.
+
+Steps 9–11 are corrective/preventive gap-closing steps layered on top of the
+original five (`accounting`, `periodControl`, `orgInfo` predate them too, ETP
+numbers as noted). `baseline` is always the final step — it stamps
+`ONBOARDING_PROVISIONED_THROUGH` (in `OnboardingBaselineService`) so the
+corrective data-fix runner (`cli/src/data-fixes/` in `etendo_schema_forge`)
+knows which fixes this tenant was already born with and skips them. **Full
+per-step rationale, the preventive/corrective "two fronts" pairing, and the
+onboarding-gap catalog (A1…K1) live in the sibling functional repo:**
+`etendo_schema_forge/docs/etendo-ad/onboarding-and-datafixes-map.md` and
+`onboarding-gaps.md` — this file intentionally does not duplicate that detail
+(see the repo-topology split: this repo documents runtime/API behavior, the
+functional repo documents the gap analysis and data-fixes).
 
 ## Services
 
@@ -31,6 +59,18 @@ occurred when the org-accessibility filter hid all org-scoped records because
 Imports the curated GOClient sampledata XML files into the target client/org via
 `DataImportService`. The dataset is loaded from the classpath (staged during
 WAR build — see `onboarding-sampledata-packaging.md`).
+
+### `OnboardingAccountingWiringService`
+Step 2 (`wire`) creates the client's accounting schema / `C_AcctSchema_Default`
+wiring; a later entry point on the SAME service, `patchBpGroupAcctMissingColumns`
+(step 10), patches 5 `C_BP_Group_Acct` columns left NULL by both the core
+trigger and this service's own initial SQL (ETP-4720). See
+`etendo_schema_forge/docs/etendo-ad/onboarding-and-datafixes-map.md` for the
+full root-cause writeup.
+
+### `OnboardingPeriodControlService`
+Step 3. Opens the initial fiscal calendar / period control for the new
+client/org so documents can be posted from day one.
 
 ### `OnboardingSequenceGeneratorService`
 Generates `AD_SEQUENCE` records for all document types that require a number
@@ -57,9 +97,40 @@ client if none exist yet. These SII descriptions are required by the Spanish
 SII reporting module and must be present before the user raises their first
 invoice. Runs under the admin user's execution context.
 
+### `OnboardingOrgInfoService`
+Step 7. Wires the org's fiscal/address information collected on the signup
+form (country, fiscal ID, address) onto the newly created `AD_Org`/legal
+entity.
+
 ### `OnboardingDefaultCustomerService`
 Creates a default `C_BPARTNER` customer record if none already exists for the
 org. The default customer is pre-selected on new sales invoice drafts.
+
+### `OnboardingBankConnectionSyncService`
+Step 9. Intentionally **non-fatal** — always returns `true` and swallows
+errors (logs + `done` "skipped"). Schedules one daily `AD_Process_Request` per
+client that runs PSD2 `Get Bank Statements`, so Salt Edge-connected accounts
+auto-import statements. Has a post-commit companion,
+`activateSchedule(clientId)`, called right after `commitDalChanges` (not
+inside this chain) because the Quartz scheduler needs a committed row.
+
+### `OnboardingAcctdimCentrallyMaintainedService`
+Step 11 (`forceFlatAccountingDimensionVisibility`, ETP-4854, gap K1). Backfills
+`C_AcctSchema_Element.isactive` per elementtype from the client's current
+effective `AD_Client.<Dim>_Acctdim_*` config, then flips
+`AD_Client.Acctdim_Centrally_Maintained` to `'N'` so the "Dimensiones
+contables" screen is functional for the tenant from birth, with no change in
+observed dimension visibility. Lockstep corrective twin:
+`R23-acctdim-centrally-maintained.sql` in `etendo_schema_forge`. Full
+root-cause and safety analysis:
+`etendo_schema_forge/docs/etendo-ad/onboarding-gaps.md` §K1.
+
+### `OnboardingBaselineService`
+Step 12, always last. Stamps the data-fix baseline row (`applied_utc =
+ONBOARDING_PROVISIONED_THROUGH`, a hardcoded cutoff — NOT `now()`) so the
+corrective data-fix runner knows which fixes a freshly-onboarded tenant
+already has natively and skips them. Single source of truth for the
+watermark — there is no separate `RegisterBaselineStep`.
 
 ## Dataset Included Tables
 

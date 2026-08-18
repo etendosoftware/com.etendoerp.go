@@ -217,20 +217,10 @@ public final class NeoDiscoveryHelper {
    */
   public static JSONArray buildMethodsArray(SFEntity entity) {
     JSONArray methods = new JSONArray();
-    if (Boolean.TRUE.equals(entity.isGet()) || Boolean.TRUE.equals(entity.isGetByID())) {
-      methods.put("GET");
-    }
-    if (Boolean.TRUE.equals(entity.isPost())) {
-      methods.put("POST");
-    }
-    if (Boolean.TRUE.equals(entity.isPut())) {
-      methods.put("PUT");
-    }
-    if (Boolean.TRUE.equals(entity.isPatch())) {
-      methods.put("PATCH");
-    }
-    if (Boolean.TRUE.equals(entity.isDelete())) {
-      methods.put("DELETE");
+    // ETP-4254: read through NeoMethodPolicy so the advertised methods cannot drift from the
+    // methods actually enforced by the CRUD gate.
+    for (String method : NeoMethodPolicy.enabledMethods(entity)) {
+      methods.put(method);
     }
     return methods;
   }
@@ -287,9 +277,16 @@ public final class NeoDiscoveryHelper {
     if ("W".equals(specType)) {
       return NeoAccessHelper.hasWindowAccessForSpec(spec, "GET");
     }
-    if ("P".equals(specType) || "R".equals(specType)) {
+    if ("P".equals(specType)) {
       Process adProcess = NeoAccessHelper.resolveProcess(spec);
       return adProcess == null || NeoAccessHelper.hasProcessAccess(adProcess.getId());
+    }
+    // ETP-4596: "R" specs no longer fall through the "P"/"R" process-only check above —
+    // hasReportSpecAccess additionally covers process-less report specs via their
+    // constituent windows (AD_TAB_ID), while still delegating to hasProcessAccess when a
+    // real AD_Process is linked. See NeoAccessHelper#hasReportSpecAccess for the full tiering.
+    if ("R".equals(specType)) {
+      return NeoAccessHelper.hasReportSpecAccess(spec, "GET");
     }
     return true;
   }

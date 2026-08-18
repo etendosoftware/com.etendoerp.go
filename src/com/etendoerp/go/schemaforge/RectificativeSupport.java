@@ -98,4 +98,5 @@ final class RectificativeSupport {
     }
     return Boolean.TRUE.equals(dt.isEtsgIsRectificative());
   }
+
 }

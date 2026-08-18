@@ -231,14 +231,70 @@ class NeoDiscoveryHelperTest {
       when(specCriteria.list()).thenReturn(Collections.singletonList(spec));
 
       try (MockedStatic<NeoAccessHelper> accessMock = mockStatic(NeoAccessHelper.class)) {
+        // ETP-4596: isSpecAccessible now gates "R" specs on hasReportSpecAccess, not
+        // resolveProcess/hasProcessAccess directly — resolveProcess is still used separately
+        // by buildSpecObject to populate processId in the response body.
+        accessMock.when(() -> NeoAccessHelper.hasReportSpecAccess(spec, "GET")).thenReturn(true);
         accessMock.when(() -> NeoAccessHelper.resolveProcess(spec)).thenReturn(adProcess);
-        accessMock.when(() -> NeoAccessHelper.hasProcessAccess("proc-2")).thenReturn(true);
 
         NeoResponse response = NeoDiscoveryHelper.handleDiscovery();
 
         assertEquals(200, response.getHttpStatus());
         JSONObject specObj = response.getBody().getJSONArray("specs").getJSONObject(0);
         assertTrue(specObj.getBoolean("isReport"));
+      }
+    }
+
+    /**
+     * ETP-4596: a process-less report spec (no {@code AD_Process}, no entity
+     * {@code AD_TAB_ID}) must keep today's permissive discovery-listing behavior — the shape
+     * of {@code aging-receivable}/{@code tax-report}/{@code inventory-stock-report}.
+     */
+    @Test
+    @DisplayName("should allow report spec with no process and no combination data")
+    void shouldAllowReportSpecWithNoProcessNoTabData() throws Exception {
+      SFSpec spec = createMockSpec("spec3b", "Aging Receivable", "R", "Untouched report");
+      when(spec.getADWindow()).thenReturn(null);
+      when(spec.getADModule()).thenReturn(null);
+
+      OBCriteria<SFSpec> specCriteria = mockCriteria();
+      when(dal.createCriteria(SFSpec.class)).thenReturn(specCriteria);
+      when(specCriteria.list()).thenReturn(Collections.singletonList(spec));
+
+      try (MockedStatic<NeoAccessHelper> accessMock = mockStatic(NeoAccessHelper.class)) {
+        accessMock.when(() -> NeoAccessHelper.hasReportSpecAccess(spec, "GET")).thenReturn(true);
+        accessMock.when(() -> NeoAccessHelper.resolveProcess(spec)).thenReturn(null);
+
+        NeoResponse response = NeoDiscoveryHelper.handleDiscovery();
+
+        assertEquals(200, response.getHttpStatus());
+        assertEquals(1, response.getBody().getJSONArray("specs").length());
+      }
+    }
+
+    /**
+     * ETP-4596: this is the live-bug scenario the fix closes — a report spec whose entity now
+     * carries a populated {@code AD_TAB_ID} (e.g. bank-statements) must be excluded from the
+     * discovery listing for a role without access to the constituent window, instead of
+     * always being listed as before.
+     */
+    @Test
+    @DisplayName("should skip report spec when hasReportSpecAccess denies constituent window")
+    void shouldSkipReportSpecWhenConstituentWindowDenied() throws Exception {
+      SFSpec spec = createMockSpec("spec3c", "Bank Statements", "R", "Financial Account report");
+      when(spec.getADWindow()).thenReturn(null);
+
+      OBCriteria<SFSpec> specCriteria = mockCriteria();
+      when(dal.createCriteria(SFSpec.class)).thenReturn(specCriteria);
+      when(specCriteria.list()).thenReturn(Collections.singletonList(spec));
+
+      try (MockedStatic<NeoAccessHelper> accessMock = mockStatic(NeoAccessHelper.class)) {
+        accessMock.when(() -> NeoAccessHelper.hasReportSpecAccess(spec, "GET")).thenReturn(false);
+
+        NeoResponse response = NeoDiscoveryHelper.handleDiscovery();
+
+        assertEquals(200, response.getHttpStatus());
+        assertEquals(0, response.getBody().getJSONArray("specs").length());
       }
     }
 

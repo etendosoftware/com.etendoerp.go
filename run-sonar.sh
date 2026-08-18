@@ -10,6 +10,7 @@ CHANGED_ONLY="true"
 ALLOW_DIRTY="false"
 FAIL_ON_GATE="false"
 COMPARE_COVERAGE="false"
+JACOCO_XML=""
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 CLASSIC_ROOT="$(cd -- "$SCRIPT_DIR/../.." && pwd)"
 
@@ -61,6 +62,18 @@ while [[ $# -gt 0 ]]; do
       # COVERAGE_MINIMUM. Mirrors Jenkins' sonarUtils.compareCoverage.
       COMPARE_COVERAGE="true"
       shift
+      ;;
+    --jacoco-xml)
+      # Absolute path to the aggregated JaCoCo XML (…/jacocoRootReport.xml).
+      # Handed straight to the scanner as sonar.coverage.jacoco.xmlReportPaths so
+      # coverage is imported exactly like CI's "Generate Coverage Report" stage.
+      # Without it the scanner imports NO coverage and the gate compares vs 0.
+      if [[ -z "${2:-}" ]]; then
+        echo "ERROR: --jacoco-xml requires a value"
+        exit 1
+      fi
+      JACOCO_XML="$2"
+      shift 2
       ;;
     *)
       echo "ERROR: Unknown argument: $1"
@@ -217,14 +230,18 @@ validate_base_ref() {
 load_env_file "$SCRIPT_DIR/.env"
 load_env_file "$CLASSIC_ROOT/.env"
 
-# Fall back to gradle.properties BEFORE prompting for a .env file; otherwise
-# credentials configured there are unreachable (the prompt exits when stdin is
-# not a TTY, e.g. inside the pre-push hook).
+# Fall back to $CORE_DIR/gradle.properties BEFORE prompting for a .env file;
+# otherwise credentials configured there are unreachable (the prompt exits when
+# stdin is not a TTY, e.g. inside the pre-push hook). Accept BOTH the camelCase
+# keys (sonarHostUrl/sonarToken) and the SONAR_HOST_URL/SONAR_TOKEN spelling, so
+# whichever convention the developer used in gradle.properties works.
 if [[ -z "${SONAR_HOST_URL:-}" ]]; then
   SONAR_HOST_URL="$(load_gradle_property sonarHostUrl)"
+  [[ -z "$SONAR_HOST_URL" ]] && SONAR_HOST_URL="$(load_gradle_property SONAR_HOST_URL)"
 fi
 if [[ -z "${SONAR_TOKEN:-}" ]]; then
   SONAR_TOKEN="$(load_gradle_property sonarToken)"
+  [[ -z "$SONAR_TOKEN" ]] && SONAR_TOKEN="$(load_gradle_property SONAR_TOKEN)"
 fi
 
 if [[ -z "${SONAR_HOST_URL:-}" || -z "${SONAR_TOKEN:-}" ]]; then
@@ -260,6 +277,18 @@ SCANNER_ARGS=(
   -Dsonar.host.url="$SONAR_HOST_URL"
   -Dsonar.token="$SONAR_TOKEN"
 )
+# Import JaCoCo coverage when the caller pointed us at the aggregated report
+# (the pre-push runs `./gradlew jacocoRootReport` first). A missing file is a
+# loud warning, not a hard stop — but it means Sonar sees no coverage, so any
+# --compare-coverage gate would then be meaningless.
+if [[ -n "$JACOCO_XML" ]]; then
+  if [[ -f "$JACOCO_XML" ]]; then
+    SCANNER_ARGS+=( -Dsonar.coverage.jacoco.xmlReportPaths="$JACOCO_XML" )
+  else
+    echo "⚠️  --jacoco-xml given but file not found: $JACOCO_XML"
+    echo "    Sonar will import NO coverage for this analysis."
+  fi
+fi
 SONAR_PR_KEY=""
 if [[ "$CHANGED_ONLY" == "true" && -n "$BASE_REF" ]]; then
   PR_SRC_BRANCH="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo 'HEAD')"
@@ -766,7 +795,10 @@ fi
 
 # ── Quality Gate enforcement (opt-in via --fail-on-gate) ────────────
 # Mirrors the server-side Quality Gate that CI enforces on the PR. When the
-# gate is in ERROR, exit non-zero so callers (e.g. the pre-push hook) can block.
+# gate is in ERROR, record it and keep going — --compare-coverage below still
+# needs to run, so a dev with both a new bug AND a coverage drop sees both in
+# this one push attempt instead of one now and the other on the next push.
+GATE_RC=0
 if [[ "$FAIL_ON_GATE" == "true" ]]; then
   QG_FILE="$REPORT_DIR/sonar-quality-gate.json"
   PR_ISSUES_FILE="$REPORT_DIR/sonar-issues-pr-only.json"
@@ -778,6 +810,7 @@ if [[ "$FAIL_ON_GATE" == "true" ]]; then
   GATE_BRANCH="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo 'this branch')"
   HANDOFF_FILE="$REPORT_DIR/sonar-handoff-prompt.md"
 
+  set +e
   REPORT_DIR="$REPORT_DIR" QG_FILE="$QG_FILE" PR_ISSUES_FILE="$PR_ISSUES_FILE" \
   CHANGED_ONLY="$CHANGED_ONLY" HANDOFF_FILE="$HANDOFF_FILE" \
   GATE_BRANCH="$GATE_BRANCH" CORE_DIR="$CLASSIC_ROOT" PROJECT_KEY="$PROJECT_KEY" \
@@ -1030,6 +1063,8 @@ print(handoff)
 print("\n  Bypass with 'git push --no-verify' (WIP only).")
 sys.exit(1)
 PYEOF
+  GATE_RC=$?
+  set -e
 fi
 
 # ── Coverage-decrease gate (opt-in via --compare-coverage) ──────────
@@ -1037,6 +1072,7 @@ fi
 # (pp, default 1) below the base branch's, or below the absolute COVERAGE_MINIMUM
 # (default 70). Mirrors the Jenkins sonarUtils.compareCoverage gate. Current and
 # base coverage are queried live from Sonar.
+CMP_RC=0
 if [[ "$COMPARE_COVERAGE" == "true" ]]; then
   CMP_BRANCH="${BASE_REF#origin/}"
   CMP_BRANCH="${CMP_BRANCH:-epic/ETP-3504}"
@@ -1143,8 +1179,19 @@ sys.exit(0)
 PYEOF
     CMP_RC=$?
     set -e
-    if [[ "$CMP_RC" -ne 0 ]]; then
-      exit "$CMP_RC"
-    fi
   fi
 fi
+
+# ── Combined result ──────────────────────────────────────────────
+# Both gates above ran to completion regardless of each other's outcome, so a
+# push with a new bug AND a coverage drop shows both here — not one now and
+# the other on the next push attempt.
+if [[ "$GATE_RC" -ne 0 || "$CMP_RC" -ne 0 ]]; then
+  if [[ "$GATE_RC" -ne 0 && "$CMP_RC" -ne 0 ]]; then
+    echo ""
+    echo "❌ Both the Quality Gate and the coverage comparison failed — see above for each."
+  fi
+  exit 1
+fi
+
+exit 0

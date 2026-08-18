@@ -17,6 +17,7 @@
 package com.etendoerp.go.rest;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -49,6 +50,7 @@ import javax.servlet.http.HttpServletResponse;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.Test;
+import org.mockito.MockedStatic;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.model.ad.access.Role;
 import org.openbravo.model.ad.access.User;
@@ -493,7 +495,7 @@ public class EtendoGoJwtServletCoverageTest {
 
     try (var ctxMock = mockStatic(OBContext.class);
          var dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
-      dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByToken("valid-token"))
+      dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByBearerToken("valid-token"))
           .thenThrow(new RuntimeException("db down"));
 
       servlet.doGet(req, resp.response);
@@ -531,7 +533,7 @@ public class EtendoGoJwtServletCoverageTest {
 
     try (var ctxMock = mockStatic(OBContext.class);
          var dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
-      dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByToken("valid-token"))
+      dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByBearerToken("valid-token"))
           .thenReturn(account);
       dalMock.when(() -> EtendoGoJwtDalHelper.findEnvironmentUsersByAccountEmail("user@test.com"))
           .thenReturn(users);
@@ -569,7 +571,7 @@ public class EtendoGoJwtServletCoverageTest {
 
     try (var ctxMock = mockStatic(OBContext.class);
          var dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
-      dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByToken("valid-token"))
+      dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByBearerToken("valid-token"))
           .thenReturn(account);
       dalMock.when(() -> EtendoGoJwtDalHelper.findEnvironmentUsersByAccountEmail("user@test.com"))
           .thenThrow(new RuntimeException("db down"));
@@ -601,11 +603,11 @@ public class EtendoGoJwtServletCoverageTest {
 
     try (var ctxMock = mockStatic(OBContext.class);
          var supportMock = mockStatic(EtendoGoJwtSupport.class);
+         var dalMock = mockStatic(EtendoGoJwtDalHelper.class);
          var obDalMock = mockStatic(OBDal.class);
          var swsMock = mockStatic(SecureWebServicesUtils.class)) {
       obDalMock.when(OBDal::getInstance).thenReturn(obDal);
-      supportMock.when(() -> EtendoGoJwtSupport.requireAccountEmail("valid-token"))
-          .thenReturn("user@test.com");
+      stubAuthenticatedAccount(dalMock);
       supportMock.when(() -> EtendoGoJwtSupport.isEnvironmentUserOwnedByAccount(
           "user@test.com", "user-1")).thenReturn(true);
       supportMock.when(() -> EtendoGoJwtSupport.loadRoleListData("user-1"))
@@ -638,10 +640,10 @@ public class EtendoGoJwtServletCoverageTest {
 
     try (var ctxMock = mockStatic(OBContext.class);
          var supportMock = mockStatic(EtendoGoJwtSupport.class);
+         var dalMock = mockStatic(EtendoGoJwtDalHelper.class);
          var obDalMock = mockStatic(OBDal.class)) {
       obDalMock.when(OBDal::getInstance).thenReturn(obDal);
-      supportMock.when(() -> EtendoGoJwtSupport.requireAccountEmail("valid-token"))
-          .thenReturn("user@test.com");
+      stubAuthenticatedAccount(dalMock);
       supportMock.when(() -> EtendoGoJwtSupport.isEnvironmentUserOwnedByAccount(
           "user@test.com", "user-1")).thenReturn(true);
       supportMock.when(() -> EtendoGoJwtSupport.loadRoleListData("user-1"))
@@ -661,8 +663,8 @@ public class EtendoGoJwtServletCoverageTest {
     when(req.getParameter("userId")).thenReturn("user-1");
 
     try (var ctxMock = mockStatic(OBContext.class);
-         var supportMock = mockStatic(EtendoGoJwtSupport.class)) {
-      supportMock.when(() -> EtendoGoJwtSupport.requireAccountEmail("valid-token"))
+         var dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
+      dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByBearerToken("valid-token"))
           .thenThrow(new RuntimeException("db down"));
 
       servlet.doGet(req, resp.response);
@@ -700,8 +702,7 @@ public class EtendoGoJwtServletCoverageTest {
     when(account.getEmail()).thenReturn("user@test.com");
     try (var ctxMock = mockStatic(OBContext.class);
          var dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
-      dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByToken("valid-token"))
-          .thenReturn(account);
+      stubAuthenticatedAccount(dalMock);
 
       servlet.doPost(req, resp.response);
     }
@@ -720,8 +721,7 @@ public class EtendoGoJwtServletCoverageTest {
     when(account.getEmail()).thenReturn("user@test.com");
     try (var ctxMock = mockStatic(OBContext.class);
          var dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
-      dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByToken("valid-token"))
-          .thenReturn(account);
+      stubAuthenticatedAccount(dalMock);
 
       servlet.doPost(req, resp.response);
     }
@@ -741,8 +741,7 @@ public class EtendoGoJwtServletCoverageTest {
     when(account.getEmail()).thenReturn("user@test.com");
     try (var ctxMock = mockStatic(OBContext.class);
          var dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
-      dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByToken("valid-token"))
-          .thenReturn(account);
+      stubAuthenticatedAccount(dalMock);
 
       servlet.doPost(req, resp.response);
     }
@@ -761,8 +760,7 @@ public class EtendoGoJwtServletCoverageTest {
     when(account.getEmail()).thenReturn("user@test.com");
     try (var ctxMock = mockStatic(OBContext.class);
          var dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
-      dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByToken("valid-token"))
-          .thenReturn(account);
+      stubAuthenticatedAccount(dalMock);
       dalMock.when(() -> EtendoGoJwtDalHelper.findCurrencyByIsoCode("XYZ"))
           .thenReturn(null);
 
@@ -788,8 +786,7 @@ public class EtendoGoJwtServletCoverageTest {
     try (var ctxMock = mockStatic(OBContext.class);
          var supportMock = mockStatic(EtendoGoJwtSupport.class);
          var dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
-      dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByToken("valid-token"))
-          .thenReturn(account);
+      stubAuthenticatedAccount(dalMock);
       dalMock.when(() -> EtendoGoJwtDalHelper.findCurrencyByIsoCode("EUR"))
           .thenReturn(currency);
       // Existing client owned by ANOTHER account -> resume refused (tenant isolation, ETP-4428).
@@ -822,8 +819,7 @@ public class EtendoGoJwtServletCoverageTest {
     try (var ctxMock = mockStatic(OBContext.class);
          var supportMock = mockStatic(EtendoGoJwtSupport.class);
          var dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
-      dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByToken("valid-token"))
-          .thenReturn(account);
+      stubAuthenticatedAccount(dalMock);
       dalMock.when(() -> EtendoGoJwtDalHelper.findCurrencyByIsoCode("EUR"))
           .thenReturn(currency);
       supportMock.when(() -> EtendoGoJwtSupport.findClientIdByName("Acme"))
@@ -868,8 +864,7 @@ public class EtendoGoJwtServletCoverageTest {
     try (var ctxMock = mockStatic(OBContext.class);
          var supportMock = mockStatic(EtendoGoJwtSupport.class);
          var dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
-      dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByToken("valid-token"))
-          .thenReturn(account);
+      stubAuthenticatedAccount(dalMock);
       dalMock.when(() -> EtendoGoJwtDalHelper.findCurrencyByIsoCode("EUR"))
           .thenReturn(currency);
       supportMock.when(() -> EtendoGoJwtSupport.findClientIdByName("Acme"))
@@ -927,8 +922,7 @@ public class EtendoGoJwtServletCoverageTest {
          var supportMock = mockStatic(EtendoGoJwtSupport.class);
          var dalMock = mockStatic(EtendoGoJwtDalHelper.class);
          var rollbackMock = mockStatic(EtendoGoDalHelper.class)) {
-      dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByToken("valid-token"))
-          .thenReturn(account);
+      stubAuthenticatedAccount(dalMock);
       dalMock.when(() -> EtendoGoJwtDalHelper.findCurrencyByIsoCode("EUR"))
           .thenReturn(currency);
       supportMock.when(() -> EtendoGoJwtSupport.findClientIdByName("Acme"))
@@ -955,6 +949,103 @@ public class EtendoGoJwtServletCoverageTest {
     assertTrue(ndjson.contains("Role provisioning failed"));
   }
 
+  // ===================== applySocialName() — ETP-4749 =====================
+  //
+  // AD_Org.SocialName ("Nombre comercial" in the Organization settings window) was never
+  // set anywhere in the onboarding flow — InitialOrgSetup/InitialSetupUtility (Etendo core)
+  // only set Name/SearchKey. applySocialName() reuses the same clientName already used for
+  // Name (which the wizard's CompanyStep.jsx already resolves to the user's Full Name for
+  // Freelancers, since that business type has no separate Company Name field) and persists
+  // it once, right after organization creation succeeds — never as part of
+  // OnboardingOrgInfoService's idempotent reconcile chain, so a resumed/retried onboarding
+  // call never overwrites a "Nombre comercial" the user already edited by hand.
+
+  @Test
+  public void applySocialNameSetsSocialNameAndSavesWhenOrganizationFound() {
+    Organization org = mock(Organization.class);
+    OBDal dal = mock(OBDal.class);
+
+    try (var dalHelperMock = mockStatic(EtendoGoJwtDalHelper.class);
+         var obDalMock = mockStatic(OBDal.class)) {
+      dalHelperMock.when(() -> EtendoGoJwtDalHelper.findFirstOrganization("client-1"))
+          .thenReturn(org);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      boolean result = servlet.applySocialName("client-1", "Acme Corp");
+
+      assertTrue(result);
+      verify(org).setSocialName("Acme Corp");
+      verify(dal).save(org);
+      verify(dal).flush();
+    }
+  }
+
+  @Test
+  public void applySocialNameUsesTheFreelancerFullNameFallbackAlreadyResolvedByTheWizard() {
+    // CompanyStep.jsx (schema_forge_core/packages/etendo-go-core) already resolves clientName
+    // to the Freelancer's Full Name before this ever reaches Java — applySocialName has no
+    // businessType branching of its own, it just persists whatever clientName it is given.
+    Organization org = mock(Organization.class);
+    OBDal dal = mock(OBDal.class);
+
+    try (var dalHelperMock = mockStatic(EtendoGoJwtDalHelper.class);
+         var obDalMock = mockStatic(OBDal.class)) {
+      dalHelperMock.when(() -> EtendoGoJwtDalHelper.findFirstOrganization("client-1"))
+          .thenReturn(org);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      boolean result = servlet.applySocialName("client-1", "Jane Freelancer");
+
+      assertTrue(result);
+      verify(org).setSocialName("Jane Freelancer");
+    }
+  }
+
+  @Test
+  public void applySocialNameReturnsFalseAndDoesNotSaveWhenOrganizationNotFound() {
+    OBDal dal = mock(OBDal.class);
+
+    try (var dalHelperMock = mockStatic(EtendoGoJwtDalHelper.class);
+         var obDalMock = mockStatic(OBDal.class)) {
+      dalHelperMock.when(() -> EtendoGoJwtDalHelper.findFirstOrganization("client-1"))
+          .thenReturn(null);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      boolean result = servlet.applySocialName("client-1", "Acme Corp");
+
+      assertFalse(result);
+      verify(dal, never()).save(any());
+      verify(dal, never()).flush();
+    }
+  }
+
+  @Test
+  public void applySocialNameHasNoBlankGuardUnlikeApplyTaxId() {
+    // Unlike OnboardingOrgInfoService.applyTaxId() (a deliberate no-op on blank, because
+    // Tax ID is genuinely optional), the clientName reaching this method is guaranteed
+    // non-blank by parseOnboardingRequest()'s upstream validation (FIELD_CLIENT_NAME must
+    // not be empty — see parseOnboardingRequest's own validation branch). This method
+    // intentionally carries no blank guard of its own: a blank value would still be
+    // persisted as-is. Locking this in so a future "harmonize with applyTaxId" refactor
+    // doesn't silently mask an upstream validation bug behind a no-op here.
+    Organization org = mock(Organization.class);
+    OBDal dal = mock(OBDal.class);
+
+    try (var dalHelperMock = mockStatic(EtendoGoJwtDalHelper.class);
+         var obDalMock = mockStatic(OBDal.class)) {
+      dalHelperMock.when(() -> EtendoGoJwtDalHelper.findFirstOrganization("client-1"))
+          .thenReturn(org);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      boolean result = servlet.applySocialName("client-1", "");
+
+      assertTrue(result);
+      verify(org).setSocialName("");
+      verify(dal).save(org);
+      verify(dal).flush();
+    }
+  }
+
   // ===================== Helpers =====================
 
   private static String testPasswordHash(String password) throws Exception {
@@ -964,6 +1055,23 @@ public class EtendoGoJwtServletCoverageTest {
     byte[] hash = digest.digest(password.getBytes(StandardCharsets.UTF_8));
     return Base64.getEncoder().encodeToString(salt) + ":"
         + Base64.getEncoder().encodeToString(hash);
+  }
+
+  private static Account stubAuthenticatedAccount(
+      MockedStatic<EtendoGoJwtDalHelper> dalMock) {
+    Account account = mock(Account.class);
+    when(account.getEmail()).thenReturn("user@test.com");
+    // ETP-4575 — both lookups are stubbed because both are genuinely reachable after
+    // this merge: the epic's newer handlers still call findActiveAccountByBearerToken
+    // directly, while resolveAuthenticatedAccountContext (the unified resolver that
+    // serves the cookie session AND the legacy bearer fallback) goes through
+    // findActiveAccountByToken. Stubbing only one leaves whichever path the test
+    // actually exercises returning null, which surfaces as a misleading 401.
+    dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByBearerToken("valid-token"))
+        .thenReturn(account);
+    dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByToken("valid-token"))
+        .thenReturn(account);
+    return account;
   }
 
   private static HttpServletRequest mockRequest(String pathInfo) {

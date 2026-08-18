@@ -167,7 +167,9 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
       for (int i = 0; i < dataArr.length(); i++) {
         JSONObject rec = dataArr.getJSONObject(i);
         enrichInvoiceSubtype(rec, getInvoiceSubtypeKey());
-        applyAmountNegationForCredit(rec);
+        // ETP-4841: no sign rewriting here. The stored sign IS the truth — a Factura
+        // Rectificativa can legitimately be positive (an under-invoiced correction, which
+        // is payable), and forcing it negative made the grid contradict the detail page.
         applyTotalDiscountToRecord(rec);
       }
       if (context.getRecordId() != null) {
@@ -177,6 +179,7 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
         enrichDocTypeLocked(rec);
         enrichIsRectificative(rec);
         enrichHasRectifications(rec, context.getRecordId());
+        InvoiceExemptTaxes.enrich(rec, context.getRecordId());
         enrichLinkedShipments(rec, context.getRecordId());
       }
       TbaiSyncStatusInjector.inject(dataArr);
@@ -216,30 +219,6 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
   @Override
   protected String getInvoiceSubtypeKey() {
     return "arInvoiceSubtype";
-  }
-
-  // ---------------------------------------------------------------------------
-  // Amount adjustments
-  // ---------------------------------------------------------------------------
-
-  /**
-   * Negates {@code grandTotalAmount} and {@code outstandingAmount} for rectificative invoice
-   * (RECTIFICATIVA — ETP-4737 unified Credit Memo / Return Invoice) records. Credit instruments
-   * represent money owed to the customer, so amounts are displayed as negative in the list.
-   */
-  private void applyAmountNegationForCredit(JSONObject rec) throws Exception {
-    String subtype = rec.optString(getInvoiceSubtypeKey(), SUBTYPE_FAC);
-    if (!SUBTYPE_RECTIFICATIVA.equals(subtype)) {
-      return;
-    }
-    double grand = rec.optDouble(FIELD_GRAND_TOTAL_AMOUNT, 0.0);
-    if (grand > 0) {
-      rec.put(FIELD_GRAND_TOTAL_AMOUNT, -grand);
-    }
-    double outstanding = rec.optDouble(FIELD_OUTSTANDING_AMOUNT, 0.0);
-    if (outstanding > 0) {
-      rec.put(FIELD_OUTSTANDING_AMOUNT, -outstanding);
-    }
   }
 
   /**

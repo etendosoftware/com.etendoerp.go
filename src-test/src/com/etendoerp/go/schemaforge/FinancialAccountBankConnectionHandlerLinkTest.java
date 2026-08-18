@@ -21,6 +21,7 @@ import static com.etendoerp.go.schemaforge.BankConnectionHandlerTestSupport.ACCO
 import static com.etendoerp.go.schemaforge.BankConnectionHandlerTestSupport.API_KEY;
 import static com.etendoerp.go.schemaforge.BankConnectionHandlerTestSupport.CONNECTION_ID;
 import static com.etendoerp.go.schemaforge.BankConnectionHandlerTestSupport.PARAM_ACCOUNT_ID;
+import static com.etendoerp.go.schemaforge.BankConnectionHandlerTestSupport.PARAM_PERMANENT_DELETION;
 import static com.etendoerp.go.schemaforge.BankConnectionHandlerTestSupport.PARAM_CONNECTION_ID;
 import static com.etendoerp.go.schemaforge.BankConnectionHandlerTestSupport.PARAM_TYPE;
 import static com.etendoerp.go.schemaforge.BankConnectionHandlerTestSupport.SALT_EDGE_ACCOUNT_ID;
@@ -33,6 +34,7 @@ import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
@@ -42,6 +44,7 @@ import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import java.math.BigDecimal;
 import java.util.Collections;
 import java.util.List;
 
@@ -64,6 +67,7 @@ import org.openbravo.model.financialmgmt.payment.FinAccPaymentMethod;
 
 import com.etendoerp.psd2.bank.integration.data.Provider;
 import com.etendoerp.psd2.bank.integration.utils.BankIntegrationUtils;
+import com.etendoerp.psd2.bank.integration.utils.ProviderCatalogUtils;
 import com.etendoerp.psd2.bank.integration.utils.SaltEdgeAccountLinkHelper;
 
 /**
@@ -568,6 +572,76 @@ public class FinancialAccountBankConnectionHandlerLinkTest {
   }
 
   /**
+   * When the provider is not found locally, {@code resolveProvider} falls through to
+   * {@code fetchAndRegisterProvider}, which fetches the full provider details from Salt Edge and
+   * must forward {@code logo_url} to {@code upsertProvider} — this is what lets the account list
+   * show the real bank logo instead of the generic icon (ETP-4764 follow-up), and it must not
+   * wait for the scheduled catalog sync in the psd2 module to populate it.
+   */
+  @Test
+  public void testLinkAccountRegistersNewProviderWithLogoUrl() throws Exception {
+    JSONObject body = linkBody();
+    FIN_FinancialAccount finAcc = mock(FIN_FinancialAccount.class);
+    when(finAcc.getId()).thenReturn(ACCOUNT_ID);
+    doReturn(finAcc).when(handler).loadAccount(ACCOUNT_ID);
+
+    JSONArray nodes = new JSONArray().put(new JSONObject().put("id", SALT_EDGE_ACCOUNT_ID));
+    JSONObject details = new JSONObject()
+        .put("provider_name", "BBVA")
+        .put("provider_code", "bbva");
+
+    String logoUrl = "https://cdn.saltedge.com/bank_icons/bbva.png";
+    JSONObject providerData = new JSONObject()
+        .put("name", "BBVA")
+        .put("max_fetch_interval", 90)
+        .put("logo_url", logoUrl);
+    JSONObject providerResponse = new JSONObject().put("data", providerData);
+
+    Provider registeredProvider = mock(Provider.class);
+
+    try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
+        MockedStatic<BankIntegrationUtils> utils = mockStatic(BankIntegrationUtils.class);
+        MockedStatic<ProviderCatalogUtils> catalog = mockStatic(ProviderCatalogUtils.class);
+        MockedStatic<SaltEdgeAccountLinkHelper> linkHelper =
+            mockStatic(SaltEdgeAccountLinkHelper.class);
+        MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      stubObContext(obContext);
+      linkHelper.when(() -> SaltEdgeAccountLinkHelper.getApiKeyForFinAcc(finAcc)).thenReturn(API_KEY);
+      utils.when(() -> BankIntegrationUtils.getSaltEdgeAccountsForConnection(CONNECTION_ID, API_KEY))
+          .thenReturn(nodes);
+      utils.when(() -> BankIntegrationUtils.getSaltEdgeConnectionDetails(CONNECTION_ID, API_KEY))
+          .thenReturn(details);
+      linkHelper.when(() -> SaltEdgeAccountLinkHelper.resolveConsentExpiresAt(any(), anyString()))
+          .thenReturn(null);
+      linkHelper.when(() -> SaltEdgeAccountLinkHelper.linkAccountToFinancialAccount(any(), any(),
+          any(), any(), any())).thenReturn("");
+      utils.when(() -> BankIntegrationUtils.makeSaltEdgeRequest(eq("GET"), isNull(), anyString(),
+          eq(API_KEY))).thenReturn(providerResponse);
+      catalog.when(() -> ProviderCatalogUtils.upsertProvider("bbva", "BBVA",
+          BigDecimal.valueOf(90), logoUrl)).thenReturn(registeredProvider);
+
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      @SuppressWarnings("unchecked")
+      OBCriteria<Provider> criteria = mock(OBCriteria.class);
+      when(dal.createCriteria(Provider.class)).thenReturn(criteria);
+      when(criteria.add(any())).thenReturn(criteria);
+      when(criteria.setMaxResults(1)).thenReturn(criteria);
+      // Not found locally — resolveProvider must fetch and register it.
+      when(criteria.uniqueResult()).thenReturn(null);
+      doNothing().when(dal).save(finAcc);
+      stubFinAccPaymentMethods(dal, Collections.emptyList());
+
+      NeoResponse response = handler.handle(postContext(ACTION_LINK, body));
+
+      assertEquals(200, response.getHttpStatus());
+      catalog.verify(() -> ProviderCatalogUtils.upsertProvider("bbva", "BBVA",
+          BigDecimal.valueOf(90), logoUrl));
+      verify(finAcc).setPsd2Provider(registeredProvider);
+    }
+  }
+
+  /**
    * When the provider code is blank, {@code resolveProvider} returns null and {@code setPsd2Provider}
    * must NOT be called — the "Bank Provider" field is left empty rather than crashing.
    */
@@ -742,7 +816,7 @@ public class FinancialAccountBankConnectionHandlerLinkTest {
             mockStatic(SaltEdgeAccountLinkHelper.class);
         MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
       stubObContext(obContext);
-      linkHelper.when(() -> SaltEdgeAccountLinkHelper.disconnectFinancialAccount(finAcc))
+      linkHelper.when(() -> SaltEdgeAccountLinkHelper.disconnectFinancialAccount(finAcc, true))
           .thenReturn(true);
 
       OBDal dal = mock(OBDal.class);
@@ -782,7 +856,7 @@ public class FinancialAccountBankConnectionHandlerLinkTest {
             mockStatic(SaltEdgeAccountLinkHelper.class);
         MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
       stubObContext(obContext);
-      linkHelper.when(() -> SaltEdgeAccountLinkHelper.disconnectFinancialAccount(finAcc))
+      linkHelper.when(() -> SaltEdgeAccountLinkHelper.disconnectFinancialAccount(finAcc, true))
           .thenReturn(true);
 
       OBDal dal = mock(OBDal.class);
@@ -822,7 +896,7 @@ public class FinancialAccountBankConnectionHandlerLinkTest {
         MockedStatic<SaltEdgeAccountLinkHelper> linkHelper =
             mockStatic(SaltEdgeAccountLinkHelper.class)) {
       stubObContext(obContext);
-      linkHelper.when(() -> SaltEdgeAccountLinkHelper.disconnectFinancialAccount(finAcc))
+      linkHelper.when(() -> SaltEdgeAccountLinkHelper.disconnectFinancialAccount(finAcc, true))
           .thenReturn(false);
 
       NeoResponse response = handler.handle(postContext(ACTION_DISCONNECT, body));
@@ -834,10 +908,53 @@ public class FinancialAccountBankConnectionHandlerLinkTest {
     }
   }
 
+  /**
+   * A <b>soft</b> disconnect (ETP-4764) deactivates the connection but keeps the Salt Edge link,
+   * so {@code Automatic Withdrawn} must NOT be restored: the account is still bank-backed and a
+   * reconnect would immediately have to clear the flag again. The account is recognized as still
+   * linked by its non-blank Salt Edge id, which the soft path preserves.
+   */
+  @Test
+  public void testSoftDisconnectDoesNotRestoreAutomaticWithdrawn() throws Exception {
+    JSONObject body = new JSONObject()
+        .put(PARAM_ACCOUNT_ID, ACCOUNT_ID)
+        .put(PARAM_PERMANENT_DELETION, false);
+    FIN_FinancialAccount finAcc = mock(FIN_FinancialAccount.class);
+    when(finAcc.getPSD2SaltEdgeAccountID()).thenReturn("SE-ACC-001");
+    doReturn(finAcc).when(handler).loadAccount(ACCOUNT_ID);
+
+    FIN_PaymentMethod transferMethod = mock(FIN_PaymentMethod.class);
+    FinAccPaymentMethod transferFapm = mock(FinAccPaymentMethod.class);
+
+    try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
+        MockedStatic<SaltEdgeAccountLinkHelper> linkHelper =
+            mockStatic(SaltEdgeAccountLinkHelper.class)) {
+      stubObContext(obContext);
+      linkHelper.when(() -> SaltEdgeAccountLinkHelper.disconnectFinancialAccount(finAcc, false))
+          .thenReturn(true);
+
+      NeoResponse response = handler.handle(postContext(ACTION_DISCONNECT, body));
+
+      assertEquals(200, response.getHttpStatus());
+      assertTrue(dataOf(response).getBoolean("disconnected"));
+      assertTrue(dataOf(response).getBoolean("reconnectable"));
+      // The restore path is never entered, so the transfer method is untouched.
+      verify(transferFapm, never()).setAutomaticWithdrawn(anyBoolean());
+      verify(transferMethod, never()).getName();
+    }
+  }
+
   // ── helpers ───────────────────────────────────────────────────────────────
 
+  /**
+   * Body for a <b>permanent</b> disconnect. The {@code Automatic Withdrawn} restore covered by
+   * this class only runs on the permanent path (ETP-4764): after a soft disconnect the bank link
+   * survives, so re-enabling the transfer method would just have to be undone on reconnect.
+   */
   private static JSONObject disconnectBody() throws Exception {
-    return new JSONObject().put(PARAM_ACCOUNT_ID, ACCOUNT_ID);
+    return new JSONObject()
+        .put(PARAM_ACCOUNT_ID, ACCOUNT_ID)
+        .put(PARAM_PERMANENT_DELETION, true);
   }
 
   private static JSONObject linkBody() throws Exception {

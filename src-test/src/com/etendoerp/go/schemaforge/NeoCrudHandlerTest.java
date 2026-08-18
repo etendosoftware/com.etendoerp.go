@@ -79,6 +79,7 @@ import org.openbravo.service.json.JsonConstants;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFSpec;
 import com.etendoerp.go.schemaforge.util.NeoDistinctFetchSupport;
+import com.etendoerp.go.schemaforge.util.NeoMethodPolicy;
 import com.etendoerp.go.schemaforge.util.NeoTypeCoercionHelper;
 
 /**
@@ -158,16 +159,19 @@ class NeoCrudHandlerTest {
   }
 
   // -------------------------------------------------------------------------
-  // isMethodEnabled tests (via reflection on private method)
+  // Method-flag gate. ETP-4254 extracted the private NeoCrudHandler#isMethodEnabled into
+  // the shared NeoMethodPolicy (the MCP write path needed the same check), so these cases
+  // now exercise the shared helper directly instead of through reflection. They are kept
+  // here because this is the gate NeoCrudHandler#handleWindowEntityCrud applies to produce
+  // the REST 405 — see also NeoMethodPolicyTest for the helper's own edge cases.
   // -------------------------------------------------------------------------
 
   @Nested
   @DisplayName("isMethodEnabled")
   class IsMethodEnabled {
 
-    private boolean invokeIsMethodEnabled(String method, SFEntity entity) throws Exception {
-      return (boolean) invokePrivate(handler, "isMethodEnabled",
-          new Class<?>[] { String.class, SFEntity.class }, method, entity);
+    private boolean invokeIsMethodEnabled(String method, SFEntity entity) {
+      return NeoMethodPolicy.isMethodEnabled(entity, method);
     }
 
     @Test
@@ -1560,6 +1564,184 @@ class NeoCrudHandlerTest {
   }
 
   // -------------------------------------------------------------------------
+  // buildDistinctProjection tests (via reflection on static method) — ETP-4770
+  // -------------------------------------------------------------------------
+
+  @Nested
+  @DisplayName("buildDistinctProjection")
+  class BuildDistinctProjection {
+
+    private String invokeBuildProjection(Property prop, String resolvedProperty) throws Exception {
+      Method method = NeoDistinctFetchSupport.class.getDeclaredMethod(
+          "buildDistinctProjection", Property.class, String.class);
+      method.setAccessible(true);
+      return (String) method.invoke(null, prop, resolvedProperty);
+    }
+
+    @Test
+    @DisplayName("Scalar property projects as-is")
+    void scalarProjectsAsIs() throws Exception {
+      Property prop = mock(Property.class);
+      when(prop.isPrimitive()).thenReturn(true);
+
+      assertEquals("e.documentStatus", invokeBuildProjection(prop, "documentStatus"));
+    }
+
+    @Test
+    @DisplayName("Relation (FK) property projects through its .id")
+    void relationProjectsThroughId() throws Exception {
+      Property prop = mock(Property.class);
+      when(prop.isPrimitive()).thenReturn(false);
+
+      assertEquals("e.businessPartner.id", invokeBuildProjection(prop, "businessPartner"));
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // loadIdentifiers tests (via reflection on static method) — ETP-4770
+  // -------------------------------------------------------------------------
+
+  @Nested
+  @DisplayName("loadIdentifiers")
+  class LoadIdentifiers {
+
+    @SuppressWarnings("unchecked")
+    private Map<String, String> invokeLoadIdentifiers(Entity targetEntity, List<Object> ids)
+        throws Exception {
+      Method method = NeoDistinctFetchSupport.class.getDeclaredMethod(
+          "loadIdentifiers", Entity.class, List.class);
+      method.setAccessible(true);
+      return (Map<String, String>) method.invoke(null, targetEntity, ids);
+    }
+
+    @Test
+    @DisplayName("Returns empty map for null target entity")
+    void returnsEmptyMapForNullEntity() throws Exception {
+      Map<String, String> result = invokeLoadIdentifiers(null, Arrays.asList("ID-1"));
+      assertTrue(result.isEmpty());
+    }
+
+    @Test
+    @DisplayName("Returns empty map for null ids list")
+    void returnsEmptyMapForNullIds() throws Exception {
+      Entity targetEntity = mock(Entity.class);
+      Map<String, String> result = invokeLoadIdentifiers(targetEntity, null);
+      assertTrue(result.isEmpty());
+    }
+
+    @Test
+    @DisplayName("Returns empty map for empty ids list without querying")
+    void returnsEmptyMapForEmptyIds() throws Exception {
+      Entity targetEntity = mock(Entity.class);
+      Map<String, String> result = invokeLoadIdentifiers(targetEntity, Collections.emptyList());
+      assertTrue(result.isEmpty());
+    }
+
+    @Test
+    @DisplayName("Batch-loads identifiers by id via a single IN query")
+    void batchLoadsIdentifiers() throws Exception {
+      Entity targetEntity = mock(Entity.class);
+      when(targetEntity.getName()).thenReturn("BusinessPartner");
+
+      try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+        OBDal dal = mock(OBDal.class);
+        obDalMock.when(OBDal::getInstance).thenReturn(dal);
+
+        org.hibernate.Session session = mock(org.hibernate.Session.class);
+        when(dal.getSession()).thenReturn(session);
+
+        @SuppressWarnings("unchecked")
+        org.hibernate.query.Query<BaseOBObject> query = mock(org.hibernate.query.Query.class);
+        when(session.createQuery(anyString(), eq(BaseOBObject.class))).thenReturn(query);
+        when(query.setParameterList(eq("ids"), any(List.class))).thenReturn(query);
+
+        BaseOBObject bp1 = mock(BaseOBObject.class);
+        when(bp1.getId()).thenReturn("BP-1");
+        when(bp1.getIdentifier()).thenReturn("Acme Corp");
+        when(query.list()).thenReturn(Arrays.asList(bp1));
+
+        Map<String, String> result = invokeLoadIdentifiers(targetEntity, Arrays.asList("BP-1"));
+
+        assertEquals(1, result.size());
+        assertEquals("Acme Corp", result.get("BP-1"));
+      }
+    }
+
+    @Test
+    @DisplayName("Skips null id entries when building the IN parameter list")
+    void skipsNullIdEntries() throws Exception {
+      Entity targetEntity = mock(Entity.class);
+      when(targetEntity.getName()).thenReturn("BusinessPartner");
+
+      try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+        OBDal dal = mock(OBDal.class);
+        obDalMock.when(OBDal::getInstance).thenReturn(dal);
+
+        org.hibernate.Session session = mock(org.hibernate.Session.class);
+        when(dal.getSession()).thenReturn(session);
+
+        @SuppressWarnings("unchecked")
+        org.hibernate.query.Query<BaseOBObject> query = mock(org.hibernate.query.Query.class);
+        when(session.createQuery(anyString(), eq(BaseOBObject.class))).thenReturn(query);
+        ArgumentCaptor<List> idsCaptor = ArgumentCaptor.forClass(List.class);
+        when(query.setParameterList(eq("ids"), idsCaptor.capture())).thenReturn(query);
+        when(query.list()).thenReturn(Collections.emptyList());
+
+        invokeLoadIdentifiers(targetEntity, Arrays.asList("BP-1", null, "BP-2"));
+
+        assertEquals(Arrays.asList("BP-1", "BP-2"), idsCaptor.getValue());
+      }
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // toRelationDistinctEntry tests (via reflection on static method) — ETP-4770
+  // -------------------------------------------------------------------------
+
+  @Nested
+  @DisplayName("toRelationDistinctEntry")
+  class ToRelationDistinctEntry {
+
+    private JSONObject invokeToRelationDistinctEntry(Object value,
+        Map<String, String> identifierById) throws Exception {
+      Method method = NeoDistinctFetchSupport.class.getDeclaredMethod(
+          "toRelationDistinctEntry", Object.class, Map.class);
+      method.setAccessible(true);
+      return (JSONObject) method.invoke(null, value, identifierById);
+    }
+
+    @Test
+    @DisplayName("Uses the resolved identifier when present in the map")
+    void usesResolvedIdentifier() throws Exception {
+      Map<String, String> identifiers = new HashMap<>();
+      identifiers.put("BP-1", "Acme Corp");
+
+      JSONObject entry = invokeToRelationDistinctEntry("BP-1", identifiers);
+
+      assertEquals("BP-1", entry.getString("id"));
+      assertEquals("Acme Corp", entry.getString("_identifier"));
+    }
+
+    @Test
+    @DisplayName("Falls back to the raw id when the map has no entry for it")
+    void fallsBackToIdWhenNotResolved() throws Exception {
+      JSONObject entry = invokeToRelationDistinctEntry("BP-ORPHAN", new HashMap<>());
+
+      assertEquals("BP-ORPHAN", entry.getString("id"));
+      assertEquals("BP-ORPHAN", entry.getString("_identifier"));
+    }
+
+    @Test
+    @DisplayName("Null value produces empty id and falls back identifier to empty")
+    void nullValueProducesEmptyId() throws Exception {
+      JSONObject entry = invokeToRelationDistinctEntry(null, new HashMap<>());
+
+      assertEquals("", entry.getString("id"));
+      assertEquals("", entry.getString("_identifier"));
+    }
+  }
+
+  // -------------------------------------------------------------------------
   // resolveDistinctProperty tests (via reflection on static method)
   // -------------------------------------------------------------------------
 
@@ -1951,6 +2133,7 @@ class NeoCrudHandlerTest {
 
         Property prop = mock(Property.class);
         when(prop.getName()).thenReturn("documentStatus");
+        when(prop.isPrimitive()).thenReturn(true);
         when(entity.getProperty("documentStatus", false)).thenReturn(prop);
 
         OBDal dal = mock(OBDal.class);
@@ -1977,6 +2160,209 @@ class NeoCrudHandlerTest {
         assertEquals(3, data.length());
         assertEquals("CO", data.getJSONObject(0).getString("id"));
         assertFalse(response.getBoolean("hasMore"));
+      }
+    }
+
+    @Test
+    @DisplayName("Relation (FK) property projects through .id and resolves display "
+        + "identifiers instead of failing with a Postgres SELECT DISTINCT/ORDER BY "
+        + "mismatch (ETP-4770)")
+    void relationPropertyProjectsThroughIdAndResolvesIdentifiers() throws Exception {
+      Tab adTab = mock(Tab.class);
+      Table table = mock(Table.class);
+      when(table.getName()).thenReturn("Invoice");
+      when(adTab.getTable()).thenReturn(table);
+      when(adTab.getHqlwhereclause()).thenReturn(null);
+      when(adTab.getTabLevel()).thenReturn(0L);
+
+      Map<String, String> params = new HashMap<>();
+      params.put("_distinct", "businessPartner");
+
+      try (MockedStatic<ModelProvider> mpMock = Mockito.mockStatic(ModelProvider.class);
+           MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+
+        ModelProvider mp = mock(ModelProvider.class);
+        mpMock.when(ModelProvider::getInstance).thenReturn(mp);
+        Entity entity = mock(Entity.class);
+        when(mp.getEntity("Invoice")).thenReturn(entity);
+
+        // businessPartner is a to-one association (FK), not a scalar column.
+        Property bpProp = mock(Property.class);
+        when(bpProp.getName()).thenReturn("businessPartner");
+        when(bpProp.isPrimitive()).thenReturn(false);
+        when(entity.getProperty("businessPartner", false)).thenReturn(bpProp);
+
+        Entity bpEntity = mock(Entity.class);
+        when(bpProp.getTargetEntity()).thenReturn(bpEntity);
+        when(bpEntity.getName()).thenReturn("BusinessPartner");
+
+        OBDal dal = mock(OBDal.class);
+        obDalMock.when(OBDal::getInstance).thenReturn(dal);
+
+        @SuppressWarnings("unchecked")
+        OBQuery<BaseOBObject> obQuery = mock(OBQuery.class);
+        ArgumentCaptor<String> whereCaptor = ArgumentCaptor.forClass(String.class);
+        when(dal.createQuery(eq("Invoice"), whereCaptor.capture())).thenReturn(obQuery);
+
+        @SuppressWarnings("unchecked")
+        org.hibernate.query.Query<Object> hQuery = mock(org.hibernate.query.Query.class);
+        when(obQuery.createQuery(Object.class)).thenReturn(hQuery);
+
+        // The projected/ordered page: raw FK ids (not BaseOBObject references).
+        List<Object> idPage = Arrays.asList("BP-1", "BP-2");
+        when(hQuery.list()).thenReturn(idPage);
+
+        // Batch identifier lookup issued by NeoDistinctFetchSupport.loadIdentifiers.
+        org.hibernate.Session session = mock(org.hibernate.Session.class);
+        when(dal.getSession()).thenReturn(session);
+        @SuppressWarnings("unchecked")
+        org.hibernate.query.Query<BaseOBObject> identifierQuery = mock(org.hibernate.query.Query.class);
+        when(session.createQuery(anyString(), eq(BaseOBObject.class))).thenReturn(identifierQuery);
+        when(identifierQuery.setParameterList(eq("ids"), any(List.class))).thenReturn(identifierQuery);
+
+        BaseOBObject bp1 = mock(BaseOBObject.class);
+        when(bp1.getId()).thenReturn("BP-1");
+        when(bp1.getIdentifier()).thenReturn("Sleep Well Hotels, Co.");
+        BaseOBObject bp2 = mock(BaseOBObject.class);
+        when(bp2.getId()).thenReturn("BP-2");
+        when(bp2.getIdentifier()).thenReturn("Hoteles Buenas Noches, S.A.");
+        when(identifierQuery.list()).thenReturn(Arrays.asList(bp1, bp2));
+
+        NeoResponse result = invokeDistinctFetch(adTab, params);
+
+        assertEquals(200, result.getHttpStatus());
+
+        // Same projection expression used for SELECT DISTINCT and ORDER BY —
+        // this is exactly what avoids Postgres's
+        // "for SELECT DISTINCT, ORDER BY expressions must appear in select list".
+        verify(obQuery).setSelectClause("DISTINCT e.businessPartner.id");
+        String where = whereCaptor.getValue();
+        assertTrue(where.contains("order by e.businessPartner.id asc"),
+            "Expected ORDER BY to project the same .id expression as SELECT DISTINCT, was: "
+                + where);
+
+        JSONObject response = result.getBody().getJSONObject("response");
+        JSONArray data = response.getJSONArray("data");
+        assertEquals(2, data.length());
+        assertEquals("BP-1", data.getJSONObject(0).getString("id"));
+        assertEquals("Sleep Well Hotels, Co.", data.getJSONObject(0).getString("_identifier"));
+        assertEquals("BP-2", data.getJSONObject(1).getString("id"));
+        assertEquals("Hoteles Buenas Noches, S.A.", data.getJSONObject(1).getString("_identifier"));
+      }
+    }
+
+    @Test
+    @DisplayName("Relation property with an id that has no matching record falls back "
+        + "to the raw id as its identifier")
+    void relationPropertyMissingRecordFallsBackToId() throws Exception {
+      Tab adTab = mock(Tab.class);
+      Table table = mock(Table.class);
+      when(table.getName()).thenReturn("Invoice");
+      when(adTab.getTable()).thenReturn(table);
+      when(adTab.getHqlwhereclause()).thenReturn(null);
+      when(adTab.getTabLevel()).thenReturn(0L);
+
+      Map<String, String> params = new HashMap<>();
+      params.put("_distinct", "businessPartner");
+
+      try (MockedStatic<ModelProvider> mpMock = Mockito.mockStatic(ModelProvider.class);
+           MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+
+        ModelProvider mp = mock(ModelProvider.class);
+        mpMock.when(ModelProvider::getInstance).thenReturn(mp);
+        Entity entity = mock(Entity.class);
+        when(mp.getEntity("Invoice")).thenReturn(entity);
+
+        Property bpProp = mock(Property.class);
+        when(bpProp.getName()).thenReturn("businessPartner");
+        when(bpProp.isPrimitive()).thenReturn(false);
+        when(entity.getProperty("businessPartner", false)).thenReturn(bpProp);
+
+        Entity bpEntity = mock(Entity.class);
+        when(bpProp.getTargetEntity()).thenReturn(bpEntity);
+        when(bpEntity.getName()).thenReturn("BusinessPartner");
+
+        OBDal dal = mock(OBDal.class);
+        obDalMock.when(OBDal::getInstance).thenReturn(dal);
+
+        @SuppressWarnings("unchecked")
+        OBQuery<BaseOBObject> obQuery = mock(OBQuery.class);
+        when(dal.createQuery(eq("Invoice"), anyString())).thenReturn(obQuery);
+
+        @SuppressWarnings("unchecked")
+        org.hibernate.query.Query<Object> hQuery = mock(org.hibernate.query.Query.class);
+        when(obQuery.createQuery(Object.class)).thenReturn(hQuery);
+        when(hQuery.list()).thenReturn(Collections.singletonList("BP-ORPHAN"));
+
+        org.hibernate.Session session = mock(org.hibernate.Session.class);
+        when(dal.getSession()).thenReturn(session);
+        @SuppressWarnings("unchecked")
+        org.hibernate.query.Query<BaseOBObject> identifierQuery = mock(org.hibernate.query.Query.class);
+        when(session.createQuery(anyString(), eq(BaseOBObject.class))).thenReturn(identifierQuery);
+        when(identifierQuery.setParameterList(eq("ids"), any(List.class))).thenReturn(identifierQuery);
+        // No matching record comes back (e.g. deleted after the distinct scan).
+        when(identifierQuery.list()).thenReturn(Collections.emptyList());
+
+        NeoResponse result = invokeDistinctFetch(adTab, params);
+
+        assertEquals(200, result.getHttpStatus());
+        JSONObject response = result.getBody().getJSONObject("response");
+        JSONArray data = response.getJSONArray("data");
+        assertEquals(1, data.length());
+        assertEquals("BP-ORPHAN", data.getJSONObject(0).getString("id"));
+        assertEquals("BP-ORPHAN", data.getJSONObject(0).getString("_identifier"));
+      }
+    }
+
+    @Test
+    @DisplayName("Relation property with an empty result page never issues the "
+        + "batch identifier lookup query")
+    void relationPropertyEmptyPageSkipsIdentifierLookup() throws Exception {
+      Tab adTab = mock(Tab.class);
+      Table table = mock(Table.class);
+      when(table.getName()).thenReturn("Invoice");
+      when(adTab.getTable()).thenReturn(table);
+      when(adTab.getHqlwhereclause()).thenReturn(null);
+      when(adTab.getTabLevel()).thenReturn(0L);
+
+      Map<String, String> params = new HashMap<>();
+      params.put("_distinct", "businessPartner");
+
+      try (MockedStatic<ModelProvider> mpMock = Mockito.mockStatic(ModelProvider.class);
+           MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+
+        ModelProvider mp = mock(ModelProvider.class);
+        mpMock.when(ModelProvider::getInstance).thenReturn(mp);
+        Entity entity = mock(Entity.class);
+        when(mp.getEntity("Invoice")).thenReturn(entity);
+
+        Property bpProp = mock(Property.class);
+        when(bpProp.getName()).thenReturn("businessPartner");
+        when(bpProp.isPrimitive()).thenReturn(false);
+        when(entity.getProperty("businessPartner", false)).thenReturn(bpProp);
+
+        Entity bpEntity = mock(Entity.class);
+        when(bpProp.getTargetEntity()).thenReturn(bpEntity);
+
+        OBDal dal = mock(OBDal.class);
+        obDalMock.when(OBDal::getInstance).thenReturn(dal);
+
+        @SuppressWarnings("unchecked")
+        OBQuery<BaseOBObject> obQuery = mock(OBQuery.class);
+        when(dal.createQuery(eq("Invoice"), anyString())).thenReturn(obQuery);
+
+        @SuppressWarnings("unchecked")
+        org.hibernate.query.Query<Object> hQuery = mock(org.hibernate.query.Query.class);
+        when(obQuery.createQuery(Object.class)).thenReturn(hQuery);
+        when(hQuery.list()).thenReturn(Collections.emptyList());
+
+        NeoResponse result = invokeDistinctFetch(adTab, params);
+
+        assertEquals(200, result.getHttpStatus());
+        JSONObject response = result.getBody().getJSONObject("response");
+        assertEquals(0, response.getJSONArray("data").length());
+        // dal.getSession() is never touched when there is nothing to resolve.
+        Mockito.verify(dal, never()).getSession();
       }
     }
 
@@ -2069,6 +2455,7 @@ class NeoCrudHandlerTest {
 
         Property prop = mock(Property.class);
         when(prop.getName()).thenReturn("status");
+        when(prop.isPrimitive()).thenReturn(true);
         when(entity.getProperty("status", false)).thenReturn(prop);
 
         OBDal dal = mock(OBDal.class);
@@ -2118,6 +2505,7 @@ class NeoCrudHandlerTest {
 
         Property prop = mock(Property.class);
         when(prop.getName()).thenReturn("status");
+        when(prop.isPrimitive()).thenReturn(true);
         when(entity.getProperty("status", false)).thenReturn(prop);
 
         OBDal dal = mock(OBDal.class);

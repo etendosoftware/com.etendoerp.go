@@ -932,7 +932,7 @@ public class EtendoGoJwtServletTest {
 
     try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
          MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
-      dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByToken("bad-token"))
+      dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByBearerToken("bad-token"))
           .thenReturn(null);
 
       servlet.doGet(req, resp.response);
@@ -955,7 +955,7 @@ public class EtendoGoJwtServletTest {
 
     try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
          MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
-      dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByToken("valid-token"))
+      dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByBearerToken("valid-token"))
           .thenReturn(account);
 
       servlet.doGet(req, resp.response);
@@ -987,7 +987,7 @@ public class EtendoGoJwtServletTest {
 
     try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
          MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
-      dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByToken("bad-token"))
+      dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByBearerToken("bad-token"))
           .thenReturn(null);
 
       servlet.doGet(req, resp.response);
@@ -1007,7 +1007,7 @@ public class EtendoGoJwtServletTest {
 
     try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
          MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
-      dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByToken("valid-token"))
+      dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByBearerToken("valid-token"))
           .thenReturn(account);
       dalMock.when(() -> EtendoGoJwtDalHelper.findEnvironmentUsersByAccountEmail("user@test.com"))
           .thenReturn(Collections.emptyList());
@@ -1053,8 +1053,8 @@ public class EtendoGoJwtServletTest {
     when(req.getParameter("userId")).thenReturn("user-1");
 
     try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
-         MockedStatic<EtendoGoJwtSupport> supportMock = mockStatic(EtendoGoJwtSupport.class)) {
-      supportMock.when(() -> EtendoGoJwtSupport.requireAccountEmail("bad-token"))
+         MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
+      dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByBearerToken("bad-token"))
           .thenReturn(null);
 
       servlet.doGet(req, resp.response);
@@ -1070,10 +1070,13 @@ public class EtendoGoJwtServletTest {
     when(req.getHeader("Authorization")).thenReturn("Bearer valid-token");
     when(req.getParameter("userId")).thenReturn("other-user");
 
+    Account account = mock(Account.class);
+    when(account.getEmail()).thenReturn("user@test.com");
     try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+         MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class);
          MockedStatic<EtendoGoJwtSupport> supportMock = mockStatic(EtendoGoJwtSupport.class)) {
-      supportMock.when(() -> EtendoGoJwtSupport.requireAccountEmail("valid-token"))
-          .thenReturn("user@test.com");
+      dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByBearerToken("valid-token"))
+          .thenReturn(account);
       supportMock.when(() -> EtendoGoJwtSupport.isEnvironmentUserOwnedByAccount(
           "user@test.com", "other-user"))
           .thenReturn(false);
@@ -1138,7 +1141,7 @@ public class EtendoGoJwtServletTest {
 
     try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
          MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
-      dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByToken("valid-token"))
+      dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByBearerToken("valid-token"))
           .thenReturn(account);
       dalMock.when(() -> EtendoGoJwtDalHelper.getOnboardingDraft(account))
           .thenReturn("{\"step\":2,\"form\":{\"fullName\":\"Jane\"}}");
@@ -1162,7 +1165,7 @@ public class EtendoGoJwtServletTest {
 
     try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
          MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
-      dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByToken("valid-token"))
+      dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByBearerToken("valid-token"))
           .thenReturn(account);
       dalMock.when(() -> EtendoGoJwtDalHelper.getOnboardingDraft(account)).thenReturn("not json");
 
@@ -1184,7 +1187,7 @@ public class EtendoGoJwtServletTest {
 
     try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
          MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
-      dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByToken("valid-token"))
+      dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByBearerToken("valid-token"))
           .thenReturn(account);
 
       servlet.doPost(req, resp.response);
@@ -1210,7 +1213,7 @@ public class EtendoGoJwtServletTest {
 
     try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
          MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
-      dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByToken("valid-token"))
+      dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByBearerToken("valid-token"))
           .thenReturn(account);
 
       servlet.doPost(req, resp.response);
@@ -1234,7 +1237,7 @@ public class EtendoGoJwtServletTest {
 
     try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
          MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
-      dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByToken("valid-token"))
+      dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByBearerToken("valid-token"))
           .thenReturn(account);
 
       servlet.doPost(req, resp.response);
@@ -1256,7 +1259,7 @@ public class EtendoGoJwtServletTest {
 
     try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
          MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
-      dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByToken("valid-token"))
+      dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByBearerToken("valid-token"))
           .thenReturn(account);
 
       servlet.doPost(req, resp.response);
@@ -1287,7 +1290,7 @@ public class EtendoGoJwtServletTest {
 
     try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
          MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
-      dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByToken("valid-token"))
+      dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByBearerToken("valid-token"))
           .thenReturn(account);
       dalMock.when(() -> EtendoGoJwtDalHelper.findEnvironmentUsersByAccountEmail("user@test.com"))
           .thenReturn(List.of(environmentUser));

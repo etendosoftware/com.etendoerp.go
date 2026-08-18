@@ -187,6 +187,10 @@ class NeoAuthenticator {
     return NeoServletSupport.hasWindowAccessForSpec(spec, httpMethod);
   }
 
+  boolean hasReportSpecAccess(SFSpec spec, String httpMethod) {
+    return NeoServletSupport.hasReportSpecAccess(spec, httpMethod);
+  }
+
   boolean hasProcessAccess(String processId) {
     return NeoServletSupport.hasProcessAccess(processId);
   }

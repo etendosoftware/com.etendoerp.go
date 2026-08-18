@@ -152,6 +152,10 @@ public class AbstractInvoiceHeaderHandlerTest {
     public void callEnrichIsRectificative(JSONObject rec) throws Exception {
       enrichIsRectificative(rec);
     }
+
+    public void callEnrichHasExemptTaxes(JSONObject rec, String id) throws Exception {
+      InvoiceExemptTaxes.enrich(rec, id);
+    }
   }
 
   // ── ETP-4029: currency / exchange-rate hooks — test doubles ─────────────────
@@ -856,6 +860,76 @@ public class AbstractInvoiceHeaderHandlerTest {
     }
   }
 
+  /**
+   * ETP-4841: the subtype reflects the DOCUMENT TYPE only. An ordinary invoice document type with
+   * a NEGATIVE total stays FAC — its negative sign makes it a spendable credit for the payment
+   * flow, but it is still a "Factura" as far as the doc-type badge and the list tab filters are
+   * concerned. This replaces the ETP-4738 sign-driven display reclassification, which was deleted
+   * as unreachable: {@code classifyDocType} already resolves a flagged doc type to RECTIFICATIVA
+   * before any total is looked at.
+   */
+  @Test
+  public void enrichInvoiceSubtype_negativeTotalOrdinaryDocType_staysFacSubtype() throws Exception {
+    JSONObject rec = new JSONObject()
+        .put("transactionDocument", "dt-plain")
+        .put("grandTotalAmount", -27.83);
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      DocumentType dt = mock(DocumentType.class);
+      when(dt.getDocumentCategory()).thenReturn("ARI"); // plain invoice base type, not ARC/ARI_RM
+      when(dal.get(DocumentType.class, "dt-plain")).thenReturn(dt);
+
+      handler.callEnrichInvoiceSubtype(rec, "arInvoiceSubtype");
+
+      assertEquals("FAC", rec.getString("arInvoiceSubtype"));
+    }
+  }
+
+  /**
+   * The mirror case: a rectificative document type with a POSITIVE total (an under-invoiced
+   * correction, which is payable) keeps its RECTIFICATIVA subtype. The sign never downgrades the
+   * document-type classification either.
+   */
+  @Test
+  public void enrichInvoiceSubtype_positiveTotalRectificativeDocType_staysRectificativaSubtype()
+      throws Exception {
+    JSONObject rec = new JSONObject()
+        .put("transactionDocument", "dt-arc")
+        .put("grandTotalAmount", 27.83);
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      DocumentType dt = mock(DocumentType.class);
+      when(dt.getDocumentCategory()).thenReturn("ARC");
+      when(dal.get(DocumentType.class, "dt-arc")).thenReturn(dt);
+
+      handler.callEnrichInvoiceSubtype(rec, "arInvoiceSubtype");
+
+      assertEquals("RECTIFICATIVA", rec.getString("arInvoiceSubtype"));
+    }
+  }
+
+  /**
+   * The total is not read at all: an invoice record that carries no {@code grandTotalAmount}
+   * resolves its subtype from the document type alone, without a JSON lookup failure.
+   */
+  @Test
+  public void enrichInvoiceSubtype_noGrandTotal_resolvesFromDocTypeAlone() throws Exception {
+    JSONObject rec = new JSONObject().put("transactionDocument", "dt-arc");
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      DocumentType dt = mock(DocumentType.class);
+      when(dt.getDocumentCategory()).thenReturn("ARC");
+      when(dal.get(DocumentType.class, "dt-arc")).thenReturn(dt);
+
+      handler.callEnrichInvoiceSubtype(rec, "arInvoiceSubtype");
+
+      assertEquals("RECTIFICATIVA", rec.getString("arInvoiceSubtype"));
+    }
+  }
+
   // ── enrichDocTypeLocked ──────────────────────────────────────────────────────
 
   @Test
@@ -923,6 +997,128 @@ public class AbstractInvoiceHeaderHandlerTest {
       assertFalse(rec.getBoolean("isRectificative"));
     } finally {
       AbstractInvoiceHeaderHandler.setRectificativeColumnPresentForTests(null);
+    }
+  }
+
+  // ── enrichHasExemptTaxes — Classic ExemptTaxes#invoiceHasExemptTaxes parity (ETP-4751) ──
+
+  /**
+   * A blank invoice id short-circuits to {@code hasExemptTaxes = false} without touching the DB.
+   */
+  @Test
+  public void enrichHasExemptTaxes_blankId_falseWithoutQuerying() throws Exception {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      JSONObject rec = new JSONObject();
+
+      handler.callEnrichHasExemptTaxes(rec, "");
+
+      assertFalse(rec.getBoolean("hasExemptTaxes"));
+      dalMock.verifyNoInteractions();
+    }
+  }
+
+  /**
+   * When the line-only query finds a matching exempt active line, the field is {@code true}.
+   */
+  @Test
+  public void enrichHasExemptTaxes_exemptRowFound_true() throws Exception {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getReadOnlyInstance).thenReturn(dal);
+      Connection conn = mock(Connection.class);
+      when(dal.getConnection()).thenReturn(conn);
+      PreparedStatement ps = mock(PreparedStatement.class);
+      when(conn.prepareStatement(anyString())).thenReturn(ps);
+      ResultSet rs = mock(ResultSet.class);
+      when(ps.executeQuery()).thenReturn(rs);
+      when(rs.next()).thenReturn(true);
+
+      JSONObject rec = new JSONObject();
+
+      handler.callEnrichHasExemptTaxes(rec, "inv-1");
+
+      assertTrue(rec.getBoolean("hasExemptTaxes"));
+    }
+  }
+
+  /**
+   * When no exempt active line exists, the field is {@code false}.
+   */
+  @Test
+  public void enrichHasExemptTaxes_noExemptRow_false() throws Exception {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getReadOnlyInstance).thenReturn(dal);
+      Connection conn = mock(Connection.class);
+      when(dal.getConnection()).thenReturn(conn);
+      PreparedStatement ps = mock(PreparedStatement.class);
+      when(conn.prepareStatement(anyString())).thenReturn(ps);
+      ResultSet rs = mock(ResultSet.class);
+      when(ps.executeQuery()).thenReturn(rs);
+      when(rs.next()).thenReturn(false);
+
+      JSONObject rec = new JSONObject();
+
+      handler.callEnrichHasExemptTaxes(rec, "inv-1");
+
+      assertFalse(rec.getBoolean("hasExemptTaxes"));
+    }
+  }
+
+  /**
+   * ETP-4751 regression guard: exempt detection MUST query ONLY active invoice lines
+   * (c_invoiceline -> c_tax), never c_invoicetax. In Etendo GO draft invoices NEO CRUD does not
+   * recompute or remove c_invoicetax rows when lines change/are deleted, so those rows LINGER and
+   * would report exempt=true after the exempt line was removed — leaving hasExemptTaxes stuck true
+   * and the SIF exemption field editable forever. This asserts the SQL never re-introduces a
+   * c_invoicetax branch (which is how a future reader might "restore Classic parity") and binds
+   * the invoice id exactly once (no UNION second bind).
+   */
+  @Test
+  public void enrichHasExemptTaxes_queriesLinesOnly_noInvoiceTaxBranch() throws Exception {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getReadOnlyInstance).thenReturn(dal);
+      Connection conn = mock(Connection.class);
+      when(dal.getConnection()).thenReturn(conn);
+      PreparedStatement ps = mock(PreparedStatement.class);
+      ArgumentCaptor<String> sqlCaptor = ArgumentCaptor.forClass(String.class);
+      when(conn.prepareStatement(sqlCaptor.capture())).thenReturn(ps);
+      ResultSet rs = mock(ResultSet.class);
+      when(ps.executeQuery()).thenReturn(rs);
+      when(rs.next()).thenReturn(false);
+
+      JSONObject rec = new JSONObject();
+
+      handler.callEnrichHasExemptTaxes(rec, "inv-1");
+
+      String sql = sqlCaptor.getValue().toLowerCase();
+      assertTrue("must detect exempt taxes via c_invoiceline", sql.contains("c_invoiceline"));
+      assertFalse("must NOT use the lingering c_invoicetax branch (ETP-4751)",
+          sql.contains("c_invoicetax"));
+      // Only ONE bind of the invoice id (the old UNION query bound it twice).
+      verify(ps, times(1)).setString(eq(1), eq("inv-1"));
+      verify(ps, times(0)).setString(eq(2), anyString());
+    }
+  }
+
+  /**
+   * A DB error is swallowed (fail-safe) and the field defaults to {@code false}.
+   */
+  @Test
+  public void enrichHasExemptTaxes_dbError_falseFailSafe() throws Exception {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getReadOnlyInstance).thenReturn(dal);
+      Connection conn = mock(Connection.class);
+      when(dal.getConnection()).thenReturn(conn);
+      when(conn.prepareStatement(anyString())).thenThrow(new RuntimeException("boom"));
+
+      JSONObject rec = new JSONObject();
+
+      handler.callEnrichHasExemptTaxes(rec, "inv-1");
+
+      assertFalse(rec.getBoolean("hasExemptTaxes"));
     }
   }
 
@@ -2049,8 +2245,8 @@ public class AbstractInvoiceHeaderHandlerTest {
   }
 
   @Test
-  public void checkExchangeRateWarning_hasConversionRateThrows_failsOpenNoWarning() throws Exception {
-    // hasConversionRate's own catch block returns true (fail-open) on any exception —
+  public void checkExchangeRateWarning_rateLookupThrows_failsOpenNoWarning() throws Exception {
+    // NeoExchangeRateService.hasRate returns true (fail-open) on any exception —
     // so an unexpected DB failure must NOT produce a false warning.
     JSONObject body = new JSONObject();
     JSONObject requestBody = new JSONObject().put("value", "usd-id");
@@ -2078,6 +2274,53 @@ public class AbstractInvoiceHeaderHandlerTest {
 
       AbstractInvoiceHeaderHandler.checkExchangeRateWarning(body, requestBody, formState, "currency");
 
+      assertTrue(!body.has("messages"));
+    }
+  }
+
+  @Test
+  public void checkExchangeRateWarning_ratesLookupIsClientOrSystemScoped() throws Exception {
+    // ETP-4838 regression: this path used to run a private query filtered by `ad_client_id = ?`
+    // alone, so it stopped finding the shared system ('0') rates once ETP-4474 centralised the
+    // currencyLayer sync there — warning "noExchangeRateAvailable" while the frontend's own
+    // /validate-exchange-rate call, on the very same pair and date, answered hasRate: true.
+    // The delegation to NeoExchangeRateService is what keeps the two answers in sync.
+    JSONObject body = new JSONObject();
+    JSONObject requestBody = new JSONObject().put("value", "gbp-id");
+    JSONObject formState = new JSONObject()
+        .put("currencyid", "gbp-id").put("invoiceDate", "2026-08-07");
+
+    try (MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
+         MockedStatic<OBCurrencyUtils> curMock = Mockito.mockStatic(OBCurrencyUtils.class);
+         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+
+      OBContext obContext = mock(OBContext.class);
+      Organization org = mock(Organization.class);
+      Client client = mock(Client.class);
+      ctxMock.when(OBContext::getOBContext).thenReturn(obContext);
+      when(obContext.getCurrentOrganization()).thenReturn(org);
+      when(obContext.getCurrentClient()).thenReturn(client);
+      when(org.getId()).thenReturn("org-1");
+      when(client.getId()).thenReturn("client-1");
+
+      curMock.when(() -> OBCurrencyUtils.getOrgCurrency("org-1")).thenReturn("eur-id");
+
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      Connection conn = mock(Connection.class);
+      PreparedStatement ps = mock(PreparedStatement.class);
+      ResultSet rs = mock(ResultSet.class);
+      when(dal.getConnection()).thenReturn(conn);
+      when(conn.prepareStatement(anyString())).thenReturn(ps);
+      when(ps.executeQuery()).thenReturn(rs);
+      when(rs.next()).thenReturn(true); // a system-level rate exists for the pair
+      when(rs.getDouble("multiplyrate")).thenReturn(0.87);
+
+      AbstractInvoiceHeaderHandler.checkExchangeRateWarning(body, requestBody, formState, "currency");
+
+      ArgumentCaptor<String> sqlCaptor = ArgumentCaptor.forClass(String.class);
+      Mockito.verify(conn).prepareStatement(sqlCaptor.capture());
+      assertTrue(sqlCaptor.getValue().contains("ad_client_id IN ('0', ?)"));
       assertTrue(!body.has("messages"));
     }
   }

@@ -200,27 +200,6 @@ public class NeoServlet extends HttpBaseServlet {
     return results.isEmpty() ? null : results.get(0);
   }
 
-  /**
-   * Check if the given HTTP method is enabled on the entity.
-   */
-  private boolean isMethodEnabled(SFEntity entity, String method) {
-    switch (method) {
-      case "GET":
-        return Boolean.TRUE.equals(entity.isGet())
-            || Boolean.TRUE.equals(entity.isGetByID());
-      case "POST":
-        return Boolean.TRUE.equals(entity.isPost());
-      case "PUT":
-        return Boolean.TRUE.equals(entity.isPut());
-      case METHOD_PATCH:
-        return Boolean.TRUE.equals(entity.isPatch());
-      case METHOD_DELETE:
-        return Boolean.TRUE.equals(entity.isDelete());
-      default:
-        return false;
-    }
-  }
-
   Map<String, String> extractQueryParams(HttpServletRequest request) {
     Map<String, String> params = new HashMap<>();
     Enumeration<String> names = request.getParameterNames();

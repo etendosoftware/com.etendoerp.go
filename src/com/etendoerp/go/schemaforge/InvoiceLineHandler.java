@@ -17,6 +17,10 @@
 
 package com.etendoerp.go.schemaforge;
 
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+
 import javax.inject.Named;
 
 import org.apache.commons.lang3.StringUtils;
@@ -24,6 +28,7 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
+import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.invoice.Invoice;
 import org.openbravo.model.common.invoice.InvoiceLine;
@@ -151,8 +156,161 @@ public class InvoiceLineHandler implements NeoHandler {
       if ("POST".equals(method)) {
         persistSourceInvoiceLine(context);
       }
+      return autoFillExemptionCauseAfterLineSave(context);
     }
     return null;
+  }
+
+  // ---------------------------------------------------------------------------
+  // SII exemption-cause auto-fill (ETP-4751 Block B) — mirrors the SII module's
+  // ExemptTaxes action handler (org.openbravo.module.sii.actionhandlers.ExemptTaxes).
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Signal key on the line-save response body that tells the frontend the invoice header's
+   * exemption cause was just auto-populated with the default cause, so it can surface the Classic
+   * "Causa de exención modificada" info toast. Absent/false when nothing was changed.
+   */
+  static final String FIELD_EXEMPTION_CAUSE_AUTOFILLED = "exemptionCauseAutoFilled";
+
+  /**
+   * Signal key on the line-save response body that tells the frontend the invoice now carries an
+   * exempt tax but has NO exemption cause selected and NO default cause exists to auto-fill, so it
+   * must surface the Classic "should indicate an exemption cause" warning toast. Mutually exclusive
+   * with {@link #FIELD_EXEMPTION_CAUSE_AUTOFILLED}: a save either auto-fills (default cause exists),
+   * warns (no default cause), or does neither. Absent/false when no warning is due.
+   */
+  static final String FIELD_EXEMPTION_CAUSE_WARNING = "exemptionCauseWarning";
+
+  /**
+   * After a sales-invoice line is saved, replicates the SII module's {@code ExemptTaxes}
+   * default-cause auto-set: when the parent is a <b>sales</b> invoice whose header has <b>no</b>
+   * exemption cause yet, the saved line (or any line/tax of the invoice) carries an
+   * <b>exempt</b> tax, and a <b>default</b> {@code AEATSII_CAUSE_EXEMPTION} exists, the default
+   * cause is written to {@code C_Invoice.EM_Aeatsii_Cause_Exemption_ID} and the response is
+   * augmented with {@link #FIELD_EXEMPTION_CAUSE_AUTOFILLED}{@code = true} so the SIF tab can toast.
+   *
+   * <p><b>Auto-fill is dormant by design</b> in Etendo GO: no default cause is seeded, so
+   * {@link #findDefaultCauseExemptionId} returns {@code null} and no cause is written. In that case
+   * — sales invoice + exempt tax present + no header cause + no default cause — the response is
+   * instead augmented with {@link #FIELD_EXEMPTION_CAUSE_WARNING}{@code = true}, so the SIF tab
+   * surfaces the Classic "should indicate an exemption cause" warning toast. The two signals are
+   * mutually exclusive. Implemented via raw SQL (no compile dependency on the SII module,
+   * mirroring {@link SiiSendHandler}'s reflection-based decoupling): if the SII columns/table are
+   * absent (module not installed) the queries fail and are swallowed — a safe no-op.
+   *
+   * @param context the current NeoContext (lines entity)
+   * @return a {@link NeoResponse} replacing the previous result with the auto-fill signal added,
+   *     or {@code null} to keep the original response unchanged (the common/dormant case)
+   */
+  private NeoResponse autoFillExemptionCauseAfterLineSave(NeoContext context) {
+    try {
+      OBContext.setAdminMode(true);
+      try {
+        String invoiceId = resolveParentInvoiceIdAfterSave(context);
+        if (StringUtils.isBlank(invoiceId) || !shouldAutoFillExemptionCause(invoiceId)) {
+          return null;
+        }
+        String defaultCauseId = findDefaultCauseExemptionId();
+        if (StringUtils.isBlank(defaultCauseId)) {
+          // No default cause configured: nothing to auto-fill, but the invoice needs a cause and
+          // has none — surface the Classic "should indicate an exemption cause" warning instead.
+          return augmentResponseWithSignal(context, FIELD_EXEMPTION_CAUSE_WARNING);
+        }
+        setInvoiceExemptionCause(invoiceId, defaultCauseId);
+        return augmentResponseWithSignal(context, FIELD_EXEMPTION_CAUSE_AUTOFILLED);
+      } finally {
+        OBContext.restorePreviousMode();
+      }
+    } catch (Exception e) {
+      log.warn("[ETP-4751] exemption-cause auto-fill skipped for line save: {}", e.getMessage());
+      return null;
+    }
+  }
+
+  /**
+   * Whether the invoice qualifies for exemption-cause auto-fill: it is a sales invoice, its header
+   * has no exemption cause selected yet, and it carries at least one exempt tax on an active LINE.
+   * Mirrors the {@code !salesInvoice || invoiceHasCauseExemptionSelected} early-return and the
+   * {@code invoiceHasExemptTaxes} check in {@code ExemptTaxes#execute}.
+   *
+   * <p>Exempt detection uses ONLY active invoice lines (c_invoiceline -> c_tax). Do NOT add a
+   * c_invoicetax branch back in: in Etendo GO draft invoices NEO CRUD does not recompute or remove
+   * c_invoicetax rows when lines change or are deleted, so those rows LINGER and would report
+   * exempt=true after the exempt line was removed (ETP-4751). Active lines are the current source
+   * of truth. This still returns true right after an exempt line is ADDED, since the c_invoiceline
+   * row already exists at afterHandle time — which is what makes the warning fire on add.
+   */
+  @SuppressWarnings("java:S2077")
+  private boolean shouldAutoFillExemptionCause(String invoiceId) throws java.sql.SQLException {
+    String sql =
+        "SELECT i.issotrx, i.em_aeatsii_cause_exemption_id,"
+      + " EXISTS (SELECT 1 FROM c_invoiceline il JOIN c_tax t ON t.c_tax_id = il.c_tax_id"
+      + "   WHERE il.c_invoice_id = i.c_invoice_id AND il.isactive = 'Y' AND t.istaxexempt = 'Y')"
+      + " AS has_exempt"
+      + " FROM c_invoice i WHERE i.c_invoice_id = ?";
+    Connection conn = OBDal.getReadOnlyInstance().getConnection();
+    try (PreparedStatement ps = conn.prepareStatement(sql)) {
+      ps.setString(1, invoiceId);
+      try (ResultSet rs = ps.executeQuery()) {
+        if (!rs.next()) {
+          return false;
+        }
+        boolean salesInvoice = "Y".equals(rs.getString("issotrx"));
+        boolean hasCause = StringUtils.isNotBlank(rs.getString("em_aeatsii_cause_exemption_id"));
+        boolean hasExempt = rs.getBoolean("has_exempt");
+        return salesInvoice && !hasCause && hasExempt;
+      }
+    }
+  }
+
+  /**
+   * Returns the ID of the default {@code AEATSII_CAUSE_EXEMPTION} ({@code ISDEFAULT = 'Y'}) visible
+   * to the current client/org, or {@code null} if none exists (the dormant case in Etendo GO).
+   * Mirrors {@code ExemptTaxes#getCauseExemptionByDefault}.
+   */
+  @SuppressWarnings("java:S2077")
+  private String findDefaultCauseExemptionId() throws java.sql.SQLException {
+    String sql =
+        "SELECT aeatsii_cause_exemption_id FROM aeatsii_cause_exemption"
+      + " WHERE isdefault = 'Y' AND isactive = 'Y' LIMIT 1";
+    Connection conn = OBDal.getReadOnlyInstance().getConnection();
+    try (PreparedStatement ps = conn.prepareStatement(sql);
+         ResultSet rs = ps.executeQuery()) {
+      return rs.next() ? rs.getString(1) : null;
+    }
+  }
+
+  @SuppressWarnings("java:S2077")
+  private void setInvoiceExemptionCause(String invoiceId, String causeId) throws java.sql.SQLException {
+    String userId = OBContext.getOBContext().getUser().getId();
+    String sql =
+        "UPDATE c_invoice SET em_aeatsii_cause_exemption_id = ?, updated = NOW(), updatedby = ?"
+      + " WHERE c_invoice_id = ?";
+    Connection conn = OBDal.getInstance().getConnection();
+    try (PreparedStatement ps = conn.prepareStatement(sql)) {
+      ps.setString(1, causeId);
+      ps.setString(2, userId);
+      ps.setString(3, invoiceId);
+      ps.executeUpdate();
+    }
+    log.info("[ETP-4751] Auto-set default exemption cause {} on invoice {}", causeId, invoiceId);
+  }
+
+  private NeoResponse augmentResponseWithSignal(NeoContext context, String signalKey) {
+    try {
+      NeoResponse prev = context.getPreviousResult();
+      if (prev == null || prev.getBody() == null) {
+        return null;
+      }
+      JSONObject body = prev.getBody();
+      body.put(signalKey, true);
+      return NeoResponse.ok(body);
+    } catch (Exception e) {
+      log.warn("[ETP-4751] Could not add '{}' signal to line-save response: {}", signalKey,
+          e.getMessage());
+      return null;
+    }
   }
 
   /**

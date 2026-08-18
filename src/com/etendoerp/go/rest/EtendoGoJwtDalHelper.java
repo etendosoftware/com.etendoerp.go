@@ -35,6 +35,8 @@ import org.openbravo.model.common.enterprise.Organization;
 
 import com.etendoerp.go.payment.TenantPlanService;
 import com.etendoerp.go.schemaforge.data.Account;
+import com.auth0.jwt.interfaces.DecodedJWT;
+import com.smf.securewebservices.utils.SecureWebServicesUtils;
 
 final class EtendoGoJwtDalHelper {
 
@@ -70,6 +72,15 @@ final class EtendoGoJwtDalHelper {
   private static final String PROPERTY_EXTERNAL_EMAIL = Account.PROPERTY_EXTERNALEMAIL;
   private static final String PROPERTY_LAST_SSO_LOGIN = Account.PROPERTY_LASTSSOLOGIN;
   private static final TenantPlanService TENANT_PLAN_SERVICE = new TenantPlanService();
+  // ETP-4829: STATUS distinguishes an account that already owns a usable local password
+  // ("active", the default for self-registration/SSO) from one an admin created on a user's
+  // behalf, awaiting the ETP-4830 invite-email flow to set a password ("pending"). No login is
+  // possible on a pending account — hasLocalPassword() already returns false (passwordHash is
+  // null), STATUS exists purely to distinguish this from a not-yet-implemented "SSO account with
+  // no local password by design" case in UI-facing account listings.
+  private static final String STATUS_ACTIVE = "active";
+  private static final String STATUS_PENDING = "pending";
+  private static final String PROPERTY_STATUS = Account.PROPERTY_STATUS;
 
   private EtendoGoJwtDalHelper() {
   }
@@ -100,6 +111,30 @@ final class EtendoGoJwtDalHelper {
     return query.uniqueResult();
   }
 
+  /** Resolves either an account session token or the active environment JWT to its account. */
+  static Account findActiveAccountByBearerToken(String token) {
+    Account account = findActiveAccountByToken(token);
+    if (account != null || StringUtils.isBlank(token)) return account;
+    try {
+      DecodedJWT jwt = SecureWebServicesUtils.decodeToken(token);
+      String userId = jwt == null ? null : jwt.getClaim("user").asString();
+      User user = StringUtils.isBlank(userId) ? null : OBDal.getInstance().get(User.class, userId);
+      if (user == null || !Boolean.TRUE.equals(user.isActive())) {
+        return null;
+      }
+      String accountEmail = StringUtils.trimToNull(user.getEmail());
+      if (accountEmail == null) accountEmail = StringUtils.trimToNull(user.getUsername());
+      account = accountEmail == null ? null : findActiveAccountByEmail(accountEmail);
+      if (account == null && StringUtils.isNotBlank(user.getUsername())) {
+        account = findActiveAccountByEmail(user.getUsername());
+      }
+      return account != null && clientBelongsToAccountEmail(user.getClient().getId(), account.getEmail())
+          ? account : null;
+    } catch (Exception e) {
+      return null;
+    }
+  }
+
   static Account findActiveAccountBySsoIdentity(String provider, String subject) {
     OBQuery<Account> query = OBDal.getInstance().createQuery(Account.class,
         "as account where account." + PROPERTY_AUTH_PROVIDER + " = :" + PARAM_AUTH_PROVIDER
@@ -120,6 +155,66 @@ final class EtendoGoJwtDalHelper {
     account.setPasswordHash(passwordHash);
     account.setName(name);
     account.setSessionToken(sessionToken);
+    account.set(PROPERTY_STATUS, STATUS_ACTIVE);
+    OBDal.getInstance().save(account);
+    flushAndCommitDalChanges();
+    return account;
+  }
+
+  /**
+   * ETP-4829: creates the {@code etgo_account} row for a user an admin created directly (not via
+   * self-service {@code /sws/go/register}). No password is set here — the account is left in the
+   * {@code pending} status with a {@code null} password hash, exactly like an SSO-only account
+   * (see {@link #hasLocalPassword(Account)}), so it cannot log in until ETP-4830's invite-email
+   * flow sets one (e.g. by driving the same {@code password-reset/confirm} path used for a
+   * normal reset) and flips the status to {@code active} — that transition is ETP-4830's
+   * responsibility, not implemented here. Returns silently with the existing account if one is
+   * already registered for this email
+   * (e.g. the admin is linking a newly-created {@code AD_User} to a pre-existing platform
+   * account) — this must never fail the parent {@code AD_User} save.
+   */
+  /**
+   * ETP-4829: creates an {@code etgo_account} for a user an admin created directly, with a real,
+   * immediately-usable password the admin typed on the create form — a temporary workaround for
+   * environments where ETP-4830's invite-email flow isn't available yet. {@code passwordHash}
+   * must already be produced by {@link PasswordHasher#hash} (this method does not hash or
+   * validate strength — see {@link EtendoGoAccountProvisioning#ensureAccountForCreatedUser},
+   * which does both before calling this). Unlike {@link #createPendingAccount}, the account is
+   * {@code active} immediately: it already has everything a normal local-password account needs
+   * to log in. Same duplicate-email handling as {@link #createPendingAccount} — returns the
+   * existing account untouched rather than failing the parent {@code AD_User} save.
+   */
+  static Account createActiveAccount(String email, String passwordHash, String name) {
+    Account existing = findActiveAccountByEmail(email);
+    if (existing != null) {
+      return existing;
+    }
+    Account account = OBProvider.getInstance().get(Account.class);
+    account.setClient(OBDal.getInstance().get(Client.class, ZERO_ID));
+    account.setOrganization(OBDal.getInstance().get(Organization.class, ZERO_ID));
+    account.setEmail(email);
+    account.setPasswordHash(passwordHash);
+    account.setName(name);
+    account.setSessionToken(null);
+    account.set(PROPERTY_STATUS, STATUS_ACTIVE);
+    OBDal.getInstance().save(account);
+    flushAndCommitDalChanges();
+    return account;
+  }
+
+  static Account createPendingAccount(String email, String name) {
+    Account existing = findActiveAccountByEmail(email);
+    if (existing != null) {
+      return existing;
+    }
+    Account account = OBProvider.getInstance().get(Account.class);
+    account.setClient(OBDal.getInstance().get(Client.class, ZERO_ID));
+    account.setOrganization(OBDal.getInstance().get(Organization.class, ZERO_ID));
+    account.setEmail(email);
+    account.setPasswordHash(null);
+    account.setName(name);
+    account.setSessionToken(null);
+    account.set(PROPERTY_STATUS, STATUS_PENDING);
     OBDal.getInstance().save(account);
     flushAndCommitDalChanges();
     return account;
@@ -138,6 +233,7 @@ final class EtendoGoJwtDalHelper {
     account.set(PROPERTY_EXTERNAL_SUBJECT, subject);
     account.set(PROPERTY_EXTERNAL_EMAIL, externalEmail);
     account.set(PROPERTY_LAST_SSO_LOGIN, loginAt);
+    account.set(PROPERTY_STATUS, STATUS_ACTIVE);
     OBDal.getInstance().save(account);
     flushAndCommitDalChanges();
     return account;
@@ -271,7 +367,8 @@ final class EtendoGoJwtDalHelper {
   static boolean clientBelongsToAccountEmail(String clientId, String accountEmail) {
     OBQuery<User> query = OBDal.getInstance().createQuery(User.class,
         "as user where user.client.id = :" + PARAM_CLIENT_ID
-            + " and (user.username = :" + PARAM_ACCOUNT_EMAIL
+            + " and (user.email = :" + PARAM_ACCOUNT_EMAIL
+            + " or user.username = :" + PARAM_ACCOUNT_EMAIL
             + " or user.username like :" + PARAM_ACCOUNT_PREFIX + " escape '\\') "
             + "and user.active = true");
     query.setNamedParameter(PARAM_CLIENT_ID, clientId);
@@ -285,7 +382,8 @@ final class EtendoGoJwtDalHelper {
 
   static List<User> findEnvironmentUsersByAccountEmail(String accountEmail) {
     OBQuery<User> query = OBDal.getInstance().createQuery(User.class,
-        "as user where (user.username = :" + PARAM_ACCOUNT_EMAIL
+        "as user where (user.email = :" + PARAM_ACCOUNT_EMAIL
+            + " or user.username = :" + PARAM_ACCOUNT_EMAIL
             + " or user.username like :" + PARAM_ACCOUNT_PREFIX + " escape '\\') "
             + "and user.active = true and user.client.active = true and user.client.id <> '0' "
             + "order by user.client.creationDate, user.creationDate");

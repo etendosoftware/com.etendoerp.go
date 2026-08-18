@@ -111,6 +111,14 @@ class NeoServletSupport {
 
       NeoResponse preResult = handler.handle(context);
       if (preResult != null) {
+        // Error responses from the pre-hook short-circuit the whole pipeline.
+        // afterHandle is a post-CRUD side effect (e.g. auto-filling adoption dates) and must
+        // NOT run when the pre-hook rejected the request — doing so could commit unintended
+        // writes (via OBDal.flush) into a transaction that is about to be rolled back or
+        // that was already partially modified, leading to corrupt state.
+        if (preResult.getHttpStatus() >= 400) {
+          return preResult;
+        }
         context.setPreviousResult(preResult);
         NeoResponse afterResult = handler.afterHandle(context);
         return afterResult != null ? afterResult : preResult;
@@ -162,6 +170,10 @@ class NeoServletSupport {
 
   static boolean hasWindowAccessForSpec(SFSpec spec, String httpMethod) {
     return com.etendoerp.go.schemaforge.util.NeoAccessHelper.hasWindowAccessForSpec(spec, httpMethod);
+  }
+
+  static boolean hasReportSpecAccess(SFSpec spec, String httpMethod) {
+    return com.etendoerp.go.schemaforge.util.NeoAccessHelper.hasReportSpecAccess(spec, httpMethod);
   }
 
   static boolean hasProcessAccess(String processId) {
