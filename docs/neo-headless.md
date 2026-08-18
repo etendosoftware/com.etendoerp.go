@@ -1496,51 +1496,114 @@ runs BEFORE core's own unprioritized propagation handlers (`InheritedAccessEnabl
 `RoleInheritanceEventHandler`) for the same event — the only way to win that race, since core never
 forwards a `preFlush`/`postFlush` hook to CDI observers.
 
-It guards four triggers, all variations on the same root cause (`WindowAccessInjector` not
-skipping `client`/`organization` in `getSkippedProperties()`, so core's `updateRoleAccess` blindly
-copies the template's own ownership fields onto an already-existing inherited row):
-1. **A template gains a new/updated `AD_Window_Access` grant.** For every OTHER role actively
-   inheriting from that template, if it already has its own active row for the same window not
-   already sourced from that same template, the row is deleted before core propagates — forcing
-   core onto the safe CREATE path instead of the corrupting UPDATE path (mirrors
-   `preventWindowAccessOverlapCorruption`'s own mechanism, generalized to every dependent role).
+It has grown, round by round (B6 rounds 1-8, ETP-4906), into **seven guarded triggers**, all
+variations on the same root cause (`WindowAccessInjector` not skipping `client`/`organization` in
+`getSkippedProperties()`, so core's `updateRoleAccess` blindly copies the template's own ownership
+fields onto an already-existing inherited row) plus one correctness-only refinement (BUG-2) layered
+onto trigger 7. This section summarizes the current mechanism; the exhaustive empirically-found
+failure mode for each — including the two rejected intermediate designs that turned out wrong on
+live re-verification — lives in the class's own javadoc, which is the source of truth this section
+is kept in sync with:
+
+1. **A template gains a new/updated `AD_Window_Access` grant (`onSave`/`onUpdate`, `guardDependentsOf`).**
+   For every OTHER role actively inheriting from that template, if it already has its own active
+   row for the same window not already sourced from that same template, the row is deleted before
+   core propagates — forcing core onto the safe CREATE path instead of the corrupting UPDATE path
+   (mirrors `preventWindowAccessOverlapCorruption`'s own mechanism, generalized to every dependent
+   role).
 2. **A role gains a brand-new `AD_Role_Inheritance` from an already-overlapping template**
-   (e.g. a raw Classic "add inheritance" edit, not `assignTemplateRoles`) — same delete-before-write
-   logic, scoped to the one role gaining the one new inheritance.
-3. **A role loses an existing `AD_Role_Inheritance`.** Core's `applyRemoveInheritance`
-   re-derives the dependent's access against every REMAINING template it still inherits from via
-   the same corrupting `updateRoleAccess` path. For every remaining template, for every window it
-   grants, if the dependent's existing row isn't already sourced from that exact template, it is
-   deleted first, forcing the safe CREATE path again. A row whose window is granted by NO
-   remaining template is left alone — core's own non-corrupting delete handles that case already.
-4. **Most-permissive-wins enforcement + `InheritedFrom` bookkeeping on widen.** None of the three
+   (`guardNewInheritance`, e.g. a raw Classic "add inheritance" edit, not `assignTemplateRoles`) —
+   same delete-before-write logic, scoped to the one role gaining the one new inheritance.
+3. **A role loses an existing `AD_Role_Inheritance` (`guardRemovedInheritance`).** Core's
+   `applyRemoveInheritance` re-derives the dependent's access against every REMAINING template it
+   still inherits from via the same corrupting `updateRoleAccess` path. For every remaining
+   template, for every window it grants, if the dependent's existing row isn't already sourced from
+   that exact template, it is deleted first, forcing the safe CREATE path again. A row whose window
+   is granted by NO remaining template is left alone — core's own non-corrupting delete handles that
+   case already.
+4. **Most-permissive-wins enforcement on widen (`widenInheritedAccessLevelIfNeeded`).** None of the
    triggers above decide the access LEVEL the CREATE path should use when 2+ actively-inherited
    templates grant the same window — outside `assignTemplateRoles`, core's propagation can leave a
-   role read-only even though another active template grants it full. `widenInheritedAccessLevelIfNeeded`
-   runs on the same `EntityNewEvent` as trigger 1-3's CREATE-path row: if any of the role's OTHER
-   active template inheritances grants the same window at a more permissive level, it widens the
-   fresh row to full (one-directional — never narrows) AND repoints `InheritedFrom` to the
-   justifying template, so a LATER removal of that exact template correctly re-triggers
-   re-derivation instead of leaving the row stuck at full forever. A same-flush race this fix
-   exposed (Hibernate runs entity Deletions after Insertions in its default action-queue order, so
-   a just-removed template's `RoleInheritance` row can still look `active=true` mid-flush) is
-   closed via a per-transaction `TEMPLATES_BEING_REMOVED` thread-local marker, cleared by a
+   role read-only even though another active template grants it full. This runs on the same
+   `EntityNewEvent` as triggers 1-3's CREATE-path row: if any of the role's OTHER active template
+   inheritances grants the same window at a more permissive level, it widens the fresh row to full
+   (one-directional — never narrows).
+5. **`InheritedFrom` bookkeeping on widen, same method.** The fourth trigger's first implementation
+   widened `editableField` but left `InheritedFrom` pointing at the (less-permissive) template the
+   CREATE path originally sourced the row from, which broke re-derivation on a later removal of the
+   ACTUAL justifying template. `widenInheritedAccessLevelIfNeeded` now also repoints `InheritedFrom`
+   to the template that justifies the widened value (`findActiveTemplateGrantingFullAccess`, tie
+   broken by highest `AD_Role_Inheritance.SeqNo`, mirroring core's own `propagateDeletedAccess`
+   heuristic), only in the branch that actually widens. A same-flush race this exposed (Hibernate
+   runs entity Deletions after Insertions in its default action-queue order, so a just-removed
+   template's `RoleInheritance` row can still look `active=true` mid-flush) is closed via a
+   per-transaction `TEMPLATES_BEING_REMOVED` thread-local marker, cleared by a
    `TransactionCompletedEvent` observer.
+6. **REMOVE-path duplicate-INSERT crash with 3+ overlapping templates (`guardRemovedInheritance`,
+   `repointInPlace`/`collectWindowGrantors`/`repointWindowIfNeeded`).** Live-confirmed on the real
+   `SFAssignUserRoles` flow with a role composed from all 4 system templates: the old
+   delete-once-per-remaining-template loop could delete the SAME dependent row more than once across
+   core's own multi-pass `calculateAccesses` walk (no flush between passes, `FlushMode.COMMIT`),
+   so two remaining templates both scheduled a CREATE for the identical `(AD_Role_ID, AD_Window_ID)`
+   pair — a real `ad_window_access_un_key` constraint violation, not a corner case. Fixed by
+   computing, ONCE per window across ALL remaining templates together, the single winning template
+   (highest `SeqNo` grantor — core's own `isPrecedent` compares only `SeqNo` order, not access
+   level; an earlier "most-permissive template wins ownership" attempt was tried and reproduced the
+   identical crash one hop later, for exactly this reason) and the most-permissive access level
+   across every remaining grantor, then correcting the existing row IN PLACE via a bulk HQL UPDATE
+   (`repointInPlace`) — never a delete+recreate. REMOVE-side only; the ADD-side triggers are
+   structurally incapable of this multi-pass race (core's ADD path only ever iterates exactly one
+   template per event).
+7. **Core cannot always SEE a pre-existing, already-correct row before it propagates
+   (`clearConflictingAccessUnconditionally` / `repointIfAlreadySourcedFromTemplate`,
+   `PropagationTrigger`).** Triggers 1-2 originally skipped deleting a dependent's row when it was
+   already sourced from the propagating template, trusting core's own `isPrecedent` to leave it
+   alone — wrong whenever the dependent's client falls outside the CALLING context's own
+   readable-clients list, which makes core's own row lookup (`AccessTypeInjector#findAccess`) blind
+   to it, so core always takes the CREATE branch regardless and risks a duplicate INSERT. Fixed by
+   deleting unconditionally. That fix in turn assumed both callers of `guardDependentsOf` feed a
+   core propagation path with a CREATE fallback — true for `onSave` (`propagateNewAccess`) but FALSE
+   for `onUpdate` (`propagateUpdatedAccess`, which only ever UPDATEs a row it can find and otherwise
+   does nothing), so unconditional deletion on the `onUpdate` path could permanently lose a
+   dependent's access with nothing left to restore it. `guardDependentsOf` now takes a
+   `PropagationTrigger` (`NEW_GRANT` vs. `UPDATED_GRANT`) so the two callers get different
+   treatment: `NEW_GRANT` keeps the unconditional delete (safe — `propagateNewAccess` always
+   recreates); `UPDATED_GRANT` instead corrects an already-template-sourced row IN PLACE
+   (`repointIfAlreadySourcedFromTemplate`, the same bulk-HQL-UPDATE technique as trigger 6) rather
+   than deleting it, so the dependent's row survives regardless of what core's own propagation does
+   afterward.
+
+**[BUG-2] Most-permissive-wins gap in trigger 7's `onUpdate` branch (found by QA's Final Coverage
+Pass, 2026-08-18).** `repointIfAlreadySourcedFromTemplate` only ever compared the dependent's row
+against the ONE template whose own access just changed, copying that template's new value directly
+— unlike triggers 4-6, it never surveyed the dependent's OTHER actively-inherited templates first.
+Live-reproduced: a dependent inheriting full access from two overlapping templates A and B;
+downgrading B's own access via a routine Classic edit dragged the dependent down to read-only too,
+even though A still actively granted full. Fixed by having `repointIfAlreadySourcedFromTemplate`
+survey every OTHER actively-inherited template (`findActiveTemplateGrantingFullAccess`, 3-arg
+`excludedTemplate` overload) before writing, resolving the final level as the MAX across the edited
+template's new value and every other active grantor, and repointing `InheritedFrom` to whichever
+template actually justifies that value — reusing the same survey pattern triggers 6/4-5 already
+established, not new divergent logic.
 
 Deliberately narrow in scope: only reacts when the touched `AD_Window_Access` row's owning role is
 itself a template (the same signal core's own handler uses to decide whether to propagate at all),
-and never touches the template's own row or any grant LEVEL outside trigger 4's widen check.
-`reconcileWindowAccessAfterComposition` (above) remains the most-permissive-wins union authority
-for the role it actively composes; this class's job is making sure core never gets the chance to
-corrupt or silently under-resolve a BYSTANDER role's access for every entry point that service
-doesn't see. Full design rationale, each empirically-discovered failure mode, and the live
-reproduction steps for all four triggers are documented in the class's own javadoc
-(`src/com/etendoerp/go/roles/WindowAccessOverlapCorruptionGuard.java`) and in ETP-4906's plan doc
-("B6 Findings" sections, `etendo_schema_forge` repo). `WindowAccessOverlapCorruptionGuard` has no
-dedicated unit-test file of its own — it is exercised entirely through
-`UserRoleCompositionServiceOverlapIntegrationTest` (all 4 triggers, real DB, `WeldBaseTest`) and
-`UserRoleCompositionServiceRealAccessControlIntegrationTest` (real seed-data access-control
-scenarios) — see §9.
+and never touches the template's own row or any grant LEVEL outside triggers 4-7/BUG-2's own
+widen/repoint logic. `reconcileWindowAccessAfterComposition` (above) remains the most-permissive-wins
+union authority for the role it actively composes; this class's job is making sure core never gets
+the chance to corrupt or silently under-resolve a BYSTANDER role's access for every entry point that
+service doesn't see. Full design rationale, each empirically-discovered failure mode (including the
+two intermediate designs that were tried and reproduced their own crash before landing on the
+current one), and the live reproduction steps for all seven triggers plus BUG-2 are documented in
+the class's own javadoc (`src/com/etendoerp/go/roles/WindowAccessOverlapCorruptionGuard.java`) and
+in ETP-4906's plan doc ("B6 Findings" sections, `etendo_schema_forge` repo) — treat the javadoc as
+canonical for current-state mechanics; the plan doc's per-round sections are historical trail.
+`WindowAccessOverlapCorruptionGuard` has no dedicated unit-test file of its own — it is exercised
+entirely through `UserRoleCompositionServiceOverlapIntegrationTest` (all 7 triggers plus BUG-2 and
+its 2 coverage-gap follow-ups, real DB, `WeldBaseTest`), `UserRoleCompositionServiceOverlapReverificationTest`
+(an independent re-verification of the same overlap fix, deliberately not reusing the fix author's
+own test), and `UserRoleCompositionServiceRealAccessControlIntegrationTest` (real seed-data
+access-control scenarios) — see §9.
 
 **Twelve matrix rows are a documented, deliberate gap — not yet implementable.** Every one of
 them has NO `AD_Window_ID` at all backing it in this environment (either a pure custom/aggregate
@@ -1709,9 +1772,9 @@ The module includes unit tests that run without a backend:
 | `TemplateRoleWindowAccessTest` (ETP-4878) | -- | The real ETP-4878 permission matrix in `TemplateRoleWindowAccess` (`src/com/etendoerp/go/roles/`), DB-free (12 tests): exactly the 4 non-Admin template roles present, exact grant counts per role (Sales 13 / Purchasing 11 / Finance 27 / Inventory 13, 64 total), Asientos manuales resolves to Simple G/L Journal and never to the classic G/L Journal window (`132`), Sales has no grant for Pago, "Categoría del producto" is read-only for Sales/Purchasing but full for Finance/Inventory, no role repeats the same `AD_Window_ID` twice, `byRoleId()` returns a fresh mutable map per call. QA (Sentinel) added 3 more: the 64 grants resolve to exactly 33 DISTINCT `AD_Window_ID`s (not just a raw count that would stay 64 even under duplication); all 8 window/role pairs from the old ETP-4852 2-window smoke test survive unchanged (same full access) in the new matrix, confirming `EnsureSystemRoleTemplatesScript#removeStaleWindowAccess`'s delete path is never actually exercised by that specific migration; and at least one window (e.g. Contactos, Pedido de venta) is granted at genuinely conflicting access levels across 2+ roles — the data-level root cause behind the ETP-4852 cross-template overlap bug fixed in `UserRoleCompositionService` (see §8d and `UserRoleCompositionServiceOverlapIntegrationTest`). |
 | `UserRoleCompositionServiceTest` | -- | Pure-Mockito unit test covering `assignTemplateRoles`'s input-validation guard clauses — the slice that fails before any persistence side effect: blank user id, `null` template id list, unknown user, unknown/inactive template id, a role that is not a template, the client-admin "Admin" role rejected even if somehow marked as a template, requested-id dedup happening before the per-id validation loop (verified via a single `Role` lookup despite 3 whitespace-noisy repeats of the same id), and the two `enforceCallerClientBoundary` regression cases from REVIEW cycle 1: a caller whose client differs from the target user's is rejected with a "different client" message, while the literal System Administrator role id (`"0"`) bypasses the check and reaches the (unrelated) template-validation error instead. **ETP-4906 additions:** `getAppliedTemplateRoleIds`'s read path — blank/unknown user id rejected the same way, a user with no `Default_Ad_Role_ID` yet returns an empty list without ever calling `createPersonalRole`, a reusable personal role with 2 active `AD_Role_Inheritance` rows returns both `InheritFrom` ids in `Seqno` order, and the read path enforces the exact same `enforceCallerClientBoundary` regression pair (cross-client rejected, System Administrator bypasses) as the write path. |
 | `UserRoleCompositionServiceIntegrationTest` | 446 | Real-DB, end-to-end proof (6 tests) of the full add/reconcile/retract lifecycle: a system-level (`AD_Client_ID = '0'`) template's `AD_Window_Access` propagates onto a per-tenant personal role purely via core's own `RoleInheritanceEventHandler`/`RoleInheritanceManager` (no hand-rolled copy in this module); removing a template on a later call retracts what it had propagated; re-running with the identical template set is a no-op (0 added, 0 removed); an empty template list on a user's FIRST-EVER composition call still creates the personal role and syncs `AD_User_Roles`/`Default_Ad_Role_ID` rather than leaving the user role-less; three occurrences of the same valid template id in one request collapse into exactly one `AD_Role_Inheritance` row instead of one per occurrence; and a recompose call mixing one still-valid template with one bogus id is rejected wholesale without mutating the inheritance/access an earlier, unrelated successful call had already applied. Extends `WeldBaseTest`, NOT plain `OBBaseTest` — role-inheritance propagation is driven by a Hibernate interceptor firing a CDI event that only `WeldBaseTest`'s Arquillian-booted container wires to an observer; under plain `OBBaseTest` the propagation silently never fires, which is a test-harness gap, not a bug in the service. |
-| `UserRoleCompositionServiceOverlapIntegrationTest` | 718 | Real-DB proof (8 tests, `WeldBaseTest`) of the cross-template `AD_Window_Access` overlap fix AND `WindowAccessOverlapCorruptionGuard` (see §8d above): composing Finance (full) + Sales (read-only) on a shared window succeeds (no `OBSecurityException`) and resolves to full access, with `client`/`organization` on the shared row matching the personal role's own, and both templates' non-shared windows also present (a real union); the same conflicting grants requested in the OPPOSITE order still resolve to full — add order never changes the most-permissive-wins outcome; re-running the identical overlapping template set is a no-op; `getAppliedTemplateRoleIds` reflects a real overlapping composition, not just a mocked one. **Task B6 additions (`WindowAccessOverlapCorruptionGuard`'s own coverage, all 4 triggers):** a bystander role never passed to `assignTemplateRoles` (e.g. gaining 2 overlapping inheritances via a raw Classic edit) is also protected (trigger 1/2); removing one of two overlapping template inheritances from a composed role is protected on the REMOVE path (trigger 3); gaining a read-only template inheritance never downgrades an existing full grant from another active template (trigger 4, most-permissive-wins); and removing the template that justified a previously-widened access level correctly downgrades the row to the remaining template's level instead of staying stuck at full (trigger 4, `InheritedFrom` bookkeeping). Uses the real Finance/Sales system templates (not throwaway roles) plus one confirmed-unused window (`AD_Window_ID = 100`) for the shared grant, so it is independent of whatever the templates' own real grants happen to be. |
+| `UserRoleCompositionServiceOverlapIntegrationTest` | 1181 | Real-DB proof (13 tests, `WeldBaseTest`) of the cross-template `AD_Window_Access` overlap fix AND `WindowAccessOverlapCorruptionGuard`, all 7 triggers plus BUG-2 (see §8d above): composing Finance (full) + Sales (read-only) on a shared window succeeds (no `OBSecurityException`) and resolves to full access, with `client`/`organization` on the shared row matching the personal role's own, and both templates' non-shared windows also present (a real union); the same conflicting grants requested in the OPPOSITE order still resolve to full; re-running the identical overlapping template set is a no-op; `getAppliedTemplateRoleIds` reflects a real overlapping composition. **Triggers 1-5 (B6 rounds 1-5):** a bystander role never passed to `assignTemplateRoles` (e.g. gaining 2 overlapping inheritances via a raw Classic edit) is also protected (triggers 1-2); removing one of two overlapping template inheritances from a composed role is protected on the REMOVE path (trigger 3); gaining a read-only template inheritance never downgrades an existing full grant from another active template (trigger 4); removing the template that justified a previously-widened access level correctly downgrades the row instead of staying stuck at full (trigger 5, `InheritedFrom` bookkeeping). **Triggers 6-7 (B6 rounds 6-7):** removing one of FOUR overlapping templates (2 remaining templates still overlapping on a window) no longer duplicate-INSERTs (trigger 6); updating a template's own access level in place never deletes an already-correctly-sourced dependent row (trigger 7, the `onUpdate`/`UPDATED_GRANT` path). **BUG-2 + coverage gaps (round 8):** downgrading one of two overlapping templates' own access never downgrades a dependent when the other still grants full (`testDowngradingOneOfTwoOverlappingTemplatesNeverDowngradesDependentWhenTheOtherStillGrantsFullAccess`); a single inheritance event touching 3 windows at once resolves each window's most-permissive-wins independently (`testSingleInheritanceEventAffectingMultipleWindowsResolvesEachWindowIndependently`); two guard-triggering template updates inside one shared flush do not cause Hibernate reentrancy (`testTwoGuardTriggeringTemplateUpdatesInsideASingleFlushDoNotCauseHibernateReentrancy`). Uses the real Finance/Sales system templates (not throwaway roles) plus one confirmed-unused window (`AD_Window_ID = 100`) for the shared grant, so it is independent of whatever the templates' own real grants happen to be. |
 | `UserRoleCompositionServiceRealAccessControlIntegrationTest` (B5, ETP-4906) | 228 | Real-DB proof (3 tests, `WeldBaseTest`) that `WindowAccessOverlapCorruptionGuard`'s protection produces the CORRECT effective access outcome, not just a crash-free one, against real ETP-4878 seed-data templates: a Sales-only composed role has no access to Purchase Invoice; a Purchasing-only composed role has no access to Sales Invoice; and a Sales-only role is read-only on "Categoría del producto", then adding Finance upgrades it to full (most-permissive-wins) — the same scenario §8d's four outcomes (no-access ×2, read-only, full) are meant to cover end-to-end. |
-| `UserRoleCompositionServiceOverlapReverificationTest` | 275 | QA (Sentinel) independent re-verification (3 tests) of the same overlap fix, deliberately NOT reusing the fix author's own integration test: 3 simultaneously-overlapping templates (Finance/Sales/Purchasing on a shared window) resolve to most-permissive-wins with the "winner" (Purchasing, full) in the middle of the composition order — ruling out a pairwise-only fix that only checks the newest template against the immediately-preceding state; and two cases seeded with the REAL ETP-4878 matrix's own access levels (not the synthetic window `100`) — Sales (full) + Inventory (read-only) on Contactos resolves to full, and Sales + Purchasing both read-only on Categoría del producto stays read-only (confirms the fix does not spuriously promote a window to full just because 2+ templates share it). Also closes a data point the original QA report got wrong: `ad_window_access_un_key` is a plain `CREATE UNIQUE INDEX` on `(ad_role_id, ad_window_id)`, invisible to a `pg_constraint`-only query — Sales already had a live pre-existing row for Contactos, so this suite seeds only the missing side instead of inserting a duplicate. |
+| `UserRoleCompositionServiceOverlapReverificationTest` | 308 | QA (Sentinel) independent re-verification (3 tests) of the same overlap fix, deliberately NOT reusing the fix author's own integration test: 3 simultaneously-overlapping templates (Finance/Sales/Purchasing on a shared window) resolve to most-permissive-wins with the "winner" (Purchasing, full) in the middle of the composition order — ruling out a pairwise-only fix that only checks the newest template against the immediately-preceding state; and two cases seeded with the REAL ETP-4878 matrix's own access levels (not the synthetic window `100`) — Sales (full) + Inventory (read-only) on Contactos resolves to full, and Sales + Purchasing both read-only on Categoría del producto stays read-only (confirms the fix does not spuriously promote a window to full just because 2+ templates share it). Also closes a data point the original QA report got wrong: `ad_window_access_un_key` is a plain `CREATE UNIQUE INDEX` on `(ad_role_id, ad_window_id)`, invisible to a `pg_constraint`-only query — Sales already had a live pre-existing row for Contactos, so this suite seeds only the missing side instead of inserting a duplicate. |
 | `SFAssignUserRolesTest` | 278 | Unit test (8 tests) proving the webhook wires parameters/results/errors correctly, with `UserRoleCompositionService` itself intercepted via `mockConstruction` (its real behavior is the integration test's job): access gate (no role / restricted role denied without constructing the service), the happy path (admin composes, parses a whitespace/empty-entry-noisy `TemplateRoleIds` CSV, returns the assignment summary), missing `UserId` rejected before construction, an absent `TemplateRoleIds` parameter resolving to an empty (not `null`) list meaning "revoke all", a domain `OBException` folding into a `success:false` HTTP-200 result rather than the bridge's `error`/500 path, an unexpected `RuntimeException` surfacing as the bridge's `error` field instead, and the REVIEW cycle 1 regression proving the webhook actually forwards its already-resolved `currentRole` through to `assignTemplateRoles`'s 3-arg overload — the exact wiring the tenant-boundary check depends on. |
 | `SFUserRoleAssignmentsTest` (ETP-4906) | -- | Unit test mirroring `SFAssignUserRolesTest`'s `mockConstruction` convention for §8e's read endpoint: access gate denies with the mode-appropriate empty shape (bulk `{"assignments":{}}` with no `UserId`, single `{"userId":...,"templateRoleIds":[]}` with one) without constructing the service; bulk mode returns every user's assignments keyed by id, scoped to `currentRole.getClient().getId()`; single mode returns one user's ids and proves `currentRole` is forwarded into the boundary-checking overload (mirrors `SFAssignUserRolesTest`'s own forwarding regression); a cross-tenant read attempt and an unknown-user-id `OBException` both fold into the single-mode empty shape rather than the bridge's `error`/500 path; an unexpected `RuntimeException` still surfaces as `error`. |
 | `SFSystemRoleTemplatesTest` (ETP-4906) | -- | Unit test (12 tests) mirroring `SFRolesOverviewTest`'s structure for §8f's endpoint: admin/client-admin access gate (no role, restricted role, System Administrator, client-admin — all resolved without the caller's own client ever appearing in any stub); roles resolved via `OBDal.get(Role.class, id)` against the 4 fixed `SystemRoleTemplates` ids rather than a client-scoped `Role` criteria; response omits `userCount`/`isClientAdmin` entirely; Finance/Sales/Purchasing/Inventory ordering; a template id resolving to `null` or to an inactive `Role` is skipped gracefully rather than erroring; GO-window intersection (native-only windows excluded) and tier resolution (full/read-only), mirroring `SFRolesOverview`'s identical logic; exception handling. |
@@ -1729,6 +1792,7 @@ are the exception, living under `src-test/src/com/etendoerp/go/roles/` alongside
 `com.etendoerp.go.roles` production classes they cover, which also includes
 `WindowAccessOverlapCorruptionGuard` itself (§8d) — it has no dedicated test class of its own and
 is exercised entirely through `UserRoleCompositionServiceOverlapIntegrationTest`/
+`UserRoleCompositionServiceOverlapReverificationTest`/
 `UserRoleCompositionServiceRealAccessControlIntegrationTest` above.
 
 ---
