@@ -3719,4 +3719,56 @@ public class NeoDefaultsServiceTest {
 
     assertEquals("DR", body.get("documentStatus"));
   }
+
+  /**
+   * ETP-4904 regression: a discarded FK column (e.g. {@code C_Project.AD_User_ID}) whose
+   * {@code AD_Column.DefaultValue} is the literal {@code "-1"} — Etendo Classic's UI sentinel for
+   * "nothing selected" — must NOT be persisted as a real FK id. Before the fix, "-1" reached
+   * {@code body.put(propName, "-1")} verbatim and NEO Headless later tried to resolve it as a
+   * real {@code AD_User(-1)} row, failing the insert with "refered to but not present in the
+   * import set". The column is not a doctype target, so {@link DocTypeResolver} must return null
+   * and the property must be left absent from the body (treated as null/omitted).
+   */
+  @Test
+  public void testApplyResolvedDefaultSkipsSentinelMinusOneForForeignKeyColumn() throws Exception {
+    JSONObject body = new JSONObject();
+    Column col = mock(Column.class);
+    when(col.getDBColumnName()).thenReturn("AD_User_ID");
+    Property prop = mock(Property.class);
+
+    try (MockedStatic<DocTypeResolver> docTypeMock = mockStatic(DocTypeResolver.class)) {
+      docTypeMock.when(() -> DocTypeResolver.resolveDefaultDocTypeId(eq(col), any()))
+          .thenReturn(null);
+
+      invokePrivate("applyResolvedDefault", APPLY_RESOLVED_DEFAULT_PARAMS,
+          body, col, "createdBy", "-1", null, prop);
+
+      assertFalse("Sentinel '-1' FK default must not be persisted as a real id",
+          body.has("createdBy"));
+    }
+  }
+
+  /**
+   * Same sentinel-skip behavior must hold for the legacy "0" sentinel on a doctype-target column
+   * when no default doctype can be resolved — guards that the "-1" fix did not regress the
+   * pre-existing "0" handling.
+   */
+  @Test
+  public void testApplyResolvedDefaultSkipsSentinelZeroWhenNoDocTypeResolved() throws Exception {
+    JSONObject body = new JSONObject();
+    Column col = mock(Column.class);
+    when(col.getDBColumnName()).thenReturn("C_DocTypeTarget_ID");
+    Property prop = mock(Property.class);
+
+    try (MockedStatic<DocTypeResolver> docTypeMock = mockStatic(DocTypeResolver.class)) {
+      docTypeMock.when(() -> DocTypeResolver.resolveDefaultDocTypeId(eq(col), any()))
+          .thenReturn(null);
+
+      invokePrivate("applyResolvedDefault", APPLY_RESOLVED_DEFAULT_PARAMS,
+          body, col, "transactionDocument", "0", null, prop);
+
+      assertFalse("Sentinel '0' FK default must not be persisted when no doctype resolves",
+          body.has("transactionDocument"));
+    }
+  }
 }

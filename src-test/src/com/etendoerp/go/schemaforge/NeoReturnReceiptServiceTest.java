@@ -39,12 +39,17 @@ import org.junit.Test;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
 import org.openbravo.base.exception.OBException;
+import org.openbravo.base.provider.OBProvider;
 import org.openbravo.dal.core.OBContext;
+import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.utility.Utility;
 import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.enterprise.DocumentType;
+import org.openbravo.model.common.enterprise.Locator;
+import org.openbravo.model.common.enterprise.Warehouse;
 import org.openbravo.model.materialmgmt.transaction.ShipmentInOut;
+import org.openbravo.model.materialmgmt.transaction.ShipmentInOutLine;
 import org.openbravo.service.db.DalConnectionProvider;
 
 /**
@@ -641,5 +646,155 @@ public class NeoReturnReceiptServiceTest {
     NeoResponse result = handler.handle(ctx);
 
     assertNull("handle() must return null when specName does not match 'goods-shipment'", result);
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // ETP-4863 — createReturnLineShell must anchor the bin to the header warehouse
+  //
+  // This shell is the DAL "import lines from a source document" path shared by
+  // NeoReturnReceiptService.createReturn and CreatePurchaseReturnHandler.addReturnLine.
+  // Neither goes through the line NeoHandler, so NeoHandlerUtils.injectDefaultLocatorIfMissing
+  // never runs and the source document's bin used to be copied verbatim — landing the stock
+  // transaction in the SOURCE document's warehouse instead of the return header's.
+  // ─────────────────────────────────────────────────────────────────────────────
+
+  private static final String WH_PRINCIPAL = LocatorTestSupport.WH_PRINCIPAL;
+  private static final String WH_SECONDARY = LocatorTestSupport.WH_SECONDARY;
+
+  /**
+   * Source line's bin lives in another warehouse than the return header → the shell must carry
+   * the header warehouse's default bin instead of the source's.
+   */
+  @Test
+  public void testCreateReturnLineShell_sourceBinFromAnotherWarehouse_anchorsToHeaderWarehouse() {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+        MockedStatic<OBProvider> providerMock = Mockito.mockStatic(OBProvider.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      Warehouse headerWarehouse = LocatorTestSupport.mockWarehouse(WH_PRINCIPAL);
+      Locator sourceBin = LocatorTestSupport.mockLocator("loc-secondary-A", LocatorTestSupport.mockWarehouse(WH_SECONDARY));
+      Locator headerDefaultBin = LocatorTestSupport.mockLocator("loc-principal-default", headerWarehouse);
+      LocatorTestSupport.stubDefaultLocatorLookup(dal, headerDefaultBin);
+
+      ShipmentInOut returnDoc = mock(ShipmentInOut.class);
+      when(returnDoc.getWarehouse()).thenReturn(headerWarehouse);
+      ShipmentInOutLine sourceLine = mock(ShipmentInOutLine.class);
+      when(sourceLine.getStorageBin()).thenReturn(sourceBin);
+
+      ShipmentInOutLine shell = mock(ShipmentInOutLine.class);
+      OBProvider provider = mock(OBProvider.class);
+      providerMock.when(OBProvider::getInstance).thenReturn(provider);
+      when(provider.get(ShipmentInOutLine.class)).thenReturn(shell);
+
+      NeoReturnReceiptService.createReturnLineShell(returnDoc, sourceLine, 10L);
+
+      verify(shell, never()).setStorageBin(sourceBin);
+      verify(shell).setStorageBin(headerDefaultBin);
+    }
+  }
+
+  /**
+   * Source line's bin already belongs to the return header's warehouse → kept verbatim, and no
+   * default-locator lookup is issued at all.
+   */
+  @Test
+  public void testCreateReturnLineShell_sourceBinInHeaderWarehouse_isKept() {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+        MockedStatic<OBProvider> providerMock = Mockito.mockStatic(OBProvider.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      Warehouse headerWarehouse = LocatorTestSupport.mockWarehouse(WH_PRINCIPAL);
+      Locator sourceBin = LocatorTestSupport.mockLocator("loc-principal-A", headerWarehouse);
+
+      ShipmentInOut returnDoc = mock(ShipmentInOut.class);
+      when(returnDoc.getWarehouse()).thenReturn(headerWarehouse);
+      ShipmentInOutLine sourceLine = mock(ShipmentInOutLine.class);
+      when(sourceLine.getStorageBin()).thenReturn(sourceBin);
+
+      ShipmentInOutLine shell = mock(ShipmentInOutLine.class);
+      OBProvider provider = mock(OBProvider.class);
+      providerMock.when(OBProvider::getInstance).thenReturn(provider);
+      when(provider.get(ShipmentInOutLine.class)).thenReturn(shell);
+
+      NeoReturnReceiptService.createReturnLineShell(returnDoc, sourceLine, 10L);
+
+      verify(shell).setStorageBin(sourceBin);
+      verify(dal, never()).createCriteria(Locator.class);
+    }
+  }
+
+  /**
+   * Regression guard, not a bug demonstrator: a source line with NO bin, whose header warehouse
+   * DOES have an active locator, already got that locator as its default before ETP-4863 too —
+   * {@code anchorLocatorToWarehouse} treats "absent" and "belongs elsewhere" identically, so the
+   * intermediate {@code if (anchoredBin != null)}-guarded version already resolved and wrote this
+   * same anchor bin. This test passes unchanged on the pre-widening code; it guards that this
+   * preexisting-and-correct default-fill keeps working, it does not exercise what ETP-4863
+   * changed (see {@code testCreateReturnLineShell_headerWarehouseHasNoLocator_doesNotKeepForeignBin}
+   * for the test that actually demonstrates the widening).
+   */
+  @Test
+  public void testCreateReturnLineShell_sourceLineWithoutBin_getsHeaderWarehouseDefault() {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+        MockedStatic<OBProvider> providerMock = Mockito.mockStatic(OBProvider.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      Warehouse headerWarehouse = LocatorTestSupport.mockWarehouse(WH_PRINCIPAL);
+      Locator headerDefaultBin = LocatorTestSupport.mockLocator(
+          "loc-principal-default", headerWarehouse);
+      LocatorTestSupport.stubDefaultLocatorLookup(dal, headerDefaultBin);
+
+      ShipmentInOut returnDoc = mock(ShipmentInOut.class);
+      when(returnDoc.getWarehouse()).thenReturn(headerWarehouse);
+      ShipmentInOutLine sourceLine = mock(ShipmentInOutLine.class);
+      when(sourceLine.getStorageBin()).thenReturn(null);
+
+      ShipmentInOutLine shell = mock(ShipmentInOutLine.class);
+      OBProvider provider = mock(OBProvider.class);
+      providerMock.when(OBProvider::getInstance).thenReturn(provider);
+      when(provider.get(ShipmentInOutLine.class)).thenReturn(shell);
+
+      NeoReturnReceiptService.createReturnLineShell(returnDoc, sourceLine, 10L);
+
+      verify(shell).setStorageBin(headerDefaultBin);
+    }
+  }
+
+  /**
+   * Cascade step 4 at this call site: the return header's warehouse has no active locator, so the
+   * source document's foreign bin must NOT be carried over — the shell is left with a null bin
+   * and the document fails loudly at posting. Uniform with {@code assignBinsToLines} and
+   * {@code createAndLinkLine}.
+   */
+  @Test
+  public void testCreateReturnLineShell_headerWarehouseHasNoLocator_doesNotKeepForeignBin() {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+        MockedStatic<OBProvider> providerMock = Mockito.mockStatic(OBProvider.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      Warehouse headerWarehouse = LocatorTestSupport.mockWarehouse(WH_PRINCIPAL);
+      Locator sourceBin = LocatorTestSupport.mockLocator("loc-secondary-A",
+          LocatorTestSupport.mockWarehouse(WH_SECONDARY));
+      LocatorTestSupport.stubLocatorCascade(dal, null);
+
+      ShipmentInOut returnDoc = mock(ShipmentInOut.class);
+      when(returnDoc.getWarehouse()).thenReturn(headerWarehouse);
+      ShipmentInOutLine sourceLine = mock(ShipmentInOutLine.class);
+      when(sourceLine.getStorageBin()).thenReturn(sourceBin);
+
+      ShipmentInOutLine shell = mock(ShipmentInOutLine.class);
+      OBProvider provider = mock(OBProvider.class);
+      providerMock.when(OBProvider::getInstance).thenReturn(provider);
+      when(provider.get(ShipmentInOutLine.class)).thenReturn(shell);
+
+      NeoReturnReceiptService.createReturnLineShell(returnDoc, sourceLine, 10L);
+
+      verify(shell, never()).setStorageBin(sourceBin);
+      verify(shell).setStorageBin(null);
+    }
   }
 }
