@@ -338,31 +338,24 @@ public class CompanyInvitationService {
           "Sign in with the invited Etendo Go account before accepting");
     }
 
-    OBContext.setOBContext("0", "0", "0", "0");
-    OBContext.setAdminMode(true);
-    try {
-      String tokenHash = hashToken(rawToken);
-      Invitation invitation = CompanyInvitationDalHelper.findInvitationByTokenHash(tokenHash);
-      if (invitation == null) {
-        return errorResponse(404, CODE_INVALID_TOKEN, MESSAGE_INVALID_TOKEN);
-      }
+    return withAdminMode(() -> acceptExistingAccountInAdminMode(rawToken, accountBearerToken));
+  }
 
-      String companyName = invitation.getClient() != null ? invitation.getClient().getName() : "";
+  private JSONObject acceptExistingAccountInAdminMode(String rawToken, String accountBearerToken)
+      throws JSONException {
+    Invitation invitation = findInvitation(rawToken);
+    if (invitation == null) {
+      return errorResponse(404, CODE_INVALID_TOKEN, MESSAGE_INVALID_TOKEN);
+    }
 
-      // Idempotency: if already accepted, return success
-      if (STATUS_ACCEPTED.equalsIgnoreCase(invitation.getStatus())) {
-        JSONObject result = new JSONObject();
-        result.put(FIELD_STATUS, FIELD_SUCCESS);
-        result.put(FIELD_MESSAGE, "Invitation already accepted");
-        result.put(FIELD_CLIENT_NAME, companyName);
-        return result;
-      }
-
-      if (STATUS_REVOKED.equalsIgnoreCase(invitation.getStatus())
-          || STATUS_EXPIRED.equalsIgnoreCase(invitation.getStatus())
-          || (invitation.getExpiresAt() != null && invitation.getExpiresAt().before(new Date()))) {
-        return errorResponse(400, CODE_EXPIRED_TOKEN, MESSAGE_EXPIRED_TOKEN);
-      }
+    String companyName = invitation.getClient() != null ? invitation.getClient().getName() : "";
+    JSONObject acceptedResponse = acceptedInvitationResponse(invitation, companyName);
+    if (acceptedResponse != null) {
+      return acceptedResponse;
+    }
+    if (isClosedInvitation(invitation)) {
+      return errorResponse(400, CODE_EXPIRED_TOKEN, MESSAGE_EXPIRED_TOKEN);
+    }
 
       Account account = EtendoGoJwtDalHelper.findActiveAccountByEmail(invitation.getEmail());
       Account authenticatedAccount = EtendoGoJwtDalHelper
@@ -395,10 +388,7 @@ public class CompanyInvitationService {
       result.put(FIELD_STATUS, FIELD_SUCCESS);
       result.put(FIELD_MESSAGE, "Invitation accepted successfully");
       result.put(FIELD_CLIENT_NAME, companyName);
-      return result;
-    } finally {
-      OBContext.restorePreviousMode();
-    }
+    return result;
   }
 
   /**
@@ -424,30 +414,24 @@ public class CompanyInvitationService {
       return errorResponse(400, "WEAK_PASSWORD", PasswordPolicy.USER_MESSAGE);
     }
 
-    OBContext.setOBContext("0", "0", "0", "0");
-    OBContext.setAdminMode(true);
-    try {
-      String tokenHash = hashToken(rawToken);
-      Invitation invitation = CompanyInvitationDalHelper.findInvitationByTokenHash(tokenHash);
-      if (invitation == null) {
-        return errorResponse(404, CODE_INVALID_TOKEN, MESSAGE_INVALID_TOKEN);
-      }
+    return withAdminMode(() -> registerAndAcceptInAdminMode(rawToken, trimmedName, password));
+  }
 
-      String companyName = invitation.getClient() != null ? invitation.getClient().getName() : "";
+  private JSONObject registerAndAcceptInAdminMode(String rawToken, String trimmedName,
+      String password) throws JSONException {
+    Invitation invitation = findInvitation(rawToken);
+    if (invitation == null) {
+      return errorResponse(404, CODE_INVALID_TOKEN, MESSAGE_INVALID_TOKEN);
+    }
 
-      if (STATUS_ACCEPTED.equalsIgnoreCase(invitation.getStatus())) {
-        JSONObject result = new JSONObject();
-        result.put(FIELD_STATUS, FIELD_SUCCESS);
-        result.put(FIELD_MESSAGE, "Invitation already accepted");
-        result.put(FIELD_CLIENT_NAME, companyName);
-        return result;
-      }
-
-      if (STATUS_REVOKED.equalsIgnoreCase(invitation.getStatus())
-          || STATUS_EXPIRED.equalsIgnoreCase(invitation.getStatus())
-          || (invitation.getExpiresAt() != null && invitation.getExpiresAt().before(new Date()))) {
-        return errorResponse(400, CODE_EXPIRED_TOKEN, MESSAGE_EXPIRED_TOKEN);
-      }
+    String companyName = invitation.getClient() != null ? invitation.getClient().getName() : "";
+    JSONObject acceptedResponse = acceptedInvitationResponse(invitation, companyName);
+    if (acceptedResponse != null) {
+      return acceptedResponse;
+    }
+    if (isClosedInvitation(invitation)) {
+      return errorResponse(400, CODE_EXPIRED_TOKEN, MESSAGE_EXPIRED_TOKEN);
+    }
 
       String email = invitation.getEmail();
       Account account = EtendoGoJwtDalHelper.findActiveAccountByEmail(email);
@@ -489,13 +473,47 @@ public class CompanyInvitationService {
       result.put("token", sessionToken);
       result.put("account", accountJson);
       result.put(FIELD_CLIENT_NAME, companyName);
-      return result;
+    return result;
+  }
+
+  // --- Internal helpers ---
+
+  @FunctionalInterface
+  private interface InvitationOperation {
+    JSONObject execute() throws JSONException;
+  }
+
+  private JSONObject withAdminMode(InvitationOperation operation) throws JSONException {
+    OBContext.setOBContext("0", "0", "0", "0");
+    OBContext.setAdminMode(true);
+    try {
+      return operation.execute();
     } finally {
       OBContext.restorePreviousMode();
     }
   }
 
-  // --- Internal helpers ---
+  private Invitation findInvitation(String rawToken) {
+    return CompanyInvitationDalHelper.findInvitationByTokenHash(hashToken(rawToken));
+  }
+
+  private boolean isClosedInvitation(Invitation invitation) {
+    return STATUS_REVOKED.equalsIgnoreCase(invitation.getStatus())
+        || STATUS_EXPIRED.equalsIgnoreCase(invitation.getStatus())
+        || (invitation.getExpiresAt() != null && invitation.getExpiresAt().before(new Date()));
+  }
+
+  private JSONObject acceptedInvitationResponse(Invitation invitation, String companyName)
+      throws JSONException {
+    if (!STATUS_ACCEPTED.equalsIgnoreCase(invitation.getStatus())) {
+      return null;
+    }
+    JSONObject result = new JSONObject();
+    result.put(FIELD_STATUS, FIELD_SUCCESS);
+    result.put(FIELD_MESSAGE, "Invitation already accepted");
+    result.put(FIELD_CLIENT_NAME, companyName);
+    return result;
+  }
 
   static String generateToken() {
     byte[] bytes = new byte[TOKEN_BYTES];
