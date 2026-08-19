@@ -157,6 +157,38 @@ public class FinancialAccountHandlerTest {
     doReturn(Collections.emptyList()).when(handler).listMatchingAlgorithms();
   }
 
+  /**
+   * Spain, fully configured for IBAN validation (ETP-4896): {@code getIBANCode()="ES"},
+   * {@code getIBANLength()=24}, matching the real {@link #ES_IBAN} fixture. A bare
+   * {@code mock(Country.class)} with only {@code getId()} stubbed fails
+   * {@code FinancialAccountCountrySupport#validateIbanCountryPair} at the "no IBAN
+   * configuration" branch, since every other getter defaults to {@code null} — this is the
+   * fixture every IBAN-success test needs.
+   */
+  private Country stubSpainWithIbanMeta() {
+    Country spain = mock(Country.class);
+    when(spain.getId()).thenReturn("106");
+    when(spain.getName()).thenReturn("Spain");
+    when(spain.getIBANCode()).thenReturn("ES");
+    when(spain.getIBANLength()).thenReturn(24L);
+    return spain;
+  }
+
+  /**
+   * Stubs {@code loadAccount(ACC_ID)} to return a bare Bank-type account fixture (ETP-4896): the
+   * country/IBAN validation on update loads the persisted record lazily, only when the body
+   * touches {@code iBAN} or {@code country} — this fixture is what those tests need instead of a
+   * live DAL call.
+   */
+  private FIN_FinancialAccount stubStoredBankAccount(String iban, Country country) {
+    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    when(account.getType()).thenReturn("B");
+    when(account.getIBAN()).thenReturn(iban);
+    when(account.getCountry()).thenReturn(country);
+    doReturn(account).when(handler).loadAccount(ACC_ID);
+    return account;
+  }
+
   // ── handle() routing ─────────────────────────────────────────────────────
 
   /** A context for another spec must pass through untouched (null). */
@@ -319,31 +351,100 @@ public class FinancialAccountHandlerTest {
   }
 
   /**
-   * When the body carries an IBAN, the country derived from its ISO prefix is
-   * injected into the body BEFORE the generic insert — the row-level trigger
-   * FIN_FINANCIAL_ACCOUNT_TRG2 rejects a bank account with an IBAN but no country.
+   * When the body carries an IBAN but no country, the country derived from the IBAN's ISO prefix
+   * is injected into the body BEFORE the generic insert — the row-level trigger
+   * FIN_FINANCIAL_ACCOUNT_TRG2 rejects a bank account with an IBAN but no country (ETP-4896).
    */
   @Test
   public void testCreateWithIbanInjectsCountry() throws Exception {
     JSONObject body = validCreateBody().put("iBAN", ES_IBAN);
     stubValidCreate();
-    Country spain = mock(Country.class);
-    when(spain.getId()).thenReturn("106");
+    Country spain = stubSpainWithIbanMeta();
     doReturn(spain).when(handler).resolveCountryFromIban(ES_IBAN);
 
     assertNull(handler.validateAndEnrichCreate(body));
     assertEquals("106", body.getString("country"));
   }
 
-  /** An IBAN whose prefix matches no active country injects nothing. */
+  /**
+   * An IBAN whose prefix matches no active country is now rejected with a 400 (ETP-4896) instead
+   * of silently creating an inconsistent record — which used to reach the generic insert and let
+   * FIN_FINANCIAL_ACCOUNT_TRG2 raise @COUNTRY_IBAN@, flattened by NeoErrorSanitizer into a raw 500.
+   */
   @Test
-  public void testCreateWithUnknownIbanPrefixInjectsNoCountry() throws Exception {
-    JSONObject body = validCreateBody().put("iBAN", "XX0012345678");
+  public void testCreateWithUnknownIbanPrefixReturns400() throws Exception {
+    String unknownPrefixIban = "XX0012345678901";
+    JSONObject body = validCreateBody().put("iBAN", unknownPrefixIban);
     stubValidCreate();
-    doReturn(null).when(handler).resolveCountryFromIban("XX0012345678");
+    doReturn(null).when(handler).resolveCountryFromIban(unknownPrefixIban);
+
+    NeoResponse response = handler.validateAndEnrichCreate(body);
+
+    assertEquals(400, response.getHttpStatus());
+    assertTrue(errorMessage(response).contains("must have a country"));
+    assertFalse(body.has("country"));
+  }
+
+  /**
+   * A country present in the body wins over IBAN-derivation (ETP-4896 requirement 2): the SPA's
+   * picker is authoritative, so resolveCountryFromIban must not even be consulted.
+   */
+  @Test
+  public void testCreateWithBodyCountryWinsOverIbanDerivation() throws Exception {
+    JSONObject body = validCreateBody().put("iBAN", ES_IBAN).put("country", "106");
+    stubValidCreate();
+    doReturn(stubSpainWithIbanMeta()).when(handler).loadCountry("106");
+
+    assertNull(handler.validateAndEnrichCreate(body));
+    assertEquals("106", body.getString("country"));
+    verify(handler, never()).resolveCountryFromIban(any());
+  }
+
+  /** An inconsistent (IBAN, country) pair is rejected with the country-specific message, not a
+   *  generic checksum failure — see FinancialAccountCountrySupport#validateIbanCountryPair. */
+  @Test
+  public void testCreateWithMismatchedCountryReturns400() throws Exception {
+    JSONObject body = validCreateBody().put("iBAN", ES_IBAN).put("country", "italy-id");
+    stubValidCreate();
+    Country italy = mock(Country.class);
+    when(italy.getName()).thenReturn("Italy");
+    when(italy.getIBANCode()).thenReturn("IT");
+    when(italy.getIBANLength()).thenReturn(27L);
+    doReturn(italy).when(handler).loadCountry("italy-id");
+
+    NeoResponse response = handler.validateAndEnrichCreate(body);
+
+    assertEquals(400, response.getHttpStatus());
+    assertTrue(errorMessage(response).contains("Italy"));
+    // The rejected body is left exactly as the caller sent it. Unlike the sibling
+    // testCreateWithUnknownIbanPrefixReturns400 — where the body carries no country at all, so
+    // "not injected" is the property to assert — here the caller DID send one, so the property is
+    // that the 400 path writes nothing: validateCountryAndIban's body.put calls all sit after the
+    // pair check, so neither the country nor the IBAN is normalized on the way out.
+    assertEquals("italy-id", body.getString("country"));
+    assertEquals(ES_IBAN, body.getString("iBAN"));
+  }
+
+  /** A Cash account carrying a stale/irrelevant IBAN skips country validation entirely. */
+  @Test
+  public void testCreateCashAccountWithIbanSkipsCountryValidation() throws Exception {
+    JSONObject body = validCreateBody().put("type", "C").put("iBAN", "not-a-real-iban");
+    stubValidCreate();
 
     assertNull(handler.validateAndEnrichCreate(body));
     assertFalse(body.has("country"));
+    verify(handler, never()).resolveCountryFromIban(any());
+  }
+
+  /** The IBAN persisted is the normalized form, regardless of how it was typed. */
+  @Test
+  public void testCreateNormalizesIbanBeforePersisting() throws Exception {
+    JSONObject body = validCreateBody().put("iBAN", "es91 2100 0418 4502 0005 1332");
+    stubValidCreate();
+    doReturn(stubSpainWithIbanMeta()).when(handler).resolveCountryFromIban(ES_IBAN);
+
+    assertNull(handler.validateAndEnrichCreate(body));
+    assertEquals(ES_IBAN, body.getString("iBAN"));
   }
 
   /** When no algorithm is provided, the first active one is injected. */
@@ -404,24 +505,104 @@ public class FinancialAccountHandlerTest {
     assertEquals(409, handler.validateAndEnrichUpdate(ACC_ID, body).getHttpStatus());
   }
 
-  /** An IBAN sent on update re-syncs the derived country into the body. */
+  /**
+   * An IBAN sent on update, with no stored country and no country in the body, re-syncs the
+   * derived country into the body (ETP-4896: fallback behavior, preserved for old API/MCP
+   * callers that only ever send an IBAN).
+   */
   @Test
   public void testUpdateWithIbanSyncsCountry() throws Exception {
     JSONObject body = new JSONObject().put("iBAN", ES_IBAN);
-    Country spain = mock(Country.class);
-    when(spain.getId()).thenReturn("106");
+    stubStoredBankAccount(null, null);
+    Country spain = stubSpainWithIbanMeta();
     doReturn(spain).when(handler).resolveCountryFromIban(ES_IBAN);
 
     assertNull(handler.validateAndEnrichUpdate(ACC_ID, body));
     assertEquals("106", body.getString("country"));
   }
 
-  /** A too-long IBAN on update is rejected with a 400. */
+  /** A too-long IBAN on update is rejected with a 400 before the account is ever loaded. */
   @Test
   public void testUpdateIbanTooLongReturns400() throws Exception {
     String longIban = new String(new char[35]).replace('\0', '9');
     JSONObject body = new JSONObject().put("iBAN", longIban);
     assertEquals(400, handler.validateAndEnrichUpdate(ACC_ID, body).getHttpStatus());
+    verify(handler, never()).loadAccount(any());
+  }
+
+  /**
+   * A stored IBAN already exists; changing ONLY the country must validate the pair against that
+   * stored IBAN — this is the scenario a user hits directly: pick a different country for an
+   * account that already has an IBAN, and the pair must still make sense (ETP-4896).
+   */
+  @Test
+  public void testUpdateCountryOnlyValidatesAgainstStoredIban() throws Exception {
+    JSONObject body = new JSONObject().put("country", "106");
+    stubStoredBankAccount(ES_IBAN, null);
+    doReturn(stubSpainWithIbanMeta()).when(handler).loadCountry("106");
+
+    assertNull(handler.validateAndEnrichUpdate(ACC_ID, body));
+    assertEquals("106", body.getString("country"));
+  }
+
+  /**
+   * Changing the country to one inconsistent with the ALREADY-STORED IBAN is rejected — the exact
+   * case a user needs surfaced with a real message instead of the raw 500 NeoErrorSanitizer would
+   * otherwise produce from FIN_FINANCIAL_ACCOUNT_TRG2's @20259@.
+   */
+  @Test
+  public void testUpdateCountryMismatchedWithStoredIbanReturns400() throws Exception {
+    JSONObject body = new JSONObject().put("country", "france-id");
+    stubStoredBankAccount(ES_IBAN, null);
+    Country france = mock(Country.class);
+    when(france.getName()).thenReturn("France");
+    when(france.getIBANCode()).thenReturn("FR");
+    when(france.getIBANLength()).thenReturn(27L);
+    doReturn(france).when(handler).loadCountry("france-id");
+
+    NeoResponse response = handler.validateAndEnrichUpdate(ACC_ID, body);
+
+    assertEquals(400, response.getHttpStatus());
+    assertTrue(errorMessage(response).contains("France"));
+  }
+
+  /** Neither IBAN nor country touched: a no-op, mirroring the trigger's own re-validate guard —
+   *  the account must not even be loaded for an unrelated edit (e.g. a rename). */
+  @Test
+  public void testUpdateNeitherIbanNorCountryTouchedIsNoOp() throws Exception {
+    JSONObject body = new JSONObject().put("name", "New Name");
+    doReturn(false).when(handler).nameExists("New Name", ACC_ID);
+
+    assertNull(handler.validateAndEnrichUpdate(ACC_ID, body));
+    verify(handler, never()).loadAccount(any());
+  }
+
+  /**
+   * PATCH {"iBAN": null} (clearing the IBAN) must not be treated as a real, non-blank IBAN —
+   * regression guard for the bug where optString() on a JSON null yielded the literal "null"
+   * string (ETP-4896).
+   */
+  @Test
+  public void testUpdateClearingIbanIsNotTreatedAsNonBlank() throws Exception {
+    JSONObject body = new JSONObject("{\"iBAN\": null}");
+    stubStoredBankAccount(ES_IBAN, stubSpainWithIbanMeta());
+
+    assertNull(handler.validateAndEnrichUpdate(ACC_ID, body));
+    assertFalse(body.has("country"));
+  }
+
+  /** Clearing the country while a non-blank IBAN remains in play is rejected, not silently
+   *  re-derived — that would hide the user's own action of clearing the field. */
+  @Test
+  public void testUpdateClearingCountryWithStoredIbanReturns400() throws Exception {
+    JSONObject body = new JSONObject("{\"country\": null}");
+    stubStoredBankAccount(ES_IBAN, stubSpainWithIbanMeta());
+
+    NeoResponse response = handler.validateAndEnrichUpdate(ACC_ID, body);
+
+    assertEquals(400, response.getHttpStatus());
+    assertTrue(errorMessage(response).contains("must have a country"));
+    verify(handler, never()).resolveCountryFromIban(any());
   }
 
   // ── amount tolerance: 0…100 percentage bound ─────────────────────────────
@@ -498,8 +679,8 @@ public class FinancialAccountHandlerTest {
    */
   @Test
   public void testUpdateWithoutAmountToleranceKeyIsUnaffected() throws Exception {
-    Country spain = mock(Country.class);
-    when(spain.getId()).thenReturn("106");
+    stubStoredBankAccount(null, null);
+    Country spain = stubSpainWithIbanMeta();
     doReturn(spain).when(handler).resolveCountryFromIban(ES_IBAN);
     JSONObject body = new JSONObject().put("iBAN", ES_IBAN);
 
@@ -1405,9 +1586,14 @@ public class FinancialAccountHandlerTest {
     }
   }
 
-  /** When the defaults endpoint cannot resolve a client currency, it leaves the generic response unchanged. */
+  /**
+   * When the defaults endpoint cannot resolve a client currency, the response is still 200 (the
+   * body is mutated in place regardless — ETP-4896 folded the old early-return-null behavior into
+   * a single always-ok response, since {@code context.getEntityName()} is unstubbed here (not the
+   * {@code account} entity), so country/catalog injection is skipped either way).
+   */
   @Test
-  public void testAfterHandleDefaultsWithoutClientCurrencyReturnsNull() {
+  public void testAfterHandleDefaultsWithoutClientCurrencyLeavesDefaultsEmpty() throws Exception {
     NeoContext ctx = mock(NeoContext.class);
     when(ctx.getSpecName()).thenReturn(SPEC);
     when(ctx.getEndpointType()).thenReturn(NeoEndpointType.DEFAULTS);
@@ -1426,8 +1612,139 @@ public class FinancialAccountHandlerTest {
       when(dal.createCriteria(AcctSchema.class)).thenReturn(criteria);
       when(criteria.uniqueResult()).thenReturn(null);
 
-      assertNull(handler.afterHandle(ctx));
+      NeoResponse out = handler.afterHandle(ctx);
+
+      assertEquals(200, out.getHttpStatus());
+      assertFalse(out.getBody().getJSONObject("defaults").has("currency"));
+      assertFalse("not the account entity, so no country key either",
+          out.getBody().getJSONObject("defaults").has("country"));
       verify(handler, never()).extractCreatedId(any());
+    }
+  }
+
+  /**
+   * On the {@code account} entity, the defaults response also gets {@code country} (ETP-4896
+   * requirement 1) and the {@code countryIbanRules} catalog as a sibling of {@code defaults}.
+   */
+  @Test
+  public void testAfterHandleDefaultsForAccountEntityInjectsCountryAndCatalog() throws Exception {
+    FinancialAccountCountrySupport.clearIbanRulesCacheForTests();
+    NeoContext ctx = mock(NeoContext.class);
+    when(ctx.getSpecName()).thenReturn(SPEC);
+    when(ctx.getEndpointType()).thenReturn(NeoEndpointType.DEFAULTS);
+    when(ctx.getEntityName()).thenReturn("account");
+    when(ctx.getPreviousResult()).thenReturn(new NeoResponse(200, new JSONObject()));
+
+    Country orgCountry = mock(Country.class);
+    when(orgCountry.getId()).thenReturn("106");
+    when(orgCountry.getName()).thenReturn("Spain");
+    doReturn(orgCountry).when(handler).resolveOrgCountry();
+
+    Country spain = stubSpainWithIbanMeta();
+    when(spain.getISOCountryCode()).thenReturn("ES");
+
+    try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      OBContext obCtx = mock(OBContext.class);
+      when(obCtx.getCurrentClient()).thenReturn(mock(Client.class));
+      obContext.when(OBContext::getOBContext).thenReturn(obCtx);
+
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      @SuppressWarnings("unchecked")
+      OBCriteria<AcctSchema> acctCriteria = mock(OBCriteria.class);
+      when(dal.createCriteria(AcctSchema.class)).thenReturn(acctCriteria);
+      when(acctCriteria.uniqueResult()).thenReturn(null);
+      @SuppressWarnings("unchecked")
+      OBCriteria<Country> countryCriteria = mock(OBCriteria.class);
+      when(dal.createCriteria(Country.class)).thenReturn(countryCriteria);
+      when(countryCriteria.list()).thenReturn(Collections.singletonList(spain));
+
+      NeoResponse out = handler.afterHandle(ctx);
+
+      assertEquals(200, out.getHttpStatus());
+      JSONObject outDefaults = out.getBody().getJSONObject("defaults");
+      assertEquals("106", outDefaults.getString("country"));
+      assertEquals("Spain", outDefaults.getString("country$_identifier"));
+      JSONArray rules = out.getBody().getJSONArray("countryIbanRules");
+      assertEquals(1, rules.length());
+      assertEquals("ES", rules.getJSONObject(0).getString("iso"));
+    }
+  }
+
+  /**
+   * A non-{@code account} entity (e.g. {@code transaction}) keeps getting the pre-existing
+   * currency default (a leak that predates ETP-4896, left alone) but must NOT get the new
+   * country/catalog keys.
+   */
+  @Test
+  public void testAfterHandleDefaultsForOtherEntitySkipsCountryAndCatalog() throws Exception {
+    NeoContext ctx = mock(NeoContext.class);
+    when(ctx.getSpecName()).thenReturn(SPEC);
+    when(ctx.getEndpointType()).thenReturn(NeoEndpointType.DEFAULTS);
+    when(ctx.getEntityName()).thenReturn("transaction");
+    when(ctx.getPreviousResult()).thenReturn(new NeoResponse(200, new JSONObject()));
+
+    try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      OBContext obCtx = mock(OBContext.class);
+      when(obCtx.getCurrentClient()).thenReturn(mock(Client.class));
+      obContext.when(OBContext::getOBContext).thenReturn(obCtx);
+
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      @SuppressWarnings("unchecked")
+      OBCriteria<AcctSchema> acctCriteria = mock(OBCriteria.class);
+      when(dal.createCriteria(AcctSchema.class)).thenReturn(acctCriteria);
+      when(acctCriteria.uniqueResult()).thenReturn(null);
+
+      NeoResponse out = handler.afterHandle(ctx);
+
+      assertEquals(200, out.getHttpStatus());
+      assertFalse(out.getBody().getJSONObject("defaults").has("country"));
+      assertFalse(out.getBody().has("countryIbanRules"));
+      verify(handler, never()).resolveOrgCountry();
+      verify(dal, never()).createCriteria(Country.class);
+    }
+  }
+
+  /**
+   * When the organization's country cannot be resolved at all, the key is simply omitted — never
+   * the AD-seeded {@code ISDEFAULT='Y'} country (United States, no IBAN metadata).
+   */
+  @Test
+  public void testAfterHandleDefaultsOrgCountryUnresolvedOmitsKeyWithoutError() throws Exception {
+    FinancialAccountCountrySupport.clearIbanRulesCacheForTests();
+    NeoContext ctx = mock(NeoContext.class);
+    when(ctx.getSpecName()).thenReturn(SPEC);
+    when(ctx.getEndpointType()).thenReturn(NeoEndpointType.DEFAULTS);
+    when(ctx.getEntityName()).thenReturn("account");
+    when(ctx.getPreviousResult()).thenReturn(new NeoResponse(200, new JSONObject()));
+    doReturn(null).when(handler).resolveOrgCountry();
+
+    try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      OBContext obCtx = mock(OBContext.class);
+      when(obCtx.getCurrentClient()).thenReturn(mock(Client.class));
+      obContext.when(OBContext::getOBContext).thenReturn(obCtx);
+
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      @SuppressWarnings("unchecked")
+      OBCriteria<AcctSchema> acctCriteria = mock(OBCriteria.class);
+      when(dal.createCriteria(AcctSchema.class)).thenReturn(acctCriteria);
+      when(acctCriteria.uniqueResult()).thenReturn(null);
+      @SuppressWarnings("unchecked")
+      OBCriteria<Country> countryCriteria = mock(OBCriteria.class);
+      when(dal.createCriteria(Country.class)).thenReturn(countryCriteria);
+      when(countryCriteria.list()).thenReturn(Collections.emptyList());
+
+      NeoResponse out = handler.afterHandle(ctx);
+
+      assertEquals(200, out.getHttpStatus());
+      assertFalse("never the AD-seeded United States default",
+          out.getBody().getJSONObject("defaults").has("country"));
+      assertTrue(out.getBody().has("countryIbanRules"));
     }
   }
 
@@ -1578,9 +1895,11 @@ public class FinancialAccountHandlerTest {
     FinancialAccountsPageHandler.AccountRow loaded1 = accountRow(ACC_ID, "1500.00", EUR_ID, "EUR", true);
     loaded1.bankConnected = true;
     loaded1.providerLogoUrl = "https://cdn.saltedge.com/bank_icons/bbva.png";
+    loaded1.country = new FinancialAccountsPageHandler.CountryRef("106", "ES", "Spain");
     FinancialAccountsPageHandler.AccountRow loaded2 = accountRow("acc-2", "0.00", "100", "USD", false);
     loaded2.active = false;
     loaded2.maskedPan = "**** 4321";
+    // loaded2.country stays null — a Cash/never-set-up account, exercising the "" fallback below.
 
     Map<String, Integer> pending = new LinkedHashMap<>();
     pending.put(ACC_ID, 4);
@@ -1605,6 +1924,9 @@ public class FinancialAccountHandlerTest {
       assertTrue(first.getBoolean("active"));
       assertEquals("lowercase alias of the contract's iBAN", ES_IBAN, first.getString("iban"));
       assertEquals("https://cdn.saltedge.com/bank_icons/bbva.png", first.getString("providerLogoUrl"));
+      assertEquals("106", first.getString("countryId"));
+      assertEquals("ES", first.getString("countryIso"));
+      assertEquals("Spain", first.getString("countryName"));
 
       JSONObject second = outArr.getJSONObject(1);
       assertFalse("account without transactions leaves the Currency field editable",
@@ -1617,6 +1939,10 @@ public class FinancialAccountHandlerTest {
       assertEquals("**** 4321", second.getString("maskedPan"));
       assertEquals("no bank provider serialises providerLogoUrl as an empty string, not null",
           "", second.getString("providerLogoUrl"));
+      assertEquals("a null row.country serialises as \"\", never the literal \"null\"",
+          "", second.getString("countryId"));
+      assertEquals("", second.getString("countryIso"));
+      assertEquals("", second.getString("countryName"));
     }
   }
 
@@ -1769,6 +2095,8 @@ public class FinancialAccountHandlerTest {
       assertFalse(out0.getBoolean("hasTransactions"));
       assertFalse("no id → nothing to correlate a pending counter with", out0.has("pendingCount"));
       assertFalse(out0.has("currencyIso"));
+      assertFalse(out0.has("countryId"));
+      assertFalse(out0.has("countryIso"));
       assertFalse(out0.has("active"));
       assertFalse("no id → the deletable check (ETP-4871) never even runs", out0.has("deletable"));
       verify(handler, never()).loadAccount(any());
@@ -1798,6 +2126,8 @@ public class FinancialAccountHandlerTest {
       assertFalse("loader-only column", out0.has("bankConnected"));
       assertFalse("loader-only column", out0.has("active"));
       assertFalse("loader-only column", out0.has("providerLogoUrl"));
+      assertFalse("loader-only column", out0.has("countryId"));
+      assertFalse("loader-only column", out0.has("countryIso"));
       // deletable (ETP-4871) is id-keyed, not loader-row-keyed: it is set from the batched
       // deleteBlockersByAccount map BEFORE the byId correlation check, so it is still present
       // (and true, since the stub's map is empty) even though every loader-only column is absent.
