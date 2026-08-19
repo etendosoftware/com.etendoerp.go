@@ -33,6 +33,17 @@ import org.openbravo.dal.service.OBDal;
  *
  * <p>Injects {@code orderQuantity} (original received qty from the canceled goods receipt line)
  * and {@code productCode} (M_Product.Value / search key) into every GET response.
+ *
+ * <p>POST (create) pre-hook (ETP-4863): defaults {@code storageBin} to the header
+ * {@code M_InOut}'s own warehouse default locator when the create request did not already
+ * supply a REAL one — same rationale and shared implementation as {@link
+ * GoodsReceiptLineHandler} (ETP-4671) and {@link GoodsShipmentLineHandler}, see {@link
+ * NeoHandlerUtils#injectDefaultLocatorIfMissing(JSONObject, Logger)}. This class implements
+ * {@link NeoHandler} directly rather than extending {@link AbstractInOutLineHandler} — its GET
+ * enrichment (orderQuantity/productCode) and movementQuantity sign handling are return-specific
+ * and unrelated to the invoice-line-linking behavior {@code AbstractInOutLineHandler} provides
+ * for receipts/shipments — so the locator default is applied directly here via the shared
+ * helper instead of inheriting it.
  */
 @Named("returnToVendorShipmentLineHandler")
 public class ReturnToVendorShipmentLineHandler implements NeoHandler {
@@ -43,6 +54,15 @@ public class ReturnToVendorShipmentLineHandler implements NeoHandler {
 
   @Override
   public NeoResponse handle(NeoContext context) {
+    if (context != null && NeoEndpointType.CRUD.equals(context.getEndpointType())
+        && "POST".equalsIgnoreCase(context.getHttpMethod())) {
+      try {
+        NeoHandlerUtils.injectDefaultLocatorIfMissing(context.getRequestBody(), log);
+      } catch (Exception e) {
+        log.warn("[ReturnToVendorShipmentLineHandler] Could not default storageBin: {}",
+            e.getMessage(), e);
+      }
+    }
     // Negate movementQuantity on write so the frontend always works with positive values.
     // V- documents store negative quantities in the DB; the UI (like Etendo Classic) shows positive.
     String method = context.getHttpMethod();
