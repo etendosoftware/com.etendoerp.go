@@ -550,6 +550,35 @@ public class InitialEmailContractsTest {
   }
 
   /**
+   * ETP-4717 (reopened) QA gap: {@code messageEdits} carrying only a whitespace-only {@code
+   * message} (present key, blank value, no subject) must be rejected the same way as an absent
+   * payload — {@link EmailMessageEdits#fromBody} trims it to {@code null} and then has neither a
+   * subject nor a message. This locks that behavior end-to-end through the full
+   * {@link TransactionalEmailService#send} path, not just at the {@code EmailMessageEdits} unit
+   * level, so the default body (and its download link) is never silently built from a body that
+   * looks edited but carries no real operator content.
+   */
+  @Test
+  public void whitespaceOnlyMessageEditIsRejectedBeforeReachingTheProvider() throws Exception {
+    FakeProviderAdapter adapter = new FakeProviderAdapter();
+    TransactionalEmailService service = service(adapter);
+
+    JSONObject command = baseCommand();
+    command.put(EmailContractCommandSupport.FIELD_RECORD_ID, "order-1");
+    JSONObject edits = new JSONObject();
+    edits.put("message", "   ");
+    command.put(EmailContractCommandSupport.FIELD_MESSAGE_EDITS, edits);
+
+    NeoResponse response = service.send("sales-order-send", command);
+
+    JSONObject data = responseData(response);
+    assertEquals(400, response.getHttpStatus());
+    assertEquals(TransactionalEmailService.STATUS_VALIDATION_FAILED, data.getString("status"));
+    assertEquals("messageEdits must carry a subject or a message", data.getString("message"));
+    assertEquals(0, adapter.getSendCount());
+  }
+
+  /**
    * Without the content hash in the send key, correcting the message and re-sending to the same
    * recipients collides with the previous send and is answered DUPLICATE, so nothing is delivered.
    */
@@ -679,6 +708,35 @@ public class InitialEmailContractsTest {
     // Openbravo.properties. Clear the System properties for this test and mock
     // OBPropertiesProvider so the Openbravo.properties fallback never supplies the keys, forcing
     // the "missing download link" path regardless of the ambient Openbravo.properties contents.
+    withoutDocumentDownloadConfig(() -> {
+      NeoResponse response = service.send("sales-order-send", command);
+
+      JSONObject data = responseData(response);
+      assertEquals(400, response.getHttpStatus());
+      assertEquals(TransactionalEmailService.STATUS_VALIDATION_FAILED, data.getString("status"));
+      assertEquals("Document download link is not configured", data.getString("message"));
+      assertEquals(0, adapter.getSendCount());
+    });
+  }
+
+  /**
+   * ETP-4717 (reopened) QA gap: {@code resolve()} must reject a document with no configured
+   * download link BEFORE ever reaching the operator-message append logic, even when
+   * {@code messageEdits} is present in the same request. Otherwise a future refactor could
+   * reorder the checks and either leak a body built with a blank/absent link, or mask the "not
+   * configured" validation behind message-edits parsing.
+   */
+  @Test
+  public void documentContractRejectsMissingDownloadLinkEvenWithMessageEdits() throws Exception {
+    FakeProviderAdapter adapter = new FakeProviderAdapter();
+    TransactionalEmailService service = service(adapter);
+
+    JSONObject command = baseCommand();
+    command.put(EmailContractCommandSupport.FIELD_RECORD_ID, "order-invalid-link");
+    JSONObject edits = new JSONObject();
+    edits.put("message", "Aqui tiene su pedido corregido");
+    command.put(EmailContractCommandSupport.FIELD_MESSAGE_EDITS, edits);
+
     withoutDocumentDownloadConfig(() -> {
       NeoResponse response = service.send("sales-order-send", command);
 
