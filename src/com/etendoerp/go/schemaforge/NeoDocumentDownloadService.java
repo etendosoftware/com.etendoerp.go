@@ -47,20 +47,24 @@ final class NeoDocumentDownloadService {
   private static final String APPLICATION_PDF = "application/pdf";
   private static final int MAX_DOWNLOAD_BYTES = 12 * 1024 * 1024;
 
+  private static final String TABLE_C_INVOICE = "C_Invoice";
+  private static final String TABLE_C_ORDER = "C_Order";
+  private static final String TABLE_M_INOUT = "M_InOut";
+
   // ETP-4315 — physical Attachment table (C_File) per window spec, mirroring
   // the frontend's WINDOW_ATTACHMENT_TABLE (documentEmailSend.js). A link for a
   // spec not listed here (or for a record whose "main" attachment was since
   // replaced) resolves to 404 rather than falling back to the retired
   // legacy preview-file cache (retired, ETP-4315 Phase 9).
   private static final Map<String, String> WINDOW_ATTACHMENT_TABLE = Map.of(
-      "sales-invoice", "C_Invoice",
-      "purchase-invoice", "C_Invoice",
-      "sales-order", "C_Order",
-      "purchase-order", "C_Order",
-      "sales-quotation", "C_Order",
-      "goods-shipment", "M_InOut",
-      "return-to-vendor-shipment", "M_InOut",
-      "return-material-receipt", "M_InOut");
+      "sales-invoice", TABLE_C_INVOICE,
+      "purchase-invoice", TABLE_C_INVOICE,
+      "sales-order", TABLE_C_ORDER,
+      "purchase-order", TABLE_C_ORDER,
+      "sales-quotation", TABLE_C_ORDER,
+      "goods-shipment", TABLE_M_INOUT,
+      "return-to-vendor-shipment", TABLE_M_INOUT,
+      "return-material-receipt", TABLE_M_INOUT);
 
   private NeoDocumentDownloadService() {
   }

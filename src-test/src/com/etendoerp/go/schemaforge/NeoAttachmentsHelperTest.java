@@ -522,6 +522,7 @@ public class NeoAttachmentsHelperTest {
         new javax.servlet.ServletOutputStream() {
           private final java.io.ByteArrayOutputStream sink = captured;
           @Override public boolean isReady() { return true; }
+          // Sync-only test double: this test never uses the async servlet API.
           @Override public void setWriteListener(javax.servlet.WriteListener l) { }
           @Override public void write(int b) { sink.write(b); }
         });

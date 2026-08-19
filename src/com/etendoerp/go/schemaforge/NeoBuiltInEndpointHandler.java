@@ -2,6 +2,7 @@ package com.etendoerp.go.schemaforge;
 
 import java.io.BufferedReader;
 import java.io.IOException;
+import java.util.Optional;
 
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
@@ -34,6 +35,7 @@ class NeoBuiltInEndpointHandler {
   private static final String DESCRIPTION_FIELD = "description";
   private static final String IS_MAIN_FIELD = "isMain";
   private static final String MARK_AS_MAIN_PARAM = "markAsMain";
+  private static final String INVALID_JSON_BODY_PREFIX = "Invalid JSON body: ";
 
   private final NeoServlet servlet;
   private final NeoDiscoveryHandler discoveryHandler;
@@ -357,17 +359,7 @@ class NeoBuiltInEndpointHandler {
     boolean isMain = segments.length >= 3 && ATTACHMENTS_SEGMENT_MAIN.equals(segments[2]);
 
     if (isMain) {
-      if (!METHOD_PATCH.equals(method)) {
-        servlet.sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
-            "Attachments main endpoint only supports PATCH");
-        return;
-      }
-      Boolean isMainValue = readIsMainFromBody(request, response);
-      if (isMainValue == null && response.isCommitted()) {
-        return;
-      }
-      servlet.writeResponse(response,
-          NeoAttachmentsHelper.handleMarkMain(attachmentId, Boolean.TRUE.equals(isMainValue)));
+      handleAttachmentsMainPatch(attachmentId, method, request, response);
       return;
     }
 
@@ -397,30 +389,49 @@ class NeoBuiltInEndpointHandler {
   }
 
   /**
-   * Reads the {@code isMain} boolean out of a {@code PATCH .../main} JSON body.
-   * Signals an error via {@code response} and returns {@code null} with the
-   * response already committed if the body is missing or invalid.
+   * Handles {@code PATCH /attachments/file/{attachmentId}/main} — mark or
+   * unmark an attachment as its record's "main" document.
    */
-  private Boolean readIsMainFromBody(HttpServletRequest request, HttpServletResponse response)
+  private void handleAttachmentsMainPatch(String attachmentId, String method,
+      HttpServletRequest request, HttpServletResponse response) throws IOException {
+    if (!METHOD_PATCH.equals(method)) {
+      servlet.sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
+          "Attachments main endpoint only supports PATCH");
+      return;
+    }
+    Optional<Boolean> isMainValue = readIsMainFromBody(request, response);
+    if (isMainValue.isEmpty() && response.isCommitted()) {
+      return;
+    }
+    servlet.writeResponse(response,
+        NeoAttachmentsHelper.handleMarkMain(attachmentId, Boolean.TRUE.equals(isMainValue.orElse(null))));
+  }
+
+  /**
+   * Reads the {@code isMain} boolean out of a {@code PATCH .../main} JSON body.
+   * Signals an error via {@code response} and returns {@code Optional.empty()}
+   * with the response already committed if the body is missing or invalid.
+   */
+  private Optional<Boolean> readIsMainFromBody(HttpServletRequest request, HttpServletResponse response)
       throws IOException {
     String body = readBody(request);
     if (StringUtils.isBlank(body)) {
       servlet.sendError(response, HttpServletResponse.SC_BAD_REQUEST,
           "Required field: isMain");
-      return null;
+      return Optional.empty();
     }
     try {
       JSONObject json = new JSONObject(body);
       if (!json.has(IS_MAIN_FIELD) || json.isNull(IS_MAIN_FIELD)) {
         servlet.sendError(response, HttpServletResponse.SC_BAD_REQUEST,
             "Required field: isMain");
-        return null;
+        return Optional.empty();
       }
-      return json.getBoolean(IS_MAIN_FIELD);
+      return Optional.of(json.getBoolean(IS_MAIN_FIELD));
     } catch (JSONException e) {
       servlet.sendError(response, HttpServletResponse.SC_BAD_REQUEST,
-          "Invalid JSON body: " + e.getMessage());
-      return null;
+          INVALID_JSON_BODY_PREFIX + e.getMessage());
+      return Optional.empty();
     }
   }
 
@@ -467,7 +478,7 @@ class NeoBuiltInEndpointHandler {
       return json.getString(DESCRIPTION_FIELD);
     } catch (JSONException e) {
       servlet.sendError(response, HttpServletResponse.SC_BAD_REQUEST,
-          "Invalid JSON body: " + e.getMessage());
+          INVALID_JSON_BODY_PREFIX + e.getMessage());
       return null;
     }
   }
@@ -509,7 +520,7 @@ class NeoBuiltInEndpointHandler {
       assetId = json.optString("assetId", null);
     } catch (Exception e) {
       servlet.sendError(response, HttpServletResponse.SC_BAD_REQUEST,
-          "Invalid JSON body: " + e.getMessage());
+          INVALID_JSON_BODY_PREFIX + e.getMessage());
       return;
     }
     if (assetId == null || assetId.trim().isEmpty()) {
