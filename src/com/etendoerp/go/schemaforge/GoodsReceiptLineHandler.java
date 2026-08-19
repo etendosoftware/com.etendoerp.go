@@ -17,19 +17,11 @@
 
 package com.etendoerp.go.schemaforge;
 
-import java.util.regex.Pattern;
-
 import javax.inject.Named;
 
-import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONObject;
-import org.hibernate.criterion.Order;
-import org.hibernate.criterion.Restrictions;
-import org.openbravo.dal.service.OBDal;
-import org.openbravo.model.common.enterprise.Locator;
-import org.openbravo.model.materialmgmt.transaction.ShipmentInOut;
 
 /**
  * NeoHandler for the Goods Receipt line entity ({@code goodsReceiptLine}).
@@ -47,10 +39,11 @@ import org.openbravo.model.materialmgmt.transaction.ShipmentInOut;
  * on-hand stock resolves to nothing, {@code M_Locator_ID} stays {@code NULL}, and the classic
  * {@code M_INOUT_POST} completion procedure then rejects the document with
  * {@code InoutLineWithoutLocator} — regardless of {@code IsSOTrx}. This hook defaults the
- * locator to the receiving warehouse's own default active {@code M_Locator} (the same "default
- * locator for a warehouse" concept {@link InventoryLineHandler} already uses for Physical
- * Inventory), so confirmation succeeds for unstocked products too. An explicit
- * user/import-supplied {@code storageBin} is never overridden.
+ * locator to the receiving warehouse's own default active {@code M_Locator} via
+ * {@link NeoHandlerUtils#injectDefaultLocatorIfMissing(JSONObject, Logger)} (the same shared
+ * helper {@link GoodsShipmentLineHandler} and {@link ReturnToVendorShipmentLineHandler} use as of
+ * ETP-4863), so confirmation succeeds for unstocked products too. An explicit user/import-supplied
+ * {@code storageBin} is never overridden.
  *
  * <h3>Callout post-hook: strip stock-derived {@code movementQuantity}</h3>
  * The classic {@code SL_InOutLine_Product} callout (shared by every {@code M_InOutLine}-based
@@ -66,15 +59,7 @@ import org.openbravo.model.materialmgmt.transaction.ShipmentInOut;
 public class GoodsReceiptLineHandler extends AbstractInOutLineHandler {
 
   private static final Logger log = LogManager.getLogger(GoodsReceiptLineHandler.class);
-  private static final String FIELD_STORAGE_BIN = "storageBin";
   private static final String FIELD_MOVEMENT_QUANTITY = "movementQuantity";
-  private static final String PARAM_PARENT_ID = "parentId";
-  // Matches an unresolved raw AD default literal such as "@OnHandLocatorDefault@". The
-  // generated frontend's addLineFields.hidden merge (DetailView.jsx) copies a hidden field's
-  // contract-level defaultValue verbatim into the create payload whenever the row never
-  // touched it — with no guard against tokens that were never actually resolved client-side.
-  // A value shaped like this is never a real Locator id, so it must be treated as absent.
-  private static final Pattern UNRESOLVED_TOKEN = Pattern.compile("^@[^@]+@$");
 
   @Override
   public NeoResponse handle(NeoContext context) {
@@ -85,68 +70,12 @@ public class GoodsReceiptLineHandler extends AbstractInOutLineHandler {
     if (context != null && NeoEndpointType.CRUD.equals(context.getEndpointType())
         && "POST".equalsIgnoreCase(context.getHttpMethod())) {
       try {
-        injectDefaultLocatorIfMissing(context.getRequestBody());
+        NeoHandlerUtils.injectDefaultLocatorIfMissing(context.getRequestBody(), log);
       } catch (Exception e) {
         log.warn("[GoodsReceiptLineHandler] Could not default storageBin: {}", e.getMessage(), e);
       }
     }
     return null;
-  }
-
-  /**
-   * Sets {@code storageBin} to the receiving warehouse's default locator when the create
-   * request did not already supply a REAL one. Treats both a genuinely absent/blank value and
-   * an unresolved {@code @Token@}-shaped literal (see {@link #UNRESOLVED_TOKEN}) as "missing" —
-   * confirmed live (ETP-4671): the frontend sends the literal string
-   * {@code "@OnHandLocatorDefault@"} for a manually-added line whose product has no prior
-   * stock, and that string is never a real Locator id. Never overrides a genuine explicit value
-   * coming from the user or from the "Import from Purchase Order" flow.
-   */
-  private void injectDefaultLocatorIfMissing(JSONObject body) throws Exception {
-    if (body == null) {
-      return;
-    }
-    String existing = body.optString(FIELD_STORAGE_BIN, null);
-    if (StringUtils.isNotBlank(existing) && !UNRESOLVED_TOKEN.matcher(existing).matches()) {
-      return;
-    }
-    String parentId = body.optString(PARAM_PARENT_ID, "");
-    if (parentId.isEmpty()) {
-      return;
-    }
-    ShipmentInOut header = OBDal.getInstance().get(ShipmentInOut.class, parentId);
-    if (header == null || header.getWarehouse() == null) {
-      return;
-    }
-    String locatorId = resolveDefaultLocatorForWarehouse(header.getWarehouse().getId());
-    if (locatorId != null) {
-      body.put(FIELD_STORAGE_BIN, locatorId);
-      log.debug("[GoodsReceiptLineHandler] POST: defaulted storageBin={} warehouse={}",
-          locatorId, header.getWarehouse().getId());
-    }
-  }
-
-  /**
-   * Returns the default active {@code M_Locator} for a warehouse, or {@code null} when none is
-   * configured. Mirrors {@link InventoryLineHandler}'s locator lookup, scoped down to just the
-   * id since the receipt line only needs {@code storageBin}.
-   */
-  @SuppressWarnings("unchecked")
-  private static String resolveDefaultLocatorForWarehouse(String warehouseId) {
-    try {
-      Locator locator = (Locator) OBDal.getInstance().createCriteria(Locator.class)
-          .add(Restrictions.eq(Locator.PROPERTY_WAREHOUSE + ".id", warehouseId))
-          .add(Restrictions.eq(Locator.PROPERTY_DEFAULT, true))
-          .add(Restrictions.eq(Locator.PROPERTY_ACTIVE, true))
-          .addOrder(Order.asc(Locator.PROPERTY_SEARCHKEY))
-          .setMaxResults(1)
-          .uniqueResult();
-      return locator != null ? locator.getId() : null;
-    } catch (Exception e) {
-      log.debug("[GoodsReceiptLineHandler] Could not resolve default locator for warehouse {}: {}",
-          warehouseId, e.getMessage());
-      return null;
-    }
   }
 
   /**

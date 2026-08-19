@@ -87,6 +87,10 @@ class NeoBuiltInEndpointHandler {
       fiscal349Handler.handle(pathInfo.entityName, method, request, response);
       return true;
     }
+    if ("fiscal-models-catalog".equals(pathInfo.specName)) {
+      handleFiscalModelsCatalogEndpoint(method, request, response);
+      return true;
+    }
     if ("email-contracts".equals(pathInfo.specName)) {
       handleEmailContractsEndpoint(pathInfo, method, request, response);
       return true;
@@ -126,6 +130,34 @@ class NeoBuiltInEndpointHandler {
     }
     servlet.writeResponse(response, NeoSessionService.resolveSession());
     return true;
+  }
+
+  /**
+   * Handles {@code /sws/neo/fiscal-models-catalog} — the per-Client active/inactive
+   * state of the Fiscal Models catalog (models 303, 349, ...).
+   *
+   * <p>GET returns the persisted active-models JSON object (empty object when nothing
+   * has been saved yet for the current client). PUT replaces it and responds 204,
+   * matching the favorites/filters built-in endpoint convention.
+   */
+  private void handleFiscalModelsCatalogEndpoint(String method,
+      HttpServletRequest request, HttpServletResponse response) throws IOException {
+    if (METHOD_GET.equals(method)) {
+      servlet.writeResponse(response, NeoFiscalModelsCatalogService.getActiveModels());
+      return;
+    }
+    if ("PUT".equals(method)) {
+      try {
+        NeoFiscalModelsCatalogService.saveActiveModels(NeoRequestBodyParser.readRequestBody(request));
+        OBDal.getInstance().flush();
+        servlet.writeResponse(response, null);
+      } catch (IllegalArgumentException e) {
+        servlet.sendError(response, HttpServletResponse.SC_BAD_REQUEST, e.getMessage());
+      }
+      return;
+    }
+    servlet.sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
+        "Fiscal models catalog endpoint only supports GET and PUT");
   }
 
   private void handleFiltersEndpoint(NeoServlet.NeoPathInfo pathInfo, String method,

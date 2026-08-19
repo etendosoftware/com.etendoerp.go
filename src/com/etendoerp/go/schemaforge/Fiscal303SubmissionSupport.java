@@ -71,6 +71,15 @@ import com.etendoerp.go.schemaforge.data.FiscalDecl;
 class Fiscal303SubmissionSupport {
 
   private static final String STATUS_SUBMITTED_ACK = "submitted_ack";
+  /**
+   * {@code submission_method} value set on {@link #persistSuccessfulSubmission} — the ONLY
+   * server-side source of this value (ETP-4755). Distinguishes a real AEAT telematic submission
+   * from the two manual paths (which collide with this exact declaration status,
+   * {@link #STATUS_SUBMITTED_ACK}, but set {@code submissionMethod} themselves via the frontend's
+   * PUT — see {@code FmOverlays.jsx}'s {@code PresentModal}/{@code handlePresent}) — see
+   * {@code FiscalDeclCrudHandler#PROPERTY_SUBMISSION_METHOD}.
+   */
+  private static final String SUBMISSION_METHOD_AEAT_TELEMATIC = "aeat_telematic";
   private static final String ERR_NO_CERTIFICATE = "NO_CERTIFICATE";
   private static final String ERR_MISSING_PRESENTER = "MISSING_PRESENTER";
   private static final String ERR_SUBMISSION_FAILED = "SUBMISSION_FAILED";
@@ -123,8 +132,9 @@ class Fiscal303SubmissionSupport {
       String tipo, String filename, HttpServletRequest request) throws Exception {
     boolean quarterly = period.startsWith("T");
     String valueKey = quarterly ? "AEAT303_Q_" + year : "AEAT303_M_" + year;
+    boolean lastPeriod = Fiscal303BoxesHandler.isLastPeriodOfYear(quarterly, period);
 
-    TaxReport taxReport   = owner.resolveTaxReport(orgId, valueKey);
+    TaxReport taxReport   = owner.resolveTaxReport(orgId, valueKey, lastPeriod);
     AcctSchema acctSchema = owner.resolveAcctSchema();
     List<Period> periods  = owner.resolvePeriods(orgId, year, period);
 
@@ -196,8 +206,10 @@ class Fiscal303SubmissionSupport {
    * submissions never need a certificate at all, so this restriction only affects production.</p>
    *
    * <p><b>Persistence:</b> only a successful PRODUCTION submission updates the declaration
-   * record itself (status → {@code submitted_ack}, file name set) and attaches the justificante
-   * PDF, both via {@link #persistSuccessfulSubmission} — matching Classic's "test submissions
+   * record itself (status → {@code submitted_ack}, file name set, {@code submissionMethod} →
+   * {@code aeat_telematic} — ETP-4755, so this real telematic path can be told apart from the two
+   * manual paths that collide on the exact same {@code submitted_ack} status) and attaches the
+   * justificante PDF, both via {@link #persistSuccessfulSubmission} — matching Classic's "test submissions
    * leave no trace" rule for the declaration's own fields. A successful TEST-mode submission
    * (ServValiDos) does NOT touch the declaration record at all — no status/filename/
    * {@code fileExternal} change — but DOES attach the returned PDF as a clearly test-labeled
@@ -414,7 +426,8 @@ class Fiscal303SubmissionSupport {
 
   /**
    * Persists the outcome of a successful PRODUCTION submission: declaration status →
-   * {@code submitted_ack}, declaration file name set to the justificante file, and the PDF
+   * {@code submitted_ack}, declaration file name set to the justificante file,
+   * {@code submissionMethod} → {@link #SUBMISSION_METHOD_AEAT_TELEMATIC} (ETP-4755), and the PDF
    * attached (best-effort — see {@link #attachJustificante}). Never called for test-mode results
    * (see {@link #attachTestJustificante} for that path, which attaches the PDF too but never
    * touches the declaration record) or failed submissions (see {@link #handleSubmit}).
@@ -432,6 +445,7 @@ class Fiscal303SubmissionSupport {
       decl.setDeclarationStatus(STATUS_SUBMITTED_ACK);
       decl.setDeclarationFileName(fileName);
       decl.setFileExternal(false);
+      decl.setSubmissionMethod(SUBMISSION_METHOD_AEAT_TELEMATIC);
       OBDal.getInstance().save(decl);
     } catch (Exception e) {
       AbstractFiscalHandler.log.error("Could not update declaration " + decl.getId()
