@@ -109,7 +109,10 @@ public class CreateGoodsReceiptHandlerTest {
       OrderLine orderLine = mock(OrderLine.class);
       when(orderLine.getId()).thenReturn("ol-1");
       when(orderLine.isActive()).thenReturn(true);
-      when(orderLine.getProduct()).thenReturn(mock(Product.class));
+      Product product = mock(Product.class);
+      when(product.isStocked()).thenReturn(true);
+      when(product.getProductType()).thenReturn("I");
+      when(orderLine.getProduct()).thenReturn(product);
       when(orderLine.getUOM()).thenReturn(mock(UOM.class));
       when(orderLine.getOrderedQuantity()).thenReturn(new BigDecimal("3"));
       when(orderLine.getDeliveredQuantity()).thenReturn(BigDecimal.ZERO);
