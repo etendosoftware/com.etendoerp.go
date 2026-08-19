@@ -58,7 +58,8 @@ import com.etendoerp.psd2.bank.integration.utils.PISTransactionUtils;
  *   <tr><td>{@code authorized}</td><td>payment created and processed</td></tr>
  *   <tr><td>{@code executed} / {@code settled}</td><td>created if needed, plus the bank
  *           transaction</td></tr>
- *   <tr><td>{@code failed}</td><td>nothing is created; the attempt is retryable</td></tr>
+ *   <tr><td>{@code failed}</td><td>nothing is created — the user is told and simply tries
+ *           again</td></tr>
  * </table>
  *
  * <p><b>How the request survives.</b> Because no {@code FIN_Payment} is created up front, the
@@ -71,9 +72,8 @@ import com.etendoerp.psd2.bank.integration.utils.PISTransactionUtils;
  *
  * <p><b>What drives it.</b> {@link #reconcile} runs from Etendo Go's own status poll
  * ({@code PisPaymentService#refreshPisStatusFromSaltEdge}), which the payment modal calls every few
- * seconds while the transfer is in flight. Every status Salt Edge can resolve to — {@code
- * authorized}, {@code executed}, {@code settled} and {@code failed} — produces a payment, so by the
- * time the poll sees a resolved transfer the payment is registered.
+ * seconds while the transfer is in flight. A payment appears as soon as the bank commits to the
+ * transfer ({@code authorized} onwards); a rejection creates nothing at all.
  *
  * <p>The one case this leaves open is a transfer that is still at an intermediate status when the
  * modal gives up waiting: nothing registers it afterwards, and it has to be entered by hand. This
@@ -81,9 +81,17 @@ import com.etendoerp.psd2.bank.integration.utils.PISTransactionUtils;
  * refresh, which cannot call into Etendo Go without inverting the dependency between the two
  * modules. {@link #reconcile} is idempotent, so wiring such a trigger later needs no change here.
  *
- * <p>A transfer the user abandons simply never reaches a resolutive status, so no payment is ever
- * created and the invoice is left untouched. Its snapshot is kept rather than swept: it costs
- * nothing and it is exactly what {@link #handleRetryPisPayment} replays.
+ * <p>A transfer the user abandons — or one the bank rejects — never produces a payment, so the
+ * invoice is left untouched either way and there is nothing to undo.
+ *
+ * <p><b>Why some pieces here look unused.</b> {@link #handleRetryPisPayment}, the {@code ETGOERR}
+ * payment status and the "Error"/retry affordances in the SPA are currently unreachable: a
+ * rejection is only ever observed while the payment modal is open, and there it is reported in
+ * place, with the form left ready to try again. They are kept on purpose for the case this design
+ * does not cover yet — a rejection arriving when nobody is watching (the PSD2 module's own
+ * background refresh, or the Salt Edge webhook). There is no modal to report that in, so the
+ * attempt would have to be recorded on the invoice instead, which is exactly what those pieces do.
+ * Do not delete them as dead code without also deciding that case is out of scope.
  */
 final class PisDeferredPaymentService {
 
@@ -97,15 +105,6 @@ final class PisDeferredPaymentService {
   private static final String FIELD_PIS = "pis";
   private static final String FIELD_PROCESS = "process";
   private static final String PROCESS_CONFIRM = "confirm";
-  private static final String PROCESS_DRAFT = "draft";
-
-  /**
-   * {@code FIN_Payment.status} for a payment whose bank transfer was rejected — the value
-   * {@code ETGOERR} ("Payment Error"), added by this module to the Core status reference
-   * {@code 575BCB88A4694C27BC013DE9C73E6FE7}. Deliberately only ever set on an unprocessed payment,
-   * so Core's own processing, accounting and reconciliation never meet a status they do not know.
-   */
-  private static final String PAYMENT_STATUS_ERROR = "ETGOERR";
 
   /** Salt Edge statuses from which a payment must exist in Etendo Go. */
   private static final String PIS_STATUS_AUTHORIZED = "authorized";
@@ -217,9 +216,14 @@ final class PisDeferredPaymentService {
         if (failed == null) {
           return NeoResponse.error(HttpServletResponse.SC_NOT_FOUND, "PIS payment not found");
         }
-        if (!BankIntegrationConstants.PIS_STATUS_FAILED.equalsIgnoreCase(failed.getStatus())) {
+        // Anything the bank has not committed to can be retried: a rejection, and also an attempt
+        // still in flight. The latter is what a user closing the Salt Edge window needs — that
+        // window's session is single-use, so reopening its URL always fails with "session lost";
+        // the only way back is a brand-new order. Refused from `authorized` on, where the money is
+        // already moving and a second order would pay twice.
+        if (!isRetryableStatus(failed.getStatus())) {
           return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
-              "Only a failed bank transfer can be retried.");
+              "This bank transfer is already in progress and can no longer be restarted.");
         }
         String raw = failed.getETGOPaymentIntent();
         if (StringUtils.isBlank(raw)) {
@@ -276,6 +280,13 @@ final class PisDeferredPaymentService {
    */
   static boolean reconcile(PisPayment pisPayment) {
     String status = pisPayment.getStatus();
+    if (isFailedStatus(status)) {
+      // Rejected: nothing is created. The money never moved, so recording the attempt would only
+      // leave a row to clean up; the user is told and retries. The snapshot is deliberately KEPT —
+      // it is what {@link #handleRetryPisPayment} replays, which is the path that matters if this
+      // rejection is ever observed with no modal open to report it in (see the class javadoc).
+      return false;
+    }
     if (!requiresPayment(status)) {
       return false;
     }
@@ -292,22 +303,31 @@ final class PisDeferredPaymentService {
   }
 
   /**
-   * True once Salt Edge has resolved the transfer one way or the other. Only the intermediate
-   * statuses ({@code requested}, {@code initiated}, {@code initiated_info_required},
-   * {@code authorizing}) produce nothing — up to that point the user may still abandon the flow.
+   * True once the bank has committed to the transfer: {@code authorized} onwards. Everything else
+   * produces no payment at all.
    * <p>
-   * A rejected transfer counts: it still yields a payment, marked as failed, so the attempt is
-   * visible on the invoice and can be retried from the record itself instead of vanishing.
+   * That deliberately includes {@code failed}. A rejected transfer moved no money, so recording it
+   * as a payment would leave a row the user has to clean up for an attempt that never happened —
+   * noise on the invoice, and one more thing that can be mistaken for a real payment. The user is
+   * told the transfer was rejected and simply tries again.
    */
   private static boolean requiresPayment(String status) {
     return StringUtils.equalsAnyIgnoreCase(status, PIS_STATUS_AUTHORIZED,
-        BankIntegrationConstants.PIS_STATUS_EXECUTED, BankIntegrationConstants.PIS_STATUS_SETTLED,
-        BankIntegrationConstants.PIS_STATUS_FAILED);
+        BankIntegrationConstants.PIS_STATUS_EXECUTED, BankIntegrationConstants.PIS_STATUS_SETTLED);
   }
 
-  /** True when Salt Edge rejected the transfer, so the payment must be recorded as failed. */
+  /** True when Salt Edge rejected the transfer. Nothing is created; the attempt is just closed. */
   private static boolean isFailedStatus(String status) {
     return BankIntegrationConstants.PIS_STATUS_FAILED.equalsIgnoreCase(status);
+  }
+
+  /**
+   * True while the attempt can be abandoned and replaced by a fresh one: the bank has not committed
+   * to it, so no money is at risk of moving twice. Everything from {@code authorized} onwards is
+   * excluded — restarting there could pay the invoice a second time.
+   */
+  private static boolean isRetryableStatus(String status) {
+    return StringUtils.isBlank(status) || !requiresPayment(status);
   }
 
   private static boolean isSettledStatus(String status) {
@@ -319,12 +339,8 @@ final class PisDeferredPaymentService {
    * Replays the stored intent through the ordinary payment-registration path and links the result.
    * <p>
    * {@code pis} is switched off so the replay registers a plain payment instead of starting a
-   * second bank transfer.
-   * <p>
-   * Whether the payment is processed depends on the outcome. A transfer the bank accepted is
-   * confirmed, exactly as a normal payment would be. A <b>rejected</b> one is only drafted and then
-   * flagged {@link #PAYMENT_STATUS_ERROR}: no money moved, so processing it would wrongly settle
-   * the invoice — the record exists to show the attempt happened and to be retried from.
+   * second bank transfer, and {@code process} is forced to {@code confirm} because reaching this
+   * point means the bank committed to the transfer. A rejected transfer never gets here.
    */
   private static boolean createPaymentFromIntent(PisPayment pisPayment) {
     String raw = pisPayment.getETGOPaymentIntent();
@@ -333,12 +349,11 @@ final class PisDeferredPaymentService {
       // payment up front). Nothing to replay.
       return false;
     }
-    boolean failed = isFailedStatus(pisPayment.getStatus());
     try {
       JSONObject intent = new JSONObject(raw);
       JSONObject body = intent.getJSONObject(INTENT_BODY);
       body.put(FIELD_PIS, false);
-      body.put(FIELD_PROCESS, failed ? PROCESS_DRAFT : PROCESS_CONFIRM);
+      body.put(FIELD_PROCESS, PROCESS_CONFIRM);
 
       NeoResponse response = PaymentRegistrationService.doRegisterPaymentAdvanced(
           intent.getString(INTENT_INVOICE_ID), body, intent.optBoolean(INTENT_IS_RECEIPT, false));
@@ -350,21 +365,13 @@ final class PisDeferredPaymentService {
         return false;
       }
       FIN_Payment payment = OBDal.getInstance().get(FIN_Payment.class, paymentId);
-      if (failed && payment != null) {
-        payment.setStatus(PAYMENT_STATUS_ERROR);
-        OBDal.getInstance().save(payment);
-      }
       pisPayment.setPayment(payment);
-      // The intent has served its purpose; clearing it keeps a replay from ever running twice.
-      // On a rejected transfer it is kept instead — that snapshot is what a retry replays.
-      if (!failed) {
-        pisPayment.setETGOPaymentIntent(null);
-      }
+      // The snapshot has served its purpose; clearing it keeps a replay from ever running twice.
+      pisPayment.setETGOPaymentIntent(null);
       OBDal.getInstance().save(pisPayment);
       OBDal.getInstance().flush();
-      log.info("PIS {} reached status {} — created payment {}{}", pisPayment.getId(),
-          pisPayment.getStatus(), payment != null ? payment.getDocumentNo() : paymentId,
-          failed ? " (marked as failed)" : "");
+      log.info("PIS {} reached status {} — created payment {}", pisPayment.getId(),
+          pisPayment.getStatus(), payment != null ? payment.getDocumentNo() : paymentId);
       return true;
     } catch (Exception e) {
       log.error("PIS {}: could not create the payment from its stored intent: {}",

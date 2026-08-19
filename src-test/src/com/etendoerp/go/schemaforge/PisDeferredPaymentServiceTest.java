@@ -67,15 +67,20 @@ class PisDeferredPaymentServiceTest {
   class RequiresPayment {
 
     @Test
-    @DisplayName("every resolutive status produces a payment, failed included")
-    void resolutiveStatusesProduceAPayment() throws Exception {
-      // The ticket's contract: AUTHORIZED / EXECUTED / SETTLED create the payment, and FAILED
-      // creates it too — flagged as an error — so a rejected attempt stays visible on the invoice
-      // instead of vanishing.
+    @DisplayName("a payment appears once the bank commits to the transfer")
+    void committedStatusesProduceAPayment() throws Exception {
       assertTrue(requiresPayment("authorized"));
       assertTrue(requiresPayment("executed"));
       assertTrue(requiresPayment("settled"));
-      assertTrue(requiresPayment("failed"));
+    }
+
+    @Test
+    @DisplayName("a rejected transfer produces no payment at all")
+    void rejectedProducesNothing() throws Exception {
+      // The money never moved, so recording the attempt would leave a row to clean up for
+      // something that never happened. The user is told and simply tries again.
+      assertFalse(requiresPayment("failed"));
+      assertFalse(requiresPayment("FAILED"));
     }
 
     @Test
@@ -121,7 +126,7 @@ class PisDeferredPaymentServiceTest {
     }
 
     @Test
-    @DisplayName("only 'failed' marks the payment as rejected")
+    @DisplayName("only 'failed' counts as a rejection")
     void onlyFailedIsAFailure() throws Exception {
       assertTrue(isFailed("failed"));
       assertTrue(isFailed("FAILED"));

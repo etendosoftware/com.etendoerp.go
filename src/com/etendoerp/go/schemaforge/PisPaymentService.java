@@ -47,10 +47,10 @@ import com.etendoerp.psd2.bank.integration.utils.PISPaymentDao;
  * PIS (Payment Initiation Service — bank transfer via Salt Edge) actions and helpers.
  *
  * <p>Split out of {@link PaymentRegistrationService} to keep that class under the authorized
- * method-count limit — this is purely an organizational split, not a behavioral change: status
- * polling, cancellation, template listing, supplier IBAN listing, and the PIS branch of the
- * advanced two-step payment registration flow. Reuses {@link PaymentRegistrationService}'s shared
- * response-envelope helpers and error messages (package-visible on that class for this reason).
+ * method-count limit: status polling, cancellation, template listing and supplier IBAN listing.
+ * Reuses {@link PaymentRegistrationService}'s shared response-envelope helpers and error messages
+ * (package-visible on that class for this reason). Starting a transfer lives in
+ * {@link PisDeferredPaymentService}.
  */
 final class PisPaymentService {
 
@@ -105,8 +105,9 @@ final class PisPaymentService {
 
   /**
    * Returns the current Salt Edge status of a PIS payment by its LOCAL {@code PSD2_PIS_PAYMENT}
-   * id (the one returned in {@code pisPaymentId} by {@code PisDeferredPaymentService#initiateDeferredPis}), so
-   * the SPA can poll it while the SCA widget / bank confirmation is pending.
+   * id (the one returned in {@code pisPaymentId} by
+   * {@link PisDeferredPaymentService#initiateDeferredPis}), so the SPA can poll it while the SCA
+   * widget / bank confirmation is pending.
    * Body: {@code {pisPaymentId}}.
    */
   static NeoResponse handlePisPaymentStatus(NeoContext context) {
@@ -376,10 +377,7 @@ final class PisPaymentService {
   }
 
   // ─── ADVANCED: PIS branch of the two-step draft/confirm payment flow ───────
-  //
-  // The old applyOverpaymentAndInitiatePis lived here. It created the FIN_Payment and processed it
-  // to PPM before Salt Edge was contacted, which is exactly the behaviour ETP-4895 removed:
-  // initiation no longer produces a payment at all. See PisDeferredPaymentService.
+  // Initiation itself lives in PisDeferredPaymentService: it creates no payment.
 
   /**
    * Collects the template + creditor fields the SPA sends for a PIS payment, keyed by the
