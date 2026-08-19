@@ -545,6 +545,123 @@ class NeoDisplayLogicHelperTest {
       assertFalse(result.contains("\"100.5"),
           "BigDecimal must not be rendered as a quoted string: " + result);
     }
+
+    @Test
+    @DisplayName("ETP-4914: a Long value renders as an unquoted numeric literal")
+    void longValueRendersUnquoted() {
+      Map<String, Object> map = new HashMap<>();
+      map.put("recordId", 9_000_000_000L);
+
+      String result = NeoDisplayLogicHelper.buildJsObjectPreamble("currentValues", map, false);
+
+      assertEquals("var currentValues = {\"recordId\":9000000000};", result);
+    }
+
+    @Test
+    @DisplayName("ETP-4914: a negative Integer renders as an unquoted negative numeric literal")
+    void negativeIntegerRendersUnquoted() {
+      Map<String, Object> map = new HashMap<>();
+      map.put("balance", -42);
+
+      String result = NeoDisplayLogicHelper.buildJsObjectPreamble("currentValues", map, false);
+
+      assertEquals("var currentValues = {\"balance\":-42};", result);
+    }
+
+    @Test
+    @DisplayName("ETP-4914: a Double with decimals renders as an unquoted numeric literal")
+    void doubleWithDecimalsRendersUnquoted() {
+      Map<String, Object> map = new HashMap<>();
+      map.put("rate", 3.14159d);
+
+      String result = NeoDisplayLogicHelper.buildJsObjectPreamble("currentValues", map, false);
+
+      assertTrue(result.startsWith("var currentValues = {\"rate\":3.14159"),
+          "Double must render as a bare numeric literal, not a quoted string: " + result);
+      assertFalse(result.contains("\"3.14159"),
+          "Double must not be rendered as a quoted string: " + result);
+    }
+
+    @Test
+    @DisplayName("ETP-4914: an empty-string value still renders as a quoted empty string")
+    void emptyStringValueRendersAsQuotedEmptyString() {
+      Map<String, Object> map = new HashMap<>();
+      map.put("notes", "");
+
+      String result = NeoDisplayLogicHelper.buildJsObjectPreamble("currentValues", map, false);
+
+      assertEquals("var currentValues = {\"notes\":\"\"};", result);
+    }
+
+    @Test
+    @DisplayName("ETP-4914: a Y/N string flag (e.g. $Element_PJ) still round-trips as a quoted "
+        + "string exactly as before -- this is the specific regression shape Alex flagged: a "
+        + "classic-Etendo 'Y'/'N' session flag must NOT be coerced into a bare JS literal")
+    void yesNoStringFlagStillRendersQuoted() throws Exception {
+      Map<String, Object> map = new HashMap<>();
+      map.put("$Element_PJ", "Y");
+      map.put("$Element_CC", "N");
+
+      String result = NeoDisplayLogicHelper.buildJsObjectPreamble("context", map, false);
+
+      String jsonPart = result.substring("var context = ".length(), result.length() - 1);
+      JSONObject parsed = new JSONObject(jsonPart);
+      assertEquals("Y", parsed.getString("$Element_PJ"));
+      assertEquals("N", parsed.getString("$Element_CC"));
+      // Assert the raw preamble text carries the quotes (not just JSONObject's own parsing,
+      // which would also accept an unquoted bare identifier as invalid and fail differently).
+      assertTrue(result.contains("\"$Element_PJ\":\"Y\""),
+          "Y/N flags must remain quoted JS strings, not bare identifiers: " + result);
+      assertTrue(result.contains("\"$Element_CC\":\"N\""),
+          "Y/N flags must remain quoted JS strings, not bare identifiers: " + result);
+    }
+
+    @Test
+    @DisplayName("ETP-4914: mixed Boolean, Number and String entries in the same object each "
+        + "serialize with their own correct JS literal shape, with no cross-type collision")
+    void mixedBooleanNumberStringEntriesSerializeIndependently() throws Exception {
+      Map<String, Object> map = new HashMap<>();
+      map.put("depreciate", Boolean.TRUE);
+      map.put("posted", Boolean.FALSE);
+      map.put("amount", 100);
+      map.put("documentNo", "DOC-001");
+      map.put("$Element_PJ", "Y");
+
+      String result = NeoDisplayLogicHelper.buildJsObjectPreamble("currentValues", map, false);
+      String jsonPart = result.substring("var currentValues = ".length(), result.length() - 1);
+
+      assertTrue(result.contains("\"depreciate\":true"));
+      assertTrue(result.contains("\"posted\":false"));
+      assertTrue(result.contains("\"amount\":100"));
+      assertTrue(result.contains("\"documentNo\":\"DOC-001\""));
+      assertTrue(result.contains("\"$Element_PJ\":\"Y\""));
+
+      JSONObject parsed = new JSONObject(jsonPart);
+      assertEquals(true, parsed.getBoolean("depreciate"));
+      assertEquals(false, parsed.getBoolean("posted"));
+      assertEquals(100, parsed.getInt("amount"));
+      assertEquals("DOC-001", parsed.getString("documentNo"));
+      assertEquals("Y", parsed.getString("$Element_PJ"));
+    }
+
+    @Test
+    @DisplayName("ETP-4914: a Map-typed value is still filtered out upstream and never reaches "
+        + "putTyped, even when mixed with Boolean/Number/String entries in the same object")
+    void mapValueStillFilteredWhenMixedWithTypedEntries() throws Exception {
+      Map<String, Object> map = new HashMap<>();
+      map.put("depreciate", Boolean.TRUE);
+      map.put("amount", 100);
+      map.put("nestedContext", new HashMap<>(Map.of("inner", "value")));
+
+      String result = NeoDisplayLogicHelper.buildJsObjectPreamble("currentValues", map, false);
+      String jsonPart = result.substring("var currentValues = ".length(), result.length() - 1);
+      JSONObject parsed = new JSONObject(jsonPart);
+
+      assertTrue(parsed.has("depreciate"));
+      assertTrue(parsed.has("amount"));
+      assertFalse(parsed.has("nestedContext"),
+          "Map-typed values must still be filtered out before reaching putTyped");
+    }
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
