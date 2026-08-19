@@ -122,16 +122,23 @@ public class NeoDefaultsServiceTest {
     NeoCommercialLinePolicy.injectLineNetAmountIfMissing(null);
   }
 
+  /**
+   * ETP-4727 (backend counterpart of the useLineGrossAmount.js frontend fix): invoicedQuantity
+   * explicitly edited to 0 on an existing line is deterministic and must force lineNetAmount to
+   * 0 — leaving it untouched let NEO's partial-update PATCH keep the stale pre-edit amount in
+   * the DB even though the frontend had already computed and sent 0.
+   */
   @Test
-  public void testZeroQtyNoInjection() throws Exception {
+  public void testZeroQtyForcesLineNetAmountZero() throws Exception {
     JSONObject body = new JSONObject();
     body.put("invoicedQuantity", "0");
     body.put("unitPrice", 29.70);
 
     NeoCommercialLinePolicy.injectLineNetAmountIfMissing(body);
 
-    assertFalse("lineNetAmount should not be injected when invoicedQuantity is zero",
+    assertTrue("lineNetAmount should be forced to 0 when invoicedQuantity is explicitly 0",
         body.has("lineNetAmount"));
+    assertEquals(0.0, body.getDouble("lineNetAmount"), 0.001);
   }
 
   @Test
@@ -145,16 +152,18 @@ public class NeoDefaultsServiceTest {
         body.has("lineNetAmount"));
   }
 
+  /** ETP-4727 (backend counterpart): unitPrice explicitly edited to 0 must also force the zero. */
   @Test
-  public void testZeroUnitPriceNoInjection() throws Exception {
+  public void testZeroUnitPriceForcesLineNetAmountZero() throws Exception {
     JSONObject body = new JSONObject();
     body.put("invoicedQuantity", "3");
     body.put("unitPrice", 0);
 
     NeoCommercialLinePolicy.injectLineNetAmountIfMissing(body);
 
-    assertFalse("lineNetAmount should not be injected when unitPrice is zero",
+    assertTrue("lineNetAmount should be forced to 0 when unitPrice is explicitly 0",
         body.has("lineNetAmount"));
+    assertEquals(0.0, body.getDouble("lineNetAmount"), 0.001);
   }
 
   @Test

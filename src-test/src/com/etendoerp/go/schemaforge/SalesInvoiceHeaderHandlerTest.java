@@ -542,6 +542,31 @@ public class SalesInvoiceHeaderHandlerTest {
     assertFalse(rec.has("sourceInvoice"));
   }
 
+  // ── SifSubRecordAttachments wiring (ETP-4888) ─────────────────────────────
+
+  /**
+   * Verifies that {@link SifSubRecordAttachments#enrich} is only invoked for detail GET
+   * (recordId != null) — a list GET must never carry {@code aeatsiiFacturaId},
+   * {@code tbaiSyncInvoiceId}, or {@code invoiceVerifactuId}.
+   */
+  @Test
+  public void testSifSubRecordAttachmentsNotCalledForListView() throws Exception {
+    JSONObject body = invoiceBody(false, 0.0, 100.0, 100.0);
+    NeoContext ctx = getCtx(); // recordId = null — list view
+    ctx.setPreviousResult(NeoResponse.ok(body));
+
+    // No OBDal mock needed — SifSubRecordAttachments.enrich should not be reached
+    NeoResponse result = new SalesInvoiceHeaderHandler().afterHandle(ctx);
+
+    assertNotNull(result);
+    JSONObject rec = result.getBody()
+        .getJSONObject("response").getJSONArray("data").getJSONObject(0);
+
+    assertFalse(rec.has("aeatsiiFacturaId"));
+    assertFalse(rec.has("tbaiSyncInvoiceId"));
+    assertFalse(rec.has("invoiceVerifactuId"));
+  }
+
   // ── classifyDocType (via resolveSubtype) ──────────────────────────────────
 
   /**
