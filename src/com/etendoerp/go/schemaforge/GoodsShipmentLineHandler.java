@@ -19,10 +19,45 @@ package com.etendoerp.go.schemaforge;
 
 import javax.inject.Named;
 
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
+
 /**
  * NeoHandler for the Goods Shipment line entity.
- * Delegates all logic to {@link AbstractInOutLineHandler}.
+ *
+ * <p>Delegates invoice-line linking and order/invoice qty + product-code enrichment to
+ * {@link AbstractInOutLineHandler}, and adds a POST (create) pre-hook (ETP-4863): default
+ * {@code storageBin} to the header {@code M_InOut}'s own warehouse default locator when the
+ * create request did not already supply a REAL one.
+ *
+ * <p>Without this, confirming a Goods Shipment on the PRINCIPAL warehouse could leave the new
+ * line's {@code M_Locator_ID} pointing at a stale, session-cached warehouse instead: the raw AD
+ * default ({@code @OnHandLocatorDefault@}) only filters by the header's warehouse when the tab
+ * declares the matching {@code AD_AuxiliaryInput}; otherwise it falls back to whatever warehouse
+ * happened to be cached in the HTTP session from the last window/document touched — a completely
+ * unrelated document. See {@link NeoHandlerUtils#injectDefaultLocatorIfMissing(
+ * org.codehaus.jettison.json.JSONObject, Logger)} for the full rationale — the same helper
+ * {@link GoodsReceiptLineHandler} (ETP-4671) and {@link ReturnToVendorShipmentLineHandler} use.
  */
 @Named("goodsShipmentLineHandler")
 public class GoodsShipmentLineHandler extends AbstractInOutLineHandler {
+
+  private static final Logger log = LogManager.getLogger(GoodsShipmentLineHandler.class);
+
+  @Override
+  public NeoResponse handle(NeoContext context) {
+    NeoResponse parentResult = super.handle(context);
+    if (parentResult != null) {
+      return parentResult;
+    }
+    if (context != null && NeoEndpointType.CRUD.equals(context.getEndpointType())
+        && "POST".equalsIgnoreCase(context.getHttpMethod())) {
+      try {
+        NeoHandlerUtils.injectDefaultLocatorIfMissing(context.getRequestBody(), log);
+      } catch (Exception e) {
+        log.warn("[GoodsShipmentLineHandler] Could not default storageBin: {}", e.getMessage(), e);
+      }
+    }
+    return null;
+  }
 }

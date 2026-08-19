@@ -26,7 +26,10 @@ import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 
 import org.apache.commons.lang3.StringUtils;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
+import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.base.provider.OBProvider;
 import org.openbravo.base.structure.BaseOBObject;
@@ -38,6 +41,8 @@ import com.etendoerp.go.schemaforge.data.FiscalDecl;
 
 class FiscalDeclCrudHandler {
 
+  private static final Logger log = LogManager.getLogger(FiscalDeclCrudHandler.class);
+
   static final String DEFAULT_STATUS = "draft";
 
   static final String ENTITY_FISCAL_DECL = FiscalDecl.ENTITY_NAME;
@@ -48,6 +53,28 @@ class FiscalDeclCrudHandler {
   static final String PROPERTY_DECLARATION_STATUS = "declarationStatus";
   static final String PROPERTY_DECLARATION_FILE_NAME = "declarationFileName";
   static final String PROPERTY_FILE_EXTERNAL = "fileExternal";
+  /**
+   * Java property for the {@code manual_data} TEXT column added to {@code ETGO_Fiscal_Decl} —
+   * persists, as a compact JSON string, the frontend's manually-entered Modelo 303
+   * identification checks and box-value overrides (previously kept only in ephemeral React
+   * state, lost on every page refresh). Read back by {@link #declToJson} as a parsed nested
+   * JSON object so the frontend never has to double-parse.
+   */
+  static final String PROPERTY_MANUAL_DATA = "manualData";
+  /**
+   * Java property for the {@code submission_method} VARCHAR(30) column added to
+   * {@code ETGO_Fiscal_Decl} (ETP-4755) — distinguishes the 3 distinct code paths that can all
+   * lead to a "Presentado" declaration, two of which collide on the exact same
+   * {@code declarationStatus} value ({@code submitted_ack}): a manual acuse/justificante upload
+   * ({@link #SUBMISSION_METHOD_MANUAL_ACK}), a manual submission with no receipt
+   * ({@link #SUBMISSION_METHOD_MANUAL_NO_RECEIPT}, paired with {@code declarationStatus =
+   * "submitted"}), and a real AEAT telematic submission ({@link #SUBMISSION_METHOD_AEAT_TELEMATIC},
+   * set server-side only — see {@code Fiscal303SubmissionSupport#persistSuccessfulSubmission}).
+   * Nullable: existing rows predate this feature and simply have no value, which is correct (not
+   * an error state). Freeform string, no AD Reference/List — same precedent as the pre-existing
+   * {@link #PROPERTY_DECLARATION_STATUS} column.
+   */
+  static final String PROPERTY_SUBMISSION_METHOD = "submissionMethod";
 
   /**
    * Entity name (= DB table name) for the AEAT validation-error rows persisted on every Modelo
@@ -120,6 +147,8 @@ class FiscalDeclCrudHandler {
   private static final String STATUS_KEY        = "status";
   private static final String FILE_NAME_KEY     = "fileName";
   private static final String FILE_EXTERNAL_KEY = "fileExternal";
+  private static final String MANUAL_DATA_KEY   = "manualData";
+  private static final String SUBMISSION_METHOD_KEY = "submissionMethod";
   private static final String CODE_KEY          = "code";
   private static final String MESSAGE_KEY       = "message";
   private static final String SEVERITY_KEY      = "severity";
@@ -207,13 +236,77 @@ class FiscalDeclCrudHandler {
     boolean hasFileName  = body.has(FILE_NAME_KEY);
     String  fileName     = hasFileName && !body.isNull(FILE_NAME_KEY)
         ? body.getString(FILE_NAME_KEY) : null;
+    // manualData is the only optional field here that is an arbitrary nested object rather than
+    // a scalar the caller can't realistically malform, so it gets its own defensive setter
+    // (see setManualDataIfPresent) instead of the getString/optBoolean one-liners above.
+    //
+    // Unlike fileName above (hasFileName = body.has(...), no null-check — an explicit null there
+    // DOES clear the stored value via decl.set(..., null)), an explicit "manualData": null is
+    // treated as "not sent" rather than "clear the value": manualData is autosaved from ephemeral
+    // frontend state, so a caller wanting to reset it must send an empty object rather than null —
+    // treating null as "clear" would risk silently wiping real user data from a stray/racy
+    // autosave call. This asymmetry with fileName is intentional, not an oversight.
+    boolean hasManualData = body.has(MANUAL_DATA_KEY) && !body.isNull(MANUAL_DATA_KEY);
+    // submissionMethod (ETP-4755) follows the exact same "explicit null means not sent" precedent
+    // as manualData above, not fileName's "explicit null clears it" one: this field is set once,
+    // at the same time as the status change that makes the declaration "Presentado" (see
+    // FmOverlays.jsx's PresentModal / handlePresent call sites), and is never meant to be wiped by
+    // a stray/racy PUT that happens to include a null for it.
+    boolean hasSubmissionMethod = body.has(SUBMISSION_METHOD_KEY) && !body.isNull(SUBMISSION_METHOD_KEY);
+    String submissionMethod = hasSubmissionMethod ? body.getString(SUBMISSION_METHOD_KEY) : null;
 
-    if (hasStatus)   decl.set(PROPERTY_DECLARATION_STATUS, status);
-    if (hasFileExt)  decl.set(PROPERTY_FILE_EXTERNAL, fileExternal);
-    if (hasFileName) decl.set(PROPERTY_DECLARATION_FILE_NAME, fileName);
+    if (hasStatus)     decl.set(PROPERTY_DECLARATION_STATUS, status);
+    if (hasFileExt)    decl.set(PROPERTY_FILE_EXTERNAL, fileExternal);
+    if (hasFileName)   decl.set(PROPERTY_DECLARATION_FILE_NAME, fileName);
+    if (hasSubmissionMethod) decl.set(PROPERTY_SUBMISSION_METHOD, submissionMethod);
+    boolean manualDataApplied = !hasManualData || setManualDataIfPresent(decl, body);
     decl.set(PROPERTY_UPDATED_BY, OBContext.getOBContext().getUser());
     OBDal.getInstance().commitAndClose();
-    response.getWriter().write("{\"ok\":true}");
+    if (manualDataApplied) {
+      response.getWriter().write("{\"ok\":true}");
+    } else {
+      response.getWriter().write("{\"ok\":true,\"manualDataApplied\":false}");
+    }
+  }
+
+  /**
+   * Persists the {@code manualData} PUT field — a nested JSON object combining the frontend's
+   * manually-entered Modelo 303 identification checks and box-value overrides — as a compact
+   * JSON string in the {@code manual_data} column. Called only when the caller sent a non-null
+   * {@code manualData}; {@link #handleDeclPut} is otherwise deliberately silent about fields the
+   * caller didn't send.
+   *
+   * <p>Deliberately does NOT throw on a malformed {@code manualData} value: every other optional
+   * field in {@link #handleDeclPut} is a scalar (string/boolean) that the caller can't
+   * realistically send malformed, so that method has no precedent for failing the whole PUT over
+   * one bad field, and this shape (an arbitrary tenant-authored JSON blob persisted into a TEXT
+   * column) already degrades gracefully elsewhere in this package — see
+   * {@code NeoFiscalModelsCatalogService#getActiveModels()} discarding an unparsable stored value
+   * rather than surfacing an error. Skipping (with a warning log) keeps that same tolerance on
+   * the write side: a malformed {@code manualData} simply leaves the previously stored value
+   * untouched instead of 500ing/400ing an otherwise-valid status/fileName/fileExternal update.
+   *
+   * <p>Returns {@code false} only in that skip case, so {@link #handleDeclPut} can tell the
+   * frontend the rest of the PUT applied but this one field silently didn't (see the
+   * {@code manualDataApplied} response flag) instead of unconditionally claiming full success.
+   *
+   * @return {@code true} if {@code manualData} was applied (this method is only called when the
+   *         field is present and non-null); {@code false} if it was present but malformed and the
+   *         write was skipped.
+   */
+  private boolean setManualDataIfPresent(BaseOBObject decl, JSONObject body) {
+    try {
+      decl.set(PROPERTY_MANUAL_DATA, body.getJSONObject(MANUAL_DATA_KEY).toString());
+      return true;
+    } catch (JSONException e) {
+      // Thrown by getJSONObject() when manualData is absent (can't happen here — the caller only
+      // invokes this when body.has(MANUAL_DATA_KEY) is true) or, the real case, when its value is
+      // not a JSON object (e.g. a string or a JSON array) — jettison's JSONObject#getJSONObject
+      // only ever throws JSONException (verified against its bytecode), so this catch is
+      // deliberately narrow: it swallows parse/type-mismatch failures only, nothing else.
+      log.warn("Ignoring malformed manualData in PUT /fiscal303/declarations: {}", e.getMessage());
+      return false;
+    }
   }
 
   private void handleDeclDelete(HttpServletRequest request, HttpServletResponse response)
@@ -420,7 +513,36 @@ class FiscalDeclCrudHandler {
     o.put(FILE_EXTERNAL_KEY, Boolean.TRUE.equals(decl.get(PROPERTY_FILE_EXTERNAL)));
     o.put("updatedAt",    updated instanceof java.util.Date
         ? ((java.util.Date) updated).getTime() : 0L);
+    o.put(MANUAL_DATA_KEY, parseManualData(decl));
+    String submissionMethod = asString(decl.get(PROPERTY_SUBMISSION_METHOD));
+    o.put(SUBMISSION_METHOD_KEY, StringUtils.isNotBlank(submissionMethod)
+        ? submissionMethod : JSONObject.NULL);
     return o;
+  }
+
+  /**
+   * Parses the stored {@code manual_data} JSON string back into a nested {@link JSONObject} for
+   * the API response, so the frontend never has to double-parse a JSON-string-inside-JSON. Falls
+   * back to an empty object — never throws — for a null/blank stored value (declaration created
+   * before this field existed, or never touched) AND for a corrupted/malformed stored string,
+   * mirroring the same graceful-degradation-to-{@code {}} convention already used by
+   * {@code NeoFiscalModelsCatalogService#getActiveModels()} for this exact "arbitrary JSON blob
+   * in a persisted text field" shape.
+   *
+   * <p>Catches {@link JSONException} specifically rather than a bare {@code Exception}: jettison's
+   * {@code new JSONObject(String)} constructor declares only {@code throws JSONException} (verified
+   * against its bytecode — the same guarantee {@link #setManualDataIfPresent} relies on), so a
+   * malformed stored string can only ever surface as that one checked type here. A raw
+   * {@code decl.get(...)} that returned something other than a String would already have failed
+   * earlier, in {@link #asString}, not in this parse step.
+   */
+  private static JSONObject parseManualData(BaseOBObject decl) {
+    String raw = asString(decl.get(PROPERTY_MANUAL_DATA));
+    try {
+      return StringUtils.isNotBlank(raw) ? new JSONObject(raw) : new JSONObject();
+    } catch (JSONException e) {
+      return new JSONObject();
+    }
   }
 
   private static String getRelatedId(BaseOBObject decl, String property) {
