@@ -33,6 +33,7 @@ import java.math.BigDecimal;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
+import java.util.Arrays;
 import java.util.Collections;
 
 import org.hibernate.Session;
@@ -50,6 +51,7 @@ import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.common.invoice.Invoice;
 import org.openbravo.model.common.invoice.InvoiceLine;
 import org.openbravo.model.common.order.Order;
+import org.openbravo.model.common.order.OrderLine;
 import org.openbravo.model.financialmgmt.tax.TaxRate;
 
 /**
@@ -134,6 +136,88 @@ public class InvoiceFromOrderSupportTest {
 
       verify(il).setGrossAmount(new BigDecimal("10.00"));
       verify(dal).save(il);
+    }
+  }
+
+  // ── copyLineDiscountsFromOrder (ETP-4006 / ETP-4780) ─────────────────────
+  //
+  // Moved here from CreateDraftInvoiceHandlerTest so both CreateDraftInvoiceHandler
+  // (sales) and CreatePurchaseInvoiceHandler (purchase) share coverage of the
+  // discount-copy logic itself; each handler's test class separately verifies
+  // that it delegates to getSupport().copyLineDiscountsFromOrder(...).
+
+  /**
+   * Copies the source order line's discount onto an invoice line that has none yet,
+   * skips a source line with a zero discount, and never overwrites an invoice line
+   * that already carries a non-zero {@code EM_Etgo_Discount} (set explicitly elsewhere).
+   * Exercises the exact regression scenario from ETP-4006, now against the shared
+   * {@link InvoiceFromOrderSupport} implementation reused by ETP-4780.
+   */
+  @Test
+  public void testCopyLineDiscountsFromOrderCopiesOnlyMissingInvoiceDiscounts() {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      OrderLine discountedOrderLine = mock(OrderLine.class);
+      when(discountedOrderLine.getDiscount()).thenReturn(new BigDecimal("10"));
+
+      InvoiceLine emptyInvoiceLine = mock(InvoiceLine.class);
+      when(emptyInvoiceLine.getSalesOrderLine()).thenReturn(discountedOrderLine);
+      when(emptyInvoiceLine.getEtgoDiscount()).thenReturn(null);
+
+      OrderLine zeroDiscountOrderLine = mock(OrderLine.class);
+      when(zeroDiscountOrderLine.getDiscount()).thenReturn(BigDecimal.ZERO);
+
+      InvoiceLine zeroDiscountInvoiceLine = mock(InvoiceLine.class);
+      when(zeroDiscountInvoiceLine.getSalesOrderLine()).thenReturn(zeroDiscountOrderLine);
+      when(zeroDiscountInvoiceLine.getEtgoDiscount()).thenReturn(null);
+
+      OrderLine alreadyCopiedOrderLine = mock(OrderLine.class);
+      when(alreadyCopiedOrderLine.getDiscount()).thenReturn(new BigDecimal("7"));
+
+      InvoiceLine existingDiscountInvoiceLine = mock(InvoiceLine.class);
+      when(existingDiscountInvoiceLine.getSalesOrderLine()).thenReturn(alreadyCopiedOrderLine);
+      when(existingDiscountInvoiceLine.getEtgoDiscount()).thenReturn(new BigDecimal("3"));
+
+      Invoice invoice = mock(Invoice.class);
+      when(invoice.getInvoiceLineList()).thenReturn(Arrays.asList(
+          emptyInvoiceLine,
+          zeroDiscountInvoiceLine,
+          existingDiscountInvoiceLine));
+
+      new InvoiceFromOrderSupport().copyLineDiscountsFromOrder(invoice);
+
+      verify(emptyInvoiceLine).setEtgoDiscount(new BigDecimal("10"));
+      verify(dal).save(emptyInvoiceLine);
+      verify(zeroDiscountInvoiceLine, never()).setEtgoDiscount(any(BigDecimal.class));
+      verify(existingDiscountInvoiceLine, never()).setEtgoDiscount(any(BigDecimal.class));
+      verify(dal).flush();
+    }
+  }
+
+  /**
+   * No source order line at all (invoice line not linked to any order, e.g. a manually
+   * added line) must be skipped without throwing, and the method must not flush when
+   * nothing was copied.
+   */
+  @Test
+  public void testCopyLineDiscountsFromOrderSkipsLineWithNoSourceOrderLine() {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      InvoiceLine orphanLine = mock(InvoiceLine.class);
+      when(orphanLine.getSalesOrderLine()).thenReturn(null);
+
+      Invoice invoice = mock(Invoice.class);
+      when(invoice.getInvoiceLineList()).thenReturn(Collections.singletonList(orphanLine));
+
+      new InvoiceFromOrderSupport().copyLineDiscountsFromOrder(invoice);
+
+      verify(orphanLine, never()).setEtgoDiscount(any(BigDecimal.class));
+      verify(dal, never()).save(any());
+      verify(dal, never()).flush();
     }
   }
 

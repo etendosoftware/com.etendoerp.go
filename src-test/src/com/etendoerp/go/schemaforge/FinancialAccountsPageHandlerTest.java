@@ -24,6 +24,7 @@ import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anySet;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
@@ -61,9 +62,11 @@ import org.mockito.MockedStatic;
 import org.mockito.Mockito;
 import org.mockito.junit.MockitoJUnitRunner;
 import org.openbravo.dal.core.OBContext;
+import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.enterprise.Organization;
+import org.openbravo.model.common.geography.Country;
 
 import com.etendoerp.go.schemaforge.FinancialAccountsPageHandler.AccountRow;
 import com.etendoerp.go.schemaforge.FinancialAccountsPageHandler.Currency;
@@ -166,21 +169,35 @@ public class FinancialAccountsPageHandlerTest {
     doReturn(pending).when(handler).loadPendingByAccount(eq(CLIENT_ID), eq(ORGS));
     doReturn(withTransactions).when(handler).loadAccountsWithTransactions(eq(CLIENT_ID), eq(ORGS));
 
-    NeoResponse response = handler.buildPayload(CLIENT_ID, ORGS);
+    // ETP-4896: buildPayload also attaches the countryIbanRules catalog, built by
+    // FinancialAccountCountrySupport straight from OBDal (not a spied seam on this handler).
+    FinancialAccountCountrySupport.clearIbanRulesCacheForTests();
+    try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      @SuppressWarnings("unchecked")
+      OBCriteria<Country> countryCriteria = mock(OBCriteria.class);
+      when(dal.createCriteria(Country.class)).thenReturn(countryCriteria);
+      when(countryCriteria.list()).thenReturn(Collections.emptyList());
 
-    assertEquals(200, response.getHttpStatus());
-    JSONObject body = response.getBody();
-    assertNotNull("response envelope must exist", body.optJSONObject("response"));
-    JSONObject data = body.getJSONObject("response").getJSONObject("data");
-    assertEquals(1, data.getJSONArray("accounts").length());
-    assertEquals(4, data.getJSONArray("accounts").getJSONObject(0).getInt("pendingCount"));
-    assertTrue("account with a registered transaction serialises hasTransactions=true",
-        data.getJSONArray("accounts").getJSONObject(0).getBoolean("hasTransactions"));
-    assertNotNull("summary present", data.optJSONObject("summary"));
+      NeoResponse response = handler.buildPayload(CLIENT_ID, ORGS);
 
-    verify(handler).loadAccounts(CLIENT_ID, ORGS);
-    verify(handler).loadPendingByAccount(CLIENT_ID, ORGS);
-    verify(handler).loadAccountsWithTransactions(CLIENT_ID, ORGS);
+      assertEquals(200, response.getHttpStatus());
+      JSONObject body = response.getBody();
+      assertNotNull("response envelope must exist", body.optJSONObject("response"));
+      JSONObject data = body.getJSONObject("response").getJSONObject("data");
+      assertEquals(1, data.getJSONArray("accounts").length());
+      assertEquals(4, data.getJSONArray("accounts").getJSONObject(0).getInt("pendingCount"));
+      assertTrue("account with a registered transaction serialises hasTransactions=true",
+          data.getJSONArray("accounts").getJSONObject(0).getBoolean("hasTransactions"));
+      assertNotNull("summary present", data.optJSONObject("summary"));
+      assertTrue("countryIbanRules is a sibling of accounts/summary, not per-account",
+          data.has("countryIbanRules"));
+
+      verify(handler).loadAccounts(CLIENT_ID, ORGS);
+      verify(handler).loadPendingByAccount(CLIENT_ID, ORGS);
+      verify(handler).loadAccountsWithTransactions(CLIENT_ID, ORGS);
+    }
   }
 
   /**
@@ -202,11 +219,21 @@ public class FinancialAccountsPageHandlerTest {
     doReturn(Collections.emptySet()).when(handler)
         .loadAccountsWithTransactions(eq(CLIENT_ID), eq(ORGS));
 
-    NeoResponse response = handler.buildPayload(CLIENT_ID, ORGS);
+    FinancialAccountCountrySupport.clearIbanRulesCacheForTests();
+    try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      @SuppressWarnings("unchecked")
+      OBCriteria<Country> countryCriteria = mock(OBCriteria.class);
+      when(dal.createCriteria(Country.class)).thenReturn(countryCriteria);
+      when(countryCriteria.list()).thenReturn(Collections.emptyList());
 
-    JSONObject data = response.getBody().getJSONObject("response").getJSONObject("data");
-    assertFalse("account with no registered transactions serialises hasTransactions=false",
-        data.getJSONArray("accounts").getJSONObject(0).getBoolean("hasTransactions"));
+      NeoResponse response = handler.buildPayload(CLIENT_ID, ORGS);
+
+      JSONObject data = response.getBody().getJSONObject("response").getJSONObject("data");
+      assertFalse("account with no registered transactions serialises hasTransactions=false",
+          data.getJSONArray("accounts").getJSONObject(0).getBoolean("hasTransactions"));
+    }
   }
 
   // ── buildSummary() ───────────────────────────────────────────────────────
@@ -336,6 +363,25 @@ public class FinancialAccountsPageHandlerTest {
     assertFalse(row.getBoolean("isDefault"));
     assertFalse("account absent from the transactions set serialises hasTransactions=false",
         row.getBoolean("hasTransactions"));
+    assertEquals("the account() fixture has no country — serialises as \"\", not \"null\" "
+        + "(ETP-4896)", "", row.getString("countryId"));
+    assertEquals("", row.getString("countryIso"));
+    assertEquals("", row.getString("countryName"));
+  }
+
+  /** A row WITH a country (ETP-4896) serialises countryId/countryIso/countryName from it. */
+  @Test
+  public void testBuildAccountsArrayEmitsCountryWhenRowHasOne() throws Exception {
+    AccountRow withCountry = account("acc-1", "BBVA", "B", new BigDecimal("100.00"), "EUR");
+    withCountry.country = new FinancialAccountsPageHandler.CountryRef("106", "ES", "Spain");
+
+    JSONArray arr = handler.buildAccountsArray(Arrays.asList(withCountry), Collections.emptyMap(),
+        Collections.emptySet());
+
+    JSONObject row = arr.getJSONObject(0);
+    assertEquals("106", row.getString("countryId"));
+    assertEquals("ES", row.getString("countryIso"));
+    assertEquals("Spain", row.getString("countryName"));
   }
 
   /**
@@ -794,6 +840,12 @@ public class FinancialAccountsPageHandlerTest {
     when(rs.getString(8)).thenReturn("Y", "N");
     // Column 9 (fa.isactive): first row active ("Y"), second archived ("N").
     when(rs.getString(9)).thenReturn("Y", "N");
+    // Columns 19-21 (ETP-4896, appended at the END of the SELECT — see ACCOUNTS_SQL's own
+    // comment on why): first row has a country (a Bank account with an IBAN), second does not
+    // (e.g. a Cash account, or a Bank account never given one).
+    when(rs.getString(19)).thenReturn("106", null);
+    when(rs.getString(20)).thenReturn("ES", null);
+    when(rs.getString(21)).thenReturn("Spain", null);
 
     try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
       OBDal dal = mock(OBDal.class);
@@ -812,12 +864,18 @@ public class FinancialAccountsPageHandlerTest {
       assertTrue("first row is default", first.isDefault);
 
       assertTrue("first row maps column 9 'Y' to active", first.active);
+      assertNotNull("first row maps columns 19-21 into a CountryRef", first.country);
+      assertEquals("106", first.country.id);
+      assertEquals("ES", first.country.iso);
+      assertEquals("Spain", first.country.name);
 
       AccountRow second = rows.get(1);
       assertEquals("acc-2", second.id);
       assertEquals(0, BigDecimal.ZERO.compareTo(second.currentBalance));
       assertFalse("second row is not default", second.isDefault);
       assertFalse("second row maps column 9 'N' to inactive", second.active);
+      assertNull("a null column 19 (no C_Country_ID) leaves row.country null, not a CountryRef "
+          + "full of blanks", second.country);
 
       verify(ps).setString(1, CLIENT_ID);
       verify(ps).setArray(2, orgArray);
@@ -1160,6 +1218,177 @@ public class FinancialAccountsPageHandlerTest {
       Set<String> result = handler.loadAccountsWithTransactions(CLIENT_ID, ORGS);
 
       assertTrue("expected empty set", result.isEmpty());
+    }
+  }
+
+  // ── loadDeleteBlockersByAccount() (ETP-4871) ─────────────────────────────
+
+  /**
+   * Verifies that {@code loadDeleteBlockersByAccount} maps each SQL reason code to the exact same
+   * {@code REASON_*} wording {@link FinancialAccountDeleteSupport} uses for the DELETE 409
+   * message — the two must never drift apart, since {@code FinancialAccountHandler#deleteAccount} and this
+   * batched, page-scoped loader independently name the same blockers to two different UI surfaces
+   * (the 409 error and the list's {@code deleteBlockedReason} field).
+   *
+   * @throws Exception if the mocked JDBC chain fails
+   */
+  @Test
+  public void testLoadDeleteBlockersByAccountReasonWordingMatchesHandlerConstants() throws Exception {
+    Connection conn = mock(Connection.class);
+    PreparedStatement ps = mock(PreparedStatement.class);
+    ResultSet rs = mock(ResultSet.class);
+
+    when(conn.prepareStatement(anyString())).thenReturn(ps);
+    when(conn.createArrayOf(eq("varchar"), any())).thenReturn(mock(Array.class));
+    when(ps.executeQuery()).thenReturn(rs);
+    when(rs.next()).thenReturn(true, false);
+    when(rs.getString(1)).thenReturn("acc-1");
+    when(rs.getString(2)).thenReturn("TRANSACTIONS");
+
+    try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.getConnection()).thenReturn(conn);
+
+      Map<String, List<String>> result = handler.loadDeleteBlockersByAccount(CLIENT_ID, ORGS);
+
+      // Same constant the DELETE 409 message uses for the "has transactions" blocker.
+      assertEquals(Collections.singletonList(FinancialAccountDeleteSupport.REASON_TRANSACTIONS),
+          result.get("acc-1"));
+    }
+  }
+
+  /**
+   * Verifies that reasons are aggregated per account id, deduplicated (a duplicate row for the
+   * same account+reason — e.g. two active transactions — must not repeat the reason text), and
+   * that different accounts do not leak reasons into one another.
+   *
+   * @throws Exception if the mocked JDBC chain fails
+   */
+  @Test
+  public void testLoadDeleteBlockersByAccountAggregatesMultipleReasonsWithoutDuplicates()
+      throws Exception {
+    Connection conn = mock(Connection.class);
+    PreparedStatement ps = mock(PreparedStatement.class);
+    ResultSet rs = mock(ResultSet.class);
+
+    when(conn.prepareStatement(anyString())).thenReturn(ps);
+    when(conn.createArrayOf(eq("varchar"), any())).thenReturn(mock(Array.class));
+    when(ps.executeQuery()).thenReturn(rs);
+    // acc-1 appears twice for TRANSACTIONS (e.g. two active transaction rows) and once for
+    // BANK_CONNECTION; acc-2 appears once for RECONCILIATIONS.
+    when(rs.next()).thenReturn(true, true, true, true, false);
+    when(rs.getString(1)).thenReturn("acc-1", "acc-1", "acc-1", "acc-2");
+    when(rs.getString(2)).thenReturn("TRANSACTIONS", "TRANSACTIONS", "BANK_CONNECTION", "RECONCILIATIONS");
+
+    try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.getConnection()).thenReturn(conn);
+
+      Map<String, List<String>> result = handler.loadDeleteBlockersByAccount(CLIENT_ID, ORGS);
+
+      assertEquals(2, result.size());
+      List<String> acc1Reasons = result.get("acc-1");
+      // The duplicate TRANSACTIONS row is deduplicated, so acc-1 has exactly two distinct
+      // reasons, not three.
+      assertEquals(2, acc1Reasons.size());
+      assertTrue(acc1Reasons.contains(FinancialAccountDeleteSupport.REASON_TRANSACTIONS));
+      assertTrue(acc1Reasons.contains(FinancialAccountDeleteSupport.REASON_BANK_CONNECTION));
+      assertEquals(Collections.singletonList(FinancialAccountDeleteSupport.REASON_RECONCILIATIONS),
+          result.get("acc-2"));
+    }
+  }
+
+  /**
+   * Verifies that a reason code the reason-map does not recognise (e.g. a future branch added to
+   * the SQL without a matching entry in {@code DELETE_BLOCKER_REASON_BY_CODE}) is defensively
+   * skipped rather than producing a phantom blocker with a {@code null} reason string.
+   *
+   * @throws Exception if the mocked JDBC chain fails
+   */
+  @Test
+  public void testLoadDeleteBlockersByAccountIgnoresUnrecognizedReasonCode() throws Exception {
+    Connection conn = mock(Connection.class);
+    PreparedStatement ps = mock(PreparedStatement.class);
+    ResultSet rs = mock(ResultSet.class);
+
+    when(conn.prepareStatement(anyString())).thenReturn(ps);
+    when(conn.createArrayOf(eq("varchar"), any())).thenReturn(mock(Array.class));
+    when(ps.executeQuery()).thenReturn(rs);
+    when(rs.next()).thenReturn(true, false);
+    when(rs.getString(1)).thenReturn("acc-1");
+    when(rs.getString(2)).thenReturn("SOME_FUTURE_CODE_NOT_YET_MAPPED");
+
+    try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.getConnection()).thenReturn(conn);
+
+      Map<String, List<String>> result = handler.loadDeleteBlockersByAccount(CLIENT_ID, ORGS);
+
+      assertTrue("an unrecognized code must not produce a phantom blocker", result.isEmpty());
+    }
+  }
+
+  /**
+   * Verifies that {@code loadDeleteBlockersByAccount} returns an empty map when no row in scope
+   * would block a hard delete — the state of a freshly-created, untouched account.
+   *
+   * @throws Exception if the mocked JDBC chain fails
+   */
+  @Test
+  public void testLoadDeleteBlockersByAccountReturnsEmptyMapWhenNoRows() throws Exception {
+    Connection conn = mock(Connection.class);
+    PreparedStatement ps = mock(PreparedStatement.class);
+    ResultSet rs = mock(ResultSet.class);
+
+    when(conn.prepareStatement(anyString())).thenReturn(ps);
+    when(conn.createArrayOf(eq("varchar"), any())).thenReturn(mock(Array.class));
+    when(ps.executeQuery()).thenReturn(rs);
+    when(rs.next()).thenReturn(false);
+
+    try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.getConnection()).thenReturn(conn);
+
+      assertTrue(handler.loadDeleteBlockersByAccount(CLIENT_ID, ORGS).isEmpty());
+    }
+  }
+
+  /**
+   * Verifies that all ten {@code UNION ALL} branches of {@code DELETE_BLOCKERS_BY_ACCOUNT_SQL} are
+   * bound with (clientId, orgs) — ten {@code setString} + ten {@code setArray} calls reusing a
+   * single {@code java.sql.Array} instance, mirroring {@code loadPendingByAccount}'s own
+   * multi-branch binding test. A missed branch would leave a placeholder unset and the driver
+   * would throw at execution time.
+   *
+   * @throws Exception if the mocked JDBC chain fails
+   */
+  @Test
+  public void testLoadDeleteBlockersByAccountBindsAllTenUnionBranches() throws Exception {
+    Connection conn = mock(Connection.class);
+    PreparedStatement ps = mock(PreparedStatement.class);
+    ResultSet rs = mock(ResultSet.class);
+    Array orgArray = mock(Array.class);
+
+    when(conn.prepareStatement(anyString())).thenReturn(ps);
+    when(conn.createArrayOf(eq("varchar"), any())).thenReturn(orgArray);
+    when(ps.executeQuery()).thenReturn(rs);
+    when(rs.next()).thenReturn(false);
+
+    try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.getConnection()).thenReturn(conn);
+
+      handler.loadDeleteBlockersByAccount(CLIENT_ID, ORGS);
+
+      verify(ps, times(10)).setString(anyInt(), eq(CLIENT_ID));
+      verify(ps, times(10)).setArray(anyInt(), eq(orgArray));
+      // One array built and bound ten times, not ten equivalent arrays.
+      verify(conn, times(1)).createArrayOf(eq("varchar"), any());
     }
   }
 

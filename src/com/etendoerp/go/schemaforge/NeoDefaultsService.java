@@ -1292,9 +1292,13 @@ public class NeoDefaultsService {
     if (resolved == null) {
       return;
     }
-    // FK columns with legacy "0" default — OBDal cannot resolve "0" as an entity ID.
-    // For doctype columns, try to resolve the actual default from C_DocType table.
-    if ("0".equals(String.valueOf(resolved))
+    // FK columns with a legacy "no selection" sentinel default ("0" or "-1") — OBDal cannot
+    // resolve either as a real entity ID (ETP-4904: "-1" is Etendo Classic's UI sentinel for
+    // "nothing selected" and is never meant to be persisted as a real FK value; it blew up NEO
+    // Headless inserts with "New object ... refered to but not present in the import set").
+    // For doctype columns, try to resolve the actual default from C_DocType table first.
+    String resolvedStr = String.valueOf(resolved);
+    if (("0".equals(resolvedStr) || "-1".equals(resolvedStr))
         && col.getDBColumnName().toUpperCase().endsWith("_ID")) {
       String docTypeId = DocTypeResolver.resolveDefaultDocTypeId(col, ctx);
       if (docTypeId != null) {
@@ -1302,7 +1306,7 @@ public class NeoDefaultsService {
         log.debug("Resolved doctype default for {}: {}", propName, docTypeId);
         return;
       }
-      log.debug("Skipping FK default '0' for {}", propName);
+      log.debug("Skipping FK default '{}' for {}", resolvedStr, propName);
       return;
     }
     // Coerce numeric String defaults to their proper Java type so DAL validation passes.

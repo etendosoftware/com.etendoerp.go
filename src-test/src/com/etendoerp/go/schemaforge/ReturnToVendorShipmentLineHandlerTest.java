@@ -22,7 +22,9 @@ import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -36,7 +38,11 @@ import org.codehaus.jettison.json.JSONObject;
 import org.junit.Test;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
+import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.common.enterprise.Locator;
+import org.openbravo.model.common.enterprise.Warehouse;
+import org.openbravo.model.materialmgmt.transaction.ShipmentInOut;
 
 /**
  * Unit tests for {@link ReturnToVendorShipmentLineHandler}.
@@ -370,6 +376,123 @@ public class ReturnToVendorShipmentLineHandlerTest {
           .getJSONObject("response").getJSONArray("data").getJSONObject(0);
       assertFalse("orderQuantity should not be present", rec.has("orderQuantity"));
       assertFalse("productCode should not be present", rec.has("productCode"));
+    }
+  }
+
+  // ── handle() — storageBin default injection (ETP-4863) ───────────────────
+
+  /**
+   * Reproduces ETP-4863: confirming a Return to Vendor Shipment (Devolución de Compra) with
+   * the header on the PRINCIPAL warehouse must never leave the created line's {@code
+   * storageBin} pointing at a different (e.g. stale session-cached "secondary") warehouse.
+   * Unlike {@link GoodsReceiptLineHandler} and {@link GoodsShipmentLineHandler}, this handler
+   * implements {@link NeoHandler} directly (does not extend {@code AbstractInOutLineHandler}),
+   * so it never inherited the ETP-4671 locator-defaulting fix. handle() must default {@code
+   * storageBin} to the header warehouse's own default locator on POST when missing, exactly
+   * like the other two M_InOutLine-based line handlers.
+   */
+  @SuppressWarnings("unchecked")
+  @Test
+  public void testHandlePostInjectsWarehouseDefaultLocatorWhenStorageBinMissing() throws Exception {
+    JSONObject body = new JSONObject().put("parentId", "return-1").put("product", "prod-1");
+    NeoContext ctx = NeoContext.builder().httpMethod("POST").endpointType(NeoEndpointType.CRUD)
+        .requestBody(body).build();
+
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      ShipmentInOut header = mock(ShipmentInOut.class);
+      Warehouse warehouse = mock(Warehouse.class);
+      Locator locator = mock(Locator.class);
+      when(dal.get(eq(ShipmentInOut.class), eq("return-1"))).thenReturn(header);
+      when(header.getWarehouse()).thenReturn(warehouse);
+      when(warehouse.getId()).thenReturn("wh-principal");
+      when(locator.getId()).thenReturn("loc-default-wh-principal");
+      OBCriteria criteria = mock(OBCriteria.class);
+      when(dal.createCriteria(Locator.class)).thenReturn(criteria);
+      when(criteria.add(any())).thenReturn(criteria);
+      when(criteria.addOrder(any())).thenReturn(criteria);
+      when(criteria.setMaxResults(1)).thenReturn(criteria);
+      when(criteria.uniqueResult()).thenReturn(locator);
+
+      assertNull(HANDLER.handle(ctx));
+      assertEquals("A return-to-vendor-shipment line's storageBin must always resolve to the "
+          + "header warehouse's own default locator, never to a stale session-cached warehouse",
+          "loc-default-wh-principal", body.getString("storageBin"));
+    }
+  }
+
+  /**
+   * handle() POST must not override an explicit storageBin already supplied on the request
+   * when it ALREADY belongs to the header's warehouse (ETP-4863 BUG-1: the guarantee is about
+   * the warehouse, not about forcing every line onto the warehouse's single "default" locator).
+   */
+  @SuppressWarnings("unchecked")
+  @Test
+  public void testHandlePostDoesNotOverrideExplicitStorageBin() throws Exception {
+    JSONObject body = new JSONObject().put("parentId", "return-1")
+        .put("storageBin", "loc-explicit");
+    NeoContext ctx = NeoContext.builder().httpMethod("POST").endpointType(NeoEndpointType.CRUD)
+        .requestBody(body).build();
+
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      ShipmentInOut header = mock(ShipmentInOut.class);
+      Warehouse warehouse = mock(Warehouse.class);
+      when(dal.get(eq(ShipmentInOut.class), eq("return-1"))).thenReturn(header);
+      when(header.getWarehouse()).thenReturn(warehouse);
+      when(warehouse.getId()).thenReturn("wh-1");
+      Locator existingLocator = mock(Locator.class);
+      when(dal.get(eq(Locator.class), eq("loc-explicit"))).thenReturn(existingLocator);
+      when(existingLocator.getWarehouse()).thenReturn(warehouse);
+
+      assertNull(HANDLER.handle(ctx));
+      assertEquals("loc-explicit", body.getString("storageBin"));
+      Mockito.verify(dal, Mockito.never()).createCriteria(Locator.class);
+    }
+  }
+
+  /**
+   * Interaction edge case (QA): this handler is the only one of the 4 M_InOutLine-based line
+   * handlers whose {@code handle()} runs BOTH the new ETP-4863 locator guard AND the
+   * pre-existing movementQuantity-negation logic on the same POST. Neither the "inject locator"
+   * test nor the "negate qty" tests above exercise a realistic create payload carrying both a
+   * missing {@code storageBin} and a positive {@code movementQuantity} at once — this proves
+   * the two behaviors compose correctly (both fire, neither short-circuits the other) instead
+   * of assuming it from two tests that never overlap on the same request body.
+   */
+  @SuppressWarnings("unchecked")
+  @Test
+  public void testHandlePostInjectsLocatorAndNegatesQuantityTogether() throws Exception {
+    JSONObject body = new JSONObject().put("parentId", "return-1")
+        .put("product", "prod-1").put("movementQuantity", 6.0);
+    NeoContext ctx = NeoContext.builder().httpMethod("POST").endpointType(NeoEndpointType.CRUD)
+        .requestBody(body).build();
+
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      ShipmentInOut header = mock(ShipmentInOut.class);
+      Warehouse warehouse = mock(Warehouse.class);
+      Locator locator = mock(Locator.class);
+      when(dal.get(eq(ShipmentInOut.class), eq("return-1"))).thenReturn(header);
+      when(header.getWarehouse()).thenReturn(warehouse);
+      when(warehouse.getId()).thenReturn("wh-principal");
+      when(locator.getId()).thenReturn("loc-default-wh-principal");
+      OBCriteria criteria = mock(OBCriteria.class);
+      when(dal.createCriteria(Locator.class)).thenReturn(criteria);
+      when(criteria.add(any())).thenReturn(criteria);
+      when(criteria.addOrder(any())).thenReturn(criteria);
+      when(criteria.setMaxResults(1)).thenReturn(criteria);
+      when(criteria.uniqueResult()).thenReturn(locator);
+
+      assertNull(HANDLER.handle(ctx));
+
+      assertEquals("loc-default-wh-principal", body.getString("storageBin"));
+      assertEquals(-6.0, body.getDouble("movementQuantity"), 0.0001);
+      assertTrue("product must be kept for POST (only PUT/PATCH strip it)",
+          body.has("product"));
     }
   }
 }

@@ -20,6 +20,7 @@ package com.etendoerp.go.schemaforge;
 import java.math.BigDecimal;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -72,9 +73,15 @@ import com.etendoerp.psd2.bank.integration.utils.ProviderCatalogUtils;
  * {@code null}, letting the generic CRUD service persist within its single
  * transaction. Injecting {@code country} before the insert is mandatory because
  * the row-level trigger {@code FIN_FINANCIAL_ACCOUNT_TRG2} ({@code @COUNTRY_IBAN@})
- * rejects a bank account that carries an IBAN without a country. On DELETE the
- * hook short-circuits with a soft-archive ({@code IsActive='N'}) to preserve the
- * former archive semantics and avoid FK violations from a hard delete.
+ * rejects a bank account that carries an IBAN without a country.
+ *
+ * <p>ETP-4871: DELETE now attempts a real hard delete (see {@link #deleteAccount}) —
+ * every FK from another table into {@code FIN_Financial_Account} is RESTRICT (no
+ * cascade), so the delete is only allowed once {@link FinancialAccountDeleteSupport#findDeleteBlockers} proves
+ * nothing depends on the account. The former soft-archive ({@code IsActive='N'})
+ * semantics still exist but moved onto the update path: a {@code PATCH
+ * {"active": false}} runs the same open-reconciliations guard the old DELETE-based
+ * archive used to run (see {@link #validateAndEnrichUpdate}).
  */
 @Named("financialAccountHeaderHandler")
 public class FinancialAccountHandler implements NeoHandler {
@@ -90,8 +97,11 @@ public class FinancialAccountHandler implements NeoHandler {
 
   private static final String FIELD_NAME = "name";
   private static final String FIELD_CURRENCY = "currency";
-  private static final String FIELD_TYPE = "type";
-  private static final String FIELD_IBAN = "iBAN";
+  /** Package-private (not private) so {@link FinancialAccountCountrySupport}'s
+   *  {@code rawEffectiveType}/{@code effectiveIban} resolvers read the same body keys this class
+   *  writes, instead of re-declaring the literals on their side. */
+  static final String FIELD_TYPE = "type";
+  static final String FIELD_IBAN = "iBAN";
   private static final String FIELD_SWIFT_CODE = "swiftCode";
   private static final String FIELD_COUNTRY = "country";
   private static final String FIELD_MATCHING_ALGORITHM = "matchingAlgorithm";
@@ -113,6 +123,13 @@ public class FinancialAccountHandler implements NeoHandler {
    *  on the generic CRUD response) rather than declared in decisions.json — the same technique
    *  {@code SalesInvoiceHeaderHandler} uses for {@code arInvoiceSubtype}. */
   private static final String FIELD_HAS_TRANSACTIONS = "hasTransactions";
+  /** {@code true} when {@link FinancialAccountDeleteSupport#findDeleteBlockers} finds nothing depending on the account
+   *  (ETP-4871). Injected the same way as {@link #FIELD_HAS_TRANSACTIONS} — post-hook, batched
+   *  per page via {@code FinancialAccountsPageHandler#loadDeleteBlockersByAccount}. */
+  private static final String FIELD_DELETABLE = "deletable";
+  /** Human-readable reason(s) blocking a hard delete; only present when
+   *  {@link #FIELD_DELETABLE} is {@code false}. */
+  private static final String FIELD_DELETE_BLOCKED_REASON = "deleteBlockedReason";
 
   /* ---------------------------------------------------------------------------
    * Derived list fields (ETP-4658 follow-up): the accounts list used to be served
@@ -138,6 +155,12 @@ public class FinancialAccountHandler implements NeoHandler {
   /** Currency ISO code, from the {@code c_currency} join. The contract only carries the FK. */
   private static final String FIELD_CURRENCY_ISO = "currencyIso";
   private static final String FIELD_CURRENCY_ID = "currencyId";
+  /** Country of the account (ETP-4896), from the {@code c_country} join — mirrors the
+   *  currencyId/currencyIso pair above and is identical in shape to the R spec's row so
+   *  EditAccountModal reads one shape regardless of which endpoint it came from. */
+  private static final String FIELD_COUNTRY_ID = "countryId";
+  private static final String FIELD_COUNTRY_ISO = "countryIso";
+  private static final String FIELD_COUNTRY_NAME = "countryName";
   private static final String FIELD_IS_DEFAULT = "isDefault";
   private static final String FIELD_MASKED_PAN = "maskedPan";
   /** Archived-vs-active flag. {@code Isactive} has no ETGO_SF_FIELD row on this entity, so the
@@ -149,6 +172,15 @@ public class FinancialAccountHandler implements NeoHandler {
   private static final String FIELD_IBAN_ALIAS = "iban";
   /** Collection-level aggregates for the list sidebar, attached as a sibling of `response.data`. */
   private static final String FIELD_SUMMARY = "summary";
+  /** Entity name of the header entity this handler is registered against (ETP-4896: used to scope
+   *  the new defaults keys, since {@code afterHandle}'s DEFAULTS branch has no entity guard). */
+  private static final String ENTITY_ACCOUNT = "account";
+  private static final String KEY_DEFAULTS = "defaults";
+  private static final String SUFFIX_IDENTIFIER = "$_identifier";
+  /** The &le;45-country IBAN-metadata catalog (ETP-4896), attached as a sibling of {@code
+   *  defaults} on the {@code account} entity's defaults response — see
+   *  {@link FinancialAccountCountrySupport#buildIbanRules}. */
+  private static final String FIELD_COUNTRY_IBAN_RULES = "countryIbanRules";
 
   private static final String TYPE_BANK = "B";
   private static final String TYPE_CASH = "C";
@@ -175,7 +207,7 @@ public class FinancialAccountHandler implements NeoHandler {
         return validateAndEnrichUpdate(context.getRecordId(), context.getRequestBody());
       }
       if (METHOD_DELETE.equals(method)) {
-        return archive(context.getRecordId());
+        return deleteAccount(context.getRecordId());
       }
       // GET (list / getById) flows straight through to the generic service.
       return null;
@@ -213,7 +245,7 @@ public class FinancialAccountHandler implements NeoHandler {
       return null;
     }
     if (NeoEndpointType.DEFAULTS.equals(context.getEndpointType())) {
-      return injectClientCurrencyDefault(context);
+      return injectAccountDefaults(context);
     }
     if (METHOD_GET.equals(context.getHttpMethod()) && NeoEndpointType.CRUD.equals(context.getEndpointType())) {
       return injectHasTransactions(context);
@@ -241,8 +273,47 @@ public class FinancialAccountHandler implements NeoHandler {
   }
 
   /**
-   * Overwrites the generic {@code defaults} response's {@code currency} with the client's
-   * accounting-schema currency (e.g. EUR for GOClient).
+   * Populates the generic {@code defaults} response for the New/Edit Account forms and attaches
+   * the {@code countryIbanRules} catalog as a sibling of {@code defaults} (ETP-4896) — a catalog
+   * is not itself the default of any one field, so it does not belong inside that node.
+   *
+   * <p>Scoped to the {@code account} entity via an explicit guard: this branch of {@code
+   * afterHandle} does not check the entity name, so the pre-existing currency injection already
+   * fires for {@code transaction}/{@code importedBankStatements}/{@code bankStatementLines}
+   * defaults too. That leak predates this change and is left alone (removing it could break a
+   * frontend already relying on it) — but the two NEW keys ({@code country},
+   * {@code countryIbanRules}) must not repeat it.
+   */
+  private NeoResponse injectAccountDefaults(NeoContext context) {
+    NeoResponse previous = context.getPreviousResult();
+    if (previous == null || previous.getBody() == null) {
+      return null;
+    }
+    try {
+      enterAdminMode();
+      JSONObject body = previous.getBody();
+      JSONObject defaults = body.optJSONObject(KEY_DEFAULTS);
+      if (defaults == null) {
+        defaults = new JSONObject();
+        body.put(KEY_DEFAULTS, defaults);
+      }
+      applyClientCurrencyDefault(defaults);
+      if (ENTITY_ACCOUNT.equals(context.getEntityName())) {
+        applyOrgCountryDefault(defaults);
+        body.put(FIELD_COUNTRY_IBAN_RULES, FinancialAccountCountrySupport.buildIbanRules());
+      }
+      return NeoResponse.ok(body);
+    } catch (Exception e) {
+      log.error("financial-account afterHandle: failed to inject account defaults", e);
+      return null;
+    } finally {
+      exitAdminMode();
+    }
+  }
+
+  /**
+   * Overwrites {@code defaults.currency} with the client's accounting-schema currency (e.g. EUR
+   * for GOClient). Verbatim behavior moved out of the former {@code injectClientCurrencyDefault}.
    *
    * <p>The {@code C_Currency_ID} column has no AD default-value expression, so
    * {@code NeoDefaultsService}'s generic fallback ({@code resolveFirstComboOption}) picks
@@ -251,38 +322,36 @@ public class FinancialAccountHandler implements NeoHandler {
    * many core windows, so fixing this dictionary-wide would risk unrelated side effects; scoping
    * the fix to this handler's post-hook only affects the financial-account spec's own defaults.
    */
-  private NeoResponse injectClientCurrencyDefault(NeoContext context) {
-    NeoResponse previous = context.getPreviousResult();
-    if (previous == null || previous.getBody() == null) {
-      return null;
+  private void applyClientCurrencyDefault(JSONObject defaults) throws JSONException {
+    OBCriteria<AcctSchema> crit = OBDal.getInstance().createCriteria(AcctSchema.class);
+    crit.add(Restrictions.eq(AcctSchema.PROPERTY_CLIENT + ".id",
+        OBContext.getOBContext().getCurrentClient().getId()));
+    crit.add(Restrictions.eq(AcctSchema.PROPERTY_ACTIVE, true));
+    crit.setMaxResults(1);
+    AcctSchema schema = (AcctSchema) crit.uniqueResult();
+    Currency clientCurrency = schema != null ? schema.getCurrency() : null;
+    if (clientCurrency == null) {
+      return;
     }
-    try {
-      enterAdminMode();
-      OBCriteria<AcctSchema> crit = OBDal.getInstance().createCriteria(AcctSchema.class);
-      crit.add(Restrictions.eq(AcctSchema.PROPERTY_CLIENT + ".id",
-          OBContext.getOBContext().getCurrentClient().getId()));
-      crit.add(Restrictions.eq(AcctSchema.PROPERTY_ACTIVE, true));
-      crit.setMaxResults(1);
-      AcctSchema schema = (AcctSchema) crit.uniqueResult();
-      Currency clientCurrency = schema != null ? schema.getCurrency() : null;
-      if (clientCurrency == null) {
-        return null;
-      }
-      JSONObject body = previous.getBody();
-      JSONObject defaults = body.optJSONObject("defaults");
-      if (defaults == null) {
-        defaults = new JSONObject();
-        body.put("defaults", defaults);
-      }
-      defaults.put(FIELD_CURRENCY, clientCurrency.getId());
-      defaults.put(FIELD_CURRENCY + "$_identifier", clientCurrency.getISOCode());
-      return NeoResponse.ok(body);
-    } catch (Exception e) {
-      log.error("financial-account afterHandle: failed to inject client currency default", e);
-      return null;
-    } finally {
-      exitAdminMode();
+    defaults.put(FIELD_CURRENCY, clientCurrency.getId());
+    defaults.put(FIELD_CURRENCY + SUFFIX_IDENTIFIER, clientCurrency.getISOCode());
+  }
+
+  /**
+   * Sets {@code defaults.country} to the active organization's country (ETP-4896 requirement 1),
+   * mirroring the {@code currency} / {@code currency$_identifier} pair above so the frontend's
+   * defaults consumer needs no new shape. Never emits the AD-seeded {@code ISDEFAULT='Y'} country
+   * (United States, no IBAN metadata): {@link #resolveOrgCountry} only returns a usable value or
+   * {@code null}, and {@code null} here means the key is simply omitted rather than written as a
+   * plausible-but-wrong default.
+   */
+  private void applyOrgCountryDefault(JSONObject defaults) throws JSONException {
+    Country orgCountry = resolveOrgCountry();
+    if (orgCountry == null) {
+      return;
     }
+    defaults.put(FIELD_COUNTRY, orgCountry.getId());
+    defaults.put(FIELD_COUNTRY + SUFFIX_IDENTIFIER, orgCountry.getName());
   }
 
   /**
@@ -312,9 +381,11 @@ public class FinancialAccountHandler implements NeoHandler {
    * Enriches every GET row with the fields the accounts list needs but no AD column provides,
    * and attaches the collection-level {@code summary} used by the list sidebar.
    *
-   * <p>All three data loaders run <b>once</b> for the whole page (a Map/Set lookup per row),
+   * <p>All four data loaders run <b>once</b> for the whole page (a Map/Set lookup per row),
    * reusing {@link FinancialAccountsPageHandler}'s SQL verbatim. The previous implementation
-   * issued two queries <i>per row</i> just for {@code hasTransactions}.
+   * issued two queries <i>per row</i> just for {@code hasTransactions}; {@code deletable} /
+   * {@code deleteBlockedReason} (ETP-4871) follow the same rule — one batched query for the
+   * whole page, never {@link FinancialAccountDeleteSupport#findDeleteBlockers} called per row.
    *
    * <p>The summary deliberately aggregates only the rows present in <b>this</b> response rather
    * than the loader's own universe: the generic CRUD already applied the role's readable-org and
@@ -332,10 +403,12 @@ public class FinancialAccountHandler implements NeoHandler {
     }
     Map<String, Integer> pendingByAccount = loaders.loadPendingByAccount(clientId, orgs);
     Set<String> withTransactions = loaders.loadAccountsWithTransactions(clientId, orgs);
+    Map<String, List<String>> deleteBlockersByAccount = loaders.loadDeleteBlockersByAccount(clientId, orgs);
 
     Set<String> visibleIds = new java.util.LinkedHashSet<>();
     for (int i = 0; i < dataArr.length(); i++) {
-      String correlatedId = enrichRecord(dataArr.getJSONObject(i), byId, pendingByAccount, withTransactions);
+      String correlatedId = enrichRecord(dataArr.getJSONObject(i), byId, pendingByAccount, withTransactions,
+          deleteBlockersByAccount);
       if (correlatedId != null) {
         visibleIds.add(correlatedId);
       }
@@ -369,7 +442,8 @@ public class FinancialAccountHandler implements NeoHandler {
    *         towards {@code summary}, or {@code null} when it did not.
    */
   private String enrichRecord(JSONObject rec, Map<String, FinancialAccountsPageHandler.AccountRow> byId,
-      Map<String, Integer> pendingByAccount, Set<String> withTransactions) throws JSONException {
+      Map<String, Integer> pendingByAccount, Set<String> withTransactions,
+      Map<String, List<String>> deleteBlockersByAccount) throws JSONException {
     String id = StringUtils.trimToNull(rec.optString("id", null));
     // A row with no id cannot be correlated with the loaders; keep the historical
     // contract (the flag is always present, defaulting to false) instead of omitting it.
@@ -382,6 +456,12 @@ public class FinancialAccountHandler implements NeoHandler {
     // which the list would render as text under the account type.
     rec.put(FIELD_IBAN_ALIAS, rec.isNull(FIELD_IBAN) ? "" : rec.optString(FIELD_IBAN, ""));
 
+    List<String> blockers = deleteBlockersByAccount.getOrDefault(id, Collections.emptyList());
+    rec.put(FIELD_DELETABLE, blockers.isEmpty());
+    if (!blockers.isEmpty()) {
+      rec.put(FIELD_DELETE_BLOCKED_REASON, String.join(" ", blockers));
+    }
+
     FinancialAccountsPageHandler.AccountRow row = byId.get(id);
     if (row == null) {
       return null;
@@ -392,6 +472,9 @@ public class FinancialAccountHandler implements NeoHandler {
     rec.put(FIELD_BANK_CONNECTION_PENDING, row.bankConnectionPending);
     rec.put(FIELD_CURRENCY_ISO, row.currency.iso);
     rec.put(FIELD_CURRENCY_ID, row.currency.id);
+    rec.put(FIELD_COUNTRY_ID, row.country != null ? row.country.id : "");
+    rec.put(FIELD_COUNTRY_ISO, row.country != null ? row.country.iso : "");
+    rec.put(FIELD_COUNTRY_NAME, row.country != null ? row.country.name : "");
     rec.put(FIELD_IS_DEFAULT, row.isDefault);
     rec.put(FIELD_MASKED_PAN, row.maskedPan);
     rec.put(FIELD_ACTIVE, row.active);
@@ -400,7 +483,7 @@ public class FinancialAccountHandler implements NeoHandler {
 
   /**
    * Seam for the SQL loaders shared with the accounts-page handler. Package-private and
-   * overridable so unit tests can stub the three queries without a live connection —
+   * overridable so unit tests can stub the four queries without a live connection —
    * same convention as {@link #loadAccount(String)} and {@code hasOpenReconciliations}.
    */
   FinancialAccountsPageHandler pageLoaders() {
@@ -449,7 +532,7 @@ public class FinancialAccountHandler implements NeoHandler {
     }
     String name = body.optString(FIELD_NAME, "").trim();
     String currencyId = body.optString(FIELD_CURRENCY, "").trim();
-    String iban = body.optString(FIELD_IBAN, "").trim();
+    String iban = StringUtils.trimToEmpty(FinancialAccountCountrySupport.bodyString(body, FIELD_IBAN));
     String swift = body.optString(FIELD_SWIFT_CODE, "").trim();
 
     NeoResponse lengthError = validateLengths(name, iban, swift);
@@ -481,13 +564,13 @@ public class FinancialAccountHandler implements NeoHandler {
     // this is metadata only — but a later bank connect can then preselect that provider.
     enrichProvider(body, type);
 
-    // Inject the country derived from the IBAN before the insert — the trigger
-    // FIN_FINANCIAL_ACCOUNT_TRG2 rejects a bank account with an IBAN but no country.
-    if (StringUtils.isNotBlank(iban)) {
-      Country country = resolveCountryFromIban(iban);
-      if (country != null) {
-        body.put(FIELD_COUNTRY, country.getId());
-      }
+    // Validates the (IBAN, country) pair and injects/normalizes both in the body before the
+    // insert — the trigger FIN_FINANCIAL_ACCOUNT_TRG2 rejects a bank account with an IBAN but no
+    // country, and a mismatched pair would otherwise surface as a raw 500 (see
+    // FinancialAccountCountrySupport#validateIbanCountryPair).
+    NeoResponse countryError = validateCountryAndIban(body, null);
+    if (countryError != null) {
+      return countryError;
     }
     // Inject a default matching algorithm when the caller did not provide one,
     // so reconciliation has an algorithm to work with.
@@ -522,8 +605,21 @@ public class FinancialAccountHandler implements NeoHandler {
     if (body == null) {
       return null;
     }
+    // Archive guard moved here from the old DELETE-based archive() (ETP-4871): the frontend now
+    // archives via PATCH {"active": false} instead of DELETE, so the open-reconciliations check
+    // that used to gate the soft-archive must gate this instead, before the generic CRUD persists
+    // the flip. Reuses the same has()/isNull() body-inspection idiom as the IBAN check below.
+    if (isArchivingRequest(body)) {
+      NeoResponse archiveGuardError = guardArchive(id);
+      if (archiveGuardError != null) {
+        return archiveGuardError;
+      }
+    }
     String name = body.has(FIELD_NAME) ? body.optString(FIELD_NAME, "").trim() : null;
-    String iban = body.optString(FIELD_IBAN, "").trim();
+    // isNull-aware: optString() on a JSON null would yield the literal "null" string, which a
+    // PATCH {"iBAN": null} (clearing the IBAN) used to feed straight into the country-derivation
+    // check below as if it were a real, non-blank IBAN.
+    String iban = StringUtils.trimToEmpty(FinancialAccountCountrySupport.bodyString(body, FIELD_IBAN));
     String swift = body.optString(FIELD_SWIFT_CODE, "").trim();
 
     NeoResponse nameError = validateRenamedName(name, id);
@@ -537,24 +633,136 @@ public class FinancialAccountHandler implements NeoHandler {
     if (toleranceError != null) {
       return toleranceError;
     }
-    // Keep the country in sync with the IBAN whenever the caller sends an IBAN.
-    if (body.has(FIELD_IBAN) && StringUtils.isNotBlank(iban)) {
-      Country country = resolveCountryFromIban(iban);
-      if (country != null) {
-        body.put(FIELD_COUNTRY, country.getId());
-      }
+    return validateCountryAndIban(body, id);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Country + IBAN validation (ETP-4896) — shared by create and update
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Resolves the (IBAN, country) pair that will actually be persisted and rejects it with a
+   * friendly 400 before {@code FIN_FINANCIAL_ACCOUNT_TRG2} can raise {@code @COUNTRY_IBAN@} /
+   * {@code @20257@} / {@code @20259@} — which {@code NeoErrorSanitizer} would otherwise flatten
+   * into a 500 "Service temporarily unavailable".
+   *
+   * <p>Precedence: a country present in the body WINS. IBAN-derivation from the prefix
+   * ({@link #resolveCountryFromIban}) is only a fallback for a body that carries no country at
+   * all, so the SPA's country picker is authoritative while older API/MCP callers that only ever
+   * sent an IBAN keep working unchanged.
+   *
+   * <p>Neither field touched by the body is treated as a no-op — deliberately mirroring the
+   * trigger's own {@code COALESCE(:OLD…)<>COALESCE(:NEW…)} guard, which does not re-validate
+   * either. This matters for legacy or externally-imported rows whose stored pair may already be
+   * inconsistent: an unrelated edit (renaming the account, say) must not suddenly reject them. It
+   * is also why the account is loaded LAZILY, only when the body actually touches {@code iBAN} or
+   * {@code country} — the overwhelming majority of partial updates (rename, tolerances,
+   * accounting config, …) never reach a DAL call here at all.
+   *
+   * @param accountId the record id on update, {@code null}/blank on create (nothing to load).
+   */
+  NeoResponse validateCountryAndIban(JSONObject body, String accountId) throws JSONException {
+    boolean bodyHasIban = body.has(FIELD_IBAN);
+    boolean bodyHasCountry = body.has(FIELD_COUNTRY);
+    if (!bodyHasIban && !bodyHasCountry) {
+      return null;
+    }
+
+    FIN_FinancialAccount stored = StringUtils.isNotBlank(accountId) ? loadAccount(accountId) : null;
+    // On create, validateAndEnrichCreate already normalized and wrote FIELD_TYPE into the body
+    // before calling here, so the body branch always wins there; the stored-type fallback only
+    // ever applies on update. normalizeType maps a null (neither source had one) to Bank, and is
+    // the identity for every value the AD "Financial account type" reference allows — the stored
+    // type now goes through it too, which only matters for a DB value outside {B, C, CA}.
+    String effectiveType = normalizeType(FinancialAccountCountrySupport.rawEffectiveType(body, stored));
+    if (!TYPE_BANK.equals(effectiveType)) {
+      // The trigger's IBAN branch only runs for TYPE='B'; mirroring that avoids rejecting a
+      // Cash/Card account that happens to carry a stale IBAN.
+      return null;
+    }
+
+    String effectiveIban = FinancialAccountCountrySupport.effectiveIban(body, bodyHasIban, stored);
+    if (StringUtils.isBlank(effectiveIban)) {
+      // The trigger's own guard is IF (:NEW.IBAN IS NOT NULL) — a bank account with a country and
+      // no IBAN is legal, so there is nothing to validate.
+      return null;
+    }
+
+    if (bodyHasCountry && FinancialAccountCountrySupport.isExplicitClear(body, FIELD_COUNTRY)) {
+      // Do not silently re-derive here: that would contradict "the user's choice wins" and hide
+      // the user's own action of clearing the field.
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
+          "A bank account with an IBAN must have a country.");
+    }
+
+    Country effectiveCountry = resolveEffectiveCountry(body, bodyHasCountry, stored, effectiveIban);
+    // Only meaningful when the body supplied one: there, null means the id does not resolve to a
+    // country at all. When it did not, null just means "nothing to derive from the IBAN either",
+    // which validateIbanCountryPair reports with its own, more specific message.
+    if (bodyHasCountry && effectiveCountry == null) {
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "Invalid country");
+    }
+
+    String pairError = FinancialAccountCountrySupport.validateIbanCountryPair(effectiveIban, effectiveCountry);
+    if (pairError != null) {
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, pairError);
+    }
+    // Always write back what was actually validated, so the generic CRUD persists exactly that —
+    // not a caller-supplied IBAN with stray separators, nor a country resolved here but never
+    // reflected in the body.
+    body.put(FIELD_IBAN, effectiveIban);
+    if (effectiveCountry != null) {
+      body.put(FIELD_COUNTRY, effectiveCountry.getId());
     }
     return null;
   }
 
+  /**
+   * The country the write will end up with, in strict precedence order (ETP-4896):
+   *
+   * <ol>
+   *   <li>the one the body carries — the SPA's picker is authoritative, so it wins outright and
+   *       {@link #resolveCountryFromIban} is not even consulted;</li>
+   *   <li>the stored account's, when the body is silent on the field;</li>
+   *   <li>derived from the IBAN prefix — the pre-ETP-4896 behavior, kept only as a fallback for
+   *       API/MCP callers that send an IBAN and no country at all.</li>
+   * </ol>
+   *
+   * <p>Returns {@code null} when nothing resolves; the caller decides what that means, since it
+   * reads differently per branch (an invalid id the caller sent vs. an unrecognized IBAN prefix).
+   *
+   * <p>Kept in this class rather than {@link FinancialAccountCountrySupport} — unlike the two
+   * resolvers there, this one goes through the {@link #loadCountry} / {@link #resolveCountryFromIban}
+   * seams, which the unit tests spy on to run without a database.</p>
+   */
+  private Country resolveEffectiveCountry(JSONObject body, boolean bodyHasCountry,
+      FIN_FinancialAccount stored, String effectiveIban) {
+    if (bodyHasCountry) {
+      return loadCountry(FinancialAccountCountrySupport.bodyString(body, FIELD_COUNTRY));
+    }
+    if (stored != null && stored.getCountry() != null) {
+      return stored.getCountry();
+    }
+    return resolveCountryFromIban(effectiveIban);
+  }
+
   // ---------------------------------------------------------------------------
-  // Delete (short-circuit with a soft-archive)
+  // Archive guard (moved here from the former DELETE-based archive(); ETP-4871)
   // ---------------------------------------------------------------------------
 
-  NeoResponse archive(String id) {
-    if (StringUtils.isBlank(id)) {
-      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "Missing account id");
-    }
+  /** {@code true} when the incoming body explicitly sets {@code active} to {@code false}. */
+  private boolean isArchivingRequest(JSONObject body) {
+    return body.has(FIELD_ACTIVE) && !body.isNull(FIELD_ACTIVE) && !body.optBoolean(FIELD_ACTIVE, true);
+  }
+
+  /**
+   * Blocks an archive (soft-delete via {@code active=false}) the same way the old DELETE-based
+   * {@code archive()} used to: an account with open reconciliations cannot be archived. Loads the
+   * account itself here (the rest of {@link #validateAndEnrichUpdate} does not need it unless the
+   * body also touches IBAN/country — see {@link #validateCountryAndIban}) so a missing id/account
+   * still gets the same 400 the old DELETE path returned.
+   */
+  private NeoResponse guardArchive(String id) {
     FIN_FinancialAccount account = loadAccount(id);
     if (account == null) {
       return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "Account not found");
@@ -563,8 +771,42 @@ public class FinancialAccountHandler implements NeoHandler {
       return NeoResponse.error(HttpServletResponse.SC_CONFLICT,
           "Cannot archive an account with open reconciliations");
     }
-    account.setActive(false);
-    OBDal.getInstance().save(account);
+    return null;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Delete (hard delete, ETP-4871: every FK into FIN_Financial_Account is RESTRICT)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Hard-deletes the account once nothing depends on it via a foreign key. Every FK from another
+   * table into {@code FIN_Financial_Account} is {@code RESTRICT} (no cascade), so a bare delete
+   * would fail at the DB level regardless — {@link FinancialAccountDeleteSupport#findDeleteBlockers}
+   * proves in advance that it will not, and returns a 409 naming every blocker instead of surfacing
+   * a raw constraint violation. The account's own auto-created configuration rows (accounting
+   * setup, default payment methods, matching rules, PSD2 sync log) are swept first via
+   * {@link FinancialAccountDeleteSupport#sweepOwnConfig} — those are not blockers, every account
+   * has them from creation.
+   *
+   * <p>The blocker checks and the config sweep live in {@link FinancialAccountDeleteSupport}
+   * (extracted purely to keep this class under the Sonar method-count threshold, java:S1448) —
+   * this method is the only remaining caller in this class.
+   */
+  NeoResponse deleteAccount(String id) {
+    if (StringUtils.isBlank(id)) {
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "Missing account id");
+    }
+    FIN_FinancialAccount account = loadAccount(id);
+    if (account == null) {
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "Account not found");
+    }
+    List<String> blockers = FinancialAccountDeleteSupport.findDeleteBlockers(account, hasTransactions(account));
+    if (!blockers.isEmpty()) {
+      return NeoResponse.error(HttpServletResponse.SC_CONFLICT,
+          "Cannot delete this account. " + String.join(" ", blockers));
+    }
+    FinancialAccountDeleteSupport.sweepOwnConfig(account);
+    OBDal.getInstance().remove(account);
     OBDal.getInstance().flush();
     return NeoResponse.noContent();
   }
@@ -689,29 +931,33 @@ public class FinancialAccountHandler implements NeoHandler {
     return OBDal.getInstance().get(FIN_FinancialAccount.class, accountId);
   }
 
+  Country loadCountry(String countryId) {
+    return OBDal.getInstance().get(Country.class, countryId);
+  }
+
+  /** The active organization's country (ETP-4896), or {@code null} when it cannot be resolved
+   *  even via the ES fallback — see {@link FinancialAccountCountrySupport#resolveOrganizationCountry}. */
+  Country resolveOrgCountry() {
+    return FinancialAccountCountrySupport.resolveOrganizationCountry(
+        OBContext.getOBContext().getCurrentOrganization().getId());
+  }
+
   /**
    * Resolves the {@link Country} an IBAN belongs to from its first two characters
    * (the ISO 3166-1 alpha-2 code, e.g. {@code ES} -> Spain). The financial account
    * trigger requires the country to be set whenever a bank account stores an IBAN.
    *
+   * <p>Delegates to {@link FinancialAccountCountrySupport#resolveCountryForIbanPrefix}, which
+   * prefers a match on {@code IBANCODE} over the plain ISO code (ETP-4896): only ~45 of 243
+   * seeded countries carry IBAN metadata, and matching on the ISO code alone can return one of
+   * the other ~198, which {@code FIN_FINANCIAL_ACCOUNT_TRG2} then rejects.
+   *
    * @return the matching country, or {@code null} when the IBAN is too short or no
-   *         active country matches the ISO prefix.
+   *         active country matches the prefix either way.
    */
   Country resolveCountryFromIban(String iban) {
-    if (iban == null || iban.trim().length() < 2) {
-      return null;
-    }
-    String isoCode = iban.trim().substring(0, 2).toUpperCase();
-    OBCriteria<Country> criteria = OBDal.getInstance().createCriteria(Country.class);
-    // Countries are standard master data (usually Client 0 / Org 0); disable the
-    // readable client/org filters so the lookup is not empty in a specific
-    // client/org context, and only consider active records.
-    criteria.setFilterOnReadableClients(false);
-    criteria.setFilterOnReadableOrganization(false);
-    criteria.add(Restrictions.eq(Country.PROPERTY_ISOCOUNTRYCODE, isoCode));
-    criteria.add(Restrictions.eq(Country.PROPERTY_ACTIVE, true));
-    criteria.setMaxResults(1);
-    return (Country) criteria.uniqueResult();
+    return FinancialAccountCountrySupport.resolveCountryForIbanPrefix(
+        FinancialAccountCountrySupport.normalizeIban(iban));
   }
 
   boolean nameExists(String name, String excludeId) {

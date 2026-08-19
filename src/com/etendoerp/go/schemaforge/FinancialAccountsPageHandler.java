@@ -103,7 +103,11 @@ public class FinancialAccountsPageHandler implements NeoHandler {
           + "       COALESCE(fa.em_aprm_glitem_diff, ''), "
           + "       COALESCE(gli.name, ''), "
           + "       fa.em_psd2_salt_edge_account_id, prov.logo_url, "
-          + "       fa.writeofflimit "
+          + "       fa.writeofflimit, "
+          // Appended at the END on purpose (ETP-4896): loadAccounts() below reads every column by
+          // POSITION, and so does FinancialAccountsPageHandlerTest's ResultSet stubbing — inserting
+          // these in the middle would silently shift every existing column index.
+          + "       fa.c_country_id, ctry.countrycode, ctry.name "
           + "  FROM fin_financial_account fa "
           + "  JOIN c_currency cur ON cur.c_currency_id = fa.c_currency_id "
           + "  LEFT JOIN c_glitem gli ON gli.c_glitem_id = fa.em_aprm_glitem_diff "
@@ -111,6 +115,8 @@ public class FinancialAccountsPageHandler implements NeoHandler {
           // Reads the logo straight from the already-synced provider catalog — no live Salt Edge
           // call per row, unlike the connect-flow bank picker / account selector.
           + "  LEFT JOIN psd2_provider prov ON prov.psd2_provider_id = fa.em_psd2_provider_id "
+          // LEFT JOIN: c_country_id is nullable and Cash accounts never carry one.
+          + "  LEFT JOIN c_country ctry ON ctry.c_country_id = fa.c_country_id "
           + " WHERE fa.ad_client_id = ? "
           + "   AND fa.ad_org_id = ANY (?) "
           + " ORDER BY fa.isdefault DESC, fa.name ASC";
@@ -166,6 +172,83 @@ public class FinancialAccountsPageHandler implements NeoHandler {
           + "   AND ft.ad_client_id = ? "
           + "   AND ft.ad_org_id = ANY (?)";
 
+  /**
+   * One reason code per row that would block a hard delete of the account (ETP-4871), across
+   * every table {@code FinancialAccountDeleteSupport.findDeleteBlockers} checks — a single {@code UNION
+   * ALL} for the whole page, same performance rule as the other loaders in this class (never N
+   * calls to {@code findDeleteBlockers} per row). Deliberately does NOT filter on {@code isactive}
+   * for any branch except {@code TRANSACTIONS} (mirroring {@code hasTransactions}'s own filter):
+   * a {@code RESTRICT} FK blocks a hard delete regardless of whether the referencing row is itself
+   * soft-deleted. {@code BPARTNER_DEFAULT} appears twice because a business partner can default to
+   * this account either as its regular or its PO financial account (two separate FK columns on the
+   * same table). Bind order: (clientId, orgs) repeated once per branch, in source order.
+   */
+  private static final String DELETE_BLOCKERS_BY_ACCOUNT_SQL =
+      "SELECT ft.fin_financial_account_id, 'TRANSACTIONS' AS reason "
+          + "  FROM fin_finacc_transaction ft "
+          + " WHERE ft.isactive = 'Y' AND ft.ad_client_id = ? AND ft.ad_org_id = ANY (?) "
+          + " UNION ALL "
+          + "SELECT r.fin_financial_account_id, 'RECONCILIATIONS' "
+          + "  FROM fin_reconciliation r "
+          + " WHERE r.ad_client_id = ? AND r.ad_org_id = ANY (?) "
+          + " UNION ALL "
+          + "SELECT bs.fin_financial_account_id, 'BANK_STATEMENTS' "
+          + "  FROM fin_bankstatement bs "
+          + " WHERE bs.ad_client_id = ? AND bs.ad_org_id = ANY (?) "
+          + " UNION ALL "
+          + "SELECT p.fin_financial_account_id, 'PAYMENTS' "
+          + "  FROM fin_payment p "
+          + " WHERE p.ad_client_id = ? AND p.ad_org_id = ANY (?) "
+          + " UNION ALL "
+          + "SELECT pp.fin_financial_account_id, 'PAYMENT_PROPOSALS' "
+          + "  FROM fin_payment_proposal pp "
+          + " WHERE pp.ad_client_id = ? AND pp.ad_org_id = ANY (?) "
+          + " UNION ALL "
+          + "SELECT gl.fin_financial_account_id, 'JOURNAL_LINES' "
+          + "  FROM gl_journalline gl "
+          + " WHERE gl.ad_client_id = ? AND gl.ad_org_id = ANY (?) "
+          + " UNION ALL "
+          + "SELECT bfe.fin_financial_account_id, 'BANK_FILE_EXCEPTIONS' "
+          + "  FROM fin_bankfile_exception bfe "
+          + " WHERE bfe.ad_client_id = ? AND bfe.ad_org_id = ANY (?) "
+          + " UNION ALL "
+          + "SELECT bp.fin_financial_account_id, 'BPARTNER_DEFAULT' "
+          + "  FROM c_bpartner bp "
+          + " WHERE bp.fin_financial_account_id IS NOT NULL "
+          + "   AND bp.ad_client_id = ? AND bp.ad_org_id = ANY (?) "
+          + " UNION ALL "
+          + "SELECT bp.po_financial_account_id, 'BPARTNER_DEFAULT' "
+          + "  FROM c_bpartner bp "
+          + " WHERE bp.po_financial_account_id IS NOT NULL "
+          + "   AND bp.ad_client_id = ? AND bp.ad_org_id = ANY (?) "
+          + " UNION ALL "
+          + "SELECT c.fin_financial_account_id, 'BANK_CONNECTION' "
+          + "  FROM psd2_finacc_connection c "
+          + " WHERE c.ad_client_id = ? AND c.ad_org_id = ANY (?)";
+
+  /** Number of {@code UNION ALL} branches in {@link #DELETE_BLOCKERS_BY_ACCOUNT_SQL}, each bound
+   *  with (clientId, orgs) — kept in sync manually with the SQL above. */
+  private static final int DELETE_BLOCKERS_SQL_BRANCH_COUNT = 10;
+
+  /** Maps each {@code DELETE_BLOCKERS_BY_ACCOUNT_SQL} reason code to the exact wording
+   *  {@code FinancialAccountDeleteSupport.findDeleteBlockers} uses for the same check, so the
+   *  DELETE 409 message and this list-view field never drift apart. */
+  private static final Map<String, String> DELETE_BLOCKER_REASON_BY_CODE = new LinkedHashMap<>();
+
+  static {
+    DELETE_BLOCKER_REASON_BY_CODE.put("TRANSACTIONS", FinancialAccountDeleteSupport.REASON_TRANSACTIONS);
+    DELETE_BLOCKER_REASON_BY_CODE.put("RECONCILIATIONS", FinancialAccountDeleteSupport.REASON_RECONCILIATIONS);
+    DELETE_BLOCKER_REASON_BY_CODE.put("BANK_STATEMENTS", FinancialAccountDeleteSupport.REASON_BANK_STATEMENTS);
+    DELETE_BLOCKER_REASON_BY_CODE.put("PAYMENTS", FinancialAccountDeleteSupport.REASON_PAYMENTS);
+    DELETE_BLOCKER_REASON_BY_CODE.put("PAYMENT_PROPOSALS",
+        FinancialAccountDeleteSupport.REASON_PAYMENT_PROPOSALS);
+    DELETE_BLOCKER_REASON_BY_CODE.put("JOURNAL_LINES", FinancialAccountDeleteSupport.REASON_JOURNAL_LINES);
+    DELETE_BLOCKER_REASON_BY_CODE.put("BANK_FILE_EXCEPTIONS",
+        FinancialAccountDeleteSupport.REASON_BANK_FILE_EXCEPTIONS);
+    DELETE_BLOCKER_REASON_BY_CODE.put("BPARTNER_DEFAULT", FinancialAccountDeleteSupport.REASON_BPARTNER_DEFAULT);
+    DELETE_BLOCKER_REASON_BY_CODE.put("BANK_CONNECTION", FinancialAccountDeleteSupport.REASON_BANK_CONNECTION);
+  }
+
   @Override
   public NeoResponse handle(NeoContext context) {
     if (!METHOD_GET.equals(context.getHttpMethod())) {
@@ -216,6 +299,11 @@ public class FinancialAccountsPageHandler implements NeoHandler {
     JSONObject data = new JSONObject();
     data.put("accounts", buildAccountsArray(accounts, pendingByAccount, accountsWithTransactions));
     data.put("summary", buildSummary(accounts, pendingByAccount));
+    // Sibling of accounts/summary, not a per-account field (ETP-4896). It is the same catalog that
+    // the W-spec defaults response carries (see the injectAccountDefaults method over in
+    // FinancialAccountHandler), and this R spec is what the accounts list and the edit modal
+    // actually load today.
+    data.put("countryIbanRules", FinancialAccountCountrySupport.buildIbanRules());
 
     JSONObject responseData = new JSONObject();
     responseData.put("data", data);
@@ -258,6 +346,13 @@ public class FinancialAccountsPageHandler implements NeoHandler {
           // Left NULL on purpose when unset: null means "no limit", which is not the same as a
           // configured 0. See the serialiser and ReconciliationHandler.assertWithinWriteoffLimit.
           row.writeoffLimit = rs.getBigDecimal(18);
+          // Null-safe by construction (ETP-4896): an account with no C_Country_ID yields a null
+          // column 19, so row.country stays null and the JSON serialiser emits "" — never "null".
+          String countryId = rs.getString(19);
+          if (countryId != null) {
+            row.country = new CountryRef(countryId, StringUtils.trimToEmpty(rs.getString(20)),
+                StringUtils.trimToEmpty(rs.getString(21)));
+          }
           rows.add(row);
         }
       }
@@ -303,6 +398,40 @@ public class FinancialAccountsPageHandler implements NeoHandler {
     return result;
   }
 
+  /**
+   * Reasons (already translated to their human-readable wording) a hard delete would fail on,
+   * per account id, for the whole page in one query (ETP-4871). Used to drive the accounts list's
+   * {@code deletable} / {@code deleteBlockedReason} fields — see
+   * {@code FinancialAccountHandler#injectDerivedFields}.
+   */
+  Map<String, List<String>> loadDeleteBlockersByAccount(String clientId, Set<String> orgs) throws Exception {
+    Map<String, java.util.LinkedHashSet<String>> reasonsByAccount = new LinkedHashMap<>();
+    Connection conn = OBDal.getInstance().getConnection();
+    try (PreparedStatement ps = conn.prepareStatement(DELETE_BLOCKERS_BY_ACCOUNT_SQL)) {
+      java.sql.Array orgArray = conn.createArrayOf(SQL_TYPE_VARCHAR, orgs.toArray(new String[0]));
+      int paramIndex = 1;
+      for (int branch = 0; branch < DELETE_BLOCKERS_SQL_BRANCH_COUNT; branch++) {
+        ps.setString(paramIndex++, clientId);
+        ps.setArray(paramIndex++, orgArray);
+      }
+      try (ResultSet rs = ps.executeQuery()) {
+        while (rs.next()) {
+          String accountId = rs.getString(1);
+          String reason = DELETE_BLOCKER_REASON_BY_CODE.get(rs.getString(2));
+          if (accountId == null || reason == null) {
+            continue;
+          }
+          reasonsByAccount.computeIfAbsent(accountId, k -> new java.util.LinkedHashSet<>()).add(reason);
+        }
+      }
+    }
+    Map<String, List<String>> result = new LinkedHashMap<>();
+    for (Map.Entry<String, java.util.LinkedHashSet<String>> entry : reasonsByAccount.entrySet()) {
+      result.put(entry.getKey(), new ArrayList<>(entry.getValue()));
+    }
+    return result;
+  }
+
   // ---------------------------------------------------------------------------
   // Response builders (package-private to allow unit tests to drive directly)
   // ---------------------------------------------------------------------------
@@ -318,6 +447,9 @@ public class FinancialAccountsPageHandler implements NeoHandler {
       json.put("currentBalance", account.currentBalance);
       json.put("currencyId", account.currency.id);
       json.put("currencyIso", account.currency.iso);
+      json.put("countryId", account.country != null ? account.country.id : "");
+      json.put("countryIso", account.country != null ? account.country.iso : "");
+      json.put("countryName", account.country != null ? account.country.name : "");
       json.put("iban", account.iban);
       json.put("maskedPan", account.maskedPan);
       json.put("bankConnected", account.bankConnected);
@@ -448,6 +580,11 @@ public class FinancialAccountsPageHandler implements NeoHandler {
     String glItemDifferenceId = "";
     /** Display name of {@link #glItemDifferenceId}, resolved server-side. Blank if unset. */
     String glItemDifferenceName = "";
+    /** Country of the account (ETP-4896) — set on Bank accounts that carry an IBAN, {@code null}
+     *  otherwise (Cash accounts never have one; a Bank account may not yet). Set by the loader,
+     *  not the constructor: {@link Currency}'s javadoc explains why the constructor stays capped
+     *  at 7 parameters, and every existing fixture already calls it with exactly that many. */
+    CountryRef country = null;
 
     AccountRow(String id, String name, String type, BigDecimal currentBalance,
         Currency currency, String iban, boolean isDefault) {
@@ -473,6 +610,24 @@ public class FinancialAccountsPageHandler implements NeoHandler {
     Currency(String id, String iso) {
       this.id = id;
       this.iso = iso;
+    }
+  }
+
+  /**
+   * Country descriptor co-located with {@link AccountRow} (ETP-4896), mirroring {@link Currency}.
+   * {@code name} is included because this R spec has no {@code $_identifier} machinery (only the
+   * W spec's {@code NeoFieldFilter} produces one), so the edit modal needs a label without a
+   * second round-trip.
+   */
+  static class CountryRef {
+    final String id;
+    final String iso;
+    final String name;
+
+    CountryRef(String id, String iso, String name) {
+      this.id = id;
+      this.iso = iso;
+      this.name = name;
     }
   }
 }

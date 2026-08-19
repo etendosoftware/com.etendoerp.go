@@ -963,9 +963,18 @@ public class ReturnMaterialReceiptHeaderHandlerTest {
     }
   }
 
+  /**
+   * Line has neither a {@code canceledInoutLine} nor a {@code storageBin} → the header
+   * warehouse's default locator is looked up and assigned.
+   *
+   * <p>ETP-4863: the lookup moved from {@code ReturnShipmentUtils}' own raw-JDBC query to the
+   * criteria-based {@code NeoHandlerUtils.findDefaultLocatorForWarehouse}, so that one definition
+   * of "the warehouse's default bin" is shared by the CRUD path and every DAL path. The stubs
+   * follow the lookup; the assertion (line gets the header warehouse's default bin) is unchanged.
+   */
   @Test
+  @SuppressWarnings("unchecked")
   public void testHandleDocumentActionFillsBinsFromDefaultLocator() throws Exception {
-    // Line has no canceledInoutLine and no storageBin → findDefaultLocator is called
     try (MockedStatic<OBContext> ignored = Mockito.mockStatic(OBContext.class);
          MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
       OBDal dal = mock(OBDal.class);
@@ -981,16 +990,14 @@ public class ReturnMaterialReceiptHeaderHandlerTest {
       when(receipt.getWarehouse()).thenReturn(warehouse);
       when(warehouse.getId()).thenReturn("wh-1");
 
-      Connection conn = mock(Connection.class);
-      when(dal.getConnection()).thenReturn(conn);
-      PreparedStatement ps = mock(PreparedStatement.class);
-      when(conn.prepareStatement(anyString())).thenReturn(ps);
-      ResultSet rs = mock(ResultSet.class);
-      when(ps.executeQuery()).thenReturn(rs);
-      when(rs.next()).thenReturn(true);
-      when(rs.getString(1)).thenReturn("loc-1");
       Locator defaultLoc = mock(Locator.class);
-      when(dal.get(Locator.class, "loc-1")).thenReturn(defaultLoc);
+      when(defaultLoc.getId()).thenReturn("loc-1");
+      OBCriteria<Locator> locatorCriteria = mock(OBCriteria.class);
+      when(dal.createCriteria(Locator.class)).thenReturn(locatorCriteria);
+      when(locatorCriteria.add(any())).thenReturn(locatorCriteria);
+      when(locatorCriteria.addOrder(any())).thenReturn(locatorCriteria);
+      when(locatorCriteria.setMaxResults(1)).thenReturn(locatorCriteria);
+      when(locatorCriteria.uniqueResult()).thenReturn(defaultLoc);
 
       when(receipt.getMaterialMgmtShipmentInOutLineList())
           .thenReturn(Collections.singletonList(line));
@@ -1001,6 +1008,7 @@ public class ReturnMaterialReceiptHeaderHandlerTest {
       assertNull(handler.handle(ctx));
 
       Mockito.verify(line).setStorageBin(defaultLoc);
+      Mockito.verify(dal).save(line);
     }
   }
 

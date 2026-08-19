@@ -20,13 +20,19 @@ package com.etendoerp.go.schemaforge;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.when;
 
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.Test;
 import org.mockito.MockedStatic;
+import org.mockito.Mockito;
 import org.openbravo.base.model.Entity;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.plm.Product;
@@ -40,8 +46,13 @@ import org.openbravo.model.common.uom.UOM;
  * all paths that require {@code fetchTaxRate} are avoided by providing
  * a non-zero {@code grossUnitPrice} or an empty tax ID (rate = 0).
  *
- * Key regression guarded: the client-value guard and the no-double-discount
- * formula ({@code baseNetAmt = unitPrice × qty}, never applying discount twice).
+ * The {@code injectCommercialAmounts} ordering tests are the one exception — deriving a gross
+ * from a net inherently needs a tax rate, so they stub the JDBC chain via {@link #withTaxRate}
+ * instead of touching a real DB.
+ *
+ * Key regressions guarded: the client-value guard, the no-double-discount formula
+ * ({@code baseNetAmt = unitPrice × qty}, never applying discount twice), and the
+ * net-before-gross injector order (ETP-4855).
  */
 public class NeoCommercialLinePolicyTest {
 
@@ -70,24 +81,58 @@ public class NeoCommercialLinePolicyTest {
     assertEquals(5.0, body.getDouble("lineGrossAmount"), DELTA);
   }
 
+  /**
+   * ETP-4727 (backend counterpart): orderedQuantity explicitly edited to 0 on an existing line
+   * is deterministic — the frontend already computes and sends lineGrossAmount=0 for this exact
+   * case (useLineGrossAmount.js's editedIsQtyOrPrice branch), but filterWriteRequest strips it
+   * as a read-only field before this injector ever sees it. Without this forced zero, NEO's
+   * partial-update PATCH left the pre-edit gross amount stale in the DB — reproduced live via
+   * the QA report on ETP-4727 (footer totals recalculated to 0, the line's own cell did not,
+   * and the stale value survived a full page reload).
+   */
   @Test
-  public void testInjectLineGross_zeroQuantity_nothingInjected() throws Exception {
+  public void testInjectLineGross_quantityEditedToZero_forcesZero() throws Exception {
     JSONObject body = new JSONObject()
         .put("orderedQuantity", "0")
         .put("unitPrice", 10.0);
 
     NeoCommercialLinePolicy.injectLineGrossAmountIfMissing(body);
 
-    assertFalse(body.has("lineGrossAmount"));
+    assertTrue(body.has("lineGrossAmount"));
+    assertEquals(0.0, body.getDouble("lineGrossAmount"), DELTA);
   }
 
+  /**
+   * ETP-4727 (backend counterpart): unitPrice explicitly edited to 0 on an existing line (the
+   * other repro step from the Jira bug — "o el campo Precio a 0") is equally deterministic and
+   * must force lineGrossAmount=0, not leave it untouched.
+   */
   @Test
-  public void testInjectLineGross_zeroUnitPriceNoGross_nothingInjected() throws Exception {
+  public void testInjectLineGross_priceEditedToZero_forcesZero() throws Exception {
     JSONObject body = new JSONObject()
         .put("orderedQuantity", "2")
         .put("unitPrice", 0.0)
         .put("grossUnitPrice", 0.0)
         .put("tax", "");
+
+    NeoCommercialLinePolicy.injectLineGrossAmountIfMissing(body);
+
+    assertTrue(body.has("lineGrossAmount"));
+    assertEquals(0.0, body.getDouble("lineGrossAmount"), DELTA);
+  }
+
+  /**
+   * ETP-4727 safety net: a body that never mentions orderedQuantity at all (e.g. an
+   * invoice-only body being run through the order-side injector, or any caller that isn't
+   * sending the full row) must NOT have lineGrossAmount forced to 0 — there is no signal here
+   * that an order-line quantity/price was actually just edited. Guards the order/invoice
+   * isolation also covered by testInjectCommercialAmounts_orderLine_onlyLineGrossInjected.
+   */
+  @Test
+  public void testInjectLineGross_noOrderedQuantityKeyAtAll_doesNotForceZero() throws Exception {
+    JSONObject body = new JSONObject()
+        .put("invoicedQuantity", "5")
+        .put("unitPrice", 0.0);
 
     NeoCommercialLinePolicy.injectLineGrossAmountIfMissing(body);
 
@@ -198,10 +243,28 @@ public class NeoCommercialLinePolicyTest {
     assertFalse(body.has("grossAmount"));
   }
 
+  /**
+   * ETP-4727 (backend counterpart, invoice side): invoicedQuantity explicitly edited to 0 on an
+   * existing line must force grossAmount=0 — mirrors testInjectLineGross_quantityEditedToZero_
+   * forcesZero on the order side.
+   */
   @Test
-  public void testInjectGross_zeroQuantity_nothingInjected() throws Exception {
+  public void testInjectGross_quantityEditedToZero_forcesZero() throws Exception {
     JSONObject body = new JSONObject()
         .put("invoicedQuantity", "0")
+        .put("grossUnitPrice", 10.0);
+
+    NeoCommercialLinePolicy.injectGrossAmountIfMissing(body);
+
+    assertTrue(body.has("grossAmount"));
+    assertEquals(0.0, body.getDouble("grossAmount"), DELTA);
+  }
+
+  /** ETP-4727 safety net, invoice side: no invoicedQuantity key at all → don't force zero. */
+  @Test
+  public void testInjectGross_noInvoicedQuantityKeyAtAll_doesNotForceZero() throws Exception {
+    JSONObject body = new JSONObject()
+        .put("orderedQuantity", "3")
         .put("grossUnitPrice", 10.0);
 
     NeoCommercialLinePolicy.injectGrossAmountIfMissing(body);
@@ -272,10 +335,27 @@ public class NeoCommercialLinePolicyTest {
     assertFalse(body.has("lineNetAmount"));
   }
 
+  /**
+   * ETP-4727 (backend counterpart): unitPrice explicitly edited to 0 on an existing invoice
+   * line must force lineNetAmount=0, not leave it untouched.
+   */
   @Test
-  public void testInjectLineNet_zeroUnitPrice_nothingInjected() throws Exception {
+  public void testInjectLineNet_zeroUnitPrice_forcesZero() throws Exception {
     JSONObject body = new JSONObject()
         .put("invoicedQuantity", "2")
+        .put("unitPrice", 0.0);
+
+    NeoCommercialLinePolicy.injectLineNetAmountIfMissing(body);
+
+    assertTrue(body.has("lineNetAmount"));
+    assertEquals(0.0, body.getDouble("lineNetAmount"), DELTA);
+  }
+
+  /** ETP-4727 safety net: no invoicedQuantity key at all → don't force zero. */
+  @Test
+  public void testInjectLineNet_noInvoicedQuantityKeyAtAll_doesNotForceZero() throws Exception {
+    JSONObject body = new JSONObject()
+        .put("orderedQuantity", "2")
         .put("unitPrice", 0.0);
 
     NeoCommercialLinePolicy.injectLineNetAmountIfMissing(body);
@@ -359,9 +439,15 @@ public class NeoCommercialLinePolicyTest {
     assertEquals(-100.0, body.getDouble("grossAmount"), DELTA);
   }
 
-  /** baseNetAmt exactly zero must remain indeterminate (NaN guard still applies). */
+  /**
+   * baseNetAmt exactly zero, driven by an explicit unitPrice=0 on an order line — post-ETP-4727
+   * this is no longer indeterminate: since orderedQuantity is present (it's an order-line body),
+   * the zero is forced rather than left as a NaN-guard no-op. See
+   * testInjectLineGross_priceEditedToZero_forcesZero for the primary regression test; this one
+   * guards the same case survives alongside the ETP-4567 negative-amount tests below.
+   */
   @Test
-  public void testInjectLineGross_zeroBaseNetAmt_stillNothingInjected() throws Exception {
+  public void testInjectLineGross_zeroBaseNetAmt_forcesZero() throws Exception {
     JSONObject body = new JSONObject()
         .put("orderedQuantity", "2")
         .put("unitPrice", 0.0)
@@ -370,7 +456,84 @@ public class NeoCommercialLinePolicyTest {
 
     NeoCommercialLinePolicy.injectLineGrossAmountIfMissing(body);
 
-    assertFalse(body.has("lineGrossAmount"));
+    assertTrue(body.has("lineGrossAmount"));
+    assertEquals(0.0, body.getDouble("lineGrossAmount"), DELTA);
+  }
+
+  // ── ETP-4855: injectCommercialAmounts ordering ────────────────────────────
+
+  @Test
+  public void testInjectCommercialAmounts_nullBody_doesNotThrow() {
+    NeoCommercialLinePolicy.injectCommercialAmounts(null);
+  }
+
+  /**
+   * ETP-4855 regression guard — THE ordering test.
+   *
+   * <p>An invoice line carrying only quantity, unit price and tax (no amounts at all) is
+   * exactly what the OCR {@code /batch} ingest, the MCP write path and the line import modal
+   * send. {@code injectGrossAmountIfMissing} derives the gross from {@code lineNetAmount}, so
+   * if it runs before {@code injectLineNetAmountIfMissing} the base is 0, the NaN guard fires
+   * and {@code grossAmount} is never written — persisting {@code LINE_GROSS_AMOUNT = 0} and a
+   * line "Total" column rendered as 0.
+   *
+   * <p>Asserting on the sequence (not on each injector in isolation, which is what the tests
+   * above do and why the bug shipped) is the whole point of this test.
+   */
+  @Test
+  public void testInjectCommercialAmounts_amountsAbsent_derivesNetThenGross() throws Exception {
+    JSONObject body = new JSONObject()
+        .put("invoicedQuantity", "20")
+        .put("unitPrice", 15.5)
+        .put("tax", "TAX21");
+
+    withTaxRate(21.0, () -> NeoCommercialLinePolicy.injectCommercialAmounts(body));
+
+    // Net first: 20 × 15.5. Then gross off that net: 310 × 1.21.
+    assertEquals(310.0, body.getDouble("lineNetAmount"), DELTA);
+    assertEquals(375.1, body.getDouble("grossAmount"), DELTA);
+  }
+
+  /**
+   * Centralising the sequence must not leak invoice-side fields onto order lines: an order line
+   * uses {@code orderedQuantity}, so only {@code lineGrossAmount} may be produced.
+   */
+  @Test
+  public void testInjectCommercialAmounts_orderLine_onlyLineGrossInjected() throws Exception {
+    JSONObject body = new JSONObject()
+        .put("orderedQuantity", "3")
+        .put("unitPrice", 20.0)
+        .put("tax", "");
+
+    NeoCommercialLinePolicy.injectCommercialAmounts(body);
+
+    assertEquals(60.0, body.getDouble("lineGrossAmount"), DELTA);
+    assertFalse(body.has("lineNetAmount"));
+    assertFalse(body.has("grossAmount"));
+  }
+
+  /**
+   * Run {@code action} with {@code NeoCommercialLinePolicy#fetchTaxRate} resolving to
+   * {@code rate}. The rate lookup goes straight to JDBC through
+   * {@code OBDal.getInstance().getConnection(false)}, so the whole chain down to the
+   * ResultSet is stubbed — no DB, no DAL initialisation.
+   */
+  private void withTaxRate(double rate, Runnable action) throws Exception {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      Connection conn = mock(Connection.class);
+      PreparedStatement ps = mock(PreparedStatement.class);
+      ResultSet rs = mock(ResultSet.class);
+
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.getConnection(false)).thenReturn(conn);
+      when(conn.prepareStatement(anyString())).thenReturn(ps);
+      when(ps.executeQuery()).thenReturn(rs);
+      when(rs.next()).thenReturn(true);
+      when(rs.getDouble(1)).thenReturn(rate);
+
+      action.run();
+    }
   }
 
   // ── injectProductDerivedUomIfMissing (IMP-15, four-attempt bug) ───────────
