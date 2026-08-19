@@ -67,6 +67,9 @@ public class TaxReportHandler implements NeoHandler {
   private static final String PARAM_GROUP_BY_BP  = "groupByBp";
   private static final String PARAM_BP_NAME_TYPE = "bpNameType";
 
+  /** Amount columns run through C_CURRENCY_CONVERT_RATE: tax base, tax amount, document total. */
+  private static final int CONVERTED_AMOUNT_COLUMNS = 3;
+
   // ---- JSON field name constants ----
   private static final String F_TAX_NAME  = "taxName";
   private static final String F_RATE      = "rate";
@@ -173,7 +176,8 @@ public class TaxReportHandler implements NeoHandler {
     p.groupByBp        = body.optBoolean(PARAM_GROUP_BY_BP, false);
     p.bpNameType       = body.optString(PARAM_BP_NAME_TYPE, "commercial");
     p.orgId            = resolveOrgId(body);
-    p.currencySymbol   = resolveCurrencySymbol(body.optString(PARAM_CURRENCY_ID, ""));
+    p.currencyId       = body.optString(PARAM_CURRENCY_ID, "");
+    p.currencySymbol   = resolveCurrencySymbol(p.currencyId);
     return p;
   }
 
@@ -187,6 +191,44 @@ public class TaxReportHandler implements NeoHandler {
     String bpNameCol = "legal".equals(p.bpNameType)
         ? "COALESCE(NULLIF(bp.name2,''), bp.name)"
         : "bp.name";
+
+    // Amounts are stored in the DOCUMENT's currency, so invoices issued in a foreign
+    // currency have to be converted to the currency the user picked before they can be
+    // summed together. Without this, a USD invoice and a EUR invoice were added up raw.
+    //
+    // Mirrors Etendo Classic's OBMTR30 Invoice Tax Report
+    // (com.etendoerp.verifactu.report.OBMTR30_InvoiceTaxReportJRCustom -> MTRRecord):
+    // same function, same arguments, and the same preference for an invoice-specific
+    // rate (c_conversion_rate_document) over the general one (c_conversion_rate).
+    // The conversion date is the report's own date column — accounting date by default —
+    // which is what Classic uses too, NOT dateinvoiced.
+    //
+    // Two behaviours of C_CURRENCY_CONVERT_RATE this relies on:
+    //   - source == target returns the amount untouched (invoices already in the target
+    //     currency keep their exact value, no rounding), and
+    //   - a NULL rate delegates to the standard c_conversion_rate lookup ('S'/Spot).
+    // A NULL target currency would blank out every amount, so with no currency selected
+    // the raw columns are emitted exactly as before.
+    boolean convertCurrency = !p.currencyId.isEmpty();
+    String taxBaseCol = "it.taxbaseamt";
+    String taxAmtCol  = "it.taxamt";
+    String totalCol   = "i.grandtotal";
+    String rateDocJoin = "";
+    if (convertCurrency) {
+      taxBaseCol = currencyConvert("it.taxbaseamt", dateColumn);
+      taxAmtCol  = currencyConvert("it.taxamt",     dateColumn);
+      totalCol   = currencyConvert("i.grandtotal",  dateColumn);
+      // Constrained to this invoice's exact currency pair so the join can never match
+      // more than one row and silently duplicate the invoice (which would inflate every
+      // total). Classic instead lets the join fan out and filters afterwards in its
+      // WHERE; restricting it here is equivalent for a matching rate and safer.
+      rateDocJoin =
+          "  LEFT JOIN c_conversion_rate_document crd " +
+          "    ON crd.c_invoice_id      = i.c_invoice_id " +
+          "   AND crd.c_currency_id     = i.c_currency_id " +
+          "   AND crd.c_currency_id_to  = ? " +
+          "   AND crd.isactive          = 'Y' ";
+    }
 
     StringBuilder sql = new StringBuilder(
         "SELECT " +
@@ -205,9 +247,9 @@ public class TaxReportHandler implements NeoHandler {
         "  dt.name               AS doc_type, " +
         "  TO_CHAR(i.dateinvoiced,'YYYY-MM-DD') AS doc_date, " +
         "  TO_CHAR(i.dateacct,   'YYYY-MM-DD') AS acct_date, " +
-        "  it.taxbaseamt         AS tax_base_amt, " +
-        "  it.taxamt             AS tax_amt, " +
-        "  i.grandtotal          AS total_amt " +
+        "  " + taxBaseCol + "    AS tax_base_amt, " +
+        "  " + taxAmtCol  + "    AS tax_amt, " +
+        "  " + totalCol   + "    AS total_amt " +
         "FROM c_invoicetax it " +
         "  JOIN c_invoice i      ON i.c_invoice_id = it.c_invoice_id " +
         "  JOIN c_tax t          ON t.c_tax_id = it.c_tax_id " +
@@ -219,6 +261,7 @@ public class TaxReportHandler implements NeoHandler {
         "  LEFT JOIN c_location loc ON loc.c_location_id = bpl.c_location_id " +
         "  LEFT JOIN c_country ctry ON ctry.c_country_id = loc.c_country_id " +
         "  LEFT JOIN c_region reg   ON reg.c_region_id = loc.c_region_id " +
+        rateDocJoin +
         "WHERE i.docstatus IN ('CO','CL') " +
         "  AND i.isactive = 'Y' " +
         "  AND i.issotrx = ? " +
@@ -229,8 +272,22 @@ public class TaxReportHandler implements NeoHandler {
     );
 
     List<Object> params = new ArrayList<>();
+    String clientId = OBContext.getOBContext().getCurrentClient().getId();
+
+    // Placeholders are positional, and the conversion ones live in the SELECT list and
+    // the join — both of which come BEFORE the WHERE — so they must be bound first.
+    // Order: (currency, client) per converted column, in SELECT order, then the join's
+    // target currency.
+    if (convertCurrency) {
+      for (int i = 0; i < CONVERTED_AMOUNT_COLUMNS; i++) {
+        params.add(p.currencyId);
+        params.add(clientId);
+      }
+      params.add(p.currencyId);
+    }
+
     params.add(isSOTrx);
-    params.add(OBContext.getOBContext().getCurrentClient().getId());
+    params.add(clientId);
     params.add(p.orgId);
     params.add(p.dateFrom);
     params.add(p.dateTo);
@@ -492,6 +549,27 @@ public class TaxReportHandler implements NeoHandler {
     return orgId;
   }
 
+  /**
+   * Wraps an amount column in the standard Openbravo currency conversion, from the
+   * invoice's own currency to the currency selected in the report filter.
+   *
+   * <p>Argument order is fixed by the function's signature
+   * (src-db/database/model/functions/C_CURRENCY_CONVERT_RATE.xml):
+   * {@code (amount, currencyFrom, currencyTo, date, rateType, client, org, rate)}.
+   * {@code rateType} is NULL so the lookup falls back to Spot, and {@code org} is '0'
+   * (client level) — both matching what Classic's OBMTR30 report passes.
+   *
+   * <p>Emits two positional placeholders: the target currency and the client id.
+   *
+   * @param amountExpr column holding the amount in the document's currency
+   * @param dateColumn date the exchange rate is looked up at — the report's own date
+   *                   column, so it follows the "Date Type" filter just like Classic
+   */
+  private static String currencyConvert(String amountExpr, String dateColumn) {
+    return "C_CURRENCY_CONVERT_RATE(" + amountExpr + ", i.c_currency_id, ?, "
+        + dateColumn + ", NULL, ?, '0', crd.rate)";
+  }
+
   private String resolveCurrencySymbol(String currencyId) {
     if (currencyId.isEmpty()) {
       return "";
@@ -544,6 +622,7 @@ public class TaxReportHandler implements NeoHandler {
     boolean groupByBp;
     String  bpNameType;
     String  orgId;
+    String  currencyId;
     String  currencySymbol;
   }
 
