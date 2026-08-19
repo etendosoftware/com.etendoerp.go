@@ -264,10 +264,19 @@ public class DefaultDocumentSendEmailContract implements EmailContract {
     return override != null ? override : buildSubject(document);
   }
 
+  /**
+   * ETP-4717 (reopened) — an operator-authored message must not drop the document download link:
+   * the override replaces only the introductory copy, the link paragraph is always appended after
+   * it. {@link EmailMessageEdits#toHtmlBody()} already escapes the operator's text and converts
+   * newlines to {@code <br>} before this method ever sees it, so appending the raw link markup
+   * afterwards cannot be mangled by that same conversion.
+   */
   private String resolveBody(EmailDocumentRecord document, String downloadLink,
       Optional<EmailMessageEdits> messageEdits) {
     String override = messageEdits.map(EmailMessageEdits::toHtmlBody).orElse(null);
-    return override != null ? override : buildBody(document, downloadLink);
+    return override != null
+        ? "<p>" + override + "</p>" + downloadLinkParagraph(downloadLink)
+        : buildBody(document, downloadLink);
   }
 
   /**
@@ -303,7 +312,15 @@ public class DefaultDocumentSendEmailContract implements EmailContract {
    */
   private String buildBody(EmailDocumentRecord document, String downloadLink) {
     return "<p>Le enviamos su " + documentTypeLabel() + " " + document.getDocumentNumber()
-        + ".</p><p>Puede descargarlo desde este enlace: <a href=\"" + downloadLink + "\">"
+        + ".</p>" + downloadLinkParagraph(downloadLink);
+  }
+
+  /**
+   * Renders the download-link paragraph shared by {@link #buildBody} and the operator-message
+   * override path in {@link #resolveBody}, so the markup is defined once (ETP-4717).
+   */
+  private String downloadLinkParagraph(String downloadLink) {
+    return "<p>Puede descargarlo desde este enlace: <a href=\"" + downloadLink + "\">"
         + downloadLink + "</a></p>";
   }
 
