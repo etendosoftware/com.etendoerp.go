@@ -1122,6 +1122,7 @@ public abstract class AbstractInvoiceHeaderHandler {
       blockCalloutDocTypeUpdateIfLocked(fields.updates(), fields.triggerField(), recordId);
       applySiiAuthorizationCallout(fields.triggerField(), fields.requestBody(), fields.updates(), fields.body());
       applyVerifactuInvTypeFromDocType(fields.triggerField(), fields.requestBody(), fields.updates());
+      applyRectificativeFieldsFromDocType(fields.triggerField(), fields.requestBody(), fields.updates());
       realignVerifactuDescWithFormStateDocType(fields.triggerField(), fields.formState(), fields.updates());
     } catch (Exception e) {
       log.warn("[ETP-4029/ETP-4535] afterCallout failed (non-fatal): {}", e.getMessage());
@@ -1315,6 +1316,73 @@ public abstract class AbstractInvoiceHeaderHandler {
       }
     } catch (Exception e) {
       log.warn("[ETP-4783] applyVerifactuInvTypeFromDocType failed (non-fatal): {}", e.getMessage());
+    }
+  }
+
+  /**
+   * Injects TicketBAI rectificative fields into the callout response when the selected document
+   * type is marked as rectificative ({@code em_etsg_isrectificative = 'Y'}) in SIF General.
+   *
+   * <p>Fires only when {@code triggerField} is {@code "transactionDocument"}. When the column
+   * {@code em_etsg_isrectificative} is absent from the DB (SIF General not installed), the whole
+   * method is a no-op ({@link RectificativeSupport#isColumnPresent()} returns {@code false}).
+   *
+   * <p>When the doctype IS rectificative:
+   * <ul>
+   *   <li>{@code tbaiIsreverseinvoice} → {@code "Y"} (maps to {@code EM_TBAI_ISREVERSEINVOICE})</li>
+   *   <li>{@code tbaiReverseinvoicetype} → {@code "I"} ("Por diferencias",
+   *       the default TicketBAI reverse invoice type)</li>
+   * </ul>
+   *
+   * <p>When the doctype is NOT rectificative both fields are cleared ({@code "N"} / empty string)
+   * so switching back from a rectificative doctype resets the form correctly.
+   *
+   * @param triggerField the callout trigger field name
+   * @param requestBody  the callout request body ({@code field}, {@code value}, {@code formState})
+   * @param updates      the callout response's {@code updates} map; may be {@code null}
+   */
+  private static void applyRectificativeFieldsFromDocType(String triggerField,
+      JSONObject requestBody, JSONObject updates) {
+    if (!FIELD_TRANSACTION_DOCUMENT.equals(triggerField)) {
+      return;
+    }
+    if (updates == null) {
+      return;
+    }
+    if (!RectificativeSupport.isColumnPresent()) {
+      return;
+    }
+    try {
+      Object rawValue = requestBody != null ? requestBody.opt("value") : null;
+      String docTypeId = rawValue != null ? rawValue.toString().trim() : "";
+      if (docTypeId.isEmpty()) {
+        return;
+      }
+      String sql = "SELECT em_etsg_isrectificative FROM c_doctype WHERE c_doctype_id = ?";
+      Connection conn = OBDal.getReadOnlyInstance().getConnection();
+      boolean isRectificative = false;
+      try (PreparedStatement ps = conn.prepareStatement(sql)) {
+        ps.setString(1, docTypeId);
+        try (ResultSet rs = ps.executeQuery()) {
+          if (rs.next()) {
+            isRectificative = "Y".equalsIgnoreCase(rs.getString(1));
+          }
+        }
+      }
+      JSONObject isReverseUpdate = new JSONObject();
+      isReverseUpdate.put("value", isRectificative ? "Y" : "N");
+      updates.put("tbaiIsreverseinvoice", isReverseUpdate);
+
+      JSONObject reverseTypeUpdate = new JSONObject();
+      // "I" = "Por diferencias" — the TicketBAI default reverse type (AD_REF_LIST VALUE for
+      // reference 6E28A33291454412B2129FDC072B6FD9). Cleared when not rectificative.
+      reverseTypeUpdate.put("value", isRectificative ? "I" : "");
+      updates.put("tbaiReverseinvoicetype", reverseTypeUpdate);
+
+      log.debug("[ETP-4783] applyRectificativeFieldsFromDocType: docType={} isRectificative={}",
+          docTypeId, isRectificative);
+    } catch (Exception e) {
+      log.warn("[ETP-4783] applyRectificativeFieldsFromDocType failed (non-fatal): {}", e.getMessage());
     }
   }
 
