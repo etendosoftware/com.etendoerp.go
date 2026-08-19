@@ -469,6 +469,8 @@ public class Fiscal303SubmitHandlerTest {
     assertFalse(body.isNull("pdfBase64"));
     // Test mode must never mutate the declaration record.
     verify(decl, never()).setDeclarationStatus(anyString());
+    // ETP-4755: submissionMethod is a production-only, real-success write — test mode never sets it.
+    verify(decl, never()).setSubmissionMethod(anyString());
   }
 
   @SuppressWarnings("unchecked")
@@ -511,6 +513,10 @@ public class Fiscal303SubmitHandlerTest {
       assertEquals("CSV999", body.getString("csv"));
       verify(decl).setDeclarationStatus("submitted_ack");
       verify(decl).setFileExternal(false);
+      // ETP-4755: a real production success also sets submissionMethod = aeat_telematic,
+      // disambiguating this path from the two manual "Presentado" paths that also land on
+      // submitted_ack.
+      verify(decl).setSubmissionMethod("aeat_telematic");
       verify(obDal, times(1)).commitAndClose();
     }
   }
@@ -551,6 +557,8 @@ public class Fiscal303SubmitHandlerTest {
     assertEquals("ERROR", body.getString("status"));
     assertEquals("E0100803 - Razon social del Declarante", body.getJSONArray("errors").getString(0));
     verify(decl, never()).setDeclarationStatus(anyString());
+    // ETP-4755: a failed production submission must not set submissionMethod either.
+    verify(decl, never()).setSubmissionMethod(anyString());
   }
 
   /**
@@ -833,6 +841,9 @@ public class Fiscal303SubmitHandlerTest {
       verify(decl, never()).setDeclarationStatus(anyString());
       verify(decl, never()).setDeclarationFileName(anyString());
       verify(decl, never()).setFileExternal(any(Boolean.class));
+      // ETP-4755: test mode must never set submissionMethod either — only a real production
+      // success does (persistSuccessfulSubmission).
+      verify(decl, never()).setSubmissionMethod(anyString());
       verify(obDal, never()).save(decl);
     }
   }
@@ -907,6 +918,8 @@ public class Fiscal303SubmitHandlerTest {
 
       verify(decl).setDeclarationStatus("submitted_ack");
       verify(decl).setFileExternal(false);
+      // ETP-4755: paired assertion — this production success also sets submissionMethod.
+      verify(decl).setSubmissionMethod("aeat_telematic");
       verify(obDal).save(decl);
 
       ArgumentCaptor<File> fileCaptor = ArgumentCaptor.forClass(File.class);
@@ -1342,6 +1355,9 @@ public class Fiscal303SubmitHandlerTest {
 
       // All three write paths actually ran...
       verify(decl).setDeclarationStatus("submitted_ack");
+      // ETP-4755: paired assertion — the consolidated production success path also sets
+      // submissionMethod, part of the same single commit as everything else here.
+      verify(decl).setSubmissionMethod("aeat_telematic");
       verify(obDal).save(decl);
       verify(aim).upload(any(), eq("tab-1"), any(), any(), any(File.class));
       verify(newInc).set(FiscalDeclCrudHandler.PROPERTY_INCIDENT_SEVERITY,
@@ -1398,6 +1414,8 @@ public class Fiscal303SubmitHandlerTest {
       verify(aim).upload(any(), eq("tab-1"), any(), any(), fileCaptor.capture());
       assertTrue(fileCaptor.getValue().getName().startsWith("TEST-justificante-303-"));
       verify(decl, never()).setDeclarationStatus(anyString());
+      // ETP-4755: test mode never sets submissionMethod, even on the full success path.
+      verify(decl, never()).setSubmissionMethod(anyString());
       verify(newInc).set(FiscalDeclCrudHandler.PROPERTY_INCIDENT_SEVERITY,
           FiscalDeclCrudHandler.SEVERITY_WARN);
       // ...but everything still shares ONE consolidated commit.
