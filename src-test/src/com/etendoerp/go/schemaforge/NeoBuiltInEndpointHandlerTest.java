@@ -447,6 +447,99 @@ public class NeoBuiltInEndpointHandlerTest {
   }
 
   /**
+   * Verifies successful GET handling for the fiscal models catalog endpoint.
+   */
+  @Test
+  public void handleFiscalModelsCatalogGetWritesActiveModelsResponse() throws Exception {
+    HttpServletRequest request = mock(HttpServletRequest.class);
+    HttpServletResponse response = mock(HttpServletResponse.class);
+    NeoResponse payload = NeoResponse.ok(new JSONObject());
+
+    try (MockedStatic<NeoFiscalModelsCatalogService> catalogMock =
+        Mockito.mockStatic(NeoFiscalModelsCatalogService.class)) {
+      catalogMock.when(NeoFiscalModelsCatalogService::getActiveModels).thenReturn(payload);
+
+      boolean handled = handler.handle(new NeoServlet.NeoPathInfo("fiscal-models-catalog", null, null),
+          "GET", request, response);
+
+      assertTrue(handled);
+      verify(servlet).writeResponse(response, payload);
+    }
+  }
+
+  /**
+   * Verifies PUT saves the active-models JSON body and responds 204 (via a null NeoResponse).
+   */
+  @Test
+  public void handleFiscalModelsCatalogPutSavesAndFlushes() throws Exception {
+    HttpServletRequest request = mock(HttpServletRequest.class);
+    HttpServletResponse response = mock(HttpServletResponse.class);
+    OBDal dal = mock(OBDal.class);
+
+    try (MockedStatic<NeoFiscalModelsCatalogService> catalogMock =
+             Mockito.mockStatic(NeoFiscalModelsCatalogService.class);
+         MockedStatic<NeoRequestBodyParser> bodyParserMock =
+             Mockito.mockStatic(NeoRequestBodyParser.class);
+         MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+
+      bodyParserMock.when(() -> NeoRequestBodyParser.readRequestBody(request))
+          .thenReturn("{\"303\":true,\"349\":false}");
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      boolean handled = handler.handle(new NeoServlet.NeoPathInfo("fiscal-models-catalog", null, null),
+          "PUT", request, response);
+
+      assertTrue(handled);
+      catalogMock.verify(() -> NeoFiscalModelsCatalogService.saveActiveModels("{\"303\":true,\"349\":false}"));
+      verify(dal).flush();
+      verify(servlet).writeResponse(eq(response), isNull());
+    }
+  }
+
+  /**
+   * Verifies PUT with an invalid JSON body returns 400, matching the service's
+   * {@link IllegalArgumentException} contract.
+   */
+  @Test
+  public void handleFiscalModelsCatalogPutInvalidJsonReturnsBadRequest() throws Exception {
+    HttpServletRequest request = mock(HttpServletRequest.class);
+    HttpServletResponse response = mock(HttpServletResponse.class);
+
+    try (MockedStatic<NeoFiscalModelsCatalogService> catalogMock =
+             Mockito.mockStatic(NeoFiscalModelsCatalogService.class);
+         MockedStatic<NeoRequestBodyParser> bodyParserMock =
+             Mockito.mockStatic(NeoRequestBodyParser.class)) {
+
+      bodyParserMock.when(() -> NeoRequestBodyParser.readRequestBody(request)).thenReturn("not-json");
+      catalogMock.when(() -> NeoFiscalModelsCatalogService.saveActiveModels("not-json"))
+          .thenThrow(new IllegalArgumentException("Invalid JSON body"));
+
+      boolean handled = handler.handle(new NeoServlet.NeoPathInfo("fiscal-models-catalog", null, null),
+          "PUT", request, response);
+
+      assertTrue(handled);
+      verify(servlet).sendError(eq(response), eq(HttpServletResponse.SC_BAD_REQUEST),
+          eq("Invalid JSON body"));
+    }
+  }
+
+  /**
+   * Verifies method restriction for the fiscal models catalog endpoint.
+   */
+  @Test
+  public void handleFiscalModelsCatalogRejectsUnsupportedMethod() throws Exception {
+    HttpServletRequest request = mock(HttpServletRequest.class);
+    HttpServletResponse response = mock(HttpServletResponse.class);
+
+    boolean handled = handler.handle(new NeoServlet.NeoPathInfo("fiscal-models-catalog", null, null),
+        "DELETE", request, response);
+
+    assertTrue(handled);
+    verify(servlet).sendError(eq(response), eq(HttpServletResponse.SC_METHOD_NOT_ALLOWED),
+        eq("Fiscal models catalog endpoint only supports GET and PUT"));
+  }
+
+  /**
    * Verifies successful GET handling for the certificate endpoint.
    */
   @Test
