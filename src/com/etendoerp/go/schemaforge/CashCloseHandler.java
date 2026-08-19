@@ -34,6 +34,7 @@ import org.openbravo.base.exception.OBException;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.dal.service.OBQuery;
 import org.openbravo.model.common.enterprise.DocumentType;
+import org.openbravo.model.financialmgmt.payment.FIN_FinaccTransaction;
 import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
 import org.openbravo.model.financialmgmt.payment.FIN_Reconciliation;
 import org.openbravo.model.financialmgmt.payment.FIN_ReconciliationLine_v;
@@ -193,6 +194,26 @@ public class CashCloseHandler implements NeoHandler {
   /** The account's most recent completed reconciliation, or {@code null} when there is none. */
   FIN_Reconciliation findLastProcessed(FIN_FinancialAccount account) {
     return TransactionsDao.getLastReconciliation(account, "Y");
+  }
+
+  /**
+   * The transactions currently linked to {@code rec}, read with a query.
+   *
+   * <p>Deliberately NOT {@code rec.getFINFinaccTransactionList()}. A draft created earlier in the
+   * SAME request comes from {@code OBProvider} (see {@code
+   * AdvPaymentMngtDao#getNewReconciliation}), so that one-to-many list is a plain in-memory
+   * collection which is never populated from the database — while linking a movement sets the FK on
+   * the OWNING side ({@code trx.setReconciliation(draft)}), which never shows up in it. Reading the
+   * list on a FIRST close therefore reported zero cleared movements, so the whole counted amount
+   * looked like a discrepancy: the close was rejected for a missing GL Item Difference it did not
+   * need, or — worse, when one was configured — posted a spurious adjustment for the full amount.
+   * A query is authoritative for a freshly created and for a reloaded draft alike.</p>
+   */
+  List<FIN_FinaccTransaction> linkedTransactions(FIN_Reconciliation rec) {
+    return OBDal.getInstance()
+        .createQuery(FIN_FinaccTransaction.class, "reconciliation.id = :reconciliationId")
+        .setNamedParameter("reconciliationId", rec.getId())
+        .list();
   }
 
   /**

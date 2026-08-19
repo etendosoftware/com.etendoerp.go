@@ -62,6 +62,7 @@ import org.openbravo.model.common.currency.Currency;
 import org.openbravo.model.common.enterprise.DocumentType;
 import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.common.invoice.Invoice;
+import org.openbravo.model.common.invoice.InvoiceLine;
 import org.openbravo.model.common.order.Order;
 import org.openbravo.model.common.order.OrderLine;
 import org.openbravo.model.common.plm.Product;
@@ -91,6 +92,7 @@ public class CreatePurchaseInvoiceHandlerTest {
   private static class TestableHandler extends CreatePurchaseInvoiceHandler {
     DocumentType docTypeToReturn;
     JSONArray selectedLinesToReturn;
+    Invoice copiedDiscountsInvoice;
 
     @Override
     protected DocumentType resolveAPInvoiceDocType(Order order) {
@@ -114,6 +116,14 @@ public class CreatePurchaseInvoiceHandlerTest {
         @Override
         public void ensureLineGrossAmounts(Invoice invoice) {
           // no-op: tested separately in InvoiceFromOrderSupportTest
+        }
+
+        // ETP-4780: no-op here so tests that don't stub invoice.getInvoiceLineList()
+        // don't NPE on the real implementation; capture the argument so delegation
+        // itself can still be asserted (see testCreateFromOrder/ReceiptDelegatesToSupport).
+        @Override
+        public void copyLineDiscountsFromOrder(Invoice invoice) {
+          copiedDiscountsInvoice = invoice;
         }
       };
     }
@@ -198,6 +208,299 @@ public class CreatePurchaseInvoiceHandlerTest {
       verify(linkQuery).setParameter(eq("userId"), eq("user-3"));
       verify(linkQuery).setParameter(eq("invoiceId"), eq("invoice-PO"));
       verify(linkQuery).executeUpdate();
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // copyLineDiscountsFromOrder delegation (ETP-4780) — "% Descuento" carried
+  // from the source Purchase Order/Goods Receipt line into the generated
+  // invoice line. The discount-copy logic itself (skip zero/null, never
+  // overwrite an already-set value) is covered once, generically, in
+  // InvoiceFromOrderSupportTest — these tests lock in that BOTH
+  // createFromOrder and createFromReceipt actually invoke it at the right
+  // point in the flow (mirroring the sales-side ETP-4006 regression).
+  // -------------------------------------------------------------------------
+
+  /**
+   * Verifies that {@code createFromOrder} delegates to
+   * {@code getSupport().copyLineDiscountsFromOrder(invoice)} — the fix for ETP-4780,
+   * where a Purchase Invoice generated from a confirmed Purchase Order silently
+   * dropped the per-line "% Descuento", producing a total that no longer matched
+   * the source order.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  public void testCreateFromOrderDelegatesToCopyLineDiscountsFromSupport() throws JSONException {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+        MockedStatic<OBProvider> obProviderMock = Mockito.mockStatic(OBProvider.class);
+        MockedStatic<OBContext> obContextMock = Mockito.mockStatic(OBContext.class);
+        MockedStatic<WeldUtils> weldUtilsMock = Mockito.mockStatic(WeldUtils.class)) {
+
+      OBDal dal = mock(OBDal.class);
+      Session session = mock(Session.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.getSession()).thenReturn(session);
+      Order orderHeader = mockOrderWithHeaderData();
+      when(dal.get(eq(Order.class), eq("po-discount"))).thenReturn(orderHeader);
+
+      NativeQuery linkQuery = mock(NativeQuery.class);
+      when(session.createNativeQuery(anyString())).thenReturn(linkQuery);
+      when(linkQuery.setParameter(anyString(), any())).thenReturn(linkQuery);
+      when(linkQuery.executeUpdate()).thenReturn(0);
+
+      OBContext ctx = mock(OBContext.class);
+      org.openbravo.model.ad.access.User user = mock(org.openbravo.model.ad.access.User.class);
+      when(user.getId()).thenReturn("user-discount");
+      when(ctx.getUser()).thenReturn(user);
+      obContextMock.when(OBContext::getOBContext).thenReturn(ctx);
+
+      OBProvider provider = mock(OBProvider.class);
+      Invoice invoice = mock(Invoice.class);
+      when(invoice.getId()).thenReturn("invoice-discount");
+      obProviderMock.when(OBProvider::getInstance).thenReturn(provider);
+      when(provider.get(Invoice.class)).thenReturn(invoice);
+
+      CreateInvoiceLinesFromProcess process = mock(CreateInvoiceLinesFromProcess.class);
+      weldUtilsMock.when(() -> WeldUtils.getInstanceFromStaticBeanManager(CreateInvoiceLinesFromProcess.class))
+          .thenReturn(process);
+
+      TestableHandler handler = new TestableHandler();
+      handler.docTypeToReturn = mock(DocumentType.class);
+      handler.selectedLinesToReturn = new JSONArray().put(new JSONObject()
+          .put("id", "ol-discount")
+          .put("orderedQuantity", "1"));
+
+      Invoice result = handler.createFromOrder("po-discount");
+
+      assertSame(invoice, result);
+      assertSame("createFromOrder must delegate discount copy to getSupport()",
+          invoice, handler.copiedDiscountsInvoice);
+    }
+  }
+
+  /**
+   * Same delegation contract as above but for the goods-receipt-with-linked-PO branch
+   * of {@code createFromReceipt} — the second entry point ETP-4780 targets.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  public void testCreateFromReceiptLinkedPoDelegatesToCopyLineDiscountsFromSupport() throws JSONException {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+        MockedStatic<OBProvider> obProviderMock = Mockito.mockStatic(OBProvider.class);
+        MockedStatic<OBContext> obContextMock = Mockito.mockStatic(OBContext.class);
+        MockedStatic<WeldUtils> weldUtilsMock = Mockito.mockStatic(WeldUtils.class)) {
+
+      OBDal dal = mock(OBDal.class);
+      Session session = mock(Session.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.getSession()).thenReturn(session);
+
+      Order linkedOrder = mockOrderWithHeaderData();
+      when(linkedOrder.getId()).thenReturn("po-linked-discount");
+
+      OrderLine ol = mock(OrderLine.class);
+      when(ol.getId()).thenReturn("ol-1");
+      Product product = mock(Product.class);
+      when(product.getId()).thenReturn("prod-1");
+      ShipmentInOutLine rl = mockReceiptLine("rl-1", true, product, BigDecimal.valueOf(3), ol);
+
+      Currency receiptCurrency = mock(Currency.class);
+      ShipmentInOut receipt = mock(ShipmentInOut.class);
+      when(receipt.getSalesOrder()).thenReturn(linkedOrder);
+      when(receipt.getMaterialMgmtShipmentInOutLineList()).thenReturn(Collections.singletonList(rl));
+      when(receipt.getEtgoCurrency()).thenReturn(receiptCurrency);
+      when(dal.get(eq(ShipmentInOut.class), eq("receipt-linked-discount"))).thenReturn(receipt);
+
+      NativeQuery linkQuery = mock(NativeQuery.class);
+      when(session.createNativeQuery(anyString())).thenReturn(linkQuery);
+      when(linkQuery.setParameter(anyString(), any())).thenReturn(linkQuery);
+      when(linkQuery.executeUpdate()).thenReturn(1);
+
+      OBContext ctx = mock(OBContext.class);
+      org.openbravo.model.ad.access.User user = mock(org.openbravo.model.ad.access.User.class);
+      when(user.getId()).thenReturn("user-receipt-discount");
+      when(ctx.getUser()).thenReturn(user);
+      obContextMock.when(OBContext::getOBContext).thenReturn(ctx);
+
+      OBProvider provider = mock(OBProvider.class);
+      Invoice invoice = mock(Invoice.class);
+      when(invoice.getDocumentNo()).thenReturn("AP-RECEIPT-DISCOUNT");
+      obProviderMock.when(OBProvider::getInstance).thenReturn(provider);
+      when(provider.get(Invoice.class)).thenReturn(invoice);
+
+      CreateInvoiceLinesFromProcess process = mock(CreateInvoiceLinesFromProcess.class);
+      weldUtilsMock.when(() -> WeldUtils.getInstanceFromStaticBeanManager(CreateInvoiceLinesFromProcess.class))
+          .thenReturn(process);
+
+      TestableHandler handler = new TestableHandler();
+      handler.docTypeToReturn = mock(DocumentType.class);
+
+      Invoice result = handler.createFromReceipt("receipt-linked-discount", null);
+
+      assertSame(invoice, result);
+      assertSame("createFromReceipt (linked-PO branch) must delegate discount copy to getSupport()",
+          invoice, handler.copiedDiscountsInvoice);
+    }
+  }
+
+  /**
+   * End-to-end regression for ETP-4780 against the REAL {@link InvoiceFromOrderSupport}
+   * implementation (only the unrelated collaborators — total discount, gross amounts,
+   * currency-rate propagation — are stubbed out): an {@code OrderLine} with a positive
+   * {@code discount} must produce an {@code InvoiceLine.setEtgoDiscount(...)} call with
+   * the same value once {@code createFromOrder} runs to completion.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  public void testCreateFromOrderCopiesPositiveDiscountFromOrderLineToInvoiceLine() throws JSONException {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+        MockedStatic<OBProvider> obProviderMock = Mockito.mockStatic(OBProvider.class);
+        MockedStatic<OBContext> obContextMock = Mockito.mockStatic(OBContext.class);
+        MockedStatic<WeldUtils> weldUtilsMock = Mockito.mockStatic(WeldUtils.class)) {
+
+      OBDal dal = mock(OBDal.class);
+      Session session = mock(Session.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.getSession()).thenReturn(session);
+      Order orderHeader = mockOrderWithHeaderData();
+      when(dal.get(eq(Order.class), eq("po-real-discount"))).thenReturn(orderHeader);
+
+      NativeQuery linkQuery = mock(NativeQuery.class);
+      when(session.createNativeQuery(anyString())).thenReturn(linkQuery);
+      when(linkQuery.setParameter(anyString(), any())).thenReturn(linkQuery);
+      when(linkQuery.executeUpdate()).thenReturn(0);
+
+      OBContext ctx = mock(OBContext.class);
+      org.openbravo.model.ad.access.User user = mock(org.openbravo.model.ad.access.User.class);
+      when(user.getId()).thenReturn("user-real-discount");
+      when(ctx.getUser()).thenReturn(user);
+      obContextMock.when(OBContext::getOBContext).thenReturn(ctx);
+
+      OrderLine sourceOrderLine = mock(OrderLine.class);
+      when(sourceOrderLine.getDiscount()).thenReturn(new BigDecimal("12.50"));
+
+      InvoiceLine invoiceLine = mock(InvoiceLine.class);
+      when(invoiceLine.getSalesOrderLine()).thenReturn(sourceOrderLine);
+      when(invoiceLine.getEtgoDiscount()).thenReturn(null);
+
+      OBProvider provider = mock(OBProvider.class);
+      Invoice invoice = mock(Invoice.class);
+      when(invoice.getId()).thenReturn("invoice-real-discount");
+      when(invoice.getInvoiceLineList()).thenReturn(Collections.singletonList(invoiceLine));
+      obProviderMock.when(OBProvider::getInstance).thenReturn(provider);
+      when(provider.get(Invoice.class)).thenReturn(invoice);
+
+      CreateInvoiceLinesFromProcess process = mock(CreateInvoiceLinesFromProcess.class);
+      weldUtilsMock.when(() -> WeldUtils.getInstanceFromStaticBeanManager(CreateInvoiceLinesFromProcess.class))
+          .thenReturn(process);
+
+      // Handler whose support delegates copyLineDiscountsFromOrder to the REAL
+      // implementation, but keeps the unrelated collaborators as no-ops so the test
+      // stays focused on the discount-copy contract.
+      TestableHandler handler = new TestableHandler() {
+        @Override
+        InvoiceFromOrderSupport getSupport() {
+          return new InvoiceFromOrderSupport() {
+            @Override
+            public Invoice applyOrderDiscountToInvoice(Invoice inv, String sourceOrderId,
+                TotalDiscountService discountService) {
+              return inv;
+            }
+            @Override
+            public void ensureLineGrossAmounts(Invoice inv) { /* no-op */ }
+            @Override
+            public void propagateOrderRateToInvoice(Order order, Invoice inv) { /* no-op */ }
+          };
+        }
+      };
+      handler.docTypeToReturn = mock(DocumentType.class);
+      handler.selectedLinesToReturn = new JSONArray().put(new JSONObject()
+          .put("id", "ol-real-discount")
+          .put("orderedQuantity", "1"));
+
+      Invoice result = handler.createFromOrder("po-real-discount");
+
+      assertSame(invoice, result);
+      verify(invoiceLine).setEtgoDiscount(new BigDecimal("12.50"));
+      verify(dal).save(invoiceLine);
+    }
+  }
+
+  /**
+   * No-regression companion to the above: when the source order line carries a zero
+   * discount, {@code createFromOrder} must leave the invoice line's
+   * {@code EM_Etgo_Discount} untouched (stays at whatever the native process set it
+   * to — never forced to 0 or overwritten).
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  public void testCreateFromOrderZeroSourceDiscountDoesNotOverwriteInvoiceLine() throws JSONException {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+        MockedStatic<OBProvider> obProviderMock = Mockito.mockStatic(OBProvider.class);
+        MockedStatic<OBContext> obContextMock = Mockito.mockStatic(OBContext.class);
+        MockedStatic<WeldUtils> weldUtilsMock = Mockito.mockStatic(WeldUtils.class)) {
+
+      OBDal dal = mock(OBDal.class);
+      Session session = mock(Session.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.getSession()).thenReturn(session);
+      Order orderHeader = mockOrderWithHeaderData();
+      when(dal.get(eq(Order.class), eq("po-zero-discount"))).thenReturn(orderHeader);
+
+      NativeQuery linkQuery = mock(NativeQuery.class);
+      when(session.createNativeQuery(anyString())).thenReturn(linkQuery);
+      when(linkQuery.setParameter(anyString(), any())).thenReturn(linkQuery);
+      when(linkQuery.executeUpdate()).thenReturn(0);
+
+      OBContext ctx = mock(OBContext.class);
+      org.openbravo.model.ad.access.User user = mock(org.openbravo.model.ad.access.User.class);
+      when(user.getId()).thenReturn("user-zero-discount");
+      when(ctx.getUser()).thenReturn(user);
+      obContextMock.when(OBContext::getOBContext).thenReturn(ctx);
+
+      OrderLine sourceOrderLine = mock(OrderLine.class);
+      when(sourceOrderLine.getDiscount()).thenReturn(BigDecimal.ZERO);
+
+      InvoiceLine invoiceLine = mock(InvoiceLine.class);
+      when(invoiceLine.getSalesOrderLine()).thenReturn(sourceOrderLine);
+      when(invoiceLine.getEtgoDiscount()).thenReturn(null);
+
+      OBProvider provider = mock(OBProvider.class);
+      Invoice invoice = mock(Invoice.class);
+      when(invoice.getId()).thenReturn("invoice-zero-discount");
+      when(invoice.getInvoiceLineList()).thenReturn(Collections.singletonList(invoiceLine));
+      obProviderMock.when(OBProvider::getInstance).thenReturn(provider);
+      when(provider.get(Invoice.class)).thenReturn(invoice);
+
+      CreateInvoiceLinesFromProcess process = mock(CreateInvoiceLinesFromProcess.class);
+      weldUtilsMock.when(() -> WeldUtils.getInstanceFromStaticBeanManager(CreateInvoiceLinesFromProcess.class))
+          .thenReturn(process);
+
+      TestableHandler handler = new TestableHandler() {
+        @Override
+        InvoiceFromOrderSupport getSupport() {
+          return new InvoiceFromOrderSupport() {
+            @Override
+            public Invoice applyOrderDiscountToInvoice(Invoice inv, String sourceOrderId,
+                TotalDiscountService discountService) {
+              return inv;
+            }
+            @Override
+            public void ensureLineGrossAmounts(Invoice inv) { /* no-op */ }
+            @Override
+            public void propagateOrderRateToInvoice(Order order, Invoice inv) { /* no-op */ }
+          };
+        }
+      };
+      handler.docTypeToReturn = mock(DocumentType.class);
+      handler.selectedLinesToReturn = new JSONArray().put(new JSONObject()
+          .put("id", "ol-zero-discount")
+          .put("orderedQuantity", "1"));
+
+      Invoice result = handler.createFromOrder("po-zero-discount");
+
+      assertSame(invoice, result);
+      verify(invoiceLine, never()).setEtgoDiscount(any(BigDecimal.class));
     }
   }
 
@@ -503,6 +806,9 @@ public class CreatePurchaseInvoiceHandlerTest {
             }
             @Override
             public void ensureLineGrossAmounts(Invoice inv) { /* no-op */ }
+
+            @Override
+            public void copyLineDiscountsFromOrder(Invoice inv) { /* no-op */ }
 
             @Override
             public void propagateOrderRateToInvoice(Order order, Invoice inv) {
