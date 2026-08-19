@@ -60,6 +60,7 @@ import org.openbravo.model.financialmgmt.payment.FinAccPaymentMethod;
 import org.openbravo.service.db.DalConnectionProvider;
 import org.openbravo.service.json.JsonUtils;
 
+import com.etendoerp.psd2.bank.integration.data.PisPayment;
 import com.etendoerp.psd2.bank.integration.utils.BankIntegrationConstants;
 
 /**
@@ -418,10 +419,18 @@ final class PaymentRegistrationService {
       item.put("paymentMethod", p.getPaymentMethod().getName());
     }
     // A linked PSD2_PIS_PAYMENT row means this payment was initiated through the Salt Edge PIS
-    // flow (this popup), not just a manually-recorded bank transfer — surfaced in the SPA's
-    // payment history as a "Realizado vía banco" badge. PisPayment is a plain DAL entity (no
-    // PSD2-module method needed), so this is queried directly here.
-    item.put(KEY_VIA_PIS, PisPaymentService.hasLinkedPisPayment(p));
+    // flow (this popup), not just a manually-recorded bank transfer. PisPayment is a plain DAL
+    // entity (no PSD2-module method needed), so this is queried directly here.
+    PisPayment linkedPis = PisPaymentService.linkedPisPayment(p);
+    item.put(KEY_VIA_PIS, linkedPis != null);
+    if (linkedPis != null) {
+      // Needed by the SPA to retry a rejected transfer — the retry acts on the PIS attempt, not on
+      // the payment, since a retry starts a brand-new transfer.
+      item.put("pisPaymentId", linkedPis.getId());
+      // Authorized at the bank but the funds have not landed yet: the payment is processed and no
+      // FIN_Finacc_Transaction exists. Shown as "Pago en progreso" rather than as fully deposited.
+      item.put("pisPending", Boolean.TRUE.equals(p.isProcessed()) && !hasFinTransaction(p));
+    }
     // Only a draft can be re-opened for editing — expose which credit/abono sources it is
     // currently consuming so the edit modal can re-check them (see creditSourcesUsedByPayment).
     if (!Boolean.TRUE.equals(p.isProcessed())) {
@@ -565,12 +574,13 @@ final class PaymentRegistrationService {
    * monetary aggregates are zeroed — and then re-applied with the new amount/date/account/method. A
    * processed payment is read-only and rejected. A blank {@code paymentId} keeps the create behavior.
    *
-   * <p>When {@code pis=true} the payment is registered as a real bank transfer through the
-   * PSD2 / Salt Edge PIS integration: the {@link FIN_Payment} is created, linked and PROCESSED to
-   * status {@code PPM} ("Payment Made") — applied to the invoice but with NO
-   * {@code FIN_Finacc_Transaction} yet (the transfer method's Automatic flags are cleared by §2b).
-   * The bank transaction is created only once Salt Edge confirms execution, by the PSD2 module's
-   * own {@code PisPaymentCallback}. See {@link PisPaymentService#applyOverpaymentAndInitiatePis}.
+   * <p>When {@code pis=true} and the request is a confirm, this method creates <b>nothing</b>: the
+   * bank transfer is initiated and the request is snapshotted, returning early. No
+   * {@link FIN_Payment} exists until Salt Edge reports a resolutive status, at which point the
+   * snapshot is replayed through this same method with {@code pis} switched off — so the payment
+   * is built by the ordinary path, credit consumption and all. See
+   * {@link PisDeferredPaymentService}. ({@code pis=true} with {@code process:"draft"} is just an
+   * ordinary draft save.)
    */
   static NeoResponse doRegisterPaymentAdvanced(String invoiceId, JSONObject body, boolean isReceipt)
       throws Exception {
@@ -623,10 +633,18 @@ final class PaymentRegistrationService {
     DocumentType docType = resolveArApDocType(org, isReceipt);
     checkPeriodOpen(invoice, docType, paymentDate);
 
-    JSONObject pisInput = null;
     if (pis) {
       PisPaymentService.validatePisEligibility(account, paymentMethod, invoice);
-      pisInput = PisPaymentService.extractPisInput(body);
+      JSONObject pisInput = PisPaymentService.extractPisInput(body);
+      if (doProcess) {
+        // Bank transfers do NOT create a payment here. Nothing is registered until Salt Edge
+        // reports a resolutive status, so abandoning the bank popup leaves the invoice untouched
+        // instead of stranding a payment that reads as made (ETP-4895). The request is snapshotted
+        // and replayed through this very method once the transfer resolves.
+        return PisDeferredPaymentService.initiateDeferredPis(invoice, account, cash, body, pisInput,
+            isReceipt);
+      }
+      // process:"draft" is an ordinary draft save — the PIS block is just showing in the form.
     }
 
     AdvPaymentMngtDao dao = new AdvPaymentMngtDao();
@@ -654,11 +672,9 @@ final class PaymentRegistrationService {
     OBDal.getInstance().flush();
 
     // Draft: created and linked but NOT processed — no transaction, no accounting.
+    // A PIS confirm never reaches this point: it returned above without creating anything, and is
+    // replayed here (with pis=false) once the bank resolves.
     if (doProcess) {
-      if (pis) {
-        return PisPaymentService.applyOverpaymentAndInitiatePis(payment, dao, org, funds,
-            invoiceApplied, pisInput, overpaymentAction);
-      }
       applyOverpaymentAndProcess(payment, dao, org, funds, invoiceApplied, overpaymentAction);
     }
     return builtPaymentResponse(payment);
@@ -772,7 +788,7 @@ final class PaymentRegistrationService {
     return wrapCreatedData(basePaymentData(payment));
   }
 
-  /** Package-visible: also used by {@link PisPaymentService#applyOverpaymentAndInitiatePis}. */
+  /** Package-visible: also used by {@link PisDeferredPaymentService}. */
   static JSONObject basePaymentData(FIN_Payment payment) throws Exception {
     JSONObject data = new JSONObject();
     data.put("id", payment.getId());
@@ -783,7 +799,7 @@ final class PaymentRegistrationService {
     return data;
   }
 
-  /** Package-visible: also used by {@link PisPaymentService#applyOverpaymentAndInitiatePis}. */
+  /** Package-visible: also used by {@link PisDeferredPaymentService}. */
   static NeoResponse wrapCreatedData(JSONObject data) throws Exception {
     JSONObject responseData = new JSONObject();
     responseData.put(KEY_DATA, data);
@@ -872,6 +888,20 @@ final class PaymentRegistrationService {
    * Processes the payment with action "P" and throws on a business error.
    * Package-visible: also used by {@link PaymentDraftEditService#confirmDraftPayment}.
    */
+  /**
+   * True when a {@code FIN_Finacc_Transaction} already exists for the payment — i.e. the money has
+   * actually landed in the account. Distinguishes a bank transfer still in flight (processed, no
+   * transaction) from a settled one.
+   */
+  static boolean hasFinTransaction(FIN_Payment payment) {
+    Long count = OBDal.getInstance().getSession()
+        .createQuery("select count(t) from FIN_Finacc_Transaction t where t.finPayment.id = :id",
+            Long.class)
+        .setParameter("id", payment.getId())
+        .uniqueResult();
+    return count != null && count > 0;
+  }
+
   static void processOrThrow(FIN_Payment payment) throws Exception {
     VariablesSecureApp vars = NeoDefaultsService.buildVariablesSecureApp(OBContext.getOBContext());
     RequestContext.get().setVariableSecureApp(vars);
@@ -880,7 +910,7 @@ final class PaymentRegistrationService {
     OBDal.getInstance().flush();
   }
 
-  /** Package-visible: also used by {@link PisPaymentService#applyOverpaymentAndInitiatePis}. */
+  /** Package-visible: also used by {@link PisDeferredPaymentService}. */
   static void failOnError(OBError result) {
     if (STATUS_ERROR.equalsIgnoreCase(result.getType())) {
       throw new OBException(result.getMessage());

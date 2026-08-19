@@ -17,9 +17,7 @@
 
 package com.etendoerp.go.schemaforge;
 
-import java.math.BigDecimal;
 
-import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 
 import org.apache.commons.lang3.StringUtils;
@@ -28,22 +26,15 @@ import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.criterion.Restrictions;
-import org.openbravo.advpaymentmngt.dao.AdvPaymentMngtDao;
-import org.openbravo.advpaymentmngt.process.FIN_AddPayment;
 import org.openbravo.base.exception.OBException;
-import org.openbravo.base.secureApp.VariablesSecureApp;
-import org.openbravo.client.kernel.RequestContext;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.businesspartner.BankAccount;
-import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.common.invoice.Invoice;
 import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
 import org.openbravo.model.financialmgmt.payment.FIN_Payment;
 import org.openbravo.model.financialmgmt.payment.FIN_PaymentMethod;
-import org.openbravo.model.financialmgmt.payment.FIN_PaymentScheduleDetail;
-import org.openbravo.service.db.DalConnectionProvider;
 
 import com.etendoerp.payment.removal.util.PaymentRemovalUtil;
 import com.etendoerp.psd2.bank.integration.data.PisPayment;
@@ -51,7 +42,6 @@ import com.etendoerp.psd2.bank.integration.utils.BankIntegrationConstants;
 import com.etendoerp.psd2.bank.integration.utils.BankIntegrationPISUtils;
 import com.etendoerp.psd2.bank.integration.utils.BankIntegrationUtils;
 import com.etendoerp.psd2.bank.integration.utils.PISPaymentDao;
-import com.etendoerp.psd2.bank.integration.utils.PISTransactionUtils;
 
 /**
  * PIS (Payment Initiation Service — bank transfer via Salt Edge) actions and helpers.
@@ -67,11 +57,33 @@ final class PisPaymentService {
   private static final Logger log = LogManager.getLogger(PisPaymentService.class);
 
   private static final String FIELD_PIS_PAYMENT_ID = "pisPaymentId";
-  private static final String KEY_PIS_PAYMENT_URL = "pisPaymentUrl";
-  private static final String KEY_PIS_STATUS = "pisStatus";
+  /**
+   * The complete {@code PSD2_PIS_PAYMENT.status} vocabulary — the AD ref-list "PIS Payment Status"
+   * ({@code AD_REFERENCE_ID = D5483E7D91134499B42BBD963BC2F9CC}, Bank Integration module) has
+   * exactly these 8 values and no others.
+   * <p>
+   * They are declared here as one block because the gates below used to hardcode a partial,
+   * hand-copied subset each: {@code initiated_info_required} was missing from the cancellable set,
+   * so a transfer sitting in that perfectly normal pre-authorization state could not be undone
+   * ("already in progress and can no longer be undone from here") and left an orphan payment
+   * behind — see ETP-4895. {@code BankIntegrationConstants} only defines the three final ones.
+   */
   private static final String PIS_STATUS_REQUESTED = "requested";
-  // The PSD2_PIS_PAYMENT.status ref-list has no "cancelled" value; "failed" marks an undone attempt.
-  private static final String PIS_STATUS_UNDONE = "failed";
+  private static final String PIS_STATUS_INITIATED = "initiated";
+  private static final String PIS_STATUS_INITIATED_INFO_REQUIRED = "initiated_info_required";
+  private static final String PIS_STATUS_AUTHORIZING = "authorizing";
+  // The ref-list has no "cancelled" value; "failed" marks an undone attempt.
+  private static final String PIS_STATUS_UNDONE = BankIntegrationConstants.PIS_STATUS_FAILED;
+
+  /**
+   * Statuses reached before the user has authorized anything at the bank, so no money has moved
+   * and the attempt can still be safely undone. Deliberately excludes {@code authorized} and
+   * everything after it.
+   */
+  private static final String[] PIS_STATUSES_PRE_AUTHORIZATION = {
+      PIS_STATUS_REQUESTED, PIS_STATUS_INITIATED, PIS_STATUS_INITIATED_INFO_REQUIRED,
+      PIS_STATUS_AUTHORIZING, PIS_STATUS_UNDONE
+  };
 
   // PIS request fields sent by the SPA (mirror the classic "Generate Bank Payment" dialog).
   private static final String FIELD_PIS_TEMPLATE = "pisTemplate";
@@ -93,7 +105,7 @@ final class PisPaymentService {
 
   /**
    * Returns the current Salt Edge status of a PIS payment by its LOCAL {@code PSD2_PIS_PAYMENT}
-   * id (the one returned in {@code pisPaymentId} by {@link #applyOverpaymentAndInitiatePis}), so
+   * id (the one returned in {@code pisPaymentId} by {@code PisDeferredPaymentService#initiateDeferredPis}), so
    * the SPA can poll it while the SCA widget / bank confirmation is pending.
    * Body: {@code {pisPaymentId}}.
    */
@@ -135,7 +147,7 @@ final class PisPaymentService {
   /** True once a PIS payment can no longer change — no point re-querying Salt Edge for it. */
   private static boolean isTerminalPisStatus(String status) {
     return StringUtils.equalsAnyIgnoreCase(status, BankIntegrationConstants.PIS_STATUS_EXECUTED,
-        PIS_STATUS_UNDONE, "settled");
+        BankIntegrationConstants.PIS_STATUS_FAILED, BankIntegrationConstants.PIS_STATUS_SETTLED);
   }
 
   /**
@@ -153,11 +165,16 @@ final class PisPaymentService {
   }
 
   /**
-   * Actively fetches {@code pisPayment}'s current status from Salt Edge, persists it, and creates
-   * the {@code FIN_Finacc_Transaction} when the status is {@code executed}. Mirrors the reconcile
-   * sequence {@code PisPaymentCallback#doGet} runs on browser-return, but done here because Etendo
-   * Go's own SPA callback bypasses that servlet and the async webhook can't reach a local server.
+   * Actively fetches {@code pisPayment}'s current status from Salt Edge, persists it, and brings
+   * the Etendo Go side in line with it. Mirrors the reconcile sequence
+   * {@code PisPaymentCallback#doGet} runs on browser-return, but done here because Etendo Go's own
+   * SPA callback bypasses that servlet and the async webhook can't reach a local server.
    * Composes only public PSD2 APIs (no PSD2 logic is duplicated or altered).
+   *
+   * <p>The Etendo Go side is delegated to {@link PisDeferredPaymentService#reconcile}: this is the
+   * "user is still watching" path, so a transfer that just resolved is registered within the poll
+   * interval rather than waiting for the periodic sweep. It also covers the bank transaction, which
+   * this method used to create on {@code executed} by itself.
    */
   private static void refreshPisStatusFromSaltEdge(PisPayment pisPayment) {
     String apiKey = BankIntegrationUtils.getPsd2ApiKey(OBContext.getOBContext().getCurrentClient());
@@ -166,9 +183,7 @@ final class PisPaymentService {
     PISPaymentDao.updateStatusWithAttributes(pisPayment, status);
     OBDal.getInstance().save(pisPayment);
     OBDal.getInstance().flush();
-    if (BankIntegrationConstants.PIS_STATUS_EXECUTED.equals(status.getStatus())) {
-      PISTransactionUtils.createFinancialTransactionIfEligible(pisPayment);
-    }
+    PisDeferredPaymentService.reconcile(pisPayment);
   }
 
   /**
@@ -247,8 +262,7 @@ final class PisPaymentService {
    */
   private static boolean isCancellablePisStatus(String status) {
     return StringUtils.isBlank(status)
-        || StringUtils.equalsAnyIgnoreCase(status, PIS_STATUS_REQUESTED, "initiated", "authorizing",
-            PIS_STATUS_UNDONE);
+        || StringUtils.equalsAnyIgnoreCase(status, PIS_STATUSES_PRE_AUTHORIZATION);
   }
 
   /**
@@ -362,77 +376,10 @@ final class PisPaymentService {
   }
 
   // ─── ADVANCED: PIS branch of the two-step draft/confirm payment flow ───────
-
-  /**
-   * Registers any over-payment as generated credit, PROCESSES the payment so it lands in status
-   * {@code PPM} ("Payment Made") — applied to the invoice but with NO {@code FIN_Finacc_Transaction}
-   * — and then initiates the real bank transfer through the PSD2 PIS integration.
-   *
-   * <p>Processing does not create a financial transaction here because the account's transfer
-   * payment method had its {@code Automatic Deposit/Withdrawn} flags cleared when the account was
-   * connected to its bank from Etendo Go (see {@code FinancialAccountBankConnectionHandler} §2b). The bank
-   * transaction is created only once Salt Edge confirms execution, by the PSD2 module's own
-   * {@code PisPaymentCallback} → {@code PISTransactionUtils} (idempotent). This mirrors Classic,
-   * whose "Generate Bank Payment" process requires {@code Status='PPM'} and
-   * {@code PSD2_HasFinTransaction=0}.
-   *
-   * <p>The refund sub-flow is skipped entirely for PIS: creating a refund payment now would
-   * refund money that has not moved yet. Any leftover is kept as generated credit instead,
-   * logging a warning when the caller had actually requested a refund.
-   */
-  static NeoResponse applyOverpaymentAndInitiatePis(FIN_Payment payment,
-      AdvPaymentMngtDao dao, Organization org, BigDecimal funds, BigDecimal invoiceApplied,
-      JSONObject pisInput, String overpaymentAction) throws Exception {
-    VariablesSecureApp vars = NeoDefaultsService.buildVariablesSecureApp(OBContext.getOBContext());
-    RequestContext.get().setVariableSecureApp(vars);
-    DalConnectionProvider conn = new DalConnectionProvider(false);
-
-    BigDecimal leftover = funds.subtract(invoiceApplied);
-    boolean overpaid = leftover.compareTo(BigDecimal.ZERO) > 0;
-    if (overpaid) {
-      FIN_PaymentScheduleDetail creditPsd = dao.getNewPaymentScheduleDetail(org, leftover);
-      dao.getNewPaymentDetail(payment, creditPsd, leftover, BigDecimal.ZERO, false, null);
-      OBDal.getInstance().flush();
-      if ("refund".equalsIgnoreCase(overpaymentAction)) {
-        log.warn("PIS payment {}: refund requested but skipped (funds have not moved yet — the "
-            + "payment awaits Salt Edge execution); leftover {} kept as generated credit instead.",
-            payment.getDocumentNo(), leftover);
-      }
-    }
-
-    // Process → status PPM. Transaction creation is deferred to the PIS callback (§2b clears the
-    // method's Automatic flags, so processing does not create a FIN_Finacc_Transaction here).
-    PaymentRegistrationService.failOnError(
-        FIN_AddPayment.processPayment(vars, conn, "P", payment, ""));
-    OBDal.getInstance().flush();
-
-    if (hasFinTransaction(payment)) {
-      log.warn("PIS payment {}: a financial transaction was created at processing time — the "
-          + "account's transfer method still has Automatic Deposit/Withdrawn enabled. The PIS "
-          + "callback will skip creating another one (idempotent), but reconnect the account from "
-          + "Etendo Go so §2b clears those flags and the transaction is deferred until execution.",
-          payment.getDocumentNo());
-    }
-
-    HttpServletRequest request = RequestContext.get() != null
-        ? RequestContext.get().getRequest() : null;
-    BankIntegrationPISUtils.PISCreatePaymentResult result =
-        PisPaymentBridge.initiatePisPayment(payment, pisInput, request);
-
-    PisPayment pisPayment = PISPaymentDao.findBySaltedgePaymentId(result.getPaymentId());
-    String localPisPaymentId = pisPayment != null ? pisPayment.getId() : null;
-    return builtPisPaymentResponse(payment, result.getPaymentUrl(), localPisPaymentId);
-  }
-
-  /** True when a {@code FIN_Finacc_Transaction} already exists for the payment. */
-  private static boolean hasFinTransaction(FIN_Payment payment) {
-    Long count = OBDal.getInstance().getSession()
-        .createQuery("select count(t) from FIN_Finacc_Transaction t where t.finPayment.id = :id",
-            Long.class)
-        .setParameter("id", payment.getId())
-        .uniqueResult();
-    return count != null && count > 0;
-  }
+  //
+  // The old applyOverpaymentAndInitiatePis lived here. It created the FIN_Payment and processed it
+  // to PPM before Salt Edge was contacted, which is exactly the behaviour ETP-4895 removed:
+  // initiation no longer produces a payment at all. See PisDeferredPaymentService.
 
   /**
    * Collects the template + creditor fields the SPA sends for a PIS payment, keyed by the
@@ -499,29 +446,17 @@ final class PisPaymentService {
   }
 
   /**
-   * Sibling of {@code PaymentRegistrationService#builtPaymentResponse}: same base payload plus
-   * the PIS fields the SPA needs to open the Salt Edge SCA widget and poll for the transfer's
-   * execution status.
+   * The {@code PSD2_PIS_PAYMENT} row behind {@code payment}, or null when the payment was not
+   * initiated through the Salt Edge PIS flow (a manually-recorded bank transfer, say).
+   * <p>
+   * The SPA needs the row itself, not just its existence: retrying a rejected transfer acts on the
+   * PIS attempt rather than on the payment. {@code PisPayment} is a plain DAL entity, so no
+   * PSD2-module method is needed for this.
    */
-  private static NeoResponse builtPisPaymentResponse(FIN_Payment payment, String pisPaymentUrl,
-      String localPisPaymentId) throws Exception {
-    JSONObject data = PaymentRegistrationService.basePaymentData(payment);
-    data.put(KEY_PIS_PAYMENT_URL, pisPaymentUrl);
-    data.put(FIELD_PIS_PAYMENT_ID, localPisPaymentId);
-    data.put(KEY_PIS_STATUS, PIS_STATUS_REQUESTED);
-    return PaymentRegistrationService.wrapCreatedData(data);
-  }
-
-  /**
-   * True when {@code payment} has an associated {@code PSD2_PIS_PAYMENT} row, meaning it was
-   * initiated through the Salt Edge PIS flow rather than just recorded as a manual bank
-   * transfer — surfaced in the SPA's payment history as a "Realizado vía banco" badge.
-   * {@code PisPayment} is a plain DAL entity, so no PSD2-module method is needed for this.
-   */
-  static boolean hasLinkedPisPayment(FIN_Payment p) {
+  static PisPayment linkedPisPayment(FIN_Payment p) {
     OBCriteria<PisPayment> criteria = OBDal.getInstance().createCriteria(PisPayment.class);
     criteria.add(Restrictions.eq(PisPayment.PROPERTY_PAYMENT, p));
     criteria.setMaxResults(1);
-    return criteria.uniqueResult() != null;
+    return (PisPayment) criteria.uniqueResult();
   }
 }
