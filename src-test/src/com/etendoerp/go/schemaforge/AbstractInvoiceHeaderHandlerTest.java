@@ -836,7 +836,7 @@ public class AbstractInvoiceHeaderHandlerTest {
 
     try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
       OBDal roInst = mock(OBDal.class);
-      dalMock.when(OBDal::getReadOnlyInstance).thenReturn(roInst);
+      dalMock.when(OBDal::getInstance).thenReturn(roInst);
 
       Connection conn = mock(Connection.class);
       PreparedStatement ps = mock(PreparedStatement.class);
@@ -870,7 +870,7 @@ public class AbstractInvoiceHeaderHandlerTest {
 
     try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
       OBDal roInst = mock(OBDal.class);
-      dalMock.when(OBDal::getReadOnlyInstance).thenReturn(roInst);
+      dalMock.when(OBDal::getInstance).thenReturn(roInst);
 
       Connection conn = mock(Connection.class);
       PreparedStatement ps = mock(PreparedStatement.class);
@@ -901,7 +901,7 @@ public class AbstractInvoiceHeaderHandlerTest {
 
     try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
       OBDal roInst = mock(OBDal.class);
-      dalMock.when(OBDal::getReadOnlyInstance).thenReturn(roInst);
+      dalMock.when(OBDal::getInstance).thenReturn(roInst);
 
       Connection conn = mock(Connection.class);
       PreparedStatement ps = mock(PreparedStatement.class);
@@ -924,11 +924,11 @@ public class AbstractInvoiceHeaderHandlerTest {
     JSONObject rec = new JSONObject();
 
     try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
-      OBDal roInst = mock(OBDal.class);
-      dalMock.when(OBDal::getReadOnlyInstance).thenReturn(roInst);
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
 
       Connection conn = mock(Connection.class);
-      when(roInst.getConnection()).thenReturn(conn);
+      when(dal.getConnection()).thenReturn(conn);
       when(conn.prepareStatement(any())).thenThrow(new RuntimeException("SQL error"));
 
       handler.callEnrichOriginInvoice(rec, "inv-sql-err");

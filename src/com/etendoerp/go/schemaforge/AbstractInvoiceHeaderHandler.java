@@ -275,21 +275,27 @@ public abstract class AbstractInvoiceHeaderHandler {
       return;
     }
     List<String> ids = new ArrayList<>();
+    boolean captured = collectOriginInvoiceIds(body, ids);
+
+    if (captured) {
+      pendingOriginInvoiceIds = ids;
+      originInvoiceCaptured = true;
+    }
+  }
+
+  /**
+   * Reads {@code originInvoices} (array) and/or the legacy singular {@code originInvoice} from
+   * {@code body} into {@code ids} (de-duplicated), removing both keys from {@code body} so the
+   * generic field filter never sees them (see {@link #captureOriginInvoice} javadoc for why).
+   *
+   * @return {@code true} if either key was present in {@code body}
+   */
+  private boolean collectOriginInvoiceIds(JSONObject body, List<String> ids) {
     boolean captured = false;
 
     if (body.has(FIELD_ORIGIN_INVOICES)) {
       captured = true;
-      try {
-        JSONArray arr = body.getJSONArray(FIELD_ORIGIN_INVOICES);
-        for (int i = 0; i < arr.length(); i++) {
-          String id = arr.optString(i, null);
-          if (StringUtils.isNotBlank(id) && !ids.contains(id)) {
-            ids.add(id);
-          }
-        }
-      } catch (Exception e) {
-        log.warn("Could not parse {} array: {}", FIELD_ORIGIN_INVOICES, e.getMessage());
-      }
+      addIdsFromOriginInvoicesArray(body, ids);
       body.remove(FIELD_ORIGIN_INVOICES);
     }
 
@@ -302,9 +308,21 @@ public abstract class AbstractInvoiceHeaderHandler {
       body.remove(FIELD_ORIGIN_INVOICE);
     }
 
-    if (captured) {
-      pendingOriginInvoiceIds = ids;
-      originInvoiceCaptured = true;
+    return captured;
+  }
+
+  /** Parses the {@code originInvoices} JSON array in {@code body} into {@code ids} (de-duplicated). */
+  private void addIdsFromOriginInvoicesArray(JSONObject body, List<String> ids) {
+    try {
+      JSONArray arr = body.getJSONArray(FIELD_ORIGIN_INVOICES);
+      for (int i = 0; i < arr.length(); i++) {
+        String id = arr.optString(i, null);
+        if (StringUtils.isNotBlank(id) && !ids.contains(id)) {
+          ids.add(id);
+        }
+      }
+    } catch (Exception e) {
+      log.warn("Could not parse {} array: {}", FIELD_ORIGIN_INVOICES, e.getMessage());
     }
   }
 
@@ -423,8 +441,7 @@ public abstract class AbstractInvoiceHeaderHandler {
         + "JOIN c_invoice inv ON inv.c_invoice_id = r.reversed_c_invoice_id "
         + "WHERE r.c_invoice_id = ? AND r.isactive = 'Y' "
         + "ORDER BY inv.documentno";
-    Connection conn = OBDal.getReadOnlyInstance().getConnection();
-    try (PreparedStatement ps = conn.prepareStatement(sql)) {
+    try (PreparedStatement ps = OBDal.getInstance().getConnection().prepareStatement(sql)) {
       ps.setString(1, invoiceId);
       try (ResultSet rs = ps.executeQuery()) {
         JSONArray origins = new JSONArray();

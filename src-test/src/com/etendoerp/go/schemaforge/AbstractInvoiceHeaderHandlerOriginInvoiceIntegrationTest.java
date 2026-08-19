@@ -17,6 +17,7 @@
 package com.etendoerp.go.schemaforge;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
 
 import java.util.Arrays;
@@ -28,6 +29,7 @@ import javax.enterprise.inject.Vetoed;
 
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
+import org.hibernate.criterion.Restrictions;
 import org.junit.After;
 import org.junit.Test;
 import org.openbravo.dal.core.OBContext;
@@ -112,15 +114,29 @@ public class AbstractInvoiceHeaderHandlerOriginInvoiceIntegrationTest extends OB
     setTestUserContext();
     OBContext.setAdminMode(true);
     try {
+      // The target must NOT be processed/posted: C_Invoice_Reverse's own DB trigger
+      // (c_invoice_reverse_trg, message @20501@ "Document posted/processed") rejects any
+      // insert/update against a processed invoice's reverse links — exactly mirroring real
+      // usage, since "Import from Source Invoice" only ever runs on a draft rectificativa.
+      Invoice target = (Invoice) OBDal.getInstance().createCriteria(Invoice.class)
+          .add(Restrictions.eq(Invoice.PROPERTY_PROCESSED, false))
+          .setMaxResults(1)
+          .uniqueResult();
+      assertNotNull("Test fixture must contain at least one non-processed invoice to use as "
+          + "the rectificativa under test", target);
+
+      // origin1/origin2 must share target's business partner: the same trigger also rejects
+      // linking invoices across different business partners (message @NotEqualBPartner@).
       @SuppressWarnings("unchecked")
-      List<Invoice> invoices = OBDal.getInstance().createCriteria(Invoice.class)
-          .setMaxResults(3)
+      List<Invoice> originCandidates = OBDal.getInstance().createCriteria(Invoice.class)
+          .add(Restrictions.eq(Invoice.PROPERTY_BUSINESSPARTNER, target.getBusinessPartner()))
+          .add(Restrictions.ne(Invoice.PROPERTY_ID, target.getId()))
+          .setMaxResults(2)
           .list();
-      assertTrue("Test fixture must contain at least 3 invoices (1 target + 2 origins)",
-          invoices.size() >= 3);
-      Invoice target = invoices.get(0);
-      Invoice origin1 = invoices.get(1);
-      Invoice origin2 = invoices.get(2);
+      assertTrue("Test fixture must contain at least 2 other invoices from the target's "
+          + "business partner to use as origins", originCandidates.size() >= 2);
+      Invoice origin1 = originCandidates.get(0);
+      Invoice origin2 = originCandidates.get(1);
 
       // First "Import from Source Invoice" run — links origin1.
       JSONObject body1 = new JSONObject().put("originInvoice", origin1.getId());
