@@ -331,7 +331,7 @@ final class CashCloseSupport {
               + "bank reconciliation cannot share the same document.");
     }
 
-    syncMarkedMovements(account, draft, movementIds);
+    syncMarkedMovements(handler, account, draft, movementIds);
 
     draft.setEndingBalance(declaredBalance);
     draft.setTransactionDate(closeDate);
@@ -388,7 +388,7 @@ final class CashCloseSupport {
               + "Reopen that period or unmark the movement before confirming the close.");
     }
 
-    BigDecimal diff = difference(openingBalance, clearedNet(draft), declaredBalance);
+    BigDecimal diff = difference(openingBalance, clearedNet(handler, draft), declaredBalance);
     boolean balanced = isBalanced(diff);
     if (!balanced && account.getAprmGlitemDiff() == null) {
       return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
@@ -400,7 +400,7 @@ final class CashCloseSupport {
       createDifferenceTransaction(account, draft, diff);
     }
 
-    rewriteDatesAndSettleInvoices(draft);
+    rewriteDatesAndSettleInvoices(handler, draft);
 
     draft.setDocumentStatus("CO");
     draft.setProcessed(true);
@@ -500,11 +500,11 @@ final class CashCloseSupport {
    * before but no longer is — the incremental equivalent of Classic's per-checkbox {@code
    * updateTransactionStatus}.
    */
-  private static void syncMarkedMovements(FIN_FinancialAccount account, FIN_Reconciliation draft,
-      List<String> movementIds) {
+  private static void syncMarkedMovements(CashCloseHandler handler, FIN_FinancialAccount account,
+      FIN_Reconciliation draft, List<String> movementIds) {
     Set<String> wanted = new HashSet<>(movementIds);
     Set<String> current = new HashSet<>();
-    for (FIN_FinaccTransaction t : draft.getFINFinaccTransactionList()) {
+    for (FIN_FinaccTransaction t : handler.linkedTransactions(draft)) {
       current.add(t.getId());
     }
     for (String id : wanted) {
@@ -554,10 +554,15 @@ final class CashCloseSupport {
     }
   }
 
-  /** Sum of {@code depositAmount - paymentAmount} over every transaction linked to the draft. */
-  private static BigDecimal clearedNet(FIN_Reconciliation draft) {
+  /**
+   * Sum of {@code depositAmount - paymentAmount} over every transaction linked to the draft.
+   *
+   * <p>Reads the links through {@link CashCloseHandler#linkedTransactions} — see the warning there
+   * about why the entity's own one-to-many list cannot be trusted on a first close.</p>
+   */
+  private static BigDecimal clearedNet(CashCloseHandler handler, FIN_Reconciliation draft) {
     BigDecimal net = BigDecimal.ZERO;
-    for (FIN_FinaccTransaction t : draft.getFINFinaccTransactionList()) {
+    for (FIN_FinaccTransaction t : handler.linkedTransactions(draft)) {
       net = net.add(signedAmount(t));
     }
     return net;
@@ -608,9 +613,10 @@ final class CashCloseSupport {
    * after the cash was counted; (2) settle the invoices of every linked payment that reached its
    * "paid" status. Mirrors {@code Reconciliation.java}'s inline loop verbatim.
    */
-  private static void rewriteDatesAndSettleInvoices(FIN_Reconciliation draft) {
+  private static void rewriteDatesAndSettleInvoices(CashCloseHandler handler,
+      FIN_Reconciliation draft) {
     Date endingDate = draft.getEndingDate();
-    for (FIN_FinaccTransaction trx : draft.getFINFinaccTransactionList()) {
+    for (FIN_FinaccTransaction trx : handler.linkedTransactions(draft)) {
       if (endingDate.compareTo(trx.getTransactionDate()) < 0) {
         pushForwardTransactionDate(trx, endingDate);
       }

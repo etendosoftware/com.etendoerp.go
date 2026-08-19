@@ -18,6 +18,8 @@ package com.etendoerp.go.schemaforge;
 
 import java.math.BigDecimal;
 
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.openbravo.base.provider.OBProvider;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.enterprise.Locator;
@@ -32,6 +34,8 @@ import org.openbravo.model.materialmgmt.transaction.ShipmentInOutLine;
  * pending-quantity rules nor the line-population code.
  */
 final class InOutLineFromOrderFactory {
+
+  private static final Logger log = LogManager.getLogger(InOutLineFromOrderFactory.class);
 
   private InOutLineFromOrderFactory() {
   }
@@ -74,6 +78,15 @@ final class InOutLineFromOrderFactory {
    * of the same order line via {@link InvoiceLineLinker}. The flow mirrors
    * what the canonical {@code m_inout_create} stored procedure performs in
    * classic when generating a shipment/receipt from an order.
+   *
+   * <p><b>ETP-4863:</b> {@code locator} arrives resolved from the ORDER's warehouse — both
+   * callers ({@code CreateShipmentHandler}, {@code CreateGoodsReceiptHandler}) obtain it via
+   * {@code findDefaultLocator(order)}. What {@code M_INOUT_POST} actually follows when it books
+   * the stock transaction is the LINE's bin measured against the DOCUMENT header's warehouse.
+   * Those two warehouses happen to coincide today (the header is built from the same order), but
+   * nothing enforced it, so this path is normalized through the same
+   * {@link NeoHandlerUtils#anchorLocatorToWarehouse} rule as every other {@code M_InOutLine}
+   * write path in the module rather than trusting an invariant that lives in another class.
    */
   static void createAndLinkLine(ShipmentInOut parentInOut, OrderLine orderLine,
       Locator locator, long lineNo, BigDecimal pendingQty) {
@@ -84,7 +97,8 @@ final class InOutLineFromOrderFactory {
     line.setLineNo(lineNo);
     line.setProduct(orderLine.getProduct());
     line.setUOM(orderLine.getUOM());
-    line.setStorageBin(locator);
+    line.setStorageBin(
+        NeoHandlerUtils.anchorLocatorToWarehouse(locator, parentInOut.getWarehouse(), log));
     line.setMovementQuantity(pendingQty);
     line.setSalesOrderLine(orderLine);
     line.setDescription(orderLine.getDescription());

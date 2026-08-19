@@ -31,8 +31,18 @@ import org.openbravo.dal.service.OBDal;
 /**
  * Post-hook for the Return Material Receipt line entity.
  *
- * Injects {@code orderQuantity} (original delivered qty from canceled source line)
+ * <p>Injects {@code orderQuantity} (original delivered qty from canceled source line)
  * and {@code productCode} (M_Product.Value / search key) into every GET response.
+ *
+ * <p>POST (create) pre-hook (ETP-4863): defaults {@code storageBin} to the header
+ * {@code M_InOut}'s own warehouse default locator when the create request did not already
+ * supply a REAL one — this is the "Devolución de Venta" (RMA of a sale) counterpart of the same
+ * fix already applied to {@link GoodsReceiptLineHandler} (ETP-4671), {@link
+ * GoodsShipmentLineHandler}, and {@link ReturnToVendorShipmentLineHandler}. See {@link
+ * NeoHandlerUtils#injectDefaultLocatorIfMissing(JSONObject, Logger)} for the full rationale.
+ * This class implements {@link NeoHandler} directly rather than extending {@link
+ * AbstractInOutLineHandler} — same shape as {@link ReturnToVendorShipmentLineHandler} — so the
+ * locator default is applied directly here via the shared helper instead of inheriting it.
  */
 @Named("returnMaterialReceiptLineHandler")
 public class ReturnMaterialReceiptLineHandler implements NeoHandler {
@@ -41,6 +51,15 @@ public class ReturnMaterialReceiptLineHandler implements NeoHandler {
 
   @Override
   public NeoResponse handle(NeoContext context) {
+    if (context != null && NeoEndpointType.CRUD.equals(context.getEndpointType())
+        && "POST".equalsIgnoreCase(context.getHttpMethod())) {
+      try {
+        NeoHandlerUtils.injectDefaultLocatorIfMissing(context.getRequestBody(), log);
+      } catch (Exception e) {
+        log.warn("[ReturnMaterialReceiptLineHandler] Could not default storageBin: {}",
+            e.getMessage(), e);
+      }
+    }
     return null;
   }
 
