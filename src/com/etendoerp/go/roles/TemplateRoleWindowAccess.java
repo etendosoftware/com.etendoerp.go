@@ -29,18 +29,18 @@ import java.util.Map;
  * WindowGrant}s from the ticket's Ventas/Compras/Financiero/Almacén matrix ("Admin" stays
  * client-level, out of scope — see {@link SystemRoleTemplates}'s own javadoc).
  *
- * <p><b>Why this is a plain {@code src/} class, not inlined into {@code
+ * <p><b>Why this matrix lives here as a plain {@code src/} class instead of only inside {@code
  * EnsureSystemRoleTemplatesScript}</b> (the {@code ModuleScript} that actually applies it, under
- * {@code src-util/modulescript}): that source root is deliberately self-contained raw SQL with no
- * dependency on this module's own {@code src/} tree (see that class's javadoc) — EXCEPT this one
- * case, where the tradeoff was made deliberately (ETP-4878): keeping the matrix here, as plain
- * data with zero SQL/DAL/{@code ConnectionProvider} dependencies, makes it reachable by a normal
- * {@code src-test} unit test with no DB and no Gradle classpath workaround, at the cost of the
- * {@code ModuleScript} needing this one import. Confirmed empirically that {@code
- * compile.modulescript} can resolve this import fine (it compiles against the module's already
- * -built {@code main} classes) — the isolation convention on that source root exists for
- * self-containment/readability of each individual script, not because the compile step is
- * technically sandboxed away from {@code src/}.</p>
+ * {@code src-util/modulescript}): keeping it here, as plain data with zero SQL/DAL/{@code
+ * ConnectionProvider} dependencies, makes it reachable by a normal {@code src-test} unit test with
+ * no DB and no Gradle classpath workaround — see {@code TemplateRoleWindowAccessTest}. {@code
+ * EnsureSystemRoleTemplatesScript} does NOT import this class, though: that source root
+ * ({@code src-util/modulescript/}) is self-contained by design (no dependency on this module's own
+ * {@code src/} tree, full stop — see that class's javadoc for why, including a build-order
+ * pitfall an earlier revision of this comment got wrong). The script keeps its own inlined,
+ * literal copy of this same matrix instead; this class stays the canonical, testable source of
+ * truth for everything else ({@code UserRoleCompositionService}, the webhooks, and this class's
+ * own tests).</p>
  *
  * <p><b>Twelve matrix rows are intentionally NOT represented here — known gap.</b> Every excluded
  * row has NO {@code AD_Window_ID} at all backing it (either a pure custom/aggregate Schema Forge
