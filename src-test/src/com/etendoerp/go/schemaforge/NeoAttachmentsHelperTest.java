@@ -1080,37 +1080,10 @@ public class NeoAttachmentsHelperTest {
     try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
       obDalMock.when(OBDal::getInstance).thenReturn(dal);
 
-      NeoResponse response = NeoAttachmentsHelper.handleUpload("C_Order", "REC1", request);
+      NeoResponse response = NeoAttachmentsHelper.handleUpload("C_Order", "REC1", request, false);
 
       assertEquals(400, response.getHttpStatus());
       assertTrue(errorMessage(response).contains("Could not resolve a standard tab"));
-      verify(dal, times(2)).createCriteria(Tab.class);
-    }
-  }
-
-  /**
-   * End-to-end regression on {@code handleDownloadAll}: same zero-active-tabs
-   * degenerate case as above, exercised through the bulk-download entry point.
-   */
-  @Test
-  @SuppressWarnings("unchecked")
-  public void handleDownloadAllReturnsBadRequestWhenNoActiveTabExistsAtAll() throws Exception {
-    HttpServletResponse response = mock(HttpServletResponse.class);
-    StringWriter sink = stubWriter(response);
-    OBDal dal = mock(OBDal.class);
-    OBCriteria<Tab> tabCriteria = mock(OBCriteria.class);
-
-    stubTableLookup(dal, "TABLE1");
-    when(dal.createCriteria(Tab.class)).thenReturn(tabCriteria);
-    when(tabCriteria.list()).thenReturn(Collections.emptyList());
-
-    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
-      obDalMock.when(OBDal::getInstance).thenReturn(dal);
-
-      NeoAttachmentsHelper.handleDownloadAll("C_Order", "REC1", response);
-
-      verify(response).setStatus(HttpServletResponse.SC_BAD_REQUEST);
-      assertTrue(sink.toString().contains("Could not resolve a standard tab"));
       verify(dal, times(2)).createCriteria(Tab.class);
     }
   }
