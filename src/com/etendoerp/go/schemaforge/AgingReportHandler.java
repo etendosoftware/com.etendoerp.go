@@ -257,17 +257,37 @@ public class AgingReportHandler implements NeoHandler {
       String orgId          = resolveOrgId(body);
       if (orgId == null || orgId.isEmpty()
           || OBDal.getInstance().get(Organization.class, orgId) == null) {
-        return NeoResponse.error(400, "Could not resolve organization context for the aging report");
+        return buildActionableError(400, "organization_not_resolved",
+            "Could not resolve organization context for the aging report.",
+            "Pass a valid orgId (a C_Organization id readable by your role), or omit it to use "
+                + "the session's current organization.",
+            null);
       }
       Set<String> orgs      = new OrganizationStructureProvider().getChildTree(orgId, true);
       if (orgs == null || orgs.isEmpty()) {
-        return NeoResponse.error(422,
-            "Could not resolve the organization tree required for the aging report");
+        return buildActionableError(422, "organization_tree_not_resolved",
+            "Could not resolve the organization tree required for the aging report.",
+            "Verify that orgId identifies an organization within a valid client organization tree.",
+            null);
       }
       AcctSchemaResult acct = resolveAcctSchema(body.optString(PARAM_GL_ID, ""), orgId);
       if (acct.accSchemaId == null || acct.accSchemaId.isEmpty() || acct.currency == null) {
-        return NeoResponse.error(422,
-            "No accounting schema with currency is configured for organization " + orgId);
+        // ETP-4918: this used to assert "no accounting schema with currency is configured for
+        // organization <id>" — a cause it never verified. A live benchmark run hit exactly this
+        // 422 against a tenant where an active, currency-bearing schema WAS configured (both via
+        // Organization.generalLedger and via OrganizationAcctSchema), with no exception logged —
+        // so the claim was simply false. All this guard actually knows is that resolution failed;
+        // it must say that, not why, and it must name the working alternative so the agent is not
+        // left reconstructing the same answer by hand (evidence: five extra calls in that run).
+        return buildActionableError(422, "accounting_schema_unresolved",
+            "Could not resolve an accounting schema with a currency for organization " + orgId
+                + ".",
+            "Check that the organization (or an ancestor in its tree) has a general ledger "
+                + "configured, or pass glId explicitly to select the accounting schema. To get "
+                + "comparable data without a resolved schema, call neo_list on \"sales-invoice\"/"
+                + "\"header\" filtering status:\"pending\" and status:\"partial\" — both are "
+                + "needed, since a partially collected invoice still owes money.",
+            "docs(topic:\"reading records\")");
       }
 
       initSessionReportsLimit();
@@ -355,14 +375,7 @@ public class AgingReportHandler implements NeoHandler {
     try {
       OBContext.setAdminMode(true);
       AcctSchema schema = accSchemaId.isEmpty()
-          ? OBDal.getInstance()
-              .createQuery(AcctSchema.class,
-                  "exists (from OrganizationAcctSchema oas where oas.accountingSchema=this"
-                      + " and oas.organization.id=:" + PARAM_ORG_ID + " and oas.active=true)"
-                      + " and active=true")
-              .setNamedParameter(PARAM_ORG_ID, orgId)
-              .setMaxResult(1)
-              .uniqueResult()
+          ? resolveAcctSchemaForOrg(orgId)
           : OBDal.getInstance().get(AcctSchema.class, accSchemaId);
       if (schema != null) {
         accSchemaId = schema.getId();
@@ -374,6 +387,80 @@ public class AgingReportHandler implements NeoHandler {
       OBContext.restorePreviousMode();
     }
     return new AcctSchemaResult(accSchemaId, currency);
+  }
+
+  /**
+   * Resolves the accounting schema for {@code orgId} when the caller named no explicit
+   * {@code glId}.
+   *
+   * <p>Tries the organization's own general ledger FK first —
+   * {@code Organization.getGeneralLedger()} — the same canonical path
+   * {@code FinancialAccountAccountingHandler#resolveOwnLedger} already uses for this exact
+   * relationship: a plain FK dereference, no subquery, and no dependence on the DAL's
+   * readable-organization/client filtering that {@code OBDal.createQuery} applies even under
+   * {@code OBContext.setAdminMode(true)}. That filtering is the leading, <b>unconfirmed</b>
+   * suspect behind ETP-4918: a live tenant with a verified, active, currency-bearing schema
+   * linked to the org both by this FK and by {@code OrganizationAcctSchema} still got a 422 from
+   * the subquery below, with no exception logged. Do not treat this comment as proof of that
+   * hypothesis — it explains why the FK is tried first, not that it is confirmed to fix anything.
+   *
+   * <p>The FK result is accepted only when it actually carries a currency — a schema without one
+   * is no better than none to the caller. The {@code OrganizationAcctSchema} subquery below is
+   * kept exactly as it was, as a fallback for tenants that populate only the link table and not
+   * the FK: do not delete it on the assumption that the FK path alone is now sufficient.
+   *
+   * @param orgId the organization whose accounting schema is being resolved
+   * @return the resolved schema, or {@code null} when neither path found one
+   */
+  private AcctSchema resolveAcctSchemaForOrg(String orgId) {
+    Organization org = OBDal.getInstance().get(Organization.class, orgId);
+    AcctSchema ledger = org != null ? org.getGeneralLedger() : null;
+    if (ledger != null && ledger.getCurrency() != null) {
+      return ledger;
+    }
+    return OBDal.getInstance()
+        .createQuery(AcctSchema.class,
+            "exists (from OrganizationAcctSchema oas where oas.accountingSchema=this"
+                + " and oas.organization.id=:" + PARAM_ORG_ID + " and oas.active=true)"
+                + " and active=true")
+        .setNamedParameter(PARAM_ORG_ID, orgId)
+        .setMaxResult(1)
+        .uniqueResult();
+  }
+
+  /**
+   * Builds a flat, machine-detectable error envelope — {@code status}/{@code error}/
+   * {@code detail} plus optional {@code hint}/{@code seeAlso} — matching the IMP-5 convention the
+   * rest of the MCP layer uses ({@code McpToolRouterSupport}, {@code NeoCrudHandler}'s
+   * {@code buildReadOnlyFieldRejectedResponse}). Built inline rather than importing
+   * {@code McpConstants}: that class is package-private to {@code com.etendoerp.go.mcp} and not
+   * accessible from here, same reasoning {@code NeoCrudHandler} documents for its own copy.
+   *
+   * @param status   the HTTP status code
+   * @param errorCode a short machine-readable error code (snake_case)
+   * @param detail   what is actually known to be true — never a cause the caller cannot verify
+   * @param hint     actionable next step, or {@code null} to omit
+   * @param seeAlso  a pointer to a working alternative, or {@code null} to omit
+   * @return the NeoResponse carrying the envelope
+   */
+  private static NeoResponse buildActionableError(int status, String errorCode, String detail,
+      String hint, String seeAlso) {
+    try {
+      JSONObject envelope = new JSONObject();
+      envelope.put("status", status);
+      envelope.put("error", errorCode);
+      envelope.put("detail", detail);
+      if (hint != null) {
+        envelope.put("hint", hint);
+      }
+      if (seeAlso != null) {
+        envelope.put("seeAlso", seeAlso);
+      }
+      return NeoResponse.error(status, envelope);
+    } catch (Exception e) {
+      log.warn("Could not build actionable error envelope for '{}': {}", errorCode, e.getMessage());
+      return NeoResponse.error(status, detail);
+    }
   }
 
   private static Date resolveDate(String dateStr) throws ParseException {
