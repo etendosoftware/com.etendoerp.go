@@ -101,6 +101,54 @@ public class EtendoGoJwtServletTest {
     assertTrue(body.has("error"));
   }
 
+  @Test
+  public void companyInvitationMineUsesAuthenticatedAccountContext() throws Exception {
+    ResponseCapture resp = mockResponse();
+    HttpServletRequest req = authenticatedRequest("/company-invitations/mine", "valid-token");
+    Account account = mock(Account.class);
+    when(account.getEmail()).thenReturn("member@example.com");
+    CompanyInvitationService invitationService = mock(CompanyInvitationService.class);
+    JSONObject result = new JSONObject().put("status", "success")
+        .put("invitations", new JSONArray());
+    when(invitationService.listInvitationsForAccount(account)).thenReturn(result);
+
+    EtendoGoJwtServlet endpointServlet = new EtendoGoJwtServlet();
+    endpointServlet.companyInvitationService = invitationService;
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+         MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
+      dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByBearerToken("valid-token"))
+          .thenReturn(account);
+
+      endpointServlet.doGet(req, resp.response);
+    }
+
+    assertEquals(200, resp.status);
+    assertEquals("success", new JSONObject(resp.body()).getString("status"));
+    verify(invitationService).listInvitationsForAccount(account);
+  }
+
+  @Test
+  public void companyInvitationMineRejectsInvalidAccountToken() throws Exception {
+    ResponseCapture resp = mockResponse();
+    HttpServletRequest req = authenticatedRequest("/company-invitations/mine", "invalid-token");
+    CompanyInvitationService invitationService = mock(CompanyInvitationService.class);
+
+    EtendoGoJwtServlet endpointServlet = new EtendoGoJwtServlet();
+    endpointServlet.companyInvitationService = invitationService;
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+         MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
+      dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByBearerToken("invalid-token"))
+          .thenReturn(null);
+
+      endpointServlet.doGet(req, resp.response);
+    }
+
+    assertEquals(401, resp.status);
+    assertEquals("Invalid or expired token",
+        new JSONObject(resp.body()).getJSONObject("error").getString("message"));
+    verify(invitationService, never()).listInvitationsForAccount(any());
+  }
+
   // ===================== POST /register =====================
 
   @Test
