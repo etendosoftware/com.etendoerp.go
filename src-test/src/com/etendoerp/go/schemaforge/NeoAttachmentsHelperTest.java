@@ -19,6 +19,7 @@ package com.etendoerp.go.schemaforge;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -53,6 +54,7 @@ import org.hibernate.query.NativeQuery;
 import org.junit.After;
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.Test;
+import org.mockito.InOrder;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
 import org.openbravo.base.session.OBPropertiesProvider;
@@ -870,6 +872,247 @@ public class NeoAttachmentsHelperTest {
     String tabId = (String) invokePrivateStatic("resolveTabId", new Class<?>[]{ String.class, String.class },
         "TABLE1", "TAB_HINT");
     assertEquals("TAB_HINT", tabId);
+  }
+
+  /**
+   * Regression guard: a table that genuinely has a {@code STD} tab (e.g.
+   * {@code C_Invoice}, {@code TBAI_SyncInvoice}) must keep resolving to it,
+   * exactly as before this fix, without falling back or issuing a second query.
+   */
+  @Test
+  @SuppressWarnings({"rawtypes", "unchecked"})
+  public void resolveTabIdPrefersStdTabWhenAvailable() throws Exception {
+    OBDal dal = mock(OBDal.class);
+    OBCriteria<Tab> stdCriteria = mock(OBCriteria.class);
+    Tab stdTab = mock(Tab.class);
+    when(stdTab.getId()).thenReturn("STD_TAB");
+    when(dal.createCriteria(Tab.class)).thenReturn(stdCriteria);
+    when(stdCriteria.list()).thenReturn(Collections.singletonList(stdTab));
+
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      String tabId = NeoAttachmentsHelper.resolveTabId("TABLE1", null);
+
+      assertEquals("STD_TAB", tabId);
+      verify(dal, times(1)).createCriteria(Tab.class);
+    }
+  }
+
+  /**
+   * Covers the reported bug: a table whose only {@code AD_Tab} rows are non-STD
+   * (e.g. {@code RO}) read-only sub-tabs — such as {@code etvfac_c_invoice_verifactu}
+   * or {@code aeatsii_facturas} — must now resolve to one of them instead of {@code null}.
+   */
+  @Test
+  @SuppressWarnings({"rawtypes", "unchecked"})
+  public void resolveTabIdFallsBackToAnyActiveTabWhenNoStdTabExists() throws Exception {
+    OBDal dal = mock(OBDal.class);
+    OBCriteria<Tab> stdCriteria = mock(OBCriteria.class);
+    OBCriteria<Tab> anyCriteria = mock(OBCriteria.class);
+    Tab roTab = mock(Tab.class);
+    when(roTab.getId()).thenReturn("RO_TAB");
+    when(dal.createCriteria(Tab.class)).thenReturn(stdCriteria, anyCriteria);
+    when(stdCriteria.list()).thenReturn(Collections.emptyList());
+    when(anyCriteria.list()).thenReturn(Collections.singletonList(roTab));
+
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      String tabId = NeoAttachmentsHelper.resolveTabId("TABLE1", null);
+
+      assertEquals("RO_TAB", tabId);
+      verify(dal, times(2)).createCriteria(Tab.class);
+    }
+  }
+
+  /**
+   * Degenerate case: a table with literally zero active tabs must still return
+   * {@code null} (not throw, not loop) after both the STD-only and the fallback
+   * queries come back empty.
+   */
+  @Test
+  @SuppressWarnings({"rawtypes", "unchecked"})
+  public void resolveTabIdReturnsNullWhenTableHasNoActiveTabsAtAll() throws Exception {
+    OBDal dal = mock(OBDal.class);
+    OBCriteria<Tab> stdCriteria = mock(OBCriteria.class);
+    OBCriteria<Tab> anyCriteria = mock(OBCriteria.class);
+    when(dal.createCriteria(Tab.class)).thenReturn(stdCriteria, anyCriteria);
+    when(stdCriteria.list()).thenReturn(Collections.emptyList());
+    when(anyCriteria.list()).thenReturn(Collections.emptyList());
+
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      String tabId = NeoAttachmentsHelper.resolveTabId("TABLE1", null);
+
+      assertNull(tabId);
+      verify(dal, times(2)).createCriteria(Tab.class);
+    }
+  }
+
+  /**
+   * Edge case: a table with MULTIPLE active non-{@code STD} tabs at different
+   * {@code tabLevel}/{@code sequenceNumber} combinations (e.g. {@code aeatsii_facturas},
+   * which has 6 {@code RO} tabs at different levels). The fallback query must request
+   * the exact same deterministic ordering as the {@code STD}-only query (lowest
+   * {@code tabLevel}, then lowest {@code sequenceNumber}) and the same single-row cap,
+   * so the "first" tab picked is never left to whatever order Postgres/the mock
+   * happens to hand back.
+   */
+  @Test
+  @SuppressWarnings({"rawtypes", "unchecked"})
+  public void resolveTabIdFallbackOrdersByTabLevelThenSequenceNumber() throws Exception {
+    OBDal dal = mock(OBDal.class);
+    OBCriteria<Tab> stdCriteria = mock(OBCriteria.class);
+    OBCriteria<Tab> anyCriteria = mock(OBCriteria.class);
+    Tab winner = mock(Tab.class);
+    when(winner.getId()).thenReturn("RO_TAB_LEVEL0_SEQ10");
+    when(dal.createCriteria(Tab.class)).thenReturn(stdCriteria, anyCriteria);
+    when(stdCriteria.list()).thenReturn(Collections.emptyList());
+    // Represents the DB already applying the requested order (lowest tabLevel,
+    // then lowest sequenceNumber) with setMaxResults(1) trimming to one row —
+    // out of the 6 RO tabs a table like aeatsii_facturas would actually have.
+    when(anyCriteria.list()).thenReturn(Collections.singletonList(winner));
+
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      String tabId = NeoAttachmentsHelper.resolveTabId("TABLE1", null);
+
+      assertEquals("RO_TAB_LEVEL0_SEQ10", tabId);
+      InOrder inOrder = Mockito.inOrder(anyCriteria);
+      inOrder.verify(anyCriteria).addOrderBy(Tab.PROPERTY_TABLEVEL, true);
+      inOrder.verify(anyCriteria).addOrderBy(Tab.PROPERTY_SEQUENCENUMBER, true);
+      verify(anyCriteria).setMaxResults(1);
+    }
+  }
+
+  /**
+   * Sharpest edge case: proves the {@code STD} preference is ABSOLUTE, not merely
+   * incidental to level/sequence ordering. Models a table with a mix of active
+   * {@code STD} and {@code RO} tabs where the {@code STD} tab has a HIGHER
+   * {@code tabLevel} (3) than an RO tab would (0) — meaning a single merged query
+   * ordered by level/seqNo across both types would put the RO tab first. The
+   * two-separate-query design must still return the {@code STD} tab, and must
+   * never even issue the fallback ("any active tab") query, proving {@code STD}
+   * wins by construction rather than by a lucky ordering coincidence.
+   */
+  @Test
+  @SuppressWarnings({"rawtypes", "unchecked"})
+  public void resolveTabIdPrefersStdTabEvenWhenRoTabWouldSortFirstByLevel() throws Exception {
+    OBDal dal = mock(OBDal.class);
+    OBCriteria<Tab> stdCriteria = mock(OBCriteria.class);
+    Tab stdTab = mock(Tab.class);
+    when(stdTab.getId()).thenReturn("STD_TAB_LEVEL3");
+    when(stdTab.getTabLevel()).thenReturn(3L);
+    when(dal.createCriteria(Tab.class)).thenReturn(stdCriteria);
+    when(stdCriteria.list()).thenReturn(Collections.singletonList(stdTab));
+
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      String tabId = NeoAttachmentsHelper.resolveTabId("TABLE1", null);
+
+      assertEquals("STD_TAB_LEVEL3", tabId);
+      // The fallback ("any active tab") query is never issued: STD wins outright,
+      // regardless of what tabLevel/sequenceNumber a coexisting RO tab might have.
+      verify(dal, times(1)).createCriteria(Tab.class);
+    }
+  }
+
+  /**
+   * An INACTIVE {@code STD} tab coexisting with an ACTIVE {@code RO} tab: the
+   * {@code STD}-only query restricts on {@code active = true} so it correctly
+   * excludes the inactive {@code STD} tab (returns empty), and the fallback must
+   * then return the active {@code RO} tab — never {@code null}, never the
+   * inactive {@code STD} tab.
+   */
+  @Test
+  @SuppressWarnings({"rawtypes", "unchecked"})
+  public void resolveTabIdIgnoresInactiveStdTabAndFallsBackToActiveRoTab() throws Exception {
+    OBDal dal = mock(OBDal.class);
+    OBCriteria<Tab> stdCriteria = mock(OBCriteria.class);
+    OBCriteria<Tab> anyCriteria = mock(OBCriteria.class);
+    Tab roTab = mock(Tab.class);
+    when(roTab.getId()).thenReturn("RO_TAB_ACTIVE");
+    when(dal.createCriteria(Tab.class)).thenReturn(stdCriteria, anyCriteria);
+    // The inactive STD tab never reaches this list: the "active = true"
+    // restriction (added unconditionally by findFirstActiveTabId) excludes it
+    // at the DB level, regardless of the stdOnly flag.
+    when(stdCriteria.list()).thenReturn(Collections.emptyList());
+    when(anyCriteria.list()).thenReturn(Collections.singletonList(roTab));
+
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      String tabId = NeoAttachmentsHelper.resolveTabId("TABLE1", null);
+
+      assertEquals("RO_TAB_ACTIVE", tabId);
+      // Both queries unconditionally restrict on table + active; only the
+      // STD-only query additionally restricts on uipattern. Call-count check
+      // guards against a future refactor silently dropping the active filter.
+      verify(stdCriteria, times(3)).add(any());
+      verify(anyCriteria, times(2)).add(any());
+    }
+  }
+
+  /**
+   * End-to-end regression on {@code handleUpload}: when a table has zero active
+   * tabs at all (not just zero STD tabs), the 400 "no standard tab" error path
+   * still triggers after both resolution attempts come back empty.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  public void handleUploadReturnsBadRequestWhenNoActiveTabExistsAtAll() throws Exception {
+    HttpServletRequest request = mock(HttpServletRequest.class);
+    Part part = mock(Part.class);
+    OBDal dal = mock(OBDal.class);
+    OBCriteria<Tab> tabCriteria = mock(OBCriteria.class);
+
+    when(request.getContentType()).thenReturn("multipart/form-data");
+    when(request.getPart("file")).thenReturn(part);
+    when(request.getParameter("tabId")).thenReturn(null);
+    stubTableLookup(dal, "TABLE1");
+    when(dal.createCriteria(Tab.class)).thenReturn(tabCriteria);
+    when(tabCriteria.list()).thenReturn(Collections.emptyList());
+
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      NeoResponse response = NeoAttachmentsHelper.handleUpload("C_Order", "REC1", request);
+
+      assertEquals(400, response.getHttpStatus());
+      assertTrue(errorMessage(response).contains("Could not resolve a standard tab"));
+      verify(dal, times(2)).createCriteria(Tab.class);
+    }
+  }
+
+  /**
+   * End-to-end regression on {@code handleDownloadAll}: same zero-active-tabs
+   * degenerate case as above, exercised through the bulk-download entry point.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  public void handleDownloadAllReturnsBadRequestWhenNoActiveTabExistsAtAll() throws Exception {
+    HttpServletResponse response = mock(HttpServletResponse.class);
+    StringWriter sink = stubWriter(response);
+    OBDal dal = mock(OBDal.class);
+    OBCriteria<Tab> tabCriteria = mock(OBCriteria.class);
+
+    stubTableLookup(dal, "TABLE1");
+    when(dal.createCriteria(Tab.class)).thenReturn(tabCriteria);
+    when(tabCriteria.list()).thenReturn(Collections.emptyList());
+
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      NeoAttachmentsHelper.handleDownloadAll("C_Order", "REC1", response);
+
+      verify(response).setStatus(HttpServletResponse.SC_BAD_REQUEST);
+      assertTrue(sink.toString().contains("Could not resolve a standard tab"));
+      verify(dal, times(2)).createCriteria(Tab.class);
+    }
   }
 
   /**
