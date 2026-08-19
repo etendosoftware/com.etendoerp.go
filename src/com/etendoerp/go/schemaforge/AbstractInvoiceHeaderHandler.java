@@ -615,7 +615,41 @@ public abstract class AbstractInvoiceHeaderHandler {
    * True when the invoice has one or more records in {@code C_Invoice_Reverse}.
    * Only meaningful in detail view (single record); do not call for list responses.
    */
-  @SuppressWarnings("java:S2077")
+  /**
+   * ETP-4783: Injects the synthetic {@code tbaiConfigActive} field into the GET response
+   * so the header form's {@code displayLogic} for {@code tbaiReverseinvoicecode} can
+   * evaluate it client-side.
+   *
+   * <p>Queries {@code tbai_config} for an active record in the same org as the invoice.
+   * Injects {@code 'Y'} when found, {@code 'N'} otherwise. The backend ignores this
+   * synthetic field in PATCH bodies ({@code NeoFieldFilter} drops unknown fields).
+   */
+  protected void enrichTbaiConfigActive(JSONObject rec) {
+    String value = "N"; // default: TBAI not active
+    try {
+      String orgId = rec.isNull("organization") ? null : rec.optString("organization", null);
+      if (orgId != null && !orgId.isEmpty()) {
+        String sql = "SELECT 1 FROM tbai_config WHERE ad_org_id = ? AND isactive = 'Y' LIMIT 1";
+        Connection conn = OBDal.getReadOnlyInstance().getConnection();
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+          ps.setString(1, orgId);
+          try (ResultSet rs = ps.executeQuery()) {
+            value = rs.next() ? "Y" : "N";
+          }
+        }
+      }
+    } catch (Exception e) {
+      log.debug("[ETP-4783] enrichTbaiConfigActive: {}", e.getMessage());
+    }
+    try {
+      rec.put("tbaiConfigActive", value);
+    } catch (Exception ignored) {
+      // best-effort: if rec.put fails the field remains absent;
+      // displayLogicJs treats absent as shown (safe default for TBAI orgs)
+    }
+  }
+
+    @SuppressWarnings("java:S2077")
   protected void enrichHasRectifications(JSONObject rec, String invoiceId) throws Exception {
     if (StringUtils.isBlank(invoiceId)) {
       rec.put("hasRectifications", false);
@@ -1087,6 +1121,8 @@ public abstract class AbstractInvoiceHeaderHandler {
       String recordId = resolveCalloutRecordId(context, fields.formState());
       blockCalloutDocTypeUpdateIfLocked(fields.updates(), fields.triggerField(), recordId);
       applySiiAuthorizationCallout(fields.triggerField(), fields.requestBody(), fields.updates(), fields.body());
+      applyVerifactuInvTypeFromDocType(fields.triggerField(), fields.requestBody(), fields.updates());
+      realignVerifactuDescWithFormStateDocType(fields.triggerField(), fields.formState(), fields.updates());
     } catch (Exception e) {
       log.warn("[ETP-4029/ETP-4535] afterCallout failed (non-fatal): {}", e.getMessage());
     }
@@ -1145,13 +1181,139 @@ public abstract class AbstractInvoiceHeaderHandler {
           appendMessage(body, "ERROR",
               "La organización no tiene configuración de SII o la configuración no tiene número de autorización.");
         } else {
-          updates.put("aeatsiiAuthorizationno", config.getAuthorizationno());
+          // Updates entries must be { "value": "..." } objects — see applyVerifactuInvTypeFromDocType.
+          JSONObject authUpdate = new JSONObject();
+          authUpdate.put("value", config.getAuthorizationno());
+          updates.put("aeatsiiAuthorizationno", authUpdate);
         }
       } else {
-        updates.put("aeatsiiAuthorizationno", "");
+        JSONObject authClear = new JSONObject();
+        authClear.put("value", "");
+        updates.put("aeatsiiAuthorizationno", authClear);
       }
     } catch (Exception e) {
       log.warn("[ETP-4783] applySiiAuthorizationCallout failed (non-fatal): {}", e.getMessage());
+    }
+  }
+
+  /**
+   * ETP-4783: After a non-DocType callout (e.g. {@code businessPartner}) the cascade may
+   * fire the {@code transactionDocument} Classic callout (because the BP callout suggests a
+   * different DocType) and inject {@code etvfacVerifacDesc} based on that suggested DocType.
+   * The cascade runs BEFORE the after-callout hook, so by the time this method runs the
+   * "wrong" description is already in {@code updates}.
+   *
+   * <p>This method corrects it by re-reading {@code em_etvfac_verifac_desc} (and
+   * {@code em_etvfac_inv_type}) for the DocType the user actually selected, taken from
+   * {@code formState.transactionDocument} (the live editing snapshot the frontend sends).
+   *
+   * <p>No-op when trigger IS {@code transactionDocument} (handled by
+   * {@link #applyVerifactuInvTypeFromDocType}), or when no Verifactu field is present in
+   * updates (the cascade did not fire for {@code transactionDocument} → nothing to fix).
+   * All failures are caught and logged (non-fatal).
+   *
+   * @param triggerField the field that fired the callout
+   * @param formState    the form state snapshot from the callout request
+   * @param updates      the callout response's {@code updates} map; may be {@code null}
+   */
+  private static void realignVerifactuDescWithFormStateDocType(String triggerField,
+      JSONObject formState, JSONObject updates) {
+    if (FIELD_TRANSACTION_DOCUMENT.equals(triggerField)) {
+      return; // already handled by applyVerifactuInvTypeFromDocType
+    }
+    if (updates == null || !updates.has("etvfacVerifacDesc")) {
+      return; // cascade did not touch Verifactu description — nothing to realign
+    }
+    if (formState == null) {
+      return;
+    }
+    String docTypeId = formState.optString(FIELD_TRANSACTION_DOCUMENT, "").trim();
+    if (docTypeId.isEmpty()) {
+      return;
+    }
+    try {
+      String sql = "SELECT em_etvfac_verifac_desc, em_etvfac_inv_type"
+          + " FROM c_doctype WHERE c_doctype_id = ?";
+      Connection conn = OBDal.getReadOnlyInstance().getConnection();
+      try (PreparedStatement ps = conn.prepareStatement(sql)) {
+        ps.setString(1, docTypeId);
+        try (ResultSet rs = ps.executeQuery()) {
+          if (rs.next()) {
+            String desc    = rs.getString(1);
+            String invType = rs.getString(2);
+            if (desc != null && !desc.trim().isEmpty()) {
+              JSONObject descUpdate = new JSONObject();
+              descUpdate.put("value", desc.trim());
+              updates.put("etvfacVerifacDesc", descUpdate);
+            }
+            // Also realign etvfacInvType if the cascade put a wrong value there
+            if (invType != null && !invType.trim().isEmpty() && updates.has("etvfacInvType")) {
+              JSONObject invUpdate = new JSONObject();
+              invUpdate.put("value", invType.trim());
+              updates.put("etvfacInvType", invUpdate);
+            }
+          }
+        }
+      }
+      log.debug("[ETP-4783] realignVerifactuDescWithFormStateDocType: corrected Verifactu desc/inv for docType={} (trigger={})",
+          docTypeId, triggerField);
+    } catch (Exception e) {
+      log.warn("[ETP-4783] realignVerifactuDescWithFormStateDocType failed (non-fatal): {}", e.getMessage());
+    }
+  }
+
+  /**
+   * When the user changes the document type ({@code transactionDocument} trigger), injects the
+   * new DocType's {@code em_etvfac_inv_type} value into the callout update map.
+   *
+   * <p>The Classic callout {@code ETVFAC_C_INVOICE_SET_VERIFACTU} propagates this field on
+   * DocType change, but it does not run in GO/NEO Headless. This method replicates that behaviour
+   * so {@code etvfacInvType} ("Tipo de Factura") updates when the user switches to a rectificative
+   * document type (ETP-4783).
+   *
+   * <p>No-op when the trigger is not {@code transactionDocument} or the DocType has no Verifactu
+   * invoice type configured. All failures are caught and logged as warnings (non-fatal).
+   *
+   * @param triggerField the field that fired the callout
+   * @param requestBody  the callout request body ({@code field}, {@code value}, {@code formState})
+   * @param updates      the callout response's {@code updates} map; may be {@code null}
+   */
+  private static void applyVerifactuInvTypeFromDocType(String triggerField, JSONObject requestBody,
+      JSONObject updates) {
+    if (!FIELD_TRANSACTION_DOCUMENT.equals(triggerField)) {
+      return;
+    }
+    if (updates == null) {
+      return;
+    }
+    try {
+      Object rawValue = requestBody != null ? requestBody.opt("value") : null;
+      String docTypeId = rawValue != null ? rawValue.toString().trim() : "";
+      if (docTypeId.isEmpty()) {
+        return;
+      }
+      String sql = "SELECT em_etvfac_inv_type FROM c_doctype WHERE c_doctype_id = ?";
+      Connection conn = OBDal.getReadOnlyInstance().getConnection();
+      try (PreparedStatement ps = conn.prepareStatement(sql)) {
+        ps.setString(1, docTypeId);
+        try (ResultSet rs = ps.executeQuery()) {
+          if (rs.next()) {
+            String invType = rs.getString(1);
+            if (invType != null && !invType.trim().isEmpty()) {
+              // Updates entries must be { "value": "..." } objects, not raw strings —
+              // the frontend's applyCalloutFieldUpdates reads entry.value; a raw string
+              // would give entry.value === undefined and silently skip the update.
+              JSONObject fieldUpdate = new JSONObject();
+              fieldUpdate.put("value", invType.trim());
+              updates.put("etvfacInvType", fieldUpdate);
+              log.debug("[ETP-4783] applyVerifactuInvTypeFromDocType: injected etvfacInvType={} for docType={}",
+                  invType.trim(), docTypeId);
+            }
+          }
+        }
+      }
+    } catch (Exception e) {
+      log.warn("[ETP-4783] applyVerifactuInvTypeFromDocType failed (non-fatal): {}", e.getMessage());
     }
   }
 

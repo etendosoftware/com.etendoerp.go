@@ -120,6 +120,9 @@ public class SiiConfigDeactivateHandler extends AbstractSmartDeactivationHandler
         applyPayloadFields(existing, body);
         OBDal.getInstance().save(existing);
         OBDal.getInstance().flush();
+        // INSIISYSTEM is not mapped in the Java entity; set it via native SQL so the
+        // AEATSII_CHECK_SIFS_CONFIGS_TRG trigger marks the org as having an active SII config.
+        setInSiiSystemY(existing.getId());
         log.info("SiiConfigDeactivateHandler: reactivated inactive config {} for org {}",
             existing.getId(), orgId);
 
@@ -220,6 +223,70 @@ public class SiiConfigDeactivateHandler extends AbstractSmartDeactivationHandler
     log.info("SiiConfigDeactivateHandler: deleted unused config record {} (no SII invoices sent)",
         recordId);
     return deletedResponse();
+  }
+
+  /**
+   * POST-CRUD hook: after a successful PUT that saves an active SII config, ensures
+   * {@code INSIISYSTEM = 'Y'} in the DB so the {@code AEATSII_CHECK_SIFS_CONFIGS_TRG}
+   * trigger correctly marks the org's {@code em_etsg_has_sii_config} flag.
+   *
+   * <p>{@code INSIISYSTEM} is not mapped in the generated {@link AEATSIIConfig} Java entity
+   * class (no {@code getInSiiSystem()} / {@code setInSiiSystem()} methods exist). Its DB
+   * default is {@code 'N'}, so without this hook every PUT leaves the column {@code 'N'} and
+   * the trigger resets the org flag to {@code 'N'} on each save (ETP-4783).
+   *
+   * <p>Deactivation PUTs ({@code active=false}) are skipped — the org flag should be cleared
+   * when the config is deactivated.
+   */
+  @Override
+  public NeoResponse afterHandle(NeoContext context) {
+    if (!"PUT".equalsIgnoreCase(context.getHttpMethod())) {
+      return null;
+    }
+    // Skip when this PUT is deactivating the record; the trigger should clear the org flag.
+    JSONObject body = context.getRequestBody();
+    if (body != null && body.has("active") && !body.optBoolean("active", true)) {
+      return null;
+    }
+    String recordId = context.getRecordId();
+    if (StringUtils.isBlank(recordId)) {
+      return null;
+    }
+    try {
+      OBContext.setAdminMode(true);
+      try {
+        setInSiiSystemY(recordId);
+      } finally {
+        OBContext.restorePreviousMode();
+      }
+    } catch (Exception e) {
+      // Non-fatal — the save already committed; log and continue.
+      log.warn("SiiConfigDeactivateHandler.afterHandle: could not set INSIISYSTEM='Y' for {}: {}",
+          recordId, e.getMessage(), e);
+    }
+    return null;
+  }
+
+  /**
+   * Sets {@code INSIISYSTEM = 'Y'} for the given {@code AEATSII_CONFIG} record via native SQL.
+   *
+   * <p>This column is not mapped in the generated {@link AEATSIIConfig} entity class, so a
+   * native {@code UPDATE} is the only way to set it through OBDal. Setting it to {@code 'Y'}
+   * causes the {@code AEATSII_CHECK_SIFS_CONFIGS_TRG} trigger (which fires on every UPDATE of
+   * {@code AEATSII_CONFIG}) to mark the organisation as having an active SII configuration by
+   * writing {@code em_etsg_has_sii_config = 'Y'} into {@code AD_ORGINFO} — the flag that the
+   * frontend reads to decide whether to show the SII section.
+   *
+   * @param recordId primary key of the {@code AEATSII_CONFIG} row to update
+   */
+  private void setInSiiSystemY(String recordId) {
+    // Flush pending Hibernate changes before the native SQL so ordering is consistent.
+    OBDal.getInstance().flush();
+    OBDal.getInstance().getSession()
+        .createNativeQuery("UPDATE AEATSII_CONFIG SET INSIISYSTEM = 'Y' WHERE AEATSII_CONFIG_ID = :id")
+        .setParameter("id", recordId)
+        .executeUpdate();
+    log.info("SiiConfigDeactivateHandler: set INSIISYSTEM='Y' for config {}", recordId);
   }
 
   /**

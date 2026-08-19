@@ -189,6 +189,7 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
         enrichOriginInvoice(rec, context.getRecordId());
         enrichDocTypeLocked(rec);
         enrichIsRectificative(rec);
+        enrichTbaiConfigActive(rec);
         enrichHasRectifications(rec, context.getRecordId());
         InvoiceExemptTaxes.enrich(rec, context.getRecordId());
         enrichLinkedShipments(rec, context.getRecordId());
