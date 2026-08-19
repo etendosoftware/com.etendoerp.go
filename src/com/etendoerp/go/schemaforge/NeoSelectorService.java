@@ -252,9 +252,20 @@ public class NeoSelectorService {
   public static final String SOURCE_ENTITY_NAME_PARAM = "_sourceEntityName";
 
   /**
-   * Returns a copy of {@code contextParams} augmented with the requesting entity's name, without
-   * mutating the caller's map. When {@code sourceEntity} is {@code null} (e.g. the MCP layer,
-   * which resolves selectors directly by column) the original params are reused unchanged.
+   * Internal context param key carrying the AD_Window_Id of the requesting source entity's
+   * spec, when the spec is linked to a window (absent for process-only specs, or when the
+   * link cannot be resolved). {@code _sourceEntityName} alone (e.g. {@code lines}) is often
+   * shared by several unrelated windows' detail tabs, so a policy that must scope itself to
+   * ONE specific window instance also needs this. See
+   * {@link com.etendoerp.go.schemaforge.selector.policy.InvoiceLineTaxSifSelectorPolicy}.
+   */
+  public static final String SOURCE_WINDOW_ID_PARAM = "_sourceWindowId";
+
+  /**
+   * Returns a copy of {@code contextParams} augmented with the requesting entity's name (and,
+   * when resolvable, its window id), without mutating the caller's map. When {@code
+   * sourceEntity} is {@code null} (e.g. the MCP layer, which resolves selectors directly by
+   * column) the original params are reused unchanged.
    */
   private static Map<String, String> withSourceEntityName(Map<String, String> contextParams,
       SFEntity sourceEntity) {
@@ -264,7 +275,32 @@ public class NeoSelectorService {
     Map<String, String> augmented = new HashMap<>(
         contextParams != null ? contextParams : Collections.emptyMap());
     augmented.put(SOURCE_ENTITY_NAME_PARAM, sourceEntity.getName());
+    String windowId = resolveSourceWindowId(sourceEntity);
+    if (StringUtils.isNotBlank(windowId)) {
+      augmented.put(SOURCE_WINDOW_ID_PARAM, windowId);
+    }
     return augmented;
+  }
+
+  /**
+   * Resolve the AD_Window_Id linked to the source entity's spec, mirroring the
+   * SFEntity -&gt; SFSpec -&gt; AD_Window chain resolution already used by
+   * {@code DocTypeResolver}/{@code NeoDefaultsService}. Returns {@code null} (never throws)
+   * when the spec has no linked window (e.g. a process spec) or the chain cannot be resolved.
+   */
+  private static String resolveSourceWindowId(SFEntity sourceEntity) {
+    try {
+      com.etendoerp.go.schemaforge.data.SFSpec spec = sourceEntity.getETGOSFSpec();
+      if (spec != null) {
+        org.openbravo.model.ad.ui.Window window = spec.getADWindow();
+        if (window != null) {
+          return window.getId();
+        }
+      }
+    } catch (Exception e) {
+      log.debug("Could not resolve source window id: {}", e.getMessage());
+    }
+    return null;
   }
 
   private static int normalizeLimit(int limit) {

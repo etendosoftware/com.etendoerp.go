@@ -77,24 +77,58 @@ public class NeoCommercialLinePolicyTest {
     assertEquals(5.0, body.getDouble("lineGrossAmount"), DELTA);
   }
 
+  /**
+   * ETP-4727 (backend counterpart): orderedQuantity explicitly edited to 0 on an existing line
+   * is deterministic — the frontend already computes and sends lineGrossAmount=0 for this exact
+   * case (useLineGrossAmount.js's editedIsQtyOrPrice branch), but filterWriteRequest strips it
+   * as a read-only field before this injector ever sees it. Without this forced zero, NEO's
+   * partial-update PATCH left the pre-edit gross amount stale in the DB — reproduced live via
+   * the QA report on ETP-4727 (footer totals recalculated to 0, the line's own cell did not,
+   * and the stale value survived a full page reload).
+   */
   @Test
-  public void testInjectLineGross_zeroQuantity_nothingInjected() throws Exception {
+  public void testInjectLineGross_quantityEditedToZero_forcesZero() throws Exception {
     JSONObject body = new JSONObject()
         .put("orderedQuantity", "0")
         .put("unitPrice", 10.0);
 
     NeoCommercialLinePolicy.injectLineGrossAmountIfMissing(body);
 
-    assertFalse(body.has("lineGrossAmount"));
+    assertTrue(body.has("lineGrossAmount"));
+    assertEquals(0.0, body.getDouble("lineGrossAmount"), DELTA);
   }
 
+  /**
+   * ETP-4727 (backend counterpart): unitPrice explicitly edited to 0 on an existing line (the
+   * other repro step from the Jira bug — "o el campo Precio a 0") is equally deterministic and
+   * must force lineGrossAmount=0, not leave it untouched.
+   */
   @Test
-  public void testInjectLineGross_zeroUnitPriceNoGross_nothingInjected() throws Exception {
+  public void testInjectLineGross_priceEditedToZero_forcesZero() throws Exception {
     JSONObject body = new JSONObject()
         .put("orderedQuantity", "2")
         .put("unitPrice", 0.0)
         .put("grossUnitPrice", 0.0)
         .put("tax", "");
+
+    NeoCommercialLinePolicy.injectLineGrossAmountIfMissing(body);
+
+    assertTrue(body.has("lineGrossAmount"));
+    assertEquals(0.0, body.getDouble("lineGrossAmount"), DELTA);
+  }
+
+  /**
+   * ETP-4727 safety net: a body that never mentions orderedQuantity at all (e.g. an
+   * invoice-only body being run through the order-side injector, or any caller that isn't
+   * sending the full row) must NOT have lineGrossAmount forced to 0 — there is no signal here
+   * that an order-line quantity/price was actually just edited. Guards the order/invoice
+   * isolation also covered by testInjectCommercialAmounts_orderLine_onlyLineGrossInjected.
+   */
+  @Test
+  public void testInjectLineGross_noOrderedQuantityKeyAtAll_doesNotForceZero() throws Exception {
+    JSONObject body = new JSONObject()
+        .put("invoicedQuantity", "5")
+        .put("unitPrice", 0.0);
 
     NeoCommercialLinePolicy.injectLineGrossAmountIfMissing(body);
 
@@ -205,10 +239,28 @@ public class NeoCommercialLinePolicyTest {
     assertFalse(body.has("grossAmount"));
   }
 
+  /**
+   * ETP-4727 (backend counterpart, invoice side): invoicedQuantity explicitly edited to 0 on an
+   * existing line must force grossAmount=0 — mirrors testInjectLineGross_quantityEditedToZero_
+   * forcesZero on the order side.
+   */
   @Test
-  public void testInjectGross_zeroQuantity_nothingInjected() throws Exception {
+  public void testInjectGross_quantityEditedToZero_forcesZero() throws Exception {
     JSONObject body = new JSONObject()
         .put("invoicedQuantity", "0")
+        .put("grossUnitPrice", 10.0);
+
+    NeoCommercialLinePolicy.injectGrossAmountIfMissing(body);
+
+    assertTrue(body.has("grossAmount"));
+    assertEquals(0.0, body.getDouble("grossAmount"), DELTA);
+  }
+
+  /** ETP-4727 safety net, invoice side: no invoicedQuantity key at all → don't force zero. */
+  @Test
+  public void testInjectGross_noInvoicedQuantityKeyAtAll_doesNotForceZero() throws Exception {
+    JSONObject body = new JSONObject()
+        .put("orderedQuantity", "3")
         .put("grossUnitPrice", 10.0);
 
     NeoCommercialLinePolicy.injectGrossAmountIfMissing(body);
@@ -279,10 +331,27 @@ public class NeoCommercialLinePolicyTest {
     assertFalse(body.has("lineNetAmount"));
   }
 
+  /**
+   * ETP-4727 (backend counterpart): unitPrice explicitly edited to 0 on an existing invoice
+   * line must force lineNetAmount=0, not leave it untouched.
+   */
   @Test
-  public void testInjectLineNet_zeroUnitPrice_nothingInjected() throws Exception {
+  public void testInjectLineNet_zeroUnitPrice_forcesZero() throws Exception {
     JSONObject body = new JSONObject()
         .put("invoicedQuantity", "2")
+        .put("unitPrice", 0.0);
+
+    NeoCommercialLinePolicy.injectLineNetAmountIfMissing(body);
+
+    assertTrue(body.has("lineNetAmount"));
+    assertEquals(0.0, body.getDouble("lineNetAmount"), DELTA);
+  }
+
+  /** ETP-4727 safety net: no invoicedQuantity key at all → don't force zero. */
+  @Test
+  public void testInjectLineNet_noInvoicedQuantityKeyAtAll_doesNotForceZero() throws Exception {
+    JSONObject body = new JSONObject()
+        .put("orderedQuantity", "2")
         .put("unitPrice", 0.0);
 
     NeoCommercialLinePolicy.injectLineNetAmountIfMissing(body);
@@ -366,9 +435,15 @@ public class NeoCommercialLinePolicyTest {
     assertEquals(-100.0, body.getDouble("grossAmount"), DELTA);
   }
 
-  /** baseNetAmt exactly zero must remain indeterminate (NaN guard still applies). */
+  /**
+   * baseNetAmt exactly zero, driven by an explicit unitPrice=0 on an order line — post-ETP-4727
+   * this is no longer indeterminate: since orderedQuantity is present (it's an order-line body),
+   * the zero is forced rather than left as a NaN-guard no-op. See
+   * testInjectLineGross_priceEditedToZero_forcesZero for the primary regression test; this one
+   * guards the same case survives alongside the ETP-4567 negative-amount tests below.
+   */
   @Test
-  public void testInjectLineGross_zeroBaseNetAmt_stillNothingInjected() throws Exception {
+  public void testInjectLineGross_zeroBaseNetAmt_forcesZero() throws Exception {
     JSONObject body = new JSONObject()
         .put("orderedQuantity", "2")
         .put("unitPrice", 0.0)
@@ -377,7 +452,8 @@ public class NeoCommercialLinePolicyTest {
 
     NeoCommercialLinePolicy.injectLineGrossAmountIfMissing(body);
 
-    assertFalse(body.has("lineGrossAmount"));
+    assertTrue(body.has("lineGrossAmount"));
+    assertEquals(0.0, body.getDouble("lineGrossAmount"), DELTA);
   }
 
   // ── ETP-4855: injectCommercialAmounts ordering ────────────────────────────
