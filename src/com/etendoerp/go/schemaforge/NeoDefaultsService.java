@@ -482,8 +482,23 @@ public class NeoDefaultsService {
 
     // SQL expressions — resolve parameters and execute
     if (defaultExpr.startsWith("@SQL=")) {
+      // ETP-4783: Ensure ISSOTRX is available for @issotrx@ tokens in @SQL= expressions
+      // (e.g. aeatsiiDescripcionSii picks "Ventas" vs "Compras" based on this flag).
+      // Utility.getContext does not carry ISSOTRX in the NEO session context, so inject it
+      // from the AD Window's isSalesTransaction flag when not already present in parentValues.
+      Map<String, Object> sqlParentValues = request.parentValues;
+      if (request.ctx != null && request.ctx.getAdTab() != null) {
+        Tab reqTab = request.ctx.getAdTab();
+        if (reqTab.getWindow() != null && reqTab.getWindow().isSalesTransaction() != null) {
+          String isSOTrx = reqTab.getWindow().isSalesTransaction() ? "Y" : "N";
+          if (sqlParentValues == null) {
+            sqlParentValues = new java.util.HashMap<>();
+          }
+          sqlParentValues.putIfAbsent("ISSOTRX", isSOTrx);
+        }
+      }
       return NeoDefaultsSqlHelper.resolveSQLDefault(defaultExpr, request.vars, request.conn,
-          request.windowId, adColumn, request.parentValues);
+          request.windowId, adColumn, sqlParentValues);
     }
 
     // List-reference columns (AD_Reference_ID = "17") with a pure literal default (no "@"
@@ -793,6 +808,17 @@ public class NeoDefaultsService {
       DalConnectionProvider conn = new DalConnectionProvider(false);
       String windowId = ctx.getSfEntity() != null ? resolveWindowId(ctx.getSfEntity()) : "";
       Map<String, Object> parentValues = NeoParentValuesLoader.load(adTab, parentId);
+
+      // ETP-4783: Inject ISSOTRX so that @issotrx@ in @SQL= defaults (e.g. aeatsiiDescripcionSii)
+      // resolves to the correct sales/purchase value rather than falling back to Utility.getContext,
+      // which returns empty in the NEO Headless session context (no Classic window session variable
+      // is set). The same lookup is done by SelectorContextResolver.resolveIsSOTrxFromWindow.
+      if (adTab != null && adTab.getWindow() != null) {
+        Boolean isSalesTrx = adTab.getWindow().isSalesTransaction();
+        if (isSalesTrx != null) {
+          parentValues.put("ISSOTRX", isSalesTrx ? "Y" : "N");
+        }
+      }
 
       // Build a map of ETGO_SF_FIELD per-window default overrides, keyed by DB column name
       // (upper-case). This mirrors the sfFieldDefault lookup that resolveDefaults already does

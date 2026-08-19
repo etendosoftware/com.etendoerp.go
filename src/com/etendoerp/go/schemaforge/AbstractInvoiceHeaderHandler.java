@@ -1178,14 +1178,15 @@ public abstract class AbstractInvoiceHeaderHandler {
         }
         AEATSIIConfig config = SIIUtils.getSiiConfigFromOrg(org);
         if (config == null || StringUtils.isBlank(config.getAuthorizationno())) {
-          appendMessage(body, "ERROR",
-              "La organización no tiene configuración de SII o la configuración no tiene número de autorización.");
-        } else {
-          // Updates entries must be { "value": "..." } objects — see applyVerifactuInvTypeFromDocType.
-          JSONObject authUpdate = new JSONObject();
-          authUpdate.put("value", config.getAuthorizationno());
-          updates.put("aeatsiiAuthorizationno", authUpdate);
+          // The classic SiiAuthorizationCallout (executed earlier via NeoCalloutEndpoint.executeCallout)
+          // already appended this ERROR message to the response. Appending it here too would cause the
+          // error to appear twice in the UI. Skip — no field update to inject either. (ETP-4783)
+          return;
         }
+        // Updates entries must be { "value": "..." } objects — see applyVerifactuInvTypeFromDocType.
+        JSONObject authUpdate = new JSONObject();
+        authUpdate.put("value", config.getAuthorizationno());
+        updates.put("aeatsiiAuthorizationno", authUpdate);
       } else {
         JSONObject authClear = new JSONObject();
         authClear.put("value", "");
