@@ -129,6 +129,10 @@ public class NeoDefaultsService {
         // pass the already-resolved C_DocTypeTarget_ID / C_DocType_ID values to
         // Utility.getDocumentNo — exactly as FormInitializationComponent does.
         JSONArray unresolvedFields = new JSONArray();
+        // ETP-4918: actionable prose for fields whose @SQL= default cleanly resolved to null
+        // (as opposed to unresolvedFields, which only ever gets populated from the catch
+        // block below and says nothing about this silent case). See appendSqlDefaultNote.
+        JSONArray notes = new JSONArray();
 
         List<SFField> sequenceSFFields = new ArrayList<>();
         JSONObject defaults = new JSONObject();
@@ -150,8 +154,9 @@ public class NeoDefaultsService {
             // This allows per-window default expressions (e.g. "@#Date@" for date fields)
             // without modifying the AD_Column metadata.
             String sfFieldDefault = sfField.getDefaultValue();
-            Object resolvedValue = resolveFieldDefault(adColumn, parentId, vars, conn, windowId,
-                ctx, sfFieldDefault);
+            FieldDefaultRequest fieldRequest = new FieldDefaultRequest(adColumn, parentId, vars,
+                conn, windowId, ctx).withSfFieldDefault(sfFieldDefault);
+            Object resolvedValue = resolveFieldDefault(fieldRequest);
             // For combo-style references (TableDir/Table/List) with no explicit default,
             // mirror FIC parity and preselect the first available option. Search-type
             // references (ref 30, OBUISEL) are excluded by resolveFirstComboOption, so
@@ -163,6 +168,9 @@ public class NeoDefaultsService {
             // table" is always wrong for them (e.g. self-referential FKs like
             // Replacedorder_ID would silently mark every new document as a replacement).
             applyDefaultWithComboFallback(ctx, sfField, resolvedValue, adColumn, defaults, propertyName, dalEntity);
+            if (!defaults.has(propertyName)) {
+              appendSqlDefaultNote(notes, propertyName, fieldRequest.getSqlOutcome());
+            }
           } catch (Exception e) {
             log.debug("Could not resolve default for column {}: {}",
                 dbColumnName, e.getMessage());
@@ -256,6 +264,12 @@ public class NeoDefaultsService {
         JSONObject metadata = new JSONObject();
         metadata.put("unresolvedFields", unresolvedFields);
         metadata.put("sequenceFields", sequenceFields);
+        // ETP-4918: only surface metadata.notes when there is something actionable to say —
+        // an empty array here would be as much noise as the vague notes this feature exists
+        // to avoid.
+        if (notes.length() > 0) {
+          metadata.put("notes", notes);
+        }
         response.put("metadata", metadata);
 
         return NeoResponse.ok(response);
@@ -286,6 +300,39 @@ public class NeoDefaultsService {
       defaults.put(propertyName, resolvedValue);
       // For FK fields, also inject $_identifier so selectors display the label, not the ID
       tryInjectIdentifier(defaults, dalEntity, propertyName, resolvedValue);
+    }
+  }
+
+  /**
+   * Build a {@code metadata.notes} entry explaining why a field's {@code @SQL=} default
+   * resolved to null and the field is therefore absent from {@code defaults} (ETP-4918).
+   *
+   * <p>Only the two causes {@link NeoDefaultsSqlHelper.SqlDefaultOutcome} can actually detect
+   * are worded — a missing parent token, or a query that legitimately matched zero rows. Any
+   * other reason a field is missing (no default expression at all, an exception, a combo
+   * fallback that also came up empty) has no {@code sqlOutcome} to reason from and gets no
+   * note: a note that cannot name both a concrete field and a concrete action is worse than
+   * silence, since it is the "some fields may not have resolved" filler this array exists to
+   * avoid.
+   *
+   * @param notes        the notes array being built, mutated in place
+   * @param propertyName the wire property name of the missing field (e.g. "storageBin")
+   * @param sqlOutcome   the diagnostic from resolving this field's @SQL= default, or
+   *                     {@code null} if the field's default was never a @SQL= expression
+   */
+  private static void appendSqlDefaultNote(JSONArray notes, String propertyName,
+      NeoDefaultsSqlHelper.SqlDefaultOutcome sqlOutcome) throws JSONException {
+    if (sqlOutcome == null) {
+      return;
+    }
+    if (sqlOutcome.getMissingParentToken() != null) {
+      notes.put(propertyName + ": its default needs @" + sqlOutcome.getMissingParentToken()
+          + "@ from the parent record, but no parentId was given. Call neo_defaults again "
+          + "with parentId to resolve it.");
+    } else if (sqlOutcome.isZeroRows()) {
+      notes.put(propertyName + ": its @SQL= default query matched zero rows for the current "
+          + "context — no such record exists for this tenant, it is not a missing parameter. "
+          + "Set this field explicitly if it is required.");
     }
   }
 
@@ -603,6 +650,9 @@ public class NeoDefaultsService {
     private final NeoContext ctx;
     private String sfFieldDefault;
     private Map<String, Object> parentValues;
+    // Set by resolveNonEmptyDefaultExpr when the @SQL= branch is taken (ETP-4918); read back by
+    // pass 1 of resolveDefaults to build a metadata.notes entry when the resolved value is null.
+    private NeoDefaultsSqlHelper.SqlDefaultOutcome sqlOutcome;
 
     private FieldDefaultRequest(Column adColumn, String parentId, VariablesSecureApp vars,
         DalConnectionProvider conn, String windowId, NeoContext ctx) {
@@ -622,6 +672,10 @@ public class NeoDefaultsService {
     private FieldDefaultRequest withParentValues(Map<String, Object> parentValues) {
       this.parentValues = parentValues;
       return this;
+    }
+
+    private NeoDefaultsSqlHelper.SqlDefaultOutcome getSqlOutcome() {
+      return sqlOutcome;
     }
   }
 
@@ -682,10 +736,16 @@ public class NeoDefaultsService {
       return "";
     }
 
-    // SQL expressions — resolve parameters and execute
+    // SQL expressions — resolve parameters and execute. Captures the diagnostic outcome on the
+    // request (ETP-4918) so a clean null (parent token missing / zero rows) can still turn into
+    // an actionable metadata.notes entry instead of the field silently vanishing.
     if (defaultExpr.startsWith("@SQL=")) {
-      return NeoDefaultsSqlHelper.resolveSQLDefault(defaultExpr, request.vars, request.conn,
-          request.windowId, adColumn, request.parentValues);
+      boolean parentIdProvided = request.parentId != null && !request.parentId.isEmpty();
+      NeoDefaultsSqlHelper.SqlDefaultOutcome outcome = NeoDefaultsSqlHelper.resolveSQLDefaultWithOutcome(
+          defaultExpr, request.vars, request.conn, request.windowId, adColumn, request.parentValues,
+          parentIdProvided);
+      request.sqlOutcome = outcome;
+      return outcome.getValue();
     }
 
     // List-reference columns (AD_Reference_ID = "17") with a pure literal default (no "@"

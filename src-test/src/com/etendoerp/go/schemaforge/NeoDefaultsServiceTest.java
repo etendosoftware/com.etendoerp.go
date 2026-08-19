@@ -68,6 +68,7 @@ import org.openbravo.model.ad.ui.Window;
 import org.openbravo.model.ad.utility.Sequence;
 import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.client.kernel.KernelUtils;
+import org.openbravo.service.db.DalConnectionProvider;
 
 import com.etendoerp.go.schemaforge.NeoMandatoryFieldValidator;
 import com.etendoerp.go.schemaforge.data.SFEntity;
@@ -3875,5 +3876,472 @@ public class NeoDefaultsServiceTest {
         body, col, "documentStatus", "DR", null, prop);
 
     assertEquals("DR", body.get("documentStatus"));
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // resolveSQLDefaultWithOutcome — SqlDefaultOutcome diagnostics (ETP-4918)
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  @Test
+  public void testResolveSqlDefaultOutcomeMissingParentTokenWhenParentIdNotProvided()
+      throws Exception {
+    OBDal dal = mock(OBDal.class);
+    Connection conn = mock(Connection.class);
+    PreparedStatement ps = mock(PreparedStatement.class);
+    ResultSet rs = mock(ResultSet.class);
+    VariablesSecureApp vars = mock(VariablesSecureApp.class);
+    DalConnectionProvider connProvider = mock(DalConnectionProvider.class);
+    Column adColumn = mock(Column.class);
+    when(adColumn.getDBColumnName()).thenReturn("M_Locator_ID");
+
+    when(dal.getConnection(false)).thenReturn(conn);
+    when(conn.prepareStatement(anyString())).thenReturn(ps);
+    when(ps.executeQuery()).thenReturn(rs);
+    when(rs.next()).thenReturn(false);
+
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+         MockedStatic<Utility> utilityMock = mockStatic(Utility.class)) {
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      // Utility.getContext is left unstubbed under mockStatic — returns null, matching a
+      // token with no session equivalent (e.g. M_Warehouse_ID).
+
+      NeoDefaultsSqlHelper.SqlDefaultOutcome outcome =
+          NeoDefaultsSqlHelper.resolveSQLDefaultWithOutcome(
+              "@SQL=SELECT id FROM t WHERE M_Warehouse_ID = '@M_Warehouse_ID@'",
+              vars, connProvider, "WIN-1", adColumn, null, false);
+
+      assertNull(outcome.getValue());
+      assertEquals("M_Warehouse_ID", outcome.getMissingParentToken());
+      assertFalse(outcome.isZeroRows());
+    }
+  }
+
+  @Test
+  public void testResolveSqlDefaultOutcomeZeroRowsWhenParentIdProvided() throws Exception {
+    OBDal dal = mock(OBDal.class);
+    Connection conn = mock(Connection.class);
+    PreparedStatement ps = mock(PreparedStatement.class);
+    ResultSet rs = mock(ResultSet.class);
+    VariablesSecureApp vars = mock(VariablesSecureApp.class);
+    DalConnectionProvider connProvider = mock(DalConnectionProvider.class);
+    Column adColumn = mock(Column.class);
+    when(adColumn.getDBColumnName()).thenReturn("M_Locator_ID");
+
+    when(dal.getConnection(false)).thenReturn(conn);
+    when(conn.prepareStatement(anyString())).thenReturn(ps);
+    when(ps.executeQuery()).thenReturn(rs);
+    when(rs.next()).thenReturn(false);
+
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+         MockedStatic<Utility> utilityMock = mockStatic(Utility.class)) {
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      // parentIdProvided=true this time: a missing/empty token must NOT be blamed on a
+      // forgotten parentId — the query simply matched nothing.
+      NeoDefaultsSqlHelper.SqlDefaultOutcome outcome =
+          NeoDefaultsSqlHelper.resolveSQLDefaultWithOutcome(
+              "@SQL=SELECT id FROM t WHERE M_Warehouse_ID = '@M_Warehouse_ID@'",
+              vars, connProvider, "WIN-1", adColumn, null, true);
+
+      assertNull(outcome.getValue());
+      assertNull(outcome.getMissingParentToken());
+      assertTrue(outcome.isZeroRows());
+    }
+  }
+
+  @Test
+  public void testResolveSqlDefaultOutcomeResolvedValue() throws Exception {
+    OBDal dal = mock(OBDal.class);
+    Connection conn = mock(Connection.class);
+    PreparedStatement ps = mock(PreparedStatement.class);
+    ResultSet rs = mock(ResultSet.class);
+    VariablesSecureApp vars = mock(VariablesSecureApp.class);
+    DalConnectionProvider connProvider = mock(DalConnectionProvider.class);
+    Column adColumn = mock(Column.class);
+    when(adColumn.getDBColumnName()).thenReturn("M_Locator_ID");
+
+    when(dal.getConnection(false)).thenReturn(conn);
+    when(conn.prepareStatement(anyString())).thenReturn(ps);
+    when(ps.executeQuery()).thenReturn(rs);
+    when(rs.next()).thenReturn(true);
+    when(rs.getString(1)).thenReturn("LOC-99");
+
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+         MockedStatic<Utility> utilityMock = mockStatic(Utility.class)) {
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      NeoDefaultsSqlHelper.SqlDefaultOutcome outcome =
+          NeoDefaultsSqlHelper.resolveSQLDefaultWithOutcome(
+              "@SQL=SELECT id FROM t WHERE M_Warehouse_ID = '@M_Warehouse_ID@'",
+              vars, connProvider, "WIN-1", adColumn, null, true);
+
+      assertEquals("LOC-99", outcome.getValue());
+      assertNull("A resolved value has no diagnostic to report", outcome.getMissingParentToken());
+      assertFalse(outcome.isZeroRows());
+    }
+  }
+
+  @Test
+  public void testResolveSqlDefaultOutcomeSessionParamNeverBlamedOnMissingParentId()
+      throws Exception {
+    OBDal dal = mock(OBDal.class);
+    Connection conn = mock(Connection.class);
+    PreparedStatement ps = mock(PreparedStatement.class);
+    ResultSet rs = mock(ResultSet.class);
+    VariablesSecureApp vars = mock(VariablesSecureApp.class);
+    DalConnectionProvider connProvider = mock(DalConnectionProvider.class);
+    Column adColumn = mock(Column.class);
+    when(adColumn.getDBColumnName()).thenReturn("Description");
+
+    when(dal.getConnection(false)).thenReturn(conn);
+    when(conn.prepareStatement(anyString())).thenReturn(ps);
+    when(ps.executeQuery()).thenReturn(rs);
+    when(rs.next()).thenReturn(false);
+
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+         MockedStatic<Utility> utilityMock = mockStatic(Utility.class)) {
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      // "#AD_Org_ID" is a session param, not a parent token — even with parentId absent it
+      // must fall through to the zero-rows case, never missingParentToken.
+      NeoDefaultsSqlHelper.SqlDefaultOutcome outcome =
+          NeoDefaultsSqlHelper.resolveSQLDefaultWithOutcome(
+              "@SQL=SELECT name FROM ad_org WHERE ad_org_id = '@#AD_Org_ID@'",
+              vars, connProvider, "WIN-1", adColumn, null, false);
+
+      assertNull(outcome.getMissingParentToken());
+      assertTrue(outcome.isZeroRows());
+    }
+  }
+
+  @Test
+  public void testResolveSqlDefaultOutcomeSqlExceptionReturnsUnresolved() throws Exception {
+    OBDal dal = mock(OBDal.class);
+    Connection conn = mock(Connection.class);
+    VariablesSecureApp vars = mock(VariablesSecureApp.class);
+    DalConnectionProvider connProvider = mock(DalConnectionProvider.class);
+    Column adColumn = mock(Column.class);
+    when(adColumn.getDBColumnName()).thenReturn("M_Locator_ID");
+
+    when(dal.getConnection(false)).thenReturn(conn);
+    when(conn.prepareStatement(anyString())).thenThrow(new java.sql.SQLException("boom"));
+
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      NeoDefaultsSqlHelper.SqlDefaultOutcome outcome =
+          NeoDefaultsSqlHelper.resolveSQLDefaultWithOutcome(
+              "@SQL=SELECT id FROM t WHERE M_Warehouse_ID = '@M_Warehouse_ID@'",
+              vars, connProvider, "WIN-1", adColumn, null, false);
+
+      assertNull(outcome.getValue());
+      assertNull("An exception is not one of the two known-cause diagnoses — no attribution",
+          outcome.getMissingParentToken());
+      assertFalse(outcome.isZeroRows());
+    }
+  }
+
+  @Test
+  public void testResolveSqlDefaultRegressionUnaffectedByOutcomeDiagnostics() throws Exception {
+    // Pins resolveSQLDefault (the pre-existing 6-arg entry point used by every caller other
+    // than pass 1 of resolveDefaults) to still return just the plain value, unaffected by the
+    // new diagnostic machinery layered underneath it (ETP-4918).
+    OBDal dal = mock(OBDal.class);
+    Connection conn = mock(Connection.class);
+    PreparedStatement ps = mock(PreparedStatement.class);
+    ResultSet rs = mock(ResultSet.class);
+    VariablesSecureApp vars = mock(VariablesSecureApp.class);
+    DalConnectionProvider connProvider = mock(DalConnectionProvider.class);
+    Column adColumn = mock(Column.class);
+    when(adColumn.getDBColumnName()).thenReturn("M_Locator_ID");
+
+    when(dal.getConnection(false)).thenReturn(conn);
+    when(conn.prepareStatement(anyString())).thenReturn(ps);
+    when(ps.executeQuery()).thenReturn(rs);
+    when(rs.next()).thenReturn(false);
+
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+         MockedStatic<Utility> utilityMock = mockStatic(Utility.class)) {
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      String result = NeoDefaultsSqlHelper.resolveSQLDefault(
+          "@SQL=SELECT id FROM t WHERE M_Warehouse_ID = '@M_Warehouse_ID@'",
+          vars, connProvider, "WIN-1", adColumn, null);
+
+      assertNull(result);
+    }
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // appendSqlDefaultNote — via reflection (ETP-4918)
+  // ═══════════════════════════════════════════════════════════════════════════
+  //
+  // SqlDefaultOutcome's factory methods are private to NeoDefaultsSqlHelper, so each test
+  // below obtains a real instance by driving resolveSQLDefaultWithOutcome against a mocked
+  // JDBC layer — the same outcome appendSqlDefaultNote would actually receive in production.
+
+  private static final Class<?>[] APPEND_SQL_DEFAULT_NOTE_PARAMS =
+      new Class<?>[]{ JSONArray.class, String.class, NeoDefaultsSqlHelper.SqlDefaultOutcome.class };
+
+  @Test
+  public void testAppendSqlDefaultNoteMissingParentTokenNamesFieldAndAction() throws Exception {
+    OBDal dal = mock(OBDal.class);
+    Connection conn = mock(Connection.class);
+    PreparedStatement ps = mock(PreparedStatement.class);
+    ResultSet rs = mock(ResultSet.class);
+    VariablesSecureApp vars = mock(VariablesSecureApp.class);
+    DalConnectionProvider connProvider = mock(DalConnectionProvider.class);
+    Column adColumn = mock(Column.class);
+
+    when(dal.getConnection(false)).thenReturn(conn);
+    when(conn.prepareStatement(anyString())).thenReturn(ps);
+    when(ps.executeQuery()).thenReturn(rs);
+    when(rs.next()).thenReturn(false);
+
+    NeoDefaultsSqlHelper.SqlDefaultOutcome outcome;
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+         MockedStatic<Utility> utilityMock = mockStatic(Utility.class)) {
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      outcome = NeoDefaultsSqlHelper.resolveSQLDefaultWithOutcome(
+          "@SQL=SELECT id FROM M_Locator WHERE M_Warehouse_ID = '@M_Warehouse_ID@'",
+          vars, connProvider, "WIN-1", adColumn, null, false);
+    }
+
+    JSONArray notes = new JSONArray();
+    invokePrivate("appendSqlDefaultNote", APPEND_SQL_DEFAULT_NOTE_PARAMS,
+        notes, "storageBin", outcome);
+
+    assertEquals(1, notes.length());
+    String note = notes.getString(0);
+    assertTrue("Note must name the field", note.contains("storageBin"));
+    assertTrue("Note must name the missing token", note.contains("M_Warehouse_ID"));
+    assertTrue("Note must name the concrete action", note.contains("parentId"));
+  }
+
+  @Test
+  public void testAppendSqlDefaultNoteZeroRowsNamesFieldAndAction() throws Exception {
+    OBDal dal = mock(OBDal.class);
+    Connection conn = mock(Connection.class);
+    PreparedStatement ps = mock(PreparedStatement.class);
+    ResultSet rs = mock(ResultSet.class);
+    VariablesSecureApp vars = mock(VariablesSecureApp.class);
+    DalConnectionProvider connProvider = mock(DalConnectionProvider.class);
+    Column adColumn = mock(Column.class);
+
+    when(dal.getConnection(false)).thenReturn(conn);
+    when(conn.prepareStatement(anyString())).thenReturn(ps);
+    when(ps.executeQuery()).thenReturn(rs);
+    when(rs.next()).thenReturn(false);
+
+    NeoDefaultsSqlHelper.SqlDefaultOutcome outcome;
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+         MockedStatic<Utility> utilityMock = mockStatic(Utility.class)) {
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      // parentIdProvided=true forces the zero-rows branch even though the token is empty.
+      outcome = NeoDefaultsSqlHelper.resolveSQLDefaultWithOutcome(
+          "@SQL=SELECT id FROM M_Locator WHERE M_Warehouse_ID = '@M_Warehouse_ID@'",
+          vars, connProvider, "WIN-1", adColumn, null, true);
+    }
+
+    JSONArray notes = new JSONArray();
+    invokePrivate("appendSqlDefaultNote", APPEND_SQL_DEFAULT_NOTE_PARAMS,
+        notes, "storageBin", outcome);
+
+    assertEquals(1, notes.length());
+    String note = notes.getString(0);
+    assertTrue("Note must name the field", note.contains("storageBin"));
+    assertTrue("Note must state the concrete action", note.contains("Set this field explicitly"));
+  }
+
+  @Test
+  public void testAppendSqlDefaultNoteNullOutcomeAddsNothing() throws Exception {
+    JSONArray notes = new JSONArray();
+
+    invokePrivate("appendSqlDefaultNote", APPEND_SQL_DEFAULT_NOTE_PARAMS,
+        notes, "storageBin", null);
+
+    assertEquals("A field with no @SQL= default (null outcome) must never earn a note",
+        0, notes.length());
+  }
+
+  @Test
+  public void testAppendSqlDefaultNoteResolvedOutcomeAddsNothing() throws Exception {
+    OBDal dal = mock(OBDal.class);
+    Connection conn = mock(Connection.class);
+    PreparedStatement ps = mock(PreparedStatement.class);
+    ResultSet rs = mock(ResultSet.class);
+    VariablesSecureApp vars = mock(VariablesSecureApp.class);
+    DalConnectionProvider connProvider = mock(DalConnectionProvider.class);
+    Column adColumn = mock(Column.class);
+
+    when(dal.getConnection(false)).thenReturn(conn);
+    when(conn.prepareStatement(anyString())).thenReturn(ps);
+    when(ps.executeQuery()).thenReturn(rs);
+    when(rs.next()).thenReturn(true);
+    when(rs.getString(1)).thenReturn("LOC-99");
+
+    NeoDefaultsSqlHelper.SqlDefaultOutcome outcome;
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+         MockedStatic<Utility> utilityMock = mockStatic(Utility.class)) {
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      outcome = NeoDefaultsSqlHelper.resolveSQLDefaultWithOutcome(
+          "@SQL=SELECT id FROM M_Locator WHERE M_Warehouse_ID = '@M_Warehouse_ID@'",
+          vars, connProvider, "WIN-1", adColumn, null, true);
+    }
+
+    JSONArray notes = new JSONArray();
+    invokePrivate("appendSqlDefaultNote", APPEND_SQL_DEFAULT_NOTE_PARAMS,
+        notes, "storageBin", outcome);
+
+    assertEquals("A resolved value has nothing to explain — no note", 0, notes.length());
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // resolveDefaults — metadata.notes end-to-end (ETP-4918)
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  @Test
+  @SuppressWarnings("unchecked")
+  public void testResolveDefaultsSqlDefaultMissingParentTokenAddsNote() throws Exception {
+    OBDal dal = mock(OBDal.class);
+    OBCriteria<SFField> fieldCriteria = mock(OBCriteria.class);
+    SFField sfField = mock(SFField.class);
+    Column adColumn = mock(Column.class);
+    SFEntity sfEntity = mock(SFEntity.class);
+    OBContext obContext = mock(OBContext.class);
+    VariablesSecureApp vars = mock(VariablesSecureApp.class);
+    Entity dalEntity = mock(Entity.class);
+    Connection conn = mock(Connection.class);
+    PreparedStatement ps = mock(PreparedStatement.class);
+    ResultSet rs = mock(ResultSet.class);
+
+    when(sfEntity.getId()).thenReturn("sf-entity-1");
+    when(sfField.getADColumn()).thenReturn(adColumn);
+    // Readonly: the combo-fallback in applyDefaultWithComboFallback is gated out, so a null
+    // resolvedValue here means the field is genuinely absent — exactly the storageBin case.
+    when(sfField.isReadOnly()).thenReturn(true);
+    when(sfField.getDefaultValue()).thenReturn(null);
+    when(adColumn.getDBColumnName()).thenReturn("M_Locator_ID");
+    when(adColumn.getDefaultValue()).thenReturn(
+        "@SQL=SELECT M_Locator_ID FROM M_Locator WHERE M_Warehouse_ID = '@M_Warehouse_ID@'");
+    when(adColumn.isLinkToParentColumn()).thenReturn(false);
+    when(adColumn.isUseAutomaticSequence()).thenReturn(false);
+    when(fieldCriteria.add(any())).thenReturn(fieldCriteria);
+    when(fieldCriteria.list()).thenReturn(Collections.singletonList(sfField));
+    when(dal.createCriteria(SFField.class)).thenReturn(fieldCriteria);
+    when(dal.getConnection(false)).thenReturn(conn);
+    when(conn.prepareStatement(anyString())).thenReturn(ps);
+    when(ps.executeQuery()).thenReturn(rs);
+    when(rs.next()).thenReturn(false);
+
+    NeoContext ctx = NeoContext.builder()
+        .sfEntity(sfEntity)
+        .obContext(obContext)
+        .build();
+
+    try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
+         MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class);
+         MockedStatic<NeoCalloutService> calloutMock = mockStatic(NeoCalloutService.class);
+         MockedStatic<NeoDefaultsCascadeHelper> cascadeMock =
+             mockStatic(NeoDefaultsCascadeHelper.class);
+         MockedStatic<SequenceUtils> sequenceMock = mockStatic(SequenceUtils.class);
+         MockedStatic<Utility> utilityMock = mockStatic(Utility.class);
+         MockedStatic<DocTypeResolver> docTypeMock = mockStatic(DocTypeResolver.class)) {
+      obContextMock.when(OBContext::setAdminMode).thenAnswer(inv -> null);
+      obContextMock.when(OBContext::restorePreviousMode).thenAnswer(inv -> null);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      calloutMock.when(() -> NeoCalloutService.buildVars(obContext, null)).thenReturn(vars);
+      cascadeMock.when(() -> NeoDefaultsCascadeHelper.resolveDalEntity(sfEntity))
+          .thenReturn(dalEntity);
+      cascadeMock.when(() -> NeoDefaultsCascadeHelper
+          .resolvePropertyName(dalEntity, "M_Locator_ID"))
+          .thenReturn("storageBin");
+      sequenceMock.when(() -> SequenceUtils.isSequence(adColumn)).thenReturn(false);
+
+      // parentId omitted — the exact failure mode this feature exists to explain.
+      NeoResponse response = NeoDefaultsService.resolveDefaults(ctx, null);
+
+      assertEquals(200, response.getHttpStatus());
+      JSONObject defaults = response.getBody().getJSONObject("defaults");
+      assertFalse("storageBin must be absent, not silently defaulted",
+          defaults.has("storageBin"));
+
+      JSONObject metadata = response.getBody().getJSONObject("metadata");
+      assertEquals("unresolvedFields must stay untouched by this clean-null case (pinned)",
+          0, metadata.getJSONArray("unresolvedFields").length());
+      assertTrue("metadata.notes must be present", metadata.has("notes"));
+      JSONArray notes = metadata.getJSONArray("notes");
+      assertEquals(1, notes.length());
+      String note = notes.getString(0);
+      assertTrue(note.contains("storageBin"));
+      assertTrue(note.contains("M_Warehouse_ID"));
+      assertTrue(note.contains("parentId"));
+    }
+  }
+
+  @Test
+  @SuppressWarnings("unchecked")
+  public void testResolveDefaultsNoDefaultExpressionAddsNoNote() throws Exception {
+    // Regression guard (the one that matters most): a field with no default expression at
+    // all — the ordinary, overwhelmingly common case — must never earn a note. If this ever
+    // regresses, metadata.notes degrades into the vague noise it was designed to avoid.
+    OBDal dal = mock(OBDal.class);
+    OBCriteria<SFField> fieldCriteria = mock(OBCriteria.class);
+    SFField sfField = mock(SFField.class);
+    Column adColumn = mock(Column.class);
+    SFEntity sfEntity = mock(SFEntity.class);
+    OBContext obContext = mock(OBContext.class);
+    VariablesSecureApp vars = mock(VariablesSecureApp.class);
+    Entity dalEntity = mock(Entity.class);
+
+    when(sfEntity.getId()).thenReturn("sf-entity-1");
+    when(sfField.getADColumn()).thenReturn(adColumn);
+    when(sfField.isReadOnly()).thenReturn(true);
+    when(sfField.getDefaultValue()).thenReturn(null);
+    when(adColumn.getDBColumnName()).thenReturn("C_Reject_Reason_ID");
+    when(adColumn.getDefaultValue()).thenReturn(null);
+    when(adColumn.isUseAutomaticSequence()).thenReturn(false);
+    when(fieldCriteria.add(any())).thenReturn(fieldCriteria);
+    when(fieldCriteria.list()).thenReturn(Collections.singletonList(sfField));
+    when(dal.createCriteria(SFField.class)).thenReturn(fieldCriteria);
+
+    NeoContext ctx = NeoContext.builder()
+        .sfEntity(sfEntity)
+        .obContext(obContext)
+        .build();
+
+    try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
+         MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class);
+         MockedStatic<NeoCalloutService> calloutMock = mockStatic(NeoCalloutService.class);
+         MockedStatic<NeoDefaultsCascadeHelper> cascadeMock =
+             mockStatic(NeoDefaultsCascadeHelper.class);
+         MockedStatic<SequenceUtils> sequenceMock = mockStatic(SequenceUtils.class);
+         MockedStatic<Utility> utilityMock = mockStatic(Utility.class);
+         MockedStatic<DocTypeResolver> docTypeMock = mockStatic(DocTypeResolver.class);
+         MockedStatic<NeoSelectorService> selectorMock =
+             mockStatic(NeoSelectorService.class)) {
+      obContextMock.when(OBContext::setAdminMode).thenAnswer(inv -> null);
+      obContextMock.when(OBContext::restorePreviousMode).thenAnswer(inv -> null);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      calloutMock.when(() -> NeoCalloutService.buildVars(obContext, null)).thenReturn(vars);
+      cascadeMock.when(() -> NeoDefaultsCascadeHelper.resolveDalEntity(sfEntity))
+          .thenReturn(dalEntity);
+      cascadeMock.when(() -> NeoDefaultsCascadeHelper
+          .resolvePropertyName(dalEntity, "C_Reject_Reason_ID"))
+          .thenReturn("rejectReason");
+      sequenceMock.when(() -> SequenceUtils.isSequence(adColumn)).thenReturn(false);
+      utilityMock.when(() -> Utility.getPreference(vars, "C_Reject_Reason_ID", ""))
+          .thenReturn(null);
+      docTypeMock.when(() -> DocTypeResolver.resolveDefaultDocTypeId(adColumn, ctx))
+          .thenReturn(null);
+
+      NeoResponse response = NeoDefaultsService.resolveDefaults(ctx, null);
+
+      assertEquals(200, response.getHttpStatus());
+      assertFalse(response.getBody().getJSONObject("defaults").has("rejectReason"));
+      JSONObject metadata = response.getBody().getJSONObject("metadata");
+      assertFalse("No @SQL= default was ever attempted — metadata.notes must be absent",
+          metadata.has("notes"));
+    }
   }
 }
