@@ -121,12 +121,14 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private static final String FIELD_EMAIL = "email";
   private static final String FIELD_CLIENT_NAME = "clientName";
   private static final String FIELD_STATUS = "status";
+  private static final String FIELD_HTTP_STATUS = "httpStatus";
   private static final String FIELD_TOKEN = "token";
   private static final String FIELD_MESSAGE = "message";
   private static final String FIELD_CODE = "code";
   private static final String FIELD_USER_MESSAGE = "userMessage";
   private static final String FIELD_PASSWORD = "password";
   private static final String FIELD_SUCCESS = "success";
+  private static final String CODE_INVITATION_ERROR = "INVITATION_ERROR";
   private static final String FIELD_TIMESTAMP = "timestamp";
   private static final String FIELD_ACCOUNT = "account";
   private static final String FIELD_AUTH_METHOD = "authMethod";
@@ -220,6 +222,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   TenantPaywallService tenantPaywallService = new TenantPaywallService();
   TenantPlanService tenantPlanService = new TenantPlanService();
   HostedCheckoutService hostedCheckoutService = new HostedCheckoutService();
+  CompanyInvitationService companyInvitationService;
   private final TransactionalAuthEmailSender authEmailSender;
   private final EtendoGoSsoProviderRegistry ssoProviderRegistry;
 
@@ -244,6 +247,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       EtendoGoSsoProviderRegistry ssoProviderRegistry) {
     this.authEmailSender = authEmailSender;
     this.ssoProviderRegistry = ssoProviderRegistry;
+    this.companyInvitationService = new CompanyInvitationService(authEmailSender);
   }
 
   // --- HTTP method dispatchers ---
@@ -266,6 +270,10 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       handleEnvironments(request, response);
     } else if (isPath(path, "/login")) {
       handleEnvironmentLogin(request, response);
+    } else if (isPath(path, "/company-invitations/mine")) {
+      handleCompanyInvitationMine(request, response);
+    } else if (isPath(path, "/company-invitations/resolve")) {
+      handleCompanyInvitationResolve(request, response);
     } else if (path != null && path.startsWith("/checkout/sessions/")) {
       handleCheckoutStatus(request, response);
     } else {
@@ -299,6 +307,12 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       handleOnboarding(request, response);
     } else if (isPath(path, "/checkout/sessions")) {
       handleCheckoutSession(request, response);
+    } else if (isPath(path, "/company-invitations")) {
+      handleCompanyInvitationCreate(request, response);
+    } else if (isPath(path, "/company-invitations/accept")) {
+      handleCompanyInvitationAccept(request, response);
+    } else if (isPath(path, "/company-invitations/register-and-accept")) {
+      handleCompanyInvitationRegisterAndAccept(request, response);
     } else {
       writeError(response, HttpServletResponse.SC_NOT_FOUND, "Unknown endpoint: " + path);
     }
@@ -385,6 +399,148 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   }
 
   // --- Endpoint handlers ---
+
+  /**
+   * POST /sws/go/company-invitations
+   * Header: Authorization: Bearer <inviter token>
+   * Body: { "email": "recipient@example.com" }
+   */
+  private void handleCompanyInvitationCreate(HttpServletRequest request,
+      HttpServletResponse response) throws IOException {
+    JSONObject body;
+    try {
+      body = readJsonBody(request);
+    } catch (JSONException e) {
+      writeError(response, HttpServletResponse.SC_BAD_REQUEST, CODE_INVALID_REQUEST,
+          INVALID_JSON_BODY, INVALID_JSON_BODY);
+      return;
+    }
+    String email = body.optString(FIELD_EMAIL, "").trim();
+    String language = body.optString(FIELD_LANGUAGE, "").trim();
+    String requestOrigin = request.getHeader("Origin");
+    String origin = StringUtils.isBlank(requestOrigin)
+        ? PublicUrlResolver.resolveAppBaseUrl(request) : requestOrigin;
+    runWithAuthenticatedAccount(request, response, "create company invitation", account -> {
+      JSONObject result = companyInvitationService.createInvitation(account, email, origin, language);
+      if (result.optBoolean(FIELD_ERROR, false)) {
+        int httpStatus = result.optInt(FIELD_HTTP_STATUS, HttpServletResponse.SC_BAD_REQUEST);
+        writeError(response, httpStatus, result.optString(FIELD_CODE, CODE_INVITATION_ERROR),
+            result.optString(FIELD_MESSAGE, "Could not create invitation"),
+            result.optString(FIELD_MESSAGE, "Could not create invitation"));
+        return;
+      }
+      writeResponse(response, HttpServletResponse.SC_CREATED, result);
+    });
+  }
+
+  /**
+   * GET /sws/go/company-invitations/mine
+   * Header: Authorization: Bearer <account session token>
+   */
+  private void handleCompanyInvitationMine(HttpServletRequest request,
+      HttpServletResponse response) throws IOException {
+    runWithAuthenticatedAccount(request, response, "list company invitations", account -> {
+      JSONObject result = companyInvitationService.listInvitationsForAccount(account);
+      if (result.optBoolean(FIELD_ERROR, false)) {
+        int httpStatus = result.optInt(FIELD_HTTP_STATUS, HttpServletResponse.SC_UNAUTHORIZED);
+        writeError(response, httpStatus, result.optString("code", "AUTHENTICATION_REQUIRED"),
+            result.optString(FIELD_MESSAGE, "Authentication required"),
+            result.optString(FIELD_MESSAGE, "Authentication required"));
+        return;
+      }
+      writeResponse(response, HttpServletResponse.SC_OK, result);
+    });
+  }
+
+  /**
+   * GET /sws/go/company-invitations/resolve?token=<token>
+   */
+  private void handleCompanyInvitationResolve(HttpServletRequest request,
+      HttpServletResponse response) throws IOException {
+    String token = request.getParameter(FIELD_TOKEN);
+    try {
+      JSONObject result = companyInvitationService.resolveInvitation(token);
+      if (result.optBoolean(FIELD_ERROR, false)) {
+        int httpStatus = result.optInt(FIELD_HTTP_STATUS, HttpServletResponse.SC_BAD_REQUEST);
+        writeError(response, httpStatus, result.optString(FIELD_CODE, CODE_INVITATION_ERROR),
+            result.optString(FIELD_MESSAGE, "Could not resolve invitation"),
+            result.optString(FIELD_MESSAGE, "Could not resolve invitation"));
+        return;
+      }
+      writeResponse(response, HttpServletResponse.SC_OK, result);
+    } catch (Exception e) {
+      log.error("Error resolving company invitation", e);
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, CODE_INTERNAL_ERROR,
+          INTERNAL_ERROR, INTERNAL_ERROR);
+    }
+  }
+
+  /**
+   * POST /sws/go/company-invitations/accept
+   * Body: { "token": "..." }
+   */
+  private void handleCompanyInvitationAccept(HttpServletRequest request,
+      HttpServletResponse response) throws IOException {
+    JSONObject body;
+    try {
+      body = readJsonBody(request);
+    } catch (JSONException e) {
+      writeError(response, HttpServletResponse.SC_BAD_REQUEST, CODE_INVALID_REQUEST,
+          INVALID_JSON_BODY, INVALID_JSON_BODY);
+      return;
+    }
+    String token = body.optString(FIELD_TOKEN, "").trim();
+    String accountBearerToken = extractBearerToken(request);
+    try {
+      JSONObject result = companyInvitationService.acceptExistingAccount(token, accountBearerToken);
+      if (result.optBoolean(FIELD_ERROR, false)) {
+        int httpStatus = result.optInt(FIELD_HTTP_STATUS, HttpServletResponse.SC_BAD_REQUEST);
+        writeError(response, httpStatus, result.optString(FIELD_CODE, CODE_INVITATION_ERROR),
+            result.optString(FIELD_MESSAGE, "Could not accept invitation"),
+            result.optString(FIELD_MESSAGE, "Could not accept invitation"));
+        return;
+      }
+      writeResponse(response, HttpServletResponse.SC_OK, result);
+    } catch (Exception e) {
+      log.error("Error accepting company invitation", e);
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, CODE_INTERNAL_ERROR,
+          INTERNAL_ERROR, INTERNAL_ERROR);
+    }
+  }
+
+  /**
+   * POST /sws/go/company-invitations/register-and-accept
+   * Body: { "token": "...", "name": "...", "password": "..." }
+   */
+  private void handleCompanyInvitationRegisterAndAccept(HttpServletRequest request,
+      HttpServletResponse response) throws IOException {
+    JSONObject body;
+    try {
+      body = readJsonBody(request);
+    } catch (JSONException e) {
+      writeError(response, HttpServletResponse.SC_BAD_REQUEST, CODE_INVALID_REQUEST,
+          INVALID_JSON_BODY, INVALID_JSON_BODY);
+      return;
+    }
+    String token = body.optString(FIELD_TOKEN, "").trim();
+    String name = body.optString("name", "").trim();
+    String password = body.optString(FIELD_PASSWORD, "");
+    try {
+      JSONObject result = companyInvitationService.registerAndAccept(token, name, password);
+      if (result.optBoolean(FIELD_ERROR, false)) {
+        int httpStatus = result.optInt(FIELD_HTTP_STATUS, HttpServletResponse.SC_BAD_REQUEST);
+        writeError(response, httpStatus, result.optString(FIELD_CODE, CODE_INVITATION_ERROR),
+            result.optString(FIELD_MESSAGE, "Could not register and accept invitation"),
+            result.optString(FIELD_MESSAGE, "Could not register and accept invitation"));
+        return;
+      }
+      writeResponse(response, HttpServletResponse.SC_OK, result);
+    } catch (Exception e) {
+      log.error("Error registering and accepting company invitation", e);
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, CODE_INTERNAL_ERROR,
+          INTERNAL_ERROR, INTERNAL_ERROR);
+    }
+  }
 
   /**
    * POST /sws/go/register
