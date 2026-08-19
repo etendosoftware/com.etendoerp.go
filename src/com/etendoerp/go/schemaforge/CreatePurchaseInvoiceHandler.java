@@ -298,6 +298,12 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
 
     OBDal.getInstance().flush();
 
+    // ETP-4780: carry the per-line % Descuento (OrderLine.discount) into the invoice
+    // line's EM_Etgo_Discount field — the native process copies prices/taxes but not
+    // this EM_ extension column, so the generated invoice total drifted from the
+    // source purchase order. Shared with CreateDraftInvoiceHandler (ETP-4006).
+    getSupport().copyLineDiscountsFromOrder(invoice);
+
     InvoiceLineLinker.linkInvoiceLinesToExistingInouts(invoice.getId());
 
     OBDal.getInstance().flush();
@@ -430,6 +436,10 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
     proc.createInvoiceLinesFromDocumentLines(selectedLines, invoice, OrderLine.class);
 
     OBDal.getInstance().flush();
+
+    // ETP-4780: same discount copy as createFromOrder above — a receipt-originated
+    // invoice must not lose the % Descuento carried by the linked purchase order line.
+    getSupport().copyLineDiscountsFromOrder(invoice);
 
     InvoiceLineLinker.linkInvoiceLinesToExistingInouts(invoice.getId());
 

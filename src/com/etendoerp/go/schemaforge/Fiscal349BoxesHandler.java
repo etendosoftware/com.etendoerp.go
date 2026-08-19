@@ -21,6 +21,7 @@ import java.math.RoundingMode;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collection;
 import java.util.Date;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
@@ -146,8 +147,16 @@ class Fiscal349BoxesHandler extends AbstractFiscalHandler {
       summary.put("total" + e.getKey(), e.getValue().setScale(2, RoundingMode.HALF_UP).toString());
     }
 
+    // Per-invoice AEAT349 key (E/S/A/I), resolved separately for purchase/sales invoices
+    // against their respective tax rate sets, then merged — purch/sales invoice ids never
+    // overlap, so a plain putAll is safe. Lets the frontend split "origin" counts per
+    // operator key instead of aggregating solely by nifIva (ETP-4755).
+    Map<String, String> invoiceKeys = new HashMap<>(
+        resolveInvoiceKeys(purch, taxesPurchase, taxReport.getId()));
+    invoiceKeys.putAll(resolveInvoiceKeys(sales, taxesSales, taxReport.getId()));
+
     String    orgNif      = resolveOrgNif(orgId);
-    JSONArray invoicesArr = collectInvoices(purch, sales);
+    JSONArray invoicesArr = collectInvoices(purch, sales, invoiceKeys);
     JSONArray rectifArr   = collectRectifications(corrPurch, corrSales);
 
     JSONObject root = new JSONObject();
@@ -222,6 +231,24 @@ class Fiscal349BoxesHandler extends AbstractFiscalHandler {
     return (v != null ? v : BigDecimal.ZERO).setScale(2, RoundingMode.HALF_UP).toString();
   }
 
+  // Maps C_BPartner.EM_OBTIK_VIESStatus ('V'/'I'/'P'/null) to the 3 status strings the
+  // frontend's ViesBadge component understands (valid/pending/invalid). Matches the same
+  // 'V'/'I' vs.-everything-else convention already used in BusinessPartnerHandler.java and
+  // ContactsLocationAddressHandler.java for this same column.
+  private static String mapViesStatus(BusinessPartner bp) {
+    if (bp == null) {
+      return "pending";
+    }
+    String status = bp.getOBTIKVIESStatus();
+    if ("V".equals(status)) {
+      return "valid";
+    }
+    if ("I".equals(status)) {
+      return "invalid";
+    }
+    return "pending";
+  }
+
   // Package-private for unit testing of the pure data→JSON transformation logic.
   Map<String, BusinessPartner> loadBpMap(List<Map<String, Object>> rows) {
     List<String> bpIds = rows.stream()
@@ -259,6 +286,7 @@ class Fiscal349BoxesHandler extends AbstractFiscalHandler {
       op.put("name", name);
       op.put("key",  key != null ? key : "");
       op.put("base", base.setScale(2, RoundingMode.HALF_UP).toString());
+      op.put("vies", mapViesStatus(bp));
       arr.put(op);
       if (key != null && summaryByKey.containsKey(key)) {
         summaryByKey.put(key, summaryByKey.get(key).add(base));
@@ -267,24 +295,26 @@ class Fiscal349BoxesHandler extends AbstractFiscalHandler {
     return arr;
   }
 
-  JSONArray collectInvoices(Set<Invoice> purch, Set<Invoice> sales) throws Exception {
+  JSONArray collectInvoices(Set<Invoice> purch, Set<Invoice> sales,
+      Map<String, String> invoiceKeys) throws Exception {
     SimpleDateFormat sdf = new SimpleDateFormat("yyyy-MM-dd");
     JSONArray arr = new JSONArray();
     for (Invoice inv : purch) {
-      arr.put(buildInvoiceRow(inv, "Compra", sdf));
+      arr.put(buildInvoiceRow(inv, "Compra", sdf, invoiceKeys));
     }
     for (Invoice inv : sales) {
-      arr.put(buildInvoiceRow(inv, "Venta", sdf));
+      arr.put(buildInvoiceRow(inv, "Venta", sdf, invoiceKeys));
     }
     return arr;
   }
 
-  JSONObject buildInvoiceRow(Invoice inv, String type, SimpleDateFormat sdf)
-      throws Exception {
+  JSONObject buildInvoiceRow(Invoice inv, String type, SimpleDateFormat sdf,
+      Map<String, String> invoiceKeys) throws Exception {
     BusinessPartner bp   = inv.getBusinessPartner();
     BigDecimal      base = inv.getSummedLineAmount() != null
         ? inv.getSummedLineAmount().abs().setScale(2, RoundingMode.HALF_UP)
         : BigDecimal.ZERO;
+    String resolvedKey = invoiceKeys != null ? invoiceKeys.get(inv.getId()) : null;
     JSONObject row = new JSONObject();
     row.put("ref",    inv.getDocumentNo());
     row.put("date",   inv.getInvoiceDate() != null ? sdf.format(inv.getInvoiceDate()) : "");
@@ -292,7 +322,64 @@ class Fiscal349BoxesHandler extends AbstractFiscalHandler {
     row.put("party",  bp != null ? bp.getName() : "");
     row.put("nifIva", bp != null && bp.getTaxID() != null ? bp.getTaxID() : "");
     row.put("base",   base.toString());
+    row.put("key",    resolvedKey != null ? resolvedKey : "");
     return row;
+  }
+
+  /**
+   * Resolves the AEAT349 classification key (E/S/A/I) for each invoice in {@code invoices},
+   * mirroring the join {@link org.openbravo.module.aeat349.es.AEAT3492010ReportDao
+   * #getTaxBaseAmountPerBusinessPartner} uses to derive the key per-BusinessPartner, but
+   * grouped per-invoice instead — this method does not need that DAO's amount-summing or
+   * multi-currency conversion, only the classification key.
+   *
+   * <p>Edge case: an invoice could in principle have lines mapping to more than one key
+   * (the HQL groups by (invoice, key), so a single invoice can produce multiple result rows).
+   * This is a simplification for a rare case: whichever key has the most matching
+   * {@code InvoiceTax} lines for that invoice wins; on an exact tie, the alphabetically first
+   * key wins — the HQL's {@code order by ... trp.tributaryKey.name} guarantees rows for the
+   * same invoice arrive in ascending key order, so "first encountered" is deterministic rather
+   * than depending on undefined DB row-return order. A single invoice almost always maps to
+   * exactly one key in practice for this report.
+   *
+   * @return a map of invoice id -&gt; AEAT349 key ("E"/"S"/"A"/"I"); never null.
+   */
+  Map<String, String> resolveInvoiceKeys(Set<Invoice> invoices, Collection<TaxRate> taxRates,
+      String taxReportId) {
+    if (invoices == null || invoices.isEmpty() || taxRates == null || taxRates.isEmpty()) {
+      return new HashMap<>();
+    }
+    List<Object[]> rows = OBDal.getInstance().getSession()
+        .createQuery("select i.id, trp.tributaryKey.name, count(it.id) "
+            + "from InvoiceTax as it, Invoice i, FinancialMgmtTaxRate tr, "
+            + "OBTL_Tax_Parameter tp, OBTL_Tax_Report_Parameter trp "
+            + "where i.id = it.invoice "
+            + "  and tr.id = it.tax "
+            + "  and tp.tax = tr.id "
+            + "  and trp.id = tp.taxReportParameter "
+            + "  and trp.taxReportGroup.taxReport.id = :taxReportId "
+            + "  and it.invoice in :invoices "
+            + "  and it.tax in :taxRates "
+            + "group by i.id, trp.tributaryKey.name "
+            + "order by i.id, trp.tributaryKey.name", Object[].class)
+        .setParameter("taxReportId", taxReportId)
+        .setParameterList("invoices", invoices)
+        .setParameterList("taxRates", taxRates)
+        .list();
+
+    Map<String, String> keyByInvoice   = new HashMap<>();
+    Map<String, Long>   lineCountByInv = new HashMap<>();
+    for (Object[] row : rows) {
+      String invId = (String) row[0];
+      String key   = (String) row[1];
+      Long   count = (Long)   row[2];
+      Long prevCount = lineCountByInv.get(invId);
+      if (prevCount == null || count > prevCount) {
+        lineCountByInv.put(invId, count);
+        keyByInvoice.put(invId, key);
+      }
+    }
+    return keyByInvoice;
   }
 
   // ── generate ──────────────────────────────────────────────────────
@@ -310,15 +397,51 @@ class Fiscal349BoxesHandler extends AbstractFiscalHandler {
 
     String yearId    = periods.get(0).getYear().getId();
     String periodIds = periods.stream().map(Period::getId).collect(Collectors.joining(","));
-    String filename  = "349_" + period + "_" + year;
+    String filename  = resolveFileName(request, period, year);
 
+    Map<String, String> inputParams = buildGenerateInputParams(request, orgId, filename);
+
+    OBTL_TaxReport_I report = (OBTL_TaxReport_I)
+        Class.forName(taxReport.getJavaClassName()).getDeclaredConstructor().newInstance();
+
+    HashMap<String, Object> result = report.generateElectronicFile(
+        orgId, taxReport.getId(), acctSchema.getId(), yearId, periodIds, inputParams);
+    writeGeneratedFile(result, filename + ".349", response);
+  }
+
+  // FileName: request param wins when provided, else fall back to the locally-computed default.
+  private String resolveFileName(HttpServletRequest request, String period, int year) {
+    String requestedFileName = request.getParameter("fileName");
+    if (requestedFileName != null && !requestedFileName.isEmpty()) {
+      return requestedFileName;
+    }
+    return "349_" + period + "_" + year;
+  }
+
+  // Extracted from handleGenerate to keep its cognitive complexity within budget.
+  private Map<String, String> buildGenerateInputParams(HttpServletRequest request, String orgId,
+      String filename) {
     Map<String, String> inputParams = new HashMap<>();
     inputParams.put("FileName", filename);
-    // Required: generateLine1 calls inputParams.get("Substitutive").equals("Y") — NPE if absent.
-    inputParams.put("Substitutive", "N");
-    // Phone and Contact: AEAT3492010Report checks constantParameters first (TaxReport config),
-    // then falls back to inputParams. Query params override; fall back to AD_OrgInformation /
-    // current user so generation works even without TaxReport pre-configuration.
+
+    // Substitutive/Navarra/Guipuzcoa are checkbox parameters: AEAT3492010Report's generateLine1
+    // calls inputParams.get("Substitutive").equals("Y") — NPE if the key is absent — so all three
+    // must ALWAYS be present in the map, "Y" or "N", mirroring classic's CHECK-type convention
+    // (OBTL_TaxReportLauncher#generateFile always writes CHECK params regardless of value).
+    inputParams.put("Substitutive", "Y".equals(request.getParameter("substitutive")) ? "Y" : "N");
+    inputParams.put("Navarra",      "Y".equals(request.getParameter("navarra"))      ? "Y" : "N");
+    inputParams.put("Guipuzcoa",    "Y".equals(request.getParameter("guipuzcoa"))    ? "Y" : "N");
+
+    applyContactParams(request, orgId, inputParams);
+    applyOptionalTextParams(request, inputParams);
+    return inputParams;
+  }
+
+  // Phone and Contact: AEAT3492010Report checks constantParameters first (TaxReport config),
+  // then falls back to inputParams. Query params override; fall back to AD_OrgInformation /
+  // current user so generation works even without TaxReport pre-configuration.
+  private void applyContactParams(HttpServletRequest request, String orgId,
+      Map<String, String> inputParams) {
     String phone   = request.getParameter("phone");
     String contact = request.getParameter("contact");
     if (phone == null || phone.isEmpty()) {
@@ -329,13 +452,20 @@ class Fiscal349BoxesHandler extends AbstractFiscalHandler {
     }
     if (phone   != null && !phone.isEmpty())   inputParams.put("Phone",   phone);
     if (contact != null && !contact.isEmpty()) inputParams.put("Contact", contact);
+  }
 
-    OBTL_TaxReport_I report = (OBTL_TaxReport_I)
-        Class.forName(taxReport.getJavaClassName()).getDeclaredConstructor().newInstance();
-
-    HashMap<String, Object> result = report.generateElectronicFile(
-        orgId, taxReport.getId(), acctSchema.getId(), yearId, periodIds, inputParams);
-    writeGeneratedFile(result, filename + ".349", response);
+  // FormerStatement/RepresentativeTaxId are TEXT parameters — classic omits empty TEXT
+  // parameters from inputParams entirely (OBTL_TaxReportLauncher#generateFile), so mirror
+  // that here rather than sending an empty string.
+  private void applyOptionalTextParams(HttpServletRequest request, Map<String, String> inputParams) {
+    String formerStatement     = request.getParameter("formerStatement");
+    String representativeTaxId = request.getParameter("representativeTaxId");
+    if (formerStatement != null && !formerStatement.isEmpty()) {
+      inputParams.put("FormerStatement", formerStatement);
+    }
+    if (representativeTaxId != null && !representativeTaxId.isEmpty()) {
+      inputParams.put("RepresentativeTaxId", representativeTaxId);
+    }
   }
 
   // ── resolution helpers ────────────────────────────────────────────
