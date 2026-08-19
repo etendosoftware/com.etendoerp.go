@@ -470,6 +470,158 @@ class NeoDisplayLogicHelperTest {
       assertTrue(parsed.has("context"));
       assertTrue(parsed.has("other"));
     }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // ETP-4914: Boolean/Number values must serialize as unquoted JS literals,
+    // not as pre-stringified quoted JS strings.
+    //
+    // Root cause: classic Etendo's DynamicExpressionParser compiles a Yes/No
+    // AD_Field's displayLogic/readOnlyLogic clause (e.g. @IsDepreciated@='Y')
+    // into a JS comparison against the JS boolean literal `true`
+    // (currentValues.depreciate === true). Pre-stringifying every value with
+    // val.toString() before handing it to JSONObject.put made a JSON `true`
+    // render as the quoted JS string "true", so "true" === true was always
+    // false, silently breaking every boolean-valued display/readOnly-logic
+    // comparison in NEO Headless (confirmed live for the Assets window's
+    // Project field, whose displayLogic includes `@IsDepreciated@='Y'`).
+    // ─────────────────────────────────────────────────────────────────────────
+
+    @Test
+    @DisplayName("ETP-4914: a Boolean true value renders as the unquoted JS literal true, "
+        + "not the quoted string \"true\"")
+    void booleanTrueRendersAsUnquotedJsLiteral() {
+      Map<String, Object> map = new HashMap<>();
+      map.put("depreciate", Boolean.TRUE);
+
+      String result = NeoDisplayLogicHelper.buildJsObjectPreamble("currentValues", map, false);
+
+      assertEquals("var currentValues = {\"depreciate\":true};", result);
+    }
+
+    @Test
+    @DisplayName("ETP-4914: a Boolean false value renders as the unquoted JS literal false, "
+        + "not the quoted string \"false\"")
+    void booleanFalseRendersAsUnquotedJsLiteral() {
+      Map<String, Object> map = new HashMap<>();
+      map.put("depreciate", Boolean.FALSE);
+
+      String result = NeoDisplayLogicHelper.buildJsObjectPreamble("currentValues", map, false);
+
+      assertEquals("var currentValues = {\"depreciate\":false};", result);
+    }
+
+    @Test
+    @DisplayName("ETP-4914: a String value still renders quoted (no regression on string entries)")
+    void stringValueStillRendersQuoted() {
+      Map<String, Object> map = new HashMap<>();
+      map.put("documentNo", "DOC-001");
+
+      String result = NeoDisplayLogicHelper.buildJsObjectPreamble("currentValues", map, false);
+
+      assertEquals("var currentValues = {\"documentNo\":\"DOC-001\"};", result);
+    }
+
+    @Test
+    @DisplayName("ETP-4914: a numeric value renders as an unquoted numeric literal")
+    void numericValueRendersUnquoted() {
+      Map<String, Object> map = new HashMap<>();
+      map.put("amount", 42);
+
+      String result = NeoDisplayLogicHelper.buildJsObjectPreamble("currentValues", map, false);
+
+      assertEquals("var currentValues = {\"amount\":42};", result);
+    }
+
+    @Test
+    @DisplayName("ETP-4914: a BigDecimal value renders as an unquoted numeric literal")
+    void bigDecimalValueRendersUnquoted() {
+      Map<String, Object> map = new HashMap<>();
+      map.put("amount", new java.math.BigDecimal("100.50"));
+
+      String result = NeoDisplayLogicHelper.buildJsObjectPreamble("currentValues", map, false);
+
+      assertTrue(result.startsWith("var currentValues = {\"amount\":100.5"),
+          "BigDecimal must render as a bare numeric literal, not a quoted string: " + result);
+      assertFalse(result.contains("\"100.5"),
+          "BigDecimal must not be rendered as a quoted string: " + result);
+    }
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // ETP-4914 regression: boolean-valued displayLogic/readOnlyLogic comparisons
+  //
+  // End-to-end reproduction (real Rhino engine, no mocked eval result) of the
+  // exact JS shape DynamicExpressionParser compiles a Yes/No field comparison
+  // into: `currentValues.<prop> === true`. Before the fix, buildJsObjectPreamble
+  // stringified Boolean.TRUE into the quoted JS string "true", so this
+  // expression was ALWAYS false regardless of the actual field value -- this
+  // test would have failed (asserted true, got false) against the pre-fix code.
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  @Nested
+  @DisplayName("ETP-4914: boolean currentValues comparison against JS literal true")
+  class BooleanCurrentValuesComparisonRegressionTests {
+
+    @Test
+    @DisplayName("evaluateExpression returns true when a JSON boolean true current value is "
+        + "compared with === true, exactly as DynamicExpressionParser compiles a Yes/No field "
+        + "displayLogic clause")
+    void trueBooleanCurrentValueMatchesStrictEqualityToTrue() throws Exception {
+      // Use the real Rhino engine instead of the class-level mock so this test exercises actual
+      // JS evaluation of the generated preamble, not a canned result.
+      scriptEngineMock.when(OBScriptEngine::getInstance).thenCallRealMethod();
+
+      Tab tab = mock(Tab.class);
+      Field field = mock(Field.class);
+      when(field.getName()).thenReturn("depreciate");
+
+      Map<String, Object> currentValues = new HashMap<>();
+      currentValues.put("depreciate", Boolean.TRUE);
+      Map<String, Object> evalContext = new HashMap<>();
+      evalContext.put("currentValues", currentValues);
+
+      try (MockedConstruction<DynamicExpressionParser> parserMock = mockConstruction(
+          DynamicExpressionParser.class,
+          (mock, context) -> {
+            when(mock.getJSExpression()).thenReturn("currentValues.depreciate === true");
+            when(mock.getSessionAttributes()).thenReturn(Collections.emptyList());
+          })) {
+        boolean result = NeoDisplayLogicHelper.evaluateExpression(
+            "@IsDepreciated@='Y'", tab, field, evalContext);
+
+        assertTrue(result,
+            "ETP-4914: currentValues.depreciate === true must evaluate true when depreciate is "
+                + "the JSON boolean true -- pre-fix, buildJsObjectPreamble stringified it into the "
+                + "quoted JS string \"true\", making this comparison always false");
+      }
+    }
+
+    @Test
+    @DisplayName("evaluateExpression returns false when the boolean current value is false")
+    void falseBooleanCurrentValueDoesNotMatchStrictEqualityToTrue() throws Exception {
+      scriptEngineMock.when(OBScriptEngine::getInstance).thenCallRealMethod();
+
+      Tab tab = mock(Tab.class);
+      Field field = mock(Field.class);
+      when(field.getName()).thenReturn("depreciate");
+
+      Map<String, Object> currentValues = new HashMap<>();
+      currentValues.put("depreciate", Boolean.FALSE);
+      Map<String, Object> evalContext = new HashMap<>();
+      evalContext.put("currentValues", currentValues);
+
+      try (MockedConstruction<DynamicExpressionParser> parserMock = mockConstruction(
+          DynamicExpressionParser.class,
+          (mock, context) -> {
+            when(mock.getJSExpression()).thenReturn("currentValues.depreciate === true");
+            when(mock.getSessionAttributes()).thenReturn(Collections.emptyList());
+          })) {
+        boolean result = NeoDisplayLogicHelper.evaluateExpression(
+            "@IsDepreciated@='Y'", tab, field, evalContext);
+
+        assertFalse(result);
+      }
+    }
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
