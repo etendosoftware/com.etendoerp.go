@@ -343,12 +343,15 @@ public class NeoAttachmentsHelperTest {
   }
 
   /**
-   * Verifies the attachment marked as the record's main document is excluded
-   * from the generic "Adjuntos" list — it belongs to the sidebar/preview only.
+   * Verifies the attachment marked as the record's main document is included
+   * in the generic "Adjuntos" list alongside every other attachment — the
+   * Attachments tab and the sidebar/preview must show the same underlying
+   * files (ETP-4855 Error 4: a file attached from the preview must also be
+   * visible in the Attachments tab).
    */
   @Test
   @SuppressWarnings("unchecked")
-  public void handleListExcludesAttachmentMarkedAsMain() throws Exception {
+  public void handleListIncludesAttachmentMarkedAsMain() throws Exception {
     OBDal dal = mock(OBDal.class);
     stubTableAndMainLookup(dal, "TABLE1", "ATT-MAIN");
 
@@ -365,8 +368,9 @@ public class NeoAttachmentsHelperTest {
       NeoResponse response = NeoAttachmentsHelper.handleList("C_Order", "REC1");
 
       assertEquals(200, response.getHttpStatus());
-      assertEquals(1, response.getBody().getJSONArray("items").length());
-      assertEquals("ATT-OTHER", response.getBody().getJSONArray("items").getJSONObject(0).getString("id"));
+      assertEquals(2, response.getBody().getJSONArray("items").length());
+      assertEquals("ATT-MAIN", response.getBody().getJSONArray("items").getJSONObject(0).getString("id"));
+      assertEquals("ATT-OTHER", response.getBody().getJSONArray("items").getJSONObject(1).getString("id"));
     }
   }
 
@@ -505,13 +509,14 @@ public class NeoAttachmentsHelperTest {
 
 
   /**
-   * Verifies the zip built by bulk-download excludes whichever attachment is
-   * marked as the record's main document — it already has its own dedicated
-   * download button in the preview.
+   * Verifies the zip built by bulk-download includes whichever attachment is
+   * marked as the record's main document alongside every other attachment —
+   * omitting it would silently download fewer files than the Attachments
+   * tab's own list shows (ETP-4855 Error 4).
    */
   @Test
   @SuppressWarnings("unchecked")
-  public void handleDownloadAllExcludesAttachmentMarkedAsMain() throws Exception {
+  public void handleDownloadAllIncludesAttachmentMarkedAsMain() throws Exception {
     HttpServletResponse response = mock(HttpServletResponse.class);
     when(response.getOutputStream()).thenReturn(
         new javax.servlet.ServletOutputStream() {
@@ -540,7 +545,7 @@ public class NeoAttachmentsHelperTest {
       NeoAttachmentsHelper.handleDownloadAll("C_Order", "REC1", response);
 
       verify(aim, times(1)).download(org.mockito.ArgumentMatchers.eq("ATT-OTHER"), any());
-      verify(aim, never()).download(org.mockito.ArgumentMatchers.eq("ATT-MAIN"), any());
+      verify(aim, times(1)).download(org.mockito.ArgumentMatchers.eq("ATT-MAIN"), any());
       verify(response).setStatus(HttpServletResponse.SC_OK);
 
       java.util.Set<String> zippedNames = new java.util.HashSet<>();
@@ -551,7 +556,9 @@ public class NeoAttachmentsHelperTest {
           zippedNames.add(entry.getName());
         }
       }
-      assertEquals(Collections.singleton("note.pdf"), zippedNames);
+      assertEquals(
+          new java.util.HashSet<>(Arrays.asList("supplier-invoice.pdf", "note.pdf")),
+          zippedNames);
     }
   }
 

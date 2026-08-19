@@ -108,9 +108,12 @@ public final class NeoAttachmentsHelper {
   // ── List ────────────────────────────────────────────────────────────────────
 
   /**
-   * Lists attachments bound to the given record, excluding whichever one is
-   * currently marked as the record's "main" document (see {@link #handleGetMain})
-   * — that one belongs to the sidebar/preview, not the generic attachments list.
+   * Lists every attachment bound to the given record, including whichever one
+   * is currently marked as the record's "main" document (see
+   * {@link #handleGetMain}) — the Attachments tab and the sidebar/preview show
+   * the same underlying files, so the marked one must appear in both (ETP-4855
+   * Error 4: a file attached from the preview must also be visible in the
+   * Attachments tab, not hidden from it).
    *
    * @param tableName the AD_Table.name (case-insensitive, e.g. {@code "C_Order"})
    * @param recordId  the record's primary key (string; all AD IDs are VARCHAR)
@@ -122,7 +125,6 @@ public final class NeoAttachmentsHelper {
     }
     try {
       String tableId = resolveTableId(tableName);
-      Set<String> mainIds = findMainAttachmentIds(tableId, recordId);
 
       OBCriteria<Attachment> criteria = OBDal.getInstance().createCriteria(Attachment.class);
       criteria.add(Restrictions.eq(Attachment.PROPERTY_TABLE + ".id", tableId));
@@ -133,9 +135,6 @@ public final class NeoAttachmentsHelper {
 
       JSONArray items = new JSONArray();
       for (Attachment attachment : criteria.list()) {
-        if (mainIds.contains(attachment.getId())) {
-          continue;
-        }
         items.put(toAttachmentJson(attachment));
       }
       JSONObject body = new JSONObject();
@@ -402,10 +401,10 @@ public final class NeoAttachmentsHelper {
   // ── Download (zip of all attachments for a record) ──────────────────────────
 
   /**
-   * Streams all of a record's attachments as a single zip file, excluding
-   * whichever one is marked as the record's main document — that one already
-   * has its own dedicated download button in the preview, no need to duplicate
-   * it here.
+   * Streams all of a record's attachments as a single zip file, including
+   * whichever one is marked as the record's main document — it now appears
+   * in the Attachments tab's own list (see {@link #handleList}), so omitting
+   * it here would silently download fewer files than the tab shows.
    *
    * @param tableName the AD_Table.name (case-insensitive)
    * @param recordId  the record's primary key
@@ -420,7 +419,6 @@ public final class NeoAttachmentsHelper {
     }
     try {
       String tableId = resolveTableId(tableName);
-      Set<String> mainIds = findMainAttachmentIds(tableId, recordId);
 
       OBCriteria<Attachment> criteria = OBDal.getInstance().createCriteria(Attachment.class);
       criteria.add(Restrictions.eq(Attachment.PROPERTY_TABLE + ".id", tableId));
@@ -431,9 +429,6 @@ public final class NeoAttachmentsHelper {
       ByteArrayOutputStream buffer = new ByteArrayOutputStream();
       try (ZipOutputStream zip = new ZipOutputStream(buffer)) {
         for (Attachment attachment : criteria.list()) {
-          if (mainIds.contains(attachment.getId())) {
-            continue;
-          }
           ByteArrayOutputStream fileBuffer = new ByteArrayOutputStream();
           aim.download(attachment.getId(), fileBuffer);
           zip.putNextEntry(new ZipEntry(attachment.getName()));
