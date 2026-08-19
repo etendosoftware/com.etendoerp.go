@@ -19,6 +19,7 @@ package com.etendoerp.go.schemaforge;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
@@ -48,8 +49,11 @@ import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.datamodel.Column;
 import org.openbravo.model.ad.datamodel.Table;
+import org.openbravo.model.ad.ui.Window;
 
+import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFField;
+import com.etendoerp.go.schemaforge.data.SFSpec;
 import com.etendoerp.go.schemaforge.selector.meta.SelectorMeta;
 import com.etendoerp.go.schemaforge.selector.policy.NeoSelectorPolicy;
 
@@ -553,5 +557,135 @@ class NeoSelectorServiceTest {
         String.class, String.class, Map.class);
     m.setAccessible(true);
     m.invoke(null, meta, "", 20, 0, "org-1", null, contextParams);
+  }
+
+  // --------------------------------------------------------------------
+  // resolveSourceWindowId / withSourceEntityName — ETP-4888. SOURCE_WINDOW_ID_PARAM
+  // is the extra context param InvoiceLineTaxSifSelectorPolicy needs to scope
+  // itself to ONE specific window instance (sales-invoice/167, purchase-invoice/183),
+  // since SOURCE_ENTITY_NAME_PARAM alone ("lines") is shared by unrelated windows'
+  // detail tabs. Both methods are private static and invoked via reflection, same
+  // convention as findFieldByColumnName/findFieldByPropertyName above.
+  // --------------------------------------------------------------------
+
+  private static final String WINDOW_ID_167 = "167";
+
+  private static String invokeResolveSourceWindowId(SFEntity sourceEntity) throws Exception {
+    Method m = NeoSelectorService.class.getDeclaredMethod("resolveSourceWindowId", SFEntity.class);
+    m.setAccessible(true);
+    return (String) m.invoke(null, sourceEntity);
+  }
+
+  @SuppressWarnings("unchecked")
+  private static Map<String, String> invokeWithSourceEntityName(Map<String, String> contextParams,
+      SFEntity sourceEntity) throws Exception {
+    Method m = NeoSelectorService.class.getDeclaredMethod("withSourceEntityName", Map.class, SFEntity.class);
+    m.setAccessible(true);
+    return (Map<String, String>) m.invoke(null, contextParams, sourceEntity);
+  }
+
+  @Test
+  @DisplayName("resolveSourceWindowId resolves the AD_Window_Id through the SFEntity -> SFSpec -> AD_Window chain")
+  void testResolveSourceWindowIdResolvesChain() throws Exception {
+    SFEntity entity = mock(SFEntity.class);
+    SFSpec spec = mock(SFSpec.class);
+    Window window = mock(Window.class);
+    when(entity.getETGOSFSpec()).thenReturn(spec);
+    when(spec.getADWindow()).thenReturn(window);
+    when(window.getId()).thenReturn(WINDOW_ID_167);
+
+    assertEquals(WINDOW_ID_167, invokeResolveSourceWindowId(entity));
+  }
+
+  @Test
+  @DisplayName("resolveSourceWindowId returns null when the entity's spec is null (e.g. a process-only spec)")
+  void testResolveSourceWindowIdNullSpec() throws Exception {
+    SFEntity entity = mock(SFEntity.class);
+    when(entity.getETGOSFSpec()).thenReturn(null);
+
+    assertNull(invokeResolveSourceWindowId(entity));
+  }
+
+  @Test
+  @DisplayName("resolveSourceWindowId returns null when the spec has no linked window")
+  void testResolveSourceWindowIdNullWindow() throws Exception {
+    SFEntity entity = mock(SFEntity.class);
+    SFSpec spec = mock(SFSpec.class);
+    when(entity.getETGOSFSpec()).thenReturn(spec);
+    when(spec.getADWindow()).thenReturn(null);
+
+    assertNull(invokeResolveSourceWindowId(entity));
+  }
+
+  @Test
+  @DisplayName("resolveSourceWindowId swallows any exception and returns null (never throws)")
+  void testResolveSourceWindowIdSwallowsException() throws Exception {
+    SFEntity entity = mock(SFEntity.class);
+    when(entity.getETGOSFSpec()).thenThrow(new RuntimeException("model not mapped"));
+
+    assertNull(invokeResolveSourceWindowId(entity));
+  }
+
+  @Test
+  @DisplayName("withSourceEntityName augments contextParams with BOTH source entity name and window id when resolvable")
+  void testWithSourceEntityNameAddsBothKeys() throws Exception {
+    SFEntity entity = mock(SFEntity.class);
+    when(entity.getName()).thenReturn("lines");
+    SFSpec spec = mock(SFSpec.class);
+    Window window = mock(Window.class);
+    when(entity.getETGOSFSpec()).thenReturn(spec);
+    when(spec.getADWindow()).thenReturn(window);
+    when(window.getId()).thenReturn(WINDOW_ID_167);
+
+    Map<String, String> ctx = new HashMap<>();
+    Map<String, String> result = invokeWithSourceEntityName(ctx, entity);
+
+    assertEquals("lines", result.get(NeoSelectorService.SOURCE_ENTITY_NAME_PARAM));
+    assertEquals(WINDOW_ID_167, result.get(NeoSelectorService.SOURCE_WINDOW_ID_PARAM));
+  }
+
+  @Test
+  @DisplayName("withSourceEntityName adds ONLY the entity name (no window key) when the window cannot be resolved")
+  void testWithSourceEntityNameOmitsWindowIdWhenUnresolvable() throws Exception {
+    SFEntity entity = mock(SFEntity.class);
+    when(entity.getName()).thenReturn("movementLine");
+    when(entity.getETGOSFSpec()).thenReturn(null);
+
+    Map<String, String> result = invokeWithSourceEntityName(new HashMap<>(), entity);
+
+    assertEquals("movementLine", result.get(NeoSelectorService.SOURCE_ENTITY_NAME_PARAM));
+    assertFalse(result.containsKey(NeoSelectorService.SOURCE_WINDOW_ID_PARAM));
+  }
+
+  @Test
+  @DisplayName("withSourceEntityName returns the original contextParams unchanged when sourceEntity is null")
+  void testWithSourceEntityNameNullEntityReturnsOriginal() throws Exception {
+    Map<String, String> ctx = new HashMap<>();
+    ctx.put("foo", "bar");
+
+    Map<String, String> result = invokeWithSourceEntityName(ctx, null);
+
+    assertSame(ctx, result);
+  }
+
+  @Test
+  @DisplayName("withSourceEntityName does NOT mutate the caller's original map (defensive copy)")
+  void testWithSourceEntityNameDoesNotMutateCallerMap() throws Exception {
+    SFEntity entity = mock(SFEntity.class);
+    when(entity.getName()).thenReturn("lines");
+    SFSpec spec = mock(SFSpec.class);
+    Window window = mock(Window.class);
+    when(entity.getETGOSFSpec()).thenReturn(spec);
+    when(spec.getADWindow()).thenReturn(window);
+    when(window.getId()).thenReturn(WINDOW_ID_167);
+
+    Map<String, String> original = new HashMap<>();
+    original.put("existing", "value");
+
+    Map<String, String> result = invokeWithSourceEntityName(original, entity);
+
+    assertEquals(1, original.size());
+    assertFalse(original.containsKey(NeoSelectorService.SOURCE_ENTITY_NAME_PARAM));
+    assertNotEquals(original, result);
   }
 }

@@ -139,6 +139,9 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
    * Adjusts grandTotalAmount / outstandingAmount for draft invoices with a total discount, and
    * injects {@code tbaiSyncEstado} (latest sync status from {@code tbai_syncinvoice}) into every
    * record so the frontend can display it without a separate inSet GET request to the TBAI spec.
+   * In detail view, also injects {@code aeatsiiFacturaId} / {@code tbaiSyncInvoiceId} /
+   * {@code invoiceVerifactuId} (see {@link SifSubRecordAttachments}) so the SIF tab's Adjuntos
+   * sections can list/download the fiscal XML attached to each sub-record (ETP-4888).
    */
   @Override
   public NeoResponse afterHandle(NeoContext context) {
@@ -181,6 +184,7 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
         enrichHasRectifications(rec, context.getRecordId());
         InvoiceExemptTaxes.enrich(rec, context.getRecordId());
         enrichLinkedShipments(rec, context.getRecordId());
+        SifSubRecordAttachments.enrich(rec, context.getRecordId());
       }
       TbaiSyncStatusInjector.inject(dataArr);
       return NeoResponse.ok(body);

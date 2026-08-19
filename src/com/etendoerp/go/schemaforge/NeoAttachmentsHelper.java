@@ -409,17 +409,47 @@ public final class NeoAttachmentsHelper {
    * it is returned unchanged; otherwise the first active STD tab is selected
    * (lowest tabLevel, then lowest sequenceNumber).
    *
+   * <p>Some tables (e.g. read-only satellite sub-records embedded inside another
+   * window, such as {@code etvfac_c_invoice_verifactu} or {@code aeatsii_facturas})
+   * have no {@code STD} tab of their own at all — every {@code AD_Tab} row for them
+   * is a non-{@code STD} pattern (typically {@code RO}). When the {@code STD}-only
+   * lookup finds nothing, this falls back to any active tab for the table (same
+   * ordering), since tab resolution here only exists to identify the table for
+   * {@link AttachImplementationManager} — it is not an authorization check (see
+   * {@code docs/adr/0003-attachment-authorization.md}, still "Proposed"). Tables
+   * that already resolve via a genuine {@code STD} tab keep that exact behavior;
+   * the fallback only ever engages when the {@code STD}-only lookup is empty.</p>
+   *
    * @param tableId   the AD_Table.id
    * @param tabIdHint optional client-provided tab id
-   * @return the AD_Tab.id, or {@code null} if no suitable tab exists
+   * @return the AD_Tab.id, or {@code null} if the table has no active tab at all
    */
   static String resolveTabId(String tableId, String tabIdHint) {
     if (StringUtils.isNotBlank(tabIdHint)) {
       return tabIdHint;
     }
+    String stdTabId = findFirstActiveTabId(tableId, true);
+    if (stdTabId != null) {
+      return stdTabId;
+    }
+    return findFirstActiveTabId(tableId, false);
+  }
+
+  /**
+   * Queries the first active tab for {@code tableId}, ordered by lowest tabLevel
+   * then lowest sequenceNumber. When {@code stdOnly} is {@code true} the query is
+   * restricted to {@code uipattern = 'STD'}; otherwise any active tab qualifies.
+   *
+   * @param tableId the AD_Table.id
+   * @param stdOnly whether to restrict the query to {@code STD} tabs only
+   * @return the AD_Tab.id, or {@code null} if no tab matches
+   */
+  private static String findFirstActiveTabId(String tableId, boolean stdOnly) {
     OBCriteria<Tab> criteria = OBDal.getInstance().createCriteria(Tab.class);
     criteria.add(Restrictions.eq(Tab.PROPERTY_TABLE + ".id", tableId));
-    criteria.add(Restrictions.eq(Tab.PROPERTY_UIPATTERN, UI_PATTERN_STD));
+    if (stdOnly) {
+      criteria.add(Restrictions.eq(Tab.PROPERTY_UIPATTERN, UI_PATTERN_STD));
+    }
     criteria.add(Restrictions.eq(Tab.PROPERTY_ACTIVE, true));
     criteria.addOrderBy(Tab.PROPERTY_TABLEVEL, true);
     criteria.addOrderBy(Tab.PROPERTY_SEQUENCENUMBER, true);

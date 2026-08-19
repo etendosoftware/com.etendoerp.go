@@ -16,6 +16,8 @@
  */
 package com.etendoerp.go.schemaforge;
 
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNull;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
@@ -36,12 +38,26 @@ import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.enterprise.Locator;
 import org.openbravo.model.common.enterprise.Warehouse;
 import org.openbravo.model.common.order.OrderLine;
+import org.openbravo.model.common.plm.Product;
+import org.openbravo.model.common.uom.UOM;
 import org.openbravo.model.materialmgmt.transaction.ShipmentInOut;
 import org.openbravo.model.materialmgmt.transaction.ShipmentInOutLine;
 
 /**
- * ETP-4863 — {@code createAndLinkLine} receives the locator resolved from the ORDER's warehouse
- * ({@code CreateShipmentHandler} / {@code CreateGoodsReceiptHandler} both call
+ * Unit tests for {@link InOutLineFromOrderFactory#pendingQuantityFor(OrderLine)} and
+ * {@link InOutLineFromOrderFactory#createAndLinkLine}.
+ *
+ * <p><b>ETP-4853:</b> when a Sales/Purchase Order carries a global discount, the
+ * synthetic discount line materialized by {@link TotalDiscountService} (a
+ * non-stockable, non-Item dummy product) must never be carried over into the
+ * generated Goods Shipment/Receipt — it never represents physical stock
+ * movement. {@code pendingQuantityFor} must skip (return {@code null}) any
+ * order line whose product is not stockable and of type Item, mirroring the
+ * discriminator the classic {@code M_INOUT_CREATE} stored procedure uses
+ * ({@code IsStocked='Y' AND ProductType='I'}).
+ *
+ * <p><b>ETP-4863:</b> {@code createAndLinkLine} receives the locator resolved from the ORDER's
+ * warehouse ({@code CreateShipmentHandler} / {@code CreateGoodsReceiptHandler} both call
  * {@code findDefaultLocator(order)}), but the stock transaction follows the LINE's bin against
  * the DOCUMENT header's warehouse. Those two warehouses are normally the same, yet nothing in
  * the code guarantees it. This normalizes the line's bin to {@code parentInOut.getWarehouse()},
@@ -51,6 +67,109 @@ public class InOutLineFromOrderFactoryTest {
 
   private static final String WH_PRINCIPAL = LocatorTestSupport.WH_PRINCIPAL;
   private static final String WH_SECONDARY = LocatorTestSupport.WH_SECONDARY;
+
+  private static OrderLine mockOrderLine(boolean stocked, String productType,
+      BigDecimal ordered, BigDecimal delivered) {
+    Product product = mock(Product.class);
+    when(product.isStocked()).thenReturn(stocked);
+    when(product.getProductType()).thenReturn(productType);
+
+    OrderLine orderLine = mock(OrderLine.class);
+    when(orderLine.isActive()).thenReturn(true);
+    when(orderLine.getProduct()).thenReturn(product);
+    when(orderLine.getUOM()).thenReturn(mock(UOM.class));
+    when(orderLine.getOrderedQuantity()).thenReturn(ordered);
+    when(orderLine.getDeliveredQuantity()).thenReturn(delivered);
+    return orderLine;
+  }
+
+  /** Existing behavior: a stockable Item-type product with pending qty is kept. */
+  @Test
+  public void testStockableItemProductWithPendingQuantityReturnsPendingQty() {
+    OrderLine orderLine = mockOrderLine(true, "I", new BigDecimal("10"), new BigDecimal("4"));
+
+    BigDecimal pending = InOutLineFromOrderFactory.pendingQuantityFor(orderLine);
+
+    assertEquals(new BigDecimal("6"), pending);
+  }
+
+  /**
+   * ETP-4853 regression: a non-stockable product (e.g. the synthetic global-discount
+   * line, {@code ETGO_DTO}) must be skipped even though it has a nonzero ordered
+   * quantity and nothing has been "delivered" against it.
+   */
+  @Test
+  public void testNonStockedProductWithPendingQuantityReturnsNull() {
+    OrderLine orderLine = mockOrderLine(false, "I", new BigDecimal("-100"), BigDecimal.ZERO);
+
+    BigDecimal pending = InOutLineFromOrderFactory.pendingQuantityFor(orderLine);
+
+    assertNull("A non-stockable product must never produce a shipment/receipt line", pending);
+  }
+
+  /**
+   * ETP-4853 regression: a product that is stocked but not of type Item (e.g. a
+   * Service or Expense product) must also be skipped — only stockable Items
+   * represent real stock movement.
+   */
+  @Test
+  public void testStockedButNonItemProductTypeReturnsNull() {
+    OrderLine orderLine = mockOrderLine(true, "S", new BigDecimal("5"), BigDecimal.ZERO);
+
+    BigDecimal pending = InOutLineFromOrderFactory.pendingQuantityFor(orderLine);
+
+    assertNull("A non-Item product type must never produce a shipment/receipt line", pending);
+  }
+
+  /** Existing edge case: an inactive order line is always skipped. */
+  @Test
+  public void testInactiveLineReturnsNull() {
+    OrderLine orderLine = mockOrderLine(true, "I", new BigDecimal("10"), BigDecimal.ZERO);
+    when(orderLine.isActive()).thenReturn(false);
+
+    assertNull(InOutLineFromOrderFactory.pendingQuantityFor(orderLine));
+  }
+
+  /** Existing edge case: a missing product is always skipped. */
+  @Test
+  public void testMissingProductReturnsNull() {
+    OrderLine orderLine = mock(OrderLine.class);
+    when(orderLine.isActive()).thenReturn(true);
+    when(orderLine.getProduct()).thenReturn(null);
+    when(orderLine.getUOM()).thenReturn(mock(UOM.class));
+
+    assertNull(InOutLineFromOrderFactory.pendingQuantityFor(orderLine));
+  }
+
+  /** Existing edge case: a missing UOM is always skipped. */
+  @Test
+  public void testMissingUOMReturnsNull() {
+    OrderLine orderLine = mockOrderLine(true, "I", new BigDecimal("10"), BigDecimal.ZERO);
+    when(orderLine.getUOM()).thenReturn(null);
+
+    assertNull(InOutLineFromOrderFactory.pendingQuantityFor(orderLine));
+  }
+
+  /** Existing edge case: a fully delivered line (pending == 0) is skipped. */
+  @Test
+  public void testFullyDeliveredLineReturnsNull() {
+    OrderLine orderLine = mockOrderLine(true, "I", new BigDecimal("10"), new BigDecimal("10"));
+
+    assertNull(InOutLineFromOrderFactory.pendingQuantityFor(orderLine));
+  }
+
+  /**
+   * ETP-4722 regression: a negative pending quantity (return-style line) must
+   * still be kept — only an exact-zero pending quantity is skipped.
+   */
+  @Test
+  public void testNegativePendingQuantityIsKept() {
+    OrderLine orderLine = mockOrderLine(true, "I", new BigDecimal("-5"), BigDecimal.ZERO);
+
+    BigDecimal pending = InOutLineFromOrderFactory.pendingQuantityFor(orderLine);
+
+    assertEquals(new BigDecimal("-5"), pending);
+  }
 
   /**
    * Stubs the native-query chain {@code InvoiceLineLinker.linkPendingInvoiceLinesToInout} runs at
