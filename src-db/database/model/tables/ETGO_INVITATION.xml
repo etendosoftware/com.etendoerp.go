@@ -78,10 +78,10 @@
       <index name="ETGO_INV_ACCOUNT_IX" unique="false">
         <index-column name="ETGO_ACCOUNT_ID"/>
       </index>
-      <index name="ETGO_INV_ONE_OPEN_CLIENT_EMAIL_UQ" unique="true">
+      <index name="ETGO_INV_OPEN_CLIENT_EMAIL_UQ" unique="true">
         <index-column name="AD_CLIENT_ID"/>
         <index-column name="EMAIL"/>
-        <whereClause><![CDATA[ISACTIVE='Y' AND(STATUS=ANY(ARRAY['PENDING','SENT'][]))]]></whereClause>
+        <whereClause><![CDATA[ISACTIVE='Y' AND STATUS=ANY(ARRAY['PENDING','SENT'])]]></whereClause>
       </index>
       <index name="ETGO_INV_STATUS_EXPIRY_IX" unique="false">
         <index-column name="STATUS"/>
