@@ -3936,6 +3936,8 @@ public class NeoDefaultsServiceTest {
 
       assertFalse("Sentinel '0' FK default must not be persisted when no doctype resolves",
           body.has("transactionDocument"));
+    }
+  }
 
   // ═══════════════════════════════════════════════════════════════════════════
   // resolveSQLDefaultWithOutcome — SqlDefaultOutcome diagnostics (ETP-4918)

@@ -60,7 +60,12 @@ final class McpSchemaFieldBuilder {
   static final String KEY_DEFAULT_EXPRESSION = "defaultExpression";
   static final String KEY_DEFAULT_SOURCE = "defaultSource";
   static final String KEY_USER_REQUIRED = "userRequired";
+  static final String KEY_READ_ONLY = "readOnly";
+  static final String KEY_VISIBILITY = "visibility";
   static final String VISIBILITY_EDITABLE = "editable";
+  /** The {@code visibility} VALUE {@code "readOnly"} — deliberately distinct from
+   *  {@link #KEY_READ_ONLY}, the JSON key, even though the two strings coincide. */
+  static final String VISIBILITY_READ_ONLY = "readOnly";
   static final String VISIBILITY_DISCARDED = "discarded";
   static final String TYPE_BUTTON = McpActionsView.TYPE_BUTTON;
   static final String KEY_INVOKE_VIA = "invokeVia";
@@ -473,8 +478,9 @@ final class McpSchemaFieldBuilder {
     // if the SFField row's own ISREADONLY column were ever mis-curated to N — VISIBILITY and
     // ISREADONLY should already agree via push-to-neo.js, but the emitted contract must not depend
     // on that staying true forever.
-    boolean visibilityIsReadOnly = "readOnly".equals(visibility);
-    fieldObj.put("readOnly", isReadOnlyColumn(adTab, col) || curatedReadOnly || visibilityIsReadOnly);
+    boolean visibilityIsReadOnly = VISIBILITY_READ_ONLY.equals(visibility);
+    fieldObj.put(KEY_READ_ONLY,
+        isReadOnlyColumn(adTab, col) || curatedReadOnly || visibilityIsReadOnly);
     addDefaultExpression(fieldObj, col);
     addVisibility(fieldObj, visibility, !isButton && col.isMandatory());
     boolean isBusinessCritical = Boolean.TRUE.equals(
@@ -772,8 +778,8 @@ final class McpSchemaFieldBuilder {
    */
   static boolean isAgentSuppliable(JSONObject fieldObj) {
     return fieldObj != null
-        && VISIBILITY_EDITABLE.equals(fieldObj.optString("visibility", null))
-        && !fieldObj.optBoolean("readOnly", false);
+        && VISIBILITY_EDITABLE.equals(fieldObj.optString(KEY_VISIBILITY, null))
+        && !fieldObj.optBoolean(KEY_READ_ONLY, false);
   }
 
   /**
@@ -795,7 +801,7 @@ final class McpSchemaFieldBuilder {
   private static void addVisibility(JSONObject fieldObj, String visibility, boolean mandatory)
       throws JSONException {
     if (visibility != null) {
-      fieldObj.put("visibility", visibility);
+      fieldObj.put(KEY_VISIBILITY, visibility);
       fieldObj.put(KEY_USER_REQUIRED, VISIBILITY_EDITABLE.equals(visibility) && mandatory
           && !hasSuppliedDefault(fieldObj));
     }

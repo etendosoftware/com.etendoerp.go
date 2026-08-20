@@ -99,32 +99,11 @@ final class NeoDefaultsSqlHelper {
     try {
       ArrayList<String> params = new ArrayList<>();
       String sql = parseSQLExpression(defaultExpr, params);
-      String missingParentToken = null;
+      String missingParentToken;
 
       try (PreparedStatement ps = OBDal.getInstance().getConnection(false).prepareStatement(sql)) {
-        int paramIndex = 1;
-        for (String parameter : params) {
-          String value = null;
-          // Non-session params: check parent record values first (e.g. @M_Warehouse_ID@, @AD_Client_ID@)
-          if (parentValues != null && !parentValues.isEmpty() && !parameter.startsWith("#")) {
-            Object pv = parentValues.get(parameter.toUpperCase());
-            if (pv != null) {
-              value = String.valueOf(pv);
-              log.debug("[resolveSQLDefault] param @{}@ from parentValues: {}", parameter, value);
-            }
-          }
-          if (value == null || value.isEmpty()) {
-            value = Utility.getContext(conn, vars, parameter, windowId);
-          }
-          // Token needed a parent value, the request never supplied parentId, and session
-          // context could not supply one either: this is the "forgot parentId" case, distinct
-          // from "the query legitimately matched nothing" below.
-          if (missingParentToken == null && !parameter.startsWith("#")
-              && (value == null || value.isEmpty()) && !parentIdProvided) {
-            missingParentToken = parameter;
-          }
-          ps.setObject(paramIndex++, value);
-        }
+        missingParentToken = bindSqlDefaultParams(ps, params, vars, conn, windowId, parentValues,
+            parentIdProvided);
 
         try (ResultSet rs = ps.executeQuery()) {
           if (rs.next()) {
@@ -142,6 +121,58 @@ final class NeoDefaultsSqlHelper {
           adColumn != null ? adColumn.getDBColumnName() : "<auxiliary-input>", e.getMessage());
       return SqlDefaultOutcome.unresolved();
     }
+  }
+
+  /**
+   * Bind every {@code @token@} of a parsed {@code @SQL=} expression onto {@code ps}, resolving
+   * each from the parent record first and from session context second.
+   *
+   * <p>Extracted from {@link #resolveSQLDefaultWithOutcome} (Sonar S3776) — that method's
+   * cognitive complexity came almost entirely from this loop, and the loop is also where the
+   * single diagnostic decision lives, so it factors out cleanly.</p>
+   *
+   * @return the first non-session token that resolved to nothing while {@code parentId} was
+   *         never supplied — the "forgot parentId" diagnosis — or {@code null} when no token
+   *         fits that case (including when the query simply matches no rows)
+   */
+  private static String bindSqlDefaultParams(PreparedStatement ps, ArrayList<String> params,
+      VariablesSecureApp vars, DalConnectionProvider conn, String windowId,
+      Map<String, Object> parentValues, boolean parentIdProvided) throws SQLException {
+    String missingParentToken = null;
+    int paramIndex = 1;
+    for (String parameter : params) {
+      boolean sessionParam = parameter.startsWith("#");
+      String value = sessionParam ? null : valueFromParent(parentValues, parameter);
+      if (value == null || value.isEmpty()) {
+        value = Utility.getContext(conn, vars, parameter, windowId);
+      }
+      // Token needed a parent value, the request never supplied parentId, and session context
+      // could not supply one either: the "forgot parentId" case, distinct from "the query
+      // legitimately matched nothing".
+      if (missingParentToken == null && !sessionParam && !parentIdProvided
+          && (value == null || value.isEmpty())) {
+        missingParentToken = parameter;
+      }
+      ps.setObject(paramIndex++, value);
+    }
+    return missingParentToken;
+  }
+
+  /**
+   * The parent record's value for a non-session {@code @token@}, or {@code null} when the caller
+   * threaded no parent values or the parent carries nothing under that name.
+   */
+  private static String valueFromParent(Map<String, Object> parentValues, String parameter) {
+    if (parentValues == null || parentValues.isEmpty()) {
+      return null;
+    }
+    Object pv = parentValues.get(parameter.toUpperCase());
+    if (pv == null) {
+      return null;
+    }
+    String value = String.valueOf(pv);
+    log.debug("[resolveSQLDefault] param @{}@ from parentValues: {}", parameter, value);
+    return value;
   }
 
   /**

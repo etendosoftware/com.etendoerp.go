@@ -272,22 +272,7 @@ public class AgingReportHandler implements NeoHandler {
       }
       AcctSchemaResult acct = resolveAcctSchema(body.optString(PARAM_GL_ID, ""), orgId);
       if (acct.accSchemaId == null || acct.accSchemaId.isEmpty() || acct.currency == null) {
-        // ETP-4918: this used to assert "no accounting schema with currency is configured for
-        // organization <id>" — a cause it never verified. A live benchmark run hit exactly this
-        // 422 against a tenant where an active, currency-bearing schema WAS configured (both via
-        // Organization.generalLedger and via OrganizationAcctSchema), with no exception logged —
-        // so the claim was simply false. All this guard actually knows is that resolution failed;
-        // it must say that, not why, and it must name the working alternative so the agent is not
-        // left reconstructing the same answer by hand (evidence: five extra calls in that run).
-        return buildActionableError(422, "accounting_schema_unresolved",
-            "Could not resolve an accounting schema with a currency for organization " + orgId
-                + ".",
-            "Check that the organization (or an ancestor in its tree) has a general ledger "
-                + "configured, or pass glId explicitly to select the accounting schema. To get "
-                + "comparable data without a resolved schema, call neo_list on \"sales-invoice\"/"
-                + "\"header\" filtering status:\"pending\" and status:\"partial\" — both are "
-                + "needed, since a partially collected invoice still owes money.",
-            "docs(topic:\"reading records\")");
+        return acctSchemaUnresolvedError(orgId);
       }
 
       initSessionReportsLimit();
@@ -633,5 +618,32 @@ public class AgingReportHandler implements NeoHandler {
     } catch (NumberFormatException e) {
       return BigDecimal.ZERO;
     }
+  }
+
+  /**
+   * The 422 returned when no accounting schema with a currency could be resolved for the
+   * requested organization.
+   *
+   * <p>ETP-4918: this guard used to assert that no such schema was configured for the
+   * organization — a cause it never verified. A live benchmark run hit exactly this 422 against
+   * a tenant where an active, currency-bearing schema WAS configured, reachable both through the
+   * organization's general ledger and through its accounting-schema assignments, with no
+   * exception logged. The claim was simply false. All this guard actually knows is that
+   * resolution failed, so it must say that and not why; and it must name the working
+   * alternative, because the agent that hit it spent five extra calls reconstructing one by
+   * hand.</p>
+   *
+   * @param orgId the organization whose schema could not be resolved
+   * @return the actionable 422 response
+   */
+  private static NeoResponse acctSchemaUnresolvedError(String orgId) {
+    return buildActionableError(422, "accounting_schema_unresolved",
+        "Could not resolve an accounting schema with a currency for organization " + orgId + ".",
+        "Check that the organization (or an ancestor in its tree) has a general ledger "
+            + "configured, or pass glId explicitly to select the accounting schema. To get "
+            + "comparable data without a resolved schema, call neo_list on \"sales-invoice\"/"
+            + "\"header\" filtering status:\"pending\" and status:\"partial\" — both are "
+            + "needed, since a partially collected invoice still owes money.",
+        "docs(topic:\"reading records\")");
   }
 }
