@@ -16,6 +16,9 @@
  */
 package com.etendoerp.go.schemaforge.handlers;
 
+import java.util.HashSet;
+import java.util.List;
+import java.util.Objects;
 import java.util.Set;
 
 import javax.inject.Named;
@@ -26,14 +29,19 @@ import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
+import org.hibernate.criterion.Restrictions;
 import org.openbravo.dal.core.OBContext;
+import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.access.Role;
 import org.openbravo.model.ad.access.User;
+import org.openbravo.model.ad.access.UserRoles;
+import org.openbravo.model.ad.system.Client;
 import org.openbravo.service.json.JsonConstants;
 
 import com.etendoerp.go.rest.CompanyInvitationService;
 import com.etendoerp.go.rest.EtendoGoJwtSupport;
+import com.etendoerp.go.schemaforge.AbstractSmartDeactivationHandler;
 import com.etendoerp.go.schemaforge.NeoContext;
 import com.etendoerp.go.schemaforge.NeoEndpointType;
 import com.etendoerp.go.schemaforge.NeoHandler;
@@ -103,6 +111,38 @@ import com.etendoerp.go.schemaforge.util.UserRoleSyncSupport;
  *   contract as role sync: never fails the parent {@code AD_User} creation. The resulting {@code
  *   invitationStatus} (see {@link #attachInvitationStatus}) is surfaced back on every {@code
  *   user} GET so the frontend can render a "pending invite" badge.</li>
+ *
+ *   <li><b>Write-path guards on {@code PUT}/{@code PATCH} (ETP-4830 QA rejection cycle 1):</b>
+ *   {@link #handle(NeoContext)} rejects two dangerous updates with a 400 BEFORE the default CRUD
+ *   update ever runs:
+ *   <ul>
+ *     <li><i>Email immutability.</i> {@code decisions.json}'s {@code readOnlyLogicJs:
+ *     "!!record.id"} on {@code email} is client-side only — {@code push-to-neo.js}'s {@code
+ *     mapVisibility()} has no notion of a dynamic display-logic expression, so {@code
+ *     NeoFieldFilter}'s {@code writableFields} still lets a direct PATCH change {@code email}
+ *     after creation, desyncing it from {@code username}/the linked {@code etgo_account} (both
+ *     keyed off the original email — see concern (3) above and {@code EtendoGoJwtDalHelper}/
+ *     {@code EtendoGoJwtSupport}). Rejected unless the incoming value is byte-for-byte identical
+ *     to the persisted one, so a client re-submitting its own unchanged form value is a no-op,
+ *     not an error. Scoped narrowly to {@code email} on this window's write path — NOT a generic
+ *     {@code readOnlyLogicJs} enforcement mechanism (the same gap exists elsewhere, e.g. {@code
+ *     transactionDocument}, and is tracked separately).</li>
+ *     <li><i>Self/last-admin lockout.</i> {@code NeoFieldFilter#forEntity} always adds {@code
+ *     active} to {@code writable} "so toggles persist", with no guard of its own. Only evaluated
+ *     when the request explicitly sets {@code active=false} ({@link
+ *     AbstractSmartDeactivationHandler#isExplicitlyDeactivating}, the same helper other {@code
+ *     active=false} guards in this module use — widened to {@code public static} for this reuse
+ *     since this handler cannot itself extend that single-purpose base class). Rejects when the
+ *     target record is the currently-authenticated user's own record (resolved from {@code
+ *     context.getObContext().getUser()}, the same "who is making this request" pattern used
+ *     elsewhere in this package), and separately rejects when the target user is the last
+ *     remaining active {@code AD_User} holding an active client-admin {@code AD_Role} ({@code
+ *     Role.isClientAdmin() == true}) for that client — see {@link #isLastActiveClientAdmin}.
+ *     </li>
+ *   </ul>
+ *   Both guards fail CLOSED (surface a 500) on an unexpected error rather than silently falling
+ *   through to the default CRUD update — same reasoning {@code AbstractSmartDeactivationHandler}'s
+ *   own javadoc gives for its guard.</li>
  * </ol>
  *
  * <p>{@code @Named} only — never a normal CDI scope. See CLAUDE.md §NeoHandler Pattern and
@@ -128,9 +168,29 @@ public class UserRoleAssignmentHandler implements NeoHandler {
   private static final String FIELD_INVITATION_STATUS = "invitationStatus";
 
   /**
-   * Pre-hook: on a {@code user} {@code POST} (create), derives a unique {@code username} from
-   * {@code email} and the current client, and rejects a blank/missing email with 400. No-op for
-   * every other method/endpoint.
+   * Pre-hook dispatch: on a {@code user} {@code POST} (create), derives a unique {@code
+   * username}; on a {@code user} {@code PUT}/{@code PATCH} (update), guards against the
+   * email-immutability and self/last-admin-lockout writes described in the class javadoc's
+   * ETP-4830 write-path-guards concern. No-op for every other method/endpoint.
+   */
+  @Override
+  public NeoResponse handle(NeoContext context) {
+    if (context.getEndpointType() != NeoEndpointType.CRUD) {
+      return null;
+    }
+    String method = context.getHttpMethod();
+    if (METHOD_POST.equalsIgnoreCase(method)) {
+      return handleCreate(context);
+    }
+    if (METHOD_PUT.equalsIgnoreCase(method) || METHOD_PATCH.equalsIgnoreCase(method)) {
+      return validateUpdate(context);
+    }
+    return null;
+  }
+
+  /**
+   * Derives a unique {@code username} from {@code email} and the current client, and rejects a
+   * blank/missing email with 400.
    *
    * <p>No longer validates or reads an admin-typed {@code password} (ETP-4830 removed that
    * temporary bypass — see the class javadoc's concern (3)): invite-email is now the only way
@@ -139,12 +199,7 @@ public class UserRoleAssignmentHandler implements NeoHandler {
    * {@code AD_User.Password}, Openbravo's own classic-backend login, unrelated to {@code
    * etgo_account}).
    */
-  @Override
-  public NeoResponse handle(NeoContext context) {
-    if (context.getEndpointType() != NeoEndpointType.CRUD
-        || !METHOD_POST.equalsIgnoreCase(context.getHttpMethod())) {
-      return null;
-    }
+  private NeoResponse handleCreate(NeoContext context) {
     JSONObject requestBody = context.getRequestBody();
     if (requestBody == null) {
       return null;
@@ -167,6 +222,135 @@ public class UserRoleAssignmentHandler implements NeoHandler {
           e.getMessage(), e);
     }
     return null;
+  }
+
+  /**
+   * Pre-hook guard for a {@code user} {@code PUT}/{@code PATCH}: rejects an {@code email} change
+   * on an existing record, then rejects a self/last-admin-lockout {@code active=false} write.
+   * See the class javadoc's ETP-4830 write-path-guards concern for the full rationale. Runs
+   * BEFORE the default CRUD update (this is a {@code handle()} pre-hook, not an {@code
+   * afterHandle()} side effect), so a rejection here never lets the write reach the DB.
+   *
+   * @return a 400/500 error response to short-circuit the request, or {@code null} to let the
+   *     default CRUD update proceed
+   */
+  private NeoResponse validateUpdate(NeoContext context) {
+    JSONObject requestBody = context.getRequestBody();
+    String userId = context.getRecordId();
+    if (requestBody == null || userId == null) {
+      return null;
+    }
+    NeoResponse emailGuard = rejectEmailChange(requestBody, userId);
+    if (emailGuard != null) {
+      return emailGuard;
+    }
+    return rejectDangerousDeactivation(requestBody, userId, context.getObContext());
+  }
+
+  /**
+   * Rejects a {@code PUT}/{@code PATCH} that changes {@code email} on an existing {@code user}
+   * record. A no-op when the request doesn't touch {@code email} at all, or when the incoming
+   * value is byte-for-byte identical (after trimming) to the currently-persisted one — a naive
+   * client re-submitting its own unchanged form value must not 400.
+   */
+  private NeoResponse rejectEmailChange(JSONObject requestBody, String userId) {
+    if (!requestBody.has(FIELD_EMAIL)) {
+      return null;
+    }
+    String incomingEmail = StringUtils.trimToNull(requestBody.optString(FIELD_EMAIL, null));
+    try {
+      OBContext.setAdminMode(true);
+      try {
+        User user = OBDal.getInstance().get(User.class, userId);
+        if (user == null) {
+          // Record doesn't exist (yet) — let the default CRUD update produce its own error.
+          return null;
+        }
+        String currentEmail = StringUtils.trimToNull(user.getEmail());
+        if (!Objects.equals(incomingEmail, currentEmail)) {
+          return NeoResponse.error(400,
+              "Field 'email' cannot be changed after the user has been created");
+        }
+        return null;
+      } finally {
+        OBContext.restorePreviousMode();
+      }
+    } catch (Exception e) {
+      log.error("UserRoleAssignmentHandler.rejectEmailChange error for user {}: {}", userId,
+          e.getMessage(), e);
+      // Fail CLOSED: an error here must not silently let an email change through unverified.
+      return NeoResponse.error(500, "Error validating email immutability: " + e.getMessage());
+    }
+  }
+
+  /**
+   * Rejects a {@code PUT}/{@code PATCH} that explicitly sets {@code active=false} on the
+   * currently-authenticated user's own record, or on the last remaining active user holding an
+   * active client-admin role for that client. A no-op for any request that doesn't explicitly
+   * deactivate (see {@link AbstractSmartDeactivationHandler#isExplicitlyDeactivating}).
+   */
+  private NeoResponse rejectDangerousDeactivation(JSONObject requestBody, String userId,
+      OBContext obContext) {
+    if (!AbstractSmartDeactivationHandler.isExplicitlyDeactivating(requestBody)) {
+      return null;
+    }
+    String actingUserId = obContext != null && obContext.getUser() != null
+        ? obContext.getUser().getId() : null;
+    if (actingUserId != null && actingUserId.equals(userId)) {
+      return NeoResponse.error(400, "You cannot deactivate your own user account");
+    }
+    try {
+      OBContext.setAdminMode(true);
+      try {
+        User targetUser = OBDal.getInstance().get(User.class, userId);
+        if (targetUser == null) {
+          return null;
+        }
+        if (isLastActiveClientAdmin(targetUser)) {
+          return NeoResponse.error(400,
+              "Cannot deactivate the last active administrator for this client");
+        }
+        return null;
+      } finally {
+        OBContext.restorePreviousMode();
+      }
+    } catch (Exception e) {
+      log.error("UserRoleAssignmentHandler.rejectDangerousDeactivation error for user {}: {}",
+          userId, e.getMessage(), e);
+      // Fail CLOSED: an error here must not silently let a lockout-risking deactivation through.
+      return NeoResponse.error(500, "Error validating deactivation: " + e.getMessage());
+    }
+  }
+
+  /**
+   * Whether {@code targetUser} is the sole remaining active {@code AD_User} holding an active
+   * client-admin {@code AD_Role} ({@code Role.isClientAdmin() == true}) for {@code targetUser}'s
+   * client — i.e. deactivating it would leave that client with zero active admins. Counts
+   * distinct users via {@code AD_User_Roles} rather than {@code AD_User.Default_Ad_Role_ID}
+   * (same reasoning as {@link com.etendoerp.go.schemaforge.util.UserRoleSyncSupport}'s own
+   * javadoc: real access checks read {@code AD_User_Roles}, not the UI-convenience pointer
+   * field). {@code false} when {@code targetUser} doesn't currently hold an active client-admin
+   * role at all — deactivating it then carries no lockout risk from this angle.
+   */
+  private boolean isLastActiveClientAdmin(User targetUser) {
+    Client client = targetUser.getClient();
+    if (client == null) {
+      return false;
+    }
+    OBCriteria<UserRoles> criteria = OBDal.getInstance().createCriteria(UserRoles.class);
+    criteria.createAlias(UserRoles.PROPERTY_ROLE, "role");
+    criteria.createAlias(UserRoles.PROPERTY_USERCONTACT, "assignedUser");
+    criteria.add(Restrictions.eq(UserRoles.PROPERTY_ACTIVE, true));
+    criteria.add(Restrictions.eq(UserRoles.PROPERTY_CLIENT, client));
+    criteria.add(Restrictions.eq("role." + Role.PROPERTY_CLIENTADMIN, true));
+    criteria.add(Restrictions.eq("role." + Role.PROPERTY_ACTIVE, true));
+    criteria.add(Restrictions.eq("assignedUser." + User.PROPERTY_ACTIVE, true));
+    List<UserRoles> activeAdminAssignments = criteria.list();
+    Set<String> activeAdminUserIds = new HashSet<>();
+    for (UserRoles row : activeAdminAssignments) {
+      activeAdminUserIds.add(row.getUserContact().getId());
+    }
+    return activeAdminUserIds.size() == 1 && activeAdminUserIds.contains(targetUser.getId());
   }
 
   /**

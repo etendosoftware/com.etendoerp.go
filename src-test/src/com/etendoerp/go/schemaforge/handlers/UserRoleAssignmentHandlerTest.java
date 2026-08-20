@@ -33,6 +33,7 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 
@@ -226,6 +227,383 @@ public class UserRoleAssignmentHandlerTest {
         .httpMethod("POST")
         .build();
     assertNull(handler.handle(ctx));
+  }
+
+  // ─── handle(): PUT/PATCH email-immutability guard (ETP-4830 QA BUG-2) ────────
+
+  @Test
+  public void handleRejectsEmailChangeOnExistingUser() throws Exception {
+    UserRoleAssignmentHandler handler = new UserRoleAssignmentHandler();
+    JSONObject requestBody = new JSONObject();
+    requestBody.put("email", "changed@example.com");
+    NeoContext ctx = NeoContext.builder()
+        .endpointType(NeoEndpointType.CRUD)
+        .httpMethod("PATCH")
+        .recordId(USER_ID)
+        .requestBody(requestBody)
+        .build();
+
+    User user = mock(User.class);
+    when(user.getEmail()).thenReturn("original@example.com");
+
+    try (MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      obCtxMock.when(() -> OBContext.setAdminMode(true)).then(inv -> null);
+      obCtxMock.when(OBContext::restorePreviousMode).then(inv -> null);
+
+      OBDal obDal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(obDal);
+      when(obDal.get(User.class, USER_ID)).thenReturn(user);
+
+      NeoResponse response = handler.handle(ctx);
+
+      assertEquals(400, response.getHttpStatus());
+    }
+  }
+
+  @Test
+  public void handleAllowsResubmittingByteForByteUnchangedEmail() throws Exception {
+    // A naive client re-submitting its own unchanged form value must not 400 — and since the
+    // request has no "active" key either, the deactivation guard is never even reached.
+    UserRoleAssignmentHandler handler = new UserRoleAssignmentHandler();
+    JSONObject requestBody = new JSONObject();
+    requestBody.put("email", "same@example.com");
+    NeoContext ctx = NeoContext.builder()
+        .endpointType(NeoEndpointType.CRUD)
+        .httpMethod("PUT")
+        .recordId(USER_ID)
+        .requestBody(requestBody)
+        .build();
+
+    User user = mock(User.class);
+    when(user.getEmail()).thenReturn("same@example.com");
+
+    try (MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      obCtxMock.when(() -> OBContext.setAdminMode(true)).then(inv -> null);
+      obCtxMock.when(OBContext::restorePreviousMode).then(inv -> null);
+
+      OBDal obDal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(obDal);
+      when(obDal.get(User.class, USER_ID)).thenReturn(user);
+
+      assertNull(handler.handle(ctx));
+    }
+  }
+
+  @Test
+  public void handleCreateIsUnaffectedByEmailImmutabilityGuardOnPost() throws Exception {
+    // The email-immutability guard only runs from validateUpdate() (PUT/PATCH) — handleCreate()
+    // (POST) never touches OBDal at all, so a brand-new user's email is always writable on create.
+    UserRoleAssignmentHandler handler = new UserRoleAssignmentHandler();
+    JSONObject requestBody = new JSONObject();
+    requestBody.put("email", "new.user@example.com");
+    NeoContext ctx = NeoContext.builder()
+        .endpointType(NeoEndpointType.CRUD)
+        .httpMethod("POST")
+        .requestBody(requestBody)
+        .build();
+
+    try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      assertNull(handler.handle(ctx));
+      assertEquals("new.user@example.com", requestBody.getString("username"));
+      obDalMock.verify(OBDal::getInstance, never());
+    }
+  }
+
+  @Test
+  public void handleAllowsPatchWithNoEmailKeyAtAll() throws Exception {
+    UserRoleAssignmentHandler handler = new UserRoleAssignmentHandler();
+    JSONObject requestBody = new JSONObject();
+    requestBody.put("name", "New name only");
+    NeoContext ctx = NeoContext.builder()
+        .endpointType(NeoEndpointType.CRUD)
+        .httpMethod("PATCH")
+        .recordId(USER_ID)
+        .requestBody(requestBody)
+        .build();
+
+    try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      assertNull(handler.handle(ctx));
+      obDalMock.verify(OBDal::getInstance, never());
+    }
+  }
+
+  @Test
+  public void handleFailsClosedWhenEmailGuardThrows() throws Exception {
+    UserRoleAssignmentHandler handler = new UserRoleAssignmentHandler();
+    JSONObject requestBody = new JSONObject();
+    requestBody.put("email", "someone@example.com");
+    NeoContext ctx = NeoContext.builder()
+        .endpointType(NeoEndpointType.CRUD)
+        .httpMethod("PUT")
+        .recordId(USER_ID)
+        .requestBody(requestBody)
+        .build();
+
+    try (MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      obCtxMock.when(() -> OBContext.setAdminMode(true)).then(inv -> null);
+      obCtxMock.when(OBContext::restorePreviousMode).then(inv -> null);
+
+      OBDal obDal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(obDal);
+      when(obDal.get(User.class, USER_ID)).thenThrow(new RuntimeException("DB unavailable"));
+
+      NeoResponse response = handler.handle(ctx);
+
+      // Fail CLOSED: an unexpected error must surface as a 500, never silently allow the
+      // email change through unverified.
+      assertEquals(500, response.getHttpStatus());
+    }
+  }
+
+  // ─── handle(): PUT/PATCH self/last-admin lockout guard (ETP-4830 QA BUG-1) ───
+
+  @Test
+  public void handleRejectsSelfDeactivation() throws Exception {
+    UserRoleAssignmentHandler handler = new UserRoleAssignmentHandler();
+    JSONObject requestBody = new JSONObject();
+    requestBody.put("active", false);
+
+    User actingUser = mock(User.class);
+    when(actingUser.getId()).thenReturn(USER_ID);
+    OBContext requestObContext = mock(OBContext.class);
+    when(requestObContext.getUser()).thenReturn(actingUser);
+
+    NeoContext ctx = NeoContext.builder()
+        .endpointType(NeoEndpointType.CRUD)
+        .httpMethod("PUT")
+        .recordId(USER_ID)
+        .requestBody(requestBody)
+        .obContext(requestObContext)
+        .build();
+
+    // The self-check short-circuits before any OBDal access at all.
+    try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      NeoResponse response = handler.handle(ctx);
+
+      assertEquals(400, response.getHttpStatus());
+      obDalMock.verify(OBDal::getInstance, never());
+    }
+  }
+
+  @Test
+  public void handleRejectsDeactivatingLastActiveClientAdmin() throws Exception {
+    UserRoleAssignmentHandler handler = new UserRoleAssignmentHandler();
+    JSONObject requestBody = new JSONObject();
+    requestBody.put("active", false);
+
+    String targetId = "target-admin-001";
+    String actingId = "acting-admin-002";
+
+    User actingUser = mock(User.class);
+    when(actingUser.getId()).thenReturn(actingId);
+    OBContext requestObContext = mock(OBContext.class);
+    when(requestObContext.getUser()).thenReturn(actingUser);
+
+    NeoContext ctx = NeoContext.builder()
+        .endpointType(NeoEndpointType.CRUD)
+        .httpMethod("PATCH")
+        .recordId(targetId)
+        .requestBody(requestBody)
+        .obContext(requestObContext)
+        .build();
+
+    Client client = mock(Client.class);
+    User targetUser = mock(User.class);
+    when(targetUser.getId()).thenReturn(targetId);
+    when(targetUser.getClient()).thenReturn(client);
+
+    UserRoles targetAdminRow = mock(UserRoles.class);
+    User targetAdminRowUser = mock(User.class);
+    when(targetAdminRowUser.getId()).thenReturn(targetId);
+    when(targetAdminRow.getUserContact()).thenReturn(targetAdminRowUser);
+
+    try (MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      obCtxMock.when(() -> OBContext.setAdminMode(true)).then(inv -> null);
+      obCtxMock.when(OBContext::restorePreviousMode).then(inv -> null);
+
+      OBDal obDal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(obDal);
+      when(obDal.get(User.class, targetId)).thenReturn(targetUser);
+
+      @SuppressWarnings("unchecked")
+      OBCriteria<UserRoles> criteria = mock(OBCriteria.class);
+      when(obDal.createCriteria(UserRoles.class)).thenReturn(criteria);
+      when(criteria.list()).thenReturn(Collections.singletonList(targetAdminRow));
+
+      NeoResponse response = handler.handle(ctx);
+
+      assertEquals(400, response.getHttpStatus());
+    }
+  }
+
+  @Test
+  public void handleAllowsDeactivatingNonSelfNonLastAdminUser() throws Exception {
+    // Should-still-work case: the target holds the client-admin role, but so does at least one
+    // other active user — deactivating the target does not leave the client admin-less.
+    UserRoleAssignmentHandler handler = new UserRoleAssignmentHandler();
+    JSONObject requestBody = new JSONObject();
+    requestBody.put("active", false);
+
+    String targetId = "target-admin-003";
+    String actingId = "acting-admin-004";
+    String otherAdminId = "other-admin-005";
+
+    User actingUser = mock(User.class);
+    when(actingUser.getId()).thenReturn(actingId);
+    OBContext requestObContext = mock(OBContext.class);
+    when(requestObContext.getUser()).thenReturn(actingUser);
+
+    NeoContext ctx = NeoContext.builder()
+        .endpointType(NeoEndpointType.CRUD)
+        .httpMethod("PATCH")
+        .recordId(targetId)
+        .requestBody(requestBody)
+        .obContext(requestObContext)
+        .build();
+
+    Client client = mock(Client.class);
+    User targetUser = mock(User.class);
+    when(targetUser.getId()).thenReturn(targetId);
+    when(targetUser.getClient()).thenReturn(client);
+
+    UserRoles targetAdminRow = mock(UserRoles.class);
+    User targetAdminRowUser = mock(User.class);
+    when(targetAdminRowUser.getId()).thenReturn(targetId);
+    when(targetAdminRow.getUserContact()).thenReturn(targetAdminRowUser);
+
+    UserRoles otherAdminRow = mock(UserRoles.class);
+    User otherAdminRowUser = mock(User.class);
+    when(otherAdminRowUser.getId()).thenReturn(otherAdminId);
+    when(otherAdminRow.getUserContact()).thenReturn(otherAdminRowUser);
+
+    try (MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      obCtxMock.when(() -> OBContext.setAdminMode(true)).then(inv -> null);
+      obCtxMock.when(OBContext::restorePreviousMode).then(inv -> null);
+
+      OBDal obDal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(obDal);
+      when(obDal.get(User.class, targetId)).thenReturn(targetUser);
+
+      @SuppressWarnings("unchecked")
+      OBCriteria<UserRoles> criteria = mock(OBCriteria.class);
+      when(obDal.createCriteria(UserRoles.class)).thenReturn(criteria);
+      when(criteria.list()).thenReturn(Arrays.asList(targetAdminRow, otherAdminRow));
+
+      assertNull(handler.handle(ctx));
+    }
+  }
+
+  @Test
+  public void handleAllowsDeactivatingUserWithNoClientAdminRoleAtAll() throws Exception {
+    UserRoleAssignmentHandler handler = new UserRoleAssignmentHandler();
+    JSONObject requestBody = new JSONObject();
+    requestBody.put("active", false);
+
+    String targetId = "regular-user-006";
+    String actingId = "acting-admin-007";
+    String otherAdminId = "other-admin-008";
+
+    User actingUser = mock(User.class);
+    when(actingUser.getId()).thenReturn(actingId);
+    OBContext requestObContext = mock(OBContext.class);
+    when(requestObContext.getUser()).thenReturn(actingUser);
+
+    NeoContext ctx = NeoContext.builder()
+        .endpointType(NeoEndpointType.CRUD)
+        .httpMethod("PUT")
+        .recordId(targetId)
+        .requestBody(requestBody)
+        .obContext(requestObContext)
+        .build();
+
+    Client client = mock(Client.class);
+    User targetUser = mock(User.class);
+    when(targetUser.getId()).thenReturn(targetId);
+    when(targetUser.getClient()).thenReturn(client);
+
+    UserRoles otherAdminRow = mock(UserRoles.class);
+    User otherAdminRowUser = mock(User.class);
+    when(otherAdminRowUser.getId()).thenReturn(otherAdminId);
+    when(otherAdminRow.getUserContact()).thenReturn(otherAdminRowUser);
+
+    try (MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      obCtxMock.when(() -> OBContext.setAdminMode(true)).then(inv -> null);
+      obCtxMock.when(OBContext::restorePreviousMode).then(inv -> null);
+
+      OBDal obDal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(obDal);
+      when(obDal.get(User.class, targetId)).thenReturn(targetUser);
+
+      @SuppressWarnings("unchecked")
+      OBCriteria<UserRoles> criteria = mock(OBCriteria.class);
+      when(obDal.createCriteria(UserRoles.class)).thenReturn(criteria);
+      when(criteria.list()).thenReturn(Collections.singletonList(otherAdminRow));
+
+      assertNull(handler.handle(ctx));
+    }
+  }
+
+  @Test
+  public void handleAllowsPutWithoutExplicitActiveFalse() throws Exception {
+    UserRoleAssignmentHandler handler = new UserRoleAssignmentHandler();
+    JSONObject requestBody = new JSONObject();
+    requestBody.put("active", true);
+    NeoContext ctx = NeoContext.builder()
+        .endpointType(NeoEndpointType.CRUD)
+        .httpMethod("PUT")
+        .recordId(USER_ID)
+        .requestBody(requestBody)
+        .build();
+
+    try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      assertNull(handler.handle(ctx));
+      obDalMock.verify(OBDal::getInstance, never());
+    }
+  }
+
+  @Test
+  public void handleFailsClosedWhenDeactivationGuardThrows() throws Exception {
+    UserRoleAssignmentHandler handler = new UserRoleAssignmentHandler();
+    JSONObject requestBody = new JSONObject();
+    requestBody.put("active", false);
+
+    String targetId = "target-admin-009";
+    String actingId = "acting-admin-010";
+
+    User actingUser = mock(User.class);
+    when(actingUser.getId()).thenReturn(actingId);
+    OBContext requestObContext = mock(OBContext.class);
+    when(requestObContext.getUser()).thenReturn(actingUser);
+
+    NeoContext ctx = NeoContext.builder()
+        .endpointType(NeoEndpointType.CRUD)
+        .httpMethod("PUT")
+        .recordId(targetId)
+        .requestBody(requestBody)
+        .obContext(requestObContext)
+        .build();
+
+    try (MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      obCtxMock.when(() -> OBContext.setAdminMode(true)).then(inv -> null);
+      obCtxMock.when(OBContext::restorePreviousMode).then(inv -> null);
+
+      OBDal obDal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(obDal);
+      when(obDal.get(User.class, targetId)).thenThrow(new RuntimeException("DB unavailable"));
+
+      NeoResponse response = handler.handle(ctx);
+
+      // Fail CLOSED: an unexpected error must surface as a 500, never silently allow a
+      // lockout-risking deactivation through.
+      assertEquals(500, response.getHttpStatus());
+    }
   }
 
   // ─── afterHandle: endpoint/method guards ─────────────────────────────────────
