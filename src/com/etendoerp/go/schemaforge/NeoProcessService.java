@@ -934,9 +934,10 @@ public class NeoProcessService {
       // severity field.  Defaulting to SUCCESS masked real errors as "sent OK".  Rule: when
       // "severity" is absent but "text" is non-empty, treat it as an error; an empty text
       // with no severity is harmless and keeps the SUCCESS default.
+      String severityDefault = StringUtils.isNotEmpty(text) ? ERROR : SUCCESS;
       String severity = message.has("severity")
           ? message.getString("severity")
-          : (StringUtils.isNotEmpty(text) ? ERROR : SUCCESS);
+          : severityDefault;
       String rawText = safeParseTranslation(text);
 
       result.put(STATUS, severity);

@@ -484,7 +484,7 @@ public abstract class AbstractInvoiceHeaderHandler {
       }
       // Defensive copy so we do not mutate the original captured result.
       JSONObject body = new JSONObject(prev.getBody().toString());
-      // Try the standard JsonDataService wrapper: { "response": { "data": [{ ... }] } }
+      // Try the standard JsonDataService wrapper (response → data array) first.
       JSONObject responseWrapper = body.optJSONObject("response");
       if (responseWrapper != null) {
         JSONArray data = responseWrapper.optJSONArray("data");
@@ -647,8 +647,7 @@ public abstract class AbstractInvoiceHeaderHandler {
     try {
       rec.put("tbaiConfigActive", value);
     } catch (Exception ignored) {
-      // best-effort: if rec.put fails the field remains absent;
-      // displayLogicJs treats absent as shown (safe default for TBAI orgs)
+      // best-effort: field stays absent on failure, which displayLogicJs treats as shown (safe default for TBAI orgs)
     }
   }
 
@@ -1123,7 +1122,7 @@ public abstract class AbstractInvoiceHeaderHandler {
       checkExchangeRateWarning(fields.body(), fields.requestBody(), fields.formState(), fields.triggerField());
       String recordId = resolveCalloutRecordId(context, fields.formState());
       blockCalloutDocTypeUpdateIfLocked(fields.updates(), fields.triggerField(), recordId);
-      applySiiAuthorizationCallout(fields.triggerField(), fields.requestBody(), fields.updates(), fields.body());
+      applySiiAuthorizationCallout(fields.triggerField(), fields.requestBody(), fields.updates());
       applyVerifactuInvTypeFromDocType(fields.triggerField(), fields.requestBody(), fields.updates());
       applyRectificativeFieldsFromDocType(fields.triggerField(), fields.requestBody(), fields.updates());
       realignVerifactuDescWithFormStateDocType(fields.triggerField(), fields.formState(), fields.updates());
@@ -1156,10 +1155,9 @@ public abstract class AbstractInvoiceHeaderHandler {
    * @param triggerField the name of the field that fired the callout
    * @param requestBody  the callout request body ({@code field}, {@code value}, {@code formState})
    * @param updates      the callout response's {@code updates} map; may be {@code null}
-   * @param body         the full callout response body, used to append error messages
    */
   private static void applySiiAuthorizationCallout(String triggerField, JSONObject requestBody,
-      JSONObject updates, JSONObject body) {
+      JSONObject updates) {
     if (!FIELD_AEATSII_IS_AUTHORIZATION.equals(triggerField)) {
       return;
     }
