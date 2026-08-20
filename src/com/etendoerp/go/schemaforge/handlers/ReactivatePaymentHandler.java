@@ -21,6 +21,7 @@ import java.math.BigDecimal;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 import javax.inject.Named;
@@ -48,6 +49,7 @@ import com.etendoerp.go.schemaforge.NeoContext;
 import com.etendoerp.go.schemaforge.NeoEndpointType;
 import com.etendoerp.go.schemaforge.NeoHandler;
 import com.etendoerp.go.schemaforge.NeoResponse;
+import com.etendoerp.go.schemaforge.PaymentRegistrationService;
 import com.etendoerp.go.schemaforge.PisDeferredPaymentService;
 import com.etendoerp.go.schemaforge.util.NeoButtonActionHelper;
 import com.etendoerp.payment.removal.util.PaymentRemovalUtil;
@@ -177,6 +179,13 @@ public class ReactivatePaymentHandler implements NeoHandler {
    * {@code PisDeferredPaymentService#isLifecycleLockedByTransfer}.
    */
   private static final String FIELD_PIS_LOCKED = "pisLocked";
+  /**
+   * The invoice this payment was applied to, or {@code null} when it is not exactly one. Lets the
+   * window open the invoice's own payment editor for a draft instead of the yes/no confirm dialog —
+   * see {@code PaymentRegistrationService#invoiceIdsByPayment}. Emitted alongside
+   * {@link #FIELD_PIS_LOCKED} so the grid's kebab can do the same, in the same batch.
+   */
+  private static final String FIELD_INVOICE_ID = "invoiceId";
   private static final String FIELD_ID = "id";
   private static final String FIELD_STATUS = "status";
   private static final String FIELD_ACCOUNT_CURRENCY = "accountCurrency";
@@ -525,7 +534,8 @@ public class ReactivatePaymentHandler implements NeoHandler {
   }
 
   /**
-   * List counterpart of {@link #afterHandle}: adds only {@link #FIELD_PIS_LOCKED} to every row.
+   * List counterpart of {@link #afterHandle}: adds {@link #FIELD_PIS_LOCKED} and
+   * {@link #FIELD_INVOICE_ID} to every row.
    *
    * <p>The other enrichments stay single-record — they each cost a query and the grid does not show
    * them. This one is worth it because the grid's kebab offers Reactivate and its row actions offer
@@ -549,8 +559,8 @@ public class ReactivatePaymentHandler implements NeoHandler {
   }
 
   /**
-   * Sets {@link #FIELD_PIS_LOCKED} on every row of {@code records}, resolving the whole batch with a
-   * single query. Swallows failures: losing the flag hides two buttons that were there before, which
+   * Sets {@link #FIELD_PIS_LOCKED} and {@link #FIELD_INVOICE_ID} on every row of {@code records},
+   * resolving each with a single query for the whole batch. Swallows failures: losing the flag hides two buttons that were there before, which
    * is far better than losing the response.
    */
   private void injectLockFlags(JSONArray records) {
@@ -563,12 +573,14 @@ public class ReactivatePaymentHandler implements NeoHandler {
         }
       }
       Set<String> withTransfer = PisDeferredPaymentService.paymentsWithBankTransfer(ids);
+      Map<String, String> invoiceIds = PaymentRegistrationService.invoiceIdsByPayment(ids);
       for (int i = 0; i < records.length(); i++) {
         JSONObject record = records.getJSONObject(i);
-        boolean locked = PisDeferredPaymentService.isLifecycleLockedByTransfer(
-            record.optString(FIELD_STATUS, null),
-            withTransfer.contains(record.optString(FIELD_ID, null)));
-        record.put(FIELD_PIS_LOCKED, locked);
+        String id = record.optString(FIELD_ID, null);
+        record.put(FIELD_PIS_LOCKED, PisDeferredPaymentService.isLifecycleLockedByTransfer(
+            record.optString(FIELD_STATUS, null), withTransfer.contains(id)));
+        String invoiceId = invoiceIds.get(id);
+        record.put(FIELD_INVOICE_ID, invoiceId != null ? invoiceId : JSONObject.NULL);
       }
     } catch (Exception e) {
       log.warn("Could not flag bank-transfer-locked payments: {}", e.getMessage());

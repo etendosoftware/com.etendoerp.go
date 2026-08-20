@@ -37,6 +37,7 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 import org.codehaus.jettison.json.JSONArray;
@@ -1832,4 +1833,72 @@ class PaymentRegistrationServiceTest {
     }
   }
 
+  // ── invoiceIdsByPayment ───────────────────────────────────────────────────
+  //
+  // Answers "which invoice can this payment be edited against", so the payment window can open the
+  // invoice's editable modal for a draft instead of the yes/no dialog it used to be stuck with.
+
+  @SuppressWarnings("unchecked")
+  private void stubInvoiceQuery(List<Object[]> rows) {
+    Query<Object[]> query = mock(Query.class);
+    when(session.createQuery(anyString(), eq(Object[].class))).thenReturn(query);
+    when(query.setParameterList(anyString(), any(java.util.Collection.class))).thenReturn(query);
+    when(query.list()).thenReturn(rows);
+  }
+
+  @Test
+  void invoiceIdsByPaymentSkipsTheQueryForAnEmptyBatch() {
+    assertTrue(PaymentRegistrationService.invoiceIdsByPayment(null).isEmpty());
+    assertTrue(PaymentRegistrationService.invoiceIdsByPayment(List.of()).isEmpty());
+    verify(session, never()).createQuery(anyString(), eq(Object[].class));
+  }
+
+  @Test
+  void invoiceIdsByPaymentResolvesASinglePayment() {
+    stubInvoiceQuery(List.of(new Object[]{ "pay-1", "inv-1" }));
+
+    assertEquals("inv-1", PaymentRegistrationService.invoiceIdsByPayment(List.of("pay-1")).get("pay-1"));
+  }
+
+  @Test
+  void invoiceIdsByPaymentDropsPaymentsSpanningSeveralInvoices() {
+    // The editor is single-invoice: opening it on one of two would misapply the other on save, so
+    // those fall back to the confirm dialog instead.
+    stubInvoiceQuery(List.of(new Object[]{ "pay-1", "inv-1" }, new Object[]{ "pay-1", "inv-2" }));
+
+    assertTrue(PaymentRegistrationService.invoiceIdsByPayment(List.of("pay-1")).isEmpty());
+  }
+
+  @Test
+  void invoiceIdsByPaymentDropsPaymentsWithNoInvoiceAtAll() {
+    // Abandoned shells with no application. Nothing to edit against.
+    stubInvoiceQuery(List.of());
+
+    assertTrue(PaymentRegistrationService.invoiceIdsByPayment(List.of("pay-1")).isEmpty());
+  }
+
+  @Test
+  void invoiceIdsByPaymentResolvesEachPaymentOfTheBatchIndependently() {
+    stubInvoiceQuery(List.of(
+        new Object[]{ "pay-1", "inv-1" },
+        new Object[]{ "pay-2", "inv-2" },
+        new Object[]{ "pay-3", "inv-3" },
+        new Object[]{ "pay-3", "inv-4" }));
+
+    Map<String, String> resolved =
+        PaymentRegistrationService.invoiceIdsByPayment(List.of("pay-1", "pay-2", "pay-3"));
+
+    assertEquals(2, resolved.size());
+    assertEquals("inv-1", resolved.get("pay-1"));
+    assertEquals("inv-2", resolved.get("pay-2"));
+  }
+
+  @Test
+  void invoiceIdsByPaymentSurvivesAFailedLookup() {
+    // Losing the field costs the editable modal, never the response: the caller falls back.
+    when(session.createQuery(anyString(), eq(Object[].class)))
+        .thenThrow(new IllegalStateException("no session"));
+
+    assertTrue(PaymentRegistrationService.invoiceIdsByPayment(List.of("pay-1")).isEmpty());
+  }
 }

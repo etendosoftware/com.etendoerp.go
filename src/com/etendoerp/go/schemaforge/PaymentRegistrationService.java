@@ -19,7 +19,11 @@ package com.etendoerp.go.schemaforge;
 
 import java.math.BigDecimal;
 import java.text.ParseException;
+import java.util.Collection;
+import java.util.Collections;
 import java.util.Date;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -71,7 +75,7 @@ import com.etendoerp.psd2.bank.integration.utils.BankIntegrationConstants;
  *   2. Payment method resolution per financial account (FinAccPaymentMethod)
  *   3. Currency compatibility check + proper financial transaction amounts
  */
-final class PaymentRegistrationService {
+public final class PaymentRegistrationService {
 
   private static final Logger log = LogManager.getLogger(PaymentRegistrationService.class);
 
@@ -345,6 +349,62 @@ final class PaymentRegistrationService {
         ? invoice.getBusinessPartner().getAccount()
         : invoice.getBusinessPartner().getPOFinancialAccount();
     return bpAccount != null ? bpAccount.getId() : null;
+  }
+
+  /**
+   * The invoice each of {@code paymentIds} was applied to, when there is exactly one.
+   *
+   * <p>Lets the payment window open the invoice's own payment editor for a draft, instead of the
+   * yes/no confirm dialog that is all it can offer today — that window has no form of its own
+   * ({@code hideFormCard}, every header field {@code form: false}), so without this there is no way
+   * to correct a payment before confirming it (ETP-4895 follow-up).
+   *
+   * <p>Only <b>positive</b> applications count. A payment that also consumes a credit carries a
+   * negative application against the credit note's own installment; that is the credit being spent,
+   * not a second invoice being paid, and the editor already models it as a credit source.
+   *
+   * <p>Absent for anything that is not exactly one invoice — an empty shell with no application at
+   * all, or the genuine multi-invoice payment this design does not cover. The caller falls back to
+   * the confirm dialog there.
+   *
+   * @param paymentIds the payments on the response; may be empty
+   * @return payment id → invoice id, resolved in a single query
+   */
+  public static Map<String, String> invoiceIdsByPayment(Collection<String> paymentIds) {
+    if (paymentIds == null || paymentIds.isEmpty()) {
+      return Collections.emptyMap();
+    }
+    Map<String, Set<String>> byPayment = new HashMap<>();
+    try {
+      OBContext.setAdminMode(true);
+      try {
+        String hql = "select distinct pd.finPayment.id, psd.invoicePaymentSchedule.invoice.id "
+            + "from FIN_Payment_Detail pd "
+            + "join pd.fINPaymentScheduleDetailList psd "
+            + "where pd.finPayment.id in :paymentIds "
+            + "and psd.invoicePaymentSchedule is not null "
+            + "and psd.amount > 0";
+        List<Object[]> rows = OBDal.getInstance().getSession()
+            .createQuery(hql, Object[].class)
+            .setParameterList("paymentIds", paymentIds)
+            .list();
+        for (Object[] row : rows) {
+          byPayment.computeIfAbsent((String) row[0], k -> new HashSet<>()).add((String) row[1]);
+        }
+      } finally {
+        OBContext.restorePreviousMode();
+      }
+    } catch (Exception e) {
+      log.warn("Could not resolve the invoices of the listed payments: {}", e.getMessage());
+      return Collections.emptyMap();
+    }
+    Map<String, String> single = new HashMap<>();
+    byPayment.forEach((paymentId, invoiceIds) -> {
+      if (invoiceIds.size() == 1) {
+        single.put(paymentId, invoiceIds.iterator().next());
+      }
+    });
+    return single;
   }
 
   // ─── PAYMENTS: list payments linked to an invoice ──────────────────────────
