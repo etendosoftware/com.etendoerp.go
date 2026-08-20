@@ -25,13 +25,18 @@ import static org.mockito.Mockito.*;
 
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
+import org.hibernate.Session;
+import org.hibernate.query.NativeQuery;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.mockito.MockedConstruction;
 import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
 import org.openbravo.dal.service.OBCriteria;
@@ -42,6 +47,8 @@ import org.openbravo.model.ad.access.WindowAccess;
 import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.ad.ui.Window;
 
+import com.etendoerp.go.roles.SystemRoleTemplates;
+import com.etendoerp.go.roles.UserRoleCompositionService;
 import com.etendoerp.go.schemaforge.data.SFSpec;
 
 /**
@@ -66,10 +73,21 @@ class SFRolesOverviewTest extends BaseWebhookTest {
     private static final String INVENTORY_ROLE_ID = "tenant-inventory-role";
 
     private SFRolesOverview webhook;
+    private NativeQuery<Object[]> categoryQuery;
 
     @BeforeEach
     void setUp() {
         webhook = new SFRolesOverview();
+
+        // ETP-4907: buildRolesOverview() unconditionally resolves the matrix's window
+        // categories via a native query. Default every test to "no category rows" (every
+        // window falls back to the "Other" bucket) — tests that care about category grouping
+        // override categoryQuery's stub explicitly.
+        Session mockSession = mock(Session.class);
+        when(obDal.getSession()).thenReturn(mockSession);
+        categoryQuery = mock(NativeQuery.class);
+        when(mockSession.createNativeQuery(anyString())).thenReturn(categoryQuery);
+        when(categoryQuery.getResultList()).thenReturn(Collections.emptyList());
     }
 
     // ── mocking helpers ──────────────────────────────────────────────────
@@ -467,6 +485,321 @@ class SFRolesOverviewTest extends BaseWebhookTest {
         // Sorted by name: "A Full Window" before "B Read Only Window".
         assertEquals("full", windows.getJSONObject(0).getString("tier"));
         assertEquals("read-only", windows.getJSONObject(1).getString("tier"));
+    }
+
+    // ── ETP-4907: system-template fallback ──────────────────────────────
+
+    /** Builds a mock system-level template {@link Role}, active by default. */
+    private Role mockTemplateRole(String id, String name) {
+        Role role = mock(Role.class);
+        when(role.getId()).thenReturn(id);
+        when(role.getName()).thenReturn(name);
+        when(role.isActive()).thenReturn(true);
+        when(role.isClientAdmin()).thenReturn(false);
+        return role;
+    }
+
+    /**
+     * Stubs {@code OBDal.get(Role.class, id)} for every one of {@link SystemRoleTemplates
+     * #byName()}'s 4 fixed ids, returning an active mock role named after the map key.
+     */
+    private void stubAllFourTemplatesResolve() {
+        SystemRoleTemplates.byName().forEach((name, id) -> {
+            Role templateRole = mockTemplateRole(id, name);
+            when(obDal.get(Role.class, id)).thenReturn(templateRole);
+        });
+    }
+
+    /**
+     * A tenant that has migrated to ETP-4852 system-level templates (its own "Finance"/"Sales"/
+     * "Purchasing"/"Inventory" rows deactivated — the live GOClient state, confirmed 2026-08-18)
+     * must still get 5 role cards: {@link #resolveTenantRoles} only returns the client-admin
+     * role, so the 4 fixed names fall back to the system templates, sourcing {@code userCount}
+     * from {@link UserRoleCompositionService#getAppliedTemplateRoleIdsForClient(String)} (never
+     * a direct {@code AD_User_Roles} count against the template) and {@code windows} from the
+     * SAME window-tier resolution a real tenant role uses.
+     */
+    @Test
+    @DisplayName("Missing tenant roles fall back to system-level templates, composition-based userCount")
+    void testSystemTemplateFallbackWhenTenantRolesAreMissing() throws Exception {
+        givenSystemAdminCallerRole();
+
+        Window salesOrderWindow = mockWindow("win-1", "Sales Order");
+        List<SFSpec> goWindowSpecs = Collections.singletonList(mockGoWindowSpec(salesOrderWindow));
+        OBCriteria<SFSpec> specCriteria = mockCriteria(SFSpec.class);
+        when(specCriteria.list()).thenReturn(goWindowSpecs);
+
+        // Only the client-admin role exists at the tenant level — the 4 fixed names are absent
+        // (mirrors GOClient's live, migrated state).
+        stubTenantRoles(Collections.singletonList(mockRole(ADMIN_ROLE_ID, "GOClient Admin", true)));
+        stubAllFourTemplatesResolve();
+
+        OBCriteria<UserRoles> userRolesCriteria = mockCriteria(UserRoles.class);
+        when(userRolesCriteria.list()).thenReturn(Collections.emptyList()); // admin's own count
+
+        // WindowAccess is queried once per role card: admin, then Finance/Sales/Purchasing/
+        // Inventory (SystemRoleTemplates#byName order) — only Finance's template grants the one
+        // GO window.
+        List<WindowAccess> financeWindowRows =
+                Collections.singletonList(mockWindowAccessRow(salesOrderWindow, true));
+        OBCriteria<WindowAccess> windowAccessCriteria = mockCriteria(WindowAccess.class);
+        when(windowAccessCriteria.list()).thenReturn(
+                Collections.emptyList(),
+                financeWindowRows,
+                Collections.emptyList(), Collections.emptyList(), Collections.emptyList());
+
+        Map<String, List<String>> composed = new LinkedHashMap<>();
+        composed.put("user-1", List.of(SystemRoleTemplates.FINANCE_ROLE_ID));
+        composed.put("user-2", List.of());
+        try (MockedConstruction<UserRoleCompositionService> construction = mockConstruction(
+                UserRoleCompositionService.class, (mockService, ctx) ->
+                        when(mockService.getAppliedTemplateRoleIdsForClient(CLIENT_ID)).thenReturn(composed))) {
+
+            webhook.get(parameters, responseVars);
+
+            assertEquals(1, construction.constructed().size(),
+                    "UserRoleCompositionService must be built lazily, once, for the whole request");
+        }
+
+        assertNull(responseVars.get(ERROR));
+        JSONObject result = new JSONObject(responseVars.get(RESULT));
+        JSONArray roles = result.getJSONArray("roles");
+        assertEquals(5, roles.length());
+
+        JSONObject admin = roles.getJSONObject(0);
+        assertEquals("tenant", admin.getString("roleSource"));
+
+        JSONObject finance = roles.getJSONObject(1);
+        assertEquals(SystemRoleTemplates.FINANCE_ROLE_ID, finance.getString("id"));
+        assertEquals("systemTemplate", finance.getString("roleSource"));
+        assertEquals(1, finance.getInt("userCount"));
+        assertEquals(1, finance.getInt("windowCount"));
+        assertEquals("win-1", finance.getJSONArray("windows").getJSONObject(0).getString("id"));
+
+        JSONObject sales = roles.getJSONObject(2);
+        assertEquals(SystemRoleTemplates.SALES_ROLE_ID, sales.getString("id"));
+        assertEquals("systemTemplate", sales.getString("roleSource"));
+        assertEquals(0, sales.getInt("userCount"));
+        assertEquals(0, sales.getInt("windowCount"));
+    }
+
+    /**
+     * When the tenant's own role for a fixed name is still active, it must be used as-is — the
+     * system-template fallback is only for names with NO active tenant-scoped match. Proves the
+     * two paths coexist correctly rather than one always winning.
+     */
+    @Test
+    @DisplayName("An active tenant role is preferred over its system-template counterpart")
+    void testActiveTenantRoleIsNotOverriddenByTemplate() throws Exception {
+        givenSystemAdminCallerRole();
+        stubBaselineQueries(standardTenantRoles(), Collections.emptyList());
+
+        try (MockedConstruction<UserRoleCompositionService> construction =
+                mockConstruction(UserRoleCompositionService.class)) {
+            webhook.get(parameters, responseVars);
+
+            assertTrue(construction.constructed().isEmpty(),
+                    "The composition service must never be constructed when every fixed name already "
+                            + "has an active tenant role");
+        }
+
+        JSONObject result = new JSONObject(responseVars.get(RESULT));
+        JSONArray roles = result.getJSONArray("roles");
+        for (int i = 0; i < roles.length(); i++) {
+            assertEquals("tenant", roles.getJSONObject(i).getString("roleSource"));
+        }
+        assertEquals(FINANCE_ROLE_ID, roles.getJSONObject(1).getString("id"));
+    }
+
+    /**
+     * When the system-template role itself does not resolve at all (missing {@code AD_Role} row
+     * — e.g. deleted or never seeded) for a fixed name with no active tenant-scoped match, that
+     * name is simply absent from the response — degrading gracefully like the existing
+     * "fewer than 5 roles" case — rather than throwing. Targets the specific early-return branch
+     * in {@link SFRolesOverview#addSystemTemplateRoleCardIfResolvable} triggered by
+     * {@code OBDal.get(Role.class, templateId) == null}.
+     */
+    @Test
+    @DisplayName("Missing system-template role (OBDal.get returns null) is silently omitted, not thrown")
+    void testSystemTemplateFallbackSkippedWhenTemplateRoleMissing() throws Exception {
+        givenSystemAdminCallerRole();
+        stubBaselineQueries(
+                Collections.singletonList(mockRole(ADMIN_ROLE_ID, "GOClient Admin", true)),
+                Collections.emptyList());
+
+        stubAllFourTemplatesResolve();
+        // Purchasing's template row does not exist at all (deleted / never seeded).
+        when(obDal.get(Role.class, SystemRoleTemplates.PURCHASING_ROLE_ID)).thenReturn(null);
+
+        Map<String, List<String>> composed = new LinkedHashMap<>();
+        try (MockedConstruction<UserRoleCompositionService> construction = mockConstruction(
+                UserRoleCompositionService.class, (mockService, ctx) ->
+                        when(mockService.getAppliedTemplateRoleIdsForClient(CLIENT_ID)).thenReturn(composed))) {
+            webhook.get(parameters, responseVars);
+        }
+
+        assertNull(responseVars.get(ERROR));
+        JSONObject result = new JSONObject(responseVars.get(RESULT));
+        JSONArray roles = result.getJSONArray("roles");
+        // Admin + Finance + Sales + Inventory = 4; Purchasing is absent, not a 5th entry with
+        // null/empty fields.
+        assertEquals(4, roles.length());
+        for (int i = 0; i < roles.length(); i++) {
+            assertNotEquals(SystemRoleTemplates.PURCHASING_ROLE_ID, roles.getJSONObject(i).getString("id"));
+        }
+    }
+
+    /**
+     * When the system-template role resolves but is {@code IsActive = 'N'}, it must be treated
+     * exactly like a missing row — omitted, not returned with stale/inactive data. Targets the
+     * {@code !Boolean.TRUE.equals(templateRole.isActive())} half of the same early-return branch.
+     */
+    @Test
+    @DisplayName("Inactive system-template role is silently omitted, not thrown")
+    void testSystemTemplateFallbackSkippedWhenTemplateRoleInactive() throws Exception {
+        givenSystemAdminCallerRole();
+        stubBaselineQueries(
+                Collections.singletonList(mockRole(ADMIN_ROLE_ID, "GOClient Admin", true)),
+                Collections.emptyList());
+
+        stubAllFourTemplatesResolve();
+        // Inventory's template row exists but has since been deactivated.
+        Role inactiveInventoryTemplate = mockTemplateRole(SystemRoleTemplates.INVENTORY_ROLE_ID, "Inventory");
+        when(inactiveInventoryTemplate.isActive()).thenReturn(false);
+        when(obDal.get(Role.class, SystemRoleTemplates.INVENTORY_ROLE_ID)).thenReturn(inactiveInventoryTemplate);
+
+        Map<String, List<String>> composed = new LinkedHashMap<>();
+        try (MockedConstruction<UserRoleCompositionService> construction = mockConstruction(
+                UserRoleCompositionService.class, (mockService, ctx) ->
+                        when(mockService.getAppliedTemplateRoleIdsForClient(CLIENT_ID)).thenReturn(composed))) {
+            webhook.get(parameters, responseVars);
+        }
+
+        assertNull(responseVars.get(ERROR));
+        JSONObject result = new JSONObject(responseVars.get(RESULT));
+        JSONArray roles = result.getJSONArray("roles");
+        assertEquals(4, roles.length());
+        for (int i = 0; i < roles.length(); i++) {
+            assertNotEquals(SystemRoleTemplates.INVENTORY_ROLE_ID, roles.getJSONObject(i).getString("id"));
+        }
+    }
+
+    /**
+     * The full degradation case: a tenant with only its client-admin role active, AND every one
+     * of the 4 system templates missing/inactive, must still return a valid (if minimal)
+     * response — just the admin card — never an exception. Also confirms
+     * {@code UserRoleCompositionService} is never constructed when no fallback template ever
+     * resolves far enough to need a composed user count (laziness holds under total
+     * degradation, not only in the "every fixed name already has a tenant role" case covered by
+     * {@link #testActiveTenantRoleIsNotOverriddenByTemplate}).
+     */
+    @Test
+    @DisplayName("All four system templates missing/inactive degrades to just the admin role, without constructing the composition service")
+    void testAllSystemTemplatesUnresolvableDegradesToAdminOnly() throws Exception {
+        givenSystemAdminCallerRole();
+        stubBaselineQueries(
+                Collections.singletonList(mockRole(ADMIN_ROLE_ID, "GOClient Admin", true)),
+                Collections.emptyList());
+        // obDal.get(Role.class, <any template id>) is left unstubbed → returns null for all 4.
+
+        try (MockedConstruction<UserRoleCompositionService> construction =
+                mockConstruction(UserRoleCompositionService.class)) {
+            webhook.get(parameters, responseVars);
+
+            assertTrue(construction.constructed().isEmpty(),
+                    "The composition service must never be constructed when every fallback template "
+                            + "is unresolvable");
+        }
+
+        assertNull(responseVars.get(ERROR));
+        JSONObject result = new JSONObject(responseVars.get(RESULT));
+        JSONArray roles = result.getJSONArray("roles");
+        assertEquals(1, roles.length());
+        assertEquals(ADMIN_ROLE_ID, roles.getJSONObject(0).getString("id"));
+    }
+
+    // ── ETP-4907: matrix ──────────────────────────────────────────────────
+
+    /**
+     * The matrix must include EVERY Etendo GO window — including one no role in the response can
+     * reach at all (tier {@code "none"}) — grouped by its resolved top-level menu category, and
+     * keyed per-role by the SAME role ids the {@code roles} array uses.
+     */
+    @Test
+    @DisplayName("Matrix covers every GO window, grouped by category, with 'none' for unreachable windows")
+    void testMatrixGroupsByCategoryAndMarksNoneForUnreachableWindow() throws Exception {
+        givenSystemAdminCallerRole();
+
+        Window reachableWindow = mockWindow("win-reachable", "Sales Order");
+        Window unreachableWindow = mockWindow("win-unreachable", "Orphan Window");
+        List<SFSpec> goWindowSpecs = Arrays.asList(
+                mockGoWindowSpec(reachableWindow), mockGoWindowSpec(unreachableWindow));
+        OBCriteria<SFSpec> specCriteria = mockCriteria(SFSpec.class);
+        when(specCriteria.list()).thenReturn(goWindowSpecs);
+
+        List<Role> roles = standardTenantRoles();
+        stubTenantRoles(roles);
+
+        OBCriteria<UserRoles> userRolesCriteria = mockCriteria(UserRoles.class);
+        when(userRolesCriteria.list()).thenReturn(Collections.emptyList());
+
+        // Only the admin role (processed first) can reach reachableWindow; nobody can reach
+        // unreachableWindow.
+        List<WindowAccess> adminWindowRows = Collections.singletonList(mockWindowAccessRow(reachableWindow, true));
+        OBCriteria<WindowAccess> windowAccessCriteria = mockCriteria(WindowAccess.class);
+        when(windowAccessCriteria.list()).thenReturn(
+                adminWindowRows,
+                Collections.emptyList(), Collections.emptyList(),
+                Collections.emptyList(), Collections.emptyList());
+
+        // Category resolution: both windows map to the same "Sales Management" folder.
+        Object[] row1 = { "win-reachable", "Sales Management" };
+        Object[] row2 = { "win-unreachable", "Sales Management" };
+        when(categoryQuery.getResultList()).thenReturn(Arrays.asList(row1, row2));
+
+        webhook.get(parameters, responseVars);
+
+        assertNull(responseVars.get(ERROR));
+        JSONObject result = new JSONObject(responseVars.get(RESULT));
+        JSONArray categories = result.getJSONObject("matrix").getJSONArray("categories");
+        assertEquals(1, categories.length());
+        JSONObject category = categories.getJSONObject(0);
+        assertEquals("Sales Management", category.getString("name"));
+
+        JSONArray windows = category.getJSONArray("windows");
+        assertEquals(2, windows.length());
+        // Sorted by name: "Orphan Window" before "Sales Order".
+        JSONObject orphan = windows.getJSONObject(0);
+        assertEquals("win-unreachable", orphan.getString("id"));
+        JSONObject orphanAccess = orphan.getJSONObject("access");
+        assertEquals("none", orphanAccess.getString(ADMIN_ROLE_ID));
+
+        JSONObject salesOrder = windows.getJSONObject(1);
+        assertEquals("win-reachable", salesOrder.getString("id"));
+        assertEquals("full", salesOrder.getJSONObject("access").getString(ADMIN_ROLE_ID));
+        assertEquals("none", salesOrder.getJSONObject("access").getString(FINANCE_ROLE_ID));
+    }
+
+    /**
+     * A window with no resolvable top-level menu folder (empty category query result) must not
+     * be silently dropped from the matrix — it falls back into the {@code "Other"} bucket.
+     */
+    @Test
+    @DisplayName("A window with no resolvable category falls back to the 'Other' bucket")
+    void testWindowWithNoCategoryFallsBackToOther() throws Exception {
+        givenSystemAdminCallerRole();
+        stubBaselineQueries(standardTenantRoles(),
+                Collections.singletonList(mockWindow("win-x", "Mystery Window")));
+        // categoryQuery already stubbed to return an empty list by default (see setUp()).
+
+        webhook.get(parameters, responseVars);
+
+        assertNull(responseVars.get(ERROR));
+        JSONObject result = new JSONObject(responseVars.get(RESULT));
+        JSONArray categories = result.getJSONObject("matrix").getJSONArray("categories");
+        assertEquals(1, categories.length());
+        assertEquals("Other", categories.getJSONObject(0).getString("name"));
+        assertEquals(1, categories.getJSONObject(0).getJSONArray("windows").length());
     }
 
     // ── exception handling ───────────────────────────────────────────────
