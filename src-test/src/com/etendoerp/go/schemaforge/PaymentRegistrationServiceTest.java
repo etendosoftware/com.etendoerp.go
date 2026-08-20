@@ -1855,7 +1855,9 @@ class PaymentRegistrationServiceTest {
 
   @Test
   void invoiceIdsByPaymentResolvesASinglePayment() {
-    stubInvoiceQuery(List.of(new Object[]{ "pay-1", "inv-1" }));
+    // Explicit type argument: with a single element, List.of would read the row as the varargs
+    // array itself and infer List<Object> instead of a one-row List<Object[]>.
+    stubInvoiceQuery(List.<Object[]>of(new Object[]{ "pay-1", "inv-1" }));
 
     assertEquals("inv-1", PaymentRegistrationService.invoiceIdsByPayment(List.of("pay-1")).get("pay-1"));
   }

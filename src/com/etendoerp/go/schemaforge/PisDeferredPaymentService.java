@@ -638,7 +638,8 @@ public final class PisDeferredPaymentService {
     if (isSupersededByNewerAttempt(attempt)) {
       return true;
     }
-    if (!payment.isProcessed()) {
+    // Boxed on the entity, so compare rather than unbox: a null would blow up on a read path.
+    if (!Boolean.TRUE.equals(payment.isProcessed())) {
       return true;
     }
     Date attemptAt = attempt.getLastStatusAt() != null ? attempt.getLastStatusAt()

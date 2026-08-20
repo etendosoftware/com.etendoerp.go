@@ -143,6 +143,9 @@ class PisDeferredPaymentServiceTest {
       when(pisPayment.getStatus()).thenReturn("failed");
       when(pisPayment.getPayment()).thenReturn(payment);
       when(payment.getStatus()).thenReturn("PPM");
+      // Processed and untouched since the transfer was rejected — the rejection still describes it.
+      // A payment that is not processed has been reactivated, and isStaleAttempt skips it.
+      when(payment.isProcessed()).thenReturn(true);
 
       reconcileWith(pisPayment);
 
@@ -159,6 +162,9 @@ class PisDeferredPaymentServiceTest {
       when(pisPayment.getStatus()).thenReturn("failed");
       when(pisPayment.getPayment()).thenReturn(payment);
       when(payment.getStatus()).thenReturn("PPM");
+      // Processed, so the flag really is applied here — otherwise this would pass for the wrong
+      // reason, with isStaleAttempt skipping the payment before anything touched it.
+      when(payment.isProcessed()).thenReturn(true);
 
       reconcileWith(pisPayment);
 

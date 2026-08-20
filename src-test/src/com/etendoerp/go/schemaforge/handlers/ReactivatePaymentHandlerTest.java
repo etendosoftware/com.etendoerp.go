@@ -1246,7 +1246,7 @@ public class ReactivatePaymentHandlerTest {
     NeoResponse result = new ReactivatePaymentHandler().handle(actionCtx("pisPaymentStatus", "pay-1"));
 
     assertNotNull(result);
-    assertEquals(HttpServletResponse.SC_BAD_REQUEST, result.getStatus());
+    assertEquals(HttpServletResponse.SC_BAD_REQUEST, result.getHttpStatus());
   }
 
   /** An action this handler does not own is left to the default CRUD path. */
