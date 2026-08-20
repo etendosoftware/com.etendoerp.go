@@ -17,6 +17,7 @@
 package com.etendoerp.go.schemaforge;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
@@ -63,6 +64,8 @@ class PisRejectedPaymentHandlerTest {
   private PisRejectedPaymentHandler handler;
   private MockedStatic<ModelProvider> mockedModelProvider;
   private MockedStatic<TriggerHandler> mockedTriggerHandler;
+  /** The newer-attempt probe hits the DAL, which these tests have no session for. */
+  private MockedStatic<PisDeferredPaymentService> mockedDeferred;
 
   private Entity pisEntity;
   private Property statusProp;
@@ -91,12 +94,17 @@ class PisRejectedPaymentHandlerTest {
     when(triggerHandler.isDisabled()).thenReturn(false);
     mockedTriggerHandler = mockStatic(TriggerHandler.class);
     mockedTriggerHandler.when(TriggerHandler::getInstance).thenReturn(triggerHandler);
+
+    mockedDeferred = mockStatic(PisDeferredPaymentService.class);
+    mockedDeferred.when(() -> PisDeferredPaymentService.isStaleAttempt(any(), any()))
+        .thenReturn(false);
   }
 
   @AfterEach
   void tearDown() {
     mockedModelProvider.close();
     mockedTriggerHandler.close();
+    mockedDeferred.close();
     Mockito.framework().clearInlineMocks();
   }
 
@@ -154,6 +162,22 @@ class PisRejectedPaymentHandlerTest {
     // The observer, the SPA poll and reconcileAttemptsFor can all reach the same row.
     FIN_Payment payment = mock(FIN_Payment.class);
     when(payment.getStatus()).thenReturn("ETGOERR");
+
+    handler.onUpdate(event("failed", payment));
+
+    verify(payment, never()).setStatus(anyString());
+  }
+
+  @Test
+  @DisplayName("leaves the payment alone when the rejection no longer describes it")
+  void ignoresStaleAttempts() {
+    // PSD2's refresh writes the same 'failed' status again on every pass, which fires this observer
+    // even though nothing changed. If a retry is in flight, or the user took the payment back to
+    // draft, re-flagging here would undo whichever of the two just happened.
+    FIN_Payment payment = mock(FIN_Payment.class);
+    when(payment.getStatus()).thenReturn("PPM");
+    mockedDeferred.when(() -> PisDeferredPaymentService.isStaleAttempt(any(), any()))
+        .thenReturn(true);
 
     handler.onUpdate(event("failed", payment));
 

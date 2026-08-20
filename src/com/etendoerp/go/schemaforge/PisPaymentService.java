@@ -51,8 +51,11 @@ import com.etendoerp.psd2.bank.integration.utils.PISPaymentDao;
  * Reuses {@link PaymentRegistrationService}'s shared response-envelope helpers and error messages
  * (package-visible on that class for this reason). Starting a transfer lives in
  * {@link PisDeferredPaymentService}.
+ *
+ * <p>Public only for {@code handlePisPaymentStatus}, which the payment window's handler routes from
+ * another package so a retry started there can be polled like one started from the invoice modal.
  */
-final class PisPaymentService {
+public final class PisPaymentService {
 
   private static final Logger log = LogManager.getLogger(PisPaymentService.class);
 
@@ -110,7 +113,7 @@ final class PisPaymentService {
    * widget / bank confirmation is pending.
    * Body: {@code {pisPaymentId}}.
    */
-  static NeoResponse handlePisPaymentStatus(NeoContext context) {
+  public static NeoResponse handlePisPaymentStatus(NeoContext context) {
     JSONObject body = context.getRequestBody();
     String pisPaymentId = body != null ? body.optString(FIELD_PIS_PAYMENT_ID, null) : null;
     if (StringUtils.isBlank(pisPaymentId)) {

@@ -22,6 +22,7 @@ import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.spy;
@@ -36,6 +37,7 @@ import java.util.List;
 import java.util.Set;
 
 import javax.inject.Named;
+import javax.servlet.http.HttpServletResponse;
 
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
@@ -44,6 +46,8 @@ import org.junit.Test;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
 import org.openbravo.advpaymentmngt.process.FIN_AddPayment;
+import org.openbravo.advpaymentmngt.utility.FIN_Utility;
+import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.financialmgmt.payment.FIN_FinaccTransaction;
@@ -88,6 +92,18 @@ public class ReactivatePaymentHandlerTest {
         .httpMethod("POST")
         .endpointType(NeoEndpointType.ACTION)
         .fieldName("eTPRRemovePayment")
+        .recordId(recordId)
+        .build();
+  }
+
+  /** An ACTION context for {@code fieldName} on the payment record. */
+  private static NeoContext actionCtx(String fieldName, String recordId) {
+    return NeoContext.builder()
+        .specName("payment-out")
+        .entityName("finPayment")
+        .httpMethod("POST")
+        .endpointType(NeoEndpointType.ACTION)
+        .fieldName(fieldName)
         .recordId(recordId)
         .build();
   }
@@ -1218,4 +1234,70 @@ public class ReactivatePaymentHandlerTest {
       assertEquals("trx-1", result);
     }
   }
+
+  /** Routes the transfer poll, so a retry started here can be followed to its outcome. */
+  @Test
+  public void routesPisPaymentStatus() {
+    // Without this route the payment window had no way to ask Salt Edge how the new attempt ended:
+    // the action was only reachable through an invoice header, the webhook cannot reach a server
+    // that is not publicly addressable, and PSD2's periodic refresh is not scheduled by default —
+    // so a retry sat at 'requested' and the payment read as in progress indefinitely (ETP-4895).
+    // Reaching the service means the route matched; the missing body is what it rejects on.
+    NeoResponse result = new ReactivatePaymentHandler().handle(actionCtx("pisPaymentStatus", "pay-1"));
+
+    assertNotNull(result);
+    assertEquals(HttpServletResponse.SC_BAD_REQUEST, result.getStatus());
+  }
+
+  /** An action this handler does not own is left to the default CRUD path. */
+  @Test
+  public void ignoresUnknownActions() {
+    assertNull(new ReactivatePaymentHandler().handle(actionCtx("somethingElse", "pay-1")));
+  }
+
+  /**
+   * Core's reactivation restores the invoice's paid amounts only when the payment's status matches
+   * the one its payment method implies. ETGOERR is not in that sequence
+   * ({@code aprm_seqnumberpaymentstatus} answers 70 for anything unknown, 40 for PPM), so the
+   * comparison never held and the payment came back to draft with its invoice still fully paid.
+   */
+  @Test
+  public void clearsTheTransferErrorFlagBeforeCoreReactivates() {
+    FIN_Payment payment = mock(FIN_Payment.class);
+    when(payment.getStatus()).thenReturn("ETGOERR");
+
+    try (MockedStatic<OBDal> dal = Mockito.mockStatic(OBDal.class);
+        MockedStatic<OBContext> ctx = Mockito.mockStatic(OBContext.class);
+        MockedStatic<FIN_Utility> util = Mockito.mockStatic(FIN_Utility.class)) {
+      OBDal instance = mock(OBDal.class);
+      dal.when(OBDal::getInstance).thenReturn(instance);
+      when(instance.get(FIN_Payment.class, "pay-err")).thenReturn(payment);
+      // The value Core is about to compare against — not a literal, so an account with automatic
+      // withdrawal on (PWNC, not PPM) is restored correctly too.
+      util.when(() -> FIN_Utility.invoicePaymentStatus(payment)).thenReturn("PPM");
+
+      new ReactivatePaymentHandler().handle(actionCtx("etprReactivatePayment", "pay-err"));
+
+      verify(payment).setStatus("PPM");
+    }
+  }
+
+  /** A payment that was never flagged keeps whatever status it has. */
+  @Test
+  public void leavesAnUnflaggedPaymentAlone() {
+    FIN_Payment payment = mock(FIN_Payment.class);
+    when(payment.getStatus()).thenReturn("PWNC");
+
+    try (MockedStatic<OBDal> dal = Mockito.mockStatic(OBDal.class);
+        MockedStatic<OBContext> ctx = Mockito.mockStatic(OBContext.class)) {
+      OBDal instance = mock(OBDal.class);
+      dal.when(OBDal::getInstance).thenReturn(instance);
+      when(instance.get(FIN_Payment.class, "pay-ok")).thenReturn(payment);
+
+      new ReactivatePaymentHandler().handle(actionCtx("etprReactivatePayment", "pay-ok"));
+
+      verify(payment, never()).setStatus(anyString());
+    }
+  }
+
 }

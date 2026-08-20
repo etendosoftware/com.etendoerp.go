@@ -20,6 +20,7 @@ package com.etendoerp.go.schemaforge;
 import java.math.BigDecimal;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.Date;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -597,11 +598,81 @@ public final class PisDeferredPaymentService {
     if (payment == null || StringUtils.equals(PAYMENT_STATUS_ERROR, payment.getStatus())) {
       return;
     }
+    if (isStaleAttempt(pisPayment, payment)) {
+      return;
+    }
     payment.setStatus(PAYMENT_STATUS_ERROR);
     OBDal.getInstance().save(payment);
     OBDal.getInstance().flush();
     log.info("PIS {} was rejected after the bank had committed — payment {} flagged as {}",
         pisPayment.getId(), payment.getDocumentNo(), PAYMENT_STATUS_ERROR);
+  }
+
+  /**
+   * True when this rejected transfer no longer describes the payment as it stands.
+   *
+   * <p>The flag means one specific thing: <em>this payment, as it is right now, was produced by a
+   * transfer the bank refused</em>. Three situations break that link, and in all of them re-flagging
+   * undoes something the user or a later transfer already did:
+   *
+   * <ol>
+   *   <li><b>A newer attempt exists.</b> A retry starts a second transfer and puts the payment back
+   *       in progress; the rejected row stays only as the audit trail of the attempt that failed.
+   *   <li><b>The payment is no longer processed.</b> The user reactivated it: it is a draft being
+   *       reworked, and a draft is not "a payment whose transfer failed".
+   *   <li><b>The payment changed after this attempt last did.</b> It was reactivated and confirmed
+   *       again — possibly by another method entirely — so whatever it is now, this rejection is
+   *       not what produced it.
+   * </ol>
+   *
+   * <p>Without these, {@link #reconcileAttemptsFor} — which walks every attempt each time a screen
+   * opens — kept dragging the payment back to {@link #PAYMENT_STATUS_ERROR}: a retry read as failed
+   * again on the next window load, and a reactivated payment came back from the server still
+   * flagged, half draft ({@code processed = N}) and half errored.
+   *
+   * @param attempt the rejected transfer being evaluated
+   * @param payment the payment it produced
+   * @return true when the rejection must not be applied to the payment
+   */
+  static boolean isStaleAttempt(PisPayment attempt, FIN_Payment payment) {
+    if (isSupersededByNewerAttempt(attempt)) {
+      return true;
+    }
+    if (!payment.isProcessed()) {
+      return true;
+    }
+    Date attemptAt = attempt.getLastStatusAt() != null ? attempt.getLastStatusAt()
+        : attempt.getCreationDate();
+    return attemptAt != null && payment.getUpdated() != null
+        && payment.getUpdated().after(attemptAt);
+  }
+
+  /**
+   * True when a later transfer exists on the same payment, which makes this rejected one history.
+   *
+   * <p>A retry starts a second {@code PSD2_PIS_PAYMENT} row against the same payment and puts it
+   * back in progress; the rejected row stays as the audit trail of the attempt that failed. Without
+   * this guard that row keeps re-flagging the payment as {@link #PAYMENT_STATUS_ERROR} every time
+   * anything touches it — {@link #reconcileAttemptsFor} walks <em>all</em> attempts when a screen
+   * opens, and PSD2's refresh fires an update event even when the status it writes is unchanged —
+   * so a retry read as failed again the moment the window was reloaded.
+   *
+   * <p>Only the newest attempt speaks for the payment. If that one is refused in turn, it is the
+   * one that flags it.
+   *
+   * @param attempt the rejected transfer being evaluated
+   * @return true when a newer attempt exists for the same payment
+   */
+  static boolean isSupersededByNewerAttempt(PisPayment attempt) {
+    FIN_Payment payment = attempt.getPayment();
+    if (payment == null || attempt.getCreationDate() == null) {
+      return false;
+    }
+    OBCriteria<PisPayment> crit = OBDal.getInstance().createCriteria(PisPayment.class);
+    crit.add(Restrictions.eq(PisPayment.PROPERTY_PAYMENT, payment));
+    crit.add(Restrictions.gt(PisPayment.PROPERTY_CREATIONDATE, attempt.getCreationDate()));
+    crit.setMaxResults(1);
+    return !crit.list().isEmpty();
   }
 
   /**

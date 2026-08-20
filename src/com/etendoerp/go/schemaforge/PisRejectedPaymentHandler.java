@@ -92,6 +92,13 @@ public class PisRejectedPaymentHandler extends EntityPersistenceEventObserver {
         // means another writer got here first — both are ordinary, not errors.
         return;
       }
+      if (PisDeferredPaymentService.isStaleAttempt((PisPayment) event.getTargetInstance(), payment)) {
+        // This rejection no longer describes the payment: a retry is already in flight, or the user
+        // took the payment back to draft. PSD2's refresh rewrites the same 'failed' status on every
+        // pass and fires this observer each time, so without the check a refresh of the old row
+        // would undo whichever of the two just happened.
+        return;
+      }
       // No OBDal.save/flush: the payment is already managed by the session running this flush, and
       // flushing from inside a flush is what makes observers dangerous.
       payment.setStatus(PAYMENT_STATUS_ERROR);

@@ -30,6 +30,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.lang.reflect.Method;
+import java.util.Date;
 import java.util.List;
 
 import org.codehaus.jettison.json.JSONObject;
@@ -269,6 +270,10 @@ class PisDeferredPaymentServiceTest {
       when(attempt.getStatus()).thenReturn("failed");
       when(attempt.getPayment()).thenReturn(payment);
       when(payment.getStatus()).thenReturn("PPM");
+      // Processed, and untouched since the transfer was rejected: the rejection still describes it.
+      when(payment.isProcessed()).thenReturn(true);
+      when(payment.getUpdated()).thenReturn(new Date(1000L));
+      when(attempt.getLastStatusAt()).thenReturn(new Date(2000L));
 
       try (MockedStatic<OBDal> dal = mockStatic(OBDal.class)) {
         OBDal instance = mock(OBDal.class);
@@ -302,6 +307,141 @@ class PisDeferredPaymentServiceTest {
         dal.when(OBDal::getInstance).thenThrow(new IllegalStateException("no session"));
         PisDeferredPaymentService.reconcileAttemptsFor(payment);
       }
+    }
+  }
+
+  @Nested
+  @DisplayName("a rejection stops describing the payment once either has moved on")
+  class StaleAttempts {
+
+    /** Mocks OBDal so the newer-attempt probe returns {@code newer}. */
+    private boolean isSuperseded(PisPayment attempt, List<PisPayment> newer) {
+      try (MockedStatic<OBDal> dal = mockStatic(OBDal.class)) {
+        OBDal instance = mock(OBDal.class);
+        @SuppressWarnings("unchecked")
+        OBCriteria<PisPayment> crit = mock(OBCriteria.class);
+        dal.when(OBDal::getInstance).thenReturn(instance);
+        doReturn(crit).when(instance).createCriteria(PisPayment.class);
+        when(crit.add(any())).thenReturn(crit);
+        doReturn(newer).when(crit).list();
+        return PisDeferredPaymentService.isSupersededByNewerAttempt(attempt);
+      }
+    }
+
+    private PisPayment rejectedAttempt(FIN_Payment payment) {
+      PisPayment attempt = mock(PisPayment.class);
+      when(attempt.getStatus()).thenReturn("failed");
+      when(attempt.getPayment()).thenReturn(payment);
+      when(attempt.getCreationDate()).thenReturn(new Date());
+      return attempt;
+    }
+
+    @Test
+    @DisplayName("a rejected attempt with a newer one behind it no longer speaks for the payment")
+    void newerAttemptWins() {
+      PisPayment attempt = rejectedAttempt(mock(FIN_Payment.class));
+      assertTrue(isSuperseded(attempt, List.of(mock(PisPayment.class))));
+    }
+
+    @Test
+    @DisplayName("the latest attempt is the one that flags the payment")
+    void lastAttemptIsNotSuperseded() {
+      PisPayment attempt = rejectedAttempt(mock(FIN_Payment.class));
+      assertFalse(isSuperseded(attempt, List.of()));
+    }
+
+    @Test
+    @DisplayName("an attempt that never produced a payment has nothing to supersede")
+    void noPaymentIsNeverSuperseded() {
+      PisPayment attempt = mock(PisPayment.class);
+      when(attempt.getPayment()).thenReturn(null);
+      // No OBDal mock on purpose: resolving this must not reach the database at all.
+      assertFalse(PisDeferredPaymentService.isSupersededByNewerAttempt(attempt));
+    }
+
+    @Test
+    @DisplayName("without a creation date the attempts cannot be ordered, so none is suppressed")
+    void undatedAttemptIsNotSuperseded() {
+      PisPayment attempt = mock(PisPayment.class);
+      when(attempt.getPayment()).thenReturn(mock(FIN_Payment.class));
+      when(attempt.getCreationDate()).thenReturn(null);
+      assertFalse(PisDeferredPaymentService.isSupersededByNewerAttempt(attempt));
+    }
+
+    @Test
+    @DisplayName("opening a screen does not undo a retry that is already in flight")
+    void doesNotReflagWhileARetryRuns() {
+      // The regression this guard exists for: retryReusingPayment puts the payment back in PPM and
+      // leaves the rejected row as the audit trail, but reconcileAttemptsFor walks EVERY attempt —
+      // so the old failure flagged the payment as errored again on the next window load.
+      FIN_Payment payment = mock(FIN_Payment.class);
+      when(payment.getStatus()).thenReturn("PPM");
+      PisPayment rejected = rejectedAttempt(payment);
+      PisPayment inFlight = mock(PisPayment.class);
+      when(inFlight.getStatus()).thenReturn("requested");
+
+      try (MockedStatic<OBDal> dal = mockStatic(OBDal.class)) {
+        OBDal instance = mock(OBDal.class);
+        @SuppressWarnings("unchecked")
+        OBCriteria<PisPayment> attempts = mock(OBCriteria.class);
+        @SuppressWarnings("unchecked")
+        OBCriteria<PisPayment> probe = mock(OBCriteria.class);
+        dal.when(OBDal::getInstance).thenReturn(instance);
+        // First criteria: the attempts of the payment. Second: the newer-attempt probe.
+        doReturn(attempts).doReturn(probe).when(instance).createCriteria(PisPayment.class);
+        when(attempts.add(any())).thenReturn(attempts);
+        when(probe.add(any())).thenReturn(probe);
+        doReturn(List.of(rejected, inFlight)).when(attempts).list();
+        doReturn(List.of(inFlight)).when(probe).list();
+
+        PisDeferredPaymentService.reconcileAttemptsFor(payment);
+      }
+
+      verify(payment, never()).setStatus("ETGOERR");
+    }
+
+    /** Builds a payment/attempt pair and returns whether the rejection still applies. */
+    private boolean isStale(boolean processed, long paymentUpdatedMs, long attemptStatusMs) {
+      FIN_Payment payment = mock(FIN_Payment.class);
+      when(payment.isProcessed()).thenReturn(processed);
+      when(payment.getUpdated()).thenReturn(new Date(paymentUpdatedMs));
+      PisPayment attempt = mock(PisPayment.class);
+      when(attempt.getPayment()).thenReturn(payment);
+      when(attempt.getCreationDate()).thenReturn(new Date(attemptStatusMs));
+      when(attempt.getLastStatusAt()).thenReturn(new Date(attemptStatusMs));
+      try (MockedStatic<OBDal> dal = mockStatic(OBDal.class)) {
+        OBDal instance = mock(OBDal.class);
+        @SuppressWarnings("unchecked")
+        OBCriteria<PisPayment> crit = mock(OBCriteria.class);
+        dal.when(OBDal::getInstance).thenReturn(instance);
+        doReturn(crit).when(instance).createCriteria(PisPayment.class);
+        when(crit.add(any())).thenReturn(crit);
+        doReturn(List.of()).when(crit).list();
+        return PisDeferredPaymentService.isStaleAttempt(attempt, payment);
+      }
+    }
+
+    @Test
+    @DisplayName("a payment the user took back to draft is not a payment whose transfer failed")
+    void reactivatedPaymentIsNotReflagged() {
+      // The regression the reactivate flow hit: reactivating cleared `processed`, and the next
+      // window load walked the attempts and dragged the payment back to ETGOERR — leaving it half
+      // draft and half errored, with the invoice still reading as paid.
+      assertTrue(isStale(false, 2000L, 1000L));
+    }
+
+    @Test
+    @DisplayName("a payment confirmed again after the rejection is no longer described by it")
+    void paymentTouchedAfterTheAttemptIsNotReflagged() {
+      // Reactivated and confirmed again — possibly by another method entirely. Whatever the payment
+      // is now, this rejection did not produce it.
+      assertTrue(isStale(true, 2000L, 1000L));
+    }
+
+    @Test
+    @DisplayName("an untouched processed payment still takes the flag")
+    void untouchedPaymentIsFlagged() {
+      assertFalse(isStale(true, 1000L, 2000L));
     }
   }
 

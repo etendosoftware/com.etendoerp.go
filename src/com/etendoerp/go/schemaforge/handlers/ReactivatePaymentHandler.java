@@ -34,6 +34,8 @@ import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.criterion.Restrictions;
 import org.openbravo.advpaymentmngt.process.FIN_AddPayment;
+import org.openbravo.advpaymentmngt.utility.FIN_Utility;
+import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.currency.Currency;
@@ -51,6 +53,7 @@ import com.etendoerp.go.schemaforge.NeoHandler;
 import com.etendoerp.go.schemaforge.NeoResponse;
 import com.etendoerp.go.schemaforge.PaymentRegistrationService;
 import com.etendoerp.go.schemaforge.PisDeferredPaymentService;
+import com.etendoerp.go.schemaforge.PisPaymentService;
 import com.etendoerp.go.schemaforge.util.NeoButtonActionHelper;
 import com.etendoerp.payment.removal.util.PaymentRemovalUtil;
 import com.etendoerp.psd2.bank.integration.data.PisPayment;
@@ -169,6 +172,19 @@ public class ReactivatePaymentHandler implements NeoHandler {
    * the invoice the payment came from.
    */
   private static final String PIS_RETRY_ACTION_FIELD = "retryPisPayment";
+  /**
+   * Same poll the invoice's payment modal runs, reachable from the payment record too.
+   *
+   * <p>A retry started here opens the bank popup and then had nothing watching it: the modal's poll
+   * belongs to the modal, the async webhook cannot reach a non-public server, and PSD2's periodic
+   * refresh is not scheduled by default — so the new attempt sat at {@code requested} and the
+   * payment read as "in progress" long after the bank had executed it. The action itself takes the
+   * transfer from the body and ignores the record it is posted to, so routing it here needs no
+   * invoice.
+   */
+  private static final String PIS_STATUS_ACTION_FIELD = "pisPaymentStatus";
+  /** Mirrors {@code PisDeferredPaymentService.PAYMENT_STATUS_ERROR}, which is not visible here. */
+  private static final String PAYMENT_STATUS_ERROR = "ETGOERR";
   private static final String FIELD_PIS_PAYMENT_ID = "pisPaymentId";
   /**
    * Read-only flag telling the UI that this payment's lifecycle belongs to its bank transfer, so
@@ -224,11 +240,15 @@ public class ReactivatePaymentHandler implements NeoHandler {
       // from the payment record, which is where a rejection observed after the fact shows up.
       return PisDeferredPaymentService.handleRetryPisPayment(context);
     }
+    if (PIS_STATUS_ACTION_FIELD.equals(fieldName)) {
+      return PisPaymentService.handlePisPaymentStatus(context);
+    }
     return null;
   }
 
   private NeoResponse handleReactivate(NeoContext context) {
     try {
+      clearTransferErrorFlag(context.getRecordId());
       JSONObject params = new JSONObject();
       params.put(ACTION_PARAM, REACTIVATE_VALUE);
       return NeoButtonActionHelper.executeButtonActionCore(
@@ -236,6 +256,52 @@ public class ReactivatePaymentHandler implements NeoHandler {
     } catch (Exception e) {
       log.error("Error reactivating payment for record {}", context.getRecordId(), e);
       return NeoResponse.error(500, "Payment reactivation failed: " + e.getMessage());
+    }
+  }
+
+  /**
+   * Puts Core's own status back on a payment flagged {@code ETGOERR} before Core reactivates it.
+   *
+   * <p>{@code ETGOERR} is Etendo Go's overlay on a payment Core knows as processed. Core's
+   * reactivation decides whether to give the invoice its outstanding back by comparing the
+   * payment's status against the one its payment method implies:
+   *
+   * <pre>
+   * restorePaidAmounts = seqnumberpaymentstatus(payment.getStatus())
+   *                   == seqnumberpaymentstatus(invoicePaymentStatus(payment))
+   * </pre>
+   *
+   * <p>Our status is not in that sequence — {@code aprm_seqnumberpaymentstatus} answers 70 for
+   * anything it does not know, against 40 for {@code PPM} — so the comparison never held and the
+   * payment came back to draft while its invoice still read as fully paid (ETP-4895).
+   *
+   * <p>Restoring {@code invoicePaymentStatus} rather than a literal is what makes this correct for
+   * an account with automatic withdrawal on, where the flagged payment had been {@code PWNC} and
+   * not {@code PPM}: it is by definition the value Core is about to compare against.
+   *
+   * <p>Nothing is lost by clearing the flag here — the user is explicitly abandoning this payment's
+   * transfer, and the rejected {@code PSD2_PIS_PAYMENT} row remains as the audit trail.
+   */
+  private void clearTransferErrorFlag(String paymentId) {
+    if (StringUtils.isBlank(paymentId)) {
+      return;
+    }
+    OBContext.setAdminMode(true);
+    try {
+      FIN_Payment payment = OBDal.getInstance().get(FIN_Payment.class, paymentId);
+      if (payment == null || !StringUtils.equals(PAYMENT_STATUS_ERROR, payment.getStatus())) {
+        return;
+      }
+      payment.setStatus(FIN_Utility.invoicePaymentStatus(payment));
+      OBDal.getInstance().save(payment);
+      OBDal.getInstance().flush();
+    } catch (Exception e) {
+      // Never block the reactivation: at worst Core skips restoring the amounts, which is the
+      // behaviour we had before this ran at all.
+      log.warn("Could not clear the transfer error flag on payment {}: {}", paymentId,
+          e.getMessage());
+    } finally {
+      OBContext.restorePreviousMode();
     }
   }
 
