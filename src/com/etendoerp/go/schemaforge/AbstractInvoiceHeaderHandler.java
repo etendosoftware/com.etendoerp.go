@@ -313,7 +313,17 @@ public abstract class AbstractInvoiceHeaderHandler {
 
     if (body.has(FIELD_ORIGIN_INVOICES)) {
       captured = true;
-      addIdsFromOriginInvoicesArray(body, ids);
+      try {
+        JSONArray arr = body.getJSONArray(FIELD_ORIGIN_INVOICES);
+        for (int i = 0; i < arr.length(); i++) {
+          String id = arr.optString(i, null);
+          if (StringUtils.isNotBlank(id) && !ids.contains(id)) {
+            ids.add(id);
+          }
+        }
+      } catch (Exception e) {
+        log.warn("Could not parse {} array: {}", FIELD_ORIGIN_INVOICES, e.getMessage());
+      }
       body.remove(FIELD_ORIGIN_INVOICES);
     }
 
@@ -327,21 +337,6 @@ public abstract class AbstractInvoiceHeaderHandler {
     }
 
     return captured;
-  }
-
-  /** Parses the {@code originInvoices} JSON array in {@code body} into {@code ids} (de-duplicated). */
-  private void addIdsFromOriginInvoicesArray(JSONObject body, List<String> ids) {
-    try {
-      JSONArray arr = body.getJSONArray(FIELD_ORIGIN_INVOICES);
-      for (int i = 0; i < arr.length(); i++) {
-        String id = arr.optString(i, null);
-        if (StringUtils.isNotBlank(id) && !ids.contains(id)) {
-          ids.add(id);
-        }
-      }
-    } catch (Exception e) {
-      log.warn("Could not parse {} array: {}", FIELD_ORIGIN_INVOICES, e.getMessage());
-    }
   }
 
   /**
@@ -387,14 +382,6 @@ public abstract class AbstractInvoiceHeaderHandler {
     } catch (Exception e) {
       log.warn("Could not persist origin invoice: {}", e.getMessage());
     }
-  }
-
-  private static String resolveInvoiceIdFromContext(NeoContext context) {
-    if (context.getRecordId() != null) {
-      return context.getRecordId();
-    }
-    // POST: extract newly created record ID from the CRUD response
-    return NeoHandlerUtils.extractCreatedIdFromPreviousResult(context);
   }
 
   /**
@@ -1220,7 +1207,7 @@ public abstract class AbstractInvoiceHeaderHandler {
    * any other per-save hooks, before their own method-gated (e.g. GET-only) logic.
    *
    * <p>Resolves the invoice ID from the header {@code NeoContext} (via
-   * {@link #resolveInvoiceIdFromContext(NeoContext)}) and delegates to
+   * {@link InvoiceCalloutHelper#resolveInvoiceIdFromContext(NeoContext)}) and delegates to
    * {@link #autoCreateOrUpdateConversionRateDocument(String)}. Handlers that are NOT scoped to
    * the invoice header entity (e.g. {@link InvoiceLineHandler}, whose {@code NeoContext} carries
    * the line's own record ID, not the invoice's) must resolve the parent invoice ID themselves
