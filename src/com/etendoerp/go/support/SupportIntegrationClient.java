@@ -60,8 +60,7 @@ final class SupportIntegrationClient {
   private static final String FIELD_MIME_TYPE = "mimeType";
   private static final String DEFAULT_MIME_TYPE = "application/octet-stream";
 
-  private static final String ADK_BASE_URL =
-      System.getProperty("support.adk.url", "http://localhost:8000");
+  private static final String ADK_BASE_URL = System.getProperty("support.adk.url");
   private static final String ADK_APP_NAME = "agent";
 
   /** Zero-width-prefixed marker appended to a reply's text when the ADK's response for that
