@@ -1961,12 +1961,18 @@ real cross-tenant privilege-escalation bug, not a theoretical one. The fix,
 non-system caller whose client differs from the target user's. The bypass is scoped to the
 LITERAL System Administrator role id (`"0"`) — never to a mere `isClientAdmin()` role, however
 privileged within its own tenant. `SFAssignUserRoles.get()` forwards its already-resolved
-`currentRole` into the 3-arg `assignTemplateRoles(String, List, Role)` overload for exactly this
-purpose — see that method's javadoc. A 2-arg `assignTemplateRoles(String, List)` overload also
-exists (delegates with `callerRole=null`, skipping the boundary check entirely); today it is only
-reached by plain unit tests and the integration test's fixture calls, but REVIEW flagged it as a
-non-blocking latent risk — a future caller reaching for the 2-arg overload instead of the 3-arg
-one would silently ship without this protection.
+`currentRole` into the tenant-boundary-enforcing `assignTemplateRoles` overload for exactly this
+purpose — see that method's javadoc. **Overload note, updated by ETP-4830:** at the time of this
+fix that was the 3-arg `assignTemplateRoles(String, List, Role)` overload directly; the real
+webhook call site today is the 4-arg `assignTemplateRoles(String, List, Role, String)` overload
+(which also carries the caller's `AD_User_ID` for the owner-protection check described below) —
+the 3-arg form still exists but now only delegates to the 4-arg one with `callerUserId=null`. The
+tenant-boundary logic itself, `enforceCallerClientBoundary`, is unchanged either way. A 2-arg
+`assignTemplateRoles(String, List)` overload also exists (delegates down with `callerRole=null`,
+skipping the boundary check entirely); today it is only reached by plain unit tests and the
+integration test's fixture calls, but REVIEW flagged it as a non-blocking latent risk — a future
+caller reaching for the 2-arg overload instead of a `Role`/caller-carrying one would silently ship
+without this protection.
 
 **Owner protection of the TARGET user (ETP-4830) — a genuinely separate check from the tenant
 boundary above.** The tenant-boundary check answers "is this target user in the caller's own
