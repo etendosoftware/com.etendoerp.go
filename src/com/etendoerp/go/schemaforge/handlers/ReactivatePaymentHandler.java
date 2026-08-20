@@ -19,11 +19,13 @@ package com.etendoerp.go.schemaforge.handlers;
 
 import java.math.BigDecimal;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 
 import javax.inject.Named;
 
+import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
@@ -46,8 +48,10 @@ import com.etendoerp.go.schemaforge.NeoContext;
 import com.etendoerp.go.schemaforge.NeoEndpointType;
 import com.etendoerp.go.schemaforge.NeoHandler;
 import com.etendoerp.go.schemaforge.NeoResponse;
+import com.etendoerp.go.schemaforge.PisDeferredPaymentService;
 import com.etendoerp.go.schemaforge.util.NeoButtonActionHelper;
 import com.etendoerp.payment.removal.util.PaymentRemovalUtil;
+import com.etendoerp.psd2.bank.integration.data.PisPayment;
 
 /**
  * Shared {@code NeoHandler} for the payment Reactivate, Confirm, and Remove actions, used
@@ -155,6 +159,26 @@ public class ReactivatePaymentHandler implements NeoHandler {
    * {@code PaymentRegistrationService.paymentListItem} already emits for the invoice payment modal,
    * so both surfaces speak one shape.
    */
+  /**
+   * Action + field for retrying a bank transfer the bank rejected after committing to it. The
+   * payment is flagged {@code ETGOERR} and kept processed, so the retry reuses it rather than
+   * registering a second one — see {@code PisDeferredPaymentService}. The id is injected on the
+   * single-record GET so the payment window can offer the retry without first having to look up
+   * the invoice the payment came from.
+   */
+  private static final String PIS_RETRY_ACTION_FIELD = "retryPisPayment";
+  private static final String FIELD_PIS_PAYMENT_ID = "pisPaymentId";
+  /**
+   * Read-only flag telling the UI that this payment's lifecycle belongs to its bank transfer, so
+   * Reactivate and Delete must not be offered. Emitted on the single record AND on every list row,
+   * because both surfaces offer those actions and a rule enforced in only one of them is a rule the
+   * user can walk around. Always present (never absent) so the UI can tell "this backend does not
+   * send it" apart from "this payment is not locked". See
+   * {@code PisDeferredPaymentService#isLifecycleLockedByTransfer}.
+   */
+  private static final String FIELD_PIS_LOCKED = "pisLocked";
+  private static final String FIELD_ID = "id";
+  private static final String FIELD_STATUS = "status";
   private static final String FIELD_ACCOUNT_CURRENCY = "accountCurrency";
   private static final String FIELD_CONVERSION_RATE = "conversionRate";
   private static final String FIELD_FINANCIAL_TRANSACTION_AMOUNT = "financialTransactionAmount";
@@ -185,6 +209,11 @@ public class ReactivatePaymentHandler implements NeoHandler {
     }
     if (REMOVE_ACTION_FIELD.equals(fieldName)) {
       return handleRemove(context);
+    }
+    if (PIS_RETRY_ACTION_FIELD.equals(fieldName)) {
+      // Same action the invoice's payment modal posts; routed here too so it is reachable straight
+      // from the payment record, which is where a rejection observed after the fact shows up.
+      return PisDeferredPaymentService.handleRetryPisPayment(context);
     }
     return null;
   }
@@ -469,6 +498,9 @@ public class ReactivatePaymentHandler implements NeoHandler {
    */
   @Override
   public NeoResponse afterHandle(NeoContext context) {
+    if (isListGet(context)) {
+      return injectLockFlagOnList(context);
+    }
     if (!isSingleRecordGet(context)) {
       return null;
     }
@@ -483,10 +515,91 @@ public class ReactivatePaymentHandler implements NeoHandler {
       paymentRecord.put(FIELD_FINANCIAL_TRANSACTION_ID,
           transactionId != null ? transactionId : JSONObject.NULL);
       injectMultiCurrencyExtrasQuietly(paymentRecord, context.getRecordId());
+      injectRetryablePisAttemptQuietly(paymentRecord, context.getRecordId());
+      injectLockFlags(new JSONArray().put(paymentRecord));
       return NeoResponse.ok(body);
     } catch (Exception e) {
       log.error("Error resolving financial transaction for payment {}", context.getRecordId(), e);
       return null;
+    }
+  }
+
+  /**
+   * List counterpart of {@link #afterHandle}: adds only {@link #FIELD_PIS_LOCKED} to every row.
+   *
+   * <p>The other enrichments stay single-record — they each cost a query and the grid does not show
+   * them. This one is worth it because the grid's kebab offers Reactivate and its row actions offer
+   * Delete, and it is answered for the whole page in one query.
+   *
+   * @return the enriched response, or {@code null} to leave the previous result untouched
+   */
+  private NeoResponse injectLockFlagOnList(NeoContext context) {
+    try {
+      JSONObject body = context.getPreviousResult().getBody();
+      JSONArray dataArr = extractDataArray(body);
+      if (dataArr == null || dataArr.length() == 0) {
+        return null;
+      }
+      injectLockFlags(dataArr);
+      return NeoResponse.ok(body);
+    } catch (Exception e) {
+      log.error("Could not flag bank-transfer-locked payments on the list response", e);
+      return null;
+    }
+  }
+
+  /**
+   * Sets {@link #FIELD_PIS_LOCKED} on every row of {@code records}, resolving the whole batch with a
+   * single query. Swallows failures: losing the flag hides two buttons that were there before, which
+   * is far better than losing the response.
+   */
+  private void injectLockFlags(JSONArray records) {
+    try {
+      Set<String> ids = new HashSet<>();
+      for (int i = 0; i < records.length(); i++) {
+        String id = records.getJSONObject(i).optString(FIELD_ID, null);
+        if (StringUtils.isNotBlank(id)) {
+          ids.add(id);
+        }
+      }
+      Set<String> withTransfer = PisDeferredPaymentService.paymentsWithBankTransfer(ids);
+      for (int i = 0; i < records.length(); i++) {
+        JSONObject record = records.getJSONObject(i);
+        boolean locked = PisDeferredPaymentService.isLifecycleLockedByTransfer(
+            record.optString(FIELD_STATUS, null),
+            withTransfer.contains(record.optString(FIELD_ID, null)));
+        record.put(FIELD_PIS_LOCKED, locked);
+      }
+    } catch (Exception e) {
+      log.warn("Could not flag bank-transfer-locked payments: {}", e.getMessage());
+    }
+  }
+
+  private static boolean isListGet(NeoContext context) {
+    return context != null
+        && HTTP_GET.equals(context.getHttpMethod())
+        && context.getRecordId() == null
+        && context.getPreviousResult() != null
+        && context.getPreviousResult().getBody() != null;
+  }
+
+  /**
+   * Adds {@link #FIELD_PIS_PAYMENT_ID}: the rejected bank transfer this payment can be retried
+   * from, or {@code null} when there is none. Always present, so the UI can tell "this backend
+   * does not send it" apart from "this payment has nothing to retry".
+   *
+   * <p>Swallows failures for the same reason as the multi-currency extras: a retry affordance is
+   * not worth discarding the whole enriched response over.
+   */
+  private void injectRetryablePisAttemptQuietly(JSONObject paymentRecord, String paymentId) {
+    try {
+      // The other moment a resolution that arrived after the payment modal closed can be noticed.
+      PisDeferredPaymentService.reconcileAttemptsFor(
+          OBDal.getInstance().get(FIN_Payment.class, paymentId));
+      PisPayment rejected = PisDeferredPaymentService.findRetryableAttempt(paymentId);
+      paymentRecord.put(FIELD_PIS_PAYMENT_ID, rejected != null ? rejected.getId() : JSONObject.NULL);
+    } catch (Exception e) {
+      log.warn("Could not resolve a retryable PIS attempt for payment {}", paymentId, e);
     }
   }
 

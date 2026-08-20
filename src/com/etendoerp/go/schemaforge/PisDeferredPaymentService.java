@@ -18,6 +18,13 @@
 package com.etendoerp.go.schemaforge;
 
 import java.math.BigDecimal;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
 
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
@@ -84,16 +91,24 @@ import com.etendoerp.psd2.bank.integration.utils.PISTransactionUtils;
  * <p>A transfer the user abandons — or one the bank rejects — never produces a payment, so the
  * invoice is left untouched either way and there is nothing to undo.
  *
- * <p><b>Why some pieces here look unused.</b> {@link #handleRetryPisPayment}, the {@code ETGOERR}
- * payment status and the "Error"/retry affordances in the SPA are currently unreachable: a
- * rejection is only ever observed while the payment modal is open, and there it is reported in
- * place, with the form left ready to try again. They are kept on purpose for the case this design
- * does not cover yet — a rejection arriving when nobody is watching (the PSD2 module's own
- * background refresh, or the Salt Edge webhook). There is no modal to report that in, so the
- * attempt would have to be recorded on the invoice instead, which is exactly what those pieces do.
- * Do not delete them as dead code without also deciding that case is out of scope.
+ * <p><b>Two very different rejections.</b> Before the bank commits, nothing exists yet: the
+ * attempt is reported in the payment modal, the form stays ready to try again, and no payment is
+ * ever recorded. After {@code authorized} a payment does exist, and a later rejection — seen by
+ * the PSD2 module's periodic refresh, the Salt Edge webhook, or the SPA's own poll — flags it
+ * {@link #PAYMENT_STATUS_ERROR} through {@code markPaymentAsFailed}. That is what makes the
+ * "Error" badge and the retry action reachable, on the invoice's payment list and on the payment
+ * window alike.
+ *
+ * <p>The flag is applied by {@code PisRejectedPaymentHandler}, an observer on the row PSD2 saves,
+ * so it lands the moment any writer records the rejection — PSD2's scheduled refresh, its manual
+ * button, the webhook or this module's own poll. {@link #reconcileAttemptsFor} repeats the check
+ * when a screen is opened, as the net for anything that changed outside a DAL flush.
+ *
+ * <p><b>Known gap.</b> The flagged payment is deliberately not reactivated, so it stays applied
+ * and the invoice keeps reading as paid until the retry succeeds. The errored row is the only
+ * signal that the money never moved.
  */
-final class PisDeferredPaymentService {
+public final class PisDeferredPaymentService {
 
   private static final Logger log = LogManager.getLogger(PisDeferredPaymentService.class);
 
@@ -108,6 +123,25 @@ final class PisDeferredPaymentService {
 
   /** Salt Edge statuses from which a payment must exist in Etendo Go. */
   private static final String PIS_STATUS_AUTHORIZED = "authorized";
+
+  /**
+   * {@code FIN_Payment.status} for a payment whose bank transfer was rejected <em>after</em> the
+   * bank had already committed to it — the value {@code ETGOERR} ("Payment Error"), added by this
+   * module to the Core status reference {@code 575BCB88A4694C27BC013DE9C73E6FE7}.
+   * <p>
+   * The payment stays <b>processed</b>: it is deliberately not reactivated, so it keeps its
+   * installment and any credit it consumed, and {@link #handleRetryPisPayment} can reuse it for a
+   * fresh transfer instead of building a second one. The trade-off is that the invoice still reads
+   * as paid until the retry succeeds — the errored row is the only signal that it is not.
+   */
+  private static final String PAYMENT_STATUS_ERROR = "ETGOERR";
+
+  /**
+   * {@code FIN_Payment.status} "Payment Made": confirmed, with the withdrawal from the account not
+   * recorded yet. What a transfer the bank has committed to but not executed reads as, and what a
+   * retried payment returns to while the new attempt is in flight.
+   */
+  private static final String PAYMENT_STATUS_PAYMENT_MADE = "PPM";
 
   private PisDeferredPaymentService() {
   }
@@ -143,6 +177,10 @@ final class PisDeferredPaymentService {
               + "Check the bank payment before retrying.");
     }
     pisPayment.setETGOPaymentIntent(buildIntent(invoice, body, isReceipt).toString());
+    // PSD2 keeps the reference only inside its payment-attributes JSON and leaves the column empty,
+    // so without this the attempt counter below would never see a previous try and every retry
+    // would reuse the same reference — the very duplicate this suffix exists to avoid.
+    pisPayment.setEndToEnd(endToEndId);
     OBDal.getInstance().save(pisPayment);
     OBDal.getInstance().flush();
 
@@ -166,16 +204,26 @@ final class PisDeferredPaymentService {
    * Capped at 35 characters, the limit {@code GenerateBankPayment} enforces.
    */
   private static String nextEndToEndId(Invoice invoice) {
-    String prefix = StringUtils.defaultString(invoice.getDocumentNo(), invoice.getId());
+    return withAttemptSuffix(StringUtils.defaultString(invoice.getDocumentNo(), invoice.getId()));
+  }
+
+  private static String withAttemptSuffix(String reference) {
     OBCriteria<PisPayment> crit = OBDal.getInstance().createCriteria(PisPayment.class);
-    crit.add(Restrictions.like(PisPayment.PROPERTY_ENDTOEND, prefix + "-%"));
-    int attempt = crit.count() + 1;
-    String suffix = "-" + attempt;
+    crit.add(Restrictions.like(PisPayment.PROPERTY_ENDTOEND, reference + "-%"));
+    String suffix = "-" + (crit.count() + 1);
     int room = 35 - suffix.length();
-    if (prefix.length() > room) {
-      prefix = prefix.substring(0, room);
-    }
+    String prefix = reference.length() > room ? reference.substring(0, room) : reference;
     return prefix + suffix;
+  }
+
+  /**
+   * The same per-attempt reference, based on a payment instead of an invoice. Used by the retry
+   * that reuses an existing payment, where the bridge would otherwise resend the payment's own
+   * {@code documentNo} verbatim on every try.
+   */
+  private static String nextEndToEndId(FIN_Payment payment) {
+    String prefix = StringUtils.defaultString(payment.getDocumentNo(), payment.getId());
+    return withAttemptSuffix(prefix);
   }
 
   /** Snapshot replayed by {@link #reconcile}: enough to rebuild the payment from scratch. */
@@ -203,7 +251,7 @@ final class PisDeferredPaymentService {
    *
    * <p>Body: {@code {pisPaymentId}}.
    */
-  static NeoResponse handleRetryPisPayment(NeoContext context) {
+  public static NeoResponse handleRetryPisPayment(NeoContext context) {
     JSONObject body = context.getRequestBody();
     String pisPaymentId = body != null ? body.optString("pisPaymentId", null) : null;
     if (StringUtils.isBlank(pisPaymentId)) {
@@ -225,6 +273,15 @@ final class PisDeferredPaymentService {
           return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
               "This bank transfer is already in progress and can no longer be restarted.");
         }
+        // A transfer the bank had already committed to left a payment behind, flagged ETGOERR by
+        // markPaymentAsFailed. That payment still holds the invoice's installment and any credit it
+        // consumed, so the retry reuses it instead of registering a second one — the only shape
+        // that cannot pay the invoice twice, and the reason this branch needs no intent snapshot.
+        FIN_Payment existing = failed.getPayment();
+        if (existing != null) {
+          return retryReusingPayment(failed, existing);
+        }
+
         String raw = failed.getETGOPaymentIntent();
         if (StringUtils.isBlank(raw)) {
           return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
@@ -235,17 +292,8 @@ final class PisDeferredPaymentService {
         // Release the old attempt before starting a new one, so a failure mid-retry cannot leave
         // two rows both claiming the same intent.
         failed.setETGOPaymentIntent(null);
-        FIN_Payment errored = failed.getPayment();
-        failed.setPayment(null);
         OBDal.getInstance().save(failed);
         OBDal.getInstance().flush();
-
-        // Drop the errored payment too. It is an unprocessed draft, but it still holds the
-        // invoice's installment and any credit it consumed — leaving it behind would make the
-        // retry find nothing left to pay. Deleting it releases both.
-        if (errored != null) {
-          PaymentDraftEditService.deleteDraftPayment(errored.getId());
-        }
 
         // Replay the original request verbatim: it still carries pis=true, so it comes straight
         // back through the deferred-initiation branch and starts a fresh transfer.
@@ -267,6 +315,234 @@ final class PisDeferredPaymentService {
     }
   }
 
+  /**
+   * Starts a fresh transfer for a payment that already exists, reusing it rather than building a
+   * second one.
+   *
+   * <p>Everything the bank needs is already on the payment, so no intent snapshot is involved —
+   * which matters, because the snapshot is cleared the moment the payment is created. Only the
+   * template and creditor account are carried over from the rejected attempt; the bridge derives
+   * amount, currency, creditor and description from the payment itself.
+   *
+   * <p>The rejected {@code PSD2_PIS_PAYMENT} row is left untouched as the audit trail of the failed
+   * attempt: {@code failed} is a final state, so the DAO opens a new row for the new order and
+   * links it to the same payment.
+   */
+  private static NeoResponse retryReusingPayment(PisPayment rejected, FIN_Payment payment)
+      throws Exception {
+    JSONObject pisInput = new JSONObject();
+    if (StringUtils.isNotBlank(rejected.getSaltedgeTemplate())) {
+      pisInput.put("template", rejected.getSaltedgeTemplate());
+    }
+    if (StringUtils.isNotBlank(rejected.getCreditorIban())) {
+      pisInput.put(BankIntegrationConstants.CREDITOR_IBAN, rejected.getCreditorIban());
+    }
+    pisInput.put(BankIntegrationConstants.END_TO_END_ID, nextEndToEndId(payment));
+
+    BankIntegrationPISUtils.PISCreatePaymentResult result =
+        PisPaymentBridge.initiatePisPayment(payment, pisInput, currentRequest());
+
+    PisPayment retry = PISPaymentDao.findBySaltedgePaymentId(result.getPaymentId());
+    if (retry == null) {
+      throw new OBException(
+          "The bank accepted the transfer but it could not be registered locally. "
+              + "Check the bank payment before retrying.");
+    }
+    retry.setEndToEnd(pisInput.getString(BankIntegrationConstants.END_TO_END_ID));
+    OBDal.getInstance().save(retry);
+    // Back to "in progress": a transfer is in flight again, so the payment must stop reading as
+    // failed. It returns to ETGOERR only if this attempt is rejected in turn.
+    payment.setStatus(PAYMENT_STATUS_PAYMENT_MADE);
+    OBDal.getInstance().save(payment);
+    OBDal.getInstance().flush();
+
+    JSONObject data = new JSONObject();
+    data.put("pisPaymentUrl", result.getPaymentUrl());
+    data.put("pisPaymentId", retry.getId());
+    data.put("pisStatus", retry.getStatus());
+    data.put("paymentDeferred", true);
+    return PaymentRegistrationService.wrapCreatedData(data);
+  }
+
+  /**
+   * Brings a payment's Etendo Go side in line with whatever Salt Edge status is already stored,
+   * called when a screen that shows the payment is opened.
+   *
+   * <p><b>Why a read does this.</b> {@link #reconcile} has exactly one other caller — the SPA's
+   * poll — and that only runs while a transfer is in flight with the modal open. Everything that
+   * resolves later is seen instead by the PSD2 module's own periodic refresh, which records the new
+   * Salt Edge status but knows nothing about Etendo Go's payment. Without this hook a transfer the
+   * bank refused after committing to it would sit in {@code PPM} forever, reading as still in
+   * progress. Reconciling when someone opens the invoice or the payment closes that gap without a
+   * second scheduled process.
+   *
+   * <p>No Salt Edge call is made here: it acts on the stored status, which the PSD2 refresh keeps
+   * current. So this stays a cheap local read — but it is a read that can write, which is the point.
+   *
+   * <p>Never throws: a screen must still open even if reconciliation fails.
+   *
+   * @param payment the payment being displayed; ignored when null or not PIS-backed
+   */
+  public static void reconcileAttemptsFor(FIN_Payment payment) {
+    if (payment == null) {
+      return;
+    }
+    try {
+      OBCriteria<PisPayment> crit = OBDal.getInstance().createCriteria(PisPayment.class);
+      crit.add(Restrictions.eq(PisPayment.PROPERTY_PAYMENT, payment));
+      for (PisPayment attempt : crit.list()) {
+        reconcile(attempt);
+      }
+    } catch (Exception e) {
+      log.warn("Could not reconcile the bank transfers of payment {}: {}", payment.getId(),
+          e.getMessage());
+    }
+  }
+
+  /** Invoice-level readings of the payment states below, worst-first. */
+  public static final String INVOICE_TRANSFER_ERROR = "error";
+  public static final String INVOICE_TRANSFER_IN_PROGRESS = "inProgress";
+
+  /**
+   * The worst payment state each of {@code invoiceIds} carries, so an invoice stops claiming to be
+   * paid while the money behind it has not actually moved.
+   *
+   * <p>An invoice whose only payment is in progress or rejected has an outstanding of zero — the
+   * payment is applied either way — so it read as "Pagada" while the payment itself read as
+   * "Pago en progreso" or "Pago con error". Same fact, two screens, opposite answers (ETP-4895).
+   *
+   * <p>Deliberately keyed on the payment's own status rather than on whether it went through PIS:
+   * these are the very states the payment badges show, so the invoice cannot disagree with them by
+   * construction. A payment that reached its account keeps the invoice silent, as before.
+   *
+   * <p>Worst-first when several payments disagree: a rejection asks the user to do something, an
+   * in-flight transfer only asks them to wait. Showing the one that needs action is what gets the
+   * error noticed instead of buried behind a payment that is merely pending.
+   *
+   * @param invoiceIds the invoices on the response; may be empty
+   * @return invoice id → {@link #INVOICE_TRANSFER_ERROR} or {@link #INVOICE_TRANSFER_IN_PROGRESS};
+   *     absent for invoices with nothing to report
+   */
+  public static Map<String, String> transferStateByInvoice(Collection<String> invoiceIds) {
+    if (invoiceIds == null || invoiceIds.isEmpty()) {
+      return Collections.emptyMap();
+    }
+    Map<String, String> byInvoice = new HashMap<>();
+    try {
+      OBContext.setAdminMode(true);
+      try {
+        String hql = "select distinct psd.invoicePaymentSchedule.invoice.id, pd.finPayment.status "
+            + "from FIN_Payment_Detail pd "
+            + "join pd.fINPaymentScheduleDetailList psd "
+            + "where psd.invoicePaymentSchedule.invoice.id in :invoiceIds "
+            + "and pd.finPayment.status in :states";
+        List<Object[]> rows = OBDal.getInstance().getSession()
+            .createQuery(hql, Object[].class)
+            .setParameterList("invoiceIds", invoiceIds)
+            .setParameterList("states", List.of(PAYMENT_STATUS_ERROR, PAYMENT_STATUS_PAYMENT_MADE))
+            .list();
+        for (Object[] row : rows) {
+          String invoiceId = (String) row[0];
+          boolean rejected = StringUtils.equals(PAYMENT_STATUS_ERROR, (String) row[1]);
+          // A rejection sticks: once seen it is never downgraded by another payment.
+          if (rejected || !byInvoice.containsKey(invoiceId)) {
+            byInvoice.put(invoiceId,
+                rejected ? INVOICE_TRANSFER_ERROR : INVOICE_TRANSFER_IN_PROGRESS);
+          }
+        }
+      } finally {
+        OBContext.restorePreviousMode();
+      }
+    } catch (Exception e) {
+      log.warn("Could not resolve the payment state of the listed invoices: {}", e.getMessage());
+    }
+    return byInvoice;
+  }
+
+  /**
+   * Which of {@code paymentIds} have a bank transfer behind them.
+   *
+   * <p>One query for the whole set on purpose: this feeds a list response, and asking per row turned
+   * a grid page into fifty round trips.
+   *
+   * @param paymentIds {@code FIN_Payment} ids to check; may be empty
+   * @return the subset that has at least one {@code PSD2_PIS_PAYMENT} row
+   */
+  public static Set<String> paymentsWithBankTransfer(Collection<String> paymentIds) {
+    if (paymentIds == null || paymentIds.isEmpty()) {
+      return Collections.emptySet();
+    }
+    Set<String> found = new HashSet<>();
+    try {
+      OBContext.setAdminMode(true);
+      try {
+        OBCriteria<PisPayment> crit = OBDal.getInstance().createCriteria(PisPayment.class);
+        crit.add(Restrictions.in(PisPayment.PROPERTY_PAYMENT + ".id", paymentIds));
+        for (PisPayment attempt : crit.list()) {
+          if (attempt.getPayment() != null) {
+            found.add(attempt.getPayment().getId());
+          }
+        }
+      } finally {
+        OBContext.restorePreviousMode();
+      }
+    } catch (Exception e) {
+      log.warn("Could not resolve which payments have a bank transfer: {}", e.getMessage());
+    }
+    return found;
+  }
+
+  /**
+   * Whether a payment's lifecycle belongs to its bank transfer rather than to the user.
+   *
+   * <p>A transfer Etendo Go initiated owns the payment it produced: reactivating or deleting it
+   * behind the bank's back would leave Salt Edge holding an order for a payment that no longer
+   * exists, and — once executed — money that moved with nothing recording it. So those actions are
+   * withdrawn for as long as the transfer is live.
+   *
+   * <p>The one exception is {@link #PAYMENT_STATUS_ERROR}: there the bank refused the transfer, no
+   * money moved and nothing is in flight, so the payment is the user's to retry or discard.
+   *
+   * <p>Payments that never went through PIS are never locked — this returns false for them, which is
+   * what keeps the ordinary flow untouched.
+   *
+   * @param status the payment's {@code FIN_Payment.status}
+   * @param hasBankTransfer whether it has a {@code PSD2_PIS_PAYMENT} row (see
+   *     {@link #paymentsWithBankTransfer})
+   */
+  public static boolean isLifecycleLockedByTransfer(String status, boolean hasBankTransfer) {
+    return hasBankTransfer && !StringUtils.equals(PAYMENT_STATUS_ERROR, status);
+  }
+
+  /**
+   * The rejected bank transfer {@code paymentId} can be retried from, or {@code null} when there is
+   * none.
+   *
+   * <p>Only a payment flagged {@link #PAYMENT_STATUS_ERROR} qualifies: that is the state
+   * {@link #markPaymentAsFailed} leaves behind when the bank refuses a transfer it had already
+   * committed to, and the only one where retrying reuses the existing payment. A payment that is
+   * merely in progress must not offer a retry — a second order there would pay twice.
+   *
+   * @param paymentId the {@code FIN_Payment} being displayed
+   * @return the rejected attempt to replay, or {@code null}
+   */
+  public static PisPayment findRetryableAttempt(String paymentId) {
+    if (StringUtils.isBlank(paymentId)) {
+      return null;
+    }
+    FIN_Payment payment = OBDal.getInstance().get(FIN_Payment.class, paymentId);
+    if (payment == null || !StringUtils.equals(PAYMENT_STATUS_ERROR, payment.getStatus())) {
+      return null;
+    }
+    OBCriteria<PisPayment> crit = OBDal.getInstance().createCriteria(PisPayment.class);
+    crit.add(Restrictions.eq(PisPayment.PROPERTY_PAYMENT, payment));
+    crit.add(Restrictions.eq(PisPayment.PROPERTY_STATUS,
+        BankIntegrationConstants.PIS_STATUS_FAILED));
+    crit.addOrderBy(PisPayment.PROPERTY_CREATIONDATE, false);
+    crit.setMaxResults(1);
+    return (PisPayment) crit.uniqueResult();
+  }
+
   // ─── reconciliation ────────────────────────────────────────────────────────
 
   /**
@@ -281,10 +557,16 @@ final class PisDeferredPaymentService {
   static boolean reconcile(PisPayment pisPayment) {
     String status = pisPayment.getStatus();
     if (isFailedStatus(status)) {
-      // Rejected: nothing is created. The money never moved, so recording the attempt would only
-      // leave a row to clean up; the user is told and retries. The snapshot is deliberately KEPT —
-      // it is what {@link #handleRetryPisPayment} replays, which is the path that matters if this
-      // rejection is ever observed with no modal open to report it in (see the class javadoc).
+      // Two very different rejections share this status.
+      //
+      // Before the bank committed, nothing was ever created: the money never moved, so recording
+      // the attempt would only leave a row to clean up. The user is told in the modal and retries.
+      // The snapshot is deliberately KEPT — it is what handleRetryPisPayment replays.
+      //
+      // After `authorized`, a payment already exists, and leaving it in PPM would show the transfer
+      // as still in progress for something the bank has definitively refused. It is flagged instead
+      // and offered for retry.
+      markPaymentAsFailed(pisPayment);
       return false;
     }
     if (!requiresPayment(status)) {
@@ -300,6 +582,26 @@ final class PisDeferredPaymentService {
       PISTransactionUtils.createFinancialTransactionIfEligible(pisPayment);
     }
     return created;
+  }
+
+  /**
+   * Flags an already-created payment whose transfer the bank went on to refuse.
+   * <p>
+   * Deliberately does <b>not</b> reactivate it. Keeping it processed keeps it holding the invoice's
+   * installment and any credit it consumed, which is what lets the retry reuse this very payment
+   * rather than create a second one — the shape that cannot pay the invoice twice. See
+   * {@link #PAYMENT_STATUS_ERROR} for what that costs.
+   */
+  private static void markPaymentAsFailed(PisPayment pisPayment) {
+    FIN_Payment payment = pisPayment.getPayment();
+    if (payment == null || StringUtils.equals(PAYMENT_STATUS_ERROR, payment.getStatus())) {
+      return;
+    }
+    payment.setStatus(PAYMENT_STATUS_ERROR);
+    OBDal.getInstance().save(payment);
+    OBDal.getInstance().flush();
+    log.info("PIS {} was rejected after the bank had committed — payment {} flagged as {}",
+        pisPayment.getId(), payment.getDocumentNo(), PAYMENT_STATUS_ERROR);
   }
 
   /**

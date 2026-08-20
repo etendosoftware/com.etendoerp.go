@@ -103,7 +103,12 @@ final class PisPaymentBridge {
     if (!params.has(KEY_TEMPLATE) || StringUtils.isBlank(params.optString(KEY_TEMPLATE, null))) {
       params.put(KEY_TEMPLATE, templateForCurrency(payment.getCurrency().getISOCode()));
     }
-    params.put(BankIntegrationConstants.END_TO_END_ID, payment.getDocumentNo());
+    // The payment's own documentNo is only the default. A retry passes its own reference, because
+    // end-to-end ids must be unique per debtor account and resending this one verbatim risks a
+    // silent bank-side reject or a false "already processed" match.
+    if (StringUtils.isBlank(params.optString(BankIntegrationConstants.END_TO_END_ID, null))) {
+      params.put(BankIntegrationConstants.END_TO_END_ID, payment.getDocumentNo());
+    }
     params.put(BankIntegrationConstants.CREDITOR_NAME, payment.getBusinessPartner().getName());
     params.put(KEY_AMOUNT, payment.getAmount().toString());
     params.put(KEY_CURRENCY_ID, payment.getCurrency().getId());

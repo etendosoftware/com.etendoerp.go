@@ -1020,12 +1020,36 @@ public class ReactivatePaymentHandlerTest {
   // ── afterHandle — guard conditions ────────────────────────────────────────
 
   /**
-   * A list response (no recordId) must be left untouched — the financial-transaction lookup
-   * only applies to the single-record detail view.
+   * A list response now gets the one enrichment the grid needs — {@code pisLocked}, which decides
+   * whether its rows may offer Reactivate and Delete (ETP-4895). It used to be left untouched, but
+   * enforcing that rule only on the detail form left a way around it from the grid.
+   *
+   * <p>The single-record enrichments stay single-record: each costs its own query and the grid does
+   * not show them.
    */
   @Test
-  public void afterHandleReturnsNullForListResponse() throws JSONException {
+  public void afterHandleAddsOnlyTheLockFlagToListResponses() throws JSONException {
     JSONObject body = singleRecordBody("pay-1");
+    NeoContext ctx = getCtx(null, "GET");
+    ctx.setPreviousResult(NeoResponse.ok(body));
+
+    NeoResponse result = new ReactivatePaymentHandler().afterHandle(ctx);
+
+    assertNotNull(result);
+    JSONObject record = result.getBody().getJSONObject("response").getJSONArray("data")
+        .getJSONObject(0);
+    assertTrue(record.has("pisLocked"));
+    assertFalse(record.has("financialTransactionId"));
+    assertFalse(record.has("pisPaymentId"));
+  }
+
+  /**
+   * An empty list is left untouched: there is nothing to flag and no reason to rebuild the body.
+   */
+  @Test
+  public void afterHandleReturnsNullForAnEmptyListResponse() throws JSONException {
+    JSONObject body = new JSONObject().put("response",
+        new JSONObject().put("data", new JSONArray()));
     NeoContext ctx = getCtx(null, "GET");
     ctx.setPreviousResult(NeoResponse.ok(body));
 

@@ -370,6 +370,10 @@ final class PaymentRegistrationService {
 
         JSONArray arr = new JSONArray();
         for (FIN_Payment p : invoicePayments) {
+          // Opening the list is one of the two moments Etendo Go gets to notice a transfer that
+          // resolved after the payment modal closed — the SPA's poll is long gone by then, and the
+          // PSD2 refresh that saw it does not touch our payment. See reconcileAttemptsFor.
+          PisDeferredPaymentService.reconcileAttemptsFor(p);
           arr.put(paymentListItem(p, invoiceId));
         }
 

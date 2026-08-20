@@ -24,9 +24,13 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.doReturn;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.lang.reflect.Method;
+import java.util.List;
 
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.jupiter.api.DisplayName;
@@ -36,6 +40,7 @@ import org.mockito.MockedStatic;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.invoice.Invoice;
+import org.openbravo.model.financialmgmt.payment.FIN_Payment;
 
 import com.etendoerp.psd2.bank.integration.data.PisPayment;
 
@@ -110,6 +115,193 @@ class PisDeferredPaymentServiceTest {
     void statusMatchingIsCaseInsensitive() throws Exception {
       assertTrue(requiresPayment("AUTHORIZED"));
       assertTrue(requiresPayment("Executed"));
+    }
+  }
+
+  @Nested
+  @DisplayName("a transfer the bank refuses after committing to it")
+  class RejectedAfterCommit {
+
+    /** Drives reconcile() with OBDal stubbed, which is all markPaymentAsFailed touches. */
+    private void reconcileWith(PisPayment pisPayment) {
+      try (MockedStatic<OBDal> dal = mockStatic(OBDal.class)) {
+        OBDal instance = mock(OBDal.class);
+        dal.when(OBDal::getInstance).thenReturn(instance);
+        PisDeferredPaymentService.reconcile(pisPayment);
+      }
+    }
+
+    @Test
+    @DisplayName("flags the payment as ETGOERR instead of leaving it reading as in progress")
+    void rejectionAfterAuthorizationFlagsThePayment() {
+      // The rejection arrives once a payment already exists — created at 'authorized'. Without
+      // this the payment stays in PPM and every surface keeps showing "Pago en progreso" for a
+      // transfer the bank has definitively refused (ETP-4895).
+      PisPayment pisPayment = mock(PisPayment.class);
+      FIN_Payment payment = mock(FIN_Payment.class);
+      when(pisPayment.getStatus()).thenReturn("failed");
+      when(pisPayment.getPayment()).thenReturn(payment);
+      when(payment.getStatus()).thenReturn("PPM");
+
+      reconcileWith(pisPayment);
+
+      verify(payment).setStatus("ETGOERR");
+    }
+
+    @Test
+    @DisplayName("does not reactivate it: the retry reuses this very payment")
+    void doesNotReactivateTheFlaggedPayment() {
+      // Keeping it processed keeps it holding the invoice's installment and any credit it
+      // consumed, which is what lets the retry reuse it rather than register a second payment.
+      PisPayment pisPayment = mock(PisPayment.class);
+      FIN_Payment payment = mock(FIN_Payment.class);
+      when(pisPayment.getStatus()).thenReturn("failed");
+      when(pisPayment.getPayment()).thenReturn(payment);
+      when(payment.getStatus()).thenReturn("PPM");
+
+      reconcileWith(pisPayment);
+
+      verify(payment, never()).setProcessed(any(Boolean.class));
+    }
+
+    @Test
+    @DisplayName("a rejection before the bank committed still creates nothing")
+    void rejectionBeforeAuthorizationCreatesNothing() {
+      // The other rejection: no payment was ever created, so there is nothing to flag. Reported
+      // in the modal instead, with the form left ready to try again.
+      PisPayment pisPayment = mock(PisPayment.class);
+      when(pisPayment.getStatus()).thenReturn("failed");
+      when(pisPayment.getPayment()).thenReturn(null);
+
+      assertFalse(PisDeferredPaymentService.reconcile(pisPayment));
+    }
+
+    @Test
+    @DisplayName("re-running on an already flagged payment changes nothing")
+    void flaggingIsIdempotent() {
+      // Several paths reconcile the same row — the SPA poll and the periodic sweep — so a second
+      // pass must not rewrite the status or emit a second save.
+      PisPayment pisPayment = mock(PisPayment.class);
+      FIN_Payment payment = mock(FIN_Payment.class);
+      when(pisPayment.getStatus()).thenReturn("failed");
+      when(pisPayment.getPayment()).thenReturn(payment);
+      when(payment.getStatus()).thenReturn("ETGOERR");
+
+      reconcileWith(pisPayment);
+
+      verify(payment, never()).setStatus(any(String.class));
+    }
+  }
+
+  @Nested
+  @DisplayName("what an invoice reports about its payments")
+  class InvoiceTransferState {
+
+    @Test
+    @DisplayName("an empty page asks the database nothing")
+    void emptyPageSkipsTheQuery() {
+      assertTrue(PisDeferredPaymentService.transferStateByInvoice(null).isEmpty());
+      assertTrue(PisDeferredPaymentService.transferStateByInvoice(List.of()).isEmpty());
+    }
+
+    @Test
+    @DisplayName("the two readings an invoice can carry are the payments' own states")
+    void statesMirrorThePaymentBadges() {
+      // Pinned so the invoice badge and the payment badge can never drift into disagreeing about
+      // the same fact — the defect this whole enrichment exists to remove.
+      assertEquals("error", PisDeferredPaymentService.INVOICE_TRANSFER_ERROR);
+      assertEquals("inProgress", PisDeferredPaymentService.INVOICE_TRANSFER_IN_PROGRESS);
+    }
+  }
+
+  @Nested
+  @DisplayName("who owns a payment's lifecycle")
+  class LifecycleLock {
+
+    @Test
+    @DisplayName("a live bank transfer owns its payment: no reactivate, no delete")
+    void liveTransferLocksThePayment() {
+      // Reactivating or deleting behind the bank's back would leave Salt Edge holding an order for a
+      // payment that no longer exists — and once executed, money that moved with nothing recording
+      // it. Locked for every state the transfer can still be in (ETP-4895).
+      assertTrue(PisDeferredPaymentService.isLifecycleLockedByTransfer("PPM", true));
+      assertTrue(PisDeferredPaymentService.isLifecycleLockedByTransfer("PWNC", true));
+      assertTrue(PisDeferredPaymentService.isLifecycleLockedByTransfer("RPAP", true));
+    }
+
+    @Test
+    @DisplayName("a rejected transfer hands the payment back")
+    void rejectedTransferUnlocksThePayment() {
+      // ETGOERR means the bank refused it: no money moved and nothing is in flight, so the payment
+      // is the user's to retry or discard. This is the whole exception to the rule.
+      assertFalse(PisDeferredPaymentService.isLifecycleLockedByTransfer("ETGOERR", true));
+    }
+
+    @Test
+    @DisplayName("a payment that never went through PIS is never locked")
+    void nonPisPaymentsAreNeverLocked() {
+      // What keeps cash and manual transfers behaving exactly as before.
+      assertFalse(PisDeferredPaymentService.isLifecycleLockedByTransfer("PPM", false));
+      assertFalse(PisDeferredPaymentService.isLifecycleLockedByTransfer("PWNC", false));
+      assertFalse(PisDeferredPaymentService.isLifecycleLockedByTransfer(null, false));
+    }
+
+    @Test
+    @DisplayName("an empty batch asks the database nothing")
+    void emptyBatchSkipsTheQuery() {
+      assertTrue(PisDeferredPaymentService.paymentsWithBankTransfer(null).isEmpty());
+      assertTrue(PisDeferredPaymentService.paymentsWithBankTransfer(List.of()).isEmpty());
+    }
+  }
+
+  @Nested
+  @DisplayName("reconciling when a screen is opened")
+  class ReconcileOnRead {
+
+    @Test
+    @DisplayName("flags a transfer the bank refused after the payment modal had closed")
+    void resolvesWhatThePollNeverSaw() {
+      // reconcile()'s only other caller is the SPA poll, which stops the moment the modal closes.
+      // A rejection arriving later is recorded by the PSD2 refresh, which knows nothing about our
+      // payment — so without this hook the payment sits in PPM forever, reading as in progress.
+      FIN_Payment payment = mock(FIN_Payment.class);
+      PisPayment attempt = mock(PisPayment.class);
+      when(attempt.getStatus()).thenReturn("failed");
+      when(attempt.getPayment()).thenReturn(payment);
+      when(payment.getStatus()).thenReturn("PPM");
+
+      try (MockedStatic<OBDal> dal = mockStatic(OBDal.class)) {
+        OBDal instance = mock(OBDal.class);
+        @SuppressWarnings("unchecked")
+        OBCriteria<PisPayment> crit = mock(OBCriteria.class);
+        dal.when(OBDal::getInstance).thenReturn(instance);
+        doReturn(crit).when(instance).createCriteria(PisPayment.class);
+        when(crit.add(any())).thenReturn(crit);
+        doReturn(List.of(attempt)).when(crit).list();
+
+        PisDeferredPaymentService.reconcileAttemptsFor(payment);
+      }
+
+      verify(payment).setStatus("ETGOERR");
+    }
+
+    @Test
+    @DisplayName("a payment with no bank transfer behind it is left alone")
+    void ignoresNonPisPayments() {
+      PisDeferredPaymentService.reconcileAttemptsFor(null);
+      // No exception, no DB access: the vast majority of payments never went through PIS.
+    }
+
+    @Test
+    @DisplayName("a screen still opens when reconciliation fails")
+    void neverThrows() {
+      // Swallowing is deliberate: this runs on a read path, and a reconciliation problem must not
+      // take the invoice or the payment window down with it.
+      FIN_Payment payment = mock(FIN_Payment.class);
+      try (MockedStatic<OBDal> dal = mockStatic(OBDal.class)) {
+        dal.when(OBDal::getInstance).thenThrow(new IllegalStateException("no session"));
+        PisDeferredPaymentService.reconcileAttemptsFor(payment);
+      }
     }
   }
 
