@@ -651,4 +651,30 @@ public class GoodsReceiptHeaderHandlerTest {
       Mockito.verify(dal).save(line);
     }
   }
+
+  /**
+   * QA edge case (ETP-4863): the reanchor guard is gated on {@code "POST".equals(httpMethod)}
+   * specifically — any other verb on the same {@code documentAction} ACTION field (GET status
+   * poll, a hypothetical PATCH/PUT/DELETE) must NOT trigger
+   * {@code NeoHandlerUtils.reanchorLinesToHeaderWarehouse}. Asserts this at the DB-interaction
+   * level (zero {@code OBContext}/{@code OBDal} static calls), not just on the return value,
+   * since a false-negative "returns null anyway" could mask the guard silently firing for the
+   * wrong verb.
+   */
+  @Test
+  public void handleDocumentActionWithNonPostMethodDoesNotReanchor() {
+    for (String method : new String[] { "GET", "PATCH", "PUT", "DELETE" }) {
+      try (MockedStatic<OBContext> obContextMock = Mockito.mockStatic(OBContext.class);
+           MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+        NeoContext ctx = NeoContext.builder()
+            .httpMethod(method).endpointType(NeoEndpointType.ACTION)
+            .fieldName("documentAction").recordId("rcpt-1").build();
+
+        assertNull(new GoodsReceiptHeaderHandler().handle(ctx));
+
+        obContextMock.verifyNoInteractions();
+        dalMock.verifyNoInteractions();
+      }
+    }
+  }
 }
