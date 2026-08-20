@@ -80,6 +80,18 @@ import com.etendoerp.go.schemaforge.selector.meta.SelectorMeta;
  * {@code selectSifFields()} already returns no fields for an SII-only tax, so even though this
  * policy projects the same columns unconditionally, the "missing" check on the frontend simply
  * never fires for SII.
+ *
+ * <p><b>Compound/summary-tax resolution (ETP-4888 follow-up):</b> a Spanish compound tax
+ * ("Entregas IVA+RE 21+5.2% ISP" and the like) is a summary tax ({@code c_tax.issummary='Y'})
+ * whose rate components are separate {@code C_Tax} rows linked via {@code parent_tax_id}. An
+ * order/invoice line always attaches the SUMMARY tax, never its component, but the régimen key
+ * Classic's completion validation reads lives on the non-equivalence-charge component
+ * ({@code em_obspti_isequivalentcharge='N'}). This policy projects {@code issummary}/
+ * {@code parent_tax_id}/{@code em_obspti_isequivalentcharge} (as {@code isSummary}/
+ * {@code parentTaxId}/{@code isEquivalentCharge}) unconditionally alongside the SIF value
+ * columns above, so the frontend can link a summary tax to its already-fetched child within the
+ * SAME catalog response and check the CHILD's completeness, without a second request — see
+ * {@code resolveEffectiveTaxRow()} in {@code useTaxSifLineRowActions.jsx}.
  */
 public final class InvoiceLineTaxSifSelectorPolicy implements SelectorEnrichmentPolicy {
 
@@ -98,16 +110,31 @@ public final class InvoiceLineTaxSifSelectorPolicy implements SelectorEnrichment
   private static final String TAX_TARGET_ENTITY = "FinancialMgmtTaxRate";
 
   // c_tax DB column (key) -> JSON key emitted on each enriched selector item (value). Keys for
-  // the TBAI/Verifactu columns are the EXACT raw AD column names `selectSifFields()`'s
+  // the TBAI/Verifactu VALUE columns are the EXACT raw AD column names `selectSifFields()`'s
   // `buildField()` calls use as `column` — the frontend looks up a resolved field's current
   // value via `row[field.column]`, so casing here must match theirs exactly (Postgres itself
   // is case-insensitive on unquoted identifiers, but the JSON keys are not).
+  //
+  // `issummary`/`parent_tax_id`/`em_obspti_isequivalentcharge` are STRUCTURAL columns, not SIF
+  // values — they carry no `row[field.column]` lookup contract, so their JSON keys are plain
+  // camelCase (matching `taxExempt`/`notTaxable` above) rather than raw AD names. Added so the
+  // frontend can resolve a compound/summary tax (`c_tax.issummary='Y'`, e.g. "Entregas IVA+RE
+  // 21+5.2% ISP") down to its rate-component child WITHOUT a second request: the whole tax
+  // catalog is already fetched in one page-through (see `fetchAllTaxPages` in
+  // `useTaxSifLineRowActions.jsx`), so a child's own row is already present in the same
+  // client-side map, keyed by its own id, needing only these 3 extra columns to be linked up
+  // (`resolveEffectiveTaxRow()` in that file). Mirrors the exact child-selection criterion
+  // Etendo Classic's own completion validation uses (`em_obspti_isequivalentcharge = 'N'` — see
+  // `ETVFAC_ORDER_VFAC_VALIDATION.xml` / `InitialValidator.java` in com.etendoerp.verifactu).
   private static final Map<String, String> COLUMN_TO_JSON_KEY;
 
   static {
     Map<String, String> m = new LinkedHashMap<>();
     m.put("istaxexempt", "taxExempt");
     m.put("isnotaxable", "notTaxable");
+    m.put("issummary", "isSummary");
+    m.put("parent_tax_id", "parentTaxId");
+    m.put("em_obspti_isequivalentcharge", "isEquivalentCharge");
     m.put("em_tbai_claveregimeniva", "EM_Tbai_Claveregimeniva");
     m.put("em_tbai_exemptioncause", "EM_Tbai_Exemptioncause");
     m.put("em_tbai_nonsubjectcause", "EM_Tbai_Nonsubjectcause");
