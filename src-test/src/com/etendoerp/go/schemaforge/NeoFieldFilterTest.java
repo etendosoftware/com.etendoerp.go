@@ -23,6 +23,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.when;
 
 import java.lang.reflect.Constructor;
@@ -30,6 +31,7 @@ import java.lang.reflect.Method;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
@@ -41,8 +43,18 @@ import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
+import org.mockito.MockedStatic;
 import org.openbravo.base.model.Entity;
+import org.openbravo.base.model.ModelProvider;
 import org.openbravo.base.model.Property;
+import org.openbravo.dal.service.OBCriteria;
+import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.ad.datamodel.Column;
+import org.openbravo.model.ad.datamodel.Table;
+import org.openbravo.model.ad.ui.Tab;
+
+import com.etendoerp.go.schemaforge.data.SFEntity;
+import com.etendoerp.go.schemaforge.data.SFField;
 
 /**
  * Unit tests for {@link NeoFieldFilter}.
@@ -686,6 +698,122 @@ class NeoFieldFilterTest {
           apiKeyMap.get("account$_identifier"),
           "apiKeyMap must map qualifier variant to DAL variant");
       assertEquals(1, apiKeyMap.size());
+    }
+  }
+
+  /**
+   * IMP-37 — clause 2 versus the explicit write grants in {@link NeoFieldFilter#forEntity}.
+   *
+   * <p>These two tests deliberately go through {@code forEntity} rather than the private
+   * constructor every other test here uses. The defect they cover lives in how forEntity
+   * COMPOSES its three sets, not in {@code filterCreateRequest} — a test that hands the
+   * constructor a ready-made {@code rejectableOnCreate} cannot observe it at all, which is
+   * exactly the blind spot IMP-30 §4 describes (a green unit test on a method whose real
+   * caller behaves differently).
+   */
+  @Nested
+  @DisplayName("forEntity: clause-2 rejection reconciled with explicit write grants")
+  class ParentColumnExemption {
+
+    private static final String CHILD_ENTITY = "BusinessPartnerBankAccount";
+
+    /** A read-only, included SFField with no AD default — clause 2's exact membership rule. */
+    private SFField readOnlyField(String dbColumn, String propName) {
+      Column col = mock(Column.class);
+      when(col.getDBColumnName()).thenReturn(dbColumn);
+      when(col.getDefaultValue()).thenReturn(null);
+      SFField f = mock(SFField.class);
+      when(f.getADColumn()).thenReturn(col);
+      when(f.isIncluded()).thenReturn(true);
+      when(f.isReadOnly()).thenReturn(true);
+      when(f.getJavaQualifier()).thenReturn(propName);
+      return f;
+    }
+
+    private Property primitiveProp(String name) {
+      Property prop = mock(Property.class);
+      when(prop.getName()).thenReturn(name);
+      when(prop.isPrimitive()).thenReturn(true);
+      return prop;
+    }
+
+    /**
+     * Builds the filter for a child entity with NO Java_Qualifier (so clause 2 is armed) whose
+     * tab table declares C_BPartner_ID as its link-to-parent column. Both C_BPartner_ID and
+     * CreditCardType are curated included + read-only + no default.
+     */
+    private NeoFieldFilter buildChildEntityFilter() {
+      // Built as locals first: stubbing a fresh mock INSIDE a when(...).thenReturn(...)
+      // expression is nested stubbing, which Mockito rejects at runtime.
+      Property parentProp = primitiveProp("businessPartner");
+      Property cardTypeProp = primitiveProp("creditCardType");
+
+      Entity dalEntity = mock(Entity.class);
+      when(dalEntity.getPropertyByColumnName("C_BPartner_ID")).thenReturn(parentProp);
+      when(dalEntity.getPropertyByColumnName("CreditCardType")).thenReturn(cardTypeProp);
+
+      Column parentCol = mock(Column.class);
+      when(parentCol.isActive()).thenReturn(true);
+      when(parentCol.isLinkToParentColumn()).thenReturn(true);
+      when(parentCol.getDBColumnName()).thenReturn("C_BPartner_ID");
+
+      List<Column> tabColumns = List.of(parentCol);
+      Table table = mock(Table.class);
+      when(table.getADColumnList()).thenReturn(tabColumns);
+      Tab tab = mock(Tab.class);
+      when(tab.getTable()).thenReturn(table);
+
+      SFEntity sfEntity = mock(SFEntity.class);
+      when(sfEntity.getId()).thenReturn("ENT-1");
+      when(sfEntity.getName()).thenReturn("bankAccount");
+      when(sfEntity.getJavaQualifier()).thenReturn(null);
+      when(sfEntity.getADTab()).thenReturn(tab);
+
+      @SuppressWarnings("unchecked")
+      OBCriteria<SFField> crit = mock(OBCriteria.class);
+      List<SFField> sfFields = List.of(
+          readOnlyField("C_BPartner_ID", "businessPartner"),
+          readOnlyField("CreditCardType", "creditCardType"));
+      when(crit.list()).thenReturn(sfFields);
+      OBDal dal = mock(OBDal.class);
+      when(dal.createCriteria(SFField.class)).thenReturn(crit);
+
+      ModelProvider modelProvider = mock(ModelProvider.class);
+      when(modelProvider.getEntity(CHILD_ENTITY)).thenReturn(dalEntity);
+
+      try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+           MockedStatic<ModelProvider> mpMock = mockStatic(ModelProvider.class)) {
+        dalMock.when(OBDal::getInstance).thenReturn(dal);
+        mpMock.when(ModelProvider::getInstance).thenReturn(modelProvider);
+        return NeoFieldFilter.forEntity(sfEntity, CHILD_ENTITY);
+      }
+    }
+
+    @Test
+    @DisplayName("a read-only link-to-parent FK is accepted on create, not rejected")
+    void parentFkSurvivesClause2() throws Exception {
+      JSONObject body = new JSONObject();
+      body.put("businessPartner", "BP-1");
+
+      JSONObject filtered = buildChildEntityFilter().filterCreateRequest(body);
+
+      assertEquals("BP-1", filtered.optString("businessPartner"),
+          "the parent link must reach persistence: a child row cannot omit it, so rejecting it"
+              + " makes the entity uncreatable by any client");
+    }
+
+    @Test
+    @DisplayName("a read-only NON-parent field on the same entity is still rejected")
+    void nonParentReadOnlyStillRejected() throws Exception {
+      JSONObject body = new JSONObject();
+      body.put("creditCardType", "VISA");
+
+      NeoFieldFilter filter = buildChildEntityFilter();
+      ReadOnlyFieldRejectedException ex = assertThrows(ReadOnlyFieldRejectedException.class,
+          () -> filter.filterCreateRequest(body),
+          "the parent-FK exemption must not disarm clause 2 for the rest of the entity —"
+              + " without this the fix would be a silent blanket disable");
+      assertEquals("creditCardType", ex.getFieldName());
     }
   }
 }

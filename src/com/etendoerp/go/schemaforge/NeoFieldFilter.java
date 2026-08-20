@@ -77,6 +77,12 @@ public class NeoFieldFilter {
    * "written by the entity's own handler". This is coarser than a per-field signal would be:
    * an entity with a handler that does NOT touch a given read-only field (e.g.
    * {@code ProductStockWarehouseHandler}, GET-only) is still exempted here. See IMP-28 report.
+   *
+   * <p><b>Membership is additionally reconciled against {@link #writableFields}</b> at the end of
+   * {@link #forEntity}: anything explicitly granted write permission there — {@code id},
+   * {@code active}, and every link-to-parent column — is removed from this set even when it
+   * satisfies the rule above. Without that step a read-only parent FK was both writable and
+   * rejectable and the rejection won, so no child row could be created at all (IMP-37).
    */
   private final Set<String> rejectableOnCreateFields;
 
@@ -172,6 +178,17 @@ public class NeoFieldFilter {
       writable.add("active");
 
       addParentColumnMappings(sfEntity, dalEntity, included, writable);
+
+      // IMP-37: the three blocks above ("id", "active", link-to-parent columns) grant write
+      // permission AFTER processFieldMappings has already classified every field, and clause 2
+      // never revisited its own set. A link-to-parent FK curated read-only therefore ended up in
+      // BOTH writable and rejectableOnCreate, and the rejection won because it runs before
+      // filterBody -- making child-row creation impossible on 58 entities (a POST cannot omit the
+      // parent link, and could not send it either). Inside processFieldMappings the two sets are
+      // disjoint by construction (an if/else on isReadOnly), so this subtraction can only remove
+      // what those three blocks added: an explicit grant must always beat an inferred rejection.
+      // Keep this AFTER every writable.add above -- a grant added below it would not be honoured.
+      rejectableOnCreate.removeAll(writable);
 
       log.debug("Field filter for entity {}: {} included, {} writable, {} rejectable on create",
           sfEntity.getName(), included.size(), writable.size(), rejectableOnCreate.size());
@@ -286,6 +303,11 @@ public class NeoFieldFilter {
    * Adds link-to-parent column properties to included and writable sets.
    * These are always allowed — they're needed for child record creation
    * (e.g., salesOrder on C_OrderLine, invoice on C_InvoiceLine).
+   *
+   * <p>"Always allowed" holds only because {@link #forEntity} subtracts {@code writable} from
+   * the clause-2 rejection set after calling this method (IMP-37). Curation routinely marks a
+   * parent FK read-only — correctly, since the user does not choose it — which used to land it
+   * in {@link #rejectableOnCreateFields} and defeat this grant entirely.
    */
   private static void addParentColumnMappings(SFEntity sfEntity, Entity dalEntity,
       Set<String> included, Set<String> writable) {
