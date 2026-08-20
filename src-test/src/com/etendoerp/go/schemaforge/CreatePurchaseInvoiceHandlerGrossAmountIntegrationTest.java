@@ -84,6 +84,10 @@ public class CreatePurchaseInvoiceHandlerGrossAmountIntegrationTest extends OBBa
 
   @Before
   public void setUp() {
+    // Defensive: a prior test in the same suite run can leave the admin-mode stack
+    // unbalanced (OBBaseTest.finished() only detects it, doesn't guarantee cleanup
+    // before the next test starts) — clear it so that check reflects only this test.
+    OBContext.clearAdminModeStack();
     OBContext.setOBContext(TestConstants.Users.ADMIN, TestConstants.Roles.FB_GRP_ADMIN,
         TestConstants.Clients.FB_GRP, TestConstants.Orgs.ESP);
   }
