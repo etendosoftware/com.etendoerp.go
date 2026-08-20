@@ -188,49 +188,72 @@ public class TaxReportHandler implements NeoHandler {
   private List<TaxRow> queryRows(String dateColumn, String isSOTrx, ReportParams p)
       throws JSONException, SQLException {
 
-    String bpNameCol = "legal".equals(p.bpNameType)
+    String bpNameCol = resolveBpNameCol(p.bpNameType);
+    ConversionClauses cc = buildConversionClauses(dateColumn, p);
+    List<Object> params = new ArrayList<>();
+    StringBuilder sql = buildBaseSql(bpNameCol, cc, dateColumn);
+    appendBaseParams(cc, isSOTrx, p, params);
+    appendOptionalFilters(sql, params, p);
+    sql.append("ORDER BY t.name, bp.name, i.documentno");
+
+    return executeQuery(sql.toString(), params);
+  }
+
+  private static String resolveBpNameCol(String bpNameType) {
+    return "legal".equals(bpNameType)
         ? "COALESCE(NULLIF(bp.name2,''), bp.name)"
         : "bp.name";
+  }
 
-    // Amounts are stored in the DOCUMENT's currency, so invoices issued in a foreign
-    // currency have to be converted to the currency the user picked before they can be
-    // summed together. Without this, a USD invoice and a EUR invoice were added up raw.
-    //
-    // Mirrors Etendo Classic's OBMTR30 Invoice Tax Report
-    // (com.etendoerp.verifactu.report.OBMTR30_InvoiceTaxReportJRCustom -> MTRRecord):
-    // same function, same arguments, and the same preference for an invoice-specific
-    // rate (c_conversion_rate_document) over the general one (c_conversion_rate).
-    // The conversion date is the report's own date column — accounting date by default —
-    // which is what Classic uses too, NOT dateinvoiced.
-    //
-    // Two behaviours of C_CURRENCY_CONVERT_RATE this relies on:
-    //   - source == target returns the amount untouched (invoices already in the target
-    //     currency keep their exact value, no rounding), and
-    //   - a NULL rate delegates to the standard c_conversion_rate lookup ('S'/Spot).
-    // A NULL target currency would blank out every amount, so with no currency selected
-    // the raw columns are emitted exactly as before.
-    boolean convertCurrency = !p.currencyId.isEmpty();
-    String taxBaseCol = "it.taxbaseamt";
-    String taxAmtCol  = "it.taxamt";
-    String totalCol   = "i.grandtotal";
-    String rateDocJoin = "";
-    if (convertCurrency) {
-      taxBaseCol = currencyConvert("it.taxbaseamt", dateColumn);
-      taxAmtCol  = currencyConvert("it.taxamt",     dateColumn);
-      totalCol   = currencyConvert("i.grandtotal",  dateColumn);
+  /** Holds the SELECT/JOIN fragments that change when currency conversion is requested. */
+  private static class ConversionClauses {
+    boolean convertCurrency;
+    String  taxBaseCol  = "it.taxbaseamt";
+    String  taxAmtCol   = "it.taxamt";
+    String  totalCol    = "i.grandtotal";
+    String  rateDocJoin = "";
+  }
+
+  // Amounts are stored in the DOCUMENT's currency, so invoices issued in a foreign
+  // currency have to be converted to the currency the user picked before they can be
+  // summed together. Without this, a USD invoice and a EUR invoice were added up raw.
+  //
+  // Mirrors Etendo Classic's OBMTR30 Invoice Tax Report
+  // (com.etendoerp.verifactu.report.OBMTR30_InvoiceTaxReportJRCustom -> MTRRecord):
+  // same function, same arguments, and the same preference for an invoice-specific
+  // rate (c_conversion_rate_document) over the general one (c_conversion_rate).
+  // The conversion date is the report's own date column — accounting date by default —
+  // which is what Classic uses too, NOT dateinvoiced.
+  //
+  // Two behaviours of C_CURRENCY_CONVERT_RATE this relies on:
+  //   - source == target returns the amount untouched (invoices already in the target
+  //     currency keep their exact value, no rounding), and
+  //   - a NULL rate delegates to the standard c_conversion_rate lookup ('S'/Spot).
+  // A NULL target currency would blank out every amount, so with no currency selected
+  // the raw columns are emitted exactly as before.
+  private static ConversionClauses buildConversionClauses(String dateColumn, ReportParams p) {
+    ConversionClauses cc = new ConversionClauses();
+    cc.convertCurrency = !p.currencyId.isEmpty();
+    if (cc.convertCurrency) {
+      cc.taxBaseCol = currencyConvert("it.taxbaseamt", dateColumn);
+      cc.taxAmtCol  = currencyConvert("it.taxamt",     dateColumn);
+      cc.totalCol   = currencyConvert("i.grandtotal",  dateColumn);
       // Constrained to this invoice's exact currency pair so the join can never match
       // more than one row and silently duplicate the invoice (which would inflate every
       // total). Classic instead lets the join fan out and filters afterwards in its
       // WHERE; restricting it here is equivalent for a matching rate and safer.
-      rateDocJoin =
+      cc.rateDocJoin =
           "  LEFT JOIN c_conversion_rate_document crd " +
           "    ON crd.c_invoice_id      = i.c_invoice_id " +
           "   AND crd.c_currency_id     = i.c_currency_id " +
           "   AND crd.c_currency_id_to  = ? " +
           "   AND crd.isactive          = 'Y' ";
     }
+    return cc;
+  }
 
-    StringBuilder sql = new StringBuilder(
+  private static StringBuilder buildBaseSql(String bpNameCol, ConversionClauses cc, String dateColumn) {
+    return new StringBuilder(
         "SELECT " +
         "  t.c_tax_id            AS tax_id, " +
         "  t.name                AS tax_name, " +
@@ -247,9 +270,9 @@ public class TaxReportHandler implements NeoHandler {
         "  dt.name               AS doc_type, " +
         "  TO_CHAR(i.dateinvoiced,'YYYY-MM-DD') AS doc_date, " +
         "  TO_CHAR(i.dateacct,   'YYYY-MM-DD') AS acct_date, " +
-        "  " + taxBaseCol + "    AS tax_base_amt, " +
-        "  " + taxAmtCol  + "    AS tax_amt, " +
-        "  " + totalCol   + "    AS total_amt " +
+        "  " + cc.taxBaseCol + "    AS tax_base_amt, " +
+        "  " + cc.taxAmtCol  + "    AS tax_amt, " +
+        "  " + cc.totalCol   + "    AS total_amt " +
         "FROM c_invoicetax it " +
         "  JOIN c_invoice i      ON i.c_invoice_id = it.c_invoice_id " +
         "  JOIN c_tax t          ON t.c_tax_id = it.c_tax_id " +
@@ -261,7 +284,7 @@ public class TaxReportHandler implements NeoHandler {
         "  LEFT JOIN c_location loc ON loc.c_location_id = bpl.c_location_id " +
         "  LEFT JOIN c_country ctry ON ctry.c_country_id = loc.c_country_id " +
         "  LEFT JOIN c_region reg   ON reg.c_region_id = loc.c_region_id " +
-        rateDocJoin +
+        cc.rateDocJoin +
         "WHERE i.docstatus IN ('CO','CL') " +
         "  AND i.isactive = 'Y' " +
         "  AND i.issotrx = ? " +
@@ -270,15 +293,16 @@ public class TaxReportHandler implements NeoHandler {
         "  AND " + dateColumn + " >= TO_DATE(?,'YYYY-MM-DD') " +
         "  AND " + dateColumn + " <= TO_DATE(?,'YYYY-MM-DD') "
     );
+  }
 
-    List<Object> params = new ArrayList<>();
+  // Placeholders are positional, and the conversion ones live in the SELECT list and
+  // the join — both of which come BEFORE the WHERE — so they must be bound first.
+  // Order: (currency, client) per converted column, in SELECT order, then the join's
+  // target currency.
+  private static void appendBaseParams(ConversionClauses cc, String isSOTrx, ReportParams p,
+      List<Object> params) {
     String clientId = OBContext.getOBContext().getCurrentClient().getId();
-
-    // Placeholders are positional, and the conversion ones live in the SELECT list and
-    // the join — both of which come BEFORE the WHERE — so they must be bound first.
-    // Order: (currency, client) per converted column, in SELECT order, then the join's
-    // target currency.
-    if (convertCurrency) {
+    if (cc.convertCurrency) {
       for (int i = 0; i < CONVERTED_AMOUNT_COLUMNS; i++) {
         params.add(p.currencyId);
         params.add(clientId);
@@ -291,7 +315,9 @@ public class TaxReportHandler implements NeoHandler {
     params.add(p.orgId);
     params.add(p.dateFrom);
     params.add(p.dateTo);
+  }
 
+  private static void appendOptionalFilters(StringBuilder sql, List<Object> params, ReportParams p) {
     if (!p.taxId.isEmpty()) {
       sql.append("  AND t.c_tax_id = ? ");
       params.add(p.taxId);
@@ -313,13 +339,13 @@ public class TaxReportHandler implements NeoHandler {
     } else {
       sql.append("  AND (t.istaxundeductable IS NULL OR t.istaxundeductable = 'N') ");
     }
+  }
 
-    sql.append("ORDER BY t.name, bp.name, i.documentno");
-
+  private static List<TaxRow> executeQuery(String sql, List<Object> params) throws SQLException, JSONException {
     Connection conn = OBDal.getInstance().getConnection();
     List<TaxRow> rows = new ArrayList<>();
 
-    try (PreparedStatement ps = conn.prepareStatement(sql.toString())) {
+    try (PreparedStatement ps = conn.prepareStatement(sql)) {
       for (int i = 0; i < params.size(); i++) {
         ps.setObject(i + 1, params.get(i));
       }
