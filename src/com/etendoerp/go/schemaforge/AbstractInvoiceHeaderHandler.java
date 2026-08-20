@@ -81,12 +81,13 @@ public abstract class AbstractInvoiceHeaderHandler {
   protected static final String FIELD_ORIGIN_INVOICE       = "originInvoice";
   protected static final String FIELD_TRANSACTION_DOCUMENT = "transactionDocument";
   private static final String FIELD_CURRENCY = "currency";
-  private static final String FIELD_VALUE = "value";
+  // Package-private: also used by InvoiceCalloutHelper (S1448 extraction)
+  static final String FIELD_VALUE = "value";
   private static final String FIELD_PROCESSED = "processed";
   private static final String FIELD_TOTAL_DISCOUNT_PCT = "etgoTotalDiscount";
-  private static final String FIELD_AEATSII_IS_AUTHORIZATION = "aeatsiiIsauthorization";
-  private static final String FIELD_AEATSII_AUTHORIZATION_NO = "aeatsiiAuthorizationno";
-  private static final String FIELD_ETVFAC_INV_TYPE = "etvfacInvType";
+  static final String FIELD_AEATSII_IS_AUTHORIZATION = "aeatsiiIsauthorization";
+  static final String FIELD_AEATSII_AUTHORIZATION_NO = "aeatsiiAuthorizationno";
+  static final String FIELD_ETVFAC_INV_TYPE = "etvfacInvType";
   protected static final String FIELD_GRAND_TOTAL_AMOUNT = "grandTotalAmount";
   protected static final String FIELD_OUTSTANDING_AMOUNT = "outstandingAmount";
 
@@ -295,7 +296,7 @@ public abstract class AbstractInvoiceHeaderHandler {
       }
       String originInvoiceId = pendingOriginInvoiceId;
 
-      String invoiceId = resolveInvoiceIdFromContext(context);
+      String invoiceId = InvoiceCalloutHelper.resolveInvoiceIdFromContext(context);
       if (StringUtils.isBlank(invoiceId)) {
         return;
       }
@@ -313,14 +314,6 @@ public abstract class AbstractInvoiceHeaderHandler {
     } catch (Exception e) {
       log.warn("Could not persist origin invoice: {}", e.getMessage());
     }
-  }
-
-  private static String resolveInvoiceIdFromContext(NeoContext context) {
-    if (context.getRecordId() != null) {
-      return context.getRecordId();
-    }
-    // POST: extract newly created record ID from the CRUD response
-    return NeoHandlerUtils.extractCreatedIdFromPreviousResult(context);
   }
 
   private void deleteExistingReverseLinks(String invoiceId) {
@@ -436,7 +429,7 @@ public abstract class AbstractInvoiceHeaderHandler {
       return;
     }
     try {
-      String invoiceId = resolveInvoiceIdFromContext(context);
+      String invoiceId = InvoiceCalloutHelper.resolveInvoiceIdFromContext(context);
       if (StringUtils.isBlank(invoiceId)) {
         return;
       }
@@ -758,7 +751,7 @@ public abstract class AbstractInvoiceHeaderHandler {
    *     not a completion request (caller should continue to the default dispatch)
    */
   protected static NeoResponse completeInvoiceIfNeeded(NeoContext context) {
-    if (!isInvoiceCompleteAction(context)) {
+    if (!InvoiceCalloutHelper.isInvoiceCompleteAction(context)) {
       return null;
     }
     String invoiceId = context.getRecordId();
@@ -867,7 +860,8 @@ public abstract class AbstractInvoiceHeaderHandler {
   // Pre-completion invoice line quantity validation
   // ---------------------------------------------------------------------------
 
-  private static final String FIELD_DOCUMENT_ACTION_INV = "documentAction";
+  // Package-private: also used by InvoiceCalloutHelper (S1448 extraction)
+  static final String FIELD_DOCUMENT_ACTION_INV = "documentAction";
 
   /**
    * Blocks invoice completion when any invoice line would over-invoice a shipment or receipt line.
@@ -883,7 +877,7 @@ public abstract class AbstractInvoiceHeaderHandler {
    */
   @SuppressWarnings("java:S2077")
   static NeoResponse validateLineQtyBeforeComplete(NeoContext context) {
-    if (!isInvoiceCompleteAction(context)) {
+    if (!InvoiceCalloutHelper.isInvoiceCompleteAction(context)) {
       return null;
     }
     String invoiceId = context.getRecordId();
@@ -960,30 +954,6 @@ public abstract class AbstractInvoiceHeaderHandler {
       }
     }
     return null;
-  }
-
-  private static boolean isInvoiceCompleteAction(NeoContext context) {
-    if (NeoEndpointType.CRUD.equals(context.getEndpointType())) {
-      String method = context.getHttpMethod();
-      if (!"PATCH".equals(method) && !"PUT".equals(method)) {
-        return false;
-      }
-      JSONObject body = context.getRequestBody();
-      return body != null && "CO".equals(body.optString(FIELD_DOCUMENT_ACTION_INV, ""));
-    }
-    if (NeoEndpointType.ACTION.equals(context.getEndpointType())
-        && FIELD_DOCUMENT_ACTION_INV.equals(context.getFieldName())) {
-      JSONObject body = context.getRequestBody();
-      if (body == null) {
-        return false;
-      }
-      JSONObject fieldValues = body.optJSONObject("fieldValues");
-      String docAction = fieldValues != null
-          ? fieldValues.optString(FIELD_DOCUMENT_ACTION_INV, "")
-          : body.optString("docAction", body.optString(FIELD_DOCUMENT_ACTION_INV, ""));
-      return "CO".equals(docAction);
-    }
-    return false;
   }
 
   // ---------------------------------------------------------------------------
@@ -1085,7 +1055,7 @@ public abstract class AbstractInvoiceHeaderHandler {
     if (!docCurrencyId.isEmpty() && orgCurrencyId != null
         && !docCurrencyId.equals(orgCurrencyId) && !invoiceDate.isEmpty()
         && !NeoExchangeRateService.hasRate(orgCurrencyId, docCurrencyId, invoiceDate)) {
-      appendMessage(body, "WARNING", "noExchangeRateAvailable");
+      InvoiceCalloutHelper.appendMessage(body, "WARNING", "noExchangeRateAvailable");
       log.debug("[ETP-4029] No conversion rate warning added (currency={})", docCurrencyId);
     }
   }
@@ -1120,320 +1090,18 @@ public abstract class AbstractInvoiceHeaderHandler {
       }
       blockCalloutCurrencyUpdate(fields.updates(), fields.triggerField());
       checkExchangeRateWarning(fields.body(), fields.requestBody(), fields.formState(), fields.triggerField());
-      String recordId = resolveCalloutRecordId(context, fields.formState());
+      String recordId = InvoiceCalloutHelper.resolveCalloutRecordId(context, fields.formState());
       blockCalloutDocTypeUpdateIfLocked(fields.updates(), fields.triggerField(), recordId);
-      applySiiAuthorizationCallout(fields.triggerField(), fields.requestBody(), fields.updates());
-      applyVerifactuInvTypeFromDocType(fields.triggerField(), fields.requestBody(), fields.updates());
-      applyRectificativeFieldsFromDocType(fields.triggerField(), fields.requestBody(), fields.updates());
-      realignVerifactuDescWithFormStateDocType(fields.triggerField(), fields.formState(), fields.updates());
+      InvoiceCalloutHelper.applySiiAuthorizationCallout(fields.triggerField(), fields.requestBody(), fields.updates());
+      InvoiceCalloutHelper.applyVerifactuInvTypeFromDocType(fields.triggerField(), fields.requestBody(), fields.updates());
+      InvoiceCalloutHelper.applyRectificativeFieldsFromDocType(fields.triggerField(), fields.requestBody(), fields.updates());
+      InvoiceCalloutHelper.realignVerifactuDescWithFormStateDocType(fields.triggerField(), fields.formState(), fields.updates());
     } catch (Exception e) {
       log.warn("[ETP-4029/ETP-4535] afterCallout failed (non-fatal): {}", e.getMessage());
     }
     return null; // mutations applied in-place; dispatcher merges nothing extra
   }
 
-  /**
-   * Replicates {@code SiiAuthorizationCallout} behavior for Go/NEO Headless (ETP-4783).
-   *
-   * <p>Classic Etendo fires the {@code SiiAuthorizationCallout} immediately when the user
-   * toggles the {@code aeatsiiIsauthorization} checkbox on the invoice. In Go/NEO, that
-   * Classic callout does not run; this hook restores the same field-update semantics:
-   *
-   * <ul>
-   *   <li>If set to {@code Y}: looks up {@link AEATSIIConfig} for the current legal-entity org
-   *       via {@link SIIUtils#getSiiConfigFromOrg(Organization)}. If no config or no
-   *       authorization number is set, an ERROR message is appended to the callout response.
-   *       Otherwise, {@code aeatsiiAuthorizationno} is injected into the {@code updates} map
-   *       so the form field is populated immediately without a round-trip save.
-   *   <li>If set to {@code N}: clears {@code aeatsiiAuthorizationno} by injecting an empty
-   *       string into the {@code updates} map.
-   * </ul>
-   *
-   * <p>No-op when the trigger field is not {@code aeatsiiIsauthorization}. All failures are
-   * caught and logged as warnings (non-fatal) to match the Classic callout's error-handling.
-   *
-   * @param triggerField the name of the field that fired the callout
-   * @param requestBody  the callout request body ({@code field}, {@code value}, {@code formState})
-   * @param updates      the callout response's {@code updates} map; may be {@code null}
-   */
-  private static void applySiiAuthorizationCallout(String triggerField, JSONObject requestBody,
-      JSONObject updates) {
-    if (!FIELD_AEATSII_IS_AUTHORIZATION.equals(triggerField)) {
-      return;
-    }
-    try {
-      Object rawValue = requestBody != null ? requestBody.opt(FIELD_VALUE) : null;
-      String value = rawValue != null ? rawValue.toString() : "";
-      boolean isAuthorization = "Y".equalsIgnoreCase(value) || "true".equalsIgnoreCase(value);
-
-      if (updates == null) {
-        // Cannot inject field updates without the updates section — skip silently.
-        log.debug("[ETP-4783] applySiiAuthorizationCallout: no updates map, skipping injection");
-        return;
-      }
-
-      if (isAuthorization) {
-        Organization org = OBContext.getOBContext().getCurrentOrganization();
-        if (org == null) {
-          log.warn("[ETP-4783] applySiiAuthorizationCallout: no current organization in OBContext");
-          return;
-        }
-        AEATSIIConfig config = SIIUtils.getSiiConfigFromOrg(org);
-        if (config == null || StringUtils.isBlank(config.getAuthorizationno())) {
-          // The classic SiiAuthorizationCallout (executed earlier via NeoCalloutEndpoint.executeCallout)
-          // already appended this ERROR message to the response. Appending it here too would cause the
-          // error to appear twice in the UI. Skip — no field update to inject either. (ETP-4783)
-          return;
-        }
-        // Updates entries must be { "value": "..." } objects — see applyVerifactuInvTypeFromDocType.
-        JSONObject authUpdate = new JSONObject();
-        authUpdate.put(FIELD_VALUE, config.getAuthorizationno());
-        updates.put(FIELD_AEATSII_AUTHORIZATION_NO, authUpdate);
-      } else {
-        JSONObject authClear = new JSONObject();
-        authClear.put(FIELD_VALUE, "");
-        updates.put(FIELD_AEATSII_AUTHORIZATION_NO, authClear);
-      }
-    } catch (Exception e) {
-      log.warn("[ETP-4783] applySiiAuthorizationCallout failed (non-fatal): {}", e.getMessage());
-    }
-  }
-
-  /**
-   * ETP-4783: After a non-DocType callout (e.g. {@code businessPartner}) the cascade may
-   * fire the {@code transactionDocument} Classic callout (because the BP callout suggests a
-   * different DocType) and inject {@code etvfacVerifacDesc} based on that suggested DocType.
-   * The cascade runs BEFORE the after-callout hook, so by the time this method runs the
-   * "wrong" description is already in {@code updates}.
-   *
-   * <p>This method corrects it by re-reading {@code em_etvfac_verifac_desc} (and
-   * {@code em_etvfac_inv_type}) for the DocType the user actually selected, taken from
-   * {@code formState.transactionDocument} (the live editing snapshot the frontend sends).
-   *
-   * <p>No-op when trigger IS {@code transactionDocument} (handled by
-   * {@link #applyVerifactuInvTypeFromDocType}), or when no Verifactu field is present in
-   * updates (the cascade did not fire for {@code transactionDocument} → nothing to fix).
-   * All failures are caught and logged (non-fatal).
-   *
-   * @param triggerField the field that fired the callout
-   * @param formState    the form state snapshot from the callout request
-   * @param updates      the callout response's {@code updates} map; may be {@code null}
-   */
-  private static void realignVerifactuDescWithFormStateDocType(String triggerField,
-      JSONObject formState, JSONObject updates) {
-    if (FIELD_TRANSACTION_DOCUMENT.equals(triggerField)) {
-      return; // already handled by applyVerifactuInvTypeFromDocType
-    }
-    if (updates == null || !updates.has("etvfacVerifacDesc")) {
-      return; // cascade did not touch Verifactu description — nothing to realign
-    }
-    if (formState == null) {
-      return;
-    }
-    String docTypeId = formState.optString(FIELD_TRANSACTION_DOCUMENT, "").trim();
-    if (docTypeId.isEmpty()) {
-      return;
-    }
-    try {
-      String sql = "SELECT em_etvfac_verifac_desc, em_etvfac_inv_type"
-          + " FROM c_doctype WHERE c_doctype_id = ?";
-      Connection conn = OBDal.getReadOnlyInstance().getConnection();
-      try (PreparedStatement ps = conn.prepareStatement(sql)) {
-        ps.setString(1, docTypeId);
-        try (ResultSet rs = ps.executeQuery()) {
-          if (rs.next()) {
-            String desc    = rs.getString(1);
-            String invType = rs.getString(2);
-            if (desc != null && !desc.trim().isEmpty()) {
-              JSONObject descUpdate = new JSONObject();
-              descUpdate.put(FIELD_VALUE, desc.trim());
-              updates.put("etvfacVerifacDesc", descUpdate);
-            }
-            // Also realign etvfacInvType if the cascade put a wrong value there
-            if (invType != null && !invType.trim().isEmpty() && updates.has(FIELD_ETVFAC_INV_TYPE)) {
-              JSONObject invUpdate = new JSONObject();
-              invUpdate.put(FIELD_VALUE, invType.trim());
-              updates.put(FIELD_ETVFAC_INV_TYPE, invUpdate);
-            }
-          }
-        }
-      }
-      log.debug("[ETP-4783] realignVerifactuDescWithFormStateDocType: corrected Verifactu desc/inv for docType={} (trigger={})",
-          docTypeId, triggerField);
-    } catch (Exception e) {
-      log.warn("[ETP-4783] realignVerifactuDescWithFormStateDocType failed (non-fatal): {}", e.getMessage());
-    }
-  }
-
-  /**
-   * When the user changes the document type ({@code transactionDocument} trigger), injects the
-   * new DocType's {@code em_etvfac_inv_type} value into the callout update map.
-   *
-   * <p>The Classic callout {@code ETVFAC_C_INVOICE_SET_VERIFACTU} propagates this field on
-   * DocType change, but it does not run in GO/NEO Headless. This method replicates that behaviour
-   * so {@code etvfacInvType} ("Tipo de Factura") updates when the user switches to a rectificative
-   * document type (ETP-4783).
-   *
-   * <p>No-op when the trigger is not {@code transactionDocument} or the DocType has no Verifactu
-   * invoice type configured. All failures are caught and logged as warnings (non-fatal).
-   *
-   * @param triggerField the field that fired the callout
-   * @param requestBody  the callout request body ({@code field}, {@code value}, {@code formState})
-   * @param updates      the callout response's {@code updates} map; may be {@code null}
-   */
-  private static void applyVerifactuInvTypeFromDocType(String triggerField, JSONObject requestBody,
-      JSONObject updates) {
-    if (!FIELD_TRANSACTION_DOCUMENT.equals(triggerField)) {
-      return;
-    }
-    if (updates == null) {
-      return;
-    }
-    try {
-      Object rawValue = requestBody != null ? requestBody.opt(FIELD_VALUE) : null;
-      String docTypeId = rawValue != null ? rawValue.toString().trim() : "";
-      if (docTypeId.isEmpty()) {
-        return;
-      }
-      String sql = "SELECT em_etvfac_inv_type FROM c_doctype WHERE c_doctype_id = ?";
-      Connection conn = OBDal.getReadOnlyInstance().getConnection();
-      try (PreparedStatement ps = conn.prepareStatement(sql)) {
-        ps.setString(1, docTypeId);
-        try (ResultSet rs = ps.executeQuery()) {
-          if (rs.next()) {
-            String invType = rs.getString(1);
-            if (invType != null && !invType.trim().isEmpty()) {
-              // Updates entries must be { "value": "..." } objects, not raw strings —
-              // the frontend's applyCalloutFieldUpdates reads entry.value; a raw string
-              // would give entry.value === undefined and silently skip the update.
-              JSONObject fieldUpdate = new JSONObject();
-              fieldUpdate.put(FIELD_VALUE, invType.trim());
-              updates.put(FIELD_ETVFAC_INV_TYPE, fieldUpdate);
-              log.debug("[ETP-4783] applyVerifactuInvTypeFromDocType: injected etvfacInvType={} for docType={}",
-                  invType.trim(), docTypeId);
-            }
-          }
-        }
-      }
-    } catch (Exception e) {
-      log.warn("[ETP-4783] applyVerifactuInvTypeFromDocType failed (non-fatal): {}", e.getMessage());
-    }
-  }
-
-  /**
-   * Injects TicketBAI rectificative fields into the callout response when the selected document
-   * type is marked as rectificative ({@code em_etsg_isrectificative = 'Y'}) in SIF General.
-   *
-   * <p>Fires only when {@code triggerField} is {@code "transactionDocument"}. When the column
-   * {@code em_etsg_isrectificative} is absent from the DB (SIF General not installed), the whole
-   * method is a no-op ({@link RectificativeSupport#isColumnPresent()} returns {@code false}).
-   *
-   * <p>When the doctype IS rectificative:
-   * <ul>
-   *   <li>{@code tbaiIsreverseinvoice} → {@code "Y"} (maps to {@code EM_TBAI_ISREVERSEINVOICE})</li>
-   *   <li>{@code tbaiReverseinvoicetype} → {@code "I"} ("Por diferencias",
-   *       the default TicketBAI reverse invoice type)</li>
-   * </ul>
-   *
-   * <p>When the doctype is NOT rectificative both fields are cleared ({@code "N"} / empty string)
-   * so switching back from a rectificative doctype resets the form correctly.
-   *
-   * @param triggerField the callout trigger field name
-   * @param requestBody  the callout request body ({@code field}, {@code value}, {@code formState})
-   * @param updates      the callout response's {@code updates} map; may be {@code null}
-   */
-  private static void applyRectificativeFieldsFromDocType(String triggerField,
-      JSONObject requestBody, JSONObject updates) {
-    if (!FIELD_TRANSACTION_DOCUMENT.equals(triggerField)) {
-      return;
-    }
-    if (updates == null) {
-      return;
-    }
-    if (!RectificativeSupport.isColumnPresent()) {
-      return;
-    }
-    try {
-      Object rawValue = requestBody != null ? requestBody.opt(FIELD_VALUE) : null;
-      String docTypeId = rawValue != null ? rawValue.toString().trim() : "";
-      if (docTypeId.isEmpty()) {
-        return;
-      }
-      String sql = "SELECT em_etsg_isrectificative FROM c_doctype WHERE c_doctype_id = ?";
-      Connection conn = OBDal.getReadOnlyInstance().getConnection();
-      boolean isRectificative = false;
-      try (PreparedStatement ps = conn.prepareStatement(sql)) {
-        ps.setString(1, docTypeId);
-        try (ResultSet rs = ps.executeQuery()) {
-          if (rs.next()) {
-            isRectificative = "Y".equalsIgnoreCase(rs.getString(1));
-          }
-        }
-      }
-      JSONObject isReverseUpdate = new JSONObject();
-      isReverseUpdate.put(FIELD_VALUE, isRectificative ? "Y" : "N");
-      updates.put("tbaiIsreverseinvoice", isReverseUpdate);
-
-      JSONObject reverseTypeUpdate = new JSONObject();
-      // "I" = "Por diferencias" — the TicketBAI default reverse type (AD_REF_LIST VALUE for
-      // reference 6E28A33291454412B2129FDC072B6FD9). Cleared when not rectificative.
-      reverseTypeUpdate.put(FIELD_VALUE, isRectificative ? "I" : "");
-      updates.put("tbaiReverseinvoicetype", reverseTypeUpdate);
-
-      log.debug("[ETP-4783] applyRectificativeFieldsFromDocType: docType={} isRectificative={}",
-          docTypeId, isRectificative);
-    } catch (Exception e) {
-      log.warn("[ETP-4783] applyRectificativeFieldsFromDocType failed (non-fatal): {}", e.getMessage());
-    }
-  }
-
-  /**
-   * Resolves the invoice's record id for a callout request.
-   *
-   * <p>Callout URLs carry no record-id path segment — {@code NeoServletSupport.parseSubEndpointPath}
-   * matches the callout route as a literal {@code {specName}/{entityName}/callout} 3-segment path
-   * with the record-id segment hardcoded {@code null}, and {@link NeoCalloutEndpoint#handleCallout}
-   * never calls {@code .recordId(...)} on the {@link NeoContext} builder. So
-   * {@link NeoContext#getRecordId()} is always {@code null} for a real callout, and the currently
-   * loaded record's id must instead be read from the callout's echoed {@code formState.id} — the
-   * same idiom already used by {@code InventoryLineHandler#afterCallout} (formState null-guard +
-   * {@code optString("id", ...)}) and {@code CalloutRequestBuilder#injectParentId}
-   * ({@code formState.has("id")} before reading).
-   *
-   * <p>{@code context.getRecordId()} is checked first as a defensive fallback for any future/other
-   * dispatch path that DOES populate it (e.g. a non-callout invocation of this shared method), but
-   * for the real production callout path it is always blank and {@code formState.id} is what fires.
-   *
-   * @param context   the current NeoContext
-   * @param formState the callout's {@code formState} object; may be {@code null}
-   * @return the resolved invoice record id, or {@code null} if neither source has one
-   */
-  private static String resolveCalloutRecordId(NeoContext context, JSONObject formState) {
-    String recordId = context.getRecordId();
-    if (StringUtils.isNotBlank(recordId)) {
-      return recordId;
-    }
-    if (formState == null) {
-      return null;
-    }
-    return StringUtils.trimToNull(formState.optString("id", null));
-  }
-
-  private static void appendMessage(JSONObject body, String type, String text) {
-    try {
-      org.codehaus.jettison.json.JSONArray messages = body.optJSONArray("messages");
-      if (messages == null) {
-        messages = new org.codehaus.jettison.json.JSONArray();
-        body.put("messages", messages);
-      }
-      JSONObject msg = new JSONObject();
-      msg.put("type", type);
-      msg.put("text", text);
-      messages.put(msg);
-    } catch (Exception e) {
-      log.warn("[ETP-4029] appendMessage failed: {}", e.getMessage());
-    }
-  }
 
   /**
    * Upserts the {@code C_Conversion_Rate_Document} record for an invoice whenever its currency
@@ -1463,7 +1131,7 @@ public abstract class AbstractInvoiceHeaderHandler {
     if (!"PATCH".equals(method) && !"PUT".equals(method) && !"POST".equals(method)) {
       return;
     }
-    String invoiceId = resolveInvoiceIdFromContext(context);
+    String invoiceId = InvoiceCalloutHelper.resolveInvoiceIdFromContext(context);
     autoCreateOrUpdateConversionRateDocument(invoiceId);
   }
 
