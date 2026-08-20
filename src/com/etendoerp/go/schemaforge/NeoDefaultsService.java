@@ -1343,9 +1343,10 @@ public class NeoDefaultsService {
    * value on {@code entity} is never overwritten, mirroring the "skip if already present" rule
    * {@link #injectMandatoryDefaults} applies to the request body on the HTTP create path — so
    * fields the builder set explicitly (order, business partner, currency, accounting date, etc.)
-   * always win over a generic derivation. Only primitive (non-FK) properties are set; an
-   * FK-typed derivation is logged and skipped rather than risked, since resolving the referenced
-   * bean safely is out of scope for this generic entry point.
+   * always win over a generic derivation. Primitive properties are coerced and set directly;
+   * FK-typed (non-primitive) properties are resolved via {@code OBDal.getInstance().get(target,
+   * id)} — mirroring the same lookup {@link #tryInjectIdentifier} performs on the HTTP path — and
+   * only set when the referenced record actually exists, otherwise the field is left untouched.
    *
    * <p>Failures anywhere in this method (missing spec/entity, resolution error, coercion
    * failure) are swallowed and logged — a background document-creation flow must never fail
@@ -1438,8 +1439,15 @@ public class NeoDefaultsService {
 
   /**
    * Applies a single resolved declared-default value onto {@code entity}, unless the property is
-   * non-primitive (FK) or already carries a non-blank value. All failures are swallowed and
-   * logged at debug level — an unresolvable single field must never abort the rest of the pass.
+   * already carrying a non-blank value. All failures are swallowed and logged at debug level — an
+   * unresolvable single field must never abort the rest of the pass.
+   *
+   * <p>FK-typed (non-primitive) properties are resolved via {@link #resolveFkDefaultTarget}, the
+   * same {@code OBDal.getInstance().get(targetEntity, id)} lookup {@link #tryInjectIdentifier}
+   * already uses on the HTTP {@code /defaults} path to turn a resolved id string into a display
+   * identifier. If the referenced bean cannot be found (invalid id, unresolvable target entity),
+   * the field is skipped and logged exactly like the previous primitive-only gate did — this
+   * method never throws out of a failed FK resolution.
    */
   private static void applyDeclaredDefaultIfMissing(BaseOBObject entity, Entity dalEntity,
       String propName, Object rawValue) {
@@ -1451,16 +1459,12 @@ public class NeoDefaultsService {
       if (prop == null) {
         return;
       }
-      if (!prop.isPrimitive()) {
-        // FK-typed derivations are intentionally not applied by this generic path — resolving
-        // the referenced bean safely is out of scope here. Logged so it's discoverable if a
-        // future SII/SIF (or other) field turns out to need it.
-        log.debug("Skipping non-primitive declared default for '{}' on background entity {}",
-            propName, entity.getEntityName());
-        return;
-      }
       if (!isBlankValue(entity.get(propName))) {
         return; // caller already set this field explicitly — never clobber it
+      }
+      if (!prop.isPrimitive()) {
+        applyDeclaredFkDefaultIfMissing(entity, prop, propName, rawValue);
+        return;
       }
       Object coerced = coercePrimitiveDefault(prop, rawValue);
       if (coerced != null) {
@@ -1471,6 +1475,59 @@ public class NeoDefaultsService {
     } catch (Exception e) {
       log.debug("Could not apply declared default for property '{}': {}", propName,
           e.getMessage());
+    }
+  }
+
+  /**
+   * FK-typed counterpart of the primitive branch in {@link #applyDeclaredDefaultIfMissing}.
+   * {@code rawValue} is expected to be the id string a {@code @SQL=} lookup derivation resolves
+   * to (e.g. {@code aeatsii_description_id} for {@code aeatsiiDescription}/
+   * {@code aeatsiiPurDescription}) — mirrors what {@link #tryInjectIdentifier} already does with
+   * such a value on the HTTP {@code /defaults} path, minus the {@code $_identifier} companion key
+   * (background entities are never read back through the JSON selector UI, so there's no
+   * identifier field to populate).
+   *
+   * <p>Resolution failures (blank id, no target entity, record not found, DAL error) are logged
+   * at debug level and the field is left untouched — matching the "never abort the rest of the
+   * pass" contract of the caller.
+   */
+  private static void applyDeclaredFkDefaultIfMissing(BaseOBObject entity, Property prop,
+      String propName, Object rawValue) {
+    BaseOBObject resolved = resolveFkDefaultTarget(prop, rawValue);
+    if (resolved == null) {
+      log.debug("Could not resolve FK declared default '{}' = '{}' on background entity {}",
+          propName, rawValue, entity.getEntityName());
+      return;
+    }
+    entity.set(propName, resolved);
+    log.debug("Applied FK declared default on background entity {}: {} = {}",
+        entity.getEntityName(), propName, resolved.getId());
+  }
+
+  /**
+   * Resolves a raw id string to a DAL bean of {@code prop}'s target entity, or {@code null} if
+   * the value is blank, the property has no target entity, or no record with that id exists.
+   * Same lookup {@link #tryInjectIdentifier} performs (line ~360): {@code
+   * OBDal.getInstance().get(targetEntity.getName(), id)}.
+   */
+  private static BaseOBObject resolveFkDefaultTarget(Property prop, Object rawValue) {
+    if (rawValue == null) {
+      return null;
+    }
+    String idStr = rawValue.toString().trim();
+    if (idStr.isEmpty()) {
+      return null;
+    }
+    Entity targetEntity = prop.getTargetEntity();
+    if (targetEntity == null) {
+      return null;
+    }
+    try {
+      return OBDal.getInstance().get(targetEntity.getName(), idStr);
+    } catch (Exception e) {
+      log.debug("Could not resolve FK target '{}' for id '{}': {}", targetEntity.getName(),
+          idStr, e.getMessage());
+      return null;
     }
   }
 
