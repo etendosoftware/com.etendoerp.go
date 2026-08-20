@@ -134,19 +134,11 @@ public class NeoDefaultsService {
         // block below and says nothing about this silent case). See appendSqlDefaultNote.
         JSONArray notes = new JSONArray();
 
-        List<SFField> sequenceSFFields = new ArrayList<>();
+        FieldPartition partition = FieldPartition.of(fields);
         JSONObject defaults = new JSONObject();
 
-        for (SFField sfField : fields) {
+        for (SFField sfField : partition.plain) {
           Column adColumn = sfField.getADColumn();
-          if (adColumn == null) {
-            continue;
-          }
-          if (isSequenceField(adColumn)) {
-            sequenceSFFields.add(sfField);  // defer to pass 2
-              continue;
-          }
-
           String dbColumnName = adColumn.getDBColumnName();
           String propertyName = NeoDefaultsCascadeHelper.resolvePropertyName(dalEntity, dbColumnName);
           try {
@@ -187,12 +179,12 @@ public class NeoDefaultsService {
         String docTypeTargetId = docTypeIds[0];
         String docTypeId = docTypeIds[1];
 
-        for (SFField sfField : sequenceSFFields) {
-          // No null check on purpose: pass 1 only adds to sequenceSFFields AFTER its own
-          // `adColumn == null` guard, so every element here is known to have a column.
-          // The tenant does hold ETGO_SF_FIELD rows with a null AD_Column (105 legacy rows from
-          // 2026-06-17 — see IMP-11), so if the two passes are ever reordered or merged this
-          // dereference becomes a live NPE. Keep the guard in pass 1, or add one here.
+        for (SFField sfField : partition.sequence) {
+          // No null check on purpose: FieldPartition.of drops null-column rows before either
+          // list is built, so every element here is known to have a column. The tenant does
+          // hold ETGO_SF_FIELD rows with a null AD_Column (105 legacy rows from 2026-06-17 —
+          // see IMP-11), so if that guard ever moves out of FieldPartition this dereference
+          // becomes a live NPE. Keep the guard there, or add one here.
           Column adColumn = sfField.getADColumn();
           String dbColumnName = adColumn.getDBColumnName();
           String propertyName = NeoDefaultsCascadeHelper.resolvePropertyName(dalEntity, dbColumnName);
@@ -257,22 +249,8 @@ public class NeoDefaultsService {
         // for the same reason as the dates: the callouts must keep seeing what they see today.
         canonicalizeBooleanDefaults(defaults, dalEntity);
 
-        // Build response
-        JSONObject response = new JSONObject();
-        response.put("defaults", defaults);
-
-        JSONObject metadata = new JSONObject();
-        metadata.put("unresolvedFields", unresolvedFields);
-        metadata.put("sequenceFields", sequenceFields);
-        // ETP-4918: only surface metadata.notes when there is something actionable to say —
-        // an empty array here would be as much noise as the vague notes this feature exists
-        // to avoid.
-        if (notes.length() > 0) {
-          metadata.put("notes", notes);
-        }
-        response.put("metadata", metadata);
-
-        return NeoResponse.ok(response);
+        return NeoResponse.ok(
+            buildDefaultsResponse(defaults, unresolvedFields, sequenceFields, notes));
 
       } finally {
         OBContext.restorePreviousMode();
@@ -281,6 +259,52 @@ public class NeoDefaultsService {
       log.error("Error resolving defaults: {}", e.getMessage(), e);
       return NeoResponse.error(500, "Failed to resolve defaults: " + e.getMessage());
     }
+  }
+
+  /**
+   * The two passes' worth of fields, split once up front (Sonar S3776 — this partitioning used
+   * to sit inline in {@link #resolveDefaults} and carried a third of its cognitive complexity).
+   *
+   * <p>Rows with a null {@code AD_Column} are dropped here and appear in neither list, which is
+   * what lets pass 2 dereference {@code getADColumn()} without a guard. The tenant really does
+   * hold such rows (105 legacy ones from 2026-06-17 — see IMP-11), so this is the single place
+   * that guard may live.</p>
+   */
+  private static final class FieldPartition {
+    private final List<SFField> plain = new ArrayList<>();
+    private final List<SFField> sequence = new ArrayList<>();
+
+    static FieldPartition of(List<SFField> fields) {
+      FieldPartition partition = new FieldPartition();
+      for (SFField sfField : fields) {
+        Column adColumn = sfField.getADColumn();
+        if (adColumn == null) {
+          continue;
+        }
+        (isSequenceField(adColumn) ? partition.sequence : partition.plain).add(sfField);
+      }
+      return partition;
+    }
+  }
+
+  /**
+   * Assemble the wire response from the three passes' accumulators.
+   *
+   * @param notes ETP-4918 actionable prose; omitted entirely when empty, since an empty array
+   *              would be as much noise as the vague notes this feature exists to avoid
+   */
+  private static JSONObject buildDefaultsResponse(JSONObject defaults, JSONArray unresolvedFields,
+      JSONArray sequenceFields, JSONArray notes) throws JSONException {
+    JSONObject metadata = new JSONObject();
+    metadata.put("unresolvedFields", unresolvedFields);
+    metadata.put("sequenceFields", sequenceFields);
+    if (notes.length() > 0) {
+      metadata.put("notes", notes);
+    }
+    JSONObject response = new JSONObject();
+    response.put("defaults", defaults);
+    response.put("metadata", metadata);
+    return response;
   }
 
   private static @Nullable Object resolveOrFirstComboOption(NeoContext ctx, Column column, Object resolved) {
