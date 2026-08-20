@@ -124,8 +124,82 @@ public class CompanyInvitationService {
         language);
   }
 
+  /**
+   * Creates (and sends) a company invitation for a user an admin just created in the same
+   * request (ETP-4830), replacing the old eager-pending-{@code etgo_account} provisioning:
+   * {@code register-and-accept} is now the sole place an {@code etgo_account} row is created for
+   * an admin-created user, and it already does that lazily at accept time. The inviter is
+   * resolved from {@code obContext} (the request's {@code OBContext}, captured by the caller
+   * before it is best-effort-wrapped in {@code OBContext.setAdminMode(true)}) rather than from an
+   * authenticated {@code etgo_account} bearer token — this runs from a {@code NeoHandler}
+   * post-hook on the {@code user} entity's {@code POST}, not from the public
+   * {@code /sws/go/invitations} endpoint {@link #createInvitation} serves. Skips the
+   * "invited user already has an active role" check (see the {@code requireExistingRole}
+   * overload of {@link #createInvitationForInviter}); everything else — dedup of an already-open
+   * invitation, throttling, token generation, and the {@code company-invitation} email send — is
+   * identical to any other invitation.
+   *
+   * @param obContext the OB security context of the admin performing the creation
+   * @param email the newly created user's email (invitation recipient)
+   * @param appBaseUrl application base URL for building the invitation link, or blank to fall
+   *     back to the configured default
+   * @param language optional language preference
+   * @return response JSON object (same shape as {@link #createInvitation})
+   * @throws JSONException when the response cannot be serialized
+   */
+  public JSONObject createInvitationForNewlyCreatedUser(OBContext obContext, String email,
+      String appBaseUrl, String language) throws JSONException {
+    String normalizedEmail = StringUtils.trimToEmpty(email).toLowerCase(Locale.ROOT);
+    if (normalizedEmail.isEmpty()) {
+      return errorResponse(400, "MISSING_EMAIL", "Email address is required");
+    }
+    return createInvitationForInviter(resolveInviterFromContext(obContext), normalizedEmail,
+        appBaseUrl, language, false);
+  }
+
+  /**
+   * Returns the status of the most recently created invitation for {@code clientId}/{@code
+   * email}, or {@code null} if none exists (ETP-4830). Backs the {@code user} NeoHandler's
+   * {@code invitationStatus} field on GET responses, so the frontend can render a "pending
+   * invite" badge without a separate round trip.
+   *
+   * @param clientId tenant client id scoping the lookup
+   * @param email the {@code AD_User}'s email
+   * @return one of {@code PENDING}, {@code SENT}, {@code ACCEPTED}, {@code EXPIRED},
+   *     {@code REVOKED}, {@code DELIVERY_FAILED}, or {@code null} when no invitation was ever
+   *     sent for this client/email
+   */
+  public static String findLatestInvitationStatus(String clientId, String email) {
+    if (StringUtils.isBlank(clientId) || StringUtils.isBlank(email)) {
+      return null;
+    }
+    Invitation invitation = CompanyInvitationDalHelper.findLatestInvitation(clientId,
+        email.toLowerCase(Locale.ROOT));
+    return invitation != null ? invitation.getStatus() : null;
+  }
+
+  private static InviterContext resolveInviterFromContext(OBContext obContext) {
+    return obContext == null ? null
+        : new InviterContext(obContext.getCurrentClient(), obContext.getCurrentOrganization(),
+            obContext.getUser());
+  }
+
   private JSONObject createInvitationForInviter(InviterContext inviter, String email,
       String appBaseUrl, String language) throws JSONException {
+    return createInvitationForInviter(inviter, email, appBaseUrl, language, true);
+  }
+
+  /**
+   * @param requireExistingRole when {@code false}, skips the "invited user already has an
+   *     active role in the invitation organization" check — used only by
+   *     {@link #createInvitationForNewlyCreatedUser} (ETP-4830): a freshly admin-created
+   *     {@code AD_User} has zero roles yet by construction (role assignment happens later, via
+   *     {@code AssignTemplateRolesControl}'s own save/PUT), so the check would always 400 there
+   *     and adds no real safety — the user unambiguously belongs to the inviter's client/org
+   *     because it was just created inside the same request.
+   */
+  private JSONObject createInvitationForInviter(InviterContext inviter, String email,
+      String appBaseUrl, String language, boolean requireExistingRole) throws JSONException {
     if (inviter == null || inviter.client == null || "0".equals(inviter.client.getId())) {
       return errorResponse(403, "FORBIDDEN",
           "Inviter does not have company administration permissions");
@@ -138,8 +212,8 @@ public class CompanyInvitationService {
       return errorResponse(400, "INVITED_USER_NOT_FOUND",
           "Create the AD_USER and assign its organization roles before sending the invitation");
     }
-    if (!CompanyInvitationDalHelper.hasActiveRoleForOrganization(invitedUser,
-        invitationOrganization)) {
+    if (requireExistingRole && !CompanyInvitationDalHelper.hasActiveRoleForOrganization(
+        invitedUser, invitationOrganization)) {
       return errorResponse(400, "INVITED_USER_NO_ROLE",
           "The AD_USER must have an active role assigned to the invitation organization");
     }

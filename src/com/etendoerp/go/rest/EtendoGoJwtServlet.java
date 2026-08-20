@@ -2273,10 +2273,9 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    * Hash a plaintext password using SHA-256 with a random salt.
    * Returns "base64(salt):base64(hash)" so the salt can be recovered for verification.
    *
-   * @deprecated logic moved to {@link PasswordHasher#hash} (ETP-4829, so
-   *     {@link EtendoGoAccountProvisioning} can hash admin-set passwords the same way without
-   *     depending on this servlet); kept as a thin delegate so every existing call site here is
-   *     unchanged.
+   * @deprecated logic moved to {@link PasswordHasher#hash} (ETP-4829, so other callers could
+   *     hash passwords the same way without depending on this servlet); kept as a thin delegate
+   *     so every existing call site here is unchanged.
    */
   @Deprecated
   private String hashPassword(String password) {

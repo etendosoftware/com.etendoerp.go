@@ -24,6 +24,7 @@ import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
+import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
@@ -31,9 +32,8 @@ import org.openbravo.model.ad.access.Role;
 import org.openbravo.model.ad.access.User;
 import org.openbravo.service.json.JsonConstants;
 
-import com.etendoerp.go.rest.EtendoGoAccountProvisioning;
+import com.etendoerp.go.rest.CompanyInvitationService;
 import com.etendoerp.go.rest.EtendoGoJwtSupport;
-import com.etendoerp.go.rest.PasswordPolicy;
 import com.etendoerp.go.schemaforge.NeoContext;
 import com.etendoerp.go.schemaforge.NeoEndpointType;
 import com.etendoerp.go.schemaforge.NeoHandler;
@@ -73,8 +73,8 @@ import com.etendoerp.go.schemaforge.util.UserRoleSyncSupport;
  *   through the Go SPA — the native classic backend remains the place for that kind of
  *   maintenance).</li>
  *
- *   <li><b>Admin-initiated user creation (ETP-4829):</b> the admin-facing "create user" form
- *   never shows a username field (see {@code artifacts/user/decisions.json}'s create-only
+ *   <li><b>Admin-initiated user creation (ETP-4829/ETP-4830):</b> the admin-facing "create user"
+ *   form never shows a username field (see {@code artifacts/user/decisions.json}'s create-only
  *   {@code username} override in {@code etendo_schema_forge}) — it is the email address for the
  *   first client and a client-suffixed username for later clients, matching the convention of
  *   {@code EtendoGoJwtDalHelper}/
@@ -87,21 +87,22 @@ import com.etendoerp.go.schemaforge.util.UserRoleSyncSupport;
  *   is the same mutable {@code JSONObject} the default service reads afterward (see {@code
  *   NeoServletSupport#handleWithHooks}). A blank/missing email is rejected with 400 before it
  *   ever reaches the DB's NOT NULL constraint, for a clearer error message. Once the {@code
- *   AD_User} is created, {@link #afterHandle(NeoContext)} reads the created record back out of
- *   the response body (POST's {@code recordId} is never populated on {@link NeoContext} — this
- *   is the one path that doesn't need it) and provisions a matching {@code etgo_account} row via
- *   {@link EtendoGoAccountProvisioning#ensureAccountForCreatedUser}. By default that account is
- *   {@code pending} (no password — see that method's javadoc), waiting on ETP-4830's
- *   invite-email flow. As a temporary workaround for environments without ETP-4830 yet, the
- *   admin can optionally type a password on the create form's existing {@code password} field
- *   (already mapped to {@code AD_User.Password}, Openbravo's own classic-backend login,
- *   unrelated to {@code etgo_account}) — when present, {@link #handle(NeoContext)} rejects it
- *   with 400 up front unless it satisfies {@link PasswordPolicy#isStrong}, and {@link
- *   #afterHandle(NeoContext)} then creates the {@code etgo_account} {@code active} with that
- *   same password (read back from {@link NeoContext#getRequestBody()}, which is still the
- *   caller's original object at this point — never from the response, which never echoes
- *   plaintext passwords). Same best-effort contract as role sync: never fails the parent
- *   {@code AD_User} creation.</li>
+ *   AD_User} is created, {@link #afterHandle(NeoContext)} reads the created record's {@code
+ *   email} back out of the response body (POST's {@code recordId} is never populated on {@link
+ *   NeoContext} — this is the one path that doesn't need it) and sends a company invitation via
+ *   {@link CompanyInvitationService#createInvitationForNewlyCreatedUser}, the same
+ *   invitation/token/email mechanism ETP-4894 built for company administrators inviting an
+ *   existing user (dedup of an already-open invitation and throttling included). Admin role
+ *   assignment happens independently, any time after creation, via {@code
+ *   AssignTemplateRolesControl}'s own save — this is why the invitation intentionally skips the
+ *   "invited user already has an active role" check {@link CompanyInvitationService#createInvitation}
+ *   otherwise enforces. There is deliberately no eager {@code etgo_account} row created on this
+ *   path any more (ETP-4830 superseded ETP-4829's pending/active bookkeeping): the invitation's
+ *   {@code register-and-accept} flow is now the sole place an {@code etgo_account} gets created
+ *   for an admin-created user, lazily, once the invitee actually accepts. Same best-effort
+ *   contract as role sync: never fails the parent {@code AD_User} creation. The resulting {@code
+ *   invitationStatus} (see {@link #attachInvitationStatus}) is surfaced back on every {@code
+ *   user} GET so the frontend can render a "pending invite" badge.</li>
  * </ol>
  *
  * <p>{@code @Named} only — never a normal CDI scope. See CLAUDE.md §NeoHandler Pattern and
@@ -124,15 +125,19 @@ public class UserRoleAssignmentHandler implements NeoHandler {
   private static final String FIELD_ID = "id";
   private static final String FIELD_USERNAME = "username";
   private static final String FIELD_EMAIL = "email";
-  private static final String FIELD_NAME = "name";
-  private static final String FIELD_PASSWORD = "password";
+  private static final String FIELD_INVITATION_STATUS = "invitationStatus";
 
   /**
    * Pre-hook: on a {@code user} {@code POST} (create), derives a unique {@code username} from
-   * {@code email} and the current client, rejects a blank/missing email with 400, and — if a {@code password} was
-   * typed on the create form (the temporary admin-set-password workaround, see concern (3) in
-   * the class javadoc) — rejects it with 400 unless it satisfies {@link PasswordPolicy#isStrong}.
-   * No-op for every other method/endpoint.
+   * {@code email} and the current client, and rejects a blank/missing email with 400. No-op for
+   * every other method/endpoint.
+   *
+   * <p>No longer validates or reads an admin-typed {@code password} (ETP-4830 removed that
+   * temporary bypass — see the class javadoc's concern (3)): invite-email is now the only way
+   * to activate an admin-created user's {@code etgo_account}, so a {@code password} field on
+   * this create form, if the frontend still sends one, is simply ignored here (it still reaches
+   * {@code AD_User.Password}, Openbravo's own classic-backend login, unrelated to {@code
+   * etgo_account}).
    */
   @Override
   public NeoResponse handle(NeoContext context) {
@@ -147,10 +152,6 @@ public class UserRoleAssignmentHandler implements NeoHandler {
     String email = StringUtils.trimToNull(requestBody.optString(FIELD_EMAIL, null));
     if (email == null) {
       return NeoResponse.error(400, "Field 'email' is required to create a user");
-    }
-    String password = StringUtils.trimToNull(requestBody.optString(FIELD_PASSWORD, null));
-    if (password != null && !PasswordPolicy.isStrong(password)) {
-      return NeoResponse.error(400, PasswordPolicy.USER_MESSAGE);
     }
     try {
       String normalizedEmail = email.toLowerCase();
@@ -169,9 +170,11 @@ public class UserRoleAssignmentHandler implements NeoHandler {
   }
 
   /**
-   * Post-hook dispatch: provisions a platform account after a {@code user} create,
-   * filters bootstrap users out of a {@code user} list GET, or syncs {@code AD_User_Roles} after
-   * a {@code user} update. See the class javadoc for why all three concerns live in one handler.
+   * Post-hook dispatch: sends a company invitation after a {@code user} create, filters
+   * bootstrap users out of a {@code user} list GET and attaches {@code invitationStatus} to
+   * every surviving {@code user} GET row (list or single-record), or syncs {@code
+   * AD_User_Roles} after a {@code user} update. See the class javadoc for why all these concerns
+   * live in one handler.
    *
    * @return always {@code null} — every concern mutates {@code context.getPreviousResult()}'s
    *     body in place (or leaves it untouched) rather than replacing the response.
@@ -183,11 +186,14 @@ public class UserRoleAssignmentHandler implements NeoHandler {
     }
     String method = context.getHttpMethod();
     if (METHOD_POST.equalsIgnoreCase(method)) {
-      provisionAccountAfterCreate(context);
+      inviteNewlyCreatedUser(context);
       return null;
     }
-    if (METHOD_GET.equalsIgnoreCase(method) && context.getRecordId() == null) {
-      hideBootstrapUsers(context);
+    if (METHOD_GET.equalsIgnoreCase(method)) {
+      if (context.getRecordId() == null) {
+        hideBootstrapUsers(context);
+      }
+      attachInvitationStatus(context);
       return null;
     }
     return syncRoleAfterUpdate(context);
@@ -233,19 +239,20 @@ public class UserRoleAssignmentHandler implements NeoHandler {
   }
 
   /**
-   * On a successful {@code user} create, reads the newly-created record's {@code email}/{@code
-   * name} back out of the response body and provisions a matching {@code etgo_account} row (see
-   * concern (3) in the class javadoc). {@link NeoContext#getRecordId()} is never populated for
-   * {@code POST}, so the created record's fields are read from {@code
-   * previousResult.body.response.data} instead — a lone {@code JSONObject}, same shape as a
-   * single-record GET (see {@link #hideBootstrapUsers}'s javadoc for that same shape). The
-   * plaintext {@code password} (temporary admin-set-password workaround), if any, is read back
-   * from {@link NeoContext#getRequestBody()} instead — the original request, still the same
-   * object {@link #handle(NeoContext)} validated, never the response (which never echoes
-   * plaintext passwords). Best-effort: any failure is logged and swallowed, never failing the
-   * parent {@code AD_User} creation.
+   * On a successful {@code user} create, reads the newly-created record's {@code email} back
+   * out of the response body and sends a company invitation via {@link
+   * CompanyInvitationService#createInvitationForNewlyCreatedUser} (see concern (3) in the class
+   * javadoc). {@link NeoContext#getRecordId()} is never populated for {@code POST}, so the
+   * created record's fields are read from {@code previousResult.body.response.data} instead — a
+   * lone {@code JSONObject}, same shape as a single-record GET (see {@link
+   * #hideBootstrapUsers}'s javadoc for that same shape). {@code context.getObContext()} is
+   * captured by the dispatcher before this method's own {@code
+   * OBContext.setAdminMode(true)} runs, so it still reflects the real acting admin's
+   * client/org/user — {@code setAdminMode} only lifts security checks, it never changes those.
+   * Best-effort: any failure is logged and swallowed, never failing the parent {@code AD_User}
+   * creation.
    */
-  private void provisionAccountAfterCreate(NeoContext context) {
+  private void inviteNewlyCreatedUser(NeoContext context) {
     try {
       NeoResponse previousResult = context.getPreviousResult();
       JSONObject body = previousResult != null ? previousResult.getBody() : null;
@@ -258,21 +265,72 @@ public class UserRoleAssignmentHandler implements NeoHandler {
       if (email == null) {
         return;
       }
-      String name = StringUtils.trimToNull(data.optString(FIELD_NAME, null));
-      String userId = StringUtils.trimToNull(data.optString(FIELD_ID, null));
-      JSONObject requestBody = context.getRequestBody();
-      String password = requestBody != null
-          ? StringUtils.trimToNull(requestBody.optString(FIELD_PASSWORD, null))
-          : null;
+      OBContext obContext = context.getObContext();
       OBContext.setAdminMode(true);
       try {
-        EtendoGoAccountProvisioning.ensureAccountForCreatedUser(email.toLowerCase(),
-            name != null ? name : email, password, userId);
+        new CompanyInvitationService().createInvitationForNewlyCreatedUser(obContext,
+            email.toLowerCase(), null, null);
       } finally {
         OBContext.restorePreviousMode();
       }
     } catch (Exception e) {
-      log.warn("UserRoleAssignmentHandler.provisionAccountAfterCreate error: {}",
+      log.warn("UserRoleAssignmentHandler.inviteNewlyCreatedUser error: {}",
+          e.getMessage(), e);
+    }
+  }
+
+  /**
+   * On a {@code user} GET (list or single-record), attaches an {@code invitationStatus} field
+   * to every surviving row — {@code null} when no invitation was ever sent, otherwise one of
+   * {@code PENDING}/{@code SENT}/{@code ACCEPTED}/{@code EXPIRED}/{@code REVOKED}/{@code
+   * DELIVERY_FAILED} (see {@link CompanyInvitationService#findLatestInvitationStatus}) — so the
+   * frontend can render a "pending invite" badge without a separate round trip. A single-record
+   * fetch has no {@code data} array (it's a lone JSON object instead, same shape {@link
+   * #hideBootstrapUsers}'s javadoc documents), so this checks both shapes.
+   */
+  private void attachInvitationStatus(NeoContext context) {
+    try {
+      NeoResponse previousResult = context.getPreviousResult();
+      JSONObject body = previousResult != null ? previousResult.getBody() : null;
+      JSONObject inner = body != null ? body.optJSONObject(JsonConstants.RESPONSE_RESPONSE) : null;
+      if (inner == null) {
+        return;
+      }
+      String clientId = context.getObContext() != null
+          && context.getObContext().getCurrentClient() != null
+          ? context.getObContext().getCurrentClient().getId() : null;
+      if (clientId == null) {
+        return;
+      }
+      OBContext.setAdminMode(true);
+      try {
+        JSONArray data = inner.optJSONArray(JsonConstants.RESPONSE_DATA);
+        if (data != null) {
+          for (int i = 0; i < data.length(); i++) {
+            attachInvitationStatusToRow(data.optJSONObject(i), clientId);
+          }
+        } else {
+          attachInvitationStatusToRow(inner.optJSONObject(JsonConstants.RESPONSE_DATA), clientId);
+        }
+      } finally {
+        OBContext.restorePreviousMode();
+      }
+    } catch (Exception e) {
+      log.warn("UserRoleAssignmentHandler.attachInvitationStatus error: {}", e.getMessage(), e);
+    }
+  }
+
+  private void attachInvitationStatusToRow(JSONObject row, String clientId) {
+    if (row == null) {
+      return;
+    }
+    String email = StringUtils.trimToNull(row.optString(FIELD_EMAIL, null));
+    String status = email == null ? null
+        : CompanyInvitationService.findLatestInvitationStatus(clientId, email);
+    try {
+      row.put(FIELD_INVITATION_STATUS, status == null ? JSONObject.NULL : status);
+    } catch (JSONException e) {
+      log.warn("UserRoleAssignmentHandler.attachInvitationStatusToRow error: {}",
           e.getMessage(), e);
     }
   }

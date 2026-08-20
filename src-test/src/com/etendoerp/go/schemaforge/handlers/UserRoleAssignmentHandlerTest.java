@@ -18,12 +18,15 @@
 package com.etendoerp.go.schemaforge.handlers;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.mockConstruction;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -36,6 +39,7 @@ import java.util.List;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.Test;
+import org.mockito.MockedConstruction;
 import org.mockito.MockedStatic;
 import org.openbravo.base.provider.OBProvider;
 import org.openbravo.dal.core.OBContext;
@@ -47,7 +51,7 @@ import org.openbravo.model.ad.access.UserRoles;
 import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.enterprise.Organization;
 
-import com.etendoerp.go.rest.EtendoGoAccountProvisioning;
+import com.etendoerp.go.rest.CompanyInvitationService;
 import com.etendoerp.go.rest.EtendoGoJwtSupport;
 import com.etendoerp.go.schemaforge.NeoContext;
 import com.etendoerp.go.schemaforge.NeoEndpointType;
@@ -71,11 +75,16 @@ import com.etendoerp.go.schemaforge.NeoResponse;
  * {@code data} is a lone object, not an array) is never altered, and that a missing/malformed
  * previous result degrades to a no-op rather than throwing.
  *
- * <p>Admin-initiated user creation (ETP-4829): covers {@link UserRoleAssignmentHandler#handle}
- * deriving a unique username from the email and client on a {@code user} {@code POST}, rejecting a blank/missing email
- * or a weak admin-set {@code password}, and {@link UserRoleAssignmentHandler#afterHandle}
- * provisioning an {@code etgo_account} (pending, or active with that password) from the created
- * record's response body plus the original request body.
+ * <p>Admin-initiated user creation (ETP-4829/ETP-4830): covers {@link
+ * UserRoleAssignmentHandler#handle} deriving a unique username from the email and client on a
+ * {@code user} {@code POST}, rejecting a blank/missing email, and — since ETP-4830 removed the
+ * temporary admin-set-password bypass — no longer validating or otherwise reacting to a {@code
+ * password} field at all (weak or strong, it is simply ignored). Covers {@link
+ * UserRoleAssignmentHandler#afterHandle} sending a company invitation (via {@link
+ * CompanyInvitationService#createInvitationForNewlyCreatedUser}) from the created record's
+ * response body's {@code email}, skipping it when that email is absent, and swallowing any
+ * failure. Also covers the ETP-4830 {@code invitationStatus} field attached to {@code user} GET
+ * responses (list and single-record) via {@link CompanyInvitationService#findLatestInvitationStatus}.
  */
 public class UserRoleAssignmentHandlerTest {
 
@@ -162,7 +171,11 @@ public class UserRoleAssignmentHandlerTest {
   }
 
   @Test
-  public void handleRejectsPostWithWeakPassword() throws Exception {
+  public void handleIgnoresWeakPasswordFieldSinceAdminSetPasswordBypassWasRemoved()
+      throws Exception {
+    // ETP-4830 removed the temporary admin-set-password bypass entirely: invite-email is now
+    // the only way to activate an admin-created user's etgo_account, so a weak `password` on
+    // the create form is no longer rejected here — it is simply not read by this handler at all.
     UserRoleAssignmentHandler handler = new UserRoleAssignmentHandler();
     JSONObject requestBody = new JSONObject();
     requestBody.put("email", "new.user@example.com");
@@ -173,12 +186,11 @@ public class UserRoleAssignmentHandlerTest {
         .requestBody(requestBody)
         .build();
 
-    NeoResponse response = handler.handle(ctx);
-    assertEquals(400, response.getHttpStatus());
+    assertNull(handler.handle(ctx));
   }
 
   @Test
-  public void handleAcceptsPostWithStrongPassword() throws Exception {
+  public void handleIgnoresStrongPasswordFieldToo() throws Exception {
     UserRoleAssignmentHandler handler = new UserRoleAssignmentHandler();
     JSONObject requestBody = new JSONObject();
     requestBody.put("email", "new.user@example.com");
@@ -337,7 +349,7 @@ public class UserRoleAssignmentHandlerTest {
     assertNull(handler.afterHandle(ctx));
   }
 
-  // ─── afterHandle: pending-account provisioning after a `user` POST create ────
+  // ─── afterHandle: company invitation after a `user` POST create (ETP-4830) ──
 
   private static JSONObject buildCreatedRecordResponseBody(String id, String email, String name)
       throws Exception {
@@ -357,84 +369,36 @@ public class UserRoleAssignmentHandlerTest {
   }
 
   @Test
-  public void afterHandleProvisionsPendingAccountAfterCreateWithNoPassword() throws Exception {
+  public void afterHandleSendsCompanyInvitationAfterCreate() throws Exception {
     UserRoleAssignmentHandler handler = new UserRoleAssignmentHandler();
     JSONObject body = buildCreatedRecordResponseBody(USER_ID, "New.User@Example.com",
         "New User");
+    OBContext requestObContext = mock(OBContext.class);
     NeoContext ctx = NeoContext.builder()
         .endpointType(NeoEndpointType.CRUD)
         .httpMethod("POST")
         .requestBody(new JSONObject())
         .previousResult(NeoResponse.ok(body))
+        .obContext(requestObContext)
         .build();
 
     try (MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
-        MockedStatic<EtendoGoAccountProvisioning> provisioningMock =
-            mockStatic(EtendoGoAccountProvisioning.class)) {
+        MockedConstruction<CompanyInvitationService> invitationServiceMock =
+            mockConstruction(CompanyInvitationService.class)) {
       obCtxMock.when(() -> OBContext.setAdminMode(true)).then(inv -> null);
       obCtxMock.when(OBContext::restorePreviousMode).then(inv -> null);
 
       assertNull(handler.afterHandle(ctx));
 
-      provisioningMock.verify(() -> EtendoGoAccountProvisioning.ensureAccountForCreatedUser(
-          eq("new.user@example.com"), eq("New User"), isNull(), eq(USER_ID)));
+      CompanyInvitationService constructed = invitationServiceMock.constructed().get(0);
+      verify(constructed).createInvitationForNewlyCreatedUser(eq(requestObContext),
+          eq("new.user@example.com"), isNull(), isNull());
       obCtxMock.verify(OBContext::restorePreviousMode, times(1));
     }
   }
 
   @Test
-  public void afterHandlePassesThroughAdminSetPasswordFromRequestBody() throws Exception {
-    UserRoleAssignmentHandler handler = new UserRoleAssignmentHandler();
-    JSONObject body = buildCreatedRecordResponseBody(USER_ID, "New.User@Example.com",
-        "New User");
-    JSONObject requestBody = new JSONObject();
-    requestBody.put("password", "  Str0ng!Pass  ");
-    NeoContext ctx = NeoContext.builder()
-        .endpointType(NeoEndpointType.CRUD)
-        .httpMethod("POST")
-        .requestBody(requestBody)
-        .previousResult(NeoResponse.ok(body))
-        .build();
-
-    try (MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
-        MockedStatic<EtendoGoAccountProvisioning> provisioningMock =
-            mockStatic(EtendoGoAccountProvisioning.class)) {
-      obCtxMock.when(() -> OBContext.setAdminMode(true)).then(inv -> null);
-      obCtxMock.when(OBContext::restorePreviousMode).then(inv -> null);
-
-      assertNull(handler.afterHandle(ctx));
-
-      provisioningMock.verify(() -> EtendoGoAccountProvisioning.ensureAccountForCreatedUser(
-          eq("new.user@example.com"), eq("New User"), eq("Str0ng!Pass"), eq(USER_ID)));
-    }
-  }
-
-  @Test
-  public void afterHandleFallsBackToEmailAsNameWhenNameIsMissing() throws Exception {
-    UserRoleAssignmentHandler handler = new UserRoleAssignmentHandler();
-    JSONObject body = buildCreatedRecordResponseBody(USER_ID, "noname@example.com", null);
-    NeoContext ctx = NeoContext.builder()
-        .endpointType(NeoEndpointType.CRUD)
-        .httpMethod("POST")
-        .requestBody(new JSONObject())
-        .previousResult(NeoResponse.ok(body))
-        .build();
-
-    try (MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
-        MockedStatic<EtendoGoAccountProvisioning> provisioningMock =
-            mockStatic(EtendoGoAccountProvisioning.class)) {
-      obCtxMock.when(() -> OBContext.setAdminMode(true)).then(inv -> null);
-      obCtxMock.when(OBContext::restorePreviousMode).then(inv -> null);
-
-      assertNull(handler.afterHandle(ctx));
-
-      provisioningMock.verify(() -> EtendoGoAccountProvisioning.ensureAccountForCreatedUser(
-          eq("noname@example.com"), eq("noname@example.com"), isNull(), eq(USER_ID)));
-    }
-  }
-
-  @Test
-  public void afterHandleSkipsProvisioningWhenCreateResponseHasNoEmail() throws Exception {
+  public void afterHandleSkipsInvitationWhenCreateResponseHasNoEmail() throws Exception {
     UserRoleAssignmentHandler handler = new UserRoleAssignmentHandler();
     JSONObject body = buildCreatedRecordResponseBody(USER_ID, null, "New User");
     NeoContext ctx = NeoContext.builder()
@@ -444,18 +408,18 @@ public class UserRoleAssignmentHandlerTest {
         .build();
 
     try (MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
-        MockedStatic<EtendoGoAccountProvisioning> provisioningMock =
-            mockStatic(EtendoGoAccountProvisioning.class)) {
+        MockedConstruction<CompanyInvitationService> invitationServiceMock =
+            mockConstruction(CompanyInvitationService.class)) {
 
       assertNull(handler.afterHandle(ctx));
 
-      provisioningMock.verifyNoInteractions();
+      assertEquals(0, invitationServiceMock.constructed().size());
       obCtxMock.verify(() -> OBContext.setAdminMode(anyBoolean()), never());
     }
   }
 
   @Test
-  public void afterHandleSwallowsExceptionFromProvisioningOnCreate() throws Exception {
+  public void afterHandleSwallowsExceptionFromInvitationOnCreate() throws Exception {
     UserRoleAssignmentHandler handler = new UserRoleAssignmentHandler();
     JSONObject body = buildCreatedRecordResponseBody(USER_ID, "boom@example.com", "Boom");
     NeoContext ctx = NeoContext.builder()
@@ -465,17 +429,105 @@ public class UserRoleAssignmentHandlerTest {
         .build();
 
     try (MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
-        MockedStatic<EtendoGoAccountProvisioning> provisioningMock =
-            mockStatic(EtendoGoAccountProvisioning.class)) {
+        MockedConstruction<CompanyInvitationService> invitationServiceMock =
+            mockConstruction(CompanyInvitationService.class, (m, constructionCtx) ->
+                when(m.createInvitationForNewlyCreatedUser(any(), any(), any(), any()))
+                    .thenThrow(new RuntimeException("DB unavailable")))) {
       obCtxMock.when(() -> OBContext.setAdminMode(true)).then(inv -> null);
       obCtxMock.when(OBContext::restorePreviousMode).then(inv -> null);
-      provisioningMock.when(() -> EtendoGoAccountProvisioning.ensureAccountForCreatedUser(
-          any(), any(), any(), any())).thenThrow(new RuntimeException("DB unavailable"));
 
       assertNull(handler.afterHandle(ctx));
 
+      assertEquals(1, invitationServiceMock.constructed().size());
       obCtxMock.verify(OBContext::restorePreviousMode, times(1));
     }
+  }
+
+  // ─── afterHandle: invitationStatus attached to `user` GET responses (ETP-4830) ─
+
+  private static OBContext mockObContextForClient(String clientId) {
+    OBContext obContext = mock(OBContext.class);
+    Client client = mock(Client.class);
+    when(client.getId()).thenReturn(clientId);
+    when(obContext.getCurrentClient()).thenReturn(client);
+    return obContext;
+  }
+
+  @Test
+  public void afterHandleAttachesInvitationStatusToEveryListRow() throws Exception {
+    UserRoleAssignmentHandler handler = new UserRoleAssignmentHandler();
+    JSONObject body = buildListResponseBody("real-user-1", "real-user-2");
+    JSONObject inner = body.getJSONObject("response");
+    inner.getJSONArray("data").getJSONObject(0).put("email", "invited@example.com");
+    inner.getJSONArray("data").getJSONObject(1).put("email", "no-invite@example.com");
+    NeoContext ctx = NeoContext.builder()
+        .endpointType(NeoEndpointType.CRUD)
+        .httpMethod("GET")
+        .previousResult(NeoResponse.ok(body))
+        .obContext(mockObContextForClient("client-1"))
+        .build();
+
+    try (MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
+        MockedStatic<CompanyInvitationService> invitationServiceMock =
+            mockStatic(CompanyInvitationService.class)) {
+      obCtxMock.when(() -> OBContext.setAdminMode(true)).then(inv -> null);
+      obCtxMock.when(OBContext::restorePreviousMode).then(inv -> null);
+      invitationServiceMock.when(() -> CompanyInvitationService.findLatestInvitationStatus(
+          "client-1", "invited@example.com")).thenReturn("SENT");
+      invitationServiceMock.when(() -> CompanyInvitationService.findLatestInvitationStatus(
+          "client-1", "no-invite@example.com")).thenReturn(null);
+
+      assertNull(handler.afterHandle(ctx));
+
+      JSONArray data = inner.getJSONArray("data");
+      assertEquals("SENT", data.getJSONObject(0).getString("invitationStatus"));
+      assertTrue(data.getJSONObject(1).isNull("invitationStatus"));
+    }
+  }
+
+  @Test
+  public void afterHandleAttachesInvitationStatusToSingleRecordGet() throws Exception {
+    UserRoleAssignmentHandler handler = new UserRoleAssignmentHandler();
+    JSONObject body = buildCreatedRecordResponseBody(USER_ID, "existing@example.com", "Existing");
+    NeoContext ctx = NeoContext.builder()
+        .endpointType(NeoEndpointType.CRUD)
+        .httpMethod("GET")
+        .recordId(USER_ID)
+        .previousResult(NeoResponse.ok(body))
+        .obContext(mockObContextForClient("client-1"))
+        .build();
+
+    try (MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
+        MockedStatic<CompanyInvitationService> invitationServiceMock =
+            mockStatic(CompanyInvitationService.class)) {
+      obCtxMock.when(() -> OBContext.setAdminMode(true)).then(inv -> null);
+      obCtxMock.when(OBContext::restorePreviousMode).then(inv -> null);
+      invitationServiceMock.when(() -> CompanyInvitationService.findLatestInvitationStatus(
+          "client-1", "existing@example.com")).thenReturn("ACCEPTED");
+
+      assertNull(handler.afterHandle(ctx));
+
+      JSONObject data = body.getJSONObject("response").getJSONObject("data");
+      assertEquals("ACCEPTED", data.getString("invitationStatus"));
+    }
+  }
+
+  @Test
+  public void afterHandleLeavesRowsUntouchedWhenObContextHasNoClient() throws Exception {
+    // No obContext at all was set on the NeoContext (the pre-existing bootstrap-hiding tests
+    // exercise this same shape) — invitationStatus must never be guessed without a tenant scope.
+    UserRoleAssignmentHandler handler = new UserRoleAssignmentHandler();
+    JSONObject body = buildListResponseBody("real-user-1");
+    NeoContext ctx = NeoContext.builder()
+        .endpointType(NeoEndpointType.CRUD)
+        .httpMethod("GET")
+        .previousResult(NeoResponse.ok(body))
+        .build();
+
+    assertNull(handler.afterHandle(ctx));
+
+    JSONObject row = body.getJSONObject("response").getJSONArray("data").getJSONObject(0);
+    assertFalse(row.has("invitationStatus"));
   }
 
   @Test

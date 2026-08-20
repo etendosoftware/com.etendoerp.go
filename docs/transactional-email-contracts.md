@@ -179,22 +179,36 @@ Auth transactional emails are created server-side by the `/sws/go/*` endpoints. 
 | `POST /sws/go/change-password` | Requires a valid platform bearer token and current password, changes the password, rotates the platform token, and sends `password-changed` best-effort |
 | `POST /sws/go/onboarding` | Commits onboarding first, then sends `environment-ready` best-effort |
 
-When an authorized company administrator creates an `AD_User` without a password, the
-`UserRoleAssignmentHandler` provisions a pending `ETGO_Account` and persists an `ETGO_Invitation`
-row. The system creates a one-time password-setup link through the existing `reset-password`
-contract. The invitation records `PENDING`, `SENT`, `DELIVERY_FAILED`, and `ACCEPTED` lifecycle
-states without storing the raw token. The recipient is resolved exclusively from that
-server-side account; the browser does not send a recipient, template, or provider payload. The
-account becomes active only after a successful password-reset confirmation, which also marks the
-related invitation `ACCEPTED`.
+When a company administrator creates an `AD_User` (ETP-4830, superseding an earlier ETP-4829
+pending-account design), `UserRoleAssignmentHandler`'s `POST` post-hook does **not** provision
+any `ETGO_Account` row itself. Instead it calls
+`CompanyInvitationService#createInvitationForNewlyCreatedUser`, which persists an
+`ETGO_Invitation` row and sends the same `company-invitation` contract described below —
+identical to the flow a company administrator triggers by inviting an *existing* user, except
+it skips the "invited user already has an active role" check (a freshly created `AD_User` has
+none yet by construction; role assignment happens later, independently, via
+`AssignTemplateRolesControl`'s own save). This is the one exception to the "only `/sws/go/*`
+triggers these emails" rule above: the trigger here is a NEO Headless `user`-entity `POST`, not
+a `/sws/go/*` call, though the email contract, throttling, and audit machinery are unchanged.
+
+No `ETGO_Account` is created eagerly on this path. `register-and-accept` (§ below) is the sole
+place an `ETGO_Account` gets created for an admin-created user, lazily, once the invitee actually
+accepts — the invitation records `PENDING`, `SENT`, `DELIVERY_FAILED`, `ACCEPTED`, `EXPIRED`, and
+`REVOKED` lifecycle states without storing the raw token. The recipient is resolved exclusively
+from the `ETGO_Invitation.email` column; the browser does not send a recipient, template, or
+provider payload. The `user` NeoHandler also surfaces the latest invitation's `status` back as an
+`invitationStatus` field (`null` when none exists) on every `user` GET response (list or
+single-record), via `CompanyInvitationService#findLatestInvitationStatus`, so the frontend can
+render a "pending invite" badge.
 
 Invitation safeguards:
 
-- Existing pending accounts with a reset token do not receive a replacement invitation.
-- A missing public app URL, provider rejection, throttle, suppression, or kill switch restores
-  the prior token state and does not leave a usable new invitation token.
-- The setup link expires after 24 hours and can be consumed only once; an expired or consumed
-  token is rejected by the existing password-reset confirmation endpoint.
+- An already-open (`PENDING`/`SENT`, not yet expired) invitation for the same client/email is
+  reused instead of creating a duplicate.
+- A missing public app URL, provider rejection, throttle, suppression, or kill switch still
+  persists the invitation in `DELIVERY_FAILED` status rather than leaving it silently unsent.
+- The invitation token expires after 7 days and can be consumed only once; an expired or revoked
+  token is rejected by `resolveInvitation`/`acceptExistingAccount`/`registerAndAccept`.
 
 Email delivery failure is audited and must not roll back registration, onboarding completion, or a successful password change. Password reset request responses stay neutral even when delivery fails.
 
