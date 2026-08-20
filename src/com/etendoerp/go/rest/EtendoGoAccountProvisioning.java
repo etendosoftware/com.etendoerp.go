@@ -18,6 +18,8 @@ package com.etendoerp.go.rest;
 
 import org.apache.commons.lang3.StringUtils;
 
+import com.etendoerp.go.schemaforge.data.Account;
+
 /**
  * Public entry point (ETP-4829) letting other packages provision an {@code etgo_account} row
  * without depending on the package-private {@link EtendoGoJwtDalHelper}, which stays scoped to
@@ -46,6 +48,25 @@ public final class EtendoGoAccountProvisioning {
   }
 
   /**
+   * Compatibility overload.
+   *
+   * @param email account login identifier
+   * @param name account holder display name
+   * @param userId created AD_User identifier
+   */
+  /**
+   * Compatibility overload retained for callers that still provide the created user id.
+   *
+   * @param email account login identifier
+   * @param name account holder display name
+   * @param userId legacy user identifier, intentionally unused by account provisioning
+   */
+  @SuppressWarnings("java:S1172")
+  public static void ensurePendingAccount(String email, String name, String userId) {
+    ensurePendingAccount(email, name);
+  }
+
+  /**
    * ETP-4829: provisions the {@code etgo_account} for a freshly admin-created {@code AD_User},
    * with an optional temporary workaround for environments without ETP-4830's invite-email flow
    * yet — if the admin typed a password on the create form, the account is created {@code
@@ -64,8 +85,21 @@ public final class EtendoGoAccountProvisioning {
    */
   public static void ensureAccountForCreatedUser(String email, String name,
       String plainPassword) {
+    ensureAccountForCreatedUser(email, name, plainPassword, null);
+  }
+
+  /**
+   * Provisions a created ERP user when no password was supplied.
+   *
+   * @param email account login identifier
+   * @param name account holder display name
+   * @param plainPassword validated password, or blank for a pending account
+   * @param userId ERP user identifier retained for compatibility with the provisioning hook
+   */
+  public static void ensureAccountForCreatedUser(String email, String name,
+      String plainPassword, String userId) {
     if (StringUtils.isBlank(plainPassword)) {
-      ensurePendingAccount(email, name);
+      ensurePendingAccount(email, name, userId);
       return;
     }
     String passwordHash = PasswordHasher.hash(plainPassword);
