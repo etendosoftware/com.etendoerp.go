@@ -34,6 +34,8 @@ import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.access.User;
 
+import com.etendoerp.go.common.ConfigPropertyReader;
+
 /**
  * Outbound integrations for the support chat: the ADK (ValerIA) agent runtime and the
  * Jira REST API. Kept separate from {@link SupportConversationsServlet} — that class owns
@@ -60,7 +62,8 @@ final class SupportIntegrationClient {
   private static final String FIELD_MIME_TYPE = "mimeType";
   private static final String DEFAULT_MIME_TYPE = "application/octet-stream";
 
-  private static final String ADK_BASE_URL = System.getProperty("support.adk.url");
+  private static final String ADK_BASE_URL = ConfigPropertyReader.readConfigValue(
+      "support.adk.url", "ETGO_SUPPORT_ADK_URL", "");
   private static final String ADK_APP_NAME = "agent";
 
   /** Zero-width-prefixed marker appended to a reply's text when the ADK's response for that
