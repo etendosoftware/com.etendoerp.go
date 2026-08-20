@@ -107,29 +107,37 @@ public class NeoProcessService {
       params = new JSONObject();
     }
     if (process == null || !NeoAccessHelper.hasProcessAccess(process.getId())) {
-      return NeoResponse.error(403, ACCESS_DENIED_FOR_CURRENT_ROLE);
+      return NeoResponse.ensureTopLevelMessage(
+          NeoResponse.error(403, ACCESS_DENIED_FOR_CURRENT_ROLE));
     }
+    NeoResponse result;
     try {
       OBContext.setAdminMode();
       try {
         NeoResponse validationError = validateMandatoryParams(process, params);
+        NeoResponse preconditionError = validationError != null ? null
+            : NeoProcessPreconditionService.validate(process, params);
         if (validationError != null) {
-          return validationError;
+          result = validationError;
+        } else if (preconditionError != null) {
+          result = preconditionError;
+        } else {
+          result = executeResolvedProcess(process, params);
         }
-        NeoResponse preconditionError = NeoProcessPreconditionService.validate(process, params);
-        if (preconditionError != null) {
-          return preconditionError;
-        }
-        return executeResolvedProcess(process, params);
       } finally {
         OBContext.restorePreviousMode();
       }
 
     } catch (Exception e) {
       log.error("Error executing process {}", process.getName(), e);
-      return NeoResponse.error(500,
+      result = NeoResponse.error(500,
           PROCESS_EXECUTION_FAILED_PREFIX + e.getMessage());
     }
+    // Normalize at the single exit point: every early-return guard clause above
+    // (access denied, missing mandatory param, unmet precondition) and every
+    // execution outcome (business-rule rejection, unexpected exception) funnels
+    // through here, so no error path can silently omit a top-level "message".
+    return NeoResponse.ensureTopLevelMessage(result);
   }
 
   private static NeoResponse executeResolvedProcess(Process process, JSONObject params)
@@ -466,9 +474,11 @@ public class NeoProcessService {
   public static NeoResponse executeObuiappProcess(Process process,
       JSONObject params) throws Exception {
     if (!NeoAccessHelper.hasProcessAccess(process.getId())) {
-      return NeoResponse.error(403, ACCESS_DENIED_FOR_CURRENT_ROLE);
+      return NeoResponse.ensureTopLevelMessage(
+          NeoResponse.error(403, ACCESS_DENIED_FOR_CURRENT_ROLE));
     }
-    return executeObuiappHandler(process.getJavaClassName(), process.getId(), params);
+    return NeoResponse.ensureTopLevelMessage(
+        executeObuiappHandler(process.getJavaClassName(), process.getId(), params));
   }
 
   /**
@@ -487,15 +497,17 @@ public class NeoProcessService {
       JSONObject params) {
     if (obuiappProcess == null
         || !NeoAccessHelper.hasObuiappProcessAccess(obuiappProcess.getId())) {
-      return NeoResponse.error(403, ACCESS_DENIED_FOR_CURRENT_ROLE);
+      return NeoResponse.ensureTopLevelMessage(
+          NeoResponse.error(403, ACCESS_DENIED_FOR_CURRENT_ROLE));
     }
     if (params == null) {
       params = new JSONObject();
     }
+    NeoResponse result;
     try {
       OBContext.setAdminMode();
       try {
-        return executeObuiappHandler(
+        result = executeObuiappHandler(
             obuiappProcess.getJavaClassName(),
             obuiappProcess.getId(),
             params);
@@ -504,9 +516,10 @@ public class NeoProcessService {
       }
     } catch (Exception e) {
       log.error("Error executing OBUIAPP process {}", obuiappProcess.getName(), e);
-      return NeoResponse.error(500,
+      result = NeoResponse.error(500,
           PROCESS_EXECUTION_FAILED_PREFIX + e.getMessage());
     }
+    return NeoResponse.ensureTopLevelMessage(result);
   }
 
   /**
@@ -526,18 +539,20 @@ public class NeoProcessService {
     if (params == null) {
       params = new JSONObject();
     }
+    NeoResponse result;
     try {
       OBContext.setAdminMode();
       try {
-        return executeObuiappHandler(className, processId, params);
+        result = executeObuiappHandler(className, processId, params);
       } finally {
         OBContext.restorePreviousMode();
       }
     } catch (Exception e) {
       log.error("Error executing OBUIAPP action handler {}", className, e);
-      return NeoResponse.error(500,
+      result = NeoResponse.error(500,
           PROCESS_EXECUTION_FAILED_PREFIX + e.getMessage());
     }
+    return NeoResponse.ensureTopLevelMessage(result);
   }
 
   /**

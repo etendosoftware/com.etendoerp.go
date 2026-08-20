@@ -20,7 +20,6 @@ package com.etendoerp.go.schemaforge;
 import javax.inject.Named;
 
 import org.codehaus.jettison.json.JSONArray;
-import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.dal.service.OBDal;
 
@@ -75,27 +74,19 @@ public class SiiSendHandler extends AbstractLegacyInvoiceActionHandler {
    * UI instead of showing the real cause, which is exactly the "sent but nothing reached AEAT"
    * symptom this handler exists to prevent.
    *
+   * <p>As of the fix generalizing this normalization into
+   * {@link NeoResponse#ensureTopLevelMessage(NeoResponse)}, {@code NeoProcessService}'s
+   * {@code executeObuiappClass} already applies it before returning, so this call is now
+   * idempotent (the body already has a top-level {@code message} by the time it gets here).
+   * Kept as a thin delegate — rather than removed — so this handler's intent stays
+   * self-documenting and unaffected by future changes to where the shared service applies
+   * its own normalization.
+   *
    * <p>Package-private and static so it can be unit tested directly against a synthetic
    * {@link NeoResponse}, without needing a live AEAT connection or DB access.
    */
   static NeoResponse normalizeErrorShape(NeoResponse response) {
-    if (response == null || response.getHttpStatus() < 400 || response.getBody() == null) {
-      return response;
-    }
-    JSONObject body = response.getBody();
-    if (body.has("message")) {
-      return response;
-    }
-    JSONObject error = body.optJSONObject("error");
-    if (error == null) {
-      return response;
-    }
-    try {
-      body.put("message", error.optString("message", "SII send failed"));
-    } catch (JSONException ignored) {
-      // Best-effort normalization: fall back to the original (unnormalized) body.
-    }
-    return response;
+    return NeoResponse.ensureTopLevelMessage(response);
   }
 
   @Override
