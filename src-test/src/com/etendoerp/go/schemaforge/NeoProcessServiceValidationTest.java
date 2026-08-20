@@ -654,10 +654,27 @@ public class NeoProcessServiceValidationTest {
   }
 
   @Test
-  public void translateObuiappResultMessageDefaultsSeverityToSuccess() throws Exception {
+  // ETP-4783: absent severity + non-empty text is treated as error (prevents masking
+  // real failures from SII MultiEnvioFactura handlers that omit the severity field).
+  public void translateObuiappResultMessageAbsentSeverityWithTextDefaultsToError() throws Exception {
     JSONObject msg = new JSONObject();
     msg.put("text", "No severity specified");
-    // no "severity" key
+    // no "severity" key — ETP-4783: non-empty text without severity is treated as error
+
+    JSONObject handlerResult = new JSONObject();
+    handlerResult.put("message", msg);
+
+    NeoResponse resp = invokeTranslateObuiapp(handlerResult);
+    assertEquals(400, resp.getHttpStatus());
+    assertEquals("error", resp.getBody().getString("status"));
+    assertEquals("No severity specified", resp.getBody().getString("message"));
+  }
+
+  @Test
+  // ETP-4783: absent severity + empty text is harmless → keeps SUCCESS default.
+  public void translateObuiappResultMessageAbsentSeverityWithEmptyTextDefaultsToSuccess() throws Exception {
+    JSONObject msg = new JSONObject();
+    // no "severity" key, no "text" key — empty text, no severity → SUCCESS (harmless)
 
     JSONObject handlerResult = new JSONObject();
     handlerResult.put("message", msg);
@@ -665,7 +682,6 @@ public class NeoProcessServiceValidationTest {
     NeoResponse resp = invokeTranslateObuiapp(handlerResult);
     assertEquals(200, resp.getHttpStatus());
     assertEquals("success", resp.getBody().getString("status"));
-    assertEquals("No severity specified", resp.getBody().getString("message"));
   }
 
   @Test
