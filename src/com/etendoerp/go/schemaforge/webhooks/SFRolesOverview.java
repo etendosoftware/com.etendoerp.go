@@ -19,6 +19,8 @@ package com.etendoerp.go.schemaforge.webhooks;
 
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -29,7 +31,9 @@ import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
+import org.hibernate.Session;
 import org.hibernate.criterion.Restrictions;
+import org.hibernate.query.NativeQuery;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
@@ -38,6 +42,8 @@ import org.openbravo.model.ad.access.UserRoles;
 import org.openbravo.model.ad.access.WindowAccess;
 import org.openbravo.model.ad.ui.Window;
 
+import com.etendoerp.go.roles.SystemRoleTemplates;
+import com.etendoerp.go.roles.UserRoleCompositionService;
 import com.etendoerp.go.schemaforge.data.SFSpec;
 import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
 import com.etendoerp.webhookevents.services.BaseWebhookService;
@@ -45,9 +51,10 @@ import com.etendoerp.webhookevents.services.BaseWebhookService;
 /**
  * Webhook that returns, for an admin caller, an aggregate overview of the CALLING TENANT's 5
  * fixed roles (ETP-4513 — "Configuración &gt; Roles"): each role's display name, raw AD
- * description, count of assigned users ({@code AD_User_Roles}), and the list of Etendo GO
- * windows it can reach ({@code AD_Window_Access}, intersected with the windows Etendo GO
- * actually exposes today — see {@link #resolveActiveEtendoGoWindowIds()}).
+ * description, count of assigned users, and the list of Etendo GO windows it can reach ({@code
+ * AD_Window_Access}, intersected with the windows Etendo GO actually exposes today — see {@link
+ * #resolveActiveEtendoGoWindowsById()}) — plus (ETP-4907) an explicit {@code windowCount} per
+ * role and a full window × role permission {@code matrix}, grouped by top-level menu category.
  *
  * <p>Unlike {@code SFWindowAccessMap}, which answers "what can the CURRENT caller's own role
  * reach" for any authenticated role, this endpoint is a cross-role aggregate: it always returns
@@ -69,18 +76,53 @@ import com.etendoerp.webhookevents.services.BaseWebhookService;
  * a live, reproducible bug (RolesPresa tenant, 2026-07-27). Now resolves the 4 fixed-name roles
  * (Finance/Sales/Purchasing/Inventory) plus whichever role has {@code is_client_admin='Y'} WITHIN
  * {@code currentRole.getClient()} — the same "resolve by name + is_client_admin, scoped to
- * :client_id" approach already used by {@code OnboardingRoleProvisioningService} and
- * {@code R16-tenant-roles-and-webhook-access.sql} in {@code etendo_schema_forge}. Every
+ * :client_id" approach used by the now-retired-and-deleted {@code OnboardingRoleProvisioningService}
+ * (ETP-4852) and {@code R16-tenant-roles-and-webhook-access.sql} in {@code etendo_schema_forge}. Every
  * OBCriteria below explicitly disables readable-client/org filtering (matching every sibling
  * webhook in this package) so cross-tenant filtering can never silently empty a same-tenant
  * result again.</p>
+ *
+ * <p><b>System-template fallback (ETP-4907 — the "Configuración &gt; Roles" read side of
+ * ETP-4852's role-composition rework).</b> ETP-4852 introduced 4 single, system-owned ({@code
+ * AD_Client_ID = '0'}) template roles ({@link SystemRoleTemplates}) that a tenant's users now
+ * compose their access from ({@link UserRoleCompositionService}), rather than every tenant
+ * keeping its OWN active copy of "Finance"/"Sales"/"Purchasing"/"Inventory". A tenant that has
+ * migrated to this model (confirmed live for GOClient, 2026-08-18: its own 4 named roles are
+ * {@code IsActive = 'N'}) would otherwise silently drop from 5 role cards to 1 (just its
+ * client-admin role) — {@link #resolveTenantRoles(String)} only ever returns ACTIVE roles. For
+ * each of the 4 fixed names with no active tenant-scoped match, this class now falls back to the
+ * corresponding {@link SystemRoleTemplates#byName()} system role: its windows are resolved via
+ * the SAME {@link #resolveWindowTierMap(Role, Set)} used for a real tenant role (already
+ * client/org-filter-disabled, so it works unchanged for a system-client role — no separate
+ * "system template window resolution" was written), and its {@code userCount} is the number of
+ * this client's users whose PERSONAL role currently composes that template — from {@link
+ * UserRoleCompositionService#getAppliedTemplateRoleIdsForClient(String)} — never a direct {@code
+ * AD_User_Roles} count against the template itself, which would always read zero (users are
+ * never assigned a template role directly; see that class's own javadoc). Each role card carries
+ * a {@code roleSource} field ({@code "tenant"} or {@code "systemTemplate"}) so the frontend never
+ * has to guess which id-space a card's {@code id} lives in. Both paths can be present
+ * side-by-side across the 4 fixed names within one response (a tenant may have migrated some
+ * roles but not others) — this is intentional graceful coexistence, not a bug.</p>
+ *
+ * <p><b>{@code matrix} (ETP-4907).</b> A full window × role permission grid, for every window in
+ * {@link #resolveActiveEtendoGoWindowsById()} (not just the ones a role happens to have access
+ * to — a window absent from a role's own {@code windows} list still gets a {@code "none"} entry
+ * here), grouped by the window's top-level {@code AD_Menu} folder name (via {@link
+ * #resolveWindowCategories(Set)}; a window with no resolvable top-level folder falls back to
+ * {@value #OTHER_CATEGORY}). The tri-state access value per window/role pair — {@code "full"} /
+ * {@code "read-only"} / {@code "none"} — reuses the exact same tier strings the per-role {@code
+ * windows} array already uses, keyed by each role's own {@code id} (from the {@code roles}
+ * array) so the frontend can join the two without a second id-mapping table.</p>
  *
  * <p><b>{@code rawDescription} is NOT display copy.</b> {@code AD_Role.description} is
  * boilerplate for 4 of the 5 GOClient roles today ({@code "*** Please, do not edit this role.
  * Use Copy Record instead ***"}) — this backend has no i18n awareness, so it cannot produce
  * user-facing copy itself. The field is returned only as a raw/debug fallback; the frontend
  * (`RolesOverviewPage.jsx`) maps the 4 fixed role NAMES (and the {@code isClientAdmin} flag for
- * the 5th) to curated, i18n-keyed copy instead of rendering this field.</p>
+ * the 5th) to curated, i18n-keyed copy instead of rendering this field. The same applies to
+ * {@code matrix}'s category names, which are the raw (English) {@code AD_Menu.name} of each
+ * window's top-level folder — the frontend is expected to map/translate them, not render them
+ * verbatim.</p>
  *
  * <p>The current role is captured once, at the very top of {@link #get(Map, Map)}, before
  * {@link OBContext#setAdminMode()} is entered — the same convention {@link SFListMenu} follows
@@ -116,11 +158,34 @@ public class SFRolesOverview extends BaseWebhookService {
    */
   private static final String IS_CLIENT_ADMIN = "isClientAdmin";
 
+  /**
+   * JSON key marking where a role card's identity comes from — {@link #SOURCE_TENANT} for a real
+   * role owned by the caller's own client, {@link #SOURCE_SYSTEM_TEMPLATE} for the ETP-4852
+   * system-template fallback. See the class javadoc.
+   */
+  private static final String ROLE_SOURCE = "roleSource";
+
+  /** {@link #ROLE_SOURCE} value for a role card backed by the caller's own tenant role. */
+  private static final String SOURCE_TENANT = "tenant";
+
+  /**
+   * {@link #ROLE_SOURCE} value for a role card backed by an ETP-4852 system-level template
+   * (client {@code '0'}) — used when the tenant has no active own-client copy of that fixed
+   * name.
+   */
+  private static final String SOURCE_SYSTEM_TEMPLATE = "systemTemplate";
+
   /** JSON key for a role's assigned-user count. */
   private static final String USER_COUNT = "userCount";
 
   /** JSON key for a role's assigned-windows array. */
   private static final String WINDOWS = "windows";
+
+  /**
+   * JSON key for a role's window count — {@code windows.length}, surfaced explicitly (ETP-4907)
+   * so the frontend's role cards don't have to derive it themselves.
+   */
+  private static final String WINDOW_COUNT = "windowCount";
 
   /** JSON key for a window entry's access tier. */
   private static final String TIER = "tier";
@@ -131,16 +196,54 @@ public class SFRolesOverview extends BaseWebhookService {
   /** Access-tier value for a window with read-only access. */
   private static final String READ_ONLY = "read-only";
 
+  /** Access-tier value for a window a role cannot reach at all — {@code matrix}-only. */
+  private static final String NONE = "none";
+
   /** {@code ETGO_SF_SPEC.SPEC_TYPE} value identifying a window/CRUD spec. */
   private static final String SPEC_TYPE_WINDOW = "W";
+
+  /** JSON key for the full window × role permission matrix (ETP-4907). */
+  private static final String MATRIX = "matrix";
+
+  /** JSON key for the matrix's category buckets. */
+  private static final String CATEGORIES = "categories";
+
+  /** JSON key for a matrix window entry's per-role access map. */
+  private static final String ACCESS = "access";
+
+  /**
+   * Category bucket used for a window whose top-level {@code AD_Menu} folder could not be
+   * resolved (should not happen for a window Etendo GO actually exposes, but degrading to a
+   * named bucket is safer than silently dropping the window from the matrix).
+   */
+  private static final String OTHER_CATEGORY = "Other";
 
   /**
    * The 4 fixed non-admin role names every tenant gets (ETP-4515/4516), in the display order
    * this endpoint returns them (after the client-admin role, which always sorts first). Mirrors
-   * {@code OnboardingRoleProvisioningService.ROLE_NAMES} / R16's role list in
-   * {@code etendo_schema_forge} — keep in lockstep.
+   * the now-deleted {@code OnboardingRoleProvisioningService.ROLE_NAMES} / R16's role list in
+   * {@code etendo_schema_forge} — keep in lockstep. Also matches {@link
+   * SystemRoleTemplates#byName()}'s own key order (Finance/Sales/Purchasing/Inventory) — the
+   * ETP-4907 system-template fallback iterates that map directly rather than re-declaring a
+   * second name list.
    */
   private static final String[] FIXED_ROLE_NAMES = { "Finance", "Sales", "Purchasing", "Inventory" };
+
+  private static final String WINDOW_CATEGORY_SQL =
+      "WITH RECURSIVE menu_tree AS ("
+      + "  SELECT tn.node_id, tn.parent_id, m.ad_window_id, tn.node_id AS top_id"
+      + "  FROM ad_treenode tn JOIN ad_menu m ON m.ad_menu_id = tn.node_id"
+      + "  WHERE tn.ad_tree_id = '10' AND tn.parent_id = '0' AND m.isactive = 'Y'"
+      + "  UNION ALL"
+      + "  SELECT tn.node_id, tn.parent_id, m.ad_window_id, mt.top_id"
+      + "  FROM ad_treenode tn JOIN ad_menu m ON m.ad_menu_id = tn.node_id"
+      + "  JOIN menu_tree mt ON tn.parent_id = mt.node_id"
+      + "  WHERE tn.ad_tree_id = '10' AND m.isactive = 'Y'"
+      + ") "
+      + "SELECT DISTINCT ON (mt.ad_window_id) mt.ad_window_id, top.name"
+      + " FROM menu_tree mt JOIN ad_menu top ON top.ad_menu_id = mt.top_id"
+      + " WHERE mt.ad_window_id IN (:windowIds)"
+      + " ORDER BY mt.ad_window_id, top.name";
 
   @Override
   public void get(Map<String, String> parameter, Map<String, String> responseVars) {
@@ -183,29 +286,108 @@ public class SFRolesOverview extends BaseWebhookService {
   }
 
   /**
-   * Builds the {@code roles} array for {@code clientId}'s own 5 fixed roles: the client-admin
-   * role first, then the 4 named roles in {@link #FIXED_ROLE_NAMES} order.
+   * Builds the full {@code {roles, matrix}} result for {@code clientId} — the client-admin role
+   * first, then the 4 fixed names in {@link #FIXED_ROLE_NAMES} order, each resolved either from
+   * the tenant's own active role or (ETP-4907 fallback) the matching system-level template. See
+   * the class javadoc for the full resolution rules.
    */
   private JSONObject buildRolesOverview(String clientId) throws JSONException {
-    Set<String> goWindowIds = resolveActiveEtendoGoWindowIds();
+    Map<String, Window> goWindowsById = resolveActiveEtendoGoWindowsById();
     List<Role> tenantRoles = resolveTenantRoles(clientId);
 
-    JSONArray roles = new JSONArray();
+    Role adminRole = null;
+    Map<String, Role> tenantFixedRolesByName = new LinkedHashMap<>();
     for (Role role : tenantRoles) {
-      roles.put(buildRoleJson(role, goWindowIds));
+      if (Boolean.TRUE.equals(role.isClientAdmin())) {
+        adminRole = role;
+      } else {
+        tenantFixedRolesByName.put(role.getName(), role);
+      }
+    }
+
+    List<JSONObject> roleCards = new ArrayList<>();
+    Map<String, Map<String, String>> tierMapsByRoleId = new LinkedHashMap<>();
+
+    if (adminRole != null) {
+      addTenantRoleCard(adminRole, goWindowsById, roleCards, tierMapsByRoleId);
+    }
+
+    // Lazily resolved on the first fixed-name role that actually needs the system-template
+    // fallback — most tenants (not yet migrated to ETP-4852) never touch this at all.
+    Map<String, List<String>> composedTemplateUserIdsByUserId = null;
+    for (Map.Entry<String, String> fixedRole : SystemRoleTemplates.byName().entrySet()) {
+      Role tenantRole = tenantFixedRolesByName.get(fixedRole.getKey());
+      if (tenantRole != null) {
+        addTenantRoleCard(tenantRole, goWindowsById, roleCards, tierMapsByRoleId);
+      } else {
+        composedTemplateUserIdsByUserId = addSystemTemplateRoleCardIfResolvable(
+            fixedRole.getValue(), clientId, goWindowsById, roleCards, tierMapsByRoleId,
+            composedTemplateUserIdsByUserId);
+      }
+    }
+
+    JSONArray roles = new JSONArray();
+    for (JSONObject card : roleCards) {
+      roles.put(card);
     }
 
     JSONObject result = new JSONObject();
     result.put(ROLES, roles);
+    result.put(MATRIX, buildMatrix(goWindowsById, tierMapsByRoleId));
     return result;
   }
 
   /**
+   * Resolves {@code role}'s window-tier map and appends its role card, mutating both {@code
+   * roleCards} and {@code tierMapsByRoleId} — shared by the admin-role branch and the tenant-side
+   * of the fixed-name loop in {@link #buildRolesOverview(String)}.
+   */
+  private void addTenantRoleCard(Role role, Map<String, Window> goWindowsById,
+      List<JSONObject> roleCards, Map<String, Map<String, String>> tierMapsByRoleId) throws JSONException {
+    Map<String, String> tiers = resolveWindowTierMap(role, goWindowsById.keySet());
+    tierMapsByRoleId.put(role.getId(), tiers);
+    roleCards.add(buildRoleCardJson(role, tiers, goWindowsById, SOURCE_TENANT, countActiveUsers(role)));
+  }
+
+  /**
+   * ETP-4907 system-template fallback for one fixed name with no active tenant-scoped role (see
+   * the class javadoc). Resolves {@code templateId}, and — only if it is an active {@code Role}
+   * — appends its role card, mutating both {@code roleCards} and {@code tierMapsByRoleId} exactly
+   * like {@link #addTenantRoleCard}, sourcing {@code userCount} from composition instead of
+   * direct {@code AD_User_Roles}. {@code composedTemplateUserIdsByUserId} is resolved lazily —
+   * {@code null} in means "not resolved yet for this request"; this method resolves it on first
+   * need and returns it so {@link #buildRolesOverview(String)}'s loop can reuse it for later
+   * fixed names without querying the composition service more than once per request.
+   *
+   * @return {@code composedTemplateUserIdsByUserId}, unchanged if the template did not resolve,
+   *     or newly populated if this was the first call in the request that needed it
+   */
+  private Map<String, List<String>> addSystemTemplateRoleCardIfResolvable(String templateId,
+      String clientId, Map<String, Window> goWindowsById, List<JSONObject> roleCards,
+      Map<String, Map<String, String>> tierMapsByRoleId,
+      Map<String, List<String>> composedTemplateUserIdsByUserId) throws JSONException {
+    Role templateRole = OBDal.getInstance().get(Role.class, templateId);
+    if (templateRole == null || !Boolean.TRUE.equals(templateRole.isActive())) {
+      // No active tenant role AND the system template itself is missing/inactive — nothing to
+      // report for this fixed name; mirrors the pre-existing "fewer than 5 roles" degradation.
+      return composedTemplateUserIdsByUserId;
+    }
+    Map<String, List<String>> composed = composedTemplateUserIdsByUserId != null
+        ? composedTemplateUserIdsByUserId
+        : new UserRoleCompositionService().getAppliedTemplateRoleIdsForClient(clientId);
+
+    int userCount = countUsersComposingTemplate(composed, templateRole.getId());
+    Map<String, String> tiers = resolveWindowTierMap(templateRole, goWindowsById.keySet());
+    tierMapsByRoleId.put(templateRole.getId(), tiers);
+    roleCards.add(buildRoleCardJson(templateRole, tiers, goWindowsById, SOURCE_SYSTEM_TEMPLATE, userCount));
+    return composed;
+  }
+
+  /**
    * Resolves {@code clientId}'s own client-admin role plus its 4 {@link #FIXED_ROLE_NAMES}
-   * roles, ordered admin-first then {@link #FIXED_ROLE_NAMES} order. Scoped strictly to
-   * {@code clientId} — a tenant's own role NAMES (not GOClient's specific ids) are what's
-   * universal across tenants (see {@code OnboardingRoleProvisioningService}), so this is the
-   * same resolution strategy as the rest of the role-provisioning feature.
+   * ACTIVE roles — a fixed name with no active tenant-scoped match is simply absent here; {@link
+   * #buildRolesOverview(String)} is responsible for falling back to the matching system template
+   * (ETP-4907). Scoped strictly to {@code clientId}.
    */
   @SuppressWarnings("unchecked")
   private List<Role> resolveTenantRoles(String clientId) {
@@ -232,21 +414,28 @@ public class SFRolesOverview extends BaseWebhookService {
   }
 
   /**
-   * Builds a single role's JSON entry.
+   * Builds a single role card's JSON entry.
    */
-  private JSONObject buildRoleJson(Role role, Set<String> goWindowIds) throws JSONException {
+  private JSONObject buildRoleCardJson(Role role, Map<String, String> tiers,
+      Map<String, Window> goWindowsById, String roleSource, int userCount) throws JSONException {
     JSONObject roleJson = new JSONObject();
     roleJson.put(ID, role.getId());
     roleJson.put(NAME, role.getName());
     roleJson.put(RAW_DESCRIPTION, role.getDescription());
     roleJson.put(IS_CLIENT_ADMIN, Boolean.TRUE.equals(role.isClientAdmin()));
-    roleJson.put(USER_COUNT, countActiveUsers(role));
-    roleJson.put(WINDOWS, buildWindowsJson(role, goWindowIds));
+    roleJson.put(ROLE_SOURCE, roleSource);
+    roleJson.put(USER_COUNT, userCount);
+    JSONArray windows = windowsJsonFromTierMap(tiers, goWindowsById);
+    roleJson.put(WINDOWS, windows);
+    roleJson.put(WINDOW_COUNT, windows.length());
     return roleJson;
   }
 
   /**
-   * Counts the distinct users with an active {@code AD_User_Roles} row for {@code role}.
+   * Counts the distinct users with an active {@code AD_User_Roles} row for {@code role}. Only
+   * valid for a REAL, directly-assignable role (a tenant's own role, or the client-admin role) —
+   * never for a system-level template, which users are never assigned to directly (see the class
+   * javadoc's system-template-fallback section).
    */
   @SuppressWarnings("unchecked")
   private int countActiveUsers(Role role) {
@@ -266,29 +455,65 @@ public class SFRolesOverview extends BaseWebhookService {
   }
 
   /**
-   * Builds the {@code windows} array for {@code role}: every active {@code AD_Window_Access}
-   * row it has, intersected with {@code goWindowIds} — a role may hold native Etendo
-   * window-access rows for windows Etendo GO never exposes (e.g. inherited/legacy grants), and
-   * those must not leak into this "assigned windows" view. Sorted by window name.
+   * Counts, across {@code composedTemplateUserIdsByUserId} (one entry per user of the client,
+   * from {@link UserRoleCompositionService#getAppliedTemplateRoleIdsForClient(String)}), how many
+   * users currently have {@code templateId} applied to their personal role.
+   */
+  private static int countUsersComposingTemplate(
+      Map<String, List<String>> composedTemplateUserIdsByUserId, String templateId) {
+    int count = 0;
+    for (List<String> appliedTemplateIds : composedTemplateUserIdsByUserId.values()) {
+      if (appliedTemplateIds.contains(templateId)) {
+        count++;
+      }
+    }
+    return count;
+  }
+
+  /**
+   * Resolves {@code role}'s active {@code AD_Window_Access} rows into a window-id → tier map
+   * ({@link #FULL} for {@code IsReadWrite = true}, {@link #READ_ONLY} otherwise), intersected
+   * with {@code goWindowIds} — a role may hold native Etendo window-access rows for windows
+   * Etendo GO never exposes (e.g. inherited/legacy grants), and those must not leak into this
+   * "assigned windows" view. Client/organization filtering is explicitly disabled so this works
+   * unchanged for a system-client ({@code AD_Client_ID = '0'}) role too — see the class javadoc's
+   * system-template-fallback section for why that matters.
    */
   @SuppressWarnings("unchecked")
-  private JSONArray buildWindowsJson(Role role, Set<String> goWindowIds) throws JSONException {
+  private Map<String, String> resolveWindowTierMap(Role role, Set<String> goWindowIds) {
     OBCriteria<WindowAccess> criteria = OBDal.getInstance().createCriteria(WindowAccess.class);
     criteria.setFilterOnReadableClients(false);
     criteria.setFilterOnReadableOrganization(false);
     criteria.add(Restrictions.eq(WindowAccess.PROPERTY_ROLE + ".id", role.getId()));
     criteria.add(Restrictions.eq(WindowAccess.PROPERTY_ACTIVE, true));
 
-    List<JSONObject> windowJsons = new ArrayList<>();
+    Map<String, String> tiers = new LinkedHashMap<>();
     for (WindowAccess access : (List<WindowAccess>) criteria.list()) {
       Window window = access.getWindow();
       if (window == null || !goWindowIds.contains(window.getId())) {
         continue;
       }
+      tiers.put(window.getId(), Boolean.TRUE.equals(access.isEditableField()) ? FULL : READ_ONLY);
+    }
+    return tiers;
+  }
+
+  /**
+   * Turns a window-id → tier map into the sorted-by-name {@code windows} JSON array a role card
+   * carries.
+   */
+  private JSONArray windowsJsonFromTierMap(Map<String, String> tiers, Map<String, Window> goWindowsById)
+      throws JSONException {
+    List<JSONObject> windowJsons = new ArrayList<>();
+    for (Map.Entry<String, String> entry : tiers.entrySet()) {
+      Window window = goWindowsById.get(entry.getKey());
+      if (window == null) {
+        continue;
+      }
       JSONObject windowJson = new JSONObject();
       windowJson.put(ID, window.getId());
       windowJson.put(NAME, window.getName());
-      windowJson.put(TIER, Boolean.TRUE.equals(access.isEditableField()) ? FULL : READ_ONLY);
+      windowJson.put(TIER, entry.getValue());
       windowJsons.add(windowJson);
     }
 
@@ -309,29 +534,108 @@ public class SFRolesOverview extends BaseWebhookService {
 
   /**
    * Resolves every distinct {@code AD_Window} backing an active, {@code SPEC_TYPE = 'W'}
-   * {@code ETGO_SF_SPEC} — i.e. every window Etendo GO actually exposes today. Used to keep
-   * {@link #buildWindowsJson(Role, Set)} scoped to Etendo GO's own window set, rather than every
-   * native {@code AD_Window_Access} row a role happens to carry (a GOClient role, especially
-   * the admin one, commonly also holds access to native-only Etendo windows that Etendo GO
-   * never surfaces — those are noise for this "assigned windows" view).
+   * {@code ETGO_SF_SPEC} — i.e. every window Etendo GO actually exposes today, keyed by id for
+   * O(1) lookups while building both the per-role {@code windows} arrays and the {@code matrix}.
    *
-   * @return the distinct window IDs (insertion order)
+   * @return the distinct windows, keyed by id (insertion order)
    */
   @SuppressWarnings("unchecked")
-  private Set<String> resolveActiveEtendoGoWindowIds() {
+  private Map<String, Window> resolveActiveEtendoGoWindowsById() {
     OBCriteria<SFSpec> criteria = OBDal.getInstance().createCriteria(SFSpec.class);
     criteria.setFilterOnReadableClients(false);
     criteria.setFilterOnReadableOrganization(false);
     criteria.add(Restrictions.eq(SFSpec.PROPERTY_ISACTIVE, true));
     criteria.add(Restrictions.eq(SFSpec.PROPERTY_SPECTYPE, SPEC_TYPE_WINDOW));
 
-    Set<String> windowIds = new LinkedHashSet<>();
+    Map<String, Window> windowsById = new LinkedHashMap<>();
     for (SFSpec spec : (List<SFSpec>) criteria.list()) {
       Window window = spec.getADWindow();
       if (window != null) {
-        windowIds.add(window.getId());
+        windowsById.put(window.getId(), window);
       }
     }
-    return windowIds;
+    return windowsById;
+  }
+
+  /**
+   * Builds the ETP-4907 {@code matrix}: every window in {@code goWindowsById}, grouped by its
+   * top-level {@code AD_Menu} category ({@link #resolveWindowCategories(Set)}), each with a
+   * per-role tri-state {@code access} map built from {@code tierMapsByRoleId} — a role/window
+   * pair absent from that role's tier map resolves to {@link #NONE}.
+   */
+  private JSONObject buildMatrix(Map<String, Window> goWindowsById,
+      Map<String, Map<String, String>> tierMapsByRoleId) throws JSONException {
+    Map<String, String> categoryByWindowId = resolveWindowCategories(goWindowsById.keySet());
+
+    Map<String, List<Window>> windowsByCategory = new LinkedHashMap<>();
+    for (Window window : goWindowsById.values()) {
+      String category = categoryByWindowId.getOrDefault(window.getId(), OTHER_CATEGORY);
+      windowsByCategory.computeIfAbsent(category, k -> new ArrayList<>()).add(window);
+    }
+
+    List<String> sortedCategories = new ArrayList<>(windowsByCategory.keySet());
+    sortedCategories.sort(String.CASE_INSENSITIVE_ORDER);
+
+    JSONArray categories = new JSONArray();
+    for (String category : sortedCategories) {
+      List<Window> windowsInCategory = windowsByCategory.get(category);
+      windowsInCategory.sort((a, b) -> a.getName().compareToIgnoreCase(b.getName()));
+
+      JSONArray windowsJson = new JSONArray();
+      for (Window window : windowsInCategory) {
+        JSONObject windowJson = new JSONObject();
+        windowJson.put(ID, window.getId());
+        windowJson.put(NAME, window.getName());
+
+        JSONObject access = new JSONObject();
+        for (Map.Entry<String, Map<String, String>> roleEntry : tierMapsByRoleId.entrySet()) {
+          access.put(roleEntry.getKey(), roleEntry.getValue().getOrDefault(window.getId(), NONE));
+        }
+        windowJson.put(ACCESS, access);
+        windowsJson.put(windowJson);
+      }
+
+      JSONObject categoryJson = new JSONObject();
+      categoryJson.put(NAME, category);
+      categoryJson.put(WINDOWS, windowsJson);
+      categories.put(categoryJson);
+    }
+
+    JSONObject matrix = new JSONObject();
+    matrix.put(CATEGORIES, categories);
+    return matrix;
+  }
+
+  /**
+   * Resolves each window id in {@code windowIds} to the name of its top-level {@code AD_Menu}
+   * folder (tree {@code '10'}, the same menu tree {@link SFListMenu} walks) via one recursive-CTE
+   * native query — a window linked from two different top-level folders deterministically picks
+   * the alphabetically-first one ({@code DISTINCT ON} + {@code ORDER BY ... top.name}), and a
+   * window absent from the result (no menu entry at all — not expected for a window Etendo GO
+   * actually exposes, but not fatal either) is simply missing from the returned map; {@link
+   * #buildMatrix(Map, Map)} falls back to {@link #OTHER_CATEGORY} for those.
+   *
+   * @param windowIds the Etendo GO window ids to resolve a category for
+   * @return window id → top-level {@code AD_Menu.name}; never {@code null}, empty when {@code
+   *     windowIds} is empty (short-circuits before touching the database)
+   */
+  @SuppressWarnings("unchecked")
+  private Map<String, String> resolveWindowCategories(Set<String> windowIds) {
+    if (windowIds.isEmpty()) {
+      return Collections.emptyMap();
+    }
+    Session session = OBDal.getInstance().getSession();
+    NativeQuery<Object[]> query = session.createNativeQuery(WINDOW_CATEGORY_SQL);
+    query.setParameterList("windowIds", windowIds);
+
+    Map<String, String> categoryByWindowId = new LinkedHashMap<>();
+    for (Object[] row : (List<Object[]>) query.getResultList()) {
+      String windowId = row[0] == null ? null : row[0].toString();
+      String category = row[1] == null ? null : row[1].toString();
+      if (windowId != null && category != null) {
+        categoryByWindowId.put(windowId, category);
+      }
+    }
+    return categoryByWindowId;
   }
 }
