@@ -210,14 +210,48 @@ public final class NeoDisplayLogicHelper {
         if (skipKey || val == null || val instanceof Map) {
           continue;
         }
-        try {
-          obj.put(key, val.toString());
-        } catch (Exception ex) {
-          // skip un-serializable entries
-        }
+        putTyped(obj, key, val);
       }
     }
     return "var " + varName + " = " + obj.toString() + ";";
+  }
+
+  /**
+   * Puts a single entry into the given {@link JSONObject}, preserving the value's real JSON type
+   * so it serializes as the matching JS literal instead of always being coerced into a quoted
+   * string.
+   *
+   * <p>This matters because classic Etendo's {@code DynamicExpressionParser} compiles a Yes/No
+   * AD_Field's {@code displayLogic}/{@code readOnlyLogic} clause (e.g. {@code @IsDepreciated@='Y'})
+   * into a JS comparison against the JS boolean literal {@code true}
+   * ({@code currentValues.depreciate === true}), not the string {@code "true"}. Pre-stringifying
+   * every value here (the previous behavior) made {@code Boolean.TRUE.toString()} render as the
+   * quoted JS string {@code "true"}, so {@code "true" === true} was always {@code false} —
+   * silently breaking every boolean-valued display/readOnly-logic comparison.
+   *
+   * <ul>
+   *   <li>{@link Boolean} → put as-is, renders as the unquoted JS literal {@code true}/{@code false}</li>
+   *   <li>{@link Number} (Integer, Long, Double, BigDecimal, etc.) → put as-is, renders as an
+   *       unquoted numeric literal (Jettison's {@code JSONObject} natively serializes any
+   *       {@code Number}, {@code BigDecimal} included, as a bare number)</li>
+   *   <li>anything else (String, or a type Jettison cannot natively serialize) → falls back to
+   *       {@code val.toString()}, preserving the pre-existing string behavior</li>
+   * </ul>
+   *
+   * @param obj the target {@link JSONObject} being built
+   * @param key the property key
+   * @param val the value to serialize; never {@code null} (callers already skip nulls)
+   */
+  private static void putTyped(JSONObject obj, String key, Object val) {
+    try {
+      if (val instanceof Boolean || val instanceof Number) {
+        obj.put(key, val);
+      } else {
+        obj.put(key, val.toString());
+      }
+    } catch (Exception ex) {
+      // skip un-serializable entries
+    }
   }
 
   /**
