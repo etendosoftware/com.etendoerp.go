@@ -26,6 +26,7 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -672,6 +673,102 @@ class EtendoGoJwtDalHelperTest {
 
       verify(query).setNamedParameter("accountEmail", "a_b%@x.com");
       verify(query).setNamedParameter("accountPrefix", "a\\_b\\%@x.com+%");
+    }
+  }
+
+  @Nested
+  @DisplayName("email verification state (ETP-4798)")
+  class EmailVerificationState {
+
+    @Test
+    @DisplayName("a confirmed address reads as verified and not pending")
+    void confirmedAddress() {
+      Account account = mock(Account.class);
+      when(account.get(EtendoGoJwtDalHelper.PROPERTY_EMAIL_VERIFIED)).thenReturn(new Date());
+      when(account.get(EtendoGoJwtDalHelper.PROPERTY_VERIFY_TOKEN_HASH)).thenReturn("hash");
+
+      assertTrue(EtendoGoJwtDalHelper.isEmailVerified(account));
+      // Still holding the hash — the link stays replayable for idempotency — but nothing is owed.
+      assertFalse(EtendoGoJwtDalHelper.isEmailVerificationPending(account));
+    }
+
+    @Test
+    @DisplayName("an issued but unused token reads as pending")
+    void issuedTokenIsPending() {
+      Account account = mock(Account.class);
+      when(account.get(EtendoGoJwtDalHelper.PROPERTY_EMAIL_VERIFIED)).thenReturn(null);
+      when(account.get(EtendoGoJwtDalHelper.PROPERTY_VERIFY_TOKEN_HASH)).thenReturn("hash");
+
+      assertFalse(EtendoGoJwtDalHelper.isEmailVerified(account));
+      assertTrue(EtendoGoJwtDalHelper.isEmailVerificationPending(account));
+    }
+
+    @Test
+    @DisplayName("an account that predates the feature is neither verified nor pending")
+    void legacyAccountIsNeverGated() {
+      // The regression this guards: gating on "not verified" alone would lock every pre-ETP-4798
+      // account out of creating an environment the moment this deploys.
+      Account account = mock(Account.class);
+      when(account.get(EtendoGoJwtDalHelper.PROPERTY_EMAIL_VERIFIED)).thenReturn(null);
+      when(account.get(EtendoGoJwtDalHelper.PROPERTY_VERIFY_TOKEN_HASH)).thenReturn(null);
+
+      assertFalse(EtendoGoJwtDalHelper.isEmailVerified(account));
+      assertFalse(EtendoGoJwtDalHelper.isEmailVerificationPending(account));
+    }
+
+    @Test
+    @DisplayName("a null account is neither verified nor pending")
+    void nullAccount() {
+      assertFalse(EtendoGoJwtDalHelper.isEmailVerified(null));
+      assertFalse(EtendoGoJwtDalHelper.isEmailVerificationPending(null));
+    }
+
+    @Test
+    @DisplayName("storing a token writes the hash and expiry and commits")
+    void storeEmailVerifyToken() {
+      Account account = mock(Account.class);
+      Date expiresAt = new Date();
+
+      EtendoGoJwtDalHelper.storeEmailVerifyToken(account, "hash", expiresAt);
+
+      verify(account).set(EtendoGoJwtDalHelper.PROPERTY_VERIFY_TOKEN_HASH, "hash");
+      verify(account).set(EtendoGoJwtDalHelper.PROPERTY_VERIFY_TOKEN_EXPIRES, expiresAt);
+      verify(obDal).save(account);
+    }
+
+    @Test
+    @DisplayName("consuming marks the address verified without clearing the token or the session")
+    void consumeEmailVerification() {
+      Account account = mock(Account.class);
+      Date verifiedAt = new Date();
+
+      EtendoGoJwtDalHelper.consumeEmailVerification(account, verifiedAt);
+
+      verify(account).set(EtendoGoJwtDalHelper.PROPERTY_EMAIL_VERIFIED, verifiedAt);
+      // Keeping the hash is what makes a second click on the link answer 200 instead of "invalid".
+      verify(account, never()).set(EtendoGoJwtDalHelper.PROPERTY_VERIFY_TOKEN_HASH, null);
+      // And the user stays signed in — they are usually mid-onboarding when they click.
+      verify(account, never()).setSessionToken(any());
+      verify(obDal).save(account);
+    }
+
+    @Test
+    @DisplayName("the lookup only accepts an unexpired token on an active account")
+    void findAccountByVerifyTokenHash() {
+      @SuppressWarnings("unchecked")
+      OBQuery<Account> query = mock(OBQuery.class);
+      Account expected = mock(Account.class);
+      Date now = new Date();
+      when(obDal.createQuery(eq(Account.class), anyString())).thenReturn(query);
+      when(query.uniqueResult()).thenReturn(expected);
+
+      Account result = EtendoGoJwtDalHelper.findAccountByVerifyTokenHash("hash", now);
+
+      assertEquals(expected, result);
+      verify(query).setNamedParameter("verifyTokenHash", "hash");
+      verify(query).setNamedParameter("now", now);
+      verify(query).setFilterOnReadableClients(false);
+      verify(query).setFilterOnReadableOrganization(false);
     }
   }
 }

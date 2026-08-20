@@ -158,6 +158,10 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private static final String CODE_INVALID_CREDENTIALS = "INVALID_CREDENTIALS";
   private static final String CODE_LOGIN_SERVER_ERROR = "LOGIN_SERVER_ERROR";
   private static final String CODE_INTERNAL_ERROR = "INTERNAL_ERROR";
+  // ETP-4798 — email ownership confirmation. Stable codes, mirrored by the web client's
+  // onboarding/errorMessages.js so it translates by code and never shows this English text.
+  private static final String CODE_EMAIL_NOT_VERIFIED = "EMAIL_NOT_VERIFIED";
+  private static final String CODE_EMAIL_VERIFY_INVALID = "EMAIL_VERIFY_INVALID";
   private static final String PROGRESS_IN_PROGRESS = "in_progress";
   private static final String PROGRESS_CLIENT = "client";
   private static final String PROGRESS_ERROR = "error";
@@ -185,6 +189,21 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       "If an account exists for that email, password reset instructions will be sent.";
   private static final String PASSWORD_RESET_INVALID_MESSAGE =
       "Invalid or expired password reset token";
+  // 24h, not the 30 minutes a password reset gets. A reset is a deliberate act the user performs
+  // and immediately waits on; a registration confirmation is often opened the next morning, and an
+  // expired link there means a dead end in the middle of signup.
+  private static final long EMAIL_VERIFICATION_TTL_SECONDS = 24 * 60 * 60L;
+  private static final String EMAIL_NOT_VERIFIED_MESSAGE =
+      "Confirm your email address before creating an environment.";
+  private static final String EMAIL_VERIFY_INVALID_MESSAGE =
+      "Invalid or expired email verification token";
+  private static final String EMAIL_VERIFY_NEUTRAL_MESSAGE =
+      "If this account still needs an email confirmation, a new link has been sent.";
+  private static final String PATH_VERIFY_EMAIL = "/verify-email";
+  private static final String PATH_VERIFY_EMAIL_RESEND = "/verify-email/resend";
+  private static final String FIELD_EMAIL_VERIFIED = "emailVerified";
+  private static final String FIELD_EMAIL_VERIFICATION_PENDING = "emailVerificationPending";
+  private static final String CONTRACT_NEW_ACCOUNT = "new-account";
   private static final String SSO_PREFIX = "/sso/";
   private static final String PATH_ONBOARDING_DRAFT = "/onboarding/draft";
   private static final String FIELD_DRAFT = "draft";
@@ -297,6 +316,10 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       handlePasswordResetConfirm(request, response);
     } else if (isPath(path, "/change-password")) {
       handleChangePassword(request, response);
+    } else if (isPath(path, PATH_VERIFY_EMAIL)) {
+      handleVerifyEmail(request, response);
+    } else if (isPath(path, PATH_VERIFY_EMAIL_RESEND)) {
+      handleResendVerifyEmail(request, response);
     } else if (isPath(path, PATH_ONBOARDING_DRAFT)) {
       handleSaveOnboardingDraft(request, response);
     } else if (isPath(path, "/onboarding")) {
@@ -465,8 +488,10 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       String sessionToken = generateToken();
       Account account = EtendoGoJwtDalHelper.createAccount(email, passwordHash, name, sessionToken);
       String normalizedLanguage = StringUtils.trimToNull(language);
-      sendAuthEmailBestEffort("new-account",
-          () -> authEmailSender.sendNewAccount(account, normalizedLanguage));
+      // ETP-4798: the session token below still comes back, so the user keeps filling in the
+      // onboarding form and their draft keeps saving. What the unconfirmed address blocks is the
+      // one irreversible, costly step — creating the tenant in handleOnboarding.
+      issueEmailVerification(account, normalizedLanguage, true);
 
       JSONObject accountJson = new JSONObject();
       accountJson.put("id", account.getId());
@@ -732,7 +757,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       OBContext.setOBContext("0", "0", "0", "0");
       OBContext.setAdminMode(true);
       Account account = EtendoGoJwtDalHelper.findActiveAccountByResetTokenHash(
-          hashResetToken(token), new Date());
+          hashAuthToken(token), new Date());
       if (account == null) {
         writeError(response, HttpServletResponse.SC_BAD_REQUEST, PASSWORD_RESET_INVALID_MESSAGE);
         return;
@@ -753,6 +778,102 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     } finally {
       OBContext.restorePreviousMode();
     }
+  }
+
+  /**
+   * POST /sws/go/verify-email
+   * Body: { "token": "..." }
+   *
+   * <p>ETP-4798. Deliberately unauthenticated: the token in the link <em>is</em> the credential,
+   * and requiring a session on top would break the ordinary case of opening the mail in a browser
+   * where the user is not signed in.
+   *
+   * <p>Idempotent by design. Following the same link twice — which people do constantly, and which
+   * mail clients do on their own when they prefetch — answers 200 both times instead of showing a
+   * scary "invalid token" on the second click. That is why
+   * {@link EtendoGoJwtDalHelper#consumeEmailVerification} leaves the token hash in place: once the
+   * address is confirmed the token grants nothing, so replaying it within its TTL is a no-op rather
+   * than something worth defending against.
+   */
+  private void handleVerifyEmail(HttpServletRequest request, HttpServletResponse response)
+      throws IOException {
+    JSONObject body;
+    try {
+      body = readJsonBody(request);
+    } catch (JSONException e) {
+      writeError(response, HttpServletResponse.SC_BAD_REQUEST, CODE_INVALID_REQUEST,
+          INVALID_JSON_BODY, INVALID_JSON_BODY);
+      return;
+    }
+
+    String verifyToken;
+    try {
+      verifyToken = body.getString(FIELD_TOKEN).trim();
+    } catch (JSONException e) {
+      writeError(response, HttpServletResponse.SC_BAD_REQUEST, CODE_INVALID_REQUEST,
+          "Missing required field: token", "Missing required field: token");
+      return;
+    }
+    if (verifyToken.isEmpty()) {
+      writeError(response, HttpServletResponse.SC_BAD_REQUEST, CODE_INVALID_REQUEST,
+          "Field token must not be empty", "Field token must not be empty");
+      return;
+    }
+
+    try {
+      OBContext.setOBContext("0", "0", "0", "0");
+      OBContext.setAdminMode(true);
+      Account account = EtendoGoJwtDalHelper.findAccountByVerifyTokenHash(
+          hashAuthToken(verifyToken), new Date());
+      if (account == null) {
+        writeError(response, HttpServletResponse.SC_BAD_REQUEST, CODE_EMAIL_VERIFY_INVALID,
+            EMAIL_VERIFY_INVALID_MESSAGE, EMAIL_VERIFY_INVALID_MESSAGE);
+        return;
+      }
+      if (!EtendoGoJwtDalHelper.isEmailVerified(account)) {
+        EtendoGoJwtDalHelper.consumeEmailVerification(account, new Date());
+      }
+
+      JSONObject result = new JSONObject();
+      result.put(FIELD_STATUS, STATUS_SUCCESS);
+      result.put(FIELD_MESSAGE, "Email address confirmed");
+      result.put(FIELD_EMAIL_VERIFIED, true);
+      writeResponse(response, HttpServletResponse.SC_OK, result);
+    } catch (RuntimeException e) {
+      EtendoGoDalHelper.rollbackDalChanges("email verification", e, log);
+      log.error("Email verification failed", e);
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, SERVER_ERROR);
+    } catch (JSONException e) {
+      log.error("JSON error building email verification response", e);
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, INTERNAL_ERROR);
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  /**
+   * POST /sws/go/verify-email/resend
+   * Header: Authorization: Bearer &lt;session_token&gt;
+   *
+   * <p>ETP-4798. Answers the same neutral 200 whether a new link went out, the address was already
+   * confirmed, or nothing was pending, so the response carries no account state and a double-click
+   * on "resend" is harmless. Neutrality here is about not restating what the caller already knows —
+   * unlike the password-reset request, this endpoint is authenticated, so a genuine server failure
+   * is reported as one rather than hidden behind a success.
+   *
+   * <p>Only re-issues when a confirmation is genuinely pending. In particular it does not mint a
+   * first token for an account that predates ETP-4798: doing so would move that account from
+   * "never gated" to "gated", locking out a user who did nothing but press a button.
+   */
+  private void handleResendVerifyEmail(HttpServletRequest request, HttpServletResponse response)
+      throws IOException {
+    runWithAuthenticatedAccount(request, response, "email verification resend", account -> {
+      String language = StringUtils.trimToNull(request.getParameter(FIELD_LANGUAGE));
+      if (EtendoGoJwtDalHelper.isEmailVerificationPending(account)) {
+        issueEmailVerification(account, language, false);
+      }
+      writeEmailVerifyNeutralResponse(response);
+    });
   }
 
   /**
@@ -872,6 +993,12 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       if (account.getCreationDate() != null) {
         result.put("created", account.getCreationDate().toInstant().toString());
       }
+      // ETP-4798: two separate facts, because they are not opposites. "pending" is what the web
+      // client shows the confirm-your-email banner for; an account that predates this feature is
+      // neither verified nor pending, and must see no banner and hit no gate.
+      result.put(FIELD_EMAIL_VERIFIED, EtendoGoJwtDalHelper.isEmailVerified(account));
+      result.put(FIELD_EMAIL_VERIFICATION_PENDING,
+          EtendoGoJwtDalHelper.isEmailVerificationPending(account));
 
       writeResponse(response, HttpServletResponse.SC_OK, result);
     } catch (RuntimeException e) {
@@ -1205,6 +1332,13 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
 
     String accountEmail = resolveOnboardingAccountEmail(token, response);
     if (accountEmail == null) {
+      return;
+    }
+
+    // ETP-4798. Sits beside the paywall below, for the same reason: before the NDJSON stream opens
+    // and before any provisioning runs, so a refused request answers with plain JSON and leaves no
+    // half-created tenant behind.
+    if (rejectWhenEmailNotVerified(token, response)) {
       return;
     }
 
@@ -2223,8 +2357,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private void storeResetTokenAndSendEmail(Account account, String appBaseUrl) {
     EtendoGoJwtDalHelper.PasswordResetTokenState previousTokenState =
         EtendoGoJwtDalHelper.capturePasswordResetToken(account);
-    String resetToken = generatePasswordResetToken();
-    String resetTokenHash = hashResetToken(resetToken);
+    String resetToken = generateSecureUrlToken();
+    String resetTokenHash = hashAuthToken(resetToken);
     Date expiresAt = Date.from(Instant.now().plusSeconds(PASSWORD_RESET_TTL_SECONDS));
     EtendoGoJwtDalHelper.storePasswordResetToken(account, resetTokenHash, expiresAt);
 
@@ -2242,6 +2376,103 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     if (!emailSent) {
       EtendoGoJwtDalHelper.restorePasswordResetToken(account, previousTokenState);
     }
+  }
+
+  /**
+   * ETP-4798: issues a fresh email-verification token and mails the link out, used both at
+   * registration ({@code welcome} true, the link rides inside the welcome mail) and on an explicit
+   * re-send ({@code welcome} false, its own {@code verify-email} message).
+   *
+   * <p><strong>Fails open, on purpose.</strong> If no link can be built (no public app base URL
+   * configured) or the mail does not go out, the token is not left behind: the account reads as
+   * "nothing pending" and {@link #rejectWhenEmailNotVerified} lets it through. The alternative is
+   * worse than the gap it closes — a misconfigured provider or an unset {@code
+   * etendo.go.app.baseUrl} would silently lock every new signup out of creating an environment,
+   * with no mail to click and no way to tell the difference from the user's side. This mirrors what
+   * {@link #storeResetTokenAndSendEmail} already does when a reset mail cannot be delivered.
+   *
+   * @param welcome true to fold the link into the {@code new-account} welcome mail, false to send
+   *     the standalone {@code verify-email} reminder
+   */
+  private void issueEmailVerification(Account account, String language, boolean welcome) {
+    boolean tokenStored = false;
+    try {
+      String verifyToken = generateSecureUrlToken();
+      String verifyTokenHash = hashAuthToken(verifyToken);
+      String verifyLink = EtendoGoAuthLinkBuilder.verifyEmailLink(verifyToken);
+      if (verifyLink == null) {
+        log.warn("Email verification skipped because the public app base URL "
+            + "({}) is not configured", PublicUrlResolver.APP_BASE_URL_PROPERTY);
+        if (welcome) {
+          sendAuthEmailBestEffort(CONTRACT_NEW_ACCOUNT,
+              () -> authEmailSender.sendNewAccount(account, language));
+        }
+        return;
+      }
+
+      EtendoGoJwtDalHelper.storeEmailVerifyToken(account, verifyTokenHash,
+          Date.from(Instant.now().plusSeconds(EMAIL_VERIFICATION_TTL_SECONDS)));
+      tokenStored = true;
+
+      boolean emailSent = welcome
+          ? authEmailSender.sendNewAccount(account, language, verifyLink)
+          : authEmailSender.sendVerifyEmail(account, verifyTokenHash, verifyLink, language);
+      if (emailSent) {
+        return;
+      }
+    } catch (RuntimeException e) {
+      // Swallowed on purpose, and this is the whole reason the method owns its own try: it runs
+      // AFTER the account transaction has already committed. Letting the exception escape would
+      // reach handleRegister's catch, roll back nothing that matters, and answer "registration
+      // failed" for an account that exists — leaving the user unable to retry (the address is now
+      // taken) and unable to log in to the account they just created.
+      log.warn("Email verification could not be issued", e);
+    }
+    if (tokenStored) {
+      dropUnusableEmailVerifyToken(account);
+    }
+  }
+
+  /**
+   * Removes a verification token whose mail never went out, so the account is left ungated instead
+   * of blocked behind a link nobody can click.
+   */
+  private void dropUnusableEmailVerifyToken(Account account) {
+    log.warn("Email verification token dropped because its mail could not be sent — "
+        + "the account is left ungated rather than locked out");
+    try {
+      EtendoGoJwtDalHelper.storeEmailVerifyToken(account, null, null);
+    } catch (RuntimeException e) {
+      log.error("Could not drop the unusable email verification token; this account may be gated "
+          + "out of creating an environment with no deliverable confirmation link", e);
+    }
+  }
+
+  /**
+   * ETP-4798 gate. Returns true (and has written the 403) when this account still owes an email
+   * confirmation. Any failure resolving that answers false: an infrastructure problem on our side
+   * must not be what stops a paying user from creating their environment.
+   */
+  private boolean rejectWhenEmailNotVerified(String token, HttpServletResponse response)
+      throws IOException {
+    boolean pending = false;
+    try {
+      OBContext.setOBContext("0", "0", "0", "0");
+      OBContext.setAdminMode(true);
+      Account account = EtendoGoJwtDalHelper.findActiveAccountByBearerToken(token);
+      pending = EtendoGoJwtDalHelper.isEmailVerificationPending(account);
+    } catch (RuntimeException e) {
+      log.error("Could not check the email verification state for onboarding; allowing the "
+          + "request through", e);
+      return false;
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+    if (pending) {
+      writeError(response, HttpServletResponse.SC_FORBIDDEN, CODE_EMAIL_NOT_VERIFIED,
+          EMAIL_NOT_VERIFIED_MESSAGE, EMAIL_NOT_VERIFIED_MESSAGE);
+    }
+    return pending;
   }
 
   private void sendAuthEmailBestEffort(String contractName, Runnable sendAction) {
@@ -2262,13 +2493,15 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     return UUID.randomUUID().toString().replace("-", "").toLowerCase();
   }
 
-  private String generatePasswordResetToken() {
+  /** Cryptographically random, URL-safe token for a mailed one-shot link (reset, verification). */
+  private String generateSecureUrlToken() {
     byte[] token = new byte[32];
     new SecureRandom().nextBytes(token);
     return Base64.getUrlEncoder().withoutPadding().encodeToString(token);
   }
 
-  private String hashResetToken(String token) {
+  /** SHA-256 of a mailed token. Only the digest is ever persisted. */
+  private String hashAuthToken(String token) {
     try {
       MessageDigest md = MessageDigest.getInstance(HASH_ALGORITHM);
       byte[] digest = md.digest(token.getBytes(StandardCharsets.UTF_8));
@@ -2311,6 +2544,19 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       }
     }
     return sb.toString();
+  }
+
+  private void writeEmailVerifyNeutralResponse(HttpServletResponse response)
+      throws IOException {
+    try {
+      JSONObject result = new JSONObject();
+      result.put(FIELD_STATUS, STATUS_SUCCESS);
+      result.put(FIELD_MESSAGE, EMAIL_VERIFY_NEUTRAL_MESSAGE);
+      writeResponse(response, HttpServletResponse.SC_OK, result);
+    } catch (JSONException e) {
+      log.error("JSON error building email verification resend response", e);
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, INTERNAL_ERROR);
+    }
   }
 
   private void writePasswordResetNeutralResponse(HttpServletResponse response)

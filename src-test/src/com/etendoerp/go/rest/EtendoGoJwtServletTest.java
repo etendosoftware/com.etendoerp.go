@@ -17,6 +17,7 @@
 package com.etendoerp.go.rest;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNotEquals;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -849,6 +850,143 @@ public class EtendoGoJwtServletTest {
     assertEquals(200, resp.status);
     JSONObject respBody = new JSONObject(resp.body());
     assertEquals("success", respBody.getString("status"));
+  }
+
+  // ===================== POST /verify-email (ETP-4798) =====================
+
+  @Test
+  public void verifyEmailInvalidTokenReturnsBadRequestWithStableCode() throws Exception {
+    ResponseCapture resp = mockResponse();
+    HttpServletRequest req = mockRequest("/verify-email");
+    when(req.getContentType()).thenReturn("application/json");
+    when(req.getReader()).thenReturn(new BufferedReader(new StringReader(
+        "{\"token\":\"bad-token\"}")));
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+         MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
+      dalMock.when(() -> EtendoGoJwtDalHelper.findAccountByVerifyTokenHash(
+          anyString(), any(Date.class))).thenReturn(null);
+
+      servlet.doPost(req, resp.response);
+    }
+
+    assertEquals(400, resp.status);
+    JSONObject error = new JSONObject(resp.body()).getJSONObject("error");
+    assertEquals("EMAIL_VERIFY_INVALID", error.getString("code"));
+  }
+
+  @Test
+  public void verifyEmailValidTokenMarksTheAddressConfirmed() throws Exception {
+    ResponseCapture resp = mockResponse();
+    HttpServletRequest req = mockRequest("/verify-email");
+    when(req.getContentType()).thenReturn("application/json");
+    when(req.getReader()).thenReturn(new BufferedReader(new StringReader(
+        "{\"token\":\"good-token\"}")));
+
+    Account account = mock(Account.class);
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+         MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
+      dalMock.when(() -> EtendoGoJwtDalHelper.findAccountByVerifyTokenHash(
+          anyString(), any(Date.class))).thenReturn(account);
+      dalMock.when(() -> EtendoGoJwtDalHelper.isEmailVerified(account)).thenReturn(false);
+
+      servlet.doPost(req, resp.response);
+
+      dalMock.verify(() -> EtendoGoJwtDalHelper.consumeEmailVerification(
+          eq(account), any(Date.class)));
+    }
+
+    assertEquals(200, resp.status);
+    JSONObject body = new JSONObject(resp.body());
+    assertEquals("success", body.getString("status"));
+    assertTrue(body.getBoolean("emailVerified"));
+  }
+
+  @Test
+  public void verifyEmailIsIdempotentOnAnAlreadyConfirmedAccount() throws Exception {
+    // Re-clicking the link (or a mail client prefetching it) must not answer with an error.
+    ResponseCapture resp = mockResponse();
+    HttpServletRequest req = mockRequest("/verify-email");
+    when(req.getContentType()).thenReturn("application/json");
+    when(req.getReader()).thenReturn(new BufferedReader(new StringReader(
+        "{\"token\":\"good-token\"}")));
+
+    Account account = mock(Account.class);
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+         MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
+      dalMock.when(() -> EtendoGoJwtDalHelper.findAccountByVerifyTokenHash(
+          anyString(), any(Date.class))).thenReturn(account);
+      dalMock.when(() -> EtendoGoJwtDalHelper.isEmailVerified(account)).thenReturn(true);
+
+      servlet.doPost(req, resp.response);
+
+      dalMock.verify(() -> EtendoGoJwtDalHelper.consumeEmailVerification(
+          any(Account.class), any(Date.class)), never());
+    }
+
+    assertEquals(200, resp.status);
+  }
+
+  @Test
+  public void verifyEmailRejectsAnEmptyToken() throws Exception {
+    ResponseCapture resp = mockResponse();
+    HttpServletRequest req = mockRequest("/verify-email");
+    when(req.getContentType()).thenReturn("application/json");
+    when(req.getReader()).thenReturn(new BufferedReader(new StringReader("{\"token\":\"  \"}")));
+
+    servlet.doPost(req, resp.response);
+
+    assertEquals(400, resp.status);
+  }
+
+  // ===================== POST /onboarding — email gate (ETP-4798) =====================
+
+  @Test
+  public void onboardingIsRefusedWhileTheEmailConfirmationIsPending() throws Exception {
+    ResponseCapture resp = mockResponse();
+    HttpServletRequest req = authenticatedRequest("/onboarding", "session-token");
+
+    Account account = mock(Account.class);
+    when(account.getEmail()).thenReturn("owner@example.test");
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+         MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
+      dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByBearerToken("session-token"))
+          .thenReturn(account);
+      dalMock.when(() -> EtendoGoJwtDalHelper.isEmailVerificationPending(account)).thenReturn(true);
+
+      servlet.doPost(req, resp.response);
+    }
+
+    // 403 with a plain JSON envelope, refused before the NDJSON stream opens so no half-created
+    // tenant is left behind.
+    assertEquals(403, resp.status);
+    JSONObject error = new JSONObject(resp.body()).getJSONObject("error");
+    assertEquals("EMAIL_NOT_VERIFIED", error.getString("code"));
+  }
+
+  @Test
+  public void onboardingIsNotRefusedForAnAccountWithNothingPending() throws Exception {
+    // The pre-ETP-4798 account: unverified, but nothing was ever issued, so the gate must not fire.
+    // The request goes on to fail later on its missing body — what matters here is that it is NOT a
+    // 403 from the email gate.
+    ResponseCapture resp = mockResponse();
+    HttpServletRequest req = authenticatedRequest("/onboarding", "session-token");
+    when(req.getContentType()).thenReturn("application/json");
+    when(req.getReader()).thenReturn(new BufferedReader(new StringReader("{}")));
+
+    Account account = mock(Account.class);
+    when(account.getEmail()).thenReturn("legacy@example.test");
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+         MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
+      dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByBearerToken("session-token"))
+          .thenReturn(account);
+      dalMock.when(() -> EtendoGoJwtDalHelper.isEmailVerificationPending(account))
+          .thenReturn(false);
+
+      servlet.doPost(req, resp.response);
+    }
+
+    assertNotEquals(403, resp.status);
   }
 
   // ===================== POST /change-password =====================

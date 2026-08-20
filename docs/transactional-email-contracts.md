@@ -173,13 +173,48 @@ Auth transactional emails are created server-side by the `/sws/go/*` endpoints. 
 
 | Endpoint | Transactional email behavior |
 |----------|------------------------------|
-| `POST /sws/go/register` | Creates the local account, commits it, then sends `new-account` best-effort with the selected UI language when provided |
+| `POST /sws/go/register` | Creates the local account, commits it, issues a hashed 24h email-verification token, then sends `new-account` best-effort with the confirmation link as its call to action and the selected UI language when provided (ETP-4798) |
 | `POST /sws/go/password-reset/request` | Returns neutral success for known, unknown, disabled, throttled, or provider-failed cases; known active accounts receive a hashed expiring reset token only when the best-effort `reset-password` email is accepted for delivery |
 | `POST /sws/go/password-reset/confirm` | Accepts one valid unexpired token once, changes the password, clears/consumes reset token fields, and clears the platform session token |
 | `POST /sws/go/change-password` | Requires a valid platform bearer token and current password, changes the password, rotates the platform token, and sends `password-changed` best-effort |
-| `POST /sws/go/onboarding` | Commits onboarding first, then sends `environment-ready` best-effort |
+| `POST /sws/go/verify-email` | Unauthenticated — the mailed token is the credential. Accepts one valid unexpired token, stamps `ETGO_Account.Email_Verified`, and is idempotent: the token hash is intentionally left in place so a re-clicked link answers 200 instead of "invalid" (ETP-4798) |
+| `POST /sws/go/verify-email/resend` | Requires a platform bearer token. Re-issues the token and sends `verify-email` best-effort, but only when a confirmation is genuinely pending. Answers a neutral 200 in every one of those cases so the response carries no account state; a genuine server failure is still a 500, since the endpoint is authenticated (ETP-4798) |
+| `POST /sws/go/onboarding` | Refused with `403 EMAIL_NOT_VERIFIED` before the NDJSON stream opens when the account still owes an email confirmation (ETP-4798), then paywalled (ETP-4686). Otherwise commits onboarding first, then sends `environment-ready` best-effort |
 
 Email delivery failure is audited and must not roll back registration, onboarding completion, or a successful password change. Password reset request responses stay neutral even when delivery fails.
+
+### Email ownership confirmation and its fail-open rule (ETP-4798)
+
+`/sws/go/register` still returns a usable session token — the account exists and can call `/me`,
+`/verify-email/resend` and `/logout`. What an unconfirmed address blocks is entering onboarding at
+all: the web client lands on a confirm-your-email wall instead of step 1, and the backend
+independently refuses the one irreversible, costly step (creating the tenant) with
+`403 EMAIL_NOT_VERIFIED`. The wall is UX; the 403 is the gate, and it stands on its own for a
+modified client or a direct request.
+
+Verification state lives in three `ETGO_ACCOUNT` columns and is read through two **independent**
+predicates, never one derived from the other:
+
+| Predicate | Meaning | Gated? |
+|-----------|---------|--------|
+| `Email_Verified is not null` | the holder proved control of the address | no |
+| `Email_Verified is null and Verify_Token_Hash is not null` | a confirmation was issued and is still owed | **yes** |
+| both null | account predates ETP-4798, or its confirmation mail could not be sent | no |
+
+That third row is the whole reason the gate keys off "a token was issued" rather than "not
+verified". It means no backfill migration was needed and no existing user was locked out by the
+deploy.
+
+The flow **fails open by design**. When no verification link can be built — `etendo.go.app.baseUrl`
+unset — or the mail is not accepted for delivery, the token is *not* left behind, so the account
+reads as "nothing pending" and onboarding proceeds. The alternative is worse than the gap it
+closes: a misconfigured provider or an unset app base URL would silently stop every new signup from
+creating an environment, with no mail to click and no way to tell from the user's side. This mirrors
+what the password-reset flow already does when its mail cannot be delivered.
+
+SSO accounts are born confirmed, and signing in through the identity provider clears any
+confirmation still pending on that address — the assertion is stronger proof of ownership than a
+link we mailed.
 
 ## Built-In v1 Contracts
 
@@ -187,6 +222,7 @@ Email delivery failure is audited and must not roll back registration, onboardin
 |----------|-------------------|------------------|-------------------------|
 | `reset-password` | `reset-password` | `ETGO_Account.email` resolved by `accountId` | `version`, `accountId`, `link` |
 | `new-account` | `custom` | `ETGO_Account.email` resolved by `accountId` | `version`, `accountId`, `link`; optional `language` |
+| `verify-email` | `custom` | `ETGO_Account.email` resolved by `accountId` | `version`, `accountId`, `link`, `recordId` (the verification token hash); optional `language` |
 | `environment-ready` | `custom` | `ETGO_Account.email` resolved by `accountId` | `version`, `accountId`, `recordId` |
 | `password-changed` | `custom` | `ETGO_Account.email` resolved by `accountId` | `version`, `accountId`, `recordId`; optional `date` |
 | `login-alert` | `login-alert` | `AD_User.email` resolved by `userId` | `version`, `userId`; optional `loginEventId`, `ip`, `date` |

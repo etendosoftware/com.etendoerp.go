@@ -37,6 +37,10 @@ public final class CoreEmailContractProvider implements EmailContractProvider {
   private static final int RESET_PASSWORD_RECIPIENT_THROTTLE_LIMIT = 3;
   private static final int NEW_ACCOUNT_RECIPIENT_THROTTLE_LIMIT = 2;
   private static final int ENVIRONMENT_READY_RECIPIENT_THROTTLE_LIMIT = 2;
+  // ETP-4798: one more than reset-password. Asking for the confirmation link again is a normal
+  // thing to do (the first mail lands in spam, the user mistypes nothing but waits), and the
+  // account is blocked from creating its environment until it arrives.
+  private static final int VERIFY_EMAIL_RECIPIENT_THROTTLE_LIMIT = 4;
   private static final int ACCOUNT_LINK_THROTTLE_WINDOW_SECONDS = 900;
   private static final String DASHBOARD_LINK_PATH = "dashboard";
   private static final String LANGUAGE_SPANISH = "es_ES";
@@ -70,6 +74,9 @@ public final class CoreEmailContractProvider implements EmailContractProvider {
         new AccountLinkEmailContract("environment-ready", PROVIDER_TEMPLATE_CUSTOM, contractResolver,
             ENVIRONMENT_READY_RECIPIENT_THROTTLE_LIMIT, ACCOUNT_LINK_THROTTLE_WINDOW_SECONDS,
             DASHBOARD_LINK_PATH, CoreEmailContractProvider::environmentReadyContent),
+        new AccountLinkEmailContract("verify-email", PROVIDER_TEMPLATE_CUSTOM, contractResolver,
+            VERIFY_EMAIL_RECIPIENT_THROTTLE_LIMIT, ACCOUNT_LINK_THROTTLE_WINDOW_SECONDS, null,
+            CoreEmailContractProvider::verifyEmailContent),
         new AccountNoticeEmailContract("password-changed", PROVIDER_TEMPLATE_CUSTOM,
             contractResolver, CoreEmailContractProvider::passwordChangedContent),
         new LoginAlertEmailContract(contractResolver));
@@ -80,12 +87,12 @@ public final class CoreEmailContractProvider implements EmailContractProvider {
     if (LANGUAGE_SPANISH.equals(language)) {
       data.put(FIELD_SUBJECT, "Bienvenido a Etendo Go");
       data.put(FIELD_BODY, "Tu cuenta de Etendo Go fue creada correctamente. "
-          + "Abre este enlace para continuar: " + link);
+          + "Abre este enlace para confirmar tu correo y continuar: " + link);
       return;
     }
     data.put(FIELD_SUBJECT, "Welcome to Etendo Go");
     data.put(FIELD_BODY, "Your Etendo Go account was created successfully. "
-        + "Open this link to continue: " + link);
+        + "Open this link to confirm your email address and continue: " + link);
   }
 
   private static void environmentReadyContent(org.codehaus.jettison.json.JSONObject data,
@@ -99,6 +106,19 @@ public final class CoreEmailContractProvider implements EmailContractProvider {
     data.put(FIELD_SUBJECT, "Your Etendo Go environment is ready");
     data.put(FIELD_BODY, "Your Etendo Go environment is ready. "
         + "Open this link to access your dashboard: " + link);
+  }
+
+  private static void verifyEmailContent(org.codehaus.jettison.json.JSONObject data,
+      String language, String link) throws org.codehaus.jettison.json.JSONException {
+    if (LANGUAGE_SPANISH.equals(language)) {
+      data.put(FIELD_SUBJECT, "Confirma tu correo de Etendo Go");
+      data.put(FIELD_BODY, "Para terminar de configurar tu entorno de Etendo Go necesitamos "
+          + "confirmar que este correo es tuyo. Abre este enlace: " + link);
+      return;
+    }
+    data.put(FIELD_SUBJECT, "Confirm your Etendo Go email address");
+    data.put(FIELD_BODY, "To finish setting up your Etendo Go environment we need to confirm this "
+        + "email address belongs to you. Open this link: " + link);
   }
 
   private static void passwordChangedContent(org.codehaus.jettison.json.JSONObject data,
