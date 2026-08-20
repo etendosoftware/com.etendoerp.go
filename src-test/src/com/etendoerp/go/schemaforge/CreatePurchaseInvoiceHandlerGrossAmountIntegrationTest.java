@@ -97,7 +97,7 @@ public class CreatePurchaseInvoiceHandlerGrossAmountIntegrationTest extends OBBa
   public void receiptInvoiceLinesReadZeroGrossAmountWhenNeverComputed() {
     Invoice invoice = createReceiptInvoiceWithNegativeLine();
 
-    reloadFromDb(invoice.getId());
+    reloadFromDb();
     Invoice reloaded = OBDal.getInstance().get(Invoice.class, invoice.getId());
 
     for (InvoiceLine il : reloaded.getInvoiceLineList()) {
@@ -118,7 +118,7 @@ public class CreatePurchaseInvoiceHandlerGrossAmountIntegrationTest extends OBBa
     new CreatePurchaseInvoiceHandler().getSupport().ensureLineGrossAmounts(invoice);
     OBDal.getInstance().flush();
 
-    reloadFromDb(invoice.getId());
+    reloadFromDb();
     Invoice reloaded = OBDal.getInstance().get(Invoice.class, invoice.getId());
 
     boolean negativeLineFound = false;
@@ -170,7 +170,7 @@ public class CreatePurchaseInvoiceHandlerGrossAmountIntegrationTest extends OBBa
     return PurchaseOrderUtils.createPurchaseInvoice(receipt);
   }
 
-  private void reloadFromDb(String invoiceId) {
+  private void reloadFromDb() {
     OBDal.getInstance().getSession().clear();
   }
 }
