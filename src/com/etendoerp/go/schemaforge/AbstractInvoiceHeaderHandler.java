@@ -84,6 +84,9 @@ public abstract class AbstractInvoiceHeaderHandler {
   private static final String FIELD_VALUE = "value";
   private static final String FIELD_PROCESSED = "processed";
   private static final String FIELD_TOTAL_DISCOUNT_PCT = "etgoTotalDiscount";
+  private static final String FIELD_AEATSII_IS_AUTHORIZATION = "aeatsiiIsauthorization";
+  private static final String FIELD_AEATSII_AUTHORIZATION_NO = "aeatsiiAuthorizationno";
+  private static final String FIELD_ETVFAC_INV_TYPE = "etvfacInvType";
   protected static final String FIELD_GRAND_TOTAL_AMOUNT = "grandTotalAmount";
   protected static final String FIELD_OUTSTANDING_AMOUNT = "outstandingAmount";
 
@@ -382,11 +385,11 @@ public abstract class AbstractInvoiceHeaderHandler {
       return null;
     }
     JSONObject body = context.getRequestBody();
-    if (body == null || !body.has("aeatsiiIsauthorization")) {
+    if (body == null || !body.has(FIELD_AEATSII_IS_AUTHORIZATION)) {
       return null;
     }
     try {
-      Object rawValue = body.opt("aeatsiiIsauthorization");
+      Object rawValue = body.opt(FIELD_AEATSII_IS_AUTHORIZATION);
       // The field is a Boolean in the Invoice entity; the JSON body can carry true/false or "Y"/"N"
       // depending on the frontend serialization.
       boolean isAuthorization = Boolean.TRUE.equals(rawValue)
@@ -486,12 +489,12 @@ public abstract class AbstractInvoiceHeaderHandler {
       if (responseWrapper != null) {
         JSONArray data = responseWrapper.optJSONArray("data");
         if (data != null && data.length() > 0) {
-          data.getJSONObject(0).put("aeatsiiAuthorizationno", pendingSiiAuthorizationno);
+          data.getJSONObject(0).put(FIELD_AEATSII_AUTHORIZATION_NO, pendingSiiAuthorizationno);
           return NeoResponse.ok(body);
         }
       }
       // Flat format fallback: the body itself is the record.
-      body.put("aeatsiiAuthorizationno", pendingSiiAuthorizationno);
+      body.put(FIELD_AEATSII_AUTHORIZATION_NO, pendingSiiAuthorizationno);
       return NeoResponse.ok(body);
     } catch (Exception e) {
       log.warn("[ETP-4783] injectAuthorizationnoIntoSaveResponse failed (non-fatal): {}", e.getMessage());
@@ -1157,11 +1160,11 @@ public abstract class AbstractInvoiceHeaderHandler {
    */
   private static void applySiiAuthorizationCallout(String triggerField, JSONObject requestBody,
       JSONObject updates, JSONObject body) {
-    if (!"aeatsiiIsauthorization".equals(triggerField)) {
+    if (!FIELD_AEATSII_IS_AUTHORIZATION.equals(triggerField)) {
       return;
     }
     try {
-      Object rawValue = requestBody != null ? requestBody.opt("value") : null;
+      Object rawValue = requestBody != null ? requestBody.opt(FIELD_VALUE) : null;
       String value = rawValue != null ? rawValue.toString() : "";
       boolean isAuthorization = "Y".equalsIgnoreCase(value) || "true".equalsIgnoreCase(value);
 
@@ -1186,12 +1189,12 @@ public abstract class AbstractInvoiceHeaderHandler {
         }
         // Updates entries must be { "value": "..." } objects — see applyVerifactuInvTypeFromDocType.
         JSONObject authUpdate = new JSONObject();
-        authUpdate.put("value", config.getAuthorizationno());
-        updates.put("aeatsiiAuthorizationno", authUpdate);
+        authUpdate.put(FIELD_VALUE, config.getAuthorizationno());
+        updates.put(FIELD_AEATSII_AUTHORIZATION_NO, authUpdate);
       } else {
         JSONObject authClear = new JSONObject();
-        authClear.put("value", "");
-        updates.put("aeatsiiAuthorizationno", authClear);
+        authClear.put(FIELD_VALUE, "");
+        updates.put(FIELD_AEATSII_AUTHORIZATION_NO, authClear);
       }
     } catch (Exception e) {
       log.warn("[ETP-4783] applySiiAuthorizationCallout failed (non-fatal): {}", e.getMessage());
@@ -1245,14 +1248,14 @@ public abstract class AbstractInvoiceHeaderHandler {
             String invType = rs.getString(2);
             if (desc != null && !desc.trim().isEmpty()) {
               JSONObject descUpdate = new JSONObject();
-              descUpdate.put("value", desc.trim());
+              descUpdate.put(FIELD_VALUE, desc.trim());
               updates.put("etvfacVerifacDesc", descUpdate);
             }
             // Also realign etvfacInvType if the cascade put a wrong value there
-            if (invType != null && !invType.trim().isEmpty() && updates.has("etvfacInvType")) {
+            if (invType != null && !invType.trim().isEmpty() && updates.has(FIELD_ETVFAC_INV_TYPE)) {
               JSONObject invUpdate = new JSONObject();
-              invUpdate.put("value", invType.trim());
-              updates.put("etvfacInvType", invUpdate);
+              invUpdate.put(FIELD_VALUE, invType.trim());
+              updates.put(FIELD_ETVFAC_INV_TYPE, invUpdate);
             }
           }
         }
@@ -1289,7 +1292,7 @@ public abstract class AbstractInvoiceHeaderHandler {
       return;
     }
     try {
-      Object rawValue = requestBody != null ? requestBody.opt("value") : null;
+      Object rawValue = requestBody != null ? requestBody.opt(FIELD_VALUE) : null;
       String docTypeId = rawValue != null ? rawValue.toString().trim() : "";
       if (docTypeId.isEmpty()) {
         return;
@@ -1306,8 +1309,8 @@ public abstract class AbstractInvoiceHeaderHandler {
               // the frontend's applyCalloutFieldUpdates reads entry.value; a raw string
               // would give entry.value === undefined and silently skip the update.
               JSONObject fieldUpdate = new JSONObject();
-              fieldUpdate.put("value", invType.trim());
-              updates.put("etvfacInvType", fieldUpdate);
+              fieldUpdate.put(FIELD_VALUE, invType.trim());
+              updates.put(FIELD_ETVFAC_INV_TYPE, fieldUpdate);
               log.debug("[ETP-4783] applyVerifactuInvTypeFromDocType: injected etvfacInvType={} for docType={}",
                   invType.trim(), docTypeId);
             }
@@ -1353,7 +1356,7 @@ public abstract class AbstractInvoiceHeaderHandler {
       return;
     }
     try {
-      Object rawValue = requestBody != null ? requestBody.opt("value") : null;
+      Object rawValue = requestBody != null ? requestBody.opt(FIELD_VALUE) : null;
       String docTypeId = rawValue != null ? rawValue.toString().trim() : "";
       if (docTypeId.isEmpty()) {
         return;
@@ -1370,13 +1373,13 @@ public abstract class AbstractInvoiceHeaderHandler {
         }
       }
       JSONObject isReverseUpdate = new JSONObject();
-      isReverseUpdate.put("value", isRectificative ? "Y" : "N");
+      isReverseUpdate.put(FIELD_VALUE, isRectificative ? "Y" : "N");
       updates.put("tbaiIsreverseinvoice", isReverseUpdate);
 
       JSONObject reverseTypeUpdate = new JSONObject();
       // "I" = "Por diferencias" — the TicketBAI default reverse type (AD_REF_LIST VALUE for
       // reference 6E28A33291454412B2129FDC072B6FD9). Cleared when not rectificative.
-      reverseTypeUpdate.put("value", isRectificative ? "I" : "");
+      reverseTypeUpdate.put(FIELD_VALUE, isRectificative ? "I" : "");
       updates.put("tbaiReverseinvoicetype", reverseTypeUpdate);
 
       log.debug("[ETP-4783] applyRectificativeFieldsFromDocType: docType={} isRectificative={}",
