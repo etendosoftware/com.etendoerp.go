@@ -77,6 +77,7 @@ import com.etendoerp.go.onboarding.OnboardingBankConnectionSyncService;
 import com.etendoerp.go.onboarding.OnboardingSequenceGeneratorService;
 import com.etendoerp.go.schemaforge.data.Account;
 import com.etendoerp.go.schemaforge.email.EmailContractCommandSupport;
+import com.etendoerp.go.schemaforge.util.OwnerSupport;
 import com.smf.securewebservices.utils.SecureWebServicesUtils;
 
 /**
@@ -1801,7 +1802,37 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     }
     data.starOrgId = EtendoGoJwtSupport.findStarOrgId(clientId);
     OBContext.setOBContext(data.adminUserId, data.adminRoleId, clientId, data.starOrgId);
+    markTenantOwnerBestEffort(clientId, data.adminUserId);
     return data;
+  }
+
+  /**
+   * ETP-4830 — flags {@code adminUserId} as {@code clientId}'s owner (see {@link
+   * OwnerSupport#markAsOwnerIfNoneExists}), the very first time this resolves for a brand-new
+   * client: at this exact point in the provisioning chain (right after {@link #createClient}
+   * created the client's real, single {@code AD_User} and BEFORE {@link
+   * #importOnboardingDataset} brings in the GOClient sample dataset's own {@code AD_User} rows —
+   * see {@code referencedata/sampledata/GOClient/AD_USER.xml}), {@code adminUserId} is
+   * unambiguously the one true founder, never a bundled sample/demo user. {@link
+   * OwnerSupport#markAsOwnerIfNoneExists} is itself idempotent (no-op once an owner already
+   * exists for the client), so calling this on every resumed/retried onboarding pass — this
+   * method runs on both the create AND the resume path — is safe and never re-assigns or moves
+   * ownership.
+   *
+   * <p>Best-effort by design (ETP-4830 scope decision): a failure here must never fail the
+   * onboarding chain — every owner-protection check downstream ({@code
+   * UserRoleAssignmentHandler}/{@code UserRoleCompositionService}) already treats a
+   * false/unset {@code is_owner} as "guard never triggers", so a tenant that failed to get an
+   * owner marked here simply ships with no owner-lock yet, exactly like every pre-existing
+   * tenant from before this column existed.</p>
+   */
+  private void markTenantOwnerBestEffort(String clientId, String adminUserId) {
+    try {
+      OwnerSupport.markAsOwnerIfNoneExists(clientId, adminUserId);
+    } catch (RuntimeException e) {
+      log.warn("markTenantOwnerBestEffort: failed to flag owner for client {} user {}: {}",
+          clientId, adminUserId, e.getMessage(), e);
+    }
   }
 
   private Boolean ensureOrganization(PrintWriter writer, String clientName,

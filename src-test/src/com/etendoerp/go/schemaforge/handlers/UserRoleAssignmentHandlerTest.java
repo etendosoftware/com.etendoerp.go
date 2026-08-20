@@ -57,6 +57,7 @@ import com.etendoerp.go.rest.EtendoGoJwtSupport;
 import com.etendoerp.go.schemaforge.NeoContext;
 import com.etendoerp.go.schemaforge.NeoEndpointType;
 import com.etendoerp.go.schemaforge.NeoResponse;
+import com.etendoerp.go.schemaforge.util.OwnerSupport;
 
 /**
  * Unit tests for {@link UserRoleAssignmentHandler} — two independent post-hook concerns on the
@@ -246,8 +247,10 @@ public class UserRoleAssignmentHandlerTest {
     User user = mock(User.class);
     when(user.getEmail()).thenReturn("original@example.com");
 
-    try (MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
+    try (MockedStatic<OwnerSupport> ownerMock = mockStatic(OwnerSupport.class);
+        MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
         MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      ownerMock.when(() -> OwnerSupport.isOwner(any())).thenReturn(false);
       obCtxMock.when(() -> OBContext.setAdminMode(true)).then(inv -> null);
       obCtxMock.when(OBContext::restorePreviousMode).then(inv -> null);
 
@@ -278,8 +281,10 @@ public class UserRoleAssignmentHandlerTest {
     User user = mock(User.class);
     when(user.getEmail()).thenReturn("same@example.com");
 
-    try (MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
+    try (MockedStatic<OwnerSupport> ownerMock = mockStatic(OwnerSupport.class);
+        MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
         MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      ownerMock.when(() -> OwnerSupport.isOwner(any())).thenReturn(false);
       obCtxMock.when(() -> OBContext.setAdminMode(true)).then(inv -> null);
       obCtxMock.when(OBContext::restorePreviousMode).then(inv -> null);
 
@@ -323,7 +328,12 @@ public class UserRoleAssignmentHandlerTest {
         .requestBody(requestBody)
         .build();
 
-    try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+    try (MockedStatic<OwnerSupport> ownerMock = mockStatic(OwnerSupport.class);
+        MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      obCtxMock.when(() -> OBContext.setAdminMode(true)).then(inv -> null);
+      obCtxMock.when(OBContext::restorePreviousMode).then(inv -> null);
+      ownerMock.when(() -> OwnerSupport.isOwner(any())).thenReturn(false);
       assertNull(handler.handle(ctx));
       obDalMock.verify(OBDal::getInstance, never());
     }
@@ -341,8 +351,10 @@ public class UserRoleAssignmentHandlerTest {
         .requestBody(requestBody)
         .build();
 
-    try (MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
+    try (MockedStatic<OwnerSupport> ownerMock = mockStatic(OwnerSupport.class);
+        MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
         MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      ownerMock.when(() -> OwnerSupport.isOwner(any())).thenReturn(false);
       obCtxMock.when(() -> OBContext.setAdminMode(true)).then(inv -> null);
       obCtxMock.when(OBContext::restorePreviousMode).then(inv -> null);
 
@@ -380,7 +392,13 @@ public class UserRoleAssignmentHandlerTest {
         .build();
 
     // The self-check short-circuits before any OBDal access at all.
-    try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+    try (MockedStatic<OwnerSupport> ownerMock = mockStatic(OwnerSupport.class);
+        MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      obCtxMock.when(() -> OBContext.setAdminMode(true)).then(inv -> null);
+      obCtxMock.when(OBContext::restorePreviousMode).then(inv -> null);
+      ownerMock.when(() -> OwnerSupport.isOwner(any())).thenReturn(false);
+
       NeoResponse response = handler.handle(ctx);
 
       assertEquals(400, response.getHttpStatus());
@@ -420,8 +438,10 @@ public class UserRoleAssignmentHandlerTest {
     when(targetAdminRowUser.getId()).thenReturn(targetId);
     when(targetAdminRow.getUserContact()).thenReturn(targetAdminRowUser);
 
-    try (MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
+    try (MockedStatic<OwnerSupport> ownerMock = mockStatic(OwnerSupport.class);
+        MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
         MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      ownerMock.when(() -> OwnerSupport.isOwner(any())).thenReturn(false);
       obCtxMock.when(() -> OBContext.setAdminMode(true)).then(inv -> null);
       obCtxMock.when(OBContext::restorePreviousMode).then(inv -> null);
 
@@ -480,8 +500,10 @@ public class UserRoleAssignmentHandlerTest {
     when(otherAdminRowUser.getId()).thenReturn(otherAdminId);
     when(otherAdminRow.getUserContact()).thenReturn(otherAdminRowUser);
 
-    try (MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
+    try (MockedStatic<OwnerSupport> ownerMock = mockStatic(OwnerSupport.class);
+        MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
         MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      ownerMock.when(() -> OwnerSupport.isOwner(any())).thenReturn(false);
       obCtxMock.when(() -> OBContext.setAdminMode(true)).then(inv -> null);
       obCtxMock.when(OBContext::restorePreviousMode).then(inv -> null);
 
@@ -531,8 +553,10 @@ public class UserRoleAssignmentHandlerTest {
     when(otherAdminRowUser.getId()).thenReturn(otherAdminId);
     when(otherAdminRow.getUserContact()).thenReturn(otherAdminRowUser);
 
-    try (MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
+    try (MockedStatic<OwnerSupport> ownerMock = mockStatic(OwnerSupport.class);
+        MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
         MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      ownerMock.when(() -> OwnerSupport.isOwner(any())).thenReturn(false);
       obCtxMock.when(() -> OBContext.setAdminMode(true)).then(inv -> null);
       obCtxMock.when(OBContext::restorePreviousMode).then(inv -> null);
 
@@ -561,7 +585,12 @@ public class UserRoleAssignmentHandlerTest {
         .requestBody(requestBody)
         .build();
 
-    try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+    try (MockedStatic<OwnerSupport> ownerMock = mockStatic(OwnerSupport.class);
+        MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      obCtxMock.when(() -> OBContext.setAdminMode(true)).then(inv -> null);
+      obCtxMock.when(OBContext::restorePreviousMode).then(inv -> null);
+      ownerMock.when(() -> OwnerSupport.isOwner(any())).thenReturn(false);
       assertNull(handler.handle(ctx));
       obDalMock.verify(OBDal::getInstance, never());
     }
@@ -589,8 +618,10 @@ public class UserRoleAssignmentHandlerTest {
         .obContext(requestObContext)
         .build();
 
-    try (MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
+    try (MockedStatic<OwnerSupport> ownerMock = mockStatic(OwnerSupport.class);
+        MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
         MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      ownerMock.when(() -> OwnerSupport.isOwner(any())).thenReturn(false);
       obCtxMock.when(() -> OBContext.setAdminMode(true)).then(inv -> null);
       obCtxMock.when(OBContext::restorePreviousMode).then(inv -> null);
 
@@ -602,6 +633,167 @@ public class UserRoleAssignmentHandlerTest {
 
       // Fail CLOSED: an unexpected error must surface as a 500, never silently allow a
       // lockout-risking deactivation through.
+      assertEquals(500, response.getHttpStatus());
+    }
+  }
+
+  // ─── handle(): PUT/PATCH owner-protection guard (ETP-4830 "owner" concept) ───
+
+  private NeoContext ownerGuardContext(String httpMethod, String ownerId, String actingUserId,
+      JSONObject requestBody) {
+    OBContext requestObContext = null;
+    if (actingUserId != null) {
+      User actingUser = mock(User.class);
+      when(actingUser.getId()).thenReturn(actingUserId);
+      requestObContext = mock(OBContext.class);
+      when(requestObContext.getUser()).thenReturn(actingUser);
+    }
+    return NeoContext.builder()
+        .endpointType(NeoEndpointType.CRUD)
+        .httpMethod(httpMethod)
+        .recordId(ownerId)
+        .requestBody(requestBody)
+        .obContext(requestObContext)
+        .build();
+  }
+
+  private String ownerGuardMessage(NeoResponse response) throws Exception {
+    return response.getBody().getJSONObject("error").getString("message");
+  }
+
+  @Test
+  public void handleBlanketRejectsNonOwnerPatchOnOwnerRecord_NameField() throws Exception {
+    UserRoleAssignmentHandler handler = new UserRoleAssignmentHandler();
+    String ownerId = "owner-001";
+    String actingId = "other-admin-001";
+    JSONObject requestBody = new JSONObject();
+    requestBody.put("name", "Renamed by someone else");
+    NeoContext ctx = ownerGuardContext("PATCH", ownerId, actingId, requestBody);
+
+    try (MockedStatic<OwnerSupport> ownerMock = mockStatic(OwnerSupport.class);
+        MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class)) {
+      obCtxMock.when(() -> OBContext.setAdminMode(true)).then(inv -> null);
+      obCtxMock.when(OBContext::restorePreviousMode).then(inv -> null);
+      ownerMock.when(() -> OwnerSupport.isOwner(ownerId)).thenReturn(true);
+
+      NeoResponse response = handler.handle(ctx);
+
+      assertEquals(400, response.getHttpStatus());
+      assertTrue(ownerGuardMessage(response).toLowerCase().contains("owner"));
+    }
+  }
+
+  @Test
+  public void handleBlanketRejectsNonOwnerPatchOnOwnerRecord_EmailField() throws Exception {
+    // Owner protection runs FIRST — the rejection must be the owner guard's own message, not the
+    // (also 400) email-immutability guard's, and OBDal/email-lookup must never even be reached.
+    UserRoleAssignmentHandler handler = new UserRoleAssignmentHandler();
+    String ownerId = "owner-002";
+    String actingId = "other-admin-002";
+    JSONObject requestBody = new JSONObject();
+    requestBody.put("email", "changed-by-someone-else@example.com");
+    NeoContext ctx = ownerGuardContext("PATCH", ownerId, actingId, requestBody);
+
+    try (MockedStatic<OwnerSupport> ownerMock = mockStatic(OwnerSupport.class);
+        MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      obCtxMock.when(() -> OBContext.setAdminMode(true)).then(inv -> null);
+      obCtxMock.when(OBContext::restorePreviousMode).then(inv -> null);
+      ownerMock.when(() -> OwnerSupport.isOwner(ownerId)).thenReturn(true);
+
+      NeoResponse response = handler.handle(ctx);
+
+      assertEquals(400, response.getHttpStatus());
+      assertTrue(ownerGuardMessage(response).toLowerCase().contains("owner"));
+      obDalMock.verify(OBDal::getInstance, never());
+    }
+  }
+
+  @Test
+  public void handleBlanketRejectsNonOwnerPatchOnOwnerRecord_ActiveField() throws Exception {
+    UserRoleAssignmentHandler handler = new UserRoleAssignmentHandler();
+    String ownerId = "owner-003";
+    String actingId = "other-admin-003";
+    JSONObject requestBody = new JSONObject();
+    // Not even a deactivation attempt — the owner guard is blanket, it does not care which
+    // field(s) the request touches.
+    requestBody.put("active", true);
+    NeoContext ctx = ownerGuardContext("PUT", ownerId, actingId, requestBody);
+
+    try (MockedStatic<OwnerSupport> ownerMock = mockStatic(OwnerSupport.class);
+        MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      obCtxMock.when(() -> OBContext.setAdminMode(true)).then(inv -> null);
+      obCtxMock.when(OBContext::restorePreviousMode).then(inv -> null);
+      ownerMock.when(() -> OwnerSupport.isOwner(ownerId)).thenReturn(true);
+
+      NeoResponse response = handler.handle(ctx);
+
+      assertEquals(400, response.getHttpStatus());
+      assertTrue(ownerGuardMessage(response).toLowerCase().contains("owner"));
+      obDalMock.verify(OBDal::getInstance, never());
+    }
+  }
+
+  @Test
+  public void handleAllowsOwnerEditingTheirOwnRecord() throws Exception {
+    // The owner editing their OWN record must fall through to the other guards unchanged — this
+    // request touches only "name", so once the owner guard no-ops, nothing else short-circuits it.
+    UserRoleAssignmentHandler handler = new UserRoleAssignmentHandler();
+    String ownerId = "owner-004";
+    JSONObject requestBody = new JSONObject();
+    requestBody.put("name", "Updated by the owner themselves");
+    NeoContext ctx = ownerGuardContext("PATCH", ownerId, ownerId, requestBody);
+
+    try (MockedStatic<OwnerSupport> ownerMock = mockStatic(OwnerSupport.class);
+        MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class)) {
+      obCtxMock.when(() -> OBContext.setAdminMode(true)).then(inv -> null);
+      obCtxMock.when(OBContext::restorePreviousMode).then(inv -> null);
+      ownerMock.when(() -> OwnerSupport.isOwner(ownerId)).thenReturn(true);
+
+      assertNull(handler.handle(ctx));
+    }
+  }
+
+  @Test
+  public void handleOwnerGuardIsNoOpWhenTargetIsNotFlaggedAsOwner() throws Exception {
+    // Baseline (every pre-existing user until the backfill data-fix runs): is_owner=false/unset
+    // means the guard never triggers at all, regardless of who the requester is.
+    UserRoleAssignmentHandler handler = new UserRoleAssignmentHandler();
+    String targetId = "regular-user-999";
+    String actingId = "some-admin-999";
+    JSONObject requestBody = new JSONObject();
+    requestBody.put("name", "Anyone can rename a non-owner");
+    NeoContext ctx = ownerGuardContext("PATCH", targetId, actingId, requestBody);
+
+    try (MockedStatic<OwnerSupport> ownerMock = mockStatic(OwnerSupport.class);
+        MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class)) {
+      obCtxMock.when(() -> OBContext.setAdminMode(true)).then(inv -> null);
+      obCtxMock.when(OBContext::restorePreviousMode).then(inv -> null);
+      ownerMock.when(() -> OwnerSupport.isOwner(targetId)).thenReturn(false);
+
+      assertNull(handler.handle(ctx));
+    }
+  }
+
+  @Test
+  public void handleOwnerGuardFailsClosedWhenIsOwnerLookupThrows() throws Exception {
+    UserRoleAssignmentHandler handler = new UserRoleAssignmentHandler();
+    String ownerId = "owner-005";
+    JSONObject requestBody = new JSONObject();
+    requestBody.put("name", "Irrelevant");
+    NeoContext ctx = ownerGuardContext("PATCH", ownerId, "other-admin-005", requestBody);
+
+    try (MockedStatic<OwnerSupport> ownerMock = mockStatic(OwnerSupport.class);
+        MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class)) {
+      obCtxMock.when(() -> OBContext.setAdminMode(true)).then(inv -> null);
+      obCtxMock.when(OBContext::restorePreviousMode).then(inv -> null);
+      ownerMock.when(() -> OwnerSupport.isOwner(ownerId))
+          .thenThrow(new RuntimeException("DB unavailable"));
+
+      NeoResponse response = handler.handle(ctx);
+
+      // Fail CLOSED, same reasoning as the other write-path guards in this class.
       assertEquals(500, response.getHttpStatus());
     }
   }

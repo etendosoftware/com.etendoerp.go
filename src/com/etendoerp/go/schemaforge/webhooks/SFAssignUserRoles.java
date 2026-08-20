@@ -27,6 +27,7 @@ import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.base.exception.OBException;
+import org.openbravo.dal.core.OBContext;
 import org.openbravo.model.ad.access.Role;
 
 import com.etendoerp.go.roles.UserRoleCompositionService;
@@ -131,9 +132,17 @@ public class SFAssignUserRoles extends BaseWebhookService {
     // System Administrator, so without this a client-admin for Tenant A could target any user
     // in Tenant B (REVIEW cycle 1 finding, ETP-4852). See
     // UserRoleCompositionService#enforceCallerClientBoundary.
+    //
+    // Same reasoning for the caller's own AD_User_ID (ETP-4830): resolved from the SAME
+    // OBContext currentRole came from, still BEFORE admin mode, so
+    // UserRoleCompositionService#enforceOwnerProtection can tell "the owner reassigning their
+    // own roles" apart from "anyone else targeting the owner".
+    String callerUserId = currentRole != null && OBContext.getOBContext() != null
+        && OBContext.getOBContext().getUser() != null
+        ? OBContext.getOBContext().getUser().getId() : null;
     try {
       UserRoleCompositionService.AssignmentResult result = new UserRoleCompositionService()
-          .assignTemplateRoles(userId, templateRoleIds, currentRole);
+          .assignTemplateRoles(userId, templateRoleIds, currentRole, callerUserId);
       responseVars.put(RESPONSE_VAR_RESULT, success(result).toString());
     } catch (OBException e) {
       // Expected domain-validation rejection — see class javadoc for why this is a 200

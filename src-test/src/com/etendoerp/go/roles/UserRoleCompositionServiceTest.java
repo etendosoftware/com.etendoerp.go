@@ -42,6 +42,8 @@ import org.openbravo.model.ad.access.User;
 import org.openbravo.model.ad.access.UserRoles;
 import org.openbravo.model.ad.system.Client;
 
+import com.etendoerp.go.schemaforge.util.OwnerSupport;
+
 /**
  * Unit tests for {@link UserRoleCompositionService}'s input-validation guard clauses — the slice
  * that fails before any persistence side effect, so it is safely mockable without a real DB.
@@ -221,6 +223,95 @@ class UserRoleCompositionServiceTest {
 
     OBException e = assertThrows(OBException.class, () -> service
         .assignTemplateRoles("user-1", List.of("missing-role"), systemAdmin));
+    assertTrue(e.getMessage().contains("Template role not found or inactive"));
+  }
+
+  // ── ETP-4830: owner-protection guard on the write path ──────────────────
+
+  /**
+   * The role-assignment-endpoint counterpart to {@code
+   * UserRoleAssignmentHandlerTest#handleBlanketRejectsNonOwnerPatchOnOwnerRecord_*} — the SAME
+   * owner-protection rule enforced on a genuinely separate write path (see {@link
+   * UserRoleCompositionService#enforceOwnerProtection}'s class javadoc for why closing this gap
+   * on the generic {@code AD_User} PUT/PATCH alone is not enough). Rejects BEFORE {@code
+   * resolveAndValidateTemplates} even runs — an empty template list (which would otherwise be a
+   * trivially valid "strip all access" request) is still blocked.
+   */
+  @Test
+  void rejectsOwnerRoleReassignmentByNonOwner() {
+    User user = mock(User.class);
+    when(user.getId()).thenReturn("owner-user-2");
+    when(mockDal.get(User.class, "owner-user-2")).thenReturn(user);
+
+    try (MockedStatic<OwnerSupport> ownerMock = mockStatic(OwnerSupport.class)) {
+      ownerMock.when(() -> OwnerSupport.isOwner("owner-user-2")).thenReturn(true);
+
+      OBException e = assertThrows(OBException.class, () -> service
+          .assignTemplateRoles("owner-user-2", Collections.emptyList(), null, "some-other-admin"));
+      assertTrue(e.getMessage().toLowerCase().contains("owner"));
+    }
+  }
+
+  /**
+   * The owner recomposing their OWN access must sail through the owner-protection check —
+   * reaching the (unrelated) template-validation error, rather than the owner-protection
+   * {@link OBException}, proves this specific guard did not block it.
+   */
+  @Test
+  void ownerReassigningTheirOwnRolesPassesOwnerProtectionCheck() {
+    User user = mock(User.class);
+    when(user.getId()).thenReturn("owner-user-1");
+    when(mockDal.get(User.class, "owner-user-1")).thenReturn(user);
+    when(mockDal.get(Role.class, "missing-role")).thenReturn(null);
+
+    try (MockedStatic<OwnerSupport> ownerMock = mockStatic(OwnerSupport.class)) {
+      ownerMock.when(() -> OwnerSupport.isOwner("owner-user-1")).thenReturn(true);
+
+      OBException e = assertThrows(OBException.class, () -> service
+          .assignTemplateRoles("owner-user-1", List.of("missing-role"), null, "owner-user-1"));
+      assertTrue(e.getMessage().contains("Template role not found or inactive"));
+    }
+  }
+
+  /**
+   * Baseline (every pre-existing user until the ETP-4830 backfill data-fix runs): {@code
+   * is_owner=false/unset} means the guard never triggers at all, regardless of who the caller is
+   * — reaching the template-validation error (not an owner-protection rejection) proves it.
+   */
+  @Test
+  void ownerProtectionIsNoOpWhenTargetIsNotFlaggedAsOwner() {
+    User user = mock(User.class);
+    when(user.getId()).thenReturn("regular-user-1");
+    when(mockDal.get(User.class, "regular-user-1")).thenReturn(user);
+    when(mockDal.get(Role.class, "missing-role")).thenReturn(null);
+
+    try (MockedStatic<OwnerSupport> ownerMock = mockStatic(OwnerSupport.class)) {
+      ownerMock.when(() -> OwnerSupport.isOwner("regular-user-1")).thenReturn(false);
+
+      OBException e = assertThrows(OBException.class, () -> service
+          .assignTemplateRoles("regular-user-1", List.of("missing-role"), null, "some-other-admin"));
+      assertTrue(e.getMessage().contains("Template role not found or inactive"));
+    }
+  }
+
+  /**
+   * A {@code null} {@code callerUserId} (the 2-arg/3-arg overloads' convention) skips the
+   * owner-protection check entirely — same "nothing to enforce" convention {@code
+   * enforceCallerClientBoundary} uses for a {@code null} {@code callerRole}.
+   */
+  @Test
+  void nullCallerUserIdSkipsOwnerProtectionCheckEvenForAnOwner() {
+    User user = mock(User.class);
+    when(user.getId()).thenReturn("owner-user-3");
+    when(mockDal.get(User.class, "owner-user-3")).thenReturn(user);
+    when(mockDal.get(Role.class, "missing-role")).thenReturn(null);
+
+    // OwnerSupport is deliberately NOT mocked here: if enforceOwnerProtection's null-check ever
+    // regressed and called OwnerSupport.isOwner anyway, the real implementation would try to use
+    // OBDal's (unstubbed) getSession() and blow up with an NPE instead of the expected
+    // template-validation OBException — turning a silent behavior change into a loud test failure.
+    OBException e = assertThrows(OBException.class, () -> service
+        .assignTemplateRoles("owner-user-3", List.of("missing-role"), null));
     assertTrue(e.getMessage().contains("Template role not found or inactive"));
   }
 

@@ -46,6 +46,7 @@ import com.etendoerp.go.schemaforge.NeoContext;
 import com.etendoerp.go.schemaforge.NeoEndpointType;
 import com.etendoerp.go.schemaforge.NeoHandler;
 import com.etendoerp.go.schemaforge.NeoResponse;
+import com.etendoerp.go.schemaforge.util.OwnerSupport;
 import com.etendoerp.go.schemaforge.util.UserRoleSyncSupport;
 
 /**
@@ -143,6 +144,21 @@ import com.etendoerp.go.schemaforge.util.UserRoleSyncSupport;
  *   Both guards fail CLOSED (surface a 500) on an unexpected error rather than silently falling
  *   through to the default CRUD update — same reasoning {@code AbstractSmartDeactivationHandler}'s
  *   own javadoc gives for its guard.</li>
+ *
+ *   <li><b>Owner protection (ETP-4830, "owner" concept):</b> {@code AD_User.EM_ETGO_Is_Owner}
+ *   (see {@link OwnerSupport}) flags the ONE user who completed self-service tenant
+ *   registration for a client. {@link #rejectNonOwnerEditingOwner} runs FIRST in {@link
+ *   #validateUpdate(NeoContext)}, before the email-immutability and self/last-admin-lockout
+ *   guards above: when the TARGET record is flagged as owner and the requester (resolved the
+ *   same way the lockout guard resolves "who is making this request",
+ *   {@code context.getObContext().getUser()}) is NOT that same user, the ENTIRE PUT/PATCH is
+ *   rejected with a 400 — blanket, regardless of which fields the request touches, matching the
+ *   human-confirmed "owner-lock scope: everything" decision. When the requester IS the owner
+ *   editing their own record, this guard is a no-op and the request falls through to the other
+ *   guards exactly as any other self-edit would (the self-lockout guard above already covers
+ *   "the owner can't deactivate themselves" generically — no separate case needed here). A
+ *   target that is not flagged as owner (every pre-existing user until a separate,
+ *   human-reviewed backfill data-fix runs) never triggers this guard at all.</li>
  * </ol>
  *
  * <p>{@code @Named} only — never a normal CDI scope. See CLAUDE.md §NeoHandler Pattern and
@@ -240,11 +256,53 @@ public class UserRoleAssignmentHandler implements NeoHandler {
     if (requestBody == null || userId == null) {
       return null;
     }
+    // Owner protection runs FIRST and short-circuits everything else — a rejection here means
+    // the request never reaches the email-immutability/self-lockout guards below at all, per the
+    // "owner-lock scope: everything" decision (see class javadoc). A self-edit by the owner (or
+    // any request against a non-owner record) simply falls through to those guards unchanged.
+    NeoResponse ownerGuard = rejectNonOwnerEditingOwner(userId, context.getObContext());
+    if (ownerGuard != null) {
+      return ownerGuard;
+    }
     NeoResponse emailGuard = rejectEmailChange(requestBody, userId);
     if (emailGuard != null) {
       return emailGuard;
     }
     return rejectDangerousDeactivation(requestBody, userId, context.getObContext());
+  }
+
+  /**
+   * Rejects a {@code PUT}/{@code PATCH} against a record flagged as its client's owner ({@link
+   * OwnerSupport#isOwner}) when the requester is anyone OTHER than that same owner. See the class
+   * javadoc's ETP-4830 owner-protection concern for the full rationale. A no-op — returns {@code
+   * null}, letting the request fall through to the other guards — when {@code userId} is not
+   * flagged as owner at all, or when the requester IS the owner editing their own record.
+   */
+  private NeoResponse rejectNonOwnerEditingOwner(String userId, OBContext obContext) {
+    boolean targetIsOwner;
+    try {
+      OBContext.setAdminMode(true);
+      try {
+        targetIsOwner = OwnerSupport.isOwner(userId);
+      } finally {
+        OBContext.restorePreviousMode();
+      }
+    } catch (Exception e) {
+      log.error("UserRoleAssignmentHandler.rejectNonOwnerEditingOwner error for user {}: {}",
+          userId, e.getMessage(), e);
+      // Fail CLOSED, same reasoning as the other write-path guards in this class.
+      return NeoResponse.error(500, "Error validating owner protection: " + e.getMessage());
+    }
+    if (!targetIsOwner) {
+      return null;
+    }
+    String actingUserId = obContext != null && obContext.getUser() != null
+        ? obContext.getUser().getId() : null;
+    if (actingUserId != null && actingUserId.equals(userId)) {
+      return null;
+    }
+    return NeoResponse.error(400,
+        "This user is the tenant owner — only the owner can modify this account");
   }
 
   /**

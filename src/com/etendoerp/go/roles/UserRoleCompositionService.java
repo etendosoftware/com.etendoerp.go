@@ -41,6 +41,7 @@ import org.openbravo.model.ad.access.UserRoles;
 import org.openbravo.model.ad.access.WindowAccess;
 import org.openbravo.model.common.enterprise.Organization;
 
+import com.etendoerp.go.schemaforge.util.OwnerSupport;
 import com.etendoerp.go.schemaforge.util.UserRoleSyncSupport;
 
 /**
@@ -247,26 +248,28 @@ public class UserRoleCompositionService {
   }
 
   /**
-   * Same as {@link #assignTemplateRoles(String, List)}, but also enforces that {@code
-   * callerRole} may target {@code userId} at all — see {@link
-   * #enforceCallerClientBoundary(User, Role)} and the class javadoc for why this matters
-   * (REVIEW cycle 1, ETP-4852: a client-admin must never be able to reassign or strip another
-   * tenant's user). Real webhook callers (e.g. {@code SFAssignUserRoles}) MUST use this
-   * overload, passing the role they already resolved for the current request.
+   * Same as {@link #assignTemplateRoles(String, List, Role)}, but also enforces the ETP-4830
+   * owner-protection rule against {@code userId} — see {@link #enforceOwnerProtection(User,
+   * String)}. Real webhook callers (e.g. {@code SFAssignUserRoles}) MUST use this overload,
+   * passing the caller's own {@code AD_User_ID}. A {@code null} {@code callerUserId} skips the
+   * check entirely, mirroring this class's existing {@code callerRole=null} convention — kept for
+   * plain unit tests and any other caller with no per-request identity to check against.
    *
    * @param userId the {@code AD_User_ID} to compose roles for
    * @param templateRoleIds the desired FULL set of template role ids — see {@link
    *     #assignTemplateRoles(String, List)}
-   * @param callerRole the role making this request, already resolved by the caller BEFORE
-   *     entering admin mode — {@code null} means "no per-request identity to check" (skips the
-   *     boundary check entirely; see {@link #enforceCallerClientBoundary(User, Role)})
+   * @param callerRole the role making this request — see {@link #assignTemplateRoles(String,
+   *     List, Role)}
+   * @param callerUserId the {@code AD_User_ID} making this request, already resolved by the
+   *     caller BEFORE entering admin mode, or {@code null} to skip the owner-protection check
    * @return a summary of what changed
    * @throws OBException if {@code userId} is missing/unresolvable, {@code templateRoleIds} is
-   *     {@code null}, any requested id is not an active, non-admin template role, or {@code
-   *     callerRole} is a non-system role whose client differs from {@code userId}'s
+   *     {@code null}, any requested id is not an active, non-admin template role, {@code
+   *     callerRole} is a non-system role whose client differs from {@code userId}'s, or {@code
+   *     userId} is flagged as its client's owner and {@code callerUserId} is not that same user
    */
   public AssignmentResult assignTemplateRoles(String userId, List<String> templateRoleIds,
-      Role callerRole) {
+      Role callerRole, String callerUserId) {
     if (StringUtils.isBlank(userId)) {
       throw new OBException("Missing user id for role composition");
     }
@@ -278,6 +281,7 @@ public class UserRoleCompositionService {
       throw new OBException("User not found: " + userId);
     }
     enforceCallerClientBoundary(user, callerRole);
+    enforceOwnerProtection(user, callerUserId);
 
     List<Role> templates = resolveAndValidateTemplates(templateRoleIds);
 
@@ -304,6 +308,67 @@ public class UserRoleCompositionService {
     } finally {
       OBContext.restorePreviousMode();
     }
+  }
+
+  /**
+   * Rejects reassigning the OWNER's role composition from anyone other than the owner
+   * themselves (ETP-4830) — the role-assignment-endpoint counterpart to {@code
+   * UserRoleAssignmentHandler#rejectNonOwnerEditingOwner}'s generic {@code AD_User} PUT/PATCH
+   * guard. Both must independently cover the owner protection: an admin reassigning the owner's
+   * role through THIS endpoint never goes through {@code UserRoleAssignmentHandler}'s write path
+   * at all, so that guard alone would not close this gap.
+   *
+   * <p>A no-op — same "nothing to enforce" convention {@link #enforceCallerClientBoundary} uses
+   * for a {@code null} {@code callerRole} — when {@code callerUserId} is {@code null} (no caller
+   * identity supplied), or when {@code user} is not flagged as owner at all (every pre-existing
+   * user until a separate, human-reviewed backfill data-fix runs). When {@code user} IS the owner
+   * and {@code callerUserId} is that same user (the owner recomposing their own access), this is
+   * also a no-op — only a DIFFERENT caller targeting the owner is rejected.</p>
+   *
+   * @param user the already-resolved target user
+   * @param callerUserId the {@code AD_User_ID} making this request, or {@code null} to skip
+   * @throws OBException if {@code user} is flagged as owner and {@code callerUserId} is not that
+   *     same user
+   */
+  private void enforceOwnerProtection(User user, String callerUserId) {
+    if (callerUserId == null) {
+      return;
+    }
+    if (!OwnerSupport.isOwner(user.getId())) {
+      return;
+    }
+    if (callerUserId.equals(user.getId())) {
+      return;
+    }
+    throw new OBException(
+        "This user is the tenant owner — only the owner can reassign their own roles: "
+            + user.getId());
+  }
+
+  /**
+   * Same as {@link #assignTemplateRoles(String, List)}, but also enforces that {@code
+   * callerRole} may target {@code userId} at all — see {@link
+   * #enforceCallerClientBoundary(User, Role)} and the class javadoc for why this matters
+   * (REVIEW cycle 1, ETP-4852: a client-admin must never be able to reassign or strip another
+   * tenant's user). Real webhook callers (e.g. {@code SFAssignUserRoles}) MUST use this
+   * overload, passing the role they already resolved for the current request.
+   *
+   * @param userId the {@code AD_User_ID} to compose roles for
+   * @param templateRoleIds the desired FULL set of template role ids — see {@link
+   *     #assignTemplateRoles(String, List)}
+   * @param callerRole the role making this request, already resolved by the caller BEFORE
+   *     entering admin mode — {@code null} means "no per-request identity to check" (skips the
+   *     boundary check entirely; see {@link #enforceCallerClientBoundary(User, Role)})
+   * @return a summary of what changed
+   * @throws OBException if {@code userId} is missing/unresolvable, {@code templateRoleIds} is
+   *     {@code null}, any requested id is not an active, non-admin template role, or {@code
+   *     callerRole} is a non-system role whose client differs from {@code userId}'s
+   * @see #assignTemplateRoles(String, List, Role, String) the overload that ALSO enforces the
+   *     ETP-4830 owner-protection rule — real webhook callers MUST use that one instead
+   */
+  public AssignmentResult assignTemplateRoles(String userId, List<String> templateRoleIds,
+      Role callerRole) {
+    return assignTemplateRoles(userId, templateRoleIds, callerRole, null);
   }
 
   /**
