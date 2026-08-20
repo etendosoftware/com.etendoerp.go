@@ -5,5 +5,12 @@
         <default><![CDATA[N]]></default>
         <onCreateDefault/>
       </column>
+      <column name="EM_ETGO_FINACC_TRANS_DEST" primaryKey="false" required="false" type="VARCHAR" size="32" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <foreign-key foreignTable="FIN_FINACC_TRANSACTION" name="EM_ETGO_FINACC_TRANS_DEST_FK">
+        <reference local="EM_ETGO_FINACC_TRANS_DEST" foreign="FIN_FINACC_TRANSACTION_ID"/>
+      </foreign-key>
     </table>
   </database>

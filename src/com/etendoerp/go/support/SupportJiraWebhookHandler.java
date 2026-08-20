@@ -50,6 +50,7 @@ import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.access.User;
 
+import com.etendoerp.go.common.ConfigPropertyReader;
 import com.etendoerp.go.schemaforge.data.SupportConversation;
 import com.etendoerp.go.schemaforge.data.SupportMessage;
 
@@ -64,7 +65,8 @@ final class SupportJiraWebhookHandler {
 
   private static final Logger log = LogManager.getLogger(SupportJiraWebhookHandler.class);
 
-  private static final String WEBHOOK_SECRET = System.getProperty("support.webhook.secret", "");
+  private static final String WEBHOOK_SECRET = ConfigPropertyReader.readConfigValue(
+      "support.webhook.secret", "ETGO_SUPPORT_WEBHOOK_SECRET", "");
 
   // Jira URL/username/token/bot-identity now live in JiraConfig, shared with
   // SupportIntegrationClient — see that class for the resolution order (system property >

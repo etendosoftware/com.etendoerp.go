@@ -62,6 +62,7 @@ import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.businesspartner.BusinessPartner;
 import org.openbravo.model.common.invoice.Invoice;
+import org.openbravo.model.financialmgmt.tax.TaxRate;
 import org.openbravo.module.taxreportlauncher.TaxReport;
 
 /**
@@ -278,6 +279,74 @@ public class Fiscal349BoxesHandlerTest {
     assertEquals("NoNif SL", arr.getJSONObject(0).getString("name"));
   }
 
+  // ── buildOperatorsArray VIES status mapping (ETP-4755) ─────────────
+
+  @Test
+  public void testBuildOperatorsArrayViesValidStatus() throws Exception {
+    BusinessPartner bp = mock(BusinessPartner.class);
+    when(bp.getName()).thenReturn("ACME");
+    when(bp.getTaxID()).thenReturn("B1");
+    when(bp.getOBTIKVIESStatus()).thenReturn("V");
+    Map<String, BusinessPartner> bpMap = new HashMap<>();
+    bpMap.put("bp1", bp);
+
+    JSONArray arr = handler.buildOperatorsArray(
+        Collections.singletonList(row("bp1", "10", "E")), bpMap, emptySummary());
+
+    assertEquals("valid", arr.getJSONObject(0).getString("vies"));
+  }
+
+  @Test
+  public void testBuildOperatorsArrayViesInvalidStatus() throws Exception {
+    BusinessPartner bp = mock(BusinessPartner.class);
+    when(bp.getName()).thenReturn("ACME");
+    when(bp.getTaxID()).thenReturn("B1");
+    when(bp.getOBTIKVIESStatus()).thenReturn("I");
+    Map<String, BusinessPartner> bpMap = new HashMap<>();
+    bpMap.put("bp1", bp);
+
+    JSONArray arr = handler.buildOperatorsArray(
+        Collections.singletonList(row("bp1", "10", "E")), bpMap, emptySummary());
+
+    assertEquals("invalid", arr.getJSONObject(0).getString("vies"));
+  }
+
+  @Test
+  public void testBuildOperatorsArrayViesPendingForNullBlankOrPStatus() throws Exception {
+    BusinessPartner bpNull = mock(BusinessPartner.class);
+    when(bpNull.getName()).thenReturn("Null status");
+    when(bpNull.getOBTIKVIESStatus()).thenReturn(null);
+
+    BusinessPartner bpBlank = mock(BusinessPartner.class);
+    when(bpBlank.getName()).thenReturn("Blank status");
+    when(bpBlank.getOBTIKVIESStatus()).thenReturn("");
+
+    BusinessPartner bpP = mock(BusinessPartner.class);
+    when(bpP.getName()).thenReturn("P status");
+    when(bpP.getOBTIKVIESStatus()).thenReturn("P");
+
+    Map<String, BusinessPartner> bpMap = new HashMap<>();
+    bpMap.put("bp1", bpNull);
+    bpMap.put("bp2", bpBlank);
+    bpMap.put("bp3", bpP);
+
+    JSONArray arr = handler.buildOperatorsArray(
+        Arrays.asList(row("bp1", "10", "E"), row("bp2", "10", "S"), row("bp3", "10", "A")),
+        bpMap, emptySummary());
+
+    for (int i = 0; i < arr.length(); i++) {
+      assertEquals("pending", arr.getJSONObject(i).getString("vies"));
+    }
+  }
+
+  @Test
+  public void testBuildOperatorsArrayViesPendingWhenBpMissing() throws Exception {
+    JSONArray arr = handler.buildOperatorsArray(
+        Collections.singletonList(row("bp-missing", "10", "E")), new HashMap<>(), emptySummary());
+
+    assertEquals("pending", arr.getJSONObject(0).getString("vies")); // graceful null-bp fallback
+  }
+
   // ── buildInvoiceRow (pure logic) ──────────────────────────────────
 
   @Test
@@ -287,12 +356,16 @@ public class Fiscal349BoxesHandlerTest {
     when(bp.getName()).thenReturn("ACME");
     when(bp.getTaxID()).thenReturn("B1");
     Invoice inv = mock(Invoice.class);
+    when(inv.getId()).thenReturn("inv-1");
     when(inv.getBusinessPartner()).thenReturn(bp);
     when(inv.getSummedLineAmount()).thenReturn(new BigDecimal("-123.456"));
     when(inv.getDocumentNo()).thenReturn("INV-1");
     when(inv.getInvoiceDate()).thenReturn(new Date(0L)); // 1970-01-01 UTC-ish
 
-    JSONObject r = handler.buildInvoiceRow(inv, "Compra", sdf);
+    Map<String, String> invoiceKeys = new HashMap<>();
+    invoiceKeys.put("inv-1", "A");
+
+    JSONObject r = handler.buildInvoiceRow(inv, "Compra", sdf, invoiceKeys);
 
     assertEquals("INV-1", r.getString("ref"));
     assertEquals("Compra", r.getString("type"));
@@ -300,18 +373,20 @@ public class Fiscal349BoxesHandlerTest {
     assertEquals("B1", r.getString("nifIva"));
     assertEquals("123.46", r.getString("base")); // abs + HALF_UP scale 2
     assertEquals(sdf.format(new Date(0L)), r.getString("date"));
+    assertEquals("A", r.getString("key")); // resolved from invoiceKeys map
   }
 
   @Test
   public void testBuildInvoiceRowNullFieldsUseDefaults() throws Exception {
     SimpleDateFormat sdf = new SimpleDateFormat("yyyy-MM-dd");
     Invoice inv = mock(Invoice.class);
+    when(inv.getId()).thenReturn("inv-2");
     when(inv.getBusinessPartner()).thenReturn(null);
     when(inv.getSummedLineAmount()).thenReturn(null);
     when(inv.getDocumentNo()).thenReturn("INV-2");
     when(inv.getInvoiceDate()).thenReturn(null);
 
-    JSONObject r = handler.buildInvoiceRow(inv, "Venta", sdf);
+    JSONObject r = handler.buildInvoiceRow(inv, "Venta", sdf, new HashMap<>());
 
     assertEquals("INV-2", r.getString("ref"));
     assertEquals("Venta", r.getString("type"));
@@ -319,6 +394,7 @@ public class Fiscal349BoxesHandlerTest {
     assertEquals("", r.getString("nifIva")); // null bp
     assertEquals("", r.getString("date"));   // null date
     assertEquals("0", r.getString("base"));  // null amount → ZERO
+    assertEquals("", r.getString("key"));    // no entry in invoiceKeys → ""
   }
 
   @Test
@@ -328,15 +404,17 @@ public class Fiscal349BoxesHandlerTest {
     when(bp.getName()).thenReturn("NoNif");
     when(bp.getTaxID()).thenReturn(null);
     Invoice inv = mock(Invoice.class);
+    when(inv.getId()).thenReturn("inv-3");
     when(inv.getBusinessPartner()).thenReturn(bp);
     when(inv.getSummedLineAmount()).thenReturn(new BigDecimal("10"));
     when(inv.getDocumentNo()).thenReturn("INV-3");
     when(inv.getInvoiceDate()).thenReturn(null);
 
-    JSONObject r = handler.buildInvoiceRow(inv, "Compra", sdf);
+    JSONObject r = handler.buildInvoiceRow(inv, "Compra", sdf, null);
 
     assertEquals("NoNif", r.getString("party"));
     assertEquals("", r.getString("nifIva"));
+    assertEquals("", r.getString("key")); // null invoiceKeys map → graceful ""
   }
 
   // ── collectInvoices (pure logic) ──────────────────────────────────
@@ -344,24 +422,36 @@ public class Fiscal349BoxesHandlerTest {
   @Test
   public void testCollectInvoicesCombinesPurchaseAndSales() throws Exception {
     Invoice p = mock(Invoice.class);
+    when(p.getId()).thenReturn("p1");
     when(p.getDocumentNo()).thenReturn("P1");
     when(p.getSummedLineAmount()).thenReturn(new BigDecimal("1"));
     Invoice s = mock(Invoice.class);
+    when(s.getId()).thenReturn("s1");
     when(s.getDocumentNo()).thenReturn("S1");
     when(s.getSummedLineAmount()).thenReturn(new BigDecimal("2"));
 
     Set<Invoice> purch = new LinkedHashSet<>(Collections.singletonList(p));
     Set<Invoice> sales = new LinkedHashSet<>(Collections.singletonList(s));
+    Map<String, String> invoiceKeys = new HashMap<>();
+    invoiceKeys.put("p1", "A");
+    invoiceKeys.put("s1", "E");
 
-    JSONArray arr = handler.collectInvoices(purch, sales);
+    JSONArray arr = handler.collectInvoices(purch, sales, invoiceKeys);
 
     assertEquals(2, arr.length());
     boolean hasCompra = false;
     boolean hasVenta = false;
     for (int i = 0; i < arr.length(); i++) {
-      String type = arr.getJSONObject(i).getString("type");
-      if ("Compra".equals(type)) hasCompra = true;
-      if ("Venta".equals(type)) hasVenta = true;
+      JSONObject row = arr.getJSONObject(i);
+      String type = row.getString("type");
+      if ("Compra".equals(type)) {
+        hasCompra = true;
+        assertEquals("A", row.getString("key"));
+      }
+      if ("Venta".equals(type)) {
+        hasVenta = true;
+        assertEquals("E", row.getString("key"));
+      }
     }
     assertTrue(hasCompra);
     assertTrue(hasVenta);
@@ -370,7 +460,7 @@ public class Fiscal349BoxesHandlerTest {
   @Test
   public void testCollectInvoicesEmptySetsYieldEmptyArray() throws Exception {
     JSONArray arr = handler.collectInvoices(
-        Collections.<Invoice>emptySet(), Collections.<Invoice>emptySet());
+        Collections.<Invoice>emptySet(), Collections.<Invoice>emptySet(), new HashMap<>());
     assertEquals(0, arr.length());
   }
 
@@ -677,6 +767,145 @@ public class Fiscal349BoxesHandlerTest {
       assertEquals("Compra", arr.getJSONObject(0).getString("type"));
       assertEquals("S-1", arr.getJSONObject(1).getString("ref"));
       assertEquals("Venta", arr.getJSONObject(1).getString("type"));
+    }
+  }
+
+  // ── resolveInvoiceKeys (ETP-4755) ───────────────────────────────────
+
+  /**
+   * Installs the OBDal→Session→Query chain for the scalar per-invoice-key HQL and returns
+   * the mocked Query so tests can control {@code list()}. Unlike {@link #mockRectifQuery},
+   * this HQL also binds a scalar named parameter ({@code taxReportId}) alongside the two
+   * list parameters.
+   */
+  @SuppressWarnings("unchecked")
+  private static Query<Object[]> mockInvoiceKeysQuery(MockedStatic<OBDal> dalMock) {
+    OBDal obDal = mock(OBDal.class);
+    dalMock.when(OBDal::getInstance).thenReturn(obDal);
+    Session session = mock(Session.class);
+    when(obDal.getSession()).thenReturn(session);
+    Query<Object[]> query = mock(Query.class);
+    when(session.createQuery(anyString(), eq(Object[].class))).thenReturn(query);
+    when(query.setParameter(anyString(), any())).thenReturn(query);
+    when(query.setParameterList(anyString(), any(Collection.class))).thenReturn(query);
+    return query;
+  }
+
+  @Test
+  public void testResolveInvoiceKeysEmptyInvoicesOrTaxRatesSkipsTheQuery() {
+    // No OBDal static mock installed: if the empty/null guard did not short-circuit,
+    // the HQL query would hit the real (unavailable) DAL and throw.
+    Invoice inv = mock(Invoice.class);
+    Set<Invoice> invoices = new LinkedHashSet<>(Collections.singletonList(inv));
+    TaxRate rate = mock(TaxRate.class);
+
+    Map<String, String> emptyInvoices = handler.resolveInvoiceKeys(
+        Collections.<Invoice>emptySet(), Collections.singletonList(rate), "tr1");
+    Map<String, String> emptyRates = handler.resolveInvoiceKeys(
+        invoices, Collections.<TaxRate>emptyList(), "tr1");
+    Map<String, String> nullInvoices = handler.resolveInvoiceKeys(null, Collections.singletonList(rate), "tr1");
+    Map<String, String> nullRates = handler.resolveInvoiceKeys(invoices, null, "tr1");
+
+    assertNotNull(emptyInvoices);
+    assertTrue(emptyInvoices.isEmpty());
+    assertTrue(emptyRates.isEmpty());
+    assertTrue(nullInvoices.isEmpty());
+    assertTrue(nullRates.isEmpty());
+  }
+
+  @Test
+  public void testResolveInvoiceKeysMapsInvoiceIdToKey() {
+    Invoice inv = mock(Invoice.class);
+    Set<Invoice> invoices = new LinkedHashSet<>(Collections.singletonList(inv));
+    TaxRate rate = mock(TaxRate.class);
+    Object[] row = { "inv-1", "E", 3L };
+
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      Query<Object[]> query = mockInvoiceKeysQuery(dalMock);
+      when(query.list()).thenReturn(Collections.singletonList(row));
+
+      Map<String, String> result = handler.resolveInvoiceKeys(
+          invoices, Collections.singletonList(rate), "tr1");
+
+      assertEquals(1, result.size());
+      assertEquals("E", result.get("inv-1"));
+    }
+  }
+
+  /**
+   * Edge case documented on {@link Fiscal349BoxesHandler#resolveInvoiceKeys}: when a single
+   * invoice groups into more than one key (e.g. lines with different tax rates), the key with
+   * the most matching InvoiceTax lines wins.
+   */
+  @Test
+  public void testResolveInvoiceKeysPicksKeyWithMoreMatchingLinesOnMultiKeyInvoice() {
+    Invoice inv = mock(Invoice.class);
+    Set<Invoice> invoices = new LinkedHashSet<>(Collections.singletonList(inv));
+    TaxRate rate = mock(TaxRate.class);
+    // Same invoice id appears twice, once per key — "I" has more matching lines than "A".
+    Object[] rowA = { "inv-1", "A", 1L };
+    Object[] rowI = { "inv-1", "I", 4L };
+
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      Query<Object[]> query = mockInvoiceKeysQuery(dalMock);
+      when(query.list()).thenReturn(Arrays.asList(rowA, rowI));
+
+      Map<String, String> result = handler.resolveInvoiceKeys(
+          invoices, Collections.singletonList(rate), "tr1");
+
+      assertEquals(1, result.size());
+      assertEquals("I", result.get("inv-1")); // 4 lines beats 1 line
+    }
+  }
+
+  /**
+   * Exact-tie case documented on {@link Fiscal349BoxesHandler#resolveInvoiceKeys}: when two
+   * keys for the same invoice have an EQUAL InvoiceTax line count, the alphabetically first
+   * key wins. The HQL's {@code order by i.id, trp.tributaryKey.name} guarantees rows for the
+   * same invoice arrive key-ascending, so this test feeds the mocked {@code list()} in that
+   * same order ("A" before "S") to faithfully simulate what the real ORDER BY produces.
+   */
+  @Test
+  public void testResolveInvoiceKeysExactTieKeepsAlphabeticallyFirstKey() {
+    Invoice inv = mock(Invoice.class);
+    Set<Invoice> invoices = new LinkedHashSet<>(Collections.singletonList(inv));
+    TaxRate rate = mock(TaxRate.class);
+    // Same invoice id, equal line counts — "A" sorts before "S" and is returned first by
+    // the HQL's order by trp.tributaryKey.name, so "A" must win the tie deterministically.
+    Object[] rowA = { "inv-1", "A", 2L };
+    Object[] rowS = { "inv-1", "S", 2L };
+
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      Query<Object[]> query = mockInvoiceKeysQuery(dalMock);
+      when(query.list()).thenReturn(Arrays.asList(rowA, rowS));
+
+      Map<String, String> result = handler.resolveInvoiceKeys(
+          invoices, Collections.singletonList(rate), "tr1");
+
+      assertEquals(1, result.size());
+      assertEquals("A", result.get("inv-1")); // exact tie → first-encountered (alphabetical) wins
+    }
+  }
+
+  @Test
+  public void testResolveInvoiceKeysMultipleInvoices() {
+    Invoice inv1 = mock(Invoice.class);
+    Invoice inv2 = mock(Invoice.class);
+    Set<Invoice> invoices = new LinkedHashSet<>(Arrays.asList(inv1, inv2));
+    TaxRate rate = mock(TaxRate.class);
+    Object[] row1 = { "inv-1", "S", 2L };
+    Object[] row2 = { "inv-2", "A", 1L };
+
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      Query<Object[]> query = mockInvoiceKeysQuery(dalMock);
+      when(query.list()).thenReturn(Arrays.asList(row1, row2));
+
+      Map<String, String> result = handler.resolveInvoiceKeys(
+          invoices, Collections.singletonList(rate), "tr1");
+
+      assertEquals(2, result.size());
+      assertEquals("S", result.get("inv-1"));
+      assertEquals("A", result.get("inv-2"));
     }
   }
 }

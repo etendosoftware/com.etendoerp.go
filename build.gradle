@@ -138,6 +138,7 @@ def isolatedDalTests = [
         '**/CreateDraftInvoiceHandlerNegativeQuantityIntegrationTest.class',
         '**/CreateGoodsReceiptHandlerNegativeQuantityIntegrationTest.class',
         '**/CreatePurchaseInvoiceHandlerNegativeQuantityIntegrationTest.class',
+        '**/AbstractInvoiceHeaderHandlerOriginInvoiceIntegrationTest.class',
 ]
 
 rootProject.afterEvaluate { rootProj ->
