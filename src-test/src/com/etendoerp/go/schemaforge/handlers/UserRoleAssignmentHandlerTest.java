@@ -756,6 +756,40 @@ public class UserRoleAssignmentHandlerTest {
   }
 
   @Test
+  public void handleOwnerSelfDeactivationFallsThroughToSelfLockoutGuardNotOwnerGuard()
+      throws Exception {
+    // QA re-pass composed-guard check (ETP-4830): the owner guard and the self-lockout guard
+    // (BUG-1) were only ever tested in isolation — this proves they actually COMPOSE when the
+    // owner targets their OWN record with active=false. The owner guard must no-op (same-user
+    // edit) and let the request fall through, and rejectDangerousDeactivation's self-check must
+    // then be the one that rejects it — asserted via the response MESSAGE, not just the status
+    // code, so a regression that let the owner guard wrongly claim this case (or a regression
+    // that let it silently pass through unblocked) would both be caught.
+    UserRoleAssignmentHandler handler = new UserRoleAssignmentHandler();
+    String ownerId = "owner-006";
+    JSONObject requestBody = new JSONObject();
+    requestBody.put("active", false);
+    NeoContext ctx = ownerGuardContext("PATCH", ownerId, ownerId, requestBody);
+
+    try (MockedStatic<OwnerSupport> ownerMock = mockStatic(OwnerSupport.class);
+        MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      obCtxMock.when(() -> OBContext.setAdminMode(true)).then(inv -> null);
+      obCtxMock.when(OBContext::restorePreviousMode).then(inv -> null);
+      ownerMock.when(() -> OwnerSupport.isOwner(ownerId)).thenReturn(true);
+
+      NeoResponse response = handler.handle(ctx);
+
+      assertEquals(400, response.getHttpStatus());
+      assertTrue(ownerGuardMessage(response).toLowerCase().contains("deactivate your own"));
+      // The self-check short-circuits before any OBDal access, same as the plain
+      // handleRejectsSelfDeactivation case above — proves this took the self-lockout path, not
+      // some other guard that happens to also return 400.
+      obDalMock.verify(OBDal::getInstance, never());
+    }
+  }
+
+  @Test
   public void handleOwnerGuardIsNoOpWhenTargetIsNotFlaggedAsOwner() throws Exception {
     // Baseline (every pre-existing user until the backfill data-fix runs): is_owner=false/unset
     // means the guard never triggers at all, regardless of who the requester is.
