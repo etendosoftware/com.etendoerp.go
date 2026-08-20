@@ -161,6 +161,44 @@ class DebugInvitationBypassServiceTest {
   }
 
   @Test
+  @DisplayName("forceAccept called twice on an already-ACCEPTED invitation is idempotent — "
+      + "no exception, no re-mutation of the invitation row (ETP-4830 QA edge case)")
+  void forceAcceptOnAlreadyAcceptedInvitationIsIdempotent() throws Exception {
+    Account existing = mock(Account.class);
+    when(existing.getId()).thenReturn("acct-existing");
+    when(existing.isActive()).thenReturn(true);
+    when(existing.get(Account.PROPERTY_STATUS)).thenReturn("active");
+
+    Invitation invitation = mock(Invitation.class);
+    when(invitation.getId()).thenReturn("inv-1");
+    // Simulates the state left behind by a first, successful forceAccept call.
+    when(invitation.getStatus()).thenReturn("ACCEPTED");
+
+    try (MockedStatic<EtendoGoJwtDalHelper> dal = mockStatic(EtendoGoJwtDalHelper.class);
+         MockedStatic<CompanyInvitationDalHelper> invitationDal = mockStatic(CompanyInvitationDalHelper.class);
+         MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      dal.when(() -> EtendoGoJwtDalHelper.findActiveAccountByEmail(EMAIL)).thenReturn(existing);
+      invitationDal.when(() -> CompanyInvitationDalHelper.findInvitationsForEmail(EMAIL))
+          .thenReturn(List.of(invitation));
+      OBDal dalInstance = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dalInstance);
+
+      DebugInvitationBypassService service = new DebugInvitationBypassService();
+      JSONObject response = service.forceAccept(EMAIL, null, null);
+
+      assertTrue(response.getBoolean("success"));
+      assertEquals("inv-1", response.getString("invitationId"));
+      assertEquals("ACCEPTED", response.getString("invitationStatus"));
+      // The already-ACCEPTED branch must not re-link or re-mutate the invitation row.
+      verify(invitation, never()).setEtgoAccount(existing);
+      verify(invitation, never()).setStatus(anyString());
+      // No second account is created either — the existing active one is reused as-is.
+      dal.verify(() -> EtendoGoJwtDalHelper.createAccount(
+          anyString(), anyString(), anyString(), anyString()), never());
+    }
+  }
+
+  @Test
   @DisplayName("forceAccept resolves the email from AdUserId when Email is blank")
   void forceAcceptResolvesEmailFromAdUserId() throws Exception {
     User user = mock(User.class);
