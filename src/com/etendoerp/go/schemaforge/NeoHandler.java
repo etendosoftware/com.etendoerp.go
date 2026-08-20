@@ -17,6 +17,9 @@
 
 package com.etendoerp.go.schemaforge;
 
+import java.util.Collections;
+import java.util.Set;
+
 /**
  * Interface for NEO Headless hook handlers.
  * Implementations are discovered via CDI using the Java_Qualifier
@@ -70,6 +73,18 @@ public interface NeoHandler {
    */
   default NeoResponse afterCallout(NeoContext context) {
     return null;
+  }
+
+  /**
+   * Declares DAL property names that the create-time callout cascade must not populate or
+   * overwrite for this entity. The default is empty so handlers opt in only when a legacy
+   * callout differs from the entity's NEO contract.
+   *
+   * @param context the create request context
+   * @return protected DAL property names
+   */
+  default Set<String> protectedCreateCalloutFields(NeoContext context) {
+    return Collections.emptySet();
   }
 
   /**

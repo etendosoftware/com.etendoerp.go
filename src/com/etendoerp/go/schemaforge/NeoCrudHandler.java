@@ -504,6 +504,14 @@ class NeoCrudHandler {
     long perfInjectDefaults = System.nanoTime();
     Set<String> protectedCalloutFields = NeoCrudHelper.snapshotMandatoryBodyFields(filteredBody, adTab);
     protectedCalloutFields.addAll(userSubmittedFields);
+    String javaQualifier = context.getSfEntity() != null
+        ? context.getSfEntity().getJavaQualifier() : null;
+    if (StringUtils.isNotBlank(javaQualifier)) {
+      NeoHandler handler = servlet.lookupHandler(javaQualifier);
+      if (handler != null) {
+        protectedCalloutFields.addAll(handler.protectedCreateCalloutFields(context));
+      }
+    }
     executePostCalloutCascade(filteredBody, adTab, context, parentIdValue, protectedCalloutFields);
     long perfCalloutCascade = System.nanoTime();
     NeoCommercialLinePolicy.injectProductDerivedUomIfMissing(filteredBody);
