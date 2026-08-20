@@ -66,7 +66,11 @@ public class InvoiceLineTaxSifSelectorPolicyTest {
   private static final String ENTITY_HEADER = "header";
   private static final String WINDOW_SALES_INVOICE = "167";
   private static final String WINDOW_PURCHASE_INVOICE = "183";
-  private static final String WINDOW_OTHER = "143";
+  // ETP-4888 follow-up round: sales-order/purchase-order joined the in-scope set, so
+  // WINDOW_OTHER must be a window id genuinely outside all four — not 143 any more.
+  private static final String WINDOW_SALES_ORDER = "143";
+  private static final String WINDOW_PURCHASE_ORDER = "181";
+  private static final String WINDOW_OTHER = "999";
   // Bound to the GENERATED DAL model's own entity name, NEVER a hardcoded literal.
   // A literal here would silently mirror whatever the production constant says, making
   // production and test mutually confirming instead of one verifying the other: that is
@@ -141,6 +145,16 @@ public class InvoiceLineTaxSifSelectorPolicyTest {
   @Test
   public void supportsPurchaseInvoiceLinesTaxSelector() {
     assertTrue(policy.supports(metaFor(TARGET_TAX_RATE), ctx(ENTITY_LINES, WINDOW_PURCHASE_INVOICE)));
+  }
+
+  @Test
+  public void supportsSalesOrderLinesTaxSelector() {
+    assertTrue(policy.supports(metaFor(TARGET_TAX_RATE), ctx(ENTITY_LINES, WINDOW_SALES_ORDER)));
+  }
+
+  @Test
+  public void supportsPurchaseOrderLinesTaxSelector() {
+    assertTrue(policy.supports(metaFor(TARGET_TAX_RATE), ctx(ENTITY_LINES, WINDOW_PURCHASE_ORDER)));
   }
 
   @Test
@@ -415,6 +429,29 @@ public class InvoiceLineTaxSifSelectorPolicyTest {
 
       NeoResponse result = NeoSelectorPolicy.enrichSelectorResult(
           response, metaFor(TARGET_TAX_RATE), ctx(ENTITY_LINES, WINDOW_PURCHASE_INVOICE));
+
+      assertEquals("05", result.getBody().getJSONArray("items").getJSONObject(0)
+          .getString("EM_Tbai_Claveregimeniva"));
+    }
+  }
+
+  @Test
+  public void neoSelectorPolicyDispatchesToThisPolicyForSalesOrder() throws Exception {
+    JSONArray items = new JSONArray().put(new JSONObject().put("id", "tax-1"));
+    NeoResponse response = new NeoResponse(200, new JSONObject().put("items", items));
+
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      Connection conn = wireConnection(dalMock);
+      PreparedStatement ps = mock(PreparedStatement.class);
+      when(conn.prepareStatement(anyString())).thenReturn(ps);
+      ResultSet rs = mock(ResultSet.class);
+      when(ps.executeQuery()).thenReturn(rs);
+      when(rs.next()).thenReturn(true, false);
+      when(rs.getString("c_tax_id")).thenReturn("tax-1");
+      when(rs.getString("em_tbai_claveregimeniva")).thenReturn("05");
+
+      NeoResponse result = NeoSelectorPolicy.enrichSelectorResult(
+          response, metaFor(TARGET_TAX_RATE), ctx(ENTITY_LINES, WINDOW_SALES_ORDER));
 
       assertEquals("05", result.getBody().getJSONArray("items").getJSONObject(0)
           .getString("EM_Tbai_Claveregimeniva"));
