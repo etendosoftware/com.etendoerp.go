@@ -927,11 +927,14 @@ GET /sws/neo/rolesoverview
 GET /sws/neo/assignuserroles?UserId=<id>&TemplateRoleIds=<id1,id2,...>
 GET /sws/neo/userroleassignments[?UserId=<id>]
 GET /sws/neo/systemroletemplates
+GET /sws/neo/debuginvitationbypass?Action=forceAccept&Email=<email>       (dev/QA only — §8g)
+GET /sws/neo/debuginvitationbypass?Action=forceStatus&Email=<email>&Status=<status>  (dev/QA only — §8g)
 Authorization: Bearer {token}
 ```
 
 `NeoGoWebhookBridge` runs `SFListMenu`/`SFWindowAccessMap`/`SFRolesOverview`/`SFAssignUserRoles`/
-`SFUserRoleAssignments`/`SFSystemRoleTemplates` (§8, §8b, §8c, §8d, §8e, §8f) through NEO's own
+`SFUserRoleAssignments`/`SFSystemRoleTemplates`/`SFDebugInvitationBypass` (§8, §8b, §8c, §8d, §8e,
+§8f, §8g) through NEO's own
 JWT authentication instead of the Webhooks module's HTTP dispatch — the same pattern
 `NeoSimSearchEndpoint` (§4.9) already used for `SimSearch`. Each of these pseudo-specs constructs
 the corresponding `BaseWebhookService` and calls its unchanged `get(Map, Map)` method directly;
@@ -942,16 +945,19 @@ response-parsing logic. `SFListMenu`/`SFWindowAccessMap`/`SFRolesOverview` still
 original `/webhooks/*` paths too — the Webhooks module dispatch was not removed for them — but
 `/sws/neo/*` is the path the Go SPA (`tools/app-shell` in `etendo_schema_forge`) actually calls,
 and no `SMFWHE_DEFINEDWEBHOOK_ROLE` grant is required for it. `SFAssignUserRoles` (ETP-4852),
-`SFUserRoleAssignments` (ETP-4906), and `SFSystemRoleTemplates` (ETP-4906) are `/sws/neo/*`-only
-— all three were authored after this pattern was already established, so none ever had a legacy
-`/webhooks/*` path to keep.
+`SFUserRoleAssignments` (ETP-4906), `SFSystemRoleTemplates` (ETP-4906), and
+`SFDebugInvitationBypass` (ETP-4830) are `/sws/neo/*`-only — all four were authored after this
+pattern was already established, so none ever had a legacy `/webhooks/*` path to keep.
 
 Each webhook's own access rule is unaffected and still enforced inside its `get()` — see
-§8/§8b/§8c/§8d/§8e/§8f for what each one checks (`NeoAccessHelper.isAdminOrClientAdmin`,
+§8/§8b/§8c/§8d/§8e/§8f/§8g for what each one checks (`NeoAccessHelper.isAdminOrClientAdmin`,
 window/process access checks, etc.). Non-`GET` requests get `405`; a webhook that throws gets
 `500` with the exception message (except `SFAssignUserRoles`'s own expected domain-validation
 rejections, and `SFUserRoleAssignments`'s own expected domain rejections — see §8d/§8e for why
-those are a `200` result instead).
+those are a `200` result instead). **`debuginvitationbypass` is different from every other
+pseudo-spec in this list: it is also gated by a runtime flag checked in
+`NeoPseudoSpecDispatcher` BEFORE `SFDebugInvitationBypass` is even constructed** — see §8g for
+why and how.
 
 ### 4.11 NEO Pseudo-Spec Bridge Pattern (preferred for new Etendo-GO-authored webhooks)
 
@@ -2309,6 +2315,73 @@ system client and a non-system caller's ambient readable-client set would otherw
 
 ---
 
+## 8g. Debug Invitation Bypass (SFDebugInvitationBypass Webhook, ETP-4830)
+
+`SFDebugInvitationBypass` (`GET /sws/neo/debuginvitationbypass?Action=<forceAccept|forceStatus>&...`
+— reached ONLY through the NEO pseudo-spec bridge, §4.10/§4.11; no legacy `/webhooks/*` path) is a
+**dev/QA-only** endpoint that lets a tester exercise the invite-email flow (ETP-4830 —
+`CompanyInvitationService#createInvitationForNewlyCreatedUser`, admin-created-user invitations)
+and the frontend's `PendingInvitationPill` states without a real email round-trip: creating and
+verifying an inbox for every `invitationStatus` value in manual QA does not scale.
+
+**GATED OFF BY DEFAULT — this is the security-critical property of this endpoint.**
+`NeoPseudoSpecDispatcher#dispatchDebugInvitationBypass` checks
+`GoRuntimeProperties.readBoolean("etendo.go.debug.invitationBypass",
+"ETGO_DEBUG_INVITATION_BYPASS", false)` **before `SFDebugInvitationBypass` is even
+constructed.** An environment that has not explicitly opted in (its own local
+`Openbravo.properties`/env var — never a value baked into a shared config file committed to this
+repo) gets a plain `404`, not a `403` and never a `200` — the endpoint behaves as if it did not
+exist at all, with zero DB access and zero writes. This is a stronger guarantee than gating inside
+the webhook's own `get()` would give: the webhook object, and everything it could reach, is never
+constructed when the flag is off. The webhook's own admin/client-admin check
+(`NeoAccessHelper.isAdminOrClientAdmin`, same convention as every sibling in this family) is
+defense-in-depth only, not a substitute — a valid NEO bearer token with an admin role is reachable
+in production too, which is exactly why a role check alone was rejected as insufficient for this
+endpoint.
+
+**Two actions, both reusing the real account-provisioning primitives rather than duplicating
+them** (`DebugInvitationBypassService`, `com.etendoerp.go.rest` package — placed there
+specifically so it can call `EtendoGoJwtDalHelper`/`CompanyInvitationDalHelper` directly, both
+package-private by design to keep account-provisioning DAL calls inside that package;
+`SFDebugInvitationBypass` itself, in `com.etendoerp.go.schemaforge.webhooks`, is only a thin
+parameter-marshalling + defense-in-depth-access-gating shim — the same shim/service split
+`SFAssignUserRoles`/`UserRoleCompositionService` already use, §8d):
+
+- **`forceAccept`** (`Email` or `AdUserId`, optional `Name`) — finds-or-creates an active
+  `etgo_account` for that email, reusing `EtendoGoJwtDalHelper#createAccount` (the exact same
+  primitive `CompanyInvitationService#registerAndAcceptInAdminMode` calls) rather than a second,
+  divergent account-creation code path. A newly created account gets a random policy-compliant
+  temporary password, returned in the response (`temporaryPassword`) — there is no email to
+  deliver it through, by design. If a matching `ETGO_INVITATION` row exists for that email (any
+  status, most recent one — this is a dev tool, not scoped to "the caller's own tenant only"), it
+  is flipped to `ACCEPTED` and linked to the account. Skips the token/email round-trip entirely:
+  unlike the real `register-and-accept` flow, no `ETGO_INVITATION` row needs to exist first.
+- **`forceStatus`** (`InvitationId`, or `Email` to resolve the most recently created invitation for
+  that address) — directly sets `ETGO_INVITATION.STATUS` to any value from its enum
+  (`PENDING`/`SENT`/`ACCEPTED`/`EXPIRED`/`REVOKED`/`DELIVERY_FAILED`), for visually exercising
+  every `PendingInvitationPill` state in `etendo_schema_forge` without waiting on real delivery.
+
+```json
+// forceAccept success:
+{"success": true, "email": "...", "accountId": "...", "accountCreated": true,
+ "temporaryPassword": "...", "invitationId": "...", "invitationStatus": "ACCEPTED"}
+// forceStatus success:
+{"success": true, "invitationId": "...", "email": "...", "status": "SENT"}
+// Validation failure or access denied (still HTTP 200, matching SFAssignUserRoles's own
+// "don't 500 a validation rejection" convention, §8d):
+{"success": false, "message": "..."}
+```
+
+**Frontend counterpart:** `useUserDebugMode.js`/`UserDebugPanel.jsx` in `etendo_schema_forge`
+(activated by typing `debuguser` anywhere in the app, mirroring `fiscal-monitor`'s own
+`debugfiscal`/`useDebugMode.js` convention as a fully independent module) — see that repo's
+`docs/generated-custom-windows/user.md` "Debug mode" section. The keydown listener there only
+registers in a dev build (`import.meta.env.DEV`), but that is a discoverability nicety on the UI
+side only; this endpoint's own flag, described above, is the actual security boundary regardless
+of which frontend build happens to be pointed at this backend.
+
+---
+
 ## 9. Testing
 
 The module includes unit tests that run without a backend:
@@ -2332,12 +2405,18 @@ The module includes unit tests that run without a backend:
 | `SFAssignUserRolesTest` | 278 | Unit test (8 tests) proving the webhook wires parameters/results/errors correctly, with `UserRoleCompositionService` itself intercepted via `mockConstruction` (its real behavior is the integration test's job): access gate (no role / restricted role denied without constructing the service), the happy path (admin composes, parses a whitespace/empty-entry-noisy `TemplateRoleIds` CSV, returns the assignment summary), missing `UserId` rejected before construction, an absent `TemplateRoleIds` parameter resolving to an empty (not `null`) list meaning "revoke all", a domain `OBException` folding into a `success:false` HTTP-200 result rather than the bridge's `error`/500 path, an unexpected `RuntimeException` surfacing as the bridge's `error` field instead, and the REVIEW cycle 1 regression proving the webhook actually forwards its already-resolved `currentRole` through to `assignTemplateRoles`'s 3-arg overload — the exact wiring the tenant-boundary check depends on. |
 | `SFUserRoleAssignmentsTest` (ETP-4906) | -- | Unit test mirroring `SFAssignUserRolesTest`'s `mockConstruction` convention for §8e's read endpoint: access gate denies with the mode-appropriate empty shape (bulk `{"assignments":{}}` with no `UserId`, single `{"userId":...,"templateRoleIds":[]}` with one) without constructing the service; bulk mode returns every user's assignments keyed by id, scoped to `currentRole.getClient().getId()`; single mode returns one user's ids and proves `currentRole` is forwarded into the boundary-checking overload (mirrors `SFAssignUserRolesTest`'s own forwarding regression); a cross-tenant read attempt and an unknown-user-id `OBException` both fold into the single-mode empty shape rather than the bridge's `error`/500 path; an unexpected `RuntimeException` still surfaces as `error`. |
 | `SFSystemRoleTemplatesTest` (ETP-4906) | -- | Unit test (12 tests) mirroring `SFRolesOverviewTest`'s structure for §8f's endpoint: admin/client-admin access gate (no role, restricted role, System Administrator, client-admin — all resolved without the caller's own client ever appearing in any stub); roles resolved via `OBDal.get(Role.class, id)` against the 4 fixed `SystemRoleTemplates` ids rather than a client-scoped `Role` criteria; response omits `userCount`/`isClientAdmin` entirely; Finance/Sales/Purchasing/Inventory ordering; a template id resolving to `null` or to an inactive `Role` is skipped gracefully rather than erroring; GO-window intersection (native-only windows excluded) and tier resolution (full/read-only), mirroring `SFRolesOverview`'s identical logic; exception handling. |
+| `NeoPseudoSpecDispatcherTest#debugInvitationBypass*` (ETP-4830) | -- | The security-critical case for §8g: flag unset AND flag explicitly `"false"` both return a plain `404` with `SFDebugInvitationBypass` never constructed and `NeoGoWebhookBridge#handle` never invoked (zero DB access, not just an early-return inside the webhook); flag `"true"` dispatches through the bridge with a real `SFDebugInvitationBypass` instance; non-`GET` is rejected even when the flag is on. Uses `System.setProperty`/`clearProperty` — `ConfigPropertyReader`'s own documented precedence puts the JVM system property first, ahead of `Openbravo.properties`/env var. |
+| `SFDebugInvitationBypassTest` (ETP-4830) | -- | Unit test mirroring `SFAssignUserRolesTest`'s shape for §8g's shim: access gate (no role / restricted role denied without touching `DebugInvitationBypassService`, injected as a plain Mockito mock via the package-private constructor); `forceAccept`/`forceStatus` delegate with the exact marshalled params, case-insensitive `Action` matching; an unknown/missing `Action` fails without touching the service; an unexpected `RuntimeException` from the service maps to the bridge's `error` field rather than escaping as a thrown exception. |
+| `DebugInvitationBypassServiceTest` (ETP-4830) | -- | Unit test for §8g's real logic, `OBDal`/`EtendoGoJwtDalHelper`/`CompanyInvitationDalHelper`/`CompanyInvitationService` all Mockito static mocks (mirrors `CompanyInvitationServiceTest`'s conventions): `forceAccept` rejects a blank email with no resolvable `AdUserId`; creates a new account via `EtendoGoJwtDalHelper#createAccount` (asserted called, proving no duplicated account-creation logic) when none exists, returning a `temporaryPassword`; reuses an existing active account without a second `createAccount` call and without a `temporaryPassword` in the response; flips a matching open invitation to `ACCEPTED` and links the account; resolves the email from `AdUserId` when `Email` is blank. `forceStatus` rejects a status outside the enum; resolves by `InvitationId` directly (skipping the email lookup entirely) or by the most recent invitation for `Email`; fails cleanly with `success:false` when no invitation matches. |
 
 Tests are located in `src-test/src/com/etendoerp/go/schemaforge/` (including its `webhooks/`
-subpackage, e.g. `SFAssignUserRolesTest`/`SFUserRoleAssignmentsTest`/`SFSystemRoleTemplatesTest`).
-The `NeoPseudoSpecDispatcher` routing for `userroleassignments` and `systemroletemplates` is
-covered by `NeoPseudoSpecDispatcherTest` (same package), mirroring its existing per-endpoint
-dispatch/method-not-allowed test pairs. The `AD_Role`-templates/composition classes —
+subpackage, e.g. `SFAssignUserRolesTest`/`SFUserRoleAssignmentsTest`/`SFSystemRoleTemplatesTest`/
+`SFDebugInvitationBypassTest`) and `src-test/src/com/etendoerp/go/rest/` (e.g.
+`CompanyInvitationServiceTest`/`DebugInvitationBypassServiceTest`).
+The `NeoPseudoSpecDispatcher` routing for `userroleassignments`, `systemroletemplates`, and
+`debuginvitationbypass` is covered by `NeoPseudoSpecDispatcherTest` (same package), mirroring its
+existing per-endpoint dispatch/method-not-allowed test pairs — `debuginvitationbypass` additionally
+covers the flag-off/flag-on branch described in §8g. The `AD_Role`-templates/composition classes —
 `UserRoleCompositionServiceTest`, `UserRoleCompositionServiceIntegrationTest`,
 `UserRoleCompositionServiceOverlapIntegrationTest`,
 `UserRoleCompositionServiceOverlapReverificationTest`,
