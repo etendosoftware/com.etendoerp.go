@@ -301,6 +301,9 @@ public class InvoiceLineTaxSifSelectorPolicyTest {
       row1.put("c_tax_id", "tax-1");
       row1.put("istaxexempt", "Y");
       row1.put("isnotaxable", "N");
+      row1.put("issummary", "Y");
+      row1.put("parent_tax_id", null);
+      row1.put("em_obspti_isequivalentcharge", "N");
       row1.put("em_tbai_claveregimeniva", "05");
       row1.put("em_tbai_exemptioncause", "E1");
       row1.put("em_tbai_nonsubjectcause", null);
@@ -320,9 +323,12 @@ public class InvoiceLineTaxSifSelectorPolicyTest {
       String sql = sqlCaptor.getValue().toLowerCase();
       assertTrue("must select from c_tax", sql.contains("from c_tax"));
       assertTrue("must project c_tax_id", sql.contains("c_tax_id"));
-      // All 8 TBAI/Verifactu key columns + the two completeness flags.
+      // All 8 TBAI/Verifactu key columns + the two completeness flags + the three
+      // compound/summary-tax structural columns (issummary/parent_tax_id/
+      // em_obspti_isequivalentcharge).
       for (String column : new String[] {
           "istaxexempt", "isnotaxable",
+          "issummary", "parent_tax_id", "em_obspti_isequivalentcharge",
           "em_tbai_claveregimeniva", "em_tbai_exemptioncause", "em_tbai_nonsubjectcause",
           "em_etvfac_vat_regime", "em_etvfac_igic_regime", "em_etvfac_ipsi_regime",
           "em_etvfac_exemption_cause", "em_etvfac_cause_not_taxable",
@@ -344,6 +350,52 @@ public class InvoiceLineTaxSifSelectorPolicyTest {
       // Null DB values are never written onto the item at all (extractRow skips them).
       assertFalse(enrichedItem1.has("EM_Tbai_Nonsubjectcause"));
       assertFalse(enrichedItem1.has("em_etvfac_igic_regime"));
+
+      // ETP-4888 follow-up: the 3 STRUCTURAL columns (compound/summary-tax linkage)
+      // use plain camelCase JSON keys, unlike the SIF VALUE columns above — they carry
+      // no row[field.column] lookup contract on the frontend.
+      assertEquals("Y", enrichedItem1.getString("isSummary"));
+      assertEquals("N", enrichedItem1.getString("isEquivalentCharge"));
+      // parent_tax_id was null in the DB row -> never written onto the item at all.
+      assertFalse(enrichedItem1.has("parentTaxId"));
+    }
+  }
+
+  /**
+   * Sibling of the "all columns" test above, isolating JUST the 3 structural columns
+   * added for compound/summary-tax resolution — a summary tax row with a non-null
+   * {@code parent_tax_id} pointing at its rate-component child.
+   */
+  @Test
+  public void enrichProjectsSummaryTaxStructuralColumnsWithCamelCaseJsonKeys() throws Exception {
+    JSONArray items = new JSONArray().put(new JSONObject().put("id", "tax-summary"));
+    NeoResponse response = new NeoResponse(200, new JSONObject().put("items", items));
+
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      Connection conn = wireConnection(dalMock);
+      PreparedStatement ps = mock(PreparedStatement.class);
+      ArgumentCaptor<String> sqlCaptor = ArgumentCaptor.forClass(String.class);
+      when(conn.prepareStatement(sqlCaptor.capture())).thenReturn(ps);
+
+      Map<String, String> row = new HashMap<>();
+      row.put("c_tax_id", "tax-summary");
+      row.put("issummary", "Y");
+      row.put("parent_tax_id", "tax-child-component");
+      row.put("em_obspti_isequivalentcharge", "N");
+      stubResultSetForTax(ps, row);
+
+      policy.enrich(response, metaFor(TARGET_TAX_RATE), ctx(ENTITY_LINES, WINDOW_SALES_INVOICE));
+
+      String sql = sqlCaptor.getValue().toLowerCase();
+      assertTrue("SQL must project issummary", sql.contains("issummary"));
+      assertTrue("SQL must project parent_tax_id", sql.contains("parent_tax_id"));
+      assertTrue("SQL must project em_obspti_isequivalentcharge",
+          sql.contains("em_obspti_isequivalentcharge"));
+
+      JSONObject enrichedItem = items.getJSONObject(0);
+      assertEquals("Y", enrichedItem.getString("isSummary"));
+      assertEquals("tax-child-component", enrichedItem.getString("parentTaxId"));
+      assertEquals("N", enrichedItem.getString("isEquivalentCharge"));
     }
   }
 

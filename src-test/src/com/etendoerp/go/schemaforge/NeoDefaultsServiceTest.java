@@ -26,6 +26,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.CALLS_REAL_METHODS;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
@@ -37,9 +38,11 @@ import java.lang.reflect.Method;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
+import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.Date;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -47,6 +50,7 @@ import java.util.Map;
 import java.util.Set;
 
 import org.codehaus.jettison.json.JSONArray;
+import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.Test;
 import org.mockito.MockedStatic;
@@ -3769,6 +3773,305 @@ public class NeoDefaultsServiceTest {
 
       assertFalse("Sentinel '0' FK default must not be persisted when no doctype resolves",
           body.has("transactionDocument"));
+    }
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // applyDeclaredDefaultsToBackgroundEntity (ETP-4888) — non-HTTP background callers
+  // ═══════════════════════════════════════════════════════════════════════════
+  //
+  // These tests mockStatic(NeoDefaultsService.class, CALLS_REAL_METHODS) — the SAME idiom
+  // already used in FinancialAccountHandlerTest for self-static-mocking a sibling method on
+  // the class under test — and stub ONLY the public resolveDefaults(NeoContext, String) entry
+  // point. This lets applyDeclaredDefaultsToBackgroundEntity's own real body run end-to-end
+  // (including its private siblings resolveBackgroundDefaults/findBackgroundEntity/
+  // applyDeclaredDefaultIfMissing/applyDeclaredFkDefaultIfMissing/resolveFkDefaultTarget/
+  // coercePrimitiveDefault), while resolveDefaults's own extensively-covered query/cascade
+  // logic (see the resolveDefaults tests above) is replaced with a canned response — keeping
+  // these tests focused purely on the background-entity application contract.
+
+  private static final String BG_SPEC_NAME = "sales-invoice";
+  private static final String BG_ENTITY_NAME = "header";
+  private static final String BG_PARENT_ID = "parent-doc-1";
+
+  /**
+   * Wires NeoServletSupport.findSpec + the OBDal/OBContext chain resolveBackgroundDefaults
+   * needs, reusing an OBDal mock the caller already created (and may have added further stubs
+   * to, e.g. {@code dal.get(...)} for an FK-resolution test) rather than creating its own — a
+   * second, independent {@code OBDal.getInstance()} stub would silently shadow the caller's.
+   */
+  private static SFEntity wireBackgroundEntityLookup(MockedStatic<NeoServletSupport> servletSupportMock,
+      MockedStatic<OBDal> dalMock, MockedStatic<OBContext> obContextMock, OBDal dal) {
+    SFSpec sfSpec = mock(SFSpec.class);
+    when(sfSpec.getId()).thenReturn("spec-1");
+    servletSupportMock.when(() -> NeoServletSupport.findSpec(BG_SPEC_NAME)).thenReturn(sfSpec);
+
+    SFEntity sfEntity = mock(SFEntity.class);
+    when(sfEntity.getId()).thenReturn("sf-entity-1");
+
+    dalMock.when(OBDal::getInstance).thenReturn(dal);
+    @SuppressWarnings("unchecked")
+    OBCriteria<SFEntity> entityCriteria = mock(OBCriteria.class);
+    when(dal.createCriteria(SFEntity.class)).thenReturn(entityCriteria);
+    when(entityCriteria.list()).thenReturn(Collections.singletonList(sfEntity));
+
+    OBContext obContext = mock(OBContext.class);
+    obContextMock.when(OBContext::getOBContext).thenReturn(obContext);
+
+    return sfEntity;
+  }
+
+  private static NeoResponse cannedDefaultsResponse(JSONObject defaults) throws JSONException {
+    return new NeoResponse(200, new JSONObject().put("defaults", defaults));
+  }
+
+  /**
+   * A primitive declared-default (a date, mirroring the real-world {@code etsgDateOperation}/
+   * {@code aeatsiiFechaRegCont} fields) is filled in on a background-built entity when the
+   * caller left it blank.
+   */
+  @Test
+  public void testApplyDeclaredDefaultsToBackgroundEntityFillsBlankPrimitiveDateField()
+      throws Exception {
+    BaseOBObject entity = mock(BaseOBObject.class);
+    Entity dalEntity = mock(Entity.class);
+    Property prop = mock(Property.class);
+    when(entity.getEntity()).thenReturn(dalEntity);
+    when(entity.get("etsgDateOperation")).thenReturn(null);
+    when(dalEntity.getProperty("etsgDateOperation")).thenReturn(prop);
+    when(prop.isPrimitive()).thenReturn(true);
+    doReturn(Date.class).when(prop).getPrimitiveObjectType();
+
+    JSONObject defaults = new JSONObject().put("etsgDateOperation", "2026-08-20");
+
+    try (MockedStatic<NeoServletSupport> servletSupportMock = mockStatic(NeoServletSupport.class);
+         MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+         MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
+         MockedStatic<NeoDefaultsService> serviceMock =
+             mockStatic(NeoDefaultsService.class, CALLS_REAL_METHODS)) {
+      wireBackgroundEntityLookup(servletSupportMock, dalMock, obContextMock, dal(dalMock));
+      serviceMock.when(() -> NeoDefaultsService.resolveDefaults(any(NeoContext.class),
+          eq(BG_PARENT_ID))).thenReturn(cannedDefaultsResponse(defaults));
+
+      NeoDefaultsService.applyDeclaredDefaultsToBackgroundEntity(
+          BG_SPEC_NAME, BG_ENTITY_NAME, entity, BG_PARENT_ID);
+
+      Date expected = new SimpleDateFormat("yyyy-MM-dd").parse("2026-08-20");
+      verify(entity).set("etsgDateOperation", expected);
+    }
+  }
+
+  /**
+   * A field the caller ALREADY set explicitly on the background-built entity must never be
+   * clobbered by a declared default — mirrors the "skip if already present" rule
+   * {@link NeoDefaultsService#injectMandatoryDefaults} applies on the HTTP create path.
+   */
+  @Test
+  public void testApplyDeclaredDefaultsToBackgroundEntityNeverClobbersAlreadySetField()
+      throws Exception {
+    BaseOBObject entity = mock(BaseOBObject.class);
+    Entity dalEntity = mock(Entity.class);
+    when(entity.getEntity()).thenReturn(dalEntity);
+    // Caller already set this field explicitly (e.g. the builder's own accountingDate setter).
+    when(entity.get("etsgDateOperation")).thenReturn(new Date());
+
+    JSONObject defaults = new JSONObject().put("etsgDateOperation", "2026-08-20");
+
+    try (MockedStatic<NeoServletSupport> servletSupportMock = mockStatic(NeoServletSupport.class);
+         MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+         MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
+         MockedStatic<NeoDefaultsService> serviceMock =
+             mockStatic(NeoDefaultsService.class, CALLS_REAL_METHODS)) {
+      wireBackgroundEntityLookup(servletSupportMock, dalMock, obContextMock, dal(dalMock));
+      serviceMock.when(() -> NeoDefaultsService.resolveDefaults(any(NeoContext.class),
+          eq(BG_PARENT_ID))).thenReturn(cannedDefaultsResponse(defaults));
+
+      NeoDefaultsService.applyDeclaredDefaultsToBackgroundEntity(
+          BG_SPEC_NAME, BG_ENTITY_NAME, entity, BG_PARENT_ID);
+
+      verify(entity, never()).set(eq("etsgDateOperation"), any());
+    }
+  }
+
+  /**
+   * ETP-4888 today's addition: an FK-typed declared default (mirroring {@code
+   * aeatsiiDescription}/{@code EM_Aeatsii_Description_ID}) resolves to a real related-entity
+   * bean via {@code OBDal.get(targetEntity, id)} and is set onto the background entity.
+   */
+  @Test
+  public void testApplyDeclaredDefaultsToBackgroundEntityResolvesFkDeclaredDefaultToRelatedBean()
+      throws Exception {
+    BaseOBObject entity = mock(BaseOBObject.class);
+    Entity dalEntity = mock(Entity.class);
+    Property prop = mock(Property.class);
+    Entity targetEntity = mock(Entity.class);
+    BaseOBObject relatedBean = mock(BaseOBObject.class);
+    when(entity.getEntity()).thenReturn(dalEntity);
+    when(entity.get("aeatsiiDescription")).thenReturn(null);
+    when(dalEntity.getProperty("aeatsiiDescription")).thenReturn(prop);
+    when(prop.isPrimitive()).thenReturn(false);
+    when(prop.getTargetEntity()).thenReturn(targetEntity);
+    when(targetEntity.getName()).thenReturn("AeatsiiDescription");
+
+    JSONObject defaults = new JSONObject().put("aeatsiiDescription", "desc-id-123");
+
+    try (MockedStatic<NeoServletSupport> servletSupportMock = mockStatic(NeoServletSupport.class);
+         MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+         MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
+         MockedStatic<NeoDefaultsService> serviceMock =
+             mockStatic(NeoDefaultsService.class, CALLS_REAL_METHODS)) {
+      OBDal dal = dal(dalMock);
+      wireBackgroundEntityLookup(servletSupportMock, dalMock, obContextMock, dal);
+      when(dal.get("AeatsiiDescription", "desc-id-123")).thenReturn(relatedBean);
+      serviceMock.when(() -> NeoDefaultsService.resolveDefaults(any(NeoContext.class),
+          eq(BG_PARENT_ID))).thenReturn(cannedDefaultsResponse(defaults));
+
+      NeoDefaultsService.applyDeclaredDefaultsToBackgroundEntity(
+          BG_SPEC_NAME, BG_ENTITY_NAME, entity, BG_PARENT_ID);
+
+      verify(entity).set("aeatsiiDescription", relatedBean);
+    }
+  }
+
+  /**
+   * Returns the same {@code OBDal} mock instance that {@link #wireBackgroundEntityLookup} is
+   * about to register on {@code dalMock}, so a test can add further stubs (e.g. {@code
+   * dal.get(...)}) on it BEFORE calling {@code wireBackgroundEntityLookup}. Since {@code
+   * OBDal::getInstance} is stubbed only once per {@code MockedStatic}, this must create and
+   * register the mock itself — {@link #wireBackgroundEntityLookup} is then adjusted to reuse it
+   * via an overload, avoiding a double {@code OBDal::getInstance} stub (Mockito allows
+   * re-stubbing, but the LAST one silently wins, which would hide a bug in one of the two).
+   */
+  private static OBDal dal(MockedStatic<OBDal> dalMock) {
+    OBDal dal = mock(OBDal.class);
+    dalMock.when(OBDal::getInstance).thenReturn(dal);
+    return dal;
+  }
+
+  /**
+   * FK resolution failure — a bad/nonexistent id (record not found via {@code OBDal.get}) —
+   * must leave the field untouched and must NOT throw: "never abort the rest of the pass".
+   */
+  @Test
+  public void testApplyDeclaredDefaultsToBackgroundEntityLeavesFieldUntouchedWhenFkIdNotFound()
+      throws Exception {
+    BaseOBObject entity = mock(BaseOBObject.class);
+    Entity dalEntity = mock(Entity.class);
+    Property prop = mock(Property.class);
+    Entity targetEntity = mock(Entity.class);
+    when(entity.getEntity()).thenReturn(dalEntity);
+    when(entity.get("aeatsiiDescription")).thenReturn(null);
+    when(dalEntity.getProperty("aeatsiiDescription")).thenReturn(prop);
+    when(prop.isPrimitive()).thenReturn(false);
+    when(prop.getTargetEntity()).thenReturn(targetEntity);
+    when(targetEntity.getName()).thenReturn("AeatsiiDescription");
+
+    JSONObject defaults = new JSONObject().put("aeatsiiDescription", "does-not-exist");
+
+    try (MockedStatic<NeoServletSupport> servletSupportMock = mockStatic(NeoServletSupport.class);
+         MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+         MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
+         MockedStatic<NeoDefaultsService> serviceMock =
+             mockStatic(NeoDefaultsService.class, CALLS_REAL_METHODS)) {
+      OBDal dal = dal(dalMock);
+      wireBackgroundEntityLookup(servletSupportMock, dalMock, obContextMock, dal);
+      when(dal.get("AeatsiiDescription", "does-not-exist")).thenReturn(null);
+      serviceMock.when(() -> NeoDefaultsService.resolveDefaults(any(NeoContext.class),
+          eq(BG_PARENT_ID))).thenReturn(cannedDefaultsResponse(defaults));
+
+      NeoDefaultsService.applyDeclaredDefaultsToBackgroundEntity(
+          BG_SPEC_NAME, BG_ENTITY_NAME, entity, BG_PARENT_ID);
+
+      verify(entity, never()).set(eq("aeatsiiDescription"), any());
+    }
+  }
+
+  /**
+   * FK resolution failure — {@code prop.getTargetEntity()} returns {@code null} (property is
+   * not actually a resolvable FK) — must also leave the field untouched and not throw, and must
+   * never even reach {@code OBDal.get(...)}.
+   */
+  @Test
+  public void testApplyDeclaredDefaultsToBackgroundEntityLeavesFieldUntouchedWhenTargetEntityIsNull()
+      throws Exception {
+    BaseOBObject entity = mock(BaseOBObject.class);
+    Entity dalEntity = mock(Entity.class);
+    Property prop = mock(Property.class);
+    when(entity.getEntity()).thenReturn(dalEntity);
+    when(entity.get("aeatsiiDescription")).thenReturn(null);
+    when(dalEntity.getProperty("aeatsiiDescription")).thenReturn(prop);
+    when(prop.isPrimitive()).thenReturn(false);
+    when(prop.getTargetEntity()).thenReturn(null);
+
+    JSONObject defaults = new JSONObject().put("aeatsiiDescription", "some-id");
+
+    try (MockedStatic<NeoServletSupport> servletSupportMock = mockStatic(NeoServletSupport.class);
+         MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+         MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
+         MockedStatic<NeoDefaultsService> serviceMock =
+             mockStatic(NeoDefaultsService.class, CALLS_REAL_METHODS)) {
+      OBDal dal = dal(dalMock);
+      wireBackgroundEntityLookup(servletSupportMock, dalMock, obContextMock, dal);
+      serviceMock.when(() -> NeoDefaultsService.resolveDefaults(any(NeoContext.class),
+          eq(BG_PARENT_ID))).thenReturn(cannedDefaultsResponse(defaults));
+
+      NeoDefaultsService.applyDeclaredDefaultsToBackgroundEntity(
+          BG_SPEC_NAME, BG_ENTITY_NAME, entity, BG_PARENT_ID);
+
+      verify(entity, never()).set(eq("aeatsiiDescription"), any());
+      verify(dal, never()).get(anyString(), anyString());
+    }
+  }
+
+  /**
+   * {@code resolveBackgroundDefaults} (and therefore the whole public entry point) must be a
+   * graceful no-op — never throw, never touch the entity — when no active {@code SFSpec}
+   * matches {@code specName}.
+   */
+  @Test
+  public void testApplyDeclaredDefaultsToBackgroundEntityNoOpsWhenNoSfSpecFound() {
+    BaseOBObject entity = mock(BaseOBObject.class);
+
+    try (MockedStatic<NeoServletSupport> servletSupportMock = mockStatic(NeoServletSupport.class);
+         MockedStatic<NeoDefaultsService> serviceMock =
+             mockStatic(NeoDefaultsService.class, CALLS_REAL_METHODS)) {
+      servletSupportMock.when(() -> NeoServletSupport.findSpec("unknown-spec")).thenReturn(null);
+
+      NeoDefaultsService.applyDeclaredDefaultsToBackgroundEntity(
+          "unknown-spec", BG_ENTITY_NAME, entity, BG_PARENT_ID);
+
+      verify(entity, never()).set(anyString(), any());
+      serviceMock.verify(() -> NeoDefaultsService.resolveDefaults(any(), any()), never());
+    }
+  }
+
+  /**
+   * Same graceful no-op contract when the {@code SFSpec} resolves but no active/included {@code
+   * SFEntity} named {@code entityName} exists under it.
+   */
+  @Test
+  public void testApplyDeclaredDefaultsToBackgroundEntityNoOpsWhenNoSfEntityFound() {
+    BaseOBObject entity = mock(BaseOBObject.class);
+    SFSpec sfSpec = mock(SFSpec.class);
+    when(sfSpec.getId()).thenReturn("spec-1");
+
+    try (MockedStatic<NeoServletSupport> servletSupportMock = mockStatic(NeoServletSupport.class);
+         MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+         MockedStatic<NeoDefaultsService> serviceMock =
+             mockStatic(NeoDefaultsService.class, CALLS_REAL_METHODS)) {
+      servletSupportMock.when(() -> NeoServletSupport.findSpec(BG_SPEC_NAME)).thenReturn(sfSpec);
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      @SuppressWarnings("unchecked")
+      OBCriteria<SFEntity> entityCriteria = mock(OBCriteria.class);
+      when(dal.createCriteria(SFEntity.class)).thenReturn(entityCriteria);
+      when(entityCriteria.list()).thenReturn(Collections.emptyList());
+
+      NeoDefaultsService.applyDeclaredDefaultsToBackgroundEntity(
+          BG_SPEC_NAME, BG_ENTITY_NAME, entity, BG_PARENT_ID);
+
+      verify(entity, never()).set(anyString(), any());
+      serviceMock.verify(() -> NeoDefaultsService.resolveDefaults(any(), any()), never());
     }
   }
 }
