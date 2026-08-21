@@ -108,4 +108,38 @@ class McpNamedFiltersTest {
       assertEquals(0, McpNamedFilters.describe("garbage").length());
     }
   }
+
+  /**
+   * The failure an unknown filter name produces, which lives in {@link McpQuerySupport} but is only
+   * meaningful against this parser's output (ETP-4793 / IMP-17, evidence C14).
+   */
+  @Nested
+  @DisplayName("unknown filter name (ETP-4793 / IMP-17)")
+  class UnknownFilterName {
+
+    /**
+     * IMP-3 made this failure self-correcting by naming the valid states; IMP-17 moves them out of the
+     * prose into {@code available} and gives the response a status. It must stay a 422: the router's
+     * catch-all classifies an unrecognised exception as {@code server_error}, which would tell an
+     * agent to stop retrying a call one corrected word would fix.
+     */
+    @Test
+    @DisplayName("is a 422 whose 'available' carries the names the parser found")
+    void unknownNameIsA422WithTheAvailableNames() throws Exception {
+      Map<String, String> byName = McpNamedFilters.parseWhereByName(JSON);
+
+      McpRoutingException ex = McpRoutingException.unknownNamedFilter(
+          "nonexistent-status-probe", "sales-invoice", List.copyOf(byName.keySet()));
+      org.codehaus.jettison.json.JSONObject envelope = ex.toEnvelope();
+
+      assertEquals(422, envelope.getInt("status"));
+      assertEquals("validation_error", envelope.getString("error"));
+      assertEquals("status", envelope.getString("field"));
+      assertTrue(envelope.getString("detail").contains("nonexistent-status-probe"));
+      JSONArray available = envelope.getJSONArray("available");
+      assertEquals(2, available.length());
+      assertEquals("completed", available.getString(0));
+      assertEquals("pending", available.getString(1));
+    }
+  }
 }

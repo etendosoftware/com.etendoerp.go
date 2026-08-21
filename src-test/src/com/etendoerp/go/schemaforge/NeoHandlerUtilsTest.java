@@ -38,6 +38,7 @@ import org.codehaus.jettison.json.JSONObject;
 import org.junit.Test;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
+import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.enterprise.Locator;
@@ -859,6 +860,65 @@ public class NeoHandlerUtilsTest {
 
       assertSame(anyActive, NeoHandlerUtils.resolveWarehouseAnchorBin(warehouse, LOG));
       assertNull(NeoHandlerUtils.resolveWarehouseAnchorBin(null, LOG));
+    }
+  }
+
+  // ── ETP-4863: reanchorLinesToHeaderWarehouse ──────────────────────────────
+  //
+  // Extracted from the identical "fillMissingStorageBins" wrapper that ReturnMaterialReceipt
+  // and ReturnToVendorShipment header handlers each used to carry as their own private copy
+  // (admin-mode try/finally around ReturnShipmentUtils.assignBinsToLines + swallow-and-warn),
+  // so a 3rd/4th copy for Goods Shipment / Goods Receipt wouldn't trip SonarQube CPD.
+
+  @Test
+  public void testReanchorLinesToHeaderWarehouseNoOpForNullId() {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      NeoHandlerUtils.reanchorLinesToHeaderWarehouse(null, LOG);
+      obDalMock.verifyNoInteractions();
+    }
+  }
+
+  @Test
+  public void testReanchorLinesToHeaderWarehouseDelegatesToAssignBinsToLines() {
+    try (MockedStatic<OBContext> obContextMock = Mockito.mockStatic(OBContext.class);
+         MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<ReturnShipmentUtils> utilsMock = Mockito.mockStatic(ReturnShipmentUtils.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      ShipmentInOut doc = mock(ShipmentInOut.class);
+      when(dal.get(ShipmentInOut.class, "inout-1")).thenReturn(doc);
+
+      NeoHandlerUtils.reanchorLinesToHeaderWarehouse("inout-1", LOG);
+
+      utilsMock.verify(() -> ReturnShipmentUtils.assignBinsToLines(doc));
+      obContextMock.verify(() -> OBContext.setAdminMode(true));
+      obContextMock.verify(OBContext::restorePreviousMode);
+    }
+  }
+
+  @Test
+  public void testReanchorLinesToHeaderWarehouseSkipsAssignWhenDocNotFound() {
+    try (MockedStatic<OBContext> ignored = Mockito.mockStatic(OBContext.class);
+         MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<ReturnShipmentUtils> utilsMock = Mockito.mockStatic(ReturnShipmentUtils.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(ShipmentInOut.class, "missing")).thenReturn(null);
+
+      NeoHandlerUtils.reanchorLinesToHeaderWarehouse("missing", LOG);
+
+      utilsMock.verifyNoInteractions();
+    }
+  }
+
+  @Test
+  public void testReanchorLinesToHeaderWarehouseSwallowsException() {
+    try (MockedStatic<OBContext> obContextMock = Mockito.mockStatic(OBContext.class);
+         MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      obDalMock.when(OBDal::getInstance).thenThrow(new RuntimeException("db down"));
+
+      // Must not propagate — a re-anchor failure should never block the documentAction request.
+      NeoHandlerUtils.reanchorLinesToHeaderWarehouse("inout-1", LOG);
     }
   }
 }

@@ -234,6 +234,204 @@ Optional query params (all but `export` are optional):
 
 The export is intercepted at the two points where list responses are written: `NeoCrudHandler.handleWindowEntityCrud` (generic CRUD + entity-qualifier handlers) and `NeoRequestRouter.handleReportSpecRequest` (single-segment custom handlers such as `bank-statements`). Output is built fully in server memory from the rows the handler already returns, so large lists are streamed by the server rather than assembled in the browser.
 
+#### 4.3.1 Date format contract (ETP-4793 / IMP-16)
+
+**NEO speaks ISO-8601 dates in both directions**, on the REST API and over MCP:
+
+| Property kind | Wire format | Example |
+|---|---|---|
+| Date | `yyyy-MM-dd` | `2026-08-06` |
+| DateTime | `yyyy-MM-dd'T'HH:mm:ss` | `2026-08-06T18:55:31` |
+
+That is not a preference, it is what the layers on both sides parse: the DAL
+(`JsonUtils.createDateFormat` → `JsonToDataConverter`) on the way in, and the React form
+(`dateOnly.js`, `date-field.jsx`) on the way out.
+
+Three things inside Etendo nevertheless produce non-ISO date strings, so NEO normalizes:
+
+- **`@#Date@` defaults are always `dd-MM-yyyy`.** Core `Utility.getContext` special-cases the name
+  (`Utility.java:410`) and returns `DateTimeData.today(conn)`, a generated `.xsql` method whose
+  output format is **hardcoded**. No session value, locale or `dateFormat.java` setting can change
+  it — an earlier attempt to override it via `vars.setSessionValue("#Date", …)` was dead code and
+  has been removed.
+- **The `dateFormat.java` UI pattern**, when a value crosses a legacy boundary.
+- **Raw Postgres timestamps** from `@SQL=` defaults (`yyyy-MM-dd HH:mm:ss.ffffff+00`).
+
+Why this is a correctness issue and not cosmetics: `JsonUtils.createDateFormat()` calls
+`setLenient(true)`, so a `dd-MM-yyyy` value is **not rejected** — it is reinterpreted. `06-08-2026`
+persists as year **0012** and `24-06-2026` as `0029-12-17`. It also happens when the caller sends
+no date at all, because both write paths (`McpToolRouter`, `NeoCrudHandler`) re-run
+`injectMandatoryDefaults` immediately before saving, so the bad value is server-produced.
+
+`NeoDateFormat` (`schemaforge/util/`) is the single definition of the canonical form and the only
+place the three accepted shapes are listed. Two coercers apply it — one per write stack:
+
+| Point | Class | Effect |
+|---|---|---|
+| Read — `/defaults` response | `NeoDefaultsService.canonicalizeDateDefaults` | every date-valued default leaves as ISO |
+| Write — REST | `NeoTypeCoercionHelper.coerceField` | date branch, reached via `coerceTypes` |
+| Write — MCP | `McpToolRouterSupport.coercePrimitiveFieldValue` | same branch, mirrored |
+
+**A coercer only protects the call sites that invoke it**, and that — not the coercer — is what made
+IMP-16 read as fixed while `neo_update` still corrupted. Every path that persists must run its
+stack's pass:
+
+| Path | Invocation | Note |
+|---|---|---|
+| `POST /crud` (React form, and every `neo_batch` op via `BatchService`) | `NeoCrudHandler.executePostCreate` → `coerceTypes` | also re-run by `NeoTypeCoercionHelper.wrapForSmartclient` |
+| `PUT`/`PATCH /crud` | `NeoCrudHandler.executeUpdate` → `wrapForSmartclient` → `coerceTypes` | the REST wrapper coerces; the MCP one does not |
+| `neo_create` | `McpToolRouter.handleCreate` → `coerceFieldTypes` | mandatory: `injectMandatoryDefaults` injects `dd-MM-yyyy` server-side |
+| `neo_update` | `McpToolRouter.handleUpdate` → `coerceFieldTypes` | **added 2026-08-10**; before that this verb had no coercion pass at all |
+
+The MCP pass runs **before** the entity's `NeoHandler` pre-hook, so a hook that mirrors one date
+field into another (e.g. `AbstractInvoiceHeaderHandler#mirrorAccountingDate`) copies an
+already-canonical value. The corollary is the one known gap: a value a pre-hook *introduces* in a
+non-ISO shape is not re-canonicalized. Hooks must emit ISO.
+
+A source-reading guard (`McpWriteVerbCoercionCallSiteTest`) fails the build if a method of
+`McpToolRouter` reaches `jsonService.add`/`update` without calling `coerceFieldTypes` — a missing
+call site is invisible to the coercers' own unit tests, which passed the whole time `neo_update` was
+writing year 0015.
+
+**Which properties are eligible** is decided in one place —
+`NeoDateFormat.canonicalShapeFor(Property)` — and it is deliberately narrower than "the Java type is
+a `Date`". Etendo has **five** date-ish domain types and `JsonToDataConverter` branches on all of
+them (`Property.java:1107-1124`):
+
+| Domain type | Predicate | NEO normalizes? |
+|---|---|---|
+| `DateDomainType` | `isDate()` | ✅ → `yyyy-MM-dd` |
+| `DatetimeDomainType` | `isDatetime()` | ✅ → `yyyy-MM-dd'T'HH:mm:ss` |
+| `TimestampDomainType` | `isTime()` | ❌ left as-is |
+| `AbsoluteTimeDomainType` | `isAbsoluteTime()` | ❌ left as-is |
+| `AbsoluteDateTimeDomainType` | `isAbsoluteDateTime()` | ❌ left as-is |
+
+The last three are excluded for a concrete reason, not as margin. The two `Time` kinds are
+**time-of-day** values: the converter discards everything before the `T`, appends `+0000` and
+supplies the calendar day itself — so rewriting such a value to `yyyy-MM-dd` would delete the only
+half it reads. `AbsoluteDateTime` is explicitly timezone-free and would need an offset policy no
+caller has asked for. All three keep today's behaviour exactly.
+
+Three deliberate constraints:
+
+- **An unrecognised shape is never blanked or guessed at.** Blanking would turn a formatting problem
+  into a missing mandatory field, and a guessed date is worse than the lenient parser this replaces.
+  What happens *instead* differs per stack: REST passes it through with a `WARN`, MCP answers a
+  structured 422 — see §4.3.1.1.
+- **A non-zero zone offset is refused, not converted.** `2026-08-06T14:30:00+02:00` already reaches
+  the DAL correctly (`JsonUtils.convertFromXSDToJavaFormat` rewrites `+02:00` to `+0200`, which the
+  datetime parser honours), and the canonical form has nowhere to put an offset — dropping it would
+  shift the instant by two hours, making the fix the corruption. A **zero** offset (`Z`, `+00`,
+  `+00:00`) *is* dropped: an offset-less canonical value is read as UTC by that same method, so the
+  two are identical.
+- **The callout boundary is unchanged.** Normalization on the read path runs *after* the callout
+  cascade, and `CalloutRequestBuilder.reformatDateParams` converts ISO back to the UI pattern
+  before a legacy callout runs — so callouts receive exactly the same `dd-MM-yyyy` they did before.
+
+Full investigation, including the corrupt rows this found in a live database:
+`docs/mcp-evaluation/imps/IMP-16.md` in the `schema_forge` repo.
+
+##### 4.3.1.1 Unusable dates on the MCP write verbs — 422 (ETP-4793 / IMP-24)
+
+`neo_create` and `neo_update` **reject** a date value they cannot read, rather than letting it reach
+the DAL. What the agent used to get back was the DAL's own leak — `{"status":-4}` plus a bare
+`java.text.ParseException` naming no field, so it could not tell *which* date was wrong, or that a
+date was the problem at all. It now gets:
+
+```json
+{
+  "status": 422,
+  "error": "validation_error",
+  "detail": "One or more date values are not in a format this API can read",
+  "invalidDates": [
+    { "name": "orderDate", "received": "06/08/2026",
+      "expectedFormat": "yyyy-MM-dd", "example": "2026-08-10" }
+  ],
+  "hint": "Send dates as ISO: yyyy-MM-dd for dates, yyyy-MM-dd'T'HH:mm:ss for datetimes. …",
+  "seeAlso": "docs(topic:\"creating records\")"
+}
+```
+
+`received` is echoed back on purpose: the field name alone cannot distinguish a wrong *format* from a
+wrong *date*, and `2026-02-30` is ISO-shaped and still impossible (the strict resolver is what makes
+it an error instead of a silent slide to the 28th).
+
+Two conditions gate the rejection, and dropping either one would make it wrong:
+
+| Gate | Why |
+|---|---|
+| `NeoDateFormat.isOffsetDateTime(value)` must be false | `toCanonical` returns `null` for **two** reasons. A non-zero-offset datetime is refused *because it is already correct* (see the constraint above) — a 422 there would break a working call, not fix a broken one. The classifier exists solely to keep these two `null`s apart |
+| The value must be **caller-supplied** | A server-injected `dd-MM-yyyy` default is our bug. Answering it with a 422 hands the agent an error about a field it never sent. Those keep the pass-through `WARN`, which is the signal that the default needs fixing at source |
+
+The witness for the second gate is per-verb: `handleCreate` uses `userProvided`, the snapshot taken
+before `injectMandatoryDefaults` runs; `handleUpdate` needs none, because it never injects defaults,
+so every key in the body is the caller's.
+
+**REST stays lenient.** `NeoTypeCoercionHelper` keeps the pass-through `WARN`, following the same
+line IMP-15 drew: the React form is not an agent, it has a date picker, and changing the REST
+contract to fix an MCP ergonomics defect would be a breaking change bought for nothing. This is the
+one documented place where the two write stacks answer the same input differently.
+
+#### 4.3.2 Boolean format contract (ETP-4793)
+
+**NEO speaks real JSON booleans in both directions.** Etendo stores booleans as `char(1) 'Y'/'N'`,
+and the legacy machinery that feeds `/defaults` — AD_Column default expressions, callout responses,
+combo option values — hands those raw strings straight through. A response that mixes both shapes
+breaks any consumer that trusts the declared type: in JavaScript the string `"N"` is **truthy**, so
+an agent reading `{"printDiscount": "N"}` concludes that discount printing is on.
+
+This was observed as a **per-producer** inconsistency, not a per-spec one — which is why it looked
+so arbitrary. On the same `c_invoice` columns:
+
+| Field | `sales-invoice/header` | `purchase-invoice/header` |
+|---|---|---|
+| `printDiscount` | `true` | `"Y"` |
+| `etvfacSentToVerifac` | `"N"` | `false` |
+| `etvfacSimpinvart7273` | `false` | `"N"` |
+| `etvfacInvNoIDArt61d` | `false` | `"N"` |
+
+The direction **inverts** between the two specs. The cause is that `/defaults` is built by five
+producers and only one of them coerced: `NeoDefaultsService.coerceBooleanDefault` was reachable
+from pass 1 alone, while the callout writeback and combo preselection in
+`NeoDefaultsCascadeHelper`, `NeoHiddenMandatoryDefaultsResolver`, and anything a handler injects
+all wrote their value directly. Which fields a callout touches differs per window, so which shape a
+field ends up with differs per window too.
+
+`NeoBooleanFormat` (`schemaforge/util/`) is the single definition, applied at three points — the
+same shape as the date fix above:
+
+| Point | Class | Effect |
+|---|---|---|
+| Read — `/defaults` response | `NeoDefaultsService.canonicalizeBooleanDefaults` | post-pass: every boolean-valued default leaves as a JSON boolean |
+| Write — REST | `NeoTypeCoercionHelper.coerceField` | Boolean branch |
+| Write — MCP | `McpToolRouterSupport.coercePrimitiveFieldValue` | same branch, mirrored |
+
+**Eligibility** is `NeoBooleanFormat.isBooleanProperty(Property)` — a primitive property whose Java
+type is `Boolean`.
+
+Three deliberate constraints:
+
+- **Read and write parse differently, on purpose.** `toCanonical` is strict: it accepts `Y`/`N`/
+  `true`/`false` (case-insensitive, trimmed) and returns `null` for anything else, so an
+  unrecognised value is left **verbatim** and logged at `WARN`. Turning an unknown string into
+  `false` would state something the ERP never stated. `toLenientBoolean`, used on the write path,
+  keeps the pre-existing behaviour where anything not recognised as true becomes `false` —
+  tightening that would reject payloads agents send today.
+- **Case sensitivity is no longer surface-dependent.** The two write coercers disagreed: MCP
+  accepted a lowercase `"y"`, REST did not, so the same payload coerced differently depending on how
+  it arrived. Both now share one parse.
+- **The callout boundary is unchanged.** The read-path normalization is a post-pass that runs
+  *after* the cascade, so legacy callouts receive exactly what they received before. The pass-1
+  `coerceBooleanDefault` is kept for the same reason — it runs before the cascade and its timing is
+  part of today's callout input.
+
+The React front end is **not** affected and needs no change: every boolean it reads from the server
+already goes through an explicit `=== true || === 'Y' || === 'true'` guard (`EntityForm.jsx`,
+`InlineLinesPanel.jsx`, `DataTable.jsx`, `listModalCells.jsx`, and ~26 more sites), so `"N"` was
+never misread as checked. Those guards exist *because* the backend did not guarantee the type;
+consolidating them behind a single helper is a follow-up, not part of this change — React still
+talks to endpoints that do not run this post-pass.
+
 ### 4.4 Selectors (FK Dropdowns)
 
 The selector service resolves foreign key references and provides searchable dropdown values.
@@ -821,7 +1019,8 @@ response down to the callable actions.
 }
 ```
 
-**Response** (`{spec, entity, actions, actionCount}` — the full `fields` array is dropped):
+**Response** (`{spec, entity, actions, actionCount, invokableCount}` — the full `fields` array is
+dropped):
 
 ```json
 {
@@ -847,9 +1046,21 @@ response down to the callable actions.
       "processType": "OBUIAPP",
       "processName": "Cancel Document",
       "processId": "..."
+    },
+    {
+      "name": "calculatePromotions",
+      "label": "Calculate Promotions",
+      "type": "button",
+      "invokable": false,
+      "notInvokableReason": "discarded: this action is not part of the curated agent surface for this window",
+      "action": "Calculate_Promotions",
+      "processType": "Classic",
+      "processName": "Calculate Promotions",
+      "processId": "..."
     }
   ],
-  "actionCount": 2
+  "actionCount": 3,
+  "invokableCount": 2
 }
 ```
 
@@ -858,9 +1069,37 @@ Behavior details (`McpActionsView`):
 - The view is a **pure re-shape** of the field array `neo_schema` already builds
   (`McpSchemaFieldBuilder.buildSchemaFieldsArray`) — it simply filters down to the `type:"button"`
   entries, in their original order. No additional DAL/model access is performed.
-- Each returned action is already fully self-describing: `invokeVia:"neo_action"` plus `action`,
-  `processType`, `processName`, and `processId` tell the agent exactly how to invoke it via
-  `neo_action` — no follow-up `neo_schema` call on the full entity is required.
+- Each returned action is already fully self-describing: `action`, `processType`, `processName` and
+  `processId` tell the agent exactly how to invoke it via `neo_action` — no follow-up `neo_schema`
+  call on the full entity is required.
+- **`invokeVia` is a claim, not a decoration (IMP-21).** Fire only the actions that carry
+  `invokeVia:"neo_action"`. An action the agent cannot run instead reports `invokable: false` plus a
+  `notInvokableReason`, for one of three causes, reported in that order: it is curated
+  `visibility:"discarded"` (deliberately out of this window's agent surface); AD itself does not
+  display the button in the tab (`AD_Field.isDisplayed = 'N'`), which makes it an internal flag
+  rather than a user-facing action; or the AD button column has no process wired behind it so there
+  is nothing to run. Uncurated buttons that AD displays and that have a process stay invokable —
+  absence of curation is not a decision to exclude. A button with **no** `AD_Field` in the tab is not
+  hidden: module-contributed buttons routinely have none, and treating that as hidden would retire
+  them.
+- The **hidden** check exists because `Processing` and `DocAction` on `C_Invoice` point at the *same*
+  `AD_Process` (`111`, `C_Invoice_Post0`). `Processing` is the classic procedure's internal
+  "in progress" flag, hidden in all three windows that have a field for it, and it was the one action
+  the catalog still offered as callable while carrying no `actionValues`, no `actionParameter` and no
+  `agentPrompt`. Curation cannot express this: `Processing` is curated `system`, which states that
+  the server fills a payload value and says nothing about a button.
+- **`invokableCount`** sits next to `actionCount` so the split is visible before reading the array.
+  On `sales-invoice/header` the catalog has 22 actions and only a handful are callable.
+- A button carries **no `required` flag** (IMP-21). A button has no payload value, so AD's NOT NULL
+  flag on the trigger column says nothing about what the agent must send; it used to be reported as
+  `required: true` right next to an honest `userRequired: false`.
+- **`businessCritical`** is derived for actions that curation left unflagged: a button bound to the
+  shared `docAction` list (it drives the document state machine, and that binding is what
+  `actionParameter` records) and the `Posted` accounting trigger are business-critical by
+  construction. Curated flags always win — the derivation only fills gaps, never clears a flag.
+- Module-contributed buttons have no `AD_Field` in the tab, so their label fell back to the raw
+  column name (`EM_Psd2_Generate Bank Payment`). The fallback chain is now curated `AD_Field` label
+  → process name → the column name with its `EM_<module>_` prefix stripped.
 - An entity with no button fields returns `"actions": []` and `"actionCount": 0` (never `null`).
 
 **When to use it:** the agent knows the entity and only wants the menu of things it can *do* to a
@@ -900,14 +1139,16 @@ Resolution rules (`McpToolRouterSupport.resolvePrimaryEntityName`):
   and report (`R`) specs never carry it.
 - A spec with no included entities yields `null`, and the key is omitted from the response entirely.
 
-#### 4.12.3 FK-by-name resolution on `neo_create` / `neo_update` (IMP-4)
+#### 4.12.3 FK resolution on the write verbs (IMP-4, extended to every verb by IMP-15)
 
 Historically every foreign-key field in a write body required the exact 32-character record id,
 forcing an agent to call `neo_selectors` first even for an obvious single-match lookup. Wave 3 lets a
 write body pass a **human search string** for an FK field; the router resolves it to the real record
 id server-side before persisting, via the same selector path `neo_selectors` uses
 (`NeoSelectorService.querySelectorByColumn`, limit 10). This runs for both `neo_create` and
-`neo_update` (`McpFkResolver.resolveFkNames`, invoked from `handleCreate` and `handleUpdate`).
+`neo_update` (`McpFkResolver.resolveFkNames`, invoked from `handleCreate` and `handleUpdate`) and,
+since IMP-15, on every `neo_batch` operation body (`McpToolRouter.resolveBatchFkNames`, run before
+the batch transaction opens).
 
 **Request** — `businessPartner` given by name instead of id:
 
@@ -931,9 +1172,20 @@ that record's id and the create proceeds normally.
 - A value is treated as an already-valid id — and left untouched — when it is exactly **32 hex
   characters** (`[0-9A-Fa-f]{32}`, upper/lower/mixed case). `looksLikeId` matches `95E2A8B5…`; it
   rejects a 31-char string, a string with a non-hex char, an empty string, and `null`.
+- **Id-first (ETP-4793 / IMP-15).** The shape check above is not the only id test: every Etendo
+  `_ID` column is a `VARCHAR`, and legacy master data (currency, UOM, document type, tax rate) still
+  carries short numeric ids such as `"102"` for EUR. Any value that fails the shape check is
+  therefore **probed as a record id of the target entity** before the selector runs, and only falls
+  through to the name lookup when no readable record carries it. This is what makes
+  `neo_defaults → currency:"102" → neo_create` work: before IMP-15 that value went down the name
+  path, matched no currency literally *named* `"102"`, and came back as a 422 advising the agent to
+  "pass the exact record id instead" — which is what it had done.
 - Only FK fields are considered: a key is resolved only if it maps to a DAL property that is a
   non-primitive association with a target entity. Non-FK fields, non-string values, and empty strings
   are never touched.
+- The same resolver runs on **`neo_create`, `neo_update` and `neo_batch`** (each op's `body`), so one
+  field body is accepted verbatim by every write verb. In a batch, `"$ref:<opId>"` placeholders are
+  skipped — the op they point at has not run yet, so the value is neither an id nor a name.
 
 **Outcomes by selector match count** (`decideOutcome`):
 
@@ -952,7 +1204,7 @@ Both error shapes are returned as an MCP error content payload with HTTP-style
 {
   "status": 422,
   "error": "not_found",
-  "detail": "No match for 'businessPartner'='Acme Corp'. Use neo_selectors to search, or pass the exact record id instead.",
+  "detail": "No match for 'businessPartner'='Acme Corp': it is neither the id of an existing record nor a value any selector matched. Use neo_selectors to find a valid one.",
   "field": "businessPartner"
 }
 ```
@@ -987,6 +1239,108 @@ If the selector lookup itself fails (HTTP status ≥ 400 or a null body) or no `
 resolved for the key, the resolver logs a warning/debug line and leaves the value as-is rather than
 failing the write — the downstream DAL then surfaces its own validation error for the unresolved
 reference.
+
+#### 4.12.4 `neo_batch` failure envelope (IMP-15)
+
+`BatchService` serves both the REST `/batch` endpoint and `neo_batch`, and its failure body forwards
+the offending sub-response verbatim under `error.detail`. For a REST caller that is useful; for an
+agent it meant a raw DAL payload — `{"response":{"status":-4,"errors":{…}}}` — with no stable code to
+branch on. The MCP layer therefore rewrites the failure in place
+(`McpToolRouterSupport.toMcpBatchFailure`) into the same envelope every other MCP error uses, while
+the REST contract stays untouched:
+
+```json
+{
+  "committed": false,
+  "atomic": true,
+  "failedAt": { "index": 1, "id": "l0" },
+  "persisted": [],
+  "hint": "Nothing was persisted: the batch was rolled back as a unit …",
+  "error": {
+    "status": 400,
+    "error": "validation_error",
+    "detail": "Operation 'l0' rejected by server: id: New object Currency(null) …",
+    "seeAlso": "docs(topic:\"creating records\")"
+  }
+}
+```
+
+`error` is one of `validation_error` (any other 4xx), `not_found` (404), `method_not_allowed` (405)
+or `server_error` (5xx, and the batch-wide failure reported at index `-1`) — only the first three are
+worth retrying with a corrected request. The DAL's own text is preserved inside `detail`; its numeric
+`status: -4` is dropped, since it names nothing an agent can act on.
+
+##### 4.12.4.1 `atomic` / `persisted` — the batch rolls back as a unit (IMP-23)
+
+**`neo_batch` and `POST /batch` are atomic**: a failure rolls back every operation, so the recovery
+is to fix the operation named in `failedAt` and retry the whole batch. `atomic: true` with
+`persisted: []` is the normal failure shape. Both keys are present on every failure body, empty
+array included — "nothing landed" and "we are not saying" must not look alike to a caller.
+
+**They were not atomic until IMP-23 option B**, and the history explains the two keys. `BatchService`
+always held a single transaction — one `commitAndClose()` after the loop, `rollbackAndClose()` on
+failure — but each op reached core's `DefaultJsonDataService#update`, whose success branch ends with
+an unconditional `OBDal.getInstance().commitAndClose()`. Every op committed itself and the batch's
+rollback found an empty session, so a failure at op *n* left ops `0..n-1` durable. That commit cannot
+be suppressed from outside — it takes no parameter, `SessionHandler#setDoRollback` is read only by
+`DalThreadHandler` at thread end, and disabling triggers makes `commitAndClose` throw — so the batch
+now routes through `NeoBatchJsonDataService`, core's write path subclassed with the commit deferred
+to `BatchService`. The failure mode was asymmetric (a validation or FK failure is caught before any op
+runs and looked atomic; a persist-time failure left records behind), which is why it read as
+intermittent across four benchmark runs, and why a `sales-order` header sat orphaned for five days.
+
+**The one case that is still not atomic**, reported rather than hidden: an operation whose handler
+runs an Etendo process commits inside that process by design (`ProcessInvoiceUtil#process`). No
+caller-side transaction ownership can undo that. `BatchService` detects it generically — a
+`commitAndClose()` underneath closes the Hibernate session, so the `Session` identity changes
+mid-batch — and then reports `atomic: false` with `persisted` naming the records that outlived the
+rollback.
+
+| `atomic` | `persisted` | What the caller does |
+|---|---|---|
+| `true` | `[]` | Fix the op in `failedAt`, retry the whole batch |
+| `false` | the surviving ops | Delete those records, or reuse them and resubmit only the remaining ops — a plain retry duplicates them |
+
+So a caller must **check `atomic` before retrying** rather than assuming either outcome.
+
+Unchanged on success: a fully successful batch still returns `committed:true` with every `recordId`.
+
+#### 4.12.5 `neo_list` / `neo_get` — unknown projection fields (IMP-18)
+
+The `fields:[…]` projection is a whitelist, so a misspelt name used to be indistinguishable from a
+field that simply held no value: the key was absent from the row either way. `neo_schema` already
+reported its rejects (§ its own `fields` argument, `unknownFields`), and the two tools now behave the
+same way — one argument name, one contract.
+
+Any requested name the entity cannot return comes back under `response`, next to `data`, sorted:
+
+```json
+{
+  "response": {
+    "data": [ { "id": "…", "documentNo": "INV-1" } ],
+    "unknownFields": ["totalGross"]
+  }
+}
+```
+
+Three decisions worth knowing, because each one is a case where the obvious implementation lies:
+
+- **Validated against what the entity can emit, not against the rows returned.** On an empty result
+  set no row can answer the question — and that is exactly when a typo is most expensive, since the
+  agent reads "no matches" and concludes the data is missing rather than that it asked wrong.
+- **The emittable set is the spec's exposure, post-rename** (`NeoFieldFilter.emittableResponseKeys()`):
+  API keys, not DAL property names. A property the spec does not include, or that is served under a
+  `javaQualifier` alias, is just as unreachable for the caller as one that does not exist — so
+  requesting `dateAcct` when the spec exposes `accountingDate` is reported. When no `ETGO_SF_FIELD`
+  config exists the filter is inactive and the response is unfiltered, so the DAL entity's property
+  list is the fallback; if neither source resolves, nothing is reported (silence beats accusing a
+  valid field).
+- **Only an explicit `fields:[…]` whitelist is judged.** A `view:"summary"` set is derived server-side
+  from properties that already resolved, so an unknown name there would be our bug, not the caller's.
+
+A requested `$_identifier` companion is normalised to its base property, for both the projection and
+the validation — `fields:["businessPartner$_identifier"]` returns the FK *and* its label (it used to
+return only `id`) and is never mislabelled as unknown.
 
 ---
 
@@ -1281,7 +1635,7 @@ NEO Headless enforces security at multiple levels:
    | Entry point | Where | Refusal |
    |---|---|---|
    | REST CRUD | `NeoCrudHandler#handleWindowEntityCrud` | `405` `"<METHOD> not enabled for <entity>"` |
-   | `/batch` + MCP `neo_batch` | `BatchService#createRecord` (the batch enters at `handleDefault`, i.e. after the CRUD gate) | per-op `405`, whole batch rolled back |
+   | `/batch` + MCP `neo_batch` | `BatchService#createRecord` (the batch enters at `handleDefault`, i.e. after the CRUD gate) | per-op `405`; the batch stops there and rolls back the earlier ops — see §4.12.4.1 |
    | MCP `neo_create` / `neo_update` / `neo_delete` | `McpToolRouterSupport#requireMethodEnabled` | MCP tool error naming the enabled methods and stating the entity is read-only |
 
    Before ETP-4254 only the REST path checked them, so turning the mutation flags off on a
