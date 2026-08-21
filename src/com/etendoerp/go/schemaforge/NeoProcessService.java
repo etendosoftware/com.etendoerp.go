@@ -928,11 +928,20 @@ public class NeoProcessService {
 
     if (handlerResult.has(MESSAGE)) {
       JSONObject message = handlerResult.getJSONObject(MESSAGE);
-      String severity = message.optString("severity", SUCCESS);
       String text = message.optString("text", "");
+      // ETP-4783: some OBUIAPP handlers (e.g. SII MultiEnvioFactura early-return path) omit
+      // "severity" on failure — they return {message:{title:"Error",text:"..."}} without the
+      // severity field.  Defaulting to SUCCESS masked real errors as "sent OK".  Rule: when
+      // "severity" is absent but "text" is non-empty, treat it as an error; an empty text
+      // with no severity is harmless and keeps the SUCCESS default.
+      String severityDefault = StringUtils.isNotEmpty(text) ? ERROR : SUCCESS;
+      String severity = message.has("severity")
+          ? message.getString("severity")
+          : severityDefault;
+      String rawText = safeParseTranslation(text);
 
       result.put(STATUS, severity);
-      result.put(MESSAGE, safeParseTranslation(text));
+      result.put(MESSAGE, rawText);
 
       if (ERROR.equals(severity)) {
         return new NeoResponse(400, result);

@@ -187,7 +187,11 @@ public class CreateInvoiceShipmentHandler implements NeoHandler {
       shipLine.setLineNo(lineNo);
       shipLine.setProduct(invLine.getProduct());
       shipLine.setUOM(invLine.getUOM());
-      shipLine.setStorageBin(locator);
+      // ETP-4863: anchor to the shipment's OWN warehouse, not just whatever warehouse `locator`
+      // was originally resolved for — same guarantee every other M_InOutLine write path in the
+      // module makes. See InOutLineFromOrderFactory#createAndLinkLine for the reference pattern.
+      shipLine.setStorageBin(
+          NeoHandlerUtils.anchorLocatorToWarehouse(locator, shipment.getWarehouse(), log));
       shipLine.setMovementQuantity(qty);
       if (invLine.getSalesOrderLine() != null) {
         shipLine.setSalesOrderLine(invLine.getSalesOrderLine());

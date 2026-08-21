@@ -18,10 +18,13 @@
 package com.etendoerp.go.common;
 
 import java.io.IOException;
+import java.util.Map;
 
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.base.HttpBaseServlet;
@@ -31,12 +34,16 @@ import org.openbravo.base.HttpBaseServlet;
  *
  * Mapped to /sws/neo/currency-format via AD_MODEL_OBJECT registration.
  *
- * GET /sws/neo/currency-format — returns {"thousandsSeparator": ".", "decimalSeparator": ","}.
- * Not sensitive data (pure UI formatting), so no authentication is required — same
- * reasoning already applied to ReportSelectorsServlet.
+ * GET /sws/neo/currency-format — returns
+ * {"thousandsSeparator": ".", "decimalSeparator": ",", "symbolRightSide": {"EUR": true, "USD": false, ...}}.
+ * `symbolRightSide` is read from `C_CURRENCY.ISSYMBOLRIGHTSIDE` (ETP-4314 follow-up) — no
+ * currency is hardcoded as an exception on the frontend, it reads whatever Etendo Classic's
+ * own reference data says. Not sensitive data (pure UI formatting), so no authentication is
+ * required — same reasoning already applied to ReportSelectorsServlet.
  */
 public class NeoCurrencyFormatServlet extends HttpBaseServlet {
 
+  private static final Logger LOG = LogManager.getLogger(NeoCurrencyFormatServlet.class);
   private static final String ALLOWED_METHODS = "GET, OPTIONS";
   private static final String ALLOWED_HEADERS = "Content-Type";
 
@@ -49,10 +56,28 @@ public class NeoCurrencyFormatServlet extends HttpBaseServlet {
       JSONObject body = new JSONObject();
       body.put("thousandsSeparator", config.getThousandsSeparator());
       body.put("decimalSeparator", config.getDecimalSeparator());
+      body.put("symbolRightSide", buildSymbolRightSideJson());
       ServletResponseUtils.writeJson(response, HttpServletResponse.SC_OK, body);
     } catch (JSONException e) {
       ServletResponseUtils.sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
           "Failed to build currency-format response");
     }
+  }
+
+  /**
+   * Builds the {@code symbolRightSide} map, failing soft to an empty object on any DB
+   * error — this field is additive, so a problem reading it must never take down the
+   * thousands/decimal separators the rest of the app depends on.
+   */
+  private JSONObject buildSymbolRightSideJson() throws JSONException {
+    JSONObject json = new JSONObject();
+    try {
+      for (Map.Entry<String, Boolean> entry : NeoCurrencySymbolPositions.fetchAll().entrySet()) {
+        json.put(entry.getKey(), entry.getValue());
+      }
+    } catch (RuntimeException e) {
+      LOG.warn("Failed to read C_CURRENCY.ISSYMBOLRIGHTSIDE — symbolRightSide will be empty", e);
+    }
+    return json;
   }
 }

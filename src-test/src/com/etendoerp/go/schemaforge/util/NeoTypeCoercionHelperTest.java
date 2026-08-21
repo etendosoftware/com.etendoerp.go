@@ -155,6 +155,22 @@ class NeoTypeCoercionHelperTest {
     }
 
     @Test
+    void coercesBooleanCaseInsensitively() {
+      // ETP-4793: this path used to require an uppercase "Y" while the MCP coercer accepted "y",
+      // so the same payload coerced differently depending on which surface it arrived through.
+      // Both now share NeoBooleanFormat.
+      Property prop = mock(Property.class);
+      when(prop.isPrimitive()).thenReturn(true);
+      when(prop.getPrimitiveObjectType()).thenReturn((Class) Boolean.class);
+      when(entity.getProperty("active")).thenReturn(prop);
+
+      Map<String, Object> coerced = new HashMap<>();
+      NeoTypeCoercionHelper.coerceField(entity, "active", "y", coerced);
+
+      assertEquals(true, coerced.get("active"));
+    }
+
+    @Test
     void skipsNonPrimitiveProperty() {
       Property prop = mock(Property.class);
       when(prop.isPrimitive()).thenReturn(false);
@@ -185,6 +201,136 @@ class NeoTypeCoercionHelperTest {
 
       Map<String, Object> coerced = new HashMap<>();
       NeoTypeCoercionHelper.coerceField(entity, "amount", "", coerced);
+
+      assertTrue(coerced.isEmpty());
+    }
+
+    /**
+     * ETP-4793 / IMP-16. These four pin the date branch. It matters more than it looks: the DAL
+     * parses dates leniently, so a {@code dd-MM-yyyy} value reaching persistence is stored as
+     * year 0012 instead of failing — this branch is the last place it can be repaired, and it
+     * fires even when the caller sent no date, because {@code injectMandatoryDefaults} resolves
+     * the server default (always {@code dd-MM-yyyy}, from core's {@code DateTimeData.today})
+     * immediately before coercion runs.
+     */
+    @Test
+    @DisplayName("normalizes a dd-MM-yyyy date to ISO — the year-0012 regression")
+    void coercesUiPatternDateToIso() {
+      Property prop = mock(Property.class);
+      when(prop.isPrimitive()).thenReturn(true);
+      when(prop.getPrimitiveObjectType()).thenReturn((Class) java.util.Date.class);
+      when(prop.isDate()).thenReturn(true);
+      when(entity.getProperty("orderDate")).thenReturn(prop);
+
+      Map<String, Object> coerced = new HashMap<>();
+      NeoTypeCoercionHelper.coerceField(entity, "orderDate", "06-08-2026", coerced);
+
+      assertEquals("2026-08-06", coerced.get("orderDate"));
+    }
+
+    @Test
+    @DisplayName("leaves an already-ISO date out of the coerced map")
+    void isoDateIsNotRewritten() {
+      Property prop = mock(Property.class);
+      when(prop.isPrimitive()).thenReturn(true);
+      when(prop.getPrimitiveObjectType()).thenReturn((Class) java.util.Date.class);
+      when(prop.isDate()).thenReturn(true);
+      when(entity.getProperty("orderDate")).thenReturn(prop);
+
+      Map<String, Object> coerced = new HashMap<>();
+      NeoTypeCoercionHelper.coerceField(entity, "orderDate", "2026-08-06", coerced);
+
+      assertTrue(coerced.isEmpty());
+    }
+
+    @Test
+    @DisplayName("a datetime property keeps its time component")
+    void datetimeKeepsTime() {
+      Property prop = mock(Property.class);
+      when(prop.isPrimitive()).thenReturn(true);
+      when(prop.getPrimitiveObjectType()).thenReturn((Class) java.util.Date.class);
+      when(prop.isDatetime()).thenReturn(true);
+      when(entity.getProperty("movementDate")).thenReturn(prop);
+
+      Map<String, Object> coerced = new HashMap<>();
+      NeoTypeCoercionHelper.coerceField(entity, "movementDate",
+          "2026-08-06 18:55:31.567837+00", coerced);
+
+      assertEquals("2026-08-06T18:55:31", coerced.get("movementDate"));
+    }
+
+    @Test
+    @DisplayName("an unrecognized date shape is passed through verbatim, not blanked")
+    void unrecognizedDateIsLeftAlone() {
+      Property prop = mock(Property.class);
+      when(prop.isPrimitive()).thenReturn(true);
+      when(prop.getPrimitiveObjectType()).thenReturn((Class) java.util.Date.class);
+      when(prop.isDate()).thenReturn(true);
+      when(entity.getProperty("orderDate")).thenReturn(prop);
+
+      Map<String, Object> coerced = new HashMap<>();
+      NeoTypeCoercionHelper.coerceField(entity, "orderDate", "06/08/2026", coerced);
+
+      // Nothing is written, so the caller's original value survives untouched. Substituting a
+      // guessed date would be worse than the lenient parser this branch exists to protect.
+      assertTrue(coerced.isEmpty());
+    }
+
+    /**
+     * A time-of-day property is a {@code java.util.Date} too, and its JSON value looks like a
+     * datetime — so a gate written on the Java type alone would rewrite it. It must not:
+     * {@code JsonToDataConverter} keeps only the part after the {@code T} for these properties
+     * and supplies the calendar day itself, so producing {@code yyyy-MM-dd} here would delete
+     * the only half that is read.
+     */
+    @Test
+    @DisplayName("a time-of-day property is left untouched — the gate is the domain type")
+    void timePropertyIsNotTouched() {
+      Property prop = mock(Property.class);
+      when(prop.isPrimitive()).thenReturn(true);
+      when(prop.getPrimitiveObjectType()).thenReturn((Class) java.util.Date.class);
+      when(prop.isTime()).thenReturn(true);
+      when(entity.getProperty("startTime")).thenReturn(prop);
+
+      Map<String, Object> coerced = new HashMap<>();
+      NeoTypeCoercionHelper.coerceField(entity, "startTime", "2026-08-06T14:30:00", coerced);
+
+      assertTrue(coerced.isEmpty());
+    }
+
+    @Test
+    @DisplayName("an absolute-datetime property is left untouched, time included")
+    void absoluteDateTimePropertyIsNotTouched() {
+      Property prop = mock(Property.class);
+      when(prop.isPrimitive()).thenReturn(true);
+      when(prop.getPrimitiveObjectType()).thenReturn((Class) java.util.Date.class);
+      when(prop.isAbsoluteDateTime()).thenReturn(true);
+      when(entity.getProperty("created")).thenReturn(prop);
+
+      Map<String, Object> coerced = new HashMap<>();
+      NeoTypeCoercionHelper.coerceField(entity, "created", "06-08-2026 14:30:00", coerced);
+
+      assertTrue(coerced.isEmpty());
+    }
+
+    /**
+     * A non-zero offset already reaches the DAL correctly — {@code convertFromXSDToJavaFormat}
+     * rewrites {@code +02:00} to {@code +0200} and the lenient datetime parser honours it. The
+     * canonical form has nowhere to put an offset, so dropping it would shift the instant by two
+     * hours: the fix would become the corruption. Refusing the conversion is the only safe move.
+     */
+    @Test
+    @DisplayName("a datetime with a non-zero offset is refused, never shifted to UTC")
+    void nonZeroOffsetIsRefused() {
+      Property prop = mock(Property.class);
+      when(prop.isPrimitive()).thenReturn(true);
+      when(prop.getPrimitiveObjectType()).thenReturn((Class) java.util.Date.class);
+      when(prop.isDatetime()).thenReturn(true);
+      when(entity.getProperty("movementDate")).thenReturn(prop);
+
+      Map<String, Object> coerced = new HashMap<>();
+      NeoTypeCoercionHelper.coerceField(entity, "movementDate", "2026-08-06T14:30:00+02:00",
+          coerced);
 
       assertTrue(coerced.isEmpty());
     }

@@ -111,7 +111,7 @@ class PaymentRegistrationServiceTest {
     when(obDal.getSession()).thenReturn(session);
 
     // paymentListItem (exercised by every handleListPayments test with a non-empty result)
-    // calls PisPaymentService.hasLinkedPisPayment for the "viaPis" badge — stub it here once
+    // calls PisPaymentService.linkedPisPayment for the "viaPis" badge — stub it here once
     // so every test gets a real, non-null OBCriteria instead of Mockito's default null.
     OBCriteria<PisPayment> pisPaymentCriteria = mock(OBCriteria.class);
     when(obDal.createCriteria(PisPayment.class)).thenReturn(pisPaymentCriteria);
@@ -1831,5 +1831,4 @@ class PaymentRegistrationServiceTest {
           eq(beyond), any(), any(), anyBoolean()), never());
     }
   }
-
 }
