@@ -1,8 +1,16 @@
 # Feature Flags and the Paid Tenant Upgrade
 
-Backend reference for the `tenant-upgrade` feature (ETP-4686, epic ETP-3504): how feature flags are
-evaluated on the server, how the onboarding paywall gates a second tenant, and how a tenant's
-commercial plan is recorded.
+Backend reference for the paid productive-environment capability (ETP-4686, ETP-4966, epic
+ETP-3504): how feature flags are evaluated on the server, how the onboarding paywall gates an
+additional environment, and how an environment's commercial plan is recorded.
+
+> **The `tenant-upgrade` flag was retired in ETP-4966.** The capability is permanent and cannot be
+> switched off. It was gated by a key the web client resolved through ConfigCat and the backend
+> through local properties, and the backend's copy was unset in *every* deployed task definition —
+> so the browser offered a Stripe checkout the backend did not believe in. Accounts were charged and
+> the paywall short-circuited to `ALLOWED` without ever reading the payment, which shipped paying
+> customers a Demo environment with no error anywhere. §1 documents the flag stack that remains for
+> future flags; §2 onwards documents the paywall, which no longer consults it.
 
 ## 1. Feature flag stack
 
@@ -52,9 +60,18 @@ A flag `my-flag` is read from `etendo.go.flags.my-flag`, resolved in priority or
 property, `Openbravo.properties`, environment variable `ETGO_FLAG_MY_FLAG` (uppercased, every
 non-alphanumeric character replaced by `_`). See `com.etendoerp.go.common.GoRuntimeProperties`.
 
+No backend flag is declared today: `tenant-upgrade` was the only one and it retired with ETP-4966.
+The stack stays as the entry point for the next one — declare its key as a constant on
+`GoFeatureFlags` and add its row here.
+
 | Flag | Property | Environment variable | Default |
 |------|----------|---------------------|---------|
-| `tenant-upgrade` | `etendo.go.flags.tenant-upgrade` | `ETGO_FLAG_TENANT_UPGRADE` | absent ⇒ **`false`** |
+| *(none)* | `etendo.go.flags.<key>` | `ETGO_FLAG_<KEY>` | absent ⇒ **`false`** |
+
+**Lesson from the retired flag, worth honouring for the next one:** a flag whose two ends read from
+different control planes has no single truth. Either both ends resolve the same key from the same
+control plane, or the backend is the only evaluator and the browser asks it. An unset backend key is
+indistinguishable from a disabled feature — which is how a charged account got a free environment.
 
 Accepted affirmatives: `true`, `Y`, `yes`, `1`. Accepted negatives: `false`, `N`, `no`, `0`
 (case-insensitive).
@@ -63,10 +80,17 @@ Because flags come from configuration, this provider serves **environment-level 
 per-user targeting**. The evaluation context is accepted for API compatibility and passed through,
 but does not affect the result. Per-user bucketing arrives with the hosted provider.
 
-### Targeting key — OPEN, must be settled before a targeting-aware provider lands
+### Targeting key — still OPEN for any future flag, no longer blocking this capability
 
-The backend targets on the **account email**. The web client must use the same value or the two ends
-will bucket the same user differently. **This is not yet resolved on the client side**, deliberately.
+Retiring `tenant-upgrade` removed this divergence's only live consumer: the paid-environment
+capability no longer evaluates a flag, so the two ends can no longer disagree about it. Everything
+below therefore describes a precondition for the **next** targeting-aware flag, not an open defect in
+this feature. It is kept because the trap is real and undiscovered-by-default: this whole section
+existed, and was accurate, while the feature it described silently failed for exactly the reason it
+warned about.
+
+The backend targets on the **account email**. A web client must use the same value or the two ends
+will bucket the same user differently. **This is not resolved on the client side**, deliberately.
 
 The client does not persist the account email. The only account identity it stores (`sf_auth_user`)
 is written by `buildEnvironmentSessionStorage` in `@etendosoftware/etendo-go-core` as
@@ -80,8 +104,8 @@ That is necessary but **not sufficient**, for two reasons found during integrati
    `return data.environments || []`, so anything outside that array never reaches the caller. Reading
    `accountEmail` requires a direct `fetch` rather than the helper — which is the default path.
 2. **Scope mismatch.** The OpenFeature evaluation context has to be set **app-wide at bootstrap**,
-   before any gated UI renders — the flag decides whether the `/upgrade` entry point is shown at all,
-   so it is evaluated long before anyone reaches that page. Setting the context from `/upgrade` would
+   before any gated UI renders — a flag that decides whether an entry point is shown at all is
+   evaluated long before anyone reaches that page. Setting the context from that page would
    make a user who visits it bucket on email and a user who never does bucket on username: the same
    user bucketing differently depending on navigation history. That is worse than being uniformly
    wrong, because it disappears into aggregates instead of showing up as a clean skew.
@@ -109,8 +133,11 @@ in the functional repo.
 | Provider registration failed | No provider bound; every flag resolves to its default |
 | Unknown flag key, type mismatch, unexpected error | Default |
 
-The code default for `tenant-upgrade` is **`false`**, so with no configuration at all the product
-behaves exactly as it did before this feature.
+Every flag's code default is **`false`**, so with no configuration at all a gated feature stays
+hidden. Note what that guarantee does *not* cover, and what ETP-4966 paid for: defaulting to `false`
+protects unfinished work from leaking, but it also makes "nobody configured this" and "this is
+deliberately off" the same observable state. A flag that gates something the user can already pay
+for must therefore never be the only thing standing between a payment and its effect.
 
 Only boolean flags are backed by configuration. The other OpenFeature types return the caller's
 default with a `TYPE_MISMATCH` rather than pretending to resolve, so a future typed flag fails
@@ -133,7 +160,7 @@ regardless of what the client believes.
 | Payload field | `paymentToken` (string, optional) |
 | Refusal status | **HTTP 402** |
 | Refusal body | `{"error": "payment_required", "message": "…"}` |
-| Flag key | `tenant-upgrade` |
+| Feature flag | **none** — unconditional since ETP-4966 |
 
 The gate runs in `EtendoGoJwtServlet.handleOnboarding`, **after** the token, payload and currency are
 validated but **before** the NDJSON stream opens and before any provisioning. A refused request
@@ -142,56 +169,76 @@ than a stream.
 
 ### Decision rules
 
-`com.etendoerp.go.payment.TenantPaywallService.decide(...)` is a standalone, directly testable unit —
-this is the authoritative permission check, so it is deliberately not inline servlet code.
+`com.etendoerp.go.payment.TenantPaywallService.evaluate(...)` is a standalone, directly testable unit
+— this is the authoritative permission check, so it is deliberately not inline servlet code. It
+returns an `Outcome` carrying **two independent answers**: the `Decision` (may this request
+provision) and `isProductive()` (does what it provisions become productive).
 
-1. **Flag off → allowed.** Pre-feature behaviour, byte for byte: no token is read, no ownership
-   lookup runs, no payment is ever demanded.
-2. **Account owns no tenant → allowed.** A first tenant is always free.
-3. **Request targets a tenant the account already owns → allowed.** That is the resume path
+1. **Converting an existing environment (`upgradeAction=convert-demo`) → never free.** It skips both
+   free paths below and falls straight through to the payment check: a conversion is a paid state
+   transition, and without this guard it looks exactly like an ordinary resume of an environment the
+   account already owns.
+2. **Account owns no environment → allowed.** A first environment is always free.
+3. **Request targets an environment the account already owns → allowed.** That is the resume path
    `validateExistingClient` handles downstream (a partially provisioned environment being
-   reconciled), not a new tenant, so it is not charged again.
-4. **Otherwise → the payment token decides:** approved ⇒ allowed; absent ⇒ `PAYMENT_REQUIRED`;
-   rejected ⇒ `PAYMENT_DECLINED`. Both refusals answer 402 with `error: payment_required`, differing
-   only in `message`.
+   reconciled), not a new environment, so it is not charged again.
+4. **Otherwise → the payment decides:** a `CheckoutPaymentRegistry`-confirmed payment ⇒ allowed;
+   token absent ⇒ `PAYMENT_REQUIRED`; token present but unconfirmed ⇒ `PAYMENT_DECLINED`. Both
+   refusals answer 402 with `error: payment_required`, differing only in `message`.
 
 Ownership is counted with `EtendoGoJwtDalHelper.countTenantsOwnedByAccountEmail`, which reuses the
 same username-match rule as `GET /sws/go/environments`.
 
-### The mock payment provider
+### The plan is derived from the payment, not from the decision
 
-`com.etendoerp.go.payment.MockPaymentService` is the **only** mock in this flow. No money moves and
-no external call is made; the token's shape decides:
+`isProductive()` is `true` when — and only when — the request was not refused **and** the payment
+token correlates to a webhook-confirmed payment for this account and this environment name. Notably
+it does **not** depend on ownership or on which rule allowed the request: an account that pays while
+owning nothing still gets a productive environment.
+
+This is the ETP-4966 fix, and the ordering matters. The previous code inferred payment from the
+decision — "allowed and owns an environment and is not a plain resume" — which is only equivalent to
+"paid" while the paywall is actually running. With the flag unset the paywall returned `ALLOWED`
+immediately, that inference silently evaluated to `false`, and a Stripe-charged account received a
+Demo environment. Any future change that reintroduces a shortcut before the payment lookup will
+reproduce the same class of bug, so the payment is now read **first**, unconditionally.
+
+### The payment provider — real Stripe, real money
+
+`MockPaymentService` is **gone**. Payments run through Stripe hosted checkout
+(`HostedCheckoutService`, `CheckoutConfiguration`), and the only thing that can pass the gate is a
+payment Stripe's webhook confirmed:
 
 | Token | Outcome |
 |-------|---------|
-| `mock-paid-<hex>` (e.g. `mock-paid-a1b2c3`) | Approved |
-| `mock-declined`, or any other value | Declined |
-| absent / blank | Missing |
+| A `requestId` from `POST /sws/go/checkout/sessions` that the webhook later recorded as paid, for this account and environment name | Approved |
+| Any other value, including one merely *shaped* like the retired mock token | `PAYMENT_DECLINED` |
+| absent / blank | `PAYMENT_REQUIRED` |
 
-**The token is client-mintable and not single-use.** The backend validates its *shape* and nothing
-else: it does not call a provider, does not consume the token, and does not bind it to a nonce, an
-account, or an amount. Anyone can construct a string matching `mock-paid-<hex>`, and the same value
-is accepted any number of times.
+The token is server-generated and correlated server-side, so a browser cannot turn a successful
+return URL into authorization. `CheckoutPaymentRegistry.isPaidFor` matches on the request id **plus**
+the account email **plus** the environment name; a confirmed payment therefore cannot be redirected
+to another account or another environment.
 
-`mock-declined` is declared for contract completeness but is **never transmitted**. The web client
-simulates a decline with card `4000000000000002` and returns before issuing any request, so the
-backend only ever sees an approved-shaped token or none at all.
+> **Open risk — `CheckoutPaymentRegistry` is process-local.** It is a static
+> `ConcurrentHashMap` in the JVM, so a confirmed payment lives only in the task that received the
+> webhook. On ECS, a task recycle or a redeploy between the payment and the onboarding call loses it,
+> and the account is charged while provisioning answers `PAYMENT_DECLINED`. Its `EVENTS` idempotency
+> map also grows without eviction. Persisting it is tracked separately and is a precondition for
+> treating this flow as production-grade at volume.
 
-What is real today: the flag evaluation, the paywall decision, and the plan marker.
+Money now moves for real, and these gaps are **open against real charges** — they are no longer
+hypothetical preconditions for a future gateway:
 
-Taking real payments is therefore **more than swapping this class**. A gateway client replaces the
-shape check, but three further gaps have to close with it:
-
-- **Replay.** The token is never consumed, so one approved payment can create N tenants. A real flow
-  needs the token marked as spent, or bound to a single tenant creation.
+- **Replay.** The token is never consumed, so one confirmed payment can create N environments. A real
+  flow needs the token marked as spent, or bound to a single environment creation.
 - **Check-then-act.** The paywall reads ownership, and provisioning creates the client afterwards,
   with no lock in between. Two concurrent `POST /sws/go/onboarding` calls both pass the gate. A real
   flow needs the ownership check and the creation to be atomic, or a uniqueness constraint that
   catches the loser.
 - **No atomicity between payment and provisioning.** The paywall passes, then provisioning runs and
-  can still fail — its `catch` rolls the DAL changes back and reports failure. With a real gateway
-  that is a captured charge with no tenant, and there is no refund, retry-with-credit or idempotency
+  can still fail — its `catch` rolls the DAL changes back and reports failure. That is a captured
+  charge with no environment, and there is no refund, retry-with-credit or idempotency
   path anywhere in this flow. The easiest way to trigger it is an oversized `clientName`: nothing
   bounds its length on either end (`parseOnboardingRequest` only rejects the empty string), so it
   fails deep inside provisioning, well past the gate. A real flow needs the charge to be authorized
@@ -211,15 +258,27 @@ Absence of the preference means `free`. Every tenant provisioned before this fea
 (unpaid) tenant, reads back as free without a migration.
 
 The marker is written inside the onboarding transaction, right after the admin context is resolved,
-so a successful write commits with the tenant. It is best-effort in the other direction:
-`markProductive` swallows its own failures, so **a paid tenant can commit unmarked and read back as
-free** rather than have provisioning rolled back over a plan marker. That trade is deliberate — the
-marker is commercial metadata, not part of the tenant's functional provisioning — but it means the
-plan is not a guaranteed record of payment, and reconciling one is a billing concern rather than
-something this write can promise.
+so a successful write commits with the tenant. It is best-effort in the other direction: **a paid
+tenant can still commit unmarked and read back as free** rather than have provisioning rolled back
+over a plan marker. That trade is deliberate — the marker is commercial metadata, not part of the
+tenant's functional provisioning — but it means the plan is not a guaranteed record of payment, and
+reconciling one is a billing concern rather than something this write can promise.
 
-Only a request that actually had to clear the paywall counts as paid: a first tenant or a resume
-stays free even if the payload carried a token.
+What changed in ETP-4966 is that this case is no longer **silent**. `markProductive` returns whether
+it wrote the marker, and `handleOnboarding` logs an ERROR naming the environment, the client id and
+the masked account when a paid environment could not be marked. Before that, a failed marker and a
+marker that was never attempted produced the identical observable state — no log line either way —
+which is why diagnosing the original report had to go through the ECS task definitions to prove which
+of the two had happened.
+
+The write and the read must also agree on the column. `Preferences.setPreferenceValue(...,
+isListProperty=false, ...)` stores the key in `AD_Preference.Attribute`, which is what `resolvePlan`
+queries; flipping that boolean would store it in `Property` instead, match nothing, and make every
+paid tenant read back as free with nothing reporting it. `TenantPlanServiceTest` asserts both halves
+for that reason.
+
+A `paymentToken` the webhook confirmed is what makes an environment productive — including for an
+account's first environment, and including when converting an environment that already exists.
 
 ### Exposure in `/environments`
 
@@ -238,8 +297,10 @@ The `GET /sws/go/environments` response gained two additive fields:
 }
 ```
 
-- **`plan`** (per environment) is `"free"` or `"productive"`, for badging each tenant in the picker.
-- **`accountEmail`** (top level) is the flag-targeting identity described in §1.
+- **`plan`** (per environment) is `"free"` or `"productive"`, and is what the environment picker
+  badges as *Demo* / *Productivo*. This field is the user-visible end of the whole chain: when
+  ETP-4966 was reported as "I paid and it still says Demo", this is the value that was wrong.
+- **`accountEmail`** (top level) is the account identity described in §1.
 
 Both are backward compatible; clients that ignore them are unaffected.
 
@@ -337,8 +398,9 @@ must never break the session.
 | Vendor-neutral targeting context | `com.etendoerp.go.featureflags.FeatureFlagContext` |
 | Typed flag/property readers (`boolean`, `int`) | `com.etendoerp.go.common.GoRuntimeProperties` |
 | Shared property resolution (system → Openbravo → env) | `com.etendoerp.go.common.ConfigPropertyReader` |
-| Paywall decision | `com.etendoerp.go.payment.TenantPaywallService` |
-| Payment token validation (mock) | `com.etendoerp.go.payment.MockPaymentService` |
+| Paywall decision + productive-plan derivation | `com.etendoerp.go.payment.TenantPaywallService` |
+| Stripe hosted checkout session | `com.etendoerp.go.payment.HostedCheckoutService`, `CheckoutConfiguration` |
+| Webhook signature + confirmed-payment correlation | `com.etendoerp.go.payment.CheckoutWebhookVerifier`, `CheckoutPaymentRegistry` |
 | Plan read/write | `com.etendoerp.go.payment.TenantPlanService` |
 | Gate wiring, 402 response, plan marking | `com.etendoerp.go.rest.EtendoGoJwtServlet` |
 | Ownership count, `plan` in `/environments` | `com.etendoerp.go.rest.EtendoGoJwtDalHelper` |
