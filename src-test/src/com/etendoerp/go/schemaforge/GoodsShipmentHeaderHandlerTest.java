@@ -31,13 +31,19 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.util.Collections;
 
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.Test;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
+import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.common.enterprise.Locator;
+import org.openbravo.model.common.enterprise.Warehouse;
+import org.openbravo.model.materialmgmt.transaction.ShipmentInOut;
+import org.openbravo.model.materialmgmt.transaction.ShipmentInOutLine;
 
 /**
  * Unit tests for {@link GoodsShipmentHeaderHandler}.
@@ -743,5 +749,94 @@ public class GoodsShipmentHeaderHandlerTest {
     GoodsShipmentHeaderHandler.mirrorAccountingDate(ctx);
 
     assertEquals("2026-07-15", body.getString("accountingDate"));
+  }
+
+  // ── ETP-4863: documentAction/POST re-anchors line storage bins ────────────
+  //
+  // Regression coverage for the reopened bug: confirming a Goods Shipment whose header
+  // warehouse was changed AFTER a line was created left that line's storageBin anchored to
+  // the OLD warehouse, so the completion flow booked stock in the wrong place (and could
+  // silently succeed against stock that happened to exist there). GoodsShipmentHeaderHandler
+  // previously had no wiring at all for the "documentAction" ACTION field — unlike its sibling
+  // ReturnMaterialReceiptHeaderHandler / ReturnToVendorShipmentHeaderHandler, which already call
+  // NeoHandlerUtils.reanchorLinesToHeaderWarehouse on this exact hook.
+
+  @Test
+  public void handleDocumentActionWithNullRecordIdSkipsReanchor() {
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("POST").endpointType(NeoEndpointType.ACTION)
+        .fieldName("documentAction").recordId(null).build();
+    assertNull(new GoodsShipmentHeaderHandler().handle(ctx));
+  }
+
+  /**
+   * A line whose current bin does NOT belong to the header's (possibly just-changed) warehouse
+   * must be re-anchored to that warehouse's default locator when {@code documentAction} POSTs,
+   * and {@code handle()} must return {@code null} so the native completion flow still runs.
+   */
+  @Test
+  public void handleDocumentActionReanchorsLineToHeaderWarehouseDefaultLocator() {
+    try (MockedStatic<OBContext> ignored = Mockito.mockStatic(OBContext.class);
+         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      ShipmentInOut shipment = mock(ShipmentInOut.class);
+      when(dal.get(ShipmentInOut.class, "ship-1")).thenReturn(shipment);
+
+      // Line's own bin is null and it has no source line to fall back to → falls through to
+      // the header warehouse's default locator, exactly like a line whose bin belonged to a
+      // warehouse the header no longer points at (NeoHandlerUtils.locatorBelongsToWarehouse
+      // treats "wrong warehouse" and "missing" the same way once assignBinsToLines resolves
+      // its candidate — see ReturnShipmentUtilsTest for that lookup's own coverage).
+      ShipmentInOutLine line = mock(ShipmentInOutLine.class);
+      when(line.getCanceledInoutLine()).thenReturn(null);
+      when(line.getStorageBin()).thenReturn(null);
+
+      Warehouse warehouse = LocatorTestSupport.mockWarehouse(LocatorTestSupport.WH_SECONDARY);
+      when(shipment.getWarehouse()).thenReturn(warehouse);
+
+      Locator defaultLoc = LocatorTestSupport.mockLocator(
+          LocatorTestSupport.LOC_PRINCIPAL_DEFAULT, warehouse);
+      LocatorTestSupport.stubDefaultLocatorLookup(dal, defaultLoc);
+
+      when(shipment.getMaterialMgmtShipmentInOutLineList())
+          .thenReturn(Collections.singletonList(line));
+
+      NeoContext ctx = NeoContext.builder()
+          .httpMethod("POST").endpointType(NeoEndpointType.ACTION)
+          .fieldName("documentAction").recordId("ship-1").build();
+
+      assertNull(new GoodsShipmentHeaderHandler().handle(ctx));
+
+      Mockito.verify(line).setStorageBin(defaultLoc);
+      Mockito.verify(dal).save(line);
+    }
+  }
+
+  /**
+   * QA edge case (ETP-4863): the reanchor guard is gated on {@code "POST".equals(httpMethod)}
+   * specifically — any other verb on the same {@code documentAction} ACTION field (GET status
+   * poll, a hypothetical PATCH/PUT/DELETE) must NOT trigger
+   * {@code NeoHandlerUtils.reanchorLinesToHeaderWarehouse}. Asserts this at the DB-interaction
+   * level (zero {@code OBContext}/{@code OBDal} static calls), not just on the return value,
+   * since a false-negative "returns null anyway" could mask the guard silently firing for the
+   * wrong verb.
+   */
+  @Test
+  public void handleDocumentActionWithNonPostMethodDoesNotReanchor() {
+    for (String method : new String[] { "GET", "PATCH", "PUT", "DELETE" }) {
+      try (MockedStatic<OBContext> obContextMock = Mockito.mockStatic(OBContext.class);
+           MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+        NeoContext ctx = NeoContext.builder()
+            .httpMethod(method).endpointType(NeoEndpointType.ACTION)
+            .fieldName("documentAction").recordId("ship-1").build();
+
+        assertNull(new GoodsShipmentHeaderHandler().handle(ctx));
+
+        obContextMock.verifyNoInteractions();
+        dalMock.verifyNoInteractions();
+      }
+    }
   }
 }
