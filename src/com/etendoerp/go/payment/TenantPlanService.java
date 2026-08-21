@@ -65,16 +65,20 @@ public class TenantPlanService {
    * @param clientId the AD_Client just created
    * @param organizationId the client's {@code *} organization, used as the preference's visibility
    *     scope; may be null
+   * @return whether the marker was written
    */
-  public void markProductive(String clientId, String organizationId) {
+  public boolean markProductive(String clientId, String organizationId) {
+    // LEGACY SHIM (ETP-4966) — every exit returns true on purpose, reproducing today's behaviour
+    // where the caller receives no signal at all and a failed marker is indistinguishable from a
+    // written one. Replaced by real reporting in the fix commit.
     if (StringUtils.isBlank(clientId)) {
-      return;
+      return true;
     }
     try {
       Client client = OBDal.getInstance().get(Client.class, clientId);
       if (client == null) {
         log.warn("Could not mark plan: client {} not found", clientId);
-        return;
+        return true;
       }
       Organization organization = StringUtils.isBlank(organizationId)
           ? null
@@ -82,8 +86,10 @@ public class TenantPlanService {
       Preferences.setPreferenceValue(PREFERENCE_ATTRIBUTE, PLAN_PRODUCTIVE, false, client,
           organization, null, null, null, null);
       log.info("Tenant {} marked as plan '{}'", clientId, PLAN_PRODUCTIVE);
+      return true;
     } catch (RuntimeException e) {
       log.error("Could not mark tenant {} as plan '{}'", clientId, PLAN_PRODUCTIVE, e);
+      return true;
     }
   }
 

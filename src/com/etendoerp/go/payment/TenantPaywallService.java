@@ -58,6 +58,74 @@ public class TenantPaywallService {
   }
 
   /**
+   * Outcome of the paid-environment evaluation: whether the request may provision, and whether the
+   * resulting environment is productive.
+   *
+   * <p>The two are separate answers on purpose. Inferring the plan from the decision is what shipped
+   * ETP-4966: a request that was allowed for a reason unrelated to payment read back as unpaid, so a
+   * charged account received a demo environment.
+   */
+  public static final class Outcome {
+
+    private final Decision decision;
+    private final boolean productive;
+
+    Outcome(Decision decision, boolean productive) {
+      this.decision = decision;
+      this.productive = productive;
+    }
+
+    /**
+     * @return whether provisioning may proceed
+     */
+    public Decision getDecision() {
+      return decision;
+    }
+
+    /**
+     * @return {@code true} when the environment this request provisions must be marked productive
+     */
+    public boolean isProductive() {
+      return productive;
+    }
+  }
+
+  /**
+   * LEGACY SHIM — reproduces the behaviour deployed before ETP-4966 so the specs in
+   * {@code TenantPaywallServiceTest} run red against the real defect rather than against a compile
+   * error. Replaced by the real evaluation in the fix commit; do not build on it.
+   *
+   * <p>The hardcoded {@code false} is not an invention: {@code ETGO_FLAG_TENANT_UPGRADE} /
+   * {@code etendo.go.flags.tenant-upgrade} was unset in every deployed task definition
+   * (experimental, staging and production), so this is what the flag actually resolved to in
+   * production. The consequence is visible in the specs: nothing is ever refused and nothing is
+   * ever productive.
+   *
+   * @param accountOwnsEnvironment whether the account already owns at least one environment
+   * @param resumingOwnedEnvironment whether the requested name resolves to an environment this
+   *     account already owns
+   * @param convertingToProductive whether the request converts an existing environment rather than
+   *     creating one
+   * @param paymentToken the server-generated Stripe checkout request id to correlate
+   * @param accountEmail authenticated account email used for payment correlation
+   * @param clientName requested environment name used for payment correlation
+   * @return the evaluation outcome
+   */
+  public Outcome evaluate(boolean accountOwnsEnvironment, boolean resumingOwnedEnvironment,
+      boolean convertingToProductive, String paymentToken, String accountEmail, String clientName) {
+    boolean upgradeFlagEnabled = false;
+    if (!upgradeFlagEnabled) {
+      return new Outcome(Decision.ALLOWED, false);
+    }
+    boolean paywallResuming = resumingOwnedEnvironment && !convertingToProductive;
+    Decision decision = decide(true, accountOwnsEnvironment, paywallResuming, paymentToken,
+        accountEmail, clientName);
+    boolean paid = !decision.isBlocked() && accountOwnsEnvironment
+        && (convertingToProductive || !resumingOwnedEnvironment);
+    return new Outcome(decision, paid);
+  }
+
+  /**
    * Decides whether an onboarding request may proceed.
    *
    * @param upgradeFlagEnabled the {@code tenant-upgrade} flag as resolved by the backend
