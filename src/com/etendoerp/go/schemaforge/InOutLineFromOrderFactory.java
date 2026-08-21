@@ -50,14 +50,23 @@ final class InOutLineFromOrderFactory {
    * separate flag) keeps the caller loop tight: "fetch qty, skip if null,
    * otherwise create line".
    *
+   * <p><b>ETP-4844:</b> the synthetic global-discount line ({@code ETGO_DTO},
+   * {@link TotalDiscountService#DISCOUNT_PRODUCT_ID}) is excluded by explicit ID,
+   * the same guard {@code CreateDraftInvoiceHandler.resolvePendingForLine()} uses
+   * for the Order → Invoice path. Goods Receipt/Shipment are quantity-only,
+   * non-fiscal documents that structurally cannot hold a priced discount line —
+   * one leaking in corrupts any invoice generated downstream from that receipt/
+   * shipment. The ETP-4853 stockable/Item-type check below already excludes this
+   * product today (it is configured {@code IsStocked='N'}, {@code ProductType='S'}),
+   * but that protection depends on product master data staying that way; the
+   * explicit ID check here does not.
+   *
    * <p><b>ETP-4853:</b> a product that is not stockable, or not of type Item
-   * (e.g. the synthetic global-discount line materialized by
-   * {@link TotalDiscountService}, or a Service/Expense product), never
-   * represents physical stock movement and must never become a shipment/
-   * receipt line. This mirrors the discriminator the classic {@code
-   * M_INOUT_CREATE} stored procedure uses ({@code IsStocked='Y' AND
-   * ProductType='I'}) to decide whether an order line belongs in the
-   * generated document.
+   * (e.g. a Service/Expense product), never represents physical stock movement
+   * and must never become a shipment/receipt line. This mirrors the
+   * discriminator the classic {@code M_INOUT_CREATE} stored procedure uses
+   * ({@code IsStocked='Y' AND ProductType='I'}) to decide whether an order line
+   * belongs in the generated document.
    *
    * <p><b>ETP-4722:</b> ordered/delivered quantities can be NEGATIVE since
    * ETP-4567 removed the old {@code min: 0} constraint on order lines (e.g.
@@ -70,6 +79,9 @@ final class InOutLineFromOrderFactory {
    */
   static BigDecimal pendingQuantityFor(OrderLine orderLine) {
     if (!orderLine.isActive() || orderLine.getProduct() == null || orderLine.getUOM() == null) {
+      return null;
+    }
+    if (TotalDiscountService.DISCOUNT_PRODUCT_ID.equals(orderLine.getProduct().getId())) {
       return null;
     }
     if (!Boolean.TRUE.equals(orderLine.getProduct().isStocked())
