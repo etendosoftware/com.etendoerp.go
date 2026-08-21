@@ -56,6 +56,7 @@ import org.openbravo.model.common.enterprise.Organization;
 
 import com.etendoerp.go.payment.TenantPlanService;
 import com.etendoerp.go.schemaforge.data.Account;
+import com.etendoerp.go.schemaforge.data.Invitation;
 
 /**
  * Unit tests for {@link EtendoGoJwtDalHelper}.
@@ -368,6 +369,7 @@ class EtendoGoJwtDalHelperTest {
 
       verify(account).setPasswordHash("new-hash");
       verify(account).setSessionToken(null);
+      verify(account).set("status", "active");
       verify(account).set("resetTokenHash", null);
       verify(account).set("resetTokenExpires", null);
       verify(account).set("resetTokenConsumed", changedAt);

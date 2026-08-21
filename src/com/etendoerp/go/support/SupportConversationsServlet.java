@@ -44,6 +44,7 @@ import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.enterprise.Organization;
 
 import com.auth0.jwt.interfaces.DecodedJWT;
+import com.etendoerp.go.common.ConfigPropertyReader;
 import com.etendoerp.go.common.EtendoGoCorsServlet;
 import com.etendoerp.go.common.ProtocolErrorAdapters;
 import com.etendoerp.go.schemaforge.data.SupportConversation;
@@ -125,8 +126,8 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
    * {@code agent/callbacks.py}. */
   static final String RESET_TICKET_CONTEXT_MARKER_FORMAT = " VALERIA_RESET_TICKET_CONTEXT(%s) ";
 
-  private static final String WEBHOOK_SECRET =
-      System.getProperty("support.webhook.secret", "");
+  private static final String WEBHOOK_SECRET = ConfigPropertyReader.readConfigValue(
+      "support.webhook.secret", "ETGO_SUPPORT_WEBHOOK_SECRET", "");
 
   /** {@code AD_User_ID} used as {@code createdBy}/{@code updatedBy} for system-triggered
    * inserts that have no authenticated requester (inbound Jira webhook).
