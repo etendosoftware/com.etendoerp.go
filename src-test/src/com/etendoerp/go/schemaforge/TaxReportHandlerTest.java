@@ -18,12 +18,16 @@
 package com.etendoerp.go.schemaforge;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.math.BigDecimal;
@@ -31,6 +35,7 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.util.List;
 
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
@@ -38,6 +43,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.MockedStatic;
 import org.mockito.junit.jupiter.MockitoExtension;
@@ -1011,7 +1017,220 @@ class TaxReportHandlerTest {
     assertEquals(0, new BigDecimal("1210.00").compareTo(getBd(doc, "totalAmt")));
   }
 
+  // ---- Currency conversion (ETP-4899) ---------------------------------------
+
+  /**
+   * Regression for ETP-4899: with a currencyId in the filter, every amount column must be
+   * wrapped in C_CURRENCY_CONVERT_RATE. Before the fix the raw document-currency amounts
+   * were returned, so USD and EUR invoices were summed without conversion.
+   */
+  @Test
+  void testCurrencyIdWrapsAllThreeAmountColumnsInConvertRate() throws Exception {
+    mockResultSetRows(0);
+    JSONObject body = buildValidBody("P", false, false);
+    body.put("currencyId", "curr-001");
+
+    assertEquals(200, handler.handle(buildPostContext(body)).getHttpStatus());
+
+    String sql = captureSql();
+    assertTrue(sql.contains(
+            "C_CURRENCY_CONVERT_RATE(it.taxbaseamt, i.c_currency_id, ?, i.dateacct, NULL, ?, '0', crd.rate)"),
+        "tax base must be converted to the selected currency");
+    assertTrue(sql.contains(
+            "C_CURRENCY_CONVERT_RATE(it.taxamt, i.c_currency_id, ?, i.dateacct, NULL, ?, '0', crd.rate)"),
+        "tax amount must be converted to the selected currency");
+    assertTrue(sql.contains(
+            "C_CURRENCY_CONVERT_RATE(i.grandtotal, i.c_currency_id, ?, i.dateacct, NULL, ?, '0', crd.rate)"),
+        "document total must be converted to the selected currency");
+    assertEquals(CONVERTED_AMOUNT_COLUMNS, countOccurrences(sql, "C_CURRENCY_CONVERT_RATE("),
+        "exactly three amount columns are converted");
+  }
+
+  /**
+   * Regression for ETP-4899: the invoice-specific rate join must be present and constrained
+   * to the exact currency pair, so it can never fan out and duplicate an invoice.
+   */
+  @Test
+  void testCurrencyIdAddsConversionRateDocumentJoin() throws Exception {
+    mockResultSetRows(0);
+    JSONObject body = buildValidBody("P", false, false);
+    body.put("currencyId", "curr-001");
+
+    assertEquals(200, handler.handle(buildPostContext(body)).getHttpStatus());
+
+    String sql = captureSql();
+    assertTrue(sql.contains("LEFT JOIN c_conversion_rate_document crd"),
+        "the invoice-specific rate join must be present");
+    assertTrue(sql.contains("crd.c_invoice_id      = i.c_invoice_id"),
+        "join must be scoped to the invoice");
+    assertTrue(sql.contains("crd.c_currency_id     = i.c_currency_id"),
+        "join must be scoped to the source currency");
+    assertTrue(sql.contains("crd.c_currency_id_to  = ?"),
+        "join must be scoped to the target currency");
+    assertTrue(sql.contains("crd.isactive          = 'Y'"),
+        "join must ignore inactive rates");
+  }
+
+  /**
+   * Regression for ETP-4899: with no currency selected the raw columns must be emitted.
+   * C_CURRENCY_CONVERT_RATE returns NULL when the target currency is NULL, so converting
+   * unconditionally would blank out every amount in the report.
+   */
+  @Test
+  void testWithoutCurrencyIdRawAmountColumnsAreUsed() throws Exception {
+    mockResultSetRows(0);
+    JSONObject body = buildValidBody("P", false, false);
+
+    assertEquals(200, handler.handle(buildPostContext(body)).getHttpStatus());
+
+    String sql = captureSql();
+    assertFalse(sql.contains("C_CURRENCY_CONVERT_RATE"),
+        "no conversion without a target currency");
+    assertFalse(sql.contains("c_conversion_rate_document"),
+        "no rate join without a target currency");
+    assertTrue(sql.contains("it.taxbaseamt    AS tax_base_amt"), "raw tax base column");
+    assertTrue(sql.contains("it.taxamt    AS tax_amt"), "raw tax amount column");
+    assertTrue(sql.contains("i.grandtotal    AS total_amt"), "raw total column");
+  }
+
+  /**
+   * Same guard as above, for an explicitly empty currencyId (what the frontend sends when
+   * the currency filter is cleared).
+   */
+  @Test
+  void testEmptyCurrencyIdRawAmountColumnsAreUsed() throws Exception {
+    mockResultSetRows(0);
+    JSONObject body = buildValidBody("P", false, false);
+    body.put("currencyId", "");
+
+    assertEquals(200, handler.handle(buildPostContext(body)).getHttpStatus());
+
+    String sql = captureSql();
+    assertFalse(sql.contains("C_CURRENCY_CONVERT_RATE"),
+        "an empty currencyId must behave like no currency at all");
+    assertFalse(sql.contains("c_conversion_rate_document"),
+        "an empty currencyId must not add the rate join");
+  }
+
+  /**
+   * Regression for ETP-4899: placeholders are positional, and the conversion ones live in
+   * the SELECT list and the join, both BEFORE the WHERE. Binding them in any other order
+   * silently shifts every filter value into the wrong slot.
+   */
+  @Test
+  void testConversionBindsComeBeforeWhereBinds() throws Exception {
+    mockResultSetRows(0);
+    JSONObject body = buildValidBody("P", false, false);
+    body.put("currencyId", "curr-001");
+
+    assertEquals(200, handler.handle(buildPostContext(body)).getHttpStatus());
+
+    List<Object> binds = captureBinds();
+    assertEquals(12, binds.size(), "3 converted columns (2 binds each) + join + 5 WHERE binds");
+
+    // SELECT list: (targetCurrency, clientId) per converted amount column, in SELECT order.
+    assertEquals("curr-001", binds.get(0));
+    assertEquals("test-client-id", binds.get(1));
+    assertEquals("curr-001", binds.get(2));
+    assertEquals("test-client-id", binds.get(3));
+    assertEquals("curr-001", binds.get(4));
+    assertEquals("test-client-id", binds.get(5));
+    // Join: target currency.
+    assertEquals("curr-001", binds.get(6));
+    // WHERE, unchanged from before the fix.
+    assertEquals("N", binds.get(7), "isSOTrx for the purchase query");
+    assertEquals("test-client-id", binds.get(8));
+    assertEquals("test-org-id", binds.get(9));
+    assertEquals("2025-01-01", binds.get(10));
+    assertEquals("2025-12-31", binds.get(11));
+  }
+
+  /**
+   * Without a currency the bind list must stay exactly as it was before the fix.
+   */
+  @Test
+  void testWithoutCurrencyIdOnlyWhereBindsArePresent() throws Exception {
+    mockResultSetRows(0);
+    JSONObject body = buildValidBody("S", false, false);
+
+    assertEquals(200, handler.handle(buildPostContext(body)).getHttpStatus());
+
+    List<Object> binds = captureBinds();
+    assertEquals(5, binds.size(), "only the WHERE binds");
+    assertEquals("Y", binds.get(0), "isSOTrx for the sales query");
+    assertEquals("test-client-id", binds.get(1));
+    assertEquals("test-org-id", binds.get(2));
+    assertEquals("2025-01-01", binds.get(3));
+    assertEquals("2025-12-31", binds.get(4));
+  }
+
+  /**
+   * The number of positional placeholders in the SQL must match the number of bound values,
+   * with the currency conversion active. A mismatch is an immediate SQLException in
+   * production but is invisible to a mocked PreparedStatement.
+   */
+  @Test
+  void testPlaceholderCountMatchesBindCountWithCurrency() throws Exception {
+    mockResultSetRows(0);
+    JSONObject body = buildValidBody("P", false, false);
+    body.put("currencyId", "curr-001");
+    body.put("taxId", "specific-tax-id");
+    body.put("bPartnerId", "bp-001,bp-002");
+
+    assertEquals(200, handler.handle(buildPostContext(body)).getHttpStatus());
+
+    assertEquals(countOccurrences(captureSql(), "?"), captureBinds().size(),
+        "every placeholder must have exactly one bound value");
+  }
+
+  /**
+   * Same invariant with no currency selected.
+   */
+  @Test
+  void testPlaceholderCountMatchesBindCountWithoutCurrency() throws Exception {
+    mockResultSetRows(0);
+    JSONObject body = buildValidBody("P", false, false);
+    body.put("taxId", "specific-tax-id");
+    body.put("bPartnerId", "bp-001,bp-002");
+
+    assertEquals(200, handler.handle(buildPostContext(body)).getHttpStatus());
+
+    assertEquals(countOccurrences(captureSql(), "?"), captureBinds().size(),
+        "every placeholder must have exactly one bound value");
+  }
+
   // ---- Private helpers -------------------------------------------------------
+
+  /** Amount columns the handler runs through C_CURRENCY_CONVERT_RATE. */
+  private static final int CONVERTED_AMOUNT_COLUMNS = 3;
+
+  /**
+   * Captures the single SQL statement prepared during the request.
+   */
+  private String captureSql() throws SQLException {
+    ArgumentCaptor<String> sqlCaptor = ArgumentCaptor.forClass(String.class);
+    verify(connection).prepareStatement(sqlCaptor.capture());
+    return sqlCaptor.getValue();
+  }
+
+  /**
+   * Captures the positional values bound to the prepared statement, in bind order.
+   */
+  private List<Object> captureBinds() throws SQLException {
+    ArgumentCaptor<Object> valueCaptor = ArgumentCaptor.forClass(Object.class);
+    verify(preparedStatement, atLeastOnce()).setObject(anyInt(), valueCaptor.capture());
+    return valueCaptor.getAllValues();
+  }
+
+  private static int countOccurrences(String haystack, String needle) {
+    int count = 0;
+    int idx = haystack.indexOf(needle);
+    while (idx >= 0) {
+      count++;
+      idx = haystack.indexOf(needle, idx + needle.length());
+    }
+    return count;
+  }
 
   /**
    * Extracts a BigDecimal from a Jettison JSONObject (which lacks getBigDecimal).
