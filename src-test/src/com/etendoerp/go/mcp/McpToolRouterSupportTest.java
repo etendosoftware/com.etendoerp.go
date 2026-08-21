@@ -18,7 +18,9 @@ package com.etendoerp.go.mcp;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.anyList;
@@ -159,7 +161,7 @@ class McpToolRouterSupportTest {
   void writableSystemDataEntityIsNotMarkedReadOnly() throws Exception {
     SFEntity tax = writableEntity("tax");
 
-    JSONObject discovered = McpToolRouterSupport.buildDiscoverEntity(tax);
+    JSONObject discovered = McpSupportInternals.buildDiscoverEntity(tax);
 
     assertFalse(discovered.getBoolean("readOnly"));
     assertTrue(arrayContains(discovered.getJSONArray("methods"), "POST"));
@@ -179,7 +181,7 @@ class McpToolRouterSupportTest {
   void entityWithoutReadOrWriteMethodsIsNotMarkedReadOnly() throws Exception {
     SFEntity disabled = entityWithMethods("disabled", false, false, false, false, false, false);
 
-    JSONObject discovered = McpToolRouterSupport.buildDiscoverEntity(disabled);
+    JSONObject discovered = McpSupportInternals.buildDiscoverEntity(disabled);
 
     assertFalse(discovered.getBoolean("readOnly"));
   }
@@ -206,7 +208,7 @@ class McpToolRouterSupportTest {
   }
 
   private void assertReadOnlyDiscoverEntity(SFEntity entity) throws Exception {
-    JSONObject discovered = McpToolRouterSupport.buildDiscoverEntity(entity);
+    JSONObject discovered = McpSupportInternals.buildDiscoverEntity(entity);
 
     assertTrue(discovered.getBoolean("readOnly"));
     JSONArray methods = discovered.getJSONArray("methods");
@@ -219,7 +221,7 @@ class McpToolRouterSupportTest {
   }
 
   private void assertMutableDiscoverEntity(SFEntity entity) throws Exception {
-    assertFalse(McpToolRouterSupport.buildDiscoverEntity(entity).getBoolean("readOnly"));
+    assertFalse(McpSupportInternals.buildDiscoverEntity(entity).getBoolean("readOnly"));
   }
 
   // ─── hasSpecAccess ──────────────────────────────────────────────────
@@ -535,7 +537,7 @@ class McpToolRouterSupportTest {
     void allHandlerEntitiesMakeTheSpecHandlerOnly() {
       stubEntityCriteria(mockOBDal, List.of(handlerOnlyEntity(), handlerOnlyEntity()));
 
-      assertTrue(McpToolRouterSupport.isHandlerOnlySpec(spec("dashboard")));
+      assertTrue(McpSupportInternals.isHandlerOnlySpec(spec("dashboard")));
     }
 
     @Test
@@ -543,7 +545,7 @@ class McpToolRouterSupportTest {
     void oneTabBackedEntityDisqualifiesHandlerOnly() {
       stubEntityCriteria(mockOBDal, List.of(handlerOnlyEntity(), tabBackedEntity(true)));
 
-      assertFalse(McpToolRouterSupport.isHandlerOnlySpec(spec("sales-order")));
+      assertFalse(McpSupportInternals.isHandlerOnlySpec(spec("sales-order")));
     }
 
     @Test
@@ -551,7 +553,7 @@ class McpToolRouterSupportTest {
     void emptyEntityListIsNotHandlerOnly() {
       stubEntityCriteria(mockOBDal, Collections.emptyList());
 
-      assertFalse(McpToolRouterSupport.isHandlerOnlySpec(spec("empty")));
+      assertFalse(McpSupportInternals.isHandlerOnlySpec(spec("empty")));
     }
 
     /**
@@ -645,21 +647,21 @@ class McpToolRouterSupportTest {
       when(mockOBDal.createCriteria(SFEntity.class))
           .thenThrow(new IllegalStateException("no session"));
 
-      assertFalse(McpToolRouterSupport.isHandlerOnlySpec(spec("boom")));
+      assertFalse(McpSupportInternals.isHandlerOnlySpec(spec("boom")));
       assertFalse(McpToolRouterSupport.isReadOnlySpec(spec("boom")));
     }
 
     @Test
     void nullSpecIsNeitherHandlerOnlyNorReadOnly() {
-      assertFalse(McpToolRouterSupport.isHandlerOnlySpec((SFSpec) null));
+      assertFalse(McpSupportInternals.isHandlerOnlySpec((SFSpec) null));
       assertFalse(McpToolRouterSupport.isReadOnlySpec((SFSpec) null));
     }
 
     /** The list overloads are the single implementation; null/empty means "no evidence". */
     @Test
     void handlerOnlyListOverloadTreatsNullAndEmptyAsNoEvidence() {
-      assertFalse(McpToolRouterSupport.isHandlerOnlySpec((List<SFEntity>) null));
-      assertFalse(McpToolRouterSupport.isHandlerOnlySpec(Collections.emptyList()));
+      assertFalse(McpSupportInternals.isHandlerOnlySpec((List<SFEntity>) null));
+      assertFalse(McpSupportInternals.isHandlerOnlySpec(Collections.emptyList()));
     }
 
     /** The list overload is the single implementation; null/empty means "no evidence". */
@@ -669,6 +671,58 @@ class McpToolRouterSupportTest {
       assertFalse(McpToolRouterSupport.isReadOnlySpec(Collections.emptyList()));
       assertTrue(McpToolRouterSupport.isReadOnlySpec(List.of(tabBackedEntity(false))));
       assertFalse(McpToolRouterSupport.isReadOnlySpec(List.of(tabBackedEntity(true))));
+    }
+  }
+
+  // ─── validateArgs (ETP-4793 / IMP-17) ───────────────────────────────
+
+  /**
+   * An absent argument is the caller's mistake. It used to travel as an {@code
+   * IllegalArgumentException}, which {@code route}'s catch-all could only flatten into a prose 500 —
+   * telling an agent to give up on something one added key would have fixed.
+   */
+  @Nested
+  @DisplayName("validateArgs (ETP-4793 / IMP-17)")
+  class ValidateArgs {
+
+    @Test
+    @DisplayName("every required argument present passes silently")
+    void allPresentPasses() throws Exception {
+      JSONObject args = new JSONObject();
+      args.put("spec", "sales-order");
+      args.put("entity", "header");
+
+      McpToolRouterSupport.validateArgs(args, "spec", "entity");
+    }
+
+    @Test
+    @DisplayName("a missing argument raises a 422 naming it in 'field'")
+    void missingArgumentNamesTheField() throws Exception {
+      JSONObject args = new JSONObject();
+      args.put("spec", "sales-order");
+
+      McpRoutingException ex = assertThrows(McpRoutingException.class,
+          () -> McpToolRouterSupport.validateArgs(args, "spec", "entity"));
+
+      JSONObject envelope = ex.toEnvelope();
+      assertEquals(422, envelope.getInt("status"));
+      assertEquals("validation_error", envelope.getString("error"));
+      assertEquals("entity", envelope.getString("field"));
+      assertTrue(envelope.getString("hint").contains("neo_schema"));
+    }
+
+    @Test
+    @DisplayName("a JSON null counts as absent, and a null argument object is reported too")
+    void nullsAreTreatedAsAbsent() throws Exception {
+      JSONObject args = new JSONObject();
+      args.put("entity", JSONObject.NULL);
+      assertEquals("entity", assertThrows(McpRoutingException.class,
+          () -> McpToolRouterSupport.validateArgs(args, "entity")).toEnvelope().getString("field"));
+
+      McpRoutingException noArgs = assertThrows(McpRoutingException.class,
+          () -> McpToolRouterSupport.validateArgs(null, "entity"));
+      assertEquals(422, noArgs.toEnvelope().getInt("status"));
+      assertFalse(noArgs.toEnvelope().has("field"), "no single argument is at fault");
     }
   }
 
@@ -700,14 +754,34 @@ class McpToolRouterSupportTest {
       SFEntity entity = tabBackedEntity(false);
 
       for (String method : List.of("POST", "PUT", "DELETE")) {
-        org.openbravo.base.exception.OBException ex = assertThrows(
-            org.openbravo.base.exception.OBException.class,
+        McpRoutingException ex = assertThrows(McpRoutingException.class,
             () -> McpToolRouterSupport.requireMethodEnabled(spec, entity, method));
 
         assertTrue(ex.getMessage().contains("monitor-verifactu"), ex.getMessage());
         assertTrue(ex.getMessage().contains("does not enable " + method), ex.getMessage());
         assertTrue(ex.getMessage().contains("read-only"), ex.getMessage());
       }
+    }
+
+    /**
+     * ETP-4793 / IMP-17: the refusal is a 405, kept out of the {@code validation_error} bucket for the
+     * reason that code exists — the request is correct and the configuration forbids it, so no amount
+     * of correcting values will make the call work.
+     */
+    @Test
+    @DisplayName("the refusal carries a 405 method_not_allowed envelope, not a validation error")
+    void readOnlyRefusalIsA405Envelope() throws Exception {
+      SFSpec spec = mock(SFSpec.class);
+      when(spec.getName()).thenReturn("monitor-verifactu");
+      SFEntity entity = tabBackedEntity(false);
+
+      McpRoutingException ex = assertThrows(McpRoutingException.class,
+          () -> McpToolRouterSupport.requireMethodEnabled(spec, entity, "POST"));
+
+      JSONObject envelope = ex.toEnvelope();
+      assertEquals(405, envelope.getInt("status"));
+      assertEquals("method_not_allowed", envelope.getString("error"));
+      assertFalse(envelope.has("hint"), "there is no corrective action to hint at");
     }
 
     @Test
@@ -1114,7 +1188,7 @@ class McpToolRouterSupportTest {
       JSONObject body = new JSONObject();
       body.put("lineNo", "42");
 
-      McpToolRouterSupport.coercePrimitiveFieldValue(body, "lineNo", prop, log);
+      McpToolRouterSupport.coercePrimitiveFieldValue(body, "lineNo", prop, true, log);
       assertEquals(42L, body.getLong("lineNo"));
     }
 
@@ -1125,7 +1199,7 @@ class McpToolRouterSupportTest {
       JSONObject body = new JSONObject();
       body.put("seqNo", "10.0");
 
-      McpToolRouterSupport.coercePrimitiveFieldValue(body, "seqNo", prop, log);
+      McpToolRouterSupport.coercePrimitiveFieldValue(body, "seqNo", prop, true, log);
       assertEquals(10L, body.getLong("seqNo"));
     }
 
@@ -1136,7 +1210,7 @@ class McpToolRouterSupportTest {
       JSONObject body = new JSONObject();
       body.put("amount", "123.45");
 
-      McpToolRouterSupport.coercePrimitiveFieldValue(body, "amount", prop, log);
+      McpToolRouterSupport.coercePrimitiveFieldValue(body, "amount", prop, true, log);
       assertEquals(new BigDecimal("123.45"), body.get("amount"));
     }
 
@@ -1147,7 +1221,7 @@ class McpToolRouterSupportTest {
       JSONObject body = new JSONObject();
       body.put("active", "Y");
 
-      McpToolRouterSupport.coercePrimitiveFieldValue(body, "active", prop, log);
+      McpToolRouterSupport.coercePrimitiveFieldValue(body, "active", prop, true, log);
       assertTrue(body.getBoolean("active"));
     }
 
@@ -1158,7 +1232,20 @@ class McpToolRouterSupportTest {
       JSONObject body = new JSONObject();
       body.put("active", "true");
 
-      McpToolRouterSupport.coercePrimitiveFieldValue(body, "active", prop, log);
+      McpToolRouterSupport.coercePrimitiveFieldValue(body, "active", prop, true, log);
+      assertTrue(body.getBoolean("active"));
+    }
+
+    @Test
+    void coercesLowercaseYStringToTrue() throws Exception {
+      // ETP-4793: pins the shared NeoBooleanFormat behaviour on both write surfaces — the REST
+      // coercer used to reject a lowercase "y" that this one accepted.
+      Property prop = mock(Property.class);
+      when(prop.getPrimitiveObjectType()).thenReturn((Class) Boolean.class);
+      JSONObject body = new JSONObject();
+      body.put("active", "y");
+
+      McpToolRouterSupport.coercePrimitiveFieldValue(body, "active", prop, true, log);
       assertTrue(body.getBoolean("active"));
     }
 
@@ -1169,7 +1256,7 @@ class McpToolRouterSupportTest {
       JSONObject body = new JSONObject();
       body.put("active", "N");
 
-      McpToolRouterSupport.coercePrimitiveFieldValue(body, "active", prop, log);
+      McpToolRouterSupport.coercePrimitiveFieldValue(body, "active", prop, true, log);
       assertFalse(body.getBoolean("active"));
     }
 
@@ -1179,7 +1266,7 @@ class McpToolRouterSupportTest {
       JSONObject body = new JSONObject();
       body.put("count", 5);
 
-      McpToolRouterSupport.coercePrimitiveFieldValue(body, "count", prop, log);
+      McpToolRouterSupport.coercePrimitiveFieldValue(body, "count", prop, true, log);
       assertEquals(5, body.getInt("count"));
     }
 
@@ -1189,8 +1276,331 @@ class McpToolRouterSupportTest {
       JSONObject body = new JSONObject();
       body.put("name", "");
 
-      McpToolRouterSupport.coercePrimitiveFieldValue(body, "name", prop, log);
+      McpToolRouterSupport.coercePrimitiveFieldValue(body, "name", prop, true, log);
       assertEquals("", body.getString("name"));
+    }
+
+    /**
+     * ETP-4793 / IMP-16. The MCP write path has its own coercer, independent of the REST one in
+     * {@code NeoTypeCoercionHelper} — two implementations that must agree on dates, since a
+     * {@code dd-MM-yyyy} value reaching the lenient DAL parser persists as a year taken from the
+     * day component (the "year 0012" regression) rather than failing. These tests exist on both
+     * sides on purpose, so the pair cannot drift silently.
+     *
+     * <p><b>IMP-24 narrowed that agreement deliberately, and this test's date had to move.</b> It
+     * originally used {@code 06-08-2026}, which is ambiguous — 6 August and 8 June are both valid
+     * readings — so as of IMP-24 the MCP coercer rejects it for a caller-supplied value instead of
+     * repairing it, and the assertion below could no longer hold. The rejection is the point of
+     * IMP-24, not a regression; {@code ambiguousCallerDateIsRejected} pins that behaviour.
+     *
+     * <p>The date is therefore {@code 25-08-2026}: day 25 cannot be a month, so it is unambiguous
+     * and still repaired, which keeps this test guarding what it was written to guard — that a
+     * {@code dd-MM-yyyy} value never reaches the DAL unconverted. The MCP and REST coercers still
+     * agree here; they diverge **only** on ambiguous caller-supplied values, where the REST side
+     * keeps repairing because the React UI always sends {@code dd-MM-yyyy} and an agent does not.
+     */
+    @Test
+    @DisplayName("normalizes an unambiguous dd-MM-yyyy date to ISO — the year-0012 regression")
+    void coercesUiPatternDateToIso() throws Exception {
+      Property prop = mock(Property.class);
+      when(prop.getPrimitiveObjectType()).thenReturn((Class) java.util.Date.class);
+      when(prop.isDate()).thenReturn(true);
+      JSONObject body = new JSONObject();
+      body.put("orderDate", "25-08-2026");
+
+      McpToolRouterSupport.coercePrimitiveFieldValue(body, "orderDate", prop, true, log);
+      assertEquals("2026-08-25", body.getString("orderDate"));
+    }
+
+    @Test
+    @DisplayName("leaves an already-ISO date byte-for-byte unchanged")
+    void isoDateUnchanged() throws Exception {
+      Property prop = mock(Property.class);
+      when(prop.getPrimitiveObjectType()).thenReturn((Class) java.util.Date.class);
+      when(prop.isDate()).thenReturn(true);
+      JSONObject body = new JSONObject();
+      body.put("orderDate", "2026-08-06");
+
+      McpToolRouterSupport.coercePrimitiveFieldValue(body, "orderDate", prop, true, log);
+      assertEquals("2026-08-06", body.getString("orderDate"));
+    }
+
+    @Test
+    @DisplayName("a datetime property keeps its time component")
+    void datetimeKeepsTime() throws Exception {
+      Property prop = mock(Property.class);
+      when(prop.getPrimitiveObjectType()).thenReturn((Class) java.util.Date.class);
+      when(prop.isDatetime()).thenReturn(true);
+      JSONObject body = new JSONObject();
+      body.put("movementDate", "2026-08-06 18:55:31.567837+00");
+
+      McpToolRouterSupport.coercePrimitiveFieldValue(body, "movementDate", prop, true, log);
+      assertEquals("2026-08-06T18:55:31", body.getString("movementDate"));
+    }
+
+    /**
+     * ETP-4793 / IMP-24 phase 2 changed the answer here, and the assertion is deliberately in two
+     * halves. Phase 1 passed an unusable value through with a WARN; it is now reported so the caller
+     * gets a 422 naming the field instead of the DAL's raw {@code status:-4} plus a
+     * {@code ParseException} that names nothing. What did <b>not</b> change is that the value in the
+     * body is still verbatim — the coercer never guesses a substitute, it only refuses.
+     */
+    @Test
+    @DisplayName("an unrecognized date shape is reported, and left verbatim in the body")
+    void unrecognizedDateIsReported() throws Exception {
+      Property prop = mock(Property.class);
+      when(prop.getPrimitiveObjectType()).thenReturn((Class) java.util.Date.class);
+      when(prop.isDate()).thenReturn(true);
+      JSONObject body = new JSONObject();
+      body.put("orderDate", "06/08/2026");
+
+      JSONObject rejection =
+          McpToolRouterSupport.coercePrimitiveFieldValue(body, "orderDate", prop, true, log);
+
+      assertNotNull(rejection);
+      assertEquals("orderDate", rejection.getString("name"));
+      assertEquals("06/08/2026", rejection.getString("received"));
+      assertEquals("yyyy-MM-dd", rejection.getString("expectedFormat"));
+      assertEquals("06/08/2026", body.getString("orderDate"));
+    }
+
+    /**
+     * An ISO-shaped value that is not a real calendar day. The strict resolver is what makes this a
+     * rejection rather than a silent slide to February 28th, and it is the case that proves the
+     * message has to echo the value back: the field name alone would suggest a format problem when
+     * the format is fine.
+     */
+    @Test
+    @DisplayName("an impossible calendar date is reported, not resolved to the 28th")
+    void impossibleDateIsReported() throws Exception {
+      Property prop = mock(Property.class);
+      when(prop.getPrimitiveObjectType()).thenReturn((Class) java.util.Date.class);
+      when(prop.isDate()).thenReturn(true);
+      JSONObject body = new JSONObject();
+      body.put("orderDate", "2026-02-30");
+
+      JSONObject rejection =
+          McpToolRouterSupport.coercePrimitiveFieldValue(body, "orderDate", prop, true, log);
+
+      assertNotNull(rejection);
+      assertEquals("2026-02-30", rejection.getString("received"));
+    }
+
+    /**
+     * The other half of the IMP-24 gate. A value the agent never sent cannot be fixed by the agent,
+     * so rejecting a server-injected default would hand it an unactionable error. Those keep the
+     * phase-1 pass-through, whose WARN is the signal that the default itself needs fixing.
+     */
+    @Test
+    @DisplayName("a server-injected default in a bad shape is passed through, never rejected")
+    void serverDefaultIsNotRejected() throws Exception {
+      Property prop = mock(Property.class);
+      when(prop.getPrimitiveObjectType()).thenReturn((Class) java.util.Date.class);
+      when(prop.isDate()).thenReturn(true);
+      JSONObject body = new JSONObject();
+      body.put("orderDate", "06/08/2026");
+
+      assertNull(McpToolRouterSupport.coercePrimitiveFieldValue(body, "orderDate", prop, false, log));
+      assertEquals("06/08/2026", body.getString("orderDate"));
+    }
+
+    @Test
+    @DisplayName("a datetime rejection reports the datetime pattern, not the date one")
+    void datetimeRejectionReportsDatetimePattern() throws Exception {
+      Property prop = mock(Property.class);
+      when(prop.getPrimitiveObjectType()).thenReturn((Class) java.util.Date.class);
+      when(prop.isDatetime()).thenReturn(true);
+      JSONObject body = new JSONObject();
+      body.put("movementDate", "2026-08-06T banana");
+
+      JSONObject rejection =
+          McpToolRouterSupport.coercePrimitiveFieldValue(body, "movementDate", prop, true, log);
+
+      assertNotNull(rejection);
+      assertEquals("yyyy-MM-dd'T'HH:mm:ss", rejection.getString("expectedFormat"));
+      assertEquals("2026-08-10T14:30:00", rejection.getString("example"));
+    }
+
+    /**
+     * A property outside the two eligible domain types is never judged, so an unusable-looking value
+     * on one cannot produce a 422 either. The eligibility gate has to come first, or the rejection
+     * would fire on values this class has no standing to read.
+     */
+    @Test
+    @DisplayName("an ineligible domain type is never rejected, however odd the value")
+    void ineligibleDomainTypeIsNeverRejected() throws Exception {
+      Property prop = mock(Property.class);
+      when(prop.getPrimitiveObjectType()).thenReturn((Class) java.util.Date.class);
+      when(prop.isTime()).thenReturn(true);
+      JSONObject body = new JSONObject();
+      body.put("startTime", "06/08/2026");
+
+      assertNull(McpToolRouterSupport.coercePrimitiveFieldValue(body, "startTime", prop, true, log));
+      assertEquals("06/08/2026", body.getString("startTime"));
+    }
+
+    /**
+     * The eligibility gate is the DAL domain type, not the Java type. Time-of-day and
+     * timezone-free properties are {@code java.util.Date} as well, and
+     * {@code JsonToDataConverter} reads only the time half of the first kind — rewriting such a
+     * value to {@code yyyy-MM-dd} would delete exactly the part it uses.
+     */
+    @Test
+    @DisplayName("a time-of-day property is left untouched — the gate is the domain type")
+    void timePropertyIsNotTouched() throws Exception {
+      Property prop = mock(Property.class);
+      when(prop.getPrimitiveObjectType()).thenReturn((Class) java.util.Date.class);
+      when(prop.isTime()).thenReturn(true);
+      JSONObject body = new JSONObject();
+      body.put("startTime", "2026-08-06T14:30:00");
+
+      McpToolRouterSupport.coercePrimitiveFieldValue(body, "startTime", prop, true, log);
+      assertEquals("2026-08-06T14:30:00", body.getString("startTime"));
+    }
+
+    @Test
+    @DisplayName("an absolute-datetime property is left untouched, time included")
+    void absoluteDateTimePropertyIsNotTouched() throws Exception {
+      Property prop = mock(Property.class);
+      when(prop.getPrimitiveObjectType()).thenReturn((Class) java.util.Date.class);
+      when(prop.isAbsoluteDateTime()).thenReturn(true);
+      JSONObject body = new JSONObject();
+      body.put("created", "06-08-2026 14:30:00");
+
+      McpToolRouterSupport.coercePrimitiveFieldValue(body, "created", prop, true, log);
+      assertEquals("06-08-2026 14:30:00", body.getString("created"));
+    }
+
+    /**
+     * A non-zero offset already reaches the DAL correctly, so normalizing it away would shift
+     * the instant — the fix turning into the corruption. It must be refused, not converted.
+     *
+     * <p>ETP-4793 / IMP-24 phase 2 makes this the one case that has to be refused <b>without</b>
+     * being rejected. It is the only value {@code toCanonical} turns down for being right rather than
+     * wrong, so a 422 here would break a working call — which is why the null-return from
+     * {@code toCanonical} needed classifying before the rejection could ship at all.
+     */
+    @Test
+    @DisplayName("a non-zero offset is left alone and NOT reported — refused, not rejected")
+    void nonZeroOffsetIsRefusedButNotRejected() throws Exception {
+      Property prop = mock(Property.class);
+      when(prop.getPrimitiveObjectType()).thenReturn((Class) java.util.Date.class);
+      when(prop.isDatetime()).thenReturn(true);
+      JSONObject body = new JSONObject();
+      body.put("movementDate", "2026-08-06T14:30:00+02:00");
+
+      assertNull(
+          McpToolRouterSupport.coercePrimitiveFieldValue(body, "movementDate", prop, true, log));
+      assertEquals("2026-08-06T14:30:00+02:00", body.getString("movementDate"));
+    }
+
+    /**
+     * ETP-4793 / IMP-24, the ambiguity gate. {@code "03-04-2026"} reads as either 3 April or
+     * 4 March under the two conventions an agent might have meant — {@code toCanonical} alone would
+     * silently pick the first, which is the exact silent-reinterpretation bug this item exists to
+     * stop. The value is left verbatim in the body, same contract as an unreadable date: this class
+     * refuses, it never guesses.
+     */
+    @Test
+    @DisplayName("a genuinely ambiguous caller-supplied date is rejected, not repaired")
+    void ambiguousCallerDateIsRejected() throws Exception {
+      Property prop = mock(Property.class);
+      when(prop.getPrimitiveObjectType()).thenReturn((Class) java.util.Date.class);
+      when(prop.isDate()).thenReturn(true);
+      JSONObject body = new JSONObject();
+      body.put("orderDate", "03-04-2026");
+
+      JSONObject rejection =
+          McpToolRouterSupport.coercePrimitiveFieldValue(body, "orderDate", prop, true, log);
+
+      assertNotNull(rejection);
+      assertEquals("orderDate", rejection.getString("name"));
+      assertEquals("03-04-2026", rejection.getString("received"));
+      assertEquals("ambiguous", rejection.getString("reason"));
+      org.codehaus.jettison.json.JSONArray candidates = rejection.getJSONArray("candidates");
+      assertEquals("2026-04-03", candidates.getString(0));
+      assertEquals("2026-03-04", candidates.getString(1));
+      assertEquals("03-04-2026", body.getString("orderDate"));
+    }
+
+    /**
+     * The case IMP-24's own report called out as most likely to be got wrong: day 20 cannot be a
+     * month under any reading, so there is only one valid calendar date here and the repair must
+     * still happen exactly as before this gate existed.
+     */
+    @Test
+    @DisplayName("an unambiguous UI-pattern date is still silently repaired")
+    void unambiguousCallerDateIsStillRepaired() throws Exception {
+      Property prop = mock(Property.class);
+      when(prop.getPrimitiveObjectType()).thenReturn((Class) java.util.Date.class);
+      when(prop.isDate()).thenReturn(true);
+      JSONObject body = new JSONObject();
+      body.put("orderDate", "20-09-2026");
+
+      JSONObject rejection =
+          McpToolRouterSupport.coercePrimitiveFieldValue(body, "orderDate", prop, true, log);
+
+      assertNull(rejection);
+      assertEquals("2026-09-20", body.getString("orderDate"));
+    }
+
+    /**
+     * The other half of the IMP-24 gate applies here too: a value the agent never sent cannot be
+     * blamed on it, so an ambiguous server-injected default is still repaired rather than rejected.
+     */
+    @Test
+    @DisplayName("an ambiguous server-injected default is still repaired, never rejected")
+    void ambiguousServerDefaultIsStillRepaired() throws Exception {
+      Property prop = mock(Property.class);
+      when(prop.getPrimitiveObjectType()).thenReturn((Class) java.util.Date.class);
+      when(prop.isDate()).thenReturn(true);
+      JSONObject body = new JSONObject();
+      body.put("orderDate", "03-04-2026");
+
+      JSONObject rejection =
+          McpToolRouterSupport.coercePrimitiveFieldValue(body, "orderDate", prop, false, log);
+
+      assertNull(rejection);
+      assertEquals("2026-04-03", body.getString("orderDate"));
+    }
+
+    /**
+     * The ISO branch must never reach the ambiguity check at all — an ISO-parsed value is never
+     * ambiguous by construction, so this pins that the new gate leaves it exactly as before.
+     */
+    @Test
+    @DisplayName("an ISO date is unaffected by the ambiguity gate")
+    void isoDateIsUnaffectedByAmbiguityGate() throws Exception {
+      Property prop = mock(Property.class);
+      when(prop.getPrimitiveObjectType()).thenReturn((Class) java.util.Date.class);
+      when(prop.isDate()).thenReturn(true);
+      JSONObject body = new JSONObject();
+      body.put("orderDate", "2026-03-04");
+
+      assertNull(McpToolRouterSupport.coercePrimitiveFieldValue(body, "orderDate", prop, true, log));
+      assertEquals("2026-03-04", body.getString("orderDate"));
+    }
+
+    /**
+     * The pre-existing phase-2 rejection for an unreadable shape is unchanged by this gate: it is
+     * a different {@code reason} ("unreadable", not "ambiguous"), reached only when neither parser
+     * accepts the value at all.
+     */
+    @Test
+    @DisplayName("a differently-separated date still hits the existing unreadable 422")
+    void differentSeparatorStillReportedAsUnreadable() throws Exception {
+      Property prop = mock(Property.class);
+      when(prop.getPrimitiveObjectType()).thenReturn((Class) java.util.Date.class);
+      when(prop.isDate()).thenReturn(true);
+      JSONObject body = new JSONObject();
+      body.put("orderDate", "06/08/2026");
+
+      JSONObject rejection =
+          McpToolRouterSupport.coercePrimitiveFieldValue(body, "orderDate", prop, true, log);
+
+      assertNotNull(rejection);
+      assertEquals("unreadable", rejection.getString("reason"));
+      assertEquals("06/08/2026", body.getString("orderDate"));
     }
   }
 
@@ -1342,9 +1752,15 @@ class McpToolRouterSupportTest {
   // ─── resolveIncludedEntityOrExplain (ETP-4257) ──────────────────────
 
   /**
-   * Guard that turns the opaque {@code "Entity not found: <name>"} error into a descriptive
-   * message when an entity-CRUD tool (neo_list/get/create/...) is called on a report-type
-   * spec, while leaving type-W entity resolution unchanged.
+   * Guard that turns an opaque entity-not-found error into a descriptive message when an entity-CRUD
+   * tool (neo_list/get/create/...) is called on a report-type spec, while leaving type-W entity
+   * resolution unchanged.
+   *
+   * <p>ETP-4793 / IMP-17: both report branches now raise an {@link McpRoutingException} — an
+   * {@code OBException} subtype, so the messages and every existing catch stay as they were, while
+   * {@code route} can render the IMP-5 envelope. The classification is {@code validation_error}, not
+   * {@code not_found}: nothing the agent named is missing, the call is aimed at the wrong surface and
+   * the message says which one to use, so a retry can succeed.</p>
    */
   @Nested
   @DisplayName("resolveIncludedEntityOrExplain (ETP-4257)")
@@ -1369,7 +1785,7 @@ class McpToolRouterSupportTest {
      * agent at the concrete {@code etendo_generate_<snake>} tool instead of an entity.
      */
     @Test
-    void callableReportSpecExplainsGenerateTool() {
+    void callableReportSpecExplainsGenerateTool() throws Exception {
       SFSpec spec = mock(SFSpec.class);
       when(spec.getSpecType()).thenReturn("R");
       when(spec.getName()).thenReturn("financial-accounts-page");
@@ -1378,14 +1794,18 @@ class McpToolRouterSupportTest {
           mockStatic(NeoReportCallability.class)) {
         callabilityMock.when(() -> NeoReportCallability.isReportCallable(spec)).thenReturn(true);
 
-        org.openbravo.base.exception.OBException ex = assertThrows(
-            org.openbravo.base.exception.OBException.class,
+        McpRoutingException ex = assertThrows(McpRoutingException.class,
             () -> McpToolRouterSupport.resolveIncludedEntityOrExplain(spec, "header"));
 
         assertTrue(ex.getMessage().contains("report type (R)"),
             "message must state the spec is a report type: " + ex.getMessage());
         assertTrue(ex.getMessage().contains("etendo_generate_financial_accounts_page"),
             "message must name the concrete report tool: " + ex.getMessage());
+        // ETP-4793 / IMP-17: carried as a 422, so an agent knows a corrected retry is worth making.
+        JSONObject envelope = ex.toEnvelope();
+        assertEquals(422, envelope.getInt("status"));
+        assertEquals("validation_error", envelope.getString("error"));
+        assertEquals("spec", envelope.getString("field"));
       }
     }
 
@@ -1527,24 +1947,118 @@ class McpToolRouterSupportTest {
   class BuildNotFoundError {
 
     @Test
-    @DisplayName("wraps a 404 not_found body with a descriptive detail")
-    void wrapsNotFoundBody() throws Exception {
-      JSONObject inner = McpToolRouterSupport
-          .buildNotFoundError("sales-invoice", "header", "NONEXISTENT123")
-          .getJSONObject("response");
-      assertEquals(404, inner.getInt("status"));
-      assertEquals("not_found", inner.getString("error"));
-      assertTrue(inner.getString("detail").contains("sales-invoice/header"));
-      assertTrue(inner.getString("detail").contains("NONEXISTENT123"));
+    @DisplayName("builds a 404 not_found body with a descriptive detail")
+    void buildsNotFoundBody() throws Exception {
+      JSONObject envelope = McpToolRouterSupport
+          .buildNotFoundError("sales-invoice", "header", "NONEXISTENT123");
+      assertEquals(404, envelope.getInt("status"));
+      assertEquals("not_found", envelope.getString("error"));
+      assertTrue(envelope.getString("detail").contains("sales-invoice/header"));
+      assertTrue(envelope.getString("detail").contains("NONEXISTENT123"));
     }
 
     @Test
     @DisplayName("points the agent to a docs recipe via seeAlso (IMP-10)")
     void includesSeeAlsoPointer() throws Exception {
-      JSONObject inner = McpToolRouterSupport
+      assertEquals("docs(topic:\"reading records\")", McpToolRouterSupport
           .buildNotFoundError("sales-invoice", "header", "NONEXISTENT123")
-          .getJSONObject("response");
-      assertEquals("docs(topic:\"reading records\")", inner.getString("seeAlso"));
+          .getString("seeAlso"));
+    }
+
+    /**
+     * IMP-5 clause (iii): this envelope used to be returned inside {@code {"response":{…}}}, which
+     * made it the one read-verb error whose shape differed from its siblings on the same tool. The
+     * two tests above were rewritten from asserting on {@code .getJSONObject("response")}; this one
+     * pins the absence directly, so a future edit that re-wraps it fails here rather than silently
+     * restoring the asymmetry.
+     */
+    @Test
+    @DisplayName("is flat — no 'response' wrapper (IMP-5 clause (iii))")
+    void isFlat() throws Exception {
+      assertFalse(McpToolRouterSupport
+          .buildNotFoundError("sales-invoice", "header", "NONEXISTENT123").has("response"));
+    }
+  }
+
+  // ─── flattenCoreResponse (IMP-5 clause (iii)) ───────────────────────
+
+  @Nested
+  @DisplayName("flattenCoreResponse")
+  class FlattenCoreResponse {
+
+    private JSONObject wrap(JSONObject inner) throws Exception {
+      return new JSONObject().put("response", inner);
+    }
+
+    @Test
+    @DisplayName("lifts data and the pagination keys to the top level")
+    void liftsDataAndPagination() throws Exception {
+      JSONObject inner = new JSONObject()
+          .put("status", 0)
+          .put("data", new JSONArray().put(new JSONObject().put("id", "X")))
+          .put("startRow", 0)
+          .put("endRow", 0)
+          .put("totalRows", 1);
+      JSONObject flat = McpToolRouterSupport.flattenCoreResponse(wrap(inner));
+      assertFalse(flat.has("response"));
+      assertEquals(1, flat.getJSONArray("data").length());
+      assertEquals(0, flat.getInt("startRow"));
+      assertEquals(0, flat.getInt("endRow"));
+      assertEquals(1, flat.getInt("totalRows"));
+    }
+
+    /**
+     * The DAL success code is dropped rather than translated: by this point the failure branches
+     * have already returned, so it carries no information, and {@code status} on every other MCP
+     * body is an HTTP code — an agent branching on it read {@code 0} where it expected {@code 200}.
+     * Nothing is substituted, because the absence of {@code error} is already the success
+     * discriminator the other verbs use.
+     */
+    @Test
+    @DisplayName("drops the DAL status:0 and substitutes nothing")
+    void dropsDalStatus() throws Exception {
+      JSONObject flat = McpToolRouterSupport.flattenCoreResponse(
+          wrap(new JSONObject().put("status", 0).put("data", new JSONArray())));
+      assertFalse(flat.has("status"));
+      assertFalse(flat.has("error"));
+    }
+
+    /**
+     * Lifting by rule rather than by an allow-list is what keeps IMP-18's annotation working: it is
+     * added inside the wrapper by {@code applyProjection} and reaches the agent at the top level
+     * without this method naming it.
+     */
+    @Test
+    @DisplayName("lifts a key it does not know about, such as IMP-18's unknownFields")
+    void liftsUnknownKeys() throws Exception {
+      JSONObject flat = McpToolRouterSupport.flattenCoreResponse(
+          wrap(new JSONObject().put("status", 0).put("data", new JSONArray())
+              .put("unknownFields", new JSONArray().put("nosuchfield"))));
+      assertEquals("nosuchfield", flat.getJSONArray("unknownFields").getString(0));
+    }
+
+    @Test
+    @DisplayName("returns an already-flat body untouched, so it is idempotent")
+    void idempotentOnFlatBody() throws Exception {
+      JSONObject flat = new JSONObject().put("data", new JSONArray()).put("totalRows", 0);
+      assertSame(flat, McpToolRouterSupport.flattenCoreResponse(flat));
+    }
+
+    /**
+     * A body carrying keys beside {@code response} is not a shape this layer produces, and merging
+     * would have to guess at a collision. Passing it through is the conservative answer.
+     */
+    @Test
+    @DisplayName("leaves a body that has keys beside 'response' alone")
+    void leavesMixedBodyAlone() throws Exception {
+      JSONObject mixed = wrap(new JSONObject().put("status", 0)).put("extra", "keep me");
+      assertSame(mixed, McpToolRouterSupport.flattenCoreResponse(mixed));
+    }
+
+    @Test
+    @DisplayName("null in, null out")
+    void nullIsNull() throws Exception {
+      assertNull(McpToolRouterSupport.flattenCoreResponse(null));
     }
   }
 
@@ -1560,6 +2074,309 @@ class McpToolRouterSupportTest {
       JSONObject guidance = McpToolRouterSupport.buildDocsGuidance();
       assertEquals("docs", guidance.getString("tool"));
       assertTrue(guidance.getString("hint").toLowerCase().contains("docs(topic"));
+    }
+  }
+
+  @Nested
+  @DisplayName("toMcpBatchFailure (IMP-15)")
+  class ToMcpBatchFailure {
+
+    /** The verbatim shape BatchService forwarded to agents before IMP-15. */
+    private JSONObject rawDalFailure() throws Exception {
+      JSONObject errors = new JSONObject();
+      errors.put("id", "New object Currency(null)  (key: EUR_Currency) refered to but not present "
+          + "in the import set");
+      JSONObject response = new JSONObject();
+      response.put("status", -4);
+      response.put("errors", errors);
+      JSONObject detail = new JSONObject();
+      detail.put("response", response);
+
+      JSONObject error = new JSONObject();
+      error.put("status", 400);
+      error.put("message", "Operation 'h1' rejected by server");
+      error.put("detail", detail);
+      JSONObject failedAt = new JSONObject();
+      failedAt.put("index", 0);
+      failedAt.put("id", "h1");
+      JSONObject body = new JSONObject();
+      body.put("committed", false);
+      body.put("failedAt", failedAt);
+      body.put("error", error);
+      return body;
+    }
+
+    @Test
+    @DisplayName("replaces the raw DAL detail with the IMP-5 envelope, keeping the failedAt pointer")
+    void rewritesTheFailure() throws Exception {
+      JSONObject result = McpToolRouterSupport.toMcpBatchFailure(rawDalFailure());
+
+      JSONObject error = result.getJSONObject("error");
+      assertEquals(400, error.getInt("status"));
+      assertEquals("validation_error", error.getString("error"));
+      assertEquals("docs(topic:\"creating records\")", error.getString("seeAlso"));
+      // The DAL's own sentence survives — it names the value that could not be resolved.
+      assertTrue(error.getString("detail").contains("EUR_Currency"));
+      // …but its transport internals do not: status:-4 is not actionable by an agent.
+      assertFalse(error.toString().contains("-4"));
+      assertNull(error.optJSONObject("detail"));
+      assertEquals("h1", result.getJSONObject("failedAt").getString("id"));
+    }
+
+    /**
+     * ETP-4793 / IMP-17 (absorbing IMP-23 §9.4): a batch operation rejected for missing required
+     * fields used to forward the REST layer's ETP-3894 {@code MISSING_REQUIRED_FIELDS} 400 verbatim,
+     * so the same mistake reached agents in three different shapes depending on the tool. The REST
+     * shape stays put — the React UI highlights fields from it — and the translation to IMP-24's
+     * {@code missingFields} 422 happens here, which is exactly what this method exists for.
+     */
+    @Test
+    @DisplayName("lifts a MISSING_REQUIRED_FIELDS rejection into the missingFields 422 shape")
+    void liftsMissingRequiredFields() throws Exception {
+      JSONArray fields = new JSONArray();
+      fields.put("partnerAddress");
+      JSONObject innerError = new JSONObject();
+      innerError.put("code", "MISSING_REQUIRED_FIELDS");
+      innerError.put("message", "Missing required fields");
+      innerError.put("fields", fields);
+      JSONObject detail = new JSONObject();
+      detail.put("error", innerError);
+
+      JSONObject error = new JSONObject();
+      error.put("status", 400);
+      error.put("message", "Operation 'h1' rejected by server");
+      error.put("detail", detail);
+      JSONObject body = new JSONObject();
+      body.put("committed", false);
+      body.put("error", error);
+
+      JSONObject result = McpToolRouterSupport.toMcpBatchFailure(body);
+
+      JSONObject mapped = result.getJSONObject("error");
+      assertEquals(422, mapped.getInt("status"));
+      assertEquals("validation_error", mapped.getString("error"));
+      assertEquals("partnerAddress", mapped.getJSONArray("missingFields").getString(0));
+      // The REST envelope's own nesting is gone: an agent parses one key, not three shapes.
+      assertNull(mapped.optJSONObject("detail"));
+      assertFalse(mapped.toString().contains("MISSING_REQUIRED_FIELDS"));
+    }
+
+    @Test
+    @DisplayName("a committed batch and a body with no error object pass through untouched")
+    void passesThroughNonFailures() throws Exception {
+      JSONObject committed = new JSONObject();
+      committed.put("committed", true);
+      assertTrue(McpToolRouterSupport.toMcpBatchFailure(committed).getBoolean("committed"));
+
+      JSONObject noError = new JSONObject();
+      noError.put("committed", false);
+      assertNull(McpToolRouterSupport.toMcpBatchFailure(noError).optJSONObject("error"));
+      assertNull(McpToolRouterSupport.toMcpBatchFailure(null));
+    }
+
+    @Test
+    @DisplayName("maps each status onto a stable code an agent can branch on")
+    void mapsStatusesToCodes() {
+      assertEquals("not_found", McpSupportInternals.errorCodeForStatus(404));
+      assertEquals("method_not_allowed", McpSupportInternals.errorCodeForStatus(405));
+      assertEquals("validation_error", McpSupportInternals.errorCodeForStatus(400));
+      assertEquals("validation_error", McpSupportInternals.errorCodeForStatus(422));
+      assertEquals("server_error", McpSupportInternals.errorCodeForStatus(500));
+    }
+
+    @Test
+    @DisplayName("extracts a message from either DAL error shape, and none when there is none")
+    void extractsDalMessages() throws Exception {
+      JSONObject nested = new JSONObject();
+      JSONObject inner = new JSONObject();
+      inner.put("message", "Unit of Measure mismatch (product/transaction)");
+      JSONObject response = new JSONObject();
+      response.put("error", inner);
+      nested.put("response", response);
+      assertEquals("Unit of Measure mismatch (product/transaction)",
+          McpSupportInternals.extractDalMessage(nested));
+
+      JSONObject perField = new JSONObject();
+      JSONObject errors = new JSONObject();
+      errors.put("documentNo", "required");
+      perField.put("errors", errors);
+      assertEquals("documentNo: required", McpSupportInternals.extractDalMessage(perField));
+
+      assertNull(McpSupportInternals.extractDalMessage(null));
+      assertNull(McpSupportInternals.extractDalMessage(new JSONObject()));
+    }
+  }
+
+  @Nested
+  @DisplayName("toMcpHandlerError — the fourth error funnel (IMP-5 clause (iv))")
+  class ToMcpHandlerError {
+
+    @Test
+    @DisplayName("flattens the nested NeoResponse.error shape into the canonical envelope")
+    void flattensNestedError() throws Exception {
+      // Verbatim from the live probe that found this funnel: generate_aging_receivable({}) after
+      // passing contract validation, failing inside the handler (IMP-19 §6.3).
+      JSONObject inner = new JSONObject();
+      inner.put("message", "No accounting schema with currency is configured for organization "
+          + "61849243BE89460EB70866880A545D50");
+      inner.put("status", 422);
+      JSONObject body = new JSONObject();
+      body.put("error", inner);
+
+      JSONObject envelope = McpToolRouterSupport.toMcpHandlerError(body, 422);
+
+      assertEquals(422, envelope.getInt("status"));
+      assertEquals("validation_error", envelope.getString("error"));
+      assertTrue(envelope.getString("detail").startsWith("No accounting schema with currency"));
+      // The nesting is gone: 'error' is a code an agent can branch on, not an object.
+      assertNull(envelope.optJSONObject("error"));
+    }
+
+    @Test
+    @DisplayName("adds no seeAlso — neither docs topic helps an instance-configuration failure")
+    void addsNoSeeAlso() throws Exception {
+      JSONObject inner = new JSONObject();
+      inner.put("message", "No accounting schema with currency is configured");
+      inner.put("status", 422);
+      JSONObject body = new JSONObject();
+      body.put("error", inner);
+
+      // Pinned rather than left to a comment, on IMP-17 §4.3's precedent: a deliberate omission and
+      // a forgotten key look identical in a response, so the test has to state which this is.
+      assertFalse(McpToolRouterSupport.toMcpHandlerError(body, 422).has("seeAlso"));
+    }
+
+    @Test
+    @DisplayName("leaves an already-canonical envelope untouched, so normalizing twice is safe")
+    void isIdempotent() throws Exception {
+      // The shape IMP-17 and IMP-24 build upstream. Re-flattening it would strip the very keys
+      // that make it actionable, so the early return is what protects them.
+      JSONObject canonical = new JSONObject();
+      canonical.put("status", 422);
+      canonical.put("error", "validation_error");
+      canonical.put("detail", "Missing required fields");
+      canonical.put("missingFields", new JSONArray().put("partnerAddress"));
+      canonical.put("seeAlso", "docs(topic:\"creating records\")");
+
+      JSONObject once = McpToolRouterSupport.toMcpHandlerError(canonical, 422);
+      JSONObject twice = McpToolRouterSupport.toMcpHandlerError(once, 422);
+
+      assertEquals("validation_error", twice.getString("error"));
+      assertEquals("partnerAddress", twice.getJSONArray("missingFields").getString(0));
+      assertEquals("docs(topic:\"creating records\")", twice.getString("seeAlso"));
+      assertEquals("Missing required fields", twice.getString("detail"));
+    }
+
+    @Test
+    @DisplayName("lifts the nested object's other keys instead of discarding them")
+    void preservesHandlerDetail() throws Exception {
+      JSONObject inner = new JSONObject();
+      inner.put("message", "Period is not open");
+      inner.put("status", 422);
+      inner.put("field", "accountingDate");
+      inner.put("available", new JSONArray().put("2026-08"));
+      JSONObject body = new JSONObject();
+      body.put("error", inner);
+
+      JSONObject envelope = McpToolRouterSupport.toMcpHandlerError(body, 422);
+
+      // A handler that named a field and its candidates meant the agent to see them; a
+      // normalization that dropped them would trade one unusable error for another.
+      assertEquals("accountingDate", envelope.getString("field"));
+      assertEquals("2026-08", envelope.getJSONArray("available").getString(0));
+      assertEquals("Period is not open", envelope.getString("detail"));
+    }
+
+    @Test
+    @DisplayName("gives a body-less failure a status, a code and a detail")
+    void handlesNullBody() throws Exception {
+      JSONObject envelope = McpToolRouterSupport.toMcpHandlerError(null, 500);
+
+      assertEquals(500, envelope.getInt("status"));
+      assertEquals("server_error", envelope.getString("error"));
+      assertEquals("Request failed with status 500", envelope.getString("detail"));
+    }
+
+    @Test
+    @DisplayName("annotates an unrecognised body without removing anything from it")
+    void annotatesUnknownShape() throws Exception {
+      JSONObject body = new JSONObject();
+      body.put("reportRows", new JSONArray().put("partial"));
+      body.put("warning", "truncated");
+
+      JSONObject envelope = McpToolRouterSupport.toMcpHandlerError(body, 500);
+
+      assertEquals(500, envelope.getInt("status"));
+      assertEquals("server_error", envelope.getString("error"));
+      // Additive: a handler's own payload survives, because we cannot know it was not the point.
+      assertEquals("truncated", envelope.getString("warning"));
+      assertEquals("partial", envelope.getJSONArray("reportRows").getString(0));
+    }
+  }
+
+  @Nested
+  @DisplayName("toMcpBatchPreflightFailure — one shape per condition (IMP-5 clause (i))")
+  class ToMcpBatchPreflightFailure {
+
+    /** The resolver's structured error for an FK name that matched nothing (evidence C9). */
+    private JSONObject fkError() throws Exception {
+      JSONObject error = new JSONObject();
+      error.put("status", 422);
+      error.put("error", "not_found");
+      error.put("detail", "No Currency matches 'EUR_Currency'");
+      error.put("field", "currency");
+      return error;
+    }
+
+    @Test
+    @DisplayName("carries committed:false, the key an agent is told to branch on")
+    void carriesCommitted() throws Exception {
+      JSONObject body = McpToolRouterSupport.toMcpBatchPreflightFailure(fkError(), 1, "l1");
+
+      // The whole of clause (i): this key was absent, so an agent following neo_batch's own
+      // documented contract read false from a missing key by luck rather than by promise.
+      assertTrue(body.has("committed"));
+      assertFalse(body.getBoolean("committed"));
+      assertEquals(1, body.getJSONObject("failedAt").getInt("index"));
+      assertEquals("l1", body.getJSONObject("failedAt").getString("id"));
+      assertEquals("not_found", body.getJSONObject("error").getString("error"));
+      assertEquals("currency", body.getJSONObject("error").getString("field"));
+    }
+
+    @Test
+    @DisplayName("claims atomic:true with an empty persisted list — true by construction here")
+    void claimsAtomicity() throws Exception {
+      JSONObject body = McpToolRouterSupport.toMcpBatchPreflightFailure(fkError(), 0, "h0");
+
+      // Stronger than executeBatch can promise: the pre-pass runs before the transaction opens,
+      // so nothing can have persisted. IMP-23 §1 found that this is exactly why FK failures
+      // always looked atomic while persist-time failures were not.
+      assertTrue(body.getBoolean("atomic"));
+      assertEquals(0, body.getJSONArray("persisted").length());
+      // And the hint must say why, not reuse the rollback wording: no rollback happened.
+      assertTrue(body.getString("hint").contains("before the transaction opened"));
+    }
+
+    @Test
+    @DisplayName("omits the failedAt id when the operation declared none")
+    void omitsBlankOpId() throws Exception {
+      assertFalse(McpToolRouterSupport.toMcpBatchPreflightFailure(fkError(), 2, null)
+          .getJSONObject("failedAt").has("id"));
+      assertFalse(McpToolRouterSupport.toMcpBatchPreflightFailure(fkError(), 2, "  ")
+          .getJSONObject("failedAt").has("id"));
+    }
+
+    @Test
+    @DisplayName("matches the outcome keys BatchService itself defines")
+    void usesBatchServiceKeys() throws Exception {
+      JSONObject body = McpToolRouterSupport.toMcpBatchPreflightFailure(fkError(), 0, "h0");
+
+      // Pins the shared-constant decision rather than the literals: if BatchService renames an
+      // outcome key, this fails here instead of drifting silently in a response body.
+      assertTrue(body.has(com.etendoerp.go.schemaforge.BatchService.FIELD_COMMITTED));
+      assertTrue(body.has(com.etendoerp.go.schemaforge.BatchService.FIELD_ATOMIC));
+      assertTrue(body.has(com.etendoerp.go.schemaforge.BatchService.FIELD_PERSISTED));
+      assertTrue(body.has(com.etendoerp.go.schemaforge.BatchService.FIELD_HINT));
     }
   }
 
