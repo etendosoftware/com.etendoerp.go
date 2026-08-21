@@ -307,6 +307,22 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       handleCheckoutWebhook(request, response);
       return;
     }
+    // Split across two chains so neither trips the cognitive-complexity limit. The relative order
+    // is identical to the single chain this replaces: authentication routes are still matched
+    // first, and an unmatched path still falls through to the 404 at the end.
+    if (routeAuthenticationPost(path, request, response)) {
+      return;
+    }
+    routeOnboardingPost(path, request, response);
+  }
+
+  /**
+   * Routes the authentication endpoints.
+   *
+   * @return true when the path matched one of them and the request was handled
+   */
+  private boolean routeAuthenticationPost(String path, HttpServletRequest request,
+      HttpServletResponse response) throws IOException {
     String ssoProvider = extractSsoProvider(path);
     if (isPath(path, "/register")) {
       handleRegister(request, response);
@@ -324,7 +340,16 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       handleVerifyEmail(request, response);
     } else if (isPath(path, PATH_VERIFY_EMAIL_RESEND)) {
       handleResendVerifyEmail(request, response);
-    } else if (isPath(path, PATH_ONBOARDING_DRAFT)) {
+    } else {
+      return false;
+    }
+    return true;
+  }
+
+  /** Routes the onboarding, checkout and invitation endpoints, and answers 404 for anything else. */
+  private void routeOnboardingPost(String path, HttpServletRequest request,
+      HttpServletResponse response) throws IOException {
+    if (isPath(path, PATH_ONBOARDING_DRAFT)) {
       handleSaveOnboardingDraft(request, response);
     } else if (isPath(path, "/onboarding")) {
       handleOnboarding(request, response);
@@ -975,15 +1000,15 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     try {
       OBContext.setOBContext("0", "0", "0", "0");
       OBContext.setAdminMode(true);
-      Account account = EtendoGoJwtDalHelper.findAccountByVerifyTokenHash(
+      Account account = EmailVerificationDalHelper.findAccountByVerifyTokenHash(
           hashAuthToken(verifyToken), new Date());
       if (account == null) {
         writeError(response, HttpServletResponse.SC_BAD_REQUEST, CODE_EMAIL_VERIFY_INVALID,
             EMAIL_VERIFY_INVALID_MESSAGE, EMAIL_VERIFY_INVALID_MESSAGE);
         return;
       }
-      if (!EtendoGoJwtDalHelper.isEmailVerified(account)) {
-        EtendoGoJwtDalHelper.consumeEmailVerification(account, new Date());
+      if (!EmailVerificationDalHelper.isEmailVerified(account)) {
+        EmailVerificationDalHelper.consumeEmailVerification(account, new Date());
       }
 
       JSONObject result = new JSONObject();
@@ -1021,7 +1046,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       throws IOException {
     runWithAuthenticatedAccount(request, response, "email verification resend", account -> {
       String language = StringUtils.trimToNull(request.getParameter(FIELD_LANGUAGE));
-      if (EtendoGoJwtDalHelper.isEmailVerificationPending(account)) {
+      if (EmailVerificationDalHelper.isEmailVerificationPending(account)) {
         issueEmailVerification(account, language, false);
       }
       writeEmailVerifyNeutralResponse(response);
@@ -1148,9 +1173,9 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       // ETP-4798: two separate facts, because they are not opposites. "pending" is what the web
       // client shows the confirm-your-email banner for; an account that predates this feature is
       // neither verified nor pending, and must see no banner and hit no gate.
-      result.put(FIELD_EMAIL_VERIFIED, EtendoGoJwtDalHelper.isEmailVerified(account));
+      result.put(FIELD_EMAIL_VERIFIED, EmailVerificationDalHelper.isEmailVerified(account));
       result.put(FIELD_EMAIL_VERIFICATION_PENDING,
-          EtendoGoJwtDalHelper.isEmailVerificationPending(account));
+          EmailVerificationDalHelper.isEmailVerificationPending(account));
 
       writeResponse(response, HttpServletResponse.SC_OK, result);
     } catch (RuntimeException e) {
@@ -2534,7 +2559,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
         return;
       }
 
-      EtendoGoJwtDalHelper.storeEmailVerifyToken(account, verifyTokenHash,
+      EmailVerificationDalHelper.storeEmailVerifyToken(account, verifyTokenHash,
           Date.from(Instant.now().plusSeconds(EMAIL_VERIFICATION_TTL_SECONDS)));
       tokenStored = true;
 
@@ -2565,7 +2590,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     log.warn("Email verification token dropped because its mail could not be sent — "
         + "the account is left ungated rather than locked out");
     try {
-      EtendoGoJwtDalHelper.storeEmailVerifyToken(account, null, null);
+      EmailVerificationDalHelper.storeEmailVerifyToken(account, null, null);
     } catch (RuntimeException e) {
       log.error("Could not drop the unusable email verification token; this account may be gated "
           + "out of creating an environment with no deliverable confirmation link", e);
@@ -2584,7 +2609,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       OBContext.setOBContext("0", "0", "0", "0");
       OBContext.setAdminMode(true);
       Account account = EtendoGoJwtDalHelper.findActiveAccountByBearerToken(token);
-      pending = EtendoGoJwtDalHelper.isEmailVerificationPending(account);
+      pending = EmailVerificationDalHelper.isEmailVerificationPending(account);
     } catch (RuntimeException e) {
       log.error("Could not check the email verification state for onboarding; allowing the "
           + "request through", e);

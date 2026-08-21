@@ -48,7 +48,6 @@ final class EtendoGoJwtDalHelper {
   private static final String PARAM_AUTH_PROVIDER = "authProvider";
   private static final String PARAM_EXTERNAL_SUBJECT = "externalSubject";
   private static final String PARAM_RESET_TOKEN_HASH = "resetTokenHash";
-  private static final String PARAM_VERIFY_TOKEN_HASH = "verifyTokenHash";
   private static final String PARAM_ACCOUNT_EMAIL = "accountEmail";
   private static final String PARAM_ACCOUNT_PREFIX = "accountPrefix";
   private static final String PARAM_CLIENT_ID = "clientId";
@@ -56,6 +55,8 @@ final class EtendoGoJwtDalHelper {
   private static final String PARAM_STAR_VALUE = "starValue";
   private static final String PARAM_SYSTEM_USER_ID = "systemUserId";
   private static final String ACTIVE_ACCOUNT_FILTER = " and account.active = true";
+  private static final String ACCOUNT_QUERY = "as account where account.";
+  private static final String AND_ACCOUNT = " and account.";
   private static final String FIELD_CLIENT_ID = "clientId";
   private static final String FIELD_CLIENT_NAME = "clientName";
   private static final String FIELD_ORG_ID = "orgId";
@@ -106,7 +107,7 @@ final class EtendoGoJwtDalHelper {
 
   static Account findActiveAccountByToken(String token) {
     OBQuery<Account> query = OBDal.getInstance().createQuery(Account.class,
-        "as account where account.sessionToken = :" + PARAM_TOKEN + ACTIVE_ACCOUNT_FILTER);
+        ACCOUNT_QUERY + "sessionToken = :" + PARAM_TOKEN + ACTIVE_ACCOUNT_FILTER);
     query.setNamedParameter(PARAM_TOKEN, token);
     query.setFilterOnReadableClients(false);
     query.setFilterOnReadableOrganization(false);
@@ -139,8 +140,8 @@ final class EtendoGoJwtDalHelper {
 
   static Account findActiveAccountBySsoIdentity(String provider, String subject) {
     OBQuery<Account> query = OBDal.getInstance().createQuery(Account.class,
-        "as account where account." + PROPERTY_AUTH_PROVIDER + " = :" + PARAM_AUTH_PROVIDER
-            + " and account." + PROPERTY_EXTERNAL_SUBJECT + " = :" + PARAM_EXTERNAL_SUBJECT
+        ACCOUNT_QUERY + PROPERTY_AUTH_PROVIDER + " = :" + PARAM_AUTH_PROVIDER
+            + AND_ACCOUNT + PROPERTY_EXTERNAL_SUBJECT + " = :" + PARAM_EXTERNAL_SUBJECT
             + ACTIVE_ACCOUNT_FILTER);
     query.setNamedParameter(PARAM_AUTH_PROVIDER, provider);
     query.setNamedParameter(PARAM_EXTERNAL_SUBJECT, subject);
@@ -322,11 +323,11 @@ final class EtendoGoJwtDalHelper {
 
   static Account findActiveAccountByResetTokenHash(String resetTokenHash, Date now) {
     OBQuery<Account> query = OBDal.getInstance().createQuery(Account.class,
-        "as account where account." + PROPERTY_RESET_TOKEN_HASH + " = :"
+        ACCOUNT_QUERY + PROPERTY_RESET_TOKEN_HASH + " = :"
             + PARAM_RESET_TOKEN_HASH
-            + " and account." + PROPERTY_RESET_TOKEN_EXPIRES + " > :now"
-            + " and account." + PROPERTY_RESET_TOKEN_CONSUMED + " is null"
-            + " and account.active = true");
+            + AND_ACCOUNT + PROPERTY_RESET_TOKEN_EXPIRES + " > :now"
+            + AND_ACCOUNT + PROPERTY_RESET_TOKEN_CONSUMED + " is null"
+            + ACTIVE_ACCOUNT_FILTER);
     query.setNamedParameter(PARAM_RESET_TOKEN_HASH, resetTokenHash);
     query.setNamedParameter("now", now);
     query.setFilterOnReadableClients(false);
@@ -344,70 +345,6 @@ final class EtendoGoJwtDalHelper {
     account.set(PROPERTY_PASSWORD_CHANGED, changedAt);
     OBDal.getInstance().save(account);
     flushAndCommitDalChanges();
-  }
-
-  /**
-   * ETP-4798: stores the hash of a freshly issued email-verification token. Only the hash is
-   * persisted — the clear token exists solely inside the link that goes out by mail, exactly like
-   * the password-reset token, so a database dump does not let anyone verify someone else's
-   * address. Issuing a new token replaces any token still pending, which is what makes "resend"
-   * safe: the previous link stops working.
-   */
-  static void storeEmailVerifyToken(Account account, String verifyTokenHash, Date expiresAt) {
-    account.set(PROPERTY_VERIFY_TOKEN_HASH, verifyTokenHash);
-    account.set(PROPERTY_VERIFY_TOKEN_EXPIRES, expiresAt);
-    OBDal.getInstance().save(account);
-    flushAndCommitDalChanges();
-  }
-
-  static Account findAccountByVerifyTokenHash(String verifyTokenHash, Date now) {
-    OBQuery<Account> query = OBDal.getInstance().createQuery(Account.class,
-        "as account where account." + PROPERTY_VERIFY_TOKEN_HASH + " = :"
-            + PARAM_VERIFY_TOKEN_HASH
-            + " and account." + PROPERTY_VERIFY_TOKEN_EXPIRES + " > :now"
-            + ACTIVE_ACCOUNT_FILTER);
-    query.setNamedParameter(PARAM_VERIFY_TOKEN_HASH, verifyTokenHash);
-    query.setNamedParameter("now", now);
-    query.setFilterOnReadableClients(false);
-    query.setFilterOnReadableOrganization(false);
-    return query.uniqueResult();
-  }
-
-  /**
-   * Marks the address as proven.
-   *
-   * <p>Two deliberate differences from {@link #consumePasswordReset}. It does not clear the token
-   * hash, so following the link again inside its TTL still resolves to this account and the
-   * endpoint can answer 200 instead of "invalid token" — people re-click confirmation links, and
-   * some mail clients fetch them unprompted. Once the verified timestamp is set the token grants nothing, so
-   * there is nothing left to replay. And it does not touch the session token: the account holder is
-   * usually signed in already (they registered, then clicked), and signing them out here would
-   * dump them out of the onboarding they are in the middle of.
-   */
-  static void consumeEmailVerification(Account account, Date verifiedAt) {
-    account.set(PROPERTY_EMAIL_VERIFIED, verifiedAt);
-    OBDal.getInstance().save(account);
-    flushAndCommitDalChanges();
-  }
-
-  static boolean isEmailVerified(Account account) {
-    return account != null && account.get(PROPERTY_EMAIL_VERIFIED) != null;
-  }
-
-  /**
-   * True when this account owes an email confirmation: a verification token was issued for it and
-   * never consumed.
-   *
-   * <p>The "token was issued" half is what keeps accounts that predate ETP-4798 working. They have
-   * no verified timestamp and no token, so they read as "nothing pending" and are never gated —
-   * no backfill migration, and no existing user locked out by the deploy. Every account created by
-   * {@code /register} from now on gets a token stored immediately after the account commits, so it
-   * is gated until the link is clicked.
-   */
-  static boolean isEmailVerificationPending(Account account) {
-    return account != null
-        && account.get(PROPERTY_EMAIL_VERIFIED) == null
-        && account.get(PROPERTY_VERIFY_TOKEN_HASH) != null;
   }
 
   static void changePassword(Account account, String passwordHash, String sessionToken,

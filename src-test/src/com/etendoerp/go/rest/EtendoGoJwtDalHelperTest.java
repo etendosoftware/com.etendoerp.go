@@ -689,9 +689,9 @@ class EtendoGoJwtDalHelperTest {
       when(account.get(EtendoGoJwtDalHelper.PROPERTY_EMAIL_VERIFIED)).thenReturn(new Date());
       when(account.get(EtendoGoJwtDalHelper.PROPERTY_VERIFY_TOKEN_HASH)).thenReturn("hash");
 
-      assertTrue(EtendoGoJwtDalHelper.isEmailVerified(account));
+      assertTrue(EmailVerificationDalHelper.isEmailVerified(account));
       // Still holding the hash — the link stays replayable for idempotency — but nothing is owed.
-      assertFalse(EtendoGoJwtDalHelper.isEmailVerificationPending(account));
+      assertFalse(EmailVerificationDalHelper.isEmailVerificationPending(account));
     }
 
     @Test
@@ -701,8 +701,8 @@ class EtendoGoJwtDalHelperTest {
       when(account.get(EtendoGoJwtDalHelper.PROPERTY_EMAIL_VERIFIED)).thenReturn(null);
       when(account.get(EtendoGoJwtDalHelper.PROPERTY_VERIFY_TOKEN_HASH)).thenReturn("hash");
 
-      assertFalse(EtendoGoJwtDalHelper.isEmailVerified(account));
-      assertTrue(EtendoGoJwtDalHelper.isEmailVerificationPending(account));
+      assertFalse(EmailVerificationDalHelper.isEmailVerified(account));
+      assertTrue(EmailVerificationDalHelper.isEmailVerificationPending(account));
     }
 
     @Test
@@ -714,15 +714,15 @@ class EtendoGoJwtDalHelperTest {
       when(account.get(EtendoGoJwtDalHelper.PROPERTY_EMAIL_VERIFIED)).thenReturn(null);
       when(account.get(EtendoGoJwtDalHelper.PROPERTY_VERIFY_TOKEN_HASH)).thenReturn(null);
 
-      assertFalse(EtendoGoJwtDalHelper.isEmailVerified(account));
-      assertFalse(EtendoGoJwtDalHelper.isEmailVerificationPending(account));
+      assertFalse(EmailVerificationDalHelper.isEmailVerified(account));
+      assertFalse(EmailVerificationDalHelper.isEmailVerificationPending(account));
     }
 
     @Test
     @DisplayName("a null account is neither verified nor pending")
     void nullAccount() {
-      assertFalse(EtendoGoJwtDalHelper.isEmailVerified(null));
-      assertFalse(EtendoGoJwtDalHelper.isEmailVerificationPending(null));
+      assertFalse(EmailVerificationDalHelper.isEmailVerified(null));
+      assertFalse(EmailVerificationDalHelper.isEmailVerificationPending(null));
     }
 
     @Test
@@ -731,7 +731,7 @@ class EtendoGoJwtDalHelperTest {
       Account account = mock(Account.class);
       Date expiresAt = new Date();
 
-      EtendoGoJwtDalHelper.storeEmailVerifyToken(account, "hash", expiresAt);
+      EmailVerificationDalHelper.storeEmailVerifyToken(account, "hash", expiresAt);
 
       verify(account).set(EtendoGoJwtDalHelper.PROPERTY_VERIFY_TOKEN_HASH, "hash");
       verify(account).set(EtendoGoJwtDalHelper.PROPERTY_VERIFY_TOKEN_EXPIRES, expiresAt);
@@ -744,7 +744,7 @@ class EtendoGoJwtDalHelperTest {
       Account account = mock(Account.class);
       Date verifiedAt = new Date();
 
-      EtendoGoJwtDalHelper.consumeEmailVerification(account, verifiedAt);
+      EmailVerificationDalHelper.consumeEmailVerification(account, verifiedAt);
 
       verify(account).set(EtendoGoJwtDalHelper.PROPERTY_EMAIL_VERIFIED, verifiedAt);
       // Keeping the hash is what makes a second click on the link answer 200 instead of "invalid".
@@ -764,7 +764,7 @@ class EtendoGoJwtDalHelperTest {
       when(obDal.createQuery(eq(Account.class), anyString())).thenReturn(query);
       when(query.uniqueResult()).thenReturn(expected);
 
-      Account result = EtendoGoJwtDalHelper.findAccountByVerifyTokenHash("hash", now);
+      Account result = EmailVerificationDalHelper.findAccountByVerifyTokenHash("hash", now);
 
       assertEquals(expected, result);
       verify(query).setNamedParameter("verifyTokenHash", "hash");

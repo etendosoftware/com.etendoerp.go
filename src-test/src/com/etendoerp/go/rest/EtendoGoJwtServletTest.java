@@ -24,6 +24,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.CALLS_REAL_METHODS;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
@@ -70,6 +71,13 @@ import com.etendoerp.go.schemaforge.data.Account;
 public class EtendoGoJwtServletTest {
 
   private static final String TEST_APP_BASE_URL = "https://app.example.test";
+
+  /** ETP-4798: a pinned confirmation link, so these tests never read the machine's app base URL. */
+  private static final String VERIFY_LINK = "https://app.example.test/onboarding?verifyToken=tok";
+  // Any test that drives /register to a successful createAccount must also mock
+  // EmailVerificationDalHelper: registration now stores a verification token, and
+  // issueEmailVerification swallows the resulting failure, so an unmocked call shows up as
+  // "the welcome mail was never sent" rather than as an error.
 
   private final EtendoGoJwtServlet servlet = new EtendoGoJwtServlet();
 
@@ -303,8 +311,16 @@ public class EtendoGoJwtServletTest {
     when(account.getEmail()).thenReturn("new@test.com");
     when(account.getName()).thenReturn("New User");
 
+    // ETP-4798: the link builder is pinned instead of left to read the ambient app base URL.
+    // Without this the outcome depends on whether the machine running the suite has
+    // etendo.go.app.baseUrl configured: with it, registration mails the confirmation link; without
+    // it, issueEmailVerification takes its fail-open branch and mails the plain welcome instead.
     try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
-         MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
+         MockedStatic<EtendoGoAuthLinkBuilder> linkMock = mockStatic(EtendoGoAuthLinkBuilder.class);
+         MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class);
+         MockedStatic<EmailVerificationDalHelper> verifyMock = mockStatic(EmailVerificationDalHelper.class)) {
+      linkMock.when(() -> EtendoGoAuthLinkBuilder.verifyEmailLink(anyString()))
+          .thenReturn(VERIFY_LINK);
       dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByEmail("new@test.com"))
           .thenReturn(null);
       dalMock.when(() -> EtendoGoJwtDalHelper.createAccount(
@@ -312,12 +328,60 @@ public class EtendoGoJwtServletTest {
           .thenReturn(account);
 
       servletWithEmailSender.doPost(req, resp.response);
+
+      // The token is stored before the mail goes out, so a click can be honoured.
+      verifyMock.verify(() -> EmailVerificationDalHelper.storeEmailVerifyToken(
+          eq(account), anyString(), any(Date.class)));
     }
 
     assertEquals(201, resp.status);
     JSONObject respBody = new JSONObject(resp.body());
     assertEquals("success", respBody.getString("status"));
+    // Registration still hands back a session token: the unconfirmed address gates creating the
+    // environment, not filling in the form.
     assertNotNull(respBody.getString("token"));
+    verify(emailSender).sendNewAccount(account, null, VERIFY_LINK);
+  }
+
+  @Test
+  public void registerWithoutAConfigurableLinkFallsBackToThePlainWelcome() throws Exception {
+    // ETP-4798 fail-open: with no app base URL there is no link to mail, so no verification token
+    // is stored and the account is left ungated rather than stranded waiting for a mail that
+    // cannot be sent. Registration must still succeed and still send the welcome.
+    ResponseCapture resp = mockResponse();
+    HttpServletRequest req = mockRequest("/register");
+    TransactionalAuthEmailSender emailSender = mock(TransactionalAuthEmailSender.class);
+    EtendoGoJwtServlet servletWithEmailSender = new EtendoGoJwtServlet(emailSender);
+    when(req.getContentType()).thenReturn("application/json");
+    JSONObject body = new JSONObject();
+    body.put("email", "nolink@test.com");
+    body.put("password", "Str0ng!Pass1");
+    body.put("name", "No Link");
+    when(req.getReader()).thenReturn(new BufferedReader(new StringReader(body.toString())));
+
+    Account account = mock(Account.class);
+    when(account.getId()).thenReturn("acct-1");
+    when(account.getEmail()).thenReturn("nolink@test.com");
+    when(account.getName()).thenReturn("No Link");
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+         MockedStatic<EtendoGoAuthLinkBuilder> linkMock = mockStatic(EtendoGoAuthLinkBuilder.class);
+         MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class);
+         MockedStatic<EmailVerificationDalHelper> verifyMock = mockStatic(EmailVerificationDalHelper.class)) {
+      linkMock.when(() -> EtendoGoAuthLinkBuilder.verifyEmailLink(anyString())).thenReturn(null);
+      dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByEmail("nolink@test.com"))
+          .thenReturn(null);
+      dalMock.when(() -> EtendoGoJwtDalHelper.createAccount(
+          anyString(), anyString(), anyString(), anyString()))
+          .thenReturn(account);
+
+      servletWithEmailSender.doPost(req, resp.response);
+
+      verifyMock.verify(() -> EmailVerificationDalHelper.storeEmailVerifyToken(
+          any(Account.class), anyString(), any(Date.class)), never());
+    }
+
+    assertEquals(201, resp.status);
     verify(emailSender).sendNewAccount(account, null);
   }
 
@@ -341,7 +405,12 @@ public class EtendoGoJwtServletTest {
     when(account.getName()).thenReturn("Localized User");
 
     try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
-         MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
+         MockedStatic<EtendoGoAuthLinkBuilder> linkMock = mockStatic(EtendoGoAuthLinkBuilder.class);
+         MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class);
+         MockedStatic<EmailVerificationDalHelper> verifyMock =
+             mockStatic(EmailVerificationDalHelper.class)) {
+      linkMock.when(() -> EtendoGoAuthLinkBuilder.verifyEmailLink(anyString()))
+          .thenReturn(VERIFY_LINK);
       dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByEmail("localized@test.com"))
           .thenReturn(null);
       dalMock.when(() -> EtendoGoJwtDalHelper.createAccount(
@@ -352,7 +421,7 @@ public class EtendoGoJwtServletTest {
     }
 
     assertEquals(201, resp.status);
-    verify(emailSender).sendNewAccount(account, "es_ES");
+    verify(emailSender).sendNewAccount(account, "es_ES", VERIFY_LINK);
   }
 
   @Test
@@ -372,11 +441,19 @@ public class EtendoGoJwtServletTest {
     when(account.getId()).thenReturn("acct-1");
     when(account.getEmail()).thenReturn("new@test.com");
     when(account.getName()).thenReturn("New User");
+    // ETP-4798: the throw has to target the overload registration actually calls — the one
+    // carrying the confirmation link. Aimed at the two-argument overload it never fired, and the
+    // test passed while exercising nothing.
     doThrow(new RuntimeException("provider unavailable"))
-        .when(emailSender).sendNewAccount(account, null);
+        .when(emailSender).sendNewAccount(account, null, VERIFY_LINK);
 
     try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
-         MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
+         MockedStatic<EtendoGoAuthLinkBuilder> linkMock = mockStatic(EtendoGoAuthLinkBuilder.class);
+         MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class);
+         MockedStatic<EmailVerificationDalHelper> verifyMock =
+             mockStatic(EmailVerificationDalHelper.class)) {
+      linkMock.when(() -> EtendoGoAuthLinkBuilder.verifyEmailLink(anyString()))
+          .thenReturn(VERIFY_LINK);
       dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByEmail("new@test.com"))
           .thenReturn(null);
       dalMock.when(() -> EtendoGoJwtDalHelper.createAccount(
@@ -384,6 +461,11 @@ public class EtendoGoJwtServletTest {
           .thenReturn(account);
 
       servletWithEmailSender.doPost(req, resp.response);
+
+      // The token is dropped again, so a provider outage leaves the account ungated rather than
+      // stuck behind a link that was never delivered.
+      verifyMock.verify(() -> EmailVerificationDalHelper.storeEmailVerifyToken(
+          eq(account), isNull(), isNull()));
     }
 
     assertEquals(201, resp.status);
@@ -911,8 +993,9 @@ public class EtendoGoJwtServletTest {
         "{\"token\":\"bad-token\"}")));
 
     try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
-         MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
-      dalMock.when(() -> EtendoGoJwtDalHelper.findAccountByVerifyTokenHash(
+         MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class);
+         MockedStatic<EmailVerificationDalHelper> verifyMock = mockStatic(EmailVerificationDalHelper.class)) {
+      verifyMock.when(() -> EmailVerificationDalHelper.findAccountByVerifyTokenHash(
           anyString(), any(Date.class))).thenReturn(null);
 
       servlet.doPost(req, resp.response);
@@ -933,14 +1016,15 @@ public class EtendoGoJwtServletTest {
 
     Account account = mock(Account.class);
     try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
-         MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
-      dalMock.when(() -> EtendoGoJwtDalHelper.findAccountByVerifyTokenHash(
+         MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class);
+         MockedStatic<EmailVerificationDalHelper> verifyMock = mockStatic(EmailVerificationDalHelper.class)) {
+      verifyMock.when(() -> EmailVerificationDalHelper.findAccountByVerifyTokenHash(
           anyString(), any(Date.class))).thenReturn(account);
-      dalMock.when(() -> EtendoGoJwtDalHelper.isEmailVerified(account)).thenReturn(false);
+      verifyMock.when(() -> EmailVerificationDalHelper.isEmailVerified(account)).thenReturn(false);
 
       servlet.doPost(req, resp.response);
 
-      dalMock.verify(() -> EtendoGoJwtDalHelper.consumeEmailVerification(
+      verifyMock.verify(() -> EmailVerificationDalHelper.consumeEmailVerification(
           eq(account), any(Date.class)));
     }
 
@@ -961,14 +1045,15 @@ public class EtendoGoJwtServletTest {
 
     Account account = mock(Account.class);
     try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
-         MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
-      dalMock.when(() -> EtendoGoJwtDalHelper.findAccountByVerifyTokenHash(
+         MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class);
+         MockedStatic<EmailVerificationDalHelper> verifyMock = mockStatic(EmailVerificationDalHelper.class)) {
+      verifyMock.when(() -> EmailVerificationDalHelper.findAccountByVerifyTokenHash(
           anyString(), any(Date.class))).thenReturn(account);
-      dalMock.when(() -> EtendoGoJwtDalHelper.isEmailVerified(account)).thenReturn(true);
+      verifyMock.when(() -> EmailVerificationDalHelper.isEmailVerified(account)).thenReturn(true);
 
       servlet.doPost(req, resp.response);
 
-      dalMock.verify(() -> EtendoGoJwtDalHelper.consumeEmailVerification(
+      verifyMock.verify(() -> EmailVerificationDalHelper.consumeEmailVerification(
           any(Account.class), any(Date.class)), never());
     }
 
@@ -997,10 +1082,11 @@ public class EtendoGoJwtServletTest {
     Account account = mock(Account.class);
     when(account.getEmail()).thenReturn("owner@example.test");
     try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
-         MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
+         MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class);
+         MockedStatic<EmailVerificationDalHelper> verifyMock = mockStatic(EmailVerificationDalHelper.class)) {
       dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByBearerToken("session-token"))
           .thenReturn(account);
-      dalMock.when(() -> EtendoGoJwtDalHelper.isEmailVerificationPending(account)).thenReturn(true);
+      verifyMock.when(() -> EmailVerificationDalHelper.isEmailVerificationPending(account)).thenReturn(true);
 
       servlet.doPost(req, resp.response);
     }
@@ -1025,10 +1111,11 @@ public class EtendoGoJwtServletTest {
     Account account = mock(Account.class);
     when(account.getEmail()).thenReturn("legacy@example.test");
     try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
-         MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
+         MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class);
+         MockedStatic<EmailVerificationDalHelper> verifyMock = mockStatic(EmailVerificationDalHelper.class)) {
       dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByBearerToken("session-token"))
           .thenReturn(account);
-      dalMock.when(() -> EtendoGoJwtDalHelper.isEmailVerificationPending(account))
+      verifyMock.when(() -> EmailVerificationDalHelper.isEmailVerificationPending(account))
           .thenReturn(false);
 
       servlet.doPost(req, resp.response);
