@@ -849,20 +849,28 @@ public class NeoDefaultsService {
   private static void injectDefaultsForActiveColumns(JSONObject body, Tab adTab,
       Entity dalEntity, MandatoryDefaultContext mCtx) {
     for (Column col : adTab.getTable().getADColumnList()) {
-      if (!col.isActive()) {
-        continue;
-      }
-      // Skip primary key columns — DAL auto-generates UUID PKs.
-      if (Boolean.TRUE.equals(col.isKeyColumn())) {
-        continue;
-      }
-      // Skip audit columns (updated, created, updatedBy, createdBy) — Hibernate manages these.
-      org.openbravo.base.model.Property prop = dalEntity.getPropertyByColumnName(col.getDBColumnName());
-      if (prop != null && prop.isAuditInfo()) {
+      if (shouldSkipColumn(col, dalEntity)) {
         continue;
       }
       injectMandatoryDefaultForColumn(body, dalEntity, col, mCtx, col.isMandatory());
     }
+  }
+
+  /**
+   * Returns true when the given column must be skipped by {@link #injectDefaultsForActiveColumns}:
+   * inactive columns, primary key columns (DAL auto-generates UUID PKs), or audit columns
+   * (updated, created, updatedBy, createdBy — Hibernate manages these). Extracted to collapse
+   * multiple {@code continue} guards into a single one (S135).
+   */
+  private static boolean shouldSkipColumn(Column col, Entity dalEntity) {
+    if (!col.isActive()) {
+      return true;
+    }
+    if (Boolean.TRUE.equals(col.isKeyColumn())) {
+      return true;
+    }
+    Property prop = dalEntity.getPropertyByColumnName(col.getDBColumnName());
+    return prop != null && prop.isAuditInfo();
   }
 
   /**
