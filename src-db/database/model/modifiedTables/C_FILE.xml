@@ -1,0 +1,10 @@
+<?xml version="1.0"?>
+  <database name="MODIFIED TABLE C_FILE">
+    <table name="C_FILE" primaryKey="C_FILE_KEY">
+      <column name="EM_ETGO_ISPREVIEWMAIN" primaryKey="false" required="true" type="CHAR" size="1" autoIncrement="false">
+        <default><![CDATA[N]]></default>
+        <onCreateDefault/>
+      </column>
+      <check name="EM_ETGO_ISPREVIEWMAIN_CHK"><![CDATA[EM_ETGO_ISPREVIEWMAIN IN ('Y', 'N')]]></check>
+    </table>
+  </database>
