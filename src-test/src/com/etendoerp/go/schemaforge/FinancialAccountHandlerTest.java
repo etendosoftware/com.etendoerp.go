@@ -1801,13 +1801,18 @@ public class FinancialAccountHandlerTest {
   //
   //   1. `hasTransactions` (ETP-4530) — the frontend locks the Currency field once the
   //      account has real movement history.
-  //   2. The accounts-list derived fields (ETP-4658) — pendingCount, bankConnected,
+  //   2. The accounts-list derived fields (ETP-4658) — bankConnected,
   //      bankConnectionPending, currencyIso/currencyId, isDefault, maskedPan, active and the
   //      lowercase `iban` alias — plus a collection-level `summary` sibling of
   //      `response.data` for the list sidebar. These used to be computed by the bespoke
   //      `financial-accounts-page` R spec; the W spec is now the single source of truth.
   //
-  // The three SQL loaders are reached through the package-private `pageLoaders()` seam and
+  // `pendingCount` used to be on that list. It is NOT injected any more: it became the
+  // EM_ETGO_Pending_Count stored computed column, so the generic CRUD already serves it as
+  // `eTGOPendingCount` and afterHandle must not touch it. What the handler still reads from
+  // the AccountRow is the count that feeds `summary.pending.accountsWithPending`.
+  //
+  // The SQL loaders are reached through the package-private `pageLoaders()` seam and
   // run ONCE for the whole page (Map/Set lookup per row) — the previous implementation
   // issued two queries PER ROW just for `hasTransactions`. Tests therefore stub
   // `pageLoaders()` with a spy whose loader seams are stubbed, letting the real
@@ -1838,7 +1843,7 @@ public class FinancialAccountHandlerTest {
 
   /**
    * Installs a spied {@link FinancialAccountsPageHandler} as the {@code pageLoaders()} seam
-   * with its four SQL loaders stubbed ({@code loadDeleteBlockersByAccount} — ETP-4871 — defaults
+   * with its three SQL loaders stubbed ({@code loadDeleteBlockersByAccount} — ETP-4871 — defaults
    * to an empty map, i.e. every account deletable, unless a test needs otherwise; see the overload
    * below). {@code buildSummary} is deliberately left real so the aggregation the sidebar renders
    * is exercised end-to-end.
@@ -1858,8 +1863,14 @@ public class FinancialAccountHandlerTest {
       Map<String, List<String>> deleteBlockersByAccount) throws Exception {
     FinancialAccountsPageHandler loaders = spy(new FinancialAccountsPageHandler());
     doReturn(ORGS).when(loaders).accessibleOrgs(ORG_ID);
+    // `pending` is applied ONTO the fixture rows rather than stubbed as a loader seam:
+    // loadPendingByAccount is gone, and loadAccounts now reads the count out of the
+    // EM_ETGO_Pending_Count column into AccountRow.pendingCount. Keeping the parameter lets
+    // every call site stay as it was while the real buildSummary still aggregates it.
+    for (FinancialAccountsPageHandler.AccountRow row : rows) {
+      row.pendingCount = pending.getOrDefault(row.id, 0);
+    }
     doReturn(rows).when(loaders).loadAccounts(eq(CLIENT_ID), eq(ORGS));
-    doReturn(pending).when(loaders).loadPendingByAccount(eq(CLIENT_ID), eq(ORGS));
     doReturn(withTransactions).when(loaders).loadAccountsWithTransactions(eq(CLIENT_ID), eq(ORGS));
     doReturn(deleteBlockersByAccount).when(loaders).loadDeleteBlockersByAccount(eq(CLIENT_ID), eq(ORGS));
     doReturn(loaders).when(handler).pageLoaders();
@@ -1914,7 +1925,9 @@ public class FinancialAccountHandlerTest {
       JSONObject first = outArr.getJSONObject(0);
       assertTrue("account with a registered transaction locks the Currency field",
           first.getBoolean("hasTransactions"));
-      assertEquals(4, first.getInt("pendingCount"));
+      assertFalse("pendingCount is the EM_ETGO_Pending_Count stored column now — the generic "
+          + "CRUD serves it as eTGOPendingCount and afterHandle must not re-inject it",
+          first.has("pendingCount"));
       assertTrue(first.getBoolean("bankConnected"));
       assertFalse("bankConnectionPending is never computed server-side yet",
           first.getBoolean("bankConnectionPending"));
@@ -1931,7 +1944,7 @@ public class FinancialAccountHandlerTest {
       JSONObject second = outArr.getJSONObject(1);
       assertFalse("account without transactions leaves the Currency field editable",
           second.getBoolean("hasTransactions"));
-      assertEquals("no pending statement lines defaults to 0", 0, second.getInt("pendingCount"));
+      assertFalse("not injected for any row, pending or not", second.has("pendingCount"));
       assertFalse(second.getBoolean("bankConnected"));
       assertEquals("USD", second.getString("currencyIso"));
       assertFalse("archived accounts are flagged so the Inactivas filter can find them",
@@ -1972,7 +1985,6 @@ public class FinancialAccountHandlerTest {
       handler.afterHandle(ctx);
 
       verify(loaders, times(1)).loadAccounts(CLIENT_ID, ORGS);
-      verify(loaders, times(1)).loadPendingByAccount(CLIENT_ID, ORGS);
       verify(loaders, times(1)).loadAccountsWithTransactions(CLIENT_ID, ORGS);
       verify(loaders, times(1)).loadDeleteBlockersByAccount(CLIENT_ID, ORGS);
       // The legacy per-row DAL seams must not be reached at all any more; findDeleteBlockers
@@ -2093,7 +2105,8 @@ public class FinancialAccountHandlerTest {
 
       JSONObject out0 = out.getBody().getJSONObject("response").getJSONArray("data").getJSONObject(0);
       assertFalse(out0.getBoolean("hasTransactions"));
-      assertFalse("no id → nothing to correlate a pending counter with", out0.has("pendingCount"));
+      assertFalse("pendingCount is never injected — it is a real column on the row",
+          out0.has("pendingCount"));
       assertFalse(out0.has("currencyIso"));
       assertFalse(out0.has("countryId"));
       assertFalse(out0.has("countryIso"));
@@ -2105,8 +2118,8 @@ public class FinancialAccountHandlerTest {
 
   /**
    * A row the loaders do not know about (e.g. visible to the generic CRUD but filtered out
-   * of the loader's own query) still gets the id-keyed basics — the transaction flag, the
-   * pending counter and the {@code iban} alias — but none of the loader-only columns.
+   * of the loader's own query) still gets the id-keyed basics — the transaction flag and the
+   * {@code iban} alias — but none of the loader-only columns.
    */
   @Test
   public void testAfterHandleGetCrudRowUnknownToLoadersKeepsIdKeyedFieldsOnly() throws Exception {
@@ -2121,7 +2134,7 @@ public class FinancialAccountHandlerTest {
 
       JSONObject out0 = out.getBody().getJSONObject("response").getJSONArray("data").getJSONObject(0);
       assertTrue(out0.getBoolean("hasTransactions"));
-      assertEquals(0, out0.getInt("pendingCount"));
+      assertFalse("pendingCount is a real column, not an injected field", out0.has("pendingCount"));
       assertEquals(ES_IBAN, out0.getString("iban"));
       assertFalse("loader-only column", out0.has("bankConnected"));
       assertFalse("loader-only column", out0.has("active"));
