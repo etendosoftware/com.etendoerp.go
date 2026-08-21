@@ -24,6 +24,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import java.util.HashSet;
 import java.util.Set;
 
+import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.jupiter.api.DisplayName;
@@ -144,6 +145,112 @@ class McpDefaultsViewTest {
       JSONObject response = new JSONObject();
       response.put("metadata", new JSONObject());
       assertSame(response, McpDefaultsView.apply(response, editable("x"), "grouped"));
+    }
+  }
+
+  /**
+   * IMP-7's second half: a writable field the server resolved to a blank is a field the agent must
+   * still supply, and belongs in {@code metadata.unresolvedFields} rather than in {@code confirm}
+   * with an empty value. The live case is {@code partnerAddress} on {@code sales-invoice/header}.
+   */
+  @Nested
+  @DisplayName("blank confirm values")
+  class BlankValues {
+
+    private static JSONObject bodyWithBlanks() throws JSONException {
+      JSONObject defaults = new JSONObject();
+      defaults.put("invoiceDate", "21-07-2026");
+      defaults.put("partnerAddress", "");
+      defaults.put("salesRepresentative", "   ");
+      defaults.put("description", JSONObject.NULL);
+      defaults.put("aeatsiiIssent", "");  // blank but NOT editable — must stay put
+      JSONObject response = new JSONObject();
+      response.put("defaults", defaults);
+      return response;
+    }
+
+    private static Set<String> unresolvedNames(JSONObject out) throws JSONException {
+      JSONArray array = out.getJSONObject(McpDefaultsView.KEY_METADATA)
+          .getJSONArray(McpDefaultsView.KEY_UNRESOLVED_FIELDS);
+      Set<String> names = new HashSet<>();
+      for (int i = 0; i < array.length(); i++) {
+        names.add(array.getString(i));
+      }
+      return names;
+    }
+
+    @Test
+    @DisplayName("empty, whitespace and JSON-null writable defaults are reported as unresolved")
+    void blanksMoveToUnresolvedFields() throws JSONException {
+      JSONObject out = McpDefaultsView.apply(bodyWithBlanks(),
+          editable("invoiceDate", "partnerAddress", "salesRepresentative", "description"),
+          "grouped");
+
+      JSONObject confirm = out.getJSONObject(McpDefaultsView.GROUP_CONFIRM);
+      assertTrue(confirm.has("invoiceDate"));
+      assertEquals(1, confirm.length(), "only the field that actually resolved stays in confirm");
+
+      assertEquals(editable("partnerAddress", "salesRepresentative", "description"),
+          unresolvedNames(out));
+    }
+
+    @Test
+    @DisplayName("a blank in systemManaged is left alone — it is not the agent's problem")
+    void blankSystemManagedIsNotReported() throws JSONException {
+      JSONObject out = McpDefaultsView.apply(bodyWithBlanks(), editable("invoiceDate"), "grouped");
+
+      assertTrue(out.getJSONObject(McpDefaultsView.GROUP_SYSTEM_MANAGED).has("aeatsiiIssent"));
+      assertFalse(out.has(McpDefaultsView.KEY_METADATA),
+          "no writable field was blank, so no metadata is invented");
+    }
+
+    @Test
+    @DisplayName("a blank FK reports its base property once, not the $_identifier companion")
+    void blankFkReportsBaseProperty() throws JSONException {
+      JSONObject defaults = new JSONObject();
+      defaults.put("partnerAddress", "");
+      defaults.put("partnerAddress$_identifier", "");
+      JSONObject response = new JSONObject();
+      response.put("defaults", defaults);
+
+      JSONObject out = McpDefaultsView.apply(response, editable("partnerAddress"), "minimal");
+
+      assertEquals(0, out.getJSONObject(McpDefaultsView.GROUP_CONFIRM).length());
+      assertEquals(editable("partnerAddress"), unresolvedNames(out));
+    }
+
+    @Test
+    @DisplayName("existing metadata is preserved and unresolvedFields de-duplicated, not replaced")
+    void mergesWithExistingMetadata() throws JSONException {
+      JSONObject response = bodyWithBlanks();
+      JSONArray existing = new JSONArray();
+      existing.put("partnerAddress");   // already reported by NeoDefaultsService
+      existing.put("documentNo");
+      JSONObject metadata = new JSONObject();
+      metadata.put(McpDefaultsView.KEY_UNRESOLVED_FIELDS, existing);
+      metadata.put("sequenceFields", new JSONArray());
+      response.put("metadata", metadata);
+
+      JSONObject out = McpDefaultsView.apply(response,
+          editable("partnerAddress", "description"), "grouped");
+
+      assertEquals(editable("partnerAddress", "documentNo", "description"), unresolvedNames(out));
+      assertTrue(out.getJSONObject(McpDefaultsView.KEY_METADATA).has("sequenceFields"),
+          "sibling metadata keys survive the merge");
+      // apply() must not mutate what it was handed
+      assertEquals(2, existing.length());
+    }
+
+    @Test
+    @DisplayName("isUnresolvedValue treats blank, whitespace and JSON null as unresolved")
+    void predicate() {
+      assertTrue(McpDefaultsView.isUnresolvedValue(null));
+      assertTrue(McpDefaultsView.isUnresolvedValue(JSONObject.NULL));
+      assertTrue(McpDefaultsView.isUnresolvedValue(""));
+      assertTrue(McpDefaultsView.isUnresolvedValue("  \t "));
+      assertFalse(McpDefaultsView.isUnresolvedValue("0"));
+      assertFalse(McpDefaultsView.isUnresolvedValue(Boolean.FALSE));
+      assertFalse(McpDefaultsView.isUnresolvedValue(0));
     }
   }
 }

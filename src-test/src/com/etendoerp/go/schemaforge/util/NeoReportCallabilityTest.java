@@ -30,6 +30,7 @@ import static org.mockito.Mockito.when;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Modifier;
 import java.util.List;
+import java.util.Optional;
 
 import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.criterion.Criterion;
@@ -46,6 +47,9 @@ import org.mockito.quality.Strictness;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 
+import com.etendoerp.go.schemaforge.NeoContext;
+import com.etendoerp.go.schemaforge.NeoHandler;
+import com.etendoerp.go.schemaforge.NeoResponse;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFSpec;
 
@@ -139,6 +143,15 @@ class NeoReportCallabilityTest {
   @DisplayName("resolveReportHandlerQualifier / isReportCallable")
   class QualifierResolution {
 
+    /**
+     * A qualifier is still resolved from the first entity that declares one — but since
+     * ETP-4793 / IMP-19 that alone no longer makes the spec callable. Five of the eight
+     * published {@code generate_*} tools named a UI handler that dispatches on an
+     * {@code action} query parameter and could never answer a report POST, so callability
+     * now also requires a deployed handler that declares a report contract. With no CDI
+     * container running here, no handler resolves, so the spec reads as non-callable even
+     * though the qualifier is present — which is exactly the distinction being asserted.
+     */
     @Test
     @DisplayName("returns the first non-blank Java_Qualifier among the spec entities")
     void returnsFirstNonBlankQualifier() {
@@ -155,7 +168,8 @@ class NeoReportCallabilityTest {
 
         assertEquals("agingReportHandler",
             NeoReportCallability.resolveReportHandlerQualifier(spec));
-        assertTrue(NeoReportCallability.isReportCallable(spec));
+        assertFalse(NeoReportCallability.isReportCallable(spec),
+            "a qualifier alone is not a report contract");
       }
     }
 
@@ -190,6 +204,121 @@ class NeoReportCallabilityTest {
         assertNull(NeoReportCallability.resolveReportHandlerQualifier(spec));
         assertFalse(NeoReportCallability.isReportCallable(spec));
       }
+    }
+  }
+
+  // ── declared report contract (ETP-4793 / IMP-19) ───────────────────────
+
+  /**
+   * {@code contractOf} is the seam every report surface shares: the tool schema, discover,
+   * the router's validation and the NEO HTTP endpoint all read the contract from the same
+   * handler object, so an agent cannot be shown one contract and judged against another.
+   */
+  @Nested
+  @DisplayName("contractOf — the handler's declared report contract")
+  class ContractResolution {
+
+    @Test
+    @DisplayName("no handler deployed → no contract")
+    void nullHandlerHasNoContract() {
+      assertTrue(NeoReportCallability.contractOf(null, "agingReportHandler").isEmpty());
+    }
+
+    /**
+     * The default {@code reportParameters()} is {@code Optional.empty()}, which is how the
+     * five UI handlers that were advertised as report generators now drop out of the catalog.
+     */
+    @Test
+    @DisplayName("handler that declares nothing → no contract (default is empty)")
+    void undeclaredHandlerHasNoContract() {
+      NeoHandler handler = new NeoHandler() {
+        @Override
+        public NeoResponse handle(NeoContext context) {
+          return null;
+        }
+      };
+      assertTrue(NeoReportCallability.contractOf(handler, "financialAccountsPageHandler").isEmpty());
+    }
+
+    /**
+     * An empty <i>list</i> is a different statement from an empty {@code Optional}: it means
+     * "a real report that takes no inputs" and must stay callable.
+     */
+    @Test
+    @DisplayName("handler declaring an empty parameter list → callable contract, JSON only")
+    void emptyListIsAContract() {
+      NeoReportContract contract = NeoReportCallability
+          .contractOf(declaring(List.of()), "inventoryStockReportHandler")
+          .orElseThrow();
+
+      assertEquals("inventoryStockReportHandler", contract.getQualifier());
+      assertTrue(contract.getParameters().isEmpty());
+      assertTrue(contract.getRequiredParameterNames().isEmpty());
+      assertEquals(NeoReportParam.FORMAT_JSON, contract.getDefaultFormat());
+    }
+
+    @Test
+    @DisplayName("required parameters are reported, optional ones are not")
+    void requiredParametersAreReported() {
+      NeoReportContract contract = NeoReportCallability.contractOf(declaring(List.of(
+          NeoReportParam.required("dateFrom", NeoReportParam.TYPE_DATE, "Start."),
+          NeoReportParam.required("dateTo", NeoReportParam.TYPE_DATE, "End."),
+          NeoReportParam.optional("orgId", NeoReportParam.TYPE_STRING, "Organization."),
+          NeoReportParam.options("recOrPay", "Side.", List.of("RECEIVABLES", "PAYABLES")))),
+          "agingReportHandler").orElseThrow();
+
+      assertEquals(List.of("dateFrom", "dateTo"), contract.getRequiredParameterNames());
+      assertTrue(contract.findParameter("orgId").isPresent());
+      assertTrue(contract.findParameter("nosuch").isEmpty());
+      // options() is a closed set, and optional: the handlers that use it supply a default.
+      NeoReportParam recOrPay = contract.findParameter("recOrPay").orElseThrow();
+      assertFalse(recOrPay.isRequired());
+      assertEquals(List.of("RECEIVABLES", "PAYABLES"), recOrPay.getAllowedValues());
+    }
+
+    @Test
+    @DisplayName("format matching is case-insensitive, and an omitted format is accepted")
+    void formatMatching() {
+      NeoReportContract contract = NeoReportCallability
+          .contractOf(declaring(List.of()), "taxReportHandler").orElseThrow();
+
+      assertTrue(contract.supportsFormat(null), "omitted format means the default");
+      assertTrue(contract.supportsFormat(""));
+      assertTrue(contract.supportsFormat("JSON"));
+      // The old schema advertised pdf/xlsx/csv and never read the argument; nothing here
+      // renders documents, so those must now be refused rather than silently ignored.
+      assertFalse(contract.supportsFormat("pdf"));
+    }
+
+    @Test
+    @DisplayName("a handler that throws while declaring is non-callable, not fatal")
+    void throwingHandlerIsNonCallable() {
+      NeoHandler handler = new NeoHandler() {
+        @Override
+        public NeoResponse handle(NeoContext context) {
+          return null;
+        }
+
+        @Override
+        public Optional<List<NeoReportParam>> reportParameters() {
+          throw new IllegalStateException("bad declaration");
+        }
+      };
+      assertTrue(NeoReportCallability.contractOf(handler, "brokenHandler").isEmpty());
+    }
+
+    private NeoHandler declaring(List<NeoReportParam> params) {
+      return new NeoHandler() {
+        @Override
+        public NeoResponse handle(NeoContext context) {
+          return null;
+        }
+
+        @Override
+        public Optional<List<NeoReportParam>> reportParameters() {
+          return Optional.of(params);
+        }
+      };
     }
   }
 }

@@ -1250,4 +1250,168 @@ public class McpToolRouterTest {
     assertEquals("object", McpConstants.TYPE_OBJECT);
   }
 
+  // ── checkJsonServiceError envelopes (ETP-4793 / IMP-17) ───────────────
+
+  /**
+   * Invokes the classifier, which before IMP-17 returned core's prose as a bare String — the leak
+   * evidence B13 recorded. Moved from {@link McpToolRouter} to {@link McpWriteRequestSupport}
+   * (ETP-4793, method-count split), where it is package-private static, so no instance is needed.
+   */
+  private JSONObject invokeCheckJsonServiceError(JSONObject responseJson, String seeAlso)
+      throws Exception {
+    java.lang.reflect.Method m = McpWriteRequestSupport.class.getDeclaredMethod(
+        "checkJsonServiceError", JSONObject.class, String.class);
+    m.setAccessible(true);
+    return (JSONObject) m.invoke(null, responseJson, seeAlso);
+  }
+
+  private JSONObject dalFailure(String message) throws Exception {
+    JSONObject error = new JSONObject();
+    error.put("message", message);
+    JSONObject inner = new JSONObject();
+    inner.put("status", -1);
+    inner.put("error", error);
+    JSONObject json = new JSONObject();
+    json.put("response", inner);
+    return json;
+  }
+
+  /**
+   * A callout rejecting a write is the caller's mistake: 422, so an agent knows a corrected retry is
+   * worth making. The message is passed through untranslated on purpose — it comes from AD_Message in
+   * the session user's language, and pinning the MCP locale is a separate change.
+   */
+  @Test
+  public void testCalloutRejectionOnWriteIsA422() throws Exception {
+    String callout = "La fecha de operación no puede ser posterior a la fecha de la factura.";
+    JSONObject envelope = invokeCheckJsonServiceError(
+        dalFailure(callout), McpConstants.SEE_ALSO_WRITING);
+
+    assertNotNull(envelope);
+    assertEquals(422, envelope.getInt("status"));
+    assertEquals("validation_error", envelope.getString("error"));
+    assertEquals(callout, envelope.getString("detail"));
+    assertEquals(McpConstants.SEE_ALSO_WRITING, envelope.getString("seeAlso"));
+    // No invented field: a callout rejects a combination of values more often than a single one.
+    assertFalse(envelope.has("field"));
+  }
+
+  /**
+   * The same core status on a read is a 500: there is nothing the agent submitted to correct, so
+   * inviting a retry-with-corrections would be a loop with no exit.
+   */
+  @Test
+  public void testDalFailureOnReadIsA500() throws Exception {
+    JSONObject envelope = invokeCheckJsonServiceError(
+        dalFailure("Query execution failed"), McpConstants.SEE_ALSO_READING);
+
+    assertNotNull(envelope);
+    assertEquals(500, envelope.getInt("status"));
+    assertEquals("server_error", envelope.getString("error"));
+  }
+
+  /** A duplicate business key is a conflict on either verb, and the hint names the way out. */
+  @Test
+  public void testDuplicateKeyFailureIsA409() throws Exception {
+    String duplicate = "There is already a Business Partner with the same (Client, Organization, "
+        + "Search Key). (Client, Organization, Search Key) must be unique. You must change the "
+        + "values entered.";
+    JSONObject envelope = invokeCheckJsonServiceError(
+        dalFailure(duplicate), McpConstants.SEE_ALSO_WRITING);
+
+    assertNotNull(envelope);
+    assertEquals(409, envelope.getInt("status"));
+    assertEquals("conflict", envelope.getString("error"));
+    assertTrue(envelope.getString("hint").contains("neo_list"));
+  }
+
+  /** The failing-row dump must never reach an agent — it is both an internals leak and an ACE cost. */
+  @Test
+  public void testRowDumpIsStrippedFromTheEnvelope() throws Exception {
+    String dumped = "insert failed  Detail: Failing row contains (" + "Z".repeat(300) + ").";
+    JSONObject envelope = invokeCheckJsonServiceError(
+        dalFailure(dumped), McpConstants.SEE_ALSO_WRITING);
+
+    assertNotNull(envelope);
+    assertFalse(envelope.toString().contains("ZZZZ"));
+  }
+
+  /**
+   * Core's per-field validation failure used to arrive as {@code "Validation error: " +
+   * innerResponse.toString()} — the raw DAL transport, {@code status:-4} and all. Only the per-field
+   * map was ever actionable, so it is lifted and the transport dropped.
+   */
+  @Test
+  public void testValidationErrorLiftsFieldErrorsAndDropsTransport() throws Exception {
+    JSONObject errors = new JSONObject();
+    errors.put("orderDate", "must not be later than the invoice date");
+    JSONObject inner = new JSONObject();
+    inner.put("status", -4);
+    inner.put("errors", errors);
+    JSONObject json = new JSONObject();
+    json.put("response", inner);
+
+    JSONObject envelope = invokeCheckJsonServiceError(json, McpConstants.SEE_ALSO_WRITING);
+
+    assertNotNull(envelope);
+    assertEquals(422, envelope.getInt("status"));
+    assertEquals("validation_error", envelope.getString("error"));
+    assertEquals("must not be later than the invoice date",
+        envelope.getJSONObject("fieldErrors").getString("orderDate"));
+    assertFalse(envelope.toString().contains("-4"));
+  }
+
+  /** A validation failure naming no field still gets a 422, with a hint that can be acted on. */
+  @Test
+  public void testValidationErrorWithoutFieldsStillExplainsItself() throws Exception {
+    JSONObject inner = new JSONObject();
+    inner.put("status", -4);
+    JSONObject json = new JSONObject();
+    json.put("response", inner);
+
+    JSONObject envelope = invokeCheckJsonServiceError(json, McpConstants.SEE_ALSO_WRITING);
+
+    assertNotNull(envelope);
+    assertEquals(422, envelope.getInt("status"));
+    assertFalse(envelope.has("fieldErrors"));
+    assertTrue(envelope.getString("hint").contains("neo_schema"));
+  }
+
+  /** A successful response, and one with no wrapper at all, must not be classified as a failure. */
+  @Test
+  public void testNonFailureResponsesReturnNull() throws Exception {
+    JSONObject inner = new JSONObject();
+    inner.put("status", 0);
+    JSONObject ok = new JSONObject();
+    ok.put("response", inner);
+    assertNull(invokeCheckJsonServiceError(ok, McpConstants.SEE_ALSO_READING));
+
+    JSONObject bare = new JSONObject();
+    bare.put("data", "rows");
+    assertNull(invokeCheckJsonServiceError(bare, McpConstants.SEE_ALSO_READING));
+  }
+
+  // ── buildUnexpectedErrorBody (ETP-4793 / IMP-17, closing evidence C14) ─
+
+  /**
+   * The last leak IMP-5 left open: {@code route}'s catch-all flattened every routing failure into
+   * {@code "Error executing neo_list: …"}. The envelope is a {@code server_error} on purpose — a
+   * validation code would invite a retry-with-corrections that cannot succeed.
+   */
+  @Test
+  public void testUnexpectedErrorBodyIsAServerErrorEnvelope() throws Exception {
+    java.lang.reflect.Method m = McpToolRouter.class.getDeclaredMethod(
+        "buildUnexpectedErrorBody", String.class, Exception.class);
+    m.setAccessible(true);
+    String body = (String) m.invoke(new McpToolRouter(), "neo_list",
+        new RuntimeException("null pointer somewhere"));
+
+    JSONObject envelope = new JSONObject(body);
+    assertEquals(500, envelope.getInt("status"));
+    assertEquals("server_error", envelope.getString("error"));
+    assertEquals("neo_list", envelope.getString("tool"));
+    assertTrue(envelope.getString("hint").contains("will not help"));
+    assertFalse(body.startsWith("Error executing"));
+  }
+
 }

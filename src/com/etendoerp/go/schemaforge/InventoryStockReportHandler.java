@@ -19,6 +19,7 @@ package com.etendoerp.go.schemaforge;
 
 import java.math.BigDecimal;
 import java.util.List;
+import java.util.Optional;
 import java.util.Set;
 
 import javax.inject.Named;
@@ -33,6 +34,8 @@ import org.hibernate.query.NativeQuery;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 
+import com.etendoerp.go.schemaforge.util.NeoReportParam;
+
 /**
  * NeoHandler that returns inventory stock valuation data grouped by warehouse.
  */
@@ -40,6 +43,29 @@ import org.openbravo.dal.service.OBDal;
 public class InventoryStockReportHandler implements NeoHandler {
 
   private static final Logger log = LogManager.getLogger(InventoryStockReportHandler.class);
+
+  private static final String PARAM_PRODUCT_ID = "M_Product_ID";
+  private static final String PARAM_WAREHOUSE_ID = "M_Warehouse_ID";
+
+  /**
+   * The report's input contract (ETP-4793 / IMP-19).
+   *
+   * <p>Both filters are optional: with neither, the report covers every product in every
+   * warehouse of the session's organization tree. That is worth declaring explicitly rather than
+   * leaving the parameter object empty — evidence B5 recorded an agent unable to tell from the
+   * schema whether this report needed inputs at all, and "no required inputs" is a different
+   * statement from "unknown inputs".</p>
+   */
+  @Override
+  public Optional<List<NeoReportParam>> reportParameters() {
+    return Optional.of(List.of(
+        NeoReportParam.optional(PARAM_PRODUCT_ID, NeoReportParam.TYPE_STRING,
+            "Restrict to these products: one M_Product id, or several separated by commas. "
+                + "Default: every product."),
+        NeoReportParam.optional(PARAM_WAREHOUSE_ID, NeoReportParam.TYPE_STRING,
+            "Restrict to these warehouses: one M_Warehouse id, or several separated by commas. "
+                + "Default: every warehouse in the session's organization tree.")));
+  }
 
   @Override
   public NeoResponse handle(NeoContext context) {
@@ -50,8 +76,8 @@ public class InventoryStockReportHandler implements NeoHandler {
     try {
       JSONObject body = context.getRequestBody() == null ? new JSONObject() : context.getRequestBody();
 
-      List<String> productIds = parseIds(body.optString("M_Product_ID", ""));
-      List<String> warehouseIds = parseIds(body.optString("M_Warehouse_ID", ""));
+      List<String> productIds = parseIds(body.optString(PARAM_PRODUCT_ID, ""));
+      List<String> warehouseIds = parseIds(body.optString(PARAM_WAREHOUSE_ID, ""));
       List<String> categoryIds = parseIds(body.optString("M_Product_Category_ID", ""));
       boolean includeZeroStock = body.optBoolean("includeZeroStock", false);
 
