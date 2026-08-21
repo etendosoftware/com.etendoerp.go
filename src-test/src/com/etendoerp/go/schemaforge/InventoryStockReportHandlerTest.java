@@ -198,7 +198,7 @@ class InventoryStockReportHandlerTest {
   @SuppressWarnings("unchecked")
   void testPostWithNoBodyReturnsData() throws Exception {
     List<Object[]> rows = Collections.singletonList(
-        new Object[]{ "Main Warehouse", "P001", "Test Product", "Unit",
+        new Object[]{ "Main Warehouse", "Beverages", "P001", "Test Product", "Unit",
             new BigDecimal("100"), new BigDecimal("10.50"), new BigDecimal("1050.00") });
     mockQueryReturning(rows);
 
@@ -211,6 +211,7 @@ class InventoryStockReportHandlerTest {
     JSONArray data = responseObj.getJSONArray("data");
     JSONObject item = data.getJSONObject(0);
     assertEquals("Main Warehouse", item.getString("warehouse"));
+    assertEquals("Beverages", item.getString("category"));
     assertEquals("P001", item.getString("productSearchKey"));
     assertEquals("Test Product", item.getString("product"));
     assertEquals("Unit", item.getString("uom"));
@@ -223,9 +224,9 @@ class InventoryStockReportHandlerTest {
   @SuppressWarnings("unchecked")
   void testPostWithEmptyBodyReturnsData() throws Exception {
     List<Object[]> rows = Arrays.asList(
-        new Object[]{ "WH-A", "P001", "Product A", "Kg",
+        new Object[]{ "WH-A", "Category A", "P001", "Product A", "Kg",
             new BigDecimal("50"), new BigDecimal("5.00"), new BigDecimal("250.00") },
-        new Object[]{ "WH-B", "P002", "Product B", "Liter",
+        new Object[]{ "WH-B", "Category B", "P002", "Product B", "Liter",
             new BigDecimal("30"), new BigDecimal("8.00"), new BigDecimal("240.00") });
     mockQueryReturning(rows);
 
@@ -245,7 +246,7 @@ class InventoryStockReportHandlerTest {
   @SuppressWarnings("unchecked")
   void testPostWithProductFilterSetsParameters() throws Exception {
     mockQueryReturning(Collections.singletonList(
-        new Object[]{ "WH-A", "P001", "Product A", "Unit",
+        new Object[]{ "WH-A", "Category A", "P001", "Product A", "Unit",
             new BigDecimal("10"), new BigDecimal("2.00"), new BigDecimal("20.00") }));
 
     JSONObject body = new JSONObject();
@@ -267,7 +268,7 @@ class InventoryStockReportHandlerTest {
   @SuppressWarnings("unchecked")
   void testPostWithWarehouseFilterSetsParameters() throws Exception {
     mockQueryReturning(Collections.singletonList(
-        new Object[]{ "WH-A", "P001", "Product A", "Unit",
+        new Object[]{ "WH-A", "Category A", "P001", "Product A", "Unit",
             new BigDecimal("10"), new BigDecimal("2.00"), new BigDecimal("20.00") }));
 
     JSONObject body = new JSONObject();
@@ -286,7 +287,7 @@ class InventoryStockReportHandlerTest {
   @SuppressWarnings("unchecked")
   void testPostWithBothFiltersSetsAllParameters() throws Exception {
     mockQueryReturning(Collections.singletonList(
-        new Object[]{ "WH-A", "P001", "Product A", "Unit",
+        new Object[]{ "WH-A", "Category A", "P001", "Product A", "Unit",
             new BigDecimal("10"), new BigDecimal("2.00"), new BigDecimal("20.00") }));
 
     JSONObject body = new JSONObject();
@@ -355,7 +356,7 @@ class InventoryStockReportHandlerTest {
   @SuppressWarnings("unchecked")
   void testResponseNumericFieldsAreBigDecimal() throws Exception {
     List<Object[]> rows = Collections.singletonList(
-        new Object[]{ "WH-A", "P001", "Product A", "Unit",
+        new Object[]{ "WH-A", "Category A", "P001", "Product A", "Unit",
             new BigDecimal("100.50"), new BigDecimal("12.75"), new BigDecimal("1281.375") });
     mockQueryReturning(rows);
 

@@ -259,6 +259,7 @@ public class ReportSelectorsServlet extends HttpBaseServlet {
       case "bpartner":   return buildBpartnerQuery();
       case "product":    return buildProductQuery(req);
       case "warehouse":  return buildWarehouseQuery(req);
+      case "product-category": return buildProductCategoryQuery();
       case "project":    return buildProjectQuery();
       case "org":        return buildOrgQuery();
       case "account":    return buildAccountQuery(req);
@@ -322,6 +323,14 @@ public class ReportSelectorsServlet extends HttpBaseServlet {
     return new SelectorQuery(
         "SELECT m_warehouse_id AS id, name, name AS label",
         fromWhere, ORDER_BY_NAME, true);
+  }
+
+  private SelectorQuery buildProductCategoryQuery() {
+    return new SelectorQuery(
+        "SELECT m_product_category_id AS id, name, name AS label",
+        new StringBuilder("FROM m_product_category WHERE isactive='Y'"
+            + ACTIVE_CLIENT_NAME_SEARCH),
+        ORDER_BY_NAME, true);
   }
 
   private SelectorQuery buildProjectQuery() {
