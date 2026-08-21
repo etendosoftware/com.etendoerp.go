@@ -181,6 +181,23 @@ Auth transactional emails are created server-side by the `/sws/go/*` endpoints. 
 | `POST /sws/go/verify-email/resend` | Requires a platform bearer token. Re-issues the token and sends `verify-email` best-effort, but only when a confirmation is genuinely pending. Answers a neutral 200 in every one of those cases so the response carries no account state; a genuine server failure is still a 500, since the endpoint is authenticated (ETP-4798) |
 | `POST /sws/go/onboarding` | Refused with `403 EMAIL_NOT_VERIFIED` before the NDJSON stream opens when the account still owes an email confirmation (ETP-4798), then paywalled (ETP-4686). Otherwise commits onboarding first, then sends `environment-ready` best-effort |
 
+When an authorized company administrator creates an `AD_User` without a password, the
+`UserRoleAssignmentHandler` provisions a pending `ETGO_Account` and persists an `ETGO_Invitation`
+row. The system creates a one-time password-setup link through the existing `reset-password`
+contract. The invitation records `PENDING`, `SENT`, `DELIVERY_FAILED`, and `ACCEPTED` lifecycle
+states without storing the raw token. The recipient is resolved exclusively from that
+server-side account; the browser does not send a recipient, template, or provider payload. The
+account becomes active only after a successful password-reset confirmation, which also marks the
+related invitation `ACCEPTED`.
+
+Invitation safeguards:
+
+- Existing pending accounts with a reset token do not receive a replacement invitation.
+- A missing public app URL, provider rejection, throttle, suppression, or kill switch restores
+  the prior token state and does not leave a usable new invitation token.
+- The setup link expires after 24 hours and can be consumed only once; an expired or consumed
+  token is rejected by the existing password-reset confirmation endpoint.
+
 Email delivery failure is audited and must not roll back registration, onboarding completion, or a successful password change. Password reset request responses stay neutral even when delivery fails.
 
 ### Email ownership confirmation and its fail-open rule (ETP-4798)
@@ -224,6 +241,7 @@ link we mailed.
 | `new-account` | `custom` | `ETGO_Account.email` resolved by `accountId` | `version`, `accountId`, `link`; optional `language` |
 | `verify-email` | `custom` | `ETGO_Account.email` resolved by `accountId` | `version`, `accountId`, `link`, `recordId` (the verification token hash); optional `language` |
 | `environment-ready` | `custom` | `ETGO_Account.email` resolved by `accountId` | `version`, `accountId`, `recordId` |
+| `company-invitation` | `custom` | `ETGO_Invitation.email` resolved by `recordId` | `version`, `recordId`, `link`; optional `language` |
 | `password-changed` | `custom` | `ETGO_Account.email` resolved by `accountId` | `version`, `accountId`, `recordId`; optional `date` |
 | `login-alert` | `login-alert` | `AD_User.email` resolved by `userId` | `version`, `userId`; optional `loginEventId`, `ip`, `date` |
 | `sales-invoice-send` | `invoice`, or `custom` on an edited send | `C_BPartner.EM_Etgo_Email`, falling back to active contact email, resolved from the invoice business partner | `version`, `recordId` |

@@ -79,7 +79,8 @@ public final class CoreEmailContractProvider implements EmailContractProvider {
             CoreEmailContractProvider::verifyEmailContent),
         new AccountNoticeEmailContract("password-changed", PROVIDER_TEMPLATE_CUSTOM,
             contractResolver, CoreEmailContractProvider::passwordChangedContent),
-        new LoginAlertEmailContract(contractResolver));
+        new LoginAlertEmailContract(contractResolver),
+        new CompanyInvitationEmailContract());
   }
 
   private static void newAccountContent(org.codehaus.jettison.json.JSONObject data,

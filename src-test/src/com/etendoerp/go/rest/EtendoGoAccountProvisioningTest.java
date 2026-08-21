@@ -19,10 +19,20 @@ package com.etendoerp.go.rest;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
+
+import java.util.Date;
 
 import org.junit.jupiter.api.Test;
+import org.mockito.MockedConstruction;
 import org.mockito.MockedStatic;
+import org.openbravo.base.provider.OBProvider;
+import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.ad.access.User;
 
+import com.etendoerp.go.common.PublicUrlResolver;
+import com.etendoerp.go.schemaforge.data.Account;
+import com.etendoerp.go.schemaforge.data.Invitation;
 /**
  * Unit tests for {@link EtendoGoAccountProvisioning} — the public cross-package entry point
  * (ETP-4829) that {@code com.etendoerp.go.schemaforge.handlers.UserRoleAssignmentHandler} calls
@@ -74,6 +84,17 @@ class EtendoGoAccountProvisioningTest {
           () -> EtendoGoJwtDalHelper.createPendingAccount(
               org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any()),
           never());
+    }
+  }
+
+  @Test
+  void ensurePendingAccountWithUserIdDelegatesToDalHelper() {
+    try (MockedStatic<EtendoGoJwtDalHelper> dalHelperMock =
+        mockStatic(EtendoGoJwtDalHelper.class)) {
+      EtendoGoAccountProvisioning.ensurePendingAccount("new.user@test.com", "New User", "user-001");
+
+      dalHelperMock.verify(
+          () -> EtendoGoJwtDalHelper.createPendingAccount("new.user@test.com", "New User"));
     }
   }
 }

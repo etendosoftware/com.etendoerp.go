@@ -580,24 +580,34 @@ does not resolve to a readable entity, `405` for any method other than `GET`.
 GET /sws/neo/listmenu[?q=<term>]
 GET /sws/neo/windowaccessmap
 GET /sws/neo/rolesoverview
+GET /sws/neo/assignuserroles?UserId=<id>&TemplateRoleIds=<id1,id2,...>
+GET /sws/neo/userroleassignments[?UserId=<id>]
+GET /sws/neo/systemroletemplates
 Authorization: Bearer {token}
 ```
 
-`NeoGoWebhookBridge` runs `SFListMenu`/`SFWindowAccessMap`/`SFRolesOverview` (§8, §8b, §8c) through
-NEO's own JWT authentication instead of the Webhooks module's HTTP dispatch — the same pattern
-`NeoSimSearchEndpoint` (§4.9) already used for `SimSearch`. Each of these three pseudo-specs
-constructs the corresponding `BaseWebhookService` and calls its unchanged `get(Map, Map)` method
-directly; the response body is the exact `{"result": "<value>"}` / `{"error": "<message>"}` shape
-the Webhooks module itself produces (verified by disassembling `WebhookServiceHandler.buildResponse`
+`NeoGoWebhookBridge` runs `SFListMenu`/`SFWindowAccessMap`/`SFRolesOverview`/`SFAssignUserRoles`/
+`SFUserRoleAssignments`/`SFSystemRoleTemplates` (§8, §8b, §8c, §8d, §8e, §8f) through NEO's own
+JWT authentication instead of the Webhooks module's HTTP dispatch — the same pattern
+`NeoSimSearchEndpoint` (§4.9) already used for `SimSearch`. Each of these pseudo-specs constructs
+the corresponding `BaseWebhookService` and calls its unchanged `get(Map, Map)` method directly;
+the response body is the exact `{"result": "<value>"}` / `{"error": "<message>"}` shape the
+Webhooks module itself produces (verified by disassembling `WebhookServiceHandler.buildResponse`
 in `webhookevents-3.1.0.jar`), so callers only need their request URL updated, never their
-response-parsing logic. All three still work at their original `/webhooks/SFListMenu` /
-`/webhooks/SFWindowAccessMap` / `/webhooks/SFRolesOverview` paths too — the Webhooks module dispatch
-was not removed — but `/sws/neo/*` is the path the Go SPA (`tools/app-shell` in
-`etendo_schema_forge`) actually calls, and no `SMFWHE_DEFINEDWEBHOOK_ROLE` grant is required for it.
+response-parsing logic. `SFListMenu`/`SFWindowAccessMap`/`SFRolesOverview` still work at their
+original `/webhooks/*` paths too — the Webhooks module dispatch was not removed for them — but
+`/sws/neo/*` is the path the Go SPA (`tools/app-shell` in `etendo_schema_forge`) actually calls,
+and no `SMFWHE_DEFINEDWEBHOOK_ROLE` grant is required for it. `SFAssignUserRoles` (ETP-4852),
+`SFUserRoleAssignments` (ETP-4906), and `SFSystemRoleTemplates` (ETP-4906) are `/sws/neo/*`-only
+— all three were authored after this pattern was already established, so none ever had a legacy
+`/webhooks/*` path to keep.
 
-Each webhook's own access rule is unaffected and still enforced inside its `get()` — see §8/§8b/§8c
-for what each one checks (`NeoAccessHelper.isAdminOrClientAdmin`, window/process access checks,
-etc.). Non-`GET` requests get `405`; a webhook that throws gets `500` with the exception message.
+Each webhook's own access rule is unaffected and still enforced inside its `get()` — see
+§8/§8b/§8c/§8d/§8e/§8f for what each one checks (`NeoAccessHelper.isAdminOrClientAdmin`,
+window/process access checks, etc.). Non-`GET` requests get `405`; a webhook that throws gets
+`500` with the exception message (except `SFAssignUserRoles`'s own expected domain-validation
+rejections, and `SFUserRoleAssignments`'s own expected domain rejections — see §8d/§8e for why
+those are a `200` result instead).
 
 ### 4.11 NEO Pseudo-Spec Bridge Pattern (preferred for new Etendo-GO-authored webhooks)
 
@@ -1257,15 +1267,17 @@ Folder nodes are never filtered directly: their children are filtered first (pos
 
 ## 8c. Roles Overview (SFRolesOverview Webhook)
 
-`SFRolesOverview` (`GET /webhooks/SFRolesOverview`, or preferably `GET /sws/neo/rolesoverview` — §4.10) returns, for an admin/client-admin caller only, a cross-role aggregate for GOClient's 5 fixed roles (ETP-4513 — "Configuración > Roles"): each role's display name, raw `AD_Role.description`, count of distinct assigned users (`AD_User_Roles`), and the list of Etendo GO windows it can reach (`AD_Window_Access`, intersected with the windows Etendo GO actually exposes today). The webhook is authored in the same Webhooks module infrastructure as `SFListMenu`/`SFWindowAccessMap`, but the Go SPA (`RolesOverviewPage.jsx`) reaches it through the NEO pseudo-spec bridge (§4.10).
+`SFRolesOverview` (`GET /webhooks/SFRolesOverview`, or preferably `GET /sws/neo/rolesoverview` — §4.10) returns, for an admin/client-admin caller only, a cross-role aggregate for the CALLING TENANT's 5 fixed roles (ETP-4513 — "Configuración > Roles"): each role's display name, raw `AD_Role.description`, count of distinct assigned users, an explicit window count, and the list of Etendo GO windows it can reach (`AD_Window_Access`, intersected with the windows Etendo GO actually exposes today) — plus (ETP-4907) a full window × role permission `matrix`, grouped by top-level menu category. The webhook is authored in the same Webhooks module infrastructure as `SFListMenu`/`SFWindowAccessMap`, but the Go SPA (`RolesOverviewPage.jsx`) reaches it through the NEO pseudo-spec bridge (§4.10).
 
-Unlike `SFWindowAccessMap`, which answers "what can the CURRENT caller's own role reach", this endpoint is a cross-role aggregate: it always returns data for all 5 GOClient roles regardless of which one the caller happens to be using. That is exactly why it is gated to admin/client-admin callers only.
+Unlike `SFWindowAccessMap`, which answers "what can the CURRENT caller's own role reach", this endpoint is a cross-role aggregate: it always returns data for all 5 of the caller's OWN tenant's roles regardless of which one the caller happens to be using. That is exactly why it is gated to admin/client-admin callers only.
+
+> **Doc correction (ETP-4907):** this section previously described a `SFRolesOverview.GOCLIENT_ROLE_IDS` hardcoded to GOClient's own 5 per-client role ids. That was already stale — the webhook was fixed on 2026-07-27 (live RolesPresa bug) to resolve roles by name (`Finance`/`Sales`/`Purchasing`/`Inventory`) plus `is_client_admin='Y'`, scoped to `currentRole.getClient()`, with no hardcoded id list at all. This section now documents the actual current behavior, including the ETP-4907 system-template fallback below.
 
 **Endpoint:**
 
 | Pattern | Method | Description |
 |---------|--------|-------------|
-| `/webhooks/SFRolesOverview` (legacy) / `/sws/neo/rolesoverview` (preferred) | GET | Per-role aggregate (user count + reachable windows) for all 5 GOClient roles |
+| `/webhooks/SFRolesOverview` (legacy) / `/sws/neo/rolesoverview` (preferred) | GET | Per-role aggregate (user count, window count, reachable windows) for the caller's own 5 fixed roles, plus the full permission matrix |
 
 **Response shape:**
 
@@ -1276,33 +1288,515 @@ Unlike `SFWindowAccessMap`, which answers "what can the CURRENT caller's own rol
       "id": "9B8D736190724807AB256DC95F20EC5E",
       "name": "GOClient Admin",
       "rawDescription": "*** Please, do not edit this role. Use Copy Record instead ***",
+      "isClientAdmin": true,
+      "roleSource": "tenant",
       "userCount": 2,
+      "windowCount": 48,
       "windows": [
         { "id": "143", "name": "Sales Order", "tier": "full" },
         { "id": "259", "name": "Business Partner", "tier": "read-only" }
       ]
+    },
+    {
+      "id": "B88A34B5D1874F8685FA6F3C3A609412",
+      "name": "Finance",
+      "rawDescription": null,
+      "isClientAdmin": false,
+      "roleSource": "systemTemplate",
+      "userCount": 9,
+      "windowCount": 27,
+      "windows": [ "..." ]
     }
-  ]
+  ],
+  "matrix": {
+    "categories": [
+      {
+        "name": "Sales Management",
+        "windows": [
+          {
+            "id": "143",
+            "name": "Sales Order",
+            "access": {
+              "9B8D736190724807AB256DC95F20EC5E": "full",
+              "B88A34B5D1874F8685FA6F3C3A609412": "none",
+              "...": "read-only"
+            }
+          }
+        ]
+      }
+    ]
+  }
 }
 ```
 
+Field types: `id`/`name`/`rawDescription` (`string`, `rawDescription` may be `null`), `isClientAdmin` (`boolean`), `roleSource` (`string`, `"tenant"` or `"systemTemplate"`), `userCount`/`windowCount` (`integer`), `windows` (`array` of `{id, name, tier}` — `tier` is `"full"` or `"read-only"`, never `"none"` — sorted by name), `matrix.categories` (`array` of `{name, windows}` — sorted by category name), each matrix window's `access` (`object` keyed by role `id` from the `roles` array above, value `"full"` / `"read-only"` / `"none"`).
+
+> **Data-accuracy caveat (ETP-4907 REVIEW/QA finding) — do NOT "fix" the code to match the Figma
+> reference screenshot's numbers.** The ETP-4907 reference screenshot shows 17/17/17/18
+> `windowCount` and 13/17/9/126 `userCount` for the 4 template roles (Finance/Sales/Purchasing/
+> Inventory order) — those are **mockup placeholders**, not live data, and were never meant to be
+> reproduced exactly. The confirmed LIVE figures for GOClient (2026-08-18) are: Admin **48
+> windows / 2 users** (exact match with the pre-ETP-4907 behavior — Admin is never subject to the
+> system-template fallback), and for the 4 templates **Finance 27 / Sales 13 / Purchasing 11 /
+> Inventory 13 windows** (independently verified against `AD_Window_Access` for
+> `SystemRoleTemplates`'s roles). The templates' `userCount` figures were **not** independently
+> DB-verified beyond confirming the composition query (`UserRoleCompositionService
+> #getAppliedTemplateRoleIdsForClient`) runs and returns a plausible count — a future reader
+> seeing a `userCount` that doesn't match the Figma mock should treat the Figma numbers as wrong,
+> not the code.
+
+
+
 **Access gate:** the current role is captured once, at the very top of `get(Map, Map)`, before the servlet enters `OBContext.setAdminMode()` — same convention as `SFListMenu`/`SFWindowAccessMap`: admin mode is only used to bypass row-level security on the underlying queries, never to decide access. A request with no role assigned, or a role that is not admin/client-admin (`NeoAccessHelper.isAdminOrClientAdmin(Role)`), gets `{"roles": []}` immediately, without querying a single `Role` — mirroring `SFListMenu`'s "deny silently, don't 403" convention for this webhook family.
 
-**`rawDescription` is NOT display copy.** `AD_Role.description` is boilerplate for 4 of the 5 GOClient roles today (`"*** Please, do not edit this role. Use Copy Record instead ***"`) — this backend has no i18n awareness, so it cannot produce user-facing copy itself. The field is returned only as a raw/debug fallback; the frontend (`RolesOverviewPage.jsx` in `etendo_schema_forge`) maps each of the 5 known role ids to its own curated, i18n-keyed description (`roleDescGoClientAdmin`, `roleDescFinance`, etc. in `en_US.json`/`es_ES.json`) instead of rendering this field.
+**`rawDescription` is NOT display copy.** `AD_Role.description` is boilerplate for 4 of the 5 GOClient roles today (`"*** Please, do not edit this role. Use Copy Record instead ***"`) — this backend has no i18n awareness, so it cannot produce user-facing copy itself. The field is returned only as a raw/debug fallback; the frontend (`RolesOverviewPage.jsx` in `etendo_schema_forge`) maps the 4 fixed role NAMES (and the `isClientAdmin` flag for the 5th) to curated, i18n-keyed copy instead of rendering this field. The same applies to `matrix.categories[].name`, which is the raw (English) top-level `AD_Menu` folder name for each window — the frontend is expected to map/translate it, not render it verbatim.
 
-**The 5 role IDs** are GOClient's fixed, well-known roles (seeded in ETP-3504 phases 1/2 — see `artifacts/user/decisions.json` in `etendo_schema_forge`'s `defaultRole.enumValues` for the same 5 ids/names) and are intentionally hardcoded in `SFRolesOverview.GOCLIENT_ROLE_IDS` rather than derived from a client/role-name heuristic:
+**Tenant-relative role resolution:** the client-admin role plus the 4 named roles (`Finance`/`Sales`/`Purchasing`/`Inventory`) are resolved via an `OBCriteria<Role>` scoped to `currentRole.getClient()` — never a hardcoded id list, and never GOClient's ids for a different tenant's caller. A fixed name with no ACTIVE match at the tenant level simply falls through to the system-template fallback below (or is omitted entirely if that also fails to resolve) rather than erroring.
 
-| Role | `AD_Role_ID` |
-|------|--------------|
-| GOClient Admin | `9B8D736190724807AB256DC95F20EC5E` |
-| Finance | `127AE77FE2994067B7FE6495FC21D51E` |
-| Sales | `2A159DF4F4B944A6AA903202AD35B545` |
-| Purchasing | `A826430F723E4C1B9A53EBB0746A98C0` |
-| Inventory | `55E05A4B43514A029D6FB6B8D94B49D4` |
+**System-template fallback (ETP-4907).** ETP-4852 introduced 4 single, system-owned (`AD_Client_ID = '0'`) template roles (`SystemRoleTemplates`, §8f) that a tenant's users now *compose* their access from (`UserRoleCompositionService`, §8d), rather than every tenant keeping its OWN active copy of the 4 fixed-name roles. A tenant that has migrated to this model — confirmed live for GOClient, 2026-08-18: its own `Finance`/`Sales`/`Purchasing`/`Inventory` rows are `IsActive = 'N'` — would otherwise silently drop from 5 role cards to 1 (just its client-admin role). For each of the 4 fixed names with no active tenant-scoped match, this webhook now falls back to the matching `SystemRoleTemplates.byName()` system role:
 
-A role id that fails to resolve (missing/renamed) is skipped defensively — the other 4 roles are still returned rather than failing the whole request.
+- **`windows`/`windowCount`** are resolved via the exact same `AD_Window_Access` query used for a real tenant role (it already disables client/organization filtering, so it works unchanged for a system-client role — no separate "system template window resolution" exists).
+- **`userCount`** is the number of this client's users whose PERSONAL role currently composes that template — from `UserRoleCompositionService#getAppliedTemplateRoleIdsForClient(String)` (called once per request, lazily, only if at least one fallback is needed) — **never** a direct `AD_User_Roles` count against the template itself, which would always read zero (users are never assigned a template role directly).
+- **`id`** is the SYSTEM template's own `AD_Role_ID` (client `'0'`) — the SAME id `SFSystemRoleTemplates` (§8f) returns for that role. Callers must not assume every card's `id` belongs to the caller's own client.
+- **`roleSource`** is `"systemTemplate"` (vs. `"tenant"` for a real tenant-owned role, including the client-admin card, which is never subject to this fallback — see the class javadoc's "Never touches the Admin role" convention shared with `UserRoleCompositionService`).
 
-**`windows` intersection:** a role's native `AD_Window_Access` rows are filtered down to windows Etendo GO actually exposes today — every distinct `AD_Window` backing an active, `SPEC_TYPE = 'W'` `ETGO_SF_SPEC` — so inherited/legacy grants to native-only Etendo windows don't leak into this "assigned windows" view. Each entry's `tier` resolves the same way as `SFWindowAccessMap`: `IsReadWrite = true` → `"full"`, `IsReadWrite = false` → `"read-only"`. The array is sorted by window name.
+Both paths can appear side-by-side within one response (a tenant may have migrated some fixed roles but not others) — this is intentional graceful coexistence, not a bug. **Admin is never affected**: it is always sourced from the tenant's own client-level `AD_Role`/`AD_User_Roles`/`AD_Window_Access` — confirmed live against GOClient, 2026-08-18: 48 windows, 2 users, matching the pre-ETP-4907 behavior exactly.
+
+**`windows`/`matrix` window universe:** every distinct `AD_Window` backing an active, `SPEC_TYPE = 'W'` `ETGO_SF_SPEC` — i.e. every window Etendo GO actually exposes today — so inherited/legacy grants to native-only Etendo windows don't leak into either structure. Each `windows[]` entry's `tier` resolves the same way as `SFWindowAccessMap`: `IsReadWrite = true` → `"full"`, `IsReadWrite = false` → `"read-only"`; a role's `windows` array only lists windows it can actually reach (sorted by name).
+
+**`matrix`** additionally covers **every** Etendo GO window — including ones no role in the response can reach at all (`"none"`) — grouped by the window's top-level `AD_Menu` folder (tree `'10'`, the same tree `SFListMenu` walks) via one recursive-CTE native query; a window linked from two different top-level folders deterministically picks the alphabetically-first one, and a window with no resolvable folder falls back to the `"Other"` bucket. Categories are sorted by name; each category's windows are sorted by name.
+
+---
+
+## 8d. Compose User Roles From Templates (SFAssignUserRoles Webhook, ETP-4852)
+
+`SFAssignUserRoles` (`GET /sws/neo/assignuserroles?UserId=<id>&TemplateRoleIds=<id1,id2,...>`
+— reached ONLY through the NEO pseudo-spec bridge, §4.10/§4.11; there is no legacy
+`/webhooks/SFAssignUserRoles` path since this webhook was authored after the bridge pattern was
+already established) backs the reworked "assign roles to user" UI: instead of picking ONE shared
+role (the old `AD_User.Default_Ad_Role_ID` single-dropdown flow, still handled by
+`UserRoleAssignmentHandler`'s `user`-entity `PUT`/`PATCH` sync for any caller who has not been
+migrated to the new flow yet), an admin picks **1+** system-level template roles to **compose**.
+
+**The model this replaces:** four fixed roles (Finance/Sales/Purchasing/Inventory) used to be
+duplicated per client by `OnboardingRoleProvisioningService`, unwired from the live onboarding
+chain by this same ticket and then deleted outright (REVIEW cycle 1 finding S1, confirmed
+unreachable from any production path) — see the now-retired-and-deleted pointers left in
+`SFRolesOverview`'s javadoc for what it used to do. ETP-4852 moves them to a single canonical, system-owned
+(`AD_Client_ID = '0'`) `AD_Role` row per role, `IsTemplate = 'Y'` / `IsManual = 'Y'`, seeded once
+by the `EnsureSystemRoleTemplatesScript` `ModuleScript` (`com.etendoerp.go.roles`) — a plain
+Etendo dataset (`referencedata/standard/`) was considered instead but rejected: dataset import
+only fires during `InitialClientSetup` for a brand-new client or via a manual
+admin-triggered `UpdateReferenceData` action, neither of which runs on every `update.database`
+execution against every environment (new or existing), which is the one guarantee this seeding
+actually needs. The "Admin"
+(`is_client_admin = 'Y'`) role stays client-level, per tenant, untouched.
+
+**The mechanism (`com.etendoerp.go.roles.UserRoleCompositionService`):** each user gets exactly
+ONE personal, non-template, non-admin `AD_Role` (found by reuse or created on first use), which
+inherits — via a real `AD_Role_Inheritance` row per requested template, added through `OBDal`
+(never native SQL) — from every template the caller asked for. Core's own
+`RoleInheritanceEventHandler`/`RoleInheritanceManager` (unmodified, `org.openbravo.role.
+inheritance`) does the actual propagation of `AD_Window_Access` (and every other inheritable
+access type) onto the personal role — this module never hand-copies an access row. Requesting a
+DIFFERENT set on a later call reconciles (adds what's missing, removes what's no longer
+requested) rather than only ever growing.
+
+**Verified live (not just from reading the source):** a template role and a personal role
+naturally end up on DIFFERENT `AD_Client_ID`s (`'0'` vs. the tenant's own) — confirmed this does
+NOT block enforcement anywhere in either NEO (`NeoAccessHelper.findActiveWindowAccess`) or
+classic core (`EntityAccessChecker`, `Seguridad_data.xsql`), since neither filters
+`AD_Window_Access` by client, and a tenant role's own readable-clients set always includes `'0'`
+by design (the exact mechanism reference/tax tables already rely on). See
+`UserRoleCompositionServiceIntegrationTest` for the real-DB proof (create template → add
+inheritance → confirm `AD_Window_Access` appears on the personal role with the right
+`InheritedFrom`, across clients).
+
+**Response shape:**
+
+```json
+// Success:
+{"success": true, "userId": "...", "personalRoleId": "...",
+ "templateRoleIds": ["...", "..."], "added": 1, "removed": 0}
+// Validation failure or access denial (still HTTP 200 — see below):
+{"success": false, "message": "Role is not a template, cannot be composed: ..."}
+```
+
+**Access gate:** admin/client-admin only (`NeoAccessHelper.isAdminOrClientAdmin`), captured
+before entering admin mode — same convention as `SFRolesOverview`. No role, or a restricted
+role, gets `{"success": false, "message": "Not authorized"}` without touching the database.
+
+**Tenant boundary of the TARGET user (REVIEW cycle 1 fix, ETP-4852).** The access gate above
+only answers "may this caller use this webhook at all" — it does not limit WHICH `userId` a
+client-admin may target, because `isAdminOrClientAdmin` treats a per-tenant client-admin the
+same as the literal System Administrator. The original implementation never verified that the
+target user's client matched the CALLER's own client, so a client-admin for Tenant A could
+reassign — or completely strip, with an empty `TemplateRoleIds` — any Tenant B user's roles: a
+real cross-tenant privilege-escalation bug, not a theoretical one. The fix,
+`UserRoleCompositionService.enforceCallerClientBoundary(User, Role)`, runs immediately after
+`user` is resolved and before any template validation or admin-mode entry, and rejects a
+non-system caller whose client differs from the target user's. The bypass is scoped to the
+LITERAL System Administrator role id (`"0"`) — never to a mere `isClientAdmin()` role, however
+privileged within its own tenant. `SFAssignUserRoles.get()` forwards its already-resolved
+`currentRole` into the 3-arg `assignTemplateRoles(String, List, Role)` overload for exactly this
+purpose — see that method's javadoc. A 2-arg `assignTemplateRoles(String, List)` overload also
+exists (delegates with `callerRole=null`, skipping the boundary check entirely); today it is only
+reached by plain unit tests and the integration test's fixture calls, but REVIEW flagged it as a
+non-blocking latent risk — a future caller reaching for the 2-arg overload instead of the 3-arg
+one would silently ship without this protection.
+
+> **Template-role lifecycle: deactivation while depended-upon is a DB-level non-issue (QA
+> finding, ETP-4852).** Reading `src-db/database/model/triggers/AD_ROLE_CHECK_TRG.xml` directly
+> confirms core's own `ad_role_check_trg()` — a `BEFORE UPDATE` trigger on `AD_Role` itself —
+> refuses to set `IsActive = 'N'`, or uncheck `IsTemplate`, on ANY role that an
+> `AD_Role_Inheritance` row still points `InheritFrom` at (`@CannotUncheckTemplateRole@`), for
+> EVERY writer (`OBDal` or raw SQL alike), gated only by core's own explicit trigger-disable
+> bypass. In practice: **a template role can never be deactivated while an active inheritance
+> still depends on it — the database physically prevents it.** Whoever eventually builds
+> ETP-4877's existing-tenant retrofit never needs application-level code to defend against
+> "template deactivated out from under an active inheritance", because it cannot happen.
+
+**⚠️ Deliberately does NOT use the bridge's `error`/HTTP 500 path for expected rejections.**
+`NeoGoWebhookBridge` always maps `responseVars["error"]` to `500` — correct for a genuine crash,
+misleading for "that id isn't a valid template". `SFAssignUserRoles` catches `OBException`
+itself and folds it into a `result` (HTTP 200) body with `success: false`; only an unexpected
+`RuntimeException` reaches the bridge's `error`/`500` path. Callers must branch on the body's
+`success` flag, not the HTTP status.
+
+**ETP-4878 — the four templates now carry the real permission matrix, not the ETP-4852 smoke
+test.** `EnsureSystemRoleTemplatesScript` (the `ModuleScript`) no longer inserts a fixed 2-window
+pair per role; it now iterates the full matrix from `TemplateRoleWindowAccess`
+(`src/com/etendoerp/go/roles/TemplateRoleWindowAccess.java`) — a plain data class holding the
+Ventas/Compras/Financiero/Almacén columns from the ticket ("Admin" stays client-level, out of
+scope). Final grant counts: **Sales 13, Purchasing 11, Finance 27, Inventory 13** (33 distinct
+`AD_Window_ID`s, 64 role×window rows total). "Asientos manuales" resolves to **Simple G/L
+Journal** (`B917E8A7B0864ACEA9D941E3B7494E53`), not the classic `G/L Journal` window (`132`,
+which literally carries the matching ES label but has no Schema Forge spec) — a human call made
+explicitly for this ticket on an otherwise genuinely ambiguous resolution. The script's
+reconciliation is now two-sided: it inserts/corrects every grant the matrix calls for AND removes
+(hard `DELETE`) any existing grant a role has for a window the matrix does NOT call for — so the
+old smoke-test pairs are cleaned up on the next `update.database`, not just added to.
+`TemplateRoleWindowAccess` is unit-tested directly (`TemplateRoleWindowAccessTest`, `src-test/`)
+since it has zero DB/SQL dependencies — no Gradle classpath workaround needed, unlike the
+`ModuleScript` itself which stays DB-only.
+
+**Cross-template `AD_Window_Access` overlap — self-contained fix for a latent core bug (found via
+ETP-4878's overlapping matrix, QA/Sentinel; fixed here, not in core, per an explicit human
+decision).** Composing a personal role from 2+ templates that grant the SAME window used to throw
+`OBSecurityException` and roll back the whole call — reachable the moment any two requested
+templates share a window, regardless of whether they agree on access level. Root cause traced
+into `org.openbravo.role.inheritance`: `WindowAccessInjector` never overrides `AccessTypeInjector
+#getSkippedProperties()` (the base default only skips `creationDate`/`createdBy`), so when a
+SECOND template's inheritance propagates to a window a FIRST template already covered,
+`RoleInheritanceManager#handleAccess` takes the UPDATE path (`updateRoleAccess` → `DalUtil.
+copyToTarget`), which overwrites the personal (tenant-client) role's existing row with the
+template's OWN `client`/`organization` (system client `"0"`) — the very next flush then fails
+`SecurityChecker.checkWriteAccess` under the tenant-scoped `OBContext`. The CREATE path
+(`copyRoleAccess`) does not hit this: `OBContext.setAdminMode(boolean)`'s bypass around it is
+still active when `Session.save()`'s interceptor callback fires (new-entity saves are checked
+immediately), while the UPDATE path's dirty-check-driven callback fires later, at the caller's own
+flush, by which point that inner bypass has already been restored.
+
+`UserRoleCompositionService.reconcileInheritances` now does two things beyond core's own
+mechanism, both scoped to `WindowAccess` only: (1) right before a new template's `AD_Role_
+Inheritance` is saved, it removes the personal role's existing active `WindowAccess` row for
+every window that template also grants — forcing core's propagation through the safe CREATE path
+for every one of that template's windows, overlapping or not (this also has to null the row's
+`InheritedFrom` field before removing it, mirroring core's own `deleteRoleAccess`, since core's
+`InheritedAccessEnabledEventHandler` otherwise rejects deleting any row that still has one set);
+(2) once the whole add/remove loop finishes, a final pass pins `client`/`organization` on every
+inherited row back to the personal role's own values (belt-and-braces, defending the CREATE path
+too even though it has not been observed to corrupt it) and resolves the ticket-required
+most-permissive-wins union — a window ends up full (`✓`) access if ANY currently-applied template
+grants it full, read-only (`R`) only if ALL of them do. Both steps use the same narrow,
+method-scoped `OBContext.setAdminMode(false)` bypass core's own `copyRoleAccess`/`updateRoleAccess`/
+`deleteRoleAccess` use for exactly this kind of cross-client write — never the outer, method-wide
+bypass, which stays at `setAdminMode(true)` so `enforceCallerClientBoundary`'s tenant-boundary
+guarantee (above) stays intact for the rest of this class. See
+`UserRoleCompositionServiceOverlapIntegrationTest` and
+`UserRoleCompositionServiceOverlapReverificationTest` (§9) for the real-DB proof (conflicting
+access levels resolve to full regardless of which template is added second, a real union of both
+templates' non-shared windows, a no-op re-run stays correct, and — independently re-verified
+against the real ETP-4878 matrix rather than a synthetic window — the fix holds for 3
+simultaneously-overlapping templates, not just 2).
+
+**System-wide guard beyond the personal role: `WindowAccessOverlapCorruptionGuard` (Task B6,
+ETP-4906).** Everything above (`reconcileInheritances`) only ever protects the ONE
+`personalRole` a given `assignTemplateRoles` call is actively composing. Core's own propagation
+is not scoped that narrowly — `RoleInheritanceManager#propagateNewAccess`/`applyNewInheritance`/
+`applyRemoveInheritance` iterate EVERY role that inherits from whichever template was touched,
+reachable from ANY entry point (a raw Etendo Classic edit to a template's own Window Access tab,
+another role gaining/losing an inheritance — zero `UserRoleCompositionService` code in the call
+stack, live-reproduced). Any such BYSTANDER role hits the exact same ownership-corrupting
+`OBSecurityException` this section describes, with no protection from the two role-scoped helpers
+above. `com.etendoerp.go.roles.WindowAccessOverlapCorruptionGuard` — a plain module-level
+`EntityPersistenceEventObserver` (no core patch), the same extension point `ContactNameSyncHandler`
+already uses — closes that system-wide gap by watching `AD_Window_Access` and `AD_Role_Inheritance`
+persistence events directly, independent of which module or UI action triggered them. `@Priority`
+on its `onSave`/`onUpdate`/`onDelete` observer methods (CDI 2.0 §10.4.2, Weld 3.1) guarantees it
+runs BEFORE core's own unprioritized propagation handlers (`InheritedAccessEnabledEventHandler`,
+`RoleInheritanceEventHandler`) for the same event — the only way to win that race, since core never
+forwards a `preFlush`/`postFlush` hook to CDI observers.
+
+It has grown, round by round (B6 rounds 1-8, ETP-4906), into **seven guarded triggers**, all
+variations on the same root cause (`WindowAccessInjector` not skipping `client`/`organization` in
+`getSkippedProperties()`, so core's `updateRoleAccess` blindly copies the template's own ownership
+fields onto an already-existing inherited row) plus one correctness-only refinement (BUG-2) layered
+onto trigger 7. This section summarizes the current mechanism; the exhaustive empirically-found
+failure mode for each — including the two rejected intermediate designs that turned out wrong on
+live re-verification — lives in the class's own javadoc, which is the source of truth this section
+is kept in sync with:
+
+1. **A template gains a new/updated `AD_Window_Access` grant (`onSave`/`onUpdate`, `guardDependentsOf`).**
+   For every OTHER role actively inheriting from that template, if it already has its own active
+   row for the same window not already sourced from that same template, the row is deleted before
+   core propagates — forcing core onto the safe CREATE path instead of the corrupting UPDATE path
+   (mirrors `preventWindowAccessOverlapCorruption`'s own mechanism, generalized to every dependent
+   role).
+2. **A role gains a brand-new `AD_Role_Inheritance` from an already-overlapping template**
+   (`guardNewInheritance`, e.g. a raw Classic "add inheritance" edit, not `assignTemplateRoles`) —
+   same delete-before-write logic, scoped to the one role gaining the one new inheritance.
+3. **A role loses an existing `AD_Role_Inheritance` (`guardRemovedInheritance`).** Core's
+   `applyRemoveInheritance` re-derives the dependent's access against every REMAINING template it
+   still inherits from via the same corrupting `updateRoleAccess` path. For every remaining
+   template, for every window it grants, if the dependent's existing row isn't already sourced from
+   that exact template, it is deleted first, forcing the safe CREATE path again. A row whose window
+   is granted by NO remaining template is left alone — core's own non-corrupting delete handles that
+   case already.
+4. **Most-permissive-wins enforcement on widen (`widenInheritedAccessLevelIfNeeded`).** None of the
+   triggers above decide the access LEVEL the CREATE path should use when 2+ actively-inherited
+   templates grant the same window — outside `assignTemplateRoles`, core's propagation can leave a
+   role read-only even though another active template grants it full. This runs on the same
+   `EntityNewEvent` as triggers 1-3's CREATE-path row: if any of the role's OTHER active template
+   inheritances grants the same window at a more permissive level, it widens the fresh row to full
+   (one-directional — never narrows).
+5. **`InheritedFrom` bookkeeping on widen, same method.** The fourth trigger's first implementation
+   widened `editableField` but left `InheritedFrom` pointing at the (less-permissive) template the
+   CREATE path originally sourced the row from, which broke re-derivation on a later removal of the
+   ACTUAL justifying template. `widenInheritedAccessLevelIfNeeded` now also repoints `InheritedFrom`
+   to the template that justifies the widened value (`findActiveTemplateGrantingFullAccess`, tie
+   broken by highest `AD_Role_Inheritance.SeqNo`, mirroring core's own `propagateDeletedAccess`
+   heuristic), only in the branch that actually widens. A same-flush race this exposed (Hibernate
+   runs entity Deletions after Insertions in its default action-queue order, so a just-removed
+   template's `RoleInheritance` row can still look `active=true` mid-flush) is closed via a
+   per-transaction `TEMPLATES_BEING_REMOVED` thread-local marker, cleared by a
+   `TransactionCompletedEvent` observer.
+6. **REMOVE-path duplicate-INSERT crash with 3+ overlapping templates (`guardRemovedInheritance`,
+   `repointInPlace`/`collectWindowGrantors`/`repointWindowIfNeeded`).** Live-confirmed on the real
+   `SFAssignUserRoles` flow with a role composed from all 4 system templates: the old
+   delete-once-per-remaining-template loop could delete the SAME dependent row more than once across
+   core's own multi-pass `calculateAccesses` walk (no flush between passes, `FlushMode.COMMIT`),
+   so two remaining templates both scheduled a CREATE for the identical `(AD_Role_ID, AD_Window_ID)`
+   pair — a real `ad_window_access_un_key` constraint violation, not a corner case. Fixed by
+   computing, ONCE per window across ALL remaining templates together, the single winning template
+   (highest `SeqNo` grantor — core's own `isPrecedent` compares only `SeqNo` order, not access
+   level; an earlier "most-permissive template wins ownership" attempt was tried and reproduced the
+   identical crash one hop later, for exactly this reason) and the most-permissive access level
+   across every remaining grantor, then correcting the existing row IN PLACE via a bulk HQL UPDATE
+   (`repointInPlace`) — never a delete+recreate. REMOVE-side only; the ADD-side triggers are
+   structurally incapable of this multi-pass race (core's ADD path only ever iterates exactly one
+   template per event).
+7. **Core cannot always SEE a pre-existing, already-correct row before it propagates
+   (`clearConflictingAccessUnconditionally` / `repointIfAlreadySourcedFromTemplate`,
+   `PropagationTrigger`).** Triggers 1-2 originally skipped deleting a dependent's row when it was
+   already sourced from the propagating template, trusting core's own `isPrecedent` to leave it
+   alone — wrong whenever the dependent's client falls outside the CALLING context's own
+   readable-clients list, which makes core's own row lookup (`AccessTypeInjector#findAccess`) blind
+   to it, so core always takes the CREATE branch regardless and risks a duplicate INSERT. Fixed by
+   deleting unconditionally. That fix in turn assumed both callers of `guardDependentsOf` feed a
+   core propagation path with a CREATE fallback — true for `onSave` (`propagateNewAccess`) but FALSE
+   for `onUpdate` (`propagateUpdatedAccess`, which only ever UPDATEs a row it can find and otherwise
+   does nothing), so unconditional deletion on the `onUpdate` path could permanently lose a
+   dependent's access with nothing left to restore it. `guardDependentsOf` now takes a
+   `PropagationTrigger` (`NEW_GRANT` vs. `UPDATED_GRANT`) so the two callers get different
+   treatment: `NEW_GRANT` keeps the unconditional delete (safe — `propagateNewAccess` always
+   recreates); `UPDATED_GRANT` instead corrects an already-template-sourced row IN PLACE
+   (`repointIfAlreadySourcedFromTemplate`, the same bulk-HQL-UPDATE technique as trigger 6) rather
+   than deleting it, so the dependent's row survives regardless of what core's own propagation does
+   afterward.
+
+**[BUG-2] Most-permissive-wins gap in trigger 7's `onUpdate` branch (found by QA's Final Coverage
+Pass, 2026-08-18).** `repointIfAlreadySourcedFromTemplate` only ever compared the dependent's row
+against the ONE template whose own access just changed, copying that template's new value directly
+— unlike triggers 4-6, it never surveyed the dependent's OTHER actively-inherited templates first.
+Live-reproduced: a dependent inheriting full access from two overlapping templates A and B;
+downgrading B's own access via a routine Classic edit dragged the dependent down to read-only too,
+even though A still actively granted full. Fixed by having `repointIfAlreadySourcedFromTemplate`
+survey every OTHER actively-inherited template (`findActiveTemplateGrantingFullAccess`, 3-arg
+`excludedTemplate` overload) before writing, resolving the final level as the MAX across the edited
+template's new value and every other active grantor, and repointing `InheritedFrom` to whichever
+template actually justifies that value — reusing the same survey pattern triggers 6/4-5 already
+established, not new divergent logic.
+
+Deliberately narrow in scope: only reacts when the touched `AD_Window_Access` row's owning role is
+itself a template (the same signal core's own handler uses to decide whether to propagate at all),
+and never touches the template's own row or any grant LEVEL outside triggers 4-7/BUG-2's own
+widen/repoint logic. `reconcileWindowAccessAfterComposition` (above) remains the most-permissive-wins
+union authority for the role it actively composes; this class's job is making sure core never gets
+the chance to corrupt or silently under-resolve a BYSTANDER role's access for every entry point that
+service doesn't see. Full design rationale, each empirically-discovered failure mode (including the
+two intermediate designs that were tried and reproduced their own crash before landing on the
+current one), and the live reproduction steps for all seven triggers plus BUG-2 are documented in
+the class's own javadoc (`src/com/etendoerp/go/roles/WindowAccessOverlapCorruptionGuard.java`) and
+in ETP-4906's plan doc ("B6 Findings" sections, `etendo_schema_forge` repo) — treat the javadoc as
+canonical for current-state mechanics; the plan doc's per-round sections are historical trail.
+`WindowAccessOverlapCorruptionGuard` has no dedicated unit-test file of its own — it is exercised
+entirely through `UserRoleCompositionServiceOverlapIntegrationTest` (all 7 triggers plus BUG-2 and
+its 2 coverage-gap follow-ups, real DB, `WeldBaseTest`), `UserRoleCompositionServiceOverlapReverificationTest`
+(an independent re-verification of the same overlap fix, deliberately not reusing the fix author's
+own test), and `UserRoleCompositionServiceRealAccessControlIntegrationTest` (real seed-data
+access-control scenarios) — see §9.
+
+**Twelve matrix rows are a documented, deliberate gap — not yet implementable.** Every one of
+them has NO `AD_Window_ID` at all backing it in this environment (either a pure custom/aggregate
+Schema Forge page with zero classic-AD entity, or a report-type spec whose access resolves via a
+different, non-window mechanism), so `AD_Window_Access` cannot express a grant for it at all:
+**Inicio (Dashboard)**, **Favoritos**, **Copilot (Asistente IA)**, **Informes de inventario**,
+**Documentos no contabilizados**, **Monitor fiscal**, **Modelos fiscales**, **Informes
+financieros**, **Informe Antigüedad de Cobros**, **Informe Antigüedad de Pagos**, **Escaneo
+inteligente**, **Configuración fiscal**. Full per-row resolution detail (which spec/artifact was
+checked, why it has no window) lives in `EnsureSystemRoleTemplatesScript`'s own class javadoc.
+Closing this gap needs either building the missing AD entity/spec first, or a different grant
+mechanism entirely — left for a follow-up ticket. Separately, "Roles", "Usuario", and "Conectar
+asistente de IA" DO resolve to real `AD_Window_ID`s but are deliberately granted to none of the
+four templates — the matrix shows "—" for all four non-Admin roles on all three, so they stay
+Admin-only.
+
+**Still open (ETP-4877, unchanged by ETP-4878):** the ~21 existing tenants still holding
+per-client duplicated role copies are untouched by this mechanism (a migration, not a runtime
+fallback).
+
+---
+
+## 8e. Read User Role Assignments (SFUserRoleAssignments Webhook, ETP-4906)
+
+`SFUserRoleAssignments` (`GET /sws/neo/userroleassignments[?UserId=<id>]` — reached ONLY through
+the NEO pseudo-spec bridge, §4.10/§4.11; no legacy `/webhooks/*` path, same as `SFAssignUserRoles`)
+is the read-path companion §8d's write endpoint needed: "which template roles does user X (or
+every user of my client) currently have applied". It backs the multi-role assignment UI's initial
+chip state (form load) and the Users grid's role-chips column, and is the one genuinely new
+backend surface ETP-4906 introduced — everything else in that ticket reuses `SFAssignUserRoles`/
+`SFRolesOverview`/`SFListMenu` as-is. All resolution logic lives in
+`UserRoleCompositionService#getAppliedTemplateRoleIds(String, Role)` (single user) and
+`UserRoleCompositionService#getAppliedTemplateRoleIdsForClient(String)` (bulk); this webhook is
+only a parameter-marshalling + access-gating shim, exactly like §8d's.
+
+**Two modes, selected by whether `UserId` is present:**
+
+| Mode | Request | Use case |
+|------|---------|----------|
+| Bulk | `GET /sws/neo/userroleassignments` (no `UserId`) | Users grid — every user of the caller's OWN client in one call |
+| Single | `GET /sws/neo/userroleassignments?UserId=<id>` | User form load — one user's applied template ids |
+
+**Response shape:**
+
+```json
+// Bulk mode:
+{"assignments": {"9B8D...": ["tpl-finance", "tpl-sales"], "A1C2...": []}}
+// Single mode:
+{"userId": "9B8D...", "templateRoleIds": ["tpl-finance", "tpl-sales"]}
+```
+
+**Access gate:** admin/client-admin only (`NeoAccessHelper.isAdminOrClientAdmin`), captured
+before any lookup — same convention as `SFAssignUserRoles`/`SFRolesOverview`. No role, or a
+restricted role, gets this webhook's own empty-result shape, shaped per the mode that was
+requested (`{"assignments": {}}` for bulk, `{"userId": "...", "templateRoleIds": []}` for
+single) — never a raw `403`, this webhook family's "deny silently" convention.
+
+**Tenant boundary of the TARGET user — single mode only.** The access gate above only answers
+"may this caller use this webhook at all" — it does not limit WHICH `userId` a client-admin may
+read, for the exact same reason §8d's write path needs its own boundary check
+(`isAdminOrClientAdmin` treats a per-tenant client-admin the same as the literal System
+Administrator). `SFUserRoleAssignments.get()` forwards its already-resolved `currentRole` into
+`UserRoleCompositionService#getAppliedTemplateRoleIds(String, Role)`, which runs the SAME
+`enforceCallerClientBoundary(User, Role)` check §8d's `assignTemplateRoles(String, List, Role)`
+uses — see that method's javadoc. A cross-tenant read attempt therefore rejects exactly like a
+cross-tenant write attempt does, just folded into the empty single-mode result instead of a
+`success:false` body (this endpoint has no `success` field at all — every expected rejection,
+including "unknown user id", degrades to the same empty shape, so a caller can never distinguish
+"exists in another tenant" from "doesn't exist" from "not authorized").
+
+**Bulk mode needs no target-user boundary check at all** — it is always scoped to
+`currentRole.getClient().getId()`, never a caller-supplied client id (no such parameter is
+exposed), mirroring `SFRolesOverview`'s identical "always the caller's own client" convention.
+`UserRoleCompositionService#getAppliedTemplateRoleIdsForClient(String)` resolves every user of
+that client in one query pass — deliberately NOT a loop calling the single-user method once per
+user (§8d's mechanism involves several queries per personal-role resolution; doing that once per
+grid row would not scale) — see that method's own javadoc for the bulk-equivalent identity checks
+it applies (mirroring `isReusablePersonalRole`'s active/non-template/non-admin/same-client/
+not-an-inheritance-target/exclusively-assigned rules, re-expressed as `Restrictions.in(...)` batch
+queries instead of one query per candidate role).
+
+**Read-only — never mints a personal role.** Unlike `assignTemplateRoles`, neither
+`getAppliedTemplateRoleIds` nor `getAppliedTemplateRoleIdsForClient` ever calls
+`createPersonalRole`: a user with no personal role yet (never composed, or a brand-new user)
+simply has zero applied templates — an empty list/array, not a role created as a side effect of
+a GET.
+
+**Deliberately does NOT use the bridge's `error`/HTTP 500 path for expected rejections**, for the
+same reason §8d's write endpoint doesn't: `NeoGoWebhookBridge` always maps
+`responseVars["error"]` to `500` — correct for a genuine crash, misleading (and a
+same-tenant-vs-other-tenant information leak) for "that id doesn't resolve for you". This class
+catches `OBException` and folds it into its own empty-result shape; only an unexpected
+`RuntimeException` reaches the bridge's `error`/`500` path.
+
+---
+
+## 8f. System-Level Role Templates (SFSystemRoleTemplates Webhook, ETP-4906)
+
+`SFSystemRoleTemplates` (`GET /sws/neo/systemroletemplates` — reached ONLY through the NEO
+pseudo-spec bridge, §4.10/§4.11; no legacy `/webhooks/*` path, same as `SFAssignUserRoles`/
+`SFUserRoleAssignments`) returns the 4 fixed role templates (Finance/Sales/Purchasing/Inventory,
+`com.etendoerp.go.roles.SystemRoleTemplates`) — resolved at the SYSTEM client
+(`AD_Client_ID = '0'`), never the caller's own tenant. It backs the "which template roles can I
+compose from" question for the multi-role assignment UI (`AssignTemplateRolesControl.jsx`,
+`UserRolesTab.jsx`, `RoleChipsCell.jsx`, `RoleFilterControl.jsx` in `etendo_schema_forge`).
+
+**Why not `SFRolesOverview` (§8c)?** That webhook is hard-scoped to the CALLING tenant's own
+client by design — it resolves the 4 fixed role NAMES plus the client-admin role WITHIN
+`currentRole.getClient()`, for its own ETP-4513 "Configuración > Roles" page. This is correct for
+that page, but breaks down the moment a tenant has no per-client copies of these roles left to
+find — which is now the target end state ETP-4906 itself needs: "no template role should be at
+client level, only at system level" (Manual QA Feedback Round 2, finding 2, `docs/plans/2026-08-
+14-etp-4906-multi-role-user-assignment.md`). Repointing `SFRolesOverview` itself would have broken
+its own unrelated page instead of fixing this — hence a new, separate webhook rather than a change
+to an existing one.
+
+**Response shape** — deliberately a subset of `SFRolesOverview`'s per-role shape (§8c), omitting
+what only makes sense for a tenant-scoped aggregate:
+
+```json
+{"roles": [
+  {"id": "B88A34B5D1874F8685FA6F3C3A609412", "name": "Finance",
+   "windows": [{"id": "...", "name": "...", "tier": "full"}]},
+  {"id": "15ECC46CFBD74CF3A76D1F4DC8BA9F80", "name": "Sales", "windows": [...]},
+  {"id": "5E279F5102F9410F9B8CCBA424741F46", "name": "Purchasing", "windows": [...]},
+  {"id": "73581A7B4F414A2C9059C83CE7BE97BF", "name": "Inventory", "windows": [...]}
+]}
+```
+
+No `userCount` — not because none can be computed (ETP-4907's `SFRolesOverview` system-template
+fallback, §8c, does compute one, via `UserRoleCompositionService#getAppliedTemplateRoleIdsForClient`
+counting how many of a CLIENT's users currently compose from a given template), but because THIS
+endpoint's own consumer — "which templates can I compose from" — has no use for a per-tenant
+aggregate; that is `SFRolesOverview`'s job, not this one's. And no client-admin row
+(`SystemRoleTemplates`'s own class javadoc explicitly excludes the client-level "Admin" role from
+the template set — there is nothing to represent at system level).
+
+**Access gate:** admin/client-admin only (`NeoAccessHelper.isAdminOrClientAdmin`), captured before
+any lookup — same convention as every sibling webhook in this family. No role, or a restricted
+role, gets `{"roles": []}`, never a raw `403` — this family's "deny silently" convention.
+
+**Resolution:** the 4 fixed ids from `SystemRoleTemplates.byName()` are looked up directly via
+`OBDal.get(Role.class, id)` — never a client-scoped `Role` criteria keyed off the caller's own
+client, the way `SFRolesOverview` resolves its roles. A template id that no longer resolves to an
+active `Role` (deleted or deactivated — not expected, but not this webhook's job to prevent) is
+skipped rather than surfaced as an error. Each role's `windows` array follows the exact same
+GO-window intersection + tier resolution as `SFRolesOverview` (`AD_Window_Access`, intersected
+with the windows Etendo GO actually exposes, tier `full`/`read-only` from `IsReadWrite`) — with
+client/organization filtering explicitly disabled on that query, since these roles live at the
+system client and a non-system caller's ambient readable-client set would otherwise filter their
+`AD_Window_Access` rows out entirely.
 
 ---
 
@@ -1319,9 +1813,32 @@ The module includes unit tests that run without a backend:
 | `NeoPreviewFileServiceTest` | ~250 | Validation (invalid JSON, blank fields), GET miss/hit, POST INSERT/UPDATE paths, DELETE miss/hit. All without a live DB via `MockedStatic<OBDal>` + `MockedStatic<OBContext>`. |
 | `SFListMenuTest` | -- | Tree building/pruning, flat search, role-based filtering (window/process/OBUIAPP-process nodes), no-role → empty menu, multi-level nesting. |
 | `SFWindowAccessMapTest` | -- | Role-based windowAccess resolution (full/read-only/absent), no-role → both maps empty, admin/client-admin bypass → full access to every active Etendo GO window + every capability true, `showAccountingFields` true/false/unset/missing-role, `isAdminOrClientAdmin` true on bypass / false for a restricted role. |
-| `SFRolesOverviewTest` | -- | Admin/client-admin access gate (no role, restricted role, System Administrator, client-admin), all 5 roles returned in `GOCLIENT_ROLE_IDS` order with id/name/rawDescription, missing/renamed role id skipped gracefully, distinct-user-count aggregation, GO-window intersection (native-only windows excluded), tier resolution (full/read-only), exception handling. Two defense-in-depth regression cases confirm the gate is genuinely `isAdminOrClientAdmin`, not "is this one of the 5 known `GOCLIENT_ROLE_IDS`": a caller authenticated AS one of those 5 roles (Finance) but not admin/client-admin is still denied (empty `roles`, zero `Role` lookups), and a role with zero active `AD_User_Roles` AND zero active `AD_Window_Access` rows degrades gracefully to `userCount: 0` + an empty `windows` array for all 5 roles rather than throwing or omitting the role. |
+| `SFRolesOverviewTest` | -- | Admin/client-admin access gate (no role, restricted role, System Administrator, client-admin); tenant-relative role resolution via a client-scoped `Role` criteria (not hardcoded ids), admin-first-then-fixed-name sort order, a tenant with fewer than 5 matching roles; distinct-user-count aggregation; GO-window intersection (native-only windows excluded); tier resolution (full/read-only); exception handling. Two defense-in-depth regression cases confirm the gate is genuinely `isAdminOrClientAdmin`, not "is this one of the tenant's 5 fixed roles": a caller authenticated AS one of those roles (Finance) but not admin/client-admin is still denied (empty `roles`, zero `Role` lookups), and a role with zero active `AD_User_Roles` AND zero active `AD_Window_Access` rows degrades gracefully to `userCount: 0` + an empty `windows` array for all 5 roles rather than throwing or omitting the role. **ETP-4907 additions:** missing tenant roles fall back to the system-level templates with composition-based `userCount` (`UserRoleCompositionService` constructed lazily, once, via `mockConstruction`); an active tenant role is never overridden by its template counterpart, and the composition service is never even constructed when unneeded; the `matrix` covers every GO window (including one no role can reach, resolving to `"none"`) grouped by category, and a window with no resolvable category falls back to the `"Other"` bucket. QA (Sentinel) added 3 more targeting the fallback's early-return branch: a system-template role that doesn't resolve at all (`OBDal.get` returns `null`, e.g. deleted/never-seeded) is silently omitted rather than appearing as a 5th entry with null/empty fields; a system-template role that resolves but is `IsActive = 'N'` is treated identically (also omitted, not returned with stale data); and the full degradation case — every one of the 4 templates missing/inactive — still returns a valid minimal response (just the admin card, `roles.length() == 1`) without ever constructing `UserRoleCompositionService`, confirming the fallback's laziness holds even under total non-resolution, not only when every fixed name already has a tenant role. |
+| `TemplateRoleWindowAccessTest` (ETP-4878) | -- | The real ETP-4878 permission matrix in `TemplateRoleWindowAccess` (`src/com/etendoerp/go/roles/`), DB-free (12 tests): exactly the 4 non-Admin template roles present, exact grant counts per role (Sales 13 / Purchasing 11 / Finance 27 / Inventory 13, 64 total), Asientos manuales resolves to Simple G/L Journal and never to the classic G/L Journal window (`132`), Sales has no grant for Pago, "Categoría del producto" is read-only for Sales/Purchasing but full for Finance/Inventory, no role repeats the same `AD_Window_ID` twice, `byRoleId()` returns a fresh mutable map per call. QA (Sentinel) added 3 more: the 64 grants resolve to exactly 33 DISTINCT `AD_Window_ID`s (not just a raw count that would stay 64 even under duplication); all 8 window/role pairs from the old ETP-4852 2-window smoke test survive unchanged (same full access) in the new matrix, confirming `EnsureSystemRoleTemplatesScript#removeStaleWindowAccess`'s delete path is never actually exercised by that specific migration; and at least one window (e.g. Contactos, Pedido de venta) is granted at genuinely conflicting access levels across 2+ roles — the data-level root cause behind the ETP-4852 cross-template overlap bug fixed in `UserRoleCompositionService` (see §8d and `UserRoleCompositionServiceOverlapIntegrationTest`). |
+| `UserRoleCompositionServiceTest` | -- | Pure-Mockito unit test covering `assignTemplateRoles`'s input-validation guard clauses — the slice that fails before any persistence side effect: blank user id, `null` template id list, unknown user, unknown/inactive template id, a role that is not a template, the client-admin "Admin" role rejected even if somehow marked as a template, requested-id dedup happening before the per-id validation loop (verified via a single `Role` lookup despite 3 whitespace-noisy repeats of the same id), and the two `enforceCallerClientBoundary` regression cases from REVIEW cycle 1: a caller whose client differs from the target user's is rejected with a "different client" message, while the literal System Administrator role id (`"0"`) bypasses the check and reaches the (unrelated) template-validation error instead. **ETP-4906 additions:** `getAppliedTemplateRoleIds`'s read path — blank/unknown user id rejected the same way, a user with no `Default_Ad_Role_ID` yet returns an empty list without ever calling `createPersonalRole`, a reusable personal role with 2 active `AD_Role_Inheritance` rows returns both `InheritFrom` ids in `Seqno` order, and the read path enforces the exact same `enforceCallerClientBoundary` regression pair (cross-client rejected, System Administrator bypasses) as the write path. |
+| `UserRoleCompositionServiceIntegrationTest` | 446 | Real-DB, end-to-end proof (6 tests) of the full add/reconcile/retract lifecycle: a system-level (`AD_Client_ID = '0'`) template's `AD_Window_Access` propagates onto a per-tenant personal role purely via core's own `RoleInheritanceEventHandler`/`RoleInheritanceManager` (no hand-rolled copy in this module); removing a template on a later call retracts what it had propagated; re-running with the identical template set is a no-op (0 added, 0 removed); an empty template list on a user's FIRST-EVER composition call still creates the personal role and syncs `AD_User_Roles`/`Default_Ad_Role_ID` rather than leaving the user role-less; three occurrences of the same valid template id in one request collapse into exactly one `AD_Role_Inheritance` row instead of one per occurrence; and a recompose call mixing one still-valid template with one bogus id is rejected wholesale without mutating the inheritance/access an earlier, unrelated successful call had already applied. Extends `WeldBaseTest`, NOT plain `OBBaseTest` — role-inheritance propagation is driven by a Hibernate interceptor firing a CDI event that only `WeldBaseTest`'s Arquillian-booted container wires to an observer; under plain `OBBaseTest` the propagation silently never fires, which is a test-harness gap, not a bug in the service. |
+| `UserRoleCompositionServiceOverlapIntegrationTest` | 1181 | Real-DB proof (13 tests, `WeldBaseTest`) of the cross-template `AD_Window_Access` overlap fix AND `WindowAccessOverlapCorruptionGuard`, all 7 triggers plus BUG-2 (see §8d above): composing Finance (full) + Sales (read-only) on a shared window succeeds (no `OBSecurityException`) and resolves to full access, with `client`/`organization` on the shared row matching the personal role's own, and both templates' non-shared windows also present (a real union); the same conflicting grants requested in the OPPOSITE order still resolve to full; re-running the identical overlapping template set is a no-op; `getAppliedTemplateRoleIds` reflects a real overlapping composition. **Triggers 1-5 (B6 rounds 1-5):** a bystander role never passed to `assignTemplateRoles` (e.g. gaining 2 overlapping inheritances via a raw Classic edit) is also protected (triggers 1-2); removing one of two overlapping template inheritances from a composed role is protected on the REMOVE path (trigger 3); gaining a read-only template inheritance never downgrades an existing full grant from another active template (trigger 4); removing the template that justified a previously-widened access level correctly downgrades the row instead of staying stuck at full (trigger 5, `InheritedFrom` bookkeeping). **Triggers 6-7 (B6 rounds 6-7):** removing one of FOUR overlapping templates (2 remaining templates still overlapping on a window) no longer duplicate-INSERTs (trigger 6); updating a template's own access level in place never deletes an already-correctly-sourced dependent row (trigger 7, the `onUpdate`/`UPDATED_GRANT` path). **BUG-2 + coverage gaps (round 8):** downgrading one of two overlapping templates' own access never downgrades a dependent when the other still grants full (`testDowngradingOneOfTwoOverlappingTemplatesNeverDowngradesDependentWhenTheOtherStillGrantsFullAccess`); a single inheritance event touching 3 windows at once resolves each window's most-permissive-wins independently (`testSingleInheritanceEventAffectingMultipleWindowsResolvesEachWindowIndependently`); two guard-triggering template updates inside one shared flush do not cause Hibernate reentrancy (`testTwoGuardTriggeringTemplateUpdatesInsideASingleFlushDoNotCauseHibernateReentrancy`). Uses the real Finance/Sales system templates (not throwaway roles) plus one confirmed-unused window (`AD_Window_ID = 100`) for the shared grant, so it is independent of whatever the templates' own real grants happen to be. |
+| `UserRoleCompositionServiceRealAccessControlIntegrationTest` (B5, ETP-4906) | 228 | Real-DB proof (3 tests, `WeldBaseTest`) that `WindowAccessOverlapCorruptionGuard`'s protection produces the CORRECT effective access outcome, not just a crash-free one, against real ETP-4878 seed-data templates: a Sales-only composed role has no access to Purchase Invoice; a Purchasing-only composed role has no access to Sales Invoice; and a Sales-only role is read-only on "Categoría del producto", then adding Finance upgrades it to full (most-permissive-wins) — the same scenario §8d's four outcomes (no-access ×2, read-only, full) are meant to cover end-to-end. |
+| `UserRoleCompositionServiceOverlapReverificationTest` | 308 | QA (Sentinel) independent re-verification (3 tests) of the same overlap fix, deliberately NOT reusing the fix author's own integration test: 3 simultaneously-overlapping templates (Finance/Sales/Purchasing on a shared window) resolve to most-permissive-wins with the "winner" (Purchasing, full) in the middle of the composition order — ruling out a pairwise-only fix that only checks the newest template against the immediately-preceding state; and two cases seeded with the REAL ETP-4878 matrix's own access levels (not the synthetic window `100`) — Sales (full) + Inventory (read-only) on Contactos resolves to full, and Sales + Purchasing both read-only on Categoría del producto stays read-only (confirms the fix does not spuriously promote a window to full just because 2+ templates share it). Also closes a data point the original QA report got wrong: `ad_window_access_un_key` is a plain `CREATE UNIQUE INDEX` on `(ad_role_id, ad_window_id)`, invisible to a `pg_constraint`-only query — Sales already had a live pre-existing row for Contactos, so this suite seeds only the missing side instead of inserting a duplicate. |
+| `SFAssignUserRolesTest` | 278 | Unit test (8 tests) proving the webhook wires parameters/results/errors correctly, with `UserRoleCompositionService` itself intercepted via `mockConstruction` (its real behavior is the integration test's job): access gate (no role / restricted role denied without constructing the service), the happy path (admin composes, parses a whitespace/empty-entry-noisy `TemplateRoleIds` CSV, returns the assignment summary), missing `UserId` rejected before construction, an absent `TemplateRoleIds` parameter resolving to an empty (not `null`) list meaning "revoke all", a domain `OBException` folding into a `success:false` HTTP-200 result rather than the bridge's `error`/500 path, an unexpected `RuntimeException` surfacing as the bridge's `error` field instead, and the REVIEW cycle 1 regression proving the webhook actually forwards its already-resolved `currentRole` through to `assignTemplateRoles`'s 3-arg overload — the exact wiring the tenant-boundary check depends on. |
+| `SFUserRoleAssignmentsTest` (ETP-4906) | -- | Unit test mirroring `SFAssignUserRolesTest`'s `mockConstruction` convention for §8e's read endpoint: access gate denies with the mode-appropriate empty shape (bulk `{"assignments":{}}` with no `UserId`, single `{"userId":...,"templateRoleIds":[]}` with one) without constructing the service; bulk mode returns every user's assignments keyed by id, scoped to `currentRole.getClient().getId()`; single mode returns one user's ids and proves `currentRole` is forwarded into the boundary-checking overload (mirrors `SFAssignUserRolesTest`'s own forwarding regression); a cross-tenant read attempt and an unknown-user-id `OBException` both fold into the single-mode empty shape rather than the bridge's `error`/500 path; an unexpected `RuntimeException` still surfaces as `error`. |
+| `SFSystemRoleTemplatesTest` (ETP-4906) | -- | Unit test (12 tests) mirroring `SFRolesOverviewTest`'s structure for §8f's endpoint: admin/client-admin access gate (no role, restricted role, System Administrator, client-admin — all resolved without the caller's own client ever appearing in any stub); roles resolved via `OBDal.get(Role.class, id)` against the 4 fixed `SystemRoleTemplates` ids rather than a client-scoped `Role` criteria; response omits `userCount`/`isClientAdmin` entirely; Finance/Sales/Purchasing/Inventory ordering; a template id resolving to `null` or to an inactive `Role` is skipped gracefully rather than erroring; GO-window intersection (native-only windows excluded) and tier resolution (full/read-only), mirroring `SFRolesOverview`'s identical logic; exception handling. |
 
-Tests are located in `src-test/src/com/etendoerp/go/schemaforge/`.
+Tests are located in `src-test/src/com/etendoerp/go/schemaforge/` (including its `webhooks/`
+subpackage, e.g. `SFAssignUserRolesTest`/`SFUserRoleAssignmentsTest`/`SFSystemRoleTemplatesTest`).
+The `NeoPseudoSpecDispatcher` routing for `userroleassignments` and `systemroletemplates` is
+covered by `NeoPseudoSpecDispatcherTest` (same package), mirroring its existing per-endpoint
+dispatch/method-not-allowed test pairs. The `AD_Role`-templates/composition classes —
+`UserRoleCompositionServiceTest`, `UserRoleCompositionServiceIntegrationTest`,
+`UserRoleCompositionServiceOverlapIntegrationTest`,
+`UserRoleCompositionServiceOverlapReverificationTest`,
+`UserRoleCompositionServiceRealAccessControlIntegrationTest`, and `TemplateRoleWindowAccessTest` —
+are the exception, living under `src-test/src/com/etendoerp/go/roles/` alongside the
+`com.etendoerp.go.roles` production classes they cover, which also includes
+`WindowAccessOverlapCorruptionGuard` itself (§8d) — it has no dedicated test class of its own and
+is exercised entirely through `UserRoleCompositionServiceOverlapIntegrationTest`/
+`UserRoleCompositionServiceOverlapReverificationTest`/
+`UserRoleCompositionServiceRealAccessControlIntegrationTest` above.
 
 ---
 

@@ -29,6 +29,7 @@ import org.openbravo.dal.service.OBDal;
 
 import com.etendoerp.go.schemaforge.NeoResponse;
 import com.etendoerp.go.schemaforge.data.Account;
+import com.etendoerp.go.schemaforge.data.Invitation;
 import com.etendoerp.go.schemaforge.email.EmailContractCommandSupport;
 import com.etendoerp.go.schemaforge.email.TransactionalEmailService;
 
@@ -36,6 +37,7 @@ class TransactionalAuthEmailSender {
 
   private static final Logger log = LogManager.getLogger(TransactionalAuthEmailSender.class);
 
+  private static final String CONTRACT_COMPANY_INVITATION = "company-invitation";
   private static final String CONTRACT_ENVIRONMENT_READY = "environment-ready";
   private static final String CONTRACT_NEW_ACCOUNT = "new-account";
   private static final String CONTRACT_PASSWORD_CHANGED = "password-changed";
@@ -130,6 +132,29 @@ class TransactionalAuthEmailSender {
       return false;
     }
     return sendAccountLink(CONTRACT_RESET_PASSWORD, account, resetLink, resetTokenHash);
+  }
+
+  boolean sendCompanyInvitation(Invitation invitation, String inviteLink) {
+    return sendCompanyInvitation(invitation, inviteLink, null);
+  }
+
+  boolean sendCompanyInvitation(Invitation invitation, String inviteLink, String language) {
+    if (invitation == null || StringUtils.isBlank(inviteLink)) {
+      return false;
+    }
+    try {
+      JSONObject body = new JSONObject();
+      body.put(EmailContractCommandSupport.FIELD_VERSION, EmailContractCommandSupport.VERSION);
+      body.put(EmailContractCommandSupport.FIELD_RECORD_ID, invitation.getId());
+      body.put(EmailContractCommandSupport.FIELD_TENANT_ID,
+          invitation.getClient() != null ? invitation.getClient().getId() : "0");
+      body.put(EmailContractCommandSupport.FIELD_LINK, inviteLink);
+      addLanguageField(body, language);
+      return sendBestEffort(CONTRACT_COMPANY_INVITATION, body);
+    } catch (JSONException e) {
+      log.warn("Could not build company-invitation email command", e);
+      return false;
+    }
   }
 
   boolean sendPasswordChanged(Account account) {
