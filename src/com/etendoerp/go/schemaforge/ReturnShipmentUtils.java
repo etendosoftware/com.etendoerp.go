@@ -128,9 +128,12 @@ final class ReturnShipmentUtils {
 
   /**
    * Header-level safety net that guarantees every line of {@code doc} carries a storage bin
-   * belonging to {@code doc}'s OWN warehouse. Called from
-   * {@code ReturnMaterialReceiptHeaderHandler.fillMissingStorageBins} and its
-   * {@code ReturnToVendorShipmentHeaderHandler} twin, after the lines exist.
+   * belonging to {@code doc}'s OWN warehouse. Called via
+   * {@code NeoHandlerUtils.reanchorLinesToHeaderWarehouse} from the {@code documentAction}/POST
+   * pre-hook of all four completable {@code M_InOut}-based header handlers —
+   * {@code GoodsShipmentHeaderHandler}, {@code GoodsReceiptHeaderHandler},
+   * {@code ReturnMaterialReceiptHeaderHandler}, and {@code ReturnToVendorShipmentHeaderHandler}
+   * — after the lines exist.
    *
    * <p><b>ETP-4863 — this method WAS the live bug.</b> It used to give the SOURCE document's bin
    * ({@code line.getCanceledInoutLine().getStorageBin()}) precedence over the line's own value.

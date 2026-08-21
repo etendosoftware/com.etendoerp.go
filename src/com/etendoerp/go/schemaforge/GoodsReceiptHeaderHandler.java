@@ -59,6 +59,7 @@ public class GoodsReceiptHeaderHandler implements NeoHandler {
   private static final String FIELD_DOCUMENT_STATUS = "documentStatus";
   private static final String FIELD_MOVEMENT_DATE = "movementDate";
   private static final String FIELD_ACCOUNTING_DATE = "accountingDate";
+  private static final String ACTION_DOCUMENT_ACTION = "documentAction";
 
   @Inject
   private NeoCloneRecordHandler cloneRecordHandler;
@@ -88,6 +89,16 @@ public class GoodsReceiptHeaderHandler implements NeoHandler {
         && "POST".equals(context.getHttpMethod())
         && context.getRecordId() == null) {
       injectPartnerAddressIfMissing(context);
+    }
+    if (NeoEndpointType.ACTION.equals(context.getEndpointType())
+        && ACTION_DOCUMENT_ACTION.equals(context.getFieldName())
+        && "POST".equals(context.getHttpMethod())) {
+      // ETP-4863: the header warehouse stays editable until the document is Processed, so a
+      // line created while the header pointed at warehouse A can be left anchored to A even
+      // after the user switches the header to warehouse B. Re-anchor every line to the
+      // header's CURRENT warehouse right before the native completion flow runs.
+      NeoHandlerUtils.reanchorLinesToHeaderWarehouse(context.getRecordId(), log);
+      return null; // let NEO native process handle completion
     }
     return NeoHeaderActionRouter.dispatch(context,
         cloneRecordHandler, createPurchaseInvoiceHandler, createPurchaseReturnHandler);

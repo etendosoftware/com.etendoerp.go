@@ -686,7 +686,7 @@ public class NeoBuiltInEndpointHandlerTest {
 
     try (MockedStatic<NeoAttachmentsHelper> attachmentsMock = Mockito.mockStatic(
         NeoAttachmentsHelper.class)) {
-      attachmentsMock.when(() -> NeoAttachmentsHelper.handleUpload("c_order", "100", request))
+      attachmentsMock.when(() -> NeoAttachmentsHelper.handleUpload("c_order", "100", request, false))
           .thenReturn(payload);
 
       boolean handled = handler.handle(new NeoServlet.NeoPathInfo("attachments", null, null),

@@ -37,7 +37,6 @@ import org.openbravo.base.model.Entity;
 import org.openbravo.base.model.ModelProvider;
 import org.openbravo.base.model.Property;
 import org.openbravo.base.secureApp.VariablesSecureApp;
-import org.openbravo.base.session.OBPropertiesProvider;
 import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
@@ -46,6 +45,8 @@ import org.openbravo.erpCommon.utility.Utility;
 import org.openbravo.model.ad.datamodel.Column;
 import org.openbravo.model.ad.ui.Tab;
 import org.openbravo.service.db.DalConnectionProvider;
+
+import com.etendoerp.go.schemaforge.util.NeoDateFormat;
 
 /**
  * Builds the synthetic HTTP request parameter map required to execute an AD Callout
@@ -177,25 +178,14 @@ class CalloutRequestBuilder {
   /**
    * Resolve the Etendo UI date pattern from {@code dateFormat.java} (e.g. "dd-MM-yyyy").
    * Falls back to dd-MM-yyyy, which matches the Postgres {@code dateFormat()} default.
+   *
+   * <p>Delegates to {@link NeoDateFormat#getUiDatePattern()} (ETP-4793 / IMP-16): the same
+   * pattern is now both what legacy callouts expect on input and one of the shapes the NEO
+   * date canonicalization accepts, so it must have a single definition. Kept as a method here
+   * because the callout tests exercise it by name.
    */
-  private static volatile String cachedDatePattern = null;
-
   static String getCalloutDatePattern() {
-    if (cachedDatePattern != null) {
-      return cachedDatePattern;
-    }
-    try {
-      String p = OBPropertiesProvider.getInstance().getOpenbravoProperties()
-          .getProperty("dateFormat.java");
-      if (p != null && !p.trim().isEmpty()) {
-        cachedDatePattern = p.trim();
-        return cachedDatePattern;
-      }
-    } catch (Exception e) {
-      log.debug("Could not read dateFormat.java, defaulting to dd-MM-yyyy: {}", e.getMessage());
-    }
-    cachedDatePattern = "dd-MM-yyyy";
-    return cachedDatePattern;
+    return NeoDateFormat.getUiDatePattern();
   }
 
   /**
