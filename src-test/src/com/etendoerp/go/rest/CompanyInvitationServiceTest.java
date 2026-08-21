@@ -165,7 +165,7 @@ class CompanyInvitationServiceTest {
   @DisplayName("acceptExistingAccount rejects blank token")
   void testAcceptBlankToken() throws Exception {
     CompanyInvitationService service = new CompanyInvitationService();
-    JSONObject response = service.acceptExistingAccount("", "");
+    JSONObject response = service.acceptExistingAccount("", null);
     assertTrue(response.optBoolean("error"));
     assertEquals("MISSING_TOKEN", response.optString("code"));
   }
@@ -173,8 +173,12 @@ class CompanyInvitationServiceTest {
   @Test
   @DisplayName("existing-account acceptance requires an authenticated session")
   void testAcceptRequiresAuthenticatedAccount() throws Exception {
+    // ETP-4576 — the caller's account arrives already resolved by the servlet
+    // (`runWithAuthenticatedAccount`, which accepts a session cookie or a bearer
+    // header), so "not signed in" is now a null Account rather than a blank
+    // bearer string.
     CompanyInvitationService service = new CompanyInvitationService();
-    JSONObject response = service.acceptExistingAccount("invitation-token", "");
+    JSONObject response = service.acceptExistingAccount("invitation-token", null);
     assertTrue(response.optBoolean("error"));
     assertEquals("AUTHENTICATION_REQUIRED", response.optString("code"));
   }

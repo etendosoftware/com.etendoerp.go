@@ -324,24 +324,24 @@ public class CompanyInvitationService {
    * Accepts an invitation for an existing Etendo Go account holder.
    *
    * @param rawToken Bearer token from the invitation
-   * @param accountBearerToken authenticated Etendo Go account session
+   * @param authenticatedAccount the caller's already-resolved Etendo Go account
    * @return Response JSON
    * @throws JSONException when the response cannot be serialized
    */
-  public JSONObject acceptExistingAccount(String rawToken, String accountBearerToken)
+  public JSONObject acceptExistingAccount(String rawToken, Account authenticatedAccount)
       throws JSONException {
     if (StringUtils.isBlank(rawToken)) {
       return errorResponse(400, CODE_MISSING_TOKEN, MESSAGE_MISSING_TOKEN);
     }
-    if (StringUtils.isBlank(accountBearerToken)) {
+    if (authenticatedAccount == null) {
       return errorResponse(401, "AUTHENTICATION_REQUIRED",
           "Sign in with the invited Etendo Go account before accepting");
     }
 
-    return withAdminMode(() -> acceptExistingAccountInAdminMode(rawToken, accountBearerToken));
+    return withAdminMode(() -> acceptExistingAccountInAdminMode(rawToken, authenticatedAccount));
   }
 
-  private JSONObject acceptExistingAccountInAdminMode(String rawToken, String accountBearerToken)
+  private JSONObject acceptExistingAccountInAdminMode(String rawToken, Account authenticatedAccount)
       throws JSONException {
     Invitation invitation = findInvitation(rawToken);
     if (invitation == null) {
@@ -358,8 +358,11 @@ public class CompanyInvitationService {
     }
 
       Account account = EtendoGoJwtDalHelper.findActiveAccountByEmail(invitation.getEmail());
-      Account authenticatedAccount = EtendoGoJwtDalHelper
-          .findActiveAccountByBearerToken(accountBearerToken);
+      // ETP-4576 — the caller's account arrives already resolved. It used to be
+      // looked up here from a bearer token, which made this the only endpoint of
+      // the invitation family that could not authenticate a cookie session: its
+      // siblings (create/list) already go through `runWithAuthenticatedAccount`,
+      // which accepts either credential. The identity checks below are unchanged.
       if (authenticatedAccount == null || !StringUtils.equalsIgnoreCase(
           authenticatedAccount.getEmail(), invitation.getEmail())) {
         return errorResponse(403, "INVITATION_ACCOUNT_MISMATCH",

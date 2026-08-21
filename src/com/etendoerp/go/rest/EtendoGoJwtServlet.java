@@ -550,9 +550,15 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       return;
     }
     String token = body.optString(FIELD_TOKEN, "").trim();
-    String accountBearerToken = extractBearerToken(request);
-    try {
-      JSONObject result = companyInvitationService.acceptExistingAccount(token, accountBearerToken);
+    // ETP-4576 — resolved through the same helper its siblings use
+    // (`create`/`list` company invitations), which accepts a `__Host-` session
+    // cookie OR a bearer header. This endpoint read `extractBearerToken`
+    // directly, so it was the only one of the family that a cookie-session
+    // caller could not authenticate against: after a cookie login the page holds
+    // no bearer token at all, and accepting an invitation as an existing account
+    // failed with no way for the client to fix it.
+    runWithAuthenticatedAccount(request, response, "accept company invitation", account -> {
+      JSONObject result = companyInvitationService.acceptExistingAccount(token, account);
       if (result.optBoolean(FIELD_ERROR, false)) {
         int httpStatus = result.optInt(FIELD_HTTP_STATUS, HttpServletResponse.SC_BAD_REQUEST);
         writeError(response, httpStatus, result.optString(FIELD_CODE, CODE_INVITATION_ERROR),
@@ -561,11 +567,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
         return;
       }
       writeResponse(response, HttpServletResponse.SC_OK, result);
-    } catch (Exception e) {
-      log.error("Error accepting company invitation", e);
-      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, CODE_INTERNAL_ERROR,
-          INTERNAL_ERROR, INTERNAL_ERROR);
-    }
+    });
   }
 
   /**
