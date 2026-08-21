@@ -60,36 +60,40 @@ public class TenantPlanService {
    *
    * <p>Best-effort by design: the plan marker is commercial metadata, not part of the tenant's
    * functional provisioning, so a failure here is logged rather than allowed to roll back an
-   * otherwise complete environment.
+   * otherwise complete environment. It is <em>reported</em> to the caller all the same — an
+   * environment that was paid for and could not be marked is the exact state ETP-4966 was reported
+   * as, and a caller that cannot tell success from failure cannot say so.
    *
    * @param clientId the AD_Client just created
    * @param organizationId the client's {@code *} organization, used as the preference's visibility
    *     scope; may be null
-   * @return whether the marker was written
+   * @return {@code true} when the marker was written, {@code false} when it could not be
    */
   public boolean markProductive(String clientId, String organizationId) {
-    // LEGACY SHIM (ETP-4966) — every exit returns true on purpose, reproducing today's behaviour
-    // where the caller receives no signal at all and a failed marker is indistinguishable from a
-    // written one. Replaced by real reporting in the fix commit.
     if (StringUtils.isBlank(clientId)) {
-      return true;
+      log.warn("Could not mark plan: no tenant was given");
+      return false;
     }
     try {
       Client client = OBDal.getInstance().get(Client.class, clientId);
       if (client == null) {
         log.warn("Could not mark plan: client {} not found", clientId);
-        return true;
+        return false;
       }
       Organization organization = StringUtils.isBlank(organizationId)
           ? null
           : OBDal.getInstance().get(Organization.class, organizationId);
+      // isListProperty=false is what makes Openbravo store the key in AD_Preference.Attribute,
+      // which is the column resolvePlan queries. The two must not drift apart: a key written to
+      // AD_Preference.Property instead would never be found, and every paid tenant would read
+      // back as free with nothing reporting it.
       Preferences.setPreferenceValue(PREFERENCE_ATTRIBUTE, PLAN_PRODUCTIVE, false, client,
           organization, null, null, null, null);
       log.info("Tenant {} marked as plan '{}'", clientId, PLAN_PRODUCTIVE);
       return true;
     } catch (RuntimeException e) {
       log.error("Could not mark tenant {} as plan '{}'", clientId, PLAN_PRODUCTIVE, e);
-      return true;
+      return false;
     }
   }
 

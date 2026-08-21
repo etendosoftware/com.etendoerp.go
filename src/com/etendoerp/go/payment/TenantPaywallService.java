@@ -27,16 +27,25 @@ import org.apache.commons.lang3.StringUtils;
  *
  * <p>Rules, in order:
  * <ol>
- *   <li>Flag off → allowed. This is the pre-feature behaviour, byte for byte: no token is read and
- *       no payment is ever demanded.</li>
- *   <li>Account owns no tenant yet → allowed. A first tenant is always free.</li>
- *   <li>The request targets a tenant the account already owns → allowed. That is a resume of a
+ *   <li>Converting an existing environment to productive is a purchase, so it never takes a free
+ *       path — it falls straight through to the payment check below.</li>
+ *   <li>Account owns no environment yet → allowed. A first environment is always free.</li>
+ *   <li>The request targets an environment the account already owns → allowed. That is a resume of a
  *       partially provisioned environment, not a new one, so it must not be charged again.</li>
- *   <li>Otherwise the account is asking for an additional tenant → only a payment Stripe's webhook
- *       actually confirmed (see {@link CheckoutPaymentRegistry}) is accepted. There is no other way
- *       to pass this check: a well-shaped but unconfirmed {@code paymentToken} is declined, not
- *       approved.</li>
+ *   <li>Otherwise the account is asking for an additional environment → only a payment Stripe's
+ *       webhook actually confirmed (see {@link CheckoutPaymentRegistry}) is accepted. There is no
+ *       other way to pass this check: a well-shaped but unconfirmed {@code paymentToken} is
+ *       declined, not approved.</li>
  * </ol>
+ *
+ * <p><strong>There is no feature flag.</strong> The paid-environment capability is permanent: it
+ * cannot be switched off, and no configuration can change the outcome of an evaluation. ETP-4966 is
+ * why. While it was gated, the web client and the backend resolved the same flag key through
+ * different control planes — ConfigCat in the browser, local properties on the server — and the
+ * server's copy was unset in every deployed environment. The browser therefore offered a checkout
+ * the server did not believe in: accounts were charged, and the paywall short-circuited to
+ * {@code ALLOWED} without ever reading their payment. An unconditional capability cannot disagree
+ * with itself.
  */
 public class TenantPaywallService {
 
@@ -91,74 +100,59 @@ public class TenantPaywallService {
   }
 
   /**
-   * LEGACY SHIM — reproduces the behaviour deployed before ETP-4966 so the specs in
-   * {@code TenantPaywallServiceTest} run red against the real defect rather than against a compile
-   * error. Replaced by the real evaluation in the fix commit; do not build on it.
+   * Evaluates one onboarding request: whether it may provision, and whether what it provisions is
+   * productive.
    *
-   * <p>The hardcoded {@code false} is not an invention: {@code ETGO_FLAG_TENANT_UPGRADE} /
-   * {@code etendo.go.flags.tenant-upgrade} was unset in every deployed task definition
-   * (experimental, staging and production), so this is what the flag actually resolved to in
-   * production. The consequence is visible in the specs: nothing is ever refused and nothing is
-   * ever productive.
+   * <p>The plan is derived from the payment and from nothing else. A webhook-confirmed payment means
+   * the account was charged, so the environment it paid for must come back productive — including in
+   * the cases where the paywall would have let the request through for free anyway (a first
+   * environment, or a name that resolves to one the account already owns). Deriving the plan from
+   * the decision instead is what made ETP-4966 invisible: the request was allowed, no payment was
+   * ever read, and the resulting environment looked exactly like an unpaid one.
    *
    * @param accountOwnsEnvironment whether the account already owns at least one environment
    * @param resumingOwnedEnvironment whether the requested name resolves to an environment this
-   *     account already owns
-   * @param convertingToProductive whether the request converts an existing environment rather than
-   *     creating one
-   * @param paymentToken the server-generated Stripe checkout request id to correlate
+   *     account already owns, which makes the request a resume rather than a new environment
+   * @param convertingToProductive whether the request converts an existing environment
+   *     ({@code upgradeAction=convert-demo}) rather than creating one
+   * @param paymentToken the server-generated Stripe checkout request id to correlate against
+   *     {@link CheckoutPaymentRegistry}
    * @param accountEmail authenticated account email used for payment correlation
    * @param clientName requested environment name used for payment correlation
    * @return the evaluation outcome
    */
   public Outcome evaluate(boolean accountOwnsEnvironment, boolean resumingOwnedEnvironment,
       boolean convertingToProductive, String paymentToken, String accountEmail, String clientName) {
-    boolean upgradeFlagEnabled = false;
-    if (!upgradeFlagEnabled) {
-      return new Outcome(Decision.ALLOWED, false);
-    }
-    boolean paywallResuming = resumingOwnedEnvironment && !convertingToProductive;
-    Decision decision = decide(true, accountOwnsEnvironment, paywallResuming, paymentToken,
-        accountEmail, clientName);
-    boolean paid = !decision.isBlocked() && accountOwnsEnvironment
-        && (convertingToProductive || !resumingOwnedEnvironment);
-    return new Outcome(decision, paid);
+    boolean confirmedPayment = CheckoutPaymentRegistry.isPaidFor(paymentToken, accountEmail,
+        clientName);
+    Decision decision = decide(accountOwnsEnvironment, resumingOwnedEnvironment,
+        convertingToProductive, paymentToken, confirmedPayment);
+    // A refused request provisions nothing, so there is nothing to promote. Guarding on the
+    // decision here is what keeps a confirmed-but-mismatched payment from granting the paid plan.
+    return new Outcome(decision, !decision.isBlocked() && confirmedPayment);
   }
 
   /**
-   * Decides whether an onboarding request may proceed.
+   * Applies the rules documented on this class, in order.
    *
-   * @param upgradeFlagEnabled the {@code tenant-upgrade} flag as resolved by the backend
-   * @param accountOwnsTenant whether the authenticated account already owns at least one tenant
-   * @param resumingOwnedTenant whether the requested company name resolves to a tenant this account
-   *     already owns, which makes the request a resume rather than a new tenant
-   * @param paymentToken the {@code paymentToken} field from the onboarding payload, if any
+   * @param accountOwnsEnvironment whether the account already owns at least one environment
+   * @param resumingOwnedEnvironment whether this request resumes an owned environment
+   * @param convertingToProductive whether this request converts an existing environment
+   * @param paymentToken the payment token from the onboarding payload, if any
+   * @param confirmedPayment whether the token correlates to a webhook-confirmed payment
    * @return the paywall decision
    */
-  public Decision decide(boolean upgradeFlagEnabled, boolean accountOwnsTenant,
-      boolean resumingOwnedTenant, String paymentToken) {
-    return decide(upgradeFlagEnabled, accountOwnsTenant, resumingOwnedTenant, paymentToken, null,
-        null);
-  }
-
-  /**
-   * Validates a Stripe webhook-correlated payment for the authenticated account and tenant.
-   *
-   * @param upgradeFlagEnabled whether the tenant-upgrade flag is enabled
-   * @param accountOwnsTenant whether the account already owns a tenant
-   * @param resumingOwnedTenant whether this request resumes an owned tenant
-   * @param paymentToken the server-generated Stripe checkout request id to correlate against
-   *     {@link CheckoutPaymentRegistry}
-   * @param accountEmail authenticated account email used for payment correlation
-   * @param clientName requested client name used for payment correlation
-   * @return the paywall decision
-   */
-  public Decision decide(boolean upgradeFlagEnabled, boolean accountOwnsTenant,
-      boolean resumingOwnedTenant, String paymentToken, String accountEmail, String clientName) {
-    if (!upgradeFlagEnabled || !accountOwnsTenant || resumingOwnedTenant) {
-      return Decision.ALLOWED;
+  private static Decision decide(boolean accountOwnsEnvironment, boolean resumingOwnedEnvironment,
+      boolean convertingToProductive, String paymentToken, boolean confirmedPayment) {
+    if (!convertingToProductive) {
+      // Conversion is a paid state transition, so it deliberately skips both free paths: without
+      // this guard it would look like an ordinary resume of an environment the account owns and
+      // pass for free.
+      if (!accountOwnsEnvironment || resumingOwnedEnvironment) {
+        return Decision.ALLOWED;
+      }
     }
-    if (CheckoutPaymentRegistry.isPaidFor(paymentToken, accountEmail, clientName)) {
+    if (confirmedPayment) {
       return Decision.ALLOWED;
     }
     return StringUtils.isBlank(paymentToken) ? Decision.PAYMENT_REQUIRED : Decision.PAYMENT_DECLINED;
