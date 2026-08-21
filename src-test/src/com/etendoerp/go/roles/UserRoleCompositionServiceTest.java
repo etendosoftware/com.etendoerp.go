@@ -1,0 +1,372 @@
+/*
+ * *************************************************************************
+ * The contents of this file are subject to the Etendo License
+ * (the "License"), you may not use this file except in compliance with
+ * the License.
+ * You may obtain a copy of the License at
+ * https://github.com/etendosoftware/etendo_core/blob/main/legal/Etendo_license.txt
+ * Software distributed under the License is distributed on an
+ * "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, either express or
+ * implied. See the License for the specific language governing rights
+ * and limitations under the License.
+ * All portions are Copyright (C) 2021-2026 FUTIT SERVICES, S.L
+ * All Rights Reserved.
+ * Contributor(s): Futit Services S.L.
+ * *************************************************************************
+ */
+package com.etendoerp.go.roles;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.when;
+
+import java.util.Collections;
+import java.util.List;
+
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.mockito.MockedStatic;
+import org.mockito.junit.jupiter.MockitoSettings;
+import org.mockito.quality.Strictness;
+import org.openbravo.base.exception.OBException;
+import org.openbravo.dal.core.OBContext;
+import org.openbravo.dal.service.OBCriteria;
+import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.ad.access.Role;
+import org.openbravo.model.ad.access.RoleInheritance;
+import org.openbravo.model.ad.access.User;
+import org.openbravo.model.ad.access.UserRoles;
+import org.openbravo.model.ad.system.Client;
+
+/**
+ * Unit tests for {@link UserRoleCompositionService}'s input-validation guard clauses — the slice
+ * that fails before any persistence side effect, so it is safely mockable without a real DB.
+ * The full find-or-create/reconciliation mechanism (personal role creation, {@code
+ * AD_Role_Inheritance} add/remove, propagation) is covered end-to-end against a real DB by
+ * {@link UserRoleCompositionServiceIntegrationTest} — this class is deliberately NOT trying to
+ * re-mock that whole call chain, which core's own {@code RoleInheritanceEventHandler} needs to
+ * be real DAL events for anyway.
+ */
+@MockitoSettings(strictness = Strictness.LENIENT)
+class UserRoleCompositionServiceTest {
+
+  private MockedStatic<OBDal> obDalMock;
+  private OBDal mockDal;
+  private UserRoleCompositionService service;
+
+  @BeforeEach
+  void setUp() {
+    obDalMock = mockStatic(OBDal.class);
+    mockDal = mock(OBDal.class);
+    obDalMock.when(OBDal::getInstance).thenReturn(mockDal);
+    service = new UserRoleCompositionService();
+  }
+
+  @AfterEach
+  void tearDown() {
+    obDalMock.close();
+  }
+
+  @Test
+  void rejectsBlankUserId() {
+    OBException e = assertThrows(OBException.class,
+        () -> service.assignTemplateRoles(" ", Collections.emptyList()));
+    assertTrue(e.getMessage().contains("Missing user id"));
+  }
+
+  @Test
+  void rejectsNullTemplateRoleIdList() {
+    User user = mock(User.class);
+    when(mockDal.get(User.class, "user-1")).thenReturn(user);
+
+    OBException e = assertThrows(OBException.class,
+        () -> service.assignTemplateRoles("user-1", null));
+    assertTrue(e.getMessage().contains("Missing template role id list"));
+  }
+
+  @Test
+  void rejectsUnknownUser() {
+    when(mockDal.get(User.class, "missing-user")).thenReturn(null);
+
+    OBException e = assertThrows(OBException.class,
+        () -> service.assignTemplateRoles("missing-user", Collections.emptyList()));
+    assertTrue(e.getMessage().contains("User not found"));
+  }
+
+  @Test
+  void rejectsUnknownTemplateRoleId() {
+    User user = mock(User.class);
+    when(mockDal.get(User.class, "user-1")).thenReturn(user);
+    when(mockDal.get(Role.class, "missing-role")).thenReturn(null);
+
+    OBException e = assertThrows(OBException.class,
+        () -> service.assignTemplateRoles("user-1", List.of("missing-role")));
+    assertTrue(e.getMessage().contains("Template role not found or inactive"));
+  }
+
+  @Test
+  void rejectsInactiveTemplateRole() {
+    User user = mock(User.class);
+    when(mockDal.get(User.class, "user-1")).thenReturn(user);
+    Role inactive = mock(Role.class);
+    when(inactive.isActive()).thenReturn(false);
+    when(mockDal.get(Role.class, "inactive-role")).thenReturn(inactive);
+
+    OBException e = assertThrows(OBException.class,
+        () -> service.assignTemplateRoles("user-1", List.of("inactive-role")));
+    assertTrue(e.getMessage().contains("Template role not found or inactive"));
+  }
+
+  @Test
+  void rejectsRoleThatIsNotATemplate() {
+    User user = mock(User.class);
+    when(mockDal.get(User.class, "user-1")).thenReturn(user);
+    Role notTemplate = mock(Role.class);
+    when(notTemplate.isActive()).thenReturn(true);
+    when(notTemplate.isTemplate()).thenReturn(false);
+    when(mockDal.get(Role.class, "plain-role")).thenReturn(notTemplate);
+
+    OBException e = assertThrows(OBException.class,
+        () -> service.assignTemplateRoles("user-1", List.of("plain-role")));
+    assertTrue(e.getMessage().contains("is not a template"));
+  }
+
+  @Test
+  void rejectsTheClientAdminRoleEvenIfSomehowMarkedAsTemplate() {
+    User user = mock(User.class);
+    when(mockDal.get(User.class, "user-1")).thenReturn(user);
+    Role adminLike = mock(Role.class);
+    when(adminLike.isActive()).thenReturn(true);
+    when(adminLike.isTemplate()).thenReturn(true);
+    when(adminLike.isClientAdmin()).thenReturn(true);
+    when(mockDal.get(Role.class, "admin-role")).thenReturn(adminLike);
+
+    OBException e = assertThrows(OBException.class,
+        () -> service.assignTemplateRoles("user-1", List.of("admin-role")));
+    assertTrue(e.getMessage().contains("Admin role can never be composed"));
+  }
+
+  @Test
+  void deduplicatesRequestedTemplateIdsBeforeValidating() {
+    User user = mock(User.class);
+    when(mockDal.get(User.class, "user-1")).thenReturn(user);
+    // The single distinct id resolves to an Admin-like role, which fails validation and throws
+    // — cleanly stopping BEFORE OBContext.setAdminMode() is ever reached (this plain Mockito
+    // unit test never mocks OBContext, so it must never call the real static one). Verifying
+    // the lookup ran exactly once, despite the id appearing three times (with whitespace noise)
+    // in the input, proves dedup happens before the per-id validation loop.
+    Role adminLike = mock(Role.class);
+    when(adminLike.isActive()).thenReturn(true);
+    when(adminLike.isTemplate()).thenReturn(true);
+    when(adminLike.isClientAdmin()).thenReturn(true);
+    when(mockDal.get(Role.class, "tpl-1")).thenReturn(adminLike);
+
+    assertThrows(OBException.class,
+        () -> service.assignTemplateRoles("user-1", List.of("tpl-1", " tpl-1", "tpl-1 ")));
+
+    org.mockito.Mockito.verify(mockDal, org.mockito.Mockito.times(1)).get(Role.class, "tpl-1");
+  }
+
+  /**
+   * REVIEW cycle 1 blocker (B1, ETP-4852): {@code SFAssignUserRoles}'s only access gate,
+   * {@code NeoAccessHelper#isAdminOrClientAdmin}, treats a per-tenant client-admin the same as
+   * the literal System Administrator — so without {@link
+   * UserRoleCompositionService#enforceCallerClientBoundary}, a client-admin for one client could
+   * target ANY user in a different client. This proves the 3-arg {@link
+   * UserRoleCompositionService#assignTemplateRoles(String, List, Role)} overload rejects that,
+   * before any template validation, admin-mode entry, or write.
+   */
+  @Test
+  void rejectsCrossClientTarget() {
+    User user = mock(User.class);
+    Client targetClient = mock(Client.class);
+    when(targetClient.getId()).thenReturn("client-B");
+    when(user.getClient()).thenReturn(targetClient);
+    when(user.getId()).thenReturn("user-1");
+    when(mockDal.get(User.class, "user-1")).thenReturn(user);
+
+    Role callerClientAdmin = mock(Role.class);
+    when(callerClientAdmin.getId()).thenReturn("caller-role-id");
+    Client callerClient = mock(Client.class);
+    when(callerClient.getId()).thenReturn("client-A");
+    when(callerClientAdmin.getClient()).thenReturn(callerClient);
+
+    OBException e = assertThrows(OBException.class, () -> service
+        .assignTemplateRoles("user-1", Collections.emptyList(), callerClientAdmin));
+    assertTrue(e.getMessage().contains("different client"));
+  }
+
+  /**
+   * The bypass is the LITERAL System Administrator role id ({@code "0"}), never a mere
+   * {@code isClientAdmin()} role (see {@link #rejectsCrossClientTarget}). Deliberately never
+   * stubs {@code systemAdmin.getClient()} — reaching the TEMPLATE validation error (not the
+   * boundary one, and not an NPE) proves {@code enforceCallerClientBoundary} short-circuits on
+   * the id check before ever comparing clients.
+   */
+  @Test
+  void systemAdministratorCallerBypassesClientBoundaryCheck() {
+    User user = mock(User.class);
+    Client targetClient = mock(Client.class);
+    when(targetClient.getId()).thenReturn("client-B");
+    when(user.getClient()).thenReturn(targetClient);
+    when(mockDal.get(User.class, "user-1")).thenReturn(user);
+    when(mockDal.get(Role.class, "missing-role")).thenReturn(null);
+
+    Role systemAdmin = mock(Role.class);
+    when(systemAdmin.getId()).thenReturn("0");
+
+    OBException e = assertThrows(OBException.class, () -> service
+        .assignTemplateRoles("user-1", List.of("missing-role"), systemAdmin));
+    assertTrue(e.getMessage().contains("Template role not found or inactive"));
+  }
+
+  // ── ETP-4906: getAppliedTemplateRoleIds (read path) ─────────────────────
+
+  @Test
+  void rejectsBlankUserIdForReadPath() {
+    OBException e = assertThrows(OBException.class,
+        () -> service.getAppliedTemplateRoleIds(" "));
+    assertTrue(e.getMessage().contains("Missing user id"));
+  }
+
+  @Test
+  void getAppliedTemplateRoleIdsRejectsUnknownUser() {
+    when(mockDal.get(User.class, "missing-user")).thenReturn(null);
+
+    OBException e = assertThrows(OBException.class,
+        () -> service.getAppliedTemplateRoleIds("missing-user"));
+    assertTrue(e.getMessage().contains("User not found"));
+  }
+
+  /**
+   * A user who never went through {@link UserRoleCompositionService#assignTemplateRoles(String,
+   * List)} has no {@code Default_Ad_Role_ID} yet — this must return an empty list, and must
+   * NEVER mint a personal role as a side effect of a read (that would be a surprising write
+   * hiding inside a GET-shaped lookup).
+   */
+  @Test
+  void noDefaultRoleAtAllReturnsEmptyList() {
+    User user = mock(User.class);
+    when(user.getDefaultRole()).thenReturn(null);
+    when(mockDal.get(User.class, "user-1")).thenReturn(user);
+
+    try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class)) {
+      List<String> ids = service.getAppliedTemplateRoleIds("user-1");
+      assertTrue(ids.isEmpty());
+      // The two OBContext admin-mode calls happened (read still bypasses row-level security the
+      // same way the write path does), but nothing else — no OBException, no NPE.
+      obContextMock.verify(() -> OBContext.setAdminMode(true));
+    }
+  }
+
+  /**
+   * The core happy path: a personal role (reusable — active, non-template, non-admin, same
+   * client, exclusively assigned to this user, not itself an inheritance target) with 2 active
+   * {@code AD_Role_Inheritance} rows returns both {@code InheritFrom} ids, in {@code Seqno}
+   * order.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  void personalRoleWithTwoAppliedTemplatesReturnsBothIds() {
+    Client userClient = mock(Client.class);
+    when(userClient.getId()).thenReturn("client-A");
+
+    User user = mock(User.class);
+    when(user.getId()).thenReturn("user-1");
+    when(user.getClient()).thenReturn(userClient);
+    when(mockDal.get(User.class, "user-1")).thenReturn(user);
+
+    Role personalRole = mock(Role.class);
+    when(personalRole.getId()).thenReturn("personal-role-1");
+    when(personalRole.isActive()).thenReturn(true);
+    when(personalRole.isTemplate()).thenReturn(false);
+    when(personalRole.isClientAdmin()).thenReturn(false);
+    when(personalRole.getClient()).thenReturn(userClient);
+    when(user.getDefaultRole()).thenReturn(personalRole);
+
+    // isExclusivelyAssignedTo: zero AD_User_Roles rows -> "never assigned yet, still safe".
+    OBCriteria<UserRoles> userRolesCriteria = mock(OBCriteria.class);
+    when(mockDal.createCriteria(UserRoles.class)).thenReturn(userRolesCriteria);
+    when(userRolesCriteria.list()).thenReturn(Collections.emptyList());
+
+    Role template1 = mock(Role.class);
+    when(template1.getId()).thenReturn("tpl-finance");
+    when(template1.isActive()).thenReturn(true);
+    when(template1.isTemplate()).thenReturn(true);
+    Role template2 = mock(Role.class);
+    when(template2.getId()).thenReturn("tpl-sales");
+    when(template2.isActive()).thenReturn(true);
+    when(template2.isTemplate()).thenReturn(true);
+
+    RoleInheritance inheritance1 = mock(RoleInheritance.class);
+    when(inheritance1.getInheritFrom()).thenReturn(template1);
+    RoleInheritance inheritance2 = mock(RoleInheritance.class);
+    when(inheritance2.getInheritFrom()).thenReturn(template2);
+
+    // The SAME RoleInheritance criteria mock backs two different calls within one invocation:
+    // first isInheritFromTargetOfAnyInheritance's check (empty -> not an inheritance target),
+    // then findExistingInheritances' own fetch (the 2 applied templates) — consecutive stubbing.
+    OBCriteria<RoleInheritance> roleInheritanceCriteria = mock(OBCriteria.class);
+    when(mockDal.createCriteria(RoleInheritance.class)).thenReturn(roleInheritanceCriteria);
+    when(roleInheritanceCriteria.list()).thenReturn(
+        Collections.emptyList(),
+        List.of(inheritance1, inheritance2));
+
+    try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class)) {
+      List<String> ids = service.getAppliedTemplateRoleIds("user-1");
+      assertEquals(List.of("tpl-finance", "tpl-sales"), ids);
+    }
+  }
+
+  /**
+   * REVIEW-parity check for the read path (mirrors {@link #rejectsCrossClientTarget} for the
+   * write path): {@link UserRoleCompositionService#getAppliedTemplateRoleIds(String, Role)} MUST
+   * enforce the exact same {@code enforceCallerClientBoundary} check the write path uses — a
+   * client-admin must never be able to read another tenant's user's applied template roles.
+   */
+  @Test
+  void getAppliedTemplateRoleIdsRejectsCrossClientTarget() {
+    User user = mock(User.class);
+    Client targetClient = mock(Client.class);
+    when(targetClient.getId()).thenReturn("client-B");
+    when(user.getClient()).thenReturn(targetClient);
+    when(user.getId()).thenReturn("user-1");
+    when(mockDal.get(User.class, "user-1")).thenReturn(user);
+
+    Role callerClientAdmin = mock(Role.class);
+    when(callerClientAdmin.getId()).thenReturn("caller-role-id");
+    Client callerClient = mock(Client.class);
+    when(callerClient.getId()).thenReturn("client-A");
+    when(callerClientAdmin.getClient()).thenReturn(callerClient);
+
+    OBException e = assertThrows(OBException.class,
+        () -> service.getAppliedTemplateRoleIds("user-1", callerClientAdmin));
+    assertTrue(e.getMessage().contains("different client"));
+  }
+
+  /**
+   * Mirrors {@link #systemAdministratorCallerBypassesClientBoundaryCheck}: the literal System
+   * Administrator role id ({@code "0"}) bypasses the boundary check on the read path too.
+   */
+  @Test
+  void systemAdministratorCallerBypassesClientBoundaryCheckOnReadPath() {
+    User user = mock(User.class);
+    Client targetClient = mock(Client.class);
+    when(targetClient.getId()).thenReturn("client-B");
+    when(user.getClient()).thenReturn(targetClient);
+    when(user.getDefaultRole()).thenReturn(null);
+    when(mockDal.get(User.class, "user-1")).thenReturn(user);
+
+    Role systemAdmin = mock(Role.class);
+    when(systemAdmin.getId()).thenReturn("0");
+
+    try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class)) {
+      List<String> ids = service.getAppliedTemplateRoleIds("user-1", systemAdmin);
+      assertTrue(ids.isEmpty());
+    }
+  }
+}

@@ -241,6 +241,10 @@ final class EtendoGoJwtDalHelper {
     return account != null && StringUtils.isNotBlank(account.getPasswordHash());
   }
 
+  static boolean hasPasswordResetToken(Account account) {
+    return account != null && StringUtils.isNotBlank((String) account.get(PROPERTY_RESET_TOKEN_HASH));
+  }
+
   static boolean linkSsoIdentityIfCompatible(Account account, String provider, String subject,
       String externalEmail) {
     String currentProvider = StringUtils.trimToNull((String) account.get(PROPERTY_AUTH_PROVIDER));
@@ -309,6 +313,7 @@ final class EtendoGoJwtDalHelper {
   static void consumePasswordReset(Account account, String passwordHash, Date changedAt) {
     account.setPasswordHash(passwordHash);
     account.setSessionToken(null);
+    account.set(PROPERTY_STATUS, STATUS_ACTIVE);
     account.set(PROPERTY_RESET_TOKEN_HASH, null);
     account.set(PROPERTY_RESET_TOKEN_EXPIRES, null);
     account.set(PROPERTY_RESET_TOKEN_CONSUMED, changedAt);
