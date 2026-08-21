@@ -140,6 +140,31 @@ public class McpHookExecutorTest {
     assertTrue("Text should mention status 503", text.contains("503"));
   }
 
+  /**
+   * The fourth error funnel, asserted at the funnel rather than only at the helper
+   * (ETP-4793 / IMP-5 clause (iv)).
+   *
+   * <p>The tests above pass on the pre-fix code too: they check {@code isError} and that the text
+   * mentions the status, which the verbatim body already did. That is why the defect survived —
+   * nothing here ever looked at the <em>shape</em> an agent has to parse. This one does, and it is
+   * the reason the assertion is on {@code error} being a code string: that key held a nested object
+   * before, so an agent branching on it got neither a match nor an exception, just silence.</p>
+   */
+  @Test
+  public void testNeoResponseToMcpResultErrorIsNormalizedToFlatEnvelope() throws Exception {
+    NeoResponse response = NeoResponse.error(422,
+        "No accounting schema with currency is configured for organization 6184");
+
+    JSONObject result = McpHookExecutor.neoResponseToMcpResult(response);
+
+    assertTrue(result.getBoolean(FIELD_IS_ERROR));
+    JSONObject envelope = new JSONObject(
+        result.getJSONArray(FIELD_CONTENT).getJSONObject(0).getString(FIELD_TEXT));
+    assertEquals("validation_error", envelope.getString("error"));
+    assertEquals(422, envelope.getInt("status"));
+    assertTrue(envelope.getString("detail").startsWith("No accounting schema"));
+  }
+
   // ── runPreHook ────────────────────────────────────────────────────────
 
   @Test
