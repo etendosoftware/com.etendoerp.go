@@ -23,6 +23,7 @@ final class PaymentActionHandlerSupport {
   private static final String PIS_SUPPLIER_ACCOUNTS_ACTION = "pisSupplierAccounts";
   private static final String PIS_TEMPLATES_ACTION = "pisTemplates";
   private static final String PIS_CANCEL_ACTION = "cancelPisPayment";
+  private static final String PIS_RETRY_ACTION = "retryPisPayment";
   private static final String CONFIRM_ACTION = "confirmPayment";
   private static final String DELETE_ACTION = "deletePayment";
 
@@ -97,6 +98,9 @@ final class PaymentActionHandlerSupport {
     }
     if (PIS_CANCEL_ACTION.equals(fieldName)) {
       return PisPaymentService.handleCancelPisPayment(context);
+    }
+    if (PIS_RETRY_ACTION.equals(fieldName)) {
+      return PisDeferredPaymentService.handleRetryPisPayment(context);
     }
     return null;
   }

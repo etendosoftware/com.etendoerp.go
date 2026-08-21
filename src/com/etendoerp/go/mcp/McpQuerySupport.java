@@ -17,6 +17,8 @@
 
 package com.etendoerp.go.mcp;
 
+import java.util.Optional;
+
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
@@ -28,6 +30,7 @@ import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.datamodel.Column;
 import org.openbravo.model.ad.ui.Tab;
 
+import com.etendoerp.go.schemaforge.NeoFieldFilter;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFField;
 
@@ -53,9 +56,9 @@ final class McpQuerySupport {
    *   <li><b>Range</b> {@code {column: {gt|gte|lt|lte: value}}} or {@code {column: {between: [a,b]}}}
    *       — comparison operators via {@link McpBusinessFilters}.</li>
    *   <li><b>Named status</b> {@code {status: "<name>"}} — resolved against the entity's hand-authored
-   *       {@code NAMED_FILTERS} (see {@link McpNamedFilters}); an unknown name raises a clear
-   *       "available filters" error, while an entity that declares no named filters falls back to
-   *       treating {@code status} as a plain column.</li>
+   *       {@code NAMED_FILTERS} (see {@link McpNamedFilters}); an unknown name raises a 422 envelope
+   *       listing the valid ones in {@code available}, while an entity that declares no named filters
+   *       falls back to treating {@code status} as a plain column.</li>
    * </ul>
    */
   static String buildWhereFromFilters(JSONObject filters, Tab adTab, SFEntity sfEntity,
@@ -157,8 +160,15 @@ final class McpQuerySupport {
    * Append the HQL condition for a named business status, resolved against the entity's
    * hand-authored {@code NAMED_FILTERS}. Returns {@code false} when the entity declares no named
    * filters, so the caller can fall back to treating {@code status} as a plain column (backward
-   * compatible). Throws {@link IllegalArgumentException} — surfaced to the agent as a clean handled
-   * error, never an HQL-500 — when the entity has named filters but none matches the requested name.
+   * compatible). Throws {@link McpRoutingException} — surfaced to the agent as a 422 envelope naming
+   * the valid states in {@code available}, never an HQL-500 — when the entity has named filters but
+   * none matches the requested name.
+   *
+   * <p>ETP-4793 / IMP-17: this used to be an {@code IllegalArgumentException}, which the router's
+   * catch-all could only render as prose (evidence C14: the list of valid states was there, but the
+   * response carried no status and no machine-detectable code). Since IMP-17 that catch-all classifies
+   * an unrecognised exception as {@code server_error}, so leaving it untyped would actively mislead —
+   * this is the caller's mistake and one corrected word fixes it.</p>
    */
   private static boolean appendStatusCondition(StringBuilder where, SFEntity sfEntity,
       String status, org.apache.logging.log4j.Logger log) {
@@ -169,8 +179,8 @@ final class McpQuerySupport {
     }
     String fragment = namedFilters.get(status);
     if (fragment == null) {
-      throw new IllegalArgumentException("Unknown status '" + status + "' for entity '"
-          + sfEntity.getName() + "'. Available: " + String.join(", ", namedFilters.keySet()));
+      throw McpRoutingException.unknownNamedFilter(status, sfEntity.getName(),
+          new java.util.ArrayList<>(namedFilters.keySet()));
     }
     log.debug("Applying named filter '{}' for entity '{}'", status, sfEntity.getName());
     appendAnd(where);
@@ -258,22 +268,73 @@ final class McpQuerySupport {
    * Precedence: an explicit {@code fields:[...]} whitelist wins; otherwise {@code view:"summary"}
    * uses the entity's business-critical fields; anything else leaves the response full. A no-op
    * when neither is present, so the default behavior is unchanged.
+   *
+   * <p>IMP-18: an explicit whitelist is also validated, and any name the entity cannot emit comes
+   * back as {@code response.unknownFields} instead of vanishing. {@code fieldFilter} is the same
+   * filter the caller already applied to the rows, and is what makes the answer honest — the
+   * emittable set has to be the spec's exposure post-rename, not the DAL model.
    */
-  static void applyProjection(JSONObject responseJson, JSONObject args, SFEntity sfEntity, Tab adTab)
-      throws JSONException {
+  static void applyProjection(JSONObject responseJson, JSONObject args, SFEntity sfEntity, Tab adTab,
+      NeoFieldFilter fieldFilter) throws JSONException {
     if (args == null) {
       return;
     }
     java.util.Set<String> requested;
     JSONArray fields = args.optJSONArray(McpFieldProjection.PARAM_FIELDS);
-    if (fields != null) {
-      requested = McpFieldProjection.parseFields(fields);
+    boolean explicitWhitelist = fields != null;
+    if (explicitWhitelist) {
+      requested = McpFieldProjection.baseNames(McpFieldProjection.parseFields(fields));
     } else if (McpFieldProjection.isSummaryView(
         args.optString(McpFieldProjection.PARAM_VIEW, null))) {
       requested = summaryFields(sfEntity, adTab);
     } else {
       return;
     }
+    if (explicitWhitelist) {
+      // IMP-18: only an explicit caller whitelist can contain a typo. A view:"summary" set is
+      // derived server-side from properties that already resolved, so an unknown name there would
+      // be a server bug, not caller input, and reporting it would blame the wrong party.
+      McpFieldProjection.reportUnknownFields(responseJson, requested,
+          emittableBaseNames(fieldFilter, adTab));
+    }
     McpFieldProjection.apply(responseJson, requested);
+  }
+
+  /**
+   * The base field names a response for this entity can contain, for validating a caller's
+   * {@code fields:[…]} whitelist (IMP-18).
+   *
+   * <p>The authoritative source is {@link NeoFieldFilter#emittableResponseKeys()} — the spec's own
+   * exposure, already renamed to API keys — because a DAL property the spec does not include is just
+   * as unavailable to the caller as one that does not exist. When no {@code ETGO_SF_FIELD} config
+   * exists the filter is inactive and the response is unfiltered, so the DAL entity's property list
+   * is the correct fallback.
+   *
+   * @return {@link Optional#of} the emittable base names, or {@link Optional#empty()} when neither
+   *     source is available, which means "cannot validate" and must leave the caller's names
+   *     unjudged rather than reported as unknown
+   */
+  private static Optional<java.util.Set<String>> emittableBaseNames(NeoFieldFilter fieldFilter, Tab adTab) {
+    Optional<java.util.Set<String>> filterKeys =
+        fieldFilter == null ? Optional.empty() : fieldFilter.emittableResponseKeys();
+    java.util.Set<String> keys;
+    if (filterKeys.isPresent()) {
+      keys = filterKeys.get();
+    } else {
+      Entity dalEntity = org.openbravo.base.model.ModelProvider.getInstance()
+          .getEntityByTableName(adTab.getTable().getDBTableName());
+      if (dalEntity == null) {
+        return Optional.empty();
+      }
+      keys = new java.util.HashSet<>();
+      for (Property prop : dalEntity.getProperties()) {
+        keys.add(prop.getName());
+      }
+    }
+    java.util.Set<String> base = new java.util.HashSet<>();
+    for (String key : keys) {
+      base.add(McpDefaultsView.baseProperty(key));
+    }
+    return Optional.of(base);
   }
 }

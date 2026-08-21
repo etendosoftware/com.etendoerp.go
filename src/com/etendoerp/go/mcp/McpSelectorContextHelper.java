@@ -19,7 +19,9 @@ package com.etendoerp.go.mcp;
 import java.time.LocalDate;
 import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeParseException;
+import java.util.Collection;
 import java.util.HashMap;
+import java.util.Iterator;
 import java.util.Map;
 
 import org.apache.commons.lang3.StringUtils;
@@ -67,6 +69,51 @@ final class McpSelectorContextHelper {
     addBusinessPartnerRoleContext(adTab, contextParams);
 
     return contextParams;
+  }
+
+  /**
+   * Derives selector context from an in-flight write body, on top of a base context (IMP-22).
+   * <p>
+   * The read path gets its context handed to it: {@code neo_selectors} takes an explicit
+   * {@code recordContext}, so resolving {@code partnerAddress} against a parent
+   * {@code businessPartner} works. The write path has no such argument — the sibling values are
+   * simply the other keys of the body being created — so before this method the write-path resolver
+   * ran with tab-derived context only, and a selector whose candidate set exists only relative to a
+   * parent field found nothing. That is IMP-22: {@code neo_create} rejected the byte-identical
+   * {@code $_identifier} that {@code neo_selectors} had just returned.
+   * <p>
+   * <b>Why the exclusion list is the whole design.</b> A body key is only usable as context once its
+   * value is a real record id. A key still holding a human search string would be copied into
+   * {@code C_BPartner_ID} verbatim and silently narrow the candidate set to nothing — turning a
+   * resolvable field into a {@code not_found} and making the fix worse than the bug. So the caller
+   * passes the keys it has NOT yet settled, and everything else in the body — resolved FKs, plus the
+   * primitives {@code copySelectorContext} already knows how to use, such as {@code orderDate} for a
+   * tax selector — becomes context.
+   *
+   * @param baseContext     tab-derived context (sales/purchase, business-partner role); may be null
+   * @param body            the write body, keyed by canonical DAL property name
+   * @param excludedKeys    body keys whose value is not (yet) a usable record id
+   * @return a new map; never the instance passed in
+   */
+  static Map<String, String> withBodyContext(Map<String, String> baseContext, JSONObject body,
+      Collection<String> excludedKeys) throws JSONException {
+    Map<String, String> merged = new HashMap<>();
+    if (baseContext != null) {
+      merged.putAll(baseContext);
+    }
+    if (body == null) {
+      return merged;
+    }
+    JSONObject usable = new JSONObject();
+    Iterator<String> keys = body.keys();
+    while (keys.hasNext()) {
+      String key = keys.next();
+      if (excludedKeys == null || !excludedKeys.contains(key)) {
+        usable.put(key, body.opt(key));
+      }
+    }
+    copySelectorContext(usable, merged);
+    return merged;
   }
 
   static NeoResponse withDiagnostics(NeoResponse neoResponse, String columnName,

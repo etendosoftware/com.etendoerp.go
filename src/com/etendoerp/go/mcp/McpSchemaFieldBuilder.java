@@ -57,6 +57,24 @@ final class McpSchemaFieldBuilder {
   private McpSchemaFieldBuilder() {
   }
 
+  static final String KEY_DEFAULT_EXPRESSION = "defaultExpression";
+  static final String KEY_DEFAULT_SOURCE = "defaultSource";
+  static final String KEY_USER_REQUIRED = "userRequired";
+  static final String KEY_READ_ONLY = "readOnly";
+  static final String KEY_VISIBILITY = "visibility";
+  static final String VISIBILITY_EDITABLE = "editable";
+  /** The {@code visibility} VALUE {@code "readOnly"} — deliberately distinct from
+   *  {@link #KEY_READ_ONLY}, the JSON key, even though the two strings coincide. */
+  static final String VISIBILITY_READ_ONLY = "readOnly";
+  static final String VISIBILITY_DISCARDED = "discarded";
+  static final String TYPE_BUTTON = McpActionsView.TYPE_BUTTON;
+  static final String KEY_INVOKE_VIA = "invokeVia";
+  static final String KEY_INVOKABLE = "invokable";
+  static final String KEY_NOT_INVOKABLE_REASON = "notInvokableReason";
+  /** AD column of the accounting trigger, present on every accountable document. */
+  private static final String COLUMN_POSTED = "Posted";
+  private static final String EM_PREFIX = "EM_";
+
   static String mapColumnType(String refId) {
     if (refId == null) {
       return McpConstants.TYPE_STRING;
@@ -145,6 +163,7 @@ final class McpSchemaFieldBuilder {
   static FieldMetadata loadFieldMetadata(SFEntity sfEntity) {
     Map<String, String> visibilityByColumnId = new HashMap<>();
     Map<String, Boolean> businessCriticalByColumnId = new HashMap<>();
+    Map<String, Boolean> readOnlyByColumnId = new HashMap<>();
     OBCriteria<SFField> fieldCrit = OBDal.getInstance().createCriteria(SFField.class);
     fieldCrit.add(Restrictions.eq(
         SFField.PROPERTY_ETGOSFENTITY + ".id", sfEntity.getId()));
@@ -155,24 +174,28 @@ final class McpSchemaFieldBuilder {
         continue;
       }
       String colId = (String) adCol.getId();
-      String visibility = (String) sfField.get("visibility");
+      String visibility = sfField.getVisibility();
       if (visibility != null && !visibility.trim().isEmpty()) {
         visibilityByColumnId.put(colId, visibility.trim());
       }
       Boolean isBusinessCritical = sfField.isBusinessCritical();
       businessCriticalByColumnId.put(colId, Boolean.TRUE.equals(isBusinessCritical));
+      readOnlyByColumnId.put(colId, Boolean.TRUE.equals(sfField.isReadOnly()));
     }
-    return new FieldMetadata(visibilityByColumnId, businessCriticalByColumnId);
+    return new FieldMetadata(visibilityByColumnId, businessCriticalByColumnId, readOnlyByColumnId);
   }
 
   static final class FieldMetadata {
     final Map<String, String> visibilityByColumnId;
     final Map<String, Boolean> businessCriticalByColumnId;
+    final Map<String, Boolean> readOnlyByColumnId;
 
     FieldMetadata(Map<String, String> visibilityByColumnId,
-        Map<String, Boolean> businessCriticalByColumnId) {
+        Map<String, Boolean> businessCriticalByColumnId,
+        Map<String, Boolean> readOnlyByColumnId) {
       this.visibilityByColumnId = visibilityByColumnId;
       this.businessCriticalByColumnId = businessCriticalByColumnId;
+      this.readOnlyByColumnId = readOnlyByColumnId;
     }
   }
 
@@ -405,13 +428,13 @@ final class McpSchemaFieldBuilder {
 
   static JSONArray buildSchemaFieldsArray(Tab adTab, Entity dalEntity,
       Map<String, String> visibilityByColumnId, Map<String, Boolean> businessCriticalByColumnId,
-      Map<String, String> promptByColumnId,
+      Map<String, Boolean> readOnlyByColumnId, Map<String, String> promptByColumnId,
       java.util.Set<String> systemColumns, java.util.Set<String> selectorRefs) throws JSONException {
     JSONArray fieldsArray = new JSONArray();
     for (Column col : adTab.getTable().getADColumnList()) {
       if (shouldIncludeSchemaColumn(col, systemColumns)) {
         fieldsArray.put(buildSchemaField(col, adTab, dalEntity, visibilityByColumnId,
-            businessCriticalByColumnId, promptByColumnId, selectorRefs));
+            businessCriticalByColumnId, readOnlyByColumnId, promptByColumnId, selectorRefs));
       }
     }
     return fieldsArray;
@@ -423,28 +446,53 @@ final class McpSchemaFieldBuilder {
 
   private static JSONObject buildSchemaField(Column col, Tab adTab, Entity dalEntity,
       Map<String, String> visibilityByColumnId, Map<String, Boolean> businessCriticalByColumnId,
-      Map<String, String> promptByColumnId,
+      Map<String, Boolean> readOnlyByColumnId, Map<String, String> promptByColumnId,
       java.util.Set<String> selectorRefs) throws JSONException {
     String dbColName = col.getDBColumnName();
     String refId = col.getReference() != null ? (String) col.getReference().getId() : null;
     String type = mapColumnType(refId);
+    boolean isButton = TYPE_BUTTON.equals(type);
     JSONObject fieldObj = new JSONObject();
     fieldObj.put("name", resolvePropertyName(dalEntity, dbColName));
     fieldObj.put("column", dbColName);
     fieldObj.put(McpConstants.KEY_LABEL, col.getName());
     fieldObj.put("type", type);
-    fieldObj.put("required", col.isMandatory());
-    fieldObj.put("readOnly", isReadOnlyColumn(adTab, col));
+    if (!isButton) {
+      // IMP-21: a button carries no payload value, so AD's NOT NULL flag says nothing about what
+      // the agent must send. Emitting it made 10 of the 22 sales-invoice actions claim
+      // required:true right next to an honest userRequired:false. See addButtonInfo.
+      fieldObj.put("required", col.isMandatory());
+    }
+    // IMP-28: isReadOnlyColumn only catches structural AD read-only columns (PK/DocumentNo/
+    // auto-sequence) — columns with no ETGO_SF_FIELD row at all still need that check, since a
+    // curated field row can be entirely absent. But when a curated SFField row DOES exist and its
+    // own SF isReadOnly=Y (source of truth for AD_Column.isUpdateable derivation, see
+    // NeoFieldFilter#processFieldMappings), the structural check alone missed it — e.g. a stored
+    // computed column like M_Product.EM_ETGO_Stock is neither a PK nor a sequence column, so it
+    // used to report readOnly:false while its own "visibility":"readOnly" said the opposite. OR
+    // the two signals together; never drop the structural check, it is the only one covering
+    // columns with no SFField row.
+    String visibility = visibilityByColumnId.get((String) col.getId());
+    boolean curatedReadOnly = Boolean.TRUE.equals(readOnlyByColumnId.get((String) col.getId()));
+    // Belt-and-suspenders for the same invariant: visibility="readOnly" forces readOnly=true even
+    // if the SFField row's own ISREADONLY column were ever mis-curated to N — VISIBILITY and
+    // ISREADONLY should already agree via push-to-neo.js, but the emitted contract must not depend
+    // on that staying true forever.
+    boolean visibilityIsReadOnly = VISIBILITY_READ_ONLY.equals(visibility);
+    fieldObj.put(KEY_READ_ONLY,
+        isReadOnlyColumn(adTab, col) || curatedReadOnly || visibilityIsReadOnly);
     addDefaultExpression(fieldObj, col);
-    addVisibility(fieldObj, visibilityByColumnId.get((String) col.getId()), col.isMandatory());
+    addVisibility(fieldObj, visibility, !isButton && col.isMandatory());
     boolean isBusinessCritical = Boolean.TRUE.equals(
         businessCriticalByColumnId.get((String) col.getId()));
-    fieldObj.put("businessCritical", isBusinessCritical);
     addAgentPrompt(fieldObj, promptByColumnId.get((String) col.getId()));
     addSelectorInfo(fieldObj, refId, selectorRefs);
-    if ("button".equals(type)) {
-      addButtonInfo(fieldObj, col);
+    addWritableVia(fieldObj, dalEntity, dbColName);
+    if (isButton) {
+      addButtonInfo(fieldObj, col, visibility, isHiddenButtonField(adTab, col));
+      isBusinessCritical = isBusinessCritical || isCriticalAction(fieldObj, dbColName);
     }
+    fieldObj.put("businessCritical", isBusinessCritical);
     return fieldObj;
   }
 
@@ -454,10 +502,30 @@ final class McpSchemaFieldBuilder {
     }
   }
 
-  private static void addButtonInfo(JSONObject fieldObj, Column col) throws JSONException {
+  /**
+   * Describes a {@code type:"button"} column as an invokable action (IMP-6's {@code
+   * view:"actions"} catalog is a filter over these).
+   *
+   * <p><b>IMP-21 — {@code invokeVia} is now a claim, not a decoration.</b> It used to be written
+   * unconditionally, so the sales-invoice catalog advertised all 22 buttons as callable via
+   * {@code neo_action} even though 17 were curated {@code visibility:"discarded"} and one
+   * ({@code CreateFrom}) resolves no process at all — there is nothing for {@code neo_action} to
+   * run. An agent had no way to tell the 22 apart. Now a button carries {@code
+   * invokeVia:"neo_action"} only when it really is invokable, and otherwise says so explicitly
+   * with {@code invokable:false} plus a machine-readable {@code notInvokableReason}. The button
+   * still appears in the catalog — knowing an action exists but is out of scope is useful; being
+   * told it is callable when it is not is not.</p>
+   *
+   * @param fieldObj    the field object being built, mutated in place
+   * @param col         the button AD column
+   * @param visibility  the curated visibility for this column, or {@code null} when uncurated
+   * @param hiddenInTab whether AD itself hides this button in the tab — see
+   *                    {@link #isHiddenButtonField}
+   */
+  private static void addButtonInfo(JSONObject fieldObj, Column col, String visibility,
+      boolean hiddenInTab) throws JSONException {
     fieldObj.put("triggerValue", "Y");
     fieldObj.put("action", col.getDBColumnName());
-    fieldObj.put("invokeVia", "neo_action");
     addActionValues(fieldObj, col);
     // Resolve process info — mirror NeoButtonActionHelper / NeoProcessService logic
     Process classicProcess = col.getProcess();
@@ -465,18 +533,160 @@ final class McpSchemaFieldBuilder {
     if (classicProcess == null && obuiappProcess == null) {
       obuiappProcess = NeoAccessHelper.resolveFallbackObuiappProcess(col);
     }
+    String processName = null;
     if (obuiappProcess != null) {
       fieldObj.put("processType", "OBUIAPP");
-      String name = obuiappProcess.getName();
-      fieldObj.put("processName", name != null ? name : "");
+      processName = obuiappProcess.getName();
+      fieldObj.put("processName", processName != null ? processName : "");
       fieldObj.put("processId", obuiappProcess.getId());
     } else if (classicProcess != null) {
       fieldObj.put("processType", "Classic");
-      String name = classicProcess.getName();
-      fieldObj.put("processName", name != null ? name : "");
+      processName = classicProcess.getName();
+      fieldObj.put("processName", processName != null ? processName : "");
       fieldObj.put("processId", classicProcess.getId());
     }
-    // If no process resolved: triggerValue/action/invokeVia already set, omit process fields
+    applyActionLabelFallback(fieldObj, col, processName);
+    addInvokability(fieldObj, visibility, processName != null, hiddenInTab);
+  }
+
+  /**
+   * Declares whether {@code neo_action} can actually run this button (IMP-21).
+   *
+   * <p>Three independent blockers, reported in the order an agent would care about. A curated
+   * {@code discarded} means the action was deliberately kept out of this window's agent surface.
+   * {@code hidden} means AD itself never shows the button in this tab, so it is not a user-facing
+   * action at all — see {@link #isHiddenButtonField}. A missing process means AD has nothing wired
+   * behind the column. An uncurated button (no {@code visibility} row at all) that AD does display
+   * and that has a process is treated as invokable — that is the pre-IMP-21 behaviour and the only
+   * safe default, since absence of curation is not a decision.</p>
+   */
+  private static void addInvokability(JSONObject fieldObj, String visibility, boolean hasProcess,
+      boolean hiddenInTab) throws JSONException {
+    String blocker = null;
+    if (VISIBILITY_DISCARDED.equals(visibility)) {
+      blocker = "discarded: this action is not part of the curated agent surface for this window";
+    } else if (hiddenInTab) {
+      blocker = "hidden: AD does not display this button in the tab, so it is an internal flag "
+          + "rather than a user-facing action";
+    } else if (!hasProcess) {
+      blocker = "no process: the AD button column has no process wired behind it";
+    }
+    if (blocker == null) {
+      fieldObj.put(KEY_INVOKE_VIA, "neo_action");
+      return;
+    }
+    fieldObj.put(KEY_INVOKABLE, false);
+    fieldObj.put(KEY_NOT_INVOKABLE_REASON, blocker);
+  }
+
+  /**
+   * Whether AD itself hides this button in the given tab, i.e. its {@code AD_Field} is
+   * {@code isDisplayed = 'N'} (IMP-21, defect viii).
+   *
+   * <p>Found by the live verification of IMP-21: {@code Processing} and {@code DocAction} on
+   * {@code C_Invoice} point at the <i>same</i> {@code AD_Process} (id {@code 111},
+   * {@code C_Invoice_Post0}), but {@code Processing} is the classic procedure's internal
+   * "in progress" flag — its {@code AD_Field} is hidden in every window that has one (Sales
+   * Invoice, Purchase Invoice, Business Partner Info), while {@code DocAction} and {@code Posted}
+   * are displayed. So the catalog was offering an undescribed second door to the invoice-processing
+   * process: no {@code actionValues}, no {@code actionParameter}, no {@code agentPrompt}.</p>
+   *
+   * <p>This is read off AD rather than curated, which is why it belongs in this generic layer: that
+   * a button the UI never renders is not a user action is structural, not per-window judgement.
+   * Curation could not carry it anyway — the visibility vocabulary is designed for form fields, and
+   * {@code system} (which is what {@code Processing} is curated as) means "the server fills this,
+   * do not ask the user" — a statement about a payload value that says nothing at all about a
+   * button.</p>
+   *
+   * <p><b>A column with no {@code AD_Field} in the tab is NOT hidden.</b> Module-contributed
+   * buttons frequently have no tab field — that is the very case
+   * {@link #applyActionLabelFallback} exists for — and treating a missing field as hidden would
+   * silently retire those actions. Only an explicit {@code isDisplayed = 'N'} blocks. Mirrors
+   * {@link #loadFieldLabels}: first active field for the column wins.</p>
+   */
+  private static boolean isHiddenButtonField(Tab adTab, Column col) {
+    if (adTab == null) {
+      return false;
+    }
+    String dbColName = col.getDBColumnName();
+    for (Field field : adTab.getADFieldList()) {
+      if (!Boolean.TRUE.equals(field.isActive()) || field.getColumn() == null) {
+        continue;
+      }
+      if (dbColName.equalsIgnoreCase(field.getColumn().getDBColumnName())) {
+        return !Boolean.TRUE.equals(field.isDisplayed());
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Replaces a raw module-extension column name with something an agent can read (IMP-21).
+   *
+   * <p>A button's label defaults to {@code AD_Column.name}, which for a column contributed by a
+   * module is the machine name the module author typed — {@code EM_Aeatsii_Dup},
+   * {@code EM_Psd2_Generate Bank Payment}. Core buttons are unaffected because their column names
+   * are already functional ({@code "Copy from"}, {@code "Document Action"}), and any button that
+   * has an {@code AD_Field} in the tab is overwritten later by {@link #applyCuratedLabels} — so
+   * this only ever fires for the module buttons that no tab field describes, which is exactly
+   * where the raw names were surfacing.</p>
+   *
+   * <p>The process name is preferred over a mechanically de-prefixed column name because it is a
+   * label a human wrote for this very action; the de-prefixed name is the last resort.</p>
+   */
+  private static void applyActionLabelFallback(JSONObject fieldObj, Column col, String processName)
+      throws JSONException {
+    String dbColName = col.getDBColumnName();
+    if (!StringUtils.startsWithIgnoreCase(dbColName, EM_PREFIX)) {
+      return;
+    }
+    if (StringUtils.isNotBlank(processName)) {
+      fieldObj.put(McpConstants.KEY_LABEL, processName.trim());
+      return;
+    }
+    String humanized = humanizeExtensionColumn(col.getName());
+    if (StringUtils.isNotBlank(humanized)) {
+      fieldObj.put(McpConstants.KEY_LABEL, humanized);
+    }
+  }
+
+  /**
+   * {@code "EM_Psd2_Generate Bank Payment"} → {@code "Generate Bank Payment"}: drops the
+   * {@code EM_<module>_} extension prefix and turns the remaining underscores into spaces.
+   */
+  static String humanizeExtensionColumn(String rawName) {
+    if (StringUtils.isBlank(rawName)) {
+      return null;
+    }
+    String name = rawName.trim();
+    if (!StringUtils.startsWithIgnoreCase(name, EM_PREFIX)) {
+      return name;
+    }
+    // EM_<module>_<rest> — drop both the marker and the module prefix that follows it.
+    int moduleEnd = name.indexOf('_', EM_PREFIX.length());
+    String rest = moduleEnd < 0 ? name.substring(EM_PREFIX.length()) : name.substring(moduleEnd + 1);
+    rest = rest.replace('_', ' ').trim();
+    return rest.isEmpty() ? null : rest;
+  }
+
+  /**
+   * Derives {@code businessCritical} for an action that curation left unflagged (IMP-21).
+   *
+   * <p>{@code ETGO_SF_FIELD.isBusinessCritical} has no producer for buttons: it is {@code N} on
+   * every button column in the instance, so the flag was emitted {@code false} on all 22
+   * sales-invoice actions and never discriminated anywhere. {@code false} is not a neutral
+   * default — it reads as "nobody needs to think before firing this", which is the opposite of
+   * true for the two actions that change a document's legal and accounting state.</p>
+   *
+   * <p>Both signals below are structural properties of core AD, not per-window judgement (which
+   * belongs in {@code decisions.json} — see {@link #addActionValues}): a button bound to the
+   * shared {@code docAction} list drives the document state machine, and {@code Posted} is the
+   * accounting trigger present on every accountable document. Curation still wins — this only
+   * fills the gap, it never clears a flag someone set.</p>
+   */
+  private static boolean isCriticalAction(JSONObject fieldObj, String dbColName) {
+    return fieldObj.has(McpConstants.KEY_ACTION_PARAMETER)
+        || COLUMN_POSTED.equalsIgnoreCase(dbColName);
   }
 
   /**
@@ -553,20 +763,57 @@ final class McpSchemaFieldBuilder {
       // "0" is a legacy AD placeholder meaning "resolve via callout/session logic" — it is not a
       // usable FK value. The resolved value is tenant-scoped (per client/org), so it must never be
       // baked into this structural schema; report shape/format only and point to neo_defaults.
-      fieldObj.put("defaultSource", "server");
+      fieldObj.put(KEY_DEFAULT_SOURCE, "server");
       fieldObj.put("defaultFormat", "32-char hex ID (FK)");
       fieldObj.put("defaultHint", "Resolved per-tenant at request time — call neo_defaults to get the value");
       return;
     }
-    fieldObj.put("defaultExpression", defaultExpr);
+    fieldObj.put(KEY_DEFAULT_EXPRESSION, defaultExpr);
   }
 
+  /**
+   * @return {@code true} when this already-built descriptor is one the agent may legitimately send on
+   *     a create: {@code editable} visibility and not read-only. Used by {@link McpSchemaCreateView}
+   *     so the create projection can never admit a sequence-generated or computed field.
+   */
+  static boolean isAgentSuppliable(JSONObject fieldObj) {
+    return fieldObj != null
+        && VISIBILITY_EDITABLE.equals(fieldObj.optString(KEY_VISIBILITY, null))
+        && !fieldObj.optBoolean(KEY_READ_ONLY, false);
+  }
+
+  /**
+   * Flags {@code userRequired} — "the agent MUST supply this in neo_create", exactly as the
+   * {@code neo_schema} hint promises.
+   *
+   * <p>Being mandatory in AD is necessary but <b>not</b> sufficient: a mandatory column that carries
+   * a default is filled by the session, the server or the declaring module, so demanding it from the
+   * agent asks for a value we already have. On {@code sales-invoice/header} that was 5 of 11 flagged
+   * fields — the invoice date ({@code @#Date@}), the currency ({@code @C_Currency_ID@}) and three
+   * SII/VeriFactu compliance booleans defaulting to {@code N} — leaving 6 that genuinely are the
+   * agent's to decide (IMP-12 §5).
+   *
+   * <p>Order matters: {@link #addDefaultExpression} runs immediately before this method
+   * ({@code buildFieldObject}), so the default keys are already on {@code fieldObj} when we read
+   * them. A precondition can still force the flag back on afterwards, via
+   * {@link #applyPreconditionRequirement} — an explicit business rule outranks a column default.
+   */
   private static void addVisibility(JSONObject fieldObj, String visibility, boolean mandatory)
       throws JSONException {
     if (visibility != null) {
-      fieldObj.put("visibility", visibility);
-      fieldObj.put("userRequired", "editable".equals(visibility) && mandatory);
+      fieldObj.put(KEY_VISIBILITY, visibility);
+      fieldObj.put(KEY_USER_REQUIRED, VISIBILITY_EDITABLE.equals(visibility) && mandatory
+          && !hasSuppliedDefault(fieldObj));
     }
+  }
+
+  /**
+   * @return {@code true} when something other than the agent already provides this field's value:
+   *     either a literal/session AD default ({@code defaultExpression}) or the legacy {@code "0"} FK
+   *     sentinel that {@link #addDefaultExpression} reports as {@code defaultSource:"server"}.
+   */
+  private static boolean hasSuppliedDefault(JSONObject fieldObj) {
+    return fieldObj.has(KEY_DEFAULT_EXPRESSION) || fieldObj.has(KEY_DEFAULT_SOURCE);
   }
 
   private static void addSelectorInfo(JSONObject fieldObj, String refId,
@@ -575,5 +822,86 @@ final class McpSchemaFieldBuilder {
       fieldObj.put("hasSelector", true);
       fieldObj.put("selectorType", mapSelectorType(refId));
     }
+  }
+
+  /**
+   * IMP-28 (§7.5a): maps a stored-computed column's {@code AD_Column.Computation_Function} name
+   * to the entity path that actually owns the value it mirrors.
+   *
+   * <p>Keyed by function name, not by column id/name/table — this is deliberate. AD's stored
+   * computed column framework ({@code Computation_Mode='S'/'Q'}, enforced by
+   * {@code ColumnStoredComputedHandler}, EPL-1807) records only that a column is derived and by
+   * which function; it carries no queryable pointer from the column to the source table/entity
+   * that maintains the underlying data — that link only exists inside the function body. So this
+   * map cannot be derived from AD metadata alone; it is a curated table, same as the
+   * {@code businessCritical}/{@code visibility} curation already sitting in {@code SFField}.
+   * What *is* data-driven is the trigger: {@link #addWritableVia} only consults this map for a
+   * property that actually reports a non-blank {@link Property#getComputationFunction()} — so a
+   * read-only field that is NOT a stored computed column (e.g. {@code product/stock}'s
+   * {@code quantityOnHand}, which is real data on {@code M_Storage_Detail} curated read-only for
+   * process-integrity reasons) correctly gets no {@code writableVia} rather than a guess.</p>
+   */
+  private static final Map<String, WritableVia> WRITABLE_VIA_BY_COMPUTATION_FUNCTION =
+      buildWritableViaMap();
+
+  private static Map<String, WritableVia> buildWritableViaMap() {
+    Map<String, WritableVia> map = new HashMap<>();
+    map.put("etgo_product_sale_price", new WritableVia("product", "price",
+        "Set on the sale price list (M_ProductPrice where issopricelist='Y')."));
+    map.put("etgo_product_purchase_price", new WritableVia("product", "price",
+        "Set on the purchase price list (M_ProductPrice where issopricelist='N')."));
+    map.put("etgo_product_stock", new WritableVia("physical-inventory", "inventoryLine",
+        "Create a physical-inventory/inventory header, add this line with the counted "
+            + "quantity, then process the document — stock is never written directly."));
+    return map;
+  }
+
+  private static final class WritableVia {
+    private final String spec;
+    private final String entity;
+    private final String note;
+
+    WritableVia(String spec, String entity, String note) {
+      this.spec = spec;
+      this.entity = entity;
+      this.note = note;
+    }
+  }
+
+  /**
+   * IMP-28 (§7.5a/§7.6): a field that is read-only because its value is a stored computed column
+   * must not just say so — it must name where the value can actually be set, or an agent that
+   * correctly declines to write it is left with nowhere to go (the "trap" the item was opened to
+   * close). Omits the key entirely when the column is not a stored computed column, or is one
+   * whose computation function has no known mapping — never emits a guess.
+   */
+  private static void addWritableVia(JSONObject fieldObj, Entity dalEntity, String dbColName)
+      throws JSONException {
+    if (dalEntity == null) {
+      return;
+    }
+    Property prop;
+    try {
+      prop = dalEntity.getPropertyByColumnName(dbColName);
+    } catch (Exception ignored) {
+      return;
+    }
+    if (prop == null) {
+      return;
+    }
+    String computationFunction = prop.getComputationFunction();
+    if (computationFunction == null || computationFunction.trim().isEmpty()) {
+      return;
+    }
+    WritableVia via = WRITABLE_VIA_BY_COMPUTATION_FUNCTION.get(
+        computationFunction.trim().toLowerCase(java.util.Locale.ROOT));
+    if (via == null) {
+      return;
+    }
+    JSONObject viaObj = new JSONObject();
+    viaObj.put("spec", via.spec);
+    viaObj.put("entity", via.entity);
+    viaObj.put("note", via.note);
+    fieldObj.put("writableVia", viaObj);
   }
 }

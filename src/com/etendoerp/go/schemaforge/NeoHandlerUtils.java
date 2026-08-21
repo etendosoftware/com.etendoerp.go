@@ -572,4 +572,49 @@ final class NeoHandlerUtils {
     }
     return anchor;
   }
+
+  /**
+   * Re-anchors every line of {@code inOutId}'s {@code M_InOut} to the document header's own
+   * warehouse, via {@link ReturnShipmentUtils#assignBinsToLines}. Shared
+   * "documentAction/POST pre-hook" wrapper reused by every completable {@code M_InOut}-based
+   * header handler (Goods Shipment, Goods Receipt, Return to Vendor Shipment, Return Material
+   * Receipt) — extracted here (ETP-4863) to stop the identical wrapper body (admin-mode
+   * try/finally + swallow-and-warn) from being copy-pasted a third and fourth time, which would
+   * trip SonarQube CPD.
+   *
+   * <p>Why this is needed at all: {@link #injectDefaultLocatorIfMissing} anchors a line's bin to
+   * the header's warehouse only at line-CREATE time. The header's own {@code warehouse} field
+   * stays editable while the document isn't {@code Processed} yet, so a user can create a line
+   * with the header in warehouse A (correctly anchored to A), then change the header to warehouse
+   * B before confirming — nothing re-anchors that already-created line, and the document can
+   * complete with a stock transaction in the wrong warehouse. Calling this once more, right
+   * before the {@code documentAction}/POST (confirm/complete) request reaches the native
+   * completion flow, closes that gap.
+   *
+   * <p>Runs in admin mode so it isn't blocked by the acting user's org/warehouse access, and
+   * swallows/logs any failure so a re-anchor problem never blocks the document-action request
+   * itself — the completion flow that follows fails loudly on its own (via
+   * {@code InoutLineWithoutLocator}) if a line ends up genuinely unlocatable.
+   *
+   * @param inOutId the {@code M_InOut} id to re-anchor; no-op when {@code null}
+   * @param log     the caller's logger, used for the warn-level failure message
+   */
+  static void reanchorLinesToHeaderWarehouse(String inOutId, Logger log) {
+    if (inOutId == null) {
+      return;
+    }
+    try {
+      OBContext.setAdminMode(true);
+      try {
+        ShipmentInOut doc = OBDal.getInstance().get(ShipmentInOut.class, inOutId);
+        if (doc != null) {
+          ReturnShipmentUtils.assignBinsToLines(doc);
+        }
+      } finally {
+        OBContext.restorePreviousMode();
+      }
+    } catch (Exception e) {
+      log.warn("Could not reanchor lines to header warehouse for {}: {}", inOutId, e.getMessage());
+    }
+  }
 }
