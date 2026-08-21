@@ -16,8 +16,6 @@
  */
 package com.etendoerp.go.schemaforge.handlers;
 
-import java.util.ArrayList;
-import java.util.List;
 import java.util.Set;
 
 import javax.inject.Named;
@@ -27,22 +25,20 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
-import org.hibernate.criterion.Restrictions;
-import org.openbravo.base.provider.OBProvider;
 import org.openbravo.dal.core.OBContext;
-import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.access.Role;
 import org.openbravo.model.ad.access.User;
-import org.openbravo.model.ad.access.UserRoles;
 import org.openbravo.service.json.JsonConstants;
 
 import com.etendoerp.go.rest.EtendoGoAccountProvisioning;
+import com.etendoerp.go.rest.EtendoGoJwtSupport;
 import com.etendoerp.go.rest.PasswordPolicy;
 import com.etendoerp.go.schemaforge.NeoContext;
 import com.etendoerp.go.schemaforge.NeoEndpointType;
 import com.etendoerp.go.schemaforge.NeoHandler;
 import com.etendoerp.go.schemaforge.NeoResponse;
+import com.etendoerp.go.schemaforge.util.UserRoleSyncSupport;
 
 /**
  * NeoHandler for the {@code user} spec. Three independent concerns share this one class because
@@ -79,12 +75,14 @@ import com.etendoerp.go.schemaforge.NeoResponse;
  *
  *   <li><b>Admin-initiated user creation (ETP-4829):</b> the admin-facing "create user" form
  *   never shows a username field (see {@code artifacts/user/decisions.json}'s create-only
- *   {@code username} override in {@code etendo_schema_forge}) — it is always a direct copy of
- *   the email address, matching the convention {@code EtendoGoJwtDalHelper}/
+ *   {@code username} override in {@code etendo_schema_forge}) — it is the email address for the
+ *   first client and a client-suffixed username for later clients, matching the convention of
+ *   {@code EtendoGoJwtDalHelper}/
  *   {@code EtendoGoJwtSupport} already rely on to link an {@code AD_User} row to its {@code
  *   etgo_account} row by matching value. The frontend never sends a {@code username}, but this
  *   is enforced server-side too (defense in depth): {@link #handle(NeoContext)} rewrites the
- *   {@code POST} request body's {@code username} to the (trimmed, lower-cased) {@code email}
+ *   {@code POST} request body's {@code username} to a normalized email-derived username
+ *   (with the shared client suffix when needed)
  *   before the default CRUD create runs — reachable because {@link NeoContext#getRequestBody()}
  *   is the same mutable {@code JSONObject} the default service reads afterward (see {@code
  *   NeoServletSupport#handleWithHooks}). A blank/missing email is rejected with 400 before it
@@ -130,8 +128,8 @@ public class UserRoleAssignmentHandler implements NeoHandler {
   private static final String FIELD_PASSWORD = "password";
 
   /**
-   * Pre-hook: on a {@code user} {@code POST} (create), forces {@code username} to mirror
-   * {@code email}, rejects a blank/missing email with 400, and — if a {@code password} was
+   * Pre-hook: on a {@code user} {@code POST} (create), derives a unique {@code username} from
+   * {@code email} and the current client, rejects a blank/missing email with 400, and — if a {@code password} was
    * typed on the create form (the temporary admin-set-password workaround, see concern (3) in
    * the class javadoc) — rejects it with 400 unless it satisfies {@link PasswordPolicy#isStrong}.
    * No-op for every other method/endpoint.
@@ -155,9 +153,16 @@ public class UserRoleAssignmentHandler implements NeoHandler {
       return NeoResponse.error(400, PasswordPolicy.USER_MESSAGE);
     }
     try {
-      requestBody.put(FIELD_USERNAME, email.toLowerCase());
+      String normalizedEmail = email.toLowerCase();
+      OBContext obContext = OBContext.getOBContext();
+      String clientName = obContext != null && obContext.getCurrentClient() != null
+          ? obContext.getCurrentClient().getName() : null;
+      requestBody.put(FIELD_USERNAME,
+          clientName == null
+              ? normalizedEmail
+              : EtendoGoJwtSupport.buildClientUsername(normalizedEmail, clientName));
     } catch (Exception e) {
-      log.warn("UserRoleAssignmentHandler.handle: failed to force username=email: {}",
+      log.warn("UserRoleAssignmentHandler.handle: failed to derive username from email: {}",
           e.getMessage(), e);
     }
     return null;
@@ -254,6 +259,7 @@ public class UserRoleAssignmentHandler implements NeoHandler {
         return;
       }
       String name = StringUtils.trimToNull(data.optString(FIELD_NAME, null));
+      String userId = StringUtils.trimToNull(data.optString(FIELD_ID, null));
       JSONObject requestBody = context.getRequestBody();
       String password = requestBody != null
           ? StringUtils.trimToNull(requestBody.optString(FIELD_PASSWORD, null))
@@ -261,7 +267,7 @@ public class UserRoleAssignmentHandler implements NeoHandler {
       OBContext.setAdminMode(true);
       try {
         EtendoGoAccountProvisioning.ensureAccountForCreatedUser(email.toLowerCase(),
-            name != null ? name : email, password);
+            name != null ? name : email, password, userId);
       } finally {
         OBContext.restorePreviousMode();
       }
@@ -307,36 +313,6 @@ public class UserRoleAssignmentHandler implements NeoHandler {
       return;
     }
     Role targetRole = user.getDefaultRole();
-
-    OBCriteria<UserRoles> criteria = OBDal.getInstance().createCriteria(UserRoles.class);
-    criteria.add(Restrictions.eq(UserRoles.PROPERTY_USERCONTACT, user));
-    List<UserRoles> existing = criteria.list();
-
-    boolean alreadyInSync = existing.size() == 1 && targetRole != null
-        && targetRole.getId().equals(existing.get(0).getRole().getId());
-    if (alreadyInSync) {
-      return;
-    }
-
-    for (UserRoles row : new ArrayList<>(existing)) {
-      OBDal.getInstance().remove(row);
-    }
-    OBDal.getInstance().flush();
-
-    if (targetRole == null) {
-      log.info("User {} has no default role set; cleared all AD_User_Roles rows.", userId);
-      return;
-    }
-
-    UserRoles newRow = OBProvider.getInstance().get(UserRoles.class);
-    newRow.setNewOBObject(true);
-    newRow.setClient(targetRole.getClient());
-    newRow.setOrganization(targetRole.getOrganization());
-    newRow.setUserContact(user);
-    newRow.setRole(targetRole);
-    newRow.setRoleAdmin(false);
-    OBDal.getInstance().save(newRow);
-    OBDal.getInstance().flush();
-    log.info("Assigned role {} to user {} via AD_User_Roles.", targetRole.getId(), userId);
+    UserRoleSyncSupport.syncSingleActiveUserRole(user, targetRole);
   }
 }

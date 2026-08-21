@@ -21,8 +21,11 @@ import java.io.IOException;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 
+import com.etendoerp.go.schemaforge.webhooks.SFAssignUserRoles;
 import com.etendoerp.go.schemaforge.webhooks.SFListMenu;
 import com.etendoerp.go.schemaforge.webhooks.SFRolesOverview;
+import com.etendoerp.go.schemaforge.webhooks.SFSystemRoleTemplates;
+import com.etendoerp.go.schemaforge.webhooks.SFUserRoleAssignments;
 import com.etendoerp.go.schemaforge.webhooks.SFWindowAccessMap;
 import com.etendoerp.webhookevents.services.BaseWebhookService;
 
@@ -88,6 +91,26 @@ class NeoPseudoSpecDispatcher {
     }
     if ("rolesoverview".equals(pathInfo.specName)) {
       return dispatchGoWebhook("Rolesoverview", method, request, response, new SFRolesOverview());
+    }
+    // ETP-4852: compose a user's access from 1+ system-level template roles. See
+    // SFAssignUserRoles's class javadoc for the full mechanism and response shape.
+    if ("assignuserroles".equals(pathInfo.specName)) {
+      return dispatchGoWebhook("Assignuserroles", method, request, response,
+          new SFAssignUserRoles());
+    }
+    // ETP-4906: read-path companion to assignuserroles — "which template roles does user X (or
+    // every user of my client) currently have applied". See SFUserRoleAssignments's class
+    // javadoc for the full mechanism and both response shapes.
+    if ("userroleassignments".equals(pathInfo.specName)) {
+      return dispatchGoWebhook("Userroleassignments", method, request, response,
+          new SFUserRoleAssignments());
+    }
+    // ETP-4906 (Manual QA Feedback Round 2, finding 2): the 4 fixed role templates resolved at
+    // the SYSTEM client (AD_Client_ID = '0'), not the caller's own tenant — see
+    // SFSystemRoleTemplates's class javadoc for why this can't just repoint SFRolesOverview.
+    if ("systemroletemplates".equals(pathInfo.specName)) {
+      return dispatchGoWebhook("Systemroletemplates", method, request, response,
+          new SFSystemRoleTemplates());
     }
     return false;
   }
