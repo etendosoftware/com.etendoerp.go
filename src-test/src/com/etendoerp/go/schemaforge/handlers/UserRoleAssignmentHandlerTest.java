@@ -90,7 +90,10 @@ import com.etendoerp.go.schemaforge.util.OwnerSupport;
  * CompanyInvitationService#createInvitationForNewlyCreatedUser}) from the created record's
  * response body's {@code email}, skipping it when that email is absent, and swallowing any
  * failure. Also covers the ETP-4830 {@code invitationStatus} field attached to {@code user} GET
- * responses (list and single-record) via {@link CompanyInvitationService#findLatestInvitationStatus}.
+ * responses (list and single-record) via {@link CompanyInvitationService#findLatestInvitationStatus},
+ * AND (ETP-4830 pending-invite-pill fix) attached directly onto the {@code POST} create response
+ * itself right after the invitation is created, so the pill renders on first paint without
+ * requiring a follow-up GET.
  */
 public class UserRoleAssignmentHandlerTest {
 
@@ -1227,6 +1230,101 @@ public class UserRoleAssignmentHandlerTest {
       verify(constructed).createInvitationForNewlyCreatedUser(eq(requestObContext),
           eq("sent@example.com"), isNull(), isNull());
       obCtxMock.verify(OBContext::restorePreviousMode, times(1));
+    }
+  }
+
+  /**
+   * ETP-4830 pending-invite-pill fix regression test: creating a user correctly sent the
+   * invitation and the toast rendered, but the "pending invite" pill in the detail header did NOT
+   * show until the record was left and re-entered (a follow-up {@code GET}) — because {@link
+   * UserRoleAssignmentHandler#attachInvitationStatus} only ran on the {@code GET} branch of
+   * {@code afterHandle}, never on this {@code POST} branch. Asserts the SAME {@code data[0]} row
+   * this handler already read the email from now also carries {@code invitationStatus} once the
+   * invitation has been created — i.e. the create response itself is enough, no follow-up GET
+   * required.
+   */
+  @Test
+  public void afterHandleAttachesInvitationStatusToCreateResponseImmediately() throws Exception {
+    UserRoleAssignmentHandler handler = new UserRoleAssignmentHandler();
+    JSONObject body = buildCreatedRecordResponseBody(USER_ID, "sent@example.com", "Sent User");
+    OBContext requestObContext = mockObContextForClient("client-1");
+    NeoContext ctx = NeoContext.builder()
+        .endpointType(NeoEndpointType.CRUD)
+        .httpMethod("POST")
+        .previousResult(NeoResponse.ok(body))
+        .obContext(requestObContext)
+        .build();
+    JSONObject invitationJson = new JSONObject();
+    invitationJson.put("status", "SENT");
+    JSONObject successResult = new JSONObject();
+    successResult.put("status", "success");
+    successResult.put("invitation", invitationJson);
+
+    try (MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
+        MockedConstruction<CompanyInvitationService> invitationServiceMock =
+            mockConstruction(CompanyInvitationService.class, (m, constructionCtx) ->
+                when(m.createInvitationForNewlyCreatedUser(any(), any(), any(), any()))
+                    .thenReturn(successResult));
+        MockedStatic<CompanyInvitationService> invitationStatusMock =
+            mockStatic(CompanyInvitationService.class)) {
+      obCtxMock.when(() -> OBContext.setAdminMode(true)).then(inv -> null);
+      obCtxMock.when(OBContext::restorePreviousMode).then(inv -> null);
+      invitationStatusMock.when(() -> CompanyInvitationService.findLatestInvitationStatus(
+          "client-1", "sent@example.com")).thenReturn("SENT");
+
+      assertNull(handler.afterHandle(ctx));
+
+      JSONObject data = body.getJSONObject("response").getJSONArray("data").getJSONObject(0);
+      assertEquals("SENT", data.getString("invitationStatus"));
+    }
+  }
+
+  /**
+   * ETP-4830 pending-invite-pill fix: the {@code invitationStatus} attach step must be
+   * best-effort like every other side effect in this method — a lookup failure must not prevent
+   * {@code createInvitationForNewlyCreatedUser} from having been called, nor swallow the parent
+   * request. Reuses the error-result fixture from {@link
+   * #afterHandleDoesNotThrowWhenInvitationCreationReturnsError} but additionally makes the status
+   * lookup itself throw, asserting the handler still completes cleanly and the create response
+   * row is simply left without an {@code invitationStatus} field.
+   */
+  @Test
+  public void afterHandleDoesNotThrowWhenInvitationStatusLookupFails() throws Exception {
+    UserRoleAssignmentHandler handler = new UserRoleAssignmentHandler();
+    JSONObject body = buildCreatedRecordResponseBody(USER_ID, "flaky@example.com", "Flaky User");
+    OBContext requestObContext = mockObContextForClient("client-1");
+    NeoContext ctx = NeoContext.builder()
+        .endpointType(NeoEndpointType.CRUD)
+        .httpMethod("POST")
+        .previousResult(NeoResponse.ok(body))
+        .obContext(requestObContext)
+        .build();
+    JSONObject invitationJson = new JSONObject();
+    invitationJson.put("status", "SENT");
+    JSONObject successResult = new JSONObject();
+    successResult.put("status", "success");
+    successResult.put("invitation", invitationJson);
+
+    try (MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
+        MockedConstruction<CompanyInvitationService> invitationServiceMock =
+            mockConstruction(CompanyInvitationService.class, (m, constructionCtx) ->
+                when(m.createInvitationForNewlyCreatedUser(any(), any(), any(), any()))
+                    .thenReturn(successResult));
+        MockedStatic<CompanyInvitationService> invitationStatusMock =
+            mockStatic(CompanyInvitationService.class)) {
+      obCtxMock.when(() -> OBContext.setAdminMode(true)).then(inv -> null);
+      obCtxMock.when(OBContext::restorePreviousMode).then(inv -> null);
+      invitationStatusMock.when(() -> CompanyInvitationService.findLatestInvitationStatus(
+          "client-1", "flaky@example.com")).thenThrow(new RuntimeException("DB unavailable"));
+
+      assertNull(handler.afterHandle(ctx));
+
+      CompanyInvitationService constructed = invitationServiceMock.constructed().get(0);
+      verify(constructed).createInvitationForNewlyCreatedUser(eq(requestObContext),
+          eq("flaky@example.com"), isNull(), isNull());
+      obCtxMock.verify(OBContext::restorePreviousMode, times(1));
+      JSONObject data = body.getJSONObject("response").getJSONArray("data").getJSONObject(0);
+      assertFalse(data.has("invitationStatus"));
     }
   }
 

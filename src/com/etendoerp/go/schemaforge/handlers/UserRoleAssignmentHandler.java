@@ -111,7 +111,11 @@ import com.etendoerp.go.schemaforge.util.UserRoleSyncSupport;
  *   for an admin-created user, lazily, once the invitee actually accepts. Same best-effort
  *   contract as role sync: never fails the parent {@code AD_User} creation. The resulting {@code
  *   invitationStatus} (see {@link #attachInvitationStatus}) is surfaced back on every {@code
- *   user} GET so the frontend can render a "pending invite" badge.</li>
+ *   user} GET so the frontend can render a "pending invite" badge — AND (ETP-4830 pending-invite-
+ *   pill fix) attached directly onto the {@code POST} create response itself, right after the
+ *   invitation is created (see {@link #inviteNewlyCreatedUser}), so the pill renders on the
+ *   detail header's FIRST paint instead of only after a subsequent GET (leaving and re-entering
+ *   the record).</li>
  *
  *   <li><b>Write-path guards on {@code PUT}/{@code PATCH} (ETP-4830 QA rejection cycle 1):</b>
  *   {@link #handle(NeoContext)} rejects two dangerous updates with a 400 BEFORE the default CRUD
@@ -519,6 +523,19 @@ public class UserRoleAssignmentHandler implements NeoHandler {
    * gets a completely silent no-op on any of those branches: no log line, no {@code
    * etgo_invitation} row, nothing. The result is now inspected and logged either way, so a clean
    * run and a silent-failure run are both visible without a DB query.
+   *
+   * <p>ETP-4830 pending-invite-pill fix: this method used to stop at logging the outcome, never
+   * writing anything onto {@code data} itself. {@link #attachInvitationStatus} — the method that
+   * DOES write {@code invitationStatus} onto a response row — only ran on the {@code GET} branch
+   * of {@link #afterHandle}, so the frontend's initial render, built directly from this {@code
+   * POST} response, legitimately had no {@code invitationStatus} field at all: the "pending
+   * invite" pill correctly rendered nothing for a genuinely-absent field, and only appeared after
+   * navigating away and back (a subsequent {@code GET}). Now, right after the invitation is
+   * created above, {@link #attachInvitationStatusToRow} is reused to write that same field onto
+   * {@code data} — the array-wrapped {@code response.data[0]} row this method already holds a
+   * reference to — so the create response carries {@code invitationStatus} on its very first
+   * paint. Isolated in its own try/catch (see the call site) so a lookup failure there can never
+   * suppress the {@link #logInvitationResult} call below.
    */
   private void inviteNewlyCreatedUser(NeoContext context) {
     String email = null;
@@ -549,6 +566,17 @@ public class UserRoleAssignmentHandler implements NeoHandler {
       try {
         invitationResult = new CompanyInvitationService().createInvitationForNewlyCreatedUser(
             obContext, email.toLowerCase(), null, null);
+        // ETP-4830 pending-invite-pill fix: attach invitationStatus onto THIS SAME create
+        // response row right away — see this method's javadoc. Isolated in its own try/catch so
+        // a lookup failure here never costs us the logInvitationResult() call below (still the
+        // best-effort diagnostic for the invitation itself).
+        try {
+          attachInvitationStatusToRow(data, clientId);
+        } catch (Exception attachError) {
+          log.warn("UserRoleAssignmentHandler.inviteNewlyCreatedUser: failed to attach "
+                  + "invitationStatus to the create response for email={} clientId={}: {}",
+              email, clientId, attachError.getMessage(), attachError);
+        }
       } finally {
         OBContext.restorePreviousMode();
       }
