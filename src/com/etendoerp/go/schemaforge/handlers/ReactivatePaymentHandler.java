@@ -51,6 +51,7 @@ import com.etendoerp.go.schemaforge.NeoContext;
 import com.etendoerp.go.schemaforge.NeoEndpointType;
 import com.etendoerp.go.schemaforge.NeoHandler;
 import com.etendoerp.go.schemaforge.NeoResponse;
+import com.etendoerp.go.schemaforge.PaymentInvoiceApplications;
 import com.etendoerp.go.schemaforge.PaymentRegistrationService;
 import com.etendoerp.go.schemaforge.PisDeferredPaymentService;
 import com.etendoerp.go.schemaforge.PisPaymentService;
@@ -198,7 +199,7 @@ public class ReactivatePaymentHandler implements NeoHandler {
   /**
    * The invoice this payment was applied to, or {@code null} when it is not exactly one. Lets the
    * window open the invoice's own payment editor for a draft instead of the yes/no confirm dialog —
-   * see {@code PaymentRegistrationService#invoiceIdsByPayment}. Emitted alongside
+   * see {@code PaymentInvoiceApplications#invoiceIdsByPayment}. Emitted alongside
    * {@link #FIELD_PIS_LOCKED} so the grid's kebab can do the same, in the same batch.
    */
   private static final String FIELD_INVOICE_ID = "invoiceId";
@@ -626,8 +627,8 @@ public class ReactivatePaymentHandler implements NeoHandler {
 
   /**
    * Sets {@link #FIELD_PIS_LOCKED} and {@link #FIELD_INVOICE_ID} on every row of {@code records},
-   * resolving each with a single query for the whole batch. Swallows failures: losing the flag hides two buttons that were there before, which
-   * is far better than losing the response.
+   * resolving each with a single query for the whole batch. Swallows failures: losing the flag
+   * hides two buttons that were there before, which is far better than losing the response.
    */
   private void injectLockFlags(JSONArray records) {
     try {
@@ -639,14 +640,14 @@ public class ReactivatePaymentHandler implements NeoHandler {
         }
       }
       Set<String> withTransfer = PisDeferredPaymentService.paymentsWithBankTransfer(ids);
-      Map<String, String> invoiceIds = PaymentRegistrationService.invoiceIdsByPayment(ids);
+      Map<String, String> invoiceIds = PaymentInvoiceApplications.invoiceIdsByPayment(ids);
       for (int i = 0; i < records.length(); i++) {
-        JSONObject record = records.getJSONObject(i);
-        String id = record.optString(FIELD_ID, null);
-        record.put(FIELD_PIS_LOCKED, PisDeferredPaymentService.isLifecycleLockedByTransfer(
-            record.optString(FIELD_STATUS, null), withTransfer.contains(id)));
+        JSONObject row = records.getJSONObject(i);
+        String id = row.optString(FIELD_ID, null);
+        row.put(FIELD_PIS_LOCKED, PisDeferredPaymentService.isLifecycleLockedByTransfer(
+            row.optString(FIELD_STATUS, null), withTransfer.contains(id)));
         String invoiceId = invoiceIds.get(id);
-        record.put(FIELD_INVOICE_ID, invoiceId != null ? invoiceId : JSONObject.NULL);
+        row.put(FIELD_INVOICE_ID, invoiceId != null ? invoiceId : JSONObject.NULL);
       }
     } catch (Exception e) {
       log.warn("Could not flag bank-transfer-locked payments: {}", e.getMessage());

@@ -19,11 +19,7 @@ package com.etendoerp.go.schemaforge;
 
 import java.math.BigDecimal;
 import java.text.ParseException;
-import java.util.Collection;
-import java.util.Collections;
 import java.util.Date;
-import java.util.HashMap;
-import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -59,7 +55,6 @@ import org.openbravo.model.financialmgmt.payment.FIN_PaymentDetail;
 import org.openbravo.model.financialmgmt.payment.FIN_PaymentMethod;
 import org.openbravo.model.financialmgmt.payment.FIN_PaymentSchedule;
 import org.openbravo.model.financialmgmt.payment.FIN_PaymentScheduleDetail;
-import org.openbravo.model.financialmgmt.payment.FIN_Payment_Credit;
 import org.openbravo.model.financialmgmt.payment.FinAccPaymentMethod;
 import org.openbravo.service.db.DalConnectionProvider;
 import org.openbravo.service.json.JsonUtils;
@@ -104,7 +99,7 @@ public final class PaymentRegistrationService {
   private static final String KEY_VIA_PIS = "viaPis";
   // Package-visible: shared with PaymentCreditSourcesService.
   static final String KEY_KIND = "kind";
-  private static final String KEY_USE = "use";
+  static final String KEY_USE = "use";
   // Package-visible: shared with PaymentCreditSourcesService.
   static final String KEY_PAYMENT_ID = "paymentId";
   // Package-visible: shared with PaymentCreditSourcesService.
@@ -351,62 +346,6 @@ public final class PaymentRegistrationService {
     return bpAccount != null ? bpAccount.getId() : null;
   }
 
-  /**
-   * The invoice each of {@code paymentIds} was applied to, when there is exactly one.
-   *
-   * <p>Lets the payment window open the invoice's own payment editor for a draft, instead of the
-   * yes/no confirm dialog that is all it can offer today — that window has no form of its own
-   * ({@code hideFormCard}, every header field {@code form: false}), so without this there is no way
-   * to correct a payment before confirming it (ETP-4895 follow-up).
-   *
-   * <p>Only <b>positive</b> applications count. A payment that also consumes a credit carries a
-   * negative application against the credit note's own installment; that is the credit being spent,
-   * not a second invoice being paid, and the editor already models it as a credit source.
-   *
-   * <p>Absent for anything that is not exactly one invoice — an empty shell with no application at
-   * all, or the genuine multi-invoice payment this design does not cover. The caller falls back to
-   * the confirm dialog there.
-   *
-   * @param paymentIds the payments on the response; may be empty
-   * @return payment id → invoice id, resolved in a single query
-   */
-  public static Map<String, String> invoiceIdsByPayment(Collection<String> paymentIds) {
-    if (paymentIds == null || paymentIds.isEmpty()) {
-      return Collections.emptyMap();
-    }
-    Map<String, Set<String>> byPayment = new HashMap<>();
-    try {
-      OBContext.setAdminMode(true);
-      try {
-        String hql = "select distinct pd.finPayment.id, psd.invoicePaymentSchedule.invoice.id "
-            + "from FIN_Payment_Detail pd "
-            + "join pd.fINPaymentScheduleDetailList psd "
-            + "where pd.finPayment.id in :paymentIds "
-            + "and psd.invoicePaymentSchedule is not null "
-            + "and psd.amount > 0";
-        List<Object[]> rows = OBDal.getInstance().getSession()
-            .createQuery(hql, Object[].class)
-            .setParameterList("paymentIds", paymentIds)
-            .list();
-        for (Object[] row : rows) {
-          byPayment.computeIfAbsent((String) row[0], k -> new HashSet<>()).add((String) row[1]);
-        }
-      } finally {
-        OBContext.restorePreviousMode();
-      }
-    } catch (Exception e) {
-      log.warn("Could not resolve the invoices of the listed payments: {}", e.getMessage());
-      return Collections.emptyMap();
-    }
-    Map<String, String> single = new HashMap<>();
-    byPayment.forEach((paymentId, invoiceIds) -> {
-      if (invoiceIds.size() == 1) {
-        single.put(paymentId, invoiceIds.iterator().next());
-      }
-    });
-    return single;
-  }
-
   // ─── PAYMENTS: list payments linked to an invoice ──────────────────────────
 
   static NeoResponse handleListPayments(NeoContext context) {
@@ -462,7 +401,7 @@ public final class PaymentRegistrationService {
     // payment consumes a credit note / return. The header amount above is the payment's own
     // total, which misleads on a credit note's history: there the row must show how much of
     // the note the payment used, not how much cash the payment moved.
-    item.put("appliedToInvoice", appliedToInvoice(p, invoiceId));
+    item.put("appliedToInvoice", PaymentInvoiceApplications.appliedToInvoice(p, invoiceId));
     item.put("paymentDate", p.getPaymentDate() != null
         ? JsonUtils.createDateFormat().format(p.getPaymentDate()) : null);
     item.put(KEY_STATUS, p.getStatus());
@@ -498,58 +437,9 @@ public final class PaymentRegistrationService {
     // Only a draft can be re-opened for editing — expose which credit/abono sources it is
     // currently consuming so the edit modal can re-check them (see creditSourcesUsedByPayment).
     if (!Boolean.TRUE.equals(p.isProcessed())) {
-      item.put("creditSourcesUsed", creditSourcesUsedByPayment(p));
+      item.put("creditSourcesUsed", PaymentInvoiceApplications.creditSourcesUsedByPayment(p));
     }
     return item;
-  }
-
-  /**
-   * Net amount {@code p} applies against {@code invoiceId}'s payment schedules: the sum of its
-   * schedule details linked to that invoice. Positive when paying the invoice, negative when
-   * consuming it as a credit note / return.
-   */
-  private static BigDecimal appliedToInvoice(FIN_Payment p, String invoiceId) {
-    BigDecimal total = BigDecimal.ZERO;
-    for (FIN_PaymentDetail detail : p.getFINPaymentDetailList()) {
-      for (FIN_PaymentScheduleDetail psd : detail.getFINPaymentScheduleDetailList()) {
-        FIN_PaymentSchedule sched = psd.getInvoicePaymentSchedule();
-        if (sched != null && sched.getInvoice() != null
-            && invoiceId.equals(sched.getInvoice().getId())) {
-          total = total.add(nullToZero(psd.getAmount()));
-        }
-      }
-    }
-    return total;
-  }
-
-  /**
-   * Reconstructs the credit/abono sources {@code payment} (a draft) is currently consuming, in the
-   * same shape the frontend sends when registering ({@code {kind, paymentId|psdId, use}}), so the
-   * edit modal can re-check the sources the draft already applied.
-   */
-  private static JSONArray creditSourcesUsedByPayment(FIN_Payment payment) throws Exception {
-    JSONArray arr = new JSONArray();
-    OBCriteria<FIN_Payment_Credit> crit = OBDal.getInstance().createCriteria(FIN_Payment_Credit.class);
-    crit.add(Restrictions.eq(FIN_Payment_Credit.PROPERTY_PAYMENT, payment));
-    for (FIN_Payment_Credit link : crit.list()) {
-      JSONObject used = new JSONObject();
-      used.put(KEY_KIND, KIND_CREDIT);
-      used.put(KEY_PAYMENT_ID, link.getCreditPaymentUsed().getId());
-      used.put(KEY_USE, link.getAmount());
-      arr.put(used);
-    }
-    for (FIN_PaymentDetail detail : payment.getFINPaymentDetailList()) {
-      for (FIN_PaymentScheduleDetail psd : detail.getFINPaymentScheduleDetailList()) {
-        if (psd.getAmount().signum() < 0) {
-          JSONObject used = new JSONObject();
-          used.put(KEY_KIND, KIND_ABONO);
-          used.put(KEY_PSD_ID, psd.getId());
-          used.put(KEY_USE, psd.getAmount().abs());
-          arr.put(used);
-        }
-      }
-    }
-    return arr;
   }
 
   // ─── PAYMENT METHODS: list methods valid for the invoice's accounts ────────

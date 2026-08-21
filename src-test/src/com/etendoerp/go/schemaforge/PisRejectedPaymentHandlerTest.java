@@ -187,7 +187,7 @@ class PisRejectedPaymentHandlerTest {
   @Test
   @DisplayName("never breaks the PSD2 write that triggered it")
   void swallowsFailures() {
-    // PSD2 must still record the Salt Edge status even if the Etendo Go side cannot be flagged;
+    // PSD2 must still record the Salt Edge status even when the Etendo Go side cannot be flagged.
     // reconcileAttemptsFor picks it up on the next read.
     FIN_Payment payment = mock(FIN_Payment.class);
     when(payment.getStatus()).thenThrow(new IllegalStateException("detached"));

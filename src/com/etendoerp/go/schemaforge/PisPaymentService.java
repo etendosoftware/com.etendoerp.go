@@ -112,6 +112,11 @@ public final class PisPaymentService {
    * {@link PisDeferredPaymentService#initiateDeferredPis}), so the SPA can poll it while the SCA
    * widget / bank confirmation is pending.
    * Body: {@code {pisPaymentId}}.
+   *
+   * @param context the NEO request; the transfer is read from its body, so the record it is posted
+   *     to is irrelevant — which is what lets the payment window route it without an invoice
+   * @return the stored status, refreshed from Salt Edge first unless it is already terminal; 400
+   *     without a {@code pisPaymentId}, 404 when it names no transfer
    */
   public static NeoResponse handlePisPaymentStatus(NeoContext context) {
     JSONObject body = context.getRequestBody();

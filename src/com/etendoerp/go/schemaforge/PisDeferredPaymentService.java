@@ -118,6 +118,8 @@ public final class PisDeferredPaymentService {
   private static final String INTENT_IS_RECEIPT = "isReceipt";
   private static final String INTENT_BODY = "body";
 
+  /** Key the SPA reads the transfer's local id from, and posts it back under. */
+  private static final String FIELD_PIS_PAYMENT_ID = "pisPaymentId";
   private static final String FIELD_PIS = "pis";
   private static final String FIELD_PROCESS = "process";
   private static final String PROCESS_CONFIRM = "confirm";
@@ -188,7 +190,7 @@ public final class PisDeferredPaymentService {
     JSONObject data = new JSONObject();
     // No payment exists yet — the SPA only needs what it takes to open the SCA widget and poll.
     data.put("pisPaymentUrl", result.getPaymentUrl());
-    data.put("pisPaymentId", pisPayment.getId());
+    data.put(FIELD_PIS_PAYMENT_ID, pisPayment.getId());
     data.put("pisStatus", pisPayment.getStatus());
     data.put("paymentDeferred", true);
     return PaymentRegistrationService.wrapCreatedData(data);
@@ -251,10 +253,15 @@ public final class PisDeferredPaymentService {
    * replayed twice.
    *
    * <p>Body: {@code {pisPaymentId}}.
+   *
+   * @param context the NEO request; the transfer to retry comes from its body, so this is reachable
+   *     both from the invoice's payment modal and from the payment record itself
+   * @return the new transfer's widget URL and local id, or an error explaining why this one can no
+   *     longer be retried
    */
   public static NeoResponse handleRetryPisPayment(NeoContext context) {
     JSONObject body = context.getRequestBody();
-    String pisPaymentId = body != null ? body.optString("pisPaymentId", null) : null;
+    String pisPaymentId = body != null ? body.optString(FIELD_PIS_PAYMENT_ID, null) : null;
     if (StringUtils.isBlank(pisPaymentId)) {
       return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "pisPaymentId is required");
     }
@@ -266,10 +273,10 @@ public final class PisDeferredPaymentService {
           return NeoResponse.error(HttpServletResponse.SC_NOT_FOUND, "PIS payment not found");
         }
         // Anything the bank has not committed to can be retried: a rejection, and also an attempt
-        // still in flight. The latter is what a user closing the Salt Edge window needs — that
-        // window's session is single-use, so reopening its URL always fails with "session lost";
-        // the only way back is a brand-new order. Refused from `authorized` on, where the money is
-        // already moving and a second order would pay twice.
+        // still in flight. The latter is what a user closing the Salt Edge window needs, because
+        // that window's session is single-use and reopening its URL always fails with a lost
+        // session, so the only way back is a brand-new order. Refused from `authorized` on, where
+        // the money is already moving and a second order would pay twice.
         if (!isRetryableStatus(failed.getStatus())) {
           return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
               "This bank transfer is already in progress and can no longer be restarted.");
@@ -359,7 +366,7 @@ public final class PisDeferredPaymentService {
 
     JSONObject data = new JSONObject();
     data.put("pisPaymentUrl", result.getPaymentUrl());
-    data.put("pisPaymentId", retry.getId());
+    data.put(FIELD_PIS_PAYMENT_ID, retry.getId());
     data.put("pisStatus", retry.getStatus());
     data.put("paymentDeferred", true);
     return PaymentRegistrationService.wrapCreatedData(data);
@@ -510,6 +517,7 @@ public final class PisDeferredPaymentService {
    * @param status the payment's {@code FIN_Payment.status}
    * @param hasBankTransfer whether it has a {@code PSD2_PIS_PAYMENT} row (see
    *     {@link #paymentsWithBankTransfer})
+   * @return true when Reactivate and Delete must be withheld from this payment
    */
   public static boolean isLifecycleLockedByTransfer(String status, boolean hasBankTransfer) {
     return hasBankTransfer && !StringUtils.equals(PAYMENT_STATUS_ERROR, status);

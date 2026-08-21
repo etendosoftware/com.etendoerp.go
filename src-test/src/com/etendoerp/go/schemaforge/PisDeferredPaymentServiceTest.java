@@ -29,7 +29,9 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import java.lang.reflect.Constructor;
 import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
 import java.util.Date;
 import java.util.List;
 
@@ -66,6 +68,16 @@ class PisDeferredPaymentServiceTest {
 
   private static boolean requiresPayment(String status) throws Exception {
     return (boolean) invokePrivate("requiresPayment", new Class<?>[]{ String.class }, status);
+  }
+
+  @Test
+  @DisplayName("is a static utility: every entry point is a hook, so there is nothing to instantiate")
+  void isNotInstantiable() throws Exception {
+    // Also what keeps this outer class a test class in its own right rather than a bare container
+    // of @Nested suites, which Sonar reads as a test class with no tests (S2187).
+    Constructor<PisDeferredPaymentService> ctor =
+        PisDeferredPaymentService.class.getDeclaredConstructor();
+    assertTrue(Modifier.isPrivate(ctor.getModifiers()));
   }
 
   @Nested

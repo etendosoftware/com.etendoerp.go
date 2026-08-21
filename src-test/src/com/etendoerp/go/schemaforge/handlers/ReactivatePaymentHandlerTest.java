@@ -1052,11 +1052,11 @@ public class ReactivatePaymentHandlerTest {
     NeoResponse result = new ReactivatePaymentHandler().afterHandle(ctx);
 
     assertNotNull(result);
-    JSONObject record = result.getBody().getJSONObject("response").getJSONArray("data")
+    JSONObject row = result.getBody().getJSONObject("response").getJSONArray("data")
         .getJSONObject(0);
-    assertTrue(record.has("pisLocked"));
-    assertFalse(record.has("financialTransactionId"));
-    assertFalse(record.has("pisPaymentId"));
+    assertTrue(row.has("pisLocked"));
+    assertFalse(row.has("financialTransactionId"));
+    assertFalse(row.has("pisPaymentId"));
   }
 
   /**
