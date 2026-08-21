@@ -17,10 +17,11 @@
 
 package com.etendoerp.go.schemaforge;
 
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
-import java.util.Base64;
+import java.util.Map;
 import java.util.Optional;
 
 import javax.servlet.http.HttpServletResponse;
@@ -28,8 +29,9 @@ import javax.servlet.http.HttpServletResponse;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.openbravo.base.exception.OBException;
+import org.openbravo.model.ad.utility.Attachment;
 
-import com.etendoerp.go.schemaforge.data.PreviewFile;
 import com.etendoerp.go.schemaforge.email.DocumentDownloadTokenService;
 import com.etendoerp.go.schemaforge.email.DocumentDownloadTokenService.Claims;
 
@@ -44,7 +46,25 @@ final class NeoDocumentDownloadService {
   private static final String DEFAULT_FILE_NAME = "document.pdf";
   private static final String APPLICATION_PDF = "application/pdf";
   private static final int MAX_DOWNLOAD_BYTES = 12 * 1024 * 1024;
-  private static final int MAX_ENCODED_DOWNLOAD_CHARS = ((MAX_DOWNLOAD_BYTES + 2) / 3) * 4;
+
+  private static final String TABLE_C_INVOICE = "C_Invoice";
+  private static final String TABLE_C_ORDER = "C_Order";
+  private static final String TABLE_M_INOUT = "M_InOut";
+
+  // ETP-4315 — physical Attachment table (C_File) per window spec, mirroring
+  // the frontend's WINDOW_ATTACHMENT_TABLE (documentEmailSend.js). A link for a
+  // spec not listed here (or for a record whose "main" attachment was since
+  // replaced) resolves to 404 rather than falling back to the retired
+  // legacy preview-file cache (retired, ETP-4315 Phase 9).
+  private static final Map<String, String> WINDOW_ATTACHMENT_TABLE = Map.of(
+      "sales-invoice", TABLE_C_INVOICE,
+      "purchase-invoice", TABLE_C_INVOICE,
+      "sales-order", TABLE_C_ORDER,
+      "purchase-order", TABLE_C_ORDER,
+      "sales-quotation", TABLE_C_ORDER,
+      "goods-shipment", TABLE_M_INOUT,
+      "return-to-vendor-shipment", TABLE_M_INOUT,
+      "return-material-receipt", TABLE_M_INOUT);
 
   private NeoDocumentDownloadService() {
   }
@@ -56,36 +76,59 @@ final class NeoDocumentDownloadService {
       return;
     }
     Claims validated = claims.get();
-    PreviewFile previewFile = NeoPreviewFileService.findPreviewFileForClient(
-        validated.getClientId(), validated.getSpecName(), validated.getRecordId());
-    if (previewFile == null || StringUtils.isBlank(previewFile.getFileData())) {
+    Attachment attachment = resolveMainAttachment(validated);
+    if (attachment == null) {
       writePlainError(response, HttpServletResponse.SC_NOT_FOUND, "Document file not found");
       return;
     }
-    if (previewFile.getFileData().length() > MAX_ENCODED_DOWNLOAD_CHARS) {
-      writePlainError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
-          "Stored document file is too large");
-      return;
-    }
     try {
-      byte[] fileData = Base64.getDecoder().decode(previewFile.getFileData());
+      ByteArrayOutputStream buffer = new ByteArrayOutputStream();
+      NeoAttachmentsHelper.getAttachManager().download(attachment.getId(), buffer);
+      byte[] fileData = buffer.toByteArray();
       if (fileData.length > MAX_DOWNLOAD_BYTES) {
         writePlainError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
             "Stored document file is too large");
         return;
       }
       response.setStatus(HttpServletResponse.SC_OK);
-      response.setContentType(StringUtils.defaultIfBlank(previewFile.getMIMEType(),
+      response.setContentType(StringUtils.defaultIfBlank(attachment.getDataType(),
           APPLICATION_PDF));
-      response.setHeader("Content-Disposition", contentDisposition(previewFile.getFileName()));
+      response.setHeader("Content-Disposition", contentDisposition(attachment.getName()));
       response.setContentLength(fileData.length);
       response.getOutputStream().write(fileData);
       response.getOutputStream().flush();
-    } catch (IllegalArgumentException e) {
-      log.error("Stored preview file has invalid base64 data for spec={} record={}",
+    } catch (OBException e) {
+      log.error("Could not stream main attachment for spec={} record={}",
           validated.getSpecName(), validated.getRecordId(), e);
       writePlainError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
           "Stored document file is invalid");
+    }
+  }
+
+  /**
+   * Resolves the attachment currently marked as "main" for the token's
+   * (specName, recordId) — the same file the sidebar/preview would show —
+   * or {@code null} if the spec is unmapped, the table is unknown, no
+   * attachment is currently marked (e.g. it was replaced since the link was
+   * sent), or the resolved attachment does not belong to the token's client.
+   */
+  private static Attachment resolveMainAttachment(Claims validated) {
+    String tableName = WINDOW_ATTACHMENT_TABLE.get(validated.getSpecName());
+    if (tableName == null) {
+      return null;
+    }
+    try {
+      String tableId = NeoAttachmentsHelper.resolveTableId(tableName);
+      Attachment attachment = NeoAttachmentsHelper.findMainAttachment(tableId, validated.getRecordId());
+      if (attachment == null || attachment.getClient() == null
+          || !attachment.getClient().getId().equals(validated.getClientId())) {
+        return null;
+      }
+      return attachment;
+    } catch (OBException e) {
+      log.warn("Could not resolve attachment table '{}' for spec={}: {}",
+          tableName, validated.getSpecName(), e.getMessage());
+      return null;
     }
   }
 
