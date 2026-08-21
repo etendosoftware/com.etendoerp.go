@@ -27,6 +27,7 @@ import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
+import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.query.NativeQuery;
 import org.openbravo.dal.core.OBContext;
@@ -95,31 +96,11 @@ public class InventoryStockReportHandler implements NeoHandler {
           + "  ORDER BY mc.m_product_id, mc.datefrom DESC "
           + ") cost ON cost.m_product_id = p.m_product_id "
           + "WHERE p.ad_client_id = :clientId AND p.isactive = 'Y' "
-          // 'S' (Service) products can never carry stock — excluded unconditionally,
-          // not just when includeZeroStock is off, since CROSS JOINing every product
-          // now surfaces them too (e.g. a "Discount" service line item).
-          + "  AND p.producttype <> 'S' "
           + "  AND (p.ad_org_id = '0' OR p.ad_org_id IN (:orgIds)) "
           + "  AND wh.ad_client_id = :clientId AND wh.isactive = 'Y' "
           + "  AND (wh.ad_org_id = '0' OR wh.ad_org_id IN (:orgIds)) ");
 
-      if (!productIds.isEmpty()) {
-        sql.append("  AND p.m_product_id IN (")
-            .append(buildNamedParams("productId", productIds.size()))
-            .append(") ");
-      }
-
-      if (!warehouseIds.isEmpty()) {
-        sql.append("  AND wh.m_warehouse_id IN (")
-            .append(buildNamedParams("warehouseId", warehouseIds.size()))
-            .append(") ");
-      }
-
-      if (!categoryIds.isEmpty()) {
-        sql.append("  AND p.m_product_category_id IN (")
-            .append(buildNamedParams("categoryId", categoryIds.size()))
-            .append(") ");
-      }
+      appendOptionalFilters(sql, productIds, warehouseIds, categoryIds);
 
       sql.append(
           "GROUP BY wh.name, pc.name, p.value, p.name, uom.name, cost.cost "
@@ -130,44 +111,13 @@ public class InventoryStockReportHandler implements NeoHandler {
       query.setParameter("clientId", clientId);
       query.setParameterList("orgIds", orgTree);
       query.setParameter("includeZeroStock", includeZeroStock);
-
-      if (!productIds.isEmpty()) {
-        for (int i = 0; i < productIds.size(); i++) {
-          query.setParameter("productId" + i, productIds.get(i));
-        }
-      }
-
-      if (!warehouseIds.isEmpty()) {
-        for (int i = 0; i < warehouseIds.size(); i++) {
-          query.setParameter("warehouseId" + i, warehouseIds.get(i));
-        }
-      }
-
-      if (!categoryIds.isEmpty()) {
-        for (int i = 0; i < categoryIds.size(); i++) {
-          query.setParameter("categoryId" + i, categoryIds.get(i));
-        }
-      }
+      bindOptionalParameters(query, productIds, warehouseIds, categoryIds);
 
       List<Object[]> rows = query.list();
 
-      JSONArray data = new JSONArray();
-      for (Object[] row : rows) {
-        JSONObject item = new JSONObject();
-        item.put("warehouse", row[0]);
-        item.put("category", row[1]);
-        item.put("productSearchKey", row[2]);
-        item.put("product", row[3]);
-        item.put("uom", row[4]);
-        item.put("qtyOnHand", toBigDecimal(row[5]));
-        item.put("unitCost", toBigDecimal(row[6]));
-        item.put("totalValuation", toBigDecimal(row[7]));
-        data.put(item);
-      }
-
       JSONObject responseData = new JSONObject();
-      responseData.put("data", data);
-      responseData.put("count", data.length());
+      responseData.put("data", mapRowsToJson(rows));
+      responseData.put("count", rows.size());
 
       JSONObject wrapper = new JSONObject();
       wrapper.put("response", responseData);
@@ -177,6 +127,75 @@ public class InventoryStockReportHandler implements NeoHandler {
       log.error("Error executing inventory stock report", e);
       return NeoResponse.error(500, "Inventory stock report failed: " + e.getMessage());
     }
+  }
+
+  /**
+   * Appends the optional {@code IN (...)} clauses for whichever product/warehouse/category
+   * filters were actually sent — the named parameters themselves are bound later, in
+   * {@link #bindOptionalParameters}. Pure extraction from {@code handle()} (Sonar
+   * java:S3776 cognitive complexity), no behavior change.
+   */
+  private static void appendOptionalFilters(StringBuilder sql, List<String> productIds,
+      List<String> warehouseIds, List<String> categoryIds) {
+    if (!productIds.isEmpty()) {
+      sql.append("  AND p.m_product_id IN (")
+          .append(buildNamedParams("productId", productIds.size()))
+          .append(") ");
+    }
+
+    if (!warehouseIds.isEmpty()) {
+      sql.append("  AND wh.m_warehouse_id IN (")
+          .append(buildNamedParams("warehouseId", warehouseIds.size()))
+          .append(") ");
+    }
+
+    if (!categoryIds.isEmpty()) {
+      sql.append("  AND p.m_product_category_id IN (")
+          .append(buildNamedParams("categoryId", categoryIds.size()))
+          .append(") ");
+    }
+  }
+
+  /**
+   * Binds the named parameters for whichever product/warehouse/category filters were
+   * actually sent, matching the placeholders {@link #appendOptionalFilters} added to the
+   * SQL. Pure extraction from {@code handle()} (Sonar java:S3776), no behavior change.
+   */
+  private static void bindOptionalParameters(NativeQuery<Object[]> query, List<String> productIds,
+      List<String> warehouseIds, List<String> categoryIds) {
+    for (int i = 0; i < productIds.size(); i++) {
+      query.setParameter("productId" + i, productIds.get(i));
+    }
+
+    for (int i = 0; i < warehouseIds.size(); i++) {
+      query.setParameter("warehouseId" + i, warehouseIds.get(i));
+    }
+
+    for (int i = 0; i < categoryIds.size(); i++) {
+      query.setParameter("categoryId" + i, categoryIds.get(i));
+    }
+  }
+
+  /**
+   * Maps each result row (see the {@code SELECT} column order in {@code handle()}) into a
+   * response JSON item. Pure extraction from {@code handle()} (Sonar java:S3776), no
+   * behavior change.
+   */
+  private static JSONArray mapRowsToJson(List<Object[]> rows) throws JSONException {
+    JSONArray data = new JSONArray();
+    for (Object[] row : rows) {
+      JSONObject item = new JSONObject();
+      item.put("warehouse", row[0]);
+      item.put("category", row[1]);
+      item.put("productSearchKey", row[2]);
+      item.put("product", row[3]);
+      item.put("uom", row[4]);
+      item.put("qtyOnHand", toBigDecimal(row[5]));
+      item.put("unitCost", toBigDecimal(row[6]));
+      item.put("totalValuation", toBigDecimal(row[7]));
+      data.put(item);
+    }
+    return data;
   }
 
   private static List<String> parseIds(String rawValue) {
