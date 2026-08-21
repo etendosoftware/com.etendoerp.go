@@ -73,8 +73,12 @@ import com.etendoerp.go.schemaforge.util.OwnerSupport;
  *
  * <p>Bootstrap-user hiding (2026-07-27): covers that a {@code user} list GET has the "Admin"
  * ({@code id="100"}) and "System" ({@code id="0"}) rows removed with {@code totalRows} adjusted,
- * that a list with neither present is left untouched, that a single-record GET (whose
- * {@code data} is a lone object, not an array) is never altered, and that a missing/malformed
+ * that a list with neither present is left untouched, that hideBootstrapUsers degrades to a
+ * no-op against a non-array {@code data} value (confirmed ETP-4830: a REAL single-record GET's
+ * {@code data} is a {@code JSONArray} of one element too — same as a create response, see {@link
+ * UserRoleAssignmentHandler#inviteNewlyCreatedUser}'s javadoc — so this defensive path is never
+ * actually exercised in production; it is only reachable here because {@code hideBootstrapUsers}
+ * is gated on {@code recordId == null}, not on the response shape), and that a missing/malformed
  * previous result degrades to a no-op rather than throwing.
  *
  * <p>Admin-initiated user creation (ETP-4829/ETP-4830): covers {@link
@@ -919,9 +923,12 @@ public class UserRoleAssignmentHandlerTest {
   }
 
   @Test
-  public void afterHandleIgnoresSingleRecordGetResponseShape() throws Exception {
-    // A single-record GET's "response" has a lone JSON object under "data", not an array —
-    // optJSONArray naturally no-ops there, so this must never throw or alter the body.
+  public void afterHandleIgnoresNonArrayDataShape() throws Exception {
+    // Defensive only: a REAL single-record GET's "data" is a JSONArray of one element too
+    // (confirmed ETP-4830 — see UserRoleAssignmentHandler#inviteNewlyCreatedUser's javadoc), so
+    // this exact lone-object shape never actually occurs in production. It's only reachable in
+    // this test because hideBootstrapUsers runs whenever recordId == null, regardless of the
+    // response's actual shape — optJSONArray must still no-op rather than throw against it.
     UserRoleAssignmentHandler handler = new UserRoleAssignmentHandler();
     JSONObject singleRecord = new JSONObject();
     singleRecord.put("id", "100");
@@ -955,6 +962,16 @@ public class UserRoleAssignmentHandlerTest {
 
   // ─── afterHandle: company invitation after a `user` POST create (ETP-4830) ──
 
+  /**
+   * Builds a {@code user} create/single-record-GET response body matching {@code
+   * DefaultJsonDataService}'s REAL shape (confirmed ETP-4830 by reading core's {@code
+   * update()}/{@code fetch()}): {@code response.data} is ALWAYS a {@code JSONArray}, holding
+   * exactly one element here — never a lone {@code JSONObject}. Before this fix the helper built
+   * a lone-object shape, which let {@code afterHandleSendsCompanyInvitationAfterCreate} and its
+   * siblings pass against a mock that matched the (wrong) production code's own incorrect
+   * assumption instead of the real response — the exact failure mode the fix in
+   * {@code UserRoleAssignmentHandler#inviteNewlyCreatedUser} addresses.
+   */
   private static JSONObject buildCreatedRecordResponseBody(String id, String email, String name)
       throws Exception {
     JSONObject data = new JSONObject();
@@ -965,8 +982,10 @@ public class UserRoleAssignmentHandlerTest {
     if (name != null) {
       data.put("name", name);
     }
+    JSONArray dataArray = new JSONArray();
+    dataArray.put(data);
     JSONObject inner = new JSONObject();
-    inner.put("data", data);
+    inner.put("data", dataArray);
     JSONObject body = new JSONObject();
     body.put("response", inner);
     return body;
@@ -1019,6 +1038,86 @@ public class UserRoleAssignmentHandlerTest {
 
       assertEquals(0, invitationServiceMock.constructed().size());
       obCtxMock.verify(() -> OBContext.setAdminMode(anyBoolean()), never());
+    }
+  }
+
+  /**
+   * ETP-4830 regression test: reproduces the real bug found in the live server log
+   * ("no 'data' object in the create response — cannot determine the created user's email,
+   * invitation not sent"). {@code response.data} is present but empty — {@code
+   * DefaultJsonDataService.update()} would never actually produce this (a successful
+   * create/update always yields exactly one element), but it is the shape the OLD {@code
+   * inner.optJSONObject("data")} extraction degraded to once {@code data} became a real {@code
+   * JSONArray}: {@code optJSONObject} always returns {@code null} against a {@code JSONArray}
+   * value, array-empty-or-not. Locks in that the fixed {@code dataArray.length() > 0} guard
+   * still degrades to a clean no-op — never a thrown exception — for this edge shape.
+   */
+  @Test
+  public void afterHandleSkipsInvitationWhenCreateResponseDataArrayIsEmpty() throws Exception {
+    UserRoleAssignmentHandler handler = new UserRoleAssignmentHandler();
+    JSONObject inner = new JSONObject();
+    inner.put("data", new JSONArray());
+    JSONObject body = new JSONObject();
+    body.put("response", inner);
+    NeoContext ctx = NeoContext.builder()
+        .endpointType(NeoEndpointType.CRUD)
+        .httpMethod("POST")
+        .previousResult(NeoResponse.ok(body))
+        .build();
+
+    try (MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
+        MockedConstruction<CompanyInvitationService> invitationServiceMock =
+            mockConstruction(CompanyInvitationService.class)) {
+
+      assertNull(handler.afterHandle(ctx));
+
+      assertEquals(0, invitationServiceMock.constructed().size());
+      obCtxMock.verify(() -> OBContext.setAdminMode(anyBoolean()), never());
+    }
+  }
+
+  /**
+   * ETP-4830 regression test: the pre-fix code read {@code data} via {@code
+   * inner.optJSONObject("data")} — the REAL create response shape ({@code data} as a {@code
+   * JSONArray}, confirmed against core's {@code DefaultJsonDataService}) always failed that
+   * extraction, which is exactly the bug seen in production. This is the single most direct
+   * regression guard for that bug: it asserts the created user's email IS correctly extracted
+   * from a {@code data} array of one element, and the invitation service IS actually invoked
+   * with it — the fixed-shape counterpart of {@link
+   * #afterHandleSendsCompanyInvitationAfterCreate} using the exact array-of-one shape
+   * {@code DefaultJsonDataService} really emits.
+   */
+  @Test
+  public void afterHandleExtractsEmailFromDataArrayOnCreate() throws Exception {
+    UserRoleAssignmentHandler handler = new UserRoleAssignmentHandler();
+    JSONObject record = new JSONObject();
+    record.put("id", USER_ID);
+    record.put("email", "Array.Shape@Example.com");
+    JSONArray dataArray = new JSONArray();
+    dataArray.put(record);
+    JSONObject inner = new JSONObject();
+    inner.put("data", dataArray);
+    JSONObject body = new JSONObject();
+    body.put("response", inner);
+    OBContext requestObContext = mock(OBContext.class);
+    NeoContext ctx = NeoContext.builder()
+        .endpointType(NeoEndpointType.CRUD)
+        .httpMethod("POST")
+        .previousResult(NeoResponse.ok(body))
+        .obContext(requestObContext)
+        .build();
+
+    try (MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
+        MockedConstruction<CompanyInvitationService> invitationServiceMock =
+            mockConstruction(CompanyInvitationService.class)) {
+      obCtxMock.when(() -> OBContext.setAdminMode(true)).then(inv -> null);
+      obCtxMock.when(OBContext::restorePreviousMode).then(inv -> null);
+
+      assertNull(handler.afterHandle(ctx));
+
+      CompanyInvitationService constructed = invitationServiceMock.constructed().get(0);
+      verify(constructed).createInvitationForNewlyCreatedUser(eq(requestObContext),
+          eq("array.shape@example.com"), isNull(), isNull());
     }
   }
 
@@ -1195,7 +1294,7 @@ public class UserRoleAssignmentHandlerTest {
 
       assertNull(handler.afterHandle(ctx));
 
-      JSONObject data = body.getJSONObject("response").getJSONObject("data");
+      JSONObject data = body.getJSONObject("response").getJSONArray("data").getJSONObject(0);
       assertEquals("ACCEPTED", data.getString("invitationStatus"));
     }
   }

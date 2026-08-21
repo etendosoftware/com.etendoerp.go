@@ -448,9 +448,12 @@ public class UserRoleAssignmentHandler implements NeoHandler {
 
   /**
    * Removes the "Admin"/"System" bootstrap-account rows (see class javadoc) from a {@code user}
-   * list GET response, adjusting {@code totalRows} to match. A single-record fetch has no
-   * {@code data} array (it's a lone JSON object instead), so {@code optJSONArray} naturally
-   * no-ops there — this only ever touches list responses.
+   * list GET response, adjusting {@code totalRows} to match. Only ever invoked for a list GET
+   * (the {@code afterHandle} dispatcher only calls this when {@code context.getRecordId() ==
+   * null}) — a single-record fetch's {@code data} is ALSO a {@code JSONArray} of one element
+   * (see {@link #inviteNewlyCreatedUser}'s javadoc, ETP-4830, confirmed against core's {@code
+   * DefaultJsonDataService}), never a lone {@code JSONObject}, so {@code optJSONArray} would
+   * work there too — this method simply never gets the chance to run on that path.
    */
   private void hideBootstrapUsers(NeoContext context) {
     try {
@@ -490,9 +493,19 @@ public class UserRoleAssignmentHandler implements NeoHandler {
    * out of the response body and sends a company invitation via {@link
    * CompanyInvitationService#createInvitationForNewlyCreatedUser} (see concern (3) in the class
    * javadoc). {@link NeoContext#getRecordId()} is never populated for {@code POST}, so the
-   * created record's fields are read from {@code previousResult.body.response.data} instead — a
-   * lone {@code JSONObject}, same shape as a single-record GET (see {@link
-   * #hideBootstrapUsers}'s javadoc for that same shape). {@code context.getObContext()} is
+   * created record's fields are read from {@code previousResult.body.response.data} instead —
+   * confirmed (ETP-4830, 2026-08-21) to ALWAYS be a {@code JSONArray}, never a lone {@code
+   * JSONObject}: {@code DefaultJsonDataService.update()} (which {@code add()} delegates to, see
+   * core's {@code modules_core/org.openbravo.service.json}) unconditionally does {@code
+   * jsonResponse.put(RESPONSE_DATA, new JSONArray(jsonObjects))}, for both a single-record create
+   * and a single-record GET by id (core wraps that one too, at its own {@code
+   * new JSONArray(Collections.singleton(singleResult))} call in {@code fetch()}) — there is no
+   * "lone object" shape anywhere in this response family. The created record is the array's one
+   * and only element. This is long-standing core behavior (unchanged since at least Feb 2025,
+   * long before this feature branch existed), NOT a regression from the {@code
+   * mergeblock/ETP-4962}/{@code ETP-4793} rebase this branch just went through — that merge only
+   * touched {@code NeoCrudHandler}'s error-envelope building (see its {@code
+   * checkJsonServiceResponse}), never the success-path shape. {@code context.getObContext()} is
    * captured by the dispatcher before this method's own {@code
    * OBContext.setAdminMode(true)} runs, so it still reflects the real acting admin's
    * client/org/user — {@code setAdminMode} only lifts security checks, it never changes those.
@@ -514,9 +527,11 @@ public class UserRoleAssignmentHandler implements NeoHandler {
       NeoResponse previousResult = context.getPreviousResult();
       JSONObject body = previousResult != null ? previousResult.getBody() : null;
       JSONObject inner = body != null ? body.optJSONObject(JsonConstants.RESPONSE_RESPONSE) : null;
-      JSONObject data = inner != null ? inner.optJSONObject(JsonConstants.RESPONSE_DATA) : null;
+      JSONArray dataArray = inner != null ? inner.optJSONArray(JsonConstants.RESPONSE_DATA) : null;
+      JSONObject data = dataArray != null && dataArray.length() > 0
+          ? dataArray.optJSONObject(0) : null;
       if (data == null) {
-        log.warn("UserRoleAssignmentHandler.inviteNewlyCreatedUser: no 'data' object in the "
+        log.warn("UserRoleAssignmentHandler.inviteNewlyCreatedUser: no 'data[0]' entry in the "
             + "create response — cannot determine the created user's email, invitation not sent");
         return;
       }
@@ -577,9 +592,11 @@ public class UserRoleAssignmentHandler implements NeoHandler {
    * to every surviving row — {@code null} when no invitation was ever sent, otherwise one of
    * {@code PENDING}/{@code SENT}/{@code ACCEPTED}/{@code EXPIRED}/{@code REVOKED}/{@code
    * DELIVERY_FAILED} (see {@link CompanyInvitationService#findLatestInvitationStatus}) — so the
-   * frontend can render a "pending invite" badge without a separate round trip. A single-record
-   * fetch has no {@code data} array (it's a lone JSON object instead, same shape {@link
-   * #hideBootstrapUsers}'s javadoc documents), so this checks both shapes.
+   * frontend can render a "pending invite" badge without a separate round trip. Both list and
+   * single-record GET responses carry {@code data} as a {@code JSONArray} (see {@link
+   * #inviteNewlyCreatedUser}'s javadoc, ETP-4830) — the {@code optJSONObject} fallback below is
+   * defensive only, kept in case a future response shape genuinely drops the array wrapper for a
+   * single record; it should never actually be exercised against the current core behavior.
    */
   private void attachInvitationStatus(NeoContext context) {
     try {
