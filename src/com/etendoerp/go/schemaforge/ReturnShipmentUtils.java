@@ -292,19 +292,19 @@ final class ReturnShipmentUtils {
 
   private static void applyBusinessPartnerFinancials(Invoice invoice, BusinessPartner bp, boolean isSales) {
     if (isSales) {
-      invoice.setPriceList(bp.getPriceList());
-      invoice.setCurrency(resolveInvoiceCurrency(bp.getPriceList(), invoice));
       if (bp.getPaymentTerms() == null || bp.getPaymentMethod() == null) {
         throw new OBException("Business Partner is missing mandatory Payment Terms or Payment Method");
       }
+      invoice.setPriceList(bp.getPriceList());
+      invoice.setCurrency(resolveInvoiceCurrency(bp.getPriceList(), invoice));
       invoice.setPaymentTerms(bp.getPaymentTerms());
       invoice.setPaymentMethod(bp.getPaymentMethod());
     } else {
-      invoice.setPriceList(bp.getPurchasePricelist());
-      invoice.setCurrency(resolveInvoiceCurrency(bp.getPurchasePricelist(), invoice));
       if (bp.getPOPaymentTerms() == null || bp.getPOPaymentMethod() == null) {
         throw new OBException("Business Partner is missing mandatory PO Payment Terms or PO Payment Method");
       }
+      invoice.setPriceList(bp.getPurchasePricelist());
+      invoice.setCurrency(resolveInvoiceCurrency(bp.getPurchasePricelist(), invoice));
       invoice.setPaymentTerms(bp.getPOPaymentTerms());
       invoice.setPaymentMethod(bp.getPOPaymentMethod());
     }
