@@ -126,8 +126,8 @@ public class PropertiesFeatureProvider implements dev.openfeature.sdk.FeaturePro
 
   /**
    * Maps a flag key to its environment-variable name: uppercased, with every character that is not
-   * a letter or digit replaced by an underscore, so {@code tenant-upgrade} becomes
-   * {@code ETGO_FLAG_TENANT_UPGRADE}.
+   * a letter or digit replaced by an underscore, so {@code some.other-flag} becomes
+   * {@code ETGO_FLAG_SOME_OTHER_FLAG}.
    */
   static String toEnvName(String flagKey) {
     return ENV_PREFIX + flagKey.toUpperCase(Locale.ROOT).replaceAll("[^A-Z0-9]", "_");

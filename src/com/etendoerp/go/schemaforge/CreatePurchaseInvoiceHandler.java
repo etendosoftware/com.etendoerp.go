@@ -445,6 +445,11 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
 
     OBDal.getInstance().getSession().refresh(invoice);
     ensureDocumentNo(invoice);
+    // ETP-4726: createFromOrder() already does this; createFromReceipt() never did,
+    // since inception (ETP-4032, commit 89d610e7) — ensureLineGrossAmounts() didn't
+    // exist yet at that point and was simply never wired in afterwards. Without it,
+    // Line_Gross_Amount stays at its stub value (0) for every receipt-generated line.
+    getSupport().ensureLineGrossAmounts(invoice);
 
     return invoice;
   }
@@ -598,6 +603,8 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
     OBDal.getInstance().flush();
     OBDal.getInstance().getSession().refresh(invoice);
     ensureDocumentNo(invoice);
+    // ETP-4726: same gap as createFromReceipt() above — never wired in this branch either.
+    getSupport().ensureLineGrossAmounts(invoice);
 
     return invoice;
   }

@@ -26,14 +26,18 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mockConstruction;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Method;
 import java.math.BigDecimal;
 import java.text.SimpleDateFormat;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Date;
+import java.util.List;
 
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
@@ -54,10 +58,12 @@ import org.openbravo.dal.service.OBQuery;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.data.FieldProvider;
 import org.openbravo.erpCommon.ad_reports.AgingDao;
+import org.openbravo.model.common.currency.Currency;
 import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.financialmgmt.accounting.coa.AcctSchema;
 
 import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
+import com.etendoerp.go.schemaforge.util.NeoReportParam;
 
 /**
  * Unit tests for {@link AgingReportHandler}.
@@ -114,6 +120,14 @@ class AgingReportHandlerTest {
     java.lang.reflect.Field f = bucket.getClass().getDeclaredField(fieldName);
     f.setAccessible(true);
     return (String) f.get(bucket);
+  }
+
+  // Access private inner class AcctSchemaResult
+  private static Object getAcctSchemaResultField(Object acctSchemaResult, String fieldName)
+      throws Exception {
+    java.lang.reflect.Field f = acctSchemaResult.getClass().getDeclaredField(fieldName);
+    f.setAccessible(true);
+    return f.get(acctSchemaResult);
   }
 
   // Simple FieldProvider stub
@@ -281,8 +295,11 @@ class AgingReportHandlerTest {
             NeoContext.builder().httpMethod("POST").requestBody(body).build());
 
         assertEquals(400, result.getHttpStatus());
-        assertTrue(result.getBody().getJSONObject("error").getString("message")
-            .contains("organization context"));
+        JSONObject errorBody = result.getBody();
+        assertEquals(400, errorBody.getInt("status"));
+        assertEquals("organization_not_resolved", errorBody.getString("error"));
+        assertTrue(errorBody.getString("detail").contains("organization context"));
+        assertTrue(errorBody.has("hint"));
         assertTrue(daoConstruction.constructed().isEmpty());
       }
     }
@@ -310,16 +327,27 @@ class AgingReportHandlerTest {
             NeoContext.builder().httpMethod("POST").requestBody(body).build());
 
         assertEquals(422, result.getHttpStatus());
-        assertTrue(result.getBody().getJSONObject("error").getString("message")
-            .contains("organization tree"));
+        JSONObject errorBody = result.getBody();
+        assertEquals(422, errorBody.getInt("status"));
+        assertEquals("organization_tree_not_resolved", errorBody.getString("error"));
+        assertTrue(errorBody.getString("detail").contains("organization tree"));
+        assertTrue(errorBody.has("hint"));
         assertTrue(daoConstruction.constructed().isEmpty());
       }
     }
 
+    /**
+     * ETP-4918: this 422 used to assert "No accounting schema with currency is configured for
+     * organization <id>" — a claim a live benchmark run found to be false (the schema WAS
+     * configured, both via the FK and via the link table). The rewritten body must say only
+     * that resolution failed, never assert the absence of configuration, and must point at the
+     * working alternative (neo_list on sales-invoice/header filtering pending+partial status).
+     */
     @Test
     @DisplayName("Missing accounting schema returns an actionable 422")
     void missingAccountingSchemaReturns422() throws Exception {
       OBDal dal = mock(OBDal.class);
+      Organization org = mock(Organization.class);
       @SuppressWarnings("unchecked")
       OBQuery<AcctSchema> schemaQuery = mock(OBQuery.class);
       try (MockedStatic<NeoAccessHelper> accessMock = mockAccessGranted();
@@ -334,7 +362,11 @@ class AgingReportHandlerTest {
         paymentStatusMock.when(FIN_Utility::getListPaymentConfirmed)
             .thenReturn(Collections.singletonList("RPR"));
         obDalMock.when(OBDal::getInstance).thenReturn(dal);
-        when(dal.get(Organization.class, "org-id")).thenReturn(mock(Organization.class));
+        // Same mocked Organization answers both the org-exists guard (executeReport) and the
+        // FK ledger lookup (resolveAcctSchemaForOrg) — getGeneralLedger() defaults to null, so
+        // resolution falls through to the OrganizationAcctSchema subquery below, which also
+        // finds nothing: neither path resolves a schema.
+        when(dal.get(Organization.class, "org-id")).thenReturn(org);
         when(dal.createQuery(eq(AcctSchema.class), anyString())).thenReturn(schemaQuery);
         when(schemaQuery.setNamedParameter(anyString(), anyString())).thenReturn(schemaQuery);
         when(schemaQuery.setMaxResult(1)).thenReturn(schemaQuery);
@@ -347,9 +379,143 @@ class AgingReportHandlerTest {
             NeoContext.builder().httpMethod("POST").requestBody(body).build());
 
         assertEquals(422, result.getHttpStatus());
-        assertTrue(result.getBody().getJSONObject("error").getString("message")
-            .contains("No accounting schema"));
+        JSONObject errorBody = result.getBody();
+        assertEquals(422, errorBody.getInt("status"));
+        assertEquals("accounting_schema_unresolved", errorBody.getString("error"));
+        String detail = errorBody.getString("detail");
+        assertTrue(detail.contains("Could not resolve"));
+        assertFalse(detail.contains("No accounting schema"),
+            "detail must not assert that nothing is configured");
+        assertFalse(detail.toLowerCase().contains("is not configured"),
+            "detail must not assert a cause that was never verified");
+        String hint = errorBody.getString("hint");
+        assertTrue(hint.contains("neo_list"));
+        assertTrue(hint.contains("sales-invoice"));
+        assertTrue(hint.contains("pending"));
+        assertTrue(hint.contains("partial"));
+        assertEquals("docs(topic:\"reading records\")", errorBody.getString("seeAlso"));
         assertTrue(daoConstruction.constructed().isEmpty());
+      }
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // resolveAcctSchema
+  // -------------------------------------------------------------------------
+
+  @Nested
+  @DisplayName("resolveAcctSchema")
+  class ResolveAcctSchema {
+
+    @Test
+    @DisplayName("Uses the organization's own general ledger FK when it carries a currency")
+    void usesOrgLedgerFkWhenCurrencyPresent() throws Exception {
+      OBDal dal = mock(OBDal.class);
+      Organization org = mock(Organization.class);
+      AcctSchema ledger = mock(AcctSchema.class);
+      Currency currency = mock(Currency.class);
+      when(ledger.getId()).thenReturn("SCHEMA-FK");
+      when(ledger.getCurrency()).thenReturn(currency);
+      when(org.getGeneralLedger()).thenReturn(ledger);
+
+      try (MockedStatic<OBContext> contextMock = mockStatic(OBContext.class);
+           MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+        obDalMock.when(OBDal::getInstance).thenReturn(dal);
+        when(dal.get(Organization.class, "org-id")).thenReturn(org);
+
+        Object result = invokePrivate(handler, "resolveAcctSchema",
+            new Class<?>[] { String.class, String.class }, "", "org-id");
+
+        assertEquals("SCHEMA-FK", getAcctSchemaResultField(result, "accSchemaId"));
+        assertEquals(currency, getAcctSchemaResultField(result, "currency"));
+        // The subquery must never run — the FK alone was sufficient.
+        verify(dal, never()).createQuery(eq(AcctSchema.class), anyString());
+      }
+    }
+
+    @Test
+    @DisplayName("Falls back to the OrganizationAcctSchema subquery when the FK ledger is null")
+    void fallsBackWhenFkLedgerIsNull() throws Exception {
+      OBDal dal = mock(OBDal.class);
+      Organization org = mock(Organization.class);
+      when(org.getGeneralLedger()).thenReturn(null);
+      AcctSchema fallbackSchema = mock(AcctSchema.class);
+      Currency currency = mock(Currency.class);
+      when(fallbackSchema.getId()).thenReturn("SCHEMA-FALLBACK");
+      when(fallbackSchema.getCurrency()).thenReturn(currency);
+      @SuppressWarnings("unchecked")
+      OBQuery<AcctSchema> schemaQuery = mock(OBQuery.class);
+
+      try (MockedStatic<OBContext> contextMock = mockStatic(OBContext.class);
+           MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+        obDalMock.when(OBDal::getInstance).thenReturn(dal);
+        when(dal.get(Organization.class, "org-id")).thenReturn(org);
+        when(dal.createQuery(eq(AcctSchema.class), anyString())).thenReturn(schemaQuery);
+        when(schemaQuery.setNamedParameter(anyString(), anyString())).thenReturn(schemaQuery);
+        when(schemaQuery.setMaxResult(1)).thenReturn(schemaQuery);
+        when(schemaQuery.uniqueResult()).thenReturn(fallbackSchema);
+
+        Object result = invokePrivate(handler, "resolveAcctSchema",
+            new Class<?>[] { String.class, String.class }, "", "org-id");
+
+        assertEquals("SCHEMA-FALLBACK", getAcctSchemaResultField(result, "accSchemaId"));
+        assertEquals(currency, getAcctSchemaResultField(result, "currency"));
+      }
+    }
+
+    @Test
+    @DisplayName("Falls through to the subquery when the FK ledger has no currency")
+    void fallsThroughWhenFkLedgerHasNoCurrency() throws Exception {
+      OBDal dal = mock(OBDal.class);
+      Organization org = mock(Organization.class);
+      AcctSchema ledgerWithoutCurrency = mock(AcctSchema.class);
+      when(ledgerWithoutCurrency.getCurrency()).thenReturn(null);
+      when(org.getGeneralLedger()).thenReturn(ledgerWithoutCurrency);
+      AcctSchema fallbackSchema = mock(AcctSchema.class);
+      Currency currency = mock(Currency.class);
+      when(fallbackSchema.getId()).thenReturn("SCHEMA-FALLBACK");
+      when(fallbackSchema.getCurrency()).thenReturn(currency);
+      @SuppressWarnings("unchecked")
+      OBQuery<AcctSchema> schemaQuery = mock(OBQuery.class);
+
+      try (MockedStatic<OBContext> contextMock = mockStatic(OBContext.class);
+           MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+        obDalMock.when(OBDal::getInstance).thenReturn(dal);
+        when(dal.get(Organization.class, "org-id")).thenReturn(org);
+        when(dal.createQuery(eq(AcctSchema.class), anyString())).thenReturn(schemaQuery);
+        when(schemaQuery.setNamedParameter(anyString(), anyString())).thenReturn(schemaQuery);
+        when(schemaQuery.setMaxResult(1)).thenReturn(schemaQuery);
+        when(schemaQuery.uniqueResult()).thenReturn(fallbackSchema);
+
+        Object result = invokePrivate(handler, "resolveAcctSchema",
+            new Class<?>[] { String.class, String.class }, "", "org-id");
+
+        assertEquals("SCHEMA-FALLBACK", getAcctSchemaResultField(result, "accSchemaId"));
+        assertEquals(currency, getAcctSchemaResultField(result, "currency"));
+      }
+    }
+
+    @Test
+    @DisplayName("An explicit glId takes precedence over both the FK and the subquery")
+    void explicitGlIdTakesPrecedence() throws Exception {
+      OBDal dal = mock(OBDal.class);
+      AcctSchema explicit = mock(AcctSchema.class);
+      Currency currency = mock(Currency.class);
+      when(explicit.getId()).thenReturn("GL-EXPLICIT");
+      when(explicit.getCurrency()).thenReturn(currency);
+
+      try (MockedStatic<OBContext> contextMock = mockStatic(OBContext.class);
+           MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+        obDalMock.when(OBDal::getInstance).thenReturn(dal);
+        when(dal.get(AcctSchema.class, "GL-EXPLICIT")).thenReturn(explicit);
+
+        Object result = invokePrivate(handler, "resolveAcctSchema",
+            new Class<?>[] { String.class, String.class }, "GL-EXPLICIT", "org-id");
+
+        assertEquals("GL-EXPLICIT", getAcctSchemaResultField(result, "accSchemaId"));
+        assertEquals(currency, getAcctSchemaResultField(result, "currency"));
+        verify(dal, never()).get(eq(Organization.class), anyString());
+        verify(dal, never()).createQuery(eq(AcctSchema.class), anyString());
       }
     }
   }
@@ -362,8 +528,16 @@ class AgingReportHandlerTest {
   @DisplayName("describeReport")
   class DescribeReport {
 
+    /**
+     * The descriptor is now rendered from {@link AgingReportHandler#reportParameters()} instead of
+     * a hand-written second copy (ETP-4793 / IMP-19). That copy had drifted: it listed 8 of the 10
+     * parameters the handler actually reads — {@code glId} and {@code showDetails} were absent —
+     * and it claimed {@code recOrPay} was required when the code defaults it to RECEIVABLES.
+     * Rendering from the declaration is what makes that class of drift impossible, so the test
+     * asserts against the declaration rather than a second hardcoded count.
+     */
     @Test
-    @DisplayName("Returns all expected parameter definitions")
+    @DisplayName("Renders every declared parameter, and only those")
     void returnsAllParams() throws Exception {
       NeoResponse result = (NeoResponse) invokePrivate(handler, "describeReport",
           new Class<?>[] {});
@@ -372,13 +546,27 @@ class AgingReportHandlerTest {
       JSONObject body = result.getBody();
       assertEquals("Aging Report", body.getString("name"));
 
+      List<NeoReportParam> declared = handler.reportParameters().orElseThrow();
       JSONArray params = body.getJSONArray("parameters");
-      assertEquals(8, params.length());
+      assertEquals(declared.size(), params.length());
+      for (int i = 0; i < declared.size(); i++) {
+        assertEquals(declared.get(i).getName(), params.getJSONObject(i).getString("name"));
+      }
 
-      // Verify recOrPay is required
-      JSONObject firstParam = params.getJSONObject(0);
-      assertEquals("recOrPay", firstParam.getString("name"));
-      assertTrue(firstParam.getBoolean("required"));
+      // The two the old hand-written descriptor omitted entirely.
+      List<String> names = new ArrayList<>();
+      for (int i = 0; i < params.length(); i++) {
+        names.add(params.getJSONObject(i).getString("name"));
+      }
+      assertTrue(names.contains("glId"));
+      assertTrue(names.contains("showDetails"));
+
+      // recOrPay is a closed set with a non-neutral default, not a requirement: declaring it
+      // required would reject calls that work today.
+      JSONObject recOrPay = params.getJSONObject(0);
+      assertEquals("recOrPay", recOrPay.getString("name"));
+      assertFalse(recOrPay.getBoolean("required"));
+      assertEquals("RECEIVABLES", recOrPay.getJSONArray("allowedValues").getString(0));
     }
   }
 
@@ -1058,17 +1246,35 @@ class AgingReportHandlerTest {
   @DisplayName("param helper")
   class ParamHelper {
 
+    /**
+     * The helper takes the declared parameter itself now, so name/type/required/description can
+     * no longer be retyped differently from what the handler reads.
+     */
     @Test
-    @DisplayName("Builds JSON parameter definition")
+    @DisplayName("Builds JSON parameter definition from the declaration")
     void buildsParam() throws Exception {
       JSONObject p = (JSONObject) invokeStatic("param",
-          new Class<?>[] { String.class, String.class, boolean.class, String.class },
-          "recOrPay", "string", true, "RECEIVABLES or PAYABLES");
+          new Class<?>[] { NeoReportParam.class },
+          NeoReportParam.required("dateFrom", NeoReportParam.TYPE_DATE, "Start date."));
 
-      assertEquals("recOrPay", p.getString("name"));
-      assertEquals("string", p.getString("type"));
+      assertEquals("dateFrom", p.getString("name"));
+      assertEquals(NeoReportParam.TYPE_DATE, p.getString("type"));
       assertTrue(p.getBoolean("required"));
-      assertEquals("RECEIVABLES or PAYABLES", p.getString("description"));
+      assertEquals("Start date.", p.getString("description"));
+      assertFalse(p.has("allowedValues"), "an open-ended parameter has no closed set");
+    }
+
+    @Test
+    @DisplayName("A closed set is rendered as allowedValues")
+    void buildsParamWithAllowedValues() throws Exception {
+      JSONObject p = (JSONObject) invokeStatic("param",
+          new Class<?>[] { NeoReportParam.class },
+          NeoReportParam.options("recOrPay", "Which side.",
+              List.of("RECEIVABLES", "PAYABLES")));
+
+      assertFalse(p.getBoolean("required"));
+      assertEquals(2, p.getJSONArray("allowedValues").length());
+      assertEquals("PAYABLES", p.getJSONArray("allowedValues").getString(1));
     }
   }
 }

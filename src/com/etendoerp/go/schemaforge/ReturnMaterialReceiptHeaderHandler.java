@@ -99,7 +99,7 @@ public class ReturnMaterialReceiptHeaderHandler implements NeoHandler {
       return handleCreateReturnInvoice(context);
     }
     if (ACTION_DOCUMENT_ACTION.equals(action) && "POST".equals(method)) {
-      fillMissingStorageBins(context.getRecordId());
+      NeoHandlerUtils.reanchorLinesToHeaderWarehouse(context.getRecordId(), log);
       return null; // let NEO native process handle completion
     }
     return null;
@@ -120,23 +120,6 @@ public class ReturnMaterialReceiptHeaderHandler implements NeoHandler {
     if (NeoEndpointType.CRUD.equals(context.getEndpointType())
         && NeoHandlerUtils.isWriteMethod(context.getHttpMethod())) {
       NeoHandlerUtils.mirrorFieldValue(context.getRequestBody(), FIELD_MOVEMENT_DATE, FIELD_ACCOUNTING_DATE);
-    }
-  }
-
-  private void fillMissingStorageBins(String receiptId) {
-    if (receiptId == null) return;
-    try {
-      OBContext.setAdminMode(true);
-      try {
-        ShipmentInOut receipt = OBDal.getInstance().get(ShipmentInOut.class, receiptId);
-        if (receipt != null) {
-          ReturnShipmentUtils.assignBinsToLines(receipt);
-        }
-      } finally {
-        OBContext.restorePreviousMode();
-      }
-    } catch (Exception e) {
-      log.warn("Could not fill missing storage bins for receipt {}: {}", receiptId, e.getMessage());
     }
   }
 
