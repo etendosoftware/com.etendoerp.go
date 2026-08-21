@@ -1,6 +1,8 @@
 package com.etendoerp.go.schemaforge;
 
+import java.text.SimpleDateFormat;
 import java.util.ArrayList;
+import java.util.Date;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
@@ -1895,10 +1897,13 @@ public class NeoDefaultsService {
    * Coerces a raw declared-default value (as returned by {@link #resolveDefaults}, typically a
    * {@code String}) to the Java type the given primitive DAL property expects.
    *
-   * <p>Date properties are parsed with the same {@code yyyy-MM-dd} format used for the
-   * {@code @#Date@} session variable ({@link #DATE_FORMAT}) — {@link NeoTypeCoercionHelper}
-   * does not cover dates, since on the HTTP path date coercion is handled downstream by
-   * {@code DefaultJsonDataService}. Other numeric/boolean types delegate to
+   * <p>Date properties are canonicalized through {@link NeoDateFormat} before parsing — the
+   * {@code @#Date@} session variable resolved by {@code Utility.getDefault} is one of the
+   * known non-ISO sources it documents (hardcoded {@code dd-MM-yyyy}), so parsing the raw
+   * value as {@link NeoDateFormat#ISO_DATE} directly would silently misread it.
+   * {@link NeoTypeCoercionHelper} does not cover dates, since on the HTTP path date coercion
+   * is handled downstream by {@code DefaultJsonDataService}. Other numeric/boolean types
+   * delegate to
    * {@link NeoTypeCoercionHelper#coerceField}, the same coercion the HTTP create path uses via
    * {@code NeoTypeCoercionHelper.coerceTypes}.
    */
@@ -1924,8 +1929,16 @@ public class NeoDefaultsService {
       return rawValue;
     }
     if (rawValue instanceof String && !((String) rawValue).isEmpty()) {
+      String raw = (String) rawValue;
+      String canonical = NeoDateFormat.isCanonical(raw, false) ? raw
+          : NeoDateFormat.toCanonical(raw, false);
+      if (canonical == null) {
+        log.debug("Could not canonicalize date default '{}' for property {}",
+            rawValue, prop.getName());
+        return null;
+      }
       try {
-        return new SimpleDateFormat(DATE_FORMAT).parse((String) rawValue);
+        return new SimpleDateFormat(NeoDateFormat.ISO_DATE).parse(canonical);
       } catch (java.text.ParseException e) {
         log.debug("Could not parse date default '{}' for property {}: {}",
             rawValue, prop.getName(), e.getMessage());
