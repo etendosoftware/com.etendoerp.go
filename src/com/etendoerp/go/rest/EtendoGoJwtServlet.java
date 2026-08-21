@@ -322,17 +322,32 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   @Override
   public void doPost(HttpServletRequest request, HttpServletResponse response) throws IOException {
     String path = request.getPathInfo();
+    // Kept ahead of everything else: the provider calls this one unauthenticated,
+    // so it must not fall through any of the credential-bearing groups below.
     if (isPath(path, "/checkout/webhook")) {
       handleCheckoutWebhook(request, response);
       return;
     }
-    String ssoProvider = extractSsoProvider(path);
-    if (isPath(path, "/register")) {
-      handleRegister(request, response);
-    } else if (isPath(path, "/session/register")) {
+    // Split into groups purely to keep this dispatcher under its cognitive-complexity
+    // limit — the chain reached 20 once the session family and the invitation
+    // endpoints both landed here. Every route below is an EXACT match on a distinct
+    // literal, and the two prefix matches cannot collide (`/sso/` is the legacy
+    // provider path, `/session/sso/` the session-family one, and neither string is a
+    // prefix of the other), so grouping does not change which handler wins.
+    if (dispatchSessionPost(path, request, response)
+        || dispatchLegacyAuthPost(path, request, response)
+        || dispatchCredentialPost(path, request, response)
+        || dispatchProvisioningPost(path, request, response)) {
+      return;
+    }
+    writeError(response, HttpServletResponse.SC_NOT_FOUND, ERROR_UNKNOWN_ENDPOINT + path);
+  }
+
+  /** The `/session*` family (ETP-4575): cookie-backed sessions. */
+  private boolean dispatchSessionPost(String path, HttpServletRequest request,
+      HttpServletResponse response) throws IOException {
+    if (isPath(path, "/session/register")) {
       handleSessionRegister(request, response);
-    } else if (isPath(path, "/login")) {
-      handleLogin(request, response);
     } else if (isPath(path, PATH_SESSION)) {
       handleSessionCreate(request, response);
     } else if (isPath(path, "/session/environment")) {
@@ -341,15 +356,47 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       handleSessionRefresh(request, response);
     } else if (path != null && path.startsWith("/session/sso/")) {
       handleSessionCreateSso(path.substring("/session/sso/".length()), request, response);
+    } else {
+      return false;
+    }
+    return true;
+  }
+
+  /** The pre-session endpoints, still answering with a bearer token. */
+  private boolean dispatchLegacyAuthPost(String path, HttpServletRequest request,
+      HttpServletResponse response) throws IOException {
+    String ssoProvider = extractSsoProvider(path);
+    if (isPath(path, "/register")) {
+      handleRegister(request, response);
+    } else if (isPath(path, "/login")) {
+      handleLogin(request, response);
     } else if (ssoProvider != null) {
       handleSsoLogin(ssoProvider, request, response);
-    } else if (isPath(path, "/password-reset/request")) {
+    } else {
+      return false;
+    }
+    return true;
+  }
+
+  /** Password reset and change — credential management, no session created. */
+  private boolean dispatchCredentialPost(String path, HttpServletRequest request,
+      HttpServletResponse response) throws IOException {
+    if (isPath(path, "/password-reset/request")) {
       handlePasswordResetRequest(request, response);
     } else if (isPath(path, "/password-reset/confirm")) {
       handlePasswordResetConfirm(request, response);
     } else if (isPath(path, "/change-password")) {
       handleChangePassword(request, response);
-    } else if (isPath(path, PATH_ONBOARDING_DRAFT)) {
+    } else {
+      return false;
+    }
+    return true;
+  }
+
+  /** Onboarding, checkout and company invitations. */
+  private boolean dispatchProvisioningPost(String path, HttpServletRequest request,
+      HttpServletResponse response) throws IOException {
+    if (isPath(path, PATH_ONBOARDING_DRAFT)) {
       handleSaveOnboardingDraft(request, response);
     } else if (isPath(path, "/onboarding")) {
       handleOnboarding(request, response);
@@ -362,8 +409,9 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     } else if (isPath(path, "/company-invitations/register-and-accept")) {
       handleCompanyInvitationRegisterAndAccept(request, response);
     } else {
-      writeError(response, HttpServletResponse.SC_NOT_FOUND, ERROR_UNKNOWN_ENDPOINT + path);
+      return false;
     }
+    return true;
   }
 
   @Override
