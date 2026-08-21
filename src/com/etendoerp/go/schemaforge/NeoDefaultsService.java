@@ -482,8 +482,12 @@ public class NeoDefaultsService {
 
     // SQL expressions — resolve parameters and execute
     if (defaultExpr.startsWith("@SQL=")) {
+      // ETP-4783: Ensure ISSOTRX is available for @issotrx@ tokens in @SQL= expressions.
+      // Extraction into a helper keeps cognitive complexity within SonarQube limits.
+      Map<String, Object> sqlParentValues = enrichWithIsSOTrxFromContext(
+          request.parentValues, request.ctx);
       return NeoDefaultsSqlHelper.resolveSQLDefault(defaultExpr, request.vars, request.conn,
-          request.windowId, adColumn, request.parentValues);
+          request.windowId, adColumn, sqlParentValues);
     }
 
     // List-reference columns (AD_Reference_ID = "17") with a pure literal default (no "@"
@@ -509,6 +513,70 @@ public class NeoDefaultsService {
     }
 
     return null;
+  }
+
+  /**
+   * Enriches a parent-values map with the ISSOTRX flag derived from the AD Window's
+   * isSalesTransaction flag, when the context carries a tab linked to a window.
+   * Creates a new map if {@code parentValues} is null. Uses {@code putIfAbsent} so an
+   * existing ISSOTRX entry is preserved. Extracted from
+   * {@link #resolveNonEmptyDefaultExpr} to reduce cognitive complexity (S3776).
+   */
+  private static Map<String, Object> enrichWithIsSOTrxFromContext(
+      Map<String, Object> parentValues, NeoContext ctx) {
+    if (ctx == null || ctx.getAdTab() == null) {
+      return parentValues;
+    }
+    Tab reqTab = ctx.getAdTab();
+    if (reqTab.getWindow() == null || reqTab.getWindow().isSalesTransaction() == null) {
+      return parentValues;
+    }
+    String isSOTrx = reqTab.getWindow().isSalesTransaction() ? "Y" : "N";
+    if (parentValues == null) {
+      parentValues = new java.util.HashMap<>();
+    }
+    parentValues.putIfAbsent("ISSOTRX", isSOTrx);
+    return parentValues;
+  }
+
+  /**
+   * Injects the ISSOTRX flag derived from the AD Window's isSalesTransaction field into
+   * the given parent-values map, overwriting any existing value. No-op when the tab or
+   * window is null or when isSalesTransaction is not set. Extracted from
+   * {@link #injectMandatoryDefaults} to reduce cognitive complexity (S3776).
+   */
+  private static void injectIsSOTrxFromTab(Map<String, Object> parentValues, Tab adTab) {
+    if (adTab == null || adTab.getWindow() == null) {
+      return;
+    }
+    Boolean isSalesTrx = adTab.getWindow().isSalesTransaction();
+    if (isSalesTrx != null) {
+      parentValues.put("ISSOTRX", isSalesTrx ? "Y" : "N");
+    }
+  }
+
+  /**
+   * Iterates all columns of the given tab's table and injects a mandatory default for
+   * each active, non-key, non-audit column. Extracted from {@link #injectMandatoryDefaults}
+   * to reduce cognitive complexity (S3776). Behavior is identical to the inline loop.
+   */
+  private static void injectDefaultsForActiveColumns(JSONObject body, Tab adTab,
+      Entity dalEntity, MandatoryDefaultContext mCtx) {
+    for (Column col : adTab.getTable().getADColumnList()) {
+      if (!col.isActive()) {
+        continue;
+      }
+      // Skip primary key columns — DAL auto-generates UUID PKs.
+      if (Boolean.TRUE.equals(col.isKeyColumn())) {
+        continue;
+      }
+      // Skip audit columns (updated, created, updatedBy, createdBy) — Hibernate manages these.
+      org.openbravo.base.model.Property prop = dalEntity.getPropertyByColumnName(col.getDBColumnName());
+      if (prop != null && prop.isAuditInfo()) {
+        continue;
+      }
+      injectMandatoryDefaultForColumn(body, dalEntity, col, mCtx, col.isMandatory());
+    }
   }
 
   /**
@@ -794,6 +862,12 @@ public class NeoDefaultsService {
       String windowId = ctx.getSfEntity() != null ? resolveWindowId(ctx.getSfEntity()) : "";
       Map<String, Object> parentValues = NeoParentValuesLoader.load(adTab, parentId);
 
+      // ETP-4783: Inject ISSOTRX so that @issotrx@ in @SQL= defaults (e.g. aeatsiiDescripcionSii)
+      // resolves to the correct sales/purchase value rather than falling back to Utility.getContext,
+      // which returns empty in the NEO Headless session context (no Classic window session variable
+      // is set). The same lookup is done by SelectorContextResolver.resolveIsSOTrxFromWindow.
+      injectIsSOTrxFromTab(parentValues, adTab);
+
       // Build a map of ETGO_SF_FIELD per-window default overrides, keyed by DB column name
       // (upper-case). This mirrors the sfFieldDefault lookup that resolveDefaults already does
       // so that the CREATE path honours the same window-level defaults as the /defaults endpoint.
@@ -807,25 +881,7 @@ public class NeoDefaultsService {
       // @C_Currency_ID@) must be injected on create to reach parity with /defaults —
       // otherwise the create path silently drops them. Mandatory-ness is passed down so
       // the aggressive NOT-NULL safety fallbacks stay gated to mandatory columns only.
-      for (Column col : adTab.getTable().getADColumnList()) {
-        if (!col.isActive()) {
-          continue;
-        }
-        // Skip primary key columns — DAL auto-generates UUID PKs.
-        // Injecting any value here (including an existing record's ID via FK fallback)
-        // would cause DefaultJsonDataService to try to UPDATE instead of INSERT.
-        if (Boolean.TRUE.equals(col.isKeyColumn())) {
-          continue;
-        }
-        // Skip audit columns (updated, created, updatedBy, createdBy) — Hibernate manages
-        // these automatically via event listeners. Injecting them causes JsonToDataConverter
-        // to run a stale-date comparison that fails with a date-format parse error.
-        org.openbravo.base.model.Property prop = dalEntity.getPropertyByColumnName(col.getDBColumnName());
-        if (prop != null && prop.isAuditInfo()) {
-          continue;
-        }
-        injectMandatoryDefaultForColumn(body, dalEntity, col, mCtx, col.isMandatory());
-      }
+      injectDefaultsForActiveColumns(body, adTab, dalEntity, mCtx);
 
       // Fallback 3: run callout cascade with all fields in body.
       // Callouts configured in AD_Column derive dependent fields (e.g. BP → address,
