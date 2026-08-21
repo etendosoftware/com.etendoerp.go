@@ -20,6 +20,8 @@ package com.etendoerp.go.schemaforge;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
+import java.util.List;
+import java.util.Map;
 
 import javax.inject.Named;
 
@@ -58,6 +60,13 @@ public class InvoiceLineHandler implements NeoHandler {
   private static final Logger log = LogManager.getLogger(InvoiceLineHandler.class);
   private static final String FIELD_INVOICED_QTY = "invoicedQuantity";
   private static final String FIELD_LINE_NET_AMOUNT = "lineNetAmount";
+  // ETP-4941: product search key (M_Product.Value) injected into GET lines so the printed PDF's
+  // "CÓD." column shows the SKU instead of falling back to the line number. Mirrors the
+  // enrichment AbstractInOutLineHandler already does for M_InOutLine lines, via the shared
+  // NeoHandlerUtils#fetchProductCodesForLines.
+  private static final String FIELD_PRODUCT_CODE = "productCode";
+  private static final String LINE_TABLE = "c_invoiceline";
+  private static final String LINE_ID_COL = "c_invoiceline_id";
   // ETP-4737: signal field for the "Import from Source Invoice" popup — carries the source
   // C_InvoiceLine id being imported, persisted into EM_ETGO_Source_Invoiceline_ID (a
   // self-referencing FK on C_InvoiceLine, same pattern as BOM_Parent_ID) so the popup can
@@ -149,6 +158,7 @@ public class InvoiceLineHandler implements NeoHandler {
     String method = context.getHttpMethod();
     if ("GET".equals(method)) {
       enrichSourceInvoiceLineId(context);
+      enrichProductCode(context);
       return DiscountLineFilter.filterFromResponse(context);
     }
     if ("POST".equals(method) || "PATCH".equals(method) || "PUT".equals(method)) {
@@ -338,6 +348,35 @@ public class InvoiceLineHandler implements NeoHandler {
       }
     } catch (Exception e) {
       log.warn("Could not enrich sourceInvoiceLineId: {}", e.getMessage());
+    }
+  }
+
+  /**
+   * ETP-4941: injects {@code productCode} (the product search key, {@code M_Product.Value})
+   * into every GET record, mutating the response body in place — same pattern as {@link
+   * #enrichSourceInvoiceLineId}. Read by the shared PDF template's "CÓD." column (see {@code
+   * documentPdf.js}'s {@code resolveProductCode} on the frontend), which already prioritizes
+   * this field over its dead fallback chain.
+   */
+  private void enrichProductCode(NeoContext context) {
+    try {
+      JSONArray dataArr = NeoHandlerUtils.extractGetDataArray(context);
+      if (dataArr == null) {
+        return;
+      }
+      List<String> lineIds = NeoHandlerUtils.collectIds(dataArr);
+      Map<String, String> codes =
+          NeoHandlerUtils.fetchProductCodesForLines(lineIds, LINE_TABLE, LINE_ID_COL, log);
+      for (int i = 0; i < dataArr.length(); i++) {
+        JSONObject line = dataArr.getJSONObject(i);
+        String id = line.optString("id", null);
+        String code = codes.get(id);
+        if (StringUtils.isNotBlank(code)) {
+          line.put(FIELD_PRODUCT_CODE, code);
+        }
+      }
+    } catch (Exception e) {
+      log.warn("Could not enrich productCode for invoice lines: {}", e.getMessage());
     }
   }
 

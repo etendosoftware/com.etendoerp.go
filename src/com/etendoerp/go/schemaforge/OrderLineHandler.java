@@ -19,11 +19,15 @@ package com.etendoerp.go.schemaforge;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
+import java.util.List;
+import java.util.Map;
 
 import javax.inject.Named;
 
+import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.order.Order;
@@ -42,7 +46,11 @@ import org.openbravo.model.financialmgmt.tax.TaxRate;
  * correctly within the same transaction.
  *
  * <p>On GET: filters discount lines (dummy product {@code ETGO_DTO}) from the response so the
- * UI never displays the internal discount line as a regular product line.
+ * UI never displays the internal discount line as a regular product line, and injects {@code
+ * productCode} (the product search key, {@code M_Product.Value}) into every line so the printed
+ * PDF's "CÓD." column can show the SKU instead of falling back to the line number (ETP-4941).
+ * Mirrors the enrichment {@code AbstractInOutLineHandler} already does for {@code M_InOutLine}
+ * lines, via the shared {@link NeoHandlerUtils#fetchProductCodesForLines}.
  *
  * <p>Registered via {@code javaQualifier = "orderLineHandler"} on the lines
  * entity of sales-order, purchase-order and sales-quotation specs.
@@ -51,6 +59,9 @@ import org.openbravo.model.financialmgmt.tax.TaxRate;
 public class OrderLineHandler implements NeoHandler {
 
   private static final Logger log = LogManager.getLogger(OrderLineHandler.class);
+  private static final String FIELD_PRODUCT_CODE = "productCode";
+  private static final String LINE_TABLE = "c_orderline";
+  private static final String LINE_ID_COL = "c_orderline_id";
 
   @Override
   public NeoResponse handle(NeoContext context) {
@@ -87,8 +98,11 @@ public class OrderLineHandler implements NeoHandler {
 
     String method = context.getHttpMethod();
 
-    // Filter discount lines from GET responses so the UI never sees them.
+    // ETP-4941: inject productCode before filtering/returning — mutates the shared
+    // response body in place, so it's visible whether or not the discount filter below
+    // ends up replacing the response.
     if ("GET".equals(method)) {
+      enrichProductCode(context);
       return DiscountLineFilter.filterFromResponse(context);
     }
 
@@ -108,6 +122,36 @@ public class OrderLineHandler implements NeoHandler {
   @Override
   public NeoResponse afterCallout(NeoContext context) {
     return LineCalloutTaxRateHelper.augmentTaxRate(context);
+  }
+
+  /**
+   * ETP-4941: injects {@code productCode} (the product search key, {@code M_Product.Value})
+   * into every GET record, mutating the response body in place — mirrors {@code
+   * InvoiceLineHandler#enrichSourceInvoiceLineId}'s injection pattern at the line level. Read
+   * by the shared PDF template's "CÓD." column (see {@code documentPdf.js}'s {@code
+   * resolveProductCode} on the frontend), which already prioritizes this field over its dead
+   * fallback chain.
+   */
+  private void enrichProductCode(NeoContext context) {
+    try {
+      JSONArray dataArr = NeoHandlerUtils.extractGetDataArray(context);
+      if (dataArr == null) {
+        return;
+      }
+      List<String> lineIds = NeoHandlerUtils.collectIds(dataArr);
+      Map<String, String> codes =
+          NeoHandlerUtils.fetchProductCodesForLines(lineIds, LINE_TABLE, LINE_ID_COL, log);
+      for (int i = 0; i < dataArr.length(); i++) {
+        JSONObject line = dataArr.getJSONObject(i);
+        String id = line.optString("id", null);
+        String code = codes.get(id);
+        if (StringUtils.isNotBlank(code)) {
+          line.put(FIELD_PRODUCT_CODE, code);
+        }
+      }
+    } catch (Exception e) {
+      log.warn("Could not enrich productCode for order lines: {}", e.getMessage());
+    }
   }
 
   /**

@@ -27,6 +27,10 @@ import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.when;
 
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.jupiter.api.AfterEach;
@@ -479,6 +483,92 @@ class InvoiceLineHandlerTest {
 
       assertNull(handler.afterHandle(ctx));
       discountFilterMock.verify(() -> DiscountLineFilter.filterFromResponse(any()), never());
+    }
+
+    // ── ETP-4941: productCode enrichment ──────────────────────────────────
+
+    /**
+     * GET on sales/purchase invoice lines must inject {@code productCode} (M_Product.Value)
+     * into each line, resolved against {@code c_invoiceline} — mutates the response body in
+     * place so it's visible regardless of whether DiscountLineFilter later replaces the
+     * response.
+     */
+    @Test
+    void getRequestEnrichesProductCodeFromCInvoiceline() throws Exception {
+      JSONObject line = new JSONObject().put("id", "inv-line-1");
+      JSONArray dataArr = new JSONArray().put(line);
+      JSONObject body = new JSONObject().put("response", new JSONObject().put("data", dataArr));
+
+      NeoContext ctx = NeoContext.builder()
+          .specName("sales-invoice").entityName("lines")
+          .httpMethod("GET").endpointType(NeoEndpointType.CRUD)
+          .previousResult(NeoResponse.ok(body)).build();
+
+      discountFilterMock.when(() -> DiscountLineFilter.filterFromResponse(any()))
+          .thenReturn(null);
+
+      try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+        OBDal dal = mock(OBDal.class);
+        dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+        Connection conn = mock(Connection.class);
+        PreparedStatement ps = mock(PreparedStatement.class);
+        ResultSet rs = mock(ResultSet.class);
+        when(dal.getConnection()).thenReturn(conn);
+        when(conn.prepareStatement(anyString())).thenReturn(ps);
+        when(ps.executeQuery()).thenReturn(rs);
+        when(rs.next()).thenReturn(true, false);
+        when(rs.getString(1)).thenReturn("inv-line-1");
+        when(rs.getString(2)).thenReturn("SKU-INV-1");
+
+        handler.afterHandle(ctx);
+
+        assertEquals("SKU-INV-1", line.getString("productCode"));
+
+        org.mockito.ArgumentCaptor<String> sqlCaptor =
+            org.mockito.ArgumentCaptor.forClass(String.class);
+        Mockito.verify(conn).prepareStatement(sqlCaptor.capture());
+        assertEquals(true, sqlCaptor.getValue().contains("c_invoiceline"));
+      }
+    }
+
+    /**
+     * A line whose product has no SKU (blank {@code M_Product.Value}) must NOT get a
+     * {@code productCode} field written — the frontend's {@code resolveProductCode} then falls
+     * back to "—", per the ETP-4941 acceptance criteria (never the line number).
+     */
+    @Test
+    void getRequestLeavesProductCodeAbsentWhenSkuBlank() throws Exception {
+      JSONObject line = new JSONObject().put("id", "inv-line-no-sku");
+      JSONArray dataArr = new JSONArray().put(line);
+      JSONObject body = new JSONObject().put("response", new JSONObject().put("data", dataArr));
+
+      NeoContext ctx = NeoContext.builder()
+          .specName("sales-invoice").entityName("lines")
+          .httpMethod("GET").endpointType(NeoEndpointType.CRUD)
+          .previousResult(NeoResponse.ok(body)).build();
+
+      discountFilterMock.when(() -> DiscountLineFilter.filterFromResponse(any()))
+          .thenReturn(null);
+
+      try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+        OBDal dal = mock(OBDal.class);
+        dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+        Connection conn = mock(Connection.class);
+        PreparedStatement ps = mock(PreparedStatement.class);
+        ResultSet rs = mock(ResultSet.class);
+        when(dal.getConnection()).thenReturn(conn);
+        when(conn.prepareStatement(anyString())).thenReturn(ps);
+        when(ps.executeQuery()).thenReturn(rs);
+        when(rs.next()).thenReturn(true, false);
+        when(rs.getString(1)).thenReturn("inv-line-no-sku");
+        when(rs.getString(2)).thenReturn("");
+
+        handler.afterHandle(ctx);
+
+        assertEquals(false, line.has("productCode"));
+      }
     }
 
     // ── ETP-4029: syncConversionRateDocumentAfterLineSave ──────────────────

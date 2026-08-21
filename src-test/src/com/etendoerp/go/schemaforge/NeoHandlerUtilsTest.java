@@ -29,7 +29,12 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.util.Collections;
 import java.util.List;
+import java.util.Map;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -52,6 +57,8 @@ import org.openbravo.model.materialmgmt.transaction.ShipmentInOut;
  * <ul>
  *   <li>{@code extractGetDataArray} — all early-exit paths and the happy path.</li>
  *   <li>{@code collectIds} — normal, empty-id filtering, and empty-array cases.</li>
+ *   <li>{@code fetchProductCodesForLines} (ETP-4941) — SKU resolution for order/invoice line
+ *       GET enrichment, including the blank-value and DB-error graceful-degradation paths.</li>
  *   <li>{@code injectDefaultLocatorIfMissing} / {@code resolveDefaultLocatorForWarehouse}
  *       (ETP-4863) — direct coverage of the shared locator-defaulting helper. Until this QA
  *       pass, this logic was only exercised indirectly through 4 near-duplicate assertions in
@@ -160,6 +167,118 @@ public class NeoHandlerUtilsTest {
   public void testCollectIdsReturnsEmptyListForEmptyArray() throws Exception {
     List<String> ids = NeoHandlerUtils.collectIds(new JSONArray());
     assertTrue(ids.isEmpty());
+  }
+
+  // ── fetchProductCodesForLines (ETP-4941) ──────────────────────────────────
+  // Shared by OrderLineHandler (c_orderline) and InvoiceLineHandler (c_invoiceline) to inject
+  // productCode (M_Product.Value) into GET line responses, mirroring the query
+  // AbstractInOutLineHandler already runs for M_InOutLine lines.
+
+  @Test
+  public void testFetchProductCodesForLinesReturnsEmptyMapForNullIds() {
+    Map<String, String> result =
+        NeoHandlerUtils.fetchProductCodesForLines(null, "c_orderline", "c_orderline_id", LOG);
+    assertTrue(result.isEmpty());
+  }
+
+  @Test
+  public void testFetchProductCodesForLinesReturnsEmptyMapForEmptyIds() {
+    Map<String, String> result = NeoHandlerUtils.fetchProductCodesForLines(
+        Collections.emptyList(), "c_orderline", "c_orderline_id", LOG);
+    assertTrue(result.isEmpty());
+  }
+
+  @Test
+  public void testFetchProductCodesForLinesReturnsSkuPerLineId() throws Exception {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      Connection conn = mock(Connection.class);
+      PreparedStatement ps = mock(PreparedStatement.class);
+      ResultSet rs = mock(ResultSet.class);
+      when(dal.getConnection()).thenReturn(conn);
+      when(conn.prepareStatement(Mockito.anyString())).thenReturn(ps);
+      when(ps.executeQuery()).thenReturn(rs);
+
+      when(rs.next()).thenReturn(true, true, false);
+      when(rs.getString(1)).thenReturn("line-1", "line-2");
+      when(rs.getString(2)).thenReturn("SKU-001", "SKU-002");
+
+      Map<String, String> result = NeoHandlerUtils.fetchProductCodesForLines(
+          List.of("line-1", "line-2"), "c_orderline", "c_orderline_id", LOG);
+
+      assertEquals(2, result.size());
+      assertEquals("SKU-001", result.get("line-1"));
+      assertEquals("SKU-002", result.get("line-2"));
+    }
+  }
+
+  @Test
+  public void testFetchProductCodesForLinesSkipsBlankValue() throws Exception {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      Connection conn = mock(Connection.class);
+      PreparedStatement ps = mock(PreparedStatement.class);
+      ResultSet rs = mock(ResultSet.class);
+      when(dal.getConnection()).thenReturn(conn);
+      when(conn.prepareStatement(Mockito.anyString())).thenReturn(ps);
+      when(ps.executeQuery()).thenReturn(rs);
+
+      // Product with no SKU (blank Value) must not appear in the result map — the caller's
+      // resolveProductCode() fallback then applies (falls to "—", never the line number).
+      when(rs.next()).thenReturn(true, false);
+      when(rs.getString(1)).thenReturn("line-no-sku");
+      when(rs.getString(2)).thenReturn("");
+
+      Map<String, String> result = NeoHandlerUtils.fetchProductCodesForLines(
+          List.of("line-no-sku"), "c_orderline", "c_orderline_id", LOG);
+
+      assertTrue(result.isEmpty());
+    }
+  }
+
+  @Test
+  public void testFetchProductCodesForLinesReturnsEmptyMapOnDbError() {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.getConnection()).thenThrow(new RuntimeException("DB unavailable"));
+
+      Map<String, String> result = NeoHandlerUtils.fetchProductCodesForLines(
+          List.of("line-1"), "c_invoiceline", "c_invoiceline_id", LOG);
+
+      assertTrue(result.isEmpty());
+    }
+  }
+
+  @Test
+  public void testFetchProductCodesForLinesBuildsSqlAgainstGivenTableAndColumn() throws Exception {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      Connection conn = mock(Connection.class);
+      PreparedStatement ps = mock(PreparedStatement.class);
+      ResultSet rs = mock(ResultSet.class);
+      when(dal.getConnection()).thenReturn(conn);
+      when(conn.prepareStatement(Mockito.anyString())).thenReturn(ps);
+      when(ps.executeQuery()).thenReturn(rs);
+      when(rs.next()).thenReturn(false);
+
+      NeoHandlerUtils.fetchProductCodesForLines(
+          List.of("inv-line-1"), "c_invoiceline", "c_invoiceline_id", LOG);
+
+      org.mockito.ArgumentCaptor<String> sqlCaptor =
+          org.mockito.ArgumentCaptor.forClass(String.class);
+      Mockito.verify(conn).prepareStatement(sqlCaptor.capture());
+      String sql = sqlCaptor.getValue();
+      assertTrue("SQL must query the given line table", sql.contains("c_invoiceline"));
+      assertTrue("SQL must filter by the given PK column", sql.contains("c_invoiceline_id"));
+      assertTrue("SQL must join m_product", sql.contains("m_product"));
+    }
   }
 
   // ── extractCreatedIdFromPreviousResult (ETP-4029) ────────────────────────
