@@ -24,6 +24,10 @@ import java.sql.ResultSet;
 import javax.inject.Inject;
 import javax.inject.Named;
 
+import java.util.HashSet;
+import java.util.Map;
+import java.util.Set;
+
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -165,6 +169,7 @@ public class PurchaseInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler i
         return injectAuthorizationnoIntoSaveResponse(context);
       }
       JSONObject body = context.getPreviousResult().getBody();
+      enrichTransferState(dataArr);
       for (int i = 0; i < dataArr.length(); i++) {
         JSONObject rec = dataArr.getJSONObject(i);
         applyTotalDiscountToRecord(rec);
@@ -257,6 +262,41 @@ public class PurchaseInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler i
       rec.put("linkedReceipts", receipts);
     } catch (Exception e) {
       log.warn("Could not enrich linked receipts for invoice {}: {}", invoiceId, e.getMessage());
+    }
+  }
+
+  /**
+   * Adds {@code pisPaymentState} to every row: the worst payment state the invoice carries, or
+   * {@code null} when there is nothing to report.
+   *
+   * <p>Without it an invoice whose only payment is in progress or rejected reads as "Pagada",
+   * because the payment is applied and the outstanding is therefore zero — while the payment itself
+   * reads "Pago en progreso" or "Pago con error". Same fact, two screens, opposite answers
+   * (ETP-4895).
+   *
+   * <p>Resolved for the whole page in one query. Purchase invoices only, which is why this lives
+   * here rather than on the shared base: the states come from the bank-transfer flow, and that only
+   * initiates outbound payments.
+   *
+   * <p>Never throws: losing the field costs a badge, not the response.
+   */
+  private void enrichTransferState(JSONArray dataArr) {
+    try {
+      Set<String> invoiceIds = new HashSet<>();
+      for (int i = 0; i < dataArr.length(); i++) {
+        String id = dataArr.getJSONObject(i).optString("id", null);
+        if (StringUtils.isNotBlank(id)) {
+          invoiceIds.add(id);
+        }
+      }
+      Map<String, String> byInvoice = PisDeferredPaymentService.transferStateByInvoice(invoiceIds);
+      for (int i = 0; i < dataArr.length(); i++) {
+        JSONObject rec = dataArr.getJSONObject(i);
+        String state = byInvoice.get(rec.optString("id", null));
+        rec.put("pisPaymentState", state != null ? state : JSONObject.NULL);
+      }
+    } catch (Exception e) {
+      log.warn("Could not resolve the payment state of the listed invoices: {}", e.getMessage());
     }
   }
 }

@@ -17,12 +17,16 @@
 
 package com.etendoerp.go.schemaforge;
 
+import java.math.BigDecimal;
+
 import javax.servlet.http.HttpServletRequest;
 
 import org.apache.commons.lang3.StringUtils;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.dal.core.OBContext;
+import org.openbravo.model.common.invoice.Invoice;
+import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
 import org.openbravo.model.financialmgmt.payment.FIN_Payment;
 
 import com.etendoerp.psd2.bank.integration.actionhandler.GenerateBankPayment;
@@ -99,7 +103,12 @@ final class PisPaymentBridge {
     if (!params.has(KEY_TEMPLATE) || StringUtils.isBlank(params.optString(KEY_TEMPLATE, null))) {
       params.put(KEY_TEMPLATE, templateForCurrency(payment.getCurrency().getISOCode()));
     }
-    params.put(BankIntegrationConstants.END_TO_END_ID, payment.getDocumentNo());
+    // The payment's own documentNo is only the default. A retry passes its own reference, because
+    // end-to-end ids must be unique per debtor account and resending this one verbatim risks a
+    // silent bank-side reject or a false "already processed" match.
+    if (StringUtils.isBlank(params.optString(BankIntegrationConstants.END_TO_END_ID, null))) {
+      params.put(BankIntegrationConstants.END_TO_END_ID, payment.getDocumentNo());
+    }
     params.put(BankIntegrationConstants.CREDITOR_NAME, payment.getBusinessPartner().getName());
     params.put(KEY_AMOUNT, payment.getAmount().toString());
     params.put(KEY_CURRENCY_ID, payment.getCurrency().getId());
@@ -112,6 +121,44 @@ final class PisPaymentBridge {
 
     // Reuse Classic's exact payload/validation/persistence via its now-public processPayment.
     return new GenerateBankPayment().processPayment(payment, params, apiKey, request, returnUrl);
+  }
+
+  /**
+   * Initiates a PIS transfer for an invoice <em>before</em> any {@link FIN_Payment} exists, so
+   * Etendo Go can wait for Salt Edge to confirm a resolutive status before registering the payment
+   * (see {@code PisDeferredPaymentService}).
+   *
+   * <p>Reuses the very same {@code GenerateBankPayment} core as the classic path through its
+   * {@code PisRequestContext} overload — only the source of the payment-derived fields differs
+   * (invoice + selected account here, the FIN_Payment there). Validation, payload shape and
+   * persistence are therefore identical.
+   *
+   * @param endToEndId
+   *     the bank reference for this attempt; the caller guarantees it is unique, since with no
+   *     payment there is no {@code documentNo} to borrow and a reused reference risks a duplicate
+   *     rejection at the bank
+   */
+  static BankIntegrationPISUtils.PISCreatePaymentResult initiateDeferredPisPayment(Invoice invoice,
+      FIN_FinancialAccount account, BigDecimal amount, String endToEndId, JSONObject pisInput,
+      HttpServletRequest request) throws JSONException {
+    String apiKey = BankIntegrationUtils.getPsd2ApiKey(OBContext.getOBContext().getCurrentClient());
+
+    JSONObject params = pisInput != null ? pisInput : new JSONObject();
+    if (!params.has(KEY_TEMPLATE) || StringUtils.isBlank(params.optString(KEY_TEMPLATE, null))) {
+      params.put(KEY_TEMPLATE, templateForCurrency(invoice.getCurrency().getISOCode()));
+    }
+    params.put(BankIntegrationConstants.END_TO_END_ID, endToEndId);
+    params.put(BankIntegrationConstants.CREDITOR_NAME, invoice.getBusinessPartner().getName());
+    params.put(KEY_AMOUNT, amount.toString());
+    params.put(KEY_CURRENCY_ID, invoice.getCurrency().getId());
+    params.put(KEY_DESCRIPTION, invoice.getDocumentNo());
+
+    GenerateBankPayment.PisRequestContext context = GenerateBankPayment.PisRequestContext.of(
+        account, invoice.getBusinessPartner(), amount, invoice.getCurrency(), endToEndId,
+        invoice.getDocumentNo());
+
+    return new GenerateBankPayment().processPayment(context, params, apiKey, request,
+        resolveGoReturnUrl(request));
   }
 
   private static String descriptionFor(FIN_Payment payment) {
