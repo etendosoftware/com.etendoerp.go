@@ -182,6 +182,11 @@ public class UserRoleAssignmentHandler implements NeoHandler {
   private static final String FIELD_USERNAME = "username";
   private static final String FIELD_EMAIL = "email";
   private static final String FIELD_INVITATION_STATUS = "invitationStatus";
+  /** Keys of the {@code JSONObject} returned by {@code CompanyInvitationService} (ETP-4830). */
+  private static final String FIELD_ERROR = "error";
+  private static final String FIELD_MESSAGE = "message";
+  private static final String FIELD_INVITATION = "invitation";
+  private static final String FIELD_STATUS = "status";
 
   /**
    * Pre-hook dispatch: on a {@code user} {@code POST} (create), derives a unique {@code
@@ -493,32 +498,78 @@ public class UserRoleAssignmentHandler implements NeoHandler {
    * client/org/user — {@code setAdminMode} only lifts security checks, it never changes those.
    * Best-effort: any failure is logged and swallowed, never failing the parent {@code AD_User}
    * creation.
+   *
+   * <p>ETP-4830 diagnostic fix: {@link CompanyInvitationService#createInvitationForNewlyCreatedUser}
+   * returns a {@code JSONObject} instead of throwing on every validation failure ({@code
+   * error: true} with a {@code code}/{@code message}, see {@code CompanyInvitationService}'s
+   * {@code errorResponse}) — a caller that discards the return value (as this method used to)
+   * gets a completely silent no-op on any of those branches: no log line, no {@code
+   * etgo_invitation} row, nothing. The result is now inspected and logged either way, so a clean
+   * run and a silent-failure run are both visible without a DB query.
    */
   private void inviteNewlyCreatedUser(NeoContext context) {
+    String email = null;
+    String clientId = null;
     try {
       NeoResponse previousResult = context.getPreviousResult();
       JSONObject body = previousResult != null ? previousResult.getBody() : null;
       JSONObject inner = body != null ? body.optJSONObject(JsonConstants.RESPONSE_RESPONSE) : null;
       JSONObject data = inner != null ? inner.optJSONObject(JsonConstants.RESPONSE_DATA) : null;
       if (data == null) {
+        log.warn("UserRoleAssignmentHandler.inviteNewlyCreatedUser: no 'data' object in the "
+            + "create response — cannot determine the created user's email, invitation not sent");
         return;
       }
-      String email = StringUtils.trimToNull(data.optString(FIELD_EMAIL, null));
+      email = StringUtils.trimToNull(data.optString(FIELD_EMAIL, null));
       if (email == null) {
+        log.warn("UserRoleAssignmentHandler.inviteNewlyCreatedUser: created user has no email "
+            + "in the create response, invitation not sent");
         return;
       }
       OBContext obContext = context.getObContext();
+      clientId = obContext != null && obContext.getCurrentClient() != null
+          ? obContext.getCurrentClient().getId() : null;
       OBContext.setAdminMode(true);
+      JSONObject invitationResult;
       try {
-        new CompanyInvitationService().createInvitationForNewlyCreatedUser(obContext,
-            email.toLowerCase(), null, null);
+        invitationResult = new CompanyInvitationService().createInvitationForNewlyCreatedUser(
+            obContext, email.toLowerCase(), null, null);
       } finally {
         OBContext.restorePreviousMode();
       }
+      logInvitationResult(invitationResult, email, clientId);
     } catch (Exception e) {
-      log.warn("UserRoleAssignmentHandler.inviteNewlyCreatedUser error: {}",
-          e.getMessage(), e);
+      log.warn("UserRoleAssignmentHandler.inviteNewlyCreatedUser error for email={} clientId={}: {}",
+          email, clientId, e.getMessage(), e);
     }
+  }
+
+  /**
+   * Logs the outcome of {@link CompanyInvitationService#createInvitationForNewlyCreatedUser} —
+   * WARN with the error code/message when the returned JSON marks {@code error: true} (see the
+   * class's {@code errorResponse} helper), INFO with the invitation status otherwise (see its
+   * {@code invitationResponse}/{@code existingInvitationResponse} helpers, both of which set
+   * {@code status: "success"} plus a nested {@code invitation.status} of {@code SENT}/{@code
+   * DELIVERY_FAILED}/{@code PENDING}). Never throws — a malformed/{@code null} result is logged
+   * as best it can be rather than failing the best-effort caller.
+   */
+  private void logInvitationResult(JSONObject invitationResult, String email, String clientId) {
+    if (invitationResult == null) {
+      log.warn("UserRoleAssignmentHandler.inviteNewlyCreatedUser: no response from "
+          + "CompanyInvitationService for email={} clientId={}", email, clientId);
+      return;
+    }
+    if (invitationResult.optBoolean(FIELD_ERROR, false)) {
+      log.warn("UserRoleAssignmentHandler.inviteNewlyCreatedUser: invitation NOT created for "
+              + "email={} clientId={} — code={} message={}",
+          email, clientId, invitationResult.optString("code", null),
+          invitationResult.optString(FIELD_MESSAGE, null));
+      return;
+    }
+    JSONObject invitation = invitationResult.optJSONObject(FIELD_INVITATION);
+    String invitationStatus = invitation != null ? invitation.optString(FIELD_STATUS, null) : null;
+    log.info("UserRoleAssignmentHandler.inviteNewlyCreatedUser: invitation created status={} "
+        + "for email={} clientId={}", invitationStatus, email, clientId);
   }
 
   /**

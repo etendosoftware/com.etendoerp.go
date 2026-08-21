@@ -1047,6 +1047,90 @@ public class UserRoleAssignmentHandlerTest {
     }
   }
 
+  /**
+   * ETP-4830 diagnostic fix: {@code createInvitationForNewlyCreatedUser} returns an
+   * {@code error: true} JSON on a validation failure instead of throwing (see {@code
+   * CompanyInvitationService#errorResponse}) — before this fix the returned value was discarded,
+   * so this branch was completely silent (no log, no DB row). This test only asserts the handler
+   * still completes without throwing and that the service was actually invoked with the created
+   * user's email; the new WARN log line itself
+   * ({@code "invitation NOT created for email=... clientId=... — code=... message=..."}) is
+   * verified by reading the code path (no log-capture test utility exists yet in this suite), per
+   * the task's guidance not to build one just for a 2-line diagnostic fix.
+   */
+  @Test
+  public void afterHandleDoesNotThrowWhenInvitationCreationReturnsError() throws Exception {
+    UserRoleAssignmentHandler handler = new UserRoleAssignmentHandler();
+    JSONObject body = buildCreatedRecordResponseBody(USER_ID, "no-role@example.com", "No Role");
+    OBContext requestObContext = mockObContextForClient("client-1");
+    NeoContext ctx = NeoContext.builder()
+        .endpointType(NeoEndpointType.CRUD)
+        .httpMethod("POST")
+        .previousResult(NeoResponse.ok(body))
+        .obContext(requestObContext)
+        .build();
+    JSONObject errorResult = new JSONObject();
+    errorResult.put("error", true);
+    errorResult.put("code", "INVITED_USER_NOT_FOUND");
+    errorResult.put("message", "Create the AD_USER and assign its organization roles before "
+        + "sending the invitation");
+
+    try (MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
+        MockedConstruction<CompanyInvitationService> invitationServiceMock =
+            mockConstruction(CompanyInvitationService.class, (m, constructionCtx) ->
+                when(m.createInvitationForNewlyCreatedUser(any(), any(), any(), any()))
+                    .thenReturn(errorResult))) {
+      obCtxMock.when(() -> OBContext.setAdminMode(true)).then(inv -> null);
+      obCtxMock.when(OBContext::restorePreviousMode).then(inv -> null);
+
+      assertNull(handler.afterHandle(ctx));
+
+      CompanyInvitationService constructed = invitationServiceMock.constructed().get(0);
+      verify(constructed).createInvitationForNewlyCreatedUser(eq(requestObContext),
+          eq("no-role@example.com"), isNull(), isNull());
+      obCtxMock.verify(OBContext::restorePreviousMode, times(1));
+    }
+  }
+
+  /**
+   * ETP-4830 diagnostic fix: a successful creation now also logs (INFO), so a clean run is
+   * distinguishable from the silent-failure case above without a DB query. Same log-verification
+   * caveat as {@link #afterHandleDoesNotThrowWhenInvitationCreationReturnsError}.
+   */
+  @Test
+  public void afterHandleDoesNotThrowWhenInvitationCreationSucceeds() throws Exception {
+    UserRoleAssignmentHandler handler = new UserRoleAssignmentHandler();
+    JSONObject body = buildCreatedRecordResponseBody(USER_ID, "sent@example.com", "Sent User");
+    OBContext requestObContext = mockObContextForClient("client-1");
+    NeoContext ctx = NeoContext.builder()
+        .endpointType(NeoEndpointType.CRUD)
+        .httpMethod("POST")
+        .previousResult(NeoResponse.ok(body))
+        .obContext(requestObContext)
+        .build();
+    JSONObject invitationJson = new JSONObject();
+    invitationJson.put("status", "SENT");
+    JSONObject successResult = new JSONObject();
+    successResult.put("status", "success");
+    successResult.put("invitation", invitationJson);
+
+    try (MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
+        MockedConstruction<CompanyInvitationService> invitationServiceMock =
+            mockConstruction(CompanyInvitationService.class, (m, constructionCtx) ->
+                when(m.createInvitationForNewlyCreatedUser(any(), any(), any(), any()))
+                    .thenReturn(successResult))) {
+      obCtxMock.when(() -> OBContext.setAdminMode(true)).then(inv -> null);
+      obCtxMock.when(OBContext::restorePreviousMode).then(inv -> null);
+
+      assertNull(handler.afterHandle(ctx));
+
+      CompanyInvitationService constructed = invitationServiceMock.constructed().get(0);
+      verify(constructed).createInvitationForNewlyCreatedUser(eq(requestObContext),
+          eq("sent@example.com"), isNull(), isNull());
+      obCtxMock.verify(OBContext::restorePreviousMode, times(1));
+    }
+  }
+
   // ─── afterHandle: invitationStatus attached to `user` GET responses (ETP-4830) ─
 
   private static OBContext mockObContextForClient(String clientId) {
