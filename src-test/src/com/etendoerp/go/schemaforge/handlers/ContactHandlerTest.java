@@ -257,7 +257,7 @@ class ContactHandlerTest {
     assertEquals("jroe", body.getString("username"));
   }
 
-  /** An explicit name does not cause a username to be invented. */
+  /** An explicit username remains untouched when a caller supplies one. */
   @Test
   void testHandlePostDoesNotInventUsernameFromExplicitName() throws Exception {
     JSONObject body = new JSONObject();
