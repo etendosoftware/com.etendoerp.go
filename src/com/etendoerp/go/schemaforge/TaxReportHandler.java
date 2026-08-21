@@ -26,6 +26,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 import javax.inject.Named;
 
@@ -36,6 +37,8 @@ import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
+
+import com.etendoerp.go.schemaforge.util.NeoReportParam;
 
 /**
  * NeoHandler for the Tax Report (Multidimensional Tax Report).
@@ -84,6 +87,53 @@ public class TaxReportHandler implements NeoHandler {
   // -------------------------------------------------------------------------
   // NeoHandler entry point
   // -------------------------------------------------------------------------
+
+  /**
+   * The report's input contract (ETP-4793 / IMP-19).
+   *
+   * <p>Every entry below is a key {@link #parseParams} actually reads, with the fallback it
+   * applies. The two dates are the only mandatory ones — {@link #executeReport} rejects the call
+   * without them — and the enums are the values the SQL genuinely branches on. Declaring the
+   * closed sets matters more here than anywhere: {@code dateType} is compared with
+   * {@code "acct".equals(…)}, so any unrecognised value silently means "invoice date" and quietly
+   * changes which period the figures belong to.</p>
+   */
+  @Override
+  public Optional<List<NeoReportParam>> reportParameters() {
+    return Optional.of(List.of(
+        NeoReportParam.required(PARAM_DATE_FROM, NeoReportParam.TYPE_DATE,
+            "Start of the reporting period, inclusive."),
+        NeoReportParam.required(PARAM_DATE_TO, NeoReportParam.TYPE_DATE,
+            "End of the reporting period, inclusive."),
+        NeoReportParam.options(PARAM_DATE_TYPE,
+            "Which invoice date the period filters on: 'acct' the accounting date, 'invoiced' the "
+                + "invoice date (default: acct).",
+            List.of("acct", "invoiced")),
+        NeoReportParam.options(PARAM_TX_TYPE,
+            "Transactions to include: 'B' both, 'P' purchases only, 'S' sales only (default: B).",
+            List.of("B", "P", "S")),
+        NeoReportParam.options(PARAM_TAX_TYPE,
+            "Tax family: 'tax' VAT and similar, 'withholding' withholdings (default: tax).",
+            List.of("tax", "withholding")),
+        NeoReportParam.optional(PARAM_TAX_ID, NeoReportParam.TYPE_STRING,
+            "Restrict to one C_Tax id. Default: every tax."),
+        NeoReportParam.optional(PARAM_BP_ID, NeoReportParam.TYPE_STRING,
+            "Restrict to these business partners: one C_BPartner id, or several separated by "
+                + "commas. Default: every partner."),
+        NeoReportParam.optional(PARAM_ORG_ID, NeoReportParam.TYPE_STRING,
+            "Organization id to report on. Default: the session's organization."),
+        NeoReportParam.optional(PARAM_CURRENCY_ID, NeoReportParam.TYPE_STRING,
+            "Currency id whose symbol labels the amounts. Amounts are not converted. Default: "
+                + "the client's currency."),
+        NeoReportParam.optional(PARAM_SHOW_DETAILS, NeoReportParam.TYPE_BOOLEAN,
+            "Include the per-invoice detail rows alongside the summaries (default: false)."),
+        NeoReportParam.optional(PARAM_GROUP_BY_BP, NeoReportParam.TYPE_BOOLEAN,
+            "Break each tax rate down by business partner (default: false)."),
+        NeoReportParam.options(PARAM_BP_NAME_TYPE,
+            "Which partner name to show: 'commercial' the trading name, 'legal' the registered "
+                + "name (default: commercial).",
+            List.of("commercial", "legal"))));
+  }
 
   @Override
   public NeoResponse handle(NeoContext context) {

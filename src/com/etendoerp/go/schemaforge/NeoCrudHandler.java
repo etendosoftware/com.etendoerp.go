@@ -25,15 +25,11 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
-
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
@@ -45,8 +41,6 @@ import org.openbravo.base.model.Entity;
 import org.openbravo.base.model.ModelProvider;
 import org.openbravo.base.model.Property;
 import org.openbravo.base.structure.BaseOBObject;
-import org.openbravo.client.kernel.KernelUtils;
-import org.openbravo.dal.core.DalUtil;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.dal.service.OBQuery;
@@ -234,7 +228,10 @@ class NeoCrudHandler {
       }
 
       String dalEntityName = adTab.getTable().getName();
-      DefaultJsonDataService jsonService = DefaultJsonDataService.getInstance();
+      // Not DefaultJsonDataService.getInstance(): when a caller owns the transaction (a batch),
+      // core's write path would commit this record on its own and defeat the caller's rollback
+      // (IMP-23). NeoBatchJsonDataService decides which of the two applies to this thread.
+      DefaultJsonDataService jsonService = BatchService.currentJsonService();
       NeoFieldFilter fieldFilter = NeoFieldFilter.forEntity(
           context.getSfEntity(), dalEntityName);
       Map<String, String> params = buildDalParams(context, adTab, dalEntityName);
@@ -244,8 +241,24 @@ class NeoCrudHandler {
     } catch (MissingRequiredFieldsException e) {
       // ETP-3894: structured 400 lists the missing fields so the UI can highlight them.
       return buildMissingRequiredFieldsResponse(e);
+    } catch (ReadOnlyFieldRejectedException e) {
+      // IMP-28 clause 2: a value was sent for a field NeoFieldFilter.filterCreateRequest would
+      // otherwise have silently dropped. Reject instead, so the caller sees why nothing changed.
+      return buildReadOnlyFieldRejectedResponse(e);
     } catch (Exception e) {
       log.error("Error in default handler for {} {}", context.getHttpMethod(), context.getEntityName(), e);
+      // ETP-4793 / IMP-17: same reclassification as the RPC-failure branch in
+      // checkJsonServiceResponse, for the case where the violation is thrown rather than swallowed.
+      // The column is read off the raw chain because sanitize() maps any DB exception to a generic
+      // message, which is where the name would otherwise be lost.
+      if (NeoErrorSanitizer.isNotNullViolation(e)) {
+        String column = NeoErrorSanitizer.notNullViolationColumn(e);
+        String fieldName = resolvePropertyNameForColumn(column, context.getAdTab());
+        if (fieldName != null) {
+          return buildMissingRequiredFieldsResponse(
+              new MissingRequiredFieldsException(List.of(fieldName)));
+        }
+      }
       // A unique-constraint violation is a data conflict, not a server failure — the
       // client sent a value that already exists, which is a 409, never a 500. Reusing
       // this same classification is also what keeps the message worded consistently
@@ -290,6 +303,106 @@ class NeoCrudHandler {
     }
   }
 
+  /** HTTP-style status for a rejected read-only field write (IMP-28 clause 2, mirrors IMP-5). */
+  private static final int STATUS_UNPROCESSABLE = 422;
+
+  /**
+   * IMP-28 clause 2: build the structured 422 response returned when a create is rejected
+   * because the client tried to write a field that is read-only with no configured default
+   * and no NeoHandler that could legitimately have supplied it. Body shape mirrors the flat
+   * IMP-5 convention used by the MCP tool layer ({@code McpToolRouter}'s 422s) — status/error/
+   * detail/field/hint/seeAlso — rather than the nested {@code {"error":{...}}} shape used by
+   * {@link #buildMissingRequiredFieldsResponse}, since the two conventions' literal string
+   * constants ({@code McpConstants}) live in a different, package-private class not
+   * accessible from here; the key names below are copied verbatim rather than imported.
+   * <pre>{
+   *   "status": 422,
+   *   "error": "read_only_field",
+   *   "detail": "...",
+   *   "field": "eTGOSalePrice",
+   *   "hint": "...",
+   *   "seeAlso": "docs(topic:\"creating records\")"
+   * }</pre>
+   */
+  private NeoResponse buildReadOnlyFieldRejectedResponse(ReadOnlyFieldRejectedException e) {
+    try {
+      JSONObject errorObj = new JSONObject();
+      errorObj.put("status", STATUS_UNPROCESSABLE);
+      errorObj.put("error", "read_only_field");
+      errorObj.put("detail", "Field '" + e.getFieldName()
+          + "' is read-only and cannot be set by the caller; its value was rejected, not silently"
+          + " dropped, so the write does not answer 200 with the field left unset.");
+      errorObj.put("field", e.getFieldName());
+      errorObj.put("hint", "Remove '" + e.getFieldName() + "' from the request. If this value must "
+          + "be set, it is derived automatically (e.g. by a callout or a dedicated write path) — "
+          + "check neo_schema's field descriptor for this entity before retrying.");
+      errorObj.put("seeAlso", "docs(topic:\"creating records\")");
+      return NeoResponse.error(STATUS_UNPROCESSABLE, errorObj);
+    } catch (Exception fallback) {
+      log.warn("Could not build READ_ONLY_FIELD_REJECTED body: {}", fallback.getMessage());
+      return NeoResponse.error(STATUS_UNPROCESSABLE, ReadOnlyFieldRejectedException.ERROR_CODE);
+    }
+  }
+
+  /**
+   * ETP-4793 / IMP-17: turn a Postgres not-null violation into the same structured
+   * {@code MISSING_REQUIRED_FIELDS} 400 a pre-flight validation failure produces.
+   *
+   * <p>What this replaces: omitting {@code partnerAddress} on a {@code sales-invoice} create used to
+   * answer <b>500</b> with the raw violation, whose {@code detail} dumped the entire failing row —
+   * ~90 columns of internals (IMP-23 §9.4). The status was wrong (the caller can fix this), the
+   * payload leaked, and it named no field.</p>
+   *
+   * <p>The field name is best-effort: the violation names a DB column
+   * ({@code c_bpartner_location_id}), so it is mapped back to the DAL property the caller actually
+   * sends ({@code partnerAddress}) through the tab's entity model. When the column cannot be mapped
+   * — or the server's locale hid it — the response still carries the corrected status and the
+   * stripped message, with an empty {@code fields} array rather than a guess.</p>
+   *
+   * @param translated the already-translated violation message
+   * @param adTab      the tab whose table the write targeted; may be {@code null}
+   * @return the structured 400 response
+   */
+  private NeoResponse buildNotNullViolationResponse(String translated, Tab adTab) {
+    String column = NeoErrorSanitizer.notNullViolationColumn(translated);
+    String fieldName = resolvePropertyNameForColumn(column, adTab);
+    List<String> fields = fieldName == null ? List.of() : List.of(fieldName);
+    log.warn("Not-null violation on column '{}' mapped to field '{}'", column, fieldName);
+    NeoResponse structured = buildMissingRequiredFieldsResponse(
+        new MissingRequiredFieldsException(fields));
+    if (fieldName != null) {
+      return structured;
+    }
+    // Nothing to highlight, so the stripped message is the only actionable content left. Returned
+    // instead of an empty `fields` list on its own, which would tell the caller nothing at all.
+    return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
+        NeoErrorSanitizer.stripRowDump(NeoErrorSanitizer.redactObjectReferences(translated)));
+  }
+
+  /**
+   * Maps a DB column name onto the DAL property name a NEO caller uses for it.
+   *
+   * @param column the DB column name; may be {@code null}
+   * @param adTab  the tab whose table owns the column; may be {@code null}
+   * @return the property name, or {@code null} when it cannot be resolved
+   */
+  private String resolvePropertyNameForColumn(String column, Tab adTab) {
+    if (StringUtils.isBlank(column) || adTab == null || adTab.getTable() == null) {
+      return null;
+    }
+    try {
+      Entity entity = ModelProvider.getInstance().getEntityByTableId(adTab.getTable().getId());
+      for (Property prop : entity.getProperties()) {
+        if (column.equalsIgnoreCase(prop.getColumnName())) {
+          return prop.getName();
+        }
+      }
+    } catch (Exception e) {
+      log.debug("Could not map column {} to a property", column, e);
+    }
+    return null;
+  }
+
   /**
    * Builds the DAL parameter map for a request, including tab metadata,
    * record ID, query params, where clause, and pagination defaults.
@@ -327,12 +440,12 @@ class NeoCrudHandler {
     String tabWhere = adTab.getHqlwhereclause();
     if (StringUtils.isNotBlank(tabWhere)) {
       if (parentId != null && tabWhere.contains("@")) {
-        tabWhere = resolveTabWhereTokens(adTab, tabWhere, parentId);
+        tabWhere = NeoParentTabFilterResolver.resolveTabWhereTokens(adTab, tabWhere, parentId);
       }
       where.append("(").append(tabWhere).append(")");
     }
     if (parentId != null && adTab.getTabLevel() != null && adTab.getTabLevel() > 0) {
-      String parentFilter = resolveParentFilter(adTab, parentId);
+      String parentFilter = NeoParentTabFilterResolver.resolveParentFilter(adTab, parentId);
       if (StringUtils.isNotBlank(parentFilter)) {
         if (where.length() > 0) {
           where.append(HQL_AND_OPERATOR);
@@ -403,7 +516,7 @@ class NeoCrudHandler {
     }
 
     JSONObject responseJson = new JSONObject(result);
-    NeoResponse errorResponse = checkJsonServiceResponse(responseJson);
+    NeoResponse errorResponse = checkJsonServiceResponse(responseJson, adTab);
     if (errorResponse != null) {
       return errorResponse;
     }
@@ -441,7 +554,7 @@ class NeoCrudHandler {
    * Validates the response for error/validation-error status codes.
    * Returns an error NeoResponse if a failure is detected, or null if the response is OK.
    */
-  private NeoResponse checkJsonServiceResponse(JSONObject responseJson) throws Exception {
+  private NeoResponse checkJsonServiceResponse(JSONObject responseJson, Tab adTab) throws Exception {
     JSONObject innerResponse = responseJson.optJSONObject(JsonConstants.RESPONSE_RESPONSE);
     if (innerResponse == null) {
       return null;
@@ -453,6 +566,16 @@ class NeoCrudHandler {
               .optString("message", "Write operation failed")
           : "Write operation failed";
       String translated = OBMessageUtils.messageBD(errMsg);
+      // ETP-4793 / IMP-17: a not-null violation means the caller omitted a value the table
+      // requires — their request to fix, so it is a 400 naming the field, never a 500. It reaches
+      // here rather than the catch-all below because DefaultJsonDataService swallows the constraint
+      // violation and returns it as an ordinary RPC failure body. Reusing ETP-3894's
+      // MISSING_REQUIRED_FIELDS shape rather than inventing a second one keeps the React UI's
+      // field-highlighting working on this path too, and gives neo_batch a 4xx it can map onto
+      // IMP-24's `missingFields` envelope (IMP-23 §9.4).
+      if (NeoErrorSanitizer.isNotNullViolationMessage(translated)) {
+        return buildNotNullViolationResponse(translated, adTab);
+      }
       // DefaultJsonDataService catches a unique-constraint violation internally and
       // returns it as a normal RPC failure response (this branch), never as a thrown
       // exception — so NeoErrorSanitizer.isDuplicateKeyViolation(Throwable), which only
@@ -466,7 +589,11 @@ class NeoCrudHandler {
       // Defence-in-depth: a DAL/validator failure message can carry a raw object toString
       // (e.g. a List-reference "one of the following values: pkg.Class@hex ..."). Strip it
       // before it reaches the client — the leak itself is built upstream in core (ETP-4668).
-      return NeoResponse.error(httpStatus, NeoErrorSanitizer.redactObjectReferences(translated));
+      // stripRowDump for the same defence-in-depth reason: any DAL failure message may carry a
+      // Postgres `Failing row contains (…)` detail, which is both an internals leak and, for an MCP
+      // agent that has to read it, a real context cost (ETP-4793 / IMP-17).
+      return NeoResponse.error(httpStatus,
+          NeoErrorSanitizer.stripRowDump(NeoErrorSanitizer.redactObjectReferences(translated)));
     }
     if (status == JsonConstants.RPCREQUEST_STATUS_VALIDATION_ERROR) {
       return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, responseJson);
@@ -514,10 +641,15 @@ class NeoCrudHandler {
     }
     executePostCalloutCascade(filteredBody, adTab, context, parentIdValue, protectedCalloutFields);
     long perfCalloutCascade = System.nanoTime();
-    NeoCommercialLinePolicy.injectProductDerivedUomIfMissing(filteredBody);
+    // checkIfNotExists=false: a name the runtime model does not know must not blow up the create —
+    // the policy simply abstains on a null entity.
+    NeoCommercialLinePolicy.injectProductDerivedUomIfMissing(filteredBody,
+        ModelProvider.getInstance().getEntity(dalEntityName, false),
+        userSubmittedFields.contains("uOM"));
     // ETP-4855: net BEFORE gross — injectCommercialAmounts owns that order. This path used to
     // call the injectors gross-first, which left LINE_GROSS_AMOUNT at 0 for any client that
-    // sent neither amount (OCR /batch, MCP, import modal).
+    // sent neither amount (OCR /batch, MCP, import modal). The update path at executePut already
+    // routes through this method, so calling it here is what keeps the two from drifting apart.
     NeoCommercialLinePolicy.injectCommercialAmounts(filteredBody);
     stripContactsPreCreateBillingDefaults(filteredBody, context, adTab);
     // Coerce String primitives injected by injectMandatoryDefaults to their correct Java types.
@@ -700,141 +832,6 @@ class NeoCrudHandler {
     return NeoTypeCoercionHelper.wrapForSmartclient(filteredBody, dalEntityName, recordId);
   }
 
-  private static final Pattern TAB_WHERE_TOKEN_PATTERN = Pattern.compile("@([A-Za-z_.]+)@");
-
-  /**
-   * Replaces {@code @token@} placeholders in a tab HQL where clause using the actual column
-   * values from the parent record rather than substituting all tokens with the same parentId.
-   *
-   * <p>Classic Etendo resolves each {@code @ColumnName@} against the corresponding column on the
-   * parent record. NEO previously replaced every token with the same parentId, which broke cases
-   * where a tab has two different tokens — e.g. {@code @AD_Org_ID@} (the parent's organization
-   * UUID) and {@code @aeatsii_config_id@} (the parent record's primary key).</p>
-   *
-   * <p>Resolution order for each token:</p>
-   * <ol>
-   *   <li>{@code @AD_Org_ID@} / {@code @Org_ID@} → parent record's {@code organization.id}</li>
-   *   <li>{@code @AD_Client_ID@} / {@code @Client_ID@} → parent record's {@code client.id}</li>
-   *   <li>{@code @<tableName>_id@} → {@code parentId} (the parent PK)</li>
-   *   <li>Any other token → matched against parent entity property column names</li>
-   *   <li>Fallback → {@code parentId}</li>
-   * </ol>
-   */
-  private String resolveTabWhereTokens(Tab adTab, String tabWhere, String parentId) {
-    Tab parentTab = null;
-    BaseOBObject parentRecord = null;
-    Entity parentEntity = null;
-    String parentTableName = null;
-
-    try {
-      parentTab = KernelUtils.getInstance().getParentTab(adTab);
-      if (parentTab != null && parentTab.getTable() != null) {
-        parentTableName = parentTab.getTable().getName().toLowerCase();
-        parentEntity = ModelProvider.getInstance()
-            .getEntityByTableId(parentTab.getTable().getId());
-        if (parentEntity != null) {
-          parentRecord = OBDal.getInstance().get(parentEntity.getName(), parentId);
-        }
-      }
-    } catch (Exception e) {
-      log.warn("Could not load parent record for tab '{}' parentId='{}': {}",
-          adTab.getName(), parentId, e.getMessage());
-    }
-
-    final BaseOBObject finalParentRecord = parentRecord;
-    final Entity finalParentEntity = parentEntity;
-    final String finalParentTableName = parentTableName;
-
-    Matcher matcher = TAB_WHERE_TOKEN_PATTERN.matcher(tabWhere);
-    StringBuilder result = new StringBuilder();
-    while (matcher.find()) {
-      String token = matcher.group(1);
-      String value = resolveTokenFromParent(
-          token, parentId, finalParentRecord, finalParentEntity, finalParentTableName);
-      matcher.appendReplacement(result, Matcher.quoteReplacement("'" + value.replace("'", "''") + "'"));
-    }
-    matcher.appendTail(result);
-    return result.toString();
-  }
-
-  /**
-   * Resolves a single {@code @token@} value from the parent record.
-   */
-  private String resolveTokenFromParent(String token, String parentId,
-      BaseOBObject parentRecord, Entity parentEntity, String parentTableName) {
-    if (parentRecord == null) {
-      return parentId;
-    }
-    String tokenLower = token.toLowerCase(Locale.ROOT);
-
-    if ("ad_org_id".equals(tokenLower) || "org_id".equals(tokenLower)) {
-      return resolveRelatedObjectId(parentRecord, "organization", parentId);
-    }
-
-    if ("ad_client_id".equals(tokenLower) || "client_id".equals(tokenLower)) {
-      return resolveRelatedObjectId(parentRecord, "client", parentId);
-    }
-
-    if (parentTableName != null && tokenLower.equals(parentTableName + "_id")) {
-      return parentId;
-    }
-
-    if (parentEntity != null) {
-      String entityValue = resolveTokenFromEntityProperty(token, parentRecord, parentEntity);
-      return entityValue != null ? entityValue : parentId;
-    }
-
-    return parentId;
-  }
-
-  private String resolveRelatedObjectId(BaseOBObject parentRecord, String propertyName,
-      String fallbackValue) {
-    try {
-      Object relatedObject = parentRecord.get(propertyName);
-      if (relatedObject instanceof BaseOBObject) {
-        return DalUtil.getId((BaseOBObject) relatedObject).toString();
-      }
-    } catch (Exception e) {
-      log.debug("Could not resolve parent {} token", propertyName, e);
-    }
-    return fallbackValue;
-  }
-
-  private String resolveTokenFromEntityProperty(String token, BaseOBObject parentRecord,
-      Entity parentEntity) {
-    try {
-      for (Property prop : parentEntity.getProperties()) {
-        if (prop.getColumnName() != null && prop.getColumnName().equalsIgnoreCase(token)) {
-          return stringifyParentValue(parentRecord.get(prop.getName()));
-        }
-      }
-    } catch (Exception e) {
-      log.debug("Could not resolve parent token {}", token, e);
-    }
-    return null;
-  }
-
-  private String stringifyParentValue(Object value) {
-    if (value instanceof BaseOBObject) {
-      return DalUtil.getId((BaseOBObject) value).toString();
-    }
-    return value != null ? value.toString() : "";
-  }
-
-  /**
-   * Resolves the HQL filter expression that constrains child tab records by parent record ID.
-   */
-  private String resolveParentFilter(Tab childTab, String parentId) {
-    try {
-      NeoTypeCoercionHelper.ParentFilter parentFilter =
-          NeoTypeCoercionHelper.buildParentWhereClause(childTab, parentId);
-      return parentFilter != null ? parentFilter.resolveForStringApi() : null;
-    } catch (Exception e) {
-      log.error("Error resolving parent filter for tab '{}': {}", childTab.getName(), e.getMessage(), e);
-      return null;
-    }
-  }
-
   /**
    * Parses an integer from a raw query-string value, falling back to
    * {@code fallback} when the value is blank or malformed.
@@ -963,7 +960,7 @@ class NeoCrudHandler {
     String tabWhere = adTab.getHqlwhereclause();
     addTabWherePredicate(adTab, tabWhere, parentId, predicates);
     if (parentId != null && adTab.getTabLevel() != null && adTab.getTabLevel() > 0) {
-      String parentFilter = resolveParentFilter(adTab, parentId);
+      String parentFilter = NeoParentTabFilterResolver.resolveParentFilter(adTab, parentId);
       if (StringUtils.isNotBlank(parentFilter)) {
         predicates.add("(" + parentFilter + ")");
       }
@@ -999,7 +996,7 @@ class NeoCrudHandler {
   private void addTabWherePredicate(Tab adTab, String tabWhere, String parentId, List<String> predicates) {
     if (StringUtils.isNotBlank(tabWhere)) {
       if (parentId != null && tabWhere.contains("@")) {
-        tabWhere = resolveTabWhereTokens(adTab, tabWhere, parentId);
+        tabWhere = NeoParentTabFilterResolver.resolveTabWhereTokens(adTab, tabWhere, parentId);
       }
       if (!tabWhere.contains("@")) {
         // Skip when unresolved @session_tokens@ remain — OBQuery can't bind
