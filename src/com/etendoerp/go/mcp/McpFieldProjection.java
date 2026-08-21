@@ -19,6 +19,7 @@ package com.etendoerp.go.mcp;
 
 import java.util.HashSet;
 import java.util.Iterator;
+import java.util.Optional;
 import java.util.Set;
 
 import org.codehaus.jettison.json.JSONArray;
@@ -56,6 +57,7 @@ final class McpFieldProjection {
   private static final String KEY_RESPONSE = "response";
   private static final String KEY_DATA = "data";
   private static final String KEY_ID = "id";
+  static final String KEY_UNKNOWN_FIELDS = "unknownFields";
 
   /** @return {@code true} if {@code view} requests the curated summary projection. */
   static boolean isSummaryView(String view) {
@@ -79,6 +81,65 @@ final class McpFieldProjection {
       }
     }
     return result;
+  }
+
+  /**
+   * Reduce requested names to their base properties, so a caller who asks for the companion
+   * ({@code businessPartner$_identifier}) gets — and is judged on — the property it belongs to.
+   *
+   * <p>Without this, {@link #apply} compared a row key's base property against the raw requested
+   * name and dropped every companion-only request, returning a row of nothing but {@code id}; and
+   * {@link #reportUnknownFields} would then have called the name unknown, blaming a typo for a
+   * defect on our side.
+   */
+  static Set<String> baseNames(Set<String> requested) {
+    Set<String> base = new HashSet<>();
+    if (requested == null) {
+      return base;
+    }
+    for (String name : requested) {
+      base.add(McpDefaultsView.baseProperty(name));
+    }
+    return base;
+  }
+
+  /**
+   * Report the requested names this entity cannot emit, as {@code response.unknownFields} (IMP-18).
+   *
+   * <p>A projection is a whitelist, so a typo used to be indistinguishable from a field that simply
+   * held no value: the key was absent either way and the caller had no signal. Naming the rejects
+   * mirrors what {@code neo_schema} already does for its own {@code fields} argument
+   * (see {@link McpSchemaCreateView#unknownFields}) — the same argument name now behaves the same
+   * way on both tools.
+   *
+   * <p>Validation is against what the entity can emit, not against the rows that came back: on an
+   * empty result set no row can answer the question, and that is exactly when a typo costs the most
+   * (an agent reads "no matches" and concludes the data is missing). An empty {@code emittable}
+   * means the emittable set could not be determined, and leaves the names
+   * unjudged — silence is better than accusing a valid field.
+   */
+  static void reportUnknownFields(JSONObject responseJson, Set<String> requestedBase,
+      Optional<Set<String>> emittable) throws JSONException {
+    if (responseJson == null || requestedBase == null || requestedBase.isEmpty()
+        || emittable.isEmpty()) {
+      return;
+    }
+    Set<String> emittableNames = emittable.get();
+    java.util.List<String> unknown = new java.util.ArrayList<>();
+    for (String name : requestedBase) {
+      if (!emittableNames.contains(name)) {
+        unknown.add(name);
+      }
+    }
+    if (unknown.isEmpty()) {
+      return;
+    }
+    java.util.Collections.sort(unknown);
+    JSONObject response = responseJson.optJSONObject(KEY_RESPONSE);
+    if (response == null) {
+      return;
+    }
+    response.put(KEY_UNKNOWN_FIELDS, new JSONArray(unknown));
   }
 
   /**

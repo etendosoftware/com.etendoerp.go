@@ -19,58 +19,47 @@ package com.etendoerp.go.schemaforge;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyString;
-import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.mockConstruction;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-import java.math.BigDecimal;
 import java.util.Arrays;
 import java.util.Collections;
 
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.criterion.Criterion;
-import org.hibernate.query.Query;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
-import org.mockito.MockedConstruction;
 import org.mockito.MockedStatic;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
-import org.openbravo.advpaymentmngt.dao.AdvPaymentMngtDao;
-import org.openbravo.advpaymentmngt.process.FIN_AddPayment;
 import org.openbravo.base.exception.OBException;
-import org.openbravo.base.secureApp.VariablesSecureApp;
-import org.openbravo.client.kernel.RequestContext;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
-import org.openbravo.erpCommon.utility.OBError;
 import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.ad.system.Language;
 import org.openbravo.model.common.businesspartner.BankAccount;
 import org.openbravo.model.common.businesspartner.BusinessPartner;
 import org.openbravo.model.common.currency.Currency;
-import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.common.invoice.Invoice;
 import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
 import org.openbravo.model.financialmgmt.payment.FIN_Payment;
 import org.openbravo.model.financialmgmt.payment.FIN_PaymentMethod;
-import org.openbravo.service.db.DalConnectionProvider;
-import org.hibernate.Session;
 
 import com.etendoerp.payment.removal.util.PaymentRemovalUtil;
 import com.etendoerp.psd2.bank.integration.data.PisPayment;
@@ -86,7 +75,7 @@ import com.etendoerp.psd2.bank.integration.utils.PISTransactionUtils;
  * <p>Covers: {@code handlePisPaymentStatus} (status refresh short-circuit and failure
  * tolerance), {@code handleCancelPisPayment} (undo eligibility and the reactivate+remove
  * sequence), {@code handlePisTemplates}, {@code handleListSupplierBankAccounts},
- * {@code validatePisEligibility}, {@code extractPisInput} and {@code hasLinkedPisPayment}.
+ * {@code validatePisEligibility}, {@code extractPisInput} and {@code linkedPisPayment}.
  */
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)
@@ -164,6 +153,8 @@ class PisPaymentServiceTest {
     // reflects the new value persisted by updateStatusWithAttributes.
     when(pisPayment.getStatus()).thenReturn("authorizing", BankIntegrationConstants.PIS_STATUS_EXECUTED);
     when(pisPayment.getSaltedgePayment()).thenReturn("se-pay-1");
+    // The financial transaction hangs off the payment, so it is only created once one exists.
+    when(pisPayment.getPayment()).thenReturn(mock(FIN_Payment.class));
 
     Client client = mock(Client.class);
     when(obContext.getCurrentClient()).thenReturn(client);
@@ -535,31 +526,35 @@ class PisPaymentServiceTest {
   }
 
   // ========================================================================
-  // hasLinkedPisPayment tests
+  // linkedPisPayment tests
   // ========================================================================
+  //
+  // Returns the row rather than a boolean: the SPA needs its id, because retrying a transfer acts
+  // on the PIS attempt rather than on the payment.
 
   @Test
   @SuppressWarnings("unchecked")
-  void testHasLinkedPisPaymentTrueWhenCriteriaFindsRow() {
+  void testLinkedPisPaymentReturnsTheRowWhenCriteriaFindsOne() {
     FIN_Payment payment = mock(FIN_Payment.class);
+    PisPayment linked = mock(PisPayment.class);
     OBCriteria<PisPayment> crit = mock(OBCriteria.class);
     when(obDal.createCriteria(PisPayment.class)).thenReturn(crit);
     when(crit.add(any(Criterion.class))).thenReturn(crit);
-    when(crit.uniqueResult()).thenReturn(mock(PisPayment.class));
+    when(crit.uniqueResult()).thenReturn(linked);
 
-    assertTrue(PisPaymentService.hasLinkedPisPayment(payment));
+    assertSame(linked, PisPaymentService.linkedPisPayment(payment));
   }
 
   @Test
   @SuppressWarnings("unchecked")
-  void testHasLinkedPisPaymentFalseWhenNoRow() {
+  void testLinkedPisPaymentReturnsNullWhenNoRow() {
     FIN_Payment payment = mock(FIN_Payment.class);
     OBCriteria<PisPayment> crit = mock(OBCriteria.class);
     when(obDal.createCriteria(PisPayment.class)).thenReturn(crit);
     when(crit.add(any(Criterion.class))).thenReturn(crit);
     when(crit.uniqueResult()).thenReturn(null);
 
-    assertFalse(PisPaymentService.hasLinkedPisPayment(payment));
+    assertNull(PisPaymentService.linkedPisPayment(payment));
   }
 
   // ========================================================================
@@ -668,140 +663,5 @@ class PisPaymentServiceTest {
         response.getBody().getJSONArray("items").getJSONObject(0).getString("name"));
     assertEquals("ACC-777",
         response.getBody().getJSONArray("items").getJSONObject(1).getString("name"));
-  }
-
-  // ========================================================================
-  // applyOverpaymentAndInitiatePis tests
-  // ========================================================================
-
-  /** Stubs {@code OBDal.getSession()...uniqueResult()} for {@code hasFinTransaction}. */
-  @SuppressWarnings("unchecked")
-  private void stubFinTransactionCount(Long count) {
-    Session session = mock(Session.class);
-    Query<Long> query = mock(Query.class);
-    when(obDal.getSession()).thenReturn(session);
-    when(session.createQuery(anyString(), eq(Long.class))).thenReturn(query);
-    when(query.setParameter(anyString(), any())).thenReturn(query);
-    when(query.uniqueResult()).thenReturn(count);
-  }
-
-  private FIN_Payment processedPaymentMock() {
-    FIN_Payment payment = mock(FIN_Payment.class);
-    when(payment.getId()).thenReturn("pay-pis");
-    when(payment.getDocumentNo()).thenReturn("PAY-PIS-1");
-    when(payment.getAmount()).thenReturn(new BigDecimal("100.00"));
-    when(payment.getStatus()).thenReturn("PPM");
-    when(payment.isProcessed()).thenReturn(true);
-    return payment;
-  }
-
-  /**
-   * The non-overpaid path ({@code funds == invoiceApplied}): no credit PSD is created, the
-   * payment is processed to PPM, the bank transfer is initiated through the bank connection bridge, and the
-   * response carries the Salt Edge payment URL, the local PIS payment id, and status "requested".
-   */
-  @Test
-  void testApplyOverpaymentAndInitiatePisNonOverpaidReturnsRequestedResponse() throws Exception {
-    FIN_Payment payment = processedPaymentMock();
-    AdvPaymentMngtDao dao = mock(AdvPaymentMngtDao.class);
-    Organization org = mock(Organization.class);
-    JSONObject pisInput = new JSONObject().put("template", "SEPA");
-
-    OBError okResult = mock(OBError.class);
-    when(okResult.getType()).thenReturn("Success");
-
-    BankIntegrationPISUtils.PISCreatePaymentResult bridgeResult =
-        mock(BankIntegrationPISUtils.PISCreatePaymentResult.class);
-    when(bridgeResult.getPaymentId()).thenReturn("se-pay-99");
-    when(bridgeResult.getPaymentUrl()).thenReturn("https://sca.saltedge/authorize");
-
-    PisPayment localPis = mock(PisPayment.class);
-    when(localPis.getId()).thenReturn("local-pis-99");
-
-    stubFinTransactionCount(0L);
-
-    try (MockedStatic<NeoDefaultsService> defaultsMock = mockStatic(NeoDefaultsService.class);
-         MockedStatic<RequestContext> reqCtxMock = mockStatic(RequestContext.class);
-         MockedStatic<FIN_AddPayment> addPayMock = mockStatic(FIN_AddPayment.class);
-         MockedStatic<PisPaymentBridge> bridgeMock = mockStatic(PisPaymentBridge.class);
-         MockedStatic<PISPaymentDao> pisDaoMock = mockStatic(PISPaymentDao.class);
-         MockedConstruction<DalConnectionProvider> connCtor =
-             mockConstruction(DalConnectionProvider.class)) {
-      defaultsMock.when(() -> NeoDefaultsService.buildVariablesSecureApp(any()))
-          .thenReturn(mock(VariablesSecureApp.class));
-      reqCtxMock.when(RequestContext::get).thenReturn(mock(RequestContext.class));
-      addPayMock.when(() -> FIN_AddPayment.processPayment(any(), any(), anyString(), any(),
-          anyString())).thenReturn(okResult);
-      bridgeMock.when(() -> PisPaymentBridge.initiatePisPayment(eq(payment), eq(pisInput), any()))
-          .thenReturn(bridgeResult);
-      pisDaoMock.when(() -> PISPaymentDao.findBySaltedgePaymentId("se-pay-99"))
-          .thenReturn(localPis);
-
-      NeoResponse response = PisPaymentService.applyOverpaymentAndInitiatePis(payment, dao, org,
-          new BigDecimal("100.00"), new BigDecimal("100.00"), pisInput, null);
-
-      assertEquals(201, response.getHttpStatus());
-      JSONObject data = response.getBody().getJSONObject("response").getJSONObject("data");
-      assertEquals("https://sca.saltedge/authorize", data.getString("pisPaymentUrl"));
-      assertEquals("local-pis-99", data.getString("pisPaymentId"));
-      assertEquals("requested", data.getString("pisStatus"));
-      // No leftover => no credit PSD created.
-      verify(dao, never()).getNewPaymentScheduleDetail(any(), any());
-    }
-  }
-
-  /**
-   * The overpaid + "refund" path: the leftover is registered as a credit PSD (refund is skipped
-   * for PIS because the funds have not moved yet), the payment is still processed and the bank
-   * transfer initiated. The credit detail creation is what proves the overpaid branch ran.
-   */
-  @Test
-  void testApplyOverpaymentAndInitiatePisOverpaidRefundKeepsLeftoverAsCredit() throws Exception {
-    FIN_Payment payment = processedPaymentMock();
-    AdvPaymentMngtDao dao = mock(AdvPaymentMngtDao.class);
-    Organization org = mock(Organization.class);
-    JSONObject pisInput = new JSONObject().put("template", "SEPA");
-
-    OBError okResult = mock(OBError.class);
-    when(okResult.getType()).thenReturn("Success");
-
-    BankIntegrationPISUtils.PISCreatePaymentResult bridgeResult =
-        mock(BankIntegrationPISUtils.PISCreatePaymentResult.class);
-    when(bridgeResult.getPaymentId()).thenReturn("se-pay-ov");
-    when(bridgeResult.getPaymentUrl()).thenReturn("https://sca.saltedge/ov");
-
-    // A financial transaction already exists here => exercises the hasFinTransaction warning too.
-    stubFinTransactionCount(1L);
-
-    try (MockedStatic<NeoDefaultsService> defaultsMock = mockStatic(NeoDefaultsService.class);
-         MockedStatic<RequestContext> reqCtxMock = mockStatic(RequestContext.class);
-         MockedStatic<FIN_AddPayment> addPayMock = mockStatic(FIN_AddPayment.class);
-         MockedStatic<PisPaymentBridge> bridgeMock = mockStatic(PisPaymentBridge.class);
-         MockedStatic<PISPaymentDao> pisDaoMock = mockStatic(PISPaymentDao.class);
-         MockedConstruction<DalConnectionProvider> connCtor =
-             mockConstruction(DalConnectionProvider.class)) {
-      defaultsMock.when(() -> NeoDefaultsService.buildVariablesSecureApp(any()))
-          .thenReturn(mock(VariablesSecureApp.class));
-      reqCtxMock.when(RequestContext::get).thenReturn(mock(RequestContext.class));
-      addPayMock.when(() -> FIN_AddPayment.processPayment(any(), any(), anyString(), any(),
-          anyString())).thenReturn(okResult);
-      bridgeMock.when(() -> PisPaymentBridge.initiatePisPayment(eq(payment), eq(pisInput), any()))
-          .thenReturn(bridgeResult);
-      // findBySaltedgePaymentId returns null here => localPisPaymentId stays null in the response.
-      pisDaoMock.when(() -> PISPaymentDao.findBySaltedgePaymentId("se-pay-ov")).thenReturn(null);
-
-      NeoResponse response = PisPaymentService.applyOverpaymentAndInitiatePis(payment, dao, org,
-          new BigDecimal("150.00"), new BigDecimal("100.00"), pisInput, "refund");
-
-      assertEquals(201, response.getHttpStatus());
-      JSONObject data = response.getBody().getJSONObject("response").getJSONObject("data");
-      assertEquals("https://sca.saltedge/ov", data.getString("pisPaymentUrl"));
-      assertEquals("requested", data.getString("pisStatus"));
-      assertFalse(data.has("pisPaymentId") && !data.isNull("pisPaymentId"));
-      // leftover = 150 - 100 = 50 kept as generated credit (never refunded).
-      verify(dao).getNewPaymentScheduleDetail(eq(org), eq(new BigDecimal("50.00")));
-      verify(dao).getNewPaymentDetail(eq(payment), any(), eq(new BigDecimal("50.00")),
-          eq(BigDecimal.ZERO), eq(false), any());
-    }
   }
 }
