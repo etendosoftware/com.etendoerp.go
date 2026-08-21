@@ -25,7 +25,6 @@ import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
-import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
@@ -60,7 +59,6 @@ import org.openbravo.model.common.currency.Currency;
 import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.dal.service.OBDal;
 
-import com.etendoerp.go.onboarding.OnboardingRoleProvisioningService;
 import com.etendoerp.go.schemaforge.data.Account;
 import com.smf.securewebservices.utils.SecureWebServicesUtils;
 
@@ -857,9 +855,6 @@ public class EtendoGoJwtServletCoverageTest {
     when(contact.getId()).thenReturn("user-1");
     when(adminUserRole.getRole()).thenReturn(role);
     when(adminUserRole.getUserContact()).thenReturn(contact);
-    // Real admin-role resolution reaches ensureRoles() before the organization step this test
-    // targets; stub it out so the (unmocked-here) OBDal calls inside the real service never run.
-    servlet.onboardingRoleProvisioningService = mock(OnboardingRoleProvisioningService.class);
 
     try (var ctxMock = mockStatic(OBContext.class);
          var supportMock = mockStatic(EtendoGoJwtSupport.class);
@@ -888,65 +883,6 @@ public class EtendoGoJwtServletCoverageTest {
     assertTrue(ndjson.contains("\"step\":\"organization\""));
     assertTrue(ndjson.contains("\"success\":false"));
     assertTrue(ndjson.contains("Organization not found"));
-  }
-
-  @Test
-  public void onboardingRolesFailureRollsBackAndStreamsFailure() throws Exception {
-    ResponseCapture resp = mockResponse();
-    HttpServletRequest req = jsonRequest("/onboarding",
-        "{\"clientName\":\"Acme\",\"currency\":\"EUR\",\"language\":\"en_US\"}");
-    when(req.getHeader("Authorization")).thenReturn("Bearer valid-token");
-
-    Currency currency = mock(Currency.class);
-    when(currency.getId()).thenReturn("currency-1");
-
-    UserRoles adminUserRole = mock(UserRoles.class);
-    Role role = mock(Role.class);
-    when(role.getId()).thenReturn("role-1");
-    User contact = mock(User.class);
-    when(contact.getId()).thenReturn("user-1");
-    when(adminUserRole.getRole()).thenReturn(role);
-    when(adminUserRole.getUserContact()).thenReturn(contact);
-
-    OnboardingRoleProvisioningService roleProvisioningService =
-        mock(OnboardingRoleProvisioningService.class);
-    // A null-message exception exercises the "no message" default-text branch.
-    doThrow(new RuntimeException()).when(roleProvisioningService)
-        .wire(anyString(), anyString(), anyString());
-    servlet.onboardingRoleProvisioningService = roleProvisioningService;
-
-    Account account = mock(Account.class);
-    when(account.getEmail()).thenReturn("user@test.com");
-
-    try (var ctxMock = mockStatic(OBContext.class);
-         var supportMock = mockStatic(EtendoGoJwtSupport.class);
-         var dalMock = mockStatic(EtendoGoJwtDalHelper.class);
-         var rollbackMock = mockStatic(EtendoGoDalHelper.class)) {
-      stubAuthenticatedAccount(dalMock);
-      dalMock.when(() -> EtendoGoJwtDalHelper.findCurrencyByIsoCode("EUR"))
-          .thenReturn(currency);
-      supportMock.when(() -> EtendoGoJwtSupport.findClientIdByName("Acme"))
-          .thenReturn("client-1");
-      dalMock.when(() -> EtendoGoJwtDalHelper.clientBelongsToAccountEmail("client-1", "user@test.com"))
-          .thenReturn(true);
-      dalMock.when(() -> EtendoGoJwtDalHelper.findClientAdminUserRole("client-1"))
-          .thenReturn(adminUserRole);
-
-      servlet.doPost(req, resp.response);
-
-      rollbackMock.verify(() -> EtendoGoDalHelper.rollbackDalChanges(
-          eq("onboarding role provisioning"), any(), any()));
-      // The chain must stop here — ensureOrganization (the actual org-creation step, which
-      // runs after roles) never fires. findStarOrgId is NOT part of that later step: it runs
-      // earlier, inside resolveAdminContextData, to resolve the OBContext org needed before
-      // role provisioning can run at all — so it always runs regardless of this failure.
-      supportMock.verify(() -> EtendoGoJwtSupport.organizationExists(any()), never());
-    }
-
-    String ndjson = resp.body();
-    assertTrue(ndjson.contains("\"step\":\"roles\""));
-    assertTrue(ndjson.contains("\"success\":false"));
-    assertTrue(ndjson.contains("Role provisioning failed"));
   }
 
   // ===================== applySocialName() — ETP-4749 =====================

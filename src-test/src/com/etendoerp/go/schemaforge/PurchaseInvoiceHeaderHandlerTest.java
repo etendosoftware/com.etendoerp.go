@@ -654,7 +654,11 @@ public class PurchaseInvoiceHeaderHandlerTest {
    */
   @Test
   public void afterHandle_putCrud_callsPersistAndReturnsNull() throws Exception {
-    JSONObject body = new JSONObject().put("originInvoice", "");
+    // ETP-4919: persistOriginInvoice is now a no-op when the captured id set is blank (there is
+    // no supported way to unlink an origin invoice through this endpoint) — so a non-blank id is
+    // required here for the test to actually exercise the persist path instead of vacuously
+    // hitting that early-return.
+    JSONObject body = new JSONObject().put("originInvoice", "inv-origin-ah");
     NeoContext ctx = NeoContext.builder()
         .httpMethod("PUT")
         .endpointType(NeoEndpointType.CRUD)
@@ -676,6 +680,8 @@ public class PurchaseInvoiceHeaderHandlerTest {
 
       Invoice invoice = mock(Invoice.class);
       when(dal.get(Invoice.class, "inv-put-ah")).thenReturn(invoice);
+      Invoice originInvoice = mock(Invoice.class);
+      when(dal.get(Invoice.class, "inv-origin-ah")).thenReturn(originInvoice);
 
       @SuppressWarnings("unchecked")
       org.openbravo.dal.service.OBCriteria<org.openbravo.model.common.invoice.ReversedInvoice>
@@ -683,16 +689,21 @@ public class PurchaseInvoiceHeaderHandlerTest {
       when(dal.createCriteria(org.openbravo.model.common.invoice.ReversedInvoice.class))
           .thenReturn(criteria);
       when(criteria.add(any())).thenReturn(criteria);
-      when(criteria.list()).thenReturn(java.util.Collections.emptyList());
+      // Pretend the link already exists (ETP-4919 dedupe check) — proves persistOriginInvoice
+      // reached the DB layer without needing to mock the OBProvider/save() creation path too.
+      when(criteria.list()).thenReturn(
+          java.util.Collections.singletonList(
+              mock(org.openbravo.model.common.invoice.ReversedInvoice.class)));
 
       NeoResponse result = handler.afterHandle(ctx);
       assertNull(result);
 
-      // persistOriginInvoice actually ran for PUT: it looked up the invoice and its existing
-      // reverse links (an empty originInvoice value only deletes, never creates, a link).
+      // persistOriginInvoice actually ran for PUT: given a non-blank originInvoice id, it looked
+      // up both the invoice and the origin invoice and checked for an existing reverse link.
       // atLeastOnce(): autoCreateOrUpdateConversionRateDocument (called unconditionally earlier
       // in afterHandle()) also does its own dal.get(Invoice.class, recordId) lookup.
       Mockito.verify(dal, Mockito.atLeastOnce()).get(Invoice.class, "inv-put-ah");
+      Mockito.verify(dal).get(Invoice.class, "inv-origin-ah");
       Mockito.verify(dal).createCriteria(org.openbravo.model.common.invoice.ReversedInvoice.class);
     }
   }
@@ -707,7 +718,11 @@ public class PurchaseInvoiceHeaderHandlerTest {
    */
   @Test
   public void afterHandle_patchCrud_callsPersistAndReturnsNull() throws Exception {
-    JSONObject body = new JSONObject().put("originInvoice", "");
+    // ETP-4919: persistOriginInvoice is now a no-op when the captured id set is blank (there is
+    // no supported way to unlink an origin invoice through this endpoint) — so a non-blank id is
+    // required here for the test to actually exercise the persist path instead of vacuously
+    // hitting that early-return.
+    JSONObject body = new JSONObject().put("originInvoice", "inv-origin-ph");
     NeoContext ctx = NeoContext.builder()
         .httpMethod("PATCH")
         .endpointType(NeoEndpointType.CRUD)
@@ -727,6 +742,8 @@ public class PurchaseInvoiceHeaderHandlerTest {
 
       Invoice invoice = mock(Invoice.class);
       when(dal.get(Invoice.class, "inv-patch-ah")).thenReturn(invoice);
+      Invoice originInvoice = mock(Invoice.class);
+      when(dal.get(Invoice.class, "inv-origin-ph")).thenReturn(originInvoice);
 
       @SuppressWarnings("unchecked")
       org.openbravo.dal.service.OBCriteria<org.openbravo.model.common.invoice.ReversedInvoice>
@@ -734,16 +751,21 @@ public class PurchaseInvoiceHeaderHandlerTest {
       when(dal.createCriteria(org.openbravo.model.common.invoice.ReversedInvoice.class))
           .thenReturn(criteria);
       when(criteria.add(any())).thenReturn(criteria);
-      when(criteria.list()).thenReturn(java.util.Collections.emptyList());
+      // Pretend the link already exists (ETP-4919 dedupe check) — proves persistOriginInvoice
+      // reached the DB layer without needing to mock the OBProvider/save() creation path too.
+      when(criteria.list()).thenReturn(
+          java.util.Collections.singletonList(
+              mock(org.openbravo.model.common.invoice.ReversedInvoice.class)));
 
       NeoResponse result = handler.afterHandle(ctx);
       assertNull(result);
 
-      // persistOriginInvoice actually ran for PATCH: it looked up the invoice and its existing
-      // reverse links (an empty originInvoice value only deletes, never creates, a link).
-      // atLeastOnce(): autoCreateOrUpdateConversionRateDocument (called unconditionally earlier
-      // in afterHandle()) also does its own dal.get(Invoice.class, recordId) lookup.
+      // persistOriginInvoice actually ran for PATCH: given a non-blank originInvoice id, it
+      // looked up both the invoice and the origin invoice and checked for an existing reverse
+      // link. atLeastOnce(): autoCreateOrUpdateConversionRateDocument (called unconditionally
+      // earlier in afterHandle()) also does its own dal.get(Invoice.class, recordId) lookup.
       Mockito.verify(dal, Mockito.atLeastOnce()).get(Invoice.class, "inv-patch-ah");
+      Mockito.verify(dal).get(Invoice.class, "inv-origin-ph");
       Mockito.verify(dal).createCriteria(org.openbravo.model.common.invoice.ReversedInvoice.class);
     }
   }

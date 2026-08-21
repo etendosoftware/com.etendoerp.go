@@ -56,6 +56,7 @@ import org.openbravo.base.model.Entity;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.enterprise.Organization;
+import org.openbravo.model.financialmgmt.payment.FIN_FinaccTransaction;
 import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
 import org.openbravo.model.financialmgmt.payment.FIN_Reconciliation;
 
@@ -96,6 +97,10 @@ public class CashCloseHandlerTest {
   public void setUp() {
     handler = spy(new CashCloseHandler());
     doNothing().when(handler).doRollbackAndClose();
+    // Default: nothing linked to the draft. The seam is queried (never read off the entity's own
+    // one-to-many list — see CashCloseHandler#linkedTransactions), so it has to be stubbed for the
+    // no-database paths; the tests that care about cleared movements override it.
+    doReturn(Collections.emptyList()).when(handler).linkedTransactions(any());
   }
 
   @After
@@ -305,6 +310,72 @@ public class CashCloseHandlerTest {
     verify(handler, never()).findLineInClosedPeriod(any());
   }
 
+  // ── Where the cleared movements are read from ──────────────────────────────
+
+  /**
+   * REGRESSION — the first close of a cash account.
+   *
+   * <p>A draft created earlier in the same request never reports its linked movements through the
+   * entity ({@code getFINFinaccTransactionList()} stays empty: the FK lives on the transaction, the
+   * owning side), so reading the cleared net off the entity made a perfectly balanced close look
+   * like a full-amount discrepancy — rejected for a missing GL Item Difference it did not need, or,
+   * with one configured, posted as a spurious adjustment for the whole counted amount. Confirming
+   * only worked from the SECOND attempt on, once the draft came back from the database.</p>
+   *
+   * <p>Here the entity list is empty and the seam reports a 200,00 deposit. Declaring exactly
+   * 200,00 against an opening of 0 must therefore balance, and complete without any GL Item
+   * Difference on the account.</p>
+   */
+  @Test
+  public void testClearedNetIsReadFromTheLinkedTransactionsNotTheEntityList() throws Exception {
+    FIN_FinancialAccount acc = cashAccountWithOrgAndClient();
+    Date closeDate = pastDate();
+    FIN_Reconciliation draft = draftEndingOn(closeDate);
+    doReturn(null).when(handler).findLastProcessed(acc);
+    doNothing().when(handler).checkPeriod(any(), any(), any(), any());
+    doReturn(null).when(handler).findLineInClosedPeriod(draft);
+    when(draft.getFINFinaccTransactionList()).thenReturn(Collections.emptyList());
+    doReturn(Collections.singletonList(deposit("200.00", closeDate)))
+        .when(handler).linkedTransactions(draft);
+    // No accounting concept for differences — the account in the reported repro had none.
+    when(acc.getAprmGlitemDiff()).thenReturn(null);
+
+    try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      NeoResponse res = CashCloseSupport.confirmDraft(handler, acc, draft,
+          BigDecimal.ZERO, new BigDecimal("200.00"));
+
+      assertEquals(HttpServletResponse.SC_OK, res.getHttpStatus());
+      verify(draft).setDocumentStatus("CO");
+      verify(draft).setProcessed(true);
+    }
+  }
+
+  /**
+   * The same close declared 100,00 short is genuinely unbalanced, so the missing-concept guard must
+   * still fire — the fix above must not have turned it into a no-op.
+   */
+  @Test
+  public void testAGenuineDifferenceWithoutAConceptIsStillRejected() throws Exception {
+    FIN_FinancialAccount acc = cashAccountWithOrgAndClient();
+    Date closeDate = pastDate();
+    FIN_Reconciliation draft = draftEndingOn(closeDate);
+    doReturn(null).when(handler).findLastProcessed(acc);
+    doNothing().when(handler).checkPeriod(any(), any(), any(), any());
+    doReturn(null).when(handler).findLineInClosedPeriod(draft);
+    doReturn(Collections.singletonList(deposit("200.00", closeDate)))
+        .when(handler).linkedTransactions(draft);
+    when(acc.getAprmGlitemDiff()).thenReturn(null);
+
+    NeoResponse res = CashCloseSupport.confirmDraft(handler, acc, draft,
+        BigDecimal.ZERO, new BigDecimal("100.00"));
+
+    assertEquals(HttpServletResponse.SC_BAD_REQUEST, res.getHttpStatus());
+    verify(draft, never()).setDocumentStatus("CO");
+  }
+
   // ── Pure close arithmetic ─────────────────────────────────────────────────
 
   /** The design-handoff figures: opening 19,00 + net 325,66 vs. a declared 182,61. */
@@ -432,8 +503,10 @@ public class CashCloseHandlerTest {
   }
 
   /**
-   * A draft with no linked transactions (so {@code clearedNet} is 0 and the flow never touches the
-   * Core statics behind the difference transaction) ending on {@code endingDate}.
+   * A draft ending on {@code endingDate}. What it has linked is decided by the {@code
+   * linkedTransactions} seam (empty by default, see {@link #setUp()}), not by this mock — so by
+   * default {@code clearedNet} is 0 and the flow never touches the Core statics behind the
+   * difference transaction.
    */
   private static FIN_Reconciliation draftEndingOn(Date endingDate) {
     FIN_Reconciliation draft = mock(FIN_Reconciliation.class);
@@ -441,13 +514,25 @@ public class CashCloseHandlerTest {
     when(draft.getEndingDate()).thenReturn(endingDate);
     when(draft.getDocumentNo()).thenReturn("1000001");
     when(draft.getEndingBalance()).thenReturn(BigDecimal.ZERO);
-    when(draft.getFINFinaccTransactionList()).thenReturn(Collections.emptyList());
     // draft.getEntity().getTableId() is evaluated as an argument of the period guard, so it must
     // resolve even when the guard itself is stubbed out.
     Entity entity = mock(Entity.class);
     when(entity.getTableId()).thenReturn("table-1");
     when(draft.getEntity()).thenReturn(entity);
     return draft;
+  }
+
+  /**
+   * A cleared inflow of {@code amount} dated on {@code transactionDate}. The date matters: the
+   * confirm flow compares it against the close date to decide whether to push it forward.
+   */
+  private static FIN_FinaccTransaction deposit(String amount, Date transactionDate) {
+    FIN_FinaccTransaction trx = mock(FIN_FinaccTransaction.class);
+    when(trx.getId()).thenReturn("trx-1");
+    when(trx.getDepositAmount()).thenReturn(new BigDecimal(amount));
+    when(trx.getPaymentAmount()).thenReturn(BigDecimal.ZERO);
+    when(trx.getTransactionDate()).thenReturn(transactionDate);
+    return trx;
   }
 
   /** Yesterday at midnight — safely inside every date guard. */

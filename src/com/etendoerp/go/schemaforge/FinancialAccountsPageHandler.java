@@ -103,7 +103,11 @@ public class FinancialAccountsPageHandler implements NeoHandler {
           + "       COALESCE(fa.em_aprm_glitem_diff, ''), "
           + "       COALESCE(gli.name, ''), "
           + "       fa.em_psd2_salt_edge_account_id, prov.logo_url, "
-          + "       fa.writeofflimit "
+          + "       fa.writeofflimit, "
+          // Appended at the END on purpose (ETP-4896): loadAccounts() below reads every column by
+          // POSITION, and so does FinancialAccountsPageHandlerTest's ResultSet stubbing — inserting
+          // these in the middle would silently shift every existing column index.
+          + "       fa.c_country_id, ctry.countrycode, ctry.name "
           + "  FROM fin_financial_account fa "
           + "  JOIN c_currency cur ON cur.c_currency_id = fa.c_currency_id "
           + "  LEFT JOIN c_glitem gli ON gli.c_glitem_id = fa.em_aprm_glitem_diff "
@@ -111,6 +115,8 @@ public class FinancialAccountsPageHandler implements NeoHandler {
           // Reads the logo straight from the already-synced provider catalog — no live Salt Edge
           // call per row, unlike the connect-flow bank picker / account selector.
           + "  LEFT JOIN psd2_provider prov ON prov.psd2_provider_id = fa.em_psd2_provider_id "
+          // LEFT JOIN: c_country_id is nullable and Cash accounts never carry one.
+          + "  LEFT JOIN c_country ctry ON ctry.c_country_id = fa.c_country_id "
           + " WHERE fa.ad_client_id = ? "
           + "   AND fa.ad_org_id = ANY (?) "
           + " ORDER BY fa.isdefault DESC, fa.name ASC";
@@ -293,6 +299,11 @@ public class FinancialAccountsPageHandler implements NeoHandler {
     JSONObject data = new JSONObject();
     data.put("accounts", buildAccountsArray(accounts, pendingByAccount, accountsWithTransactions));
     data.put("summary", buildSummary(accounts, pendingByAccount));
+    // Sibling of accounts/summary, not a per-account field (ETP-4896). It is the same catalog that
+    // the W-spec defaults response carries (see the injectAccountDefaults method over in
+    // FinancialAccountHandler), and this R spec is what the accounts list and the edit modal
+    // actually load today.
+    data.put("countryIbanRules", FinancialAccountCountrySupport.buildIbanRules());
 
     JSONObject responseData = new JSONObject();
     responseData.put("data", data);
@@ -335,6 +346,13 @@ public class FinancialAccountsPageHandler implements NeoHandler {
           // Left NULL on purpose when unset: null means "no limit", which is not the same as a
           // configured 0. See the serialiser and ReconciliationHandler.assertWithinWriteoffLimit.
           row.writeoffLimit = rs.getBigDecimal(18);
+          // Null-safe by construction (ETP-4896): an account with no C_Country_ID yields a null
+          // column 19, so row.country stays null and the JSON serialiser emits "" — never "null".
+          String countryId = rs.getString(19);
+          if (countryId != null) {
+            row.country = new CountryRef(countryId, StringUtils.trimToEmpty(rs.getString(20)),
+                StringUtils.trimToEmpty(rs.getString(21)));
+          }
           rows.add(row);
         }
       }
@@ -429,6 +447,9 @@ public class FinancialAccountsPageHandler implements NeoHandler {
       json.put("currentBalance", account.currentBalance);
       json.put("currencyId", account.currency.id);
       json.put("currencyIso", account.currency.iso);
+      json.put("countryId", account.country != null ? account.country.id : "");
+      json.put("countryIso", account.country != null ? account.country.iso : "");
+      json.put("countryName", account.country != null ? account.country.name : "");
       json.put("iban", account.iban);
       json.put("maskedPan", account.maskedPan);
       json.put("bankConnected", account.bankConnected);
@@ -559,6 +580,11 @@ public class FinancialAccountsPageHandler implements NeoHandler {
     String glItemDifferenceId = "";
     /** Display name of {@link #glItemDifferenceId}, resolved server-side. Blank if unset. */
     String glItemDifferenceName = "";
+    /** Country of the account (ETP-4896) — set on Bank accounts that carry an IBAN, {@code null}
+     *  otherwise (Cash accounts never have one; a Bank account may not yet). Set by the loader,
+     *  not the constructor: {@link Currency}'s javadoc explains why the constructor stays capped
+     *  at 7 parameters, and every existing fixture already calls it with exactly that many. */
+    CountryRef country = null;
 
     AccountRow(String id, String name, String type, BigDecimal currentBalance,
         Currency currency, String iban, boolean isDefault) {
@@ -584,6 +610,24 @@ public class FinancialAccountsPageHandler implements NeoHandler {
     Currency(String id, String iso) {
       this.id = id;
       this.iso = iso;
+    }
+  }
+
+  /**
+   * Country descriptor co-located with {@link AccountRow} (ETP-4896), mirroring {@link Currency}.
+   * {@code name} is included because this R spec has no {@code $_identifier} machinery (only the
+   * W spec's {@code NeoFieldFilter} produces one), so the edit modal needs a label without a
+   * second round-trip.
+   */
+  static class CountryRef {
+    final String id;
+    final String iso;
+    final String name;
+
+    CountryRef(String id, String iso, String name) {
+      this.id = id;
+      this.iso = iso;
+      this.name = name;
     }
   }
 }

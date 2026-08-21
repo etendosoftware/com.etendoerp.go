@@ -82,7 +82,6 @@ import com.etendoerp.go.onboarding.OnboardingOrgInfoService;
 import com.etendoerp.go.onboarding.OnboardingMarkOrgReadyService;
 import com.etendoerp.go.onboarding.OnboardingPeriodControlService;
 import com.etendoerp.go.onboarding.OnboardingBankConnectionSyncService;
-import com.etendoerp.go.onboarding.OnboardingRoleProvisioningService;
 import com.etendoerp.go.onboarding.OnboardingSequenceGeneratorService;
 import com.etendoerp.go.schemaforge.data.Account;
 import com.etendoerp.go.schemaforge.email.EmailContractCommandSupport;
@@ -136,12 +135,14 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private static final String FIELD_EMAIL = "email";
   private static final String FIELD_CLIENT_NAME = "clientName";
   private static final String FIELD_STATUS = "status";
+  private static final String FIELD_HTTP_STATUS = "httpStatus";
   private static final String FIELD_TOKEN = "token";
   private static final String FIELD_MESSAGE = "message";
   private static final String FIELD_CODE = "code";
   private static final String FIELD_USER_MESSAGE = "userMessage";
   private static final String FIELD_PASSWORD = "password";
   private static final String FIELD_SUCCESS = "success";
+  private static final String CODE_INVITATION_ERROR = "INVITATION_ERROR";
   private static final String FIELD_TIMESTAMP = "timestamp";
   private static final String FIELD_ACCOUNT = "account";
   private static final String FIELD_AUTH_METHOD = "authMethod";
@@ -193,7 +194,6 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private static final String PROGRESS_CLIENT = "client";
   private static final String PROGRESS_ERROR = "error";
   private static final String PROGRESS_ORGANIZATION = "organization";
-  private static final String PROGRESS_ROLES = "roles";
   private static final String PROGRESS_DATASET = "dataset";
   private static final String PROGRESS_ACCOUNTING = "accounting";
   private static final String PROGRESS_PERIOD_CONTROL = "periodControl";
@@ -230,8 +230,6 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       "fiscalIdValue", FIELD_ADDRESS, "sector" };
 
   OnboardingDatasetImportService onboardingDatasetImportService = new OnboardingDatasetImportService();
-  OnboardingRoleProvisioningService onboardingRoleProvisioningService =
-      new OnboardingRoleProvisioningService();
   OnboardingAccountingWiringService onboardingAccountingWiringService =
       new OnboardingAccountingWiringService();
   OnboardingPeriodControlService onboardingPeriodControlService =
@@ -255,6 +253,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   TenantPaywallService tenantPaywallService = new TenantPaywallService();
   TenantPlanService tenantPlanService = new TenantPlanService();
   HostedCheckoutService hostedCheckoutService = new HostedCheckoutService();
+  CompanyInvitationService companyInvitationService;
   private final TransactionalAuthEmailSender authEmailSender;
   private final EtendoGoSsoProviderRegistry ssoProviderRegistry;
   private final GoSessionService goSessionService;
@@ -286,6 +285,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     this.authEmailSender = authEmailSender;
     this.ssoProviderRegistry = ssoProviderRegistry;
     this.goSessionService = goSessionService;
+    this.companyInvitationService = new CompanyInvitationService(authEmailSender);
   }
 
   // --- HTTP method dispatchers ---
@@ -310,6 +310,10 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       handleEnvironmentLogin(request, response);
     } else if (isPath(path, PATH_SESSION)) {
       handleSessionRestore(request, response);
+    } else if (isPath(path, "/company-invitations/mine")) {
+      handleCompanyInvitationMine(request, response);
+    } else if (isPath(path, "/company-invitations/resolve")) {
+      handleCompanyInvitationResolve(request, response);
     } else if (path != null && path.startsWith("/checkout/sessions/")) {
       handleCheckoutStatus(request, response);
     } else {
@@ -353,6 +357,12 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       handleOnboarding(request, response);
     } else if (isPath(path, "/checkout/sessions")) {
       handleCheckoutSession(request, response);
+    } else if (isPath(path, "/company-invitations")) {
+      handleCompanyInvitationCreate(request, response);
+    } else if (isPath(path, "/company-invitations/accept")) {
+      handleCompanyInvitationAccept(request, response);
+    } else if (isPath(path, "/company-invitations/register-and-accept")) {
+      handleCompanyInvitationRegisterAndAccept(request, response);
     } else {
       writeError(response, HttpServletResponse.SC_NOT_FOUND, ERROR_UNKNOWN_ENDPOINT + path);
     }
@@ -449,6 +459,148 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   }
 
   // --- Endpoint handlers ---
+
+  /**
+   * POST /sws/go/company-invitations
+   * Header: Authorization: Bearer <inviter token>
+   * Body: { "email": "recipient@example.com" }
+   */
+  private void handleCompanyInvitationCreate(HttpServletRequest request,
+      HttpServletResponse response) throws IOException {
+    JSONObject body;
+    try {
+      body = readJsonBody(request);
+    } catch (JSONException e) {
+      writeError(response, HttpServletResponse.SC_BAD_REQUEST, CODE_INVALID_REQUEST,
+          INVALID_JSON_BODY, INVALID_JSON_BODY);
+      return;
+    }
+    String email = body.optString(FIELD_EMAIL, "").trim();
+    String language = body.optString(FIELD_LANGUAGE, "").trim();
+    String requestOrigin = request.getHeader("Origin");
+    String origin = StringUtils.isBlank(requestOrigin)
+        ? PublicUrlResolver.resolveAppBaseUrl(request) : requestOrigin;
+    runWithAuthenticatedAccount(request, response, "create company invitation", account -> {
+      JSONObject result = companyInvitationService.createInvitation(account, email, origin, language);
+      if (result.optBoolean(FIELD_ERROR, false)) {
+        int httpStatus = result.optInt(FIELD_HTTP_STATUS, HttpServletResponse.SC_BAD_REQUEST);
+        writeError(response, httpStatus, result.optString(FIELD_CODE, CODE_INVITATION_ERROR),
+            result.optString(FIELD_MESSAGE, "Could not create invitation"),
+            result.optString(FIELD_MESSAGE, "Could not create invitation"));
+        return;
+      }
+      writeResponse(response, HttpServletResponse.SC_CREATED, result);
+    });
+  }
+
+  /**
+   * GET /sws/go/company-invitations/mine
+   * Header: Authorization: Bearer <account session token>
+   */
+  private void handleCompanyInvitationMine(HttpServletRequest request,
+      HttpServletResponse response) throws IOException {
+    runWithAuthenticatedAccount(request, response, "list company invitations", account -> {
+      JSONObject result = companyInvitationService.listInvitationsForAccount(account);
+      if (result.optBoolean(FIELD_ERROR, false)) {
+        int httpStatus = result.optInt(FIELD_HTTP_STATUS, HttpServletResponse.SC_UNAUTHORIZED);
+        writeError(response, httpStatus, result.optString("code", "AUTHENTICATION_REQUIRED"),
+            result.optString(FIELD_MESSAGE, "Authentication required"),
+            result.optString(FIELD_MESSAGE, "Authentication required"));
+        return;
+      }
+      writeResponse(response, HttpServletResponse.SC_OK, result);
+    });
+  }
+
+  /**
+   * GET /sws/go/company-invitations/resolve?token=<token>
+   */
+  private void handleCompanyInvitationResolve(HttpServletRequest request,
+      HttpServletResponse response) throws IOException {
+    String token = request.getParameter(FIELD_TOKEN);
+    try {
+      JSONObject result = companyInvitationService.resolveInvitation(token);
+      if (result.optBoolean(FIELD_ERROR, false)) {
+        int httpStatus = result.optInt(FIELD_HTTP_STATUS, HttpServletResponse.SC_BAD_REQUEST);
+        writeError(response, httpStatus, result.optString(FIELD_CODE, CODE_INVITATION_ERROR),
+            result.optString(FIELD_MESSAGE, "Could not resolve invitation"),
+            result.optString(FIELD_MESSAGE, "Could not resolve invitation"));
+        return;
+      }
+      writeResponse(response, HttpServletResponse.SC_OK, result);
+    } catch (Exception e) {
+      log.error("Error resolving company invitation", e);
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, CODE_INTERNAL_ERROR,
+          INTERNAL_ERROR, INTERNAL_ERROR);
+    }
+  }
+
+  /**
+   * POST /sws/go/company-invitations/accept
+   * Body: { "token": "..." }
+   */
+  private void handleCompanyInvitationAccept(HttpServletRequest request,
+      HttpServletResponse response) throws IOException {
+    JSONObject body;
+    try {
+      body = readJsonBody(request);
+    } catch (JSONException e) {
+      writeError(response, HttpServletResponse.SC_BAD_REQUEST, CODE_INVALID_REQUEST,
+          INVALID_JSON_BODY, INVALID_JSON_BODY);
+      return;
+    }
+    String token = body.optString(FIELD_TOKEN, "").trim();
+    String accountBearerToken = extractBearerToken(request);
+    try {
+      JSONObject result = companyInvitationService.acceptExistingAccount(token, accountBearerToken);
+      if (result.optBoolean(FIELD_ERROR, false)) {
+        int httpStatus = result.optInt(FIELD_HTTP_STATUS, HttpServletResponse.SC_BAD_REQUEST);
+        writeError(response, httpStatus, result.optString(FIELD_CODE, CODE_INVITATION_ERROR),
+            result.optString(FIELD_MESSAGE, "Could not accept invitation"),
+            result.optString(FIELD_MESSAGE, "Could not accept invitation"));
+        return;
+      }
+      writeResponse(response, HttpServletResponse.SC_OK, result);
+    } catch (Exception e) {
+      log.error("Error accepting company invitation", e);
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, CODE_INTERNAL_ERROR,
+          INTERNAL_ERROR, INTERNAL_ERROR);
+    }
+  }
+
+  /**
+   * POST /sws/go/company-invitations/register-and-accept
+   * Body: { "token": "...", "name": "...", "password": "..." }
+   */
+  private void handleCompanyInvitationRegisterAndAccept(HttpServletRequest request,
+      HttpServletResponse response) throws IOException {
+    JSONObject body;
+    try {
+      body = readJsonBody(request);
+    } catch (JSONException e) {
+      writeError(response, HttpServletResponse.SC_BAD_REQUEST, CODE_INVALID_REQUEST,
+          INVALID_JSON_BODY, INVALID_JSON_BODY);
+      return;
+    }
+    String token = body.optString(FIELD_TOKEN, "").trim();
+    String name = body.optString("name", "").trim();
+    String password = body.optString(FIELD_PASSWORD, "");
+    try {
+      JSONObject result = companyInvitationService.registerAndAccept(token, name, password);
+      if (result.optBoolean(FIELD_ERROR, false)) {
+        int httpStatus = result.optInt(FIELD_HTTP_STATUS, HttpServletResponse.SC_BAD_REQUEST);
+        writeError(response, httpStatus, result.optString(FIELD_CODE, CODE_INVITATION_ERROR),
+            result.optString(FIELD_MESSAGE, "Could not register and accept invitation"),
+            result.optString(FIELD_MESSAGE, "Could not register and accept invitation"));
+        return;
+      }
+      writeResponse(response, HttpServletResponse.SC_OK, result);
+    } catch (Exception e) {
+      log.error("Error registering and accepting company invitation", e);
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, CODE_INTERNAL_ERROR,
+          INTERNAL_ERROR, INTERNAL_ERROR);
+    }
+  }
 
   /**
    * POST /sws/go/register
@@ -1428,10 +1580,6 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
         return;
       }
 
-      if (!ensureRoles(writer, clientId, adminContext.adminUserId, adminContext.adminRoleId)) {
-        return;
-      }
-
       if (paidUpgrade) {
         // Joins the onboarding transaction, so a successful marker commits with the tenant. It is
         // best-effort in the other direction: markProductive swallows its own failures, so a tenant
@@ -1884,30 +2032,6 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     data.starOrgId = EtendoGoJwtSupport.findStarOrgId(clientId);
     OBContext.setOBContext(data.adminUserId, data.adminRoleId, clientId, data.starOrgId);
     return data;
-  }
-
-  /**
-   * ETP-4515 (Phase 7) — clones GOClient's Finance/Sales/Purchasing/Inventory roles (plus their
-   * AD_Window_Access) onto the tenant. Runs right after client/organization resolution since it
-   * needs no organization yet: roles are client-wide. See {@link OnboardingRoleProvisioningService}
-   * for the full rationale.
-   */
-  private boolean ensureRoles(PrintWriter writer, String clientId, String adminUserId,
-      String adminRoleId) {
-    sendProgress(writer, PROGRESS_ROLES, PROGRESS_IN_PROGRESS,
-        "Provisioning Finance/Sales/Purchasing/Inventory roles...");
-    try {
-      onboardingRoleProvisioningService.wire(clientId, adminUserId, adminRoleId);
-      sendProgress(writer, PROGRESS_ROLES, "done", "Roles provisioned");
-      return true;
-    } catch (Exception e) {
-      EtendoGoDalHelper.rollbackDalChanges("onboarding role provisioning", e, log);
-      String errorMessage = e.getMessage() != null ? e.getMessage()
-          : "Role provisioning failed";
-      sendProgress(writer, PROGRESS_ROLES, PROGRESS_ERROR, errorMessage);
-      sendFinalResult(writer, false, errorMessage);
-      return false;
-    }
   }
 
   private Boolean ensureOrganization(PrintWriter writer, String clientName,
