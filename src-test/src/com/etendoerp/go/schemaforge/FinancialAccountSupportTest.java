@@ -67,10 +67,13 @@ import org.openbravo.model.financialmgmt.payment.MatchingAlgorithm;
  *   <li>findCurrencyByIsoCode: blank / null input short-circuits to null without the DAL;
  *       a found code returns the currency (uppercased, active filter); a missing code returns null.</li>
  *   <li>assignDefaultPaymentMethods: Cash/Bank/Card accounts get their type's methods linked, the
- *       first one flagged as default; a method not found in the catalog is skipped without
+ *       first one flagged as default (Bank -> Transferencia bancaria, Recibo, Tarjeta; Card ->
+ *       Tarjeta, Recibo — Recibo is never first, so it never becomes an account's default); a
+ *       method not found in the catalog is skipped without
  *       throwing; an existing link is left untouched (idempotent, no extra save); an unmapped
  *       type and the "nothing created" case never call {@code OBDal.flush()}. The link also
- *       copies uponDepositUse/uponWithdrawalUse/automaticDeposit/automaticWithdrawn from the
+ *       copies uponDepositUse/uponWithdrawalUse/inUponClearingUse/outUponClearingUse/
+ *       automaticDeposit/automaticWithdrawn from the
  *       master {@link FIN_PaymentMethod} — verified both with truthy values and with
  *       false/null values to confirm it is a genuine copy, not a hardcoded default. Tested
  *       end-to-end
@@ -276,6 +279,8 @@ public class FinancialAccountSupportTest {
     FinAccPaymentMethod link = mock(FinAccPaymentMethod.class);
     when(cash.getUponDepositUse()).thenReturn("DEP");
     when(cash.getUponWithdrawalUse()).thenReturn("WIT");
+    when(cash.getINUponClearingUse()).thenReturn("CLE");
+    when(cash.getOUTUponClearingUse()).thenReturn("CLE");
     when(cash.isAutomaticDeposit()).thenReturn(true);
     when(cash.isAutomaticWithdrawn()).thenReturn(true);
 
@@ -307,6 +312,8 @@ public class FinancialAccountSupportTest {
       verify(link).setDefault(true);
       verify(link).setUponDepositUse("DEP");
       verify(link).setUponWithdrawalUse("WIT");
+      verify(link).setINUponClearingUse("CLE");
+      verify(link).setOUTUponClearingUse("CLE");
       verify(link).setAutomaticDeposit(true);
       verify(link).setAutomaticWithdrawn(true);
       verify(dal).save(link);
@@ -331,6 +338,8 @@ public class FinancialAccountSupportTest {
     FinAccPaymentMethod link = mock(FinAccPaymentMethod.class);
     when(cash.getUponDepositUse()).thenReturn(null);
     when(cash.getUponWithdrawalUse()).thenReturn(null);
+    when(cash.getINUponClearingUse()).thenReturn(null);
+    when(cash.getOUTUponClearingUse()).thenReturn(null);
     when(cash.isAutomaticDeposit()).thenReturn(false);
     when(cash.isAutomaticWithdrawn()).thenReturn(false);
 
@@ -357,6 +366,8 @@ public class FinancialAccountSupportTest {
 
       verify(link).setUponDepositUse(null);
       verify(link).setUponWithdrawalUse(null);
+      verify(link).setINUponClearingUse(null);
+      verify(link).setOUTUponClearingUse(null);
       verify(link).setAutomaticDeposit(false);
       verify(link).setAutomaticWithdrawn(false);
       verify(dal).save(link);
@@ -365,8 +376,84 @@ public class FinancialAccountSupportTest {
   }
 
   /**
-   * A Bank account links its three configured methods (Transferencia bancaria, Cheque,
-   * Tarjeta), with only the first (Transferencia bancaria) flagged as default.
+   * Regression for the Cheque -> Recibo replacement: {@code createLink} must copy the
+   * reconciliation ("Cleared Payment Account") columns {@code INUponClearingUse} /
+   * {@code OUTUponClearingUse} from the master {@link FIN_PaymentMethod} onto the new link.
+   *
+   * <p>Recibo is the only one of the four seeded methods whose template carries
+   * {@code inuponclearinguse='CLE'} / {@code outuponclearinguse='CLE'}. Before these two copies
+   * existed, a runtime-created link was born with both columns EMPTY while the corrective
+   * data-fix (R24) set them to CLE — so an account created from Etendo GO diverged from an
+   * account repaired by the data-fix. Verified here on the Recibo link of a Bank account, with
+   * the sibling Transferencia/Tarjeta links deliberately given a different (empty) template so a
+   * hardcoded 'CLE' default would not pass.
+   */
+  @Test
+  public void testAssignDefaultPaymentMethodsCopiesClearingUseFromReceiptTemplate() {
+    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    when(account.getType()).thenReturn(TYPE_BANK);
+    when(account.getClient()).thenReturn(mock(Client.class));
+    when(account.getOrganization()).thenReturn(mock(Organization.class));
+
+    FIN_PaymentMethod transfer = mock(FIN_PaymentMethod.class);
+    FIN_PaymentMethod receipt = mock(FIN_PaymentMethod.class);
+    FIN_PaymentMethod card = mock(FIN_PaymentMethod.class);
+    // Only the Recibo template carries the reconciliation accounts.
+    when(receipt.getINUponClearingUse()).thenReturn("CLE");
+    when(receipt.getOUTUponClearingUse()).thenReturn("CLE");
+    when(receipt.getUponDepositUse()).thenReturn("DEP");
+    when(receipt.getUponWithdrawalUse()).thenReturn("WIT");
+
+    FinAccPaymentMethod transferLink = mock(FinAccPaymentMethod.class);
+    FinAccPaymentMethod receiptLink = mock(FinAccPaymentMethod.class);
+    FinAccPaymentMethod cardLink = mock(FinAccPaymentMethod.class);
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+        MockedStatic<OBProvider> obProvider = mockStatic(OBProvider.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+
+      @SuppressWarnings("unchecked")
+      OBCriteria<FIN_PaymentMethod> transferCriteria = mock(OBCriteria.class);
+      when(transferCriteria.uniqueResult()).thenReturn(transfer);
+      @SuppressWarnings("unchecked")
+      OBCriteria<FIN_PaymentMethod> receiptCriteria = mock(OBCriteria.class);
+      when(receiptCriteria.uniqueResult()).thenReturn(receipt);
+      @SuppressWarnings("unchecked")
+      OBCriteria<FIN_PaymentMethod> cardCriteria = mock(OBCriteria.class);
+      when(cardCriteria.uniqueResult()).thenReturn(card);
+      when(dal.createCriteria(FIN_PaymentMethod.class))
+          .thenReturn(transferCriteria, receiptCriteria, cardCriteria);
+
+      @SuppressWarnings("unchecked")
+      OBCriteria<FinAccPaymentMethod> linkCriteria = mock(OBCriteria.class);
+      when(linkCriteria.uniqueResult()).thenReturn(null);
+      when(dal.createCriteria(FinAccPaymentMethod.class)).thenReturn(linkCriteria);
+
+      OBProvider provider = mock(OBProvider.class);
+      obProvider.when(OBProvider::getInstance).thenReturn(provider);
+      when(provider.get(FinAccPaymentMethod.class))
+          .thenReturn(transferLink, receiptLink, cardLink);
+
+      FinancialAccountSupport.assignDefaultPaymentMethods(account);
+
+      // The Recibo link mirrors its template exactly...
+      verify(receiptLink).setINUponClearingUse("CLE");
+      verify(receiptLink).setOUTUponClearingUse("CLE");
+      verify(receiptLink).setUponDepositUse("DEP");
+      verify(receiptLink).setUponWithdrawalUse("WIT");
+      // ...and the copy is genuine: the siblings, whose templates are empty, stay empty.
+      verify(transferLink).setINUponClearingUse(null);
+      verify(transferLink).setOUTUponClearingUse(null);
+      verify(cardLink).setINUponClearingUse(null);
+      verify(cardLink).setOUTUponClearingUse(null);
+    }
+  }
+
+  /**
+   * A Bank account links its three configured methods (Transferencia bancaria, Recibo,
+   * Tarjeta), with only the first (Transferencia bancaria) flagged as default. Recibo is
+   * deliberately NOT first, so replacing Cheque with it can never steal the account default.
    */
   @Test
   public void testAssignDefaultPaymentMethodsBankLinksThreeMethodsTransferDefault() {
@@ -378,10 +465,10 @@ public class FinancialAccountSupportTest {
     when(account.getOrganization()).thenReturn(org);
 
     FIN_PaymentMethod transfer = mock(FIN_PaymentMethod.class);
-    FIN_PaymentMethod check = mock(FIN_PaymentMethod.class);
+    FIN_PaymentMethod receipt = mock(FIN_PaymentMethod.class);
     FIN_PaymentMethod card = mock(FIN_PaymentMethod.class);
     FinAccPaymentMethod transferLink = mock(FinAccPaymentMethod.class);
-    FinAccPaymentMethod checkLink = mock(FinAccPaymentMethod.class);
+    FinAccPaymentMethod receiptLink = mock(FinAccPaymentMethod.class);
     FinAccPaymentMethod cardLink = mock(FinAccPaymentMethod.class);
 
     try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
@@ -389,19 +476,19 @@ public class FinancialAccountSupportTest {
       OBDal dal = mock(OBDal.class);
       obDal.when(OBDal::getInstance).thenReturn(dal);
 
-      // One criteria mock per method lookup, returned in call order (Transfer, Check, Card —
+      // One criteria mock per method lookup, returned in call order (Transfer, Receipt, Card —
       // the iteration order of PAYMENT_METHODS_BY_TYPE.get("B")).
       @SuppressWarnings("unchecked")
       OBCriteria<FIN_PaymentMethod> transferCriteria = mock(OBCriteria.class);
       when(transferCriteria.uniqueResult()).thenReturn(transfer);
       @SuppressWarnings("unchecked")
-      OBCriteria<FIN_PaymentMethod> checkCriteria = mock(OBCriteria.class);
-      when(checkCriteria.uniqueResult()).thenReturn(check);
+      OBCriteria<FIN_PaymentMethod> receiptCriteria = mock(OBCriteria.class);
+      when(receiptCriteria.uniqueResult()).thenReturn(receipt);
       @SuppressWarnings("unchecked")
       OBCriteria<FIN_PaymentMethod> cardCriteria = mock(OBCriteria.class);
       when(cardCriteria.uniqueResult()).thenReturn(card);
       when(dal.createCriteria(FIN_PaymentMethod.class))
-          .thenReturn(transferCriteria, checkCriteria, cardCriteria);
+          .thenReturn(transferCriteria, receiptCriteria, cardCriteria);
 
       // No existing links for any of the three lookups.
       @SuppressWarnings("unchecked")
@@ -412,14 +499,14 @@ public class FinancialAccountSupportTest {
       OBProvider provider = mock(OBProvider.class);
       obProvider.when(OBProvider::getInstance).thenReturn(provider);
       when(provider.get(FinAccPaymentMethod.class))
-          .thenReturn(transferLink, checkLink, cardLink);
+          .thenReturn(transferLink, receiptLink, cardLink);
 
       FinancialAccountSupport.assignDefaultPaymentMethods(account);
 
       verify(transferLink).setPaymentMethod(transfer);
       verify(transferLink).setDefault(true);
-      verify(checkLink).setPaymentMethod(check);
-      verify(checkLink).setDefault(false);
+      verify(receiptLink).setPaymentMethod(receipt);
+      verify(receiptLink).setDefault(false);
       verify(cardLink).setPaymentMethod(card);
       verify(cardLink).setDefault(false);
       verify(dal, times(3)).save(any());
@@ -427,9 +514,17 @@ public class FinancialAccountSupportTest {
     }
   }
 
-  /** A Card account links only Tarjeta, flagged as its default. */
+  /**
+   * A Card account links its two configured methods (Tarjeta, Recibo), with only the first
+   * (Tarjeta) flagged as default.
+   *
+   * <p>Recibo on a Card account is NEW behaviour introduced with the Cheque -> Recibo replacement
+   * (Cheque was never linked to Card accounts). This test pins both halves of the contract: the
+   * account gets TWO links, and the second one (Recibo) is never the default — the reason Recibo
+   * is listed after Tarjeta in {@code PAYMENT_METHODS_BY_TYPE.get("CA")}.
+   */
   @Test
-  public void testAssignDefaultPaymentMethodsCardLinksTarjetaAsDefault() {
+  public void testAssignDefaultPaymentMethodsCardLinksTarjetaAsDefaultAndReceiptNonDefault() {
     FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
     Client client = mock(Client.class);
     Organization org = mock(Organization.class);
@@ -437,17 +532,25 @@ public class FinancialAccountSupportTest {
     when(account.getClient()).thenReturn(client);
     when(account.getOrganization()).thenReturn(org);
     FIN_PaymentMethod card = mock(FIN_PaymentMethod.class);
-    FinAccPaymentMethod link = mock(FinAccPaymentMethod.class);
+    FIN_PaymentMethod receipt = mock(FIN_PaymentMethod.class);
+    FinAccPaymentMethod cardLink = mock(FinAccPaymentMethod.class);
+    FinAccPaymentMethod receiptLink = mock(FinAccPaymentMethod.class);
 
     try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
         MockedStatic<OBProvider> obProvider = mockStatic(OBProvider.class)) {
       OBDal dal = mock(OBDal.class);
       obDal.when(OBDal::getInstance).thenReturn(dal);
 
+      // One criteria mock per method lookup, returned in call order (Card, Receipt — the
+      // iteration order of PAYMENT_METHODS_BY_TYPE.get("CA")).
       @SuppressWarnings("unchecked")
-      OBCriteria<FIN_PaymentMethod> methodCriteria = mock(OBCriteria.class);
-      when(dal.createCriteria(FIN_PaymentMethod.class)).thenReturn(methodCriteria);
-      when(methodCriteria.uniqueResult()).thenReturn(card);
+      OBCriteria<FIN_PaymentMethod> cardCriteria = mock(OBCriteria.class);
+      when(cardCriteria.uniqueResult()).thenReturn(card);
+      @SuppressWarnings("unchecked")
+      OBCriteria<FIN_PaymentMethod> receiptCriteria = mock(OBCriteria.class);
+      when(receiptCriteria.uniqueResult()).thenReturn(receipt);
+      when(dal.createCriteria(FIN_PaymentMethod.class))
+          .thenReturn(cardCriteria, receiptCriteria);
 
       @SuppressWarnings("unchecked")
       OBCriteria<FinAccPaymentMethod> linkCriteria = mock(OBCriteria.class);
@@ -456,13 +559,15 @@ public class FinancialAccountSupportTest {
 
       OBProvider provider = mock(OBProvider.class);
       obProvider.when(OBProvider::getInstance).thenReturn(provider);
-      when(provider.get(FinAccPaymentMethod.class)).thenReturn(link);
+      when(provider.get(FinAccPaymentMethod.class)).thenReturn(cardLink, receiptLink);
 
       FinancialAccountSupport.assignDefaultPaymentMethods(account);
 
-      verify(link).setPaymentMethod(card);
-      verify(link).setDefault(true);
-      verify(dal, times(1)).save(any());
+      verify(cardLink).setPaymentMethod(card);
+      verify(cardLink).setDefault(true);
+      verify(receiptLink).setPaymentMethod(receipt);
+      verify(receiptLink).setDefault(false);
+      verify(dal, times(2)).save(any());
       verify(dal).flush();
     }
   }
@@ -584,7 +689,7 @@ public class FinancialAccountSupportTest {
 
   /**
    * On a Bank account, the bank-transfer link identified by the PSD2 flag
-   * ({@code EM_PSD2_Is_Bank_Transfer='Y'}) has both multicurrency columns turned OFF; the Cheque and
+   * ({@code EM_PSD2_Is_Bank_Transfer='Y'}) has both multicurrency columns turned OFF; the Recibo and
    * Tarjeta links are left completely untouched (AC#2). save + flush happen once for the change.
    */
   @Test
@@ -594,8 +699,8 @@ public class FinancialAccountSupportTest {
 
     FIN_PaymentMethod transferMethod = mock(FIN_PaymentMethod.class);
     when(transferMethod.isPSD2IsBankTransfer()).thenReturn(Boolean.TRUE);
-    FIN_PaymentMethod checkMethod = mock(FIN_PaymentMethod.class);
-    when(checkMethod.getName()).thenReturn("Cheque");
+    FIN_PaymentMethod receiptMethod = mock(FIN_PaymentMethod.class);
+    when(receiptMethod.getName()).thenReturn("Recibo");
     FIN_PaymentMethod cardMethod = mock(FIN_PaymentMethod.class);
     when(cardMethod.getName()).thenReturn("Tarjeta");
 
@@ -603,15 +708,15 @@ public class FinancialAccountSupportTest {
     when(transferLink.getPaymentMethod()).thenReturn(transferMethod);
     when(transferLink.isPayinIsMulticurrency()).thenReturn(Boolean.TRUE);
     when(transferLink.isPayoutIsMulticurrency()).thenReturn(Boolean.TRUE);
-    FinAccPaymentMethod checkLink = mock(FinAccPaymentMethod.class);
-    when(checkLink.getPaymentMethod()).thenReturn(checkMethod);
+    FinAccPaymentMethod receiptLink = mock(FinAccPaymentMethod.class);
+    when(receiptLink.getPaymentMethod()).thenReturn(receiptMethod);
     FinAccPaymentMethod cardLink = mock(FinAccPaymentMethod.class);
     when(cardLink.getPaymentMethod()).thenReturn(cardMethod);
 
     try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
       OBDal dal = mock(OBDal.class);
       obDal.when(OBDal::getInstance).thenReturn(dal);
-      stubLinkList(dal, Arrays.asList(transferLink, checkLink, cardLink));
+      stubLinkList(dal, Arrays.asList(transferLink, receiptLink, cardLink));
 
       FinancialAccountSupport.disableMulticurrencyForBankTransfer(account);
 
@@ -619,11 +724,11 @@ public class FinancialAccountSupportTest {
       verify(transferLink).setPayoutIsMulticurrency(false);
       verify(dal).save(transferLink);
       verify(dal).flush();
-      verify(checkLink, never()).setPayinIsMulticurrency(anyBoolean());
-      verify(checkLink, never()).setPayoutIsMulticurrency(anyBoolean());
+      verify(receiptLink, never()).setPayinIsMulticurrency(anyBoolean());
+      verify(receiptLink, never()).setPayoutIsMulticurrency(anyBoolean());
       verify(cardLink, never()).setPayinIsMulticurrency(anyBoolean());
       verify(cardLink, never()).setPayoutIsMulticurrency(anyBoolean());
-      verify(dal, never()).save(checkLink);
+      verify(dal, never()).save(receiptLink);
       verify(dal, never()).save(cardLink);
     }
   }
