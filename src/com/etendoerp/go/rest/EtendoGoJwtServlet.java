@@ -1415,18 +1415,16 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
         return;
       }
 
-      if (paidUpgrade) {
-        // Joins the onboarding transaction, so a successful marker commits with the tenant. Still
-        // best-effort in the other direction: a tenant may commit unmarked rather than have
-        // provisioning rolled back over a plan marker. What must never happen quietly is exactly
-        // that case, so it is logged as an error naming the account — "paid but demo" is the
-        // symptom ETP-4966 was reported as, and this line is what makes it searchable instead of
-        // indistinguishable from a marker that was never attempted.
-        if (!tenantPlanService.markProductive(clientId, adminContext.starOrgId)) {
-          log.error("Paid environment '{}' (client {}) for account {} could not be marked as plan "
-              + "'{}' and will read back as free", onboardingRequest.clientName, clientId,
-              maskEmail(accountEmail), TenantPlanService.PLAN_PRODUCTIVE);
-        }
+      // Joins the onboarding transaction, so a successful marker commits with the tenant. Still
+      // best-effort in the other direction: a tenant may commit unmarked rather than have
+      // provisioning rolled back over a plan marker. What must never happen quietly is exactly
+      // that case, so it is logged as an error naming the account — "paid but demo" is the
+      // symptom ETP-4966 was reported as, and this line is what makes it searchable instead of
+      // indistinguishable from a marker that was never attempted.
+      if (paidUpgrade && !tenantPlanService.markProductive(clientId, adminContext.starOrgId)) {
+        log.error("Paid environment '{}' (client {}) for account {} could not be marked as plan "
+            + "'{}' and will read back as free", onboardingRequest.clientName, clientId,
+            maskEmail(accountEmail), TenantPlanService.PLAN_PRODUCTIVE);
       }
 
       // The returned flag (created vs. already-existing) is no longer used to gate downstream

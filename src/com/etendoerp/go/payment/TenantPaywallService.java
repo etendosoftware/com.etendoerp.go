@@ -144,13 +144,11 @@ public class TenantPaywallService {
    */
   private static Decision decide(boolean accountOwnsEnvironment, boolean resumingOwnedEnvironment,
       boolean convertingToProductive, String paymentToken, boolean confirmedPayment) {
-    if (!convertingToProductive) {
-      // Conversion is a paid state transition, so it deliberately skips both free paths: without
-      // this guard it would look like an ordinary resume of an environment the account owns and
-      // pass for free.
-      if (!accountOwnsEnvironment || resumingOwnedEnvironment) {
-        return Decision.ALLOWED;
-      }
+    // Conversion is a paid state transition, so it deliberately skips both free paths: without
+    // this guard it would look like an ordinary resume of an environment the account owns and
+    // pass for free.
+    if (!convertingToProductive && (!accountOwnsEnvironment || resumingOwnedEnvironment)) {
+      return Decision.ALLOWED;
     }
     if (confirmedPayment) {
       return Decision.ALLOWED;
