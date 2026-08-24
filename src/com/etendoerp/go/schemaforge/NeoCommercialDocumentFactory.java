@@ -95,7 +95,7 @@ final class NeoCommercialDocumentFactory {
   }
 
   // ETP-4888: shipment/receipt headers (M_InOut) intentionally do NOT call
-  // NeoDefaultsService.applyDeclaredDefaultsToBackgroundEntity here. The confirmed SII/SIF
+  // NeoBackgroundDefaultsService.applyDeclaredDefaultsToBackgroundEntity here. The confirmed SII/SIF
   // gaps (etsgDateOperation, aeatsiiFechaRegCont) live on the sales-invoice/purchase-invoice
   // header entities, not on the shipment/goods-receipt spec — M_InOut carries no SII fields.
   // Only the invoice header builders below need the declared-derivation resolution pass.
@@ -201,7 +201,7 @@ final class NeoCommercialDocumentFactory {
     // "new record" HTTP path that would otherwise resolve every declared contract.json
     // derivation (e.g. SII/SIF fields like aeatsiiFechaRegCont). Fields already set above are
     // never overwritten — only properties still blank are filled in.
-    NeoDefaultsService.applyDeclaredDefaultsToBackgroundEntity("purchase-invoice", "header",
+    NeoBackgroundDefaultsService.applyDeclaredDefaultsToBackgroundEntity("purchase-invoice", "header",
         invoice, receipt.getId());
     return invoice;
   }
@@ -239,7 +239,7 @@ final class NeoCommercialDocumentFactory {
     // already set above are never overwritten — only properties still blank are filled in.
     // Used by both the AR (sales-invoice) and AP (purchase-invoice) order-to-invoice paths.
     String invoiceSpecName = salesTransaction ? "sales-invoice" : "purchase-invoice";
-    NeoDefaultsService.applyDeclaredDefaultsToBackgroundEntity(invoiceSpecName, "header",
+    NeoBackgroundDefaultsService.applyDeclaredDefaultsToBackgroundEntity(invoiceSpecName, "header",
         invoice, order.getId());
     return invoice;
   }

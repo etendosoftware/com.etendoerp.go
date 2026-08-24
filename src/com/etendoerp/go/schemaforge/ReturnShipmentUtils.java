@@ -296,7 +296,7 @@ final class ReturnShipmentUtils {
     // and CreateDraftInvoiceHandler#createInvoiceHeaderFromShipment. `doc` (the return
     // shipment/receipt this credit note is generated from) plays the same "parentId" role as
     // `order`/`receipt` at those sites.
-    NeoDefaultsService.applyDeclaredDefaultsToBackgroundEntity(
+    NeoBackgroundDefaultsService.applyDeclaredDefaultsToBackgroundEntity(
         isSales ? "sales-invoice" : "purchase-invoice", "header", invoice, doc.getId());
     return invoice;
   }

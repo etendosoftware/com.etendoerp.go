@@ -1035,7 +1035,7 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
     // "new record" HTTP path that would otherwise resolve every declared contract.json
     // derivation (e.g. SII/SIF fields like etsgDateOperation). Fields already set above are
     // never overwritten — only properties still blank are filled in.
-    NeoDefaultsService.applyDeclaredDefaultsToBackgroundEntity("sales-invoice", "header",
+    NeoBackgroundDefaultsService.applyDeclaredDefaultsToBackgroundEntity("sales-invoice", "header",
         invoice, first.getId());
 
     return invoice;

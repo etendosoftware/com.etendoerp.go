@@ -985,12 +985,13 @@ public class ReturnShipmentUtilsTest {
   //
   // buildReturnInvoiceHeader builds its Invoice header directly via OBProvider (bypassing the
   // normal NEO CRUD "new record" HTTP path), so it must call
-  // NeoDefaultsService.applyDeclaredDefaultsToBackgroundEntity itself to resolve any
+  // NeoBackgroundDefaultsService.applyDeclaredDefaultsToBackgroundEntity itself to resolve any
   // contract.json-declared derivation (e.g. SII/SIF fields) — mirrors the same call already
   // added to NeoCommercialDocumentFactory#createInvoiceFromOrderHeader/
   // #createInvoiceFromReceiptHeader and CreateDraftInvoiceHandler#createInvoiceHeaderFromShipment.
-  // NeoDefaultsService itself is fully mocked out here (a no-op void call) — its own resolution
-  // logic is covered by NeoDefaultsServiceTest; this only pins the CALL and its ARGUMENTS.
+  // NeoBackgroundDefaultsService itself is fully mocked out here (a no-op void call) — its own
+  // resolution logic is covered by NeoBackgroundDefaultsServiceTest; this only pins the CALL and
+  // its ARGUMENTS.
 
   @Test
   public void buildReturnInvoiceHeader_sales_appliesDeclaredDefaultsWithSalesInvoiceSpecAndShipmentIdAsParent() {
@@ -1004,8 +1005,8 @@ public class ReturnShipmentUtilsTest {
     Invoice createdInvoice = mock(Invoice.class);
 
     try (MockedStatic<OBProvider> obProviderMock = Mockito.mockStatic(OBProvider.class);
-        MockedStatic<NeoDefaultsService> defaultsMock =
-            Mockito.mockStatic(NeoDefaultsService.class)) {
+        MockedStatic<NeoBackgroundDefaultsService> defaultsMock =
+            Mockito.mockStatic(NeoBackgroundDefaultsService.class)) {
       OBProvider obProvider = mock(OBProvider.class);
       obProviderMock.when(OBProvider::getInstance).thenReturn(obProvider);
       when(obProvider.get(Invoice.class)).thenReturn(createdInvoice);
@@ -1014,7 +1015,7 @@ public class ReturnShipmentUtilsTest {
           doc, docType, sourceInvoice, true);
 
       assertSame(createdInvoice, result);
-      defaultsMock.verify(() -> NeoDefaultsService.applyDeclaredDefaultsToBackgroundEntity(
+      defaultsMock.verify(() -> NeoBackgroundDefaultsService.applyDeclaredDefaultsToBackgroundEntity(
           "sales-invoice", "header", createdInvoice, "shipment-sales-001"));
     }
   }
@@ -1031,8 +1032,8 @@ public class ReturnShipmentUtilsTest {
     Invoice createdInvoice = mock(Invoice.class);
 
     try (MockedStatic<OBProvider> obProviderMock = Mockito.mockStatic(OBProvider.class);
-        MockedStatic<NeoDefaultsService> defaultsMock =
-            Mockito.mockStatic(NeoDefaultsService.class)) {
+        MockedStatic<NeoBackgroundDefaultsService> defaultsMock =
+            Mockito.mockStatic(NeoBackgroundDefaultsService.class)) {
       OBProvider obProvider = mock(OBProvider.class);
       obProviderMock.when(OBProvider::getInstance).thenReturn(obProvider);
       when(obProvider.get(Invoice.class)).thenReturn(createdInvoice);
@@ -1041,7 +1042,7 @@ public class ReturnShipmentUtilsTest {
           doc, docType, sourceInvoice, false);
 
       assertSame(createdInvoice, result);
-      defaultsMock.verify(() -> NeoDefaultsService.applyDeclaredDefaultsToBackgroundEntity(
+      defaultsMock.verify(() -> NeoBackgroundDefaultsService.applyDeclaredDefaultsToBackgroundEntity(
           "purchase-invoice", "header", createdInvoice, "shipment-purchase-002"));
     }
   }
