@@ -17,9 +17,14 @@
 
 package com.etendoerp.go.schemaforge;
 
+import java.util.Set;
+
 import javax.inject.Named;
 import javax.servlet.http.HttpServletResponse;
 
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
+import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.criterion.Restrictions;
 import org.openbravo.dal.service.OBCriteria;
@@ -47,16 +52,23 @@ import org.openbravo.model.common.plm.ProductCategory;
  * <p>Living at the NEO Headless layer (rather than as an {@code EntityPersistenceEventObserver})
  * ensures this GO-specific behavior does not affect Etendo Classic / Enterprise users that
  * operate directly on the AD windows.
+ *
+ * <p>ETP-4967: also hides any category flagged {@code em_etgo_issystemcategory = 'Y'} from GET
+ * responses — see {@link #afterHandle}.
  */
 @Named("productCategoryDefaultHandler")
 public class ProductCategoryDefaultHandler implements NeoHandler {
 
+  private static final Logger log = LogManager.getLogger(ProductCategoryDefaultHandler.class);
+
   private static final String FIELD_DEFAULT = "default";
+  private static final String FIELD_ID = "id";
   private static final String MSG_CANNOT_SET_MULTIPLE_DEFAULT =
       "ETGO_ProductCategoryCannotSetMultipleDefault";
   private static final String METHOD_POST = "POST";
   private static final String METHOD_PATCH = "PATCH";
   private static final String METHOD_PUT = "PUT";
+  private static final String METHOD_GET = "GET";
 
   @Override
   public NeoResponse handle(NeoContext context) {
@@ -142,8 +154,72 @@ public class ProductCategoryDefaultHandler implements NeoHandler {
     return null;
   }
 
+  /**
+   * ETP-4967: strips categories flagged {@code em_etgo_issystemcategory = 'Y'} (see
+   * {@link SystemCategoryIds}) from GET responses (list and single-record alike —
+   * {@code response.data} has the same shape either way) before they reach the UI, so an
+   * internal category like "Discounts" never shows up in the "Categoría del producto" window.
+   * Mirrors {@link DiscountLineFilter#filterFromResponse}'s exact shape.
+   */
   @Override
   public NeoResponse afterHandle(NeoContext context) {
+    if (!METHOD_GET.equals(context.getHttpMethod())) {
+      return null;
+    }
+    NeoResponse previousResult = context.getPreviousResult();
+    if (previousResult == null || previousResult.getBody() == null) {
+      return null;
+    }
+    try {
+      JSONObject body = previousResult.getBody();
+      JSONObject responseWrapper = body.optJSONObject("response");
+      if (responseWrapper == null) {
+        return null;
+      }
+      JSONArray dataArr = responseWrapper.optJSONArray("data");
+      if (dataArr == null || dataArr.length() == 0) {
+        return null;
+      }
+      String clientId = resolveContextClientId(context);
+      if (clientId == null || clientId.isEmpty()) {
+        return null;
+      }
+      Set<String> hiddenIds = SystemCategoryIds.resolve(clientId);
+      if (hiddenIds.isEmpty()) {
+        return null;
+      }
+      JSONArray filtered = new JSONArray();
+      boolean removed = false;
+      for (int i = 0; i < dataArr.length(); i++) {
+        JSONObject row = dataArr.optJSONObject(i);
+        if (row == null) {
+          continue;
+        }
+        if (hiddenIds.contains(row.optString(FIELD_ID, ""))) {
+          removed = true;
+        } else {
+          filtered.put(row);
+        }
+      }
+      if (!removed) {
+        return null;
+      }
+      responseWrapper.put("data", filtered);
+      return NeoResponse.ok(body);
+    } catch (Exception e) {
+      log.warn("Could not filter hidden product categories from GET response: {}", e.getMessage());
+      return null;
+    }
+  }
+
+  /**
+   * The current request's client — same resolution {@link #resolveClientId} uses for the create
+   * case, extracted here so {@code afterHandle} does not need an existing record id.
+   */
+  private static String resolveContextClientId(NeoContext context) {
+    if (context.getObContext() != null && context.getObContext().getCurrentClient() != null) {
+      return context.getObContext().getCurrentClient().getId();
+    }
     return null;
   }
 }

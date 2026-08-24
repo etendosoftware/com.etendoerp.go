@@ -280,9 +280,16 @@ public class ReportSelectorsServlet extends HttpBaseServlet {
   }
 
   private SelectorQuery buildProductQuery(SelectorRequest req) {
+    // ETP-4967: excludes products classified under a category flagged
+    // EM_Etgo_IsSystemCategory='Y' (e.g. ETGO_DTO, category "Discounts") — same exclusion as
+    // every other product selector in the app, applied directly in SQL since this servlet builds
+    // its own queries independently of NeoSelectorService.
     StringBuilder fromWhere = new StringBuilder(
         "FROM m_product WHERE isactive='Y' AND ad_client_id = :clientId"
-        + " AND (name ILIKE :search OR value ILIKE :search)");
+        + " AND (name ILIKE :search OR value ILIKE :search)"
+        + " AND NOT EXISTS (SELECT 1 FROM m_product_category mpc"
+        + " WHERE mpc.m_product_category_id = m_product.m_product_category_id"
+        + " AND mpc.em_etgo_issystemcategory = 'Y')");
     if (!req.warehouseIds.isEmpty()) {
       fromWhere.append(" AND EXISTS (SELECT 1 FROM m_storage_detail sd"
           + " JOIN m_locator l ON l.m_locator_id = sd.m_locator_id"
