@@ -24,8 +24,10 @@ import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -37,9 +39,11 @@ import java.io.StringWriter;
 import java.lang.reflect.Method;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.Date;
 import java.util.Properties;
+import java.util.zip.ZipInputStream;
 
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
@@ -54,8 +58,11 @@ import org.mockito.InOrder;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
 import org.openbravo.base.session.OBPropertiesProvider;
+import org.openbravo.base.weld.WeldUtils;
+import org.openbravo.client.application.attachment.AttachImplementationManager;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.ad.datamodel.Table;
 import org.openbravo.model.ad.ui.Tab;
 import org.openbravo.model.ad.utility.Attachment;
 
@@ -97,6 +104,30 @@ public class NeoAttachmentsHelperTest {
     when(session.createNativeQuery(anyString())).thenReturn(query);
     when(query.setParameter(anyString(), any())).thenReturn(query);
     when(query.list()).thenReturn(Collections.emptyList());
+  }
+
+  /**
+   * Stubs both the table-id resolution query (matches SQL containing
+   * {@code "ad_table"}) and the main-attachment-ids lookup (matches SQL
+   * containing {@code "C_File"}), returning distinct results for each so
+   * tests can assert exclusion behavior precisely.
+   */
+  @SuppressWarnings({"rawtypes", "unchecked"})
+  private static NativeQuery stubTableAndMainLookup(OBDal dal, String tableId,
+      String... mainAttachmentIds) {
+    Session session = mock(Session.class);
+    NativeQuery tableQuery = mock(NativeQuery.class);
+    NativeQuery mainQuery = mock(NativeQuery.class);
+    when(dal.getSession()).thenReturn(session);
+    when(session.createNativeQuery(argThat(sql -> sql != null && sql.contains("ad_table"))))
+        .thenReturn(tableQuery);
+    when(tableQuery.setParameter(anyString(), any())).thenReturn(tableQuery);
+    when(tableQuery.list()).thenReturn(Collections.singletonList(tableId));
+    when(session.createNativeQuery(argThat(sql -> sql != null && sql.contains("C_File"))))
+        .thenReturn(mainQuery);
+    when(mainQuery.setParameter(anyString(), any())).thenReturn(mainQuery);
+    when(mainQuery.list()).thenReturn(Arrays.asList(mainAttachmentIds));
+    return mainQuery;
   }
 
   private static String errorMessage(NeoResponse response) throws Exception {
@@ -314,13 +345,58 @@ public class NeoAttachmentsHelperTest {
   }
 
   /**
+   * Verifies the attachment marked as the record's main document is included
+   * in the generic "Adjuntos" list alongside every other attachment — the
+   * Attachments tab and the sidebar/preview must show the same underlying
+   * files (ETP-4855 Error 4: a file attached from the preview must also be
+   * visible in the Attachments tab).
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  public void handleListIncludesAttachmentMarkedAsMain() throws Exception {
+    OBDal dal = mock(OBDal.class);
+    stubTableAndMainLookup(dal, "TABLE1", "ATT-MAIN");
+
+    OBCriteria<Attachment> criteria = mock(OBCriteria.class);
+    when(dal.createCriteria(Attachment.class)).thenReturn(criteria);
+
+    Attachment mainAttachment = stubAttachment("ATT-MAIN", "supplier-invoice.pdf");
+    Attachment regularAttachment = stubAttachment("ATT-OTHER", "note.pdf");
+    when(criteria.list()).thenReturn(Arrays.asList(mainAttachment, regularAttachment));
+
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      NeoResponse response = NeoAttachmentsHelper.handleList("C_Order", "REC1");
+
+      assertEquals(200, response.getHttpStatus());
+      assertEquals(2, response.getBody().getJSONArray("items").length());
+      assertEquals("ATT-MAIN", response.getBody().getJSONArray("items").getJSONObject(0).getString("id"));
+      assertEquals("ATT-OTHER", response.getBody().getJSONArray("items").getJSONObject(1).getString("id"));
+    }
+  }
+
+  private static Attachment stubAttachment(String id, String name) {
+    Attachment attachment = mock(Attachment.class);
+    when(attachment.getId()).thenReturn(id);
+    when(attachment.getName()).thenReturn(name);
+    when(attachment.getPath()).thenReturn(null);
+    when(attachment.getDataType()).thenReturn("application/pdf");
+    when(attachment.getText()).thenReturn(null);
+    when(attachment.getCreationDate()).thenReturn(new Date(0L));
+    when(attachment.getUpdated()).thenReturn(new Date(0L));
+    when(attachment.getCreatedBy()).thenReturn(null);
+    return attachment;
+  }
+
+  /**
    * Verifies upload endpoint validation for blank table/record identifiers.
    */
   @Test
   public void handleUploadRejectsBlankInputs() throws Exception {
     HttpServletRequest request = mock(HttpServletRequest.class);
 
-    NeoResponse response = NeoAttachmentsHelper.handleUpload("", " ", request);
+    NeoResponse response = NeoAttachmentsHelper.handleUpload("", " ", request, false);
 
     assertEquals(400, response.getHttpStatus());
     assertEquals("tableName and recordId are required", errorMessage(response));
@@ -334,7 +410,7 @@ public class NeoAttachmentsHelperTest {
     HttpServletRequest request = mock(HttpServletRequest.class);
     when(request.getContentType()).thenReturn("application/json");
 
-    NeoResponse response = NeoAttachmentsHelper.handleUpload("C_Order", "REC1", request);
+    NeoResponse response = NeoAttachmentsHelper.handleUpload("C_Order", "REC1", request, false);
 
     assertEquals(400, response.getHttpStatus());
     assertEquals("Expected multipart/form-data", errorMessage(response));
@@ -349,7 +425,7 @@ public class NeoAttachmentsHelperTest {
     when(request.getContentType()).thenReturn("multipart/form-data");
     when(request.getPart("file")).thenReturn(null);
 
-    NeoResponse response = NeoAttachmentsHelper.handleUpload("C_Order", "REC1", request);
+    NeoResponse response = NeoAttachmentsHelper.handleUpload("C_Order", "REC1", request, false);
 
     assertEquals(400, response.getHttpStatus());
     assertEquals("Missing 'file' part", errorMessage(response));
@@ -376,7 +452,7 @@ public class NeoAttachmentsHelperTest {
     try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
       obDalMock.when(OBDal::getInstance).thenReturn(dal);
 
-      NeoResponse response = NeoAttachmentsHelper.handleUpload("C_Order", "REC1", request);
+      NeoResponse response = NeoAttachmentsHelper.handleUpload("C_Order", "REC1", request, false);
 
       assertEquals(400, response.getHttpStatus());
       assertTrue(errorMessage(response).contains("Could not resolve a standard tab"));
@@ -435,29 +511,62 @@ public class NeoAttachmentsHelperTest {
 
 
   /**
-   * Verifies bulk-download returns bad request when no standard tab is found.
+   * Verifies the zip built by bulk-download includes whichever attachment is
+   * marked as the record's main document alongside every other attachment —
+   * omitting it would silently download fewer files than the Attachments
+   * tab's own list shows (ETP-4855 Error 4).
    */
   @Test
   @SuppressWarnings("unchecked")
-  public void handleDownloadAllReturnsBadRequestWhenNoStandardTabFound() throws Exception {
+  public void handleDownloadAllIncludesAttachmentMarkedAsMain() throws Exception {
     HttpServletResponse response = mock(HttpServletResponse.class);
-    StringWriter sink = stubWriter(response);
+    when(response.getOutputStream()).thenReturn(
+        new javax.servlet.ServletOutputStream() {
+          private final java.io.ByteArrayOutputStream sink = captured;
+          @Override public boolean isReady() { return true; }
+          @Override public void setWriteListener(javax.servlet.WriteListener l) {
+            // Sync-only test double: this test never uses the async servlet API.
+          }
+          @Override public void write(int b) { sink.write(b); }
+        });
     OBDal dal = mock(OBDal.class);
-    OBCriteria<Tab> tabCriteria = mock(OBCriteria.class);
+    stubTableAndMainLookup(dal, "TABLE1", "ATT-MAIN");
 
-    stubTableLookup(dal, "TABLE1");
-    when(dal.createCriteria(Tab.class)).thenReturn(tabCriteria);
-    when(tabCriteria.list()).thenReturn(Collections.emptyList());
+    OBCriteria<Attachment> criteria = mock(OBCriteria.class);
+    when(dal.createCriteria(Attachment.class)).thenReturn(criteria);
+    Attachment mainAttachment = stubAttachment("ATT-MAIN", "supplier-invoice.pdf");
+    Attachment regularAttachment = stubAttachment("ATT-OTHER", "note.pdf");
+    when(criteria.list()).thenReturn(Arrays.asList(mainAttachment, regularAttachment));
 
-    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+    AttachImplementationManager aim = mock(AttachImplementationManager.class);
+
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+        MockedStatic<WeldUtils> weldMock = Mockito.mockStatic(WeldUtils.class)) {
       obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      weldMock.when(() -> WeldUtils.getInstanceFromStaticBeanManager(AttachImplementationManager.class))
+          .thenReturn(aim);
 
       NeoAttachmentsHelper.handleDownloadAll("C_Order", "REC1", response);
 
-      verify(response).setStatus(HttpServletResponse.SC_BAD_REQUEST);
-      assertTrue(sink.toString().contains("Could not resolve a standard tab"));
+      verify(aim, times(1)).download(org.mockito.ArgumentMatchers.eq("ATT-OTHER"), any());
+      verify(aim, times(1)).download(org.mockito.ArgumentMatchers.eq("ATT-MAIN"), any());
+      verify(response).setStatus(HttpServletResponse.SC_OK);
+
+      java.util.Set<String> zippedNames = new java.util.HashSet<>();
+      try (ZipInputStream zip = new ZipInputStream(
+          new java.io.ByteArrayInputStream(captured.toByteArray()))) {
+        java.util.zip.ZipEntry entry;
+        while ((entry = zip.getNextEntry()) != null) {
+          zippedNames.add(entry.getName());
+        }
+      }
+      assertEquals(
+          new java.util.HashSet<>(Arrays.asList("supplier-invoice.pdf", "note.pdf")),
+          zippedNames);
     }
   }
+
+  private final java.io.ByteArrayOutputStream captured = new java.io.ByteArrayOutputStream();
 
 
   /**
@@ -488,6 +597,173 @@ public class NeoAttachmentsHelperTest {
     }
   }
 
+
+  /**
+   * Verifies main-lookup validation for blank table/record identifiers.
+   */
+  @Test
+  public void handleGetMainRejectsBlankInputs() throws Exception {
+    NeoResponse response = NeoAttachmentsHelper.handleGetMain(" ", null);
+    assertEquals(400, response.getHttpStatus());
+    assertEquals("tableName and recordId are required", errorMessage(response));
+  }
+
+  /**
+   * Verifies main-lookup returns an empty object when no attachment is marked.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  public void handleGetMainReturnsEmptyObjectWhenNoneMarked() throws Exception {
+    OBDal dal = mock(OBDal.class);
+    stubTableAndMainLookup(dal, "TABLE1");
+
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      NeoResponse response = NeoAttachmentsHelper.handleGetMain("C_Invoice", "REC1");
+
+      assertEquals(200, response.getHttpStatus());
+      assertEquals(0, response.getBody().length());
+    }
+  }
+
+  /**
+   * Verifies main-lookup returns the marked attachment's projection when one exists.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  public void handleGetMainReturnsMarkedAttachment() throws Exception {
+    OBDal dal = mock(OBDal.class);
+    stubTableAndMainLookup(dal, "TABLE1", "ATT-MAIN");
+    Attachment mainAttachment = stubAttachment("ATT-MAIN", "supplier-invoice.pdf");
+    when(dal.get(Attachment.class, "ATT-MAIN")).thenReturn(mainAttachment);
+
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      NeoResponse response = NeoAttachmentsHelper.handleGetMain("C_Invoice", "REC1");
+
+      assertEquals(200, response.getHttpStatus());
+      assertEquals("ATT-MAIN", response.getBody().getString("id"));
+      assertEquals("supplier-invoice.pdf", response.getBody().getString("name"));
+    }
+  }
+
+  /**
+   * Verifies mark-main validation for blank attachment id.
+   */
+  @Test
+  public void handleMarkMainRejectsBlankAttachmentId() throws Exception {
+    NeoResponse response = NeoAttachmentsHelper.handleMarkMain(" ", true);
+    assertEquals(400, response.getHttpStatus());
+    assertEquals("attachmentId is required", errorMessage(response));
+  }
+
+  /**
+   * Verifies mark-main returns 404 when the target attachment does not exist.
+   */
+  @Test
+  public void handleMarkMainReturnsNotFoundWhenAttachmentMissing() throws Exception {
+    OBDal dal = mock(OBDal.class);
+    when(dal.get(Attachment.class, "ATT1")).thenReturn(null);
+
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      NeoResponse response = NeoAttachmentsHelper.handleMarkMain("ATT1", true);
+
+      assertEquals(404, response.getHttpStatus());
+      assertEquals("Attachment not found", errorMessage(response));
+    }
+  }
+
+  /**
+   * Verifies marking a new attachment as main deletes the previously-marked one
+   * (in the same transaction) and sets the flag on the new one — at most one
+   * main attachment per (table, record) at any time.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  public void handleMarkMainDeletesPreviousHolderThenMarksNewOne() throws Exception {
+    OBDal dal = mock(OBDal.class);
+    Session session = mock(Session.class);
+    NativeQuery mainQuery = mock(NativeQuery.class);
+    NativeQuery updateQuery = mock(NativeQuery.class);
+    when(dal.getSession()).thenReturn(session);
+    when(session.createNativeQuery(argThat(sql -> sql != null && sql.contains("SELECT"))))
+        .thenReturn(mainQuery);
+    when(mainQuery.setParameter(anyString(), any())).thenReturn(mainQuery);
+    when(mainQuery.list()).thenReturn(Collections.singletonList("ATT-OLD"));
+    when(session.createNativeQuery(argThat(sql -> sql != null && sql.contains("UPDATE"))))
+        .thenReturn(updateQuery);
+    when(updateQuery.setParameter(anyString(), any())).thenReturn(updateQuery);
+    when(updateQuery.executeUpdate()).thenReturn(1);
+
+    Attachment newAttachment = mock(Attachment.class);
+    when(newAttachment.getId()).thenReturn("ATT-NEW");
+    Table table = mock(Table.class);
+    when(table.getId()).thenReturn("TABLE1");
+    when(newAttachment.getTable()).thenReturn(table);
+    when(newAttachment.getRecord()).thenReturn("REC1");
+    when(dal.get(Attachment.class, "ATT-NEW")).thenReturn(newAttachment);
+
+    Attachment oldAttachment = mock(Attachment.class);
+    when(oldAttachment.getId()).thenReturn("ATT-OLD");
+    when(dal.get(Attachment.class, "ATT-OLD")).thenReturn(oldAttachment);
+
+    AttachImplementationManager aim = mock(AttachImplementationManager.class);
+
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+        MockedStatic<WeldUtils> weldMock = Mockito.mockStatic(WeldUtils.class)) {
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      weldMock.when(() -> WeldUtils.getInstanceFromStaticBeanManager(AttachImplementationManager.class))
+          .thenReturn(aim);
+
+      NeoResponse response = NeoAttachmentsHelper.handleMarkMain("ATT-NEW", true);
+
+      assertEquals(200, response.getHttpStatus());
+      assertEquals("ATT-NEW", response.getBody().getString("id"));
+      assertTrue(response.getBody().getBoolean("isMain"));
+      verify(aim).delete(oldAttachment);
+      verify(updateQuery).setParameter("flag", "Y");
+      verify(updateQuery).setParameter("id", "ATT-NEW");
+    }
+  }
+
+  /**
+   * Verifies unmarking just clears the flag — no delete is ever triggered.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  public void handleMarkMainUnmarkClearsFlagWithoutDeleting() throws Exception {
+    OBDal dal = mock(OBDal.class);
+    Session session = mock(Session.class);
+    NativeQuery updateQuery = mock(NativeQuery.class);
+    when(dal.getSession()).thenReturn(session);
+    when(session.createNativeQuery(anyString())).thenReturn(updateQuery);
+    when(updateQuery.setParameter(anyString(), any())).thenReturn(updateQuery);
+    when(updateQuery.executeUpdate()).thenReturn(1);
+
+    Attachment attachment = mock(Attachment.class);
+    when(attachment.getId()).thenReturn("ATT1");
+    when(dal.get(Attachment.class, "ATT1")).thenReturn(attachment);
+
+    AttachImplementationManager aim = mock(AttachImplementationManager.class);
+
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+        MockedStatic<WeldUtils> weldMock = Mockito.mockStatic(WeldUtils.class)) {
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      weldMock.when(() -> WeldUtils.getInstanceFromStaticBeanManager(AttachImplementationManager.class))
+          .thenReturn(aim);
+
+      NeoResponse response = NeoAttachmentsHelper.handleMarkMain("ATT1", false);
+
+      assertEquals(200, response.getHttpStatus());
+      assertFalse(response.getBody().getBoolean("isMain"));
+      verify(aim, never()).delete(any());
+      verify(updateQuery).setParameter("flag", "N");
+    }
+  }
 
   /**
    * Verifies update-description endpoint success flow.
@@ -804,37 +1080,10 @@ public class NeoAttachmentsHelperTest {
     try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
       obDalMock.when(OBDal::getInstance).thenReturn(dal);
 
-      NeoResponse response = NeoAttachmentsHelper.handleUpload("C_Order", "REC1", request);
+      NeoResponse response = NeoAttachmentsHelper.handleUpload("C_Order", "REC1", request, false);
 
       assertEquals(400, response.getHttpStatus());
       assertTrue(errorMessage(response).contains("Could not resolve a standard tab"));
-      verify(dal, times(2)).createCriteria(Tab.class);
-    }
-  }
-
-  /**
-   * End-to-end regression on {@code handleDownloadAll}: same zero-active-tabs
-   * degenerate case as above, exercised through the bulk-download entry point.
-   */
-  @Test
-  @SuppressWarnings("unchecked")
-  public void handleDownloadAllReturnsBadRequestWhenNoActiveTabExistsAtAll() throws Exception {
-    HttpServletResponse response = mock(HttpServletResponse.class);
-    StringWriter sink = stubWriter(response);
-    OBDal dal = mock(OBDal.class);
-    OBCriteria<Tab> tabCriteria = mock(OBCriteria.class);
-
-    stubTableLookup(dal, "TABLE1");
-    when(dal.createCriteria(Tab.class)).thenReturn(tabCriteria);
-    when(tabCriteria.list()).thenReturn(Collections.emptyList());
-
-    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
-      obDalMock.when(OBDal::getInstance).thenReturn(dal);
-
-      NeoAttachmentsHelper.handleDownloadAll("C_Order", "REC1", response);
-
-      verify(response).setStatus(HttpServletResponse.SC_BAD_REQUEST);
-      assertTrue(sink.toString().contains("Could not resolve a standard tab"));
       verify(dal, times(2)).createCriteria(Tab.class);
     }
   }

@@ -1047,6 +1047,7 @@ public class CreatePurchaseInvoiceHandlerTest {
       OBProvider provider = mock(OBProvider.class);
       Invoice invoice = mock(Invoice.class);
       when(invoice.getDocumentNo()).thenReturn("AP-NOPO-1");
+      when(invoice.getCurrency()).thenReturn(receiptCurrency);
       obProviderMock.when(OBProvider::getInstance).thenReturn(provider);
       when(provider.get(Invoice.class)).thenReturn(invoice);
 
@@ -1101,6 +1102,7 @@ public class CreatePurchaseInvoiceHandlerTest {
       OBProvider provider = mock(OBProvider.class);
       Invoice invoice = mock(Invoice.class);
       when(invoice.getDocumentNo()).thenReturn("AP-NOPO-2");
+      when(invoice.getCurrency()).thenReturn(receiptCurrency);
       obProviderMock.when(OBProvider::getInstance).thenReturn(provider);
       when(provider.get(Invoice.class)).thenReturn(invoice);
 
@@ -1154,6 +1156,7 @@ public class CreatePurchaseInvoiceHandlerTest {
       OBProvider provider = mock(OBProvider.class);
       Invoice invoice = mock(Invoice.class);
       when(invoice.getDocumentNo()).thenReturn("AP-NOPO-3");
+      when(invoice.getCurrency()).thenReturn(receiptCurrency);
       obProviderMock.when(OBProvider::getInstance).thenReturn(provider);
       when(provider.get(Invoice.class)).thenReturn(invoice);
 

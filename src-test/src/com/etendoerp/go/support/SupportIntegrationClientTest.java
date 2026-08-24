@@ -370,6 +370,79 @@ class SupportIntegrationClientTest {
   }
 
   // -------------------------------------------------------------------------
+  // responseSuggestsEscalation
+  // -------------------------------------------------------------------------
+
+  @Nested
+  @DisplayName("responseSuggestsEscalation")
+  class ResponseSuggestsEscalation {
+
+    @Test
+    @DisplayName("Event with pending_escalation=confirm in stateDelta returns true")
+    void confirmPendingEscalationReturnsTrue() {
+      String json = "[" +
+          "{\"actions\":{\"stateDelta\":{\"pending_escalation\":\"confirm\"}}}" +
+          "]";
+      assertTrue(SupportIntegrationClient.responseSuggestsEscalation(json));
+    }
+
+    @Test
+    @DisplayName("No event has pending_escalation=confirm returns false")
+    void noConfirmReturnsFalse() {
+      String json = "[" +
+          "{\"actions\":{\"stateDelta\":{\"human_takeover\":true}}}" +
+          "]";
+      assertFalse(SupportIntegrationClient.responseSuggestsEscalation(json));
+    }
+
+    @Test
+    @DisplayName("Event without a stateDelta is skipped without error")
+    void missingStateDeltaReturnsFalse() {
+      String json = "[{\"actions\":{}}]";
+      assertFalse(SupportIntegrationClient.responseSuggestsEscalation(json));
+    }
+
+    @Test
+    @DisplayName("Event without an actions object is skipped without error")
+    void missingActionsReturnsFalse() {
+      String json = "[{\"author\":\"agent\"}]";
+      assertFalse(SupportIntegrationClient.responseSuggestsEscalation(json));
+    }
+
+    @Test
+    @DisplayName("pending_escalation with a different value returns false")
+    void differentPendingEscalationValueReturnsFalse() {
+      String json = "[" +
+          "{\"actions\":{\"stateDelta\":{\"pending_escalation\":\"reason\"}}}" +
+          "]";
+      assertFalse(SupportIntegrationClient.responseSuggestsEscalation(json));
+    }
+
+    @Test
+    @DisplayName("Malformed JSON returns false without throwing")
+    void malformedJsonReturnsFalse() {
+      assertFalse(SupportIntegrationClient.responseSuggestsEscalation("not json at all"));
+    }
+
+    @Test
+    @DisplayName("Empty array returns false")
+    void emptyArrayReturnsFalse() {
+      assertFalse(SupportIntegrationClient.responseSuggestsEscalation("[]"));
+    }
+
+    @Test
+    @DisplayName("Only one of several events has the marker — still returns true")
+    void oneOfSeveralEventsHasMarkerReturnsTrue() {
+      String json = "[" +
+          "{\"actions\":{\"stateDelta\":{\"human_takeover\":true}}}," +
+          "{\"actions\":{\"stateDelta\":{\"pending_escalation\":\"confirm\"}}}," +
+          "{\"actions\":{}}" +
+          "]";
+      assertTrue(SupportIntegrationClient.responseSuggestsEscalation(json));
+    }
+  }
+
+  // -------------------------------------------------------------------------
   // buildFeedbackComment
   // -------------------------------------------------------------------------
 
