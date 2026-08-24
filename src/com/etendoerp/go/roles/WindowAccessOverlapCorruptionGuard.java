@@ -51,6 +51,7 @@ import com.etendoerp.go.roles.overlap.ActiveTemplateInheritance;
 import com.etendoerp.go.roles.overlap.GrantCandidate;
 import com.etendoerp.go.roles.overlap.OverlapReconciliationCore;
 import com.etendoerp.go.roles.overlap.OverlapWinner;
+import com.etendoerp.go.roles.overlap.PropagationTrigger;
 import com.etendoerp.go.roles.overlap.TemplateRemovalTracker;
 
 /**
@@ -727,16 +728,20 @@ public class WindowAccessOverlapCorruptionGuard extends EntityPersistenceEventOb
    */
   private Role findActiveTemplateGrantingFullAccess(Role dependent, Window window,
       Role excludedTemplate) {
+    Map<String, Role> templatesById = new LinkedHashMap<>();
+    List<GrantCandidate> candidates = new ArrayList<>();
     for (Role template : findActiveTemplatesFor(dependent, null)) {
-      if (excludedTemplate != null && sameId(template, excludedTemplate)) {
-        continue;
-      }
+      templatesById.putIfAbsent(template.getId(), template);
       WindowAccess templateAccess = findActiveWindowAccess(template, window);
-      if (templateAccess != null && Boolean.TRUE.equals(templateAccess.isEditableField())) {
-        return template;
+      if (templateAccess != null) {
+        candidates.add(new GrantCandidate(template.getId(),
+            Boolean.TRUE.equals(templateAccess.isEditableField())));
       }
     }
-    return null;
+    String excludedTemplateId = excludedTemplate != null ? excludedTemplate.getId() : null;
+    String winnerId =
+        OverlapReconciliationCore.findJustifyingFullGrant(candidates, excludedTemplateId);
+    return winnerId != null ? templatesById.get(winnerId) : null;
   }
 
   /**
@@ -947,32 +952,6 @@ public class WindowAccessOverlapCorruptionGuard extends EntityPersistenceEventOb
    */
   private List<Role> findActiveTemplatesFor(Role dependent, String excludedInheritanceId) {
     return ActiveTemplateInheritance.findActiveTemplatesFor(dependent, excludedInheritanceId);
-  }
-
-  /**
-   * Which core propagation method will run AFTER {@link #guardDependentsOf(WindowAccess,
-   * PropagationTrigger)} returns, for the SAME {@code AD_Window_Access} event — determines whether
-   * it is safe to unconditionally delete a dependent's conflicting row. See the class javadoc's
-   * "The seventh trigger's own gap, found in REVIEW" section (finding "[B7]") for the full
-   * root-cause write-up.
-   */
-  private enum PropagationTrigger {
-    /**
-     * Fed by {@link #onSave(EntityNewEvent)} — a template GAINED a brand-new window grant. Core
-     * propagates via {@code RoleInheritanceManager#propagateNewAccess}, which ALWAYS falls back to
-     * {@code copyRoleAccess} (a CREATE) when it finds no existing row for a dependent — so
-     * unconditionally deleting a dependent's conflicting row first is always safe here.
-     */
-    NEW_GRANT,
-    /**
-     * Fed by {@link #onUpdate(EntityUpdateEvent)} — a template's OWN EXISTING window grant had its
-     * access level changed. Core propagates via {@code RoleInheritanceManager
-     * #propagateUpdatedAccess}, which has NO create fallback: it only ever UPDATEs a dependent's
-     * row it can find via {@code findInheritedAccess}, and silently does nothing otherwise.
-     * Unconditionally deleting here would permanently lose the dependent's access with nothing
-     * left to restore it.
-     */
-    UPDATED_GRANT
   }
 
   /**
