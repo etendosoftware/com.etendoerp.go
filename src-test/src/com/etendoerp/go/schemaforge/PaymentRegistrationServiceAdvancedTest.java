@@ -1101,12 +1101,12 @@ class PaymentRegistrationServiceAdvancedTest {
 
   /**
    * When {@code pis=true} and the account/method/currency are PIS-eligible, the confirm flow
-   * dispatches to {@link PisPaymentService#applyOverpaymentAndInitiatePis}: it processes the
-   * payment to PPM and initiates the Salt Edge transfer, returning the PIS payment URL, the local
-   * PIS payment id, and status "requested" on top of the base payment envelope.
+   * dispatches to {@code PisDeferredPaymentService.initiateDeferredPis}: it creates no payment at
+   * all, initiates the Salt Edge transfer and returns the PIS payment URL, the local PIS payment
+   * id and status "requested".
    */
   @Test
-  @DisplayName("PIS confirm initiates the bank transfer and returns the requested PIS response")
+  @DisplayName("PIS confirm starts the bank transfer and creates no payment")
   @SuppressWarnings("unchecked")
   void testAdvancedPisConfirmInitiatesBankTransfer() throws Exception {
     stubAdvancedBasics();
@@ -1118,11 +1118,12 @@ class PaymentRegistrationServiceAdvancedTest {
     when(method.getName()).thenReturn("Bank Transfer");
     when(currency.getISOCode()).thenReturn("EUR");
 
-    // hasFinTransaction => 0 (no transaction created at processing time, as expected for PIS).
-    Query<Long> countQuery = mock(Query.class);
-    when(session.createQuery(anyString(), eq(Long.class))).thenReturn(countQuery);
-    when(countQuery.setParameter(anyString(), any())).thenReturn(countQuery);
-    when(countQuery.uniqueResult()).thenReturn(0L);
+    // nextEndToEndId counts this invoice's previous attempts to build a unique bank reference.
+    when(invoice.getDocumentNo()).thenReturn("INV-77");
+    OBCriteria<PisPayment> attemptCrit = mock(OBCriteria.class);
+    when(dal.createCriteria(PisPayment.class)).thenReturn(attemptCrit);
+    when(attemptCrit.add(any(Criterion.class))).thenReturn(attemptCrit);
+    when(attemptCrit.count()).thenReturn(0);
 
     BankIntegrationPISUtils.PISCreatePaymentResult bridgeResult =
         mock(BankIntegrationPISUtils.PISCreatePaymentResult.class);
@@ -1130,6 +1131,7 @@ class PaymentRegistrationServiceAdvancedTest {
     when(bridgeResult.getPaymentUrl()).thenReturn("https://sca.saltedge/adv");
     PisPayment localPis = mock(PisPayment.class);
     when(localPis.getId()).thenReturn("local-adv-1");
+    when(localPis.getStatus()).thenReturn("requested");
 
     JSONObject body = advancedBody("100.00", CONFIRM)
         .put("pis", true)
@@ -1138,8 +1140,8 @@ class PaymentRegistrationServiceAdvancedTest {
 
     try (MockedStatic<PisPaymentBridge> bridgeMock = mockStatic(PisPaymentBridge.class);
          MockedStatic<PISPaymentDao> pisDaoMock = mockStatic(PISPaymentDao.class)) {
-      bridgeMock.when(() -> PisPaymentBridge.initiatePisPayment(eq(newPayment), any(), any()))
-          .thenReturn(bridgeResult);
+      bridgeMock.when(() -> PisPaymentBridge.initiateDeferredPisPayment(
+          eq(invoice), eq(account), any(), anyString(), any(), any())).thenReturn(bridgeResult);
       pisDaoMock.when(() -> PISPaymentDao.findBySaltedgePaymentId("se-adv-1")).thenReturn(localPis);
 
       NeoResponse response = PaymentRegistrationService.doRegisterPaymentAdvanced(
@@ -1149,11 +1151,14 @@ class PaymentRegistrationServiceAdvancedTest {
       JSONObject data = response.getBody().getJSONObject("response").getJSONObject("data");
       assertEquals("https://sca.saltedge/adv", data.getString("pisPaymentUrl"));
       assertEquals("local-adv-1", data.getString("pisPaymentId"));
-      assertEquals("requested", data.getString("pisStatus"));
-      bridgeMock.verify(() -> PisPaymentBridge.initiatePisPayment(eq(newPayment), any(), any()));
-      // No refund path is ever taken for PIS (funds have not moved yet).
-      finAddPaymentMock.verify(
-          () -> FIN_AddPayment.createRefundPayment(any(), any(), any(), any(), any()), never());
+      assertTrue(data.getBoolean("paymentDeferred"));
+
+      // The point of the whole change: confirming a bank transfer registers NOTHING. The payment
+      // is built later, only once Salt Edge reports the bank committed to the transfer.
+      finAddPaymentMock.verify(() -> FIN_AddPayment.processPayment(
+          any(), any(), anyString(), any(), anyString()), never());
+      // The request is snapshotted instead, so it can be replayed when that happens.
+      verify(localPis).setETGOPaymentIntent(anyString());
     }
   }
 
@@ -1666,7 +1671,7 @@ class PaymentRegistrationServiceAdvancedTest {
   }
 
   /**
-   * Stubs {@code PisPaymentService.hasLinkedPisPayment} (called by every {@code paymentListItem})
+   * Stubs {@code PisPaymentService.linkedPisPayment} (called by every {@code paymentListItem})
    * to report no linked PIS payment, so {@code handleListPayments} tests don't NPE on the
    * unrelated {@code PisPayment} criteria.
    */

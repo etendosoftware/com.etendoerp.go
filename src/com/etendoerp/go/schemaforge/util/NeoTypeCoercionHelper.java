@@ -19,6 +19,7 @@ package com.etendoerp.go.schemaforge.util;
 
 import java.util.Iterator;
 import java.util.Map;
+import java.util.Optional;
 
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
@@ -168,10 +169,53 @@ public final class NeoTypeCoercionHelper {
       } else if (Integer.class.isAssignableFrom(type)) {
         coerced.put(key, Integer.parseInt(strVal));
       } else if (Boolean.class.isAssignableFrom(type)) {
-        coerced.put(key, "Y".equals(strVal) || "true".equalsIgnoreCase(strVal));
+        // ETP-4793: shared with the MCP coercer via NeoBooleanFormat. The two used to differ
+        // on case sensitivity ("y" was rejected here and accepted there).
+        coerced.put(key, NeoBooleanFormat.toLenientBoolean(strVal));
+      } else if (java.util.Date.class.isAssignableFrom(type)) {
+        coerceDateField(prop, key, strVal, coerced);
       }
     } catch (Exception ignored) {
       log.debug("Skipping string coercion for key {}: {}", key, ignored.getMessage());
+    }
+  }
+
+  /**
+   * Coerces a single date-typed string field into the canonical ISO wire format, when the
+   * property is eligible (ETP-4793 / IMP-16). Extracted out of {@link #coerceField} to keep that
+   * method's cognitive complexity within the allowed limit; behaviour is unchanged.
+   *
+   * <p>The DAL parses date strings with a lenient {@code SimpleDateFormat}
+   * ({@code JsonUtils.createDateFormat}), so a {@code dd-MM-yyyy} value is silently
+   * reinterpreted instead of rejected — {@code "06-08-2026"} persists as year 0012. This is the
+   * same class of bug the numeric coercion above guards against, and it fires even when the
+   * caller sends no date, because {@code injectMandatoryDefaults} re-resolves the server
+   * default first. An unrecognised shape is passed through verbatim: guessing a date is worse
+   * than letting the existing (loud or lenient) parser handle it.
+   *
+   * <p>The gate is {@link NeoDateFormat#canonicalShapeFor(Property)}, not the Java type:
+   * time-of-day ({@code Timestamp}, {@code AbsoluteTime}) and timezone-free
+   * ({@code AbsoluteDateTime}) properties are {@code java.util.Date} too, and rewriting one of
+   * those into {@code yyyy-MM-dd} would destroy the half the converter actually reads.
+   *
+   * @param prop    the date-typed property {@code strVal} is destined for
+   * @param key     the field name, used only for logging
+   * @param strVal  the raw string value to convert
+   * @param coerced the accumulator map into which the coerced entry is placed when a rewrite is
+   *                needed
+   */
+  private static void coerceDateField(Property prop, String key, String strVal,
+      Map<String, Object> coerced) {
+    Optional<Boolean> shape = NeoDateFormat.canonicalShapeFor(prop);
+    if (shape.isEmpty()) {
+      return;
+    }
+    String canonical = NeoDateFormat.toCanonical(strVal, shape.get().booleanValue());
+    if (canonical == null) {
+      log.warn("[NEO] Unrecognized date format for '{}': '{}' passed through unchanged",
+          key, strVal);
+    } else if (!canonical.equals(strVal)) {
+      coerced.put(key, canonical);
     }
   }
 

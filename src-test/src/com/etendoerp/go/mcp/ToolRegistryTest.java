@@ -124,8 +124,19 @@ public class ToolRegistryTest {
 
     assertEquals("neo_batch", tool.getName());
     assertNotNull(tool.getDescription());
-    assertTrue("Description must mention atomic transaction",
-        tool.getDescription().toLowerCase().contains("atomic"));
+    // This assertion has now been wrong twice, in opposite directions, which is why it checks the
+    // caller-visible consequence rather than a keyword. It first required the description to
+    // "mention atomic transaction" while the endpoint was not atomic at all (IMP-23): every op was
+    // committed by core's write path, so a failure left the earlier ones durable. It was then
+    // inverted to require "not atomic" — correct only until option B made the batch genuinely
+    // atomic. What must hold in every version is that the description tells the agent what to do
+    // after a failure: retry the whole batch, unless 'atomic' says records survived.
+    String description = tool.getDescription().toLowerCase();
+    assertTrue("Description must state the batch is atomic", description.contains("atomically"));
+    assertTrue("Description must flag the process-commit exception, or agents will trust 'atomic' "
+        + "blindly in the one case where it is false", description.contains("'atomic':false"));
+    assertTrue("Description must point the caller at 'persisted' to recover surviving records",
+        description.contains("persisted"));
 
     Map<String, Object> schema = tool.getInputSchema();
     assertEquals("object", schema.get("type"));
