@@ -17,10 +17,15 @@
 package com.etendoerp.go.roles;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.util.Collections;
@@ -33,6 +38,7 @@ import org.mockito.MockedStatic;
 import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
 import org.openbravo.base.exception.OBException;
+import org.openbravo.base.provider.OBProvider;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
@@ -41,17 +47,19 @@ import org.openbravo.model.ad.access.RoleInheritance;
 import org.openbravo.model.ad.access.User;
 import org.openbravo.model.ad.access.UserRoles;
 import org.openbravo.model.ad.system.Client;
+import org.openbravo.model.common.enterprise.Organization;
 
 import com.etendoerp.go.schemaforge.util.OwnerSupport;
 
 /**
  * Unit tests for {@link UserRoleCompositionService}'s input-validation guard clauses — the slice
- * that fails before any persistence side effect, so it is safely mockable without a real DB.
- * The full find-or-create/reconciliation mechanism (personal role creation, {@code
- * AD_Role_Inheritance} add/remove, propagation) is covered end-to-end against a real DB by
- * {@link UserRoleCompositionServiceIntegrationTest} — this class is deliberately NOT trying to
- * re-mock that whole call chain, which core's own {@code RoleInheritanceEventHandler} needs to
- * be real DAL events for anyway.
+ * that fails before any persistence side effect, so it is safely mockable without a real DB —
+ * PLUS (ETP-4830) {@link UserRoleCompositionService#ensurePersonalRole}'s get-or-create/identity
+ * logic, which is plain deterministic Java with no event-driven propagation and is therefore also
+ * safely mockable (unlike {@code assignTemplateRoles}'s {@code AD_Role_Inheritance}
+ * add/remove/propagation reconciliation, which genuinely needs core's real {@code
+ * RoleInheritanceEventHandler} DAL events — that part is deliberately NOT re-mocked here and is
+ * instead covered end-to-end against a real DB by {@link UserRoleCompositionServiceIntegrationTest}).
  */
 @MockitoSettings(strictness = Strictness.LENIENT)
 class UserRoleCompositionServiceTest {
@@ -458,6 +466,173 @@ class UserRoleCompositionServiceTest {
     try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class)) {
       List<String> ids = service.getAppliedTemplateRoleIds("user-1", systemAdmin);
       assertTrue(ids.isEmpty());
+    }
+  }
+
+  // ── ETP-4830: ensurePersonalRole (get-or-create, no template composition) ──
+
+  @Test
+  void ensurePersonalRoleRejectsNullUser() {
+    OBException e = assertThrows(OBException.class, () -> service.ensurePersonalRole(null));
+    assertTrue(e.getMessage().contains("Missing user"));
+  }
+
+  /**
+   * The "genuinely theirs" happy path (ETP-4830 human-directed requirement): a candidate {@code
+   * user.getDefaultRole()} that satisfies EVERY {@link
+   * UserRoleCompositionService#isReusablePersonalRole} check (active, non-template,
+   * non-client-admin, same client as the user, not itself an {@code AD_Role_Inheritance}
+   * {@code InheritFrom} target, and exclusively assigned to this one user via {@code
+   * AD_User_Roles}) must be returned AS-IS — the exact same reference, no new role minted. Mirrors
+   * {@link #personalRoleWithTwoAppliedTemplatesReturnsBothIds}'s identical fixture shape for the
+   * read path, since both must apply the SAME identity definition.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  void ensurePersonalRoleReusesExistingRoleWhenIdentityCheckIsSatisfied() {
+    Client userClient = mock(Client.class);
+    when(userClient.getId()).thenReturn("client-A");
+
+    User user = mock(User.class);
+    when(user.getId()).thenReturn("user-1");
+    when(user.getClient()).thenReturn(userClient);
+
+    Role existingPersonalRole = mock(Role.class);
+    when(existingPersonalRole.getId()).thenReturn("personal-role-1");
+    when(existingPersonalRole.isActive()).thenReturn(true);
+    when(existingPersonalRole.isTemplate()).thenReturn(false);
+    when(existingPersonalRole.isClientAdmin()).thenReturn(false);
+    when(existingPersonalRole.getClient()).thenReturn(userClient);
+    when(user.getDefaultRole()).thenReturn(existingPersonalRole);
+
+    // Not an AD_Role_Inheritance InheritFrom target of anything else.
+    OBCriteria<RoleInheritance> roleInheritanceCriteria = mock(OBCriteria.class);
+    when(mockDal.createCriteria(RoleInheritance.class)).thenReturn(roleInheritanceCriteria);
+    when(roleInheritanceCriteria.list()).thenReturn(Collections.emptyList());
+
+    // Exclusively assigned to this one user via AD_User_Roles.
+    UserRoles ownRow = mock(UserRoles.class);
+    when(ownRow.getUserContact()).thenReturn(user);
+    OBCriteria<UserRoles> userRolesCriteria = mock(OBCriteria.class);
+    when(mockDal.createCriteria(UserRoles.class)).thenReturn(userRolesCriteria);
+    when(userRolesCriteria.list()).thenReturn(List.of(ownRow));
+
+    try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class)) {
+      Role result = service.ensurePersonalRole(user);
+
+      assertSame(existingPersonalRole, result);
+      verify(mockDal, never()).save(any(Role.class));
+      obContextMock.verify(() -> OBContext.setAdminMode(true));
+      obContextMock.verify(OBContext::restorePreviousMode);
+    }
+  }
+
+  /**
+   * No default role at all yet (a genuinely new {@code AD_User}) — a brand-new, empty personal
+   * role must be minted via {@link UserRoleCompositionService#createPersonalRole}, matching what
+   * {@code createPersonalRole}'s own javadoc documents: manual, non-template, non-client-admin,
+   * scoped to the user's client and the {@code "0"} organization.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  void ensurePersonalRoleCreatesNewRoleWhenNoDefaultRoleYet() {
+    Client userClient = mock(Client.class);
+    when(userClient.getId()).thenReturn("client-A");
+
+    User user = mock(User.class);
+    when(user.getId()).thenReturn("user-1");
+    when(user.getClient()).thenReturn(userClient);
+    when(user.getName()).thenReturn("Jane Doe");
+    when(user.getDefaultRole()).thenReturn(null);
+
+    Organization starOrg = mock(Organization.class);
+    when(mockDal.get(Organization.class, "0")).thenReturn(starOrg);
+
+    OBCriteria<Role> nameUniquenessCriteria = mock(OBCriteria.class);
+    when(mockDal.createCriteria(Role.class)).thenReturn(nameUniquenessCriteria);
+    when(nameUniquenessCriteria.uniqueResult()).thenReturn(null);
+
+    Role newRole = mock(Role.class);
+
+    try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
+        MockedStatic<OBProvider> obProviderMock = mockStatic(OBProvider.class)) {
+      OBProvider obProvider = mock(OBProvider.class);
+      obProviderMock.when(OBProvider::getInstance).thenReturn(obProvider);
+      when(obProvider.get(Role.class)).thenReturn(newRole);
+
+      Role result = service.ensurePersonalRole(user);
+
+      assertSame(newRole, result);
+      verify(newRole).setNewOBObject(true);
+      verify(newRole).setClient(userClient);
+      verify(newRole).setOrganization(starOrg);
+      verify(newRole).setActive(true);
+      verify(newRole).setManual(true);
+      verify(newRole).setTemplate(false);
+      verify(newRole).setClientAdmin(false);
+      verify(mockDal).save(newRole);
+      obContextMock.verify(() -> OBContext.setAdminMode(true));
+      obContextMock.verify(OBContext::restorePreviousMode);
+    }
+  }
+
+  /**
+   * A {@code user.getDefaultRole()} that is active/non-template/non-client-admin/same-client but
+   * is ALSO assigned (via {@code AD_User_Roles}) to a DIFFERENT user entirely fails {@link
+   * UserRoleCompositionService#isExclusivelyAssignedTo} — it is not genuinely this user's own
+   * role, so a brand-new one must be minted instead of silently repurposing it (the exact
+   * REVIEW-cycle-1 concern {@code isReusablePersonalRole}'s own javadoc documents).
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  void ensurePersonalRoleCreatesNewRoleWhenExistingCandidateBelongsToSomeoneElse() {
+    Client userClient = mock(Client.class);
+    when(userClient.getId()).thenReturn("client-A");
+
+    User user = mock(User.class);
+    when(user.getId()).thenReturn("user-1");
+    when(user.getClient()).thenReturn(userClient);
+    when(user.getName()).thenReturn("Jane Doe");
+
+    Role notActuallyTheirs = mock(Role.class);
+    when(notActuallyTheirs.isActive()).thenReturn(true);
+    when(notActuallyTheirs.isTemplate()).thenReturn(false);
+    when(notActuallyTheirs.isClientAdmin()).thenReturn(false);
+    when(notActuallyTheirs.getClient()).thenReturn(userClient);
+    when(user.getDefaultRole()).thenReturn(notActuallyTheirs);
+
+    OBCriteria<RoleInheritance> roleInheritanceCriteria = mock(OBCriteria.class);
+    when(mockDal.createCriteria(RoleInheritance.class)).thenReturn(roleInheritanceCriteria);
+    when(roleInheritanceCriteria.list()).thenReturn(Collections.emptyList());
+
+    User someoneElse = mock(User.class);
+    when(someoneElse.getId()).thenReturn("user-2");
+    UserRoles someoneElsesRow = mock(UserRoles.class);
+    when(someoneElsesRow.getUserContact()).thenReturn(someoneElse);
+    OBCriteria<UserRoles> userRolesCriteria = mock(OBCriteria.class);
+    when(mockDal.createCriteria(UserRoles.class)).thenReturn(userRolesCriteria);
+    when(userRolesCriteria.list()).thenReturn(List.of(someoneElsesRow));
+
+    Organization starOrg = mock(Organization.class);
+    when(mockDal.get(Organization.class, "0")).thenReturn(starOrg);
+    OBCriteria<Role> nameUniquenessCriteria = mock(OBCriteria.class);
+    when(mockDal.createCriteria(Role.class)).thenReturn(nameUniquenessCriteria);
+    when(nameUniquenessCriteria.uniqueResult()).thenReturn(null);
+
+    Role newRole = mock(Role.class);
+
+    try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
+        MockedStatic<OBProvider> obProviderMock = mockStatic(OBProvider.class)) {
+      OBProvider obProvider = mock(OBProvider.class);
+      obProviderMock.when(OBProvider::getInstance).thenReturn(obProvider);
+      when(obProvider.get(Role.class)).thenReturn(newRole);
+
+      Role result = service.ensurePersonalRole(user);
+
+      assertNotNull(result);
+      assertSame(newRole, result, "A role belonging to someone else must never be reused, even "
+          + "though every other field-level check passes");
+      verify(mockDal).save(newRole);
     }
   }
 }

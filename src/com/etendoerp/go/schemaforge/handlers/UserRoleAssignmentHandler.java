@@ -41,6 +41,7 @@ import org.openbravo.service.json.JsonConstants;
 
 import com.etendoerp.go.rest.CompanyInvitationService;
 import com.etendoerp.go.rest.EtendoGoJwtSupport;
+import com.etendoerp.go.roles.UserRoleCompositionService;
 import com.etendoerp.go.schemaforge.AbstractSmartDeactivationHandler;
 import com.etendoerp.go.schemaforge.NeoContext;
 import com.etendoerp.go.schemaforge.NeoEndpointType;
@@ -98,14 +99,21 @@ import com.etendoerp.go.schemaforge.util.UserRoleSyncSupport;
  *   ever reaches the DB's NOT NULL constraint, for a clearer error message. Once the {@code
  *   AD_User} is created, {@link #afterHandle(NeoContext)} reads the created record's {@code
  *   email} back out of the response body (POST's {@code recordId} is never populated on {@link
- *   NeoContext} — this is the one path that doesn't need it) and sends a company invitation via
- *   {@link CompanyInvitationService#createInvitationForNewlyCreatedUser}, the same
+ *   NeoContext} — this is the one path that doesn't need it), FIRST ensures the new user already
+ *   has their own personal role created and assigned (see {@link
+ *   #ensurePersonalRoleForNewlyCreatedUser}, ETP-4830 human-directed requirement: "create user
+ *   -&gt; assign personal role -&gt; invite", so no other role can ever land on the user first),
+ *   THEN sends a company invitation via {@link
+ *   CompanyInvitationService#createInvitationForNewlyCreatedUser}, the same
  *   invitation/token/email mechanism ETP-4894 built for company administrators inviting an
- *   existing user (dedup of an already-open invitation and throttling included). Admin role
- *   assignment happens independently, any time after creation, via {@code
- *   AssignTemplateRolesControl}'s own save — this is why the invitation intentionally skips the
- *   "invited user already has an active role" check {@link CompanyInvitationService#createInvitation}
- *   otherwise enforces. There is deliberately no eager {@code etgo_account} row created on this
+ *   existing user (dedup of an already-open invitation and throttling included). Template-role
+ *   composition on TOP of that empty personal role happens independently, any time after
+ *   creation, via {@code AssignTemplateRolesControl}'s own save (see {@link
+ *   com.etendoerp.go.roles.UserRoleCompositionService#assignTemplateRoles(String, List)}) — this
+ *   is why the invitation intentionally skips the "invited user already has an active role" check
+ *   {@link CompanyInvitationService#createInvitation} otherwise enforces (an empty personal role
+ *   with no templates is not a meaningful "active role" from that check's perspective). There is
+ *   deliberately no eager {@code etgo_account} row created on this
  *   path any more (ETP-4830 superseded ETP-4829's pending/active bookkeeping): the invitation's
  *   {@code register-and-accept} flow is now the sole place an {@code etgo_account} gets created
  *   for an admin-created user, lazily, once the invitee actually accepts. Same best-effort
@@ -558,12 +566,18 @@ public class UserRoleAssignmentHandler implements NeoHandler {
             + "in the create response, invitation not sent");
         return;
       }
+      String userId = StringUtils.trimToNull(data.optString(FIELD_ID, null));
       OBContext obContext = context.getObContext();
       clientId = obContext != null && obContext.getCurrentClient() != null
           ? obContext.getCurrentClient().getId() : null;
       OBContext.setAdminMode(true);
       JSONObject invitationResult;
       try {
+        // ETP-4830 human-directed requirement: "create user -> assign personal role -> invite" —
+        // MUST run before the invitation is created, so no other role ever gets a chance to land
+        // on this user first. Best-effort (see the method's own javadoc): a failure here is
+        // logged and swallowed, it never blocks the invitation that follows.
+        ensurePersonalRoleForNewlyCreatedUser(userId, email, clientId);
         invitationResult = new CompanyInvitationService().createInvitationForNewlyCreatedUser(
             obContext, email.toLowerCase(), null, null);
         // ETP-4830 pending-invite-pill fix: attach invitationStatus onto THIS SAME create
@@ -584,6 +598,65 @@ public class UserRoleAssignmentHandler implements NeoHandler {
     } catch (Exception e) {
       log.warn("UserRoleAssignmentHandler.inviteNewlyCreatedUser error for email={} clientId={}: {}",
           email, clientId, e.getMessage(), e);
+    }
+  }
+
+  /**
+   * ETP-4830 human-directed requirement: "the personal role should be created as soon as the
+   * user is created ... so no other role gets assigned" — ensures the newly-created {@code
+   * AD_User} already has its own personal role created AND assigned (both {@code
+   * AD_User.Default_Ad_Role_ID} and {@code AD_User_Roles}) BEFORE {@link #inviteNewlyCreatedUser}
+   * sends the create-user invitation. Called from inside that method's own {@code
+   * OBContext.setAdminMode(true)} block — nesting here is safe, admin mode is stack-based
+   * (push/pop), same reasoning {@link com.etendoerp.go.roles.UserRoleCompositionService}'s class
+   * javadoc gives for its own nested admin-mode entries.
+   *
+   * <p>Reuses {@link UserRoleCompositionService#ensurePersonalRole(User)} for the get-or-create
+   * part — same "is this genuinely the user's own role" identity rules the template-composition
+   * flow already relies on (see that method's javadoc) — and {@link
+   * UserRoleSyncSupport#syncSingleActiveUserRole(User, Role)} for the actual {@code
+   * AD_User_Roles} write, the exact same mechanism {@link #syncUserRole(String)} uses elsewhere
+   * in this class, instead of hand-rolling a new insert.</p>
+   *
+   * <p>Best-effort, same contract as the rest of this method (see its own javadoc): a failure
+   * here must never block the parent {@code AD_User} creation or the invitation that follows —
+   * every failure path is logged at WARN with enough context (userId/email/clientId) to diagnose
+   * without a DB query, never silently swallowed.</p>
+   *
+   * @param userId the newly-created user's {@code AD_User_ID}, read from the create response's
+   *     {@code data[0].id} by the caller — {@code null} (missing from the response) is logged and
+   *     treated as a no-op, since there is nothing to look up
+   * @param email the newly-created user's email — used only for logging context
+   * @param clientId the current client id — used only for logging context
+   */
+  private void ensurePersonalRoleForNewlyCreatedUser(String userId, String email,
+      String clientId) {
+    if (userId == null) {
+      log.warn("UserRoleAssignmentHandler.ensurePersonalRoleForNewlyCreatedUser: no 'id' entry "
+              + "in the create response for email={} clientId={} — personal role not created",
+          email, clientId);
+      return;
+    }
+    try {
+      User user = OBDal.getInstance().get(User.class, userId);
+      if (user == null) {
+        log.warn("UserRoleAssignmentHandler.ensurePersonalRoleForNewlyCreatedUser: user {} not "
+                + "found right after creation (email={} clientId={}) — personal role not created",
+            userId, email, clientId);
+        return;
+      }
+      Role personalRole = new UserRoleCompositionService().ensurePersonalRole(user);
+      user.setDefaultRole(personalRole);
+      OBDal.getInstance().save(user);
+      OBDal.getInstance().flush();
+      UserRoleSyncSupport.syncSingleActiveUserRole(user, personalRole);
+      log.info("UserRoleAssignmentHandler.ensurePersonalRoleForNewlyCreatedUser: assigned "
+              + "personal role {} to newly-created user {} (email={} clientId={})",
+          personalRole.getId(), userId, email, clientId);
+    } catch (Exception e) {
+      log.warn("UserRoleAssignmentHandler.ensurePersonalRoleForNewlyCreatedUser error for user "
+              + "{} email={} clientId={}: {}",
+          userId, email, clientId, e.getMessage(), e);
     }
   }
 

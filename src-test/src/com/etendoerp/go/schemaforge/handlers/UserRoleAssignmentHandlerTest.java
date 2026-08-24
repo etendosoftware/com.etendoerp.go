@@ -33,6 +33,7 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
@@ -54,10 +55,12 @@ import org.openbravo.model.common.enterprise.Organization;
 
 import com.etendoerp.go.rest.CompanyInvitationService;
 import com.etendoerp.go.rest.EtendoGoJwtSupport;
+import com.etendoerp.go.roles.UserRoleCompositionService;
 import com.etendoerp.go.schemaforge.NeoContext;
 import com.etendoerp.go.schemaforge.NeoEndpointType;
 import com.etendoerp.go.schemaforge.NeoResponse;
 import com.etendoerp.go.schemaforge.util.OwnerSupport;
+import com.etendoerp.go.schemaforge.util.UserRoleSyncSupport;
 
 /**
  * Unit tests for {@link UserRoleAssignmentHandler} — two independent post-hook concerns on the
@@ -93,11 +96,49 @@ import com.etendoerp.go.schemaforge.util.OwnerSupport;
  * responses (list and single-record) via {@link CompanyInvitationService#findLatestInvitationStatus},
  * AND (ETP-4830 pending-invite-pill fix) attached directly onto the {@code POST} create response
  * itself right after the invitation is created, so the pill renders on first paint without
- * requiring a follow-up GET.
+ * requiring a follow-up GET. Also covers the ETP-4830 "create user -&gt; assign personal role ->
+ * invite" ordering requirement: {@link UserRoleAssignmentHandler#ensurePersonalRoleForNewlyCreatedUser}
+ * must run, and must complete, BEFORE {@link CompanyInvitationService#createInvitationForNewlyCreatedUser}
+ * is ever called — see the {@code afterHandleAssignsPersonalRoleBeforeInvitationOnCreate} test and
+ * its siblings below the existing invitation tests.
  */
 public class UserRoleAssignmentHandlerTest {
 
   private static final String USER_ID = "user-001";
+
+  /**
+   * ETP-4830 — bundles the three collaborators {@link
+   * UserRoleAssignmentHandler#ensurePersonalRoleForNewlyCreatedUser} now reaches on every
+   * create-user invitation flow (a real {@code User} lookup via {@link OBDal}, a personal role
+   * from {@link UserRoleCompositionService#ensurePersonalRole}, and the {@code AD_User_Roles}
+   * sync via {@link UserRoleSyncSupport#syncSingleActiveUserRole}), so the pre-existing invitation
+   * tests below — which only care about the invitation itself — don't each have to hand-roll the
+   * same three mocks just to keep this new step from reaching real (unmocked) Openbravo statics.
+   * NOT used by the dedicated {@code afterHandleAssignsPersonalRoleBeforeInvitationOnCreate} tests
+   * further down, which need fine-grained control over each collaborator instead.
+   */
+  private static final class PersonalRoleMocks implements AutoCloseable {
+    private final MockedStatic<OBDal> obDalMock;
+    private final MockedConstruction<UserRoleCompositionService> compositionServiceMock;
+    private final MockedStatic<UserRoleSyncSupport> syncSupportMock;
+
+    PersonalRoleMocks(String userId, User user, Role personalRole) {
+      obDalMock = mockStatic(OBDal.class);
+      OBDal obDal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(obDal);
+      when(obDal.get(User.class, userId)).thenReturn(user);
+      compositionServiceMock = mockConstruction(UserRoleCompositionService.class,
+          (m, constructionCtx) -> when(m.ensurePersonalRole(any())).thenReturn(personalRole));
+      syncSupportMock = mockStatic(UserRoleSyncSupport.class);
+    }
+
+    @Override
+    public void close() {
+      syncSupportMock.close();
+      compositionServiceMock.close();
+      obDalMock.close();
+    }
+  }
 
   // ─── handle(): pre-hook no-op for everything except a `user` POST ────────────
 
@@ -1010,7 +1051,9 @@ public class UserRoleAssignmentHandlerTest {
 
     try (MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
         MockedConstruction<CompanyInvitationService> invitationServiceMock =
-            mockConstruction(CompanyInvitationService.class)) {
+            mockConstruction(CompanyInvitationService.class);
+        PersonalRoleMocks personalRoleMocks =
+            new PersonalRoleMocks(USER_ID, mock(User.class), mock(Role.class))) {
       obCtxMock.when(() -> OBContext.setAdminMode(true)).then(inv -> null);
       obCtxMock.when(OBContext::restorePreviousMode).then(inv -> null);
 
@@ -1112,7 +1155,9 @@ public class UserRoleAssignmentHandlerTest {
 
     try (MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
         MockedConstruction<CompanyInvitationService> invitationServiceMock =
-            mockConstruction(CompanyInvitationService.class)) {
+            mockConstruction(CompanyInvitationService.class);
+        PersonalRoleMocks personalRoleMocks =
+            new PersonalRoleMocks(USER_ID, mock(User.class), mock(Role.class))) {
       obCtxMock.when(() -> OBContext.setAdminMode(true)).then(inv -> null);
       obCtxMock.when(OBContext::restorePreviousMode).then(inv -> null);
 
@@ -1121,6 +1166,179 @@ public class UserRoleAssignmentHandlerTest {
       CompanyInvitationService constructed = invitationServiceMock.constructed().get(0);
       verify(constructed).createInvitationForNewlyCreatedUser(eq(requestObContext),
           eq("array.shape@example.com"), isNull(), isNull());
+    }
+  }
+
+  // ─── afterHandle: ETP-4830 "assign personal role BEFORE invite" ordering ────
+
+  /**
+   * The core ordering requirement this session's task was built around: {@link
+   * UserRoleAssignmentHandler#ensurePersonalRoleForNewlyCreatedUser} must run to completion
+   * (personal role resolved, {@code Default_Ad_Role_ID} set, {@code AD_User_Roles} synced) BEFORE
+   * {@link CompanyInvitationService#createInvitationForNewlyCreatedUser} is ever called — proved
+   * via a shared call-order trail across the two independently-mocked collaborators, not just by
+   * asserting both were eventually called.
+   */
+  @Test
+  public void afterHandleAssignsPersonalRoleBeforeInvitationOnCreate() throws Exception {
+    UserRoleAssignmentHandler handler = new UserRoleAssignmentHandler();
+    JSONObject body = buildCreatedRecordResponseBody(USER_ID, "brand.new@example.com",
+        "Brand New");
+    OBContext requestObContext = mock(OBContext.class);
+    NeoContext ctx = NeoContext.builder()
+        .endpointType(NeoEndpointType.CRUD)
+        .httpMethod("POST")
+        .previousResult(NeoResponse.ok(body))
+        .obContext(requestObContext)
+        .build();
+
+    User createdUser = mock(User.class);
+    Role personalRole = mock(Role.class);
+    when(personalRole.getId()).thenReturn("personal-role-new");
+    List<String> callOrder = new ArrayList<>();
+    JSONObject successResult = new JSONObject();
+    successResult.put("status", "success");
+
+    try (MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class);
+        MockedConstruction<UserRoleCompositionService> compositionServiceMock =
+            mockConstruction(UserRoleCompositionService.class, (m, constructionCtx) ->
+                when(m.ensurePersonalRole(createdUser)).thenAnswer(inv -> {
+                  callOrder.add("personalRole");
+                  return personalRole;
+                }));
+        MockedStatic<UserRoleSyncSupport> syncMock = mockStatic(UserRoleSyncSupport.class);
+        MockedConstruction<CompanyInvitationService> invitationServiceMock =
+            mockConstruction(CompanyInvitationService.class, (m, constructionCtx) ->
+                when(m.createInvitationForNewlyCreatedUser(any(), any(), any(), any()))
+                    .thenAnswer(inv -> {
+                      callOrder.add("invitation");
+                      return successResult;
+                    }))) {
+      obCtxMock.when(() -> OBContext.setAdminMode(true)).then(inv -> null);
+      obCtxMock.when(OBContext::restorePreviousMode).then(inv -> null);
+      OBDal obDal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(obDal);
+      when(obDal.get(User.class, USER_ID)).thenReturn(createdUser);
+
+      assertNull(handler.afterHandle(ctx));
+
+      assertEquals(1, compositionServiceMock.constructed().size());
+      assertEquals(Arrays.asList("personalRole", "invitation"), callOrder);
+      verify(createdUser).setDefaultRole(personalRole);
+      verify(obDal).save(createdUser);
+      verify(obDal).flush();
+      syncMock.verify(
+          () -> UserRoleSyncSupport.syncSingleActiveUserRole(createdUser, personalRole));
+    }
+  }
+
+  /**
+   * Defensive-only: a real create response always includes {@code id} (confirmed against core's
+   * {@code DefaultJsonDataService}, same as {@code email}), but the personal-role assignment step
+   * must still degrade to a clean no-op rather than block the invitation if it were ever missing.
+   */
+  @Test
+  public void afterHandleSkipsPersonalRoleAssignmentWhenCreateResponseHasNoId() throws Exception {
+    UserRoleAssignmentHandler handler = new UserRoleAssignmentHandler();
+    JSONObject record = new JSONObject();
+    record.put("email", "no-id@example.com");
+    JSONArray dataArray = new JSONArray();
+    dataArray.put(record);
+    JSONObject inner = new JSONObject();
+    inner.put("data", dataArray);
+    JSONObject body = new JSONObject();
+    body.put("response", inner);
+    NeoContext ctx = NeoContext.builder()
+        .endpointType(NeoEndpointType.CRUD)
+        .httpMethod("POST")
+        .previousResult(NeoResponse.ok(body))
+        .build();
+
+    try (MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
+        MockedConstruction<UserRoleCompositionService> compositionServiceMock =
+            mockConstruction(UserRoleCompositionService.class);
+        MockedConstruction<CompanyInvitationService> invitationServiceMock =
+            mockConstruction(CompanyInvitationService.class)) {
+      obCtxMock.when(() -> OBContext.setAdminMode(true)).then(inv -> null);
+      obCtxMock.when(OBContext::restorePreviousMode).then(inv -> null);
+
+      assertNull(handler.afterHandle(ctx));
+
+      assertEquals(0, compositionServiceMock.constructed().size());
+      assertEquals("The invitation must still be sent even though the personal-role step "
+          + "no-opped", 1, invitationServiceMock.constructed().size());
+    }
+  }
+
+  /**
+   * The created user's id is present, but a lookup for it comes back empty (should never happen
+   * right after a successful create, but the step must fail safe): no personal role is minted,
+   * and the invitation still proceeds.
+   */
+  @Test
+  public void afterHandleSkipsPersonalRoleAssignmentWhenUserNotFound() throws Exception {
+    UserRoleAssignmentHandler handler = new UserRoleAssignmentHandler();
+    JSONObject body = buildCreatedRecordResponseBody(USER_ID, "ghost@example.com", "Ghost");
+    NeoContext ctx = NeoContext.builder()
+        .endpointType(NeoEndpointType.CRUD)
+        .httpMethod("POST")
+        .previousResult(NeoResponse.ok(body))
+        .build();
+
+    try (MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class);
+        MockedConstruction<UserRoleCompositionService> compositionServiceMock =
+            mockConstruction(UserRoleCompositionService.class);
+        MockedConstruction<CompanyInvitationService> invitationServiceMock =
+            mockConstruction(CompanyInvitationService.class)) {
+      obCtxMock.when(() -> OBContext.setAdminMode(true)).then(inv -> null);
+      obCtxMock.when(OBContext::restorePreviousMode).then(inv -> null);
+      OBDal obDal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(obDal);
+      when(obDal.get(User.class, USER_ID)).thenReturn(null);
+
+      assertNull(handler.afterHandle(ctx));
+
+      assertEquals(0, compositionServiceMock.constructed().size());
+      assertEquals(1, invitationServiceMock.constructed().size());
+    }
+  }
+
+  /**
+   * Best-effort contract, same as every other side effect in this method: a failure while
+   * ensuring the personal role must never block the parent {@code AD_User} creation, nor the
+   * invitation that follows.
+   */
+  @Test
+  public void afterHandleSwallowsExceptionFromPersonalRoleAssignmentAndStillSendsInvitation()
+      throws Exception {
+    UserRoleAssignmentHandler handler = new UserRoleAssignmentHandler();
+    JSONObject body = buildCreatedRecordResponseBody(USER_ID, "flaky-role@example.com", "Flaky");
+    NeoContext ctx = NeoContext.builder()
+        .endpointType(NeoEndpointType.CRUD)
+        .httpMethod("POST")
+        .previousResult(NeoResponse.ok(body))
+        .build();
+
+    try (MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class);
+        MockedConstruction<UserRoleCompositionService> compositionServiceMock =
+            mockConstruction(UserRoleCompositionService.class, (m, constructionCtx) ->
+                when(m.ensurePersonalRole(any()))
+                    .thenThrow(new RuntimeException("DB unavailable")));
+        MockedConstruction<CompanyInvitationService> invitationServiceMock =
+            mockConstruction(CompanyInvitationService.class)) {
+      obCtxMock.when(() -> OBContext.setAdminMode(true)).then(inv -> null);
+      obCtxMock.when(OBContext::restorePreviousMode).then(inv -> null);
+      OBDal obDal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(obDal);
+      when(obDal.get(User.class, USER_ID)).thenReturn(mock(User.class));
+
+      assertNull(handler.afterHandle(ctx));
+
+      assertEquals(1, invitationServiceMock.constructed().size());
+      obCtxMock.verify(OBContext::restorePreviousMode, times(1));
     }
   }
 
@@ -1138,7 +1356,9 @@ public class UserRoleAssignmentHandlerTest {
         MockedConstruction<CompanyInvitationService> invitationServiceMock =
             mockConstruction(CompanyInvitationService.class, (m, constructionCtx) ->
                 when(m.createInvitationForNewlyCreatedUser(any(), any(), any(), any()))
-                    .thenThrow(new RuntimeException("DB unavailable")))) {
+                    .thenThrow(new RuntimeException("DB unavailable")));
+        PersonalRoleMocks personalRoleMocks =
+            new PersonalRoleMocks(USER_ID, mock(User.class), mock(Role.class))) {
       obCtxMock.when(() -> OBContext.setAdminMode(true)).then(inv -> null);
       obCtxMock.when(OBContext::restorePreviousMode).then(inv -> null);
 
@@ -1181,7 +1401,9 @@ public class UserRoleAssignmentHandlerTest {
         MockedConstruction<CompanyInvitationService> invitationServiceMock =
             mockConstruction(CompanyInvitationService.class, (m, constructionCtx) ->
                 when(m.createInvitationForNewlyCreatedUser(any(), any(), any(), any()))
-                    .thenReturn(errorResult))) {
+                    .thenReturn(errorResult));
+        PersonalRoleMocks personalRoleMocks =
+            new PersonalRoleMocks(USER_ID, mock(User.class), mock(Role.class))) {
       obCtxMock.when(() -> OBContext.setAdminMode(true)).then(inv -> null);
       obCtxMock.when(OBContext::restorePreviousMode).then(inv -> null);
 
@@ -1220,7 +1442,9 @@ public class UserRoleAssignmentHandlerTest {
         MockedConstruction<CompanyInvitationService> invitationServiceMock =
             mockConstruction(CompanyInvitationService.class, (m, constructionCtx) ->
                 when(m.createInvitationForNewlyCreatedUser(any(), any(), any(), any()))
-                    .thenReturn(successResult))) {
+                    .thenReturn(successResult));
+        PersonalRoleMocks personalRoleMocks =
+            new PersonalRoleMocks(USER_ID, mock(User.class), mock(Role.class))) {
       obCtxMock.when(() -> OBContext.setAdminMode(true)).then(inv -> null);
       obCtxMock.when(OBContext::restorePreviousMode).then(inv -> null);
 
@@ -1266,7 +1490,9 @@ public class UserRoleAssignmentHandlerTest {
                 when(m.createInvitationForNewlyCreatedUser(any(), any(), any(), any()))
                     .thenReturn(successResult));
         MockedStatic<CompanyInvitationService> invitationStatusMock =
-            mockStatic(CompanyInvitationService.class)) {
+            mockStatic(CompanyInvitationService.class);
+        PersonalRoleMocks personalRoleMocks =
+            new PersonalRoleMocks(USER_ID, mock(User.class), mock(Role.class))) {
       obCtxMock.when(() -> OBContext.setAdminMode(true)).then(inv -> null);
       obCtxMock.when(OBContext::restorePreviousMode).then(inv -> null);
       invitationStatusMock.when(() -> CompanyInvitationService.findLatestInvitationStatus(
@@ -1311,7 +1537,9 @@ public class UserRoleAssignmentHandlerTest {
                 when(m.createInvitationForNewlyCreatedUser(any(), any(), any(), any()))
                     .thenReturn(successResult));
         MockedStatic<CompanyInvitationService> invitationStatusMock =
-            mockStatic(CompanyInvitationService.class)) {
+            mockStatic(CompanyInvitationService.class);
+        PersonalRoleMocks personalRoleMocks =
+            new PersonalRoleMocks(USER_ID, mock(User.class), mock(Role.class))) {
       obCtxMock.when(() -> OBContext.setAdminMode(true)).then(inv -> null);
       obCtxMock.when(OBContext::restorePreviousMode).then(inv -> null);
       invitationStatusMock.when(() -> CompanyInvitationService.findLatestInvitationStatus(

@@ -311,6 +311,47 @@ public class UserRoleCompositionService {
   }
 
   /**
+   * ETP-4830 — public get-or-create entry point for "just the user's own empty personal role,
+   * with no templates composed" — the step that must now run immediately after a new {@code
+   * AD_User} is created (see {@code UserRoleAssignmentHandler#ensurePersonalRoleForNewlyCreatedUser},
+   * which calls this BEFORE the create-user invitation goes out), independent of and prior to
+   * whatever templates an admin later picks via {@link #assignTemplateRoles(String, List)}.
+   *
+   * <p>Deliberately thin: reuses {@link #resolveOrCreatePersonalRole(User)} — the exact same
+   * "is this genuinely user's own role" identity check ({@link #isReusablePersonalRole(User,
+   * Role)}) and creation logic ({@link #createPersonalRole(User)}) the template-composition path
+   * already relies on — so there is exactly one definition of what a personal role is and how one
+   * gets minted. Unlike {@link #assignTemplateRoles(String, List)}, this method does NOT touch
+   * {@code AD_Role_Inheritance}, does NOT set {@code AD_User.Default_Ad_Role_ID}, and does NOT
+   * sync {@code AD_User_Roles} — the caller is responsible for the assignment step (setting the
+   * user's default role and syncing {@code AD_User_Roles}, e.g. via {@link
+   * com.etendoerp.go.schemaforge.util.UserRoleSyncSupport#syncSingleActiveUserRole(User, Role)})
+   * once it has the returned {@link Role}. Enters/exits its own {@code
+   * OBContext.setAdminMode(true)} scope (mirroring {@link #getAppliedTemplateRoleIds(String,
+   * Role)}'s convention for a read/write entry point not already wrapped by {@link
+   * #assignTemplateRoles(String, List, Role, String)}'s own admin-mode block) — safe to call from
+   * within an already-admin-mode caller, since Openbravo's admin-mode flag is stack-based
+   * (push/pop), same reasoning as the class javadoc gives for {@link #assignTemplateRoles(String,
+   * List, Role)}.
+   *
+   * @param user the already-resolved user to get or create a personal role for
+   * @return the user's existing personal role if one is already reusable (see {@link
+   *     #isReusablePersonalRole(User, Role)}), otherwise a brand-new, empty one
+   * @throws OBException if {@code user} is {@code null}
+   */
+  public Role ensurePersonalRole(User user) {
+    if (user == null) {
+      throw new OBException("Missing user for personal role creation");
+    }
+    OBContext.setAdminMode(true);
+    try {
+      return resolveOrCreatePersonalRole(user);
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  /**
    * Rejects reassigning the OWNER's role composition from anyone other than the owner
    * themselves (ETP-4830) — the role-assignment-endpoint counterpart to {@code
    * UserRoleAssignmentHandler#rejectNonOwnerEditingOwner}'s generic {@code AD_User} PUT/PATCH

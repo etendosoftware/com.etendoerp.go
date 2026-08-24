@@ -192,11 +192,17 @@ public class CompanyInvitationService {
   /**
    * @param requireExistingRole when {@code false}, skips the "invited user already has an
    *     active role in the invitation organization" check — used only by
-   *     {@link #createInvitationForNewlyCreatedUser} (ETP-4830): a freshly admin-created
-   *     {@code AD_User} has zero roles yet by construction (role assignment happens later, via
-   *     {@code AssignTemplateRolesControl}'s own save/PUT), so the check would always 400 there
-   *     and adds no real safety — the user unambiguously belongs to the inviter's client/org
-   *     because it was just created inside the same request.
+   *     {@link #createInvitationForNewlyCreatedUser} (ETP-4830). Originally added because a
+   *     freshly admin-created {@code AD_User} had zero roles yet by construction; since the
+   *     ETP-4830 "assign personal role before invite" ordering ({@code
+   *     UserRoleAssignmentHandler#ensurePersonalRoleForNewlyCreatedUser}, called right before this
+   *     method from the same {@code afterHandle} post-hook) the user DOES already have an active
+   *     (though empty, template-less) personal role by the time this runs — so the check would no
+   *     longer always 400 there, but the skip is kept regardless: an empty personal role is not a
+   *     meaningful "active role" from this check's perspective (template assignment still happens
+   *     later, via {@code AssignTemplateRolesControl}'s own save/PUT), and the user unambiguously
+   *     belongs to the inviter's client/org either way, because it was just created inside the
+   *     same request.
    */
   private JSONObject createInvitationForInviter(InviterContext inviter, String email,
       String appBaseUrl, String language, boolean requireExistingRole) throws JSONException {
