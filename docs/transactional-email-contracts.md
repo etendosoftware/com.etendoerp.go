@@ -222,6 +222,16 @@ Invitation safeguards:
   `ACCEPTED`), and — for `acceptExistingAccount` — the signed-in `ETGO_Account`'s email matching
   the invitation's email. A roleless user can still sign in after accepting; they simply cannot do
   anything until a role is assigned, identical to any other freshly created `AD_User`.
+- **User/role validation runs BEFORE account creation, not after (ETP-4830 fix).** Accepting a
+  brand-new-account invite (`registerAndAcceptInAdminMode`) used to crash with
+  `org.hibernate.LazyInitializationException: could not initialize proxy - no Session`: the
+  user/role check above read `invitation.getUser()` (a lazy `AD_User` proxy) AFTER
+  `EtendoGoJwtDalHelper#createAccount` had already run, and that method ends with a
+  flush-and-commit that closes the Hibernate session the proxy needs to initialize. Fixed by
+  moving the validation ahead of the `createAccount()` call, while the session that loaded
+  `invitation` is still open. The sibling `acceptExistingAccountInAdminMode` path never had this
+  specific crash (it has no `createAccount()` call), which is why only the new-account path needed
+  the reorder.
 
 Email delivery failure is audited and must not roll back registration, onboarding completion, or a successful password change. Password reset request responses stay neutral even when delivery fails.
 
