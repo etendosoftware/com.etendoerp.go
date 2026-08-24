@@ -51,6 +51,9 @@ public final class SystemCategoryIds {
   }
 
   /**
+   * Resolves every {@code M_Product_Category} id of {@code clientId} flagged
+   * {@code EM_Etgo_IsSystemCategory = 'Y'}.
+   *
    * @param clientId the tenant to scope the lookup to
    * @return ids of every system-flagged category for that client, or an empty set on any
    *         resolution failure (fail open — callers must treat an empty set as "hide nothing",

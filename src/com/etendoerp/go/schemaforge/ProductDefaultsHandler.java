@@ -155,53 +155,77 @@ public class ProductDefaultsHandler implements NeoHandler {
     try {
       JSONObject body = previous.getBody();
       JSONObject responseWrapper = body.optJSONObject("response");
-      if (responseWrapper == null) {
-        return null;
-      }
-      JSONArray dataArr = responseWrapper.optJSONArray("data");
+      JSONArray dataArr = responseWrapper != null ? responseWrapper.optJSONArray("data") : null;
       if (dataArr == null || dataArr.length() == 0) {
         return null;
       }
-      String clientId = resolveClientId(context);
-      if (StringUtils.isBlank(clientId)) {
-        return null;
-      }
-      Set<String> hiddenCategoryIds = SystemCategoryIds.resolve(clientId);
+      Set<String> hiddenCategoryIds = resolveHiddenCategoryIds(context);
       if (hiddenCategoryIds.isEmpty()) {
         return null;
       }
-      JSONArray filtered = new JSONArray();
-      int removedCount = 0;
-      for (int i = 0; i < dataArr.length(); i++) {
-        JSONObject row = dataArr.optJSONObject(i);
-        if (row == null) {
-          continue;
-        }
-        if (hiddenCategoryIds.contains(row.optString(FIELD_PRODUCT_CATEGORY, ""))) {
-          removedCount++;
-        } else {
-          filtered.put(row);
-        }
-      }
-      if (removedCount == 0) {
+      FilterOutcome outcome = filterHiddenCategoryRows(dataArr, hiddenCategoryIds);
+      if (outcome.removedCount() == 0) {
         return null;
       }
-      responseWrapper.put("data", filtered);
-      // response.totalRows/endRow come from core's own datasource count query, computed
-      // before this filter ran — decrement them so a caller that pages off totalRows (rather
-      // than data.length, which is already correct) does not request a page past the end.
-      if (responseWrapper.has(FIELD_TOTAL_ROWS)) {
-        responseWrapper.put(FIELD_TOTAL_ROWS,
-            Math.max(0, responseWrapper.optInt(FIELD_TOTAL_ROWS, 0) - removedCount));
-      }
-      if (responseWrapper.has(FIELD_END_ROW)) {
-        responseWrapper.put(FIELD_END_ROW,
-            Math.max(0, responseWrapper.optInt(FIELD_END_ROW, 0) - removedCount));
-      }
+      responseWrapper.put("data", outcome.filtered());
+      adjustRowCounts(responseWrapper, outcome.removedCount());
       return NeoResponse.ok(body);
     } catch (Exception e) {
       log.warn("product afterHandle: failed to hide system-category products: {}", e.getMessage());
       return null;
+    }
+  }
+
+  /** The current request's client's system-flagged category ids, or empty when unresolvable. */
+  private static Set<String> resolveHiddenCategoryIds(NeoContext context) {
+    String clientId = resolveClientId(context);
+    if (StringUtils.isBlank(clientId)) {
+      return Set.of();
+    }
+    return SystemCategoryIds.resolve(clientId);
+  }
+
+  /** Result of {@link #filterHiddenCategoryRows}: the surviving rows and how many were cut. */
+  private record FilterOutcome(JSONArray filtered, int removedCount) {
+  }
+
+  /**
+   * Removes rows whose {@code productCategory} is in {@code hiddenCategoryIds} from
+   * {@code dataArr}.
+   */
+  private static FilterOutcome filterHiddenCategoryRows(JSONArray dataArr,
+      Set<String> hiddenCategoryIds) {
+    JSONArray filtered = new JSONArray();
+    int removedCount = 0;
+    for (int i = 0; i < dataArr.length(); i++) {
+      JSONObject row = dataArr.optJSONObject(i);
+      if (row == null) {
+        continue;
+      }
+      if (hiddenCategoryIds.contains(row.optString(FIELD_PRODUCT_CATEGORY, ""))) {
+        removedCount++;
+      } else {
+        filtered.put(row);
+      }
+    }
+    return new FilterOutcome(filtered, removedCount);
+  }
+
+  /**
+   * {@code response.totalRows}/{@code endRow} come from core's own datasource count query,
+   * computed before {@link #filterHiddenCategoryRows} ran — decrement them by
+   * {@code removedCount} so a caller that pages off those fields (rather than
+   * {@code data.length}, which is already correct) does not request a page past the end.
+   */
+  private static void adjustRowCounts(JSONObject responseWrapper, int removedCount)
+      throws JSONException {
+    if (responseWrapper.has(FIELD_TOTAL_ROWS)) {
+      responseWrapper.put(FIELD_TOTAL_ROWS,
+          Math.max(0, responseWrapper.optInt(FIELD_TOTAL_ROWS, 0) - removedCount));
+    }
+    if (responseWrapper.has(FIELD_END_ROW)) {
+      responseWrapper.put(FIELD_END_ROW,
+          Math.max(0, responseWrapper.optInt(FIELD_END_ROW, 0) - removedCount));
     }
   }
 

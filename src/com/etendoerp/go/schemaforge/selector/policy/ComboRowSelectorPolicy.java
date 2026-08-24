@@ -60,6 +60,13 @@ public final class ComboRowSelectorPolicy {
   /**
    * Filters {@code rawRows} for the given column when a hiding policy applies to it; returns
    * {@code rawRows} unchanged otherwise (including when it is {@code null}/empty).
+   *
+   * @param columnName physical DB column name the combo selector was built for (e.g.
+   *        {@code "M_Product_Category_ID"}); only {@link #COLUMN_PRODUCT_CATEGORY_FK} triggers
+   *        filtering, matched case-insensitively
+   * @param rawRows the combo's own raw result rows, or {@code null}/empty
+   * @return {@code rawRows} with hidden rows removed, or {@code rawRows} itself unchanged when
+   *         no hiding policy applies to {@code columnName} or nothing needs filtering
    */
   public static FieldProvider[] filter(String columnName, FieldProvider[] rawRows) {
     if (rawRows == null || rawRows.length == 0
