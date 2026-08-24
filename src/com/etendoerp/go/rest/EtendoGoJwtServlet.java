@@ -1528,11 +1528,12 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       return;
     }
 
-    Boolean paywallOutcome = resolveOnboardingPaywall(accountEmail, onboardingRequest, response);
-    if (paywallOutcome == null) {
+    PaywallOutcome paywallOutcome =
+        resolveOnboardingPaywall(accountEmail, onboardingRequest, response);
+    if (paywallOutcome == PaywallOutcome.REFUSED) {
       return;
     }
-    boolean paidUpgrade = paywallOutcome;
+    boolean paidUpgrade = paywallOutcome == PaywallOutcome.PAID;
 
     // Set up NDJSON streaming
     response.setStatus(HttpServletResponse.SC_OK);
@@ -1641,24 +1642,38 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    * error instead of a stream. The backend is authoritative here: the /upgrade page in the web
    * client shows the checkout, but this check is what actually gates tenant creation.
    *
-   * @return whether the environment is a paid (productive) one, or null when the request was
-   *     refused or the evaluation failed — in which case the error response has already been
-   *     written and the caller must return
+   * @return {@link PaywallOutcome#REFUSED} when the caller must stop (the error response is
+   *     already written), otherwise whether the environment is free or paid
    */
-  private Boolean resolveOnboardingPaywall(String accountEmail,
+  private PaywallOutcome resolveOnboardingPaywall(String accountEmail,
       OnboardingRequestData onboardingRequest, HttpServletResponse response) throws IOException {
     try {
       TenantPaywallService.Outcome paywall = evaluatePaywall(accountEmail, onboardingRequest);
       if (paywall.getDecision().isBlocked()) {
         writePaymentRequiredError(response, paywall.getDecision());
-        return null;
+        return PaywallOutcome.REFUSED;
       }
-      return paywall.isProductive();
+      return paywall.isProductive() ? PaywallOutcome.PAID : PaywallOutcome.FREE;
     } catch (RuntimeException e) {
       log.error("Paywall evaluation failed for onboarding", e);
       writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, SERVER_ERROR);
-      return null;
+      return PaywallOutcome.REFUSED;
     }
+  }
+
+  /**
+   * What the paywall decided for one onboarding request. An enum rather than a nullable
+   * {@code Boolean}: "refused" and "free" are different answers, and encoding one of them as null
+   * makes the caller carry a three-state Boolean that unboxes to an NPE the day someone forgets
+   * the null check (java:S2447).
+   */
+  private enum PaywallOutcome {
+    /** Refused, or the evaluation itself failed. The error response is already written. */
+    REFUSED,
+    /** Allowed. A free environment — the tenant is not marked productive. */
+    FREE,
+    /** Allowed. A paid environment — the tenant is marked productive after provisioning. */
+    PAID
   }
 
   /**
