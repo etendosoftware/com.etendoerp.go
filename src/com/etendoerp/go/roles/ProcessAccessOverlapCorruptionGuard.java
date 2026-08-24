@@ -37,6 +37,7 @@ import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.client.kernel.event.EntityDeleteEvent;
 import org.openbravo.client.kernel.event.EntityNewEvent;
 import org.openbravo.client.kernel.event.EntityPersistenceEventObserver;
+import org.openbravo.client.kernel.event.EntityUpdateEvent;
 import org.openbravo.client.kernel.event.TransactionCompletedEvent;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
@@ -64,15 +65,21 @@ import com.etendoerp.go.roles.overlap.TemplateRemovalTracker;
  * {@code AccessTypeInjector} (window/process/OBUIAPP-process), walking every REMAINING template in
  * one un-flushed pass regardless of which access type it is reconciling.
  *
- * <p><b>Scope: REMOVE path only.</b> Deliberately does NOT observe {@code AD_Process_Access}
- * {@code EntityNewEvent}/{@code EntityUpdateEvent} (the ADD/UPDATE-path ownership-correction and
- * most-permissive-wins-widening triggers {@code WindowAccessOverlapCorruptionGuard} also has) —
- * per the approved ETP-4830 item 7 design, those 6 other triggers are deferred, not yet proven
- * necessary for process access. Only the REMOVE-side duplicate-INSERT race is closed here; watch
- * for the SAME failure signatures ({@code OBSecurityException}, {@code
- * ConstraintViolationException} on {@code AD_PROCESS_ACCESS_UN_KEY}, or a silently wrong access
- * level) on the ADD/UPDATE paths, and extend this guard the same way {@code
- * WindowAccessOverlapCorruptionGuard} grew, if/when one is actually hit.
+ * <p><b>Scope: full ADD/UPDATE/REMOVE-path parity with {@code
+ * WindowAccessOverlapCorruptionGuard}.</b> {@link #onSave(EntityNewEvent)} covers the ADD path —
+ * ownership correction for a newly-inherited dependent row, most-permissive-wins widening, and
+ * unconditional dependent-clearing (safe here because core's {@code propagateNewAccess} always
+ * falls back to a CREATE) when a template gains a brand-new grant or a role gains a new
+ * inheritance ({@code guardNewInheritance}). {@link #onUpdate(EntityUpdateEvent)} covers the
+ * UPDATE path — when a template's own existing grant changes access level, {@code
+ * guardDependentsOf}'s {@code UPDATED_GRANT} branch repoints an already-correctly-sourced
+ * dependent row in place ({@code repointIfAlreadySourcedFromTemplate}) rather than deleting it,
+ * since core's {@code propagateUpdatedAccess} has no create fallback and would otherwise leave
+ * the dependent with nothing to restore its access. {@link #onDelete(EntityDeleteEvent)} covers
+ * the REMOVE path — the original duplicate-INSERT race documented above. All three mirror the
+ * SAME failure signatures ({@code OBSecurityException}, {@code ConstraintViolationException} on
+ * {@code AD_PROCESS_ACCESS_UN_KEY}, or a silently wrong access level) that {@code
+ * WindowAccessOverlapCorruptionGuard} closes for {@code AD_Window_Access}.
  *
  * <p>Reuses, rather than re-derives, the exact winner/level algorithm ({@link
  * OverlapReconciliationCore#computeWinner(java.util.List)}) and the "which templates does this
@@ -128,6 +135,23 @@ public class ProcessAccessOverlapCorruptionGuard extends EntityPersistenceEventO
       }
     } else if (target instanceof RoleInheritance) {
       guardNewInheritance((RoleInheritance) target);
+    }
+  }
+
+  /**
+   * Mirrors {@code WindowAccessOverlapCorruptionGuard#onUpdate(EntityUpdateEvent)} — see that
+   * method's own javadoc. Uses a DIFFERENT safe strategy than {@link #onSave(EntityNewEvent)}'s
+   * {@code NEW_GRANT} trigger: core's own {@code propagateUpdatedAccess} (triggered here) has NO
+   * create fallback, unlike {@code propagateNewAccess}.
+   */
+  public void onUpdate(@Observes @Priority(RUNS_BEFORE_UNPRIORITIZED_CORE_OBSERVERS)
+      EntityUpdateEvent event) {
+    if (!isValidEvent(event)) {
+      return;
+    }
+    Object target = event.getTargetInstance();
+    if (target instanceof ProcessAccess) {
+      guardDependentsOf((ProcessAccess) target, PropagationTrigger.UPDATED_GRANT);
     }
   }
 
@@ -270,9 +294,9 @@ public class ProcessAccessOverlapCorruptionGuard extends EntityPersistenceEventO
 
   /**
    * Mirrors {@code WindowAccessOverlapCorruptionGuard#guardDependentsOf} — see that method's own
-   * javadoc. This task only ever calls this with {@link PropagationTrigger#NEW_GRANT} (from
-   * {@link #onSave(EntityNewEvent)}); the {@code UPDATED_GRANT} branch is Task 4's own addition,
-   * wired from a new {@code onUpdate} handler.
+   * javadoc. Called with {@link PropagationTrigger#NEW_GRANT} from {@link
+   * #onSave(EntityNewEvent)} and with {@link PropagationTrigger#UPDATED_GRANT} from {@link
+   * #onUpdate(EntityUpdateEvent)}.
    */
   private void guardDependentsOf(ProcessAccess templateAccess, PropagationTrigger trigger) {
     Role role = templateAccess.getRole();
@@ -283,11 +307,45 @@ public class ProcessAccessOverlapCorruptionGuard extends EntityPersistenceEventO
     if (process == null) {
       return;
     }
-    if (trigger == PropagationTrigger.NEW_GRANT) {
-      for (Role dependent : findActiveDependentRoles(role)) {
+    for (Role dependent : findActiveDependentRoles(role)) {
+      if (trigger == PropagationTrigger.NEW_GRANT) {
         clearConflictingAccessUnconditionally(dependent, process, role);
+      } else {
+        repointIfAlreadySourcedFromTemplate(dependent, process, role, templateAccess);
       }
     }
+  }
+
+  /**
+   * Mirrors {@code WindowAccessOverlapCorruptionGuard#repointIfAlreadySourcedFromTemplate} — see
+   * that method's own javadoc for the full [B7]/BUG-2 root-cause write-up (why deleting is not
+   * safe on this trigger, and why the most-permissive-wins survey against every OTHER actively-
+   * inherited template is required before trusting {@code grantingTemplate}'s own new value).
+   */
+  private void repointIfAlreadySourcedFromTemplate(Role dependent, Process process,
+      Role grantingTemplate, ProcessAccess templateAccess) {
+    ProcessAccess existing = findActiveProcessAccess(dependent, process);
+    if (existing == null) {
+      return;
+    }
+    Role existingSource = existing.getInheritedFrom();
+    if (existingSource == null || !sameId(existingSource, grantingTemplate)) {
+      return;
+    }
+    boolean grantingTemplateNewLevel = Boolean.TRUE.equals(templateAccess.isEditableField());
+    Role otherJustifyingTemplate =
+        grantingTemplateNewLevel ? null
+            : findActiveTemplateGrantingFullAccess(dependent, process, grantingTemplate);
+
+    boolean finalLevel = grantingTemplateNewLevel || otherJustifyingTemplate != null;
+    Role winner = otherJustifyingTemplate != null ? otherJustifyingTemplate : grantingTemplate;
+
+    boolean sourceCorrect = sameId(existingSource, winner);
+    boolean levelCorrect = Boolean.valueOf(finalLevel).equals(existing.isEditableField());
+    if (sourceCorrect && levelCorrect) {
+      return;
+    }
+    repointInPlace(existing, process, winner, finalLevel, existingSource);
   }
 
   /**

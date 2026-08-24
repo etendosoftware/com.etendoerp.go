@@ -98,24 +98,18 @@ public class ProcessAccessOverlapCorruptionGuardIntegrationTest extends WeldBase
       addInheritance(bystanderRole, purchasingTemplate, 30L);
       addInheritance(bystanderRole, inventoryTemplate, 40L);
 
-      // Fixture repair (fix round 2, 2026-08-24): unlike AD_Window_Access,
-      // ProcessAccessOverlapCorruptionGuard is deliberately REMOVE-path only (see its own class
-      // javadoc, "Scope: REMOVE path only") — there is no ADD-path guard for AD_Process_Access.
-      // Composing the bystander from 3 overlapping process grantors via plain addInheritance
-      // therefore leaves the propagated row silently WRONG on two counts: (1) mis-sourced — core's
-      // own naive "last-processed-template-wins" ADD behavior, not most-permissive-wins, so the
-      // row ends up sourced from Purchasing (the last template added that grants this process),
-      // read-only, not Finance/full; (2) mis-owned — its client is silently overwritten to the
-      // last template's own system client "0" (the SAME ownership-corruption bug
-      // WindowAccessOverlapCorruptionGuard's own ADD-path fix prevents for windows — it doesn't
-      // throw OBSecurityException here only because addInheritance's own flush runs under the
-      // no-arg OBContext.setAdminMode() bypass, which disables SecurityChecker.checkWriteAccess).
-      // Repairing the row directly here — exactly like grantProcessAccess already builds
-      // TEMPLATE-owned rows directly, bypassing core's inheritance propagation entirely —
-      // establishes the SAME valid "already correctly composed" starting state a real role would
-      // have BEFORE the human's real regression was ever hit (see this class's own javadoc),
-      // without smuggling the deferred ADD-path fix into either this test or the guard under test.
-      // Only the REMOVE-path trigger below is being exercised.
+      // Fixture setup note (revised Task 4, 2026-08-24): as of Task 3,
+      // ProcessAccessOverlapCorruptionGuard's ADD-path guard (onSave/guardNewInheritance) already
+      // covers ownership correction and most-permissive-wins widening as each template is
+      // composed via addInheritance below, and as of this task (Task 4) the UPDATE path is
+      // covered too — see this class's own class javadoc ("Scope: full ADD/UPDATE/REMOVE-path
+      // parity with WindowAccessOverlapCorruptionGuard"). The row is nonetheless repaired
+      // directly here — exactly like grantProcessAccess already builds TEMPLATE-owned rows
+      // directly, bypassing core's inheritance propagation entirely — to deterministically
+      // establish the SAME "already correctly composed" starting state a real role would have
+      // BEFORE the human's real regression was ever hit (see this class's own javadoc),
+      // independent of the ADD-path guard's own behavior, so this test stays isolated to the
+      // REMOVE-path trigger it actually exercises below.
       ProcessAccess beforeRepair = findProcessAccess(bystanderRole, sharedProcess);
       assertNotNull("Sanity: composing all 4 templates must have propagated the shared process",
           beforeRepair);
@@ -318,6 +312,98 @@ public class ProcessAccessOverlapCorruptionGuardIntegrationTest extends WeldBase
     }
   }
 
+  @Test
+  public void testUpdatingTemplatesOwnAccessLevelNeverDeletesAnAlreadyCorrectlySourcedDependentRow()
+      throws Exception {
+    setTestUserContext();
+    OBContext.setAdminMode(true);
+    try {
+      Process sharedProcess = OBDal.getInstance().get(Process.class, UNUSED_PROCESS_ID);
+      assertNotNull(sharedProcess);
+
+      Role template = createThrowawaySystemTemplateRole();
+      grantProcessAccess(template, sharedProcess, true);
+      OBDal.getInstance().flush();
+
+      User user = OBDal.getInstance().get(User.class, TEST_USER_ID);
+      assertNotNull(user);
+
+      Role bystanderRole = createBystanderRole(user);
+      addInheritance(bystanderRole, template, 10L);
+
+      ProcessAccess beforeUpdate = findProcessAccess(bystanderRole, sharedProcess);
+      assertNotNull(beforeUpdate);
+      assertEquals(template.getId(),
+          beforeUpdate.getInheritedFrom() != null ? beforeUpdate.getInheritedFrom().getId()
+              : null);
+      assertFalse(Boolean.TRUE.equals(beforeUpdate.isEditableField()));
+
+      ProcessAccess templateAccess = findProcessAccess(template, sharedProcess);
+      assertNotNull(templateAccess);
+      updateProcessAccessLevel(templateAccess, false);
+
+      ProcessAccess afterUpdate = findProcessAccess(bystanderRole, sharedProcess);
+      assertNotNull("The dependent's row must survive a routine UPDATE to the template's own "
+          + "access level, not be silently deleted with nothing left to restore it", afterUpdate);
+      assertEquals("client must always match the DEPENDENT role's own, never a template's",
+          bystanderRole.getClient().getId(), afterUpdate.getClient().getId());
+      assertEquals("organization must always match the DEPENDENT role's own, never a template's",
+          bystanderRole.getOrganization().getId(), afterUpdate.getOrganization().getId());
+      assertEquals(template.getId(),
+          afterUpdate.getInheritedFrom() != null ? afterUpdate.getInheritedFrom().getId() : null);
+      assertTrue("The dependent's access level must be corrected to match the template's new "
+          + "(widened) value", Boolean.TRUE.equals(afterUpdate.isEditableField()));
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  @Test
+  public void testDowngradingOneOfTwoOverlappingTemplatesNeverDowngradesDependentWhenTheOtherStillGrantsFullAccess()
+      throws Exception {
+    setTestUserContext();
+    OBContext.setAdminMode(true);
+    try {
+      Process sharedProcess = OBDal.getInstance().get(Process.class, UNUSED_PROCESS_ID);
+      assertNotNull(sharedProcess);
+
+      Role templateA = createThrowawaySystemTemplateRole();
+      Role templateB = createThrowawaySystemTemplateRole();
+      grantProcessAccess(templateA, sharedProcess, false);
+      grantProcessAccess(templateB, sharedProcess, false);
+      OBDal.getInstance().flush();
+
+      User user = OBDal.getInstance().get(User.class, TEST_USER_ID);
+      assertNotNull(user);
+
+      Role bystanderRole = createBystanderRole(user);
+      addInheritance(bystanderRole, templateA, 10L);
+      addInheritance(bystanderRole, templateB, 20L);
+
+      ProcessAccess beforeUpdate = findProcessAccess(bystanderRole, sharedProcess);
+      assertNotNull(beforeUpdate);
+      assertTrue(Boolean.TRUE.equals(beforeUpdate.isEditableField()));
+      assertEquals("Sanity: sourced from templateB (higher SeqNo)", templateB.getId(),
+          beforeUpdate.getInheritedFrom() != null ? beforeUpdate.getInheritedFrom().getId()
+              : null);
+
+      ProcessAccess templateBAccess = findProcessAccess(templateB, sharedProcess);
+      assertNotNull(templateBAccess);
+      updateProcessAccessLevel(templateBAccess, true);
+
+      ProcessAccess afterUpdate = findProcessAccess(bystanderRole, sharedProcess);
+      assertNotNull(afterUpdate);
+      assertTrue("MOST-PERMISSIVE-WINS: the dependent must STAY at full access — templateA "
+          + "still actively grants this process full access", Boolean.TRUE.equals(
+              afterUpdate.isEditableField()));
+      assertEquals("InheritedFrom must repoint to the template that actually still justifies "
+          + "full access (templateA)", templateA.getId(),
+          afterUpdate.getInheritedFrom() != null ? afterUpdate.getInheritedFrom().getId() : null);
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
   private Role createBystanderRole(User user) {
     Organization starOrg = OBDal.getInstance().get(Organization.class, "0");
     Role role = OBProvider.getInstance().get(Role.class);
@@ -365,6 +451,21 @@ public class ProcessAccessOverlapCorruptionGuardIntegrationTest extends WeldBase
       access.setProcess(process);
       access.setEditableField(!readOnly);
       OBDal.getInstance().save(access);
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  /**
+   * UPDATEs (never creates) an existing template's own {@link ProcessAccess} row's level — the
+   * B7 trigger's own entry point (core's {@code onUpdate}/{@code propagateUpdatedAccess}).
+   */
+  private void updateProcessAccessLevel(ProcessAccess access, boolean readOnly) {
+    OBContext.setAdminMode();
+    try {
+      access.setEditableField(!readOnly);
+      OBDal.getInstance().save(access);
+      OBDal.getInstance().flush();
     } finally {
       OBContext.restorePreviousMode();
     }
@@ -419,14 +520,15 @@ public class ProcessAccessOverlapCorruptionGuardIntegrationTest extends WeldBase
    * dependent on the first grant, then a second grant on the SAME process takes core's UPDATE path
    * on that row and corrupts its ownership to system client {@code "0"}, throwing {@code
    * OBSecurityException} — the classic ADD-path bug {@code WindowAccessOverlapCorruptionGuard}
-   * also fixes for {@code AD_Window_Access} via its own ADD/UPDATE-path triggers, which {@link
-   * ProcessAccessOverlapCorruptionGuard} deliberately does NOT implement (see that class's own
-   * javadoc, "Scope: REMOVE path only" — out of this task's approved scope). Using fresh, never-
-   * inherited-by-anyone-else throwaway templates instead means this test's own setup can never
-   * fan out to an unrelated real dependent, so it only ever exercises the REMOVE-path trigger this
-   * guard actually implements — exactly the same swap {@code
-   * UserRoleCompositionServiceOverlapIntegrationTest}'s own B7/BUG-2 tests already use for the
-   * analogous reason.
+   * also fixes for {@code AD_Window_Access} via its own ADD/UPDATE-path triggers. {@link
+   * ProcessAccessOverlapCorruptionGuard} has since grown the same ADD/UPDATE-path triggers
+   * (Tasks 3 and 4 — see that class's own class javadoc, "Scope: full ADD/UPDATE/REMOVE-path
+   * parity" — this fixture predates that work and was out of the original REMOVE-path-only task's
+   * approved scope). Using fresh, never-inherited-by-anyone-else throwaway templates instead
+   * means this test's own setup can never fan out to an unrelated real dependent, so it stays
+   * isolated to whichever trigger a given test method actually exercises — exactly the same swap
+   * {@code UserRoleCompositionServiceOverlapIntegrationTest}'s own B7/BUG-2 tests already use for
+   * the analogous reason.
    */
   private Role createThrowawaySystemTemplateRole() {
     OBContext.setAdminMode();
