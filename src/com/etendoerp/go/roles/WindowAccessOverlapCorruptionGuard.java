@@ -463,36 +463,6 @@ public class WindowAccessOverlapCorruptionGuard extends EntityPersistenceEventOb
    */
   private static final int RUNS_BEFORE_UNPRIORITIZED_CORE_OBSERVERS = 1;
 
-  /**
-   * Template role ids currently being removed via an in-flight {@code RoleInheritance} deletion
-   * within THIS transaction (one set per thread — Openbravo/Tomcat threads process one request's
-   * transaction at a time, never concurrently). Exists to close a race confirmed EMPIRICALLY
-   * (ETP-4906, Task B6 5th round follow-up, 2026-08-16) while verifying the {@code InheritedFrom}
-   * repointing fix: {@link #guardRemovedInheritance(RoleInheritance)} deletes a dependent's stale
-   * row and forces core onto the safe CREATE path; the resulting fresh {@code AD_Window_Access}
-   * row's {@code EntityNewEvent} fires — and reaches {@link #widenInheritedAccessLevelIfNeeded}
-   * — NESTED inside the SAME still-in-progress flush that is ALSO in the middle of deleting the
-   * template's own {@code AD_Role_Inheritance} row. Hibernate's default action-queue execution
-   * order runs entity Deletions LAST (after Insertions/Updates), so the just-removed template's
-   * {@code RoleInheritance} row is STILL {@code active=true} as far as any fresh {@code OBCriteria}
-   * SELECT can see at that point — reproduced live as an infinite-seeming loop: removing the FULL
-   * template correctly deleted-and-recreated the dependent's row sourced from the REMAINING
-   * (read-only) template, but the immediately-following widen check found the just-removed FULL
-   * template "still active," and re-widened the fresh row right back to full, silently undoing the
-   * whole point of the removal within the same flush.
-   *
-   * <p>Populated by {@link #guardRemovedInheritance(RoleInheritance)} and consulted by {@link
-   * #findActiveTemplatesFor(Role, String)} (see that method's own javadoc for why the ALREADY-
-   * EXISTING {@code excludedInheritanceId} parameter is not sufficient on its own). Deliberately
-   * NOT cleared at the end of {@link #guardRemovedInheritance(RoleInheritance)}'s own method body —
-   * by the time the nested CREATE this field exists to protect actually fires, that method's own
-   * stack frame has already returned (core's unprioritized {@code RoleInheritanceEventHandler}
-   * observer, which triggers the nested CREATE, runs strictly AFTER this class's own prioritized
-   * observer returns — the entire point of {@code @Priority} in this class). Instead cleared once
-   * per transaction via {@link #onTransactionComplete(TransactionCompletedEvent)} — safe because a
-   * marker surviving until transaction end can only make this class MORE conservative (skip a
-   * template that is, by then, genuinely gone or about to be), never less correct.
-   */
   private static Entity[] entities;
 
   private static Entity[] resolveEntities() {
@@ -578,8 +548,9 @@ public class WindowAccessOverlapCorruptionGuard extends EntityPersistenceEventOb
   }
 
   /**
-   * Cleanup counterpart to {@link #TEMPLATES_BEING_REMOVED} — see that field's own javadoc for why
-   * it is deliberately NOT cleared inside {@link #guardRemovedInheritance(RoleInheritance)} itself.
+   * Cleanup counterpart to {@link com.etendoerp.go.roles.overlap.TemplateRemovalTracker} — see
+   * that class's own javadoc for why the marker it holds is deliberately NOT cleared inside
+   * {@link #guardRemovedInheritance(RoleInheritance)} itself.
    * {@code TransactionCompletedEvent} fires once per transaction, on BOTH commit and rollback (see
    * {@code OBInterceptor#afterTransactionCompletion(Transaction)}, this event's own {@code @see}
    * reference) — always strictly after every flush the transaction could have triggered, so this is
@@ -819,7 +790,7 @@ public class WindowAccessOverlapCorruptionGuard extends EntityPersistenceEventOb
       return;
     }
     // Marks removedTemplate as "being removed" for the REST of this transaction, not just this
-    // method call — see TEMPLATES_BEING_REMOVED's own javadoc for why the marker must outlive
+    // method call — see TemplateRemovalTracker's own javadoc for why the marker must outlive
     // this method's own stack frame (a race this class hit empirically, see that javadoc).
     TemplateRemovalTracker.markRemoved(removedTemplate.getId());
 
@@ -962,8 +933,9 @@ public class WindowAccessOverlapCorruptionGuard extends EntityPersistenceEventOb
    * propagateDeletedAccess} (also descending), which is itself the tie-break authority {@link
    * #findActiveTemplateGrantingFullAccess(Role, Window)} deliberately reuses.
    *
-   * <p><b>ALSO excludes every template in {@link #templatesBeingRemoved()}</b> — see that field's
-   * own javadoc for the exact race this closes (a template's {@code RoleInheritance} row is still
+   * <p><b>ALSO excludes every template {@link com.etendoerp.go.roles.overlap.TemplateRemovalTracker
+   * #isBeingRemoved(String)} currently reports</b> — see that class's own javadoc for the exact
+   * race this closes (a template's {@code RoleInheritance} row is still
    * DB-visible as {@code active=true} here, mid-flush, even though it is being deleted in the SAME
    * flush this query runs in). {@code excludedInheritanceId} alone is not enough for THIS
    * exclusion: that parameter excludes one specific {@code AD_Role_Inheritance} row by id, known
