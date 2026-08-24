@@ -503,7 +503,7 @@ class PaymentRegistrationServiceTest {
   /**
    * Regression test for the bug reproduced live in Etendo Classic: the business partner (or
    * invoice) has its own payment method configured (e.g. "Efectivo"/Cash), but that method is NOT
-   * configured on the reconciliation account (which only allows Cheque/Transferencia/Tarjeta).
+   * configured on the reconciliation account (which only allows Recibo/Transferencia/Tarjeta).
    *
    * <p>Classic's {@code TransactionAddPaymentDefaultValues.getDefaultPaymentMethod} validates the
    * BP's method against the BP's OWN linked financial account instead of the account actually
