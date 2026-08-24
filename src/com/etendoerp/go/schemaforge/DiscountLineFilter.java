@@ -17,21 +17,26 @@
 
 package com.etendoerp.go.schemaforge;
 
+import java.util.Set;
+
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 
 /**
- * Shared helper that strips discount lines (dummy product {@code ETGO_DTO}) from
- * GET list responses before they reach the UI.
+ * Shared helper that strips rows matching a hidden-value set from a {@code response.data}
+ * GET list result before it reaches the UI.
  *
- * <p>Used by {@link OrderLineHandler} and {@link InvoiceLineHandler} to avoid duplicating
- * the same filtering logic in each handler.
+ * <p>Originally written to strip discount lines (dummy product {@code ETGO_DTO}) for
+ * {@link OrderLineHandler} and {@link InvoiceLineHandler}; generalized (ETP-4967) so
+ * {@link ProductCategoryDefaultHandler} can reuse the same envelope-extraction and
+ * filter-loop logic for hiding system-flagged categories, instead of duplicating it.
  */
 class DiscountLineFilter {
 
   private static final Logger log = LogManager.getLogger(DiscountLineFilter.class);
+  private static final String FIELD_PRODUCT = "product";
 
   private DiscountLineFilter() {
   }
@@ -44,6 +49,27 @@ class DiscountLineFilter {
    *         or {@code null} to leave the original response untouched.
    */
   static NeoResponse filterFromResponse(NeoContext context) {
+    return filterFieldFromResponse(context, FIELD_PRODUCT,
+        Set.of(TotalDiscountService.DISCOUNT_PRODUCT_ID));
+  }
+
+  /**
+   * Removes rows whose {@code fieldName} value is contained in {@code hiddenValues} from the
+   * {@code response.data} array in the previous CRUD GET result (list and single-record alike
+   * — the envelope has the same shape either way).
+   *
+   * @param context the current request; only {@link NeoContext#getPreviousResult()} is used
+   * @param fieldName the row field to match against {@code hiddenValues}
+   * @param hiddenValues values of {@code fieldName} whose row must be stripped; an empty set
+   *        is a no-op (returns {@code null} without inspecting the response)
+   * @return a new {@link NeoResponse} with the filtered body if any rows were removed,
+   *         or {@code null} to leave the original response untouched
+   */
+  static NeoResponse filterFieldFromResponse(NeoContext context, String fieldName,
+      Set<String> hiddenValues) {
+    if (hiddenValues.isEmpty()) {
+      return null;
+    }
     NeoResponse prev = context.getPreviousResult();
     if (prev == null || prev.getBody() == null) {
       return null;
@@ -51,10 +77,7 @@ class DiscountLineFilter {
     try {
       JSONObject body = prev.getBody();
       JSONObject responseWrapper = body.optJSONObject("response");
-      if (responseWrapper == null) {
-        return null;
-      }
-      JSONArray dataArr = responseWrapper.optJSONArray("data");
+      JSONArray dataArr = responseWrapper != null ? responseWrapper.optJSONArray("data") : null;
       if (dataArr == null || dataArr.length() == 0) {
         return null;
       }
@@ -65,7 +88,7 @@ class DiscountLineFilter {
         if (row == null) {
           continue;
         }
-        if (TotalDiscountService.DISCOUNT_PRODUCT_ID.equals(row.optString("product", ""))) {
+        if (hiddenValues.contains(row.optString(fieldName, ""))) {
           removed = true;
         } else {
           filtered.put(row);
@@ -77,7 +100,8 @@ class DiscountLineFilter {
       responseWrapper.put("data", filtered);
       return NeoResponse.ok(body);
     } catch (Exception e) {
-      log.warn("Could not filter discount lines from GET response: {}", e.getMessage());
+      log.warn("Could not filter rows (field={}) from GET response: {}", fieldName,
+          e.getMessage());
       return null;
     }
   }

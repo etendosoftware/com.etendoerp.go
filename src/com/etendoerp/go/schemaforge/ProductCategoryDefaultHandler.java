@@ -17,14 +17,9 @@
 
 package com.etendoerp.go.schemaforge;
 
-import java.util.Set;
-
 import javax.inject.Named;
 import javax.servlet.http.HttpServletResponse;
 
-import org.apache.logging.log4j.LogManager;
-import org.apache.logging.log4j.Logger;
-import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.criterion.Restrictions;
 import org.openbravo.dal.service.OBCriteria;
@@ -58,8 +53,6 @@ import org.openbravo.model.common.plm.ProductCategory;
  */
 @Named("productCategoryDefaultHandler")
 public class ProductCategoryDefaultHandler implements NeoHandler {
-
-  private static final Logger log = LogManager.getLogger(ProductCategoryDefaultHandler.class);
 
   private static final String FIELD_DEFAULT = "default";
   private static final String FIELD_ID = "id";
@@ -156,60 +149,22 @@ public class ProductCategoryDefaultHandler implements NeoHandler {
 
   /**
    * ETP-4967: strips categories flagged {@code em_etgo_issystemcategory = 'Y'} (see
-   * {@link SystemCategoryIds}) from GET responses (list and single-record alike —
-   * {@code response.data} has the same shape either way) before they reach the UI, so an
-   * internal category like "Discounts" never shows up in the "Categoría del producto" window.
-   * Mirrors {@link DiscountLineFilter#filterFromResponse}'s exact shape.
+   * {@link SystemCategoryIds}) from GET responses before they reach the UI, so an internal
+   * category like "Discounts" never shows up in the "Categoría del producto" window. Delegates
+   * the actual envelope-extraction/filter-loop to {@link DiscountLineFilter#filterFieldFromResponse}
+   * (generalized from its original discount-line use) rather than duplicating that logic here.
    */
   @Override
   public NeoResponse afterHandle(NeoContext context) {
     if (!METHOD_GET.equals(context.getHttpMethod())) {
       return null;
     }
-    NeoResponse previousResult = context.getPreviousResult();
-    if (previousResult == null || previousResult.getBody() == null) {
+    String clientId = resolveContextClientId(context);
+    if (clientId == null || clientId.isEmpty()) {
       return null;
     }
-    try {
-      JSONObject body = previousResult.getBody();
-      JSONObject responseWrapper = body.optJSONObject("response");
-      if (responseWrapper == null) {
-        return null;
-      }
-      JSONArray dataArr = responseWrapper.optJSONArray("data");
-      if (dataArr == null || dataArr.length() == 0) {
-        return null;
-      }
-      String clientId = resolveContextClientId(context);
-      if (clientId == null || clientId.isEmpty()) {
-        return null;
-      }
-      Set<String> hiddenIds = SystemCategoryIds.resolve(clientId);
-      if (hiddenIds.isEmpty()) {
-        return null;
-      }
-      JSONArray filtered = new JSONArray();
-      boolean removed = false;
-      for (int i = 0; i < dataArr.length(); i++) {
-        JSONObject row = dataArr.optJSONObject(i);
-        if (row == null) {
-          continue;
-        }
-        if (hiddenIds.contains(row.optString(FIELD_ID, ""))) {
-          removed = true;
-        } else {
-          filtered.put(row);
-        }
-      }
-      if (!removed) {
-        return null;
-      }
-      responseWrapper.put("data", filtered);
-      return NeoResponse.ok(body);
-    } catch (Exception e) {
-      log.warn("Could not filter hidden product categories from GET response: {}", e.getMessage());
-      return null;
-    }
+    return DiscountLineFilter.filterFieldFromResponse(context, FIELD_ID,
+        SystemCategoryIds.resolve(clientId));
   }
 
   /**
