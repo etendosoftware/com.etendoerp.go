@@ -194,6 +194,7 @@ public class UserRoleAssignmentHandler implements NeoHandler {
   private static final String FIELD_USERNAME = "username";
   private static final String FIELD_EMAIL = "email";
   private static final String FIELD_INVITATION_STATUS = "invitationStatus";
+  private static final String FIELD_IS_OWNER = "isOwner";
   /** Keys of the {@code JSONObject} returned by {@code CompanyInvitationService} (ETP-4830). */
   private static final String FIELD_ERROR = "error";
   private static final String FIELD_MESSAGE = "message";
@@ -453,6 +454,7 @@ public class UserRoleAssignmentHandler implements NeoHandler {
         hideBootstrapUsers(context);
       }
       attachInvitationStatus(context);
+      attachOwnerFlag(context);
       return null;
     }
     return syncRoleAfterUpdate(context);
@@ -752,6 +754,52 @@ public class UserRoleAssignmentHandler implements NeoHandler {
     } catch (JSONException e) {
       log.warn("UserRoleAssignmentHandler.attachInvitationStatusToRow error: {}",
           e.getMessage(), e);
+    }
+  }
+
+  /**
+   * On a {@code user} GET (list or single-record), attaches a boolean {@code isOwner} field to
+   * every surviving row — {@code true} only for the ONE {@code AD_User} per client flagged via
+   * {@code EM_ETGO_Is_Owner} (see {@link OwnerSupport}, ETP-4830 item #4), so the frontend can
+   * render an "Owner" badge without a separate round trip, the same pattern {@link
+   * #attachInvitationStatus} already established for {@code invitationStatus}. Unlike that
+   * method, no {@code clientId}/admin-mode scoping is needed — {@link OwnerSupport#isOwner}
+   * reads straight off the row's own id via a native query, which does not go through OBContext's
+   * row-level filtering at all. Same {@code JSONArray}-vs-lone-object defensive shape as {@link
+   * #attachInvitationStatus} (see that method's own javadoc for why the fallback branch should
+   * never actually be exercised against current core behavior).
+   */
+  private void attachOwnerFlag(NeoContext context) {
+    try {
+      NeoResponse previousResult = context.getPreviousResult();
+      JSONObject body = previousResult != null ? previousResult.getBody() : null;
+      JSONObject inner = body != null ? body.optJSONObject(JsonConstants.RESPONSE_RESPONSE) : null;
+      if (inner == null) {
+        return;
+      }
+      JSONArray data = inner.optJSONArray(JsonConstants.RESPONSE_DATA);
+      if (data != null) {
+        for (int i = 0; i < data.length(); i++) {
+          attachOwnerFlagToRow(data.optJSONObject(i));
+        }
+      } else {
+        attachOwnerFlagToRow(inner.optJSONObject(JsonConstants.RESPONSE_DATA));
+      }
+    } catch (Exception e) {
+      log.warn("UserRoleAssignmentHandler.attachOwnerFlag error: {}", e.getMessage(), e);
+    }
+  }
+
+  private void attachOwnerFlagToRow(JSONObject row) {
+    if (row == null) {
+      return;
+    }
+    String userId = StringUtils.trimToNull(row.optString(FIELD_ID, null));
+    boolean isOwner = userId != null && OwnerSupport.isOwner(userId);
+    try {
+      row.put(FIELD_IS_OWNER, isOwner);
+    } catch (JSONException e) {
+      log.warn("UserRoleAssignmentHandler.attachOwnerFlagToRow error: {}", e.getMessage(), e);
     }
   }
 

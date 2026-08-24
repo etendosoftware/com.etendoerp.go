@@ -1657,6 +1657,97 @@ public class UserRoleAssignmentHandlerTest {
     }
   }
 
+  // ─── afterHandle: isOwner attached to `user` GET responses (ETP-4830 item #4) ─
+
+  @Test
+  public void afterHandleAttachesIsOwnerToEveryListRow() throws Exception {
+    UserRoleAssignmentHandler handler = new UserRoleAssignmentHandler();
+    JSONObject body = buildListResponseBody("owner-user", "regular-user");
+    JSONObject inner = body.getJSONObject("response");
+    NeoContext ctx = NeoContext.builder()
+        .endpointType(NeoEndpointType.CRUD)
+        .httpMethod("GET")
+        .previousResult(NeoResponse.ok(body))
+        .build();
+
+    try (MockedStatic<OwnerSupport> ownerSupportMock = mockStatic(OwnerSupport.class)) {
+      ownerSupportMock.when(() -> OwnerSupport.isOwner("owner-user")).thenReturn(true);
+      ownerSupportMock.when(() -> OwnerSupport.isOwner("regular-user")).thenReturn(false);
+
+      assertNull(handler.afterHandle(ctx));
+
+      JSONArray data = inner.getJSONArray("data");
+      assertTrue(data.getJSONObject(0).getBoolean("isOwner"));
+      assertFalse(data.getJSONObject(1).getBoolean("isOwner"));
+    }
+  }
+
+  @Test
+  public void afterHandleAttachesIsOwnerToSingleRecordGet() throws Exception {
+    UserRoleAssignmentHandler handler = new UserRoleAssignmentHandler();
+    JSONObject body = buildCreatedRecordResponseBody(USER_ID, "existing@example.com", "Existing");
+    NeoContext ctx = NeoContext.builder()
+        .endpointType(NeoEndpointType.CRUD)
+        .httpMethod("GET")
+        .recordId(USER_ID)
+        .previousResult(NeoResponse.ok(body))
+        .build();
+
+    try (MockedStatic<OwnerSupport> ownerSupportMock = mockStatic(OwnerSupport.class)) {
+      ownerSupportMock.when(() -> OwnerSupport.isOwner(USER_ID)).thenReturn(true);
+
+      assertNull(handler.afterHandle(ctx));
+
+      JSONObject data = body.getJSONObject("response").getJSONArray("data").getJSONObject(0);
+      assertTrue(data.getBoolean("isOwner"));
+    }
+  }
+
+  @Test
+  public void afterHandleDoesNotNeedObContextToAttachIsOwner() throws Exception {
+    // Unlike invitationStatus (client-scoped), isOwner needs no obContext/clientId at all —
+    // OwnerSupport.isOwner reads straight off the row's own id.
+    UserRoleAssignmentHandler handler = new UserRoleAssignmentHandler();
+    JSONObject body = buildListResponseBody("real-user-1");
+    NeoContext ctx = NeoContext.builder()
+        .endpointType(NeoEndpointType.CRUD)
+        .httpMethod("GET")
+        .previousResult(NeoResponse.ok(body))
+        .build();
+
+    try (MockedStatic<OwnerSupport> ownerSupportMock = mockStatic(OwnerSupport.class)) {
+      ownerSupportMock.when(() -> OwnerSupport.isOwner("real-user-1")).thenReturn(true);
+
+      assertNull(handler.afterHandle(ctx));
+
+      JSONObject row = body.getJSONObject("response").getJSONArray("data").getJSONObject(0);
+      assertTrue(row.getBoolean("isOwner"));
+    }
+  }
+
+  @Test
+  public void afterHandleLeavesIsOwnerUnattachedWhenOwnerSupportThrows() throws Exception {
+    // Best-effort, same convention as attachInvitationStatus: an unexpected failure is logged
+    // and swallowed, never propagated to the caller, and the row simply never gets the field.
+    UserRoleAssignmentHandler handler = new UserRoleAssignmentHandler();
+    JSONObject body = buildListResponseBody("real-user-1");
+    NeoContext ctx = NeoContext.builder()
+        .endpointType(NeoEndpointType.CRUD)
+        .httpMethod("GET")
+        .previousResult(NeoResponse.ok(body))
+        .build();
+
+    try (MockedStatic<OwnerSupport> ownerSupportMock = mockStatic(OwnerSupport.class)) {
+      ownerSupportMock.when(() -> OwnerSupport.isOwner("real-user-1"))
+          .thenThrow(new RuntimeException("DAL not available"));
+
+      assertNull(handler.afterHandle(ctx));
+
+      JSONObject row = body.getJSONObject("response").getJSONArray("data").getJSONObject(0);
+      assertFalse(row.has("isOwner"));
+    }
+  }
+
   // ─── afterHandle: happy path — no prior AD_User_Roles row ────────────────────
 
   @Test
