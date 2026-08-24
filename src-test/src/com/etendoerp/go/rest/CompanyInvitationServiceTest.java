@@ -603,4 +603,109 @@ class CompanyInvitationServiceTest {
           "user@example.com"));
     }
   }
+
+  // ─── findLatestInvitationStatus live-computed EXPIRED (ETP-4830) ──────────────
+  //
+  // Nothing in the codebase ever writes STATUS_EXPIRED to the DB column (verified via grep
+  // before this fix) — a PENDING/SENT invitation whose deadline has passed stayed PENDING/SENT
+  // forever, so the grid/detail pill kept showing "pending" indefinitely for a dead invite even
+  // though accept-time already correctly rejected it via isClosedInvitation's own expiresAt
+  // check. These tests lock in the read-time fallback that closes that gap.
+
+  private static Invitation invitationWith(String status, Date expiresAt) {
+    Invitation invitation = mock(Invitation.class);
+    when(invitation.getStatus()).thenReturn(status);
+    when(invitation.getExpiresAt()).thenReturn(expiresAt);
+    return invitation;
+  }
+
+  @Test
+  @DisplayName("findLatestInvitationStatus reports EXPIRED for a PENDING invitation past its deadline")
+  void testFindLatestInvitationStatusComputesExpiredForPastPending() {
+    Invitation invitation = invitationWith("PENDING", new Date(System.currentTimeMillis() - 1000));
+
+    try (MockedStatic<CompanyInvitationDalHelper> dalHelperMock =
+        mockStatic(CompanyInvitationDalHelper.class)) {
+      dalHelperMock.when(() -> CompanyInvitationDalHelper.findLatestInvitation("client-1",
+          "user@example.com")).thenReturn(invitation);
+
+      assertEquals("EXPIRED",
+          CompanyInvitationService.findLatestInvitationStatus("client-1", "user@example.com"));
+    }
+  }
+
+  @Test
+  @DisplayName("findLatestInvitationStatus reports EXPIRED for a SENT invitation past its deadline")
+  void testFindLatestInvitationStatusComputesExpiredForPastSent() {
+    Invitation invitation = invitationWith("SENT", new Date(System.currentTimeMillis() - 1000));
+
+    try (MockedStatic<CompanyInvitationDalHelper> dalHelperMock =
+        mockStatic(CompanyInvitationDalHelper.class)) {
+      dalHelperMock.when(() -> CompanyInvitationDalHelper.findLatestInvitation("client-1",
+          "user@example.com")).thenReturn(invitation);
+
+      assertEquals("EXPIRED",
+          CompanyInvitationService.findLatestInvitationStatus("client-1", "user@example.com"));
+    }
+  }
+
+  @Test
+  @DisplayName("findLatestInvitationStatus keeps PENDING when the deadline has not passed yet")
+  void testFindLatestInvitationStatusKeepsPendingBeforeDeadline() {
+    Invitation invitation = invitationWith("PENDING", new Date(System.currentTimeMillis() + 60000));
+
+    try (MockedStatic<CompanyInvitationDalHelper> dalHelperMock =
+        mockStatic(CompanyInvitationDalHelper.class)) {
+      dalHelperMock.when(() -> CompanyInvitationDalHelper.findLatestInvitation("client-1",
+          "user@example.com")).thenReturn(invitation);
+
+      assertEquals("PENDING",
+          CompanyInvitationService.findLatestInvitationStatus("client-1", "user@example.com"));
+    }
+  }
+
+  @Test
+  @DisplayName("findLatestInvitationStatus keeps PENDING when expiresAt is null")
+  void testFindLatestInvitationStatusKeepsPendingWhenExpiresAtNull() {
+    Invitation invitation = invitationWith("PENDING", null);
+
+    try (MockedStatic<CompanyInvitationDalHelper> dalHelperMock =
+        mockStatic(CompanyInvitationDalHelper.class)) {
+      dalHelperMock.when(() -> CompanyInvitationDalHelper.findLatestInvitation("client-1",
+          "user@example.com")).thenReturn(invitation);
+
+      assertEquals("PENDING",
+          CompanyInvitationService.findLatestInvitationStatus("client-1", "user@example.com"));
+    }
+  }
+
+  @Test
+  @DisplayName("findLatestInvitationStatus does not override a REVOKED status past its deadline")
+  void testFindLatestInvitationStatusDoesNotOverrideRevoked() {
+    Invitation invitation = invitationWith("REVOKED", new Date(System.currentTimeMillis() - 1000));
+
+    try (MockedStatic<CompanyInvitationDalHelper> dalHelperMock =
+        mockStatic(CompanyInvitationDalHelper.class)) {
+      dalHelperMock.when(() -> CompanyInvitationDalHelper.findLatestInvitation("client-1",
+          "user@example.com")).thenReturn(invitation);
+
+      assertEquals("REVOKED",
+          CompanyInvitationService.findLatestInvitationStatus("client-1", "user@example.com"));
+    }
+  }
+
+  @Test
+  @DisplayName("findLatestInvitationStatus does not override an ACCEPTED status past its deadline")
+  void testFindLatestInvitationStatusDoesNotOverrideAccepted() {
+    Invitation invitation = invitationWith("ACCEPTED", new Date(System.currentTimeMillis() - 1000));
+
+    try (MockedStatic<CompanyInvitationDalHelper> dalHelperMock =
+        mockStatic(CompanyInvitationDalHelper.class)) {
+      dalHelperMock.when(() -> CompanyInvitationDalHelper.findLatestInvitation("client-1",
+          "user@example.com")).thenReturn(invitation);
+
+      assertEquals("ACCEPTED",
+          CompanyInvitationService.findLatestInvitationStatus("client-1", "user@example.com"));
+    }
+  }
 }

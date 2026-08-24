@@ -175,7 +175,27 @@ public class CompanyInvitationService {
     }
     Invitation invitation = CompanyInvitationDalHelper.findLatestInvitation(clientId,
         email.toLowerCase(Locale.ROOT));
-    return invitation != null ? invitation.getStatus() : null;
+    return invitation != null ? effectiveStatus(invitation) : null;
+  }
+
+  /**
+   * Returns {@code invitation}'s status as it should be OBSERVED, without requiring a
+   * scheduled sweep to have already flipped the stored {@code STATUS} column (ETP-4830). Nothing
+   * ever writes {@code EXPIRED} once {@code expiresAt} passes — a {@code PENDING}/{@code SENT}
+   * row stays that way in the DB forever past its deadline, even though {@link
+   * #isClosedInvitation} already correctly rejects an accept attempt against it via the same
+   * {@code expiresAt} check. Computing this at read time (instead of a batch job) means there is
+   * no missed-sweep window where the exposed status lags reality.
+   */
+  private static String effectiveStatus(Invitation invitation) {
+    String status = invitation.getStatus();
+    boolean pendingOrSent = STATUS_PENDING.equalsIgnoreCase(status)
+        || STATUS_SENT.equalsIgnoreCase(status);
+    if (pendingOrSent && invitation.getExpiresAt() != null
+        && invitation.getExpiresAt().before(new Date())) {
+      return STATUS_EXPIRED;
+    }
+    return status;
   }
 
   private static InviterContext resolveInviterFromContext(OBContext obContext) {
