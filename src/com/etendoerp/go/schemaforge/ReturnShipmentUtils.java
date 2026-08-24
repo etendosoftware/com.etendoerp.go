@@ -284,6 +284,17 @@ final class ReturnShipmentUtils {
     } else {
       applyBusinessPartnerFinancials(invoice, bp, isSales);
     }
+    // ETP-4888: this header is built directly via OBProvider, bypassing the normal NEO CRUD
+    // "new record" HTTP path that would otherwise resolve every declared contract.json
+    // derivation (e.g. SII/SIF fields like etsgDateOperation/aeatsiiFechaRegCont). Fields
+    // already set above are never overwritten — only properties still blank are filled in.
+    // 4th OBProvider-direct invoice-header path fixed today alongside
+    // NeoCommercialDocumentFactory#createInvoiceFromOrderHeader/#createInvoiceFromReceiptHeader
+    // and CreateDraftInvoiceHandler#createInvoiceHeaderFromShipment. `doc` (the return
+    // shipment/receipt this credit note is generated from) plays the same "parentId" role as
+    // `order`/`receipt` at those sites.
+    NeoDefaultsService.applyDeclaredDefaultsToBackgroundEntity(
+        isSales ? "sales-invoice" : "purchase-invoice", "header", invoice, doc.getId());
     return invoice;
   }
 
