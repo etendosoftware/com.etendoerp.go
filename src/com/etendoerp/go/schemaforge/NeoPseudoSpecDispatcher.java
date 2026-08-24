@@ -25,6 +25,7 @@ import com.etendoerp.go.common.GoRuntimeProperties;
 import com.etendoerp.go.schemaforge.webhooks.SFAssignUserRoles;
 import com.etendoerp.go.schemaforge.webhooks.SFDebugInvitationBypass;
 import com.etendoerp.go.schemaforge.webhooks.SFListMenu;
+import com.etendoerp.go.schemaforge.webhooks.SFResendInvitation;
 import com.etendoerp.go.schemaforge.webhooks.SFRolesOverview;
 import com.etendoerp.go.schemaforge.webhooks.SFSystemRoleTemplates;
 import com.etendoerp.go.schemaforge.webhooks.SFUserRoleAssignments;
@@ -129,6 +130,14 @@ class NeoPseudoSpecDispatcher {
     // for the two actions. GATED OFF BY DEFAULT — see dispatchDebugInvitationBypass.
     if ("debuginvitationbypass".equals(pathInfo.specName)) {
       return dispatchDebugInvitationBypass(method, request, response);
+    }
+    // ETP-4830 (item #2) — admin "Resend invitation" action on the user detail header. Real,
+    // always-on production feature (no feature flag, unlike debuginvitationbypass above) — the
+    // access boundary is SFResendInvitation's own admin/client-admin role check plus
+    // CompanyInvitationService#resendInvitation scoping the target user to the caller's client.
+    if ("resendinvitation".equals(pathInfo.specName)) {
+      return dispatchGoWebhook("Resendinvitation", method, request, response,
+          new SFResendInvitation());
     }
     return false;
   }

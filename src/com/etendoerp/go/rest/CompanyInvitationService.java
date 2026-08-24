@@ -251,9 +251,22 @@ public class CompanyInvitationService {
       return existingInvitationResponse(existing);
     }
 
+    return issueFreshInvitation(inviter, invitationOrganization, invitedUser, email, appBaseUrl,
+        language);
+  }
+
+  /**
+   * Mints a brand-new token, persists a new {@link Invitation} row, and sends the email —
+   * unconditionally, with no dedup/"already pending" check of its own. Extracted (ETP-4830 item
+   * #2) out of {@link #createInvitationForInviter} so {@link #resendInvitation} can reuse the
+   * exact same mint+send mechanics without going through that method's dedup-then-mint wrapper,
+   * which is deliberately bypassed for an explicit admin-triggered resend.
+   */
+  private JSONObject issueFreshInvitation(InviterContext inviter, Organization organization,
+      User invitedUser, String email, String appBaseUrl, String language) throws JSONException {
     String rawToken = generateToken();
     Date expiresAt = Date.from(Instant.now().plus(INVITATION_TTL_DAYS, ChronoUnit.DAYS));
-    Invitation invitation = persistInvitation(inviter, invitationOrganization, invitedUser, email,
+    Invitation invitation = persistInvitation(inviter, organization, invitedUser, email,
         hashToken(rawToken), expiresAt);
     String baseUrl = StringUtils.isNotBlank(appBaseUrl) ? appBaseUrl
         : PublicUrlResolver.resolveConfiguredAppBaseUrl();
@@ -264,6 +277,80 @@ public class CompanyInvitationService {
     OBDal.getInstance().flush();
     OBDal.getInstance().commitAndClose();
     return invitationResponse(invitation);
+  }
+
+  /**
+   * Admin-triggered resend (ETP-4830 item #2): re-issues an invitation for {@code userId}
+   * regardless of whether the current one is still valid, unlike {@link #createInvitation}'s own
+   * dedup-then-no-op behavior. Eligible source statuses match the frontend's "Resend" button
+   * gating: {@code PENDING}, {@code SENT}, {@code EXPIRED}, {@code DELIVERY_FAILED} — a
+   * {@code REVOKED} invitation must not be silently resurrected, and an {@code ACCEPTED} one has
+   * nothing left to resend.
+   *
+   * <p>Human-confirmed design decision: if the current invitation is still open ({@code
+   * PENDING}/{@code SENT}, not yet expired), it is marked {@code REVOKED} first so the old link
+   * stops working the instant a fresh one is issued — an admin clicking Resend should never leave
+   * two simultaneously-valid links for the same invite.
+   *
+   * @param obContext admin's security context (client/org/user resolved from here, same as
+   *     {@link #createInvitation})
+   * @param userId {@code AD_User_ID} of the invited user
+   * @param appBaseUrl application base URL for the invite link, or blank for the configured
+   *     default
+   * @param language optional language preference
+   * @return response JSON object (same shape as {@link #createInvitation})
+   * @throws JSONException when the response cannot be serialized
+   */
+  public JSONObject resendInvitation(OBContext obContext, String userId, String appBaseUrl,
+      String language) throws JSONException {
+    InviterContext inviter = resolveInviterFromContext(obContext);
+    if (inviter == null || inviter.client == null || "0".equals(inviter.client.getId())) {
+      return errorResponse(403, "FORBIDDEN",
+          "Inviter does not have company administration permissions");
+    }
+    if (StringUtils.isBlank(userId)) {
+      return errorResponse(400, "MISSING_USER_ID", "AD_User_ID is required");
+    }
+
+    User invitedUser = OBDal.getInstance().get(User.class, userId);
+    if (invitedUser == null || invitedUser.getClient() == null
+        || !inviter.client.getId().equals(invitedUser.getClient().getId())) {
+      return errorResponse(404, "USER_NOT_FOUND", "User not found for this client");
+    }
+    String email = StringUtils.trimToEmpty(invitedUser.getEmail()).toLowerCase(Locale.ROOT);
+    if (email.isEmpty()) {
+      return errorResponse(400, "MISSING_EMAIL", "User has no email address on file");
+    }
+
+    Invitation latest = CompanyInvitationDalHelper.findLatestInvitation(inviter.client.getId(),
+        email);
+    if (latest == null) {
+      return errorResponse(400, "NO_INVITATION_TO_RESEND",
+          "No invitation has ever been sent to this user");
+    }
+    String status = effectiveStatus(latest);
+    boolean eligible = STATUS_PENDING.equalsIgnoreCase(status)
+        || STATUS_SENT.equalsIgnoreCase(status)
+        || STATUS_EXPIRED.equalsIgnoreCase(status)
+        || STATUS_DELIVERY_FAILED.equalsIgnoreCase(status);
+    if (!eligible) {
+      return errorResponse(400, "INVITATION_NOT_RESENDABLE",
+          "Invitation status '" + status + "' cannot be resent");
+    }
+
+    boolean stillOpen = (STATUS_PENDING.equalsIgnoreCase(latest.getStatus())
+        || STATUS_SENT.equalsIgnoreCase(latest.getStatus()))
+        && (latest.getExpiresAt() == null || latest.getExpiresAt().after(new Date()));
+    if (stillOpen) {
+      latest.setStatus(STATUS_REVOKED);
+      OBDal.getInstance().save(latest);
+      OBDal.getInstance().flush();
+    }
+
+    Organization invitationOrganization = inviter.org != null ? inviter.org
+        : OBDal.getInstance().get(Organization.class, "0");
+    return issueFreshInvitation(inviter, invitationOrganization, invitedUser, email, appBaseUrl,
+        language);
   }
 
   private JSONObject existingInvitationResponse(Invitation existing) throws JSONException {

@@ -708,4 +708,246 @@ class CompanyInvitationServiceTest {
           CompanyInvitationService.findLatestInvitationStatus("client-1", "user@example.com"));
     }
   }
+
+  // ─── resendInvitation (ETP-4830 item #2) ───────────────────────────────────
+
+  @Test
+  @DisplayName("resendInvitation rejects a null OBContext as an unprivileged inviter")
+  void testResendInvitationRejectsNullContext() throws Exception {
+    CompanyInvitationService service = new CompanyInvitationService();
+    JSONObject response = service.resendInvitation(null, "user-1", "https://app.test", "en_US");
+    assertTrue(response.optBoolean("error"));
+    assertEquals("FORBIDDEN", response.optString("code"));
+  }
+
+  @Test
+  @DisplayName("resendInvitation rejects the System client (id '0')")
+  void testResendInvitationRejectsSystemClient() throws Exception {
+    Client systemClient = mock(Client.class);
+    when(systemClient.getId()).thenReturn("0");
+    OBContext obContext = mock(OBContext.class);
+    when(obContext.getCurrentClient()).thenReturn(systemClient);
+
+    CompanyInvitationService service = new CompanyInvitationService();
+    JSONObject response = service.resendInvitation(obContext, "user-1", "https://app.test", "en_US");
+    assertTrue(response.optBoolean("error"));
+    assertEquals("FORBIDDEN", response.optString("code"));
+  }
+
+  @Test
+  @DisplayName("resendInvitation rejects a blank AD_User_ID")
+  void testResendInvitationRejectsBlankUserId() throws Exception {
+    Client client = mock(Client.class);
+    when(client.getId()).thenReturn("client-1");
+    OBContext obContext = mock(OBContext.class);
+    when(obContext.getCurrentClient()).thenReturn(client);
+
+    CompanyInvitationService service = new CompanyInvitationService();
+    JSONObject response = service.resendInvitation(obContext, " ", "https://app.test", "en_US");
+    assertTrue(response.optBoolean("error"));
+    assertEquals("MISSING_USER_ID", response.optString("code"));
+  }
+
+  @Test
+  @DisplayName("resendInvitation rejects a user that does not belong to the inviter's client")
+  void testResendInvitationRejectsUserFromAnotherClient() throws Exception {
+    Client client = mock(Client.class);
+    when(client.getId()).thenReturn("client-1");
+    OBContext obContext = mock(OBContext.class);
+    when(obContext.getCurrentClient()).thenReturn(client);
+
+    Client otherClient = mock(Client.class);
+    when(otherClient.getId()).thenReturn("client-2");
+    User user = mock(User.class);
+    when(user.getClient()).thenReturn(otherClient);
+
+    OBDal dal = mock(OBDal.class);
+    when(dal.get(User.class, "user-1")).thenReturn(user);
+
+    try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      CompanyInvitationService service = new CompanyInvitationService();
+      JSONObject response = service.resendInvitation(obContext, "user-1", "https://app.test", "en_US");
+      assertTrue(response.optBoolean("error"));
+      assertEquals("USER_NOT_FOUND", response.optString("code"));
+    }
+  }
+
+  @Test
+  @DisplayName("resendInvitation rejects a user with no email on file")
+  void testResendInvitationRejectsUserWithoutEmail() throws Exception {
+    Client client = mock(Client.class);
+    when(client.getId()).thenReturn("client-1");
+    OBContext obContext = mock(OBContext.class);
+    when(obContext.getCurrentClient()).thenReturn(client);
+
+    User user = mock(User.class);
+    when(user.getClient()).thenReturn(client);
+    when(user.getEmail()).thenReturn(" ");
+
+    OBDal dal = mock(OBDal.class);
+    when(dal.get(User.class, "user-1")).thenReturn(user);
+
+    try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      CompanyInvitationService service = new CompanyInvitationService();
+      JSONObject response = service.resendInvitation(obContext, "user-1", "https://app.test", "en_US");
+      assertTrue(response.optBoolean("error"));
+      assertEquals("MISSING_EMAIL", response.optString("code"));
+    }
+  }
+
+  @Test
+  @DisplayName("resendInvitation rejects when no invitation has ever been sent to this user")
+  void testResendInvitationRejectsWhenNoInvitationExists() throws Exception {
+    Client client = mock(Client.class);
+    when(client.getId()).thenReturn("client-1");
+    OBContext obContext = mock(OBContext.class);
+    when(obContext.getCurrentClient()).thenReturn(client);
+
+    User user = mock(User.class);
+    when(user.getClient()).thenReturn(client);
+    when(user.getEmail()).thenReturn("user@example.com");
+
+    OBDal dal = mock(OBDal.class);
+    when(dal.get(User.class, "user-1")).thenReturn(user);
+
+    try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class);
+        MockedStatic<CompanyInvitationDalHelper> dalHelperMock =
+            mockStatic(CompanyInvitationDalHelper.class)) {
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      dalHelperMock.when(() -> CompanyInvitationDalHelper.findLatestInvitation("client-1",
+          "user@example.com")).thenReturn(null);
+
+      CompanyInvitationService service = new CompanyInvitationService();
+      JSONObject response = service.resendInvitation(obContext, "user-1", "https://app.test", "en_US");
+      assertTrue(response.optBoolean("error"));
+      assertEquals("NO_INVITATION_TO_RESEND", response.optString("code"));
+    }
+  }
+
+  @Test
+  @DisplayName("resendInvitation rejects a REVOKED invitation — must not be silently resurrected")
+  void testResendInvitationRejectsRevoked() throws Exception {
+    JSONObject response = runResendInvitationWithExistingStatus("REVOKED", null);
+    assertTrue(response.optBoolean("error"));
+    assertEquals("INVITATION_NOT_RESENDABLE", response.optString("code"));
+  }
+
+  @Test
+  @DisplayName("resendInvitation rejects an ACCEPTED invitation — nothing left to resend")
+  void testResendInvitationRejectsAccepted() throws Exception {
+    JSONObject response = runResendInvitationWithExistingStatus("ACCEPTED", null);
+    assertTrue(response.optBoolean("error"));
+    assertEquals("INVITATION_NOT_RESENDABLE", response.optString("code"));
+  }
+
+  @Test
+  @DisplayName("resendInvitation revokes a still-open PENDING invitation before minting a new one")
+  void testResendInvitationRevokesStillOpenInvitationBeforeReissuing() throws Exception {
+    Invitation latest = invitationWith("PENDING", new Date(System.currentTimeMillis() + 60000));
+
+    JSONObject response = runResendInvitationSuccess(latest);
+
+    assertFalse(response.optBoolean("error"));
+    verify(latest).setStatus("REVOKED");
+    assertEquals("SENT", response.getJSONObject("invitation").getString("status"));
+  }
+
+  @Test
+  @DisplayName("resendInvitation does not revoke an already-EXPIRED invitation before minting a new one")
+  void testResendInvitationDoesNotRevokeAlreadyExpiredInvitation() throws Exception {
+    Invitation latest = invitationWith("EXPIRED", new Date(System.currentTimeMillis() - 1000));
+
+    JSONObject response = runResendInvitationSuccess(latest);
+
+    assertFalse(response.optBoolean("error"));
+    verify(latest, never()).setStatus(anyString());
+    assertEquals("SENT", response.getJSONObject("invitation").getString("status"));
+  }
+
+  @Test
+  @DisplayName("resendInvitation reissues a DELIVERY_FAILED invitation without revoking anything")
+  void testResendInvitationReissuesDeliveryFailedInvitation() throws Exception {
+    Invitation latest = invitationWith("DELIVERY_FAILED", null);
+
+    JSONObject response = runResendInvitationSuccess(latest);
+
+    assertFalse(response.optBoolean("error"));
+    verify(latest, never()).setStatus(anyString());
+    assertEquals("SENT", response.getJSONObject("invitation").getString("status"));
+  }
+
+  /** Runs resendInvitation for a source invitation whose status makes it ineligible. */
+  private JSONObject runResendInvitationWithExistingStatus(String status, Date expiresAt)
+      throws Exception {
+    Client client = mock(Client.class);
+    when(client.getId()).thenReturn("client-1");
+    OBContext obContext = mock(OBContext.class);
+    when(obContext.getCurrentClient()).thenReturn(client);
+
+    User user = mock(User.class);
+    when(user.getClient()).thenReturn(client);
+    when(user.getEmail()).thenReturn("user@example.com");
+
+    Invitation latest = invitationWith(status, expiresAt);
+
+    OBDal dal = mock(OBDal.class);
+    when(dal.get(User.class, "user-1")).thenReturn(user);
+
+    try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class);
+        MockedStatic<CompanyInvitationDalHelper> dalHelperMock =
+            mockStatic(CompanyInvitationDalHelper.class)) {
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      dalHelperMock.when(() -> CompanyInvitationDalHelper.findLatestInvitation("client-1",
+          "user@example.com")).thenReturn(latest);
+
+      CompanyInvitationService service = new CompanyInvitationService();
+      return service.resendInvitation(obContext, "user-1", "https://app.test", "en_US");
+    }
+  }
+
+  /**
+   * Runs resendInvitation through a full eligible/success path — inviter, target user, source
+   * invitation lookup, then the mint-and-send mechanics shared with {@code createInvitation}.
+   */
+  private JSONObject runResendInvitationSuccess(Invitation latest) throws Exception {
+    Client client = mock(Client.class);
+    when(client.getId()).thenReturn("client-1");
+    Organization org = mock(Organization.class);
+    OBContext obContext = mock(OBContext.class);
+    when(obContext.getCurrentClient()).thenReturn(client);
+    when(obContext.getCurrentOrganization()).thenReturn(org);
+
+    User user = mock(User.class);
+    when(user.getClient()).thenReturn(client);
+    when(user.getEmail()).thenReturn("user@example.com");
+
+    Invitation freshInvitation = mock(Invitation.class);
+    when(freshInvitation.getEmail()).thenReturn("user@example.com");
+    when(freshInvitation.getStatus()).thenReturn("SENT");
+
+    TransactionalAuthEmailSender sender = mock(TransactionalAuthEmailSender.class);
+    when(sender.sendCompanyInvitation(any(), any(), any())).thenReturn(true);
+
+    OBDal dal = mock(OBDal.class);
+    when(dal.get(User.class, "user-1")).thenReturn(user);
+    OBProvider provider = mock(OBProvider.class);
+    when(provider.get(Invitation.class)).thenReturn(freshInvitation);
+
+    try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class);
+        MockedStatic<OBProvider> obProviderMock = mockStatic(OBProvider.class);
+        MockedStatic<CompanyInvitationDalHelper> dalHelperMock =
+            mockStatic(CompanyInvitationDalHelper.class)) {
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      obProviderMock.when(OBProvider::getInstance).thenReturn(provider);
+      dalHelperMock.when(() -> CompanyInvitationDalHelper.findLatestInvitation("client-1",
+          "user@example.com")).thenReturn(latest);
+
+      CompanyInvitationService service = new CompanyInvitationService(sender);
+      return service.resendInvitation(obContext, "user-1", "https://app.test", "en_US");
+    }
+  }
 }

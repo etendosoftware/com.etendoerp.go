@@ -37,6 +37,7 @@ import org.mockito.ArgumentCaptor;
 import com.etendoerp.go.schemaforge.webhooks.SFAssignUserRoles;
 import com.etendoerp.go.schemaforge.webhooks.SFDebugInvitationBypass;
 import com.etendoerp.go.schemaforge.webhooks.SFListMenu;
+import com.etendoerp.go.schemaforge.webhooks.SFResendInvitation;
 import com.etendoerp.go.schemaforge.webhooks.SFRolesOverview;
 import com.etendoerp.go.schemaforge.webhooks.SFSystemRoleTemplates;
 import com.etendoerp.go.schemaforge.webhooks.SFUserRoleAssignments;
@@ -345,6 +346,34 @@ public class NeoPseudoSpecDispatcherTest {
     assertTrue(handled);
     verify(servlet).sendError(eq(response), eq(HttpServletResponse.SC_METHOD_NOT_ALLOWED),
         eq("Debuginvitationbypass endpoint only supports GET"));
+    verify(goWebhookBridge, never()).handle(any(), any());
+  }
+
+  // -------------------------------------------------------------------------
+  // resendinvitation (ETP-4830, item #2) — real, always-on, no feature flag
+  // -------------------------------------------------------------------------
+
+  @Test
+  public void resendInvitationGetDispatchesThroughBridgeWithSFResendInvitation() throws Exception {
+    NeoResponse payload = NeoResponse.ok(new JSONObject());
+    when(goWebhookBridge.handle(eq(request), any(BaseWebhookService.class))).thenReturn(payload);
+
+    boolean handled = dispatcher.handle(pathInfo("resendinvitation"), "GET", request, response);
+
+    assertTrue(handled);
+    ArgumentCaptor<BaseWebhookService> webhookCaptor = ArgumentCaptor.forClass(BaseWebhookService.class);
+    verify(goWebhookBridge).handle(eq(request), webhookCaptor.capture());
+    assertTrue(webhookCaptor.getValue() instanceof SFResendInvitation);
+    verify(servlet).writeResponse(response, payload);
+  }
+
+  @Test
+  public void resendInvitationRejectsNonGetMethod() throws Exception {
+    boolean handled = dispatcher.handle(pathInfo("resendinvitation"), "POST", request, response);
+
+    assertTrue(handled);
+    verify(servlet).sendError(eq(response), eq(HttpServletResponse.SC_METHOD_NOT_ALLOWED),
+        eq("Resendinvitation endpoint only supports GET"));
     verify(goWebhookBridge, never()).handle(any(), any());
   }
 }
