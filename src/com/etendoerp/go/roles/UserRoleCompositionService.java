@@ -352,6 +352,55 @@ public class UserRoleCompositionService {
   }
 
   /**
+   * ETP-4830 bug fix — {@code UserRoleAssignmentHandler#ensurePersonalRoleForNewlyCreatedUser}'s
+   * ONLY entry point into this class: unlike {@link #ensurePersonalRole(User)}, this NEVER looks
+   * at {@code user.getDefaultRole()} at all — it unconditionally mints a brand-new, empty
+   * personal role via {@link #createPersonalRole(User)}.
+   *
+   * <p><b>Why "get-or-create" is the wrong shape for this ONE caller.</b> A user that was just
+   * created, this very request, cannot possibly already have a genuine personal role — nothing
+   * could have run {@link #createPersonalRole(User)} (or any equivalent) for it before now. So
+   * any non-null {@code Default_Ad_Role_ID} already sitting on the freshly-inserted row is, by
+   * construction, NOT evidence of a real prior assignment — it can only be leftover/incorrect
+   * data (confirmed root cause, ETP-4830: a stale {@code hook.editing} object in the React SPA's
+   * {@code DetailView.jsx}, carried over from a previously-viewed DIFFERENT user's record when
+   * navigating straight to "New user" with no remount, was still being serialized into the
+   * create {@code POST} payload — since fixed by resetting {@code hook.editing} whenever it holds
+   * a different persisted record, see {@code DetailView.jsx}'s {@code isNew}-guard effect). {@link
+   * #ensurePersonalRole(User)}'s {@link #resolveOrCreatePersonalRole(User)} path, via {@link
+   * #isReusablePersonalRole(User, Role)} → {@link #isExclusivelyAssignedTo(Role, User)}, treats a
+   * candidate role with ZERO {@code AD_User_Roles} rows as "never assigned yet, still safe to
+   * reuse" (a deliberate accommodation for an EXISTING user whose {@code Default_Ad_Role_ID} was
+   * set manually via the classic UI and never synced) — but that same accommodation is exactly
+   * what let the stale/incorrect role above be silently "reused" as if it already belonged to the
+   * brand-new user, instead of a fresh one being minted. Since a just-created user can never
+   * legitimately be in that "manually pre-set, not yet synced" situation, the safest fix for THIS
+   * call site is to never consult {@code Default_Ad_Role_ID} at all, rather than trying to further
+   * distinguish "genuinely pre-set" from "stale/incorrect" after the fact — a personal role must
+   * only ever be found for a user if it was actually created FOR that user before, never inferred
+   * from an arbitrary existing role reference.</p>
+   *
+   * <p>Same admin-mode contract as {@link #ensurePersonalRole(User)} — enters/exits its own
+   * {@code OBContext.setAdminMode(true)} scope, safe to call from within an already-admin-mode
+   * caller (Openbravo's admin-mode flag is stack-based).</p>
+   *
+   * @param user the already-resolved, newly-created user to mint a personal role for
+   * @return a brand-new, empty personal role — never a pre-existing one
+   * @throws OBException if {@code user} is {@code null}
+   */
+  public Role createFreshPersonalRole(User user) {
+    if (user == null) {
+      throw new OBException("Missing user for personal role creation");
+    }
+    OBContext.setAdminMode(true);
+    try {
+      return createPersonalRole(user);
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  /**
    * Rejects reassigning the OWNER's role composition from anyone other than the owner
    * themselves (ETP-4830) — the role-assignment-endpoint counterpart to {@code
    * UserRoleAssignmentHandler#rejectNonOwnerEditingOwner}'s generic {@code AD_User} PUT/PATCH

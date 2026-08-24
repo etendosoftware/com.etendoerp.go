@@ -635,4 +635,122 @@ class UserRoleCompositionServiceTest {
       verify(mockDal).save(newRole);
     }
   }
+
+  // ── ETP-4830 bug fix: createFreshPersonalRole (never reuses Default_Ad_Role_ID) ──
+
+  @Test
+  void createFreshPersonalRoleRejectsNullUser() {
+    OBException e = assertThrows(OBException.class, () -> service.createFreshPersonalRole(null));
+    assertTrue(e.getMessage().contains("Missing user"));
+  }
+
+  /**
+   * The exact repro this method was added to fix: a candidate {@code user.getDefaultRole()} that
+   * satisfies EVERY {@link UserRoleCompositionService#isReusablePersonalRole} check — including a
+   * REAL, exclusively-assigned {@code AD_User_Roles} row, the strongest possible "genuinely
+   * theirs" evidence, the same fixture {@link
+   * #ensurePersonalRoleReusesExistingRoleWhenIdentityCheckIsSatisfied} uses to prove {@link
+   * UserRoleCompositionService#ensurePersonalRole} DOES reuse it — must still NEVER be returned by
+   * {@link UserRoleCompositionService#createFreshPersonalRole}: a brand-new role must always be
+   * minted instead. This proves {@code createFreshPersonalRole} does not merely have a narrower
+   * reuse check — it never even reads {@code user.getDefaultRole()}, since even a candidate this
+   * strong is bypassed entirely.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  void createFreshPersonalRoleNeverReusesEvenAFullyQualifyingExistingRole() {
+    Client userClient = mock(Client.class);
+    when(userClient.getId()).thenReturn("client-A");
+
+    User user = mock(User.class);
+    when(user.getId()).thenReturn("user-1");
+    when(user.getClient()).thenReturn(userClient);
+    when(user.getName()).thenReturn("Jane Doe");
+
+    Role existingPersonalRole = mock(Role.class);
+    when(existingPersonalRole.getId()).thenReturn("personal-role-1");
+    when(existingPersonalRole.isActive()).thenReturn(true);
+    when(existingPersonalRole.isTemplate()).thenReturn(false);
+    when(existingPersonalRole.isClientAdmin()).thenReturn(false);
+    when(existingPersonalRole.getClient()).thenReturn(userClient);
+    when(user.getDefaultRole()).thenReturn(existingPersonalRole);
+
+    UserRoles ownRow = mock(UserRoles.class);
+    when(ownRow.getUserContact()).thenReturn(user);
+    OBCriteria<UserRoles> userRolesCriteria = mock(OBCriteria.class);
+    when(mockDal.createCriteria(UserRoles.class)).thenReturn(userRolesCriteria);
+    when(userRolesCriteria.list()).thenReturn(List.of(ownRow));
+
+    Organization starOrg = mock(Organization.class);
+    when(mockDal.get(Organization.class, "0")).thenReturn(starOrg);
+    OBCriteria<Role> nameUniquenessCriteria = mock(OBCriteria.class);
+    when(mockDal.createCriteria(Role.class)).thenReturn(nameUniquenessCriteria);
+    when(nameUniquenessCriteria.uniqueResult()).thenReturn(null);
+
+    Role newRole = mock(Role.class);
+
+    try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
+        MockedStatic<OBProvider> obProviderMock = mockStatic(OBProvider.class)) {
+      OBProvider obProvider = mock(OBProvider.class);
+      obProviderMock.when(OBProvider::getInstance).thenReturn(obProvider);
+      when(obProvider.get(Role.class)).thenReturn(newRole);
+
+      Role result = service.createFreshPersonalRole(user);
+
+      assertSame(newRole, result, "createFreshPersonalRole must always mint a brand-new role, "
+          + "never reuse Default_Ad_Role_ID even when it would otherwise pass every reuse check");
+      verify(mockDal).save(newRole);
+      verify(user, never()).getDefaultRole();
+      obContextMock.verify(() -> OBContext.setAdminMode(true));
+      obContextMock.verify(OBContext::restorePreviousMode);
+    }
+  }
+
+  /**
+   * Same "get(Organization, '0')"/uniqueness-check plumbing as {@link
+   * #ensurePersonalRoleCreatesNewRoleWhenNoDefaultRoleYet}, confirming {@code
+   * createFreshPersonalRole} produces the exact same shape of role {@link
+   * UserRoleCompositionService#createPersonalRole} always builds (manual, non-template,
+   * non-client-admin, scoped to the user's client and the {@code "0"} organization) — this method
+   * is a thin admin-mode wrapper around it, not a separate implementation.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  void createFreshPersonalRoleBuildsRoleWithExpectedShape() {
+    Client userClient = mock(Client.class);
+    when(userClient.getId()).thenReturn("client-A");
+
+    User user = mock(User.class);
+    when(user.getId()).thenReturn("user-1");
+    when(user.getClient()).thenReturn(userClient);
+    when(user.getName()).thenReturn("Jane Doe");
+
+    Organization starOrg = mock(Organization.class);
+    when(mockDal.get(Organization.class, "0")).thenReturn(starOrg);
+
+    OBCriteria<Role> nameUniquenessCriteria = mock(OBCriteria.class);
+    when(mockDal.createCriteria(Role.class)).thenReturn(nameUniquenessCriteria);
+    when(nameUniquenessCriteria.uniqueResult()).thenReturn(null);
+
+    Role newRole = mock(Role.class);
+
+    try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
+        MockedStatic<OBProvider> obProviderMock = mockStatic(OBProvider.class)) {
+      OBProvider obProvider = mock(OBProvider.class);
+      obProviderMock.when(OBProvider::getInstance).thenReturn(obProvider);
+      when(obProvider.get(Role.class)).thenReturn(newRole);
+
+      Role result = service.createFreshPersonalRole(user);
+
+      assertSame(newRole, result);
+      verify(newRole).setNewOBObject(true);
+      verify(newRole).setClient(userClient);
+      verify(newRole).setOrganization(starOrg);
+      verify(newRole).setActive(true);
+      verify(newRole).setManual(true);
+      verify(newRole).setTemplate(false);
+      verify(newRole).setClientAdmin(false);
+      verify(mockDal).save(newRole);
+    }
+  }
 }

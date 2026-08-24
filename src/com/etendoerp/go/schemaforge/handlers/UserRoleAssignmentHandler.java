@@ -611,12 +611,21 @@ public class UserRoleAssignmentHandler implements NeoHandler {
    * (push/pop), same reasoning {@link com.etendoerp.go.roles.UserRoleCompositionService}'s class
    * javadoc gives for its own nested admin-mode entries.
    *
-   * <p>Reuses {@link UserRoleCompositionService#ensurePersonalRole(User)} for the get-or-create
-   * part — same "is this genuinely the user's own role" identity rules the template-composition
-   * flow already relies on (see that method's javadoc) — and {@link
-   * UserRoleSyncSupport#syncSingleActiveUserRole(User, Role)} for the actual {@code
-   * AD_User_Roles} write, the exact same mechanism {@link #syncUserRole(String)} uses elsewhere
-   * in this class, instead of hand-rolling a new insert.</p>
+   * <p>Uses {@link UserRoleCompositionService#createFreshPersonalRole(User)} — NOT the
+   * get-or-create {@link UserRoleCompositionService#ensurePersonalRole(User)} the
+   * template-composition flow relies on for an EXISTING user. Bug found while diagnosing a real
+   * repro (ETP-4830): {@code ensurePersonalRole}'s reuse check treats a candidate {@code
+   * Default_Ad_Role_ID} with zero {@code AD_User_Roles} rows as "safe to reuse" (a legitimate
+   * accommodation for an existing, manually-configured user) — but a user THIS METHOD just
+   * created can never legitimately already have a personal role, so any non-null {@code
+   * Default_Ad_Role_ID} already on the row at this point is necessarily stale/incorrect data
+   * (e.g. the frontend's now-fixed stale-{@code hook.editing} bug, see
+   * {@code createFreshPersonalRole}'s own javadoc) — reusing it silently handed a brand-new user
+   * an unrelated pre-existing role instead of the empty one this ticket requires. {@code
+   * createFreshPersonalRole} closes that gap by never consulting {@code Default_Ad_Role_ID} at
+   * all for a newly-created user, and {@link UserRoleSyncSupport#syncSingleActiveUserRole(User,
+   * Role)} still does the actual {@code AD_User_Roles} write, the exact same mechanism {@link
+   * #syncUserRole(String)} uses elsewhere in this class, instead of hand-rolling a new insert.</p>
    *
    * <p>Best-effort, same contract as the rest of this method (see its own javadoc): a failure
    * here must never block the parent {@code AD_User} creation or the invitation that follows —
@@ -645,7 +654,7 @@ public class UserRoleAssignmentHandler implements NeoHandler {
             userId, email, clientId);
         return;
       }
-      Role personalRole = new UserRoleCompositionService().ensurePersonalRole(user);
+      Role personalRole = new UserRoleCompositionService().createFreshPersonalRole(user);
       user.setDefaultRole(personalRole);
       OBDal.getInstance().save(user);
       OBDal.getInstance().flush();

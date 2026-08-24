@@ -110,7 +110,7 @@ public class UserRoleAssignmentHandlerTest {
    * ETP-4830 — bundles the three collaborators {@link
    * UserRoleAssignmentHandler#ensurePersonalRoleForNewlyCreatedUser} now reaches on every
    * create-user invitation flow (a real {@code User} lookup via {@link OBDal}, a personal role
-   * from {@link UserRoleCompositionService#ensurePersonalRole}, and the {@code AD_User_Roles}
+   * from {@link UserRoleCompositionService#createFreshPersonalRole}, and the {@code AD_User_Roles}
    * sync via {@link UserRoleSyncSupport#syncSingleActiveUserRole}), so the pre-existing invitation
    * tests below — which only care about the invitation itself — don't each have to hand-roll the
    * same three mocks just to keep this new step from reaching real (unmocked) Openbravo statics.
@@ -128,7 +128,7 @@ public class UserRoleAssignmentHandlerTest {
       obDalMock.when(OBDal::getInstance).thenReturn(obDal);
       when(obDal.get(User.class, userId)).thenReturn(user);
       compositionServiceMock = mockConstruction(UserRoleCompositionService.class,
-          (m, constructionCtx) -> when(m.ensurePersonalRole(any())).thenReturn(personalRole));
+          (m, constructionCtx) -> when(m.createFreshPersonalRole(any())).thenReturn(personalRole));
       syncSupportMock = mockStatic(UserRoleSyncSupport.class);
     }
 
@@ -1203,7 +1203,7 @@ public class UserRoleAssignmentHandlerTest {
         MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class);
         MockedConstruction<UserRoleCompositionService> compositionServiceMock =
             mockConstruction(UserRoleCompositionService.class, (m, constructionCtx) ->
-                when(m.ensurePersonalRole(createdUser)).thenAnswer(inv -> {
+                when(m.createFreshPersonalRole(createdUser)).thenAnswer(inv -> {
                   callOrder.add("personalRole");
                   return personalRole;
                 }));
@@ -1325,7 +1325,7 @@ public class UserRoleAssignmentHandlerTest {
         MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class);
         MockedConstruction<UserRoleCompositionService> compositionServiceMock =
             mockConstruction(UserRoleCompositionService.class, (m, constructionCtx) ->
-                when(m.ensurePersonalRole(any()))
+                when(m.createFreshPersonalRole(any()))
                     .thenThrow(new RuntimeException("DB unavailable")));
         MockedConstruction<CompanyInvitationService> invitationServiceMock =
             mockConstruction(CompanyInvitationService.class)) {
