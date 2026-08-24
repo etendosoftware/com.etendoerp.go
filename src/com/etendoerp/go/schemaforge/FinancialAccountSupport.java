@@ -238,7 +238,15 @@ final class FinancialAccountSupport {
     link.setUponDepositUse(method.getUponDepositUse());
     link.setUponWithdrawalUse(method.getUponWithdrawalUse());
     link.setAutomaticDeposit(method.isAutomaticDeposit());
-    link.setAutomaticWithdrawn(method.isAutomaticWithdrawn());
+    // ETP-4891: the bank-transfer method NEVER auto-withdraws. Etendo Go pays transfers over PIS,
+    // where the FIN_Finacc_Transaction is created by the Salt Edge callback once the bank reports
+    // execution — auto-creating it here too would double it. This is now an invariant of the
+    // method, not a consequence of the account having a bank connection (the connect/disconnect
+    // toggling in FinancialAccountBankConnectionHandler was removed with this change), so it is
+    // enforced here rather than copied from the template: sampledata seeds the template with 'N'
+    // and R24 repairs existing tenants, but a legacy template still on 'Y' — or a transfer method
+    // created by hand — must not be able to propagate it to the link.
+    link.setAutomaticWithdrawn(!isBankTransferMethod(method) && method.isAutomaticWithdrawn());
     OBDal.getInstance().save(link);
   }
 
@@ -297,8 +305,13 @@ final class FinancialAccountSupport {
    * Whether {@code method} is the bank-transfer payment method: the extension flag
    * {@code EM_PSD2_Is_Bank_Transfer='Y'} first, then a name fallback (Spanish and English
    * variants). Mirrors the R14/R15 data-fix predicates.
+   *
+   * <p>Package-private (ETP-4891) so {@link PaymentRegistrationService} can tag the payment
+   * methods it lists with the same predicate the runtime uses. The payment modal's transfer gate
+   * now BLOCKS a payment instead of merely offering an extra section, so it must not keep guessing
+   * from the method name on its own.
    */
-  private static boolean isBankTransferMethod(FIN_PaymentMethod method) {
+  static boolean isBankTransferMethod(FIN_PaymentMethod method) {
     if (method == null) {
       return false;
     }
