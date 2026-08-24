@@ -904,7 +904,19 @@ public class UserRoleCompositionService {
     for (RoleInheritance inheritance : existing) {
       if (!desiredIds.contains(inheritance.getInheritFrom().getId())) {
         OBDal.getInstance().remove(inheritance);
-        OBDal.getInstance().flush();
+        // Same core RoleInheritanceEventHandler fan-out as the ADD loop below (see its own
+        // comment) — deleting this row triggers RoleInheritanceManager#applyRemoveInheritance,
+        // which retracts every AccessTypeInjector's propagated rows (window, tab, field, process,
+        // OBUIAPP process, ...) for this role. Core's own deleteRoleAccess wraps ITS internal
+        // remove() calls in an admin-mode bypass, but that bypass is popped before THIS flush
+        // runs, so a still-client-"0" child row (from a system-level template) fails the same
+        // ClientList check the ADD loop already guards against.
+        OBContext.setAdminMode(false);
+        try {
+          OBDal.getInstance().flush();
+        } finally {
+          OBContext.restorePreviousMode();
+        }
         removed++;
       }
     }
@@ -925,7 +937,25 @@ public class UserRoleCompositionService {
       inheritance.setInheritFrom(template);
       inheritance.setSequenceNumber(maxSeqno);
       OBDal.getInstance().save(inheritance);
-      OBDal.getInstance().flush();
+      // Saving this AD_Role_Inheritance row fires core's RoleInheritanceEventHandler, which
+      // fans out through EVERY registered AccessTypeInjector (window, tab, field, process,
+      // OBUIAPP process, ...) to copy the template's accesses onto personalRole. Each injector's
+      // own copyRoleAccess() bypasses the client/org check while it saves (OBContext.setAdminMode
+      // (false)), but that bypass is popped again before this flush runs, so anything it left
+      // dirty/pending gets re-checked HERE under the caller's normal context. That's harmless for
+      // window access (reconcileWindowAccessAfterComposition below re-pins its client/org right
+      // after), but a system-level template (AD_Client_ID = '0', see
+      // EnsureSystemRoleTemplatesScript) that also grants process/report access has nothing
+      // equivalent for those rows, so the copy — still carrying the template's client "0" — fails
+      // this flush with OBSecurityException as soon as a template actually has any (ETP-4830's
+      // own EnsureSystemRoleTemplatesScript#reconcileProcessAccess started seeding those rows).
+      // Same bypass RoleInheritanceManager's own internal saves use, scoped to just this flush.
+      OBContext.setAdminMode(false);
+      try {
+        OBDal.getInstance().flush();
+      } finally {
+        OBContext.restorePreviousMode();
+      }
       added++;
     }
 

@@ -66,9 +66,6 @@ import com.etendoerp.go.schemaforge.data.Invitation;
  */
 public class EtgoInvitationUserCascadeDeleteIntegrationTest extends OBBaseTest {
 
-  private static final String SYSTEM_CLIENT_ID = "0";
-  private static final String STAR_ORG_ID = "0";
-
   @After
   public void rollbackChanges() {
     while (OBContext.getOBContext() != null
@@ -83,13 +80,17 @@ public class EtgoInvitationUserCascadeDeleteIntegrationTest extends OBBaseTest {
     setTestUserContext();
     OBContext.setAdminMode(true);
     try {
-      Client systemClient = OBDal.getInstance().get(Client.class, SYSTEM_CLIENT_ID);
-      Organization starOrg = OBDal.getInstance().get(Organization.class, STAR_ORG_ID);
+      // Scoped to the test context's OWN client/org (matches TbaiSyncStatusInjectorIntegrationTest's
+      // convention of reusing an already-accessible entity's client) rather than a hardcoded System
+      // client "0" — setTestUserContext() logs in as TEST_CLIENT_ID, so a brand-new AD_User created
+      // under client "0" would fail SecurityChecker's ClientList check on this method's own flush(es).
+      Client testClient = OBDal.getInstance().get(Client.class, TEST_CLIENT_ID);
+      Organization testOrg = OBDal.getInstance().get(Organization.class, TEST_ORG_ID);
       String unique = UUID.randomUUID().toString().replace("-", "");
 
       User user = OBProvider.getInstance().get(User.class);
-      user.setClient(systemClient);
-      user.setOrganization(starOrg);
+      user.setClient(testClient);
+      user.setOrganization(testOrg);
       user.setName("ETP-4830 cascade test user");
       user.setUsername("etp4830-cascade-test-" + unique);
       user.setPassword("x");
@@ -98,8 +99,8 @@ public class EtgoInvitationUserCascadeDeleteIntegrationTest extends OBBaseTest {
       String userId = user.getId();
 
       Invitation invitation = OBProvider.getInstance().get(Invitation.class);
-      invitation.setClient(systemClient);
-      invitation.setOrganization(starOrg);
+      invitation.setClient(testClient);
+      invitation.setOrganization(testOrg);
       invitation.setUser(user);
       invitation.setEmail("etp4830-cascade-test-" + unique + "@example.com");
       invitation.setTokenHash(unique);
