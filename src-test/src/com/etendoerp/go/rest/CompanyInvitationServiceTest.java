@@ -31,6 +31,7 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import java.util.Date;
 import java.util.List;
 
 import org.codehaus.jettison.json.JSONObject;
@@ -198,6 +199,127 @@ class CompanyInvitationServiceTest {
     JSONObject response2 = service.registerAndAccept("token", "Name", "weak");
     assertTrue(response2.optBoolean("error"));
     assertEquals("WEAK_PASSWORD", response2.optString("code"));
+  }
+
+  // ─── registerAndAcceptInAdminMode (ETP-4830 lazy-init reordering fix) ────────
+
+  /**
+   * Regression test for the reported {@code LazyInitializationException}: before the fix,
+   * {@code registerAndAcceptInAdminMode} created/updated the {@code etgo_account} FIRST and only
+   * checked {@code invitation.getUser()} afterward. For a brand-new account, that account
+   * creation calls {@link EtendoGoJwtDalHelper#createAccount} which commits and CLOSES the
+   * Hibernate session, so the later {@code invitation.getUser()} touched an orphaned lazy proxy.
+   * The fix moves the user/role validation before any account mutation, so an invalid invitation
+   * user must now be rejected WITHOUT ever calling {@code findActiveAccountByEmail} or
+   * {@code createAccount}.
+   */
+  @Test
+  @DisplayName("registerAndAccept rejects an inactive invitation user before touching the account "
+      + "(ETP-4830: validation must run before the session-closing createAccount call)")
+  void testRegisterAndAcceptRejectsInvalidUserBeforeCreatingAccount() throws Exception {
+    Invitation invitation = mock(Invitation.class);
+    when(invitation.getStatus()).thenReturn("SENT");
+    when(invitation.getExpiresAt()).thenReturn(new Date(System.currentTimeMillis() + 86_400_000L));
+    Client client = mock(Client.class);
+    when(client.getName()).thenReturn("Acme");
+    when(invitation.getClient()).thenReturn(client);
+    when(invitation.getEmail()).thenReturn("invitee@example.com");
+    Organization org = mock(Organization.class);
+    when(invitation.getOrganization()).thenReturn(org);
+
+    User user = mock(User.class);
+    when(user.isActive()).thenReturn(false); // inactive -> must be rejected
+    when(invitation.getUser()).thenReturn(user);
+
+    OBDal dal = mock(OBDal.class);
+
+    try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class);
+        MockedStatic<CompanyInvitationDalHelper> dalHelperMock =
+            mockStatic(CompanyInvitationDalHelper.class);
+        MockedStatic<EtendoGoJwtDalHelper> jwtHelperMock =
+            mockStatic(EtendoGoJwtDalHelper.class)) {
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      dalHelperMock.when(() -> CompanyInvitationDalHelper.findInvitationByTokenHash(anyString()))
+          .thenReturn(invitation);
+
+      CompanyInvitationService service = new CompanyInvitationService();
+      JSONObject response = service.registerAndAccept("token", "Jane Doe", "StrongPass1!");
+
+      assertTrue(response.optBoolean("error"));
+      assertEquals("INVITATION_USER_CONFIGURATION_INVALID", response.optString("code"));
+      // The whole point of the reordering: an invalid invitation user is rejected BEFORE the
+      // account is ever looked up or created.
+      jwtHelperMock.verify(
+          () -> EtendoGoJwtDalHelper.findActiveAccountByEmail(anyString()), never());
+      jwtHelperMock.verify(() -> EtendoGoJwtDalHelper.createAccount(anyString(), anyString(),
+          anyString(), anyString()), never());
+      verify(invitation, never()).setEtgoAccount(any());
+    }
+  }
+
+  /**
+   * Happy-path companion to the test above: once the invitation user IS valid, the new-account
+   * branch (the one that calls {@link EtendoGoJwtDalHelper#createAccount}, closing the session)
+   * must still run to completion and produce a success response — proving the reordering didn't
+   * just move the bug, it actually resolved it for the real "create a brand-new account" path
+   * that triggered the original stack trace.
+   */
+  @Test
+  @DisplayName("registerAndAccept creates a new account end-to-end once the invitation user is valid")
+  void testRegisterAndAcceptCreatesAccountAfterValidatingUser() throws Exception {
+    Invitation invitation = mock(Invitation.class);
+    when(invitation.getStatus()).thenReturn("SENT");
+    when(invitation.getExpiresAt()).thenReturn(new Date(System.currentTimeMillis() + 86_400_000L));
+    Client client = mock(Client.class);
+    when(client.getName()).thenReturn("Acme");
+    when(invitation.getClient()).thenReturn(client);
+    when(invitation.getEmail()).thenReturn("invitee@example.com");
+    Organization org = mock(Organization.class);
+    when(invitation.getOrganization()).thenReturn(org);
+
+    User user = mock(User.class);
+    when(user.isActive()).thenReturn(true);
+    when(invitation.getUser()).thenReturn(user);
+
+    Account createdAccount = mock(Account.class);
+    when(createdAccount.getId()).thenReturn("account-1");
+    when(createdAccount.getEmail()).thenReturn("invitee@example.com");
+    when(createdAccount.getName()).thenReturn("Jane Doe");
+
+    OBDal dal = mock(OBDal.class);
+
+    try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class);
+        MockedStatic<CompanyInvitationDalHelper> dalHelperMock =
+            mockStatic(CompanyInvitationDalHelper.class);
+        MockedStatic<EtendoGoJwtDalHelper> jwtHelperMock =
+            mockStatic(EtendoGoJwtDalHelper.class)) {
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      dalHelperMock.when(() -> CompanyInvitationDalHelper.findInvitationByTokenHash(anyString()))
+          .thenReturn(invitation);
+      dalHelperMock.when(() -> CompanyInvitationDalHelper.hasActiveRoleForOrganization(user, org))
+          .thenReturn(true);
+      jwtHelperMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByEmail("invitee@example.com"))
+          .thenReturn(null);
+      jwtHelperMock.when(() -> EtendoGoJwtDalHelper.createAccount(eq("invitee@example.com"),
+          anyString(), eq("Jane Doe"), anyString())).thenReturn(createdAccount);
+
+      CompanyInvitationService service = new CompanyInvitationService();
+      JSONObject response = service.registerAndAccept("token", "Jane Doe", "StrongPass1!");
+
+      assertFalse(response.optBoolean("error"));
+      assertEquals("account-1", response.getJSONObject("account").getString("id"));
+      assertEquals("Acme", response.getString("clientName"));
+      assertNotNull(response.getString("token"));
+
+      verify(invitation).getUser();
+      dalHelperMock.verify(() -> CompanyInvitationDalHelper.hasActiveRoleForOrganization(user, org));
+      jwtHelperMock.verify(() -> EtendoGoJwtDalHelper.createAccount(eq("invitee@example.com"),
+          anyString(), eq("Jane Doe"), anyString()));
+      verify(invitation).setEtgoAccount(createdAccount);
+      verify(invitation).setStatus("ACCEPTED");
+    }
   }
 
   // ─── createInvitationForNewlyCreatedUser (ETP-4830) ──────────────────────────

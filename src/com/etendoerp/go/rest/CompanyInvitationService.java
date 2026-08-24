@@ -507,6 +507,22 @@ public class CompanyInvitationService {
       return errorResponse(400, CODE_EXPIRED_TOKEN, MESSAGE_EXPIRED_TOKEN);
     }
 
+      // ETP-4830 fix: this validation MUST run before any account mutation below. It reads
+      // invitation.getUser() (a lazy AD_User proxy) and invitation.getOrganization() while the
+      // session that loaded `invitation` (from findInvitation, above) is still open. Once the
+      // account == null branch below calls EtendoGoJwtDalHelper.createAccount(), that method
+      // ends with flushAndCommitDalChanges() (flush + commitAndClose), which closes the current
+      // Hibernate session. Touching invitation.getUser() AFTER that point throws
+      // org.hibernate.LazyInitializationException: could not initialize proxy - no Session,
+      // because the proxy was never initialized before its owning session was closed.
+      User user = invitation.getUser();
+      if (user == null || !Boolean.TRUE.equals(user.isActive())
+          || !CompanyInvitationDalHelper.hasActiveRoleForOrganization(user,
+              invitation.getOrganization())) {
+        return errorResponse(409, "INVITATION_USER_CONFIGURATION_INVALID",
+            "The invitation user or its organization role is no longer valid");
+      }
+
       String email = invitation.getEmail();
       Account account = EtendoGoJwtDalHelper.findActiveAccountByEmail(email);
       String sessionToken = generateToken();
@@ -523,14 +539,11 @@ public class CompanyInvitationService {
         OBDal.getInstance().flush();
       }
 
-      User user = invitation.getUser();
-      if (user == null || !Boolean.TRUE.equals(user.isActive())
-          || !CompanyInvitationDalHelper.hasActiveRoleForOrganization(user,
-              invitation.getOrganization())) {
-        return errorResponse(409, "INVITATION_USER_CONFIGURATION_INVALID",
-            "The invitation user or its organization role is no longer valid");
-      }
-
+      // Safe to touch `invitation` again here even after createAccount() above may have closed
+      // the session: these are plain setters (no lazy-proxy access), and OBDal.save() below
+      // performs a Hibernate saveOrUpdate(), which correctly re-attaches this now-detached,
+      // already-persistent entity and issues an UPDATE (see SessionHandler#save) rather than
+      // failing or re-inserting it.
       invitation.setEtgoAccount(account);
       invitation.setStatus(STATUS_ACCEPTED);
       OBDal.getInstance().save(invitation);
