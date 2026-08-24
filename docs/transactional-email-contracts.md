@@ -222,12 +222,27 @@ That third row is the whole reason the gate keys off "a token was issued" rather
 verified". It means no backfill migration was needed and no existing user was locked out by the
 deploy.
 
-The flow **fails open by design**. When no verification link can be built — `etendo.go.app.baseUrl`
-unset — or the mail is not accepted for delivery, the token is *not* left behind, so the account
-reads as "nothing pending" and onboarding proceeds. The alternative is worse than the gap it
-closes: a misconfigured provider or an unset app base URL would silently stop every new signup from
-creating an environment, with no mail to click and no way to tell from the user's side. This mirrors
-what the password-reset flow already does when its mail cannot be delivered.
+The flow **fails open only when there is nothing to fall back to**. Issuing a token overwrites
+whatever was pending, so the previous state is captured first and put back when the send fails —
+the same capture/restore pair the reset token uses. Which way that lands depends on whether a
+confirmation was already owed:
+
+| Send fails during | Previous token | Result |
+|-------------------|----------------|--------|
+| first issue at `/register` | none | restores to "no token": account ungated, onboarding proceeds |
+| `/verify-email/resend` | one pending | previous token restored: account stays gated, the link already in the inbox still works |
+
+The first row is the deliberate fail-open. When no verification link can be built
+(`etendo.go.app.baseUrl` unset) or the mail is not accepted for delivery, a misconfigured provider
+would otherwise silently stop every new signup from creating an environment, with no mail to click
+and no way to tell from the user's side.
+
+The second row is **not** optional, and clearing the token there would be a bypass of the whole
+feature rather than a graceful degradation. `verify-email` carries a per-recipient throttle
+(4 sends / 900s); once it refuses, the send returns false like any other delivery failure. If that
+cleared the token, pressing "resend" until the throttle tripped would switch the gate off — no
+tampering, just an impatient user waiting on a slow mail. Regression-tested by
+`resendWhoseMailFailsRestoresThePendingTokenSoTheAccountStaysGated`.
 
 SSO accounts are born confirmed, and signing in through the identity provider clears any
 confirmation still pending on that address — the assertion is stronger proof of ownership than a

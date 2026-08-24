@@ -58,6 +58,37 @@ final class EmailVerificationDalHelper {
     flushAndCommit();
   }
 
+  /**
+   * Snapshots the verification token currently on the account, so a re-issue whose mail never
+   * leaves the building can be undone.
+   *
+   * <p>Mirrors {@link EtendoGoJwtDalHelper#capturePasswordResetToken}, and exists for the same
+   * reason: {@link #storeEmailVerifyToken} overwrites whatever was pending, and the overwrite has
+   * to be reversible when the send that justified it fails.
+   */
+  static EmailVerifyTokenState captureEmailVerifyToken(Account account) {
+    if (account == null) {
+      return null;
+    }
+    return new EmailVerifyTokenState(
+        (String) account.get(EtendoGoJwtDalHelper.PROPERTY_VERIFY_TOKEN_HASH),
+        (Date) account.get(EtendoGoJwtDalHelper.PROPERTY_VERIFY_TOKEN_EXPIRES));
+  }
+
+  /**
+   * Puts back the token captured by {@link #captureEmailVerifyToken}. A null state means the
+   * account held no token, which restores to "no token" — the fail-open case a first issue at
+   * {@code /register} must keep.
+   */
+  static void restoreEmailVerifyToken(Account account, EmailVerifyTokenState tokenState) {
+    if (account == null) {
+      return;
+    }
+    storeEmailVerifyToken(account,
+        tokenState == null ? null : tokenState.verifyTokenHash,
+        tokenState == null ? null : tokenState.verifyTokenExpires);
+  }
+
   static Account findAccountByVerifyTokenHash(String verifyTokenHash, Date now) {
     OBQuery<Account> query = OBDal.getInstance().createQuery(Account.class,
         "as account where account." + EtendoGoJwtDalHelper.PROPERTY_VERIFY_TOKEN_HASH + " = :"
@@ -113,5 +144,21 @@ final class EmailVerificationDalHelper {
   private static void flushAndCommit() {
     OBDal.getInstance().flush();
     OBDal.getInstance().commitAndClose();
+  }
+
+  /** Immutable snapshot of the verification token columns, for the capture/restore pair above. */
+  static final class EmailVerifyTokenState {
+    private final String verifyTokenHash;
+    private final Date verifyTokenExpires;
+
+    private EmailVerifyTokenState(String verifyTokenHash, Date verifyTokenExpires) {
+      this.verifyTokenHash = verifyTokenHash;
+      this.verifyTokenExpires = verifyTokenExpires;
+    }
+
+    /** True when a confirmation was already pending before the re-issue that is being undone. */
+    boolean hasToken() {
+      return verifyTokenHash != null;
+    }
   }
 }

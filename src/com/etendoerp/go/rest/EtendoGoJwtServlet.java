@@ -1528,23 +1528,11 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       return;
     }
 
-    // Paywall (ETP-4686). Runs before the NDJSON stream opens and before any provisioning, so a
-    // refused request leaves no half-created tenant behind and can still answer with a plain
-    // JSON error instead of a stream. The backend is authoritative here: the /upgrade page in the
-    // web client shows the checkout, but this check is what actually gates tenant creation.
-    boolean paidUpgrade;
-    try {
-      TenantPaywallService.Outcome paywall = evaluatePaywall(accountEmail, onboardingRequest);
-      if (paywall.getDecision().isBlocked()) {
-        writePaymentRequiredError(response, paywall.getDecision());
-        return;
-      }
-      paidUpgrade = paywall.isProductive();
-    } catch (RuntimeException e) {
-      log.error("Paywall evaluation failed for onboarding", e);
-      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, SERVER_ERROR);
+    Boolean paywallOutcome = resolveOnboardingPaywall(accountEmail, onboardingRequest, response);
+    if (paywallOutcome == null) {
       return;
     }
+    boolean paidUpgrade = paywallOutcome;
 
     // Set up NDJSON streaming
     response.setStatus(HttpServletResponse.SC_OK);
@@ -1644,6 +1632,32 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
             + "created successfully server-side, but the UI will report a false failure. "
             + "accountEmail={}", maskEmail(accountEmail));
       }
+    }
+  }
+
+  /**
+   * Paywall (ETP-4686). Runs before the NDJSON stream opens and before any provisioning, so a
+   * refused request leaves no half-created tenant behind and can still answer with a plain JSON
+   * error instead of a stream. The backend is authoritative here: the /upgrade page in the web
+   * client shows the checkout, but this check is what actually gates tenant creation.
+   *
+   * @return whether the environment is a paid (productive) one, or null when the request was
+   *     refused or the evaluation failed — in which case the error response has already been
+   *     written and the caller must return
+   */
+  private Boolean resolveOnboardingPaywall(String accountEmail,
+      OnboardingRequestData onboardingRequest, HttpServletResponse response) throws IOException {
+    try {
+      TenantPaywallService.Outcome paywall = evaluatePaywall(accountEmail, onboardingRequest);
+      if (paywall.getDecision().isBlocked()) {
+        writePaymentRequiredError(response, paywall.getDecision());
+        return null;
+      }
+      return paywall.isProductive();
+    } catch (RuntimeException e) {
+      log.error("Paywall evaluation failed for onboarding", e);
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, SERVER_ERROR);
+      return null;
     }
   }
 
@@ -2507,18 +2521,24 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    * registration ({@code welcome} true, the link rides inside the welcome mail) and on an explicit
    * re-send ({@code welcome} false, its own {@code verify-email} message).
    *
-   * <p><strong>Fails open, on purpose.</strong> If no link can be built (no public app base URL
-   * configured) or the mail does not go out, the token is not left behind: the account reads as
-   * "nothing pending" and {@link #rejectWhenEmailNotVerified} lets it through. The alternative is
-   * worse than the gap it closes — a misconfigured provider or an unset {@code
-   * etendo.go.app.baseUrl} would silently lock every new signup out of creating an environment,
-   * with no mail to click and no way to tell the difference from the user's side. This mirrors what
-   * {@link #storeResetTokenAndSendEmail} already does when a reset mail cannot be delivered.
+   * <p><strong>Fails open only when there was nothing to fall back to.</strong> Issuing a token
+   * overwrites whatever was pending, so the previous state is captured first and put back when the
+   * mail does not go out. That distinction is the whole point: on a first issue at {@code /register}
+   * there is no previous token, so a failed send leaves the account reading as "nothing pending" and
+   * {@link #rejectWhenEmailNotVerified} lets it through — a misconfigured provider or an unset
+   * {@code etendo.go.app.baseUrl} must not silently lock every new signup out of creating an
+   * environment. On a re-send there IS a previous token, and restoring it keeps the account gated
+   * and keeps the link already sitting in the user's inbox working. Clearing it there instead
+   * would hand anyone a way to switch the gate off simply by pressing "resend" until the
+   * per-recipient throttle refuses the send. Same capture/restore pair
+   * {@link #storeResetTokenAndSendEmail} uses for the reset token.
    *
    * @param welcome true to fold the link into the {@code new-account} welcome mail, false to send
    *     the standalone {@code verify-email} reminder
    */
   private void issueEmailVerification(Account account, String language, boolean welcome) {
+    EmailVerificationDalHelper.EmailVerifyTokenState previousTokenState =
+        EmailVerificationDalHelper.captureEmailVerifyToken(account);
     boolean tokenStored = false;
     try {
       String verifyToken = generateSecureUrlToken();
@@ -2553,22 +2573,35 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       log.warn("Email verification could not be issued", e);
     }
     if (tokenStored) {
-      dropUnusableEmailVerifyToken(account);
+      revertUnusableEmailVerifyToken(account, previousTokenState);
     }
   }
 
   /**
-   * Removes a verification token whose mail never went out, so the account is left ungated instead
-   * of blocked behind a link nobody can click.
+   * Undoes a token re-issue whose mail never went out, putting back whatever the account held
+   * before it.
+   *
+   * <p>When a confirmation was already pending, the previous token comes back: the account stays
+   * gated and the link already in the user's inbox keeps working. When nothing was pending this
+   * restores to "no token", leaving the account ungated rather than blocked behind a link nobody
+   * can click.
    */
-  private void dropUnusableEmailVerifyToken(Account account) {
-    log.warn("Email verification token dropped because its mail could not be sent — "
-        + "the account is left ungated rather than locked out");
+  private void revertUnusableEmailVerifyToken(Account account,
+      EmailVerificationDalHelper.EmailVerifyTokenState previousTokenState) {
+    boolean hadPendingToken = previousTokenState != null && previousTokenState.hasToken();
     try {
-      EmailVerificationDalHelper.storeEmailVerifyToken(account, null, null);
+      EmailVerificationDalHelper.restoreEmailVerifyToken(account, previousTokenState);
     } catch (RuntimeException e) {
-      log.error("Could not drop the unusable email verification token; this account may be gated "
+      log.error("Could not revert the unusable email verification token; this account may be gated "
           + "out of creating an environment with no deliverable confirmation link", e);
+      return;
+    }
+    if (hadPendingToken) {
+      log.warn("Email verification re-send could not be delivered; the previously issued token was "
+          + "restored, so the account stays gated and its earlier link still works");
+    } else {
+      log.warn("Email verification token dropped because its mail could not be sent — "
+          + "the account is left ungated rather than locked out");
     }
   }
 

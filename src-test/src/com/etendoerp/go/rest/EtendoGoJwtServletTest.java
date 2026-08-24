@@ -462,10 +462,11 @@ public class EtendoGoJwtServletTest {
 
       servletWithEmailSender.doPost(req, resp.response);
 
-      // The token is dropped again, so a provider outage leaves the account ungated rather than
-      // stuck behind a link that was never delivered.
-      verifyMock.verify(() -> EmailVerificationDalHelper.storeEmailVerifyToken(
-          eq(account), isNull(), isNull()));
+      // Nothing was pending before this first issue, so the revert restores to "no token": a
+      // provider outage leaves the account ungated rather than stuck behind a link that was never
+      // delivered. On a re-send the same revert puts the earlier token back instead — see
+      // resendWhoseMailFailsRestoresThePendingTokenSoTheAccountStaysGated.
+      verifyMock.verify(() -> EmailVerificationDalHelper.restoreEmailVerifyToken(account, null));
     }
 
     assertEquals(201, resp.status);
@@ -1073,6 +1074,126 @@ public class EtendoGoJwtServletTest {
   }
 
   // ===================== POST /onboarding — email gate (ETP-4798) =====================
+
+  @Test
+  public void resendWhoseMailFailsRestoresThePendingTokenSoTheAccountStaysGated() throws Exception {
+    // ETP-4798 regression. Issuing a token overwrites the pending one, and the per-recipient
+    // throttle refuses the send after a handful of re-sends. If the overwritten token were simply
+    // cleared, the account would read as "nothing pending" and walk straight past the onboarding
+    // gate — turning the resend button into an off switch for the whole feature. The previous
+    // token must come back instead, so the account stays gated and the link already in the user's
+    // inbox keeps working.
+    ResponseCapture resp = mockResponse();
+    HttpServletRequest req = authenticatedRequest("/verify-email/resend", "valid-token");
+    TransactionalAuthEmailSender emailSender = mock(TransactionalAuthEmailSender.class);
+    EtendoGoJwtServlet servletWithEmailSender = new EtendoGoJwtServlet(emailSender);
+
+    Account account = mock(Account.class);
+    EmailVerificationDalHelper.EmailVerifyTokenState pendingToken =
+        mock(EmailVerificationDalHelper.EmailVerifyTokenState.class);
+    when(pendingToken.hasToken()).thenReturn(true);
+    // The throttle answers 429, which sendVerifyEmail reports as a plain false.
+    when(emailSender.sendVerifyEmail(any(Account.class), anyString(), anyString(), any()))
+        .thenReturn(false);
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+         MockedStatic<EtendoGoAuthLinkBuilder> linkMock = mockStatic(EtendoGoAuthLinkBuilder.class);
+         MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class);
+         MockedStatic<EmailVerificationDalHelper> verifyMock = mockStatic(EmailVerificationDalHelper.class)) {
+      linkMock.when(() -> EtendoGoAuthLinkBuilder.verifyEmailLink(anyString()))
+          .thenReturn(VERIFY_LINK);
+      dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByBearerToken("valid-token"))
+          .thenReturn(account);
+      verifyMock.when(() -> EmailVerificationDalHelper.isEmailVerificationPending(account))
+          .thenReturn(true);
+      verifyMock.when(() -> EmailVerificationDalHelper.captureEmailVerifyToken(account))
+          .thenReturn(pendingToken);
+
+      servletWithEmailSender.doPost(req, resp.response);
+
+      verifyMock.verify(() -> EmailVerificationDalHelper.restoreEmailVerifyToken(
+          account, pendingToken));
+      // The gate is never switched off: nothing clears the token columns.
+      verifyMock.verify(() -> EmailVerificationDalHelper.storeEmailVerifyToken(
+          eq(account), isNull(), isNull()), never());
+    }
+
+    // Neutral either way, so the response still carries no account state.
+    assertEquals(200, resp.status);
+  }
+
+  @Test
+  public void registerWhoseWelcomeMailFailsLeavesTheAccountUngated() throws Exception {
+    // The other half of the same rule: on a FIRST issue there is no earlier token to fall back on,
+    // so a failed send must restore to "no token" and leave the account ungated. Gating it would
+    // strand a brand-new signup behind a confirmation link that was never delivered.
+    ResponseCapture resp = mockResponse();
+    HttpServletRequest req = mockRequest("/register");
+    TransactionalAuthEmailSender emailSender = mock(TransactionalAuthEmailSender.class);
+    EtendoGoJwtServlet servletWithEmailSender = new EtendoGoJwtServlet(emailSender);
+    when(req.getContentType()).thenReturn("application/json");
+    JSONObject body = new JSONObject();
+    body.put("email", "undeliverable@test.com");
+    body.put("password", "Str0ng!Pass1");
+    body.put("name", "Undeliverable");
+    when(req.getReader()).thenReturn(new BufferedReader(new StringReader(body.toString())));
+
+    Account account = mock(Account.class);
+    when(account.getId()).thenReturn("acct-1");
+    when(account.getEmail()).thenReturn("undeliverable@test.com");
+    when(account.getName()).thenReturn("Undeliverable");
+    when(emailSender.sendNewAccount(any(Account.class), any(), anyString())).thenReturn(false);
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+         MockedStatic<EtendoGoAuthLinkBuilder> linkMock = mockStatic(EtendoGoAuthLinkBuilder.class);
+         MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class);
+         MockedStatic<EmailVerificationDalHelper> verifyMock = mockStatic(EmailVerificationDalHelper.class)) {
+      linkMock.when(() -> EtendoGoAuthLinkBuilder.verifyEmailLink(anyString()))
+          .thenReturn(VERIFY_LINK);
+      dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByEmail("undeliverable@test.com"))
+          .thenReturn(null);
+      dalMock.when(() -> EtendoGoJwtDalHelper.createAccount(
+          anyString(), anyString(), anyString(), anyString()))
+          .thenReturn(account);
+      // Nothing was pending before this first issue.
+      verifyMock.when(() -> EmailVerificationDalHelper.captureEmailVerifyToken(account))
+          .thenReturn(null);
+
+      servletWithEmailSender.doPost(req, resp.response);
+
+      verifyMock.verify(() -> EmailVerificationDalHelper.restoreEmailVerifyToken(account, null));
+    }
+
+    assertEquals(201, resp.status);
+  }
+
+  @Test
+  public void resendDoesNotMintAFirstTokenForAnAccountWithNothingPending() throws Exception {
+    // An account that predates ETP-4798 has no token and no verified date. Pressing resend must
+    // not move it from "never gated" to "gated" over a button it did nothing else with.
+    ResponseCapture resp = mockResponse();
+    HttpServletRequest req = authenticatedRequest("/verify-email/resend", "valid-token");
+    TransactionalAuthEmailSender emailSender = mock(TransactionalAuthEmailSender.class);
+    EtendoGoJwtServlet servletWithEmailSender = new EtendoGoJwtServlet(emailSender);
+
+    Account account = mock(Account.class);
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+         MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class);
+         MockedStatic<EmailVerificationDalHelper> verifyMock = mockStatic(EmailVerificationDalHelper.class)) {
+      dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByBearerToken("valid-token"))
+          .thenReturn(account);
+      verifyMock.when(() -> EmailVerificationDalHelper.isEmailVerificationPending(account))
+          .thenReturn(false);
+
+      servletWithEmailSender.doPost(req, resp.response);
+
+      verifyMock.verify(() -> EmailVerificationDalHelper.storeEmailVerifyToken(
+          any(Account.class), anyString(), any(Date.class)), never());
+    }
+
+    assertEquals(200, resp.status);
+    verify(emailSender, never()).sendVerifyEmail(any(Account.class), anyString(), anyString(), any());
+  }
 
   @Test
   public void onboardingIsRefusedWhileTheEmailConfirmationIsPending() throws Exception {
