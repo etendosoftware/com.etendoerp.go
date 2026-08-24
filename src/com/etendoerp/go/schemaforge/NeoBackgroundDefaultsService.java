@@ -27,20 +27,23 @@ import com.etendoerp.go.schemaforge.data.SFSpec;
 import com.etendoerp.go.schemaforge.util.NeoDateFormat;
 import com.etendoerp.go.schemaforge.util.NeoTypeCoercionHelper;
 
-// ── Background entity defaults (non-HTTP callers) ───────────────────────
-// ETP-4888: header-builder methods that construct a document (Invoice,
-// ShipmentInOut, ...) directly via OBProvider/manual setters — instead of
-// going through NeoCrudHandler's HTTP "new record" path — never triggered
-// NeoDefaultsService's declared-derivation resolution. Any field whose value comes
-// purely from a contract.json derivation (callout/fromConfig/lookup) and is
-// never set by hand in the builder was silently left null (e.g. SII/SIF
-// fields like etsgDateOperation, aeatsiiFechaRegCont). This class gives
-// those background callers a non-HTTP entry point into the same resolution
-// pass that /defaults already exposes over HTTP.
-//
-// Extracted from NeoDefaultsService (ETP-4978 merge block) to keep that class under
-// SonarQube's method-count threshold — fully self-contained, its only external
-// dependency is NeoDefaultsService#resolveDefaults.
+/**
+ * Resolves declared field derivations (contract.json defaults/callouts/lookups) for header
+ * entities built by non-HTTP background Java callers, instead of the normal NEO CRUD HTTP path.
+ *
+ * <p>ETP-4888: header-builder methods that construct a document (Invoice, ShipmentInOut, ...)
+ * directly via OBProvider/manual setters — instead of going through NeoCrudHandler's HTTP
+ * "new record" path — never triggered {@link NeoDefaultsService}'s declared-derivation
+ * resolution. Any field whose value comes purely from a contract.json derivation
+ * (callout/fromConfig/lookup) and is never set by hand in the builder was silently left null
+ * (e.g. SII/SIF fields like etsgDateOperation, aeatsiiFechaRegCont). This class gives those
+ * background callers a non-HTTP entry point into the same resolution pass that /defaults
+ * already exposes over HTTP.
+ *
+ * <p>Extracted from {@link NeoDefaultsService} (ETP-4978 merge block) to keep that class under
+ * SonarQube's method-count threshold — fully self-contained, its only external dependency is
+ * {@link NeoDefaultsService#resolveDefaults}.
+ */
 public class NeoBackgroundDefaultsService {
 
   private static final Logger log = LogManager.getLogger(NeoBackgroundDefaultsService.class);

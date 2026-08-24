@@ -59,6 +59,15 @@ public class NeoMandatoryDefaultsService {
     injectMandatoryDefaults(body, adTab, ctx, null, true);
   }
 
+  /**
+   * Overload of {@link #injectMandatoryDefaults(JSONObject, Tab, NeoContext)} that also
+   * accepts a parent record id, used for child-tab default resolution.
+   *
+   * @param body     the filtered request body — columns already present are skipped
+   * @param adTab    the AD_Tab for the entity being created
+   * @param ctx      the NeoContext with OBContext and spec/entity info
+   * @param parentId optional parent record id used for child-tab defaults
+   */
   public static void injectMandatoryDefaults(JSONObject body, Tab adTab, NeoContext ctx, String parentId) {
     injectMandatoryDefaults(body, adTab, ctx, parentId, true);
   }
