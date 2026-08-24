@@ -47,6 +47,12 @@ import org.openbravo.model.ad.access.RoleInheritance;
 import org.openbravo.model.ad.access.WindowAccess;
 import org.openbravo.model.ad.ui.Window;
 
+import com.etendoerp.go.roles.overlap.ActiveTemplateInheritance;
+import com.etendoerp.go.roles.overlap.GrantCandidate;
+import com.etendoerp.go.roles.overlap.OverlapReconciliationCore;
+import com.etendoerp.go.roles.overlap.OverlapWinner;
+import com.etendoerp.go.roles.overlap.TemplateRemovalTracker;
+
 /**
  * ETP-4906 (Task B6, REDESIGNED 2026-08-16) — widens ETP-4852's cross-template
  * {@code AD_Window_Access} overlap-corruption fix beyond the single, actively-composed role
@@ -487,13 +493,6 @@ public class WindowAccessOverlapCorruptionGuard extends EntityPersistenceEventOb
    * marker surviving until transaction end can only make this class MORE conservative (skip a
    * template that is, by then, genuinely gone or about to be), never less correct.
    */
-  private static final ThreadLocal<Set<String>> TEMPLATES_BEING_REMOVED =
-      ThreadLocal.withInitial(LinkedHashSet::new);
-
-  private static Set<String> templatesBeingRemoved() {
-    return TEMPLATES_BEING_REMOVED.get();
-  }
-
   private static Entity[] entities;
 
   private static Entity[] resolveEntities() {
@@ -587,7 +586,7 @@ public class WindowAccessOverlapCorruptionGuard extends EntityPersistenceEventOb
    * a safe, simple point to reset the marker for the next transaction on this thread.
    */
   public void onTransactionComplete(@Observes TransactionCompletedEvent event) {
-    TEMPLATES_BEING_REMOVED.remove();
+    TemplateRemovalTracker.clear();
   }
 
   /**
@@ -822,7 +821,7 @@ public class WindowAccessOverlapCorruptionGuard extends EntityPersistenceEventOb
     // Marks removedTemplate as "being removed" for the REST of this transaction, not just this
     // method call — see TEMPLATES_BEING_REMOVED's own javadoc for why the marker must outlive
     // this method's own stack frame (a race this class hit empirically, see that javadoc).
-    templatesBeingRemoved().add(removedTemplate.getId());
+    TemplateRemovalTracker.markRemoved(removedTemplate.getId());
 
     // ONE winner per window, computed ONCE across ALL remaining templates — see the class
     // javadoc's "A sixth trigger" section for why this replaces the old per-remaining-template
@@ -855,43 +854,45 @@ public class WindowAccessOverlapCorruptionGuard extends EntityPersistenceEventOb
   }
 
   /**
-   * Per-window verdict {@link #collectWindowGrantors(List)} computes and {@link
-   * #repointWindowIfNeeded(Role, Window, WindowGrantors)} consumes — extracted purely to keep
-   * {@link #guardRemovedInheritance(RoleInheritance)}'s own cognitive complexity and per-loop
-   * break/continue count within the SonarQube gate; carries no behavior of its own.
+   * Per-window candidates {@link #collectWindowGrantors(List)} builds and {@link
+   * #repointWindowIfNeeded(Role, Window, WindowGrantors)} feeds into {@link
+   * OverlapReconciliationCore#computeWinner(List)} — extracted purely to keep {@link
+   * #guardRemovedInheritance(RoleInheritance)}'s own cognitive complexity and per-loop
+   * break/continue count within the SonarQube gate; carries no behavior of its own. The
+   * winner/level decision itself now lives in {@link OverlapReconciliationCore}, shared with
+   * {@code ProcessAccessOverlapCorruptionGuard} (ETP-4830 item 7) — this class only builds the
+   * per-window {@link GrantCandidate} lists (in the SAME SeqNo-descending order {@link
+   * #findActiveTemplatesFor(Role, String)} already returns) and resolves the winner's {@code
+   * templateId} back to a {@code Role}.
    */
   private static final class WindowGrantors {
     private final Map<String, Window> windowsById = new LinkedHashMap<>();
-    private final Map<String, Role> anyGrantor = new LinkedHashMap<>();
-    private final Map<String, Role> fullGrantor = new LinkedHashMap<>();
+    private final Map<String, Role> templatesById = new LinkedHashMap<>();
+    private final Map<String, List<GrantCandidate>> candidatesByWindowId = new LinkedHashMap<>();
   }
 
   /**
-   * Builds the per-window verdict {@link #repointWindowIfNeeded(Role, Window, WindowGrantors)}
-   * needs, across ALL of {@code remainingTemplates} in one pass. {@code remainingTemplates} is
-   * already SeqNo DESCENDING ({@link #findActiveTemplatesFor(Role, String)}), so the FIRST
-   * remaining template seen granting a given window — {@code anyGrantor}'s {@code putIfAbsent} —
-   * is exactly the value core's OWN ascending-SeqNo precedence algorithm ({@code
-   * RoleInheritanceManager#isPrecedent}) would itself converge on if left undisturbed, REGARDLESS
-   * of which template grants the window most permissively; {@code fullGrantor} is a SEPARATE,
-   * independent tracking of whether ANY remaining template (not necessarily {@code anyGrantor}'s
-   * winner) grants the window full access — see {@link #repointWindowIfNeeded(Role, Window,
-   * WindowGrantors)}'s own javadoc for why the source (WHO) and the level (HOW MUCH) are two
-   * separate decisions.
+   * Builds, across ALL of {@code remainingTemplates} in one pass, the per-window {@link
+   * GrantCandidate} lists {@link #repointWindowIfNeeded(Role, Window, WindowGrantors)} feeds
+   * into {@link OverlapReconciliationCore#computeWinner(List)}. {@code remainingTemplates} is
+   * already SeqNo DESCENDING ({@link #findActiveTemplatesFor(Role, String)}), and that relative
+   * order is preserved per window here — {@code computeWinner} relies on the first candidate in
+   * each window's list being the highest-SeqNo remaining grantor.
    */
   private WindowGrantors collectWindowGrantors(List<Role> remainingTemplates) {
     WindowGrantors grantors = new WindowGrantors();
     for (Role remainingTemplate : remainingTemplates) {
+      grantors.templatesById.putIfAbsent(remainingTemplate.getId(), remainingTemplate);
       for (WindowAccess templateGrant : findActiveWindowAccess(remainingTemplate)) {
         Window window = templateGrant.getWindow();
         if (window == null) {
           continue;
         }
         grantors.windowsById.putIfAbsent(window.getId(), window);
-        grantors.anyGrantor.putIfAbsent(window.getId(), remainingTemplate);
-        if (Boolean.TRUE.equals(templateGrant.isEditableField())) {
-          grantors.fullGrantor.putIfAbsent(window.getId(), remainingTemplate);
-        }
+        grantors.candidatesByWindowId
+            .computeIfAbsent(window.getId(), key -> new ArrayList<>())
+            .add(new GrantCandidate(remainingTemplate.getId(),
+                Boolean.TRUE.equals(templateGrant.isEditableField())));
       }
     }
     return grantors;
@@ -899,48 +900,36 @@ public class WindowAccessOverlapCorruptionGuard extends EntityPersistenceEventOb
 
   /**
    * Corrects {@code dependent}'s existing row for {@code window} in place when it does not
-   * already match {@code grantors}' verdict for that window; returns whether a correction was
-   * made (so the caller knows whether {@code dependent} needs refreshing afterward).
-   *
-   * <p><b>Winner (WHO becomes {@code InheritedFrom}) is ALWAYS the highest-SeqNo remaining
-   * template granting this window, regardless of level</b> — see the class javadoc's "A sixth
-   * trigger" section, "InheritedFrom must track core's own precedence, not most-permissive-wins"
-   * paragraph, for why preferring a more-permissive-but-lower-SeqNo template here (as an earlier
-   * version of this fix did) is NOT safe: core's own {@code calculateAccesses} walks ALL
-   * remaining templates ascending by SeqNo in ONE call, and {@code isPrecedent} only ever
-   * compares list INDEX (== SeqNo order), never access level — so anything other than the
-   * highest-SeqNo grantor here is guaranteed to be overridden by core's own LATER pass over the
-   * actual highest-SeqNo grantor, hitting the exact blind-copy client corruption this class
-   * exists to prevent. {@code winnerLevel} (the ACCESS LEVEL) is a SEPARATE decision —
-   * most-permissive-wins across every remaining template granting this window, independent of
-   * which one ends up as the source, exactly mirroring {@link
-   * #widenInheritedAccessLevelIfNeeded(EntityNewEvent, WindowAccess)}'s own "level and ownership
-   * are different concerns" split on the ADD side.
+   * already match {@link OverlapReconciliationCore#computeWinner(List)}'s verdict for {@code
+   * grantors.candidatesByWindowId.get(windowId)}; returns whether a correction was made (so the
+   * caller knows whether {@code dependent} needs refreshing afterward). See {@code
+   * OverlapReconciliationCore}'s own javadoc, and the class javadoc's "A sixth trigger" section
+   * and "Why InheritedFrom must track core's own SeqNo precedence" paragraph, for why the winner
+   * (WHO becomes {@code InheritedFrom}) and the level (HOW MUCH access) are two independent
+   * decisions computed together there.
    */
   private boolean repointWindowIfNeeded(Role dependent, Window window, WindowGrantors grantors) {
     String windowId = window.getId();
-    Role winner = grantors.anyGrantor.get(windowId);
-    boolean winnerLevel = grantors.fullGrantor.containsKey(windowId);
+    OverlapWinner winner = OverlapReconciliationCore.computeWinner(
+        grantors.candidatesByWindowId.get(windowId));
+    if (winner == null) {
+      return false;
+    }
+    Role winnerRole = grantors.templatesById.get(winner.getWinnerTemplateId());
 
     WindowAccess existing = findActiveWindowAccess(dependent, window);
     if (existing == null) {
-      // No existing row to correct in place — nothing for THIS mechanism to do; falls back to
-      // core's own natural CREATE path. Residual, pre-existing, theoretical gap (not the
-      // failure mode reproduced by ETP-4906's 6th round): if 2+ remaining templates BOTH grant
-      // a window the dependent never had access to before this removal, core's own
-      // calculateAccesses could still independently attempt 2 competing CREATEs for it, same
-      // root cause as the fix below just for a row that never existed to repoint. Not closed
-      // here — see the class javadoc's "A sixth trigger" section for why this is considered
-      // acceptable residual risk for now.
+      // No existing row to correct in place — same residual, pre-existing, theoretical gap as
+      // before this refactor. See the class javadoc's "A sixth trigger" section.
       return false;
     }
     Role existingSource = existing.getInheritedFrom();
-    boolean sourceCorrect = existingSource != null && sameId(existingSource, winner);
-    boolean levelCorrect = Boolean.valueOf(winnerLevel).equals(existing.isEditableField());
+    boolean sourceCorrect = existingSource != null && sameId(existingSource, winnerRole);
+    boolean levelCorrect = Boolean.valueOf(winner.isWinnerLevel()).equals(existing.isEditableField());
     if (sourceCorrect && levelCorrect) {
       return false;
     }
-    repointInPlace(existing, dependent, window, winner, winnerLevel, existingSource);
+    repointInPlace(existing, dependent, window, winnerRole, winner.isWinnerLevel(), existingSource);
     return true;
   }
 
@@ -984,27 +973,8 @@ public class WindowAccessOverlapCorruptionGuard extends EntityPersistenceEventOb
    * that carries no reference back to whichever {@code RoleInheritance} deletion, if any, is
    * concurrently in-flight in the same transaction).
    */
-  @SuppressWarnings("unchecked")
   private List<Role> findActiveTemplatesFor(Role dependent, String excludedInheritanceId) {
-    OBCriteria<RoleInheritance> criteria = crossClientCriteria(RoleInheritance.class);
-    criteria.add(Restrictions.eq(RoleInheritance.PROPERTY_ROLE, dependent));
-    criteria.add(Restrictions.eq(RoleInheritance.PROPERTY_ACTIVE, true));
-    if (excludedInheritanceId != null) {
-      criteria.add(Restrictions.ne(RoleInheritance.PROPERTY_ID, excludedInheritanceId));
-    }
-    criteria.addOrderBy(RoleInheritance.PROPERTY_SEQUENCENUMBER, false);
-    Set<String> beingRemoved = templatesBeingRemoved();
-    List<Role> templates = new ArrayList<>();
-    Set<String> seenTemplateIds = new LinkedHashSet<>();
-    for (RoleInheritance ri : (List<RoleInheritance>) criteria.list()) {
-      Role template = ri.getInheritFrom();
-      if (template != null && Boolean.TRUE.equals(template.isTemplate())
-          && !beingRemoved.contains(template.getId())
-          && seenTemplateIds.add(template.getId())) {
-        templates.add(template);
-      }
-    }
-    return templates;
+    return ActiveTemplateInheritance.findActiveTemplatesFor(dependent, excludedInheritanceId);
   }
 
   /**
