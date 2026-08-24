@@ -28,14 +28,24 @@ import org.openbravo.base.exception.OBException;
 import org.openbravo.dal.core.OBContext;
 
 import com.auth0.jwt.interfaces.DecodedJWT;
+import com.etendoerp.go.session.GoLegacyBearer;
+import com.etendoerp.go.session.GoNeoAuth;
+import com.etendoerp.go.session.GoSessionAuthResult;
+import com.etendoerp.go.session.GoSessionAuthenticator;
+import com.etendoerp.go.session.GoSessionRecord;
+import com.etendoerp.go.session.GoSessionService;
+import com.etendoerp.go.session.JdbcGoSessionStore;
 import com.smf.securewebservices.utils.SecureWebServicesUtils;
 
 /**
  * Shared JWT authentication utility for Etendo GO servlets.
  *
- * Reads the {@code Authorization: Bearer <token>} header, decodes the JWT,
- * and sets up {@link OBContext} for the request. Throws {@link OBException}
- * on any authentication failure so callers can return 401.
+ * ETP-4575 — {@link #authenticateOrFail} honours the {@code __Host-} cookie session first and
+ * only falls back to {@code Authorization: Bearer} when no session cookie is present (and the
+ * legacy path is still enabled). It used to be bearer-only, which made every servlet built on it
+ * reject a perfectly valid cookie session with "Missing or invalid Authorization header" — and
+ * because the frontend logs out on a 401, one peripheral widget failing that way revoked the whole
+ * session and blanked every window. {@link #authenticate} stays the bearer-only primitive.
  */
 public class JwtAuthUtils {
 
@@ -46,6 +56,10 @@ public class JwtAuthUtils {
   private static final String CLAIM_ORG = "organization";
   private static final String CLAIM_WAREHOUSE = "warehouse";
   private static final String CLAIM_CLIENT = "client";
+  private static final String MSG_MISSING_AUTH_HEADER = "Missing or invalid Authorization header";
+
+  private static final GoSessionAuthenticator SESSION_AUTHENTICATOR =
+      new GoSessionAuthenticator(new GoSessionService(new JdbcGoSessionStore()));
 
   private JwtAuthUtils() {
   }
@@ -75,6 +89,46 @@ public class JwtAuthUtils {
    */
   public static boolean authenticateOrFail(HttpServletRequest request, HttpServletResponse response,
       Logger log, String context) throws IOException {
+    GoSessionAuthResult sessionAuth = SESSION_AUTHENTICATOR.authenticate(request);
+    switch (GoNeoAuth.decide(sessionAuth.getStatus(), GoLegacyBearer.isEnabled())) {
+      case USE_SESSION:
+        return applySessionOrFail(request, response, log, context, sessionAuth.getRecord());
+      case CSRF_REJECTED:
+        log.warn("Forbidden {}: CSRF validation failed", context);
+        ServletResponseUtils.sendError(response, HttpServletResponse.SC_FORBIDDEN,
+            "CSRF validation failed");
+        return false;
+      case SESSION_INVALID:
+        log.warn("Unauthorized {}: invalid or expired session", context);
+        ServletResponseUtils.sendError(response, HttpServletResponse.SC_UNAUTHORIZED,
+            "Invalid or expired session");
+        return false;
+      case NO_CREDENTIALS:
+        log.warn("Unauthorized {}: no credentials", context);
+        ServletResponseUtils.sendError(response, HttpServletResponse.SC_UNAUTHORIZED,
+            MSG_MISSING_AUTH_HEADER);
+        return false;
+      case USE_LEGACY_BEARER:
+      default:
+        GoLegacyBearer.recordUse();
+        return authenticateBearerOrFail(request, response, log, context);
+    }
+  }
+
+  private static boolean applySessionOrFail(HttpServletRequest request, HttpServletResponse response,
+      Logger log, String context, GoSessionRecord record) throws IOException {
+    try {
+      applySessionContext(request, record);
+      return true;
+    } catch (OBException e) {
+      log.warn("Unauthorized {}: {}", context, e.getMessage());
+      ServletResponseUtils.sendError(response, HttpServletResponse.SC_UNAUTHORIZED, e.getMessage());
+      return false;
+    }
+  }
+
+  private static boolean authenticateBearerOrFail(HttpServletRequest request,
+      HttpServletResponse response, Logger log, String context) throws IOException {
     try {
       authenticate(request);
       return true;
@@ -89,10 +143,27 @@ public class JwtAuthUtils {
     }
   }
 
+  /**
+   * Reconstruct {@link OBContext} from a resolved cookie session, mirroring
+   * {@link #applyContext} but sourcing the environment from the session record instead of JWT
+   * claims. Same shape as NeoAuthenticator's own session path, deliberately: a caller must not be
+   * able to tell which servlet it reached by how its session is honoured.
+   */
+  private static void applySessionContext(HttpServletRequest request, GoSessionRecord record) {
+    if (StringUtils.isAnyBlank(record.getUserId(), record.getRoleId(), record.getCtxOrgId(),
+        record.getCtxClientId())) {
+      throw new OBException("Session has no environment selected");
+    }
+    OBContext ctx = SecureWebServicesUtils.createContext(record.getUserId(), record.getRoleId(),
+        record.getCtxOrgId(), record.getWarehouseId(), record.getCtxClientId());
+    OBContext.setOBContext(ctx);
+    OBContext.setOBContextInSession(request, ctx);
+  }
+
   private static String extractBearerToken(HttpServletRequest request) {
     String authHeader = request.getHeader(AUTH_HEADER);
     if (authHeader == null || !authHeader.startsWith(BEARER_PREFIX)) {
-      throw new OBException("Missing or invalid Authorization header");
+      throw new OBException(MSG_MISSING_AUTH_HEADER);
     }
     return authHeader.substring(BEARER_PREFIX.length());
   }
