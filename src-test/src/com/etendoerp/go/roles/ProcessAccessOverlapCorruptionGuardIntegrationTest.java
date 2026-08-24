@@ -165,6 +165,159 @@ public class ProcessAccessOverlapCorruptionGuardIntegrationTest extends WeldBase
     }
   }
 
+  @Test
+  public void testBystanderRoleNotPassedToAssignTemplateRolesIsAlsoProtected() throws Exception {
+    setTestUserContext();
+    OBContext.setAdminMode(true);
+    try {
+      Process sharedProcess = OBDal.getInstance().get(Process.class, UNUSED_PROCESS_ID);
+      assertNotNull(sharedProcess);
+
+      Role financeTemplate = createThrowawaySystemTemplateRole();
+      Role salesTemplate = createThrowawaySystemTemplateRole();
+      User user = OBDal.getInstance().get(User.class, TEST_USER_ID);
+      assertNotNull(user);
+
+      Role bystanderRole = createBystanderRole(user);
+      addInheritance(bystanderRole, financeTemplate, 10L);
+      addInheritance(bystanderRole, salesTemplate, 20L);
+
+      // Fixture-only refresh, not a guard-under-test concern: createThrowawaySystemTemplateRole()
+      // returns a role that was NEW in this very Hibernate session, so Hibernate considers its
+      // ADRoleInheritanceInheritFromList collection already-initialized-empty from creation time
+      // (a brand-new row cannot have pre-existing children) and never re-queries it on its own.
+      // Core's own RoleInheritanceManager#propagateNewAccess (fired below, from
+      // grantProcessAccess's flush) reads exactly that in-memory collection to find dependents to
+      // propagate to — without forcing a refresh here, it would see a stale, still-empty list and
+      // silently propagate to nobody, even though the RoleInheritance rows just added above are
+      // already committed. The sibling tests below never hit this: they either grant access to the
+      // templates BEFORE composing the bystander (so propagateNewAccess never runs against a role
+      // with dependents yet), or route through addInheritance's own onSave-triggered
+      // guardNewInheritance path instead (which queries AD_Process_Access directly, not through
+      // this cached collection). Real (non-fixture) templates never hit this either, since they are
+      // always fetched from the DB, never created fresh in the same session — see
+      // createThrowawaySystemTemplateRole()'s own javadoc for why this test uses throwaway
+      // templates in the first place.
+      OBDal.getInstance().refresh(financeTemplate);
+      OBDal.getInstance().refresh(salesTemplate);
+
+      grantProcessAccess(financeTemplate, sharedProcess, false);
+      OBDal.getInstance().flush();
+      grantProcessAccess(salesTemplate, sharedProcess, true);
+      OBDal.getInstance().flush();
+
+      ProcessAccess bystanderAccess = findProcessAccess(bystanderRole, sharedProcess);
+      assertNotNull("The bystander role must have received the propagated access, not lost it",
+          bystanderAccess);
+      assertEquals("client must always match the BYSTANDER role's own, never a template's",
+          bystanderRole.getClient().getId(), bystanderAccess.getClient().getId());
+      assertEquals("organization must always match the BYSTANDER role's own, never a template's",
+          bystanderRole.getOrganization().getId(), bystanderAccess.getOrganization().getId());
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  @Test
+  public void testGainingReadOnlyTemplateInheritanceNeverDowngradesExistingFullAccess()
+      throws Exception {
+    setTestUserContext();
+    OBContext.setAdminMode(true);
+    try {
+      Process sharedProcess = OBDal.getInstance().get(Process.class, UNUSED_PROCESS_ID);
+      assertNotNull(sharedProcess);
+
+      Role financeTemplate = createThrowawaySystemTemplateRole();
+      Role salesTemplate = createThrowawaySystemTemplateRole();
+      User user = OBDal.getInstance().get(User.class, TEST_USER_ID);
+      assertNotNull(user);
+
+      grantProcessAccess(financeTemplate, sharedProcess, false);
+      OBDal.getInstance().flush();
+      grantProcessAccess(salesTemplate, sharedProcess, true);
+      OBDal.getInstance().flush();
+
+      Role bystanderRole = createBystanderRole(user);
+      addInheritance(bystanderRole, financeTemplate, 10L);
+
+      ProcessAccess afterFinance = findProcessAccess(bystanderRole, sharedProcess);
+      assertNotNull("Sanity: Finance alone must have propagated the shared process", afterFinance);
+      assertTrue("Sanity: Finance alone must grant full access",
+          Boolean.TRUE.equals(afterFinance.isEditableField()));
+
+      addInheritance(bystanderRole, salesTemplate, 20L);
+
+      ProcessAccess afterSales = findProcessAccess(bystanderRole, sharedProcess);
+      assertNotNull("The shared process's access must survive gaining the second template",
+          afterSales);
+      assertEquals("client must always match the BYSTANDER role's own, never a template's",
+          bystanderRole.getClient().getId(), afterSales.getClient().getId());
+      assertEquals("organization must always match the BYSTANDER role's own, never a template's",
+          bystanderRole.getOrganization().getId(), afterSales.getOrganization().getId());
+      assertTrue("Most-permissive-wins: gaining a READ-ONLY template must never downgrade "
+          + "already-existing FULL access", Boolean.TRUE.equals(afterSales.isEditableField()));
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  @Test
+  public void testRemovingTheTemplateThatJustifiedAWidenedAccessLevelCorrectlyDowngrades()
+      throws Exception {
+    setTestUserContext();
+    OBContext.setAdminMode(true);
+    try {
+      Process sharedProcess = OBDal.getInstance().get(Process.class, UNUSED_PROCESS_ID);
+      assertNotNull(sharedProcess);
+
+      Role financeTemplate = createThrowawaySystemTemplateRole();
+      Role salesTemplate = createThrowawaySystemTemplateRole();
+      User user = OBDal.getInstance().get(User.class, TEST_USER_ID);
+      assertNotNull(user);
+
+      grantProcessAccess(financeTemplate, sharedProcess, false);
+      OBDal.getInstance().flush();
+      grantProcessAccess(salesTemplate, sharedProcess, true);
+      OBDal.getInstance().flush();
+
+      Role bystanderRole = createBystanderRole(user);
+      addInheritance(bystanderRole, financeTemplate, 10L);
+      addInheritance(bystanderRole, salesTemplate, 20L);
+
+      ProcessAccess widened = findProcessAccess(bystanderRole, sharedProcess);
+      assertNotNull(widened);
+      assertTrue("Sanity: most-permissive-wins must resolve to full",
+          Boolean.TRUE.equals(widened.isEditableField()));
+      assertEquals("InheritedFrom must point at the template that actually justifies the "
+          + "widened value (Finance), not the template CREATE originally sourced the row from",
+          financeTemplate.getId(),
+          widened.getInheritedFrom() != null ? widened.getInheritedFrom().getId() : null);
+
+      RoleInheritance financeInheritance = findInheritance(bystanderRole, financeTemplate);
+      assertNotNull(financeInheritance);
+      OBDal.getInstance().remove(financeInheritance);
+      OBContext.setAdminMode();
+      try {
+        OBDal.getInstance().flush();
+      } finally {
+        OBContext.restorePreviousMode();
+      }
+
+      ProcessAccess afterRemoval = findProcessAccess(bystanderRole, sharedProcess);
+      assertNotNull("The shared process's access must survive the removal, re-derived from the "
+          + "one remaining template (Sales)", afterRemoval);
+      assertEquals("The process must now be re-derived from Sales, the one remaining template",
+          salesTemplate.getId(),
+          afterRemoval.getInheritedFrom() != null ? afterRemoval.getInheritedFrom().getId()
+              : null);
+      assertFalse("Removing the FULL template must downgrade to the remaining READ-ONLY "
+          + "template's level, not stay stuck at full",
+          Boolean.TRUE.equals(afterRemoval.isEditableField()));
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
   private Role createBystanderRole(User user) {
     Organization starOrg = OBDal.getInstance().get(Organization.class, "0");
     Role role = OBProvider.getInstance().get(Role.class);
