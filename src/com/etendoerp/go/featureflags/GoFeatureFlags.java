@@ -63,8 +63,11 @@ public final class GoFeatureFlags {
 
   private static final Logger log = LogManager.getLogger(GoFeatureFlags.class);
 
-  /** Gates the paid second-tenant (productive plan) upgrade flow. Default OFF. */
-  public static final String FLAG_TENANT_UPGRADE = "tenant-upgrade";
+  // No backend flag is declared today. `tenant-upgrade` was retired in ETP-4966: the paid
+  // productive-environment capability is permanent, and gating it behind a key the browser and the
+  // backend resolved through different control planes is what let a charged account receive a demo
+  // environment. The infrastructure below stays as the entry point and swap point for the next
+  // flag; declare its key here when there is one.
 
   /**
    * OpenFeature domain the provider is bound to. Using a domain instead of the global default
@@ -83,7 +86,7 @@ public final class GoFeatureFlags {
   /**
    * Evaluates a boolean flag, defaulting to {@code false}.
    *
-   * @param flagKey the flag key (e.g. {@link #FLAG_TENANT_UPGRADE})
+   * @param flagKey the flag key, as declared by the constant that owns it in this class
    * @param context targeting information for this evaluation
    * @return {@code true} only when the control plane positively resolves the flag to true
    */
