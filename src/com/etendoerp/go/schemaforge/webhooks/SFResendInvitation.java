@@ -71,6 +71,11 @@ public class SFResendInvitation extends BaseWebhookService {
 
   private final CompanyInvitationService service;
 
+  /**
+   * No-arg constructor the webhook engine actually instantiates in production; delegates to the
+   * package-private constructor below with a real {@link CompanyInvitationService} so tests can
+   * inject a mock instead.
+   */
   public SFResendInvitation() {
     this(new CompanyInvitationService());
   }

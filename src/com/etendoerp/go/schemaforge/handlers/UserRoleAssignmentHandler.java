@@ -586,13 +586,7 @@ public class UserRoleAssignmentHandler implements NeoHandler {
         // response row right away — see this method's javadoc. Isolated in its own try/catch so
         // a lookup failure here never costs us the logInvitationResult() call below (still the
         // best-effort diagnostic for the invitation itself).
-        try {
-          attachInvitationStatusToRow(data, clientId);
-        } catch (Exception attachError) {
-          log.warn("UserRoleAssignmentHandler.inviteNewlyCreatedUser: failed to attach "
-                  + "invitationStatus to the create response for email={} clientId={}: {}",
-              email, clientId, attachError.getMessage(), attachError);
-        }
+        attachInvitationStatusToRowSafely(data, clientId, email);
       } finally {
         OBContext.restorePreviousMode();
       }
@@ -600,6 +594,21 @@ public class UserRoleAssignmentHandler implements NeoHandler {
     } catch (Exception e) {
       log.warn("UserRoleAssignmentHandler.inviteNewlyCreatedUser error for email={} clientId={}: {}",
           email, clientId, e.getMessage(), e);
+    }
+  }
+
+  /**
+   * Best-effort wrapper around {@link #attachInvitationStatusToRow} extracted out of {@link
+   * #inviteNewlyCreatedUser} (was a nested {@code try} there) — a lookup failure here is logged
+   * and swallowed, it must never cost the caller its {@link #logInvitationResult} diagnostic call.
+   */
+  private void attachInvitationStatusToRowSafely(JSONObject data, String clientId, String email) {
+    try {
+      attachInvitationStatusToRow(data, clientId);
+    } catch (Exception attachError) {
+      log.warn("UserRoleAssignmentHandler.inviteNewlyCreatedUser: failed to attach "
+              + "invitationStatus to the create response for email={} clientId={}: {}",
+          email, clientId, attachError.getMessage(), attachError);
     }
   }
 

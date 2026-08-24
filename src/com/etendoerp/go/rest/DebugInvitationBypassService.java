@@ -59,11 +59,11 @@ import com.etendoerp.go.schemaforge.data.Invitation;
  */
 public class DebugInvitationBypassService {
 
-  private static final Set<String> VALID_STATUSES = new HashSet<>(Arrays.asList(
-      "PENDING", "SENT", "ACCEPTED", "EXPIRED", "REVOKED", "DELIVERY_FAILED"));
-
   private static final String STATUS_ACTIVE = "active";
   private static final String STATUS_ACCEPTED = "ACCEPTED";
+
+  private static final Set<String> VALID_STATUSES = new HashSet<>(Arrays.asList(
+      "PENDING", "SENT", STATUS_ACCEPTED, "EXPIRED", "REVOKED", "DELIVERY_FAILED"));
 
   private static final String FIELD_SUCCESS = "success";
   private static final String FIELD_MESSAGE = "message";

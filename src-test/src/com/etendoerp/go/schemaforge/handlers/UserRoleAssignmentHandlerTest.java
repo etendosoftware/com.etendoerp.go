@@ -1136,11 +1136,11 @@ public class UserRoleAssignmentHandlerTest {
   @Test
   public void afterHandleExtractsEmailFromDataArrayOnCreate() throws Exception {
     UserRoleAssignmentHandler handler = new UserRoleAssignmentHandler();
-    JSONObject record = new JSONObject();
-    record.put("id", USER_ID);
-    record.put("email", "Array.Shape@Example.com");
+    JSONObject recordJson = new JSONObject();
+    recordJson.put("id", USER_ID);
+    recordJson.put("email", "Array.Shape@Example.com");
     JSONArray dataArray = new JSONArray();
-    dataArray.put(record);
+    dataArray.put(recordJson);
     JSONObject inner = new JSONObject();
     inner.put("data", dataArray);
     JSONObject body = new JSONObject();
@@ -1241,10 +1241,10 @@ public class UserRoleAssignmentHandlerTest {
   @Test
   public void afterHandleSkipsPersonalRoleAssignmentWhenCreateResponseHasNoId() throws Exception {
     UserRoleAssignmentHandler handler = new UserRoleAssignmentHandler();
-    JSONObject record = new JSONObject();
-    record.put("email", "no-id@example.com");
+    JSONObject recordJson = new JSONObject();
+    recordJson.put("email", "no-id@example.com");
     JSONArray dataArray = new JSONArray();
-    dataArray.put(record);
+    dataArray.put(recordJson);
     JSONObject inner = new JSONObject();
     inner.put("data", dataArray);
     JSONObject body = new JSONObject();

@@ -36,12 +36,10 @@ import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.access.Role;
 import org.openbravo.model.ad.access.RoleInheritance;
-import org.openbravo.model.ad.access.RoleOrganization;
 import org.openbravo.model.ad.access.User;
 import org.openbravo.model.ad.access.UserRoles;
 import org.openbravo.model.ad.access.WindowAccess;
 import org.openbravo.model.common.enterprise.Organization;
-import org.openbravo.model.common.enterprise.Warehouse;
 
 import com.etendoerp.go.schemaforge.util.OwnerSupport;
 import com.etendoerp.go.schemaforge.util.UserRoleSyncSupport;
@@ -179,11 +177,16 @@ public class UserRoleCompositionService {
   /** {@code AD_Role.UserLevel} shared by every fixed role in this fleet (client + org). */
   private static final String FIXED_ROLE_USER_LEVEL = SystemRoleTemplates.FIXED_ROLE_USER_LEVEL;
 
-  /** Personal-role name prefix — see {@link #buildPersonalRoleName(User)}. */
-  private static final String PERSONAL_ROLE_NAME_PREFIX = "Personal – ";
-
   /** Increment used when minting a fresh {@code AD_Role_Inheritance.Seqno}. */
   private static final long SEQNO_STEP = 10L;
+
+  /**
+   * Naming/org-access/user-defaults finishing steps for a freshly-minted personal role — see its
+   * own class javadoc for why this is a separate collaborator (Sonar S1448, extracted from this
+   * class). Stateless, so a single shared instance is safe to reuse across every call.
+   */
+  private final PersonalRoleAccessProvisioningService personalRoleAccessProvisioningService =
+      new PersonalRoleAccessProvisioningService();
 
   /**
    * The literal System Administrator {@code AD_Role_ID} — the ONLY role id that bypasses
@@ -843,7 +846,7 @@ public class UserRoleCompositionService {
     role.setClient(user.getClient());
     role.setOrganization(starOrg);
     role.setActive(true);
-    role.setName(buildPersonalRoleName(user));
+    role.setName(personalRoleAccessProvisioningService.buildPersonalRoleName(user));
     role.setDescription("Personal composition role (ETP-4852) — access derives from its "
         + "template inheritances; do not edit directly.");
     role.setUserLevel(FIXED_ROLE_USER_LEVEL);
@@ -852,109 +855,10 @@ public class UserRoleCompositionService {
     role.setClientAdmin(false);
     OBDal.getInstance().save(role);
     OBDal.getInstance().flush();
-    createOrgAccess(role, user, starOrg);
-    applyUserDefaults(user, role);
+    personalRoleAccessProvisioningService.createOrgAccess(role, user, starOrg);
+    personalRoleAccessProvisioningService.applyUserDefaults(user, role);
     log.info("Created personal composition role {} for user {}", role.getId(), user.getId());
     return role;
-  }
-
-  /**
-   * Grants {@code role} access to {@code user}'s own organization plus the wildcard {@code '*'}
-   * (ETP-4830 item #6.1) — without this, a freshly-minted personal role has zero
-   * {@code AD_Role_OrgAccess} rows and cannot actually operate in any organization, regardless of
-   * its {@code AD_Window_Access}/{@code AD_Role_Inheritance} grants. Mirrors the pattern an
-   * already-correctly-configured role has in production (confirmed against real tenant data: one
-   * row for the role's real organization, one for {@code '*'}). Skips the duplicate when {@code
-   * user.getOrganization()} IS the wildcard org already (nothing meaningful to add twice).
-   */
-  private void createOrgAccess(Role role, User user, Organization starOrg) {
-    Organization userOrg = user.getOrganization();
-    if (userOrg != null && !starOrg.getId().equals(userOrg.getId())) {
-      saveOrgAccess(role, userOrg);
-    }
-    saveOrgAccess(role, starOrg);
-  }
-
-  private void saveOrgAccess(Role role, Organization organization) {
-    RoleOrganization access = OBProvider.getInstance().get(RoleOrganization.class);
-    access.setNewOBObject(true);
-    access.setClient(role.getClient());
-    access.setOrganization(organization);
-    access.setRole(role);
-    access.setActive(true);
-    access.setOrgAdmin(false);
-    OBDal.getInstance().save(access);
-  }
-
-  /**
-   * Sets the newly-created user's own default-* fields to real, tenant-scoped values (ETP-4830
-   * item #6.2) — confirmed via real tenant data that these were otherwise left at whatever
-   * generic {@code AD_User} defaulting produces, which is NOT tenant-scoped: every test user
-   * checked had {@code Default_Ad_Client_ID} pointing at a DIFFERENT tenant's client entirely,
-   * {@code Default_Ad_Org_ID} at the wildcard org, and {@code EM_SMFSWS_Default_WS_Role_ID}
-   * (Default role for web services) unset. {@code Default_Ad_Role_ID} is intentionally NOT
-   * touched here — every existing caller of {@link #createPersonalRole} already sets it right
-   * after this method returns, immediately following the exact same "a role was just resolved for
-   * this user" moment.
-   */
-  private void applyUserDefaults(User user, Role role) {
-    user.setDefaultClient(user.getClient());
-    Organization userOrg = user.getOrganization();
-    if (userOrg != null) {
-      user.setDefaultOrganization(userOrg);
-      Warehouse warehouse = findFirstActiveWarehouse(userOrg);
-      if (warehouse != null) {
-        user.setDefaultWarehouse(warehouse);
-      }
-    }
-    user.setSmfswsDefaultWsRole(role);
-    OBDal.getInstance().save(user);
-  }
-
-  @SuppressWarnings("unchecked")
-  private Warehouse findFirstActiveWarehouse(Organization organization) {
-    OBCriteria<Warehouse> criteria = OBDal.getInstance().createCriteria(Warehouse.class);
-    criteria.add(Restrictions.eq(Warehouse.PROPERTY_ORGANIZATION, organization));
-    criteria.add(Restrictions.eq(Warehouse.PROPERTY_ACTIVE, true));
-    criteria.setMaxResults(1);
-    return (Warehouse) criteria.uniqueResult();
-  }
-
-  /**
-   * {@code AD_Role.Name} is unique per {@code (AD_Client_ID, Name)} — the user's display name
-   * (falling back to username, then id) is unique enough in practice, but a numeric suffix is
-   * appended on an actual collision rather than failing the whole composition over a duplicate
-   * display name.
-   */
-  private String buildPersonalRoleName(User user) {
-    String base = StringUtils.trimToNull(user.getName());
-    if (base == null) {
-      base = StringUtils.trimToNull(user.getUsername());
-    }
-    if (base == null) {
-      base = user.getId();
-    }
-    String candidate = PERSONAL_ROLE_NAME_PREFIX + base;
-    String name = truncate(candidate, 60);
-    int suffix = 2;
-    while (roleNameExists(user, name)) {
-      String suffixed = candidate + " (" + suffix + ")";
-      name = truncate(suffixed, 60);
-      suffix++;
-    }
-    return name;
-  }
-
-  private boolean roleNameExists(User user, String name) {
-    OBCriteria<Role> criteria = OBDal.getInstance().createCriteria(Role.class);
-    criteria.add(Restrictions.eq(Role.PROPERTY_CLIENT + ".id", user.getClient().getId()));
-    criteria.add(Restrictions.eq(Role.PROPERTY_NAME, name));
-    criteria.setMaxResults(1);
-    return criteria.uniqueResult() != null;
-  }
-
-  private static String truncate(String value, int maxLength) {
-    return value.length() <= maxLength ? value : value.substring(0, maxLength);
   }
 
   /**

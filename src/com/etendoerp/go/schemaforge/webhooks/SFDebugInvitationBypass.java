@@ -88,6 +88,11 @@ public class SFDebugInvitationBypass extends BaseWebhookService {
 
   private final DebugInvitationBypassService service;
 
+  /**
+   * No-arg constructor the webhook engine actually instantiates in production; delegates to the
+   * package-private constructor below with a real {@link DebugInvitationBypassService} so tests
+   * can inject a mock instead.
+   */
   public SFDebugInvitationBypass() {
     this(new DebugInvitationBypassService());
   }

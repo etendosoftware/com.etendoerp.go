@@ -832,7 +832,7 @@ class UserRoleCompositionServiceTest {
       verify(starOrgAccess).setRole(newRole);
       verify(mockDal).save(starOrgAccess);
 
-      // User defaults: client, organization, warehouse, and web-services role all set;
+      // User defaults: client, organization, warehouse, and web-services role are all set here.
       // Default_Ad_Role_ID is deliberately NOT this method's job (see its own javadoc).
       verify(user).setDefaultClient(userClient);
       verify(user).setDefaultOrganization(userOrg);

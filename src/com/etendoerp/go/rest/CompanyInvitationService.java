@@ -73,6 +73,7 @@ public class CompanyInvitationService {
   private static final String FIELD_SUCCESS = "success";
   private static final String FIELD_ERROR = "error";
   private static final String FIELD_HTTP_STATUS = "httpStatus";
+  private static final String CODE_MISSING_EMAIL = "MISSING_EMAIL";
   private static final String CODE_MISSING_TOKEN = "MISSING_TOKEN";
   private static final String CODE_INVALID_TOKEN = "INVALID_TOKEN";
   private static final String CODE_EXPIRED_TOKEN = "EXPIRED_TOKEN";
