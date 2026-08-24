@@ -71,4 +71,32 @@ public final class OverlapReconciliationCore {
     }
     return new OverlapWinner(winnerTemplateId, winnerLevel);
   }
+
+  /**
+   * "Does some OTHER active template (excluding {@code excludedTemplateId}) still grant full
+   * access to this item" — the survey both the ADD-path widening trigger and the update-path
+   * most-permissive-wins survey need. Extracted from {@code WindowAccessOverlapCorruption
+   * Guard#findActiveTemplateGrantingFullAccess}'s own loop (ETP-4906) — same SeqNo-descending
+   * tie-break as {@link #computeWinner(List)}: returns the FIRST candidate (in list order) that
+   * grants full access, after skipping {@code excludedTemplateId} — not necessarily the
+   * highest-SeqNo grantor overall, just the highest-SeqNo one that is BOTH non-excluded AND full.
+   *
+   * <p>Returns {@code null} when {@code candidatesOrderedBySeqNoDescending} is {@code null}, or
+   * when no non-excluded candidate grants full access.
+   */
+  public static String findJustifyingFullGrant(
+      List<GrantCandidate> candidatesOrderedBySeqNoDescending, String excludedTemplateId) {
+    if (candidatesOrderedBySeqNoDescending == null) {
+      return null;
+    }
+    for (GrantCandidate candidate : candidatesOrderedBySeqNoDescending) {
+      if (excludedTemplateId != null && excludedTemplateId.equals(candidate.getTemplateId())) {
+        continue;
+      }
+      if (candidate.isFullAccess()) {
+        return candidate.getTemplateId();
+      }
+    }
+    return null;
+  }
 }

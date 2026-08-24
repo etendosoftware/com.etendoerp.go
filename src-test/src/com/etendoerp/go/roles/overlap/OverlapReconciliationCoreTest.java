@@ -110,4 +110,43 @@ class OverlapReconciliationCoreTest {
     assertEquals("purchasing", winner.getWinnerTemplateId());
     assertTrue(winner.isWinnerLevel());
   }
+
+  @Test
+  void findJustifyingFullGrantReturnsNullForNullList() {
+    assertNull(OverlapReconciliationCore.findJustifyingFullGrant(null, null));
+  }
+
+  @Test
+  void findJustifyingFullGrantReturnsNullWhenNoCandidateGrantsFullAccess() {
+    List<GrantCandidate> candidates = Arrays.asList(
+        new GrantCandidate("template-a", false),
+        new GrantCandidate("template-b", false));
+    assertNull(OverlapReconciliationCore.findJustifyingFullGrant(candidates, null));
+  }
+
+  @Test
+  void findJustifyingFullGrantReturnsFirstFullGrantorInOrder() {
+    List<GrantCandidate> candidates = Arrays.asList(
+        new GrantCandidate("readonly-first", false),
+        new GrantCandidate("full-second", true),
+        new GrantCandidate("full-third", true));
+    assertEquals("full-second",
+        OverlapReconciliationCore.findJustifyingFullGrant(candidates, null));
+  }
+
+  @Test
+  void findJustifyingFullGrantSkipsExcludedTemplateEvenWhenItGrantsFullAccess() {
+    List<GrantCandidate> candidates = Arrays.asList(
+        new GrantCandidate("full-excluded", true),
+        new GrantCandidate("full-other", true));
+    assertEquals("full-other",
+        OverlapReconciliationCore.findJustifyingFullGrant(candidates, "full-excluded"));
+  }
+
+  @Test
+  void findJustifyingFullGrantReturnsNullWhenOnlyFullGrantorIsExcluded() {
+    List<GrantCandidate> candidates = Collections.singletonList(
+        new GrantCandidate("full-excluded", true));
+    assertNull(OverlapReconciliationCore.findJustifyingFullGrant(candidates, "full-excluded"));
+  }
 }
