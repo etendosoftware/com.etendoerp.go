@@ -19,8 +19,10 @@ package com.etendoerp.go.roles;
 import java.util.ArrayList;
 import java.util.Date;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import javax.annotation.Priority;
 import javax.enterprise.event.Observes;
@@ -30,9 +32,11 @@ import org.apache.logging.log4j.Logger;
 import org.hibernate.criterion.Restrictions;
 import org.openbravo.base.model.Entity;
 import org.openbravo.base.model.ModelProvider;
+import org.openbravo.base.model.Property;
 import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.client.application.ProcessAccess;
 import org.openbravo.client.kernel.event.EntityDeleteEvent;
+import org.openbravo.client.kernel.event.EntityNewEvent;
 import org.openbravo.client.kernel.event.EntityPersistenceEventObserver;
 import org.openbravo.client.kernel.event.TransactionCompletedEvent;
 import org.openbravo.dal.core.OBContext;
@@ -46,6 +50,7 @@ import com.etendoerp.go.roles.overlap.ActiveTemplateInheritance;
 import com.etendoerp.go.roles.overlap.GrantCandidate;
 import com.etendoerp.go.roles.overlap.OverlapReconciliationCore;
 import com.etendoerp.go.roles.overlap.OverlapWinner;
+import com.etendoerp.go.roles.overlap.PropagationTrigger;
 import com.etendoerp.go.roles.overlap.TemplateRemovalTracker;
 
 /**
@@ -90,6 +95,32 @@ public class ObuiappProcessAccessOverlapCorruptionGuard extends EntityPersistenc
     return resolveEntities();
   }
 
+  /**
+   * Mirrors {@code ProcessAccessOverlapCorruptionGuard#onSave(EntityNewEvent)} — see that
+   * method's own javadoc. A NEW {@code OBUIAPP_Process_Access} row on a template, or a NEW
+   * {@code AD_Role_Inheritance} row on any role, are the two places core's own propagation can
+   * start a corrupting UPDATE against a role this class never even knows is at risk.
+   */
+  public void onSave(@Observes @Priority(RUNS_BEFORE_UNPRIORITIZED_CORE_OBSERVERS)
+      EntityNewEvent event) {
+    if (!isValidEvent(event)) {
+      return;
+    }
+    Object target = event.getTargetInstance();
+    if (target instanceof ProcessAccess) {
+      ProcessAccess access = (ProcessAccess) target;
+      Role role = access.getRole();
+      if (role != null && Boolean.TRUE.equals(role.isTemplate())) {
+        guardDependentsOf(access, PropagationTrigger.NEW_GRANT);
+      } else {
+        correctInheritedOwnership(event, access);
+        widenInheritedAccessLevelIfNeeded(event, access);
+      }
+    } else if (target instanceof RoleInheritance) {
+      guardNewInheritance((RoleInheritance) target);
+    }
+  }
+
   public void onDelete(@Observes @Priority(RUNS_BEFORE_UNPRIORITIZED_CORE_OBSERVERS)
       EntityDeleteEvent event) {
     if (!isValidEvent(event)) {
@@ -103,6 +134,193 @@ public class ObuiappProcessAccessOverlapCorruptionGuard extends EntityPersistenc
 
   public void onTransactionComplete(@Observes TransactionCompletedEvent event) {
     TemplateRemovalTracker.clear();
+  }
+
+  /**
+   * Mirrors {@code ProcessAccessOverlapCorruptionGuard#correctInheritedOwnership} — see that
+   * method's own javadoc for the full rationale (why {@code event.setCurrentState}, not a plain
+   * setter, is required).
+   */
+  private void correctInheritedOwnership(EntityNewEvent event, ProcessAccess access) {
+    if (access.getInheritedFrom() == null) {
+      return;
+    }
+    Role owner = access.getRole();
+    if (owner == null) {
+      return;
+    }
+    Entity paEntity = obuiappProcessAccessEntity();
+    Property clientProperty = paEntity.getProperty(ProcessAccess.PROPERTY_CLIENT);
+    Property organizationProperty = paEntity.getProperty(ProcessAccess.PROPERTY_ORGANIZATION);
+
+    boolean clientWrong = owner.getClient() != null
+        && !sameId(owner.getClient(), event.getCurrentState(clientProperty));
+    boolean organizationWrong = owner.getOrganization() != null
+        && !sameId(owner.getOrganization(), event.getCurrentState(organizationProperty));
+    if (!clientWrong && !organizationWrong) {
+      return;
+    }
+    if (clientWrong) {
+      event.setCurrentState(clientProperty, owner.getClient());
+    }
+    if (organizationWrong) {
+      event.setCurrentState(organizationProperty, owner.getOrganization());
+    }
+    log.info(
+        "Corrected OBUIAPP_Process_Access ownership on role {} process {}: pinned client/"
+            + "organization back to the role's own (template-derived row, inherited from {})",
+        owner.getId(), access.getObuiappProcess() != null ? access.getObuiappProcess().getId()
+            : null, access.getInheritedFrom().getId());
+  }
+
+  private static Entity obuiappProcessAccessEntity() {
+    return ModelProvider.getInstance().getEntity(ProcessAccess.ENTITY_NAME);
+  }
+
+  /**
+   * Mirrors {@code ProcessAccessOverlapCorruptionGuard#widenInheritedAccessLevelIfNeeded} — see
+   * that method's own javadoc for the full rationale (most-permissive-wins, InheritedFrom
+   * bookkeeping).
+   */
+  private void widenInheritedAccessLevelIfNeeded(EntityNewEvent event, ProcessAccess access) {
+    if (access.getInheritedFrom() == null) {
+      return;
+    }
+    Role owner = access.getRole();
+    Process process = access.getObuiappProcess();
+    if (owner == null || process == null) {
+      return;
+    }
+    Entity paEntity = obuiappProcessAccessEntity();
+    Property editableFieldProperty = paEntity.getProperty(ProcessAccess.PROPERTY_EDITABLEFIELD);
+    if (Boolean.TRUE.equals(event.getCurrentState(editableFieldProperty))) {
+      return;
+    }
+    Role justifyingTemplate = findActiveTemplateGrantingFullAccess(owner, process);
+    if (justifyingTemplate == null) {
+      return;
+    }
+    event.setCurrentState(editableFieldProperty, true);
+    Property inheritedFromProperty = paEntity.getProperty(ProcessAccess.PROPERTY_INHERITEDFROM);
+    Role originalSource = access.getInheritedFrom();
+    event.setCurrentState(inheritedFromProperty, justifyingTemplate);
+    log.info(
+        "Widened OBUIAPP_Process_Access on role {} process {} to full and repointed "
+            + "InheritedFrom from {} to {}: another currently-inherited template already grants "
+            + "this process full access",
+        owner.getId(), process.getId(), originalSource.getId(), justifyingTemplate.getId());
+  }
+
+  private Role findActiveTemplateGrantingFullAccess(Role dependent, Process process) {
+    return findActiveTemplateGrantingFullAccess(dependent, process, null);
+  }
+
+  /**
+   * Mirrors {@code ProcessAccessOverlapCorruptionGuard#findActiveTemplateGrantingFullAccess} —
+   * see that method's own javadoc.
+   */
+  private Role findActiveTemplateGrantingFullAccess(Role dependent, Process process,
+      Role excludedTemplate) {
+    Map<String, Role> templatesById = new LinkedHashMap<>();
+    List<GrantCandidate> candidates = new ArrayList<>();
+    for (Role template : ActiveTemplateInheritance.findActiveTemplatesFor(dependent, null)) {
+      templatesById.putIfAbsent(template.getId(), template);
+      ProcessAccess templateAccess = findActiveObuiappProcessAccess(template, process);
+      if (templateAccess != null) {
+        candidates.add(new GrantCandidate(template.getId(),
+            Boolean.TRUE.equals(templateAccess.isEditableField())));
+      }
+    }
+    String excludedTemplateId = excludedTemplate != null ? excludedTemplate.getId() : null;
+    String winnerId =
+        OverlapReconciliationCore.findJustifyingFullGrant(candidates, excludedTemplateId);
+    return winnerId != null ? templatesById.get(winnerId) : null;
+  }
+
+  /**
+   * Mirrors {@code ProcessAccessOverlapCorruptionGuard#guardNewInheritance} — see that method's
+   * own javadoc.
+   */
+  private void guardNewInheritance(RoleInheritance inheritance) {
+    Role dependent = inheritance.getRole();
+    Role template = inheritance.getInheritFrom();
+    if (dependent == null || template == null || !Boolean.TRUE.equals(template.isTemplate())) {
+      return;
+    }
+    for (ProcessAccess templateGrant : findActiveObuiappProcessAccess(template)) {
+      Process process = templateGrant.getObuiappProcess();
+      if (process == null) {
+        continue;
+      }
+      clearConflictingAccessUnconditionally(dependent, process, template);
+    }
+  }
+
+  /**
+   * Mirrors {@code ProcessAccessOverlapCorruptionGuard#guardDependentsOf} — see that method's own
+   * javadoc. Called with {@link PropagationTrigger#NEW_GRANT} from {@link
+   * #onSave(EntityNewEvent)}. Unlike the sibling class, there is no {@code onUpdate} handler yet
+   * (Task 7), so {@link PropagationTrigger#UPDATED_GRANT} is never passed here.
+   */
+  private void guardDependentsOf(ProcessAccess templateAccess, PropagationTrigger trigger) {
+    Role role = templateAccess.getRole();
+    if (role == null || !Boolean.TRUE.equals(role.isTemplate())) {
+      return;
+    }
+    Process process = templateAccess.getObuiappProcess();
+    if (process == null) {
+      return;
+    }
+    if (trigger == PropagationTrigger.NEW_GRANT) {
+      for (Role dependent : findActiveDependentRoles(role)) {
+        clearConflictingAccessUnconditionally(dependent, process, role);
+      }
+    }
+  }
+
+  /**
+   * Mirrors {@code ProcessAccessOverlapCorruptionGuard#clearConflictingAccessUnconditionally} —
+   * see that method's own javadoc for why "already correct" is not a reason to skip.
+   */
+  private void clearConflictingAccessUnconditionally(Role dependent, Process process,
+      Role grantingTemplate) {
+    ProcessAccess existing = findActiveObuiappProcessAccess(dependent, process);
+    if (existing == null) {
+      return;
+    }
+    deleteForcingCreatePath(existing, dependent, process, grantingTemplate,
+        existing.getInheritedFrom());
+  }
+
+  /**
+   * Mirrors {@code ProcessAccessOverlapCorruptionGuard#deleteForcingCreatePath} — see that
+   * method's own javadoc for the full bulk-HQL-vs-reentrant-flush rationale and the
+   * refresh-not-evict collection-management reasoning. Uses {@code
+   * getOBUIAPPProcessAccessList()} (confirmed at {@code
+   * src-gen/org/openbravo/model/ad/access/Role.java:996}) — the OBUIAPP equivalent of {@code
+   * getADProcessAccessList()}.
+   */
+  private void deleteForcingCreatePath(ProcessAccess existing, Role dependent, Process process,
+      Role template, Role previousSource) {
+    OBContext.setAdminMode(false);
+    try {
+      OBDal.getInstance().getSession()
+          .createQuery("delete from " + ProcessAccess.ENTITY_NAME + " where id = :id")
+          .setParameter("id", existing.getId())
+          .executeUpdate();
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+    dependent.getOBUIAPPProcessAccessList().remove(existing);
+    OBDal.getInstance().refresh(dependent);
+    OBDal.getInstance().getSession().evict(existing);
+    log.info(
+        "Prevented cross-template OBUIAPP_Process_Access overlap corruption: cleared role {} "
+            + "process {} access (previously {}) before template {}'s own grant propagates, "
+            + "forcing core onto the safe CREATE path",
+        dependent.getId(), process.getId(),
+        previousSource != null ? "inherited from " + previousSource.getId() : "manually granted",
+        template.getId());
   }
 
   /**
@@ -237,6 +455,26 @@ public class ObuiappProcessAccessOverlapCorruptionGuard extends EntityPersistenc
     return criteria.list();
   }
 
+  /**
+   * Mirrors {@code ProcessAccessOverlapCorruptionGuard#findActiveDependentRoles} — see that
+   * method's own javadoc for the cross-client criteria rationale.
+   */
+  @SuppressWarnings("unchecked")
+  private List<Role> findActiveDependentRoles(Role template) {
+    OBCriteria<RoleInheritance> criteria = crossClientCriteria(RoleInheritance.class);
+    criteria.add(Restrictions.eq(RoleInheritance.PROPERTY_INHERITFROM, template));
+    criteria.add(Restrictions.eq(RoleInheritance.PROPERTY_ACTIVE, true));
+    List<Role> dependents = new ArrayList<>();
+    Set<String> seenRoleIds = new LinkedHashSet<>();
+    for (RoleInheritance inheritance : (List<RoleInheritance>) criteria.list()) {
+      Role dependent = inheritance.getRole();
+      if (dependent != null && seenRoleIds.add(dependent.getId())) {
+        dependents.add(dependent);
+      }
+    }
+    return dependents;
+  }
+
   private static boolean sameId(BaseOBObject a, BaseOBObject b) {
     if (a == null || b == null) {
       return false;
@@ -244,5 +482,17 @@ public class ObuiappProcessAccessOverlapCorruptionGuard extends EntityPersistenc
     String idA = (String) a.getId();
     String idB = (String) b.getId();
     return idA != null && idA.equals(idB);
+  }
+
+  /**
+   * Overload for comparing against an {@code EntityPersistenceEvent#getCurrentState(Property)}
+   * result, which is declared {@code Object} — matches {@code
+   * ProcessAccessOverlapCorruptionGuard#sameId(BaseOBObject, Object)}'s own overload.
+   */
+  private static boolean sameId(BaseOBObject expected, Object actualState) {
+    if (!(actualState instanceof BaseOBObject)) {
+      return false;
+    }
+    return sameId(expected, (BaseOBObject) actualState);
   }
 }

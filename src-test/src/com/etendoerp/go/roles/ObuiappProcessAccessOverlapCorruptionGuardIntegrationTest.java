@@ -281,4 +281,138 @@ public class ObuiappProcessAccessOverlapCorruptionGuardIntegrationTest extends W
     criteria.add(Restrictions.eq(ProcessAccess.PROPERTY_ACTIVE, true));
     return criteria.list();
   }
+
+  @Test
+  public void testBystanderRoleNotPassedToAssignTemplateRolesIsAlsoProtected() throws Exception {
+    setTestUserContext();
+    OBContext.setAdminMode(true);
+    try {
+      Process sharedProcess = OBDal.getInstance().get(Process.class, OBUIAPP_PROCESS_ID);
+      assertNotNull(sharedProcess);
+
+      Role financeTemplate = createThrowawaySystemTemplateRole();
+      Role salesTemplate = createThrowawaySystemTemplateRole();
+      User user = OBDal.getInstance().get(User.class, TEST_USER_ID);
+      assertNotNull(user);
+
+      Role bystanderRole = createBystanderRole(user);
+      addInheritance(bystanderRole, financeTemplate, 10L);
+      addInheritance(bystanderRole, salesTemplate, 20L);
+
+      // Fixture-only refresh, not a guard-under-test concern — same rationale as
+      // ProcessAccessOverlapCorruptionGuardIntegrationTest's own identically-named test (see that
+      // method's own comment for the full explanation): createThrowawaySystemTemplateRole()
+      // returns a role that was NEW in this very Hibernate session, so Hibernate considers its
+      // inheritFrom-side collection already-initialized-empty and never re-queries it on its own.
+      // Core's own RoleInheritanceManager#propagateNewAccess (fired below, from
+      // grantObuiappProcessAccess's flush) reads exactly that in-memory collection to find
+      // dependents to propagate to — without forcing a refresh here, it would see a stale,
+      // still-empty list and silently propagate to nobody, even though the RoleInheritance rows
+      // just added above are already committed.
+      OBDal.getInstance().refresh(financeTemplate);
+      OBDal.getInstance().refresh(salesTemplate);
+
+      grantObuiappProcessAccess(financeTemplate, sharedProcess, false);
+      OBDal.getInstance().flush();
+      grantObuiappProcessAccess(salesTemplate, sharedProcess, true);
+      OBDal.getInstance().flush();
+
+      ProcessAccess bystanderAccess = findObuiappProcessAccess(bystanderRole, sharedProcess);
+      assertNotNull(bystanderAccess);
+      assertEquals(bystanderRole.getClient().getId(), bystanderAccess.getClient().getId());
+      assertEquals(bystanderRole.getOrganization().getId(),
+          bystanderAccess.getOrganization().getId());
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  @Test
+  public void testGainingReadOnlyTemplateInheritanceNeverDowngradesExistingFullAccess()
+      throws Exception {
+    setTestUserContext();
+    OBContext.setAdminMode(true);
+    try {
+      Process sharedProcess = OBDal.getInstance().get(Process.class, OBUIAPP_PROCESS_ID);
+      assertNotNull(sharedProcess);
+
+      Role financeTemplate = createThrowawaySystemTemplateRole();
+      Role salesTemplate = createThrowawaySystemTemplateRole();
+      User user = OBDal.getInstance().get(User.class, TEST_USER_ID);
+      assertNotNull(user);
+
+      grantObuiappProcessAccess(financeTemplate, sharedProcess, false);
+      OBDal.getInstance().flush();
+      grantObuiappProcessAccess(salesTemplate, sharedProcess, true);
+      OBDal.getInstance().flush();
+
+      Role bystanderRole = createBystanderRole(user);
+      addInheritance(bystanderRole, financeTemplate, 10L);
+
+      ProcessAccess afterFinance = findObuiappProcessAccess(bystanderRole, sharedProcess);
+      assertNotNull(afterFinance);
+      assertTrue(Boolean.TRUE.equals(afterFinance.isEditableField()));
+
+      addInheritance(bystanderRole, salesTemplate, 20L);
+
+      ProcessAccess afterSales = findObuiappProcessAccess(bystanderRole, sharedProcess);
+      assertNotNull(afterSales);
+      assertEquals(bystanderRole.getClient().getId(), afterSales.getClient().getId());
+      assertEquals(bystanderRole.getOrganization().getId(), afterSales.getOrganization().getId());
+      assertTrue("Most-permissive-wins: gaining a READ-ONLY template must never downgrade "
+          + "already-existing FULL access", Boolean.TRUE.equals(afterSales.isEditableField()));
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  @Test
+  public void testRemovingTheTemplateThatJustifiedAWidenedAccessLevelCorrectlyDowngrades()
+      throws Exception {
+    setTestUserContext();
+    OBContext.setAdminMode(true);
+    try {
+      Process sharedProcess = OBDal.getInstance().get(Process.class, OBUIAPP_PROCESS_ID);
+      assertNotNull(sharedProcess);
+
+      Role financeTemplate = createThrowawaySystemTemplateRole();
+      Role salesTemplate = createThrowawaySystemTemplateRole();
+      User user = OBDal.getInstance().get(User.class, TEST_USER_ID);
+      assertNotNull(user);
+
+      grantObuiappProcessAccess(financeTemplate, sharedProcess, false);
+      OBDal.getInstance().flush();
+      grantObuiappProcessAccess(salesTemplate, sharedProcess, true);
+      OBDal.getInstance().flush();
+
+      Role bystanderRole = createBystanderRole(user);
+      addInheritance(bystanderRole, financeTemplate, 10L);
+      addInheritance(bystanderRole, salesTemplate, 20L);
+
+      ProcessAccess widened = findObuiappProcessAccess(bystanderRole, sharedProcess);
+      assertNotNull(widened);
+      assertTrue(Boolean.TRUE.equals(widened.isEditableField()));
+      assertEquals(financeTemplate.getId(),
+          widened.getInheritedFrom() != null ? widened.getInheritedFrom().getId() : null);
+
+      RoleInheritance financeInheritance = findInheritance(bystanderRole, financeTemplate);
+      assertNotNull(financeInheritance);
+      OBDal.getInstance().remove(financeInheritance);
+      OBContext.setAdminMode();
+      try {
+        OBDal.getInstance().flush();
+      } finally {
+        OBContext.restorePreviousMode();
+      }
+
+      ProcessAccess afterRemoval = findObuiappProcessAccess(bystanderRole, sharedProcess);
+      assertNotNull(afterRemoval);
+      assertEquals(salesTemplate.getId(),
+          afterRemoval.getInheritedFrom() != null ? afterRemoval.getInheritedFrom().getId()
+              : null);
+      assertFalse(Boolean.TRUE.equals(afterRemoval.isEditableField()));
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
 }
