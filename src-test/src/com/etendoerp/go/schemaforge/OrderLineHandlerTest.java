@@ -212,7 +212,8 @@ class OrderLineHandlerTest {
       when(conn.prepareStatement(org.mockito.ArgumentMatchers.anyString())).thenReturn(ps);
       when(ps.executeQuery()).thenReturn(rs);
       when(rs.next()).thenReturn(true, false);
-      when(rs.getString(1)).thenReturn("line-no-sku");
+      // getString(1) (the line id) is only read once the blank-SKU check passes, so it must
+      // not be stubbed here — a blank getString(2) short-circuits before reaching it.
       when(rs.getString(2)).thenReturn("");
 
       discountFilterMock.when(() -> DiscountLineFilter.filterFromResponse(any()))
