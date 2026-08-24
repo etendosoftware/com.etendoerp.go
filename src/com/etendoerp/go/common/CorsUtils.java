@@ -37,11 +37,24 @@ public final class CorsUtils {
 
   private static final String ALLOWED_ORIGINS_PROPERTY = "etgo.allowed.origins";
   private static final String ALLOWED_ORIGINS_ENV = "ETGO_ALLOWED_ORIGINS";
+  // ETP-4575 — these are the local development origins the session's CSRF/origin
+  // check trusts out of the box. 3000 (CRA) and 5173 (vite's own default) came
+  // from the generic list and never matched this project: the app's dev and
+  // preview servers run on 3100, and the E2E harness starts its preview on 4173.
+  // With those missing, every unsafe request from a local UI failed the origin
+  // check and surfaced as "CSRF validation failed" even though the token was
+  // correct — the integration E2E suite could not pass on a fresh checkout.
+  // Localhost only; any other origin still has to be declared through
+  // etgo.allowed.origins / ETGO_ALLOWED_ORIGINS.
   private static final Set<String> DEFAULT_ALLOWED_ORIGINS = Collections.unmodifiableSet(
       new HashSet<>(Arrays.asList(
           "http://localhost:3000",
+          "http://localhost:3100",
+          "http://localhost:4173",
           "http://localhost:5173",
           "http://127.0.0.1:3000",
+          "http://127.0.0.1:3100",
+          "http://127.0.0.1:4173",
           "http://127.0.0.1:5173")));
 
   private CorsUtils() {
