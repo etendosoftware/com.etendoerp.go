@@ -36,10 +36,12 @@ import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.access.Role;
 import org.openbravo.model.ad.access.RoleInheritance;
+import org.openbravo.model.ad.access.RoleOrganization;
 import org.openbravo.model.ad.access.User;
 import org.openbravo.model.ad.access.UserRoles;
 import org.openbravo.model.ad.access.WindowAccess;
 import org.openbravo.model.common.enterprise.Organization;
+import org.openbravo.model.common.enterprise.Warehouse;
 
 import com.etendoerp.go.schemaforge.util.OwnerSupport;
 import com.etendoerp.go.schemaforge.util.UserRoleSyncSupport;
@@ -850,8 +852,72 @@ public class UserRoleCompositionService {
     role.setClientAdmin(false);
     OBDal.getInstance().save(role);
     OBDal.getInstance().flush();
+    createOrgAccess(role, user, starOrg);
+    applyUserDefaults(user, role);
     log.info("Created personal composition role {} for user {}", role.getId(), user.getId());
     return role;
+  }
+
+  /**
+   * Grants {@code role} access to {@code user}'s own organization plus the wildcard {@code '*'}
+   * (ETP-4830 item #6.1) — without this, a freshly-minted personal role has zero
+   * {@code AD_Role_OrgAccess} rows and cannot actually operate in any organization, regardless of
+   * its {@code AD_Window_Access}/{@code AD_Role_Inheritance} grants. Mirrors the pattern an
+   * already-correctly-configured role has in production (confirmed against real tenant data: one
+   * row for the role's real organization, one for {@code '*'}). Skips the duplicate when {@code
+   * user.getOrganization()} IS the wildcard org already (nothing meaningful to add twice).
+   */
+  private void createOrgAccess(Role role, User user, Organization starOrg) {
+    Organization userOrg = user.getOrganization();
+    if (userOrg != null && !starOrg.getId().equals(userOrg.getId())) {
+      saveOrgAccess(role, userOrg);
+    }
+    saveOrgAccess(role, starOrg);
+  }
+
+  private void saveOrgAccess(Role role, Organization organization) {
+    RoleOrganization access = OBProvider.getInstance().get(RoleOrganization.class);
+    access.setNewOBObject(true);
+    access.setClient(role.getClient());
+    access.setOrganization(organization);
+    access.setRole(role);
+    access.setActive(true);
+    access.setOrgAdmin(false);
+    OBDal.getInstance().save(access);
+  }
+
+  /**
+   * Sets the newly-created user's own default-* fields to real, tenant-scoped values (ETP-4830
+   * item #6.2) — confirmed via real tenant data that these were otherwise left at whatever
+   * generic {@code AD_User} defaulting produces, which is NOT tenant-scoped: every test user
+   * checked had {@code Default_Ad_Client_ID} pointing at a DIFFERENT tenant's client entirely,
+   * {@code Default_Ad_Org_ID} at the wildcard org, and {@code EM_SMFSWS_Default_WS_Role_ID}
+   * (Default role for web services) unset. {@code Default_Ad_Role_ID} is intentionally NOT
+   * touched here — every existing caller of {@link #createPersonalRole} already sets it right
+   * after this method returns, immediately following the exact same "a role was just resolved for
+   * this user" moment.
+   */
+  private void applyUserDefaults(User user, Role role) {
+    user.setDefaultClient(user.getClient());
+    Organization userOrg = user.getOrganization();
+    if (userOrg != null) {
+      user.setDefaultOrganization(userOrg);
+      Warehouse warehouse = findFirstActiveWarehouse(userOrg);
+      if (warehouse != null) {
+        user.setDefaultWarehouse(warehouse);
+      }
+    }
+    user.setSmfswsDefaultWsRole(role);
+    OBDal.getInstance().save(user);
+  }
+
+  @SuppressWarnings("unchecked")
+  private Warehouse findFirstActiveWarehouse(Organization organization) {
+    OBCriteria<Warehouse> criteria = OBDal.getInstance().createCriteria(Warehouse.class);
+    criteria.add(Restrictions.eq(Warehouse.PROPERTY_ORGANIZATION, organization));
+    criteria.add(Restrictions.eq(Warehouse.PROPERTY_ACTIVE, true));
+    criteria.setMaxResults(1);
+    return (Warehouse) criteria.uniqueResult();
   }
 
   /**

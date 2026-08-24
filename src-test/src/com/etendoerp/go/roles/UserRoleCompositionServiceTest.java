@@ -25,6 +25,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -44,10 +45,12 @@ import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.access.Role;
 import org.openbravo.model.ad.access.RoleInheritance;
+import org.openbravo.model.ad.access.RoleOrganization;
 import org.openbravo.model.ad.access.User;
 import org.openbravo.model.ad.access.UserRoles;
 import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.enterprise.Organization;
+import org.openbravo.model.common.enterprise.Warehouse;
 
 import com.etendoerp.go.schemaforge.util.OwnerSupport;
 
@@ -559,6 +562,7 @@ class UserRoleCompositionServiceTest {
       OBProvider obProvider = mock(OBProvider.class);
       obProviderMock.when(OBProvider::getInstance).thenReturn(obProvider);
       when(obProvider.get(Role.class)).thenReturn(newRole);
+      when(obProvider.get(RoleOrganization.class)).thenAnswer(inv -> mock(RoleOrganization.class));
 
       Role result = service.ensurePersonalRole(user);
 
@@ -626,6 +630,7 @@ class UserRoleCompositionServiceTest {
       OBProvider obProvider = mock(OBProvider.class);
       obProviderMock.when(OBProvider::getInstance).thenReturn(obProvider);
       when(obProvider.get(Role.class)).thenReturn(newRole);
+      when(obProvider.get(RoleOrganization.class)).thenAnswer(inv -> mock(RoleOrganization.class));
 
       Role result = service.ensurePersonalRole(user);
 
@@ -694,6 +699,7 @@ class UserRoleCompositionServiceTest {
       OBProvider obProvider = mock(OBProvider.class);
       obProviderMock.when(OBProvider::getInstance).thenReturn(obProvider);
       when(obProvider.get(Role.class)).thenReturn(newRole);
+      when(obProvider.get(RoleOrganization.class)).thenAnswer(inv -> mock(RoleOrganization.class));
 
       Role result = service.createFreshPersonalRole(user);
 
@@ -739,6 +745,7 @@ class UserRoleCompositionServiceTest {
       OBProvider obProvider = mock(OBProvider.class);
       obProviderMock.when(OBProvider::getInstance).thenReturn(obProvider);
       when(obProvider.get(Role.class)).thenReturn(newRole);
+      when(obProvider.get(RoleOrganization.class)).thenAnswer(inv -> mock(RoleOrganization.class));
 
       Role result = service.createFreshPersonalRole(user);
 
@@ -751,6 +758,172 @@ class UserRoleCompositionServiceTest {
       verify(newRole).setTemplate(false);
       verify(newRole).setClientAdmin(false);
       verify(mockDal).save(newRole);
+    }
+  }
+
+  // ── ETP-4830 item #6.1/#6.2: org access + user defaults on a freshly-minted personal role ──
+
+  /**
+   * Confirmed against real tenant data before this fix: a freshly-minted personal role had ZERO
+   * {@code AD_Role_OrgAccess} rows, and the user's {@code Default_Ad_Client_ID}/
+   * {@code Default_Ad_Org_ID}/{@code EM_SMFSWS_Default_WS_Role_ID} were left at whatever generic
+   * {@code AD_User} defaulting produced — NOT tenant-scoped (one test user's
+   * {@code Default_Ad_Client_ID} pointed at a completely different tenant's client). This test
+   * locks in the fix: two {@code AD_Role_OrgAccess} rows (the user's own organization + the
+   * wildcard {@code '*'}), and the user's default client/organization/warehouse/web-services-role
+   * all set to real, tenant-scoped values.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  void createFreshPersonalRoleGrantsOrgAccessAndSetsUserDefaults() {
+    Client userClient = mock(Client.class);
+    when(userClient.getId()).thenReturn("client-A");
+
+    Organization userOrg = mock(Organization.class);
+    when(userOrg.getId()).thenReturn("org-real");
+
+    User user = mock(User.class);
+    when(user.getId()).thenReturn("user-1");
+    when(user.getClient()).thenReturn(userClient);
+    when(user.getName()).thenReturn("Jane Doe");
+    when(user.getOrganization()).thenReturn(userOrg);
+
+    Organization starOrg = mock(Organization.class);
+    when(starOrg.getId()).thenReturn("0");
+    when(mockDal.get(Organization.class, "0")).thenReturn(starOrg);
+
+    OBCriteria<Role> nameUniquenessCriteria = mock(OBCriteria.class);
+    when(mockDal.createCriteria(Role.class)).thenReturn(nameUniquenessCriteria);
+    when(nameUniquenessCriteria.uniqueResult()).thenReturn(null);
+
+    Warehouse warehouse = mock(Warehouse.class);
+    OBCriteria<Warehouse> warehouseCriteria = mock(OBCriteria.class);
+    when(mockDal.createCriteria(Warehouse.class)).thenReturn(warehouseCriteria);
+    when(warehouseCriteria.uniqueResult()).thenReturn(warehouse);
+
+    Role newRole = mock(Role.class);
+    when(newRole.getClient()).thenReturn(userClient);
+    RoleOrganization userOrgAccess = mock(RoleOrganization.class);
+    RoleOrganization starOrgAccess = mock(RoleOrganization.class);
+
+    try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
+        MockedStatic<OBProvider> obProviderMock = mockStatic(OBProvider.class)) {
+      OBProvider obProvider = mock(OBProvider.class);
+      obProviderMock.when(OBProvider::getInstance).thenReturn(obProvider);
+      when(obProvider.get(Role.class)).thenReturn(newRole);
+      when(obProvider.get(RoleOrganization.class)).thenReturn(userOrgAccess, starOrgAccess);
+
+      Role result = service.createFreshPersonalRole(user);
+
+      assertSame(newRole, result);
+
+      // Two org-access rows: the user's real organization, then the wildcard.
+      verify(userOrgAccess).setNewOBObject(true);
+      verify(userOrgAccess).setClient(userClient);
+      verify(userOrgAccess).setOrganization(userOrg);
+      verify(userOrgAccess).setRole(newRole);
+      verify(userOrgAccess).setActive(true);
+      verify(userOrgAccess).setOrgAdmin(false);
+      verify(mockDal).save(userOrgAccess);
+
+      verify(starOrgAccess).setNewOBObject(true);
+      verify(starOrgAccess).setClient(userClient);
+      verify(starOrgAccess).setOrganization(starOrg);
+      verify(starOrgAccess).setRole(newRole);
+      verify(mockDal).save(starOrgAccess);
+
+      // User defaults: client, organization, warehouse, and web-services role all set;
+      // Default_Ad_Role_ID is deliberately NOT this method's job (see its own javadoc).
+      verify(user).setDefaultClient(userClient);
+      verify(user).setDefaultOrganization(userOrg);
+      verify(user).setDefaultWarehouse(warehouse);
+      verify(user).setSmfswsDefaultWsRole(newRole);
+      verify(mockDal).save(user);
+    }
+  }
+
+  /**
+   * {@code user.getOrganization()} is {@code '*'} itself (a real, if unusual, case) — the
+   * user-organization access row must not be created a second time on top of the wildcard row.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  void createFreshPersonalRoleSkipsDuplicateOrgAccessWhenUserOrgIsAlreadyWildcard() {
+    Client userClient = mock(Client.class);
+    when(userClient.getId()).thenReturn("client-A");
+
+    Organization starOrg = mock(Organization.class);
+    when(starOrg.getId()).thenReturn("0");
+    when(mockDal.get(Organization.class, "0")).thenReturn(starOrg);
+
+    User user = mock(User.class);
+    when(user.getId()).thenReturn("user-1");
+    when(user.getClient()).thenReturn(userClient);
+    when(user.getName()).thenReturn("Jane Doe");
+    when(user.getOrganization()).thenReturn(starOrg);
+
+    OBCriteria<Role> nameUniquenessCriteria = mock(OBCriteria.class);
+    when(mockDal.createCriteria(Role.class)).thenReturn(nameUniquenessCriteria);
+    when(nameUniquenessCriteria.uniqueResult()).thenReturn(null);
+
+    OBCriteria<Warehouse> warehouseCriteria = mock(OBCriteria.class);
+    when(mockDal.createCriteria(Warehouse.class)).thenReturn(warehouseCriteria);
+    when(warehouseCriteria.uniqueResult()).thenReturn(null);
+
+    Role newRole = mock(Role.class);
+    when(newRole.getClient()).thenReturn(userClient);
+    RoleOrganization starOrgAccess = mock(RoleOrganization.class);
+
+    try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
+        MockedStatic<OBProvider> obProviderMock = mockStatic(OBProvider.class)) {
+      OBProvider obProvider = mock(OBProvider.class);
+      obProviderMock.when(OBProvider::getInstance).thenReturn(obProvider);
+      when(obProvider.get(Role.class)).thenReturn(newRole);
+      when(obProvider.get(RoleOrganization.class)).thenReturn(starOrgAccess);
+
+      service.createFreshPersonalRole(user);
+
+      verify(obProvider, times(1)).get(RoleOrganization.class);
+      verify(mockDal, times(1)).save(starOrgAccess);
+    }
+  }
+
+  /** No organization at all on the user (edge case) — default org/warehouse are simply skipped. */
+  @Test
+  @SuppressWarnings("unchecked")
+  void createFreshPersonalRoleSkipsDefaultOrgAndWarehouseWhenUserHasNoOrganization() {
+    Client userClient = mock(Client.class);
+    when(userClient.getId()).thenReturn("client-A");
+
+    User user = mock(User.class);
+    when(user.getId()).thenReturn("user-1");
+    when(user.getClient()).thenReturn(userClient);
+    when(user.getName()).thenReturn("Jane Doe");
+    when(user.getOrganization()).thenReturn(null);
+
+    Organization starOrg = mock(Organization.class);
+    when(starOrg.getId()).thenReturn("0");
+    when(mockDal.get(Organization.class, "0")).thenReturn(starOrg);
+
+    OBCriteria<Role> nameUniquenessCriteria = mock(OBCriteria.class);
+    when(mockDal.createCriteria(Role.class)).thenReturn(nameUniquenessCriteria);
+    when(nameUniquenessCriteria.uniqueResult()).thenReturn(null);
+
+    Role newRole = mock(Role.class);
+
+    try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
+        MockedStatic<OBProvider> obProviderMock = mockStatic(OBProvider.class)) {
+      OBProvider obProvider = mock(OBProvider.class);
+      obProviderMock.when(OBProvider::getInstance).thenReturn(obProvider);
+      when(obProvider.get(Role.class)).thenReturn(newRole);
+      when(obProvider.get(RoleOrganization.class)).thenAnswer(inv -> mock(RoleOrganization.class));
+
+      service.createFreshPersonalRole(user);
+
+      verify(user, never()).setDefaultOrganization(any());
+      verify(user, never()).setDefaultWarehouse(any());
+      verify(user).setDefaultClient(userClient);
+      verify(user).setSmfswsDefaultWsRole(newRole);
     }
   }
 }
