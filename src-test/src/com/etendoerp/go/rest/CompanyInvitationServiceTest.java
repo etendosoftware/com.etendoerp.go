@@ -298,8 +298,6 @@ class CompanyInvitationServiceTest {
       obDalMock.when(OBDal::getInstance).thenReturn(dal);
       dalHelperMock.when(() -> CompanyInvitationDalHelper.findInvitationByTokenHash(anyString()))
           .thenReturn(invitation);
-      dalHelperMock.when(() -> CompanyInvitationDalHelper.hasActiveRoleForOrganization(user, org))
-          .thenReturn(true);
       jwtHelperMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByEmail("invitee@example.com"))
           .thenReturn(null);
       jwtHelperMock.when(() -> EtendoGoJwtDalHelper.createAccount(eq("invitee@example.com"),
@@ -314,11 +312,149 @@ class CompanyInvitationServiceTest {
       assertNotNull(response.getString("token"));
 
       verify(invitation).getUser();
-      dalHelperMock.verify(() -> CompanyInvitationDalHelper.hasActiveRoleForOrganization(user, org));
+      // ETP-4830: accept must succeed for a roleless-but-active invitation user — the
+      // active-role-for-organization check is no longer part of the accept gate.
+      dalHelperMock.verify(
+          () -> CompanyInvitationDalHelper.hasActiveRoleForOrganization(any(), any()), never());
       jwtHelperMock.verify(() -> EtendoGoJwtDalHelper.createAccount(eq("invitee@example.com"),
           anyString(), eq("Jane Doe"), anyString()));
       verify(invitation).setEtgoAccount(createdAccount);
       verify(invitation).setStatus("ACCEPTED");
+    }
+  }
+
+  // ─── acceptExistingAccountInAdminMode (ETP-4830: role check removed from accept) ─────
+
+  /**
+   * Confirms the fix for the design conflict found in manual testing: accepting an invitation
+   * must succeed for a roleless-but-active invitation user. An admin-created {@code AD_User} has
+   * zero roles at invite time by construction (role assignment happens later, independently, via
+   * the "Roles del usuario" tab), so gating accept on a pre-existing role made every such
+   * invitation permanently un-acceptable with a 409 {@code INVITATION_USER_CONFIGURATION_INVALID}.
+   */
+  @Test
+  @DisplayName("acceptExistingAccount succeeds for a roleless-but-active invitation user")
+  void testAcceptExistingAccountSucceedsForRolelessActiveUser() throws Exception {
+    Invitation invitation = mock(Invitation.class);
+    when(invitation.getStatus()).thenReturn("SENT");
+    when(invitation.getExpiresAt()).thenReturn(new Date(System.currentTimeMillis() + 86_400_000L));
+    Client client = mock(Client.class);
+    when(client.getName()).thenReturn("Acme");
+    when(invitation.getClient()).thenReturn(client);
+    when(invitation.getEmail()).thenReturn("invitee@example.com");
+    Organization org = mock(Organization.class);
+    when(invitation.getOrganization()).thenReturn(org);
+
+    User user = mock(User.class);
+    when(user.isActive()).thenReturn(true); // active but no role stubbed anywhere
+    when(invitation.getUser()).thenReturn(user);
+
+    Account platformAccount = mock(Account.class);
+    when(platformAccount.getId()).thenReturn("account-1");
+    when(platformAccount.getEmail()).thenReturn("invitee@example.com");
+
+    OBDal dal = mock(OBDal.class);
+
+    try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class);
+        MockedStatic<CompanyInvitationDalHelper> dalHelperMock =
+            mockStatic(CompanyInvitationDalHelper.class);
+        MockedStatic<EtendoGoJwtDalHelper> jwtHelperMock =
+            mockStatic(EtendoGoJwtDalHelper.class)) {
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      dalHelperMock.when(() -> CompanyInvitationDalHelper.findInvitationByTokenHash(anyString()))
+          .thenReturn(invitation);
+      jwtHelperMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByEmail("invitee@example.com"))
+          .thenReturn(platformAccount);
+      jwtHelperMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByBearerToken("session-token"))
+          .thenReturn(platformAccount);
+
+      CompanyInvitationService service = new CompanyInvitationService();
+      JSONObject response = service.acceptExistingAccount("invitation-token", "session-token");
+
+      assertFalse(response.optBoolean("error"));
+      assertEquals("Acme", response.getString("clientName"));
+      dalHelperMock.verify(
+          () -> CompanyInvitationDalHelper.hasActiveRoleForOrganization(any(), any()), never());
+      verify(invitation).setEtgoAccount(platformAccount);
+      verify(invitation).setStatus("ACCEPTED");
+    }
+  }
+
+  @Test
+  @DisplayName("acceptExistingAccount still rejects an inactive invitation user")
+  void testAcceptExistingAccountRejectsInactiveUser() throws Exception {
+    Invitation invitation = mock(Invitation.class);
+    when(invitation.getStatus()).thenReturn("SENT");
+    when(invitation.getExpiresAt()).thenReturn(new Date(System.currentTimeMillis() + 86_400_000L));
+    Client client = mock(Client.class);
+    when(client.getName()).thenReturn("Acme");
+    when(invitation.getClient()).thenReturn(client);
+    when(invitation.getEmail()).thenReturn("invitee@example.com");
+    Organization org = mock(Organization.class);
+    when(invitation.getOrganization()).thenReturn(org);
+
+    User user = mock(User.class);
+    when(user.isActive()).thenReturn(false); // inactive -> must still be rejected
+    when(invitation.getUser()).thenReturn(user);
+
+    Account platformAccount = mock(Account.class);
+    when(platformAccount.getId()).thenReturn("account-1");
+    when(platformAccount.getEmail()).thenReturn("invitee@example.com");
+
+    OBDal dal = mock(OBDal.class);
+
+    try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class);
+        MockedStatic<CompanyInvitationDalHelper> dalHelperMock =
+            mockStatic(CompanyInvitationDalHelper.class);
+        MockedStatic<EtendoGoJwtDalHelper> jwtHelperMock =
+            mockStatic(EtendoGoJwtDalHelper.class)) {
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      dalHelperMock.when(() -> CompanyInvitationDalHelper.findInvitationByTokenHash(anyString()))
+          .thenReturn(invitation);
+      jwtHelperMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByEmail("invitee@example.com"))
+          .thenReturn(platformAccount);
+      jwtHelperMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByBearerToken("session-token"))
+          .thenReturn(platformAccount);
+
+      CompanyInvitationService service = new CompanyInvitationService();
+      JSONObject response = service.acceptExistingAccount("invitation-token", "session-token");
+
+      assertTrue(response.optBoolean("error"));
+      assertEquals("INVITATION_USER_CONFIGURATION_INVALID", response.optString("code"));
+      verify(invitation, never()).setEtgoAccount(any());
+    }
+  }
+
+  @Test
+  @DisplayName("acceptExistingAccount rejects a signed-in account that does not match the invitation email")
+  void testAcceptExistingAccountRejectsMismatchedAccount() throws Exception {
+    Invitation invitation = mock(Invitation.class);
+    when(invitation.getStatus()).thenReturn("SENT");
+    when(invitation.getExpiresAt()).thenReturn(new Date(System.currentTimeMillis() + 86_400_000L));
+    when(invitation.getClient()).thenReturn(mock(Client.class));
+    when(invitation.getEmail()).thenReturn("invitee@example.com");
+
+    Account otherAccount = mock(Account.class);
+    when(otherAccount.getEmail()).thenReturn("someone-else@example.com");
+
+    try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
+        MockedStatic<CompanyInvitationDalHelper> dalHelperMock =
+            mockStatic(CompanyInvitationDalHelper.class);
+        MockedStatic<EtendoGoJwtDalHelper> jwtHelperMock =
+            mockStatic(EtendoGoJwtDalHelper.class)) {
+      dalHelperMock.when(() -> CompanyInvitationDalHelper.findInvitationByTokenHash(anyString()))
+          .thenReturn(invitation);
+      jwtHelperMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByBearerToken("session-token"))
+          .thenReturn(otherAccount);
+
+      CompanyInvitationService service = new CompanyInvitationService();
+      JSONObject response = service.acceptExistingAccount("invitation-token", "session-token");
+
+      assertTrue(response.optBoolean("error"));
+      assertEquals("INVITATION_ACCOUNT_MISMATCH", response.optString("code"));
+      verify(invitation, never()).getUser();
     }
   }
 

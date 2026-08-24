@@ -209,6 +209,19 @@ Invitation safeguards:
   persists the invitation in `DELIVERY_FAILED` status rather than leaving it silently unsent.
 - The invitation token expires after 7 days and can be consumed only once; an expired or revoked
   token is rejected by `resolveInvitation`/`acceptExistingAccount`/`registerAndAccept`.
+- **Accepting an invitation does not require the invited `AD_User` to already hold a role**
+  (`acceptExistingAccountInAdminMode`/`registerAndAcceptInAdminMode`, ETP-4830): the only user-side
+  check is that `AD_User` still exists and is active. An earlier revision additionally required
+  `CompanyInvitationDalHelper#hasActiveRoleForOrganization` at accept time, which contradicted the
+  admin-created-user flow above — a freshly created user has zero roles by construction, so that
+  check made every such invitation permanently un-acceptable (409
+  `INVITATION_USER_CONFIGURATION_INVALID`) until an admin manually assigned a role first, which
+  itself normally happens *after* the user is invited and can sign in. What still gates who can
+  accept what: possession of the invitation's own unguessable token (delivered only to
+  `ETGO_Invitation.email`), the invitation not being closed (`REVOKED`/`EXPIRED`/already
+  `ACCEPTED`), and — for `acceptExistingAccount` — the signed-in `ETGO_Account`'s email matching
+  the invitation's email. A roleless user can still sign in after accepting; they simply cannot do
+  anything until a role is assigned, identical to any other freshly created `AD_User`.
 
 Email delivery failure is audited and must not roll back registration, onboarding completion, or a successful password change. Password reset request responses stay neutral even when delivery fails.
 

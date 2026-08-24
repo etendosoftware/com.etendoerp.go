@@ -444,12 +444,16 @@ public class CompanyInvitationService {
             "No active platform account found. Registration is required.");
       }
 
+      // ETP-4830: accepting only requires the invitation itself to be valid and the invitation's
+      // AD_User to still be active — NOT that a role has already been assigned. An admin-created
+      // user has zero roles at invite time by construction (role assignment happens later,
+      // independently, via the "Roles del usuario" tab), so gating accept on an existing role
+      // would make every such invitation permanently unacceptable. See
+      // registerAndAcceptInAdminMode below for the identical rationale.
       User user = invitation.getUser();
-      if (user == null || !Boolean.TRUE.equals(user.isActive())
-          || !CompanyInvitationDalHelper.hasActiveRoleForOrganization(user,
-              invitation.getOrganization())) {
+      if (user == null || !Boolean.TRUE.equals(user.isActive())) {
         return errorResponse(409, "INVITATION_USER_CONFIGURATION_INVALID",
-            "The invitation user or its organization role is no longer valid");
+            "The invitation user is no longer valid");
       }
 
       invitation.setEtgoAccount(account);
@@ -508,19 +512,23 @@ public class CompanyInvitationService {
     }
 
       // ETP-4830 fix: this validation MUST run before any account mutation below. It reads
-      // invitation.getUser() (a lazy AD_User proxy) and invitation.getOrganization() while the
-      // session that loaded `invitation` (from findInvitation, above) is still open. Once the
-      // account == null branch below calls EtendoGoJwtDalHelper.createAccount(), that method
-      // ends with flushAndCommitDalChanges() (flush + commitAndClose), which closes the current
-      // Hibernate session. Touching invitation.getUser() AFTER that point throws
+      // invitation.getUser() (a lazy AD_User proxy) while the session that loaded `invitation`
+      // (from findInvitation, above) is still open. Once the account == null branch below calls
+      // EtendoGoJwtDalHelper.createAccount(), that method ends with flushAndCommitDalChanges()
+      // (flush + commitAndClose), which closes the current Hibernate session. Touching
+      // invitation.getUser() AFTER that point throws
       // org.hibernate.LazyInitializationException: could not initialize proxy - no Session,
       // because the proxy was never initialized before its owning session was closed.
+      //
+      // Note this only checks the AD_User is active, NOT that it already has a role — an
+      // admin-created user has zero roles at invite time by construction (role assignment happens
+      // later, independently, via the "Roles del usuario" tab), so gating accept on an existing
+      // role would make every such invitation permanently unacceptable. See
+      // acceptExistingAccountInAdminMode above for the identical rationale.
       User user = invitation.getUser();
-      if (user == null || !Boolean.TRUE.equals(user.isActive())
-          || !CompanyInvitationDalHelper.hasActiveRoleForOrganization(user,
-              invitation.getOrganization())) {
+      if (user == null || !Boolean.TRUE.equals(user.isActive())) {
         return errorResponse(409, "INVITATION_USER_CONFIGURATION_INVALID",
-            "The invitation user or its organization role is no longer valid");
+            "The invitation user is no longer valid");
       }
 
       String email = invitation.getEmail();
