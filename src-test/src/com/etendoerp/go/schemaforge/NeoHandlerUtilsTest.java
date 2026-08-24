@@ -240,6 +240,43 @@ public class NeoHandlerUtilsTest {
     }
   }
 
+  /**
+   * QA edge case (ETP-4941): when one of the requested line ids does not resolve to a row at
+   * all (invalid id, deleted line, or a line whose product was removed) — as opposed to
+   * resolving to a row with a blank SKU, covered above — that id must simply be absent from
+   * the result map rather than appearing with a null/placeholder value. The caller
+   * ({@code enrichProductCode}) relies on {@code Map#get} returning {@code null} for it, which
+   * then correctly skips writing {@code productCode} for that line.
+   */
+  @Test
+  public void testFetchProductCodesForLinesOmitsIdsWithNoMatchingRow() throws Exception {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      Connection conn = mock(Connection.class);
+      PreparedStatement ps = mock(PreparedStatement.class);
+      ResultSet rs = mock(ResultSet.class);
+      when(dal.getConnection()).thenReturn(conn);
+      when(conn.prepareStatement(Mockito.anyString())).thenReturn(ps);
+      when(ps.executeQuery()).thenReturn(rs);
+
+      // Two ids requested, but only "line-1" produces a joinable row — "line-missing" (bad id /
+      // deleted line / product removed) simply never appears in the ResultSet.
+      when(rs.next()).thenReturn(true, false);
+      when(rs.getString(1)).thenReturn("line-1");
+      when(rs.getString(2)).thenReturn("SKU-001");
+
+      Map<String, String> result = NeoHandlerUtils.fetchProductCodesForLines(
+          List.of("line-1", "line-missing"), "c_orderline", "c_orderline_id", LOG);
+
+      assertEquals(1, result.size());
+      assertEquals("SKU-001", result.get("line-1"));
+      assertFalse(result.containsKey("line-missing"));
+      assertNull(result.get("line-missing"));
+    }
+  }
+
   @Test
   public void testFetchProductCodesForLinesReturnsEmptyMapOnDbError() {
     try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
