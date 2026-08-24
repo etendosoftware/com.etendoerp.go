@@ -2053,6 +2053,41 @@ old smoke-test pairs are cleaned up on the next `update.database`, not just adde
 since it has zero DB/SQL dependencies — no Gradle classpath workaround needed, unlike the
 `ModuleScript` itself which stays DB-only.
 
+**ETP-4830 item #6.3 — process/report access, mechanical follow-up to the window matrix above.**
+A real-DB audit found all four templates had ZERO `AD_Process_Access`/`obuiapp_process_access`
+rows despite the 64 window grants — a composed user could OPEN a window (e.g. Sales Order) but
+not click any of its action buttons (Process Order, Add Payment, Post, ...), since
+`NeoAccessHelper#hasProcessAccess`/`#hasObuiappProcessAccess` gate those independently of window
+access, and both are real, load-bearing checks (button actions, process execution, menu
+filtering, MCP tool access all go through them). `EnsureSystemRoleTemplatesScript
+#reconcileProcessAccess` closes this: for every window a role has FULL (not read-only) access to,
+it grants every classic `AD_Process`/OBUIAPP process reachable as a BUTTON on that window (an
+`AD_Column` with `AD_Process_ID`/`EM_OBUIAPP_Process_ID` set, on an active `AD_Field`) — queried
+LIVE against the DB every run, not a hardcoded literal list like the window matrix, so it
+self-heals if a button is later added to or removed from one of these windows. Read-only window
+grants contribute no process access (these buttons are all mutating actions — unlocking them from
+a read-only grant would contradict what "read-only" means).
+
+**Deliberately mechanical, not a hand-curated ETP-4878-style matrix — human-approved scope
+reduction.** A real audit found ~270 individual report/process items exist system-wide across the
+4 roles; curating each one by hand (the way the 64-window matrix was designed) was explicitly
+ruled out as its own follow-up ticket, too large for a single pass. This mechanical rule closes
+the button-linked subset (~180 of those ~270 — confirmed via the same audit: 87 classic + 93
+OBUIAPP button-linked processes across the 33 already-granted windows) with zero new per-item
+judgment calls. **STANDALONE reports/processes not tied to any window button (~90 items — 52
+report-type + 22 process-type + 18 OBUIAPP-process menu entries at the system client level)
+remain a known, separate, NOT-yet-closed gap** — out of scope for this pass.
+
+**Propagation onto composed personal roles needed zero new code.** Core's
+`RoleInheritanceManager` already propagates `AD_Process_Access`/`obuiapp_process_access` the exact
+same generic way it propagates `AD_Window_Access` — confirmed by inspecting its registered
+`AccessTypeInjector` implementations (`ReportAndProcessAccessInjector`,
+`ProcessDefinitionAccessInjector`, alongside `WindowAccessInjector`/`FormAccessInjector`/
+`TabAccessInjector`/`FieldAccessInjector`/`OrgAccessInjector`/others). Seeding the TEMPLATE role's
+own access (this script's only job) is sufficient — `UserRoleCompositionService` needed no
+changes at all for personal roles to inherit these new grants, the same way they already inherit
+window access.
+
 **Cross-template `AD_Window_Access` overlap — self-contained fix for a latent core bug (found via
 ETP-4878's overlapping matrix, QA/Sentinel; fixed here, not in core, per an explicit human
 decision).** Composing a personal role from 2+ templates that grant the SAME window used to throw
