@@ -73,6 +73,8 @@ public class ProductDefaultsHandler implements NeoHandler {
   private static final String FIELD_UOM = "uOM";
   private static final String FIELD_TAX_CATEGORY = "taxCategory";
   private static final String FIELD_PRODUCT_CATEGORY = "productCategory";
+  private static final String FIELD_TOTAL_ROWS = "totalRows";
+  private static final String FIELD_END_ROW = "endRow";
   private static final String SYSTEM_CLIENT_ID = "0";
 
   @Override
@@ -169,22 +171,33 @@ public class ProductDefaultsHandler implements NeoHandler {
         return null;
       }
       JSONArray filtered = new JSONArray();
-      boolean removed = false;
+      int removedCount = 0;
       for (int i = 0; i < dataArr.length(); i++) {
         JSONObject row = dataArr.optJSONObject(i);
         if (row == null) {
           continue;
         }
         if (hiddenCategoryIds.contains(row.optString(FIELD_PRODUCT_CATEGORY, ""))) {
-          removed = true;
+          removedCount++;
         } else {
           filtered.put(row);
         }
       }
-      if (!removed) {
+      if (removedCount == 0) {
         return null;
       }
       responseWrapper.put("data", filtered);
+      // response.totalRows/endRow come from core's own datasource count query, computed
+      // before this filter ran — decrement them so a caller that pages off totalRows (rather
+      // than data.length, which is already correct) does not request a page past the end.
+      if (responseWrapper.has(FIELD_TOTAL_ROWS)) {
+        responseWrapper.put(FIELD_TOTAL_ROWS,
+            Math.max(0, responseWrapper.optInt(FIELD_TOTAL_ROWS, 0) - removedCount));
+      }
+      if (responseWrapper.has(FIELD_END_ROW)) {
+        responseWrapper.put(FIELD_END_ROW,
+            Math.max(0, responseWrapper.optInt(FIELD_END_ROW, 0) - removedCount));
+      }
       return NeoResponse.ok(body);
     } catch (Exception e) {
       log.warn("product afterHandle: failed to hide system-category products: {}", e.getMessage());

@@ -333,10 +333,15 @@ public class ReportSelectorsServlet extends HttpBaseServlet {
   }
 
   private SelectorQuery buildProductCategoryQuery() {
+    // ETP-4967: excludes categories flagged EM_Etgo_IsSystemCategory='Y' (e.g. "Discounts",
+    // which exists solely to hold the internal global-discount product ETGO_DTO) from the
+    // report scope's category filter/grouping. COALESCE covers rows from before the column
+    // existed, same as InventoryStockReportHandler's own exclusion.
     return new SelectorQuery(
         "SELECT m_product_category_id AS id, name, name AS label",
         new StringBuilder("FROM m_product_category WHERE isactive='Y'"
-            + ACTIVE_CLIENT_NAME_SEARCH),
+            + ACTIVE_CLIENT_NAME_SEARCH
+            + " AND COALESCE(em_etgo_issystemcategory, 'N') <> 'Y'"),
         ORDER_BY_NAME, true);
   }
 
