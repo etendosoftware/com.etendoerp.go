@@ -21,6 +21,7 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -379,6 +380,92 @@ public class CreateInvoiceShipmentHandlerTest {
       JSONObject data = body.getJSONObject("response").getJSONObject("data");
       assertEquals("shipment-1", data.getString("id"));
       assertEquals("ALB-0001", data.getString("documentNo"));
+    }
+  }
+
+  // ── ETP-4863: createShipmentLines anchors storageBin to the shipment's warehouse ───────────
+  //
+  // CreateInvoiceShipmentHandler (the "create shipment from invoice" flow) was the only DAL
+  // M_InOutLine-create path in the module that wrote storageBin verbatim, bypassing
+  // NeoHandlerUtils.anchorLocatorToWarehouse — the same guarantee InOutLineFromOrderFactory
+  // already applies. This proves createShipmentLines routes the resolved locator through that
+  // helper, using the ANCHORED result (not the raw resolveDefaultLocator() result) as the
+  // line's storageBin.
+
+  @Test
+  @SuppressWarnings("unchecked")
+  public void handle_success_anchorsStorageBinToShipmentWarehouse() throws Exception {
+    NeoContext ctx = actionCtx("inv-anchor");
+
+    try (MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
+         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<OBProvider> providerMock = Mockito.mockStatic(OBProvider.class);
+         MockedStatic<NeoHandlerUtils> utilsMock = Mockito.mockStatic(NeoHandlerUtils.class)) {
+
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      OBProvider provider = mock(OBProvider.class);
+      providerMock.when(OBProvider::getInstance).thenReturn(provider);
+
+      Invoice invoice = mock(Invoice.class);
+      Warehouse orderWarehouse = mock(Warehouse.class);
+      Warehouse shipmentWarehouse = mock(Warehouse.class);
+      Locator resolvedLocator = mock(Locator.class);
+      Locator anchoredLocator = mock(Locator.class);
+      Order order = mock(Order.class);
+      Client client = mock(Client.class);
+      Organization org = mock(Organization.class);
+      DocumentType docType = mock(DocumentType.class);
+      ShipmentInOut shipment = mock(ShipmentInOut.class);
+      ShipmentInOutLine shipLine = mock(ShipmentInOutLine.class);
+      Product product = mock(Product.class);
+      UOM uom = mock(UOM.class);
+
+      when(dal.get(Invoice.class, "inv-anchor")).thenReturn(invoice);
+      when(invoice.getSalesOrder()).thenReturn(order);
+      when(order.getWarehouse()).thenReturn(orderWarehouse);
+      when(invoice.getClient()).thenReturn(client);
+      when(invoice.getOrganization()).thenReturn(org);
+
+      OBCriteria<DocumentType> dtCriteria = mock(OBCriteria.class);
+      when(dal.createCriteria(DocumentType.class)).thenReturn(dtCriteria);
+      when(dtCriteria.add(any(Criterion.class))).thenReturn(dtCriteria);
+      when(dtCriteria.setMaxResults(1)).thenReturn(dtCriteria);
+      when(dtCriteria.list()).thenReturn(Collections.singletonList(docType));
+
+      when(provider.get(ShipmentInOut.class)).thenReturn(shipment);
+      when(shipment.getId()).thenReturn("shipment-anchor");
+      when(shipment.getDocumentNo()).thenReturn("ALB-ANCHOR");
+      // The created shipment's own warehouse — what the line must actually anchor to.
+      when(shipment.getWarehouse()).thenReturn(shipmentWarehouse);
+
+      OBCriteria<Locator> locCriteria = mock(OBCriteria.class);
+      when(dal.createCriteria(Locator.class)).thenReturn(locCriteria);
+      when(locCriteria.add(any(Criterion.class))).thenReturn(locCriteria);
+      when(locCriteria.setMaxResults(1)).thenReturn(locCriteria);
+      when(locCriteria.list()).thenReturn(Collections.singletonList(resolvedLocator));
+
+      InvoiceLine invLine = mock(InvoiceLine.class);
+      when(invLine.getProduct()).thenReturn(product);
+      when(invLine.getUOM()).thenReturn(uom);
+      when(invLine.getInvoicedQuantity()).thenReturn(new BigDecimal("3"));
+      when(invLine.getSalesOrderLine()).thenReturn(null);
+      when(invoice.getInvoiceLineList()).thenReturn(Collections.singletonList(invLine));
+
+      when(provider.get(ShipmentInOutLine.class)).thenReturn(shipLine);
+
+      // Simulate the anchor helper correcting the resolved locator to a DIFFERENT one, so the
+      // assertion below can only pass if createShipmentLines actually routes through it.
+      utilsMock.when(() -> NeoHandlerUtils.anchorLocatorToWarehouse(
+          eq(resolvedLocator), eq(shipmentWarehouse), any())).thenReturn(anchoredLocator);
+
+      NeoResponse result = handler.handle(ctx);
+
+      assertNotNull(result);
+      assertEquals(201, result.getHttpStatus());
+      Mockito.verify(shipLine).setStorageBin(anchoredLocator);
+      utilsMock.verify(() -> NeoHandlerUtils.anchorLocatorToWarehouse(
+          eq(resolvedLocator), eq(shipmentWarehouse), any()));
     }
   }
 

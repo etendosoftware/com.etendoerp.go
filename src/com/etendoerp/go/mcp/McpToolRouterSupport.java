@@ -17,9 +17,10 @@
 
 package com.etendoerp.go.mcp;
 
-import java.util.Collections;
+import java.util.Iterator;
 import java.util.List;
 
+import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
@@ -38,10 +39,12 @@ import org.openbravo.model.ad.ui.Tab;
 
 import org.openbravo.service.json.JsonConstants;
 
+import com.etendoerp.go.schemaforge.BatchService;
 import com.etendoerp.go.schemaforge.NeoActionSurface;
 import com.etendoerp.go.schemaforge.NeoResponse;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFSpec;
+import com.etendoerp.go.schemaforge.util.NeoBooleanFormat;
 import com.etendoerp.go.schemaforge.util.NeoMethodPolicy;
 import com.etendoerp.go.schemaforge.util.NeoReportCallability;
 
@@ -60,7 +63,7 @@ final class McpToolRouterSupport {
     criteria.setMaxResults(1);
     List<SFSpec> results = criteria.list();
     if (results.isEmpty()) {
-      throw new OBException("Spec not found: " + specName);
+      throw McpRoutingException.specNotFound(specName);
     }
     return results.get(0);
   }
@@ -74,7 +77,12 @@ final class McpToolRouterSupport {
     criteria.setMaxResults(1);
     List<SFEntity> results = criteria.list();
     if (results.isEmpty()) {
-      throw new OBException("Entity not found: " + entityName);
+      // ETP-4793 / IMP-17: the miss is only worth reporting alongside the names that would have
+      // worked. The extra query runs on the failure path only, and it is the one the agent would
+      // otherwise have to make itself (evidence B20).
+      throw McpRoutingException.entityNotFound(entityName,
+          McpSupportInternals.resolveSpecNameForError(specId),
+          McpSupportInternals.includedEntityNames(specId));
     }
     return results.get(0);
   }
@@ -109,11 +117,12 @@ final class McpToolRouterSupport {
     if ("R".equals(spec.getSpecType())) {
       if (NeoReportCallability.isReportCallable(spec)) {
         String snakeTool = McpConstants.GENERATE_PREFIX + ToolRegistry.kebabToSnake(spec.getName());
-        throw new OBException("Spec '" + spec.getName() + "' is a report type (R) and does not "
-            + "expose listable entities. Use the etendo_" + snakeTool
-            + " tool to produce this report.");
+        throw McpRoutingException.notCrudCapable("Spec '" + spec.getName()
+            + "' is a report type (R) and does not expose listable entities. Use the etendo_"
+            + snakeTool + " tool to produce this report.");
       }
-      throw new OBException(NeoReportCallability.buildNotConfiguredMessage(spec.getName()));
+      throw McpRoutingException.notCrudCapable(
+          NeoReportCallability.buildNotConfiguredMessage(spec.getName()));
     }
     return findIncludedEntity(spec.getId(), entityName);
   }
@@ -143,7 +152,7 @@ final class McpToolRouterSupport {
       return summary;
     }
     for (SFEntity entity : entities) {
-      summary.put(buildDiscoverEntity(entity));
+      summary.put(McpSupportInternals.buildDiscoverEntity(entity));
     }
     return summary;
   }
@@ -175,36 +184,6 @@ final class McpToolRouterSupport {
       }
     }
     return entities.get(0).getName();
-  }
-
-  /**
-   * Builds the entity metadata returned by {@code neo_discover}.
-   *
-   * <p>The {@code readOnly} flag is derived from the entity's configured mutation methods rather
-   * than its name, so it applies consistently to handler-backed GET-only entities and any future
-   * system-data entity configured without POST, PUT, PATCH, or DELETE support.
-   */
-  static JSONObject buildDiscoverEntity(SFEntity entity) throws JSONException {
-    JSONObject item = new JSONObject();
-    item.put("name", entity.getName());
-    item.put("methods", buildMethodsArray(entity));
-    item.put("readOnly", isReadOnlyEntity(entity));
-    // Entity-level agent guidance (ETP-4278), additive to the spec-level and
-    // per-field prompts. Emitted only when set so untagged entities stay lean.
-    String agentPrompt = entity.getAgentPrompt();
-    if (agentPrompt != null && !agentPrompt.trim().isEmpty()) {
-      item.put("agentPrompt", agentPrompt.trim());
-    }
-    return item;
-  }
-
-  /**
-   * Returns whether an entity declares at least one read method and no supported mutation
-   * method. Delegates to {@link NeoMethodPolicy#isReadOnly(SFEntity)} — the single source of
-   * truth for the {@code ETGO_SF_ENTITY} method flags (ETP-4254).
-   */
-  static boolean isReadOnlyEntity(SFEntity entity) {
-    return NeoMethodPolicy.isReadOnly(entity);
   }
 
   static JSONArray buildMethodsArray(SFEntity entity) {
@@ -244,49 +223,8 @@ final class McpToolRouterSupport {
     }
     String specName = spec != null ? spec.getName() : null;
     String entityName = entity != null ? entity.getName() : null;
-    throw new OBException(
+    throw McpRoutingException.methodNotAllowed(
         NeoMethodPolicy.buildMcpNotEnabledMessage(specName, entityName, method, entity));
-  }
-
-  /**
-   * Identify a spec that the generic CRUD path cannot serve at all: one whose included
-   * entities are handler-backed (no {@code AD_Tab}), such as the dashboard's business widgets
-   * (gap G4, ETP-4284).
-   *
-   * <p>ETP-4254 replaced the previous hardcoded {@code "dashboard"} spec-name literal with
-   * this data-driven test, so any future handler-only spec is recognized without a code
-   * change. The rule is deliberately conservative — it fires only on positive evidence (the
-   * spec HAS included entities and NONE of them is AD_Tab-backed). An empty entity list, or a
-   * failed lookup, answers {@code false}: the authoritative per-operation gate is
-   * {@link #requireMethodEnabled(SFSpec, SFEntity, String)}, so this predicate only shapes the
-   * catalog and must never be the thing that silently hides a working window.</p>
-   *
-   * <p><b>Being handler-only is NOT on its own a reason to hide a spec</b> — see
-   * {@link #isCatalogExcludedSpec(SFSpec)}, which is what the callers actually use.</p>
-   *
-   * <p>Cost: one indexed {@code ETGO_SF_ENTITY} query per call.</p>
-   *
-   * @param spec the spec to test (may be {@code null})
-   * @return {@code true} when every included entity of the spec is handler-backed
-   */
-  static boolean isHandlerOnlySpec(SFSpec spec) {
-    if (spec == null) {
-      return false;
-    }
-    return isHandlerOnlySpec(safeListIncludedEntities(spec));
-  }
-
-  /**
-   * Same shape test as {@link #isHandlerOnlySpec(SFSpec)}, against an already-loaded list.
-   *
-   * @param entities the spec's active, included entities (may be {@code null} or empty)
-   * @return {@code true} when the list is non-empty and no entity is AD_Tab-backed
-   */
-  static boolean isHandlerOnlySpec(List<SFEntity> entities) {
-    if (entities == null || entities.isEmpty()) {
-      return false;
-    }
-    return entities.stream().noneMatch(entity -> entity.getADTab() != null);
   }
 
   /**
@@ -296,8 +234,8 @@ final class McpToolRouterSupport {
    *
    * <p>Two conditions, both required:</p>
    * <ol>
-   *   <li>{@link #isHandlerOnlySpec(SFSpec)} — the generic CRUD path cannot serve it, because
-   *       not one included entity is AD_Tab-backed.</li>
+   *   <li>{@link McpSupportInternals#isHandlerOnlySpec(SFSpec)} — the generic CRUD path cannot
+   *       serve it, because not one included entity is AD_Tab-backed.</li>
    *   <li>{@link NeoActionSurface#hasActionSurface(List)} is {@code false} — no entity's
    *       handler answers ACTION requests, so there is no {@code /action} route either.</li>
    * </ol>
@@ -322,10 +260,10 @@ final class McpToolRouterSupport {
     if (spec == null) {
       return false;
     }
-    List<SFEntity> entities = safeListIncludedEntities(spec);
+    List<SFEntity> entities = McpSupportInternals.safeListIncludedEntities(spec);
     // Short-circuit on the cheap shape test: the CDI action probe below only ever runs for the
     // handful of tab-less specs, never for an ordinary AD_Tab-backed window.
-    if (!isHandlerOnlySpec(entities)) {
+    if (!McpSupportInternals.isHandlerOnlySpec(entities)) {
       return false;
     }
     return !NeoActionSurface.hasActionSurface(entities);
@@ -338,9 +276,9 @@ final class McpToolRouterSupport {
    * <p>This is the data-driven rule behind the MCP write-tool catalog (ETP-4254 AC#1):
    * monitor/log specs (SII, VeriFactu, conversion-rate download log, TicketBAI sent
    * invoices) are read-only by configuration, so write tools must not offer them in their
-   * {@code spec} enum. Like {@link #isHandlerOnlySpec(SFSpec)} it requires positive evidence:
-   * an empty entity list or a failed lookup returns {@code false} and keeps the spec writable
-   * in the catalog, because the real refusal happens in
+   * {@code spec} enum. Like {@link McpSupportInternals#isHandlerOnlySpec(SFSpec)} it requires
+   * positive evidence: an empty entity list or a failed lookup returns {@code false} and keeps
+   * the spec writable in the catalog, because the real refusal happens in
    * {@link #requireMethodEnabled(SFSpec, SFEntity, String)}.</p>
    *
    * @param spec the spec to test (may be {@code null})
@@ -350,7 +288,7 @@ final class McpToolRouterSupport {
     if (spec == null) {
       return false;
     }
-    return isReadOnlySpec(safeListIncludedEntities(spec));
+    return isReadOnlySpec(McpSupportInternals.safeListIncludedEntities(spec));
   }
 
   /**
@@ -396,22 +334,6 @@ final class McpToolRouterSupport {
       return false;
     }
     return entities.stream().noneMatch(NeoMethodPolicy::hasMutableMethod);
-  }
-
-  /**
-   * Load a spec's included entities without letting an infrastructure failure break the
-   * caller. Both catalog predicates above are advisory (see their javadoc), so a lookup
-   * failure degrades to "no evidence" — an empty list — rather than hiding a spec.
-   */
-  private static List<SFEntity> safeListIncludedEntities(SFSpec spec) {
-    try {
-      List<SFEntity> entities = listIncludedEntities(spec.getId());
-      return entities != null ? entities : Collections.emptyList();
-    } catch (Exception e) {
-      log.warn("Could not list included entities for spec '{}': {}", spec.getName(),
-          e.getMessage());
-      return Collections.emptyList();
-    }
   }
 
   /**
@@ -582,15 +504,25 @@ final class McpToolRouterSupport {
     return fieldInfo;
   }
 
-  static void coercePrimitiveFieldValue(JSONObject body, String key, Property prop,
-      org.apache.logging.log4j.Logger log) {
+  /**
+   * Coerce one primitive write value in place, and report it back when it is unusable.
+   *
+   * @param callerSupplied whether this key came from the agent rather than from a server-injected
+   *     default. Only a caller's own value may be rejected — see
+   *     {@link McpSupportInternals#coerceDateFieldValue} and {@code McpToolRouter.coerceFieldTypes}
+   * @return a rejection descriptor (see {@link McpSupportInternals#buildInvalidDateInfo}) when the
+   *     value cannot be used, or {@code null} when it was coerced, left alone, or is not the
+   *     caller's to fix
+   */
+  static JSONObject coercePrimitiveFieldValue(JSONObject body, String key, Property prop,
+      boolean callerSupplied, org.apache.logging.log4j.Logger log) {
     Object value = body.opt(key);
     if (!(value instanceof String)) {
-      return;
+      return null;
     }
     String strVal = (String) value;
     if (strVal.isEmpty()) {
-      return;
+      return null;
     }
     try {
       Class<?> type = prop.getPrimitiveObjectType();
@@ -599,12 +531,20 @@ final class McpToolRouterSupport {
             Long.parseLong(strVal.contains(".") ? strVal.substring(0, strVal.indexOf('.')) : strVal));
       } else if (type == java.math.BigDecimal.class) {
         body.put(key, new java.math.BigDecimal(strVal));
-      } else if (type == Boolean.class) {
-        body.put(key, "Y".equalsIgnoreCase(strVal) || "true".equalsIgnoreCase(strVal));
+      } else if (type != null && Boolean.class.isAssignableFrom(type)) {
+        // ETP-4793: shared with the REST coercer via NeoBooleanFormat. The two used to differ
+        // on case sensitivity ("y" was accepted here and rejected there).
+        body.put(key, NeoBooleanFormat.toLenientBoolean(strVal));
+      } else if (type != null && java.util.Date.class.isAssignableFrom(type)) {
+        return McpSupportInternals.coerceDateFieldValue(body, key, prop, strVal, callerSupplied, log);
       }
     } catch (Exception e) {
+      // Numeric and boolean shapes stay lenient here: a malformed one already surfaces as a DAL
+      // error whose text names the column, so the agent is not left guessing. Dates were the
+      // exception worth fixing (IMP-24) because the lenient parser *succeeds* on them.
       log.debug("Could not coerce field {} value '{}': {}", key, strVal, e.getMessage());
     }
+    return null;
   }
 
   // ── Action result mapping (kept here to stay within McpToolRouter method-count limit) ─
@@ -669,7 +609,17 @@ final class McpToolRouterSupport {
 
   /**
    * Wraps a flat JSON body into the structure expected by DefaultJsonDataService.
-   * Identical to NeoServlet.wrapForSmartclient().
+   *
+   * <p><b>This wrapper does not coerce.</b> It is no longer identical to
+   * {@link com.etendoerp.go.schemaforge.util.NeoTypeCoercionHelper#wrapForSmartclient}, which calls
+   * {@code coerceTypes} on its way through — so on the REST side the wrap is a second safety net,
+   * and here it is not. Type and date coercion is the caller's responsibility on this path:
+   * {@code McpToolRouter#coerceFieldTypes} must run before the body reaches this method.
+   *
+   * <p>That asymmetry is what let ETP-4793 / IMP-16 ship a working date coercer and still corrupt
+   * dates on {@code neo_update}: the verb wrapped without coercing, and nothing in either signature
+   * said it had to. Do not add coercion here to fix a future gap of that kind — it would give
+   * {@code neo_create} two passes and hide the missing call site again instead of naming it.
    */
   static String wrapForSmartclient(JSONObject filteredBody, String dalEntityName,
       String recordId, org.apache.logging.log4j.Logger log) {
@@ -701,12 +651,15 @@ final class McpToolRouterSupport {
    * @throws IllegalArgumentException when {@code args} is {@code null} or a key is missing
    */
   static void validateArgs(JSONObject args, String... required) {
+    // ETP-4793 / IMP-17: an absent argument is the caller's mistake, so it must not travel as an
+    // IllegalArgumentException the router can only classify as a 500. The exception carries its own
+    // 422 envelope and names the argument in `field`.
     if (args == null) {
-      throw new IllegalArgumentException("Missing arguments");
+      throw McpRoutingException.missingArgument("Missing arguments", null);
     }
     for (String key : required) {
       if (!args.has(key) || args.isNull(key)) {
-        throw new IllegalArgumentException("Missing required argument: " + key);
+        throw McpRoutingException.missingArgument("Missing required argument: " + key, key);
       }
     }
   }
@@ -768,26 +721,95 @@ final class McpToolRouterSupport {
    * Build an explicit, machine-detectable not-found error body for a get-by-id (IMP-5).
    * <p>
    * Replaces the ambiguous {@code {data:[], status:0}} success shape with a clear
-   * {@code {response:{status:404, error:"not_found", detail:"…"}}} so an agent can tell
+   * {@code {status:404, error:"not_found", detail:"…", seeAlso:"…"}} so an agent can tell
    * "not found" from "empty match" purely from the response.
+   *
+   * <p><b>Flat, as of IMP-5 clause (iii).</b> This envelope used to be returned wrapped in
+   * {@code {"response":{…}}}, which made it the one read-verb error that did not match the shape of
+   * its siblings on the same tool: an unknown filter or a DAL failure on the very same
+   * {@code neo_get} call came back flat from {@code buildDalFailureEnvelope}. IMP-17 §8.6 measured
+   * "read errors are flat" on that vector and the not-found vector was never re-checked, so the
+   * asymmetry survived inside the item that introduced the envelope.</p>
    *
    * @param specName   the spec name from the tool call
    * @param entityName the entity name from the tool call
    * @param recordId   the id that matched no record
-   * @return the wrapped not-found error object
+   * @return the flat not-found envelope
    * @throws JSONException never in practice (all values are plain strings/ints)
    */
   static JSONObject buildNotFoundError(String specName, String entityName, String recordId)
       throws JSONException {
-    JSONObject inner = new JSONObject();
-    inner.put(McpConstants.KEY_STATUS, McpConstants.STATUS_NOT_FOUND);
-    inner.put(McpConstants.KEY_ERROR, McpConstants.ERROR_NOT_FOUND);
-    inner.put(McpConstants.KEY_DETAIL,
+    JSONObject envelope = new JSONObject();
+    envelope.put(McpConstants.KEY_STATUS, McpConstants.STATUS_NOT_FOUND);
+    envelope.put(McpConstants.KEY_ERROR, McpConstants.ERROR_NOT_FOUND);
+    envelope.put(McpConstants.KEY_DETAIL,
         "No " + specName + "/" + entityName + " with id " + recordId);
-    inner.put(McpConstants.KEY_SEE_ALSO, McpConstants.SEE_ALSO_READING);
-    JSONObject wrapper = new JSONObject();
-    wrapper.put(JsonConstants.RESPONSE_RESPONSE, inner);
-    return wrapper;
+    envelope.put(McpConstants.KEY_SEE_ALSO, McpConstants.SEE_ALSO_READING);
+    return envelope;
+  }
+
+  /**
+   * Lift a success body out of core's {@code {"response":{…}}} wrapper (ETP-4793 / IMP-5
+   * clause (iii)).
+   *
+   * <p><b>The asymmetry this closes.</b> Every MCP failure body is flat — {@code {status, error,
+   * detail, …}} — and so is every {@code neo_delete} success, which builds its own
+   * {@code {deleted,id}}. The four DAL-backed successes were the exception: {@code neo_list},
+   * {@code neo_get}, {@code neo_create} and {@code neo_update} forwarded
+   * {@code {"response":{data,status:0,startRow,endRow,totalRows}}} straight from
+   * {@code DefaultJsonDataService}, so an agent had to unwrap <em>conditionally</em>, on a key it
+   * could only predict by first knowing whether the call had succeeded. Same defect class as clauses
+   * (i) and (iv): one surface, two shapes, chosen by which code path produced the body.</p>
+   *
+   * <p><b>Wider than the clause as registered</b>, which reads "read-verb wrapped, write-verb bare".
+   * That was measured on the <em>error</em> bodies (IMP-17 §8.6); on the success bodies the write
+   * verbs are wrapped too, and only {@code neo_delete} — which never returns
+   * {@code DefaultJsonDataService}'s response — is bare. Flattening the reads alone would have made
+   * {@code neo_create} and {@code neo_update} the new outliers, i.e. moved the inconsistency rather
+   * than removed it.</p>
+   *
+   * <p><b>Where the wrapper comes from, and why it is not removed there.</b> {@code response} is
+   * Etendo core's RPC convention and ~20 {@code schemaforge} handlers speak it over NEO REST, where
+   * the React UI reads it. Flattening in core would break that consumer, so the translation lives in
+   * the MCP layer — the same layering call as clause (iv) §4.4 for {@code NeoResponse.error} and as
+   * IMP-17 §4.4 before it.</p>
+   *
+   * <p><b>{@code status:0} is dropped, and nothing replaces it.</b> By the time a body reaches here
+   * the failure branches have already returned, so the DAL success code carries no information — and
+   * it actively misleads, because {@code status} on every other MCP body is an HTTP code, so an agent
+   * branching on it read {@code 0} where it expected {@code 200}. No {@code status:200} is
+   * substituted either: the absence of {@code error} is already the success discriminator every other
+   * verb uses, and a second redundant one is a second thing to drift.</p>
+   *
+   * <p><b>Everything else is lifted, not filtered.</b> The pagination keys survive, and so does any
+   * key a later stage added inside the wrapper — IMP-18's {@code unknownFields} is lifted to the top
+   * level by this rule rather than by being named here, which is why a future annotation needs no
+   * edit to this method. A body with no {@code response} object is returned untouched, so calling
+   * this twice is safe; a body carrying keys <em>beside</em> {@code response} is left alone rather
+   * than merged, because that shape is not one this layer produces and guessing at a collision is
+   * worse than passing it through.</p>
+   *
+   * @param responseJson the parsed DAL response, or {@code null}
+   * @return the flattened body; {@code responseJson} itself when it is not a lone wrapper
+   * @throws JSONException never in practice (keys are copied, not parsed)
+   */
+  static JSONObject flattenCoreResponse(JSONObject responseJson) throws JSONException {
+    if (responseJson == null) {
+      return null;
+    }
+    JSONObject inner = responseJson.optJSONObject(JsonConstants.RESPONSE_RESPONSE);
+    if (inner == null || responseJson.length() != 1) {
+      return responseJson;
+    }
+    JSONObject flat = new JSONObject();
+    for (Iterator<?> keys = inner.keys(); keys.hasNext();) {
+      String key = String.valueOf(keys.next());
+      if (JsonConstants.RESPONSE_STATUS.equals(key)) {
+        continue;
+      }
+      flat.put(key, inner.get(key));
+    }
+    return flat;
   }
 
   /**
@@ -803,5 +825,200 @@ final class McpToolRouterSupport {
     guidance.put(McpConstants.KEY_TOOL, McpConstants.TOOL_DOCS);
     guidance.put(McpConstants.KEY_HINT, McpConstants.GUIDANCE_DOCS_HINT);
     return guidance;
+  }
+
+  /**
+   * Normalize a {@link com.etendoerp.go.schemaforge.NeoResponse} error body into the flat IMP-5
+   * envelope (ETP-4793 / IMP-5 clause (iv)).
+   *
+   * <p><b>The fourth error funnel.</b> IMP-17 enumerated three places a raw error escaped the
+   * envelope and closed all three. Verifying IMP-19 found a fourth that none of them covered:
+   * a report handler's <em>own</em> errors. {@code McpToolRouter#handleReport} validates the call
+   * against the handler's declared contract — that half is enveloped — and then invokes the handler,
+   * whose {@code NeoResponse} body is forwarded verbatim. So
+   * {@code generate_aging_receivable({})} answered
+   * {@code {"error":{"message":"No accounting schema with currency is configured for organization
+   * 6184…","status":422}}}: the nested pre-IMP-5 shape, with no machine-detectable code to branch on.
+   * The same funnel serves {@code neo_process}, the {@code neo_widget}/amortization paths and every
+   * entity pre/post hook, because all of them return through
+   * {@code McpHookExecutor#neoResponseToMcpResult} — which is why one normalization here covers five
+   * surfaces, the same leverage IMP-17 got from closing three funnels with one change.</p>
+   *
+   * <p><b>The shape is not rewritten in {@code NeoResponse.error} itself</b>, deliberately. That
+   * factory serves the REST endpoints the React UI consumes, and its nested {@code error.message} is
+   * what the UI reads. This is the same split IMP-17 §4.4 made for {@code MISSING_REQUIRED_FIELDS}:
+   * the REST shape stays, the translation to the agent's shape happens in the MCP layer.</p>
+   *
+   * <p><b>Additive, never destructive.</b> A handler may have built a rich body on purpose, so no
+   * key is ever removed: the nested {@code error} object is flattened (its {@code message} becomes
+   * {@code detail}, its remaining keys are lifted alongside), and {@code status} / {@code error} are
+   * filled in only when absent. A body that is already a canonical envelope — {@code error} carrying
+   * a code {@code String} — is returned untouched, which is what keeps this idempotent and keeps the
+   * richer IMP-17 / IMP-24 bodies ({@code missingFields}, {@code invalidDates}, {@code fieldErrors})
+   * passing through this method intact.</p>
+   *
+   * <p><b>No {@code seeAlso} is added</b>, on IMP-17 §4.3's precedent that a deliberate omission
+   * beats an unhelpful value. The two topics that exist are {@code "reading records"} and
+   * {@code "creating records"}; pointing an agent at either for *"no accounting schema with currency
+   * is configured"* sends it to read a recipe that cannot help. When a handler knows a better
+   * pointer it can put one in its own body, and this method will preserve it.</p>
+   *
+   * @param body       the handler's error body, or {@code null}
+   * @param httpStatus the response status, used when the body names none
+   * @return the normalized envelope; a fresh object when {@code body} is {@code null}, otherwise
+   *         {@code body} itself, mutated in place
+   * @throws JSONException never in practice (all values are plain strings/ints)
+   */
+  static JSONObject toMcpHandlerError(JSONObject body, int httpStatus) throws JSONException {
+    if (body == null) {
+      JSONObject envelope = new JSONObject();
+      envelope.put(McpConstants.KEY_STATUS, httpStatus);
+      envelope.put(McpConstants.KEY_ERROR, McpSupportInternals.errorCodeForStatus(httpStatus));
+      envelope.put(McpConstants.KEY_DETAIL, "Request failed with status " + httpStatus);
+      return envelope;
+    }
+    // Already canonical: 'error' holds the code itself. Returning early is what makes repeated
+    // normalization safe, and it is why the envelopes IMP-17 and IMP-24 build upstream survive.
+    if (body.optString(McpConstants.KEY_ERROR, null) != null
+        && body.optJSONObject(McpConstants.KEY_ERROR) == null) {
+      return body;
+    }
+    JSONObject nested = body.optJSONObject(McpConstants.KEY_ERROR);
+    int status = nested != null ? flattenNestedError(body, nested, httpStatus) : httpStatus;
+    body.put(McpConstants.KEY_ERROR, McpSupportInternals.errorCodeForStatus(status));
+    if (!body.has(McpConstants.KEY_STATUS)) {
+      body.put(McpConstants.KEY_STATUS, status);
+    }
+    if (!body.has(McpConstants.KEY_DETAIL)) {
+      body.put(McpConstants.KEY_DETAIL, "Request failed with status " + status);
+    }
+    return body;
+  }
+
+  /**
+   * Flatten {@code body}'s nested {@code error} object into it in place, and resolve the
+   * HTTP status. Extracted from {@link #toMcpHandlerError} to keep that method's cognitive
+   * complexity within SonarQube's limit — pure extraction, no behavior change: same order of
+   * operations (resolve status, fill {@code detail}, lift remaining keys, then remove the
+   * nested {@code error} object) as before the extraction.
+   *
+   * @param body       the error body being normalized, mutated in place
+   * @param nested     {@code body}'s nested {@code error} object (never {@code null})
+   * @param httpStatus the fallback status when {@code nested} names none
+   * @return the resolved status, read from {@code nested} when present, else {@code httpStatus}
+   */
+  private static int flattenNestedError(JSONObject body, JSONObject nested, int httpStatus)
+      throws JSONException {
+    int status = nested.optInt(McpConstants.KEY_STATUS, httpStatus);
+    String message = nested.optString(McpConstants.KEY_MESSAGE, null);
+    if (message != null && !message.isBlank() && !body.has(McpConstants.KEY_DETAIL)) {
+      body.put(McpConstants.KEY_DETAIL, message);
+    }
+    // Lift whatever else the handler put inside the nested object rather than discarding it —
+    // a handler that reported a field or a candidate list meant the agent to see it.
+    for (Iterator<?> keys = nested.keys(); keys.hasNext();) {
+      String key = String.valueOf(keys.next());
+      if (!McpConstants.KEY_MESSAGE.equals(key) && !McpConstants.KEY_STATUS.equals(key)
+          && !body.has(key)) {
+        body.put(key, nested.get(key));
+      }
+    }
+    body.remove(McpConstants.KEY_ERROR);
+    return status;
+  }
+
+  /**
+   * Report a batch rejected by the MCP FK pre-pass in the same outcome envelope a batch failure
+   * always uses (ETP-4793 / IMP-5 clause (i)).
+   *
+   * <p><b>The envelope used to differ by failure class.</b> A batch that failed inside
+   * {@code executeBatch} came back as {@code {committed:false, atomic, persisted, hint, failedAt,
+   * error:{…}}}. A batch rejected by the FK-by-name pre-pass — which runs <em>before</em>
+   * {@code executeBatch} — came back as the resolver's flat error with a {@code failedAt} bolted on
+   * and <b>no {@code committed} key at all</b> (evidence C9), so an agent branching on
+   * {@code committed}, exactly as the tool description tells it to, read {@code false} from a missing
+   * key by luck or crashed on it. One condition, two shapes, and the difference was invisible from
+   * the call site.</p>
+   *
+   * <p><b>{@code atomic:true} / {@code persisted:[]} are true here by construction</b>, not by
+   * observation — a stronger guarantee than {@code executeBatch} can give. IMP-23 §1 found that the
+   * discriminator three benchmark runs had missed was exactly this: a pre-pass failure happens before
+   * the transaction opens, so nothing can have persisted, which is why these failures always
+   * <em>looked</em> atomic while persist-time failures were not. What used to be an accident of
+   * timing is now a claim the response makes. The hint says so specifically rather than reusing
+   * {@code BatchService}'s "rolled back as a unit" wording: no rollback happened, because no
+   * transaction was opened.</p>
+   *
+   * @param fkError the resolver's structured error for the first op that failed to resolve
+   * @param index   the index of that operation in the {@code operations} array
+   * @param opId    that operation's caller-supplied {@code id}, or {@code null} when it declared none
+   * @return the batch outcome envelope
+   * @throws JSONException never in practice (all values are plain strings/ints)
+   */
+  static JSONObject toMcpBatchPreflightFailure(JSONObject fkError, int index, String opId)
+      throws JSONException {
+    JSONObject body = new JSONObject();
+    body.put(BatchService.FIELD_COMMITTED, false);
+    body.put(BatchService.FIELD_ATOMIC, true);
+    body.put(BatchService.FIELD_PERSISTED, new JSONArray());
+    body.put(BatchService.FIELD_HINT, "Nothing was persisted: the batch was rejected before the "
+        + "transaction opened, so no records were created and none need cleaning up. Fix the "
+        + "operation reported in 'failedAt' and retry the whole batch.");
+    JSONObject failedAt = new JSONObject();
+    failedAt.put("index", index);
+    if (StringUtils.isNotBlank(opId)) {
+      failedAt.put("id", opId);
+    }
+    body.put("failedAt", failedAt);
+    body.put(McpConstants.KEY_ERROR, fkError);
+    return body;
+  }
+
+  /**
+   * Rewrite a {@code BatchService} failure body into the IMP-5 error envelope (IMP-15).
+   * <p>
+   * {@code BatchService} serves both the REST {@code /batch} endpoint and {@code neo_batch}, and it
+   * forwards the failing operation's sub-response verbatim as {@code error.detail}. For an MCP agent
+   * that meant a raw DAL payload — {@code {"response":{"status":-4,"errors":{"id":"New object
+   * Currency(null) (key: EUR_Currency) refered to but not present in the import set"}}}} — with no
+   * error code, no field and no next step, while the single-record verbs had carried a structured
+   * envelope since IMP-5. The translation happens here rather than in {@code BatchService} so the
+   * REST contract, and any non-MCP caller reading {@code detail}, stay untouched.
+   * <p>
+   * Success bodies ({@code committed:true}) and bodies with no {@code error} object pass through
+   * unchanged. The {@code failedAt} pointer is always preserved — it is what tells the agent which
+   * operation to fix.
+   *
+   * @param result the body returned by {@code BatchService#executeBatch}, mutated in place
+   * @return the same object, for call chaining
+   * @throws JSONException never in practice (all values are plain strings/ints)
+   */
+  static JSONObject toMcpBatchFailure(JSONObject result) throws JSONException {
+    if (result == null || result.optBoolean("committed", false)) {
+      return result;
+    }
+    JSONObject rawError = result.optJSONObject(McpConstants.KEY_ERROR);
+    if (rawError == null) {
+      return result;
+    }
+    int status = rawError.optInt(McpConstants.KEY_STATUS, 500);
+    String message = rawError.optString(McpConstants.KEY_MESSAGE, "Batch operation failed");
+    JSONObject detail = rawError.optJSONObject(McpConstants.KEY_DETAIL);
+
+    JSONArray missingFields = McpSupportInternals.extractMissingFields(detail);
+    if (missingFields != null) {
+      result.put(McpConstants.KEY_ERROR, McpSupportInternals.buildBatchMissingFieldsError(missingFields));
+      return result;
+    }
+
+    String dalMessage = McpSupportInternals.extractDalMessage(detail);
+
+    JSONObject clean = new JSONObject();
+    clean.put(McpConstants.KEY_STATUS, status);
+    clean.put(McpConstants.KEY_ERROR, McpSupportInternals.errorCodeForStatus(status));
+    clean.put(McpConstants.KEY_DETAIL, dalMessage == null ? message : message + ": " + dalMessage);
+    clean.put(McpConstants.KEY_SEE_ALSO, McpConstants.SEE_ALSO_WRITING);
+    result.put(McpConstants.KEY_ERROR, clean);
+    return result;
   }
 }

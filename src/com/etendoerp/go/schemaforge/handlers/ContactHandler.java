@@ -16,9 +16,11 @@
  */
 package com.etendoerp.go.schemaforge.handlers;
 
+import java.util.Collections;
+import java.util.Set;
+
 import javax.inject.Named;
 
-import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONObject;
@@ -31,8 +33,8 @@ import com.etendoerp.go.schemaforge.NeoResponse;
 /**
  * Pre-save hook for the {@code contact} entity ({@code AD_User}) of the contacts spec.
  *
- * <p>Fills the two AD-mandatory columns that the window does not expose as editable
- * fields, so a create driven only by the visible fields (first name / last name) passes
+ * <p>Fills the AD-mandatory name column that the window does not expose as an editable
+ * field, so a create driven only by the visible fields (first name / last name) passes
  * validation:
  * <ul>
  *   <li><b>{@code name}</b> — {@code AD_User.Name} is mandatory but declared
@@ -40,14 +42,12 @@ import com.etendoerp.go.schemaforge.NeoResponse;
  *       {@code firstName + " " + lastName} by {@link AbstractPersonNameHandler#deriveName}
  *       when the effective name is blank (body value on POST, persisted value on
  *       PATCH/PUT).</li>
- *   <li><b>{@code username}</b> — {@code AD_User.Username} is AD-mandatory and is not
- *       declared as a Schema Forge field at all, so
- *       {@code NeoHiddenMandatoryDefaultsResolver} cannot resolve it (the column has no
- *       AD default). Derived from {@code name} on POST only, when blank.</li>
+ *   <li><b>{@code username}</b> — intentionally omitted. Contacts created through Classic
+ *       leave {@code AD_User.Username} null, so NEO must preserve that behavior.</li>
  * </ul>
  *
- * <p>Both values are truncated to the column length ({@code NVARCHAR(60)} for
- * {@code AD_User.Name} and {@code AD_User.Username}).
+ * <p>The derived name is truncated to the {@code AD_User.Name} column length
+ * ({@code NVARCHAR(60)}).
  *
  * <p><b>ETP-4156.</b> This logic used to live in the app-shell's generic
  * {@code useEntity} hook, branching on hardcoded entity names
@@ -57,9 +57,8 @@ import com.etendoerp.go.schemaforge.NeoResponse;
  *
  * <p>Two deliberate differences from the removed front-end code:
  * <ul>
- *   <li>{@code username} is derived on POST only. The old hook also rewrote it on every
- *       update whose payload carried a new {@code name}, silently reassigning a unique
- *       login identifier on rename.</li>
+ *   <li>{@code username} is not generated. The old hook generated it from the contact name,
+ *       which diverged from Classic and caused duplicate {@code AD_User.Username} errors.</li>
  *   <li>It applies to the contacts spec's {@code contact} entity only. The {@code user}
  *       spec exposes {@code name} and {@code username} as editable fields, so it no
  *       longer gets a silent autofill.</li>
@@ -76,13 +75,12 @@ public class ContactHandler extends AbstractPersonNameHandler {
 
   private static final Logger log = LogManager.getLogger(ContactHandler.class);
 
-  private static final String FIELD_USERNAME = "username";
   private static final String FIELD_FIRSTNAME = "firstName";
   private static final String FIELD_LASTNAME = "lastName";
 
   private static final String METHOD_POST = "POST";
 
-  /** {@code AD_User.Name} and {@code AD_User.Username} are both {@code NVARCHAR(60)}. */
+  /** {@code AD_User.Name} is {@code NVARCHAR(60)}. */
   private static final int MAX_LENGTH = 60;
 
   @Override
@@ -106,6 +104,11 @@ public class ContactHandler extends AbstractPersonNameHandler {
   }
 
   @Override
+  public Set<String> protectedCreateCalloutFields(NeoContext context) {
+    return Collections.singleton("username");
+  }
+
+  @Override
   public NeoResponse handle(NeoContext ctx) {
     String method = ctx.getHttpMethod();
     boolean isWrite = METHOD_POST.equals(method) || "PATCH".equals(method) || "PUT".equals(method);
@@ -118,9 +121,6 @@ public class ContactHandler extends AbstractPersonNameHandler {
     }
     try {
       deriveName(ctx, body);
-      if (METHOD_POST.equals(method)) {
-        deriveUsername(body);
-      }
     } catch (Exception e) {
       log.error("ContactHandler: error in handle()", e);
       throw new OBException("Error processing Contact name derivation", e);
@@ -128,17 +128,4 @@ public class ContactHandler extends AbstractPersonNameHandler {
     return null;
   }
 
-  /**
-   * Fills the mandatory {@code username} from {@code name} when the create body omits it.
-   */
-  private void deriveUsername(JSONObject body) throws Exception {
-    if (StringUtils.isNotBlank(body.optString(FIELD_USERNAME, null))) {
-      return;
-    }
-    String name = StringUtils.trimToEmpty(body.optString(FIELD_NAME, ""));
-    if (StringUtils.isBlank(name)) {
-      return;
-    }
-    body.put(FIELD_USERNAME, truncateToMaxNameLength(name));
-  }
 }

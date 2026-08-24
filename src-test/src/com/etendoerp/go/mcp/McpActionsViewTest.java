@@ -125,5 +125,42 @@ class McpActionsViewTest {
       assertEquals(2, response.getJSONArray(McpActionsView.KEY_ACTIONS).length());
       assertFalse(response.has("fields"));
     }
+
+    /**
+     * IMP-21: the catalog lists every button the window has, but only the invokable ones carry
+     * {@code invokeVia}. {@code invokableCount} is what tells an agent the split without walking
+     * the array — on sales-invoice it reads 5 of 22.
+     */
+    @Test
+    @DisplayName("invokableCount counts only the actions carrying invokeVia")
+    void countsInvokableActions() throws JSONException {
+      JSONArray fields = sampleFields();
+      JSONObject discarded = buttonField("calculatePromotions", "Calculate Promotions");
+      discarded.remove("invokeVia");
+      discarded.put("invokable", false);
+      discarded.put("notInvokableReason", "discarded: not part of the curated agent surface");
+      fields.put(discarded);
+
+      JSONObject response = McpActionsView.buildResponse("sales-invoice", "header", fields);
+
+      assertEquals(3, response.getInt("actionCount"));
+      assertEquals(2, response.getInt(McpActionsView.KEY_INVOKABLE_COUNT));
+    }
+
+    /** A catalog where nothing is callable reports 0, not a missing key. */
+    @Test
+    @DisplayName("invokableCount is 0 when no action is callable")
+    void countsZeroWhenNothingInvokable() throws JSONException {
+      JSONArray fields = new JSONArray();
+      JSONObject blocked = buttonField("createLinesFrom", "");
+      blocked.remove("invokeVia");
+      blocked.put("invokable", false);
+      fields.put(blocked);
+
+      JSONObject response = McpActionsView.buildResponse("sales-invoice", "header", fields);
+
+      assertEquals(1, response.getInt("actionCount"));
+      assertEquals(0, response.getInt(McpActionsView.KEY_INVOKABLE_COUNT));
+    }
   }
 }
