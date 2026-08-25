@@ -22,6 +22,8 @@ import java.util.List;
 import java.util.Set;
 
 import org.apache.commons.lang3.StringUtils;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.base.provider.OBProvider;
@@ -33,12 +35,15 @@ import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.currency.Currency;
 import org.openbravo.model.common.enterprise.Organization;
 
+import com.etendoerp.go.common.GoAccountResolver;
 import com.etendoerp.go.payment.TenantPlanService;
 import com.etendoerp.go.schemaforge.data.Account;
 import com.auth0.jwt.interfaces.DecodedJWT;
 import com.smf.securewebservices.utils.SecureWebServicesUtils;
 
 final class EtendoGoJwtDalHelper {
+
+  private static final Logger log = LogManager.getLogger();
 
   private static final String ZERO_ID = "0";
   private static final String STAR_ORGANIZATION_VALUE = "*";
@@ -123,19 +128,58 @@ final class EtendoGoJwtDalHelper {
       String userId = jwt == null ? null : jwt.getClaim("user").asString();
       User user = StringUtils.isBlank(userId) ? null : OBDal.getInstance().get(User.class, userId);
       if (user == null || !Boolean.TRUE.equals(user.isActive())) {
+        log.debug("Bearer token resolved to no active AD_User");
         return null;
       }
-      String accountEmail = StringUtils.trimToNull(user.getEmail());
-      if (accountEmail == null) accountEmail = StringUtils.trimToNull(user.getUsername());
-      account = accountEmail == null ? null : findActiveAccountByEmail(accountEmail);
-      if (account == null && StringUtils.isNotBlank(user.getUsername())) {
-        account = findActiveAccountByEmail(user.getUsername());
+      account = findAccountForEnvironmentUser(user);
+      if (account == null) {
+        log.debug("No active account owns environment user {}", maskUsername(user.getUsername()));
+        return null;
       }
-      return account != null && clientBelongsToAccountEmail(user.getClient().getId(), account.getEmail())
-          ? account : null;
+      // Unchanged tenant-isolation gate: the client the JWT was issued for must actually be owned
+      // by the resolved account. Recovering the account from a suffixed username must not become a
+      // way past this check.
+      if (!clientBelongsToAccountEmail(user.getClient().getId(), account.getEmail())) {
+        log.debug("Client {} is not owned by the account behind the presented token",
+            user.getClient().getId());
+        return null;
+      }
+      return account;
     } catch (Exception e) {
+      log.debug("Bearer token could not be resolved to an account: {}", e.getMessage(), e);
       return null;
     }
+  }
+
+  /**
+   * Resolves the platform account behind an environment's {@code AD_User}.
+   *
+   * <p>{@code AD_User.email} is authoritative when set, but onboarding never sets it —
+   * {@code InitialSetupUtility.insertUser} only writes {@code username} — so in practice the
+   * identity lives in the username. Onboarding names the first environment user after the plain
+   * account email and every later one {@code <accountEmail>+<clientName>}
+   * ({@link EtendoGoJwtSupport#buildClientUsername}), so an exact-match lookup silently fails from
+   * the second tenant onwards. {@link GoAccountResolver#findAccountByUsername} is the canonical
+   * inverse of that naming: it splits on the <em>last</em> {@code '+'}, which keeps plus-addressed
+   * account emails intact.
+   */
+  private static Account findAccountForEnvironmentUser(User user) {
+    String email = StringUtils.trimToNull(user.getEmail());
+    Account byEmail = email == null ? null : findActiveAccountByEmail(email);
+    if (byEmail != null) {
+      return byEmail;
+    }
+    return GoAccountResolver.findAccountByUsername(user.getUsername()).orElse(null);
+  }
+
+  /** Masks a username for logging, mirroring {@code EtendoGoJwtServlet.maskEmail}. */
+  private static String maskUsername(String username) {
+    String trimmed = StringUtils.trimToNull(username);
+    if (trimmed == null) {
+      return "(unknown)";
+    }
+    int at = trimmed.indexOf('@');
+    return at <= 0 ? trimmed.charAt(0) + "***" : trimmed.charAt(0) + "***" + trimmed.substring(at);
   }
 
   static Account findActiveAccountBySsoIdentity(String provider, String subject) {
