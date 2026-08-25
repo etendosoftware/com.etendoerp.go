@@ -1,9 +1,12 @@
 package com.etendoerp.go.schemaforge;
 
 import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -119,6 +122,16 @@ public class NeoMandatoryDefaultsService {
       MandatoryDefaultContext mCtx = new MandatoryDefaultContext(parentId, vars, conn,
           windowId, ctx, parentValues, sfFieldDefaults);
 
+      // ETP-4784: snapshot the field names present in the body AS SUBMITTED BY THE CLIENT,
+      // before the generic mandatory-column defaults pass below writes anything into it. This
+      // is the set of fields the callout cascade must treat as user-provided and protect from
+      // being overwritten. Taking this snapshot AFTER injectDefaultsForActiveColumns (the
+      // previous behaviour) incorrectly included columns the backend itself just filled with a
+      // generic, BP-agnostic default (e.g. aeatsiiClaveTipo="F1" from the plain AD_Column
+      // default), causing a later, more specific callout (e.g. the Business Partner callout
+      // resolving "F2") to be silently discarded as if the user had chosen "F1" on purpose.
+      Set<String> clientProvidedFields = snapshotBodyKeys(body);
+
       // ETP-4274: iterate ALL active columns, not only mandatory ones. Non-mandatory
       // columns that have a genuine resolvable default (e.g. C_Currency_ID from
       // @C_Currency_ID@) must be injected on create to reach parity with /defaults —
@@ -132,13 +145,32 @@ public class NeoMandatoryDefaultsService {
       // Skipped when the caller will run the cascade explicitly right after, to avoid
       // duplicating the (expensive) cascade pass.
       if (runCascade) {
-        NeoDefaultsCascadeHelper.executeCalloutCascadeForCreate(ctx, adTab, body);
+        NeoDefaultsCascadeHelper.executeCalloutCascadeForCreate(
+            ctx, adTab, body, clientProvidedFields);
       }
 
     } catch (Exception e) {
       log.error("Error injecting mandatory defaults for tab {}: {}",
           adTab.getName(), e.getMessage(), e);
     }
+  }
+
+  /**
+   * Returns a snapshot of the top-level key names currently present in {@code body}.
+   *
+   * <p>Used by {@link #injectMandatoryDefaults(JSONObject, Tab, NeoContext, String, boolean)}
+   * to capture, BEFORE the generic mandatory-column defaults pass runs, which fields the
+   * client actually submitted on the create POST — so the trailing callout cascade can tell
+   * a genuine user-provided value from one the backend just filled in with a generic default
+   * (ETP-4784).</p>
+   */
+  private static Set<String> snapshotBodyKeys(JSONObject body) {
+    Set<String> keys = new HashSet<>();
+    Iterator<String> bodyKeys = body.keys();
+    while (bodyKeys.hasNext()) {
+      keys.add(bodyKeys.next());
+    }
+    return keys;
   }
 
   /**

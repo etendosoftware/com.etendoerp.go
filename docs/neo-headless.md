@@ -205,11 +205,30 @@ Returns a single record. Requires either `ISGET` or `ISGETBYID` to be enabled.
 
 Request body is JSON. Delegated to DataSourceServlet's POST handler.
 
-Before persistence, NEO resolves defaults and executes the header-tab callout cascade. Values
-explicitly supplied by the client and values injected for mandatory AD columns are protected from
-callout updates. Defaults for non-mandatory columns remain eligible for callout-derived updates.
-This keeps an explicit or mandatory system default from being replaced by an unrelated selector
-callout while preserving normal dependent-field derivation.
+Before persistence, NEO resolves defaults and executes the header-tab callout cascade, in this
+strict order:
+
+1. **Snapshot** the field names present in the request body exactly as submitted by the client
+   (`NeoMandatoryDefaultsService.injectMandatoryDefaults`, before step 2 runs).
+2. **Inject generic mandatory-column defaults** (`injectDefaultsForActiveColumns`) — plain
+   `AD_Column` defaults, session context, parent-tab values — for any column the client did not
+   submit.
+3. **Run the callout cascade** (`NeoDefaultsCascadeHelper.executeCalloutCascadeForCreate`),
+   passing the *step-1 snapshot* as `protectedFields` — never a snapshot taken after step 2.
+
+Only fields present in the step-1 snapshot are protected from callout overwrite; a field the
+backend itself filled in during step 2 with a generic, context-agnostic default is **not**
+protected and can be corrected by a callout that resolves a more specific value from a field the
+client did submit (e.g. the Business Partner). Getting this ordering backwards — snapshotting
+`protectedFields` from the body *after* the generic defaults already ran — silently freezes those
+generic defaults, because the cascade then treats a value the backend just invented as if the
+user had chosen it on purpose (ETP-4784: "Tipo factura" stuck at the generic default instead of
+the Business Partner's configured value).
+
+This still preserves ETP-4772's original intent: a value the client genuinely submitted in the
+original POST (including one forced by upstream logic before the request reached NEO, e.g. a
+rectifying-document key per ETP-4783) is in the step-1 snapshot and stays protected from being
+overwritten by a re-cascaded callout.
 
 **PUT / PATCH update** -- `PUT|PATCH /{specName}/{entityName}/{recordId}`
 

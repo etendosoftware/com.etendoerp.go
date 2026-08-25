@@ -67,15 +67,51 @@ public class NeoDefaultsCascadeHelper {
   }
 
   static void executeCalloutCascadeForCreate(NeoContext ctx, Tab adTab, JSONObject body) {
+    // No explicit snapshot supplied: fall back to the CURRENT body keys. Used by callers
+    // (and legacy tests) that invoke the cascade directly against an already-assembled body
+    // with no separate "as submitted by the client" snapshot available. The create path in
+    // NeoMandatoryDefaultsService.injectMandatoryDefaults MUST use the overload below with an
+    // explicit pre-defaults snapshot instead (ETP-4784 defaults-cascade-order fix) — otherwise
+    // values written by the generic mandatory-column defaults pass (e.g. the plain AD_Column
+    // default, computed with no knowledge of the Business Partner) get frozen as "protected"
+    // before the callout cascade ever gets a chance to recompute them from the real BP.
+    Set<String> protectedFields = new HashSet<>();
+    Iterator<String> bodyKeys = body.keys();
+    while (bodyKeys.hasNext()) {
+      protectedFields.add(bodyKeys.next());
+    }
+    executeCalloutCascadeForCreate(ctx, adTab, body, protectedFields);
+  }
+
+  /**
+   * Runs the create-path callout cascade, protecting only the fields listed in
+   * {@code protectedFields} from being overwritten by a re-cascaded callout.
+   *
+   * <p>ETP-4784: {@code protectedFields} MUST be a snapshot of the field names present in the
+   * request body <em>as submitted by the client</em>, taken BEFORE any generic mandatory-column
+   * default injection ran. Passing a snapshot taken from the body AFTER that injection (the
+   * previous behaviour, when this method computed the snapshot internally from the live body)
+   * incorrectly protects values the backend itself filled in with a generic default — e.g. a
+   * plain column-level default for a document-type-key field that ignores the Business Partner
+   * — from being corrected by a subsequent callout that knows the real, BP-aware value. A value
+   * the user genuinely submitted in the original POST must still end up in {@code
+   * protectedFields} and stay protected; only backend-injected generic defaults must not.</p>
+   *
+   * @param ctx             the NEO request context
+   * @param adTab           the tab whose columns may trigger dependent callouts
+   * @param body            the in-progress create payload, mutated in place by the cascade
+   * @param protectedFields snapshot of field names to protect from cascade overwrite — must
+   *                        reflect the client-submitted body, not the body after generic
+   *                        default injection
+   */
+  static void executeCalloutCascadeForCreate(NeoContext ctx, Tab adTab, JSONObject body,
+      Set<String> protectedFields) {
     try {
       Set<String> emptySeqFields = new HashSet<>();
-      Set<String> protectedFields = new HashSet<>();
-      Iterator<String> bodyKeys = body.keys();
-      while (bodyKeys.hasNext()) {
-        protectedFields.add(bodyKeys.next());
-      }
+      Set<String> effectiveProtected = protectedFields != null
+          ? protectedFields : java.util.Collections.emptySet();
       NeoDefaultsService.CalloutCascadeResult cascadeResult =
-          executeCalloutCascade(ctx, adTab, body, emptySeqFields, protectedFields);
+          executeCalloutCascade(ctx, adTab, body, emptySeqFields, effectiveProtected);
       if (cascadeResult != null && cascadeResult.hasResults()) {
         log.info("[NEO-CREATE] Callout cascade derived {} field updates",
             cascadeResult.updatedFieldCount());

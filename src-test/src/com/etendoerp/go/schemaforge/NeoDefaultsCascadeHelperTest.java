@@ -1373,6 +1373,139 @@ public class NeoDefaultsCascadeHelperTest {
     }
   }
 
+  /**
+   * ETP-4784: reproduces the "Tipo factura" bug. {@code aeatsiiClaveTipo} was already written
+   * into {@code body} by the generic mandatory-column defaults pass (a plain, BP-agnostic
+   * AD_Column default of "F1") BEFORE the cascade runs — but it was never present in the
+   * client's original POST, so it must NOT be in {@code protectedFields}. The Business Partner
+   * callout resolving "F2" must be allowed to overwrite it.
+   */
+  @Test
+  public void testExecuteCalloutCascadeForCreateOverwritesBackendInjectedDefault()
+      throws Exception {
+    try (MockedStatic<NeoCalloutService> calloutMock = mockStatic(NeoCalloutService.class);
+         MockedStatic<ModelProvider> providerMock = mockStatic(ModelProvider.class)) {
+      NeoCalloutService.CalloutInfo bpCalloutInfo = new NeoCalloutService.CalloutInfo(
+          "org.openbravo.erpCommon.ad_callouts.SiiAutoSetSIIKEYByDefault",
+          "inpcbpartnerid", "BusinessPartner");
+      calloutMock.when(() -> NeoCalloutService.resolveCallout(any(), eq("businessPartner")))
+          .thenReturn(bpCalloutInfo);
+      calloutMock.when(() -> NeoCalloutService.resolveCallout(any(), eq("aeatsiiClaveTipo")))
+          .thenReturn(null);
+
+      JSONObject calloutResponseBody = new JSONObject();
+      JSONObject updateEntry = new JSONObject();
+      updateEntry.put("value", "F2");
+      JSONObject updates = new JSONObject();
+      updates.put("aeatsiiClaveTipo", updateEntry);
+      calloutResponseBody.put("updates", updates);
+      calloutMock.when(() -> NeoCalloutService.executeCallout(any(), any()))
+          .thenReturn(NeoResponse.ok(calloutResponseBody));
+
+      ModelProvider mockProvider = mock(ModelProvider.class);
+      providerMock.when(ModelProvider::getInstance).thenReturn(mockProvider);
+      when(mockProvider.getEntityByTableId(anyString())).thenReturn(null);
+
+      Tab adTab = mockTabWithTable("318");
+      NeoContext ctx = mock(NeoContext.class);
+
+      // Body AFTER the generic mandatory-column defaults pass already ran: businessPartner is
+      // the client-submitted value, aeatsiiClaveTipo="F1" was just backend-injected.
+      JSONObject body = new JSONObject();
+      body.put("businessPartner", "BP001");
+      body.put("aeatsiiClaveTipo", "F1");
+
+      // Snapshot of what the CLIENT actually submitted — taken before the generic defaults
+      // pass ran, so it does NOT include aeatsiiClaveTipo.
+      Set<String> clientProvidedFields = new HashSet<>();
+      clientProvidedFields.add("businessPartner");
+
+      NeoDefaultsCascadeHelper.executeCalloutCascadeForCreate(ctx, adTab, body, clientProvidedFields);
+
+      assertEquals("Business Partner default must overwrite the backend-injected generic "
+              + "default, not be blocked as if the user had chosen it",
+          "F2", body.getString("aeatsiiClaveTipo"));
+    }
+  }
+
+  /**
+   * ETP-4784 regression guard: when the client's original POST genuinely included
+   * {@code aeatsiiClaveTipo} (e.g. a rectifying document forced to "R" per ETP-4783), that
+   * value must stay protected from the Business Partner cascade — ETP-4772's original intent.
+   */
+  @Test
+  public void testExecuteCalloutCascadeForCreateKeepsGenuineClientValue() throws Exception {
+    try (MockedStatic<NeoCalloutService> calloutMock = mockStatic(NeoCalloutService.class);
+         MockedStatic<ModelProvider> providerMock = mockStatic(ModelProvider.class)) {
+      NeoCalloutService.CalloutInfo bpCalloutInfo = new NeoCalloutService.CalloutInfo(
+          "org.openbravo.erpCommon.ad_callouts.SiiAutoSetSIIKEYByDefault",
+          "inpcbpartnerid", "BusinessPartner");
+      calloutMock.when(() -> NeoCalloutService.resolveCallout(any(), eq("businessPartner")))
+          .thenReturn(bpCalloutInfo);
+      calloutMock.when(() -> NeoCalloutService.resolveCallout(any(), eq("aeatsiiClaveTipo")))
+          .thenReturn(null);
+
+      JSONObject calloutResponseBody = new JSONObject();
+      JSONObject updateEntry = new JSONObject();
+      updateEntry.put("value", "F2");
+      JSONObject updates = new JSONObject();
+      updates.put("aeatsiiClaveTipo", updateEntry);
+      calloutResponseBody.put("updates", updates);
+      calloutMock.when(() -> NeoCalloutService.executeCallout(any(), any()))
+          .thenReturn(NeoResponse.ok(calloutResponseBody));
+
+      ModelProvider mockProvider = mock(ModelProvider.class);
+      providerMock.when(ModelProvider::getInstance).thenReturn(mockProvider);
+      when(mockProvider.getEntityByTableId(anyString())).thenReturn(null);
+
+      Tab adTab = mockTabWithTable("318");
+      NeoContext ctx = mock(NeoContext.class);
+
+      JSONObject body = new JSONObject();
+      body.put("businessPartner", "BP001");
+      // The client explicitly submitted aeatsiiClaveTipo="R" in the original POST.
+      body.put("aeatsiiClaveTipo", "R");
+
+      Set<String> clientProvidedFields = new HashSet<>();
+      clientProvidedFields.add("businessPartner");
+      clientProvidedFields.add("aeatsiiClaveTipo");
+
+      NeoDefaultsCascadeHelper.executeCalloutCascadeForCreate(ctx, adTab, body, clientProvidedFields);
+
+      assertEquals("A value genuinely submitted by the client must stay protected from the "
+              + "Business Partner cascade",
+          "R", body.getString("aeatsiiClaveTipo"));
+    }
+  }
+
+  /**
+   * ETP-4784 base case: no Business Partner in the payload at all (no cascade trigger field
+   * present) — the generic backend default must remain untouched, exactly as before this fix.
+   */
+  @Test
+  public void testExecuteCalloutCascadeForCreateLeavesGenericDefaultWhenNoBusinessPartner()
+      throws Exception {
+    try (MockedStatic<NeoCalloutService> calloutMock = mockStatic(NeoCalloutService.class)) {
+      calloutMock.when(() -> NeoCalloutService.resolveCallout(any(), anyString()))
+          .thenReturn(null);
+
+      Tab adTab = mockTabWithTable("318");
+      NeoContext ctx = mock(NeoContext.class);
+
+      JSONObject body = new JSONObject();
+      body.put("aeatsiiClaveTipo", "F1");
+
+      // Nothing came from the client in this scenario — the field was entirely backend-injected.
+      Set<String> clientProvidedFields = new HashSet<>();
+
+      NeoDefaultsCascadeHelper.executeCalloutCascadeForCreate(ctx, adTab, body, clientProvidedFields);
+
+      assertEquals("With no Business Partner to trigger a cascade, the generic default must "
+              + "apply normally",
+          "F1", body.getString("aeatsiiClaveTipo"));
+    }
+  }
+
   // ===================================================================
   // collectFieldsWithCallouts
   // ===================================================================
