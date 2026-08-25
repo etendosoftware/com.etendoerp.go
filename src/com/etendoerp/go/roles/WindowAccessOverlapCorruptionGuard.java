@@ -19,10 +19,8 @@ package com.etendoerp.go.roles;
 import java.util.ArrayList;
 import java.util.Date;
 import java.util.LinkedHashMap;
-import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 
 import javax.annotation.Priority;
 import javax.enterprise.event.Observes;
@@ -33,7 +31,6 @@ import org.hibernate.criterion.Restrictions;
 import org.openbravo.base.model.Entity;
 import org.openbravo.base.model.ModelProvider;
 import org.openbravo.base.model.Property;
-import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.client.kernel.event.EntityDeleteEvent;
 import org.openbravo.client.kernel.event.EntityNewEvent;
 import org.openbravo.client.kernel.event.EntityPersistenceEventObserver;
@@ -385,8 +382,10 @@ import com.etendoerp.go.roles.overlap.TemplateRemovalTracker;
  * leave it alone. That reasoning silently assumed core's own {@code AccessTypeInjector#findAccess}
  * lookup CAN see the row - it cannot whenever the dependent's client is outside the CALLING
  * {@code OBContext}'s own readable-clients list (the row-level filter core's query builds is not
- * admin-mode-gated, exactly like {@link #crossClientCriteria(Class)}'s own javadoc documents for
- * OUR queries). When blind, {@code handleAccess} ALWAYS evaluates {@code access == null} and takes
+ * admin-mode-gated, exactly like {@link
+ * com.etendoerp.go.roles.overlap.ActiveTemplateInheritance#crossClientCriteria(Class)}'s own
+ * javadoc documents for OUR queries). When blind, {@code handleAccess} ALWAYS evaluates {@code
+ * access == null} and takes
  * the CREATE branch regardless of whether a correct row already exists, so ANY pre-existing row -
  * no matter how correct - risks a duplicate-INSERT the instant core's blind {@code copyRoleAccess}
  * reaches it.
@@ -609,9 +608,11 @@ public class WindowAccessOverlapCorruptionGuard extends EntityPersistenceEventOb
     Property organizationProperty = waEntity.getProperty(WindowAccess.PROPERTY_ORGANIZATION);
 
     boolean clientWrong = owner.getClient() != null
-        && !sameId(owner.getClient(), event.getCurrentState(clientProperty));
+        && !ActiveTemplateInheritance.sameId(owner.getClient(),
+            event.getCurrentState(clientProperty));
     boolean organizationWrong = owner.getOrganization() != null
-        && !sameId(owner.getOrganization(), event.getCurrentState(organizationProperty));
+        && !ActiveTemplateInheritance.sameId(owner.getOrganization(),
+            event.getCurrentState(organizationProperty));
     if (!clientWrong && !organizationWrong) {
       return;
     }
@@ -900,7 +901,8 @@ public class WindowAccessOverlapCorruptionGuard extends EntityPersistenceEventOb
       return false;
     }
     Role existingSource = existing.getInheritedFrom();
-    boolean sourceCorrect = existingSource != null && sameId(existingSource, winnerRole);
+    boolean sourceCorrect =
+        existingSource != null && ActiveTemplateInheritance.sameId(existingSource, winnerRole);
     boolean levelCorrect = Boolean.valueOf(winner.isWinnerLevel()).equals(existing.isEditableField());
     if (sourceCorrect && levelCorrect) {
       return false;
@@ -972,7 +974,7 @@ public class WindowAccessOverlapCorruptionGuard extends EntityPersistenceEventOb
     if (window == null) {
       return;
     }
-    for (Role dependent : findActiveDependentRoles(role)) {
+    for (Role dependent : ActiveTemplateInheritance.findActiveDependentRoles(role)) {
       if (trigger == PropagationTrigger.NEW_GRANT) {
         clearConflictingAccessUnconditionally(dependent, window, role);
       } else {
@@ -1031,7 +1033,8 @@ public class WindowAccessOverlapCorruptionGuard extends EntityPersistenceEventOb
       return;
     }
     Role existingSource = existing.getInheritedFrom();
-    if (existingSource == null || !sameId(existingSource, grantingTemplate)) {
+    if (existingSource == null
+        || !ActiveTemplateInheritance.sameId(existingSource, grantingTemplate)) {
       // Not sourced from THIS template — out of scope for core's own propagateUpdatedAccess too,
       // see this method's own javadoc.
       return;
@@ -1051,7 +1054,7 @@ public class WindowAccessOverlapCorruptionGuard extends EntityPersistenceEventOb
     // or some other active template is the one that now justifies the final value.
     Role winner = otherJustifyingTemplate != null ? otherJustifyingTemplate : grantingTemplate;
 
-    boolean sourceCorrect = sameId(existingSource, winner);
+    boolean sourceCorrect = ActiveTemplateInheritance.sameId(existingSource, winner);
     boolean levelCorrect = Boolean.valueOf(finalLevel).equals(existing.isEditableField());
     if (sourceCorrect && levelCorrect) {
       // Already matches the correctly-surveyed value/source — nothing to correct.
@@ -1083,8 +1086,9 @@ public class WindowAccessOverlapCorruptionGuard extends EntityPersistenceEventOb
    * readable-clients list: {@code findAccess}'s generated query filters by {@code AD_Client_ID in
    * (...)} using the CALLING context's readable clients (confirmed via SQL trace: a role
    * belonging to a tenant client not in that list is invisible to this query, full stop — the
-   * row-level filter is not admin-mode-gated, exactly like {@link #crossClientCriteria(Class)}'s
-   * own javadoc already documents for OUR OWN queries). When blind, {@code handleAccess} ALWAYS
+   * row-level filter is not admin-mode-gated, exactly like {@link
+   * com.etendoerp.go.roles.overlap.ActiveTemplateInheritance#crossClientCriteria(Class)}'s own
+   * javadoc already documents for OUR OWN queries). When blind, {@code handleAccess} ALWAYS
    * evaluates {@code access == null} and takes the CREATE branch — REGARDLESS of whether a
    * correctly-sourced row already exists — so ANY pre-existing row for that (role, window), no
    * matter how correct, is a duplicate-INSERT collision waiting to happen the instant core's own
@@ -1366,42 +1370,16 @@ public class WindowAccessOverlapCorruptionGuard extends EntityPersistenceEventOb
   }
 
   /**
-   * Disables {@code OBCriteria}'s implicit client/organization filtering — REQUIRED for every
-   * query in this class. {@code OBCriteria#initialize()} adds a {@code Restrictions.in(...
-   * readableClients/readableOrganizations)} filter UNCONDITIONALLY, regardless of {@code
-   * OBContext.isInAdministratorMode()} (only the separate {@code checkReadable} ACCESS check is
-   * admin-mode-gated — the row-level filter itself is not). A template role is typically system
-   * client {@code "0"} while its dependents are real tenant clients, so without this every query
-   * here would silently return zero rows whenever the ambient {@code OBContext}'s role does not
-   * happen to have both the template's AND the dependent's client in its own readable-clients list
-   * — exactly the failure mode this class hit empirically while verifying this redesign against a
-   * role composed from real templates it did not itself create the {@code OBContext} for.
+   * {@code crossClientCriteria}, {@code findActiveDependentRoles}, and both {@code sameId}
+   * overloads used to be private copies here — moved to {@link ActiveTemplateInheritance} (ETP-
+   * 4830 final-review Finding 2) because they touch only {@code Role}/{@code RoleInheritance},
+   * never {@code WindowAccess}, and were triplicated verbatim across all 3 overlap-corruption
+   * guard classes. See that class's own javadoc for the full rationale; calls below go through
+   * {@code ActiveTemplateInheritance.crossClientCriteria(...)} etc.
    */
-  private static <T extends BaseOBObject> OBCriteria<T> crossClientCriteria(Class<T> clazz) {
-    OBCriteria<T> criteria = OBDal.getInstance().createCriteria(clazz);
-    criteria.setFilterOnReadableClients(false);
-    criteria.setFilterOnReadableOrganization(false);
-    return criteria;
-  }
-
-  @SuppressWarnings("unchecked")
-  private List<Role> findActiveDependentRoles(Role template) {
-    OBCriteria<RoleInheritance> criteria = crossClientCriteria(RoleInheritance.class);
-    criteria.add(Restrictions.eq(RoleInheritance.PROPERTY_INHERITFROM, template));
-    criteria.add(Restrictions.eq(RoleInheritance.PROPERTY_ACTIVE, true));
-    List<Role> dependents = new ArrayList<>();
-    Set<String> seenRoleIds = new LinkedHashSet<>();
-    for (RoleInheritance inheritance : (List<RoleInheritance>) criteria.list()) {
-      Role dependent = inheritance.getRole();
-      if (dependent != null && seenRoleIds.add(dependent.getId())) {
-        dependents.add(dependent);
-      }
-    }
-    return dependents;
-  }
-
   private WindowAccess findActiveWindowAccess(Role role, Window window) {
-    OBCriteria<WindowAccess> criteria = crossClientCriteria(WindowAccess.class);
+    OBCriteria<WindowAccess> criteria =
+        ActiveTemplateInheritance.crossClientCriteria(WindowAccess.class);
     criteria.add(Restrictions.eq(WindowAccess.PROPERTY_ROLE, role));
     criteria.add(Restrictions.eq(WindowAccess.PROPERTY_WINDOW, window));
     criteria.add(Restrictions.eq(WindowAccess.PROPERTY_ACTIVE, true));
@@ -1411,31 +1389,10 @@ public class WindowAccessOverlapCorruptionGuard extends EntityPersistenceEventOb
 
   @SuppressWarnings("unchecked")
   private List<WindowAccess> findActiveWindowAccess(Role role) {
-    OBCriteria<WindowAccess> criteria = crossClientCriteria(WindowAccess.class);
+    OBCriteria<WindowAccess> criteria =
+        ActiveTemplateInheritance.crossClientCriteria(WindowAccess.class);
     criteria.add(Restrictions.eq(WindowAccess.PROPERTY_ROLE, role));
     criteria.add(Restrictions.eq(WindowAccess.PROPERTY_ACTIVE, true));
     return criteria.list();
-  }
-
-  private static boolean sameId(BaseOBObject a, BaseOBObject b) {
-    if (a == null || b == null) {
-      return false;
-    }
-    String idA = (String) a.getId();
-    String idB = (String) b.getId();
-    return idA != null && idA.equals(idB);
-  }
-
-  /**
-   * Overload for comparing against an {@code EntityPersistenceEvent#getCurrentState(Property)}
-   * result, which is declared {@code Object} — defensively checks the runtime type rather than
-   * casting, matching the same pattern this class's own predecessor design used for exactly this
-   * comparison.
-   */
-  private static boolean sameId(BaseOBObject expected, Object actualState) {
-    if (!(actualState instanceof BaseOBObject)) {
-      return false;
-    }
-    return sameId(expected, (BaseOBObject) actualState);
   }
 }

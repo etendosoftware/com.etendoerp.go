@@ -33,7 +33,8 @@ import org.openbravo.model.ad.access.RoleInheritance;
  * com.etendoerp.go.roles.WindowAccessOverlapCorruptionGuard#findActiveTemplatesFor(Role, String)}
  * (ETP-4830 item 7) because that method itself has zero {@code WindowAccess}-specific logic in
  * it: it only ever touches {@code Role}/{@code RoleInheritance}, so it is shared verbatim by
- * {@code ProcessAccessOverlapCorruptionGuard} instead of being duplicated.
+ * {@code WindowAccessOverlapCorruptionGuard}, {@code ProcessAccessOverlapCorruptionGuard}, and
+ * {@code ObuiappProcessAccessOverlapCorruptionGuard} instead of being duplicated.
  *
  * <p>Ordered by {@code AD_Role_Inheritance.SeqNo} DESCENDING — mirrors core's own {@code
  * RoleInheritanceManager#getRoleInheritancesList(Role, Role, boolean)} call from {@code
@@ -44,6 +45,12 @@ import org.openbravo.model.ad.access.RoleInheritance;
  * row may still be physically present at this point in the flush). ALSO excludes every template
  * {@link TemplateRemovalTracker#isBeingRemoved(String)} currently reports — see that class's own
  * javadoc for the exact same-flush-visibility race this closes.
+ *
+ * <p>Also home to {@link #findActiveDependentRoles(Role)} and both {@code sameId} overloads
+ * ({@link #sameId(BaseOBObject, BaseOBObject)}, {@link #sameId(BaseOBObject, Object)}) — same
+ * criterion as above: pure {@code Role}/{@code RoleInheritance} logic with zero {@code
+ * WindowAccess}/{@code ProcessAccess}/{@code OBUIAPP_Process_Access}-specific content, previously
+ * triplicated across all 3 guard classes (ETP-4830 final-review Finding 2).
  */
 public final class ActiveTemplateInheritance {
 
@@ -74,17 +81,68 @@ public final class ActiveTemplateInheritance {
   }
 
   /**
-   * Disables {@code OBCriteria}'s implicit client/organization filtering — REQUIRED here, same
-   * reasoning as {@code WindowAccessOverlapCorruptionGuard}'s own private {@code
-   * crossClientCriteria}: a template role is typically system client {@code "0"} while its
-   * dependents are real tenant clients, so without this the query would silently return zero rows
-   * whenever the ambient {@code OBContext}'s role does not have both clients in its own
-   * readable-clients list.
+   * Every role that currently, actively inherits from {@code template} — extracted from the
+   * identical private copy previously duplicated across {@code
+   * WindowAccessOverlapCorruptionGuard}, {@code ProcessAccessOverlapCorruptionGuard}, and {@code
+   * ObuiappProcessAccessOverlapCorruptionGuard} (ETP-4830 final-review Finding 2). See {@link
+   * #crossClientCriteria(Class)} for why the query must disable readable-client/organization
+   * filtering.
    */
-  private static <T extends BaseOBObject> OBCriteria<T> crossClientCriteria(Class<T> clazz) {
+  @SuppressWarnings("unchecked")
+  public static List<Role> findActiveDependentRoles(Role template) {
+    OBCriteria<RoleInheritance> criteria = crossClientCriteria(RoleInheritance.class);
+    criteria.add(Restrictions.eq(RoleInheritance.PROPERTY_INHERITFROM, template));
+    criteria.add(Restrictions.eq(RoleInheritance.PROPERTY_ACTIVE, true));
+    List<Role> dependents = new ArrayList<>();
+    Set<String> seenRoleIds = new LinkedHashSet<>();
+    for (RoleInheritance inheritance : (List<RoleInheritance>) criteria.list()) {
+      Role dependent = inheritance.getRole();
+      if (dependent != null && seenRoleIds.add(dependent.getId())) {
+        dependents.add(dependent);
+      }
+    }
+    return dependents;
+  }
+
+  /**
+   * Disables {@code OBCriteria}'s implicit client/organization filtering — REQUIRED here: a
+   * template role is typically system client {@code "0"} while its dependents are real tenant
+   * clients, so without this the query would silently return zero rows whenever the ambient
+   * {@code OBContext}'s role does not have both clients in its own readable-clients list.
+   * {@code public} (not private) so every method in this class can reuse it AND so the 3 guard
+   * classes (a different package, {@code com.etendoerp.go.roles}) can call it directly for their
+   * own {@code WindowAccess}/{@code ProcessAccess}-specific queries.
+   */
+  public static <T extends BaseOBObject> OBCriteria<T> crossClientCriteria(Class<T> clazz) {
     OBCriteria<T> criteria = OBDal.getInstance().createCriteria(clazz);
     criteria.setFilterOnReadableClients(false);
     criteria.setFilterOnReadableOrganization(false);
     return criteria;
+  }
+
+  /**
+   * Extracted from the identical private copy previously duplicated across all 3 guard classes
+   * (ETP-4830 final-review Finding 2).
+   */
+  public static boolean sameId(BaseOBObject a, BaseOBObject b) {
+    if (a == null || b == null) {
+      return false;
+    }
+    String idA = (String) a.getId();
+    String idB = (String) b.getId();
+    return idA != null && idA.equals(idB);
+  }
+
+  /**
+   * Overload for comparing against an {@code EntityPersistenceEvent#getCurrentState(Property)}
+   * result, which is declared {@code Object} — defensively checks the runtime type rather than
+   * casting. Extracted from the identical private copy previously duplicated across all 3 guard
+   * classes (ETP-4830 final-review Finding 2).
+   */
+  public static boolean sameId(BaseOBObject expected, Object actualState) {
+    if (!(actualState instanceof BaseOBObject)) {
+      return false;
+    }
+    return sameId(expected, (BaseOBObject) actualState);
   }
 }

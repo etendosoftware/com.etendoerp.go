@@ -19,10 +19,8 @@ package com.etendoerp.go.roles;
 import java.util.ArrayList;
 import java.util.Date;
 import java.util.LinkedHashMap;
-import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 
 import javax.annotation.Priority;
 import javax.enterprise.event.Observes;
@@ -33,7 +31,6 @@ import org.hibernate.criterion.Restrictions;
 import org.openbravo.base.model.Entity;
 import org.openbravo.base.model.ModelProvider;
 import org.openbravo.base.model.Property;
-import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.client.application.ProcessAccess;
 import org.openbravo.client.kernel.event.EntityDeleteEvent;
 import org.openbravo.client.kernel.event.EntityNewEvent;
@@ -188,9 +185,11 @@ public class ObuiappProcessAccessOverlapCorruptionGuard extends EntityPersistenc
     Property organizationProperty = paEntity.getProperty(ProcessAccess.PROPERTY_ORGANIZATION);
 
     boolean clientWrong = owner.getClient() != null
-        && !sameId(owner.getClient(), event.getCurrentState(clientProperty));
+        && !ActiveTemplateInheritance.sameId(owner.getClient(),
+            event.getCurrentState(clientProperty));
     boolean organizationWrong = owner.getOrganization() != null
-        && !sameId(owner.getOrganization(), event.getCurrentState(organizationProperty));
+        && !ActiveTemplateInheritance.sameId(owner.getOrganization(),
+            event.getCurrentState(organizationProperty));
     if (!clientWrong && !organizationWrong) {
       return;
     }
@@ -305,7 +304,7 @@ public class ObuiappProcessAccessOverlapCorruptionGuard extends EntityPersistenc
     if (process == null) {
       return;
     }
-    for (Role dependent : findActiveDependentRoles(role)) {
+    for (Role dependent : ActiveTemplateInheritance.findActiveDependentRoles(role)) {
       if (trigger == PropagationTrigger.NEW_GRANT) {
         clearConflictingAccessUnconditionally(dependent, process, role);
       } else {
@@ -327,7 +326,8 @@ public class ObuiappProcessAccessOverlapCorruptionGuard extends EntityPersistenc
       return;
     }
     Role existingSource = existing.getInheritedFrom();
-    if (existingSource == null || !sameId(existingSource, grantingTemplate)) {
+    if (existingSource == null
+        || !ActiveTemplateInheritance.sameId(existingSource, grantingTemplate)) {
       return;
     }
     boolean grantingTemplateNewLevel = Boolean.TRUE.equals(templateAccess.isEditableField());
@@ -338,7 +338,7 @@ public class ObuiappProcessAccessOverlapCorruptionGuard extends EntityPersistenc
     boolean finalLevel = grantingTemplateNewLevel || otherJustifyingTemplate != null;
     Role winner = otherJustifyingTemplate != null ? otherJustifyingTemplate : grantingTemplate;
 
-    boolean sourceCorrect = sameId(existingSource, winner);
+    boolean sourceCorrect = ActiveTemplateInheritance.sameId(existingSource, winner);
     boolean levelCorrect = Boolean.valueOf(finalLevel).equals(existing.isEditableField());
     if (sourceCorrect && levelCorrect) {
       return;
@@ -445,10 +445,20 @@ public class ObuiappProcessAccessOverlapCorruptionGuard extends EntityPersistenc
       Role winnerRole) {
     ProcessAccess existing = findActiveObuiappProcessAccess(dependent, process);
     if (existing == null) {
+      // No existing row to correct in place — same residual, pre-existing gap as
+      // WindowAccessOverlapCorruptionGuard's/ProcessAccessOverlapCorruptionGuard's own equivalent
+      // case (see WindowAccessOverlapCorruptionGuard's javadoc, "A sixth trigger" section), but
+      // materially WORSE here: OBUIAPP_Process_Access carries NO unique constraint (unlike
+      // AD_Process_Access's AD_PROCESS_ACCESS_UN_KEY / AD_Window_Access's own equivalent), so if
+      // this gap is ever actually hit, falling back to core's natural CREATE when 2+ remaining
+      // templates grant the same process does not raise a loud ConstraintViolationException — it
+      // silently inserts a DUPLICATE row instead, strictly harder to detect than the sibling
+      // classes' failure mode.
       return false;
     }
     Role existingSource = existing.getInheritedFrom();
-    boolean sourceCorrect = existingSource != null && sameId(existingSource, winnerRole);
+    boolean sourceCorrect =
+        existingSource != null && ActiveTemplateInheritance.sameId(existingSource, winnerRole);
     boolean levelCorrect =
         Boolean.valueOf(winner.isWinnerLevel()).equals(existing.isEditableField());
     if (sourceCorrect && levelCorrect) {
@@ -499,15 +509,17 @@ public class ObuiappProcessAccessOverlapCorruptionGuard extends EntityPersistenc
         winnerLevel);
   }
 
-  private static <T extends BaseOBObject> OBCriteria<T> crossClientCriteria(Class<T> clazz) {
-    OBCriteria<T> criteria = OBDal.getInstance().createCriteria(clazz);
-    criteria.setFilterOnReadableClients(false);
-    criteria.setFilterOnReadableOrganization(false);
-    return criteria;
-  }
-
+  /**
+   * {@code crossClientCriteria}, {@code findActiveDependentRoles}, and both {@code sameId}
+   * overloads used to be private copies here — moved to {@link ActiveTemplateInheritance} (ETP-
+   * 4830 final-review Finding 2) because they touch only {@code Role}/{@code RoleInheritance},
+   * never {@code ProcessAccess}, and were triplicated verbatim across all 3 overlap-corruption
+   * guard classes. Calls below go through {@code ActiveTemplateInheritance.crossClientCriteria
+   * (...)} etc.
+   */
   private ProcessAccess findActiveObuiappProcessAccess(Role role, Process process) {
-    OBCriteria<ProcessAccess> criteria = crossClientCriteria(ProcessAccess.class);
+    OBCriteria<ProcessAccess> criteria =
+        ActiveTemplateInheritance.crossClientCriteria(ProcessAccess.class);
     criteria.add(Restrictions.eq(ProcessAccess.PROPERTY_ROLE, role));
     criteria.add(Restrictions.eq(ProcessAccess.PROPERTY_OBUIAPPPROCESS, process));
     criteria.add(Restrictions.eq(ProcessAccess.PROPERTY_ACTIVE, true));
@@ -517,50 +529,10 @@ public class ObuiappProcessAccessOverlapCorruptionGuard extends EntityPersistenc
 
   @SuppressWarnings("unchecked")
   private List<ProcessAccess> findActiveObuiappProcessAccess(Role role) {
-    OBCriteria<ProcessAccess> criteria = crossClientCriteria(ProcessAccess.class);
+    OBCriteria<ProcessAccess> criteria =
+        ActiveTemplateInheritance.crossClientCriteria(ProcessAccess.class);
     criteria.add(Restrictions.eq(ProcessAccess.PROPERTY_ROLE, role));
     criteria.add(Restrictions.eq(ProcessAccess.PROPERTY_ACTIVE, true));
     return criteria.list();
-  }
-
-  /**
-   * Mirrors {@code ProcessAccessOverlapCorruptionGuard#findActiveDependentRoles} — see that
-   * method's own javadoc for the cross-client criteria rationale.
-   */
-  @SuppressWarnings("unchecked")
-  private List<Role> findActiveDependentRoles(Role template) {
-    OBCriteria<RoleInheritance> criteria = crossClientCriteria(RoleInheritance.class);
-    criteria.add(Restrictions.eq(RoleInheritance.PROPERTY_INHERITFROM, template));
-    criteria.add(Restrictions.eq(RoleInheritance.PROPERTY_ACTIVE, true));
-    List<Role> dependents = new ArrayList<>();
-    Set<String> seenRoleIds = new LinkedHashSet<>();
-    for (RoleInheritance inheritance : (List<RoleInheritance>) criteria.list()) {
-      Role dependent = inheritance.getRole();
-      if (dependent != null && seenRoleIds.add(dependent.getId())) {
-        dependents.add(dependent);
-      }
-    }
-    return dependents;
-  }
-
-  private static boolean sameId(BaseOBObject a, BaseOBObject b) {
-    if (a == null || b == null) {
-      return false;
-    }
-    String idA = (String) a.getId();
-    String idB = (String) b.getId();
-    return idA != null && idA.equals(idB);
-  }
-
-  /**
-   * Overload for comparing against an {@code EntityPersistenceEvent#getCurrentState(Property)}
-   * result, which is declared {@code Object} — matches {@code
-   * ProcessAccessOverlapCorruptionGuard#sameId(BaseOBObject, Object)}'s own overload.
-   */
-  private static boolean sameId(BaseOBObject expected, Object actualState) {
-    if (!(actualState instanceof BaseOBObject)) {
-      return false;
-    }
-    return sameId(expected, (BaseOBObject) actualState);
   }
 }
