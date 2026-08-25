@@ -43,12 +43,36 @@ final class EtendoGoAuthLinkBuilder {
         DASHBOARD_PATH);
   }
 
+  /**
+   * ETP-4798: the link that proves the recipient controls the mailbox. It lands on the same
+   * {@code /onboarding} route as every other auth link — the web client reads the token off the
+   * query string and confirms it — so no new public route has to be exposed or configured.
+   *
+   * @param verifyToken clear email-verification token; the stored side is only its hash
+   * @return absolute link, or null when no public app base URL is configured
+   */
+  static String verifyEmailLink(String verifyToken) {
+    return verifyEmailLink(verifyToken, PublicUrlResolver.resolveConfiguredAppBaseUrl());
+  }
+
+  static String verifyEmailLink(String verifyToken, String appBaseUrl) {
+    return onboardingLinkWithToken(verifyToken, appBaseUrl, "verifyToken");
+  }
+
   static String resetPasswordLink(String resetToken) {
     return resetPasswordLink(resetToken, PublicUrlResolver.resolveConfiguredAppBaseUrl());
   }
 
   static String resetPasswordLink(String resetToken, String appBaseUrl) {
-    String normalizedToken = StringUtils.trimToNull(resetToken);
+    return onboardingLinkWithToken(resetToken, appBaseUrl, "resetToken");
+  }
+
+  /**
+   * Builds an {@code /onboarding?<param>=<token>} link. Returns null when either half is missing —
+   * a blank token or an unconfigured app base URL — so callers never mail a link that cannot work.
+   */
+  private static String onboardingLinkWithToken(String token, String appBaseUrl, String param) {
+    String normalizedToken = StringUtils.trimToNull(token);
     if (normalizedToken == null) {
       return null;
     }
@@ -57,7 +81,7 @@ final class EtendoGoAuthLinkBuilder {
       return null;
     }
     String separator = onboardingLink.contains("?") ? "&" : "?";
-    return onboardingLink + separator + "resetToken=" + encode(normalizedToken);
+    return onboardingLink + separator + param + "=" + encode(normalizedToken);
   }
 
   private static String encode(String value) {
