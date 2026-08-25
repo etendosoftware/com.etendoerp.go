@@ -116,9 +116,8 @@ import com.etendoerp.go.roles.overlap.TemplateRemovalTracker;
  * </ul>
  *
  * <p><b>Why {@link #correctInheritedOwnership} uses {@code event.setCurrentState(Property,
- * Object)}, never a plain entity setter.</b> See {@link WindowAccessOverlapCorruptionGuard#
- * correctInheritedOwnership(EntityNewEvent, org.openbravo.model.ad.access.WindowAccess)}'s own
- * javadoc for the full empirical write-up (confirmed the hard way: a plain setter only mutates the
+ * Object)}, never a plain entity setter.</b> See {@link #correctInheritedOwnership}'s own javadoc
+ * for the full empirical write-up (confirmed the hard way: a plain setter only mutates the
  * Java object, never Hibernate's own {@code state[]} array the eventual INSERT's bound values are
  * read from). This constraint is entity-agnostic — {@code
  * PersistenceEventOBInterceptor#sendNewEvent} builds the SAME kind of {@code EntityNewEvent} for
@@ -126,22 +125,21 @@ import com.etendoerp.go.roles.overlap.TemplateRemovalTracker;
  * binds.
  *
  * <p><b>Why {@link #deleteForcingCreatePath} uses a direct bulk HQL {@code DELETE}, and why it
- * refreshes (never evicts) the owning role.</b> See {@link WindowAccessOverlapCorruptionGuard#
- * deleteForcingCreatePath}'s own javadoc for the full empirical write-up ({@code FlushMode.COMMIT}
- * never auto-flushes a pending {@code OBDal.remove()} into query visibility; a reentrant {@code
- * OBDal.flush()} corrupts the outer flush's own action queue; evicting the owning role strips its
- * live session, breaking a later lazy collection re-initialization). Entity-agnostic reasoning,
- * reused verbatim here.
+ * refreshes (never evicts) the owning role.</b> See {@link #deleteForcingCreatePath}'s own javadoc
+ * for the full empirical write-up ({@code FlushMode.COMMIT} never auto-flushes a pending {@code
+ * OBDal.remove()} into query visibility; a reentrant {@code OBDal.flush()} corrupts the outer
+ * flush's own action queue; evicting the owning role strips its live session, breaking a later
+ * lazy collection re-initialization). Entity-agnostic reasoning, reused verbatim here.
  *
  * <p><b>Why {@link #repointInPlace} uses a bulk HQL {@code UPDATE} instead of {@link
  * #deleteForcingCreatePath}, and why it refreshes (never evicts) the corrected row itself.</b> See
- * {@link WindowAccessOverlapCorruptionGuard#repointInPlace}'s own javadoc for the full write-up:
- * deleting here would reopen the exact duplicate-INSERT race this method exists to close whenever
- * 2+ remaining templates overlap on the same item (REMOVE path), or would permanently lose a
- * dependent's row on a core propagation path with no create fallback (UPDATE path, the "[B7]"
- * fix). Evicting the row itself (rather than refreshing) collides with Hibernate's own
- * flush-time collection-reachability walk when reached from {@code onUpdate}'s {@code
- * Interceptor#onFlushDirty} — refresh avoids the collision on both callers.
+ * {@link #repointInPlace}'s own javadoc for the full write-up: deleting here would reopen the
+ * exact duplicate-INSERT race this method exists to close whenever 2+ remaining templates overlap
+ * on the same item (REMOVE path), or would permanently lose a dependent's row on a core
+ * propagation path with no create fallback (UPDATE path, the "[B7]" fix). Evicting the row itself
+ * (rather than refreshing) collides with Hibernate's own flush-time collection-reachability walk
+ * when reached from {@code onUpdate}'s {@code Interceptor#onFlushDirty} — refresh avoids the
+ * collision on both callers.
  *
  * @param <A>
  *          the concrete access entity type this guard observes ({@code WindowAccess}, classic
@@ -318,8 +316,36 @@ public abstract class AbstractAccessOverlapCorruptionGuard<A extends BaseOBObjec
 
   /**
    * Corrects {@code access}'s {@code client}/{@code organization} to match its OWNING role's own
-   * values, for a freshly-{@code onSave}d row that is NOT a template's own. See the class
-   * javadoc's "Why {@link #correctInheritedOwnership} uses {@code event.setCurrentState}" section.
+   * values, for a freshly-{@code onSave}d row that is NOT a template's own (i.e. a dependent
+   * role's newly-propagated, {@code inheritedFrom != null} row — {@code copyRoleAccess}'s CREATE
+   * output). Generalizes {@code UserRoleCompositionService#reconcileWindowAccessAfterComposition}'s
+   * OWN ownership-pinning (currently scoped to the ONE role that class is actively composing) to
+   * EVERY dependent role's freshly-created row, matching the ticket's own invariant: "client/
+   * organization must always match the role's own, never a template's" — verified live: without
+   * this, {@code copyRoleAccess} (see {@code RoleInheritanceManager}) copies EVERY field from the
+   * template's own access row via {@code DalUtil.copy}, {@code client}/{@code organization}
+   * included, and only ever corrects {@code role} afterward via {@code AccessTypeInjector#setParent}
+   * — so a bystander role's brand-new inherited row silently ends up owned by the TEMPLATE's own
+   * client (typically system client {@code "0"}) unless something fixes it, exactly like the row
+   * {@link #deleteForcingCreatePath} just cleared away.
+   *
+   * <p><b>Why this MUST use {@code event.setCurrentState(Property, Object)}, not a plain {@code
+   * access.setClient(...)} setter call — confirmed empirically, the hard way.</b> A first attempt
+   * here called the entity's own setters directly, reasoning (correctly) that {@code
+   * OBInterceptor}'s security check for a NEW entity fires synchronously, before this observer, so
+   * there was no check left to out-race. That reasoning was right but incomplete: {@code
+   * PersistenceEventOBInterceptor#sendNewEvent} builds {@code EntityNewEvent} from the {@code
+   * Object[] state} array Hibernate itself already extracted from the entity BEFORE dispatching to
+   * this listener chain — the eventual INSERT's bound values come from THAT array, not from
+   * re-reading the entity's fields at execution time. A plain setter call only mutates the JAVA
+   * OBJECT; it never touches Hibernate's own already-captured {@code state[]}, so the row still
+   * got physically inserted with the template's own client/organization regardless of the setter
+   * call (reproduced live: the "Corrected..." log line fired, confirming the setter WAS called,
+   * yet the persisted row's client was still the template's). {@code
+   * EntityPersistenceEvent#setCurrentState(Property, Object)} is the API specifically designed to
+   * reach the bound values instead (see its own javadoc) — the SAME mechanism the class's first,
+   * abandoned design already used correctly for this exact reason, just never generalized past the
+   * one role it was reactively (and, for THAT use case, ineffectively) trying to fix.
    */
   private void correctInheritedOwnership(EntityNewEvent event, A access) {
     if (getInheritedFrom(access) == null) {
@@ -402,19 +428,38 @@ public abstract class AbstractAccessOverlapCorruptionGuard<A extends BaseOBObjec
 
   /**
    * The single OTHER template {@code dependent} is currently, actively inheriting from that
-   * grants {@code item} full access — see {@link WindowAccessOverlapCorruptionGuard#
-   * findActiveTemplateGrantingFullAccess(Role, org.openbravo.model.ad.ui.Window)}'s own javadoc
-   * for the SeqNo-descending tie-break rationale (mirrors core's own {@code
-   * RoleInheritanceManager#propagateDeletedAccess} heuristic).
+   * grants {@code item} full ("&#x2713;") access — read fresh from each template's own access
+   * rows, mirroring {@code UserRoleCompositionService#mostPermissiveWindowAccess} (same
+   * source-of-truth choice: the templates' own current grants, not whatever single row core's
+   * per-item propagation happened to leave behind). Returns {@code null} if none does.
+   *
+   * <p><b>Tie-break when 2+ OTHER active templates both grant full access.</b> {@link
+   * com.etendoerp.go.roles.overlap.ActiveTemplateInheritance#findActiveTemplatesFor(Role, String)}
+   * returns templates ordered by their {@code AD_Role_Inheritance.SeqNo} DESCENDING, so the first
+   * match this method finds is the highest-sequence-number one — deliberately mirroring the exact
+   * tie-break core's own {@code RoleInheritanceManager#propagateDeletedAccess} already uses when
+   * it has to pick ONE surviving template to re-source a row from after a removal ("retrieve the
+   * list of templates, ordered by sequence number descending, to update the access with the first
+   * one available"). Picking the SAME tie-break core itself uses means this method's choice of
+   * "the" justifying template stays consistent with whatever core would independently re-derive if
+   * the row were deleted and recreated from scratch — not a novel rule invented for this method.
+   *
+   * <p>Also reused by {@link #repointIfAlreadySourcedFromTemplate} (the BUG-2 fix, ETP-4906 QA
+   * final coverage pass, 2026-08-18) via the {@code excludedTemplate} overload below, so the
+   * {@code onUpdate}/{@code UPDATED_GRANT} trigger surveys every OTHER actively-inherited template
+   * before applying a downgrade — the same most-permissive-wins pattern this method already gives
+   * the ADD-path trigger.
    */
   private Role findActiveTemplateGrantingFullAccess(Role dependent, G item) {
     return findActiveTemplateGrantingFullAccess(dependent, item, null);
   }
 
   /**
-   * Overload that skips one specific template — used by {@link
-   * #repointIfAlreadySourcedFromTemplate} to survey every OTHER actively-inherited template. Same
-   * SeqNo-descending tie-break as the no-exclusion overload.
+   * Overload of {@link #findActiveTemplateGrantingFullAccess(Role, BaseOBObject)} that skips one
+   * specific template — used by {@link #repointIfAlreadySourcedFromTemplate} to survey every
+   * OTHER actively-inherited template ({@code excludedTemplate} is the one whose own row just
+   * changed and is being handled separately, from the caller's already-updated in-memory value).
+   * Same SeqNo-descending tie-break as the no-exclusion overload — see that method's own javadoc.
    */
   private Role findActiveTemplateGrantingFullAccess(Role dependent, G item, Role excludedTemplate) {
     Map<String, Role> templatesById = new LinkedHashMap<>();
@@ -480,15 +525,43 @@ public abstract class AbstractAccessOverlapCorruptionGuard<A extends BaseOBObjec
 
   /**
    * The {@code onUpdate}/{@code UPDATED_GRANT} counterpart to {@link
-   * #clearConflictingAccessUnconditionally} — deleting is NOT safe on this trigger (see {@link
-   * PropagationTrigger#UPDATED_GRANT}'s own javadoc). Restricted to the only case core's own
-   * {@code propagateUpdatedAccess} actually acts on: {@code dependent}'s existing row for {@code
-   * item} is ALREADY sourced from {@code grantingTemplate}. Never blindly trusts {@code
-   * grantingTemplate}'s new value in isolation — surveys every OTHER actively-inherited template
-   * first (the "BUG-2" fix — see {@link WindowAccessOverlapCorruptionGuard#
-   * repointIfAlreadySourcedFromTemplate}'s own javadoc for the full live-reproduced write-up), so
-   * most-permissive-wins holds even when the template whose OWN grant just changed is not the only
-   * one justifying full access.
+   * #clearConflictingAccessUnconditionally} — see {@link PropagationTrigger}'s own javadoc and the
+   * class javadoc's "[B7]" section for why deleting is NOT safe on this trigger. Restricted to the
+   * only case core's own {@code propagateUpdatedAccess} actually acts on: {@code dependent}'s
+   * existing row for {@code item} is ALREADY sourced from {@code grantingTemplate}. For that case,
+   * corrects the row's {@code editableField} IN PLACE to match {@code templateAccess}'s own
+   * (already-updated, pre-flush) value directly — via the same bulk-HQL-UPDATE technique {@link
+   * #repointInPlace} already uses for the sixth trigger — rather than deleting it, so the
+   * dependent's row is guaranteed to survive regardless of whether core's own {@code
+   * propagateUpdatedAccess} manages to find and update it afterward.
+   *
+   * <p>A row NOT sourced from {@code grantingTemplate} (manually granted, or sourced from a
+   * DIFFERENT template) is left entirely untouched: core's own {@code findInheritedAccess} only
+   * ever matches a dependent's row already sourced from the SAME template whose grant just
+   * changed, so it would not have acted on this row either — nothing to prevent, nothing to
+   * correct.
+   *
+   * <p><b>[BUG-2 fix, ETP-4906 QA final coverage pass, 2026-08-18] Never blindly trusts {@code
+   * grantingTemplate}'s new value in isolation.</b> The original version of this method copied
+   * {@code templateAccess}'s new {@code editableField} onto the dependent's row unconditionally
+   * whenever the row was sourced from {@code grantingTemplate} — silently violating
+   * most-permissive-wins whenever {@code dependent} ALSO actively inherits from a DIFFERENT
+   * template that still grants {@code item} full access: downgrading {@code grantingTemplate}'s
+   * own access (a routine Etendo Classic admin action) would drag the dependent's row down too,
+   * even though the other template still justified full access. Empirically reproduced live (QA's
+   * throwaway probe, see the plan doc's "QA Findings — Final Coverage Pass" section) — first
+   * attempt, no flakiness. Fixed by surveying every OTHER actively-inherited template via {@link
+   * #findActiveTemplateGrantingFullAccess(Role, BaseOBObject, Role)} BEFORE applying anything — the
+   * exact same most-permissive-wins survey {@link #widenInheritedAccessLevelIfNeeded(EntityNewEvent,
+   * BaseOBObject)} (ADD path) and {@link #collectItemGrantors(List)} (REMOVE path) already run,
+   * just applied to the one trigger that skipped it. The final level is the MAX of {@code
+   * grantingTemplate}'s own new value and every other active grantor's current value; {@code
+   * InheritedFrom} is repointed to whichever template actually justifies that final value —
+   * {@code grantingTemplate} itself when its own new value already suffices, otherwise the
+   * OTHER still-active full grantor — mirroring {@code widenInheritedAccessLevelIfNeeded}'s own
+   * "repoint to whoever actually justifies the value" rule so a LATER removal of either template
+   * correctly re-triggers re-derivation instead of leaving the row pointed at a template that no
+   * longer backs its own value.
    */
   private void repointIfAlreadySourcedFromTemplate(Role dependent, G item, Role grantingTemplate,
       A templateAccess) {
@@ -521,12 +594,65 @@ public abstract class AbstractAccessOverlapCorruptionGuard<A extends BaseOBObjec
   }
 
   /**
-   * Shared by both {@code NEW_GRANT}-safe ADD-side triggers. If {@code dependent} has an active
-   * row for {@code item}, deletes it via {@link #deleteForcingCreatePath} UNCONDITIONALLY — even
-   * when the row is ALREADY correctly sourced from {@code grantingTemplate} — see {@link
-   * WindowAccessOverlapCorruptionGuard#clearConflictingAccessUnconditionally}'s own javadoc for
-   * why "already correct" is not a safe reason to skip (core's blind lookup across clients cannot
-   * always SEE the row before its own CREATE-branch decision).
+   * Shared by both {@code NEW_GRANT}-safe ADD-side triggers ({@link
+   * #guardDependentsOf(BaseOBObject, PropagationTrigger)}'s {@code NEW_GRANT} case and {@link
+   * #guardNewInheritance(RoleInheritance)}) — NOT called for {@link
+   * #guardDependentsOf(BaseOBObject, PropagationTrigger)}'s {@code UPDATED_GRANT} case, which uses
+   * {@link #repointIfAlreadySourcedFromTemplate} instead (see that method's own javadoc and {@link
+   * PropagationTrigger}'s javadoc for why). If {@code dependent} has an active access row for
+   * {@code item}, deletes it via {@link #deleteForcingCreatePath} UNCONDITIONALLY — even when the
+   * row is ALREADY correctly sourced from {@code grantingTemplate}. See the class javadoc's "A
+   * seventh trigger" section for the full root-cause write-up; summarized here.
+   *
+   * <p><b>Why "already correct" is no longer a reason to skip — found empirically (ETP-4906,
+   * Task B6, 7th round, 2026-08-17).</b> Both prior ADD-side implementations (rounds 1-2) treated
+   * "the existing row is already sourced from the SAME template that just gained the grant" as a
+   * safe no-op, reasoning that core's own {@code RoleInheritanceManager#handleAccess}/{@code
+   * isPrecedent} would independently reach the identical conclusion (its own {@code
+   * ACCESS_NOT_CHANGED} branch) and leave the row alone. That reasoning assumed core's own {@code
+   * getAccess()}/{@code AccessTypeInjector#findAccess} lookup can actually SEE the row — it
+   * cannot, whenever the dependent's client is not in the ambient {@code OBContext}'s own
+   * readable-clients list: {@code findAccess}'s generated query filters by {@code AD_Client_ID in
+   * (...)} using the CALLING context's readable clients (confirmed via SQL trace: a role
+   * belonging to a tenant client not in that list is invisible to this query, full stop — the
+   * row-level filter is not admin-mode-gated, exactly like {@link
+   * com.etendoerp.go.roles.overlap.ActiveTemplateInheritance#crossClientCriteria(Class)}'s own
+   * javadoc already documents for OUR OWN queries). When blind, {@code handleAccess} ALWAYS
+   * evaluates {@code access == null} and takes the CREATE branch — REGARDLESS of whether a
+   * correctly-sourced row already exists — so ANY pre-existing row for that (role, item), no
+   * matter how correct, is a duplicate-INSERT collision waiting to happen the instant core's own
+   * propagation reaches it. Live-reproduced (for the {@code WindowAccess}/{@code Window} case):
+   * {@code
+   * UserRoleCompositionServiceOverlapReverificationTest#testRealMatrixOverlapSalesAndPurchasingOnProductCategoryStaysReadOnly}
+   * — a bystander role ({@code F238CDA0}, "Personal – CompositionUser") already had a correctly-
+   * sourced, correctly-leveled row for the template's newly-granted window; the OLD "skip when
+   * already correct" branch left it in place; core's own blind {@code copyRoleAccess} then tried
+   * to INSERT a second row for the identical {@code (AD_Role_ID, AD_Window_ID)} key and crashed
+   * with the same {@code ad_window_access_un_key} violation this mechanism exists to prevent for
+   * every entity pair it now defends.
+   *
+   * <p><b>Why deletion (not {@link #repointInPlace}) is the correct lever here — a DIFFERENT
+   * conclusion from {@link #guardRemovedInheritance(RoleInheritance)}'s own "never delete, always
+   * repoint in place" rule, for a DIFFERENTLY-SHAPED bug.</b> {@code guardRemovedInheritance}'s
+   * duplicate-INSERT race (the "sixth trigger") is about core's {@code calculateAccesses} walking
+   * 2+ REMAINING TEMPLATES in ONE call with no flush between passes — repointing in place removes
+   * the underlying trigger entirely, because core's OWN {@code isPrecedent} check, once it can
+   * see a row sourced from the highest-{@code SeqNo} template, correctly resolves to
+   * ACCESS_NOT_CHANGED and never attempts a competing write. That reasoning requires core to be
+   * ABLE to see the row. Here, core's blindness is the root cause itself — repointing a row's
+   * fields in place changes nothing about whether the row PHYSICALLY EXISTS, so core's blind
+   * {@code copyRoleAccess} would still attempt an INSERT against the identical key regardless of
+   * what values the surviving row holds. The ONLY way to guarantee core's own (blind) CREATE
+   * lands on an empty slot is to ensure no row exists at all before returning control to it —
+   * exactly what {@link #deleteForcingCreatePath} already does for the "needs correction" case.
+   * Applying it unconditionally simply closes the gap left by the old "already correct" shortcut.
+   *
+   * <p>Trades a small amount of churn (a correctly-sourced row is deleted and recreated with a
+   * fresh id/audit columns instead of being left untouched) for guaranteed safety — acceptable
+   * given the alternative is a 500 error on the real {@code SFAssignUserRoles} webhook. The
+   * recreated row is corrected right back to the exact same values by {@link
+   * #correctInheritedOwnership}/{@link #widenInheritedAccessLevelIfNeeded}, which already run on
+   * EVERY freshly-created inherited row regardless of how it was triggered.
    */
   private void clearConflictingAccessUnconditionally(Role dependent, G item, Role grantingTemplate) {
     A existing = findActiveAccess(dependent, item);
@@ -539,10 +665,93 @@ public abstract class AbstractAccessOverlapCorruptionGuard<A extends BaseOBObjec
 
   /**
    * Removes {@code existing} — the dependent role's OWN conflicting row — so core's subsequent
-   * lookup for (role={@code dependent}, item={@code item}) finds nothing and takes the CREATE path
-   * instead of the corrupting UPDATE path. See the class javadoc's own section on why this is a
-   * direct bulk HQL {@code DELETE}, and why {@code dependent} is refreshed (never evicted)
-   * afterward.
+   * {@code handleAccess}/{@code findInheritedAccess} lookup for (role={@code dependent}, item=
+   * {@code item}) finds nothing and takes the CREATE path instead of the corrupting UPDATE path.
+   * Same GOAL as {@code UserRoleCompositionService#preventWindowAccessOverlapCorruption}, but a
+   * DIFFERENT mechanism was required to reach it from this nested position — see below.
+   *
+   * <p><b>Why this is a direct bulk HQL {@code DELETE}, not {@code OBDal.remove()} +
+   * {@code OBDal.flush()} (what {@code preventWindowAccessOverlapCorruption} itself safely does).
+   * </b> This method runs NESTED inside a Hibernate {@code Session.flush()} that is already in
+   * progress (this class's {@code onSave}/{@code onUpdate} fire from mid-flush — see the class
+   * javadoc), and Openbravo's DAL layer sets every session's flush mode to {@code
+   * FlushMode.COMMIT} (see {@code SessionHandler#setDefaultFlushMode}/its call site) — meaning
+   * queries NEVER auto-flush pending entity-level changes, unlike the {@code FlushMode.AUTO}
+   * default most Hibernate apps run under. Two consequences, both confirmed empirically while
+   * verifying this redesign:
+   * <ol>
+   *   <li>{@code OBDal.remove(existing)} WITHOUT an explicit {@code flush()} is invisible to
+   *   core's subsequent {@code findAccess}/{@code getAccessList} HQL queries — {@code
+   *   FlushMode.COMMIT} means nothing auto-flushes before them. Core's query still finds the
+   *   "existing" row, so {@code handleAccess} never reaches the CREATE path at all — worse, when
+   *   the OUTER flush eventually executes OUR scheduled delete, the row is gone with NOTHING core
+   *   ever created to replace it (reproduced live: every item this method needed to clear ended
+   *   up simply absent from the dependent role afterward, confirmed against the actual DB rows).
+   *   </li>
+   *   <li>Calling {@code OBDal.flush()} explicitly from here to force visibility is a REENTRANT
+   *   {@code Session.flush()} call — one flush() invoked from inside another, still-in-progress
+   *   one on the SAME session. This corrupts the OUTER flush's own in-progress action-queue
+   *   bookkeeping: reproduced live as a {@code StaleStateException} ("actual row count: 0;
+   *   expected: 1") on an UPDATE for a row that demonstrably still existed moments earlier in the
+   *   very same flush cycle.</li>
+   * </ol>
+   * A direct {@code session.createQuery("delete from " + accessEntityName() + " ...")
+   * .executeUpdate()} sidesteps BOTH: a bulk HQL DML statement is executed as a single SQL
+   * statement immediately, on the current connection/transaction — it does not go through the
+   * session's flush/action-queue machinery at all (no {@code EntityDeleteEvent} fires either, so
+   * core's own inherited-access delete-protection check (e.g. {@code
+   * InheritedAccessEnabledEventHandler}'s "NotDeleteInheritedAccess" check for the {@code
+   * WindowAccess} case) — which exists to protect exactly this {@code inheritedFrom != null} case
+   * from a NORMAL entity-level delete — never runs, and does not need to: we WANT this specific
+   * case deleted regardless of {@code inheritedFrom}). The row is gone from the DB immediately,
+   * visible to any subsequent SELECT on the same transaction (including core's), with no
+   * reentrant flush anywhere.
+   *
+   * <p><b>Also refreshes {@code dependent} (the OWNING role) — {@code OBDal.refresh}, NOT {@code
+   * evict}.</b> {@code dependent}'s own access collection (see {@link
+   * #removeFromOwnerCollection(Role, BaseOBObject)}, e.g. {@code getADWindowAccessList()} for the
+   * {@code WindowAccess} case) is frequently ALREADY loaded and cached in this session by the time
+   * this method runs — typically because an EARLIER, separate top-level flush already
+   * force-initialized it (core's own access-injector equivalent, e.g. {@code
+   * WindowAccessInjector#setParent}, calls {@code role.get<Access>List().add(...)} for every row
+   * it ever creates, which lazily loads the collection the first time). That cached Java list
+   * still holds a reference to {@code existing} even after the bulk delete above — a raw SQL
+   * statement does not know or care about Hibernate's separate collection-snapshot bookkeeping.
+   * THREE outcomes were tried empirically here, in order:
+   * <ol>
+   *   <li>Leave the stale reference alone: the next time core touches this SAME collection (e.g.
+   *   appending its own newly-created replacement row for a different, non-conflicting item),
+   *   Hibernate re-examines the whole collection and finds a member with no valid snapshot —
+   *   {@code OBInterceptor} logs "detected as not new... but it does not have a current state in
+   *   the database" and still schedules an UPDATE for it, which then fails with {@code
+   *   StaleStateException} ("actual row count: 0") once the row's absence surfaces at SQL
+   *   execution time.</li>
+   *   <li>Remove {@code existing} from the collection explicitly ({@link
+   *   #removeFromOwnerCollection(Role, BaseOBObject)}): Hibernate's own orphan-removal cascade
+   *   (this collection mapping cascades deletes) detects the missing element against its loaded
+   *   snapshot and schedules its OWN {@code session.delete()} for it — which DOES run through
+   *   {@code OBInterceptor.onDelete}/{@code SecurityChecker.checkDeleteAllowed}, reproduced live
+   *   as the exact {@code OBSecurityException} this whole class exists to prevent in the first
+   *   place, just relocated from an update to a delete.</li>
+   *   <li>Fully {@code evict(dependent)} (detach the whole entity, not just the collection):
+   *   avoids both of the above, but ALSO strips {@code dependent} of its live Hibernate session —
+   *   the very next time core's access-injector equivalent calls {@code
+   *   role.get<Access>List().add(...)} to register ITS OWN newly-created replacement row, the (now
+   *   fully detached) collection cannot lazily re-initialize itself at all, reproduced live as
+   *   {@code LazyInitializationException}: "could not initialize proxy - no Session".</li>
+   * </ol>
+   * {@code OBDal.refresh(dependent)} is the one operation that does what is actually needed:
+   * {@code dependent} stays ATTACHED/managed (so a subsequent lazy collection access still has a
+   * live session to reload through — no {@code LazyInitializationException}), while its cached
+   * collection snapshot is discarded and will be re-fetched from the database on next access —
+   * correctly excluding {@code existing}, which the bulk delete above already removed there, with
+   * no stale reference left for Hibernate to misinterpret as a pending update OR an orphan needing
+   * its own cascade delete. This does not interfere with core's own CREATE for the replacement row
+   * either way — {@code copyRoleAccess} (or its Process/OBUIAPP equivalent) persists the new
+   * access row via a DIRECT {@code OBDal.save(newAccess)} call, never via cascade from the parent
+   * collection; the access-injector's own {@code .add(...)} call is only ever a convenience for
+   * keeping the in-memory list accurate for the REST of this same request, not what actually
+   * persists the row.
    */
   private void deleteForcingCreatePath(A existing, Role dependent, G item, Role template,
       Role previousSource) {
@@ -672,14 +881,86 @@ public abstract class AbstractAccessOverlapCorruptionGuard<A extends BaseOBObjec
   }
 
   /**
-   * Corrects {@code existing}'s {@code inheritedFrom} and {@code editableField} to the
-   * pre-computed {@code winner}/{@code winnerLevel} DIRECTLY, IN PLACE — the SAME row, SAME
-   * primary key — instead of {@link #deleteForcingCreatePath} deleting it and relying on core's
-   * OWN propagation to recreate it. See the class javadoc's own section on why a bulk HQL {@code
-   * UPDATE} is required here, and why {@code existing} is refreshed (never evicted) afterward.
-   * {@code client}/{@code organization} are deliberately NOT touched here — {@code existing}
-   * already belongs to {@code dependent}'s own role, so there is nothing to re-pin, unlike {@link
+   * Originally the SIXTH-trigger fix's own mechanism (see the class javadoc's "A sixth trigger"
+   * section for the full root-cause write-up) — now ALSO reused by the seventh trigger's own B7
+   * fix, {@link #repointIfAlreadySourcedFromTemplate} (see the class javadoc's "The seventh
+   * trigger's own gap, found in REVIEW" section). Corrects {@code existing}'s {@code
+   * inheritedFrom} and {@code editableField} to the pre-computed {@code winner}/{@code
+   * winnerLevel} DIRECTLY, IN PLACE — the SAME row, SAME primary key — instead of {@link
+   * #deleteForcingCreatePath} deleting it and relying on core's OWN propagation to recreate it.
+   * Deliberately does NOT reuse {@code deleteForcingCreatePath}: for the sixth trigger, deleting
+   * would reopen the exact duplicate-INSERT race this method exists to close (see the class
+   * javadoc) whenever 2+ remaining templates both grant {@code item} — core's {@code
+   * RoleInheritanceManager#applyRemoveInheritance} walks EVERY remaining template's own grants in
+   * ONE {@code calculateAccesses} call, and with {@code existing} deleted, each remaining template
+   * covering the same item independently finds no row and issues its OWN {@code copyRoleAccess}
+   * INSERT, none of them aware of the others' still-unflushed one ({@code FlushMode.COMMIT} never
+   * auto-flushes a query into visibility — see {@link #deleteForcingCreatePath}'s own javadoc for
+   * the proof of that same limitation on the delete side); for the seventh trigger's B7 fix,
+   * deleting would reopen the ORIGINAL "[B7]" bug this method's caller exists to close — core's
+   * {@code propagateUpdatedAccess} has no create fallback at all, so a deleted row here is simply
+   * gone forever.
+   *
+   * <p>Same bulk-DML-bypasses-the-session technique as {@link #deleteForcingCreatePath} (an
+   * {@code executeUpdate()} HQL bulk UPDATE, not an entity-level setter + flush), for the identical
+   * reason: this runs nested inside an already-in-progress flush under {@code FlushMode.COMMIT},
+   * so an entity-level {@code existing.setInheritedFrom(winner)} would only mutate the in-memory
+   * Java object — never Hibernate's own dirty-check bookkeeping in a way guaranteed to survive
+   * being invoked mid-flush from an unrelated entity's delete-event callback — and a reentrant
+   * {@code OBDal.flush()} to force it through is independently unsafe (see {@link
+   * #deleteForcingCreatePath}'s javadoc, point 2). A bulk UPDATE writes the SQL immediately on the
+   * current connection, visible to every subsequent SELECT in this transaction (including core's
+   * own {@code getAccess()} lookups during {@code calculateAccesses}), with zero risk to the outer
+   * flush's action queue.
+   *
+   * <p>Because {@code existing}'s {@code inheritedFrom} is corrected to {@code winner} — by
+   * construction ALWAYS the remaining template with the numerically HIGHEST {@code
+   * AD_Role_Inheritance.SeqNo} among every remaining template granting {@code item}, regardless
+   * of that template's own access level (see the class javadoc's "Why InheritedFrom must track
+   * core's own SeqNo precedence" paragraph for why a most-permissive-based pick here is NOT safe
+   * — {@code winnerLevel} is where most-permissive-wins is actually applied, decoupled from this)
+   * — core's OWN {@code
+   * isPrecedent(inheritanceInheritFromIdList, currentInheritedFromId, newInheritedFromId)} check
+   * can never find {@code winner}'s index smaller than any OTHER remaining template's index (its
+   * index is, by construction, the largest among templates granting this item), so every one of
+   * core's own per-template passes over this item resolves to {@code ACCESS_NOT_CHANGED} —
+   * core touches this row ZERO times during its own recalculation (sixth-trigger case) or, for the
+   * seventh-trigger's B7 case, core's {@code propagateUpdatedAccess}'s own {@code updateRoleAccess}
+   * call against this SAME row afterward is a same-value, idempotent no-op. Either way, no {@code
+   * EntityNewEvent}/{@code EntityUpdateEvent} is left for {@link #correctInheritedOwnership}/{@link
+   * #widenInheritedAccessLevelIfNeeded} to react to — this method does both jobs itself, up front,
+   * in one step.
+   *
+   * <p>{@code client}/{@code organization} are deliberately NOT touched here — {@code existing}
+   * already belongs to {@code dependent} (it is an update to an ALREADY-correctly-owned row, never
+   * a copy from a template's own row), so there is nothing to re-pin, unlike {@link
    * #correctInheritedOwnership}'s CREATE-path concern.
+   *
+   * <p><b>Refreshes {@code existing} afterward — {@code OBDal.refresh}, NOT {@code
+   * session.evict()} — found empirically (ETP-4906, REVIEW round, "[B7]" fix, 2026-08-17).</b> An
+   * earlier version of the seventh-trigger's B7 fix reused {@code session.evict(existing)} here
+   * unchanged (the same call the sixth trigger's own {@code onDelete}-triggered caller uses safely)
+   * — reproduced live (for the {@code WindowAccess} case) as {@code HibernateException: Don't
+   * change the reference to a collection with delete-orphan enabled :
+   * ADWindowAccess.aDTabAccessList} at the OUTER flush, specifically on the B7 fix's own {@code
+   * onUpdate}-triggered path, never on the sixth trigger's {@code onDelete} path. Root cause
+   * (confirmed by bisection — the crash disappeared when the {@code evict} call was removed, and
+   * reappeared only once {@code repointInPlace} was called again from the {@code onUpdate}
+   * trigger): {@code Interceptor#onFlushDirty} (which is how {@code onUpdate}'s {@code
+   * EntityUpdateEvent} reaches this class) fires FROM WITHIN Hibernate's own {@code
+   * AbstractFlushingEventListener#flushEntities} loop — the SAME loop that walks every OTHER
+   * managed entity's collection-valued properties for reachability, {@code existing} included, in
+   * the SAME pass. Evicting {@code existing} mid-loop rips it out of the persistence context while
+   * Hibernate's own flush-time bookkeeping still expects to examine it, corrupting the collection
+   * tracking. {@code Interceptor#onSave} (how the sixth trigger's sibling ADD-side triggers and
+   * {@code deleteForcingCreatePath} reach this class) fires synchronously at {@code save()}/{@code
+   * delete()} call time, OUTSIDE that loop entirely — evicting there never collides with it, which
+   * is why the identical {@code evict()} call is safe on those paths but not here. {@code
+   * OBDal.refresh(existing)} avoids the collision entirely: it re-syncs {@code existing}'s scalar
+   * fields from the DB (reflecting the bulk UPDATE above, visible on the same connection/
+   * transaction) while keeping it ATTACHED and managed, so the flush's own collection-reachability
+   * bookkeeping for it stays consistent throughout — confirmed safe for BOTH callers by re-running
+   * the full existing regression suite in this class after the change.
    */
   private void repointInPlace(A existing, G item, Role winner, boolean winnerLevel,
       Role previousSource) {
