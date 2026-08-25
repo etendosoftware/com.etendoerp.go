@@ -82,6 +82,13 @@ final class ReconciliationPaymentService {
    * additionally requires the resolved method to be multi-currency enabled; a PSD2 bank-transfer
    * method (multi-currency disabled by ETP-4503) is rejected with a clear error rather than a
    * cryptic Core failure.
+   *
+   * <p>A same-currency settlement CAN use the bank-transfer method (e.g. a connected account's
+   * imported statement line, reconciled against an invoice). This never goes through PIS — there is
+   * no live handshake to defer to, the transaction is for money that has already moved — so {@link
+   * PaymentRegistrationService#processOrThrow} always forces it to be created immediately
+   * ({@code mayDeferToPis=false}, ETP-4891). Deferring here would leave {@link
+   * ReconciliationFlowSupport} with no transaction to match against the statement line at all.
    */
   static FIN_Payment registerReconciliationPayment(ReconciliationPaymentRequest req)
       throws Exception {

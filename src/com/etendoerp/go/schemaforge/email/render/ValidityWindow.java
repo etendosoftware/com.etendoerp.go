@@ -32,7 +32,52 @@ import java.time.temporal.ChronoUnit;
 public final class ValidityWindow {
 
   private static final long MINUTES_PER_DAY = 1440;
+  private static final long MINUTES_PER_HOUR = 60;
   private static final long SECONDS_PER_MINUTE = 60;
+
+  /** The unit an email states its validity window in. */
+  public enum Unit {
+    /** Short-lived links, such as a password reset. */
+    MINUTES,
+    /** Day-scale links, such as email verification. */
+    HOURS,
+    /** Long-lived links, such as an invitation. */
+    DAYS
+  }
+
+  /**
+   * Whole units from now until an expiry instant, rounded up.
+   *
+   * @param unit the unit the email's copy is written in
+   * @param now the reference instant
+   * @param expiresAt the expiry instant, may be {@code null}
+   * @return whole units remaining, never below one
+   */
+  public static long until(Unit unit, Instant now, Instant expiresAt) {
+    switch (unit) {
+      case HOURS:
+        return hoursUntil(now, expiresAt);
+      case DAYS:
+        return daysUntil(now, expiresAt);
+      default:
+        return minutesUntil(now, expiresAt);
+    }
+  }
+
+  /**
+   * Whole hours from now until an expiry instant, rounded up.
+   *
+   * @param now the reference instant
+   * @param expiresAt the expiry instant, may be {@code null}
+   * @return whole hours remaining, never below one
+   */
+  public static long hoursUntil(Instant now, Instant expiresAt) {
+    if (expiresAt == null) {
+      return 1;
+    }
+    long minutes = ChronoUnit.MINUTES.between(now, expiresAt);
+    return Math.max(1, (long) Math.ceil(minutes / (double) MINUTES_PER_HOUR));
+  }
 
   private ValidityWindow() {
   }

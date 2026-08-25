@@ -20,6 +20,7 @@ package com.etendoerp.go.schemaforge.email.contracts;
 import com.etendoerp.go.schemaforge.email.EmailContract;
 import com.etendoerp.go.schemaforge.email.EmailContractDataResolver;
 import com.etendoerp.go.schemaforge.email.EmailContractProvider;
+import com.etendoerp.go.schemaforge.email.render.ValidityWindow;
 
 import java.util.Arrays;
 import java.util.Collection;
@@ -36,6 +37,10 @@ public final class CoreEmailContractProvider implements EmailContractProvider {
   private static final int RESET_PASSWORD_RECIPIENT_THROTTLE_LIMIT = 3;
   private static final int NEW_ACCOUNT_RECIPIENT_THROTTLE_LIMIT = 2;
   private static final int ENVIRONMENT_READY_RECIPIENT_THROTTLE_LIMIT = 2;
+  // ETP-4798: one more than reset-password. Asking for the confirmation link again is a normal
+  // thing to do (the first mail lands in spam, the user mistypes nothing but waits), and the
+  // account is blocked from creating its environment until it arrives.
+  private static final int VERIFY_EMAIL_RECIPIENT_THROTTLE_LIMIT = 4;
   private static final int ACCOUNT_LINK_THROTTLE_WINDOW_SECONDS = 900;
   private static final String DASHBOARD_LINK_PATH = "dashboard";
 
@@ -62,10 +67,19 @@ public final class CoreEmailContractProvider implements EmailContractProvider {
             RESET_PASSWORD_RECIPIENT_THROTTLE_LIMIT, ACCOUNT_LINK_THROTTLE_WINDOW_SECONDS, null,
             "note.expiry", "note.ignore"),
         new AccountLinkEmailContract("new-account", contractResolver,
-            NEW_ACCOUNT_RECIPIENT_THROTTLE_LIMIT, ACCOUNT_LINK_THROTTLE_WINDOW_SECONDS),
+            NEW_ACCOUNT_RECIPIENT_THROTTLE_LIMIT, ACCOUNT_LINK_THROTTLE_WINDOW_SECONDS, null,
+            ValidityWindow.Unit.HOURS, "note.expiry"),
         new AccountLinkEmailContract("environment-ready", contractResolver,
             ENVIRONMENT_READY_RECIPIENT_THROTTLE_LIMIT, ACCOUNT_LINK_THROTTLE_WINDOW_SECONDS,
             DASHBOARD_LINK_PATH),
+        new AccountLinkEmailContract("verify-email", contractResolver,
+            VERIFY_EMAIL_RECIPIENT_THROTTLE_LIMIT, ACCOUNT_LINK_THROTTLE_WINDOW_SECONDS, null,
+            ValidityWindow.Unit.HOURS, "note.expiry", "note.ignore"),
+        // An invited operator gets a welcome of its own: its button goes to the dashboard, not to
+        // email verification, because an invitation is itself the proof that somebody meant to
+        // reach this address (ETP-5003).
+        new AccountLinkEmailContract("new-account-invitee", contractResolver,
+            NEW_ACCOUNT_RECIPIENT_THROTTLE_LIMIT, ACCOUNT_LINK_THROTTLE_WINDOW_SECONDS),
         new AccountNoticeEmailContract("password-changed", contractResolver, "note.warning"),
         new LoginAlertEmailContract(contractResolver),
         new OrganizationJoinedEmailContract(contractResolver),

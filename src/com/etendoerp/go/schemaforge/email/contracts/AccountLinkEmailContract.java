@@ -57,15 +57,25 @@ final class AccountLinkEmailContract implements EmailContract {
   private final int throttleWindowSeconds;
   private final String configuredLinkPath;
   private final String[] noteKeys;
+  private final ValidityWindow.Unit expiryUnit;
 
   AccountLinkEmailContract(String name, EmailContractDataResolver dataResolver,
       int recipientThrottleLimit, int throttleWindowSeconds) {
-    this(name, dataResolver, recipientThrottleLimit, throttleWindowSeconds, null, new String[0]);
+    this(name, dataResolver, recipientThrottleLimit, throttleWindowSeconds, null,
+        ValidityWindow.Unit.MINUTES, new String[0]);
   }
 
   AccountLinkEmailContract(String name, EmailContractDataResolver dataResolver,
       int recipientThrottleLimit, int throttleWindowSeconds, String configuredLinkPath,
       String... noteKeys) {
+    this(name, dataResolver, recipientThrottleLimit, throttleWindowSeconds, configuredLinkPath,
+        ValidityWindow.Unit.MINUTES, noteKeys);
+  }
+
+  AccountLinkEmailContract(String name, EmailContractDataResolver dataResolver,
+      int recipientThrottleLimit, int throttleWindowSeconds, String configuredLinkPath,
+      ValidityWindow.Unit expiryUnit, String... noteKeys) {
+    this.expiryUnit = expiryUnit;
     this.name = name;
     this.dataResolver = dataResolver;
     this.recipientThrottleLimit = recipientThrottleLimit;
@@ -141,7 +151,8 @@ final class AccountLinkEmailContract implements EmailContract {
       String language = EmailContractCommandSupport.text(command,
           EmailContractCommandSupport.FIELD_LANGUAGE);
       String recipientName = contact.get().getName();
-      Object[] noteParams = { ValidityWindow.minutesUntil(Instant.now(), resolveExpiry(command)) };
+      Object[] noteParams = { ValidityWindow.until(expiryUnit, Instant.now(),
+          resolveExpiry(command)) };
 
       JSONObject data = new JSONObject();
       // Kept alongside the rendered content: the gateway logs these for traceability, and they
