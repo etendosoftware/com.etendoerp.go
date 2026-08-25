@@ -464,7 +464,7 @@ El `NeoSelectorService` resuelve referencias FK y provee valores de dropdown con
 **Simple selectors (TableDir ref 19, Table ref 18, Search ref 30):**
 - Usan `AD_Ref_Table` para encontrar la entity target
 - Una sola propiedad de display (identifier)
-- Where clause opcional desde `AD_Ref_Table.HQLWhereClause`
+- Where clause opcional desde `AD_Ref_Table.HQLWhereClause`, con fallback a `SQLWhereClause` (traducido a HQL) cuando `HQLWhereClause` esta vacio; un segmento con subquery anidada `(SELECT ...)` se descarta en vez de traducirse mal, via el guard `NESTED_SUBQUERY` compartido con `SelectorValidationResolver` (ETP-4975 -- ver `docs/neo-headless.md` §4.4 para el detalle completo)
 
 **Rich selectors (OBUISEL_Selector):**
 - Grid con multiples columnas configurables
