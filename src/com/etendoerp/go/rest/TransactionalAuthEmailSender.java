@@ -37,11 +37,12 @@ class TransactionalAuthEmailSender {
 
   private static final Logger log = LogManager.getLogger(TransactionalAuthEmailSender.class);
 
+  private static final String CONTRACT_COMPANY_INVITATION = "company-invitation";
   private static final String CONTRACT_ENVIRONMENT_READY = "environment-ready";
   private static final String CONTRACT_NEW_ACCOUNT = "new-account";
   private static final String CONTRACT_PASSWORD_CHANGED = "password-changed";
   private static final String CONTRACT_RESET_PASSWORD = "reset-password";
-  private static final String CONTRACT_COMPANY_INVITATION = "company-invitation";
+  private static final String CONTRACT_VERIFY_EMAIL = "verify-email";
 
   private final TransactionalEmailService emailService;
 
@@ -54,15 +55,53 @@ class TransactionalAuthEmailSender {
   }
 
   boolean sendNewAccount(Account account) {
-    return sendNewAccount(account, null);
+    return sendNewAccount(account, null, null);
   }
 
   boolean sendNewAccount(Account account, String language) {
+    return sendNewAccount(account, language, null);
+  }
+
+  /**
+   * Welcome email for a freshly registered account.
+   *
+   * <p>ETP-4798 folds the email confirmation into this one message instead of adding a second
+   * mail at registration: when a verification link is available it replaces the plain
+   * {@code /onboarding} link, so the recipient confirms the address by following the same "continue
+   * here" call to action they already got. Two separate mails arriving together would compete for
+   * the same click and double the chance of one landing in spam.
+   *
+   * <p>A null {@code verifyLink} (no public app base URL configured, or no token issued) degrades
+   * to the previous behaviour rather than skipping the mail.
+   *
+   * @param verifyLink email-verification link, or null to fall back to the plain onboarding link
+   */
+  boolean sendNewAccount(Account account, String language, String verifyLink) {
     if (account == null) {
       return false;
     }
-    return sendAccountLink(CONTRACT_NEW_ACCOUNT, account,
-        EtendoGoAuthLinkBuilder.onboardingLink(), null, language);
+    String link = StringUtils.isNotBlank(verifyLink) ? verifyLink
+        : EtendoGoAuthLinkBuilder.onboardingLink();
+    return sendAccountLink(CONTRACT_NEW_ACCOUNT, account, link, null, language);
+  }
+
+  /**
+   * Standalone "confirm your email" message, used when the account holder asks for the link again.
+   * It is a distinct contract from {@code new-account} on purpose: the copy is a reminder rather
+   * than a welcome, and it gets its own throttle budget so re-sends cannot exhaust the welcome
+   * allowance (or vice versa).
+   */
+  boolean sendVerifyEmail(Account account, String verifyTokenHash, String verifyLink) {
+    return sendVerifyEmail(account, verifyTokenHash, verifyLink, null);
+  }
+
+  boolean sendVerifyEmail(Account account, String verifyTokenHash, String verifyLink,
+      String language) {
+    if (account == null || StringUtils.isBlank(verifyTokenHash)
+        || StringUtils.isBlank(verifyLink)) {
+      return false;
+    }
+    return sendAccountLink(CONTRACT_VERIFY_EMAIL, account, verifyLink, verifyTokenHash, language);
   }
 
   boolean sendEnvironmentReady(Account account, String clientId) {
