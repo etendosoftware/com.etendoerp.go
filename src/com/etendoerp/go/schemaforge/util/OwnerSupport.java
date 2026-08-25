@@ -105,6 +105,16 @@ public final class OwnerSupport {
    * when a resumed/retried tenant-provisioning call finds an owner already set, so this is safe
    * to call unconditionally on every onboarding pass rather than only on the very first one.
    *
+   * <p><b>Single atomic UPDATE — not a check-then-update.</b> The {@code ad_client_id} match and
+   * the "no owner yet" check both live inside the same {@code UPDATE ... WHERE ...} statement
+   * (via a correlated {@code NOT EXISTS} subquery), instead of a separate {@link
+   * #clientHasOwner(String)} pre-check followed by an unscoped {@code UPDATE}. This closes two
+   * bugs the old two-statement version had: (a) the old {@code UPDATE} filtered only by {@code
+   * ad_user_id}, so a caller bug elsewhere could flag a user belonging to a DIFFERENT client as
+   * this client's owner; (b) the check and the update were not atomic, so two concurrent
+   * provisioning calls for the same client could both pass the check before either committed,
+   * marking two or more owners for the same client.
+   *
    * @param clientId the {@code AD_Client_ID} the owner is being assigned for
    * @param userId the {@code AD_User_ID} to flag as owner
    */
@@ -114,16 +124,21 @@ public final class OwnerSupport {
           clientId, userId);
       return;
     }
-    if (clientHasOwner(clientId)) {
-      return;
-    }
     Session session = OBDal.getInstance().getSession();
     NativeQuery<?> update = session.createNativeQuery(
-        "UPDATE ad_user SET " + COLUMN_IS_OWNER + " = 'Y' WHERE ad_user_id = :userId");
+        "UPDATE ad_user SET " + COLUMN_IS_OWNER + " = 'Y' "
+            + "WHERE ad_user_id = :userId AND ad_client_id = :clientId AND NOT EXISTS ("
+            + "SELECT 1 FROM ad_user u2 WHERE u2.ad_client_id = :clientId AND u2."
+            + COLUMN_IS_OWNER + " = 'Y')");
     update.setParameter("userId", userId);
+    update.setParameter("clientId", clientId);
     int updated = update.executeUpdate();
     if (updated == 0) {
-      log.warn("OwnerSupport.markAsOwnerIfNoneExists: no AD_User row matched id {} for client {}",
+      // Zero rows affected means either: no AD_User row matches userId for this clientId, OR the
+      // client already has an owner — the single atomic statement above cannot distinguish the
+      // two, and re-querying separately here would reintroduce the very race this fix removes.
+      log.warn("OwnerSupport.markAsOwnerIfNoneExists: no row updated for user {} in client {} — "
+          + "either the user does not belong to this client, or the client already has an owner",
           userId, clientId);
       return;
     }

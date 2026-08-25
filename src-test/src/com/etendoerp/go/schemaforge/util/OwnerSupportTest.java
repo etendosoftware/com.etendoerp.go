@@ -135,26 +135,31 @@ public class OwnerSupportTest {
 
   @Test
   public void markAsOwnerIfNoneExistsUpdatesTheRowWhenClientHasNoOwnerYet() {
-    // First native query: clientHasOwner() -> empty (no owner yet). Second: the UPDATE itself.
-    NativeQuery<Object> checkQuery = mock(NativeQuery.class);
+    // Single atomic UPDATE ... WHERE ... NOT EXISTS (...) statement — one native query only.
     NativeQuery<Object> updateQuery = mock(NativeQuery.class);
-    when(mockSession.createNativeQuery(anyString())).thenReturn(checkQuery, updateQuery);
-    when(checkQuery.getResultList()).thenReturn(Collections.emptyList());
+    when(mockSession.createNativeQuery(anyString())).thenReturn(updateQuery);
     when(updateQuery.executeUpdate()).thenReturn(1);
 
     OwnerSupport.markAsOwnerIfNoneExists("client-1", "user-1");
 
+    verify(mockSession, times(1)).createNativeQuery(anyString());
+    verify(updateQuery, times(1)).setParameter("userId", "user-1");
+    verify(updateQuery, times(1)).setParameter("clientId", "client-1");
     verify(updateQuery, times(1)).executeUpdate();
   }
 
   @Test
   public void markAsOwnerIfNoneExistsIsNoOpWhenClientAlreadyHasAnOwner() {
-    stubQuery(Collections.singletonList(1));
+    // The atomic UPDATE's own NOT EXISTS guard rejects every row when the client already has an
+    // owner, so executeUpdate() reports zero rows affected — still a single native query.
+    NativeQuery<Object> updateQuery = mock(NativeQuery.class);
+    when(mockSession.createNativeQuery(anyString())).thenReturn(updateQuery);
+    when(updateQuery.executeUpdate()).thenReturn(0);
 
     OwnerSupport.markAsOwnerIfNoneExists("client-1", "user-2");
 
-    // Only the clientHasOwner() check ran — no second (UPDATE) native query was ever created.
     verify(mockSession, times(1)).createNativeQuery(anyString());
+    verify(updateQuery, times(1)).executeUpdate();
   }
 
   @Test

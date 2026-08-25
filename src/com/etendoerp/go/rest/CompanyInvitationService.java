@@ -154,6 +154,9 @@ public class CompanyInvitationService {
     if (normalizedEmail.isEmpty()) {
       return errorResponse(400, CODE_MISSING_EMAIL, "Email address is required");
     }
+    if (!EmailContractCommandSupport.isValidEmail(normalizedEmail)) {
+      return errorResponse(400, "INVALID_EMAIL_FORMAT", "Invalid email format");
+    }
     return createInvitationForInviter(resolveInviterFromContext(obContext), normalizedEmail,
         appBaseUrl, language, false);
   }

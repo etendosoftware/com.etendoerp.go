@@ -546,13 +546,19 @@ public class EnsureSystemRoleTemplatesScript extends ModuleScript {
     removeStaleObuiappProcessAccess(cp, roleId, desiredObuiappProcessIds);
   }
 
-  /** Distinct {@code AD_Process_ID}s reachable as a button on any active tab of {@code windowId}. */
+  /**
+   * Distinct {@code AD_Process_ID}s reachable as a button on any active tab of {@code windowId}.
+   * All three levels — tab, column, field — must be active, otherwise a button living on an
+   * inactive tab or backed by an inactive column would still grant process access despite not
+   * actually being reachable/visible in the real UI.
+   */
   private List<String> findButtonProcessIds(ConnectionProvider cp, String windowId) throws Exception {
     List<String> ids = new ArrayList<>();
     String sql = "SELECT DISTINCT c.AD_Process_ID FROM AD_Field f "
         + "JOIN AD_Column c ON c.AD_Column_ID = f.AD_Column_ID "
         + "JOIN AD_Tab t ON t.AD_Tab_ID = f.AD_Tab_ID "
-        + "WHERE t.AD_Window_ID = ? AND f.IsActive = 'Y' AND c.AD_Process_ID IS NOT NULL";
+        + "WHERE t.AD_Window_ID = ? AND t.IsActive = 'Y' AND c.IsActive = 'Y' "
+        + "AND f.IsActive = 'Y' AND c.AD_Process_ID IS NOT NULL";
     try (PreparedStatement ps = cp.getPreparedStatement(sql)) {
       ps.setString(1, windowId);
       try (ResultSet rs = ps.executeQuery()) {
@@ -566,7 +572,9 @@ public class EnsureSystemRoleTemplatesScript extends ModuleScript {
 
   /**
    * Distinct {@code EM_OBUIAPP_Process_ID}s reachable as a button on any active tab of
-   * {@code windowId}.
+   * {@code windowId}. All three levels — tab, column, field — must be active, otherwise a button
+   * living on an inactive tab or backed by an inactive column would still grant process access
+   * despite not actually being reachable/visible in the real UI.
    */
   private List<String> findButtonObuiappProcessIds(ConnectionProvider cp, String windowId)
       throws Exception {
@@ -574,7 +582,8 @@ public class EnsureSystemRoleTemplatesScript extends ModuleScript {
     String sql = "SELECT DISTINCT c.EM_OBUIAPP_Process_ID FROM AD_Field f "
         + "JOIN AD_Column c ON c.AD_Column_ID = f.AD_Column_ID "
         + "JOIN AD_Tab t ON t.AD_Tab_ID = f.AD_Tab_ID "
-        + "WHERE t.AD_Window_ID = ? AND f.IsActive = 'Y' AND c.EM_OBUIAPP_Process_ID IS NOT NULL";
+        + "WHERE t.AD_Window_ID = ? AND t.IsActive = 'Y' AND c.IsActive = 'Y' "
+        + "AND f.IsActive = 'Y' AND c.EM_OBUIAPP_Process_ID IS NOT NULL";
     try (PreparedStatement ps = cp.getPreparedStatement(sql)) {
       ps.setString(1, windowId);
       try (ResultSet rs = ps.executeQuery()) {
@@ -586,13 +595,29 @@ public class EnsureSystemRoleTemplatesScript extends ModuleScript {
     return ids;
   }
 
-  /** Inserts one {@code AD_Process_Access} row for {@code roleId}/{@code processId} unless it exists. */
+  /**
+   * Inserts one {@code AD_Process_Access} row for {@code roleId}/{@code processId}, or
+   * reactivates an existing INACTIVE row for that exact pair instead of blindly inserting a
+   * duplicate (ETP-4830 PR review fix). {@code AD_Process_Access} carries a real unique index on
+   * {@code (AD_Role_ID, AD_Process_ID)} — {@code AD_PROCESS_ACCESS_UN_KEY} — that is NOT filtered
+   * by {@code IsActive}, so the previous "check only ACTIVE rows, then blind INSERT" logic threw a
+   * genuine {@code ConstraintViolationException} whenever an inactive row for the pair already
+   * existed (e.g. deactivated by hand outside this script, or by some other reconciliation path).
+   */
   private void upsertProcessAccess(ConnectionProvider cp, String roleId, String processId)
       throws Exception {
-    if (exists(cp, "SELECT 1 FROM AD_Process_Access WHERE AD_Role_ID = ? AND AD_Process_ID = ? "
-        + "AND IsActive = 'Y'", roleId, processId)) {
-      return;
+    String existingIsActive = singleString(cp,
+        "SELECT IsActive FROM AD_Process_Access WHERE AD_Role_ID = ? AND AD_Process_ID = ?",
+        roleId, processId);
+    if (existingIsActive == null) {
+      insertProcessAccess(cp, roleId, processId);
+    } else if (!"Y".equals(existingIsActive)) {
+      reactivateProcessAccess(cp, roleId, processId);
     }
+  }
+
+  private void insertProcessAccess(ConnectionProvider cp, String roleId, String processId)
+      throws Exception {
     String sql = "INSERT INTO AD_Process_Access (AD_Process_Access_ID, AD_Client_ID, AD_Org_ID, "
         + "IsActive, Created, CreatedBy, Updated, UpdatedBy, AD_Role_ID, AD_Process_ID, "
         + "IsReadWrite) VALUES (get_uuid(), ?, ?, 'Y', now(), ?, now(), ?, ?, ?, 'Y')";
@@ -607,16 +632,43 @@ public class EnsureSystemRoleTemplatesScript extends ModuleScript {
     }
   }
 
+  /** Reactivates an existing (inactive) {@code AD_Process_Access} row instead of re-inserting it. */
+  private void reactivateProcessAccess(ConnectionProvider cp, String roleId, String processId)
+      throws Exception {
+    String sql = "UPDATE AD_Process_Access SET IsActive = 'Y', IsReadWrite = 'Y', Updated = now(), "
+        + "UpdatedBy = ? WHERE AD_Role_ID = ? AND AD_Process_ID = ?";
+    try (PreparedStatement ps = cp.getPreparedStatement(sql)) {
+      ps.setString(1, SYSTEM_ADMIN_USER_ID);
+      ps.setString(2, roleId);
+      ps.setString(3, processId);
+      ps.executeUpdate();
+    }
+  }
+
   /**
-   * Inserts one {@code obuiapp_process_access} row for {@code roleId}/{@code obuiappProcessId}
-   * unless it exists.
+   * Inserts one {@code obuiapp_process_access} row for {@code roleId}/{@code obuiappProcessId},
+   * or reactivates an existing INACTIVE row for that exact pair instead of blindly inserting a
+   * duplicate (ETP-4830 PR review fix, OBUIAPP sibling of {@link #upsertProcessAccess}).
+   * {@code obuiapp_process_access} has no unique constraint on {@code (AD_Role_ID,
+   * obuiapp_process_id)}, so the previous logic did not crash — but it could silently create a
+   * genuine duplicate row for the pair, which this fixes for correctness/consistency with the
+   * {@code AD_Process_Access} path above.
    */
   private void upsertObuiappProcessAccess(ConnectionProvider cp, String roleId,
       String obuiappProcessId) throws Exception {
-    if (exists(cp, "SELECT 1 FROM obuiapp_process_access WHERE AD_Role_ID = ? "
-        + "AND obuiapp_process_id = ? AND IsActive = 'Y'", roleId, obuiappProcessId)) {
-      return;
+    String existingIsActive = singleString(cp,
+        "SELECT IsActive FROM obuiapp_process_access WHERE AD_Role_ID = ? "
+            + "AND obuiapp_process_id = ?",
+        roleId, obuiappProcessId);
+    if (existingIsActive == null) {
+      insertObuiappProcessAccess(cp, roleId, obuiappProcessId);
+    } else if (!"Y".equals(existingIsActive)) {
+      reactivateObuiappProcessAccess(cp, roleId, obuiappProcessId);
     }
+  }
+
+  private void insertObuiappProcessAccess(ConnectionProvider cp, String roleId,
+      String obuiappProcessId) throws Exception {
     String sql = "INSERT INTO obuiapp_process_access (obuiapp_process_access_id, AD_Client_ID, "
         + "AD_Org_ID, IsActive, Created, CreatedBy, Updated, UpdatedBy, AD_Role_ID, "
         + "obuiapp_process_id, IsReadWrite) VALUES (get_uuid(), ?, ?, 'Y', now(), ?, now(), ?, ?, "
@@ -628,6 +680,22 @@ public class EnsureSystemRoleTemplatesScript extends ModuleScript {
       ps.setString(4, SYSTEM_ADMIN_USER_ID);
       ps.setString(5, roleId);
       ps.setString(6, obuiappProcessId);
+      ps.executeUpdate();
+    }
+  }
+
+  /**
+   * Reactivates an existing (inactive) {@code obuiapp_process_access} row instead of re-inserting
+   * it.
+   */
+  private void reactivateObuiappProcessAccess(ConnectionProvider cp, String roleId,
+      String obuiappProcessId) throws Exception {
+    String sql = "UPDATE obuiapp_process_access SET IsActive = 'Y', IsReadWrite = 'Y', "
+        + "Updated = now(), UpdatedBy = ? WHERE AD_Role_ID = ? AND obuiapp_process_id = ?";
+    try (PreparedStatement ps = cp.getPreparedStatement(sql)) {
+      ps.setString(1, SYSTEM_ADMIN_USER_ID);
+      ps.setString(2, roleId);
+      ps.setString(3, obuiappProcessId);
       ps.executeUpdate();
     }
   }
