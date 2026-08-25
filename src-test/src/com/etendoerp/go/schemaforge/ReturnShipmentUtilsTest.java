@@ -42,6 +42,7 @@ import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.common.enterprise.Warehouse;
 import org.openbravo.model.common.invoice.Invoice;
 import org.openbravo.model.common.invoice.InvoiceLine;
+import org.openbravo.model.common.invoice.ReversedInvoice;
 import org.openbravo.model.common.plm.Product;
 import org.openbravo.model.financialmgmt.tax.TaxRate;
 import org.openbravo.model.materialmgmt.transaction.ShipmentInOut;
@@ -1044,6 +1045,137 @@ public class ReturnShipmentUtilsTest {
       assertSame(createdInvoice, result);
       defaultsMock.verify(() -> NeoBackgroundDefaultsService.applyDeclaredDefaultsToBackgroundEntity(
           "purchase-invoice", "header", createdInvoice, "shipment-purchase-002"));
+    }
+  }
+
+  // ── finalizeReturnInvoice — C_Invoice_Reverse link creation (ETP-5000) ─────────────
+  //
+  // ReturnShipmentUtils#finalizeReturnInvoice used to never link the auto-generated
+  // rectificativa back to the source invoice it corrects. ETSG_CHECK_RECTIF_INV_DOC rejects
+  // completing (DocAction='CO') a rectificative-doc-type invoice with no C_Invoice_Reverse row,
+  // on tenants with SII/TicketBAI/Verifactu configured. finalizeReturnInvoice now delegates the
+  // link creation to AbstractInvoiceHeaderHandler#createReverseLinkIfMissing (widened from
+  // private to package-private static) — the same dedupe-checked helper the manual "Import from
+  // Source Invoice" flow already uses, so re-finalizing the same invoice never creates a
+  // duplicate row.
+
+  private CreateDraftInvoiceHandler mockCreateDraftInvoiceHandler() {
+    CreateDraftInvoiceHandler handler = mock(CreateDraftInvoiceHandler.class);
+    InvoiceFromOrderSupport support = mock(InvoiceFromOrderSupport.class);
+    when(handler.getSupport()).thenReturn(support);
+    return handler;
+  }
+
+  @Test
+  public void finalizeReturnInvoice_withSourceInvoice_createsReverseLinkWhenNoneExists() throws Exception {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+        MockedStatic<OBProvider> obProviderMock = Mockito.mockStatic(OBProvider.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      Session session = mock(Session.class);
+      when(dal.getSession()).thenReturn(session);
+
+      Invoice invoice = mock(Invoice.class);
+      when(invoice.getId()).thenReturn("inv-return-1");
+      when(invoice.getDocumentNo()).thenReturn("RECT-0001");
+
+      Invoice sourceInvoice = mock(Invoice.class);
+      when(sourceInvoice.getId()).thenReturn("inv-source-1");
+
+      when(dal.get(Invoice.class, "inv-return-1")).thenReturn(invoice);
+      when(dal.get(Invoice.class, "inv-source-1")).thenReturn(sourceInvoice);
+
+      @SuppressWarnings("unchecked")
+      OBCriteria<ReversedInvoice> criteria = mock(OBCriteria.class);
+      when(dal.createCriteria(ReversedInvoice.class)).thenReturn(criteria);
+      when(criteria.add(any())).thenReturn(criteria);
+      when(criteria.list()).thenReturn(Collections.emptyList());
+
+      OBProvider obProvider = mock(OBProvider.class);
+      obProviderMock.when(OBProvider::getInstance).thenReturn(obProvider);
+      ReversedInvoice link = mock(ReversedInvoice.class);
+      when(obProvider.get(ReversedInvoice.class)).thenReturn(link);
+
+      CreateDraftInvoiceHandler createDraftInvoiceHandler = mockCreateDraftInvoiceHandler();
+
+      NeoResponse response = ReturnShipmentUtils.finalizeReturnInvoice(
+          invoice, Collections.emptyList(), createDraftInvoiceHandler, sourceInvoice);
+
+      assertEquals(200, response.getHttpStatus());
+      verify(link).setInvoice(invoice);
+      verify(link).setReversedInvoice(sourceInvoice);
+      verify(dal).save(link);
+    }
+  }
+
+  @Test
+  public void finalizeReturnInvoice_withSourceInvoice_doesNotDuplicateWhenLinkAlreadyExists() throws Exception {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+        MockedStatic<OBProvider> obProviderMock = Mockito.mockStatic(OBProvider.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      Session session = mock(Session.class);
+      when(dal.getSession()).thenReturn(session);
+
+      Invoice invoice = mock(Invoice.class);
+      when(invoice.getId()).thenReturn("inv-return-1");
+      when(invoice.getDocumentNo()).thenReturn("RECT-0001");
+
+      Invoice sourceInvoice = mock(Invoice.class);
+      when(sourceInvoice.getId()).thenReturn("inv-source-1");
+
+      when(dal.get(Invoice.class, "inv-return-1")).thenReturn(invoice);
+      when(dal.get(Invoice.class, "inv-source-1")).thenReturn(sourceInvoice);
+
+      // Simulates finalizing the SAME return invoice twice (e.g. a retried completion): the
+      // link created on the first run already exists.
+      @SuppressWarnings("unchecked")
+      OBCriteria<ReversedInvoice> criteria = mock(OBCriteria.class);
+      when(dal.createCriteria(ReversedInvoice.class)).thenReturn(criteria);
+      when(criteria.add(any())).thenReturn(criteria);
+      when(criteria.list()).thenReturn(Collections.singletonList(mock(ReversedInvoice.class)));
+
+      OBProvider obProvider = mock(OBProvider.class);
+      obProviderMock.when(OBProvider::getInstance).thenReturn(obProvider);
+
+      CreateDraftInvoiceHandler createDraftInvoiceHandler = mockCreateDraftInvoiceHandler();
+
+      NeoResponse response = ReturnShipmentUtils.finalizeReturnInvoice(
+          invoice, Collections.emptyList(), createDraftInvoiceHandler, sourceInvoice);
+
+      assertEquals(200, response.getHttpStatus());
+      // A matching row already exists — no new ReversedInvoice is instantiated or saved.
+      verify(obProvider, never()).get(ReversedInvoice.class);
+      verify(dal, never()).save(any(ReversedInvoice.class));
+    }
+  }
+
+  @Test
+  public void finalizeReturnInvoice_withNullSourceInvoice_neverTouchesReversedInvoice() throws Exception {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+        MockedStatic<OBProvider> obProviderMock = Mockito.mockStatic(OBProvider.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      Session session = mock(Session.class);
+      when(dal.getSession()).thenReturn(session);
+
+      Invoice invoice = mock(Invoice.class);
+      when(invoice.getId()).thenReturn("inv-return-1");
+      when(invoice.getDocumentNo()).thenReturn("RECT-0001");
+
+      OBProvider obProvider = mock(OBProvider.class);
+      obProviderMock.when(OBProvider::getInstance).thenReturn(obProvider);
+
+      CreateDraftInvoiceHandler createDraftInvoiceHandler = mockCreateDraftInvoiceHandler();
+
+      // No source invoice was resolvable (e.g. the return has no linked source document) —
+      // must behave exactly as before this change: no reverse-link lookup at all.
+      NeoResponse response = ReturnShipmentUtils.finalizeReturnInvoice(
+          invoice, Collections.emptyList(), createDraftInvoiceHandler, null);
+
+      assertEquals(200, response.getHttpStatus());
+      verify(dal, never()).createCriteria(ReversedInvoice.class);
+      verify(obProvider, never()).get(ReversedInvoice.class);
     }
   }
 }

@@ -299,7 +299,7 @@ public class ReturnMaterialReceiptHeaderHandler implements NeoHandler {
         Invoice invoice = ReturnShipmentUtils.buildReturnInvoiceHeader(receipt, docType, sourceInvoice, true);
         OBDal.getInstance().save(invoice);
         OBDal.getInstance().flush();
-        return ReturnShipmentUtils.finalizeReturnInvoice(invoice, lines, createDraftInvoiceHandler);
+        return ReturnShipmentUtils.finalizeReturnInvoice(invoice, lines, createDraftInvoiceHandler, sourceInvoice);
 
       } finally {
         OBContext.restorePreviousMode();

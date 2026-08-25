@@ -586,14 +586,29 @@ final class ReturnShipmentUtils {
   // Invoice finalization – shared between both return header handlers
   // ---------------------------------------------------------------------------
 
+  /**
+   * @param sourceInvoice
+   *     the original invoice this return invoice rectifies, when one was resolved (nullable).
+   *     When present, links {@code invoice} to it via {@code C_Invoice_Reverse} — ETP-5000: an
+   *     auto-generated return rectificativa with no reverse link fails completion on tenants with
+   *     SII/TicketBAI/Verifactu configured, where {@code ETSG_CHECK_RECTIF_INV_DOC} rejects
+   *     {@code DocAction='CO'} on a rectificative doc type with no {@code C_Invoice_Reverse} row
+   *     ("El tipo de documento es rectificativo, pero no se han asociado facturas a rectificar.").
+   *     Reuses {@link AbstractInvoiceHeaderHandler#createReverseLinkIfMissing}, the same
+   *     dedupe-checked link creation the manual "Import from Source Invoice" flow uses, so
+   *     finalizing the same return invoice twice never creates a duplicate row.
+   */
   static NeoResponse finalizeReturnInvoice(Invoice invoice, List<ShipmentInOutLine> lines,
-      CreateDraftInvoiceHandler createDraftInvoiceHandler) throws Exception {
+      CreateDraftInvoiceHandler createDraftInvoiceHandler, Invoice sourceInvoice) throws Exception {
     addReturnInvoiceLines(invoice, lines, createDraftInvoiceHandler);
     OBDal.getInstance().flush();
     OBDal.getInstance().getSession().refresh(invoice);
     createDraftInvoiceHandler.ensureDocumentNo(invoice);
     createDraftInvoiceHandler.getSupport().ensureLineGrossAmounts(invoice);
     createDraftInvoiceHandler.recalculateTotals(invoice);
+    if (sourceInvoice != null) {
+      AbstractInvoiceHeaderHandler.createReverseLinkIfMissing(invoice.getId(), sourceInvoice.getId());
+    }
     OBDal.getInstance().flush();
     JSONObject data = new JSONObject();
     data.put("id", invoice.getId());

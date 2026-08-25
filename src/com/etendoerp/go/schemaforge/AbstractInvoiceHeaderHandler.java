@@ -390,8 +390,13 @@ public abstract class AbstractInvoiceHeaderHandler {
    * delete-then-create (ETP-4919), so importing from the same source invoice twice never
    * produces duplicate rows, and importing from a NEW source invoice never removes the link to a
    * previously-imported one.
+   *
+   * <p>Package-private static (ETP-5000, widened from {@code private}) — this doesn't touch any
+   * instance state, and {@link ReturnShipmentUtils#finalizeReturnInvoice} in the same package
+   * reuses it verbatim to link an auto-generated return rectificativa to its source invoice,
+   * rather than duplicating this dedupe check a second time.
    */
-  private void createReverseLinkIfMissing(String invoiceId, String originInvoiceId) {
+  static void createReverseLinkIfMissing(String invoiceId, String originInvoiceId) {
     Invoice invoice = OBDal.getInstance().get(Invoice.class, invoiceId);
     Invoice origin = OBDal.getInstance().get(Invoice.class, originInvoiceId);
     if (invoice == null || origin == null) {
