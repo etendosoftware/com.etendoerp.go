@@ -54,6 +54,25 @@ final class CompanyInvitationDalHelper {
     return list.isEmpty() ? null : list.get(0);
   }
 
+  /**
+   * Returns the most recently created invitation for {@code clientId}/{@code email}, regardless
+   * of status, or {@code null} if none exists (ETP-4830). Unlike {@link #findOpenInvitation},
+   * this is not restricted to {@code PENDING}/{@code SENT} — it backs an {@code invitationStatus}
+   * read used to render a UI badge, which must also reflect a terminal state
+   * ({@code ACCEPTED}/{@code EXPIRED}/{@code REVOKED}/{@code DELIVERY_FAILED}).
+   */
+  static Invitation findLatestInvitation(String clientId, String email) {
+    OBQuery<Invitation> query = OBDal.getInstance().createQuery(Invitation.class,
+        "as i where i.client.id = :clientId and lower(i.email) = :email "
+            + "and i.active = true order by i.creationDate desc");
+    query.setNamedParameter("clientId", clientId);
+    query.setNamedParameter(EMAIL_PARAMETER, email.toLowerCase(Locale.ROOT));
+    disableTenantFilters(query);
+    query.setMaxResult(1);
+    List<Invitation> list = query.list();
+    return list.isEmpty() ? null : list.get(0);
+  }
+
   static User findUserForClientEmail(Client client, String email) {
     OBQuery<User> query = OBDal.getInstance().createQuery(User.class,
         "as u where u.client = :client and (lower(u.email) = :email "

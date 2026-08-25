@@ -165,27 +165,16 @@ final class EtendoGoJwtDalHelper {
   }
 
   /**
-   * ETP-4829: creates the {@code etgo_account} row for a user an admin created directly (not via
-   * self-service {@code /sws/go/register}). No password is set here — the account is left in the
-   * {@code pending} status with a {@code null} password hash, exactly like an SSO-only account
-   * (see {@link #hasLocalPassword(Account)}), so it cannot log in until ETP-4830's invite-email
-   * flow sets one (e.g. by driving the same {@code password-reset/confirm} path used for a
-   * normal reset) and flips the status to {@code active} — that transition is ETP-4830's
-   * responsibility, not implemented here. Returns silently with the existing account if one is
-   * already registered for this email
-   * (e.g. the admin is linking a newly-created {@code AD_User} to a pre-existing platform
-   * account) — this must never fail the parent {@code AD_User} save.
-   */
-  /**
-   * ETP-4829: creates an {@code etgo_account} for a user an admin created directly, with a real,
-   * immediately-usable password the admin typed on the create form — a temporary workaround for
-   * environments where ETP-4830's invite-email flow isn't available yet. {@code passwordHash}
-   * must already be produced by {@link PasswordHasher#hash} (this method does not hash or
-   * validate strength — see {@link EtendoGoAccountProvisioning#ensureAccountForCreatedUser},
-   * which does both before calling this). Unlike {@link #createPendingAccount}, the account is
-   * {@code active} immediately: it already has everything a normal local-password account needs
-   * to log in. Same duplicate-email handling as {@link #createPendingAccount} — returns the
-   * existing account untouched rather than failing the parent {@code AD_User} save.
+   * Creates an {@code etgo_account} for a user with a real, immediately-usable password (as
+   * opposed to {@link #createPendingAccount}). {@code passwordHash} must already be produced by
+   * {@link PasswordHasher#hash} and validated for strength by the caller — this method does
+   * neither. The account is {@code active} immediately: it already has everything a normal
+   * local-password account needs to log in. Same duplicate-email handling as {@link
+   * #createPendingAccount} — returns the existing account untouched rather than failing the
+   * caller.
+   *
+   * <p>Not currently called by admin-created-user provisioning (see {@link #createPendingAccount}
+   * for why) — kept as a general-purpose DAL primitive alongside {@link #createAccount}.
    */
   static Account createActiveAccount(String email, String passwordHash, String name) {
     Account existing = findActiveAccountByEmail(email);
@@ -205,6 +194,21 @@ final class EtendoGoJwtDalHelper {
     return account;
   }
 
+  /**
+   * Creates an {@code etgo_account} row in {@code pending} status with a {@code null} password
+   * hash, exactly like an SSO-only account (see {@link #hasLocalPassword(Account)}) — it cannot
+   * log in until something sets a password and flips the status to {@code active} (e.g. the
+   * same {@code password-reset/confirm} path used for a normal reset). Returns silently with
+   * the existing account if one is already registered for this email, rather than failing the
+   * caller.
+   *
+   * <p>Not currently called by admin-created-user provisioning: ETP-4830 replaced that eager
+   * pending-account creation with a company invitation (see {@code
+   * CompanyInvitationService#createInvitationForNewlyCreatedUser} in the {@code
+   * schemaforge.handlers.UserRoleAssignmentHandler} caller), whose own {@code
+   * register-and-accept} flow creates the {@code etgo_account} lazily, at accept time, through
+   * {@link #createAccount} instead. Kept as a general-purpose DAL primitive.
+   */
   static Account createPendingAccount(String email, String name) {
     Account existing = findActiveAccountByEmail(email);
     if (existing != null) {
