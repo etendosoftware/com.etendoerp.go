@@ -41,25 +41,38 @@ import com.etendoerp.go.schemaforge.NeoSelectorService;
 import com.etendoerp.go.schemaforge.selector.meta.SelectorMeta;
 
 /**
- * Enriches the invoice-lines Tax selector response for the sales-invoice (AD_Window_Id
- * {@code 167}) and purchase-invoice (AD_Window_Id {@code 183}) windows with the columns
+ * Enriches the lines Tax selector response for the sales-invoice (AD_Window_Id
+ * {@code 167}), purchase-invoice (AD_Window_Id {@code 183}), sales-order (AD_Window_Id
+ * {@code 143}) and purchase-order (AD_Window_Id {@code 181}) windows with the columns
  * the frontend's {@code selectSifFields()} (mirrored here, see
  * {@code tools/app-shell/src/windows/custom/shared/TaxSifField.jsx}) needs to detect a tax
  * missing its TBAI/Verifactu SIF (Sistemas de Información de Facturación) configuration —
- * ETP-4888 point 5.
+ * ETP-4888 point 5 (invoices), extended to sales-order/purchase-order in a follow-up round
+ * once a real-world sales-order confirmation failed with an uncommunicated missing
+ * "Clave Régimen Especial IVA" — the exact class of error this feature exists to surface
+ * earlier. The class/file name stays invoice-flavored for now (kept as a single diff, not a
+ * rename) — a follow-up rename to a spec-neutral name is a reasonable Alex-review call.
  *
  * <p><b>Why the selector, not a per-line GET enrichment:</b> the frontend calls this SAME
- * selector endpoint ONCE per invoice (a large, unfiltered page — the client's tax catalog is
+ * selector endpoint ONCE per document (a large, unfiltered page — the client's tax catalog is
  * small) to build a client-side {@code taxId -> completeness} lookup, instead of one GET-by-id
  * per distinct tax used on the grid. Enriching the selector response, rather than duplicating
- * the same columns onto every invoice line's own GET response, keeps the extra payload to
- * exactly one request regardless of how many lines/distinct taxes the invoice has.
+ * the same columns onto every line's own GET response, keeps the extra payload to exactly one
+ * request regardless of how many lines/distinct taxes the document has.
  *
  * <p><b>Scoping:</b> {@code entityName == "lines"} alone is too broad — several unrelated
  * windows name their detail/lines entity "lines" too. This also requires
- * {@link NeoSelectorService#SOURCE_WINDOW_ID_PARAM} to be one of the two in-scope windows,
+ * {@link NeoSelectorService#SOURCE_WINDOW_ID_PARAM} to be one of the four in-scope windows,
  * and the selector's resolved DAL target entity to be {@code FinancialMgmtTaxRate} (so this
  * never misfires against, e.g., the SAME lines entity's Product selector).
+ *
+ * <p><b>Without this scoping, the frontend badge would false-positive:</b> {@code
+ * useTaxSifLineRowActions.jsx}'s {@code isTaxSifMissing()} treats an ABSENT enrichment column
+ * the same as a genuinely blank one ({@code value == null || value === ''}), and {@code
+ * selectSifFields()} still resolves a régimen field even with no {@code taxExempt}/{@code
+ * notTaxable} enrichment (it falls through to the régimen-column default). So an unscoped
+ * window would show the "needs SIF configuration" warning on every TBAI/Verifactu tax, even
+ * correctly configured ones — not merely "no badge", but a wrong one.
  *
  * <p><b>SII is intentionally NOT enriched here</b> — confirmed by investigation that SII has
  * nothing to configure at tax level; its equivalent ({@code aeatsiiCauseExemption}) already
@@ -67,15 +80,28 @@ import com.etendoerp.go.schemaforge.selector.meta.SelectorMeta;
  * {@code selectSifFields()} already returns no fields for an SII-only tax, so even though this
  * policy projects the same columns unconditionally, the "missing" check on the frontend simply
  * never fires for SII.
+ *
+ * <p><b>Compound/summary-tax resolution (ETP-4888 follow-up):</b> a Spanish compound tax
+ * ("Entregas IVA+RE 21+5.2% ISP" and the like) is a summary tax ({@code c_tax.issummary='Y'})
+ * whose rate components are separate {@code C_Tax} rows linked via {@code parent_tax_id}. An
+ * order/invoice line always attaches the SUMMARY tax, never its component, but the régimen key
+ * Classic's completion validation reads lives on the non-equivalence-charge component
+ * ({@code em_obspti_isequivalentcharge='N'}). This policy projects {@code issummary}/
+ * {@code parent_tax_id}/{@code em_obspti_isequivalentcharge} (as {@code isSummary}/
+ * {@code parentTaxId}/{@code isEquivalentCharge}) unconditionally alongside the SIF value
+ * columns above, so the frontend can link a summary tax to its already-fetched child within the
+ * SAME catalog response and check the CHILD's completeness, without a second request — see
+ * {@code resolveEffectiveTaxRow()} in {@code useTaxSifLineRowActions.jsx}.
  */
 public final class InvoiceLineTaxSifSelectorPolicy implements SelectorEnrichmentPolicy {
 
   private static final Logger log = LogManager.getLogger(InvoiceLineTaxSifSelectorPolicy.class);
 
-  // AD_Window_Id — sales-invoice (167) and purchase-invoice (183). Mirrors the
-  // useWindowAccess('167')/('183') constants already hardcoded in each window's own
-  // tools/app-shell/src/windows/custom/{sales-invoice,purchase-invoice}/index.jsx.
-  private static final Set<String> IN_SCOPE_WINDOW_IDS = Set.of("167", "183");
+  // AD_Window_Id — sales-invoice (167), purchase-invoice (183), sales-order (143),
+  // purchase-order (181). Mirrors the useWindowAccess('167')/('183')/('143')/('181')
+  // constants already hardcoded in each window's own
+  // tools/app-shell/src/windows/custom/{sales-invoice,purchase-invoice,sales-order,purchase-order}/index.jsx.
+  private static final Set<String> IN_SCOPE_WINDOW_IDS = Set.of("167", "183", "143", "181");
   private static final String LINES_ENTITY_NAME = "lines";
   // DAL entity name for C_Tax (org.openbravo.model.financialmgmt.tax.TaxRate), resolved by
   // SelectorDescriptorResolver via ModelProvider.getEntityByTableName("C_Tax").getName().
@@ -84,16 +110,31 @@ public final class InvoiceLineTaxSifSelectorPolicy implements SelectorEnrichment
   private static final String TAX_TARGET_ENTITY = "FinancialMgmtTaxRate";
 
   // c_tax DB column (key) -> JSON key emitted on each enriched selector item (value). Keys for
-  // the TBAI/Verifactu columns are the EXACT raw AD column names `selectSifFields()`'s
+  // the TBAI/Verifactu VALUE columns are the EXACT raw AD column names `selectSifFields()`'s
   // `buildField()` calls use as `column` — the frontend looks up a resolved field's current
   // value via `row[field.column]`, so casing here must match theirs exactly (Postgres itself
   // is case-insensitive on unquoted identifiers, but the JSON keys are not).
+  //
+  // `issummary`/`parent_tax_id`/`em_obspti_isequivalentcharge` are STRUCTURAL columns, not SIF
+  // values — they carry no `row[field.column]` lookup contract, so their JSON keys are plain
+  // camelCase (matching `taxExempt`/`notTaxable` above) rather than raw AD names. Added so the
+  // frontend can resolve a compound/summary tax (`c_tax.issummary='Y'`, e.g. "Entregas IVA+RE
+  // 21+5.2% ISP") down to its rate-component child WITHOUT a second request: the whole tax
+  // catalog is already fetched in one page-through (see `fetchAllTaxPages` in
+  // `useTaxSifLineRowActions.jsx`), so a child's own row is already present in the same
+  // client-side map, keyed by its own id, needing only these 3 extra columns to be linked up
+  // (`resolveEffectiveTaxRow()` in that file). Mirrors the exact child-selection criterion
+  // Etendo Classic's own completion validation uses (`em_obspti_isequivalentcharge = 'N'` — see
+  // `ETVFAC_ORDER_VFAC_VALIDATION.xml` / `InitialValidator.java` in com.etendoerp.verifactu).
   private static final Map<String, String> COLUMN_TO_JSON_KEY;
 
   static {
     Map<String, String> m = new LinkedHashMap<>();
     m.put("istaxexempt", "taxExempt");
     m.put("isnotaxable", "notTaxable");
+    m.put("issummary", "isSummary");
+    m.put("parent_tax_id", "parentTaxId");
+    m.put("em_obspti_isequivalentcharge", "isEquivalentCharge");
     m.put("em_tbai_claveregimeniva", "EM_Tbai_Claveregimeniva");
     m.put("em_tbai_exemptioncause", "EM_Tbai_Exemptioncause");
     m.put("em_tbai_nonsubjectcause", "EM_Tbai_Nonsubjectcause");

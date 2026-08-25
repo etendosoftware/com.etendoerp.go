@@ -627,7 +627,7 @@ class NeoCrudHandler {
     long perfStart = perfTotalStart;
     // runCascade=false: the cascade is run explicitly right after by executePostCalloutCascade,
     // so we skip the duplicated pass embedded in injectMandatoryDefaults.
-    NeoDefaultsService.injectMandatoryDefaults(filteredBody, adTab, context, parentIdValue, false);
+    NeoMandatoryDefaultsService.injectMandatoryDefaults(filteredBody, adTab, context, parentIdValue, false);
     long perfInjectDefaults = System.nanoTime();
     Set<String> protectedCalloutFields = NeoCrudHelper.snapshotMandatoryBodyFields(filteredBody, adTab);
     protectedCalloutFields.addAll(userSubmittedFields);

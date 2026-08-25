@@ -38,9 +38,11 @@ import java.lang.reflect.Method;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
+import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.Date;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -48,6 +50,7 @@ import java.util.Map;
 import java.util.Set;
 
 import org.codehaus.jettison.json.JSONArray;
+import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.Test;
 import org.mockito.MockedStatic;
@@ -97,7 +100,17 @@ public class NeoDefaultsServiceTest {
    */
   private static Object invokePrivate(String methodName, Class<?>[] paramTypes, Object... args)
       throws Exception {
-    Method method = NeoDefaultsService.class.getDeclaredMethod(methodName, paramTypes);
+    return invokePrivate(NeoDefaultsService.class, methodName, paramTypes, args);
+  }
+
+  /**
+   * Invoke a private static method on an arbitrary class via reflection. Used for methods that
+   * moved to {@link NeoMandatoryDefaultsService} / {@link NeoBackgroundDefaultsService} in the
+   * ETP-4978 God Class split.
+   */
+  private static Object invokePrivate(Class<?> targetClass, String methodName,
+      Class<?>[] paramTypes, Object... args) throws Exception {
+    Method method = targetClass.getDeclaredMethod(methodName, paramTypes);
     method.setAccessible(true);
     return method.invoke(null, args);
   }
@@ -1030,7 +1043,7 @@ public class NeoDefaultsServiceTest {
 
   @Test
   public void testInjectMandatoryDefaultsNullBodyNoOp() {
-    NeoDefaultsService.injectMandatoryDefaults(null, mock(Tab.class),
+    NeoMandatoryDefaultsService.injectMandatoryDefaults(null, mock(Tab.class),
         mock(NeoContext.class));
     // Should not throw
   }
@@ -1038,14 +1051,14 @@ public class NeoDefaultsServiceTest {
   @Test
   public void testInjectMandatoryDefaultsNullTabNoOp() {
     JSONObject body = new JSONObject();
-    NeoDefaultsService.injectMandatoryDefaults(body, null, mock(NeoContext.class));
+    NeoMandatoryDefaultsService.injectMandatoryDefaults(body, null, mock(NeoContext.class));
     assertEquals(0, body.length());
   }
 
   @Test
   public void testInjectMandatoryDefaultsNullCtxNoOp() {
     JSONObject body = new JSONObject();
-    NeoDefaultsService.injectMandatoryDefaults(body, mock(Tab.class), null);
+    NeoMandatoryDefaultsService.injectMandatoryDefaults(body, mock(Tab.class), null);
     assertEquals(0, body.length());
   }
 
@@ -1105,7 +1118,7 @@ public class NeoDefaultsServiceTest {
       when(mp.getEntityByTableId("TABLE-1")).thenReturn(dalEntity);
       calloutMock.when(() -> NeoCalloutService.buildVars(obContext, adTab)).thenReturn(vars);
 
-      NeoDefaultsService.injectMandatoryDefaults(body, adTab, ctx);
+      NeoMandatoryDefaultsService.injectMandatoryDefaults(body, adTab, ctx);
 
       // Body should still be empty — all columns were skipped
       assertEquals("Key and audit columns should be skipped", 0, body.length());
@@ -1187,7 +1200,7 @@ public class NeoDefaultsServiceTest {
       parentMock.when(() -> NeoParentValuesLoader.load(adTab, null))
           .thenReturn(java.util.Collections.emptyMap());
 
-      NeoDefaultsService.injectMandatoryDefaults(body, adTab, ctx);
+      NeoMandatoryDefaultsService.injectMandatoryDefaults(body, adTab, ctx);
 
       assertEquals("Inactive/non-mandatory columns should be skipped", 0, body.length());
       // The !mandatory gate must prevent the NOT-NULL safety fallbacks from firing on the
@@ -1240,7 +1253,7 @@ public class NeoDefaultsServiceTest {
       when(mp.getEntityByTableId("TABLE-1")).thenReturn(dalEntity);
       calloutMock.when(() -> NeoCalloutService.buildVars(obContext, adTab)).thenReturn(vars);
 
-      NeoDefaultsService.injectMandatoryDefaults(body, adTab, ctx);
+      NeoMandatoryDefaultsService.injectMandatoryDefaults(body, adTab, ctx);
 
       // Field already present — should not be overwritten
       assertEquals("ORG-1", body.getString("organization"));
@@ -1280,7 +1293,7 @@ public class NeoDefaultsServiceTest {
       when(mp.getEntityByTableId("TABLE-1")).thenReturn(dalEntity);
       calloutMock.when(() -> NeoCalloutService.buildVars(obContext, adTab)).thenReturn(vars);
 
-      NeoDefaultsService.injectMandatoryDefaults(body, adTab, ctx, null, false);
+      NeoMandatoryDefaultsService.injectMandatoryDefaults(body, adTab, ctx, null, false);
 
       // Cascade should NOT be called when runCascade is false
       cascadeMock.verify(() -> NeoDefaultsCascadeHelper.executeCalloutCascadeForCreate(
@@ -1333,7 +1346,7 @@ public class NeoDefaultsServiceTest {
       calloutMock.when(() -> NeoCalloutService.buildVars(obContext, adTab)).thenReturn(vars);
 
       // Two-arg overload — should run cascade by default
-      NeoDefaultsService.injectMandatoryDefaults(body, adTab, ctx, "PARENT-1");
+      NeoMandatoryDefaultsService.injectMandatoryDefaults(body, adTab, ctx, "PARENT-1");
 
       cascadeMock.verify(() -> NeoDefaultsCascadeHelper.executeCalloutCascadeForCreate(
           eq(ctx), eq(adTab), eq(body)));
@@ -1368,7 +1381,7 @@ public class NeoDefaultsServiceTest {
       calloutMock.when(() -> NeoCalloutService.buildVars(any(), any()))
           .thenReturn(mock(VariablesSecureApp.class));
 
-      NeoDefaultsService.injectMandatoryDefaults(body, adTab, ctx);
+      NeoMandatoryDefaultsService.injectMandatoryDefaults(body, adTab, ctx);
 
       assertEquals("Body should remain empty when dalEntity is null", 0, body.length());
     }
@@ -2260,7 +2273,7 @@ public class NeoDefaultsServiceTest {
   public void testIsAuditColumnCreated() throws Exception {
     Column col = mock(Column.class);
     when(col.getDBColumnName()).thenReturn("Created");
-    boolean result = (boolean) invokePrivate("isAuditColumn",
+    boolean result = (boolean) invokePrivate(NeoMandatoryDefaultsService.class, "isAuditColumn",
         new Class<?>[]{ Column.class }, col);
     assertTrue(result);
   }
@@ -2269,7 +2282,7 @@ public class NeoDefaultsServiceTest {
   public void testIsAuditColumnUpdated() throws Exception {
     Column col = mock(Column.class);
     when(col.getDBColumnName()).thenReturn("Updated");
-    boolean result = (boolean) invokePrivate("isAuditColumn",
+    boolean result = (boolean) invokePrivate(NeoMandatoryDefaultsService.class, "isAuditColumn",
         new Class<?>[]{ Column.class }, col);
     assertTrue(result);
   }
@@ -2278,7 +2291,7 @@ public class NeoDefaultsServiceTest {
   public void testIsAuditColumnCreatedBy() throws Exception {
     Column col = mock(Column.class);
     when(col.getDBColumnName()).thenReturn("CreatedBy");
-    boolean result = (boolean) invokePrivate("isAuditColumn",
+    boolean result = (boolean) invokePrivate(NeoMandatoryDefaultsService.class, "isAuditColumn",
         new Class<?>[]{ Column.class }, col);
     assertTrue(result);
   }
@@ -2287,7 +2300,7 @@ public class NeoDefaultsServiceTest {
   public void testIsAuditColumnUpdatedBy() throws Exception {
     Column col = mock(Column.class);
     when(col.getDBColumnName()).thenReturn("UpdatedBy");
-    boolean result = (boolean) invokePrivate("isAuditColumn",
+    boolean result = (boolean) invokePrivate(NeoMandatoryDefaultsService.class, "isAuditColumn",
         new Class<?>[]{ Column.class }, col);
     assertTrue(result);
   }
@@ -2296,7 +2309,7 @@ public class NeoDefaultsServiceTest {
   public void testIsAuditColumnNonAudit() throws Exception {
     Column col = mock(Column.class);
     when(col.getDBColumnName()).thenReturn("Name");
-    boolean result = (boolean) invokePrivate("isAuditColumn",
+    boolean result = (boolean) invokePrivate(NeoMandatoryDefaultsService.class, "isAuditColumn",
         new Class<?>[]{ Column.class }, col);
     assertFalse(result);
   }
@@ -3133,7 +3146,7 @@ public class NeoDefaultsServiceTest {
       ctxMock.when(OBContext::restorePreviousMode).thenAnswer(inv -> null);
 
       Map<String, String> result = (Map<String, String>) invokePrivate(
-          "buildSfFieldDefaultsMap",
+          NeoMandatoryDefaultsService.class, "buildSfFieldDefaultsMap",
           new Class<?>[]{ NeoContext.class }, ctx);
 
       assertNotNull(result);
@@ -3187,7 +3200,7 @@ public class NeoDefaultsServiceTest {
       ctxMock.when(OBContext::restorePreviousMode).thenAnswer(inv -> null);
 
       Map<String, String> result = (Map<String, String>) invokePrivate(
-          "buildSfFieldDefaultsMap",
+          NeoMandatoryDefaultsService.class, "buildSfFieldDefaultsMap",
           new Class<?>[]{ NeoContext.class }, ctx);
 
       assertNotNull(result);
@@ -3204,7 +3217,7 @@ public class NeoDefaultsServiceTest {
   public void testBuildSfFieldDefaultsMapReturnsEmptyWhenCtxOrEntityIsNull() throws Exception {
     // null ctx
     Map<String, String> resultNullCtx = (Map<String, String>) invokePrivate(
-        "buildSfFieldDefaultsMap",
+        NeoMandatoryDefaultsService.class, "buildSfFieldDefaultsMap",
         new Class<?>[]{ NeoContext.class }, new Object[]{ null });
     assertNotNull(resultNullCtx);
     assertTrue(resultNullCtx.isEmpty());
@@ -3215,7 +3228,7 @@ public class NeoDefaultsServiceTest {
         .obContext(mock(OBContext.class))
         .build();
     Map<String, String> resultNullEntity = (Map<String, String>) invokePrivate(
-        "buildSfFieldDefaultsMap",
+        NeoMandatoryDefaultsService.class, "buildSfFieldDefaultsMap",
         new Class<?>[]{ NeoContext.class }, ctxNullEntity);
     assertNotNull(resultNullEntity);
     assertTrue(resultNullEntity.isEmpty());
@@ -3263,7 +3276,7 @@ public class NeoDefaultsServiceTest {
       ctxMock.when(OBContext::restorePreviousMode).thenAnswer(inv -> null);
 
       Map<String, String> result = (Map<String, String>) invokePrivate(
-          "buildSfFieldDefaultsMap",
+          NeoMandatoryDefaultsService.class, "buildSfFieldDefaultsMap",
           new Class<?>[]{ NeoContext.class }, ctx);
 
       assertEquals("Only the valid SFField entry should be included", 1, result.size());
@@ -3364,7 +3377,7 @@ public class NeoDefaultsServiceTest {
           eq("TI"), anyString(), eq("")))
           .thenReturn("TI");
 
-      NeoDefaultsService.injectMandatoryDefaults(body, adTab, ctx);
+      NeoMandatoryDefaultsService.injectMandatoryDefaults(body, adTab, ctx);
 
       assertTrue("calculateType must be injected", body.has("calculateType"));
       assertEquals(
@@ -3525,7 +3538,7 @@ public class NeoDefaultsServiceTest {
           eq("DR"), anyString(), eq("")))
           .thenReturn("DR");
 
-      NeoDefaultsService.injectMandatoryDefaults(body, adTab, ctx);
+      NeoMandatoryDefaultsService.injectMandatoryDefaults(body, adTab, ctx);
 
       assertTrue("documentStatus must be injected", body.has("documentStatus"));
       assertEquals(
@@ -3619,7 +3632,7 @@ public class NeoDefaultsServiceTest {
       parentMock.when(() -> NeoParentValuesLoader.load(adTab, null))
           .thenReturn(java.util.Collections.emptyMap());
 
-      NeoDefaultsService.injectMandatoryDefaults(body, adTab, ctx);
+      NeoMandatoryDefaultsService.injectMandatoryDefaults(body, adTab, ctx);
 
       assertTrue("Non-mandatory column with a session default must be injected (ETP-4274)",
           body.has("currency"));
@@ -3707,7 +3720,7 @@ public class NeoDefaultsServiceTest {
       parentMock.when(() -> NeoParentValuesLoader.load(adTab, null))
           .thenReturn(java.util.Collections.emptyMap());
 
-      NeoDefaultsService.injectMandatoryDefaults(body, adTab, ctx);
+      NeoMandatoryDefaultsService.injectMandatoryDefaults(body, adTab, ctx);
 
       // The mandatory column must reach the safe-type fallback — proving the !mandatory gate
       // does NOT short-circuit mandatory columns (NOT NULL parity preserved).
@@ -3781,7 +3794,7 @@ public class NeoDefaultsServiceTest {
       parentMock.when(() -> NeoParentValuesLoader.load(adTab, null))
           .thenReturn(java.util.Collections.emptyMap());
 
-      NeoDefaultsService.injectMandatoryDefaults(body, adTab, ctx);
+      NeoMandatoryDefaultsService.injectMandatoryDefaults(body, adTab, ctx);
 
       assertEquals("User-supplied value must not be overwritten", "USER-USD",
           body.getString("currency"));
@@ -3813,7 +3826,7 @@ public class NeoDefaultsServiceTest {
     when(prop.isPrimitive()).thenReturn(true);
     doReturn(String.class).when(prop).getPrimitiveObjectType();
 
-    invokePrivate("applyResolvedDefault", APPLY_RESOLVED_DEFAULT_PARAMS,
+    invokePrivate(NeoMandatoryDefaultsService.class, "applyResolvedDefault", APPLY_RESOLVED_DEFAULT_PARAMS,
         body, col, "invoiceGrouping", "000000000000000", null, prop);
 
     Object stored = body.get("invoiceGrouping");
@@ -3837,7 +3850,7 @@ public class NeoDefaultsServiceTest {
     when(prop.isPrimitive()).thenReturn(true);
     doReturn(Long.class).when(prop).getPrimitiveObjectType();
 
-    invokePrivate("applyResolvedDefault", APPLY_RESOLVED_DEFAULT_PARAMS,
+    invokePrivate(NeoMandatoryDefaultsService.class, "applyResolvedDefault", APPLY_RESOLVED_DEFAULT_PARAMS,
         body, col, "lineNo", "10", null, prop);
 
     Object stored = body.get("lineNo");
@@ -3859,7 +3872,7 @@ public class NeoDefaultsServiceTest {
     when(prop.isPrimitive()).thenReturn(true);
     doReturn(java.math.BigDecimal.class).when(prop).getPrimitiveObjectType();
 
-    invokePrivate("applyResolvedDefault", APPLY_RESOLVED_DEFAULT_PARAMS,
+    invokePrivate(NeoMandatoryDefaultsService.class, "applyResolvedDefault", APPLY_RESOLVED_DEFAULT_PARAMS,
         body, col, "priceStd", "10.50", null, prop);
 
     Object stored = body.get("priceStd");
@@ -3881,7 +3894,7 @@ public class NeoDefaultsServiceTest {
     when(prop.isPrimitive()).thenReturn(true);
     doReturn(String.class).when(prop).getPrimitiveObjectType();
 
-    invokePrivate("applyResolvedDefault", APPLY_RESOLVED_DEFAULT_PARAMS,
+    invokePrivate(NeoMandatoryDefaultsService.class, "applyResolvedDefault", APPLY_RESOLVED_DEFAULT_PARAMS,
         body, col, "documentStatus", "DR", null, prop);
 
     assertEquals("DR", body.get("documentStatus"));
@@ -3907,7 +3920,7 @@ public class NeoDefaultsServiceTest {
       docTypeMock.when(() -> DocTypeResolver.resolveDefaultDocTypeId(eq(col), any()))
           .thenReturn(null);
 
-      invokePrivate("applyResolvedDefault", APPLY_RESOLVED_DEFAULT_PARAMS,
+      invokePrivate(NeoMandatoryDefaultsService.class, "applyResolvedDefault", APPLY_RESOLVED_DEFAULT_PARAMS,
           body, col, "createdBy", "-1", null, prop);
 
       assertFalse("Sentinel '-1' FK default must not be persisted as a real id",
@@ -3931,11 +3944,310 @@ public class NeoDefaultsServiceTest {
       docTypeMock.when(() -> DocTypeResolver.resolveDefaultDocTypeId(eq(col), any()))
           .thenReturn(null);
 
-      invokePrivate("applyResolvedDefault", APPLY_RESOLVED_DEFAULT_PARAMS,
+      invokePrivate(NeoMandatoryDefaultsService.class, "applyResolvedDefault", APPLY_RESOLVED_DEFAULT_PARAMS,
           body, col, "transactionDocument", "0", null, prop);
 
       assertFalse("Sentinel '0' FK default must not be persisted when no doctype resolves",
           body.has("transactionDocument"));
+    }
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // applyDeclaredDefaultsToBackgroundEntity (ETP-4888) — non-HTTP background callers
+  // ═══════════════════════════════════════════════════════════════════════════
+  //
+  // ETP-4978: applyDeclaredDefaultsToBackgroundEntity and its private siblings
+  // (resolveBackgroundDefaults/findBackgroundEntity/applyDeclaredDefaultIfMissing/
+  // applyDeclaredFkDefaultIfMissing/resolveFkDefaultTarget/coercePrimitiveDefault) moved to
+  // NeoBackgroundDefaultsService (God Class split). These tests call it directly (its real
+  // body, no mocking needed on it) and mockStatic(NeoDefaultsService.class) only to stub the
+  // public resolveDefaults(NeoContext, String) entry point it delegates to — resolveDefaults's
+  // own extensively-covered query/cascade logic (see the resolveDefaults tests above) is
+  // replaced with a canned response — keeping these tests focused purely on the
+  // background-entity application contract.
+
+  private static final String BG_SPEC_NAME = "sales-invoice";
+  private static final String BG_ENTITY_NAME = "header";
+  private static final String BG_PARENT_ID = "parent-doc-1";
+
+  /**
+   * Wires NeoServletSupport.findSpec + the OBDal/OBContext chain resolveBackgroundDefaults
+   * needs, reusing an OBDal mock the caller already created (and may have added further stubs
+   * to, e.g. {@code dal.get(...)} for an FK-resolution test) rather than creating its own — a
+   * second, independent {@code OBDal.getInstance()} stub would silently shadow the caller's.
+   */
+  private static SFEntity wireBackgroundEntityLookup(MockedStatic<NeoServletSupport> servletSupportMock,
+      MockedStatic<OBDal> dalMock, MockedStatic<OBContext> obContextMock, OBDal dal) {
+    SFSpec sfSpec = mock(SFSpec.class);
+    when(sfSpec.getId()).thenReturn("spec-1");
+    servletSupportMock.when(() -> NeoServletSupport.findSpec(BG_SPEC_NAME)).thenReturn(sfSpec);
+
+    SFEntity sfEntity = mock(SFEntity.class);
+    when(sfEntity.getId()).thenReturn("sf-entity-1");
+
+    dalMock.when(OBDal::getInstance).thenReturn(dal);
+    @SuppressWarnings("unchecked")
+    OBCriteria<SFEntity> entityCriteria = mock(OBCriteria.class);
+    when(dal.createCriteria(SFEntity.class)).thenReturn(entityCriteria);
+    when(entityCriteria.list()).thenReturn(Collections.singletonList(sfEntity));
+
+    OBContext obContext = mock(OBContext.class);
+    obContextMock.when(OBContext::getOBContext).thenReturn(obContext);
+
+    return sfEntity;
+  }
+
+  private static NeoResponse cannedDefaultsResponse(JSONObject defaults) throws JSONException {
+    return new NeoResponse(200, new JSONObject().put("defaults", defaults));
+  }
+
+  /**
+   * A primitive declared-default (a date, mirroring the real-world {@code etsgDateOperation}/
+   * {@code aeatsiiFechaRegCont} fields) is filled in on a background-built entity when the
+   * caller left it blank.
+   */
+  @Test
+  public void testApplyDeclaredDefaultsToBackgroundEntityFillsBlankPrimitiveDateField()
+      throws Exception {
+    BaseOBObject entity = mock(BaseOBObject.class);
+    Entity dalEntity = mock(Entity.class);
+    Property prop = mock(Property.class);
+    when(entity.getEntity()).thenReturn(dalEntity);
+    when(entity.get("etsgDateOperation")).thenReturn(null);
+    when(dalEntity.getProperty("etsgDateOperation")).thenReturn(prop);
+    when(prop.isPrimitive()).thenReturn(true);
+    doReturn(Date.class).when(prop).getPrimitiveObjectType();
+
+    JSONObject defaults = new JSONObject().put("etsgDateOperation", "2026-08-20");
+
+    try (MockedStatic<NeoServletSupport> servletSupportMock = mockStatic(NeoServletSupport.class);
+         MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+         MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
+         MockedStatic<NeoDefaultsService> serviceMock =
+             mockStatic(NeoDefaultsService.class)) {
+      wireBackgroundEntityLookup(servletSupportMock, dalMock, obContextMock, dal(dalMock));
+      serviceMock.when(() -> NeoDefaultsService.resolveDefaults(any(NeoContext.class),
+          eq(BG_PARENT_ID))).thenReturn(cannedDefaultsResponse(defaults));
+
+      NeoBackgroundDefaultsService.applyDeclaredDefaultsToBackgroundEntity(
+          BG_SPEC_NAME, BG_ENTITY_NAME, entity, BG_PARENT_ID);
+
+      Date expected = new SimpleDateFormat("yyyy-MM-dd").parse("2026-08-20");
+      verify(entity).set("etsgDateOperation", expected);
+    }
+  }
+
+  /**
+   * A field the caller ALREADY set explicitly on the background-built entity must never be
+   * clobbered by a declared default — mirrors the "skip if already present" rule
+   * {@link NeoMandatoryDefaultsService#injectMandatoryDefaults} applies on the HTTP create path.
+   */
+  @Test
+  public void testApplyDeclaredDefaultsToBackgroundEntityNeverClobbersAlreadySetField()
+      throws Exception {
+    BaseOBObject entity = mock(BaseOBObject.class);
+    Entity dalEntity = mock(Entity.class);
+    when(entity.getEntity()).thenReturn(dalEntity);
+    // Caller already set this field explicitly (e.g. the builder's own accountingDate setter).
+    when(entity.get("etsgDateOperation")).thenReturn(new Date());
+
+    JSONObject defaults = new JSONObject().put("etsgDateOperation", "2026-08-20");
+
+    try (MockedStatic<NeoServletSupport> servletSupportMock = mockStatic(NeoServletSupport.class);
+         MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+         MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
+         MockedStatic<NeoDefaultsService> serviceMock =
+             mockStatic(NeoDefaultsService.class)) {
+      wireBackgroundEntityLookup(servletSupportMock, dalMock, obContextMock, dal(dalMock));
+      serviceMock.when(() -> NeoDefaultsService.resolveDefaults(any(NeoContext.class),
+          eq(BG_PARENT_ID))).thenReturn(cannedDefaultsResponse(defaults));
+
+      NeoBackgroundDefaultsService.applyDeclaredDefaultsToBackgroundEntity(
+          BG_SPEC_NAME, BG_ENTITY_NAME, entity, BG_PARENT_ID);
+
+      verify(entity, never()).set(eq("etsgDateOperation"), any());
+    }
+  }
+
+  /**
+   * ETP-4888 today's addition: an FK-typed declared default (mirroring {@code
+   * aeatsiiDescription}/{@code EM_Aeatsii_Description_ID}) resolves to a real related-entity
+   * bean via {@code OBDal.get(targetEntity, id)} and is set onto the background entity.
+   */
+  @Test
+  public void testApplyDeclaredDefaultsToBackgroundEntityResolvesFkDeclaredDefaultToRelatedBean()
+      throws Exception {
+    BaseOBObject entity = mock(BaseOBObject.class);
+    Entity dalEntity = mock(Entity.class);
+    Property prop = mock(Property.class);
+    Entity targetEntity = mock(Entity.class);
+    BaseOBObject relatedBean = mock(BaseOBObject.class);
+    when(entity.getEntity()).thenReturn(dalEntity);
+    when(entity.get("aeatsiiDescription")).thenReturn(null);
+    when(dalEntity.getProperty("aeatsiiDescription")).thenReturn(prop);
+    when(prop.isPrimitive()).thenReturn(false);
+    when(prop.getTargetEntity()).thenReturn(targetEntity);
+    when(targetEntity.getName()).thenReturn("AeatsiiDescription");
+
+    JSONObject defaults = new JSONObject().put("aeatsiiDescription", "desc-id-123");
+
+    try (MockedStatic<NeoServletSupport> servletSupportMock = mockStatic(NeoServletSupport.class);
+         MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+         MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
+         MockedStatic<NeoDefaultsService> serviceMock =
+             mockStatic(NeoDefaultsService.class)) {
+      OBDal dal = dal(dalMock);
+      wireBackgroundEntityLookup(servletSupportMock, dalMock, obContextMock, dal);
+      when(dal.get("AeatsiiDescription", "desc-id-123")).thenReturn(relatedBean);
+      serviceMock.when(() -> NeoDefaultsService.resolveDefaults(any(NeoContext.class),
+          eq(BG_PARENT_ID))).thenReturn(cannedDefaultsResponse(defaults));
+
+      NeoBackgroundDefaultsService.applyDeclaredDefaultsToBackgroundEntity(
+          BG_SPEC_NAME, BG_ENTITY_NAME, entity, BG_PARENT_ID);
+
+      verify(entity).set("aeatsiiDescription", relatedBean);
+    }
+  }
+
+  /**
+   * Returns the same {@code OBDal} mock instance that {@link #wireBackgroundEntityLookup} is
+   * about to register on {@code dalMock}, so a test can add further stubs (e.g. {@code
+   * dal.get(...)}) on it BEFORE calling {@code wireBackgroundEntityLookup}. Since {@code
+   * OBDal::getInstance} is stubbed only once per {@code MockedStatic}, this must create and
+   * register the mock itself — {@link #wireBackgroundEntityLookup} is then adjusted to reuse it
+   * via an overload, avoiding a double {@code OBDal::getInstance} stub (Mockito allows
+   * re-stubbing, but the LAST one silently wins, which would hide a bug in one of the two).
+   */
+  private static OBDal dal(MockedStatic<OBDal> dalMock) {
+    OBDal dal = mock(OBDal.class);
+    dalMock.when(OBDal::getInstance).thenReturn(dal);
+    return dal;
+  }
+
+  /**
+   * FK resolution failure — a bad/nonexistent id (record not found via {@code OBDal.get}) —
+   * must leave the field untouched and must NOT throw: "never abort the rest of the pass".
+   */
+  @Test
+  public void testApplyDeclaredDefaultsToBackgroundEntityLeavesFieldUntouchedWhenFkIdNotFound()
+      throws Exception {
+    BaseOBObject entity = mock(BaseOBObject.class);
+    Entity dalEntity = mock(Entity.class);
+    Property prop = mock(Property.class);
+    Entity targetEntity = mock(Entity.class);
+    when(entity.getEntity()).thenReturn(dalEntity);
+    when(entity.get("aeatsiiDescription")).thenReturn(null);
+    when(dalEntity.getProperty("aeatsiiDescription")).thenReturn(prop);
+    when(prop.isPrimitive()).thenReturn(false);
+    when(prop.getTargetEntity()).thenReturn(targetEntity);
+    when(targetEntity.getName()).thenReturn("AeatsiiDescription");
+
+    JSONObject defaults = new JSONObject().put("aeatsiiDescription", "does-not-exist");
+
+    try (MockedStatic<NeoServletSupport> servletSupportMock = mockStatic(NeoServletSupport.class);
+         MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+         MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
+         MockedStatic<NeoDefaultsService> serviceMock =
+             mockStatic(NeoDefaultsService.class)) {
+      OBDal dal = dal(dalMock);
+      wireBackgroundEntityLookup(servletSupportMock, dalMock, obContextMock, dal);
+      when(dal.get("AeatsiiDescription", "does-not-exist")).thenReturn(null);
+      serviceMock.when(() -> NeoDefaultsService.resolveDefaults(any(NeoContext.class),
+          eq(BG_PARENT_ID))).thenReturn(cannedDefaultsResponse(defaults));
+
+      NeoBackgroundDefaultsService.applyDeclaredDefaultsToBackgroundEntity(
+          BG_SPEC_NAME, BG_ENTITY_NAME, entity, BG_PARENT_ID);
+
+      verify(entity, never()).set(eq("aeatsiiDescription"), any());
+    }
+  }
+
+  /**
+   * FK resolution failure — {@code prop.getTargetEntity()} returns {@code null} (property is
+   * not actually a resolvable FK) — must also leave the field untouched and not throw, and must
+   * never even reach {@code OBDal.get(...)}.
+   */
+  @Test
+  public void testApplyDeclaredDefaultsToBackgroundEntityLeavesFieldUntouchedWhenTargetEntityIsNull()
+      throws Exception {
+    BaseOBObject entity = mock(BaseOBObject.class);
+    Entity dalEntity = mock(Entity.class);
+    Property prop = mock(Property.class);
+    when(entity.getEntity()).thenReturn(dalEntity);
+    when(entity.get("aeatsiiDescription")).thenReturn(null);
+    when(dalEntity.getProperty("aeatsiiDescription")).thenReturn(prop);
+    when(prop.isPrimitive()).thenReturn(false);
+    when(prop.getTargetEntity()).thenReturn(null);
+
+    JSONObject defaults = new JSONObject().put("aeatsiiDescription", "some-id");
+
+    try (MockedStatic<NeoServletSupport> servletSupportMock = mockStatic(NeoServletSupport.class);
+         MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+         MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
+         MockedStatic<NeoDefaultsService> serviceMock =
+             mockStatic(NeoDefaultsService.class)) {
+      OBDal dal = dal(dalMock);
+      wireBackgroundEntityLookup(servletSupportMock, dalMock, obContextMock, dal);
+      serviceMock.when(() -> NeoDefaultsService.resolveDefaults(any(NeoContext.class),
+          eq(BG_PARENT_ID))).thenReturn(cannedDefaultsResponse(defaults));
+
+      NeoBackgroundDefaultsService.applyDeclaredDefaultsToBackgroundEntity(
+          BG_SPEC_NAME, BG_ENTITY_NAME, entity, BG_PARENT_ID);
+
+      verify(entity, never()).set(eq("aeatsiiDescription"), any());
+      verify(dal, never()).get(anyString(), anyString());
+    }
+  }
+
+  /**
+   * {@code resolveBackgroundDefaults} (and therefore the whole public entry point) must be a
+   * graceful no-op — never throw, never touch the entity — when no active {@code SFSpec}
+   * matches {@code specName}.
+   */
+  @Test
+  public void testApplyDeclaredDefaultsToBackgroundEntityNoOpsWhenNoSfSpecFound() {
+    BaseOBObject entity = mock(BaseOBObject.class);
+
+    try (MockedStatic<NeoServletSupport> servletSupportMock = mockStatic(NeoServletSupport.class);
+         MockedStatic<NeoDefaultsService> serviceMock =
+             mockStatic(NeoDefaultsService.class)) {
+      servletSupportMock.when(() -> NeoServletSupport.findSpec("unknown-spec")).thenReturn(null);
+
+      NeoBackgroundDefaultsService.applyDeclaredDefaultsToBackgroundEntity(
+          "unknown-spec", BG_ENTITY_NAME, entity, BG_PARENT_ID);
+
+      verify(entity, never()).set(anyString(), any());
+      serviceMock.verify(() -> NeoDefaultsService.resolveDefaults(any(), any()), never());
+    }
+  }
+
+  /**
+   * Same graceful no-op contract when the {@code SFSpec} resolves but no active/included {@code
+   * SFEntity} named {@code entityName} exists under it.
+   */
+  @Test
+  public void testApplyDeclaredDefaultsToBackgroundEntityNoOpsWhenNoSfEntityFound() {
+    BaseOBObject entity = mock(BaseOBObject.class);
+    SFSpec sfSpec = mock(SFSpec.class);
+    when(sfSpec.getId()).thenReturn("spec-1");
+
+    try (MockedStatic<NeoServletSupport> servletSupportMock = mockStatic(NeoServletSupport.class);
+         MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+         MockedStatic<NeoDefaultsService> serviceMock =
+             mockStatic(NeoDefaultsService.class)) {
+      servletSupportMock.when(() -> NeoServletSupport.findSpec(BG_SPEC_NAME)).thenReturn(sfSpec);
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      @SuppressWarnings("unchecked")
+      OBCriteria<SFEntity> entityCriteria = mock(OBCriteria.class);
+      when(dal.createCriteria(SFEntity.class)).thenReturn(entityCriteria);
+      when(entityCriteria.list()).thenReturn(Collections.emptyList());
+
+      NeoBackgroundDefaultsService.applyDeclaredDefaultsToBackgroundEntity(
+          BG_SPEC_NAME, BG_ENTITY_NAME, entity, BG_PARENT_ID);
+
+      verify(entity, never()).set(anyString(), any());
+      serviceMock.verify(() -> NeoDefaultsService.resolveDefaults(any(), any()), never());
     }
   }
 
