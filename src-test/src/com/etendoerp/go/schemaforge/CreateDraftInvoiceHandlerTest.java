@@ -2209,6 +2209,10 @@ public class CreateDraftInvoiceHandlerTest {
       ShipmentInOut first = mock(ShipmentInOut.class);
       ShipmentInOut second = mock(ShipmentInOut.class);
       Invoice invoice = mock(Invoice.class);
+      // ETP-4942: createFromShipments now fails fast when the resulting invoice has no
+      // price list at all (see ensurePriceListResolved) — stub a non-null one so this
+      // test keeps exercising header/lines plumbing rather than that unrelated guard.
+      when(invoice.getPriceList()).thenReturn(mock(PriceList.class));
 
       CreateFromShipmentsHandler handler = new CreateFromShipmentsHandler();
       handler.shipmentsToReturn = Arrays.asList(first, second);
@@ -2243,6 +2247,10 @@ public class CreateDraftInvoiceHandlerTest {
       ShipmentInOut first = mock(ShipmentInOut.class);
       ShipmentInOut second = mock(ShipmentInOut.class);
       Invoice invoice = mock(Invoice.class);
+      // ETP-4942: stub the getter too — a bare mock's setPriceList(...) call (verified
+      // below) does not make getPriceList() reflect it, and ensurePriceListResolved
+      // would otherwise see a null price list and throw.
+      when(invoice.getPriceList()).thenReturn(overridePriceList);
 
       CreateFromShipmentsHandler handler = new CreateFromShipmentsHandler();
       handler.shipmentsToReturn = Arrays.asList(first, second);
