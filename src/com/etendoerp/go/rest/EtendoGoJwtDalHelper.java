@@ -55,6 +55,8 @@ final class EtendoGoJwtDalHelper {
   private static final String PARAM_STAR_VALUE = "starValue";
   private static final String PARAM_SYSTEM_USER_ID = "systemUserId";
   private static final String ACTIVE_ACCOUNT_FILTER = " and account.active = true";
+  private static final String ACCOUNT_QUERY = "as account where account.";
+  private static final String AND_ACCOUNT = " and account.";
   private static final String FIELD_CLIENT_ID = "clientId";
   private static final String FIELD_CLIENT_NAME = "clientName";
   private static final String FIELD_ORG_ID = "orgId";
@@ -67,6 +69,15 @@ final class EtendoGoJwtDalHelper {
   private static final String PROPERTY_RESET_TOKEN_CONSUMED = Account.PROPERTY_RESETTOKENCONSUMED;
   private static final String PROPERTY_RESET_TOKEN_EXPIRES = Account.PROPERTY_RESETTOKENEXPIRES;
   private static final String PROPERTY_RESET_TOKEN_HASH = Account.PROPERTY_RESETTOKENHASH;
+  // ETP-4798 — spelled out as literals rather than as Account.PROPERTY_* constants, following the
+  // precedent set for every column added since (see FiscalDeclCrudHandler#PROPERTY_MANUAL_DATA).
+  // Account lives in src-gen and is regenerated from the Application Dictionary in the database, so
+  // referencing generated constants for a column this branch introduces makes the module refuse to
+  // compile until update.database has run — including on any checkout or CI job that builds before
+  // applying the model. Package-private so the tests can assert against the same names.
+  static final String PROPERTY_VERIFY_TOKEN_HASH = "verifyTokenHash";
+  static final String PROPERTY_VERIFY_TOKEN_EXPIRES = "verifyTokenExpires";
+  static final String PROPERTY_EMAIL_VERIFIED = "emailVerified";
   private static final String PROPERTY_AUTH_PROVIDER = Account.PROPERTY_AUTHPROVIDER;
   private static final String PROPERTY_EXTERNAL_SUBJECT = Account.PROPERTY_EXTERNALSUBJECT;
   private static final String PROPERTY_EXTERNAL_EMAIL = Account.PROPERTY_EXTERNALEMAIL;
@@ -96,7 +107,7 @@ final class EtendoGoJwtDalHelper {
 
   static Account findActiveAccountByToken(String token) {
     OBQuery<Account> query = OBDal.getInstance().createQuery(Account.class,
-        "as account where account.sessionToken = :" + PARAM_TOKEN + ACTIVE_ACCOUNT_FILTER);
+        ACCOUNT_QUERY + "sessionToken = :" + PARAM_TOKEN + ACTIVE_ACCOUNT_FILTER);
     query.setNamedParameter(PARAM_TOKEN, token);
     query.setFilterOnReadableClients(false);
     query.setFilterOnReadableOrganization(false);
@@ -129,8 +140,8 @@ final class EtendoGoJwtDalHelper {
 
   static Account findActiveAccountBySsoIdentity(String provider, String subject) {
     OBQuery<Account> query = OBDal.getInstance().createQuery(Account.class,
-        "as account where account." + PROPERTY_AUTH_PROVIDER + " = :" + PARAM_AUTH_PROVIDER
-            + " and account." + PROPERTY_EXTERNAL_SUBJECT + " = :" + PARAM_EXTERNAL_SUBJECT
+        ACCOUNT_QUERY + PROPERTY_AUTH_PROVIDER + " = :" + PARAM_AUTH_PROVIDER
+            + AND_ACCOUNT + PROPERTY_EXTERNAL_SUBJECT + " = :" + PARAM_EXTERNAL_SUBJECT
             + ACTIVE_ACCOUNT_FILTER);
     query.setNamedParameter(PARAM_AUTH_PROVIDER, provider);
     query.setNamedParameter(PARAM_EXTERNAL_SUBJECT, subject);
@@ -226,6 +237,11 @@ final class EtendoGoJwtDalHelper {
     account.set(PROPERTY_EXTERNAL_EMAIL, externalEmail);
     account.set(PROPERTY_LAST_SSO_LOGIN, loginAt);
     account.set(PROPERTY_STATUS, STATUS_ACTIVE);
+    // ETP-4798: the identity provider already proved the user controls this mailbox (the address
+    // comes from a verified assertion, not from a form), so an SSO account is born verified.
+    // Leaving it null would gate onboarding for every Google user over a confirmation email they
+    // can never receive a reason to click.
+    account.set(PROPERTY_EMAIL_VERIFIED, loginAt);
     OBDal.getInstance().save(account);
     flushAndCommitDalChanges();
     return account;
@@ -264,6 +280,15 @@ final class EtendoGoJwtDalHelper {
     account.setSessionToken(sessionToken);
     account.set(PROPERTY_EXTERNAL_EMAIL, externalEmail);
     account.set(PROPERTY_LAST_SSO_LOGIN, loginAt);
+    // ETP-4798: signing in through the identity provider on this address is itself proof of
+    // ownership — stronger proof than clicking a link we mailed. It closes any confirmation still
+    // pending from a prior /register on the same address, so the user is not asked to confirm an
+    // address they just authenticated with.
+    if (account.get(PROPERTY_EMAIL_VERIFIED) == null) {
+      account.set(PROPERTY_EMAIL_VERIFIED, loginAt);
+      account.set(PROPERTY_VERIFY_TOKEN_HASH, null);
+      account.set(PROPERTY_VERIFY_TOKEN_EXPIRES, null);
+    }
     OBDal.getInstance().save(account);
     flushAndCommitDalChanges();
   }
@@ -298,11 +323,11 @@ final class EtendoGoJwtDalHelper {
 
   static Account findActiveAccountByResetTokenHash(String resetTokenHash, Date now) {
     OBQuery<Account> query = OBDal.getInstance().createQuery(Account.class,
-        "as account where account." + PROPERTY_RESET_TOKEN_HASH + " = :"
+        ACCOUNT_QUERY + PROPERTY_RESET_TOKEN_HASH + " = :"
             + PARAM_RESET_TOKEN_HASH
-            + " and account." + PROPERTY_RESET_TOKEN_EXPIRES + " > :now"
-            + " and account." + PROPERTY_RESET_TOKEN_CONSUMED + " is null"
-            + " and account.active = true");
+            + AND_ACCOUNT + PROPERTY_RESET_TOKEN_EXPIRES + " > :now"
+            + AND_ACCOUNT + PROPERTY_RESET_TOKEN_CONSUMED + " is null"
+            + ACTIVE_ACCOUNT_FILTER);
     query.setNamedParameter(PARAM_RESET_TOKEN_HASH, resetTokenHash);
     query.setNamedParameter("now", now);
     query.setFilterOnReadableClients(false);
