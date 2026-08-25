@@ -57,6 +57,7 @@ import com.etendoerp.go.schemaforge.util.NeoReportContract;
 import com.etendoerp.go.schemaforge.NeoContext;
 import com.etendoerp.go.schemaforge.NeoDefaultsService;
 import com.etendoerp.go.schemaforge.NeoFieldFilter;
+import com.etendoerp.go.schemaforge.NeoMandatoryDefaultsService;
 import com.etendoerp.go.schemaforge.NeoHandler;
 import com.etendoerp.go.schemaforge.NeoProcessService;
 import com.etendoerp.go.schemaforge.NeoResponse;
@@ -528,7 +529,7 @@ public class McpToolRouter {
         .sfEntity(sfEntity)
         .obContext(OBContext.getOBContext())
         .build();
-    NeoDefaultsService.injectMandatoryDefaults(filteredBody, adTab, ctx, parentIdValue);
+    NeoMandatoryDefaultsService.injectMandatoryDefaults(filteredBody, adTab, ctx, parentIdValue);
 
     // Restore user-provided fields that callouts may have overwritten with sentinels.
     // User intent takes precedence over callout-derived values.
