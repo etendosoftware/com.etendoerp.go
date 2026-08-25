@@ -47,6 +47,8 @@ import javax.servlet.http.HttpServletResponse;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
@@ -87,6 +89,25 @@ class SupportConversationsServletTest {
   private static final String CLIENT_ID = "CLIENT1";
   private static final String ORG_ID = "ORG1";
   private static final String FIELD_MESSAGES_LITERAL = "messages";
+
+  /** Forces the servlet's fire-and-forget Jira background thread (see
+   * {@link SupportConversationsServlet#BACKGROUND_TASK_RUNNER}) onto the SAME thread as the
+   * test, for every test in this class — not just the ones that currently exercise it —
+   * so a future test can never again silently escape a {@code MockedStatic<SupportIntegrationClient>}
+   * block and fire a real HTTP POST against whatever real Jira credentials happen to be
+   * configured on the machine running the suite (confirmed incident: ticket SUP-5 in the
+   * real Etendo Jira received months of unmocked "hola" / fake CSAT spam from exactly this
+   * class before this seam existed). */
+  @BeforeEach
+  void forceSynchronousBackgroundTasks() {
+    SupportConversationsServlet.BACKGROUND_TASK_RUNNER = (threadName, task) -> task.run();
+  }
+
+  @AfterEach
+  void restoreRealBackgroundTasks() {
+    SupportConversationsServlet.BACKGROUND_TASK_RUNNER =
+        (threadName, task) -> new Thread(task, threadName).start();
+  }
 
   private static HttpServletResponse mockResponse(StringWriter capture) throws Exception {
     HttpServletResponse response = mock(HttpServletResponse.class);
@@ -392,6 +413,51 @@ class SupportConversationsServletTest {
       }
 
       assertTrue(capture.toString().contains("\"jiraTicketKey\":\"\""));
+    }
+
+    @Test
+    @DisplayName("Conversation summary reports assigneeKind \"human\" once escalated to a human "
+        + "agent — regression: this field was missing entirely, so the frontend's "
+        + "conversation?.assigneeKind === 'human' check always read undefined and the "
+        + "\"talk to a human\" bar never hid after a ticket was actually escalated")
+    void assigneeKindHumanWhenTakenOver() throws Exception {
+      StringWriter capture = new StringWriter();
+      HttpServletResponse response = mockResponse(capture);
+      HttpServletRequest request = authenticatedRequest("/conversations", null);
+
+      try (MockedStatic<SecureWebServicesUtils> swsMock = mockValidAuth();
+           MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+           MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+        OBDal obDal = mockObDal(dalMock);
+        SupportConversation conv = mockConversation("conv-4");
+        when(conv.isHumanTakeover()).thenReturn(true);
+        mockCriteria(obDal, SupportConversation.class, List.of(conv));
+
+        new SupportConversationsServlet().doGet(request, response);
+      }
+
+      assertTrue(capture.toString().contains("\"assigneeKind\":\"human\""));
+    }
+
+    @Test
+    @DisplayName("Conversation summary reports assigneeKind \"ai\" when not under human takeover")
+    void assigneeKindAiWhenNotTakenOver() throws Exception {
+      StringWriter capture = new StringWriter();
+      HttpServletResponse response = mockResponse(capture);
+      HttpServletRequest request = authenticatedRequest("/conversations", null);
+
+      try (MockedStatic<SecureWebServicesUtils> swsMock = mockValidAuth();
+           MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+           MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+        OBDal obDal = mockObDal(dalMock);
+        SupportConversation conv = mockConversation("conv-5");
+        when(conv.isHumanTakeover()).thenReturn(false);
+        mockCriteria(obDal, SupportConversation.class, List.of(conv));
+
+        new SupportConversationsServlet().doGet(request, response);
+      }
+
+      assertTrue(capture.toString().contains("\"assigneeKind\":\"ai\""));
     }
 
     @Test
@@ -703,6 +769,56 @@ class SupportConversationsServletTest {
            MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
         OBDal obDal = mockObDal(dalMock);
         SupportConversation conv = mockConversation("conv-1");
+        when(obDal.get(SupportConversation.class, "conv-1")).thenReturn(conv);
+
+        new SupportConversationsServlet().doPost(request, response);
+      }
+
+      assertTrue(capture.toString().contains("\"status\":\"ok\""));
+    }
+
+    @Test
+    @DisplayName("/internal/set-ticket ignores a DIFFERENT key when the conversation is already linked "
+        + "to a ticket — regression: a duplicate ticket created for the same conversation (see "
+        + "JIRA_TICKET_SYNC_MARKER_FORMAT's javadoc) used to silently repoint the conversation to "
+        + "whichever ticket's set-ticket call landed last, orphaning the correct one")
+    void setTicketIgnoresConflictingKeyWhenAlreadyLinked() throws Exception {
+      StringWriter capture = new StringWriter();
+      HttpServletResponse response = mockResponse(capture);
+      String body = "{\"conversationId\":\"conv-1\",\"jiraTicketKey\":\"SUP-2\"}";
+      HttpServletRequest request = mockRequestWithBody(body);
+      when(request.getPathInfo()).thenReturn("/internal/set-ticket");
+
+      try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+           MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+        OBDal obDal = mockObDal(dalMock);
+        SupportConversation conv = mockConversation("conv-1");
+        when(conv.getJiraTicketKey()).thenReturn("SUP-1");
+        when(obDal.get(SupportConversation.class, "conv-1")).thenReturn(conv);
+
+        new SupportConversationsServlet().doPost(request, response);
+
+        verify(conv, never()).setJiraTicketKey(any());
+      }
+
+      assertTrue(capture.toString().contains("\"status\":\"ignored_already_linked\""));
+      assertTrue(capture.toString().contains("\"existingKey\":\"SUP-1\""));
+    }
+
+    @Test
+    @DisplayName("/internal/set-ticket accepts the SAME key again as a no-op success")
+    void setTicketAcceptsSameKeyAgain() throws Exception {
+      StringWriter capture = new StringWriter();
+      HttpServletResponse response = mockResponse(capture);
+      String body = "{\"conversationId\":\"conv-1\",\"jiraTicketKey\":\"SUP-1\"}";
+      HttpServletRequest request = mockRequestWithBody(body);
+      when(request.getPathInfo()).thenReturn("/internal/set-ticket");
+
+      try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+           MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+        OBDal obDal = mockObDal(dalMock);
+        SupportConversation conv = mockConversation("conv-1");
+        when(conv.getJiraTicketKey()).thenReturn("SUP-1");
         when(obDal.get(SupportConversation.class, "conv-1")).thenReturn(conv);
 
         new SupportConversationsServlet().doPost(request, response);
@@ -1255,7 +1371,8 @@ class SupportConversationsServletTest {
       try (MockedStatic<SecureWebServicesUtils> swsMock = mockValidAuth();
            MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
            MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
-           MockedStatic<OBProvider> providerMock = mockStatic(OBProvider.class)) {
+           MockedStatic<OBProvider> providerMock = mockStatic(OBProvider.class);
+           MockedStatic<SupportIntegrationClient> sicMock = mockStatic(SupportIntegrationClient.class)) {
         OBDal obDal = mockObDal(dalMock);
         SupportConversation conv = mockConversation("conv-1");
         when(conv.isHumanTakeover()).thenReturn(true);
@@ -1264,10 +1381,12 @@ class SupportConversationsServletTest {
         stubProvider(providerMock, null, mock(SupportMessage.class));
         mockCriteria(obDal, SupportMessage.class, Collections.emptyList());
 
-        // postJiraComment() runs on a fire-and-forget background thread the test can't
-        // observe (Mockito static mocks are thread-local); it safely no-ops in this
-        // environment since JIRA_API_TOKEN is unset. We assert on the HTTP response only.
+        // BACKGROUND_TASK_RUNNER is forced same-thread by forceSynchronousBackgroundTasks(),
+        // so this static mock reliably intercepts postJiraComment() instead of a real
+        // background thread escaping it and hitting the real Jira API.
         new SupportConversationsServlet().doPost(request, response);
+
+        sicMock.verify(() -> SupportIntegrationClient.postJiraComment("SUP-5", "hola", false));
       }
 
       assertTrue(capture.toString().contains(FIELD_MESSAGES_LITERAL));
@@ -1332,13 +1451,15 @@ class SupportConversationsServletTest {
 
         new SupportConversationsServlet().doPost(request, response);
 
-        assertEquals(" VALERIA_RESET_TICKET_CONTEXT(SUP-OLD) hola de nuevo", textCaptor.getValue());
+        assertEquals(" VALERIA_RESET_TICKET_CONTEXT(SUP-OLD)  VALERIA_SYNC_HUMAN_TAKEOVER_FALSE hola de nuevo",
+            textCaptor.getValue());
       }
     }
 
     @Test
     @DisplayName("Sending a message with an ACTIVE Jira ticket already linked does NOT prepend the reset "
-        + "marker — the self-limiting condition only fires once, on the turn right after a reopen")
+        + "marker (the self-limiting condition only fires once, on the turn right after a reopen) but "
+        + "DOES prepend the jira-ticket sync marker instead, asserting the existing key")
     void sendMessageWithActiveTicketDoesNotPrependResetMarker() throws Exception {
       StringWriter capture = new StringWriter();
       HttpServletResponse response = mockResponse(capture);
@@ -1365,7 +1486,8 @@ class SupportConversationsServletTest {
 
         new SupportConversationsServlet().doPost(request, response);
 
-        assertEquals("hola", textCaptor.getValue());
+        assertEquals(" VALERIA_SYNC_JIRA_TICKET_KEY(SUP-ACTIVE)  VALERIA_SYNC_HUMAN_TAKEOVER_FALSE hola",
+            textCaptor.getValue());
       }
     }
   }
@@ -1383,6 +1505,37 @@ class SupportConversationsServletTest {
     void producesExpectedMarkerString() {
       String result = String.format(SupportConversationsServlet.RESET_TICKET_CONTEXT_MARKER_FORMAT, "SUP-42");
       assertEquals(" VALERIA_RESET_TICKET_CONTEXT(SUP-42) ", result);
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // HUMAN_TAKEOVER_SYNC_MARKER
+  // -------------------------------------------------------------------------
+
+  @Nested
+  @DisplayName("HUMAN_TAKEOVER_SYNC_MARKER")
+  class HumanTakeoverSyncMarker {
+
+    @Test
+    @DisplayName("Is the exact marker string the ADK's callbacks.py _HUMAN_TAKEOVER_SYNC_MARKER_RE regex expects")
+    void producesExpectedMarkerString() {
+      assertEquals(" VALERIA_SYNC_HUMAN_TAKEOVER_FALSE ", SupportConversationsServlet.HUMAN_TAKEOVER_SYNC_MARKER);
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // JIRA_TICKET_SYNC_MARKER_FORMAT
+  // -------------------------------------------------------------------------
+
+  @Nested
+  @DisplayName("JIRA_TICKET_SYNC_MARKER_FORMAT")
+  class JiraTicketSyncMarkerFormat {
+
+    @Test
+    @DisplayName("Formats the exact marker string the ADK's callbacks.py _JIRA_TICKET_SYNC_MARKER_RE regex expects")
+    void producesExpectedMarkerString() {
+      String result = String.format(SupportConversationsServlet.JIRA_TICKET_SYNC_MARKER_FORMAT, "EGS-287");
+      assertEquals(" VALERIA_SYNC_JIRA_TICKET_KEY(EGS-287) ", result);
     }
   }
 
@@ -1451,16 +1604,23 @@ class SupportConversationsServletTest {
 
       try (MockedStatic<SecureWebServicesUtils> swsMock = mockValidAuth();
            MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
-           MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+           MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+           MockedStatic<SupportIntegrationClient> sicMock = mockStatic(SupportIntegrationClient.class)) {
         OBDal obDal = mockObDal(dalMock);
         SupportConversation conv = mockConversation("conv-1");
         when(conv.getJiraTicketKey()).thenReturn("SUP-5");
         when(obDal.get(SupportConversation.class, "conv-1")).thenReturn(conv);
+        sicMock.when(() -> SupportIntegrationClient.buildFeedbackComment(5, "Genial!"))
+            .thenReturn("⭐ Valoración de satisfacción: 5/5\n\nComentario del cliente: Genial!");
 
-        // buildFeedbackComment/postJiraCsatLabel run on a fire-and-forget background
-        // thread the test can't observe (Mockito static mocks are thread-local); they
-        // safely run for real here (no network — JIRA_API_TOKEN is unset in this env).
+        // BACKGROUND_TASK_RUNNER is forced same-thread by forceSynchronousBackgroundTasks(),
+        // so these static mocks reliably intercept postJiraComment()/postJiraCsatLabel()
+        // instead of a real background thread escaping them and hitting the real Jira API.
         new SupportConversationsServlet().doPost(request, response);
+
+        sicMock.verify(() -> SupportIntegrationClient.postJiraComment(
+            "SUP-5", "⭐ Valoración de satisfacción: 5/5\n\nComentario del cliente: Genial!", true));
+        sicMock.verify(() -> SupportIntegrationClient.postJiraCsatLabel("SUP-5", 5));
       }
 
       assertTrue(capture.toString().contains("\"status\":\"success\""));
