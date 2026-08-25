@@ -684,17 +684,23 @@ public class FinancialAccountBankConnectionHandlerLinkTest {
     }
   }
 
-  // ── linkAccount: disableAutomaticWithdrawnForTransferMethod (ETP-4406 fix) ─
+  // ── Automatic Withdrawn is NOT touched by connect/disconnect (ETP-4891) ────
+  //
+  // Until ETP-4891 this handler cleared Automatic Withdrawn on connect and restored it to true on
+  // a permanent disconnect (ETP-4406). Both are gone: the flag is now an invariant of the
+  // bank-transfer payment METHOD — always off — seeded by sampledata, enforced at link creation by
+  // FinancialAccountSupport.createLink, and repaired on existing tenants by data-fix R24. These
+  // tests pin the absence of the old behavior, because the restore in particular was a live bug:
+  // an account that was connected and then disconnected silently went back to auto-withdrawing.
 
   /**
-   * When a linked account has a {@code FinAccPaymentMethod} row whose payment method name contains
-   * "transfer" (matched case-insensitively, same heuristic as
-   * {@code PaymentRegistrationService.isTransferMethod}), {@code linkAccount} must clear only
-   * {@code Automatic Withdrawn} (Payment OUT) on it — {@code Automatic Deposit} (Payment IN) is left
-   * untouched because Etendo Go's Salt Edge PIS flow only initiates outbound transfers.
+   * Linking an account to its bank must NOT write {@code Automatic Withdrawn} on any of its
+   * payment-method rows, not even a transfer one. The flag no longer depends on the account's
+   * connection state, so a connect that still cleared it would be dead weight at best and, paired
+   * with the removed restore, a source of drift.
    */
   @Test
-  public void testLinkAccountDisablesAutomaticWithdrawnForTransferPaymentMethod() throws Exception {
+  public void testLinkAccountDoesNotTouchAutomaticWithdrawn() throws Exception {
     JSONObject body = linkBody();
     FIN_FinancialAccount finAcc = mock(FIN_FinancialAccount.class);
     when(finAcc.getId()).thenReturn(ACCOUNT_ID);
@@ -733,18 +739,13 @@ public class FinancialAccountBankConnectionHandlerLinkTest {
       NeoResponse response = handler.handle(postContext(ACTION_LINK, body));
 
       assertEquals(200, response.getHttpStatus());
-      verify(transferFapm).setAutomaticWithdrawn(false);
+      verify(transferFapm, never()).setAutomaticWithdrawn(anyBoolean());
       verify(transferFapm, never()).setAutomaticDeposit(anyBoolean());
-      verify(dal).save(transferFapm);
-      verify(dal).flush();
     }
   }
 
   /**
-   * A {@code FinAccPaymentMethod} row whose payment method name does NOT contain
-   * "transfer"/"transferencia" (e.g. Cash) must be left completely untouched by
-   * {@code linkAccount} — neither {@code Automatic Withdrawn} nor {@code Automatic Deposit} is
-   * modified.
+   * A non-transfer row (e.g. Cash) is untouched by a connect too — it always was, and stays so.
    */
   @Test
   public void testLinkAccountLeavesNonTransferPaymentMethodUnchanged() throws Exception {
@@ -790,17 +791,15 @@ public class FinancialAccountBankConnectionHandlerLinkTest {
     }
   }
 
-  // ── handleDisconnect: restoreAutomaticWithdrawnForTransferMethod (ETP-4406) ─
-
   /**
-   * When {@code disconnectFinancialAccount} succeeds and the account has a transfer-named
-   * {@code FinAccPaymentMethod} row, {@code handleDisconnect} must restore {@code Automatic Withdrawn}
-   * (Payment OUT) to {@code true} on it — the inverse of the connect-time clear — so that, with no
-   * PIS callback in play anymore, processing a payment once again auto-creates its
-   * {@code FIN_Finacc_Transaction}. {@code Automatic Deposit} (Payment IN) is left untouched.
+   * The ETP-4891 regression guard. A <b>permanent</b> disconnect used to set {@code Automatic
+   * Withdrawn} back to {@code true} on the transfer method — which is exactly how a transfer
+   * account ended up auto-creating its {@code FIN_Finacc_Transaction} again after having been
+   * connected once. It must now leave the flag alone, and the response must still report the
+   * disconnect faithfully.
    */
   @Test
-  public void testDisconnectRestoresAutomaticWithdrawnForTransferPaymentMethod() throws Exception {
+  public void testPermanentDisconnectDoesNotRestoreAutomaticWithdrawn() throws Exception {
     JSONObject body = disconnectBody();
     FIN_FinancialAccount finAcc = mock(FIN_FinancialAccount.class);
     when(finAcc.getId()).thenReturn(ACCOUNT_ID);
@@ -827,61 +826,20 @@ public class FinancialAccountBankConnectionHandlerLinkTest {
 
       assertEquals(200, response.getHttpStatus());
       assertTrue(dataOf(response).getBoolean("disconnected"));
-      verify(transferFapm).setAutomaticWithdrawn(true);
+      // The whole point of ETP-4891: no write in either direction.
+      verify(transferFapm, never()).setAutomaticWithdrawn(anyBoolean());
       verify(transferFapm, never()).setAutomaticDeposit(anyBoolean());
-      verify(dal).save(transferFapm);
-      verify(dal).flush();
+      verify(dal, never()).save(transferFapm);
     }
   }
 
   /**
-   * On a successful disconnect, a {@code FinAccPaymentMethod} row whose payment method name does NOT
-   * contain "transfer"/"transferencia" (e.g. Cash) must be left completely untouched — no
-   * {@code Automatic Withdrawn} restore is applied to non-transfer methods.
+   * A failed disconnect equally leaves the flag alone, and still reports
+   * {@code disconnected=false}. With the restore gone there is no branch left that could write it,
+   * so this pins the response contract as much as the flag.
    */
   @Test
-  public void testDisconnectLeavesNonTransferPaymentMethodUnchanged() throws Exception {
-    JSONObject body = disconnectBody();
-    FIN_FinancialAccount finAcc = mock(FIN_FinancialAccount.class);
-    when(finAcc.getId()).thenReturn(ACCOUNT_ID);
-    doReturn(finAcc).when(handler).loadAccount(ACCOUNT_ID);
-
-    FIN_PaymentMethod cashMethod = mock(FIN_PaymentMethod.class);
-    when(cashMethod.getName()).thenReturn("Efectivo");
-    FinAccPaymentMethod cashFapm = mock(FinAccPaymentMethod.class);
-    when(cashFapm.getPaymentMethod()).thenReturn(cashMethod);
-
-    try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
-        MockedStatic<SaltEdgeAccountLinkHelper> linkHelper =
-            mockStatic(SaltEdgeAccountLinkHelper.class);
-        MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
-      stubObContext(obContext);
-      linkHelper.when(() -> SaltEdgeAccountLinkHelper.disconnectFinancialAccount(finAcc, true))
-          .thenReturn(true);
-
-      OBDal dal = mock(OBDal.class);
-      obDal.when(OBDal::getInstance).thenReturn(dal);
-      stubFinAccPaymentMethods(dal, Collections.singletonList(cashFapm));
-
-      NeoResponse response = handler.handle(postContext(ACTION_DISCONNECT, body));
-
-      assertEquals(200, response.getHttpStatus());
-      assertTrue(dataOf(response).getBoolean("disconnected"));
-      verify(cashFapm, never()).setAutomaticWithdrawn(anyBoolean());
-      verify(cashFapm, never()).setAutomaticDeposit(anyBoolean());
-      verify(dal, never()).save(cashFapm);
-    }
-  }
-
-  /**
-   * When {@code disconnectFinancialAccount} returns {@code false} (the disconnect did not succeed),
-   * {@code handleDisconnect} must NOT restore {@code Automatic Withdrawn} — the transfer method's
-   * PIS-driven behavior stays in place because the account is still connected. The response reports
-   * {@code disconnected=false} and no {@code FinAccPaymentMethod} row is touched (the restore path,
-   * which would create a {@code FinAccPaymentMethod} criteria, is never reached).
-   */
-  @Test
-  public void testDisconnectDoesNotRestoreWhenDisconnectFails() throws Exception {
+  public void testDisconnectReportsFailureAndTouchesNothing() throws Exception {
     JSONObject body = disconnectBody();
     FIN_FinancialAccount finAcc = mock(FIN_FinancialAccount.class);
     when(finAcc.getId()).thenReturn(ACCOUNT_ID);
@@ -903,19 +861,17 @@ public class FinancialAccountBankConnectionHandlerLinkTest {
 
       assertEquals(200, response.getHttpStatus());
       assertEquals(false, dataOf(response).getBoolean("disconnected"));
-      // Disconnect failed → no restore, the transfer method's Automatic Withdrawn is left as-is.
       verify(transferFapm, never()).setAutomaticWithdrawn(anyBoolean());
     }
   }
 
   /**
    * A <b>soft</b> disconnect (ETP-4764) deactivates the connection but keeps the Salt Edge link,
-   * so {@code Automatic Withdrawn} must NOT be restored: the account is still bank-backed and a
-   * reconnect would immediately have to clear the flag again. The account is recognized as still
-   * linked by its non-blank Salt Edge id, which the soft path preserves.
+   * so the account stays reconnectable — which is the state the payment modal now blocks a transfer
+   * on (ETP-4891). It must not write {@code Automatic Withdrawn} either.
    */
   @Test
-  public void testSoftDisconnectDoesNotRestoreAutomaticWithdrawn() throws Exception {
+  public void testSoftDisconnectDoesNotTouchAutomaticWithdrawn() throws Exception {
     JSONObject body = new JSONObject()
         .put(PARAM_ACCOUNT_ID, ACCOUNT_ID)
         .put(PARAM_PERMANENT_DELETION, false);
@@ -938,7 +894,6 @@ public class FinancialAccountBankConnectionHandlerLinkTest {
       assertEquals(200, response.getHttpStatus());
       assertTrue(dataOf(response).getBoolean("disconnected"));
       assertTrue(dataOf(response).getBoolean("reconnectable"));
-      // The restore path is never entered, so the transfer method is untouched.
       verify(transferFapm, never()).setAutomaticWithdrawn(anyBoolean());
       verify(transferMethod, never()).getName();
     }
@@ -946,11 +901,7 @@ public class FinancialAccountBankConnectionHandlerLinkTest {
 
   // ── helpers ───────────────────────────────────────────────────────────────
 
-  /**
-   * Body for a <b>permanent</b> disconnect. The {@code Automatic Withdrawn} restore covered by
-   * this class only runs on the permanent path (ETP-4764): after a soft disconnect the bank link
-   * survives, so re-enabling the transfer method would just have to be undone on reconnect.
-   */
+  /** Body for a <b>permanent</b> disconnect (the path that used to restore Automatic Withdrawn). */
   private static JSONObject disconnectBody() throws Exception {
     return new JSONObject()
         .put(PARAM_ACCOUNT_ID, ACCOUNT_ID)
@@ -976,9 +927,9 @@ public class FinancialAccountBankConnectionHandlerLinkTest {
   }
 
   /**
-   * Stubs {@code dal.createCriteria(FinAccPaymentMethod.class)} so
-   * {@code disableAutomaticWithdrawnForTransferMethod} (called at the end of every
-   * {@code linkAccount}) returns the given rows instead of hitting a real Hibernate session.
+   * Stubs {@code dal.createCriteria(FinAccPaymentMethod.class)} so the payment-method sweep at the
+   * end of {@code linkAccount} ({@code disableMulticurrencyForBankTransfer}, ETP-4503) returns the
+   * given rows instead of hitting a real Hibernate session.
    * Every test that reaches {@code linkAccount} must call this (with an empty list when the
    * behavior is not under test), otherwise the unstubbed {@code OBDal.getInstance()} call blows up
    * and the handler's catch-all turns it into a 500.
