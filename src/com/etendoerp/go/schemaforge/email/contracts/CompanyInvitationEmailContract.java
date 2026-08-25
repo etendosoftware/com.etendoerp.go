@@ -33,6 +33,10 @@ import com.etendoerp.go.schemaforge.email.EmailContractCommandSupport;
 import com.etendoerp.go.schemaforge.email.EmailContractResolution;
 import com.etendoerp.go.schemaforge.email.EmailDeliveryPolicy;
 import com.etendoerp.go.schemaforge.email.EmailProviderRequest;
+import com.etendoerp.go.schemaforge.email.render.EmailContent;
+import com.etendoerp.go.schemaforge.email.render.EmailEscape;
+import com.etendoerp.go.schemaforge.email.render.EmailLayout;
+import com.etendoerp.go.schemaforge.email.render.EmailMessages;
 import com.etendoerp.go.schemaforge.email.EmailRecipientResolution;
 import com.etendoerp.go.schemaforge.email.EmailThrottleRule;
 import com.etendoerp.go.schemaforge.email.TransactionalEmailService;
@@ -47,7 +51,6 @@ public final class CompanyInvitationEmailContract implements EmailContract {
   private static final String CONTRACT_NAME = "company-invitation";
   private static final String INVITATION_RECORD_NOT_FOUND = "Invitation record was not found";
   private static final String PROVIDER_TEMPLATE = "custom";
-  private static final String LANGUAGE_SPANISH = "es_ES";
   private static final String FIELD_SUBJECT = "subject";
   private static final String FIELD_BODY = "body";
 
@@ -122,7 +125,7 @@ public final class CompanyInvitationEmailContract implements EmailContract {
       if (language != null) {
         data.put("language", language);
       }
-      populateContent(data, language, companyName, link);
+      populateContent(data, language, companyName, link, resolveRecipientName(inv));
       return EmailContractResolution.ready(new EmailProviderRequest(recipient.getRecipient(),
           PROVIDER_TEMPLATE, data, null));
     } catch (JSONException e) {
@@ -154,16 +157,52 @@ public final class CompanyInvitationEmailContract implements EmailContract {
     return Optional.ofNullable(OBDal.getInstance().get(Invitation.class, recordId));
   }
 
+  /**
+   * Fills subject and body with the shared layout (ETP-5003).
+   *
+   * <p>Both the company name and the recipient name are emphasised, matching the design, so they
+   * are escaped here and handed to the layout as pre-escaped markup. Every other string in the
+   * message comes from the module's own properties catalog.</p>
+   */
   private static void populateContent(JSONObject data, String language, String companyName,
-      String link) throws JSONException {
-    if (LANGUAGE_SPANISH.equals(language) || (language != null && language.startsWith("es"))) {
-      data.put(FIELD_SUBJECT, "Invitación para unirte a " + companyName);
-      data.put(FIELD_BODY, "Has sido invitado a unirte a " + companyName + " en Etendo Go.\n\n"
-          + "Abre el siguiente enlace para aceptar la invitación:\n" + link);
-      return;
+      String link, String recipientName) throws JSONException {
+    EmailContent.Builder content = EmailContent.builder();
+    if (StringUtils.isNotBlank(recipientName)) {
+      content.greetingHtml(
+          EmailMessages.get("invitation.greeting", language, strong(recipientName)));
     }
-    data.put(FIELD_SUBJECT, "Invitation to join " + companyName);
-    data.put(FIELD_BODY, "You have been invited to join " + companyName + " on Etendo Go.\n\n"
-        + "Open the following link to accept your invitation:\n" + link);
+    content.paragraphHtml(EmailMessages.get("invitation.body", language, strong(companyName)))
+        .cta(EmailMessages.get("invitation.cta", language), link)
+        .linkFallbackText(EmailMessages.get("link.fallback", language))
+        .note(EmailMessages.get("invitation.note.expiry", language))
+        .note(EmailMessages.get("invitation.note.ignore", language))
+        .signature(EmailMessages.get("signature", language));
+
+    data.put(FIELD_SUBJECT, EmailMessages.get("invitation.subject", language, companyName));
+    data.put(FIELD_BODY, EmailLayout.render(content.build()));
+  }
+
+  /**
+   * Escapes a value and wraps it for emphasis inside layout copy.
+   *
+   * @param value the untrusted value
+   * @return the emphasised markup
+   */
+  private static String strong(String value) {
+    return "<strong>" + EmailEscape.escapeHtml(value) + "</strong>";
+  }
+
+  /**
+   * Resolves the greeting name for the invited user, which is absent when the invitation targets an
+   * email address with no Etendo user behind it yet. The layout simply omits the greeting then.
+   *
+   * @param invitation the invitation record
+   * @return the recipient name, or {@code null}
+   */
+  private static String resolveRecipientName(Invitation invitation) {
+    if (invitation.getUser() == null) {
+      return null;
+    }
+    return StringUtils.trimToNull(invitation.getUser().getName());
   }
 }

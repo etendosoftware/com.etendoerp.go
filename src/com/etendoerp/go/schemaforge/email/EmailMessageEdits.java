@@ -25,6 +25,8 @@ import java.util.Optional;
 import java.util.Set;
 
 import org.apache.commons.lang3.StringUtils;
+
+import com.etendoerp.go.schemaforge.email.render.EmailEscape;
 import org.codehaus.jettison.json.JSONObject;
 
 /**
@@ -150,12 +152,7 @@ public final class EmailMessageEdits {
   }
 
   private static String escapeHtml(String value) {
-    return value
-        .replace("&", "&amp;")
-        .replace("<", "&lt;")
-        .replace(">", "&gt;")
-        .replace("\"", "&quot;")
-        .replace("'", "&#39;");
+    return EmailEscape.escapeHtml(value);
   }
 
   /**
