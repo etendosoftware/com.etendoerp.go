@@ -27,7 +27,11 @@ import org.codehaus.jettison.json.JSONObject;
  * GET list responses before they reach the UI.
  *
  * <p>Used by {@link OrderLineHandler} and {@link InvoiceLineHandler} to avoid duplicating
- * the same filtering logic in each handler.
+ * the same filtering logic in each handler, and by {@link AbstractInOutLineHandler}
+ * (ETP-4844) so Goods Receipt/Shipment lines get the same GET-time protection —
+ * defense-in-depth for any pre-existing/Classic-created document that still carries
+ * the line, since {@link InOutLineFromOrderFactory#pendingQuantityFor} already stops
+ * new ones from being created.
  */
 class DiscountLineFilter {
 
@@ -58,27 +62,48 @@ class DiscountLineFilter {
       if (dataArr == null || dataArr.length() == 0) {
         return null;
       }
-      JSONArray filtered = new JSONArray();
-      boolean removed = false;
-      for (int i = 0; i < dataArr.length(); i++) {
-        JSONObject row = dataArr.optJSONObject(i);
-        if (row == null) {
-          continue;
-        }
-        if (TotalDiscountService.DISCOUNT_PRODUCT_ID.equals(row.optString("product", ""))) {
-          removed = true;
-        } else {
-          filtered.put(row);
-        }
-      }
-      if (!removed) {
-        return null;
-      }
-      responseWrapper.put("data", filtered);
-      return NeoResponse.ok(body);
+      JSONArray filtered = filterDataArray(dataArr, responseWrapper);
+      return filtered == dataArr ? null : NeoResponse.ok(body);
     } catch (Exception e) {
       log.warn("Could not filter discount lines from GET response: {}", e.getMessage());
       return null;
     }
+  }
+
+  /**
+   * Removes rows whose {@code product} field matches the discount-product ID from
+   * {@code dataArr}, and — only when at least one row was actually removed — replaces
+   * the {@code "data"} entry in {@code responseWrapper} with the filtered array.
+   *
+   * <p>Exposed separately from {@link #filterFromResponse} so callers that still need
+   * to run further per-line enrichment on the (possibly filtered) rows — such as
+   * {@link AbstractInOutLineHandler#afterHandle} — can filter first and keep working
+   * off the returned array, instead of re-deriving it from a freshly built response.
+   *
+   * @param dataArr         the {@code response.data} array from a GET result
+   * @param responseWrapper the enclosing {@code response} object that owns {@code dataArr};
+   *                        mutated in place only when rows are actually removed
+   * @return {@code dataArr} unchanged when nothing was removed, or a new, filtered
+   *         {@link JSONArray} (already installed into {@code responseWrapper}) otherwise
+   */
+  static JSONArray filterDataArray(JSONArray dataArr, JSONObject responseWrapper) throws org.codehaus.jettison.json.JSONException {
+    JSONArray filtered = new JSONArray();
+    boolean removed = false;
+    for (int i = 0; i < dataArr.length(); i++) {
+      JSONObject row = dataArr.optJSONObject(i);
+      if (row == null) {
+        continue;
+      }
+      if (TotalDiscountService.DISCOUNT_PRODUCT_ID.equals(row.optString("product", ""))) {
+        removed = true;
+      } else {
+        filtered.put(row);
+      }
+    }
+    if (!removed) {
+      return dataArr;
+    }
+    responseWrapper.put("data", filtered);
+    return filtered;
   }
 }
