@@ -415,4 +415,103 @@ public class ObuiappProcessAccessOverlapCorruptionGuardIntegrationTest extends W
       OBContext.restorePreviousMode();
     }
   }
+
+  @Test
+  public void testUpdatingTemplatesOwnAccessLevelNeverDeletesAnAlreadyCorrectlySourcedDependentRow()
+      throws Exception {
+    setTestUserContext();
+    OBContext.setAdminMode(true);
+    try {
+      Process sharedProcess = OBDal.getInstance().get(Process.class, OBUIAPP_PROCESS_ID);
+      assertNotNull(sharedProcess);
+
+      Role template = createThrowawaySystemTemplateRole();
+      grantObuiappProcessAccess(template, sharedProcess, true);
+      OBDal.getInstance().flush();
+
+      User user = OBDal.getInstance().get(User.class, TEST_USER_ID);
+      assertNotNull(user);
+
+      Role bystanderRole = createBystanderRole(user);
+      addInheritance(bystanderRole, template, 10L);
+
+      ProcessAccess beforeUpdate = findObuiappProcessAccess(bystanderRole, sharedProcess);
+      assertNotNull(beforeUpdate);
+      assertEquals(template.getId(),
+          beforeUpdate.getInheritedFrom() != null ? beforeUpdate.getInheritedFrom().getId()
+              : null);
+      assertFalse(Boolean.TRUE.equals(beforeUpdate.isEditableField()));
+
+      ProcessAccess templateAccess = findObuiappProcessAccess(template, sharedProcess);
+      assertNotNull(templateAccess);
+      updateObuiappProcessAccessLevel(templateAccess, false);
+
+      ProcessAccess afterUpdate = findObuiappProcessAccess(bystanderRole, sharedProcess);
+      assertNotNull("The dependent's row must survive a routine UPDATE to the template's own "
+          + "access level", afterUpdate);
+      assertEquals(bystanderRole.getClient().getId(), afterUpdate.getClient().getId());
+      assertEquals(bystanderRole.getOrganization().getId(),
+          afterUpdate.getOrganization().getId());
+      assertEquals(template.getId(),
+          afterUpdate.getInheritedFrom() != null ? afterUpdate.getInheritedFrom().getId() : null);
+      assertTrue(Boolean.TRUE.equals(afterUpdate.isEditableField()));
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  @Test
+  public void testDowngradingOneOfTwoOverlappingTemplatesNeverDowngradesDependentWhenTheOtherStillGrantsFullAccess()
+      throws Exception {
+    setTestUserContext();
+    OBContext.setAdminMode(true);
+    try {
+      Process sharedProcess = OBDal.getInstance().get(Process.class, OBUIAPP_PROCESS_ID);
+      assertNotNull(sharedProcess);
+
+      Role templateA = createThrowawaySystemTemplateRole();
+      Role templateB = createThrowawaySystemTemplateRole();
+      grantObuiappProcessAccess(templateA, sharedProcess, false);
+      grantObuiappProcessAccess(templateB, sharedProcess, false);
+      OBDal.getInstance().flush();
+
+      User user = OBDal.getInstance().get(User.class, TEST_USER_ID);
+      assertNotNull(user);
+
+      Role bystanderRole = createBystanderRole(user);
+      addInheritance(bystanderRole, templateA, 10L);
+      addInheritance(bystanderRole, templateB, 20L);
+
+      ProcessAccess beforeUpdate = findObuiappProcessAccess(bystanderRole, sharedProcess);
+      assertNotNull(beforeUpdate);
+      assertTrue(Boolean.TRUE.equals(beforeUpdate.isEditableField()));
+      assertEquals(templateB.getId(),
+          beforeUpdate.getInheritedFrom() != null ? beforeUpdate.getInheritedFrom().getId()
+              : null);
+
+      ProcessAccess templateBAccess = findObuiappProcessAccess(templateB, sharedProcess);
+      assertNotNull(templateBAccess);
+      updateObuiappProcessAccessLevel(templateBAccess, true);
+
+      ProcessAccess afterUpdate = findObuiappProcessAccess(bystanderRole, sharedProcess);
+      assertNotNull(afterUpdate);
+      assertTrue("MOST-PERMISSIVE-WINS: dependent must stay full — templateA still grants full",
+          Boolean.TRUE.equals(afterUpdate.isEditableField()));
+      assertEquals(templateA.getId(),
+          afterUpdate.getInheritedFrom() != null ? afterUpdate.getInheritedFrom().getId() : null);
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  private void updateObuiappProcessAccessLevel(ProcessAccess access, boolean readOnly) {
+    OBContext.setAdminMode();
+    try {
+      access.setEditableField(!readOnly);
+      OBDal.getInstance().save(access);
+      OBDal.getInstance().flush();
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
 }

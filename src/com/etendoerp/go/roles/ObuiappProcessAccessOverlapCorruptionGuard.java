@@ -38,6 +38,7 @@ import org.openbravo.client.application.ProcessAccess;
 import org.openbravo.client.kernel.event.EntityDeleteEvent;
 import org.openbravo.client.kernel.event.EntityNewEvent;
 import org.openbravo.client.kernel.event.EntityPersistenceEventObserver;
+import org.openbravo.client.kernel.event.EntityUpdateEvent;
 import org.openbravo.client.kernel.event.TransactionCompletedEvent;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
@@ -71,6 +72,22 @@ import com.etendoerp.go.roles.overlap.TemplateRemovalTracker;
  * {@code AD_PROCESS_ACCESS_UN_KEY}) vs. silently duplicate (OBUIAPP: no unique constraint) — and
  * that sub-case is already handled identically for both via repoint-in-place, which prevents the
  * duplicate from ever being created, making the distinction moot in practice.
+ *
+ * <p><b>Scope: full ADD/UPDATE/REMOVE-path parity with {@code
+ * WindowAccessOverlapCorruptionGuard}/{@link ProcessAccessOverlapCorruptionGuard}.</b> {@link
+ * #onSave(EntityNewEvent)} covers the ADD path — ownership correction for a newly-inherited
+ * dependent row, most-permissive-wins widening, and unconditional dependent-clearing (safe here
+ * because core's {@code propagateNewAccess} always falls back to a CREATE) when a template gains
+ * a brand-new grant or a role gains a new inheritance ({@code guardNewInheritance}). {@link
+ * #onUpdate(EntityUpdateEvent)} covers the UPDATE path — when a template's own existing grant
+ * changes access level, {@code guardDependentsOf}'s {@code UPDATED_GRANT} branch repoints an
+ * already-correctly-sourced dependent row in place ({@code
+ * repointIfAlreadySourcedFromTemplate}) rather than deleting it, since core's {@code
+ * propagateUpdatedAccess} has no create fallback and would otherwise leave the dependent with
+ * nothing to restore its access. {@link #onDelete(EntityDeleteEvent)} covers the REMOVE path —
+ * the original duplicate-INSERT/silent-duplicate race documented above. All three mirror the SAME
+ * failure signatures ({@code OBSecurityException} or a silently wrong access level) that {@code
+ * WindowAccessOverlapCorruptionGuard} closes for {@code AD_Window_Access}.
  */
 public class ObuiappProcessAccessOverlapCorruptionGuard extends EntityPersistenceEventObserver {
 
@@ -118,6 +135,23 @@ public class ObuiappProcessAccessOverlapCorruptionGuard extends EntityPersistenc
       }
     } else if (target instanceof RoleInheritance) {
       guardNewInheritance((RoleInheritance) target);
+    }
+  }
+
+  /**
+   * Mirrors {@code ProcessAccessOverlapCorruptionGuard#onUpdate(EntityUpdateEvent)} — see that
+   * method's own javadoc. Uses a DIFFERENT safe strategy than {@link #onSave(EntityNewEvent)}'s
+   * {@code NEW_GRANT} trigger: core's own {@code propagateUpdatedAccess} (triggered here) has NO
+   * create fallback, unlike {@code propagateNewAccess}.
+   */
+  public void onUpdate(@Observes @Priority(RUNS_BEFORE_UNPRIORITIZED_CORE_OBSERVERS)
+      EntityUpdateEvent event) {
+    if (!isValidEvent(event)) {
+      return;
+    }
+    Object target = event.getTargetInstance();
+    if (target instanceof ProcessAccess) {
+      guardDependentsOf((ProcessAccess) target, PropagationTrigger.UPDATED_GRANT);
     }
   }
 
@@ -259,8 +293,8 @@ public class ObuiappProcessAccessOverlapCorruptionGuard extends EntityPersistenc
   /**
    * Mirrors {@code ProcessAccessOverlapCorruptionGuard#guardDependentsOf} — see that method's own
    * javadoc. Called with {@link PropagationTrigger#NEW_GRANT} from {@link
-   * #onSave(EntityNewEvent)}. Unlike the sibling class, there is no {@code onUpdate} handler yet
-   * (Task 7), so {@link PropagationTrigger#UPDATED_GRANT} is never passed here.
+   * #onSave(EntityNewEvent)} and with {@link PropagationTrigger#UPDATED_GRANT} from {@link
+   * #onUpdate(EntityUpdateEvent)}.
    */
   private void guardDependentsOf(ProcessAccess templateAccess, PropagationTrigger trigger) {
     Role role = templateAccess.getRole();
@@ -271,11 +305,45 @@ public class ObuiappProcessAccessOverlapCorruptionGuard extends EntityPersistenc
     if (process == null) {
       return;
     }
-    if (trigger == PropagationTrigger.NEW_GRANT) {
-      for (Role dependent : findActiveDependentRoles(role)) {
+    for (Role dependent : findActiveDependentRoles(role)) {
+      if (trigger == PropagationTrigger.NEW_GRANT) {
         clearConflictingAccessUnconditionally(dependent, process, role);
+      } else {
+        repointIfAlreadySourcedFromTemplate(dependent, process, role, templateAccess);
       }
     }
+  }
+
+  /**
+   * Mirrors {@code ProcessAccessOverlapCorruptionGuard#repointIfAlreadySourcedFromTemplate} — see
+   * that method's own javadoc for the full [B7]/BUG-2 root-cause write-up (why deleting is not
+   * safe on this trigger, and why the most-permissive-wins survey against every OTHER actively-
+   * inherited template is required before trusting {@code grantingTemplate}'s own new value).
+   */
+  private void repointIfAlreadySourcedFromTemplate(Role dependent, Process process,
+      Role grantingTemplate, ProcessAccess templateAccess) {
+    ProcessAccess existing = findActiveObuiappProcessAccess(dependent, process);
+    if (existing == null) {
+      return;
+    }
+    Role existingSource = existing.getInheritedFrom();
+    if (existingSource == null || !sameId(existingSource, grantingTemplate)) {
+      return;
+    }
+    boolean grantingTemplateNewLevel = Boolean.TRUE.equals(templateAccess.isEditableField());
+    Role otherJustifyingTemplate =
+        grantingTemplateNewLevel ? null
+            : findActiveTemplateGrantingFullAccess(dependent, process, grantingTemplate);
+
+    boolean finalLevel = grantingTemplateNewLevel || otherJustifyingTemplate != null;
+    Role winner = otherJustifyingTemplate != null ? otherJustifyingTemplate : grantingTemplate;
+
+    boolean sourceCorrect = sameId(existingSource, winner);
+    boolean levelCorrect = Boolean.valueOf(finalLevel).equals(existing.isEditableField());
+    if (sourceCorrect && levelCorrect) {
+      return;
+    }
+    repointInPlace(existing, process, winner, finalLevel, existingSource);
   }
 
   /**
