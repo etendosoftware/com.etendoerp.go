@@ -58,6 +58,20 @@ public final class ActiveTemplateInheritance {
     // static utility
   }
 
+  /**
+   * Every ACTIVE template {@code dependent} currently inherits from, ordered by {@code
+   * AD_Role_Inheritance.SeqNo} DESCENDING — see this class's own javadoc for the full tie-break
+   * rationale this ordering supports.
+   *
+   * @param dependent
+   *          the role whose active template inheritances are being looked up
+   * @param excludedInheritanceId
+   *          the id of one {@code AD_Role_Inheritance} row to exclude from the result (typically
+   *          the row about to be deleted), or {@code null} to include all of them
+   * @return every active template {@code dependent} inherits from, excluding {@code
+   *         excludedInheritanceId} and any template {@link TemplateRemovalTracker} currently
+   *         reports as being removed, ordered by {@code SeqNo} descending
+   */
   @SuppressWarnings("unchecked")
   public static List<Role> findActiveTemplatesFor(Role dependent, String excludedInheritanceId) {
     OBCriteria<RoleInheritance> criteria = crossClientCriteria(RoleInheritance.class);
@@ -87,6 +101,10 @@ public final class ActiveTemplateInheritance {
    * ObuiappProcessAccessOverlapCorruptionGuard} (ETP-4830 final-review Finding 2). See {@link
    * #crossClientCriteria(Class)} for why the query must disable readable-client/organization
    * filtering.
+   *
+   * @param template
+   *          the template role to find active dependents of
+   * @return every role currently, actively inheriting from {@code template}
    */
   @SuppressWarnings("unchecked")
   public static List<Role> findActiveDependentRoles(Role template) {
@@ -112,6 +130,13 @@ public final class ActiveTemplateInheritance {
    * {@code public} (not private) so every method in this class can reuse it AND so the 3 guard
    * classes (a different package, {@code com.etendoerp.go.roles}) can call it directly for their
    * own {@code WindowAccess}/{@code ProcessAccess}-specific queries.
+   *
+   * @param <T>
+   *          the entity type being queried
+   * @param clazz
+   *          the entity class to build a criteria for
+   * @return a fresh {@link OBCriteria} for {@code clazz} with readable-client/organization
+   *         filtering disabled
    */
   public static <T extends BaseOBObject> OBCriteria<T> crossClientCriteria(Class<T> clazz) {
     OBCriteria<T> criteria = OBDal.getInstance().createCriteria(clazz);
@@ -123,6 +148,12 @@ public final class ActiveTemplateInheritance {
   /**
    * Extracted from the identical private copy previously duplicated across all 3 guard classes
    * (ETP-4830 final-review Finding 2).
+   *
+   * @param a
+   *          the first entity to compare, or {@code null}
+   * @param b
+   *          the second entity to compare, or {@code null}
+   * @return {@code true} when both are non-{@code null} and share the same id
    */
   public static boolean sameId(BaseOBObject a, BaseOBObject b) {
     if (a == null || b == null) {
@@ -138,6 +169,13 @@ public final class ActiveTemplateInheritance {
    * result, which is declared {@code Object} — defensively checks the runtime type rather than
    * casting. Extracted from the identical private copy previously duplicated across all 3 guard
    * classes (ETP-4830 final-review Finding 2).
+   *
+   * @param expected
+   *          the entity the current state is expected to reference
+   * @param actualState
+   *          the raw {@code getCurrentState(Property)} result to compare against
+   * @return {@code true} when {@code actualState} is a {@link BaseOBObject} sharing {@code
+   *         expected}'s id
    */
   public static boolean sameId(BaseOBObject expected, Object actualState) {
     if (!(actualState instanceof BaseOBObject)) {

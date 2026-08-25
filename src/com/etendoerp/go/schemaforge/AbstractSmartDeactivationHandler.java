@@ -87,6 +87,10 @@ public abstract class AbstractSmartDeactivationHandler implements NeoHandler {
    * Returns {@code true} only when {@code body} explicitly carries an "active" flag (boolean
    * {@code false}, or the string {@code "false"}/{@code "N"}) set to false — a field simply
    * absent from {@code body} is never treated as a deactivation request.
+   *
+   * @param body
+   *          the incoming request body to inspect, or {@code null}
+   * @return {@code true} when {@code body} explicitly sets the active flag to false
    */
   public static boolean isExplicitlyDeactivating(JSONObject body) {
     if (body == null || !body.has(FIELD_ACTIVE)) {

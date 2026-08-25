@@ -83,8 +83,6 @@ public class SFDebugInvitationBypass extends BaseWebhookService {
   private static final String ACTION_FORCE_STATUS = "forceStatus";
 
   private static final String RESPONSE_VAR_RESULT = "result";
-  private static final String FIELD_SUCCESS = "success";
-  private static final String FIELD_MESSAGE = "message";
 
   private final DebugInvitationBypassService service;
 
@@ -109,7 +107,7 @@ public class SFDebugInvitationBypass extends BaseWebhookService {
     // runs, so resolveCurrentRole() here still reads the real caller role, not "Admin").
     Role currentRole = NeoAccessHelper.resolveCurrentRole();
     if (currentRole == null || !NeoAccessHelper.isAdminOrClientAdmin(currentRole)) {
-      responseVars.put(RESPONSE_VAR_RESULT, denied().toString());
+      responseVars.put(RESPONSE_VAR_RESULT, WebhookFailureResponses.denied().toString());
       return;
     }
 
@@ -123,8 +121,8 @@ public class SFDebugInvitationBypass extends BaseWebhookService {
         result = service.forceStatus(parameter.get(PARAM_INVITATION_ID), parameter.get(PARAM_EMAIL),
             parameter.get(PARAM_STATUS));
       } else {
-        result = failure("Unknown or missing Action (expected forceAccept or forceStatus): "
-            + action);
+        result = WebhookFailureResponses.failure(
+            "Unknown or missing Action (expected forceAccept or forceStatus): " + action);
       }
       responseVars.put(RESPONSE_VAR_RESULT, result.toString());
     } catch (JSONException e) {
@@ -133,21 +131,6 @@ public class SFDebugInvitationBypass extends BaseWebhookService {
     } catch (RuntimeException e) {
       log.error("Unexpected error in SFDebugInvitationBypass for action {}", action, e);
       responseVars.put("error", e.getMessage());
-    }
-  }
-
-  private JSONObject denied() {
-    return failure("Not authorized");
-  }
-
-  private JSONObject failure(String message) {
-    try {
-      JSONObject result = new JSONObject();
-      result.put(FIELD_SUCCESS, false);
-      result.put(FIELD_MESSAGE, message != null ? message : "Request could not be completed");
-      return result;
-    } catch (JSONException e) {
-      throw new IllegalStateException("Unable to build failure result", e);
     }
   }
 }

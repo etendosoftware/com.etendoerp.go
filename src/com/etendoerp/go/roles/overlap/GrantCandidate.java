@@ -28,6 +28,14 @@ public final class GrantCandidate {
   private final String templateId;
   private final boolean fullAccess;
 
+  /**
+   * Creates a candidate recording one remaining template's active grant for a single item.
+   *
+   * @param templateId
+   *          the id of the remaining template this candidate represents
+   * @param fullAccess
+   *          whether this template currently grants full ("&#x2713;") access to the item
+   */
   public GrantCandidate(String templateId, boolean fullAccess) {
     this.templateId = templateId;
     this.fullAccess = fullAccess;

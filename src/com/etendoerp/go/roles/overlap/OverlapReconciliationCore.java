@@ -55,6 +55,13 @@ public final class OverlapReconciliationCore {
    * <p><b>Level ({@code winnerLevel}) is a SEPARATE, most-permissive-wins decision</b>,
    * independent of which candidate is the winner: {@code true} the moment ANY candidate in the
    * list grants full access, regardless of that candidate's own {@code SeqNo}.
+   *
+   * @param candidatesOrderedBySeqNoDescending
+   *          every remaining template currently, actively granting one window/process/report
+   *          item, ordered by {@code AD_Role_Inheritance.SeqNo} descending, or {@code null}/empty
+   *          when no remaining template grants it
+   * @return the winning template id and most-permissive-wins level, or {@code null} when the
+   *         input list is {@code null} or empty
    */
   public static OverlapWinner computeWinner(
       List<GrantCandidate> candidatesOrderedBySeqNoDescending) {
@@ -83,6 +90,15 @@ public final class OverlapReconciliationCore {
    *
    * <p>Returns {@code null} when {@code candidatesOrderedBySeqNoDescending} is {@code null}, or
    * when no non-excluded candidate grants full access.
+   *
+   * @param candidatesOrderedBySeqNoDescending
+   *          every remaining template currently, actively granting one window/process/report
+   *          item, ordered by {@code AD_Role_Inheritance.SeqNo} descending, or {@code null}
+   * @param excludedTemplateId
+   *          the id of one template to skip (typically the one whose own grant just changed and
+   *          is being handled separately by the caller), or {@code null} to exclude none
+   * @return the id of the highest-SeqNo non-excluded template granting full access, or {@code
+   *         null} when none does
    */
   public static String findJustifyingFullGrant(
       List<GrantCandidate> candidatesOrderedBySeqNoDescending, String excludedTemplateId) {

@@ -115,7 +115,7 @@ public class CompanyInvitationService {
 
     String normalizedEmail = StringUtils.trimToEmpty(email).toLowerCase(Locale.ROOT);
     if (normalizedEmail.isEmpty()) {
-      return errorResponse(400, "MISSING_EMAIL", "Email address is required");
+      return errorResponse(400, CODE_MISSING_EMAIL, "Email address is required");
     }
     if (!EmailContractCommandSupport.isValidEmail(normalizedEmail)) {
       return errorResponse(400, "INVALID_EMAIL_FORMAT", "Invalid email format");
@@ -152,7 +152,7 @@ public class CompanyInvitationService {
       String appBaseUrl, String language) throws JSONException {
     String normalizedEmail = StringUtils.trimToEmpty(email).toLowerCase(Locale.ROOT);
     if (normalizedEmail.isEmpty()) {
-      return errorResponse(400, "MISSING_EMAIL", "Email address is required");
+      return errorResponse(400, CODE_MISSING_EMAIL, "Email address is required");
     }
     return createInvitationForInviter(resolveInviterFromContext(obContext), normalizedEmail,
         appBaseUrl, language, false);
@@ -320,7 +320,7 @@ public class CompanyInvitationService {
     }
     String email = StringUtils.trimToEmpty(invitedUser.getEmail()).toLowerCase(Locale.ROOT);
     if (email.isEmpty()) {
-      return errorResponse(400, "MISSING_EMAIL", "User has no email address on file");
+      return errorResponse(400, CODE_MISSING_EMAIL, "User has no email address on file");
     }
 
     Invitation latest = CompanyInvitationDalHelper.findLatestInvitation(inviter.client.getId(),

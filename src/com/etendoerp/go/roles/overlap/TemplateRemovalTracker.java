@@ -53,14 +53,35 @@ public final class TemplateRemovalTracker {
     // static utility
   }
 
+  /**
+   * Marks {@code templateId} as being removed for the rest of this transaction on this thread —
+   * see this class's own javadoc for why the marker outlives the calling guard method's own stack
+   * frame.
+   *
+   * @param templateId
+   *          the id of the template role whose {@code RoleInheritance} is being deleted
+   */
   public static void markRemoved(String templateId) {
     BEING_REMOVED.get().add(templateId);
   }
 
+  /**
+   * Reports whether {@code templateId} is currently marked as being removed in this transaction.
+   *
+   * @param templateId
+   *          the id of the template role to check
+   * @return {@code true} when {@code templateId} was marked via {@link #markRemoved(String)}
+   *         earlier in this same transaction, on this same thread, and not yet {@link #clear()}ed
+   */
   public static boolean isBeingRemoved(String templateId) {
     return BEING_REMOVED.get().contains(templateId);
   }
 
+  /**
+   * Resets the marker for the next transaction on this thread — see this class's own javadoc for
+   * why this is called once per transaction (on both commit and rollback) rather than at the end
+   * of the guard method that populates it.
+   */
   public static void clear() {
     BEING_REMOVED.remove();
   }

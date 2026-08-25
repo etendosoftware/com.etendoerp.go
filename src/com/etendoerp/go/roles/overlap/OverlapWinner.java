@@ -26,6 +26,14 @@ public final class OverlapWinner {
   private final String winnerTemplateId;
   private final boolean winnerLevel;
 
+  /**
+   * Creates the verdict for one window/process/report item.
+   *
+   * @param winnerTemplateId
+   *          the id of the template that becomes {@code InheritedFrom}
+   * @param winnerLevel
+   *          the most-permissive-wins access level the dependent's row should end up at
+   */
   public OverlapWinner(String winnerTemplateId, boolean winnerLevel) {
     this.winnerTemplateId = winnerTemplateId;
     this.winnerLevel = winnerLevel;
