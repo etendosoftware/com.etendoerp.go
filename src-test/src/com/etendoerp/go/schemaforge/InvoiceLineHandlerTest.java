@@ -28,8 +28,6 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.when;
 
 import java.sql.Connection;
-import java.sql.PreparedStatement;
-import java.sql.ResultSet;
 
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
@@ -511,15 +509,8 @@ class InvoiceLineHandlerTest {
         OBDal dal = mock(OBDal.class);
         dalMock.when(OBDal::getInstance).thenReturn(dal);
 
-        Connection conn = mock(Connection.class);
-        PreparedStatement ps = mock(PreparedStatement.class);
-        ResultSet rs = mock(ResultSet.class);
-        when(dal.getConnection()).thenReturn(conn);
-        when(conn.prepareStatement(anyString())).thenReturn(ps);
-        when(ps.executeQuery()).thenReturn(rs);
-        when(rs.next()).thenReturn(true, false);
-        when(rs.getString(1)).thenReturn("inv-line-1");
-        when(rs.getString(2)).thenReturn("SKU-INV-1");
+        Connection conn = ProductCodeQueryTestSupport.mockSingleRowProductCodeQuery(
+            dal, "inv-line-1", "SKU-INV-1");
 
         handler.afterHandle(ctx);
 
@@ -555,16 +546,9 @@ class InvoiceLineHandlerTest {
         OBDal dal = mock(OBDal.class);
         dalMock.when(OBDal::getInstance).thenReturn(dal);
 
-        Connection conn = mock(Connection.class);
-        PreparedStatement ps = mock(PreparedStatement.class);
-        ResultSet rs = mock(ResultSet.class);
-        when(dal.getConnection()).thenReturn(conn);
-        when(conn.prepareStatement(anyString())).thenReturn(ps);
-        when(ps.executeQuery()).thenReturn(rs);
-        when(rs.next()).thenReturn(true, false);
-        // getString(1) (the line id) is only read once the blank-SKU check passes, so it must
+        // lineId=null: getString(1) is only read once the blank-SKU check passes, so it must
         // not be stubbed here — a blank getString(2) short-circuits before reaching it.
-        when(rs.getString(2)).thenReturn("");
+        ProductCodeQueryTestSupport.mockSingleRowProductCodeQuery(dal, null, "");
 
         handler.afterHandle(ctx);
 

@@ -220,18 +220,9 @@ public class NeoHandlerUtilsTest {
       OBDal dal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(dal);
 
-      Connection conn = mock(Connection.class);
-      PreparedStatement ps = mock(PreparedStatement.class);
-      ResultSet rs = mock(ResultSet.class);
-      when(dal.getConnection()).thenReturn(conn);
-      when(conn.prepareStatement(Mockito.anyString())).thenReturn(ps);
-      when(ps.executeQuery()).thenReturn(rs);
-
       // Product with no SKU (blank Value) must not appear in the result map — the caller's
       // resolveProductCode() fallback then applies (falls to "—", never the line number).
-      when(rs.next()).thenReturn(true, false);
-      when(rs.getString(1)).thenReturn("line-no-sku");
-      when(rs.getString(2)).thenReturn("");
+      ProductCodeQueryTestSupport.mockSingleRowProductCodeQuery(dal, "line-no-sku", "");
 
       Map<String, String> result = NeoHandlerUtils.fetchProductCodesForLines(
           List.of("line-no-sku"), "c_orderline", "c_orderline_id", LOG);
@@ -254,18 +245,9 @@ public class NeoHandlerUtilsTest {
       OBDal dal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(dal);
 
-      Connection conn = mock(Connection.class);
-      PreparedStatement ps = mock(PreparedStatement.class);
-      ResultSet rs = mock(ResultSet.class);
-      when(dal.getConnection()).thenReturn(conn);
-      when(conn.prepareStatement(Mockito.anyString())).thenReturn(ps);
-      when(ps.executeQuery()).thenReturn(rs);
-
       // Two ids requested, but only "line-1" produces a joinable row — "line-missing" (bad id /
       // deleted line / product removed) simply never appears in the ResultSet.
-      when(rs.next()).thenReturn(true, false);
-      when(rs.getString(1)).thenReturn("line-1");
-      when(rs.getString(2)).thenReturn("SKU-001");
+      ProductCodeQueryTestSupport.mockSingleRowProductCodeQuery(dal, "line-1", "SKU-001");
 
       Map<String, String> result = NeoHandlerUtils.fetchProductCodesForLines(
           List.of("line-1", "line-missing"), "c_orderline", "c_orderline_id", LOG);
@@ -297,13 +279,7 @@ public class NeoHandlerUtilsTest {
       OBDal dal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(dal);
 
-      Connection conn = mock(Connection.class);
-      PreparedStatement ps = mock(PreparedStatement.class);
-      ResultSet rs = mock(ResultSet.class);
-      when(dal.getConnection()).thenReturn(conn);
-      when(conn.prepareStatement(Mockito.anyString())).thenReturn(ps);
-      when(ps.executeQuery()).thenReturn(rs);
-      when(rs.next()).thenReturn(false);
+      Connection conn = ProductCodeQueryTestSupport.mockEmptyProductCodeQuery(dal);
 
       NeoHandlerUtils.fetchProductCodesForLines(
           List.of("inv-line-1"), "c_invoiceline", "c_invoiceline_id", LOG);

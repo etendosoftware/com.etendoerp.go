@@ -27,8 +27,6 @@ import static org.mockito.Mockito.when;
 
 import java.math.BigDecimal;
 import java.sql.Connection;
-import java.sql.PreparedStatement;
-import java.sql.ResultSet;
 
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
@@ -166,15 +164,8 @@ class OrderLineHandlerTest {
           .httpMethod("GET").endpointType(NeoEndpointType.CRUD)
           .previousResult(NeoResponse.ok(body)).build();
 
-      Connection conn = mock(Connection.class);
-      PreparedStatement ps = mock(PreparedStatement.class);
-      ResultSet rs = mock(ResultSet.class);
-      when(obDal.getConnection()).thenReturn(conn);
-      when(conn.prepareStatement(org.mockito.ArgumentMatchers.anyString())).thenReturn(ps);
-      when(ps.executeQuery()).thenReturn(rs);
-      when(rs.next()).thenReturn(true, false);
-      when(rs.getString(1)).thenReturn("line-1");
-      when(rs.getString(2)).thenReturn("SKU-ORDER-1");
+      Connection conn = ProductCodeQueryTestSupport.mockSingleRowProductCodeQuery(
+          obDal, "line-1", "SKU-ORDER-1");
 
       discountFilterMock.when(() -> DiscountLineFilter.filterFromResponse(any()))
           .thenReturn(null);
@@ -205,16 +196,9 @@ class OrderLineHandlerTest {
           .httpMethod("GET").endpointType(NeoEndpointType.CRUD)
           .previousResult(NeoResponse.ok(body)).build();
 
-      Connection conn = mock(Connection.class);
-      PreparedStatement ps = mock(PreparedStatement.class);
-      ResultSet rs = mock(ResultSet.class);
-      when(obDal.getConnection()).thenReturn(conn);
-      when(conn.prepareStatement(org.mockito.ArgumentMatchers.anyString())).thenReturn(ps);
-      when(ps.executeQuery()).thenReturn(rs);
-      when(rs.next()).thenReturn(true, false);
-      // getString(1) (the line id) is only read once the blank-SKU check passes, so it must
-      // not be stubbed here — a blank getString(2) short-circuits before reaching it.
-      when(rs.getString(2)).thenReturn("");
+      // lineId=null: getString(1) is only read once the blank-SKU check passes, so it must not
+      // be stubbed here — a blank getString(2) short-circuits before reaching it.
+      ProductCodeQueryTestSupport.mockSingleRowProductCodeQuery(obDal, null, "");
 
       discountFilterMock.when(() -> DiscountLineFilter.filterFromResponse(any()))
           .thenReturn(null);
