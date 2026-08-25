@@ -484,8 +484,12 @@ public class InitialEmailContractsTest {
     assertEquals("custom", adapter.getLastRequest().getTemplate());
     JSONObject data = adapter.getLastRequest().getData();
     assertEquals("Su factura corregida", data.getString("subject"));
-    // Newlines become <br>, and the invoice variables still travel untouched.
-    assertEquals("Adjuntamos la factura<br>con el importe corregido.", data.getString("body"));
+    // Newlines become <br>, and the operator message is always followed by the download-link
+    // paragraph (ETP-4717 reopened) so the edited send never drops the document link.
+    assertEquals("<p>Adjuntamos la factura<br>con el importe corregido.</p>"
+        + "<p>Puede descargarlo desde este enlace: "
+        + "<a href=\"https://app.example.test/doc/sales-invoice/invoice-1\">"
+        + "https://app.example.test/doc/sales-invoice/invoice-1</a></p>", data.getString("body"));
     assertEquals("0001-00042", data.getString("invoice_number"));
   }
 
@@ -520,7 +524,11 @@ public class InitialEmailContractsTest {
 
     assertSent(response);
     String body = adapter.getLastRequest().getData().getString("body");
-    assertEquals("&lt;script&gt;alert(&#39;x&#39;)&lt;/script&gt; &amp; listo", body);
+    // The escaped message is followed by the download-link paragraph (ETP-4717 reopened).
+    assertEquals("<p>&lt;script&gt;alert(&#39;x&#39;)&lt;/script&gt; &amp; listo</p>"
+        + "<p>Puede descargarlo desde este enlace: "
+        + "<a href=\"https://app.example.test/doc/sales-order/order-1\">"
+        + "https://app.example.test/doc/sales-order/order-1</a></p>", body);
   }
 
   @Test
@@ -568,7 +576,12 @@ public class InitialEmailContractsTest {
 
     assertSent(response);
     assertEquals(2, adapter.getSendCount());
-    assertEquals("Texto corregido", adapter.getLastRequest().getData().getString("body"));
+    // The message is wrapped and followed by the download-link paragraph (ETP-4717 reopened).
+    assertEquals("<p>Texto corregido</p>"
+        + "<p>Puede descargarlo desde este enlace: "
+        + "<a href=\"https://app.example.test/doc/sales-order/order-1\">"
+        + "https://app.example.test/doc/sales-order/order-1</a></p>",
+        adapter.getLastRequest().getData().getString("body"));
   }
 
   @Test

@@ -17,10 +17,13 @@
 
 package com.etendoerp.go.schemaforge;
 
+import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
+import org.codehaus.jettison.json.JSONException;
+import org.codehaus.jettison.json.JSONObject;
 import org.junit.Test;
 
 /**
@@ -90,5 +93,43 @@ public class SiiSendHandlerTest {
         .build();
 
     assertNull(handler.handle(ctx));
+  }
+
+  @Test
+  public void testNormalizeErrorShapePromotesNestedMultiEnvioFacturaError() throws JSONException {
+    // Mirrors NeoProcessService#executeObuiappClass's generic catch: a SOAP/network
+    // failure from the classic MultiEnvioFactura process is wrapped via
+    // NeoResponse#error(int, String), nesting the text under error.message.
+    NeoResponse response = NeoResponse.error(500, "MultiEnvioFactura: SOAP fault from AEAT");
+
+    NeoResponse result = SiiSendHandler.normalizeErrorShape(response);
+
+    assertEquals(response, result);
+    assertEquals(500, result.getHttpStatus());
+    assertEquals("MultiEnvioFactura: SOAP fault from AEAT", result.getBody().getString("message"));
+    assertEquals("MultiEnvioFactura: SOAP fault from AEAT",
+        result.getBody().getJSONObject("error").getString("message"));
+  }
+
+  @Test
+  public void testNormalizeErrorShapeIsIdempotentWhenAlreadyFlat() throws JSONException {
+    // As of NeoResponse#ensureTopLevelMessage being applied upstream in
+    // NeoProcessService#executeObuiappClass, the body may already carry a
+    // top-level message by the time it reaches this handler's delegate.
+    JSONObject errorObj = new JSONObject();
+    errorObj.put("message", "Original failure");
+    JSONObject body = new JSONObject();
+    body.put("error", errorObj);
+    body.put("message", "Original failure");
+    NeoResponse response = new NeoResponse(500, body);
+
+    NeoResponse result = SiiSendHandler.normalizeErrorShape(response);
+
+    assertEquals("Original failure", result.getBody().getString("message"));
+  }
+
+  @Test
+  public void testNormalizeErrorShapeReturnsNullUnchanged() {
+    assertNull(SiiSendHandler.normalizeErrorShape(null));
   }
 }

@@ -141,9 +141,13 @@ public class FinancialAccountHandler implements NeoHandler {
    *
    * All of these MUST be injected post-hook: `NeoFieldFilter` strips every key that
    * is not a declared field, and it runs before afterHandle.
+   *
+   * <p>{@code pendingCount} used to be one of them. It is no longer injected here: it became the
+   * {@code EM_ETGO_Pending_Count} stored computed column, so the generic CRUD serves it as
+   * {@code eTGOPendingCount} straight from the row. That is what makes the "Por conciliar" column
+   * sortable — a value injected in afterHandle can only ever be reordered within the page SQL
+   * already selected, which is not the same as ordering the dataset.
    * --------------------------------------------------------------------------- */
-  /** Unreconciled statement lines for the account — drives the "Por conciliar (N)" pill. */
-  private static final String FIELD_PENDING_COUNT = "pendingCount";
   /** {@code EM_PSD2_Connection_Status = 'CO'} — drives the "Sincronizado / Sin conexión" badge. */
   private static final String FIELD_BANK_CONNECTED = "bankConnected";
   /** Soft-disconnected but still linked to Salt Edge — drives the "Reconectar" action. */
@@ -381,7 +385,7 @@ public class FinancialAccountHandler implements NeoHandler {
    * Enriches every GET row with the fields the accounts list needs but no AD column provides,
    * and attaches the collection-level {@code summary} used by the list sidebar.
    *
-   * <p>All four data loaders run <b>once</b> for the whole page (a Map/Set lookup per row),
+   * <p>All three data loaders run <b>once</b> for the whole page (a Map/Set lookup per row),
    * reusing {@link FinancialAccountsPageHandler}'s SQL verbatim. The previous implementation
    * issued two queries <i>per row</i> just for {@code hasTransactions}; {@code deletable} /
    * {@code deleteBlockedReason} (ETP-4871) follow the same rule — one batched query for the
@@ -401,13 +405,12 @@ public class FinancialAccountHandler implements NeoHandler {
     for (FinancialAccountsPageHandler.AccountRow row : loaders.loadAccounts(clientId, orgs)) {
       byId.put(row.id, row);
     }
-    Map<String, Integer> pendingByAccount = loaders.loadPendingByAccount(clientId, orgs);
     Set<String> withTransactions = loaders.loadAccountsWithTransactions(clientId, orgs);
     Map<String, List<String>> deleteBlockersByAccount = loaders.loadDeleteBlockersByAccount(clientId, orgs);
 
     Set<String> visibleIds = new java.util.LinkedHashSet<>();
     for (int i = 0; i < dataArr.length(); i++) {
-      String correlatedId = enrichRecord(dataArr.getJSONObject(i), byId, pendingByAccount, withTransactions,
+      String correlatedId = enrichRecord(dataArr.getJSONObject(i), byId, withTransactions,
           deleteBlockersByAccount);
       if (correlatedId != null) {
         visibleIds.add(correlatedId);
@@ -426,7 +429,7 @@ public class FinancialAccountHandler implements NeoHandler {
 
     JSONObject envelope = context.getPreviousResult().getBody().optJSONObject("response");
     if (envelope != null) {
-      envelope.put(FIELD_SUMMARY, loaders.buildSummary(visible, pendingByAccount));
+      envelope.put(FIELD_SUMMARY, loaders.buildSummary(visible));
     }
   }
 
@@ -442,7 +445,7 @@ public class FinancialAccountHandler implements NeoHandler {
    *         towards {@code summary}, or {@code null} when it did not.
    */
   private String enrichRecord(JSONObject rec, Map<String, FinancialAccountsPageHandler.AccountRow> byId,
-      Map<String, Integer> pendingByAccount, Set<String> withTransactions,
+      Set<String> withTransactions,
       Map<String, List<String>> deleteBlockersByAccount) throws JSONException {
     String id = StringUtils.trimToNull(rec.optString("id", null));
     // A row with no id cannot be correlated with the loaders; keep the historical
@@ -451,7 +454,6 @@ public class FinancialAccountHandler implements NeoHandler {
     if (id == null) {
       return null;
     }
-    rec.put(FIELD_PENDING_COUNT, pendingByAccount.getOrDefault(id, 0));
     // isNull() first: optString() on a JSON null yields the literal "null" string,
     // which the list would render as text under the account type.
     rec.put(FIELD_IBAN_ALIAS, rec.isNull(FIELD_IBAN) ? "" : rec.optString(FIELD_IBAN, ""));
