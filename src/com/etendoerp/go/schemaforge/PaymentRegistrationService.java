@@ -302,8 +302,17 @@ public final class PaymentRegistrationService {
       item.put("currency", acc.getCurrency().getISOCode());
       item.put("currencyId", acc.getCurrency().getId());
     }
-    item.put("bankConnected", BankIntegrationConstants.FA_CONNECTION_STATUS_CONNECTED
-        .equals(acc.getPSD2ConnectionStatus()));
+    boolean bankConnected = BankIntegrationConstants.FA_CONNECTION_STATUS_CONNECTED
+        .equals(acc.getPSD2ConnectionStatus());
+    item.put("bankConnected", bankConnected);
+    // ETP-4891: the third PSD2 state the modal needs — the connection was established and then
+    // switched off, but the Salt Edge link survives, so it can be revived from Editar Cuenta.
+    // A transfer payment on such an account is blocked (there is no live channel to execute it)
+    // whereas an account that was NEVER connected keeps the ordinary manual flow, so "not
+    // connected" alone is not enough to tell the two apart. Same predicate as
+    // FinancialAccountsPageHandler's bankReconnectable column — keep them in lockstep.
+    item.put("bankReconnectable", !bankConnected
+        && StringUtils.isNotBlank(acc.getPSD2SaltEdgeAccountID()));
     // ETP-4797: caps the write-off the payment modal will offer. put(String, null) removes the key,
     // so an unconfigured limit simply does not travel — which the UI reads as "no limit".
     item.put("writeoffLimit", acc.getWriteofflimit());
@@ -469,16 +478,21 @@ public final class PaymentRegistrationService {
         crit.setFilterOnReadableOrganization(false);
         crit.add(Restrictions.eq(allowProperty(isReceipt), Boolean.TRUE));
 
-        Map<String, String> distinct = new LinkedHashMap<>();
+        Map<String, FIN_PaymentMethod> distinct = new LinkedHashMap<>();
         for (FinAccPaymentMethod fapm : crit.list()) {
           collectMethodInTree(distinct, fapm, naturalTree);
         }
 
         JSONArray arr = new JSONArray();
-        for (Map.Entry<String, String> e : distinct.entrySet()) {
+        for (Map.Entry<String, FIN_PaymentMethod> e : distinct.entrySet()) {
           JSONObject item = new JSONObject();
           item.put("id", e.getKey());
-          item.put(KEY_LABEL, e.getValue());
+          item.put(KEY_LABEL, e.getValue().getName());
+          // ETP-4891: the SPA used to guess "is this a transfer?" from the label with a regex.
+          // That gate now BLOCKS a payment (a transfer on an account whose PSD2 connection is
+          // inactive cannot be paid), so a method merely NAMED like a transfer must no longer
+          // trip it. Same predicate the runtime uses for the Automatic Withdrawn invariant.
+          item.put("isBankTransfer", FinancialAccountSupport.isBankTransferMethod(e.getValue()));
           arr.put(item);
         }
         return itemsResponse(arr);
@@ -493,8 +507,8 @@ public final class PaymentRegistrationService {
   }
 
   /** Adds the method behind {@code fapm} to {@code distinct} when its account is in the org tree. */
-  private static void collectMethodInTree(Map<String, String> distinct, FinAccPaymentMethod fapm,
-      Set<String> naturalTree) {
+  private static void collectMethodInTree(Map<String, FIN_PaymentMethod> distinct,
+      FinAccPaymentMethod fapm, Set<String> naturalTree) {
     FIN_FinancialAccount acc = fapm.getAccount();
     if (acc == null || acc.getOrganization() == null
         || (!naturalTree.isEmpty() && !naturalTree.contains(acc.getOrganization().getId()))) {
@@ -502,7 +516,7 @@ public final class PaymentRegistrationService {
     }
     FIN_PaymentMethod pm = fapm.getPaymentMethod();
     if (pm != null && !distinct.containsKey(pm.getId())) {
-      distinct.put(pm.getId(), pm.getName());
+      distinct.put(pm.getId(), pm);
     }
   }
 
@@ -702,14 +716,17 @@ public final class PaymentRegistrationService {
       OBDal.getInstance().flush();
     }
 
-    failOnError(FIN_AddPayment.processPayment(vars, conn, "P", payment, ""));
+    // mayDeferToPis=true: this is the one call site reached from doRegisterPaymentAdvanced, the
+    // only place that can have arranged for a PIS callback to create the transaction later.
+    failOnError(FIN_AddPayment.processPayment(vars, conn, resolveProcessAction(payment, true),
+        payment, ""));
     OBDal.getInstance().flush();
 
     if (overpaid && "refund".equalsIgnoreCase(overpaymentAction)) {
       FIN_Payment refund = FIN_AddPayment.createRefundPayment(conn, vars, payment,
           leftover.negate(), null);
-      failOnError(FIN_AddPayment.processPayment(vars, conn, "P", refund, "",
-          "(" + payment.getId() + ")"));
+      failOnError(FIN_AddPayment.processPayment(vars, conn, resolveProcessAction(refund, true),
+          refund, "", "(" + payment.getId() + ")"));
       OBDal.getInstance().flush();
     }
   }
@@ -839,10 +856,6 @@ public final class PaymentRegistrationService {
   }
 
   /**
-   * Processes the payment with action "P" and throws on a business error.
-   * Package-visible: also used by {@link PaymentDraftEditService#confirmDraftPayment}.
-   */
-  /**
    * True when a {@code FIN_Finacc_Transaction} already exists for the payment — i.e. the money has
    * actually landed in the account. Distinguishes a bank transfer still in flight (processed, no
    * transaction) from a settled one.
@@ -856,11 +869,54 @@ public final class PaymentRegistrationService {
     return count != null && count > 0;
   }
 
+  /**
+   * Which {@code strAction} to pass {@link FIN_AddPayment#processPayment}: {@code "D"} ("Process
+   * Made Payment(s) and Withdrawal" in Classic) makes Core create the {@code
+   * FIN_Finacc_Transaction} right now; {@code "P"} ("Process Made Payment(s)") does not by itself —
+   * Core only auto-creates it on {@code "P"} when {@code FIN_Utility.isAutomaticDepositWithdrawn}
+   * is true for the payment's account+method+direction.
+   *
+   * <p><b>ETP-4891 changed what that means for a transfer.</b> The bank-transfer method's Automatic
+   * Withdrawn is now permanently OFF (it used to default ON and only get cleared for an
+   * SPA-connected account), so {@code isAutomaticDepositWithdrawn} never fires for a transfer any
+   * more — {@code "D"} is now the only way to get that transaction. It is required for every
+   * transfer payment OUT except one that is actually headed to PIS: a connected account defers to
+   * the Salt Edge callback ({@code PisPaymentCallback} → {@code PISTransactionUtils}), which would
+   * double the movement if this created a transaction too. Receipts and non-transfer methods are
+   * untouched by ETP-4891 (only the transfer method's Automatic Withdrawn changed), so {@code "P"}
+   * is correct for them exactly as before.
+   *
+   * <p>{@code mayDeferToPis} must be {@code true} ONLY for a call site that has actually arranged
+   * for a PIS callback to create the transaction later — today that is exclusively {@link
+   * #applyOverpaymentAndProcess}, reached from {@link #doRegisterPaymentAdvanced}. Every other
+   * caller of {@link #processOrThrow} ({@link PaymentDraftEditService#confirmDraftPayment}, the
+   * simple quick-pay path, {@link ReconciliationPaymentService}) and {@link AddPaymentService}
+   * never initiate a PIS handshake, so they pass {@code false} and always get {@code "D"} for a
+   * transfer — this is a strict improvement over the pre-ETP-4891 behavior for those three, not a
+   * new regression: the old connect-time clear applied to the per-account LINK regardless of which
+   * code path was processing the payment, so a connected account already produced no transaction
+   * there before this change.
+   */
+  static String resolveProcessAction(FIN_Payment payment, boolean mayDeferToPis) {
+    if (payment.isReceipt() || !FinancialAccountSupport.isBankTransferMethod(payment.getPaymentMethod())) {
+      return "P";
+    }
+    boolean connected = mayDeferToPis && BankIntegrationConstants.FA_CONNECTION_STATUS_CONNECTED
+        .equals(payment.getAccount().getPSD2ConnectionStatus());
+    return connected ? "P" : "D";
+  }
+
+  /**
+   * Processes the payment, never deferring to PIS ({@code mayDeferToPis=false} — see {@link
+   * #resolveProcessAction}), and throws on a business error. Package-visible: also used by {@link
+   * PaymentDraftEditService#confirmDraftPayment} and {@link ReconciliationPaymentService}, neither
+   * of which ever initiates a PIS handshake.
+   */
   static void processOrThrow(FIN_Payment payment) throws Exception {
     VariablesSecureApp vars = NeoDefaultsService.buildVariablesSecureApp(OBContext.getOBContext());
     RequestContext.get().setVariableSecureApp(vars);
     failOnError(FIN_AddPayment.processPayment(vars, new DalConnectionProvider(false),
-        "P", payment, ""));
+        resolveProcessAction(payment, false), payment, ""));
     OBDal.getInstance().flush();
   }
 
