@@ -35,6 +35,7 @@ import org.mockito.Mockito;
 import org.openbravo.base.provider.OBProvider;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.common.businesspartner.BusinessPartner;
 import org.openbravo.model.common.enterprise.DocumentType;
 import org.openbravo.model.common.enterprise.Locator;
 import org.openbravo.model.common.enterprise.Organization;
@@ -977,6 +978,72 @@ public class ReturnShipmentUtilsTest {
       verify(line).setStorageBin(sourceBin);
       // No warehouse to resolve an anchor bin for → no M_Locator lookup at all.
       verify(dal, never()).createCriteria(Locator.class);
+    }
+  }
+
+  // ── buildReturnInvoiceHeader — declared-defaults background resolution (ETP-4888) ──
+  //
+  // buildReturnInvoiceHeader builds its Invoice header directly via OBProvider (bypassing the
+  // normal NEO CRUD "new record" HTTP path), so it must call
+  // NeoBackgroundDefaultsService.applyDeclaredDefaultsToBackgroundEntity itself to resolve any
+  // contract.json-declared derivation (e.g. SII/SIF fields) — mirrors the same call already
+  // added to NeoCommercialDocumentFactory#createInvoiceFromOrderHeader/
+  // #createInvoiceFromReceiptHeader and CreateDraftInvoiceHandler#createInvoiceHeaderFromShipment.
+  // NeoBackgroundDefaultsService itself is fully mocked out here (a no-op void call) — its own
+  // resolution logic is covered by NeoBackgroundDefaultsServiceTest; this only pins the CALL and
+  // its ARGUMENTS.
+
+  @Test
+  public void buildReturnInvoiceHeader_sales_appliesDeclaredDefaultsWithSalesInvoiceSpecAndShipmentIdAsParent() {
+    ShipmentInOut doc = mock(ShipmentInOut.class);
+    BusinessPartner bp = mock(BusinessPartner.class);
+    when(doc.getBusinessPartner()).thenReturn(bp);
+    when(doc.getId()).thenReturn("shipment-sales-001");
+
+    DocumentType docType = mock(DocumentType.class);
+    Invoice sourceInvoice = mock(Invoice.class);
+    Invoice createdInvoice = mock(Invoice.class);
+
+    try (MockedStatic<OBProvider> obProviderMock = Mockito.mockStatic(OBProvider.class);
+        MockedStatic<NeoBackgroundDefaultsService> defaultsMock =
+            Mockito.mockStatic(NeoBackgroundDefaultsService.class)) {
+      OBProvider obProvider = mock(OBProvider.class);
+      obProviderMock.when(OBProvider::getInstance).thenReturn(obProvider);
+      when(obProvider.get(Invoice.class)).thenReturn(createdInvoice);
+
+      Invoice result = ReturnShipmentUtils.buildReturnInvoiceHeader(
+          doc, docType, sourceInvoice, true);
+
+      assertSame(createdInvoice, result);
+      defaultsMock.verify(() -> NeoBackgroundDefaultsService.applyDeclaredDefaultsToBackgroundEntity(
+          "sales-invoice", "header", createdInvoice, "shipment-sales-001"));
+    }
+  }
+
+  @Test
+  public void buildReturnInvoiceHeader_purchase_appliesDeclaredDefaultsWithPurchaseInvoiceSpecAndShipmentIdAsParent() {
+    ShipmentInOut doc = mock(ShipmentInOut.class);
+    BusinessPartner bp = mock(BusinessPartner.class);
+    when(doc.getBusinessPartner()).thenReturn(bp);
+    when(doc.getId()).thenReturn("shipment-purchase-002");
+
+    DocumentType docType = mock(DocumentType.class);
+    Invoice sourceInvoice = mock(Invoice.class);
+    Invoice createdInvoice = mock(Invoice.class);
+
+    try (MockedStatic<OBProvider> obProviderMock = Mockito.mockStatic(OBProvider.class);
+        MockedStatic<NeoBackgroundDefaultsService> defaultsMock =
+            Mockito.mockStatic(NeoBackgroundDefaultsService.class)) {
+      OBProvider obProvider = mock(OBProvider.class);
+      obProviderMock.when(OBProvider::getInstance).thenReturn(obProvider);
+      when(obProvider.get(Invoice.class)).thenReturn(createdInvoice);
+
+      Invoice result = ReturnShipmentUtils.buildReturnInvoiceHeader(
+          doc, docType, sourceInvoice, false);
+
+      assertSame(createdInvoice, result);
+      defaultsMock.verify(() -> NeoBackgroundDefaultsService.applyDeclaredDefaultsToBackgroundEntity(
+          "purchase-invoice", "header", createdInvoice, "shipment-purchase-002"));
     }
   }
 }
