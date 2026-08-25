@@ -84,6 +84,16 @@ public class EmailMessagesTest {
   }
 
   @Test
+  public void statesTheValidityWindowItIsGiven() {
+    // The window belongs to CompanyInvitationService, not to the copy: a literal here is how the
+    // email came to promise 24 hours for a token that lives seven days.
+    assertEquals("Este enlace es personal y seguro. Tiene una validez de 7 días.",
+        EmailMessages.get("invitation.note.expiry", "es_ES", 7L));
+    assertEquals("This link is personal and secure. It is valid for 7 days.",
+        EmailMessages.get("invitation.note.expiry", "en_US", 7L));
+  }
+
+  @Test
   public void keepsBothCatalogsInSync() {
     // A key added to one language and forgotten in the other silently ships the Spanish string to
     // an English recipient. Cheaper to catch here than in an inbox.

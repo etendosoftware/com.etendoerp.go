@@ -17,6 +17,8 @@
 
 package com.etendoerp.go.schemaforge.email.contracts;
 
+import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.Optional;
 
 import org.apache.commons.lang3.StringUtils;
@@ -125,7 +127,7 @@ public final class CompanyInvitationEmailContract implements EmailContract {
       if (language != null) {
         data.put("language", language);
       }
-      populateContent(data, language, companyName, link, resolveRecipientName(inv));
+      populateContent(data, language, companyName, link, resolveRecipientName(inv), inv);
       return EmailContractResolution.ready(new EmailProviderRequest(recipient.getRecipient(),
           PROVIDER_TEMPLATE, data, null));
     } catch (JSONException e) {
@@ -165,7 +167,7 @@ public final class CompanyInvitationEmailContract implements EmailContract {
    * message comes from the module's own properties catalog.</p>
    */
   private static void populateContent(JSONObject data, String language, String companyName,
-      String link, String recipientName) throws JSONException {
+      String link, String recipientName, Invitation invitation) throws JSONException {
     EmailContent.Builder content = EmailContent.builder();
     if (StringUtils.isNotBlank(recipientName)) {
       content.greetingHtml(
@@ -174,12 +176,30 @@ public final class CompanyInvitationEmailContract implements EmailContract {
     content.paragraphHtml(EmailMessages.get("invitation.body", language, strong(companyName)))
         .cta(EmailMessages.get("invitation.cta", language), link)
         .linkFallbackText(EmailMessages.get("link.fallback", language))
-        .note(EmailMessages.get("invitation.note.expiry", language))
+        .note(EmailMessages.get("invitation.note.expiry", language, validityDays(invitation)))
         .note(EmailMessages.get("invitation.note.ignore", language))
         .signature(EmailMessages.get("signature", language));
 
     data.put(FIELD_SUBJECT, EmailMessages.get("invitation.subject", language, companyName));
     data.put(FIELD_BODY, EmailLayout.render(content.build()));
+  }
+
+  /**
+   * Days the invitation link stays valid, read from the record rather than restated as a literal.
+   *
+   * <p>The window is owned by {@code CompanyInvitationService}. Writing it into the copy by hand is
+   * how the email ends up promising 24 hours while the token actually lives a week — which is
+   * exactly what the design mockup said before this was wired to the record.</p>
+   *
+   * @param invitation the invitation record
+   * @return whole days until expiry, at least one
+   */
+  private static long validityDays(Invitation invitation) {
+    if (invitation.getExpiresAt() == null) {
+      return 1;
+    }
+    long days = ChronoUnit.DAYS.between(Instant.now(), invitation.getExpiresAt().toInstant());
+    return Math.max(1, days);
   }
 
   /**
