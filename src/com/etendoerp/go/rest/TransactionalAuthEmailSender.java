@@ -41,6 +41,7 @@ class TransactionalAuthEmailSender {
 
   private static final String CONTRACT_ENVIRONMENT_READY = "environment-ready";
   private static final String CONTRACT_NEW_ACCOUNT = "new-account";
+  private static final String CONTRACT_ORGANIZATION_JOINED = "organization-joined";
   private static final String CONTRACT_PASSWORD_CHANGED = "password-changed";
   private static final String CONTRACT_RESET_PASSWORD = "reset-password";
   private static final String CONTRACT_COMPANY_INVITATION = "company-invitation";
@@ -65,6 +66,53 @@ class TransactionalAuthEmailSender {
     }
     return sendAccountLink(CONTRACT_NEW_ACCOUNT, account,
         EtendoGoAuthLinkBuilder.onboardingLink(), null, language);
+  }
+
+  /**
+   * Welcome email for a user who created the account by accepting an invitation.
+   *
+   * <p>The call to action points at the dashboard rather than at onboarding: an operator joining
+   * someone else's environment never runs onboarding, so the standard welcome link would drop them
+   * into a flow that is not theirs.</p>
+   *
+   * @param account the account just created
+   * @param language the recipient language
+   * @return whether the email was accepted for delivery
+   */
+  boolean sendNewAccountForInvitee(Account account, String language) {
+    if (account == null) {
+      return false;
+    }
+    return sendAccountLink(CONTRACT_NEW_ACCOUNT, account,
+        EtendoGoAuthLinkBuilder.dashboardLink(), null, language);
+  }
+
+  /**
+   * Tells a user they now belong to an organization, sent once an invitation is accepted.
+   *
+   * @param account the accepting account
+   * @param companyName the organization the user joined
+   * @param invitationId the invitation record, used as the idempotency record id
+   * @param language the recipient language
+   * @return whether the email was accepted for delivery
+   */
+  boolean sendOrganizationJoined(Account account, String companyName, String invitationId,
+      String language) {
+    if (account == null || StringUtils.isBlank(companyName)) {
+      return false;
+    }
+    try {
+      JSONObject body = baseCommand(account);
+      body.put("companyName", companyName);
+      if (StringUtils.isNotBlank(invitationId)) {
+        body.put(EmailContractCommandSupport.FIELD_RECORD_ID, invitationId);
+      }
+      addLanguageField(body, language);
+      return sendBestEffort(CONTRACT_ORGANIZATION_JOINED, body);
+    } catch (JSONException e) {
+      log.warn("Could not build organization-joined email command", e);
+      return false;
+    }
   }
 
   boolean sendEnvironmentReady(Account account, String clientId) {

@@ -15,8 +15,18 @@
  * *************************************************************************
  */
 
+
+
 package com.etendoerp.go.schemaforge.email.contracts;
 
+import java.util.Optional;
+
+import org.apache.commons.lang3.StringUtils;
+import org.codehaus.jettison.json.JSONException;
+import org.codehaus.jettison.json.JSONObject;
+import org.openbravo.base.exception.OBException;
+
+import com.etendoerp.go.common.PublicUrlResolver;
 import com.etendoerp.go.schemaforge.email.EmailAuthorizationResult;
 import com.etendoerp.go.schemaforge.email.EmailContactRecord;
 import com.etendoerp.go.schemaforge.email.EmailContract;
@@ -33,28 +43,28 @@ import com.etendoerp.go.schemaforge.email.render.AccountEmailContent;
 import com.etendoerp.go.schemaforge.email.render.EmailEscape;
 import com.etendoerp.go.schemaforge.email.render.EmailLayout;
 
-import java.time.OffsetDateTime;
-import java.time.ZoneOffset;
-import java.time.format.DateTimeFormatter;
-import java.util.Optional;
+/**
+ * Tells an invited user they are now part of an organization (ETP-5003).
+ *
+ * <p>Sent once the invitation is accepted, which is a different moment from the welcome email: the
+ * welcome confirms an account exists, this one confirms the account belongs somewhere. An operator
+ * joining an admin's environment receives both, in that order, and neither points at onboarding —
+ * an operator never runs it.</p>
+ */
+final class OrganizationJoinedEmailContract implements EmailContract {
 
-import org.apache.commons.lang3.StringUtils;
-import org.codehaus.jettison.json.JSONException;
-import org.codehaus.jettison.json.JSONObject;
-import org.openbravo.base.exception.OBException;
-
-final class LoginAlertEmailContract implements EmailContract {
-
-  static final String NAME = "login-alert";
+  static final String NAME = "organization-joined";
+  private static final String ACCOUNT_RECORD_NOT_FOUND = "Email account record was not found";
   /** The provider's bring-your-own-content template: the layout is rendered here, not there. */
   private static final String CONTENT_TEMPLATE = "custom";
   private static final String FIELD_SUBJECT = "subject";
   private static final String FIELD_BODY = "body";
-  private static final String USER_RECORD_NOT_FOUND = "Email user record was not found";
+  private static final String FIELD_COMPANY_NAME = "companyName";
+  private static final String DASHBOARD_LINK_PATH = "dashboard";
 
   private final EmailContractDataResolver dataResolver;
 
-  LoginAlertEmailContract(EmailContractDataResolver dataResolver) {
+  OrganizationJoinedEmailContract(EmailContractDataResolver dataResolver) {
     this.dataResolver = dataResolver;
   }
 
@@ -76,20 +86,20 @@ final class LoginAlertEmailContract implements EmailContract {
       return messageRejection;
     }
     EmailAuthorizationResult validation = EmailContractCommandSupport.validateCommand(command,
-        EmailContractCommandSupport.FIELD_USER_ID);
+        EmailContractCommandSupport.FIELD_ACCOUNT_ID);
     if (!validation.isAllowed()) {
       return validation;
     }
-    return resolveUser(command).isPresent()
+    return resolveAccount(command).isPresent()
         ? EmailAuthorizationResult.allowed()
-        : EmailAuthorizationResult.rejected(404, USER_RECORD_NOT_FOUND);
+        : EmailAuthorizationResult.rejected(404, ACCOUNT_RECORD_NOT_FOUND);
   }
 
   @Override
   public EmailRecipientResolution resolveRecipient(EmailContractCommand command) {
-    Optional<EmailContactRecord> contact = resolveUser(command);
+    Optional<EmailContactRecord> contact = resolveAccount(command);
     if (!contact.isPresent()) {
-      return EmailRecipientResolution.rejected(404, USER_RECORD_NOT_FOUND);
+      return EmailRecipientResolution.rejected(404, ACCOUNT_RECORD_NOT_FOUND);
     }
     if (!EmailContractCommandSupport.isValidEmail(contact.get().getEmail())) {
       return EmailContractCommandSupport.invalidRecipient();
@@ -100,59 +110,77 @@ final class LoginAlertEmailContract implements EmailContract {
   @Override
   public EmailContractResolution resolve(EmailContractCommand command,
       EmailRecipientResolution recipient) {
-    Optional<EmailContactRecord> contact = resolveUser(command);
+    Optional<EmailContactRecord> contact = resolveAccount(command);
     if (!contact.isPresent()) {
       return EmailContractResolution.rejected(404,
+          TransactionalEmailService.STATUS_VALIDATION_FAILED, ACCOUNT_RECORD_NOT_FOUND);
+    }
+    String companyName = StringUtils.trimToNull(
+        EmailContractCommandSupport.text(command, FIELD_COMPANY_NAME));
+    if (companyName == null) {
+      return EmailContractResolution.rejected(400,
           TransactionalEmailService.STATUS_VALIDATION_FAILED,
-          USER_RECORD_NOT_FOUND);
+          "Email contract requires the organization name");
     }
     try {
       String language = EmailContractCommandSupport.text(command,
           EmailContractCommandSupport.FIELD_LANGUAGE);
-      String ip = StringUtils.defaultIfBlank(EmailContractCommandSupport.text(command,
-          EmailContractCommandSupport.FIELD_IP), "unknown");
-      String date = StringUtils.defaultIfBlank(EmailContractCommandSupport.text(command,
-          EmailContractCommandSupport.FIELD_DATE), now());
+      String link = resolveDashboardLink();
 
       JSONObject data = new JSONObject();
       data.put("name", StringUtils.defaultIfBlank(contact.get().getName(), "User"));
-      data.put("ip", ip);
-      data.put("date", date);
-      data.put(FIELD_SUBJECT, AccountEmailContent.subject(NAME, language));
-      data.put(FIELD_BODY, EmailLayout.render(AccountEmailContent.buildWithNotes(NAME, language,
-          contact.get().getName(), null, new String[] { "note.warning" }, null,
-          EmailEscape.escapeHtml(ip), EmailEscape.escapeHtml(date))));
+      data.put(FIELD_COMPANY_NAME, companyName);
+      if (link != null) {
+        data.put("link", link);
+      }
+      if (language != null) {
+        data.put("language", language);
+      }
+      data.put(FIELD_SUBJECT, AccountEmailContent.subject(NAME, language, companyName));
+      data.put(FIELD_BODY, EmailLayout.render(AccountEmailContent.build(NAME, language,
+          contact.get().getName(), link, emphasised(companyName))));
       return EmailContractResolution.ready(new EmailProviderRequest(recipient.getRecipient(),
           CONTENT_TEMPLATE, data, null));
     } catch (JSONException e) {
-      throw new OBException("Could not build login alert email payload", e);
+      throw new OBException("Could not build organization joined email payload", e);
     }
   }
 
   @Override
   public EmailDeliveryPolicy deliveryPolicy(EmailContractCommand command,
       EmailRecipientResolution recipient, EmailProviderRequest providerRequest) {
-    String eventId = EmailContractCommandSupport.text(command,
-        EmailContractCommandSupport.FIELD_LOGIN_EVENT_ID);
-    String userId = EmailContractCommandSupport.text(command,
-        EmailContractCommandSupport.FIELD_USER_ID);
+    String accountId = EmailContractCommandSupport.text(command,
+        EmailContractCommandSupport.FIELD_ACCOUNT_ID);
+    String recordId = EmailContractCommandSupport.firstNonBlank(
+        EmailContractCommandSupport.text(command, EmailContractCommandSupport.FIELD_RECORD_ID),
+        accountId);
     String tenantId = EmailContractCommandSupport.text(command,
         EmailContractCommandSupport.FIELD_TENANT_ID);
-    String idempotencyKey = eventId == null ? null
-        : EmailContractCommandSupport.idempotencyKey(NAME, tenantId, userId + ":" + eventId);
-    return EmailContractCommandSupport.deliveryPolicy(idempotencyKey,
-        EmailThrottleRule.perUser(10, 3600),
-        EmailThrottleRule.perRecipient(10, 3600),
-        EmailThrottleRule.perDomain(100, 3600),
-        EmailThrottleRule.global(1000, 60));
+    // Keyed on the invitation record, so accepting once sends once even if the accept endpoint is
+    // retried by a flaky client.
+    return EmailContractCommandSupport.deliveryPolicy(
+        EmailContractCommandSupport.idempotencyKey(NAME, tenantId, recordId),
+        EmailThrottleRule.perTenant(30, 900),
+        EmailThrottleRule.perRecipient(2, 900),
+        EmailThrottleRule.perDomain(60, 900),
+        EmailThrottleRule.global(500, 60));
   }
 
-  private Optional<EmailContactRecord> resolveUser(EmailContractCommand command) {
-    return dataResolver.findUserContact(EmailContractCommandSupport.text(command,
-        EmailContractCommandSupport.FIELD_USER_ID));
+  private Optional<EmailContactRecord> resolveAccount(EmailContractCommand command) {
+    return dataResolver.findAccountContact(EmailContractCommandSupport.text(command,
+        EmailContractCommandSupport.FIELD_ACCOUNT_ID));
   }
 
-  private static String now() {
-    return OffsetDateTime.now(ZoneOffset.UTC).format(DateTimeFormatter.ISO_OFFSET_DATE_TIME);
+  /**
+   * Dashboard link for the call to action, or {@code null} when the public app URL is not
+   * configured — the email is still worth sending without a button.
+   */
+  private static String resolveDashboardLink() {
+    String baseUrl = PublicUrlResolver.resolveConfiguredAppBaseUrl();
+    return baseUrl == null ? null : PublicUrlResolver.appendPath(baseUrl, DASHBOARD_LINK_PATH);
+  }
+
+  private static String emphasised(String value) {
+    return "<strong>" + EmailEscape.escapeHtml(value) + "</strong>";
   }
 }

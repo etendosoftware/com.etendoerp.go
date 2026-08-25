@@ -25,7 +25,7 @@ import org.apache.commons.lang3.StringUtils;
  * Builds the body of an account email from a message-key prefix (ETP-5003).
  *
  * <p>The account emails — welcome, environment ready, password reset, password changed, sign-in
- * alert — are the same shape: a greeting, one paragraph, an optional call to action and up to two
+ * alert, organization joined — are the same shape: a greeting, one paragraph, an optional call to action and up to two
  * fine-print lines. Rather than five near-identical builders, each contract names a key prefix and
  * this class assembles the blocks, taking whichever optional keys the catalog defines for it.</p>
  */
@@ -60,7 +60,9 @@ public final class AccountEmailContent {
    * @param ctaUrl target of the call to action, or {@code null}
    * @param notes note keys to append, relative to the prefix, such as {@code note.expiry}
    * @param noteParams values for the first note's placeholders
-   * @param bodyParams values for the body's placeholders
+   * @param bodyParams values for the body's placeholders. <b>Callers must escape these</b> — the
+   *     body is emitted as markup so that copy can emphasise a name, which means an unescaped
+   *     value would be interpolated as HTML. Use {@link EmailEscape#escapeHtml(String)}.
    * @return the assembled content
    */
   public static EmailContent buildWithNotes(String keyPrefix, String language, String recipientName,
@@ -70,7 +72,7 @@ public final class AccountEmailContent {
       content.greetingHtml(EmailMessages.get(keyPrefix + ".greeting", language,
           "<strong>" + EmailEscape.escapeHtml(recipientName) + "</strong>"));
     }
-    content.paragraph(EmailMessages.get(keyPrefix + ".body", language, bodyParams));
+    content.paragraphHtml(EmailMessages.get(keyPrefix + ".body", language, bodyParams));
     if (StringUtils.isNotBlank(ctaUrl)) {
       content.cta(EmailMessages.get(keyPrefix + ".cta", language), ctaUrl)
           .linkFallbackText(EmailMessages.get("link.fallback", language));

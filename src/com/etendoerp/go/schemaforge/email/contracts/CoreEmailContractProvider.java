@@ -68,6 +68,7 @@ public final class CoreEmailContractProvider implements EmailContractProvider {
             DASHBOARD_LINK_PATH),
         new AccountNoticeEmailContract("password-changed", contractResolver, "note.warning"),
         new LoginAlertEmailContract(contractResolver),
+        new OrganizationJoinedEmailContract(contractResolver),
         new CompanyInvitationEmailContract());
   }
 }
