@@ -27,6 +27,7 @@ import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.base.exception.OBException;
+import org.openbravo.dal.core.OBContext;
 import org.openbravo.model.ad.access.Role;
 
 import com.etendoerp.go.roles.UserRoleCompositionService;
@@ -96,7 +97,6 @@ public class SFAssignUserRoles extends BaseWebhookService {
   private static final String RESPONSE_VAR_RESULT = "result";
 
   private static final String FIELD_SUCCESS = "success";
-  private static final String FIELD_MESSAGE = "message";
   private static final String FIELD_USER_ID = "userId";
   private static final String FIELD_PERSONAL_ROLE_ID = "personalRoleId";
   private static final String FIELD_TEMPLATE_ROLE_IDS = "templateRoleIds";
@@ -110,7 +110,7 @@ public class SFAssignUserRoles extends BaseWebhookService {
     // against the role actually resolved for this request.
     Role currentRole = NeoAccessHelper.resolveCurrentRole();
     if (currentRole == null || !NeoAccessHelper.isAdminOrClientAdmin(currentRole)) {
-      responseVars.put(RESPONSE_VAR_RESULT, denied().toString());
+      responseVars.put(RESPONSE_VAR_RESULT, WebhookFailureResponses.denied().toString());
       return;
     }
 
@@ -118,7 +118,8 @@ public class SFAssignUserRoles extends BaseWebhookService {
     List<String> templateRoleIds = parseTemplateRoleIds(parameter.get(PARAM_TEMPLATE_ROLE_IDS));
     if (userId == null) {
       responseVars.put(RESPONSE_VAR_RESULT,
-          failure("Missing required parameter: " + PARAM_USER_ID).toString());
+          WebhookFailureResponses.failure("Missing required parameter: " + PARAM_USER_ID)
+              .toString());
       return;
     }
 
@@ -131,14 +132,23 @@ public class SFAssignUserRoles extends BaseWebhookService {
     // System Administrator, so without this a client-admin for Tenant A could target any user
     // in Tenant B (REVIEW cycle 1 finding, ETP-4852). See
     // UserRoleCompositionService#enforceCallerClientBoundary.
+    //
+    // Same reasoning for the caller's own AD_User_ID (ETP-4830): resolved from the SAME
+    // OBContext currentRole came from, still BEFORE admin mode, so
+    // UserRoleCompositionService#enforceOwnerProtection can tell "the owner reassigning their
+    // own roles" apart from "anyone else targeting the owner".
+    String callerUserId = currentRole != null && OBContext.getOBContext() != null
+        && OBContext.getOBContext().getUser() != null
+        ? OBContext.getOBContext().getUser().getId() : null;
     try {
       UserRoleCompositionService.AssignmentResult result = new UserRoleCompositionService()
-          .assignTemplateRoles(userId, templateRoleIds, currentRole);
+          .assignTemplateRoles(userId, templateRoleIds, currentRole, callerUserId);
       responseVars.put(RESPONSE_VAR_RESULT, success(result).toString());
     } catch (OBException e) {
       // Expected domain-validation rejection — see class javadoc for why this is a 200
       // success:false result, not the bridge's 500 error path.
-      responseVars.put(RESPONSE_VAR_RESULT, failure(e.getMessage()).toString());
+      responseVars.put(RESPONSE_VAR_RESULT,
+          WebhookFailureResponses.failure(e.getMessage()).toString());
     } catch (Exception e) {
       log.error("Unexpected error in SFAssignUserRoles for user {}", userId, e);
       responseVars.put("error", e.getMessage());
@@ -157,21 +167,6 @@ public class SFAssignUserRoles extends BaseWebhookService {
       }
     }
     return ids;
-  }
-
-  private JSONObject denied() {
-    return failure("Not authorized");
-  }
-
-  private JSONObject failure(String message) {
-    try {
-      JSONObject result = new JSONObject();
-      result.put(FIELD_SUCCESS, false);
-      result.put(FIELD_MESSAGE, message != null ? message : "Request could not be completed");
-      return result;
-    } catch (JSONException e) {
-      throw new IllegalStateException("Unable to build failure result", e);
-    }
   }
 
   private JSONObject success(UserRoleCompositionService.AssignmentResult result) {

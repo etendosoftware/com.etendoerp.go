@@ -376,6 +376,61 @@ public class FinancialAccountSupportTest {
   }
 
   /**
+   * ETP-4891: the bank-transfer method NEVER auto-withdraws, so the link is forced to {@code false}
+   * even when the master template says {@code true}. That is the whole point of the guard: sampledata
+   * and data-fix R24 correct the template, but a legacy tenant whose template is still {@code 'Y'}
+   * — or a transfer method created by hand — must not be able to propagate it to the link. Every
+   * OTHER reconcile/automatic field is still copied verbatim from the master, so the guard is
+   * narrow, not a blanket override.
+   */
+  @Test
+  public void testAssignDefaultPaymentMethodsForcesAutomaticWithdrawnOffForBankTransfer() {
+    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    Client client = mock(Client.class);
+    Organization org = mock(Organization.class);
+    when(account.getType()).thenReturn("C");
+    when(account.getClient()).thenReturn(client);
+    when(account.getOrganization()).thenReturn(org);
+    FIN_PaymentMethod transfer = mock(FIN_PaymentMethod.class);
+    FinAccPaymentMethod link = mock(FinAccPaymentMethod.class);
+    // Identified as the transfer method by the flag, and configured to auto-withdraw.
+    when(transfer.isPSD2IsBankTransfer()).thenReturn(Boolean.TRUE);
+    when(transfer.isAutomaticWithdrawn()).thenReturn(true);
+    when(transfer.isAutomaticDeposit()).thenReturn(true);
+    when(transfer.getUponDepositUse()).thenReturn("DEP");
+    when(transfer.getUponWithdrawalUse()).thenReturn("WIT");
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+        MockedStatic<OBProvider> obProvider = mockStatic(OBProvider.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+
+      @SuppressWarnings("unchecked")
+      OBCriteria<FIN_PaymentMethod> methodCriteria = mock(OBCriteria.class);
+      when(dal.createCriteria(FIN_PaymentMethod.class)).thenReturn(methodCriteria);
+      when(methodCriteria.uniqueResult()).thenReturn(transfer);
+
+      @SuppressWarnings("unchecked")
+      OBCriteria<FinAccPaymentMethod> linkCriteria = mock(OBCriteria.class);
+      when(dal.createCriteria(FinAccPaymentMethod.class)).thenReturn(linkCriteria);
+      when(linkCriteria.uniqueResult()).thenReturn(null);
+
+      OBProvider provider = mock(OBProvider.class);
+      obProvider.when(OBProvider::getInstance).thenReturn(provider);
+      when(provider.get(FinAccPaymentMethod.class)).thenReturn(link);
+
+      FinancialAccountSupport.assignDefaultPaymentMethods(account);
+
+      verify(link).setAutomaticWithdrawn(false);
+      verify(link, never()).setAutomaticWithdrawn(true);
+      // Payment IN is untouched by the PIS flow, so Automatic Deposit is still a faithful copy.
+      verify(link).setAutomaticDeposit(true);
+      verify(link).setUponWithdrawalUse("WIT");
+      verify(link).setPSD2IsBankTransfer(true);
+    }
+  }
+
+  /**
    * Regression for the Cheque -> Recibo replacement: {@code createLink} must copy the
    * reconciliation ("Cleared Payment Account") columns {@code INUponClearingUse} /
    * {@code OUTUponClearingUse} from the master {@link FIN_PaymentMethod} onto the new link.
