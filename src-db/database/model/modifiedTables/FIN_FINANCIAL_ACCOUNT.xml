@@ -9,5 +9,9 @@
         <default><![CDATA[0]]></default>
         <onCreateDefault/>
       </column>
+      <column name="EM_ETGO_PENDING_COUNT" primaryKey="false" required="false" type="DECIMAL" size="10,0" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
     </table>
   </database>
