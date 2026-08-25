@@ -607,6 +607,33 @@ class SupportJiraWebhookHandlerTest {
     }
 
     @Test
+    @DisplayName("Assignee reset with NO emailAddress (private Atlassian profile) still triggers "
+        + "human takeover reset, via the assignee's displayName")
+    void assigneeIsBotWithPrivateEmailFallsBackToDisplayName() throws Exception {
+      // Regression test: "Information Etendo" has email visibility set to private in its
+      // Atlassian profile, so Jira Cloud omits emailAddress from the assignee object entirely —
+      // isBotEmail(assigneeEmail) alone would silently never match, leaving human_takeover
+      // stuck true forever even after a human reassigns the ticket back to the bot.
+      StringWriter capture = new StringWriter();
+      HttpServletResponse response = mockResponse(capture);
+      JSONObject assignee = new JSONObject().put("displayName", "Information Etendo");
+      JSONObject fields = new JSONObject().put("assignee", assignee);
+      JSONObject issue = new JSONObject().put("fields", fields);
+      JSONObject body = new JSONObject();
+
+      try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+           MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+        OBDal obDal = mockObDal(dalMock);
+        mockCriteria(obDal, SupportConversation.class, List.of(mockConversation("conv-1")));
+
+        SupportJiraWebhookHandler.handleJiraNonCommentEvent(response, issue, body, "SUP-1");
+      }
+
+      assertTrue(capture.toString().contains("\"status\":\"ok\""));
+      assertTrue(capture.toString().contains("SUP-1"));
+    }
+
+    @Test
     @DisplayName("Status transition to Done triggers ticket closed handling")
     void statusDone() throws Exception {
       StringWriter capture = new StringWriter();
@@ -783,6 +810,30 @@ class SupportJiraWebhookHandlerTest {
         assertNull(result);
       } finally {
         System.clearProperty(JiraConfig.PROP_USERNAME);
+      }
+      assertTrue(capture.toString().contains("\"status\":\"ok\""));
+    }
+
+    @Test
+    @DisplayName("assignee_reset action with no authorEmail still triggers reset via authorName "
+        + "(same private-email fallback as the standard webhook path)")
+    void assigneeResetFromBotWithNoEmailFallsBackToAuthorName() throws Exception {
+      StringWriter capture = new StringWriter();
+      HttpServletResponse response = mockResponse(capture);
+      HttpServletRequest request = mock(HttpServletRequest.class);
+      when(request.getParameter("issueKey")).thenReturn("SUP-11");
+      when(request.getParameter("action")).thenReturn("assignee_reset");
+      when(request.getParameter("authorName")).thenReturn("Information Etendo");
+
+      try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+           MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+        OBDal obDal = mockObDal(dalMock);
+        mockCriteria(obDal, SupportConversation.class, List.of(mockConversation("conv-1")));
+
+        SupportJiraWebhookHandler.JiraWebhookComment result =
+            SupportJiraWebhookHandler.parseAutomationJiraWebhook(request, response);
+
+        assertNull(result);
       }
       assertTrue(capture.toString().contains("\"status\":\"ok\""));
     }
