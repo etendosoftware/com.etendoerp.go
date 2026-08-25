@@ -21,8 +21,8 @@ import java.util.List;
 /**
  * Pure, Hibernate-free reconciliation decision shared by {@code
  * com.etendoerp.go.roles.WindowAccessOverlapCorruptionGuard}, {@code ProcessAccessOverlap
- * CorruptionGuard}, and {@code ObuiappProcessAccessDuplicateGuard} (ETP-4830 item 7). See {@code
- * WindowAccessOverlapCorruptionGuard}'s own class javadoc, "A sixth trigger" and "Why
+ * CorruptionGuard}, and {@code ObuiappProcessAccessOverlapCorruptionGuard} (ETP-4830 item 7). See
+ * {@code WindowAccessOverlapCorruptionGuard}'s own class javadoc, "A sixth trigger" and "Why
  * InheritedFrom must track core's own SeqNo precedence" sections, for the full live-reproduced
  * root-cause write-up this method's rule comes from — extracted here verbatim, not re-derived,
  * so a future change to the rule only has to happen once.

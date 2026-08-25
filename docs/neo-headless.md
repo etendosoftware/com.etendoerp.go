@@ -2256,6 +2256,21 @@ its 2 coverage-gap follow-ups, real DB, `WeldBaseTest`), `UserRoleCompositionSer
 own test), and `UserRoleCompositionServiceRealAccessControlIntegrationTest` (real seed-data
 access-control scenarios) — see §9.
 
+**Same protection extended to `AD_Process_Access`/`OBUIAPP_Process_Access` (ETP-4830 item 7).**
+`ProcessAccessOverlapCorruptionGuard` and `ObuiappProcessAccessOverlapCorruptionGuard` are sibling
+`EntityPersistenceEventObserver`s that mirror this same ADD/UPDATE/REMOVE-path trigger set for
+`AD_Process_Access` and `OBUIAPP_Process_Access` respectively — a role's active processes/reports
+are exposed to the identical cross-template ownership-corruption risk that windows are. The
+entity-agnostic pieces (the "which active templates does a role inherit from" query, the
+SeqNo-descending winner/most-permissive-wins reconciliation, the same-flush
+`TEMPLATES_BEING_REMOVED` marker, and a few pure `Role`/`RoleInheritance` helpers) live in the
+shared `com.etendoerp.go.roles.overlap` package (`ActiveTemplateInheritance`,
+`OverlapReconciliationCore`, `TemplateRemovalTracker`) instead of being re-derived per guard.
+`OBUIAPP_Process_Access` carries no unique constraint (unlike `AD_Process_Access`/
+`AD_Window_Access`), so its own residual gap manifests as a silent duplicate row rather than a
+loud `ConstraintViolationException` — see `ObuiappProcessAccessOverlapCorruptionGuard`'s own
+class/method javadoc for the full detail.
+
 **Twelve matrix rows are a documented, deliberate gap — not yet implementable.** Every one of
 them has NO `AD_Window_ID` at all backing it in this environment (either a pure custom/aggregate
 Schema Forge page with zero classic-AD entity, or a report-type spec whose access resolves via a

@@ -90,21 +90,18 @@ public class ObuiappProcessAccessOverlapCorruptionGuardIntegrationTest extends W
       addInheritance(bystanderRole, purchasingTemplate, 30L);
       addInheritance(bystanderRole, inventoryTemplate, 40L);
 
-      // Fixture repair — same precedented fix as ProcessAccessOverlapCorruptionGuardIntegration
-      // Test's own original REMOVE-path-only skeleton stage (see that class's git history, commit
-      // 033d3b0d, "Fixture repair (fix round 2)"): this guard is deliberately REMOVE-path only —
-      // there is no ADD-path guard for OBUIAPP_Process_Access (Tasks 6/7 add it later). Composing
-      // the bystander from 3 overlapping process grantors via plain addInheritance therefore
-      // leaves the propagated row silently WRONG on two counts: (1) mis-sourced — core's own naive
-      // "last-processed-template-wins" ADD behavior, not most-permissive-wins, so the row ends up
-      // sourced from Purchasing (the last template added that grants this process), read-only, not
-      // Finance/full; (2) mis-owned — its client/organization is silently overwritten to the last
-      // template's own system client "0". Repairing the row directly here — exactly like
-      // grantObuiappProcessAccess already builds TEMPLATE-owned rows directly, bypassing core's
-      // inheritance propagation entirely — establishes the SAME valid "already correctly composed"
-      // starting state a real role would have BEFORE the human's real regression was ever hit,
-      // without smuggling the deferred ADD-path fix into either this test or the guard under test.
-      // Only the REMOVE-path trigger below is being exercised.
+      // Fixture setup note (revised final-review pass, 2026-08-25): as of Task 6, this guard's
+      // ADD-path guard (onSave/guardNewInheritance) already covers ownership correction and
+      // most-permissive-wins widening as each template is composed via addInheritance below, and
+      // as of Task 7 the UPDATE path is covered too — see this class's own class javadoc ("full
+      // ADD/UPDATE/REMOVE-path parity with WindowAccessOverlapCorruptionGuard/
+      // ProcessAccessOverlapCorruptionGuard"). The row is nonetheless repaired directly here —
+      // exactly like grantObuiappProcessAccess already builds TEMPLATE-owned rows directly,
+      // bypassing core's inheritance propagation entirely — to deterministically establish the
+      // SAME "already correctly composed" starting state a real role would have BEFORE the
+      // human's real regression was ever hit (see this class's own javadoc), independent of the
+      // ADD-path guard's own behavior, so this test stays isolated to the REMOVE-path trigger it
+      // actually exercises below.
       ProcessAccess beforeRepair = findObuiappProcessAccess(bystanderRole, sharedProcess);
       assertNotNull("Sanity: composing all 4 templates must have propagated the shared process",
           beforeRepair);

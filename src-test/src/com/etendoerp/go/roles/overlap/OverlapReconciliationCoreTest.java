@@ -31,8 +31,8 @@ import org.junit.jupiter.api.Test;
  * Plain, DB-free unit tests for {@link OverlapReconciliationCore#computeWinner(List)} — the
  * SeqNo-descending winner + most-permissive-wins level decision extracted from {@code
  * WindowAccessOverlapCorruptionGuard}'s own sixth-trigger fix (ETP-4906) so {@code
- * ProcessAccessOverlapCorruptionGuard} and {@code ObuiappProcessAccessDuplicateGuard} reuse the
- * exact same, already-proven algorithm instead of re-deriving it (ETP-4830 item 7).
+ * ProcessAccessOverlapCorruptionGuard} and {@code ObuiappProcessAccessOverlapCorruptionGuard}
+ * reuse the exact same, already-proven algorithm instead of re-deriving it (ETP-4830 item 7).
  */
 class OverlapReconciliationCoreTest {
 

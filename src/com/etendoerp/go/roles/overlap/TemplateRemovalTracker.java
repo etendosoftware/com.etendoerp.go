@@ -25,9 +25,10 @@ import java.util.Set;
  * transaction at a time, never concurrently). Extracted from {@code
  * com.etendoerp.go.roles.WindowAccessOverlapCorruptionGuard}'s own private {@code
  * TEMPLATES_BEING_REMOVED} field (ETP-4906, Task B6, 5th round) so {@code
- * ProcessAccessOverlapCorruptionGuard} shares the SAME marker instead of tracking its own,
- * separate one — a template being removed is being removed for every access type at once, not
- * independently per guard.
+ * WindowAccessOverlapCorruptionGuard}, {@code ProcessAccessOverlapCorruptionGuard}, and {@code
+ * ObuiappProcessAccessOverlapCorruptionGuard} share the SAME marker instead of each tracking its
+ * own, separate one — a template being removed is being removed for every access type at once,
+ * not independently per guard.
  *
  * <p>See the original field's own javadoc (git history, {@code WindowAccessOverlapCorruptionGuard}
  * before ETP-4830 item 7) for the exact empirically-confirmed race this closes: a template's own
