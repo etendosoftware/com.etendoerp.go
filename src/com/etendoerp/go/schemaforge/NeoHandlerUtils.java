@@ -218,6 +218,50 @@ final class NeoHandlerUtils {
   }
 
   /**
+   * Injects a product search key ({@code M_Product.Value}, the SKU) into every record of a GET
+   * line response, mutating the response body in place via {@link #fetchProductCodesForLines}.
+   *
+   * <p>Shared implementation behind {@code OrderLineHandler} and {@code InvoiceLineHandler}'s
+   * {@code enrichProductCode} hooks (ETP-4941): both {@code afterHandle()} bodies called an
+   * identical private method — same extract/collect/lookup/loop shape, differing only in the
+   * line table/column/field constants and the log message's noun — which SonarQube flagged as
+   * duplicated-lines-on-new-code (PR #921, 7.44% vs. the 3% gate). Read by the shared PDF
+   * template's "CÓD." column (see {@code documentPdf.js}'s {@code resolveProductCode} on the
+   * frontend), which already prioritizes this field over its dead fallback chain.
+   *
+   * @param context   the current NeoContext; only used to read the GET response body
+   * @param lineTable fixed DB table name literal for the line entity (e.g. {@code
+   *                  "c_orderline"}), passed straight through to {@link
+   *                  #fetchProductCodesForLines}
+   * @param lineIdCol fixed PK column name literal for {@code lineTable} (e.g. {@code
+   *                  "c_orderline_id"})
+   * @param fieldName the JSON field name to write the resolved SKU into (e.g. {@code
+   *                  "productCode"})
+   * @param log       caller's logger, used for the warn-level failure message
+   */
+  static void enrichLinesWithProductCode(NeoContext context, String lineTable, String lineIdCol,
+      String fieldName, Logger log) {
+    try {
+      JSONArray dataArr = extractGetDataArray(context);
+      if (dataArr == null) {
+        return;
+      }
+      List<String> lineIds = collectIds(dataArr);
+      Map<String, String> codes = fetchProductCodesForLines(lineIds, lineTable, lineIdCol, log);
+      for (int i = 0; i < dataArr.length(); i++) {
+        JSONObject line = dataArr.getJSONObject(i);
+        String id = line.optString("id", null);
+        String code = codes.get(id);
+        if (StringUtils.isNotBlank(code)) {
+          line.put(fieldName, code);
+        }
+      }
+    } catch (Exception e) {
+      log.warn("Could not enrich {} for lines in {}: {}", fieldName, lineTable, e.getMessage());
+    }
+  }
+
+  /**
    * Extracts the {@code id} of a just-created record from a POST/create response, read via
    * {@code context.getPreviousResult()}.
    *

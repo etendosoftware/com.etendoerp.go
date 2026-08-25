@@ -294,6 +294,110 @@ public class NeoHandlerUtilsTest {
     }
   }
 
+  // ── enrichLinesWithProductCode (ETP-4941) ─────────────────────────────────
+  // Shared GET-response enrichment loop extracted out of OrderLineHandler and
+  // InvoiceLineHandler's identical private enrichProductCode() methods — the actual source of
+  // the SonarQube new-code duplication flagged on PR #921 (7.44%, gate is 3%). Composes
+  // extractGetDataArray + collectIds + fetchProductCodesForLines, so this only needs to cover
+  // the loop/field-name wiring; the lower-level pieces are covered above/elsewhere.
+
+  @Test
+  public void testEnrichLinesWithProductCodeWritesFieldForEachLine() throws Exception {
+    JSONObject line1 = new JSONObject().put("id", "line-1");
+    JSONObject line2 = new JSONObject().put("id", "line-2");
+    JSONArray data = new JSONArray().put(line1).put(line2);
+    JSONObject body = new JSONObject().put("response", new JSONObject().put("data", data));
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("GET")
+        .previousResult(new NeoResponse(200, body))
+        .build();
+
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      Connection conn = mock(Connection.class);
+      PreparedStatement ps = mock(PreparedStatement.class);
+      ResultSet rs = mock(ResultSet.class);
+      when(dal.getConnection()).thenReturn(conn);
+      when(conn.prepareStatement(Mockito.anyString())).thenReturn(ps);
+      when(ps.executeQuery()).thenReturn(rs);
+      when(rs.next()).thenReturn(true, true, false);
+      when(rs.getString(1)).thenReturn("line-1", "line-2");
+      when(rs.getString(2)).thenReturn("SKU-001", "SKU-002");
+
+      NeoHandlerUtils.enrichLinesWithProductCode(ctx, "c_orderline", "c_orderline_id",
+          "productCode", LOG);
+
+      assertEquals("SKU-001", line1.getString("productCode"));
+      assertEquals("SKU-002", line2.getString("productCode"));
+    }
+  }
+
+  @Test
+  public void testEnrichLinesWithProductCodeUsesGivenFieldName() throws Exception {
+    // Proves the written key isn't hardcoded to "productCode" — both call sites (order lines,
+    // invoice lines) currently pass the same literal, but the shared method must honor whatever
+    // fieldName it's given.
+    JSONObject line = new JSONObject().put("id", "inv-line-1");
+    JSONArray data = new JSONArray().put(line);
+    JSONObject body = new JSONObject().put("response", new JSONObject().put("data", data));
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("GET")
+        .previousResult(new NeoResponse(200, body))
+        .build();
+
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      ProductCodeQueryTestSupport.mockSingleRowProductCodeQuery(dal, "inv-line-1", "SKU-INV-1");
+
+      NeoHandlerUtils.enrichLinesWithProductCode(ctx, "c_invoiceline", "c_invoiceline_id",
+          "sku", LOG);
+
+      assertEquals("SKU-INV-1", line.getString("sku"));
+      assertFalse(line.has("productCode"));
+    }
+  }
+
+  @Test
+  public void testEnrichLinesWithProductCodeSkipsBlankSku() throws Exception {
+    JSONObject line = new JSONObject().put("id", "line-no-sku");
+    JSONArray data = new JSONArray().put(line);
+    JSONObject body = new JSONObject().put("response", new JSONObject().put("data", data));
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("GET")
+        .previousResult(new NeoResponse(200, body))
+        .build();
+
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      ProductCodeQueryTestSupport.mockSingleRowProductCodeQuery(dal, null, "");
+
+      NeoHandlerUtils.enrichLinesWithProductCode(ctx, "c_orderline", "c_orderline_id",
+          "productCode", LOG);
+
+      assertFalse(line.has("productCode"));
+    }
+  }
+
+  @Test
+  public void testEnrichLinesWithProductCodeNoOpWhenDataArrayNull() {
+    // Non-GET request: extractGetDataArray short-circuits to null, so the method must return
+    // without touching OBDal at all.
+    NeoContext ctx = NeoContext.builder().httpMethod("POST").build();
+
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      NeoHandlerUtils.enrichLinesWithProductCode(ctx, "c_orderline", "c_orderline_id",
+          "productCode", LOG);
+
+      dalMock.verifyNoInteractions();
+    }
+  }
+
   // ── extractCreatedIdFromPreviousResult (ETP-4029) ────────────────────────
 
   /**
