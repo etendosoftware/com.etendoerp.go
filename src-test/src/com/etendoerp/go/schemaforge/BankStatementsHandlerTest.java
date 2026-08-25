@@ -81,6 +81,7 @@ public class BankStatementsHandlerTest {
 
   private BankStatementsHandler handler;
   private MockedStatic<BankStatementAggregates> aggMock;
+  private MockedStatic<BankStatementLinePruner> prunerMock;
 
   @Before
   public void setUp() {
@@ -89,6 +90,10 @@ public class BankStatementsHandlerTest {
     // ModelProvider. Stub it globally (no-op) so happy-path tests don't have to
     // wire the aggregate model; dedicated BankStatementAggregatesTest covers it.
     aggMock = mockStatic(BankStatementAggregates.class);
+    // The zero-amount prune reads its lines through OBDal; stub it here so the
+    // import/preview happy paths don't have to wire a criteria each time. The
+    // rule itself is covered by BankStatementLinePrunerTest.
+    prunerMock = mockStatic(BankStatementLinePruner.class);
   }
 
   /**
@@ -102,17 +107,20 @@ public class BankStatementsHandlerTest {
     if (aggMock != null) {
       aggMock.close();
     }
+    if (prunerMock != null) {
+      prunerMock.close();
+    }
     Mockito.framework().clearInlineMocks();
   }
 
   /**
-   * Stubs the zero-amount prune seam so import/preview happy paths don't need a
-   * real line collection on the mocked statement. The prune rule itself is
-   * covered by {@link BankStatementLinePrunerTest}.
+   * Programs the statically-mocked prune for {@code statement}. The prune rule
+   * itself is covered by {@link BankStatementLinePrunerTest}; here we only care
+   * about how the handler reacts to its counts.
    */
   private void stubPrune(FIN_BankStatement statement, int kept, int discarded) {
-    doReturn(new BankStatementLinePruner.PruneResult(kept, discarded))
-        .when(handler).pruneLines(statement);
+    prunerMock.when(() -> BankStatementLinePruner.pruneZeroAmountLines(statement))
+        .thenReturn(new BankStatementLinePruner.PruneResult(kept, discarded));
   }
 
   // ── handle() routing ───────────────────────────────────────────────────

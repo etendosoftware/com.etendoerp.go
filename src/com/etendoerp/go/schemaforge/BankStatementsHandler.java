@@ -19,6 +19,7 @@ package com.etendoerp.go.schemaforge;
 
 import static com.etendoerp.go.schemaforge.BankStatementFormatDetector.detectFormat;
 import static com.etendoerp.go.schemaforge.BankStatementsSupport.buildLineTxns;
+import static com.etendoerp.go.schemaforge.BankStatementsSupport.codedError;
 import static com.etendoerp.go.schemaforge.BankStatementsSupport.mapLineRow;
 import static com.etendoerp.go.schemaforge.BankStatementsSupport.deriveStatementStatus;
 import static com.etendoerp.go.schemaforge.BankStatementsSupport.formatDate;
@@ -47,7 +48,6 @@ import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
-import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.advpaymentmngt.utility.FIN_BankStatementImport;
 import org.openbravo.base.exception.OBException;
@@ -178,30 +178,6 @@ public class BankStatementsHandler implements NeoHandler {
    *                             a long hint listing both formats; preview uses
    *                             the short variant.
    */
-  /**
-   * Builds a 400 response carrying both a human-readable message and a stable
-   * machine-readable {@code code}, so the import wizard can map the failure to
-   * a translated message instead of falling back to the generic
-   * "unsupported format" text.
-   *
-   * @param code    stable error code (e.g. {@code NO_VALID_LINES})
-   * @param message human-readable explanation
-   * @return the error response
-   */
-  private static NeoResponse codedError(String code, String message) {
-    try {
-      JSONObject error = new JSONObject();
-      error.put("message", message);
-      error.put("status", 400);
-      error.put("code", code);
-      JSONObject body = new JSONObject();
-      body.put("error", error);
-      return NeoResponse.error(400, body);
-    } catch (JSONException e) {
-      return NeoResponse.error(400, message);
-    }
-  }
-
   private UploadInput parseUploadInput(JSONObject body, boolean verboseUnknownFormat) {
     String accountId = body.optString(PARAM_ACCOUNT_ID, null);
     String fileName = body.optString(FIELD_FILE_NAME, null);
@@ -431,7 +407,8 @@ public class BankStatementsHandler implements NeoHandler {
 
       // Same rule Classic applies in FIN_BankStatementImport.saveFINBankStatementLines:
       // lines with no amount at all are dropped and the survivors renumbered.
-      BankStatementLinePruner.PruneResult pruned = pruneLines(statement);
+      BankStatementLinePruner.PruneResult pruned =
+          BankStatementLinePruner.pruneZeroAmountLines(statement);
       if (pruned.getKept() == 0) {
         OBDal.getInstance().rollbackAndClose();
         return codedError(CODE_NO_VALID_LINES, MSG_NO_VALID_LINES);
@@ -931,18 +908,6 @@ public class BankStatementsHandler implements NeoHandler {
    * line count. Centralises the CSV/C43 branching so both endpoints stay free
    * of conditional duplication.
    */
-  /**
-   * Drops the parsed lines that carry no amount at all and renumbers the rest,
-   * the same way Classic's {@code FIN_BankStatementImport.saveFINBankStatementLines}
-   * does. Package-private so unit tests can stub it.
-   *
-   * @param statement the statement whose lines were just parsed
-   * @return kept / discarded counts
-   */
-  BankStatementLinePruner.PruneResult pruneLines(FIN_BankStatement statement) {
-    return BankStatementLinePruner.pruneZeroAmountLines(statement);
-  }
-
   private int runParser(StatementFormat format, byte[] fileBytes, FIN_BankStatement statement) throws Exception {
     ByteArrayInputStream stream = new ByteArrayInputStream(fileBytes);
     return format == StatementFormat.GENERIC_CSV
@@ -1004,7 +969,8 @@ public class BankStatementsHandler implements NeoHandler {
 
       // Prune before reading back so the preview shows exactly what the import
       // will persist (same rule as handleImport / Classic).
-      BankStatementLinePruner.PruneResult pruned = pruneLines(transientStmt);
+      BankStatementLinePruner.PruneResult pruned =
+          BankStatementLinePruner.pruneZeroAmountLines(transientStmt);
       if (pruned.getKept() == 0) {
         OBDal.getInstance().rollbackAndClose();
         return codedError(CODE_NO_VALID_LINES, MSG_NO_VALID_LINES);

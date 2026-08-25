@@ -20,6 +20,7 @@ package com.etendoerp.go.schemaforge;
 import static org.junit.Assert.assertEquals;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -64,10 +65,11 @@ public class BankStatementLinePrunerTest {
   }
 
   /**
-   * The lines are handed to {@link #stubDal} instead of to the entity: the pruner
-   * reads them through OBDal, not through the statement's lazy collection.
+   * A bare statement mock. Its lines are NOT set on the entity: the pruner reads
+   * them through OBDal (see {@link #stubDal}), not through the statement's lazy
+   * collection, which is unreliable right after the parser's saves.
    */
-  private static FIN_BankStatement statementWith(List<FIN_BankStatementLine> lines) {
+  private static FIN_BankStatement statement() {
     return mock(FIN_BankStatement.class);
   }
 
@@ -98,7 +100,7 @@ public class BankStatementLinePrunerTest {
     lines.add(zero);
     lines.add(credit);
     lines.add(debit);
-    FIN_BankStatement statement = statementWith(lines);
+    FIN_BankStatement statement = statement();
 
     try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
       OBDal dal = stubDal(obDalMock, lines);
@@ -121,7 +123,7 @@ public class BankStatementLinePrunerTest {
     FIN_BankStatementLine blank = line(10L, null, null);
     lines.add(blank);
     lines.add(line(20L, "10.00", "0"));
-    FIN_BankStatement statement = statementWith(lines);
+    FIN_BankStatement statement = statement();
 
     try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
       OBDal dal = stubDal(obDalMock, lines);
@@ -143,7 +145,7 @@ public class BankStatementLinePrunerTest {
     List<FIN_BankStatementLine> lines = new ArrayList<>();
     FIN_BankStatementLine negative = line(10L, "-25.00", "0");
     lines.add(negative);
-    FIN_BankStatement statement = statementWith(lines);
+    FIN_BankStatement statement = statement();
 
     try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
       OBDal dal = stubDal(obDalMock, lines);
@@ -154,15 +156,18 @@ public class BankStatementLinePrunerTest {
       assertEquals(1, r.getKept());
       assertEquals(0, r.getDiscarded());
       verify(negative).setLineNo(10L);
+      verify(dal, never()).remove(negative);
     }
   }
 
   @Test
   public void reportsZeroKeptWhenEveryLineIsAmountLess() {
     List<FIN_BankStatementLine> lines = new ArrayList<>();
-    lines.add(line(10L, "0", "0"));
-    lines.add(line(20L, "0", "0"));
-    FIN_BankStatement statement = statementWith(lines);
+    FIN_BankStatementLine first = line(10L, "0", "0");
+    FIN_BankStatementLine second = line(20L, "0", "0");
+    lines.add(first);
+    lines.add(second);
+    FIN_BankStatement statement = statement();
 
     try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
       OBDal dal = stubDal(obDalMock, lines);
@@ -172,6 +177,8 @@ public class BankStatementLinePrunerTest {
 
       assertEquals(0, r.getKept());
       assertEquals(2, r.getDiscarded());
+      verify(dal).remove(first);
+      verify(dal).remove(second);
     }
   }
 
@@ -179,7 +186,7 @@ public class BankStatementLinePrunerTest {
   public void reportsZeroKeptForAFileThatParsedNoLines() {
     // A CSV with only its header row: the parser saved nothing.
     List<FIN_BankStatementLine> lines = new ArrayList<>();
-    FIN_BankStatement statement = statementWith(lines);
+    FIN_BankStatement statement = statement();
     try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
       stubDal(obDalMock, lines);
       BankStatementLinePruner.PruneResult r =
@@ -192,7 +199,7 @@ public class BankStatementLinePrunerTest {
   @Test
   public void toleratesANullQueryResult() {
     List<FIN_BankStatementLine> lines = null;
-    FIN_BankStatement statement = statementWith(lines);
+    FIN_BankStatement statement = statement();
     try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
       stubDal(obDalMock, lines);
       BankStatementLinePruner.PruneResult r =
