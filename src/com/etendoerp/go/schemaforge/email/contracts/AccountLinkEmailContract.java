@@ -30,7 +30,12 @@ import com.etendoerp.go.schemaforge.email.EmailProviderRequest;
 import com.etendoerp.go.schemaforge.email.EmailRecipientResolution;
 import com.etendoerp.go.schemaforge.email.EmailThrottleRule;
 import com.etendoerp.go.schemaforge.email.TransactionalEmailService;
+import com.etendoerp.go.schemaforge.email.render.AccountEmailContent;
+import com.etendoerp.go.schemaforge.email.render.EmailLayout;
+import com.etendoerp.go.schemaforge.email.render.ValidityWindow;
 
+import java.time.Instant;
+import java.time.format.DateTimeParseException;
 import java.util.Optional;
 
 import org.apache.commons.lang3.StringUtils;
@@ -41,36 +46,32 @@ import org.openbravo.base.exception.OBException;
 final class AccountLinkEmailContract implements EmailContract {
 
   private static final String ACCOUNT_RECORD_NOT_FOUND = "Email account record was not found";
+  /** The provider's bring-your-own-content template: the layout is rendered here, not there. */
+  private static final String CONTENT_TEMPLATE = "custom";
+  private static final String FIELD_SUBJECT = "subject";
+  private static final String FIELD_BODY = "body";
 
   private final String name;
-  private final String template;
   private final EmailContractDataResolver dataResolver;
   private final int recipientThrottleLimit;
   private final int throttleWindowSeconds;
   private final String configuredLinkPath;
-  private final AccountLinkCustomContent customContent;
+  private final String[] noteKeys;
 
-  AccountLinkEmailContract(String name, String template, EmailContractDataResolver dataResolver,
+  AccountLinkEmailContract(String name, EmailContractDataResolver dataResolver,
       int recipientThrottleLimit, int throttleWindowSeconds) {
-    this(name, template, dataResolver, recipientThrottleLimit, throttleWindowSeconds, null, null);
+    this(name, dataResolver, recipientThrottleLimit, throttleWindowSeconds, null, new String[0]);
   }
 
-  AccountLinkEmailContract(String name, String template, EmailContractDataResolver dataResolver,
-      int recipientThrottleLimit, int throttleWindowSeconds, String configuredLinkPath) {
-    this(name, template, dataResolver, recipientThrottleLimit, throttleWindowSeconds,
-        configuredLinkPath, null);
-  }
-
-  AccountLinkEmailContract(String name, String template, EmailContractDataResolver dataResolver,
+  AccountLinkEmailContract(String name, EmailContractDataResolver dataResolver,
       int recipientThrottleLimit, int throttleWindowSeconds, String configuredLinkPath,
-      AccountLinkCustomContent customContent) {
+      String... noteKeys) {
     this.name = name;
-    this.template = template;
     this.dataResolver = dataResolver;
     this.recipientThrottleLimit = recipientThrottleLimit;
     this.throttleWindowSeconds = throttleWindowSeconds;
     this.configuredLinkPath = configuredLinkPath;
-    this.customContent = customContent;
+    this.noteKeys = noteKeys == null ? new String[0] : noteKeys.clone();
   }
 
   @Override
@@ -137,19 +138,24 @@ final class AccountLinkEmailContract implements EmailContract {
           ACCOUNT_RECORD_NOT_FOUND);
     }
     try {
-      JSONObject data = new JSONObject();
-      data.put("name", StringUtils.defaultIfBlank(contact.get().getName(), "User"));
-      data.put("link", link);
       String language = EmailContractCommandSupport.text(command,
           EmailContractCommandSupport.FIELD_LANGUAGE);
+      String recipientName = contact.get().getName();
+      Object[] noteParams = { ValidityWindow.minutesUntil(Instant.now(), resolveExpiry(command)) };
+
+      JSONObject data = new JSONObject();
+      // Kept alongside the rendered content: the gateway logs these for traceability, and they
+      // cost nothing now that the copy no longer depends on them.
+      data.put("name", StringUtils.defaultIfBlank(recipientName, "User"));
+      data.put("link", link);
       if (language != null) {
         data.put("language", language);
       }
-      if (customContent != null) {
-        customContent.apply(data, language, link);
-      }
+      data.put(FIELD_SUBJECT, AccountEmailContent.subject(name, language));
+      data.put(FIELD_BODY, EmailLayout.render(AccountEmailContent.buildWithNotes(name, language,
+          recipientName, link, noteKeys, noteParams)));
       return EmailContractResolution.ready(new EmailProviderRequest(recipient.getRecipient(),
-          template, data, null));
+          CONTENT_TEMPLATE, data, null));
     } catch (JSONException e) {
       throw new OBException("Could not build account email payload", e);
     }
@@ -178,6 +184,28 @@ final class AccountLinkEmailContract implements EmailContract {
         EmailContractCommandSupport.FIELD_ACCOUNT_ID));
   }
 
+  /**
+   * Expiry of the link this email carries, when the caller states one.
+   *
+   * <p>Only the short-lived links say how long they last, and the window has to come from the
+   * command rather than from a constant restated here: the copy would otherwise drift from the TTL
+   * the servlet actually applies.</p>
+   *
+   * @param command the contract command
+   * @return the expiry instant, or {@code null} when the command carries none
+   */
+  private static Instant resolveExpiry(EmailContractCommand command) {
+    String raw = EmailContractCommandSupport.text(command, "expiresAt");
+    if (StringUtils.isBlank(raw)) {
+      return null;
+    }
+    try {
+      return Instant.parse(raw);
+    } catch (DateTimeParseException e) {
+      return null;
+    }
+  }
+
   private String resolveLink(EmailContractCommand command) {
     if (configuredLinkPath == null) {
       return EmailContractCommandSupport.text(command, EmailContractCommandSupport.FIELD_LINK);
@@ -189,23 +217,4 @@ final class AccountLinkEmailContract implements EmailContract {
     return PublicUrlResolver.appendPath(baseUrl, configuredLinkPath);
   }
 
-  /**
-   * Functional interface to add custom content to the account link email payload.
-   */
-  @FunctionalInterface
-  interface AccountLinkCustomContent {
-    /**
-     * Adds localized custom content to the provider payload for an account link email.
-     *
-     * @param data
-     *     provider payload to populate
-     * @param language
-     *     recipient language code
-     * @param link
-     *     account action link
-     * @throws JSONException
-     *     when the payload cannot be populated
-     */
-    void apply(JSONObject data, String language, String link) throws JSONException;
-  }
 }

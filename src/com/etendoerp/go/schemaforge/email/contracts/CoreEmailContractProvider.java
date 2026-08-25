@@ -33,15 +33,11 @@ import javax.enterprise.context.ApplicationScoped;
 public final class CoreEmailContractProvider implements EmailContractProvider {
 
   private final EmailContractDataResolver contractResolver;
-  private static final String PROVIDER_TEMPLATE_CUSTOM = "custom";
   private static final int RESET_PASSWORD_RECIPIENT_THROTTLE_LIMIT = 3;
   private static final int NEW_ACCOUNT_RECIPIENT_THROTTLE_LIMIT = 2;
   private static final int ENVIRONMENT_READY_RECIPIENT_THROTTLE_LIMIT = 2;
   private static final int ACCOUNT_LINK_THROTTLE_WINDOW_SECONDS = 900;
   private static final String DASHBOARD_LINK_PATH = "dashboard";
-  private static final String LANGUAGE_SPANISH = "es_ES";
-  private static final String FIELD_SUBJECT = "subject";
-  private static final String FIELD_BODY = "body";
 
   /**
    * Creates the provider with the default DAL-backed contact resolver.
@@ -62,57 +58,16 @@ public final class CoreEmailContractProvider implements EmailContractProvider {
   @Override
   public Collection<EmailContract> getContracts() {
     return Arrays.asList(
-        new AccountLinkEmailContract("reset-password", "reset-password", contractResolver,
-            RESET_PASSWORD_RECIPIENT_THROTTLE_LIMIT, ACCOUNT_LINK_THROTTLE_WINDOW_SECONDS),
-        new AccountLinkEmailContract("new-account", PROVIDER_TEMPLATE_CUSTOM, contractResolver,
-            NEW_ACCOUNT_RECIPIENT_THROTTLE_LIMIT, ACCOUNT_LINK_THROTTLE_WINDOW_SECONDS, null,
-            CoreEmailContractProvider::newAccountContent),
-        new AccountLinkEmailContract("environment-ready", PROVIDER_TEMPLATE_CUSTOM, contractResolver,
+        new AccountLinkEmailContract("reset-password", contractResolver,
+            RESET_PASSWORD_RECIPIENT_THROTTLE_LIMIT, ACCOUNT_LINK_THROTTLE_WINDOW_SECONDS, null,
+            "note.expiry", "note.ignore"),
+        new AccountLinkEmailContract("new-account", contractResolver,
+            NEW_ACCOUNT_RECIPIENT_THROTTLE_LIMIT, ACCOUNT_LINK_THROTTLE_WINDOW_SECONDS),
+        new AccountLinkEmailContract("environment-ready", contractResolver,
             ENVIRONMENT_READY_RECIPIENT_THROTTLE_LIMIT, ACCOUNT_LINK_THROTTLE_WINDOW_SECONDS,
-            DASHBOARD_LINK_PATH, CoreEmailContractProvider::environmentReadyContent),
-        new AccountNoticeEmailContract("password-changed", PROVIDER_TEMPLATE_CUSTOM,
-            contractResolver, CoreEmailContractProvider::passwordChangedContent),
+            DASHBOARD_LINK_PATH),
+        new AccountNoticeEmailContract("password-changed", contractResolver, "note.warning"),
         new LoginAlertEmailContract(contractResolver),
         new CompanyInvitationEmailContract());
-  }
-
-  private static void newAccountContent(org.codehaus.jettison.json.JSONObject data,
-      String language, String link) throws org.codehaus.jettison.json.JSONException {
-    if (LANGUAGE_SPANISH.equals(language)) {
-      data.put(FIELD_SUBJECT, "Bienvenido a Etendo Go");
-      data.put(FIELD_BODY, "Tu cuenta de Etendo Go fue creada correctamente. "
-          + "Abre este enlace para continuar: " + link);
-      return;
-    }
-    data.put(FIELD_SUBJECT, "Welcome to Etendo Go");
-    data.put(FIELD_BODY, "Your Etendo Go account was created successfully. "
-        + "Open this link to continue: " + link);
-  }
-
-  private static void environmentReadyContent(org.codehaus.jettison.json.JSONObject data,
-      String language, String link) throws org.codehaus.jettison.json.JSONException {
-    if (LANGUAGE_SPANISH.equals(language)) {
-      data.put(FIELD_SUBJECT, "Tu entorno de Etendo Go está listo");
-      data.put(FIELD_BODY, "Tu entorno de Etendo Go está listo. "
-          + "Abre este enlace para acceder a tu panel: " + link);
-      return;
-    }
-    data.put(FIELD_SUBJECT, "Your Etendo Go environment is ready");
-    data.put(FIELD_BODY, "Your Etendo Go environment is ready. "
-        + "Open this link to access your dashboard: " + link);
-  }
-
-  private static void passwordChangedContent(org.codehaus.jettison.json.JSONObject data,
-      String language)
-      throws org.codehaus.jettison.json.JSONException {
-    if (LANGUAGE_SPANISH.equals(language)) {
-      data.put(FIELD_SUBJECT, "Tu contraseña de Etendo Go fue modificada");
-      data.put(FIELD_BODY, "Tu contraseña de Etendo Go fue modificada correctamente. "
-          + "Si no realizaste este cambio, contacta a soporte.");
-      return;
-    }
-    data.put(FIELD_SUBJECT, "Your Etendo Go password was changed");
-    data.put(FIELD_BODY, "Your Etendo Go password was changed successfully. "
-        + "If you did not make this change, contact support.");
   }
 }

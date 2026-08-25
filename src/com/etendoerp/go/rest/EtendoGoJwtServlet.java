@@ -2333,7 +2333,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       log.warn("Auth email reset-password skipped because the public app base URL is not configured");
     } else {
       try {
-        emailSent = authEmailSender.sendPasswordReset(account, resetTokenHash, resetLink);
+        emailSent = authEmailSender.sendPasswordReset(account, resetTokenHash, resetLink,
+            expiresAt);
       } catch (RuntimeException e) {
         log.warn("Auth email reset-password failed after token storage", e);
       }

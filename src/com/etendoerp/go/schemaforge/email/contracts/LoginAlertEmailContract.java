@@ -29,6 +29,8 @@ import com.etendoerp.go.schemaforge.email.EmailProviderRequest;
 import com.etendoerp.go.schemaforge.email.EmailRecipientResolution;
 import com.etendoerp.go.schemaforge.email.EmailThrottleRule;
 import com.etendoerp.go.schemaforge.email.TransactionalEmailService;
+import com.etendoerp.go.schemaforge.email.render.AccountEmailContent;
+import com.etendoerp.go.schemaforge.email.render.EmailLayout;
 
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
@@ -43,7 +45,10 @@ import org.openbravo.base.exception.OBException;
 final class LoginAlertEmailContract implements EmailContract {
 
   static final String NAME = "login-alert";
-  private static final String TEMPLATE = "login-alert";
+  /** The provider's bring-your-own-content template: the layout is rendered here, not there. */
+  private static final String CONTENT_TEMPLATE = "custom";
+  private static final String FIELD_SUBJECT = "subject";
+  private static final String FIELD_BODY = "body";
   private static final String USER_RECORD_NOT_FOUND = "Email user record was not found";
 
   private final EmailContractDataResolver dataResolver;
@@ -101,14 +106,22 @@ final class LoginAlertEmailContract implements EmailContract {
           USER_RECORD_NOT_FOUND);
     }
     try {
+      String language = EmailContractCommandSupport.text(command,
+          EmailContractCommandSupport.FIELD_LANGUAGE);
+      String ip = StringUtils.defaultIfBlank(EmailContractCommandSupport.text(command,
+          EmailContractCommandSupport.FIELD_IP), "unknown");
+      String date = StringUtils.defaultIfBlank(EmailContractCommandSupport.text(command,
+          EmailContractCommandSupport.FIELD_DATE), now());
+
       JSONObject data = new JSONObject();
       data.put("name", StringUtils.defaultIfBlank(contact.get().getName(), "User"));
-      data.put("ip", StringUtils.defaultIfBlank(EmailContractCommandSupport.text(command,
-          EmailContractCommandSupport.FIELD_IP), "unknown"));
-      data.put("date", StringUtils.defaultIfBlank(EmailContractCommandSupport.text(command,
-          EmailContractCommandSupport.FIELD_DATE), now()));
+      data.put("ip", ip);
+      data.put("date", date);
+      data.put(FIELD_SUBJECT, AccountEmailContent.subject(NAME, language));
+      data.put(FIELD_BODY, EmailLayout.render(AccountEmailContent.buildWithNotes(NAME, language,
+          contact.get().getName(), null, new String[] { "note.warning" }, null, ip, date)));
       return EmailContractResolution.ready(new EmailProviderRequest(recipient.getRecipient(),
-          TEMPLATE, data, null));
+          CONTENT_TEMPLATE, data, null));
     } catch (JSONException e) {
       throw new OBException("Could not build login alert email payload", e);
     }

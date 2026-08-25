@@ -71,6 +71,29 @@ public final class EmailMessages {
   }
 
   /**
+   * Resolves a message that only some emails define, such as an optional fine-print line.
+   *
+   * @param key the message key
+   * @param language the recipient language
+   * @param params values for the {@code {0}}-style placeholders
+   * @return the resolved message, or {@code null} when no catalog defines the key
+   */
+  public static String getOptional(String key, String language, Object... params) {
+    Locale locale = toLocale(language);
+    String pattern = read(key, locale);
+    if (pattern == null && !FALLBACK_LOCALE.equals(locale)) {
+      pattern = read(key, FALLBACK_LOCALE);
+    }
+    if (pattern == null) {
+      return null;
+    }
+    if (params == null || params.length == 0) {
+      return pattern;
+    }
+    return new MessageFormat(pattern, locale).format(params);
+  }
+
+  /**
    * Converts an Etendo language code into a {@link Locale}.
    *
    * @param language a code such as {@code es_ES} or {@code en_US}, may be blank

@@ -19,6 +19,8 @@ package com.etendoerp.go.rest;
 
 import java.time.Instant;
 
+import java.util.Date;
+
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -89,10 +91,26 @@ class TransactionalAuthEmailSender {
   }
 
   boolean sendPasswordReset(Account account, String resetTokenHash, String resetLink) {
+    return sendPasswordReset(account, resetTokenHash, resetLink, null);
+  }
+
+  /**
+   * Sends the password-reset email, stating the token's real expiry.
+   *
+   * @param account the account requesting the reset
+   * @param resetTokenHash hash of the issued token, used as the record id
+   * @param resetLink the reset link
+   * @param expiresAt when the token stops working; the email states the remaining window and omits
+   *     it when unknown
+   * @return whether the email was accepted for delivery
+   */
+  boolean sendPasswordReset(Account account, String resetTokenHash, String resetLink,
+      Date expiresAt) {
     if (account == null || StringUtils.isBlank(resetTokenHash) || StringUtils.isBlank(resetLink)) {
       return false;
     }
-    return sendAccountLink(CONTRACT_RESET_PASSWORD, account, resetLink, resetTokenHash);
+    return sendAccountLink(CONTRACT_RESET_PASSWORD, account, resetLink, resetTokenHash, null,
+        expiresAt);
   }
 
   boolean sendCompanyInvitation(Invitation invitation, String inviteLink) {
@@ -146,6 +164,11 @@ class TransactionalAuthEmailSender {
 
   private boolean sendAccountLink(String contractName, Account account, String link,
       String recordId, String language) {
+    return sendAccountLink(contractName, account, link, recordId, language, null);
+  }
+
+  private boolean sendAccountLink(String contractName, Account account, String link,
+      String recordId, String language, Date expiresAt) {
     if (account == null || link == null) {
       return false;
     }
@@ -155,6 +178,11 @@ class TransactionalAuthEmailSender {
       addLanguageField(body, language);
       if (recordId != null) {
         body.put(EmailContractCommandSupport.FIELD_RECORD_ID, recordId);
+      }
+      if (expiresAt != null) {
+        // The contract states the remaining window in the copy; it must come from the TTL the
+        // servlet actually applied, not from a number repeated in the message catalog.
+        body.put("expiresAt", expiresAt.toInstant().toString());
       }
       return sendBestEffort(contractName, body);
     } catch (JSONException e) {

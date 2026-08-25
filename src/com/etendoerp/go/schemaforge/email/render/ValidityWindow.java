@@ -32,8 +32,27 @@ import java.time.temporal.ChronoUnit;
 public final class ValidityWindow {
 
   private static final long MINUTES_PER_DAY = 1440;
+  private static final long SECONDS_PER_MINUTE = 60;
 
   private ValidityWindow() {
+  }
+
+  /**
+   * Whole minutes from now until an expiry instant, rounded up.
+   *
+   * <p>Short-lived links state their window in minutes: the password-reset token lives half an
+   * hour, and "valid for 1 day" would be both wrong and reassuring in the wrong direction.</p>
+   *
+   * @param now the reference instant
+   * @param expiresAt the expiry instant, may be {@code null}
+   * @return whole minutes remaining, never below one
+   */
+  public static long minutesUntil(Instant now, Instant expiresAt) {
+    if (expiresAt == null) {
+      return 1;
+    }
+    long seconds = ChronoUnit.SECONDS.between(now, expiresAt);
+    return Math.max(1, (long) Math.ceil(seconds / (double) SECONDS_PER_MINUTE));
   }
 
   /**
