@@ -52,7 +52,12 @@ final class PaymentDraftEditService {
   private PaymentDraftEditService() {
   }
 
-  /** Processes a previously-saved draft payment (Borrador → Depositado). */
+  /**
+   * Processes a previously-saved draft payment (Borrador → Depositado). Never PIS-aware — there is
+   * no Salt Edge handshake anywhere in this path — so a bank-transfer payment OUT always gets its
+   * {@code FIN_Finacc_Transaction} created immediately by {@link
+   * PaymentRegistrationService#processOrThrow} (ETP-4891).
+   */
   static NeoResponse confirmDraftPayment(String paymentId) throws Exception {
     FIN_Payment payment = OBDal.getInstance().get(FIN_Payment.class, paymentId);
     if (payment == null) {
