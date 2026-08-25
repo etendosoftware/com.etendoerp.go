@@ -28,6 +28,8 @@ import org.codehaus.jettison.json.JSONObject;
  */
 public class NeoResponse {
 
+  private static final String MESSAGE_FIELD = "message";
+
   private int httpStatus;
   private JSONObject body;
   private Map<String, String> headers;
@@ -124,7 +126,7 @@ public class NeoResponse {
     try {
       JSONObject errorBody = new JSONObject();
       JSONObject errorObj = new JSONObject();
-      errorObj.put("message", message);
+      errorObj.put(MESSAGE_FIELD, message);
       errorObj.put("status", status);
       errorBody.put("error", errorObj);
       return new NeoResponse(status, errorBody);
@@ -142,5 +144,52 @@ public class NeoResponse {
    */
   public static NeoResponse error(int status, JSONObject body) {
     return new NeoResponse(status, body);
+  }
+
+  /**
+   * Ensures every error response carries a top-level {@code message} field.
+   *
+   * <p>Different code paths that build error bodies in this package disagree on shape.
+   * {@link #error(int, String)} and structured guard-clause/precondition responses (e.g.
+   * missing mandatory parameters, access-denied, {@code PRECONDITIONS_UNMET}) nest the
+   * human-readable text under {@code error.message}. But a process that runs and then
+   * reports a business-rule rejection (a classic DB-procedure DocAction like
+   * {@code C_Order_Post}, or an OBUIAPP handler result) builds a <em>flat</em> body with
+   * a top-level {@code message} directly — see {@code NeoProcessService}'s
+   * {@code translatePInstanceResult}/{@code translateObuiappResult}/{@code translateClassicResult}.
+   *
+   * <p>Frontend document-confirmation flows (e.g. {@code OrderConfirmModal.jsx}) read
+   * {@code response.message} / {@code message} off the parsed error body and do not
+   * uniformly know about the nested {@code error.message} shape. Without this
+   * normalization, any guard-clause or precondition rejection silently degrades to a
+   * generic "Process failed (400)" in the UI instead of showing the real cause — even
+   * though the real cause was already computed server-side.
+   *
+   * <p>Idempotent and safe to apply at multiple layers: a body that already has a
+   * top-level {@code message}, or has neither {@code message} nor a nested
+   * {@code error.message}, is returned unchanged.
+   *
+   * @param response the response to normalize (may be {@code null})
+   * @return the same response, with a top-level {@code message} copied from a nested
+   *         {@code error.message} when the top-level key was missing; unchanged otherwise
+   */
+  public static NeoResponse ensureTopLevelMessage(NeoResponse response) {
+    if (response == null || response.getHttpStatus() < 400 || response.getBody() == null) {
+      return response;
+    }
+    JSONObject body = response.getBody();
+    if (body.has(MESSAGE_FIELD)) {
+      return response;
+    }
+    JSONObject error = body.optJSONObject("error");
+    if (error == null) {
+      return response;
+    }
+    try {
+      body.put(MESSAGE_FIELD, error.optString(MESSAGE_FIELD, "Request failed"));
+    } catch (JSONException ignored) {
+      // Best-effort normalization: fall back to the original (unnormalized) body.
+    }
+    return response;
   }
 }
