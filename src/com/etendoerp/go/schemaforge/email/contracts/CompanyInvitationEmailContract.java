@@ -18,7 +18,6 @@
 package com.etendoerp.go.schemaforge.email.contracts;
 
 import java.time.Instant;
-import java.time.temporal.ChronoUnit;
 import java.util.Optional;
 
 import org.apache.commons.lang3.StringUtils;
@@ -39,6 +38,7 @@ import com.etendoerp.go.schemaforge.email.render.EmailContent;
 import com.etendoerp.go.schemaforge.email.render.EmailEscape;
 import com.etendoerp.go.schemaforge.email.render.EmailLayout;
 import com.etendoerp.go.schemaforge.email.render.EmailMessages;
+import com.etendoerp.go.schemaforge.email.render.ValidityWindow;
 import com.etendoerp.go.schemaforge.email.EmailRecipientResolution;
 import com.etendoerp.go.schemaforge.email.EmailThrottleRule;
 import com.etendoerp.go.schemaforge.email.TransactionalEmailService;
@@ -187,19 +187,12 @@ public final class CompanyInvitationEmailContract implements EmailContract {
   /**
    * Days the invitation link stays valid, read from the record rather than restated as a literal.
    *
-   * <p>The window is owned by {@code CompanyInvitationService}. Writing it into the copy by hand is
-   * how the email ends up promising 24 hours while the token actually lives a week — which is
-   * exactly what the design mockup said before this was wired to the record.</p>
-   *
    * @param invitation the invitation record
    * @return whole days until expiry, at least one
    */
   private static long validityDays(Invitation invitation) {
-    if (invitation.getExpiresAt() == null) {
-      return 1;
-    }
-    long days = ChronoUnit.DAYS.between(Instant.now(), invitation.getExpiresAt().toInstant());
-    return Math.max(1, days);
+    return ValidityWindow.daysUntil(Instant.now(),
+        invitation.getExpiresAt() == null ? null : invitation.getExpiresAt().toInstant());
   }
 
   /**
