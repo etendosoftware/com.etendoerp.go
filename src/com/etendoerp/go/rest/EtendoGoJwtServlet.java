@@ -939,6 +939,11 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
         return;
       }
       EtendoGoJwtDalHelper.consumePasswordReset(account, hashPassword(password), new Date());
+      // ETP-5003 — the security notice belongs to every password change, not only the one made
+      // from inside the app. This is the path an attacker with a stolen reset link would take, so
+      // it is the one where the owner most needs to be told.
+      sendAuthEmailBestEffort("password-changed",
+          () -> authEmailSender.sendPasswordChanged(account));
 
       JSONObject result = new JSONObject();
       result.put(FIELD_STATUS, STATUS_SUCCESS);
