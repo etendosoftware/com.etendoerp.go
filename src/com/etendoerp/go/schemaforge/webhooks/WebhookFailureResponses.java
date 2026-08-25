@@ -57,8 +57,9 @@ final class WebhookFailureResponses {
   }
 
   /**
-   * @return the standard "Not authorized" failure body used by every access-gated webhook in this
-   *         package
+   * @return the standard "Not authorized" failure body shared by {@link SFAssignUserRoles} and
+   *         {@link SFDebugInvitationBypass} — NOT a package-wide contract; {@code
+   *         SFResendInvitation} deliberately uses a different-shaped denied response
    */
   static JSONObject denied() {
     return failure("Not authorized");
