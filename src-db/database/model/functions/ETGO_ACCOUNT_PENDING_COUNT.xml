@@ -1,0 +1,37 @@
+<?xml version="1.0"?>
+  <database name="FUNCTION ETGO_ACCOUNT_PENDING_COUNT">
+    <function name="ETGO_ACCOUNT_PENDING_COUNT" type="NUMERIC" volatility="STABLE">
+      <parameter name="p_fin_financial_account_id" type="VARCHAR" mode="in">
+        <default/>
+      </parameter>
+      <body><![CDATA[v_bank NUMBER;
+v_cash NUMBER;
+BEGIN
+  -- Unmatched bank-statement lines (bank / card accounts)
+  SELECT COUNT(*) INTO v_bank
+  FROM   fin_bankstatementline bsl
+  JOIN   fin_bankstatement bs ON bs.fin_bankstatement_id = bsl.fin_bankstatement_id
+  WHERE  bs.fin_financial_account_id = p_fin_financial_account_id
+    AND  bsl.fin_finacc_transaction_id IS NULL
+    AND  bsl.isactive = 'Y'
+    AND  bs.isactive  = 'Y';
+
+  -- Unreconciled cash movements (cash accounts only, ETP-4795)
+  SELECT COUNT(*) INTO v_cash
+  FROM   fin_finacc_transaction ft
+  JOIN   fin_financial_account fa ON fa.fin_financial_account_id = ft.fin_financial_account_id
+  WHERE  ft.fin_financial_account_id = p_fin_financial_account_id
+    AND  fa.type = 'C'
+    AND  ft.isactive = 'Y'
+    AND  ft.processed = 'Y'
+    AND  ft.fin_reconciliation_id IS NULL
+    AND  ft.status <> 'RPPC';
+
+  -- Summed, not UNION ALL'd: an account can be cash-type AND have imported bank
+  -- statements, and the old Java read loop needed Map.merge(..., Integer::sum) for
+  -- exactly that case.
+  RETURN COALESCE(v_bank, 0) + COALESCE(v_cash, 0);
+END ETGO_ACCOUNT_PENDING_COUNT
+]]></body>
+    </function>
+  </database>

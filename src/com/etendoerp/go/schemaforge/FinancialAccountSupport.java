@@ -61,11 +61,14 @@ final class FinancialAccountSupport {
   // matched by name. it1 has no payment-method management screen and exactly these
   // four fixed methods, so name matching is acceptable; if methods ever become
   // localizable or renameable this must migrate to a stable key.
+  // METHOD_RECEIPT replaced the former "Cheque" method: the name lives in the sampledata
+  // template for new tenants and is repaired on existing ones by the R24 data-fix, so a
+  // tenant that has not run that fix yet simply gets no link (see assignDefaultPaymentMethods).
   private static final String METHOD_CASH = "Efectivo";
   private static final String METHOD_TRANSFER = "Transferencia bancaria";
   private static final String METHOD_TRANSFER_SHORT = "Transferencia";
   private static final String METHOD_TRANSFER_EN = "Wire Transfer";
-  private static final String METHOD_CHECK = "Cheque";
+  private static final String METHOD_RECEIPT = "Recibo";
   private static final String METHOD_CARD = "Tarjeta";
 
   /**
@@ -78,8 +81,8 @@ final class FinancialAccountSupport {
   private static Map<String, List<String>> buildMethodsByType() {
     Map<String, List<String>> map = new LinkedHashMap<>();
     map.put("C", Arrays.asList(METHOD_CASH));
-    map.put("B", Arrays.asList(METHOD_TRANSFER, METHOD_CHECK, METHOD_CARD));
-    map.put("CA", Arrays.asList(METHOD_CARD));
+    map.put("B", Arrays.asList(METHOD_TRANSFER, METHOD_RECEIPT, METHOD_CARD));
+    map.put("CA", Arrays.asList(METHOD_CARD, METHOD_RECEIPT));
     return map;
   }
 
@@ -237,6 +240,8 @@ final class FinancialAccountSupport {
     // the payment method itself is configured to do.
     link.setUponDepositUse(method.getUponDepositUse());
     link.setUponWithdrawalUse(method.getUponWithdrawalUse());
+    link.setINUponClearingUse(method.getINUponClearingUse());
+    link.setOUTUponClearingUse(method.getOUTUponClearingUse());
     link.setAutomaticDeposit(method.isAutomaticDeposit());
     // ETP-4891: the bank-transfer method NEVER auto-withdraws. Etendo Go pays transfers over PIS,
     // where the FIN_Finacc_Transaction is created by the Salt Edge callback once the bank reports
