@@ -65,6 +65,7 @@ public final class EmailLayout {
     appendHeader(html);
     appendGreeting(html, content);
     appendParagraphs(html, content.getParagraphs());
+    appendDetails(html, content.getDetails());
     appendCta(html, content);
     appendNotes(html, content.getNotes());
     appendSignature(html, content.getSignature());
@@ -142,6 +143,31 @@ public final class EmailLayout {
           .append(paragraph.getHtml() != null ? paragraph.getHtml() : escape(paragraph.getText()))
           .append("</p>");
     }
+  }
+
+  private static void appendDetails(StringBuilder html, List<EmailContent.Detail> details) {
+    if (details.isEmpty()) {
+      return;
+    }
+    // A two-column table rather than a definition list: label left, value right-aligned and
+    // emphasised, one hairline per row. Word's engine ignores flex and text-align on a block, so
+    // the alignment has to come from the cell's own align attribute.
+    html.append("<table role=\"presentation\" width=\"100%\" cellpadding=\"0\" cellspacing=\"0\" ")
+        .append("border=\"0\" style=\"width:100%;margin:32px 0;border-collapse:collapse;\">");
+    for (EmailContent.Detail detail : details) {
+      html.append("<tr><td class=\"sf-text sf-divider\" style=\"padding:12px 0;border-top:1px solid ")
+          .append(EmailPalette.LIGHT_DIVIDER).append(";font-family:").append(FONT_STACK)
+          .append(";font-size:14px;line-height:20px;font-weight:400;color:")
+          .append(EmailPalette.LIGHT_TEXT).append(";\">").append(escape(detail.getLabel()))
+          .append("</td>")
+          .append("<td class=\"sf-strong sf-divider\" align=\"right\" ")
+          .append("style=\"padding:12px 0;border-top:1px solid ")
+          .append(EmailPalette.LIGHT_DIVIDER).append(";font-family:").append(FONT_STACK)
+          .append(";font-size:14px;line-height:20px;font-weight:600;text-align:right;color:")
+          .append(EmailPalette.LIGHT_TEXT_STRONG).append(";\">").append(escape(detail.getValue()))
+          .append("</td></tr>");
+    }
+    html.append("</table>");
   }
 
   private static void appendCta(StringBuilder html, EmailContent content) {

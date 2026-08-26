@@ -132,4 +132,50 @@ public class EmailLayoutTest {
     // Gmail clips around 102KB. A layout that ever approaches it has grown a bug, not a feature.
     assertTrue("layout grew to " + html.length() + " chars", html.length() < 20000);
   }
+
+  @Test
+  public void rendersTheSummaryBlockAsATwoColumnTable() {
+    String html = EmailLayout.render(minimal()
+        .detail("Factura de venta", "10000016")
+        .detail("Fecha", "26/08/2026")
+        .build());
+
+    assertTrue(html.contains(">Factura de venta</td>"));
+    assertTrue(html.contains(">10000016</td>"));
+    assertTrue(html.contains(">Fecha</td>"));
+    assertTrue(html.contains(">26/08/2026</td>"));
+    // The value column is right-aligned through the cell attribute: Word's engine ignores
+    // text-align on a block, so the attribute is what actually holds the layout together.
+    assertTrue(html.contains("align=\"right\""));
+  }
+
+  @Test
+  public void omitsTheSummaryBlockWhenThereAreNoRows() {
+    String html = EmailLayout.render(minimal().build());
+
+    assertFalse(html.contains("border-collapse:collapse"));
+  }
+
+  @Test
+  public void dropsASummaryRowWhoseValueIsMissing() {
+    // A document without a due date must not print the label with nothing beside it.
+    String html = EmailLayout.render(minimal()
+        .detail("Vencimiento", null)
+        .detail("Total", "133,10 EUR")
+        .build());
+
+    assertFalse(html.contains("Vencimiento"));
+    assertTrue(html.contains(">133,10 EUR</td>"));
+  }
+
+  @Test
+  public void escapesBothSidesOfASummaryRow() {
+    String html = EmailLayout.render(minimal()
+        .detail("<b>Label</b>", "<script>alert(1)</script>")
+        .build());
+
+    assertFalse(html.contains("<script>"));
+    assertTrue(html.contains("&lt;script&gt;"));
+    assertTrue(html.contains("&lt;b&gt;Label&lt;/b&gt;"));
+  }
 }

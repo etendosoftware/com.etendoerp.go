@@ -36,6 +36,7 @@ public final class EmailContent {
   private final String greeting;
   private final boolean greetingIsHtml;
   private final List<Paragraph> paragraphs;
+  private final List<Detail> details;
   private final String ctaLabel;
   private final String ctaUrl;
   private final String linkFallbackText;
@@ -46,6 +47,7 @@ public final class EmailContent {
     this.greeting = builder.greeting;
     this.greetingIsHtml = builder.greetingIsHtml;
     this.paragraphs = Collections.unmodifiableList(new ArrayList<>(builder.paragraphs));
+    this.details = Collections.unmodifiableList(new ArrayList<>(builder.details));
     this.ctaLabel = builder.ctaLabel;
     this.ctaUrl = builder.ctaUrl;
     this.linkFallbackText = builder.linkFallbackText;
@@ -87,6 +89,15 @@ public final class EmailContent {
    */
   public List<Paragraph> getParagraphs() {
     return paragraphs;
+  }
+
+  /**
+   * Summary rows rendered between the body copy and the call to action.
+   *
+   * @return the details, never {@code null}
+   */
+  public List<Detail> getDetails() {
+    return details;
   }
 
   /**
@@ -141,6 +152,26 @@ public final class EmailContent {
    */
   public boolean hasCta() {
     return StringUtils.isNotBlank(ctaLabel) && StringUtils.isNotBlank(ctaUrl);
+  }
+
+  /** One label/value row of the summary block. Both sides are escaped at render time. */
+  public static final class Detail {
+
+    private final String label;
+    private final String value;
+
+    private Detail(String label, String value) {
+      this.label = label;
+      this.value = value;
+    }
+
+    public String getLabel() {
+      return label;
+    }
+
+    public String getValue() {
+      return value;
+    }
   }
 
   /** A single body paragraph, either plain text or contract-assembled HTML. */
@@ -200,6 +231,7 @@ public final class EmailContent {
   public static final class Builder {
 
     private final List<Paragraph> paragraphs = new ArrayList<>();
+    private final List<Detail> details = new ArrayList<>();
     private final List<String> notes = new ArrayList<>();
     private String greeting;
     private boolean greetingIsHtml;
@@ -255,6 +287,25 @@ public final class EmailContent {
       String normalized = StringUtils.trimToNull(value);
       if (normalized != null) {
         paragraphs.add(Paragraph.preEscapedHtml(normalized));
+      }
+      return this;
+    }
+
+    /**
+     * Appends a summary row.
+     *
+     * <p>A row with a blank value is dropped rather than rendered empty, so a document that has no
+     * due date does not print a "Due date" label with nothing beside it.</p>
+     *
+     * @param label the row label
+     * @param value the row value
+     * @return this builder
+     */
+    public Builder detail(String label, String value) {
+      String normalizedLabel = StringUtils.trimToNull(label);
+      String normalizedValue = StringUtils.trimToNull(value);
+      if (normalizedLabel != null && normalizedValue != null) {
+        details.add(new Detail(normalizedLabel, normalizedValue));
       }
       return this;
     }

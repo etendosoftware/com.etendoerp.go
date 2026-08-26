@@ -422,6 +422,35 @@ still audited by `TransactionalEmailService`, but the download endpoint does not
 process-local audit state so links keep working across restarts and clustered nodes until their
 token expires.
 
+## Document summary block (ETP-5003)
+
+Document emails render a label/value table between the body copy and the call to action. It is built
+from `EmailDocumentRecord.getDetails()`, a list of `EmailDocumentDetail` rows the DAL resolver
+contributes.
+
+```java
+EmailDocumentRecord.withGeneratedDownloadLink(name, email, id, documentNo, amount, clientId,
+    Arrays.asList(
+        EmailDocumentDetail.date("document.detail.date", invoice.getInvoiceDate()),
+        EmailDocumentDetail.date("document.detail.dueDate", invoice.getETGODueDate()),
+        EmailDocumentDetail.text("document.detail.total", amount)));
+```
+
+- `date(...)` keeps the value unformatted. The resolver runs inside the **sender's** session and
+  cannot know the recipient's language; `DefaultDocumentSendEmailContract` formats it through
+  `EmailDates.format` once the language is known.
+- `text(...)` is for values already rendered, such as a currency amount.
+- A row whose value is `null` or blank is dropped by `EmailDocumentRecord`, so an absent due date
+  costs nothing and needs no branch at the call site.
+- **No rows means no block.** The contract prepends the document number as the first row only when
+  the resolver contributed at least one other, so a resolver returning `Collections.emptyList()`
+  opts that document type out entirely (`purchase-order-send` does exactly this).
+- Row labels and the date pattern (`document.detail.dateFormat`) are catalog keys in both
+  `emails_es_ES.properties` and `emails_en_US.properties`.
+
+The block is independent of `messageEdits`: an operator-authored message replaces the greeting and
+body copy, never the summary rows.
+
 ## Provider Configuration
 
 No provider endpoint or API key is hardcoded in the module.

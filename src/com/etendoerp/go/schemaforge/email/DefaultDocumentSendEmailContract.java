@@ -31,6 +31,7 @@ import org.openbravo.base.exception.OBException;
 
 import com.etendoerp.go.common.ConfigPropertyReader;
 import com.etendoerp.go.schemaforge.email.render.EmailContent;
+import com.etendoerp.go.schemaforge.email.render.EmailDates;
 import com.etendoerp.go.schemaforge.email.render.EmailEscape;
 import com.etendoerp.go.schemaforge.email.render.EmailLayout;
 import com.etendoerp.go.schemaforge.email.render.EmailMessages;
@@ -289,9 +290,10 @@ public class DefaultDocumentSendEmailContract implements EmailContract {
       // ETP-5003 — the gateway always sends from a verified noreply@ address, so without a
       // Reply-To the customer receiving this invoice or order has no way to answer the operator
       // who sent it. Derived from the session, never from the command body.
+      String replyTo = EmailSenderIdentity.resolveReplyTo();
       return EmailContractResolution.ready(new EmailProviderRequest(recipients, CONTENT_TEMPLATE,
-          buildTemplateData(document.get(), downloadLink.get(), language, messageEdits),
-          EmailSenderIdentity.resolveReplyTo()));
+          buildTemplateData(document.get(), downloadLink.get(), language, messageEdits, replyTo),
+          replyTo));
     } catch (JSONException e) {
       throw new OBException("Could not build document email payload for " + name, e);
     }
@@ -326,7 +328,8 @@ public class DefaultDocumentSendEmailContract implements EmailContract {
   }
 
   private JSONObject buildTemplateData(EmailDocumentRecord document, String downloadLink,
-      String language, Optional<EmailMessageEdits> messageEdits) throws JSONException {
+      String language, Optional<EmailMessageEdits> messageEdits, String replyTo)
+      throws JSONException {
     JSONObject data = new JSONObject();
     // Kept beside the rendered content: the gateway logs these for traceability, and they cost
     // nothing now that the copy no longer depends on them.
@@ -342,7 +345,7 @@ public class DefaultDocumentSendEmailContract implements EmailContract {
     data.put("download_link", downloadLink);
     data.put(FIELD_SUBJECT, resolveSubject(document, language, messageEdits));
     data.put(FIELD_BODY,
-        EmailLayout.render(buildContent(document, downloadLink, language, messageEdits)));
+        EmailLayout.render(buildContent(document, downloadLink, language, messageEdits, replyTo)));
     return data;
   }
 
@@ -355,7 +358,7 @@ public class DefaultDocumentSendEmailContract implements EmailContract {
    * reopened).</p>
    */
   private EmailContent buildContent(EmailDocumentRecord document, String downloadLink,
-      String language, Optional<EmailMessageEdits> messageEdits) {
+      String language, Optional<EmailMessageEdits> messageEdits, String replyTo) {
     EmailContent.Builder content = EmailContent.builder();
     // toHtmlBody() has already escaped the operator's text and turned newlines into <br>.
     String override = messageEdits.map(EmailMessageEdits::toHtmlBody).orElse(null);
@@ -377,10 +380,43 @@ public class DefaultDocumentSendEmailContract implements EmailContract {
           EmailEscape.escapeHtml(documentTypeLabel(language)),
           EmailEscape.escapeHtml(document.getDocumentNumber()))));
     }
-    return content.cta(EmailMessages.get("document.cta", language), downloadLink)
-        .linkFallbackText(EmailMessages.get("link.fallback", language))
-        .signature(EmailMessages.get("signature", language))
-        .build();
+    appendDetails(content, document, language);
+    content.cta(EmailMessages.get("document.cta", language), downloadLink)
+        .linkFallbackText(EmailMessages.get("link.fallback", language));
+    // A document email is the one place where answering reaches a person, so it closes by saying
+    // so instead of with the generic team signature. Only when there is genuinely an address to
+    // answer: with no Reply-To resolved the reply would land on the unattended noreply@ mailbox,
+    // and inviting someone to write there is worse than not inviting them at all.
+    if (StringUtils.isNotBlank(replyTo)) {
+      content.note(EmailMessages.get("document.replyNote", language));
+    } else {
+      content.signature(EmailMessages.get("signature", language));
+    }
+    return content.build();
+  }
+
+  /**
+   * Appends the summary block: the document number first, then whatever rows the resolver decided
+   * this document type is worth summarising.
+   *
+   * <p>The block is skipped entirely when the resolver contributed no rows — a table whose only
+   * line repeats the number already stated in the sentence above it is noise, not a summary. That
+   * is also how a document type opts out: it contributes nothing.</p>
+   *
+   * <p>It renders on every send, including one where the operator wrote their own message: these
+   * are facts about the record, not part of the copy.</p>
+   */
+  private void appendDetails(EmailContent.Builder content, EmailDocumentRecord document,
+      String language) {
+    List<EmailDocumentDetail> details = document.getDetails();
+    if (details.isEmpty()) {
+      return;
+    }
+    content.detail(documentTypeLabel(language), document.getDocumentNumber());
+    for (EmailDocumentDetail detail : details) {
+      content.detail(EmailMessages.get(detail.getLabelKey(), language),
+          detail.isDate() ? EmailDates.format(detail.getDate(), language) : detail.getText());
+    }
   }
 
   private String resolveSubject(EmailDocumentRecord document, String language,

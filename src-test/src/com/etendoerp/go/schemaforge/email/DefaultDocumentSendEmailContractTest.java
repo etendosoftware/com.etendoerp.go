@@ -25,6 +25,10 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.when;
 
+import java.util.Arrays;
+import java.util.Calendar;
+import java.util.Date;
+import java.util.List;
 import java.util.Optional;
 
 import org.codehaus.jettison.json.JSONException;
@@ -231,5 +235,108 @@ public class DefaultDocumentSendEmailContractTest {
         resolution.isReady());
 
     return resolution.getProviderRequest();
+  }
+
+  @Test
+  public void opensTheSummaryBlockWithTheDocumentNumber() throws JSONException {
+    String body = resolveBodyWithDetails(new JSONObject("{\"recordId\":\"" + RECORD_ID + "\"}"),
+        Arrays.asList(EmailDocumentDetail.date("document.detail.date", august26()),
+            EmailDocumentDetail.text("document.detail.total", "133,10 EUR")));
+
+    // The first row labels the number with the document type, the way a reader would name it,
+    // rather than with a generic "Number".
+    assertTrue(body.contains(">Documento</td>"));
+    assertTrue(body.contains(">" + DOCUMENT_NUMBER + "</td>"));
+    assertTrue(body.contains(">Fecha</td>"));
+    assertTrue(body.contains(">26/08/2026</td>"));
+    assertTrue(body.contains(">Total</td>"));
+    assertTrue(body.contains(">133,10 EUR</td>"));
+  }
+
+  @Test
+  public void skipsTheSummaryBlockWhenTheResolverContributesNoRows() throws JSONException {
+    // A table whose only line repeats the number already stated in the sentence above it is noise.
+    // This is also how a document type opts out of the block entirely.
+    String body = resolveBody(new JSONObject("{\"recordId\":\"" + RECORD_ID + "\"}"));
+
+    assertFalse(body.contains("border-collapse:collapse"));
+  }
+
+  @Test
+  public void keepsTheSummaryBlockWhenTheOperatorWritesTheirOwnMessage() throws JSONException {
+    JSONObject commandBody = new JSONObject("{\"recordId\":\"" + RECORD_ID + "\"}");
+    commandBody.put("messageEdits", new JSONObject()
+        .put("subject", "Asunto propio")
+        .put("message", "Texto escrito por el operador"));
+
+    String body = resolveBodyWithDetails(commandBody, Arrays.asList(
+        EmailDocumentDetail.date("document.detail.date", august26())));
+
+    // The rows are facts about the record, not part of the copy, so personalising the message must
+    // not take them away.
+    assertTrue(body.contains("Texto escrito por el operador"));
+    assertTrue(body.contains(">26/08/2026</td>"));
+  }
+
+  private static Date august26() {
+    Calendar calendar = Calendar.getInstance();
+    calendar.clear();
+    calendar.set(2026, Calendar.AUGUST, 26);
+    return calendar.getTime();
+  }
+
+  private String resolveBodyWithDetails(JSONObject commandBody,
+      List<EmailDocumentDetail> details) throws JSONException {
+    EmailDocumentRecordResolver resolver = recordId -> Optional.of(
+        new EmailDocumentRecord("Cliente", RECIPIENT_EMAIL, RECORD_ID, DOCUMENT_NUMBER, null,
+            DOWNLOAD_LINK, "client-1", details));
+    DefaultDocumentSendEmailContract contract =
+        new DefaultDocumentSendEmailContract(CONTRACT_NAME, "Documento", resolver);
+
+    EmailContractResolution resolution = contract.resolve(
+        new EmailContractCommand(CONTRACT_NAME, commandBody),
+        EmailRecipientResolution.serverResolved(RECIPIENT_EMAIL));
+    assertTrue("expected a ready resolution, got: " + resolution.getMessage(),
+        resolution.isReady());
+
+    return resolution.getProviderRequest().getData().getString("body");
+  }
+
+  @Test
+  public void closesWithTheReplyInviteWhenThereIsSomeoneToAnswer() throws Exception {
+    User user = mock(User.class);
+    when(user.getEmail()).thenReturn("operator@example.com");
+    OBContext obContext = mock(OBContext.class);
+    when(obContext.getUser()).thenReturn(user);
+
+    JSONObject commandBody = new JSONObject();
+    commandBody.put("recordId", RECORD_ID);
+
+    try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class)) {
+      obContextMock.when(OBContext::getOBContext).thenReturn(obContext);
+
+      String body = resolveRequest(commandBody).getData().getString("body");
+
+      assertTrue(body.contains("Puedes responder a este correo"));
+      // The generic team signature gives way to it: two closings would contradict each other.
+      assertFalse(body.contains("Equipo de Etendo"));
+    }
+  }
+
+  @Test
+  public void keepsTheSignatureWhenNobodyCanBeAnswered() throws Exception {
+    // With no Reply-To resolved a reply lands on the unattended noreply@ mailbox, so inviting the
+    // customer to write back would be a promise the email cannot keep.
+    JSONObject commandBody = new JSONObject();
+    commandBody.put("recordId", RECORD_ID);
+
+    try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class)) {
+      obContextMock.when(OBContext::getOBContext).thenReturn(null);
+
+      String body = resolveRequest(commandBody).getData().getString("body");
+
+      assertFalse(body.contains("Puedes responder a este correo"));
+      assertTrue(body.contains("Equipo de Etendo"));
+    }
   }
 }
