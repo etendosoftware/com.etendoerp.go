@@ -444,7 +444,21 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
     InvoiceLineLinker.linkInvoiceLinesToExistingInouts(invoice.getId());
 
     OBDal.getInstance().getSession().refresh(invoice);
+    // ETP-4844: mirrors createFromOrder() above — without these two calls the invoice's
+    // etgoTotalDiscount header % was carried over but never materialized into a real
+    // ETGO_DTO line/c_invoicetax update (correct-looking Draft totals came only from the
+    // GET-time compensation formula, not persisted data — Classic's own Complete process
+    // never runs our header handlers and would post the wrong totals), and every line's
+    // lineGrossAmount/grossUnitPrice was left at 0 (CreateInvoiceLinesFromProcess never
+    // populates them; only ensureLineGrossAmounts does).
+    invoice = getSupport().applyOrderDiscountToInvoice(invoice, linkedOrder.getId(), totalDiscountService);
+    getSupport().ensureLineGrossAmounts(invoice);
     ensureDocumentNo(invoice);
+    // ETP-4726: createFromOrder() already does this; createFromReceipt() never did,
+    // since inception (ETP-4032, commit 89d610e7) — ensureLineGrossAmounts() didn't
+    // exist yet at that point and was simply never wired in afterwards. Without it,
+    // Line_Gross_Amount stays at its stub value (0) for every receipt-generated line.
+    getSupport().ensureLineGrossAmounts(invoice);
 
     return invoice;
   }
@@ -598,6 +612,8 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
     OBDal.getInstance().flush();
     OBDal.getInstance().getSession().refresh(invoice);
     ensureDocumentNo(invoice);
+    // ETP-4726: same gap as createFromReceipt() above — never wired in this branch either.
+    getSupport().ensureLineGrossAmounts(invoice);
 
     return invoice;
   }

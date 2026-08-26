@@ -215,6 +215,116 @@ public class NeoErrorSanitizerTest {
     assertTrue(safe.contains(NeoErrorSanitizer.REDACTED_OBJECT));
   }
 
+  // ─── not-null violation detection (ETP-4793 / IMP-17, absorbing IMP-23 §9.4) ───
+
+  private static final String NOT_NULL_MESSAGE =
+      "ERROR: null value in column \"c_bpartner_location_id\" of relation \"c_invoice\" "
+          + "violates not-null constraint";
+
+  @Test
+  public void isNotNullViolation_sqlStateInCauseChain_isDetected() {
+    Throwable root = new java.sql.SQLException("boom", "23502");
+    assertTrue(NeoErrorSanitizer.isNotNullViolation(new RuntimeException("wrapper", root)));
+  }
+
+  @Test
+  public void isNotNullViolation_otherSqlState_isNotDetected() {
+    assertFalse(NeoErrorSanitizer.isNotNullViolation(
+        new java.sql.SQLException("duplicate", "23505")));
+  }
+
+  @Test
+  public void isNotNullViolation_null_isFalse() {
+    assertFalse(NeoErrorSanitizer.isNotNullViolation(null));
+  }
+
+  /**
+   * The SQLState is language-independent, so it is checked first; the English wording is a
+   * best-effort refinement for the swallowed-exception path, where only a message survives.
+   */
+  @Test
+  public void isNotNullViolationMessage_sqlStateOrWording_isDetected() {
+    assertTrue(NeoErrorSanitizer.isNotNullViolationMessage(NOT_NULL_MESSAGE));
+    assertTrue(NeoErrorSanitizer.isNotNullViolationMessage("SQL error 23502 on insert"));
+  }
+
+  @Test
+  public void isNotNullViolationMessage_unrelatedMessage_isNotDetected() {
+    assertFalse(NeoErrorSanitizer.isNotNullViolationMessage("Business Partner must be unique."));
+    assertFalse(NeoErrorSanitizer.isNotNullViolationMessage(null));
+  }
+
+  @Test
+  public void notNullViolationColumn_fromMessage_isLowerCased() {
+    assertEquals("c_bpartner_location_id",
+        NeoErrorSanitizer.notNullViolationColumn(NOT_NULL_MESSAGE));
+    assertEquals("c_bpartner_location_id", NeoErrorSanitizer.notNullViolationColumn(
+        "null value in column \"C_BPartner_Location_ID\" violates not-null constraint"));
+  }
+
+  /**
+   * The message core actually hands us is HTML-escaped, so the quote around the column name arrives
+   * as {@code &quot;}. This is not a hypothetical: the first live probe of the IMP-23 §9.4 vector
+   * returned the 500 it was meant to replace, because the pattern required a bare {@code "}, found
+   * no column, could not resolve a field, and fell through. §9.4 had even recorded the escaping —
+   * it just was not read as load-bearing. Verbatim from that response.
+   */
+  @Test
+  public void notNullViolationColumn_htmlEscapedQuotes_isFound() {
+    String live = "ERROR: null value in column &quot;c_bpartner_location_id&quot; of relation "
+        + "&quot;c_invoice&quot; violates not-null constraint\n  Detail: Failing row contains (…).";
+    assertEquals("c_bpartner_location_id", NeoErrorSanitizer.notNullViolationColumn(live));
+    assertTrue(NeoErrorSanitizer.isNotNullViolationMessage(live));
+  }
+
+  @Test
+  public void notNullViolationColumn_messageNamingNoColumn_isNull() {
+    assertNull(NeoErrorSanitizer.notNullViolationColumn("something else failed"));
+    assertNull(NeoErrorSanitizer.notNullViolationColumn((String) null));
+  }
+
+  /**
+   * The throwable overload exists because {@link NeoErrorSanitizer#sanitize} maps any DB exception to
+   * a generic message: the raw cause chain is the only place the column name survives.
+   */
+  @Test
+  public void notNullViolationColumn_fromCauseChain_isFound() {
+    Throwable root = new java.sql.SQLException(NOT_NULL_MESSAGE, "23502");
+    assertEquals("c_bpartner_location_id",
+        NeoErrorSanitizer.notNullViolationColumn(new RuntimeException("insert failed", root)));
+    assertNull(NeoErrorSanitizer.notNullViolationColumn((Throwable) null));
+  }
+
+  // ─── row-dump stripping (ETP-4793 / IMP-17, absorbing IMP-23 §9.4) ───
+
+  @Test
+  public void stripRowDump_failingRowDetail_isReplaced() {
+    String dumped = "not-null violation  Detail: Failing row contains ("
+        + "0123456789".repeat(30) + ").";
+    String safe = NeoErrorSanitizer.stripRowDump(dumped);
+    assertFalse(safe.contains("0123456789"));
+    assertTrue(safe.contains(NeoErrorSanitizer.REDACTED_ROW));
+  }
+
+  /**
+   * Keyed on the shape of the leak, not on the localised {@code Failing row contains} lead-in — but a
+   * short parenthetical is ordinary prose and must survive.
+   */
+  @Test
+  public void stripRowDump_shortParenthetical_isUnchanged() {
+    String clean = "(Client, Organization, Search Key) must be unique.";
+    assertEquals(clean, NeoErrorSanitizer.stripRowDump(clean));
+    assertNull(NeoErrorSanitizer.stripRowDump(null));
+  }
+
+  @Test
+  public void sanitize_nonDbExceptionCarryingRowDump_isStripped() {
+    String dumped = "insert failed  Detail: Failing row contains (" + "x".repeat(250) + ").";
+    String safe = NeoErrorSanitizer.sanitize(new RuntimeException(dumped));
+    assertFalse(safe.contains("xxxx"));
+    assertTrue(safe.contains(NeoErrorSanitizer.REDACTED_ROW));
+  }
+
   // Inner classes whose names contain the patterns checked by isDbException.
   // getName() returns the binary name, e.g. "...NeoErrorSanitizerTest$FakeSQLException",
   // which contains "SQLException" as a substring.

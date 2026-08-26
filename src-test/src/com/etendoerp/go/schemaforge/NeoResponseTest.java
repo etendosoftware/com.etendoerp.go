@@ -135,4 +135,54 @@ public class NeoResponseTest {
     assertEquals(200, response.getHttpStatus());
     assertNull(response.getBody());
   }
+
+  @Test
+  public void testEnsureTopLevelMessagePromotesNestedErrorMessage() throws JSONException {
+    JSONObject errorObj = new JSONObject();
+    errorObj.put("message", "Nested failure");
+    errorObj.put("status", 400);
+    JSONObject body = new JSONObject();
+    body.put("error", errorObj);
+    NeoResponse response = new NeoResponse(400, body);
+
+    NeoResponse result = NeoResponse.ensureTopLevelMessage(response);
+
+    assertEquals(response, result);
+    assertEquals("Nested failure", result.getBody().getString("message"));
+    assertEquals("Nested failure", result.getBody().getJSONObject("error").getString("message"));
+  }
+
+  @Test
+  public void testEnsureTopLevelMessageLeavesAlreadyFlatShapeUnchanged() throws JSONException {
+    JSONObject body = new JSONObject();
+    body.put("message", "Already flat");
+    JSONObject errorObj = new JSONObject();
+    errorObj.put("message", "Should not override");
+    body.put("error", errorObj);
+    NeoResponse response = new NeoResponse(400, body);
+
+    NeoResponse result = NeoResponse.ensureTopLevelMessage(response);
+
+    assertEquals("Already flat", result.getBody().getString("message"));
+  }
+
+  @Test
+  public void testEnsureTopLevelMessageNeverTouchesSuccessResponses() throws JSONException {
+    JSONObject errorObj = new JSONObject();
+    errorObj.put("message", "Should be ignored");
+    JSONObject body = new JSONObject();
+    body.put("error", errorObj);
+    NeoResponse response = new NeoResponse(200, body);
+
+    NeoResponse result = NeoResponse.ensureTopLevelMessage(response);
+
+    assertEquals(response, result);
+    assertTrue(!result.getBody().has("message"));
+  }
+
+  @Test
+  public void testEnsureTopLevelMessageWithNullResponseDoesNotThrow() {
+    NeoResponse result = NeoResponse.ensureTopLevelMessage(null);
+    assertNull(result);
+  }
 }

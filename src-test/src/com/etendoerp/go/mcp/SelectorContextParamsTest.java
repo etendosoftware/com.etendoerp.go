@@ -18,10 +18,12 @@ package com.etendoerp.go.mcp;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.Mockito.when;
 
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 import org.codehaus.jettison.json.JSONArray;
@@ -378,6 +380,64 @@ public class SelectorContextParamsTest {
     JSONObject responseBody = result.getBody();
     assertFalse("Should not have diagnostics when all params provided",
         responseBody.has("diagnostics"));
+  }
+
+  // ── withBodyContext — sibling fields as selector context (IMP-22) ───────
+
+  @Test
+  public void bodySiblingBecomesSelectorContext() throws Exception {
+    JSONObject body = new JSONObject();
+    body.put("businessPartner", "BP-001");
+    body.put("orderDate", "2026-05-12");
+
+    Map<String, String> merged = McpSelectorContextHelper.withBodyContext(new HashMap<>(), body,
+        List.of());
+
+    assertEquals("BP-001", merged.get("C_BPartner_ID"));
+    assertEquals("12-05-2026", merged.get("dateOrdered"));
+  }
+
+  @Test
+  public void excludedKeyNeverReachesTheContext() throws Exception {
+    JSONObject body = new JSONObject();
+    body.put("businessPartner", "Tercero España");  // still a display name, not resolved yet
+    body.put("orderDate", "2026-05-12");
+
+    Map<String, String> merged = McpSelectorContextHelper.withBodyContext(new HashMap<>(), body,
+        List.of("businessPartner"));
+
+    // The whole point of the exclusion list: an unresolved search string copied into C_BPartner_ID
+    // would narrow the dependent selector's candidate set to nothing, making the fix worse than the
+    // bug it addresses. A sibling that is merely unresolved must look absent, not wrong.
+    assertNull(merged.get("C_BPartner_ID"));
+    assertEquals("12-05-2026", merged.get("dateOrdered"));
+  }
+
+  @Test
+  public void baseContextSurvivesAndTabContextIsNotOverwrittenByAnExcludedKey() throws Exception {
+    Map<String, String> base = new HashMap<>();
+    base.put("C_BPartner_ID", "FROM-TAB");
+    base.put("IsSOTrx", "Y");
+    JSONObject body = new JSONObject();
+    body.put("businessPartner", "Tercero España");
+
+    Map<String, String> merged = McpSelectorContextHelper.withBodyContext(base, body,
+        List.of("businessPartner"));
+
+    assertEquals("FROM-TAB", merged.get("C_BPartner_ID"));
+    assertEquals("Y", merged.get("IsSOTrx"));
+  }
+
+  @Test
+  public void nullBodyYieldsACopyOfTheBaseContext() throws Exception {
+    Map<String, String> base = new HashMap<>();
+    base.put("IsSOTrx", "N");
+
+    Map<String, String> merged = McpSelectorContextHelper.withBodyContext(base, null, List.of());
+
+    assertEquals("N", merged.get("IsSOTrx"));
+    merged.put("IsSOTrx", "Y");
+    assertEquals("Caller's context map must not be mutated", "N", base.get("IsSOTrx"));
   }
 
   private boolean containsMissingContext(JSONArray missingContext, String param, String field)

@@ -51,6 +51,7 @@ import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 
 import org.codehaus.jettison.json.JSONArray;
+import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -130,6 +131,19 @@ class NeoCrudHandlerTest {
     Method method = target.getClass().getDeclaredMethod(methodName, paramTypes);
     method.setAccessible(true);
     return method.invoke(target, args);
+  }
+
+  /**
+   * Like {@link #invokePrivate} but for a {@code static} method, invoked with no target
+   * instance. Used for {@link NeoParentTabFilterResolver}'s private static helpers, which moved
+   * out of {@code NeoCrudHandler} (Sonar method-count split) but are still exercised directly
+   * via reflection here, same as their previous instance-method form.
+   */
+  private static Object invokeStaticPrivate(Class<?> clazz, String methodName,
+      Class<?>[] paramTypes, Object... args) throws Exception {
+    Method method = clazz.getDeclaredMethod(methodName, paramTypes);
+    method.setAccessible(true);
+    return method.invoke(null, args);
   }
 
   private static ServletInputStream toServletInputStream(String content) {
@@ -712,6 +726,82 @@ class NeoCrudHandlerTest {
   }
 
   // -------------------------------------------------------------------------
+  // buildReadOnlyFieldRejectedResponse tests (via reflection, IMP-28 clause 2)
+  // -------------------------------------------------------------------------
+
+  @Nested
+  @DisplayName("buildReadOnlyFieldRejectedResponse")
+  class BuildReadOnlyFieldRejectedResponse {
+
+    private NeoResponse invokeBuildResponse(ReadOnlyFieldRejectedException e) throws Exception {
+      return (NeoResponse) invokePrivate(handler, "buildReadOnlyFieldRejectedResponse",
+          new Class<?>[] { ReadOnlyFieldRejectedException.class }, e);
+    }
+
+    @Test
+    @DisplayName("Returns the IMP-5-shaped 422: status/error/detail/field/hint/seeAlso")
+    void buildsFlatImp5Shape() throws Exception {
+      ReadOnlyFieldRejectedException ex = new ReadOnlyFieldRejectedException("eTGOSalePrice");
+
+      NeoResponse result = invokeBuildResponse(ex);
+
+      assertNotNull(result);
+      assertEquals(422, result.getHttpStatus());
+
+      JSONObject body = result.getBody();
+      assertNotNull(body);
+      assertEquals(422, body.getInt("status"));
+      assertEquals("read_only_field", body.getString("error"));
+      assertEquals("eTGOSalePrice", body.getString("field"));
+      assertTrue(body.has("detail"));
+      assertTrue(body.has("hint"));
+      assertEquals("docs(topic:\"creating records\")", body.getString("seeAlso"));
+    }
+
+    @Test
+    @DisplayName("detail and hint both name the rejected field")
+    void detailAndHintNameTheField() throws Exception {
+      ReadOnlyFieldRejectedException ex = new ReadOnlyFieldRejectedException("quantityOnHand");
+
+      NeoResponse result = invokeBuildResponse(ex);
+
+      JSONObject body = result.getBody();
+      assertTrue(body.getString("detail").contains("quantityOnHand"));
+      assertTrue(body.getString("hint").contains("quantityOnHand"));
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // handleDefault + ReadOnlyFieldRejectedException wiring (IMP-28 clause 2)
+  // -------------------------------------------------------------------------
+
+  @Nested
+  @DisplayName("handleDefault — ReadOnlyFieldRejectedException")
+  class HandleDefaultReadOnlyFieldRejected {
+
+    @Test
+    @DisplayName("A ReadOnlyFieldRejectedException thrown deep in the write path answers 422, "
+        + "not the generic 500 the catch-all(Exception) branch would otherwise produce")
+    void translatesToStructured422() throws JSONException {
+      Tab adTab = mock(Tab.class);
+      // Forces handleDefault's try-block to throw before reaching the DAL —
+      // getTable() is the first call handleDefault makes on adTab.
+      when(adTab.getTable()).thenThrow(new ReadOnlyFieldRejectedException("salePrice"));
+
+      NeoContext context = buildContext("POST", null, adTab,
+          mock(SFEntity.class), null, null);
+
+      NeoResponse result = handler.handleDefault(context);
+
+      assertNotNull(result);
+      assertEquals(422, result.getHttpStatus(),
+          "must be routed through buildReadOnlyFieldRejectedResponse, not the generic 500 path");
+      assertEquals("read_only_field", result.getBody().getString("error"));
+      assertEquals("salePrice", result.getBody().getString("field"));
+    }
+  }
+
+  // -------------------------------------------------------------------------
   // applyPaginationDefaults tests (via reflection)
   // -------------------------------------------------------------------------
 
@@ -1134,8 +1224,28 @@ class NeoCrudHandlerTest {
   class CheckJsonServiceResponse {
 
     private NeoResponse invokeCheckResponse(JSONObject responseJson) throws Exception {
+      return invokeCheckResponse(responseJson, null);
+    }
+
+    /**
+     * ETP-4793 / IMP-17: the method now also receives the tab, because a not-null violation has to be
+     * mapped from a DB column back to the property name the caller sends. Passing {@code null} keeps
+     * the pre-existing cases exactly as they were — none of them reach the mapping.
+     */
+    private NeoResponse invokeCheckResponse(JSONObject responseJson, Tab adTab) throws Exception {
       return (NeoResponse) invokePrivate(handler, "checkJsonServiceResponse",
-          new Class<?>[] { JSONObject.class }, responseJson);
+          new Class<?>[] { JSONObject.class, Tab.class }, responseJson, adTab);
+    }
+
+    private JSONObject failureWithMessage(String rawMessage) throws Exception {
+      JSONObject error = new JSONObject();
+      error.put("message", rawMessage);
+      JSONObject inner = new JSONObject();
+      inner.put("status", -1);
+      inner.put("error", error);
+      JSONObject json = new JSONObject();
+      json.put("response", inner);
+      return json;
     }
 
     @Test
@@ -1275,6 +1385,98 @@ class NeoCrudHandlerTest {
       json.put("response", inner);
 
       assertNull(invokeCheckResponse(json));
+    }
+
+    /**
+     * ETP-4793 / IMP-17 (absorbing IMP-23 §9.4): the not-null violation is the caller's mistake, so it
+     * must arrive as the same {@code MISSING_REQUIRED_FIELDS} 400 a pre-flight failure produces —
+     * naming the property the caller sends, not the DB column the constraint names.
+     */
+    @Test
+    @DisplayName("Reclassifies a not-null violation as MISSING_REQUIRED_FIELDS 400 naming the property")
+    void reclassifiesNotNullViolationAsMissingRequiredFields() throws Exception {
+      JSONObject json = failureWithMessage("@GenericDatabaseError@");
+      String violation = "ERROR: null value in column \"c_bpartner_location_id\" of relation "
+          + "\"c_invoice\" violates not-null constraint";
+
+      Table table = mock(Table.class);
+      when(table.getId()).thenReturn("318");
+      Tab adTab = mock(Tab.class);
+      when(adTab.getTable()).thenReturn(table);
+
+      try (MockedStatic<org.openbravo.erpCommon.utility.OBMessageUtils> msgMock =
+               Mockito.mockStatic(org.openbravo.erpCommon.utility.OBMessageUtils.class);
+           MockedStatic<ModelProvider> mpMock = Mockito.mockStatic(ModelProvider.class)) {
+        msgMock.when(() -> org.openbravo.erpCommon.utility.OBMessageUtils.messageBD(
+            org.mockito.ArgumentMatchers.anyString())).thenReturn(violation);
+        ModelProvider mp = mock(ModelProvider.class);
+        mpMock.when(ModelProvider::getInstance).thenReturn(mp);
+        Entity entity = mock(Entity.class);
+        when(mp.getEntityByTableId("318")).thenReturn(entity);
+        Property prop = mock(Property.class);
+        when(prop.getColumnName()).thenReturn("C_BPartner_Location_ID");
+        when(prop.getName()).thenReturn("partnerAddress");
+        when(entity.getProperties()).thenReturn(List.of(prop));
+
+        NeoResponse result = invokeCheckResponse(json, adTab);
+
+        assertNotNull(result);
+        assertEquals(HttpServletResponse.SC_BAD_REQUEST, result.getHttpStatus());
+        JSONObject error = result.getBody().getJSONObject("error");
+        assertEquals(MissingRequiredFieldsException.ERROR_CODE, error.getString("code"));
+        assertEquals("partnerAddress", error.getJSONArray("fields").getString(0));
+      }
+    }
+
+    /**
+     * ETP-4793 / IMP-17: when the column cannot be mapped to a property the status is still corrected
+     * to 400, but the response must not fall back to an empty {@code fields} array alone — and the
+     * Postgres row dump (~90 columns of internals, both a leak and an ACE cost) must be stripped.
+     */
+    @Test
+    @DisplayName("Corrects the status and strips the row dump when the column maps to no property")
+    void stripsRowDumpWhenColumnUnmappable() throws Exception {
+      JSONObject json = failureWithMessage("@GenericDatabaseError@");
+      String violation = "ERROR: null value in column \"c_bpartner_location_id\" violates "
+          + "not-null constraint  Detail: Failing row contains ("
+          + "A".repeat(300) + ").";
+
+      try (MockedStatic<org.openbravo.erpCommon.utility.OBMessageUtils> msgMock =
+          Mockito.mockStatic(org.openbravo.erpCommon.utility.OBMessageUtils.class)) {
+        msgMock.when(() -> org.openbravo.erpCommon.utility.OBMessageUtils.messageBD(
+            org.mockito.ArgumentMatchers.anyString())).thenReturn(violation);
+
+        NeoResponse result = invokeCheckResponse(json, null);
+
+        assertNotNull(result);
+        assertEquals(HttpServletResponse.SC_BAD_REQUEST, result.getHttpStatus());
+        String body = result.getBody().toString();
+        assertFalse(body.contains("AAAA"), "the failing-row dump must not reach the caller");
+      }
+    }
+
+    /**
+     * ETP-4793 / IMP-17: a failure that stays a 500 must still lose the row dump. The status is
+     * unchanged from the pre-existing behaviour; only the payload shrinks.
+     */
+    @Test
+    @DisplayName("Strips the row dump from a failure that remains a 500")
+    void stripsRowDumpOnServerError() throws Exception {
+      JSONObject json = failureWithMessage("@GenericDatabaseError@");
+      String dump = "Database error  Detail: Failing row contains (" + "B".repeat(300) + ").";
+
+      try (MockedStatic<org.openbravo.erpCommon.utility.OBMessageUtils> msgMock =
+          Mockito.mockStatic(org.openbravo.erpCommon.utility.OBMessageUtils.class)) {
+        msgMock.when(() -> org.openbravo.erpCommon.utility.OBMessageUtils.messageBD(
+            org.mockito.ArgumentMatchers.anyString())).thenReturn(dump);
+
+        NeoResponse result = invokeCheckResponse(json, null);
+
+        assertNotNull(result);
+        assertEquals(HttpServletResponse.SC_INTERNAL_SERVER_ERROR, result.getHttpStatus());
+        assertFalse(result.getBody().toString().contains("BBBB"),
+            "the failing-row dump must not reach the caller");
+      }
     }
   }
 
@@ -1829,7 +2031,9 @@ class NeoCrudHandlerTest {
 
     private String invokeResolveToken(String token, String parentId,
         Object parentRecord, Object parentEntity, String parentTableName) throws Exception {
-      return (String) invokePrivate(handler, "resolveTokenFromParent",
+      // Moved to NeoParentTabFilterResolver (Sonar method-count split of NeoCrudHandler) —
+      // invoked here with no target instance since it is now a static helper.
+      return (String) invokeStaticPrivate(NeoParentTabFilterResolver.class, "resolveTokenFromParent",
           new Class<?>[] { String.class, String.class,
               BaseOBObject.class, Entity.class, String.class },
           token, parentId, parentRecord, parentEntity, parentTableName);
@@ -2870,9 +3074,10 @@ class NeoCrudHandlerTest {
   @DisplayName("resolveParentFilter")
   class ResolveParentFilter {
 
-    private String invokeResolveParentFilter(Tab childTab, String parentId) throws Exception {
-      return (String) invokePrivate(handler, "resolveParentFilter",
-          new Class<?>[] { Tab.class, String.class }, childTab, parentId);
+    private String invokeResolveParentFilter(Tab childTab, String parentId) {
+      // Moved to NeoParentTabFilterResolver (Sonar method-count split of NeoCrudHandler) as a
+      // package-private static method — callable directly, no reflection needed.
+      return NeoParentTabFilterResolver.resolveParentFilter(childTab, parentId);
     }
 
     @Test

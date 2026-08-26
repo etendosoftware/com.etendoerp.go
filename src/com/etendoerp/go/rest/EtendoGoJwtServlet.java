@@ -58,8 +58,6 @@ import org.openbravo.model.common.enterprise.Organization;
 import com.etendoerp.go.common.EtendoGoCorsServlet;
 import com.etendoerp.go.common.ProtocolErrorAdapters;
 import com.etendoerp.go.common.PublicUrlResolver;
-import com.etendoerp.go.featureflags.FeatureFlagContext;
-import com.etendoerp.go.featureflags.GoFeatureFlags;
 import com.etendoerp.go.payment.TenantPaywallService;
 import com.etendoerp.go.payment.TenantPlanService;
 import com.etendoerp.go.payment.HostedCheckoutService;
@@ -76,10 +74,10 @@ import com.etendoerp.go.onboarding.OnboardingOrgInfoService;
 import com.etendoerp.go.onboarding.OnboardingMarkOrgReadyService;
 import com.etendoerp.go.onboarding.OnboardingPeriodControlService;
 import com.etendoerp.go.onboarding.OnboardingBankConnectionSyncService;
-import com.etendoerp.go.onboarding.OnboardingRoleProvisioningService;
 import com.etendoerp.go.onboarding.OnboardingSequenceGeneratorService;
 import com.etendoerp.go.schemaforge.data.Account;
 import com.etendoerp.go.schemaforge.email.EmailContractCommandSupport;
+import com.etendoerp.go.schemaforge.util.OwnerSupport;
 import com.smf.securewebservices.utils.SecureWebServicesUtils;
 
 /**
@@ -122,12 +120,14 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private static final String FIELD_EMAIL = "email";
   private static final String FIELD_CLIENT_NAME = "clientName";
   private static final String FIELD_STATUS = "status";
+  private static final String FIELD_HTTP_STATUS = "httpStatus";
   private static final String FIELD_TOKEN = "token";
   private static final String FIELD_MESSAGE = "message";
   private static final String FIELD_CODE = "code";
   private static final String FIELD_USER_MESSAGE = "userMessage";
   private static final String FIELD_PASSWORD = "password";
   private static final String FIELD_SUCCESS = "success";
+  private static final String CODE_INVITATION_ERROR = "INVITATION_ERROR";
   private static final String FIELD_TIMESTAMP = "timestamp";
   private static final String FIELD_ACCOUNT = "account";
   private static final String FIELD_AUTH_METHOD = "authMethod";
@@ -158,11 +158,14 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private static final String CODE_INVALID_CREDENTIALS = "INVALID_CREDENTIALS";
   private static final String CODE_LOGIN_SERVER_ERROR = "LOGIN_SERVER_ERROR";
   private static final String CODE_INTERNAL_ERROR = "INTERNAL_ERROR";
+  // ETP-4798 — email ownership confirmation. Stable codes, mirrored by the web client's
+  // onboarding/errorMessages.js so it translates by code and never shows this English text.
+  private static final String CODE_EMAIL_NOT_VERIFIED = "EMAIL_NOT_VERIFIED";
+  private static final String CODE_EMAIL_VERIFY_INVALID = "EMAIL_VERIFY_INVALID";
   private static final String PROGRESS_IN_PROGRESS = "in_progress";
   private static final String PROGRESS_CLIENT = "client";
   private static final String PROGRESS_ERROR = "error";
   private static final String PROGRESS_ORGANIZATION = "organization";
-  private static final String PROGRESS_ROLES = "roles";
   private static final String PROGRESS_DATASET = "dataset";
   private static final String PROGRESS_ACCOUNTING = "accounting";
   private static final String PROGRESS_PERIOD_CONTROL = "periodControl";
@@ -185,6 +188,21 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       "If an account exists for that email, password reset instructions will be sent.";
   private static final String PASSWORD_RESET_INVALID_MESSAGE =
       "Invalid or expired password reset token";
+  // 24h, not the 30 minutes a password reset gets. A reset is a deliberate act the user performs
+  // and immediately waits on; a registration confirmation is often opened the next morning, and an
+  // expired link there means a dead end in the middle of signup.
+  private static final long EMAIL_VERIFICATION_TTL_SECONDS = 24 * 60 * 60L;
+  private static final String EMAIL_NOT_VERIFIED_MESSAGE =
+      "Confirm your email address before creating an environment.";
+  private static final String EMAIL_VERIFY_INVALID_MESSAGE =
+      "Invalid or expired email verification token";
+  private static final String EMAIL_VERIFY_NEUTRAL_MESSAGE =
+      "If this account still needs an email confirmation, a new link has been sent.";
+  private static final String PATH_VERIFY_EMAIL = "/verify-email";
+  private static final String PATH_VERIFY_EMAIL_RESEND = "/verify-email/resend";
+  private static final String FIELD_EMAIL_VERIFIED = "emailVerified";
+  private static final String FIELD_EMAIL_VERIFICATION_PENDING = "emailVerificationPending";
+  private static final String CONTRACT_NEW_ACCOUNT = "new-account";
   private static final String SSO_PREFIX = "/sso/";
   private static final String PATH_ONBOARDING_DRAFT = "/onboarding/draft";
   private static final String FIELD_DRAFT = "draft";
@@ -199,8 +217,6 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       "fiscalIdValue", FIELD_ADDRESS, "sector" };
 
   OnboardingDatasetImportService onboardingDatasetImportService = new OnboardingDatasetImportService();
-  OnboardingRoleProvisioningService onboardingRoleProvisioningService =
-      new OnboardingRoleProvisioningService();
   OnboardingAccountingWiringService onboardingAccountingWiringService =
       new OnboardingAccountingWiringService();
   OnboardingPeriodControlService onboardingPeriodControlService =
@@ -224,6 +240,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   TenantPaywallService tenantPaywallService = new TenantPaywallService();
   TenantPlanService tenantPlanService = new TenantPlanService();
   HostedCheckoutService hostedCheckoutService = new HostedCheckoutService();
+  CompanyInvitationService companyInvitationService;
   private final TransactionalAuthEmailSender authEmailSender;
   private final EtendoGoSsoProviderRegistry ssoProviderRegistry;
 
@@ -248,6 +265,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       EtendoGoSsoProviderRegistry ssoProviderRegistry) {
     this.authEmailSender = authEmailSender;
     this.ssoProviderRegistry = ssoProviderRegistry;
+    this.companyInvitationService = new CompanyInvitationService(authEmailSender);
   }
 
   // --- HTTP method dispatchers ---
@@ -270,6 +288,10 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       handleEnvironments(request, response);
     } else if (isPath(path, "/login")) {
       handleEnvironmentLogin(request, response);
+    } else if (isPath(path, "/company-invitations/mine")) {
+      handleCompanyInvitationMine(request, response);
+    } else if (isPath(path, "/company-invitations/resolve")) {
+      handleCompanyInvitationResolve(request, response);
     } else if (path != null && path.startsWith("/checkout/sessions/")) {
       handleCheckoutStatus(request, response);
     } else {
@@ -284,6 +306,22 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       handleCheckoutWebhook(request, response);
       return;
     }
+    // Split across two chains so neither trips the cognitive-complexity limit. The relative order
+    // is identical to the single chain this replaces: authentication routes are still matched
+    // first, and an unmatched path still falls through to the 404 at the end.
+    if (routeAuthenticationPost(path, request, response)) {
+      return;
+    }
+    routeOnboardingPost(path, request, response);
+  }
+
+  /**
+   * Routes the authentication endpoints.
+   *
+   * @return true when the path matched one of them and the request was handled
+   */
+  private boolean routeAuthenticationPost(String path, HttpServletRequest request,
+      HttpServletResponse response) throws IOException {
     String ssoProvider = extractSsoProvider(path);
     if (isPath(path, "/register")) {
       handleRegister(request, response);
@@ -297,12 +335,31 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       handlePasswordResetConfirm(request, response);
     } else if (isPath(path, "/change-password")) {
       handleChangePassword(request, response);
-    } else if (isPath(path, PATH_ONBOARDING_DRAFT)) {
+    } else if (isPath(path, PATH_VERIFY_EMAIL)) {
+      handleVerifyEmail(request, response);
+    } else if (isPath(path, PATH_VERIFY_EMAIL_RESEND)) {
+      handleResendVerifyEmail(request, response);
+    } else {
+      return false;
+    }
+    return true;
+  }
+
+  /** Routes the onboarding, checkout and invitation endpoints, and answers 404 for anything else. */
+  private void routeOnboardingPost(String path, HttpServletRequest request,
+      HttpServletResponse response) throws IOException {
+    if (isPath(path, PATH_ONBOARDING_DRAFT)) {
       handleSaveOnboardingDraft(request, response);
     } else if (isPath(path, "/onboarding")) {
       handleOnboarding(request, response);
     } else if (isPath(path, "/checkout/sessions")) {
       handleCheckoutSession(request, response);
+    } else if (isPath(path, "/company-invitations")) {
+      handleCompanyInvitationCreate(request, response);
+    } else if (isPath(path, "/company-invitations/accept")) {
+      handleCompanyInvitationAccept(request, response);
+    } else if (isPath(path, "/company-invitations/register-and-accept")) {
+      handleCompanyInvitationRegisterAndAccept(request, response);
     } else {
       writeError(response, HttpServletResponse.SC_NOT_FOUND, "Unknown endpoint: " + path);
     }
@@ -391,6 +448,148 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   // --- Endpoint handlers ---
 
   /**
+   * POST /sws/go/company-invitations
+   * Header: Authorization: Bearer <inviter token>
+   * Body: { "email": "recipient@example.com" }
+   */
+  private void handleCompanyInvitationCreate(HttpServletRequest request,
+      HttpServletResponse response) throws IOException {
+    JSONObject body;
+    try {
+      body = readJsonBody(request);
+    } catch (JSONException e) {
+      writeError(response, HttpServletResponse.SC_BAD_REQUEST, CODE_INVALID_REQUEST,
+          INVALID_JSON_BODY, INVALID_JSON_BODY);
+      return;
+    }
+    String email = body.optString(FIELD_EMAIL, "").trim();
+    String language = body.optString(FIELD_LANGUAGE, "").trim();
+    String requestOrigin = request.getHeader("Origin");
+    String origin = StringUtils.isBlank(requestOrigin)
+        ? PublicUrlResolver.resolveAppBaseUrl(request) : requestOrigin;
+    runWithAuthenticatedAccount(request, response, "create company invitation", account -> {
+      JSONObject result = companyInvitationService.createInvitation(account, email, origin, language);
+      if (result.optBoolean(FIELD_ERROR, false)) {
+        int httpStatus = result.optInt(FIELD_HTTP_STATUS, HttpServletResponse.SC_BAD_REQUEST);
+        writeError(response, httpStatus, result.optString(FIELD_CODE, CODE_INVITATION_ERROR),
+            result.optString(FIELD_MESSAGE, "Could not create invitation"),
+            result.optString(FIELD_MESSAGE, "Could not create invitation"));
+        return;
+      }
+      writeResponse(response, HttpServletResponse.SC_CREATED, result);
+    });
+  }
+
+  /**
+   * GET /sws/go/company-invitations/mine
+   * Header: Authorization: Bearer <account session token>
+   */
+  private void handleCompanyInvitationMine(HttpServletRequest request,
+      HttpServletResponse response) throws IOException {
+    runWithAuthenticatedAccount(request, response, "list company invitations", account -> {
+      JSONObject result = companyInvitationService.listInvitationsForAccount(account);
+      if (result.optBoolean(FIELD_ERROR, false)) {
+        int httpStatus = result.optInt(FIELD_HTTP_STATUS, HttpServletResponse.SC_UNAUTHORIZED);
+        writeError(response, httpStatus, result.optString("code", "AUTHENTICATION_REQUIRED"),
+            result.optString(FIELD_MESSAGE, "Authentication required"),
+            result.optString(FIELD_MESSAGE, "Authentication required"));
+        return;
+      }
+      writeResponse(response, HttpServletResponse.SC_OK, result);
+    });
+  }
+
+  /**
+   * GET /sws/go/company-invitations/resolve?token=<token>
+   */
+  private void handleCompanyInvitationResolve(HttpServletRequest request,
+      HttpServletResponse response) throws IOException {
+    String token = request.getParameter(FIELD_TOKEN);
+    try {
+      JSONObject result = companyInvitationService.resolveInvitation(token);
+      if (result.optBoolean(FIELD_ERROR, false)) {
+        int httpStatus = result.optInt(FIELD_HTTP_STATUS, HttpServletResponse.SC_BAD_REQUEST);
+        writeError(response, httpStatus, result.optString(FIELD_CODE, CODE_INVITATION_ERROR),
+            result.optString(FIELD_MESSAGE, "Could not resolve invitation"),
+            result.optString(FIELD_MESSAGE, "Could not resolve invitation"));
+        return;
+      }
+      writeResponse(response, HttpServletResponse.SC_OK, result);
+    } catch (Exception e) {
+      log.error("Error resolving company invitation", e);
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, CODE_INTERNAL_ERROR,
+          INTERNAL_ERROR, INTERNAL_ERROR);
+    }
+  }
+
+  /**
+   * POST /sws/go/company-invitations/accept
+   * Body: { "token": "..." }
+   */
+  private void handleCompanyInvitationAccept(HttpServletRequest request,
+      HttpServletResponse response) throws IOException {
+    JSONObject body;
+    try {
+      body = readJsonBody(request);
+    } catch (JSONException e) {
+      writeError(response, HttpServletResponse.SC_BAD_REQUEST, CODE_INVALID_REQUEST,
+          INVALID_JSON_BODY, INVALID_JSON_BODY);
+      return;
+    }
+    String token = body.optString(FIELD_TOKEN, "").trim();
+    String accountBearerToken = extractBearerToken(request);
+    try {
+      JSONObject result = companyInvitationService.acceptExistingAccount(token, accountBearerToken);
+      if (result.optBoolean(FIELD_ERROR, false)) {
+        int httpStatus = result.optInt(FIELD_HTTP_STATUS, HttpServletResponse.SC_BAD_REQUEST);
+        writeError(response, httpStatus, result.optString(FIELD_CODE, CODE_INVITATION_ERROR),
+            result.optString(FIELD_MESSAGE, "Could not accept invitation"),
+            result.optString(FIELD_MESSAGE, "Could not accept invitation"));
+        return;
+      }
+      writeResponse(response, HttpServletResponse.SC_OK, result);
+    } catch (Exception e) {
+      log.error("Error accepting company invitation", e);
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, CODE_INTERNAL_ERROR,
+          INTERNAL_ERROR, INTERNAL_ERROR);
+    }
+  }
+
+  /**
+   * POST /sws/go/company-invitations/register-and-accept
+   * Body: { "token": "...", "name": "...", "password": "..." }
+   */
+  private void handleCompanyInvitationRegisterAndAccept(HttpServletRequest request,
+      HttpServletResponse response) throws IOException {
+    JSONObject body;
+    try {
+      body = readJsonBody(request);
+    } catch (JSONException e) {
+      writeError(response, HttpServletResponse.SC_BAD_REQUEST, CODE_INVALID_REQUEST,
+          INVALID_JSON_BODY, INVALID_JSON_BODY);
+      return;
+    }
+    String token = body.optString(FIELD_TOKEN, "").trim();
+    String name = body.optString("name", "").trim();
+    String password = body.optString(FIELD_PASSWORD, "");
+    try {
+      JSONObject result = companyInvitationService.registerAndAccept(token, name, password);
+      if (result.optBoolean(FIELD_ERROR, false)) {
+        int httpStatus = result.optInt(FIELD_HTTP_STATUS, HttpServletResponse.SC_BAD_REQUEST);
+        writeError(response, httpStatus, result.optString(FIELD_CODE, CODE_INVITATION_ERROR),
+            result.optString(FIELD_MESSAGE, "Could not register and accept invitation"),
+            result.optString(FIELD_MESSAGE, "Could not register and accept invitation"));
+        return;
+      }
+      writeResponse(response, HttpServletResponse.SC_OK, result);
+    } catch (Exception e) {
+      log.error("Error registering and accepting company invitation", e);
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, CODE_INTERNAL_ERROR,
+          INTERNAL_ERROR, INTERNAL_ERROR);
+    }
+  }
+
+  /**
    * POST /sws/go/register
    * Body: { "email": "...", "password": "...", "name": "...", "language": "es_ES" }
    * Returns 201 with session token on success, 400 if email is taken.
@@ -465,8 +664,10 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       String sessionToken = generateToken();
       Account account = EtendoGoJwtDalHelper.createAccount(email, passwordHash, name, sessionToken);
       String normalizedLanguage = StringUtils.trimToNull(language);
-      sendAuthEmailBestEffort("new-account",
-          () -> authEmailSender.sendNewAccount(account, normalizedLanguage));
+      // ETP-4798: the session token below still comes back, so the user keeps filling in the
+      // onboarding form and their draft keeps saving. What the unconfirmed address blocks is the
+      // one irreversible, costly step — creating the tenant in handleOnboarding.
+      issueEmailVerification(account, normalizedLanguage, true);
 
       JSONObject accountJson = new JSONObject();
       accountJson.put("id", account.getId());
@@ -732,7 +933,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       OBContext.setOBContext("0", "0", "0", "0");
       OBContext.setAdminMode(true);
       Account account = EtendoGoJwtDalHelper.findActiveAccountByResetTokenHash(
-          hashResetToken(token), new Date());
+          hashAuthToken(token), new Date());
       if (account == null) {
         writeError(response, HttpServletResponse.SC_BAD_REQUEST, PASSWORD_RESET_INVALID_MESSAGE);
         return;
@@ -753,6 +954,102 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     } finally {
       OBContext.restorePreviousMode();
     }
+  }
+
+  /**
+   * POST /sws/go/verify-email
+   * Body: { "token": "..." }
+   *
+   * <p>ETP-4798. Deliberately unauthenticated: the token in the link <em>is</em> the credential,
+   * and requiring a session on top would break the ordinary case of opening the mail in a browser
+   * where the user is not signed in.
+   *
+   * <p>Idempotent by design. Following the same link twice — which people do constantly, and which
+   * mail clients do on their own when they prefetch — answers 200 both times instead of showing a
+   * scary "invalid token" on the second click. That is why
+   * {@link EtendoGoJwtDalHelper#consumeEmailVerification} leaves the token hash in place: once the
+   * address is confirmed the token grants nothing, so replaying it within its TTL is a no-op rather
+   * than something worth defending against.
+   */
+  private void handleVerifyEmail(HttpServletRequest request, HttpServletResponse response)
+      throws IOException {
+    JSONObject body;
+    try {
+      body = readJsonBody(request);
+    } catch (JSONException e) {
+      writeError(response, HttpServletResponse.SC_BAD_REQUEST, CODE_INVALID_REQUEST,
+          INVALID_JSON_BODY, INVALID_JSON_BODY);
+      return;
+    }
+
+    String verifyToken;
+    try {
+      verifyToken = body.getString(FIELD_TOKEN).trim();
+    } catch (JSONException e) {
+      writeError(response, HttpServletResponse.SC_BAD_REQUEST, CODE_INVALID_REQUEST,
+          "Missing required field: token", "Missing required field: token");
+      return;
+    }
+    if (verifyToken.isEmpty()) {
+      writeError(response, HttpServletResponse.SC_BAD_REQUEST, CODE_INVALID_REQUEST,
+          "Field token must not be empty", "Field token must not be empty");
+      return;
+    }
+
+    try {
+      OBContext.setOBContext("0", "0", "0", "0");
+      OBContext.setAdminMode(true);
+      Account account = EmailVerificationDalHelper.findAccountByVerifyTokenHash(
+          hashAuthToken(verifyToken), new Date());
+      if (account == null) {
+        writeError(response, HttpServletResponse.SC_BAD_REQUEST, CODE_EMAIL_VERIFY_INVALID,
+            EMAIL_VERIFY_INVALID_MESSAGE, EMAIL_VERIFY_INVALID_MESSAGE);
+        return;
+      }
+      if (!EmailVerificationDalHelper.isEmailVerified(account)) {
+        EmailVerificationDalHelper.consumeEmailVerification(account, new Date());
+      }
+
+      JSONObject result = new JSONObject();
+      result.put(FIELD_STATUS, STATUS_SUCCESS);
+      result.put(FIELD_MESSAGE, "Email address confirmed");
+      result.put(FIELD_EMAIL_VERIFIED, true);
+      writeResponse(response, HttpServletResponse.SC_OK, result);
+    } catch (RuntimeException e) {
+      EtendoGoDalHelper.rollbackDalChanges("email verification", e, log);
+      log.error("Email verification failed", e);
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, SERVER_ERROR);
+    } catch (JSONException e) {
+      log.error("JSON error building email verification response", e);
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, INTERNAL_ERROR);
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  /**
+   * POST /sws/go/verify-email/resend
+   * Header: Authorization: Bearer &lt;session_token&gt;
+   *
+   * <p>ETP-4798. Answers the same neutral 200 whether a new link went out, the address was already
+   * confirmed, or nothing was pending, so the response carries no account state and a double-click
+   * on "resend" is harmless. Neutrality here is about not restating what the caller already knows —
+   * unlike the password-reset request, this endpoint is authenticated, so a genuine server failure
+   * is reported as one rather than hidden behind a success.
+   *
+   * <p>Only re-issues when a confirmation is genuinely pending. In particular it does not mint a
+   * first token for an account that predates ETP-4798: doing so would move that account from
+   * "never gated" to "gated", locking out a user who did nothing but press a button.
+   */
+  private void handleResendVerifyEmail(HttpServletRequest request, HttpServletResponse response)
+      throws IOException {
+    runWithAuthenticatedAccount(request, response, "email verification resend", account -> {
+      String language = StringUtils.trimToNull(request.getParameter(FIELD_LANGUAGE));
+      if (EmailVerificationDalHelper.isEmailVerificationPending(account)) {
+        issueEmailVerification(account, language, false);
+      }
+      writeEmailVerifyNeutralResponse(response);
+    });
   }
 
   /**
@@ -872,6 +1169,12 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       if (account.getCreationDate() != null) {
         result.put("created", account.getCreationDate().toInstant().toString());
       }
+      // ETP-4798: two separate facts, because they are not opposites. "pending" is what the web
+      // client shows the confirm-your-email banner for; an account that predates this feature is
+      // neither verified nor pending, and must see no banner and hit no gate.
+      result.put(FIELD_EMAIL_VERIFIED, EmailVerificationDalHelper.isEmailVerified(account));
+      result.put(FIELD_EMAIL_VERIFICATION_PENDING,
+          EmailVerificationDalHelper.isEmailVerificationPending(account));
 
       writeResponse(response, HttpServletResponse.SC_OK, result);
     } catch (RuntimeException e) {
@@ -1188,11 +1491,12 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    *
    * Streams NDJSON progress lines to the frontend.
    *
-   * <p>When the {@code tenant-upgrade} flag is on, an account that already owns a tenant must
-   * supply an accepted {@code paymentToken} to create an additional one; otherwise the request is
-   * refused with HTTP 402 and {@code {"error":"payment_required"}} before any provisioning starts.
-   * The flag defaults to off, and a first tenant is always free. See
-   * {@code docs/feature-flags-and-tenant-upgrade.md}.
+   * <p>An account that already owns an environment must supply an accepted {@code paymentToken} to
+   * create an additional one, or to convert an existing one to productive; otherwise the request is
+   * refused with HTTP 402 and {@code {"error":"payment_required"}} before any provisioning starts. A
+   * first environment is always free. This is unconditional — the capability carries no feature flag
+   * (ETP-4966). A payment the Stripe webhook confirmed is also what marks the resulting environment
+   * productive. See {@code docs/feature-flags-and-tenant-upgrade.md}.
    */
   private void handleOnboarding(HttpServletRequest request, HttpServletResponse response)
       throws IOException {
@@ -1208,6 +1512,13 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       return;
     }
 
+    // ETP-4798. Sits beside the paywall below, for the same reason: before the NDJSON stream opens
+    // and before any provisioning runs, so a refused request answers with plain JSON and leaves no
+    // half-created tenant behind.
+    if (rejectWhenEmailNotVerified(token, response)) {
+      return;
+    }
+
     OnboardingRequestData onboardingRequest = parseOnboardingRequest(request, response);
     if (onboardingRequest == null) {
       return;
@@ -1218,23 +1529,12 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       return;
     }
 
-    // Paywall (ETP-4686). Runs before the NDJSON stream opens and before any provisioning, so a
-    // refused request leaves no half-created tenant behind and can still answer with a plain
-    // JSON error instead of a stream. The backend is authoritative here: the /upgrade page in the
-    // web client shows the checkout, but this check is what actually gates tenant creation.
-    boolean paidUpgrade;
-    try {
-      PaywallOutcome paywall = evaluatePaywall(accountEmail, onboardingRequest);
-      if (paywall.decision.isBlocked()) {
-        writePaymentRequiredError(response, paywall.decision);
-        return;
-      }
-      paidUpgrade = paywall.paid;
-    } catch (RuntimeException e) {
-      log.error("Paywall evaluation failed for onboarding", e);
-      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, SERVER_ERROR);
+    PaywallOutcome paywallOutcome =
+        resolveOnboardingPaywall(accountEmail, onboardingRequest, response);
+    if (paywallOutcome == PaywallOutcome.REFUSED) {
       return;
     }
+    boolean paidUpgrade = paywallOutcome == PaywallOutcome.PAID;
 
     // Set up NDJSON streaming
     response.setStatus(HttpServletResponse.SC_OK);
@@ -1264,16 +1564,16 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
         return;
       }
 
-      if (!ensureRoles(writer, clientId, adminContext.adminUserId, adminContext.adminRoleId)) {
-        return;
-      }
-
-      if (paidUpgrade) {
-        // Joins the onboarding transaction, so a successful marker commits with the tenant. It is
-        // best-effort in the other direction: markProductive swallows its own failures, so a tenant
-        // can commit unmarked and read back as free, rather than have provisioning rolled back over
-        // a plan marker.
-        tenantPlanService.markProductive(clientId, adminContext.starOrgId);
+      // Joins the onboarding transaction, so a successful marker commits with the tenant. Still
+      // best-effort in the other direction: a tenant may commit unmarked rather than have
+      // provisioning rolled back over a plan marker. What must never happen quietly is exactly
+      // that case, so it is logged as an error naming the account — "paid but demo" is the
+      // symptom ETP-4966 was reported as, and this line is what makes it searchable instead of
+      // indistinguishable from a marker that was never attempted.
+      if (paidUpgrade && !tenantPlanService.markProductive(clientId, adminContext.starOrgId)) {
+        log.error("Paid environment '{}' (client {}) for account {} could not be marked as plan "
+            + "'{}' and will read back as free", onboardingRequest.clientName, clientId,
+            maskEmail(accountEmail), TenantPlanService.PLAN_PRODUCTIVE);
       }
 
       // The returned flag (created vs. already-existing) is no longer used to gate downstream
@@ -1338,6 +1638,46 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   }
 
   /**
+   * Paywall (ETP-4686). Runs before the NDJSON stream opens and before any provisioning, so a
+   * refused request leaves no half-created tenant behind and can still answer with a plain JSON
+   * error instead of a stream. The backend is authoritative here: the /upgrade page in the web
+   * client shows the checkout, but this check is what actually gates tenant creation.
+   *
+   * @return {@link PaywallOutcome#REFUSED} when the caller must stop (the error response is
+   *     already written), otherwise whether the environment is free or paid
+   */
+  private PaywallOutcome resolveOnboardingPaywall(String accountEmail,
+      OnboardingRequestData onboardingRequest, HttpServletResponse response) throws IOException {
+    try {
+      TenantPaywallService.Outcome paywall = evaluatePaywall(accountEmail, onboardingRequest);
+      if (paywall.getDecision().isBlocked()) {
+        writePaymentRequiredError(response, paywall.getDecision());
+        return PaywallOutcome.REFUSED;
+      }
+      return paywall.isProductive() ? PaywallOutcome.PAID : PaywallOutcome.FREE;
+    } catch (RuntimeException e) {
+      log.error("Paywall evaluation failed for onboarding", e);
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, SERVER_ERROR);
+      return PaywallOutcome.REFUSED;
+    }
+  }
+
+  /**
+   * What the paywall decided for one onboarding request. An enum rather than a nullable
+   * {@code Boolean}: "refused" and "free" are different answers, and encoding one of them as null
+   * makes the caller carry a three-state Boolean that unboxes to an NPE the day someone forgets
+   * the null check (java:S2447).
+   */
+  private enum PaywallOutcome {
+    /** Refused, or the evaluation itself failed. The error response is already written. */
+    REFUSED,
+    /** Allowed. A free environment — the tenant is not marked productive. */
+    FREE,
+    /** Allowed. A paid environment — the tenant is marked productive after provisioning. */
+    PAID
+  }
+
+  /**
    * Starts a daemon scheduler that emits a blank NDJSON line every
    * {@link #ONBOARDING_HEARTBEAT_SECONDS} seconds. This keeps bytes flowing on the
    * streaming response so a long-running onboarding step never leaves the connection
@@ -1386,54 +1726,26 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   }
 
   /**
-   * Resolves the paywall decision for an onboarding request (ETP-4686).
+   * Evaluates the paid-environment rules for an onboarding request (ETP-4686, ETP-4966).
    *
-   * <p>Reads the {@code tenant-upgrade} flag from the backend flag provider — the authoritative
-   * evaluation, independent of whatever the web client decided — and combines it with what the
-   * account already owns. The two ownership lookups only run while the flag is on, so with the flag
-   * off this method costs nothing and always allows the request, exactly as before the feature.
+   * <p>Unconditional: the capability has no flag, so this runs for every onboarding request and the
+   * backend is the only authority on both answers it produces. While it was gated, the browser
+   * evaluated the flag through ConfigCat and the backend through local properties that were unset
+   * everywhere — so the browser sold environments the backend then handed out for free.
    */
-  private PaywallOutcome evaluatePaywall(String accountEmail,
+  private TenantPaywallService.Outcome evaluatePaywall(String accountEmail,
       OnboardingRequestData onboardingRequest) {
-    if (!isTenantUpgradeEnabled(accountEmail)) {
-      return new PaywallOutcome(TenantPaywallService.Decision.ALLOWED, false);
-    }
     OBContext.setOBContext(ZERO_ID, ZERO_ID, ZERO_ID, ZERO_ID);
     OBContext.setAdminMode(true);
     try {
-      boolean ownsTenant = EtendoGoJwtDalHelper.countTenantsOwnedByAccountEmail(accountEmail) > 0;
+      boolean ownsEnvironment = EtendoGoJwtDalHelper.countTenantsOwnedByAccountEmail(accountEmail) > 0;
       boolean resuming = isResumingOwnedTenant(onboardingRequest.clientName, accountEmail);
       boolean convertingDemo = "convert-demo".equalsIgnoreCase(onboardingRequest.upgradeAction);
-      // Conversion is a paid state transition, not a free retry of interrupted onboarding.
-      boolean paywallResuming = resuming && !convertingDemo;
-      TenantPaywallService.Decision decision = tenantPaywallService.decide(true, ownsTenant,
-          paywallResuming, onboardingRequest.paymentToken, accountEmail, onboardingRequest.clientName);
-      // Only a request that actually had to clear the paywall counts as a paid upgrade. A first
-      // tenant, or a resume, stays on the free plan even if the payload carried a token.
-      boolean paid = !decision.isBlocked() && ownsTenant && (convertingDemo || !resuming);
-      return new PaywallOutcome(decision, paid);
+      return tenantPaywallService.evaluate(ownsEnvironment, resuming, convertingDemo,
+          onboardingRequest.paymentToken, accountEmail, onboardingRequest.clientName);
     } finally {
       OBContext.restorePreviousMode();
     }
-  }
-
-  /**
-   * Evaluates the {@code tenant-upgrade} flag for this account, targeting on the account email.
-   *
-   * <p><strong>The web client does not yet target on the same value.</strong> It targets on
-   * {@code sf_auth_user}, which the core writes as the ERP admin username of the selected
-   * environment, so the two ends currently bucket a given user differently.
-   *
-   * <p>ETP-4693 supplies the resolution path: {@code GET /sws/neo/session} now returns
-   * {@code accountId} and {@code accountEmail} for the authenticated user, which is the identity
-   * this method targets on. The divergence closes once the web client consumes them — that half is
-   * still open, so do <em>not</em> read this as resolved. It must be closed before any
-   * targeting-aware provider is installed; see the targeting-key precondition in
-   * {@code docs/feature-flags-and-tenant-upgrade.md} §1 and §4.
-   */
-  private boolean isTenantUpgradeEnabled(String accountEmail) {
-    return GoFeatureFlags.isEnabled(GoFeatureFlags.FLAG_TENANT_UPGRADE,
-        FeatureFlagContext.forAccount(accountEmail));
   }
 
   /**
@@ -1678,30 +1990,36 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     }
     data.starOrgId = EtendoGoJwtSupport.findStarOrgId(clientId);
     OBContext.setOBContext(data.adminUserId, data.adminRoleId, clientId, data.starOrgId);
+    markTenantOwnerBestEffort(clientId, data.adminUserId);
     return data;
   }
 
   /**
-   * ETP-4515 (Phase 7) — clones GOClient's Finance/Sales/Purchasing/Inventory roles (plus their
-   * AD_Window_Access) onto the tenant. Runs right after client/organization resolution since it
-   * needs no organization yet: roles are client-wide. See {@link OnboardingRoleProvisioningService}
-   * for the full rationale.
+   * ETP-4830 — flags {@code adminUserId} as {@code clientId}'s owner (see {@link
+   * OwnerSupport#markAsOwnerIfNoneExists}), the very first time this resolves for a brand-new
+   * client: at this exact point in the provisioning chain (right after {@link #createClient}
+   * created the client's real, single {@code AD_User} and BEFORE {@link
+   * #importOnboardingDataset} brings in the GOClient sample dataset's own {@code AD_User} rows —
+   * see {@code referencedata/sampledata/GOClient/AD_USER.xml}), {@code adminUserId} is
+   * unambiguously the one true founder, never a bundled sample/demo user. {@link
+   * OwnerSupport#markAsOwnerIfNoneExists} is itself idempotent (no-op once an owner already
+   * exists for the client), so calling this on every resumed/retried onboarding pass — this
+   * method runs on both the create AND the resume path — is safe and never re-assigns or moves
+   * ownership.
+   *
+   * <p>Best-effort by design (ETP-4830 scope decision): a failure here must never fail the
+   * onboarding chain — every owner-protection check downstream ({@code
+   * UserRoleAssignmentHandler}/{@code UserRoleCompositionService}) already treats a
+   * false/unset {@code is_owner} as "guard never triggers", so a tenant that failed to get an
+   * owner marked here simply ships with no owner-lock yet, exactly like every pre-existing
+   * tenant from before this column existed.</p>
    */
-  private boolean ensureRoles(PrintWriter writer, String clientId, String adminUserId,
-      String adminRoleId) {
-    sendProgress(writer, PROGRESS_ROLES, PROGRESS_IN_PROGRESS,
-        "Provisioning Finance/Sales/Purchasing/Inventory roles...");
+  private void markTenantOwnerBestEffort(String clientId, String adminUserId) {
     try {
-      onboardingRoleProvisioningService.wire(clientId, adminUserId, adminRoleId);
-      sendProgress(writer, PROGRESS_ROLES, "done", "Roles provisioned");
-      return true;
-    } catch (Exception e) {
-      EtendoGoDalHelper.rollbackDalChanges("onboarding role provisioning", e, log);
-      String errorMessage = e.getMessage() != null ? e.getMessage()
-          : "Role provisioning failed";
-      sendProgress(writer, PROGRESS_ROLES, PROGRESS_ERROR, errorMessage);
-      sendFinalResult(writer, false, errorMessage);
-      return false;
+      OwnerSupport.markAsOwnerIfNoneExists(clientId, adminUserId);
+    } catch (RuntimeException e) {
+      log.warn("markTenantOwnerBestEffort: failed to flag owner for client {} user {}: {}",
+          clientId, adminUserId, e.getMessage(), e);
     }
   }
 
@@ -2174,10 +2492,9 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    * Hash a plaintext password using SHA-256 with a random salt.
    * Returns "base64(salt):base64(hash)" so the salt can be recovered for verification.
    *
-   * @deprecated logic moved to {@link PasswordHasher#hash} (ETP-4829, so
-   *     {@link EtendoGoAccountProvisioning} can hash admin-set passwords the same way without
-   *     depending on this servlet); kept as a thin delegate so every existing call site here is
-   *     unchanged.
+   * @deprecated logic moved to {@link PasswordHasher#hash} (ETP-4829, so other callers could
+   *     hash passwords the same way without depending on this servlet); kept as a thin delegate
+   *     so every existing call site here is unchanged.
    */
   @Deprecated
   private String hashPassword(String password) {
@@ -2223,8 +2540,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private void storeResetTokenAndSendEmail(Account account, String appBaseUrl) {
     EtendoGoJwtDalHelper.PasswordResetTokenState previousTokenState =
         EtendoGoJwtDalHelper.capturePasswordResetToken(account);
-    String resetToken = generatePasswordResetToken();
-    String resetTokenHash = hashResetToken(resetToken);
+    String resetToken = generateSecureUrlToken();
+    String resetTokenHash = hashAuthToken(resetToken);
     Date expiresAt = Date.from(Instant.now().plusSeconds(PASSWORD_RESET_TTL_SECONDS));
     EtendoGoJwtDalHelper.storePasswordResetToken(account, resetTokenHash, expiresAt);
 
@@ -2242,6 +2559,122 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     if (!emailSent) {
       EtendoGoJwtDalHelper.restorePasswordResetToken(account, previousTokenState);
     }
+  }
+
+  /**
+   * ETP-4798: issues a fresh email-verification token and mails the link out, used both at
+   * registration ({@code welcome} true, the link rides inside the welcome mail) and on an explicit
+   * re-send ({@code welcome} false, its own {@code verify-email} message).
+   *
+   * <p><strong>Fails open only when there was nothing to fall back to.</strong> Issuing a token
+   * overwrites whatever was pending, so the previous state is captured first and put back when the
+   * mail does not go out. That distinction is the whole point: on a first issue at {@code /register}
+   * there is no previous token, so a failed send leaves the account reading as "nothing pending" and
+   * {@link #rejectWhenEmailNotVerified} lets it through — a misconfigured provider or an unset
+   * {@code etendo.go.app.baseUrl} must not silently lock every new signup out of creating an
+   * environment. On a re-send there IS a previous token, and restoring it keeps the account gated
+   * and keeps the link already sitting in the user's inbox working. Clearing it there instead
+   * would hand anyone a way to switch the gate off simply by pressing "resend" until the
+   * per-recipient throttle refuses the send. Same capture/restore pair
+   * {@link #storeResetTokenAndSendEmail} uses for the reset token.
+   *
+   * @param welcome true to fold the link into the {@code new-account} welcome mail, false to send
+   *     the standalone {@code verify-email} reminder
+   */
+  private void issueEmailVerification(Account account, String language, boolean welcome) {
+    EmailVerificationDalHelper.EmailVerifyTokenState previousTokenState =
+        EmailVerificationDalHelper.captureEmailVerifyToken(account);
+    boolean tokenStored = false;
+    try {
+      String verifyToken = generateSecureUrlToken();
+      String verifyTokenHash = hashAuthToken(verifyToken);
+      String verifyLink = EtendoGoAuthLinkBuilder.verifyEmailLink(verifyToken);
+      if (verifyLink == null) {
+        log.warn("Email verification skipped because the public app base URL "
+            + "({}) is not configured", PublicUrlResolver.APP_BASE_URL_PROPERTY);
+        if (welcome) {
+          sendAuthEmailBestEffort(CONTRACT_NEW_ACCOUNT,
+              () -> authEmailSender.sendNewAccount(account, language));
+        }
+        return;
+      }
+
+      EmailVerificationDalHelper.storeEmailVerifyToken(account, verifyTokenHash,
+          Date.from(Instant.now().plusSeconds(EMAIL_VERIFICATION_TTL_SECONDS)));
+      tokenStored = true;
+
+      boolean emailSent = welcome
+          ? authEmailSender.sendNewAccount(account, language, verifyLink)
+          : authEmailSender.sendVerifyEmail(account, verifyTokenHash, verifyLink, language);
+      if (emailSent) {
+        return;
+      }
+    } catch (RuntimeException e) {
+      // Swallowed on purpose, and this is the whole reason the method owns its own try: it runs
+      // AFTER the account transaction has already committed. Letting the exception escape would
+      // reach handleRegister's catch, roll back nothing that matters, and answer "registration
+      // failed" for an account that exists — leaving the user unable to retry (the address is now
+      // taken) and unable to log in to the account they just created.
+      log.warn("Email verification could not be issued", e);
+    }
+    if (tokenStored) {
+      revertUnusableEmailVerifyToken(account, previousTokenState);
+    }
+  }
+
+  /**
+   * Undoes a token re-issue whose mail never went out, putting back whatever the account held
+   * before it.
+   *
+   * <p>When a confirmation was already pending, the previous token comes back: the account stays
+   * gated and the link already in the user's inbox keeps working. When nothing was pending this
+   * restores to "no token", leaving the account ungated rather than blocked behind a link nobody
+   * can click.
+   */
+  private void revertUnusableEmailVerifyToken(Account account,
+      EmailVerificationDalHelper.EmailVerifyTokenState previousTokenState) {
+    boolean hadPendingToken = previousTokenState != null && previousTokenState.hasToken();
+    try {
+      EmailVerificationDalHelper.restoreEmailVerifyToken(account, previousTokenState);
+    } catch (RuntimeException e) {
+      log.error("Could not revert the unusable email verification token; this account may be gated "
+          + "out of creating an environment with no deliverable confirmation link", e);
+      return;
+    }
+    if (hadPendingToken) {
+      log.warn("Email verification re-send could not be delivered; the previously issued token was "
+          + "restored, so the account stays gated and its earlier link still works");
+    } else {
+      log.warn("Email verification token dropped because its mail could not be sent — "
+          + "the account is left ungated rather than locked out");
+    }
+  }
+
+  /**
+   * ETP-4798 gate. Returns true (and has written the 403) when this account still owes an email
+   * confirmation. Any failure resolving that answers false: an infrastructure problem on our side
+   * must not be what stops a paying user from creating their environment.
+   */
+  private boolean rejectWhenEmailNotVerified(String token, HttpServletResponse response)
+      throws IOException {
+    boolean pending = false;
+    try {
+      OBContext.setOBContext("0", "0", "0", "0");
+      OBContext.setAdminMode(true);
+      Account account = EtendoGoJwtDalHelper.findActiveAccountByBearerToken(token);
+      pending = EmailVerificationDalHelper.isEmailVerificationPending(account);
+    } catch (RuntimeException e) {
+      log.error("Could not check the email verification state for onboarding; allowing the "
+          + "request through", e);
+      return false;
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+    if (pending) {
+      writeError(response, HttpServletResponse.SC_FORBIDDEN, CODE_EMAIL_NOT_VERIFIED,
+          EMAIL_NOT_VERIFIED_MESSAGE, EMAIL_NOT_VERIFIED_MESSAGE);
+    }
+    return pending;
   }
 
   private void sendAuthEmailBestEffort(String contractName, Runnable sendAction) {
@@ -2262,13 +2695,15 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     return UUID.randomUUID().toString().replace("-", "").toLowerCase();
   }
 
-  private String generatePasswordResetToken() {
+  /** Cryptographically random, URL-safe token for a mailed one-shot link (reset, verification). */
+  private String generateSecureUrlToken() {
     byte[] token = new byte[32];
     new SecureRandom().nextBytes(token);
     return Base64.getUrlEncoder().withoutPadding().encodeToString(token);
   }
 
-  private String hashResetToken(String token) {
+  /** SHA-256 of a mailed token. Only the digest is ever persisted. */
+  private String hashAuthToken(String token) {
     try {
       MessageDigest md = MessageDigest.getInstance(HASH_ALGORITHM);
       byte[] digest = md.digest(token.getBytes(StandardCharsets.UTF_8));
@@ -2311,6 +2746,19 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       }
     }
     return sb.toString();
+  }
+
+  private void writeEmailVerifyNeutralResponse(HttpServletResponse response)
+      throws IOException {
+    try {
+      JSONObject result = new JSONObject();
+      result.put(FIELD_STATUS, STATUS_SUCCESS);
+      result.put(FIELD_MESSAGE, EMAIL_VERIFY_NEUTRAL_MESSAGE);
+      writeResponse(response, HttpServletResponse.SC_OK, result);
+    } catch (JSONException e) {
+      log.error("JSON error building email verification resend response", e);
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, INTERNAL_ERROR);
+    }
   }
 
   private void writePasswordResetNeutralResponse(HttpServletResponse response)
@@ -2432,8 +2880,9 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     // Optional Tax ID from the wizard's "Details to start invoicing" step (ETP-4749).
     // Same JSON key as ONBOARDING_DRAFT_FORM_FIELDS ("fiscalIdValue") for consistency.
     private String taxId;
-    // Present only when the paid second-tenant flow issued one (ETP-4686). Ignored while the
-    // tenant-upgrade flag is off and for an account's first tenant.
+    // Present only when the paid environment flow issued one (ETP-4686). Correlated against
+    // CheckoutPaymentRegistry: a token the Stripe webhook confirmed is what makes the resulting
+    // environment productive (ETP-4966).
     private String paymentToken;
     private String upgradeAction;
   }
@@ -2442,19 +2891,5 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     private String adminRoleId;
     private String adminUserId;
     private String starOrgId;
-  }
-
-  /**
-   * Paywall verdict for one onboarding request: whether it may proceed, and whether it proceeded by
-   * paying (which is what marks the resulting tenant productive).
-   */
-  private static class PaywallOutcome {
-    private final TenantPaywallService.Decision decision;
-    private final boolean paid;
-
-    PaywallOutcome(TenantPaywallService.Decision decision, boolean paid) {
-      this.decision = decision;
-      this.paid = paid;
-    }
   }
 }

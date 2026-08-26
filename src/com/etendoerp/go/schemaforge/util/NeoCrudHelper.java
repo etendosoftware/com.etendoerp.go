@@ -44,8 +44,8 @@ import org.openbravo.erpCommon.utility.OBMessageUtils;
 import com.etendoerp.go.schemaforge.DocTypeResolver;
 import com.etendoerp.go.schemaforge.NeoContext;
 import com.etendoerp.go.schemaforge.NeoDefaultsCascadeHelper;
-import com.etendoerp.go.schemaforge.NeoDefaultsService;
 import com.etendoerp.go.schemaforge.NeoFieldFilter;
+import com.etendoerp.go.schemaforge.NeoMandatoryDefaultsService;
 import com.etendoerp.go.schemaforge.NeoResponse;
 
 /**
@@ -202,7 +202,7 @@ public class NeoCrudHelper {
     // Snapshot user-submitted keys before injectMandatoryDefaults adds backend defaults so
     // the callout cascade cannot overwrite values the user explicitly set.
     Set<String> userSubmittedFields = snapshotBodyFields(filteredBody);
-    NeoDefaultsService.injectMandatoryDefaults(filteredBody, adTab, context, parentIdValue);
+    NeoMandatoryDefaultsService.injectMandatoryDefaults(filteredBody, adTab, context, parentIdValue);
 
     Set<String> protectedCalloutFields = snapshotMandatoryBodyFields(filteredBody, adTab);
     protectedCalloutFields.addAll(userSubmittedFields);
@@ -348,7 +348,7 @@ public class NeoCrudHelper {
         effectiveProtected);
     DocTypeResolver.reapplyDocTypeFromTabFilter(filteredBody, adTab, context);
     NeoDefaultsCascadeHelper.removeEmptyFkValues(filteredBody, adTab);
-    NeoDefaultsService.injectMandatoryDefaults(filteredBody, adTab, context, parentIdValue);
+    NeoMandatoryDefaultsService.injectMandatoryDefaults(filteredBody, adTab, context, parentIdValue);
   }
 
   /**

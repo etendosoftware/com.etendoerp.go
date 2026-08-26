@@ -40,7 +40,9 @@ import org.openbravo.base.provider.OBProvider;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.businessUtility.Tax;
+import org.openbravo.erpCommon.utility.OBCurrencyUtils;
 import org.openbravo.model.common.businesspartner.BusinessPartner;
+import org.openbravo.model.common.currency.Currency;
 import org.openbravo.model.common.enterprise.DocumentType;
 import org.openbravo.model.common.enterprise.Locator;
 import org.openbravo.model.common.enterprise.Warehouse;
@@ -49,6 +51,7 @@ import org.openbravo.model.common.invoice.InvoiceLine;
 import org.openbravo.model.financialmgmt.tax.TaxRate;
 import org.openbravo.model.materialmgmt.transaction.ShipmentInOut;
 import org.openbravo.model.materialmgmt.transaction.ShipmentInOutLine;
+import org.openbravo.model.pricing.pricelist.PriceList;
 import org.openbravo.service.db.DalConnectionProvider;
 
 /**
@@ -128,9 +131,12 @@ final class ReturnShipmentUtils {
 
   /**
    * Header-level safety net that guarantees every line of {@code doc} carries a storage bin
-   * belonging to {@code doc}'s OWN warehouse. Called from
-   * {@code ReturnMaterialReceiptHeaderHandler.fillMissingStorageBins} and its
-   * {@code ReturnToVendorShipmentHeaderHandler} twin, after the lines exist.
+   * belonging to {@code doc}'s OWN warehouse. Called via
+   * {@code NeoHandlerUtils.reanchorLinesToHeaderWarehouse} from the {@code documentAction}/POST
+   * pre-hook of all four completable {@code M_InOut}-based header handlers —
+   * {@code GoodsShipmentHeaderHandler}, {@code GoodsReceiptHeaderHandler},
+   * {@code ReturnMaterialReceiptHeaderHandler}, and {@code ReturnToVendorShipmentHeaderHandler}
+   * — after the lines exist.
    *
    * <p><b>ETP-4863 — this method WAS the live bug.</b> It used to give the SOURCE document's bin
    * ({@code line.getCanceledInoutLine().getStorageBin()}) precedence over the line's own value.
@@ -281,31 +287,66 @@ final class ReturnShipmentUtils {
     } else {
       applyBusinessPartnerFinancials(invoice, bp, isSales);
     }
+    // ETP-4888: this header is built directly via OBProvider, bypassing the normal NEO CRUD
+    // "new record" HTTP path that would otherwise resolve every declared contract.json
+    // derivation (e.g. SII/SIF fields like etsgDateOperation/aeatsiiFechaRegCont). Fields
+    // already set above are never overwritten — only properties still blank are filled in.
+    // 4th OBProvider-direct invoice-header path fixed today alongside
+    // NeoCommercialDocumentFactory#createInvoiceFromOrderHeader/#createInvoiceFromReceiptHeader
+    // and CreateDraftInvoiceHandler#createInvoiceHeaderFromShipment. `doc` (the return
+    // shipment/receipt this credit note is generated from) plays the same "parentId" role as
+    // `order`/`receipt` at those sites.
+    NeoBackgroundDefaultsService.applyDeclaredDefaultsToBackgroundEntity(
+        isSales ? "sales-invoice" : "purchase-invoice", "header", invoice, doc.getId());
     return invoice;
   }
 
   private static void applyBusinessPartnerFinancials(Invoice invoice, BusinessPartner bp, boolean isSales) {
     if (isSales) {
-      invoice.setPriceList(bp.getPriceList());
-      if (bp.getPriceList() != null) {
-        invoice.setCurrency(bp.getPriceList().getCurrency());
-      }
       if (bp.getPaymentTerms() == null || bp.getPaymentMethod() == null) {
         throw new OBException("Business Partner is missing mandatory Payment Terms or Payment Method");
       }
+      invoice.setPriceList(bp.getPriceList());
+      invoice.setCurrency(resolveInvoiceCurrency(bp.getPriceList(), invoice));
       invoice.setPaymentTerms(bp.getPaymentTerms());
       invoice.setPaymentMethod(bp.getPaymentMethod());
     } else {
-      invoice.setPriceList(bp.getPurchasePricelist());
-      if (bp.getPurchasePricelist() != null) {
-        invoice.setCurrency(bp.getPurchasePricelist().getCurrency());
-      }
       if (bp.getPOPaymentTerms() == null || bp.getPOPaymentMethod() == null) {
         throw new OBException("Business Partner is missing mandatory PO Payment Terms or PO Payment Method");
       }
+      invoice.setPriceList(bp.getPurchasePricelist());
+      invoice.setCurrency(resolveInvoiceCurrency(bp.getPurchasePricelist(), invoice));
       invoice.setPaymentTerms(bp.getPOPaymentTerms());
       invoice.setPaymentMethod(bp.getPOPaymentMethod());
     }
+    if (invoice.getCurrency() == null) {
+      throw new OBException("Business Partner is missing mandatory "
+          + (isSales ? "Price List" : "Purchase Price List")
+          + " (or its Currency) required to create a " + (isSales ? "Sales" : "Purchase") + " invoice");
+    }
+  }
+
+  /**
+   * ETP-4737: {@code applyBusinessPartnerFinancials} used to set the invoice currency ONLY from
+   * the BP's (sales/purchase) price list, with no fallback — a vendor/customer with no price list
+   * (or a price list with no currency) left {@code Invoice.currency} {@code null}, which Postgres
+   * then rejected with a raw {@code NOT NULL} violation on {@code c_invoice.c_currency_id} at save
+   * time instead of a clean validation message.
+   *
+   * <p>Falls back, in order, to: the invoice organization's own currency, its legal entity's
+   * currency, then the client's base currency — the same resolution chain core already uses for
+   * "what currency applies to this organization" (see
+   * {@link OBCurrencyUtils#getOrgCurrency(String)}), so a BP that is merely missing its
+   * price-list-specific currency still gets a sensible working default instead of a hard failure.
+   * Returns {@code null} only if that chain also fails to resolve anything, which the caller turns
+   * into an {@link OBException} instead of letting a null propagate to the DB save.
+   */
+  private static Currency resolveInvoiceCurrency(PriceList priceList, Invoice invoice) {
+    if (priceList != null && priceList.getCurrency() != null) {
+      return priceList.getCurrency();
+    }
+    String orgCurrencyId = OBCurrencyUtils.getOrgCurrency(invoice.getOrganization().getId());
+    return orgCurrencyId != null ? OBDal.getInstance().get(Currency.class, orgCurrencyId) : null;
   }
 
   // ---------------------------------------------------------------------------

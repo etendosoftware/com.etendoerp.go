@@ -36,6 +36,8 @@ import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFField;
 import com.etendoerp.go.schemaforge.data.SFSpec;
 import com.etendoerp.go.schemaforge.util.NeoReportCallability;
+import com.etendoerp.go.schemaforge.util.NeoReportContract;
+import com.etendoerp.go.schemaforge.util.NeoReportParam;
 
 /**
  * Generates MCP tool definitions dynamically based on ETGO_SF_SPEC configuration
@@ -60,6 +62,9 @@ import com.etendoerp.go.schemaforge.util.NeoReportCallability;
 public class ToolRegistry {
 
   private static final Logger log = LogManager.getLogger(ToolRegistry.class);
+
+  /** The JSON-schema {@code required} keyword, kept as one constant so it is not re-typed. */
+  private static final String KEY_REQUIRED = "required";
 
   /**
    * Generate all MCP tools the authenticated user can access.
@@ -131,15 +136,20 @@ public class ToolRegistry {
         tools.add(buildProcessTool(spec.getName(), spec));
         return;
       }
-      // A generate_ tool is emitted only for NEO-native callable report specs backed by a
-      // Java qualifier handler. Non-callable report specs get no tool and surface as
-      // not configured via neo discover. ETP-4596: also require RBAC access — a process-less
-      // report spec now gates on its constituent windows (AD_TAB_ID) via
-      // hasReportSpecAccess, instead of always being offered as a tool.
+      // A generate_ tool is emitted only for a report spec that clears two independent gates.
+      // ETP-4596: the role must be able to reach it — a process-less report spec gates on its
+      // constituent windows (AD_TAB_ID) via hasReportSpecAccess instead of always being offered.
+      // ETP-4793 / IMP-19: the spec's NEO-native handler must declare a report contract.
+      // Anything else — no handler, or a handler that serves the entity for some other purpose —
+      // gets no tool and surfaces as not configured via neo discover. The contract is resolved
+      // once here and carried into the schema so the tool an agent reads and the parameters the
+      // router enforces cannot diverge. The access gate runs first because it is the security
+      // one: both predicates are pure, so the order changes only which cost is paid on a spec
+      // that fails both, and a spec the role cannot see should not have its handlers looked up.
       if ("R".equals(specType) && permissions.canReport
-          && NeoReportCallability.isReportCallable(spec)
           && NeoAccessUtils.hasReportSpecAccess(spec, "GET")) {
-        tools.add(buildReportTool(spec.getName(), spec));
+        NeoReportCallability.resolveReportContract(spec)
+            .ifPresent(contract -> tools.add(buildReportTool(spec.getName(), spec, contract)));
       }
     } catch (Exception e) {
       log.warn("Error generating tools for spec '{}': {}", spec.getName(), e.getMessage());
@@ -439,7 +449,9 @@ public class ToolRegistry {
     props.put(McpFieldProjection.PARAM_FIELDS, stringArrayProp(
         "Optional projection: return only these field names per row (e.g. "
             + "[\"documentNo\",\"businessPartner\",\"grandTotalAmount\"]). A FK's $_identifier "
-            + "label is included automatically. Omit to return every column."));
+            + "label is included automatically. Names this entity cannot return come back in "
+            + "\"unknownFields\" alongside \"data\" — check it if a field you expected is missing, "
+            + "including when \"data\" is empty. Omit to return every column."));
     props.put(McpFieldProjection.PARAM_VIEW, enumProp(
         "Optional curated view. \"summary\" returns only the spec's business-critical fields — a "
             + "compact row for compliance-heavy specs. Ignored when `fields` is given; omit for the "
@@ -461,7 +473,9 @@ public class ToolRegistry {
     props.put(McpFieldProjection.PARAM_FIELDS, stringArrayProp(
         "Optional projection: return only these field names (e.g. "
             + "[\"documentNo\",\"grandTotalAmount\"]). A FK's $_identifier label is included "
-            + "automatically. Omit to return every column."));
+            + "automatically. Names this entity cannot return come back in \"unknownFields\" "
+            + "alongside \"data\" — check it if a field you expected is missing. Omit to return "
+            + "every column."));
     props.put(McpFieldProjection.PARAM_VIEW, enumProp(
         "Optional curated view. \"summary\" returns only the spec's business-critical fields. "
             + "Ignored when `fields` is given; omit for the full record.",
@@ -487,7 +501,9 @@ public class ToolRegistry {
             + "for this record type, then build the fields object by overriding only the values "
             + "the user actually wants to change on top of that base — instead of asking the "
             + "user for every field or guessing values that already have a sensible default "
-            + "(document number, dates, prices, etc.).",
+            + "(document number, dates, prices, etc.). "
+            + "Dates must be ISO-8601: 'YYYY-MM-DD' for date fields and "
+            + "'YYYY-MM-DDTHH:MM:SS' for datetime fields. No other format is supported.",
         buildObjectSchema(props,
           List.of("spec", McpConstants.PARAM_ENTITY, McpConstants.PARAM_FIELDS)));
   }
@@ -501,7 +517,9 @@ public class ToolRegistry {
 
     return new McpToolDefinition(
         "neo_update",
-        "Update an existing record in a NEO Headless API spec.",
+        "Update an existing record in a NEO Headless API spec. "
+            + "Dates must be ISO-8601: 'YYYY-MM-DD' for date fields and "
+            + "'YYYY-MM-DDTHH:MM:SS' for datetime fields. No other format is supported.",
         buildObjectSchema(props,
           List.of("spec", McpConstants.PARAM_ENTITY, "id", McpConstants.PARAM_FIELDS)));
   }
@@ -553,7 +571,13 @@ public class ToolRegistry {
     props.put("spec", enumProp(McpConstants.LABEL_SPEC_NAME, specNames));
     props.put(McpConstants.PARAM_ENTITY, stringProp(McpConstants.LABEL_ENTITY_NAME_WITH_EXAMPLE));
     props.put(McpConstants.PARAM_PARENT_ID, stringProp(
-        "Optional parent record ID for child entities (e.g. order ID when getting line defaults)"));
+        "Parent record ID — REQUIRED for a child/line entity (e.g. the order ID when getting "
+            + "line defaults, or the inventory header ID when getting inventory-line defaults). "
+            + "Without it, fields whose default depends on the parent record (a storage bin scoped "
+            + "to the parent's warehouse, a price-list version, a running line number) are silently "
+            + "left out of the result rather than erroring — they simply do not appear, so a missing "
+            + "value here is easy to miss unless you know to expect it. Pass the parent's id "
+            + "whenever entity is not the spec's top-level entity."));
     props.put(McpConstants.PARAM_ASSET_ID, stringProp(
         "Optional asset ID for computing dynamic defaults that depend on a specific asset "
             + "(e.g. the amortization header name derived from the asset name and start date)"));
@@ -563,7 +587,10 @@ public class ToolRegistry {
             + "override before neo_create) and `systemManaged` (compliance/audit flags the server "
             + "owns — leave them alone). \"minimal\" returns only the `confirm` block. Use "
             + "grouped/minimal on compliance-heavy specs (invoices, payments) to avoid wading "
-            + "through ~65 fields when only ~5 matter.",
+            + "through ~65 fields when only ~5 matter. In both grouped views a field the server "
+            + "knows but could not resolve a value for is listed in `metadata.unresolvedFields` "
+            + "instead of appearing in `confirm` with an empty value — those are the fields you "
+            + "must supply yourself.",
         List.of(McpDefaultsView.VIEW_FULL, McpDefaultsView.VIEW_GROUPED,
             McpDefaultsView.VIEW_MINIMAL)));
 
@@ -575,17 +602,28 @@ public class ToolRegistry {
             + "the starting point and only override the fields the user actually wants to set — "
             + "instead of asking the user for every value from scratch. neo_create will still "
             + "auto-fill any field you omit, but calling this first lets you see the full base "
-            + "dataset up front. Pass view:\"minimal\" (or \"grouped\") to collapse server-managed "
-            + "compliance flags and focus on the fields you actually confirm.",
+            + "dataset up front. When entity is a child/line tab (not the spec's top-level "
+            + "entity), pass parentId with the parent record's id — omitting it does not resolve "
+            + "parent-dependent fields (a storage bin scoped to the parent's warehouse, a "
+            + "price-list version, a running line number); they are silently absent rather than "
+            + "erroring. Pass view:\"minimal\" (or \"grouped\") to collapse server-managed "
+            + "compliance flags and focus on the fields you actually confirm. "
+            + "Date values come back ISO-8601 ('YYYY-MM-DD', or 'YYYY-MM-DDTHH:MM:SS' for "
+            + "datetime fields) and can be passed straight back to neo_create unchanged.",
         buildObjectSchema(props, List.of("spec", McpConstants.PARAM_ENTITY)));
   }
 
-  // ── Batch tool (cross-spec, atomic) ───────────────────────────────────
+  // ── Batch tool (cross-spec, sequential — not atomic, see IMP-23) ──────
 
   /**
    * Build the {@code neo_batch} tool definition. Unlike the per-spec CRUD tools,
    * each operation in the batch carries its own {@code spec}, so this tool is
    * registered once with no top-level enum.
+   *
+   * <p>The description states plainly that the tool is not atomic (IMP-23). It used to promise
+   * all-or-nothing, which is worse than saying nothing: an agent that believes a failed batch
+   * wrote nothing has no reason to look for the records it left behind, and one such orphan
+   * survived five days in this project's own benchmark evidence.</p>
    */
   McpToolDefinition buildBatchTool() {
     Map<String, Object> opProps = new LinkedHashMap<>();
@@ -617,19 +655,21 @@ public class ToolRegistry {
     Map<String, Object> bodyProp = new LinkedHashMap<>();
     bodyProp.put("type", McpConstants.TYPE_OBJECT);
     bodyProp.put(McpConstants.KEY_DESCRIPTION,
-        "Field values for the new record. String values of the form '$ref:<opId>' are "
-            + "replaced with the resolved recordId of an earlier op.");
+        "Field values for the new record, in the same format neo_create accepts: a foreign key "
+            + "may be a record id (32-char hex or a legacy numeric one such as '102') or a display "
+            + "name resolved server-side (e.g. currency:'EUR'). String values of the form "
+            + "'$ref:<opId>' are replaced with the resolved recordId of an earlier op.");
     opProps.put("body", bodyProp);
 
     Map<String, Object> opItem = new LinkedHashMap<>();
     opItem.put("type", McpConstants.TYPE_OBJECT);
     opItem.put(McpConstants.KEY_PROPERTIES, opProps);
-    opItem.put("required", List.of("id", "spec", McpConstants.PARAM_ENTITY));
+    opItem.put(KEY_REQUIRED, List.of("id", "spec", McpConstants.PARAM_ENTITY));
 
     Map<String, Object> operationsProp = new LinkedHashMap<>();
     operationsProp.put("type", "array");
     operationsProp.put(McpConstants.KEY_DESCRIPTION,
-        "Ordered list of create operations to run as a single transaction.");
+        "Ordered list of create operations, run in the given order.");
     operationsProp.put("items", opItem);
 
     Map<String, Object> props = new LinkedHashMap<>();
@@ -637,9 +677,13 @@ public class ToolRegistry {
 
     return new McpToolDefinition(
         "neo_batch",
-        "Run a sequence of cross-spec create operations atomically. All operations "
-            + "share one OBDal transaction: success commits everything, any failure "
-            + "rolls back everything (no partial writes). Each op carries its own "
+        "Run a sequence of cross-spec create operations in order, atomically: a failure rolls "
+            + "the whole batch back, so retry the whole batch after fixing the reported operation. "
+            + "One exception, and the response states it explicitly: if an operation triggers an "
+            + "Etendo process, that process commits internally and cannot be rolled back — the "
+            + "failure response then carries 'atomic':false plus 'persisted', listing the "
+            + "recordIds that survived, which you must delete or reuse before retrying (a plain "
+            + "retry duplicates them). Always check 'atomic' before retrying. Each op carries its own "
             + "'spec' and 'entity', so a single batch can mix windows (e.g. create a "
             + "Business Partner, a Location, then a Purchase Invoice referencing both). "
             + "Use 'parentRef':<earlierOpId> to set the parent FK on a child-tab op, "
@@ -648,8 +692,10 @@ public class ToolRegistry {
             + "neo_list / neo_selectors first to look up existing records and only "
             + "include create ops for what is genuinely new. "
             + "Returns {committed:true, operations:[{id,ok:true,recordId}]} on success "
-            + "or {committed:false, failedAt:{id,index}, error:{status,message,detail?}} "
-            + "on failure.",
+            + "or {committed:false, atomic:true, failedAt:{id,index}, persisted:[], hint, "
+            + "error:{status,error,detail,seeAlso}} on failure, where 'error' is a stable code "
+            + "(validation_error, not_found, method_not_allowed, server_error) naming what to fix "
+            + "and 'persisted' is non-empty only in the process-commit case above.",
         buildObjectSchema(props, List.of("operations")));
   }
 
@@ -661,21 +707,39 @@ public class ToolRegistry {
     props.put(McpConstants.PARAM_ENTITY,
       stringProp("Entity name within the spec (e.g. 'Header', 'Lines')"));
     props.put(McpActionsView.PARAM_VIEW, enumProp(
-        "Optional response shape. Omit for the full field dump (default, unchanged). "
-            + "\"actions\" returns only the callable buttons/processes ({name, label, "
-            + "invokeVia:\"neo_action\", action, processName, processId, ...}) instead of the "
-            + "full ~97-field schema — use it when you only need to know what can be triggered "
-            + "on this entity, not every column.",
-        List.of(McpActionsView.VIEW_ACTIONS)));
+        "Optional response shape. Omit for the full field dump (default, unchanged) — but note it "
+            + "can exceed 60 kB on compliance-heavy windows and may not fit your context. "
+            + "\"create\" returns ONLY the fields you may send to neo_create, split into "
+            + "required/optional — this is what you want before a create. "
+            + "\"actions\" returns only the buttons/processes ({name, label, action, processName, "
+            + "processId, ...}) — use it when you only need to know what can be triggered on this "
+            + "entity, not every column. Fire only the ones carrying invokeVia:\"neo_action\"; the "
+            + "rest report invokable:false plus a notInvokableReason, and \"invokableCount\" next "
+            + "to \"actionCount\" tells you the split up front.",
+        List.of(McpSchemaCreateView.VIEW_CREATE, McpActionsView.VIEW_ACTIONS)));
+    props.put(McpSchemaCreateView.PARAM_FIELDS, stringArrayProp(
+        "Optional whitelist of field names to describe (e.g. [\"businessPartner\",\"invoiceDate\"]). "
+            + "Returns only those descriptors instead of all of them. Names that match nothing come "
+            + "back in \"unknownFields\" — check it if a field you expected is missing. Ignored when "
+            + "\"view\" is set."));
 
     return new McpToolDefinition(
         "neo_schema",
         "Get the field schema for an entity: field names, types, required flag, "
             + "read-only flag, default values, visibility (editable/readOnly/system/discarded), "
             + "and which fields have FK selectors. Call this BEFORE neo_create to know which "
-            + "fields exist and which are required. Only fields with userRequired=true need to "
-            + "be provided — system fields are auto-derived by Etendo callouts. Pass "
-            + "view:\"actions\" to get only the callable buttons/processes instead.",
+            + "fields exist and which are required — and prefer view:\"create\", which returns "
+            + "only the fields you may send, already split into required/optional. Only fields "
+            + "with userRequired=true need to be provided: a field that is mandatory but that the "
+            + "server can already resolve a value for — from an AD default, a session preference, "
+            + "the business partner's configuration, or a callout — is filled by the server, so it "
+            + "is NOT userRequired. In view:\"create\" those appear under optional with "
+            + "serverDefaulted=true. In the full dump userRequired is a static approximation — it "
+            + "reads the column's own default only, so it over-reports fields the server resolves "
+            + "from elsewhere; view:\"create\" cross-checks against the real defaults and is the "
+            + "authoritative answer to \"must I ask the user for this?\". System fields are "
+            + "auto-derived by Etendo callouts. Pass view:\"actions\" for the callable "
+            + "buttons/processes instead.",
         buildObjectSchema(props, List.of("spec", "entity")));
   }
 
@@ -729,20 +793,82 @@ public class ToolRegistry {
 
   // ── Report tool ────────────────────────────────────────────────────────
 
-  private McpToolDefinition buildReportTool(String specName, SFSpec spec) {
+  /**
+   * Build the {@code generate_*} tool schema from the handler's declared contract
+   * (ETP-4793 / IMP-19).
+   *
+   * <p>The parameters used to come from {@code buildProcessParamSchema}, which emits a property
+   * only for a field backed by an {@code AD_Column}. Every active report spec has zero
+   * {@code ETGO_SF_FIELD} rows — report inputs are not AD columns — so that produced an empty map
+   * and, because {@code objectPropWithProperties} omits the key when the map is empty, a bare
+   * {@code parameters:{type:"object"}} with no properties and no {@code required} list. An agent
+   * had to guess {@code dateFrom} and its date shape, then learn from a 400 that it had guessed
+   * wrong. The handler declares the truth, so the schema is built from that instead.</p>
+   */
+  private McpToolDefinition buildReportTool(String specName, SFSpec spec,
+      NeoReportContract contract) {
     String toolName = McpConstants.GENERATE_PREFIX + kebabToSnake(specName);
     String desc = String.format("Generate the '%s' report", specName);
     if (spec.getDescription() != null) {
       desc += ". " + spec.getDescription();
     }
 
-    Map<String, Object> paramProps = buildProcessParamSchema(spec);
+    Map<String, Object> paramProps = new LinkedHashMap<>();
+    for (NeoReportParam param : contract.getParameters()) {
+      paramProps.put(param.getName(), reportParamProp(param));
+    }
+
+    Map<String, Object> parametersProp = objectPropWithProperties("Report input parameters",
+        paramProps);
+    // An empty `properties` map is itself a statement — "this report takes no inputs" — where an
+    // absent one reads as "any object", which is the very ambiguity IMP-19 removes. The shared
+    // helper omits it when empty (right for process specs, whose parameters come from the
+    // AD_Process definition), so pin it explicitly here.
+    parametersProp.putIfAbsent(McpConstants.KEY_PROPERTIES, paramProps);
+    List<String> requiredParams = contract.getRequiredParameterNames();
+    if (!requiredParams.isEmpty()) {
+      parametersProp.put(KEY_REQUIRED, requiredParams);
+    }
 
     Map<String, Object> props = new LinkedHashMap<>();
-    props.put(McpConstants.PARAM_PARAMETERS, objectPropWithProperties("Report input parameters", paramProps));
-    props.put("format", stringProp("Output format: pdf, xlsx, csv (default: pdf)", false));
+    props.put(McpConstants.PARAM_PARAMETERS, parametersProp);
+    // Only the formats the handler actually serves. The previous schema advertised
+    // "pdf, xlsx, csv (default: pdf)" while the router never read the argument, so a request
+    // for a PDF was answered with JSON and nothing said the format had been ignored.
+    props.put(McpConstants.PARAM_FORMAT, enumProp(
+        "Output format (default: " + contract.getDefaultFormat() + ")", contract.getFormats()));
 
     return new McpToolDefinition(toolName, desc, buildObjectSchema(props, List.of()));
+  }
+
+  /**
+   * Render one declared report parameter as a JSON-schema property.
+   *
+   * <p>{@code date} is carried as a string with the expected shape stated in the description:
+   * JSON Schema's own {@code format:"date"} is an annotation most MCP clients do not enforce, and
+   * IMP-16 traced silent corruption to date values whose shape was never written down where an
+   * agent could read it.</p>
+   */
+  private Map<String, Object> reportParamProp(NeoReportParam param) {
+    String description = param.getDescription();
+    if (!param.getAllowedValues().isEmpty()) {
+      return enumProp(description, param.getAllowedValues());
+    }
+    if (NeoReportParam.TYPE_DATE.equals(param.getType())) {
+      Map<String, Object> prop = stringProp(description + " Format: yyyy-MM-dd.");
+      prop.put("format", "date");
+      return prop;
+    }
+    if (NeoReportParam.TYPE_INTEGER.equals(param.getType())) {
+      return intProp(description);
+    }
+    if (NeoReportParam.TYPE_BOOLEAN.equals(param.getType())) {
+      Map<String, Object> prop = new LinkedHashMap<>();
+      prop.put("type", "boolean");
+      prop.put(McpConstants.KEY_DESCRIPTION, description);
+      return prop;
+    }
+    return stringProp(description);
   }
 
   // ── Process/report parameter introspection ─────────────────────────────
@@ -791,7 +917,7 @@ public class ToolRegistry {
     schema.put("type", McpConstants.TYPE_OBJECT);
     schema.put(McpConstants.KEY_PROPERTIES, properties);
     if (required != null && !required.isEmpty()) {
-      schema.put("required", required);
+      schema.put(KEY_REQUIRED, required);
     }
     return schema;
   }
@@ -800,16 +926,6 @@ public class ToolRegistry {
     Map<String, Object> prop = new LinkedHashMap<>();
     prop.put("type", McpConstants.TYPE_STRING);
     prop.put(McpConstants.KEY_DESCRIPTION, description);
-    return prop;
-  }
-
-  private Map<String, Object> stringProp(String description, boolean required) {
-    Map<String, Object> prop = new LinkedHashMap<>();
-    prop.put("type", McpConstants.TYPE_STRING);
-    prop.put(McpConstants.KEY_DESCRIPTION, description);
-    if (!required) {
-      prop.put("optional", true);
-    }
     return prop;
   }
 

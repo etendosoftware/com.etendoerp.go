@@ -62,7 +62,7 @@ import org.openbravo.erpCommon.utility.OBMessageUtils;
 import com.etendoerp.go.schemaforge.DocTypeResolver;
 import com.etendoerp.go.schemaforge.NeoContext;
 import com.etendoerp.go.schemaforge.NeoDefaultsCascadeHelper;
-import com.etendoerp.go.schemaforge.NeoDefaultsService;
+import com.etendoerp.go.schemaforge.NeoMandatoryDefaultsService;
 import com.etendoerp.go.schemaforge.NeoFieldFilter;
 import com.etendoerp.go.schemaforge.NeoResponse;
 
@@ -601,7 +601,7 @@ class NeoCrudHelperTest {
       try (MockedStatic<NeoDefaultsCascadeHelper> cascadeMock = mockStatic(
               NeoDefaultsCascadeHelper.class);
            MockedStatic<DocTypeResolver> docTypeMock = mockStatic(DocTypeResolver.class);
-           MockedStatic<NeoDefaultsService> defaultsMock = mockStatic(NeoDefaultsService.class)) {
+           MockedStatic<NeoMandatoryDefaultsService> defaultsMock = mockStatic(NeoMandatoryDefaultsService.class)) {
 
         Set<String> protectedFields = Collections.singleton("name");
         NeoCrudHelper.executePostCalloutCascade(
@@ -612,7 +612,7 @@ class NeoCrudHelperTest {
         docTypeMock.verify(() -> DocTypeResolver.reapplyDocTypeFromTabFilter(
             body, adTab, context));
         cascadeMock.verify(() -> NeoDefaultsCascadeHelper.removeEmptyFkValues(body, adTab));
-        defaultsMock.verify(() -> NeoDefaultsService.injectMandatoryDefaults(
+        defaultsMock.verify(() -> NeoMandatoryDefaultsService.injectMandatoryDefaults(
             body, adTab, context, "parent-1"));
       }
     }
@@ -628,7 +628,7 @@ class NeoCrudHelperTest {
       try (MockedStatic<NeoDefaultsCascadeHelper> cascadeMock = mockStatic(
               NeoDefaultsCascadeHelper.class);
            MockedStatic<DocTypeResolver> docTypeMock = mockStatic(DocTypeResolver.class);
-           MockedStatic<NeoDefaultsService> defaultsMock = mockStatic(NeoDefaultsService.class)) {
+           MockedStatic<NeoMandatoryDefaultsService> defaultsMock = mockStatic(NeoMandatoryDefaultsService.class)) {
 
         NeoCrudHelper.executePostCalloutCascade(
             body, adTab, context, null, Collections.emptySet());
@@ -651,7 +651,7 @@ class NeoCrudHelperTest {
       try (MockedStatic<NeoDefaultsCascadeHelper> cascadeMock = mockStatic(
               NeoDefaultsCascadeHelper.class);
            MockedStatic<DocTypeResolver> docTypeMock = mockStatic(DocTypeResolver.class);
-           MockedStatic<NeoDefaultsService> defaultsMock = mockStatic(NeoDefaultsService.class)) {
+           MockedStatic<NeoMandatoryDefaultsService> defaultsMock = mockStatic(NeoMandatoryDefaultsService.class)) {
 
         NeoCrudHelper.executePostCalloutCascade(
             body, adTab, context, null, null);
