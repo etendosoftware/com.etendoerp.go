@@ -927,11 +927,15 @@ GET /sws/neo/rolesoverview
 GET /sws/neo/assignuserroles?UserId=<id>&TemplateRoleIds=<id1,id2,...>
 GET /sws/neo/userroleassignments[?UserId=<id>]
 GET /sws/neo/systemroletemplates
+GET /sws/neo/debuginvitationbypass?Action=forceAccept&Email=<email>       (dev/QA only — §8g)
+GET /sws/neo/debuginvitationbypass?Action=forceStatus&Email=<email>&Status=<status>  (dev/QA only — §8g)
+GET /sws/neo/resendinvitation?AdUserId=<id>                               (§8h)
 Authorization: Bearer {token}
 ```
 
 `NeoGoWebhookBridge` runs `SFListMenu`/`SFWindowAccessMap`/`SFRolesOverview`/`SFAssignUserRoles`/
-`SFUserRoleAssignments`/`SFSystemRoleTemplates` (§8, §8b, §8c, §8d, §8e, §8f) through NEO's own
+`SFUserRoleAssignments`/`SFSystemRoleTemplates`/`SFDebugInvitationBypass`/`SFResendInvitation` (§8,
+§8b, §8c, §8d, §8e, §8f, §8g, §8h) through NEO's own
 JWT authentication instead of the Webhooks module's HTTP dispatch — the same pattern
 `NeoSimSearchEndpoint` (§4.9) already used for `SimSearch`. Each of these pseudo-specs constructs
 the corresponding `BaseWebhookService` and calls its unchanged `get(Map, Map)` method directly;
@@ -942,16 +946,21 @@ response-parsing logic. `SFListMenu`/`SFWindowAccessMap`/`SFRolesOverview` still
 original `/webhooks/*` paths too — the Webhooks module dispatch was not removed for them — but
 `/sws/neo/*` is the path the Go SPA (`tools/app-shell` in `etendo_schema_forge`) actually calls,
 and no `SMFWHE_DEFINEDWEBHOOK_ROLE` grant is required for it. `SFAssignUserRoles` (ETP-4852),
-`SFUserRoleAssignments` (ETP-4906), and `SFSystemRoleTemplates` (ETP-4906) are `/sws/neo/*`-only
-— all three were authored after this pattern was already established, so none ever had a legacy
+`SFUserRoleAssignments` (ETP-4906), `SFSystemRoleTemplates` (ETP-4906),
+`SFDebugInvitationBypass` (ETP-4830), and `SFResendInvitation` (ETP-4830) are `/sws/neo/*`-only —
+all five were authored after this pattern was already established, so none ever had a legacy
 `/webhooks/*` path to keep.
 
 Each webhook's own access rule is unaffected and still enforced inside its `get()` — see
-§8/§8b/§8c/§8d/§8e/§8f for what each one checks (`NeoAccessHelper.isAdminOrClientAdmin`,
+§8/§8b/§8c/§8d/§8e/§8f/§8g/§8h for what each one checks (`NeoAccessHelper.isAdminOrClientAdmin`,
 window/process access checks, etc.). Non-`GET` requests get `405`; a webhook that throws gets
 `500` with the exception message (except `SFAssignUserRoles`'s own expected domain-validation
 rejections, and `SFUserRoleAssignments`'s own expected domain rejections — see §8d/§8e for why
-those are a `200` result instead).
+those are a `200` result instead). **`debuginvitationbypass` is different from every other
+pseudo-spec in this list: it is also gated by a runtime flag checked in
+`NeoPseudoSpecDispatcher` BEFORE `SFDebugInvitationBypass` is even constructed** — see §8g for
+why and how. `resendinvitation` (§8h) has NO such flag — it is a real, always-on production
+feature, gated only by the webhook's own admin/client-admin check plus server-side client scoping.
 
 ### 4.11 NEO Pseudo-Spec Bridge Pattern (preferred for new Etendo-GO-authored webhooks)
 
@@ -1560,6 +1569,17 @@ Responses support custom headers via `withHeader(name, value)`.
   - `InvoiceLineHandler#enrichProductCode` calls it with `("c_invoiceline", "c_invoiceline_id")`, covering sales-invoice and purchase-invoice lines.
 
   Both call sites run from the `GET` branch of `afterHandle()`, immediately before `DiscountLineFilter.filterFromResponse(context)` — mutating the response body in place (same pattern as `InvoiceLineHandler#enrichSourceInvoiceLineId`) so the field survives regardless of whether the discount filter later replaces the response. A line whose product resolves to a non-blank SKU gets `productCode` set on its JSON record; every other line is left without the field. The backend never writes a placeholder value for the missing case — the frontend's `resolveProductCode` (`documentPdf.js`) owns the `'—'` fallback shown on the printed document. Any DB error is caught, logged, and swallowed: this is a best-effort display enrichment and must never fail the parent GET request.
+**Real-world example — `UserRoleAssignmentHandler`'s admin-created-user invitation (ETP-4830, superseding ETP-4829):** the `user` entity's `POST` post-hook used to eagerly provision an `etgo_account` row via a now-deleted `EtendoGoAccountProvisioning` bridge class — `pending` by default, or `active` immediately if the admin typed a password on the create form (a temporary workaround gated by `PasswordPolicy.isStrong` in the `handle()` pre-hook). ETP-4830 replaced both:
+
+  - The `handle()` pre-hook no longer reads or validates a `password` field at all — the field, if the frontend still sends one, is simply ignored by this handler (it still reaches `AD_User.Password`, Openbravo's own classic-backend login, unrelated to `etgo_account`). Invite-email is now the only way to activate an admin-created user's account.
+  - **Ordering (ETP-4830 human-directed requirement, item #14): "create user → assign personal role → invite."** `afterHandle()`'s `POST` branch FIRST calls `ensurePersonalRoleForNewlyCreatedUser` — which delegates to `UserRoleCompositionService#createFreshPersonalRole(User)`, never the get-or-create `ensurePersonalRole(User)`, so a brand-new user can never end up with someone else's orphaned role (see the org-access/defaults writeup in §8d) — and only THEN calls `CompanyInvitationService#createInvitationForNewlyCreatedUser`, so no other role can ever land on the user before its own personal role exists. The strict ordering is proven by a call-order test, not just "both ran" (`UserRoleAssignmentHandlerTest`'s `afterHandleAssignsPersonalRoleBeforeInvitationOnCreate`). Template-role composition on top of that empty personal role happens independently, any time after creation, via `AssignTemplateRolesControl`'s own save — which is why the invitation intentionally skips the "invited user already has an active role" check below (an empty personal role with no templates composed onto it is not a meaningful "active role" from that check's perspective).
+  - `afterHandle()`'s `POST` branch then calls `CompanyInvitationService#createInvitationForNewlyCreatedUser(obContext, email, appBaseUrl, language)` — the same invitation/token/`company-invitation`-contract/dedup/throttle machinery ETP-4894 built for a company administrator inviting an *existing* user (§ `docs/transactional-email-contracts.md`). It resolves the inviter from `context.getObContext()` (captured by the dispatcher before this method's own `OBContext.setAdminMode(true)`, so it still reflects the real acting admin's client/org/user) rather than from an authenticated `etgo_account` bearer token, since this runs from a NeoHandler post-hook, not from the public `/sws/go/invitations` endpoint. It deliberately skips the "invited user already has an active role in the invitation organization" check `createInvitation` otherwise enforces — a freshly `POST`-created `AD_User` has zero roles yet by construction beyond the empty personal role just created above (role composition happens independently, any time after creation, via `AssignTemplateRolesControl`'s own save/`PUT`), so that check would always 400 here and adds no real safety. `CompanyInvitationService` grew a `requireExistingRole` private overload for this rather than a bespoke duplicate of `createInvitationForInviter`, so the new call site still gets dedup-of-an-open-invitation and throttling for free.
+  - There is no eager `etgo_account` row on this path any more: the invitation's `register-and-accept` flow is now the *sole* place an `etgo_account` gets created for an admin-created user, lazily, once the invitee actually accepts. Accepting that invitation does not require the invited `AD_User` to already hold a role — an earlier revision's `hasActiveRoleForOrganization` accept-time check was dropped from both `acceptExistingAccountInAdminMode` and `registerAndAcceptInAdminMode` for exactly this reason (a freshly-created user has none yet by construction); see `docs/transactional-email-contracts.md` for the full accept-time contract this handler's invitation flows into.
+  - `afterHandle()`'s `GET` branch (list and single-record) now also attaches an `invitationStatus` field to every row — `null` when no invitation was ever sent, otherwise one of `PENDING`/`SENT`/`ACCEPTED`/`EXPIRED`/`REVOKED`/`DELIVERY_FAILED` — via a new `CompanyInvitationService.findLatestInvitationStatus(clientId, email)` (backed by a new `CompanyInvitationDalHelper.findLatestInvitation`, unlike `findOpenInvitation` this is not restricted to `PENDING`/`SENT`). This is what lets the frontend render a "pending invite" badge on the Usuarios grid without a separate round trip.
+
+  Both changes are best-effort, same contract as the handler's other two concerns: any failure is logged and swallowed, never failing the parent `AD_User` request.
+
+  - **`ETGO_INVITATION_USER_FK` cascade delete (ETP-4830):** because this handler makes admin-created-user invitations part of the normal create flow, `ETGO_INVITATION` rows now exist for ordinary users, not just for ETP-4894's opt-in "invite an existing user" path. `ETGO_INVITATION.AD_USER_ID` originally referenced `AD_USER` with no `ON DELETE` behavior (`onDelete` omitted in `src-db/database/model/tables/ETGO_INVITATION.xml`, i.e. `NO ACTION`), so deleting an `AD_User` that had ever received an invitation failed with a 500 ("Este registro no puede ser eliminado ya que está relacionado con otros elementos existentes.") — a pre-existing ETP-4894 schema gap, only surfaced now that this handler makes invitation rows routine. Fixed by adding `onDelete="cascade"` to `ETGO_INVITATION_USER_FK`: deleting the `AD_User` now deletes its `ETGO_INVITATION` row(s) with it, since a dangling invitation for a user that no longer exists can never sensibly be accepted. The sibling `ETGO_INVITATION_CREATEDBY_FK`/`ETGO_INVITATION_UPDATEDBY_FK`/`ETGO_INVITATION_ACCOUNT_FK`/`ETGO_INVITATION_CLIENT_FK`/`ETGO_INVITATION_ORG_FK` constraints are intentionally left as `NO ACTION` — those reference the actor/tenant, not the invited user, and Etendo audit columns (`CREATEDBY`/`UPDATEDBY`) are never expected to be deleted out from under a row.
 
 ---
 
@@ -1690,6 +1710,15 @@ NEO Headless enforces security at multiple levels:
    but the declaration keeps the catalog honest if the spec ever loses its tabs.
 
 9. **Field-level control:** Only fields with `ISINCLUDED = 'Y'` participate in selector listings and button action discovery.
+
+10. **Tenant-owner protection (ETP-4830).** `AD_User.EM_ETGO_Is_Owner` (`char(1)`, `NOT NULL DEFAULT 'N'`, an `EM_ETGO_`-prefixed extension column on core's `AD_User` table — same convention as `AD_Role.EM_ETGO_Show_Acct_Fields`, added via the `/etendo:alter-db` webhook mechanism, never by hand-editing core's model XML) flags the ONE `AD_User` who completed self-service onboarding/registration for a client — that client's owner. Read/written via native SQL only (`OwnerSupport`, `schemaforge/util/OwnerSupport.java`), never a DAL getter/setter — the column is not mapped as a typed entity property, exactly the same reasoning `SFWindowAccessMap#resolveShowAccountingFields` documents for its own precedent column.
+
+    - **Assignment.** Auto-set, once, on the real founding admin `AD_User` right after `EtendoGoJwtServlet#createClient` provisions a brand-new client (`InitialClientSetup.createClient`) — before the GOClient sample dataset import (`OnboardingDatasetImportService`) brings in its own bundled `AD_User` rows (`GOAdmin`/`Finance Tester`/`GOuser`), so the founder is unambiguously identified, never one of those sample rows. `OwnerSupport#markAsOwnerIfNoneExists` is idempotent — a no-op once a client already has an owner — so it is safe to call on every resumed/retried onboarding pass, and it is best-effort: a failure here never fails tenant provisioning, it just leaves that client with no owner-lock yet (same as every tenant provisioned before this column existed).
+    - **Enforcement, path (a) — generic `AD_User` PUT/PATCH.** `UserRoleAssignmentHandler`'s write-path guard rejects the ENTIRE request with `400` when the target record is flagged as owner and the requester (`context.getObContext().getUser()`) is anyone other than that same owner — blanket, regardless of which fields the request touches. Runs BEFORE the email-immutability and self/last-admin-lockout guards on that same entity, so a non-owner's attempt to edit the owner is rejected with the owner-specific message, not one of those others'. A self-edit by the owner is a no-op here and falls through to those guards normally.
+    - **Enforcement, path (b) — role reassignment.** `UserRoleCompositionService#assignTemplateRoles`'s 4-arg overload (`(String, List, Role, String)`) takes the caller's own resolved `AD_User_ID` and rejects reassigning the OWNER's role composition the same way, independently of path (a) — an admin reassigning the owner's role through `SFAssignUserRoles` never goes through `UserRoleAssignmentHandler`'s write path at all, so closing only one of the two would leave the other wide open. `SFAssignUserRoles` resolves the caller's `AD_User_ID` from the same `OBContext` its `currentRole` access-gate check already reads, before entering admin mode, and forwards it through — the 2-arg/3-arg overloads (unit tests, any caller with no per-request identity) pass `null`, which skips the check entirely, the same "nothing to enforce" convention `enforceCallerClientBoundary` uses for a `null` caller role.
+    - **Baseline / rollout.** Every user existing before this column shipped reads back `false` (the column backfilled `NOT NULL DEFAULT 'N'` on every pre-existing row), so both enforcement checks are a guaranteed no-op for them until a separate, human-reviewed backfill data-fix (Remedy's domain, `cli/src/data-fixes/` in `etendo_schema_forge`) assigns a retroactive owner. **That backfill has NOT shipped as of this writing** — do not assume every real tenant already has an owner marked.
+    - **Read-side exposure (ETP-4830 item #4).** `UserRoleAssignmentHandler#attachOwnerFlag` attaches a boolean `isOwner` field to every `user` GET response row (list + single-record alike) — the same pattern `attachInvitationStatus` already established for `invitationStatus`, one row at a time, best-effort (a lookup failure is logged and swallowed, the row simply never gets the field, never propagated to the caller). Unlike `attachInvitationStatus`, no `clientId`/admin-mode scoping is needed: `OwnerSupport#isOwner` reads straight off the row's own id via a native query, which bypasses OBContext's row-level filtering entirely. The Go SPA (`tools/app-shell` in `etendo_schema_forge`) renders a small neutral "Owner" pill from this field — `windows/custom/user/OwnerBadge.jsx`, shown in both the Users list grid and the detail header's toolbar — see that repo's `docs/generated-custom-windows/user.md` "Owner badge" section.
+    - **Scope.** Write-path enforcement (paths a/b above) plus this read-side exposure; there is still no UI to ASSIGN/change ownership — only the auto-set-once-at-registration path and a future backfill (not asked for, tracked separately) ever write the column.
 
 **Report spec access control (ETP-4596):** `NeoAccessHelper.hasReportSpecAccess(SFSpec, String)` is the single gate now shared by all 4 access-check call sites that previously either skipped `SPEC_TYPE = 'R'` report specs entirely or fell through a `spec.getProcess() == null` guard that was always true for them — `NeoRequestRouter.handleReportSpecRequest` (the real HTTP data-access gate, which previously had zero check), `NeoDiscoveryHelper.isSpecAccessible`, `McpToolRouterSupport.hasSpecAccess`, and `ToolRegistry`. It checks a linked `AD_Process`/`OBUIAPP_Process` first when the spec has one (delegating to items 5/6 above), else falls back to the same constituent-window check from item 4, keyed off each active/included `SFEntity`'s `AD_TAB_ID`. Five of the 8 report specs now have `AD_TAB_ID` populated and gate on the classic "Financial Account" window (`AD_Window_ID=94EAA455D2644E04AB25D93BE5157B6D`): `financial-accounts-page`, `financial-account-transactions`, `bank-statements`, `bank-reconciliation`, `financial-account-bank-connection`. Verified end-to-end against real roles: `403` for a role lacking Financial Account window access, `200` for a role that has it; discovery listing correctly excludes these specs for an unauthorized role while still showing them to an authorized one.
 
@@ -1910,6 +1939,25 @@ access type) onto the personal role — this module never hand-copies an access 
 DIFFERENT set on a later call reconciles (adds what's missing, removes what's no longer
 requested) rather than only ever growing.
 
+**Org access + user defaults on creation (ETP-4830 items #6.1/#6.2).** Confirmed against real
+tenant data that a freshly-minted personal role previously had ZERO `AD_Role_OrgAccess` rows —
+`createPersonalRole` set the role's own header org to `'*'` but never granted it access to
+anything — and the user's `Default_Ad_Client_ID`/`Default_Ad_Org_ID`/`EM_SMFSWS_Default_WS_Role_ID`
+were left at whatever generic `AD_User` defaulting produced (NOT tenant-scoped — one real test
+user's `Default_Ad_Client_ID` pointed at a completely different tenant's client entirely).
+`createPersonalRole` now also: (1) grants the role `AD_Role_OrgAccess` to the user's own
+organization plus the wildcard `'*'` (skipping the duplicate when the user's own org already IS
+`'*'`); (2) sets `Default_Ad_Client_ID`/`Default_Ad_Org_ID` to the user's own client/organization,
+`Default_M_Warehouse_ID` to the first active warehouse found for that organization (left untouched
+if none exists — never forced to a wrong org's warehouse), and `EM_SMFSWS_Default_WS_Role_ID` to
+the newly-created role itself. `Default_Ad_Role_ID` is deliberately NOT touched by this method —
+every existing caller already sets it immediately after `createPersonalRole` returns, at the same
+"a role was just resolved for this user" moment. Applies uniformly to BOTH callers of
+`createPersonalRole` (`createFreshPersonalRole`'s always-fresh path and
+`resolveOrCreatePersonalRole`'s get-or-create path), so it fires wherever a personal role is
+genuinely minted, regardless of which caller triggered it — including the still-unbuilt ETP-4877
+existing-user backfill, once that reuses this same method as planned.
+
 **Verified live (not just from reading the source):** a template role and a personal role
 naturally end up on DIFFERENT `AD_Client_ID`s (`'0'` vs. the tenant's own) — confirmed this does
 NOT block enforcement anywhere in either NEO (`NeoAccessHelper.findActiveWindowAccess`) or
@@ -1946,12 +1994,37 @@ real cross-tenant privilege-escalation bug, not a theoretical one. The fix,
 non-system caller whose client differs from the target user's. The bypass is scoped to the
 LITERAL System Administrator role id (`"0"`) — never to a mere `isClientAdmin()` role, however
 privileged within its own tenant. `SFAssignUserRoles.get()` forwards its already-resolved
-`currentRole` into the 3-arg `assignTemplateRoles(String, List, Role)` overload for exactly this
-purpose — see that method's javadoc. A 2-arg `assignTemplateRoles(String, List)` overload also
-exists (delegates with `callerRole=null`, skipping the boundary check entirely); today it is only
-reached by plain unit tests and the integration test's fixture calls, but REVIEW flagged it as a
-non-blocking latent risk — a future caller reaching for the 2-arg overload instead of the 3-arg
-one would silently ship without this protection.
+`currentRole` into the tenant-boundary-enforcing `assignTemplateRoles` overload for exactly this
+purpose — see that method's javadoc. **Overload note, updated by ETP-4830:** at the time of this
+fix that was the 3-arg `assignTemplateRoles(String, List, Role)` overload directly; the real
+webhook call site today is the 4-arg `assignTemplateRoles(String, List, Role, String)` overload
+(which also carries the caller's `AD_User_ID` for the owner-protection check described below) —
+the 3-arg form still exists but now only delegates to the 4-arg one with `callerUserId=null`. The
+tenant-boundary logic itself, `enforceCallerClientBoundary`, is unchanged either way. A 2-arg
+`assignTemplateRoles(String, List)` overload also exists (delegates down with `callerRole=null`,
+skipping the boundary check entirely); today it is only reached by plain unit tests and the
+integration test's fixture calls, but REVIEW flagged it as a non-blocking latent risk — a future
+caller reaching for the 2-arg overload instead of a `Role`/caller-carrying one would silently ship
+without this protection.
+
+**Owner protection of the TARGET user (ETP-4830) — a genuinely separate check from the tenant
+boundary above.** The tenant-boundary check answers "is this target user in the caller's own
+client at all"; it says nothing about whether the target is that client's OWNER. `AD_User.
+EM_ETGO_Is_Owner` (see §7 item 10 for the full mechanism) flags the ONE user who completed
+self-service registration for a client — any PUT/PATCH to that user's `AD_User` record, or any
+reassignment of their role composition, from anyone other than the owner themselves must be
+rejected, blanket. `UserRoleCompositionService.enforceOwnerProtection(User, String)` closes the
+role-reassignment half of that rule: it runs right after `enforceCallerClientBoundary`, inside the
+4-arg `assignTemplateRoles(String, List, Role, String)` overload, and throws the same way when the
+target is flagged as owner and the supplied `callerUserId` (the caller's own `AD_User_ID`, NOT
+their role) is not that same user. `SFAssignUserRoles.get()` resolves `callerUserId` from the same
+`OBContext` its `currentRole` access-gate check already reads — before entering admin mode — and
+forwards it through as the 4th argument. The 3-arg overload (unit tests, any caller with no
+per-request identity) delegates with `callerUserId=null`, which skips this check entirely, mirroring
+the 2-arg/`callerRole=null` convention above. **This check is independent of, and does not
+substitute for, `UserRoleAssignmentHandler`'s equivalent guard on the plain `AD_User` PUT/PATCH
+path** — an admin reassigning the owner's role through this webhook never reaches that handler's
+write path at all, so both had to be closed separately.
 
 > **Template-role lifecycle: deactivation while depended-upon is a DB-level non-issue (QA
 > finding, ETP-4852).** Reading `src-db/database/model/triggers/AD_ROLE_CHECK_TRG.xml` directly
@@ -1987,6 +2060,41 @@ old smoke-test pairs are cleaned up on the next `update.database`, not just adde
 `TemplateRoleWindowAccess` is unit-tested directly (`TemplateRoleWindowAccessTest`, `src-test/`)
 since it has zero DB/SQL dependencies — no Gradle classpath workaround needed, unlike the
 `ModuleScript` itself which stays DB-only.
+
+**ETP-4830 item #6.3 — process/report access, mechanical follow-up to the window matrix above.**
+A real-DB audit found all four templates had ZERO `AD_Process_Access`/`obuiapp_process_access`
+rows despite the 64 window grants — a composed user could OPEN a window (e.g. Sales Order) but
+not click any of its action buttons (Process Order, Add Payment, Post, ...), since
+`NeoAccessHelper#hasProcessAccess`/`#hasObuiappProcessAccess` gate those independently of window
+access, and both are real, load-bearing checks (button actions, process execution, menu
+filtering, MCP tool access all go through them). `EnsureSystemRoleTemplatesScript
+#reconcileProcessAccess` closes this: for every window a role has FULL (not read-only) access to,
+it grants every classic `AD_Process`/OBUIAPP process reachable as a BUTTON on that window (an
+`AD_Column` with `AD_Process_ID`/`EM_OBUIAPP_Process_ID` set, on an active `AD_Field`) — queried
+LIVE against the DB every run, not a hardcoded literal list like the window matrix, so it
+self-heals if a button is later added to or removed from one of these windows. Read-only window
+grants contribute no process access (these buttons are all mutating actions — unlocking them from
+a read-only grant would contradict what "read-only" means).
+
+**Deliberately mechanical, not a hand-curated ETP-4878-style matrix — human-approved scope
+reduction.** A real audit found ~270 individual report/process items exist system-wide across the
+4 roles; curating each one by hand (the way the 64-window matrix was designed) was explicitly
+ruled out as its own follow-up ticket, too large for a single pass. This mechanical rule closes
+the button-linked subset (~180 of those ~270 — confirmed via the same audit: 87 classic + 93
+OBUIAPP button-linked processes across the 33 already-granted windows) with zero new per-item
+judgment calls. **STANDALONE reports/processes not tied to any window button (~90 items — 52
+report-type + 22 process-type + 18 OBUIAPP-process menu entries at the system client level)
+remain a known, separate, NOT-yet-closed gap** — out of scope for this pass.
+
+**Propagation onto composed personal roles needed zero new code.** Core's
+`RoleInheritanceManager` already propagates `AD_Process_Access`/`obuiapp_process_access` the exact
+same generic way it propagates `AD_Window_Access` — confirmed by inspecting its registered
+`AccessTypeInjector` implementations (`ReportAndProcessAccessInjector`,
+`ProcessDefinitionAccessInjector`, alongside `WindowAccessInjector`/`FormAccessInjector`/
+`TabAccessInjector`/`FieldAccessInjector`/`OrgAccessInjector`/others). Seeding the TEMPLATE role's
+own access (this script's only job) is sufficient — `UserRoleCompositionService` needed no
+changes at all for personal roles to inherit these new grants, the same way they already inherit
+window access.
 
 **Cross-template `AD_Window_Access` overlap — self-contained fix for a latent core bug (found via
 ETP-4878's overlapping matrix, QA/Sentinel; fixed here, not in core, per an explicit human
@@ -2155,6 +2263,21 @@ its 2 coverage-gap follow-ups, real DB, `WeldBaseTest`), `UserRoleCompositionSer
 own test), and `UserRoleCompositionServiceRealAccessControlIntegrationTest` (real seed-data
 access-control scenarios) — see §9.
 
+**Same protection extended to `AD_Process_Access`/`OBUIAPP_Process_Access` (ETP-4830 item 7).**
+`ProcessAccessOverlapCorruptionGuard` and `ObuiappProcessAccessOverlapCorruptionGuard` are sibling
+`EntityPersistenceEventObserver`s that mirror this same ADD/UPDATE/REMOVE-path trigger set for
+`AD_Process_Access` and `OBUIAPP_Process_Access` respectively — a role's active processes/reports
+are exposed to the identical cross-template ownership-corruption risk that windows are. The
+entity-agnostic pieces (the "which active templates does a role inherit from" query, the
+SeqNo-descending winner/most-permissive-wins reconciliation, the same-flush
+`TEMPLATES_BEING_REMOVED` marker, and a few pure `Role`/`RoleInheritance` helpers) live in the
+shared `com.etendoerp.go.roles.overlap` package (`ActiveTemplateInheritance`,
+`OverlapReconciliationCore`, `TemplateRemovalTracker`) instead of being re-derived per guard.
+`OBUIAPP_Process_Access` carries no unique constraint (unlike `AD_Process_Access`/
+`AD_Window_Access`), so its own residual gap manifests as a silent duplicate row rather than a
+loud `ConstraintViolationException` — see `ObuiappProcessAccessOverlapCorruptionGuard`'s own
+class/method javadoc for the full detail.
+
 **Twelve matrix rows are a documented, deliberate gap — not yet implementable.** Every one of
 them has NO `AD_Window_ID` at all backing it in this environment (either a pure custom/aggregate
 Schema Forge page with zero classic-AD entity, or a report-type spec whose access resolves via a
@@ -2308,6 +2431,129 @@ system client and a non-system caller's ambient readable-client set would otherw
 
 ---
 
+## 8g. Debug Invitation Bypass (SFDebugInvitationBypass Webhook, ETP-4830)
+
+`SFDebugInvitationBypass` (`GET /sws/neo/debuginvitationbypass?Action=<forceAccept|forceStatus>&...`
+— reached ONLY through the NEO pseudo-spec bridge, §4.10/§4.11; no legacy `/webhooks/*` path) is a
+**dev/QA-only** endpoint that lets a tester exercise the invite-email flow (ETP-4830 —
+`CompanyInvitationService#createInvitationForNewlyCreatedUser`, admin-created-user invitations)
+and the frontend's `PendingInvitationPill` states without a real email round-trip: creating and
+verifying an inbox for every `invitationStatus` value in manual QA does not scale.
+
+**GATED OFF BY DEFAULT — this is the security-critical property of this endpoint.**
+`NeoPseudoSpecDispatcher#dispatchDebugInvitationBypass` checks
+`GoRuntimeProperties.readBoolean("etendo.go.debug.invitationBypass",
+"ETGO_DEBUG_INVITATION_BYPASS", false)` **before `SFDebugInvitationBypass` is even
+constructed.** An environment that has not explicitly opted in (its own local
+`Openbravo.properties`/env var — never a value baked into a shared config file committed to this
+repo) gets a plain `404`, not a `403` and never a `200` — the endpoint behaves as if it did not
+exist at all, with zero DB access and zero writes. This is a stronger guarantee than gating inside
+the webhook's own `get()` would give: the webhook object, and everything it could reach, is never
+constructed when the flag is off. The webhook's own admin/client-admin check
+(`NeoAccessHelper.isAdminOrClientAdmin`, same convention as every sibling in this family) is
+defense-in-depth only, not a substitute — a valid NEO bearer token with an admin role is reachable
+in production too, which is exactly why a role check alone was rejected as insufficient for this
+endpoint.
+
+**Two actions, both reusing the real account-provisioning primitives rather than duplicating
+them** (`DebugInvitationBypassService`, `com.etendoerp.go.rest` package — placed there
+specifically so it can call `EtendoGoJwtDalHelper`/`CompanyInvitationDalHelper` directly, both
+package-private by design to keep account-provisioning DAL calls inside that package;
+`SFDebugInvitationBypass` itself, in `com.etendoerp.go.schemaforge.webhooks`, is only a thin
+parameter-marshalling + defense-in-depth-access-gating shim — the same shim/service split
+`SFAssignUserRoles`/`UserRoleCompositionService` already use, §8d):
+
+- **`forceAccept`** (`Email` or `AdUserId`, optional `Name`) — finds-or-creates an active
+  `etgo_account` for that email, reusing `EtendoGoJwtDalHelper#createAccount` (the exact same
+  primitive `CompanyInvitationService#registerAndAcceptInAdminMode` calls) rather than a second,
+  divergent account-creation code path. A newly created account gets a random policy-compliant
+  temporary password, returned in the response (`temporaryPassword`) — there is no email to
+  deliver it through, by design. If a matching `ETGO_INVITATION` row exists for that email (any
+  status, most recent one — this is a dev tool, not scoped to "the caller's own tenant only"), it
+  is flipped to `ACCEPTED` and linked to the account. Skips the token/email round-trip entirely:
+  unlike the real `register-and-accept` flow, no `ETGO_INVITATION` row needs to exist first.
+- **`forceStatus`** (`InvitationId`, or `Email` to resolve the most recently created invitation for
+  that address) — directly sets `ETGO_INVITATION.STATUS` to any value from its enum
+  (`PENDING`/`SENT`/`ACCEPTED`/`EXPIRED`/`REVOKED`/`DELIVERY_FAILED`), for visually exercising
+  every `PendingInvitationPill` state in `etendo_schema_forge` without waiting on real delivery.
+
+```json
+// forceAccept success:
+{"success": true, "email": "...", "accountId": "...", "accountCreated": true,
+ "temporaryPassword": "...", "invitationId": "...", "invitationStatus": "ACCEPTED"}
+// forceStatus success:
+{"success": true, "invitationId": "...", "email": "...", "status": "SENT"}
+// Validation failure or access denied (still HTTP 200, matching SFAssignUserRoles's own
+// "don't 500 a validation rejection" convention, §8d):
+{"success": false, "message": "..."}
+```
+
+**Frontend counterpart:** `useUserDebugMode.js`/`UserDebugPanel.jsx` in `etendo_schema_forge`
+(activated by typing `debuguser` anywhere in the app, mirroring `fiscal-monitor`'s own
+`debugfiscal`/`useDebugMode.js` convention as a fully independent module) — see that repo's
+`docs/generated-custom-windows/user.md` "Debug mode" section. The keydown listener there only
+registers in a dev build (`import.meta.env.DEV`), but that is a discoverability nicety on the UI
+side only; this endpoint's own flag, described above, is the actual security boundary regardless
+of which frontend build happens to be pointed at this backend.
+
+---
+
+## 8h. Resend Invitation (SFResendInvitation Webhook, ETP-4830)
+
+`SFResendInvitation` (`GET /sws/neo/resendinvitation?AdUserId=<id>` — reached ONLY through the NEO
+pseudo-spec bridge, §4.10/§4.11; no legacy `/webhooks/*` path) is the admin-side counterpart to the
+create-time invite flow (§8a-equivalent — `CompanyInvitationService#createInvitationForNewlyCreatedUser`):
+lets an admin re-trigger an invitation for an existing `AD_User` from the `user` window's detail-header
+"Reenviar invitación" button, next to `PendingInvitationPill` (`etendo_schema_forge`'s
+`windows/custom/user/index.jsx`).
+
+**Unlike §8g's debug bypass, this is a real, always-on production feature — no dev-only
+`GoRuntimeProperties` flag.** The access boundary is `SFResendInvitation`'s own
+`NeoAccessHelper.isAdminOrClientAdmin` check (same convention as every sibling in this family) plus
+`CompanyInvitationService#resendInvitation` itself re-validating that the target `AD_User` belongs to the
+caller's own client — a client-admin cannot resend an invitation for another tenant's user by id.
+
+**Eligibility gate** — matches the frontend button's own visibility check exactly (the button is a UX
+nicety only; this server-side gate is the real boundary): the target user's latest invitation (via
+`CompanyInvitationService#effectiveStatus` — computed live from `expiresAt` at read time, so a
+`PENDING`/`SENT` row past its deadline reads as `EXPIRED` without any stored-column write or batch
+sweep job; see `etendo_schema_forge`'s `docs/generated-custom-windows/user.md` "Invite-on-create
+flow" section for the resulting pill states) must
+read `PENDING`, `SENT`, `EXPIRED`, or `DELIVERY_FAILED`. A `REVOKED` invitation is rejected
+(`INVITATION_NOT_RESENDABLE`) rather than silently resurrected — an admin who revoked an invite on purpose
+should not have that undone by a stale button click; `ACCEPTED` is rejected too (nothing left to resend); a
+user with no invitation history at all is rejected (`NO_INVITATION_TO_RESEND`).
+
+**Revoke-then-reissue, not resend-the-same-link.** If the current invitation is still open (`PENDING`/`SENT`
+AND `expiresAt` has not passed), it is flipped to `REVOKED` before a brand-new token/row is minted — so the
+OLD invite link stops working the instant the new one is issued. There is never a window where two links
+for the same invitation are simultaneously valid. An already-`EXPIRED`/`DELIVERY_FAILED` invitation has
+nothing open to revoke, so this step is a no-op for those two source states — only the mint-and-send step
+runs.
+
+**Shares its mint-and-send mechanics with `createInvitation` itself**, not a second, divergent
+implementation: `CompanyInvitationService#createInvitationForInviter`'s own token-generation/persist/send
+tail was extracted into a private `issueFreshInvitation(...)` helper, called both by the normal
+dedup-then-mint create path and by `resendInvitation` directly (bypassing the dedup check on purpose — a
+resend is an explicit admin action, not a repeat create request that should silently no-op).
+
+```json
+// success:
+{"status": "success", "invitation": {"id": "...", "email": "...", "status": "SENT", "expiresAt": "..."}}
+// validation failure (still HTTP 200, matching SFAssignUserRoles's own
+// "don't 500 a validation rejection" convention, §8d):
+{"error": true, "code": "INVITATION_NOT_RESENDABLE", "message": "...", "httpStatus": 400}
+```
+
+**Frontend counterpart:** `resendInvitationApi.js` (`etendo_schema_forge`, `lib/`) — thin
+`fetchNeoWebhookJson` client, same shared mechanics as `debugInvitationBypassApi.js` (§8g) but detects the
+domain-error via this webhook's own `error: true` key (not `success: false` — this response reuses
+`CompanyInvitationService`'s pre-existing `errorResponse`/`invitationResponse` builders rather than
+inventing a new shape for this one webhook). See that repo's `docs/generated-custom-windows/user.md`
+"Resend invitation" section.
+
+---
+
 ## 9. Testing
 
 The module includes unit tests that run without a backend:
@@ -2323,20 +2569,33 @@ The module includes unit tests that run without a backend:
 | `SFWindowAccessMapTest` | -- | Role-based windowAccess resolution (full/read-only/absent), no-role → both maps empty, admin/client-admin bypass → full access to every active Etendo GO window + every capability true, `showAccountingFields` true/false/unset/missing-role, `isAdminOrClientAdmin` true on bypass / false for a restricted role. |
 | `SFRolesOverviewTest` | -- | Admin/client-admin access gate (no role, restricted role, System Administrator, client-admin); tenant-relative role resolution via a client-scoped `Role` criteria (not hardcoded ids), admin-first-then-fixed-name sort order, a tenant with fewer than 5 matching roles; distinct-user-count aggregation; GO-window intersection (native-only windows excluded); tier resolution (full/read-only); exception handling. Two defense-in-depth regression cases confirm the gate is genuinely `isAdminOrClientAdmin`, not "is this one of the tenant's 5 fixed roles": a caller authenticated AS one of those roles (Finance) but not admin/client-admin is still denied (empty `roles`, zero `Role` lookups), and a role with zero active `AD_User_Roles` AND zero active `AD_Window_Access` rows degrades gracefully to `userCount: 0` + an empty `windows` array for all 5 roles rather than throwing or omitting the role. **ETP-4907 additions:** missing tenant roles fall back to the system-level templates with composition-based `userCount` (`UserRoleCompositionService` constructed lazily, once, via `mockConstruction`); an active tenant role is never overridden by its template counterpart, and the composition service is never even constructed when unneeded; the `matrix` covers every GO window (including one no role can reach, resolving to `"none"`) grouped by category, and a window with no resolvable category falls back to the `"Other"` bucket. QA (Sentinel) added 3 more targeting the fallback's early-return branch: a system-template role that doesn't resolve at all (`OBDal.get` returns `null`, e.g. deleted/never-seeded) is silently omitted rather than appearing as a 5th entry with null/empty fields; a system-template role that resolves but is `IsActive = 'N'` is treated identically (also omitted, not returned with stale data); and the full degradation case — every one of the 4 templates missing/inactive — still returns a valid minimal response (just the admin card, `roles.length() == 1`) without ever constructing `UserRoleCompositionService`, confirming the fallback's laziness holds even under total non-resolution, not only when every fixed name already has a tenant role. |
 | `TemplateRoleWindowAccessTest` (ETP-4878) | -- | The real ETP-4878 permission matrix in `TemplateRoleWindowAccess` (`src/com/etendoerp/go/roles/`), DB-free (12 tests): exactly the 4 non-Admin template roles present, exact grant counts per role (Sales 13 / Purchasing 11 / Finance 27 / Inventory 13, 64 total), Asientos manuales resolves to Simple G/L Journal and never to the classic G/L Journal window (`132`), Sales has no grant for Pago, "Categoría del producto" is read-only for Sales/Purchasing but full for Finance/Inventory, no role repeats the same `AD_Window_ID` twice, `byRoleId()` returns a fresh mutable map per call. QA (Sentinel) added 3 more: the 64 grants resolve to exactly 33 DISTINCT `AD_Window_ID`s (not just a raw count that would stay 64 even under duplication); all 8 window/role pairs from the old ETP-4852 2-window smoke test survive unchanged (same full access) in the new matrix, confirming `EnsureSystemRoleTemplatesScript#removeStaleWindowAccess`'s delete path is never actually exercised by that specific migration; and at least one window (e.g. Contactos, Pedido de venta) is granted at genuinely conflicting access levels across 2+ roles — the data-level root cause behind the ETP-4852 cross-template overlap bug fixed in `UserRoleCompositionService` (see §8d and `UserRoleCompositionServiceOverlapIntegrationTest`). |
-| `UserRoleCompositionServiceTest` | -- | Pure-Mockito unit test covering `assignTemplateRoles`'s input-validation guard clauses — the slice that fails before any persistence side effect: blank user id, `null` template id list, unknown user, unknown/inactive template id, a role that is not a template, the client-admin "Admin" role rejected even if somehow marked as a template, requested-id dedup happening before the per-id validation loop (verified via a single `Role` lookup despite 3 whitespace-noisy repeats of the same id), and the two `enforceCallerClientBoundary` regression cases from REVIEW cycle 1: a caller whose client differs from the target user's is rejected with a "different client" message, while the literal System Administrator role id (`"0"`) bypasses the check and reaches the (unrelated) template-validation error instead. **ETP-4906 additions:** `getAppliedTemplateRoleIds`'s read path — blank/unknown user id rejected the same way, a user with no `Default_Ad_Role_ID` yet returns an empty list without ever calling `createPersonalRole`, a reusable personal role with 2 active `AD_Role_Inheritance` rows returns both `InheritFrom` ids in `Seqno` order, and the read path enforces the exact same `enforceCallerClientBoundary` regression pair (cross-client rejected, System Administrator bypasses) as the write path. |
+| `UserRoleCompositionServiceTest` | -- | **ETP-4830 items #6.1/#6.2 additions:** `createFreshPersonalRole` grants `AD_Role_OrgAccess` to both the user's real organization and the wildcard `'*'` (two distinct `RoleOrganization` saves, both scoped to the role's own client); skips the duplicate org-access row when the user's own organization already IS the wildcard; sets `Default_Ad_Client_ID`/`Default_Ad_Org_ID`/`Default_M_Warehouse_ID`/`EM_SMFSWS_Default_WS_Role_ID` on the user (warehouse resolved via a `Warehouse` criteria scoped to the user's org); and skips the org/warehouse defaults entirely (no crash) when the user has no organization at all. Pure-Mockito unit test covering `assignTemplateRoles`'s input-validation guard clauses — the slice that fails before any persistence side effect: blank user id, `null` template id list, unknown user, unknown/inactive template id, a role that is not a template, the client-admin "Admin" role rejected even if somehow marked as a template, requested-id dedup happening before the per-id validation loop (verified via a single `Role` lookup despite 3 whitespace-noisy repeats of the same id), and the two `enforceCallerClientBoundary` regression cases from REVIEW cycle 1: a caller whose client differs from the target user's is rejected with a "different client" message, while the literal System Administrator role id (`"0"`) bypasses the check and reaches the (unrelated) template-validation error instead. **ETP-4906 additions:** `getAppliedTemplateRoleIds`'s read path — blank/unknown user id rejected the same way, a user with no `Default_Ad_Role_ID` yet returns an empty list without ever calling `createPersonalRole`, a reusable personal role with 2 active `AD_Role_Inheritance` rows returns both `InheritFrom` ids in `Seqno` order, and the read path enforces the exact same `enforceCallerClientBoundary` regression pair (cross-client rejected, System Administrator bypasses) as the write path. **ETP-4830 owner-protection additions:** the 4-arg `assignTemplateRoles(String, List, Role, String)` overload rejects a non-owner `callerUserId` reassigning a `EM_ETGO_Is_Owner`-flagged user's roles (`OwnerSupport.isOwner` mocked statically); the owner reassigning their OWN roles reaches the (unrelated) template-validation error instead, proving `enforceOwnerProtection` did not block it; a target NOT flagged as owner is unaffected regardless of caller mismatch (baseline); and a `null` `callerUserId` (the 2-/3-arg overloads) skips the check entirely without ever calling `OwnerSupport` — deliberately left unmocked in that one test so a regression would surface as a loud NPE, not a silent behavior change. |
 | `UserRoleCompositionServiceIntegrationTest` | 446 | Real-DB, end-to-end proof (6 tests) of the full add/reconcile/retract lifecycle: a system-level (`AD_Client_ID = '0'`) template's `AD_Window_Access` propagates onto a per-tenant personal role purely via core's own `RoleInheritanceEventHandler`/`RoleInheritanceManager` (no hand-rolled copy in this module); removing a template on a later call retracts what it had propagated; re-running with the identical template set is a no-op (0 added, 0 removed); an empty template list on a user's FIRST-EVER composition call still creates the personal role and syncs `AD_User_Roles`/`Default_Ad_Role_ID` rather than leaving the user role-less; three occurrences of the same valid template id in one request collapse into exactly one `AD_Role_Inheritance` row instead of one per occurrence; and a recompose call mixing one still-valid template with one bogus id is rejected wholesale without mutating the inheritance/access an earlier, unrelated successful call had already applied. Extends `WeldBaseTest`, NOT plain `OBBaseTest` — role-inheritance propagation is driven by a Hibernate interceptor firing a CDI event that only `WeldBaseTest`'s Arquillian-booted container wires to an observer; under plain `OBBaseTest` the propagation silently never fires, which is a test-harness gap, not a bug in the service. |
 | `UserRoleCompositionServiceOverlapIntegrationTest` | 1181 | Real-DB proof (13 tests, `WeldBaseTest`) of the cross-template `AD_Window_Access` overlap fix AND `WindowAccessOverlapCorruptionGuard`, all 7 triggers plus BUG-2 (see §8d above): composing Finance (full) + Sales (read-only) on a shared window succeeds (no `OBSecurityException`) and resolves to full access, with `client`/`organization` on the shared row matching the personal role's own, and both templates' non-shared windows also present (a real union); the same conflicting grants requested in the OPPOSITE order still resolve to full; re-running the identical overlapping template set is a no-op; `getAppliedTemplateRoleIds` reflects a real overlapping composition. **Triggers 1-5 (B6 rounds 1-5):** a bystander role never passed to `assignTemplateRoles` (e.g. gaining 2 overlapping inheritances via a raw Classic edit) is also protected (triggers 1-2); removing one of two overlapping template inheritances from a composed role is protected on the REMOVE path (trigger 3); gaining a read-only template inheritance never downgrades an existing full grant from another active template (trigger 4); removing the template that justified a previously-widened access level correctly downgrades the row instead of staying stuck at full (trigger 5, `InheritedFrom` bookkeeping). **Triggers 6-7 (B6 rounds 6-7):** removing one of FOUR overlapping templates (2 remaining templates still overlapping on a window) no longer duplicate-INSERTs (trigger 6); updating a template's own access level in place never deletes an already-correctly-sourced dependent row (trigger 7, the `onUpdate`/`UPDATED_GRANT` path). **BUG-2 + coverage gaps (round 8):** downgrading one of two overlapping templates' own access never downgrades a dependent when the other still grants full (`testDowngradingOneOfTwoOverlappingTemplatesNeverDowngradesDependentWhenTheOtherStillGrantsFullAccess`); a single inheritance event touching 3 windows at once resolves each window's most-permissive-wins independently (`testSingleInheritanceEventAffectingMultipleWindowsResolvesEachWindowIndependently`); two guard-triggering template updates inside one shared flush do not cause Hibernate reentrancy (`testTwoGuardTriggeringTemplateUpdatesInsideASingleFlushDoNotCauseHibernateReentrancy`). Uses the real Finance/Sales system templates (not throwaway roles) plus one confirmed-unused window (`AD_Window_ID = 100`) for the shared grant, so it is independent of whatever the templates' own real grants happen to be. |
 | `UserRoleCompositionServiceRealAccessControlIntegrationTest` (B5, ETP-4906) | 228 | Real-DB proof (3 tests, `WeldBaseTest`) that `WindowAccessOverlapCorruptionGuard`'s protection produces the CORRECT effective access outcome, not just a crash-free one, against real ETP-4878 seed-data templates: a Sales-only composed role has no access to Purchase Invoice; a Purchasing-only composed role has no access to Sales Invoice; and a Sales-only role is read-only on "Categoría del producto", then adding Finance upgrades it to full (most-permissive-wins) — the same scenario §8d's four outcomes (no-access ×2, read-only, full) are meant to cover end-to-end. |
 | `UserRoleCompositionServiceOverlapReverificationTest` | 308 | QA (Sentinel) independent re-verification (3 tests) of the same overlap fix, deliberately NOT reusing the fix author's own integration test: 3 simultaneously-overlapping templates (Finance/Sales/Purchasing on a shared window) resolve to most-permissive-wins with the "winner" (Purchasing, full) in the middle of the composition order — ruling out a pairwise-only fix that only checks the newest template against the immediately-preceding state; and two cases seeded with the REAL ETP-4878 matrix's own access levels (not the synthetic window `100`) — Sales (full) + Inventory (read-only) on Contactos resolves to full, and Sales + Purchasing both read-only on Categoría del producto stays read-only (confirms the fix does not spuriously promote a window to full just because 2+ templates share it). Also closes a data point the original QA report got wrong: `ad_window_access_un_key` is a plain `CREATE UNIQUE INDEX` on `(ad_role_id, ad_window_id)`, invisible to a `pg_constraint`-only query — Sales already had a live pre-existing row for Contactos, so this suite seeds only the missing side instead of inserting a duplicate. |
-| `SFAssignUserRolesTest` | 278 | Unit test (8 tests) proving the webhook wires parameters/results/errors correctly, with `UserRoleCompositionService` itself intercepted via `mockConstruction` (its real behavior is the integration test's job): access gate (no role / restricted role denied without constructing the service), the happy path (admin composes, parses a whitespace/empty-entry-noisy `TemplateRoleIds` CSV, returns the assignment summary), missing `UserId` rejected before construction, an absent `TemplateRoleIds` parameter resolving to an empty (not `null`) list meaning "revoke all", a domain `OBException` folding into a `success:false` HTTP-200 result rather than the bridge's `error`/500 path, an unexpected `RuntimeException` surfacing as the bridge's `error` field instead, and the REVIEW cycle 1 regression proving the webhook actually forwards its already-resolved `currentRole` through to `assignTemplateRoles`'s 3-arg overload — the exact wiring the tenant-boundary check depends on. |
+| `SFAssignUserRolesTest` | -- | Unit test proving the webhook wires parameters/results/errors correctly, with `UserRoleCompositionService` itself intercepted via `mockConstruction` (its real behavior is the integration test's job): access gate (no role / restricted role denied without constructing the service), the happy path (admin composes, parses a whitespace/empty-entry-noisy `TemplateRoleIds` CSV, returns the assignment summary), missing `UserId` rejected before construction, an absent `TemplateRoleIds` parameter resolving to an empty (not `null`) list meaning "revoke all", a domain `OBException` folding into a `success:false` HTTP-200 result rather than the bridge's `error`/500 path, an unexpected `RuntimeException` surfacing as the bridge's `error` field instead, and the REVIEW cycle 1 regression proving the webhook actually forwards its already-resolved `currentRole` through to `assignTemplateRoles`'s 4-arg overload — the exact wiring the tenant-boundary check depends on. **ETP-4830 addition:** a companion regression proves the webhook ALSO resolves the caller's own `AD_User_ID` (via `OBContext.getOBContext().getUser()`, stubbed on the mock context) and forwards it as the 4th argument — the wiring `enforceOwnerProtection` depends on; every pre-existing test in this file leaves `mockContext.getUser()` unstubbed (defaults to `null`), confirming `callerUserId=null` for those and that the owner-protection check stays a no-op unless a real caller identity is resolved. |
 | `SFUserRoleAssignmentsTest` (ETP-4906) | -- | Unit test mirroring `SFAssignUserRolesTest`'s `mockConstruction` convention for §8e's read endpoint: access gate denies with the mode-appropriate empty shape (bulk `{"assignments":{}}` with no `UserId`, single `{"userId":...,"templateRoleIds":[]}` with one) without constructing the service; bulk mode returns every user's assignments keyed by id, scoped to `currentRole.getClient().getId()`; single mode returns one user's ids and proves `currentRole` is forwarded into the boundary-checking overload (mirrors `SFAssignUserRolesTest`'s own forwarding regression); a cross-tenant read attempt and an unknown-user-id `OBException` both fold into the single-mode empty shape rather than the bridge's `error`/500 path; an unexpected `RuntimeException` still surfaces as `error`. |
 | `SFSystemRoleTemplatesTest` (ETP-4906) | -- | Unit test (12 tests) mirroring `SFRolesOverviewTest`'s structure for §8f's endpoint: admin/client-admin access gate (no role, restricted role, System Administrator, client-admin — all resolved without the caller's own client ever appearing in any stub); roles resolved via `OBDal.get(Role.class, id)` against the 4 fixed `SystemRoleTemplates` ids rather than a client-scoped `Role` criteria; response omits `userCount`/`isClientAdmin` entirely; Finance/Sales/Purchasing/Inventory ordering; a template id resolving to `null` or to an inactive `Role` is skipped gracefully rather than erroring; GO-window intersection (native-only windows excluded) and tier resolution (full/read-only), mirroring `SFRolesOverview`'s identical logic; exception handling. |
+| `NeoPseudoSpecDispatcherTest#debugInvitationBypass*` (ETP-4830) | -- | The security-critical case for §8g: flag unset AND flag explicitly `"false"` both return a plain `404` with `SFDebugInvitationBypass` never constructed and `NeoGoWebhookBridge#handle` never invoked (zero DB access, not just an early-return inside the webhook); flag `"true"` dispatches through the bridge with a real `SFDebugInvitationBypass` instance; non-`GET` is rejected even when the flag is on. Uses `System.setProperty`/`clearProperty` — `ConfigPropertyReader`'s own documented precedence puts the JVM system property first, ahead of `Openbravo.properties`/env var. |
+| `SFDebugInvitationBypassTest` (ETP-4830) | -- | Unit test mirroring `SFAssignUserRolesTest`'s shape for §8g's shim: access gate (no role / restricted role denied without touching `DebugInvitationBypassService`, injected as a plain Mockito mock via the package-private constructor); `forceAccept`/`forceStatus` delegate with the exact marshalled params, case-insensitive `Action` matching; an unknown/missing `Action` fails without touching the service; an unexpected `RuntimeException` from the service maps to the bridge's `error` field rather than escaping as a thrown exception. |
+| `DebugInvitationBypassServiceTest` (ETP-4830) | -- | Unit test for §8g's real logic, `OBDal`/`EtendoGoJwtDalHelper`/`CompanyInvitationDalHelper`/`CompanyInvitationService` all Mockito static mocks (mirrors `CompanyInvitationServiceTest`'s conventions): `forceAccept` rejects a blank email with no resolvable `AdUserId`; creates a new account via `EtendoGoJwtDalHelper#createAccount` (asserted called, proving no duplicated account-creation logic) when none exists, returning a `temporaryPassword`; reuses an existing active account without a second `createAccount` call and without a `temporaryPassword` in the response; flips a matching open invitation to `ACCEPTED` and links the account; resolves the email from `AdUserId` when `Email` is blank. `forceStatus` rejects a status outside the enum; resolves by `InvitationId` directly (skipping the email lookup entirely) or by the most recent invitation for `Email`; fails cleanly with `success:false` when no invitation matches. |
+| `SFResendInvitationTest` (ETP-4830) | -- | Unit test mirroring `SFDebugInvitationBypassTest`'s shape for §8h's shim: access gate (no role / restricted role denied without touching `CompanyInvitationService`, injected as a plain Mockito mock via the package-private constructor); delegates to `resendInvitation` with the marshalled `AdUserId` (blank when the param is absent, not `null`); an unexpected `RuntimeException` from the service maps to the bridge's `error` field rather than escaping as a thrown exception. |
+| `OwnerSupportTest` (ETP-4830) | -- | Unit test for §7 item 10's `EM_ETGO_Is_Owner` read/write helper, mirroring `SFWindowAccessMapTest`'s native-query mocking convention (`MockedStatic<OBDal>` + a mocked `Session`/`NativeQuery`, `Character` rows for the `char(1)` column, never `String`): `isOwner` true/false/null-column/missing-user, and `false` for a blank/`null` id without ever touching `OBDal`; `clientHasOwner` true/false, same blank/`null` short-circuit; `markAsOwnerIfNoneExists` executes the `UPDATE` only when `clientHasOwner` first reads empty (2 native queries), is a complete no-op (only 1 native query, the check) when the client already has an owner, and never touches `OBDal` at all for a missing client id or user id. |
+| `UserRoleAssignmentHandlerTest` (owner-protection additions, ETP-4830) | -- | `rejectNonOwnerEditingOwner` (§7 item 10's path (a)): a non-owner's PATCH/PUT on an `EM_ETGO_Is_Owner`-flagged record is rejected with `400` regardless of which field it touches (separate cases for `name`, `email`, and `active`, the last two proving the owner guard's own message wins over the ALSO-400 email-immutability/self-lockout guards it runs before — and that `OBDal` is never even reached for those); the owner editing their own record is a no-op that falls through to the other guards unchanged; a target NOT flagged as owner is unaffected regardless of caller (baseline); and an `OwnerSupport.isOwner` lookup failure fails CLOSED (`500`), same convention as every other guard in this handler. Every PRE-EXISTING PUT/PATCH test in this file also gained a `MockedStatic<OwnerSupport>` stub (`isOwner` → `false`) plus, where the test did not already mock it, a matching `MockedStatic<OBContext>` stub — the new guard's own `OBContext.setAdminMode`/`OwnerSupport.isOwner` calls run unconditionally on every PUT/PATCH now, ahead of the email/deactivation guards those tests actually target. **ETP-4830 item #4 additions (`attachOwnerFlag`):** `isOwner` attached `true`/`false` per row on a list GET (`OwnerSupport.isOwner` mocked statically, one stub per row id); attached on a single-record GET the same way; attached with NO `obContext`/`clientId` at all (unlike `invitationStatus`, confirming the two attach steps are independently scoped); and left unattached (best-effort, no field written, `afterHandle` itself never throws) when `OwnerSupport.isOwner` throws. |
 
 Tests are located in `src-test/src/com/etendoerp/go/schemaforge/` (including its `webhooks/`
-subpackage, e.g. `SFAssignUserRolesTest`/`SFUserRoleAssignmentsTest`/`SFSystemRoleTemplatesTest`).
-The `NeoPseudoSpecDispatcher` routing for `userroleassignments` and `systemroletemplates` is
-covered by `NeoPseudoSpecDispatcherTest` (same package), mirroring its existing per-endpoint
-dispatch/method-not-allowed test pairs. The `AD_Role`-templates/composition classes —
+subpackage, e.g. `SFAssignUserRolesTest`/`SFUserRoleAssignmentsTest`/`SFSystemRoleTemplatesTest`/
+`SFDebugInvitationBypassTest`/`SFResendInvitationTest`, and its `handlers/`/`util/` subpackages,
+e.g. `UserRoleAssignmentHandlerTest`/`OwnerSupportTest`) and `src-test/src/com/etendoerp/go/rest/`
+(e.g. `CompanyInvitationServiceTest`/`DebugInvitationBypassServiceTest` — the former's
+`resendInvitation` coverage, §8h, lives alongside its pre-existing `createInvitation`/
+`findLatestInvitationStatus` suites, same file, no separate class).
+The `NeoPseudoSpecDispatcher` routing for `userroleassignments`, `systemroletemplates`,
+`debuginvitationbypass`, and `resendinvitation` is covered by `NeoPseudoSpecDispatcherTest` (same
+package), mirroring its existing per-endpoint dispatch/method-not-allowed test pairs —
+`debuginvitationbypass` additionally covers the flag-off/flag-on branch described in §8g
+(`resendinvitation` has no such flag to test, §8h). The `AD_Role`-templates/composition classes —
 `UserRoleCompositionServiceTest`, `UserRoleCompositionServiceIntegrationTest`,
 `UserRoleCompositionServiceOverlapIntegrationTest`,
 `UserRoleCompositionServiceOverlapReverificationTest`,

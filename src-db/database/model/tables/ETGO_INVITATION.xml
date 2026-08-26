@@ -72,7 +72,7 @@
       <foreign-key foreignTable="AD_USER" name="ETGO_INVITATION_UPDATEDBY_FK">
         <reference local="UPDATEDBY" foreign="AD_USER_ID"/>
       </foreign-key>
-      <foreign-key foreignTable="AD_USER" name="ETGO_INVITATION_USER_FK">
+      <foreign-key foreignTable="AD_USER" name="ETGO_INVITATION_USER_FK" onDelete="cascade">
         <reference local="AD_USER_ID" foreign="AD_USER_ID"/>
       </foreign-key>
       <index name="ETGO_INV_ACCOUNT_IX" unique="false">
