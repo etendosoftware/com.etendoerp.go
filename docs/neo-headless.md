@@ -1741,8 +1741,8 @@ NEO Headless enforces security at multiple levels:
 
     - **Assignment.** Auto-set, once, on the real founding admin `AD_User` right after `EtendoGoJwtServlet#createClient` provisions a brand-new client (`InitialClientSetup.createClient`) — before the GOClient sample dataset import (`OnboardingDatasetImportService`) brings in its own bundled `AD_User` rows (`GOAdmin`/`Finance Tester`/`GOuser`), so the founder is unambiguously identified, never one of those sample rows. `OwnerSupport#markAsOwnerIfNoneExists` is idempotent — a no-op once a client already has an owner — so it is safe to call on every resumed/retried onboarding pass, and it is best-effort: a failure here never fails tenant provisioning, it just leaves that client with no owner-lock yet (same as every tenant provisioned before this column existed).
     - **Enforcement, path (a) — generic `AD_User` PUT/PATCH.** `UserRoleAssignmentHandler`'s write-path guard rejects the ENTIRE request with `400` when the target record is flagged as owner and the requester (`context.getObContext().getUser()`) is anyone other than that same owner — blanket, regardless of which fields the request touches. Runs BEFORE the email-immutability and self/last-admin-lockout guards on that same entity, so a non-owner's attempt to edit the owner is rejected with the owner-specific message, not one of those others'. A self-edit by the owner is a no-op here and falls through to those guards normally.
-    - **Enforcement, path (b) — role reassignment.** `UserRoleCompositionService#assignTemplateRoles`'s 4-arg overload (`(String, List, Role, String)`) takes the caller's own resolved `AD_User_ID` and rejects reassigning the OWNER's role composition the same way, independently of path (a) — an admin reassigning the owner's role through `SFAssignUserRoles` never goes through `UserRoleAssignmentHandler`'s write path at all, so closing only one of the two would leave the other wide open. `SFAssignUserRoles` resolves the caller's `AD_User_ID` from the same `OBContext` its `currentRole` access-gate check already reads, before entering admin mode, and forwards it through — the 2-arg/3-arg overloads (unit tests, any caller with no per-request identity) pass `null`, which skips the check entirely, the same "nothing to enforce" convention `enforceCallerClientBoundary` uses for a `null` caller role.
-    - **Baseline / rollout.** Every user existing before this column shipped reads back `false` (the column backfilled `NOT NULL DEFAULT 'N'` on every pre-existing row), so both enforcement checks are a guaranteed no-op for them until a separate, human-reviewed backfill data-fix (Remedy's domain, `cli/src/data-fixes/` in `etendo_schema_forge`) assigns a retroactive owner. **Shipped 2026-08-26 (ETP-4877):** `20260826T120000Z__R26-tenant-owner-and-personal-role-retrofit.sql` Step 0 flags the earliest-created `is_client_admin`-holding `AD_User` per client (human-confirmed heuristic), atomically and idempotently, mirroring `OwnerSupport#markAsOwnerIfNoneExists`'s own "never overwrite, never move ownership" shape. One live edge case found and left flagged, not fixed: a tenant with ZERO `is_client_admin` holders at all (e.g. "QA Testing" on the local dev DB) has nothing for this heuristic to act on — surfaced via the fix's own `@report`, not silently skipped.
+    - **Enforcement, path (b) — role reassignment.** `UserRoleCompositionService#assignTemplateRoles`'s 4-arg overload (`(String, List, Role, String)`) takes the caller's own resolved `AD_User_ID` and rejects composing template roles onto the owner/admin — **unconditionally as of ETP-5019** (no self-service exception; also triggered by currently holding the client-admin role, not just the owner flag — see §8d for the full ETP-5019 writeup), independently of path (a) — an admin reassigning the owner's role through `SFAssignUserRoles` never goes through `UserRoleAssignmentHandler`'s write path at all, so closing only one of the two would leave the other wide open. `SFAssignUserRoles` resolves the caller's `AD_User_ID` from the same `OBContext` its `currentRole` access-gate check already reads, before entering admin mode, and forwards it through — the 2-arg/3-arg overloads (unit tests, any caller with no per-request identity) pass `null`, which skips the check entirely, the same "nothing to enforce" convention `enforceCallerClientBoundary` uses for a `null` caller role.
+    - **Baseline / rollout.** Every user existing before this column shipped reads back `false` (the column backfilled `NOT NULL DEFAULT 'N'` on every pre-existing row), so path (a) and path (b)'s owner-flag signal are a guaranteed no-op for them until a separate, human-reviewed backfill data-fix (Remedy's domain, `cli/src/data-fixes/` in `etendo_schema_forge`) assigns a retroactive owner. **Shipped 2026-08-26 (ETP-4877):** `20260826T120000Z__R26-tenant-owner-and-personal-role-retrofit.sql` Step 0 flags the earliest-created `is_client_admin`-holding `AD_User` per client (human-confirmed heuristic), atomically and idempotently, mirroring `OwnerSupport#markAsOwnerIfNoneExists`'s own "never overwrite, never move ownership" shape. One live edge case found and left flagged, not fixed: a tenant with ZERO `is_client_admin` holders at all (e.g. "QA Testing" on the local dev DB) has nothing for this heuristic to act on — surfaced via the fix's own `@report`, not silently skipped. **This does NOT extend to path (b)'s second signal (ETP-5019):** `enforceOwnerProtection` also rejects composition for any user CURRENTLY holding the client-admin role, read live off `AD_Role.is_client_admin` — entirely independent of `EM_ETGO_Is_Owner` — so a pre-existing tenant's real admin user was already protected against the self-overwrite bug regardless of the R26 backfill's status. See §8d.
     - **Read-side exposure (ETP-4830 item #4).** `UserRoleAssignmentHandler#attachOwnerFlag` attaches a boolean `isOwner` field to every `user` GET response row (list + single-record alike) — the same pattern `attachInvitationStatus` already established for `invitationStatus`, one row at a time, best-effort (a lookup failure is logged and swallowed, the row simply never gets the field, never propagated to the caller). Unlike `attachInvitationStatus`, no `clientId`/admin-mode scoping is needed: `OwnerSupport#isOwner` reads straight off the row's own id via a native query, which bypasses OBContext's row-level filtering entirely. The Go SPA (`tools/app-shell` in `etendo_schema_forge`) renders a small neutral "Owner" pill from this field — `windows/custom/user/OwnerBadge.jsx`, shown in both the Users list grid and the detail header's toolbar — see that repo's `docs/generated-custom-windows/user.md` "Owner badge" section.
     - **Scope.** Write-path enforcement (paths a/b above) plus this read-side exposure; there is still no UI to ASSIGN/change ownership — only the auto-set-once-at-registration path and a future backfill (not asked for, tracked separately) ever write the column.
 
@@ -2033,24 +2033,46 @@ integration test's fixture calls, but REVIEW flagged it as a non-blocking latent
 caller reaching for the 2-arg overload instead of a `Role`/caller-carrying one would silently ship
 without this protection.
 
-**Owner protection of the TARGET user (ETP-4830) — a genuinely separate check from the tenant
-boundary above.** The tenant-boundary check answers "is this target user in the caller's own
-client at all"; it says nothing about whether the target is that client's OWNER. `AD_User.
-EM_ETGO_Is_Owner` (see §7 item 10 for the full mechanism) flags the ONE user who completed
-self-service registration for a client — any PUT/PATCH to that user's `AD_User` record, or any
-reassignment of their role composition, from anyone other than the owner themselves must be
-rejected, blanket. `UserRoleCompositionService.enforceOwnerProtection(User, String)` closes the
-role-reassignment half of that rule: it runs right after `enforceCallerClientBoundary`, inside the
-4-arg `assignTemplateRoles(String, List, Role, String)` overload, and throws the same way when the
-target is flagged as owner and the supplied `callerUserId` (the caller's own `AD_User_ID`, NOT
-their role) is not that same user. `SFAssignUserRoles.get()` resolves `callerUserId` from the same
-`OBContext` its `currentRole` access-gate check already reads — before entering admin mode — and
-forwards it through as the 4th argument. The 3-arg overload (unit tests, any caller with no
-per-request identity) delegates with `callerUserId=null`, which skips this check entirely, mirroring
-the 2-arg/`callerRole=null` convention above. **This check is independent of, and does not
-substitute for, `UserRoleAssignmentHandler`'s equivalent guard on the plain `AD_User` PUT/PATCH
-path** — an admin reassigning the owner's role through this webhook never reaches that handler's
-write path at all, so both had to be closed separately.
+**Owner/admin protection of the TARGET user (ETP-4830, made unconditional by ETP-5019) — a
+genuinely separate check from the tenant boundary above.** The tenant-boundary check answers "is
+this target user in the caller's own client at all"; it says nothing about whether the target is
+that client's owner/admin. `AD_User.EM_ETGO_Is_Owner` (see §7 item 10 for the full mechanism) flags
+the ONE user who completed self-service registration for a client.
+`UserRoleCompositionService.enforceOwnerProtection(User, String)` closes the role-reassignment half
+of the owner-protection rule: it runs right after `enforceCallerClientBoundary`, inside the 4-arg
+`assignTemplateRoles(String, List, Role, String)` overload, and rejects composing ANY template role
+onto the target when EITHER of two signals fires — `OwnerSupport.isOwner(user.getId())` reads
+`true`, OR the target's current `Default_Ad_Role_ID` resolves to a role with `isClientAdmin() ==
+true` (so a second user manually granted the classic "Admin" role via core, not necessarily the
+flagged owner, is covered too) — as long as a real caller identity was supplied
+(`callerUserId != null`).
+
+> **ETP-5019 fix — the original self-service exception is gone.** ETP-4830's first cut treated
+> `callerUserId.equals(user.getId())` — the owner reassigning their OWN roles — as a no-op, on the
+> theory that only a DIFFERENT caller targeting the owner was the risk. That theory was wrong: the
+> owner's/admin's default role is the client-admin "Admin" role, which `isReusablePersonalRole`
+> explicitly refuses to treat as a reusable personal role (`isClientAdmin()` check) — so composing
+> even ONE template role, self-service or not, made `resolveOrCreatePersonalRole` mint a brand-new
+> personal role and `user.setDefaultRole(personalRole)` SILENTLY REPLACED the Admin role with it.
+> The reported bug: a tenant owner/admin composing roles through the normal `User` window UI
+> unknowingly demoted themselves. The fix removed the self-service exception entirely (the guard is
+> now truly unconditional whenever a caller identity is present) and added the independent
+> `isClientAdmin()` signal so any current client-admin holder is covered even before the ETP-4877
+> owner-flag backfill runs (see the Baseline/rollout note in §7 item 10).
+
+`SFAssignUserRoles.get()` resolves `callerUserId` from the same `OBContext` its `currentRole`
+access-gate check already reads — before entering admin mode — and forwards it through as the 4th
+argument. The 3-arg overload (unit tests, any caller with no per-request identity) delegates with
+`callerUserId=null`, which skips this check entirely, mirroring the 2-arg/`callerRole=null`
+convention above. **This check is independent of, and does not substitute for,
+`UserRoleAssignmentHandler`'s equivalent guard on the plain `AD_User` PUT/PATCH path (unaffected by
+ETP-5019 — still the original owner-vs-non-owner rule, self-edit by the owner remains a no-op
+there)** — an admin reassigning the owner's role through this webhook never reaches that handler's
+write path at all, so both had to be closed separately. On the frontend,
+`AssignTemplateRolesControl` (`tools/app-shell/src/windows/custom/user/`, `etendo_schema_forge`)
+additionally detects the same condition client-side and renders a locked message instead of the
+composition editor, so the doomed interaction is never even offered — see that repo's
+`docs/generated-custom-windows/user.md` → "Owner/admin composition lock (ETP-5019)".
 
 > **Template-role lifecycle: deactivation while depended-upon is a DB-level non-issue (QA
 > finding, ETP-4852).** Reading `src-db/database/model/triggers/AD_ROLE_CHECK_TRG.xml` directly
