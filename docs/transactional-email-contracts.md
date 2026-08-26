@@ -156,6 +156,39 @@ The executor builds an `EmailSendContext` after authorization, recipient resolut
 
 Rules whose context key is unavailable are skipped, so contracts can share policy helpers across flows where not every dimension applies.
 
+### Per-environment throttle ceilings
+
+The document-send family (`sales-invoice-send` and its five siblings) reads its ceilings from
+configuration instead of hardcoding them, because the production values are deliberately tight
+enough to block ordinary development. `perRecord` allows **3 sends of the same document per hour**,
+so re-sending one invoice while checking a template change locks that record out for the rest of
+the hour — indistinguishable, from the operator's side, from the email system being broken.
+
+| Property | Env var | Default | Scope |
+|---|---|---|---|
+| `etendo.go.email.throttle.maxPerRecord` | `ETGO_EMAIL_THROTTLE_MAX_PER_RECORD` | 3 | same document |
+| `etendo.go.email.throttle.maxPerRecipient` | `ETGO_EMAIL_THROTTLE_MAX_PER_RECIPIENT` | 20 | same address |
+| `etendo.go.email.throttle.maxPerUser` | `ETGO_EMAIL_THROTTLE_MAX_PER_USER` | 50 | sending operator |
+| `etendo.go.email.throttle.maxPerTenant` | `ETGO_EMAIL_THROTTLE_MAX_PER_TENANT` | 100 | client |
+| `etendo.go.email.throttle.maxPerDomain` | `ETGO_EMAIL_THROTTLE_MAX_PER_DOMAIN` | 200 | recipient domain |
+
+All windows are one rolling hour. Set them in the Etendo root `gradle.properties`; the defaults are
+the production values, so an environment that configures nothing behaves exactly as before this
+existed.
+
+The global rule (2000 per minute) is **not** configurable: it is a burst guard protecting the
+provider, not a per-actor quota, and no development loop reaches it.
+
+Two behaviours worth knowing:
+
+- **Raising a ceiling resets the counter.** `DalEmailSafetyStore.findThrottle()` matches a throttle
+  row on `maxAttempts` and `windowSeconds` as well as on scope and bucket key, so a changed ceiling
+  finds no existing row and starts a fresh one at zero. Clearing `ETGO_EMAIL_SAFETY` by hand to
+  unblock a developer is never necessary.
+- **A malformed override is ignored**, with a warning logged. This is deliberate: `EmailThrottleRule`
+  clamps with `Math.max(1, maxAttempts)`, so a typo parsing as `0` would silently mean *one* email
+  per hour — a far worse failure than the limit staying where it was.
+
 `EmailSafetyStore` is the persistence boundary for:
 
 - global, tenant, and template kill switches

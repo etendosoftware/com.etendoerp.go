@@ -23,6 +23,8 @@ import java.util.Optional;
 import java.util.Objects;
 
 import org.apache.commons.lang3.StringUtils;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.base.exception.OBException;
@@ -37,6 +39,8 @@ import com.etendoerp.go.schemaforge.email.render.EmailMessages;
  * Base contract for document-send transactional emails resolved from trusted server records.
  */
 public class DefaultDocumentSendEmailContract implements EmailContract {
+
+  private static final Logger log = LogManager.getLogger();
 
   /**
    * Provider template that renders caller-supplied {@code subject}/{@code body} instead of
@@ -61,6 +65,41 @@ public class DefaultDocumentSendEmailContract implements EmailContract {
       "etendo.go.email.provider.documentTemplate";
   public static final String ENV_DOCUMENT_TEMPLATE =
       "ETGO_EMAIL_PROVIDER_DOCUMENT_TEMPLATE";
+
+  /**
+   * Anti-abuse throttle ceilings, per rolling hour.
+   *
+   * <p>ETP-5003: these were inline literals, which made a repeated test send indistinguishable from
+   * abuse — {@code perRecord} in particular allows only 3 sends of the <b>same</b> document per
+   * hour, so re-sending one invoice while checking a template change locks the record out. The
+   * defaults below are the production values and are unchanged; each can be raised per environment
+   * so a developer never has to edit and recompile this class to unblock themselves.</p>
+   *
+   * <p>Raising a limit does not carry the old counter over: {@code DalEmailSafetyStore} matches a
+   * throttle row on {@code maxAttempts} and {@code windowSeconds} as well as on scope and bucket,
+   * so a changed ceiling starts a fresh row at zero.</p>
+   */
+  static final int DEFAULT_MAX_PER_TENANT = 100;
+  static final int DEFAULT_MAX_PER_USER = 50;
+  static final int DEFAULT_MAX_PER_RECORD = 3;
+  static final int DEFAULT_MAX_PER_RECIPIENT = 20;
+  static final int DEFAULT_MAX_PER_DOMAIN = 200;
+
+  /** Global rate is a burst guard rather than a per-actor quota, so it stays fixed. */
+  private static final int DEFAULT_MAX_GLOBAL = 2000;
+  private static final int GLOBAL_WINDOW_SECONDS = 60;
+  private static final int THROTTLE_WINDOW_SECONDS = 3600;
+
+  public static final String PROP_MAX_PER_TENANT = "etendo.go.email.throttle.maxPerTenant";
+  public static final String PROP_MAX_PER_USER = "etendo.go.email.throttle.maxPerUser";
+  public static final String PROP_MAX_PER_RECORD = "etendo.go.email.throttle.maxPerRecord";
+  public static final String PROP_MAX_PER_RECIPIENT = "etendo.go.email.throttle.maxPerRecipient";
+  public static final String PROP_MAX_PER_DOMAIN = "etendo.go.email.throttle.maxPerDomain";
+  public static final String ENV_MAX_PER_TENANT = "ETGO_EMAIL_THROTTLE_MAX_PER_TENANT";
+  public static final String ENV_MAX_PER_USER = "ETGO_EMAIL_THROTTLE_MAX_PER_USER";
+  public static final String ENV_MAX_PER_RECORD = "ETGO_EMAIL_THROTTLE_MAX_PER_RECORD";
+  public static final String ENV_MAX_PER_RECIPIENT = "ETGO_EMAIL_THROTTLE_MAX_PER_RECIPIENT";
+  public static final String ENV_MAX_PER_DOMAIN = "ETGO_EMAIL_THROTTLE_MAX_PER_DOMAIN";
 
   private static final String DOCUMENT_RECORD_NOT_FOUND = "Email document record was not found";
   private static final String FIELD_SUBJECT = "subject";
@@ -103,6 +142,32 @@ public class DefaultDocumentSendEmailContract implements EmailContract {
   static String resolveDefaultTemplate() {
     return StringUtils.defaultIfBlank(ConfigPropertyReader.readConfigValue(PROP_DOCUMENT_TEMPLATE,
         ENV_DOCUMENT_TEMPLATE, null), DEFAULT_TEMPLATE);
+  }
+
+  /**
+   * Reads a throttle ceiling from configuration, falling back to the production default.
+   *
+   * <p>A malformed or non-positive override is ignored rather than honoured: a typo that parsed as
+   * zero would clamp to a single attempt per hour and read as the email system being broken.</p>
+   *
+   * @param propertyName Openbravo property name
+   * @param envName environment variable name
+   * @param defaultValue production ceiling used when nothing overrides it
+   * @return the configured ceiling, or {@code defaultValue}
+   */
+  static int maxAttempts(String propertyName, String envName, int defaultValue) {
+    String configured = ConfigPropertyReader.readConfigValue(propertyName, envName, null);
+    if (StringUtils.isBlank(configured)) {
+      return defaultValue;
+    }
+    try {
+      int parsed = Integer.parseInt(configured.trim());
+      return parsed > 0 ? parsed : defaultValue;
+    } catch (NumberFormatException e) {
+      log.warn("Ignoring non-numeric email throttle override {}={}, using {}", propertyName,
+          configured, defaultValue);
+      return defaultValue;
+    }
   }
 
   @Override
@@ -206,12 +271,27 @@ public class DefaultDocumentSendEmailContract implements EmailContract {
     // paragraphs.
     String language = EmailContractCommandSupport.text(command,
         EmailContractCommandSupport.FIELD_LANGUAGE);
+    if (StringUtils.isBlank(language)) {
+      // ETP-5003 — a command with no language silently renders in Spanish (EmailMessages'
+      // fallback). That is indistinguishable from a correct Spanish send, so an operator working
+      // in English reads English on screen and the customer receives Spanish, with nothing
+      // anywhere to explain it. It stays a fallback rather than a rejection — refusing to send an
+      // invoice over a missing header field is worse than sending it in the default language — but
+      // it must never again be silent.
+      log.warn("Email contract {} received no language for record {}; falling back to Spanish. "
+          + "The caller should post the operator's locale.", name,
+          EmailContractCommandSupport.text(command, EmailContractCommandSupport.FIELD_RECORD_ID));
+    }
     try {
       EmailRecipientSet recipients = recipient.getRecipientSet() != null
           ? recipient.getRecipientSet()
           : EmailRecipientSet.singleTo(recipient.getRecipient());
+      // ETP-5003 — the gateway always sends from a verified noreply@ address, so without a
+      // Reply-To the customer receiving this invoice or order has no way to answer the operator
+      // who sent it. Derived from the session, never from the command body.
       return EmailContractResolution.ready(new EmailProviderRequest(recipients, CONTENT_TEMPLATE,
-          buildTemplateData(document.get(), downloadLink.get(), language, messageEdits), null));
+          buildTemplateData(document.get(), downloadLink.get(), language, messageEdits),
+          EmailSenderIdentity.resolveReplyTo()));
     } catch (JSONException e) {
       throw new OBException("Could not build document email payload for " + name, e);
     }
@@ -232,12 +312,17 @@ public class DefaultDocumentSendEmailContract implements EmailContract {
         resolveSendIdempotencyKey(tenantId, documentRecordId, finalRecipients,
             messageEditsQuietly(command)),
         java.util.Arrays.asList(
-            EmailThrottleRule.perTenant(100, 3600),
-            EmailThrottleRule.perUser(50, 3600),
-            EmailThrottleRule.perRecord(3, 3600),
-            EmailThrottleRule.perRecipient(20, 3600),
-            EmailThrottleRule.perDomain(200, 3600),
-            EmailThrottleRule.global(2000, 60)));
+            EmailThrottleRule.perTenant(maxAttempts(PROP_MAX_PER_TENANT, ENV_MAX_PER_TENANT,
+                DEFAULT_MAX_PER_TENANT), THROTTLE_WINDOW_SECONDS),
+            EmailThrottleRule.perUser(maxAttempts(PROP_MAX_PER_USER, ENV_MAX_PER_USER,
+                DEFAULT_MAX_PER_USER), THROTTLE_WINDOW_SECONDS),
+            EmailThrottleRule.perRecord(maxAttempts(PROP_MAX_PER_RECORD, ENV_MAX_PER_RECORD,
+                DEFAULT_MAX_PER_RECORD), THROTTLE_WINDOW_SECONDS),
+            EmailThrottleRule.perRecipient(maxAttempts(PROP_MAX_PER_RECIPIENT,
+                ENV_MAX_PER_RECIPIENT, DEFAULT_MAX_PER_RECIPIENT), THROTTLE_WINDOW_SECONDS),
+            EmailThrottleRule.perDomain(maxAttempts(PROP_MAX_PER_DOMAIN, ENV_MAX_PER_DOMAIN,
+                DEFAULT_MAX_PER_DOMAIN), THROTTLE_WINDOW_SECONDS),
+            EmailThrottleRule.global(DEFAULT_MAX_GLOBAL, GLOBAL_WINDOW_SECONDS)));
   }
 
   private JSONObject buildTemplateData(EmailDocumentRecord document, String downloadLink,
@@ -272,17 +357,26 @@ public class DefaultDocumentSendEmailContract implements EmailContract {
   private EmailContent buildContent(EmailDocumentRecord document, String downloadLink,
       String language, Optional<EmailMessageEdits> messageEdits) {
     EmailContent.Builder content = EmailContent.builder();
-    String recipientName = StringUtils.trimToNull(document.getRecipientName());
-    if (recipientName != null) {
-      content.greetingHtml(EmailMessages.get("document.greeting", language,
-          emphasised(recipientName)));
-    }
     // toHtmlBody() has already escaped the operator's text and turned newlines into <br>.
     String override = messageEdits.map(EmailMessageEdits::toHtmlBody).orElse(null);
-    content.paragraphHtml(override != null ? override
-        : EmailMessages.get("document.body", language,
-            EmailEscape.escapeHtml(documentTypeLabel(language)),
-            emphasised(document.getDocumentNumber())));
+    if (override != null) {
+      // ETP-5003 — the operator's text now carries its own greeting, because the send modal shows
+      // it in the message box so they can read and edit how the customer is addressed. Composing a
+      // second greeting here would print it twice.
+      content.paragraphHtml(override);
+    } else {
+      // Emphasis lives in the catalog as **markers**, the same syntax the operator sees and edits
+      // in the send modal, so both paths render bold through one mechanism. Values are escaped
+      // before interpolation; applyBold runs over the assembled string afterwards.
+      String recipientName = StringUtils.trimToNull(document.getRecipientName());
+      if (recipientName != null) {
+        content.greetingHtml(EmailEscape.applyBold(EmailMessages.get("document.greeting", language,
+            EmailEscape.escapeHtml(recipientName))));
+      }
+      content.paragraphHtml(EmailEscape.applyBold(EmailMessages.get("document.body", language,
+          EmailEscape.escapeHtml(documentTypeLabel(language)),
+          EmailEscape.escapeHtml(document.getDocumentNumber()))));
+    }
     return content.cta(EmailMessages.get("document.cta", language), downloadLink)
         .linkFallbackText(EmailMessages.get("link.fallback", language))
         .signature(EmailMessages.get("signature", language))
@@ -328,9 +422,6 @@ public class DefaultDocumentSendEmailContract implements EmailContract {
             document.getDocumentNumber(), recipientName);
   }
 
-  private static String emphasised(String value) {
-    return "<strong>" + EmailEscape.escapeHtml(value) + "</strong>";
-  }
 
   private Optional<String> resolveDownloadLink(EmailContractCommand command,
       EmailDocumentRecord document) {

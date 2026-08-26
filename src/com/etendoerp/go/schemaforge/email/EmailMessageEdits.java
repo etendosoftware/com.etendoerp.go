@@ -26,8 +26,9 @@ import java.util.Set;
 
 import org.apache.commons.lang3.StringUtils;
 
-import com.etendoerp.go.schemaforge.email.render.EmailEscape;
 import org.codehaus.jettison.json.JSONObject;
+
+import com.etendoerp.go.schemaforge.email.render.EmailEscape;
 
 /**
  * Typed, validated representation of the allowlisted {@code messageEdits} command field for the
@@ -125,7 +126,11 @@ public final class EmailMessageEdits {
     if (message == null) {
       return null;
     }
-    return escapeHtml(message).replace("\r\n", "\n").replace("\r", "\n").replace("\n", "<br>");
+    // Escape first, then emphasis, then line breaks: asterisks survive escaping untouched, so a
+    // message containing markup stays inert while its **bold** still renders. Emphasis is applied
+    // before newlines become <br> so a run can never span two lines.
+    return EmailEscape.applyBold(escapeHtml(message))
+        .replace("\r\n", "\n").replace("\r", "\n").replace("\n", "<br>");
   }
 
   /**

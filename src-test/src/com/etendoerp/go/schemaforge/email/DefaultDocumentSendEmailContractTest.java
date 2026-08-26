@@ -19,13 +19,20 @@ package com.etendoerp.go.schemaforge.email;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.when;
 
 import java.util.Optional;
 
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.Test;
+import org.mockito.MockedStatic;
+import org.openbravo.dal.core.OBContext;
+import org.openbravo.model.ad.access.User;
 
 /**
  * Unit tests for {@link DefaultDocumentSendEmailContract#resolve}, covering ETP-4717's reopened
@@ -117,6 +124,82 @@ public class DefaultDocumentSendEmailContractTest {
         body.contains("</a></p><br>"));
   }
 
+  @Test
+  public void operatorMarkersRenderAsEmphasis() throws Exception {
+    // ETP-5003 — emphasis is expressed as **markers** in the message itself, so an operator who
+    // edits the text can still bold a name or a number. Before this, editing dropped every bold
+    // run and there was no way to put one back.
+    JSONObject edits = new JSONObject();
+    edits.put("message", "Hola **Cliente**, adjuntamos la **10000016**.");
+    JSONObject commandBody = new JSONObject();
+    commandBody.put("recordId", RECORD_ID);
+    commandBody.put("messageEdits", edits);
+
+    String body = resolveBody(commandBody);
+
+    assertTrue("operator markers must render as <strong>: " + body,
+        body.contains("Hola <strong>Cliente</strong>, adjuntamos la <strong>10000016</strong>."));
+    assertFalse("the raw markers must not survive into the email: " + body, body.contains("**"));
+  }
+
+  @Test
+  public void operatorMessageReplacesTheGreetingInsteadOfStackingWithIt() throws Exception {
+    // The greeting now lives inside the editable message, so the module must not compose a second
+    // one — the customer would be greeted twice.
+    JSONObject edits = new JSONObject();
+    edits.put("message", "Buenas tardes, aqui va el documento.");
+    JSONObject commandBody = new JSONObject();
+    commandBody.put("recordId", RECORD_ID);
+    commandBody.put("messageEdits", edits);
+
+    String body = resolveBody(commandBody);
+
+    assertTrue("expected the operator greeting: " + body,
+        body.contains("Buenas tardes, aqui va el documento."));
+    assertFalse("the catalog greeting must not be added on top: " + body,
+        body.contains("Hola, <strong>Cliente</strong>:"));
+  }
+
+  @Test
+  public void aDefaultSendStillGreetsTheCustomer() throws Exception {
+    // The catalog greeting remains the path for a command that carries no message at all.
+    String body = resolveBody(new JSONObject("{\"recordId\":\"" + RECORD_ID + "\"}"));
+
+    assertTrue("expected the catalog greeting: " + body,
+        body.contains("Hola, <strong>Cliente</strong>:"));
+  }
+
+  @Test
+  public void documentSendCarriesTheOperatorAddressAsReplyTo() throws Exception {
+    // ETP-5003 — the gateway sends from a verified noreply@ address, so the operator's own
+    // address has to travel in Reply-To or the customer cannot answer the invoice.
+    User user = mock(User.class);
+    when(user.getEmail()).thenReturn("operator@example.com");
+    OBContext obContext = mock(OBContext.class);
+    when(obContext.getUser()).thenReturn(user);
+
+    JSONObject commandBody = new JSONObject();
+    commandBody.put("recordId", RECORD_ID);
+
+    try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class)) {
+      obContextMock.when(OBContext::getOBContext).thenReturn(obContext);
+
+      assertEquals("operator@example.com", resolveRequest(commandBody).getReplyTo());
+    }
+  }
+
+  @Test
+  public void documentSendOmitsReplyToWhenTheOperatorHasNoAddress() throws Exception {
+    JSONObject commandBody = new JSONObject();
+    commandBody.put("recordId", RECORD_ID);
+
+    try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class)) {
+      obContextMock.when(OBContext::getOBContext).thenReturn(null);
+
+      assertNull(resolveRequest(commandBody).getReplyTo());
+    }
+  }
+
   private String resolveBody(JSONObject commandBody) throws JSONException {
     EmailDocumentRecordResolver resolver = recordId -> Optional.of(
         new EmailDocumentRecord("Cliente", RECIPIENT_EMAIL, RECORD_ID, DOCUMENT_NUMBER, null,
@@ -132,5 +215,21 @@ public class DefaultDocumentSendEmailContractTest {
         resolution.isReady());
 
     return resolution.getProviderRequest().getData().getString("body");
+  }
+
+  private EmailProviderRequest resolveRequest(JSONObject commandBody) {
+    EmailDocumentRecordResolver resolver = recordId -> Optional.of(
+        new EmailDocumentRecord("Cliente", RECIPIENT_EMAIL, RECORD_ID, DOCUMENT_NUMBER, null,
+            DOWNLOAD_LINK, "client-1"));
+    DefaultDocumentSendEmailContract contract =
+        new DefaultDocumentSendEmailContract(CONTRACT_NAME, "Documento", resolver);
+
+    EmailContractResolution resolution = contract.resolve(
+        new EmailContractCommand(CONTRACT_NAME, commandBody),
+        EmailRecipientResolution.serverResolved(RECIPIENT_EMAIL));
+    assertTrue("expected a ready resolution, got: " + resolution.getMessage(),
+        resolution.isReady());
+
+    return resolution.getProviderRequest();
   }
 }
