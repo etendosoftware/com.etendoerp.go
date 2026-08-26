@@ -1,10 +1,13 @@
 package com.etendoerp.go.schemaforge;
 
 import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 import org.apache.logging.log4j.LogManager;
@@ -18,6 +21,7 @@ import org.openbravo.base.model.Property;
 import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.datamodel.Column;
+import org.openbravo.model.ad.ui.Field;
 import org.openbravo.model.ad.ui.Tab;
 
 import com.etendoerp.go.schemaforge.data.SFEntity;
@@ -315,7 +319,64 @@ public class NeoDefaultsCascadeHelper {
         fieldsWithCallouts.add(fieldName);
       }
     }
-    return fieldsWithCallouts;
+    return orderByAdFieldSequence(fieldsWithCallouts, adTab);
+  }
+
+  /**
+   * Orders the cascade's trigger fields by their AD_Field sequence number, i.e. the order the
+   * fields appear in the Classic form, from the most generic (Organization) to the most
+   * specific (Business Partner, its address, ...).
+   *
+   * <p><b>Why this matters (ETP-4784).</b> Unlike Classic — where only the callout of the field
+   * the user just edited runs — the create/defaults cascade fires the callout of EVERY field
+   * present in the payload. When two callouts write the same column, the winner is simply
+   * whichever runs last, and the previous iteration order was {@code JSONObject.keys()}, i.e.
+   * hash order: non-deterministic and unrelated to any business rule.
+   *
+   * <p>Concrete case this fixes: on a sales invoice both
+   * {@code SiiInvoiceOrganizationCallout} (on {@code AD_Org_ID}, seqNo 10) and
+   * {@code SiiAutoSetSIIKEYByDefault} (on {@code C_BPartner_ID}, seqNo 50) write
+   * {@code EM_Aeatsii_Clave_Tipo}. The organization callout writes a blanket {@code "F1"},
+   * while the business-partner one resolves the key actually configured on that partner. Under
+   * hash order the blanket value could land last and silently overwrite the specific one.
+   * Following the form's own sequence reproduces what Classic does when a user fills the form
+   * top-to-bottom: the more specific callout runs later and therefore wins.
+   *
+   * <p>Fields with no matching AD_Field (a payload key that is not on this tab) keep their
+   * original relative order and are appended last, so behaviour for them is unchanged.
+   */
+  private static List<String> orderByAdFieldSequence(List<String> fieldsWithCallouts, Tab adTab) {
+    if (fieldsWithCallouts.size() < 2 || adTab == null || adTab.getTable() == null) {
+      return fieldsWithCallouts;
+    }
+    try {
+      Entity dalEntity = ModelProvider.getInstance().getEntityByTableId(adTab.getTable().getId());
+      if (dalEntity == null) {
+        return fieldsWithCallouts;
+      }
+      // property name -> smallest AD_Field seqNo declaring it on this tab
+      Map<String, Long> seqByProperty = new HashMap<>();
+      for (Field adField : adTab.getADFieldList()) {
+        Column column = adField.getColumn();
+        if (column == null || adField.getSequenceNumber() == null) {
+          continue;
+        }
+        // resolvePropertyName never returns null: it falls back to toCleanFieldName().
+        String propertyName = resolvePropertyName(dalEntity, column.getDBColumnName());
+        seqByProperty.merge(propertyName, adField.getSequenceNumber(), Math::min);
+      }
+      if (seqByProperty.isEmpty()) {
+        return fieldsWithCallouts;
+      }
+      List<String> ordered = new ArrayList<>(fieldsWithCallouts);
+      // Stable sort: unknown fields (no AD_Field on this tab) sort last, keeping their order.
+      ordered.sort(Comparator.comparing(
+          field -> seqByProperty.getOrDefault(field, Long.MAX_VALUE)));
+      return ordered;
+    } catch (Exception e) {
+      log.debug("[NEO-DEFAULTS] Could not order cascade fields by AD sequence: {}", e.getMessage());
+      return fieldsWithCallouts;
+    }
   }
 
   private static void processCalloutForField(NeoContext ctx, Tab adTab, String fieldName,
