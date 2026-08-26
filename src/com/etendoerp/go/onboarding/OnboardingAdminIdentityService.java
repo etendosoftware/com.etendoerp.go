@@ -18,15 +18,15 @@ package com.etendoerp.go.onboarding;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
-import org.hibernate.criterion.Restrictions;
 import org.openbravo.base.exception.OBException;
-import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.access.Role;
 import org.openbravo.model.ad.access.User;
 import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.common.enterprise.Warehouse;
+
+import com.etendoerp.go.common.WarehouseLookupHelper;
 
 /**
  * Wires the onboarding admin's own session-default fields to the tenant's REAL business
@@ -119,7 +119,7 @@ public class OnboardingAdminIdentityService {
       user.setDefaultOrganization(org);
     }
     if (user.getDefaultWarehouse() == null) {
-      Warehouse warehouse = findFirstActiveWarehouse(client, org);
+      Warehouse warehouse = WarehouseLookupHelper.findFirstActiveWarehouse(client, org);
       if (warehouse != null) {
         user.setDefaultWarehouse(warehouse);
       }
@@ -128,31 +128,5 @@ public class OnboardingAdminIdentityService {
       user.setSmfswsDefaultWsRole(role);
     }
     OBDal.getInstance().save(user);
-  }
-
-  /**
-   * Prefers a warehouse scoped exactly to {@code organization}; falls back to any active
-   * warehouse belonging to {@code client} (any organization) when none exists at that exact
-   * organization. Same "exact org, then client-wide" DESIGN as {@code
-   * PersonalRoleAccessProvisioningService#findFirstActiveWarehouse} (ETP-4999's sibling fix for
-   * the NEO-invite path) — re-implemented here, in this different package, rather than reached
-   * into cross-package, since that class is package-private and deliberately not touched by this
-   * ticket: the warehouse created during onboarding is itself scoped to the root org {@code '0'},
-   * not this tenant's real business org, so an exact-org-only lookup would leave {@code
-   * Default_M_Warehouse_ID} null for every single-warehouse tenant onboarded this way.
-   */
-  private Warehouse findFirstActiveWarehouse(Client client, Organization organization) {
-    Warehouse warehouse = findFirstActiveWarehouseMatching(Warehouse.PROPERTY_ORGANIZATION, organization);
-    return warehouse != null ? warehouse
-        : findFirstActiveWarehouseMatching(Warehouse.PROPERTY_CLIENT, client);
-  }
-
-  @SuppressWarnings("unchecked")
-  private Warehouse findFirstActiveWarehouseMatching(String property, Object value) {
-    OBCriteria<Warehouse> criteria = OBDal.getInstance().createCriteria(Warehouse.class);
-    criteria.add(Restrictions.eq(property, value));
-    criteria.add(Restrictions.eq(Warehouse.PROPERTY_ACTIVE, true));
-    criteria.setMaxResults(1);
-    return (Warehouse) criteria.uniqueResult();
   }
 }

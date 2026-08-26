@@ -28,6 +28,8 @@ import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.common.enterprise.Warehouse;
 
+import com.etendoerp.go.common.WarehouseLookupHelper;
+
 /**
  * ETP-4830 items #6.1/#6.2 — extracted out of {@link UserRoleCompositionService} (SonarQube
  * S1448, that class was over the 35-method limit) to keep this one responsibility — finishing
@@ -126,40 +128,12 @@ class PersonalRoleAccessProvisioningService {
     Organization userOrg = user.getOrganization();
     if (userOrg != null) {
       user.setDefaultOrganization(userOrg);
-      Warehouse warehouse = findFirstActiveWarehouse(user.getClient(), userOrg);
+      Warehouse warehouse = WarehouseLookupHelper.findFirstActiveWarehouse(user.getClient(), userOrg);
       if (warehouse != null) {
         user.setDefaultWarehouse(warehouse);
       }
     }
     user.setSmfswsDefaultWsRole(role);
     OBDal.getInstance().save(user);
-  }
-
-  /**
-   * Prefers a warehouse scoped exactly to {@code organization}; falls back to any active
-   * warehouse belonging to {@code client} (any organization) when none exists at that exact
-   * organization (ETP-4999). Confirmed against real tenant data: a single-warehouse tenant
-   * commonly has its one {@code M_Warehouse} row attached to the client's root ({@code '*'},
-   * {@code AD_Org_ID = '0'}) organization, not the specific business organization a newly-invited
-   * user's role operates in — an exact-organization-only match left {@code Default_M_Warehouse_ID}
-   * null for the majority of such users. {@code SecureWebServicesUtils#getOrganizationWarehouses}
-   * (the core SWS login/environment-switch path that ultimately needs this default) only walks
-   * DOWN the org tree from the selected organization, never up to a parent/root org, so a
-   * root-scoped warehouse is otherwise invisible there too — a null {@code Default_M_Warehouse_ID}
-   * on a user whose selected organization has no warehouse of its own then throws
-   * {@code SMFSWS_OrgHasNoRole} ("the selected organization has no warehouses") on login.
-   */
-  private Warehouse findFirstActiveWarehouse(Client client, Organization organization) {
-    Warehouse warehouse = findFirstActiveWarehouseMatching(Warehouse.PROPERTY_ORGANIZATION, organization);
-    return warehouse != null ? warehouse : findFirstActiveWarehouseMatching(Warehouse.PROPERTY_CLIENT, client);
-  }
-
-  @SuppressWarnings("unchecked")
-  private Warehouse findFirstActiveWarehouseMatching(String property, Object value) {
-    OBCriteria<Warehouse> criteria = OBDal.getInstance().createCriteria(Warehouse.class);
-    criteria.add(Restrictions.eq(property, value));
-    criteria.add(Restrictions.eq(Warehouse.PROPERTY_ACTIVE, true));
-    criteria.setMaxResults(1);
-    return (Warehouse) criteria.uniqueResult();
   }
 }
