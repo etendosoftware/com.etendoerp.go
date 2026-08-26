@@ -46,6 +46,9 @@ public final class WarehouseLookupHelper {
   }
 
   /**
+   * Finds the first active warehouse for the given organization, falling back to any active
+   * warehouse of the client when none is scoped to that exact organization.
+   *
    * @param client       the tenant's {@code AD_Client}
    * @param organization the organization to prefer an exact warehouse match for
    * @return the first active warehouse scoped to {@code organization}, or else the first active
