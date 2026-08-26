@@ -22,6 +22,8 @@ import java.util.List;
 import java.util.Set;
 
 import org.apache.commons.lang3.StringUtils;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.base.provider.OBProvider;
@@ -33,12 +35,15 @@ import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.currency.Currency;
 import org.openbravo.model.common.enterprise.Organization;
 
+import com.etendoerp.go.common.GoAccountResolver;
 import com.etendoerp.go.payment.TenantPlanService;
 import com.etendoerp.go.schemaforge.data.Account;
 import com.auth0.jwt.interfaces.DecodedJWT;
 import com.smf.securewebservices.utils.SecureWebServicesUtils;
 
 final class EtendoGoJwtDalHelper {
+
+  private static final Logger log = LogManager.getLogger();
 
   private static final String ZERO_ID = "0";
   private static final String STAR_ORGANIZATION_VALUE = "*";
@@ -55,6 +60,8 @@ final class EtendoGoJwtDalHelper {
   private static final String PARAM_STAR_VALUE = "starValue";
   private static final String PARAM_SYSTEM_USER_ID = "systemUserId";
   private static final String ACTIVE_ACCOUNT_FILTER = " and account.active = true";
+  private static final String ACCOUNT_QUERY = "as account where account.";
+  private static final String AND_ACCOUNT = " and account.";
   private static final String FIELD_CLIENT_ID = "clientId";
   private static final String FIELD_CLIENT_NAME = "clientName";
   private static final String FIELD_ORG_ID = "orgId";
@@ -67,6 +74,15 @@ final class EtendoGoJwtDalHelper {
   private static final String PROPERTY_RESET_TOKEN_CONSUMED = Account.PROPERTY_RESETTOKENCONSUMED;
   private static final String PROPERTY_RESET_TOKEN_EXPIRES = Account.PROPERTY_RESETTOKENEXPIRES;
   private static final String PROPERTY_RESET_TOKEN_HASH = Account.PROPERTY_RESETTOKENHASH;
+  // ETP-4798 — spelled out as literals rather than as Account.PROPERTY_* constants, following the
+  // precedent set for every column added since (see FiscalDeclCrudHandler#PROPERTY_MANUAL_DATA).
+  // Account lives in src-gen and is regenerated from the Application Dictionary in the database, so
+  // referencing generated constants for a column this branch introduces makes the module refuse to
+  // compile until update.database has run — including on any checkout or CI job that builds before
+  // applying the model. Package-private so the tests can assert against the same names.
+  static final String PROPERTY_VERIFY_TOKEN_HASH = "verifyTokenHash";
+  static final String PROPERTY_VERIFY_TOKEN_EXPIRES = "verifyTokenExpires";
+  static final String PROPERTY_EMAIL_VERIFIED = "emailVerified";
   private static final String PROPERTY_AUTH_PROVIDER = Account.PROPERTY_AUTHPROVIDER;
   private static final String PROPERTY_EXTERNAL_SUBJECT = Account.PROPERTY_EXTERNALSUBJECT;
   private static final String PROPERTY_EXTERNAL_EMAIL = Account.PROPERTY_EXTERNALEMAIL;
@@ -104,7 +120,7 @@ final class EtendoGoJwtDalHelper {
 
   static Account findActiveAccountByToken(String token) {
     OBQuery<Account> query = OBDal.getInstance().createQuery(Account.class,
-        "as account where account.sessionToken = :" + PARAM_TOKEN + ACTIVE_ACCOUNT_FILTER);
+        ACCOUNT_QUERY + "sessionToken = :" + PARAM_TOKEN + ACTIVE_ACCOUNT_FILTER);
     query.setNamedParameter(PARAM_TOKEN, token);
     query.setFilterOnReadableClients(false);
     query.setFilterOnReadableOrganization(false);
@@ -120,25 +136,64 @@ final class EtendoGoJwtDalHelper {
       String userId = jwt == null ? null : jwt.getClaim("user").asString();
       User user = StringUtils.isBlank(userId) ? null : OBDal.getInstance().get(User.class, userId);
       if (user == null || !Boolean.TRUE.equals(user.isActive())) {
+        log.debug("Bearer token resolved to no active AD_User");
         return null;
       }
-      String accountEmail = StringUtils.trimToNull(user.getEmail());
-      if (accountEmail == null) accountEmail = StringUtils.trimToNull(user.getUsername());
-      account = accountEmail == null ? null : findActiveAccountByEmail(accountEmail);
-      if (account == null && StringUtils.isNotBlank(user.getUsername())) {
-        account = findActiveAccountByEmail(user.getUsername());
+      account = findAccountForEnvironmentUser(user);
+      if (account == null) {
+        log.debug("No active account owns environment user {}", maskUsername(user.getUsername()));
+        return null;
       }
-      return account != null && clientBelongsToAccountEmail(user.getClient().getId(), account.getEmail())
-          ? account : null;
+      // Unchanged tenant-isolation gate: the client the JWT was issued for must actually be owned
+      // by the resolved account. Recovering the account from a suffixed username must not become a
+      // way past this check.
+      if (!clientBelongsToAccountEmail(user.getClient().getId(), account.getEmail())) {
+        log.debug("Client {} is not owned by the account behind the presented token",
+            user.getClient().getId());
+        return null;
+      }
+      return account;
     } catch (Exception e) {
+      log.debug("Bearer token could not be resolved to an account: {}", e.getMessage(), e);
       return null;
     }
   }
 
+  /**
+   * Resolves the platform account behind an environment's {@code AD_User}.
+   *
+   * <p>{@code AD_User.email} is authoritative when set, but onboarding never sets it —
+   * {@code InitialSetupUtility.insertUser} only writes {@code username} — so in practice the
+   * identity lives in the username. Onboarding names the first environment user after the plain
+   * account email and every later one {@code <accountEmail>+<clientName>}
+   * ({@link EtendoGoJwtSupport#buildClientUsername}), so an exact-match lookup silently fails from
+   * the second tenant onwards. {@link GoAccountResolver#findAccountByUsername} is the canonical
+   * inverse of that naming: it splits on the <em>last</em> {@code '+'}, which keeps plus-addressed
+   * account emails intact.
+   */
+  private static Account findAccountForEnvironmentUser(User user) {
+    String email = StringUtils.trimToNull(user.getEmail());
+    Account byEmail = email == null ? null : findActiveAccountByEmail(email);
+    if (byEmail != null) {
+      return byEmail;
+    }
+    return GoAccountResolver.findAccountByUsername(user.getUsername()).orElse(null);
+  }
+
+  /** Masks a username for logging, mirroring {@code EtendoGoJwtServlet.maskEmail}. */
+  private static String maskUsername(String username) {
+    String trimmed = StringUtils.trimToNull(username);
+    if (trimmed == null) {
+      return "(unknown)";
+    }
+    int at = trimmed.indexOf('@');
+    return at <= 0 ? trimmed.charAt(0) + "***" : trimmed.charAt(0) + "***" + trimmed.substring(at);
+  }
+
   static Account findActiveAccountBySsoIdentity(String provider, String subject) {
     OBQuery<Account> query = OBDal.getInstance().createQuery(Account.class,
-        "as account where account." + PROPERTY_AUTH_PROVIDER + " = :" + PARAM_AUTH_PROVIDER
-            + " and account." + PROPERTY_EXTERNAL_SUBJECT + " = :" + PARAM_EXTERNAL_SUBJECT
+        ACCOUNT_QUERY + PROPERTY_AUTH_PROVIDER + " = :" + PARAM_AUTH_PROVIDER
+            + AND_ACCOUNT + PROPERTY_EXTERNAL_SUBJECT + " = :" + PARAM_EXTERNAL_SUBJECT
             + ACTIVE_ACCOUNT_FILTER);
     query.setNamedParameter(PARAM_AUTH_PROVIDER, provider);
     query.setNamedParameter(PARAM_EXTERNAL_SUBJECT, subject);
@@ -162,27 +217,16 @@ final class EtendoGoJwtDalHelper {
   }
 
   /**
-   * ETP-4829: creates the {@code etgo_account} row for a user an admin created directly (not via
-   * self-service {@code /sws/go/register}). No password is set here — the account is left in the
-   * {@code pending} status with a {@code null} password hash, exactly like an SSO-only account
-   * (see {@link #hasLocalPassword(Account)}), so it cannot log in until ETP-4830's invite-email
-   * flow sets one (e.g. by driving the same {@code password-reset/confirm} path used for a
-   * normal reset) and flips the status to {@code active} — that transition is ETP-4830's
-   * responsibility, not implemented here. Returns silently with the existing account if one is
-   * already registered for this email
-   * (e.g. the admin is linking a newly-created {@code AD_User} to a pre-existing platform
-   * account) — this must never fail the parent {@code AD_User} save.
-   */
-  /**
-   * ETP-4829: creates an {@code etgo_account} for a user an admin created directly, with a real,
-   * immediately-usable password the admin typed on the create form — a temporary workaround for
-   * environments where ETP-4830's invite-email flow isn't available yet. {@code passwordHash}
-   * must already be produced by {@link PasswordHasher#hash} (this method does not hash or
-   * validate strength — see {@link EtendoGoAccountProvisioning#ensureAccountForCreatedUser},
-   * which does both before calling this). Unlike {@link #createPendingAccount}, the account is
-   * {@code active} immediately: it already has everything a normal local-password account needs
-   * to log in. Same duplicate-email handling as {@link #createPendingAccount} — returns the
-   * existing account untouched rather than failing the parent {@code AD_User} save.
+   * Creates an {@code etgo_account} for a user with a real, immediately-usable password (as
+   * opposed to {@link #createPendingAccount}). {@code passwordHash} must already be produced by
+   * {@link PasswordHasher#hash} and validated for strength by the caller — this method does
+   * neither. The account is {@code active} immediately: it already has everything a normal
+   * local-password account needs to log in. Same duplicate-email handling as {@link
+   * #createPendingAccount} — returns the existing account untouched rather than failing the
+   * caller.
+   *
+   * <p>Not currently called by admin-created-user provisioning (see {@link #createPendingAccount}
+   * for why) — kept as a general-purpose DAL primitive alongside {@link #createAccount}.
    */
   static Account createActiveAccount(String email, String passwordHash, String name) {
     Account existing = findActiveAccountByEmail(email);
@@ -202,6 +246,21 @@ final class EtendoGoJwtDalHelper {
     return account;
   }
 
+  /**
+   * Creates an {@code etgo_account} row in {@code pending} status with a {@code null} password
+   * hash, exactly like an SSO-only account (see {@link #hasLocalPassword(Account)}) — it cannot
+   * log in until something sets a password and flips the status to {@code active} (e.g. the
+   * same {@code password-reset/confirm} path used for a normal reset). Returns silently with
+   * the existing account if one is already registered for this email, rather than failing the
+   * caller.
+   *
+   * <p>Not currently called by admin-created-user provisioning: ETP-4830 replaced that eager
+   * pending-account creation with a company invitation (see {@code
+   * CompanyInvitationService#createInvitationForNewlyCreatedUser} in the {@code
+   * schemaforge.handlers.UserRoleAssignmentHandler} caller), whose own {@code
+   * register-and-accept} flow creates the {@code etgo_account} lazily, at accept time, through
+   * {@link #createAccount} instead. Kept as a general-purpose DAL primitive.
+   */
   static Account createPendingAccount(String email, String name) {
     Account existing = findActiveAccountByEmail(email);
     if (existing != null) {
@@ -234,6 +293,11 @@ final class EtendoGoJwtDalHelper {
     account.set(PROPERTY_EXTERNAL_EMAIL, externalEmail);
     account.set(PROPERTY_LAST_SSO_LOGIN, loginAt);
     account.set(PROPERTY_STATUS, STATUS_ACTIVE);
+    // ETP-4798: the identity provider already proved the user controls this mailbox (the address
+    // comes from a verified assertion, not from a form), so an SSO account is born verified.
+    // Leaving it null would gate onboarding for every Google user over a confirmation email they
+    // can never receive a reason to click.
+    account.set(PROPERTY_EMAIL_VERIFIED, loginAt);
     OBDal.getInstance().save(account);
     flushAndCommitDalChanges();
     return account;
@@ -272,6 +336,15 @@ final class EtendoGoJwtDalHelper {
     account.setSessionToken(sessionToken);
     account.set(PROPERTY_EXTERNAL_EMAIL, externalEmail);
     account.set(PROPERTY_LAST_SSO_LOGIN, loginAt);
+    // ETP-4798: signing in through the identity provider on this address is itself proof of
+    // ownership — stronger proof than clicking a link we mailed. It closes any confirmation still
+    // pending from a prior /register on the same address, so the user is not asked to confirm an
+    // address they just authenticated with.
+    if (account.get(PROPERTY_EMAIL_VERIFIED) == null) {
+      account.set(PROPERTY_EMAIL_VERIFIED, loginAt);
+      account.set(PROPERTY_VERIFY_TOKEN_HASH, null);
+      account.set(PROPERTY_VERIFY_TOKEN_EXPIRES, null);
+    }
     OBDal.getInstance().save(account);
     flushAndCommitDalChanges();
   }
@@ -306,11 +379,11 @@ final class EtendoGoJwtDalHelper {
 
   static Account findActiveAccountByResetTokenHash(String resetTokenHash, Date now) {
     OBQuery<Account> query = OBDal.getInstance().createQuery(Account.class,
-        "as account where account." + PROPERTY_RESET_TOKEN_HASH + " = :"
+        ACCOUNT_QUERY + PROPERTY_RESET_TOKEN_HASH + " = :"
             + PARAM_RESET_TOKEN_HASH
-            + " and account." + PROPERTY_RESET_TOKEN_EXPIRES + " > :now"
-            + " and account." + PROPERTY_RESET_TOKEN_CONSUMED + " is null"
-            + " and account.active = true");
+            + AND_ACCOUNT + PROPERTY_RESET_TOKEN_EXPIRES + " > :now"
+            + AND_ACCOUNT + PROPERTY_RESET_TOKEN_CONSUMED + " is null"
+            + ACTIVE_ACCOUNT_FILTER);
     query.setNamedParameter(PARAM_RESET_TOKEN_HASH, resetTokenHash);
     query.setNamedParameter("now", now);
     query.setFilterOnReadableClients(false);
