@@ -18,7 +18,9 @@
 package com.etendoerp.go.schemaforge.handlers;
 
 import java.math.BigDecimal;
+import java.text.SimpleDateFormat;
 import java.util.ArrayList;
+import java.util.Date;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -56,6 +58,7 @@ import com.etendoerp.go.schemaforge.PaymentRegistrationService;
 import com.etendoerp.go.schemaforge.PisDeferredPaymentService;
 import com.etendoerp.go.schemaforge.PisPaymentService;
 import com.etendoerp.go.schemaforge.util.NeoButtonActionHelper;
+import com.etendoerp.go.schemaforge.util.NeoDateFormat;
 import com.etendoerp.payment.removal.util.PaymentRemovalUtil;
 import com.etendoerp.psd2.bank.integration.data.PisPayment;
 
@@ -208,6 +211,16 @@ public class ReactivatePaymentHandler implements NeoHandler {
   private static final String FIELD_ACCOUNT_CURRENCY = "accountCurrency";
   private static final String FIELD_CONVERSION_RATE = "conversionRate";
   private static final String FIELD_FINANCIAL_TRANSACTION_AMOUNT = "financialTransactionAmount";
+  /**
+   * The payment's audit {@code updated} timestamp, ISO with a time of day.
+   *
+   * <p>Injected here rather than registered as a NEO field because the push to
+   * {@code ETGO_SF_FIELD} excludes audit columns, so declaring it in {@code decisions.json} — where
+   * it already is — never reaches the runtime. The activity panel needs a real time of day: it used
+   * to fall back to {@code paymentDate}, a date-only column, and rendered a payment confirmed at
+   * 12:10 as "· 00:00" (ETP-4895).
+   */
+  private static final String FIELD_UPDATED_AT = "updatedAt";
   private static final String HTTP_GET = "GET";
   private static final String KEY_RESPONSE = "response";
   private static final String KEY_DATA = "data";
@@ -592,6 +605,7 @@ public class ReactivatePaymentHandler implements NeoHandler {
           transactionId != null ? transactionId : JSONObject.NULL);
       injectMultiCurrencyExtrasQuietly(paymentRecord, context.getRecordId());
       injectRetryablePisAttemptQuietly(paymentRecord, context.getRecordId());
+      injectUpdatedAtQuietly(paymentRecord, context.getRecordId());
       injectLockFlags(new JSONArray().put(paymentRecord));
       return NeoResponse.ok(body);
     } catch (Exception e) {
@@ -679,6 +693,30 @@ public class ReactivatePaymentHandler implements NeoHandler {
       paymentRecord.put(FIELD_PIS_PAYMENT_ID, rejected != null ? rejected.getId() : JSONObject.NULL);
     } catch (Exception e) {
       log.warn("Could not resolve a retryable PIS attempt for payment {}", paymentId, e);
+    }
+  }
+
+  /**
+   * Adds {@link #FIELD_UPDATED_AT}: when this payment last changed, with its time of day.
+   *
+   * <p>This is the only timestamp the client can get that carries an hour. {@code paymentDate} is a
+   * date-only AD column, and the audit columns are absent from the spec (see
+   * {@link #FIELD_UPDATED_AT}), so without this the activity panel has nothing but midnight to
+   * show. Always present — {@code null} rather than missing — so the UI can tell "this backend does
+   * not send it" apart from "this payment has no timestamp".
+   *
+   * <p>Swallows failures for the same reason as its siblings: a timestamp is a display nicety and
+   * is not worth discarding the whole enriched response over.
+   */
+  private void injectUpdatedAtQuietly(JSONObject paymentRecord, String paymentId) {
+    try {
+      FIN_Payment payment = OBDal.getInstance().get(FIN_Payment.class, paymentId);
+      Date updated = payment != null ? payment.getUpdated() : null;
+      paymentRecord.put(FIELD_UPDATED_AT, updated != null
+          ? new SimpleDateFormat(NeoDateFormat.ISO_DATETIME).format(updated)
+          : JSONObject.NULL);
+    } catch (Exception e) {
+      log.warn("Could not resolve the updated timestamp for payment {}", paymentId, e);
     }
   }
 
