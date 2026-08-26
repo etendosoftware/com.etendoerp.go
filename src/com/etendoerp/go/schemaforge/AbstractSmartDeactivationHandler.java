@@ -34,8 +34,14 @@ import org.openbravo.dal.core.OBContext;
  * would bypass the pending-invoices check and allow deactivation without verification.
  * Concrete handlers supply only {@link #smartDeactivate} and their {@code @Named} qualifier.
  *
- * <p>{@link #deletedResponse()} and {@link #isExplicitlyDeactivating} are {@code protected
- * static} for use in subclass {@code smartDeactivate} and {@code afterHandle} implementations.
+ * <p>{@link #deletedResponse()} is {@code protected static} for use in subclass
+ * {@code smartDeactivate} and {@code afterHandle} implementations. {@link
+ * #isExplicitlyDeactivating} is {@code public static} instead — {@code
+ * UserRoleAssignmentHandler} (ETP-4830) is not a subclass of this class (it already has its own
+ * multi-concern {@code handle()}/{@code afterHandle()} dispatch across GET/POST/PUT/PATCH for
+ * the {@code user} entity, so it cannot also extend this class's single-purpose PUT-only
+ * skeleton) but still needs the exact same "is this request explicitly setting {@code
+ * active=false}" test for its own self/last-admin lockout guard, rather than duplicating it.
  */
 public abstract class AbstractSmartDeactivationHandler implements NeoHandler {
 
@@ -77,7 +83,16 @@ public abstract class AbstractSmartDeactivationHandler implements NeoHandler {
     return NeoResponse.ok(body);
   }
 
-  protected static boolean isExplicitlyDeactivating(JSONObject body) {
+  /**
+   * Returns {@code true} only when {@code body} explicitly carries an "active" flag (boolean
+   * {@code false}, or the string {@code "false"}/{@code "N"}) set to false — a field simply
+   * absent from {@code body} is never treated as a deactivation request.
+   *
+   * @param body
+   *          the incoming request body to inspect, or {@code null}
+   * @return {@code true} when {@code body} explicitly sets the active flag to false
+   */
+  public static boolean isExplicitlyDeactivating(JSONObject body) {
     if (body == null || !body.has(FIELD_ACTIVE)) {
       return false;
     }
