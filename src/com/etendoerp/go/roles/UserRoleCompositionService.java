@@ -255,12 +255,13 @@ public class UserRoleCompositionService {
   }
 
   /**
-   * Same as {@link #assignTemplateRoles(String, List, Role)}, but also enforces the ETP-4830
-   * owner-protection rule against {@code userId} — see {@link #enforceOwnerProtection(User,
-   * String)}. Real webhook callers (e.g. {@code SFAssignUserRoles}) MUST use this overload,
-   * passing the caller's own {@code AD_User_ID}. A {@code null} {@code callerUserId} skips the
-   * check entirely, mirroring this class's existing {@code callerRole=null} convention — kept for
-   * plain unit tests and any other caller with no per-request identity to check against.
+   * Same as {@link #assignTemplateRoles(String, List, Role)}, but also enforces the ETP-4830/
+   * ETP-5019 owner/admin-role protection rule against {@code userId} — see {@link
+   * #enforceOwnerProtection(User, String)}. Real webhook callers (e.g. {@code
+   * SFAssignUserRoles}) MUST use this overload, passing the caller's own {@code AD_User_ID}. A
+   * {@code null} {@code callerUserId} skips the check entirely, mirroring this class's existing
+   * {@code callerRole=null} convention — kept for plain unit tests and any other caller with no
+   * per-request identity to check against.
    *
    * @param userId the {@code AD_User_ID} to compose roles for
    * @param templateRoleIds the desired FULL set of template role ids — see {@link
@@ -273,7 +274,9 @@ public class UserRoleCompositionService {
    * @throws OBException if {@code userId} is missing/unresolvable, {@code templateRoleIds} is
    *     {@code null}, any requested id is not an active, non-admin template role, {@code
    *     callerRole} is a non-system role whose client differs from {@code userId}'s, or {@code
-   *     userId} is flagged as its client's owner and {@code callerUserId} is not that same user
+   *     userId} is flagged as its client's owner or currently holds the client-admin role
+   *     (ETP-5019 — unconditional, including the owner/admin targeting themselves) and {@code
+   *     callerUserId} is non-null
    */
   public AssignmentResult assignTemplateRoles(String userId, List<String> templateRoleIds,
       Role callerRole, String callerUserId) {
@@ -408,38 +411,55 @@ public class UserRoleCompositionService {
   }
 
   /**
-   * Rejects reassigning the OWNER's role composition from anyone other than the owner
-   * themselves (ETP-4830) — the role-assignment-endpoint counterpart to {@code
-   * UserRoleAssignmentHandler#rejectNonOwnerEditingOwner}'s generic {@code AD_User} PUT/PATCH
-   * guard. Both must independently cover the owner protection: an admin reassigning the owner's
-   * role through THIS endpoint never goes through {@code UserRoleAssignmentHandler}'s write path
-   * at all, so that guard alone would not close this gap.
+   * Rejects composing template roles onto the tenant owner/admin — the role-assignment-endpoint
+   * counterpart to {@code UserRoleAssignmentHandler#rejectNonOwnerEditingOwner}'s generic
+   * {@code AD_User} PUT/PATCH guard. Both must independently cover the owner protection: this
+   * write path never goes through {@code UserRoleAssignmentHandler}'s write path at all, so that
+   * guard alone would not close this gap.
+   *
+   * <p><b>ETP-5019 fix — unconditional, no self-service exception.</b> This guard originally
+   * (ETP-4830) allowed the owner to recompose their OWN roles ({@code callerUserId.equals(
+   * user.getId())} was a no-op), on the theory that only a DIFFERENT caller reassigning the
+   * owner was the risk. That theory was wrong: the owner's default role is the client-admin
+   * "Admin" role, which {@link #isReusablePersonalRole(User, Role)} explicitly refuses to treat
+   * as a reusable personal role ({@code isClientAdmin()} check) — so composing even ONE template
+   * role for the owner, self-service or not, made {@link #resolveOrCreatePersonalRole(User)}
+   * mint a brand-new personal role and {@code user.setDefaultRole(personalRole)} SILENTLY
+   * REPLACED the owner's Admin role with it. The owner/admin already has full access by
+   * construction — composing template roles for it is never meaningful, whoever asks. This
+   * method now rejects unconditionally (still gated on non-null {@code callerUserId} below, the
+   * same "skip when no caller identity was supplied" convention {@link
+   * #enforceCallerClientBoundary} uses for a {@code null} {@code callerRole} — kept for plain
+   * unit tests and any other caller with no per-request identity to check).</p>
+   *
+   * <p>Also rejects any user CURRENTLY holding the client-admin role even when {@code
+   * OwnerSupport.isOwner} reads {@code false} — e.g. a second user manually granted the classic
+   * "Admin" role via the core UI, not (or not yet) flagged as the ETP-4830 owner. The underlying
+   * mechanism bug (a client-admin role can never be reused as a personal role) applies to any
+   * client-admin holder, not only the one flagged owner, so the guard checks both signals.</p>
    *
    * <p>A no-op — same "nothing to enforce" convention {@link #enforceCallerClientBoundary} uses
    * for a {@code null} {@code callerRole} — when {@code callerUserId} is {@code null} (no caller
-   * identity supplied), or when {@code user} is not flagged as owner at all (every pre-existing
-   * user until a separate, human-reviewed backfill data-fix runs). When {@code user} IS the owner
-   * and {@code callerUserId} is that same user (the owner recomposing their own access), this is
-   * also a no-op — only a DIFFERENT caller targeting the owner is rejected.</p>
+   * identity supplied), or when {@code user} is neither flagged as owner nor currently holding
+   * the client-admin role.</p>
    *
    * @param user the already-resolved target user
    * @param callerUserId the {@code AD_User_ID} making this request, or {@code null} to skip
-   * @throws OBException if {@code user} is flagged as owner and {@code callerUserId} is not that
-   *     same user
+   * @throws OBException if {@code user} is flagged as owner or currently holds the client-admin
+   *     role, and {@code callerUserId} is non-null (i.e. a real caller identity was supplied)
    */
   private void enforceOwnerProtection(User user, String callerUserId) {
     if (callerUserId == null) {
       return;
     }
-    if (!OwnerSupport.isOwner(user.getId())) {
-      return;
-    }
-    if (callerUserId.equals(user.getId())) {
+    Role currentRole = user.getDefaultRole();
+    boolean holdsAdminRole = currentRole != null && Boolean.TRUE.equals(currentRole.isClientAdmin());
+    if (!OwnerSupport.isOwner(user.getId()) && !holdsAdminRole) {
       return;
     }
     throw new OBException(
-        "This user is the tenant owner — only the owner can reassign their own roles: "
-            + user.getId());
+        "This user is the tenant owner/admin — it already has full access by construction and "
+            + "can never compose additional template roles: " + user.getId());
   }
 
   /**
