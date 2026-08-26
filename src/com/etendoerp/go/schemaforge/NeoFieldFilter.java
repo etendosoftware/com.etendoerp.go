@@ -55,6 +55,20 @@ public class NeoFieldFilter {
   private static final String IDENTIFIER_SUFFIX = "$_identifier";
 
   /**
+   * Audit keys a GET response always carries, whatever {@code ETGO_SF_FIELD} says.
+   *
+   * <p>{@code updated} is an AD <i>column</i> on every table but not an AD <i>field</i>, so
+   * {@code push-to-neo} cannot register it and no window can opt into it — yet the client needs
+   * it to tell a cached rendering of a record from a stale one (ETP-4787: the preview serves the
+   * marked attachment, which had no way of knowing the record had changed underneath it).
+   *
+   * <p>Read side only, deliberately: this set is NOT unioned into {@code includedFields}, because
+   * that same set gates {@link #filterCreateRequest}, and a client must never be able to write
+   * its own {@code updated}.
+   */
+  private static final Set<String> ALWAYS_READABLE_KEYS = Set.of("updated");
+
+  /**
    * Set of DAL property names that are included (IsIncluded=Y).
    */
   private final Set<String> includedFields;
@@ -357,7 +371,7 @@ public class NeoFieldFilter {
       if (data != null) {
         for (int i = 0; i < data.length(); i++) {
           JSONObject item = data.getJSONObject(i);
-          filterRecord(item, includedFields);
+          filterRecord(item, includedFields, ALWAYS_READABLE_KEYS);
           renameToApiKeys(item);
         }
       }
@@ -481,7 +495,7 @@ public class NeoFieldFilter {
         bodyToFilter = requestBody.getJSONObject("data");
       }
       remapApiKeys(bodyToFilter);
-      filterRecord(bodyToFilter, allowedFields);
+      filterRecord(bodyToFilter, allowedFields, Set.of());
       return bodyToFilter;
     } catch (Exception e) {
       log.error("Error filtering write request: {}", e.getMessage(), e);
@@ -571,9 +585,13 @@ public class NeoFieldFilter {
    * Remove all keys from a JSON item that are NOT in the allowed set.
    * Preserves standard metadata keys added by DefaultJsonDataService
    * (e.g., _identifier, _entityName, recordTime).
+   *
+   * @param alsoKeep
+   *     extra keys to preserve on top of {@code allowedFields} — empty on the write path, and
+   *     {@link #ALWAYS_READABLE_KEYS} on the read path
    */
   @SuppressWarnings("unchecked")
-  private void filterRecord(JSONObject item, Set<String> allowedFields) {
+  private void filterRecord(JSONObject item, Set<String> allowedFields, Set<String> alsoKeep) {
     Iterator<String> keys = item.keys();
     Set<String> toRemove = new HashSet<>();
 
@@ -583,7 +601,7 @@ public class NeoFieldFilter {
       if (isMetadataKey(key)) {
         continue;
       }
-      if (!allowedFields.contains(key)) {
+      if (!allowedFields.contains(key) && !alsoKeep.contains(key)) {
         toRemove.add(key);
       }
     }
