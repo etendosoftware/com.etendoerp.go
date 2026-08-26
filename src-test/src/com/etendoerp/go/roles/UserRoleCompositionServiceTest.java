@@ -264,12 +264,19 @@ class UserRoleCompositionServiceTest {
   }
 
   /**
-   * The owner recomposing their OWN access must sail through the owner-protection check —
-   * reaching the (unrelated) template-validation error, rather than the owner-protection
-   * {@link OBException}, proves this specific guard did not block it.
+   * ETP-5019 regression guard — inverts the pre-fix behavior this test used to assert. The owner
+   * recomposing their OWN roles is NO LONGER a no-op: {@link
+   * UserRoleCompositionService#enforceOwnerProtection} used to special-case {@code
+   * callerUserId.equals(user.getId())}, but that self-service exception is exactly what let the
+   * owner silently overwrite their own "Admin" role with a fresh empty personal role (see the
+   * method's own javadoc). Self-targeting must now be rejected exactly like any other caller,
+   * BEFORE {@code resolveAndValidateTemplates} ever runs (reachable-but-unrelated {@code
+   * "missing-role"} template id proves the owner-protection guard is what fired) — and no
+   * persistence side effect (personal-role creation, {@code Default_Ad_Role_ID} rewrite) must
+   * happen as a result.
    */
   @Test
-  void ownerReassigningTheirOwnRolesPassesOwnerProtectionCheck() {
+  void ownerReassigningTheirOwnRolesIsRejectedByOwnerProtectionCheck() {
     User user = mock(User.class);
     when(user.getId()).thenReturn("owner-user-1");
     when(mockDal.get(User.class, "owner-user-1")).thenReturn(user);
@@ -280,14 +287,102 @@ class UserRoleCompositionServiceTest {
 
       OBException e = assertThrows(OBException.class, () -> service
           .assignTemplateRoles("owner-user-1", List.of("missing-role"), null, "owner-user-1"));
-      assertTrue(e.getMessage().contains("Template role not found or inactive"));
+      assertTrue(e.getMessage().toLowerCase().contains("owner"));
+      assertTrue(e.getMessage().toLowerCase().contains("admin"));
     }
+
+    verify(mockDal, never()).save(any());
+  }
+
+  /**
+   * ETP-5019: a user NOT flagged {@code EM_ETGO_Is_Owner} but whose {@code
+   * user.getDefaultRole().isClientAdmin()} reads {@code true} (e.g. a second user manually
+   * granted the classic "Admin" role via the core UI) must also be rejected — the {@code
+   * isOwner} flag and the client-admin default-role check are OR'd in {@link
+   * UserRoleCompositionService#enforceOwnerProtection}. Covers self-targeting.
+   */
+  @Test
+  void clientAdminRoleHolderTargetingSelfIsRejectedEvenWhenNotFlaggedAsOwner() {
+    User user = mock(User.class);
+    when(user.getId()).thenReturn("admin-holder-1");
+    when(mockDal.get(User.class, "admin-holder-1")).thenReturn(user);
+    when(mockDal.get(Role.class, "missing-role")).thenReturn(null);
+
+    Role currentAdminRole = mock(Role.class);
+    when(currentAdminRole.isClientAdmin()).thenReturn(true);
+    when(user.getDefaultRole()).thenReturn(currentAdminRole);
+
+    try (MockedStatic<OwnerSupport> ownerMock = mockStatic(OwnerSupport.class)) {
+      ownerMock.when(() -> OwnerSupport.isOwner("admin-holder-1")).thenReturn(false);
+
+      OBException e = assertThrows(OBException.class, () -> service
+          .assignTemplateRoles("admin-holder-1", List.of("missing-role"), null, "admin-holder-1"));
+      assertTrue(e.getMessage().toLowerCase().contains("owner"));
+    }
+
+    verify(mockDal, never()).save(any());
+  }
+
+  /**
+   * Same as {@link #clientAdminRoleHolderTargetingSelfIsRejectedEvenWhenNotFlaggedAsOwner} but
+   * with a DIFFERENT caller targeting the client-admin-role holder — proves the OR'd check
+   * rejects regardless of who is asking, matching {@link #rejectsOwnerRoleReassignmentByNonOwner}
+   * for the {@code isOwner=true} signal.
+   */
+  @Test
+  void clientAdminRoleHolderTargetedByAnotherCallerIsRejectedEvenWhenNotFlaggedAsOwner() {
+    User user = mock(User.class);
+    when(user.getId()).thenReturn("admin-holder-2");
+    when(mockDal.get(User.class, "admin-holder-2")).thenReturn(user);
+    when(mockDal.get(Role.class, "missing-role")).thenReturn(null);
+
+    Role currentAdminRole = mock(Role.class);
+    when(currentAdminRole.isClientAdmin()).thenReturn(true);
+    when(user.getDefaultRole()).thenReturn(currentAdminRole);
+
+    try (MockedStatic<OwnerSupport> ownerMock = mockStatic(OwnerSupport.class)) {
+      ownerMock.when(() -> OwnerSupport.isOwner("admin-holder-2")).thenReturn(false);
+
+      OBException e = assertThrows(OBException.class, () -> service
+          .assignTemplateRoles("admin-holder-2", List.of("missing-role"), null, "some-other-admin"));
+      assertTrue(e.getMessage().toLowerCase().contains("owner"));
+    }
+
+    verify(mockDal, never()).save(any());
+  }
+
+  /**
+   * Edge case: {@code user.getDefaultRole()} returns {@code null} (e.g. a brand-new {@code
+   * AD_User} with no role assigned yet) — {@link UserRoleCompositionService#enforceOwnerProtection}
+   * must not NPE on {@code currentRole.isClientAdmin()} and must fall through to evaluating the
+   * {@code isOwner} flag alone. Here {@code isOwner=true}, so the guard still rejects.
+   */
+  @Test
+  void nullDefaultRoleDoesNotNpeAndFallsThroughToOwnerFlagCheck() {
+    User user = mock(User.class);
+    when(user.getId()).thenReturn("owner-user-4");
+    when(mockDal.get(User.class, "owner-user-4")).thenReturn(user);
+    when(mockDal.get(Role.class, "missing-role")).thenReturn(null);
+    when(user.getDefaultRole()).thenReturn(null);
+
+    try (MockedStatic<OwnerSupport> ownerMock = mockStatic(OwnerSupport.class)) {
+      ownerMock.when(() -> OwnerSupport.isOwner("owner-user-4")).thenReturn(true);
+
+      OBException e = assertThrows(OBException.class, () -> service
+          .assignTemplateRoles("owner-user-4", List.of("missing-role"), null, "some-other-admin"));
+      assertTrue(e.getMessage().toLowerCase().contains("owner"));
+    }
+
+    verify(mockDal, never()).save(any());
   }
 
   /**
    * Baseline (every pre-existing user until the ETP-4830 backfill data-fix runs): {@code
-   * is_owner=false/unset} means the guard never triggers at all, regardless of who the caller is
-   * — reaching the template-validation error (not an owner-protection rejection) proves it.
+   * is_owner=false/unset} AND a non-client-admin (or absent) default role means the guard never
+   * triggers at all, regardless of who the caller is — reaching the template-validation error
+   * (not an owner-protection rejection) proves it. {@code user.getDefaultRole()} is explicitly
+   * stubbed to {@code null} here (rather than relying on Mockito's default null-return) to make
+   * explicit that the OR'd client-admin signal is also false for this baseline case.
    */
   @Test
   void ownerProtectionIsNoOpWhenTargetIsNotFlaggedAsOwner() {
@@ -295,6 +390,7 @@ class UserRoleCompositionServiceTest {
     when(user.getId()).thenReturn("regular-user-1");
     when(mockDal.get(User.class, "regular-user-1")).thenReturn(user);
     when(mockDal.get(Role.class, "missing-role")).thenReturn(null);
+    when(user.getDefaultRole()).thenReturn(null);
 
     try (MockedStatic<OwnerSupport> ownerMock = mockStatic(OwnerSupport.class)) {
       ownerMock.when(() -> OwnerSupport.isOwner("regular-user-1")).thenReturn(false);
