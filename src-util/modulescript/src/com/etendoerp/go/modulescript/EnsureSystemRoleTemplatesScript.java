@@ -81,6 +81,19 @@ import org.openbravo.modulescript.ModuleScript;
  * ambiguous resolution, made explicitly for this ticket. Full per-window detail lives in
  * {@code TemplateRoleWindowAccess}'s own javadoc, not duplicated here.</p>
  *
+ * <p><b>ETP-4830 item #6.3 — process/report access, mechanical follow-up to the window matrix
+ * above.</b> A real-DB audit found all four templates had ZERO {@code AD_Process_Access}/
+ * {@code obuiapp_process_access} rows despite the 64 window grants — a composed user could open
+ * a window but not click any action button on it. {@link #reconcileProcessAccess} closes this
+ * for every window a role has FULL access to: every classic/OBUIAPP process reachable as a
+ * button on that window is granted, queried LIVE from the DB every run (not a hardcoded list,
+ * unlike the window matrix above) so it self-heals if a button is later added/removed. Read-only
+ * window grants contribute no process access. Deliberately mechanical, not a hand-curated
+ * per-role judgment call (~270 individual report/process items exist system-wide — curating all
+ * of them was explicitly scoped out as its own follow-up ticket); STANDALONE reports/processes
+ * not tied to any window button remain a separate, known gap. See that method's own javadoc for
+ * the full rule and rationale.</p>
+ *
  * <p><b>Twelve matrix rows are deliberately NOT implemented — known gap, follow-up ticket
  * pending.</b> Every one of these has NO {@code AD_Window_ID} at all backing it (either a pure
  * custom/aggregate Schema Forge page with zero classic-AD entity, or a report-type spec whose
@@ -327,6 +340,7 @@ public class EnsureSystemRoleTemplatesScript extends ModuleScript {
         String roleId = entry.getKey();
         ensureRole(cp, roleId, ROLE_NAMES_BY_ID.get(roleId));
         reconcileWindowAccess(cp, roleId, entry.getValue());
+        reconcileProcessAccess(cp, roleId, entry.getValue());
       }
     } catch (Exception e) {
       handleError(e);
@@ -474,6 +488,276 @@ public class EnsureSystemRoleTemplatesScript extends ModuleScript {
       try (PreparedStatement ps = cp.getPreparedStatement(deleteSql)) {
         ps.setString(1, roleId);
         ps.setString(2, windowId);
+        ps.executeUpdate();
+      }
+    }
+  }
+
+  /**
+   * ETP-4830 item #6.3 — process/report access, the mechanical follow-up to
+   * {@link #reconcileWindowAccess}. Confirmed via a real-DB audit before this shipped: all four
+   * templates had ZERO {@code AD_Process_Access}/{@code obuiapp_process_access} rows despite
+   * having 64 window grants between them — so a composed user could OPEN a window (e.g. Sales
+   * Order) but not click any of its action buttons (Process Order, Add Payment, Post, ...),
+   * since {@code NeoAccessHelper#hasProcessAccess}/{@code #hasObuiappProcessAccess} gate those
+   * independently of window access.
+   *
+   * <p><b>Human-approved rule (not a hand-curated matrix — deliberately mechanical):</b> for
+   * every window this role has FULL (not read-only) access to, grant every classic
+   * {@code AD_Process}/OBUIAPP process reachable as a BUTTON on that window's tabs (a
+   * {@code AD_Column} with {@code AD_Process_ID} or {@code EM_OBUIAPP_Process_ID} set, on an
+   * active {@code AD_Field}). Read-only window grants contribute NO process access — a read-only
+   * window is "look but don't touch", and these buttons are all mutating actions (Post, Process
+   * Order, Reverse Payment, ...), so unlocking them from a read-only grant would contradict what
+   * "read-only" means. Curating a role-by-role judgment call for the ~270 individual
+   * report/process items in this system (mirroring ETP-4878's window matrix) was explicitly
+   * ruled out as its own, much bigger ticket — this mechanical derivation is the approved
+   * interim close for the button-linked subset (~180 of those ~270); STANDALONE reports/processes
+   * not tied to any window button remain a known, separate gap.</p>
+   *
+   * <p>Queried LIVE against the DB every run, not a hardcoded literal list (unlike {@link
+   * #windowAccessByRoleId()}'s window matrix) — deliberately, so this self-heals if a button is
+   * ever added to or removed from one of these windows later, with no code change needed here.
+   * Propagation onto composed personal roles is NOT this script's job: core's
+   * {@code RoleInheritanceManager} already propagates {@code AD_Process_Access}/
+   * {@code obuiapp_process_access} the exact same generic way it propagates
+   * {@code AD_Window_Access} (via its {@code ReportAndProcessAccessInjector}/
+   * {@code ProcessDefinitionAccessInjector}), confirmed by inspecting the injector list — no
+   * change needed in {@code UserRoleCompositionService} at all.</p>
+   */
+  private void reconcileProcessAccess(ConnectionProvider cp, String roleId, List<WindowGrant> grants)
+      throws Exception {
+    Set<String> desiredProcessIds = new HashSet<>();
+    Set<String> desiredObuiappProcessIds = new HashSet<>();
+    for (WindowGrant grant : grants) {
+      if (grant.isReadOnly()) {
+        continue;
+      }
+      desiredProcessIds.addAll(findButtonProcessIds(cp, grant.getWindowId()));
+      desiredObuiappProcessIds.addAll(findButtonObuiappProcessIds(cp, grant.getWindowId()));
+    }
+    for (String processId : desiredProcessIds) {
+      upsertProcessAccess(cp, roleId, processId);
+    }
+    removeStaleProcessAccess(cp, roleId, desiredProcessIds);
+    for (String obuiappProcessId : desiredObuiappProcessIds) {
+      upsertObuiappProcessAccess(cp, roleId, obuiappProcessId);
+    }
+    removeStaleObuiappProcessAccess(cp, roleId, desiredObuiappProcessIds);
+  }
+
+  /**
+   * Distinct {@code AD_Process_ID}s reachable as a button on any active tab of {@code windowId}.
+   * All three levels — tab, column, field — must be active, otherwise a button living on an
+   * inactive tab or backed by an inactive column would still grant process access despite not
+   * actually being reachable/visible in the real UI.
+   */
+  private List<String> findButtonProcessIds(ConnectionProvider cp, String windowId) throws Exception {
+    List<String> ids = new ArrayList<>();
+    String sql = "SELECT DISTINCT c.AD_Process_ID FROM AD_Field f "
+        + "JOIN AD_Column c ON c.AD_Column_ID = f.AD_Column_ID "
+        + "JOIN AD_Tab t ON t.AD_Tab_ID = f.AD_Tab_ID "
+        + "WHERE t.AD_Window_ID = ? AND t.IsActive = 'Y' AND c.IsActive = 'Y' "
+        + "AND f.IsActive = 'Y' AND c.AD_Process_ID IS NOT NULL";
+    try (PreparedStatement ps = cp.getPreparedStatement(sql)) {
+      ps.setString(1, windowId);
+      try (ResultSet rs = ps.executeQuery()) {
+        while (rs.next()) {
+          ids.add(rs.getString(1));
+        }
+      }
+    }
+    return ids;
+  }
+
+  /**
+   * Distinct {@code EM_OBUIAPP_Process_ID}s reachable as a button on any active tab of
+   * {@code windowId}. All three levels — tab, column, field — must be active, otherwise a button
+   * living on an inactive tab or backed by an inactive column would still grant process access
+   * despite not actually being reachable/visible in the real UI.
+   */
+  private List<String> findButtonObuiappProcessIds(ConnectionProvider cp, String windowId)
+      throws Exception {
+    List<String> ids = new ArrayList<>();
+    String sql = "SELECT DISTINCT c.EM_OBUIAPP_Process_ID FROM AD_Field f "
+        + "JOIN AD_Column c ON c.AD_Column_ID = f.AD_Column_ID "
+        + "JOIN AD_Tab t ON t.AD_Tab_ID = f.AD_Tab_ID "
+        + "WHERE t.AD_Window_ID = ? AND t.IsActive = 'Y' AND c.IsActive = 'Y' "
+        + "AND f.IsActive = 'Y' AND c.EM_OBUIAPP_Process_ID IS NOT NULL";
+    try (PreparedStatement ps = cp.getPreparedStatement(sql)) {
+      ps.setString(1, windowId);
+      try (ResultSet rs = ps.executeQuery()) {
+        while (rs.next()) {
+          ids.add(rs.getString(1));
+        }
+      }
+    }
+    return ids;
+  }
+
+  /**
+   * Inserts one {@code AD_Process_Access} row for {@code roleId}/{@code processId}, or
+   * reactivates an existing INACTIVE row for that exact pair instead of blindly inserting a
+   * duplicate (ETP-4830 PR review fix). {@code AD_Process_Access} carries a real unique index on
+   * {@code (AD_Role_ID, AD_Process_ID)} — {@code AD_PROCESS_ACCESS_UN_KEY} — that is NOT filtered
+   * by {@code IsActive}, so the previous "check only ACTIVE rows, then blind INSERT" logic threw a
+   * genuine {@code ConstraintViolationException} whenever an inactive row for the pair already
+   * existed (e.g. deactivated by hand outside this script, or by some other reconciliation path).
+   */
+  private void upsertProcessAccess(ConnectionProvider cp, String roleId, String processId)
+      throws Exception {
+    String existingIsActive = singleString(cp,
+        "SELECT IsActive FROM AD_Process_Access WHERE AD_Role_ID = ? AND AD_Process_ID = ?",
+        roleId, processId);
+    if (existingIsActive == null) {
+      insertProcessAccess(cp, roleId, processId);
+    } else if (!"Y".equals(existingIsActive)) {
+      reactivateProcessAccess(cp, roleId, processId);
+    }
+  }
+
+  private void insertProcessAccess(ConnectionProvider cp, String roleId, String processId)
+      throws Exception {
+    String sql = "INSERT INTO AD_Process_Access (AD_Process_Access_ID, AD_Client_ID, AD_Org_ID, "
+        + "IsActive, Created, CreatedBy, Updated, UpdatedBy, AD_Role_ID, AD_Process_ID, "
+        + "IsReadWrite) VALUES (get_uuid(), ?, ?, 'Y', now(), ?, now(), ?, ?, ?, 'Y')";
+    try (PreparedStatement ps = cp.getPreparedStatement(sql)) {
+      ps.setString(1, SYSTEM_CLIENT_ID);
+      ps.setString(2, STAR_ORG_ID);
+      ps.setString(3, SYSTEM_ADMIN_USER_ID);
+      ps.setString(4, SYSTEM_ADMIN_USER_ID);
+      ps.setString(5, roleId);
+      ps.setString(6, processId);
+      ps.executeUpdate();
+    }
+  }
+
+  /** Reactivates an existing (inactive) {@code AD_Process_Access} row instead of re-inserting it. */
+  private void reactivateProcessAccess(ConnectionProvider cp, String roleId, String processId)
+      throws Exception {
+    String sql = "UPDATE AD_Process_Access SET IsActive = 'Y', IsReadWrite = 'Y', Updated = now(), "
+        + "UpdatedBy = ? WHERE AD_Role_ID = ? AND AD_Process_ID = ?";
+    try (PreparedStatement ps = cp.getPreparedStatement(sql)) {
+      ps.setString(1, SYSTEM_ADMIN_USER_ID);
+      ps.setString(2, roleId);
+      ps.setString(3, processId);
+      ps.executeUpdate();
+    }
+  }
+
+  /**
+   * Inserts one {@code obuiapp_process_access} row for {@code roleId}/{@code obuiappProcessId},
+   * or reactivates an existing INACTIVE row for that exact pair instead of blindly inserting a
+   * duplicate (ETP-4830 PR review fix, OBUIAPP sibling of {@link #upsertProcessAccess}).
+   * {@code obuiapp_process_access} has no unique constraint on {@code (AD_Role_ID,
+   * obuiapp_process_id)}, so the previous logic did not crash — but it could silently create a
+   * genuine duplicate row for the pair, which this fixes for correctness/consistency with the
+   * {@code AD_Process_Access} path above.
+   */
+  private void upsertObuiappProcessAccess(ConnectionProvider cp, String roleId,
+      String obuiappProcessId) throws Exception {
+    String existingIsActive = singleString(cp,
+        "SELECT IsActive FROM obuiapp_process_access WHERE AD_Role_ID = ? "
+            + "AND obuiapp_process_id = ?",
+        roleId, obuiappProcessId);
+    if (existingIsActive == null) {
+      insertObuiappProcessAccess(cp, roleId, obuiappProcessId);
+    } else if (!"Y".equals(existingIsActive)) {
+      reactivateObuiappProcessAccess(cp, roleId, obuiappProcessId);
+    }
+  }
+
+  private void insertObuiappProcessAccess(ConnectionProvider cp, String roleId,
+      String obuiappProcessId) throws Exception {
+    String sql = "INSERT INTO obuiapp_process_access (obuiapp_process_access_id, AD_Client_ID, "
+        + "AD_Org_ID, IsActive, Created, CreatedBy, Updated, UpdatedBy, AD_Role_ID, "
+        + "obuiapp_process_id, IsReadWrite) VALUES (get_uuid(), ?, ?, 'Y', now(), ?, now(), ?, ?, "
+        + "?, 'Y')";
+    try (PreparedStatement ps = cp.getPreparedStatement(sql)) {
+      ps.setString(1, SYSTEM_CLIENT_ID);
+      ps.setString(2, STAR_ORG_ID);
+      ps.setString(3, SYSTEM_ADMIN_USER_ID);
+      ps.setString(4, SYSTEM_ADMIN_USER_ID);
+      ps.setString(5, roleId);
+      ps.setString(6, obuiappProcessId);
+      ps.executeUpdate();
+    }
+  }
+
+  /**
+   * Reactivates an existing (inactive) {@code obuiapp_process_access} row instead of re-inserting
+   * it.
+   */
+  private void reactivateObuiappProcessAccess(ConnectionProvider cp, String roleId,
+      String obuiappProcessId) throws Exception {
+    String sql = "UPDATE obuiapp_process_access SET IsActive = 'Y', IsReadWrite = 'Y', "
+        + "Updated = now(), UpdatedBy = ? WHERE AD_Role_ID = ? AND obuiapp_process_id = ?";
+    try (PreparedStatement ps = cp.getPreparedStatement(sql)) {
+      ps.setString(1, SYSTEM_ADMIN_USER_ID);
+      ps.setString(2, roleId);
+      ps.setString(3, obuiappProcessId);
+      ps.executeUpdate();
+    }
+  }
+
+  /**
+   * Deletes every active {@code AD_Process_Access} row for {@code roleId} whose process is NOT in
+   * {@code desiredProcessIds} — same reconciliation half as {@link #removeStaleWindowAccess}.
+   */
+  private void removeStaleProcessAccess(ConnectionProvider cp, String roleId,
+      Set<String> desiredProcessIds) throws Exception {
+    List<String> staleIds = new ArrayList<>();
+    String selectSql = "SELECT AD_Process_ID FROM AD_Process_Access WHERE AD_Role_ID = ? "
+        + "AND IsActive = 'Y'";
+    try (PreparedStatement ps = cp.getPreparedStatement(selectSql)) {
+      ps.setString(1, roleId);
+      try (ResultSet rs = ps.executeQuery()) {
+        while (rs.next()) {
+          String processId = rs.getString(1);
+          if (!desiredProcessIds.contains(processId)) {
+            staleIds.add(processId);
+          }
+        }
+      }
+    }
+    String deleteSql = "DELETE FROM AD_Process_Access WHERE AD_Role_ID = ? AND AD_Process_ID = ? "
+        + "AND IsActive = 'Y'";
+    for (String processId : staleIds) {
+      try (PreparedStatement ps = cp.getPreparedStatement(deleteSql)) {
+        ps.setString(1, roleId);
+        ps.setString(2, processId);
+        ps.executeUpdate();
+      }
+    }
+  }
+
+  /**
+   * Deletes every active {@code obuiapp_process_access} row for {@code roleId} whose process is
+   * NOT in {@code desiredObuiappProcessIds} — same reconciliation half as
+   * {@link #removeStaleWindowAccess}.
+   */
+  private void removeStaleObuiappProcessAccess(ConnectionProvider cp, String roleId,
+      Set<String> desiredObuiappProcessIds) throws Exception {
+    List<String> staleIds = new ArrayList<>();
+    String selectSql = "SELECT obuiapp_process_id FROM obuiapp_process_access "
+        + "WHERE AD_Role_ID = ? AND IsActive = 'Y'";
+    try (PreparedStatement ps = cp.getPreparedStatement(selectSql)) {
+      ps.setString(1, roleId);
+      try (ResultSet rs = ps.executeQuery()) {
+        while (rs.next()) {
+          String obuiappProcessId = rs.getString(1);
+          if (!desiredObuiappProcessIds.contains(obuiappProcessId)) {
+            staleIds.add(obuiappProcessId);
+          }
+        }
+      }
+    }
+    String deleteSql = "DELETE FROM obuiapp_process_access WHERE AD_Role_ID = ? "
+        + "AND obuiapp_process_id = ? AND IsActive = 'Y'";
+    for (String obuiappProcessId : staleIds) {
+      try (PreparedStatement ps = cp.getPreparedStatement(deleteSql)) {
+        ps.setString(1, roleId);
+        ps.setString(2, obuiappProcessId);
         ps.executeUpdate();
       }
     }
