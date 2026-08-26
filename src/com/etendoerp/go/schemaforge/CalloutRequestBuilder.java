@@ -586,10 +586,10 @@ class CalloutRequestBuilder {
     Iterator<String> auxKeys = auxValues.keys();
     while (auxKeys.hasNext()) {
       String key = auxKeys.next();   // e.g., "businessPartner_LOC"
-      // Same Classic HTTP-layer rendering as every other param — see toClassicParamValue.
-      // Selector aux values are ids/strings in practice, so no boolean reaches this today;
-      // routing it through the shared converter keeps "single conversion point" literally
-      // true instead of true-by-convention, so a future boolean-valued aux cannot regress.
+      // Rendered like every other param, through the shared converter documented on
+      // toClassicParamValue. Selector aux values are ids or plain strings in practice, so no
+      // boolean reaches this point today, but converting here keeps that single-conversion
+      // invariant holding by construction rather than by convention.
       String auxVal = toClassicParamValue(auxValues.opt(key));
       // Split into base field name + suffix
       int suffixStart = key.lastIndexOf('_');
