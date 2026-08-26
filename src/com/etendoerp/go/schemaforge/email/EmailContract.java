@@ -17,6 +17,8 @@
 
 package com.etendoerp.go.schemaforge.email;
 
+import java.util.Optional;
+
 /**
  * Server-side contract that translates an Etendo Go workflow command into a
  * provider-ready transactional email request.
@@ -75,4 +77,17 @@ public interface EmailContract {
    * @return resolved provider request or a contract-level rejection
    */
   EmailContractResolution resolve(EmailContractCommand command, EmailRecipientResolution recipient);
+
+  /**
+   * The subject and message this contract would send if the operator edits nothing.
+   *
+   * <p>Contracts whose copy the operator cannot edit — every account email — return empty, which is
+   * why this is a default method rather than something every implementation must answer.</p>
+   *
+   * @param command the contract command, carrying at least the record id
+   * @return the defaults, or empty when this contract offers none
+   */
+  default Optional<EmailMessageDefaults> messageDefaults(EmailContractCommand command) {
+    return Optional.empty();
+  }
 }

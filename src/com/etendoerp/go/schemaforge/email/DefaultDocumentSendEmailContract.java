@@ -240,6 +240,22 @@ public class DefaultDocumentSendEmailContract implements EmailContract {
             EmailThrottleRule.global(2000, 60)));
   }
 
+  @Override
+  public Optional<EmailMessageDefaults> messageDefaults(EmailContractCommand command) {
+    Optional<EmailDocumentRecord> document = resolveDocument(command);
+    if (!document.isPresent()) {
+      return Optional.empty();
+    }
+    String language = EmailContractCommandSupport.text(command,
+        EmailContractCommandSupport.FIELD_LANGUAGE);
+    // The plain-text form of the same sentence resolve() renders: the operator edits text, and the
+    // layout adds the emphasis, the button and the signature around it.
+    String message = EmailMessages.get("document.body", language, documentTypeLabel(language),
+        document.get().getDocumentNumber());
+    return Optional.of(
+        new EmailMessageDefaults(buildSubject(document.get(), language), message));
+  }
+
   private JSONObject buildTemplateData(EmailDocumentRecord document, String downloadLink,
       String language, Optional<EmailMessageEdits> messageEdits) throws JSONException {
     JSONObject data = new JSONObject();
