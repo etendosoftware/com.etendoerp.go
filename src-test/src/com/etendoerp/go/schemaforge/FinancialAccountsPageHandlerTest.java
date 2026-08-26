@@ -382,6 +382,28 @@ public class FinancialAccountsPageHandlerTest {
   }
 
   /**
+   * Verifies that {@code buildAccountsArray()} serialises {@code swiftCode} (ETP-4896 QA
+   * follow-up). The edit modal opened from the account DETAIL page reads its record from this R
+   * spec, so this key is what keeps its BIC/SWIFT field from rendering empty on an account that
+   * has one stored.
+   *
+   * @throws Exception if the JSON traversal fails
+   */
+  @Test
+  public void testBuildAccountsArrayEmitsSwiftCode() throws Exception {
+    AccountRow withSwift = account("acc-1", "BBVA", "B", new BigDecimal("100.00"), "EUR");
+    withSwift.swiftCode = "BBVAESMM";
+    AccountRow withoutSwift = account("acc-2", "Caja", "C", new BigDecimal("0.00"), "EUR");
+
+    JSONArray arr = handler.buildAccountsArray(Arrays.asList(withSwift, withoutSwift),
+        Collections.emptySet());
+
+    assertEquals("BBVAESMM", arr.getJSONObject(0).getString("swiftCode"));
+    assertEquals("an account with no BIC serialises as \"\", not the literal \"null\"",
+        "", arr.getJSONObject(1).getString("swiftCode"));
+  }
+
+  /**
    * Verifies that {@code buildAccountsArray()} serialises {@code providerLogoUrl} per row, and
    * that an account with no bank provider (the default, e.g. cash accounts) serialises it as an
    * empty string rather than omitting the key or emitting {@code null} — the SPA's avatar
@@ -844,6 +866,9 @@ public class FinancialAccountsPageHandlerTest {
     // ETP-4896 country block for the same reason — every column here is read BY POSITION.
     // COALESCEd in the SQL, so getInt never sees a NULL.
     when(rs.getInt(22)).thenReturn(4, 0);
+    // Column 23: fa.swiftcode (ETP-4896 QA follow-up), appended last for the same positional
+    // reason. First row has a BIC, second has none (a Cash account, or a Bank account without one).
+    when(rs.getString(23)).thenReturn("BBVAESMM", null);
 
     try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
       OBDal dal = mock(OBDal.class);
@@ -867,6 +892,7 @@ public class FinancialAccountsPageHandlerTest {
       assertEquals("ES", first.country.iso);
       assertEquals("Spain", first.country.name);
       assertEquals("first row maps column 22 into pendingCount", 4, first.pendingCount);
+      assertEquals("first row maps column 23 into swiftCode", "BBVAESMM", first.swiftCode);
 
       AccountRow second = rows.get(1);
       assertEquals("acc-2", second.id);
@@ -877,6 +903,8 @@ public class FinancialAccountsPageHandlerTest {
           + "full of blanks", second.country);
       assertEquals("a zero column 22 is a real zero, not a missing value", 0,
           second.pendingCount);
+      assertEquals("a null column 23 becomes \"\", never the literal \"null\"",
+          "", second.swiftCode);
 
       verify(ps).setString(1, CLIENT_ID);
       verify(ps).setArray(2, orgArray);
