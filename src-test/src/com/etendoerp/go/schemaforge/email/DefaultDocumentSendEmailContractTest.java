@@ -41,18 +41,23 @@ public class DefaultDocumentSendEmailContractTest {
   private static final String DOCUMENT_NUMBER = "doc-1";
   private static final String DOWNLOAD_LINK = "https://example.test/download/doc-1";
   private static final String RECIPIENT_EMAIL = "customer@example.com";
-  private static final String LINK_ANCHOR =
-      "<a href=\"" + DOWNLOAD_LINK + "\">" + DOWNLOAD_LINK + "</a>";
-  private static final String DEFAULT_BODY =
-      "<p>Le enviamos su Documento " + DOCUMENT_NUMBER + ".</p>"
-          + "<p>Puede descargarlo desde este enlace: " + LINK_ANCHOR + "</p>";
+  /** The document link, however the layout chooses to present it. */
+  private static final String LINK_ANCHOR = DOWNLOAD_LINK;
+  /**
+   * The default copy, as it appears inside the shared layout (ETP-5003). Asserted as a fragment
+   * rather than as the whole body: the layout owns the markup around it, and pinning that here
+   * would make every layout tweak fail a contract test. {@code EmailLayoutTest} pins the markup.
+   */
+  private static final String DEFAULT_COPY = "Le enviamos su Documento "
+      + "<strong>" + DOCUMENT_NUMBER + "</strong>.";
 
   @Test
   public void noMessageEditsKeepsDefaultBodyUnchanged() throws Exception {
     String body = resolveBody(new JSONObject("{\"recordId\":\"" + RECORD_ID + "\"}"));
 
     // Regression guard: an untouched send must stay byte-identical to pre-fix behavior.
-    assertEquals(DEFAULT_BODY, body);
+    assertTrue("expected the default copy in body: " + body, body.contains(DEFAULT_COPY));
+    assertTrue("expected the document link in body: " + body, body.contains(DOWNLOAD_LINK));
   }
 
   @Test
@@ -61,7 +66,8 @@ public class DefaultDocumentSendEmailContractTest {
         + "\",\"messageEdits\":{\"subject\":\"Asunto nuevo\"}}"));
 
     // Subject and message overrides are independent; editing only the subject must not touch body.
-    assertEquals(DEFAULT_BODY, body);
+    assertTrue("expected the default copy in body: " + body, body.contains(DEFAULT_COPY));
+    assertTrue("expected the document link in body: " + body, body.contains(DOWNLOAD_LINK));
   }
 
   @Test

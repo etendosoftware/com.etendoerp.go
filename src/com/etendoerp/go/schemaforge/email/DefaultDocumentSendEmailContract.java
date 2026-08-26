@@ -28,6 +28,10 @@ import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.base.exception.OBException;
 
 import com.etendoerp.go.common.ConfigPropertyReader;
+import com.etendoerp.go.schemaforge.email.render.EmailContent;
+import com.etendoerp.go.schemaforge.email.render.EmailEscape;
+import com.etendoerp.go.schemaforge.email.render.EmailLayout;
+import com.etendoerp.go.schemaforge.email.render.EmailMessages;
 
 /**
  * Base contract for document-send transactional emails resolved from trusted server records.
@@ -196,17 +200,18 @@ public class DefaultDocumentSendEmailContract implements EmailContract {
       return EmailContractResolution.rejected(400,
           TransactionalEmailService.STATUS_VALIDATION_FAILED, e.getMessage());
     }
-    // ETP-4717 + ETP-4786 — the branded template carries its own copy and cannot render an
-    // operator-authored message, so an edited send switches to the content template for that send
-    // only. Untouched sends keep the contract's own template (and thus the branded email).
-    String effectiveTemplate = messageEdits.isPresent() ? CONTENT_TEMPLATE : template;
+    // ETP-5003 — every document email now renders through the shared layout, so there is no
+    // branded-template branch left: an edited send and an untouched one produce the same design.
+    // Before this, editing the message silently downgraded a branded invoice to two bare
+    // paragraphs.
+    String language = EmailContractCommandSupport.text(command,
+        EmailContractCommandSupport.FIELD_LANGUAGE);
     try {
       EmailRecipientSet recipients = recipient.getRecipientSet() != null
           ? recipient.getRecipientSet()
           : EmailRecipientSet.singleTo(recipient.getRecipient());
-      return EmailContractResolution.ready(new EmailProviderRequest(recipients, effectiveTemplate,
-          buildTemplateData(document.get(), downloadLink.get(), effectiveTemplate, messageEdits),
-          null));
+      return EmailContractResolution.ready(new EmailProviderRequest(recipients, CONTENT_TEMPLATE,
+          buildTemplateData(document.get(), downloadLink.get(), language, messageEdits), null));
     } catch (JSONException e) {
       throw new OBException("Could not build document email payload for " + name, e);
     }
@@ -236,8 +241,10 @@ public class DefaultDocumentSendEmailContract implements EmailContract {
   }
 
   private JSONObject buildTemplateData(EmailDocumentRecord document, String downloadLink,
-      String effectiveTemplate, Optional<EmailMessageEdits> messageEdits) throws JSONException {
+      String language, Optional<EmailMessageEdits> messageEdits) throws JSONException {
     JSONObject data = new JSONObject();
+    // Kept beside the rendered content: the gateway logs these for traceability, and they cost
+    // nothing now that the copy no longer depends on them.
     data.put("name", StringUtils.defaultIfBlank(document.getRecipientName(), "Customer"));
     data.put("document_type", documentType);
     data.put("document_number", document.getDocumentNumber());
@@ -248,86 +255,83 @@ public class DefaultDocumentSendEmailContract implements EmailContract {
       data.put("amount", document.getAmount());
     }
     data.put("download_link", downloadLink);
-    if (CONTENT_TEMPLATE.equals(effectiveTemplate)) {
-      // The content template has no copy of its own, so subject and body must be supplied. They
-      // default to contract-composed values built from the trusted document record; the operator's
-      // allowlisted messageEdits override them when present, escaped by EmailMessageEdits.
-      data.put(FIELD_SUBJECT, resolveSubject(document, messageEdits));
-      data.put(FIELD_BODY, resolveBody(document, downloadLink, messageEdits));
-    }
+    data.put(FIELD_SUBJECT, resolveSubject(document, language, messageEdits));
+    data.put(FIELD_BODY,
+        EmailLayout.render(buildContent(document, downloadLink, language, messageEdits)));
     return data;
   }
 
-  private String resolveSubject(EmailDocumentRecord document,
+  /**
+   * Composes the document email from shared layout blocks.
+   *
+   * <p>An operator-authored message replaces only the introductory paragraph. The download button
+   * and its link fallback are always appended after it, because the whole point of the email is
+   * the document and an operator rewriting the greeting must not be able to remove it (ETP-4717,
+   * reopened).</p>
+   */
+  private EmailContent buildContent(EmailDocumentRecord document, String downloadLink,
+      String language, Optional<EmailMessageEdits> messageEdits) {
+    EmailContent.Builder content = EmailContent.builder();
+    String recipientName = StringUtils.trimToNull(document.getRecipientName());
+    if (recipientName != null) {
+      content.greetingHtml(EmailMessages.get("document.greeting", language,
+          emphasised(recipientName)));
+    }
+    // toHtmlBody() has already escaped the operator's text and turned newlines into <br>.
+    String override = messageEdits.map(EmailMessageEdits::toHtmlBody).orElse(null);
+    content.paragraphHtml(override != null ? override
+        : EmailMessages.get("document.body", language,
+            EmailEscape.escapeHtml(documentTypeLabel(language)),
+            emphasised(document.getDocumentNumber())));
+    return content.cta(EmailMessages.get("document.cta", language), downloadLink)
+        .linkFallbackText(EmailMessages.get("link.fallback", language))
+        .signature(EmailMessages.get("signature", language))
+        .build();
+  }
+
+  private String resolveSubject(EmailDocumentRecord document, String language,
       Optional<EmailMessageEdits> messageEdits) {
     String override = messageEdits.map(EmailMessageEdits::getSubject).orElse(null);
-    return override != null ? override : buildSubject(document);
+    return override != null ? override : buildSubject(document, language);
   }
 
   /**
-   * ETP-4717 (reopened) — an operator-authored message must not drop the document download link:
-   * the override replaces only the introductory copy, the link paragraph is always appended after
-   * it. {@link EmailMessageEdits#toHtmlBody()} already escapes the operator's text and converts
-   * newlines to {@code <br>} before this method ever sees it, so appending the raw link markup
-   * afterwards cannot be mangled by that same conversion.
-   */
-  private String resolveBody(EmailDocumentRecord document, String downloadLink,
-      Optional<EmailMessageEdits> messageEdits) {
-    String override = messageEdits.map(EmailMessageEdits::toHtmlBody).orElse(null);
-    return override != null
-        ? "<p>" + override + "</p>" + downloadLinkParagraph(downloadLink)
-        : buildBody(document, downloadLink);
-  }
-
-  /**
-   * Display name of the document type used in the subject and body of content-template emails.
-   * Contracts override this to localize; {@link #documentType} stays as the provider
-   * {@code document_type} variable and is not affected.
+   * Human-facing label of the document type, read from the message catalog under the contract's own
+   * name.
    *
-   * @return human-facing document type label
+   * <p>It used to be a fixed Spanish string overridden by each subclass, which is how the subject
+   * the send modal displays and the subject actually delivered came to disagree under
+   * {@code en_US}.</p>
+   *
+   * @param language the recipient language
+   * @return the localized document type label
    */
-  protected String documentTypeLabel() {
-    return documentType;
+  protected String documentTypeLabel(String language) {
+    // Falls back to the type the contract was constructed with rather than emitting the raw key:
+    // a contract added without its catalog entry would otherwise put "foo-send.documentType" in
+    // the subject line of a customer's email.
+    return StringUtils.defaultIfBlank(
+        EmailMessages.getOptional(name + ".documentType", language), documentType);
   }
 
   /**
-   * Builds the default subject line, deliberately mirroring the shape the send modal displays
-   * ({@code {documentType} #{documentNo} — {businessPartner}}) so that an operator who edits only
-   * the message does not see the subject change meaning: the modal posts its own derived subject
-   * back as the override, and the two must agree.
-   * <p>
-   * Known limitation: the modal derives its label from the active UI locale while
-   * {@link #documentTypeLabel()} is a fixed Spanish string, so the two diverge under {@code en_US}.
+   * Builds the default subject, deliberately mirroring the shape the send modal displays
+   * ({@code {documentType} #{documentNo} — {businessPartner}}): the modal posts its own derived
+   * subject back as the override, so the two must agree.
    */
-  private String buildSubject(EmailDocumentRecord document) {
-    String subject = documentTypeLabel() + " #" + document.getDocumentNumber();
+  private String buildSubject(EmailDocumentRecord document, String language) {
+    String label = documentTypeLabel(language);
     String recipientName = StringUtils.trimToNull(document.getRecipientName());
-    return recipientName == null ? subject : subject + " — " + recipientName;
+    return recipientName == null
+        ? EmailMessages.get("document.subject", language, label, document.getDocumentNumber())
+        : EmailMessages.get("document.subject.withRecipient", language, label,
+            document.getDocumentNumber(), recipientName);
   }
 
-  /**
-   * Builds the default body. The content template renders {@code body} as HTML, so this emits
-   * markup rather than plain text; operator-authored bodies are escaped by
-   * {@link EmailMessageEdits#toHtmlBody()} before they reach this slot.
-   */
-  private String buildBody(EmailDocumentRecord document, String downloadLink) {
-    return "<p>Le enviamos su " + documentTypeLabel() + " " + document.getDocumentNumber()
-        + ".</p>" + downloadLinkParagraph(downloadLink);
+  private static String emphasised(String value) {
+    return "<strong>" + EmailEscape.escapeHtml(value) + "</strong>";
   }
 
-  /**
-   * Renders the download-link paragraph shared by {@link #buildBody} and the operator-message
-   * override path in {@link #resolveBody}, so the markup is defined once (ETP-4717).
-   */
-  private String downloadLinkParagraph(String downloadLink) {
-    return "<p>Puede descargarlo desde este enlace: <a href=\"" + downloadLink + "\">"
-        + downloadLink + "</a></p>";
-  }
-
-  /**
-   * Resolves an existing absolute document link or creates a signed download link for the trusted
-   * document record.
-   */
   private Optional<String> resolveDownloadLink(EmailContractCommand command,
       EmailDocumentRecord document) {
     String configuredLink = document.getDownloadLink();
