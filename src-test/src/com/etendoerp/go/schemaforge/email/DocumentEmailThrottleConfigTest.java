@@ -18,9 +18,13 @@
 package com.etendoerp.go.schemaforge.email;
 
 import static org.junit.Assert.assertEquals;
+import static org.mockito.Mockito.mockStatic;
 
 import org.junit.After;
 import org.junit.Test;
+import org.mockito.MockedStatic;
+
+import com.etendoerp.go.common.ConfigPropertyReader;
 
 /**
  * Unit tests for the per-environment throttle ceilings of the document-send family (ETP-5003).
@@ -37,9 +41,17 @@ public class DocumentEmailThrottleConfigTest {
 
   @Test
   public void usesTheProductionCeilingWhenNothingOverridesIt() {
-    assertEquals(DefaultDocumentSendEmailContract.DEFAULT_MAX_PER_RECORD,
-        DefaultDocumentSendEmailContract.maxAttempts(PROP, ENV,
-            DefaultDocumentSendEmailContract.DEFAULT_MAX_PER_RECORD));
+    // The reader is stubbed rather than trusted to come back empty. A developer machine
+    // legitimately carries these ceilings in gradle.properties — that is the entire point of the
+    // feature — so reading the real configuration would assert against whatever that developer
+    // happens to have configured, and the test would fail on exactly the machines that use it.
+    try (MockedStatic<ConfigPropertyReader> reader = mockStatic(ConfigPropertyReader.class)) {
+      reader.when(() -> ConfigPropertyReader.readConfigValue(PROP, ENV, null)).thenReturn(null);
+
+      assertEquals(DefaultDocumentSendEmailContract.DEFAULT_MAX_PER_RECORD,
+          DefaultDocumentSendEmailContract.maxAttempts(PROP, ENV,
+              DefaultDocumentSendEmailContract.DEFAULT_MAX_PER_RECORD));
+    }
   }
 
   @Test
