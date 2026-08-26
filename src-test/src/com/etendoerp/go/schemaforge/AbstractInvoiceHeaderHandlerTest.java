@@ -2921,7 +2921,7 @@ public class AbstractInvoiceHeaderHandlerTest {
 
       PreparedStatement findPs = mock(PreparedStatement.class);
       ResultSet findRs = mock(ResultSet.class);
-      when(findRs.next()).thenReturn(true); // existing row found
+      when(findRs.next()).thenReturn(true, false); // exactly one existing row found
       when(findRs.getString(1)).thenReturn("existing-crd-id");
       when(findPs.executeQuery()).thenReturn(findRs);
 
@@ -2934,9 +2934,86 @@ public class AbstractInvoiceHeaderHandlerTest {
       callAutoCreateOrUpdate("inv-update");
 
       verify(updatePs).executeUpdate();
-      verify(updatePs).setString(eq(4), eq("existing-crd-id"));
-      // Only two prepareStatement calls: the SELECT and the UPDATE — no INSERT attempted.
+      // Param order: 1=c_currency_id, 2=rate, 3=foreign_amount, 4=updatedby, 5=recordId.
+      verify(updatePs).setString(eq(1), eq("usd-id"));
+      verify(updatePs).setString(eq(5), eq("existing-crd-id"));
+      // Only two prepareStatement calls: the SELECT and the UPDATE — no INSERT, no DELETE.
       verify(conn, times(2)).prepareStatement(anyString());
+    }
+  }
+
+  /**
+   * ETP-4836 regression test — repeated currency changes (EUR org → GBP → USD) must
+   * not accumulate rows. When {@code findConversionRateDocumentIds} returns more than
+   * one existing row for the invoice (simulating stray duplicates left by the
+   * pre-fix bug, or just a second currency switch since the previous save), the most
+   * recent one is updated in place — including its currency — and every other one is
+   * deleted, so only one row survives per invoice.
+   */
+  @Test
+  public void autoCreateOrUpdate_multipleExistingRows_keepsNewestAndDeletesStrayDuplicates()
+      throws Exception {
+    try (MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
+         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<OBCurrencyUtils> curMock = Mockito.mockStatic(OBCurrencyUtils.class)) {
+      ctxMock.when(() -> OBContext.setAdminMode(anyBoolean())).thenAnswer(i -> null);
+      ctxMock.when(OBContext::restorePreviousMode).thenAnswer(i -> null);
+
+      OBContext obContext = mock(OBContext.class);
+      org.openbravo.model.ad.access.User user = mock(org.openbravo.model.ad.access.User.class);
+      when(user.getId()).thenReturn("user-4");
+      when(obContext.getUser()).thenReturn(user);
+      ctxMock.when(OBContext::getOBContext).thenReturn(obContext);
+
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      Invoice invoice = mock(Invoice.class);
+      Currency currency = mock(Currency.class);
+      Organization org = mock(Organization.class);
+      when(dal.get(Invoice.class, "inv-dup")).thenReturn(invoice);
+      when(invoice.getId()).thenReturn("inv-dup");
+      when(invoice.getCurrency()).thenReturn(currency);
+      when(currency.getId()).thenReturn("usd-id"); // currency just switched to USD
+      when(invoice.getOrganization()).thenReturn(org);
+      when(org.getId()).thenReturn("org-1");
+      when(invoice.getETGOCurrencyRate()).thenReturn(new BigDecimal("1.16"));
+      when(invoice.getGrandTotalAmount()).thenReturn(new BigDecimal("100.00"));
+
+      curMock.when(() -> OBCurrencyUtils.getOrgCurrency("org-1")).thenReturn("eur-id");
+
+      org.hibernate.Session session = mock(org.hibernate.Session.class);
+      when(dal.getSession()).thenReturn(session);
+
+      Connection conn = mock(Connection.class);
+      when(dal.getConnection()).thenReturn(conn);
+
+      // Two stray rows for this invoice (e.g. from EUR→GBP then EUR→USD switches
+      // before this fix), newest first per ORDER BY created DESC.
+      PreparedStatement findPs = mock(PreparedStatement.class);
+      ResultSet findRs = mock(ResultSet.class);
+      when(findRs.next()).thenReturn(true, true, false);
+      when(findRs.getString(1)).thenReturn("newest-crd-id", "stale-crd-id");
+      when(findPs.executeQuery()).thenReturn(findRs);
+
+      PreparedStatement updatePs = mock(PreparedStatement.class);
+      PreparedStatement deletePs = mock(PreparedStatement.class);
+      when(conn.prepareStatement(anyString()))
+          .thenReturn(findPs)
+          .thenReturn(updatePs)
+          .thenReturn(deletePs);
+
+      callAutoCreateOrUpdate("inv-dup");
+
+      verify(updatePs).setString(eq(1), eq("usd-id"));
+      verify(updatePs).setString(eq(5), eq("newest-crd-id"));
+      verify(updatePs).executeUpdate();
+
+      verify(deletePs).setString(eq(1), eq("stale-crd-id"));
+      verify(deletePs).executeUpdate();
+
+      // SELECT + UPDATE + one DELETE for the single stray row.
+      verify(conn, times(3)).prepareStatement(anyString());
     }
   }
 
