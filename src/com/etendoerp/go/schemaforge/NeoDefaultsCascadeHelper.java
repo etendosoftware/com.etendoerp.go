@@ -1,10 +1,13 @@
 package com.etendoerp.go.schemaforge;
 
 import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 import org.apache.logging.log4j.LogManager;
@@ -18,6 +21,7 @@ import org.openbravo.base.model.Property;
 import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.datamodel.Column;
+import org.openbravo.model.ad.ui.Field;
 import org.openbravo.model.ad.ui.Tab;
 
 import com.etendoerp.go.schemaforge.data.SFEntity;
@@ -67,15 +71,51 @@ public class NeoDefaultsCascadeHelper {
   }
 
   static void executeCalloutCascadeForCreate(NeoContext ctx, Tab adTab, JSONObject body) {
+    // No explicit snapshot supplied: fall back to the CURRENT body keys. Used by callers
+    // (and legacy tests) that invoke the cascade directly against an already-assembled body
+    // with no separate "as submitted by the client" snapshot available. The create path in
+    // NeoMandatoryDefaultsService.injectMandatoryDefaults MUST use the overload below with an
+    // explicit pre-defaults snapshot instead (ETP-4784 defaults-cascade-order fix) — otherwise
+    // values written by the generic mandatory-column defaults pass (e.g. the plain AD_Column
+    // default, computed with no knowledge of the Business Partner) get frozen as "protected"
+    // before the callout cascade ever gets a chance to recompute them from the real BP.
+    Set<String> protectedFields = new HashSet<>();
+    Iterator<String> bodyKeys = body.keys();
+    while (bodyKeys.hasNext()) {
+      protectedFields.add(bodyKeys.next());
+    }
+    executeCalloutCascadeForCreate(ctx, adTab, body, protectedFields);
+  }
+
+  /**
+   * Runs the create-path callout cascade, protecting only the fields listed in
+   * {@code protectedFields} from being overwritten by a re-cascaded callout.
+   *
+   * <p>ETP-4784: {@code protectedFields} MUST be a snapshot of the field names present in the
+   * request body <em>as submitted by the client</em>, taken BEFORE any generic mandatory-column
+   * default injection ran. Passing a snapshot taken from the body AFTER that injection (the
+   * previous behaviour, when this method computed the snapshot internally from the live body)
+   * incorrectly protects values the backend itself filled in with a generic default — e.g. a
+   * plain column-level default for a document-type-key field that ignores the Business Partner
+   * — from being corrected by a subsequent callout that knows the real, BP-aware value. A value
+   * the user genuinely submitted in the original POST must still end up in {@code
+   * protectedFields} and stay protected; only backend-injected generic defaults must not.</p>
+   *
+   * @param ctx             the NEO request context
+   * @param adTab           the tab whose columns may trigger dependent callouts
+   * @param body            the in-progress create payload, mutated in place by the cascade
+   * @param protectedFields snapshot of field names to protect from cascade overwrite — must
+   *                        reflect the client-submitted body, not the body after generic
+   *                        default injection
+   */
+  static void executeCalloutCascadeForCreate(NeoContext ctx, Tab adTab, JSONObject body,
+      Set<String> protectedFields) {
     try {
       Set<String> emptySeqFields = new HashSet<>();
-      Set<String> protectedFields = new HashSet<>();
-      Iterator<String> bodyKeys = body.keys();
-      while (bodyKeys.hasNext()) {
-        protectedFields.add(bodyKeys.next());
-      }
+      Set<String> effectiveProtected = protectedFields != null
+          ? protectedFields : java.util.Collections.emptySet();
       NeoDefaultsService.CalloutCascadeResult cascadeResult =
-          executeCalloutCascade(ctx, adTab, body, emptySeqFields, protectedFields);
+          executeCalloutCascade(ctx, adTab, body, emptySeqFields, effectiveProtected);
       if (cascadeResult != null && cascadeResult.hasResults()) {
         log.info("[NEO-CREATE] Callout cascade derived {} field updates",
             cascadeResult.updatedFieldCount());
@@ -279,7 +319,64 @@ public class NeoDefaultsCascadeHelper {
         fieldsWithCallouts.add(fieldName);
       }
     }
-    return fieldsWithCallouts;
+    return orderByAdFieldSequence(fieldsWithCallouts, adTab);
+  }
+
+  /**
+   * Orders the cascade's trigger fields by their AD_Field sequence number, i.e. the order the
+   * fields appear in the Classic form, from the most generic (Organization) to the most
+   * specific (Business Partner, its address, ...).
+   *
+   * <p><b>Why this matters (ETP-4784).</b> Unlike Classic — where only the callout of the field
+   * the user just edited runs — the create/defaults cascade fires the callout of EVERY field
+   * present in the payload. When two callouts write the same column, the winner is simply
+   * whichever runs last, and the previous iteration order was {@code JSONObject.keys()}, i.e.
+   * hash order: non-deterministic and unrelated to any business rule.
+   *
+   * <p>Concrete case this fixes: on a sales invoice both
+   * {@code SiiInvoiceOrganizationCallout} (on {@code AD_Org_ID}, seqNo 10) and
+   * {@code SiiAutoSetSIIKEYByDefault} (on {@code C_BPartner_ID}, seqNo 50) write
+   * {@code EM_Aeatsii_Clave_Tipo}. The organization callout writes a blanket {@code "F1"},
+   * while the business-partner one resolves the key actually configured on that partner. Under
+   * hash order the blanket value could land last and silently overwrite the specific one.
+   * Following the form's own sequence reproduces what Classic does when a user fills the form
+   * top-to-bottom: the more specific callout runs later and therefore wins.
+   *
+   * <p>Fields with no matching AD_Field (a payload key that is not on this tab) keep their
+   * original relative order and are appended last, so behaviour for them is unchanged.
+   */
+  private static List<String> orderByAdFieldSequence(List<String> fieldsWithCallouts, Tab adTab) {
+    if (fieldsWithCallouts.size() < 2 || adTab == null || adTab.getTable() == null) {
+      return fieldsWithCallouts;
+    }
+    try {
+      Entity dalEntity = ModelProvider.getInstance().getEntityByTableId(adTab.getTable().getId());
+      if (dalEntity == null) {
+        return fieldsWithCallouts;
+      }
+      // property name -> smallest AD_Field seqNo declaring it on this tab
+      Map<String, Long> seqByProperty = new HashMap<>();
+      for (Field adField : adTab.getADFieldList()) {
+        Column column = adField.getColumn();
+        if (column == null || adField.getSequenceNumber() == null) {
+          continue;
+        }
+        // resolvePropertyName never returns null: it falls back to toCleanFieldName().
+        String propertyName = resolvePropertyName(dalEntity, column.getDBColumnName());
+        seqByProperty.merge(propertyName, adField.getSequenceNumber(), Math::min);
+      }
+      if (seqByProperty.isEmpty()) {
+        return fieldsWithCallouts;
+      }
+      List<String> ordered = new ArrayList<>(fieldsWithCallouts);
+      // Stable sort: unknown fields (no AD_Field on this tab) sort last, keeping their order.
+      ordered.sort(Comparator.comparing(
+          field -> seqByProperty.getOrDefault(field, Long.MAX_VALUE)));
+      return ordered;
+    } catch (Exception e) {
+      log.debug("[NEO-DEFAULTS] Could not order cascade fields by AD sequence: {}", e.getMessage());
+      return fieldsWithCallouts;
+    }
   }
 
   private static void processCalloutForField(NeoContext ctx, Tab adTab, String fieldName,
