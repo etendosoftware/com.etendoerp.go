@@ -26,9 +26,10 @@ import java.util.Base64;
  * ETP-4829: extracted from {@link EtendoGoJwtServlet#hashPassword}, which now delegates here.
  * Single source of truth for the {@code etgo_account.password_hash} algorithm — anything that
  * writes an {@code etgo_account} row with a real, verifiable password (self-registration,
- * password reset/change, and now admin-set passwords via {@link EtendoGoAccountProvisioning})
- * must hash through this class, never re-implement the salt/digest logic, or
- * {@link EtendoGoJwtServlet#verifyPassword} won't be able to check it back at login.
+ * password reset/change, company-invitation {@code register-and-accept}) must hash through this
+ * class, never re-implement the salt/digest logic, or {@link EtendoGoJwtServlet#verifyPassword}
+ * won't be able to check it back at login. (ETP-4830 removed the admin-set-password bypass that
+ * used to be this class's other caller — {@code EtendoGoAccountProvisioning} no longer exists.)
  */
 public final class PasswordHasher {
 

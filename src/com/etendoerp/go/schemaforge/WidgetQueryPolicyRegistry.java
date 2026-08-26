@@ -42,6 +42,11 @@ final class WidgetQueryPolicyRegistry {
             + "  JOIN c_invoice i ON i.c_invoice_id = il.c_invoice_id"
             + "  JOIN m_product p ON p.m_product_id = il.m_product_id"
             + "  WHERE i.issotrx = 'Y' AND i.docstatus IN ('CO','CL') AND i.ad_client_id = :clientId"
+            // ETP-4967: excludes products under a category flagged EM_Etgo_IsSystemCategory='Y'
+            // (e.g. ETGO_DTO, category "Discounts") from the widget ranking.
+            + "    AND NOT EXISTS (SELECT 1 FROM m_product_category mpc"
+            + "      WHERE mpc.m_product_category_id = p.m_product_category_id"
+            + "      AND mpc.em_etgo_issystemcategory = 'Y')"
             + "  GROUP BY p.m_product_id, p.name"
             + "), curr_period AS ("
             + "  SELECT il.m_product_id, SUM(il.linenetamt) AS amount"
@@ -78,6 +83,11 @@ final class WidgetQueryPolicyRegistry {
             + "  JOIN m_product p ON p.m_product_id = il.m_product_id"
             + "  WHERE i.issotrx = 'Y' AND i.docstatus IN ('CO','CL') AND i.ad_client_id = :clientId"
             + "    AND i.dateinvoiced >= %1$s AND i.dateinvoiced <= NOW()"
+            // ETP-4967: excludes products under a category flagged EM_Etgo_IsSystemCategory='Y'
+            // (e.g. ETGO_DTO, category "Discounts") from the widget ranking.
+            + "    AND NOT EXISTS (SELECT 1 FROM m_product_category mpc"
+            + "      WHERE mpc.m_product_category_id = p.m_product_category_id"
+            + "      AND mpc.em_etgo_issystemcategory = 'Y')"
             + "  GROUP BY p.m_product_id, p.name"
             + "), curr_period AS ("
             + "  SELECT il.m_product_id, SUM(il.linenetamt) AS amount"
@@ -111,6 +121,11 @@ final class WidgetQueryPolicyRegistry {
             + "  JOIN m_product p ON p.m_product_id = il.m_product_id"
             + "  LEFT JOIN c_uom uom ON uom.c_uom_id = p.c_uom_id"
             + "  WHERE i.issotrx = 'Y' AND i.docstatus IN ('CO','CL') AND i.ad_client_id = :clientId"
+            // ETP-4967: excludes products under a category flagged EM_Etgo_IsSystemCategory='Y'
+            // (e.g. ETGO_DTO, category "Discounts") from the widget ranking.
+            + "    AND NOT EXISTS (SELECT 1 FROM m_product_category mpc"
+            + "      WHERE mpc.m_product_category_id = p.m_product_category_id"
+            + "      AND mpc.em_etgo_issystemcategory = 'Y')"
             + "  GROUP BY p.m_product_id, p.name, uom.name"
             + "), curr_period AS ("
             + "  SELECT il.m_product_id, SUM(il.qtyinvoiced) AS qty"
@@ -148,6 +163,11 @@ final class WidgetQueryPolicyRegistry {
             + "  LEFT JOIN c_uom uom ON uom.c_uom_id = p.c_uom_id"
             + "  WHERE i.issotrx = 'Y' AND i.docstatus IN ('CO','CL') AND i.ad_client_id = :clientId"
             + "    AND i.dateinvoiced >= %1$s AND i.dateinvoiced <= NOW()"
+            // ETP-4967: excludes products under a category flagged EM_Etgo_IsSystemCategory='Y'
+            // (e.g. ETGO_DTO, category "Discounts") from the widget ranking.
+            + "    AND NOT EXISTS (SELECT 1 FROM m_product_category mpc"
+            + "      WHERE mpc.m_product_category_id = p.m_product_category_id"
+            + "      AND mpc.em_etgo_issystemcategory = 'Y')"
             + "  GROUP BY p.m_product_id, p.name, uom.name"
             + "), curr_period AS ("
             + "  SELECT il.m_product_id, SUM(il.qtyinvoiced) AS qty"
