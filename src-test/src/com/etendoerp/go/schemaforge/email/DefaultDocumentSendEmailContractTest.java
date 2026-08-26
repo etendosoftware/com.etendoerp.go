@@ -289,7 +289,7 @@ public class DefaultDocumentSendEmailContractTest {
       List<EmailDocumentDetail> details) throws JSONException {
     EmailDocumentRecordResolver resolver = recordId -> Optional.of(
         new EmailDocumentRecord("Cliente", RECIPIENT_EMAIL, RECORD_ID, DOCUMENT_NUMBER, null,
-            DOWNLOAD_LINK, "client-1", details));
+            DOWNLOAD_LINK, "client-1").withDetails(details));
     DefaultDocumentSendEmailContract contract =
         new DefaultDocumentSendEmailContract(CONTRACT_NAME, "Documento", resolver);
 

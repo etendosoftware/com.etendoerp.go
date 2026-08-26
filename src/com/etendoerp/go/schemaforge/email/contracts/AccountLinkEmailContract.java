@@ -62,7 +62,7 @@ final class AccountLinkEmailContract implements EmailContract {
   AccountLinkEmailContract(String name, EmailContractDataResolver dataResolver,
       int recipientThrottleLimit, int throttleWindowSeconds) {
     this(name, dataResolver, recipientThrottleLimit, throttleWindowSeconds, null,
-        ValidityWindow.Unit.MINUTES, new String[0]);
+        ValidityWindow.Unit.MINUTES);
   }
 
   AccountLinkEmailContract(String name, EmailContractDataResolver dataResolver,

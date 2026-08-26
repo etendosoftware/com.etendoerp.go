@@ -33,6 +33,9 @@ import javax.enterprise.context.ApplicationScoped;
 @ApplicationScoped
 public final class CoreEmailContractProvider implements EmailContractProvider {
 
+  /** Catalog key of the "this link expires in N" note, shared by the link contracts. */
+  private static final String NOTE_EXPIRY = "note.expiry";
+
   private final EmailContractDataResolver contractResolver;
   private static final int RESET_PASSWORD_RECIPIENT_THROTTLE_LIMIT = 3;
   private static final int NEW_ACCOUNT_RECIPIENT_THROTTLE_LIMIT = 2;
@@ -65,16 +68,16 @@ public final class CoreEmailContractProvider implements EmailContractProvider {
     return Arrays.asList(
         new AccountLinkEmailContract("reset-password", contractResolver,
             RESET_PASSWORD_RECIPIENT_THROTTLE_LIMIT, ACCOUNT_LINK_THROTTLE_WINDOW_SECONDS, null,
-            "note.expiry", "note.ignore"),
+            NOTE_EXPIRY, "note.ignore"),
         new AccountLinkEmailContract("new-account", contractResolver,
             NEW_ACCOUNT_RECIPIENT_THROTTLE_LIMIT, ACCOUNT_LINK_THROTTLE_WINDOW_SECONDS, null,
-            ValidityWindow.Unit.HOURS, "note.expiry"),
+            ValidityWindow.Unit.HOURS, NOTE_EXPIRY),
         new AccountLinkEmailContract("environment-ready", contractResolver,
             ENVIRONMENT_READY_RECIPIENT_THROTTLE_LIMIT, ACCOUNT_LINK_THROTTLE_WINDOW_SECONDS,
             DASHBOARD_LINK_PATH),
         new AccountLinkEmailContract("verify-email", contractResolver,
             VERIFY_EMAIL_RECIPIENT_THROTTLE_LIMIT, ACCOUNT_LINK_THROTTLE_WINDOW_SECONDS, null,
-            ValidityWindow.Unit.HOURS, "note.expiry", "note.ignore"),
+            ValidityWindow.Unit.HOURS, NOTE_EXPIRY, "note.ignore"),
         // An invited operator gets a welcome of its own: its button goes to the dashboard, not to
         // email verification, because an invitation is itself the proof that somebody meant to
         // reach this address (ETP-5003).

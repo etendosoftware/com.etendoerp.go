@@ -49,6 +49,8 @@ public final class EmailLayout {
       "'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif";
   private static final int CARD_WIDTH = 600;
   private static final int CARD_PADDING = 56;
+  /** Closes a dark-mode override: every rule in that block has to outrank the inline style. */
+  private static final String IMPORTANT_END = " !important}";
 
   private EmailLayout() {
   }
@@ -83,15 +85,15 @@ public final class EmailLayout {
         .append("<style>")
         .append("@media (prefers-color-scheme: dark){")
         .append(".sf-page{background:").append(EmailPalette.DARK_PAGE_BACKGROUND)
-        .append(" !important}")
+        .append(IMPORTANT_END)
         .append(".sf-card{background:").append(EmailPalette.DARK_CARD_BACKGROUND)
-        .append(" !important}")
-        .append(".sf-divider{border-color:").append(EmailPalette.DARK_DIVIDER).append(" !important}")
-        .append(".sf-text{color:").append(EmailPalette.DARK_TEXT).append(" !important}")
-        .append(".sf-strong{color:").append(EmailPalette.DARK_TEXT_STRONG).append(" !important}")
-        .append(".sf-link{color:").append(EmailPalette.DARK_LINK).append(" !important}")
-        .append(".sf-cta{background:").append(EmailPalette.DARK_CTA_BACKGROUND).append(" !important}")
-        .append(".sf-cta-label{color:").append(EmailPalette.DARK_CTA_LABEL).append(" !important}")
+        .append(IMPORTANT_END)
+        .append(".sf-divider{border-color:").append(EmailPalette.DARK_DIVIDER).append(IMPORTANT_END)
+        .append(".sf-text{color:").append(EmailPalette.DARK_TEXT).append(IMPORTANT_END)
+        .append(".sf-strong{color:").append(EmailPalette.DARK_TEXT_STRONG).append(IMPORTANT_END)
+        .append(".sf-link{color:").append(EmailPalette.DARK_LINK).append(IMPORTANT_END)
+        .append(".sf-cta{background:").append(EmailPalette.DARK_CTA_BACKGROUND).append(IMPORTANT_END)
+        .append(".sf-cta-label{color:").append(EmailPalette.DARK_CTA_LABEL).append(IMPORTANT_END)
         .append("}")
         .append("@media (max-width:480px){")
         .append(".sf-card{width:100% !important}")

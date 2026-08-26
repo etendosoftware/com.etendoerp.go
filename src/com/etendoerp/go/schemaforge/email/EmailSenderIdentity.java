@@ -17,7 +17,6 @@
 
 package com.etendoerp.go.schemaforge.email;
 
-import java.util.regex.Pattern;
 
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
@@ -48,8 +47,11 @@ public final class EmailSenderIdentity {
    * header it lands in: whitespace (including CR and LF, which would inject a header break), the
    * {@code ,} and {@code ;} address separators, and the {@code <>"} display-name delimiters.
    */
-  private static final Pattern SINGLE_ADDRESS =
-      Pattern.compile("^[^\\s@,;<>\"]+@[^\\s@,;<>\"]+\\.[^\\s@,;<>\"]+$");
+  /**
+   * Characters that must never reach a mail header. Whitespace is rejected separately, and
+   * {@code @} is handled by the single-address check itself.
+   */
+  private static final String FORBIDDEN_CHARACTERS = ",;<>\"";
 
   private EmailSenderIdentity() {
   }
@@ -99,8 +101,44 @@ public final class EmailSenderIdentity {
     return preferred != null ? preferred : singleAddressOrNull(username);
   }
 
+  /**
+   * Accepts a value only when it is exactly one plain address.
+   *
+   * <p>Scanned character by character rather than matched against a regular expression. The
+   * pattern this replaced was ambiguous by construction — the domain parts on both sides of the
+   * dot accepted dots themselves — so an input like {@code a@} followed by a long run of dots made
+   * the matcher backtrack quadratically before rejecting it. Since the value ultimately reaches a
+   * mail header, an attacker-influenced username is exactly the input that would exercise it.</p>
+   *
+   * <p>The accepted shape is unchanged: something, one {@code @}, then a domain carrying a dot
+   * with at least one character on each side, and no separator or whitespace anywhere.</p>
+   *
+   * @param candidate the raw value
+   * @return the trimmed address, or {@code null} when it is not a single plain address
+   */
   private static String singleAddressOrNull(String candidate) {
     String value = StringUtils.trimToNull(candidate);
-    return value != null && SINGLE_ADDRESS.matcher(value).matches() ? value : null;
+    if (value == null || containsForbiddenCharacter(value)) {
+      return null;
+    }
+    int at = value.indexOf('@');
+    boolean singleAt = at > 0 && at < value.length() - 1
+        && value.indexOf('@', at + 1) < 0;
+    if (!singleAt) {
+      return null;
+    }
+    // From at + 2: a dot immediately after the @ would leave the first domain label empty.
+    int dot = value.indexOf('.', at + 2);
+    return dot > 0 && dot < value.length() - 1 ? value : null;
+  }
+
+  private static boolean containsForbiddenCharacter(String value) {
+    for (int i = 0; i < value.length(); i++) {
+      char character = value.charAt(i);
+      if (Character.isWhitespace(character) || FORBIDDEN_CHARACTERS.indexOf(character) >= 0) {
+        return true;
+      }
+    }
+    return false;
   }
 }

@@ -51,8 +51,8 @@ public final class EmailDocumentRecord {
   public static EmailDocumentRecord withGeneratedDownloadLink(final String recipientName,
       final String recipientEmail, final String recordId, final String documentNumber,
       final String amount, final String clientId) {
-    return withGeneratedDownloadLink(recipientName, recipientEmail, recordId, documentNumber,
-        amount, clientId, Collections.emptyList());
+    return new EmailDocumentRecord(recipientName, recipientEmail, recordId, documentNumber,
+        amount, null, clientId);
   }
 
   /**
@@ -70,8 +70,8 @@ public final class EmailDocumentRecord {
   public static EmailDocumentRecord withGeneratedDownloadLink(final String recipientName,
       final String recipientEmail, final String recordId, final String documentNumber,
       final String amount, final String clientId, final List<EmailDocumentDetail> details) {
-    return new EmailDocumentRecord(recipientName, recipientEmail, recordId, documentNumber,
-        amount, null, clientId, details);
+    return withGeneratedDownloadLink(recipientName, recipientEmail, recordId, documentNumber,
+        amount, clientId).withDetails(details);
   }
 
   /**
@@ -89,28 +89,7 @@ public final class EmailDocumentRecord {
   public EmailDocumentRecord(final String recipientName, final String recipientEmail,
       final String recordId, final String documentNumber, final String amount,
       final String downloadLink, final String clientId) {
-    this(recipientName, recipientEmail, recordId, documentNumber, amount, downloadLink, clientId,
-        Collections.emptyList());
-  }
-
-  /**
-   * Creates a normalized document email record carrying summary rows.
-   *
-   * @param recipientName display name for the server-resolved recipient
-   * @param recipientEmail email address for the server-resolved recipient
-   * @param recordId trusted document record id
-   * @param documentNumber human-readable document number
-   * @param amount formatted amount for templates that include totals
-   * @param downloadLink absolute server link used by the template, or {@code null} when the
-   *        contract must generate a signed download link
-   * @param clientId trusted client id that owns the document
-   * @param details summary rows in render order; rows without a value are dropped
-   */
-  public EmailDocumentRecord(final String recipientName, final String recipientEmail,
-      final String recordId, final String documentNumber, final String amount,
-      final String downloadLink, final String clientId,
-      final List<EmailDocumentDetail> details) {
-    this.details = normalizeDetails(details);
+    this.details = Collections.emptyList();
     this.recipientName = StringUtils.trimToNull(recipientName);
     this.recipientEmail = StringUtils.trimToNull(recipientEmail);
     this.recordId = StringUtils.trimToNull(recordId);
@@ -178,6 +157,32 @@ public final class EmailDocumentRecord {
    */
   public List<EmailDocumentDetail> getDetails() {
     return details;
+  }
+
+  /**
+   * Returns a copy of this record carrying the given summary rows.
+   *
+   * <p>Separate from the constructors on purpose: threading the rows through them would push the
+   * widest one past the parameter count anybody can read at a glance, for a value most callers do
+   * not set.</p>
+   *
+   * @param details summary rows in render order; rows without a value are dropped
+   * @return a record identical to this one except for its details
+   */
+  public EmailDocumentRecord withDetails(final List<EmailDocumentDetail> details) {
+    return new EmailDocumentRecord(this, details);
+  }
+
+  private EmailDocumentRecord(final EmailDocumentRecord source,
+      final List<EmailDocumentDetail> details) {
+    this.recipientName = source.recipientName;
+    this.recipientEmail = source.recipientEmail;
+    this.recordId = source.recordId;
+    this.documentNumber = source.documentNumber;
+    this.amount = source.amount;
+    this.downloadLink = source.downloadLink;
+    this.clientId = source.clientId;
+    this.details = normalizeDetails(details);
   }
 
   private static List<EmailDocumentDetail> normalizeDetails(
