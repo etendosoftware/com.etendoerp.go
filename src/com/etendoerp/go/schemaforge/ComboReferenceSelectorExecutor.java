@@ -44,6 +44,7 @@ import org.openbravo.service.db.DalConnectionProvider;
 
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.selector.meta.SelectorContextResolver;
+import com.etendoerp.go.schemaforge.selector.policy.ComboRowSelectorPolicy;
 
 /** Executes classic ComboTableData selectors for SQL validation-rule references. */
 final class ComboReferenceSelectorExecutor {
@@ -102,6 +103,10 @@ final class ComboReferenceSelectorExecutor {
         false, offset, offset + limit);
     log.info("[ComboSelector] column={} rawRows={} offset={} limit={} resolvedParams={}",
         column.getDBColumnName(), rawRows.length, offset, limit, resolvedParams);
+
+    // ETP-4967: excludes rows flagged hidden (e.g. the "Discounts" M_Product_Category) — see
+    // ComboRowSelectorPolicy's Javadoc for why this can't be done via the validation rule itself.
+    rawRows = ComboRowSelectorPolicy.filter(column.getDBColumnName(), rawRows);
 
     return buildResponse(rawRows, limit, offset);
   }

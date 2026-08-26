@@ -243,6 +243,75 @@ public class TransactionalAuthEmailSenderTest {
   }
 
   @Test
+  public void sendNewAccountCarriesTheVerificationLinkWhenOneIsAvailable() throws Exception {
+    System.setProperty(PublicUrlResolver.APP_BASE_URL_PROPERTY, TEST_APP_BASE_URL);
+    TransactionalEmailService emailService = mock(TransactionalEmailService.class);
+    TransactionalAuthEmailSender sender = new TransactionalAuthEmailSender(emailService);
+    Account account = account("account-1");
+
+    JSONObject command = sendAndCaptureCommand(emailService,
+        () -> sender.sendNewAccount(account, "es_ES",
+            "https://app.example.test/onboarding?verifyToken=abc"),
+        "new-account");
+
+    assertBaseCommand(command);
+    // ETP-4798: the welcome mail's single call to action becomes the confirmation link.
+    assertEquals("https://app.example.test/onboarding?verifyToken=abc",
+        command.getString(EmailContractCommandSupport.FIELD_LINK));
+  }
+
+  @Test
+  public void sendNewAccountFallsBackToThePlainOnboardingLinkWithoutAVerificationLink()
+      throws Exception {
+    System.setProperty(PublicUrlResolver.APP_BASE_URL_PROPERTY, TEST_APP_BASE_URL);
+    TransactionalEmailService emailService = mock(TransactionalEmailService.class);
+    TransactionalAuthEmailSender sender = new TransactionalAuthEmailSender(emailService);
+    Account account = account("account-1");
+
+    JSONObject command = sendAndCaptureCommand(emailService,
+        () -> sender.sendNewAccount(account, null, "  "),
+        "new-account");
+
+    assertBaseCommand(command);
+    assertEquals("https://app.example.test/onboarding",
+        command.getString(EmailContractCommandSupport.FIELD_LINK));
+  }
+
+  @Test
+  public void sendVerifyEmailBuildsTheVerifyEmailCommand() throws Exception {
+    System.setProperty(PublicUrlResolver.APP_BASE_URL_PROPERTY, TEST_APP_BASE_URL);
+    TransactionalEmailService emailService = mock(TransactionalEmailService.class);
+    TransactionalAuthEmailSender sender = new TransactionalAuthEmailSender(emailService);
+    Account account = account("account-1");
+
+    JSONObject command = sendAndCaptureCommand(emailService,
+        () -> sender.sendVerifyEmail(account, "verify-hash",
+            "https://app.example.test/onboarding?verifyToken=abc", "es_ES"),
+        "verify-email");
+
+    assertBaseCommand(command);
+    assertEquals("https://app.example.test/onboarding?verifyToken=abc",
+        command.getString(EmailContractCommandSupport.FIELD_LINK));
+    // The token hash doubles as the idempotency key, exactly as reset-password does.
+    assertEquals("verify-hash", command.getString(EmailContractCommandSupport.FIELD_RECORD_ID));
+    assertEquals("es_ES", command.getString(EmailContractCommandSupport.FIELD_LANGUAGE));
+  }
+
+  @Test
+  public void sendVerifyEmailRefusesIncompleteInput() {
+    TransactionalEmailService emailService = mock(TransactionalEmailService.class);
+    TransactionalAuthEmailSender sender = new TransactionalAuthEmailSender(emailService);
+
+    assertFalse(sender.sendVerifyEmail(null, "verify-hash", "https://app.example.test/x"));
+    assertFalse(sender.sendVerifyEmail(account("account-1"), null, "https://app.example.test/x"));
+    assertFalse(sender.sendVerifyEmail(account("account-1"), " ", "https://app.example.test/x"));
+    assertFalse(sender.sendVerifyEmail(account("account-1"), "verify-hash", null));
+    assertFalse(sender.sendVerifyEmail(account("account-1"), "verify-hash", " "));
+
+    verify(emailService, never()).send(any(), any());
+  }
+
+  @Test
   public void nullAccountOrMissingLinkDoesNotSendEmail() {
     TransactionalEmailService emailService = mock(TransactionalEmailService.class);
     TransactionalAuthEmailSender sender = new TransactionalAuthEmailSender(emailService);

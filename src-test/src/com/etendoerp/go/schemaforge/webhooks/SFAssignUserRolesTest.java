@@ -41,6 +41,7 @@ import org.mockito.quality.Strictness;
 import org.openbravo.base.exception.OBException;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.model.ad.access.Role;
+import org.openbravo.model.ad.access.User;
 
 import com.etendoerp.go.roles.UserRoleCompositionService;
 import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
@@ -141,7 +142,7 @@ class SFAssignUserRolesTest {
     try (MockedConstruction<UserRoleCompositionService> construction =
         mockConstruction(UserRoleCompositionService.class, (mockService, ctx) ->
             when(mockService.assignTemplateRoles("user-1",
-                Arrays.asList("tpl-finance", "tpl-sales"), currentRole))
+                Arrays.asList("tpl-finance", "tpl-sales"), currentRole, null))
                     .thenReturn(delegateResult))) {
 
       webhook.get(parameters, responseVars);
@@ -178,13 +179,51 @@ class SFAssignUserRolesTest {
 
     try (MockedConstruction<UserRoleCompositionService> construction =
         mockConstruction(UserRoleCompositionService.class, (mockService, ctx) ->
-            when(mockService.assignTemplateRoles("user-1", List.of("tpl-finance"), currentRole))
+            when(mockService.assignTemplateRoles("user-1", List.of("tpl-finance"), currentRole, null))
                 .thenReturn(delegateResult))) {
       webhook.get(parameters, responseVars);
 
       UserRoleCompositionService constructedService = construction.constructed().get(0);
       org.mockito.Mockito.verify(constructedService)
-          .assignTemplateRoles("user-1", List.of("tpl-finance"), currentRole);
+          .assignTemplateRoles("user-1", List.of("tpl-finance"), currentRole, null);
+    }
+
+    JSONObject result = resultOf(responseVars);
+    assertTrue(result.optBoolean("success"));
+  }
+
+  /**
+   * ETP-4830 — the role-assignment-endpoint counterpart to {@code
+   * forwardsCallerRoleToTheServiceForTheTenantBoundaryCheck}: proves the webhook resolves the
+   * caller's OWN {@code AD_User_ID} from the SAME {@code OBContext} {@code currentRole} came
+   * from (still before admin mode) and forwards it through to {@link
+   * UserRoleCompositionService#assignTemplateRoles(String, List, Role, String)}'s 4th
+   * parameter, so that overload's owner-protection check has something to compare against —
+   * without this wiring the check would be permanently inert for every real request (every
+   * {@code callerUserId} would silently read as {@code null}).
+   */
+  @Test
+  void forwardsCallerUserIdToTheServiceForTheOwnerProtectionCheck() {
+    Role currentRole = givenClientAdminRole();
+    User callerUser = mock(User.class);
+    when(callerUser.getId()).thenReturn("acting-admin-1");
+    when(mockContext.getUser()).thenReturn(callerUser);
+    parameters.put("UserId", "user-1");
+    parameters.put("TemplateRoleIds", "tpl-finance");
+
+    UserRoleCompositionService.AssignmentResult delegateResult =
+        new UserRoleCompositionService.AssignmentResult("user-1", "personal-1",
+            List.of("tpl-finance"), 1, 0);
+
+    try (MockedConstruction<UserRoleCompositionService> construction =
+        mockConstruction(UserRoleCompositionService.class, (mockService, ctx) ->
+            when(mockService.assignTemplateRoles("user-1", List.of("tpl-finance"), currentRole,
+                "acting-admin-1")).thenReturn(delegateResult))) {
+      webhook.get(parameters, responseVars);
+
+      UserRoleCompositionService constructedService = construction.constructed().get(0);
+      org.mockito.Mockito.verify(constructedService)
+          .assignTemplateRoles("user-1", List.of("tpl-finance"), currentRole, "acting-admin-1");
     }
 
     JSONObject result = resultOf(responseVars);
@@ -218,7 +257,7 @@ class SFAssignUserRolesTest {
 
     try (MockedConstruction<UserRoleCompositionService> construction =
         mockConstruction(UserRoleCompositionService.class, (mockService, ctx) ->
-            when(mockService.assignTemplateRoles("user-1", Collections.emptyList(), currentRole))
+            when(mockService.assignTemplateRoles("user-1", Collections.emptyList(), currentRole, null))
                 .thenReturn(delegateResult))) {
       webhook.get(parameters, responseVars);
     }
@@ -239,7 +278,7 @@ class SFAssignUserRolesTest {
     try (MockedConstruction<UserRoleCompositionService> construction =
         mockConstruction(UserRoleCompositionService.class, (mockService, ctx) ->
             when(mockService.assignTemplateRoles("user-1", List.of("not-a-template"),
-                currentRole))
+                currentRole, null))
                     .thenThrow(new OBException("Role is not a template, cannot be composed: "
                         + "not-a-template")))) {
       webhook.get(parameters, responseVars);
@@ -259,7 +298,7 @@ class SFAssignUserRolesTest {
 
     try (MockedConstruction<UserRoleCompositionService> construction =
         mockConstruction(UserRoleCompositionService.class, (mockService, ctx) ->
-            when(mockService.assignTemplateRoles("user-1", List.of("tpl-finance"), currentRole))
+            when(mockService.assignTemplateRoles("user-1", List.of("tpl-finance"), currentRole, null))
                 .thenThrow(new RuntimeException("boom")))) {
       webhook.get(parameters, responseVars);
     }
