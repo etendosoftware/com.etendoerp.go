@@ -140,48 +140,6 @@ public class TransactionalEmailService {
    * @param commandBody contract-specific command body
    * @return NEO response with contract status and provider metadata when sent
    */
-  /**
-   * Answers the subject and message a contract would send if the operator edits nothing (ETP-5003).
-   *
-   * <p>Read-only, but authorized exactly like a send: the defaults name the document and its
-   * business partner, so a caller who may not send the email may not read them either.</p>
-   *
-   * @param contractName the contract to ask
-   * @param commandBody the command, carrying at least the record id
-   * @return the defaults, or an error response mirroring the send authorization
-   */
-  public NeoResponse messageDefaults(String contractName, JSONObject commandBody) {
-    String normalizedContract = StringUtils.trimToNull(contractName);
-    if (normalizedContract == null || commandBody == null) {
-      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
-          "Email contract name and command body are required");
-    }
-    Optional<EmailContract> contract = contractRegistry.find(normalizedContract);
-    if (!contract.isPresent()) {
-      return NeoResponse.error(HttpServletResponse.SC_NOT_FOUND, "Unknown email contract");
-    }
-    EmailContractCommand command = new EmailContractCommand(normalizedContract, commandBody);
-    EmailAuthorizationResult authorization = contract.get().authorize(command);
-    if (!authorization.isAllowed()) {
-      return NeoResponse.error(authorization.getHttpStatus(), authorization.getMessage());
-    }
-    Optional<EmailMessageDefaults> defaults = contract.get().messageDefaults(command);
-    if (!defaults.isPresent()) {
-      return NeoResponse.error(HttpServletResponse.SC_NOT_FOUND,
-          "Email contract does not expose editable defaults");
-    }
-    try {
-      JSONObject data = new JSONObject();
-      data.put("subject", defaults.get().getSubject());
-      data.put("message", defaults.get().getMessage());
-      return NeoResponse.ok(data);
-    } catch (JSONException e) {
-      log.error("Could not serialize email defaults for [{}]", normalizedContract, e);
-      return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
-          "Could not build email defaults");
-    }
-  }
-
   public NeoResponse send(String contractName, JSONObject commandBody) {
     long startedAtNanos = System.nanoTime();
     String normalizedContract = StringUtils.trimToNull(contractName);

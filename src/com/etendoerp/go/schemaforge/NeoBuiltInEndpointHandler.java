@@ -14,7 +14,6 @@ import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.dal.service.OBDal;
 
-import com.etendoerp.go.schemaforge.email.EmailContractCommandSupport;
 import com.etendoerp.go.schemaforge.email.TransactionalEmailService;
 import com.etendoerp.go.schemaforge.util.NeoImageHelper;
 
@@ -202,11 +201,6 @@ class NeoBuiltInEndpointHandler {
 
   private void handleEmailContractsEndpoint(NeoServlet.NeoPathInfo pathInfo, String method,
       HttpServletRequest request, HttpServletResponse response) throws IOException {
-    if (METHOD_GET.equals(method) && "defaults".equals(pathInfo.recordId)
-        && StringUtils.isNotBlank(pathInfo.entityName)) {
-      handleEmailContractDefaults(pathInfo.entityName, request, response);
-      return;
-    }
     if (!METHOD_POST.equals(method)) {
       servlet.sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
           "Email contract endpoint only supports POST");
@@ -249,29 +243,6 @@ class NeoBuiltInEndpointHandler {
         && "email-contracts".equals(parts[0])
         && StringUtils.isNotBlank(parts[1])
         && "send".equals(parts[2]);
-  }
-
-  /**
-   * Answers the subject and message a document-send contract would use untouched, so the send modal
-   * shows what will actually go out instead of deriving its own copy (ETP-5003).
-   */
-  private void handleEmailContractDefaults(String contractName, HttpServletRequest request,
-      HttpServletResponse response) throws IOException {
-    try {
-      JSONObject command = new JSONObject();
-      command.put(EmailContractCommandSupport.FIELD_VERSION, EmailContractCommandSupport.VERSION);
-      command.put(EmailContractCommandSupport.FIELD_RECORD_ID,
-          StringUtils.trimToEmpty(request.getParameter("recordId")));
-      String language = StringUtils.trimToNull(request.getParameter("language"));
-      if (language != null) {
-        command.put(EmailContractCommandSupport.FIELD_LANGUAGE, language);
-      }
-      servlet.writeResponse(response,
-          transactionalEmailService.messageDefaults(contractName, command));
-    } catch (JSONException e) {
-      servlet.sendError(response, HttpServletResponse.SC_BAD_REQUEST,
-          "Could not build email defaults request");
-    }
   }
 
   private void handleCertificateEndpoint(String method, HttpServletRequest request,
