@@ -58,6 +58,12 @@ public class InvoiceLineHandler implements NeoHandler {
   private static final Logger log = LogManager.getLogger(InvoiceLineHandler.class);
   private static final String FIELD_INVOICED_QTY = "invoicedQuantity";
   private static final String FIELD_LINE_NET_AMOUNT = "lineNetAmount";
+  // ETP-4941: product search key (M_Product.Value) injected into GET lines so the printed PDF's
+  // "CÓD." column shows the SKU instead of falling back to the line number, via the shared
+  // NeoHandlerUtils#enrichLinesWithProductCode.
+  private static final String FIELD_PRODUCT_CODE = "productCode";
+  private static final String LINE_TABLE = "c_invoiceline";
+  private static final String LINE_ID_COL = "c_invoiceline_id";
   // ETP-4737: signal field for the "Import from Source Invoice" popup — carries the source
   // C_InvoiceLine id being imported, persisted into EM_ETGO_Source_Invoiceline_ID (a
   // self-referencing FK on C_InvoiceLine, same pattern as BOM_Parent_ID) so the popup can
@@ -149,6 +155,8 @@ public class InvoiceLineHandler implements NeoHandler {
     String method = context.getHttpMethod();
     if ("GET".equals(method)) {
       enrichSourceInvoiceLineId(context);
+      NeoHandlerUtils.enrichLinesWithProductCode(context, LINE_TABLE, LINE_ID_COL,
+          FIELD_PRODUCT_CODE, log);
       return DiscountLineFilter.filterFromResponse(context);
     }
     if ("POST".equals(method) || "PATCH".equals(method) || "PUT".equals(method)) {

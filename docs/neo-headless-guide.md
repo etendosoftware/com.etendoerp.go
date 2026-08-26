@@ -464,7 +464,7 @@ El `NeoSelectorService` resuelve referencias FK y provee valores de dropdown con
 **Simple selectors (TableDir ref 19, Table ref 18, Search ref 30):**
 - Usan `AD_Ref_Table` para encontrar la entity target
 - Una sola propiedad de display (identifier)
-- Where clause opcional desde `AD_Ref_Table.HQLWhereClause`
+- Where clause opcional desde `AD_Ref_Table.HQLWhereClause`, con fallback a `SQLWhereClause` (traducido a HQL) cuando `HQLWhereClause` esta vacio; un segmento con subquery anidada `(SELECT ...)` se descarta en vez de traducirse mal, via el guard `NESTED_SUBQUERY` compartido con `SelectorValidationResolver` (ETP-4975 -- ver `docs/neo-headless.md` §4.4 para el detalle completo)
 
 **Rich selectors (OBUISEL_Selector):**
 - Grid con multiples columnas configurables
@@ -690,6 +690,30 @@ POST /sws/neo/{specName}/{entityName}/callout
 4. **Ejecucion**: Instancia la clase callout, la inicializa, y ejecuta `executeSimpleCallout()`.
 
 5. **Transformacion de response**: Convierte el resultado nativo del callout (formato inp*) a nombres OBDal property limpios.
+
+### Convencion `inp*` y fallback de alias (ETP-4784)
+
+Los callouts legacy de Etendo (subclases de `SimpleCallout`, ej. `SE_Invoice_Organization`,
+`SE_Order_BPartnerLocation`, `SE_InOut_Warehouse`, `SiiAutoSetSIIKEYByDefault`) leen sus parametros
+via `VariablesBase#getStringParameter`, que siempre busca el nombre HTTP crudo con la convencion
+`lower('inp' + fieldName)` (ej. `inpissotrx` para `isSOTrx`). `CalloutRequestBuilder` mapea la
+mayoria de los parametros de `formState` a esa forma exacta, pero algunas variables de contexto
+historicamente se colocaron directamente con su nombre bare camelCase (ej. `isSOTrx` en vez de
+`inpissotrx` — ver punto 3 arriba). Cuando un callout pedia la variante `inp*` de uno de esos
+parametros, `getParameter` devolvia `null` silenciosamente y cualquier rama de logica que dependiera
+de ese valor (ej. el default de SII en `SiiAutoSetSIIKEYByDefault`) nunca se ejecutaba.
+
+**Fix (a nivel de puente, no por-callout):** `SyntheticHttpServletRequest` mantiene ademas de los
+parametros exactos un indice de alias normalizado (case-insensitive, con el prefijo `inp` opcional
+quitado de ambos lados). `getParameter` / `getParameterValues` primero intentan la clave exacta —
+asi que cualquier parametro que ya resolvia bien sigue resolviendo exactamente igual — y solo si no
+hay match exacto caen al alias. Esto es puramente aditivo y generaliza el fix a **todos** los
+callouts legacy, no solo al caso de SII: si un futuro parametro de contexto se agrega bare (sin
+`inp`), sigue resolviendo sin necesidad de tocar el bridge de nuevo.
+
+Cuando agregues un nuevo parametro de contexto en `CalloutRequestBuilder` o `NeoCalloutService`,
+preferi seguir emitiendolo ya en forma `inp<field>` (consistente con el resto); el alias existe como
+red de seguridad, no como excusa para no normalizar nombres nuevos.
 
 ### Response
 

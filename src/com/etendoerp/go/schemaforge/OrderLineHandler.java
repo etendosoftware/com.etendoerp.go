@@ -42,7 +42,10 @@ import org.openbravo.model.financialmgmt.tax.TaxRate;
  * correctly within the same transaction.
  *
  * <p>On GET: filters discount lines (dummy product {@code ETGO_DTO}) from the response so the
- * UI never displays the internal discount line as a regular product line.
+ * UI never displays the internal discount line as a regular product line, and injects {@code
+ * productCode} (the product search key, {@code M_Product.Value}) into every line so the printed
+ * PDF's "CÓD." column can show the SKU instead of falling back to the line number (ETP-4941),
+ * via the shared {@link NeoHandlerUtils#enrichLinesWithProductCode}.
  *
  * <p>Registered via {@code javaQualifier = "orderLineHandler"} on the lines
  * entity of sales-order, purchase-order and sales-quotation specs.
@@ -51,6 +54,9 @@ import org.openbravo.model.financialmgmt.tax.TaxRate;
 public class OrderLineHandler implements NeoHandler {
 
   private static final Logger log = LogManager.getLogger(OrderLineHandler.class);
+  private static final String FIELD_PRODUCT_CODE = "productCode";
+  private static final String LINE_TABLE = "c_orderline";
+  private static final String LINE_ID_COL = "c_orderline_id";
 
   @Override
   public NeoResponse handle(NeoContext context) {
@@ -87,8 +93,12 @@ public class OrderLineHandler implements NeoHandler {
 
     String method = context.getHttpMethod();
 
-    // Filter discount lines from GET responses so the UI never sees them.
+    // ETP-4941: inject productCode before filtering/returning — mutates the shared
+    // response body in place, so it's visible whether or not the discount filter below
+    // ends up replacing the response.
     if ("GET".equals(method)) {
+      NeoHandlerUtils.enrichLinesWithProductCode(context, LINE_TABLE, LINE_ID_COL,
+          FIELD_PRODUCT_CODE, log);
       return DiscountLineFilter.filterFromResponse(context);
     }
 

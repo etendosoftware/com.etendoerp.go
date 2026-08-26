@@ -213,6 +213,34 @@ class NeoFieldFilterTest {
     }
 
     @Test
+    @DisplayName("keeps 'updated' although no window can declare it (ETP-4787)")
+    void preservesUpdatedAuditKey() throws Exception {
+      Set<String> included = new HashSet<>(Set.of("id"));
+      NeoFieldFilter filter = activeFilter(included, included);
+
+      JSONObject row = new JSONObject();
+      row.put("id", "1");
+      row.put("updated", "2026-08-24T12:15:30+02:00");
+      row.put("updatedBy", "100");
+
+      JSONArray data = new JSONArray();
+      data.put(row);
+      JSONObject wrapper = new JSONObject()
+          .put("response", new JSONObject().put("data", data));
+
+      filter.filterGetResponse(wrapper);
+
+      JSONObject filtered = wrapper.getJSONObject("response")
+          .getJSONArray("data").getJSONObject(0);
+      // Rationale: updated is an AD column rather than an AD field, so it can never appear in
+      // the ETGO_SF_FIELD configuration, yet the client needs it to tell a cached rendering of
+      // the record from a stale one.
+      assertEquals("2026-08-24T12:15:30+02:00", filtered.getString("updated"));
+      // Only that one key is exempted, so the rest of the audit block stays filtered out.
+      assertFalse(filtered.has("updatedBy"));
+    }
+
+    @Test
     void renamesPropertiesToApiKeysInGetResponse() throws Exception {
       Set<String> included = new HashSet<>(Set.of("id", "priceActual"));
       Map<String, String> propToApi = new HashMap<>();
@@ -293,6 +321,23 @@ class NeoFieldFilterTest {
       assertTrue(result.has("name"));
       assertFalse(result.has("readOnlyField"));
       assertFalse(result.has("unknownField"));
+    }
+
+    @Test
+    @DisplayName("'updated' is readable but never writable")
+    void stripsUpdatedFromWriteBody() throws Exception {
+      Set<String> included = new HashSet<>(Set.of("id"));
+      NeoFieldFilter filter = activeFilter(included, included);
+
+      JSONObject body = new JSONObject()
+          .put("id", "1")
+          .put("updated", "1999-01-01T00:00:00+00:00");
+
+      JSONObject result = filter.filterWriteRequest(body);
+      assertTrue(result.has("id"));
+      // The read-path exemption must not leak into the write path: letting a client set its
+      // own 'updated' would let it defeat the very staleness check the exemption exists for.
+      assertFalse(result.has("updated"));
     }
 
     @Test
