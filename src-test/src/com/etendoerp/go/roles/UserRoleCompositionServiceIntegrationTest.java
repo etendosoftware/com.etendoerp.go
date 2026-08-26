@@ -389,8 +389,8 @@ public class UserRoleCompositionServiceIntegrationTest extends WeldBaseTest {
           .assignTemplateRoles(TEST_USER_ID, Collections.singletonList(financeTemplate.getId()));
 
       assertEquals(1, result.addedCount);
-      assertEquals("Y", readShowAcctFieldsFlag(result.personalRoleId),
-          "A personal role composed WITH the Finance template must read 'Y'");
+      assertEquals("A personal role composed WITH the Finance template must read 'Y'",
+          "Y", readShowAcctFieldsFlag(result.personalRoleId));
     } finally {
       OBContext.restorePreviousMode();
     }
@@ -414,16 +414,16 @@ public class UserRoleCompositionServiceIntegrationTest extends WeldBaseTest {
       UserRoleCompositionService service = new UserRoleCompositionService();
       UserRoleCompositionService.AssignmentResult first = service.assignTemplateRoles(
           TEST_USER_ID, Collections.singletonList(financeTemplate.getId()));
-      assertEquals("Y", readShowAcctFieldsFlag(first.personalRoleId),
-          "sanity check: must read 'Y' right after composing with Finance");
+      assertEquals("sanity check: must read 'Y' right after composing with Finance",
+          "Y", readShowAcctFieldsFlag(first.personalRoleId));
 
       UserRoleCompositionService.AssignmentResult second = service.assignTemplateRoles(
           TEST_USER_ID, Collections.emptyList());
 
       assertEquals(first.personalRoleId, second.personalRoleId);
       assertEquals(1, second.removedCount);
-      assertEquals("N", readShowAcctFieldsFlag(second.personalRoleId),
-          "Removing the Finance template must reset the flag back to 'N', not leave it at 'Y'");
+      assertEquals("Removing the Finance template must reset the flag back to 'N', not leave it at 'Y'",
+          "N", readShowAcctFieldsFlag(second.personalRoleId));
     } finally {
       OBContext.restorePreviousMode();
     }
@@ -446,8 +446,8 @@ public class UserRoleCompositionServiceIntegrationTest extends WeldBaseTest {
           .assignTemplateRoles(TEST_USER_ID, Collections.singletonList(salesTemplate.getId()));
 
       assertEquals(1, result.addedCount);
-      assertEquals("N", readShowAcctFieldsFlag(result.personalRoleId),
-          "A personal role composed WITHOUT Finance must read 'N' (never derived from any other template)");
+      assertEquals("A personal role composed WITHOUT Finance must read 'N' (never derived from any other template)",
+          "N", readShowAcctFieldsFlag(result.personalRoleId));
     } finally {
       OBContext.restorePreviousMode();
     }
