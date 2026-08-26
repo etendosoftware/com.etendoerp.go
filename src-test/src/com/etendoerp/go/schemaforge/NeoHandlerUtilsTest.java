@@ -29,7 +29,12 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.util.Collections;
 import java.util.List;
+import java.util.Map;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -52,6 +57,8 @@ import org.openbravo.model.materialmgmt.transaction.ShipmentInOut;
  * <ul>
  *   <li>{@code extractGetDataArray} — all early-exit paths and the happy path.</li>
  *   <li>{@code collectIds} — normal, empty-id filtering, and empty-array cases.</li>
+ *   <li>{@code fetchProductCodesForLines} (ETP-4941) — SKU resolution for order/invoice line
+ *       GET enrichment, including the blank-value and DB-error graceful-degradation paths.</li>
  *   <li>{@code injectDefaultLocatorIfMissing} / {@code resolveDefaultLocatorForWarehouse}
  *       (ETP-4863) — direct coverage of the shared locator-defaulting helper. Until this QA
  *       pass, this logic was only exercised indirectly through 4 near-duplicate assertions in
@@ -160,6 +167,235 @@ public class NeoHandlerUtilsTest {
   public void testCollectIdsReturnsEmptyListForEmptyArray() throws Exception {
     List<String> ids = NeoHandlerUtils.collectIds(new JSONArray());
     assertTrue(ids.isEmpty());
+  }
+
+  // ── fetchProductCodesForLines (ETP-4941) ──────────────────────────────────
+  // Shared by OrderLineHandler (c_orderline) and InvoiceLineHandler (c_invoiceline) to inject
+  // productCode (M_Product.Value) into GET line responses, mirroring the query
+  // AbstractInOutLineHandler already runs for M_InOutLine lines.
+
+  @Test
+  public void testFetchProductCodesForLinesReturnsEmptyMapForNullIds() {
+    Map<String, String> result =
+        NeoHandlerUtils.fetchProductCodesForLines(null, "c_orderline", "c_orderline_id", LOG);
+    assertTrue(result.isEmpty());
+  }
+
+  @Test
+  public void testFetchProductCodesForLinesReturnsEmptyMapForEmptyIds() {
+    Map<String, String> result = NeoHandlerUtils.fetchProductCodesForLines(
+        Collections.emptyList(), "c_orderline", "c_orderline_id", LOG);
+    assertTrue(result.isEmpty());
+  }
+
+  @Test
+  public void testFetchProductCodesForLinesReturnsSkuPerLineId() throws Exception {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      Connection conn = mock(Connection.class);
+      PreparedStatement ps = mock(PreparedStatement.class);
+      ResultSet rs = mock(ResultSet.class);
+      when(dal.getConnection()).thenReturn(conn);
+      when(conn.prepareStatement(Mockito.anyString())).thenReturn(ps);
+      when(ps.executeQuery()).thenReturn(rs);
+
+      when(rs.next()).thenReturn(true, true, false);
+      when(rs.getString(1)).thenReturn("line-1", "line-2");
+      when(rs.getString(2)).thenReturn("SKU-001", "SKU-002");
+
+      Map<String, String> result = NeoHandlerUtils.fetchProductCodesForLines(
+          List.of("line-1", "line-2"), "c_orderline", "c_orderline_id", LOG);
+
+      assertEquals(2, result.size());
+      assertEquals("SKU-001", result.get("line-1"));
+      assertEquals("SKU-002", result.get("line-2"));
+    }
+  }
+
+  @Test
+  public void testFetchProductCodesForLinesSkipsBlankValue() throws Exception {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      // Product with no SKU (blank Value) must not appear in the result map — the caller's
+      // resolveProductCode() fallback then applies (falls to "—", never the line number).
+      ProductCodeQueryTestSupport.mockSingleRowProductCodeQuery(dal, "line-no-sku", "");
+
+      Map<String, String> result = NeoHandlerUtils.fetchProductCodesForLines(
+          List.of("line-no-sku"), "c_orderline", "c_orderline_id", LOG);
+
+      assertTrue(result.isEmpty());
+    }
+  }
+
+  /**
+   * QA edge case (ETP-4941): when one of the requested line ids does not resolve to a row at
+   * all (invalid id, deleted line, or a line whose product was removed) — as opposed to
+   * resolving to a row with a blank SKU, covered above — that id must simply be absent from
+   * the result map rather than appearing with a null/placeholder value. The caller
+   * ({@code enrichProductCode}) relies on {@code Map#get} returning {@code null} for it, which
+   * then correctly skips writing {@code productCode} for that line.
+   */
+  @Test
+  public void testFetchProductCodesForLinesOmitsIdsWithNoMatchingRow() throws Exception {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      // Two ids requested, but only "line-1" produces a joinable row — "line-missing" (bad id /
+      // deleted line / product removed) simply never appears in the ResultSet.
+      ProductCodeQueryTestSupport.mockSingleRowProductCodeQuery(dal, "line-1", "SKU-001");
+
+      Map<String, String> result = NeoHandlerUtils.fetchProductCodesForLines(
+          List.of("line-1", "line-missing"), "c_orderline", "c_orderline_id", LOG);
+
+      assertEquals(1, result.size());
+      assertEquals("SKU-001", result.get("line-1"));
+      assertFalse(result.containsKey("line-missing"));
+      assertNull(result.get("line-missing"));
+    }
+  }
+
+  @Test
+  public void testFetchProductCodesForLinesReturnsEmptyMapOnDbError() {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.getConnection()).thenThrow(new RuntimeException("DB unavailable"));
+
+      Map<String, String> result = NeoHandlerUtils.fetchProductCodesForLines(
+          List.of("line-1"), "c_invoiceline", "c_invoiceline_id", LOG);
+
+      assertTrue(result.isEmpty());
+    }
+  }
+
+  @Test
+  public void testFetchProductCodesForLinesBuildsSqlAgainstGivenTableAndColumn() throws Exception {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      Connection conn = ProductCodeQueryTestSupport.mockEmptyProductCodeQuery(dal);
+
+      NeoHandlerUtils.fetchProductCodesForLines(
+          List.of("inv-line-1"), "c_invoiceline", "c_invoiceline_id", LOG);
+
+      org.mockito.ArgumentCaptor<String> sqlCaptor =
+          org.mockito.ArgumentCaptor.forClass(String.class);
+      Mockito.verify(conn).prepareStatement(sqlCaptor.capture());
+      String sql = sqlCaptor.getValue();
+      assertTrue("SQL must query the given line table", sql.contains("c_invoiceline"));
+      assertTrue("SQL must filter by the given PK column", sql.contains("c_invoiceline_id"));
+      assertTrue("SQL must join m_product", sql.contains("m_product"));
+    }
+  }
+
+  // ── enrichLinesWithProductCode (ETP-4941) ─────────────────────────────────
+  // Shared GET-response enrichment loop extracted out of OrderLineHandler and
+  // InvoiceLineHandler's identical private enrichProductCode() methods — the actual source of
+  // the SonarQube new-code duplication flagged on PR #921 (7.44%, gate is 3%). Composes
+  // extractGetDataArray + collectIds + fetchProductCodesForLines, so this only needs to cover
+  // the loop/field-name wiring; the lower-level pieces are covered above/elsewhere.
+
+  @Test
+  public void testEnrichLinesWithProductCodeWritesFieldForEachLine() throws Exception {
+    JSONObject line1 = new JSONObject().put("id", "line-1");
+    JSONObject line2 = new JSONObject().put("id", "line-2");
+    JSONArray data = new JSONArray().put(line1).put(line2);
+    JSONObject body = new JSONObject().put("response", new JSONObject().put("data", data));
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("GET")
+        .previousResult(new NeoResponse(200, body))
+        .build();
+
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      Connection conn = mock(Connection.class);
+      PreparedStatement ps = mock(PreparedStatement.class);
+      ResultSet rs = mock(ResultSet.class);
+      when(dal.getConnection()).thenReturn(conn);
+      when(conn.prepareStatement(Mockito.anyString())).thenReturn(ps);
+      when(ps.executeQuery()).thenReturn(rs);
+      when(rs.next()).thenReturn(true, true, false);
+      when(rs.getString(1)).thenReturn("line-1", "line-2");
+      when(rs.getString(2)).thenReturn("SKU-001", "SKU-002");
+
+      NeoHandlerUtils.enrichLinesWithProductCode(ctx, "c_orderline", "c_orderline_id",
+          "productCode", LOG);
+
+      assertEquals("SKU-001", line1.getString("productCode"));
+      assertEquals("SKU-002", line2.getString("productCode"));
+    }
+  }
+
+  @Test
+  public void testEnrichLinesWithProductCodeUsesGivenFieldName() throws Exception {
+    // Proves the written key isn't hardcoded to "productCode" — both call sites (order lines,
+    // invoice lines) currently pass the same literal, but the shared method must honor whatever
+    // fieldName it's given.
+    JSONObject line = new JSONObject().put("id", "inv-line-1");
+    JSONArray data = new JSONArray().put(line);
+    JSONObject body = new JSONObject().put("response", new JSONObject().put("data", data));
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("GET")
+        .previousResult(new NeoResponse(200, body))
+        .build();
+
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      ProductCodeQueryTestSupport.mockSingleRowProductCodeQuery(dal, "inv-line-1", "SKU-INV-1");
+
+      NeoHandlerUtils.enrichLinesWithProductCode(ctx, "c_invoiceline", "c_invoiceline_id",
+          "sku", LOG);
+
+      assertEquals("SKU-INV-1", line.getString("sku"));
+      assertFalse(line.has("productCode"));
+    }
+  }
+
+  @Test
+  public void testEnrichLinesWithProductCodeSkipsBlankSku() throws Exception {
+    JSONObject line = new JSONObject().put("id", "line-no-sku");
+    JSONArray data = new JSONArray().put(line);
+    JSONObject body = new JSONObject().put("response", new JSONObject().put("data", data));
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("GET")
+        .previousResult(new NeoResponse(200, body))
+        .build();
+
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      ProductCodeQueryTestSupport.mockSingleRowProductCodeQuery(dal, null, "");
+
+      NeoHandlerUtils.enrichLinesWithProductCode(ctx, "c_orderline", "c_orderline_id",
+          "productCode", LOG);
+
+      assertFalse(line.has("productCode"));
+    }
+  }
+
+  @Test
+  public void testEnrichLinesWithProductCodeNoOpWhenDataArrayNull() {
+    // Non-GET request: extractGetDataArray short-circuits to null, so the method must return
+    // without touching OBDal at all.
+    NeoContext ctx = NeoContext.builder().httpMethod("POST").build();
+
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      NeoHandlerUtils.enrichLinesWithProductCode(ctx, "c_orderline", "c_orderline_id",
+          "productCode", LOG);
+
+      dalMock.verifyNoInteractions();
+    }
   }
 
   // ── extractCreatedIdFromPreviousResult (ETP-4029) ────────────────────────
