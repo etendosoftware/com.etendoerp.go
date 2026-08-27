@@ -17,9 +17,12 @@
 
 package com.etendoerp.go.schemaforge.email.contracts;
 
+import com.etendoerp.go.schemaforge.email.EmailDocumentDetail;
 import com.etendoerp.go.schemaforge.email.EmailDocumentRecord;
 import com.etendoerp.go.schemaforge.email.EmailDocumentRecordResolver;
 
+import java.util.Collections;
+import java.util.List;
 import java.util.Optional;
 
 import org.apache.commons.lang3.StringUtils;
@@ -76,7 +79,24 @@ final class DalPurchaseOrderEmailDocumentResolver implements EmailDocumentRecord
         order.getDocumentNo(),
         DalEmailContractDataResolver.formatAmount(order.getGrandTotalAmount(),
             order.getCurrency()),
-        order.getClient().getId()));
+        order.getClient().getId(),
+        buildDetails(order)));
+  }
+
+  /**
+   * Builds the summary rows for this purchase document.
+   *
+   * <p>A purchase order shows none: it goes to a vendor, who reads it as an instruction rather than
+   * as a record to check, and the summary would only repeat what the document itself states. With
+   * no rows the contract skips the block entirely. A return carries its date, since that is the
+   * fact the vendor has to match against the goods arriving back.</p>
+   */
+  private List<EmailDocumentDetail> buildDetails(Order order) {
+    if (documentFamily != PurchaseOrderDocumentFamily.PURCHASE_RETURN) {
+      return Collections.emptyList();
+    }
+    return Collections.singletonList(
+        EmailDocumentDetail.date("document.detail.date", order.getOrderDate()));
   }
 
   boolean acceptsReturnDocument(boolean isReturnDocument) {

@@ -17,6 +17,8 @@
 
 package com.etendoerp.go.schemaforge.email;
 
+import java.util.Optional;
+
 /**
  * Server-side contract that translates an Etendo Go workflow command into a
  * provider-ready transactional email request.
@@ -75,4 +77,5 @@ public interface EmailContract {
    * @return resolved provider request or a contract-level rejection
    */
   EmailContractResolution resolve(EmailContractCommand command, EmailRecipientResolution recipient);
+
 }

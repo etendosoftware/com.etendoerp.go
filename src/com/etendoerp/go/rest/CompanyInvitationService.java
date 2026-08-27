@@ -384,6 +384,34 @@ public class CompanyInvitationService {
     return invitation;
   }
 
+  /**
+   * Sends the welcome email for an account created by accepting an invitation (ETP-5003).
+   *
+   * @param account the account just created
+   */
+  private void sendWelcomeForInvitee(Account account) {
+    try {
+      authEmailSender.sendNewAccountForInvitee(account, null);
+    } catch (RuntimeException e) {
+      log.warn("Welcome email for invited user failed to send", e);
+    }
+  }
+
+  /**
+   * Tells the user they joined the organization (ETP-5003).
+   *
+   * @param account the accepting account
+   * @param companyName the organization joined
+   * @param invitationId the invitation record, used for send idempotency
+   */
+  private void sendJoinedNotice(Account account, String companyName, String invitationId) {
+    try {
+      authEmailSender.sendOrganizationJoined(account, companyName, invitationId, null);
+    } catch (RuntimeException e) {
+      log.warn("Organization-joined email failed to send", e);
+    }
+  }
+
   private boolean sendInvitation(Invitation invitation, String inviteLink, String language) {
     try {
       return authEmailSender.sendCompanyInvitation(invitation, inviteLink, language);
@@ -571,11 +599,16 @@ public class CompanyInvitationService {
             "The invitation user is no longer valid");
       }
 
+      String invitationId = invitation.getId();
       invitation.setEtgoAccount(account);
       invitation.setStatus(STATUS_ACCEPTED);
       OBDal.getInstance().save(invitation);
       OBDal.getInstance().flush();
       OBDal.getInstance().commitAndClose();
+
+      // ETP-5003 — best effort, after the commit: a mail failure must never undo an accepted
+      // invitation. The account already existed here, so only the joined notice applies.
+      sendJoinedNotice(account, companyName, invitationId);
 
       JSONObject result = new JSONObject();
       result.put(FIELD_STATUS, FIELD_SUCCESS);
@@ -667,11 +700,18 @@ public class CompanyInvitationService {
       // performs a Hibernate saveOrUpdate(), which correctly re-attaches this now-detached,
       // already-persistent entity and issues an UPDATE (see SessionHandler#save) rather than
       // failing or re-inserting it.
+      String invitationId = invitation.getId();
       invitation.setEtgoAccount(account);
       invitation.setStatus(STATUS_ACCEPTED);
       OBDal.getInstance().save(invitation);
       OBDal.getInstance().flush();
       OBDal.getInstance().commitAndClose();
+
+      // ETP-5003 — the account was created right here, so this user gets both: the welcome
+      // confirming the account exists, then the notice confirming it belongs to an organization.
+      // Best effort and post-commit: a mail failure must never undo an accepted invitation.
+      sendWelcomeForInvitee(account);
+      sendJoinedNotice(account, companyName, invitationId);
 
       JSONObject accountJson = new JSONObject();
       accountJson.put("id", account.getId());
