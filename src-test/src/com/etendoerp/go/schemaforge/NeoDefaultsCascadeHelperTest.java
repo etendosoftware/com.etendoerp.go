@@ -21,6 +21,7 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -31,9 +32,11 @@ import static org.mockito.Mockito.when;
 
 import java.lang.reflect.Method;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 import org.codehaus.jettison.json.JSONArray;
@@ -1373,6 +1376,139 @@ public class NeoDefaultsCascadeHelperTest {
     }
   }
 
+  /**
+   * ETP-4784: reproduces the "Tipo factura" bug. {@code aeatsiiClaveTipo} was already written
+   * into {@code body} by the generic mandatory-column defaults pass (a plain, BP-agnostic
+   * AD_Column default of "F1") BEFORE the cascade runs — but it was never present in the
+   * client's original POST, so it must NOT be in {@code protectedFields}. The Business Partner
+   * callout resolving "F2" must be allowed to overwrite it.
+   */
+  @Test
+  public void testExecuteCalloutCascadeForCreateOverwritesBackendInjectedDefault()
+      throws Exception {
+    try (MockedStatic<NeoCalloutService> calloutMock = mockStatic(NeoCalloutService.class);
+         MockedStatic<ModelProvider> providerMock = mockStatic(ModelProvider.class)) {
+      NeoCalloutService.CalloutInfo bpCalloutInfo = new NeoCalloutService.CalloutInfo(
+          "org.openbravo.erpCommon.ad_callouts.SiiAutoSetSIIKEYByDefault",
+          "inpcbpartnerid", "BusinessPartner");
+      calloutMock.when(() -> NeoCalloutService.resolveCallout(any(), eq("businessPartner")))
+          .thenReturn(bpCalloutInfo);
+      calloutMock.when(() -> NeoCalloutService.resolveCallout(any(), eq("aeatsiiClaveTipo")))
+          .thenReturn(null);
+
+      JSONObject calloutResponseBody = new JSONObject();
+      JSONObject updateEntry = new JSONObject();
+      updateEntry.put("value", "F2");
+      JSONObject updates = new JSONObject();
+      updates.put("aeatsiiClaveTipo", updateEntry);
+      calloutResponseBody.put("updates", updates);
+      calloutMock.when(() -> NeoCalloutService.executeCallout(any(), any()))
+          .thenReturn(NeoResponse.ok(calloutResponseBody));
+
+      ModelProvider mockProvider = mock(ModelProvider.class);
+      providerMock.when(ModelProvider::getInstance).thenReturn(mockProvider);
+      when(mockProvider.getEntityByTableId(anyString())).thenReturn(null);
+
+      Tab adTab = mockTabWithTable("318");
+      NeoContext ctx = mock(NeoContext.class);
+
+      // Body AFTER the generic mandatory-column defaults pass already ran: businessPartner is
+      // the client-submitted value, aeatsiiClaveTipo="F1" was just backend-injected.
+      JSONObject body = new JSONObject();
+      body.put("businessPartner", "BP001");
+      body.put("aeatsiiClaveTipo", "F1");
+
+      // Snapshot of what the CLIENT actually submitted — taken before the generic defaults
+      // pass ran, so it does NOT include aeatsiiClaveTipo.
+      Set<String> clientProvidedFields = new HashSet<>();
+      clientProvidedFields.add("businessPartner");
+
+      NeoDefaultsCascadeHelper.executeCalloutCascadeForCreate(ctx, adTab, body, clientProvidedFields);
+
+      assertEquals("Business Partner default must overwrite the backend-injected generic "
+              + "default, not be blocked as if the user had chosen it",
+          "F2", body.getString("aeatsiiClaveTipo"));
+    }
+  }
+
+  /**
+   * ETP-4784 regression guard: when the client's original POST genuinely included
+   * {@code aeatsiiClaveTipo} (e.g. a rectifying document forced to "R" per ETP-4783), that
+   * value must stay protected from the Business Partner cascade — ETP-4772's original intent.
+   */
+  @Test
+  public void testExecuteCalloutCascadeForCreateKeepsGenuineClientValue() throws Exception {
+    try (MockedStatic<NeoCalloutService> calloutMock = mockStatic(NeoCalloutService.class);
+         MockedStatic<ModelProvider> providerMock = mockStatic(ModelProvider.class)) {
+      NeoCalloutService.CalloutInfo bpCalloutInfo = new NeoCalloutService.CalloutInfo(
+          "org.openbravo.erpCommon.ad_callouts.SiiAutoSetSIIKEYByDefault",
+          "inpcbpartnerid", "BusinessPartner");
+      calloutMock.when(() -> NeoCalloutService.resolveCallout(any(), eq("businessPartner")))
+          .thenReturn(bpCalloutInfo);
+      calloutMock.when(() -> NeoCalloutService.resolveCallout(any(), eq("aeatsiiClaveTipo")))
+          .thenReturn(null);
+
+      JSONObject calloutResponseBody = new JSONObject();
+      JSONObject updateEntry = new JSONObject();
+      updateEntry.put("value", "F2");
+      JSONObject updates = new JSONObject();
+      updates.put("aeatsiiClaveTipo", updateEntry);
+      calloutResponseBody.put("updates", updates);
+      calloutMock.when(() -> NeoCalloutService.executeCallout(any(), any()))
+          .thenReturn(NeoResponse.ok(calloutResponseBody));
+
+      ModelProvider mockProvider = mock(ModelProvider.class);
+      providerMock.when(ModelProvider::getInstance).thenReturn(mockProvider);
+      when(mockProvider.getEntityByTableId(anyString())).thenReturn(null);
+
+      Tab adTab = mockTabWithTable("318");
+      NeoContext ctx = mock(NeoContext.class);
+
+      JSONObject body = new JSONObject();
+      body.put("businessPartner", "BP001");
+      // The client explicitly submitted aeatsiiClaveTipo="R" in the original POST.
+      body.put("aeatsiiClaveTipo", "R");
+
+      Set<String> clientProvidedFields = new HashSet<>();
+      clientProvidedFields.add("businessPartner");
+      clientProvidedFields.add("aeatsiiClaveTipo");
+
+      NeoDefaultsCascadeHelper.executeCalloutCascadeForCreate(ctx, adTab, body, clientProvidedFields);
+
+      assertEquals("A value genuinely submitted by the client must stay protected from the "
+              + "Business Partner cascade",
+          "R", body.getString("aeatsiiClaveTipo"));
+    }
+  }
+
+  /**
+   * ETP-4784 base case: no Business Partner in the payload at all (no cascade trigger field
+   * present) — the generic backend default must remain untouched, exactly as before this fix.
+   */
+  @Test
+  public void testExecuteCalloutCascadeForCreateLeavesGenericDefaultWhenNoBusinessPartner()
+      throws Exception {
+    try (MockedStatic<NeoCalloutService> calloutMock = mockStatic(NeoCalloutService.class)) {
+      calloutMock.when(() -> NeoCalloutService.resolveCallout(any(), anyString()))
+          .thenReturn(null);
+
+      Tab adTab = mockTabWithTable("318");
+      NeoContext ctx = mock(NeoContext.class);
+
+      JSONObject body = new JSONObject();
+      body.put("aeatsiiClaveTipo", "F1");
+
+      // Nothing came from the client in this scenario — the field was entirely backend-injected.
+      Set<String> clientProvidedFields = new HashSet<>();
+
+      NeoDefaultsCascadeHelper.executeCalloutCascadeForCreate(ctx, adTab, body, clientProvidedFields);
+
+      assertEquals("With no Business Partner to trigger a cascade, the generic default must "
+              + "apply normally",
+          "F1", body.getString("aeatsiiClaveTipo"));
+    }
+  }
+
   // ===================================================================
   // collectFieldsWithCallouts
   // ===================================================================
@@ -2177,6 +2313,284 @@ public class NeoDefaultsCascadeHelperTest {
       assertNotNull(result);
       assertEquals(1, result.chainDepth);
       assertFalse("Null body should not produce results", result.hasResults());
+    }
+  }
+
+  // ===================================================================
+  // orderByAdFieldSequence / collectFieldsWithCallouts (ETP-4784)
+  // ===================================================================
+  //
+  // Unlike Classic — where only the callout of the field the user just edited runs — the
+  // create/defaults cascade fires the callout of EVERY field in the payload. When two callouts
+  // write the same column the winner is simply whichever runs last, and the previous iteration
+  // order was JSONObject.keys(), i.e. hash order. Ordering by the AD_Field sequence number
+  // reproduces a user filling the Classic form top-to-bottom, so the more specific callout
+  // (Business Partner, seqNo 50) runs after the generic one (Organization, seqNo 10) and wins.
+
+  private static Method orderByAdFieldSequenceMethod() throws Exception {
+    return getPrivateMethod("orderByAdFieldSequence", List.class, Tab.class);
+  }
+
+  /**
+   * Builds an AD_Field mock bound to {@code dbColumnName} with the given form sequence number.
+   */
+  private static org.openbravo.model.ad.ui.Field mockAdField(String dbColumnName, Long seqNo) {
+    org.openbravo.model.ad.ui.Field adField = mock(org.openbravo.model.ad.ui.Field.class);
+    Column column = mock(Column.class);
+    when(column.getDBColumnName()).thenReturn(dbColumnName);
+    when(adField.getColumn()).thenReturn(column);
+    when(adField.getSequenceNumber()).thenReturn(seqNo);
+    return adField;
+  }
+
+  /**
+   * Wires a DAL entity mock so {@code resolvePropertyName} maps each DB column name to the
+   * matching property name (e.g. {@code AD_Org_ID} → {@code organization}).
+   */
+  /**
+   * Stubs the tab's AD_Field list. The field mocks are built by the caller BEFORE this call so
+   * their own stubbing never happens inside an unfinished {@code when(...)} (Mockito misuse).
+   */
+  private static void stubAdFieldList(Tab adTab, org.openbravo.model.ad.ui.Field... fields) {
+    List<org.openbravo.model.ad.ui.Field> list = Arrays.asList(fields);
+    when(adTab.getADFieldList()).thenReturn(list);
+  }
+
+  private static Entity mockEntityWithProperties(Map<String, String> columnToProperty) {
+    Entity dalEntity = mock(Entity.class);
+    for (Map.Entry<String, String> e : columnToProperty.entrySet()) {
+      Property prop = mock(Property.class);
+      when(prop.getName()).thenReturn(e.getValue());
+      when(dalEntity.getPropertyByColumnName(e.getKey())).thenReturn(prop);
+    }
+    return dalEntity;
+  }
+
+  @SuppressWarnings("unchecked")
+  private static List<String> invokeOrderByAdFieldSequence(List<String> fields, Tab adTab)
+      throws Exception {
+    return (List<String>) orderByAdFieldSequenceMethod().invoke(null, fields, adTab);
+  }
+
+  /**
+   * The canonical ETP-4784 case: the Business Partner trigger (AD_Field seqNo 50) must run
+   * AFTER the Organization one (seqNo 10), so SiiAutoSetSIIKEYByDefault's partner-specific key
+   * overwrites SiiInvoiceOrganizationCallout's blanket "F1" and not the other way round.
+   */
+  @Test
+  public void testOrderByAdFieldSequenceSortsByAdFieldSeqNo() throws Exception {
+    Map<String, String> columnToProperty = new java.util.HashMap<>();
+    columnToProperty.put("AD_Org_ID", "organization");
+    columnToProperty.put("C_BPartner_ID", "businessPartner");
+
+    Tab adTab = mockTabWithTable("100");
+    stubAdFieldList(adTab, mockAdField("C_BPartner_ID", 50L), mockAdField("AD_Org_ID", 10L));
+    Entity dalEntity = mockEntityWithProperties(columnToProperty);
+
+    try (MockedStatic<ModelProvider> providerMock = mockStatic(ModelProvider.class)) {
+      ModelProvider mockProvider = mock(ModelProvider.class);
+      providerMock.when(ModelProvider::getInstance).thenReturn(mockProvider);
+      when(mockProvider.getEntityByTableId("100")).thenReturn(dalEntity);
+
+      // Deliberately supplied in the "wrong" (hash-like) order
+      List<String> ordered = invokeOrderByAdFieldSequence(
+          new ArrayList<>(Arrays.asList("businessPartner", "organization")), adTab);
+
+      assertEquals(Arrays.asList("organization", "businessPartner"), ordered);
+    }
+  }
+
+  /**
+   * Fields with no AD_Field on this tab (a payload key that is not a form field) keep their
+   * original relative order and are appended after every sequenced field.
+   */
+  @Test
+  public void testOrderByAdFieldSequencePutsUnknownFieldsLastPreservingOrder() throws Exception {
+    Map<String, String> columnToProperty = new java.util.HashMap<>();
+    columnToProperty.put("AD_Org_ID", "organization");
+    columnToProperty.put("C_BPartner_ID", "businessPartner");
+
+    Tab adTab = mockTabWithTable("100");
+    stubAdFieldList(adTab, mockAdField("AD_Org_ID", 10L), mockAdField("C_BPartner_ID", 50L));
+    Entity dalEntity = mockEntityWithProperties(columnToProperty);
+
+    try (MockedStatic<ModelProvider> providerMock = mockStatic(ModelProvider.class)) {
+      ModelProvider mockProvider = mock(ModelProvider.class);
+      providerMock.when(ModelProvider::getInstance).thenReturn(mockProvider);
+      when(mockProvider.getEntityByTableId("100")).thenReturn(dalEntity);
+
+      List<String> ordered = invokeOrderByAdFieldSequence(new ArrayList<>(Arrays.asList(
+          "notOnThisTabA", "businessPartner", "notOnThisTabB", "organization")), adTab);
+
+      assertEquals(Arrays.asList(
+          "organization", "businessPartner", "notOnThisTabA", "notOnThisTabB"), ordered);
+    }
+  }
+
+  /**
+   * A list with fewer than two entries has nothing to order — returned as-is, without ever
+   * touching ModelProvider or the tab's field list.
+   */
+  @Test
+  public void testOrderByAdFieldSequenceReturnsShortListsUnchanged() throws Exception {
+    Tab adTab = mockTabWithTable("100");
+
+    List<String> single = new ArrayList<>(Collections.singletonList("businessPartner"));
+    assertSame(single, invokeOrderByAdFieldSequence(single, adTab));
+
+    List<String> empty = new ArrayList<>();
+    assertSame(empty, invokeOrderByAdFieldSequence(empty, adTab));
+  }
+
+  /**
+   * A null tab (or a tab with no table) must never blow up the cascade — the original order is
+   * returned untouched.
+   */
+  @Test
+  public void testOrderByAdFieldSequenceNullTabReturnsOriginalOrder() throws Exception {
+    List<String> fields = new ArrayList<>(Arrays.asList("businessPartner", "organization"));
+
+    assertSame(fields, invokeOrderByAdFieldSequence(fields, null));
+
+    Tab tabWithoutTable = mock(Tab.class);
+    when(tabWithoutTable.getTable()).thenReturn(null);
+    assertSame(fields, invokeOrderByAdFieldSequence(fields, tabWithoutTable));
+  }
+
+  /**
+   * If the tab's DAL entity cannot be resolved there is no sequence information to sort by, so
+   * the original order survives unchanged.
+   */
+  @Test
+  public void testOrderByAdFieldSequenceNullDalEntityReturnsOriginalOrder() throws Exception {
+    Tab adTab = mockTabWithTable("100");
+
+    try (MockedStatic<ModelProvider> providerMock = mockStatic(ModelProvider.class)) {
+      ModelProvider mockProvider = mock(ModelProvider.class);
+      providerMock.when(ModelProvider::getInstance).thenReturn(mockProvider);
+      when(mockProvider.getEntityByTableId("100")).thenReturn(null);
+
+      List<String> fields = new ArrayList<>(Arrays.asList("businessPartner", "organization"));
+      assertSame(fields, invokeOrderByAdFieldSequence(fields, adTab));
+    }
+  }
+
+  /**
+   * AD_Fields with no column or no sequence number are ignored; when that leaves nothing to
+   * sort by, the original order is preserved.
+   */
+  @Test
+  public void testOrderByAdFieldSequenceIgnoresFieldsWithoutColumnOrSeqNo() throws Exception {
+    org.openbravo.model.ad.ui.Field noColumn = mock(org.openbravo.model.ad.ui.Field.class);
+    when(noColumn.getColumn()).thenReturn(null);
+    when(noColumn.getSequenceNumber()).thenReturn(10L);
+
+    Tab adTab = mockTabWithTable("100");
+    stubAdFieldList(adTab, noColumn, mockAdField("C_BPartner_ID", null));
+    Entity dalEntity = mock(Entity.class);
+
+    try (MockedStatic<ModelProvider> providerMock = mockStatic(ModelProvider.class)) {
+      ModelProvider mockProvider = mock(ModelProvider.class);
+      providerMock.when(ModelProvider::getInstance).thenReturn(mockProvider);
+      when(mockProvider.getEntityByTableId("100")).thenReturn(dalEntity);
+
+      List<String> fields = new ArrayList<>(Arrays.asList("businessPartner", "organization"));
+      assertSame("No usable AD_Field sequence → original order kept",
+          fields, invokeOrderByAdFieldSequence(fields, adTab));
+    }
+  }
+
+  /**
+   * When the same property is declared by several AD_Fields on the tab, the smallest sequence
+   * number wins (the field's first appearance in the form).
+   */
+  @Test
+  public void testOrderByAdFieldSequenceUsesSmallestSeqNoForDuplicatedProperty() throws Exception {
+    Map<String, String> columnToProperty = new java.util.HashMap<>();
+    columnToProperty.put("AD_Org_ID", "organization");
+    columnToProperty.put("C_BPartner_ID", "businessPartner");
+
+    Tab adTab = mockTabWithTable("100");
+    stubAdFieldList(adTab, mockAdField("C_BPartner_ID", 5L), mockAdField("C_BPartner_ID", 90L),
+        mockAdField("AD_Org_ID", 10L));
+    Entity dalEntity = mockEntityWithProperties(columnToProperty);
+
+    try (MockedStatic<ModelProvider> providerMock = mockStatic(ModelProvider.class)) {
+      ModelProvider mockProvider = mock(ModelProvider.class);
+      providerMock.when(ModelProvider::getInstance).thenReturn(mockProvider);
+      when(mockProvider.getEntityByTableId("100")).thenReturn(dalEntity);
+
+      List<String> ordered = invokeOrderByAdFieldSequence(
+          new ArrayList<>(Arrays.asList("organization", "businessPartner")), adTab);
+
+      assertEquals(Arrays.asList("businessPartner", "organization"), ordered);
+    }
+  }
+
+  /**
+   * An exception while reading the tab's field list must be swallowed: the cascade still runs,
+   * just in the original (unordered) sequence.
+   */
+  @Test
+  public void testOrderByAdFieldSequenceSwallowsExceptionAndKeepsOriginalOrder() throws Exception {
+    Tab adTab = mockTabWithTable("100");
+    when(adTab.getADFieldList()).thenThrow(new RuntimeException("DB unavailable"));
+
+    try (MockedStatic<ModelProvider> providerMock = mockStatic(ModelProvider.class)) {
+      ModelProvider mockProvider = mock(ModelProvider.class);
+      providerMock.when(ModelProvider::getInstance).thenReturn(mockProvider);
+      when(mockProvider.getEntityByTableId("100")).thenReturn(mock(Entity.class));
+
+      List<String> fields = new ArrayList<>(Arrays.asList("businessPartner", "organization"));
+      assertSame(fields, invokeOrderByAdFieldSequence(fields, adTab));
+    }
+  }
+
+  /**
+   * The observable end of the chain: {@code collectFieldsWithCallouts} returns the callout
+   * trigger fields already ordered by AD_Field sequence, so
+   * {@code executeCalloutCascade} fires them in Classic's own form order.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  public void testCollectFieldsWithCalloutsReturnsFieldsInAdSequenceOrder() throws Exception {
+    Map<String, String> columnToProperty = new java.util.HashMap<>();
+    columnToProperty.put("AD_Org_ID", "organization");
+    columnToProperty.put("C_BPartner_ID", "businessPartner");
+
+    Tab adTab = mockTabWithTable("100");
+    stubAdFieldList(adTab, mockAdField("C_BPartner_ID", 50L), mockAdField("AD_Org_ID", 10L));
+    Entity dalEntity = mockEntityWithProperties(columnToProperty);
+
+    JSONObject defaults = new JSONObject();
+    defaults.put("businessPartner", "BP001");
+    defaults.put("organization", "ORG001");
+    defaults.put("noCallout", "X");
+
+    try (MockedStatic<NeoCalloutService> calloutMock = mockStatic(NeoCalloutService.class);
+         MockedStatic<ModelProvider> providerMock = mockStatic(ModelProvider.class)) {
+      calloutMock.when(() -> NeoCalloutService.resolveCallout(any(), eq("businessPartner")))
+          .thenReturn(new NeoCalloutService.CalloutInfo(
+              "org.openbravo.module.sii.callouts.SiiAutoSetSIIKEYByDefault",
+              "inpcBpartnerId", "C_BPartner_ID"));
+      calloutMock.when(() -> NeoCalloutService.resolveCallout(any(), eq("organization")))
+          .thenReturn(new NeoCalloutService.CalloutInfo(
+              "org.openbravo.module.sii.callouts.SiiInvoiceOrganizationCallout",
+              "inpadOrgId", "AD_Org_ID"));
+      calloutMock.when(() -> NeoCalloutService.resolveCallout(any(), eq("noCallout")))
+          .thenReturn(null);
+      calloutMock.when(() -> NeoCalloutService.toCleanFieldName(anyString()))
+          .thenCallRealMethod();
+
+      ModelProvider mockProvider = mock(ModelProvider.class);
+      providerMock.when(ModelProvider::getInstance).thenReturn(mockProvider);
+      when(mockProvider.getEntityByTableId("100")).thenReturn(dalEntity);
+
+      List<String> collected = (List<String>) collectFieldsWithCalloutsMethod()
+          .invoke(null, defaults, new HashSet<String>(), adTab);
+
+      assertEquals("Generic (Organization) callout must run before the specific (BP) one",
+          Arrays.asList("organization", "businessPartner"), collected);
     }
   }
 

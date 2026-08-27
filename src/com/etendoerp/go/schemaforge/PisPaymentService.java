@@ -176,16 +176,19 @@ public final class PisPaymentService {
   /**
    * Actively fetches {@code pisPayment}'s current status from Salt Edge, persists it, and brings
    * the Etendo Go side in line with it. Mirrors the reconcile sequence
-   * {@code PisPaymentCallback#doGet} runs on browser-return, but done here because Etendo Go's own
-   * SPA callback bypasses that servlet and the async webhook can't reach a local server.
-   * Composes only public PSD2 APIs (no PSD2 logic is duplicated or altered).
+   * {@code PisPaymentCallback#doGet} runs on browser-return, composing only public PSD2 APIs (no
+   * PSD2 logic is duplicated or altered).
    *
-   * <p>The Etendo Go side is delegated to {@link PisDeferredPaymentService#reconcile}: this is the
-   * "user is still watching" path, so a transfer that just resolved is registered within the poll
-   * interval rather than waiting for the periodic sweep. It also covers the bank transaction, which
-   * this method used to create on {@code executed} by itself.
+   * <p>The Etendo Go side is delegated to {@link PisDeferredPaymentService#reconcile}, which is
+   * what actually creates the {@code FIN_Payment} — the step Classic's own callback has no way to
+   * perform, since PSD2 is the shared module and must not know about Etendo Go.
+   *
+   * <p>Package-private rather than private so {@link PisReturnCallbackServlet} can reuse it
+   * verbatim for the browser-return path: ONE consult-and-reconcile sequence, called from either
+   * the SPA's poll (user still watching) or the browser's own redirect back from the bank (which
+   * works even with the app-shell tab already closed).
    */
-  private static void refreshPisStatusFromSaltEdge(PisPayment pisPayment) {
+  static void refreshPisStatusFromSaltEdge(PisPayment pisPayment) {
     String apiKey = BankIntegrationUtils.getPsd2ApiKey(OBContext.getOBContext().getCurrentClient());
     BankIntegrationPISUtils.PISPaymentStatus status = BankIntegrationPISUtils.showPayment(apiKey,
         pisPayment.getSaltedgePayment());

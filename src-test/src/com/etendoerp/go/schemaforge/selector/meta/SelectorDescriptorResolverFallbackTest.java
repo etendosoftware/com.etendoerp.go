@@ -223,4 +223,67 @@ class SelectorDescriptorResolverFallbackTest {
 
     assertEquals(List.of("combination"), props);
   }
+
+  // =========================================================================
+  // "description" fallback — regression coverage for the IAE Activity Type bug
+  // (epiae_type: Key + Description, no explicit OBUISEL_Selector_Field config).
+  // Search for "alquiler" matched 0 rows because the fallback only ever added
+  // the short identifier key (e.g. "3"), never "description".
+  // =========================================================================
+
+  @Test
+  @DisplayName("Adds description alongside a short identifier key from displayProp")
+  void addsDescriptionAlongsideShortIdentifierKey() {
+    List<String> props = new ArrayList<>();
+    // Mirrors epiae_type: displayProp resolves to the short key property
+    // ("searchKey", e.g. "3"), and the entity also exposes "description"
+    // ("Alquiler de viviendas"). Neither is explicitly configured as
+    // searchable in AD — both must come from this fallback.
+    Entity entity = entityWithProperties("searchKey", "description");
+
+    SelectorDescriptorResolver.ensureSearchableFallback(props, entity, "searchKey", "id");
+
+    assertTrue(props.contains("searchKey"), "short key should still be added");
+    assertTrue(props.contains("description"), "description must be added so free-text search works");
+    assertEquals(2, props.size());
+  }
+
+  @Test
+  @DisplayName("Does not add description when the entity has no such property (no-op)")
+  void skipsDescriptionWhenEntityHasNone() {
+    List<String> props = new ArrayList<>();
+    Entity entity = entityWithProperties("searchKey");
+
+    SelectorDescriptorResolver.ensureSearchableFallback(props, entity, "searchKey", "id");
+
+    assertEquals(List.of("searchKey"), props);
+  }
+
+  @Test
+  @DisplayName("Empty-searchableProps fallback (name/searchKey) still runs when entity also has description")
+  void emptyFallbackStillRunsAlongsideDescription() {
+    List<String> props = new ArrayList<>();
+    // displayProp is an identifier alias (not a real property), so the
+    // name/searchKey/valueProp block must still fire even though the entity
+    // also has "description" — description must never short-circuit it.
+    Entity entity = entityWithProperties("name", "searchKey", "description");
+
+    SelectorDescriptorResolver.ensureSearchableFallback(props, entity, "_identifier", "id");
+
+    assertTrue(props.contains("name"), "name fallback must still run");
+    assertTrue(props.contains("searchKey"), "searchKey fallback must still run");
+    assertTrue(props.contains("description"), "description must be added too");
+    assertEquals(3, props.size());
+  }
+
+  @Test
+  @DisplayName("Does not duplicate description when already present in the list")
+  void doesNotDuplicateDescription() {
+    List<String> props = new ArrayList<>(List.of("description"));
+    Entity entity = entityWithProperties("searchKey", "description");
+
+    SelectorDescriptorResolver.ensureSearchableFallback(props, entity, "searchKey", "id");
+
+    assertEquals(List.of("description", "searchKey"), props);
+  }
 }
