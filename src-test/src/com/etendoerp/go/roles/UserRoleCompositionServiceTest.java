@@ -23,7 +23,6 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.atLeastOnce;
-import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
@@ -34,9 +33,11 @@ import static org.mockito.Mockito.when;
 import java.util.Collections;
 import java.util.List;
 
+import org.hibernate.criterion.Criterion;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 import org.mockito.MockedStatic;
 import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
@@ -1166,8 +1167,24 @@ class UserRoleCompositionServiceTest {
 
       assertEquals("role-prior", result.personalRoleId);
       verify(target).setDefaultRole(priorPersonalRole);
-      // Verify that the name-based lookup was performed: criteria.add() was called
-      verify(roleCriteria, atLeastOnce()).add(any());
+
+      // Verify that the name-based lookup was performed: Restrictions.eq(Role.PROPERTY_NAME, expectedName)
+      // was added to the criteria. Capture all add() calls and assert at least one contains the name restriction.
+      ArgumentCaptor<Criterion> criterionCaptor = ArgumentCaptor.forClass(Criterion.class);
+      verify(roleCriteria, atLeastOnce()).add(criterionCaptor.capture());
+      String expectedName = "Personal – Jane Doe"; // buildPersonalRoleName adds "Personal – " prefix
+      boolean foundNameRestriction = false;
+      for (Criterion criterion : criterionCaptor.getAllValues()) {
+        String criterionStr = criterion.toString();
+        if (criterionStr.contains(org.openbravo.model.ad.access.Role.PROPERTY_NAME)
+            && criterionStr.contains(expectedName)) {
+          foundNameRestriction = true;
+          break;
+        }
+      }
+      assertTrue(foundNameRestriction,
+          "Expected to find name-based restriction Restrictions.eq(Role.PROPERTY_NAME, '" + expectedName
+          + "') in criteria, but it was not found in any of the captured criteria: " + criterionCaptor.getAllValues());
     }
   }
 }
