@@ -328,6 +328,30 @@ public final class BankStatementsSupport {
   }
 
   /**
+   * Builds a 400 response carrying both a human-readable message and a stable
+   * machine-readable {@code code}, so a caller (e.g. the import wizard) can map
+   * the failure to its own translated message instead of falling back to a
+   * generic one.
+   *
+   * @param code    stable error code (e.g. {@code NO_VALID_LINES})
+   * @param message human-readable explanation
+   * @return the error response
+   */
+  public static NeoResponse codedError(String code, String message) {
+    try {
+      JSONObject error = new JSONObject();
+      error.put("message", message);
+      error.put("status", 400);
+      error.put("code", code);
+      JSONObject body = new JSONObject();
+      body.put("error", error);
+      return NeoResponse.error(400, body);
+    } catch (JSONException e) {
+      return NeoResponse.error(400, message);
+    }
+  }
+
+  /**
    * Parses a plain decimal string into a non-null {@link BigDecimal}.
    *
    * @param raw the decimal string to parse (may be {@code null}/blank)

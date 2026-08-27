@@ -114,7 +114,12 @@ public class FinancialAccountsPageHandler implements NeoHandler {
           // transaction or the account type changes. COALESCE because the column is nullable —
           // it stays NULL on a row the engine has not populated yet (a fresh account before its
           // first dependency write), and the list reads that as zero pending.
-          + "       COALESCE(fa.em_etgo_pending_count, 0) "
+          + "       COALESCE(fa.em_etgo_pending_count, 0), "
+          // Also appended at the END, same positional-read reason as the country columns above
+          // (ETP-4896 QA follow-up): the edit modal opened from the account DETAIL page reads its
+          // record from this R spec, so without this column its BIC/SWIFT field would render empty
+          // even for an account that has one stored.
+          + "       fa.swiftcode "
           + "  FROM fin_financial_account fa "
           + "  JOIN c_currency cur ON cur.c_currency_id = fa.c_currency_id "
           + "  LEFT JOIN c_glitem gli ON gli.c_glitem_id = fa.em_aprm_glitem_diff "
@@ -324,6 +329,7 @@ public class FinancialAccountsPageHandler implements NeoHandler {
           // COALESCEd in SQL, so getInt never sees a NULL and 0 is a real zero, not a
           // "was null" artefact.
           row.pendingCount = rs.getInt(22);
+          row.swiftCode = StringUtils.trimToEmpty(rs.getString(23));
           rows.add(row);
         }
       }
@@ -400,6 +406,7 @@ public class FinancialAccountsPageHandler implements NeoHandler {
       json.put("countryIso", account.country != null ? account.country.iso : "");
       json.put("countryName", account.country != null ? account.country.name : "");
       json.put("iban", account.iban);
+      json.put("swiftCode", account.swiftCode);
       json.put("maskedPan", account.maskedPan);
       json.put("bankConnected", account.bankConnected);
       json.put("bankReconnectable", account.bankReconnectable);
@@ -544,6 +551,9 @@ public class FinancialAccountsPageHandler implements NeoHandler {
      *  not the constructor: {@link Currency}'s javadoc explains why the constructor stays capped
      *  at 7 parameters, and every existing fixture already calls it with exactly that many. */
     CountryRef country = null;
+    /** BIC/SWIFT code (ETP-4896 QA follow-up). Blank for Cash/Card accounts and for Bank accounts
+     *  that never got one. Loader-set for the same 7-parameter reason as {@link #country}. */
+    String swiftCode = "";
 
     AccountRow(String id, String name, String type, BigDecimal currentBalance,
         Currency currency, String iban, boolean isDefault) {
