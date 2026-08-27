@@ -1429,4 +1429,83 @@ public class UserRoleCompositionService {
       OBContext.restorePreviousMode();
     }
   }
+
+  /**
+   * ETP-5019 — finds the given user's dormant personal role by its deterministic name (see
+   * {@link PersonalRoleAccessProvisioningService#buildPersonalRoleName(User)}), scoped to the
+   * user's client. Unlike {@link #findExistingPersonalRole(User)}, this does NOT consult {@code
+   * user.getDefaultRole()} — that field currently points at the Admin role being demoted FROM,
+   * not at the dormant personal role being restored TO. {@link
+   * #isReusablePersonalRole(User, Role)}'s other checks (active, non-template, non-client-admin,
+   * same client, not the target of any inheritance, exclusively assigned to this user or
+   * unassigned) are still applied defensively before trusting the name match.
+   *
+   * @return the user's dormant personal role if one is found and still valid to reuse, otherwise
+   *     {@code null}
+   */
+  @SuppressWarnings("unchecked")
+  private Role findDormantPersonalRoleByName(User user) {
+    String expectedName = personalRoleAccessProvisioningService.buildPersonalRoleName(user);
+    OBCriteria<Role> criteria = OBDal.getInstance().createCriteria(Role.class);
+    criteria.setFilterOnReadableClients(false);
+    criteria.setFilterOnReadableOrganization(false);
+    criteria.add(Restrictions.eq(Role.PROPERTY_CLIENT + ".id", user.getClient().getId()));
+    criteria.add(Restrictions.eq(Role.PROPERTY_NAME, expectedName));
+    criteria.setMaxResults(1);
+    List<Role> roles = (List<Role>) criteria.list();
+    if (roles.isEmpty()) {
+      return null;
+    }
+    Role candidate = roles.get(0);
+    return isReusablePersonalRole(user, candidate) ? candidate : null;
+  }
+
+  /**
+   * ETP-5019 — demotes {@code targetUserId} from the client's Admin role back to a personal
+   * role: their prior one (found by name, composition intact — see {@link
+   * #findDormantPersonalRoleByName(User)}) if one exists, otherwise a fresh empty one (same
+   * fallback {@link #resolveOrCreatePersonalRole(User)}'s "create" half already uses).
+   *
+   * @throws OBException if the caller is not owner/admin, the target is the owner (never
+   *     demotable, by anyone), or the target does not currently hold the client-admin role
+   */
+  public AssignmentResult demoteFromAdmin(String callerUserId, Role callerRole,
+      String targetUserId) {
+    if (StringUtils.isBlank(targetUserId)) {
+      throw new OBException("Missing user id for admin demotion");
+    }
+    if (!callerIsOwnerOrAdmin(callerUserId)) {
+      throw new OBException("Not authorized to demote an Admin: " + callerUserId);
+    }
+    User target = OBDal.getInstance().get(User.class, targetUserId);
+    if (target == null) {
+      throw new OBException("User not found: " + targetUserId);
+    }
+    enforceCallerClientBoundary(target, callerRole);
+    if (OwnerSupport.isOwner(targetUserId)) {
+      throw new OBException("The owner can never be demoted: " + targetUserId);
+    }
+    Role currentRole = target.getDefaultRole();
+    if (currentRole == null || !Boolean.TRUE.equals(currentRole.isClientAdmin())) {
+      throw new OBException("User does not currently hold the Admin role: " + targetUserId);
+    }
+
+    OBContext.setAdminMode(true);
+    try {
+      Role restoredRole = findDormantPersonalRoleByName(target);
+      if (restoredRole == null) {
+        restoredRole = createPersonalRole(target);
+      }
+      target.setDefaultRole(restoredRole);
+      OBDal.getInstance().save(target);
+      OBDal.getInstance().flush();
+      UserRoleSyncSupport.syncSingleActiveUserRole(target, restoredRole);
+      log.info("Demoted user {} from Admin to personal role {}", targetUserId,
+          restoredRole.getId());
+      return new AssignmentResult(targetUserId, restoredRole.getId(), Collections.emptyList(), 0,
+          0);
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
 }

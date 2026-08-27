@@ -1082,4 +1082,76 @@ class UserRoleCompositionServiceTest {
       verify(mockDal, never()).save(any());
     }
   }
+
+  @Test
+  void demoteFromAdminRejectsWhenTargetIsOwner() {
+    Role callerRole = mock(Role.class);
+    when(callerRole.isClientAdmin()).thenReturn(true);
+
+    User target = mock(User.class);
+    when(target.getId()).thenReturn("owner-1");
+
+    try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class);
+         MockedStatic<OwnerSupport> ownerSupportMock = mockStatic(OwnerSupport.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(User.class, "owner-1")).thenReturn(target);
+      ownerSupportMock.when(() -> OwnerSupport.isOwner("caller-1")).thenReturn(true);
+      ownerSupportMock.when(() -> OwnerSupport.isOwner("owner-1")).thenReturn(true);
+
+      UserRoleCompositionService service = new UserRoleCompositionService();
+      assertThrows(OBException.class,
+          () -> service.demoteFromAdmin("caller-1", callerRole, "owner-1"));
+      verify(dal, never()).save(any());
+    }
+  }
+
+  @Test
+  void demoteFromAdminRestoresPriorPersonalRoleByName() {
+    Role callerRole = mock(Role.class);
+    when(callerRole.isClientAdmin()).thenReturn(true);
+
+    Client client = mock(Client.class);
+    when(client.getId()).thenReturn("client-1");
+
+    User target = mock(User.class);
+    when(target.getId()).thenReturn("target-1");
+    when(target.getClient()).thenReturn(client);
+    when(target.getName()).thenReturn("Jane Doe");
+    Role adminRole = mock(Role.class);
+    when(adminRole.isClientAdmin()).thenReturn(true);
+    when(target.getDefaultRole()).thenReturn(adminRole);
+
+    Role priorPersonalRole = mock(Role.class);
+    when(priorPersonalRole.isActive()).thenReturn(true);
+    when(priorPersonalRole.isTemplate()).thenReturn(false);
+    when(priorPersonalRole.isClientAdmin()).thenReturn(false);
+    when(priorPersonalRole.getClient()).thenReturn(client);
+    when(priorPersonalRole.getId()).thenReturn("role-prior");
+
+    try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class);
+         MockedStatic<OwnerSupport> ownerSupportMock = mockStatic(OwnerSupport.class);
+         MockedStatic<com.etendoerp.go.schemaforge.util.UserRoleSyncSupport> userRoleSyncMock = mockStatic(com.etendoerp.go.schemaforge.util.UserRoleSyncSupport.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(User.class, "target-1")).thenReturn(target);
+      ownerSupportMock.when(() -> OwnerSupport.isOwner("caller-1")).thenReturn(true);
+      ownerSupportMock.when(() -> OwnerSupport.isOwner("target-1")).thenReturn(false);
+
+      OBCriteria<Role> roleCriteria = mock(OBCriteria.class);
+      when(dal.createCriteria(Role.class)).thenReturn(roleCriteria);
+      when(roleCriteria.list()).thenReturn(Collections.singletonList(priorPersonalRole));
+
+      OBCriteria<UserRoles> userRolesCriteria = mock(OBCriteria.class);
+      when(dal.createCriteria(UserRoles.class)).thenReturn(userRolesCriteria);
+      when(userRolesCriteria.list()).thenReturn(Collections.emptyList());
+
+      UserRoleCompositionService service = new UserRoleCompositionService();
+      UserRoleCompositionService.AssignmentResult result =
+          service.demoteFromAdmin("caller-1", callerRole, "target-1");
+
+      assertEquals("role-prior", result.personalRoleId);
+      verify(target).setDefaultRole(priorPersonalRole);
+    }
+  }
 }
