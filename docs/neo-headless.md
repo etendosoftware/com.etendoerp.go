@@ -956,12 +956,13 @@ GET /sws/neo/systemroletemplates
 GET /sws/neo/debuginvitationbypass?Action=forceAccept&Email=<email>       (dev/QA only — §8g)
 GET /sws/neo/debuginvitationbypass?Action=forceStatus&Email=<email>&Status=<status>  (dev/QA only — §8g)
 GET /sws/neo/resendinvitation?AdUserId=<id>                               (§8h)
+GET /sws/neo/promoteuserrole?UserId=<id>&Mode=promote|demote              (§8i)
 Authorization: Bearer {token}
 ```
 
 `NeoGoWebhookBridge` runs `SFListMenu`/`SFWindowAccessMap`/`SFRolesOverview`/`SFAssignUserRoles`/
-`SFUserRoleAssignments`/`SFSystemRoleTemplates`/`SFDebugInvitationBypass`/`SFResendInvitation` (§8,
-§8b, §8c, §8d, §8e, §8f, §8g, §8h) through NEO's own
+`SFUserRoleAssignments`/`SFSystemRoleTemplates`/`SFDebugInvitationBypass`/`SFResendInvitation`/
+`SFPromoteUserRole` (§8, §8b, §8c, §8d, §8e, §8f, §8g, §8h, §8i) through NEO's own
 JWT authentication instead of the Webhooks module's HTTP dispatch — the same pattern
 `NeoSimSearchEndpoint` (§4.9) already used for `SimSearch`. Each of these pseudo-specs constructs
 the corresponding `BaseWebhookService` and calls its unchanged `get(Map, Map)` method directly;
@@ -973,20 +974,23 @@ original `/webhooks/*` paths too — the Webhooks module dispatch was not remove
 `/sws/neo/*` is the path the Go SPA (`tools/app-shell` in `etendo_schema_forge`) actually calls,
 and no `SMFWHE_DEFINEDWEBHOOK_ROLE` grant is required for it. `SFAssignUserRoles` (ETP-4852),
 `SFUserRoleAssignments` (ETP-4906), `SFSystemRoleTemplates` (ETP-4906),
-`SFDebugInvitationBypass` (ETP-4830), and `SFResendInvitation` (ETP-4830) are `/sws/neo/*`-only —
-all five were authored after this pattern was already established, so none ever had a legacy
-`/webhooks/*` path to keep.
+`SFDebugInvitationBypass` (ETP-4830), `SFResendInvitation` (ETP-4830), and `SFPromoteUserRole`
+(ETP-5019) are `/sws/neo/*`-only — all six were authored after this pattern was already
+established, so none ever had a legacy `/webhooks/*` path to keep.
 
 Each webhook's own access rule is unaffected and still enforced inside its `get()` — see
-§8/§8b/§8c/§8d/§8e/§8f/§8g/§8h for what each one checks (`NeoAccessHelper.isAdminOrClientAdmin`,
+§8/§8b/§8c/§8d/§8e/§8f/§8g/§8h/§8i for what each one checks (`NeoAccessHelper.isAdminOrClientAdmin`,
 window/process access checks, etc.). Non-`GET` requests get `405`; a webhook that throws gets
 `500` with the exception message (except `SFAssignUserRoles`'s own expected domain-validation
-rejections, and `SFUserRoleAssignments`'s own expected domain rejections — see §8d/§8e for why
-those are a `200` result instead). **`debuginvitationbypass` is different from every other
-pseudo-spec in this list: it is also gated by a runtime flag checked in
-`NeoPseudoSpecDispatcher` BEFORE `SFDebugInvitationBypass` is even constructed** — see §8g for
-why and how. `resendinvitation` (§8h) has NO such flag — it is a real, always-on production
-feature, gated only by the webhook's own admin/client-admin check plus server-side client scoping.
+rejections, `SFUserRoleAssignments`'s own expected domain rejections, and `SFPromoteUserRole`'s
+own expected domain rejections — see §8d/§8e/§8i for why those are a `200` result instead).
+**`debuginvitationbypass` is different from every other pseudo-spec in this list: it is also
+gated by a runtime flag checked in `NeoPseudoSpecDispatcher` BEFORE `SFDebugInvitationBypass` is
+even constructed** — see §8g for why and how. `resendinvitation` (§8h) and `promoteuserrole`
+(§8i) have NO such flag — both are real, always-on production features, gated only by their own
+admin/client-admin check plus their own further scoping (client boundary for `resendinvitation`;
+owner/admin caller + tenant-boundary + target-not-owner/not-already-Admin for
+`promoteuserrole`, enforced inside `UserRoleCompositionService`, §8i).
 
 ### 4.11 NEO Pseudo-Spec Bridge Pattern (preferred for new Etendo-GO-authored webhooks)
 
@@ -2602,6 +2606,60 @@ inventing a new shape for this one webhook). See that repo's `docs/generated-cus
 
 ---
 
+## 8i. Promote/Demote User Role (SFPromoteUserRole Webhook, ETP-5019)
+
+`SFPromoteUserRole` (`GET /sws/neo/promoteuserrole?UserId=<id>&Mode=promote|demote` — reached ONLY
+through the NEO pseudo-spec bridge, §4.10/§4.11; no legacy `/webhooks/*` path) backs the admin
+"Promote to Admin" / "Demote from Admin" actions on the `user` window's detail-header: lets the
+owner or a current Admin flip an invited user between their composed personal role
+(§8d/`UserRoleCompositionService#assignTemplateRoles`) and the client's Admin role, and back again,
+without losing that personal role's template composition in the process.
+
+**Same admin/client-admin access gate as every sibling in this family** — `SFPromoteUserRole`'s own
+`NeoAccessHelper.isAdminOrClientAdmin` check, evaluated BEFORE `UserRoleCompositionService` is even
+constructed, same convention as `SFAssignUserRoles`/`SFResendInvitation`. Like `resendinvitation`
+(§8h), there is **no dev-only `GoRuntimeProperties` flag** — this is a real, always-on production
+feature. The finer-grained rules are NOT enforced by the webhook itself; they live inside
+`UserRoleCompositionService#promoteToAdmin`/`#demoteFromAdmin` (Tasks 1-2, ETP-5019):
+
+- the CALLER must be the client's owner (`OwnerSupport.isOwner`) or already hold the client-admin
+  role (`callerIsOwnerOrAdmin`) — a merely-composed non-admin user cannot promote/demote anyone,
+  even themselves;
+- `enforceCallerClientBoundary` — the same tenant-boundary check `SFAssignUserRoles`/
+  `SFUserRoleAssignments` use — stops a client-admin from targeting a user outside their own client;
+- the TARGET can never be the owner (`OwnerSupport.isOwner`) for either direction — the owner
+  already effectively has Admin and can never be demoted by anyone;
+- `promoteToAdmin` additionally rejects a target who already holds the client-admin role;
+  `demoteFromAdmin` additionally rejects a target who does NOT currently hold it.
+
+**Mode dispatch, not two endpoints.** `Mode=promote` calls `promoteToAdmin`; `Mode=demote` calls
+`demoteFromAdmin`; any other (or missing) value is rejected before either service method — or
+`UserRoleCompositionService` itself — is ever constructed, same "reject cheaply before touching the
+service" convention `SFAssignUserRoles` uses for a missing `UserId`.
+
+**Promote replaces, never deletes.** Promoting sets the target's `Default_Ad_Role_ID` to the
+client's Admin role and syncs `AD_User_Roles` (`UserRoleSyncSupport#syncSingleActiveUserRole`) —
+the personal role's own `AD_Role` row and its `AD_Role_Inheritance` composition are left completely
+intact, only unassigned, so a later demote can find and restore it by name
+(`findDormantPersonalRoleByName`, scoped to the user's client) rather than starting from an empty
+role again. If no dormant personal role is found (e.g. the user never had one), demote falls back to
+creating a fresh one, the same `createPersonalRole` path `resolveOrCreatePersonalRole` already uses.
+
+```json
+// success (personalRoleId reused as the field name for whichever role id is now active —
+// the newly-assigned Admin role's id on promote, the restored/created personal role's id on
+// demote — to avoid diverging from SFAssignUserRoles's existing response shape):
+{"success": true, "userId": "...", "roleId": "..."}
+// domain validation failure (still HTTP 200, matching SFAssignUserRoles's own
+// "don't 500 a validation rejection" convention, §8d):
+{"success": false, "message": "..."}
+```
+
+**Frontend counterpart:** Task 4 of this plan (`etendo_schema_forge`) — a thin client calling this
+endpoint with the same `UserId`/`Mode` params, wired to the `user` window's detail-header actions.
+
+---
+
 ## 9. Testing
 
 The module includes unit tests that run without a backend:
@@ -2640,10 +2698,11 @@ e.g. `UserRoleAssignmentHandlerTest`/`OwnerSupportTest`) and `src-test/src/com/e
 `resendInvitation` coverage, §8h, lives alongside its pre-existing `createInvitation`/
 `findLatestInvitationStatus` suites, same file, no separate class).
 The `NeoPseudoSpecDispatcher` routing for `userroleassignments`, `systemroletemplates`,
-`debuginvitationbypass`, and `resendinvitation` is covered by `NeoPseudoSpecDispatcherTest` (same
-package), mirroring its existing per-endpoint dispatch/method-not-allowed test pairs —
-`debuginvitationbypass` additionally covers the flag-off/flag-on branch described in §8g
-(`resendinvitation` has no such flag to test, §8h). The `AD_Role`-templates/composition classes —
+`debuginvitationbypass`, `resendinvitation`, and `promoteuserrole` is covered by
+`NeoPseudoSpecDispatcherTest` (same package), mirroring its existing per-endpoint dispatch/
+method-not-allowed test pairs — `debuginvitationbypass` additionally covers the flag-off/flag-on
+branch described in §8g (`resendinvitation` and `promoteuserrole` have no such flag to test, §8h/
+§8i). The `AD_Role`-templates/composition classes —
 `UserRoleCompositionServiceTest`, `UserRoleCompositionServiceIntegrationTest`,
 `UserRoleCompositionServiceOverlapIntegrationTest`,
 `UserRoleCompositionServiceOverlapReverificationTest`,
