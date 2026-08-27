@@ -939,6 +939,11 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
         return;
       }
       EtendoGoJwtDalHelper.consumePasswordReset(account, hashPassword(password), new Date());
+      // ETP-5003 — the security notice belongs to every password change, not only the one made
+      // from inside the app. This is the path an attacker with a stolen reset link would take, so
+      // it is the one where the owner most needs to be told.
+      sendAuthEmailBestEffort("password-changed",
+          () -> authEmailSender.sendPasswordChanged(account));
 
       JSONObject result = new JSONObject();
       result.put(FIELD_STATUS, STATUS_SUCCESS);
@@ -2551,7 +2556,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       log.warn("Auth email reset-password skipped because the public app base URL is not configured");
     } else {
       try {
-        emailSent = authEmailSender.sendPasswordReset(account, resetTokenHash, resetLink);
+        emailSent = authEmailSender.sendPasswordReset(account, resetTokenHash, resetLink,
+            expiresAt);
       } catch (RuntimeException e) {
         log.warn("Auth email reset-password failed after token storage", e);
       }
@@ -2599,13 +2605,16 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
         return;
       }
 
-      EmailVerificationDalHelper.storeEmailVerifyToken(account, verifyTokenHash,
-          Date.from(Instant.now().plusSeconds(EMAIL_VERIFICATION_TTL_SECONDS)));
+      // ETP-5003 — the same expiry the token is stored with is handed to the email, so the copy
+      // states the window the server actually grants instead of repeating a constant.
+      Date verifyExpiresAt = Date.from(Instant.now().plusSeconds(EMAIL_VERIFICATION_TTL_SECONDS));
+      EmailVerificationDalHelper.storeEmailVerifyToken(account, verifyTokenHash, verifyExpiresAt);
       tokenStored = true;
 
       boolean emailSent = welcome
-          ? authEmailSender.sendNewAccount(account, language, verifyLink)
-          : authEmailSender.sendVerifyEmail(account, verifyTokenHash, verifyLink, language);
+          ? authEmailSender.sendNewAccount(account, language, verifyLink, verifyExpiresAt)
+          : authEmailSender.sendVerifyEmail(account, verifyTokenHash, verifyLink, language,
+              verifyExpiresAt);
       if (emailSent) {
         return;
       }
