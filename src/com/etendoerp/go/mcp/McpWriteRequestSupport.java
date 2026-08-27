@@ -37,6 +37,7 @@ import org.openbravo.service.json.JsonConstants;
 
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.util.NeoErrorSanitizer;
+import com.etendoerp.go.schemaforge.util.NeoListReferenceError;
 
 /**
  * Request-body preparation and DAL-response classification helpers extracted from
@@ -380,7 +381,7 @@ final class McpWriteRequestSupport {
   private static JSONObject buildDalFailureEnvelope(String rawMessage, String seeAlso)
       throws JSONException {
     String detail = NeoErrorSanitizer.stripRowDump(
-        NeoErrorSanitizer.redactObjectReferences(rawMessage));
+        NeoErrorSanitizer.redactObjectReferences(NeoListReferenceError.enrich(rawMessage)));
     boolean write = McpConstants.SEE_ALSO_WRITING.equals(seeAlso);
     JSONObject envelope = new JSONObject();
     if (NeoErrorSanitizer.isDuplicateKeyMessage(detail)) {
@@ -424,7 +425,8 @@ final class McpWriteRequestSupport {
       while (keys.hasNext()) {
         String key = keys.next();
         fieldErrors.put(key, NeoErrorSanitizer.stripRowDump(
-            NeoErrorSanitizer.redactObjectReferences(rawErrors.optString(key, ""))));
+            NeoErrorSanitizer.redactObjectReferences(
+                NeoListReferenceError.enrich(rawErrors.optString(key, "")))));
       }
     }
     if (fieldErrors.length() > 0) {

@@ -59,6 +59,7 @@ class NeoTrlTest {
   private MockedStatic<ModelProvider> modelProvider;
   private OBDal obDalInstance;
   private ModelProvider modelInstance;
+  private Entity uomBaseEntity;
 
   @BeforeEach
   void setUp() {
@@ -93,6 +94,8 @@ class NeoTrlTest {
     when(backRef.getName()).thenReturn("uOM");
     when(backRef.getTargetEntity()).thenReturn(base);
     when(trl.getProperties()).thenReturn(Arrays.asList(backRef, nameProp));
+    when(base.getProperties()).thenReturn(Collections.singletonList(nameProp));
+    uomBaseEntity = base;
 
     when(modelInstance.getEntity(eq("UOM"), eq(false))).thenReturn(base);
     when(modelInstance.getEntity(eq("UOMTrl"), eq(false))).thenReturn(trl);
@@ -196,5 +199,171 @@ class NeoTrlTest {
   void resolveSearchMetaBlank() {
     assertNull(NeoTrl.resolveSearchMeta(null));
     assertNull(NeoTrl.resolveSearchMeta("  "));
+  }
+
+  /**
+   * A {@code UOMTrl} row for {@code translatedName} whose base UOM holds {@code baseName} in its
+   * own name column.
+   *
+   * <p>{@code getIdentifier()} is stubbed to the TRANSLATED name on purpose: that is what
+   * Openbravo's identifier provider really returns under a translated context (verified against
+   * a live es_ES instance — Algeria's identifier comes back as "Argelia"). An earlier version of
+   * this helper stubbed the identifier to the BASE name, which encoded the assumption under test
+   * instead of reality, so it happily passed while the production code was silently a no-op for
+   * every translated term. Any resolver that reaches for the identifier now fails here.
+   */
+  private BaseOBObject trlRowFor(String baseName, String translatedName) {
+    BaseOBObject base = mock(BaseOBObject.class);
+    when(base.getEntity()).thenReturn(uomBaseEntity);
+    when(base.get("name")).thenReturn(baseName);
+    when(base.getIdentifier()).thenReturn(translatedName);
+    BaseOBObject row = mock(BaseOBObject.class);
+    when(row.get("uOM")).thenReturn(base);
+    when(row.get("name")).thenReturn(translatedName);
+    return row;
+  }
+
+  @Test
+  @DisplayName("baseNameForTranslation rewrites a session-language term into its base name")
+  void baseNameForTranslationRewrites() {
+    // The bug this fixes: trigram similarity only ever compares against the base row, so
+    // "Unidad" scores 0.333 against "Unit" and resolves nothing. Handing the matcher "Unit"
+    // instead lets it match at 100% without changing the matcher itself.
+    stubUomModel();
+    OBQuery<BaseOBObject> query = stubTrlQuery();
+    when(query.list()).thenReturn(Collections.singletonList(trlRowFor("Unit", "Unidad")));
+
+    assertEquals("Unit", NeoTrl.baseNameForTranslation("UOM", "Unidad", "es_ES"));
+    obContext.verify(() -> OBContext.setAdminMode(true), atLeastOnce());
+    obContext.verify(OBContext::restorePreviousMode, atLeastOnce());
+  }
+
+  @Test
+  @DisplayName("baseNameForTranslation ignores surrounding whitespace in the typed term")
+  void baseNameForTranslationTrims() {
+    stubUomModel();
+    OBQuery<BaseOBObject> query = stubTrlQuery();
+    when(query.list()).thenReturn(Collections.singletonList(trlRowFor("Unit", "Unidad")));
+
+    assertEquals("Unit", NeoTrl.baseNameForTranslation("UOM", "  Unidad  ", "es_ES"));
+  }
+
+  @Test
+  @DisplayName("baseNameForTranslation refuses to rewrite an ambiguous term")
+  void baseNameForTranslationAmbiguous() {
+    // Two different base rows share one translated name; picking either would be arbitrary,
+    // so the original term goes to the matcher untouched and the user disambiguates.
+    stubUomModel();
+    OBQuery<BaseOBObject> query = stubTrlQuery();
+    when(query.list()).thenReturn(Arrays.asList(
+        trlRowFor("Unit", "Unidad"),
+        trlRowFor("Each", "Unidad")));
+
+    assertNull(NeoTrl.baseNameForTranslation("UOM", "Unidad", "es_ES"));
+  }
+
+  @Test
+  @DisplayName("baseNameForTranslation returns null when the translation IS the base name")
+  void baseNameForTranslationNoOp() {
+    // A base-language session (or a country named the same in both languages, e.g. Argentina)
+    // has nothing to rewrite. Returning null keeps that request on exactly the path it takes
+    // today rather than round-tripping an identical term.
+    stubUomModel();
+    OBQuery<BaseOBObject> query = stubTrlQuery();
+    when(query.list()).thenReturn(Collections.singletonList(trlRowFor("Unit", "unit")));
+
+    assertNull(NeoTrl.baseNameForTranslation("UOM", "Unit", "en_US"));
+  }
+
+  @Test
+  @DisplayName("baseNameForTranslation short-circuits blank inputs with no model or DB work")
+  void baseNameForTranslationBlankInputs() {
+    assertNull(NeoTrl.baseNameForTranslation("  ", "Unidad", "es_ES"));
+    assertNull(NeoTrl.baseNameForTranslation("UOM", "  ", "es_ES"));
+    assertNull(NeoTrl.baseNameForTranslation("UOM", "Unidad", null));
+    obContext.verify(() -> OBContext.setAdminMode(true), never());
+    verify(obDalInstance, never()).createQuery(anyString(), anyString());
+  }
+
+  @Test
+  @DisplayName("baseNameForTranslation returns null for an entity with no *_Trl sibling")
+  void baseNameForTranslationNonTranslatable() {
+    Entity base = mock(Entity.class);
+    when(base.getName()).thenReturn("SomeEntity");
+    when(modelInstance.getEntity(eq("SomeEntity"), eq(false))).thenReturn(base);
+    when(modelInstance.getEntity(eq("SomeEntityTrl"), eq(false))).thenReturn(null);
+
+    assertNull(NeoTrl.baseNameForTranslation("SomeEntity", "Cualquiera", "es_ES"));
+    verify(obDalInstance, never()).createQuery(anyString(), anyString());
+  }
+
+  @Test
+  @DisplayName("baseNameForTranslation swallows query errors and restores admin mode")
+  void baseNameForTranslationSwallowsErrors() {
+    // A failing translation lookup must degrade to "search the term as typed", never to a
+    // failed simsearch request — the caller is an import preview with 5000 other rows to show.
+    stubUomModel();
+    when(obDalInstance.createQuery(eq("UOMTrl"), anyString()))
+        .thenThrow(new RuntimeException("boom"));
+
+    assertNull(NeoTrl.baseNameForTranslation("UOM", "Unidad", "es_ES"));
+    obContext.verify(OBContext::restorePreviousMode, atLeastOnce());
+  }
+
+  @Test
+  @DisplayName("pickUniqueBaseName collapses repeated rows for one base record")
+  void pickUniqueBaseNameCollapsesDuplicates() {
+    // Duplicate trl rows for the same base record are not ambiguity — they name one winner.
+    assertEquals("Unit", NeoTrl.pickUniqueBaseName("Unidad", Arrays.asList("Unit", "unit")));
+  }
+
+  @Test
+  @DisplayName("pickUniqueBaseName skips blank names and returns null when none remain")
+  void pickUniqueBaseNameSkipsBlanks() {
+    assertEquals("Unit", NeoTrl.pickUniqueBaseName("Unidad", Arrays.asList(null, "  ", "Unit")));
+    assertNull(NeoTrl.pickUniqueBaseName("Unidad", Arrays.asList(null, "  ")));
+    assertNull(NeoTrl.pickUniqueBaseName("Unidad", Collections.emptyList()));
+  }
+
+  @Test
+  @DisplayName("baseNameForTranslation reads the base name column, never getIdentifier()")
+  void baseNameForTranslationIgnoresTranslatedIdentifier() {
+    // The regression this locks down: Openbravo's identifier provider honours the context
+    // language, so under es_ES the base row's identifier IS the translated name. Resolving
+    // through it returned the same term that was passed in, pickUniqueBaseName's
+    // same-as-input guard discarded it as a no-op, and translation silently never happened
+    // for any term that actually had a translation — i.e. for every term that needed it.
+    stubUomModel();
+    BaseOBObject baseRow = mock(BaseOBObject.class);
+    when(baseRow.getEntity()).thenReturn(uomBaseEntity);
+    when(baseRow.get("name")).thenReturn("Unit");
+    when(baseRow.getIdentifier()).thenReturn("Unidad");   // what Openbravo really returns
+    BaseOBObject row = mock(BaseOBObject.class);
+    when(row.get("uOM")).thenReturn(baseRow);
+    when(row.get("name")).thenReturn("Unidad");
+    OBQuery<BaseOBObject> query = stubTrlQuery();
+    when(query.list()).thenReturn(Collections.singletonList(row));
+
+    assertEquals("Unit", NeoTrl.baseNameForTranslation("UOM", "Unidad", "es_ES"));
+    verify(baseRow, never()).getIdentifier();
+  }
+
+  @Test
+  @DisplayName("baseNameForTranslation skips a base row that has no name property")
+  void baseNameForTranslationNoNameProperty() {
+    // Defensive: resolveNameProperty can fall back to the conventional "name" column off the
+    // TRL side, which the base entity is not guaranteed to expose. No property means no
+    // rewrite, never an exception.
+    stubUomModel();
+    Entity bare = mock(Entity.class);
+    when(bare.getProperties()).thenReturn(Collections.emptyList());
+    BaseOBObject base = mock(BaseOBObject.class);
+    when(base.getEntity()).thenReturn(bare);
+    BaseOBObject row = mock(BaseOBObject.class);
+    when(row.get("uOM")).thenReturn(base);
+    OBQuery<BaseOBObject> query = stubTrlQuery();
+    when(query.list()).thenReturn(Collections.singletonList(row));
+
+    assertNull(NeoTrl.baseNameForTranslation("UOM", "Unidad", "es_ES"));
   }
 }
