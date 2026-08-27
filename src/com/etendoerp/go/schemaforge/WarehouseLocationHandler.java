@@ -228,7 +228,11 @@ public class WarehouseLocationHandler implements NeoHandler {
       return result;
     }
     String region = geoLoc.getRegion() != null ? nullIfEmpty(geoLoc.getRegion().getName()) : null;
-    String country = geoLoc.getCountry() != null ? nullIfEmpty(geoLoc.getCountry().getName()) : null;
+    // ETP-5022: getIdentifier() translates, getName() does not — same reason as the
+    // country$_identifier field above. This fallback is what the UI shows when the location has
+    // no city or street, so leaving it on getName() kept the country untranslated there.
+    // Safe because this name is computed for the response only and never written back.
+    String country = geoLoc.getCountry() != null ? nullIfEmpty(geoLoc.getCountry().getIdentifier()) : null;
     result = joinNonNull(region, country);
     return result != null ? result : "Location";
   }
