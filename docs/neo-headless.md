@@ -1781,11 +1781,23 @@ NEO Headless enforces security at multiple levels:
       ]
     }
   ],
-  "count": 2
+  "count": 2,
+  "viewerRoleId": "...",
+  "viewerIsClientAdmin": false
 }
 ```
 
 `type` is derived from `AD_Menu.issummary`/`action`: `folder` (summary node), `window` (`action = 'W'`), `process` (`action = 'P'`), `report` (`action = 'R'`), `form` (`action = 'X'`), or `other`. Leaf nodes carry whichever of `windowId`, `processId`, `obuiappProcessId`, `formId` applies; folders carry `children` instead.
+
+**`viewerRoleId`/`viewerIsClientAdmin` (ETP-5019 follow-up).** The CALLING user's own current
+`AD_Role_ID` and whether that role is the tenant's client-admin role — reusing the role already
+resolved for the tree/search filtering above, not a second lookup. Absent entirely on the no-role
+response (`{"tree": [], "count": 0}`, no viewer keys at all). This has nothing to do with menu
+rendering itself; it exists because `SFListMenu` is the app's only once-per-session call, so the
+frontend's `useViewerRole()` hook (`tools/app-shell/src/hooks/useViewerRole.js` in
+`etendo_schema_forge`) piggybacks on it to expose the current viewer's own permission level to any
+component that needs to gate UI by it (e.g. the User window's admin promote/demote buttons),
+without a dedicated endpoint or a second network round trip.
 
 **Access filtering:** the requesting role is captured once, at the very top of the request, *before* the servlet enters `OBContext.setAdminMode()` — admin mode is only used to bypass row-level security on the underlying native SQL queries that build the tree, never to decide access. A request with no role assigned gets `{"tree": [], "count": 0}` immediately, without even querying the database.
 
@@ -2671,7 +2683,7 @@ The module includes unit tests that run without a backend:
 | `NeoResponseTest` | -- | Static builders (`ok`, `created`, `noContent`, `error`), custom headers. |
 | `NeoServletTabFilterTest` | -- | Parent-child HQL where clause generation. |
 | `NeoPreviewFileServiceTest` | ~250 | Validation (invalid JSON, blank fields), GET miss/hit, POST INSERT/UPDATE paths, DELETE miss/hit. All without a live DB via `MockedStatic<OBDal>` + `MockedStatic<OBContext>`. |
-| `SFListMenuTest` | -- | Tree building/pruning, flat search, role-based filtering (window/process/OBUIAPP-process nodes), no-role → empty menu, multi-level nesting. |
+| `SFListMenuTest` | -- | Tree building/pruning, flat search, role-based filtering (window/process/OBUIAPP-process nodes), no-role → empty menu, multi-level nesting, viewer-role identity fields (`viewerRoleId`/`viewerIsClientAdmin`) present when a role is resolved and absent when it isn't. |
 | `SFWindowAccessMapTest` | -- | Role-based windowAccess resolution (full/read-only/absent), no-role → both maps empty, admin/client-admin bypass → full access to every active Etendo GO window + every capability true, `showAccountingFields` true/false/unset/missing-role, `isAdminOrClientAdmin` true on bypass / false for a restricted role. |
 | `SFRolesOverviewTest` | -- | Admin/client-admin access gate (no role, restricted role, System Administrator, client-admin); tenant-relative role resolution via a client-scoped `Role` criteria (not hardcoded ids), admin-first-then-fixed-name sort order, a tenant with fewer than 5 matching roles; distinct-user-count aggregation; GO-window intersection (native-only windows excluded); tier resolution (full/read-only); exception handling. Two defense-in-depth regression cases confirm the gate is genuinely `isAdminOrClientAdmin`, not "is this one of the tenant's 5 fixed roles": a caller authenticated AS one of those roles (Finance) but not admin/client-admin is still denied (empty `roles`, zero `Role` lookups), and a role with zero active `AD_User_Roles` AND zero active `AD_Window_Access` rows degrades gracefully to `userCount: 0` + an empty `windows` array for all 5 roles rather than throwing or omitting the role. **ETP-4907 additions:** missing tenant roles fall back to the system-level templates with composition-based `userCount` (`UserRoleCompositionService` constructed lazily, once, via `mockConstruction`); an active tenant role is never overridden by its template counterpart, and the composition service is never even constructed when unneeded; the `matrix` covers every GO window (including one no role can reach, resolving to `"none"`) grouped by category, and a window with no resolvable category falls back to the `"Other"` bucket. QA (Sentinel) added 3 more targeting the fallback's early-return branch: a system-template role that doesn't resolve at all (`OBDal.get` returns `null`, e.g. deleted/never-seeded) is silently omitted rather than appearing as a 5th entry with null/empty fields; a system-template role that resolves but is `IsActive = 'N'` is treated identically (also omitted, not returned with stale data); and the full degradation case — every one of the 4 templates missing/inactive — still returns a valid minimal response (just the admin card, `roles.length() == 1`) without ever constructing `UserRoleCompositionService`, confirming the fallback's laziness holds even under total non-resolution, not only when every fixed name already has a tenant role. |
 | `TemplateRoleWindowAccessTest` (ETP-4878) | -- | The real ETP-4878 permission matrix in `TemplateRoleWindowAccess` (`src/com/etendoerp/go/roles/`), DB-free (12 tests): exactly the 4 non-Admin template roles present, exact grant counts per role (Sales 13 / Purchasing 11 / Finance 27 / Inventory 13, 64 total), Asientos manuales resolves to Simple G/L Journal and never to the classic G/L Journal window (`132`), Sales has no grant for Pago, "Categoría del producto" is read-only for Sales/Purchasing but full for Finance/Inventory, no role repeats the same `AD_Window_ID` twice, `byRoleId()` returns a fresh mutable map per call. QA (Sentinel) added 3 more: the 64 grants resolve to exactly 33 DISTINCT `AD_Window_ID`s (not just a raw count that would stay 64 even under duplication); all 8 window/role pairs from the old ETP-4852 2-window smoke test survive unchanged (same full access) in the new matrix, confirming `EnsureSystemRoleTemplatesScript#removeStaleWindowAccess`'s delete path is never actually exercised by that specific migration; and at least one window (e.g. Contactos, Pedido de venta) is granted at genuinely conflicting access levels across 2+ roles — the data-level root cause behind the ETP-4852 cross-template overlap bug fixed in `UserRoleCompositionService` (see §8d and `UserRoleCompositionServiceOverlapIntegrationTest`). |
