@@ -91,7 +91,7 @@ class SupportConversationsServletTest {
   private static final String FIELD_MESSAGES_LITERAL = "messages";
 
   /** Forces the servlet's fire-and-forget Jira background thread (see
-   * {@link SupportConversationsServlet#BACKGROUND_TASK_RUNNER}) onto the SAME thread as the
+   * {@link SupportConversationsServlet#backgroundTaskRunner}) onto the SAME thread as the
    * test, for every test in this class — not just the ones that currently exercise it —
    * so a future test can never again silently escape a {@code MockedStatic<SupportIntegrationClient>}
    * block and fire a real HTTP POST against whatever real Jira credentials happen to be
@@ -100,12 +100,12 @@ class SupportConversationsServletTest {
    * class before this seam existed). */
   @BeforeEach
   void forceSynchronousBackgroundTasks() {
-    SupportConversationsServlet.BACKGROUND_TASK_RUNNER = (threadName, task) -> task.run();
+    SupportConversationsServlet.backgroundTaskRunner = (threadName, task) -> task.run();
   }
 
   @AfterEach
   void restoreRealBackgroundTasks() {
-    SupportConversationsServlet.BACKGROUND_TASK_RUNNER =
+    SupportConversationsServlet.backgroundTaskRunner =
         (threadName, task) -> new Thread(task, threadName).start();
   }
 
@@ -1381,7 +1381,7 @@ class SupportConversationsServletTest {
         stubProvider(providerMock, null, mock(SupportMessage.class));
         mockCriteria(obDal, SupportMessage.class, Collections.emptyList());
 
-        // BACKGROUND_TASK_RUNNER is forced same-thread by forceSynchronousBackgroundTasks(),
+        // backgroundTaskRunner is forced same-thread by forceSynchronousBackgroundTasks(),
         // so this static mock reliably intercepts postJiraComment() instead of a real
         // background thread escaping it and hitting the real Jira API.
         new SupportConversationsServlet().doPost(request, response);
@@ -1613,7 +1613,7 @@ class SupportConversationsServletTest {
         sicMock.when(() -> SupportIntegrationClient.buildFeedbackComment(5, "Genial!"))
             .thenReturn("⭐ Valoración de satisfacción: 5/5\n\nComentario del cliente: Genial!");
 
-        // BACKGROUND_TASK_RUNNER is forced same-thread by forceSynchronousBackgroundTasks(),
+        // backgroundTaskRunner is forced same-thread by forceSynchronousBackgroundTasks(),
         // so these static mocks reliably intercept postJiraComment()/postJiraCsatLabel()
         // instead of a real background thread escaping them and hitting the real Jira API.
         new SupportConversationsServlet().doPost(request, response);

@@ -107,7 +107,7 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
    * incident: SUP-5 received months of "hola" / fake CSAT comments from unmocked runs of
    * this exact class). Tests MUST reset this to a same-thread runner before exercising
    * {@link #handleSendMessage}'s human-takeover branch or {@link #handleSubmitRating}. */
-  static java.util.function.BiConsumer<String, Runnable> BACKGROUND_TASK_RUNNER =
+  static java.util.function.BiConsumer<String, Runnable> backgroundTaskRunner =
       (threadName, task) -> new Thread(task, threadName).start();
   /** Package-private: also used by {@link SupportAttachmentHelpers}. */
   static final String FIELD_MIME_TYPE   = "mimeType";
@@ -464,7 +464,7 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
             : text;
         // Public: the customer will see this reflected in the portal, same as any other reply
         // they post there directly — this is just their own message, forwarded.
-        BACKGROUND_TASK_RUNNER.accept("jira-comment",
+        backgroundTaskRunner.accept("jira-comment",
             () -> SupportIntegrationClient.postJiraComment(finalKey, finalText, false));
         JSONObject result = new JSONObject();
         result.put(FIELD_MESSAGES,     buildMessageArray(convId));
@@ -548,7 +548,7 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
       final String finalJiraKey = conv.getJiraTicketKey();
       final int finalScore = score;
       final String finalComment = comment;
-      BACKGROUND_TASK_RUNNER.accept("jira-csat-feedback", () -> {
+      backgroundTaskRunner.accept("jira-csat-feedback", () -> {
         // Internal: the CSAT rating/comment is for the support team, never customer-facing.
         SupportIntegrationClient.postJiraComment(finalJiraKey,
             SupportIntegrationClient.buildFeedbackComment(finalScore, finalComment), true);
