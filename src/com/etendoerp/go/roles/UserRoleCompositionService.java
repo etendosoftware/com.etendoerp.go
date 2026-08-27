@@ -1420,6 +1420,7 @@ public class UserRoleCompositionService {
         throw new OBException("No Admin role found for client: " + target.getClient().getId());
       }
       target.setDefaultRole(adminRole);
+      target.setSmfswsDefaultWsRole(adminRole);
       OBDal.getInstance().save(target);
       OBDal.getInstance().flush();
       UserRoleSyncSupport.syncSingleActiveUserRole(target, adminRole);
@@ -1432,7 +1433,7 @@ public class UserRoleCompositionService {
 
   /**
    * ETP-5019 — finds the given user's dormant personal role by its deterministic name (see
-   * {@link PersonalRoleAccessProvisioningService#buildPersonalRoleName(User)}), scoped to the
+   * {@link PersonalRoleAccessProvisioningService#personalRoleBaseName(User)}), scoped to the
    * user's client. Unlike {@link #findExistingPersonalRole(User)}, this does NOT consult {@code
    * user.getDefaultRole()} — that field currently points at the Admin role being demoted FROM,
    * not at the dormant personal role being restored TO. {@link
@@ -1445,12 +1446,13 @@ public class UserRoleCompositionService {
    */
   @SuppressWarnings("unchecked")
   private Role findDormantPersonalRoleByName(User user) {
-    String expectedName = personalRoleAccessProvisioningService.buildPersonalRoleName(user);
+    String expectedName = personalRoleAccessProvisioningService.personalRoleBaseName(user);
     OBCriteria<Role> criteria = OBDal.getInstance().createCriteria(Role.class);
     criteria.setFilterOnReadableClients(false);
     criteria.setFilterOnReadableOrganization(false);
     criteria.add(Restrictions.eq(Role.PROPERTY_CLIENT + ".id", user.getClient().getId()));
     criteria.add(Restrictions.eq(Role.PROPERTY_NAME, expectedName));
+    criteria.add(Restrictions.eq(Role.PROPERTY_ACTIVE, true));
     criteria.setMaxResults(1);
     List<Role> roles = (List<Role>) criteria.list();
     if (roles.isEmpty()) {
@@ -1462,9 +1464,10 @@ public class UserRoleCompositionService {
 
   /**
    * ETP-5019 — demotes {@code targetUserId} from the client's Admin role back to a personal
-   * role: their prior one (found by name, composition intact — see {@link
-   * #findDormantPersonalRoleByName(User)}) if one exists, otherwise a fresh empty one (same
-   * fallback {@link #resolveOrCreatePersonalRole(User)}'s "create" half already uses).
+   * role: their prior one (found by name via {@link
+   * PersonalRoleAccessProvisioningService#personalRoleBaseName(User)}, composition intact — see
+   * {@link #findDormantPersonalRoleByName(User)}) if one exists, otherwise a fresh empty one
+   * (same fallback {@link #resolveOrCreatePersonalRole(User)}'s "create" half already uses).
    *
    * @throws OBException if the caller is not owner/admin, the target is the owner (never
    *     demotable, by anyone), or the target does not currently hold the client-admin role
@@ -1497,6 +1500,7 @@ public class UserRoleCompositionService {
         restoredRole = createPersonalRole(target);
       }
       target.setDefaultRole(restoredRole);
+      target.setSmfswsDefaultWsRole(restoredRole);
       OBDal.getInstance().save(target);
       OBDal.getInstance().flush();
       UserRoleSyncSupport.syncSingleActiveUserRole(target, restoredRole);
