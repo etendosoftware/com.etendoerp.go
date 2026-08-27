@@ -782,7 +782,7 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
         "Could not reactivate the movement. Please check logs for details.", () -> {
           FIN_FinaccTransaction trx = loadTransactionFromBody(body);
           if (trx == null) return NeoResponse.error(404, MSG_TRANSACTION_NOT_FOUND);
-          FIN_BankStatementLine line = linkedBankStatementLine(trx);
+          FIN_BankStatementLine line = FinancialAccountTransactionsSupport.linkedBankStatementLine(trx);
           TransactionRemovalUtil.reactivate(trx);
           OBDal.getInstance().flush();
           if (line != null) {
@@ -791,12 +791,6 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
           trx = OBDal.getInstance().get(FIN_FinaccTransaction.class, trx.getId());
           return lifecycleOk(trx);
         });
-  }
-
-  /** The bank-statement line currently matched to {@code trx}, or {@code null} when it is unmatched. */
-  private FIN_BankStatementLine linkedBankStatementLine(FIN_FinaccTransaction trx) {
-    List<FIN_BankStatementLine> lines = trx.getFINBankStatementLineList();
-    return lines.isEmpty() ? null : lines.get(0);
   }
 
   /**

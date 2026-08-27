@@ -39,6 +39,7 @@ import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.base.exception.OBException;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.erpCommon.utility.OBError;
 import org.openbravo.model.common.invoice.Invoice;
 import org.openbravo.model.financialmgmt.payment.FIN_BankStatementLine;
 import org.openbravo.model.financialmgmt.payment.FIN_FinaccTransaction;
@@ -565,6 +566,69 @@ final class ReconciliationHandlerSupport {
             + "this batch are not rolled back (Core commits mid-flow) — continuing with the rest.",
             id, e);
       }
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // applySuggestions helpers ("T1" batch-header refactor)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Matches every prepared group into ONE shared reconciliation and processes it once. Extracted
+   * from {@code ReconciliationHandler.applySuggestions} to keep that method's cognitive complexity
+   * under the Sonar limit (java:S3776) — every seam below still runs on the SAME {@code handler}
+   * instance the caller passes in, so its behavior (and what its unit tests observe/verify) is
+   * unchanged.
+   *
+   * <p>Not atomic across groups: Core's matching services commit mid-flow, so a failure matching
+   * group <em>k</em> does not roll back groups {@code 1..k-1} already matched into the same
+   * document — it is captured as an error entry in {@code results} and the rest of the batch still
+   * proceeds.
+   *
+   * @param successfulGroups single-element output array; entry 0 is incremented once per group that
+   *     matched successfully (the caller needs the final count for its telemetry emit)
+   * @return the verbatim error response when the final {@code processReconciliation} call fails
+   *     (the batch is aborted at that point), or {@code null} on success
+   */
+  static NeoResponse matchAndProcessBatch(ReconciliationHandler handler,
+      FIN_FinancialAccount account, List<ReconciliationHandler.PreparedGroup> prepared,
+      JSONArray results, int[] successfulGroups) throws Exception {
+    FIN_Reconciliation rec = handler.getOrCreateDraftReconciliation(account);
+    for (ReconciliationHandler.PreparedGroup p : prepared) {
+      try {
+        handler.matchInto(p.line, p.operationIds, rec);
+        successfulGroups[0]++;
+        JSONObject ok = new JSONObject();
+        ok.put("reconciliationId", rec.getId());
+        ok.put(ReconciliationHandler.KEY_STATEMENT_LINE_ID, p.line.getId());
+        results.put(ok);
+      } catch (Exception e) {
+        log.error("Failed to match statement line {} into batch reconciliation {}",
+            p.line.getId(), rec.getId(), e);
+        results.put(NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
+            "Could not match statement line " + p.line.getId() + ": " + e.getMessage()).getBody());
+      }
+    }
+    OBError result = handler.processReconciliation(rec);
+    if (result != null && "Error".equalsIgnoreCase(result.getType())) {
+      handler.doRollbackAndClose();
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, result.getMessage());
+    }
+    return null;
+  }
+
+  /**
+   * True when {@code candidateLine}'s own transaction belongs to {@code rec}; when so, it is added
+   * to {@code out} (de-duplicated via {@code seenIds}). Extracted from {@code
+   * ReconciliationHandler.transactionsOfLineIn}, which calls this once for the line itself and once
+   * per ETGO match-group sibling.
+   */
+  static void addTransactionOwnedByRec(FIN_BankStatementLine candidateLine,
+      FIN_Reconciliation rec, List<FIN_FinaccTransaction> out, Set<String> seenIds) {
+    FIN_FinaccTransaction t = candidateLine.getFinancialAccountTransaction();
+    if (t != null && t.getReconciliation() != null
+        && rec.getId().equals(t.getReconciliation().getId()) && seenIds.add(t.getId())) {
+      out.add(t);
     }
   }
 }

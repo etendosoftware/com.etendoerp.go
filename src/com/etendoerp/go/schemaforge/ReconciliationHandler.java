@@ -866,7 +866,7 @@ public class ReconciliationHandler implements NeoHandler {
    * see {@link #compose}) or shared across a whole automatch batch, and processes it once after
    * every group has been matched in.
    */
-  private void matchInto(FIN_BankStatementLine line, List<String> operationIds,
+  void matchInto(FIN_BankStatementLine line, List<String> operationIds,
       FIN_Reconciliation rec) {
     // Grouping (option B): tag the original line with a fresh match-group id BEFORE the match so
     // the split sub-lines inherit it (DalUtil.copy copies all EM_ properties). The UI re-groups
@@ -944,10 +944,14 @@ public class ReconciliationHandler implements NeoHandler {
   // POST applySuggestions (commit — creates payments + reconciles)
   // ---------------------------------------------------------------------------
 
-  /** Holds one {@code prepareGroup} success: the resolved line + the final operation ids to match. */
-  private static final class PreparedGroup {
-    private final FIN_BankStatementLine line;
-    private final List<String> operationIds;
+  /**
+   * Holds one {@code prepareGroup} success: the resolved line + the final operation ids to match.
+   * Package-visible (not private) so {@link ReconciliationHandlerSupport#matchAndProcessBatch} can
+   * read {@code line}/{@code operationIds} directly.
+   */
+  static final class PreparedGroup {
+    final FIN_BankStatementLine line;
+    final List<String> operationIds;
 
     private PreparedGroup(FIN_BankStatementLine line, List<String> operationIds) {
       this.line = line;
@@ -998,28 +1002,15 @@ public class ReconciliationHandler implements NeoHandler {
       }
     }
 
-    int successfulGroups = 0;
+    // Matching every prepared group into the shared reconciliation and processing it once lives in
+    // ReconciliationHandlerSupport — extracted so this method's cognitive complexity stays under the
+    // Sonar limit (java:S3776); behavior is unchanged, every seam still runs on THIS handler instance.
+    int[] successfulGroups = {0};
     if (!prepared.isEmpty()) {
-      FIN_Reconciliation rec = getOrCreateDraftReconciliation(account);
-      for (PreparedGroup p : prepared) {
-        try {
-          matchInto(p.line, p.operationIds, rec);
-          successfulGroups++;
-          JSONObject ok = new JSONObject();
-          ok.put("reconciliationId", rec.getId());
-          ok.put(KEY_STATEMENT_LINE_ID, p.line.getId());
-          results.put(ok);
-        } catch (Exception e) {
-          log.error("Failed to match statement line {} into batch reconciliation {}",
-              p.line.getId(), rec.getId(), e);
-          results.put(NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
-              "Could not match statement line " + p.line.getId() + ": " + e.getMessage()).getBody());
-        }
-      }
-      OBError result = processReconciliation(rec);
-      if (result != null && "Error".equalsIgnoreCase(result.getType())) {
-        doRollbackAndClose();
-        return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, result.getMessage());
+      NeoResponse batchError = ReconciliationHandlerSupport.matchAndProcessBatch(
+          this, account, prepared, results, successfulGroups);
+      if (batchError != null) {
+        return batchError;
       }
     }
 
@@ -1027,7 +1018,7 @@ public class ReconciliationHandler implements NeoHandler {
     data.put("applied", results.length());
     data.put("results", results);
     ReconciliationKpiTelemetry.emitReconciliationMatchEvaluated(
-        groupsJson.length(), results.length(), successfulGroups);
+        groupsJson.length(), results.length(), successfulGroups[0]);
     return NeoResponse.createdWithData(data);
   }
 
@@ -1191,23 +1182,14 @@ public class ReconciliationHandler implements NeoHandler {
       FIN_Reconciliation rec) {
     List<FIN_FinaccTransaction> result = new ArrayList<>();
     Set<String> seenIds = new HashSet<>();
-    addTransactionOwnedByRec(line, rec, result, seenIds);
+    ReconciliationHandlerSupport.addTransactionOwnedByRec(line, rec, result, seenIds);
     String groupId = ReactivationSupport.readMatchGroupId(line);
     if (StringUtils.isNotBlank(groupId) && line.getBankStatement() != null) {
       for (FIN_BankStatementLine sibling : loadMatchGroupLines(line.getBankStatement(), groupId)) {
-        addTransactionOwnedByRec(sibling, rec, result, seenIds);
+        ReconciliationHandlerSupport.addTransactionOwnedByRec(sibling, rec, result, seenIds);
       }
     }
     return result;
-  }
-
-  private void addTransactionOwnedByRec(FIN_BankStatementLine candidateLine,
-      FIN_Reconciliation rec, List<FIN_FinaccTransaction> out, Set<String> seenIds) {
-    FIN_FinaccTransaction t = candidateLine.getFinancialAccountTransaction();
-    if (t != null && t.getReconciliation() != null
-        && rec.getId().equals(t.getReconciliation().getId()) && seenIds.add(t.getId())) {
-      out.add(t);
-    }
   }
 
   /**
