@@ -58,6 +58,7 @@ import org.openbravo.model.common.currency.Currency;
 import org.openbravo.model.common.plm.Product;
 import org.openbravo.model.financialmgmt.accounting.Costcenter;
 import org.openbravo.model.financialmgmt.gl.GLItem;
+import org.openbravo.model.financialmgmt.payment.FIN_BankStatementLine;
 import org.openbravo.model.financialmgmt.payment.FIN_FinaccTransaction;
 import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
 import org.openbravo.model.project.Project;
@@ -763,6 +764,17 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
    * Handles {@code POST ?action=reactivate} — reactivates a Processed transaction (Procesado →
    * Borrador), undoing posting and reconciliation in reverse order via the payment-removal module's
    * {@link TransactionRemovalUtil#reactivate}. Never reimplements that logic.
+   *
+   * <p>One cleanup {@link ReconciliationHandler} already performs for its own un-reconcile actions
+   * is missing on this path: when the transaction was matched to a bank-statement line that Core
+   * physically split for a 1:N match, {@code TransactionRemovalUtil.reactivate} only clears the
+   * line's transaction link ({@code
+   * ReconciliationRemovalUtil.removeTransactionFromReconciliation}), never re-collapsing its
+   * ETGO-tagged split siblings — so the line stays fragmented into sub-amounts that no longer match
+   * anything the bank actually sent. The statement line is captured BEFORE reactivating (the detach
+   * clears the transaction→line pointer), then {@link ReconciliationHandler#normalizeReactivatedMatchGroup}
+   * is reused — a plain instantiation, no CDI wiring needed, same as
+   * {@link ReconciliationHandlerSupport}'s own composition with this handler.
    */
   private NeoResponse handleReactivate(NeoContext context) {
     JSONObject body = context.getRequestBody();
@@ -770,11 +782,21 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
         "Could not reactivate the movement. Please check logs for details.", () -> {
           FIN_FinaccTransaction trx = loadTransactionFromBody(body);
           if (trx == null) return NeoResponse.error(404, MSG_TRANSACTION_NOT_FOUND);
+          FIN_BankStatementLine line = linkedBankStatementLine(trx);
           TransactionRemovalUtil.reactivate(trx);
           OBDal.getInstance().flush();
+          if (line != null) {
+            new ReconciliationHandler().normalizeReactivatedMatchGroup(line);
+          }
           trx = OBDal.getInstance().get(FIN_FinaccTransaction.class, trx.getId());
           return lifecycleOk(trx);
         });
+  }
+
+  /** The bank-statement line currently matched to {@code trx}, or {@code null} when it is unmatched. */
+  private FIN_BankStatementLine linkedBankStatementLine(FIN_FinaccTransaction trx) {
+    List<FIN_BankStatementLine> lines = trx.getFINBankStatementLineList();
+    return lines.isEmpty() ? null : lines.get(0);
   }
 
   /**
