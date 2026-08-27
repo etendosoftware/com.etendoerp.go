@@ -25,7 +25,6 @@ import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.Base64;
 import java.util.Date;
-import java.util.List;
 import java.util.Locale;
 
 import org.apache.commons.lang3.StringUtils;
@@ -37,7 +36,6 @@ import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.base.provider.OBProvider;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
-import org.openbravo.dal.service.OBQuery;
 import org.openbravo.model.ad.access.User;
 import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.enterprise.Organization;
@@ -757,16 +755,15 @@ public class CompanyInvitationService {
 
   private static InviterContext resolveInviter(Account account) {
     if (account != null) {
-      // Find active ERP user associated with this account
-      OBQuery<User> query = OBDal.getInstance().createQuery(User.class,
-          "as u where (lower(u.email) = :email or lower(u.username) = :email) and u.client.id <> '0' and u.active = true");
-      query.setNamedParameter(FIELD_EMAIL, account.getEmail().toLowerCase(Locale.ROOT));
-      query.setFilterOnReadableClients(false);
-      query.setFilterOnReadableOrganization(false);
-      query.setMaxResult(1);
-      List<User> users = query.list();
-      if (!users.isEmpty()) {
-        User user = users.get(0);
+      // ETP-4999 fix (Mystery #1): delegate to CompanyInvitationDalHelper#findInviterHomeUser,
+      // which resolves the account's own administrative HOME client deterministically (by exact
+      // username match first) instead of an unordered email-or-username scan across every client
+      // the account happens to touch. See that method's Javadoc for the full rationale — the old
+      // inline query here could non-deterministically resolve a self-invite (or any explicit
+      // invite sent with a bare platform token) to the WRONG client once the account also owned a
+      // teammate AD_User elsewhere.
+      User user = CompanyInvitationDalHelper.findInviterHomeUser(account.getEmail());
+      if (user != null) {
         return new InviterContext(user.getClient(), user.getOrganization(), user);
       }
     }

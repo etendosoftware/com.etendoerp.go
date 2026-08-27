@@ -65,6 +65,7 @@ import com.etendoerp.go.payment.CheckoutConfiguration;
 import com.etendoerp.go.payment.CheckoutPaymentRegistry;
 import com.etendoerp.go.payment.CheckoutWebhookVerifier;
 import com.etendoerp.go.onboarding.OnboardingAcctdimCentrallyMaintainedService;
+import com.etendoerp.go.onboarding.OnboardingAdminIdentityService;
 import com.etendoerp.go.onboarding.OnboardingBaselineService;
 import com.etendoerp.go.onboarding.OnboardingAccountingWiringService;
 import com.etendoerp.go.onboarding.OnboardingDatasetImportService;
@@ -178,6 +179,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private static final String PROGRESS_BANK_CONNECTION_SYNC = "bankConnectionSync";
   private static final String PROGRESS_BP_GROUP_ACCT_PATCH = "bpGroupAcctPatch";
   private static final String PROGRESS_ACCTDIM_VISIBILITY = "acctdimVisibility";
+  private static final String PROGRESS_ADMIN_IDENTITY = "adminIdentity";
   private static final String LEGAL_WITH_ACCOUNTING_ORG_TYPE_ID = "1";
   // Stable codes for provisioning failures whose underlying message is an unresolved AD message
   // key. Mirrored by the frontend's onboarding/errorMessages.js (ETP-4665).
@@ -233,6 +235,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       new OnboardingDefaultCustomerService();
   OnboardingAcctdimCentrallyMaintainedService onboardingAcctdimCentrallyMaintainedService =
       new OnboardingAcctdimCentrallyMaintainedService();
+  OnboardingAdminIdentityService onboardingAdminIdentityService =
+      new OnboardingAdminIdentityService();
   OnboardingBaselineService onboardingBaselineService =
       new OnboardingBaselineService();
   OnboardingBankConnectionSyncService onboardingBankConnectionSyncService =
@@ -2161,6 +2165,14 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     if (!forceFlatAccountingDimensionVisibility(writer, clientId)) {
       return false;
     }
+    // ETP-4999 (gap M1): wire the onboarding admin's own session defaults to the REAL business
+    // org, not the root/wildcard '0' InitialClientSetup left them at. Runs AFTER the org and its
+    // warehouse both exist (step 1) and BEFORE the baseline stamp — see
+    // OnboardingAdminIdentityService for the full root-cause explanation (including why this does
+    // NOT touch AD_User_Roles) and its lockstep corrective twin (R26-admin-identity-real-org.sql).
+    if (!wireAdminIdentity(writer, clientId, orgId, adminUserId, adminRoleId)) {
+      return false;
+    }
     // Final action before commitDalChanges: stamp the tenant's data-fix baseline so it lands in the
     // same atomic onboarding commit. A genuine SQL error propagates (not caught here) so the outer
     // handleOnboarding catch rolls back cleanly; the expected ON CONFLICT->0-rows case is benign.
@@ -2375,6 +2387,29 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       String errorMessage = e.getMessage() != null ? e.getMessage()
           : "Accounting-dimension visibility configuration failed";
       sendProgress(writer, PROGRESS_ACCTDIM_VISIBILITY, PROGRESS_ERROR, errorMessage);
+      sendFinalResult(writer, false, errorMessage);
+      return false;
+    }
+  }
+
+  /**
+   * Wires the onboarding admin's session defaults to the real business organization (ETP-4999,
+   * gap M1) — see {@link OnboardingAdminIdentityService} for the full explanation and its
+   * corrective twin ({@code R26-admin-identity-real-org.sql}).
+   */
+  boolean wireAdminIdentity(PrintWriter writer, String clientId, String orgId,
+      String adminUserId, String adminRoleId) {
+    sendProgress(writer, PROGRESS_ADMIN_IDENTITY, PROGRESS_IN_PROGRESS,
+        "Wiring admin identity to organization...");
+    try {
+      onboardingAdminIdentityService.wireAdminIdentity(clientId, orgId, adminUserId, adminRoleId);
+      sendProgress(writer, PROGRESS_ADMIN_IDENTITY, "done", "Admin identity wired");
+      return true;
+    } catch (Exception e) {
+      EtendoGoDalHelper.rollbackDalChanges("onboarding admin-identity wiring", e, log);
+      String errorMessage = e.getMessage() != null ? e.getMessage()
+          : "Admin identity wiring failed";
+      sendProgress(writer, PROGRESS_ADMIN_IDENTITY, PROGRESS_ERROR, errorMessage);
       sendFinalResult(writer, false, errorMessage);
       return false;
     }
