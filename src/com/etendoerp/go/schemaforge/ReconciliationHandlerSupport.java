@@ -297,6 +297,11 @@ final class ReconciliationHandlerSupport {
       throws JSONException {
     BigDecimal total = BigDecimal.ZERO;
     Map<String, Integer> counts = AutoMatchSupport.newCounts();
+    // Shared across every PENDING row below (same rows/order as ReconciliationHandler.buildAutoMatch
+    // iterates), so a transaction already claimed by an earlier line does not also count as
+    // "suggested" for a later line of the same amount — see AutoMatchSupport.classifyPendingLine.
+    Set<String> usedTxnIds = new HashSet<>();
+    List<FIN_FinaccTransaction> excludedTxns = new ArrayList<>();
     for (int i = 0; i < lines.length(); i++) {
       JSONObject row = lines.getJSONObject(i);
       BigDecimal amount =
@@ -324,7 +329,7 @@ final class ReconciliationHandlerSupport {
       } else {
         state = AutoMatchSupport.classifyPendingLine(account,
             row.optString(ReconciliationHandler.KEY_ID), rules, pendingDateTolDays,
-            pendingAmtTolPct);
+            pendingAmtTolPct, usedTxnIds, excludedTxns);
         row.put(ReconciliationHandler.KEY_STATUS, ReconciliationHandler.STATUS_PENDING);
       }
       row.put("state", state);
