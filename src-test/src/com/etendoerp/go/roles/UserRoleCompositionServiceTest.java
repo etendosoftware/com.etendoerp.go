@@ -1142,6 +1142,14 @@ class UserRoleCompositionServiceTest {
     OBCriteria<Role> roleCriteria = mock(OBCriteria.class);
     when(mockDal.createCriteria(Role.class)).thenReturn(roleCriteria);
     when(roleCriteria.list()).thenReturn(Collections.singletonList(priorPersonalRole));
+    // ETP-5019 C1 regression guard: the dormant role ALREADY occupies the base name, so a
+    // uniqueResult() lookup against that same name (what buildPersonalRoleName's roleNameExists
+    // would run) must "see" it as a collision. If the fix ever regresses back to calling
+    // buildPersonalRoleName(user) here, this collision would make it suffix the name away, the
+    // subsequent list() lookup (by the suffixed name) would find nothing, and the method would
+    // wrongly fall through to createPersonalRole — which is deliberately left unmocked below, so
+    // that fallthrough surfaces as a hard test failure instead of silently passing.
+    when(roleCriteria.uniqueResult()).thenReturn(priorPersonalRole);
     when(roleCriteria.setMaxResults(1)).thenReturn(roleCriteria);
     when(roleCriteria.setFilterOnReadableClients(false)).thenReturn(roleCriteria);
     when(roleCriteria.setFilterOnReadableOrganization(false)).thenReturn(roleCriteria);
@@ -1167,12 +1175,18 @@ class UserRoleCompositionServiceTest {
 
       assertEquals("role-prior", result.personalRoleId);
       verify(target).setDefaultRole(priorPersonalRole);
+      // ETP-5019 C2: the web-services default role must be kept in lockstep with Default_Ad_Role
+      // on restore too, otherwise the user's next JWT mint could still resolve the dormant role.
+      verify(target).setSmfswsDefaultWsRole(priorPersonalRole);
 
       // Verify that the name-based lookup was performed: Restrictions.eq(Role.PROPERTY_NAME, expectedName)
       // was added to the criteria. Capture all add() calls and assert at least one contains the name restriction.
       ArgumentCaptor<Criterion> criterionCaptor = ArgumentCaptor.forClass(Criterion.class);
       verify(roleCriteria, atLeastOnce()).add(criterionCaptor.capture());
-      String expectedName = "Personal – Jane Doe"; // buildPersonalRoleName adds "Personal – " prefix
+      // ETP-5019 C1: the lookup must use personalRoleBaseName (the UNSUFFIXED base name) — NOT
+      // buildPersonalRoleName, which would suffix this name away since the dormant role already
+      // occupies it (see UserRoleCompositionService#findDormantPersonalRoleByName's javadoc).
+      String expectedName = "Personal – Jane Doe";
       boolean foundNameRestriction = false;
       for (Criterion criterion : criterionCaptor.getAllValues()) {
         String criterionStr = criterion.toString();
@@ -1185,6 +1199,59 @@ class UserRoleCompositionServiceTest {
       assertTrue(foundNameRestriction,
           "Expected to find name-based restriction Restrictions.eq(Role.PROPERTY_NAME, '" + expectedName
           + "') in criteria, but it was not found in any of the captured criteria: " + criterionCaptor.getAllValues());
+    }
+  }
+
+  /**
+   * ETP-5019 C2 happy-path coverage: a non-owner, non-admin user with a personal role gets
+   * promoted to the client's Admin role. Asserts {@code Default_Ad_Role_ID} is set to the Admin
+   * role AND (the C2 fix) {@code EM_Smfsws_Default_Ws_Role_ID} is kept in lockstep — without the
+   * latter, {@code SecureWebServicesUtils.getRole} could still mint the target's next JWT scoped
+   * to their old, now-dormant personal role instead of the freshly assigned Admin role.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  void promoteToAdminHappyPathSetsAdminRoleAndWebServicesDefault() {
+    Role callerRole = mock(Role.class);
+    when(callerRole.isClientAdmin()).thenReturn(true);
+    Client client = mock(Client.class);
+    when(client.getId()).thenReturn("client-1");
+    when(callerRole.getClient()).thenReturn(client);
+
+    User target = mock(User.class);
+    when(target.getId()).thenReturn("target-1");
+    when(target.getClient()).thenReturn(client);
+    when(target.getDefaultRole()).thenReturn(null);
+
+    when(mockDal.get(User.class, "target-1")).thenReturn(target);
+
+    Role adminRole = mock(Role.class);
+    when(adminRole.getId()).thenReturn("admin-role-1");
+
+    OBCriteria<Role> adminRoleCriteria = mock(OBCriteria.class);
+    when(mockDal.createCriteria(Role.class)).thenReturn(adminRoleCriteria);
+    when(adminRoleCriteria.setFilterOnReadableClients(false)).thenReturn(adminRoleCriteria);
+    when(adminRoleCriteria.setFilterOnReadableOrganization(false)).thenReturn(adminRoleCriteria);
+    when(adminRoleCriteria.add(any())).thenReturn(adminRoleCriteria);
+    when(adminRoleCriteria.setMaxResults(1)).thenReturn(adminRoleCriteria);
+    when(adminRoleCriteria.list()).thenReturn(Collections.singletonList(adminRole));
+
+    try (MockedStatic<OwnerSupport> ownerSupportMock = mockStatic(OwnerSupport.class);
+        MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
+        MockedStatic<com.etendoerp.go.schemaforge.util.UserRoleSyncSupport> userRoleSyncMock =
+            mockStatic(com.etendoerp.go.schemaforge.util.UserRoleSyncSupport.class)) {
+      ownerSupportMock.when(() -> OwnerSupport.isOwner("caller-1")).thenReturn(true);
+      ownerSupportMock.when(() -> OwnerSupport.isOwner("target-1")).thenReturn(false);
+
+      UserRoleCompositionService.AssignmentResult result =
+          service.promoteToAdmin("caller-1", callerRole, "target-1");
+
+      assertEquals("admin-role-1", result.personalRoleId);
+      verify(target).setDefaultRole(adminRole);
+      verify(target).setSmfswsDefaultWsRole(adminRole);
+      verify(mockDal).save(target);
+      userRoleSyncMock.verify(() -> com.etendoerp.go.schemaforge.util.UserRoleSyncSupport
+          .syncSingleActiveUserRole(target, adminRole));
     }
   }
 }
