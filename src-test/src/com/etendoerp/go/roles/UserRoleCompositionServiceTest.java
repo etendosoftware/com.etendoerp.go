@@ -1022,4 +1022,58 @@ class UserRoleCompositionServiceTest {
       verify(user).setSmfswsDefaultWsRole(newRole);
     }
   }
+
+  // ── ETP-5019: promoteToAdmin (promotion workflow) ────────────────────────
+
+  @Test
+  void promoteToAdminRejectsWhenCallerIsNotOwnerOrAdmin() {
+    User caller = mock(User.class);
+    when(caller.getId()).thenReturn("caller-1");
+    Role callerRole = mock(Role.class);
+    when(callerRole.isClientAdmin()).thenReturn(false);
+
+    User target = mock(User.class);
+    when(target.getId()).thenReturn("target-1");
+
+    when(mockDal.get(User.class, "target-1")).thenReturn(target);
+    when(mockDal.get(User.class, "caller-1")).thenReturn(caller);
+    when(caller.getDefaultRole()).thenReturn(callerRole);
+
+    try (MockedStatic<OwnerSupport> ownerSupportMock = mockStatic(OwnerSupport.class)) {
+      ownerSupportMock.when(() -> OwnerSupport.isOwner("caller-1")).thenReturn(false);
+
+      OBException ex = assertThrows(OBException.class,
+          () -> service.promoteToAdmin("caller-1", callerRole, "target-1"));
+      assertTrue(ex.getMessage().toLowerCase().contains("not authorized")
+          || ex.getMessage().toLowerCase().contains("admin"));
+      verify(mockDal, never()).save(any());
+    }
+  }
+
+  @Test
+  void promoteToAdminRejectsWhenTargetAlreadyClientAdmin() {
+    User caller = mock(User.class);
+    when(caller.getId()).thenReturn("caller-1");
+    Role callerRole = mock(Role.class);
+    when(callerRole.isClientAdmin()).thenReturn(true);
+
+    User target = mock(User.class);
+    when(target.getId()).thenReturn("target-1");
+    Role targetCurrentRole = mock(Role.class);
+    when(targetCurrentRole.isClientAdmin()).thenReturn(true);
+    when(target.getDefaultRole()).thenReturn(targetCurrentRole);
+
+    when(mockDal.get(User.class, "target-1")).thenReturn(target);
+    when(mockDal.get(User.class, "caller-1")).thenReturn(caller);
+    when(caller.getDefaultRole()).thenReturn(callerRole);
+
+    try (MockedStatic<OwnerSupport> ownerSupportMock = mockStatic(OwnerSupport.class)) {
+      ownerSupportMock.when(() -> OwnerSupport.isOwner("target-1")).thenReturn(false);
+      ownerSupportMock.when(() -> OwnerSupport.isOwner("caller-1")).thenReturn(false);
+
+      assertThrows(OBException.class,
+          () -> service.promoteToAdmin("caller-1", callerRole, "target-1"));
+      verify(mockDal, never()).save(any());
+    }
+  }
 }

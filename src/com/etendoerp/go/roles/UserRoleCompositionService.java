@@ -1333,4 +1333,100 @@ public class UserRoleCompositionService {
     }
     return byPersonalRoleId;
   }
+
+  /**
+   * ETP-5019 — finds the client's single Admin {@code AD_Role} row ({@code is_client_admin =
+   * 'Y'}), scoped to {@code clientId}. Same "resolve by is_client_admin, scoped to :client_id"
+   * approach {@link com.etendoerp.go.schemaforge.webhooks.SFRolesOverview#resolveTenantRoles}
+   * already uses.
+   *
+   * @param clientId the {@code AD_Client_ID} to scope the search to
+   * @return the active client-admin role, or {@code null} if none exists for this client
+   */
+  @SuppressWarnings("unchecked")
+  private Role findClientAdminRole(String clientId) {
+    OBCriteria<Role> criteria = OBDal.getInstance().createCriteria(Role.class);
+    criteria.setFilterOnReadableClients(false);
+    criteria.setFilterOnReadableOrganization(false);
+    criteria.add(Restrictions.eq(Role.PROPERTY_CLIENT + ".id", clientId));
+    criteria.add(Restrictions.eq(Role.PROPERTY_ACTIVE, true));
+    criteria.add(Restrictions.eq(Role.PROPERTY_CLIENTADMIN, true));
+    criteria.setMaxResults(1);
+    List<Role> roles = (List<Role>) criteria.list();
+    return roles.isEmpty() ? null : roles.get(0);
+  }
+
+  /**
+   * ETP-5019 — is {@code callerUserId} allowed to promote/demote another user? True when the
+   * caller is the owner, or currently holds the client-admin role themselves. Same signal
+   * {@link #enforceOwnerProtection(User, String)} already uses, just the opposite polarity
+   * (require it here, reject it there).
+   */
+  private boolean callerIsOwnerOrAdmin(String callerUserId) {
+    if (callerUserId == null) {
+      return false;
+    }
+    if (OwnerSupport.isOwner(callerUserId)) {
+      return true;
+    }
+    User caller = OBDal.getInstance().get(User.class, callerUserId);
+    Role callerCurrentRole = caller != null ? caller.getDefaultRole() : null;
+    return callerCurrentRole != null && Boolean.TRUE.equals(callerCurrentRole.isClientAdmin());
+  }
+
+  /**
+   * ETP-5019 — promotes {@code targetUserId} to the client's Admin role, replacing whatever
+   * role they currently hold (typically a personal composed role). The personal role's own
+   * {@code AD_Role} row and {@code AD_Role_Inheritance} composition are NEVER deleted here —
+   * only unassigned (via {@link UserRoleSyncSupport#syncSingleActiveUserRole(User, Role)}, which
+   * replaces the user's single active {@code AD_User_Roles} row) — so {@link
+   * #demoteFromAdmin(String, Role, String)} can find and restore it later by name.
+   *
+   * @param callerUserId the {@code AD_User_ID} making this request
+   * @param callerRole the caller's currently resolved role, for {@link
+   *     #enforceCallerClientBoundary(User, Role)}'s tenant-boundary check
+   * @param targetUserId the {@code AD_User_ID} to promote
+   * @return an {@link AssignmentResult} whose {@code personalRoleId} is actually the newly
+   *     assigned Admin role's id (field reused, not renamed, to avoid touching {@code
+   *     SFAssignUserRoles}'s response shape for the unrelated composition endpoint)
+   * @throws OBException if the caller is not owner/admin, the target is already owner or
+   *     already client-admin, or no Admin role exists for the target's client
+   */
+  public AssignmentResult promoteToAdmin(String callerUserId, Role callerRole,
+      String targetUserId) {
+    if (StringUtils.isBlank(targetUserId)) {
+      throw new OBException("Missing user id for admin promotion");
+    }
+    if (!callerIsOwnerOrAdmin(callerUserId)) {
+      throw new OBException("Not authorized to promote users to Admin: " + callerUserId);
+    }
+    User target = OBDal.getInstance().get(User.class, targetUserId);
+    if (target == null) {
+      throw new OBException("User not found: " + targetUserId);
+    }
+    enforceCallerClientBoundary(target, callerRole);
+    if (OwnerSupport.isOwner(targetUserId)) {
+      throw new OBException("The owner already has the Admin role: " + targetUserId);
+    }
+    Role currentRole = target.getDefaultRole();
+    if (currentRole != null && Boolean.TRUE.equals(currentRole.isClientAdmin())) {
+      throw new OBException("User is already an Admin: " + targetUserId);
+    }
+
+    OBContext.setAdminMode(true);
+    try {
+      Role adminRole = findClientAdminRole(target.getClient().getId());
+      if (adminRole == null) {
+        throw new OBException("No Admin role found for client: " + target.getClient().getId());
+      }
+      target.setDefaultRole(adminRole);
+      OBDal.getInstance().save(target);
+      OBDal.getInstance().flush();
+      UserRoleSyncSupport.syncSingleActiveUserRole(target, adminRole);
+      log.info("Promoted user {} to Admin role {}", targetUserId, adminRole.getId());
+      return new AssignmentResult(targetUserId, adminRole.getId(), Collections.emptyList(), 0, 0);
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
 }
