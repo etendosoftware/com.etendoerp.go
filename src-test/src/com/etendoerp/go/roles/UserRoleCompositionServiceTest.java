@@ -1056,9 +1056,13 @@ class UserRoleCompositionServiceTest {
     when(caller.getId()).thenReturn("caller-1");
     Role callerRole = mock(Role.class);
     when(callerRole.isClientAdmin()).thenReturn(true);
+    Client callerClient = mock(Client.class);
+    when(callerClient.getId()).thenReturn("client-1");
+    when(callerRole.getClient()).thenReturn(callerClient);
 
     User target = mock(User.class);
     when(target.getId()).thenReturn("target-1");
+    when(target.getClient()).thenReturn(callerClient);
     Role targetCurrentRole = mock(Role.class);
     when(targetCurrentRole.isClientAdmin()).thenReturn(true);
     when(target.getDefaultRole()).thenReturn(targetCurrentRole);
@@ -1071,8 +1075,10 @@ class UserRoleCompositionServiceTest {
       ownerSupportMock.when(() -> OwnerSupport.isOwner("target-1")).thenReturn(false);
       ownerSupportMock.when(() -> OwnerSupport.isOwner("caller-1")).thenReturn(false);
 
-      assertThrows(OBException.class,
+      OBException ex = assertThrows(OBException.class,
           () -> service.promoteToAdmin("caller-1", callerRole, "target-1"));
+      assertTrue(ex.getMessage().toLowerCase().contains("already")
+          && ex.getMessage().toLowerCase().contains("admin"));
       verify(mockDal, never()).save(any());
     }
   }
