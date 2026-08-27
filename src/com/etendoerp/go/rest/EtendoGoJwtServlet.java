@@ -162,6 +162,11 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   // onboarding/errorMessages.js so it translates by code and never shows this English text.
   private static final String CODE_EMAIL_NOT_VERIFIED = "EMAIL_NOT_VERIFIED";
   private static final String CODE_EMAIL_VERIFY_INVALID = "EMAIL_VERIFY_INVALID";
+  // AUTH-07 / ETP-5022 — change-password failures. Stable codes so the web client translates
+  // by code; the English text below is a developer-facing fallback, never end-user copy.
+  private static final String CODE_MISSING_CREDENTIALS = "CHANGE_PASSWORD_MISSING_CREDENTIALS";
+  private static final String CODE_NO_LOCAL_PASSWORD = "NO_LOCAL_PASSWORD";
+  private static final String CODE_INVALID_CURRENT_PASSWORD = "INVALID_CURRENT_PASSWORD";
   private static final String PROGRESS_IN_PROGRESS = "in_progress";
   private static final String PROGRESS_CLIENT = "client";
   private static final String PROGRESS_ERROR = "error";
@@ -1079,13 +1084,15 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       currentPassword = body.getString("currentPassword");
       newPassword = body.getString("newPassword");
     } catch (JSONException e) {
-      writeError(response, HttpServletResponse.SC_BAD_REQUEST,
-          "Missing required fields: currentPassword, newPassword");
+      writeError(response, HttpServletResponse.SC_BAD_REQUEST, CODE_MISSING_CREDENTIALS,
+          "changePassword: request body lacks currentPassword and/or newPassword",
+          "The current and new password are both required.");
       return;
     }
     if (currentPassword.isEmpty() || newPassword.isEmpty()) {
-      writeError(response, HttpServletResponse.SC_BAD_REQUEST,
-          "Fields currentPassword and newPassword must not be empty");
+      writeError(response, HttpServletResponse.SC_BAD_REQUEST, CODE_MISSING_CREDENTIALS,
+          "changePassword: currentPassword and/or newPassword is empty",
+          "The current and new password are both required.");
       return;
     }
     if (!PasswordPolicy.isStrong(newPassword)) {
@@ -1102,12 +1109,15 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
         return;
       }
       if (!EtendoGoJwtDalHelper.hasLocalPassword(account)) {
-        writeError(response, HttpServletResponse.SC_BAD_REQUEST,
-            "Local password is not configured for this account");
+        writeError(response, HttpServletResponse.SC_BAD_REQUEST, CODE_NO_LOCAL_PASSWORD,
+            "changePassword: account has no local password (external identity provider)",
+            "This account signs in through an external provider, so it has no password to change.");
         return;
       }
       if (!verifyPassword(currentPassword, account.getPasswordHash())) {
-        writeError(response, HttpServletResponse.SC_UNAUTHORIZED, "Current password is invalid");
+        writeError(response, HttpServletResponse.SC_UNAUTHORIZED, CODE_INVALID_CURRENT_PASSWORD,
+            "changePassword: current password did not verify",
+            "The current password is not correct.");
         return;
       }
       String sessionToken = generateToken();
