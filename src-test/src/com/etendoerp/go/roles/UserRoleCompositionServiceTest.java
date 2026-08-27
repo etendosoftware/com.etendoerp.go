@@ -1144,12 +1144,12 @@ class UserRoleCompositionServiceTest {
     when(roleCriteria.list()).thenReturn(Collections.singletonList(priorPersonalRole));
     // ETP-5019 C1 regression guard: the dormant role ALREADY occupies the base name, so a
     // uniqueResult() lookup against that same name (what buildPersonalRoleName's roleNameExists
-    // would run) must "see" it as a collision. If the fix ever regresses back to calling
-    // buildPersonalRoleName(user) here, this collision would make it suffix the name away, the
-    // subsequent list() lookup (by the suffixed name) would find nothing, and the method would
-    // wrongly fall through to createPersonalRole — which is deliberately left unmocked below, so
-    // that fallthrough surfaces as a hard test failure instead of silently passing.
-    when(roleCriteria.uniqueResult()).thenReturn(priorPersonalRole);
+    // would run) must "see" it as a collision on the FIRST check. If the fix ever regresses back
+    // to calling buildPersonalRoleName(user) here, that collision drives its suffix loop —
+    // bounded to a second call returning null so the loop terminates after one suffix attempt
+    // instead of spinning forever, turning a regression into a fast, clear test failure (a wrong
+    // role restored) rather than a hung test run / CI timeout.
+    when(roleCriteria.uniqueResult()).thenReturn(priorPersonalRole).thenReturn(null);
     when(roleCriteria.setMaxResults(1)).thenReturn(roleCriteria);
     when(roleCriteria.setFilterOnReadableClients(false)).thenReturn(roleCriteria);
     when(roleCriteria.setFilterOnReadableOrganization(false)).thenReturn(roleCriteria);
@@ -1179,26 +1179,38 @@ class UserRoleCompositionServiceTest {
       // on restore too, otherwise the user's next JWT mint could still resolve the dormant role.
       verify(target).setSmfswsDefaultWsRole(priorPersonalRole);
 
-      // Verify that the name-based lookup was performed: Restrictions.eq(Role.PROPERTY_NAME, expectedName)
-      // was added to the criteria. Capture all add() calls and assert at least one contains the name restriction.
-      ArgumentCaptor<Criterion> criterionCaptor = ArgumentCaptor.forClass(Criterion.class);
-      verify(roleCriteria, atLeastOnce()).add(criterionCaptor.capture());
       // ETP-5019 C1: the lookup must use personalRoleBaseName (the UNSUFFIXED base name) — NOT
       // buildPersonalRoleName, which would suffix this name away since the dormant role already
       // occupies it (see UserRoleCompositionService#findDormantPersonalRoleByName's javadoc).
+      // Capture EVERY add() call on this shared criteria mock — under a C1 regression,
+      // buildPersonalRoleName's own internal roleNameExists() collision check ALSO runs a
+      // Restrictions.eq(Role.PROPERTY_NAME, ...) against this same mock (createCriteria(Role.class)
+      // always returns this one instance), using the exact unsuffixed base name first before
+      // suffixing it away — so an earlier round's "does any captured criterion CONTAIN the base
+      // name" check passed under both the correct fix AND a regression: the regressed final
+      // query's own name is "Personal – Jane Doe (2)", which still contains the substring
+      // "Personal – Jane Doe". Confirmed empirically (Criterion#toString() format is exactly
+      // "name=<value>", verified by temporarily printing it): only the LAST name-restriction
+      // value, checked for EXACT equality (not containment), distinguishes the two cases —
+      // findDormantPersonalRoleByName's own query always adds its Restrictions AFTER any
+      // roleNameExists() sub-calls a regression would trigger, so the last one is always the
+      // value actually used for the real, outer lookup.
+      ArgumentCaptor<Criterion> criterionCaptor = ArgumentCaptor.forClass(Criterion.class);
+      verify(roleCriteria, atLeastOnce()).add(criterionCaptor.capture());
       String expectedName = "Personal – Jane Doe";
-      boolean foundNameRestriction = false;
+      String namePrefix = org.openbravo.model.ad.access.Role.PROPERTY_NAME + "=";
+      String lastNameRestrictionValue = null;
       for (Criterion criterion : criterionCaptor.getAllValues()) {
         String criterionStr = criterion.toString();
-        if (criterionStr.contains(org.openbravo.model.ad.access.Role.PROPERTY_NAME)
-            && criterionStr.contains(expectedName)) {
-          foundNameRestriction = true;
-          break;
+        if (criterionStr.startsWith(namePrefix)) {
+          lastNameRestrictionValue = criterionStr.substring(namePrefix.length());
         }
       }
+      boolean foundNameRestriction = expectedName.equals(lastNameRestrictionValue);
       assertTrue(foundNameRestriction,
-          "Expected to find name-based restriction Restrictions.eq(Role.PROPERTY_NAME, '" + expectedName
-          + "') in criteria, but it was not found in any of the captured criteria: " + criterionCaptor.getAllValues());
+          "Expected the FINAL name-based restriction to be exactly Restrictions.eq(Role.PROPERTY_NAME, '"
+              + expectedName + "'), but it was '" + lastNameRestrictionValue
+              + "'. All captured criteria: " + criterionCaptor.getAllValues());
     }
   }
 
