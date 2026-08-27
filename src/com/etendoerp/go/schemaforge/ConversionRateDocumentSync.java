@@ -126,7 +126,9 @@ final class ConversionRateDocumentSync {
     }
   }
 
-  private static void insertConversionRateDocument(Connection conn, Invoice invoice,
+  /** Package-visible: also reused by {@link InvoiceFromOrderSupport} to avoid duplicating
+   * this insert for the order→invoice rate-propagation path (ETP-4027). */
+  static void insertConversionRateDocument(Connection conn, Invoice invoice,
       String orgCurrencyId, BigDecimal docRate, BigDecimal foreignAmount) throws java.sql.SQLException {
     String newId = UUID.randomUUID().toString().replace("-", "").toUpperCase();
     String userId = OBContext.getOBContext().getUser().getId();
