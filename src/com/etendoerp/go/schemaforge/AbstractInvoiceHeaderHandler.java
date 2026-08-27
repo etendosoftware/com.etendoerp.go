@@ -26,7 +26,6 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.UUID;
 
 import javax.servlet.http.HttpServletResponse;
 
@@ -1278,123 +1277,13 @@ public abstract class AbstractInvoiceHeaderHandler {
             ? grandTotal.multiply(docRate).setScale(2, RoundingMode.HALF_UP)
             : null;
 
-        upsertConversionRateDocument(invoice, orgCurrencyId, docRate, foreignAmount);
+        ConversionRateDocumentSync.upsert(invoice, orgCurrencyId, docRate, foreignAmount);
       } finally {
         OBContext.restorePreviousMode();
       }
     } catch (Exception e) {
       log.warn("[ETP-4029] autoCreateOrUpdateConversionRateDocument failed for invoice {}: {}",
           invoiceId, e.getMessage());
-    }
-  }
-
-  /**
-   * Matches by {@code (c_invoice_id, c_currency_id_to)} only — deliberately NOT by
-   * {@code c_currency_id}. The doc currency is the very thing that changes when the
-   * user switches the invoice currency more than once; matching on it made every
-   * currency switch look like a brand-new pair and left the previous currency's row
-   * orphaned (ETP-4836). {@code c_currency_id_to} (the org currency) never changes
-   * for a given invoice, so it's the correct — and only needed — join key.
-   */
-  private static void upsertConversionRateDocument(Invoice invoice, String orgCurrencyId,
-      BigDecimal docRate, BigDecimal foreignAmount) throws java.sql.SQLException {
-    Connection conn = OBDal.getInstance().getConnection();
-    List<String> existingIds = findConversionRateDocumentIds(conn, invoice.getId(), orgCurrencyId);
-    if (existingIds.isEmpty()) {
-      insertConversionRateDocument(conn, invoice, orgCurrencyId, docRate, foreignAmount);
-      return;
-    }
-    // Most recent row (ORDER BY created DESC) is updated in place, including its
-    // currency — self-healing any stray duplicates left by the pre-ETP-4836 bug by
-    // deleting every other row found for this invoice.
-    String keepId = existingIds.get(0);
-    updateConversionRateDocument(conn, keepId, invoice.getCurrency().getId(), docRate, foreignAmount);
-    for (int i = 1; i < existingIds.size(); i++) {
-      String staleId = existingIds.get(i);
-      deleteConversionRateDocument(conn, staleId);
-      log.info("[ETP-4836] Deleted stale duplicate C_Conversion_Rate_Document {} for invoice {}",
-          staleId, invoice.getId());
-    }
-  }
-
-  private static List<String> findConversionRateDocumentIds(Connection conn, String invoiceId,
-      String orgCurrencyId) throws java.sql.SQLException {
-    String sql =
-        "SELECT c_conversion_rate_document_id FROM c_conversion_rate_document"
-      + " WHERE c_invoice_id = ? AND c_currency_id_to = ? ORDER BY created DESC";
-    List<String> ids = new ArrayList<>();
-    try (PreparedStatement ps = conn.prepareStatement(sql)) {
-      ps.setString(1, invoiceId);
-      ps.setString(2, orgCurrencyId);
-      try (ResultSet rs = ps.executeQuery()) {
-        while (rs.next()) {
-          ids.add(rs.getString(1));
-        }
-      }
-    }
-    return ids;
-  }
-
-  private static void updateConversionRateDocument(Connection conn, String recordId,
-      String docCurrencyId, BigDecimal docRate, BigDecimal foreignAmount) throws java.sql.SQLException {
-    String userId = OBContext.getOBContext().getUser().getId();
-    String sql =
-        "UPDATE c_conversion_rate_document"
-      + " SET c_currency_id = ?, rate = ?, foreign_amount = ?, updated = NOW(), updatedby = ?"
-      + " WHERE c_conversion_rate_document_id = ?";
-    try (PreparedStatement ps = conn.prepareStatement(sql)) {
-      ps.setString(1, docCurrencyId);
-      ps.setBigDecimal(2, docRate);
-      if (foreignAmount != null) {
-        ps.setBigDecimal(3, foreignAmount);
-      } else {
-        ps.setNull(3, java.sql.Types.NUMERIC);
-      }
-      ps.setString(4, userId);
-      ps.setString(5, recordId);
-      ps.executeUpdate();
-      log.info("[ETP-4029] Updated C_Conversion_Rate_Document {} (currency={}, docRate={})",
-          recordId, docCurrencyId, docRate);
-    }
-  }
-
-  private static void deleteConversionRateDocument(Connection conn, String recordId)
-      throws java.sql.SQLException {
-    String sql = "DELETE FROM c_conversion_rate_document WHERE c_conversion_rate_document_id = ?";
-    try (PreparedStatement ps = conn.prepareStatement(sql)) {
-      ps.setString(1, recordId);
-      ps.executeUpdate();
-    }
-  }
-
-  private static void insertConversionRateDocument(Connection conn, Invoice invoice,
-      String orgCurrencyId, BigDecimal docRate, BigDecimal foreignAmount) throws java.sql.SQLException {
-    String newId = UUID.randomUUID().toString().replace("-", "").toUpperCase();
-    String userId = OBContext.getOBContext().getUser().getId();
-    String sql =
-        "INSERT INTO c_conversion_rate_document ("
-      + " c_conversion_rate_document_id, ad_client_id, ad_org_id, isactive,"
-      + " created, createdby, updated, updatedby,"
-      + " c_invoice_id, c_currency_id, c_currency_id_to, rate, foreign_amount"
-      + ") VALUES (?, ?, ?, 'Y', NOW(), ?, NOW(), ?, ?, ?, ?, ?, ?)";
-    try (PreparedStatement ps = conn.prepareStatement(sql)) {
-      ps.setString(1, newId);
-      ps.setString(2, invoice.getClient().getId());
-      ps.setString(3, invoice.getOrganization().getId());
-      ps.setString(4, userId);
-      ps.setString(5, userId);
-      ps.setString(6, invoice.getId());
-      ps.setString(7, invoice.getCurrency().getId());
-      ps.setString(8, orgCurrencyId);
-      ps.setBigDecimal(9, docRate);
-      if (foreignAmount != null) {
-        ps.setBigDecimal(10, foreignAmount);
-      } else {
-        ps.setNull(10, java.sql.Types.NUMERIC);
-      }
-      ps.executeUpdate();
-      log.info("[ETP-4029] Created C_Conversion_Rate_Document {} for invoice {} (docRate={})",
-          newId, invoice.getId(), docRate);
     }
   }
 }
