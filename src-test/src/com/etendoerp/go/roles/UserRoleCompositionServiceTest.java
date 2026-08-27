@@ -22,6 +22,8 @@ import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.atLeastOnce;
+import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
@@ -1088,21 +1090,25 @@ class UserRoleCompositionServiceTest {
     Role callerRole = mock(Role.class);
     when(callerRole.isClientAdmin()).thenReturn(true);
 
+    Client client = mock(Client.class);
+    when(client.getId()).thenReturn("client-1");
+    when(callerRole.getClient()).thenReturn(client);
+
     User target = mock(User.class);
     when(target.getId()).thenReturn("owner-1");
+    when(target.getClient()).thenReturn(client);
 
-    try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class);
-         MockedStatic<OwnerSupport> ownerSupportMock = mockStatic(OwnerSupport.class)) {
-      OBDal dal = mock(OBDal.class);
-      obDalMock.when(OBDal::getInstance).thenReturn(dal);
-      when(dal.get(User.class, "owner-1")).thenReturn(target);
+    when(mockDal.get(User.class, "owner-1")).thenReturn(target);
+
+    try (MockedStatic<OwnerSupport> ownerSupportMock = mockStatic(OwnerSupport.class)) {
       ownerSupportMock.when(() -> OwnerSupport.isOwner("caller-1")).thenReturn(true);
       ownerSupportMock.when(() -> OwnerSupport.isOwner("owner-1")).thenReturn(true);
 
-      UserRoleCompositionService service = new UserRoleCompositionService();
-      assertThrows(OBException.class,
+      OBException ex = assertThrows(OBException.class,
           () -> service.demoteFromAdmin("caller-1", callerRole, "owner-1"));
-      verify(dal, never()).save(any());
+      assertTrue(ex.getMessage().toLowerCase().contains("owner")
+          && ex.getMessage().toLowerCase().contains("demoted"));
+      verify(mockDal, never()).save(any());
     }
   }
 
@@ -1113,6 +1119,7 @@ class UserRoleCompositionServiceTest {
 
     Client client = mock(Client.class);
     when(client.getId()).thenReturn("client-1");
+    when(callerRole.getClient()).thenReturn(client);
 
     User target = mock(User.class);
     when(target.getId()).thenReturn("target-1");
@@ -1129,29 +1136,38 @@ class UserRoleCompositionServiceTest {
     when(priorPersonalRole.getClient()).thenReturn(client);
     when(priorPersonalRole.getId()).thenReturn("role-prior");
 
-    try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class);
-         MockedStatic<OwnerSupport> ownerSupportMock = mockStatic(OwnerSupport.class);
+    when(mockDal.get(User.class, "target-1")).thenReturn(target);
+
+    OBCriteria<Role> roleCriteria = mock(OBCriteria.class);
+    when(mockDal.createCriteria(Role.class)).thenReturn(roleCriteria);
+    when(roleCriteria.list()).thenReturn(Collections.singletonList(priorPersonalRole));
+    when(roleCriteria.setMaxResults(1)).thenReturn(roleCriteria);
+    when(roleCriteria.setFilterOnReadableClients(false)).thenReturn(roleCriteria);
+    when(roleCriteria.setFilterOnReadableOrganization(false)).thenReturn(roleCriteria);
+    when(roleCriteria.add(any())).thenReturn(roleCriteria);
+
+    OBCriteria<UserRoles> userRolesCriteria = mock(OBCriteria.class);
+    when(mockDal.createCriteria(UserRoles.class)).thenReturn(userRolesCriteria);
+    when(userRolesCriteria.list()).thenReturn(Collections.emptyList());
+
+    OBCriteria<org.openbravo.model.ad.access.RoleInheritance> inheritanceCriteria = mock(OBCriteria.class);
+    when(mockDal.createCriteria(org.openbravo.model.ad.access.RoleInheritance.class)).thenReturn(inheritanceCriteria);
+    when(inheritanceCriteria.setMaxResults(1)).thenReturn(inheritanceCriteria);
+    when(inheritanceCriteria.list()).thenReturn(Collections.emptyList());
+
+    try (MockedStatic<OwnerSupport> ownerSupportMock = mockStatic(OwnerSupport.class);
+         MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
          MockedStatic<com.etendoerp.go.schemaforge.util.UserRoleSyncSupport> userRoleSyncMock = mockStatic(com.etendoerp.go.schemaforge.util.UserRoleSyncSupport.class)) {
-      OBDal dal = mock(OBDal.class);
-      obDalMock.when(OBDal::getInstance).thenReturn(dal);
-      when(dal.get(User.class, "target-1")).thenReturn(target);
       ownerSupportMock.when(() -> OwnerSupport.isOwner("caller-1")).thenReturn(true);
       ownerSupportMock.when(() -> OwnerSupport.isOwner("target-1")).thenReturn(false);
 
-      OBCriteria<Role> roleCriteria = mock(OBCriteria.class);
-      when(dal.createCriteria(Role.class)).thenReturn(roleCriteria);
-      when(roleCriteria.list()).thenReturn(Collections.singletonList(priorPersonalRole));
-
-      OBCriteria<UserRoles> userRolesCriteria = mock(OBCriteria.class);
-      when(dal.createCriteria(UserRoles.class)).thenReturn(userRolesCriteria);
-      when(userRolesCriteria.list()).thenReturn(Collections.emptyList());
-
-      UserRoleCompositionService service = new UserRoleCompositionService();
       UserRoleCompositionService.AssignmentResult result =
           service.demoteFromAdmin("caller-1", callerRole, "target-1");
 
       assertEquals("role-prior", result.personalRoleId);
       verify(target).setDefaultRole(priorPersonalRole);
+      // Verify that the name-based lookup was performed: criteria.add() was called
+      verify(roleCriteria, atLeastOnce()).add(any());
     }
   }
 }
