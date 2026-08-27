@@ -186,7 +186,15 @@ public class WarehouseLocationHandler implements NeoHandler {
     json.put("postalCode", orNull(geoLoc.getPostalCode()));
     if (geoLoc.getCountry() != null) {
       json.put(FIELD_COUNTRY, geoLoc.getCountry().getId());
-      json.put("country$_identifier", geoLoc.getCountry().getName());
+      // ETP-5022: getIdentifier(), NOT getName(). getName() is the plain Hibernate getter —
+      // it calls get(prop) with no language, so it never consults C_Country_Trl and returns
+      // the base-language name ("Spain") even when the request carries Accept-Language: es_ES.
+      // getIdentifier() goes through IdentifierProvider, which passes the record id and so
+      // resolves the translation. Country's identifier is a single column (Name), so the text
+      // shown is unchanged apart from being translated.
+      // Region is deliberately left on getName(): C_Region has no _Trl table, so there is
+      // nothing to translate and the two calls would be equivalent.
+      json.put("country$_identifier", geoLoc.getCountry().getIdentifier());
     } else {
       json.put(FIELD_COUNTRY, JSONObject.NULL);
       json.put("country$_identifier", JSONObject.NULL);
