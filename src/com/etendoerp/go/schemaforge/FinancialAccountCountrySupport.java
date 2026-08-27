@@ -145,6 +145,13 @@ final class FinancialAccountCountrySupport {
    * for Spain", not "bad checksum". The DB's ordering is irrelevant here because this method
    * short-circuits before the database ever runs.
    *
+   * <p><b>The returned strings are a wire contract with the SPA (ETP-4896 QA follow-up).</b> The
+   * error envelope carries no machine-readable {@code code} (only {@code message}), so
+   * {@code tools/app-shell/src/lib/backendErrors.js} recognises these messages by their literal
+   * text — exact-match for the fixed ones, prefix/suffix matchers for the three that interpolate.
+   * Rewording any of them silently drops the user back to untranslated English; update the
+   * matchers and their {@code backendError.*} locale keys in the same change.
+   *
    * @param iban    already {@link #normalizeIban(String) normalized}; assumed non-blank — callers
    *                only invoke this once they know the effective IBAN is present.
    * @param country the effective country for the account; may be {@code null}.

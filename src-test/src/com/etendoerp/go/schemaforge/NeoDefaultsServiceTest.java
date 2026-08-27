@@ -1348,8 +1348,11 @@ public class NeoDefaultsServiceTest {
       // Two-arg overload — should run cascade by default
       NeoMandatoryDefaultsService.injectMandatoryDefaults(body, adTab, ctx, "PARENT-1");
 
+      // ETP-4784: the create path must call the 4-arg overload with an explicit
+      // client-provided-fields snapshot (empty here, since body started empty), not the
+      // 3-arg overload that recomputes protected fields from the (by-then-mutated) body.
       cascadeMock.verify(() -> NeoDefaultsCascadeHelper.executeCalloutCascadeForCreate(
-          eq(ctx), eq(adTab), eq(body)));
+          eq(ctx), eq(adTab), eq(body), eq(Collections.emptySet())));
     }
   }
 

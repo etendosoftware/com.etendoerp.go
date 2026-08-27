@@ -91,7 +91,9 @@ class CalloutRequestBuilder {
 
     // Set the trigger field and its value
     params.put("inpLastFieldChanged", new String[]{ inpFieldName });
-    params.put(inpFieldName, new String[]{ value != null ? value.toString() : "" });
+    // The trigger field is the first param every Classic callout reads, so it must go through
+    // the same Y/N normalization as the rest of the form state (ETP-4784).
+    params.put(inpFieldName, new String[]{ toClassicParamValue(value) });
 
     // Set tab and window IDs
     params.put("inpTabId", new String[]{ adTab.getId() });
@@ -292,6 +294,33 @@ class CalloutRequestBuilder {
   }
 
   /**
+   * Renders a JSON form-state value the way Classic's HTTP layer would have sent it.
+   *
+   * <p><b>Why this exists (ETP-4784).</b> NEO's {@code formState} is typed JSON, so a Yes/No
+   * column arrives as a real JSON boolean ({@code salesTransaction: true}). Classic callouts,
+   * however, read raw request parameters and compare them against Etendo's {@code "Y"}/{@code "N"}
+   * convention — e.g. {@code SiiAutoSetSIIKEYByDefault} guards its whole SII-default branch on
+   * {@code StringUtils.equals("Y", info.vars.getStringParameter("inpissotrx"))}. Serializing the
+   * boolean with {@code optString} yields {@code "true"}, that comparison silently fails, and the
+   * callout's branch never runs — no error, no log, just a missing field update.
+   *
+   * <p>This affects every Classic callout reading a boolean {@code inp*} param, not just the SII
+   * one, which is why the conversion lives here in the shared bridge rather than in any callout.
+   *
+   * @param raw the raw {@code formState} value; may be {@code null} or {@link JSONObject#NULL}
+   * @return {@code "Y"}/{@code "N"} for booleans, the string form otherwise, never {@code null}
+   */
+  static String toClassicParamValue(Object raw) {
+    if (raw == null || JSONObject.NULL.equals(raw)) {
+      return "";
+    }
+    if (raw instanceof Boolean) {
+      return Boolean.TRUE.equals(raw) ? "Y" : "N";
+    }
+    return raw.toString();
+  }
+
+  /**
    * Maps a single form-state key to its inp* parameter name and adds it to params,
    * skipping identifier companion keys and the trigger field.
    */
@@ -301,7 +330,7 @@ class CalloutRequestBuilder {
     if (key.contains("$_identifier")) {
       return;
     }
-    String val = formState.optString(key, "");
+    String val = toClassicParamValue(formState.opt(key));
     // Try OBDal property name first, then fall back to clean/db names
     String inpKey = maps.propertyNameToInp.get(key.toLowerCase());
     if (inpKey == null) {
@@ -528,18 +557,18 @@ class CalloutRequestBuilder {
   }
 
   /**
-   * Convert a field value to its string representation.
+   * Convert a parent-record field value (read from DAL) to its string representation.
    * For FK references (BaseOBObject), returns the record ID.
-   * For null values, returns an empty string.
+   * Everything else is routed through {@link #toClassicParamValue(Object)} so that parent
+   * params obey exactly the same Classic conventions as form-state params — in particular a
+   * Yes/No column, which DAL materializes as a Java {@link Boolean}, must reach the callout as
+   * {@code "Y"}/{@code "N"} and never as {@code "true"} (ETP-4784).
    */
   private static String resolveFieldValueAsString(Object val) {
-    if (val == null) {
-      return "";
-    }
     if (val instanceof BaseOBObject) {
       return ((BaseOBObject) val).getId().toString();
     }
-    return val.toString();
+    return toClassicParamValue(val);
   }
 
   // ── Auxiliary values ───────────────────────────────────────────────
@@ -557,7 +586,11 @@ class CalloutRequestBuilder {
     Iterator<String> auxKeys = auxValues.keys();
     while (auxKeys.hasNext()) {
       String key = auxKeys.next();   // e.g., "businessPartner_LOC"
-      String auxVal = auxValues.optString(key, "");
+      // Rendered like every other param, through the shared converter documented on
+      // toClassicParamValue. Selector aux values are ids or plain strings in practice, so no
+      // boolean reaches this point today, but converting here keeps that single-conversion
+      // invariant holding by construction rather than by convention.
+      String auxVal = toClassicParamValue(auxValues.opt(key));
       // Split into base field name + suffix
       int suffixStart = key.lastIndexOf('_');
       if (suffixStart > 0) {

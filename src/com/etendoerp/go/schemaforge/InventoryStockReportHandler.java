@@ -123,6 +123,11 @@ public class InventoryStockReportHandler implements NeoHandler {
           + ") cost ON cost.m_product_id = p.m_product_id "
           + "WHERE p.ad_client_id = :clientId AND p.isactive = 'Y' "
           + "  AND (p.ad_org_id = '0' OR p.ad_org_id IN (:orgIds)) "
+          // ETP-4967: excludes products under a category flagged EM_Etgo_IsSystemCategory='Y'
+          // (e.g. ETGO_DTO, category "Discounts") — pc is already joined above, so this reuses
+          // it instead of a second subquery. Left-joined categories with no flag at all (NULL)
+          // must stay visible, hence the COALESCE.
+          + "  AND COALESCE(pc.em_etgo_issystemcategory, 'N') <> 'Y' "
           + "  AND wh.ad_client_id = :clientId AND wh.isactive = 'Y' "
           + "  AND (wh.ad_org_id = '0' OR wh.ad_org_id IN (:orgIds)) ");
 
