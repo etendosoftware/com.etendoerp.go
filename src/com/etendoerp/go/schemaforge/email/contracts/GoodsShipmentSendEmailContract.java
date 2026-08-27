@@ -38,8 +38,4 @@ public final class GoodsShipmentSendEmailContract extends DefaultDocumentSendEma
     super(NAME, "Goods Shipment", Objects.requireNonNull(documentResolver, "documentResolver"));
   }
 
-  @Override
-  protected String documentTypeLabel() {
-    return "Albarán de Venta";
-  }
 }

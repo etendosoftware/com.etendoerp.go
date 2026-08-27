@@ -96,10 +96,15 @@ public class InitialEmailContractsTest {
 
     assertSent(response);
     assertEquals("account@example.com", adapter.getLastRequest().getRecipient());
-    assertEquals("reset-password", adapter.getLastRequest().getTemplate());
+    // ETP-5003 — migrated off the provider-branded template onto the shared layout.
+    assertEquals("custom", adapter.getLastRequest().getTemplate());
     assertEquals("Lucas", adapter.getLastRequest().getData().getString("name"));
     assertEquals("https://app.example.test/reset?token=abc123",
         adapter.getLastRequest().getData().getString("link"));
+    assertEquals("Restablece tu contraseña de Etendo Go",
+        adapter.getLastRequest().getData().getString("subject"));
+    assertTrue(adapter.getLastRequest().getData().getString("body")
+        .contains("https://app.example.test/reset?token=abc123"));
   }
 
   @Test
@@ -119,7 +124,9 @@ public class InitialEmailContractsTest {
     assertEquals("Lucas", adapter.getLastRequest().getData().getString("name"));
     assertEquals("https://app.example.test/welcome",
         adapter.getLastRequest().getData().getString("link"));
-    assertEquals("Welcome to Etendo Go",
+    // ETP-5003 — a command with no language now falls back to Spanish, the product's default,
+    // instead of English.
+    assertEquals("Bienvenido a Etendo Go",
         adapter.getLastRequest().getData().getString("subject"));
     assertTrue(adapter.getLastRequest().getData().getString("body")
         .contains("https://app.example.test/welcome"));
@@ -180,7 +187,7 @@ public class InitialEmailContractsTest {
     assertEquals("Lucas", adapter.getLastRequest().getData().getString("name"));
     assertEquals("https://app.example.test/dashboard",
         adapter.getLastRequest().getData().getString("link"));
-    assertEquals("Your Etendo Go environment is ready",
+    assertEquals("Tu entorno de Etendo Go está listo",
         adapter.getLastRequest().getData().getString("subject"));
     assertTrue(adapter.getLastRequest().getData().getString("body")
         .contains("https://app.example.test/dashboard"));
@@ -227,7 +234,7 @@ public class InitialEmailContractsTest {
     assertEquals("Tu entorno de Etendo Go está listo",
         adapter.getLastRequest().getData().getString("subject"));
     assertTrue(adapter.getLastRequest().getData().getString("body")
-        .contains("Abre este enlace para acceder a tu panel"));
+        .contains("Haz clic en el siguiente botón para acceder a tu panel"));
   }
 
   @Test
@@ -247,10 +254,10 @@ public class InitialEmailContractsTest {
     assertEquals("Lucas", adapter.getLastRequest().getData().getString("name"));
     assertEquals("2026-05-29T10:00:00Z",
         adapter.getLastRequest().getData().getString("date"));
-    assertEquals("Your Etendo Go password was changed",
+    assertEquals("Tu contraseña de Etendo Go fue modificada",
         adapter.getLastRequest().getData().getString("subject"));
     assertTrue(adapter.getLastRequest().getData().getString("body")
-        .contains("contact support"));
+        .contains("contacta a soporte"));
     assertFalse(adapter.getLastRequest().getData().has("link"));
   }
 
@@ -304,7 +311,8 @@ public class InitialEmailContractsTest {
     NeoResponse response = service.send("login-alert", command);
 
     assertSent(response);
-    assertEquals("login-alert", adapter.getLastRequest().getTemplate());
+    // ETP-5003 — migrated off the provider-branded template onto the shared layout.
+    assertEquals("custom", adapter.getLastRequest().getTemplate());
     assertEquals("user@example.com", adapter.getLastRequest().getRecipient());
     assertEquals("Ana", adapter.getLastRequest().getData().getString("name"));
     assertEquals("190.123.45.67", adapter.getLastRequest().getData().getString("ip"));
@@ -354,7 +362,7 @@ public class InitialEmailContractsTest {
     NeoResponse response = service.send("sales-invoice-send", command);
 
     assertSent(response);
-    assertEquals("invoice", adapter.getLastRequest().getTemplate());
+    assertEquals("custom", adapter.getLastRequest().getTemplate());
     assertEquals("billing@example.com", adapter.getLastRequest().getRecipient());
     assertEquals("Empresa SRL", adapter.getLastRequest().getData().getString("name"));
     assertEquals("0001-00042",
@@ -467,7 +475,7 @@ public class InitialEmailContractsTest {
    * only contract with branded copy today.
    */
   @Test
-  public void editedSalesInvoiceSendSwapsBrandedTemplateForContentTemplate() throws Exception {
+  public void editedSalesInvoiceSendKeepsTheSharedLayout() throws Exception {
     FakeProviderAdapter adapter = new FakeProviderAdapter();
     TransactionalEmailService service = service(adapter);
 
@@ -484,17 +492,19 @@ public class InitialEmailContractsTest {
     assertEquals("custom", adapter.getLastRequest().getTemplate());
     JSONObject data = adapter.getLastRequest().getData();
     assertEquals("Su factura corregida", data.getString("subject"));
-    // Newlines become <br>, and the operator message is always followed by the download-link
-    // paragraph (ETP-4717 reopened) so the edited send never drops the document link.
-    assertEquals("<p>Adjuntamos la factura<br>con el importe corregido.</p>"
-        + "<p>Puede descargarlo desde este enlace: "
-        + "<a href=\"https://app.example.test/doc/sales-invoice/invoice-1\">"
-        + "https://app.example.test/doc/sales-invoice/invoice-1</a></p>", data.getString("body"));
+    // Newlines become <br>, and the operator message is always followed by the document link
+    // (ETP-4717 reopened) so the edited send never drops it.
+    String body = data.getString("body");
+    assertTrue(body.contains("Adjuntamos la factura<br>con el importe corregido."));
+    assertTrue(body.contains("https://app.example.test/doc/sales-invoice/invoice-1"));
+    // ETP-5003 — an edited send is no longer a downgrade: it carries the same shared layout an
+    // untouched one does.
+    assertTrue(body.startsWith("<!DOCTYPE html>"));
     assertEquals("0001-00042", data.getString("invoice_number"));
   }
 
   @Test
-  public void untouchedSalesInvoiceSendKeepsBrandedTemplateWithoutContentFields() throws Exception {
+  public void untouchedSalesInvoiceSendUsesTheSharedLayout() throws Exception {
     FakeProviderAdapter adapter = new FakeProviderAdapter();
     TransactionalEmailService service = service(adapter);
 
@@ -504,9 +514,13 @@ public class InitialEmailContractsTest {
     NeoResponse response = service.send("sales-invoice-send", command);
 
     assertSent(response);
-    assertEquals("invoice", adapter.getLastRequest().getTemplate());
-    assertFalse(adapter.getLastRequest().getData().has("subject"));
-    assertFalse(adapter.getLastRequest().getData().has("body"));
+    // ETP-5003 — migrated off the provider's branded "invoice" template, so the contract now
+    // supplies the subject and the rendered document itself.
+    assertEquals("custom", adapter.getLastRequest().getTemplate());
+    JSONObject data = adapter.getLastRequest().getData();
+    assertEquals("Factura de Venta #0001-00042 — Empresa SRL", data.getString("subject"));
+    assertTrue(data.getString("body").startsWith("<!DOCTYPE html>"));
+    assertTrue(data.getString("body").contains("Descargar documento"));
   }
 
   @Test
@@ -524,11 +538,11 @@ public class InitialEmailContractsTest {
 
     assertSent(response);
     String body = adapter.getLastRequest().getData().getString("body");
-    // The escaped message is followed by the download-link paragraph (ETP-4717 reopened).
-    assertEquals("<p>&lt;script&gt;alert(&#39;x&#39;)&lt;/script&gt; &amp; listo</p>"
-        + "<p>Puede descargarlo desde este enlace: "
-        + "<a href=\"https://app.example.test/doc/sales-order/order-1\">"
-        + "https://app.example.test/doc/sales-order/order-1</a></p>", body);
+    // The operator's markup is inert, and the document link still follows it (ETP-4717 reopened),
+    // now as the shared layout's button plus its fallback (ETP-5003).
+    assertFalse(body.contains("<script>"));
+    assertTrue(body.contains("&lt;script&gt;alert(&#39;x&#39;)&lt;/script&gt; &amp; listo"));
+    assertTrue(body.contains("https://app.example.test/doc/sales-order/order-1"));
   }
 
   @Test
@@ -577,10 +591,7 @@ public class InitialEmailContractsTest {
     assertSent(response);
     assertEquals(2, adapter.getSendCount());
     // The message is wrapped and followed by the download-link paragraph (ETP-4717 reopened).
-    assertEquals("<p>Texto corregido</p>"
-        + "<p>Puede descargarlo desde este enlace: "
-        + "<a href=\"https://app.example.test/doc/sales-order/order-1\">"
-        + "https://app.example.test/doc/sales-order/order-1</a></p>",
+    assertBodyCarries("Texto corregido", "https://app.example.test/doc/sales-order/order-1",
         adapter.getLastRequest().getData().getString("body"));
   }
 
@@ -886,6 +897,18 @@ public class InitialEmailContractsTest {
     command.put(EmailContractCommandSupport.FIELD_VERSION, EmailContractCommandSupport.VERSION);
     command.put(EmailContractCommandSupport.FIELD_TENANT_ID, "tenant-1");
     return command;
+  }
+
+  /**
+   * Asserts a document email carries the operator's copy and still offers the document link.
+   *
+   * <p>Deliberately not an equality check on the whole body: the shared layout owns the markup
+   * around it (ETP-5003), and pinning that here would make every layout tweak fail a contract
+   * test. {@code EmailLayoutTest} pins the markup itself.</p>
+   */
+  private static void assertBodyCarries(String copy, String documentLink, String body) {
+    assertTrue("copy missing from body", body.contains(copy));
+    assertTrue("document link missing from body", body.contains(documentLink));
   }
 
   private static void assertSent(NeoResponse response) throws JSONException {
