@@ -19,6 +19,8 @@ package com.etendoerp.go.rest;
 
 import java.time.Instant;
 
+import java.util.Date;
+
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -40,6 +42,8 @@ class TransactionalAuthEmailSender {
   private static final String CONTRACT_COMPANY_INVITATION = "company-invitation";
   private static final String CONTRACT_ENVIRONMENT_READY = "environment-ready";
   private static final String CONTRACT_NEW_ACCOUNT = "new-account";
+  private static final String CONTRACT_NEW_ACCOUNT_INVITEE = "new-account-invitee";
+  private static final String CONTRACT_ORGANIZATION_JOINED = "organization-joined";
   private static final String CONTRACT_PASSWORD_CHANGED = "password-changed";
   private static final String CONTRACT_RESET_PASSWORD = "reset-password";
   private static final String CONTRACT_VERIFY_EMAIL = "verify-email";
@@ -76,6 +80,15 @@ class TransactionalAuthEmailSender {
    *
    * @param verifyLink email-verification link, or null to fall back to the plain onboarding link
    */
+  boolean sendNewAccount(Account account, String language, String verifyLink, Date expiresAt) {
+    if (account == null) {
+      return false;
+    }
+    String link = StringUtils.isNotBlank(verifyLink) ? verifyLink
+        : EtendoGoAuthLinkBuilder.onboardingLink();
+    return sendAccountLink(CONTRACT_NEW_ACCOUNT, account, link, null, language, expiresAt);
+  }
+
   boolean sendNewAccount(Account account, String language, String verifyLink) {
     if (account == null) {
       return false;
@@ -101,7 +114,72 @@ class TransactionalAuthEmailSender {
         || StringUtils.isBlank(verifyLink)) {
       return false;
     }
-    return sendAccountLink(CONTRACT_VERIFY_EMAIL, account, verifyLink, verifyTokenHash, language);
+    return sendVerifyEmail(account, verifyTokenHash, verifyLink, language, null);
+  }
+
+  /**
+   * Sends the email-verification message, stating the token's real window.
+   *
+   * @param account the account being verified
+   * @param verifyTokenHash hash of the issued token, used as the record id
+   * @param verifyLink the verification link
+   * @param language the recipient language
+   * @param expiresAt when the token stops working; the copy states the remaining hours and omits
+   *     the claim when unknown
+   * @return whether the email was accepted for delivery
+   */
+  boolean sendVerifyEmail(Account account, String verifyTokenHash, String verifyLink,
+      String language, Date expiresAt) {
+    return sendAccountLink(CONTRACT_VERIFY_EMAIL, account, verifyLink, verifyTokenHash, language,
+        expiresAt);
+  }
+
+  /**
+   * Welcome email for a user who created the account by accepting an invitation.
+   *
+   * <p>A separate contract from {@link #sendNewAccount}, because the two welcomes ask for different
+   * things. The standard one now carries the email-verification link; an invited operator has
+   * nothing to verify — the invitation is itself the proof that somebody meant to reach this
+   * address — and never runs onboarding, so its button goes to the dashboard.</p>
+   *
+   * @param account the account just created
+   * @param language the recipient language
+   * @return whether the email was accepted for delivery
+   */
+  boolean sendNewAccountForInvitee(Account account, String language) {
+    if (account == null) {
+      return false;
+    }
+    return sendAccountLink(CONTRACT_NEW_ACCOUNT_INVITEE, account,
+        EtendoGoAuthLinkBuilder.dashboardLink(), null, language);
+  }
+
+  /**
+   * Tells a user they now belong to an organization, sent once an invitation is accepted.
+   *
+   * @param account the accepting account
+   * @param companyName the organization the user joined
+   * @param invitationId the invitation record, used as the idempotency record id
+   * @param language the recipient language
+   * @return whether the email was accepted for delivery
+   */
+  boolean sendOrganizationJoined(Account account, String companyName, String invitationId,
+      String language) {
+    if (account == null || StringUtils.isBlank(companyName)) {
+      return false;
+    }
+    try {
+      JSONObject body = baseCommand(account);
+      body.put("companyName", companyName);
+      if (StringUtils.isNotBlank(invitationId)) {
+        body.put(EmailContractCommandSupport.FIELD_RECORD_ID, invitationId);
+      }
+      addLanguageField(body, language);
+      return sendBestEffort(CONTRACT_ORGANIZATION_JOINED, body);
+    } catch (JSONException e) {
+      log.warn("Could not build organization-joined email command", e);
+      return false;
+    }
   }
 
   boolean sendEnvironmentReady(Account account, String clientId) {
@@ -128,10 +206,26 @@ class TransactionalAuthEmailSender {
   }
 
   boolean sendPasswordReset(Account account, String resetTokenHash, String resetLink) {
+    return sendPasswordReset(account, resetTokenHash, resetLink, null);
+  }
+
+  /**
+   * Sends the password-reset email, stating the token's real expiry.
+   *
+   * @param account the account requesting the reset
+   * @param resetTokenHash hash of the issued token, used as the record id
+   * @param resetLink the reset link
+   * @param expiresAt when the token stops working; the email states the remaining window and omits
+   *     it when unknown
+   * @return whether the email was accepted for delivery
+   */
+  boolean sendPasswordReset(Account account, String resetTokenHash, String resetLink,
+      Date expiresAt) {
     if (account == null || StringUtils.isBlank(resetTokenHash) || StringUtils.isBlank(resetLink)) {
       return false;
     }
-    return sendAccountLink(CONTRACT_RESET_PASSWORD, account, resetLink, resetTokenHash);
+    return sendAccountLink(CONTRACT_RESET_PASSWORD, account, resetLink, resetTokenHash, null,
+        expiresAt);
   }
 
   boolean sendCompanyInvitation(Invitation invitation, String inviteLink) {
@@ -185,6 +279,11 @@ class TransactionalAuthEmailSender {
 
   private boolean sendAccountLink(String contractName, Account account, String link,
       String recordId, String language) {
+    return sendAccountLink(contractName, account, link, recordId, language, null);
+  }
+
+  private boolean sendAccountLink(String contractName, Account account, String link,
+      String recordId, String language, Date expiresAt) {
     if (account == null || link == null) {
       return false;
     }
@@ -194,6 +293,11 @@ class TransactionalAuthEmailSender {
       addLanguageField(body, language);
       if (recordId != null) {
         body.put(EmailContractCommandSupport.FIELD_RECORD_ID, recordId);
+      }
+      if (expiresAt != null) {
+        // The contract states the remaining window in the copy; it must come from the TTL the
+        // servlet actually applied, not from a number repeated in the message catalog.
+        body.put("expiresAt", expiresAt.toInstant().toString());
       }
       return sendBestEffort(contractName, body);
     } catch (JSONException e) {
