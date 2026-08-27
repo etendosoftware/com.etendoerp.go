@@ -2209,6 +2209,10 @@ public class CreateDraftInvoiceHandlerTest {
       ShipmentInOut first = mock(ShipmentInOut.class);
       ShipmentInOut second = mock(ShipmentInOut.class);
       Invoice invoice = mock(Invoice.class);
+      // ETP-4942: createFromShipments now fails fast when the resulting invoice has no
+      // price list at all (see ensurePriceListResolved) — stub a non-null one so this
+      // test keeps exercising header/lines plumbing rather than that unrelated guard.
+      when(invoice.getPriceList()).thenReturn(mock(PriceList.class));
 
       CreateFromShipmentsHandler handler = new CreateFromShipmentsHandler();
       handler.shipmentsToReturn = Arrays.asList(first, second);
@@ -2243,6 +2247,10 @@ public class CreateDraftInvoiceHandlerTest {
       ShipmentInOut first = mock(ShipmentInOut.class);
       ShipmentInOut second = mock(ShipmentInOut.class);
       Invoice invoice = mock(Invoice.class);
+      // ETP-4942: stub the getter too — a bare mock's setPriceList(...) call (verified
+      // below) does not make getPriceList() reflect it, and ensurePriceListResolved
+      // would otherwise see a null price list and throw.
+      when(invoice.getPriceList()).thenReturn(overridePriceList);
 
       CreateFromShipmentsHandler handler = new CreateFromShipmentsHandler();
       handler.shipmentsToReturn = Arrays.asList(first, second);
@@ -2252,6 +2260,97 @@ public class CreateDraftInvoiceHandlerTest {
           Collections.emptyMap(), "pl-shipments-1");
 
       verify(invoice).setPriceList(overridePriceList);
+    }
+  }
+
+  // ─── ensurePriceListResolved (ETP-4942) — exercised via createFromShipments ─
+  //
+  // ensurePriceListResolved() itself is private and takes only the already-built
+  // Invoice, so it is exercised through the multi-shipment createFromShipments()
+  // entry point (the single-shipment-with-linked-order path delegates to
+  // createFromOrder() before this guard ever runs) using the same
+  // CreateFromShipmentsHandler test double as the price-list-override tests above.
+  // The "does not throw" side is already covered by
+  // testCreateFromShipmentsSavesHeaderAndAddsLines (header already resolved a
+  // tariff — the linked-order/Business-Partner-default case) and
+  // testCreateFromShipmentsMultiShipmentAppliesPriceListOverride (the explicit
+  // popup override resolves it); this section adds the missing throwing case plus
+  // one explicit non-throwing case naming the guard directly.
+
+  /**
+   * Verifies that {@code createFromShipments} fails fast with the ETP-4942
+   * validation message when none of the three price-list sources (linked order,
+   * Business Partner default, explicit popup override) resolved a tariff — i.e.
+   * the header-derived invoice still has a {@code null} price list and no
+   * {@code priceListId} override was supplied.
+   */
+  @Test
+  public void testCreateFromShipmentsNoPriceListResolvedThrows() {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      ShipmentInOut first = mock(ShipmentInOut.class);
+      Invoice invoice = mock(Invoice.class);
+      // No linked order, no Business Partner default, no override — the header
+      // derivation left the invoice's price list null.
+      when(invoice.getPriceList()).thenReturn(null);
+
+      CreateFromShipmentsHandler handler = new CreateFromShipmentsHandler();
+      handler.shipmentsToReturn = Collections.singletonList(first);
+      handler.invoiceHeader = invoice;
+
+      try {
+        handler.createFromShipments(Collections.singletonList("ship-50"), Collections.emptyMap(), null);
+        org.junit.Assert.fail("Expected an OBException when no Price List could be resolved");
+      } catch (OBException e) {
+        assertEquals(
+            "No Price List could be resolved for this invoice: select a tariff or configure "
+                + "a default Price List for the Business Partner",
+            e.getMessage());
+      }
+
+      // The guard must fail BEFORE the header/lines are persisted, so a bad
+      // draft invoice is never left half-built in the database.
+      verify(dal, never()).save(invoice);
+      verify(dal, never()).flush();
+    }
+  }
+
+  /**
+   * Verifies that {@code createFromShipments} does NOT throw when the popup
+   * override resolves a {@link PriceList} even though the header derivation
+   * itself left the invoice's price list null (no linked order, no Business
+   * Partner default) — the explicit override is the last chance to fill it in,
+   * exercised before {@code ensurePriceListResolved} runs.
+   */
+  @Test
+  public void testCreateFromShipmentsOverrideAloneSatisfiesPriceListGuard() {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      PriceList overridePriceList = mock(PriceList.class);
+      when(dal.get(eq(PriceList.class), eq("pl-guard-1"))).thenReturn(overridePriceList);
+
+      ShipmentInOut first = mock(ShipmentInOut.class);
+      Invoice invoice = mock(Invoice.class);
+      // Header derivation alone left it null; only the override call (stubbed via
+      // getPriceList() below, since a bare mock's setPriceList() doesn't make
+      // getPriceList() reflect it) resolves a tariff.
+      when(invoice.getPriceList()).thenReturn(overridePriceList);
+
+      CreateFromShipmentsHandler handler = new CreateFromShipmentsHandler();
+      handler.shipmentsToReturn = Collections.singletonList(first);
+      handler.invoiceHeader = invoice;
+
+      Invoice result = handler.createFromShipments(
+          Collections.singletonList("ship-51"), Collections.emptyMap(), "pl-guard-1");
+
+      assertSame(invoice, result);
+      verify(invoice).setPriceList(overridePriceList);
+      verify(dal).save(invoice);
+      verify(dal).flush();
     }
   }
 

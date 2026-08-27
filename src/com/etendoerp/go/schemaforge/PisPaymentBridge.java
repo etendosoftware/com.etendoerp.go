@@ -22,17 +22,23 @@ import java.math.BigDecimal;
 import javax.servlet.http.HttpServletRequest;
 
 import org.apache.commons.lang3.StringUtils;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.dal.core.OBContext;
+import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.invoice.Invoice;
 import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
 import org.openbravo.model.financialmgmt.payment.FIN_Payment;
 
 import com.etendoerp.psd2.bank.integration.actionhandler.GenerateBankPayment;
+import com.etendoerp.psd2.bank.integration.data.PisPayment;
 import com.etendoerp.psd2.bank.integration.utils.BankIntegrationConstants;
 import com.etendoerp.psd2.bank.integration.utils.BankIntegrationPISUtils;
+import com.etendoerp.psd2.bank.integration.utils.BankIntegrationUrlUtils;
 import com.etendoerp.psd2.bank.integration.utils.BankIntegrationUtils;
+import com.etendoerp.psd2.bank.integration.utils.PISPaymentDao;
 
 /**
  * Bridges a NEO-registered {@link FIN_Payment} to the PSD2 module's PIS (Payment Initiation
@@ -42,8 +48,14 @@ import com.etendoerp.psd2.bank.integration.utils.BankIntegrationUtils;
  *
  * <p>Rather than re-implementing the ~300 lines of payload building / SEPA-FPS-DOMESTIC validation
  * / persistence, this reuses {@code GenerateBankPayment.processPayment(...)} directly — that method
- * is public and takes an explicit {@code returnToUrl} so the popup can return to the Etendo Go SPA
- * callback instead of the Classic result page. No PSD2 logic is copied or changed here.
+ * is public and takes an explicit {@code returnToUrl}. No PSD2 logic is copied or changed here.
+ *
+ * <p><b>Where the bank sends the browser back (ETP-4895).</b> Salt Edge's {@code return_to} points
+ * at {@link PisReturnCallbackServlet}, not at the SPA: that servlet resolves the payment's final
+ * status server-side and creates it, exactly as Classic's own callback does, so a transfer is
+ * registered even when the tab that started it is already closed. The SPA page the popup should
+ * finally land on is persisted separately on the PSD2 row's {@code return_to_url} column, which
+ * that servlet reads when bouncing the browser onward.
  *
  * <p>The {@code params} JSON built here uses the exact same keys that {@code GenerateBankPayment}
  * normalizes: {@code template}, {@code end_to_end_id}, {@code creditor_name}, {@code amount},
@@ -63,13 +75,28 @@ final class PisPaymentBridge {
   private static final String TEMPLATE_FPS = "FPS";
   private static final String CURRENCY_GBP = "GBP";
 
+  private static final Logger log = LogManager.getLogger(PisPaymentBridge.class);
+
   /**
-   * App-shell SPA route the Salt Edge popup is returned to after SCA. It is a tiny page that just
-   * closes the popup (the "Add payment" modal already polls the payment status), so the user lands
-   * back on the invoice instead of the Classic-styled shared bank-auth result page. Mirrors the
-   * AIS connect flow's {@code /financial-account/bank-connection-callback}.
+   * App-shell SPA route the popup finally lands on. It is a tiny page that just closes the popup
+   * and tells the "Add payment" modal the user is back, so they land on the invoice instead of the
+   * Classic-styled shared bank-auth result page. Mirrors the AIS connect flow's
+   * {@code /financial-account/bank-connection-callback}.
+   *
+   * <p>Salt Edge no longer redirects here directly: it returns to
+   * {@link #PIS_RETURN_SERVLET_PATH} first, so the status is resolved and the payment created
+   * server-side, and only then is the browser bounced here. This URL is persisted on the PSD2 row
+   * ({@code return_to_url}) so the servlet knows where to send it.
    */
   private static final String PIS_CALLBACK_PATH = "/financial-account/pis-callback";
+
+  /**
+   * Backend route Salt Edge is told to return to after SCA — {@link PisReturnCallbackServlet}.
+   * Registered as an exact servlet mapping so it is served there rather than by the {@code /sws/*}
+   * SecureWebServices dispatcher, and reachable with no session (the bank redirects a bare
+   * browser, carrying no bearer token).
+   */
+  private static final String PIS_RETURN_SERVLET_PATH = "/sws/pis-return";
 
   private PisPaymentBridge() {
   }
@@ -114,13 +141,17 @@ final class PisPaymentBridge {
     params.put(KEY_CURRENCY_ID, payment.getCurrency().getId());
     params.put(KEY_DESCRIPTION, descriptionFor(payment));
 
-    // Route the post-SCA browser redirect back to the Etendo Go SPA (auto-closing popup) rather
-    // than the shared Classic bank-auth page. When the request origin can't be resolved this is
-    // null and GenerateBankPayment falls back to its default /pisPaymentCallback (Classic behaviour).
-    String returnUrl = resolveGoReturnUrl(request);
+    // Salt Edge returns to our own servlet, which resolves the status server-side and only then
+    // bounces the browser to the SPA page below — so the payment is registered even if the tab
+    // that started it is gone. The SPA URL is null when the request origin can't be resolved; the
+    // servlet then serves its own "you can close this window" fallback.
+    String appReturnUrl = resolveGoReturnUrl(request);
 
     // Reuse Classic's exact payload/validation/persistence via its now-public processPayment.
-    return new GenerateBankPayment().processPayment(payment, params, apiKey, request, returnUrl);
+    BankIntegrationPISUtils.PISCreatePaymentResult result = new GenerateBankPayment()
+        .processPayment(payment, params, apiKey, request, resolveBackendReturnUrl());
+    persistAppReturnUrl(result.getPaymentId(), appReturnUrl);
+    return result;
   }
 
   /**
@@ -157,8 +188,52 @@ final class PisPaymentBridge {
         account, invoice.getBusinessPartner(), amount, invoice.getCurrency(), endToEndId,
         invoice.getDocumentNo());
 
-    return new GenerateBankPayment().processPayment(context, params, apiKey, request,
-        resolveGoReturnUrl(request));
+    String appReturnUrl = resolveGoReturnUrl(request);
+    BankIntegrationPISUtils.PISCreatePaymentResult result = new GenerateBankPayment()
+        .processPayment(context, params, apiKey, request, resolveBackendReturnUrl());
+    persistAppReturnUrl(result.getPaymentId(), appReturnUrl);
+    return result;
+  }
+
+  /**
+   * Absolute URL of {@link PisReturnCallbackServlet}, built from the instance's own configured base
+   * URL — the same {@link BankIntegrationUrlUtils#buildBaseUrl()} PSD2 uses for its own default
+   * {@code /pisPaymentCallback}, so both callbacks resolve identically in every environment.
+   */
+  private static String resolveBackendReturnUrl() {
+    return StringUtils.removeEnd(BankIntegrationUrlUtils.buildBaseUrl(), "/") + PIS_RETURN_SERVLET_PATH;
+  }
+
+  /**
+   * Stores the SPA page the popup should end up on once {@link PisReturnCallbackServlet} is done.
+   *
+   * <p>Written by fetching the row PSD2 just created rather than by widening
+   * {@code processPayment}'s signature: {@code return_to_url} is an existing, unused column, and
+   * this is the same fetch-back-then-set-one-field pattern {@code PisDeferredPaymentService
+   * #retryReusingPayment} already uses for {@code endToEnd}. Keeps the change entirely inside
+   * Etendo Go — PSD2 is untouched.
+   *
+   * <p>Failing here is not fatal: without it the servlet still resolves the payment and just serves
+   * its own fallback page instead of returning the user to the invoice.
+   */
+  private static void persistAppReturnUrl(String saltedgePaymentId, String appReturnUrl) {
+    if (StringUtils.isBlank(appReturnUrl) || StringUtils.isBlank(saltedgePaymentId)) {
+      return;
+    }
+    try {
+      PisPayment pisPayment = PISPaymentDao.findBySaltedgePaymentId(saltedgePaymentId);
+      if (pisPayment == null) {
+        log.warn("Could not persist app return URL: no PisPayment for Salt Edge id {}",
+            saltedgePaymentId);
+        return;
+      }
+      pisPayment.setReturnToUrl(appReturnUrl);
+      OBDal.getInstance().save(pisPayment);
+      OBDal.getInstance().flush();
+    } catch (Exception e) {
+      log.warn("Could not persist app return URL for Salt Edge id {}: {}", saltedgePaymentId,
+          e.getMessage());
+    }
   }
 
   private static String descriptionFor(FIN_Payment payment) {

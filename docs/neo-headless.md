@@ -205,11 +205,30 @@ Returns a single record. Requires either `ISGET` or `ISGETBYID` to be enabled.
 
 Request body is JSON. Delegated to DataSourceServlet's POST handler.
 
-Before persistence, NEO resolves defaults and executes the header-tab callout cascade. Values
-explicitly supplied by the client and values injected for mandatory AD columns are protected from
-callout updates. Defaults for non-mandatory columns remain eligible for callout-derived updates.
-This keeps an explicit or mandatory system default from being replaced by an unrelated selector
-callout while preserving normal dependent-field derivation.
+Before persistence, NEO resolves defaults and executes the header-tab callout cascade, in this
+strict order:
+
+1. **Snapshot** the field names present in the request body exactly as submitted by the client
+   (`NeoMandatoryDefaultsService.injectMandatoryDefaults`, before step 2 runs).
+2. **Inject generic mandatory-column defaults** (`injectDefaultsForActiveColumns`) — plain
+   `AD_Column` defaults, session context, parent-tab values — for any column the client did not
+   submit.
+3. **Run the callout cascade** (`NeoDefaultsCascadeHelper.executeCalloutCascadeForCreate`),
+   passing the *step-1 snapshot* as `protectedFields` — never a snapshot taken after step 2.
+
+Only fields present in the step-1 snapshot are protected from callout overwrite; a field the
+backend itself filled in during step 2 with a generic, context-agnostic default is **not**
+protected and can be corrected by a callout that resolves a more specific value from a field the
+client did submit (e.g. the Business Partner). Getting this ordering backwards — snapshotting
+`protectedFields` from the body *after* the generic defaults already ran — silently freezes those
+generic defaults, because the cascade then treats a value the backend just invented as if the
+user had chosen it on purpose (ETP-4784: "Tipo factura" stuck at the generic default instead of
+the Business Partner's configured value).
+
+This still preserves ETP-4772's original intent: a value the client genuinely submitted in the
+original POST (including one forced by upstream logic before the request reached NEO, e.g. a
+rectifying-document key per ETP-4783) is in the step-1 snapshot and stays protected from being
+overwritten by a re-cascaded callout.
 
 **PUT / PATCH update** -- `PUT|PATCH /{specName}/{entityName}/{recordId}`
 
@@ -530,11 +549,18 @@ Response (rich OBUISEL selector):
 
 1. **OBUISEL Selector** -- checked first via `referenceSearchKey` or column reference. Returns rich multi-column results with searchable fields from `OBUISEL_Selector_Field`.
 2. **TableDir (ref 19)** -- column name convention: `{TableName}_ID` resolves to target table.
-3. **Table (ref 18) / Search (ref 30)** -- resolved via `AD_Ref_Table` (target table, key column, display column, optional HQL where clause).
+3. **Table (ref 18) / Search (ref 30)** -- resolved via `AD_Ref_Table` (target table, key column, display column, optional where clause from `HQLWhereClause`, falling back to a translated `SQLWhereClause` -- see the ETP-4975 note below).
 
 OBUISEL selectors with custom HQL queries are fully supported. The service uses `Session.createQuery()` to execute the custom HQL with org security filtering, validation rules, search across searchable properties, and pagination.
 
 The service resolves `@param@` placeholders in OBUISEL HQL where clauses: `@AD_Org_ID@`, `@AD_Client_ID@`, `@AD_User_ID@`, `@AD_Role_ID@`.
+
+**Searchable-field fallback and `SQLWhereClause` support (ETP-4975).** Two fixes in `SelectorDescriptorResolver` (`com.etendoerp.go.schemaforge.selector.meta`):
+
+- `ensureSearchableFallback()` -- when an OBUISEL selector has no `OBUISEL_Selector_Field` rows configured, the resolver falls back to a small set of candidate searchable properties (identifier/name, `valueProp`, search key). `description` is now always added to that fallback list too, appended after the existing empty-list check so it never short-circuits the earlier candidates. Example: the "IAE Activity Type" selector (`epiae_type`: Key + Description, no explicit search-field config) previously only searched the short Key column -- typing "alquiler" (present only in the description) matched nothing.
+- `resolveRefTable()` -- previously read only `AD_Ref_Table.HQLWhereClause` and silently dropped the filter for any reference configured the classic way, with the clause on `SQLWhereClause` instead. It now falls back to `SQLWhereClause`, translated to HQL via the now-public `SqlToHqlTranslator.convertSqlToHql()` (the same translator `SelectorValidationResolver` already uses for AD validation-rule clauses -- see `resolveValidationFilter` below), whenever `HQLWhereClause` is empty. This fixed the GO tax selector (`C_Tax_ID`, Table ref 18) showing "child" breakdown taxes (`Parent_Tax_ID` not null) that Classic excludes via `C_Tax.Parent_Tax_ID IS NULL`, which lives in `SQLWhereClause` for that reference with `HQLWhereClause` empty.
+
+**`NESTED_SUBQUERY` guard, shared across both SQL-to-HQL paths.** `SelectorValidationResolver` guards AD_Validation clauses against a nested `(SELECT ...` subquery (raw SQL table names the generic translator cannot map to HQL entities) by dropping the whole offending clause instead of emitting broken HQL. The `resolveRefTableWhereClause()` path added above initially had no equivalent guard, and it was hit live: the `M_Warehouse_ID` reference's classic `SQLWhereClause` (`M_Warehouse.AD_Client_ID=@#AD_Client_ID@ AND (select ad.isactive from ad_org ad where ad.ad_org_id = M_Warehouse.AD_Org_ID) = 'Y'`) reached Hibernate as invalid HQL (`QuerySyntaxException: ad_org is not mapped`) the first time the Warehouse selector was actually queried in an E2E integration test, rather than degrading gracefully at config-resolution time the way the validation-clause path already did. The fix moves `NESTED_SUBQUERY` (and a new `dropNestedSubqueryClauses` helper) into `SqlToHqlTranslator` itself -- the class both callers already share -- so `convertSqlToHql()` now splits its input into top-level AND-segments, drops any segment containing a nested `(SELECT ...)`, and translates only what survives (returning `null`, i.e. no filter, when every segment is dropped). `SelectorValidationResolver` was updated to reference `SqlToHqlTranslator.NESTED_SUBQUERY` instead of keeping its own copy of the regex, so any future caller of `convertSqlToHql()` is protected by construction. Covered by `SelectorDescriptorResolverTest#resolveTarget_tableRef_sqlWhereClauseWithNestedSubquery_dropsSubqueryClause` (the C_Tax/C_TaxCategory case) and `#resolveTarget_tableRef_warehouseCorrelatedSubqueryWhereClause_dropsSubqueryClause` (the exact Warehouse regression case) in `src-test/src/com/etendoerp/go/schemaforge/selector/meta/SelectorDescriptorResolverTest.java`.
 
 **Internal package split:**
 
@@ -1585,6 +1611,13 @@ Responses support custom headers via `withHeader(name, value)`.
 
   Previously `AbstractOrderHeaderHandler` and `AbstractInvoiceHeaderHandler` each carried a private `hasConversionRate()` copy of the query filtered by `ad_client_id = ?` alone. When ETP-4474 moved the currencyLayer rate sync to the System client, those copies went blind to it: the endpoint answered `hasRate: true` and the callout warned `noExchangeRateAvailable` for the very same pair and date. The lesson generalises — **when a handler needs an answer a NEO endpoint already computes, call the endpoint's helper, don't re-derive the query.** Two copies of a client-scoping filter is exactly the kind of drift that survives review and only surfaces when the data moves.
 
+**Real-world example — `NeoHandlerUtils.fetchProductCodesForLines` (SKU enrichment shared across order/invoice-line handlers, ETP-4941):** the printed PDF's "CÓD." column (Sales Quotation, Sales Order, Purchase Order, Sales Invoice) is meant to show the product's search key (`M_Product.Value`, the SKU), but the field it reads was never populated in the GET response, so the template's fallback chain always landed on the line number instead. `AbstractInOutLineHandler` already solved this for `M_InOutLine` lines (goods shipments/receipts) by joining `m_product` and injecting a `productCode` field on every GET record. ETP-4941 extracts that same query into a shared static helper and reuses it for the two other line families that print through the same PDF template:
+
+  - `NeoHandlerUtils.fetchProductCodesForLines(List<String> lineIds, String lineTable, String lineIdCol, Logger log)` runs `SELECT l.<lineIdCol>, p.value FROM <lineTable> l JOIN m_product p ON p.m_product_id = l.m_product_id WHERE l.<lineIdCol> IN (...)` and returns a `Map<lineId, sku>`. `lineTable`/`lineIdCol` are fixed literals supplied by the caller (never derived from request input), so building the SQL string from them carries no injection risk — only the `?` placeholders carry caller-derived values (`@SuppressWarnings("java:S2077")` documents this at the call site). A line id with no matching row — bad id, deleted line, or a line whose product was removed — is simply absent from the returned map (inner `JOIN`, not `LEFT JOIN`); a matching row whose `p.value` is blank is also skipped. `null`/empty `lineIds` short-circuits to an empty map without touching the DB.
+  - `OrderLineHandler#enrichProductCode` calls it with `("c_orderline", "c_orderline_id")`, covering sales-order, purchase-order, and sales-quotation lines (all backed by `c_orderline`).
+  - `InvoiceLineHandler#enrichProductCode` calls it with `("c_invoiceline", "c_invoiceline_id")`, covering sales-invoice and purchase-invoice lines.
+
+  Both call sites run from the `GET` branch of `afterHandle()`, immediately before `DiscountLineFilter.filterFromResponse(context)` — mutating the response body in place (same pattern as `InvoiceLineHandler#enrichSourceInvoiceLineId`) so the field survives regardless of whether the discount filter later replaces the response. A line whose product resolves to a non-blank SKU gets `productCode` set on its JSON record; every other line is left without the field. The backend never writes a placeholder value for the missing case — the frontend's `resolveProductCode` (`documentPdf.js`) owns the `'—'` fallback shown on the printed document. Any DB error is caught, logged, and swallowed: this is a best-effort display enrichment and must never fail the parent GET request.
 **Real-world example — `UserRoleAssignmentHandler`'s admin-created-user invitation (ETP-4830, superseding ETP-4829):** the `user` entity's `POST` post-hook used to eagerly provision an `etgo_account` row via a now-deleted `EtendoGoAccountProvisioning` bridge class — `pending` by default, or `active` immediately if the admin typed a password on the create form (a temporary workaround gated by `PasswordPolicy.isStrong` in the `handle()` pre-hook). ETP-4830 replaced both:
 
   - The `handle()` pre-hook no longer reads or validates a `password` field at all — the field, if the frontend still sends one, is simply ignored by this handler (it still reaches `AD_User.Password`, Openbravo's own classic-backend login, unrelated to `etgo_account`). Invite-email is now the only way to activate an admin-created user's account.

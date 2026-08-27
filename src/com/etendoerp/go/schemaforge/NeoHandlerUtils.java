@@ -17,9 +17,15 @@
 
 package com.etendoerp.go.schemaforge;
 
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
@@ -155,6 +161,104 @@ final class NeoHandlerUtils {
       }
     }
     return ids;
+  }
+
+  /**
+   * Resolves the product search key ({@code M_Product.Value}, the SKU) for each line id in a
+   * given line table, joined via {@code m_product_id}. Mirrors the query
+   * {@code AbstractInOutLineHandler} already runs for {@code M_InOutLine} lines — shared here
+   * (ETP-4941) so {@link OrderLineHandler} (sales-order/purchase-order/sales-quotation lines,
+   * all backed by {@code c_orderline}) and {@link InvoiceLineHandler}
+   * (sales-invoice/purchase-invoice lines, {@code c_invoiceline}) can inject the same
+   * {@code productCode} field into their GET responses — the "CÓD." column on the printed
+   * PDFs read this field with a fallback chain that, before this fix, always missed it and fell
+   * back to the line number instead of the SKU.
+   *
+   * @param lineIds   the line ids to resolve; returns an empty map when {@code null}/empty
+   * @param lineTable fixed DB table name literal supplied by the caller (e.g. {@code
+   *                  "c_orderline"}, {@code "c_invoiceline"}) — never derived from request
+   *                  input, so building the SQL string from it carries no injection risk; only
+   *                  the {@code ?} placeholders below carry caller/request-derived values
+   * @param lineIdCol fixed PK column name literal for {@code lineTable} (e.g. {@code
+   *                  "c_orderline_id"}), same provenance guarantee as {@code lineTable}
+   * @param log       caller's logger, used for the error message on DB failure
+   * @return map of line id to {@code M_Product.Value}, only for lines whose product has a
+   *         non-blank value
+   */
+  @SuppressWarnings("java:S2077")
+  static Map<String, String> fetchProductCodesForLines(List<String> lineIds, String lineTable,
+      String lineIdCol, Logger log) {
+    Map<String, String> result = new HashMap<>();
+    if (lineIds == null || lineIds.isEmpty()) {
+      return result;
+    }
+    String placeholders = lineIds.stream().map(id -> "?").collect(Collectors.joining(","));
+    String sql = "SELECT l." + lineIdCol + ", p.value FROM " + lineTable + " l "
+        + "JOIN m_product p ON p.m_product_id = l.m_product_id "
+        + "WHERE l." + lineIdCol + " IN (" + placeholders + ")";
+    try {
+      Connection conn = OBDal.getInstance().getConnection();
+      try (PreparedStatement ps = conn.prepareStatement(sql)) {
+        for (int i = 0; i < lineIds.size(); i++) {
+          ps.setString(i + 1, lineIds.get(i));
+        }
+        try (ResultSet rs = ps.executeQuery()) {
+          while (rs.next()) {
+            String code = rs.getString(2);
+            if (StringUtils.isNotBlank(code)) {
+              result.put(rs.getString(1), code);
+            }
+          }
+        }
+      }
+    } catch (Exception e) {
+      log.error("DB error fetching product codes from {}: {}", lineTable, e.getMessage());
+    }
+    return result;
+  }
+
+  /**
+   * Injects a product search key ({@code M_Product.Value}, the SKU) into every record of a GET
+   * line response, mutating the response body in place via {@link #fetchProductCodesForLines}.
+   *
+   * <p>Shared implementation behind {@code OrderLineHandler} and {@code InvoiceLineHandler}'s
+   * {@code enrichProductCode} hooks (ETP-4941): both {@code afterHandle()} bodies called an
+   * identical private method — same extract/collect/lookup/loop shape, differing only in the
+   * line table/column/field constants and the log message's noun — which SonarQube flagged as
+   * duplicated-lines-on-new-code (PR #921, 7.44% vs. the 3% gate). Read by the shared PDF
+   * template's "CÓD." column (see {@code documentPdf.js}'s {@code resolveProductCode} on the
+   * frontend), which already prioritizes this field over its dead fallback chain.
+   *
+   * @param context   the current NeoContext; only used to read the GET response body
+   * @param lineTable fixed DB table name literal for the line entity (e.g. {@code
+   *                  "c_orderline"}), passed straight through to {@link
+   *                  #fetchProductCodesForLines}
+   * @param lineIdCol fixed PK column name literal for {@code lineTable} (e.g. {@code
+   *                  "c_orderline_id"})
+   * @param fieldName the JSON field name to write the resolved SKU into (e.g. {@code
+   *                  "productCode"})
+   * @param log       caller's logger, used for the warn-level failure message
+   */
+  static void enrichLinesWithProductCode(NeoContext context, String lineTable, String lineIdCol,
+      String fieldName, Logger log) {
+    try {
+      JSONArray dataArr = extractGetDataArray(context);
+      if (dataArr == null) {
+        return;
+      }
+      List<String> lineIds = collectIds(dataArr);
+      Map<String, String> codes = fetchProductCodesForLines(lineIds, lineTable, lineIdCol, log);
+      for (int i = 0; i < dataArr.length(); i++) {
+        JSONObject line = dataArr.getJSONObject(i);
+        String id = line.optString("id", null);
+        String code = codes.get(id);
+        if (StringUtils.isNotBlank(code)) {
+          line.put(fieldName, code);
+        }
+      }
+    } catch (Exception e) {
+      log.warn("Could not enrich {} for lines in {}: {}", fieldName, lineTable, e.getMessage());
+    }
   }
 
   /**

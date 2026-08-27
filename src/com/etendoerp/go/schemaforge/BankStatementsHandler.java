@@ -19,6 +19,7 @@ package com.etendoerp.go.schemaforge;
 
 import static com.etendoerp.go.schemaforge.BankStatementFormatDetector.detectFormat;
 import static com.etendoerp.go.schemaforge.BankStatementsSupport.buildLineTxns;
+import static com.etendoerp.go.schemaforge.BankStatementsSupport.codedError;
 import static com.etendoerp.go.schemaforge.BankStatementsSupport.mapLineRow;
 import static com.etendoerp.go.schemaforge.BankStatementsSupport.deriveStatementStatus;
 import static com.etendoerp.go.schemaforge.BankStatementsSupport.formatDate;
@@ -130,6 +131,12 @@ public class BankStatementsHandler implements NeoHandler {
   private static final String MSG_HAS_RECONCILED =
       "The statement has reconciled lines; unreconcile them first";
   private static final String MSG_LINE_REQUIRED = "At least one line is required";
+  private static final String MSG_NO_VALID_LINES =
+      "The file contains no valid lines to import";
+  private static final String MSG_ZERO_AMOUNT_LINE =
+      "Every line must have an amount in either Deposit or Withdrawal";
+  private static final String CODE_NO_VALID_LINES = "NO_VALID_LINES";
+  private static final String FIELD_DISCARDED_LINES = "discardedLines";
 
   /**
    * AutoCloseable wrapper around {@link OBContext#setAdminMode}. Lets us drop
@@ -395,7 +402,18 @@ public class BankStatementsHandler implements NeoHandler {
       FIN_BankStatement statement = newBankStatement(in.account, in.fileName);
       OBDal.getInstance().save(statement);
 
-      int lineCount = runParser(in.format, in.fileBytes, statement);
+      runParser(in.format, in.fileBytes, statement);
+      OBDal.getInstance().flush();
+
+      // Same rule Classic applies in FIN_BankStatementImport.saveFINBankStatementLines:
+      // lines with no amount at all are dropped and the survivors renumbered.
+      BankStatementLinePruner.PruneResult pruned =
+          BankStatementLinePruner.pruneZeroAmountLines(statement);
+      if (pruned.getKept() == 0) {
+        OBDal.getInstance().rollbackAndClose();
+        return codedError(CODE_NO_VALID_LINES, MSG_NO_VALID_LINES);
+      }
+
       processStatement(statement);
       BankStatementAggregates.recompute(statement);
       OBDal.getInstance().flush();
@@ -403,7 +421,8 @@ public class BankStatementsHandler implements NeoHandler {
       JSONObject result = new JSONObject();
       result.put("id", statement.getId());
       result.put(FIELD_FILE_NAME, in.fileName);
-      result.put(FIELD_LINE_COUNT, lineCount);
+      result.put(FIELD_LINE_COUNT, pruned.getKept());
+      result.put(FIELD_DISCARDED_LINES, pruned.getDiscarded());
       return NeoResponse.createdWithData(result);
 
     } catch (IllegalArgumentException e) {
@@ -796,13 +815,14 @@ public class BankStatementsHandler implements NeoHandler {
    * file name / notes clear the field, mirroring an edit that removed them.
    */
   private void applyEditableHeader(FIN_BankStatement statement, JSONObject body) {
-    statement.setName(body.optString(FIELD_NAME, null));
+    String name = body.optString(FIELD_NAME, null);
+    statement.setName(StringUtils.isNotBlank(name) ? truncate(name, 60) : null);
     statement.setImportdate(parseIsoDate(body.optString(FIELD_IMPORT_DATE, null), new Date()));
     statement.setTransactionDate(parseIsoDate(body.optString(FIELD_TRANSACTION_DATE, null), new Date()));
     String fileName = body.optString(FIELD_FILE_NAME, null);
-    statement.setFileName(StringUtils.isNotBlank(fileName) ? truncate(fileName, 60) : null);
+    statement.setFileName(StringUtils.isNotBlank(fileName) ? truncate(fileName, 255) : null);
     String notes = body.optString(FIELD_NOTES, null);
-    statement.setNotes(StringUtils.isNotBlank(notes) ? truncate(notes, 2000) : null);
+    statement.setNotes(StringUtils.isNotBlank(notes) ? truncate(notes, 255) : null);
   }
 
   /**
@@ -825,8 +845,16 @@ public class BankStatementsHandler implements NeoHandler {
       line.setOrganization(statement.getOrganization());
       line.setLineNo(lineNo);
       line.setTransactionDate(parseIsoDate(l.optString("date", null), statement.getTransactionDate()));
-      line.setCramount(parseAmount(l.optString("in", null)));
-      line.setDramount(parseAmount(l.optString("out", null)));
+      BigDecimal crAmount = parseAmount(l.optString("in", null));
+      BigDecimal drAmount = parseAmount(l.optString("out", null));
+      // A line the user actually filled in must carry an amount. Unlike the file
+      // import — which silently drops amount-less rows, as Classic does — here it
+      // is a validation error: the manual form has a user to fix it.
+      if (crAmount.signum() == 0 && drAmount.signum() == 0) {
+        throw new OBException(MSG_ZERO_AMOUNT_LINE);
+      }
+      line.setCramount(crAmount);
+      line.setDramount(drAmount);
 
       String bpName = l.optString(FIELD_BPARTNER_NAME, null);
       if (StringUtils.isNotBlank(bpName)) line.setBpartnername(truncate(bpName, 60));
@@ -939,6 +967,15 @@ public class BankStatementsHandler implements NeoHandler {
       runParser(in.format, in.fileBytes, transientStmt);
       OBDal.getInstance().flush();
 
+      // Prune before reading back so the preview shows exactly what the import
+      // will persist (same rule as handleImport / Classic).
+      BankStatementLinePruner.PruneResult pruned =
+          BankStatementLinePruner.pruneZeroAmountLines(transientStmt);
+      if (pruned.getKept() == 0) {
+        OBDal.getInstance().rollbackAndClose();
+        return codedError(CODE_NO_VALID_LINES, MSG_NO_VALID_LINES);
+      }
+
       // Read the parsed lines straight from the DB instead of going through
       // statement.getFINBankStatementLineList(). The entity collection isn't
       // refreshed after save(line), so it can come back empty even when the
@@ -949,6 +986,7 @@ public class BankStatementsHandler implements NeoHandler {
       // Use the SQL row count as the canonical lineCount — that's the only
       // value guaranteed to match what the user will actually see in step 2.
       JSONObject result = BankStatementPreview.buildPayload(in.format, in.fileName, lines.length(), lines);
+      result.put(FIELD_DISCARDED_LINES, pruned.getDiscarded());
 
       // Drop everything we parsed — preview is read-only. rollbackAndClose
       // discards both the statement and the cascaded lines from the DB.
@@ -1010,8 +1048,10 @@ public class BankStatementsHandler implements NeoHandler {
     statement.setOrganization(account.getOrganization());
     statement.setActive(true);
     statement.setAccount(account);
-    statement.setName(fileName);
-    statement.setFileName(fileName);
+    // FIN_BANKSTATEMENT.NAME is NVARCHAR(60); Classic truncates too
+    // (FIN_BankStatementImport.createFINBankStatement).
+    statement.setName(truncate(fileName, 60));
+    statement.setFileName(truncate(fileName, 255));
     statement.setImportdate(new Date());
     statement.setTransactionDate(new Date());
     statement.setProcessed(false);
