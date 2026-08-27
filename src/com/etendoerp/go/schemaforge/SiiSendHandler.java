@@ -51,7 +51,42 @@ public class SiiSendHandler extends AbstractLegacyInvoiceActionHandler {
     ids.put(recordId);
     params.put("ids", ids);
 
-    return NeoProcessService.executeObuiappClass(PROCESS_CLASS, PROCESS_ID, params);
+    NeoResponse response = NeoProcessService.executeObuiappClass(PROCESS_CLASS, PROCESS_ID, params);
+    return normalizeErrorShape(response);
+  }
+
+  /**
+   * Ensures every error response carries a top-level {@code message} field.
+   *
+   * <p>{@code MultiEnvioFactura} (the classic SII sending process) reports a failed
+   * single-invoice send (e.g. a missing required field caught by
+   * {@code SIIUtils.invoicePreviousValidations}) through
+   * {@link NeoProcessService#translateObuiappResult}, which already produces a body with a
+   * top-level {@code message}. But any exception the classic process throws instead (a bug in
+   * its own validation/classification code, a SOAP/network failure, etc.) is caught generically
+   * by {@link NeoProcessService#executeObuiappClass} and returned via
+   * {@link NeoResponse#error(int, String)}, whose body nests the text under {@code error.message}.
+   *
+   * <p>The frontend ({@code SifSendingModal.jsx}) only reads {@code response.message} /
+   * {@code message} off the on-demand send response — it does not know about the
+   * {@code error.message} shape used by generic CRUD/process error handling elsewhere. Without
+   * this normalization, any such exception would silently degrade to a generic "HTTP 500" in the
+   * UI instead of showing the real cause, which is exactly the "sent but nothing reached AEAT"
+   * symptom this handler exists to prevent.
+   *
+   * <p>As of the fix generalizing this normalization into
+   * {@link NeoResponse#ensureTopLevelMessage(NeoResponse)}, {@code NeoProcessService}'s
+   * {@code executeObuiappClass} already applies it before returning, so this call is now
+   * idempotent (the body already has a top-level {@code message} by the time it gets here).
+   * Kept as a thin delegate — rather than removed — so this handler's intent stays
+   * self-documenting and unaffected by future changes to where the shared service applies
+   * its own normalization.
+   *
+   * <p>Package-private and static so it can be unit tested directly against a synthetic
+   * {@link NeoResponse}, without needing a live AEAT connection or DB access.
+   */
+  static NeoResponse normalizeErrorShape(NeoResponse response) {
+    return NeoResponse.ensureTopLevelMessage(response);
   }
 
   @Override

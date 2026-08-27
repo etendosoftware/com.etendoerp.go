@@ -72,6 +72,7 @@ import org.openbravo.model.financialmgmt.payment.FinAccPaymentMethod;
 import org.openbravo.model.ad.system.Client;
 
 import com.etendoerp.psd2.bank.integration.data.PisPayment;
+import com.etendoerp.psd2.bank.integration.utils.BankIntegrationConstants;
 
 /**
  * Unit tests for {@link PaymentRegistrationService}.
@@ -503,7 +504,7 @@ class PaymentRegistrationServiceTest {
   /**
    * Regression test for the bug reproduced live in Etendo Classic: the business partner (or
    * invoice) has its own payment method configured (e.g. "Efectivo"/Cash), but that method is NOT
-   * configured on the reconciliation account (which only allows Cheque/Transferencia/Tarjeta).
+   * configured on the reconciliation account (which only allows Recibo/Transferencia/Tarjeta).
    *
    * <p>Classic's {@code TransactionAddPaymentDefaultValues.getDefaultPaymentMethod} validates the
    * BP's method against the BP's OWN linked financial account instead of the account actually
@@ -1830,5 +1831,259 @@ class PaymentRegistrationServiceTest {
       addPayment.verify(() -> FIN_AddPayment.updatePaymentDetail(
           eq(beyond), any(), any(), anyBoolean()), never());
     }
+  }
+  // ========================================================================
+  // PSD2 contract for the payment modal (ETP-4891)
+  // ========================================================================
+
+  /**
+   * Builds the standard invoice/org/tree stubbing every listing test needs.
+   */
+  private void stubInvoiceInTree() {
+    Invoice invoice = mock(Invoice.class);
+    Client client = mock(Client.class);
+    Organization org = mock(Organization.class);
+    OrganizationStructureProvider osp = mock(OrganizationStructureProvider.class);
+    when(obDal.get(Invoice.class, "inv-1")).thenReturn(invoice);
+    when(invoice.getClient()).thenReturn(client);
+    when(client.getId()).thenReturn("client-1");
+    when(invoice.getOrganization()).thenReturn(org);
+    when(org.getId()).thenReturn("org-1");
+    when(obContext.getOrganizationStructureProvider("client-1")).thenReturn(osp);
+    when(osp.getNaturalTree("org-1")).thenReturn(new HashSet<>(Collections.singleton("org-1")));
+  }
+
+  private static NeoContext listContext() {
+    return NeoContext.builder()
+        .recordId("inv-1")
+        .httpMethod("GET")
+        .endpointType(NeoEndpointType.CRUD)
+        .build();
+  }
+
+  /**
+   * The payment modal needs all THREE PSD2 states, not two: an account that was connected and then
+   * switched off keeps its Salt Edge link and is `bankReconnectable`, and a transfer aimed at it is
+   * blocked; an account that was never connected has neither flag and keeps the ordinary manual
+   * flow. Emitting only `bankConnected` made those two indistinguishable.
+   *
+   * @param connectionStatus the stored em_psd2_connection_status
+   * @param saltEdgeAccountId the stored Salt Edge account id (null/blank when never linked)
+   */
+  @SuppressWarnings("unchecked")
+  private JSONObject listOneAccount(String connectionStatus, String saltEdgeAccountId)
+      throws Exception {
+    stubInvoiceInTree();
+
+    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    when(account.getId()).thenReturn("acc-1");
+    when(account.getName()).thenReturn("Banco");
+    when(account.getPSD2ConnectionStatus()).thenReturn(connectionStatus);
+    when(account.getPSD2SaltEdgeAccountID()).thenReturn(saltEdgeAccountId);
+
+    OBCriteria<FIN_FinancialAccount> accountCriteria = mock(OBCriteria.class);
+    when(obDal.createCriteria(FIN_FinancialAccount.class)).thenReturn(accountCriteria);
+    when(accountCriteria.setFilterOnReadableOrganization(anyBoolean())).thenReturn(accountCriteria);
+    when(accountCriteria.add(any(Criterion.class))).thenReturn(accountCriteria);
+    when(accountCriteria.addOrderBy(anyString(), anyBoolean())).thenReturn(accountCriteria);
+    when(accountCriteria.list()).thenReturn(Collections.singletonList(account));
+
+    FIN_PaymentMethod transfer = mock(FIN_PaymentMethod.class);
+    when(transfer.getId()).thenReturn("pm-transfer");
+    when(transfer.getName()).thenReturn("Transferencia bancaria");
+    FinAccPaymentMethod link = mock(FinAccPaymentMethod.class);
+    when(link.getPaymentMethod()).thenReturn(transfer);
+
+    OBCriteria<FinAccPaymentMethod> methodCrit = mock(OBCriteria.class);
+    when(obDal.createCriteria(FinAccPaymentMethod.class)).thenReturn(methodCrit);
+    when(methodCrit.add(any(Criterion.class))).thenReturn(methodCrit);
+    when(methodCrit.list()).thenReturn(Collections.singletonList(link));
+
+    NeoResponse response = PaymentRegistrationService.handleListAccounts(listContext(), false);
+    assertEquals(200, response.getHttpStatus());
+    return response.getBody().getJSONArray("items").getJSONObject(0);
+  }
+
+  /** An active connection ('CO') is connected and NOT reconnectable. */
+  @Test
+  void testHandleListAccountsActiveConnectionIsConnectedNotReconnectable() throws Exception {
+    JSONObject item = listOneAccount("CO", "SE-ACC-001");
+    assertTrue(item.getBoolean("bankConnected"));
+    assertFalse(item.getBoolean("bankReconnectable"));
+  }
+
+  /** Switched off but still linked → reconnectable. This is the state that blocks a transfer. */
+  @Test
+  void testHandleListAccountsInactiveConnectionWithSurvivingLinkIsReconnectable() throws Exception {
+    JSONObject item = listOneAccount("DI", "SE-ACC-001");
+    assertFalse(item.getBoolean("bankConnected"));
+    assertTrue(item.getBoolean("bankReconnectable"));
+  }
+
+  /** Never connected → neither flag, so the ordinary manual payment flow is untouched. */
+  @Test
+  void testHandleListAccountsNeverConnectedIsNeitherConnectedNorReconnectable() throws Exception {
+    JSONObject item = listOneAccount(null, null);
+    assertFalse(item.getBoolean("bankConnected"));
+    assertFalse(item.getBoolean("bankReconnectable"));
+  }
+
+  /** A blank (not null) Salt Edge id is still "no link" — StringUtils.isNotBlank, not != null. */
+  @Test
+  void testHandleListAccountsBlankSaltEdgeIdIsNotReconnectable() throws Exception {
+    JSONObject item = listOneAccount("DI", "   ");
+    assertFalse(item.getBoolean("bankReconnectable"));
+  }
+
+  /**
+   * The listed payment methods carry the authoritative {@code isBankTransfer} flag, so the SPA no
+   * longer has to guess from the label with a regex. It matters because that gate now BLOCKS a
+   * payment: a method merely NAMED like a transfer must report {@code false}.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  void testHandleListPaymentMethodsEmitsIsBankTransferFromTheFlagNotTheName() throws Exception {
+    stubInvoiceInTree();
+
+    // Flagged as the bank transfer.
+    FIN_PaymentMethod transfer = mock(FIN_PaymentMethod.class);
+    when(transfer.getId()).thenReturn("pm-transfer");
+    when(transfer.getName()).thenReturn("Transferencia bancaria");
+    when(transfer.isPSD2IsBankTransfer()).thenReturn(Boolean.TRUE);
+
+    // Named like one, but NOT flagged — the anti-regex case.
+    FIN_PaymentMethod internal = mock(FIN_PaymentMethod.class);
+    when(internal.getId()).thenReturn("pm-internal");
+    when(internal.getName()).thenReturn("Transferencia interna");
+    when(internal.isPSD2IsBankTransfer()).thenReturn(Boolean.FALSE);
+
+    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    Organization accOrg = mock(Organization.class);
+    when(accOrg.getId()).thenReturn("org-1");
+    when(account.getOrganization()).thenReturn(accOrg);
+
+    FinAccPaymentMethod transferLink = mock(FinAccPaymentMethod.class);
+    when(transferLink.getAccount()).thenReturn(account);
+    when(transferLink.getPaymentMethod()).thenReturn(transfer);
+    FinAccPaymentMethod internalLink = mock(FinAccPaymentMethod.class);
+    when(internalLink.getAccount()).thenReturn(account);
+    when(internalLink.getPaymentMethod()).thenReturn(internal);
+
+    OBCriteria<FinAccPaymentMethod> crit = mock(OBCriteria.class);
+    when(obDal.createCriteria(FinAccPaymentMethod.class)).thenReturn(crit);
+    when(crit.setFilterOnReadableOrganization(anyBoolean())).thenReturn(crit);
+    when(crit.add(any(Criterion.class))).thenReturn(crit);
+    when(crit.list()).thenReturn(Arrays.asList(transferLink, internalLink));
+
+    NeoResponse response =
+        PaymentRegistrationService.handleListPaymentMethods(listContext(), false);
+
+    assertEquals(200, response.getHttpStatus());
+    JSONArray items = response.getBody().getJSONArray("items");
+    assertEquals(2, items.length());
+    JSONObject first = items.getJSONObject(0);
+    JSONObject second = items.getJSONObject(1);
+    assertEquals("pm-transfer", first.getString("id"));
+    assertEquals("Transferencia bancaria", first.getString("label"));
+    assertTrue(first.getBoolean("isBankTransfer"));
+    assertEquals("pm-internal", second.getString("id"));
+    assertEquals("Transferencia interna", second.getString("label"));
+    assertFalse(second.getBoolean("isBankTransfer"),
+        "a method merely named like a transfer must not be reported as one");
+  }
+  // ========================================================================
+  // resolveProcessAction (ETP-4891)
+  // ========================================================================
+
+  /**
+   * "D" ("Process Made Payment(s) and Withdrawal" in Classic) is the only way left to get Core to
+   * create the {@code FIN_Finacc_Transaction} for a transfer, now that Automatic Withdrawn is
+   * permanently off for that method. It is required for every transfer payment OUT except one that
+   * can defer to a live PIS handshake — a connected account, and ONLY when the caller passes
+   * {@code mayDeferToPis=true}.
+   */
+  private static FIN_Payment paymentFor(boolean isReceipt, FIN_PaymentMethod method,
+      FIN_FinancialAccount account) {
+    FIN_Payment payment = mock(FIN_Payment.class);
+    when(payment.isReceipt()).thenReturn(isReceipt);
+    when(payment.getPaymentMethod()).thenReturn(method);
+    when(payment.getAccount()).thenReturn(account);
+    return payment;
+  }
+
+  private static FIN_PaymentMethod transferMethod() {
+    FIN_PaymentMethod method = mock(FIN_PaymentMethod.class);
+    when(method.isPSD2IsBankTransfer()).thenReturn(Boolean.TRUE);
+    return method;
+  }
+
+  private static FIN_PaymentMethod nonTransferMethod() {
+    FIN_PaymentMethod method = mock(FIN_PaymentMethod.class);
+    when(method.isPSD2IsBankTransfer()).thenReturn(Boolean.FALSE);
+    when(method.getName()).thenReturn("Efectivo");
+    return method;
+  }
+
+  private static FIN_FinancialAccount accountWithStatus(String connectionStatus) {
+    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    when(account.getPSD2ConnectionStatus()).thenReturn(connectionStatus);
+    return account;
+  }
+
+  @Test
+  void testResolveProcessActionTransferOutNotConnectedGetsWithdrawal() {
+    FIN_Payment payment = paymentFor(false, transferMethod(), accountWithStatus("NC"));
+    assertEquals("D", PaymentRegistrationService.resolveProcessAction(payment, true));
+  }
+
+  @Test
+  void testResolveProcessActionTransferOutNeverConnectedGetsWithdrawal() {
+    // No PSD2 status at all (null) — never linked, must not be confused with "connected".
+    FIN_Payment payment = paymentFor(false, transferMethod(), accountWithStatus(null));
+    assertEquals("D", PaymentRegistrationService.resolveProcessAction(payment, true));
+  }
+
+  @Test
+  void testResolveProcessActionTransferOutConnectedDefersToPisWhenAllowed() {
+    FIN_Payment payment = paymentFor(false, transferMethod(),
+        accountWithStatus(BankIntegrationConstants.FA_CONNECTION_STATUS_CONNECTED));
+    assertEquals("P", PaymentRegistrationService.resolveProcessAction(payment, true));
+  }
+
+  /**
+   * The whole reason {@code mayDeferToPis} exists: a caller that never initiates a PIS handshake
+   * (confirmDraftPayment, the quick-pay path, bank reconciliation, the New Movement wizard) must
+   * get the transaction created NOW even on a connected account — nothing else will ever create it
+   * for that specific call. Connection state alone is not enough; the caller's intent is.
+   */
+  @Test
+  void testResolveProcessActionTransferOutConnectedButCallerCannotDeferStillWithdraws() {
+    FIN_Payment payment = paymentFor(false, transferMethod(),
+        accountWithStatus(BankIntegrationConstants.FA_CONNECTION_STATUS_CONNECTED));
+    assertEquals("D", PaymentRegistrationService.resolveProcessAction(payment, false));
+  }
+
+  @Test
+  void testResolveProcessActionReceiptIsAlwaysPlainProcessRegardlessOfMethodOrConnection() {
+    // Automatic Deposit was never touched by ETP-4891 — Core's own trigger still governs receipts.
+    FIN_Payment payment = paymentFor(true, transferMethod(), accountWithStatus("NC"));
+    assertEquals("P", PaymentRegistrationService.resolveProcessAction(payment, true));
+    assertEquals("P", PaymentRegistrationService.resolveProcessAction(payment, false));
+  }
+
+  @Test
+  void testResolveProcessActionNonTransferMethodIsAlwaysPlainProcess() {
+    FIN_Payment payment = paymentFor(false, nonTransferMethod(), accountWithStatus("NC"));
+    assertEquals("P", PaymentRegistrationService.resolveProcessAction(payment, true));
+    assertEquals("P", PaymentRegistrationService.resolveProcessAction(payment, false));
+  }
+
+  @Test
+  void testResolveProcessActionFallsBackToNameWhenFlagAbsent() {
+    // Mirrors isBankTransferMethod's own name fallback for a legacy template with no flag set yet.
+    FIN_PaymentMethod method = mock(FIN_PaymentMethod.class);
+    when(method.getName()).thenReturn("Transferencia bancaria");
+    FIN_Payment payment = paymentFor(false, method, accountWithStatus("NC"));
+    assertEquals("D", PaymentRegistrationService.resolveProcessAction(payment, true));
   }
 }

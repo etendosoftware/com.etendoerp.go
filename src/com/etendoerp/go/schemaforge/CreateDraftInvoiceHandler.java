@@ -106,6 +106,12 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
   private static final String PARAM_SHIPMENT_IDS = "shipmentIds";
   private static final String PARAM_PRICE_LIST_ID = "priceListId";
   private static final String ERR_RECORD_ID_REQUIRED = "Record ID is required";
+  // ETP-4942 — surfaced as a 400 validation error instead of letting a null
+  // Invoice.getPriceList() reach UpdatePricesAndAmounts and blow up as an
+  // unguarded 500 further down the native invoice-line-creation pipeline.
+  private static final String ERR_PRICE_LIST_REQUIRED =
+      "No Price List could be resolved for this invoice: select a tariff or configure "
+          + "a default Price List for the Business Partner";
   private static final String KEY_RESPONSE = "response";
 
   /**
@@ -830,6 +836,7 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
 
     Invoice invoice = createInvoiceHeaderFromShipment(first, shipments);
     applyPriceListOverride(invoice, priceListId);
+    ensurePriceListResolved(invoice);
     OBDal.getInstance().save(invoice);
     OBDal.getInstance().flush();
     addShipmentLinesToInvoice(invoice, shipments, lineOverrides);
@@ -854,6 +861,21 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
     PriceList priceList = OBDal.getInstance().get(PriceList.class, priceListId);
     if (priceList != null) {
       invoice.setPriceList(priceList);
+    }
+  }
+
+  /**
+   * Fails fast with a clear 400 when neither the shipment's linked order, the
+   * Business Partner's default tariff, nor an explicit {@code priceListId} override
+   * resolved a price list (ETP-4942 — a shipment with no linked sales order and a
+   * Business Partner with no default Price List used to reach {@code
+   * UpdatePricesAndAmounts} with a null {@code Invoice.getPriceList()}, which threw an
+   * unguarded NPE surfaced to the caller as a 500). Must run AFTER {@link
+   * #applyPriceListOverride}, which is the last chance to fill it in.
+   */
+  private void ensurePriceListResolved(Invoice invoice) {
+    if (invoice.getPriceList() == null) {
+      throw new OBException(ERR_PRICE_LIST_REQUIRED);
     }
   }
 
@@ -1030,6 +1052,13 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
     invoice.setSummedLineAmount(BigDecimal.ZERO);
     invoice.setGrandTotalAmount(BigDecimal.ZERO);
     invoice.setWithholdingamount(BigDecimal.ZERO);
+
+    // ETP-4888: this header is built directly via OBProvider, bypassing the normal NEO CRUD
+    // "new record" HTTP path that would otherwise resolve every declared contract.json
+    // derivation (e.g. SII/SIF fields like etsgDateOperation). Fields already set above are
+    // never overwritten — only properties still blank are filled in.
+    NeoBackgroundDefaultsService.applyDeclaredDefaultsToBackgroundEntity("sales-invoice", "header",
+        invoice, first.getId());
 
     return invoice;
   }

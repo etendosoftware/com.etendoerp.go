@@ -40,7 +40,10 @@ import org.openbravo.dal.service.OBDal;
  * This marks the source invoice line as received so it no longer appears in the
  * "Add from Invoice" modal.
  *
- * <p>On GET: enriches each line with:
+ * <p>On GET: strips any discount line (dummy product {@code ETGO_DTO}) via
+ * {@link DiscountLineFilter} — same protection {@link OrderLineHandler} and
+ * {@link InvoiceLineHandler} apply on their own GET responses (ETP-4844) — then
+ * enriches each remaining line with:
  * <ul>
  *   <li>{@code orderQuantity} — from {@code C_OrderLine.QtyOrdered} (authoritative for
  *       single-UOM products where {@code QuantityOrder} is typically null).</li>
@@ -105,6 +108,8 @@ public abstract class AbstractInOutLineHandler implements NeoHandler {
         return null;
       }
       JSONObject body = context.getPreviousResult().getBody();
+      JSONObject responseWrapper = body.optJSONObject("response");
+      dataArr = DiscountLineFilter.filterDataArray(dataArr, responseWrapper);
       List<String> lineIds = NeoHandlerUtils.collectIds(dataArr);
       Map<String, LineData> dataMap = fetchLineData(lineIds);
       for (int i = 0; i < dataArr.length(); i++) {

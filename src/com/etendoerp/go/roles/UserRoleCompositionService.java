@@ -27,7 +27,9 @@ import java.util.Set;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.hibernate.Session;
 import org.hibernate.criterion.Restrictions;
+import org.hibernate.query.NativeQuery;
 import org.openbravo.base.exception.OBException;
 import org.openbravo.base.provider.OBProvider;
 import org.openbravo.base.structure.BaseOBObject;
@@ -41,6 +43,7 @@ import org.openbravo.model.ad.access.UserRoles;
 import org.openbravo.model.ad.access.WindowAccess;
 import org.openbravo.model.common.enterprise.Organization;
 
+import com.etendoerp.go.schemaforge.util.OwnerSupport;
 import com.etendoerp.go.schemaforge.util.UserRoleSyncSupport;
 
 /**
@@ -176,11 +179,16 @@ public class UserRoleCompositionService {
   /** {@code AD_Role.UserLevel} shared by every fixed role in this fleet (client + org). */
   private static final String FIXED_ROLE_USER_LEVEL = SystemRoleTemplates.FIXED_ROLE_USER_LEVEL;
 
-  /** Personal-role name prefix — see {@link #buildPersonalRoleName(User)}. */
-  private static final String PERSONAL_ROLE_NAME_PREFIX = "Personal – ";
-
   /** Increment used when minting a fresh {@code AD_Role_Inheritance.Seqno}. */
   private static final long SEQNO_STEP = 10L;
+
+  /**
+   * Naming/org-access/user-defaults finishing steps for a freshly-minted personal role — see its
+   * own class javadoc for why this is a separate collaborator (Sonar S1448, extracted from this
+   * class). Stateless, so a single shared instance is safe to reuse across every call.
+   */
+  private final PersonalRoleAccessProvisioningService personalRoleAccessProvisioningService =
+      new PersonalRoleAccessProvisioningService();
 
   /**
    * The literal System Administrator {@code AD_Role_ID} — the ONLY role id that bypasses
@@ -247,26 +255,28 @@ public class UserRoleCompositionService {
   }
 
   /**
-   * Same as {@link #assignTemplateRoles(String, List)}, but also enforces that {@code
-   * callerRole} may target {@code userId} at all — see {@link
-   * #enforceCallerClientBoundary(User, Role)} and the class javadoc for why this matters
-   * (REVIEW cycle 1, ETP-4852: a client-admin must never be able to reassign or strip another
-   * tenant's user). Real webhook callers (e.g. {@code SFAssignUserRoles}) MUST use this
-   * overload, passing the role they already resolved for the current request.
+   * Same as {@link #assignTemplateRoles(String, List, Role)}, but also enforces the ETP-4830
+   * owner-protection rule against {@code userId} — see {@link #enforceOwnerProtection(User,
+   * String)}. Real webhook callers (e.g. {@code SFAssignUserRoles}) MUST use this overload,
+   * passing the caller's own {@code AD_User_ID}. A {@code null} {@code callerUserId} skips the
+   * check entirely, mirroring this class's existing {@code callerRole=null} convention — kept for
+   * plain unit tests and any other caller with no per-request identity to check against.
    *
    * @param userId the {@code AD_User_ID} to compose roles for
    * @param templateRoleIds the desired FULL set of template role ids — see {@link
    *     #assignTemplateRoles(String, List)}
-   * @param callerRole the role making this request, already resolved by the caller BEFORE
-   *     entering admin mode — {@code null} means "no per-request identity to check" (skips the
-   *     boundary check entirely; see {@link #enforceCallerClientBoundary(User, Role)})
+   * @param callerRole the role making this request — see {@link #assignTemplateRoles(String,
+   *     List, Role)}
+   * @param callerUserId the {@code AD_User_ID} making this request, already resolved by the
+   *     caller BEFORE entering admin mode, or {@code null} to skip the owner-protection check
    * @return a summary of what changed
    * @throws OBException if {@code userId} is missing/unresolvable, {@code templateRoleIds} is
-   *     {@code null}, any requested id is not an active, non-admin template role, or {@code
-   *     callerRole} is a non-system role whose client differs from {@code userId}'s
+   *     {@code null}, any requested id is not an active, non-admin template role, {@code
+   *     callerRole} is a non-system role whose client differs from {@code userId}'s, or {@code
+   *     userId} is flagged as its client's owner and {@code callerUserId} is not that same user
    */
   public AssignmentResult assignTemplateRoles(String userId, List<String> templateRoleIds,
-      Role callerRole) {
+      Role callerRole, String callerUserId) {
     if (StringUtils.isBlank(userId)) {
       throw new OBException("Missing user id for role composition");
     }
@@ -278,6 +288,7 @@ public class UserRoleCompositionService {
       throw new OBException("User not found: " + userId);
     }
     enforceCallerClientBoundary(user, callerRole);
+    enforceOwnerProtection(user, callerUserId);
 
     List<Role> templates = resolveAndValidateTemplates(templateRoleIds);
 
@@ -304,6 +315,157 @@ public class UserRoleCompositionService {
     } finally {
       OBContext.restorePreviousMode();
     }
+  }
+
+  /**
+   * ETP-4830 — public get-or-create entry point for "just the user's own empty personal role,
+   * with no templates composed" — the step that must now run immediately after a new {@code
+   * AD_User} is created (see {@code UserRoleAssignmentHandler#ensurePersonalRoleForNewlyCreatedUser},
+   * which calls this BEFORE the create-user invitation goes out), independent of and prior to
+   * whatever templates an admin later picks via {@link #assignTemplateRoles(String, List)}.
+   *
+   * <p>Deliberately thin: reuses {@link #resolveOrCreatePersonalRole(User)} — the exact same
+   * "is this genuinely user's own role" identity check ({@link #isReusablePersonalRole(User,
+   * Role)}) and creation logic ({@link #createPersonalRole(User)}) the template-composition path
+   * already relies on — so there is exactly one definition of what a personal role is and how one
+   * gets minted. Unlike {@link #assignTemplateRoles(String, List)}, this method does NOT touch
+   * {@code AD_Role_Inheritance}, does NOT set {@code AD_User.Default_Ad_Role_ID}, and does NOT
+   * sync {@code AD_User_Roles} — the caller is responsible for the assignment step (setting the
+   * user's default role and syncing {@code AD_User_Roles}, e.g. via {@link
+   * com.etendoerp.go.schemaforge.util.UserRoleSyncSupport#syncSingleActiveUserRole(User, Role)})
+   * once it has the returned {@link Role}. Enters/exits its own {@code
+   * OBContext.setAdminMode(true)} scope (mirroring {@link #getAppliedTemplateRoleIds(String,
+   * Role)}'s convention for a read/write entry point not already wrapped by {@link
+   * #assignTemplateRoles(String, List, Role, String)}'s own admin-mode block) — safe to call from
+   * within an already-admin-mode caller, since Openbravo's admin-mode flag is stack-based
+   * (push/pop), same reasoning as the class javadoc gives for {@link #assignTemplateRoles(String,
+   * List, Role)}.
+   *
+   * @param user the already-resolved user to get or create a personal role for
+   * @return the user's existing personal role if one is already reusable (see {@link
+   *     #isReusablePersonalRole(User, Role)}), otherwise a brand-new, empty one
+   * @throws OBException if {@code user} is {@code null}
+   */
+  public Role ensurePersonalRole(User user) {
+    if (user == null) {
+      throw new OBException("Missing user for personal role creation");
+    }
+    OBContext.setAdminMode(true);
+    try {
+      return resolveOrCreatePersonalRole(user);
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  /**
+   * ETP-4830 bug fix — {@code UserRoleAssignmentHandler#ensurePersonalRoleForNewlyCreatedUser}'s
+   * ONLY entry point into this class: unlike {@link #ensurePersonalRole(User)}, this NEVER looks
+   * at {@code user.getDefaultRole()} at all — it unconditionally mints a brand-new, empty
+   * personal role via {@link #createPersonalRole(User)}.
+   *
+   * <p><b>Why "get-or-create" is the wrong shape for this ONE caller.</b> A user that was just
+   * created, this very request, cannot possibly already have a genuine personal role — nothing
+   * could have run {@link #createPersonalRole(User)} (or any equivalent) for it before now. So
+   * any non-null {@code Default_Ad_Role_ID} already sitting on the freshly-inserted row is, by
+   * construction, NOT evidence of a real prior assignment — it can only be leftover/incorrect
+   * data (confirmed root cause, ETP-4830: a stale {@code hook.editing} object in the React SPA's
+   * {@code DetailView.jsx}, carried over from a previously-viewed DIFFERENT user's record when
+   * navigating straight to "New user" with no remount, was still being serialized into the
+   * create {@code POST} payload — since fixed by resetting {@code hook.editing} whenever it holds
+   * a different persisted record, see {@code DetailView.jsx}'s {@code isNew}-guard effect). {@link
+   * #ensurePersonalRole(User)}'s {@link #resolveOrCreatePersonalRole(User)} path, via {@link
+   * #isReusablePersonalRole(User, Role)} → {@link #isExclusivelyAssignedTo(Role, User)}, treats a
+   * candidate role with ZERO {@code AD_User_Roles} rows as "never assigned yet, still safe to
+   * reuse" (a deliberate accommodation for an EXISTING user whose {@code Default_Ad_Role_ID} was
+   * set manually via the classic UI and never synced) — but that same accommodation is exactly
+   * what let the stale/incorrect role above be silently "reused" as if it already belonged to the
+   * brand-new user, instead of a fresh one being minted. Since a just-created user can never
+   * legitimately be in that "manually pre-set, not yet synced" situation, the safest fix for THIS
+   * call site is to never consult {@code Default_Ad_Role_ID} at all, rather than trying to further
+   * distinguish "genuinely pre-set" from "stale/incorrect" after the fact — a personal role must
+   * only ever be found for a user if it was actually created FOR that user before, never inferred
+   * from an arbitrary existing role reference.</p>
+   *
+   * <p>Same admin-mode contract as {@link #ensurePersonalRole(User)} — enters/exits its own
+   * {@code OBContext.setAdminMode(true)} scope, safe to call from within an already-admin-mode
+   * caller (Openbravo's admin-mode flag is stack-based).</p>
+   *
+   * @param user the already-resolved, newly-created user to mint a personal role for
+   * @return a brand-new, empty personal role — never a pre-existing one
+   * @throws OBException if {@code user} is {@code null}
+   */
+  public Role createFreshPersonalRole(User user) {
+    if (user == null) {
+      throw new OBException("Missing user for personal role creation");
+    }
+    OBContext.setAdminMode(true);
+    try {
+      return createPersonalRole(user);
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  /**
+   * Rejects reassigning the OWNER's role composition from anyone other than the owner
+   * themselves (ETP-4830) — the role-assignment-endpoint counterpart to {@code
+   * UserRoleAssignmentHandler#rejectNonOwnerEditingOwner}'s generic {@code AD_User} PUT/PATCH
+   * guard. Both must independently cover the owner protection: an admin reassigning the owner's
+   * role through THIS endpoint never goes through {@code UserRoleAssignmentHandler}'s write path
+   * at all, so that guard alone would not close this gap.
+   *
+   * <p>A no-op — same "nothing to enforce" convention {@link #enforceCallerClientBoundary} uses
+   * for a {@code null} {@code callerRole} — when {@code callerUserId} is {@code null} (no caller
+   * identity supplied), or when {@code user} is not flagged as owner at all (every pre-existing
+   * user until a separate, human-reviewed backfill data-fix runs). When {@code user} IS the owner
+   * and {@code callerUserId} is that same user (the owner recomposing their own access), this is
+   * also a no-op — only a DIFFERENT caller targeting the owner is rejected.</p>
+   *
+   * @param user the already-resolved target user
+   * @param callerUserId the {@code AD_User_ID} making this request, or {@code null} to skip
+   * @throws OBException if {@code user} is flagged as owner and {@code callerUserId} is not that
+   *     same user
+   */
+  private void enforceOwnerProtection(User user, String callerUserId) {
+    if (callerUserId == null) {
+      return;
+    }
+    if (!OwnerSupport.isOwner(user.getId())) {
+      return;
+    }
+    if (callerUserId.equals(user.getId())) {
+      return;
+    }
+    throw new OBException(
+        "This user is the tenant owner — only the owner can reassign their own roles: "
+            + user.getId());
+  }
+
+  /**
+   * Same as {@link #assignTemplateRoles(String, List)}, but also enforces that {@code
+   * callerRole} may target {@code userId} at all — see {@link
+   * #enforceCallerClientBoundary(User, Role)} and the class javadoc for why this matters
+   * (REVIEW cycle 1, ETP-4852: a client-admin must never be able to reassign or strip another
+   * tenant's user). Real webhook callers (e.g. {@code SFAssignUserRoles}) MUST use this
+   * overload, passing the role they already resolved for the current request.
+   *
+   * @param userId the {@code AD_User_ID} to compose roles for
+   * @param templateRoleIds the desired FULL set of template role ids — see {@link
+   *     #assignTemplateRoles(String, List)}
+   * @param callerRole the role making this request, already resolved by the caller BEFORE
+   *     entering admin mode — {@code null} means "no per-request identity to check" (skips the
+   *     boundary check entirely; see {@link #enforceCallerClientBoundary(User, Role)})
+   * @return a summary of what changed
+   * @throws OBException if {@code userId} is missing/unresolvable, {@code templateRoleIds} is
+   *     {@code null}, any requested id is not an active, non-admin template role, or {@code
+   *     callerRole} is a non-system role whose client differs from {@code userId}'s
+   * @see #assignTemplateRoles(String, List, Role, String) the overload that ALSO enforces the
+   *     ETP-4830 owner-protection rule — real webhook callers MUST use that one instead
+   */
+  public AssignmentResult assignTemplateRoles(String userId, List<String> templateRoleIds,
+      Role callerRole) {
+    return assignTemplateRoles(userId, templateRoleIds, callerRole, null);
   }
 
   /**
@@ -686,7 +848,7 @@ public class UserRoleCompositionService {
     role.setClient(user.getClient());
     role.setOrganization(starOrg);
     role.setActive(true);
-    role.setName(buildPersonalRoleName(user));
+    role.setName(personalRoleAccessProvisioningService.buildPersonalRoleName(user));
     role.setDescription("Personal composition role (ETP-4852) — access derives from its "
         + "template inheritances; do not edit directly.");
     role.setUserLevel(FIXED_ROLE_USER_LEVEL);
@@ -695,45 +857,10 @@ public class UserRoleCompositionService {
     role.setClientAdmin(false);
     OBDal.getInstance().save(role);
     OBDal.getInstance().flush();
+    personalRoleAccessProvisioningService.createOrgAccess(role, user, starOrg);
+    personalRoleAccessProvisioningService.applyUserDefaults(user, role);
     log.info("Created personal composition role {} for user {}", role.getId(), user.getId());
     return role;
-  }
-
-  /**
-   * {@code AD_Role.Name} is unique per {@code (AD_Client_ID, Name)} — the user's display name
-   * (falling back to username, then id) is unique enough in practice, but a numeric suffix is
-   * appended on an actual collision rather than failing the whole composition over a duplicate
-   * display name.
-   */
-  private String buildPersonalRoleName(User user) {
-    String base = StringUtils.trimToNull(user.getName());
-    if (base == null) {
-      base = StringUtils.trimToNull(user.getUsername());
-    }
-    if (base == null) {
-      base = user.getId();
-    }
-    String candidate = PERSONAL_ROLE_NAME_PREFIX + base;
-    String name = truncate(candidate, 60);
-    int suffix = 2;
-    while (roleNameExists(user, name)) {
-      String suffixed = candidate + " (" + suffix + ")";
-      name = truncate(suffixed, 60);
-      suffix++;
-    }
-    return name;
-  }
-
-  private boolean roleNameExists(User user, String name) {
-    OBCriteria<Role> criteria = OBDal.getInstance().createCriteria(Role.class);
-    criteria.add(Restrictions.eq(Role.PROPERTY_CLIENT + ".id", user.getClient().getId()));
-    criteria.add(Restrictions.eq(Role.PROPERTY_NAME, name));
-    criteria.setMaxResults(1);
-    return criteria.uniqueResult() != null;
-  }
-
-  private static String truncate(String value, int maxLength) {
-    return value.length() <= maxLength ? value : value.substring(0, maxLength);
   }
 
   /**
@@ -779,7 +906,19 @@ public class UserRoleCompositionService {
     for (RoleInheritance inheritance : existing) {
       if (!desiredIds.contains(inheritance.getInheritFrom().getId())) {
         OBDal.getInstance().remove(inheritance);
-        OBDal.getInstance().flush();
+        // Same core RoleInheritanceEventHandler fan-out as the ADD loop below (see its own
+        // comment) — deleting this row triggers RoleInheritanceManager#applyRemoveInheritance,
+        // which retracts every AccessTypeInjector's propagated rows (window, tab, field, process,
+        // OBUIAPP process, ...) for this role. Core's own deleteRoleAccess wraps ITS internal
+        // remove() calls in an admin-mode bypass, but that bypass is popped before THIS flush
+        // runs, so a still-client-"0" child row (from a system-level template) fails the same
+        // ClientList check the ADD loop already guards against.
+        OBContext.setAdminMode(false);
+        try {
+          OBDal.getInstance().flush();
+        } finally {
+          OBContext.restorePreviousMode();
+        }
         removed++;
       }
     }
@@ -800,14 +939,75 @@ public class UserRoleCompositionService {
       inheritance.setInheritFrom(template);
       inheritance.setSequenceNumber(maxSeqno);
       OBDal.getInstance().save(inheritance);
-      OBDal.getInstance().flush();
+      // Saving this AD_Role_Inheritance row fires core's RoleInheritanceEventHandler, which
+      // fans out through EVERY registered AccessTypeInjector (window, tab, field, process,
+      // OBUIAPP process, ...) to copy the template's accesses onto personalRole. Each injector's
+      // own copyRoleAccess() bypasses the client/org check while it saves (OBContext.setAdminMode
+      // (false)), but that bypass is popped again before this flush runs, so anything it left
+      // dirty/pending gets re-checked HERE under the caller's normal context. That's harmless for
+      // window access (reconcileWindowAccessAfterComposition below re-pins its client/org right
+      // after), but a system-level template (AD_Client_ID = '0', see
+      // EnsureSystemRoleTemplatesScript) that also grants process/report access has nothing
+      // equivalent for those rows, so the copy — still carrying the template's client "0" — fails
+      // this flush with OBSecurityException as soon as a template actually has any (ETP-4830's
+      // own EnsureSystemRoleTemplatesScript#reconcileProcessAccess started seeding those rows).
+      // Same bypass RoleInheritanceManager's own internal saves use, scoped to just this flush.
+      OBContext.setAdminMode(false);
+      try {
+        OBDal.getInstance().flush();
+      } finally {
+        OBContext.restorePreviousMode();
+      }
       added++;
     }
 
     if (added > 0) {
       reconcileWindowAccessAfterComposition(personalRole, templates);
     }
+    syncShowAccountingFieldsFlag(personalRole, templates);
     return new int[] { added, removed };
+  }
+
+  /**
+   * ETP-4877 — keeps {@code AD_Role.EM_ETGO_Show_Acct_Fields} (ETP-4520; gates the
+   * {@code showAccountingFields} capability {@code SFWindowAccessMap} exposes) in sync with
+   * whether {@code personalRole} currently inherits from the system Finance template ({@link
+   * SystemRoleTemplates#FINANCE_ROLE_ID}). {@code 'Y'} when {@code templates} — the FULL desired
+   * set this call is reconciling to, not merely what changed — contains the Finance template;
+   * {@code 'N'} otherwise (including when Finance is being removed on this very call).
+   *
+   * <p>This is the "going forward" half of a two-front fix: {@code
+   * SFWindowAccessMap#resolveShowAccountingFields} reads the column as a flat stored value with
+   * no join to {@code AD_Role_Inheritance} at read time, so the column is a DERIVED fact, not an
+   * independent one — whoever last changed a role's template inheritance is responsible for
+   * keeping it in sync, and this was the one gap in that chain: nothing previously wrote this
+   * column when {@link #assignTemplateRoles(String, List)} changed a personal role's templates
+   * (only {@code EnsureSystemRoleTemplatesScript}/R16/R23 ever set it, once, at role-clone time,
+   * for the old per-client-clone model). Called unconditionally at the end of every {@link
+   * #reconcileInheritances(Role, List)} call — including a no-op reconciliation — so this is
+   * self-healing on every {@code assignTemplateRoles} call, not only when something actually
+   * changed. The retroactive half (every PRE-EXISTING personal role, not touched by a live
+   * composition call) is the sibling {@code R26-tenant-owner-and-personal-role-retrofit.sql}
+   * data-fix's Step 8b, in {@code etendo_schema_forge} — same predicate, kept in lockstep; a
+   * change to one must be mirrored in the other.</p>
+   *
+   * <p>Native SQL, not a DAL property — same reasoning {@link OwnerSupport} and {@code
+   * SFWindowAccessMap#resolveShowAccountingFields} document for this exact column: it was added
+   * straight to the physical table (ETP-4520) and is not mapped as a typed entity property.
+   * Guarded to a no-op UPDATE when the value already matches, so a call that changes nothing here
+   * costs one cheap, index-backed statement.</p>
+   */
+  private void syncShowAccountingFieldsFlag(Role personalRole, List<Role> templates) {
+    boolean shouldShowAcctFields = templates.stream()
+        .anyMatch(template -> SystemRoleTemplates.FINANCE_ROLE_ID.equals(template.getId()));
+    String desired = shouldShowAcctFields ? "Y" : "N";
+    Session session = OBDal.getInstance().getSession();
+    NativeQuery<?> update = session.createNativeQuery(
+        "UPDATE ad_role SET em_etgo_show_acct_fields = :desired, updated = now(), updatedby = '0' "
+            + "WHERE ad_role_id = :roleId AND em_etgo_show_acct_fields <> :desired");
+    update.setParameter("desired", desired);
+    update.setParameter("roleId", personalRole.getId());
+    update.executeUpdate();
   }
 
   /**

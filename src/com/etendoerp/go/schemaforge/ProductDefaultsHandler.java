@@ -17,11 +17,14 @@
 
 package com.etendoerp.go.schemaforge;
 
+import java.util.Set;
+
 import javax.inject.Named;
 
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.criterion.Restrictions;
@@ -54,6 +57,19 @@ import org.openbravo.model.financialmgmt.tax.TaxCategory;
  * <p>Registered via {@code ETGO_SF_ENTITY.Java_Qualifier = "productDefaultsHandler"} on the
  * {@code product} header entity. No other handler was registered for that entity/qualifier before
  * this change, so a brand-new handler class was used rather than extending an existing one.
+ *
+ * <p>ETP-4967: also hides any product classified under a category flagged
+ * {@code em_etgo_issystemcategory = 'Y'} from GET responses — see
+ * {@link #hideSystemCategoryProducts}.
+ *
+ * <p>ETP-4943: also forces {@code stocked}/{@code returnable} to {@code false} whenever a
+ * request declares {@code productType = "S"} (Service) — see
+ * {@link #enforceServiceProductNotStockable}. Runs on both POST and PATCH, unlike the
+ * uOM/taxCategory defaulting above (POST-only): the frontend's own auto-correction
+ * (`ProductAdditionalInfoPanel.jsx`) only fires while the "Additional Info" tab is mounted, so a
+ * user who sets the type to Service on the "General" tab and saves immediately never triggers
+ * it. This is the authoritative enforcement; the frontend one is a same-session UX nicety, not
+ * the guarantee.
  */
 @Named("productDefaultsHandler")
 public class ProductDefaultsHandler implements NeoHandler {
@@ -62,8 +78,17 @@ public class ProductDefaultsHandler implements NeoHandler {
 
   private static final String SPEC = "product";
   private static final String METHOD_POST = "POST";
+  private static final String METHOD_PATCH = "PATCH";
+  private static final String METHOD_GET = "GET";
   private static final String FIELD_UOM = "uOM";
   private static final String FIELD_TAX_CATEGORY = "taxCategory";
+  private static final String FIELD_PRODUCT_CATEGORY = "productCategory";
+  private static final String FIELD_PRODUCT_TYPE = "productType";
+  private static final String FIELD_STOCKED = "stocked";
+  private static final String FIELD_RETURNABLE = "returnable";
+  private static final String PRODUCT_TYPE_SERVICE = "S";
+  private static final String FIELD_TOTAL_ROWS = "totalRows";
+  private static final String FIELD_END_ROW = "endRow";
   private static final String SYSTEM_CLIENT_ID = "0";
 
   @Override
@@ -71,7 +96,10 @@ public class ProductDefaultsHandler implements NeoHandler {
     if (context == null || !SPEC.equals(context.getSpecName())) {
       return null;
     }
-    if (!METHOD_POST.equals(context.getHttpMethod())) {
+    String method = context.getHttpMethod();
+    boolean isCreate = METHOD_POST.equals(method);
+    boolean isUpdate = METHOD_PATCH.equals(method);
+    if (!isCreate && !isUpdate) {
       return null;
     }
     JSONObject body = context.getRequestBody();
@@ -79,16 +107,41 @@ public class ProductDefaultsHandler implements NeoHandler {
       return null;
     }
     try {
-      String clientId = resolveClientId(context);
-      injectIfMissing(body, FIELD_UOM, UOM.class, clientId);
-      injectIfMissing(body, FIELD_TAX_CATEGORY, TaxCategory.class, clientId);
+      enforceServiceProductNotStockable(body);
     } catch (Exception e) {
-      log.error("product pre-hook: failed to inject uOM/taxCategory default", e);
+      log.error("product pre-hook: failed to enforce Service product stock flags", e);
     }
-    // Never short-circuits: the generic CRUD create still runs, now with the two fields
-    // already present in the body (so the generic "first combo option" fallback never fires
-    // for them).
+    if (isCreate) {
+      try {
+        String clientId = resolveClientId(context);
+        injectIfMissing(body, FIELD_UOM, UOM.class, clientId);
+        injectIfMissing(body, FIELD_TAX_CATEGORY, TaxCategory.class, clientId);
+      } catch (Exception e) {
+        log.error("product pre-hook: failed to inject uOM/taxCategory default", e);
+      }
+    }
+    // Never short-circuits: the generic CRUD create/update still runs, now with the request
+    // body already corrected (so the generic "first combo option" fallback never fires for
+    // uOM/taxCategory, and a Service product can never persist as stocked/returnable).
     return null;
+  }
+
+  /**
+   * ETP-4943: a Service product has no physical existence, so it can never be stocked or
+   * returnable. Forces both flags to {@code false} whenever the request itself declares
+   * {@code productType = "S"} — whether or not the caller sent a value for them, so an omitted
+   * flag can't silently resolve to {@code true} downstream. Deliberately scoped to requests that
+   * mention {@code productType}: a PATCH that edits something else on an already-Service product
+   * (e.g. weight) and never touches the type is left alone — resolving the persisted type would
+   * need a DB lookup, out of scope for this ticket's reported cases (all of which change
+   * {@code productType} in the same request).
+   */
+  private static void enforceServiceProductNotStockable(JSONObject body) throws JSONException {
+    if (!PRODUCT_TYPE_SERVICE.equals(body.optString(FIELD_PRODUCT_TYPE, null))) {
+      return;
+    }
+    body.put(FIELD_STOCKED, false);
+    body.put(FIELD_RETURNABLE, false);
   }
 
   @Override
@@ -96,9 +149,16 @@ public class ProductDefaultsHandler implements NeoHandler {
     if (context == null || !SPEC.equals(context.getSpecName())) {
       return null;
     }
-    if (!NeoEndpointType.DEFAULTS.equals(context.getEndpointType())) {
-      return null;
+    if (NeoEndpointType.DEFAULTS.equals(context.getEndpointType())) {
+      return injectDefaults(context);
     }
+    if (NeoEndpointType.CRUD.equals(context.getEndpointType())) {
+      return hideSystemCategoryProducts(context);
+    }
+    return null;
+  }
+
+  private NeoResponse injectDefaults(NeoContext context) {
     NeoResponse previous = context.getPreviousResult();
     if (previous == null || previous.getBody() == null) {
       return null;
@@ -117,6 +177,97 @@ public class ProductDefaultsHandler implements NeoHandler {
     } catch (Exception e) {
       log.error("product afterHandle: failed to inject uOM/taxCategory default", e);
       return null;
+    }
+  }
+
+  /**
+   * ETP-4967: strips products classified under a category flagged {@code em_etgo_issystemcategory
+   * = 'Y'} (see {@link SystemCategoryIds}) from GET responses (list and single-record alike —
+   * {@code response.data} has the same shape either way), so e.g. {@code ETGO_DTO} (category
+   * "Discounts") never shows up in the Product window.
+   */
+  private NeoResponse hideSystemCategoryProducts(NeoContext context) {
+    if (!METHOD_GET.equals(context.getHttpMethod())) {
+      return null;
+    }
+    NeoResponse previous = context.getPreviousResult();
+    if (previous == null || previous.getBody() == null) {
+      return null;
+    }
+    try {
+      JSONObject body = previous.getBody();
+      JSONObject responseWrapper = body.optJSONObject("response");
+      JSONArray dataArr = responseWrapper != null ? responseWrapper.optJSONArray("data") : null;
+      if (dataArr == null || dataArr.length() == 0) {
+        return null;
+      }
+      Set<String> hiddenCategoryIds = resolveHiddenCategoryIds(context);
+      if (hiddenCategoryIds.isEmpty()) {
+        return null;
+      }
+      FilterOutcome outcome = filterHiddenCategoryRows(dataArr, hiddenCategoryIds);
+      if (outcome.removedCount() == 0) {
+        return null;
+      }
+      responseWrapper.put("data", outcome.filtered());
+      adjustRowCounts(responseWrapper, outcome.removedCount());
+      return NeoResponse.ok(body);
+    } catch (Exception e) {
+      log.warn("product afterHandle: failed to hide system-category products: {}", e.getMessage());
+      return null;
+    }
+  }
+
+  /** The current request's client's system-flagged category ids, or empty when unresolvable. */
+  private static Set<String> resolveHiddenCategoryIds(NeoContext context) {
+    String clientId = resolveClientId(context);
+    if (StringUtils.isBlank(clientId)) {
+      return Set.of();
+    }
+    return SystemCategoryIds.resolve(clientId);
+  }
+
+  /** Result of {@link #filterHiddenCategoryRows}: the surviving rows and how many were cut. */
+  private record FilterOutcome(JSONArray filtered, int removedCount) {
+  }
+
+  /**
+   * Removes rows whose {@code productCategory} is in {@code hiddenCategoryIds} from
+   * {@code dataArr}.
+   */
+  private static FilterOutcome filterHiddenCategoryRows(JSONArray dataArr,
+      Set<String> hiddenCategoryIds) {
+    JSONArray filtered = new JSONArray();
+    int removedCount = 0;
+    for (int i = 0; i < dataArr.length(); i++) {
+      JSONObject row = dataArr.optJSONObject(i);
+      if (row == null) {
+        continue;
+      }
+      if (hiddenCategoryIds.contains(row.optString(FIELD_PRODUCT_CATEGORY, ""))) {
+        removedCount++;
+      } else {
+        filtered.put(row);
+      }
+    }
+    return new FilterOutcome(filtered, removedCount);
+  }
+
+  /**
+   * {@code response.totalRows}/{@code endRow} come from core's own datasource count query,
+   * computed before {@link #filterHiddenCategoryRows} ran — decrement them by
+   * {@code removedCount} so a caller that pages off those fields (rather than
+   * {@code data.length}, which is already correct) does not request a page past the end.
+   */
+  private static void adjustRowCounts(JSONObject responseWrapper, int removedCount)
+      throws JSONException {
+    if (responseWrapper.has(FIELD_TOTAL_ROWS)) {
+      responseWrapper.put(FIELD_TOTAL_ROWS,
+          Math.max(0, responseWrapper.optInt(FIELD_TOTAL_ROWS, 0) - removedCount));
+    }
+    if (responseWrapper.has(FIELD_END_ROW)) {
+      responseWrapper.put(FIELD_END_ROW,
+          Math.max(0, responseWrapper.optInt(FIELD_END_ROW, 0) - removedCount));
     }
   }
 

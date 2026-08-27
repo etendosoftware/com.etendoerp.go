@@ -46,6 +46,25 @@ public final class SqlToHqlTranslator {
   private static final Pattern REDUNDANT_AND_ONE_EQUALS_ONE =
       Pattern.compile("(?i)\\s*+AND\\s++1=1\\b");
 
+  // Matches @Param@ / @#Param@ placeholders (session-level variables in Etendo), e.g.
+  // "@#AD_Client_ID@" or "@AD_Org_ID@". Masked out of convertSqlToHql's input before table/column
+  // translation runs — see convertSqlToHql for why.
+  private static final Pattern PARAM_PLACEHOLDER = Pattern.compile("@#?\\w+@");
+
+  /**
+   * Detects a nested {@code (SELECT ...)} subquery inside a SQL-style clause (e.g. {@code X IN
+   * (SELECT ... FROM Fin_Finacc_Paymentmethod WHERE ...)}). This translator only rewrites
+   * {@code TABLE.COLUMN} references — it has no notion of a nested {@code FROM} clause — so a
+   * segment matching this pattern is dropped by {@link #dropNestedSubqueryClauses} instead of
+   * being emitted as broken HQL with the subquery's raw SQL table/column names left untranslated.
+   *
+   * <p>Package-visible (not {@code private}) so {@link
+   * com.etendoerp.go.schemaforge.SelectorValidationResolver}'s AD_Validation-clause guard shares
+   * this exact detection instead of maintaining a second copy of the regex — both classes live in
+   * {@code com.etendoerp.go.schemaforge}.
+   */
+  static final Pattern NESTED_SUBQUERY = Pattern.compile("\\(\\s*SELECT\\b", Pattern.CASE_INSENSITIVE);
+
   private SqlToHqlTranslator() {
   }
 
@@ -218,26 +237,102 @@ public final class SqlToHqlTranslator {
   }
 
   /**
+   * Drops every top-level AND-segment of {@code sqlClause} that contains a nested {@code (SELECT
+   * ...)} subquery (see {@link #NESTED_SUBQUERY}), rejoining whatever segments survive.
+   *
+   * <p>This is the same strategy {@code SelectorValidationResolver#resolveValidationClause}
+   * already applies per-clause to AD_Validation rules: rather than emitting HQL with the
+   * subquery's raw SQL table/column names left untranslated (which Hibernate would reject at
+   * query-execution time), the offending segment is treated as if it were never configured.
+   *
+   * @param sqlClause the raw SQL clause, possibly containing multiple top-level AND-segments
+   * @return {@code sqlClause} unchanged when blank (nothing to guard); the segments that don't
+   *     contain a nested subquery, rejoined with {@code " AND "}; or {@code null} when every
+   *     segment was dropped
+   */
+  private static String dropNestedSubqueryClauses(String sqlClause) {
+    if (sqlClause == null || sqlClause.trim().isEmpty()) {
+      return sqlClause;
+    }
+    List<String> clauses = splitTopLevelAnd(sqlClause);
+    List<String> safeClauses = new ArrayList<>();
+    for (String clause : clauses) {
+      if (NESTED_SUBQUERY.matcher(clause).find()) {
+        log.debug("Dropping SQLWhereClause segment with nested subquery: {}", clause);
+      } else {
+        safeClauses.add(clause);
+      }
+    }
+    if (safeClauses.isEmpty()) {
+      return null;
+    }
+    return String.join(SelectorQueryBuilder.SQL_AND, safeClauses);
+  }
+
+  /**
    * Convert a SQL-style validation clause to HQL.
    * Replaces TABLE.COLUMN with e.dalProperty, handling FK columns (_ID -> .id).
    * Also converts bare column names (without table prefix) to e.property paths.
    *
    * Example: "C_DocType.DocBaseType IN ('POO')" -> "e.documentType IN ('POO')"
    * Example: "docsubtypeso like 'OB'" -> "e.sOSubType like 'OB'"
+   *
+   * <p>Public (not package-private) because {@code SelectorDescriptorResolver}
+   * (package {@code com.etendoerp.go.schemaforge.selector.meta}) also uses it to translate
+   * classic {@code AD_Ref_Table.SQLWhereClause} filters — e.g. {@code C_Tax.Parent_Tax_ID IS
+   * NULL} — the same way AD validation rules are translated by
+   * {@link com.etendoerp.go.schemaforge.SelectorValidationResolver#resolveValidationFilter}.
+   *
+   * <p>Any {@code @Param@} / {@code @#Param@} placeholder in {@code sqlClause} is masked out
+   * before translation and restored verbatim afterward, so a param name that happens to also be
+   * a real column name (e.g. {@code @#AD_Client_ID@} next to an {@code AD_Client_ID} FK column)
+   * is never rewritten into something like {@code @#e.client.id@}. That would corrupt the
+   * placeholder beyond what the downstream param substitution step can recognize, leaving broken
+   * literal text in the final HQL. This matters for the {@code AD_Ref_Table.SQLWhereClause}
+   * caller specifically: param substitution runs strictly *after* this method there (see
+   * {@code SelectorValidationResolver#resolveObuiselParams}), unlike the AD validation-rule
+   * caller, which already substitutes params *before* calling this method — so for that caller
+   * the masking is a no-op.
+   *
+   * <p>Before any translation runs, every top-level AND-segment of {@code sqlClause} is checked
+   * against {@link #NESTED_SUBQUERY} via {@link #dropNestedSubqueryClauses} and dropped if it
+   * contains a nested {@code (SELECT ...)} — mirroring the guard {@code
+   * SelectorValidationResolver#resolveValidationClause} already applies to AD_Validation clauses.
+   * Without it, a classic {@code AD_Ref_Table.SQLWhereClause} such as the one on {@code
+   * M_Warehouse_ID} ({@code M_Warehouse.AD_Client_ID=@#AD_Client_ID@ AND (select ad.isactive from
+   * ad_org ad where ad.ad_org_id = M_Warehouse.AD_Org_ID) = 'Y'}) would have its subquery's raw
+   * SQL table/column names ({@code ad_org}, {@code ad.isactive}) pass straight through
+   * untranslated, and Hibernate would throw {@code QuerySyntaxException: ad_org is not mapped}
+   * the first time a user actually opens that selector — not when this method resolves it.
+   *
+   * @param sqlClause SQL-style clause using TABLE.COLUMN or bare column references
+   * @param targetEntityName HQL entity name the clause is being resolved against
+   * @return the clause translated to HQL {@code e.property} paths; {@code null} when every
+   *     top-level segment was dropped by the nested-subquery guard (i.e. no filter survives);
+   *     returns {@code sqlClause} unchanged if {@code targetEntityName} does not resolve to a
+   *     known entity or translation fails
    */
-  static String convertSqlToHql(String sqlClause, String targetEntityName) {
+  public static String convertSqlToHql(String sqlClause, String targetEntityName) {
     try {
       Entity targetEntity = ModelProvider.getInstance().getEntity(targetEntityName);
       if (targetEntity == null) {
         return sqlClause;
       }
 
+      String guardedClause = dropNestedSubqueryClauses(sqlClause);
+      if (guardedClause == null) {
+        return null;
+      }
+
+      Map<String, String> maskedParams = new HashMap<>();
+      String maskedClause = maskParamPlaceholders(guardedClause, maskedParams);
+
       String tableName = targetEntity.getTableName();
 
       // Step 1: Replace TABLE.COLUMN patterns with e.property
       Pattern tableColPattern = Pattern.compile(
           Pattern.quote(tableName) + "\\.(\\w+)", Pattern.CASE_INSENSITIVE);
-      Matcher m = tableColPattern.matcher(sqlClause);
+      Matcher m = tableColPattern.matcher(maskedClause);
 
       StringBuffer result = new StringBuffer();
       while (m.find()) {
@@ -268,11 +363,42 @@ public final class SqlToHqlTranslator {
         replaceBareColumnToken(m, result, targetEntity, token);
       }
       m.appendTail(result);
-      return result.toString();
+      return unmaskParamPlaceholders(result.toString(), maskedParams);
     } catch (Exception e) {
       log.warn("Could not convert SQL to HQL for entity {}: {}", targetEntityName, e.getMessage());
       return sqlClause;
     }
+  }
+
+  /**
+   * Replace every {@code @Param@} / {@code @#Param@} placeholder in {@code clause} with a unique
+   * alphanumeric sentinel that neither translation pass in {@link #convertSqlToHql} can mistake
+   * for a real column reference, recording the original text in {@code maskedParams} so it can be
+   * restored by {@link #unmaskParamPlaceholders}.
+   */
+  private static String maskParamPlaceholders(String clause, Map<String, String> maskedParams) {
+    Matcher m = PARAM_PLACEHOLDER.matcher(clause);
+    StringBuffer sb = new StringBuffer();
+    int index = 0;
+    while (m.find()) {
+      String sentinel = "sfParamMask" + (index++) + "Sentinel";
+      maskedParams.put(sentinel, m.group());
+      m.appendReplacement(sb, Matcher.quoteReplacement(sentinel));
+    }
+    m.appendTail(sb);
+    return sb.toString();
+  }
+
+  /**
+   * Restore the {@code @Param@} / {@code @#Param@} placeholders masked by
+   * {@link #maskParamPlaceholders}.
+   */
+  private static String unmaskParamPlaceholders(String clause, Map<String, String> maskedParams) {
+    String restored = clause;
+    for (Map.Entry<String, String> entry : maskedParams.entrySet()) {
+      restored = restored.replace(entry.getKey(), entry.getValue());
+    }
+    return restored;
   }
 
   /**

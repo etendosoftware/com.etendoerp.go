@@ -444,7 +444,18 @@ public class UserRoleCompositionServiceOverlapIntegrationTest extends WeldBaseTe
       RoleInheritance salesInheritance = findInheritance(bystanderRole, salesTemplate);
       assertNotNull(salesInheritance);
       OBDal.getInstance().remove(salesInheritance);
-      OBDal.getInstance().flush();
+      // Same OBContext.setAdminMode() bypass addInheritance()/grantWindowAccess() already use:
+      // this delete fans out through core's RoleInheritanceManager#applyRemoveInheritance, which
+      // retracts every AccessTypeInjector's propagated rows (window, tab, field, PROCESS, OBUIAPP
+      // process, ...) — a system-level template's process-access rows still carry client "0" at
+      // this point, and this flush is where that would otherwise fail the ClientList check (see
+      // UserRoleCompositionService#reconcileInheritances's own REMOVE-loop comment).
+      OBContext.setAdminMode();
+      try {
+        OBDal.getInstance().flush();
+      } finally {
+        OBContext.restorePreviousMode();
+      }
 
       WindowAccess afterRemoval = findWindowAccess(bystanderRole, sharedWindow);
       assertNotNull("The shared window's access must survive the removal, re-derived from the "
@@ -622,7 +633,14 @@ public class UserRoleCompositionServiceOverlapIntegrationTest extends WeldBaseTe
       RoleInheritance financeInheritance = findInheritance(bystanderRole, financeTemplate);
       assertNotNull(financeInheritance);
       OBDal.getInstance().remove(financeInheritance);
-      OBDal.getInstance().flush();
+      // Same OBContext.setAdminMode() bypass addInheritance()/grantWindowAccess() already use —
+      // see UserRoleCompositionService#reconcileInheritances's REMOVE-loop comment for why.
+      OBContext.setAdminMode();
+      try {
+        OBDal.getInstance().flush();
+      } finally {
+        OBContext.restorePreviousMode();
+      }
 
       WindowAccess afterRemoval = findWindowAccess(bystanderRole, sharedWindow);
       assertNotNull("The shared window's access must survive the removal, re-derived from the "
@@ -727,7 +745,14 @@ public class UserRoleCompositionServiceOverlapIntegrationTest extends WeldBaseTe
       RoleInheritance financeInheritance = findInheritance(bystanderRole, financeTemplate);
       assertNotNull(financeInheritance);
       OBDal.getInstance().remove(financeInheritance);
-      OBDal.getInstance().flush();
+      // Same OBContext.setAdminMode() bypass addInheritance()/grantWindowAccess() already use —
+      // see UserRoleCompositionService#reconcileInheritances's REMOVE-loop comment for why.
+      OBContext.setAdminMode();
+      try {
+        OBDal.getInstance().flush();
+      } finally {
+        OBContext.restorePreviousMode();
+      }
 
       WindowAccess afterRemoval = findWindowAccess(bystanderRole, sharedWindow);
       assertNotNull("The shared window's access must survive the removal, re-derived from the "
@@ -1138,6 +1163,14 @@ public class UserRoleCompositionServiceOverlapIntegrationTest extends WeldBaseTe
    * #reconcileInheritances}'s own established pattern (save one {@code AD_Role_Inheritance} row,
    * flush, THEN move to the next), never batching 2+ inheritance-adds into one flush. See the call
    * site's own comment for why this matters here specifically.
+   *
+   * <p>Same {@code OBContext.setAdminMode()} bypass its sibling {@link #grantWindowAccess} already
+   * uses: saving this row fires core's {@code RoleInheritanceEventHandler}, which fans out through
+   * every registered {@code AccessTypeInjector} (window, tab, field, process, OBUIAPP process, ...)
+   * to copy the template's accesses onto {@code role} — still carrying the template's own client
+   * ("0" for a system-level template) until this flush, which runs under the caller's normal
+   * context otherwise. See {@code UserRoleCompositionService#reconcileInheritances}'s own comment
+   * on its equivalent production-path flush for the full explanation.</p>
    */
   private void addInheritance(Role role, Role template, long seqno) {
     RoleInheritance inheritance = OBProvider.getInstance().get(RoleInheritance.class);
@@ -1149,7 +1182,12 @@ public class UserRoleCompositionServiceOverlapIntegrationTest extends WeldBaseTe
     inheritance.setInheritFrom(template);
     inheritance.setSequenceNumber(seqno);
     OBDal.getInstance().save(inheritance);
-    OBDal.getInstance().flush();
+    OBContext.setAdminMode();
+    try {
+      OBDal.getInstance().flush();
+    } finally {
+      OBContext.restorePreviousMode();
+    }
   }
 
   private void grantWindowAccess(Role role, Window window, boolean readOnly) {

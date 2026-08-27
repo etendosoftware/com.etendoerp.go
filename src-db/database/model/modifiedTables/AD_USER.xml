@@ -1,0 +1,10 @@
+<?xml version="1.0"?>
+  <database name="MODIFIED TABLE AD_USER">
+    <table name="AD_USER" primaryKey="AD_USER_KEY">
+      <column name="EM_ETGO_IS_OWNER" primaryKey="false" required="true" type="CHAR" size="1" autoIncrement="false">
+        <default><![CDATA[N]]></default>
+        <onCreateDefault/>
+      </column>
+      <check name="EM_ETGO_IS_OWNER_CHK"><![CDATA[EM_ETGO_IS_OWNER IN ('Y', 'N')]]></check>
+    </table>
+  </database>

@@ -25,7 +25,6 @@ import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.Base64;
 import java.util.Date;
-import java.util.List;
 import java.util.Locale;
 
 import org.apache.commons.lang3.StringUtils;
@@ -37,7 +36,6 @@ import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.base.provider.OBProvider;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
-import org.openbravo.dal.service.OBQuery;
 import org.openbravo.model.ad.access.User;
 import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.enterprise.Organization;
@@ -73,6 +71,7 @@ public class CompanyInvitationService {
   private static final String FIELD_SUCCESS = "success";
   private static final String FIELD_ERROR = "error";
   private static final String FIELD_HTTP_STATUS = "httpStatus";
+  private static final String CODE_MISSING_EMAIL = "MISSING_EMAIL";
   private static final String CODE_MISSING_TOKEN = "MISSING_TOKEN";
   private static final String CODE_INVALID_TOKEN = "INVALID_TOKEN";
   private static final String CODE_EXPIRED_TOKEN = "EXPIRED_TOKEN";
@@ -114,7 +113,7 @@ public class CompanyInvitationService {
 
     String normalizedEmail = StringUtils.trimToEmpty(email).toLowerCase(Locale.ROOT);
     if (normalizedEmail.isEmpty()) {
-      return errorResponse(400, "MISSING_EMAIL", "Email address is required");
+      return errorResponse(400, CODE_MISSING_EMAIL, "Email address is required");
     }
     if (!EmailContractCommandSupport.isValidEmail(normalizedEmail)) {
       return errorResponse(400, "INVALID_EMAIL_FORMAT", "Invalid email format");
@@ -124,8 +123,111 @@ public class CompanyInvitationService {
         language);
   }
 
+  /**
+   * Creates (and sends) a company invitation for a user an admin just created in the same
+   * request (ETP-4830), replacing the old eager-pending-{@code etgo_account} provisioning:
+   * {@code register-and-accept} is now the sole place an {@code etgo_account} row is created for
+   * an admin-created user, and it already does that lazily at accept time. The inviter is
+   * resolved from {@code obContext} (the request's {@code OBContext}, captured by the caller
+   * before it is best-effort-wrapped in {@code OBContext.setAdminMode(true)}) rather than from an
+   * authenticated {@code etgo_account} bearer token — this runs from a {@code NeoHandler}
+   * post-hook on the {@code user} entity's {@code POST}, not from the public
+   * {@code /sws/go/invitations} endpoint {@link #createInvitation} serves. Skips the
+   * "invited user already has an active role" check (see the {@code requireExistingRole}
+   * overload of {@link #createInvitationForInviter}); everything else — dedup of an already-open
+   * invitation, throttling, token generation, and the {@code company-invitation} email send — is
+   * identical to any other invitation.
+   *
+   * @param obContext the OB security context of the admin performing the creation
+   * @param email the newly created user's email (invitation recipient)
+   * @param appBaseUrl application base URL for building the invitation link, or blank to fall
+   *     back to the configured default
+   * @param language optional language preference
+   * @return response JSON object (same shape as {@link #createInvitation})
+   * @throws JSONException when the response cannot be serialized
+   */
+  public JSONObject createInvitationForNewlyCreatedUser(OBContext obContext, String email,
+      String appBaseUrl, String language) throws JSONException {
+    String normalizedEmail = StringUtils.trimToEmpty(email).toLowerCase(Locale.ROOT);
+    if (normalizedEmail.isEmpty()) {
+      return errorResponse(400, CODE_MISSING_EMAIL, "Email address is required");
+    }
+    if (!EmailContractCommandSupport.isValidEmail(normalizedEmail)) {
+      return errorResponse(400, "INVALID_EMAIL_FORMAT", "Invalid email format");
+    }
+    return createInvitationForInviter(resolveInviterFromContext(obContext), normalizedEmail,
+        appBaseUrl, language, false);
+  }
+
+  /**
+   * Returns the status of the most recently created invitation for {@code clientId}/{@code
+   * email}, or {@code null} if none exists (ETP-4830). Backs the {@code user} NeoHandler's
+   * {@code invitationStatus} field on GET responses, so the frontend can render a "pending
+   * invite" badge without a separate round trip.
+   *
+   * @param clientId tenant client id scoping the lookup
+   * @param email the {@code AD_User}'s email
+   * @return one of {@code PENDING}, {@code SENT}, {@code ACCEPTED}, {@code EXPIRED},
+   *     {@code REVOKED}, {@code DELIVERY_FAILED}, or {@code null} when no invitation was ever
+   *     sent for this client/email
+   */
+  public static String findLatestInvitationStatus(String clientId, String email) {
+    if (StringUtils.isBlank(clientId) || StringUtils.isBlank(email)) {
+      return null;
+    }
+    Invitation invitation = CompanyInvitationDalHelper.findLatestInvitation(clientId,
+        email.toLowerCase(Locale.ROOT));
+    return invitation != null ? effectiveStatus(invitation) : null;
+  }
+
+  /**
+   * Returns {@code invitation}'s status as it should be OBSERVED, without requiring a
+   * scheduled sweep to have already flipped the stored {@code STATUS} column (ETP-4830). Nothing
+   * ever writes {@code EXPIRED} once {@code expiresAt} passes — a {@code PENDING}/{@code SENT}
+   * row stays that way in the DB forever past its deadline, even though {@link
+   * #isClosedInvitation} already correctly rejects an accept attempt against it via the same
+   * {@code expiresAt} check. Computing this at read time (instead of a batch job) means there is
+   * no missed-sweep window where the exposed status lags reality.
+   */
+  private static String effectiveStatus(Invitation invitation) {
+    String status = invitation.getStatus();
+    boolean pendingOrSent = STATUS_PENDING.equalsIgnoreCase(status)
+        || STATUS_SENT.equalsIgnoreCase(status);
+    if (pendingOrSent && invitation.getExpiresAt() != null
+        && invitation.getExpiresAt().before(new Date())) {
+      return STATUS_EXPIRED;
+    }
+    return status;
+  }
+
+  private static InviterContext resolveInviterFromContext(OBContext obContext) {
+    return obContext == null ? null
+        : new InviterContext(obContext.getCurrentClient(), obContext.getCurrentOrganization(),
+            obContext.getUser());
+  }
+
   private JSONObject createInvitationForInviter(InviterContext inviter, String email,
       String appBaseUrl, String language) throws JSONException {
+    return createInvitationForInviter(inviter, email, appBaseUrl, language, true);
+  }
+
+  /**
+   * @param requireExistingRole when {@code false}, skips the "invited user already has an
+   *     active role in the invitation organization" check — used only by
+   *     {@link #createInvitationForNewlyCreatedUser} (ETP-4830). Originally added because a
+   *     freshly admin-created {@code AD_User} had zero roles yet by construction; since the
+   *     ETP-4830 "assign personal role before invite" ordering ({@code
+   *     UserRoleAssignmentHandler#ensurePersonalRoleForNewlyCreatedUser}, called right before this
+   *     method from the same {@code afterHandle} post-hook) the user DOES already have an active
+   *     (though empty, template-less) personal role by the time this runs — so the check would no
+   *     longer always 400 there, but the skip is kept regardless: an empty personal role is not a
+   *     meaningful "active role" from this check's perspective (template assignment still happens
+   *     later, via {@code AssignTemplateRolesControl}'s own save/PUT), and the user unambiguously
+   *     belongs to the inviter's client/org either way, because it was just created inside the
+   *     same request.
+   */
+  private JSONObject createInvitationForInviter(InviterContext inviter, String email,
+      String appBaseUrl, String language, boolean requireExistingRole) throws JSONException {
     if (inviter == null || inviter.client == null || "0".equals(inviter.client.getId())) {
       return errorResponse(403, "FORBIDDEN",
           "Inviter does not have company administration permissions");
@@ -138,8 +240,8 @@ public class CompanyInvitationService {
       return errorResponse(400, "INVITED_USER_NOT_FOUND",
           "Create the AD_USER and assign its organization roles before sending the invitation");
     }
-    if (!CompanyInvitationDalHelper.hasActiveRoleForOrganization(invitedUser,
-        invitationOrganization)) {
+    if (requireExistingRole && !CompanyInvitationDalHelper.hasActiveRoleForOrganization(
+        invitedUser, invitationOrganization)) {
       return errorResponse(400, "INVITED_USER_NO_ROLE",
           "The AD_USER must have an active role assigned to the invitation organization");
     }
@@ -151,9 +253,22 @@ public class CompanyInvitationService {
       return existingInvitationResponse(existing);
     }
 
+    return issueFreshInvitation(inviter, invitationOrganization, invitedUser, email, appBaseUrl,
+        language);
+  }
+
+  /**
+   * Mints a brand-new token, persists a new {@link Invitation} row, and sends the email —
+   * unconditionally, with no dedup/"already pending" check of its own. Extracted (ETP-4830 item
+   * #2) out of {@link #createInvitationForInviter} so {@link #resendInvitation} can reuse the
+   * exact same mint+send mechanics without going through that method's dedup-then-mint wrapper,
+   * which is deliberately bypassed for an explicit admin-triggered resend.
+   */
+  private JSONObject issueFreshInvitation(InviterContext inviter, Organization organization,
+      User invitedUser, String email, String appBaseUrl, String language) throws JSONException {
     String rawToken = generateToken();
     Date expiresAt = Date.from(Instant.now().plus(INVITATION_TTL_DAYS, ChronoUnit.DAYS));
-    Invitation invitation = persistInvitation(inviter, invitationOrganization, invitedUser, email,
+    Invitation invitation = persistInvitation(inviter, organization, invitedUser, email,
         hashToken(rawToken), expiresAt);
     String baseUrl = StringUtils.isNotBlank(appBaseUrl) ? appBaseUrl
         : PublicUrlResolver.resolveConfiguredAppBaseUrl();
@@ -164,6 +279,80 @@ public class CompanyInvitationService {
     OBDal.getInstance().flush();
     OBDal.getInstance().commitAndClose();
     return invitationResponse(invitation);
+  }
+
+  /**
+   * Admin-triggered resend (ETP-4830 item #2): re-issues an invitation for {@code userId}
+   * regardless of whether the current one is still valid, unlike {@link #createInvitation}'s own
+   * dedup-then-no-op behavior. Eligible source statuses match the frontend's "Resend" button
+   * gating: {@code PENDING}, {@code SENT}, {@code EXPIRED}, {@code DELIVERY_FAILED} — a
+   * {@code REVOKED} invitation must not be silently resurrected, and an {@code ACCEPTED} one has
+   * nothing left to resend.
+   *
+   * <p>Human-confirmed design decision: if the current invitation is still open ({@code
+   * PENDING}/{@code SENT}, not yet expired), it is marked {@code REVOKED} first so the old link
+   * stops working the instant a fresh one is issued — an admin clicking Resend should never leave
+   * two simultaneously-valid links for the same invite.
+   *
+   * @param obContext admin's security context (client/org/user resolved from here, same as
+   *     {@link #createInvitation})
+   * @param userId {@code AD_User_ID} of the invited user
+   * @param appBaseUrl application base URL for the invite link, or blank for the configured
+   *     default
+   * @param language optional language preference
+   * @return response JSON object (same shape as {@link #createInvitation})
+   * @throws JSONException when the response cannot be serialized
+   */
+  public JSONObject resendInvitation(OBContext obContext, String userId, String appBaseUrl,
+      String language) throws JSONException {
+    InviterContext inviter = resolveInviterFromContext(obContext);
+    if (inviter == null || inviter.client == null || "0".equals(inviter.client.getId())) {
+      return errorResponse(403, "FORBIDDEN",
+          "Inviter does not have company administration permissions");
+    }
+    if (StringUtils.isBlank(userId)) {
+      return errorResponse(400, "MISSING_USER_ID", "AD_User_ID is required");
+    }
+
+    User invitedUser = OBDal.getInstance().get(User.class, userId);
+    if (invitedUser == null || invitedUser.getClient() == null
+        || !inviter.client.getId().equals(invitedUser.getClient().getId())) {
+      return errorResponse(404, "USER_NOT_FOUND", "User not found for this client");
+    }
+    String email = StringUtils.trimToEmpty(invitedUser.getEmail()).toLowerCase(Locale.ROOT);
+    if (email.isEmpty()) {
+      return errorResponse(400, CODE_MISSING_EMAIL, "User has no email address on file");
+    }
+
+    Invitation latest = CompanyInvitationDalHelper.findLatestInvitation(inviter.client.getId(),
+        email);
+    if (latest == null) {
+      return errorResponse(400, "NO_INVITATION_TO_RESEND",
+          "No invitation has ever been sent to this user");
+    }
+    String status = effectiveStatus(latest);
+    boolean eligible = STATUS_PENDING.equalsIgnoreCase(status)
+        || STATUS_SENT.equalsIgnoreCase(status)
+        || STATUS_EXPIRED.equalsIgnoreCase(status)
+        || STATUS_DELIVERY_FAILED.equalsIgnoreCase(status);
+    if (!eligible) {
+      return errorResponse(400, "INVITATION_NOT_RESENDABLE",
+          "Invitation status '" + status + "' cannot be resent");
+    }
+
+    boolean stillOpen = (STATUS_PENDING.equalsIgnoreCase(latest.getStatus())
+        || STATUS_SENT.equalsIgnoreCase(latest.getStatus()))
+        && (latest.getExpiresAt() == null || latest.getExpiresAt().after(new Date()));
+    if (stillOpen) {
+      latest.setStatus(STATUS_REVOKED);
+      OBDal.getInstance().save(latest);
+      OBDal.getInstance().flush();
+    }
+
+    Organization invitationOrganization = inviter.org != null ? inviter.org
+        : OBDal.getInstance().get(Organization.class, "0");
+    return issueFreshInvitation(inviter, invitationOrganization, invitedUser, email, appBaseUrl,
+        language);
   }
 
   private JSONObject existingInvitationResponse(Invitation existing) throws JSONException {
@@ -193,6 +382,34 @@ public class CompanyInvitationService {
     OBDal.getInstance().flush();
     OBDal.getInstance().commitAndClose();
     return invitation;
+  }
+
+  /**
+   * Sends the welcome email for an account created by accepting an invitation (ETP-5003).
+   *
+   * @param account the account just created
+   */
+  private void sendWelcomeForInvitee(Account account) {
+    try {
+      authEmailSender.sendNewAccountForInvitee(account, null);
+    } catch (RuntimeException e) {
+      log.warn("Welcome email for invited user failed to send", e);
+    }
+  }
+
+  /**
+   * Tells the user they joined the organization (ETP-5003).
+   *
+   * @param account the accepting account
+   * @param companyName the organization joined
+   * @param invitationId the invitation record, used for send idempotency
+   */
+  private void sendJoinedNotice(Account account, String companyName, String invitationId) {
+    try {
+      authEmailSender.sendOrganizationJoined(account, companyName, invitationId, null);
+    } catch (RuntimeException e) {
+      log.warn("Organization-joined email failed to send", e);
+    }
   }
 
   private boolean sendInvitation(Invitation invitation, String inviteLink, String language) {
@@ -370,19 +587,28 @@ public class CompanyInvitationService {
             "No active platform account found. Registration is required.");
       }
 
+      // ETP-4830: accepting only requires the invitation itself to be valid and the invitation's
+      // AD_User to still be active — NOT that a role has already been assigned. An admin-created
+      // user has zero roles at invite time by construction (role assignment happens later,
+      // independently, via the "Roles del usuario" tab), so gating accept on an existing role
+      // would make every such invitation permanently unacceptable. See
+      // registerAndAcceptInAdminMode below for the identical rationale.
       User user = invitation.getUser();
-      if (user == null || !Boolean.TRUE.equals(user.isActive())
-          || !CompanyInvitationDalHelper.hasActiveRoleForOrganization(user,
-              invitation.getOrganization())) {
+      if (user == null || !Boolean.TRUE.equals(user.isActive())) {
         return errorResponse(409, "INVITATION_USER_CONFIGURATION_INVALID",
-            "The invitation user or its organization role is no longer valid");
+            "The invitation user is no longer valid");
       }
 
+      String invitationId = invitation.getId();
       invitation.setEtgoAccount(account);
       invitation.setStatus(STATUS_ACCEPTED);
       OBDal.getInstance().save(invitation);
       OBDal.getInstance().flush();
       OBDal.getInstance().commitAndClose();
+
+      // ETP-5003 — best effort, after the commit: a mail failure must never undo an accepted
+      // invitation. The account already existed here, so only the joined notice applies.
+      sendJoinedNotice(account, companyName, invitationId);
 
       JSONObject result = new JSONObject();
       result.put(FIELD_STATUS, FIELD_SUCCESS);
@@ -433,6 +659,26 @@ public class CompanyInvitationService {
       return errorResponse(400, CODE_EXPIRED_TOKEN, MESSAGE_EXPIRED_TOKEN);
     }
 
+      // ETP-4830 fix: this validation MUST run before any account mutation below. It reads
+      // invitation.getUser() (a lazy AD_User proxy) while the session that loaded `invitation`
+      // (from findInvitation, above) is still open. Once the account == null branch below calls
+      // EtendoGoJwtDalHelper.createAccount(), that method ends with flushAndCommitDalChanges()
+      // (flush + commitAndClose), which closes the current Hibernate session. Touching
+      // invitation.getUser() AFTER that point throws
+      // org.hibernate.LazyInitializationException: could not initialize proxy - no Session,
+      // because the proxy was never initialized before its owning session was closed.
+      //
+      // Note this only checks the AD_User is active, NOT that it already has a role — an
+      // admin-created user has zero roles at invite time by construction (role assignment happens
+      // later, independently, via the "Roles del usuario" tab), so gating accept on an existing
+      // role would make every such invitation permanently unacceptable. See
+      // acceptExistingAccountInAdminMode above for the identical rationale.
+      User user = invitation.getUser();
+      if (user == null || !Boolean.TRUE.equals(user.isActive())) {
+        return errorResponse(409, "INVITATION_USER_CONFIGURATION_INVALID",
+            "The invitation user is no longer valid");
+      }
+
       String email = invitation.getEmail();
       Account account = EtendoGoJwtDalHelper.findActiveAccountByEmail(email);
       String sessionToken = generateToken();
@@ -449,19 +695,23 @@ public class CompanyInvitationService {
         OBDal.getInstance().flush();
       }
 
-      User user = invitation.getUser();
-      if (user == null || !Boolean.TRUE.equals(user.isActive())
-          || !CompanyInvitationDalHelper.hasActiveRoleForOrganization(user,
-              invitation.getOrganization())) {
-        return errorResponse(409, "INVITATION_USER_CONFIGURATION_INVALID",
-            "The invitation user or its organization role is no longer valid");
-      }
-
+      // Safe to touch `invitation` again here even after createAccount() above may have closed
+      // the session: these are plain setters (no lazy-proxy access), and OBDal.save() below
+      // performs a Hibernate saveOrUpdate(), which correctly re-attaches this now-detached,
+      // already-persistent entity and issues an UPDATE (see SessionHandler#save) rather than
+      // failing or re-inserting it.
+      String invitationId = invitation.getId();
       invitation.setEtgoAccount(account);
       invitation.setStatus(STATUS_ACCEPTED);
       OBDal.getInstance().save(invitation);
       OBDal.getInstance().flush();
       OBDal.getInstance().commitAndClose();
+
+      // ETP-5003 — the account was created right here, so this user gets both: the welcome
+      // confirming the account exists, then the notice confirming it belongs to an organization.
+      // Best effort and post-commit: a mail failure must never undo an accepted invitation.
+      sendWelcomeForInvitee(account);
+      sendJoinedNotice(account, companyName, invitationId);
 
       JSONObject accountJson = new JSONObject();
       accountJson.put("id", account.getId());
@@ -545,16 +795,15 @@ public class CompanyInvitationService {
 
   private static InviterContext resolveInviter(Account account) {
     if (account != null) {
-      // Find active ERP user associated with this account
-      OBQuery<User> query = OBDal.getInstance().createQuery(User.class,
-          "as u where (lower(u.email) = :email or lower(u.username) = :email) and u.client.id <> '0' and u.active = true");
-      query.setNamedParameter(FIELD_EMAIL, account.getEmail().toLowerCase(Locale.ROOT));
-      query.setFilterOnReadableClients(false);
-      query.setFilterOnReadableOrganization(false);
-      query.setMaxResult(1);
-      List<User> users = query.list();
-      if (!users.isEmpty()) {
-        User user = users.get(0);
+      // ETP-4999 fix (Mystery #1): delegate to CompanyInvitationDalHelper#findInviterHomeUser,
+      // which resolves the account's own administrative HOME client deterministically (by exact
+      // username match first) instead of an unordered email-or-username scan across every client
+      // the account happens to touch. See that method's Javadoc for the full rationale — the old
+      // inline query here could non-deterministically resolve a self-invite (or any explicit
+      // invite sent with a bare platform token) to the WRONG client once the account also owned a
+      // teammate AD_User elsewhere.
+      User user = CompanyInvitationDalHelper.findInviterHomeUser(account.getEmail());
+      if (user != null) {
         return new InviterContext(user.getClient(), user.getOrganization(), user);
       }
     }
