@@ -619,6 +619,333 @@ public class SelectorDescriptorResolverTest {
   }
 
   // =========================================================================
+  // resolveTarget — resolveRefTable: AD_Ref_Table.SQLWhereClause fallback (ETP-4975)
+  //
+  // Classic Etendo stores the C_Tax_ID selector filter for C_OrderLine/C_InvoiceLine as a
+  // classic SQL clause ("C_Tax.Parent_Tax_ID IS NULL") in SQLWhereClause, with Hqlwhereclause
+  // left empty. Before the fix, resolveRefTable only read Hqlwhereclause, so this filter was
+  // silently dropped and GO's manual tax selector showed compound taxes' "child" breakdown
+  // rows that Classic hides.
+  // =========================================================================
+
+  @SuppressWarnings("unchecked")
+  @Test
+  public void resolveTarget_tableRef_sqlWhereClauseOnly_translatesToHql() {
+    String referenceId = "REF-TABLE-SQL-001";
+    Reference refSearchKey = mock(Reference.class);
+    when(refSearchKey.getId()).thenReturn(referenceId);
+
+    Column column = columnWithNoObuiselSelector("C_Currency_ID");
+    when(column.getReferenceSearchKey()).thenReturn(refSearchKey);
+    when(column.getDBColumnName()).thenReturn("C_Currency_ID");
+
+    Table targetTable = mock(Table.class);
+    when(targetTable.getDBTableName()).thenReturn("C_Currency");
+
+    ReferencedTable refTable = mock(ReferencedTable.class);
+    when(refTable.getTable()).thenReturn(targetTable);
+    when(refTable.getDisplayedColumn()).thenReturn(null);
+    when(refTable.getHqlwhereclause()).thenReturn(null);
+    when(refTable.getSQLWhereClause()).thenReturn("C_Currency.IsActive = 'Y'");
+
+    OBCriteria<ReferencedTable> refTableCrit = mock(OBCriteria.class);
+    when(refTableCrit.add(any())).thenReturn(refTableCrit);
+    when(refTableCrit.setMaxResults(1)).thenReturn(refTableCrit);
+    when(refTableCrit.uniqueResult()).thenReturn(refTable);
+
+    OBCriteria<Selector> selCrit = selectorCriteria(null);
+    when(dal.createCriteria(ReferencedTable.class)).thenReturn(refTableCrit);
+    when(dal.createCriteria(Selector.class)).thenReturn(selCrit);
+
+    Property activeProp = mock(Property.class);
+    when(activeProp.isPrimitive()).thenReturn(true);
+    when(activeProp.getName()).thenReturn("active");
+
+    Entity entity = entityWithName("Currency");
+    when(entity.getIdentifierProperties()).thenReturn(Collections.emptyList());
+    when(entity.hasProperty("name")).thenReturn(true);
+    when(entity.getTableName()).thenReturn("C_Currency");
+    when(entity.getPropertyByColumnName("IsActive")).thenReturn(activeProp);
+    when(modelProvider.getEntityByTableName("C_Currency")).thenReturn(entity);
+    // convertSqlToHql resolves the entity a second time by DAL name (ModelProvider#getEntity)
+    when(modelProvider.getEntity("Currency")).thenReturn(entity);
+
+    SelectorMeta meta = SelectorDescriptorResolver.resolveTarget(column, NeoSelectorService.REF_TABLE);
+
+    assertNotNull(meta);
+    assertEquals("e.active = 'Y'", meta.whereClause);
+  }
+
+  @SuppressWarnings("unchecked")
+  @Test
+  public void resolveTarget_tableRef_hqlWhereClausePresent_ignoresSqlWhereClause() {
+    String referenceId = "REF-TABLE-SQL-002";
+    Reference refSearchKey = mock(Reference.class);
+    when(refSearchKey.getId()).thenReturn(referenceId);
+
+    Column column = columnWithNoObuiselSelector("C_Currency_ID");
+    when(column.getReferenceSearchKey()).thenReturn(refSearchKey);
+    when(column.getDBColumnName()).thenReturn("C_Currency_ID");
+
+    Table targetTable = mock(Table.class);
+    when(targetTable.getDBTableName()).thenReturn("C_Currency");
+
+    ReferencedTable refTable = mock(ReferencedTable.class);
+    when(refTable.getTable()).thenReturn(targetTable);
+    when(refTable.getDisplayedColumn()).thenReturn(null);
+    // Both populated — Hqlwhereclause must win, SQLWhereClause must never be consulted
+    when(refTable.getHqlwhereclause()).thenReturn("e.active = true");
+    when(refTable.getSQLWhereClause()).thenReturn("C_Currency.IsActive = 'Y'");
+
+    OBCriteria<ReferencedTable> refTableCrit = mock(OBCriteria.class);
+    when(refTableCrit.add(any())).thenReturn(refTableCrit);
+    when(refTableCrit.setMaxResults(1)).thenReturn(refTableCrit);
+    when(refTableCrit.uniqueResult()).thenReturn(refTable);
+
+    OBCriteria<Selector> selCrit = selectorCriteria(null);
+    when(dal.createCriteria(ReferencedTable.class)).thenReturn(refTableCrit);
+    when(dal.createCriteria(Selector.class)).thenReturn(selCrit);
+
+    Entity entity = entityWithName("Currency");
+    when(entity.getIdentifierProperties()).thenReturn(Collections.emptyList());
+    when(entity.hasProperty("name")).thenReturn(true);
+    when(modelProvider.getEntityByTableName("C_Currency")).thenReturn(entity);
+
+    SelectorMeta meta = SelectorDescriptorResolver.resolveTarget(column, NeoSelectorService.REF_TABLE);
+
+    assertNotNull(meta);
+    assertEquals("e.active = true", meta.whereClause);
+  }
+
+  @SuppressWarnings("unchecked")
+  @Test
+  public void resolveTarget_tableRef_noWhereClauseAtAll_whereClauseIsNull() {
+    String referenceId = "REF-TABLE-SQL-003";
+    Reference refSearchKey = mock(Reference.class);
+    when(refSearchKey.getId()).thenReturn(referenceId);
+
+    Column column = columnWithNoObuiselSelector("C_Currency_ID");
+    when(column.getReferenceSearchKey()).thenReturn(refSearchKey);
+    when(column.getDBColumnName()).thenReturn("C_Currency_ID");
+
+    Table targetTable = mock(Table.class);
+    when(targetTable.getDBTableName()).thenReturn("C_Currency");
+
+    ReferencedTable refTable = mock(ReferencedTable.class);
+    when(refTable.getTable()).thenReturn(targetTable);
+    when(refTable.getDisplayedColumn()).thenReturn(null);
+    when(refTable.getHqlwhereclause()).thenReturn(null);
+    when(refTable.getSQLWhereClause()).thenReturn(null);
+
+    OBCriteria<ReferencedTable> refTableCrit = mock(OBCriteria.class);
+    when(refTableCrit.add(any())).thenReturn(refTableCrit);
+    when(refTableCrit.setMaxResults(1)).thenReturn(refTableCrit);
+    when(refTableCrit.uniqueResult()).thenReturn(refTable);
+
+    OBCriteria<Selector> selCrit = selectorCriteria(null);
+    when(dal.createCriteria(ReferencedTable.class)).thenReturn(refTableCrit);
+    when(dal.createCriteria(Selector.class)).thenReturn(selCrit);
+
+    Entity entity = entityWithName("Currency");
+    when(entity.getIdentifierProperties()).thenReturn(Collections.emptyList());
+    when(entity.hasProperty("name")).thenReturn(true);
+    when(modelProvider.getEntityByTableName("C_Currency")).thenReturn(entity);
+
+    SelectorMeta meta = SelectorDescriptorResolver.resolveTarget(column, NeoSelectorService.REF_TABLE);
+
+    assertNotNull(meta);
+    assertNull(meta.whereClause);
+  }
+
+  @SuppressWarnings("unchecked")
+  @Test
+  public void resolveTarget_tableRef_taxParentTaxIdSqlClause_translatesToParentTaxRateId() {
+    // Real-world case: C_Tax_ID reference on C_OrderLine/C_InvoiceLine. AD_Ref_Table stores
+    // "C_Tax.Parent_Tax_ID IS NULL" in SQLWhereClause (hides compound-tax breakdown children,
+    // e.g. the "(+10%)"/"(+1.4%)" rows under "Entregas IVA+RE 10+1.4%") with Hqlwhereclause
+    // empty. Must translate to "e.parentTaxRate.id IS NULL".
+    String referenceId = "REF-TABLE-TAX-158";
+    Reference refSearchKey = mock(Reference.class);
+    when(refSearchKey.getId()).thenReturn(referenceId);
+
+    Column column = columnWithNoObuiselSelector("C_Tax_ID");
+    when(column.getReferenceSearchKey()).thenReturn(refSearchKey);
+    when(column.getDBColumnName()).thenReturn("C_Tax_ID");
+
+    Table targetTable = mock(Table.class);
+    when(targetTable.getDBTableName()).thenReturn("C_Tax");
+
+    ReferencedTable refTable = mock(ReferencedTable.class);
+    when(refTable.getTable()).thenReturn(targetTable);
+    when(refTable.getDisplayedColumn()).thenReturn(null);
+    when(refTable.getHqlwhereclause()).thenReturn(null);
+    when(refTable.getSQLWhereClause()).thenReturn("C_Tax.Parent_Tax_ID IS NULL");
+
+    OBCriteria<ReferencedTable> refTableCrit = mock(OBCriteria.class);
+    when(refTableCrit.add(any())).thenReturn(refTableCrit);
+    when(refTableCrit.setMaxResults(1)).thenReturn(refTableCrit);
+    when(refTableCrit.uniqueResult()).thenReturn(refTable);
+
+    OBCriteria<Selector> selCrit = selectorCriteria(null);
+    when(dal.createCriteria(ReferencedTable.class)).thenReturn(refTableCrit);
+    when(dal.createCriteria(Selector.class)).thenReturn(selCrit);
+
+    // Parent_Tax_ID is a self-referencing FK on C_Tax -> DAL property "parentTaxRate"
+    Entity parentTaxTargetEntity = mock(Entity.class);
+    Property parentTaxRateProp = mock(Property.class);
+    when(parentTaxRateProp.isPrimitive()).thenReturn(false);
+    when(parentTaxRateProp.getTargetEntity()).thenReturn(parentTaxTargetEntity);
+    when(parentTaxRateProp.getName()).thenReturn("parentTaxRate");
+
+    Entity entity = entityWithName("FinancialMgmtTaxRate");
+    when(entity.getIdentifierProperties()).thenReturn(Collections.emptyList());
+    when(entity.hasProperty("name")).thenReturn(true);
+    when(entity.getTableName()).thenReturn("C_Tax");
+    when(entity.getPropertyByColumnName("Parent_Tax_ID")).thenReturn(parentTaxRateProp);
+    when(modelProvider.getEntityByTableName("C_Tax")).thenReturn(entity);
+    when(modelProvider.getEntity("FinancialMgmtTaxRate")).thenReturn(entity);
+
+    SelectorMeta meta = SelectorDescriptorResolver.resolveTarget(column, NeoSelectorService.REF_TABLE);
+
+    assertNotNull(meta);
+    assertEquals("FinancialMgmtTaxRate", meta.entityName);
+    assertEquals("e.parentTaxRate.id IS NULL", meta.whereClause);
+  }
+
+  @SuppressWarnings("unchecked")
+  @Test
+  public void resolveTarget_tableRef_sqlWhereClauseWithNestedSubquery_dropsSubqueryClause() {
+    // ETP-4975 (fixed) — SqlToHqlTranslator#convertSqlToHql now applies the same NESTED_SUBQUERY
+    // guard SelectorValidationResolver#resolveValidationClause already applies to AD_Validation
+    // clauses (both share SqlToHqlTranslator.NESTED_SUBQUERY): a top-level AND-segment containing
+    // "(SELECT ..." is dropped instead of being translated into invalid HQL. Only the surviving
+    // "C_Tax.Parent_Tax_ID IS NULL" segment is translated; the C_TaxCategory subquery segment is
+    // discarded whole, so its raw SQL table name ("C_TaxCategory") never leaks into the emitted
+    // HQL and Hibernate never sees a QuerySyntaxException for it.
+    String referenceId = "REF-TABLE-TAX-SUBQ-159";
+    Reference refSearchKey = mock(Reference.class);
+    when(refSearchKey.getId()).thenReturn(referenceId);
+
+    Column column = columnWithNoObuiselSelector("C_Tax_ID");
+    when(column.getReferenceSearchKey()).thenReturn(refSearchKey);
+    when(column.getDBColumnName()).thenReturn("C_Tax_ID");
+
+    Table targetTable = mock(Table.class);
+    when(targetTable.getDBTableName()).thenReturn("C_Tax");
+
+    ReferencedTable refTable = mock(ReferencedTable.class);
+    when(refTable.getTable()).thenReturn(targetTable);
+    when(refTable.getDisplayedColumn()).thenReturn(null);
+    when(refTable.getHqlwhereclause()).thenReturn(null);
+    when(refTable.getSQLWhereClause()).thenReturn(
+        "C_Tax.Parent_Tax_ID IS NULL AND C_Tax.C_TaxCategory_ID IN "
+            + "(SELECT tc.C_TaxCategory_ID FROM C_TaxCategory tc WHERE tc.IsSummary='N')");
+
+    OBCriteria<ReferencedTable> refTableCrit = mock(OBCriteria.class);
+    when(refTableCrit.add(any())).thenReturn(refTableCrit);
+    when(refTableCrit.setMaxResults(1)).thenReturn(refTableCrit);
+    when(refTableCrit.uniqueResult()).thenReturn(refTable);
+
+    OBCriteria<Selector> selCrit = selectorCriteria(null);
+    when(dal.createCriteria(ReferencedTable.class)).thenReturn(refTableCrit);
+    when(dal.createCriteria(Selector.class)).thenReturn(selCrit);
+
+    Entity parentTaxTargetEntity = mock(Entity.class);
+    Property parentTaxRateProp = mock(Property.class);
+    when(parentTaxRateProp.isPrimitive()).thenReturn(false);
+    when(parentTaxRateProp.getTargetEntity()).thenReturn(parentTaxTargetEntity);
+    when(parentTaxRateProp.getName()).thenReturn("parentTaxRate");
+
+    Entity entity = entityWithName("FinancialMgmtTaxRate");
+    when(entity.getIdentifierProperties()).thenReturn(Collections.emptyList());
+    when(entity.hasProperty("name")).thenReturn(true);
+    when(entity.getTableName()).thenReturn("C_Tax");
+    when(entity.getPropertyByColumnName("Parent_Tax_ID")).thenReturn(parentTaxRateProp);
+    // C_TaxCategory_ID is never queried: the whole segment containing it is dropped by the guard
+    // before column translation runs, so it is deliberately left unstubbed.
+    when(modelProvider.getEntityByTableName("C_Tax")).thenReturn(entity);
+    when(modelProvider.getEntity("FinancialMgmtTaxRate")).thenReturn(entity);
+
+    SelectorMeta meta = SelectorDescriptorResolver.resolveTarget(column, NeoSelectorService.REF_TABLE);
+
+    assertNotNull(meta);
+    // Only the surviving segment is translated — exactly as if the subquery segment had never
+    // been configured. No trace of the dropped segment (translated or raw) remains.
+    assertEquals("e.parentTaxRate.id IS NULL", meta.whereClause);
+    assertFalse("nested subquery's raw SQL table name must never leak into HQL output",
+        meta.whereClause.contains("C_TaxCategory"));
+  }
+
+  @SuppressWarnings("unchecked")
+  @Test
+  public void resolveTarget_tableRef_warehouseCorrelatedSubqueryWhereClause_dropsSubqueryClause() {
+    // Real-world regression (ETP-4975) — the AD_Ref_Table for M_Warehouse_ID carries this exact
+    // classic SQLWhereClause: a correlated subquery checking the warehouse's organization is
+    // active. Before the guard, resolveRefTableWhereClause -> convertSqlToHql translated the
+    // outer M_Warehouse.AD_Client_ID reference but left "ad_org"/"ad.isactive"/"ad.ad_org_id"
+    // completely untranslated inside the emitted "HQL". Hibernate then threw
+    // "QuerySyntaxException: ad_org is not mapped" the first time this selector was queried —
+    // reproduced live by 2 E2E integration tests hitting this exact selector. With the guard, the
+    // whole subquery segment is dropped and only the client-scoping segment survives, translated
+    // correctly.
+    String referenceId = "REF-TABLE-WAREHOUSE-160";
+    Reference refSearchKey = mock(Reference.class);
+    when(refSearchKey.getId()).thenReturn(referenceId);
+
+    Column column = columnWithNoObuiselSelector("M_Warehouse_ID");
+    when(column.getReferenceSearchKey()).thenReturn(refSearchKey);
+    when(column.getDBColumnName()).thenReturn("M_Warehouse_ID");
+
+    Table targetTable = mock(Table.class);
+    when(targetTable.getDBTableName()).thenReturn("M_Warehouse");
+
+    ReferencedTable refTable = mock(ReferencedTable.class);
+    when(refTable.getTable()).thenReturn(targetTable);
+    when(refTable.getDisplayedColumn()).thenReturn(null);
+    when(refTable.getHqlwhereclause()).thenReturn(null);
+    when(refTable.getSQLWhereClause()).thenReturn(
+        "M_Warehouse.AD_Client_ID=@#AD_Client_ID@ AND (select ad.isactive from ad_org ad "
+            + "where ad.ad_org_id = M_Warehouse.AD_Org_ID) = 'Y'");
+
+    OBCriteria<ReferencedTable> refTableCrit = mock(OBCriteria.class);
+    when(refTableCrit.add(any())).thenReturn(refTableCrit);
+    when(refTableCrit.setMaxResults(1)).thenReturn(refTableCrit);
+    when(refTableCrit.uniqueResult()).thenReturn(refTable);
+
+    OBCriteria<Selector> selCrit = selectorCriteria(null);
+    when(dal.createCriteria(ReferencedTable.class)).thenReturn(refTableCrit);
+    when(dal.createCriteria(Selector.class)).thenReturn(selCrit);
+
+    // AD_Client_ID is a FK column -> "client" DAL property on every AD entity.
+    Entity clientTargetEntity = mock(Entity.class);
+    Property clientProp = mock(Property.class);
+    when(clientProp.isPrimitive()).thenReturn(false);
+    when(clientProp.getTargetEntity()).thenReturn(clientTargetEntity);
+    when(clientProp.getName()).thenReturn("client");
+
+    Entity entity = entityWithName("Warehouse");
+    when(entity.getIdentifierProperties()).thenReturn(Collections.emptyList());
+    when(entity.hasProperty("name")).thenReturn(true);
+    when(entity.getTableName()).thenReturn("M_Warehouse");
+    when(entity.getPropertyByColumnName("AD_Client_ID")).thenReturn(clientProp);
+    // ad_org / ad.isactive / ad.ad_org_id are never queried against this entity: the whole
+    // subquery segment referencing them is dropped by the guard before column translation runs.
+    when(modelProvider.getEntityByTableName("M_Warehouse")).thenReturn(entity);
+    when(modelProvider.getEntity("Warehouse")).thenReturn(entity);
+
+    SelectorMeta meta = SelectorDescriptorResolver.resolveTarget(column, NeoSelectorService.REF_TABLE);
+
+    assertNotNull(meta);
+    // Only the client-scoping segment survives, correctly translated; the subquery segment (and
+    // its raw SQL table/column names) is gone entirely — not merely left untranslated.
+    assertEquals("e.client.id=@#AD_Client_ID@", meta.whereClause);
+    assertFalse("correlated subquery's raw SQL table name must never leak into HQL output",
+        meta.whereClause.contains("ad_org"));
+    assertFalse("correlated subquery's raw SQL column ref must never leak into HQL output",
+        meta.whereClause.contains("ad.isactive"));
+  }
+
+  // =========================================================================
   // resolveTarget — OBUISEL path (selector found first)
   // =========================================================================
 

@@ -107,7 +107,19 @@ public class FinancialAccountsPageHandler implements NeoHandler {
           // Appended at the END on purpose (ETP-4896): loadAccounts() below reads every column by
           // POSITION, and so does FinancialAccountsPageHandlerTest's ResultSet stubbing — inserting
           // these in the middle would silently shift every existing column index.
-          + "       fa.c_country_id, ctry.countrycode, ctry.name "
+          + "       fa.c_country_id, ctry.countrycode, ctry.name, "
+          // Stored computed column (EPL-1807 engine). Replaces the per-request
+          // PENDING_BY_ACCOUNT_SQL aggregate this class used to run: the value is now a real,
+          // sortable column the engine recomputes whenever a statement, statement line,
+          // transaction or the account type changes. COALESCE because the column is nullable —
+          // it stays NULL on a row the engine has not populated yet (a fresh account before its
+          // first dependency write), and the list reads that as zero pending.
+          + "       COALESCE(fa.em_etgo_pending_count, 0), "
+          // Also appended at the END, same positional-read reason as the country columns above
+          // (ETP-4896 QA follow-up): the edit modal opened from the account DETAIL page reads its
+          // record from this R spec, so without this column its BIC/SWIFT field would render empty
+          // even for an account that has one stored.
+          + "       fa.swiftcode "
           + "  FROM fin_financial_account fa "
           + "  JOIN c_currency cur ON cur.c_currency_id = fa.c_currency_id "
           + "  LEFT JOIN c_glitem gli ON gli.c_glitem_id = fa.em_aprm_glitem_diff "
@@ -121,44 +133,6 @@ public class FinancialAccountsPageHandler implements NeoHandler {
           + "   AND fa.ad_org_id = ANY (?) "
           + " ORDER BY fa.isdefault DESC, fa.name ASC";
 
-  /**
-   * "Pending to reconcile" per account, in two branches because the two account types measure it
-   * against different things (ETP-4795):
-   *
-   * <ul>
-   *   <li><b>Bank / card</b> — unmatched bank-statement lines, the rows the split panel lists.</li>
-   *   <li><b>Cash</b> — movements not yet part of a reconciliation, the rows the cash close lists.
-   *       A cash drawer has no bank statements, so before this branch existed its counter was
-   *       structurally always 0: the tab badge, the list's "Por conciliar" column and the sidebar's
-   *       "Cuentas con pendientes" were all blind to cash accounts.</li>
-   * </ul>
-   *
-   * An account is either cash or not, so the branches can never both match one — {@code UNION ALL}
-   * is safe and still yields exactly one row per account. Bind order: clientId, orgs, clientId, orgs.
-   */
-  private static final String PENDING_BY_ACCOUNT_SQL =
-      "SELECT bs.fin_financial_account_id, COUNT(bsl.*) AS pending_lines "
-          + "  FROM fin_bankstatementline bsl "
-          + "  JOIN fin_bankstatement bs ON bs.fin_bankstatement_id = bsl.fin_bankstatement_id "
-          + " WHERE bsl.fin_finacc_transaction_id IS NULL "
-          + "   AND bsl.isactive = 'Y' "
-          + "   AND bs.isactive = 'Y' "
-          + "   AND bs.ad_client_id = ? "
-          + "   AND bs.ad_org_id = ANY (?) "
-          + " GROUP BY bs.fin_financial_account_id "
-          + " UNION ALL "
-          + "SELECT ft.fin_financial_account_id, COUNT(*) AS pending_lines "
-          + "  FROM fin_finacc_transaction ft "
-          + "  JOIN fin_financial_account fa "
-          + "    ON fa.fin_financial_account_id = ft.fin_financial_account_id "
-          + " WHERE fa.type = 'C' "
-          + "   AND ft.isactive = 'Y' "
-          + "   AND ft.processed = 'Y' "
-          + "   AND ft.fin_reconciliation_id IS NULL "
-          + "   AND ft.status <> 'RPPC' "
-          + "   AND ft.ad_client_id = ? "
-          + "   AND ft.ad_org_id = ANY (?) "
-          + " GROUP BY ft.fin_financial_account_id";
 
   /**
    * Accounts with at least one active transaction (ETP-4530). Used by the frontend to lock the
@@ -293,12 +267,11 @@ public class FinancialAccountsPageHandler implements NeoHandler {
    */
   NeoResponse buildPayload(String clientId, Set<String> orgs) throws Exception {
     List<AccountRow> accounts = loadAccounts(clientId, orgs);
-    Map<String, Integer> pendingByAccount = loadPendingByAccount(clientId, orgs);
     Set<String> accountsWithTransactions = loadAccountsWithTransactions(clientId, orgs);
 
     JSONObject data = new JSONObject();
-    data.put("accounts", buildAccountsArray(accounts, pendingByAccount, accountsWithTransactions));
-    data.put("summary", buildSummary(accounts, pendingByAccount));
+    data.put("accounts", buildAccountsArray(accounts, accountsWithTransactions));
+    data.put("summary", buildSummary(accounts));
     // Sibling of accounts/summary, not a per-account field (ETP-4896). It is the same catalog that
     // the W-spec defaults response carries (see the injectAccountDefaults method over in
     // FinancialAccountHandler), and this R spec is what the accounts list and the edit modal
@@ -353,33 +326,15 @@ public class FinancialAccountsPageHandler implements NeoHandler {
             row.country = new CountryRef(countryId, StringUtils.trimToEmpty(rs.getString(20)),
                 StringUtils.trimToEmpty(rs.getString(21)));
           }
+          // COALESCEd in SQL, so getInt never sees a NULL and 0 is a real zero, not a
+          // "was null" artefact.
+          row.pendingCount = rs.getInt(22);
+          row.swiftCode = StringUtils.trimToEmpty(rs.getString(23));
           rows.add(row);
         }
       }
     }
     return rows;
-  }
-
-  Map<String, Integer> loadPendingByAccount(String clientId, Set<String> orgs) throws Exception {
-    Map<String, Integer> result = new LinkedHashMap<>();
-    Connection conn = OBDal.getInstance().getConnection();
-    try (PreparedStatement ps = conn.prepareStatement(PENDING_BY_ACCOUNT_SQL)) {
-      // Two branches (bank-statement lines / cash movements), each scoped by client + org.
-      java.sql.Array orgArray = conn.createArrayOf(SQL_TYPE_VARCHAR, orgs.toArray(new String[0]));
-      ps.setString(1, clientId);
-      ps.setArray(2, orgArray);
-      ps.setString(3, clientId);
-      ps.setArray(4, orgArray);
-      try (ResultSet rs = ps.executeQuery()) {
-        while (rs.next()) {
-          // merge, not put: the two UNION ALL branches are grouped independently, so an account
-          // that is cash-type AND has imported bank statements yields one row per branch. Summing
-          // keeps both; put would silently drop the first.
-          result.merge(rs.getString(1), rs.getInt(2), Integer::sum);
-        }
-      }
-    }
-    return result;
   }
 
   /** Ids of accounts (within scope) that have at least one active transaction (ETP-4530). */
@@ -436,7 +391,7 @@ public class FinancialAccountsPageHandler implements NeoHandler {
   // Response builders (package-private to allow unit tests to drive directly)
   // ---------------------------------------------------------------------------
 
-  JSONArray buildAccountsArray(List<AccountRow> accounts, Map<String, Integer> pendingByAccount,
+  JSONArray buildAccountsArray(List<AccountRow> accounts,
       Set<String> accountsWithTransactions) throws JSONException {
     JSONArray arr = new JSONArray();
     for (AccountRow account : accounts) {
@@ -451,6 +406,7 @@ public class FinancialAccountsPageHandler implements NeoHandler {
       json.put("countryIso", account.country != null ? account.country.iso : "");
       json.put("countryName", account.country != null ? account.country.name : "");
       json.put("iban", account.iban);
+      json.put("swiftCode", account.swiftCode);
       json.put("maskedPan", account.maskedPan);
       json.put("bankConnected", account.bankConnected);
       json.put("bankReconnectable", account.bankReconnectable);
@@ -458,7 +414,11 @@ public class FinancialAccountsPageHandler implements NeoHandler {
       json.put("bankConnectionPending", account.bankConnectionPending);
       json.put("isDefault", account.isDefault);
       json.put("active", account.active);
-      json.put("pendingCount", pendingByAccount.getOrDefault(account.id, 0));
+      // Key stays `pendingCount` even though the column is now EM_ETGO_Pending_Count: this R
+      // spec hand-builds its JSON, and the detail view (useFinancialAccount) plus the funds
+      // transfer picker (useFinancialAccounts) read this flat name. Only the W spec's generic
+      // CRUD, which derives its keys from the AD column, exposes it as `eTGOPendingCount`.
+      json.put("pendingCount", account.pendingCount);
       json.put("dateTolerance", account.dateTolerance);
       json.put("amountTolerance", account.amountTolerance);
       // JSONObject.put(String, Object) with null REMOVES the key, which is exactly what we want:
@@ -472,8 +432,7 @@ public class FinancialAccountsPageHandler implements NeoHandler {
     return arr;
   }
 
-  JSONObject buildSummary(List<AccountRow> accounts, Map<String, Integer> pendingByAccount)
-      throws JSONException {
+  JSONObject buildSummary(List<AccountRow> accounts) throws JSONException {
     JSONObject summary = new JSONObject();
 
     BigDecimal total = BigDecimal.ZERO;
@@ -488,7 +447,7 @@ public class FinancialAccountsPageHandler implements NeoHandler {
       }
       total = total.add(account.currentBalance);
       byCurrency.merge(account.currency.iso, account.currentBalance, BigDecimal::add);
-      if (pendingByAccount.getOrDefault(account.id, 0) > 0) {
+      if (account.pendingCount > 0) {
         accountsWithPending++;
       }
     }
@@ -565,6 +524,13 @@ public class FinancialAccountsPageHandler implements NeoHandler {
     String providerLogoUrl = "";
     /** Whether a bank sync is pending. Not tracked server-side yet; reserved for the list sync badge. */
     boolean bankConnectionPending = false;
+    /**
+     * Items still awaiting reconciliation, from the {@code EM_ETGO_Pending_Count} stored computed
+     * column. Unmatched bank-statement lines for bank/card accounts, plus unreconciled processed
+     * transactions for cash accounts (ETP-4795) — the engine's function sums both branches. Set by
+     * the loader; 0 both when nothing is pending and when the engine has not populated the row yet.
+     */
+    int pendingCount = 0;
     /** Days of margin allowed between bank line and transaction dates. Default 3. */
     int dateTolerance = 3;
     /** Maximum % difference allowed when matching amounts. Default 0 (exact match). */
@@ -585,6 +551,9 @@ public class FinancialAccountsPageHandler implements NeoHandler {
      *  not the constructor: {@link Currency}'s javadoc explains why the constructor stays capped
      *  at 7 parameters, and every existing fixture already calls it with exactly that many. */
     CountryRef country = null;
+    /** BIC/SWIFT code (ETP-4896 QA follow-up). Blank for Cash/Card accounts and for Bank accounts
+     *  that never got one. Loader-set for the same 7-parameter reason as {@link #country}. */
+    String swiftCode = "";
 
     AccountRow(String id, String name, String type, BigDecimal currentBalance,
         Currency currency, String iban, boolean isDefault) {

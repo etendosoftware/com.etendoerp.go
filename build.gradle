@@ -136,6 +136,7 @@ dependencies {
 def isolatedDalTests = [
         '**/ReactivatePaymentHandlerRemoveIntegrationTest.class',
         '**/CreateDraftInvoiceHandlerNegativeQuantityIntegrationTest.class',
+        '**/CreateDraftInvoiceHandlerPriceListRequiredIntegrationTest.class',
         '**/CreateGoodsReceiptHandlerNegativeQuantityIntegrationTest.class',
         '**/CreatePurchaseInvoiceHandlerNegativeQuantityIntegrationTest.class',
         '**/AbstractInvoiceHeaderHandlerOriginInvoiceIntegrationTest.class',

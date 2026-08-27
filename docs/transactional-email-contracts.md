@@ -173,30 +173,117 @@ Auth transactional emails are created server-side by the `/sws/go/*` endpoints. 
 
 | Endpoint | Transactional email behavior |
 |----------|------------------------------|
-| `POST /sws/go/register` | Creates the local account, commits it, then sends `new-account` best-effort with the selected UI language when provided |
+| `POST /sws/go/register` | Creates the local account, commits it, issues a hashed 24h email-verification token, then sends `new-account` best-effort with the confirmation link as its call to action and the selected UI language when provided (ETP-4798) |
 | `POST /sws/go/password-reset/request` | Returns neutral success for known, unknown, disabled, throttled, or provider-failed cases; known active accounts receive a hashed expiring reset token only when the best-effort `reset-password` email is accepted for delivery |
 | `POST /sws/go/password-reset/confirm` | Accepts one valid unexpired token once, changes the password, clears/consumes reset token fields, and clears the platform session token |
 | `POST /sws/go/change-password` | Requires a valid platform bearer token and current password, changes the password, rotates the platform token, and sends `password-changed` best-effort |
-| `POST /sws/go/onboarding` | Commits onboarding first, then sends `environment-ready` best-effort |
+| `POST /sws/go/verify-email` | Unauthenticated — the mailed token is the credential. Accepts one valid unexpired token, stamps `ETGO_Account.Email_Verified`, and is idempotent: the token hash is intentionally left in place so a re-clicked link answers 200 instead of "invalid" (ETP-4798) |
+| `POST /sws/go/verify-email/resend` | Requires a platform bearer token. Re-issues the token and sends `verify-email` best-effort, but only when a confirmation is genuinely pending. Answers a neutral 200 in every one of those cases so the response carries no account state; a genuine server failure is still a 500, since the endpoint is authenticated (ETP-4798) |
+| `POST /sws/go/onboarding` | Refused with `403 EMAIL_NOT_VERIFIED` before the NDJSON stream opens when the account still owes an email confirmation (ETP-4798), then paywalled (ETP-4686). Otherwise commits onboarding first, then sends `environment-ready` best-effort |
 
-When an authorized company administrator creates an `AD_User` without a password, the
-`UserRoleAssignmentHandler` provisions a pending `ETGO_Account` and persists an `ETGO_Invitation`
-row. The system creates a one-time password-setup link through the existing `reset-password`
-contract. The invitation records `PENDING`, `SENT`, `DELIVERY_FAILED`, and `ACCEPTED` lifecycle
-states without storing the raw token. The recipient is resolved exclusively from that
-server-side account; the browser does not send a recipient, template, or provider payload. The
-account becomes active only after a successful password-reset confirmation, which also marks the
-related invitation `ACCEPTED`.
+When a company administrator creates an `AD_User` (ETP-4830, superseding an earlier ETP-4829
+pending-account design), `UserRoleAssignmentHandler`'s `POST` post-hook does **not** provision
+any `ETGO_Account` row itself. Instead it calls
+`CompanyInvitationService#createInvitationForNewlyCreatedUser`, which persists an
+`ETGO_Invitation` row and sends the same `company-invitation` contract described below —
+identical to the flow a company administrator triggers by inviting an *existing* user, except
+it skips the "invited user already has an active role" check (a freshly created `AD_User` has
+none yet by construction; role assignment happens later, independently, via
+`AssignTemplateRolesControl`'s own save). This is the one exception to the "only `/sws/go/*`
+triggers these emails" rule above: the trigger here is a NEO Headless `user`-entity `POST`, not
+a `/sws/go/*` call, though the email contract, throttling, and audit machinery are unchanged.
+
+No `ETGO_Account` is created eagerly on this path. `register-and-accept` (§ below) is the sole
+place an `ETGO_Account` gets created for an admin-created user, lazily, once the invitee actually
+accepts — the invitation records `PENDING`, `SENT`, `DELIVERY_FAILED`, `ACCEPTED`, `EXPIRED`, and
+`REVOKED` lifecycle states without storing the raw token. The recipient is resolved exclusively
+from the `ETGO_Invitation.email` column; the browser does not send a recipient, template, or
+provider payload. The `user` NeoHandler also surfaces the latest invitation's `status` back as an
+`invitationStatus` field (`null` when none exists) on every `user` GET response (list or
+single-record), via `CompanyInvitationService#findLatestInvitationStatus`, so the frontend can
+render a "pending invite" badge.
 
 Invitation safeguards:
 
-- Existing pending accounts with a reset token do not receive a replacement invitation.
-- A missing public app URL, provider rejection, throttle, suppression, or kill switch restores
-  the prior token state and does not leave a usable new invitation token.
-- The setup link expires after 24 hours and can be consumed only once; an expired or consumed
-  token is rejected by the existing password-reset confirmation endpoint.
+- An already-open (`PENDING`/`SENT`, not yet expired) invitation for the same client/email is
+  reused instead of creating a duplicate.
+- A missing public app URL, provider rejection, throttle, suppression, or kill switch still
+  persists the invitation in `DELIVERY_FAILED` status rather than leaving it silently unsent.
+- The invitation token expires after 7 days and can be consumed only once; an expired or revoked
+  token is rejected by `resolveInvitation`/`acceptExistingAccount`/`registerAndAccept`.
+- **Accepting an invitation does not require the invited `AD_User` to already hold a role**
+  (`acceptExistingAccountInAdminMode`/`registerAndAcceptInAdminMode`, ETP-4830): the only user-side
+  check is that `AD_User` still exists and is active. An earlier revision additionally required
+  `CompanyInvitationDalHelper#hasActiveRoleForOrganization` at accept time, which contradicted the
+  admin-created-user flow above — a freshly created user has zero roles by construction, so that
+  check made every such invitation permanently un-acceptable (409
+  `INVITATION_USER_CONFIGURATION_INVALID`) until an admin manually assigned a role first, which
+  itself normally happens *after* the user is invited and can sign in. What still gates who can
+  accept what: possession of the invitation's own unguessable token (delivered only to
+  `ETGO_Invitation.email`), the invitation not being closed (`REVOKED`/`EXPIRED`/already
+  `ACCEPTED`), and — for `acceptExistingAccount` — the signed-in `ETGO_Account`'s email matching
+  the invitation's email. A roleless user can still sign in after accepting; they simply cannot do
+  anything until a role is assigned, identical to any other freshly created `AD_User`.
+- **User/role validation runs BEFORE account creation, not after (ETP-4830 fix).** Accepting a
+  brand-new-account invite (`registerAndAcceptInAdminMode`) used to crash with
+  `org.hibernate.LazyInitializationException: could not initialize proxy - no Session`: the
+  user/role check above read `invitation.getUser()` (a lazy `AD_User` proxy) AFTER
+  `EtendoGoJwtDalHelper#createAccount` had already run, and that method ends with a
+  flush-and-commit that closes the Hibernate session the proxy needs to initialize. Fixed by
+  moving the validation ahead of the `createAccount()` call, while the session that loaded
+  `invitation` is still open. The sibling `acceptExistingAccountInAdminMode` path never had this
+  specific crash (it has no `createAccount()` call), which is why only the new-account path needed
+  the reorder.
 
 Email delivery failure is audited and must not roll back registration, onboarding completion, or a successful password change. Password reset request responses stay neutral even when delivery fails.
+
+### Email ownership confirmation and its fail-open rule (ETP-4798)
+
+`/sws/go/register` still returns a usable session token — the account exists and can call `/me`,
+`/verify-email/resend` and `/logout`. What an unconfirmed address blocks is entering onboarding at
+all: the web client lands on a confirm-your-email wall instead of step 1, and the backend
+independently refuses the one irreversible, costly step (creating the tenant) with
+`403 EMAIL_NOT_VERIFIED`. The wall is UX; the 403 is the gate, and it stands on its own for a
+modified client or a direct request.
+
+Verification state lives in three `ETGO_ACCOUNT` columns and is read through two **independent**
+predicates, never one derived from the other:
+
+| Predicate | Meaning | Gated? |
+|-----------|---------|--------|
+| `Email_Verified is not null` | the holder proved control of the address | no |
+| `Email_Verified is null and Verify_Token_Hash is not null` | a confirmation was issued and is still owed | **yes** |
+| both null | account predates ETP-4798, or its confirmation mail could not be sent | no |
+
+That third row is the whole reason the gate keys off "a token was issued" rather than "not
+verified". It means no backfill migration was needed and no existing user was locked out by the
+deploy.
+
+The flow **fails open only when there is nothing to fall back to**. Issuing a token overwrites
+whatever was pending, so the previous state is captured first and put back when the send fails —
+the same capture/restore pair the reset token uses. Which way that lands depends on whether a
+confirmation was already owed:
+
+| Send fails during | Previous token | Result |
+|-------------------|----------------|--------|
+| first issue at `/register` | none | restores to "no token": account ungated, onboarding proceeds |
+| `/verify-email/resend` | one pending | previous token restored: account stays gated, the link already in the inbox still works |
+
+The first row is the deliberate fail-open. When no verification link can be built
+(`etendo.go.app.baseUrl` unset) or the mail is not accepted for delivery, a misconfigured provider
+would otherwise silently stop every new signup from creating an environment, with no mail to click
+and no way to tell from the user's side.
+
+The second row is **not** optional, and clearing the token there would be a bypass of the whole
+feature rather than a graceful degradation. `verify-email` carries a per-recipient throttle
+(4 sends / 900s); once it refuses, the send returns false like any other delivery failure. If that
+cleared the token, pressing "resend" until the throttle tripped would switch the gate off — no
+tampering, just an impatient user waiting on a slow mail. Regression-tested by
+`resendWhoseMailFailsRestoresThePendingTokenSoTheAccountStaysGated`.
+
+SSO accounts are born confirmed, and signing in through the identity provider clears any
+confirmation still pending on that address — the assertion is stronger proof of ownership than a
+link we mailed.
 
 ## Built-In v1 Contracts
 
@@ -204,6 +291,7 @@ Email delivery failure is audited and must not roll back registration, onboardin
 |----------|-------------------|------------------|-------------------------|
 | `reset-password` | `reset-password` | `ETGO_Account.email` resolved by `accountId` | `version`, `accountId`, `link` |
 | `new-account` | `custom` | `ETGO_Account.email` resolved by `accountId` | `version`, `accountId`, `link`; optional `language` |
+| `verify-email` | `custom` | `ETGO_Account.email` resolved by `accountId` | `version`, `accountId`, `link`, `recordId` (the verification token hash); optional `language` |
 | `environment-ready` | `custom` | `ETGO_Account.email` resolved by `accountId` | `version`, `accountId`, `recordId` |
 | `company-invitation` | `custom` | `ETGO_Invitation.email` resolved by `recordId` | `version`, `recordId`, `link`; optional `language` |
 | `password-changed` | `custom` | `ETGO_Account.email` resolved by `accountId` | `version`, `accountId`, `recordId`; optional `date` |
