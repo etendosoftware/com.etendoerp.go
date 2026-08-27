@@ -512,10 +512,9 @@ public class ReconciliationHandlerTest {
 
       handler.buildCandidates(ACC_ID, LINE_ID, "payments", null, null);
 
-      // accountId binds first (position 1); the date-range NULL-check pair takes positions 2-5
-      // (dateFrom/dateTo, each bound twice for the "CAST(? AS date) IS NULL OR ... >= ?" guard);
-      // the docType flag lands at position 6. There is no more draftRec-aware OR-branch/bind — that
-      // "Reactivar leaves it linked" state (and its CANDIDATES_SQL clause) no longer exists.
+      // The account id is the first bound parameter these days, followed by the four
+      // date-range bounds and then the docType flag. There is no leading reconciliation id
+      // parameter any more, since the old draftRec branch of the candidates query is gone.
       verify(ps).setString(1, ACC_ID);
       verify(ps).setString(6, "N");
     }
