@@ -29,12 +29,18 @@ import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 
 import org.codehaus.jettison.json.JSONObject;
+import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
 import org.mockito.ArgumentCaptor;
 
+import com.etendoerp.go.schemaforge.webhooks.SFAssignUserRoles;
+import com.etendoerp.go.schemaforge.webhooks.SFDebugInvitationBypass;
 import com.etendoerp.go.schemaforge.webhooks.SFListMenu;
+import com.etendoerp.go.schemaforge.webhooks.SFResendInvitation;
 import com.etendoerp.go.schemaforge.webhooks.SFRolesOverview;
+import com.etendoerp.go.schemaforge.webhooks.SFSystemRoleTemplates;
+import com.etendoerp.go.schemaforge.webhooks.SFUserRoleAssignments;
 import com.etendoerp.go.schemaforge.webhooks.SFWindowAccessMap;
 import com.etendoerp.webhookevents.services.BaseWebhookService;
 
@@ -63,6 +69,13 @@ public class NeoPseudoSpecDispatcherTest {
     dispatcher = new NeoPseudoSpecDispatcher(servlet, batchService, simSearchEndpoint, goWebhookBridge);
     request = mock(HttpServletRequest.class);
     response = mock(HttpServletResponse.class);
+  }
+
+  private static final String DEBUG_FLAG_PROPERTY = "etendo.go.debug.invitationBypass";
+
+  @After
+  public void clearDebugFlagProperty() {
+    System.clearProperty(DEBUG_FLAG_PROPERTY);
   }
 
   private static NeoServlet.NeoPathInfo pathInfo(String specName) {
@@ -200,6 +213,167 @@ public class NeoPseudoSpecDispatcherTest {
     assertTrue(handled);
     verify(servlet).sendError(eq(response), eq(HttpServletResponse.SC_METHOD_NOT_ALLOWED),
         eq("Rolesoverview endpoint only supports GET"));
+    verify(goWebhookBridge, never()).handle(any(), any());
+  }
+
+  @Test
+  public void assignUserRolesGetDispatchesThroughBridgeWithSFAssignUserRoles() throws Exception {
+    NeoResponse payload = NeoResponse.ok(new JSONObject());
+    when(goWebhookBridge.handle(eq(request), any(BaseWebhookService.class))).thenReturn(payload);
+
+    boolean handled = dispatcher.handle(pathInfo("assignuserroles"), "GET", request, response);
+
+    assertTrue(handled);
+    ArgumentCaptor<BaseWebhookService> webhookCaptor = ArgumentCaptor.forClass(BaseWebhookService.class);
+    verify(goWebhookBridge).handle(eq(request), webhookCaptor.capture());
+    assertTrue(webhookCaptor.getValue() instanceof SFAssignUserRoles);
+    verify(servlet).writeResponse(response, payload);
+  }
+
+  @Test
+  public void assignUserRolesRejectsNonGetMethod() throws Exception {
+    boolean handled = dispatcher.handle(pathInfo("assignuserroles"), "POST", request, response);
+
+    assertTrue(handled);
+    verify(servlet).sendError(eq(response), eq(HttpServletResponse.SC_METHOD_NOT_ALLOWED),
+        eq("Assignuserroles endpoint only supports GET"));
+    verify(goWebhookBridge, never()).handle(any(), any());
+  }
+
+  @Test
+  public void userRoleAssignmentsGetDispatchesThroughBridgeWithSFUserRoleAssignments() throws Exception {
+    NeoResponse payload = NeoResponse.ok(new JSONObject());
+    when(goWebhookBridge.handle(eq(request), any(BaseWebhookService.class))).thenReturn(payload);
+
+    boolean handled = dispatcher.handle(pathInfo("userroleassignments"), "GET", request, response);
+
+    assertTrue(handled);
+    ArgumentCaptor<BaseWebhookService> webhookCaptor = ArgumentCaptor.forClass(BaseWebhookService.class);
+    verify(goWebhookBridge).handle(eq(request), webhookCaptor.capture());
+    assertTrue(webhookCaptor.getValue() instanceof SFUserRoleAssignments);
+    verify(servlet).writeResponse(response, payload);
+  }
+
+  @Test
+  public void userRoleAssignmentsRejectsNonGetMethod() throws Exception {
+    boolean handled = dispatcher.handle(pathInfo("userroleassignments"), "POST", request, response);
+
+    assertTrue(handled);
+    verify(servlet).sendError(eq(response), eq(HttpServletResponse.SC_METHOD_NOT_ALLOWED),
+        eq("Userroleassignments endpoint only supports GET"));
+    verify(goWebhookBridge, never()).handle(any(), any());
+  }
+
+  @Test
+  public void systemRoleTemplatesGetDispatchesThroughBridgeWithSFSystemRoleTemplates() throws Exception {
+    NeoResponse payload = NeoResponse.ok(new JSONObject());
+    when(goWebhookBridge.handle(eq(request), any(BaseWebhookService.class))).thenReturn(payload);
+
+    boolean handled = dispatcher.handle(pathInfo("systemroletemplates"), "GET", request, response);
+
+    assertTrue(handled);
+    ArgumentCaptor<BaseWebhookService> webhookCaptor = ArgumentCaptor.forClass(BaseWebhookService.class);
+    verify(goWebhookBridge).handle(eq(request), webhookCaptor.capture());
+    assertTrue(webhookCaptor.getValue() instanceof SFSystemRoleTemplates);
+    verify(servlet).writeResponse(response, payload);
+  }
+
+  @Test
+  public void systemRoleTemplatesRejectsNonGetMethod() throws Exception {
+    boolean handled = dispatcher.handle(pathInfo("systemroletemplates"), "POST", request, response);
+
+    assertTrue(handled);
+    verify(servlet).sendError(eq(response), eq(HttpServletResponse.SC_METHOD_NOT_ALLOWED),
+        eq("Systemroletemplates endpoint only supports GET"));
+    verify(goWebhookBridge, never()).handle(any(), any());
+  }
+
+  // -------------------------------------------------------------------------
+  // debuginvitationbypass (ETP-4830, item #4) — dev-only, gated OFF by default
+  // -------------------------------------------------------------------------
+
+  /**
+   * The security-critical case for this whole feature: with the flag unset (the default in
+   * every environment that hasn't explicitly opted in), the endpoint must behave as if it does
+   * not exist — a plain 404, {@link SFDebugInvitationBypass} never constructed,
+   * {@link NeoGoWebhookBridge#handle} never invoked (so zero DB reads/writes occur, not just an
+   * early-return inside the webhook itself).
+   */
+  @Test
+  public void debugInvitationBypassIsA404WhenFlagIsOff() throws Exception {
+    System.clearProperty(DEBUG_FLAG_PROPERTY);
+
+    boolean handled = dispatcher.handle(pathInfo("debuginvitationbypass"), "GET", request, response);
+
+    assertTrue(handled);
+    verify(servlet).sendError(eq(response), eq(HttpServletResponse.SC_NOT_FOUND), eq("Not found"));
+    verify(goWebhookBridge, never()).handle(any(), any());
+  }
+
+  @Test
+  public void debugInvitationBypassIsA404WhenFlagIsExplicitlyFalse() throws Exception {
+    System.setProperty(DEBUG_FLAG_PROPERTY, "false");
+
+    boolean handled = dispatcher.handle(pathInfo("debuginvitationbypass"), "GET", request, response);
+
+    assertTrue(handled);
+    verify(servlet).sendError(eq(response), eq(HttpServletResponse.SC_NOT_FOUND), eq("Not found"));
+    verify(goWebhookBridge, never()).handle(any(), any());
+  }
+
+  @Test
+  public void debugInvitationBypassDispatchesThroughBridgeWhenFlagIsOn() throws Exception {
+    System.setProperty(DEBUG_FLAG_PROPERTY, "true");
+    NeoResponse payload = NeoResponse.ok(new JSONObject());
+    when(goWebhookBridge.handle(eq(request), any(BaseWebhookService.class))).thenReturn(payload);
+
+    boolean handled = dispatcher.handle(pathInfo("debuginvitationbypass"), "GET", request, response);
+
+    assertTrue(handled);
+    ArgumentCaptor<BaseWebhookService> webhookCaptor = ArgumentCaptor.forClass(BaseWebhookService.class);
+    verify(goWebhookBridge).handle(eq(request), webhookCaptor.capture());
+    assertTrue(webhookCaptor.getValue() instanceof SFDebugInvitationBypass);
+    verify(servlet).writeResponse(response, payload);
+    verify(servlet, never()).sendError(eq(response), eq(HttpServletResponse.SC_NOT_FOUND), any());
+  }
+
+  @Test
+  public void debugInvitationBypassRejectsNonGetMethodEvenWhenFlagIsOn() throws Exception {
+    System.setProperty(DEBUG_FLAG_PROPERTY, "true");
+
+    boolean handled = dispatcher.handle(pathInfo("debuginvitationbypass"), "POST", request, response);
+
+    assertTrue(handled);
+    verify(servlet).sendError(eq(response), eq(HttpServletResponse.SC_METHOD_NOT_ALLOWED),
+        eq("Debuginvitationbypass endpoint only supports GET"));
+    verify(goWebhookBridge, never()).handle(any(), any());
+  }
+
+  // -------------------------------------------------------------------------
+  // resendinvitation (ETP-4830, item #2) — real, always-on, no feature flag
+  // -------------------------------------------------------------------------
+
+  @Test
+  public void resendInvitationGetDispatchesThroughBridgeWithSFResendInvitation() throws Exception {
+    NeoResponse payload = NeoResponse.ok(new JSONObject());
+    when(goWebhookBridge.handle(eq(request), any(BaseWebhookService.class))).thenReturn(payload);
+
+    boolean handled = dispatcher.handle(pathInfo("resendinvitation"), "GET", request, response);
+
+    assertTrue(handled);
+    ArgumentCaptor<BaseWebhookService> webhookCaptor = ArgumentCaptor.forClass(BaseWebhookService.class);
+    verify(goWebhookBridge).handle(eq(request), webhookCaptor.capture());
+    assertTrue(webhookCaptor.getValue() instanceof SFResendInvitation);
+    verify(servlet).writeResponse(response, payload);
+  }
+
+  @Test
+  public void resendInvitationRejectsNonGetMethod() throws Exception {
+    boolean handled = dispatcher.handle(pathInfo("resendinvitation"), "POST", request, response);
+
+    assertTrue(handled);
+    verify(servlet).sendError(eq(response), eq(HttpServletResponse.SC_METHOD_NOT_ALLOWED),
+        eq("Resendinvitation endpoint only supports GET"));
     verify(goWebhookBridge, never()).handle(any(), any());
   }
 }

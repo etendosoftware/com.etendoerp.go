@@ -19,6 +19,7 @@ package com.etendoerp.go.schemaforge.handlers;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
@@ -218,14 +219,14 @@ class ContactHandlerTest {
     assertEquals(("A".repeat(40) + " " + "B".repeat(40)).substring(0, 60), body.getString("name"));
   }
 
-  // ── handle() — POST: username derivation ────────────────────────────────────
+  // ── handle() — POST: username parity with Classic ───────────────────────────
 
   /**
-   * {@code AD_User.Username} is AD-mandatory and is not exposed as a Schema Forge field
-   * in the contacts window, so a create with no username must still pass validation.
+   * Contacts created through Classic leave {@code AD_User.Username} null. NEO must preserve
+   * that behaviour instead of deriving a username from the contact name.
    */
   @Test
-  void testHandlePostDerivesUsernameFromName() throws Exception {
+  void testHandlePostLeavesUsernameNullWhenNotProvided() throws Exception {
     JSONObject body = new JSONObject();
     body.put("firstName", "Jane");
     body.put("lastName", "Roe");
@@ -235,7 +236,7 @@ class ContactHandlerTest {
 
     handler.handle(ctx);
 
-    assertEquals("Jane Roe", body.getString("username"));
+    assertFalse(body.has("username"));
   }
 
   /**
@@ -256,29 +257,9 @@ class ContactHandlerTest {
     assertEquals("jroe", body.getString("username"));
   }
 
-  /**
-   * Regression: {@code AD_User.Username} is also {@code NVARCHAR(60)}.
-   */
+  /** An explicit name does not cause a username to be invented. */
   @Test
-  void testHandlePostTruncatesDerivedUsernameToColumnLength() throws Exception {
-    JSONObject body = new JSONObject();
-    body.put("firstName", "A".repeat(40));
-    body.put("lastName", "B".repeat(40));
-
-    when(ctx.getHttpMethod()).thenReturn("POST");
-    when(ctx.getRequestBody()).thenReturn(body);
-
-    handler.handle(ctx);
-
-    assertEquals(60, body.getString("username").length());
-  }
-
-  /**
-   * With an explicit name and no name parts, the username still gets filled — the
-   * mandatory column is what matters, not where the name came from.
-   */
-  @Test
-  void testHandlePostDerivesUsernameFromExplicitName() throws Exception {
+  void testHandlePostDoesNotInventUsernameFromExplicitName() throws Exception {
     JSONObject body = new JSONObject();
     body.put("name", "Explicit Name");
 
@@ -287,7 +268,13 @@ class ContactHandlerTest {
 
     handler.handle(ctx);
 
-    assertEquals("Explicit Name", body.getString("username"));
+    assertFalse(body.has("username"));
+  }
+
+  /** The contact handler protects username from the Classic name callout cascade. */
+  @Test
+  void testProtectsUsernameFromCreateCalloutCascade() {
+    assertTrue(handler.protectedCreateCalloutFields(ctx).contains("username"));
   }
 
   // ── handle() — PATCH / PUT ──────────────────────────────────────────────────

@@ -42,9 +42,13 @@ import dev.openfeature.sdk.Value;
 
 class PropertiesFeatureProviderTest {
 
-  private static final String FLAG = GoFeatureFlags.FLAG_TENANT_UPGRADE;
-  private static final String FLAG_PROPERTY =
-      PropertiesFeatureProvider.PROPERTY_PREFIX + GoFeatureFlags.FLAG_TENANT_UPGRADE;
+  /**
+   * A key that belongs to no shipped feature. The provider is key-agnostic, so these tests only ever
+   * needed <em>a</em> key — and borrowing a live flag's key made them break when that flag retired
+   * (ETP-4966). Keep this deliberately fictional so it cannot happen again.
+   */
+  private static final String FLAG = "sample-flag";
+  private static final String FLAG_PROPERTY = PropertiesFeatureProvider.PROPERTY_PREFIX + FLAG;
 
   private final PropertiesFeatureProvider provider = new PropertiesFeatureProvider();
 
@@ -54,8 +58,8 @@ class PropertiesFeatureProviderTest {
    * Isolate every test from the ambient {@code Openbravo.properties}/{@code gradle.properties} on
    * whatever machine runs this suite: {@code ConfigPropertyReader} falls back to
    * {@code OBPropertiesProvider} whenever the JVM system property is unset, so a developer's local
-   * override (e.g. {@code etendo.go.flags.tenant-upgrade=true}, kept locally to exercise the paid
-   * upgrade flow by hand) would otherwise leak into "unconfigured" assertions here and fail them
+   * override (e.g. {@code etendo.go.flags.sample-flag=true}, kept locally to exercise a flag by
+   * hand) would otherwise leak into "unconfigured" assertions here and fail them
    * on that machine only, never in CI. Returning empty properties forces every test to exercise
    * only what it explicitly sets via {@code System.setProperty}. Same pattern as
    * {@code PublicUrlResolverTest}.
@@ -119,7 +123,7 @@ class PropertiesFeatureProviderTest {
 
   @ParameterizedTest
   @CsvSource({
-      "tenant-upgrade,  ETGO_FLAG_TENANT_UPGRADE",
+      "sample-flag,     ETGO_FLAG_SAMPLE_FLAG",
       "some.other-flag, ETGO_FLAG_SOME_OTHER_FLAG",
       "simple,          ETGO_FLAG_SIMPLE"
   })

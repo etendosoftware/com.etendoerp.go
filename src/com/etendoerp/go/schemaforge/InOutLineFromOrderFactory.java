@@ -18,6 +18,8 @@ package com.etendoerp.go.schemaforge;
 
 import java.math.BigDecimal;
 
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.openbravo.base.provider.OBProvider;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.enterprise.Locator;
@@ -33,17 +35,38 @@ import org.openbravo.model.materialmgmt.transaction.ShipmentInOutLine;
  */
 final class InOutLineFromOrderFactory {
 
+  private static final Logger log = LogManager.getLogger(InOutLineFromOrderFactory.class);
+
   private InOutLineFromOrderFactory() {
   }
 
   /**
    * Returns the pending qty for an order line (ordered minus delivered), or
    * {@code null} when the line should be skipped from a new shipment/receipt
-   * (inactive, missing product/UOM, or fully shipped/received).
+   * (inactive, missing product/UOM, non-stockable/non-Item product, or fully
+   * shipped/received).
    *
    * <p>Returning {@code null} (instead of throwing or returning ZERO with a
    * separate flag) keeps the caller loop tight: "fetch qty, skip if null,
    * otherwise create line".
+   *
+   * <p><b>ETP-4844:</b> the synthetic global-discount line ({@code ETGO_DTO},
+   * {@link TotalDiscountService#DISCOUNT_PRODUCT_ID}) is excluded by explicit ID,
+   * the same guard {@code CreateDraftInvoiceHandler.resolvePendingForLine()} uses
+   * for the Order → Invoice path. Goods Receipt/Shipment are quantity-only,
+   * non-fiscal documents that structurally cannot hold a priced discount line —
+   * one leaking in corrupts any invoice generated downstream from that receipt/
+   * shipment. The ETP-4853 stockable/Item-type check below already excludes this
+   * product today (it is configured {@code IsStocked='N'}, {@code ProductType='S'}),
+   * but that protection depends on product master data staying that way; the
+   * explicit ID check here does not.
+   *
+   * <p><b>ETP-4853:</b> a product that is not stockable, or not of type Item
+   * (e.g. a Service/Expense product), never represents physical stock movement
+   * and must never become a shipment/receipt line. This mirrors the
+   * discriminator the classic {@code M_INOUT_CREATE} stored procedure uses
+   * ({@code IsStocked='Y' AND ProductType='I'}) to decide whether an order line
+   * belongs in the generated document.
    *
    * <p><b>ETP-4722:</b> ordered/delivered quantities can be NEGATIVE since
    * ETP-4567 removed the old {@code min: 0} constraint on order lines (e.g.
@@ -56,6 +79,13 @@ final class InOutLineFromOrderFactory {
    */
   static BigDecimal pendingQuantityFor(OrderLine orderLine) {
     if (!orderLine.isActive() || orderLine.getProduct() == null || orderLine.getUOM() == null) {
+      return null;
+    }
+    if (TotalDiscountService.DISCOUNT_PRODUCT_ID.equals(orderLine.getProduct().getId())) {
+      return null;
+    }
+    if (!Boolean.TRUE.equals(orderLine.getProduct().isStocked())
+        || !"I".equals(orderLine.getProduct().getProductType())) {
       return null;
     }
     BigDecimal orderedQty = orderLine.getOrderedQuantity();
@@ -74,6 +104,15 @@ final class InOutLineFromOrderFactory {
    * of the same order line via {@link InvoiceLineLinker}. The flow mirrors
    * what the canonical {@code m_inout_create} stored procedure performs in
    * classic when generating a shipment/receipt from an order.
+   *
+   * <p><b>ETP-4863:</b> {@code locator} arrives resolved from the ORDER's warehouse — both
+   * callers ({@code CreateShipmentHandler}, {@code CreateGoodsReceiptHandler}) obtain it via
+   * {@code findDefaultLocator(order)}. What {@code M_INOUT_POST} actually follows when it books
+   * the stock transaction is the LINE's bin measured against the DOCUMENT header's warehouse.
+   * Those two warehouses happen to coincide today (the header is built from the same order), but
+   * nothing enforced it, so this path is normalized through the same
+   * {@link NeoHandlerUtils#anchorLocatorToWarehouse} rule as every other {@code M_InOutLine}
+   * write path in the module rather than trusting an invariant that lives in another class.
    */
   static void createAndLinkLine(ShipmentInOut parentInOut, OrderLine orderLine,
       Locator locator, long lineNo, BigDecimal pendingQty) {
@@ -84,7 +123,8 @@ final class InOutLineFromOrderFactory {
     line.setLineNo(lineNo);
     line.setProduct(orderLine.getProduct());
     line.setUOM(orderLine.getUOM());
-    line.setStorageBin(locator);
+    line.setStorageBin(
+        NeoHandlerUtils.anchorLocatorToWarehouse(locator, parentInOut.getWarehouse(), log));
     line.setMovementQuantity(pendingQty);
     line.setSalesOrderLine(orderLine);
     line.setDescription(orderLine.getDescription());

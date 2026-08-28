@@ -18,15 +18,9 @@
 package com.etendoerp.go.mcp;
 
 import java.util.Map;
-import java.util.Set;
 
-import javax.enterprise.inject.spi.Bean;
-import javax.enterprise.inject.spi.BeanManager;
-
-import org.apache.commons.lang3.StringUtils;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
-import org.openbravo.base.weld.WeldUtils;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.model.ad.ui.Tab;
 
@@ -35,6 +29,7 @@ import com.etendoerp.go.schemaforge.NeoEndpointType;
 import com.etendoerp.go.schemaforge.NeoHandler;
 import com.etendoerp.go.schemaforge.NeoResponse;
 import com.etendoerp.go.schemaforge.data.SFEntity;
+import com.etendoerp.go.schemaforge.util.NeoHandlerLookup;
 
 /**
  * Executes NeoHandler pre/post hooks for MCP write operations, providing the same
@@ -49,27 +44,16 @@ final class McpHookExecutor {
 
   /**
    * Resolve the {@link NeoHandler} registered for the entity's Java_Qualifier.
-   * Uses {@link Bean#getName()} — the CDI-standard way to read the {@code @Named}
-   * value; works correctly on scoped proxies ({@code @ApplicationScoped}, etc.).
+   *
+   * <p>Delegates to {@link NeoHandlerLookup}, where the CDI lookup was moved (ETP-4793 / IMP-19)
+   * so {@code schemaforge} code — the report-callability gate — can ask a handler what it
+   * supports without depending on this package.</p>
    *
    * @return the matching handler, or {@code null} when the entity declares no
    *         qualifier or no matching {@code @Named} handler is deployed
    */
-  @SuppressWarnings("unchecked")
   static NeoHandler resolveEntityHandler(SFEntity sfEntity) {
-    String qualifier = sfEntity.getJavaQualifier();
-    if (StringUtils.isBlank(qualifier)) {
-      return null;
-    }
-    BeanManager bm = WeldUtils.getStaticInstanceBeanManager();
-    Set<Bean<?>> beans = bm.getBeans(NeoHandler.class, WeldUtils.ANY_LITERAL);
-    for (Bean<?> bean : beans) {
-      if (qualifier.equals(bean.getName())) {
-        return (NeoHandler) bm.getReference(bean, NeoHandler.class,
-            bm.createCreationalContext(bean));
-      }
-    }
-    return null;
+    return NeoHandlerLookup.byQualifier(sfEntity.getJavaQualifier());
   }
 
   /**
@@ -183,12 +167,21 @@ final class McpHookExecutor {
   /**
    * Convert a {@link NeoResponse} to MCP result format.
    * Responses with status &ge; 400 set {@code isError: true}.
+   *
+   * <p>This is the <b>fourth error funnel</b> (ETP-4793 / IMP-5 clause (iv)). It used to forward the
+   * handler's body verbatim, which is how {@code generate_aging_receivable({})} answered the nested
+   * pre-IMP-5 {@code {"error":{"message":…,"status":422}}} with nothing an agent could branch on —
+   * found while verifying IMP-19, after IMP-17 had closed the three funnels it enumerated and this
+   * was in none of them. Every MCP path that returns a handler's or a process's {@code NeoResponse}
+   * comes through here — report generation, {@code neo_process}, the widget/amortization paths and
+   * all four entity pre/post hooks — so normalizing once covers all of them. The normalization is
+   * additive and idempotent; see {@link McpToolRouterSupport#toMcpHandlerError} for why it does not
+   * live in {@code NeoResponse.error} itself.</p>
    */
   static JSONObject neoResponseToMcpResult(NeoResponse neoResponse) throws JSONException {
     if (neoResponse.getHttpStatus() >= 400) {
-      String errorText = neoResponse.getBody() != null
-          ? neoResponse.getBody().toString(2)
-          : "Request failed with status " + neoResponse.getHttpStatus();
+      String errorText = McpToolRouterSupport
+          .toMcpHandlerError(neoResponse.getBody(), neoResponse.getHttpStatus()).toString(2);
       return McpToolRouter.wrapAsErrorContent(errorText);
     }
     String text = neoResponse.getBody() != null

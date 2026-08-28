@@ -21,8 +21,14 @@ import java.io.IOException;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 
+import com.etendoerp.go.common.GoRuntimeProperties;
+import com.etendoerp.go.schemaforge.webhooks.SFAssignUserRoles;
+import com.etendoerp.go.schemaforge.webhooks.SFDebugInvitationBypass;
 import com.etendoerp.go.schemaforge.webhooks.SFListMenu;
+import com.etendoerp.go.schemaforge.webhooks.SFResendInvitation;
 import com.etendoerp.go.schemaforge.webhooks.SFRolesOverview;
+import com.etendoerp.go.schemaforge.webhooks.SFSystemRoleTemplates;
+import com.etendoerp.go.schemaforge.webhooks.SFUserRoleAssignments;
 import com.etendoerp.go.schemaforge.webhooks.SFWindowAccessMap;
 import com.etendoerp.webhookevents.services.BaseWebhookService;
 
@@ -38,6 +44,15 @@ import com.etendoerp.webhookevents.services.BaseWebhookService;
  * constructor (DB/DAL-touching in several cases), which is not safe in a unit test.</p>
  */
 class NeoPseudoSpecDispatcher {
+
+  // ETP-4830 (dev-only debug bypass, item #4) — gates com/etendoerp/go/schemaforge/webhooks/
+  // SFDebugInvitationBypass.java entirely. Default false: an environment that never sets this
+  // property/env var behaves exactly as if the endpoint did not exist (404, checked BEFORE the
+  // webhook is even constructed — see dispatchDebugInvitationBypass below). This is the ONLY
+  // acceptable safeguard for this endpoint (role/session checks alone are reachable in
+  // production too) — see docs/neo-headless.md's "Debug invitation bypass" subsection.
+  private static final String DEBUG_INVITATION_BYPASS_PROPERTY = "etendo.go.debug.invitationBypass";
+  private static final String DEBUG_INVITATION_BYPASS_ENV = "ETGO_DEBUG_INVITATION_BYPASS";
 
   private final NeoServlet servlet;
   private final BatchService batchService;
@@ -89,6 +104,41 @@ class NeoPseudoSpecDispatcher {
     if ("rolesoverview".equals(pathInfo.specName)) {
       return dispatchGoWebhook("Rolesoverview", method, request, response, new SFRolesOverview());
     }
+    // ETP-4852: compose a user's access from 1+ system-level template roles. See
+    // SFAssignUserRoles's class javadoc for the full mechanism and response shape.
+    if ("assignuserroles".equals(pathInfo.specName)) {
+      return dispatchGoWebhook("Assignuserroles", method, request, response,
+          new SFAssignUserRoles());
+    }
+    // ETP-4906: read-path companion to assignuserroles — "which template roles does user X (or
+    // every user of my client) currently have applied". See SFUserRoleAssignments's class
+    // javadoc for the full mechanism and both response shapes.
+    if ("userroleassignments".equals(pathInfo.specName)) {
+      return dispatchGoWebhook("Userroleassignments", method, request, response,
+          new SFUserRoleAssignments());
+    }
+    // ETP-4906 (Manual QA Feedback Round 2, finding 2): the 4 fixed role templates resolved at
+    // the SYSTEM client (AD_Client_ID = '0'), not the caller's own tenant — see
+    // SFSystemRoleTemplates's class javadoc for why this can't just repoint SFRolesOverview.
+    if ("systemroletemplates".equals(pathInfo.specName)) {
+      return dispatchGoWebhook("Systemroletemplates", method, request, response,
+          new SFSystemRoleTemplates());
+    }
+    // ETP-4830 (item #4) — dev/QA-only endpoint to force-accept an invitation or force an
+    // ETGO_INVITATION.STATUS value, so the invite-email flow and the frontend's status pill can
+    // be exercised without a real email round-trip. See SFDebugInvitationBypass's class javadoc
+    // for the two actions. GATED OFF BY DEFAULT — see dispatchDebugInvitationBypass.
+    if ("debuginvitationbypass".equals(pathInfo.specName)) {
+      return dispatchDebugInvitationBypass(method, request, response);
+    }
+    // ETP-4830 (item #2) — admin "Resend invitation" action on the user detail header. Real,
+    // always-on production feature (no feature flag, unlike debuginvitationbypass above) — the
+    // access boundary is SFResendInvitation's own admin/client-admin role check plus
+    // CompanyInvitationService#resendInvitation scoping the target user to the caller's client.
+    if ("resendinvitation".equals(pathInfo.specName)) {
+      return dispatchGoWebhook("Resendinvitation", method, request, response,
+          new SFResendInvitation());
+    }
     return false;
   }
 
@@ -127,5 +177,31 @@ class NeoPseudoSpecDispatcher {
     }
     servlet.writeResponse(response, goWebhookBridge.handle(request, webhook));
     return true;
+  }
+
+  /**
+   * ETP-4830 (item #4) — the debug bypass's own gate, checked BEFORE {@link SFDebugInvitationBypass}
+   * is even constructed. When the flag reads {@code false} (the default in every environment that
+   * hasn't explicitly opted in via its own local {@code Openbravo.properties}/env var), this
+   * returns a plain 404 — the endpoint behaves as if it did not exist, with zero DB access and
+   * zero writes. This is the true, only safeguard here (see the field's own comment above);
+   * {@link SFDebugInvitationBypass}'s own admin/client-admin role check is defense-in-depth only,
+   * not a substitute, since a valid NEO bearer token with an admin role is reachable in
+   * production too.
+   */
+  private boolean dispatchDebugInvitationBypass(String method, HttpServletRequest request,
+      HttpServletResponse response) throws IOException {
+    if (!"GET".equals(method)) {
+      servlet.sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
+          "Debuginvitationbypass endpoint only supports GET");
+      return true;
+    }
+    if (!GoRuntimeProperties.readBoolean(DEBUG_INVITATION_BYPASS_PROPERTY,
+        DEBUG_INVITATION_BYPASS_ENV, false)) {
+      servlet.sendError(response, HttpServletResponse.SC_NOT_FOUND, "Not found");
+      return true;
+    }
+    return dispatchGoWebhook("Debuginvitationbypass", method, request, response,
+        new SFDebugInvitationBypass());
   }
 }

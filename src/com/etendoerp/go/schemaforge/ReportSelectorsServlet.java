@@ -259,6 +259,7 @@ public class ReportSelectorsServlet extends HttpBaseServlet {
       case "bpartner":   return buildBpartnerQuery();
       case "product":    return buildProductQuery(req);
       case "warehouse":  return buildWarehouseQuery(req);
+      case "product-category": return buildProductCategoryQuery();
       case "project":    return buildProjectQuery();
       case "org":        return buildOrgQuery();
       case "account":    return buildAccountQuery(req);
@@ -280,9 +281,16 @@ public class ReportSelectorsServlet extends HttpBaseServlet {
   }
 
   private SelectorQuery buildProductQuery(SelectorRequest req) {
+    // ETP-4967: excludes products classified under a category flagged
+    // EM_Etgo_IsSystemCategory='Y' (e.g. ETGO_DTO, category "Discounts") — same exclusion as
+    // every other product selector in the app, applied directly in SQL since this servlet builds
+    // its own queries independently of NeoSelectorService.
     StringBuilder fromWhere = new StringBuilder(
         "FROM m_product WHERE isactive='Y' AND ad_client_id = :clientId"
-        + " AND (name ILIKE :search OR value ILIKE :search)");
+        + " AND (name ILIKE :search OR value ILIKE :search)"
+        + " AND NOT EXISTS (SELECT 1 FROM m_product_category mpc"
+        + " WHERE mpc.m_product_category_id = m_product.m_product_category_id"
+        + " AND mpc.em_etgo_issystemcategory = 'Y')");
     if (!req.warehouseIds.isEmpty()) {
       fromWhere.append(" AND EXISTS (SELECT 1 FROM m_storage_detail sd"
           + " JOIN m_locator l ON l.m_locator_id = sd.m_locator_id"
@@ -322,6 +330,19 @@ public class ReportSelectorsServlet extends HttpBaseServlet {
     return new SelectorQuery(
         "SELECT m_warehouse_id AS id, name, name AS label",
         fromWhere, ORDER_BY_NAME, true);
+  }
+
+  private SelectorQuery buildProductCategoryQuery() {
+    // ETP-4967: excludes categories flagged EM_Etgo_IsSystemCategory='Y' (e.g. "Discounts",
+    // which exists solely to hold the internal global-discount product ETGO_DTO) from the
+    // report scope's category filter/grouping. COALESCE covers rows from before the column
+    // existed, same as InventoryStockReportHandler's own exclusion.
+    return new SelectorQuery(
+        "SELECT m_product_category_id AS id, name, name AS label",
+        new StringBuilder("FROM m_product_category WHERE isactive='Y'"
+            + ACTIVE_CLIENT_NAME_SEARCH
+            + " AND COALESCE(em_etgo_issystemcategory, 'N') <> 'Y'"),
+        ORDER_BY_NAME, true);
   }
 
   private SelectorQuery buildProjectQuery() {

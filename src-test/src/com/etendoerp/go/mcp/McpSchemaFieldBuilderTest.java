@@ -46,6 +46,7 @@ import org.mockito.MockedStatic;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
+import org.openbravo.base.model.Entity;
 import org.openbravo.base.model.Property;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
@@ -188,6 +189,7 @@ class McpSchemaFieldBuilderTest {
     JSONArray fields = McpSchemaFieldBuilder.buildSchemaFieldsArray(
         tab,
         null,
+        java.util.Map.of(),
         java.util.Map.of(),
         java.util.Map.of(),
         java.util.Map.of("COL1", "  Pick the correct customer.  "),
@@ -515,6 +517,77 @@ class McpSchemaFieldBuilderTest {
       assertEquals("hidden", fieldObj.getString("visibility"));
       assertFalse(fieldObj.getBoolean("userRequired"));
     }
+
+    // IMP-12: a mandatory column that carries an AD default is filled by the server, so it is NOT
+    // the user's to supply. On sales-invoice/header this is 5 of the 11 mandatory editable fields
+    // (invoiceDate, accountingDate, paymentTerms, currency, priceList) — reporting them as
+    // userRequired is what made the agent ask the user for values the server already knows.
+    @Test
+    void mandatoryWithDefaultExpressionIsNotUserRequired() throws Exception {
+      JSONObject fieldObj = new JSONObject();
+      fieldObj.put(McpSchemaFieldBuilder.KEY_DEFAULT_EXPRESSION, "@#Date@");
+      invokeStatic("addVisibility",
+          new Class<?>[]{ JSONObject.class, String.class, boolean.class },
+          fieldObj, "editable", true);
+      assertEquals("editable", fieldObj.getString("visibility"));
+      assertFalse(fieldObj.getBoolean(McpSchemaFieldBuilder.KEY_USER_REQUIRED));
+    }
+
+    @Test
+    void mandatoryWithDefaultSourceIsNotUserRequired() throws Exception {
+      JSONObject fieldObj = new JSONObject();
+      fieldObj.put(McpSchemaFieldBuilder.KEY_DEFAULT_SOURCE, "server");
+      invokeStatic("addVisibility",
+          new Class<?>[]{ JSONObject.class, String.class, boolean.class },
+          fieldObj, "editable", true);
+      assertFalse(fieldObj.getBoolean(McpSchemaFieldBuilder.KEY_USER_REQUIRED));
+    }
+  }
+
+  // ─── isAgentSuppliable ──────────────────────────────────────────────
+
+  @Nested
+  @DisplayName("isAgentSuppliable")
+  class IsAgentSuppliable {
+
+    private JSONObject field(String visibility, boolean readOnly) throws Exception {
+      JSONObject fieldObj = new JSONObject();
+      if (visibility != null) {
+        fieldObj.put("visibility", visibility);
+      }
+      fieldObj.put("readOnly", readOnly);
+      return fieldObj;
+    }
+
+    @Test
+    @DisplayName("an editable, writable field is the agent's to send")
+    void editableWritable() throws Exception {
+      assertTrue(McpSchemaFieldBuilder.isAgentSuppliable(field("editable", false)));
+    }
+
+    @Test
+    @DisplayName("readOnly overrides editable — the server owns the value")
+    void editableButReadOnly() throws Exception {
+      assertFalse(McpSchemaFieldBuilder.isAgentSuppliable(field("editable", true)));
+    }
+
+    @Test
+    @DisplayName("system, readOnly and discarded visibilities are never suppliable")
+    void nonEditableVisibilities() throws Exception {
+      assertFalse(McpSchemaFieldBuilder.isAgentSuppliable(field("system", false)));
+      assertFalse(McpSchemaFieldBuilder.isAgentSuppliable(field("readOnly", false)));
+      assertFalse(McpSchemaFieldBuilder.isAgentSuppliable(field("discarded", false)));
+    }
+
+    // An uncurated entity (105 of them, per IMP-11 §4.2) emits no visibility at all. Excluding
+    // those from view:"create" is deliberate: absent curation, we cannot claim a field is safe to
+    // send, and a wrong "required" list is worse than a missing one.
+    @Test
+    @DisplayName("a field with no visibility, and null, are excluded")
+    void missingVisibility() throws Exception {
+      assertFalse(McpSchemaFieldBuilder.isAgentSuppliable(field(null, false)));
+      assertFalse(McpSchemaFieldBuilder.isAgentSuppliable(null));
+    }
   }
 
   // ─── addSelectorInfo ────────────────────────────────────────────────
@@ -708,8 +781,9 @@ class McpSchemaFieldBuilderTest {
 
       JSONObject fieldObj = new JSONObject();
       invokeStatic("addButtonInfo",
-          new Class<?>[]{ JSONObject.class, org.openbravo.model.ad.datamodel.Column.class },
-          fieldObj, col);
+          new Class<?>[]{ JSONObject.class, org.openbravo.model.ad.datamodel.Column.class,
+              String.class, boolean.class },
+          fieldObj, col, null, false);
 
       assertEquals("Y", fieldObj.getString("triggerValue"));
       assertEquals("Processed", fieldObj.getString("action"));
@@ -734,8 +808,9 @@ class McpSchemaFieldBuilderTest {
 
       JSONObject fieldObj = new JSONObject();
       invokeStatic("addButtonInfo",
-          new Class<?>[]{ JSONObject.class, org.openbravo.model.ad.datamodel.Column.class },
-          fieldObj, col);
+          new Class<?>[]{ JSONObject.class, org.openbravo.model.ad.datamodel.Column.class,
+              String.class, boolean.class },
+          fieldObj, col, null, false);
 
       assertEquals("Y", fieldObj.getString("triggerValue"));
       assertEquals("DocAction", fieldObj.getString("action"));
@@ -745,13 +820,18 @@ class McpSchemaFieldBuilderTest {
       assertEquals("CLASSIC-PROC-001", fieldObj.getString("processId"));
     }
 
+    /**
+     * IMP-21: a button with no process behind it has nothing for {@code neo_action} to run, so it
+     * must not claim {@code invokeVia} — it used to, which is how {@code CreateFrom} was advertised
+     * as callable while carrying neither {@code processName} nor {@code processId}.
+     */
     @Test
-    @DisplayName("buttonColumnWithNoProcessEmitsOnlyTrigger")
-    void buttonColumnWithNoProcessEmitsOnlyTrigger() throws Exception {
+    @DisplayName("buttonColumnWithNoProcessIsNotInvokable")
+    void buttonColumnWithNoProcessIsNotInvokable() throws Exception {
       org.openbravo.model.ad.datamodel.Column col = mock(
           org.openbravo.model.ad.datamodel.Column.class);
 
-      when(col.getDBColumnName()).thenReturn("Posted");
+      when(col.getDBColumnName()).thenReturn("CreateFrom");
       when(col.getProcess()).thenReturn(null);
       when(col.getOBUIAPPProcess()).thenReturn(null);
       accessHelperMock.when(
@@ -759,15 +839,216 @@ class McpSchemaFieldBuilderTest {
 
       JSONObject fieldObj = new JSONObject();
       invokeStatic("addButtonInfo",
-          new Class<?>[]{ JSONObject.class, org.openbravo.model.ad.datamodel.Column.class },
-          fieldObj, col);
+          new Class<?>[]{ JSONObject.class, org.openbravo.model.ad.datamodel.Column.class,
+              String.class, boolean.class },
+          fieldObj, col, null, false);
 
       assertEquals("Y", fieldObj.getString("triggerValue"));
-      assertEquals("Posted", fieldObj.getString("action"));
-      assertEquals("neo_action", fieldObj.getString("invokeVia"));
+      assertEquals("CreateFrom", fieldObj.getString("action"));
+      assertFalse(fieldObj.has("invokeVia"));
+      assertFalse(fieldObj.getBoolean("invokable"));
+      assertTrue(fieldObj.getString("notInvokableReason").startsWith("no process"));
       assertFalse(fieldObj.has("processType"));
       assertFalse(fieldObj.has("processName"));
       assertFalse(fieldObj.has("processId"));
+    }
+
+    /**
+     * IMP-21: 17 of the 22 sales-invoice actions were curated {@code discarded} and still
+     * advertised {@code invokeVia:"neo_action"}. A discarded action stays in the catalog — the
+     * agent should know it exists — but is reported as out of scope, not as callable.
+     */
+    @Test
+    @DisplayName("discardedButtonIsNotInvokableEvenWithAProcess")
+    void discardedButtonIsNotInvokableEvenWithAProcess() throws Exception {
+      org.openbravo.model.ad.datamodel.Column col = mock(
+          org.openbravo.model.ad.datamodel.Column.class);
+      Process classicProcess = mock(Process.class);
+
+      when(col.getDBColumnName()).thenReturn("Calculate_Promotions");
+      when(col.getProcess()).thenReturn(classicProcess);
+      when(col.getOBUIAPPProcess()).thenReturn(null);
+      when(classicProcess.getName()).thenReturn("Calculate Promotions");
+      when(classicProcess.getId()).thenReturn("CLASSIC-PROC-002");
+
+      JSONObject fieldObj = new JSONObject();
+      invokeStatic("addButtonInfo",
+          new Class<?>[]{ JSONObject.class, org.openbravo.model.ad.datamodel.Column.class,
+              String.class, boolean.class },
+          fieldObj, col, "discarded", false);
+
+      assertFalse(fieldObj.has("invokeVia"));
+      assertFalse(fieldObj.getBoolean("invokable"));
+      assertTrue(fieldObj.getString("notInvokableReason").startsWith("discarded"));
+      // The action is still fully described — only the callable claim is withdrawn.
+      assertEquals("Calculate Promotions", fieldObj.getString("processName"));
+      assertEquals("CLASSIC-PROC-002", fieldObj.getString("processId"));
+    }
+
+    /**
+     * A curated-but-not-discarded button with a process is invokable; so is an uncurated one
+     * ({@code visibility == null}), because absence of curation is not a decision to exclude.
+     */
+    @Test
+    @DisplayName("curatedNonDiscardedButtonWithProcessIsInvokable")
+    void curatedNonDiscardedButtonWithProcessIsInvokable() throws Exception {
+      org.openbravo.model.ad.datamodel.Column col = mock(
+          org.openbravo.model.ad.datamodel.Column.class);
+      Process classicProcess = mock(Process.class);
+
+      when(col.getDBColumnName()).thenReturn("DocAction");
+      when(col.getProcess()).thenReturn(classicProcess);
+      when(col.getOBUIAPPProcess()).thenReturn(null);
+      when(classicProcess.getName()).thenReturn("Process Invoice");
+      when(classicProcess.getId()).thenReturn("CLASSIC-PROC-003");
+
+      JSONObject fieldObj = new JSONObject();
+      invokeStatic("addButtonInfo",
+          new Class<?>[]{ JSONObject.class, org.openbravo.model.ad.datamodel.Column.class,
+              String.class, boolean.class },
+          fieldObj, col, "system", false);
+
+      assertEquals("neo_action", fieldObj.getString("invokeVia"));
+      assertFalse(fieldObj.has("invokable"));
+      assertFalse(fieldObj.has("notInvokableReason"));
+    }
+
+    /**
+     * IMP-21 defect (viii), found by the live verification: {@code Processing} shares
+     * {@code AD_Process} 111 with {@code DocAction} but is the classic procedure's internal flag,
+     * hidden in every window that has a field for it. It was the one action still presented as
+     * callable while carrying no {@code actionValues}, {@code actionParameter} or
+     * {@code agentPrompt}. Curation could not withdraw it — it is curated {@code system}, which is
+     * a statement about a payload value and says nothing about a button.
+     */
+    @Test
+    @DisplayName("buttonHiddenInTheTabIsNotInvokableEvenWithAProcess")
+    void buttonHiddenInTheTabIsNotInvokableEvenWithAProcess() throws Exception {
+      org.openbravo.model.ad.datamodel.Column col = mock(
+          org.openbravo.model.ad.datamodel.Column.class);
+      Process classicProcess = mock(Process.class);
+
+      when(col.getDBColumnName()).thenReturn("Processing");
+      when(col.getProcess()).thenReturn(classicProcess);
+      when(col.getOBUIAPPProcess()).thenReturn(null);
+      when(classicProcess.getName()).thenReturn("Process Invoice");
+      when(classicProcess.getId()).thenReturn("111");
+
+      JSONObject fieldObj = new JSONObject();
+      invokeStatic("addButtonInfo",
+          new Class<?>[]{ JSONObject.class, org.openbravo.model.ad.datamodel.Column.class,
+              String.class, boolean.class },
+          fieldObj, col, "system", true);
+
+      assertFalse(fieldObj.has("invokeVia"));
+      assertFalse(fieldObj.getBoolean("invokable"));
+      assertTrue(fieldObj.getString("notInvokableReason").startsWith("hidden"));
+      // Still described: an agent should be able to see it exists and shares process 111.
+      assertEquals("111", fieldObj.getString("processId"));
+    }
+
+    /**
+     * Both blockers at once must report the curated one — it tells the agent a human decided this,
+     * which is more actionable than AD's display flag.
+     */
+    @Test
+    @DisplayName("discardedTakesPrecedenceOverHiddenInTheReason")
+    void discardedTakesPrecedenceOverHiddenInTheReason() throws Exception {
+      org.openbravo.model.ad.datamodel.Column col = mock(
+          org.openbravo.model.ad.datamodel.Column.class);
+      Process classicProcess = mock(Process.class);
+
+      when(col.getDBColumnName()).thenReturn("Processing");
+      when(col.getProcess()).thenReturn(classicProcess);
+      when(col.getOBUIAPPProcess()).thenReturn(null);
+      when(classicProcess.getName()).thenReturn("Process Invoice");
+      when(classicProcess.getId()).thenReturn("111");
+
+      JSONObject fieldObj = new JSONObject();
+      invokeStatic("addButtonInfo",
+          new Class<?>[]{ JSONObject.class, org.openbravo.model.ad.datamodel.Column.class,
+              String.class, boolean.class },
+          fieldObj, col, "discarded", true);
+
+      assertTrue(fieldObj.getString("notInvokableReason").startsWith("discarded"));
+    }
+
+    /**
+     * IMP-21: a module-contributed button has no {@code AD_Field} in the tab, so its label fell
+     * back to the raw column name the module author typed ({@code EM_Psd2_Generate Bank Payment}).
+     * The process name is a label a human wrote for this action, so it wins.
+     */
+    @Test
+    @DisplayName("extensionButtonLabelFallsBackToProcessName")
+    void extensionButtonLabelFallsBackToProcessName() throws Exception {
+      org.openbravo.model.ad.datamodel.Column col = mock(
+          org.openbravo.model.ad.datamodel.Column.class);
+      Process classicProcess = mock(Process.class);
+
+      when(col.getDBColumnName()).thenReturn("EM_Psd2_Generate_Bank_Payment");
+      when(col.getName()).thenReturn("EM_Psd2_Generate Bank Payment");
+      when(col.getProcess()).thenReturn(classicProcess);
+      when(col.getOBUIAPPProcess()).thenReturn(null);
+      when(classicProcess.getName()).thenReturn("Generate SEPA payment file");
+      when(classicProcess.getId()).thenReturn("CLASSIC-PROC-004");
+
+      JSONObject fieldObj = new JSONObject();
+      fieldObj.put("label", "EM_Psd2_Generate Bank Payment");
+      invokeStatic("addButtonInfo",
+          new Class<?>[]{ JSONObject.class, org.openbravo.model.ad.datamodel.Column.class,
+              String.class, boolean.class },
+          fieldObj, col, null, false);
+
+      assertEquals("Generate SEPA payment file", fieldObj.getString("label"));
+    }
+
+    /** With no process name to borrow, the raw name is de-prefixed rather than left as-is. */
+    @Test
+    @DisplayName("extensionButtonLabelFallsBackToHumanizedColumnName")
+    void extensionButtonLabelFallsBackToHumanizedColumnName() throws Exception {
+      org.openbravo.model.ad.datamodel.Column col = mock(
+          org.openbravo.model.ad.datamodel.Column.class);
+
+      when(col.getDBColumnName()).thenReturn("EM_Aeatsii_Unsubscribe");
+      when(col.getName()).thenReturn("EM_Aeatsii_Unsubscribe");
+      when(col.getProcess()).thenReturn(null);
+      when(col.getOBUIAPPProcess()).thenReturn(null);
+      accessHelperMock.when(
+          () -> NeoAccessHelper.resolveFallbackObuiappProcess(col)).thenReturn(null);
+
+      JSONObject fieldObj = new JSONObject();
+      fieldObj.put("label", "EM_Aeatsii_Unsubscribe");
+      invokeStatic("addButtonInfo",
+          new Class<?>[]{ JSONObject.class, org.openbravo.model.ad.datamodel.Column.class,
+              String.class, boolean.class },
+          fieldObj, col, null, false);
+
+      assertEquals("Unsubscribe", fieldObj.getString("label"));
+    }
+
+    /** A core button's column name is already functional — the fallback must not touch it. */
+    @Test
+    @DisplayName("coreButtonLabelIsLeftAlone")
+    void coreButtonLabelIsLeftAlone() throws Exception {
+      org.openbravo.model.ad.datamodel.Column col = mock(
+          org.openbravo.model.ad.datamodel.Column.class);
+      Process classicProcess = mock(Process.class);
+
+      when(col.getDBColumnName()).thenReturn("CopyFrom");
+      when(col.getName()).thenReturn("Copy from");
+      when(col.getProcess()).thenReturn(classicProcess);
+      when(col.getOBUIAPPProcess()).thenReturn(null);
+      when(classicProcess.getName()).thenReturn("Copy Lines");
+      when(classicProcess.getId()).thenReturn("CLASSIC-PROC-005");
+
+      JSONObject fieldObj = new JSONObject();
+      fieldObj.put("label", "Copy from");
+      invokeStatic("addButtonInfo",
+          new Class<?>[]{ JSONObject.class, org.openbravo.model.ad.datamodel.Column.class,
+              String.class, boolean.class },
+          fieldObj, col, null, false);
+
+      assertEquals("Copy from", fieldObj.getString("label"));
     }
 
     @Test
@@ -805,8 +1086,10 @@ class McpSchemaFieldBuilderTest {
               java.util.Map.class,
               java.util.Map.class,
               java.util.Map.class,
+              java.util.Map.class,
               java.util.Set.class },
           col, tab, null,
+          new java.util.HashMap<>(),
           new java.util.HashMap<>(),
           new java.util.HashMap<>(),
           new java.util.HashMap<>(),
@@ -815,7 +1098,10 @@ class McpSchemaFieldBuilderTest {
       assertEquals("button", result.getString("type"));
       assertEquals("Y", result.getString("triggerValue"));
       assertEquals("Processed", result.getString("action"));
-      assertEquals("neo_action", result.getString("invokeVia"));
+      // No process resolved → not invokable (IMP-21).
+      assertFalse(result.getBoolean("invokable"));
+      // IMP-21: a button carries no payload, so AD's NOT NULL flag is not reported as `required`.
+      assertFalse(result.has("required"));
     }
 
     @Test
@@ -847,8 +1133,9 @@ class McpSchemaFieldBuilderTest {
 
         JSONObject fieldObj = new JSONObject();
         invokeStatic("addButtonInfo",
-            new Class<?>[]{ JSONObject.class, org.openbravo.model.ad.datamodel.Column.class },
-            fieldObj, col);
+            new Class<?>[]{ JSONObject.class, org.openbravo.model.ad.datamodel.Column.class,
+                String.class, boolean.class },
+            fieldObj, col, null, false);
 
         assertEquals("docAction", fieldObj.getString("actionParameter"));
         JSONArray values = fieldObj.getJSONArray("actionValues");
@@ -876,8 +1163,9 @@ class McpSchemaFieldBuilderTest {
 
       JSONObject fieldObj = new JSONObject();
       invokeStatic("addButtonInfo",
-          new Class<?>[]{ JSONObject.class, org.openbravo.model.ad.datamodel.Column.class },
-          fieldObj, col);
+          new Class<?>[]{ JSONObject.class, org.openbravo.model.ad.datamodel.Column.class,
+              String.class, boolean.class },
+          fieldObj, col, null, false);
 
       assertFalse(fieldObj.has("actionValues"));
       assertFalse(fieldObj.has("actionParameter"));
@@ -906,13 +1194,15 @@ class McpSchemaFieldBuilderTest {
 
         JSONObject fieldObj = new JSONObject();
         invokeStatic("addButtonInfo",
-            new Class<?>[]{ JSONObject.class, org.openbravo.model.ad.datamodel.Column.class },
-            fieldObj, col);
+            new Class<?>[]{ JSONObject.class, org.openbravo.model.ad.datamodel.Column.class,
+                String.class, boolean.class },
+            fieldObj, col, null, false);
 
         assertFalse(fieldObj.has("actionValues"));
         assertFalse(fieldObj.has("actionParameter"));
         // The rest of the button metadata is still emitted.
-        assertEquals("neo_action", fieldObj.getString("invokeVia"));
+        assertEquals("Y", fieldObj.getString("triggerValue"));
+        assertEquals("DocAction", fieldObj.getString("action"));
       }
     }
 
@@ -938,8 +1228,9 @@ class McpSchemaFieldBuilderTest {
 
         JSONObject fieldObj = new JSONObject();
         invokeStatic("addButtonInfo",
-            new Class<?>[]{ JSONObject.class, org.openbravo.model.ad.datamodel.Column.class },
-            fieldObj, col);
+            new Class<?>[]{ JSONObject.class, org.openbravo.model.ad.datamodel.Column.class,
+                String.class, boolean.class },
+            fieldObj, col, null, false);
 
         assertFalse(fieldObj.has("actionValues"));
         assertFalse(fieldObj.has("actionParameter"));
@@ -1006,10 +1297,12 @@ class McpSchemaFieldBuilderTest {
               java.util.Map.class,
               java.util.Map.class,
               java.util.Map.class,
+              java.util.Map.class,
               java.util.Set.class },
           col, tab, null,
           new java.util.HashMap<>(),
           businessCriticalMap,
+          new java.util.HashMap<>(),
           new java.util.HashMap<>(),
           new java.util.HashSet<>());
 
@@ -1029,8 +1322,10 @@ class McpSchemaFieldBuilderTest {
               java.util.Map.class,
               java.util.Map.class,
               java.util.Map.class,
+              java.util.Map.class,
               java.util.Set.class },
           col, tab, null,
+          new java.util.HashMap<>(),
           new java.util.HashMap<>(),
           new java.util.HashMap<>(),
           new java.util.HashMap<>(),
@@ -1055,14 +1350,248 @@ class McpSchemaFieldBuilderTest {
               java.util.Map.class,
               java.util.Map.class,
               java.util.Map.class,
+              java.util.Map.class,
               java.util.Set.class },
           col, tab, null,
           new java.util.HashMap<>(),
           businessCriticalMap,
           new java.util.HashMap<>(),
+          new java.util.HashMap<>(),
           new java.util.HashSet<>());
 
       assertFalse(result.getBoolean("businessCritical"));
+    }
+
+    private org.openbravo.model.ad.datamodel.Column buildButtonColumn(String colId,
+        String dbColName) {
+      org.openbravo.model.ad.datamodel.Column col = mock(
+          org.openbravo.model.ad.datamodel.Column.class);
+      org.openbravo.model.ad.domain.Reference ref = mock(
+          org.openbravo.model.ad.domain.Reference.class);
+      when(ref.getId()).thenReturn("28"); // button
+      when(col.getReference()).thenReturn(ref);
+      when(col.getDBColumnName()).thenReturn(dbColName);
+      when(col.getName()).thenReturn(dbColName);
+      when(col.isMandatory()).thenReturn(true);
+      when(col.isUseAutomaticSequence()).thenReturn(false);
+      when(col.getDefaultValue()).thenReturn(null);
+      when(col.getProcess()).thenReturn(null);
+      when(col.getOBUIAPPProcess()).thenReturn(null);
+      when(col.getReferenceSearchKey()).thenReturn(null);
+      when(col.getId()).thenReturn(colId);
+      accessHelperMock.when(
+          () -> NeoAccessHelper.resolveFallbackObuiappProcess(col)).thenReturn(null);
+      return col;
+    }
+
+    private JSONObject buildField(org.openbravo.model.ad.datamodel.Column col,
+        Map<String, Boolean> businessCriticalMap) throws Exception {
+      return (JSONObject) invokeStatic("buildSchemaField",
+          new Class<?>[]{ org.openbravo.model.ad.datamodel.Column.class,
+              org.openbravo.model.ad.ui.Tab.class,
+              org.openbravo.base.model.Entity.class,
+              java.util.Map.class,
+              java.util.Map.class,
+              java.util.Map.class,
+              java.util.Map.class,
+              java.util.Set.class },
+          col, buildTab(), null,
+          new java.util.HashMap<>(),
+          businessCriticalMap,
+          new java.util.HashMap<>(),
+          new java.util.HashMap<>(),
+          new java.util.HashSet<>());
+    }
+
+    /**
+     * IMP-21: {@code ETGO_SF_FIELD.isBusinessCritical} is {@code N} on every button column in the
+     * instance, so before this the accounting trigger was reported as not business-critical —
+     * an assertion of safety nobody made. It is now derived from the column itself.
+     */
+    @Test
+    @DisplayName("postedButtonIsBusinessCriticalWithoutCuration")
+    void postedButtonIsBusinessCriticalWithoutCuration() throws Exception {
+      JSONObject result = buildField(buildButtonColumn("col-posted", "Posted"), new HashMap<>());
+
+      assertTrue(result.getBoolean("businessCritical"));
+    }
+
+    /**
+     * A button bound to the shared {@code docAction} list drives the document state machine, so it
+     * is business-critical by construction — that binding is what {@code actionParameter} records.
+     */
+    @Test
+    @DisplayName("docActionButtonIsBusinessCriticalWithoutCuration")
+    void docActionButtonIsBusinessCriticalWithoutCuration() throws Exception {
+      org.openbravo.model.ad.datamodel.Column col = buildButtonColumn("col-docaction", "DocAction");
+      org.openbravo.model.ad.domain.Reference listRef = mock(
+          org.openbravo.model.ad.domain.Reference.class);
+      when(col.getReferenceSearchKey()).thenReturn(listRef);
+      when(listRef.getId()).thenReturn("INVOICE-DOCACTION-REF");
+
+      try (MockedStatic<NeoSelectorService> selectorMock = mockStatic(NeoSelectorService.class)) {
+        selectorMock.when(() -> NeoSelectorService.getListLabels("INVOICE-DOCACTION-REF"))
+            .thenReturn(Map.of("CO", "Book", "VO", "Void"));
+
+        JSONObject result = buildField(col, new HashMap<>());
+
+        assertTrue(result.getBoolean("businessCritical"));
+      }
+    }
+
+    /** An ordinary process button is not promoted — the derivation must still discriminate. */
+    @Test
+    @DisplayName("plainProcessButtonIsNotBusinessCritical")
+    void plainProcessButtonIsNotBusinessCritical() throws Exception {
+      JSONObject result = buildField(
+          buildButtonColumn("col-copyfrom", "CopyFrom"), new HashMap<>());
+
+      assertFalse(result.getBoolean("businessCritical"));
+    }
+
+    /** Curation still wins: an explicitly flagged button stays critical. */
+    @Test
+    @DisplayName("curatedFlagStillWinsOnAPlainButton")
+    void curatedFlagStillWinsOnAPlainButton() throws Exception {
+      Map<String, Boolean> curated = new HashMap<>();
+      curated.put("col-copyfrom-2", true);
+
+      JSONObject result = buildField(buildButtonColumn("col-copyfrom-2", "CopyFrom"), curated);
+
+      assertTrue(result.getBoolean("businessCritical"));
+    }
+  }
+
+  // ─── isHiddenButtonField ────────────────────────────────────────────
+
+  @Nested
+  @DisplayName("isHiddenButtonField")
+  class IsHiddenButtonField {
+
+    private org.openbravo.model.ad.ui.Field fieldFor(String colName, boolean displayed,
+        boolean active) {
+      org.openbravo.model.ad.ui.Field field = mock(org.openbravo.model.ad.ui.Field.class);
+      org.openbravo.model.ad.datamodel.Column col = mock(
+          org.openbravo.model.ad.datamodel.Column.class);
+      when(col.getDBColumnName()).thenReturn(colName);
+      when(field.getColumn()).thenReturn(col);
+      when(field.isDisplayed()).thenReturn(displayed);
+      when(field.isActive()).thenReturn(active);
+      return field;
+    }
+
+    private boolean isHidden(org.openbravo.model.ad.ui.Tab tab, String colName) throws Exception {
+      org.openbravo.model.ad.datamodel.Column col = mock(
+          org.openbravo.model.ad.datamodel.Column.class);
+      when(col.getDBColumnName()).thenReturn(colName);
+      return (boolean) invokeStatic("isHiddenButtonField",
+          new Class<?>[]{ org.openbravo.model.ad.ui.Tab.class,
+              org.openbravo.model.ad.datamodel.Column.class },
+          tab, col);
+    }
+
+    private org.openbravo.model.ad.ui.Tab tabWith(org.openbravo.model.ad.ui.Field... fields) {
+      org.openbravo.model.ad.ui.Tab tab = mock(org.openbravo.model.ad.ui.Tab.class);
+      when(tab.getADFieldList()).thenReturn(java.util.Arrays.asList(fields));
+      return tab;
+    }
+
+    /** The Processing case: AD has a field for it and hides it. */
+    @Test
+    @DisplayName("reportsHiddenWhenTheTabFieldIsNotDisplayed")
+    void reportsHiddenWhenTheTabFieldIsNotDisplayed() throws Exception {
+      assertTrue(isHidden(tabWith(fieldFor("Processing", false, true)), "Processing"));
+    }
+
+    /** The DocAction case: displayed, so it stays a real action. */
+    @Test
+    @DisplayName("reportsVisibleWhenTheTabFieldIsDisplayed")
+    void reportsVisibleWhenTheTabFieldIsDisplayed() throws Exception {
+      assertFalse(isHidden(tabWith(fieldFor("DocAction", true, true)), "DocAction"));
+    }
+
+    /**
+     * The load-bearing case. Module-contributed buttons frequently have no AD_Field in the tab —
+     * that is why {@code applyActionLabelFallback} exists — and treating a missing field as hidden
+     * would silently retire those actions across the instance.
+     */
+    @Test
+    @DisplayName("columnWithNoTabFieldIsNotHidden")
+    void columnWithNoTabFieldIsNotHidden() throws Exception {
+      assertFalse(isHidden(tabWith(fieldFor("DocAction", true, true)), "EM_Aeatsii_Send"));
+    }
+
+    /** An inactive field does not describe the tab, so it must not decide the answer. */
+    @Test
+    @DisplayName("inactiveFieldIsIgnored")
+    void inactiveFieldIsIgnored() throws Exception {
+      assertFalse(isHidden(tabWith(fieldFor("Processing", false, false)), "Processing"));
+    }
+
+    /** Column names are compared case-insensitively, as everywhere else in the builder. */
+    @Test
+    @DisplayName("matchesTheColumnNameCaseInsensitively")
+    void matchesTheColumnNameCaseInsensitively() throws Exception {
+      assertTrue(isHidden(tabWith(fieldFor("em_tbai_qrcode", false, true)), "EM_Tbai_QRcode"));
+    }
+
+    /** A field with no column must be skipped rather than NPE the schema build. */
+    @Test
+    @DisplayName("skipsFieldsWithNoColumn")
+    void skipsFieldsWithNoColumn() throws Exception {
+      org.openbravo.model.ad.ui.Field orphan = mock(org.openbravo.model.ad.ui.Field.class);
+      when(orphan.isActive()).thenReturn(true);
+      when(orphan.getColumn()).thenReturn(null);
+      assertTrue(isHidden(tabWith(orphan, fieldFor("Processing", false, true)), "Processing"));
+    }
+
+    @Test
+    @DisplayName("nullTabIsNotHidden")
+    void nullTabIsNotHidden() throws Exception {
+      assertFalse(isHidden(null, "Processing"));
+    }
+  }
+
+  // ─── humanizeExtensionColumn ────────────────────────────────────────
+
+  @Nested
+  @DisplayName("humanizeExtensionColumn")
+  class HumanizeExtensionColumn {
+
+    @Test
+    @DisplayName("dropsExtensionAndModulePrefix")
+    void dropsExtensionAndModulePrefix() {
+      assertEquals("Generate Bank Payment",
+          McpSchemaFieldBuilder.humanizeExtensionColumn("EM_Psd2_Generate Bank Payment"));
+      assertEquals("Dup", McpSchemaFieldBuilder.humanizeExtensionColumn("EM_Aeatsii_Dup"));
+      assertEquals("Rect Create",
+          McpSchemaFieldBuilder.humanizeExtensionColumn("EM_Etvfac_Rect_Create"));
+    }
+
+    /** The prefix marker is matched case-insensitively — some modules use {@code em_}. */
+    @Test
+    @DisplayName("matchesLowercaseMarker")
+    void matchesLowercaseMarker() {
+      assertEquals("qrcode", McpSchemaFieldBuilder.humanizeExtensionColumn("em_tbai_qrcode"));
+    }
+
+    /** A core column name is already functional and is returned untouched. */
+    @Test
+    @DisplayName("leavesNonExtensionNameAlone")
+    void leavesNonExtensionNameAlone() {
+      assertEquals("Copy from", McpSchemaFieldBuilder.humanizeExtensionColumn("Copy from"));
+    }
+
+    /**
+     * Degenerate inputs must not produce an empty label — the caller keeps the raw name instead of
+     * showing the agent a blank action.
+     */
+    @Test
+    @DisplayName("returnsNullWhenNothingIsLeft")
+    void returnsNullWhenNothingIsLeft() {
+      assertNull(McpSchemaFieldBuilder.humanizeExtensionColumn(null));
+      assertNull(McpSchemaFieldBuilder.humanizeExtensionColumn("   "));
+      assertNull(McpSchemaFieldBuilder.humanizeExtensionColumn("EM_Aeatsii_"));
     }
   }
 
@@ -1137,6 +1666,331 @@ class McpSchemaFieldBuilderTest {
       McpSchemaFieldBuilder.FieldMetadata meta = McpSchemaFieldBuilder.loadFieldMetadata(sfEntity);
 
       assertFalse(meta.businessCriticalByColumnId.get("col-3"));
+    }
+  }
+
+  // ─── loadFieldMetadata — readOnly mapping (IMP-28) ──────────────────
+
+  @Nested
+  @DisplayName("loadFieldMetadata — readOnly mapping (IMP-28)")
+  class LoadFieldMetadataReadOnly {
+
+    @Mock private OBDal mockOBDal;
+    private MockedStatic<OBDal> obDalMock;
+
+    @BeforeEach
+    void setUp() {
+      obDalMock = mockStatic(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(mockOBDal);
+    }
+
+    @AfterEach
+    void tearDown() {
+      obDalMock.close();
+    }
+
+    @SuppressWarnings("unchecked")
+    private OBCriteria<SFField> mockFieldCriteria(List<SFField> fields) {
+      OBCriteria<SFField> crit = mock(OBCriteria.class);
+      when(mockOBDal.createCriteria(SFField.class)).thenReturn(crit);
+      when(crit.list()).thenReturn(fields);
+      return crit;
+    }
+
+    private SFField buildSFField(String columnId, Boolean isReadOnly) {
+      SFField field = mock(SFField.class);
+      Column col = mock(Column.class);
+      when(col.getId()).thenReturn(columnId);
+      when(field.getADColumn()).thenReturn(col);
+      when(field.isReadOnly()).thenReturn(isReadOnly);
+      return field;
+    }
+
+    @Test
+    @DisplayName("field with isReadOnly=true maps to true in result map")
+    void fieldWithTrueMapsToTrue() {
+      SFEntity sfEntity = mock(SFEntity.class);
+      when(sfEntity.getId()).thenReturn("entity-1");
+      mockFieldCriteria(List.of(buildSFField("col-1", true)));
+
+      McpSchemaFieldBuilder.FieldMetadata meta = McpSchemaFieldBuilder.loadFieldMetadata(sfEntity);
+
+      assertTrue(meta.readOnlyByColumnId.get("col-1"));
+    }
+
+    @Test
+    @DisplayName("field with isReadOnly=false maps to false in result map")
+    void fieldWithFalseMapsToFalse() {
+      SFEntity sfEntity = mock(SFEntity.class);
+      when(sfEntity.getId()).thenReturn("entity-2");
+      mockFieldCriteria(List.of(buildSFField("col-2", false)));
+
+      McpSchemaFieldBuilder.FieldMetadata meta = McpSchemaFieldBuilder.loadFieldMetadata(sfEntity);
+
+      assertFalse(meta.readOnlyByColumnId.get("col-2"));
+    }
+
+    @Test
+    @DisplayName("field with isReadOnly=null maps to false — no NPE")
+    void fieldWithNullMapsToFalse() {
+      SFEntity sfEntity = mock(SFEntity.class);
+      when(sfEntity.getId()).thenReturn("entity-3");
+      mockFieldCriteria(List.of(buildSFField("col-3", null)));
+
+      McpSchemaFieldBuilder.FieldMetadata meta = McpSchemaFieldBuilder.loadFieldMetadata(sfEntity);
+
+      assertFalse(meta.readOnlyByColumnId.get("col-3"));
+    }
+  }
+
+  // ─── buildSchemaField — readOnly never disagrees with visibility (IMP-28) ──
+
+  @Nested
+  @DisplayName("buildSchemaField — readOnly never disagrees with visibility (IMP-28)")
+  class ReadOnlyVisibilityInvariant {
+
+    private org.openbravo.model.ad.datamodel.Column buildColumn(String colId, String dbColName) {
+      org.openbravo.model.ad.datamodel.Column col = mock(
+          org.openbravo.model.ad.datamodel.Column.class);
+      org.openbravo.model.ad.domain.Reference ref = mock(
+          org.openbravo.model.ad.domain.Reference.class);
+      when(ref.getId()).thenReturn("10"); // string
+      when(col.getReference()).thenReturn(ref);
+      when(col.getDBColumnName()).thenReturn(dbColName);
+      when(col.getName()).thenReturn(dbColName);
+      when(col.isMandatory()).thenReturn(false);
+      when(col.isUseAutomaticSequence()).thenReturn(false);
+      when(col.getDefaultValue()).thenReturn(null);
+      when(col.getId()).thenReturn(colId);
+      return col;
+    }
+
+    private org.openbravo.model.ad.ui.Tab buildTab() {
+      org.openbravo.model.ad.ui.Tab tab = mock(org.openbravo.model.ad.ui.Tab.class);
+      org.openbravo.model.ad.datamodel.Table table = mock(
+          org.openbravo.model.ad.datamodel.Table.class);
+      when(tab.getTable()).thenReturn(table);
+      when(table.getDBTableName()).thenReturn("M_Product");
+      return tab;
+    }
+
+    private JSONObject build(String colId, String visibility, Boolean curatedReadOnly)
+        throws Exception {
+      org.openbravo.model.ad.datamodel.Column col = buildColumn(colId, "EM_ETGO_Sale_Price");
+      org.openbravo.model.ad.ui.Tab tab = buildTab();
+
+      Map<String, String> visibilityMap = new HashMap<>();
+      if (visibility != null) {
+        visibilityMap.put(colId, visibility);
+      }
+      Map<String, Boolean> readOnlyMap = new HashMap<>();
+      if (curatedReadOnly != null) {
+        readOnlyMap.put(colId, curatedReadOnly);
+      }
+
+      return (JSONObject) invokeStatic("buildSchemaField",
+          new Class<?>[]{ org.openbravo.model.ad.datamodel.Column.class,
+              org.openbravo.model.ad.ui.Tab.class,
+              org.openbravo.base.model.Entity.class,
+              java.util.Map.class,
+              java.util.Map.class,
+              java.util.Map.class,
+              java.util.Map.class,
+              java.util.Set.class },
+          col, tab, null, visibilityMap, new java.util.HashMap<>(), readOnlyMap,
+          new java.util.HashMap<>(), new java.util.HashSet<>());
+    }
+
+    /**
+     * The exact regression this item was opened for: {@code readOnly:false} next to
+     * {@code visibility:"readOnly"} in the same field object (IMP-28 §2).
+     */
+    @Test
+    @DisplayName("visibility=readOnly forces readOnly=true even when ISREADONLY was mis-curated to N")
+    void visibilityReadOnlyForcesReadOnlyTrueEvenIfCuratedFlagSaysNo() throws Exception {
+      JSONObject field = build("col-price", "readOnly", false);
+      assertEquals("readOnly", field.getString("visibility"));
+      assertTrue(field.getBoolean("readOnly"),
+          "readOnly must never be false when visibility is readOnly");
+    }
+
+    @Test
+    @DisplayName("curated ISREADONLY=true sets readOnly=true regardless of the structural check")
+    void curatedReadOnlyTrueSetsReadOnlyTrue() throws Exception {
+      JSONObject field = build("col-price", "readOnly", true);
+      assertTrue(field.getBoolean("readOnly"));
+    }
+
+    @Test
+    @DisplayName("no curation at all leaves a regular column writable")
+    void noCurationLeavesRegularColumnWritable() throws Exception {
+      JSONObject field = build("col-price", null, null);
+      assertFalse(field.has("visibility"));
+      assertFalse(field.getBoolean("readOnly"));
+    }
+
+    @Test
+    @DisplayName("editable visibility with no curated readOnly flag stays writable")
+    void editableVisibilityStaysWritable() throws Exception {
+      JSONObject field = build("col-price", "editable", false);
+      assertEquals("editable", field.getString("visibility"));
+      assertFalse(field.getBoolean("readOnly"));
+    }
+
+    /**
+     * Pins the invariant itself (not a spot check on one field): for every
+     * (visibility, curatedReadOnly) combination a curator could configure, whenever the built
+     * field reports {@code visibility:"readOnly"} it must also report {@code readOnly:true}.
+     */
+    @ParameterizedTest
+    @CsvSource({
+        "readOnly, true",
+        "readOnly, false",
+        "editable, true",
+        "editable, false",
+        "hidden, true",
+        "hidden, false",
+        "system, true",
+        "system, false",
+        "discarded, true",
+        "discarded, false"
+    })
+    @DisplayName("invariant: visibility=readOnly implies readOnly=true, for every curated combination")
+    void invariantHoldsAcrossEveryCombination(String visibility, boolean curatedReadOnly)
+        throws Exception {
+      JSONObject field = build("col-price", visibility, curatedReadOnly);
+      if ("readOnly".equals(field.optString("visibility", null))) {
+        assertTrue(field.getBoolean("readOnly"),
+            "visibility=readOnly must imply readOnly=true (curatedReadOnly was " + curatedReadOnly
+                + ")");
+      }
+    }
+  }
+
+  // ─── addWritableVia (IMP-28 §7.5a) ──────────────────────────────────
+
+  @Nested
+  @DisplayName("addWritableVia")
+  class AddWritableVia {
+
+    private Object invokeAddWritableVia(JSONObject fieldObj, Entity dalEntity, String dbColName)
+        throws Exception {
+      Method method = McpSchemaFieldBuilder.class.getDeclaredMethod("addWritableVia",
+          JSONObject.class, Entity.class, String.class);
+      method.setAccessible(true);
+      return method.invoke(null, fieldObj, dalEntity, dbColName);
+    }
+
+    @Test
+    @DisplayName("a stored-computed sale price column gets writableVia pointing at product/price")
+    void salePriceGetsWritableViaProductPrice() throws Exception {
+      Entity dalEntity = mock(Entity.class);
+      Property prop = mock(Property.class);
+      when(dalEntity.getPropertyByColumnName("EM_ETGO_Sale_Price")).thenReturn(prop);
+      when(prop.getComputationFunction()).thenReturn("etgo_product_sale_price");
+
+      JSONObject fieldObj = new JSONObject();
+      invokeAddWritableVia(fieldObj, dalEntity, "EM_ETGO_Sale_Price");
+
+      JSONObject via = fieldObj.getJSONObject("writableVia");
+      assertEquals("product", via.getString("spec"));
+      assertEquals("price", via.getString("entity"));
+      assertTrue(via.has("note"));
+    }
+
+    @Test
+    @DisplayName("a stored-computed stock column gets writableVia pointing at physical-inventory/inventoryLine")
+    void stockGetsWritableViaPhysicalInventory() throws Exception {
+      Entity dalEntity = mock(Entity.class);
+      Property prop = mock(Property.class);
+      when(dalEntity.getPropertyByColumnName("EM_ETGO_Stock")).thenReturn(prop);
+      when(prop.getComputationFunction()).thenReturn("etgo_product_stock");
+
+      JSONObject fieldObj = new JSONObject();
+      invokeAddWritableVia(fieldObj, dalEntity, "EM_ETGO_Stock");
+
+      JSONObject via = fieldObj.getJSONObject("writableVia");
+      assertEquals("physical-inventory", via.getString("spec"));
+      assertEquals("inventoryLine", via.getString("entity"));
+    }
+
+    @Test
+    @DisplayName("a regular (non-computed) column omits writableVia")
+    void regularColumnOmitsWritableVia() throws Exception {
+      Entity dalEntity = mock(Entity.class);
+      Property prop = mock(Property.class);
+      when(dalEntity.getPropertyByColumnName("Description")).thenReturn(prop);
+      when(prop.getComputationFunction()).thenReturn(null);
+
+      JSONObject fieldObj = new JSONObject();
+      invokeAddWritableVia(fieldObj, dalEntity, "Description");
+
+      assertFalse(fieldObj.has("writableVia"));
+    }
+
+    /**
+     * IMP-28 §7.5a's own example: {@code product/stock.quantityOnHand} is real data on
+     * {@code M_Storage_Detail}, curated read-only for process-integrity reasons, but it is NOT a
+     * stored computed column — it must not get a fabricated writableVia pointer.
+     */
+    @Test
+    @DisplayName("a read-only column with no computation function omits writableVia — never a guess")
+    void readOnlyColumnWithoutComputationFunctionOmitsWritableVia() throws Exception {
+      Entity dalEntity = mock(Entity.class);
+      Property prop = mock(Property.class);
+      when(dalEntity.getPropertyByColumnName("QtyOnHand")).thenReturn(prop);
+      when(prop.getComputationFunction()).thenReturn("   ");
+
+      JSONObject fieldObj = new JSONObject();
+      invokeAddWritableVia(fieldObj, dalEntity, "QtyOnHand");
+
+      assertFalse(fieldObj.has("writableVia"));
+    }
+
+    @Test
+    @DisplayName("an unmapped computation function omits writableVia rather than guessing")
+    void unmappedComputationFunctionOmitsWritableVia() throws Exception {
+      Entity dalEntity = mock(Entity.class);
+      Property prop = mock(Property.class);
+      when(dalEntity.getPropertyByColumnName("Some_Other_Computed_Col")).thenReturn(prop);
+      when(prop.getComputationFunction()).thenReturn("some_future_unmapped_function");
+
+      JSONObject fieldObj = new JSONObject();
+      invokeAddWritableVia(fieldObj, dalEntity, "Some_Other_Computed_Col");
+
+      assertFalse(fieldObj.has("writableVia"));
+    }
+
+    @Test
+    @DisplayName("null dalEntity omits writableVia without throwing")
+    void nullDalEntityOmitsWritableVia() throws Exception {
+      JSONObject fieldObj = new JSONObject();
+      invokeAddWritableVia(fieldObj, null, "EM_ETGO_Sale_Price");
+      assertFalse(fieldObj.has("writableVia"));
+    }
+
+    @Test
+    @DisplayName("null property (unmapped column) omits writableVia without throwing")
+    void nullPropertyOmitsWritableVia() throws Exception {
+      Entity dalEntity = mock(Entity.class);
+      when(dalEntity.getPropertyByColumnName("Unknown_Col")).thenReturn(null);
+
+      JSONObject fieldObj = new JSONObject();
+      invokeAddWritableVia(fieldObj, dalEntity, "Unknown_Col");
+
+      assertFalse(fieldObj.has("writableVia"));
+    }
+
+    @Test
+    @DisplayName("a property lookup exception is swallowed and omits writableVia")
+    void propertyLookupExceptionOmitsWritableVia() throws Exception {
+      Entity dalEntity = mock(Entity.class);
+      when(dalEntity.getPropertyByColumnName("Bad_Col")).thenThrow(new RuntimeException("fail"));
+
+      JSONObject fieldObj = new JSONObject();
+      invokeAddWritableVia(fieldObj, dalEntity, "Bad_Col");
+
+      assertFalse(fieldObj.has("writableVia"));
     }
   }
 

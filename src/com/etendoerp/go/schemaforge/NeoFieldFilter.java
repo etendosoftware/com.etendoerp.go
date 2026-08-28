@@ -22,6 +22,7 @@ import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 
 import org.apache.logging.log4j.LogManager;
@@ -54,6 +55,20 @@ public class NeoFieldFilter {
   private static final String IDENTIFIER_SUFFIX = "$_identifier";
 
   /**
+   * Audit keys a GET response always carries, whatever {@code ETGO_SF_FIELD} says.
+   *
+   * <p>{@code updated} is an AD <i>column</i> on every table but not an AD <i>field</i>, so
+   * {@code push-to-neo} cannot register it and no window can opt into it — yet the client needs
+   * it to tell a cached rendering of a record from a stale one (ETP-4787: the preview serves the
+   * marked attachment, which had no way of knowing the record had changed underneath it).
+   *
+   * <p>Read side only, deliberately: this set is NOT unioned into {@code includedFields}, because
+   * that same set gates {@link #filterCreateRequest}, and a client must never be able to write
+   * its own {@code updated}.
+   */
+  private static final Set<String> ALWAYS_READABLE_KEYS = Set.of("updated");
+
+  /**
    * Set of DAL property names that are included (IsIncluded=Y).
    */
   private final Set<String> includedFields;
@@ -62,6 +77,28 @@ public class NeoFieldFilter {
    * Set of DAL property names that are writable (IsIncluded=Y AND IsReadOnly=N).
    */
   private final Set<String> writableFields;
+
+  /**
+   * Set of DAL property names that {@link #filterCreateRequest} must reject rather than
+   * silently drop when present in a POST body: IsIncluded=Y, IsReadOnly=Y, the AD column has
+   * no configured default value, AND the owning entity has no {@code Java_Qualifier} (no
+   * {@code NeoHandler} that could legitimately be the one supplying the value via a pre-hook,
+   * as {@code InventoryLineHandler} does for {@code bookQuantity}). IMP-28 clause 2.
+   *
+   * <p>Entities with a Java_Qualifier are exempt in full — a handler for that entity might
+   * inject the value before this filter runs (see {@code NeoServletSupport.handleWithHooks}),
+   * so a per-field default-value check alone cannot tell "genuinely unwritable" from
+   * "written by the entity's own handler". This is coarser than a per-field signal would be:
+   * an entity with a handler that does NOT touch a given read-only field (e.g.
+   * {@code ProductStockWarehouseHandler}, GET-only) is still exempted here. See IMP-28 report.
+   *
+   * <p><b>Membership is additionally reconciled against {@link #writableFields}</b> at the end of
+   * {@link #forEntity}: anything explicitly granted write permission there — {@code id},
+   * {@code active}, and every link-to-parent column — is removed from this set even when it
+   * satisfies the rule above. Without that step a read-only parent FK was both writable and
+   * rejectable and the rejection won, so no child row could be created at all (IMP-37).
+   */
+  private final Set<String> rejectableOnCreateFields;
 
   /**
    * Maps API keys (javaQualifier, e.g. "unitPrice") to DAL property names
@@ -83,9 +120,11 @@ public class NeoFieldFilter {
   private final boolean active;
 
   private NeoFieldFilter(Set<String> includedFields, Set<String> writableFields,
+      Set<String> rejectableOnCreateFields,
       Map<String, String> apiKeyToPropName, Map<String, String> propNameToApiKey, boolean active) {
     this.includedFields = includedFields;
     this.writableFields = writableFields;
+    this.rejectableOnCreateFields = rejectableOnCreateFields;
     this.apiKeyToPropName = apiKeyToPropName;
     this.propNameToApiKey = propNameToApiKey;
     this.active = active;
@@ -127,11 +166,19 @@ public class NeoFieldFilter {
 
       Set<String> included = new HashSet<>();
       Set<String> writable = new HashSet<>();
+      Set<String> rejectableOnCreate = new HashSet<>();
       Map<String, String> apiKeyMap = new HashMap<>();
       Map<String, String> propToApiMap = new HashMap<>();
 
-      processFieldMappings(allFields, dalEntity, included, writable, apiKeyMap, propToApiMap,
-          dalEntityName);
+      // An entity with a Java_Qualifier has a NeoHandler that runs as a pre-hook before this
+      // filter (NeoServletSupport.handleWithHooks) and may legitimately inject a read-only
+      // field's value itself — e.g. InventoryLineHandler sets bookQuantity. Such entities are
+      // exempt from clause-2 rejection entirely (see rejectableOnCreateFields javadoc).
+      boolean entityHasHandler = sfEntity.getJavaQualifier() != null
+          && !sfEntity.getJavaQualifier().trim().isEmpty();
+
+      processFieldMappings(allFields, dalEntity, included, writable, rejectableOnCreate,
+          apiKeyMap, propToApiMap, dalEntityName, entityHasHandler);
 
       // Always include "id" — it's needed for record identification
       included.add("id");
@@ -146,10 +193,21 @@ public class NeoFieldFilter {
 
       addParentColumnMappings(sfEntity, dalEntity, included, writable);
 
-      log.debug("Field filter for entity {}: {} included, {} writable",
-          sfEntity.getName(), included.size(), writable.size());
+      // IMP-37: the three blocks above ("id", "active", link-to-parent columns) grant write
+      // permission AFTER processFieldMappings has already classified every field, and clause 2
+      // never revisited its own set. A link-to-parent FK curated read-only therefore ended up in
+      // BOTH writable and rejectableOnCreate, and the rejection won because it runs before
+      // filterBody -- making child-row creation impossible on 58 entities (a POST cannot omit the
+      // parent link, and could not send it either). Inside processFieldMappings the two sets are
+      // disjoint by construction (an if/else on isReadOnly), so this subtraction can only remove
+      // what those three blocks added: an explicit grant must always beat an inferred rejection.
+      // Keep this AFTER every writable.add above -- a grant added below it would not be honoured.
+      rejectableOnCreate.removeAll(writable);
 
-      return new NeoFieldFilter(included, writable, apiKeyMap, propToApiMap, true);
+      log.debug("Field filter for entity {}: {} included, {} writable, {} rejectable on create",
+          sfEntity.getName(), included.size(), writable.size(), rejectableOnCreate.size());
+
+      return new NeoFieldFilter(included, writable, rejectableOnCreate, apiKeyMap, propToApiMap, true);
 
     } catch (Exception e) {
       log.error("Error building field filter for entity {}: {}",
@@ -163,9 +221,9 @@ public class NeoFieldFilter {
    * apiKeyMap, and propToApiMap sets/maps.
    */
   private static void processFieldMappings(List<SFField> fields, Entity dalEntity,
-      Set<String> included, Set<String> writable,
+      Set<String> included, Set<String> writable, Set<String> rejectableOnCreate,
       Map<String, String> apiKeyMap, Map<String, String> propToApiMap,
-      String dalEntityName) {
+      String dalEntityName, boolean entityHasHandler) {
     for (SFField sfField : fields) {
       Property prop = resolveProperty(sfField, dalEntity, dalEntityName);
       if (prop == null) {
@@ -193,9 +251,31 @@ public class NeoFieldFilter {
 
         if (!Boolean.TRUE.equals(sfField.isReadOnly())) {
           writable.add(propName);
+        } else if (!entityHasHandler && !hasConfiguredDefault(sfField.getADColumn())) {
+          // IMP-28 clause 2: included + read-only + no AD default + no handler that could be
+          // supplying it -> a client-sent value here can only be a mistake (or leftover from a
+          // stale reading of a previous readOnly:false response). Reject on POST instead of
+          // silently dropping it.
+          rejectableOnCreate.add(propName);
         }
       }
     }
+  }
+
+  /**
+   * Whether the given AD column has a non-blank default value configured
+   * ({@code AD_Column.DefaultValue}). Mirrors the check
+   * {@code McpSchemaFieldBuilder.hasSuppliedDefault} uses to decide whether a schema field
+   * descriptor carries {@code defaultExpression}/{@code defaultSource} — kept as a separate,
+   * literal re-implementation here since {@code McpSchemaFieldBuilder} lives in a different
+   * package ({@code com.etendoerp.go.mcp}) and its helper is not accessible from here.
+   */
+  private static boolean hasConfiguredDefault(Column adColumn) {
+    if (adColumn == null) {
+      return false;
+    }
+    String defaultValue = adColumn.getDefaultValue();
+    return defaultValue != null && !defaultValue.trim().isEmpty();
   }
 
   /**
@@ -237,6 +317,11 @@ public class NeoFieldFilter {
    * Adds link-to-parent column properties to included and writable sets.
    * These are always allowed — they're needed for child record creation
    * (e.g., salesOrder on C_OrderLine, invoice on C_InvoiceLine).
+   *
+   * <p>"Always allowed" holds only because {@link #forEntity} subtracts {@code writable} from
+   * the clause-2 rejection set after calling this method (IMP-37). Curation routinely marks a
+   * parent FK read-only — correctly, since the user does not choose it — which used to land it
+   * in {@link #rejectableOnCreateFields} and defeat this grant entirely.
    */
   private static void addParentColumnMappings(SFEntity sfEntity, Entity dalEntity,
       Set<String> included, Set<String> writable) {
@@ -258,7 +343,7 @@ public class NeoFieldFilter {
    * Create an inactive filter that performs no filtering.
    */
   private static NeoFieldFilter inactive() {
-    return new NeoFieldFilter(null, null,
+    return new NeoFieldFilter(null, null, null,
         java.util.Collections.emptyMap(), java.util.Collections.emptyMap(), false);
   }
 
@@ -286,7 +371,7 @@ public class NeoFieldFilter {
       if (data != null) {
         for (int i = 0; i < data.length(); i++) {
           JSONObject item = data.getJSONObject(i);
-          filterRecord(item, includedFields);
+          filterRecord(item, includedFields, ALWAYS_READABLE_KEYS);
           renameToApiKeys(item);
         }
       }
@@ -327,17 +412,74 @@ public class NeoFieldFilter {
   }
 
   /**
+   * The field keys a GET response can actually contain, expressed as the API keys the caller sees —
+   * i.e. every included DAL property already passed through the {@code propNameToApiKey} rename that
+   * {@link #filterGetResponse} applies. Companion keys such as {@code $_identifier} are included as
+   * they appear.
+   *
+   * <p>Exists so a caller can tell "this name is not available here" from "this name happens to be
+   * absent from the rows I got back" **without inspecting the rows** — the row-inspection answer is
+   * undefined on an empty result set, which is exactly when a typo is most expensive to miss
+   * (IMP-18). Read-only: the returned set is a copy.
+   *
+   * @return {@link Optional#of} the emittable response keys, or {@link Optional#empty()} when this
+   *     filter is inactive (no {@code ETGO_SF_FIELD} config), in which case the response is
+   *     unfiltered and the caller must fall back to the DAL entity's own property list rather than
+   *     assume nothing is valid
+   */
+  public Optional<Set<String>> emittableResponseKeys() {
+    if (!active || includedFields == null) {
+      return Optional.empty();
+    }
+    Set<String> keys = new HashSet<>();
+    for (String propName : includedFields) {
+      keys.add(propNameToApiKey.getOrDefault(propName, propName));
+    }
+    return Optional.of(keys);
+  }
+
+  /**
    * Filter a POST (create) request body.
-   * Allows read-only fields through because they may carry values from callouts
-   * or defaults that are required for record creation (e.g., transactionDocument).
-   * Only removes fields that are not included at all.
+   * Allows read-only fields through when their entity's own NeoHandler pre-hook may have
+   * legitimately supplied them (e.g., {@code transactionDocument}, {@code bookQuantity} — see
+   * {@code InventoryLineHandler}), or when the AD column has a configured default value.
+   * Removes fields that are not included at all, and REJECTS (does not silently drop) a
+   * client-supplied value for a field that is read-only with no such excuse — see
+   * {@link #rejectableOnCreateFields} and IMP-28.
    *
    * @param requestBody
    *     the request body JSON
    * @return the filtered JSON (modified in place)
+   * @throws ReadOnlyFieldRejectedException
+   *     if the body writes a field that is read-only, has no configured default, and belongs
+   *     to an entity with no NeoHandler that could have supplied it
    */
   public JSONObject filterCreateRequest(JSONObject requestBody) {
+    if (active && requestBody != null) {
+      JSONObject dataNode = requestBody.optJSONObject("data");
+      rejectDisallowedReadOnlyFields(dataNode != null ? dataNode : requestBody);
+    }
     return filterBody(requestBody, includedFields);
+  }
+
+  /**
+   * Throws {@link ReadOnlyFieldRejectedException} if the body contains a key (in either its
+   * API-facing form or its resolved DAL property name) that is a member of
+   * {@link #rejectableOnCreateFields}. Called before {@link #filterBody} would otherwise strip
+   * the same key silently.
+   */
+  private void rejectDisallowedReadOnlyFields(JSONObject body) {
+    if (body == null || rejectableOnCreateFields == null || rejectableOnCreateFields.isEmpty()) {
+      return;
+    }
+    Iterator<String> keys = body.keys();
+    while (keys.hasNext()) {
+      String key = keys.next();
+      String propName = apiKeyToPropName.getOrDefault(key, key);
+      if (rejectableOnCreateFields.contains(propName)) {
+        throw new ReadOnlyFieldRejectedException(key);
+      }
+    }
   }
 
   private JSONObject filterBody(JSONObject requestBody, Set<String> allowedFields) {
@@ -353,7 +495,7 @@ public class NeoFieldFilter {
         bodyToFilter = requestBody.getJSONObject("data");
       }
       remapApiKeys(bodyToFilter);
-      filterRecord(bodyToFilter, allowedFields);
+      filterRecord(bodyToFilter, allowedFields, Set.of());
       return bodyToFilter;
     } catch (Exception e) {
       log.error("Error filtering write request: {}", e.getMessage(), e);
@@ -443,9 +585,13 @@ public class NeoFieldFilter {
    * Remove all keys from a JSON item that are NOT in the allowed set.
    * Preserves standard metadata keys added by DefaultJsonDataService
    * (e.g., _identifier, _entityName, recordTime).
+   *
+   * @param alsoKeep
+   *     extra keys to preserve on top of {@code allowedFields} — empty on the write path, and
+   *     {@link #ALWAYS_READABLE_KEYS} on the read path
    */
   @SuppressWarnings("unchecked")
-  private void filterRecord(JSONObject item, Set<String> allowedFields) {
+  private void filterRecord(JSONObject item, Set<String> allowedFields, Set<String> alsoKeep) {
     Iterator<String> keys = item.keys();
     Set<String> toRemove = new HashSet<>();
 
@@ -455,7 +601,7 @@ public class NeoFieldFilter {
       if (isMetadataKey(key)) {
         continue;
       }
-      if (!allowedFields.contains(key)) {
+      if (!allowedFields.contains(key) && !alsoKeep.contains(key)) {
         toRemove.add(key);
       }
     }

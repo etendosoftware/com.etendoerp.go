@@ -10,13 +10,16 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.Set;
 
+import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
+import org.hibernate.criterion.MatchMode;
 import org.hibernate.criterion.Restrictions;
 import org.jspecify.annotations.NonNull;
 import org.jspecify.annotations.Nullable;
@@ -36,8 +39,12 @@ import org.openbravo.model.ad.utility.Sequence;
 import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.service.db.DalConnectionProvider;
 
+import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFField;
 import com.etendoerp.go.schemaforge.data.SFSpec;
+import com.etendoerp.go.schemaforge.util.NeoBooleanFormat;
+import com.etendoerp.go.schemaforge.util.NeoDateFormat;
+import com.etendoerp.go.schemaforge.util.NeoTypeCoercionHelper;
 import com.etendoerp.sequences.SequenceUtils;
 
 /**
@@ -62,7 +69,6 @@ import com.etendoerp.sequences.SequenceUtils;
 public class NeoDefaultsService {
 
   private static final Logger log = LogManager.getLogger(NeoDefaultsService.class);
-  private static final String DATE_FORMAT = "yyyy-MM-dd";
   private static final String KEY_UPDATES = "updates";
   private static final String KEY_COMBOS = "combos";
   private static final String LOG_SEQUENCE_PREVIEW_FAILURE = "Could not generate sequence preview for {}: {}";
@@ -129,20 +135,16 @@ public class NeoDefaultsService {
         // pass the already-resolved C_DocTypeTarget_ID / C_DocType_ID values to
         // Utility.getDocumentNo — exactly as FormInitializationComponent does.
         JSONArray unresolvedFields = new JSONArray();
+        // ETP-4918: actionable prose for fields whose @SQL= default cleanly resolved to null
+        // (as opposed to unresolvedFields, which only ever gets populated from the catch
+        // block below and says nothing about this silent case). See appendSqlDefaultNote.
+        JSONArray notes = new JSONArray();
 
-        List<SFField> sequenceSFFields = new ArrayList<>();
+        FieldPartition partition = FieldPartition.of(fields);
         JSONObject defaults = new JSONObject();
 
-        for (SFField sfField : fields) {
+        for (SFField sfField : partition.plain) {
           Column adColumn = sfField.getADColumn();
-          if (adColumn == null) {
-            continue;
-          }
-          if (isSequenceField(adColumn)) {
-            sequenceSFFields.add(sfField);  // defer to pass 2
-              continue;
-          }
-
           String dbColumnName = adColumn.getDBColumnName();
           String propertyName = NeoDefaultsCascadeHelper.resolvePropertyName(dalEntity, dbColumnName);
           try {
@@ -150,8 +152,9 @@ public class NeoDefaultsService {
             // This allows per-window default expressions (e.g. "@#Date@" for date fields)
             // without modifying the AD_Column metadata.
             String sfFieldDefault = sfField.getDefaultValue();
-            Object resolvedValue = resolveFieldDefault(adColumn, parentId, vars, conn, windowId,
-                ctx, sfFieldDefault);
+            FieldDefaultRequest fieldRequest = new FieldDefaultRequest(adColumn, parentId, vars,
+                conn, windowId, ctx).withSfFieldDefault(sfFieldDefault);
+            Object resolvedValue = resolveFieldDefault(fieldRequest);
             // For combo-style references (TableDir/Table/List) with no explicit default,
             // mirror FIC parity and preselect the first available option. Search-type
             // references (ref 30, OBUISEL) are excluded by resolveFirstComboOption, so
@@ -163,6 +166,9 @@ public class NeoDefaultsService {
             // table" is always wrong for them (e.g. self-referential FKs like
             // Replacedorder_ID would silently mark every new document as a replacement).
             applyDefaultWithComboFallback(ctx, sfField, resolvedValue, adColumn, defaults, propertyName, dalEntity);
+            if (!defaults.has(propertyName)) {
+              appendSqlDefaultNote(notes, propertyName, fieldRequest.getSqlOutcome());
+            }
           } catch (Exception e) {
             log.debug("Could not resolve default for column {}: {}",
                 dbColumnName, e.getMessage());
@@ -179,7 +185,12 @@ public class NeoDefaultsService {
         String docTypeTargetId = docTypeIds[0];
         String docTypeId = docTypeIds[1];
 
-        for (SFField sfField : sequenceSFFields) {
+        for (SFField sfField : partition.sequence) {
+          // No null check on purpose: FieldPartition.of drops null-column rows before either
+          // list is built, so every element here is known to have a column. The tenant does
+          // hold ETGO_SF_FIELD rows with a null AD_Column (105 legacy rows from 2026-06-17 —
+          // see IMP-11), so if that guard ever moves out of FieldPartition this dereference
+          // becomes a live NPE. Keep the guard there, or add one here.
           Column adColumn = sfField.getADColumn();
           String dbColumnName = adColumn.getDBColumnName();
           String propertyName = NeoDefaultsCascadeHelper.resolvePropertyName(dalEntity, dbColumnName);
@@ -227,16 +238,25 @@ public class NeoDefaultsService {
                 .withIdentifierInjector(NeoDefaultsService::tryInjectIdentifier)
                 .withSfFieldColumns(sfFieldColumns));
 
-        // Build response
-        JSONObject response = new JSONObject();
-        response.put("defaults", defaults);
+        // ETP-4793 / IMP-16: normalize every date-valued default to the canonical ISO wire
+        // format. Done here, once, after all three passes and the cascade, rather than
+        // per-field: the cascade consumes `defaults` as callout input, and running before it
+        // would change what the legacy callouts receive. Running after leaves that boundary
+        // byte-for-byte as it is today (CalloutRequestBuilder.reformatDateParams converts ISO
+        // back to the UI pattern, and is a no-op on values already in it).
+        canonicalizeDateDefaults(defaults, dalEntity);
 
-        JSONObject metadata = new JSONObject();
-        metadata.put("unresolvedFields", unresolvedFields);
-        metadata.put("sequenceFields", sequenceFields);
-        response.put("metadata", metadata);
+        // ETP-4793: same treatment for boolean-valued defaults. Etendo stores booleans as
+        // char(1) 'Y'/'N' and several producers below write that raw string into `defaults`
+        // (the callout writeback and combo preselection in NeoDefaultsCascadeHelper, the
+        // hidden-mandatory resolver), bypassing coerceBooleanDefault — which is only reached
+        // from pass 1. The result was a response that mixed JSON booleans and "Y"/"N" strings
+        // for the same column depending on the window. Normalizing here, after the cascade,
+        // for the same reason as the dates: the callouts must keep seeing what they see today.
+        canonicalizeBooleanDefaults(defaults, dalEntity);
 
-        return NeoResponse.ok(response);
+        return NeoResponse.ok(
+            buildDefaultsResponse(defaults, unresolvedFields, sequenceFields, notes));
 
       } finally {
         OBContext.restorePreviousMode();
@@ -245,6 +265,52 @@ public class NeoDefaultsService {
       log.error("Error resolving defaults: {}", e.getMessage(), e);
       return NeoResponse.error(500, "Failed to resolve defaults: " + e.getMessage());
     }
+  }
+
+  /**
+   * The two passes' worth of fields, split once up front (Sonar S3776 — this partitioning used
+   * to sit inline in {@link #resolveDefaults} and carried a third of its cognitive complexity).
+   *
+   * <p>Rows with a null {@code AD_Column} are dropped here and appear in neither list, which is
+   * what lets pass 2 dereference {@code getADColumn()} without a guard. The tenant really does
+   * hold such rows (105 legacy ones from 2026-06-17 — see IMP-11), so this is the single place
+   * that guard may live.</p>
+   */
+  private static final class FieldPartition {
+    private final List<SFField> plain = new ArrayList<>();
+    private final List<SFField> sequence = new ArrayList<>();
+
+    static FieldPartition of(List<SFField> fields) {
+      FieldPartition partition = new FieldPartition();
+      for (SFField sfField : fields) {
+        Column adColumn = sfField.getADColumn();
+        if (adColumn == null) {
+          continue;
+        }
+        (isSequenceField(adColumn) ? partition.sequence : partition.plain).add(sfField);
+      }
+      return partition;
+    }
+  }
+
+  /**
+   * Assemble the wire response from the three passes' accumulators.
+   *
+   * @param notes ETP-4918 actionable prose; omitted entirely when empty, since an empty array
+   *              would be as much noise as the vague notes this feature exists to avoid
+   */
+  private static JSONObject buildDefaultsResponse(JSONObject defaults, JSONArray unresolvedFields,
+      JSONArray sequenceFields, JSONArray notes) throws JSONException {
+    JSONObject metadata = new JSONObject();
+    metadata.put("unresolvedFields", unresolvedFields);
+    metadata.put("sequenceFields", sequenceFields);
+    if (notes.length() > 0) {
+      metadata.put("notes", notes);
+    }
+    JSONObject response = new JSONObject();
+    response.put("defaults", defaults);
+    response.put("metadata", metadata);
+    return response;
   }
 
   private static @Nullable Object resolveOrFirstComboOption(NeoContext ctx, Column column, Object resolved) {
@@ -268,26 +334,239 @@ public class NeoDefaultsService {
   }
 
   /**
+   * Build a {@code metadata.notes} entry explaining why a field's {@code @SQL=} default
+   * resolved to null and the field is therefore absent from {@code defaults} (ETP-4918).
+   *
+   * <p>Only the two causes {@link NeoDefaultsSqlHelper.SqlDefaultOutcome} can actually detect
+   * are worded — a missing parent token, or a query that legitimately matched zero rows. Any
+   * other reason a field is missing (no default expression at all, an exception, a combo
+   * fallback that also came up empty) has no {@code sqlOutcome} to reason from and gets no
+   * note: a note that cannot name both a concrete field and a concrete action is worse than
+   * silence, since it is the "some fields may not have resolved" filler this array exists to
+   * avoid.
+   *
+   * @param notes        the notes array being built, mutated in place
+   * @param propertyName the wire property name of the missing field (e.g. "storageBin")
+   * @param sqlOutcome   the diagnostic from resolving this field's @SQL= default, or
+   *                     {@code null} if the field's default was never a @SQL= expression
+   */
+  private static void appendSqlDefaultNote(JSONArray notes, String propertyName,
+      NeoDefaultsSqlHelper.SqlDefaultOutcome sqlOutcome) throws JSONException {
+    if (sqlOutcome == null) {
+      return;
+    }
+    if (sqlOutcome.getMissingParentToken() != null) {
+      notes.put(propertyName + ": its default needs @" + sqlOutcome.getMissingParentToken()
+          + "@ from the parent record, but no parentId was given. Call neo_defaults again "
+          + "with parentId to resolve it.");
+    } else if (sqlOutcome.isZeroRows()) {
+      notes.put(propertyName + ": its @SQL= default query matched zero rows for the current "
+          + "context — no such record exists for this tenant, it is not a missing parameter. "
+          + "Set this field explicitly if it is required.");
+    }
+  }
+
+  /**
+   * Rewrite every date-valued entry of {@code defaults} into the canonical ISO wire format
+   * (ETP-4793 / IMP-16).
+   *
+   * <p>Defaults reach this map in up to three different shapes: {@code dd-MM-yyyy} from any
+   * {@code @#Date@} expression (core's {@code DateTimeData.today} hardcodes it), ISO from a
+   * date callout whose return path {@code NeoCalloutService.normalizeUpdateDatesToIso} already
+   * normalized, and occasionally a raw Postgres timestamp from an {@code @SQL=} default. The
+   * response is a wire contract with two consumers that both read ISO — the DAL write path
+   * ({@code JsonUtils.createDateFormat}) and the React form ({@code dateOnly.js}) — so any
+   * other shape is a defect regardless of which consumer notices first.
+   *
+   * <p>A value the canonicalizer does not recognise is left <b>verbatim</b> and logged at WARN.
+   * Blanking or dropping it would turn a formatting problem into a missing mandatory field,
+   * and an unrecognised shape is a signal that this method needs a new case — not that the
+   * value is worthless.
+   *
+   * <p>Which properties qualify is decided by {@link NeoDateFormat#canonicalShapeFor(Property)},
+   * not by "is the Java type a {@code Date}" — Etendo's time-of-day and timezone-free domain
+   * types are also backed by {@code java.util.Date} and must be left alone.
+   *
+   * @param defaults  the resolved defaults object, mutated in place
+   * @param dalEntity the DAL entity used to tell date properties from everything else; a
+   *                  {@code null} entity makes this a no-op
+   */
+  private static void canonicalizeDateDefaults(JSONObject defaults, Entity dalEntity) {
+    if (defaults == null || dalEntity == null) {
+      return;
+    }
+    Iterator<?> keys = defaults.keys();
+    Map<String, String> rewritten = new HashMap<>();
+    while (keys.hasNext()) {
+      String key = String.valueOf(keys.next());
+      canonicalDateFor(key, defaults, dalEntity).ifPresent(canonical -> rewritten.put(key, canonical));
+    }
+    for (Map.Entry<String, String> entry : rewritten.entrySet()) {
+      try {
+        defaults.put(entry.getKey(), entry.getValue());
+      } catch (JSONException e) {
+        log.debug("Could not store canonical date for {}: {}", entry.getKey(), e.getMessage());
+      }
+    }
+    if (!rewritten.isEmpty()) {
+      log.info("[NEO] canonicalizeDateDefaults: normalized {} date fields on {}: {}",
+          rewritten.size(), dalEntity.getName(), rewritten.keySet());
+    }
+  }
+
+  /**
+   * Compute the canonical ISO value for a single {@code defaults} entry, if it is a
+   * date-valued, non-canonical string. Extracted from {@link #canonicalizeDateDefaults}
+   * to keep that method's cognitive complexity and break/continue count within
+   * SonarQube's limits — pure extraction, no behavior change.
+   *
+   * @param key       the defaults key being examined
+   * @param defaults  the resolved defaults object (read-only here)
+   * @param dalEntity the DAL entity used to tell date properties from everything else
+   * @return the canonical value to rewrite the key to, or empty when the key should be
+   *         left untouched (not a string, not a date property, already canonical, or an
+   *         unrecognized date shape — the last case is logged at WARN here, same as before
+   *         the extraction)
+   */
+  private static Optional<String> canonicalDateFor(String key, JSONObject defaults, Entity dalEntity) {
+    Object value = defaults.opt(key);
+    if (!(value instanceof String) || ((String) value).isEmpty()) {
+      return Optional.empty();
+    }
+    try {
+      Property prop = dalEntity.getProperty(key);
+      if (prop == null || !prop.isPrimitive()) {
+        return Optional.empty();
+      }
+      Optional<Boolean> shape = NeoDateFormat.canonicalShapeFor(prop);
+      if (shape.isEmpty()) {
+        return Optional.empty();
+      }
+      String raw = (String) value;
+      boolean datetime = shape.get().booleanValue();
+      if (NeoDateFormat.isCanonical(raw, datetime)) {
+        return Optional.empty();
+      }
+      String canonical = NeoDateFormat.toCanonical(raw, datetime);
+      if (canonical == null) {
+        log.warn("[NEO] Unrecognized date format for default '{}' on {}: '{}' left as-is",
+            key, dalEntity.getName(), raw);
+        return Optional.empty();
+      }
+      return Optional.of(canonical);
+    } catch (Exception e) {
+      // getProperty throws for keys that are not properties at all ($_identifier companions).
+      log.debug("Skipping date canonicalization for key {}: {}", key, e.getMessage());
+      return Optional.empty();
+    }
+  }
+
+  /**
+   * Rewrites every boolean-valued default that is still a string into a real JSON boolean
+   * (ETP-4793).
+   *
+   * <p>Runs as a post-pass over the finished {@code defaults} object for the same reason
+   * {@link #canonicalizeDateDefaults(JSONObject, Entity)} does: the per-field coercion at
+   * {@link #coerceBooleanDefault(Entity, String, Object)} is only reachable from pass 1, so
+   * every other producer — the callout writeback and combo preselection inside
+   * {@code NeoDefaultsCascadeHelper}, {@code NeoHiddenMandatoryDefaultsResolver}, anything a
+   * handler injects — bypassed it and left {@code "Y"}/{@code "N"} in the response. Which
+   * fields a callout touches differs per window, which is why the same column came back as a
+   * boolean on one spec and as a string on another.
+   *
+   * <p>Placement is deliberate: after the cascade, so the values the legacy callouts receive as
+   * input stay byte-for-byte what they are today.
+   *
+   * <p>A value whose shape {@link NeoBooleanFormat#toCanonical(String)} does not recognise is
+   * left untouched and logged at WARN. Defaulting it to {@code false} would state something the
+   * ERP never said; an unrecognised shape is a signal that this needs a new case.
+   *
+   * @param defaults  the resolved defaults object, mutated in place
+   * @param dalEntity the DAL entity used to tell boolean properties from everything else; a
+   *                  {@code null} entity makes this a no-op
+   */
+  private static void canonicalizeBooleanDefaults(JSONObject defaults, Entity dalEntity) {
+    if (defaults == null || dalEntity == null) {
+      return;
+    }
+    Iterator<?> keys = defaults.keys();
+    Map<String, Boolean> rewritten = new HashMap<>();
+    while (keys.hasNext()) {
+      String key = String.valueOf(keys.next());
+      canonicalBooleanFor(key, defaults, dalEntity).ifPresent(canonical -> rewritten.put(key, canonical));
+    }
+    for (Map.Entry<String, Boolean> entry : rewritten.entrySet()) {
+      try {
+        defaults.put(entry.getKey(), entry.getValue().booleanValue());
+      } catch (JSONException e) {
+        log.debug("Could not store canonical boolean for {}: {}", entry.getKey(), e.getMessage());
+      }
+    }
+    if (!rewritten.isEmpty()) {
+      log.info("[NEO] canonicalizeBooleanDefaults: normalized {} boolean fields on {}: {}",
+          rewritten.size(), dalEntity.getName(), rewritten.keySet());
+    }
+  }
+
+  /**
+   * Compute the canonical boolean value for a single {@code defaults} entry, if it is a
+   * boolean-valued, string-shaped default. Extracted from {@link #canonicalizeBooleanDefaults}
+   * for the same reason {@link #canonicalDateFor} was extracted from
+   * {@link #canonicalizeDateDefaults} — pure extraction, no behavior change.
+   *
+   * @param key       the defaults key being examined
+   * @param defaults  the resolved defaults object (read-only here)
+   * @param dalEntity the DAL entity used to tell boolean properties from everything else
+   * @return the canonical boolean to rewrite the key to, or empty when the key should be left
+   *         untouched (not a string, not a boolean property, or an unrecognized shape — the
+   *         last case is logged at WARN here, same as before the extraction)
+   */
+  private static Optional<Boolean> canonicalBooleanFor(String key, JSONObject defaults, Entity dalEntity) {
+    Object value = defaults.opt(key);
+    if (!(value instanceof String) || ((String) value).isEmpty()) {
+      return Optional.empty();
+    }
+    try {
+      if (!NeoBooleanFormat.isBooleanProperty(dalEntity.getProperty(key))) {
+        return Optional.empty();
+      }
+      String raw = (String) value;
+      Optional<Boolean> canonical = NeoBooleanFormat.toCanonical(raw);
+      if (canonical.isEmpty()) {
+        log.warn("[NEO] Unrecognized boolean format for default '{}' on {}: '{}' left as-is",
+            key, dalEntity.getName(), raw);
+        return Optional.empty();
+      }
+      return canonical;
+    } catch (Exception e) {
+      // getProperty throws for keys that are not properties at all ($_identifier companions).
+      log.debug("Skipping boolean canonicalization for key {}: {}", key, e.getMessage());
+      return Optional.empty();
+    }
+  }
+
+  /**
    * If {@code value} is the string {@code "Y"} or {@code "N"} and the DAL property for
    * {@code propertyName} is a {@link Boolean} primitive type, returns the corresponding
    * {@code Boolean} ({@code true} for "Y", {@code false} for "N"/"anything else").
    * In all other cases the original value is returned unchanged.
    *
    * <p>This mirrors the coercion applied on the create path by
-   * {@code NeoTypeCoercionHelper.coerceField} (Boolean branch, line ~157).
+   * {@code NeoTypeCoercionHelper.coerceField} (Boolean branch) — both now share the one
+   * definition in {@link NeoBooleanFormat}.
+   *
+   * <p>Kept as a pass-1 step even though
+   * {@link #canonicalizeBooleanDefaults(JSONObject, Entity)} would catch the same values later:
+   * coercing before the cascade means the callouts receive the value in the shape they have
+   * always received it. The post-pass is what covers the producers this never reaches.
    */
   private static Object coerceBooleanDefault(Entity dalEntity, String propertyName, Object value) {
     if (dalEntity == null || !(value instanceof String)) {
       return value;
     }
     try {
-      Property prop = dalEntity.getProperty(propertyName);
-      if (prop != null && prop.isPrimitive()) {
-        Class<?> type = prop.getPrimitiveObjectType();
-        if (type != null && Boolean.class.isAssignableFrom(type)) {
-          String strVal = (String) value;
-          return "Y".equals(strVal) || "true".equalsIgnoreCase(strVal);
-        }
+      if (NeoBooleanFormat.isBooleanProperty(dalEntity.getProperty(propertyName))) {
+        return NeoBooleanFormat.toLenientBoolean((String) value);
       }
     } catch (Exception e) {
       log.debug("Could not coerce boolean default for property '{}': {}", propertyName, e.getMessage());
@@ -339,7 +618,7 @@ public class NeoDefaultsService {
    * raw ID string. Silently skips if the property is primitive, the entity is not found, or
    * the lookup fails.
    */
-  private static void tryInjectIdentifier(JSONObject defaults, Entity dalEntity,
+  static void tryInjectIdentifier(JSONObject defaults, Entity dalEntity,
       String propertyName, Object resolvedValue) {
     if (dalEntity == null || resolvedValue == null) {
       return;
@@ -392,7 +671,10 @@ public class NeoDefaultsService {
         ctx).withSfFieldDefault(sfFieldDefault));
   }
 
-  private static final class FieldDefaultRequest {
+  // Package-private (not private): NeoMandatoryDefaultsService (ETP-4978 split, kept under
+  // SonarQube's method-count threshold) also constructs and resolves these requests on the
+  // create path — see resolveFieldDefault(FieldDefaultRequest) below.
+  static final class FieldDefaultRequest {
     private final Column adColumn;
     private final String parentId;
     private final VariablesSecureApp vars;
@@ -401,8 +683,11 @@ public class NeoDefaultsService {
     private final NeoContext ctx;
     private String sfFieldDefault;
     private Map<String, Object> parentValues;
+    // Set by resolveNonEmptyDefaultExpr when the @SQL= branch is taken (ETP-4918); read back by
+    // pass 1 of resolveDefaults to build a metadata.notes entry when the resolved value is null.
+    private NeoDefaultsSqlHelper.SqlDefaultOutcome sqlOutcome;
 
-    private FieldDefaultRequest(Column adColumn, String parentId, VariablesSecureApp vars,
+    FieldDefaultRequest(Column adColumn, String parentId, VariablesSecureApp vars,
         DalConnectionProvider conn, String windowId, NeoContext ctx) {
       this.adColumn = Objects.requireNonNull(adColumn, "adColumn is required");
       this.parentId = parentId;
@@ -412,18 +697,22 @@ public class NeoDefaultsService {
       this.ctx = ctx;
     }
 
-    private FieldDefaultRequest withSfFieldDefault(String sfFieldDefault) {
+    FieldDefaultRequest withSfFieldDefault(String sfFieldDefault) {
       this.sfFieldDefault = sfFieldDefault;
       return this;
     }
 
-    private FieldDefaultRequest withParentValues(Map<String, Object> parentValues) {
+    FieldDefaultRequest withParentValues(Map<String, Object> parentValues) {
       this.parentValues = parentValues;
       return this;
     }
+
+    private NeoDefaultsSqlHelper.SqlDefaultOutcome getSqlOutcome() {
+      return sqlOutcome;
+    }
   }
 
-  private static Object resolveFieldDefault(FieldDefaultRequest request) {
+  static Object resolveFieldDefault(FieldDefaultRequest request) {
     Column adColumn = request.adColumn;
     String dbColumnName = adColumn.getDBColumnName();
 
@@ -480,10 +769,20 @@ public class NeoDefaultsService {
       return "";
     }
 
-    // SQL expressions — resolve parameters and execute
+    // SQL expressions — resolve parameters and execute. Captures the diagnostic outcome on the
+    // request (ETP-4918) so a clean null (parent token missing / zero rows) can still turn into
+    // an actionable metadata.notes entry instead of the field silently vanishing.
     if (defaultExpr.startsWith("@SQL=")) {
-      return NeoDefaultsSqlHelper.resolveSQLDefault(defaultExpr, request.vars, request.conn,
-          request.windowId, adColumn, request.parentValues);
+      // ETP-4783: Ensure ISSOTRX is available for @issotrx@ tokens in @SQL= expressions.
+      // Extraction into a helper keeps cognitive complexity within SonarQube limits.
+      Map<String, Object> sqlParentValues = enrichWithIsSOTrxFromContext(
+          request.parentValues, request.ctx);
+      boolean parentIdProvided = request.parentId != null && !request.parentId.isEmpty();
+      NeoDefaultsSqlHelper.SqlDefaultOutcome outcome = NeoDefaultsSqlHelper.resolveSQLDefaultWithOutcome(
+          defaultExpr, request.vars, request.conn, request.windowId, adColumn, sqlParentValues,
+          parentIdProvided);
+      request.sqlOutcome = outcome;
+      return outcome.getValue();
     }
 
     // List-reference columns (AD_Reference_ID = "17") with a pure literal default (no "@"
@@ -509,6 +808,30 @@ public class NeoDefaultsService {
     }
 
     return null;
+  }
+
+  /**
+   * Enriches a parent-values map with the ISSOTRX flag derived from the AD Window's
+   * isSalesTransaction flag, when the context carries a tab linked to a window.
+   * Creates a new map if {@code parentValues} is null. Uses {@code putIfAbsent} so an
+   * existing ISSOTRX entry is preserved. Extracted from
+   * {@link #resolveNonEmptyDefaultExpr} to reduce cognitive complexity (S3776).
+   */
+  private static Map<String, Object> enrichWithIsSOTrxFromContext(
+      Map<String, Object> parentValues, NeoContext ctx) {
+    if (ctx == null || ctx.getAdTab() == null) {
+      return parentValues;
+    }
+    Tab reqTab = ctx.getAdTab();
+    if (reqTab.getWindow() == null || reqTab.getWindow().isSalesTransaction() == null) {
+      return parentValues;
+    }
+    String isSOTrx = reqTab.getWindow().isSalesTransaction() ? "Y" : "N";
+    if (parentValues == null) {
+      parentValues = new java.util.HashMap<>();
+    }
+    parentValues.putIfAbsent("ISSOTRX", isSOTrx);
+    return parentValues;
   }
 
   /**
@@ -684,7 +1007,8 @@ public class NeoDefaultsService {
 
   /**
    * Build a VariablesSecureApp from OBContext, fully populated with ALL session variables.
-   * Delegates to {@link NeoCalloutService#buildVars} and adds caching + #Date.
+   * Delegates to {@link NeoCalloutService#buildVars}. It does NOT seed a #Date session value —
+   * see the two-arg overload for why that was removed by ETP-4793 / IMP-16.
    *
    * @param obContext the current OBContext containing user, role, org, and warehouse info
    * @return a cached or newly built VariablesSecureApp instance with session variables populated
@@ -701,9 +1025,7 @@ public class NeoDefaultsService {
    * a purchase pricelist on a sales window.
    *
    * <p>Delegates the session-variable population (including {@code IsSOTrx}) to the shared
-   * {@link NeoCalloutService#buildVars(OBContext, Tab)} builder, and layers caching + the
-   * {@code #Date} variable on top. The cache key includes the resolved {@code isSOTrx} value
-   * so a sales-window entry is not served to a purchase-window caller within the TTL.
+   * {@link NeoCalloutService#buildVars(OBContext, Tab)} builder.
    *
    * @param obContext the current OBContext containing user, role, org, and warehouse info
    * @param adTab     the AD_Tab whose window provides the IsSOTrx flag. Pass {@code null}
@@ -713,19 +1035,23 @@ public class NeoDefaultsService {
   public static VariablesSecureApp buildVariablesSecureApp(OBContext obContext, Tab adTab) {
     // The shared builder pulls identity + number-format vars from
     // NeoSessionVarsCache and applies per-tab IsSOTrx on a fresh
-    // VariablesSecureApp, so there is no need for a per-call cache here. #Date
-    // changes daily and is intentionally NOT cached: we set it per request.
-    VariablesSecureApp vars = NeoCalloutService.buildVars(obContext, adTab);
-    vars.setSessionValue("#Date",
-        new SimpleDateFormat(DATE_FORMAT).format(new Date()));
-    return vars;
+    // VariablesSecureApp, so there is no need for a per-call cache here.
+    //
+    // ETP-4793 / IMP-16: this method used to also seed an ISO "#Date" session value here.
+    // That was dead code. Core never reads the session for it: Utility.getContext
+    // special-cases the name (Utility.java:410) and returns DateTimeData.today(conn), whose
+    // generated .xsql implementation formats with a hardcoded "dd-MM-yyyy". So every
+    // @#Date@ default arrives in that format no matter what is in the session, and the
+    // canonicalization has to happen on the resolved value instead — see
+    // canonicalizeDateDefaults below.
+    return NeoCalloutService.buildVars(obContext, adTab);
   }
 
   /**
    * Resolve the window ID from the SFEntity -> SFSpec -> AD_Window chain.
    * Returns empty string if no window is linked (e.g., process specs).
    */
-  private static String resolveWindowId(com.etendoerp.go.schemaforge.data.SFEntity sfEntity) {
+  static String resolveWindowId(com.etendoerp.go.schemaforge.data.SFEntity sfEntity) {
     try {
       SFSpec spec = sfEntity.getETGOSFSpec();
       if (spec != null) {
@@ -738,421 +1064,6 @@ public class NeoDefaultsService {
       log.debug("Could not resolve window ID: {}", e.getMessage());
     }
     return "";
-  }
-
-  /**
-   * Resolve default values for mandatory table columns that are NOT configured in
-   * ETGO_SF_FIELD. These are "system" columns with NOT NULL DB constraints that need
-   * a value on INSERT (e.g., C_DocType_ID = "0", DateAcct = today, C_Currency_ID).
-   *
-   * <p>Uses the same resolution logic as the /defaults endpoint (Utility.getDefault,
-   * context variables, SQL expressions, preferences), so expressions like @#Date@
-   * and @C_Currency_ID@ are resolved correctly.</p>
-   *
-   * @param body    the filtered request body — columns already present are skipped
-   * @param adTab   the AD_Tab for the entity being created
-   * @param ctx     the NeoContext with OBContext and spec/entity info
-   */
-  public static void injectMandatoryDefaults(JSONObject body, Tab adTab, NeoContext ctx) {
-    injectMandatoryDefaults(body, adTab, ctx, null, true);
-  }
-
-  public static void injectMandatoryDefaults(JSONObject body, Tab adTab, NeoContext ctx, String parentId) {
-    injectMandatoryDefaults(body, adTab, ctx, parentId, true);
-  }
-
-  /**
-   * Injects missing mandatory default values into a create payload.
-   *
-   * <p>This overload lets callers decide whether the default injection pass should
-   * also execute the trailing callout cascade. Use {@code runCascade=false} when
-   * the caller runs the cascade immediately afterward.</p>
-   *
-   * @param body       the filtered request body — columns already present are skipped
-   * @param adTab      the AD_Tab for the entity being created
-   * @param ctx        the NeoContext with OBContext and spec/entity info
-   * @param parentId   optional parent record id used for child-tab defaults
-   * @param runCascade whether to run the trailing callout cascade after column iteration.
-   *                   Set to {@code false} when the caller will run the cascade explicitly
-   *                   right after, to avoid duplicating the (expensive) cascade pass.
-   */
-  public static void injectMandatoryDefaults(JSONObject body, Tab adTab, NeoContext ctx,
-      String parentId, boolean runCascade) {
-    if (body == null || adTab == null || ctx == null) {
-      return;
-    }
-    try {
-      Entity dalEntity = ModelProvider.getInstance()
-          .getEntityByTableId(adTab.getTable().getId());
-      if (dalEntity == null) {
-        return;
-      }
-
-      // Build resolution infrastructure once for all columns
-      VariablesSecureApp vars = buildVariablesSecureApp(ctx.getObContext(), adTab);
-      DalConnectionProvider conn = new DalConnectionProvider(false);
-      String windowId = ctx.getSfEntity() != null ? resolveWindowId(ctx.getSfEntity()) : "";
-      Map<String, Object> parentValues = NeoParentValuesLoader.load(adTab, parentId);
-
-      // Build a map of ETGO_SF_FIELD per-window default overrides, keyed by DB column name
-      // (upper-case). This mirrors the sfFieldDefault lookup that resolveDefaults already does
-      // so that the CREATE path honours the same window-level defaults as the /defaults endpoint.
-      Map<String, String> sfFieldDefaults = buildSfFieldDefaultsMap(ctx);
-
-      MandatoryDefaultContext mCtx = new MandatoryDefaultContext(parentId, vars, conn,
-          windowId, ctx, parentValues, sfFieldDefaults);
-
-      // ETP-4274: iterate ALL active columns, not only mandatory ones. Non-mandatory
-      // columns that have a genuine resolvable default (e.g. C_Currency_ID from
-      // @C_Currency_ID@) must be injected on create to reach parity with /defaults —
-      // otherwise the create path silently drops them. Mandatory-ness is passed down so
-      // the aggressive NOT-NULL safety fallbacks stay gated to mandatory columns only.
-      for (Column col : adTab.getTable().getADColumnList()) {
-        if (!col.isActive()) {
-          continue;
-        }
-        // Skip primary key columns — DAL auto-generates UUID PKs.
-        // Injecting any value here (including an existing record's ID via FK fallback)
-        // would cause DefaultJsonDataService to try to UPDATE instead of INSERT.
-        if (Boolean.TRUE.equals(col.isKeyColumn())) {
-          continue;
-        }
-        // Skip audit columns (updated, created, updatedBy, createdBy) — Hibernate manages
-        // these automatically via event listeners. Injecting them causes JsonToDataConverter
-        // to run a stale-date comparison that fails with a date-format parse error.
-        org.openbravo.base.model.Property prop = dalEntity.getPropertyByColumnName(col.getDBColumnName());
-        if (prop != null && prop.isAuditInfo()) {
-          continue;
-        }
-        injectMandatoryDefaultForColumn(body, dalEntity, col, mCtx, col.isMandatory());
-      }
-
-      // Fallback 3: run callout cascade with all fields in body.
-      // Callouts configured in AD_Column derive dependent fields (e.g. BP → address,
-      // price list, payment terms) without hardcoding any field relationships.
-      // Skipped when the caller will run the cascade explicitly right after, to avoid
-      // duplicating the (expensive) cascade pass.
-      if (runCascade) {
-        NeoDefaultsCascadeHelper.executeCalloutCascadeForCreate(ctx, adTab, body);
-      }
-
-    } catch (Exception e) {
-      log.error("Error injecting mandatory defaults for tab {}: {}",
-          adTab.getName(), e.getMessage(), e);
-    }
-  }
-
-  /**
-   * Bundles the resolution infrastructure needed for mandatory default injection.
-   */
-  private static class MandatoryDefaultContext {
-    final String parentId;
-    final VariablesSecureApp vars;
-    final DalConnectionProvider conn;
-    final String windowId;
-    final NeoContext neoCtx;
-    final Map<String, Object> parentValues;
-    /**
-     * Per-column ETGO_SF_FIELD default expressions, keyed by DB column name (upper-case).
-     * Built once from the entity's SFField list so that injectMandatoryDefaults honours the
-     * same per-window defaults that /defaults already returns via resolveFieldDefault.
-     * Columns without an ETGO_SF_FIELD entry are absent from this map → null is passed to
-     * resolveFieldDefault → AD_Column default is used (no behaviour change for them).
-     */
-    final Map<String, String> sfFieldDefaults;
-
-    MandatoryDefaultContext(String parentId, VariablesSecureApp vars,
-        DalConnectionProvider conn, String windowId, NeoContext neoCtx,
-        Map<String, Object> parentValues, Map<String, String> sfFieldDefaults) {
-      this.parentId = parentId;
-      this.vars = vars;
-      this.conn = conn;
-      this.windowId = windowId;
-      this.neoCtx = neoCtx;
-      this.parentValues = parentValues != null ? parentValues
-          : java.util.Collections.emptyMap();
-      this.sfFieldDefaults = sfFieldDefaults != null ? sfFieldDefaults
-          : java.util.Collections.emptyMap();
-    }
-  }
-
-  /**
-   * Attempt to inject a default value for a single column into the body.
-   * Tries field default resolution first, then session context, then parent values. For
-   * mandatory columns only, falls back to combo first-option preselection and a safe
-   * numeric/boolean default to avoid NOT NULL violations.
-   *
-   * @param mandatory whether the column is NOT-NULL (mandatory). Non-mandatory columns
-   *                  run only the genuine default-resolution passes and stop; the
-   *                  aggressive NOT-NULL fallbacks are gated behind this flag (ETP-4274).
-   */
-  private static void injectMandatoryDefaultForColumn(JSONObject body, Entity dalEntity,
-      Column col, MandatoryDefaultContext mCtx, boolean mandatory) {
-    try {
-      if (isAuditColumn(col)) {
-        return;
-      }
-      Property prop = dalEntity.getPropertyByColumnName(col.getDBColumnName());
-      if (prop == null) {
-        return;
-      }
-      String propName = prop.getName();
-      // Skip if already present in the body (user or field-filter provided it)
-      if (body.has(propName)) {
-        return;
-      }
-
-      if (tryResolveFieldDefault(body, propName, col, mCtx, prop)) {
-        return;
-      }
-      if (tryInjectFromSession(body, dalEntity, propName, col, mCtx, prop)) {
-        return;
-      }
-      if (tryInjectFromParentValues(body, dalEntity, propName, col, mCtx.parentValues, prop)) {
-        return;
-      }
-      // ETP-4274: non-mandatory columns stop after the genuine default-resolution passes
-      // above. Do NOT apply the combo first-option preselection or the safe-type fallback
-      // — those exist only to avoid NOT NULL violations on mandatory columns. Applying
-      // them to optional columns would over-inject (and reintroduce the kind of silent FK
-      // pick removed in ETP-3894).
-      if (!mandatory) {
-        return;
-      }
-      // ETP-3894: tryInjectFallbackFkDefault was removed here — it silently picked the
-      // first active record for ANY column ending in _ID (including Search-type FKs like
-      // C_BPartner_ID / Contact) without checking the reference type. That caused
-      // documents to be saved with the wrong business partner when the user clicked Save
-      // without choosing one. tryInjectFirstFromLookup is kept because it only fires for
-      // combo-style references (TableDir/Table/List), matching legitimate FIC parity.
-      if (tryInjectFirstFromLookup(body, dalEntity, propName, col, mCtx.neoCtx)) {
-        return;
-      }
-      NeoDefaultsCascadeHelper.injectSafeTypeDefault(body, propName, col);
-    } catch (Exception e) {
-      log.debug("Could not process mandatory column {}: {}",
-          col.getDBColumnName(), e.getMessage());
-    }
-  }
-
-  /**
-   * Try to resolve the field default using the standard resolution logic.
-   *
-   * <p>Looks up the ETGO_SF_FIELD per-window default override from {@code mCtx.sfFieldDefaults}
-   * and passes it via {@link FieldDefaultRequest#withSfFieldDefault} so that
-   * {@link #resolveFieldDefault(FieldDefaultRequest)} honours window-level customisations
-   * (e.g. {@code calculateType = "TI"}) exactly as the {@code /defaults} endpoint does.
-   * Columns that have no ETGO_SF_FIELD entry receive {@code null}, preserving the existing
-   * AD_Column fallback behaviour unchanged.
-   *
-   * @return true if a value was injected, false otherwise
-   */
-  private static boolean tryResolveFieldDefault(JSONObject body, String propName, Column col,
-      MandatoryDefaultContext mCtx, Property prop) {
-    try {
-      // Look up the ETGO_SF_FIELD override for this column (null if not configured)
-      String sfFieldDefault = mCtx.sfFieldDefaults.get(
-          col.getDBColumnName().toUpperCase(Locale.ROOT));
-      Object resolved = resolveFieldDefault(new FieldDefaultRequest(col, mCtx.parentId, mCtx.vars,
-          mCtx.conn, mCtx.windowId, mCtx.neoCtx)
-          .withSfFieldDefault(sfFieldDefault)
-          .withParentValues(mCtx.parentValues));
-      if (resolved != null) {
-        applyResolvedDefault(body, col, propName, resolved, mCtx.neoCtx, prop);
-        tryInjectIdentifier(body,
-            NeoDefaultsCascadeHelper.resolveDalEntity(mCtx.neoCtx.getSfEntity()),
-            propName, body.opt(propName));
-        log.debug("Injected mandatory default: {} = {}", propName, body.opt(propName));
-        return true;
-      }
-    } catch (Exception e) {
-      log.debug("Could not resolve mandatory default for {}: {}",
-          col.getDBColumnName(), e.getMessage());
-    }
-    return false;
-  }
-
-  /**
-   * Try to inject a value from session context variables (#ColumnName or ColumnName).
-   * Returns true if a value was found and injected, false otherwise.
-   */
-  private static boolean tryInjectFromSession(JSONObject body, Entity dalEntity, String propName,
-      Column col, MandatoryDefaultContext mCtx, Property prop) {
-    try {
-      String dbColName = col.getDBColumnName();
-      VariablesSecureApp vars = mCtx.vars;
-      String fromSession = vars.getSessionValue("#" + dbColName);
-      if (fromSession == null || fromSession.isEmpty()) {
-        fromSession = vars.getSessionValue(dbColName);
-      }
-      if (fromSession != null && !fromSession.isEmpty()) {
-        applyResolvedDefault(body, col, propName, fromSession, mCtx.neoCtx, prop);
-        tryInjectIdentifier(body, dalEntity, propName, body.opt(propName));
-        log.debug("Injected from session context: {} = {}", propName, body.opt(propName));
-        return true;
-      }
-    } catch (Exception e) {
-      log.debug("Could not read session value for {}: {}", col.getDBColumnName(), e.getMessage());
-    }
-    return false;
-  }
-
-  private static boolean tryInjectFromParentValues(JSONObject body, Entity dalEntity,
-      String propName, Column col, Map<String, Object> parentValues, Property prop) {
-    if (parentValues == null || parentValues.isEmpty()) {
-      return false;
-    }
-    String defaultExpr = col.getDefaultValue();
-    if (defaultExpr == null || !defaultExpr.matches("^@[A-Za-z_]+@$") ) {
-      return false;
-    }
-    String refCol = defaultExpr.substring(1, defaultExpr.length() - 1).toUpperCase();
-    Object value = parentValues.get(refCol);
-    if (value == null) {
-      return false;
-    }
-    try {
-      applyResolvedDefault(body, col, propName, value, null, prop);
-      tryInjectIdentifier(body, dalEntity, propName, body.opt(propName));
-      log.debug("Injected parent fallback default: {} = {}", propName, body.opt(propName));
-      return true;
-    } catch (Exception e) {
-      log.debug("Could not inject parent fallback for {}: {}", propName, e.getMessage());
-      return false;
-    }
-  }
-
-  private static void applyResolvedDefault(JSONObject body, Column col,
-      String propName, Object resolved, NeoContext ctx, Property prop) throws Exception {
-    if (resolved == null) {
-      return;
-    }
-    // FK columns with legacy "0" default — OBDal cannot resolve "0" as an entity ID.
-    // For doctype columns, try to resolve the actual default from C_DocType table.
-    if ("0".equals(String.valueOf(resolved))
-        && col.getDBColumnName().toUpperCase().endsWith("_ID")) {
-      String docTypeId = DocTypeResolver.resolveDefaultDocTypeId(col, ctx);
-      if (docTypeId != null) {
-        body.put(propName, docTypeId);
-        log.debug("Resolved doctype default for {}: {}", propName, docTypeId);
-        return;
-      }
-      log.debug("Skipping FK default '0' for {}", propName);
-      return;
-    }
-    // Coerce numeric String defaults to their proper Java type so DAL validation passes.
-    // SQL defaults (e.g. lineNo from COALESCE(MAX(Line),0)+10) arrive as String from rs.getString().
-    // The target type is decided by the DAL property, NOT by the column name: a String property
-    // whose default happens to be all digits (e.g. a List-reference code like
-    // BusinessPartner.invoiceGrouping = "000000000000000") must stay a String — coercing it to a
-    // number corrupts the value and fails the List-reference validator (ETP-4668). Mirrors the
-    // type check in NeoTypeCoercionHelper.coerceField used on the create path.
-    Object valueToStore = resolved;
-    if (resolved instanceof String && isNumericProperty(prop)) {
-      valueToStore = coerceNumericStringToPropertyType((String) resolved, prop);
-    }
-    body.put(propName, valueToStore);
-    log.debug("[NEO-DEFAULTS] {} = {} ({})", propName, valueToStore,
-        valueToStore == null ? "null" : valueToStore.getClass().getSimpleName());
-  }
-
-  /**
-   * True when the DAL property is a primitive numeric type ({@link java.math.BigDecimal},
-   * {@link Long} or {@link Integer}). FK (non-primitive) and String properties return false, so
-   * their String defaults are never coerced to numbers — the fix for ETP-4668, where an all-digit
-   * List-reference code on a String property was silently turned into a number.
-   */
-  private static boolean isNumericProperty(Property prop) {
-    if (prop == null || !prop.isPrimitive()) {
-      return false;
-    }
-    Class<?> type = prop.getPrimitiveObjectType();
-    return type != null
-        && (java.math.BigDecimal.class.isAssignableFrom(type)
-            || Long.class.isAssignableFrom(type)
-            || Integer.class.isAssignableFrom(type));
-  }
-
-  /**
-   * Coerces a numeric String default to the exact Java type declared by the DAL property,
-   * mirroring {@link com.etendoerp.go.schemaforge.util.NeoTypeCoercionHelper#coerceField}. If the
-   * string cannot be parsed as that numeric type the original String is returned unchanged.
-   */
-  private static Object coerceNumericStringToPropertyType(String resolved, Property prop) {
-    String strVal = resolved.trim();
-    try {
-      Class<?> type = prop.getPrimitiveObjectType();
-      if (java.math.BigDecimal.class.isAssignableFrom(type)) {
-        return new java.math.BigDecimal(strVal);
-      }
-      if (Long.class.isAssignableFrom(type)) {
-        return new java.math.BigDecimal(strVal).longValue();
-      }
-      if (Integer.class.isAssignableFrom(type)) {
-        return Integer.parseInt(strVal);
-      }
-    } catch (Exception ex) {
-      log.debug("Could not coerce '{}' to numeric type for property {}: keeping as String — {}",
-          strVal, prop.getName(), ex.getMessage());
-    }
-    return resolved;
-  }
-
-  private static boolean isAuditColumn(Column col) {
-    String colNameUpper = col.getDBColumnName().toUpperCase();
-    return "CREATED".equals(colNameUpper)
-        || "UPDATED".equals(colNameUpper)
-        || "CREATEDBY".equals(colNameUpper)
-        || "UPDATEDBY".equals(colNameUpper);
-  }
-
-  /**
-   * Build a map of ETGO_SF_FIELD per-window default expressions, keyed by DB column name
-   * (upper-case). Only non-blank {@code ETGO_SF_FIELD.defaultvalue} entries are included.
-   *
-   * <p>Uses the same OBCriteria query as {@link #resolveDefaults} (active + included SFFields
-   * for the entity) so the CREATE path and the {@code /defaults} endpoint see the same set of
-   * per-window overrides. If {@code ctx.getSfEntity()} is null or no SFFields are found an
-   * empty map is returned — columns without an entry fall back to the AD_Column default,
-   * preserving existing behaviour.</p>
-   *
-   * @param ctx the NeoContext whose sfEntity provides the entity ID
-   * @return map of DB_COLUMN_NAME.toUpperCase() → ETGO_SF_FIELD.defaultvalue
-   */
-  private static Map<String, String> buildSfFieldDefaultsMap(NeoContext ctx) {
-    Map<String, String> result = new HashMap<>();
-    if (ctx == null || ctx.getSfEntity() == null) {
-      return result;
-    }
-    // ETGO_SF_FIELD rows are System data (client 0). The CREATE path runs as the end-user's
-    // client (e.g. a tenant role), which cannot see them under the normal client filter — so
-    // the query must run in admin mode, mirroring resolveDefaults. Without this the map comes
-    // back empty for tenant users and the create falls back to the AD_Column default.
-    OBContext.setAdminMode(true);
-    try {
-      OBCriteria<SFField> fieldCrit = OBDal.getInstance().createCriteria(SFField.class);
-      fieldCrit.add(Restrictions.eq(SFField.PROPERTY_ETGOSFENTITY + ".id",
-          ctx.getSfEntity().getId()));
-      fieldCrit.add(Restrictions.eq(SFField.PROPERTY_ISACTIVE, true));
-      fieldCrit.add(Restrictions.eq(SFField.PROPERTY_ISINCLUDED, true));
-      List<SFField> fields = fieldCrit.list();
-      for (SFField sfField : fields) {
-        Column adColumn = sfField.getADColumn();
-        if (adColumn == null) {
-          continue;
-        }
-        String defaultValue = sfField.getDefaultValue();
-        if (defaultValue != null && !defaultValue.trim().isEmpty()) {
-          result.put(adColumn.getDBColumnName().toUpperCase(Locale.ROOT), defaultValue.trim());
-        }
-      }
-    } catch (Exception e) {
-      log.debug("Could not build sfFieldDefaults map for entity {}: {}",
-          ctx.getSfEntity().getId(), e.getMessage());
-    } finally {
-      OBContext.restorePreviousMode();
-    }
-    return result;
   }
 
   // ── Callout cascade ─────────────────────────────────────────────────
@@ -1257,7 +1168,7 @@ public class NeoDefaultsService {
     return params;
   }
 
-  private static Object resolveFirstComboOption(Column col, NeoContext ctx) {
+  static Object resolveFirstComboOption(Column col, NeoContext ctx) {
     try {
       String baseRefId = NeoSelectorService.getBaseReferenceId(col);
       if (!isFICComboReference(baseRefId)) {
@@ -1290,24 +1201,6 @@ public class NeoDefaultsService {
       log.debug("Could not resolve first combo option for {}: {}",
           col.getDBColumnName(), e.getMessage());
       return null;
-    }
-  }
-
-  private static boolean tryInjectFirstFromLookup(JSONObject body, Entity dalEntity,
-      String propName, Column col, NeoContext ctx) {
-    Object firstId = resolveFirstComboOption(col, ctx);
-    if (firstId == null) {
-      return false;
-    }
-    try {
-      body.put(propName, firstId);
-      tryInjectIdentifier(body, dalEntity, propName, firstId.toString());
-      log.debug("Auto-injected first combo option: {} = {}", propName, firstId);
-      return true;
-    } catch (Exception e) {
-      log.debug("Could not auto-pick first combo option for {}: {}",
-          col.getDBColumnName(), e.getMessage());
-      return false;
     }
   }
 

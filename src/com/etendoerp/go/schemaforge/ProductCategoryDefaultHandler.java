@@ -47,16 +47,21 @@ import org.openbravo.model.common.plm.ProductCategory;
  * <p>Living at the NEO Headless layer (rather than as an {@code EntityPersistenceEventObserver})
  * ensures this GO-specific behavior does not affect Etendo Classic / Enterprise users that
  * operate directly on the AD windows.
+ *
+ * <p>ETP-4967: also hides any category flagged {@code em_etgo_issystemcategory = 'Y'} from GET
+ * responses — see {@link #afterHandle}.
  */
 @Named("productCategoryDefaultHandler")
 public class ProductCategoryDefaultHandler implements NeoHandler {
 
   private static final String FIELD_DEFAULT = "default";
+  private static final String FIELD_ID = "id";
   private static final String MSG_CANNOT_SET_MULTIPLE_DEFAULT =
       "ETGO_ProductCategoryCannotSetMultipleDefault";
   private static final String METHOD_POST = "POST";
   private static final String METHOD_PATCH = "PATCH";
   private static final String METHOD_PUT = "PUT";
+  private static final String METHOD_GET = "GET";
 
   @Override
   public NeoResponse handle(NeoContext context) {
@@ -142,8 +147,34 @@ public class ProductCategoryDefaultHandler implements NeoHandler {
     return null;
   }
 
+  /**
+   * ETP-4967: strips categories flagged {@code em_etgo_issystemcategory = 'Y'} (see
+   * {@link SystemCategoryIds}) from GET responses before they reach the UI, so an internal
+   * category like "Discounts" never shows up in the "Categoría del producto" window. Delegates
+   * the actual envelope-extraction/filter-loop to {@link DiscountLineFilter#filterFieldFromResponse}
+   * (generalized from its original discount-line use) rather than duplicating that logic here.
+   */
   @Override
   public NeoResponse afterHandle(NeoContext context) {
+    if (!METHOD_GET.equals(context.getHttpMethod())) {
+      return null;
+    }
+    String clientId = resolveContextClientId(context);
+    if (clientId == null || clientId.isEmpty()) {
+      return null;
+    }
+    return DiscountLineFilter.filterFieldFromResponse(context, FIELD_ID,
+        SystemCategoryIds.resolve(clientId));
+  }
+
+  /**
+   * The current request's client — same resolution {@link #resolveClientId} uses for the create
+   * case, extracted here so {@code afterHandle} does not need an existing record id.
+   */
+  private static String resolveContextClientId(NeoContext context) {
+    if (context.getObContext() != null && context.getObContext().getCurrentClient() != null) {
+      return context.getObContext().getCurrentClient().getId();
+    }
     return null;
   }
 }

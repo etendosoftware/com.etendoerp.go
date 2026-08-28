@@ -243,4 +243,91 @@ public class ProductDefaultsHandlerTest {
     assertEquals(false, result.getBody().getJSONObject("defaults").has("uOM"));
     assertEquals(false, result.getBody().getJSONObject("defaults").has("taxCategory"));
   }
+
+  // ── ETP-4943: a Service product is never stocked/returnable ──────────────
+  //
+  // Enforced here (not just in the frontend `ProductAdditionalInfoPanel.jsx`) because that
+  // panel's client-side auto-correction only runs while the "Additional Info" tab is mounted —
+  // a user who sets Type=Service on the "General" tab and saves immediately never triggers it.
+  // Mirrors the ETP-4606 defense-in-depth precedent (`ServiceProductGuard`), but as an
+  // auto-correction rather than a rejection, since the product record itself (unlike a
+  // stock-movement line) has no valid alternative to fall back to.
+
+  private static NeoContext patchCtx(JSONObject body) {
+    return NeoContext.builder()
+        .specName("product").entityName("product")
+        .httpMethod("PATCH").endpointType(NeoEndpointType.CRUD)
+        .requestBody(body).build();
+  }
+
+  @Test
+  public void testHandleForcesStockedAndReturnableFalseOnCreateWhenTypeIsService() throws Exception {
+    JSONObject body = new JSONObject()
+        .put("productType", "S")
+        .put("stocked", true)
+        .put("returnable", true);
+
+    NeoResponse result = new ProductDefaultsHandler().handle(postCtx(body, mock(OBContext.class)));
+
+    assertNull(result);
+    assertEquals(false, body.getBoolean("stocked"));
+    assertEquals(false, body.getBoolean("returnable"));
+  }
+
+  @Test
+  public void testHandleForcesStockedAndReturnableFalseOnCreateWhenTypeIsServiceAndFlagsAbsent()
+      throws Exception {
+    // Flags omitted entirely (e.g. relying on whatever default the client applied) — must still
+    // end up explicitly false, not just "left unset" (which could resolve to true downstream).
+    JSONObject body = new JSONObject().put("productType", "S");
+
+    new ProductDefaultsHandler().handle(postCtx(body, mock(OBContext.class)));
+
+    assertEquals(false, body.getBoolean("stocked"));
+    assertEquals(false, body.getBoolean("returnable"));
+  }
+
+  @Test
+  public void testHandleForcesStockedAndReturnableFalseOnPatchWhenTypeIsService() throws Exception {
+    // The case the frontend alone cannot guarantee: an edit that switches Type to Service.
+    JSONObject body = new JSONObject()
+        .put("productType", "S")
+        .put("stocked", true)
+        .put("returnable", true);
+
+    NeoResponse result = new ProductDefaultsHandler().handle(patchCtx(body));
+
+    assertNull(result);
+    assertEquals(false, body.getBoolean("stocked"));
+    assertEquals(false, body.getBoolean("returnable"));
+  }
+
+  @Test
+  public void testHandleLeavesStockedAndReturnableUntouchedForArticleType() throws Exception {
+    ProductDefaultsHandler handler = handlerResolving(null, null, null, null);
+    JSONObject body = new JSONObject()
+        .put("productType", "I")
+        .put("stocked", true)
+        .put("returnable", true);
+
+    handler.handle(postCtx(body, mock(OBContext.class)));
+
+    assertEquals(true, body.getBoolean("stocked"));
+    assertEquals(true, body.getBoolean("returnable"));
+  }
+
+  @Test
+  public void testHandleLeavesStockedAndReturnableUntouchedWhenPatchDoesNotTouchType()
+      throws Exception {
+    // A PATCH that edits something unrelated (e.g. weight) and never mentions productType at
+    // all must not force these flags off just because the record might already be a Service —
+    // resolving the persisted type would need a DB lookup, out of scope for this ticket's
+    // reported cases (all of which change productType in the same request).
+    JSONObject body = new JSONObject().put("weight", 5);
+
+    new ProductDefaultsHandler().handle(patchCtx(body));
+
+    assertEquals(false, body.has("stocked"));
+    assertEquals(false, body.has("returnable"));
+  }
 }

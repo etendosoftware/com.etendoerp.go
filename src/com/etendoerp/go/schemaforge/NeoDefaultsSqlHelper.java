@@ -71,41 +71,157 @@ final class NeoDefaultsSqlHelper {
   static String resolveSQLDefault(String defaultExpr, VariablesSecureApp vars,
       DalConnectionProvider conn, String windowId, Column adColumn,
       Map<String, Object> parentValues) {
+    return resolveSQLDefaultWithOutcome(defaultExpr, vars, conn, windowId, adColumn, parentValues,
+        parentValues != null && !parentValues.isEmpty()).getValue();
+  }
+
+  /**
+   * Same resolution as {@link #resolveSQLDefault}, but also reports WHY a null came back
+   * (ETP-4918). {@code resolveSQLDefault} above stays byte-for-byte behaviorally identical —
+   * it just discards the diagnostic half of this outcome — so every existing caller is
+   * unaffected. The one caller that needs the diagnostic (pass 1 of
+   * {@code NeoDefaultsService#resolveDefaults}) uses this method directly to turn a silent
+   * {@code null} into an actionable {@code metadata.notes} entry instead of a field that
+   * simply vanishes from the response.
+   *
+   * @param parentIdProvided whether the caller's {@code parentId} request parameter was
+   *                         actually present, independent of whether {@code parentValues} was
+   *                         threaded through for this particular call. Pass 1 of
+   *                         {@code resolveDefaults} never threads {@code parentValues} into
+   *                         this call at all (a separate, pre-existing gap — not something
+   *                         this change fixes), so basing the "you forgot parentId" diagnosis
+   *                         on {@code parentValues} emptiness would misreport a query that
+   *                         merely returned zero rows while parentId was in fact supplied.
+   */
+  static SqlDefaultOutcome resolveSQLDefaultWithOutcome(String defaultExpr, VariablesSecureApp vars,
+      DalConnectionProvider conn, String windowId, Column adColumn,
+      Map<String, Object> parentValues, boolean parentIdProvided) {
     try {
       ArrayList<String> params = new ArrayList<>();
       String sql = parseSQLExpression(defaultExpr, params);
+      String missingParentToken;
 
       try (PreparedStatement ps = OBDal.getInstance().getConnection(false).prepareStatement(sql)) {
-        int paramIndex = 1;
-        for (String parameter : params) {
-          String value = null;
-          // Non-session params: check parent record values first (e.g. @M_Warehouse_ID@, @AD_Client_ID@)
-          if (parentValues != null && !parentValues.isEmpty() && !parameter.startsWith("#")) {
-            Object pv = parentValues.get(parameter.toUpperCase());
-            if (pv != null) {
-              value = String.valueOf(pv);
-              log.debug("[resolveSQLDefault] param @{}@ from parentValues: {}", parameter, value);
-            }
-          }
-          if (value == null || value.isEmpty()) {
-            value = Utility.getContext(conn, vars, parameter, windowId);
-          }
-          ps.setObject(paramIndex++, value);
-        }
+        missingParentToken = bindSqlDefaultParams(ps, params, vars, conn, windowId, parentValues,
+            parentIdProvided);
 
         try (ResultSet rs = ps.executeQuery()) {
           if (rs.next()) {
-            return rs.getString(1);
+            return SqlDefaultOutcome.resolved(rs.getString(1));
           }
         }
       }
-      return null;
+      return missingParentToken != null
+          ? SqlDefaultOutcome.missingParentToken(missingParentToken)
+          : SqlDefaultOutcome.zeroRows();
     } catch (Exception e) {
       // adColumn is null when resolving a tab auxiliary input's @SQL= code (which is
       // column-independent), so guard the dereference before logging.
       log.debug("Could not resolve SQL default for column {}: {}",
           adColumn != null ? adColumn.getDBColumnName() : "<auxiliary-input>", e.getMessage());
+      return SqlDefaultOutcome.unresolved();
+    }
+  }
+
+  /**
+   * Bind every {@code @token@} of a parsed {@code @SQL=} expression onto {@code ps}, resolving
+   * each from the parent record first and from session context second.
+   *
+   * <p>Extracted from {@link #resolveSQLDefaultWithOutcome} (Sonar S3776) — that method's
+   * cognitive complexity came almost entirely from this loop, and the loop is also where the
+   * single diagnostic decision lives, so it factors out cleanly.</p>
+   *
+   * @return the first non-session token that resolved to nothing while {@code parentId} was
+   *         never supplied — the "forgot parentId" diagnosis — or {@code null} when no token
+   *         fits that case (including when the query simply matches no rows)
+   */
+  private static String bindSqlDefaultParams(PreparedStatement ps, ArrayList<String> params,
+      VariablesSecureApp vars, DalConnectionProvider conn, String windowId,
+      Map<String, Object> parentValues, boolean parentIdProvided) throws SQLException {
+    String missingParentToken = null;
+    int paramIndex = 1;
+    for (String parameter : params) {
+      boolean sessionParam = parameter.startsWith("#");
+      String value = sessionParam ? null : valueFromParent(parentValues, parameter);
+      if (value == null || value.isEmpty()) {
+        value = Utility.getContext(conn, vars, parameter, windowId);
+      }
+      // Token needed a parent value, the request never supplied parentId, and session context
+      // could not supply one either: the "forgot parentId" case, distinct from "the query
+      // legitimately matched nothing".
+      if (missingParentToken == null && !sessionParam && !parentIdProvided
+          && (value == null || value.isEmpty())) {
+        missingParentToken = parameter;
+      }
+      ps.setObject(paramIndex++, value);
+    }
+    return missingParentToken;
+  }
+
+  /**
+   * The parent record's value for a non-session {@code @token@}, or {@code null} when the caller
+   * threaded no parent values or the parent carries nothing under that name.
+   */
+  private static String valueFromParent(Map<String, Object> parentValues, String parameter) {
+    if (parentValues == null || parentValues.isEmpty()) {
       return null;
+    }
+    Object pv = parentValues.get(parameter.toUpperCase());
+    if (pv == null) {
+      return null;
+    }
+    String value = String.valueOf(pv);
+    log.debug("[resolveSQLDefault] param @{}@ from parentValues: {}", parameter, value);
+    return value;
+  }
+
+  /**
+   * Diagnostic outcome of a {@code @SQL=} default resolution attempt (ETP-4918). Carries just
+   * enough context for a caller to explain a {@code null} value — which of the two known-cause
+   * cases applies, if either — without {@link #resolveSQLDefaultWithOutcome} needing to know
+   * anything about the wire response format its caller builds.
+   */
+  static final class SqlDefaultOutcome {
+    private final String value;
+    private final String missingParentToken;
+    private final boolean zeroRows;
+
+    private SqlDefaultOutcome(String value, String missingParentToken, boolean zeroRows) {
+      this.value = value;
+      this.missingParentToken = missingParentToken;
+      this.zeroRows = zeroRows;
+    }
+
+    private static SqlDefaultOutcome resolved(String value) {
+      return new SqlDefaultOutcome(value, null, false);
+    }
+
+    private static SqlDefaultOutcome missingParentToken(String token) {
+      return new SqlDefaultOutcome(null, token, false);
+    }
+
+    private static SqlDefaultOutcome zeroRows() {
+      return new SqlDefaultOutcome(null, null, true);
+    }
+
+    private static SqlDefaultOutcome unresolved() {
+      return new SqlDefaultOutcome(null, null, false);
+    }
+
+    String getValue() {
+      return value;
+    }
+
+    /** Non-null only when a non-session @token@ resolved to nothing AND the request's
+     *  {@code parentId} was never supplied — i.e. the caller almost certainly forgot it. */
+    String getMissingParentToken() {
+      return missingParentToken;
+    }
+
+    /** True when the query executed cleanly but matched zero rows, and no parent token was
+     *  the likely cause — the tenant simply has no such record for the current context. */
+    boolean isZeroRows() {
+      return zeroRows;
     }
   }
 

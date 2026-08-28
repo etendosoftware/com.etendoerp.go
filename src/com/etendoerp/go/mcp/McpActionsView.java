@@ -27,9 +27,15 @@ import org.codehaus.jettison.json.JSONObject;
  * <p>A full {@code neo_schema} dump can carry ~97 fields for a compliance-heavy window, most of
  * which are irrelevant to an agent that only wants to know which buttons/processes it can invoke.
  * The {@code type:"button"} fields are already fully described inline by
- * {@link McpSchemaFieldBuilder#buildSchemaFieldsArray} (name, label, {@code invokeVia:"neo_action"},
- * {@code action}, {@code processType}/{@code processName}/{@code processId}) — this view just
- * filters the already-built field array down to those, no extra DAL access needed.
+ * {@link McpSchemaFieldBuilder#buildSchemaFieldsArray} (name, label, {@code action},
+ * {@code processType}/{@code processName}/{@code processId}, and either
+ * {@code invokeVia:"neo_action"} or {@code invokable:false} + {@code notInvokableReason}) — this
+ * view just filters the already-built field array down to those, no extra DAL access needed.
+ *
+ * <p><b>IMP-21:</b> the catalog stays complete — every button the window has is listed, including
+ * the ones curation put out of scope — but it no longer implies they are all callable. {@code
+ * invokableCount} sits next to {@code actionCount} so an agent sees the split before reading the
+ * array: on sales-invoice most of the 22 are not callable.
  *
  * <p>No view / anything other than {@code "actions"} is a no-op — the caller keeps returning the
  * full schema, unchanged.
@@ -43,6 +49,7 @@ final class McpActionsView {
   static final String VIEW_ACTIONS = "actions";
   static final String TYPE_BUTTON = "button";
   static final String KEY_ACTIONS = "actions";
+  static final String KEY_INVOKABLE_COUNT = "invokableCount";
 
   /** @return {@code true} when {@code view} requests the actions-only projection. */
   static boolean isActionsView(String view) {
@@ -71,7 +78,7 @@ final class McpActionsView {
 
   /**
    * Builds the {@code neo_schema({view:"actions"})} response shape: {@code {spec, entity,
-   * actions, actionCount}}, dropping the full field dump.
+   * actions, actionCount, invokableCount}}, dropping the full field dump.
    */
   static JSONObject buildResponse(String specName, String entityName, JSONArray fields)
       throws JSONException {
@@ -81,6 +88,18 @@ final class McpActionsView {
     JSONArray actions = apply(fields);
     response.put(KEY_ACTIONS, actions);
     response.put("actionCount", actions.length());
+    response.put(KEY_INVOKABLE_COUNT, countInvokable(actions));
     return response;
+  }
+
+  /** @return how many of the catalog's actions {@code neo_action} can actually run (IMP-21). */
+  private static int countInvokable(JSONArray actions) throws JSONException {
+    int invokable = 0;
+    for (int i = 0; i < actions.length(); i++) {
+      if (actions.getJSONObject(i).has(McpSchemaFieldBuilder.KEY_INVOKE_VIA)) {
+        invokable++;
+      }
+    }
+    return invokable;
   }
 }
