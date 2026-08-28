@@ -1992,28 +1992,6 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     writeResponse(response, SC_PAYMENT_REQUIRED, body);
   }
 
-  private String resolveOnboardingAccountEmail(String token, HttpServletResponse response)
-      throws IOException {
-    String accountEmail = null;
-    try {
-      OBContext.setOBContext("0", "0", "0", "0");
-      OBContext.setAdminMode(true);
-      Account account = EtendoGoJwtDalHelper.findActiveAccountByBearerToken(token);
-      String resolvedEmail = account == null ? null : account.getEmail();
-      if (resolvedEmail == null) {
-        writeError(response, HttpServletResponse.SC_UNAUTHORIZED, INVALID_OR_EXPIRED_TOKEN);
-      } else {
-        accountEmail = resolvedEmail;
-      }
-    } catch (RuntimeException e) {
-      log.error("Database error validating token for onboarding", e);
-      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, SERVER_ERROR);
-    } finally {
-      OBContext.restorePreviousMode();
-    }
-    return accountEmail;
-  }
-
   private void writeEnvironmentLoginResponse(HttpServletResponse response, String userId,
       EtendoGoJwtSupport.RoleListData roleListData) throws Exception {
     OBContext.setOBContext("0", "0", "0", "0");

@@ -69,7 +69,7 @@ import com.smf.securewebservices.utils.SecureWebServicesUtils;
  * the change-password and password-reset validation branches, the /environments data-mapping
  * loop, the GET /login (environment login) success and user-not-found paths, and the
  * onboarding pre-flight helpers (resolveCurrencyId, parseOnboardingRequest,
- * resolveOnboardingAccountEmail, writeEnvironmentLoginResponse).
+ * writeEnvironmentLoginResponse).
  */
 public class EtendoGoJwtServletCoverageTest {
 
