@@ -17,10 +17,6 @@
 
 package com.etendoerp.go.psd2;
 
-import java.sql.Connection;
-import java.sql.PreparedStatement;
-import java.sql.ResultSet;
-import java.sql.SQLException;
 import java.util.UUID;
 
 import javax.enterprise.context.ApplicationScoped;
@@ -29,35 +25,27 @@ import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.openbravo.base.exception.OBException;
-import org.openbravo.dal.core.OBContext;
+import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.system.Client;
-import org.openbravo.database.ConnectionProvider;
-import org.openbravo.service.db.DalConnectionProvider;
+import org.openbravo.model.ad.access.User;
+import org.openbravo.dal.service.OBQuery;
 import org.openbravo.utils.FormatUtilities;
 
-import com.etendoerp.go.common.GoAccountResolver;
-import com.etendoerp.go.schemaforge.data.Account;
 import com.etendoerp.psd2.bank.integration.spi.Psd2ApiKeyProvider;
 import com.etendoerp.psd2.bank.integration.audit.Psd2ApiKeyAuditService;
+import com.etendoerp.go.schemaforge.data.Account;
 
 /**
  * Lazily provisions and persists the PSD2 API key for an Etendo client.
  *
- * <p>The provisioning transaction is deliberately managed through a separate
- * {@link DalConnectionProvider}; it is never the DAL transaction of the PSD2 business operation.
- * The PostgreSQL transaction advisory lock serializes provisioning for one client across
- * application nodes while allowing different clients to proceed independently.</p>
+ * <p>The owner email is read through a dedicated read-only OBDal pool and that session is closed
+ * before the external provisioning call. The API key is then persisted through the caller's normal
+ * DAL lifecycle, without holding an AD_CLIENT lock while waiting for the proxy.</p>
  */
 @ApplicationScoped
 public class SaltEdgeApiKeyProvider implements Psd2ApiKeyProvider {
 
   private static final Logger log = LogManager.getLogger(SaltEdgeApiKeyProvider.class);
-  private static final String SELECT_KEY =
-      "SELECT EM_PSD2_API_KEY FROM AD_CLIENT WHERE AD_CLIENT_ID = ? FOR UPDATE";
-  private static final String UPDATE_KEY =
-      "UPDATE AD_CLIENT SET EM_PSD2_API_KEY = ?, UPDATED = CURRENT_TIMESTAMP, UPDATEDBY = ? "
-          + "WHERE AD_CLIENT_ID = ?";
-  private static final String LOCK = "SELECT pg_advisory_xact_lock(hashtext(?))";
   private final SaltEdgeProvisioningClient provisioningClient;
 
   public SaltEdgeApiKeyProvider() {
@@ -74,69 +62,54 @@ public class SaltEdgeApiKeyProvider implements Psd2ApiKeyProvider {
       throw new OBException("A client is required to obtain a PSD2 API key");
     }
 
-    DalConnectionProvider connectionProvider = new DalConnectionProvider(false);
-    Connection connection = null;
+    String storedValue = client.getPsd2ApiKey();
+    if (StringUtils.isNotBlank(storedValue)) {
+      Psd2ApiKeyAuditService.record(client.getId(), "PROVISION_REUSED", "SUCCESS",
+          UUID.randomUUID().toString(), null, null, null, 0L, "GO");
+      return decrypt(storedValue);
+    }
+
+    String correlationId = UUID.randomUUID().toString();
+    long startedAt = System.nanoTime();
     try {
-      connection = connectionProvider.getTransactionConnection();
-      lockClient(connection, client.getId());
-
-      String storedValue = readStoredValue(connection, client.getId());
-      if (StringUtils.isNotBlank(storedValue)) {
-        Psd2ApiKeyAuditService.record(client.getId(), "PROVISION_REUSED", "SUCCESS",
-            UUID.randomUUID().toString(), null, null, null, 0L, "GO");
-        return decrypt(storedValue);
-      }
-
-      String correlationId = UUID.randomUUID().toString();
-      long startedAt = System.nanoTime();
-      String apiKey = provisioningClient.provision(client.getId(), resolveEmail());
-      String encryptedKey = FormatUtilities.encryptDecrypt(apiKey, true);
-      try (PreparedStatement statement = connection.prepareStatement(UPDATE_KEY)) {
-        statement.setString(1, encryptedKey);
-        statement.setString(2, resolveUserId());
-        statement.setString(3, client.getId());
-        statement.executeUpdate();
-      }
-      connectionProvider.releaseCommitConnection(connection);
-      connection = null;
+      // The email lookup, when a dedicated read-only pool is available, is closed before this
+      // call. Never hold an AD_CLIENT lock while waiting for the proxy or Salt Edge.
+      String apiKey = provisioningClient.provision(client.getId(), resolveOwnerEmail(client));
+      persistApiKey(client.getId(), apiKey);
       Psd2ApiKeyAuditService.record(client.getId(), "PROVISION_SUCCEEDED", "SUCCESS", correlationId,
           200, null, null, elapsedMillis(startedAt), "GO");
       return apiKey;
     } catch (Exception e) {
-      rollback(connectionProvider, connection);
-      connection = null;
       Psd2ApiKeyAuditService.record(client.getId(), "PROVISION_FAILED", "ERROR",
-          UUID.randomUUID().toString(), null, "PROVISIONING_ERROR", e, 0L, "GO");
+          correlationId, null, "PROVISIONING_ERROR", e, elapsedMillis(startedAt), "GO");
       log.error("PSD2 API key provisioning failed for client {}", client.getId(), e);
       if (e instanceof OBException) {
         throw (OBException) e;
       }
       throw new OBException("Unable to provision the PSD2 API key", e);
-    } finally {
-      if (connection != null) {
-        rollback(connectionProvider, connection);
+    }
+  }
+
+  private static void persistApiKey(String clientId, String apiKey) {
+    try {
+      Client managedClient = OBDal.getInstance().get(Client.class, clientId);
+      if (managedClient == null) {
+        throw new OBException("Client not found while persisting the PSD2 API key");
       }
+      if (StringUtils.isBlank(managedClient.getPsd2ApiKey())) {
+        managedClient.setPsd2ApiKey(FormatUtilities.encryptDecrypt(apiKey, true));
+        OBDal.getInstance().save(managedClient);
+        OBDal.getInstance().flush();
+      }
+    } catch (OBException e) {
+      throw e;
+    } catch (Exception e) {
+      throw new OBException("Unable to persist the PSD2 API key", e);
     }
   }
 
   private static long elapsedMillis(long startedAt) {
     return startedAt == 0L ? 0L : (System.nanoTime() - startedAt) / 1_000_000L;
-  }
-
-  private static void lockClient(Connection connection, String clientId) throws SQLException {
-    try (PreparedStatement statement = connection.prepareStatement(LOCK)) {
-      statement.setString(1, "psd2-api-key:" + clientId);
-      statement.executeQuery();
-    }
-  }
-
-  private static String readStoredValue(Connection connection, String clientId) throws SQLException {
-    try (PreparedStatement statement = connection.prepareStatement(SELECT_KEY)) {
-      statement.setString(1, clientId);
-      try (ResultSet result = statement.executeQuery()) {
-        return result.next() ? result.getString(1) : null;
-      }
-    }
   }
 
   private static String decrypt(String storedValue) {
@@ -147,40 +120,47 @@ public class SaltEdgeApiKeyProvider implements Psd2ApiKeyProvider {
     }
   }
 
-  private static String resolveEmail() {
+  private static String resolveOwnerEmail(Client client) {
     try {
-      if (OBContext.getOBContext() != null && OBContext.getOBContext().getUser() != null) {
-        String username = OBContext.getOBContext().getUser().getUsername();
-        Account account = GoAccountResolver.findAccountByUsername(username).orElse(null);
-        if (account != null && StringUtils.isNotBlank(account.getEmail())) {
-          return account.getEmail();
+      OBDal readOnlyDal = OBDal.getReadOnlyInstance();
+      if (readOnlyDal == OBDal.getInstance()) {
+        throw new OBException("A dedicated read-only DAL pool is required for PSD2 provisioning");
+      }
+      try {
+        OBQuery<User> ownerQuery = readOnlyDal.createQuery(User.class,
+            "as owner where owner.client.id = :clientId and owner.eTGOIsOwner = true "
+                + "and owner.active = true");
+        ownerQuery.setNamedParameter("clientId", client.getId());
+        ownerQuery.setFilterOnReadableClients(false);
+        ownerQuery.setFilterOnReadableOrganization(false);
+        ownerQuery.setMaxResult(1);
+        User owner = ownerQuery.uniqueResult();
+        if (owner != null) {
+          String ownerIdentity = StringUtils.isNotBlank(owner.getEmail()) ? owner.getEmail()
+              : owner.getUsername();
+          if (StringUtils.isNotBlank(ownerIdentity)) {
+            OBQuery<Account> accountQuery = readOnlyDal.createQuery(Account.class,
+                "as account where lower(account.email) = :email and account.active = true "
+                    + "and account.status = 'active'");
+            accountQuery.setNamedParameter("email", ownerIdentity.toLowerCase());
+            accountQuery.setFilterOnReadableClients(false);
+            accountQuery.setFilterOnReadableOrganization(false);
+            accountQuery.setMaxResult(1);
+            Account account = accountQuery.uniqueResult();
+            if (account != null && StringUtils.isNotBlank(account.getEmail())) {
+              return account.getEmail();
+            }
+          }
         }
+      } finally {
+        // The account lookup must not keep a read-only transaction open while the proxy call is
+        // running. The default DAL session is never closed here.
+        readOnlyDal.rollbackAndClose();
       }
     } catch (Exception e) {
-      log.debug("Could not resolve the ETGO account email for PSD2 provisioning", e);
+      log.debug("Could not resolve the ETGO account owner email for client {}", client.getId(), e);
     }
-    throw new OBException("An active ETGO account email is required for PSD2 provisioning");
+    throw new OBException("An active ETGO account owner email is required for PSD2 provisioning");
   }
 
-  private static String resolveUserId() {
-    try {
-      if (OBContext.getOBContext() != null && OBContext.getOBContext().getUser() != null) {
-        return OBContext.getOBContext().getUser().getId();
-      }
-    } catch (Exception e) {
-      log.debug("Could not resolve the current user for PSD2 provisioning", e);
-    }
-    return "0";
-  }
-
-  private static void rollback(ConnectionProvider connectionProvider, Connection connection) {
-    if (connection == null) {
-      return;
-    }
-    try {
-      connectionProvider.releaseRollbackConnection(connection);
-    } catch (Exception e) {
-      log.error("Could not rollback the PSD2 provisioning transaction", e);
-    }
-  }
 }
