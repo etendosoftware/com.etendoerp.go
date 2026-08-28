@@ -26,6 +26,7 @@ import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.time.temporal.ChronoUnit;
 import java.util.Date;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.Callable;
 import java.util.function.Consumer;
@@ -39,6 +40,8 @@ import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.currency.Currency;
+import org.openbravo.model.financialmgmt.payment.FIN_BankStatementLine;
+import org.openbravo.model.financialmgmt.payment.FIN_FinaccTransaction;
 import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
 
 /**
@@ -223,5 +226,11 @@ final class FinancialAccountTransactionsSupport {
     if (!body.has(key)) return;
     String id = body.optString(key, null);
     setter.accept(StringUtils.isBlank(id) ? null : OBDal.getInstance().get(entityClass, id));
+  }
+
+  /** The bank-statement line currently matched to {@code trx}, or {@code null} when it is unmatched. */
+  static FIN_BankStatementLine linkedBankStatementLine(FIN_FinaccTransaction trx) {
+    List<FIN_BankStatementLine> lines = trx.getFINBankStatementLineList();
+    return lines.isEmpty() ? null : lines.get(0);
   }
 }

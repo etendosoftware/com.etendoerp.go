@@ -38,7 +38,6 @@ import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
 import org.openbravo.model.financialmgmt.payment.FIN_Payment;
 import org.openbravo.model.financialmgmt.payment.FIN_PaymentMethod;
 import org.openbravo.model.financialmgmt.payment.FIN_PaymentSchedule;
-import org.openbravo.model.financialmgmt.payment.FIN_Reconciliation;
 
 final class ReconciliationFlowSupport {
 
@@ -201,10 +200,9 @@ final class ReconciliationFlowSupport {
       FIN_BankStatementLine line, Function<String, FIN_FinaccTransaction> transactionLoader,
       BigDecimal tolerance) {
     BigDecimal opSum = BigDecimal.ZERO;
-    String ownDraftId = ownDraftIdOf(line);
     for (String opId : operationIds) {
       FIN_FinaccTransaction trx = transactionLoader.apply(opId);
-      NeoResponse opError = validateOperation(trx, opId, accountId, ownDraftId);
+      NeoResponse opError = validateOperation(trx, opId, accountId);
       if (opError != null) {
         return opError;
       }
@@ -224,24 +222,12 @@ final class ReconciliationFlowSupport {
   }
 
   /**
-   * The id of the line's OWN unprocessed ("Reactivar"-ed) reconciliation, or {@code null} when the
-   * line is unmatched or its reconciliation is already processed. Those transactions legitimately
-   * still carry that reconciliation — re-confirming them is the whole point of that action.
-   */
-  private static String ownDraftIdOf(FIN_BankStatementLine line) {
-    FIN_Reconciliation ownDraft = line != null && line.getFinancialAccountTransaction() != null
-        ? line.getFinancialAccountTransaction().getReconciliation()
-        : null;
-    return ownDraft != null && !ownDraft.isProcessed() ? ownDraft.getId() : null;
-  }
-
-  /**
    * Per-operation guards: it must exist, belong to {@code accountId}, and be free — i.e. carry no
-   * reconciliation other than the line's own draft ({@code ownDraftId}). Returns the verbatim error
-   * response, or {@code null} when the operation is valid.
+   * reconciliation at all. Returns the verbatim error response, or {@code null} when the operation
+   * is valid.
    */
   private static NeoResponse validateOperation(FIN_FinaccTransaction trx, String opId,
-      String accountId, String ownDraftId) {
+      String accountId) {
     if (trx == null) {
       return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "Operation not found: " + opId);
     }
@@ -249,10 +235,7 @@ final class ReconciliationFlowSupport {
       return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
           "Operation does not belong to the financial account: " + opId);
     }
-    // Compared from ownDraftId outwards so a reconciliation with a null id (defensive: never in a
-    // real DB, but reachable via mocks) still rejects instead of throwing.
-    FIN_Reconciliation trxRec = trx.getReconciliation();
-    if (trxRec != null && (ownDraftId == null || !ownDraftId.equals(trxRec.getId()))) {
+    if (trx.getReconciliation() != null) {
       return NeoResponse.error(HttpServletResponse.SC_CONFLICT,
           "Operation is already reconciled: " + opId);
     }
