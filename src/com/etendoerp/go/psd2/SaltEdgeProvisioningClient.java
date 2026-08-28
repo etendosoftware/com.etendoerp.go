@@ -54,9 +54,8 @@ final class SaltEdgeProvisioningClient {
       JSONObject body = new JSONObject();
       body.put("client_id", clientId);
       body.put("identifier", clientId);
-      if (StringUtils.isNotBlank(email)) {
-        body.put("email", email);
-      }
+      body.put("api_key", clientId);
+      body.put("email", email);
 
       HttpRequest request = HttpRequest.newBuilder()
           .uri(URI.create(Psd2ApiKeyConfiguration.provisioningUrl()))

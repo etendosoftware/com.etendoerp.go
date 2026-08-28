@@ -35,6 +35,8 @@ import org.openbravo.database.ConnectionProvider;
 import org.openbravo.service.db.DalConnectionProvider;
 import org.openbravo.utils.FormatUtilities;
 
+import com.etendoerp.go.common.GoAccountResolver;
+import com.etendoerp.go.schemaforge.data.Account;
 import com.etendoerp.psd2.bank.integration.spi.Psd2ApiKeyProvider;
 import com.etendoerp.psd2.bank.integration.audit.Psd2ApiKeyAuditService;
 
@@ -148,15 +150,16 @@ public class SaltEdgeApiKeyProvider implements Psd2ApiKeyProvider {
   private static String resolveEmail() {
     try {
       if (OBContext.getOBContext() != null && OBContext.getOBContext().getUser() != null) {
-        String email = OBContext.getOBContext().getUser().getEmail();
-        if (StringUtils.isNotBlank(email)) {
-          return email;
+        String username = OBContext.getOBContext().getUser().getUsername();
+        Account account = GoAccountResolver.findAccountByUsername(username).orElse(null);
+        if (account != null && StringUtils.isNotBlank(account.getEmail())) {
+          return account.getEmail();
         }
       }
     } catch (Exception e) {
-      log.debug("Could not resolve the current user email for PSD2 provisioning", e);
+      log.debug("Could not resolve the ETGO account email for PSD2 provisioning", e);
     }
-    return null;
+    throw new OBException("An active ETGO account email is required for PSD2 provisioning");
   }
 
   private static String resolveUserId() {
