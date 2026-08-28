@@ -22,11 +22,13 @@ import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 
 /** Client for the private Salt Edge proxy provisioning endpoint. */
@@ -37,7 +39,10 @@ final class SaltEdgeProvisioningClient {
   private final HttpClient httpClient;
 
   SaltEdgeProvisioningClient() {
-    this(HttpClient.newBuilder().connectTimeout(REQUEST_TIMEOUT).build());
+    this(HttpClient.newBuilder()
+        .connectTimeout(REQUEST_TIMEOUT)
+        .version(HttpClient.Version.HTTP_1_1)
+        .build());
   }
 
   SaltEdgeProvisioningClient(HttpClient httpClient) {
@@ -63,14 +68,15 @@ final class SaltEdgeProvisioningClient {
           .header("Accept", "application/json")
           .header("Content-Type", "application/json")
           .header("X-Admin-Key", adminKey)
-          .POST(HttpRequest.BodyPublishers.ofString(body.toString()))
+          .POST(HttpRequest.BodyPublishers.ofByteArray(
+              body.toString().getBytes(StandardCharsets.UTF_8)))
           .build();
       HttpResponse<String> response = httpClient.send(request,
           HttpResponse.BodyHandlers.ofString());
 
       if (response.statusCode() < 200 || response.statusCode() >= 300) {
-        log.warn("Salt Edge provisioning failed for client {} with HTTP {}", clientId,
-            response.statusCode());
+        log.warn("Salt Edge provisioning failed for client {} with HTTP {}: {}", clientId,
+            response.statusCode(), summarizeValidationError(response.body()));
         throw new IllegalStateException("Salt Edge provisioning failed with HTTP "
             + response.statusCode());
       }
@@ -91,6 +97,32 @@ final class SaltEdgeProvisioningClient {
         throw (IllegalStateException) e;
       }
       throw new IllegalStateException("Invalid Salt Edge provisioning response", e);
+    }
+  }
+
+  /** Returns validation locations and messages without logging request values or secrets. */
+  private static String summarizeValidationError(String responseBody) {
+    try {
+      JSONArray details = new JSONObject(responseBody).optJSONArray("detail");
+      if (details == null) {
+        return "proxy error";
+      }
+      StringBuilder summary = new StringBuilder();
+      for (int i = 0; i < details.length(); i++) {
+        JSONObject detail = details.optJSONObject(i);
+        if (detail == null) {
+          continue;
+        }
+        if (summary.length() > 0) {
+          summary.append("; ");
+        }
+        summary.append(detail.optString("loc", "unknown"))
+            .append(": ")
+            .append(detail.optString("msg", "validation failed"));
+      }
+      return summary.length() == 0 ? "validation failed" : summary.toString();
+    } catch (Exception e) {
+      return "proxy error";
     }
   }
 }
