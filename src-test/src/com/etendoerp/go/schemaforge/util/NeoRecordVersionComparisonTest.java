@@ -148,7 +148,7 @@ class NeoRecordVersionComparisonTest {
 
   @Test
   @DisplayName("a record that is not Traceable is not a conflict")
-  void nonNeoRecordVersionFixtures.TraceableRecordIsNotStale() {
+  void nonTraceableRecordIsNotStale() {
     when(obDal.get(anyString(), any())).thenReturn(mock(BaseOBObject.class));
     assertFalse(NeoRecordVersion.isStale(ENTITY, RECORD_ID, tokenFor(instant(15, 0))));
   }
