@@ -825,9 +825,14 @@ class SFRolesOverviewTest extends BaseWebhookTest {
         Window visibleWindow = mockWindow("win-visible", "Sales Order");
         Window excludedWindow = mockWindow("6FEBA130CDE24CC09041FFA6117ADFA9",
                 "Conversion Rate Downloader Log");
+        // Build the spec list BEFORE opening the when(...) — mockGoWindowSpec() stubs a mock of
+        // its own, and Mockito rejects a nested stubbing inside an unfinished thenReturn(...)
+        // with UnfinishedStubbingException. Same reason the sibling matrix test above hoists its
+        // list into a local. Do not re-inline this.
+        List<SFSpec> goWindowSpecs = Arrays.asList(
+                mockGoWindowSpec(visibleWindow), mockGoWindowSpec(excludedWindow));
         OBCriteria<SFSpec> specCriteria = mockCriteria(SFSpec.class);
-        when(specCriteria.list()).thenReturn(
-                Arrays.asList(mockGoWindowSpec(visibleWindow), mockGoWindowSpec(excludedWindow)));
+        when(specCriteria.list()).thenReturn(goWindowSpecs);
 
         List<Role> roles = standardTenantRoles();
         stubTenantRoles(roles);
