@@ -59,14 +59,7 @@ public class GoodsShipmentLineHandler extends AbstractInOutLineHandler {
     if (parentResult != null) {
       return parentResult;
     }
-    if (context != null && NeoEndpointType.CRUD.equals(context.getEndpointType())
-        && "POST".equalsIgnoreCase(context.getHttpMethod())) {
-      try {
-        NeoHandlerUtils.injectDefaultLocatorIfMissing(context.getRequestBody(), log);
-      } catch (Exception e) {
-        log.warn("[GoodsShipmentLineHandler] Could not default storageBin: {}", e.getMessage(), e);
-      }
-    }
+    NeoHandlerUtils.injectDefaultLocatorOnPost(context, log);
     return null;
   }
 

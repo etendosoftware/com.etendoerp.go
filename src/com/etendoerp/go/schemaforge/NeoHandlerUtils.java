@@ -414,6 +414,27 @@ final class NeoHandlerUtils {
   }
 
   /**
+   * POST/CRUD gate around {@link #injectDefaultLocatorIfMissing}: shared by every
+   * {@code M_InOutLine}-based handler's {@code handle()} pre-hook so each one only has to call
+   * this single method instead of repeating the endpoint/method check and the try/catch —
+   * duplicating that boilerplate across handlers is exactly what trips Sonar's duplicated-lines
+   * gate (ETP-5062).
+   *
+   * @param context the current NeoContext; a no-op for anything other than a CRUD POST
+   * @param log     the caller's logger, used for a warn message if the injection throws
+   */
+  static void injectDefaultLocatorOnPost(NeoContext context, Logger log) {
+    if (context != null && NeoEndpointType.CRUD.equals(context.getEndpointType())
+        && "POST".equalsIgnoreCase(context.getHttpMethod())) {
+      try {
+        injectDefaultLocatorIfMissing(context.getRequestBody(), log);
+      } catch (Exception e) {
+        log.warn("Could not default storageBin: {}", e.getMessage(), e);
+      }
+    }
+  }
+
+  /**
    * Sets {@code storageBin} to the header {@code M_InOut}'s own warehouse default locator when
    * a line-create request did not already supply a REAL one. Shared by every
    * {@code M_InOutLine}-based create flow — Goods Receipt, Goods Shipment, and Return to Vendor
