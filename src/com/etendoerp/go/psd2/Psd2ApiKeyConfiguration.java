@@ -17,6 +17,8 @@
 
 package com.etendoerp.go.psd2;
 
+import org.apache.commons.lang3.StringUtils;
+
 import com.etendoerp.go.common.GoRuntimeProperties;
 
 /** Server-side settings for the PSD2 Salt Edge provisioning client. */
@@ -40,7 +42,7 @@ public final class Psd2ApiKeyConfiguration {
   private static String proxyBaseUrl() {
     String configured = GoRuntimeProperties.readValue(PROXY_URL_PROPERTY, PROXY_URL_ENV,
         DEFAULT_PROXY_URL);
-    return configured.replaceAll("/+$", "");
+    return StringUtils.stripEnd(configured, "/");
   }
 
   /**
