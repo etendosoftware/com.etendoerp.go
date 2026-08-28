@@ -197,7 +197,7 @@ public class ReconciliationHandler implements NeoHandler {
   private static final String TRX_TYPE_DEPOSIT = "BPD";
   private static final String TRX_TYPE_WITHDRAWAL = "BPW";
   /** Tolerance applied when comparing the line amount to the sum of operations. */
-  private static final BigDecimal TOLERANCE = new BigDecimal("0.01");
+  static final BigDecimal TOLERANCE = new BigDecimal("0.01");
 
   /**
    * JSON keys / messages reused across rows — extracted to satisfy Sonar S1192. Some are
@@ -232,7 +232,7 @@ public class ReconciliationHandler implements NeoHandler {
       "Statement line does not belong to the financial account";
   /** Shared with {@link ReconciliationDifferenceSupport}, which hoists this very guard. */
   static final String MSG_LINE_ALREADY_RECONCILED = "Statement line is already reconciled";
-  private static final String KEY_UPDATED_BALANCE = "updatedBalance";
+  static final String KEY_UPDATED_BALANCE = "updatedBalance";
 
   /**
    * Pending bank-statement lines (panel left): unmatched lines of the account,
@@ -821,30 +821,7 @@ public class ReconciliationHandler implements NeoHandler {
       return opError;
     }
 
-    return compose(account, line, operationIds);
-  }
-
-  /**
-   * Composes the standard Etendo reconciliation services for a 1:N manual match: creates a fresh
-   * draft reconciliation, matches into it, and processes it. Never reimplements the matching logic.
-   */
-  private NeoResponse compose(FIN_FinancialAccount account, FIN_BankStatementLine line,
-      List<String> operationIds) throws Exception {
-    FIN_Reconciliation rec = addNewDraftReconciliation(account);
-    matchInto(line, operationIds, rec);
-    OBError result = processReconciliation(rec);
-    if (result != null && "Error".equalsIgnoreCase(result.getType())) {
-      doRollbackAndClose();
-      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, result.getMessage());
-    }
-
-    JSONObject data = new JSONObject();
-    data.put("reconciliationId", rec.getId());
-    JSONArray lineIds = new JSONArray();
-    lineIds.put(line.getId());
-    data.put("lineIds", lineIds);
-    data.put(KEY_UPDATED_BALANCE, nullSafe(rec.getEndingBalance()));
-    return NeoResponse.createdWithData(data);
+    return ReconciliationFlowSupport.compose(this, account, line, operationIds);
   }
 
   /**
@@ -863,8 +840,8 @@ public class ReconciliationHandler implements NeoHandler {
    * Tags the line's match group (when the match will split it) and runs Core's standard
    * {@code matchBankStatementLine} for a single statement line into {@code rec}. Does not create or
    * process the reconciliation — the caller decides whether {@code rec} is fresh (one manual match,
-   * see {@link #compose}) or shared across a whole automatch batch, and processes it once after
-   * every group has been matched in.
+   * see {@link ReconciliationFlowSupport#compose}) or shared across a whole automatch batch, and
+   * processes it once after every group has been matched in.
    */
   void matchInto(FIN_BankStatementLine line, List<String> operationIds,
       FIN_Reconciliation rec) {
@@ -959,7 +936,7 @@ public class ReconciliationHandler implements NeoHandler {
     final FIN_BankStatementLine line;
     final List<String> operationIds;
 
-    private PreparedGroup(FIN_BankStatementLine line, List<String> operationIds) {
+    PreparedGroup(FIN_BankStatementLine line, List<String> operationIds) {
       this.line = line;
       this.operationIds = operationIds;
     }
@@ -969,9 +946,10 @@ public class ReconciliationHandler implements NeoHandler {
    * Commits every accepted automatch group in ONE {@code FIN_Reconciliation} document — Core's own
    * "one reconciliation per statement" model, instead of a header per statement line. Two passes:
    * <ol>
-   *   <li>{@link #prepareGroup} validates every group (line exists, not already reconciled, invoice
-   *       payments created, operations within the line amount) — an invalid group is reported in
-   *       {@code results[]} without ever touching the shared reconciliation;</li>
+   *   <li>{@link ReconciliationFlowSupport#prepareGroup} validates every group (line exists, not
+   *       already reconciled, invoice payments created, operations within the line amount) — an
+   *       invalid group is reported in {@code results[]} without ever touching the shared
+   *       reconciliation;</li>
    *   <li>every group that passed validation is matched into ONE {@link #getOrCreateDraftReconciliation}
    *       result via {@link #matchInto}, then that single document is processed once.</li>
    * </ol>
@@ -1002,7 +980,8 @@ public class ReconciliationHandler implements NeoHandler {
       if (groupEntry == null) {
         continue;
       }
-      NeoResponse prepError = prepareGroup(account, groupEntry, prepared);
+      NeoResponse prepError = ReconciliationFlowSupport.prepareGroup(
+          this, account, groupEntry, prepared);
       if (prepError != null) {
         results.put(prepError.getBody());
       }
@@ -1026,64 +1005,6 @@ public class ReconciliationHandler implements NeoHandler {
     ReconciliationKpiTelemetry.emitReconciliationMatchEvaluated(
         groupsJson.length(), results.length(), successfulGroups[0]);
     return NeoResponse.createdWithData(data);
-  }
-
-  /**
-   * Validates one {@code applySuggestions} group and, on success, appends a {@link PreparedGroup} to
-   * {@code out} (the resolved line + final operation ids, invoice/rule payments already created).
-   * Returns the verbatim error response on the first failed guard, or {@code null} on success.
-   * Deliberately does NOT match or touch any {@code FIN_Reconciliation} — that happens once the
-   * caller has a single shared document for the whole batch.
-   */
-  private NeoResponse prepareGroup(FIN_FinancialAccount account, JSONObject groupEntry,
-      List<PreparedGroup> out) throws Exception {
-    String statementLineId = groupEntry.optString(KEY_STATEMENT_LINE_ID, null);
-    if (StringUtils.isBlank(statementLineId)) {
-      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "statementLineId is required");
-    }
-
-    FIN_BankStatementLine line = loadLine(statementLineId);
-    if (line == null) {
-      return NeoResponse.error(HttpServletResponse.SC_NOT_FOUND,
-          MSG_STATEMENT_LINE_NOT_FOUND + statementLineId);
-    }
-    if (line.getFinancialAccountTransaction() != null) {
-      return NeoResponse.error(HttpServletResponse.SC_CONFLICT,
-          "Statement line is already reconciled: " + statementLineId);
-    }
-
-    List<String> operationIds = readOperationIds(groupEntry);
-
-    // When a rule group requires creating a new transaction, do that first.
-    JSONObject createPaymentSpec = groupEntry.optJSONObject("createPayment");
-    if (createPaymentSpec != null && StringUtils.isNotBlank(createPaymentSpec.optString("glItemId", null))) {
-      String newTxnId = createTransactionForRule(account, line, createPaymentSpec);
-      if (StringUtils.isNotBlank(newTxnId)) {
-        operationIds = new ArrayList<>(operationIds);
-        operationIds.add(newTxnId);
-        // Increment the rule's matchCount.
-        String ruleId = createPaymentSpec.optString("ruleId", null);
-        if (StringUtils.isNotBlank(ruleId)) {
-          AutoMatchSupport.incrementMatchCount(ruleId);
-        }
-      }
-    }
-
-    if (operationIds.isEmpty()) {
-      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
-          "At least one operation is required for line: " + statementLineId);
-    }
-
-    // Operations (including any just-created rule transaction) may match part of the line but must
-    // not EXCEED it — the same over-reconciliation guard the manual reconcileGroup path applies.
-    NeoResponse opError = ReconciliationFlowSupport.validateOperations(
-        operationIds, account.getId(), line, this::loadTransaction, TOLERANCE);
-    if (opError != null) {
-      return opError;
-    }
-
-    out.add(new PreparedGroup(line, operationIds));
-    return null;
   }
 
   // ---------------------------------------------------------------------------
