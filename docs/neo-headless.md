@@ -939,6 +939,29 @@ match against entities it can already read.
 `{status, data}` shape `SimSearch`'s webhook already returns — so existing callers only need their
 request URL updated, not their response parsing.
 
+**Session-language terms are translated before matching.** `SimSearch` compares trigrams against
+the **base** row only — translated text lives in a sibling `*_Trl` table it never reads — so a
+Spanish session searching `España` scores 0.083 against the base-language `Spain` and resolves
+nothing. Before delegating, the endpoint looks the term up in the entity's `*_Trl` sibling for the
+current session language and substitutes the base-language name (`España` → `Spain`, `Unidad` →
+`Unit`); `SimSearch` then matches at 100% and the matching logic itself is unchanged.
+
+The lookup is generic, not a per-entity or per-language table: `NeoTrl.resolveSearchMeta()`
+discovers the `*_Trl` sibling by convention, so every translatable entity and every language whose
+translations an instance has loaded is covered by the same call — a newly loaded `fr_FR` resolves
+`Espagne` with no code change.
+
+The substitution is an **exact** (trimmed, case-insensitive) match, and falls through to the term as
+typed whenever it is not unambiguous: no translation row, no `*_Trl` sibling, a translation shared by
+several base rows, or a translation equal to the base name. Those requests behave exactly as they did
+before translation existed, which is what preserves the matcher's typo tolerance — the fuzziness stays
+in `SimSearch`, never in the decision of what to hand it.
+
+> **Callers must send `Accept-Language`.** The session language comes from the header
+> `NeoAuthenticator` applies to the `OBContext`. A request without it falls back to the AD user's
+> default language, so a Spanish UI driven by a user whose AD default is `en_US` gets no translation
+> at all. `lib/simSearch.js` in app-shell-core sends it; any new client must too.
+
 Returns `400` if `entityName`/`items` is missing or `items` is not valid JSON, `422` if `entityName`
 does not resolve to a readable entity, `405` for any method other than `GET`.
 
