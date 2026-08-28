@@ -1395,7 +1395,13 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       return null;
     }
     GoLegacyBearer.recordUse();
-    Account account = EtendoGoJwtDalHelper.findActiveAccountByToken(token);
+    // The wide lookup, not findActiveAccountByToken: the legacy path has to keep
+    // accepting Etendo's JWTs, and only this one falls back to decoding the token and
+    // resolving the account from its `user` claim when no opaque sessionToken matches.
+    // Centralising the resolution here narrowed it by accident, which answered 401 to
+    // every JWT-bearing client on /me, /environments, the onboarding draft and the
+    // invitation endpoints — the exact callers GoLegacyBearer stays enabled for.
+    Account account = EtendoGoJwtDalHelper.findActiveAccountByBearerToken(token);
     if (account == null) {
       writeError(response, HttpServletResponse.SC_UNAUTHORIZED, INVALID_OR_EXPIRED_TOKEN);
       return null;
