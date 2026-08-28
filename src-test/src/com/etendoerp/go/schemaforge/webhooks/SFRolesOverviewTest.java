@@ -802,6 +802,104 @@ class SFRolesOverviewTest extends BaseWebhookTest {
         assertEquals(1, categories.getJSONObject(0).getJSONArray("windows").length());
     }
 
+    // ── ETP-5068: windows Etendo GO serves but never shows ───────────────
+
+    /**
+     * ETP-5068 — a window listed in {@code UI_EXCLUDED_WINDOW_IDS} must not reach ANY part of
+     * this response, even when the calling tenant's roles hold a live {@code AD_Window_Access}
+     * grant for it. The grant is the real-world state, not a corner case: {@code
+     * TemplateRoleWindowAccess} deliberately keeps granting "Conversion Rate Downloader Log" to
+     * the GO template roles so administrators can still read the log in Etendo classic — which
+     * is exactly why the window cannot be hidden by revoking access and has to be filtered here.
+     *
+     * <p>Asserting all three derived structures at once (the {@code matrix}, the role's {@code
+     * windows} array and its {@code windowCount}) is deliberate: they are what "Configuración
+     * &gt; Roles" and "Usuario &gt; Roles" render, and the whole point of filtering in {@code
+     * resolveActiveEtendoGoWindowsById()} is that one filter covers all of them.
+     */
+    @Test
+    @DisplayName("ETP-5068: a UI-excluded window is absent from the matrix, windows array and windowCount even when granted")
+    void testUiExcludedWindowNeverReachesTheResponse() throws Exception {
+        givenSystemAdminCallerRole();
+
+        Window visibleWindow = mockWindow("win-visible", "Sales Order");
+        Window excludedWindow = mockWindow("6FEBA130CDE24CC09041FFA6117ADFA9",
+                "Conversion Rate Downloader Log");
+        OBCriteria<SFSpec> specCriteria = mockCriteria(SFSpec.class);
+        when(specCriteria.list()).thenReturn(
+                Arrays.asList(mockGoWindowSpec(visibleWindow), mockGoWindowSpec(excludedWindow)));
+
+        List<Role> roles = standardTenantRoles();
+        stubTenantRoles(roles);
+
+        OBCriteria<UserRoles> userRolesCriteria = mockCriteria(UserRoles.class);
+        when(userRolesCriteria.list()).thenReturn(Collections.emptyList());
+
+        // The admin role (processed first) is granted BOTH windows — including the excluded one.
+        List<WindowAccess> adminWindowRows = Arrays.asList(
+                mockWindowAccessRow(visibleWindow, true),
+                mockWindowAccessRow(excludedWindow, true));
+        OBCriteria<WindowAccess> windowAccessCriteria = mockCriteria(WindowAccess.class);
+        when(windowAccessCriteria.list()).thenReturn(
+                adminWindowRows,
+                Collections.emptyList(), Collections.emptyList(),
+                Collections.emptyList(), Collections.emptyList());
+
+        // Both windows would land in the same top-level menu folder.
+        when(categoryQuery.getResultList()).thenReturn(Arrays.asList(
+                new Object[] { "win-visible", "Settings" },
+                new Object[] { "6FEBA130CDE24CC09041FFA6117ADFA9", "Settings" }));
+
+        webhook.get(parameters, responseVars);
+
+        assertNull(responseVars.get(ERROR));
+        String rawResult = responseVars.get(RESULT);
+        // Blunt but decisive: the id must not appear ANYWHERE in the payload, whichever
+        // structure a future refactor might add it to.
+        assertFalse(rawResult.contains("6FEBA130CDE24CC09041FFA6117ADFA9"),
+                "the UI-excluded window id must not appear anywhere in the response");
+
+        JSONObject result = new JSONObject(rawResult);
+        JSONArray categories = result.getJSONObject("matrix").getJSONArray("categories");
+        assertEquals(1, categories.length());
+        JSONArray matrixWindows = categories.getJSONObject(0).getJSONArray("windows");
+        assertEquals(1, matrixWindows.length());
+        assertEquals("win-visible", matrixWindows.getJSONObject(0).getString("id"));
+
+        JSONObject admin = result.getJSONArray("roles").getJSONObject(0);
+        assertEquals(ADMIN_ROLE_ID, admin.getString("id"));
+        assertEquals(1, admin.getInt("windowCount"));
+        assertEquals(1, admin.getJSONArray("windows").length());
+        assertEquals("win-visible", admin.getJSONArray("windows").getJSONObject(0).getString("id"));
+    }
+
+    /**
+     * Guards the flip side of the filter: a window that merely SHARES the excluded window's
+     * category (and, in the real data, a similar name — "Conversion Rates" is the companion
+     * window users actually need) must be completely unaffected.
+     */
+    @Test
+    @DisplayName("ETP-5068: a non-excluded window in the same category is unaffected")
+    void testNonExcludedWindowInSameCategorySurvives() throws Exception {
+        givenSystemAdminCallerRole();
+
+        Window conversionRates = mockWindow("116", "Conversion Rates");
+        stubBaselineQueries(standardTenantRoles(), Collections.singletonList(conversionRates));
+        when(categoryQuery.getResultList()).thenReturn(
+                Collections.singletonList(new Object[] { "116", "Settings" }));
+
+        webhook.get(parameters, responseVars);
+
+        assertNull(responseVars.get(ERROR));
+        JSONObject result = new JSONObject(responseVars.get(RESULT));
+        JSONArray categories = result.getJSONObject("matrix").getJSONArray("categories");
+        assertEquals(1, categories.length());
+        JSONArray windows = categories.getJSONObject(0).getJSONArray("windows");
+        assertEquals(1, windows.length());
+        assertEquals("116", windows.getJSONObject(0).getString("id"));
+        assertEquals("Conversion Rates", windows.getJSONObject(0).getString("name"));
+    }
+
     // ── exception handling ───────────────────────────────────────────────
 
     @Test

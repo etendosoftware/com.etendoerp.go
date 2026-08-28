@@ -1834,6 +1834,27 @@ Folder nodes are never filtered directly: their children are filtered first (pos
 
 Unlike `SFWindowAccessMap`, which answers "what can the CURRENT caller's own role reach", this endpoint is a cross-role aggregate: it always returns data for all 5 of the caller's OWN tenant's roles regardless of which one the caller happens to be using. That is exactly why it is gated to admin/client-admin callers only.
 
+**UI-excluded windows (ETP-5068).** `resolveActiveEtendoGoWindowsById()` subtracts
+`SFRolesOverview.UI_EXCLUDED_WINDOW_IDS` from the active-`SPEC_TYPE='W'` spec set: windows Etendo GO
+serves read-only over NEO/MCP but deliberately shows nowhere in its own UI. Because that one method is
+the single source every downstream structure derives from — each role's `windows` array, its
+`windowCount`, and the `matrix` — a single entry in that set removes the window from **both** admin
+screens at once:
+
+- **"Configuración > Roles"** (`RolesAccessMatrix.jsx`) renders `matrix.categories` directly.
+- **"Usuario > Roles"** (`UserRolesTab.jsx`) walks `SFListMenu`'s raw AD tree but intersects it
+  against the union of every role's `windows[]` from THIS endpoint (`activeWindowIds`), which is also
+  what already keeps classic-only entries such as Application Dictionary out of that tab.
+
+Note the exclusion cannot be achieved by revoking `AD_Window_Access`: the `matrix` lists every GO
+spec window regardless of grants (an ungranted window simply shows `access: "none"`), and the grants
+are deliberately kept so administrators can still reach the window in Etendo classic. It is also
+deliberately NOT applied in `SFListMenu`, whose tree must keep reporting the native AD menu as-is for
+its other consumers (`useRoleMenu`'s allowed-id filter, the Explorer's spec picker).
+
+Current contents: `6FEBA130CDE24CC09041FFA6117ADFA9` — "Conversion Rate Downloader Log" (ETP-5068),
+an internal log of the conversion-rate downloader job that adds no value to the Etendo Go end user.
+
 > **Doc correction (ETP-4907):** this section previously described a `SFRolesOverview.GOCLIENT_ROLE_IDS` hardcoded to GOClient's own 5 per-client role ids. That was already stale — the webhook was fixed on 2026-07-27 (live RolesPresa bug) to resolve roles by name (`Finance`/`Sales`/`Purchasing`/`Inventory`) plus `is_client_admin='Y'`, scoped to `currentRole.getClient()`, with no hardcoded id list at all. This section now documents the actual current behavior, including the ETP-4907 system-template fallback below.
 
 **Endpoint:**
