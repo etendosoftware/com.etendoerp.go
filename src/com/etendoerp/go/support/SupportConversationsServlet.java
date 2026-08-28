@@ -704,17 +704,17 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
   }
 
   /** Builds the request context from a resolved cookie session. */
-  private AuthContext sessionAuthContext(HttpServletResponse response, GoSessionRecord record)
+  private AuthContext sessionAuthContext(HttpServletResponse response, GoSessionRecord session)
       throws IOException {
-    String userId = record.getUserId();
-    String roleId = record.getRoleId();
+    String userId = session.getUserId();
+    String roleId = session.getRoleId();
     if (userId == null || userId.isEmpty() || roleId == null || roleId.isEmpty()) {
       writeError(response, HttpServletResponse.SC_UNAUTHORIZED,
           "Session has no environment selected");
       return null;
     }
-    String clientId = record.getCtxClientId();
-    String orgId = record.getCtxOrgId();
+    String clientId = session.getCtxClientId();
+    String orgId = session.getCtxOrgId();
     return new AuthContext(userId, roleId,
         clientId == null || clientId.isEmpty() ? SYSTEM_USER_ID : clientId,
         orgId == null || orgId.isEmpty() ? SYSTEM_USER_ID : orgId);

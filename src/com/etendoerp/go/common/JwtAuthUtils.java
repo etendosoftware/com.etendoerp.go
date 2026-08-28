@@ -50,6 +50,7 @@ import com.smf.securewebservices.utils.SecureWebServicesUtils;
 public class JwtAuthUtils {
 
   private static final String AUTH_HEADER = "Authorization";
+  private static final String UNAUTHORIZED_LOG = "Unauthorized {}: {}";
   private static final String BEARER_PREFIX = "Bearer ";
   private static final String CLAIM_USER = "user";
   private static final String CLAIM_ROLE = "role";
@@ -116,12 +117,12 @@ public class JwtAuthUtils {
   }
 
   private static boolean applySessionOrFail(HttpServletRequest request, HttpServletResponse response,
-      Logger log, String context, GoSessionRecord record) throws IOException {
+      Logger log, String context, GoSessionRecord session) throws IOException {
     try {
-      applySessionContext(request, record);
+      applySessionContext(request, session);
       return true;
     } catch (OBException e) {
-      log.warn("Unauthorized {}: {}", context, e.getMessage());
+      log.warn(UNAUTHORIZED_LOG, context, e.getMessage());
       ServletResponseUtils.sendError(response, HttpServletResponse.SC_UNAUTHORIZED, e.getMessage());
       return false;
     }
@@ -133,11 +134,11 @@ public class JwtAuthUtils {
       authenticate(request);
       return true;
     } catch (OBException e) {
-      log.warn("Unauthorized {}: {}", context, e.getMessage());
+      log.warn(UNAUTHORIZED_LOG, context, e.getMessage());
       ServletResponseUtils.sendError(response, HttpServletResponse.SC_UNAUTHORIZED, e.getMessage());
       return false;
     } catch (Exception e) {
-      log.warn("Unauthorized {}: {}", context, e.getMessage());
+      log.warn(UNAUTHORIZED_LOG, context, e.getMessage());
       ServletResponseUtils.sendError(response, HttpServletResponse.SC_UNAUTHORIZED, "Invalid or expired token");
       return false;
     }
@@ -149,13 +150,13 @@ public class JwtAuthUtils {
    * claims. Same shape as NeoAuthenticator's own session path, deliberately: a caller must not be
    * able to tell which servlet it reached by how its session is honoured.
    */
-  private static void applySessionContext(HttpServletRequest request, GoSessionRecord record) {
-    if (StringUtils.isAnyBlank(record.getUserId(), record.getRoleId(), record.getCtxOrgId(),
-        record.getCtxClientId())) {
+  private static void applySessionContext(HttpServletRequest request, GoSessionRecord session) {
+    if (StringUtils.isAnyBlank(session.getUserId(), session.getRoleId(), session.getCtxOrgId(),
+        session.getCtxClientId())) {
       throw new OBException("Session has no environment selected");
     }
-    OBContext ctx = SecureWebServicesUtils.createContext(record.getUserId(), record.getRoleId(),
-        record.getCtxOrgId(), record.getWarehouseId(), record.getCtxClientId());
+    OBContext ctx = SecureWebServicesUtils.createContext(session.getUserId(), session.getRoleId(),
+        session.getCtxOrgId(), session.getWarehouseId(), session.getCtxClientId());
     OBContext.setOBContext(ctx);
     OBContext.setOBContextInSession(request, ctx);
   }
